@@ -2,6 +2,7 @@
 
 use crate::context::IdGenerator;
 use crate::ident::Ident;
+use crate::lambda::LamLoc;
 use crate::lambda::indexed::{IndexedLambda, IndexedLambdaContext, NodeId, NodeSnapshot, NodeView};
 use crate::lambda::lam_analysis_indexed::{hit_variable, is_closed_with_map, no_side_effects};
 use crate::lambda::lam_beta_reduce_indexed::{
@@ -14,7 +15,6 @@ use crate::lambda::lam_pass_collect_indexed::indexed_size_upto;
 use crate::lambda::lam_pass_collect_indexed::{IndexedElement, IndexedIdKind, IndexedLamStats};
 use crate::lambda::lam_primitive::Primitive;
 use crate::lambda::{InlineAttribute, Lambda, TagInfo};
-use crate::location::Location;
 
 pub type IndexedExternalInlineResolver<'a> = dyn FnMut(&Ident, &str) -> Option<Lambda> + 'a;
 
@@ -80,7 +80,7 @@ fn field_get(
                 NodeSnapshot::Prim(
                     Primitive::Pfield(index, info.clone()),
                     vec![base],
-                    Location::none(),
+                    LamLoc::NONE,
                 ),
             ))
         }
@@ -276,11 +276,11 @@ impl Simplifier<'_> {
                             };
                             let pred = append_rebuilt(
                                 self.store,
-                                NodeSnapshot::Prim(primitive, vec![value], Location::none()),
+                                NodeSnapshot::Prim(primitive, vec![value], LamLoc::NONE),
                             );
                             let not = append_rebuilt(
                                 self.store,
-                                NodeSnapshot::Prim(Primitive::Pnot, vec![pred], Location::none()),
+                                NodeSnapshot::Prim(Primitive::Pnot, vec![pred], LamLoc::NONE),
                             );
                             let a = self.simpl(then_);
                             let b = self.simpl(else_);
@@ -588,7 +588,7 @@ mod tests {
     }
     fn info() -> ApInfo {
         ApInfo {
-            loc: Location::none(),
+            loc: LamLoc::NONE,
             status: ApplyStatus::Na,
         }
     }
@@ -650,7 +650,7 @@ mod tests {
         let binding = Lambda::prim(
             Primitive::Psome,
             vec![Lambda::const_(Constant::JsFalse)],
-            Location::none(),
+            LamLoc::NONE,
         );
         let input = Lambda::let_(
             LetKind::Strict,
@@ -679,7 +679,7 @@ mod tests {
         ] {
             let boxed = id("boxed", 1);
             let source = id("source", 2);
-            let condition_loc = Location::new_for_error("optional.res", 4, 9);
+            let condition_loc = LamLoc::for_test(1);
             let input = Lambda::if_(
                 Lambda::prim(
                     Primitive::PisNotNone,
@@ -710,9 +710,9 @@ mod tests {
             let generator = IdGenerator::with_start_stamp(20);
             let mut external = |_: &Ident, _: &str| None;
             context.simplify_alias(&generator, &mut external);
-            let check = Lambda::prim(predicate, vec![Lambda::var(source)], Location::none());
+            let check = Lambda::prim(predicate, vec![Lambda::var(source)], LamLoc::NONE);
             let expected = Lambda::if_(
-                Lambda::prim(Primitive::Pnot, vec![check], Location::none()),
+                Lambda::prim(Primitive::Pnot, vec![check], LamLoc::NONE),
                 int(1),
                 int(2),
             );
@@ -739,9 +739,9 @@ mod tests {
                     crate::lambda::lam_primitive::Mutable::Immutable,
                 ),
                 vec![int(1)],
-                Location::none(),
+                LamLoc::NONE,
             ),
-            Lambda::prim(Primitive::Psome, vec![int(1)], Location::none()),
+            Lambda::prim(Primitive::Psome, vec![int(1)], LamLoc::NONE),
         ];
         for (index, binding) in shapes.into_iter().enumerate() {
             let value = id("shape", index as i32 + 1);
@@ -753,7 +753,7 @@ mod tests {
                     Lambda::prim(
                         Primitive::PisNotNone,
                         vec![Lambda::var(value)],
-                        Location::new_for_error("shape.res", 1, 2),
+                        LamLoc::for_test(2),
                     ),
                     int(7),
                     int(8),
@@ -771,7 +771,7 @@ mod tests {
             Lambda::prim(
                 Primitive::PisNotNone,
                 vec![Lambda::var(value)],
-                Location::none(),
+                LamLoc::NONE,
             ),
             int(7),
             int(8),
@@ -793,7 +793,7 @@ mod tests {
             kind: IndexedIdKind,
             info: FieldDbgInfo,
             index: i32,
-            loc: Location,
+            loc: LamLoc,
         ) -> Lambda {
             let value = id("value", 1);
             let input = Lambda::prim(
@@ -815,7 +815,7 @@ mod tests {
                 name: "field".into(),
             },
             0,
-            Location::new_for_error("field.res", 1, 2),
+            LamLoc::for_test(3),
         );
         let expected = Lambda::prim(
             Primitive::Pfield(
@@ -825,14 +825,14 @@ mod tests {
                 },
             ),
             vec![Lambda::global_module(module)],
-            Location::none(),
+            LamLoc::NONE,
         );
         assert_exact(&actual, &expected);
 
         let mut context = IndexedLambdaContext::from_lambda(int(0), []);
         let simple = context.store_mut().append_compat_lambda(int(7));
         let value = id("value", 1);
-        let loc = Location::new_for_error("field.res", 3, 4);
+        let loc = LamLoc::for_test(4);
         let root = context.store_mut().append_compat_lambda(Lambda::prim(
             Primitive::Pfield(0, FieldDbgInfo::Tuple),
             vec![Lambda::var(value)],
@@ -872,7 +872,7 @@ mod tests {
             IndexedIdKind::Constant(record),
             FieldDbgInfo::Record { name: "b".into() },
             0,
-            Location::none(),
+            LamLoc::NONE,
         );
         assert_exact(&actual, &int(8));
         let tuple = Constant::Block {
@@ -883,7 +883,7 @@ mod tests {
             IndexedIdKind::Constant(tuple),
             FieldDbgInfo::Tuple,
             0,
-            Location::none(),
+            LamLoc::NONE,
         );
         assert_exact(&actual, &int(9));
     }
@@ -921,8 +921,8 @@ mod tests {
             }))
         };
         let base = id("base", 2);
-        let first_loc = Location::new_for_error("jsx.res", 1, 2);
-        let call_loc = Location::new_for_error("jsx.res", 3, 4);
+        let first_loc = LamLoc::for_test(5);
+        let call_loc = LamLoc::for_test(6);
         let first = Lambda::prim(
             Primitive::Pfield(0, FieldDbgInfo::Tuple),
             vec![Lambda::var(base)],
@@ -955,7 +955,7 @@ mod tests {
         let then_ = Lambda::prim(
             Primitive::Paddint,
             vec![Lambda::var(id("left", 3)), Lambda::var(id("right", 4))],
-            Location::none(),
+            LamLoc::NONE,
         );
         let body = Lambda::if_(Lambda::var(param), then_.clone(), int(3));
         let mut store = IndexedLambda::from_lambda(body);
@@ -979,7 +979,7 @@ mod tests {
         let impure_body = store.append_compat_lambda(Lambda::if_(
             Lambda::var(param),
             then_,
-            Lambda::prim(Primitive::Pdebugger, vec![], Location::none()),
+            Lambda::prim(Primitive::Pdebugger, vec![], LamLoc::NONE),
         ));
         let truth = store.append_compat_lambda(Lambda::const_(Constant::JsTrue));
         assert!(inline_allowed(
@@ -1041,9 +1041,9 @@ mod tests {
         let function = Lambda::function_(
             1,
             vec![p],
-            Lambda::prim(Primitive::Pidentity, vec![Lambda::var(p)], Location::none()),
+            Lambda::prim(Primitive::Pidentity, vec![Lambda::var(p)], LamLoc::NONE),
             FunctionAttribute::default(),
-            crate::location::Location::none(),
+            LamLoc::NONE,
         );
         for (flag, should_inline) in [
             (crate::lambda::lam_compile_context::RecFlag::Rec, true),
@@ -1055,7 +1055,7 @@ mod tests {
             let mut external = |_: &Ident, _: &str| None;
             context.simplify_alias(&generator, &mut external);
             let expected = if should_inline {
-                Lambda::prim(Primitive::Pidentity, vec![int(4)], Location::none())
+                Lambda::prim(Primitive::Pidentity, vec![int(4)], LamLoc::NONE)
             } else {
                 apply(Lambda::var(f), vec![int(4)])
             };
@@ -1089,7 +1089,7 @@ mod tests {
         closed.simplify_alias(&generator, &mut external);
         assert_exact(
             &closed.materialize(),
-            &Lambda::prim(Primitive::Pidentity, vec![int(4)], Location::none()),
+            &Lambda::prim(Primitive::Pidentity, vec![int(4)], LamLoc::NONE),
         );
 
         let free = id("free", 3);
@@ -1098,7 +1098,7 @@ mod tests {
             vec![p],
             Lambda::var(free),
             FunctionAttribute::default(),
-            crate::location::Location::none(),
+            LamLoc::NONE,
         );
         let mut open = context_with_function(
             f,
@@ -1117,7 +1117,7 @@ mod tests {
     fn direct_function_attribute_and_arity_guards_preserve_full_apply_info() {
         let x = id("x", 1);
         let app_info = ApInfo {
-            loc: Location::new_for_error("guard.res", 4, 8),
+            loc: LamLoc::for_test(7),
             status: ApplyStatus::Uncurry,
         };
         let variants = vec![
@@ -1131,13 +1131,7 @@ mod tests {
             },
         ];
         for attr in variants {
-            let function = Lambda::function_(
-                1,
-                vec![x],
-                Lambda::var(x),
-                attr,
-                crate::location::Location::none(),
-            );
+            let function = Lambda::function_(1, vec![x], Lambda::var(x), attr, LamLoc::NONE);
             let input = Lambda::Lapply(Box::new(Apply {
                 ap_func: Box::new(function),
                 ap_args: vec![int(1)],
@@ -1152,7 +1146,7 @@ mod tests {
             vec![x, id("y", 2)],
             Lambda::var(x),
             FunctionAttribute::default(),
-            crate::location::Location::none(),
+            LamLoc::NONE,
         );
         let input = Lambda::Lapply(Box::new(Apply {
             ap_func: Box::new(function),
@@ -1170,7 +1164,7 @@ mod tests {
         let target = Lambda::prim(
             Primitive::Pfield(0, FieldDbgInfo::Module { name: "run".into() }),
             vec![Lambda::global_module(module)],
-            Location::new_for_error("external.res", 1, 2),
+            LamLoc::for_test(8),
         );
         let input = apply(target.clone(), vec![Lambda::const_(Constant::JsTrue)]);
         let mut context = IndexedLambdaContext::from_lambda(input, []);
@@ -1182,7 +1176,7 @@ mod tests {
             vec![parameter],
             Lambda::if_(Lambda::var(parameter), int(7), int(8)),
             FunctionAttribute::default(),
-            crate::location::Location::none(),
+            LamLoc::NONE,
         );
         let mut external = |id: &Ident, field: &str| {
             calls.push((id.name().to_string(), field.to_string()));
@@ -1215,10 +1209,10 @@ mod tests {
     fn nullable_beta_arguments_bind_original_rhs_without_identity_compensation() {
         for primitive in [Primitive::PnullToOpt, Primitive::PnullUndefinedToOpt] {
             let x = id("x", 1);
-            let predicate_loc = Location::new_for_error("nullable.res", 10, 11);
-            let unwrap_loc = Location::new_for_error("nullable.res", 12, 13);
-            let argument_loc = Location::new_for_error("nullable.res", 20, 21);
-            let effect_loc = Location::new_for_error("nullable.res", 22, 23);
+            let predicate_loc = LamLoc::for_test(9);
+            let unwrap_loc = LamLoc::for_test(10);
+            let argument_loc = LamLoc::for_test(11);
+            let effect_loc = LamLoc::for_test(12);
             let body = Lambda::if_(
                 Lambda::prim(Primitive::PisNotNone, vec![Lambda::var(x)], predicate_loc),
                 Lambda::prim(Primitive::PvalFromOption, vec![Lambda::var(x)], unwrap_loc),
@@ -1235,13 +1229,7 @@ mod tests {
             );
             let argument = Lambda::prim(primitive.clone(), vec![effect.clone()], argument_loc);
             let input = apply(
-                Lambda::function_(
-                    1,
-                    vec![x],
-                    body,
-                    FunctionAttribute::default(),
-                    crate::location::Location::none(),
-                ),
+                Lambda::function_(1, vec![x], body, FunctionAttribute::default(), LamLoc::NONE),
                 vec![argument.clone()],
             );
             let (actual, frontier, peak) = run(input, 200);
@@ -1276,7 +1264,7 @@ mod tests {
         let callee = id("callee", 2);
         let input = apply(
             Lambda::Lfunction(Box::new(LFunction {
-                loc: crate::location::Location::none(),
+                loc: LamLoc::NONE,
                 arity: 1,
                 params: vec![x],
                 body: Box::new(apply(Lambda::var(callee), vec![Lambda::var(x)])),
@@ -1306,16 +1294,10 @@ mod tests {
                 ffi: Box::new(crate::lambda::lam_primitive::ExternalDecl::test_val("", 0)),
             },
             vec![],
-            Location::none(),
+            LamLoc::NONE,
         );
         let input = apply(
-            Lambda::function_(
-                1,
-                vec![x],
-                body,
-                FunctionAttribute::default(),
-                crate::location::Location::none(),
-            ),
+            Lambda::function_(1, vec![x], body, FunctionAttribute::default(), LamLoc::NONE),
             vec![argument.clone()],
         );
         let (result, frontier, substitution_peak) = run(input, 100);
@@ -1355,7 +1337,7 @@ mod tests {
                         crate::lambda::lam_primitive::Mutable::Immutable,
                     ),
                     vec![int(7)],
-                    Location::none(),
+                    LamLoc::NONE,
                 ),
                 Lambda::let_(
                     LetKind::Strict,
@@ -1363,18 +1345,18 @@ mod tests {
                     Lambda::prim(
                         Primitive::PnullToOpt,
                         vec![Lambda::var(source)],
-                        Location::none(),
+                        LamLoc::NONE,
                     ),
                     Lambda::seq(
                         Lambda::prim(
                             Primitive::Pfield(0, FieldDbgInfo::Tuple),
                             vec![Lambda::var(block)],
-                            Location::none(),
+                            LamLoc::NONE,
                         ),
                         Lambda::prim(
                             Primitive::PvalFromOption,
                             vec![Lambda::var(optional)],
-                            Location::none(),
+                            LamLoc::NONE,
                         ),
                     ),
                 ),
@@ -1393,7 +1375,7 @@ mod tests {
                         crate::lambda::lam_primitive::Mutable::Immutable,
                     ),
                     vec![int(7)],
-                    Location::none(),
+                    LamLoc::NONE,
                 ),
                 Lambda::let_(
                     LetKind::Strict,
@@ -1401,7 +1383,7 @@ mod tests {
                     Lambda::prim(
                         Primitive::PnullToOpt,
                         vec![Lambda::var(source)],
-                        Location::none(),
+                        LamLoc::NONE,
                     ),
                     Lambda::seq(int(7), Lambda::var(source)),
                 ),
@@ -1418,7 +1400,7 @@ mod tests {
         let target = Lambda::prim(
             Primitive::Pfield(0, FieldDbgInfo::Module { name: "run".into() }),
             vec![Lambda::global_module(module)],
-            Location::none(),
+            LamLoc::NONE,
         );
         let input = apply(target.clone(), vec![int(1)]);
         let generator = IdGenerator::with_start_stamp(10);
@@ -1442,9 +1424,9 @@ mod tests {
         let function = Lambda::function_(
             1,
             vec![x],
-            Lambda::prim(Primitive::Pidentity, vec![Lambda::var(x)], Location::none()),
+            Lambda::prim(Primitive::Pidentity, vec![Lambda::var(x)], LamLoc::NONE),
             FunctionAttribute::default(),
-            crate::location::Location::none(),
+            LamLoc::NONE,
         );
         let raised = Lambda::static_raise(7, vec![int(9)]);
         let caught = Lambda::static_catch(
@@ -1468,7 +1450,7 @@ mod tests {
             LetKind::StrictOpt,
             expected_f,
             expected_function,
-            Lambda::prim(Primitive::Pidentity, vec![int(9)], Location::none()),
+            Lambda::prim(Primitive::Pidentity, vec![int(9)], LamLoc::NONE),
         );
         assert_exact(&context.materialize(), &expected);
         let measurements = context.storage_measurements();
@@ -1483,7 +1465,7 @@ mod tests {
                 measurements.metadata_retained_only_side_payload_shallow_bytes,
                 measurements.superseded_unreachable_side_payload_shallow_bytes,
             ),
-            (25, 6, 3, 8, 17, 488, 244, 1036),
+            (25, 6, 3, 8, 17, 392, 180, 812),
         );
     }
 }

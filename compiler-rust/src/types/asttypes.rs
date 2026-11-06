@@ -3,6 +3,7 @@
 //! These types are shared between the surface syntax (Parsetree) and
 //! the typed syntax (Typedtree).
 
+use super::decl_loc::DeclLoc;
 use crate::location::Location;
 use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
@@ -39,14 +40,14 @@ pub enum ArgLabel {
     #[default]
     Nolabel,
     /// Labeled argument: `~label => ...`
-    Labelled(Located<String>),
+    Labelled(Located<String, DeclLoc>),
     /// Optional argument: `~(label=e) => ...`
-    Optional(Located<String>),
+    Optional(Located<String, DeclLoc>),
 }
 
 impl ArgLabel {
     /// Create a labeled argument.
-    pub fn labelled(name: impl Into<String>, loc: Location) -> Self {
+    pub fn labelled(name: impl Into<String>, loc: DeclLoc) -> Self {
         ArgLabel::Labelled(Located {
             txt: name.into(),
             loc,
@@ -54,7 +55,7 @@ impl ArgLabel {
     }
 
     /// Create an optional argument.
-    pub fn optional(name: impl Into<String>, loc: Location) -> Self {
+    pub fn optional(name: impl Into<String>, loc: DeclLoc) -> Self {
         ArgLabel::Optional(Located {
             txt: name.into(),
             loc,
@@ -66,7 +67,7 @@ impl ArgLabel {
     pub fn labelled_noloc(name: impl Into<String>) -> Self {
         ArgLabel::Labelled(Located {
             txt: name.into(),
-            loc: Location::none(),
+            loc: DeclLoc::none(),
         })
     }
 
@@ -75,7 +76,7 @@ impl ArgLabel {
     pub fn optional_noloc(name: impl Into<String>) -> Self {
         ArgLabel::Optional(Located {
             txt: name.into(),
-            loc: Location::none(),
+            loc: DeclLoc::none(),
         })
     }
 
@@ -99,9 +100,9 @@ impl ArgLabel {
     }
 
     /// Get the location of the label, if any.
-    pub fn loc(&self) -> Location {
+    pub fn loc(&self) -> DeclLoc {
         match self {
-            ArgLabel::Nolabel => Location::none(),
+            ArgLabel::Nolabel => DeclLoc::none(),
             ArgLabel::Labelled(l) => l.loc,
             ArgLabel::Optional(l) => l.loc,
         }
@@ -118,18 +119,19 @@ impl ArgLabel {
     }
 }
 
-/// A value with source location.
+/// A value with source location. Declarations and type labels locate their
+/// names with a [`DeclLoc`] handle (see `types::decl_loc`).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct Located<T> {
+pub struct Located<T, L = Location> {
     /// The value.
     pub txt: T,
     /// The source location.
-    pub loc: Location,
+    pub loc: L,
 }
 
-impl<T> Located<T> {
+impl<T, L: Copy + Default> Located<T, L> {
     /// Create a new located value.
-    pub fn new(txt: T, loc: Location) -> Self {
+    pub fn new(txt: T, loc: L) -> Self {
         Located { txt, loc }
     }
 
@@ -137,12 +139,12 @@ impl<T> Located<T> {
     pub fn noloc(txt: T) -> Self {
         Located {
             txt,
-            loc: Location::none(),
+            loc: L::default(),
         }
     }
 
     /// Map a function over the contained value.
-    pub fn map<U>(self, f: impl FnOnce(T) -> U) -> Located<U> {
+    pub fn map<U>(self, f: impl FnOnce(T) -> U) -> Located<U, L> {
         Located {
             txt: f(self.txt),
             loc: self.loc,
@@ -150,7 +152,7 @@ impl<T> Located<T> {
     }
 
     /// Get a reference to the contained value.
-    pub fn as_ref(&self) -> Located<&T> {
+    pub fn as_ref(&self) -> Located<&T, L> {
         Located {
             txt: &self.txt,
             loc: self.loc,
@@ -190,7 +192,7 @@ mod tests {
 
     #[test]
     fn test_located() {
-        let loc = Located::new(42, Location::none());
+        let loc: Located<i32> = Located::new(42, Location::none());
         assert_eq!(loc.txt, 42);
 
         let mapped = loc.map(|x| x * 2);
@@ -202,5 +204,13 @@ mod tests {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<ArgLabel>();
         assert_send_sync::<Located<String>>();
+    }
+
+    #[test]
+    fn type_labels_hold_compact_locations() {
+        assert_eq!(std::mem::size_of::<Located<String, DeclLoc>>(), 32);
+        // The `Nolabel` discriminant needs its own word: `Located<String, DeclLoc>`
+        // has no niche the enum can use. A full inline `Location` made this 64.
+        assert_eq!(std::mem::size_of::<ArgLabel>(), 40);
     }
 }

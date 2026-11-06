@@ -168,7 +168,7 @@ impl Processor<'_> {
             SignatureItem::SigValue(ident, vd) => {
                 let stamp = ident.binding_time();
                 let old_declared = self.stamps.find_value(stamp).cloned();
-                let loc = Loc::of_location(&vd.val_loc);
+                let loc = Loc::of_location(&self.ctx.types.resolve_loc(vd.val_loc));
                 let stamps = &mut self.stamps;
                 let declared = add_declared(
                     Located {
@@ -244,7 +244,7 @@ impl Processor<'_> {
                                 };
                                 let declared = attrs::new_declared(
                                     item.clone(),
-                                    Loc::of_location(&cd.cd_loc),
+                                    Loc::of_location(&self.ctx.types.resolve_loc(cd.cd_loc)),
                                     Located::mknoloc(cname),
                                     stamp,
                                     env.module_path.clone(),
@@ -270,7 +270,7 @@ impl Processor<'_> {
                 let stamps = &mut self.stamps;
                 let declared = add_declared(
                     name,
-                    Loc::of_location(&decl.type_loc),
+                    Loc::of_location(&self.ctx.types.resolve_loc(decl.type_loc)),
                     ident.binding_time(),
                     env,
                     item,
@@ -283,7 +283,7 @@ impl Processor<'_> {
             SignatureItem::SigModule(ident, md, _) => {
                 let name = ident.name().to_string();
                 let item = self.for_type_module(&name, env, &md.md_type);
-                let loc = Loc::of_location(&md.md_loc);
+                let loc = Loc::of_location(&self.ctx.types.resolve_loc(md.md_loc));
                 let stamps = &mut self.stamps;
                 let declared = add_declared(
                     Located { txt: name, loc },

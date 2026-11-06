@@ -6,6 +6,7 @@
 //! - Variable usage statistics for inlining and optimization decisions
 //! - Position tracking for safe substitution
 
+use crate::lambda::LamLoc;
 use ahash::{AHashMap as HashMap, AHashSet as HashSet};
 
 use crate::ident::Ident;
@@ -458,7 +459,7 @@ mod tests {
             vec![x],
             Lambda::var(y),
             FunctionAttribute::default(),
-            crate::location::Location::none(),
+            LamLoc::NONE,
         );
 
         let fv = free_variables_with_stats(&HashSet::new(), HashMap::new(), &func);
@@ -502,7 +503,7 @@ mod tests {
             vec![param],
             Lambda::var(param),
             FunctionAttribute::default(),
-            crate::location::Location::none(),
+            LamLoc::NONE,
         );
         assert!(is_closed(&func));
     }

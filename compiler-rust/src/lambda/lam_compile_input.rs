@@ -5,13 +5,13 @@
 //! owner-scoped same-store contract; this is not compile-time arena branding.
 
 use crate::ident::Ident;
+use crate::lambda::LamLoc;
 use crate::lambda::indexed::{IndexedLambda, NodeId, NodeView};
 use crate::lambda::lam_compat::LetKind;
 use crate::lambda::{
     ApInfo, ApplyStatus, Constant, DirectionFlag, FunctionAttribute, Lambda, Primitive,
     SwitchDispatch, SwitchKey,
 };
-use crate::location::Location;
 
 #[derive(Clone, Copy)]
 pub(crate) enum LambdaInput<'a> {
@@ -300,7 +300,7 @@ pub(crate) enum LambdaInputView<'a> {
     Function(FunctionInput<'a>),
     Let(LetKind, &'a Ident, LambdaInput<'a>, LambdaInput<'a>),
     LetRec(LambdaBindings<'a>, LambdaInput<'a>),
-    Prim(&'a Primitive, LambdaInputs<'a>, &'a Location),
+    Prim(&'a Primitive, LambdaInputs<'a>, &'a LamLoc),
     Switch(LambdaInput<'a>, SwitchInput<'a>),
     StringSwitch(LambdaInput<'a>, StringCases<'a>, Option<LambdaInput<'a>>),
     StaticRaise(i32, LambdaInputs<'a>),

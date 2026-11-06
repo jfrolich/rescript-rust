@@ -16,8 +16,7 @@
 
 use crate::parse_arena::{ExprIdx, LocIdx, ParseArena};
 use crate::parser::ast::{
-    ArgLabel, Attributes, Constant, DictEntry, Expression, ExpressionDesc, Loc, Payload, PexpApply,
-    StringLoc,
+    ArgLabel, Attributes, DictEntry, Expression, ExpressionDesc, Loc, Payload, PexpApply, StringLoc,
 };
 use crate::parser::core::mknoloc;
 use crate::parser::longident::Longident;
@@ -133,22 +132,22 @@ pub fn rows_array(
             let end = arena.loc_end_idx(arena.get_expr(*value).pexp_loc);
             let tuple_loc = arena.mk_loc(start, end);
             let key_text = arena.get_string(key.txt).to_string();
+            let key_constant = arena.string_constant(&key_text);
             let key_expr = arena.push_expr(Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(Constant::string(
-                    &key_text,
-                )))),
+                pexp_desc: ExpressionDesc::Pexp_constant(key_constant),
                 pexp_loc: key.loc,
                 pexp_attributes: Attributes::new(),
             });
+            let tuple = arena.push_expr_list(&[key_expr, *value]);
             arena.push_expr(Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_tuple(Box::new(vec![key_expr, *value]))),
+                pexp_desc: ExpressionDesc::Pexp_tuple(tuple),
                 pexp_loc: tuple_loc,
                 pexp_attributes: Attributes::new(),
             })
         })
-        .collect();
+        .collect::<Vec<_>>();
     Expression {
-        pexp_desc: Box::new(ExpressionDesc::Pexp_array(Box::new(items))),
+        pexp_desc: ExpressionDesc::Pexp_array(arena.push_expr_list(&items)),
         pexp_loc: loc,
         pexp_attributes: Attributes::new(),
     }
@@ -165,7 +164,7 @@ fn primitive_dict(
     let name = arena.intern(name);
     let lid = arena.push_longident(Longident::Ldot(Box::new(Longident::Lident(module)), name));
     Expression {
-        pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Loc { txt: lid, loc })),
+        pexp_desc: ExpressionDesc::Pexp_ident(Loc { txt: lid, loc }),
         pexp_loc: loc,
         pexp_attributes: attrs,
     }
@@ -181,14 +180,15 @@ fn apply(
     let args = args
         .into_iter()
         .map(|arg| (ArgLabel::Nolabel, arena.push_expr(arg)))
-        .collect();
+        .collect::<Vec<_>>();
+    let args = arena.push_apply_args(&args);
     Expression {
-        pexp_desc: Box::new(ExpressionDesc::Pexp_apply(Box::new(PexpApply {
+        pexp_desc: ExpressionDesc::Pexp_apply(PexpApply {
             funct,
             args,
             partial: false,
             transformed_jsx: false,
-        }))),
+        }),
         pexp_loc: loc,
         pexp_attributes: Attributes::new(),
     }
@@ -232,9 +232,9 @@ pub fn to_calls(
                     }
                     Part::Spread(spread) => spread,
                 })
-                .collect();
+                .collect::<Vec<_>>();
             let sources = Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_array(Box::new(sources))),
+                pexp_desc: ExpressionDesc::Pexp_array(arena.push_expr_list(&sources)),
                 pexp_loc: loc,
                 pexp_attributes: Attributes::new(),
             };

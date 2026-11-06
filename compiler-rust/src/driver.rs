@@ -62,6 +62,18 @@ static SKIP_CLI_CLEANUP: AtomicBool = AtomicBool::new(false);
 static EXTERNAL_PPX_TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
 use crate::binary_ast::writer::{AST_IMPL_MAGIC_NUMBER, AST_INTF_MAGIC_NUMBER};
 
+/// Internal control flow: discard a location-free attempt before publishing
+/// it, then compile the same source with location side tables enabled.
+#[derive(Debug, thiserror::Error, Clone, Copy, PartialEq, Eq)]
+pub enum LocationRetry {
+    #[error("warning reporting requires source locations")]
+    Warning,
+    #[error("diagnostic compilation requires source locations")]
+    Diagnostic,
+    #[error("generated output requires source locations")]
+    Output,
+}
+
 #[derive(Debug)]
 pub struct UserDiagnostic {
     output: String,
@@ -107,8 +119,8 @@ fn expression_has_string_literal(
 ) -> bool {
     use crate::parser::ast::ExpressionDesc as ED;
 
-    match &*expr.pexp_desc {
-        ED::Pexp_constant(c) => matches!(&**c, Constant::String(s) if s.semantic() == value),
+    match &expr.pexp_desc {
+        ED::Pexp_constant(c) => matches!(&*c, Constant::String(s) if s.semantic(arena) == value),
         ED::Pexp_template(template) => template
             .values
             .iter()
@@ -121,8 +133,9 @@ fn expression_has_string_literal(
                     .any(|e| expression_has_string_literal(arena.get_expr(*e), value, arena))
         }
         ED::Pexp_let(inner) => {
-            let (_, bindings, body) = &**inner;
-            bindings
+            let (_, bindings, body) = &*inner;
+            arena
+                .vb_list(*bindings)
                 .iter()
                 .any(|vb| expression_has_string_literal(arena.get_expr(vb.pvb_expr), value, arena))
                 || expression_has_string_literal(arena.get_expr(*body), value, arena)
@@ -135,22 +148,23 @@ fn expression_has_string_literal(
                 || expression_has_string_literal(arena.get_expr(*rhs), value, arena)
         }
         ED::Pexp_apply(inner) => {
-            let crate::parser::ast::PexpApply { funct, args, .. } = &**inner;
+            let crate::parser::ast::PexpApply { funct, args, .. } = inner;
             expression_has_string_literal(arena.get_expr(*funct), value, arena)
-                || args.iter().any(|(_, arg)| {
+                || arena.apply_args(*args).iter().any(|(_, arg)| {
                     expression_has_string_literal(arena.get_expr(*arg), value, arena)
                 })
         }
         ED::Pexp_match(inner) | ED::Pexp_try(inner) => {
-            let (scrutinee, cases) = &**inner;
+            let (scrutinee, cases) = &*inner;
             expression_has_string_literal(arena.get_expr(*scrutinee), value, arena)
-                || cases.iter().any(|case| {
+                || arena.case_list(*cases).iter().any(|case| {
                     case.pc_guard.as_ref().is_some_and(|g| {
                         expression_has_string_literal(arena.get_expr(*g), value, arena)
                     }) || expression_has_string_literal(arena.get_expr(case.pc_rhs), value, arena)
                 })
         }
-        ED::Pexp_tuple(items) | ED::Pexp_array(items) => items
+        ED::Pexp_tuple(items) | ED::Pexp_array(items) => arena
+            .expr_list(*items)
             .iter()
             .any(|item| expression_has_string_literal(arena.get_expr(*item), value, arena)),
         ED::Pexp_dict(entries) => entries.iter().any(|entry| match entry {
@@ -162,19 +176,20 @@ fn expression_has_string_literal(
                 expression_has_string_literal(arena.get_expr(*e), value, arena)
             }
         }),
-        ED::Pexp_construct(_, args) => args
-            .txt
+        ED::Pexp_construct(_, args) => arena
+            .expr_list(args.txt)
             .iter()
             .any(|arg| expression_has_string_literal(arena.get_expr(*arg), value, arena)),
         ED::Pexp_variant(inner) => {
             let (_, args) = &**inner;
-            args.txt
+            arena
+                .expr_list(args.txt)
                 .iter()
                 .any(|arg| expression_has_string_literal(arena.get_expr(*arg), value, arena))
         }
         ED::Pexp_record(inner) => {
-            let (fields, base) = &**inner;
-            fields.iter().any(|field| {
+            let (fields, base) = &*inner;
+            arena.expr_field_list(*fields).iter().any(|field| {
                 expression_has_string_literal(arena.get_expr(field.expr), value, arena)
             }) || base.as_ref().is_some_and(|base| {
                 expression_has_string_literal(arena.get_expr(*base), value, arena)
@@ -276,7 +291,7 @@ fn payload_has_string_literal(
     arena: &crate::parse_arena::ParseArena,
 ) -> bool {
     match payload {
-        Payload::PStr(items) => items.iter().any(|item| match &*item.pstr_desc {
+        Payload::PStr(items) => items.iter().any(|item| match &item.pstr_desc {
             StructureItemDesc::Pstr_eval(inner) => {
                 let (expr, _) = &**inner;
                 expression_has_string_literal(arena.get_expr(*expr), value, arena)
@@ -304,8 +319,8 @@ fn pattern_has_string_literal(
 ) -> bool {
     use crate::parser::ast::PatternDesc as PD;
 
-    match &*pat.ppat_desc {
-        PD::Ppat_constant(c) => matches!(&**c, Constant::String(s) if s.semantic() == value),
+    match &pat.ppat_desc {
+        PD::Ppat_constant(c) => matches!(&*c, Constant::String(s) if s.semantic(arena) == value),
         PD::Ppat_alias(inner, _) | PD::Ppat_exception(inner) => {
             pattern_has_string_literal(arena.get_pat(*inner), value, arena)
         }
@@ -313,16 +328,18 @@ fn pattern_has_string_literal(
             let (inner_pat, _) = &**inner;
             pattern_has_string_literal(arena.get_pat(*inner_pat), value, arena)
         }
-        PD::Ppat_tuple(items) | PD::Ppat_array(items) => items
+        PD::Ppat_tuple(items) | PD::Ppat_array(items) => arena
+            .pat_list(*items)
             .iter()
             .any(|item| pattern_has_string_literal(arena.get_pat(*item), value, arena)),
-        PD::Ppat_construct(_, args) => args
-            .txt
+        PD::Ppat_construct(_, args) => arena
+            .pat_list(args.txt)
             .iter()
             .any(|arg| pattern_has_string_literal(arena.get_pat(*arg), value, arena)),
         PD::Ppat_variant(inner) => {
             let (_, args) = &**inner;
-            args.txt
+            arena
+                .pat_list(args.txt)
                 .iter()
                 .any(|arg| pattern_has_string_literal(arena.get_pat(*arg), value, arena))
         }
@@ -332,7 +349,9 @@ fn pattern_has_string_literal(
         }
         PD::Ppat_record(inner) => {
             let (rows, _, _) = &**inner;
-            rows.iter()
+            arena
+                .pat_field_list(*rows)
+                .iter()
                 .any(|row| pattern_has_string_literal(arena.get_pat(row.pat), value, arena))
         }
         PD::Ppat_dict(entries) => entries.iter().any(|entry| {
@@ -351,7 +370,7 @@ fn module_expr_has_config_string(
     value: &str,
     arena: &crate::parse_arena::ParseArena,
 ) -> bool {
-    match &*module_expr.pmod_desc {
+    match &module_expr.pmod_desc {
         ModuleExprDesc::Pmod_structure(structure) => {
             structure_has_config_string(structure, value, arena)
         }
@@ -383,8 +402,8 @@ fn module_type_has_config_string(
 ) -> bool {
     use crate::parser::ast::ModuleTypeDesc as MTD;
 
-    match &*module_type.pmty_desc {
-        MTD::Pmty_signature(sig_items) => sig_items.iter().any(|item| match &*item.psig_desc {
+    match &module_type.pmty_desc {
+        MTD::Pmty_signature(sig_items) => sig_items.iter().any(|item| match &item.psig_desc {
             crate::parser::ast::SignatureItemDesc::Psig_attribute(attr) => {
                 payload_has_string_literal(&attr.1, value, arena)
             }
@@ -412,7 +431,7 @@ fn structure_has_config_string(
     value: &str,
     arena: &crate::parse_arena::ParseArena,
 ) -> bool {
-    structure.iter().any(|item| match &*item.pstr_desc {
+    structure.iter().any(|item| match &item.pstr_desc {
         StructureItemDesc::Pstr_attribute(attr) => {
             payload_has_string_literal(&attr.1, value, arena)
         }
@@ -499,6 +518,50 @@ fn latin1_dump(bytes: Vec<u8>) -> String {
     bytes.into_iter().map(char::from).collect()
 }
 
+/// See [`CompilerOptions::warning_locations`].
+pub type WarningLocations =
+    std::sync::Arc<dyn Fn() -> Option<crate::parse_arena::ParseArena> + Send + Sync>;
+
+/// Place the warnings of a location-free compile in a located parse of the
+/// same source, replacing each warning's location identity with the matching
+/// location of `located` (parsed on first use). Returns false when any
+/// warning cannot be placed with certainty; the caller then retries the
+/// whole compile with locations. A located compile needs no placement.
+fn place_location_free_warnings(
+    arena: &crate::parse_arena::ParseArena,
+    options: &CompilerOptions,
+    located: &mut Option<crate::parse_arena::ParseArena>,
+    warnings: &mut [TypeCoreWarning],
+) -> bool {
+    if arena.stores_locations() || warnings.is_empty() {
+        return true;
+    }
+    let Some(slots) = warnings
+        .iter()
+        .map(|warning| arena.located_parse_slot(warning.loc))
+        .collect::<Option<Vec<_>>>()
+    else {
+        return false;
+    };
+    if located.is_none() {
+        let Some(parse) = options.warning_locations.as_ref().and_then(|parse| parse()) else {
+            return false;
+        };
+        // Both parses must have issued the same locations, or identities and
+        // located indices do not correspond.
+        if !parse.stores_locations()
+            || parse.parse_location_slot_count() != arena.parse_location_slot_count()
+        {
+            return false;
+        }
+        *located = Some(parse);
+    }
+    for (warning, slot) in warnings.iter_mut().zip(slots) {
+        warning.loc = slot;
+    }
+    true
+}
+
 /// Compiler options that can be passed to the driver.
 #[derive(Clone)]
 pub struct CompilerOptions {
@@ -522,6 +585,10 @@ pub struct CompilerOptions {
     /// Record what an in-process compile read of other units
     /// (`unit_reads` of the results), for incremental builds.
     pub collect_unit_reads: bool,
+    /// For a location-free compile: parse the same source again with
+    /// locations (the same frontend included). Warnings are then placed in
+    /// that parse instead of compiling the unit a second time.
+    pub warning_locations: Option<WarningLocations>,
     /// Warning enable/disable specs from `-w` flags.
     pub warning_specs: Vec<String>,
     /// Warning-as-error specs from `-warn-error` flags.
@@ -638,8 +705,8 @@ fn strip_saved_signature_locations(sig: &mut [crate::types::decl::SignatureItem]
     // `Subst.loc` and `Subst.attrs` (compiler/ml/subst.ml:57-67).
     struct Strip;
     impl SignatureLocationVisitor for Strip {
-        fn location(&mut self, loc: &mut crate::location::Location) {
-            *loc = crate::location::Location::none();
+        fn location(&mut self, loc: &mut crate::types::DeclLoc) {
+            *loc = crate::types::DeclLoc::none();
         }
         fn attribute(&mut self, attr: &mut Attribute) {
             self.location(&mut attr.attr_loc);
@@ -671,7 +738,7 @@ fn strip_saved_extension_locations(sig: &mut [crate::types::decl::SignatureItem]
     }
     for item in sig {
         match item {
-            SignatureItem::SigTypext(_, ext, _) => ext.ext_loc = crate::location::Location::none(),
+            SignatureItem::SigTypext(_, ext, _) => ext.ext_loc = crate::types::DeclLoc::none(),
             SignatureItem::SigModule(_, md, _) => module_type(&mut md.md_type),
             SignatureItem::SigModtype(_, mtd) => {
                 if let Some(mty) = &mut mtd.mtd_type {
@@ -774,6 +841,7 @@ impl Default for CompilerOptions {
             runtime_path: None,
             open_modules: Vec::new(),
             collect_unit_reads: false,
+            warning_locations: None,
             warning_specs: Vec::new(),
             warning_error_specs: Vec::new(),
             source_filename: None,
@@ -1740,7 +1808,7 @@ fn let_unwrap_binding_loc(
 }
 
 fn is_supported_let_unwrap_pattern(pat: &crate::parser::ast::Pattern, arena: &ParseArena) -> bool {
-    let PatternDesc::Ppat_construct(ctor_lid, payload) = &*pat.ppat_desc else {
+    let PatternDesc::Ppat_construct(ctor_lid, payload) = &pat.ppat_desc else {
         return false;
     };
     let Longident::Lident(ctor_name_idx) = arena.get_longident(ctor_lid.txt) else {
@@ -1769,17 +1837,19 @@ fn invalid_enabled_let_unwrap_in_structure(
     arena: &ParseArena,
 ) -> Option<LetUnwrapPositionError> {
     for item in structure {
-        match &*item.pstr_desc {
+        match &item.pstr_desc {
             StructureItemDesc::Pstr_eval(eval) => {
                 if let Some(error) = invalid_enabled_let_unwrap_in_expr(eval.0, arena) {
                     return Some(error);
                 }
             }
             StructureItemDesc::Pstr_value(value) => {
-                if let Some(loc) = let_unwrap_binding_loc(&value.1, arena) {
+                if let Some(loc) = let_unwrap_binding_loc(arena.vb_list(value.1), arena) {
                     return Some(LetUnwrapPositionError::Toplevel(loc));
                 }
-                if let Some(error) = invalid_enabled_let_unwrap_in_bindings(&value.1, arena) {
+                if let Some(error) =
+                    invalid_enabled_let_unwrap_in_bindings(arena.vb_list(value.1), arena)
+                {
                     return Some(error);
                 }
             }
@@ -1817,7 +1887,7 @@ fn invalid_enabled_let_unwrap_in_mod_expr(
     arena: &ParseArena,
 ) -> Option<LetUnwrapPositionError> {
     let mod_expr = arena.get_mod_expr(mod_expr);
-    match &*mod_expr.pmod_desc {
+    match &mod_expr.pmod_desc {
         ModuleExprDesc::Pmod_structure(items) => {
             invalid_enabled_let_unwrap_in_structure(items, arena)
         }
@@ -1839,10 +1909,10 @@ fn invalid_enabled_let_unwrap_in_expr(
     arena: &ParseArena,
 ) -> Option<LetUnwrapPositionError> {
     let expr = arena.get_expr(expr);
-    match &*expr.pexp_desc {
+    match &expr.pexp_desc {
         ExpressionDesc::Pexp_let(inner) => {
-            let (_rec_flag, bindings, body) = &**inner;
-            if let [binding] = bindings.as_slice()
+            let (_rec_flag, bindings, body) = &*inner;
+            if let [binding] = arena.vb_list(*bindings)
                 && attrs_have_let_unwrap(&binding.pvb_attributes, arena)
                 && !is_supported_let_unwrap_pattern(arena.get_pat(binding.pvb_pat), arena)
             {
@@ -1850,7 +1920,7 @@ fn invalid_enabled_let_unwrap_in_expr(
                     arena.get_pat(binding.pvb_pat).ppat_loc,
                 ));
             }
-            invalid_enabled_let_unwrap_in_bindings(bindings, arena)
+            invalid_enabled_let_unwrap_in_bindings(arena.vb_list(*bindings), arena)
                 .or_else(|| invalid_enabled_let_unwrap_in_expr(*body, arena))
         }
         ExpressionDesc::Pexp_fun(fun) => fun
@@ -1859,34 +1929,34 @@ fn invalid_enabled_let_unwrap_in_expr(
             .or_else(|| invalid_enabled_let_unwrap_in_expr(fun.rhs, arena)),
         ExpressionDesc::Pexp_apply(apply) => invalid_enabled_let_unwrap_in_expr(apply.funct, arena)
             .or_else(|| {
-                apply
-                    .args
+                arena
+                    .apply_args(apply.args)
                     .iter()
                     .find_map(|(_, arg)| invalid_enabled_let_unwrap_in_expr(*arg, arena))
             }),
         ExpressionDesc::Pexp_match(inner) | ExpressionDesc::Pexp_try(inner) => {
             invalid_enabled_let_unwrap_in_expr(inner.0, arena).or_else(|| {
-                inner.1.iter().find_map(|case| {
+                arena.case_list(inner.1).iter().find_map(|case| {
                     case.pc_guard
                         .and_then(|guard| invalid_enabled_let_unwrap_in_expr(guard, arena))
                         .or_else(|| invalid_enabled_let_unwrap_in_expr(case.pc_rhs, arena))
                 })
             })
         }
-        ExpressionDesc::Pexp_tuple(items) | ExpressionDesc::Pexp_array(items) => items
+        ExpressionDesc::Pexp_tuple(items) | ExpressionDesc::Pexp_array(items) => arena
+            .expr_list(*items)
             .iter()
             .find_map(|item| invalid_enabled_let_unwrap_in_expr(*item, arena)),
-        ExpressionDesc::Pexp_construct(_, payload) => payload
-            .txt
+        ExpressionDesc::Pexp_construct(_, payload) => arena
+            .expr_list(payload.txt)
             .iter()
             .find_map(|expr| invalid_enabled_let_unwrap_in_expr(*expr, arena)),
-        ExpressionDesc::Pexp_variant(inner) => inner
-            .1
-            .txt
+        ExpressionDesc::Pexp_variant(inner) => arena
+            .expr_list(inner.1.txt)
             .iter()
             .find_map(|expr| invalid_enabled_let_unwrap_in_expr(*expr, arena)),
-        ExpressionDesc::Pexp_record(record) => record
-            .0
+        ExpressionDesc::Pexp_record(record) => arena
+            .expr_field_list(record.0)
             .iter()
             .find_map(|field| invalid_enabled_let_unwrap_in_expr(field.expr, arena))
             .or_else(|| {
@@ -1970,14 +2040,16 @@ fn disabled_let_unwrap_loc_in_structure(
     arena: &ParseArena,
 ) -> Option<LocIdx> {
     for item in structure {
-        match &*item.pstr_desc {
+        match &item.pstr_desc {
             StructureItemDesc::Pstr_eval(eval) => {
                 if let Some(loc) = disabled_let_unwrap_loc_in_expr(eval.0, arena) {
                     return Some(loc);
                 }
             }
             StructureItemDesc::Pstr_value(value) => {
-                if let Some(loc) = disabled_let_unwrap_loc_in_bindings(&value.1, arena) {
+                if let Some(loc) =
+                    disabled_let_unwrap_loc_in_bindings(arena.vb_list(value.1), arena)
+                {
                     return Some(loc);
                 }
             }
@@ -2012,7 +2084,7 @@ fn disabled_let_unwrap_loc_in_structure(
 
 fn disabled_let_unwrap_loc_in_mod_expr(mod_expr: ModExprIdx, arena: &ParseArena) -> Option<LocIdx> {
     let mod_expr = arena.get_mod_expr(mod_expr);
-    match &*mod_expr.pmod_desc {
+    match &mod_expr.pmod_desc {
         ModuleExprDesc::Pmod_structure(items) => disabled_let_unwrap_loc_in_structure(items, arena),
         ModuleExprDesc::Pmod_functor(functor) => {
             disabled_let_unwrap_loc_in_mod_expr(functor.2, arena)
@@ -2029,43 +2101,45 @@ fn disabled_let_unwrap_loc_in_mod_expr(mod_expr: ModExprIdx, arena: &ParseArena)
 
 fn disabled_let_unwrap_loc_in_expr(expr: ExprIdx, arena: &ParseArena) -> Option<LocIdx> {
     let expr = arena.get_expr(expr);
-    match &*expr.pexp_desc {
-        ExpressionDesc::Pexp_let(inner) => disabled_let_unwrap_loc_in_bindings(&inner.1, arena)
-            .or_else(|| disabled_let_unwrap_loc_in_expr(inner.2, arena)),
+    match &expr.pexp_desc {
+        ExpressionDesc::Pexp_let(inner) => {
+            disabled_let_unwrap_loc_in_bindings(arena.vb_list(inner.1), arena)
+                .or_else(|| disabled_let_unwrap_loc_in_expr(inner.2, arena))
+        }
         ExpressionDesc::Pexp_fun(fun) => fun
             .default
             .and_then(|expr| disabled_let_unwrap_loc_in_expr(expr, arena))
             .or_else(|| disabled_let_unwrap_loc_in_expr(fun.rhs, arena)),
         ExpressionDesc::Pexp_apply(apply) => disabled_let_unwrap_loc_in_expr(apply.funct, arena)
             .or_else(|| {
-                apply
-                    .args
+                arena
+                    .apply_args(apply.args)
                     .iter()
                     .find_map(|(_, arg)| disabled_let_unwrap_loc_in_expr(*arg, arena))
             }),
         ExpressionDesc::Pexp_match(inner) | ExpressionDesc::Pexp_try(inner) => {
             disabled_let_unwrap_loc_in_expr(inner.0, arena).or_else(|| {
-                inner.1.iter().find_map(|case| {
+                arena.case_list(inner.1).iter().find_map(|case| {
                     case.pc_guard
                         .and_then(|guard| disabled_let_unwrap_loc_in_expr(guard, arena))
                         .or_else(|| disabled_let_unwrap_loc_in_expr(case.pc_rhs, arena))
                 })
             })
         }
-        ExpressionDesc::Pexp_tuple(items) | ExpressionDesc::Pexp_array(items) => items
+        ExpressionDesc::Pexp_tuple(items) | ExpressionDesc::Pexp_array(items) => arena
+            .expr_list(*items)
             .iter()
             .find_map(|item| disabled_let_unwrap_loc_in_expr(*item, arena)),
-        ExpressionDesc::Pexp_construct(_, payload) => payload
-            .txt
+        ExpressionDesc::Pexp_construct(_, payload) => arena
+            .expr_list(payload.txt)
             .iter()
             .find_map(|expr| disabled_let_unwrap_loc_in_expr(*expr, arena)),
-        ExpressionDesc::Pexp_variant(inner) => inner
-            .1
-            .txt
+        ExpressionDesc::Pexp_variant(inner) => arena
+            .expr_list(inner.1.txt)
             .iter()
             .find_map(|expr| disabled_let_unwrap_loc_in_expr(*expr, arena)),
-        ExpressionDesc::Pexp_record(record) => record
-            .0
+        ExpressionDesc::Pexp_record(record) => arena
+            .expr_field_list(record.0)
             .iter()
             .find_map(|field| disabled_let_unwrap_loc_in_expr(field.expr, arena))
             .or_else(|| {
@@ -4374,7 +4448,7 @@ fn parsed_signature_has_gentype_ignore_interface(
     // OCaml compiler/gentype/GenTypeMain.ml:93-134 discovers
     // @@genType.ignoreInterface while scanning the interface CMT before
     // deciding whether the implementation artifact should own GenType output.
-    signature.iter().any(|item| match item.psig_desc.as_ref() {
+    signature.iter().any(|item| match &item.psig_desc {
         SignatureItemDesc::Psig_attribute(attribute) => {
             let attributes = Attributes::from_vec(vec![attribute.as_ref().clone()]);
             crate::gentype::annotation::get_attribute_payload(
@@ -10786,6 +10860,7 @@ fn compile_source_to_js_with_options_inner(
         raw_converter.convert_structure_with_coercion(&typed_structure, &implementation_coercion);
     let raw_warnings = raw_converter.take_warnings();
     let hoisted_functions = raw_converter.take_hoisted_functions();
+    let lam_locs = raw_converter.take_lam_locs();
     if let Some(diagnostic) = raw_converter.take_diagnostic() {
         // A Translmod error escapes before `Warnings.check_fatal`.
         emit_type_warnings(parser.arena(), source, filename, &raw_warnings);
@@ -10898,6 +10973,7 @@ fn compile_source_to_js_with_options_inner(
         options.source_map != crate::js_ir::source_map::SourceMapMode::None,
     );
     compiler.set_hoisted_functions(hoisted_functions);
+    compiler.set_lam_locs(lam_locs);
     let program = compiler.compile_deps_program_with_possible_required_modules(
         &lowered_lambda,
         &possible_required_modules,
@@ -10907,11 +10983,16 @@ fn compile_source_to_js_with_options_inner(
         trace.js_program = format!("{program:#?}");
     }
     if let Some(diagnostic) = compiler.take_diagnostic() {
+        // A location-free compilation has no range to report: recompile
+        // with locations instead of printing a zero range.
+        let Some(diagnostic_loc) = diagnostic.loc else {
+            return Err(LocationRetry::Diagnostic.into());
+        };
         return Err(UserDiagnostic::new(
             format_compiler_error_report_from_location(
                 source,
                 filename,
-                &diagnostic.loc,
+                &diagnostic_loc,
                 &diagnostic.message,
             ),
             2,
@@ -10938,7 +11019,7 @@ fn compile_source_to_js_with_options_inner(
         jsx_preserve,
         options,
         options.output_path.as_deref(),
-        std::sync::Arc::new(parser.arena().source_file_names()),
+        std::sync::Arc::new(compiler.take_lam_locs()),
     );
     if let Some(output_path) = options.output_path.as_deref() {
         let map_path = PathBuf::from(format!("{}.map", output_path.display()));
@@ -11164,13 +11245,13 @@ fn report_compunit_inclusion_warnings(
 
 fn direct_compunit_error_location(
     error: &crate::types::includemod::IncludeModError,
-) -> Option<&Location> {
+) -> Option<crate::types::DeclLoc> {
     use crate::types::includemod::IncludeModError;
 
     match error {
-        IncludeModError::ValueTypeMismatch { actual, .. } => Some(&actual.val_loc),
-        IncludeModError::TypeDeclarationMismatch { actual, .. } => Some(&actual.type_loc),
-        IncludeModError::MissingField { loc, .. } => Some(loc),
+        IncludeModError::ValueTypeMismatch { actual, .. } => Some(actual.val_loc),
+        IncludeModError::TypeDeclarationMismatch { actual, .. } => Some(actual.type_loc),
+        IncludeModError::MissingField { loc, .. } => Some(*loc),
         IncludeModError::SignatureMismatch(errors) if errors.len() == 1 => {
             direct_compunit_error_location(&errors[0])
         }
@@ -11204,7 +11285,8 @@ fn format_compunit_mismatch_report(
     error: &crate::types::includemod::IncludeModError,
 ) -> String {
     let file_loc = Location::in_file(StrIdx::default());
-    let loc = direct_compunit_error_location(error).unwrap_or(&file_loc);
+    let loc =
+        &direct_compunit_error_location(error).map_or(file_loc, |loc| type_ctx.resolve_loc(loc));
     let mut message = String::new();
     message.push_str("  The implementation ");
     message.push_str(impl_name);
@@ -11649,6 +11731,7 @@ pub fn typecheck_interface_source(
     let sig_type = crate::types::typemod::decl_signature_from_typed_signature(
         &typed_signature,
         parser.arena(),
+        &type_ctx,
     );
     let _ = crate::types::includemod::compunit(
         &type_ctx, &env, filename, &sig_type, filename, &sig_type,
@@ -12436,7 +12519,7 @@ fn extract_file_directives_from_structure(
     let mut directives = Vec::new();
 
     for item in structure {
-        let StructureItemDesc::Pstr_attribute(attr) = &*item.pstr_desc else {
+        let StructureItemDesc::Pstr_attribute(attr) = &item.pstr_desc else {
             continue;
         };
         if arena.get_string(attr.0.txt) != "directive" {
@@ -12538,15 +12621,15 @@ fn config_payload_actions(
         push_invalid_config_record_warning(warnings, default_loc);
         return Ok(Vec::new());
     }
-    let StructureItemDesc::Pstr_eval(inner) = &*items[0].pstr_desc else {
+    let StructureItemDesc::Pstr_eval(inner) = &items[0].pstr_desc else {
         push_invalid_config_record_warning(warnings, default_loc);
         return Ok(Vec::new());
     };
     let (expr_idx, _) = &**inner;
     let expr = arena.get_expr(*expr_idx);
-    match &*expr.pexp_desc {
+    match &expr.pexp_desc {
         ExpressionDesc::Pexp_record(inner) => {
-            let (fields, with_obj) = &**inner;
+            let (fields, with_obj) = &*inner;
             if with_obj.is_some() {
                 push_config_warning(
                     warnings,
@@ -12558,7 +12641,7 @@ fn config_payload_actions(
                 return Ok(Vec::new());
             }
             let mut actions = Vec::with_capacity(fields.len());
-            for field in fields {
+            for field in arena.expr_field_list(*fields) {
                 let Longident::Lident(name_idx) = arena.get_longident(field.lid.txt) else {
                     return Err(ConfigPayloadError {
                         loc: default_loc,
@@ -12566,7 +12649,7 @@ fn config_payload_actions(
                     });
                 };
                 let field_expr = arena.get_expr(field.expr);
-                let punned = match &*field_expr.pexp_desc {
+                let punned = match &field_expr.pexp_desc {
                     // OCaml compiler/ml/ast_payload.ml:206-214 compares the
                     // label and identifier names, so separately interned Rust
                     // StrIdx values for `no_export: no_export` must still
@@ -12609,7 +12692,7 @@ fn validate_config_bool_literal(
     arena: &ParseArena,
 ) -> Result<(), ConfigPayloadError> {
     let expr = arena.get_expr(expr_idx);
-    let is_bool_literal = match &*expr.pexp_desc {
+    let is_bool_literal = match &expr.pexp_desc {
         ExpressionDesc::Pexp_construct(lid, args) if args.txt.is_empty() => matches!(
             arena.get_longident(lid.txt),
             Longident::Lident(name_idx)
@@ -12674,14 +12757,14 @@ fn config_flags_strings(
         return Ok(None);
     };
     let expr = arena.get_expr(expr_idx);
-    let ExpressionDesc::Pexp_array(elements) = &*expr.pexp_desc else {
+    let ExpressionDesc::Pexp_array(elements) = &expr.pexp_desc else {
         return Err(ConfigPayloadError {
             loc: expr.pexp_loc,
             message: "string array expected".to_string(),
         });
     };
     let mut flags = Vec::with_capacity(elements.len());
-    for elem_idx in elements.iter() {
+    for elem_idx in arena.expr_list(*elements).iter() {
         let elem = arena.get_expr(*elem_idx);
         // rescript_compiler_main.ml file_level_flags_handler:
         // `Ast_payload.semantic_string_of_expression`.
@@ -12810,7 +12893,7 @@ fn first_config_attribute_of_structure<'s>(
     arena: &ParseArena,
 ) -> Option<&'s crate::parser::ast::Attribute> {
     for item in structure {
-        let StructureItemDesc::Pstr_attribute(attr) = &*item.pstr_desc else {
+        let StructureItemDesc::Pstr_attribute(attr) = &item.pstr_desc else {
             return None;
         };
         if arena.get_string(attr.0.txt) == "config" {
@@ -12826,7 +12909,7 @@ fn first_config_attribute_of_signature<'s>(
     arena: &ParseArena,
 ) -> Option<&'s crate::parser::ast::Attribute> {
     for item in signature {
-        let SignatureItemDesc::Psig_attribute(attr) = &*item.psig_desc else {
+        let SignatureItemDesc::Psig_attribute(attr) = &item.psig_desc else {
             return None;
         };
         if arena.get_string(attr.0.txt) == "config" {
@@ -13036,7 +13119,7 @@ pub struct InProcessCompileResult {
     pub cmj_export_arities: ahash::AHashMap<String, CmjExportArity>,
     /// `.cmj` `persistent_closed_lambda` exports for cross-module inlining
     /// (lam_stats_export.ml:53-89).
-    pub cmj_export_lambdas: ahash::AHashMap<String, crate::lambda::Lambda>,
+    pub cmj_export_lambdas: crate::lambda::CmjExportLambdas,
     pub hoisted_exports: Vec<crate::lambda::HoistedExport>,
     /// Intermediate-representation sexps, populated when
     /// `CompilerOptions::capture_intermediates` is true (for the playground).
@@ -13063,7 +13146,9 @@ pub struct InProcessPreJsCompileResult {
     pub signature: crate::types::decl::Signature,
     pub pers_struct: Option<PortablePersStruct>,
     pub new_alias_rewrites: ahash::AHashMap<String, crate::types::path::Path>,
-    pub source_file_names: std::sync::Arc<std::collections::HashMap<crate::intern::StrIdx, String>>,
+    /// Resolves the location handles of `lowered_lambda` and
+    /// `hoisted_functions`; outlives the parse arena and typed tree.
+    pub lam_locs: crate::lambda::LamLocTable,
     /// Intermediate-representation sexps, populated when
     /// `CompilerOptions::capture_intermediates` is true (for the playground).
     pub typed_tree_sexp: String,
@@ -13084,7 +13169,7 @@ pub struct InProcessJsMetadataReady {
     pub is_pure: bool,
     pub cmj_export_constants: ahash::AHashMap<String, CmjExportConstant>,
     pub cmj_export_arities: ahash::AHashMap<String, CmjExportArity>,
-    pub cmj_export_lambdas: ahash::AHashMap<String, crate::lambda::Lambda>,
+    pub cmj_export_lambdas: crate::lambda::CmjExportLambdas,
     pub hoisted_exports: Vec<crate::lambda::HoistedExport>,
     pub pers_struct: Option<PortablePersStruct>,
     pub new_alias_rewrites: ahash::AHashMap<String, crate::types::path::Path>,
@@ -13293,7 +13378,7 @@ fn render_js_program(
     jsx_preserve: bool,
     options: &CompilerOptions,
     output_path: Option<&FsPath>,
-    source_file_names: std::sync::Arc<std::collections::HashMap<crate::intern::StrIdx, String>>,
+    lam_locs: std::sync::Arc<crate::lambda::LamLocTable>,
 ) -> (String, Option<String>) {
     let source_path = options.source_filename.as_deref().map(FsPath::new);
     let source_map_target = output_path.map(FsPath::to_path_buf).or_else(|| {
@@ -13315,7 +13400,7 @@ fn render_js_program(
             options.source_map,
             options.source_map_sources_content,
             &options.source_map_root,
-            source_file_names,
+            lam_locs,
         )
     } else {
         (
@@ -13337,7 +13422,10 @@ type JsBackendOutput = (
     ModulePathResolver,
     ahash::AHashMap<String, CmjExportConstant>,
     ahash::AHashMap<String, CmjExportArity>,
-    ahash::AHashMap<String, crate::lambda::Lambda>,
+    crate::lambda::CmjExportLambdas,
+    // Resolves the program's location handles (source maps) after the
+    // backend imported inlined `.cmj` lambdas into it.
+    crate::lambda::LamLocTable,
 );
 
 /// Build the `LambdaCompiler` for one JS output target: resolve local module
@@ -13352,6 +13440,7 @@ fn js_backend_compiler(
     output_module_format: Option<ModuleFormat>,
     persistent_env: Option<PersistentEnv>,
     jsx_preserve: bool,
+    lam_locs: crate::lambda::LamLocTable,
 ) -> LambdaCompiler {
     let mut module_path_resolver = ModulePathResolver::from_compile_options(
         options.source_filename.as_deref(),
@@ -13382,6 +13471,7 @@ fn js_backend_compiler(
         options.source_map != crate::js_ir::source_map::SourceMapMode::None,
     );
     compiler.set_hoisted_functions(hoisted_functions);
+    compiler.set_lam_locs(lam_locs);
     compiler
 }
 
@@ -13393,12 +13483,15 @@ fn finish_js_backend(
     // lam_compile_main.ml reports a primitive's Location error before the
     // fatal-warnings check, as the file compile does.
     if let Some(diagnostic) = compiler.take_diagnostic() {
+        let Some(diagnostic_loc) = diagnostic.loc else {
+            return Err(LocationRetry::Diagnostic.into());
+        };
         let filename = options.source_filename.as_deref().unwrap_or("_none_");
         return Err(UserDiagnostic::new(
             format_compiler_error_report_from_location(
                 &read_in_process_source(filename),
                 filename,
-                &diagnostic.loc,
+                &diagnostic_loc,
                 &diagnostic.message,
             ),
             2,
@@ -13411,12 +13504,14 @@ fn finish_js_backend(
     let cmj_export_constants = compiler.take_cmj_export_constants();
     let cmj_export_arities = compiler.take_cmj_export_arities();
     let cmj_export_lambdas = compiler.take_cmj_export_lambdas();
+    let lam_locs = compiler.take_lam_locs();
     Ok((
         program,
         module_path_resolver,
         cmj_export_constants,
         cmj_export_arities,
         cmj_export_lambdas,
+        lam_locs,
     ))
 }
 
@@ -13430,6 +13525,7 @@ fn compile_js_program_for_output(
     output_module_format: Option<ModuleFormat>,
     persistent_env: Option<PersistentEnv>,
     jsx_preserve: bool,
+    lam_locs: &crate::lambda::LamLocTable,
 ) -> Result<JsBackendOutput> {
     let _span = info_span!(
         "compiler.js_backend",
@@ -13446,6 +13542,7 @@ fn compile_js_program_for_output(
         output_module_format,
         persistent_env,
         jsx_preserve,
+        lam_locs.clone(),
     );
     let program = compiler.compile_deps_program_with_possible_required_modules(
         lowered_lambda,
@@ -13468,6 +13565,7 @@ fn compile_js_program_for_output_owned(
     output_module_format: Option<ModuleFormat>,
     persistent_env: Option<PersistentEnv>,
     jsx_preserve: bool,
+    lam_locs: crate::lambda::LamLocTable,
 ) -> Result<JsBackendOutput> {
     let _span = info_span!(
         "compiler.js_backend",
@@ -13485,6 +13583,7 @@ fn compile_js_program_for_output_owned(
         output_module_format,
         persistent_env,
         jsx_preserve,
+        lam_locs,
     );
     let program = compiler.compile_deps_program_with_collected_possible_required_modules_owned(
         lowered_lambda,
@@ -13715,8 +13814,15 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     registry: &ModuleRegistry,
     has_interface: bool,
     gentype_ignore_interface: bool,
-    signature_ready: Option<&mut InProcessSignatureReadyHook<'_>>,
+    mut signature_ready: Option<&mut InProcessSignatureReadyHook<'_>>,
 ) -> Result<InProcessPreJsCompileResult> {
+    if !arena.stores_locations()
+        && (options.source_map != crate::js_ir::source_map::SourceMapMode::None
+            || options.capture_intermediates
+            || !options.dumps.is_empty())
+    {
+        return Err(LocationRetry::Output.into());
+    }
     let _span = info_span!(
         "compiler.in_process_compile",
         module = %module_name,
@@ -13904,6 +14010,10 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     // typemod.ml:1769-1776 forces the delayed usage checks before Lambda
     // translation, as the file compile does.
     tctx.flush_value_usage_checks();
+    let mut located_warnings = None;
+    if !place_location_free_warnings(arena, options, &mut located_warnings, &mut tctx.warnings) {
+        return Err(LocationRetry::Warning.into());
+    }
     let post_type_warning_start = tctx.warnings.len();
     // js_implementation.ml:148-156 prints `-dtyped-sexp` here, before the
     // signature is saved: `register_in_memory_signature` below finalizes the
@@ -14030,7 +14140,12 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         }
         (pers_struct, new_alias_rewrites, internal_env)
     };
-    if !has_interface && let Some(hook) = signature_ready {
+    // A location-free attempt must not publish a signature before Lambda
+    // translation has ruled out a diagnostic or a location-valued constant.
+    if !has_interface
+        && arena.stores_locations()
+        && let Some(hook) = signature_ready.take()
+    {
         let _ = hook(InProcessSignatureReady {
             pers_struct: pers_struct.take(),
             new_alias_rewrites: std::mem::take(&mut new_alias_rewrites),
@@ -14080,6 +14195,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         raw_lambda_current_stamp,
         hoisted_functions,
         hoisted_exports,
+        lam_locs,
     ) = match crate::timing::measure(crate::timing::Phase::Lambda, || {
         let _phase = info_span!("compiler.raw_lambda").entered();
         // The interface check above already computed the coercion; report
@@ -14134,6 +14250,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         let raw_lambda_current_stamp = raw_converter.current_stamp();
         let hoisted_functions = raw_converter.take_hoisted_functions();
         let hoisted_exports = raw_converter.take_hoisted_exports();
+        let lam_locs = raw_converter.take_lam_locs();
         Ok((
             raw_lambda,
             raw_warnings,
@@ -14142,6 +14259,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
             raw_lambda_current_stamp,
             hoisted_functions,
             hoisted_exports,
+            lam_locs,
         ))
     }) {
         Ok(converted) => converted,
@@ -14152,25 +14270,55 @@ pub fn compile_preprocessed_structure_in_process_until_js(
             return Err(UserDiagnostic::new(
                 format!(
                     "{}{report}\n",
-                    format_type_warnings_lazy(arena, &source, filename, &tctx.warnings)
+                    format_type_warnings_lazy(
+                        located_warnings.as_ref().unwrap_or(arena),
+                        &source,
+                        filename,
+                        &tctx.warnings,
+                    )
                 ),
                 2,
             )
             .into());
         }
     };
+    let mut raw_warnings = raw_warnings;
+    if !arena.stores_locations() {
+        if raw_diagnostic.is_some() {
+            return Err(LocationRetry::Diagnostic.into());
+        }
+        if arena.locations_required() {
+            return Err(LocationRetry::Output.into());
+        }
+        if !place_location_free_warnings(
+            arena,
+            options,
+            &mut located_warnings,
+            &mut tctx.warnings[post_type_warning_start..],
+        ) || !place_location_free_warnings(
+            arena,
+            options,
+            &mut located_warnings,
+            &mut raw_warnings,
+        ) {
+            return Err(LocationRetry::Warning.into());
+        }
+    }
+    // Warnings of a location-free compile were placed in a located parse.
+    let warning_arena = located_warnings.as_ref().unwrap_or(arena);
+
     // The file compile reports the typing warnings, then Translmod's
     // (js_implementation.ml:161-167); a Translmod error escapes before
     // `Warnings.check_fatal`.
     let mut warnings = format_type_warnings_lazy(
-        arena,
+        warning_arena,
         &source,
         filename,
         &tctx.warnings[..post_type_warning_start],
     );
     if let Some(diagnostic) = raw_diagnostic {
         warnings.push_str(&format_type_warnings_lazy(
-            arena,
+            warning_arena,
             &source,
             filename,
             &raw_warnings,
@@ -14191,13 +14339,13 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     }
     let late_type_warnings = &tctx.warnings[post_type_warning_start..];
     warnings.push_str(&format_type_warnings_lazy(
-        arena,
+        warning_arena,
         &source,
         filename,
         late_type_warnings,
     ));
     warnings.push_str(&format_type_warnings_lazy(
-        arena,
+        warning_arena,
         &source,
         filename,
         &raw_warnings,
@@ -14267,6 +14415,12 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         String::new()
     };
 
+    if !has_interface && let Some(hook) = signature_ready {
+        let _ = hook(InProcessSignatureReady {
+            pers_struct: pers_struct.take(),
+            new_alias_rewrites: std::mem::take(&mut new_alias_rewrites),
+        })?;
+    }
     Ok(InProcessPreJsCompileResult {
         lowered_lambda,
         possible_required_modules,
@@ -14279,7 +14433,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         signature: published_signature,
         pers_struct,
         new_alias_rewrites,
-        source_file_names: std::sync::Arc::new(arena.source_file_names()),
+        lam_locs,
         typed_tree_sexp,
         raw_lambda_sexp,
         lambda_sexp,
@@ -14346,6 +14500,7 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
         mut cmj_export_constants,
         mut cmj_export_arities,
         mut cmj_export_lambdas,
+        lam_locs,
     ) = {
         let _phase = info_span!(
             "compiler.js_compile",
@@ -14364,6 +14519,7 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
                 primary_output_module_format,
                 persistent_env_for_js.clone(),
                 pre_js.jsx_preserve,
+                &pre_js.lam_locs,
             )?
         } else {
             compile_js_program_for_output_owned(
@@ -14377,9 +14533,11 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
                 primary_output_module_format,
                 persistent_env_for_js.clone(),
                 pre_js.jsx_preserve,
+                std::mem::take(&mut pre_js.lam_locs),
             )?
         }
     };
+    let lam_locs = std::sync::Arc::new(lam_locs);
     if !options.skip_js_render {
         check_module_path_resolution_errors(
             &program,
@@ -14407,26 +14565,34 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
             primary_target.map(|target| target.path.clone()),
             program,
             module_path_resolver,
+            lam_locs,
         )];
         for target in js_targets.iter().skip(1) {
-            let (program, module_path_resolver, _, _, _) = compile_js_program_for_output(
-                lowered_lambda
-                    .as_ref()
-                    .expect("lowered lambda retained for secondary JS targets"),
-                &pre_js.hoisted_functions,
-                &pre_js.possible_required_modules,
-                options,
-                Some(&target.path),
-                Some(target.module_format),
-                persistent_env_for_js.clone(),
-                pre_js.jsx_preserve,
-            )?;
+            let (program, module_path_resolver, _, _, _, target_lam_locs) =
+                compile_js_program_for_output(
+                    lowered_lambda
+                        .as_ref()
+                        .expect("lowered lambda retained for secondary JS targets"),
+                    &pre_js.hoisted_functions,
+                    &pre_js.possible_required_modules,
+                    options,
+                    Some(&target.path),
+                    Some(target.module_format),
+                    persistent_env_for_js.clone(),
+                    pre_js.jsx_preserve,
+                    &pre_js.lam_locs,
+                )?;
             check_module_path_resolution_errors(
                 &program,
                 &module_path_resolver,
                 options.source_filename.as_deref().unwrap_or("_none_"),
             )?;
-            rendered_programs.push((Some(target.path.clone()), program, module_path_resolver));
+            rendered_programs.push((
+                Some(target.path.clone()),
+                program,
+                module_path_resolver,
+                std::sync::Arc::new(target_lam_locs),
+            ));
         }
         rendered_programs
     };
@@ -14441,7 +14607,8 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
         if options.skip_js_render {
             (String::new(), Vec::new())
         } else {
-            let (primary_path, primary_program, primary_resolver) = rendered_programs.remove(0);
+            let (primary_path, primary_program, primary_resolver, primary_lam_locs) =
+                rendered_programs.remove(0);
             let (mut primary_js, primary_source_map) = render_js_program(
                 &primary_program,
                 &primary_resolver,
@@ -14450,7 +14617,7 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
                 pre_js.jsx_preserve,
                 options,
                 primary_path.as_deref(),
-                pre_js.source_file_names.clone(),
+                primary_lam_locs,
             );
             let mut js_outputs = Vec::new();
             let js = if let Some(path) = primary_path {
@@ -14465,7 +14632,7 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
                 crate::js_ir::dispose_deps_program_nonrecursive(primary_program);
                 primary_js
             };
-            for (path, program, module_path_resolver) in rendered_programs {
+            for (path, program, module_path_resolver, lam_locs) in rendered_programs {
                 let Some(path) = path else {
                     crate::js_ir::dispose_deps_program_nonrecursive(program);
                     continue;
@@ -14478,7 +14645,7 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
                     pre_js.jsx_preserve,
                     options,
                     Some(&path),
-                    pre_js.source_file_names.clone(),
+                    lam_locs,
                 );
                 crate::js_ir::dispose_deps_program_nonrecursive(program);
                 js_outputs.push(JsOutput {
@@ -14553,6 +14720,9 @@ pub fn typecheck_preprocessed_signature_in_process(
             // As in the file compile: the warnings reported so far precede
             // the error report.
             tctx.drain_open_slot_uses();
+            if !arena.stores_locations() {
+                return Err(LocationRetry::Diagnostic.into());
+            }
             let warnings = format_type_warnings_lazy(arena, &source, filename, &tctx.warnings);
             let suppress_info_style =
                 !tctx.warnings.is_empty() && !crate::parser::code_frame::should_enable_color();
@@ -14590,14 +14760,26 @@ pub fn typecheck_preprocessed_signature_in_process(
     };
     // js_implementation.ml:62: `ignore (Includemod.signatures initial_env sg
     // sg)`, which marks the declarations of the interface used.
-    let sig_type =
-        crate::types::typemod::decl_signature_from_typed_signature(&typed_signature, arena);
+    let sig_type = crate::types::typemod::decl_signature_from_typed_signature(
+        &typed_signature,
+        arena,
+        &type_ctx,
+    );
     let _ = crate::types::includemod::compunit(
         &type_ctx, &env, filename, &sig_type, filename, &sig_type,
     );
     // js_implementation.ml:64 `Delayed_checks.force_delayed_checks ()`.
     tctx.flush_value_usage_checks();
-    let warnings = format_type_warnings_lazy(arena, &source, filename, &tctx.warnings);
+    let mut located_warnings = None;
+    if !place_location_free_warnings(arena, options, &mut located_warnings, &mut tctx.warnings) {
+        return Err(LocationRetry::Warning.into());
+    }
+    let warnings = format_type_warnings_lazy(
+        located_warnings.as_ref().unwrap_or(arena),
+        &source,
+        filename,
+        &tctx.warnings,
+    );
     if type_warnings_have_errors(&tctx.warnings) {
         return Err(UserDiagnostic::new(warnings, 2).into());
     }
@@ -14637,8 +14819,11 @@ pub fn typecheck_preprocessed_signature_in_process(
             true,
         )?;
     }
-    let decl_signature =
-        crate::types::typemod::decl_signature_from_typed_signature(&typed_signature, arena);
+    let decl_signature = crate::types::typemod::decl_signature_from_typed_signature(
+        &typed_signature,
+        arena,
+        &type_ctx,
+    );
 
     let typed_module_type = crate::types::typedtree::ModuleType {
         mty_desc: crate::types::typedtree::ModuleTypeDesc::Tmty_signature(typed_signature),
@@ -14781,7 +14966,7 @@ mod tests {
         let md = ModuleDeclaration {
             md_type: ModuleType::MtyAlias(AliasPresence::MtaAbsent, TypePath::pident(target_id)),
             md_attributes: vec![],
-            md_loc: Location::none(),
+            md_loc: crate::types::DeclLoc::none(),
             md_path: None,
         };
         let sig = vec![SignatureItem::SigModule(module_id, md, RecStatus::TrecNot)];

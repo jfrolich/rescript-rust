@@ -1,6 +1,7 @@
 //! Indexed port of `compiler/core/lam_pass_eliminate_ref.ml`.
 
 use crate::ident::Ident;
+use crate::lambda::LamLoc;
 use crate::lambda::indexed::{IndexedLambda, NodeId, NodeSnapshot, NodeView};
 use crate::lambda::lam_analysis_indexed::hit_variable;
 use crate::lambda::lam_indexed_helpers::append_rebuilt;
@@ -206,7 +207,7 @@ mod tests {
     use crate::ident::IdentFlags;
     use crate::lambda::lam_compat::{FieldDbgInfo, SetFieldDbgInfo};
     use crate::lambda::{Constant, FunctionAttribute, Lambda};
-    use crate::location::Location;
+    use LamLoc;
 
     fn id(name: &str, stamp: i32) -> Ident {
         Ident::new(name, stamp, IdentFlags::NONE)
@@ -219,13 +220,13 @@ mod tests {
             Lambda::prim(
                 Primitive::Pfield(0, FieldDbgInfo::Tuple),
                 vec![Lambda::var(reference)],
-                Location::none(),
+                LamLoc::NONE,
             ),
             Lambda::seq(
                 Lambda::prim(
                     Primitive::Psetfield(0, SetFieldDbgInfo::RecordSet("value".into())),
                     vec![Lambda::var(reference), Lambda::const_(Constant::int(2))],
-                    Location::none(),
+                    LamLoc::NONE,
                 ),
                 Lambda::prim(
                     Primitive::Psetfield(0, SetFieldDbgInfo::RecordSet("contents".into())),
@@ -237,14 +238,14 @@ mod tests {
                                 Lambda::prim(
                                     Primitive::Pfield(0, FieldDbgInfo::Tuple),
                                     vec![Lambda::var(reference)],
-                                    Location::none(),
+                                    LamLoc::NONE,
                                 ),
                                 Lambda::const_(Constant::int(1)),
                             ],
-                            Location::none(),
+                            LamLoc::NONE,
                         ),
                     ],
-                    Location::none(),
+                    LamLoc::NONE,
                 ),
             ),
         );
@@ -260,7 +261,7 @@ mod tests {
                     Lambda::prim(
                         Primitive::Paddint,
                         vec![Lambda::var(reference), Lambda::const_(Constant::int(1))],
-                        Location::none(),
+                        LamLoc::NONE,
                     ),
                 ),
             ),
@@ -293,7 +294,7 @@ mod tests {
                 vec![parameter],
                 body,
                 FunctionAttribute::default(),
-                crate::location::Location::none(),
+                LamLoc::NONE,
             );
             let mut store = IndexedLambda::from_lambda(function);
             let root = store.root();

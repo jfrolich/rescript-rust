@@ -1,5 +1,6 @@
 //! Indexed port of `compiler/core/lam_pass_deep_flatten.ml`.
 
+use crate::lambda::LamLoc;
 use ahash::AHashMap;
 
 use crate::context::IdGenerator;
@@ -9,7 +10,6 @@ use crate::lambda::lam_analysis_indexed::{hit_variable, hit_variables};
 use crate::lambda::lam_compat::LetKind;
 use crate::lambda::lam_indexed_helpers::{append_rebuilt, append_refine_let, map_children};
 use crate::lambda::lam_primitive::{Mutable, Primitive};
-use crate::location::Location;
 
 enum Group {
     Single(LetKind, Ident, NodeId),
@@ -84,7 +84,7 @@ fn flatten(
                 let fresh_var = store.append(NodeSnapshot::Var(fresh));
                 let wrapped = append_rebuilt(
                     store,
-                    NodeSnapshot::Prim(primitive, vec![fresh_var], Location::none()),
+                    NodeSnapshot::Prim(primitive, vec![fresh_var], LamLoc::NONE),
                 );
                 let inner = store.append(NodeSnapshot::Let(LetKind::Alias, id, wrapped, body));
                 let rewritten = store.append(NodeSnapshot::Let(kind, fresh, *arg, inner));
@@ -239,7 +239,7 @@ mod tests {
             Lambda::prim(
                 Primitive::Pmakeblock(TagInfo::Tuple, Mutable::Immutable),
                 vec![int(10), int(20)],
-                Location::none(),
+                LamLoc::NONE,
             ),
             Lambda::let_(
                 LetKind::Alias,
@@ -247,7 +247,7 @@ mod tests {
                 Lambda::prim(
                     Primitive::Pfield(1, FieldDbgInfo::Tuple),
                     vec![Lambda::var(tuple)],
-                    Location::none(),
+                    LamLoc::NONE,
                 ),
                 Lambda::var(projected),
             ),
@@ -266,9 +266,9 @@ mod tests {
                 vec![Lambda::prim(
                     Primitive::Paddint,
                     vec![int(1), int(2)],
-                    Location::none(),
+                    LamLoc::NONE,
                 )],
-                Location::none(),
+                LamLoc::NONE,
             ),
             Lambda::var(value),
         );

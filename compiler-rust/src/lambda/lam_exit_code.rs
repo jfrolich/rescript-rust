@@ -5,6 +5,7 @@
 //! the #1698 safety check: an outer `Lstaticcatch` may only absorb an inner
 //! one if the inner's handler cannot raise back to any already-absorbed label.
 
+use crate::lambda::LamLoc;
 use crate::lambda::Lambda;
 
 /// Direct port of `Lam_exit_code.has_exit_code` (lam_exit_code.ml:25-33).
@@ -88,7 +89,7 @@ mod tests {
         use crate::lambda::LFunction;
         let body = Lambda::LstaticRaise(1, vec![]);
         let func = Lambda::Lfunction(Box::new(LFunction {
-            loc: crate::location::Location::none(),
+            loc: LamLoc::NONE,
             arity: 0,
             params: vec![],
             body: Box::new(body),

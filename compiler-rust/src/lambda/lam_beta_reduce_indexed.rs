@@ -5,6 +5,8 @@ use ahash::AHashMap;
 
 use crate::context::IdGenerator;
 use crate::ident::Ident;
+#[cfg(test)]
+use crate::lambda::LamLoc;
 use crate::lambda::indexed::{IndexedLambda, NodeId, NodeSnapshot, NodeView};
 use crate::lambda::lam_analysis_indexed::no_side_effects;
 use crate::lambda::lam_closure::StatsMap;
@@ -14,8 +16,6 @@ use crate::lambda::lam_indexed_helpers::{
 };
 use crate::lambda::lam_pass_collect_indexed::{IndexedIdKind, IndexedLamStats, kind_of_block};
 use crate::lambda::lam_primitive::{Mutable, Primitive};
-#[cfg(test)]
-use crate::location::Location;
 
 struct Usage {
     node: NodeId,
@@ -359,7 +359,7 @@ mod tests {
                 ffi: Box::new(crate::lambda::lam_primitive::ExternalDecl::test_val("", 0)),
             },
             vec![],
-            Location::none(),
+            LamLoc::NONE,
         )
     }
 
@@ -369,7 +369,7 @@ mod tests {
         let body = crate::lambda::Lambda::prim(
             Primitive::Pidentity,
             vec![crate::lambda::Lambda::var(params[0])],
-            Location::none(),
+            LamLoc::NONE,
         );
         let mut store = IndexedLambda::from_lambda(body);
         let root = store.root();

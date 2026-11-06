@@ -5,6 +5,7 @@ pub(super) use crate::js_ir::{
     ModulePathResolver, print_block, print_deps_program, print_deps_program_with_directives,
     print_expression,
 };
+pub(super) use crate::lambda::LamLoc;
 pub(super) use crate::lambda::js_exp_make::{int32_band, int32_bxor, int32_mul, ocaml_typeof_expr};
 pub(super) use crate::lambda::lam_coercion::resolve_export_aliases;
 pub(super) use crate::lambda::lam_compile_external::external_module_import_attributes;
@@ -18,7 +19,6 @@ pub(super) use crate::lambda::lam_primitive::{
 pub(super) use crate::lambda::{
     ApInfo, Apply, ApplyStatus, Comparison, FieldDbgInfo, FunctionAttribute, Lambda,
 };
-pub(super) use crate::location::Location;
 use std::fs;
 pub(super) use std::path::PathBuf;
 pub(super) use tempfile::tempdir;
@@ -165,13 +165,13 @@ fn js_var_external(name: &str, external_module_name: Option<ExternalModuleName>)
             }),
         },
         vec![],
-        Location::none(),
+        LamLoc::NONE,
     )
 }
 
 fn test_apply_info() -> ApInfo {
     ApInfo {
-        loc: Location::none(),
+        loc: LamLoc::NONE,
         status: ApplyStatus::Na,
     }
 }
@@ -189,7 +189,7 @@ fn test_function_calling(ident: Ident, target: &Ident) -> (Ident, Lambda) {
                 ap_info: test_apply_info(),
             })),
             FunctionAttribute::default(),
-            crate::location::Location::none(),
+            LamLoc::NONE,
         ),
     )
 }
@@ -211,7 +211,7 @@ fn test_function_calling_two(ident: Ident, first: &Ident, second: &Ident) -> (Id
             vec![param],
             Lambda::seq(test_apply(first), test_apply(second)),
             FunctionAttribute::default(),
-            crate::location::Location::none(),
+            LamLoc::NONE,
         ),
     )
 }
@@ -225,7 +225,7 @@ fn test_unit_function(ident: Ident) -> (Ident, Lambda) {
             vec![param],
             Lambda::const_(Constant::JsUndefined { is_unit: true }),
             FunctionAttribute::default(),
-            crate::location::Location::none(),
+            LamLoc::NONE,
         ),
     )
 }
@@ -316,7 +316,7 @@ fn console_log_effect(arg: Lambda) -> Lambda {
                 ffi: Box::new(crate::lambda::lam_primitive::ExternalDecl::test_val("", 0)),
             },
             vec![arg],
-            Location::none(),
+            LamLoc::NONE,
         ),
         Lambda::const_(Constant::JsUndefined { is_unit: true }),
     )
@@ -348,7 +348,7 @@ pub(super) fn import_attributes_lowered_lambda() -> Lambda {
                 Mutable::Immutable,
             ),
             vec![js_var_external("default", Some(json_module))],
-            Location::none(),
+            LamLoc::NONE,
         ),
         Lambda::let_(
             LetKind::Alias,
@@ -361,7 +361,7 @@ pub(super) fn import_attributes_lowered_lambda() -> Lambda {
                     },
                 ),
                 vec![Lambda::var(include_json)],
-                Location::none(),
+                LamLoc::NONE,
             ),
             Lambda::seq(
                 console_log_effect(Lambda::var(my_json)),
@@ -374,7 +374,7 @@ pub(super) fn import_attributes_lowered_lambda() -> Lambda {
                             Mutable::Immutable,
                         ),
                         vec![js_var_external("button", Some(css_module))],
-                        Location::none(),
+                        LamLoc::NONE,
                     ),
                     Lambda::let_(
                         LetKind::Alias,
@@ -387,7 +387,7 @@ pub(super) fn import_attributes_lowered_lambda() -> Lambda {
                                 },
                             ),
                             vec![Lambda::var(include_css)],
-                            Location::none(),
+                            LamLoc::NONE,
                         ),
                         Lambda::seq(
                             console_log_effect(Lambda::var(button_css)),
@@ -397,7 +397,7 @@ pub(super) fn import_attributes_lowered_lambda() -> Lambda {
                                     Mutable::Immutable,
                                 ),
                                 vec![Lambda::var(my_json), Lambda::var(button_css)],
-                                Location::none(),
+                                LamLoc::NONE,
                             ),
                         ),
                     ),
@@ -479,7 +479,7 @@ fn compile_raw_js_trims_outer_whitespace_before_js_ir_printing() {
             is_stmt: true,
         }),
         vec![],
-        Location::none(),
+        LamLoc::NONE,
     );
 
     let program = compiler.compile_program(&lam);
@@ -642,7 +642,7 @@ fn compile_float_pow_uses_js_exponentiation_operator() {
             Lambda::const_(Constant::float("2.")),
             Lambda::const_(Constant::float("3.")),
         ],
-        Location::none(),
+        LamLoc::NONE,
     ));
 
     assert!(compiled.prelude.is_empty());
@@ -685,7 +685,7 @@ fn compile_int_pow_folds_small_int_literals_like_ocaml_ext_int() {
             Lambda::const_(Constant::int(2)),
             Lambda::const_(Constant::int(2)),
         ],
-        Location::none(),
+        LamLoc::NONE,
     ));
 
     assert!(compiled.prelude.is_empty());
@@ -701,7 +701,7 @@ fn compile_int_pow_folds_overflowing_int_literals_like_ocaml_ext_int() {
             Lambda::const_(Constant::int(2_147_483_647)),
             Lambda::const_(Constant::int(2)),
         ],
-        Location::none(),
+        LamLoc::NONE,
     ));
 
     assert!(compiled.prelude.is_empty());
@@ -714,7 +714,7 @@ fn compile_create_extension_uses_primitive_exceptions_create() {
     let compiled = compiler.compile_expr(&Lambda::prim(
         Primitive::PcreateExtension("Local_exception_test.A".to_string()),
         vec![],
-        Location::none(),
+        LamLoc::NONE,
     ));
 
     assert!(compiled.prelude.is_empty());
@@ -750,7 +750,7 @@ fn compile_wrap_exn_uses_primitive_exceptions_internal_to_exception() {
     let mut compiler = LambdaCompiler::new();
     let exn = Ident::create_local("exn");
     let compiled = compiler.compile_expr(&crate::raw_lambda::lower::wrap_exn(
-        Location::none(),
+        LamLoc::NONE,
         Lambda::var(exn),
     ));
 
@@ -783,11 +783,11 @@ fn compile_integer_inequality_preserves_typeof_string_comparison_like_ocaml() {
             Lambda::prim(
                 Primitive::Ptypeof,
                 vec![Lambda::const_(Constant::int(3))],
-                Location::none(),
+                LamLoc::NONE,
             ),
             Lambda::const_(Constant::String("number".to_string())),
         ],
-        Location::none(),
+        LamLoc::NONE,
     ));
 
     assert!(compiled.prelude.is_empty());
@@ -804,7 +804,7 @@ fn compile_integer_inequality_preserves_typeof_string_comparison_like_ocaml() {
 #[test]
 fn compile_module_primitives_lower_to_primitive_module_runtime_calls_like_ocaml() {
     let mut compiler = LambdaCompiler::new();
-    let loc = Location::none();
+    let loc = LamLoc::NONE;
     let init = compiler.compile_expr(&Lambda::prim(
         Primitive::PinitMod,
         vec![
@@ -843,7 +843,7 @@ fn compile_int_order_uses_primitive_int_compare() {
     let compiled = compiler.compile_expr(&Lambda::prim(
         Primitive::Pintorder,
         vec![Lambda::var(left), Lambda::var(right)],
-        Location::none(),
+        LamLoc::NONE,
     ));
 
     assert!(compiled.prelude.is_empty());
@@ -860,7 +860,7 @@ fn compile_checked_int_div_uses_primitive_int_runtime_call_like_ocaml() {
     let compiled = compiler.compile_expr(&Lambda::prim(
         Primitive::Pdivint,
         vec![Lambda::var(left), Lambda::const_(Constant::int(0))],
-        Location::none(),
+        LamLoc::NONE,
     ));
 
     assert!(compiled.prelude.is_empty());
@@ -877,7 +877,7 @@ fn compile_checked_int_mod_uses_primitive_int_runtime_call_like_ocaml() {
     let compiled = compiler.compile_expr(&Lambda::prim(
         Primitive::Pmodint,
         vec![Lambda::var(left), Lambda::const_(Constant::int(0))],
-        Location::none(),
+        LamLoc::NONE,
     ));
 
     assert!(compiled.prelude.is_empty());
@@ -897,7 +897,7 @@ fn compile_checked_bigint_div_uses_primitive_bigint_runtime_call_like_ocaml() {
             Lambda::var(left),
             Lambda::const_(Constant::bigint(false, "0")),
         ],
-        Location::none(),
+        LamLoc::NONE,
     ));
 
     assert!(compiled.prelude.is_empty());
@@ -917,7 +917,7 @@ fn compile_checked_bigint_mod_uses_primitive_bigint_runtime_call_like_ocaml() {
             Lambda::var(left),
             Lambda::const_(Constant::bigint(false, "0")),
         ],
-        Location::none(),
+        LamLoc::NONE,
     ));
 
     assert!(compiled.prelude.is_empty());
@@ -935,7 +935,7 @@ fn compile_string_order_uses_primitive_string_compare() {
     let compiled = compiler.compile_expr(&Lambda::prim(
         Primitive::Pstringorder,
         vec![Lambda::var(left), Lambda::var(right)],
-        Location::none(),
+        LamLoc::NONE,
     ));
 
     assert!(compiled.prelude.is_empty());
@@ -953,7 +953,7 @@ fn compile_arrayrefu_uses_direct_array_index() {
     let compiled = compiler.compile_expr(&Lambda::prim(
         Primitive::Parrayrefu,
         vec![Lambda::var(array), Lambda::var(index)],
-        Location::none(),
+        LamLoc::NONE,
     ));
 
     assert!(compiled.prelude.is_empty());
@@ -968,7 +968,7 @@ fn compile_arrayrefs_uses_primitive_array_get() {
     let compiled = compiler.compile_expr(&Lambda::prim(
         Primitive::Parrayrefs,
         vec![Lambda::var(array), Lambda::var(index)],
-        Location::none(),
+        LamLoc::NONE,
     ));
 
     assert!(compiled.prelude.is_empty());
@@ -987,7 +987,7 @@ fn compile_arraysetu_sequences_assignment_to_unit() {
     let compiled = compiler.compile_expr(&Lambda::prim(
         Primitive::Parraysetu,
         vec![Lambda::var(array), Lambda::var(index), Lambda::var(value)],
-        Location::none(),
+        LamLoc::NONE,
     ));
 
     assert!(compiled.prelude.is_empty());
@@ -1038,7 +1038,7 @@ fn compile_string_refs_use_primitive_string_get_char() {
     let compiled = compiler.compile_expr(&Lambda::prim(
         Primitive::Pstringrefs,
         vec![Lambda::var(string), Lambda::var(index)],
-        Location::none(),
+        LamLoc::NONE,
     ));
 
     assert!(compiled.prelude.is_empty());
@@ -1055,7 +1055,7 @@ fn compile_obj_compare_against_null_uses_strict_equality() {
     let compiled = compiler.compile_expr(&Lambda::prim(
         Primitive::Pobjcomp(Comparison::Eq),
         vec![Lambda::const_(Constant::JsNull), Lambda::var(value)],
-        Location::none(),
+        LamLoc::NONE,
     ));
 
     assert!(compiled.prelude.is_empty());
@@ -1071,7 +1071,7 @@ fn compile_obj_compare_null_against_number_literal_folds_false() {
             Lambda::const_(Constant::JsNull),
             Lambda::const_(Constant::int(5)),
         ],
-        Location::none(),
+        LamLoc::NONE,
     ));
 
     assert!(compiled.prelude.is_empty());
@@ -1087,7 +1087,7 @@ fn compile_obj_notequal_undefined_against_number_literal_folds_true() {
             Lambda::const_(Constant::JsUndefined { is_unit: false }),
             Lambda::const_(Constant::int(5)),
         ],
-        Location::none(),
+        LamLoc::NONE,
     ));
 
     assert!(compiled.prelude.is_empty());
@@ -1102,7 +1102,7 @@ fn compile_obj_order_uses_primitive_object_compare() {
     let compiled = compiler.compile_expr(&Lambda::prim(
         Primitive::Pobjorder,
         vec![Lambda::var(left), Lambda::var(right)],
-        Location::none(),
+        LamLoc::NONE,
     ));
 
     assert!(compiled.prelude.is_empty());
@@ -1123,10 +1123,10 @@ fn compile_eta_wrapped_object_compare_function_aliases_runtime_member() {
         Lambda::prim(
             Primitive::Pobjorder,
             vec![Lambda::var(left), Lambda::var(right)],
-            Location::none(),
+            LamLoc::NONE,
         ),
         Default::default(),
-        crate::location::Location::none(),
+        LamLoc::NONE,
     ));
 
     assert!(compiled.prelude.is_empty());
@@ -1140,7 +1140,7 @@ fn compile_obj_tag_uses_caml_block_tag_access_like_ocaml() {
     let compiled = compiler.compile_expr(&Lambda::prim(
         Primitive::Pobjtag,
         vec![Lambda::var(value)],
-        Location::none(),
+        LamLoc::NONE,
     ));
 
     assert!(compiled.prelude.is_empty());
@@ -1158,10 +1158,10 @@ fn compile_eta_wrapped_float_compare_function_aliases_runtime_member() {
         Lambda::prim(
             Primitive::Pfloatorder,
             vec![Lambda::var(left), Lambda::var(right)],
-            Location::none(),
+            LamLoc::NONE,
         ),
         Default::default(),
-        crate::location::Location::none(),
+        LamLoc::NONE,
     ));
 
     assert!(compiled.prelude.is_empty());
@@ -1187,16 +1187,16 @@ fn compile_expr_keeps_forwarded_module_call_params_like_ocaml() {
                     },
                 ),
                 vec![Lambda::LglobalModule(belt_map)],
-                Location::none(),
+                LamLoc::NONE,
             )),
             ap_args: vec![Lambda::var(none), Lambda::var(icmp)],
             ap_info: ApInfo {
-                loc: Location::none(),
+                loc: LamLoc::NONE,
                 status: ApplyStatus::Uncurry,
             },
         })),
         Default::default(),
-        crate::location::Location::none(),
+        LamLoc::NONE,
     ));
 
     let rendered = print_expression(&compiled.expr);
@@ -1238,19 +1238,19 @@ fn compile_expr_keeps_forwarded_nested_wrapper_params_like_ocaml() {
                         },
                     ),
                     vec![Lambda::LglobalModule(belt_map)],
-                    Location::none(),
+                    LamLoc::NONE,
                 )),
                 ap_args: vec![Lambda::var(a), Lambda::var(b), Lambda::var(extra)],
                 ap_info: ApInfo {
-                    loc: Location::none(),
+                    loc: LamLoc::NONE,
                     status: ApplyStatus::Uncurry,
                 },
             })),
             Default::default(),
-            crate::location::Location::none(),
+            LamLoc::NONE,
         ),
         Default::default(),
-        crate::location::Location::none(),
+        LamLoc::NONE,
     ));
 
     let rendered = print_expression(&compiled.expr);
@@ -1278,7 +1278,7 @@ fn compile_effectful_underscore_binding_from_nested_js_function_calls_survives_s
     let unused = Ident::create_local("_s");
     let always_true = Ident::create_local("h");
     let also_true = Ident::create_local("j");
-    let loc = Location::none();
+    let loc = LamLoc::NONE;
     let starj_empty = Lambda::const_(Constant::String("".to_string()));
 
     let outer_value = Lambda::let_(
@@ -1296,18 +1296,18 @@ fn compile_effectful_underscore_binding_from_nested_js_function_calls_survives_s
                     vec![inner_true_param],
                     Lambda::true_(),
                     FunctionAttribute::default(),
-                    crate::location::Location::none(),
+                    LamLoc::NONE,
                 ),
                 Lambda::function_(
                     1,
                     vec![inner_zero_param],
                     Lambda::const_(Constant::int(0)),
                     FunctionAttribute::default(),
-                    crate::location::Location::none(),
+                    LamLoc::NONE,
                 ),
             ),
             FunctionAttribute::default(),
-            crate::location::Location::none(),
+            LamLoc::NONE,
         ),
     );
     let nested_call = Lambda::Lapply(Box::new(Apply {
@@ -1354,7 +1354,7 @@ fn compile_hash_primitives_lower_to_primitive_hash_runtime_calls_like_ocaml() {
             Lambda::const_(Constant::int(0)),
             Lambda::var(x),
         ],
-        Location::none(),
+        LamLoc::NONE,
     ));
     assert!(hash.prelude.is_empty());
     assert_eq!(
@@ -1365,7 +1365,7 @@ fn compile_hash_primitives_lower_to_primitive_hash_runtime_calls_like_ocaml() {
     let hash_mix_int = compiler.compile_expr(&Lambda::prim(
         Primitive::PhashMixint,
         vec![Lambda::var(seed), Lambda::var(value)],
-        Location::none(),
+        LamLoc::NONE,
     ));
     assert!(hash_mix_int.prelude.is_empty());
     assert_eq!(
@@ -1376,7 +1376,7 @@ fn compile_hash_primitives_lower_to_primitive_hash_runtime_calls_like_ocaml() {
     let hash_mix_string = compiler.compile_expr(&Lambda::prim(
         Primitive::PhashMixstring,
         vec![Lambda::var(seed), Lambda::var(value)],
-        Location::none(),
+        LamLoc::NONE,
     ));
     assert!(hash_mix_string.prelude.is_empty());
     assert_eq!(
@@ -1387,7 +1387,7 @@ fn compile_hash_primitives_lower_to_primitive_hash_runtime_calls_like_ocaml() {
     let hash_final_mix = compiler.compile_expr(&Lambda::prim(
         Primitive::PhashFinalmix,
         vec![Lambda::var(seed)],
-        Location::none(),
+        LamLoc::NONE,
     ));
     assert!(hash_final_mix.prelude.is_empty());
     assert_eq!(
@@ -1414,10 +1414,10 @@ fn compile_eta_wrapped_hash_function_aliases_runtime_member() {
                 Lambda::var(hash_acc),
                 Lambda::var(value),
             ],
-            Location::none(),
+            LamLoc::NONE,
         ),
         Default::default(),
-        crate::location::Location::none(),
+        LamLoc::NONE,
     ));
 
     assert!(compiled.prelude.is_empty());
@@ -1435,11 +1435,11 @@ fn compile_compare_against_zero_elides_runtime_compare_call_like_ocaml() {
             Lambda::prim(
                 Primitive::Pfloatorder,
                 vec![Lambda::var(left), Lambda::var(right)],
-                Location::none(),
+                LamLoc::NONE,
             ),
             Lambda::const_(Constant::int(0)),
         ],
-        Location::none(),
+        LamLoc::NONE,
     ));
 
     assert!(compiled.prelude.is_empty());
@@ -1464,11 +1464,11 @@ fn compile_bigint_compare_against_zero_elides_runtime_compare_call_like_ocaml() 
                         value: "555555".to_string(),
                     }),
                 ],
-                Location::none(),
+                LamLoc::NONE,
             ),
             Lambda::const_(Constant::int(0)),
         ],
-        Location::none(),
+        LamLoc::NONE,
     ));
 
     assert!(compiled.prelude.is_empty());
@@ -1490,7 +1490,7 @@ fn compile_bigint_literal_equality_folds_like_ocaml() {
                 value: "1000".to_string(),
             }),
         ],
-        Location::none(),
+        LamLoc::NONE,
     ));
 
     assert!(compiled.prelude.is_empty());
@@ -1508,10 +1508,10 @@ fn compile_eta_wrapped_float_equality_stays_as_function() {
         Lambda::prim(
             Primitive::Pfloatcomp(Comparison::Eq),
             vec![Lambda::var(left), Lambda::var(right)],
-            Location::none(),
+            LamLoc::NONE,
         ),
         Default::default(),
-        crate::location::Location::none(),
+        LamLoc::NONE,
     ));
 
     assert!(compiled.prelude.is_empty());
@@ -1533,7 +1533,7 @@ fn compile_bigint_min_literals_use_conditional_fast_path() {
                 value: "1".to_string(),
             }),
         ],
-        Location::none(),
+        LamLoc::NONE,
     ));
 
     assert!(compiled.prelude.is_empty());
@@ -1555,7 +1555,7 @@ fn compile_bigint_arithmetic_primitives_use_raw_js_bigint_ops_like_ocaml() {
     let add = compiler.compile_expr(&Lambda::prim(
         Primitive::Paddbigint,
         vec![lhs.clone(), rhs.clone()],
-        Location::none(),
+        LamLoc::NONE,
     ));
     assert!(add.prelude.is_empty());
     assert_eq!(print_expression(&add.expr), "9n + 1n");
@@ -1563,7 +1563,7 @@ fn compile_bigint_arithmetic_primitives_use_raw_js_bigint_ops_like_ocaml() {
     let pow = compiler.compile_expr(&Lambda::prim(
         Primitive::Ppowbigint,
         vec![lhs.clone(), rhs.clone()],
-        Location::none(),
+        LamLoc::NONE,
     ));
     assert!(pow.prelude.is_empty());
     assert_eq!(print_expression(&pow.expr), "9n ** 1n");
@@ -1571,7 +1571,7 @@ fn compile_bigint_arithmetic_primitives_use_raw_js_bigint_ops_like_ocaml() {
     let neg = compiler.compile_expr(&Lambda::prim(
         Primitive::Pnegbigint,
         vec![lhs],
-        Location::none(),
+        LamLoc::NONE,
     ));
     assert!(neg.prelude.is_empty());
     assert_eq!(print_expression(&neg.expr), "0n - 9n");
@@ -1592,7 +1592,7 @@ fn compile_bigint_bitwise_primitives_use_raw_js_bigint_ops_like_ocaml() {
     let land = compiler.compile_expr(&Lambda::prim(
         Primitive::Pandbigint,
         vec![lhs.clone(), rhs.clone()],
-        Location::none(),
+        LamLoc::NONE,
     ));
     assert!(land.prelude.is_empty());
     assert_eq!(print_expression(&land.expr), "9n & 1n");
@@ -1600,7 +1600,7 @@ fn compile_bigint_bitwise_primitives_use_raw_js_bigint_ops_like_ocaml() {
     let lsl = compiler.compile_expr(&Lambda::prim(
         Primitive::Plslbigint,
         vec![lhs.clone(), rhs.clone()],
-        Location::none(),
+        LamLoc::NONE,
     ));
     assert!(lsl.prelude.is_empty());
     assert_eq!(print_expression(&lsl.expr), "(9n << 1n)");
@@ -1608,7 +1608,7 @@ fn compile_bigint_bitwise_primitives_use_raw_js_bigint_ops_like_ocaml() {
     let lnot = compiler.compile_expr(&Lambda::prim(
         Primitive::Pnotbigint,
         vec![lhs],
-        Location::none(),
+        LamLoc::NONE,
     ));
     assert!(lnot.prelude.is_empty());
     assert_eq!(print_expression(&lnot.expr), "~9n");
@@ -1621,7 +1621,7 @@ fn compile_duprecord_lowers_to_object_spread_like_ocaml() {
     let compiled = compiler.compile_expr(&Lambda::prim(
         Primitive::Pduprecord,
         vec![Lambda::var(source)],
-        Location::none(),
+        LamLoc::NONE,
     ));
 
     assert!(compiled.prelude.is_empty());
@@ -1642,7 +1642,7 @@ fn compile_deps_program_reuses_same_name_export_targets() {
             vec![param],
             Lambda::var(param),
             crate::lambda::FunctionAttribute::default(),
-            crate::location::Location::none(),
+            LamLoc::NONE,
         ),
         Lambda::let_(
             LetKind::Alias,
@@ -1654,7 +1654,7 @@ fn compile_deps_program_reuses_same_name_export_targets() {
                     Mutable::Immutable,
                 ),
                 vec![Lambda::var(source)],
-                Location::none(),
+                LamLoc::NONE,
             ),
         ),
     );
@@ -1692,7 +1692,7 @@ fn compile_deps_program_keeps_exported_call_result_before_rebound_constant_block
     let export_block = Lambda::prim(
         Primitive::Pmakeblock(TagInfo::ModuleExport(vec![v, res]), Mutable::Immutable),
         vec![Lambda::var(v), Lambda::var(res)],
-        Location::none(),
+        LamLoc::NONE,
     );
     let lam = Lambda::let_(
         LetKind::Strict,
@@ -1708,10 +1708,10 @@ fn compile_deps_program_keeps_exported_call_result_before_rebound_constant_block
                     },
                 ),
                 vec![Lambda::var(param)],
-                Location::none(),
+                LamLoc::NONE,
             ),
             FunctionAttribute::default(),
-            crate::location::Location::none(),
+            LamLoc::NONE,
         ),
         Lambda::let_(
             LetKind::Strict,
@@ -1738,7 +1738,7 @@ fn compile_deps_program_keeps_exported_call_result_before_rebound_constant_block
                     ap_func: Box::new(Lambda::var(f)),
                     ap_args: vec![Lambda::var(v)],
                     ap_info: ApInfo {
-                        loc: Location::none(),
+                        loc: LamLoc::NONE,
                         status: ApplyStatus::Uncurry,
                     },
                 })),
@@ -1771,14 +1771,14 @@ fn compile_deps_program_rebinds_different_name_exports_after_effects() {
             Mutable::Immutable,
         ),
         vec![Lambda::unit()],
-        Location::none(),
+        LamLoc::NONE,
     );
     let lam = Lambda::let_(
         LetKind::Alias,
         original_export,
         Lambda::unit(),
         Lambda::seq(
-            Lambda::prim(Primitive::Pdebugger, vec![], Location::none()),
+            Lambda::prim(Primitive::Pdebugger, vec![], LamLoc::NONE),
             export_block,
         ),
     );
@@ -1822,7 +1822,7 @@ fn compile_deps_program_rebinds_exported_constants_after_surviving_function_bind
     let export_block = Lambda::prim(
         Primitive::Pmakeblock(TagInfo::ModuleExport(vec![x, xx, foo]), Mutable::Immutable),
         vec![Lambda::var(x), Lambda::var(xx), Lambda::var(foo)],
-        Location::none(),
+        LamLoc::NONE,
     );
     let lam = Lambda::let_(
         LetKind::Strict,
@@ -1840,7 +1840,7 @@ fn compile_deps_program_rebinds_exported_constants_after_surviving_function_bind
                     vec![param],
                     Lambda::var(param),
                     FunctionAttribute::default(),
-                    crate::location::Location::none(),
+                    LamLoc::NONE,
                 ),
                 export_block,
             ),
@@ -1905,7 +1905,7 @@ fn compile_deps_program_rebinds_marshaled_string_exports_after_surviving_functio
     let export_block = Lambda::prim(
         Primitive::Pmakeblock(TagInfo::ModuleExport(vec![foo, s, bar]), Mutable::Immutable),
         vec![Lambda::var(foo), Lambda::var(s), Lambda::var(bar)],
-        Location::none(),
+        LamLoc::NONE,
     );
     let lam = Lambda::let_(
         LetKind::Strict,
@@ -1915,7 +1915,7 @@ fn compile_deps_program_rebinds_marshaled_string_exports_after_surviving_functio
             vec![foo_param],
             Lambda::var(foo_param),
             FunctionAttribute::default(),
-            crate::location::Location::none(),
+            LamLoc::NONE,
         ),
         Lambda::let_(
             LetKind::Strict,
@@ -1929,7 +1929,7 @@ fn compile_deps_program_rebinds_marshaled_string_exports_after_surviving_functio
                     vec![bar_param],
                     Lambda::var(bar_param),
                     FunctionAttribute::default(),
-                    crate::location::Location::none(),
+                    LamLoc::NONE,
                 ),
                 export_block,
             ),
@@ -1970,7 +1970,7 @@ fn compile_deps_program_keeps_same_name_export_aliases_for_unbound_globals() {
                 Mutable::Immutable,
             ),
             vec![Lambda::var(rebound_export)],
-            Location::none(),
+            LamLoc::NONE,
         ),
     );
 
@@ -2095,7 +2095,7 @@ fn compile_deps_program_declares_export_left_unbound_by_throwing_binding() {
     let export_block = Lambda::prim(
         Primitive::Pmakeblock(TagInfo::ModuleExport(vec![exported]), Mutable::Immutable),
         vec![Lambda::var(exported)],
-        Location::none(),
+        LamLoc::NONE,
     );
     let lam = Lambda::let_(
         LetKind::Strict,
@@ -2103,7 +2103,7 @@ fn compile_deps_program_declares_export_left_unbound_by_throwing_binding() {
         Lambda::prim(
             Primitive::Praise,
             vec![Lambda::const_(Constant::string("boom"))],
-            Location::none(),
+            LamLoc::NONE,
         ),
         export_block,
     );
@@ -2146,7 +2146,7 @@ fn compile_deps_program_declares_export_left_unbound_by_nested_throwing_binding(
     let export_block = Lambda::prim(
         Primitive::Pmakeblock(TagInfo::ModuleExport(vec![exported]), Mutable::Immutable),
         vec![Lambda::var(exported)],
-        Location::none(),
+        LamLoc::NONE,
     );
     let lam = Lambda::let_(
         LetKind::Strict,
@@ -2157,7 +2157,7 @@ fn compile_deps_program_declares_export_left_unbound_by_nested_throwing_binding(
             Lambda::prim(
                 Primitive::Praise,
                 vec![Lambda::const_(Constant::string("boom"))],
-                Location::none(),
+                LamLoc::NONE,
             ),
             Lambda::prim(
                 Primitive::Pmakeblock(
@@ -2168,7 +2168,7 @@ fn compile_deps_program_declares_export_left_unbound_by_nested_throwing_binding(
                     Mutable::Immutable,
                 ),
                 vec![Lambda::var(nested)],
-                Location::none(),
+                LamLoc::NONE,
             ),
         ),
         export_block,
@@ -2215,7 +2215,7 @@ fn compile_return_block_skips_unreachable_sequence_after_throw() {
         Lambda::prim(
             Primitive::Praise,
             vec![Lambda::const_(Constant::string("boom"))],
-            Location::none(),
+            LamLoc::NONE,
         ),
         Lambda::const_(Constant::int(12)),
     ));
@@ -2245,7 +2245,7 @@ fn compile_return_block_lowers_trywith_in_return_position() {
             ap_func: Box::new(Lambda::var(callee)),
             ap_args: vec![],
             ap_info: ApInfo {
-                loc: Location::none(),
+                loc: LamLoc::NONE,
                 status: ApplyStatus::Na,
             },
         }))),
@@ -2359,7 +2359,7 @@ fn direct_recursive_trywith_self_calls_do_not_lower_to_loops_like_ocaml() {
                         ap_func: Box::new(Lambda::var(loop_)),
                         ap_args: vec![Lambda::var(acc)],
                         ap_info: ApInfo {
-                            loc: Location::none(),
+                            loc: LamLoc::NONE,
                             status: ApplyStatus::Na,
                         },
                     }))),
@@ -2367,7 +2367,7 @@ fn direct_recursive_trywith_self_calls_do_not_lower_to_loops_like_ocaml() {
                     Box::new(Lambda::const_(Constant::int(0))),
                 ),
                 FunctionAttribute::default(),
-                crate::location::Location::none(),
+                LamLoc::NONE,
             ),
         )],
         Lambda::unit(),
@@ -2403,7 +2403,7 @@ fn recursive_trywith_handler_self_calls_lower_to_loops_like_ocaml() {
         ap_func: Box::new(Lambda::var(loop_)),
         ap_args: vec![Lambda::var(acc)],
         ap_info: ApInfo {
-            loc: Location::none(),
+            loc: LamLoc::NONE,
             status: ApplyStatus::Na,
         },
     }));
@@ -2418,7 +2418,7 @@ fn recursive_trywith_handler_self_calls_lower_to_loops_like_ocaml() {
                         ap_func: Box::new(Lambda::var(read)),
                         ap_args: vec![Lambda::var(acc)],
                         ap_info: ApInfo {
-                            loc: Location::none(),
+                            loc: LamLoc::NONE,
                             status: ApplyStatus::Na,
                         },
                     }))),
@@ -2426,7 +2426,7 @@ fn recursive_trywith_handler_self_calls_lower_to_loops_like_ocaml() {
                     Box::new(tailcall),
                 ),
                 FunctionAttribute::default(),
-                crate::location::Location::none(),
+                LamLoc::NONE,
             ),
         )],
         Lambda::unit(),
@@ -2487,7 +2487,7 @@ fn lowers_expression_sequences_to_js_comma_expressions() {
             ap_func: Box::new(Lambda::var(callback)),
             ap_args: vec![],
             ap_info: ApInfo {
-                loc: Location::none(),
+                loc: LamLoc::NONE,
                 status: ApplyStatus::Na,
             },
         }))),
@@ -2496,7 +2496,7 @@ fn lowers_expression_sequences_to_js_comma_expressions() {
     let program = compiler.compile_program(&Lambda::prim(
         Primitive::Pmakearray,
         vec![sequence],
-        Location::none(),
+        LamLoc::NONE,
     ));
 
     let [stmt] = program.block.as_slice() else {
@@ -2549,7 +2549,7 @@ fn nested_effect_sequences_drop_intermediate_pignore_suffixes_when_appended_to_v
         ap_func: Box::new(Lambda::var(callback)),
         ap_args: vec![],
         ap_info: ApInfo {
-            loc: Location::none(),
+            loc: LamLoc::NONE,
             status: ApplyStatus::Na,
         },
     }));
@@ -2559,7 +2559,7 @@ fn nested_effect_sequences_drop_intermediate_pignore_suffixes_when_appended_to_v
             Box::new(Lambda::prim(
                 Primitive::Pignore,
                 vec![Lambda::const_(Constant::int(3))],
-                Location::none(),
+                LamLoc::NONE,
             )),
         )),
         Box::new(Lambda::var(value)),
@@ -2799,7 +2799,7 @@ pub(super) fn gpr_1438_fallthrough_handler() -> Lambda {
             return_unit: true,
             ..FunctionAttribute::default()
         },
-        crate::location::Location::none(),
+        LamLoc::NONE,
     )
 }
 
@@ -2836,7 +2836,7 @@ fn compile_deps_program_keeps_gpr_1438_fallthrough_return_outside_switch() {
             Box::new(Lambda::var(a)),
         ),
         FunctionAttribute::default(),
-        crate::location::Location::none(),
+        LamLoc::NONE,
     );
     let lam = Lambda::let_(
         LetKind::Strict,
@@ -2845,7 +2845,7 @@ fn compile_deps_program_keeps_gpr_1438_fallthrough_return_outside_switch() {
         Lambda::prim(
             Primitive::Pmakeblock(TagInfo::ModuleExport(vec![action_key]), Mutable::Immutable),
             vec![Lambda::var(action_key)],
-            Location::none(),
+            LamLoc::NONE,
         ),
     );
 
@@ -2926,7 +2926,7 @@ fn function_return_blocks_lower_switches_without_a_result_temp() {
     let mut compiler = LambdaCompiler::new();
     let scrutinee = Ident::create_local("scrutinee");
     let compiled = compiler.compile_expr(&Lambda::Lfunction(Box::new(crate::lambda::LFunction {
-        loc: crate::location::Location::none(),
+        loc: LamLoc::NONE,
         arity: 1,
         params: vec![scrutinee],
         body: Box::new(Lambda::Lswitch(
@@ -2988,7 +2988,7 @@ fn function_return_blocks_lower_ifs_without_a_result_temp() {
     let cond = Ident::create_local("cond");
     let branch = Ident::create_local("branch");
     let compiled = compiler.compile_expr(&Lambda::Lfunction(Box::new(crate::lambda::LFunction {
-        loc: crate::location::Location::none(),
+        loc: LamLoc::NONE,
         arity: 1,
         params: vec![cond],
         body: Box::new(Lambda::LifThenElse(
@@ -3188,7 +3188,7 @@ fn unit_return_function_with_trivial_if_branches_keeps_condition_effect_only() {
             Lambda::var(effect),
             vec![],
             ApInfo {
-                loc: Location::none(),
+                loc: LamLoc::NONE,
                 status: ApplyStatus::Na,
             },
         )),
@@ -3196,7 +3196,7 @@ fn unit_return_function_with_trivial_if_branches_keeps_condition_effect_only() {
         Box::new(Lambda::const_(Constant::JsUndefined { is_unit: true })),
     );
     let compiled = compiler.compile_expr(&Lambda::Lfunction(Box::new(crate::lambda::LFunction {
-        loc: crate::location::Location::none(),
+        loc: LamLoc::NONE,
         arity: 1,
         params: vec![effect],
         body: Box::new(body),
@@ -3260,12 +3260,12 @@ fn unit_return_function_flips_effect_guard_into_early_return() {
                 return_unit: true,
                 ..Default::default()
             },
-            crate::location::Location::none(),
+            LamLoc::NONE,
         ),
         Lambda::prim(
             Primitive::Pmakeblock(TagInfo::ModuleExport(vec![run]), Mutable::Immutable),
             vec![Lambda::var(run)],
-            Location::none(),
+            LamLoc::NONE,
         ),
     );
 
@@ -3309,12 +3309,12 @@ fn unit_return_function_with_for_loop_tail_keeps_negative_guard() {
                 return_unit: true,
                 ..Default::default()
             },
-            crate::location::Location::none(),
+            LamLoc::NONE,
         ),
         Lambda::prim(
             Primitive::Pmakeblock(TagInfo::ModuleExport(vec![run]), Mutable::Immutable),
             vec![Lambda::var(run)],
-            Location::none(),
+            LamLoc::NONE,
         ),
     );
 
@@ -3358,12 +3358,12 @@ fn unit_return_function_with_else_for_loop_tail_keeps_negative_guard() {
                 return_unit: true,
                 ..Default::default()
             },
-            crate::location::Location::none(),
+            LamLoc::NONE,
         ),
         Lambda::prim(
             Primitive::Pmakeblock(TagInfo::ModuleExport(vec![run]), Mutable::Immutable),
             vec![Lambda::var(run)],
-            Location::none(),
+            LamLoc::NONE,
         ),
     );
 
@@ -3414,12 +3414,12 @@ fn unit_return_function_with_local_while_tail_keeps_negative_guard() {
                 return_unit: true,
                 ..Default::default()
             },
-            crate::location::Location::none(),
+            LamLoc::NONE,
         ),
         Lambda::prim(
             Primitive::Pmakeblock(TagInfo::ModuleExport(vec![run]), Mutable::Immutable),
             vec![Lambda::var(run)],
-            Location::none(),
+            LamLoc::NONE,
         ),
     );
 
@@ -3561,7 +3561,7 @@ fn let_bindings_lower_effectful_short_circuits_without_a_result_alias_temp() {
                     Lambda::var(branch),
                 ),
             ],
-            Location::none(),
+            LamLoc::NONE,
         )),
         Box::new(Lambda::var(result)),
     ));
@@ -3808,7 +3808,7 @@ fn effect_blocks_keep_allocating_branches_inside_conditional_expressions_like_oc
                 Lambda::var(effect),
                 vec![],
                 ApInfo {
-                    loc: Location::none(),
+                    loc: LamLoc::NONE,
                     status: ApplyStatus::Na,
                 },
             )),
@@ -4709,7 +4709,7 @@ fn flattens_value_sequences_back_to_effect_statements_at_toplevel() {
             ap_func: Box::new(Lambda::var(callback)),
             ap_args: vec![],
             ap_info: ApInfo {
-                loc: Location::none(),
+                loc: LamLoc::NONE,
                 status: ApplyStatus::Na,
             },
         }))),
@@ -4755,7 +4755,7 @@ fn effect_context_calls_with_arg_preludes_skip_intermediate_call_temps() {
                     ap_func: Box::new(Lambda::var(before)),
                     ap_args: vec![],
                     ap_info: ApInfo {
-                        loc: Location::none(),
+                        loc: LamLoc::NONE,
                         status: ApplyStatus::Na,
                     },
                 }))),
@@ -4766,7 +4766,7 @@ fn effect_context_calls_with_arg_preludes_skip_intermediate_call_temps() {
                     ap_func: Box::new(Lambda::var(after)),
                     ap_args: vec![],
                     ap_info: ApInfo {
-                        loc: Location::none(),
+                        loc: LamLoc::NONE,
                         status: ApplyStatus::Na,
                     },
                 }))),
@@ -4775,7 +4775,7 @@ fn effect_context_calls_with_arg_preludes_skip_intermediate_call_temps() {
         )),
         ap_args: vec![Lambda::const_(Constant::int(1))],
         ap_info: ApInfo {
-            loc: Location::none(),
+            loc: LamLoc::NONE,
             status: ApplyStatus::Na,
         },
     }));
@@ -4800,7 +4800,7 @@ fn value_context_direct_calls_stay_as_call_expressions() {
         ap_func: Box::new(Lambda::var(callback)),
         ap_args: vec![Lambda::const_(Constant::int(1))],
         ap_info: ApInfo {
-            loc: Location::none(),
+            loc: LamLoc::NONE,
             status: ApplyStatus::Na,
         },
     })));
@@ -4840,7 +4840,7 @@ fn nested_app_na_calls_reassociate_through_lam_apply_for_ari_regress_shape() {
     let u = Ident::create_local("u");
     let z = Ident::create_local("z");
     let result = Ident::create_local("result");
-    let loc = Location::none();
+    let loc = LamLoc::NONE;
 
     let lam = Lambda::let_(
         LetKind::Alias,
@@ -4865,11 +4865,11 @@ fn nested_app_na_calls_reassociate_through_lam_apply_for_ari_regress_shape() {
                         loc,
                     ),
                     crate::lambda::FunctionAttribute::default(),
-                    crate::location::Location::none(),
+                    LamLoc::NONE,
                 ),
             ),
             crate::lambda::FunctionAttribute::default(),
-            crate::location::Location::none(),
+            LamLoc::NONE,
         ),
         Lambda::let_(
             LetKind::Strict,
@@ -4925,7 +4925,7 @@ fn nested_app_na_calls_reassociate_multi_arg_returned_functions_for_test_demo_sh
     let yy = Ident::create_local("yy");
     let extra = Ident::create_local("extra");
     let result = Ident::create_local("result");
-    let loc = Location::none();
+    let loc = LamLoc::NONE;
 
     let lam = Lambda::let_(
         LetKind::Alias,
@@ -4957,11 +4957,11 @@ fn nested_app_na_calls_reassociate_multi_arg_returned_functions_for_test_demo_sh
                         loc,
                     ),
                     crate::lambda::FunctionAttribute::default(),
-                    crate::location::Location::none(),
+                    LamLoc::NONE,
                 ),
             ),
             crate::lambda::FunctionAttribute::default(),
-            crate::location::Location::none(),
+            LamLoc::NONE,
         ),
         Lambda::let_(
             LetKind::Strict,
@@ -4988,7 +4988,7 @@ fn nested_app_na_calls_reassociate_multi_arg_returned_functions_for_test_demo_sh
                     },
                 })),
                 crate::lambda::FunctionAttribute::default(),
-                crate::location::Location::none(),
+                LamLoc::NONE,
             ),
             Lambda::var(result),
         ),
@@ -5020,7 +5020,7 @@ fn let_bound_direct_calls_skip_intermediate_call_aliases() {
             ap_func: Box::new(Lambda::var(callback)),
             ap_args: vec![Lambda::const_(Constant::int(1))],
             ap_info: ApInfo {
-                loc: Location::none(),
+                loc: LamLoc::NONE,
                 status: ApplyStatus::Na,
             },
         }))),
@@ -5083,7 +5083,7 @@ fn return_context_calls_with_arg_preludes_skip_intermediate_call_temps() {
                     ap_func: Box::new(Lambda::var(before)),
                     ap_args: vec![],
                     ap_info: ApInfo {
-                        loc: Location::none(),
+                        loc: LamLoc::NONE,
                         status: ApplyStatus::Na,
                     },
                 }))),
@@ -5094,7 +5094,7 @@ fn return_context_calls_with_arg_preludes_skip_intermediate_call_temps() {
                     ap_func: Box::new(Lambda::var(after)),
                     ap_args: vec![],
                     ap_info: ApInfo {
-                        loc: Location::none(),
+                        loc: LamLoc::NONE,
                         status: ApplyStatus::Na,
                     },
                 }))),
@@ -5103,7 +5103,7 @@ fn return_context_calls_with_arg_preludes_skip_intermediate_call_temps() {
         )),
         ap_args: vec![Lambda::const_(Constant::int(1))],
         ap_info: ApInfo {
-            loc: Location::none(),
+            loc: LamLoc::NONE,
             status: ApplyStatus::Na,
         },
     }));
@@ -5140,7 +5140,7 @@ fn assignment_context_calls_with_arg_preludes_skip_intermediate_call_temps() {
                     ap_func: Box::new(Lambda::var(before)),
                     ap_args: vec![],
                     ap_info: ApInfo {
-                        loc: Location::none(),
+                        loc: LamLoc::NONE,
                         status: ApplyStatus::Na,
                     },
                 }))),
@@ -5151,7 +5151,7 @@ fn assignment_context_calls_with_arg_preludes_skip_intermediate_call_temps() {
                     ap_func: Box::new(Lambda::var(after)),
                     ap_args: vec![],
                     ap_info: ApInfo {
-                        loc: Location::none(),
+                        loc: LamLoc::NONE,
                         status: ApplyStatus::Na,
                     },
                 }))),
@@ -5160,7 +5160,7 @@ fn assignment_context_calls_with_arg_preludes_skip_intermediate_call_temps() {
         )),
         ap_args: vec![Lambda::const_(Constant::int(1))],
         ap_info: ApInfo {
-            loc: Location::none(),
+            loc: LamLoc::NONE,
             status: ApplyStatus::Na,
         },
     }));
@@ -5191,7 +5191,7 @@ fn function_bodies_drop_pure_undefined_sequence_suffixes() {
             ap_func: Box::new(Lambda::var(callback)),
             ap_args: vec![],
             ap_info: ApInfo {
-                loc: Location::none(),
+                loc: LamLoc::NONE,
                 status: ApplyStatus::Na,
             },
         }))
@@ -5210,7 +5210,7 @@ fn function_bodies_drop_pure_undefined_sequence_suffixes() {
         )),
     );
     let compiled = compiler.compile_expr(&Lambda::Lfunction(Box::new(crate::lambda::LFunction {
-        loc: crate::location::Location::none(),
+        loc: LamLoc::NONE,
         arity: 1,
         params: vec![value],
         body: Box::new(body),
@@ -5268,7 +5268,7 @@ fn top_level_if_effects_drop_trailing_pure_undefined_branch_suffixes() {
             ap_func: Box::new(Lambda::var(*id)),
             ap_args: vec![],
             ap_info: ApInfo {
-                loc: Location::none(),
+                loc: LamLoc::NONE,
                 status: ApplyStatus::Na,
             },
         }))
@@ -5753,10 +5753,10 @@ fn function_return_blocks_collapse_identity_module_wrapper_to_parameter() {
     let mut compiler = LambdaCompiler::new();
     let module_param = Ident::create_local("U");
     let field_alias = Ident::create_local("x");
-    let loc = crate::location::Location::none();
+    let loc = LamLoc::NONE;
 
     let compiled = compiler.compile_expr(&Lambda::Lfunction(Box::new(crate::lambda::LFunction {
-        loc: crate::location::Location::none(),
+        loc: LamLoc::NONE,
         arity: 1,
         params: vec![module_param],
         body: Box::new(Lambda::let_(
@@ -5805,10 +5805,10 @@ fn function_return_blocks_collapse_identity_module_wrapper_to_parameter() {
 fn function_return_blocks_collapse_inlined_identity_module_wrapper_to_parameter() {
     let mut compiler = LambdaCompiler::new();
     let module_param = Ident::create_local("U");
-    let loc = crate::location::Location::none();
+    let loc = LamLoc::NONE;
 
     let compiled = compiler.compile_expr(&Lambda::Lfunction(Box::new(crate::lambda::LFunction {
-        loc: crate::location::Location::none(),
+        loc: LamLoc::NONE,
         arity: 1,
         params: vec![module_param],
         body: Box::new(Lambda::prim(
@@ -5823,7 +5823,7 @@ fn function_return_blocks_collapse_inlined_identity_module_wrapper_to_parameter(
                 vec![Lambda::var(module_param)],
                 loc,
             )],
-            crate::location::Location::none(),
+            LamLoc::NONE,
         )),
         attr: crate::lambda::FunctionAttribute::default(),
     })));
@@ -5855,10 +5855,10 @@ fn function_return_blocks_keep_non_identity_module_wrapper() {
     let right = Ident::create_local("Right");
     let left_alias = Ident::create_local("x");
     let right_alias = Ident::create_local("y");
-    let loc = crate::location::Location::none();
+    let loc = LamLoc::NONE;
 
     let compiled = compiler.compile_expr(&Lambda::Lfunction(Box::new(crate::lambda::LFunction {
-        loc: crate::location::Location::none(),
+        loc: LamLoc::NONE,
         arity: 2,
         params: vec![left, right],
         body: Box::new(Lambda::let_(
@@ -6893,7 +6893,7 @@ fn top_level_record_field_assignments_on_pure_fresh_literals_collapse_to_rhs_eff
                         Mutable::Immutable,
                     ),
                     vec![Lambda::const_(Constant::int(3))],
-                    Location::none(),
+                    LamLoc::NONE,
                 ),
                 Lambda::Lsequence(
                     Box::new(Lambda::prim(
@@ -6902,12 +6902,12 @@ fn top_level_record_field_assignments_on_pure_fresh_literals_collapse_to_rhs_eff
                             is_stmt: true,
                         }),
                         vec![],
-                        Location::none(),
+                        LamLoc::NONE,
                     )),
                     Box::new(Lambda::const_(Constant::int(2))),
                 ),
             ],
-            Location::none(),
+            LamLoc::NONE,
         ),
         Lambda::unit(),
     );
@@ -7031,7 +7031,7 @@ fn lassign_expression_lowers_to_statement_prelude_and_unit_value() {
         Box::new(Lambda::prim(
             Primitive::Paddint,
             vec![Lambda::var(cell), Lambda::const_(Constant::int(1))],
-            Location::none(),
+            LamLoc::NONE,
         )),
     ));
 
@@ -7058,7 +7058,7 @@ fn let_bindings_of_unit_lassigns_emit_effects_before_undefined_declarations() {
             Box::new(Lambda::prim(
                 Primitive::Paddint,
                 vec![Lambda::var(u), Lambda::const_(Constant::int(1))],
-                Location::none(),
+                LamLoc::NONE,
             )),
         ),
     );
@@ -7072,7 +7072,7 @@ fn lowers_pis_poly_var_block_to_typeof_object_check() {
     let compiled = compiler.compile_expr(&Lambda::prim(
         Primitive::PisPolyVarBlock,
         vec![Lambda::var(value)],
-        Location::none(),
+        LamLoc::NONE,
     ));
 
     assert!(
@@ -7198,7 +7198,7 @@ fn lowers_psome_not_nest_to_identity_optional_block() {
     let compiled = compiler.compile_expr(&Lambda::prim(
         Primitive::PsomeNotNest,
         vec![Lambda::var(value)],
-        Location::none(),
+        LamLoc::NONE,
     ));
 
     assert!(compiled.prelude.is_empty());
@@ -7222,7 +7222,7 @@ fn lowers_psome_immediates_to_identity_optional_block_like_ocaml() {
     let compiled = compiler.compile_expr(&Lambda::prim(
         Primitive::Psome,
         vec![Lambda::const_(Constant::int(3))],
-        Location::none(),
+        LamLoc::NONE,
     ));
 
     assert!(compiled.prelude.is_empty());
@@ -7248,9 +7248,9 @@ fn lowers_pval_from_option_optional_block_to_inner_value() {
         vec![Lambda::prim(
             Primitive::PsomeNotNest,
             vec![Lambda::var(value)],
-            Location::none(),
+            LamLoc::NONE,
         )],
-        Location::none(),
+        LamLoc::NONE,
     ));
 
     let [stmt] = program.block.as_slice() else {
@@ -7272,7 +7272,7 @@ fn lowers_pval_from_option_to_primitive_option_runtime_call() {
     let compiled = compiler.compile_expr(&Lambda::prim(
         Primitive::PvalFromOption,
         vec![Lambda::var(value)],
-        Location::none(),
+        LamLoc::NONE,
     ));
 
     assert!(compiled.prelude.is_empty());
@@ -7305,7 +7305,7 @@ fn lowers_pnull_to_opt_non_inline_operand_to_primitive_option_from_null() {
     let compiled = compiler.compile_expr(&Lambda::prim(
         Primitive::PnullToOpt,
         vec![Lambda::const_(Constant::string("value"))],
-        Location::none(),
+        LamLoc::NONE,
     ));
 
     assert!(compiled.prelude.is_empty());
@@ -7338,7 +7338,7 @@ fn lowers_pnull_undefined_to_opt_non_inline_operand_to_primitive_option_from_nul
     let compiled = compiler.compile_expr(&Lambda::prim(
         Primitive::PnullUndefinedToOpt,
         vec![Lambda::const_(Constant::string("value"))],
-        Location::none(),
+        LamLoc::NONE,
     ));
 
     assert!(compiled.prelude.is_empty());
@@ -7864,7 +7864,7 @@ fn one_unit_arg_functions_lower_to_zero_arg_js_functions() {
             one_unit_arg: true,
             ..FunctionAttribute::default()
         },
-        crate::location::Location::none(),
+        LamLoc::NONE,
     ));
 
     assert!(compiled.prelude.is_empty());
@@ -7887,7 +7887,7 @@ fn recursive_function_bindings_lower_directly_without_placeholder_assignments() 
                 vec![param],
                 Lambda::var(func),
                 FunctionAttribute::default(),
-                crate::location::Location::none(),
+                LamLoc::NONE,
             ),
         )],
         Lambda::unit(),
@@ -7925,7 +7925,7 @@ fn mutually_recursive_function_bindings_lower_without_placeholder_assignments() 
                     vec![n],
                     Lambda::var(odd),
                     FunctionAttribute::default(),
-                    crate::location::Location::none(),
+                    LamLoc::NONE,
                 ),
             ),
             (
@@ -7935,7 +7935,7 @@ fn mutually_recursive_function_bindings_lower_without_placeholder_assignments() 
                     vec![n],
                     Lambda::var(even),
                     FunctionAttribute::default(),
-                    crate::location::Location::none(),
+                    LamLoc::NONE,
                 ),
             ),
         ],
@@ -7979,7 +7979,7 @@ fn recursive_singleton_nested_let_function_bindings_avoid_placeholder_assignment
                     vec![param],
                     Lambda::var(make),
                     FunctionAttribute::default(),
-                    crate::location::Location::none(),
+                    LamLoc::NONE,
                 ),
                 Lambda::let_(
                     LetKind::Strict,
@@ -7994,12 +7994,12 @@ fn recursive_singleton_nested_let_function_bindings_avoid_placeholder_assignment
                                 Lambda::var(make_internal),
                                 vec![Lambda::var(props)],
                                 ApInfo {
-                                    loc: Location::none(),
+                                    loc: LamLoc::NONE,
                                     status: ApplyStatus::Na,
                                 },
                             ),
                             FunctionAttribute::default(),
-                            crate::location::Location::none(),
+                            LamLoc::NONE,
                         ),
                         Lambda::var(component),
                     ),
@@ -8045,7 +8045,7 @@ fn recursive_self_referential_record_bindings_lower_to_dummy_object_updates_like
                     Mutable::Immutable,
                 ),
                 vec![Lambda::var(xx)],
-                Location::none(),
+                LamLoc::NONE,
             ),
         )],
         Lambda::unit(),
@@ -8121,7 +8121,7 @@ fn mutually_recursive_record_bindings_lower_to_runtime_update_dummy_calls() {
                         Mutable::Immutable,
                     ),
                     vec![Lambda::var(b)],
-                    Location::none(),
+                    LamLoc::NONE,
                 ),
             ),
             (
@@ -8135,7 +8135,7 @@ fn mutually_recursive_record_bindings_lower_to_runtime_update_dummy_calls() {
                         Mutable::Immutable,
                     ),
                     vec![Lambda::var(a)],
-                    Location::none(),
+                    LamLoc::NONE,
                 ),
             ),
         ],
@@ -8174,7 +8174,7 @@ fn recursive_self_tailcalls_lower_to_looping_while_bodies() {
             Lambda::var(next),
         ],
         ap_info: ApInfo {
-            loc: Location::none(),
+            loc: LamLoc::NONE,
             status: ApplyStatus::Na,
         },
     }));
@@ -8186,7 +8186,7 @@ fn recursive_self_tailcalls_lower_to_looping_while_bodies() {
                 vec![flag, acc, next],
                 Lambda::if_(Lambda::var(flag), tailcall, Lambda::var(acc)),
                 FunctionAttribute::default(),
-                crate::location::Location::none(),
+                LamLoc::NONE,
             ),
         )],
         Lambda::unit(),
@@ -8219,7 +8219,7 @@ fn recursive_int_switch_fallthrough_handler_breaks_before_tail_loop_continue() {
         ap_func: Box::new(Lambda::var(loop_)),
         ap_args: vec![Lambda::var(next), Lambda::var(next)],
         ap_info: ApInfo {
-            loc: Location::none(),
+            loc: LamLoc::NONE,
             status: ApplyStatus::Na,
         },
     }));
@@ -8255,7 +8255,7 @@ fn recursive_int_switch_fallthrough_handler_breaks_before_tail_loop_continue() {
                 vec![tag, next],
                 body,
                 FunctionAttribute::default(),
-                crate::location::Location::none(),
+                LamLoc::NONE,
             ),
         )],
         Lambda::unit(),
@@ -8279,7 +8279,7 @@ fn recursive_string_switch_fallthrough_handler_breaks_before_tail_loop_continue(
         ap_func: Box::new(Lambda::var(strip)),
         ap_args: vec![Lambda::var(next), Lambda::var(next)],
         ap_info: ApInfo {
-            loc: Location::none(),
+            loc: LamLoc::NONE,
             status: ApplyStatus::Na,
         },
     }));
@@ -8303,7 +8303,7 @@ fn recursive_string_switch_fallthrough_handler_breaks_before_tail_loop_continue(
                 vec![ch, next],
                 body,
                 FunctionAttribute::default(),
-                crate::location::Location::none(),
+                LamLoc::NONE,
             ),
         )],
         Lambda::unit(),
@@ -8326,7 +8326,7 @@ fn recursive_self_tailcalls_lower_sequands_to_looping_while_bodies() {
         ap_func: Box::new(Lambda::var(loop_)),
         ap_args: vec![Lambda::const_(Constant::JsFalse)],
         ap_info: ApInfo {
-            loc: Location::none(),
+            loc: LamLoc::NONE,
             status: ApplyStatus::Na,
         },
     }));
@@ -8339,10 +8339,10 @@ fn recursive_self_tailcalls_lower_sequands_to_looping_while_bodies() {
                 Lambda::prim(
                     Primitive::Psequand,
                     vec![Lambda::var(flag), tailcall],
-                    Location::none(),
+                    LamLoc::NONE,
                 ),
                 FunctionAttribute::default(),
-                crate::location::Location::none(),
+                LamLoc::NONE,
             ),
         )],
         Lambda::unit(),
@@ -8374,7 +8374,7 @@ fn recursive_self_tailcalls_lower_sequors_to_looping_while_bodies() {
         ap_func: Box::new(Lambda::var(loop_)),
         ap_args: vec![Lambda::const_(Constant::JsFalse)],
         ap_info: ApInfo {
-            loc: Location::none(),
+            loc: LamLoc::NONE,
             status: ApplyStatus::Na,
         },
     }));
@@ -8387,10 +8387,10 @@ fn recursive_self_tailcalls_lower_sequors_to_looping_while_bodies() {
                 Lambda::prim(
                     Primitive::Psequor,
                     vec![Lambda::var(flag), tailcall],
-                    Location::none(),
+                    LamLoc::NONE,
                 ),
                 FunctionAttribute::default(),
-                crate::location::Location::none(),
+                LamLoc::NONE,
             ),
         )],
         Lambda::unit(),
@@ -8430,7 +8430,7 @@ fn recursive_self_tailcalls_rename_params_before_loop_assignments() {
             Lambda::const_(Constant::JsFalse),
         ],
         ap_info: ApInfo {
-            loc: Location::none(),
+            loc: LamLoc::NONE,
             status: ApplyStatus::Na,
         },
     }));
@@ -8442,7 +8442,7 @@ fn recursive_self_tailcalls_rename_params_before_loop_assignments() {
                 vec![a, b, flag],
                 Lambda::if_(Lambda::var(flag), tailcall, Lambda::var(a)),
                 FunctionAttribute::default(),
-                crate::location::Location::none(),
+                LamLoc::NONE,
             ),
         )],
         Lambda::unit(),
@@ -8483,18 +8483,18 @@ fn recursive_self_tailcalls_preserve_ocaml_loop_ordering() {
                 Lambda::prim(
                     Primitive::Psubint,
                     vec![Lambda::var(n), Lambda::const_(Constant::int(1))],
-                    Location::none(),
+                    LamLoc::NONE,
                 ),
                 Lambda::function_(
                     1,
                     vec![compiler.id_gen.create("param")],
                     Lambda::var(acc),
                     FunctionAttribute::default(),
-                    crate::location::Location::none(),
+                    LamLoc::NONE,
                 ),
             ],
             ap_info: ApInfo {
-                loc: Location::none(),
+                loc: LamLoc::NONE,
                 status: ApplyStatus::Na,
             },
         })),
@@ -8508,7 +8508,7 @@ fn recursive_self_tailcalls_preserve_ocaml_loop_ordering() {
                 vec![n, acc],
                 body,
                 FunctionAttribute::default(),
-                crate::location::Location::none(),
+                LamLoc::NONE,
             ),
         )],
         Lambda::unit(),
@@ -8561,7 +8561,7 @@ fn recursive_function_bindings_lower_to_looping_while_bodies() {
             Lambda::var(next),
         ],
         ap_info: ApInfo {
-            loc: Location::none(),
+            loc: LamLoc::NONE,
             status: ApplyStatus::Na,
         },
     }));
@@ -8573,7 +8573,7 @@ fn recursive_function_bindings_lower_to_looping_while_bodies() {
                 vec![flag, acc, next],
                 Lambda::if_(Lambda::var(flag), tailcall, Lambda::var(acc)),
                 FunctionAttribute::default(),
-                crate::location::Location::none(),
+                LamLoc::NONE,
             ),
         )],
         Lambda::var(loop_),
@@ -8610,7 +8610,7 @@ fn recursive_named_variant_block_cases_reenter_tail_loops() {
         ap_func: Box::new(Lambda::var(loop_)),
         ap_args: vec![Lambda::var(value)],
         ap_info: ApInfo {
-            loc: Location::none(),
+            loc: LamLoc::NONE,
             status: ApplyStatus::Na,
         },
     }));
@@ -8663,7 +8663,7 @@ fn recursive_named_variant_block_cases_reenter_tail_loops() {
                 vec![value],
                 body,
                 FunctionAttribute::default(),
-                crate::location::Location::none(),
+                LamLoc::NONE,
             ),
         )],
         Lambda::unit(),

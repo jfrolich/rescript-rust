@@ -63,17 +63,17 @@ fn extension_eval_string(
     arena: &ParseArena,
     item: &crate::parser::ast::StructureItem,
 ) -> Option<String> {
-    let crate::parser::ast::StructureItemDesc::Pstr_eval(eval) = &*item.pstr_desc else {
+    let crate::parser::ast::StructureItemDesc::Pstr_eval(eval) = &item.pstr_desc else {
         return None;
     };
     let expr = arena.get_expr(eval.0);
-    let crate::parser::ast::ExpressionDesc::Pexp_constant(constant) = &*expr.pexp_desc else {
+    let crate::parser::ast::ExpressionDesc::Pexp_constant(constant) = &expr.pexp_desc else {
         return None;
     };
-    let ParsedConstant::String(message) = &**constant else {
+    let ParsedConstant::String(message) = &*constant else {
         return None;
     };
-    Some(message.semantic().to_string())
+    Some(message.semantic(arena).to_string())
 }
 
 fn builtin_extension_sub_errors(
@@ -84,7 +84,7 @@ fn builtin_extension_sub_errors(
 ) -> Option<Vec<BuiltinExtensionError>> {
     let mut sub = Vec::new();
     for item in items {
-        match &*item.pstr_desc {
+        match &item.pstr_desc {
             crate::parser::ast::StructureItemDesc::Pstr_extension(extension) => {
                 sub.push(extension_error(arena, &extension.0)?);
             }
@@ -1407,6 +1407,18 @@ pub(crate) enum LetCheck {
 }
 
 impl<'a> TypeCheckContext<'a> {
+    /// `TypeContext::intern_loc`.
+    #[inline]
+    pub fn intern_loc(&self, loc: Location) -> crate::types::DeclLoc {
+        self.type_ctx.intern_loc(loc)
+    }
+
+    /// `TypeContext::resolve_loc`.
+    #[inline]
+    pub fn resolve_loc(&self, loc: crate::types::DeclLoc) -> Location {
+        self.type_ctx.resolve_loc(loc)
+    }
+
     /// Create a new type check context.
     pub fn new(type_ctx: &'a TypeContext, arena: &'a ParseArena) -> Self {
         type_ctx.register_arena_longident_names(arena);
@@ -2254,6 +2266,7 @@ pub(crate) fn int32_literal_fits_ocaml(s: &str) -> bool {
 pub fn convert_constant(
     cst: &crate::parser::ast::Constant,
     loc: LocIdx,
+    arena: &ParseArena,
 ) -> TypeCoreResult<Constant> {
     use crate::parser::ast::Constant as ParsedConstant;
 
@@ -2266,7 +2279,7 @@ pub fn convert_constant(
             // intervals must see Lambda's int32 value (`Int32.to_int
             // (Int32.of_int value)`), so -0xFFFF_FFFF and 1 are the same key.
             // This does not change overflow diagnostics.
-            match parse_int_literal(s) {
+            match parse_int_literal(arena.get_string(*s)) {
                 Some(n) => Ok(Constant::Int(i64::from(wrap_to_ocaml_int(n) as i32))),
                 None => Err(TypeCoreError::LiteralOverflow {
                     loc,
@@ -2275,20 +2288,22 @@ pub fn convert_constant(
             }
         }
         ParsedConstant::Integer(s, Some('n')) => {
-            let (sign, digits) = parse_bigint_literal(s);
+            let (sign, digits) = parse_bigint_literal(arena.get_string(*s));
             Ok(Constant::BigInt(sign, digits))
         }
         ParsedConstant::Integer(i, Some(c)) => Err(TypeCoreError::UnknownLiteral {
             loc,
-            literal: i.to_string(),
+            literal: arena.get_string(*i).to_string(),
             modifier: *c,
         }),
         ParsedConstant::Char { semantic, .. } => Ok(Constant::Char(*semantic)),
-        ParsedConstant::String(payload) => Ok(Constant::String(payload.semantic().to_string())),
-        ParsedConstant::Float(f, None) => Ok(Constant::Float(f.to_string())),
+        ParsedConstant::String(payload) => {
+            Ok(Constant::String(payload.semantic(arena).to_string()))
+        }
+        ParsedConstant::Float(f, None) => Ok(Constant::Float(arena.get_string(*f).to_string())),
         ParsedConstant::Float(f, Some(c)) => Err(TypeCoreError::UnknownLiteral {
             loc,
-            literal: f.to_string(),
+            literal: arena.get_string(*f).to_string(),
             modifier: *c,
         }),
     }
@@ -2302,16 +2317,17 @@ pub fn convert_constant(
 fn convert_arg_label_for_ctx(
     lbl: &crate::parser::ast::ArgLabel,
     arena: &ParseArena,
+    ctx: &TypeContext,
 ) -> crate::types::ArgLabel {
     match lbl {
         crate::parser::ast::ArgLabel::Nolabel => crate::types::ArgLabel::Nolabel,
         crate::parser::ast::ArgLabel::Labelled(s) => crate::types::ArgLabel::labelled(
             arena.get_string(s.txt).to_string(),
-            arena.to_location(s.loc),
+            ctx.intern_loc(arena.to_location(s.loc)),
         ),
         crate::parser::ast::ArgLabel::Optional(s) => crate::types::ArgLabel::optional(
             arena.get_string(s.txt).to_string(),
-            arena.to_location(s.loc),
+            ctx.intern_loc(arena.to_location(s.loc)),
         ),
     }
 }
@@ -2850,7 +2866,7 @@ fn transl_type_inner(
     let ctx = tctx.type_ctx;
     let loc = styp.ptyp_loc;
 
-    match &*styp.ptyp_desc {
+    match &styp.ptyp_desc {
         CTD::Ptyp_any => {
             if tctx.fixed_type_variables {
                 return Err(TypeCoreError::UnboundTypeVariable {
@@ -2876,7 +2892,7 @@ fn transl_type_inner(
             // Locally abstract types (type a) are handled by Ptyp_constr,
             // not Ptyp_var. OCaml's typetexp only looks up type variables
             // (used_variables/TyVarEnv), not the type environment, for Ptyp_var.
-            let name_str = name.to_string();
+            let name_str = tctx.arena.get_string(*name).to_string();
             if name_str.starts_with('_') {
                 return Err(TypeCoreError::InvalidVariableName {
                     loc,
@@ -2919,7 +2935,7 @@ fn transl_type_inner(
                 if source_arg.lbl.is_optional() {
                     typ = ctx.new_constr(crate::types::predef::path_option(), vec![typ]);
                 }
-                let label = convert_arg_label_for_ctx(&source_arg.lbl, tctx.arena);
+                let label = convert_arg_label_for_ctx(&source_arg.lbl, tctx.arena, tctx.type_ctx);
                 type_args.push(TypeArg::new(label.clone(), typ));
                 typed_args.push(ArrowArg {
                     attrs: source_arg.attrs,
@@ -2950,7 +2966,7 @@ fn transl_type_inner(
             let mut typed_types = Vec::new();
             let mut type_refs = Vec::new();
 
-            for t in types.iter() {
+            for t in tctx.arena.type_list(*types).iter() {
                 let (ctyp, ty) = transl_type_inner(tctx, env, tctx.arena.get_core_type(*t))?;
                 typed_types.push(ctyp);
                 type_refs.push(ty);
@@ -2969,7 +2985,7 @@ fn transl_type_inner(
         }
 
         CTD::Ptyp_constr(inner) => {
-            let (ref lid, ref args) = **inner;
+            let (ref lid, ref args) = *inner;
             // Type constructor: int, string, list<'a>, etc.
             let longident = tctx.arena.get_longident(lid.txt);
 
@@ -2985,13 +3001,15 @@ fn transl_type_inner(
                 tctx.report_warning(lid.loc, warning);
             }
 
-            let mut parsed_args: Vec<_> = args
+            let mut parsed_args: Vec<_> = tctx
+                .arena
+                .type_list(*args)
                 .iter()
                 .map(|arg| tctx.arena.get_core_type(*arg).clone())
                 .collect();
             // Match OCaml Typetexp: `t<_>` for arity>1 expands `_` to all params.
             if parsed_args.len() == 1
-                && matches!(&*parsed_args[0].ptyp_desc, CTD::Ptyp_any)
+                && matches!(&parsed_args[0].ptyp_desc, CTD::Ptyp_any)
                 && decl.type_arity > 1
             {
                 parsed_args = vec![parsed_args[0].clone(); decl.type_arity as usize];
@@ -3587,10 +3605,8 @@ fn transl_type_inner(
                                 types => {
                                     tctx.arena
                                         .push_shared_core_type(crate::parser::ast::CoreType {
-                                            ptyp_desc: Box::new(
-                                                crate::parser::ast::CoreTypeDesc::Ptyp_tuple(
-                                                    Box::new(types.to_vec()),
-                                                ),
+                                            ptyp_desc: crate::parser::ast::CoreTypeDesc::Ptyp_tuple(
+                                                tctx.arena.push_shared_type_list(types),
                                             ),
                                             ptyp_loc: group.loc,
                                             ptyp_attributes: Attributes::new(),
@@ -3961,7 +3977,7 @@ fn push_synthetic_pat(arena: &ParseArena, pat: ParsedPattern) -> crate::parse_ar
 /// typecore.ml `is_from_parmatch`: a constructor of a counter-example rebuilt
 /// by `Parmatch.Conv`.
 fn is_from_parmatch(arena: &ParseArena, pat: &ParsedPattern) -> bool {
-    match &*pat.ppat_desc {
+    match &pat.ppat_desc {
         crate::parser::ast::PatternDesc::Ppat_construct(lid, _) => {
             match arena.get_longident(lid.txt) {
                 Longident::Lident(name) => arena.get_string(*name).starts_with("#$"),
@@ -3985,10 +4001,13 @@ fn wrap_some(
     push_synthetic_pat(
         arena,
         ParsedPattern {
-            ppat_desc: Box::new(crate::parser::ast::PatternDesc::Ppat_construct(
+            ppat_desc: crate::parser::ast::PatternDesc::Ppat_construct(
                 lid,
-                crate::parser::ast::ctor_args(vec![pat_idx], loc),
-            )),
+                Located {
+                    txt: arena.push_shared_pat_list(&[pat_idx]),
+                    loc,
+                },
+            ),
             ppat_loc: loc,
             ppat_attributes: Attributes::new(),
         },
@@ -4002,24 +4021,22 @@ fn wrap_some(
 fn normalize_constructor_pat_args(
     arena: &ParseArena,
     arity: i32,
-    sargs: &Located<Vec<crate::parse_arena::PatIdx>>,
+    sargs: &Located<crate::parse_arena::PatList>,
 ) -> Vec<crate::parse_arena::PatIdx> {
-    match sargs.txt.as_slice() {
-        [sp] if arity > 1 => match &*arena.get_pat(*sp).ppat_desc {
-            crate::parser::ast::PatternDesc::Ppat_tuple(args) => args.to_vec(),
-            _ => sargs.txt.clone(),
+    match arena.pat_list(sargs.txt) {
+        [sp] if arity > 1 => match &arena.get_pat(*sp).ppat_desc {
+            crate::parser::ast::PatternDesc::Ppat_tuple(args) => arena.pat_list(*args).to_vec(),
+            _ => vec![*sp],
         },
         [_, _, ..] if arity == 1 => vec![push_synthetic_pat(
             arena,
             ParsedPattern {
-                ppat_desc: Box::new(crate::parser::ast::PatternDesc::Ppat_tuple(Box::new(
-                    sargs.txt.clone(),
-                ))),
+                ppat_desc: crate::parser::ast::PatternDesc::Ppat_tuple(sargs.txt),
                 ppat_loc: sargs.loc,
                 ppat_attributes: Attributes::new(),
             },
         )],
-        _ => sargs.txt.clone(),
+        items => items.to_vec(),
     }
 }
 
@@ -4027,21 +4044,19 @@ fn normalize_constructor_pat_args(
 fn normalize_constructor_expr_args(
     arena: &ParseArena,
     arity: i32,
-    sargs: &Located<Vec<crate::parse_arena::ExprIdx>>,
+    sargs: &Located<crate::parse_arena::ExprList>,
 ) -> Vec<crate::parse_arena::ExprIdx> {
-    match sargs.txt.as_slice() {
-        [se] if arity > 1 => match &*arena.get_expr(*se).pexp_desc {
-            crate::parser::ast::ExpressionDesc::Pexp_tuple(args) => args.to_vec(),
-            _ => sargs.txt.clone(),
+    match arena.expr_list(sargs.txt) {
+        [se] if arity > 1 => match &arena.get_expr(*se).pexp_desc {
+            crate::parser::ast::ExpressionDesc::Pexp_tuple(args) => arena.expr_list(*args).to_vec(),
+            _ => vec![*se],
         },
         [_, _, ..] if arity == 1 => vec![arena.push_shared_expr(ParsedExpression {
-            pexp_desc: Box::new(crate::parser::ast::ExpressionDesc::Pexp_tuple(Box::new(
-                sargs.txt.clone(),
-            ))),
+            pexp_desc: crate::parser::ast::ExpressionDesc::Pexp_tuple(sargs.txt),
             pexp_loc: sargs.loc,
             pexp_attributes: Attributes::new(),
         })],
-        _ => sargs.txt.clone(),
+        items => items.to_vec(),
     }
 }
 
@@ -4234,7 +4249,7 @@ fn build_ppat_or_for_variant_spread(
     pat: &ParsedPattern,
     expected_ty: TypeExprRef,
 ) -> TypeCoreResult<Option<(ParsedPattern, TypeExprRef)>> {
-    let crate::parser::ast::PatternDesc::Ppat_variant_spread(lident) = &*pat.ppat_desc else {
+    let crate::parser::ast::PatternDesc::Ppat_variant_spread(lident) = &pat.ppat_desc else {
         return Ok(None);
     };
 
@@ -4264,17 +4279,17 @@ fn build_ppat_or_for_variant_spread(
             _ => vec![push_synthetic_pat(
                 tctx.arena,
                 ParsedPattern {
-                    ppat_desc: Box::new(crate::parser::ast::PatternDesc::Ppat_any),
+                    ppat_desc: crate::parser::ast::PatternDesc::Ppat_any,
                     ppat_loc: LocIdx::none(),
                     ppat_attributes: Attributes::new(),
                 },
             )],
         };
         let parsed = ParsedPattern {
-            ppat_desc: Box::new(crate::parser::ast::PatternDesc::Ppat_construct(
+            ppat_desc: crate::parser::ast::PatternDesc::Ppat_construct(
                 cstr_lid,
-                crate::parser::ast::ctor_args(cstr_args, lident.loc),
-            )),
+                tctx.arena.shared_pat_ctor_args(&cstr_args, lident.loc),
+            ),
             ppat_loc: lident.loc,
             ppat_attributes: vec![pat_from_variant_spread_attr.clone()].into(),
         };
@@ -4290,7 +4305,7 @@ fn build_ppat_or_for_variant_spread(
         push_synthetic_pat(
             tctx.arena,
             ParsedPattern {
-                ppat_desc: Box::new(crate::parser::ast::PatternDesc::Ppat_or(lhs, rhs)),
+                ppat_desc: crate::parser::ast::PatternDesc::Ppat_or(lhs, rhs),
                 ppat_loc: lident.loc,
                 ppat_attributes: vec![pat_from_variant_spread_attr.clone()].into(),
             },
@@ -4315,7 +4330,7 @@ fn maybe_expand_variant_spread_in_pattern(
     expected_ty: TypeExprRef,
 ) -> TypeCoreResult<Option<ParsedPattern>> {
     if !matches!(
-        &*pat.ppat_desc,
+        &pat.ppat_desc,
         crate::parser::ast::PatternDesc::Ppat_variant_spread(_)
     ) {
         return Ok(None);
@@ -4474,7 +4489,7 @@ fn type_pattern_inner(
     let loc = pat.ppat_loc;
     let ctx = tctx.type_ctx;
 
-    match &*pat.ppat_desc {
+    match &pat.ppat_desc {
         PD::Ppat_any => {
             if explode > 0 {
                 let constructor_checkpoint = tctx.generated_pattern_constructors.len();
@@ -4487,7 +4502,7 @@ fn type_pattern_inner(
                         return Err(TypeCoreError::NeedBacktrack);
                     }
                     let generated_is_or = matches!(
-                        &*tctx.arena.get_pat(generated).ppat_desc,
+                        &tctx.arena.get_pat(generated).ppat_desc,
                         crate::parser::ast::PatternDesc::Ppat_or(_, _)
                     );
                     let next_explode = if generated_is_or {
@@ -4554,7 +4569,7 @@ fn type_pattern_inner(
 
         PD::Ppat_constant(cst) => {
             // Constant pattern
-            let constant = convert_constant(cst, loc)?;
+            let constant = convert_constant(cst, loc, tctx.arena)?;
             let ty = type_constant(ctx, env, &constant);
 
             // Unify with expected type
@@ -4574,7 +4589,12 @@ fn type_pattern_inner(
             assert!(pats.len() >= 2, "Tuple must have at least 2 elements");
 
             // Create fresh type variables for each element
-            let elem_types: Vec<TypeExprRef> = pats.iter().map(|_| ctx.new_var(None)).collect();
+            let elem_types: Vec<TypeExprRef> = tctx
+                .arena
+                .pat_list(*pats)
+                .iter()
+                .map(|_| ctx.new_var(None))
+                .collect();
 
             // Create tuple type and unify
             let tuple_ty = ctx.new_tuple(elem_types.clone());
@@ -4582,7 +4602,7 @@ fn type_pattern_inner(
 
             // Type check each element
             let mut typed_pats = Vec::new();
-            for (p, ty) in pats.iter().zip(elem_types.iter()) {
+            for (p, ty) in tctx.arena.pat_list(*pats).iter().zip(elem_types.iter()) {
                 let typed_pat = type_pattern_inner(
                     tctx,
                     env,
@@ -4609,7 +4629,7 @@ fn type_pattern_inner(
             // Alias pattern: P as x
             let inner_pat = tctx.arena.get_pat(*inner_pat_idx);
             let (expanded_inner, override_type_from_variant_spread) =
-                if matches!(&*inner_pat.ppat_desc, PD::Ppat_variant_spread(_)) {
+                if matches!(&inner_pat.ppat_desc, PD::Ppat_variant_spread(_)) {
                     match build_ppat_or_for_variant_spread(tctx, env, inner_pat, expected_ty)? {
                         Some((expanded, spread_ty)) => (Some(expanded), Some(spread_ty)),
                         None => (None, None),
@@ -4826,7 +4846,7 @@ fn type_pattern_inner(
             unify_pattern_types(tctx, loc, array_ty, expected_ty)?;
 
             let mut typed_pats = Vec::new();
-            for p in pats.iter() {
+            for p in tctx.arena.pat_list(*pats).iter() {
                 let typed_pat = type_pattern_inner(
                     tctx,
                     env,
@@ -4926,13 +4946,13 @@ fn type_pattern_inner(
             check_polyvar_name(loc, label)?;
             // typecore.ml Ppat_variant: several arguments form one tuple
             // payload located at the argument list.
-            let sarg = match sargs.txt.as_slice() {
+            let sarg = match tctx.arena.pat_list(sargs.txt) {
                 [] => None,
                 [sarg] => Some(*sarg),
                 args => Some(push_synthetic_pat(
                     tctx.arena,
                     ParsedPattern {
-                        ppat_desc: Box::new(PD::Ppat_tuple(Box::new(args.to_vec()))),
+                        ppat_desc: PD::Ppat_tuple(tctx.arena.push_shared_pat_list(&args.to_vec())),
                         ppat_loc: sargs.loc,
                         ppat_attributes: Attributes::new(),
                     },
@@ -4961,7 +4981,7 @@ fn type_pattern_inner(
                 tctx,
                 env,
                 loc,
-                fields,
+                tctx.arena.pat_field_list(*fields),
                 *closed_flag,
                 record_rest.as_ref(),
                 expected_ty,
@@ -4981,7 +5001,7 @@ fn type_pattern_inner(
             // OCaml typecore.ml:1249-1274: Special case for Ppat_constraint(Ppat_var, Ptyp_poly)
             // Uses instance_poly ~keep_names:true to preserve type variable names.
             if let (PD::Ppat_var(name), crate::parser::ast::CoreTypeDesc::Ptyp_poly(_)) =
-                (&*inner_pat.ppat_desc, &*core_ty.ptyp_desc)
+                (&inner_pat.ppat_desc, &core_ty.ptyp_desc)
             {
                 type_pattern_constraint_poly_var(
                     tctx,
@@ -5569,7 +5589,7 @@ fn type_pattern_construct(
     env: &Env,
     loc: LocIdx,
     lid: &Located<crate::parse_arena::LidentIdx>,
-    sargs: &Located<Vec<crate::parse_arena::PatIdx>>,
+    sargs: &Located<crate::parse_arena::PatList>,
     expected_ty: TypeExprRef,
     mode: PatternMode,
     allow_existentials: bool,
@@ -5792,7 +5812,7 @@ fn type_pattern_construct(
     let sargs: Vec<crate::parse_arena::PatIdx> = match normalized.as_slice() {
         [sp] if arity != 1
             && matches!(
-                &*tctx.arena.get_pat(*sp).ppat_desc,
+                &tctx.arena.get_pat(*sp).ppat_desc,
                 crate::parser::ast::PatternDesc::Ppat_any
             ) =>
         {
@@ -5809,7 +5829,7 @@ fn type_pattern_construct(
     if let [sp] = sargs.as_slice() {
         let sp = tctx.arena.get_pat(*sp);
         if matches!(
-            &*sp.ppat_desc,
+            &sp.ppat_desc,
             crate::parser::ast::PatternDesc::Ppat_constant(_)
         ) && has_warn_on_literal_pattern_attribute(&cstr_desc.cstr_attributes)
         {
@@ -5861,7 +5881,7 @@ fn type_pattern_construct(
     // constrained, directly or under an or-pattern or alias.
     if cstr_desc.cstr_inlined.is_some() {
         fn check_non_escaping(arena: &ParseArena, pat: &ParsedPattern) -> TypeCoreResult<()> {
-            match &*pat.ppat_desc {
+            match &pat.ppat_desc {
                 crate::parser::ast::PatternDesc::Ppat_or(p1, p2) => {
                     check_non_escaping(arena, arena.get_pat(*p1))?;
                     check_non_escaping(arena, arena.get_pat(*p2))
@@ -6886,10 +6906,10 @@ fn type_record_pat_rest(
     let (rest_type_lid, rest_type_args_syntax): (
         Located<LidentIdx>,
         Vec<crate::parse_arena::CoreTypeIdx>,
-    ) = match &*core_type.ptyp_desc {
+    ) = match &core_type.ptyp_desc {
         crate::parser::ast::CoreTypeDesc::Ptyp_constr(inner) => {
-            let (lid, args) = inner.as_ref();
-            (*lid, args.clone())
+            let (lid, args) = inner;
+            (*lid, tctx.arena.type_list(*args).to_vec())
         }
         _ => return rest_err(rest_loc, RecordRestError::InvalidType),
     };
@@ -7350,7 +7370,7 @@ fn type_pattern_interval(
 ) -> TypeCoreResult<Pattern> {
     let ctx = tctx.type_ctx;
     let bound = |c: &crate::parser::ast::Constant| -> TypeCoreResult<Option<(i64, Constant)>> {
-        let c = convert_constant(c, loc)?;
+        let c = convert_constant(c, loc, tctx.arena)?;
         Ok(crate::types::parmatch::int_of_constant(&c).map(|i| (i, c)))
     };
     let (Some(b1), Some(b2)) = (bound(c1)?, bound(c2)?) else {
@@ -7446,14 +7466,14 @@ fn final_subexpression<'e>(
 ) -> &'e ParsedExpression {
     use crate::parser::ast::ExpressionDesc as ED;
     loop {
-        let next = match &*sexp.pexp_desc {
+        let next = match &sexp.pexp_desc {
             ED::Pexp_let(inner) => inner.2,
             ED::Pexp_sequence(_, e) => *e,
             ED::Pexp_try(inner) => inner.0,
             ED::Pexp_braces(braces) => braces.expr,
             ED::Pexp_ifthenelse(inner) => inner.1,
             ED::Pexp_ternary(inner) => inner.1,
-            ED::Pexp_match(inner) => match inner.1.first() {
+            ED::Pexp_match(inner) => match arena.case_list(inner.1).first() {
                 Some(case) => case.pc_rhs,
                 None => return sexp,
             },
@@ -7464,7 +7484,7 @@ fn final_subexpression<'e>(
 }
 
 fn type_clash_context_in_statement(expr: &ParsedExpression) -> Option<TypeClashContext> {
-    match &*expr.pexp_desc {
+    match &expr.pexp_desc {
         crate::parser::ast::ExpressionDesc::Pexp_apply(inner) if !inner.transformed_jsx => {
             Some(TypeClashContext::StatementFunctionCall)
         }
@@ -7703,11 +7723,11 @@ fn type_expect_with_recarg_unscoped<'a>(
     let loc = expr.pexp_loc;
     let ctx = tctx.type_ctx;
     let exp_env_ref = ctx.store_typed_env(env);
-    let context = match &*expr.pexp_desc {
+    let context = match &expr.pexp_desc {
         // Special errors for braced identifiers passed to records.
         ED::Pexp_braces(braces)
             if matches!(
-                &*tctx.arena.get_expr(braces.expr).pexp_desc,
+                &tctx.arena.get_expr(braces.expr).pexp_desc,
                 ED::Pexp_ident(_)
             ) =>
         {
@@ -7720,7 +7740,7 @@ fn type_expect_with_recarg_unscoped<'a>(
     // unify-state snapshot on each type_expect entry.
     tctx.set_unify_env(env);
 
-    match &*expr.pexp_desc {
+    match &expr.pexp_desc {
         ED::Pexp_braces(braces) => {
             // typecore.ml: type the inner expression, then prepend the
             // braces node's attributes.
@@ -7787,7 +7807,7 @@ fn type_expect_with_recarg_unscoped<'a>(
             };
             // `Env.lookup_value` marks the declaration used (env.ml:1169-1172).
             let used_name = tctx.arena.get_string(longident.last_idx());
-            tctx.mark_value_used(env, used_name, desc.val_loc);
+            tctx.mark_value_used(env, used_name, tctx.resolve_loc(desc.val_loc));
             // typetexp.ml:117-123 via typecore.ml:2381-2388.
             let deprecated_context = if std::mem::take(&mut tctx.deprecated_function_call) {
                 crate::types::context::DeprecatedContext::FunctionCall
@@ -7819,7 +7839,7 @@ fn type_expect_with_recarg_unscoped<'a>(
 
         ED::Pexp_constant(cst) => {
             // Constant expression
-            let constant = convert_constant(cst, loc)?;
+            let constant = convert_constant(cst, loc, tctx.arena)?;
             let ty = type_constant(ctx, env, &constant);
 
             // OCaml: rue { ... exp_type = type_constant cst; ... }
@@ -7871,7 +7891,12 @@ fn type_expect_with_recarg_unscoped<'a>(
             assert!(exprs.len() >= 2, "Tuple must have at least 2 elements");
 
             // Create fresh type variables for each element
-            let elem_types: Vec<TypeExprRef> = exprs.iter().map(|_| ctx.new_var(None)).collect();
+            let elem_types: Vec<TypeExprRef> = tctx
+                .arena
+                .expr_list(*exprs)
+                .iter()
+                .map(|_| ctx.new_var(None))
+                .collect();
 
             // Create tuple type and unify (instance generic expected_ty to avoid corruption)
             let tuple_ty = ctx.new_tuple(elem_types.clone());
@@ -7881,7 +7906,7 @@ fn type_expect_with_recarg_unscoped<'a>(
 
             // Type check each element
             let mut typed_exprs = Vec::new();
-            for (e, ty) in exprs.iter().zip(elem_types.iter()) {
+            for (e, ty) in tctx.arena.expr_list(*exprs).iter().zip(elem_types.iter()) {
                 let typed_expr = type_expect(tctx, env, tctx.arena.get_expr(*e), *ty, None)?;
                 typed_exprs.push(typed_expr);
             }
@@ -7899,17 +7924,23 @@ fn type_expect_with_recarg_unscoped<'a>(
         }
 
         ED::Pexp_let(inner) => {
-            let (ref rec_flag, ref bindings, ref body_idx) = **inner;
+            let (ref rec_flag, ref bindings, ref body_idx) = *inner;
             // Let expression
             // OCaml does NOT reset typetexp.type_variables for local Pexp_let.
             // reset_type_variables happens at top-level expression/binding entry.
-            let let_check = if is_fake_optional_arg_let(tctx.arena, bindings) {
+            let let_check = if is_fake_optional_arg_let(tctx.arena, tctx.arena.vb_list(*bindings)) {
                 LetCheck::FakeOptional
             } else {
                 LetCheck::Local
             };
-            let (typed_bindings, new_env, unpacks) =
-                type_let_bindings(tctx, env, *rec_flag, bindings, true, let_check)?;
+            let (typed_bindings, new_env, unpacks) = type_let_bindings(
+                tctx,
+                env,
+                *rec_flag,
+                tctx.arena.vb_list(*bindings),
+                true,
+                let_check,
+            )?;
 
             // Type check body in extended environment
             let body = tctx.arena.get_expr(*body_idx);
@@ -7958,7 +7989,7 @@ fn type_expect_with_recarg_unscoped<'a>(
 
         ED::Pexp_ifthenelse(_) | ED::Pexp_ternary(_) => {
             // typecore.ml `(Pexp_ifthenelse _ | Pexp_ternary _) as conditional`.
-            let (cond_idx, then_idx, else_idx, return_context) = match &*expr.pexp_desc {
+            let (cond_idx, then_idx, else_idx, return_context) = match &expr.pexp_desc {
                 ED::Pexp_ifthenelse(inner) => {
                     (inner.0, inner.1, inner.2, Some(TypeClashContext::IfReturn))
                 }
@@ -8116,7 +8147,7 @@ fn type_expect_with_recarg_unscoped<'a>(
             unify_expression_types(tctx, loc, array_ty, expected_ty, None)?;
 
             let mut typed_exprs = Vec::new();
-            for e in exprs.iter() {
+            for e in tctx.arena.expr_list(*exprs).iter() {
                 let typed_e = type_expect(
                     tctx,
                     env,
@@ -8224,7 +8255,7 @@ fn type_expect_with_recarg_unscoped<'a>(
             ctx.begin_def();
             let stag = tctx.arena.get_expr(template.tag);
             let tag_var = ctx.new_var(None);
-            tctx.deprecated_function_call = matches!(&*stag.pexp_desc, ED::Pexp_ident(_));
+            tctx.deprecated_function_call = matches!(&stag.pexp_desc, ED::Pexp_ident(_));
             let tag = type_expect(tctx, env, stag, tag_var, None);
             tctx.deprecated_function_call = false;
             let tag = tag?;
@@ -8282,10 +8313,11 @@ fn type_expect_with_recarg_unscoped<'a>(
         ED::Pexp_apply(inner) => {
             let PexpApply {
                 ref funct,
-                ref args,
                 ref partial,
                 ref transformed_jsx,
-            } = **inner;
+                ..
+            } = *inner;
+            let args = tctx.arena.apply_args(inner.args);
             // Function application
             let funct_expr = tctx.arena.get_expr(*funct);
 
@@ -8308,7 +8340,7 @@ fn type_expect_with_recarg_unscoped<'a>(
         }
 
         ED::Pexp_match(inner) => {
-            let (ref scrutinee_idx, ref cases) = **inner;
+            let (ref scrutinee_idx, ref cases) = *inner;
             let scrutinee = tctx.arena.get_expr(*scrutinee_idx);
 
             // Normal match expression
@@ -8317,14 +8349,14 @@ fn type_expect_with_recarg_unscoped<'a>(
                 env,
                 loc,
                 scrutinee,
-                cases,
+                tctx.arena.case_list(*cases),
                 expected_ty,
                 &expr.pexp_attributes,
             )
         }
 
         ED::Pexp_try(inner) => {
-            let (ref body_idx, ref handlers) = **inner;
+            let (ref body_idx, ref handlers) = *inner;
             // Try expression
             let body = tctx.arena.get_expr(*body_idx);
             type_try(
@@ -8332,7 +8364,7 @@ fn type_expect_with_recarg_unscoped<'a>(
                 env,
                 loc,
                 body,
-                handlers,
+                tctx.arena.case_list(*handlers),
                 expected_ty,
                 &expr.pexp_attributes,
             )
@@ -8455,11 +8487,11 @@ fn type_expect_with_recarg_unscoped<'a>(
             check_polyvar_name(loc, label)?;
             // typecore.ml Pexp_variant: several arguments form one tuple
             // payload located at the argument list.
-            let sarg = match sargs.txt.as_slice() {
+            let sarg = match tctx.arena.expr_list(sargs.txt) {
                 [] => None,
                 [sarg] => Some(*sarg),
                 args => Some(tctx.arena.push_shared_expr(ParsedExpression {
-                    pexp_desc: Box::new(ED::Pexp_tuple(Box::new(args.to_vec()))),
+                    pexp_desc: ED::Pexp_tuple(tctx.arena.push_shared_expr_list(&args.to_vec())),
                     pexp_loc: sargs.loc,
                     pexp_attributes: Attributes::new(),
                 })),
@@ -8478,7 +8510,7 @@ fn type_expect_with_recarg_unscoped<'a>(
         }
 
         ED::Pexp_record(inner) => {
-            let (ref fields, ref base) = **inner;
+            let (ref fields, ref base) = *inner;
             // Record expression
             // OCaml quirk: in `Pexp_record (lid_sexp_list, Some sexp)`, the pattern
             // variable `sexp` shadows the outer function parameter, so
@@ -8492,7 +8524,7 @@ fn type_expect_with_recarg_unscoped<'a>(
                 tctx,
                 env,
                 loc,
-                fields,
+                tctx.arena.expr_field_list(*fields),
                 (*base).map(|idx| tctx.arena.get_expr(idx)),
                 expected_ty,
                 attrs,
@@ -9283,11 +9315,11 @@ fn translate_unified_ops(
 
             let typed_args = vec![
                 ApplyArg {
-                    label: convert_arg_label_for_ctx(&args[0].0, tctx.arena),
+                    label: convert_arg_label_for_ctx(&args[0].0, tctx.arena, tctx.type_ctx),
                     expression: Some(lhs),
                 },
                 ApplyArg {
-                    label: convert_arg_label_for_ctx(&args[1].0, tctx.arena),
+                    label: convert_arg_label_for_ctx(&args[1].0, tctx.arena, tctx.type_ctx),
                     expression: Some(rhs),
                 },
             ];
@@ -9335,7 +9367,7 @@ fn translate_unified_ops(
             }
 
             let typed_args = vec![ApplyArg {
-                label: convert_arg_label_for_ctx(&args[0].0, tctx.arena),
+                label: convert_arg_label_for_ctx(&args[0].0, tctx.arena, tctx.type_ctx),
                 expression: Some(arg),
             }];
 
@@ -9604,11 +9636,11 @@ fn function_argument_type_clash_context(typed_funct_value_path: Option<&Path>) -
     TypeClashContext::FunctionCall
 }
 
-fn math_operator_constant_text(expr: &ParsedExpression) -> Option<String> {
-    match &*expr.pexp_desc {
-        crate::parser::ast::ExpressionDesc::Pexp_constant(c) => match &**c {
+fn math_operator_constant_text(expr: &ParsedExpression, arena: &ParseArena) -> Option<String> {
+    match &expr.pexp_desc {
+        crate::parser::ast::ExpressionDesc::Pexp_constant(c) => match &*c {
             ParsedConstant::Integer(txt, _) | ParsedConstant::Float(txt, _) => {
-                Some(txt.as_ref().to_string())
+                Some(arena.get_string(*txt).to_string())
             }
             _ => None,
         },
@@ -9630,7 +9662,7 @@ fn type_clash_context_for_function_argument(
         } => TypeClashContext::MathOperator {
             for_float: *for_float,
             operator: operator.clone(),
-            is_constant: math_operator_constant_text(arg_expr),
+            is_constant: math_operator_constant_text(arg_expr, arena),
         },
         TypeClashContext::FunctionCall => TypeClashContext::FunctionArgument {
             optional: false,
@@ -9681,7 +9713,7 @@ fn type_application(
     // special infix applications before rewriting them. Keep that boundary
     // ahead of function lookup so a malformed pipe reports the label itself,
     // rather than an unbound synthetic `->` value.
-    if let crate::parser::ast::ExpressionDesc::Pexp_ident(lid) = &*funct.pexp_desc
+    if let crate::parser::ast::ExpressionDesc::Pexp_ident(lid) = &funct.pexp_desc
         && tctx.arena.is_lident(lid.txt, "->")
         && let Some((_, arg_idx)) = args
             .iter()
@@ -9750,6 +9782,7 @@ fn type_application(
         param_label: &crate::types::ArgLabel,
         call_label: &ArgLabel,
         arena: &ParseArena,
+        ctx: &TypeContext,
     ) -> crate::types::ArgLabel {
         match param_label {
             crate::types::ArgLabel::Nolabel => crate::types::ArgLabel::Nolabel,
@@ -9758,7 +9791,7 @@ fn type_application(
                 ArgLabel::Labelled(loc) | ArgLabel::Optional(loc) => {
                     crate::types::ArgLabel::labelled(
                         arena.get_string(loc.txt).to_string(),
-                        arena.to_location(loc.loc),
+                        ctx.intern_loc(arena.to_location(loc.loc)),
                     )
                 }
             },
@@ -9767,7 +9800,7 @@ fn type_application(
                 ArgLabel::Labelled(loc) | ArgLabel::Optional(loc) => {
                     crate::types::ArgLabel::optional(
                         arena.get_string(loc.txt).to_string(),
-                        arena.to_location(loc.loc),
+                        ctx.intern_loc(arena.to_location(loc.loc)),
                     )
                 }
             },
@@ -9784,7 +9817,7 @@ fn type_application(
     ctx.begin_def();
     let funct_ty = ctx.new_var(None);
     tctx.deprecated_function_call = matches!(
-        &*funct.pexp_desc,
+        &funct.pexp_desc,
         crate::parser::ast::ExpressionDesc::Pexp_ident(_)
     );
     let typed_funct = type_expect(tctx, env, funct, funct_ty, None);
@@ -9855,7 +9888,7 @@ fn type_application(
             .iter()
             .map(|(label, _)| {
                 crate::types::TypeArg::new(
-                    convert_arg_label_for_ctx(label, tctx.arena),
+                    convert_arg_label_for_ctx(label, tctx.arena, tctx.type_ctx),
                     ctx.new_var(None),
                 )
             })
@@ -9992,7 +10025,12 @@ fn type_application(
                 )
             };
             argument_thunks.push(ApplyArgThunk::Provided {
-                label: apply_arg_label_for_param(param.label(), call_label, tctx.arena),
+                label: apply_arg_label_for_param(
+                    param.label(),
+                    call_label,
+                    tctx.arena,
+                    tctx.type_ctx,
+                ),
                 expr: arg_expr,
                 expected_ty: expected_arg_ty,
                 unify_ty: unify_arg_ty,
@@ -10032,7 +10070,7 @@ fn type_application(
         let unit_sentinel = remaining_args.len() == 1
             && matches!(args[remaining_args[0]].0, ArgLabel::Nolabel)
             && matches!(
-                &*tctx.arena.get_expr(args[remaining_args[0]].1).pexp_desc,
+                &tctx.arena.get_expr(args[remaining_args[0]].1).pexp_desc,
                 crate::parser::ast::ExpressionDesc::Pexp_construct(lid, args)
                     if tctx.arena.is_lident(lid.txt, "()") && args.txt.is_empty()
             );
@@ -11001,7 +11039,7 @@ fn add_pattern_variable_value(
     let desc = ValueDescription {
         val_type: pv.ty,
         val_kind: crate::types::ValueKind::ValReg,
-        val_loc: pv.loc,
+        val_loc: tctx.intern_loc(pv.loc),
         val_attributes: vec![],
         val_path: None,
     };
@@ -11317,7 +11355,7 @@ fn type_match(
     let mut exn_caselist: Vec<crate::parser::ast::Case> = Vec::new();
     for case in cases {
         let lhs_pat = tctx.arena.get_pat(case.pc_lhs);
-        if let crate::parser::ast::PatternDesc::Ppat_exception(inner_pat) = &*lhs_pat.ppat_desc {
+        if let crate::parser::ast::PatternDesc::Ppat_exception(inner_pat) = &lhs_pat.ppat_desc {
             // Unwrap the Ppat_exception: replace pc_lhs with the inner pattern
             let unwrapped_case = crate::parser::ast::Case {
                 pc_bar: case.pc_bar,
@@ -11732,7 +11770,7 @@ fn pattern_contains_generalized_constructor(
     env: &Env,
     pat: &ParsedPattern,
 ) -> bool {
-    match &*pat.ppat_desc {
+    match &pat.ppat_desc {
         crate::parser::ast::PatternDesc::Ppat_construct(lid, arg) => {
             let lid_txt = tctx.resolve_lid(lid.txt).clone();
             let lid_name = tctx.longident_last_name(&lid_txt);
@@ -11772,7 +11810,7 @@ fn pattern_contains_generalized_constructor(
                     .any(|desc| desc.cstr_generalized)
             };
             is_generalized
-                || arg.txt.iter().any(|inner| {
+                || tctx.arena.pat_list(arg.txt).iter().any(|inner| {
                     pattern_contains_generalized_constructor(tctx, env, tctx.arena.get_pat(*inner))
                 })
         }
@@ -11780,12 +11818,16 @@ fn pattern_contains_generalized_constructor(
             pattern_contains_generalized_constructor(tctx, env, tctx.arena.get_pat(*inner))
         }
         crate::parser::ast::PatternDesc::Ppat_tuple(items)
-        | crate::parser::ast::PatternDesc::Ppat_array(items) => items.iter().any(|item| {
-            pattern_contains_generalized_constructor(tctx, env, tctx.arena.get_pat(*item))
-        }),
-        crate::parser::ast::PatternDesc::Ppat_record(inner) => inner.0.iter().any(|field| {
-            pattern_contains_generalized_constructor(tctx, env, tctx.arena.get_pat(field.pat))
-        }),
+        | crate::parser::ast::PatternDesc::Ppat_array(items) => {
+            tctx.arena.pat_list(*items).iter().any(|item| {
+                pattern_contains_generalized_constructor(tctx, env, tctx.arena.get_pat(*item))
+            })
+        }
+        crate::parser::ast::PatternDesc::Ppat_record(inner) => {
+            tctx.arena.pat_field_list(inner.0).iter().any(|field| {
+                pattern_contains_generalized_constructor(tctx, env, tctx.arena.get_pat(field.pat))
+            })
+        }
         crate::parser::ast::PatternDesc::Ppat_dict(entries) => entries.iter().any(|entry| {
             pattern_contains_generalized_constructor(
                 tctx,
@@ -11815,16 +11857,16 @@ fn collect_lident_idents_in_module_expr(
     use crate::parser::ast::ModuleExprDesc as MED;
     use crate::parser::ast::StructureItemDesc as SID;
 
-    match &*mod_expr.pmod_desc {
+    match &mod_expr.pmod_desc {
         MED::Pmod_ident(_) | MED::Pmod_extension(_) => {}
         MED::Pmod_structure(items) => {
             for item in items.iter() {
-                match &*item.pstr_desc {
+                match &item.pstr_desc {
                     SID::Pstr_eval(inner) => {
                         collect_lident_idents_in_expression(arena, arena.get_expr(inner.0), out);
                     }
                     SID::Pstr_value(inner) => {
-                        for binding in inner.1.iter() {
+                        for binding in arena.vb_list(inner.1).iter() {
                             collect_lident_idents_in_expression(
                                 arena,
                                 arena.get_expr(binding.pvb_expr),
@@ -11892,7 +11934,7 @@ fn collect_lident_idents_in_expression(
     use crate::parser::ast::JsxElement;
     use crate::parser::ast::JsxProp;
 
-    match &*expr.pexp_desc {
+    match &expr.pexp_desc {
         ED::Pexp_ident(lid) => {
             if let Longident::Lident(id) = arena.get_longident(lid.txt) {
                 out.push(arena.get_string(*id).to_string());
@@ -11904,7 +11946,7 @@ fn collect_lident_idents_in_expression(
         | ED::Pexp_break
         | ED::Pexp_continue => {}
         ED::Pexp_let(inner) => {
-            for binding in inner.1.iter() {
+            for binding in arena.vb_list(inner.1).iter() {
                 collect_lident_idents_in_expression(arena, arena.get_expr(binding.pvb_expr), out);
             }
             collect_lident_idents_in_expression(arena, arena.get_expr(inner.2), out);
@@ -11917,7 +11959,7 @@ fn collect_lident_idents_in_expression(
         }
         ED::Pexp_apply(inner) => {
             collect_lident_idents_in_expression(arena, arena.get_expr(inner.funct), out);
-            for (_label, arg) in &inner.args {
+            for (_label, arg) in arena.apply_args(inner.args) {
                 collect_lident_idents_in_expression(arena, arena.get_expr(*arg), out);
             }
         }
@@ -11934,7 +11976,7 @@ fn collect_lident_idents_in_expression(
         }
         ED::Pexp_match(inner) | ED::Pexp_try(inner) => {
             collect_lident_idents_in_expression(arena, arena.get_expr(inner.0), out);
-            for case in inner.1.iter() {
+            for case in arena.case_list(inner.1).iter() {
                 if let Some(guard) = case.pc_guard {
                     collect_lident_idents_in_expression(arena, arena.get_expr(guard), out);
                 }
@@ -11942,7 +11984,7 @@ fn collect_lident_idents_in_expression(
             }
         }
         ED::Pexp_tuple(items) | ED::Pexp_array(items) => {
-            for item in items.iter() {
+            for item in arena.expr_list(*items).iter() {
                 collect_lident_idents_in_expression(arena, arena.get_expr(*item), out);
             }
         }
@@ -11957,17 +11999,17 @@ fn collect_lident_idents_in_expression(
             }
         }
         ED::Pexp_construct(_, args) => {
-            for arg in args.txt.iter() {
+            for arg in arena.expr_list(args.txt).iter() {
                 collect_lident_idents_in_expression(arena, arena.get_expr(*arg), out);
             }
         }
         ED::Pexp_variant(inner) => {
-            for arg in inner.1.txt.iter() {
+            for arg in arena.expr_list(inner.1.txt).iter() {
                 collect_lident_idents_in_expression(arena, arena.get_expr(*arg), out);
             }
         }
         ED::Pexp_record(inner) => {
-            for field in inner.0.iter() {
+            for field in arena.expr_field_list(inner.0).iter() {
                 collect_lident_idents_in_expression(arena, arena.get_expr(field.expr), out);
             }
             if let Some(base) = inner.1 {
@@ -12131,7 +12173,7 @@ fn duplicate_ident_types_for_gadt_cases(
 }
 
 fn is_simple_variable_pattern(arena: &ParseArena, pat: &ParsedPattern) -> bool {
-    match &*pat.ppat_desc {
+    match &pat.ppat_desc {
         crate::parser::ast::PatternDesc::Ppat_any
         | crate::parser::ast::PatternDesc::Ppat_var(_) => true,
         crate::parser::ast::PatternDesc::Ppat_alias(inner, _) => {
@@ -12142,25 +12184,29 @@ fn is_simple_variable_pattern(arena: &ParseArena, pat: &ParsedPattern) -> bool {
 }
 
 fn parsed_pattern_contains_polymorphic_variant(arena: &ParseArena, pat: &ParsedPattern) -> bool {
-    match &*pat.ppat_desc {
+    match &pat.ppat_desc {
         crate::parser::ast::PatternDesc::Ppat_variant(_)
         | crate::parser::ast::PatternDesc::Ppat_type(_) => true,
         crate::parser::ast::PatternDesc::Ppat_array(pats)
-        | crate::parser::ast::PatternDesc::Ppat_tuple(pats) => pats.iter().any(|pat_idx| {
-            parsed_pattern_contains_polymorphic_variant(arena, arena.get_pat(*pat_idx))
-        }),
+        | crate::parser::ast::PatternDesc::Ppat_tuple(pats) => {
+            arena.pat_list(*pats).iter().any(|pat_idx| {
+                parsed_pattern_contains_polymorphic_variant(arena, arena.get_pat(*pat_idx))
+            })
+        }
         crate::parser::ast::PatternDesc::Ppat_or(p1, p2) => {
             parsed_pattern_contains_polymorphic_variant(arena, arena.get_pat(*p1))
                 || parsed_pattern_contains_polymorphic_variant(arena, arena.get_pat(*p2))
         }
         crate::parser::ast::PatternDesc::Ppat_construct(_, args) => {
-            args.txt.iter().any(|pat_idx| {
+            arena.pat_list(args.txt).iter().any(|pat_idx| {
                 parsed_pattern_contains_polymorphic_variant(arena, arena.get_pat(*pat_idx))
             })
         }
-        crate::parser::ast::PatternDesc::Ppat_record(inner) => inner.0.iter().any(|field| {
-            parsed_pattern_contains_polymorphic_variant(arena, arena.get_pat(field.pat))
-        }),
+        crate::parser::ast::PatternDesc::Ppat_record(inner) => {
+            arena.pat_field_list(inner.0).iter().any(|field| {
+                parsed_pattern_contains_polymorphic_variant(arena, arena.get_pat(field.pat))
+            })
+        }
         crate::parser::ast::PatternDesc::Ppat_dict(entries) => entries.iter().any(|entry| {
             parsed_pattern_contains_polymorphic_variant(arena, arena.get_pat(entry.pdp_pattern))
         }),
@@ -12523,56 +12569,59 @@ fn desugar_nary_function_defaults(
             let sth_lid = arena.push_longident(Longident::Lident(sth_name));
             let matched_pat = arena.push_pat(ParsedPattern {
                 // typecore.ml:3558 `Pat.var ~loc:default_loc (mknoloc "*sth*")`.
-                ppat_desc: Box::new(PD::Ppat_var(Located {
+                ppat_desc: PD::Ppat_var(Located {
                     txt: sth_name,
                     loc: noloc,
-                })),
+                }),
                 ppat_loc: default_loc,
                 ppat_attributes: Attributes::new(),
             });
             let some_pat = arena.push_pat(ParsedPattern {
-                ppat_desc: Box::new(PD::Ppat_construct(
+                ppat_desc: PD::Ppat_construct(
                     Located {
                         txt: arena.predef_some_lid(),
                         loc: noloc,
                     },
-                    crate::parser::ast::ctor_args(vec![matched_pat], default_loc),
-                )),
+                    arena.shared_pat_ctor_args(&[matched_pat], default_loc),
+                ),
                 ppat_loc: default_loc,
                 ppat_attributes: Attributes::new(),
             });
             let none_pat = arena.push_pat(ParsedPattern {
-                ppat_desc: Box::new(PD::Ppat_construct(
+                ppat_desc: PD::Ppat_construct(
                     Located {
                         txt: arena.predef_none_lid(),
                         loc: noloc,
                     },
-                    crate::parser::ast::ctor_args(Vec::new(), default_loc),
-                )),
+                    crate::parse_arena::Located::new(
+                        crate::parse_arena::PatList::EMPTY,
+                        default_loc,
+                    ),
+                ),
                 ppat_loc: default_loc,
                 ppat_attributes: Attributes::new(),
             });
             let some_rhs = arena.push_expr(ParsedExpression {
-                pexp_desc: Box::new(ED::Pexp_ident(Located {
+                pexp_desc: ED::Pexp_ident(Located {
                     txt: sth_lid,
                     loc: noloc,
-                })),
+                }),
                 pexp_loc: default_loc,
                 pexp_attributes: Attributes::new(),
             });
             let scrutinee = arena.push_expr(ParsedExpression {
-                pexp_desc: Box::new(ED::Pexp_ident(Located {
+                pexp_desc: ED::Pexp_ident(Located {
                     txt: opt_lid,
                     loc: noloc,
-                })),
+                }),
                 pexp_loc: loc,
                 pexp_attributes: Attributes::new(),
             });
             let optional_default_attr = arena.intern_string("#optional_arg_default");
             let match_expr = arena.push_expr(ParsedExpression {
-                pexp_desc: Box::new(ED::Pexp_match(Box::new((
+                pexp_desc: ED::Pexp_match((
                     scrutinee,
-                    vec![
+                    arena.push_shared_case_list(&[
                         crate::parser::ast::Case {
                             pc_bar: None,
                             pc_lhs: some_pat,
@@ -12585,8 +12634,8 @@ fn desugar_nary_function_defaults(
                             pc_guard: None,
                             pc_rhs: default_idx,
                         },
-                    ],
-                )))),
+                    ]),
+                )),
                 pexp_loc: sloc,
                 pexp_attributes: vec![(
                     Located::mknoloc(optional_default_attr),
@@ -12600,10 +12649,10 @@ fn desugar_nary_function_defaults(
                 p_default: None,
                 p_pat: arena.push_pat(ParsedPattern {
                     // typecore.ml:3582 `Pat.var ~loc:sloc (mknoloc opt_name)`.
-                    ppat_desc: Box::new(PD::Ppat_var(Located {
+                    ppat_desc: PD::Ppat_var(Located {
                         txt: opt_name,
                         loc: noloc,
-                    })),
+                    }),
                     ppat_loc: sloc,
                     ppat_attributes: Attributes::new(),
                 }),
@@ -12724,7 +12773,7 @@ fn type_function_nary_with_newtypes(
                         type_manifest: None,
                         type_variance: vec![],
                         type_newtype_level: Some((level, level)),
-                        type_loc: convert_loc(loc, tctx.arena),
+                        type_loc: tctx.intern_loc(convert_loc(loc, tctx.arena)),
                         type_attributes: vec![],
                         type_immediate: false,
                         type_representation: crate::types::decl::TypeRepresentation::Boxed,
@@ -12841,7 +12890,7 @@ fn type_function_nary(
     let ctx = tctx.type_ctx;
     let labels = params
         .iter()
-        .map(|param| convert_arg_label_for_ctx(&param.p_lbl, tctx.arena))
+        .map(|param| convert_arg_label_for_ctx(&param.p_lbl, tctx.arena, tctx.type_ctx))
         .collect::<Vec<_>>();
 
     // compiler/ml/typecore.ml:3594-3613 checks labels against an existing
@@ -13185,7 +13234,7 @@ fn type_for(
 
     // OCaml only accepts `_` or a variable for `for` loop indices.
     if !matches!(
-        &*pat.ppat_desc,
+        &pat.ppat_desc,
         crate::parser::ast::PatternDesc::Ppat_any | crate::parser::ast::PatternDesc::Ppat_var(_)
     ) {
         return Err(TypeCoreError::InvalidForLoopIndex { loc: pat.ppat_loc });
@@ -13205,7 +13254,7 @@ fn type_for(
     )?;
 
     // The loop variable
-    let loop_var_id = match &*pat.ppat_desc {
+    let loop_var_id = match &pat.ppat_desc {
         crate::parser::ast::PatternDesc::Ppat_any => {
             if !state.pattern_variables.is_empty() {
                 return Err(TypeCoreError::InvalidForLoopIndex { loc: pat.ppat_loc });
@@ -13236,7 +13285,7 @@ fn type_for(
             val_kind: crate::types::ValueKind::ValReg,
             // Match OCaml `type_for`: for-index value descriptions use the
             // enclosing `for` expression location.
-            val_loc,
+            val_loc: tctx.intern_loc(val_loc),
             val_attributes: vec![],
             val_path: None,
         };
@@ -13299,7 +13348,7 @@ fn type_for_of(
 
     // OCaml only accepts `_` or a variable for the for-of binding.
     if !matches!(
-        &*pat.ppat_desc,
+        &pat.ppat_desc,
         crate::parser::ast::PatternDesc::Ppat_any | crate::parser::ast::PatternDesc::Ppat_var(_)
     ) {
         return Err(TypeCoreError::InvalidForOfPattern { loc: pat.ppat_loc });
@@ -13368,7 +13417,7 @@ fn type_for_of(
     // Bind the loop variable (if any) into the body environment.
     let mut state = PatternState::new();
     let _typed_pat = type_pattern(tctx, env, pat, ty_elem, PatternMode::Normal, &mut state)?;
-    let loop_var_id = match &*pat.ppat_desc {
+    let loop_var_id = match &pat.ppat_desc {
         crate::parser::ast::PatternDesc::Ppat_any => {
             if !state.pattern_variables.is_empty() {
                 return Err(TypeCoreError::InvalidForOfPattern { loc: pat.ppat_loc });
@@ -13399,7 +13448,7 @@ fn type_for_of(
         let desc = ValueDescription {
             val_type: pv.ty,
             val_kind: crate::types::ValueKind::ValReg,
-            val_loc,
+            val_loc: tctx.intern_loc(val_loc),
             val_attributes: vec![],
             val_path: None,
         };
@@ -13454,7 +13503,7 @@ fn type_construct(
     env: &Env,
     loc: LocIdx,
     lid: &Located<LidentIdx>,
-    sargs: &Located<Vec<crate::parse_arena::ExprIdx>>,
+    sargs: &Located<crate::parse_arena::ExprList>,
     expected_ty: TypeExprRef,
     attributes: &[crate::parser::ast::Attribute],
 ) -> TypeCoreResult<Expression> {
@@ -13695,14 +13744,14 @@ fn type_construct(
     let recarg = if cstr_desc.cstr_inlined.is_none() {
         RecArg::Rejected
     } else {
-        let inline_record_arg_shape = matches!(sargs.as_slice(), [arg_idx] if match &*tctx.arena.get_expr(*arg_idx).pexp_desc {
+        let inline_record_arg_shape = matches!(sargs.as_slice(), [arg_idx] if match &tctx.arena.get_expr(*arg_idx).pexp_desc {
             crate::parser::ast::ExpressionDesc::Pexp_ident(_) => true,
             crate::parser::ast::ExpressionDesc::Pexp_record(inner) => {
-                let (_, base) = &**inner;
+                let (_, base) = &*inner;
                 match base {
                     None => true,
                     Some(base_idx) => matches!(
-                        &*tctx.arena.get_expr(*base_idx).pexp_desc,
+                        &tctx.arena.get_expr(*base_idx).pexp_desc,
                         crate::parser::ast::ExpressionDesc::Pexp_ident(_)
                     ),
                 }
@@ -15866,7 +15915,7 @@ fn make_some_constructor(ctx: &TypeContext) -> crate::types::ConstructorDescript
         }),
         cstr_generalized: false,
         cstr_private: crate::types::PrivateFlag::Public,
-        cstr_loc: crate::location::Location::none(),
+        cstr_loc: crate::types::DeclLoc::none(),
         cstr_attributes: vec![crate::types::decl::internal_optional_attr()],
         cstr_inlined: None,
     }
@@ -15887,7 +15936,7 @@ fn make_none_constructor(ctx: &TypeContext) -> crate::types::ConstructorDescript
         }),
         cstr_generalized: false,
         cstr_private: crate::types::PrivateFlag::Public,
-        cstr_loc: crate::location::Location::none(),
+        cstr_loc: crate::types::DeclLoc::none(),
         cstr_attributes: vec![crate::types::decl::internal_optional_attr()],
         cstr_inlined: None,
     }
@@ -16935,7 +16984,7 @@ fn type_newtype(
                 type_manifest: None,
                 type_variance: vec![],
                 type_newtype_level: Some((level, level)),
-                type_loc: convert_loc(loc, tctx.arena),
+                type_loc: tctx.intern_loc(convert_loc(loc, tctx.arena)),
                 type_attributes: vec![],
                 type_immediate: false,
                 type_representation: crate::types::decl::TypeRepresentation::Boxed,
@@ -17356,131 +17405,133 @@ fn type_letexception(
     // Match OCaml's transl_exception: begin_def before creating arg types,
     // end_def + generalize after, so instance_constructor creates fresh copies.
     ctx.begin_def();
-    let (typed_args, typed_ret, ext_args, cstr_args, cstr_inlined, ext_ret_ty) =
-        match &ext_constr.pext_kind {
-            crate::parser::ast::ExtensionConstructorKind::Pext_decl(args, ret) => {
-                let mut arg_ty_refs = Vec::new();
-                let (typed_args, ext_args, cstr_args, cstr_inlined) = match args {
-                    crate::parser::ast::ConstructorArguments::Pcstr_tuple(types) => {
-                        let mut typed = Vec::new();
-                        for ty in types {
-                            let (typed_ct, ty_ref) =
-                                transl_type(tctx, env, arena.get_core_type(*ty))?;
-                            arg_ty_refs.push(ty_ref);
-                            typed.push(typed_ct);
-                        }
-                        (
-                            crate::types::typedtree::ConstructorArgument::Cstr_tuple(typed),
-                            crate::types::ConstructorArguments::CstrTuple(arg_ty_refs.clone()),
-                            arg_ty_refs.clone(),
-                            None,
-                        )
+    let (typed_args, typed_ret, ext_args, cstr_args, cstr_inlined, ext_ret_ty) = match &ext_constr
+        .pext_kind
+    {
+        crate::parser::ast::ExtensionConstructorKind::Pext_decl(args, ret) => {
+            let mut arg_ty_refs = Vec::new();
+            let (typed_args, ext_args, cstr_args, cstr_inlined) = match args {
+                crate::parser::ast::ConstructorArguments::Pcstr_tuple(types) => {
+                    let mut typed = Vec::new();
+                    for ty in types {
+                        let (typed_ct, ty_ref) = transl_type(tctx, env, arena.get_core_type(*ty))?;
+                        arg_ty_refs.push(ty_ref);
+                        typed.push(typed_ct);
                     }
-                    crate::parser::ast::ConstructorArguments::Pcstr_record(labels) => {
-                        let mut typed_labels = Vec::new();
-                        let mut decl_labels = Vec::new();
-                        for label in labels {
-                            let label_name = arena.get_string(label.pld_name.txt).to_string();
-                            let (typed_ct, ty_ref) =
-                                transl_type(tctx, env, arena.get_core_type(label.pld_type))?;
-                            let poly_ty_ref = ctx.new_poly(ty_ref, vec![]);
-                            let poly_typed_ct = crate::types::typedtree::TypedCoreType {
-                                ctyp_desc: crate::types::typedtree::TypedCoreTypeDesc::Ttyp_poly(
-                                    vec![],
-                                    Box::new(typed_ct.clone()),
-                                ),
-                                ctyp_type: poly_ty_ref,
-                                ctyp_env: typed_ct.ctyp_env,
-                                ctyp_loc: typed_ct.ctyp_loc,
-                                ctyp_attributes: Attributes::new(),
-                            };
-                            let label_id = ctx.create_ident(&label_name);
-                            typed_labels.push(crate::types::typedtree::LabelDeclaration {
-                                ld_id: label_id,
-                                ld_name: crate::parse_arena::Located {
-                                    txt: label_name.clone(),
-                                    loc: label.pld_name.loc,
-                                },
-                                ld_runtime_name:
-                                    crate::types::record_runtime::parsetree_runtime_name(label),
-                                ld_mutable: label.pld_mutable,
-                                ld_optional: label.pld_optional,
-                                ld_type: poly_typed_ct,
-                                ld_loc: label.pld_loc,
-                                ld_attributes: label.pld_attributes.clone(),
-                            });
-                            decl_labels.push(crate::types::decl::LabelDeclaration {
-                                ld_id: label_id,
-                                ld_runtime_name:
-                                    crate::types::record_runtime::parsetree_runtime_name(label),
-                                ld_mutable: match label.pld_mutable {
-                                    crate::parser::ast::MutableFlag::Immutable => {
-                                        crate::types::MutableFlag::Immutable
-                                    }
-                                    crate::parser::ast::MutableFlag::Mutable => {
-                                        crate::types::MutableFlag::Mutable
-                                    }
-                                },
-                                ld_optional: label.pld_optional,
-                                ld_type: poly_ty_ref,
-                                ld_loc: arena.to_location(label.pld_loc),
-                                ld_attributes: vec![],
-                            });
-                        }
-                        let inline_path = Path::pident(id);
-                        // Match OCaml's newgenconstr: create at generic_level
-                        let inline_ty = ctx.new_generic_constr(inline_path.clone(), vec![]);
-                        let inline_decl = crate::types::TypeDeclaration {
-                            type_params: vec![],
-                            type_arity: 0,
-                            type_kind: crate::types::TypeKind::TypeRecord(
-                                crate::types::decl::SharedVec::from(decl_labels.clone()),
-                                crate::types::RecordRepresentation::RecordExtension,
+                    (
+                        crate::types::typedtree::ConstructorArgument::Cstr_tuple(typed),
+                        crate::types::ConstructorArguments::CstrTuple(arg_ty_refs.clone()),
+                        arg_ty_refs.clone(),
+                        None,
+                    )
+                }
+                crate::parser::ast::ConstructorArguments::Pcstr_record(labels) => {
+                    let mut typed_labels = Vec::new();
+                    let mut decl_labels = Vec::new();
+                    for label in labels {
+                        let label_name = arena.get_string(label.pld_name.txt).to_string();
+                        let (typed_ct, ty_ref) =
+                            transl_type(tctx, env, arena.get_core_type(label.pld_type))?;
+                        let poly_ty_ref = ctx.new_poly(ty_ref, vec![]);
+                        let poly_typed_ct = crate::types::typedtree::TypedCoreType {
+                            ctyp_desc: crate::types::typedtree::TypedCoreTypeDesc::Ttyp_poly(
+                                vec![],
+                                Box::new(typed_ct.clone()),
                             ),
-                            type_private: crate::types::PrivateFlag::Public,
-                            type_manifest: None,
-                            type_variance: vec![],
-                            type_newtype_level: None,
-                            type_loc: crate::location::Location::none(),
-                            type_attributes: vec![],
-                            type_immediate: false,
-                            type_representation: crate::types::TypeRepresentation::Boxed,
-                            type_inlined_types: vec![],
-                            type_path: None,
+                            ctyp_type: poly_ty_ref,
+                            ctyp_env: typed_ct.ctyp_env,
+                            ctyp_loc: typed_ct.ctyp_loc,
+                            ctyp_attributes: Attributes::new(),
                         };
-                        (
-                            crate::types::typedtree::ConstructorArgument::Cstr_record(typed_labels),
-                            crate::types::ConstructorArguments::CstrRecord(decl_labels),
-                            vec![inline_ty],
-                            Some(Box::new(inline_decl)),
-                        )
+                        let label_id = ctx.create_ident(&label_name);
+                        typed_labels.push(crate::types::typedtree::LabelDeclaration {
+                            ld_id: label_id,
+                            ld_name: crate::parse_arena::Located {
+                                txt: label_name.clone(),
+                                loc: label.pld_name.loc,
+                            },
+                            ld_runtime_name: crate::types::record_runtime::parsetree_runtime_name(
+                                label, arena,
+                            ),
+                            ld_mutable: label.pld_mutable,
+                            ld_optional: label.pld_optional,
+                            ld_type: poly_typed_ct,
+                            ld_loc: label.pld_loc,
+                            ld_attributes: label.pld_attributes.clone(),
+                        });
+                        decl_labels.push(crate::types::decl::LabelDeclaration {
+                            ld_id: label_id,
+                            ld_runtime_name: crate::types::record_runtime::parsetree_runtime_name(
+                                label, arena,
+                            ),
+                            ld_mutable: match label.pld_mutable {
+                                crate::parser::ast::MutableFlag::Immutable => {
+                                    crate::types::MutableFlag::Immutable
+                                }
+                                crate::parser::ast::MutableFlag::Mutable => {
+                                    crate::types::MutableFlag::Mutable
+                                }
+                            },
+                            ld_optional: label.pld_optional,
+                            ld_type: poly_ty_ref,
+                            ld_loc: tctx.intern_loc(arena.to_location(label.pld_loc)),
+                            ld_attributes: vec![],
+                        });
                     }
-                };
-                let (typed_ret, ext_ret_ty) = match ret {
-                    Some(ct) => {
-                        let (typed_ct, ty_ref) = transl_type(tctx, env, arena.get_core_type(*ct))?;
-                        (Some(typed_ct), Some(ty_ref))
-                    }
-                    None => (None, None),
-                };
-                (
-                    typed_args,
-                    typed_ret,
-                    ext_args,
-                    cstr_args,
-                    cstr_inlined,
-                    ext_ret_ty,
-                )
-            }
-            crate::parser::ast::ExtensionConstructorKind::Pext_rebind(_lid) => (
-                crate::types::typedtree::ConstructorArgument::Cstr_tuple(vec![]),
-                None,
-                crate::types::ConstructorArguments::CstrTuple(vec![]),
-                vec![],
-                None,
-                None,
-            ),
-        };
+                    let inline_path = Path::pident(id);
+                    // Match OCaml's newgenconstr: create at generic_level
+                    let inline_ty = ctx.new_generic_constr(inline_path.clone(), vec![]);
+                    let inline_decl = crate::types::TypeDeclaration {
+                        type_params: vec![],
+                        type_arity: 0,
+                        type_kind: crate::types::TypeKind::TypeRecord(
+                            crate::types::decl::SharedVec::from(decl_labels.clone()),
+                            crate::types::RecordRepresentation::RecordExtension,
+                        ),
+                        type_private: crate::types::PrivateFlag::Public,
+                        type_manifest: None,
+                        type_variance: vec![],
+                        type_newtype_level: None,
+                        type_loc: crate::types::DeclLoc::none(),
+                        type_attributes: vec![],
+                        type_immediate: false,
+                        type_representation: crate::types::TypeRepresentation::Boxed,
+                        type_inlined_types: vec![],
+                        type_path: None,
+                    };
+                    (
+                        crate::types::typedtree::ConstructorArgument::Cstr_record(typed_labels),
+                        crate::types::ConstructorArguments::CstrRecord(decl_labels),
+                        vec![inline_ty],
+                        Some(Box::new(inline_decl)),
+                    )
+                }
+            };
+            let (typed_ret, ext_ret_ty) = match ret {
+                Some(ct) => {
+                    let (typed_ct, ty_ref) = transl_type(tctx, env, arena.get_core_type(*ct))?;
+                    (Some(typed_ct), Some(ty_ref))
+                }
+                None => (None, None),
+            };
+            (
+                typed_args,
+                typed_ret,
+                ext_args,
+                cstr_args,
+                cstr_inlined,
+                ext_ret_ty,
+            )
+        }
+        crate::parser::ast::ExtensionConstructorKind::Pext_rebind(_lid) => (
+            crate::types::typedtree::ConstructorArgument::Cstr_tuple(vec![]),
+            None,
+            crate::types::ConstructorArguments::CstrTuple(vec![]),
+            vec![],
+            None,
+            None,
+        ),
+    };
     ctx.end_def();
 
     // Generalize constructor arg types (matching OCaml's iter_type_expr_cstr_args generalize)
@@ -17512,7 +17563,7 @@ fn type_letexception(
         cstr_generalized: false,
         cstr_private: crate::types::PrivateFlag::Public,
         // `Datarepr.extension_descr`: `cstr_loc = ext.ext_loc = pext_loc`.
-        cstr_loc: arena.to_location(ext_constr.pext_loc),
+        cstr_loc: tctx.intern_loc(arena.to_location(ext_constr.pext_loc)),
         cstr_attributes: vec![],
         cstr_inlined: cstr_inlined.clone(),
     };
@@ -17547,7 +17598,7 @@ fn type_letexception(
             ext_args,
             ext_ret_type: ext_ret_ty,
             ext_private: crate::types::PrivateFlag::Public,
-            ext_loc: arena.to_location(ext_constr.pext_loc),
+            ext_loc: tctx.intern_loc(arena.to_location(ext_constr.pext_loc)),
             ext_attributes: vec![],
             ext_is_exception: true,
         },
@@ -17802,7 +17853,7 @@ pub(crate) fn find_type_for_lid(
             tctx.type_ctx,
             env,
             tctx.longident_last_name_str(longident),
-            decl.type_loc,
+            tctx.resolve_loc(decl.type_loc),
         );
     }
     let Some(decl) = type_decl else {
@@ -18236,11 +18287,11 @@ fn type_letmodule(
         // Keep let-module member lookups stable for direct module aliases
         // (`module M = List` / constrained direct idents) by materializing
         // aliases/identifiers to signatures when the environment can resolve them.
-        let materialize_alias_sig = match &*module_expr.pmod_desc {
+        let materialize_alias_sig = match &module_expr.pmod_desc {
             crate::parser::ast::ModuleExprDesc::Pmod_ident(_) => true,
             crate::parser::ast::ModuleExprDesc::Pmod_constraint(inner, _) => {
                 matches!(
-                    &*arena.get_mod_expr(*inner).pmod_desc,
+                    &arena.get_mod_expr(*inner).pmod_desc,
                     crate::parser::ast::ModuleExprDesc::Pmod_ident(_)
                 )
             }
@@ -18269,7 +18320,7 @@ fn type_letmodule(
         let md_decl = crate::types::decl::ModuleDeclaration {
             md_type: mod_sig,
             md_attributes: vec![],
-            md_loc: crate::location::Location::none(),
+            md_loc: crate::types::DeclLoc::none(),
             md_path: None,
         };
         body_env.add_module(mod_id, md_decl);
@@ -18593,7 +18644,7 @@ fn type_pack(
                 crate::types::decl::ModuleDeclaration {
                     md_type: typed_module.mod_type.clone(),
                     md_attributes: vec![],
-                    md_loc: crate::location::Location::none(),
+                    md_loc: crate::types::DeclLoc::none(),
                     md_path: None,
                 },
             );
@@ -18859,7 +18910,7 @@ fn type_expect_with_module_unpacks(
     // `Env.lookup_value` marks the pattern variable used (env.ml:1169-1172).
     if let Ok(desc) = env.find_value(unpack.id.name()) {
         let val_loc = desc.val_loc;
-        tctx.mark_value_used(env, unpack.id.name(), val_loc);
+        tctx.mark_value_used(env, unpack.id.name(), tctx.resolve_loc(val_loc));
     }
     // Note: OCaml applies prefix_idents/Subst.signature here via lazy
     // components_of_module_maker, rewriting Pident paths to Pdot(Reducer, ...).
@@ -18874,7 +18925,7 @@ fn type_expect_with_module_unpacks(
         crate::types::decl::ModuleDeclaration {
             md_type: decl_mty.clone(),
             md_attributes: vec![],
-            md_loc: crate::location::Location::none(),
+            md_loc: crate::types::DeclLoc::none(),
             md_path: None,
         },
     );
@@ -18903,7 +18954,7 @@ fn type_expect_with_module_unpacks(
         .unwrap_or(ValueDescription {
             val_type: unpack.ty,
             val_kind: crate::types::ValueKind::ValReg,
-            val_loc: unpack.loc,
+            val_loc: tctx.intern_loc(unpack.loc),
             val_attributes: vec![],
             val_path: None,
         });
@@ -19231,7 +19282,7 @@ fn approx_type_for_rec_let(
 
     let ctx = tctx.type_ctx;
 
-    match &*sty.ptyp_desc {
+    match &sty.ptyp_desc {
         CTD::Ptyp_arrow(inner) => {
             let (arg, ret, arity) = &**inner;
             let args = tctx
@@ -19245,27 +19296,34 @@ fn approx_type_for_rec_let(
                     } else {
                         ctx.new_var(None)
                     };
-                    TypeArg::new(convert_arg_label_for_ctx(&arg.lbl, tctx.arena), typ)
+                    TypeArg::new(
+                        convert_arg_label_for_ctx(&arg.lbl, tctx.arena, tctx.type_ctx),
+                        typ,
+                    )
                 })
                 .collect();
             let ret = approx_type_for_rec_let(tctx, env, tctx.arena.get_core_type(*ret));
             ctx.new_type(TypeDesc::Tarrow { args, ret })
         }
         CTD::Ptyp_tuple(args) => {
-            let tys = args
+            let tys = tctx
+                .arena
+                .type_list(*args)
                 .iter()
                 .map(|arg| approx_type_for_rec_let(tctx, env, tctx.arena.get_core_type(*arg)))
                 .collect();
             ctx.new_tuple(tys)
         }
         CTD::Ptyp_constr(inner) => {
-            let (lid, args) = &**inner;
+            let (lid, args) = &*inner;
             let longident = tctx.resolve_lid(lid.txt).clone();
             // typecore.ml:1988: `Env.lookup_type lid.txt env`, without `?loc`.
             let (path, decl) = resolve_type_constructor_path(tctx, env, &longident, None);
             if let Some(decl) = decl {
                 if args.len() == decl.type_arity as usize {
-                    let tys = args
+                    let tys = tctx
+                        .arena
+                        .type_list(*args)
                         .iter()
                         .map(|arg| {
                             approx_type_for_rec_let(tctx, env, tctx.arena.get_core_type(*arg))
@@ -19295,12 +19353,12 @@ fn type_approx_for_rec_let(
     let ctx = tctx.type_ctx;
     let loc = sexp.pexp_loc;
 
-    match &*sexp.pexp_desc {
+    match &sexp.pexp_desc {
         ED::Pexp_braces(braces) => {
             type_approx_for_rec_let(tctx, env, tctx.arena.get_expr(braces.expr))
         }
         ED::Pexp_let(inner) => {
-            let (_, _, body) = &**inner;
+            let (_, _, body) = &*inner;
             type_approx_for_rec_let(tctx, env, tctx.arena.get_expr(*body))
         }
         ED::Pexp_fun(inner) => {
@@ -19315,25 +19373,30 @@ fn type_approx_for_rec_let(
                     } else {
                         ctx.new_var(None)
                     };
-                    TypeArg::new(convert_arg_label_for_ctx(&param.p_lbl, tctx.arena), typ)
+                    TypeArg::new(
+                        convert_arg_label_for_ctx(&param.p_lbl, tctx.arena, tctx.type_ctx),
+                        typ,
+                    )
                 })
                 .collect();
             let ret = type_approx_for_rec_let(tctx, env, tctx.arena.get_expr(body))?;
             Ok(ctx.new_type(TypeDesc::Tarrow { args, ret }))
         }
         ED::Pexp_match(inner) => {
-            let (_, cases) = &**inner;
-            match cases.first() {
+            let (_, cases) = &*inner;
+            match tctx.arena.case_list(*cases).first() {
                 Some(case) => type_approx_for_rec_let(tctx, env, tctx.arena.get_expr(case.pc_rhs)),
                 None => Ok(ctx.new_var(None)),
             }
         }
         ED::Pexp_try(inner) => {
-            let (expr, _) = &**inner;
+            let (expr, _) = &*inner;
             type_approx_for_rec_let(tctx, env, tctx.arena.get_expr(*expr))
         }
         ED::Pexp_tuple(items) => {
-            let tys: TypeCoreResult<Vec<_>> = items
+            let tys: TypeCoreResult<Vec<_>> = tctx
+                .arena
+                .expr_list(*items)
                 .iter()
                 .map(|item| type_approx_for_rec_let(tctx, env, tctx.arena.get_expr(*item)))
                 .collect();
@@ -20543,7 +20606,7 @@ fn type_let_bindings(
                     let desc = ValueDescription {
                         val_type: pv.ty,
                         val_kind: crate::types::ValueKind::ValReg,
-                        val_loc: pv.loc,
+                        val_loc: tctx.intern_loc(pv.loc),
                         val_attributes: vec![],
                         val_path: None,
                     };
@@ -20817,7 +20880,7 @@ fn type_let_bindings(
                 let desc = ValueDescription {
                     val_type: pv.ty,
                     val_kind: crate::types::ValueKind::ValReg,
-                    val_loc: pv.loc,
+                    val_loc: tctx.intern_loc(pv.loc),
                     val_attributes: vec![],
                     val_path: None,
                 };
@@ -20889,7 +20952,7 @@ pub fn type_expression<'a>(
                             typed_expr.exp_type,
                         )),
                         is_function_call: matches!(
-                            &*expr.pexp_desc,
+                            &expr.pexp_desc,
                             crate::parser::ast::ExpressionDesc::Pexp_apply(_)
                         ),
                     },
@@ -22843,7 +22906,7 @@ fn lookup_predef_option_constructor(
         }),
         cstr_generalized: false,
         cstr_private: crate::types::PrivateFlag::Public,
-        cstr_loc: crate::location::Location::none(),
+        cstr_loc: crate::types::DeclLoc::none(),
         cstr_attributes: vec![crate::types::decl::internal_optional_attr()],
         cstr_inlined: None,
     };
@@ -23887,7 +23950,7 @@ pub(crate) fn mark_constructor(
     };
     if let Some(loc) = loc {
         ctx.usage()
-            .mark_constructor_used(usage, path.last(), loc, name);
+            .mark_constructor_used(usage, path.last(), ctx.resolve_loc(loc), name);
     }
 }
 
@@ -23896,7 +23959,7 @@ pub(crate) fn mark_type_path(ctx: &crate::types::context::TypeContext, env: &Env
     let type_loc =
         crate::types::ctype::lookup_type_decl_for_path(ctx, env, path).map(|decl| decl.type_loc);
     if let Some(type_loc) = type_loc {
-        mark_type_used(ctx, env, path.last(), type_loc);
+        mark_type_used(ctx, env, path.last(), ctx.resolve_loc(type_loc));
     }
 }
 
@@ -24864,7 +24927,12 @@ fn lookup_label_by_expected_type(
     let (concrete_path, _actual_args, type_decl) =
         extract_concrete_record_type_info(record_ty, env, pers_env, ctx)?;
     // `lookup_from_type` marks the type used (typecore.ml:852-854).
-    mark_type_used(ctx, env, concrete_path.last(), type_decl.type_loc);
+    mark_type_used(
+        ctx,
+        env,
+        concrete_path.last(),
+        ctx.resolve_loc(type_decl.type_loc),
+    );
     let (labels, repr) = match &type_decl.type_kind {
         crate::types::TypeKind::TypeRecord(labels, repr) => (labels, repr),
         _ => return None,
@@ -26562,7 +26630,8 @@ fn mark_module_lid_used(
         Longident::Lapply(_, _) => return None,
     };
     if !env.is_implicit_coercion() {
-        ctx.usage().mark_module_used(name, md.md_loc);
+        ctx.usage()
+            .mark_module_used(name, ctx.resolve_loc(md.md_loc));
     }
     if let Some((loc, deprecations)) = report.as_mut()
         && let Some(deprecated) = deprecated_of_decl_attrs(&md.md_attributes)
@@ -28838,6 +28907,7 @@ mod tests {
         let val_loc = Location::none();
         let val_loc = Location {
             loc_ghost: false,
+            origin: Default::default(),
             ..val_loc
         };
         // `check_usage` registers a (name, loc) key once.
@@ -28902,90 +28972,103 @@ mod tests {
 
     #[test]
     fn test_convert_constant_int() {
-        let cst = crate::parser::ast::Constant::Integer(Cow::Borrowed("42"), None);
-        let result = convert_constant(&cst, LocIdx(0)).unwrap();
+        let mut arena = crate::parse_arena::ParseArena::new();
+        let cst = crate::parser::ast::Constant::Integer(arena.intern_string("42"), None);
+        let result = convert_constant(&cst, LocIdx(0), &arena).unwrap();
         assert_eq!(result, Constant::Int(42));
     }
 
     #[test]
     fn test_convert_constant_large_wraps_to_int32() {
+        let mut arena = crate::parse_arena::ParseArena::new();
         // Values beyond int32 wrap to Lambda's int32 value
-        let cst = crate::parser::ast::Constant::Integer(Cow::Borrowed("99999999999999999"), None);
-        let result = convert_constant(&cst, LocIdx(0)).unwrap();
+        let cst =
+            crate::parser::ast::Constant::Integer(arena.intern_string("99999999999999999"), None);
+        let result = convert_constant(&cst, LocIdx(0), &arena).unwrap();
         assert_eq!(
             result,
             Constant::Int(i64::from(99999999999999999i64 as i32))
         );
-        let cst = crate::parser::ast::Constant::Integer(Cow::Borrowed("4294967295"), None);
+        let cst = crate::parser::ast::Constant::Integer(arena.intern_string("4294967295"), None);
         assert_eq!(
-            convert_constant(&cst, LocIdx(0)).unwrap(),
+            convert_constant(&cst, LocIdx(0), &arena).unwrap(),
             Constant::Int(-1)
         );
     }
 
     #[test]
     fn test_convert_constant_overflow_too_large() {
+        let mut arena = crate::parse_arena::ParseArena::new();
         // Values that don't fit in i64 should still error
-        let cst =
-            crate::parser::ast::Constant::Integer(Cow::Borrowed("99999999999999999999999"), None);
-        let result = convert_constant(&cst, LocIdx(0));
+        let cst = crate::parser::ast::Constant::Integer(
+            arena.intern_string("99999999999999999999999"),
+            None,
+        );
+        let result = convert_constant(&cst, LocIdx(0), &arena);
         assert!(matches!(result, Err(TypeCoreError::LiteralOverflow { .. })));
     }
 
     #[test]
     fn test_convert_constant_underscores() {
+        let mut arena = crate::parse_arena::ParseArena::new();
         // Underscores are skipped; 949460645006 then wraps to int32
-        let cst = crate::parser::ast::Constant::Integer(Cow::Borrowed("949_460_645_006"), None);
-        let result = convert_constant(&cst, LocIdx(0)).unwrap();
+        let cst =
+            crate::parser::ast::Constant::Integer(arena.intern_string("949_460_645_006"), None);
+        let result = convert_constant(&cst, LocIdx(0), &arena).unwrap();
         assert_eq!(result, Constant::Int(i64::from(949_460_645_006i64 as i32)));
     }
 
     #[test]
     fn test_convert_constant_hex() {
+        let mut arena = crate::parse_arena::ParseArena::new();
         // 0xFFFFFFFF = 4294967295, which is -1 as an int32
-        let cst = crate::parser::ast::Constant::Integer(Cow::Borrowed("0xffff_ffff"), None);
-        let result = convert_constant(&cst, LocIdx(0)).unwrap();
+        let cst = crate::parser::ast::Constant::Integer(arena.intern_string("0xffff_ffff"), None);
+        let result = convert_constant(&cst, LocIdx(0), &arena).unwrap();
         assert_eq!(result, Constant::Int(-1));
     }
 
     #[test]
     fn test_convert_constant_63bit_wrap() {
+        let mut arena = crate::parse_arena::ParseArena::new();
         // 4611686018427387904 = 2^62 wraps to -2^62 in 63-bit, whose low 32
         // bits are 0
-        let cst = crate::parser::ast::Constant::Integer(Cow::Borrowed("4611686018427387904"), None);
-        let result = convert_constant(&cst, LocIdx(0)).unwrap();
+        let cst =
+            crate::parser::ast::Constant::Integer(arena.intern_string("4611686018427387904"), None);
+        let result = convert_constant(&cst, LocIdx(0), &arena).unwrap();
         assert_eq!(result, Constant::Int(0));
     }
 
     #[test]
     fn test_convert_constant_string() {
-        let cst = crate::parser::ast::Constant::string("hello");
-        let result = convert_constant(&cst, LocIdx(0)).unwrap();
+        let mut arena = crate::parse_arena::ParseArena::new();
+        let cst = arena.string_constant("hello");
+        let result = convert_constant(&cst, LocIdx(0), &arena).unwrap();
         assert!(matches!(result, Constant::String(s) if s == "hello"));
     }
 
     #[test]
     fn test_convert_constant_bigint() {
-        let cst = crate::parser::ast::Constant::Integer(Cow::Borrowed("12345"), Some('n'));
-        let result = convert_constant(&cst, LocIdx(0)).unwrap();
+        let mut arena = crate::parse_arena::ParseArena::new();
+        let cst = crate::parser::ast::Constant::Integer(arena.intern_string("12345"), Some('n'));
+        let result = convert_constant(&cst, LocIdx(0), &arena).unwrap();
         assert!(matches!(result, Constant::BigInt(true, d) if d == "12345"));
     }
 
     #[test]
     fn test_convert_constant_bigint_removes_underscores() {
+        let mut arena = crate::parse_arena::ParseArena::new();
         let cst =
-            crate::parser::ast::Constant::Integer(Cow::Owned("01_000_000".to_string()), Some('n'));
-        let result = convert_constant(&cst, LocIdx(0)).unwrap();
+            crate::parser::ast::Constant::Integer(arena.intern_string("01_000_000"), Some('n'));
+        let result = convert_constant(&cst, LocIdx(0), &arena).unwrap();
         assert!(matches!(result, Constant::BigInt(true, d) if d == "1000000"));
     }
 
     #[test]
     fn test_convert_constant_bigint_preserves_non_decimal_heads() {
-        let cst = crate::parser::ast::Constant::Integer(
-            Cow::Owned("00x1_000_000".to_string()),
-            Some('n'),
-        );
-        let result = convert_constant(&cst, LocIdx(0)).unwrap();
+        let mut arena = crate::parse_arena::ParseArena::new();
+        let cst =
+            crate::parser::ast::Constant::Integer(arena.intern_string("00x1_000_000"), Some('n'));
+        let result = convert_constant(&cst, LocIdx(0), &arena).unwrap();
         assert!(matches!(result, Constant::BigInt(true, d) if d == "00x1000000"));
     }
 
@@ -29037,17 +29120,17 @@ mod tests {
         let x_idx = arena.intern("x");
         let x_name = Located { txt: x_idx, loc };
         let left = arena.push_pat(crate::parser::ast::Pattern {
-            ppat_desc: Box::new(crate::parser::ast::PatternDesc::Ppat_var(x_name)),
+            ppat_desc: crate::parser::ast::PatternDesc::Ppat_var(x_name),
             ppat_loc: loc,
             ppat_attributes: Attributes::new(),
         });
         let right = arena.push_pat(crate::parser::ast::Pattern {
-            ppat_desc: Box::new(crate::parser::ast::PatternDesc::Ppat_var(x_name)),
+            ppat_desc: crate::parser::ast::PatternDesc::Ppat_var(x_name),
             ppat_loc: loc,
             ppat_attributes: Attributes::new(),
         });
         let or_pat = crate::parser::ast::Pattern {
-            ppat_desc: Box::new(crate::parser::ast::PatternDesc::Ppat_or(left, right)),
+            ppat_desc: crate::parser::ast::PatternDesc::Ppat_or(left, right),
             ppat_loc: loc,
             ppat_attributes: Attributes::new(),
         };
@@ -29667,20 +29750,24 @@ fn partial_pred(
     result.ok()
 }
 
-fn untype_constant(constant: &Constant) -> ParsedConstant {
+fn untype_constant(constant: &Constant, arena: &ParseArena) -> ParsedConstant {
     // Untypeast.constant (untypeast.ml:19-27).
     match constant {
-        Constant::Int(value) => ParsedConstant::Integer(value.to_string().into(), None),
-        Constant::Char(value) => ParsedConstant::char(*value),
-        Constant::String(value) => ParsedConstant::string(value),
-        Constant::Float(value) => ParsedConstant::Float(value.clone().into(), None),
+        Constant::Int(value) => {
+            ParsedConstant::Integer(arena.push_typecheck_string(value.to_string()), None)
+        }
+        Constant::Char(value) => arena.typecheck_char_constant(*value),
+        Constant::String(value) => arena.typecheck_string_constant(value),
+        Constant::Float(value) => {
+            ParsedConstant::Float(arena.push_typecheck_string(value.clone()), None)
+        }
         Constant::BigInt(positive, digits) => {
             let value = if *positive {
                 digits.clone()
             } else {
                 format!("-{digits}")
             };
-            ParsedConstant::Integer(value.into(), Some('n'))
+            ParsedConstant::Integer(arena.push_typecheck_string(value), Some('n'))
         }
     }
 }
@@ -29691,7 +29778,7 @@ fn push_parsed_pattern(
     desc: crate::parser::ast::PatternDesc,
 ) -> crate::parse_arena::PatIdx {
     arena.push_typecheck_pattern(ParsedPattern {
-        ppat_desc: Box::new(desc),
+        ppat_desc: desc,
         ppat_loc: loc,
         ppat_attributes: Attributes::new(),
     })
@@ -29737,20 +29824,27 @@ fn conv_counter_example(
             PatternDesc::Tpat_constant(constant) => push_parsed_pattern(
                 arena,
                 loc,
-                P::Ppat_constant(Box::new(untype_constant(constant))),
+                P::Ppat_constant(untype_constant(constant, arena)),
             ),
             PatternDesc::Tpat_interval(c1, c2) => push_parsed_pattern(
                 arena,
                 loc,
-                P::Ppat_interval(Box::new((untype_constant(c1), untype_constant(c2)))),
+                P::Ppat_interval(Box::new((
+                    untype_constant(c1, arena),
+                    untype_constant(c2, arena),
+                ))),
             ),
             PatternDesc::Tpat_alias(inner, _, _) => lp(tctx, inner, counter, loc),
             PatternDesc::Tpat_tuple(items) => {
                 let items = items
                     .iter()
                     .map(|item| lp(tctx, item, counter, none))
-                    .collect();
-                push_parsed_pattern(arena, loc, P::Ppat_tuple(Box::new(items)))
+                    .collect::<Vec<_>>();
+                push_parsed_pattern(
+                    arena,
+                    loc,
+                    P::Ppat_tuple(arena.push_shared_pat_list(&items)),
+                )
             }
             PatternDesc::Tpat_construct(cstr_lid, cstr, args) => {
                 let id = fresh(counter, &cstr.cstr_name);
@@ -29765,7 +29859,7 @@ fn conv_counter_example(
                 push_parsed_pattern(
                     arena,
                     loc,
-                    P::Ppat_construct(lid, crate::parser::ast::ctor_args(items, none)),
+                    P::Ppat_construct(lid, arena.shared_pat_ctor_args(&items, none)),
                 )
             }
             PatternDesc::Tpat_variant(label, arg, _) => {
@@ -29777,7 +29871,10 @@ fn conv_counter_example(
                 push_parsed_pattern(
                     arena,
                     loc,
-                    P::Ppat_variant(Box::new((label.clone().into(), Located::new(args, none)))),
+                    P::Ppat_variant(Box::new((
+                        label.clone().into(),
+                        arena.shared_pat_ctor_args(&args, none),
+                    ))),
                 )
             }
             // A lowered dict pattern: its labels are the keys, in order of
@@ -29827,14 +29924,14 @@ fn conv_counter_example(
                             opt: *optional,
                         }
                     })
-                    .collect();
+                    .collect::<Vec<_>>();
                 // TODO: Conv.conv_record_rest (parmatch.ml:1948-1959) keeps the
                 // rest binding with a `Typ.constr` annotation.
                 push_parsed_pattern(
                     arena,
                     loc,
                     P::Ppat_record(Box::new((
-                        fields,
+                        arena.push_shared_pat_field_list(&fields),
                         crate::parser::ast::ClosedFlag::Open,
                         None,
                     ))),
@@ -29844,8 +29941,12 @@ fn conv_counter_example(
                 let items = items
                     .iter()
                     .map(|item| lp(tctx, item, counter, none))
-                    .collect();
-                push_parsed_pattern(arena, loc, P::Ppat_array(Box::new(items)))
+                    .collect::<Vec<_>>();
+                push_parsed_pattern(
+                    arena,
+                    loc,
+                    P::Ppat_array(arena.push_shared_pat_list(&items)),
+                )
             }
         }
     }
@@ -29933,26 +30034,39 @@ fn print_counter_example(arena: &ParseArena, typed: &Pattern) -> String {
             PatternDesc::Tpat_constant(constant) => push_parsed_pattern(
                 arena,
                 none,
-                P::Ppat_constant(Box::new(untype_constant(constant))),
+                P::Ppat_constant(untype_constant(constant, arena)),
             ),
             PatternDesc::Tpat_interval(c1, c2) => push_parsed_pattern(
                 arena,
                 none,
-                P::Ppat_interval(Box::new((untype_constant(c1), untype_constant(c2)))),
+                P::Ppat_interval(Box::new((
+                    untype_constant(c1, arena),
+                    untype_constant(c2, arena),
+                ))),
             ),
             PatternDesc::Tpat_alias(inner, _, _) => untype(arena, inner),
             PatternDesc::Tpat_tuple(items) => {
-                let items = items.iter().map(|item| untype(arena, item)).collect();
-                push_parsed_pattern(arena, none, P::Ppat_tuple(Box::new(items)))
+                let items = items
+                    .iter()
+                    .map(|item| untype(arena, item))
+                    .collect::<Vec<_>>();
+                push_parsed_pattern(
+                    arena,
+                    none,
+                    P::Ppat_tuple(arena.push_shared_pat_list(&items)),
+                )
             }
             PatternDesc::Tpat_construct(cstr_lid, cstr, args) => {
                 let lid = Located::new(arena.push_typecheck_lident(&cstr.cstr_name), cstr_lid.loc);
                 // pattern_printer.ml untype: `mknoloc (List.map loop lst)`.
-                let items: Vec<_> = args.iter().map(|arg| untype(arena, arg)).collect();
+                let items: Vec<_> = args
+                    .iter()
+                    .map(|arg| untype(arena, arg))
+                    .collect::<Vec<_>>();
                 push_parsed_pattern(
                     arena,
                     none,
-                    P::Ppat_construct(lid, crate::parser::ast::ctor_args(items, none)),
+                    P::Ppat_construct(lid, arena.shared_pat_ctor_args(&items, none)),
                 )
             }
             PatternDesc::Tpat_variant(label, arg, _) => {
@@ -29964,7 +30078,10 @@ fn print_counter_example(arena: &ParseArena, typed: &Pattern) -> String {
                 push_parsed_pattern(
                     arena,
                     none,
-                    P::Ppat_variant(Box::new((label.clone().into(), Located::new(args, none)))),
+                    P::Ppat_variant(Box::new((
+                        label.clone().into(),
+                        arena.shared_pat_ctor_args(&args, none),
+                    ))),
                 )
             }
             PatternDesc::Tpat_record(subpatterns, closed_flag, rest) => {
@@ -29989,7 +30106,10 @@ fn print_counter_example(arena: &ParseArena, typed: &Pattern) -> String {
                                         none,
                                         P::Ppat_construct(
                                             none_lid,
-                                            crate::parser::ast::ctor_args(Vec::new(), none),
+                                            crate::parse_arena::Located::new(
+                                                crate::parse_arena::PatList::EMPTY,
+                                                none,
+                                            ),
                                         ),
                                     ),
                                 )
@@ -30006,7 +30126,7 @@ fn print_counter_example(arena: &ParseArena, typed: &Pattern) -> String {
                             opt,
                         }
                     })
-                    .collect();
+                    .collect::<Vec<_>>();
                 let closed_flag = if saw_optional_rewrite {
                     crate::parser::ast::ClosedFlag::Closed
                 } else {
@@ -30023,12 +30143,23 @@ fn print_counter_example(arena: &ParseArena, typed: &Pattern) -> String {
                 push_parsed_pattern(
                     arena,
                     none,
-                    P::Ppat_record(Box::new((fields, closed_flag, rest))),
+                    P::Ppat_record(Box::new((
+                        arena.push_shared_pat_field_list(&fields),
+                        closed_flag,
+                        rest,
+                    ))),
                 )
             }
             PatternDesc::Tpat_array(items) => {
-                let items = items.iter().map(|item| untype(arena, item)).collect();
-                push_parsed_pattern(arena, none, P::Ppat_array(Box::new(items)))
+                let items = items
+                    .iter()
+                    .map(|item| untype(arena, item))
+                    .collect::<Vec<_>>();
+                push_parsed_pattern(
+                    arena,
+                    none,
+                    P::Ppat_array(arena.push_shared_pat_list(&items)),
+                )
             }
             // An entry's pattern matches the key's value as an option.
             PatternDesc::Tpat_dict(entries) => {

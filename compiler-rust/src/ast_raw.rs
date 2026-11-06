@@ -89,7 +89,7 @@ pub fn of_payload(arena: &mut ParseArena, payload: &Payload) -> Option<RawSource
     let [item] = items.as_slice() else {
         return None;
     };
-    let StructureItemDesc::Pstr_eval(eval) = &*item.pstr_desc else {
+    let StructureItemDesc::Pstr_eval(eval) = &item.pstr_desc else {
         return None;
     };
     let (expr_idx, eval_attrs) = &**eval;
@@ -101,10 +101,10 @@ pub fn of_payload(arena: &mut ParseArena, payload: &Payload) -> Option<RawSource
         return None;
     }
     let pexp_loc = expr.pexp_loc;
-    match &*expr.pexp_desc {
-        ExpressionDesc::Pexp_constant(constant) => match &**constant {
+    match &expr.pexp_desc {
+        ExpressionDesc::Pexp_constant(constant) => match *constant {
             Constant::String(payload) => {
-                let source = payload.source().to_string();
+                let source = payload.source(arena).to_string();
                 Some(RawSource::String(Located {
                     txt: arena.intern(&source),
                     loc: pexp_loc,
@@ -151,7 +151,7 @@ pub fn to_extension(
 ) -> Extension {
     let loc = payload_loc_shared(arena, source);
     let expression = |desc| Expression {
-        pexp_desc: Box::new(desc),
+        pexp_desc: desc,
         pexp_loc: loc,
         pexp_attributes: Attributes::new(),
     };
@@ -170,7 +170,9 @@ pub fn to_extension(
                 None
             };
             match payload {
-                Some(payload) => ExpressionDesc::Pexp_constant(Box::new(Constant::String(payload))),
+                Some(payload) => ExpressionDesc::Pexp_constant(Constant::String(
+                    arena.push_shared_string_literal(&payload),
+                )),
                 None => template(Located {
                     txt: arena
                         .push_shared_string(crate::string_literal::encode_raw_template_source(txt)),
@@ -187,10 +189,7 @@ pub fn to_extension(
             loc: name_loc,
         },
         Payload::PStr(Box::new(vec![StructureItem {
-            pstr_desc: Box::new(StructureItemDesc::Pstr_eval(Box::new((
-                expr,
-                Attributes::new(),
-            )))),
+            pstr_desc: StructureItemDesc::Pstr_eval(Box::new((expr, Attributes::new()))),
             pstr_loc: loc,
         }])),
     )

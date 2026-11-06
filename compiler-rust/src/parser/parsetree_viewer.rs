@@ -15,7 +15,7 @@ use crate::parser::longident::Longident;
 /// looking through explicit braces (res_parsetree_viewer.ml `is_block_expr`).
 pub fn is_block_expr(arena: &ParseArena, expr: &Expression) -> bool {
     matches!(
-        &*unwrap_braces(arena, expr).pexp_desc,
+        &unwrap_braces(arena, expr).pexp_desc,
         ExpressionDesc::Pexp_letmodule(_)
             | ExpressionDesc::Pexp_letexception(_)
             | ExpressionDesc::Pexp_let(_)
@@ -26,7 +26,7 @@ pub fn is_block_expr(arena: &ParseArena, expr: &Expression) -> bool {
 
 /// Check if an expression is an explicit braces node.
 pub fn is_braced_expr(expr: &Expression) -> bool {
-    matches!(&*expr.pexp_desc, ExpressionDesc::Pexp_braces(_))
+    matches!(&expr.pexp_desc, ExpressionDesc::Pexp_braces(_))
 }
 
 /// res_parsetree_viewer.ml `process_braces`: the braces location and the
@@ -35,7 +35,7 @@ pub fn process_braces<'a>(
     arena: &'a ParseArena,
     expr: &'a Expression,
 ) -> (Option<LocIdx>, &'a Expression) {
-    match &*expr.pexp_desc {
+    match &expr.pexp_desc {
         ExpressionDesc::Pexp_braces(braces) => {
             (Some(braces.braces_loc), arena.get_expr(braces.expr))
         }
@@ -46,7 +46,7 @@ pub fn process_braces<'a>(
 /// res_parsetree_viewer.ml `unwrap_braces`.
 pub fn unwrap_braces<'a>(arena: &'a ParseArena, expr: &'a Expression) -> &'a Expression {
     let mut expr = expr;
-    while let ExpressionDesc::Pexp_braces(braces) = &*expr.pexp_desc {
+    while let ExpressionDesc::Pexp_braces(braces) = &expr.pexp_desc {
         expr = arena.get_expr(braces.expr);
     }
     expr
@@ -54,7 +54,7 @@ pub fn unwrap_braces<'a>(arena: &'a ParseArena, expr: &'a Expression) -> &'a Exp
 
 /// Check if an expression is a ternary expression.
 pub fn is_ternary_expr(expr: &Expression) -> bool {
-    matches!(&*expr.pexp_desc, ExpressionDesc::Pexp_ternary(_))
+    matches!(&expr.pexp_desc, ExpressionDesc::Pexp_ternary(_))
 }
 
 /// Collect the parts of a ternary expression chain.
@@ -66,7 +66,7 @@ pub fn collect_ternary_parts<'a>(
     let mut parts = Vec::new();
     let mut current = expr;
 
-    while let ExpressionDesc::Pexp_ternary(inner) = &*current.pexp_desc {
+    while let ExpressionDesc::Pexp_ternary(inner) = &current.pexp_desc {
         let (condition, consequent, alternate) = **inner;
         parts.push((arena.get_expr(condition), arena.get_expr(consequent)));
         current = arena.get_expr(alternate);
@@ -77,7 +77,7 @@ pub fn collect_ternary_parts<'a>(
 
 /// Check if an expression is a if-then-else (any form).
 pub fn is_if_then_else_expr(expr: &Expression) -> bool {
-    matches!(&*expr.pexp_desc, ExpressionDesc::Pexp_ifthenelse(_))
+    matches!(&expr.pexp_desc, ExpressionDesc::Pexp_ifthenelse(_))
 }
 
 /// Collect all the branches of an if-expression chain.
@@ -94,7 +94,7 @@ pub fn collect_if_expressions<'a>(
 
     loop {
         let expr_loc = &current.pexp_loc;
-        match &*current.pexp_desc {
+        match &current.pexp_desc {
             // Regular if-then-else (with or without else branch)
             ExpressionDesc::Pexp_ifthenelse(inner) => {
                 let (ref if_idx, ref then_idx, ref opt_else) = **inner;
@@ -116,13 +116,10 @@ pub fn collect_if_expressions<'a>(
 
 /// Check if expression is a binary expression.
 pub fn is_binary_expression(arena: &crate::parse_arena::ParseArena, expr: &Expression) -> bool {
-    match &*expr.pexp_desc {
+    match &expr.pexp_desc {
         ExpressionDesc::Pexp_apply(inner) => {
-            let PexpApply {
-                ref funct,
-                ref args,
-                ..
-            } = **inner;
+            let PexpApply { ref funct, .. } = *inner;
+            let args = arena.apply_args(inner.args);
             if args.len() != 2
                 || args
                     .iter()
@@ -131,7 +128,7 @@ pub fn is_binary_expression(arena: &crate::parse_arena::ParseArena, expr: &Expre
                 return false;
             }
             let funct_expr = arena.get_expr(*funct);
-            match &*funct_expr.pexp_desc {
+            match &funct_expr.pexp_desc {
                 ExpressionDesc::Pexp_ident(ident) => {
                     if let Longident::Lident(op_idx) = arena.get_longident(ident.txt) {
                         let op = arena.get_string(*op_idx);
@@ -153,18 +150,15 @@ pub fn is_binary_expression(arena: &crate::parse_arena::ParseArena, expr: &Expre
 pub fn is_single_pipe_expr(arena: &crate::parse_arena::ParseArena, expr: &Expression) -> bool {
     // Helper to check if expr is a pipe expression
     fn is_pipe(arena: &crate::parse_arena::ParseArena, expr: &Expression) -> bool {
-        match &*expr.pexp_desc {
+        match &expr.pexp_desc {
             ExpressionDesc::Pexp_apply(inner) => {
-                let PexpApply {
-                    ref funct,
-                    ref args,
-                    ..
-                } = **inner;
+                let PexpApply { ref funct, .. } = *inner;
+                let args = arena.apply_args(inner.args);
                 if args.len() != 2 {
                     return false;
                 }
                 let funct_expr = arena.get_expr(*funct);
-                if let ExpressionDesc::Pexp_ident(ident) = &*funct_expr.pexp_desc {
+                if let ExpressionDesc::Pexp_ident(ident) = &funct_expr.pexp_desc {
                     if let Longident::Lident(op_idx) = arena.get_longident(ident.txt) {
                         return arena.get_string(*op_idx) == "->";
                     }
@@ -176,18 +170,15 @@ pub fn is_single_pipe_expr(arena: &crate::parse_arena::ParseArena, expr: &Expres
     }
 
     // Check if this is a pipe where the LHS is NOT also a pipe
-    match &*expr.pexp_desc {
+    match &expr.pexp_desc {
         ExpressionDesc::Pexp_apply(inner) => {
-            let PexpApply {
-                ref funct,
-                ref args,
-                ..
-            } = **inner;
+            let PexpApply { ref funct, .. } = *inner;
+            let args = arena.apply_args(inner.args);
             if args.len() != 2 {
                 return false;
             }
             let funct_expr = arena.get_expr(*funct);
-            if let ExpressionDesc::Pexp_ident(ident) = &*funct_expr.pexp_desc {
+            if let ExpressionDesc::Pexp_ident(ident) = &funct_expr.pexp_desc {
                 if let Longident::Lident(op_idx) = arena.get_longident(ident.txt) {
                     if arena.get_string(*op_idx) == "->" {
                         // It's a pipe - check that LHS is not also a pipe
@@ -204,12 +195,12 @@ pub fn is_single_pipe_expr(arena: &crate::parse_arena::ParseArena, expr: &Expres
 
 /// Check if expression is an await expression.
 pub fn expr_is_await(expr: &Expression) -> bool {
-    matches!(&*expr.pexp_desc, ExpressionDesc::Pexp_await(_))
+    matches!(&expr.pexp_desc, ExpressionDesc::Pexp_await(_))
 }
 
 /// Check if expression is underscore apply sugar: `(__x) => f(...)`.
 pub fn is_underscore_apply_sugar(arena: &ParseArena, expr: &Expression) -> bool {
-    match &*expr.pexp_desc {
+    match &expr.pexp_desc {
         ExpressionDesc::Pexp_fun(inner) => {
             let PexpFun {
                 ref arg_label,
@@ -222,10 +213,10 @@ pub fn is_underscore_apply_sugar(arena: &ParseArena, expr: &Expression) -> bool 
                 return false;
             }
             let lhs_pat = arena.get_pat(*lhs);
-            if let PatternDesc::Ppat_var(name) = &*lhs_pat.ppat_desc {
+            if let PatternDesc::Ppat_var(name) = &lhs_pat.ppat_desc {
                 if arena.get_string(name.txt) == "__x" {
                     let rhs_expr = arena.get_expr(*rhs);
-                    return matches!(&*rhs_expr.pexp_desc, ExpressionDesc::Pexp_apply(_));
+                    return matches!(&rhs_expr.pexp_desc, ExpressionDesc::Pexp_apply(_));
                 }
             }
             false
@@ -238,7 +229,7 @@ pub fn is_underscore_apply_sugar(arena: &ParseArena, expr: &Expression) -> bool 
 /// braces (res_parsetree_viewer.ml `is_fun_expr`).
 pub fn is_fun_newtype(arena: &ParseArena, expr: &Expression) -> bool {
     matches!(
-        &*unwrap_braces(arena, expr).pexp_desc,
+        &unwrap_braces(arena, expr).pexp_desc,
         ExpressionDesc::Pexp_fun(_) | ExpressionDesc::Pexp_newtype(_)
     )
 }
@@ -246,7 +237,7 @@ pub fn is_fun_newtype(arena: &ParseArena, expr: &Expression) -> bool {
 /// Check if expression is an uncurried function (has explicit arity).
 /// Requires arena to look up arity value (Arity is now ArityIdx).
 pub fn expr_is_uncurried_fun(arena: &ParseArena, expr: &Expression) -> bool {
-    if let ExpressionDesc::Pexp_fun(fun_inner) = &*expr.pexp_desc {
+    if let ExpressionDesc::Pexp_fun(fun_inner) = &expr.pexp_desc {
         // Has explicit arity if arena.get_arity returns Some(_)
         arena.get_arity(fun_inner.arity).is_some()
     } else {
@@ -317,11 +308,11 @@ pub fn requires_special_callback_printing_first_arg(
 
 /// Check if an expression is "huggable" (can be printed without line breaks).
 pub fn is_huggable_expression(arena: &crate::parse_arena::ParseArena, expr: &Expression) -> bool {
-    match &*expr.pexp_desc {
+    match &expr.pexp_desc {
         ExpressionDesc::Pexp_array(_)
         | ExpressionDesc::Pexp_tuple(_)
         | ExpressionDesc::Pexp_record(_) => true,
-        ExpressionDesc::Pexp_constant(c) if matches!(&**c, Constant::Char { .. }) => true,
+        ExpressionDesc::Pexp_constant(c) if matches!(c, Constant::Char { .. }) => true,
         ExpressionDesc::Pexp_template(template) if template.values.is_empty() => true,
         ExpressionDesc::Pexp_construct(lid, _)
             if arena.is_lident(lid.txt, "::") || arena.is_lident(lid.txt, "[]") =>
@@ -330,8 +321,8 @@ pub fn is_huggable_expression(arena: &crate::parse_arena::ParseArena, expr: &Exp
         }
         ExpressionDesc::Pexp_object_literal(_) | ExpressionDesc::Pexp_braces(_) => true,
         _ if is_block_expr(arena, expr) => true,
-        ExpressionDesc::Pexp_constant(c) => match &**c {
-            Constant::String(payload) => is_multiline_text(payload.source()),
+        ExpressionDesc::Pexp_constant(c) => match c {
+            Constant::String(payload) => is_multiline_text(payload.source(arena)),
             _ => false,
         },
         _ => false,
@@ -361,7 +352,7 @@ fn is_multiline_text(txt: &str) -> bool {
 /// Check if an expression is "huggable" as a RHS (simpler than is_huggable_expression).
 pub fn is_huggable_rhs(expr: &Expression) -> bool {
     matches!(
-        &*expr.pexp_desc,
+        &expr.pexp_desc,
         ExpressionDesc::Pexp_array(_)
             | ExpressionDesc::Pexp_tuple(_)
             | ExpressionDesc::Pexp_record(_)
@@ -372,13 +363,10 @@ pub fn is_huggable_rhs(expr: &Expression) -> bool {
 
 /// Check if an expression is a unary expression.
 pub fn is_unary_expression(arena: &crate::parse_arena::ParseArena, expr: &Expression) -> bool {
-    match &*expr.pexp_desc {
+    match &expr.pexp_desc {
         ExpressionDesc::Pexp_apply(inner) => {
-            let PexpApply {
-                ref funct,
-                ref args,
-                ..
-            } = **inner;
+            let PexpApply { ref funct, .. } = *inner;
+            let args = arena.apply_args(inner.args);
             if args.len() != 1
                 || args
                     .iter()
@@ -387,7 +375,7 @@ pub fn is_unary_expression(arena: &crate::parse_arena::ParseArena, expr: &Expres
                 return false;
             }
             let funct_expr = arena.get_expr(*funct);
-            if let ExpressionDesc::Pexp_ident(ident) = &*funct_expr.pexp_desc {
+            if let ExpressionDesc::Pexp_ident(ident) = &funct_expr.pexp_desc {
                 is_unary_operator_idx(arena, ident.txt)
             } else {
                 false
@@ -420,7 +408,7 @@ pub fn is_unary_operator_idx(
 /// Note: Pexp_match (switch) is NOT in this list, so it will NOT inline
 pub fn should_inline_rhs_binary_expr(arena: &ParseArena, expr: &Expression) -> bool {
     matches!(
-        &*unwrap_braces(arena, expr).pexp_desc,
+        &unwrap_braces(arena, expr).pexp_desc,
         ExpressionDesc::Pexp_constant(_)
             | ExpressionDesc::Pexp_let(_)
             | ExpressionDesc::Pexp_letmodule(_)
@@ -495,7 +483,7 @@ pub fn dict_expr_parts(
 /// Used for dict pattern rows to determine if the pattern should be on the same line as the key.
 pub fn is_huggable_pattern(pat: &Pattern) -> bool {
     matches!(
-        &*pat.ppat_desc,
+        &pat.ppat_desc,
         PatternDesc::Ppat_array(_)
             | PatternDesc::Ppat_tuple(_)
             | PatternDesc::Ppat_record(_)
@@ -515,18 +503,18 @@ pub fn collect_list_expressions<'a>(
     let mut current = expr;
 
     loop {
-        match &*current.pexp_desc {
+        match &current.pexp_desc {
             // res_parsetree_viewer.ml `collect_list_expressions`: `::` takes
             // its head and tail as two arguments, or as one 2-tuple.
             ExpressionDesc::Pexp_construct(lid, _) if arena.is_lident(lid.txt, "[]") => {
                 return (acc, None);
             }
             ExpressionDesc::Pexp_construct(lid, args) if arena.is_lident(lid.txt, "::") => {
-                let pair = match args.txt.as_slice() {
+                let pair = match arena.expr_list(args.txt) {
                     [head, tail] => Some((*head, *tail)),
-                    [arg] => match &*arena.get_expr(*arg).pexp_desc {
+                    [arg] => match &arena.get_expr(*arg).pexp_desc {
                         ExpressionDesc::Pexp_tuple(exprs) if exprs.len() == 2 => {
-                            Some((exprs[0], exprs[1]))
+                            Some((arena.expr_list(*exprs)[0], arena.expr_list(*exprs)[1]))
                         }
                         _ => None,
                     },
@@ -558,13 +546,15 @@ pub fn collect_list_patterns<'a>(
     let mut acc = Vec::new();
     let mut current = pat;
     loop {
-        if let PatternDesc::Ppat_construct(lid, args) = &*current.ppat_desc
+        if let PatternDesc::Ppat_construct(lid, args) = &current.ppat_desc
             && arena.is_lident(lid.txt, "::")
         {
-            let pair = match args.txt.as_slice() {
+            let pair = match arena.pat_list(args.txt) {
                 [head, rest] => Some((*head, *rest)),
-                [arg] => match &*arena.get_pat(*arg).ppat_desc {
-                    PatternDesc::Ppat_tuple(pats) if pats.len() == 2 => Some((pats[0], pats[1])),
+                [arg] => match &arena.get_pat(*arg).ppat_desc {
+                    PatternDesc::Ppat_tuple(pats) if pats.len() == 2 => {
+                        Some((arena.pat_list(*pats)[0], arena.pat_list(*pats)[1]))
+                    }
                     _ => None,
                 },
                 _ => None,
@@ -588,10 +578,15 @@ pub fn collect_array_expressions<'a>(
     arena: &'a ParseArena,
     expr: &'a Expression,
 ) -> (Vec<&'a Expression>, Option<&'a Expression>) {
-    match &*expr.pexp_desc {
-        ExpressionDesc::Pexp_array(exprs) => {
-            (exprs.iter().map(|idx| arena.get_expr(*idx)).collect(), None)
-        }
+    match &expr.pexp_desc {
+        ExpressionDesc::Pexp_array(exprs) => (
+            arena
+                .expr_list(*exprs)
+                .iter()
+                .map(|idx| arena.get_expr(*idx))
+                .collect(),
+            None,
+        ),
         _ => (vec![], Some(expr)),
     }
 }
@@ -662,13 +657,13 @@ pub fn fun_expr<'a>(
 
     // First, collect leading Pexp_newtype (like OCaml's top-level match)
     // This combines consecutive newtypes like "type t, type u" into "type t u"
-    if let ExpressionDesc::Pexp_newtype(newtype_inner) = &*current.pexp_desc {
+    if let ExpressionDesc::Pexp_newtype(newtype_inner) = &current.pexp_desc {
         let (ref name, ref body_idx) = **newtype_inner;
         let mut names = vec![name];
         current = arena.get_expr(*body_idx);
 
         // Collect any additional consecutive newtypes
-        while let ExpressionDesc::Pexp_newtype(next_inner) = &*current.pexp_desc {
+        while let ExpressionDesc::Pexp_newtype(next_inner) = &current.pexp_desc {
             let (ref next_name, ref next_body_idx) = **next_inner;
             names.push(next_name);
             current = arena.get_expr(*next_body_idx);
@@ -682,7 +677,7 @@ pub fn fun_expr<'a>(
     let mut found_first_pexp_fun = false;
 
     loop {
-        match &*current.pexp_desc {
+        match &current.pexp_desc {
             ExpressionDesc::Pexp_fun(inner) => {
                 if let Some(source_params) = arena.stored_nary_fun_params(inner) {
                     // A function with its own parameter list is a separate
@@ -792,7 +787,7 @@ pub fn is_spread_belt_list_concat(arena: &ParseArena, expr: &Expression) -> bool
 }
 
 fn is_primitive_spread(arena: &ParseArena, expr: &Expression, module_name: &str) -> bool {
-    let ExpressionDesc::Pexp_ident(loc_idx) = &*expr.pexp_desc else {
+    let ExpressionDesc::Pexp_ident(loc_idx) = &expr.pexp_desc else {
         return false;
     };
     let Longident::Ldot(parent, name_idx) = arena.get_longident(loc_idx.txt) else {
@@ -872,15 +867,12 @@ pub fn should_indent_binary_expr(
 ) -> bool {
     use crate::parser::longident::Longident;
 
-    match &*expr.pexp_desc {
+    match &expr.pexp_desc {
         ExpressionDesc::Pexp_apply(apply_inner) if apply_inner.args.len() == 2 => {
-            let PexpApply {
-                ref funct,
-                ref args,
-                ..
-            } = **apply_inner;
+            let PexpApply { ref funct, .. } = *apply_inner;
+            let args = arena.apply_args(apply_inner.args);
             let funct_expr = arena.get_expr(*funct);
-            if let ExpressionDesc::Pexp_ident(ident) = &*funct_expr.pexp_desc {
+            if let ExpressionDesc::Pexp_ident(ident) = &funct_expr.pexp_desc {
                 if let Longident::Lident(op_idx) = arena.get_longident(ident.txt) {
                     let op = arena.get_string(*op_idx);
                     if is_binary_operator_str(op) {
@@ -911,13 +903,12 @@ fn same_precedence_sub_expression(
 ) -> bool {
     use crate::parser::longident::Longident;
 
-    match &*sub_expr.pexp_desc {
+    match &sub_expr.pexp_desc {
         ExpressionDesc::Pexp_apply(apply_inner) if apply_inner.args.len() == 2 => {
-            let PexpApply {
-                ref funct, args: _, ..
-            } = **apply_inner;
+            let PexpApply { ref funct, .. } = *apply_inner;
+            let _ = arena.apply_args(apply_inner.args);
             let funct_expr = arena.get_expr(*funct);
-            if let ExpressionDesc::Pexp_ident(ident) = &*funct_expr.pexp_desc {
+            if let ExpressionDesc::Pexp_ident(ident) = &funct_expr.pexp_desc {
                 if let Longident::Lident(op_idx) = arena.get_longident(ident.txt) {
                     let sub_op = arena.get_string(*op_idx);
                     if is_binary_operator_str(sub_op) {
@@ -982,7 +973,7 @@ pub fn not_ghost_operator(op: &str, is_ghost: bool) -> bool {
 /// Check if an expression is a `__x` identifier that should be printed as `_`.
 /// Used when printing inside underscore apply sugar.
 pub fn is_underscore_ident(expr: &Expression, arena: &ParseArena) -> bool {
-    match &*expr.pexp_desc {
+    match &expr.pexp_desc {
         ExpressionDesc::Pexp_ident(lid) => arena.is_lident(lid.txt, "__x"),
         _ => false,
     }
@@ -1011,7 +1002,7 @@ pub fn arrow_type<'a>(
     arena: &'a ParseArena,
     typ: &'a CoreType,
 ) -> (&'a Attributes, Vec<TypeParameter<'a>>, &'a CoreType) {
-    match &*typ.ptyp_desc {
+    match &typ.ptyp_desc {
         CoreTypeDesc::Ptyp_arrow(inner) => {
             let (arg, ret, _) = &**inner;
             let params = arena
@@ -1051,7 +1042,7 @@ pub fn mod_expr_apply<'a>(
         acc: Vec<&'a ModuleExpr>,
         mod_expr: &'a ModuleExpr,
     ) -> (Vec<&'a ModuleExpr>, &'a ModuleExpr) {
-        match &*mod_expr.pmod_desc {
+        match &mod_expr.pmod_desc {
             // An inner application with attributes is kept as the callee, so
             // the printer can parenthesize it with its attributes.
             ModuleExprDesc::Pmod_apply(next_idx, arg_idx)
@@ -1091,7 +1082,7 @@ pub fn mod_expr_functor<'a>(
         acc: Vec<FunctorParam<'a>>,
         mod_expr: &'a ModuleExpr,
     ) -> (Vec<FunctorParam<'a>>, &'a ModuleExpr) {
-        match &*mod_expr.pmod_desc {
+        match &mod_expr.pmod_desc {
             ModuleExprDesc::Pmod_functor(inner) => {
                 let (ref lbl, ref mod_type_idx, ref return_mod_expr_idx) = **inner;
                 let param = FunctorParam {
@@ -1120,13 +1111,10 @@ pub fn mod_expr_functor<'a>(
 
 /// Check if an expression is `Array.get(arr, idx)`.
 pub fn is_array_access(arena: &crate::parse_arena::ParseArena, expr: &Expression) -> bool {
-    match &*expr.pexp_desc {
+    match &expr.pexp_desc {
         ExpressionDesc::Pexp_apply(inner) => {
-            let PexpApply {
-                ref funct,
-                ref args,
-                ..
-            } = **inner;
+            let PexpApply { ref funct, .. } = *inner;
+            let args = arena.apply_args(inner.args);
             if args.len() != 2
                 || args
                     .iter()
@@ -1135,7 +1123,7 @@ pub fn is_array_access(arena: &crate::parse_arena::ParseArena, expr: &Expression
                 return false;
             }
             let funct_expr = arena.get_expr(*funct);
-            if let ExpressionDesc::Pexp_ident(lid) = &*funct_expr.pexp_desc {
+            if let ExpressionDesc::Pexp_ident(lid) = &funct_expr.pexp_desc {
                 if let Longident::Ldot(base, method_idx) = arena.get_longident(lid.txt) {
                     if let Longident::Lident(module_idx) = base.as_ref() {
                         let module = arena.get_string(*module_idx);
@@ -1152,13 +1140,10 @@ pub fn is_array_access(arena: &crate::parse_arena::ParseArena, expr: &Expression
 
 /// Check if an expression is `Array.set(arr, idx, value)`.
 pub fn is_array_set(arena: &crate::parse_arena::ParseArena, expr: &Expression) -> bool {
-    match &*expr.pexp_desc {
+    match &expr.pexp_desc {
         ExpressionDesc::Pexp_apply(inner) => {
-            let PexpApply {
-                ref funct,
-                ref args,
-                ..
-            } = **inner;
+            let PexpApply { ref funct, .. } = *inner;
+            let args = arena.apply_args(inner.args);
             if args.len() != 3
                 || args
                     .iter()
@@ -1167,7 +1152,7 @@ pub fn is_array_set(arena: &crate::parse_arena::ParseArena, expr: &Expression) -
                 return false;
             }
             let funct_expr = arena.get_expr(*funct);
-            if let ExpressionDesc::Pexp_ident(lid) = &*funct_expr.pexp_desc {
+            if let ExpressionDesc::Pexp_ident(lid) = &funct_expr.pexp_desc {
                 if let Longident::Ldot(base, method_idx) = arena.get_longident(lid.txt) {
                     if let Longident::Lident(module_idx) = base.as_ref() {
                         let module = arena.get_string(*module_idx);
@@ -1188,7 +1173,7 @@ pub fn is_rewritten_underscore_apply_sugar(
     arena: &crate::parse_arena::ParseArena,
     expr: &Expression,
 ) -> bool {
-    match &*expr.pexp_desc {
+    match &expr.pexp_desc {
         ExpressionDesc::Pexp_ident(lid) => arena.is_lident(lid.txt, "_"),
         _ => false,
     }
@@ -1207,12 +1192,12 @@ pub fn is_doc_comment_attribute(arena: &ParseArena, attr: &Attribute) -> bool {
     let [item] = items.as_slice() else {
         return false;
     };
-    let StructureItemDesc::Pstr_eval(eval) = &*item.pstr_desc else {
+    let StructureItemDesc::Pstr_eval(eval) = &item.pstr_desc else {
         return false;
     };
     matches!(
-        &*arena.get_expr(eval.0).pexp_desc,
-        ExpressionDesc::Pexp_constant(c) if matches!(&**c, Constant::String(..))
+        &arena.get_expr(eval.0).pexp_desc,
+        ExpressionDesc::Pexp_constant(c) if matches!(&*c, Constant::String(..))
     )
 }
 
@@ -1242,7 +1227,7 @@ pub fn partition_doc_comment_attributes<'a>(
 /// preserving the nested or-pattern (which should be wrapped in parens when printed).
 pub fn collect_or_pattern_chain<'a>(arena: &'a ParseArena, pat: &'a Pattern) -> Vec<&'a Pattern> {
     fn loop_collect<'a>(arena: &'a ParseArena, pattern: &'a Pattern, chain: &mut Vec<&'a Pattern>) {
-        match &*pattern.ppat_desc {
+        match &pattern.ppat_desc {
             PatternDesc::Ppat_or(left_idx, right_idx) => {
                 let left: &Pattern = arena.get_pat(*left_idx);
                 let right: &Pattern = arena.get_pat(*right_idx);

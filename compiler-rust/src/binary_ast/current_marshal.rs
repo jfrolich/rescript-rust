@@ -22,9 +22,9 @@ use crate::parser::ast::{
     ModuleExprDesc, ModuleType, ModuleTypeDeclaration, ModuleTypeDesc, MutableFlag, ObjectField,
     OpenDescription, OverrideFlag, Pattern, PatternDesc, PatternRecordField, Payload, PexpApply,
     PexpFun, PrimitiveRepr, PrivateFlag, RecFlag, RecordPatRest, RowField, SignatureItem,
-    SignatureItemDesc, StringLoc, StructureItem, StructureItemDesc, TypeArg, TypeDeclaration,
-    TypeExtension, TypeKind, ValueBinding, ValueConstraint, ValueDescription, Variance,
-    WithConstraint,
+    SignatureItemDesc, StringConst, StringLoc, StructureItem, StructureItemDesc, TypeArg,
+    TypeDeclaration, TypeExtension, TypeKind, ValueBinding, ValueConstraint, ValueDescription,
+    Variance, WithConstraint,
 };
 use crate::parser::longident::Longident;
 
@@ -38,14 +38,11 @@ fn is_symbolic_operator(name: &str) -> bool {
 fn is_pipe_application(expr: &Expression, w: &MarshalWriter<'_>) -> bool {
     let arena = w.get_arena();
 
-    let ExpressionDesc::Pexp_apply(inner) = &*expr.pexp_desc else {
+    let ExpressionDesc::Pexp_apply(inner) = &expr.pexp_desc else {
         return false;
     };
-    let PexpApply {
-        ref funct,
-        ref args,
-        ..
-    } = **inner;
+    let PexpApply { ref funct, .. } = *inner;
+    let args = arena.apply_args(inner.args);
     if args.is_empty() || !matches!(args[0].0, ArgLabel::Nolabel) {
         return false;
     }
@@ -67,7 +64,7 @@ fn is_pipe_application(expr: &Expression, w: &MarshalWriter<'_>) -> bool {
         return false;
     }
 
-    let ExpressionDesc::Pexp_ident(lid) = &*funct_expr.pexp_desc else {
+    let ExpressionDesc::Pexp_ident(lid) = &funct_expr.pexp_desc else {
         return false;
     };
     let name = match arena.get_longident(lid.txt) {
@@ -131,7 +128,7 @@ fn is_none_loc_idx(loc: LocIdx, w: &MarshalWriter<'_>) -> bool {
 }
 
 fn is_raw_expansion_expr(expr: &Expression, w: &MarshalWriter<'_>) -> bool {
-    let ExpressionDesc::Pexp_letmodule(lm_inner) = &*expr.pexp_desc else {
+    let ExpressionDesc::Pexp_letmodule(lm_inner) = &expr.pexp_desc else {
         return false;
     };
     let (ref module_name, ref mod_expr, ref body) = **lm_inner;
@@ -142,14 +139,14 @@ fn is_raw_expansion_expr(expr: &Expression, w: &MarshalWriter<'_>) -> bool {
     }
 
     let mod_expr_ref = arena.get_mod_expr(*mod_expr);
-    let ModuleExprDesc::Pmod_structure(items) = &*mod_expr_ref.pmod_desc else {
+    let ModuleExprDesc::Pmod_structure(items) = &mod_expr_ref.pmod_desc else {
         return false;
     };
     if items.len() != 1 {
         return false;
     }
 
-    let StructureItemDesc::Pstr_primitive(vd) = &*items[0].pstr_desc else {
+    let StructureItemDesc::Pstr_primitive(vd) = &items[0].pstr_desc else {
         return false;
     };
     if arena.get_string(vd.pval_name.txt) != "unsafe_expr" {
@@ -164,20 +161,17 @@ fn is_raw_expansion_expr(expr: &Expression, w: &MarshalWriter<'_>) -> bool {
     }
 
     let body_expr = arena.get_expr(*body);
-    let ExpressionDesc::Pexp_apply(inner) = &*body_expr.pexp_desc else {
+    let ExpressionDesc::Pexp_apply(inner) = &body_expr.pexp_desc else {
         return false;
     };
-    let PexpApply {
-        ref funct,
-        ref args,
-        ..
-    } = **inner;
+    let PexpApply { ref funct, .. } = *inner;
+    let args = arena.apply_args(inner.args);
     if args.len() != 1 || !matches!(args[0].0, ArgLabel::Nolabel) {
         return false;
     }
 
     let funct_expr = arena.get_expr(*funct);
-    let ExpressionDesc::Pexp_ident(lid) = &*funct_expr.pexp_desc else {
+    let ExpressionDesc::Pexp_ident(lid) = &funct_expr.pexp_desc else {
         return false;
     };
     match arena.get_longident(lid.txt) {
@@ -194,19 +188,19 @@ fn is_raw_expansion_expr(expr: &Expression, w: &MarshalWriter<'_>) -> bool {
 fn is_external_ext_expr(expr: &Expression, w: &MarshalWriter<'_>) -> bool {
     let arena = w.get_arena();
 
-    let ExpressionDesc::Pexp_apply(inner) = &*expr.pexp_desc else {
+    let ExpressionDesc::Pexp_apply(inner) = &expr.pexp_desc else {
         return false;
     };
     let PexpApply {
         funct: ref outer_funct,
-        args: ref outer_args,
         ..
-    } = **inner;
+    } = *inner;
+    let outer_args = arena.apply_args(inner.args);
     if outer_args.len() != 1 || !matches!(outer_args[0].0, ArgLabel::Nolabel) {
         return false;
     }
     let outer_funct_expr = arena.get_expr(*outer_funct);
-    let ExpressionDesc::Pexp_ident(outer_lid) = &*outer_funct_expr.pexp_desc else {
+    let ExpressionDesc::Pexp_ident(outer_lid) = &outer_funct_expr.pexp_desc else {
         return false;
     };
     if outer_lid.txt != arena.ppx_js_undefined_to_option_lid() {
@@ -214,7 +208,7 @@ fn is_external_ext_expr(expr: &Expression, w: &MarshalWriter<'_>) -> bool {
     }
 
     let outer_arg_expr = arena.get_expr(outer_args[0].1);
-    let ExpressionDesc::Pexp_ifthenelse(ite_inner) = &*outer_arg_expr.pexp_desc else {
+    let ExpressionDesc::Pexp_ifthenelse(ite_inner) = &outer_arg_expr.pexp_desc else {
         return false;
     };
     let (ref cond, ref then_expr, ref opt_else) = **ite_inner;
@@ -227,21 +221,21 @@ fn is_external_ext_expr(expr: &Expression, w: &MarshalWriter<'_>) -> bool {
     }
     let then_expr_ref = arena.get_expr(*then_expr);
     if !matches!(
-        &*then_expr_ref.pexp_desc,
+        &then_expr_ref.pexp_desc,
         ExpressionDesc::Pexp_ident(then_lid) if then_lid.txt == arena.ppx_js_undefined_empty_lid()
     ) {
         return false;
     }
 
     let cond_expr = arena.get_expr(*cond);
-    let ExpressionDesc::Pexp_apply(eq_inner) = &*cond_expr.pexp_desc else {
+    let ExpressionDesc::Pexp_apply(eq_inner) = &cond_expr.pexp_desc else {
         return false;
     };
     let PexpApply {
         funct: ref eq_funct,
-        args: ref eq_args,
         ..
-    } = **eq_inner;
+    } = *eq_inner;
+    let eq_args = arena.apply_args(eq_inner.args);
     if eq_args.len() != 2
         || !matches!(eq_args[0].0, ArgLabel::Nolabel)
         || !matches!(eq_args[1].0, ArgLabel::Nolabel)
@@ -250,7 +244,7 @@ fn is_external_ext_expr(expr: &Expression, w: &MarshalWriter<'_>) -> bool {
     }
     let eq_funct_expr = arena.get_expr(*eq_funct);
     if !matches!(
-        &*eq_funct_expr.pexp_desc,
+        &eq_funct_expr.pexp_desc,
         ExpressionDesc::Pexp_ident(eq_lid)
             if matches!(arena.get_longident(eq_lid.txt), Longident::Lident(s) if *s == arena.ppx_eq_str())
     ) {
@@ -258,20 +252,20 @@ fn is_external_ext_expr(expr: &Expression, w: &MarshalWriter<'_>) -> bool {
     }
 
     let eq_arg0_expr = arena.get_expr(eq_args[0].1);
-    let ExpressionDesc::Pexp_apply(typeof_inner) = &*eq_arg0_expr.pexp_desc else {
+    let ExpressionDesc::Pexp_apply(typeof_inner) = &eq_arg0_expr.pexp_desc else {
         return false;
     };
     let PexpApply {
         funct: ref typeof_funct,
-        args: ref typeof_args,
         ..
-    } = **typeof_inner;
+    } = *typeof_inner;
+    let typeof_args = arena.apply_args(typeof_inner.args);
     if typeof_args.len() != 1 || !matches!(typeof_args[0].0, ArgLabel::Nolabel) {
         return false;
     }
     let typeof_funct_expr = arena.get_expr(*typeof_funct);
     if !matches!(
-        &*typeof_funct_expr.pexp_desc,
+        &typeof_funct_expr.pexp_desc,
         ExpressionDesc::Pexp_ident(typeof_lid) if typeof_lid.txt == arena.ppx_js_typeof_lid()
     ) {
         return false;
@@ -283,8 +277,8 @@ fn is_external_ext_expr(expr: &Expression, w: &MarshalWriter<'_>) -> bool {
 
     let eq_arg1_expr = arena.get_expr(eq_args[1].1);
     matches!(
-        &*eq_arg1_expr.pexp_desc,
-        ExpressionDesc::Pexp_constant(c) if matches!(&**c, Constant::String(s) if s.semantic() == "undefined")
+        &eq_arg1_expr.pexp_desc,
+        ExpressionDesc::Pexp_constant(c) if matches!(&*c, Constant::String(s) if s.semantic(arena) == "undefined")
     )
 }
 
@@ -295,22 +289,22 @@ fn is_external_raw_expansion_expr(expr: &Expression, w: &MarshalWriter<'_>) -> b
 /// The `%external`-specific half of [`is_external_raw_expansion_expr`], for
 /// callers that already know `expr` is a raw expansion.
 fn is_external_raw_expansion_body(expr: &Expression, w: &MarshalWriter<'_>) -> bool {
-    let ExpressionDesc::Pexp_letmodule(lm_inner) = &*expr.pexp_desc else {
+    let ExpressionDesc::Pexp_letmodule(lm_inner) = &expr.pexp_desc else {
         return false;
     };
     let (_, _, ref body) = **lm_inner;
     let body_expr = w.get_arena().get_expr(*body);
-    let ExpressionDesc::Pexp_apply(apply_inner) = &*body_expr.pexp_desc else {
+    let ExpressionDesc::Pexp_apply(apply_inner) = &body_expr.pexp_desc else {
         return false;
     };
-    let PexpApply { ref args, .. } = **apply_inner;
+    let args = w.get_arena().apply_args(apply_inner.args);
     if args.len() != 1 || !matches!(args[0].0, ArgLabel::Nolabel) {
         return false;
     }
     let arg_expr = w.get_arena().get_expr(args[0].1);
     matches!(
-        &*arg_expr.pexp_desc,
-        ExpressionDesc::Pexp_constant(c) if matches!(&**c, Constant::String(_))
+        &arg_expr.pexp_desc,
+        ExpressionDesc::Pexp_constant(Constant::String(_))
     )
 }
 
@@ -462,7 +456,7 @@ fn marshal_attribute_list(
 ///
 /// In OCaml, certain parser attributes (`template_literal_attr`, etc.) are module-level
 /// `let` bindings that create a single physical tuple object. When the PPX preserves
-/// these attributes (early-return cases like `Pexp_constant(Box::new(Pconst_string(_, Some _)))`),
+/// these attributes (early-return cases like `Pexp_constant(Pconst_string(_, Some _))`),
 /// the marshal sees the same physical pointer and writes SHARED references.
 ///
 /// For expressions that go through OCaml's default mapper, `sub.attributes sub attrs`
@@ -823,28 +817,48 @@ fn marshal_string_literal(
     }
 }
 
+/// `String_literal.payload` of an interned literal, written by content.
+fn marshal_string_const(payload: StringConst, w: &mut MarshalWriter<'_>) {
+    let arena = w.get_arena();
+    match payload {
+        StringConst::Valid { source, semantic } => {
+            w.write_block_header(0, 2);
+            w.write_str(arena.get_string(source));
+            w.write_str(arena.get_string(semantic));
+        }
+        StringConst::InvalidSource(source) => {
+            w.write_block_header(1, 1);
+            w.write_str(arena.get_string(source));
+        }
+    }
+}
+
 impl Marshal for Constant {
+    /// Constant strings are written by content, never as shared references:
+    /// each OCaml constant owns its string, and the arena may intern equal
+    /// constant spellings to one `StrIdx`.
     fn marshal(&self, w: &mut MarshalWriter<'_>) {
-        match self {
+        let arena = w.get_arena();
+        match *self {
             Constant::Integer(s, suffix) => {
                 w.write_block_header(0, 2);
-                w.write_str(s);
+                w.write_str(arena.get_string(s));
                 suffix.marshal(w);
             }
             Constant::Char { source, semantic } => {
                 // Pconst_char {source; semantic}: inline record, tag 1.
                 w.write_block_header(1, 2);
-                w.write_str(source);
-                w.write_int(*semantic as i64);
+                w.write_str(arena.get_string(source));
+                w.write_int(semantic as i64);
             }
             Constant::String(payload) => {
                 // Pconst_string of String_literal.payload, tag 2.
                 w.write_block_header(2, 1);
-                marshal_string_literal(payload, w);
+                marshal_string_const(payload, w);
             }
             Constant::Float(s, suffix) => {
                 w.write_block_header(3, 2);
-                w.write_str(s);
+                w.write_str(arena.get_string(s));
                 suffix.marshal(w);
             }
         }
@@ -931,15 +945,15 @@ impl Marshal for FunParam {
 
 impl Marshal for CoreType {
     fn marshal(&self, w: &mut MarshalWriter<'_>) {
-        let share_empty_pstr = match &*self.ptyp_desc {
+        let share_empty_pstr = match &self.ptyp_desc {
             CoreTypeDesc::Ptyp_object(_) => Some(EmptyPayloadShareKind::ObjectTypeAttr),
             _ => None,
         };
 
         // OCaml's Ast_literal.No_loc simple core_types are module-level constants.
         // Share only those dedicated lidents to avoid value-based over-sharing.
-        if let CoreTypeDesc::Ptyp_constr(inner) = &*self.ptyp_desc {
-            let (ref lid, ref types) = **inner;
+        if let CoreTypeDesc::Ptyp_constr(inner) = &self.ptyp_desc {
+            let (ref lid, ref types) = *inner;
             let should_share_simple_type = self.ptyp_attributes.is_empty()
                 && types.is_empty()
                 && is_none_loc_idx(self.ptyp_loc, w)
@@ -967,7 +981,8 @@ impl Marshal for CoreType {
         // In OCaml's from_labels (handle_obj), the same tyvar CoreType is physically
         // shared between Otag fields and Labelled args. The first write creates the
         // object, subsequent writes with the same (name, loc) emit shared references.
-        if let CoreTypeDesc::Ptyp_var(name) = &*self.ptyp_desc {
+        if let CoreTypeDesc::Ptyp_var(name) = &self.ptyp_desc {
+            let name = w.get_arena().get_string(*name);
             // Most located tyvars are rebuilt as fresh nodes in OCaml and should not
             // be globally shared by value. Keep sharing narrow, but allow it in
             // letmodule/module_typeof scopes where OCaml reuses tyvar core_types in
@@ -992,7 +1007,8 @@ impl Marshal for CoreType {
             }
         }
 
-        if let CoreTypeDesc::Ptyp_var(name) = &*self.ptyp_desc {
+        if let CoreTypeDesc::Ptyp_var(name) = &self.ptyp_desc {
+            let name = w.get_arena().get_string(*name);
             w.write_block_header(0, 3);
             marshal_ptyp_var_desc(name, self.ptyp_loc, w);
             self.ptyp_loc.marshal(w);
@@ -1026,6 +1042,7 @@ impl Marshal for CoreTypeDesc {
             CoreTypeDesc::Ptyp_any => w.write_int(0),
             CoreTypeDesc::Ptyp_var(s) => {
                 w.write_block_header(0, 1);
+                let s = w.get_arena().get_string(*s);
                 w.write_str(s);
             }
             CoreTypeDesc::Ptyp_arrow(inner) => {
@@ -1042,7 +1059,7 @@ impl Marshal for CoreTypeDesc {
                 types.marshal(w);
             }
             CoreTypeDesc::Ptyp_constr(inner) => {
-                let (ref lid, ref types) = **inner;
+                let (ref lid, ref types) = *inner;
                 w.write_block_header(3, 2);
                 lid.marshal(w);
                 types.marshal(w);
@@ -1143,7 +1160,7 @@ impl Marshal for ObjectField {
 impl Marshal for Pattern {
     fn marshal(&self, w: &mut MarshalWriter<'_>) {
         w.write_block_header(0, 3);
-        if let PatternDesc::Ppat_record(inner) = &*self.ppat_desc {
+        if let PatternDesc::Ppat_record(inner) = &self.ppat_desc {
             let (fields, flag, rest) = &**inner;
             w.write_block_header(7, 3);
             fields.marshal(w);
@@ -1153,7 +1170,7 @@ impl Marshal for Pattern {
             self.ppat_desc.marshal(w);
         }
         let mut wrote_shared_ppat_loc = false;
-        if let PatternDesc::Ppat_var(name) = &*self.ppat_desc {
+        if let PatternDesc::Ppat_var(name) = &self.ppat_desc {
             if name.loc != self.ppat_loc {
                 let arena = w.get_arena();
                 if arena.get_location(name.loc) == arena.get_location(self.ppat_loc) {
@@ -1358,7 +1375,7 @@ impl Marshal for Expression {
         if is_external_raw_expansion {
             w.set_raw_expansion_expr(self.pexp_loc, w.obj_counter() - 1);
         }
-        let is_extension = matches!(*self.pexp_desc, ExpressionDesc::Pexp_extension(_));
+        let is_extension = matches!(self.pexp_desc, ExpressionDesc::Pexp_extension(_));
         if is_extension {
             w.enter_extension();
         }
@@ -1377,24 +1394,24 @@ impl Marshal for Expression {
         // sharing of singleton `(mknoloc name, PStr [])` module-level constants.
         //
         // Early-return expression types (preserve attribute tuple pointers):
-        // - Pexp_constant(Box::new(Pconst_integer(_, Some _))): int suffix stripping
+        // - Pexp_constant(Pconst_integer(_, Some _)): int suffix stripping
         // - Pexp_extension: unknown extensions return unchanged
         // - Pexp_newtype: preserves attrs in record-with update
         //
-        // Note: Pexp_constant(Box::new(String(_, None))) and Pexp_letmodule are NOT included.
+        // Note: Pexp_constant(String(_, None)) and Pexp_letmodule are NOT included.
         // While PPX-created instances preserve attrs, user code instances go through
         // the default mapper which creates fresh tuples.
         let share_attrs = matches!(
-            &*self.pexp_desc,
-            ExpressionDesc::Pexp_constant(c) if matches!(&**c, Constant::Integer(_, Some(_)))
+            &self.pexp_desc,
+            ExpressionDesc::Pexp_constant(c) if matches!(&*c, Constant::Integer(_, Some(_)))
         ) || matches!(
-            &*self.pexp_desc,
+            &self.pexp_desc,
             ExpressionDesc::Pexp_extension(_) | ExpressionDesc::Pexp_newtype(_)
         );
         let has_braces_or_ternary =
             has_attr(&self.pexp_attributes, w, &["res.braces", "res.ternary"]);
         let rewritten_await_letmodule = matches!(
-            &*self.pexp_desc,
+            &self.pexp_desc,
             ExpressionDesc::Pexp_letmodule(inner) if has_attr(&w.get_arena().get_mod_expr((**inner).1).pmod_attributes, w, &["res.await"])
         );
         let rewritten_expr = w.get_arena().is_rewritten_expr_loc(self.pexp_loc);
@@ -1418,7 +1435,7 @@ impl Marshal for Expression {
             &self.pexp_attributes,
             w,
             share_singleton_attr_tuple,
-            matches!(&*self.pexp_desc, ExpressionDesc::Pexp_open(_)),
+            matches!(&self.pexp_desc, ExpressionDesc::Pexp_open(_)),
             share_empty_pstr,
         );
         if is_raw_expansion {
@@ -1505,7 +1522,7 @@ impl Marshal for ExpressionDesc {
                 c.marshal(w);
             }
             ExpressionDesc::Pexp_let(inner) => {
-                let (ref flag, ref bindings, ref body) = **inner;
+                let (ref flag, ref bindings, ref body) = *inner;
                 w.write_block_header(3, 3);
                 flag.marshal(w);
                 bindings.marshal(w);
@@ -1549,10 +1566,11 @@ impl Marshal for ExpressionDesc {
             ExpressionDesc::Pexp_apply(inner) => {
                 let PexpApply {
                     ref funct,
-                    ref args,
                     ref partial,
                     ref transformed_jsx,
-                } = **inner;
+                    ..
+                } = *inner;
+                let args = w.get_arena().apply_args(inner.args).to_vec();
                 // Pexp_apply of { funct; args; partial; transformed_jsx }
                 // Inline record with 4 fields
                 w.write_block_header(5, 4);
@@ -1562,7 +1580,7 @@ impl Marshal for ExpressionDesc {
                 w.write_int(if *transformed_jsx { 1 } else { 0 });
             }
             ExpressionDesc::Pexp_match(inner) => {
-                let (ref e, ref cases) = **inner;
+                let (ref e, ref cases) = *inner;
                 w.write_block_header(6, 2);
                 e.marshal(w);
                 if let Some(owner) = w.current_expr_idx() {
@@ -1574,7 +1592,7 @@ impl Marshal for ExpressionDesc {
                 }
             }
             ExpressionDesc::Pexp_try(inner) => {
-                let (ref e, ref cases) = **inner;
+                let (ref e, ref cases) = *inner;
                 w.write_block_header(7, 2);
                 e.marshal(w);
                 if let Some(owner) = w.current_expr_idx() {
@@ -1601,7 +1619,7 @@ impl Marshal for ExpressionDesc {
                 args.marshal(w);
             }
             ExpressionDesc::Pexp_record(inner) => {
-                let (ref fields, ref spread) = **inner;
+                let (ref fields, ref spread) = *inner;
                 let spread_idx = w
                     .current_expr_idx()
                     .and_then(|owner| w.get_arena().record_spread(owner))
@@ -2056,22 +2074,23 @@ impl Marshal for TypeKind {
 /// constructors 0 and 1.
 impl Marshal for ConstructorTag {
     fn marshal(&self, w: &mut MarshalWriter<'_>) {
+        let arena = w.get_arena();
         match self {
             ConstructorTag::Pct_string(s) => {
                 w.write_block_header(0, 1);
-                marshal_string_literal(s, w);
+                marshal_string_const(*s, w);
             }
             ConstructorTag::Pct_int(i) => {
                 w.write_block_header(1, 1);
-                w.write_str(i);
+                w.write_str(arena.get_string(*i));
             }
             ConstructorTag::Pct_float(f) => {
                 w.write_block_header(2, 1);
-                w.write_str(f);
+                w.write_str(arena.get_string(*f));
             }
             ConstructorTag::Pct_bigint(i) => {
                 w.write_block_header(3, 1);
-                w.write_str(i);
+                w.write_str(arena.get_string(*i));
             }
             ConstructorTag::Pct_bool(b) => {
                 w.write_block_header(4, 1);
@@ -2123,7 +2142,7 @@ impl Marshal for LabelDeclaration {
             Some(name) => {
                 w.write_block_header(0, 1);
                 w.write_block_header(0, 2);
-                marshal_string_literal(&name.txt, w);
+                marshal_string_const(name.txt, w);
                 name.loc.marshal(w);
             }
         }
@@ -2358,7 +2377,7 @@ impl Marshal for StructureItemDesc {
                 marshal_attributes(attrs, w, false, false, share_empty_pstr);
             }
             StructureItemDesc::Pstr_value(inner) => {
-                let (ref flag, ref bindings) = **inner;
+                let (ref flag, ref bindings) = *inner;
                 w.write_block_header(1, 2);
                 flag.marshal(w);
                 bindings.marshal(w);

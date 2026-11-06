@@ -120,7 +120,7 @@ pub fn walk_payload<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, payload:
 pub fn walk_typ<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, idx: CoreTypeIdx) {
     let typ = arena.get_core_type(idx);
     v.attributes(arena, typ.ptyp_attributes.as_slice());
-    match &*typ.ptyp_desc {
+    match &typ.ptyp_desc {
         CoreTypeDesc::Ptyp_any | CoreTypeDesc::Ptyp_var(_) => {}
         CoreTypeDesc::Ptyp_arrow(inner) => {
             // `Ptyp_arrow {params; ret}`: every parameter lives in the
@@ -132,12 +132,12 @@ pub fn walk_typ<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, idx: CoreTyp
             v.typ(arena, *ret);
         }
         CoreTypeDesc::Ptyp_tuple(types) => {
-            for t in types.iter() {
+            for t in arena.type_list(*types).iter() {
                 v.typ(arena, *t);
             }
         }
         CoreTypeDesc::Ptyp_constr(inner) => {
-            for t in inner.1.iter() {
+            for t in arena.type_list(inner.1).iter() {
                 v.typ(arena, *t);
             }
         }
@@ -277,7 +277,7 @@ pub fn walk_extension_constructor<V: AstIter + ?Sized>(
 pub fn walk_module_type<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, idx: ModTypeIdx) {
     let mty = arena.get_mod_type(idx);
     v.attributes(arena, mty.pmty_attributes.as_slice());
-    match &*mty.pmty_desc {
+    match &mty.pmty_desc {
         ModuleTypeDesc::Pmty_ident(_) | ModuleTypeDesc::Pmty_alias(_) => {}
         ModuleTypeDesc::Pmty_signature(items) => walk_signature(v, arena, items),
         ModuleTypeDesc::Pmty_functor(inner) => {
@@ -309,7 +309,7 @@ pub fn walk_signature_item<V: AstIter + ?Sized>(
     arena: &ParseArena,
     item: &SignatureItem,
 ) {
-    match &*item.psig_desc {
+    match &item.psig_desc {
         SignatureItemDesc::Psig_value(vd) => v.value_description(arena, vd),
         SignatureItemDesc::Psig_type(inner) => {
             for td in &inner.1 {
@@ -342,7 +342,7 @@ pub fn walk_signature_item<V: AstIter + ?Sized>(
 pub fn walk_module_expr<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, idx: ModExprIdx) {
     let me = arena.get_mod_expr(idx);
     v.attributes(arena, me.pmod_attributes.as_slice());
-    match &*me.pmod_desc {
+    match &me.pmod_desc {
         ModuleExprDesc::Pmod_ident(_) => {}
         ModuleExprDesc::Pmod_structure(items) => walk_structure(v, arena, items),
         ModuleExprDesc::Pmod_functor(inner) => {
@@ -371,14 +371,14 @@ pub fn walk_structure_item<V: AstIter + ?Sized>(
     arena: &ParseArena,
     item: &StructureItem,
 ) {
-    match &*item.pstr_desc {
+    match &item.pstr_desc {
         StructureItemDesc::Pstr_eval(inner) => {
             let (e, attrs) = &**inner;
             v.expr(arena, *e);
             v.attributes(arena, attrs.as_slice());
         }
         StructureItemDesc::Pstr_value(inner) => {
-            for vb in &inner.1 {
+            for vb in arena.vb_list(inner.1) {
                 v.value_binding(arena, vb);
             }
         }
@@ -425,7 +425,7 @@ fn walk_jsx_props<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, props: &[J
 pub fn walk_expr<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, idx: ExprIdx) {
     let expr = arena.get_expr(idx);
     v.attributes(arena, expr.pexp_attributes.as_slice());
-    match &*expr.pexp_desc {
+    match &expr.pexp_desc {
         ExpressionDesc::Pexp_braces(braces) => v.expr(arena, braces.expr),
         ExpressionDesc::Pexp_ternary(inner) => {
             v.expr(arena, inner.0);
@@ -438,8 +438,8 @@ pub fn walk_expr<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, idx: ExprId
         | ExpressionDesc::Pexp_break
         | ExpressionDesc::Pexp_continue => {}
         ExpressionDesc::Pexp_let(inner) => {
-            let (_, vbs, body) = &**inner;
-            for vb in vbs {
+            let (_, vbs, body) = &*inner;
+            for vb in arena.vb_list(*vbs) {
                 v.value_binding(arena, vb);
             }
             v.expr(arena, *body);
@@ -459,19 +459,19 @@ pub fn walk_expr<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, idx: ExprId
         }
         ExpressionDesc::Pexp_apply(apply) => {
             v.expr(arena, apply.funct);
-            for (_, arg) in &apply.args {
+            for (_, arg) in arena.apply_args(apply.args) {
                 v.expr(arena, *arg);
             }
         }
         ExpressionDesc::Pexp_match(inner) | ExpressionDesc::Pexp_try(inner) => {
-            let (scrutinee, cases) = &**inner;
+            let (scrutinee, cases) = &*inner;
             v.expr(arena, *scrutinee);
-            for (index, case) in cases.iter().enumerate() {
+            for (index, case) in arena.case_list(*cases).iter().enumerate() {
                 v.case(arena, idx, index, case);
             }
         }
         ExpressionDesc::Pexp_tuple(items) | ExpressionDesc::Pexp_array(items) => {
-            for e in items.iter() {
+            for e in arena.expr_list(*items).iter() {
                 v.expr(arena, *e);
             }
         }
@@ -483,17 +483,17 @@ pub fn walk_expr<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, idx: ExprId
             }
         }
         ExpressionDesc::Pexp_construct(_, args) => {
-            for arg in &args.txt {
+            for arg in arena.expr_list(args.txt) {
                 v.expr(arena, *arg);
             }
         }
         ExpressionDesc::Pexp_variant(inner) => {
-            for arg in &inner.1.txt {
+            for arg in arena.expr_list(inner.1.txt) {
                 v.expr(arena, *arg);
             }
         }
         ExpressionDesc::Pexp_record(inner) => {
-            for field in &inner.0 {
+            for field in arena.expr_field_list(inner.0) {
                 v.expr(arena, field.expr);
             }
             if let Some(spread) = arena.record_spread(idx) {
@@ -609,7 +609,7 @@ pub fn walk_case<V: AstIter + ?Sized>(
 pub fn walk_pat<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, idx: PatIdx) {
     let pat = arena.get_pat(idx);
     v.attributes(arena, pat.ppat_attributes.as_slice());
-    match &*pat.ppat_desc {
+    match &pat.ppat_desc {
         PatternDesc::Ppat_any
         | PatternDesc::Ppat_var(_)
         | PatternDesc::Ppat_constant(_)
@@ -619,7 +619,7 @@ pub fn walk_pat<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, idx: PatIdx)
         | PatternDesc::Ppat_unpack(_) => {}
         PatternDesc::Ppat_alias(p, _) | PatternDesc::Ppat_exception(p) => v.pat(arena, *p),
         PatternDesc::Ppat_tuple(pats) | PatternDesc::Ppat_array(pats) => {
-            for p in pats.iter() {
+            for p in arena.pat_list(*pats).iter() {
                 v.pat(arena, *p);
             }
         }
@@ -629,17 +629,17 @@ pub fn walk_pat<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, idx: PatIdx)
             }
         }
         PatternDesc::Ppat_construct(_, args) => {
-            for arg in &args.txt {
+            for arg in arena.pat_list(args.txt) {
                 v.pat(arena, *arg);
             }
         }
         PatternDesc::Ppat_variant(inner) => {
-            for arg in &inner.1.txt {
+            for arg in arena.pat_list(inner.1.txt) {
                 v.pat(arena, *arg);
             }
         }
         PatternDesc::Ppat_record(inner) => {
-            for field in &inner.0 {
+            for field in arena.pat_field_list(inner.0) {
                 v.pat(arena, field.pat);
             }
             if let Some(rest) = &inner.2

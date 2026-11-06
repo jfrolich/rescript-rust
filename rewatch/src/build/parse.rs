@@ -92,6 +92,7 @@ pub fn generate_asts(
                                 state,
                                 state.get_warn_error_override(),
                                 &parse_span,
+                                !state.diagnostic_locations && state.dump.is_none(),
                             )
                             .map_err(|e| e.to_string());
 
@@ -103,6 +104,7 @@ pub fn generate_asts(
                                         state,
                                         state.get_warn_error_override(),
                                         &parse_span,
+                                        !state.diagnostic_locations && state.dump.is_none(),
                                     ) {
                                         Ok(v) => Ok(Some(v)),
                                         Err(e) => Err(e.to_string()),
@@ -315,6 +317,7 @@ pub(crate) fn parse_for_tooling(
         build_state,
         build_state.get_warn_error_override(),
         &tracing::Span::none(),
+        false,
     )?;
     generated
         .stored_ast
@@ -327,6 +330,7 @@ fn generate_ast(
     build_state: &BuildState,
     warn_error_override: Option<String>,
     parent_span: &tracing::Span,
+    omit_locations: bool,
 ) -> anyhow::Result<GeneratedAst> {
     let file_path = PathBuf::from(&package.path).join(filename);
 
@@ -400,19 +404,82 @@ fn generate_ast(
         tracing::Span::none().entered()
     };
 
-    parse_source(
-        &file_path,
-        source_bytes,
-        &source_path_str,
-        &open_deps,
-        &frontend_options,
-    )
-    .map_err(|err| anyhow!("Error in {}:\n{}", package.name, err))
-    .map(|(stderr, stored_ast, deps)| GeneratedAst {
+    // External PPXs consume the location-bearing frozen AST protocol. A
+    // source map explicitly asks for source coordinates as generated output.
+    let locations = !omit_locations
+        || !frontend_options.external_ppxs.is_empty()
+        || build_state
+            .get_root_config()
+            .effective_source_map_mode(build_state.source_map_command)
+            .is_some();
+    let source = Arc::new(ParseSource {
+        file_path,
+        source: source_bytes,
+        source_path_for_ast: source_path_str,
+        open_deps,
+        options: frontend_options,
+    });
+    let mut result = parse_saved_source(&source, locations);
+    // The first pass reports nothing with invented positions. Parse failures
+    // and frontend warnings are regenerated against the exact same bytes.
+    // A unit whose generated code embeds source coordinates (`__LOC__`,
+    // `assert`, `module rec`) is parsed with locations now, rather than type
+    // checked location-free and then compiled again.
+    if !locations
+        && result.as_ref().map_or(true, |(stderr, ast, _)| {
+            stderr.is_some() || ast.arena().locations_required()
+        })
+    {
+        result = parse_saved_source(&source, true);
+    }
+    let (stderr, mut stored_ast, deps) =
+        result.map_err(|err| anyhow!("Error in {}:\n{}", package.name, err))?;
+    if !stored_ast.arena().stores_locations() {
+        match &mut stored_ast {
+            StoredAst::Structure(ast) => Arc::get_mut(ast).unwrap().retry_source = Some(source),
+            StoredAst::Signature(ast) => Arc::get_mut(ast).unwrap().retry_source = Some(source),
+        }
+    }
+    Ok(GeneratedAst {
         stderr,
         stored_ast: Some(stored_ast),
         deps: Some(deps),
     })
+}
+
+fn parse_saved_source(
+    source: &ParseSource,
+    locations: bool,
+) -> anyhow::Result<(Option<helpers::StdErr>, StoredAst, Dependencies)> {
+    parse_source(
+        &source.file_path,
+        source.source.clone(),
+        &source.source_path_for_ast,
+        &source.open_deps,
+        &source.options,
+        locations,
+    )
+}
+
+/// Recreate the AST with location side tables only when compilation needs them.
+pub(crate) fn reparse_with_locations(ast: &StoredAst) -> anyhow::Result<StoredAst> {
+    let source = ast
+        .retry_source()
+        .ok_or_else(|| anyhow!("missing source for location retry"))?;
+    let (_, ast, _) = parse_saved_source(source, true)?;
+    Ok(ast)
+}
+
+/// The located arena of a fresh parse of `source`, for placing the warnings
+/// of a location-free compile (`CompilerOptions::warning_locations`).
+pub(crate) fn reparse_arena_with_locations(
+    source: &ParseSource,
+) -> Option<rescript_compiler::parse_arena::ParseArena> {
+    let (_, ast, _) = parse_saved_source(source, true).ok()?;
+    match ast {
+        StoredAst::Structure(ast) => Arc::try_unwrap(ast).ok().map(|ast| ast.arena),
+        StoredAst::Signature(ast) => Arc::try_unwrap(ast).ok().map(|ast| ast.arena),
+    }
 }
 
 const SOURCE_TRIGGERED_PPXES: &[(&[&str], &str)] = &[
@@ -472,6 +539,7 @@ fn parse_source(
     source_path_for_ast: &str,
     extra_deps: &[String],
     options: &rescript_compiler::driver::CompilerOptions,
+    locations: bool,
 ) -> anyhow::Result<(
     Option<helpers::StdErr>,
     super::build_types::StoredAst,
@@ -479,7 +547,7 @@ fn parse_source(
 )> {
     rescript_compiler::timing::measure(rescript_compiler::timing::Phase::Parse, || {
         let source = source_bytes_to_latin1(bytes);
-        let mut parser = Parser::new(source_path_for_ast.to_string(), &source);
+        let mut parser = Parser::with_locations(source_path_for_ast.to_string(), &source, locations);
         // Frontend warning reports, in the order `bsc -bs-ast` prints them.
         let mut warnings = String::new();
 
@@ -513,11 +581,13 @@ fn parse_source(
 
             let mut arena = parser.into_arena();
             rescript_compiler::types::typecore::prepare_typecheck_arena(&mut arena);
+            arena.finish_parse_locations();
             let stored =
                 super::build_types::StoredAst::Signature(Arc::new(super::build_types::StoredSignatureAst {
                     arena,
                     signature,
                     source_len: source.len(),
+                    retry_source: None,
                 }));
             Ok(((!warnings.is_empty()).then_some(warnings), stored, deps))
         } else {
@@ -545,11 +615,13 @@ fn parse_source(
 
             let mut arena = parser.into_arena();
             rescript_compiler::types::typecore::prepare_typecheck_arena(&mut arena);
+            arena.finish_parse_locations();
             let stored =
                 super::build_types::StoredAst::Structure(Arc::new(super::build_types::StoredStructureAst {
                     arena,
                     structure,
                     source_len: source.len(),
+                    retry_source: None,
                 }));
             Ok(((!warnings.is_empty()).then_some(warnings), stored, deps))
         }
@@ -659,6 +731,96 @@ mod tests {
         filter_ppx_flags, open_dependencies_from_bsc_flags, rust_parser_let_unwrap_enabled, should_run_ppx,
     };
     use crate::config::{Config, OneOrMore};
+
+    #[test]
+    fn location_free_frontend_keeps_ast_and_dependencies_for_compilation() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(move || {
+                let source = std::sync::Arc::new(super::ParseSource {
+                    file_path: std::path::PathBuf::from("Example.res"),
+                    source: b"@genType type t = {value: int}\nlet f = x => Other.apply(x)\nlet view = () => <div />".to_vec(),
+                    source_path_for_ast: "Example.res".to_string(),
+                    open_deps: vec!["Implicit".to_string()],
+                    options: rescript_compiler::driver::CompilerOptions {
+                        spice_ppx: true,
+                        jsx_version: Some(4),
+                        ..Default::default()
+                    },
+                });
+                let (warnings, mut ast, deps) = super::parse_saved_source(&source, false).unwrap();
+                assert!(warnings.is_none());
+                assert!(!ast.arena().stores_locations());
+                assert_eq!(ast.arena().location_count(), 0);
+                assert_eq!(ast.arena().position_count(), 0);
+                let super::StoredAst::Structure(stored) = &mut ast else {
+                    panic!("expected structure")
+                };
+                std::sync::Arc::get_mut(stored).unwrap().retry_source = Some(source.clone());
+                let located = super::reparse_with_locations(&ast).unwrap();
+                assert!(located.arena().stores_locations());
+                assert!(located.arena().location_count() > 0);
+                assert!(located.retry_source().is_none());
+                let (_, _, full_deps) = super::parse_saved_source(&source, true).unwrap();
+                assert_eq!(deps, full_deps);
+                assert!(deps.iter().any(|name| name == "Other"));
+                tx.send(()).unwrap();
+            })
+            .unwrap();
+        rx.recv_timeout(std::time::Duration::from_secs(5))
+            .expect("frontend timed out or failed");
+    }
+
+    /// Warnings of a location-free compile are placed in a located parse by
+    /// identity, which needs both parses to issue the same location slots.
+    #[test]
+    fn location_free_parse_issues_the_located_parse_slots() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(move || {
+                let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/tests/src");
+                let mut sources: Vec<_> = std::fs::read_dir(&root)
+                    .unwrap()
+                    .map(|entry| entry.unwrap().path())
+                    .filter(|path| path.extension().is_some_and(|ext| ext == "res" || ext == "resi"))
+                    .collect();
+                sources.sort();
+                assert!(sources.len() > 100, "{}", root.display());
+                let mut checked = 0;
+                for path in sources {
+                    let name = path.file_name().unwrap().to_string_lossy().to_string();
+                    let source = super::ParseSource {
+                        file_path: path.clone(),
+                        source: std::fs::read(&path).unwrap(),
+                        source_path_for_ast: name,
+                        open_deps: Vec::new(),
+                        options: rescript_compiler::driver::CompilerOptions {
+                            jsx_version: Some(4),
+                            ..Default::default()
+                        },
+                    };
+                    let Ok((_, free, _)) = super::parse_saved_source(&source, false) else {
+                        continue;
+                    };
+                    let located = super::reparse_arena_with_locations(&source).unwrap();
+                    assert!(!free.arena().stores_locations());
+                    assert_eq!(
+                        free.arena().parse_location_slot_count(),
+                        located.parse_location_slot_count(),
+                        "{}",
+                        path.display()
+                    );
+                    checked += 1;
+                }
+                assert!(checked > 100);
+                tx.send(()).unwrap();
+            })
+            .unwrap();
+        rx.recv_timeout(std::time::Duration::from_secs(60))
+            .expect("parsing the runtime test sources timed out or failed");
+    }
 
     #[test]
     fn open_dependencies_extracts_and_dedups() {

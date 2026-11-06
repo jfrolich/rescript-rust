@@ -7,6 +7,7 @@
 //! Each match arm cites the OCaml line in `lam_pass_lets_dce.ml` that
 //! justifies it. Do not introduce Rust-only logic.
 
+use crate::lambda::LamLoc;
 use ahash::AHashMap as HashMap;
 
 use crate::ident::Ident;
@@ -317,7 +318,7 @@ mod tests {
         let concat = Lambda::prim(
             Primitive::Pstringadd,
             vec![Lambda::Lvar(x), Lambda::Lvar(y)],
-            crate::location::Location::none(),
+            LamLoc::NONE,
         );
         let inner = Lambda::let_(
             LetKind::Alias,

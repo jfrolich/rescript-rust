@@ -8,6 +8,7 @@
 //!
 //! These assumptions are typically ensured by alpha-renaming before substitution.
 
+use crate::lambda::LamLoc;
 use ahash::AHashMap as HashMap;
 
 use crate::ident::Ident;
@@ -197,7 +198,7 @@ fn subst_single(id: &Ident, expr: &Lambda, lam: &Lambda) -> Lambda {
 mod tests {
     use super::*;
     use crate::lambda::{Constant, FunctionAttribute, LetKind, Primitive};
-    use crate::location::Location;
+    use LamLoc;
 
     #[test]
     fn test_subst_var() {
@@ -267,7 +268,7 @@ mod tests {
             vec![x],
             Lambda::var(y),
             FunctionAttribute::default(),
-            crate::location::Location::none(),
+            LamLoc::NONE,
         );
 
         let s = singleton(y, Lambda::const_(Constant::int(42)));
@@ -293,7 +294,7 @@ mod tests {
         let prim = Lambda::prim(
             Primitive::Paddint,
             vec![Lambda::var(x), Lambda::var(x)],
-            Location::none(),
+            LamLoc::NONE,
         );
 
         let s = singleton(x, Lambda::const_(Constant::int(5)));
@@ -391,7 +392,7 @@ mod tests {
             vec![x],
             Lambda::var(y),
             FunctionAttribute::default(),
-            crate::location::Location::none(),
+            LamLoc::NONE,
         );
         let letrec = Lambda::letrec(vec![(f, func)], Lambda::var(f));
 

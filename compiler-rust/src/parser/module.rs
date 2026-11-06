@@ -3,7 +3,6 @@
 //! This module contains the module parsing logic, converting tokens
 //! into module AST nodes (structures, signatures, module expressions, etc.).
 
-use std::borrow::Cow;
 use std::cell::RefCell;
 
 use crate::location::Position;
@@ -229,9 +228,10 @@ pub fn parse_structure_item(p: &mut Parser<'_>) -> Option<StructureItem> {
             parse_newline_or_semicolon_structure(p);
             // Don't share LocIdx - OCaml creates separate Location objects for pstr_loc and pvb_loc.
             // The internal positions (PosIdx) are shared, but the Location records themselves are separate.
-            Some(StructureItemDesc::Pstr_value(Box::new((
-                rec_flag, bindings,
-            ))))
+            Some(StructureItemDesc::Pstr_value((
+                rec_flag,
+                p.arena_mut().push_vb_list(&bindings),
+            )))
         }
         Token::Typ => {
             // OCaml uses begin_region/end_region around type parsing
@@ -267,7 +267,7 @@ pub fn parse_structure_item(p: &mut Parser<'_>) -> Option<StructureItem> {
                 let loc = p.mk_loc_idx_to_prev_end(item_start_idx);
                 item_loc_idx = Some(loc);
                 p.pending_structure_items.push(StructureItem {
-                    pstr_desc: Box::new(StructureItemDesc::Pstr_primitive(Box::new(vd))),
+                    pstr_desc: StructureItemDesc::Pstr_primitive(Box::new(vd)),
                     pstr_loc: loc,
                 });
                 Some(StructureItemDesc::Pstr_type(Box::new((
@@ -406,7 +406,7 @@ pub fn parse_structure_item(p: &mut Parser<'_>) -> Option<StructureItem> {
     };
 
     desc.map(|d| StructureItem {
-        pstr_desc: Box::new(d),
+        pstr_desc: d,
         pstr_loc: match item_loc_idx {
             Some(loc_idx) => loc_idx,
             None => p.mk_loc_idx_to_prev_end(item_start_idx),
@@ -775,7 +775,7 @@ pub fn parse_signature_item(p: &mut Parser<'_>) -> Option<SignatureItem> {
                 let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
                 item_loc_idx = Some(loc);
                 p.pending_signature_items.push(SignatureItem {
-                    psig_desc: Box::new(SignatureItemDesc::Psig_value(Box::new(vd))),
+                    psig_desc: SignatureItemDesc::Psig_value(Box::new(vd)),
                     psig_loc: loc,
                 });
                 Some(SignatureItemDesc::Psig_type(Box::new((
@@ -894,7 +894,7 @@ pub fn parse_signature_item(p: &mut Parser<'_>) -> Option<SignatureItem> {
             _ => p.mk_loc_idx(start_pos_idx, end_pos_idx),
         };
         SignatureItem {
-            psig_desc: Box::new(d),
+            psig_desc: d,
             psig_loc,
         }
     })
@@ -944,7 +944,7 @@ pub fn parse_module_expr(p: &mut Parser<'_>) -> ModuleExpr {
         let loc = p.mk_loc_idx(await_start_idx, end_idx);
         let inner = p.arena_mut().push_mod_expr(expr);
         return ModuleExpr {
-            pmod_desc: Box::new(ModuleExprDesc::Pmod_await(inner)),
+            pmod_desc: ModuleExprDesc::Pmod_await(inner),
             pmod_loc: loc,
             pmod_attributes: attrs,
         };
@@ -975,7 +975,7 @@ fn parse_constrained_mod_expr(p: &mut Parser<'_>) -> ModuleExpr {
     let expr_idx = p.arena_mut().push_mod_expr(mod_expr);
     let mod_type_idx = p.arena_mut().push_mod_type(mod_type);
     ModuleExpr {
-        pmod_desc: Box::new(ModuleExprDesc::Pmod_constraint(expr_idx, mod_type_idx)),
+        pmod_desc: ModuleExprDesc::Pmod_constraint(expr_idx, mod_type_idx),
         pmod_loc: loc,
         pmod_attributes: Attributes::new(),
     }
@@ -1035,7 +1035,7 @@ pub fn parse_module_expr_without_constraint(p: &mut Parser<'_>) -> ModuleExpr {
         let loc = p.mk_loc_idx(await_start_idx, end_idx);
         let inner = p.arena_mut().push_mod_expr(expr);
         return ModuleExpr {
-            pmod_desc: Box::new(ModuleExprDesc::Pmod_await(inner)),
+            pmod_desc: ModuleExprDesc::Pmod_await(inner),
             pmod_loc: loc,
             pmod_attributes: attrs,
         };
@@ -1063,7 +1063,7 @@ fn parse_primary_module_expr(p: &mut Parser<'_>) -> ModuleExpr {
             // Module path - use lid.loc directly (OCaml: Ast_helper.Mod.ident ~loc:longident.loc)
             let lid = parse_module_long_ident(p);
             ModuleExpr {
-                pmod_desc: Box::new(ModuleExprDesc::Pmod_ident(lid)),
+                pmod_desc: ModuleExprDesc::Pmod_ident(lid),
                 pmod_loc: lid.loc,
                 pmod_attributes: Attributes::new(),
             }
@@ -1075,7 +1075,7 @@ fn parse_primary_module_expr(p: &mut Parser<'_>) -> ModuleExpr {
             p.expect(Token::Rbrace);
             let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
             ModuleExpr {
-                pmod_desc: Box::new(ModuleExprDesc::Pmod_structure(Box::new(items))),
+                pmod_desc: ModuleExprDesc::Pmod_structure(Box::new(items)),
                 pmod_loc: loc,
                 pmod_attributes: Attributes::new(),
             }
@@ -1093,7 +1093,7 @@ fn parse_primary_module_expr(p: &mut Parser<'_>) -> ModuleExpr {
                     let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
                     p.next();
                     ModuleExpr {
-                        pmod_desc: Box::new(ModuleExprDesc::Pmod_structure(Box::default())),
+                        pmod_desc: ModuleExprDesc::Pmod_structure(Box::default()),
                         pmod_loc: loc,
                         pmod_attributes: Attributes::new(),
                     }
@@ -1111,7 +1111,7 @@ fn parse_primary_module_expr(p: &mut Parser<'_>) -> ModuleExpr {
             let ext = parse_extension(p, false);
             let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
             ModuleExpr {
-                pmod_desc: Box::new(ModuleExprDesc::Pmod_extension(Box::new(ext))),
+                pmod_desc: ModuleExprDesc::Pmod_extension(Box::new(ext)),
                 pmod_loc: loc,
                 pmod_attributes: Attributes::new(),
             }
@@ -1146,10 +1146,10 @@ fn parse_primary_module_expr(p: &mut Parser<'_>) -> ModuleExpr {
                     let constraint_loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
                     let expr_idx = p.arena_mut().push_expr(expr);
                     Expression {
-                        pexp_desc: Box::new(ExpressionDesc::Pexp_constraint(Box::new((
+                        pexp_desc: ExpressionDesc::Pexp_constraint(Box::new((
                             expr_idx,
                             pkg_type_idx,
-                        )))),
+                        ))),
                         pexp_loc: constraint_loc,
                         pexp_attributes: Attributes::new(),
                     }
@@ -1160,7 +1160,7 @@ fn parse_primary_module_expr(p: &mut Parser<'_>) -> ModuleExpr {
                 let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
                 let final_expr_idx = p.arena_mut().push_expr(final_expr);
                 ModuleExpr {
-                    pmod_desc: Box::new(ModuleExprDesc::Pmod_unpack(final_expr_idx)),
+                    pmod_desc: ModuleExprDesc::Pmod_unpack(final_expr_idx),
                     pmod_loc: loc,
                     pmod_attributes: Attributes::new(),
                 }
@@ -1194,7 +1194,7 @@ fn parse_module_apply(p: &mut Parser<'_>, func: ModuleExpr) -> ModuleExpr {
         let args = if args.is_empty() {
             let loc = p.mk_loc_idx_to_prev_end(lparen_pos_idx);
             vec![ModuleExpr {
-                pmod_desc: Box::new(ModuleExprDesc::Pmod_structure(Box::default())),
+                pmod_desc: ModuleExprDesc::Pmod_structure(Box::default()),
                 pmod_loc: loc,
                 pmod_attributes: Attributes::new(),
             }]
@@ -1216,7 +1216,7 @@ fn parse_module_apply(p: &mut Parser<'_>, func: ModuleExpr) -> ModuleExpr {
             let result_idx = p.arena_mut().push_mod_expr(result);
             let arg_idx = p.arena_mut().push_mod_expr(arg);
             result = ModuleExpr {
-                pmod_desc: Box::new(ModuleExprDesc::Pmod_apply(result_idx, arg_idx)),
+                pmod_desc: ModuleExprDesc::Pmod_apply(result_idx, arg_idx),
                 pmod_loc: loc,
                 pmod_attributes: Attributes::new(),
             };
@@ -1297,7 +1297,7 @@ fn parse_functor_arg(p: &mut Parser<'_>) -> Option<FunctorArg> {
                     let lid_idx = p.push_longident(lid);
                     let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
                     let mod_type = ModuleType {
-                        pmty_desc: Box::new(ModuleTypeDesc::Pmty_ident(with_loc(lid_idx, loc))),
+                        pmty_desc: ModuleTypeDesc::Pmty_ident(with_loc(lid_idx, loc)),
                         pmty_loc: loc,
                         pmty_attributes: Attributes::new(),
                     };
@@ -1314,7 +1314,7 @@ fn parse_functor_arg(p: &mut Parser<'_>) -> Option<FunctorArg> {
                     let lid_idx = p.push_lident(&ident);
                     let mod_ident = with_loc(lid_idx, loc);
                     let mod_type = ModuleType {
-                        pmty_desc: Box::new(ModuleTypeDesc::Pmty_ident(mod_ident)),
+                        pmty_desc: ModuleTypeDesc::Pmty_ident(mod_ident),
                         pmty_loc: loc,
                         pmty_attributes: Attributes::new(),
                     };
@@ -1418,7 +1418,7 @@ fn parse_functor_module_expr(p: &mut Parser<'_>) -> ModuleExpr {
             let expr_idx = p.arena_mut().push_mod_expr(rhs_module_expr);
             let mod_type_idx = p.arena_mut().push_mod_type(mod_type);
             ModuleExpr {
-                pmod_desc: Box::new(ModuleExprDesc::Pmod_constraint(expr_idx, mod_type_idx)),
+                pmod_desc: ModuleExprDesc::Pmod_constraint(expr_idx, mod_type_idx),
                 pmod_loc: loc,
                 pmod_attributes: Attributes::new(),
             }
@@ -1434,11 +1434,7 @@ fn parse_functor_module_expr(p: &mut Parser<'_>) -> ModuleExpr {
         let acc_idx = p.arena_mut().push_mod_expr(acc);
         let mod_type_idx = arg.mod_type.map(|mt| p.arena_mut().push_mod_type(mt));
         ModuleExpr {
-            pmod_desc: Box::new(ModuleExprDesc::Pmod_functor(Box::new((
-                arg.name,
-                mod_type_idx,
-                acc_idx,
-            )))),
+            pmod_desc: ModuleExprDesc::Pmod_functor(Box::new((arg.name, mod_type_idx, acc_idx))),
             pmod_loc: loc,
             pmod_attributes: arg.attrs,
         }
@@ -1523,11 +1519,11 @@ fn parse_module_type_impl(p: &mut Parser<'_>, es6_arrow: bool, parse_with: bool)
             let param_type_idx = p.arena_mut().push_mod_type(modty);
             let rhs_idx = p.arena_mut().push_mod_type(rhs);
             ModuleType {
-                pmty_desc: Box::new(ModuleTypeDesc::Pmty_functor(Box::new((
+                pmty_desc: ModuleTypeDesc::Pmty_functor(Box::new((
                     mknoloc(p.arena_mut().intern("_")),
                     Some(param_type_idx),
                     rhs_idx,
-                )))),
+                ))),
                 pmty_loc: loc,
                 pmty_attributes: Attributes::new(),
             }
@@ -1554,7 +1550,7 @@ fn parse_module_type_impl(p: &mut Parser<'_>, es6_arrow: bool, parse_with: bool)
         let loc = p.mk_loc_idx_to_prev_end(typ_start_idx);
         let typ_idx = p.arena_mut().push_mod_type(typ);
         ModuleType {
-            pmty_desc: Box::new(ModuleTypeDesc::Pmty_with(Box::new((typ_idx, constraints)))),
+            pmty_desc: ModuleTypeDesc::Pmty_with(Box::new((typ_idx, constraints))),
             pmty_loc: loc,
             pmty_attributes: Attributes::new(),
         }
@@ -1575,11 +1571,7 @@ fn parse_functor_module_type(p: &mut Parser<'_>) -> ModuleType {
         let acc_idx = p.arena_mut().push_mod_type(acc);
         let mod_type_idx = arg.mod_type.map(|mt| p.arena_mut().push_mod_type(mt));
         ModuleType {
-            pmty_desc: Box::new(ModuleTypeDesc::Pmty_functor(Box::new((
-                arg.name,
-                mod_type_idx,
-                acc_idx,
-            )))),
+            pmty_desc: ModuleTypeDesc::Pmty_functor(Box::new((arg.name, mod_type_idx, acc_idx))),
             pmty_loc: loc,
             pmty_attributes: arg.attrs,
         }
@@ -1597,7 +1589,7 @@ fn parse_primary_module_type(p: &mut Parser<'_>) -> ModuleType {
             // Module type path
             let lid = parse_module_type_long_ident(p);
             ModuleType {
-                pmty_desc: Box::new(ModuleTypeDesc::Pmty_ident(lid)),
+                pmty_desc: ModuleTypeDesc::Pmty_ident(lid),
                 pmty_loc: p.mk_loc_idx_to_prev_end(start_pos_idx),
                 pmty_attributes: Attributes::new(),
             }
@@ -1609,7 +1601,7 @@ fn parse_primary_module_type(p: &mut Parser<'_>) -> ModuleType {
             p.expect(Token::Rbrace);
             let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
             ModuleType {
-                pmty_desc: Box::new(ModuleTypeDesc::Pmty_signature(Box::new(items))),
+                pmty_desc: ModuleTypeDesc::Pmty_signature(Box::new(items)),
                 pmty_loc: loc,
                 pmty_attributes: Attributes::new(),
             }
@@ -1633,7 +1625,7 @@ fn parse_primary_module_type(p: &mut Parser<'_>) -> ModuleType {
             let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
             let mod_expr_idx = p.arena_mut().push_mod_expr(mod_expr);
             ModuleType {
-                pmty_desc: Box::new(ModuleTypeDesc::Pmty_typeof(mod_expr_idx)),
+                pmty_desc: ModuleTypeDesc::Pmty_typeof(mod_expr_idx),
                 pmty_loc: loc,
                 pmty_attributes: Attributes::new(),
             }
@@ -1643,7 +1635,7 @@ fn parse_primary_module_type(p: &mut Parser<'_>) -> ModuleType {
             let ext = parse_extension(p, false);
             let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
             ModuleType {
-                pmty_desc: Box::new(ModuleTypeDesc::Pmty_extension(Box::new(ext))),
+                pmty_desc: ModuleTypeDesc::Pmty_extension(Box::new(ext)),
                 pmty_loc: loc,
                 pmty_attributes: Attributes::new(),
             }
@@ -1733,7 +1725,7 @@ fn parse_type_constraint(p: &mut Parser<'_>) -> Option<(CoreTypeIdx, CoreTypeIdx
             let var_end_idx = p.end_pos_idx();
             p.next();
             let var = CoreType {
-                ptyp_desc: Box::new(CoreTypeDesc::Ptyp_var(Box::new(name))),
+                ptyp_desc: CoreTypeDesc::Ptyp_var(p.arena_mut().intern(&name)),
                 ptyp_loc: p.mk_loc_idx(cstr_start_idx, var_end_idx),
                 ptyp_attributes: Attributes::new(),
             };
@@ -1748,7 +1740,7 @@ fn parse_type_constraint(p: &mut Parser<'_>) -> Option<(CoreTypeIdx, CoreTypeIdx
             p.err(DiagnosticCategory::Lident(token.clone().into_owned()));
             let loc = p.mk_loc_idx_to_prev_end(cstr_start_idx);
             let any = CoreType {
-                ptyp_desc: Box::new(CoreTypeDesc::Ptyp_any),
+                ptyp_desc: CoreTypeDesc::Ptyp_any,
                 ptyp_loc: LocIdx::none(),
                 ptyp_attributes: Attributes::new(),
             };
@@ -2138,7 +2130,7 @@ fn parse_let_binding_body(
             let typ_idx = p.arena_mut().push_core_type(poly_type);
             (
                 Pattern {
-                    ppat_desc: Box::new(PatternDesc::Ppat_constraint(Box::new((pat_idx, typ_idx)))),
+                    ppat_desc: PatternDesc::Ppat_constraint(Box::new((pat_idx, typ_idx))),
                     ppat_loc: loc,
                     ppat_attributes: Attributes::new(),
                 },
@@ -2342,7 +2334,7 @@ fn parse_type_equation_or_constr_decl(p: &mut Parser<'_>) -> TypeEquation {
             let param_idx = p.arena_mut().push_core_type(typ);
             let ret_idx = p.arena_mut().push_core_type(return_type);
             let arrow = CoreType {
-                ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow(Box::new((
+                ptyp_desc: CoreTypeDesc::Ptyp_arrow(Box::new((
                     Box::new(TypeArg {
                         fixed: None,
                         attrs: Attributes::new(),
@@ -2351,7 +2343,7 @@ fn parse_type_equation_or_constr_decl(p: &mut Parser<'_>) -> TypeEquation {
                     }),
                     ret_idx,
                     p.static_arity_1(),
-                )))),
+                ))),
                 ptyp_loc: loc,
                 ptyp_attributes: Attributes::new(),
             };
@@ -2489,7 +2481,7 @@ fn parse_type_param(p: &mut Parser<'_>) -> Option<(CoreTypeIdx, Variance)> {
             } else {
                 super::core::parse_ident(p, TYPE_PARAM, start_pos_idx)
             };
-            (CoreTypeDesc::Ptyp_var(Box::new(Cow::Owned(ident))), loc)
+            (CoreTypeDesc::Ptyp_var(p.arena_mut().intern(&ident)), loc)
         }
         Token::Underscore => {
             let loc = p.mk_loc_current();
@@ -2503,12 +2495,12 @@ fn parse_type_param(p: &mut Parser<'_>) -> Option<(CoreTypeIdx, Variance)> {
             )));
             let start_pos_idx = p.start_pos_idx();
             let (ident, loc) = super::core::parse_ident(p, TYPE_PARAM, start_pos_idx);
-            (CoreTypeDesc::Ptyp_var(Box::new(Cow::Owned(ident))), loc)
+            (CoreTypeDesc::Ptyp_var(p.arena_mut().intern(&ident)), loc)
         }
         _ => return None,
     };
     let typ = CoreType {
-        ptyp_desc: Box::new(desc),
+        ptyp_desc: desc,
         ptyp_loc: loc,
         ptyp_attributes: Attributes::new(),
     };
@@ -2753,10 +2745,10 @@ fn label_declaration(
 fn punned_field_type(p: &mut Parser<'_>, name: &Located<StrIdx>, attrs: Attributes) -> CoreType {
     let lid_idx = p.push_lident_from_idx(name.txt);
     CoreType {
-        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_constr(Box::new((
+        ptyp_desc: CoreTypeDesc::Ptyp_constr((
             with_loc(lid_idx, name.loc),
-            vec![],
-        )))),
+            crate::parse_arena::ArenaList::EMPTY,
+        )),
         ptyp_loc: name.loc,
         ptyp_attributes: attrs,
     }
@@ -2991,7 +2983,7 @@ fn object_fields_of_labels(fields: Vec<LabelDeclaration>, p: &mut Parser<'_>) ->
 
 fn object_type(fields: Vec<ObjectField>, closed: ClosedFlag, loc: LocIdx) -> CoreType {
     CoreType {
-        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_object(Box::new((fields, closed)))),
+        ptyp_desc: CoreTypeDesc::Ptyp_object(Box::new((fields, closed))),
         ptyp_loc: loc,
         ptyp_attributes: Attributes::new(),
     }
@@ -3669,6 +3661,11 @@ fn parse_module_definition(
 
     // Check for rec
     let rec_flag = if p.token == Token::Rec {
+        // Recursive-module initialization embeds the module's source
+        // position (`Transl_recmodule.init_shape`); see `Parser::next`.
+        if !p.arena().stores_locations() {
+            p.arena().require_locations();
+        }
         p.next();
         RecFlag::Recursive
     } else {
@@ -3740,7 +3737,7 @@ pub(super) fn parse_module_binding_body(p: &mut Parser<'_>) -> ModuleExpr {
             let mod_expr_idx = p.arena_mut().push_mod_expr(mod_expr);
             let mod_type_idx = p.arena_mut().push_mod_type(mod_type);
             ModuleExpr {
-                pmod_desc: Box::new(ModuleExprDesc::Pmod_constraint(mod_expr_idx, mod_type_idx)),
+                pmod_desc: ModuleExprDesc::Pmod_constraint(mod_expr_idx, mod_type_idx),
                 pmod_loc: loc,
                 pmod_attributes: Attributes::new(),
             }
@@ -3801,7 +3798,7 @@ fn parse_module_declaration(p: &mut Parser<'_>, attrs: Attributes) -> ModuleDecl
                 // `Ast_helper.Mty.alias` without `~loc`: the default location.
                 let lid = parse_module_long_ident(p);
                 ModuleType {
-                    pmty_desc: Box::new(ModuleTypeDesc::Pmty_alias(lid)),
+                    pmty_desc: ModuleTypeDesc::Pmty_alias(lid),
                     pmty_loc: Location::none(),
                     pmty_attributes: Attributes::new(),
                 }
@@ -4183,7 +4180,7 @@ mod tests {
         let structure = parse_with_timeout("let x = 42");
         assert_eq!(structure.len(), 1);
         assert!(matches!(
-            *structure[0].pstr_desc,
+            structure[0].pstr_desc,
             StructureItemDesc::Pstr_value(_)
         ));
     }
@@ -4193,7 +4190,7 @@ mod tests {
         let structure = parse_with_timeout("open Belt");
         assert_eq!(structure.len(), 1);
         assert!(matches!(
-            *structure[0].pstr_desc,
+            structure[0].pstr_desc,
             StructureItemDesc::Pstr_open(_)
         ));
     }
@@ -4203,7 +4200,7 @@ mod tests {
         let structure = parse_with_timeout("type t = int");
         assert_eq!(structure.len(), 1);
         assert!(matches!(
-            *structure[0].pstr_desc,
+            structure[0].pstr_desc,
             StructureItemDesc::Pstr_type(_)
         ));
     }
@@ -4212,7 +4209,7 @@ mod tests {
     fn test_parse_variant_type() {
         let structure = parse_with_timeout("type color = | Red | Green | Blue");
         assert_eq!(structure.len(), 1);
-        if let StructureItemDesc::Pstr_type(inner) = &*structure[0].pstr_desc {
+        if let StructureItemDesc::Pstr_type(inner) = &structure[0].pstr_desc {
             let (_, ref type_decls) = **inner;
             assert_eq!(type_decls.len(), 1);
             if let TypeKind::Ptype_variant(constructors) = &type_decls[0].ptype_kind {
@@ -4229,7 +4226,7 @@ mod tests {
     fn test_parse_record_type() {
         let structure = parse_with_timeout("type person = { name: string, age: int }");
         assert_eq!(structure.len(), 1);
-        if let StructureItemDesc::Pstr_type(inner) = &*structure[0].pstr_desc {
+        if let StructureItemDesc::Pstr_type(inner) = &structure[0].pstr_desc {
             let (_, ref type_decls) = **inner;
             assert_eq!(type_decls.len(), 1);
             if let TypeKind::Ptype_record(labels) = &type_decls[0].ptype_kind {
@@ -4247,7 +4244,7 @@ mod tests {
         let structure = parse_with_timeout("module M = { let x = 1 }");
         assert_eq!(structure.len(), 1);
         assert!(matches!(
-            *structure[0].pstr_desc,
+            structure[0].pstr_desc,
             StructureItemDesc::Pstr_module(_)
         ));
     }
@@ -4257,7 +4254,7 @@ mod tests {
         let structure = parse_with_timeout("external log: string => unit = \"console.log\"");
         assert_eq!(structure.len(), 1);
         assert!(matches!(
-            *structure[0].pstr_desc,
+            structure[0].pstr_desc,
             StructureItemDesc::Pstr_primitive(_)
         ));
     }
@@ -4267,7 +4264,7 @@ mod tests {
         let structure = parse_with_timeout("exception MyError(string)");
         assert_eq!(structure.len(), 1);
         assert!(matches!(
-            *structure[0].pstr_desc,
+            structure[0].pstr_desc,
             StructureItemDesc::Pstr_exception(_)
         ));
     }

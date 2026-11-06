@@ -35,7 +35,6 @@ use super::type_expr::{
 use super::variance::{Variance, VarianceFlag};
 use crate::fast_hash::{AHashMap as HashMap, AHashSet as HashSet};
 use crate::ident::Ident;
-use crate::location::Location;
 use std::sync::Arc;
 
 fn in_process_module_resolution_env(
@@ -1563,7 +1562,7 @@ fn add_gadt_equation(
         type_manifest: Some(destination_copy),
         type_variance: vec![],
         type_newtype_level: source_lev,
-        type_loc: crate::location::Location::none(),
+        type_loc: crate::types::DeclLoc::none(),
         type_attributes: vec![],
         type_immediate: false,
         type_representation: super::TypeRepresentation::Boxed,
@@ -1591,7 +1590,7 @@ fn reified_type_decl(newtype_level: i32) -> super::TypeDeclaration {
         type_manifest: None,
         type_variance: vec![],
         type_newtype_level: Some((newtype_level, newtype_level)),
-        type_loc: crate::location::Location::none(),
+        type_loc: crate::types::DeclLoc::none(),
         type_attributes: vec![],
         type_immediate: false,
         type_representation: super::TypeRepresentation::Boxed,
@@ -6999,7 +6998,7 @@ pub(crate) fn package_type_lists_have_ocaml_same_label_completion_side_effect(
             super::decl::ModuleDeclaration {
                 md_type: mty,
                 md_attributes: vec![],
-                md_loc: Location::none(),
+                md_loc: crate::types::DeclLoc::none(),
                 md_path: None,
             },
         );
@@ -11919,7 +11918,7 @@ pub fn instance_constructor_in_pattern(
             type_manifest: None,
             type_variance: vec![],
             type_newtype_level: Some((newtype_lev, newtype_lev)),
-            type_loc: crate::location::Location::none(),
+            type_loc: crate::types::DeclLoc::none(),
             type_attributes: vec![],
             type_immediate: false,
             type_representation: super::decl::TypeRepresentation::Boxed,
@@ -14095,7 +14094,7 @@ mod tests {
             type_manifest: Some(manifest),
             type_variance: vec![],
             type_newtype_level: None,
-            type_loc: crate::location::Location::none(),
+            type_loc: crate::types::DeclLoc::none(),
             type_attributes: vec![],
             type_immediate: false,
             type_representation: crate::types::TypeRepresentation::Boxed,
@@ -14112,7 +14111,7 @@ mod tests {
                 RecStatus::TrecNot,
             )])),
             md_attributes: vec![],
-            md_loc: crate::location::Location::none(),
+            md_loc: crate::types::DeclLoc::none(),
             md_path: None,
         }
     }
@@ -14137,11 +14136,12 @@ mod tests {
             loc_start: Position::new(StrIdx(31), 2, 10, 12),
             loc_end: Position::new(StrIdx(32), 4, 25, 29),
             loc_ghost: true,
+            origin: Default::default(),
         };
         let labels = [
             ArgLabel::Nolabel,
-            ArgLabel::labelled("x", loc),
-            ArgLabel::optional("y", loc),
+            ArgLabel::labelled("x", ctx.intern_loc(loc)),
+            ArgLabel::optional("y", ctx.intern_loc(loc)),
         ];
         let arrow = ctx.new_type(TypeDesc::Tarrow {
             args: labels
@@ -14167,9 +14167,7 @@ mod tests {
             assert_eq!(arg.typ, replacement);
             assert_eq!(arg.label(), expected);
             if let ArgLabel::Labelled(l) | ArgLabel::Optional(l) = arg.label() {
-                assert_eq!(l.loc.loc_start, loc.loc_start);
-                assert_eq!(l.loc.loc_end, loc.loc_end);
-                assert_eq!(l.loc.loc_ghost, loc.loc_ghost);
+                assert_eq!(ctx.resolve_loc(l.loc), loc);
             }
         }
         let copied = copy_type_deep(&ctx, arrow, &mut HashMap::new());
@@ -14183,9 +14181,7 @@ mod tests {
             assert_eq!(arg.typ, *ret);
             assert_eq!(arg.label(), expected);
             if let ArgLabel::Labelled(l) | ArgLabel::Optional(l) = arg.label() {
-                assert_eq!(l.loc.loc_start, loc.loc_start);
-                assert_eq!(l.loc.loc_end, loc.loc_end);
-                assert_eq!(l.loc.loc_ghost, loc.loc_ghost);
+                assert_eq!(ctx.resolve_loc(l.loc), loc);
             }
         }
         let original = ctx.get_desc(arrow);
@@ -14436,7 +14432,7 @@ mod tests {
             type_manifest: Some(int_ty),
             type_variance: vec![],
             type_newtype_level: None,
-            type_loc: crate::location::Location::none(),
+            type_loc: crate::types::DeclLoc::none(),
             type_attributes: vec![],
             type_immediate: false,
             type_representation: crate::types::TypeRepresentation::Boxed,
@@ -14451,7 +14447,7 @@ mod tests {
             type_manifest: Some(ctx.new_constr(crate::types::Path::pident(sibling_id), vec![])),
             type_variance: vec![],
             type_newtype_level: None,
-            type_loc: crate::location::Location::none(),
+            type_loc: crate::types::DeclLoc::none(),
             type_attributes: vec![],
             type_immediate: false,
             type_representation: crate::types::TypeRepresentation::Boxed,
@@ -14475,7 +14471,7 @@ mod tests {
                     ),
                 ])),
                 md_attributes: vec![],
-                md_loc: crate::location::Location::none(),
+                md_loc: crate::types::DeclLoc::none(),
                 md_path: None,
             },
         );

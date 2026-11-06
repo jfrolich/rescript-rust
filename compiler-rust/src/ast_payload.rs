@@ -14,7 +14,7 @@ pub fn unwrap_braces<'a>(arena: &'a ParseArena, expression: &'a Expression) -> &
 pub fn payload_expression(payload: &Payload) -> Option<ExprIdx> {
     if let Payload::PStr(items) = payload
         && let [item] = items.as_slice()
-        && let StructureItemDesc::Pstr_eval(eval) = &*item.pstr_desc
+        && let StructureItemDesc::Pstr_eval(eval) = &item.pstr_desc
     {
         return Some(eval.0);
     }
@@ -44,9 +44,9 @@ pub fn semantic_string_of_expression(
     expression: &Expression,
 ) -> Result<Option<String>, PayloadError> {
     let expression = unwrap_braces(arena, expression);
-    match &*expression.pexp_desc {
-        ExpressionDesc::Pexp_constant(constant) => match &**constant {
-            Constant::String(payload) => Ok(Some(payload.semantic().to_string())),
+    match &expression.pexp_desc {
+        ExpressionDesc::Pexp_constant(constant) => match &*constant {
+            Constant::String(payload) => Ok(Some(payload.semantic(arena).to_string())),
             _ => Ok(None),
         },
         ExpressionDesc::Pexp_template(_) => template_semantic(arena, expression),
@@ -60,7 +60,7 @@ fn template_semantic(
     arena: &ParseArena,
     expression: &Expression,
 ) -> Result<Option<String>, PayloadError> {
-    let ExpressionDesc::Pexp_template(template) = &*expression.pexp_desc else {
+    let ExpressionDesc::Pexp_template(template) = &expression.pexp_desc else {
         return Ok(None);
     };
     if template.source_segments.len() != 1 || !template.values.is_empty() {
@@ -95,9 +95,9 @@ pub fn string_literal_of_expression(
     expression: &Expression,
 ) -> Result<Option<crate::string_literal::StringLiteral>, PayloadError> {
     let expression = unwrap_braces(arena, expression);
-    match &*expression.pexp_desc {
-        ExpressionDesc::Pexp_constant(constant) => match &**constant {
-            Constant::String(payload) => Ok(Some(payload.clone())),
+    match &expression.pexp_desc {
+        ExpressionDesc::Pexp_constant(constant) => match &*constant {
+            Constant::String(payload) => Ok(Some(payload.to_literal(arena))),
             _ => Ok(None),
         },
         ExpressionDesc::Pexp_template(_) => Ok(template_semantic(arena, expression)?
@@ -118,7 +118,7 @@ pub fn string_literal_of_payload(
 }
 
 fn single_constant<'a>(arena: &'a ParseArena, payload: &Payload) -> Option<&'a Constant> {
-    match &*unwrapped_payload_expression(arena, payload)?.pexp_desc {
+    match &unwrapped_payload_expression(arena, payload)?.pexp_desc {
         ExpressionDesc::Pexp_constant(constant) => Some(constant),
         _ => None,
     }
@@ -128,7 +128,9 @@ fn single_constant<'a>(arena: &'a ParseArena, payload: &Payload) -> Option<&'a C
 /// without the bigint suffix.
 pub fn single_int_source(arena: &ParseArena, payload: &Payload) -> Option<String> {
     match single_constant(arena, payload)? {
-        Constant::Integer(name, suffix) if *suffix != Some('n') => Some(name.to_string()),
+        Constant::Integer(name, suffix) if *suffix != Some('n') => {
+            Some(arena.get_string(*name).to_string())
+        }
         _ => None,
     }
 }
@@ -136,7 +138,7 @@ pub fn single_int_source(arena: &ParseArena, payload: &Payload) -> Option<String
 /// OCaml `Ast_payload.is_single_float`.
 fn is_single_float(arena: &ParseArena, payload: &Payload) -> Option<String> {
     match single_constant(arena, payload)? {
-        Constant::Float(name, _) => Some(name.to_string()),
+        Constant::Float(name, _) => Some(arena.get_string(*name).to_string()),
         _ => None,
     }
 }
@@ -144,14 +146,14 @@ fn is_single_float(arena: &ParseArena, payload: &Payload) -> Option<String> {
 /// OCaml `Ast_payload.is_single_bigint`.
 fn is_single_bigint(arena: &ParseArena, payload: &Payload) -> Option<String> {
     match single_constant(arena, payload)? {
-        Constant::Integer(name, Some('n')) => Some(name.to_string()),
+        Constant::Integer(name, Some('n')) => Some(arena.get_string(*name).to_string()),
         _ => None,
     }
 }
 
 /// OCaml `Ast_payload.is_single_bool`.
 fn is_single_bool(arena: &ParseArena, payload: &Payload) -> Option<bool> {
-    match &*unwrapped_payload_expression(arena, payload)?.pexp_desc {
+    match &unwrapped_payload_expression(arena, payload)?.pexp_desc {
         ExpressionDesc::Pexp_construct(lid, _) => match arena.get_longident(lid.txt) {
             crate::parser::longident::Longident::Lident(name) => match arena.get_string(*name) {
                 "true" => Some(true),
@@ -167,7 +169,7 @@ fn is_single_bool(arena: &ParseArena, payload: &Payload) -> Option<bool> {
 /// OCaml `Ast_payload.is_single_ident`, as the name of a simple identifier
 /// (`Some(None)` for any other identifier path).
 fn is_single_ident<'a>(arena: &'a ParseArena, payload: &Payload) -> Option<Option<&'a str>> {
-    match &*unwrapped_payload_expression(arena, payload)?.pexp_desc {
+    match &unwrapped_payload_expression(arena, payload)?.pexp_desc {
         ExpressionDesc::Pexp_ident(lid) => match arena.get_longident(lid.txt) {
             crate::parser::longident::Longident::Lident(name) => {
                 Some(Some(arena.get_string(*name)))
@@ -178,24 +180,50 @@ fn is_single_ident<'a>(arena: &'a ParseArena, payload: &Payload) -> Option<Optio
     }
 }
 
+/// `string_literal_of_payload` with the literal stored in `arena`. A quoted
+/// string constant keeps its interned spellings; a backquoted string gets
+/// canonical quoted spelling, interned here.
+pub fn string_const_of_payload(
+    arena: &mut ParseArena,
+    payload: &Payload,
+) -> Result<Option<crate::parser::ast::StringConst>, PayloadError> {
+    let Some(expression) = unwrapped_payload_expression(arena, payload) else {
+        return Ok(None);
+    };
+    let expression = unwrap_braces(arena, expression);
+    match &expression.pexp_desc {
+        ExpressionDesc::Pexp_constant(Constant::String(payload)) => Ok(Some(*payload)),
+        ExpressionDesc::Pexp_template(_) => match template_semantic(arena, expression)? {
+            Some(semantic) => {
+                let literal = crate::string_literal::string_from_semantic(&semantic);
+                Ok(Some(arena.push_string_literal(&literal)))
+            }
+            None => Ok(None),
+        },
+        _ => Ok(None),
+    }
+}
+
 /// OCaml `Ast_payload.constructor_tag_of_payload`: the literal denoted by a
-/// valid variant-constructor `@as` payload.
+/// valid variant-constructor `@as` payload. Number tags keep the payload
+/// constant's interned spelling.
 pub fn constructor_tag_of_payload(
-    arena: &ParseArena,
+    arena: &mut ParseArena,
     payload: &Payload,
 ) -> Result<Option<crate::parser::ast::ConstructorTag>, PayloadError> {
     use crate::parser::ast::ConstructorTag;
-    if let Some(s) = string_literal_of_payload(arena, payload)? {
+    if let Some(s) = string_const_of_payload(arena, payload)? {
         return Ok(Some(ConstructorTag::Pct_string(s)));
     }
-    if let Some(i) = single_int_source(arena, payload) {
-        return Ok(Some(ConstructorTag::Pct_int(i)));
-    }
-    if let Some(f) = is_single_float(arena, payload) {
-        return Ok(Some(ConstructorTag::Pct_float(f)));
-    }
-    if let Some(i) = is_single_bigint(arena, payload) {
-        return Ok(Some(ConstructorTag::Pct_bigint(i)));
+    match single_constant(arena, payload) {
+        Some(Constant::Integer(i, suffix)) if *suffix != Some('n') => {
+            return Ok(Some(ConstructorTag::Pct_int(*i)));
+        }
+        Some(Constant::Float(f, _)) => return Ok(Some(ConstructorTag::Pct_float(*f))),
+        Some(Constant::Integer(i, Some('n'))) => {
+            return Ok(Some(ConstructorTag::Pct_bigint(*i)));
+        }
+        _ => {}
     }
     if let Some(b) = is_single_bool(arena, payload) {
         return Ok(Some(ConstructorTag::Pct_bool(b)));

@@ -399,11 +399,10 @@ fn compute_module_costs(
         let impl_key = format!("{name}:impl");
         let intf_key = format!("{name}:intf");
         let mut source_len = 0usize;
-        if let Some(StoredAst::Structure(stored)) = stored_asts.get(&impl_key) {
-            source_len = source_len.saturating_add(stored.source_len);
-        }
-        if let Some(StoredAst::Signature(stored)) = stored_asts.get(&intf_key) {
-            source_len = source_len.saturating_add(stored.source_len);
+        for key in [&impl_key, &intf_key] {
+            if let Some(stored) = stored_asts.get(key) {
+                source_len = source_len.saturating_add(stored.source_len());
+            }
         }
         costs.insert(name.clone(), source_len.max(1) as i64);
     }
@@ -793,12 +792,16 @@ pub fn compile(
             round_universe.retain(|module_name| !loaded.contains(module_name));
             build_state.loaded_modules.extend(loaded);
         }
+        // Each module's AST is dropped once the module is compiled (below), so
+        // a module compiled by an earlier build (watch mode) or round has to
+        // be parsed again before it compiles.
+        super::incremental::parse_for_round(build_state, &round_universe)?;
         let registry_only = Arc::new(std::mem::take(&mut round_registry_only));
         let compile_universe_count = round_universe.len();
         total_universe_count += compile_universe_count;
         set_length(total_universe_count as u64);
 
-        let stored_asts_snapshot = build_state.snapshot_stored_asts();
+        let mut stored_asts_snapshot = build_state.take_stored_asts(&round_universe);
         let compile_universe = Arc::new(std::mem::take(&mut round_universe));
         let module_costs = compute_module_costs(&compile_universe, &stored_asts_snapshot);
         let priorities =
@@ -955,7 +958,13 @@ pub fn compile(
                         );
                     }
                     let registry_snapshot = worker_registry_template.clone();
-                    let stored_asts = &stored_asts_snapshot;
+                    // Hand the worker this module's ASTs: they are freed as soon
+                    // as it is compiled, not when the build ends.
+                    let module_asts: AHashMap<String, StoredAst> =
+                        [format!("{module_name}:impl"), format!("{module_name}:intf")]
+                            .into_iter()
+                            .filter_map(|key| stored_asts_snapshot.remove(&key).map(|ast| (key, ast)))
+                            .collect();
                     let parent_span = compile_parent_span.clone();
                     let in_process_hooks = InProcessSchedulerHooks {
                         tx: tx.clone(),
@@ -967,7 +976,7 @@ pub fn compile(
                             build_state_ref,
                             build_command_state_ref,
                             &registry_snapshot,
-                            stored_asts,
+                            &module_asts,
                             &module_name,
                             is_dirty,
                             parent_span,
@@ -1194,6 +1203,9 @@ pub fn compile(
         // Close our sender handle so any lingering clones in already-spawned
         // workers don't keep the channel open past the scope.
         drop(tx);
+        // Modules this round did not get to (an error stopped it) keep their
+        // ASTs for the next build.
+        build_state.restore_stored_asts(stored_asts_snapshot);
         completed_count += completed.len();
         for msg in &results_buffer[round_results_start..] {
             let ok = msg.result.is_ok() && !matches!(msg.interface_result, Some(Err(_)));
@@ -2205,6 +2217,7 @@ fn build_package_compiler_options(
         runtime_path,
         open_modules,
         collect_unit_reads: true,
+        warning_locations: None,
         warning_specs: parsed_flags.warning_specs,
         warning_error_specs: parsed_flags.warning_error_specs,
         source_map,
@@ -2338,7 +2351,7 @@ fn in_memory_module_info_for_package(
     is_pure: bool,
     cmj_export_constants: AHashMap<String, CmjExportConstant>,
     cmj_export_arities: AHashMap<String, CmjExportArity>,
-    cmj_export_lambdas: AHashMap<String, rescript_compiler::lambda::Lambda>,
+    cmj_export_lambdas: rescript_compiler::lambda::CmjExportLambdas,
     hoisted_exports: Vec<rescript_compiler::lambda::HoistedExport>,
     is_runtime: bool,
 ) -> InMemoryModuleInfo {
@@ -2364,7 +2377,7 @@ fn js_metadata_registry_updates_for_package(
     is_pure: bool,
     cmj_export_constants: AHashMap<String, CmjExportConstant>,
     cmj_export_arities: AHashMap<String, CmjExportArity>,
-    cmj_export_lambdas: AHashMap<String, rescript_compiler::lambda::Lambda>,
+    cmj_export_lambdas: rescript_compiler::lambda::CmjExportLambdas,
     hoisted_exports: Vec<rescript_compiler::lambda::HoistedExport>,
     is_runtime: bool,
     has_interface: bool,
@@ -3678,6 +3691,50 @@ pub(crate) fn runtime_compiler_options(
 /// after the worker returns, before dependents are scheduled. Actual compiler
 /// failures are returned as errors so the DAG scheduler stops dependents, like
 /// the bsc subprocess path does.
+fn compile_with_location_retry<T>(
+    ast: &StoredAst,
+    build: &BuildCommandState,
+    options: &rescript_compiler::driver::CompilerOptions,
+    mut compile: impl FnMut(&StoredAst, &rescript_compiler::driver::CompilerOptions) -> Result<T>,
+) -> Result<T> {
+    use rescript_compiler::driver::LocationRetry;
+    let result = match ast.retry_source() {
+        // A location-free compile places its warnings in a located parse of
+        // the same source; it returns `LocationRetry::Warning` when it cannot.
+        Some(source) if !ast.arena().stores_locations() => {
+            let source = source.clone();
+            let mut options = options.clone();
+            options.warning_locations = Some(Arc::new(move || {
+                super::parse::reparse_arena_with_locations(&source)
+            }));
+            compile(ast, &options)
+        }
+        _ => compile(ast, options),
+    };
+    let local_retry = !ast.arena().stores_locations()
+        && matches!(
+            &result,
+            Err(error) if matches!(
+                error.downcast_ref::<LocationRetry>(),
+                Some(LocationRetry::Output | LocationRetry::Warning)
+            )
+        );
+    if local_retry {
+        // Warning sites and location-valued constants belong to this module.
+        // No first-attempt signature or JavaScript has been published.
+        return super::parse::reparse_with_locations(ast).and_then(|located| compile(&located, options));
+    }
+    if !build.diagnostic_locations && build.dump.is_none() && result.is_err() {
+        // Type errors can quote declarations from dependency interfaces.
+        // Rebuild those with locations as well before reporting the error.
+        build
+            .diagnostic_retry
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        return Err(LocationRetry::Diagnostic.into());
+    }
+    result
+}
+
 fn compile_module_in_process_to_js_boundary(
     package: &packages::Package,
     module: &Module,
@@ -3738,7 +3795,7 @@ fn compile_module_in_process_to_js_boundary(
         provisional_is_pure,
         AHashMap::new(),
         AHashMap::new(),
-        AHashMap::new(),
+        Default::default(),
         Vec::new(),
         is_runtime,
     );
@@ -3766,25 +3823,30 @@ fn compile_module_in_process_to_js_boundary(
         let intf_source_abs = helpers::ocaml_absname(&Path::new(&package.path).join(&interface.path));
         let intf_key = format!("{module_name}:intf");
         let intf_result = match stored_asts.get(&intf_key) {
-            Some(StoredAst::Signature(stored)) => {
-                rescript_compiler::driver::typecheck_preprocessed_signature_in_process(
-                    &stored.arena,
-                    &stored.signature,
-                    &intf_source_abs.to_string_lossy(),
-                    module_name,
-                    &options,
-                    &local_registry,
-                )
+            Some(ast @ StoredAst::Signature(_)) => {
+                compile_with_location_retry(ast, build_command_state, &options, |ast, options| {
+                    let StoredAst::Signature(stored) = ast else {
+                        unreachable!("interface retry changed AST kind")
+                    };
+                    rescript_compiler::driver::typecheck_preprocessed_signature_in_process(
+                        &stored.arena,
+                        &stored.signature,
+                        &intf_source_abs.to_string_lossy(),
+                        module_name,
+                        options,
+                        &local_registry,
+                    )
+                })
             }
-            Some(StoredAst::Structure(_)) => {
+            Some(_) => {
                 return Err(anyhow!(
-                    "in-process invariant violated: expected signature AST for {}, found structure AST",
+                    "expected signature AST for {}",
                     intf_source_abs.display()
                 ));
             }
             None => {
                 return Err(anyhow!(
-                    "in-process invariant violated: missing stored signature AST for {}",
+                    "missing stored signature AST for {}",
                     intf_source_abs.display()
                 ));
             }
@@ -3924,28 +3986,33 @@ fn compile_module_in_process_to_js_boundary(
         .entered();
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             match stored_asts.get(&impl_key) {
-                Some(StoredAst::Structure(stored)) => {
-                    let signature_hook: Option<
-                        &mut rescript_compiler::driver::InProcessSignatureReadyHook<'_>,
-                    > = if publish_implementation_signature {
-                        Some(&mut signature_hook)
-                    } else {
-                        None
-                    };
-                    rescript_compiler::driver::compile_preprocessed_structure_in_process_until_js(
-                        &stored.arena,
-                        &stored.structure,
-                        &source_abs.to_string_lossy(),
-                        module_name,
-                        &options,
-                        &local_registry,
-                        has_interface,
-                        gentype_ignore_interface,
-                        signature_hook,
-                    )
+                Some(ast @ StoredAst::Structure(_)) => {
+                    compile_with_location_retry(ast, build_command_state, &options, |ast, options| {
+                        let StoredAst::Structure(stored) = ast else {
+                            unreachable!("implementation retry changed AST kind")
+                        };
+                        let signature_hook: Option<
+                            &mut rescript_compiler::driver::InProcessSignatureReadyHook<'_>,
+                        > = if publish_implementation_signature {
+                            Some(&mut signature_hook)
+                        } else {
+                            None
+                        };
+                        rescript_compiler::driver::compile_preprocessed_structure_in_process_until_js(
+                            &stored.arena,
+                            &stored.structure,
+                            &source_abs.to_string_lossy(),
+                            module_name,
+                            options,
+                            &local_registry,
+                            has_interface,
+                            gentype_ignore_interface,
+                            signature_hook,
+                        )
+                    })
                 }
-                Some(StoredAst::Signature(_)) => panic!(
-                    "in-process invariant violated: expected structure AST for {}, found signature AST",
+                Some(_) => panic!(
+                    "in-process invariant violated: expected structure AST for {}, found another AST",
                     source_abs.display()
                 ),
                 None => panic!(
@@ -4085,6 +4152,11 @@ fn finish_in_process_js(
         metadata_tx,
         write_tx,
     );
+    if !build_command_state.diagnostic_locations && build_command_state.dump.is_none() && result.is_err() {
+        build_command_state
+            .diagnostic_retry
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
     let (result, registry_updates) = match result {
         Ok(outcome) => (Ok(outcome.warning), outcome.registry_updates),
         Err(err) => (Err(err), Vec::new()),

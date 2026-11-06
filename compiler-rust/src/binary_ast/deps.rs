@@ -287,18 +287,18 @@ impl<'a> DependencyCollector<'a> {
     }
 
     fn add_structure_item(&mut self, item: &StructureItem) {
-        match &*item.pstr_desc {
+        match &item.pstr_desc {
             StructureItemDesc::Pstr_eval(inner) => {
                 let (ref expr, ref _attrs) = **inner;
                 self.add_expr_idx(*expr);
             }
             StructureItemDesc::Pstr_value(inner) => {
-                let (ref _rec_flag, ref bindings) = **inner;
+                let (ref _rec_flag, ref bindings) = *inner;
                 // OCaml's add_bindings collects pattern bindings (including Ppat_unpack)
                 // and adds them to bound_modules so later references don't add dependencies.
                 // First collect all unpack names from patterns
                 let mut unpack_names = HashSet::new();
-                for binding in bindings {
+                for binding in self.arena.vb_list(*bindings) {
                     let names = self.add_pat_idx_collecting_unpack(binding.pvb_pat);
                     unpack_names.extend(names);
                 }
@@ -307,7 +307,7 @@ impl<'a> DependencyCollector<'a> {
                 // to these modules in the same or later bindings don't add dependencies
                 self.bound_modules.extend(unpack_names);
                 // Now process expressions
-                for binding in bindings {
+                for binding in self.arena.vb_list(*bindings) {
                     self.add_expr_idx(binding.pvb_expr);
                 }
             }
@@ -377,7 +377,7 @@ impl<'a> DependencyCollector<'a> {
     }
 
     fn add_signature_item(&mut self, item: &SignatureItem) {
-        match &*item.psig_desc {
+        match &item.psig_desc {
             SignatureItemDesc::Psig_value(vd) => {
                 self.add_value_description(vd);
             }
@@ -436,7 +436,7 @@ impl<'a> DependencyCollector<'a> {
     // ========== Expressions ==========
 
     fn add_expression(&mut self, expr: &Expression) {
-        match &*expr.pexp_desc {
+        match &expr.pexp_desc {
             ExpressionDesc::Pexp_ident(lid) => {
                 self.add_lident_idx(lid.txt);
             }
@@ -450,11 +450,11 @@ impl<'a> DependencyCollector<'a> {
             }
             ExpressionDesc::Pexp_break | ExpressionDesc::Pexp_continue => {}
             ExpressionDesc::Pexp_let(inner) => {
-                let (ref _rec_flag, ref bindings, ref body) = **inner;
+                let (ref _rec_flag, ref bindings, ref body) = *inner;
                 // OCaml's add_bindings collects pattern bindings (including Ppat_unpack)
                 // First collect all unpack names from patterns
                 let mut unpack_names = HashSet::new();
-                for binding in bindings {
+                for binding in self.arena.vb_list(*bindings) {
                     let names = self.add_pat_idx_collecting_unpack(binding.pvb_pat);
                     unpack_names.extend(names);
                 }
@@ -467,7 +467,7 @@ impl<'a> DependencyCollector<'a> {
                     .filter(|name| self.bound_modules.insert(name.clone()))
                     .collect();
                 // Process expressions
-                for binding in bindings {
+                for binding in self.arena.vb_list(*bindings) {
                     self.add_expr_idx(binding.pvb_expr);
                 }
                 // body is ExprIdx
@@ -532,15 +532,9 @@ impl<'a> DependencyCollector<'a> {
                 }
             }
             ExpressionDesc::Pexp_apply(inner) => {
-                let PexpApply {
-                    ref funct,
-                    ref args,
-                    ..
-                } = **inner;
-                // funct is ExprIdx
-                let funct = *funct;
+                let PexpApply { funct, args, .. } = *inner;
                 self.add_expr_idx(funct);
-                for (_label, arg) in args {
+                for (_label, arg) in self.arena.apply_args(args) {
                     self.add_expr_idx(*arg);
                 }
             }
@@ -556,16 +550,16 @@ impl<'a> DependencyCollector<'a> {
                 }
             }
             ExpressionDesc::Pexp_match(inner) | ExpressionDesc::Pexp_try(inner) => {
-                let (ref expr, ref cases) = **inner;
+                let (ref expr, ref cases) = *inner;
                 // expr is ExprIdx
                 let expr = *expr;
                 self.add_expr_idx(expr);
-                for case in cases {
+                for case in self.arena.case_list(*cases) {
                     self.add_case(case);
                 }
             }
             ExpressionDesc::Pexp_tuple(exprs) | ExpressionDesc::Pexp_array(exprs) => {
-                for expr in &**exprs {
+                for expr in self.arena.expr_list(*exprs) {
                     self.add_expr_idx(*expr);
                 }
             }
@@ -579,18 +573,18 @@ impl<'a> DependencyCollector<'a> {
             }
             ExpressionDesc::Pexp_construct(lid, args) => {
                 self.add_lident_idx(lid.txt);
-                for arg in &args.txt {
+                for arg in self.arena.expr_list(args.txt) {
                     self.add_expr_idx(*arg);
                 }
             }
             ExpressionDesc::Pexp_variant(inner) => {
-                for arg in &inner.1.txt {
+                for arg in self.arena.expr_list(inner.1.txt) {
                     self.add_expr_idx(*arg);
                 }
             }
             ExpressionDesc::Pexp_record(inner) => {
-                let (ref fields, ref spread) = **inner;
-                for field in fields {
+                let (ref fields, ref spread) = *inner;
+                for field in self.arena.expr_field_list(*fields) {
                     self.add_lident_idx(field.lid.txt);
                     self.add_expr_idx(field.expr);
                 }
@@ -839,7 +833,7 @@ impl<'a> DependencyCollector<'a> {
     }
 
     fn add_pattern_inner(&mut self, pat: &Pattern, unpack_names: &mut HashSet<String>) {
-        match &*pat.ppat_desc {
+        match &pat.ppat_desc {
             PatternDesc::Ppat_any | PatternDesc::Ppat_var(_) | PatternDesc::Ppat_constant(_) => {}
             PatternDesc::Ppat_alias(pat_idx, _name) => {
                 // pat is PatIdx
@@ -850,7 +844,7 @@ impl<'a> DependencyCollector<'a> {
                 let (_, _) = &**inner;
             }
             PatternDesc::Ppat_tuple(pats) | PatternDesc::Ppat_array(pats) => {
-                for pat in &**pats {
+                for pat in self.arena.pat_list(*pats) {
                     // pat is PatIdx
                     self.add_pat_idx_inner(*pat, unpack_names);
                 }
@@ -862,18 +856,18 @@ impl<'a> DependencyCollector<'a> {
             }
             PatternDesc::Ppat_construct(lid, args) => {
                 self.add_lident_idx(lid.txt);
-                for arg in &args.txt {
+                for arg in self.arena.pat_list(args.txt) {
                     self.add_pat_idx_inner(*arg, unpack_names);
                 }
             }
             PatternDesc::Ppat_variant(inner) => {
-                for arg in &inner.1.txt {
+                for arg in self.arena.pat_list(inner.1.txt) {
                     self.add_pat_idx_inner(*arg, unpack_names);
                 }
             }
             PatternDesc::Ppat_record(inner) => {
                 let (ref fields, ref _closed, ref record_rest) = **inner;
-                for field in fields {
+                for field in self.arena.pat_field_list(*fields) {
                     self.add_lident_idx(field.lid.txt);
                     // field.pat is PatIdx
                     self.add_pat_idx_inner(field.pat, unpack_names);
@@ -924,7 +918,7 @@ impl<'a> DependencyCollector<'a> {
     // ========== Core Types ==========
 
     fn add_core_type(&mut self, ty: &CoreType) {
-        match &*ty.ptyp_desc {
+        match &ty.ptyp_desc {
             CoreTypeDesc::Ptyp_any | CoreTypeDesc::Ptyp_var(_) => {}
             CoreTypeDesc::Ptyp_arrow(inner) => {
                 let (ref arg, ref ret, arity) = **inner;
@@ -938,15 +932,15 @@ impl<'a> DependencyCollector<'a> {
                 self.add_core_type_idx(ret);
             }
             CoreTypeDesc::Ptyp_tuple(tys) => {
-                for ty in &**tys {
+                for ty in self.arena.type_list(*tys) {
                     // ty is CoreTypeIdx
                     self.add_core_type_idx(*ty);
                 }
             }
             CoreTypeDesc::Ptyp_constr(inner) => {
-                let (ref lid, ref args) = **inner;
+                let (ref lid, ref args) = *inner;
                 self.add_lident_idx(lid.txt);
-                for arg in args {
+                for arg in self.arena.type_list(*args) {
                     // arg is CoreTypeIdx
                     self.add_core_type_idx(*arg);
                 }
@@ -1012,7 +1006,7 @@ impl<'a> DependencyCollector<'a> {
     // ========== Modules ==========
 
     fn add_module_expr(&mut self, me: &ModuleExpr) {
-        match &*me.pmod_desc {
+        match &me.pmod_desc {
             ModuleExprDesc::Pmod_ident(lid) => {
                 // Module ident uses full path (OCaml: addmodule)
                 self.add_lident_idx_full(lid.txt);
@@ -1069,7 +1063,7 @@ impl<'a> DependencyCollector<'a> {
     }
 
     fn add_module_type(&mut self, mt: &ModuleType) {
-        match &*mt.pmty_desc {
+        match &mt.pmty_desc {
             ModuleTypeDesc::Pmty_ident(lid) => {
                 // Pmty_ident uses add = add_parent (OCaml: add bv l)
                 // For simple Lidents like `Tree` or `Intf`, this adds nothing (correct)
@@ -1330,10 +1324,10 @@ mod tests {
     fn make_ident_expr(arena: &mut ParseArena, lid: Longident) -> ExprIdx {
         let lid_idx = arena.push_longident(lid);
         let expr = Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Located {
+            pexp_desc: ExpressionDesc::Pexp_ident(Located {
                 txt: lid_idx,
                 loc: LocIdx::none(),
-            })),
+            }),
             pexp_loc: LocIdx::none(),
             pexp_attributes: Attributes::new(),
         };
@@ -1342,10 +1336,7 @@ mod tests {
 
     fn make_eval_item(expr_idx: ExprIdx) -> StructureItem {
         StructureItem {
-            pstr_desc: Box::new(StructureItemDesc::Pstr_eval(Box::new((
-                expr_idx,
-                Attributes::new(),
-            )))),
+            pstr_desc: StructureItemDesc::Pstr_eval(Box::new((expr_idx, Attributes::new()))),
             pstr_loc: LocIdx::none(),
         }
     }

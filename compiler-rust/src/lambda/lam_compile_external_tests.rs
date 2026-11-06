@@ -1,4 +1,5 @@
 use super::*;
+use crate::lambda::LamLoc;
 
 #[test]
 #[ignore = "stale internal shape expectation; covered by strict lambda/JS parity gates"]
@@ -55,7 +56,7 @@ fn lowers_js_var_without_args_to_a_value() {
             }),
         },
         vec![],
-        Location::none(),
+        LamLoc::NONE,
     );
 
     let compiled = compiler.compile_expr(&lam);
@@ -90,7 +91,7 @@ fn lowers_js_var_calls_with_runtime_args_even_without_external_arg_metadata() {
             i: 10,
             comment: None,
         })],
-        Location::none(),
+        LamLoc::NONE,
     );
 
     let program = compiler.compile_program(&lam);
@@ -140,7 +141,7 @@ fn lowers_module_external_calls_to_namespace_imports() {
             }),
         },
         vec![],
-        Location::none(),
+        LamLoc::NONE,
     );
 
     let deps = compiler.compile_deps_program(&lam);
@@ -210,14 +211,14 @@ fn lowers_pjs_object_get_to_method_calls() {
         ap_func: Box::new(Lambda::prim(
             Primitive::PjsObjectGet("say".to_string()),
             vec![Lambda::var(john)],
-            Location::none(),
+            LamLoc::NONE,
         )),
         ap_args: vec![
             Lambda::const_(Constant::String("hey".to_string())),
             Lambda::const_(Constant::String("jude".to_string())),
         ],
         ap_info: ApInfo {
-            loc: Location::none(),
+            loc: LamLoc::NONE,
             status: ApplyStatus::Uncurry,
         },
     }));
@@ -237,7 +238,7 @@ fn lowers_pjs_object_set_to_property_assignments() {
             Lambda::var(student),
             Lambda::const_(Constant::String("Mary".to_string())),
         ],
-        Location::none(),
+        LamLoc::NONE,
     );
 
     let program = compiler.compile_program(&lam);
@@ -268,9 +269,9 @@ fn lowers_spliced_js_calls_by_flattening_literal_variadic_arrays() {
                 Lambda::const_(Constant::String(".".to_string())),
                 Lambda::const_(Constant::String("Node_path_test".to_string())),
             ],
-            Location::none(),
+            LamLoc::NONE,
         )],
-        Location::none(),
+        LamLoc::NONE,
     );
 
     let program = compiler.compile_program(&lam);
@@ -287,7 +288,7 @@ fn lowers_default_module_values_in_dynamic_imports() {
             path: vec!["default".to_string()],
         })),
         vec![],
-        Location::none(),
+        LamLoc::NONE,
     ));
     let rendered = print_block(&program.block);
     assert_eq!(rendered, "import(\"a\").then(m => m.default);");
@@ -313,7 +314,7 @@ fn lowers_js_new_to_new_expression() {
             }),
         },
         vec![Lambda::var(arg)],
-        Location::none(),
+        LamLoc::NONE,
     );
 
     let program = compiler.compile_program(&lam);
@@ -378,7 +379,7 @@ fn lowers_js_call_omits_trailing_optional_undefined_args_like_ocaml() {
             Lambda::const_(Constant::JsUndefined { is_unit: false }),
             Lambda::const_(Constant::JsUndefined { is_unit: false }),
         ],
-        Location::none(),
+        LamLoc::NONE,
     );
 
     let simplified = crate::lambda::lam_compile_main::simplify_for_js_backend(&lam);
@@ -421,7 +422,7 @@ fn lowers_js_send_omits_trailing_optional_undefined_args_like_ocaml() {
             Lambda::const_(Constant::Float("42.".to_string())),
             Lambda::const_(Constant::JsUndefined { is_unit: false }),
         ],
-        Location::none(),
+        LamLoc::NONE,
     );
 
     let rendered = print_block(&compiler.compile_program(&lam).block);
@@ -458,7 +459,7 @@ fn lowers_js_new_omits_trailing_optional_undefined_args_like_ocaml() {
             Lambda::const_(Constant::String("ab+c".to_string())),
             Lambda::const_(Constant::JsUndefined { is_unit: false }),
         ],
-        Location::none(),
+        LamLoc::NONE,
     );
 
     let rendered = print_block(&compiler.compile_program(&lam).block);
@@ -505,7 +506,7 @@ fn lowers_external_polyvar_string_and_int_args_like_ocaml() {
             Lambda::const_(Constant::Pointer("in_".to_string())),
             Lambda::const_(Constant::Pointer("on_open".to_string())),
         ],
-        Location::none(),
+        LamLoc::NONE,
     );
 
     let rendered = print_block(&compiler.compile_program(&lam).block);
@@ -538,7 +539,7 @@ fn lowers_external_polyvar_payload_args_to_two_js_args_like_ocaml() {
             tag_info: Box::new(TagInfo::PolyVar("b".to_string())),
             elements: vec![Constant::Pointer("b".to_string()), Constant::int(2)],
         })],
-        Location::none(),
+        LamLoc::NONE,
     );
 
     let rendered = print_block(&compiler.compile_program(&lam).block);
@@ -604,7 +605,7 @@ fn lowers_marshaled_constant_args_in_js_call() {
             }),
         },
         vec![],
-        Location::none(),
+        LamLoc::NONE,
     );
 
     let program = compiler.compile_program(&lam);
@@ -666,7 +667,7 @@ fn lowers_js_object_create_with_marshaled_fields() {
             Lambda::var(name_ident),
             Lambda::const_(Constant::JsUndefined { is_unit: true }),
         ],
-        Location::none(),
+        LamLoc::NONE,
     ));
 
     assert!(compiled.prelude.is_empty());
@@ -724,7 +725,7 @@ fn lowers_js_object_create_with_polyvar_string_field_like_ocaml() {
             },
         }]),
         vec![Lambda::const_(Constant::Pointer("best_fit".to_string()))],
-        Location::none(),
+        LamLoc::NONE,
     ));
 
     assert!(compiled.prelude.is_empty());
@@ -765,9 +766,9 @@ fn lowers_js_object_create_with_optional_polyvar_string_field_inline_like_ocaml(
         vec![Lambda::prim(
             Primitive::Psome,
             vec![Lambda::const_(Constant::Pointer("two_digit".to_string()))],
-            Location::none(),
+            LamLoc::NONE,
         )],
-        Location::none(),
+        LamLoc::NONE,
     ));
 
     assert!(compiled.prelude.is_empty());
@@ -838,9 +839,9 @@ fn lowers_js_object_create_with_statically_present_optional_field_inline_like_oc
         vec![Lambda::prim(
             Primitive::Psome,
             vec![Lambda::const_(Constant::string("pic"))],
-            Location::none(),
+            LamLoc::NONE,
         )],
-        Location::none(),
+        LamLoc::NONE,
     ));
 
     assert!(compiled.prelude.is_empty());
@@ -875,7 +876,7 @@ fn lowers_js_object_create_with_unknown_optional_field_to_conditional_assignment
             },
         }]),
         vec![Lambda::var(opt)],
-        Location::none(),
+        LamLoc::NONE,
     ));
 
     let ExpressionDesc::Var(crate::js_ir::VIdent::Id(obj)) = &compiled.expr.desc else {
@@ -977,9 +978,9 @@ fn lowers_js_object_create_with_nonduplicable_optional_field_after_object_temp_l
                 is_stmt: false,
             }),
             vec![],
-            Location::none(),
+            LamLoc::NONE,
         )],
-        Location::none(),
+        LamLoc::NONE,
     ));
 
     let ExpressionDesc::Var(crate::js_ir::VIdent::Id(obj)) = &compiled.expr.desc else {
@@ -1120,13 +1121,13 @@ fn lowers_ignored_js_call_args_to_ocaml_sequence_effects() {
                         is_stmt: false,
                     }),
                     vec![],
-                    Location::none(),
+                    LamLoc::NONE,
                 )),
                 Box::new(Lambda::const_(Constant::string("Float"))),
             ),
             Lambda::const_(Constant::int(3)),
         ],
-        Location::none(),
+        LamLoc::NONE,
     );
 
     let compiled = compiler.compile_expr(&lam);
@@ -1200,13 +1201,13 @@ fn lowers_ignored_js_object_fields_to_ocaml_sequence_effects() {
                         is_stmt: false,
                     }),
                     vec![],
-                    Location::none(),
+                    LamLoc::NONE,
                 )),
                 Box::new(Lambda::const_(Constant::string("Float"))),
             ),
             Lambda::const_(Constant::int(3)),
         ],
-        Location::none(),
+        LamLoc::NONE,
     );
 
     let compiled = compiler.compile_expr(&lam);
@@ -1272,11 +1273,11 @@ fn compile_deps_program_keeps_exported_dict_initializer_object_literals() {
                     Lambda::const_(Constant::string("first")),
                     Lambda::const_(Constant::string("hello")),
                 ],
-                Location::none(),
+                LamLoc::NONE,
             )],
-            Location::none(),
+            LamLoc::NONE,
         )],
-        Location::none(),
+        LamLoc::NONE,
     );
     let lam = Lambda::let_(
         LetKind::Strict,
@@ -1285,7 +1286,7 @@ fn compile_deps_program_keeps_exported_dict_initializer_object_literals() {
         Lambda::prim(
             Primitive::Pmakeblock(TagInfo::ModuleExport(vec![dict_ident]), Mutable::Immutable),
             vec![Lambda::var(dict_ident)],
-            Location::none(),
+            LamLoc::NONE,
         ),
     );
 
@@ -1328,7 +1329,7 @@ fn compile_dict_has_primitive_emits_in_operator_like_ocaml() {
     let compiled = compiler.compile_expr(&Lambda::prim(
         Primitive::PdictHas,
         vec![Lambda::var(dict), Lambda::const_(Constant::string("key1"))],
-        Location::none(),
+        LamLoc::NONE,
     ));
 
     assert!(compiled.prelude.is_empty());
@@ -1687,11 +1688,11 @@ fn module_side_effect_reason_uses_first_impure_group_in_final_order_like_ocaml()
     let lam = Lambda::let_(
         LetKind::Strict,
         first,
-        Lambda::prim(Primitive::Pdebugger, vec![], Location::none()),
+        Lambda::prim(Primitive::Pdebugger, vec![], LamLoc::NONE),
         Lambda::let_(
             LetKind::Strict,
             second,
-            Lambda::prim(Primitive::Pdebugger, vec![], Location::none()),
+            Lambda::prim(Primitive::Pdebugger, vec![], LamLoc::NONE),
             Lambda::unit(),
         ),
     );
@@ -1706,7 +1707,7 @@ fn module_side_effect_reason_uses_binding_name_for_impure_group_bodies() {
         Lambda::let_(
             LetKind::Strict,
             match_id,
-            Lambda::prim(Primitive::Pdebugger, vec![], Location::none()),
+            Lambda::prim(Primitive::Pdebugger, vec![], LamLoc::NONE),
             Lambda::unit(),
         ),
         Lambda::unit(),
@@ -1718,7 +1719,7 @@ fn module_side_effect_reason_uses_binding_name_for_impure_group_bodies() {
 #[test]
 fn module_side_effect_reason_keeps_empty_reason_for_impure_nops() {
     let lam = Lambda::seq(
-        Lambda::prim(Primitive::Pdebugger, vec![], Location::none()),
+        Lambda::prim(Primitive::Pdebugger, vec![], LamLoc::NONE),
         Lambda::unit(),
     );
 
@@ -1753,7 +1754,7 @@ fn resolves_runtime_dynamic_import_to_string_path() {
             path: vec![],
         })),
         vec![],
-        Location::none(),
+        LamLoc::NONE,
     ));
 
     let [stmt] = program.block.as_slice() else {
@@ -1853,17 +1854,17 @@ fn lowers_nullable_predicates_to_js_null_checks() {
     let null_compiled = compiler.compile_expr(&Lambda::prim(
         Primitive::PisNull,
         vec![Lambda::var(value)],
-        Location::none(),
+        LamLoc::NONE,
     ));
     let undefined_compiled = compiler.compile_expr(&Lambda::prim(
         Primitive::PisUndefined,
         vec![Lambda::var(value)],
-        Location::none(),
+        LamLoc::NONE,
     ));
     let nullable_compiled = compiler.compile_expr(&Lambda::prim(
         Primitive::PisNullUndefined,
         vec![Lambda::var(value)],
-        Location::none(),
+        LamLoc::NONE,
     ));
 
     assert!(null_compiled.prelude.is_empty());

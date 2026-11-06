@@ -8,8 +8,7 @@ use std::borrow::Cow;
 
 use super::{RawLambdaConverter, label_runtime_name, raw_optional_none};
 use crate::lambda::lam_primitive::JsxElement;
-use crate::lambda::{FieldDbgInfo, Primitive};
-use crate::location::Location;
+use crate::lambda::{FieldDbgInfo, LamLoc, Primitive};
 use crate::raw_lambda::{LetKind, RawLambda};
 use crate::types::asttypes::ArgLabel;
 use crate::types::decl::{LabelDescription, PrimKind, RecordRepresentation, ValueKind};
@@ -304,7 +303,7 @@ impl<'a> RawLambdaConverter<'a> {
     /// `transl_jsx_element`: the arguments of `Pjsx` are in the order the
     /// call evaluates them, except that the children come after the other
     /// props, as in JSX.
-    pub(super) fn transl_jsx_element(&mut self, loc: Location, call: JsxCall<'_>) -> RawLambda {
+    pub(super) fn transl_jsx_element(&mut self, loc: LamLoc, call: JsxCall<'_>) -> RawLambda {
         let init_id = self.fresh_ident("init");
         let (init, spread, fields, children) = match call.props {
             JsxProps::Spread(props) => (None, Some(self.convert_expr_raw(props)), Vec::new(), None),

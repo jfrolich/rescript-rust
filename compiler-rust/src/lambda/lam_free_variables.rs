@@ -5,6 +5,7 @@
 //! expression. This analysis is essential for closure conversion and
 //! determining what variables need to be captured in closures.
 
+use crate::lambda::LamLoc;
 use ahash::AHashSet as HashSet;
 
 use crate::ident::Ident;
@@ -217,7 +218,7 @@ mod tests {
             vec![x],
             Lambda::var(y),
             FunctionAttribute::default(),
-            crate::location::Location::none(),
+            LamLoc::NONE,
         );
 
         let fv = free_variables(&func);
@@ -237,7 +238,7 @@ mod tests {
             vec![x],
             Lambda::var(x),
             FunctionAttribute::default(),
-            crate::location::Location::none(),
+            LamLoc::NONE,
         );
 
         let fv = free_variables(&func);
@@ -257,7 +258,7 @@ mod tests {
             vec![x],
             Lambda::var(y),
             FunctionAttribute::default(),
-            crate::location::Location::none(),
+            LamLoc::NONE,
         );
 
         let letrec = Lambda::letrec(vec![(f, func)], Lambda::var(f));

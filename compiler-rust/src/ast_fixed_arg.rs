@@ -20,7 +20,7 @@ pub fn of_payload(arena: &mut ParseArena, payload: &Payload) -> Option<(FixedVal
     let [item] = items.as_slice() else {
         return None;
     };
-    let StructureItemDesc::Pstr_eval(eval) = &*item.pstr_desc else {
+    let StructureItemDesc::Pstr_eval(eval) = &item.pstr_desc else {
         return None;
     };
     let (expr_idx, eval_attrs) = &**eval;
@@ -32,16 +32,13 @@ pub fn of_payload(arena: &mut ParseArena, payload: &Payload) -> Option<(FixedVal
         return None;
     }
     let pexp_loc = expr.pexp_loc;
-    let value = match &*expr.pexp_desc {
-        ExpressionDesc::Pexp_constant(constant) => match &**constant {
-            Constant::Integer(source, None) => {
-                let source = source.clone();
-                FixedValue::Int(Located {
-                    txt: arena.intern(&source),
-                    loc: pexp_loc,
-                })
-            }
-            Constant::String(payload) => FixedValue::String(payload.clone()),
+    let value = match &expr.pexp_desc {
+        ExpressionDesc::Pexp_constant(constant) => match *constant {
+            Constant::Integer(source, None) => FixedValue::Int(Located {
+                txt: source,
+                loc: pexp_loc,
+            }),
+            Constant::String(payload) => FixedValue::String(payload.to_literal(arena)),
             _ => return None,
         },
         ExpressionDesc::Pexp_template(template) => match template.source_segments.as_slice() {
@@ -51,7 +48,7 @@ pub fn of_payload(arena: &mut ParseArena, payload: &Payload) -> Option<(FixedVal
         ExpressionDesc::Pexp_tagged_template(template) => {
             let tag = arena.get_expr(template.tag);
             let is_json = tag.pexp_attributes.is_empty()
-                && matches!(&*tag.pexp_desc,
+                && matches!(&tag.pexp_desc,
                     ExpressionDesc::Pexp_ident(lid) if arena.is_lident(lid.txt, "json"));
             match template.raw_sources.as_slice() {
                 [source] if is_json && template.values.is_empty() => FixedValue::Json(*source),
@@ -67,20 +64,17 @@ pub fn of_payload(arena: &mut ParseArena, payload: &Payload) -> Option<(FixedVal
 /// `value`.
 pub fn to_expression(arena: &mut ParseArena, value: &FixedValue, loc: LocIdx) -> Expression {
     let constant = |desc, loc| Expression {
-        pexp_desc: Box::new(desc),
+        pexp_desc: desc,
         pexp_loc: loc,
         pexp_attributes: Attributes::new(),
     };
     match value {
         FixedValue::Int(source) => constant(
-            ExpressionDesc::Pexp_constant(Box::new(Constant::Integer(
-                arena.get_string(source.txt).to_string().into(),
-                None,
-            ))),
+            ExpressionDesc::Pexp_constant(Constant::Integer(source.txt, None)),
             source.loc,
         ),
         FixedValue::String(payload) => constant(
-            ExpressionDesc::Pexp_constant(Box::new(Constant::String(payload.clone()))),
+            ExpressionDesc::Pexp_constant(Constant::String(arena.push_string_literal(payload))),
             loc,
         ),
         FixedValue::Template(source) => constant(
@@ -122,10 +116,7 @@ pub fn to_attribute(
     (
         Located { txt: name, loc },
         Payload::PStr(Box::new(vec![StructureItem {
-            pstr_desc: Box::new(StructureItemDesc::Pstr_eval(Box::new((
-                expr,
-                Attributes::new(),
-            )))),
+            pstr_desc: StructureItemDesc::Pstr_eval(Box::new((expr, Attributes::new()))),
             pstr_loc: value_loc,
         }])),
     )
@@ -183,7 +174,7 @@ fn normalize_arg(arena: &mut ParseArena, arg: &mut TypeArg) {
         return;
     }
     let typ = arena.get_core_type(arg.typ);
-    if !matches!(&*typ.ptyp_desc, CoreTypeDesc::Ptyp_any) {
+    if !matches!(&typ.ptyp_desc, CoreTypeDesc::Ptyp_any) {
         return;
     }
     let [(name, payload)] = typ.ptyp_attributes.as_slice() else {
@@ -220,7 +211,7 @@ fn normalize_arg(arena: &mut ParseArena, arg: &mut TypeArg) {
 /// OCaml `Ast_fixed_arg.normalize_external_type`: turn the `@as(value) _`
 /// arguments of an external's type into fixed arguments.
 pub fn normalize_external_type(arena: &mut ParseArena, typ: &mut CoreType) {
-    let CoreTypeDesc::Ptyp_arrow(inner) = &mut *typ.ptyp_desc else {
+    let CoreTypeDesc::Ptyp_arrow(inner) = &mut typ.ptyp_desc else {
         return;
     };
     let first = &mut inner.0;

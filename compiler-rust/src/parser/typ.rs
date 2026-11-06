@@ -36,7 +36,7 @@ fn inline_type_name_exists(p: &Parser<'_>, name: &str) -> bool {
 fn inline_type_param_exists(p: &Parser<'_>, name: &str) -> bool {
     p.inline_types_params.iter().any(|(typ_idx, _)| {
         let typ = p.arena().get_core_type(*typ_idx);
-        matches!(&*typ.ptyp_desc, CoreTypeDesc::Ptyp_var(existing) if existing.as_ref() == name)
+        matches!(&typ.ptyp_desc, CoreTypeDesc::Ptyp_var(existing) if p.arena().get_string(*existing) == name)
     })
 }
 
@@ -45,9 +45,7 @@ fn maybe_track_inline_type_param(p: &mut Parser<'_>, name: &str, loc: LocIdx) {
         // OCaml compiler/syntax/src/res_core.ml:49-56 appends free type
         // variables to the inline record context while parsing externals.
         let typ = CoreType {
-            ptyp_desc: Box::new(CoreTypeDesc::Ptyp_var(Box::new(Cow::Owned(
-                name.to_string(),
-            )))),
+            ptyp_desc: CoreTypeDesc::Ptyp_var(p.arena_mut().intern(name)),
             ptyp_loc: loc,
             ptyp_attributes: Attributes::new(),
         };
@@ -110,15 +108,15 @@ pub fn substitute_type_vars(
     typ: CoreType,
     vars: &HashSet<String>,
 ) -> Result<CoreType, LocIdx> {
-    let new_desc = match *typ.ptyp_desc {
+    let new_desc = match typ.ptyp_desc {
         CoreTypeDesc::Ptyp_var(name) => {
-            if vars.contains(name.as_ref().as_ref()) {
+            if vars.contains(arena.get_string(name)) {
                 return Err(typ.ptyp_loc);
             }
             CoreTypeDesc::Ptyp_var(name)
         }
         CoreTypeDesc::Ptyp_constr(inner) => {
-            let (lid, args) = *inner;
+            let (lid, args) = inner;
             // Check if this is a simple Lident that matches a type variable
             if args.is_empty() {
                 if let Longident::Lident(name_idx) = arena.get_longident(lid.txt) {
@@ -129,7 +127,7 @@ pub fn substitute_type_vars(
                         arena.record_tyvar_source(typ.ptyp_loc, source_idx);
                         // Convert to Ptyp_var
                         return Ok(CoreType {
-                            ptyp_desc: Box::new(CoreTypeDesc::Ptyp_var(Box::new(name))),
+                            ptyp_desc: CoreTypeDesc::Ptyp_var(arena.intern(&name)),
                             ptyp_loc: typ.ptyp_loc,
                             ptyp_attributes: typ.ptyp_attributes,
                         });
@@ -137,7 +135,9 @@ pub fn substitute_type_vars(
                 }
             }
             // Recursively process type arguments
-            let new_args: Vec<CoreTypeIdx> = args
+            let new_args: Vec<CoreTypeIdx> = arena
+                .type_list(args)
+                .to_vec()
                 .into_iter()
                 .map(|arg_idx| {
                     let arg_type = arena.get_core_type(arg_idx).clone();
@@ -145,7 +145,7 @@ pub fn substitute_type_vars(
                         .map(|substituted| arena.push_core_type(substituted))
                 })
                 .collect::<Result<_, _>>()?;
-            CoreTypeDesc::Ptyp_constr(Box::new((lid, new_args)))
+            CoreTypeDesc::Ptyp_constr((lid, arena.push_type_list(&new_args)))
         }
         CoreTypeDesc::Ptyp_arrow(inner) => {
             // `Ptyp_arrow {params; ret}`: the record's `ret` is evaluated
@@ -168,16 +168,19 @@ pub fn substitute_type_vars(
             arena.set_nary_arrow_args(arity, new_params);
             CoreTypeDesc::Ptyp_arrow(Box::new((Box::new(first), new_ret, arity)))
         }
-        CoreTypeDesc::Ptyp_tuple(elements) => CoreTypeDesc::Ptyp_tuple(Box::new(
-            (*elements)
+        CoreTypeDesc::Ptyp_tuple(elements) => {
+            let new_elements: Vec<CoreTypeIdx> = arena
+                .type_list(elements)
+                .to_vec()
                 .into_iter()
                 .map(|e_idx| {
                     let e_type = arena.get_core_type(e_idx).clone();
                     substitute_type_vars(arena, e_type, vars)
                         .map(|substituted| arena.push_core_type(substituted))
                 })
-                .collect::<Result<_, _>>()?,
-        )),
+                .collect::<Result<_, _>>()?;
+            CoreTypeDesc::Ptyp_tuple(arena.push_type_list(&new_elements))
+        }
         CoreTypeDesc::Ptyp_poly(inner) => {
             let (poly_vars, body_idx) = *inner;
             if poly_vars
@@ -273,7 +276,7 @@ pub fn substitute_type_vars(
         other => other,
     };
     Ok(CoreType {
-        ptyp_desc: Box::new(new_desc),
+        ptyp_desc: new_desc,
         ptyp_loc: typ.ptyp_loc,
         ptyp_attributes: typ.ptyp_attributes,
     })
@@ -317,7 +320,7 @@ pub fn parse_poly_type_expr(p: &mut Parser<'_>) -> CoreType {
                 let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
                 let body_idx = p.arena_mut().push_core_type(body);
                 return CoreType {
-                    ptyp_desc: Box::new(CoreTypeDesc::Ptyp_poly(Box::new((vars, body_idx)))),
+                    ptyp_desc: CoreTypeDesc::Ptyp_poly(Box::new((vars, body_idx))),
                     ptyp_loc: loc,
                     ptyp_attributes: Attributes::new(),
                 };
@@ -329,7 +332,7 @@ pub fn parse_poly_type_expr(p: &mut Parser<'_>) -> CoreType {
                     let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
                     let body_idx = p.arena_mut().push_core_type(body);
                     return CoreType {
-                        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_poly(Box::new((vars, body_idx)))),
+                        ptyp_desc: CoreTypeDesc::Ptyp_poly(Box::new((vars, body_idx))),
                         ptyp_loc: loc,
                         ptyp_attributes: Attributes::new(),
                     };
@@ -338,7 +341,7 @@ pub fn parse_poly_type_expr(p: &mut Parser<'_>) -> CoreType {
                     p.next();
                     let name = p.arena().get_string(var.txt).to_string();
                     let typ = CoreType {
-                        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_var(Box::new(Cow::Owned(name)))),
+                        ptyp_desc: CoreTypeDesc::Ptyp_var(p.arena_mut().intern(&name)),
                         ptyp_loc: var.loc,
                         ptyp_attributes: Attributes::new(),
                     };
@@ -356,11 +359,11 @@ pub fn parse_poly_type_expr(p: &mut Parser<'_>) -> CoreType {
                     };
                     let ret_idx = p.arena_mut().push_core_type(return_type);
                     return CoreType {
-                        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow(Box::new((
+                        ptyp_desc: CoreTypeDesc::Ptyp_arrow(Box::new((
                             Box::new(arg),
                             ret_idx,
                             p.static_arity_1(),
-                        )))),
+                        ))),
                         ptyp_loc: loc,
                         ptyp_attributes: Attributes::new(),
                     };
@@ -368,7 +371,7 @@ pub fn parse_poly_type_expr(p: &mut Parser<'_>) -> CoreType {
                 _ => {
                     let name = p.arena().get_string(var.txt).to_string();
                     return CoreType {
-                        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_var(Box::new(Cow::Owned(name)))),
+                        ptyp_desc: CoreTypeDesc::Ptyp_var(p.arena_mut().intern(&name)),
                         ptyp_loc: var.loc,
                         ptyp_attributes: Attributes::new(),
                     };
@@ -425,7 +428,7 @@ pub fn parse_locally_abstract_type(p: &mut Parser<'_>) -> CoreType {
     let loc = p.mk_loc_to_end_of(&start_pos, body.ptyp_loc);
     let body_idx = p.arena_mut().push_core_type(body);
     CoreType {
-        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_poly(Box::new((vars, body_idx)))),
+        ptyp_desc: CoreTypeDesc::Ptyp_poly(Box::new((vars, body_idx))),
         ptyp_loc: loc,
         ptyp_attributes: Attributes::new(),
     }
@@ -466,7 +469,7 @@ pub(super) fn parse_type_alias(p: &mut Parser<'_>, typ: CoreType) -> CoreType {
         let loc = p.mk_loc_idx(typ_start_idx, end_pos_idx);
         let typ_idx = p.arena_mut().push_core_type(typ);
         return CoreType {
-            ptyp_desc: Box::new(CoreTypeDesc::Ptyp_alias(Box::new((typ_idx, var_name)))),
+            ptyp_desc: CoreTypeDesc::Ptyp_alias(Box::new((typ_idx, var_name))),
             ptyp_loc: loc,
             ptyp_attributes: Attributes::new(),
         };
@@ -557,11 +560,7 @@ pub(super) fn parse_arrow_type_rest(
     // Use static arity to match OCaml's CSE sharing behavior
     let ret_idx = p.arena_mut().push_core_type(return_type);
     CoreType {
-        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow(Box::new((
-            Box::new(arg),
-            ret_idx,
-            p.static_arity_1(),
-        )))),
+        ptyp_desc: CoreTypeDesc::Ptyp_arrow(Box::new((Box::new(arg), ret_idx, p.static_arity_1()))),
         ptyp_loc: loc,
         ptyp_attributes: Attributes::new(),
     }
@@ -674,11 +673,7 @@ fn parse_es6_arrow_type(p: &mut Parser<'_>, attrs: Attributes) -> CoreType {
         p.arena_mut()
             .set_nary_arrow_args(full_arity, vec![arg.clone()]);
         CoreType {
-            ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow(Box::new((
-                Box::new(arg),
-                ret_idx,
-                full_arity,
-            )))),
+            ptyp_desc: CoreTypeDesc::Ptyp_arrow(Box::new((Box::new(arg), ret_idx, full_arity))),
             ptyp_loc: loc,
             ptyp_attributes: Attributes::new(),
         }
@@ -728,7 +723,7 @@ fn parse_atomic_typ_expr_with_start(
             };
             maybe_track_inline_type_param(p, &name, var_loc);
             CoreType {
-                ptyp_desc: Box::new(CoreTypeDesc::Ptyp_var(Box::new(Cow::Owned(name)))),
+                ptyp_desc: CoreTypeDesc::Ptyp_var(p.arena_mut().intern(&name)),
                 ptyp_loc: var_loc,
                 ptyp_attributes: Attributes::new(),
             }
@@ -738,7 +733,7 @@ fn parse_atomic_typ_expr_with_start(
             p.next();
             let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
             CoreType {
-                ptyp_desc: Box::new(CoreTypeDesc::Ptyp_any),
+                ptyp_desc: CoreTypeDesc::Ptyp_any,
                 ptyp_loc: loc,
                 ptyp_attributes: Attributes::new(),
             }
@@ -760,7 +755,12 @@ fn parse_atomic_typ_expr_with_start(
                 p.next();
                 let lid_loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
                 let lid_idx = p.push_lident_static("unit");
-                ast_helper::make_type_constr(lid_idx, vec![], lid_loc, LocIdx::none())
+                ast_helper::make_type_constr(
+                    lid_idx,
+                    crate::parse_arena::TypeList::EMPTY,
+                    lid_loc,
+                    LocIdx::none(),
+                )
             } else {
                 // Parenthesized type or tuple. res_core.ml:4618-4622 calls
                 // `parse_typ_expr p` and `parse_tuple_type` without the
@@ -809,7 +809,7 @@ fn parse_atomic_typ_expr_with_start(
             let ext = parse_extension(p);
             let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
             CoreType {
-                ptyp_desc: Box::new(CoreTypeDesc::Ptyp_extension(Box::new(ext))),
+                ptyp_desc: CoreTypeDesc::Ptyp_extension(Box::new(ext)),
                 ptyp_loc: loc,
                 ptyp_attributes: Attributes::new(),
             }
@@ -915,8 +915,8 @@ fn parse_type_constr_with_start(
         let count = args
             .iter()
             .filter(|arg| {
-                if let CoreTypeDesc::Ptyp_constr(constr_inner) = &*arg.ptyp_desc {
-                    let (ref lid, _) = **constr_inner;
+                if let CoreTypeDesc::Ptyp_constr(constr_inner) = &arg.ptyp_desc {
+                    let (ref lid, _) = *constr_inner;
                     inline_names
                         .iter()
                         .any(|iname| p.arena().is_lident(lid.txt, p.arena().get_string(*iname)))
@@ -947,6 +947,7 @@ fn parse_type_constr_with_start(
         .into_iter()
         .map(|a| p.arena_mut().push_core_type(a))
         .collect();
+    let args_idx = p.arena_mut().push_type_list(&args_idx);
     ast_helper::make_type_constr(lid_idx, args_idx, lid_loc, ptyp_loc)
 }
 
@@ -986,10 +987,10 @@ pub(super) fn parse_type_constructor_args(
                 .map(|arg| p.arena_mut().push_core_type(arg.clone()))
                 .collect();
             let typ = CoreType {
-                ptyp_desc: Box::new(CoreTypeDesc::Ptyp_constr(Box::new((
+                ptyp_desc: CoreTypeDesc::Ptyp_constr((
                     with_loc(lid_idx, lid_loc),
-                    arg_idxs,
-                )))),
+                    p.arena_mut().push_type_list(&arg_idxs),
+                )),
                 ptyp_loc: LocIdx::none(),
                 ptyp_attributes: Attributes::new(),
             };
@@ -1064,6 +1065,7 @@ pub(super) fn parse_type_equation_constr(
             .into_iter()
             .map(|a| p.arena_mut().push_core_type(a))
             .collect();
+        let args_idx = p.arena_mut().push_type_list(&args_idx);
         let typ = ast_helper::make_type_constr(lid_idx, args_idx, lid_loc, loc);
         parse_type_alias(p, typ)
     })
@@ -1322,7 +1324,7 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
             && !prehandled_unlabeled_lident_attrs
         {
             let is_simple_constr = matches!(
-                &*typ.ptyp_desc,
+                &typ.ptyp_desc,
                 CoreTypeDesc::Ptyp_constr(inner) if p.arena().is_simple_lident(inner.0.txt)
             );
             // If param_attrs is empty but the type already has attributes, it was parsed as
@@ -1345,7 +1347,7 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
             // We detect direct arrows by checking if the arrow's first arg starts exactly
             // at post_doc_start. For nested arrows, the inner `.` extension moves the
             // first arg location before post_doc_start.
-            if let CoreTypeDesc::Ptyp_arrow(inner) = *typ.ptyp_desc {
+            if let CoreTypeDesc::Ptyp_arrow(inner) = typ.ptyp_desc {
                 let (arg, ret, arity) = *inner;
                 let arg_typ = p.arena().get_core_type(arg.typ).clone();
                 let first_arg_start = p.loc_start(arg_typ.ptyp_loc);
@@ -1360,7 +1362,7 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
 
                     // Also extend first argument's location if it's a simple Lident
                     let new_arg = if matches!(
-                        &*arg_typ.ptyp_desc,
+                        &arg_typ.ptyp_desc,
                         CoreTypeDesc::Ptyp_constr(ci) if p.arena().is_simple_lident(ci.0.txt)
                     ) && !arg_typ.ptyp_loc.is_none()
                     {
@@ -1380,18 +1382,18 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
                     };
 
                     typ = CoreType {
-                        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow(Box::new((
+                        ptyp_desc: CoreTypeDesc::Ptyp_arrow(Box::new((
                             Box::new(new_arg),
                             ret,
                             arity,
-                        )))),
+                        ))),
                         ptyp_loc: new_arrow_loc,
                         ptyp_attributes: typ.ptyp_attributes,
                     };
                 } else {
                     // Restore the type without modification
                     typ = CoreType {
-                        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow(Box::new((arg, ret, arity)))),
+                        ptyp_desc: CoreTypeDesc::Ptyp_arrow(Box::new((arg, ret, arity))),
                         ..typ
                     };
                 }
@@ -1419,7 +1421,7 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
             Attributes::new()
         } else if matches!(label, ArgLabel::Nolabel) && !param_attrs.is_empty() {
             let is_simple_lident = matches!(
-                &*typ.ptyp_desc,
+                &typ.ptyp_desc,
                 CoreTypeDesc::Ptyp_constr(inner) if p.arena().is_simple_lident(inner.0.txt)
             );
             if is_simple_lident && !typ.ptyp_loc.is_none() {
@@ -1509,7 +1511,12 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
         // Use stored PosIdx for sharing instead of pushing fresh position
         let lid_loc = p.mk_loc_idx(start_pos_idx, rparen_end_idx);
         let lid_idx = p.push_lident_static("unit");
-        let unit_type = ast_helper::make_type_constr(lid_idx, vec![], lid_loc, LocIdx::none());
+        let unit_type = ast_helper::make_type_constr(
+            lid_idx,
+            crate::parse_arena::TypeList::EMPTY,
+            lid_loc,
+            LocIdx::none(),
+        );
         let unit_type_idx = p.arena_mut().push_core_type(unit_type);
         params.push((
             TypeArg {
@@ -1531,7 +1538,7 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
             .filter(|(param, _)| {
                 let param_typ = p.arena().get_core_type(param.typ);
                 matches!(param.lbl, ArgLabel::Labelled(_))
-                    && matches!(*param_typ.ptyp_desc, CoreTypeDesc::Ptyp_any)
+                    && matches!(param_typ.ptyp_desc, CoreTypeDesc::Ptyp_any)
                     && param_typ
                         .ptyp_attributes
                         .iter()
@@ -1553,11 +1560,7 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
     let ret = p.arena_mut().push_core_type(return_type);
     p.arena_mut().set_nary_arrow_args(full_arity, args);
     CoreType {
-        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow(Box::new((
-            Box::new(first),
-            ret,
-            full_arity,
-        )))),
+        ptyp_desc: CoreTypeDesc::Ptyp_arrow(Box::new((Box::new(first), ret, full_arity))),
         ptyp_loc: p.mk_loc_idx(start_pos_idx, end_pos_idx),
         ptyp_attributes: Attributes::new(),
     }
@@ -1612,7 +1615,7 @@ fn parse_tuple_type(p: &mut Parser<'_>, start_pos_idx: PosIdx, first: CoreType) 
         .map(|t| p.arena_mut().push_core_type(t))
         .collect();
     CoreType {
-        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_tuple(Box::new(types_idx))),
+        ptyp_desc: CoreTypeDesc::Ptyp_tuple(p.arena_mut().push_type_list(&types_idx)),
         ptyp_loc: loc,
         ptyp_attributes: Attributes::new(),
     }
@@ -1677,10 +1680,10 @@ fn parse_record_or_object_type_inner(p: &mut Parser<'_>) -> (CoreType, bool) {
         let lid_idx = p.push_lident_from_idx(inline_type_idx);
         (
             CoreType {
-                ptyp_desc: Box::new(CoreTypeDesc::Ptyp_constr(Box::new((
+                ptyp_desc: CoreTypeDesc::Ptyp_constr((
                     with_loc(lid_idx, loc),
-                    type_args,
-                )))),
+                    p.arena_mut().push_type_list(&type_args),
+                )),
                 ptyp_loc: loc,
                 ptyp_attributes: Attributes::new(),
             },
@@ -1704,7 +1707,7 @@ fn parse_record_or_object_type_inner(p: &mut Parser<'_>) -> (CoreType, bool) {
         let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
         (
             CoreType {
-                ptyp_desc: Box::new(CoreTypeDesc::Ptyp_object(Box::new((fields, closed)))),
+                ptyp_desc: CoreTypeDesc::Ptyp_object(Box::new((fields, closed))),
                 ptyp_loc: loc,
                 ptyp_attributes: Attributes::new(),
             },
@@ -1739,7 +1742,7 @@ pub fn parse_object_type_body(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Core
     p.expect(Token::Rbrace);
     let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
     let typ = CoreType {
-        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_object(Box::new((fields, closed)))),
+        ptyp_desc: CoreTypeDesc::Ptyp_object(Box::new((fields, closed))),
         ptyp_loc: loc,
         ptyp_attributes: Attributes::new(),
     };
@@ -1868,9 +1871,7 @@ fn parse_poly_variant_type(p: &mut Parser<'_>) -> CoreType {
     let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
     p.expect(Token::Rbracket);
     CoreType {
-        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_variant(Box::new((
-            fields, closed, low_tags,
-        )))),
+        ptyp_desc: CoreTypeDesc::Ptyp_variant(Box::new((fields, closed, low_tags))),
         ptyp_loc: loc,
         ptyp_attributes: Attributes::new(),
     }
@@ -2078,7 +2079,7 @@ pub fn parse_package_type(
     let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
 
     CoreType {
-        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_package(Box::new((lid, constraints)))),
+        ptyp_desc: CoreTypeDesc::Ptyp_package(Box::new((lid, constraints))),
         ptyp_loc: loc,
         ptyp_attributes: attrs,
     }
@@ -2157,37 +2158,37 @@ mod tests {
     #[test]
     fn test_parse_type_var() {
         let typ = parse_type_with_timeout("'a");
-        assert!(matches!(*typ.ptyp_desc, CoreTypeDesc::Ptyp_var(_)));
+        assert!(matches!(typ.ptyp_desc, CoreTypeDesc::Ptyp_var(_)));
     }
 
     #[test]
     fn test_parse_type_any() {
         let typ = parse_type_with_timeout("_");
-        assert!(matches!(*typ.ptyp_desc, CoreTypeDesc::Ptyp_any));
+        assert!(matches!(typ.ptyp_desc, CoreTypeDesc::Ptyp_any));
     }
 
     #[test]
     fn test_parse_type_constr_simple() {
         let typ = parse_type_with_timeout("int");
-        assert!(matches!(*typ.ptyp_desc, CoreTypeDesc::Ptyp_constr(..)));
+        assert!(matches!(typ.ptyp_desc, CoreTypeDesc::Ptyp_constr(..)));
     }
 
     #[test]
     fn test_parse_type_constr_with_args() {
         let typ = parse_type_with_timeout("array<int>");
-        assert!(matches!(*typ.ptyp_desc, CoreTypeDesc::Ptyp_constr(..)));
+        assert!(matches!(typ.ptyp_desc, CoreTypeDesc::Ptyp_constr(..)));
     }
 
     #[test]
     fn test_parse_type_tuple() {
         let typ = parse_type_with_timeout("(int, string)");
-        assert!(matches!(*typ.ptyp_desc, CoreTypeDesc::Ptyp_tuple(_)));
+        assert!(matches!(typ.ptyp_desc, CoreTypeDesc::Ptyp_tuple(_)));
     }
 
     #[test]
     fn test_parse_type_arrow() {
         let typ = parse_type_with_timeout("int => string");
-        assert!(matches!(*typ.ptyp_desc, CoreTypeDesc::Ptyp_arrow(_)));
+        assert!(matches!(typ.ptyp_desc, CoreTypeDesc::Ptyp_arrow(_)));
     }
 
     #[test]

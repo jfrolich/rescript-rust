@@ -36,6 +36,7 @@ pub mod btype;
 pub mod context;
 pub mod ctype;
 pub mod decl;
+pub mod decl_loc;
 pub mod dict_pattern;
 pub mod env;
 pub(crate) mod env_lazy;
@@ -70,6 +71,7 @@ pub use decl::{
     TypeDeclaration, TypeInlinedType, TypeKind, TypeRepresentation, ValueDescription, ValueKind,
     may_equal_constructor, same_constructor,
 };
+pub use decl_loc::{DeclLoc, DeclLocTable, DeclLocs};
 pub use path::{NOPOS, Path, Typath};
 pub(crate) use type_expr::TypeExprRefMap;
 pub use type_expr::{

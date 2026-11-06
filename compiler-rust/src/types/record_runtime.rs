@@ -10,11 +10,11 @@ use crate::parser::ast::LabelDeclaration;
 
 /// The decoded `@as` rename of a parsetree field
 /// (`String_literal.string_semantic` of `pld_runtime_name`).
-pub fn parsetree_runtime_name(label: &LabelDeclaration) -> Option<String> {
+pub fn parsetree_runtime_name(label: &LabelDeclaration, arena: &ParseArena) -> Option<String> {
     label
         .pld_runtime_name
         .as_ref()
-        .map(|name| name.txt.semantic().to_string())
+        .map(|name| name.txt.semantic(arena).to_string())
 }
 
 /// OCaml `Record_runtime.check_duplicated_labels`: the first field that
@@ -32,7 +32,7 @@ pub fn check_duplicated_labels(
         // Checked against the fields seen before this one, so that
         // `@as("x") x` renames a field to the name it already has.
         let clash = label.pld_runtime_name.as_ref().and_then(|name| {
-            let semantic = name.txt.semantic();
+            let semantic = name.txt.semantic(arena);
             coll.contains(semantic)
                 .then(|| (semantic.to_string(), name.loc))
         });
@@ -41,7 +41,7 @@ pub fn check_duplicated_labels(
             return clash;
         }
         if let Some(name) = &label.pld_runtime_name {
-            coll.insert(name.txt.semantic());
+            coll.insert(name.txt.semantic(arena));
         }
     }
     None

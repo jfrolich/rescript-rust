@@ -17,13 +17,13 @@ use crate::js_ir::{
     BinOp, Block, CallInfo, Expression, ExpressionDesc, JsxExpression, ModuleId, Statement,
     VariableDeclaration, expression_has_no_side_effects,
 };
+use crate::lambda::LamLoc;
 use crate::lambda::lam_compat::{FieldDbgInfo, LetKind};
 use crate::lambda::lam_primitive::{
     Attr, DeclKind, ExternalDecl, ExternalModuleName, ImportSource, JsxElement, Label, LabelNoname,
     ModuleBindName, ModuleSource, Mutable, ObjParam, Param, Primitive,
 };
 use crate::lambda::{Lambda, TagInfo};
-use crate::location::Location;
 
 pub(crate) fn external_module_import_attributes(
     module_name: &ExternalModuleName,
@@ -1201,7 +1201,7 @@ impl LambdaCompiler {
     /// `Lam_compile_primitive.translate` for `Pimport source`: the module is
     /// registered as a dynamic dependency here, the single place that knows
     /// about it, and the emitted form is `import("path")[.then(m => m.<name>)]`.
-    pub(crate) fn compile_import(&mut self, loc: &Location, source: &ImportSource) -> Expression {
+    pub(crate) fn compile_import(&mut self, loc: &LamLoc, source: &ImportSource) -> Expression {
         let invalid = "Invalid argument: Dynamic import requires a module or module value that is a file as argument. Passing a value or local module is not allowed.";
         match source {
             ImportSource::ImportModule { module_, path } => {

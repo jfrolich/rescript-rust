@@ -182,6 +182,10 @@ pub(crate) struct ThreadTypeStore {
     /// The build's process-wide pool of immutable dependency graphs; holding
     /// it keeps every shared node this store's signatures refer to alive.
     shared: Arc<super::shared_store::SharedTypePool>,
+    /// Locations of store-owned declarations and type labels
+    /// (`DeclLocKind::Store` handles; see `types::decl_loc`).
+    decl_locs: super::decl_loc::OwnedDeclLocs,
+    decl_loc_owner: u32,
 }
 
 impl ThreadTypeStore {
@@ -203,7 +207,46 @@ impl ThreadTypeStore {
             initial_env: RefCell::new(None),
             generation,
             shared: super::shared_store::pool_for(generation),
+            decl_locs: Default::default(),
+            decl_loc_owner: super::decl_loc::next_table_owner(),
         }
+    }
+
+    /// Store handle for a declaration location built into the store.
+    pub(crate) fn intern_decl_loc(&self, loc: crate::location::Location) -> super::DeclLoc {
+        if let Some(source) = super::DeclLoc::source(&loc) {
+            return source;
+        }
+        super::DeclLoc::table(
+            super::decl_loc::DeclLocKind::Store,
+            self.decl_loc_owner,
+            self.decl_locs.intern(loc),
+        )
+    }
+
+    /// Append an imported portable location table, returning the mapping of
+    /// its handles into this store.
+    pub(crate) fn import_decl_locs<'a>(
+        &self,
+        locations: impl IntoIterator<Item = crate::location::Location>,
+        files: &'a dyn Fn(StrIdx) -> StrIdx,
+    ) -> super::decl_loc::DeclLocImport<'a> {
+        super::decl_loc::DeclLocImport {
+            kind: super::decl_loc::DeclLocKind::Store,
+            owner: self.decl_loc_owner,
+            base: self.decl_locs.append(locations),
+            files,
+        }
+    }
+
+    /// The location of a store handle.
+    pub(crate) fn decl_loc(&self, loc: super::DeclLoc) -> crate::location::Location {
+        assert_eq!(
+            loc.owner(),
+            self.decl_loc_owner,
+            "store declaration location resolved by another worker store"
+        );
+        self.decl_locs.get(loc.index())
     }
 
     /// The process-wide pool of this store's build.

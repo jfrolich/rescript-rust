@@ -28,12 +28,12 @@ fn braces_from_attr(arena: &ParseArena, expr: &Expression) -> Option<ParenKind> 
 
 #[inline]
 fn is_module_pack_constraint(arena: &ParseArena, expr: &Expression) -> bool {
-    if let ExpressionDesc::Pexp_constraint(inner) = &*expr.pexp_desc {
+    if let ExpressionDesc::Pexp_constraint(inner) = &expr.pexp_desc {
         let (ref inner_expr_idx, ref typ) = **inner;
         let inner_expr = arena.get_expr(*inner_expr_idx);
-        matches!(&*inner_expr.pexp_desc, ExpressionDesc::Pexp_pack(_))
+        matches!(&inner_expr.pexp_desc, ExpressionDesc::Pexp_pack(_))
             && matches!(
-                &*arena.get_core_type(*typ).ptyp_desc,
+                &arena.get_core_type(*typ).ptyp_desc,
                 CoreTypeDesc::Ptyp_package(_)
             )
     } else {
@@ -51,7 +51,7 @@ fn expr_with_coercion_kind(
         return kind;
     }
 
-    match &*expr.pexp_desc {
+    match &expr.pexp_desc {
         _ if is_module_pack_constraint(arena, expr) => ParenKind::Nothing,
         ExpressionDesc::Pexp_coerce(_) => coercion_kind,
         ExpressionDesc::Pexp_constraint(_) => ParenKind::Parenthesized,
@@ -73,7 +73,7 @@ pub fn expr_allowing_coercion(arena: &ParseArena, expr: &Expression) -> ParenKin
 pub fn expr_record_row_rhs(arena: &ParseArena, optional: bool, e: &Expression) -> ParenKind {
     let kind = expr(arena, e);
     match kind {
-        ParenKind::Nothing if optional => match &*e.pexp_desc {
+        ParenKind::Nothing if optional => match &e.pexp_desc {
             ExpressionDesc::Pexp_ifthenelse(_)
             | ExpressionDesc::Pexp_ternary(_)
             | ExpressionDesc::Pexp_fun(_) => ParenKind::Parenthesized,
@@ -101,7 +101,7 @@ pub fn call_expr(arena: &ParseArena, expr: &Expression) -> ParenKind {
         return ParenKind::Parenthesized;
     }
 
-    match &*expr.pexp_desc {
+    match &expr.pexp_desc {
         _ if is_module_pack_constraint(arena, expr) => ParenKind::Nothing,
         ExpressionDesc::Pexp_fun(_) if parsetree_viewer::is_underscore_apply_sugar(arena, expr) => {
             ParenKind::Nothing
@@ -132,7 +132,7 @@ pub fn structure_expr(arena: &ParseArena, expr: &Expression) -> ParenKind {
         return kind;
     }
 
-    match &*expr.pexp_desc {
+    match &expr.pexp_desc {
         ExpressionDesc::Pexp_jsx_element(_) => ParenKind::Nothing,
         _ if !expr.pexp_attributes.is_empty() => ParenKind::Parenthesized,
         _ if is_module_pack_constraint(arena, expr) => ParenKind::Nothing,
@@ -159,7 +159,7 @@ pub fn unary_expr_operand(arena: &ParseArena, expr: &Expression) -> ParenKind {
         return ParenKind::Parenthesized;
     }
 
-    match &*expr.pexp_desc {
+    match &expr.pexp_desc {
         _ if is_module_pack_constraint(arena, expr) => ParenKind::Nothing,
         ExpressionDesc::Pexp_fun(_) if parsetree_viewer::is_underscore_apply_sugar(arena, expr) => {
             ParenKind::Nothing
@@ -193,7 +193,7 @@ pub fn binary_expr_operand(arena: &ParseArena, is_lhs: bool, expr: &Expression) 
         return kind;
     }
 
-    match &*expr.pexp_desc {
+    match &expr.pexp_desc {
         _ if is_module_pack_constraint(arena, expr) => ParenKind::Nothing,
         ExpressionDesc::Pexp_fun(_) if parsetree_viewer::is_underscore_apply_sugar(arena, expr) => {
             ParenKind::Nothing
@@ -230,18 +230,15 @@ pub fn rhs_binary_expr_operand(
     parent_operator: &str,
     rhs: &Expression,
 ) -> bool {
-    match &*rhs.pexp_desc {
+    match &rhs.pexp_desc {
         ExpressionDesc::Pexp_apply(inner) => {
-            let PexpApply {
-                ref funct,
-                ref args,
-                ..
-            } = **inner;
+            let PexpApply { ref funct, .. } = *inner;
+            let args = arena.apply_args(inner.args);
             if args.len() != 2 {
                 return false;
             }
             let funct_expr = arena.get_expr(*funct);
-            match &*funct_expr.pexp_desc {
+            match &funct_expr.pexp_desc {
                 ExpressionDesc::Pexp_ident(ident) if funct_expr.pexp_attributes.is_empty() => {
                     if let Longident::Lident(op_idx) = arena.get_longident(ident.txt) {
                         let operator = arena.get_string(*op_idx);
@@ -270,18 +267,15 @@ pub fn flatten_operand_rhs(
     parent_operator: &str,
     rhs: &Expression,
 ) -> bool {
-    match &*rhs.pexp_desc {
+    match &rhs.pexp_desc {
         ExpressionDesc::Pexp_apply(inner) => {
-            let PexpApply {
-                ref funct,
-                ref args,
-                ..
-            } = **inner;
+            let PexpApply { ref funct, .. } = *inner;
+            let args = arena.apply_args(inner.args);
             if args.len() != 2 {
                 return false;
             }
             let funct_expr = arena.get_expr(*funct);
-            match &*funct_expr.pexp_desc {
+            match &funct_expr.pexp_desc {
                 ExpressionDesc::Pexp_ident(ident) => {
                     if let Longident::Lident(op_idx) = arena.get_longident(ident.txt) {
                         let operator = arena.get_string(*op_idx);
@@ -304,9 +298,9 @@ pub fn flatten_operand_rhs(
             if {
                 let (ref inner_expr_idx, ref typ) = **inner;
                 let inner_expr = arena.get_expr(*inner_expr_idx);
-                matches!(&*inner_expr.pexp_desc, ExpressionDesc::Pexp_pack(_))
+                matches!(&inner_expr.pexp_desc, ExpressionDesc::Pexp_pack(_))
                     && matches!(
-                        &*arena.get_core_type(*typ).ptyp_desc,
+                        &arena.get_core_type(*typ).ptyp_desc,
                         CoreTypeDesc::Ptyp_package(_)
                     )
             } =>
@@ -315,7 +309,7 @@ pub fn flatten_operand_rhs(
         }
         ExpressionDesc::Pexp_fun(inner) => {
             let PexpFun { ref lhs, .. } = **inner;
-            if let PatternDesc::Ppat_var(name) = &*arena.get_pat(*lhs).ppat_desc {
+            if let PatternDesc::Ppat_var(name) = &arena.get_pat(*lhs).ppat_desc {
                 if arena.get_string(name.txt) == "__x" {
                     return false;
                 }
@@ -338,18 +332,15 @@ pub fn flatten_operand_rhs_without_attrs(
     parent_operator: &str,
     rhs: &Expression,
 ) -> bool {
-    match &*rhs.pexp_desc {
+    match &rhs.pexp_desc {
         ExpressionDesc::Pexp_apply(inner) => {
-            let PexpApply {
-                ref funct,
-                ref args,
-                ..
-            } = **inner;
+            let PexpApply { ref funct, .. } = *inner;
+            let args = arena.apply_args(inner.args);
             if args.len() != 2 {
                 return false;
             }
             let funct_expr = arena.get_expr(*funct);
-            match &*funct_expr.pexp_desc {
+            match &funct_expr.pexp_desc {
                 ExpressionDesc::Pexp_ident(ident) => {
                     if let Longident::Lident(op_idx) = arena.get_longident(ident.txt) {
                         let operator = arena.get_string(*op_idx);
@@ -373,9 +364,9 @@ pub fn flatten_operand_rhs_without_attrs(
             if {
                 let (ref inner_expr_idx, ref typ) = **inner;
                 let inner_expr = arena.get_expr(*inner_expr_idx);
-                matches!(&*inner_expr.pexp_desc, ExpressionDesc::Pexp_pack(_))
+                matches!(&inner_expr.pexp_desc, ExpressionDesc::Pexp_pack(_))
                     && matches!(
-                        &*arena.get_core_type(*typ).ptyp_desc,
+                        &arena.get_core_type(*typ).ptyp_desc,
                         CoreTypeDesc::Ptyp_package(_)
                     )
             } =>
@@ -384,7 +375,7 @@ pub fn flatten_operand_rhs_without_attrs(
         }
         ExpressionDesc::Pexp_fun(inner) => {
             let PexpFun { ref lhs, .. } = **inner;
-            if let PatternDesc::Ppat_var(name) = &*arena.get_pat(*lhs).ppat_desc {
+            if let PatternDesc::Ppat_var(name) = &arena.get_pat(*lhs).ppat_desc {
                 if arena.get_string(name.txt) == "__x" {
                     return false;
                 }
@@ -426,13 +417,13 @@ fn assert_or_await_expr_rhs_inner(
         return ParenKind::Parenthesized;
     }
 
-    match &*expr.pexp_desc {
+    match &expr.pexp_desc {
         ExpressionDesc::Pexp_apply(apply_inner)
             if parsetree_viewer::is_binary_expression(arena, expr) =>
         {
-            let PexpApply { ref funct, .. } = **apply_inner;
+            let PexpApply { ref funct, .. } = *apply_inner;
             let funct_expr = arena.get_expr(*funct);
-            if let ExpressionDesc::Pexp_ident(ident) = &*funct_expr.pexp_desc {
+            if let ExpressionDesc::Pexp_ident(ident) = &funct_expr.pexp_desc {
                 if let Longident::Lident(op_idx) = arena.get_longident(ident.txt) {
                     let operator = arena.get_string(*op_idx);
                     if in_await && !binary_operator_inside_await_needs_parens(operator) {
@@ -466,12 +457,12 @@ fn assert_or_await_expr_rhs_inner(
 }
 
 /// Check if a constant is negative.
-pub fn is_negative_constant(constant: &Constant) -> bool {
+pub fn is_negative_constant(constant: &Constant, arena: &ParseArena) -> bool {
     fn is_neg(txt: &str) -> bool {
         txt.starts_with('-')
     }
     match constant {
-        Constant::Integer(i, _) | Constant::Float(i, _) => is_neg(i),
+        Constant::Integer(i, _) | Constant::Float(i, _) => is_neg(arena.get_string(*i)),
         _ => false,
     }
 }
@@ -492,9 +483,11 @@ pub fn field_expr(arena: &ParseArena, expr: &Expression) -> ParenKind {
         return ParenKind::Parenthesized;
     }
 
-    match &*expr.pexp_desc {
+    match &expr.pexp_desc {
         _ if is_module_pack_constraint(arena, expr) => ParenKind::Nothing,
-        ExpressionDesc::Pexp_constant(c) if is_negative_constant(c) => ParenKind::Parenthesized,
+        ExpressionDesc::Pexp_constant(c) if is_negative_constant(c, arena) => {
+            ParenKind::Parenthesized
+        }
         ExpressionDesc::Pexp_fun(_) if parsetree_viewer::is_underscore_apply_sugar(arena, expr) => {
             ParenKind::Nothing
         }
@@ -527,7 +520,7 @@ pub fn ternary_operand(arena: &ParseArena, is_condition: bool, expr: &Expression
         return kind;
     }
 
-    match &*expr.pexp_desc {
+    match &expr.pexp_desc {
         _ if is_module_pack_constraint(arena, expr) => ParenKind::Nothing,
         // A leading condition attribute otherwise attaches to the whole
         // statement.
@@ -538,7 +531,7 @@ pub fn ternary_operand(arena: &ParseArena, is_condition: bool, expr: &Expression
         }
         _ if parsetree_viewer::is_fun_newtype(arena, expr) => {
             let (_, _, return_expr) = parsetree_viewer::fun_expr(arena, expr);
-            match &*return_expr.pexp_desc {
+            match &return_expr.pexp_desc {
                 ExpressionDesc::Pexp_constraint(_) | ExpressionDesc::Pexp_coerce(_) => {
                     ParenKind::Parenthesized
                 }
@@ -556,7 +549,7 @@ pub fn starts_with_minus(txt: &str) -> bool {
 
 /// Check if JSX prop expression needs parentheses/braces.
 pub fn jsx_prop_expr(arena: &ParseArena, expr: &Expression) -> ParenKind {
-    match &*expr.pexp_desc {
+    match &expr.pexp_desc {
         ExpressionDesc::Pexp_let(_)
         | ExpressionDesc::Pexp_sequence(_, _)
         | ExpressionDesc::Pexp_letexception(_)
@@ -572,10 +565,10 @@ pub fn jsx_prop_expr(arena: &ParseArena, expr: &Expression) -> ParenKind {
                 return kind;
             }
 
-            match &*expr.pexp_desc {
+            match &expr.pexp_desc {
                 ExpressionDesc::Pexp_constant(c)
                     if expr.pexp_attributes.is_empty()
-                        && matches!(&**c, Constant::Integer(x, _) | Constant::Float(x, _) if starts_with_minus(x)) =>
+                        && matches!(&*c, Constant::Integer(x, _) | Constant::Float(x, _) if starts_with_minus(arena.get_string(*x))) =>
                 {
                     ParenKind::Parenthesized
                 }
@@ -625,13 +618,13 @@ pub fn binary_expr(arena: &ParseArena, expr: &Expression) -> ParenKind {
 
 /// Check if module type functor return needs parentheses.
 pub fn mod_type_functor_return(mod_type: &ModuleType) -> bool {
-    matches!(&*mod_type.pmty_desc, ModuleTypeDesc::Pmty_with(_))
+    matches!(&mod_type.pmty_desc, ModuleTypeDesc::Pmty_with(_))
 }
 
 /// Check if module type with operand needs parentheses.
 pub fn mod_type_with_operand(mod_type: &ModuleType) -> bool {
     matches!(
-        &*mod_type.pmty_desc,
+        &mod_type.pmty_desc,
         ModuleTypeDesc::Pmty_functor(_) | ModuleTypeDesc::Pmty_with(_)
     )
 }
@@ -639,20 +632,20 @@ pub fn mod_type_with_operand(mod_type: &ModuleType) -> bool {
 /// Check if module expression functor constraint needs parentheses.
 pub fn mod_expr_functor_constraint(mod_type: &ModuleType) -> bool {
     matches!(
-        &*mod_type.pmty_desc,
+        &mod_type.pmty_desc,
         ModuleTypeDesc::Pmty_functor(_) | ModuleTypeDesc::Pmty_with(_)
     )
 }
 
 /// Check if braced expression needs explicit braces.
 pub fn braced_expr(arena: &ParseArena, expr: &Expression) -> bool {
-    match &*parsetree_viewer::unwrap_braces(arena, expr).pexp_desc {
+    match &parsetree_viewer::unwrap_braces(arena, expr).pexp_desc {
         ExpressionDesc::Pexp_constraint(inner) => {
             let (ref inner_expr_idx, ref typ) = **inner;
             let inner_expr = arena.get_expr(*inner_expr_idx);
-            !(matches!(&*inner_expr.pexp_desc, ExpressionDesc::Pexp_pack(_))
+            !(matches!(&inner_expr.pexp_desc, ExpressionDesc::Pexp_pack(_))
                 && matches!(
-                    &*arena.get_core_type(*typ).ptyp_desc,
+                    &arena.get_core_type(*typ).ptyp_desc,
                     CoreTypeDesc::Ptyp_package(_)
                 ))
         }
@@ -664,7 +657,7 @@ pub fn braced_expr(arena: &ParseArena, expr: &Expression) -> bool {
 /// something else, e.g. after `include` or `module type of`. With attributes
 /// it prints its own.
 pub fn mod_constraint(mod_expr: &ModuleExpr) -> bool {
-    matches!(&*mod_expr.pmod_desc, ModuleExprDesc::Pmod_constraint(_, _))
+    matches!(&mod_expr.pmod_desc, ModuleExprDesc::Pmod_constraint(_, _))
         && !parsetree_viewer::mod_expr_has_attributes(mod_expr)
 }
 
@@ -672,7 +665,7 @@ pub fn mod_constraint(mod_expr: &ModuleExpr) -> bool {
 /// reads one `await` per module), `await (@a M)` (the attributes after
 /// `await` belong to the await) and `await (M: S)`.
 pub fn mod_await_operand(operand: &ModuleExpr) -> bool {
-    match &*operand.pmod_desc {
+    match &operand.pmod_desc {
         ModuleExprDesc::Pmod_await(_) | ModuleExprDesc::Pmod_constraint(..) => true,
         _ => parsetree_viewer::mod_expr_has_attributes(operand),
     }
@@ -683,7 +676,7 @@ pub fn mod_await_operand(operand: &ModuleExpr) -> bool {
 /// is read as a functor's parameters, as in `module((M: S1): S2)` or
 /// `module(await (await M): S)`.
 pub fn mod_pack_constraint(arena: &ParseArena, mod_expr: &ModuleExpr) -> bool {
-    match &*mod_expr.pmod_desc {
+    match &mod_expr.pmod_desc {
         ModuleExprDesc::Pmod_constraint(..) => true,
         ModuleExprDesc::Pmod_await(operand) => mod_await_operand(arena.get_mod_expr(*operand)),
         _ => false,
@@ -694,7 +687,7 @@ pub fn mod_pack_constraint(arena: &ParseArena, mod_expr: &ModuleExpr) -> bool {
 /// `((Y) => M)(X)`, `(%ext)(X)`, `(await M)(X)`, and with attributes, which
 /// would otherwise apply to the whole application.
 pub fn mod_apply_callee(callee: &ModuleExpr) -> bool {
-    match &*callee.pmod_desc {
+    match &callee.pmod_desc {
         ModuleExprDesc::Pmod_constraint(..)
         | ModuleExprDesc::Pmod_functor(..)
         | ModuleExprDesc::Pmod_await(..) => true,
@@ -711,16 +704,16 @@ pub fn mod_apply_callee(callee: &ModuleExpr) -> bool {
 /// - Pmod_constraint(_, Pmty_signature(Box::new([Psig_module]))) -> true
 /// - Otherwise -> false
 pub fn mod_expr_parens(arena: &ParseArena, mod_expr: &ModuleExpr) -> bool {
-    match &*mod_expr.pmod_desc {
+    match &mod_expr.pmod_desc {
         ModuleExprDesc::Pmod_constraint(inner_idx, typ_idx) => {
             let inner = arena.get_mod_expr(*inner_idx);
             let typ = arena.get_mod_type(*typ_idx);
             // Check if typ is Pmty_signature with single Psig_module
-            if let ModuleTypeDesc::Pmty_signature(items) = &*typ.pmty_desc {
+            if let ModuleTypeDesc::Pmty_signature(items) = &typ.pmty_desc {
                 if items.len() == 1 {
-                    if let SignatureItemDesc::Psig_module(_) = &*items[0].psig_desc {
+                    if let SignatureItemDesc::Psig_module(_) = &items[0].psig_desc {
                         // Sig is [Psig_module] - return false if inner is Pmod_structure, true otherwise
-                        return !matches!(&*inner.pmod_desc, ModuleExprDesc::Pmod_structure(_));
+                        return !matches!(&inner.pmod_desc, ModuleExprDesc::Pmod_structure(_));
                     }
                 }
             }
@@ -733,18 +726,18 @@ pub fn mod_expr_parens(arena: &ParseArena, mod_expr: &ModuleExpr) -> bool {
 
 /// Check if arrow return type expression needs parentheses.
 pub fn arrow_return_typ_expr(typ_expr: &CoreType) -> bool {
-    matches!(&*typ_expr.ptyp_desc, CoreTypeDesc::Ptyp_arrow(_))
+    matches!(&typ_expr.ptyp_desc, CoreTypeDesc::Ptyp_arrow(_))
 }
 
 /// Check if pattern record row RHS needs parentheses.
 pub fn pattern_record_row_rhs(arena: &ParseArena, pattern: &Pattern) -> bool {
-    match &*pattern.ppat_desc {
+    match &pattern.ppat_desc {
         PatternDesc::Ppat_constraint(inner) => {
             let (ref inner_pat_idx, ref typ) = **inner;
             let inner_pat = arena.get_pat(*inner_pat_idx);
-            !(matches!(&*inner_pat.ppat_desc, PatternDesc::Ppat_unpack(_))
+            !(matches!(&inner_pat.ppat_desc, PatternDesc::Ppat_unpack(_))
                 && matches!(
-                    &*arena.get_core_type(*typ).ptyp_desc,
+                    &arena.get_core_type(*typ).ptyp_desc,
                     CoreTypeDesc::Ptyp_package(_)
                 ))
         }
@@ -762,7 +755,7 @@ pub fn starts_with_regexp(arena: &ParseArena, e: &Expression) -> bool {
         module: Option<&str>,
         name: &str,
     ) -> bool {
-        let ExpressionDesc::Pexp_ident(lid) = &*arena.get_expr(funct).pexp_desc else {
+        let ExpressionDesc::Pexp_ident(lid) = &arena.get_expr(funct).pexp_desc else {
             return false;
         };
         match (arena.get_longident(lid.txt), module) {
@@ -781,14 +774,14 @@ pub fn starts_with_regexp(arena: &ParseArena, e: &Expression) -> bool {
     if !e.pexp_attributes.is_empty() {
         return false;
     }
-    match &*e.pexp_desc {
+    match &e.pexp_desc {
         ExpressionDesc::Pexp_regexp(_) => true,
         ExpressionDesc::Pexp_apply(apply) => {
-            let all_nolabel = apply
-                .args
+            let args = arena.apply_args(apply.args);
+            let all_nolabel = args
                 .iter()
                 .all(|(label, _)| matches!(label, ArgLabel::Nolabel));
-            let parent = match apply.args.as_slice() {
+            let parent = match args {
                 [(_, parent), _]
                     if all_nolabel
                         && (ident_is(arena, apply.funct, None, "##")
@@ -808,19 +801,18 @@ pub fn starts_with_regexp(arena: &ParseArena, e: &Expression) -> bool {
                 return starts_unwrapped(unary_expr_operand(arena, parent), parent);
             }
             let funct = arena.get_expr(apply.funct);
-            if let (ExpressionDesc::Pexp_ident(lid), [(_, lhs), (_, _)]) =
-                (&*funct.pexp_desc, apply.args.as_slice())
+            if let (ExpressionDesc::Pexp_ident(lid), [(_, lhs), (_, _)]) = (&funct.pexp_desc, args)
                 && all_nolabel
                 && let Longident::Lident(operator) = arena.get_longident(lid.txt)
                 && parsetree_viewer::is_binary_expression(arena, e)
             {
                 let operator = arena.get_string(*operator);
                 let lhs = arena.get_expr(*lhs);
-                let child_operator = match &*lhs.pexp_desc {
+                let child_operator = match &lhs.pexp_desc {
                     ExpressionDesc::Pexp_apply(lhs_apply)
                         if parsetree_viewer::is_binary_expression(arena, lhs) =>
                     {
-                        match &*arena.get_expr(lhs_apply.funct).pexp_desc {
+                        match &arena.get_expr(lhs_apply.funct).pexp_desc {
                             ExpressionDesc::Pexp_ident(child_lid) => {
                                 match arena.get_longident(child_lid.txt) {
                                     Longident::Lident(child) => Some(arena.get_string(*child)),
@@ -832,7 +824,7 @@ pub fn starts_with_regexp(arena: &ParseArena, e: &Expression) -> bool {
                     }
                     _ => None,
                 };
-                return match (child_operator, &*lhs.pexp_desc) {
+                return match (child_operator, &lhs.pexp_desc) {
                     (Some(child_operator), _) => {
                         !sub_binary_expr_operand(operator, child_operator)
                             && starts_with_regexp(arena, lhs)

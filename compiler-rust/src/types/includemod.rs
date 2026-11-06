@@ -56,11 +56,12 @@ fn deprecated_payload_reason(payload: &AttributePayload) -> &str {
 }
 
 fn deprecated_inclusion_warning(
+    type_ctx: &TypeContext,
     name: &str,
     impl_attrs: &[Attribute],
     sig_attrs: &[Attribute],
-    def_loc: &Location,
-    use_loc: &Location,
+    def_loc: crate::types::DeclLoc,
+    use_loc: crate::types::DeclLoc,
 ) -> Option<Warning> {
     let impl_payload = deprecated_payload_from_attrs(impl_attrs, &["deprecated"])?;
     if deprecated_payload_from_attrs(sig_attrs, &["deprecated"]).is_some() {
@@ -74,8 +75,8 @@ fn deprecated_inclusion_warning(
     };
     Some(Warning::Deprecated {
         message,
-        def_loc: *def_loc,
-        use_loc: *use_loc,
+        def_loc: type_ctx.resolve_loc(def_loc),
+        use_loc: type_ctx.resolve_loc(use_loc),
         can_be_automigrated: false,
     })
 }
@@ -86,7 +87,7 @@ pub enum IncludeModError {
     /// Missing signature field in implementation.
     MissingField {
         id: Ident,
-        loc: crate::location::Location,
+        loc: crate::types::DeclLoc,
         kind: &'static str,
     },
     /// Value type mismatch.
@@ -431,20 +432,26 @@ fn format_include_error(
             }
             push_show_loc(
                 output,
-                &code_frame::format_location(
-                    &location_filename(type_ctx, filename, &expected.type_loc),
-                    &expected.type_loc.loc_start,
-                    &expected.type_loc.loc_end,
-                ),
+                &{
+                    let loc = type_ctx.resolve_loc(expected.type_loc);
+                    code_frame::format_location(
+                        &location_filename(type_ctx, filename, &loc),
+                        &loc.loc_start,
+                        &loc.loc_end,
+                    )
+                },
                 "Expected declaration",
             );
             push_show_loc(
                 output,
-                &code_frame::format_location(
-                    &location_filename(type_ctx, filename, &actual.type_loc),
-                    &actual.type_loc.loc_start,
-                    &actual.type_loc.loc_end,
-                ),
+                &{
+                    let loc = type_ctx.resolve_loc(actual.type_loc);
+                    code_frame::format_location(
+                        &location_filename(type_ctx, filename, &loc),
+                        &loc.loc_start,
+                        &loc.loc_end,
+                    )
+                },
                 "Actual declaration",
             );
             for line in detail.message().lines() {
@@ -468,20 +475,26 @@ fn format_include_error(
             output.push('\n');
             push_show_loc(
                 output,
-                &code_frame::format_location(
-                    &location_filename(type_ctx, filename, &expected.ext_loc),
-                    &expected.ext_loc.loc_start,
-                    &expected.ext_loc.loc_end,
-                ),
+                &{
+                    let loc = type_ctx.resolve_loc(expected.ext_loc);
+                    code_frame::format_location(
+                        &location_filename(type_ctx, filename, &loc),
+                        &loc.loc_start,
+                        &loc.loc_end,
+                    )
+                },
                 "Expected declaration",
             );
             push_show_loc(
                 output,
-                &code_frame::format_location(
-                    &location_filename(type_ctx, filename, &actual.ext_loc),
-                    &actual.ext_loc.loc_start,
-                    &actual.ext_loc.loc_end,
-                ),
+                &{
+                    let loc = type_ctx.resolve_loc(actual.ext_loc);
+                    code_frame::format_location(
+                        &location_filename(type_ctx, filename, &loc),
+                        &loc.loc_start,
+                        &loc.loc_end,
+                    )
+                },
                 "Actual declaration",
             );
         }
@@ -491,10 +504,11 @@ fn format_include_error(
             output.push_str(" `");
             output.push_str(id.name());
             output.push_str("' is required but not provided\n");
+            let loc = type_ctx.resolve_loc(*loc);
             push_show_loc(
                 output,
                 &code_frame::format_location(
-                    &location_filename(type_ctx, filename, loc),
+                    &location_filename(type_ctx, filename, &loc),
                     &loc.loc_start,
                     &loc.loc_end,
                 ),
@@ -550,20 +564,26 @@ fn format_include_error(
             }
             push_show_loc(
                 output,
-                &code_frame::format_location(
-                    &location_filename(type_ctx, filename, &expected.val_loc),
-                    &expected.val_loc.loc_start,
-                    &expected.val_loc.loc_end,
-                ),
+                &{
+                    let loc = type_ctx.resolve_loc(expected.val_loc);
+                    code_frame::format_location(
+                        &location_filename(type_ctx, filename, &loc),
+                        &loc.loc_start,
+                        &loc.loc_end,
+                    )
+                },
                 "Expected declaration",
             );
             push_show_loc(
                 output,
-                &code_frame::format_location(
-                    &location_filename(type_ctx, filename, &actual.val_loc),
-                    &actual.val_loc.loc_start,
-                    &actual.val_loc.loc_end,
-                ),
+                &{
+                    let loc = type_ctx.resolve_loc(actual.val_loc);
+                    code_frame::format_location(
+                        &location_filename(type_ctx, filename, &loc),
+                        &loc.loc_start,
+                        &loc.loc_end,
+                    )
+                },
                 "Actual declaration",
             );
         }
@@ -1272,7 +1292,7 @@ fn modtypes_inner(
                 ModuleDeclaration {
                     md_type: param_binding_type,
                     md_attributes: vec![],
-                    md_loc: crate::location::Location::none(),
+                    md_loc: crate::types::DeclLoc::none(),
                     md_path: None,
                 },
             );
@@ -1548,22 +1568,18 @@ struct PairedSignatureItem<'a> {
     runtime_pos: usize,
 }
 
-fn item_ident_name(item: &SignatureItem) -> (&Ident, &crate::location::Location, FieldDesc) {
+fn item_ident_name(item: &SignatureItem) -> (&Ident, crate::types::DeclLoc, FieldDesc) {
     match item {
-        SignatureItem::SigValue(id, desc) => {
-            (id, &desc.val_loc, FieldDesc::Value(id.name().into()))
-        }
+        SignatureItem::SigValue(id, desc) => (id, desc.val_loc, FieldDesc::Value(id.name().into())),
         SignatureItem::SigType(id, decl, _) => {
-            (id, &decl.type_loc, FieldDesc::Type(id.name().into()))
+            (id, decl.type_loc, FieldDesc::Type(id.name().into()))
         }
         SignatureItem::SigTypext(id, ext, _) => {
-            (id, &ext.ext_loc, FieldDesc::Typext(id.name().into()))
+            (id, ext.ext_loc, FieldDesc::Typext(id.name().into()))
         }
-        SignatureItem::SigModule(id, md, _) => {
-            (id, &md.md_loc, FieldDesc::Module(id.name().into()))
-        }
+        SignatureItem::SigModule(id, md, _) => (id, md.md_loc, FieldDesc::Module(id.name().into())),
         SignatureItem::SigModtype(id, mtd) => {
-            (id, &mtd.mtd_loc, FieldDesc::Modtype(id.name().into()))
+            (id, mtd.mtd_loc, FieldDesc::Modtype(id.name().into()))
         }
         SignatureItem::SigClass | SignatureItem::SigClassType => unreachable!(),
     }
@@ -1687,12 +1703,12 @@ fn field_desc_kind(field_desc: &FieldDesc) -> &'static str {
 
 fn missing_signature_item_error(
     id: &Ident,
-    loc: &crate::location::Location,
+    loc: crate::types::DeclLoc,
     field_desc: &FieldDesc,
 ) -> IncludeModError {
     IncludeModError::MissingField {
         id: *id,
-        loc: *loc,
+        loc,
         kind: field_desc_kind(field_desc),
     }
 }
@@ -1797,20 +1813,22 @@ fn check_paired_signature_items(
                 SignatureItem::SigModule(sig_id, sig_mod_decl, _),
             ) => {
                 if let Some(warning) = deprecated_inclusion_warning(
+                    type_ctx,
                     impl_id.name(),
                     &impl_mod_decl.md_attributes,
                     &sig_mod_decl.md_attributes,
-                    &impl_mod_decl.md_loc,
-                    &sig_mod_decl.md_loc,
+                    impl_mod_decl.md_loc,
+                    sig_mod_decl.md_loc,
                 ) {
                     warnings.push(warning);
                 }
                 // includemod.ml:399: `Env.mark_module_used env (Ident.name
                 // id1) md1.md_loc`.
                 if !env.is_implicit_coercion() {
-                    type_ctx
-                        .usage()
-                        .mark_module_used(impl_id.name(), impl_mod_decl.md_loc);
+                    type_ctx.usage().mark_module_used(
+                        impl_id.name(),
+                        type_ctx.resolve_loc(impl_mod_decl.md_loc),
+                    );
                 }
                 // Match compiler/ml/includemod.ml:396-413:
                 // `module_declarations` always strengthens the implementation
@@ -2108,14 +2126,15 @@ fn value_descriptions(
     if !env.is_implicit_coercion() {
         type_ctx
             .usage()
-            .mark_value_used(id.name(), impl_desc.val_loc);
+            .mark_value_used(id.name(), type_ctx.resolve_loc(impl_desc.val_loc));
     }
     if let Some(warning) = deprecated_inclusion_warning(
+        type_ctx,
         id.name(),
         &impl_desc.val_attributes,
         &sig_desc.val_attributes,
-        &impl_desc.val_loc,
-        &sig_desc.val_loc,
+        impl_desc.val_loc,
+        sig_desc.val_loc,
     ) {
         warnings.push(warning);
     }
@@ -2770,7 +2789,12 @@ pub(crate) fn type_declarations(
     warnings: &mut Vec<Warning>,
 ) -> IncludeModResult<()> {
     // includemod.ml:66-67: `Env.mark_type_used env (Ident.name id) decl1`.
-    crate::types::typecore::mark_type_used(type_ctx, env, id.name(), impl_decl.type_loc);
+    crate::types::typecore::mark_type_used(
+        type_ctx,
+        env,
+        id.name(),
+        type_ctx.resolve_loc(impl_decl.type_loc),
+    );
     // includecore.ml:384-398 marks the implementation's constructors when both
     // declarations are variants.
     if let (
@@ -2791,17 +2815,18 @@ pub(crate) fn type_declarations(
             usage_tables.mark_constructor_used(
                 usage,
                 id.name(),
-                impl_decl.type_loc,
+                type_ctx.resolve_loc(impl_decl.type_loc),
                 cstr.cd_id.name(),
             );
         }
     }
     if let Some(warning) = deprecated_inclusion_warning(
+        type_ctx,
         id.name(),
         &impl_decl.type_attributes,
         &sig_decl.type_attributes,
-        &impl_decl.type_loc,
-        &sig_decl.type_loc,
+        impl_decl.type_loc,
+        sig_decl.type_loc,
     ) {
         warnings.push(warning);
     }
@@ -3599,11 +3624,12 @@ fn compare_variant_declarations(
             ));
         }
         if let Some(warning) = deprecated_inclusion_warning(
+            type_ctx,
             impl_constructor.cd_id.name(),
             &impl_constructor.cd_attributes,
             &sig_constructor.cd_attributes,
-            &impl_constructor.cd_loc,
-            &sig_constructor.cd_loc,
+            impl_constructor.cd_loc,
+            sig_constructor.cd_loc,
         ) {
             warnings.push(warning);
         }
@@ -4277,7 +4303,7 @@ fn extension_constructors(
         type_ctx.usage().mark_constructor_used(
             usage,
             impl_ext.ext_type_path.last(),
-            impl_ext.ext_loc,
+            type_ctx.resolve_loc(impl_ext.ext_loc),
             id.name(),
         );
     }
@@ -4403,11 +4429,12 @@ fn modtype_declarations(
     warnings: &mut Vec<Warning>,
 ) -> IncludeModResult<()> {
     if let Some(warning) = deprecated_inclusion_warning(
+        type_ctx,
         id.name(),
         &impl_decl.mtd_attributes,
         &sig_decl.mtd_attributes,
-        &impl_decl.mtd_loc,
-        &sig_decl.mtd_loc,
+        impl_decl.mtd_loc,
+        sig_decl.mtd_loc,
     ) {
         warnings.push(warning);
     }
@@ -4540,7 +4567,7 @@ mod tests {
             type_manifest: None,
             type_variance: vec![],
             type_newtype_level: None,
-            type_loc: Location::none(),
+            type_loc: crate::types::DeclLoc::none(),
             type_attributes: vec![],
             type_immediate: false,
             type_representation: TypeRepresentation::Boxed,
@@ -4553,7 +4580,7 @@ mod tests {
         ValueDescription {
             val_type,
             val_kind: ValueKind::ValReg,
-            val_loc: Location::none(),
+            val_loc: crate::types::DeclLoc::none(),
             val_attributes: vec![],
             val_path: None,
         }
@@ -4585,7 +4612,7 @@ mod tests {
             ValueDescription {
                 val_type: val_ty,
                 val_kind: ValueKind::ValReg,
-                val_loc: Location::none(),
+                val_loc: crate::types::DeclLoc::none(),
                 val_attributes: vec![],
                 val_path: None,
             },
@@ -4607,7 +4634,7 @@ mod tests {
             ValueDescription {
                 val_type: val_ty,
                 val_kind: ValueKind::ValReg,
-                val_loc: Location::none(),
+                val_loc: crate::types::DeclLoc::none(),
                 val_attributes: vec![],
                 val_path: None,
             },
@@ -4617,7 +4644,7 @@ mod tests {
             ValueDescription {
                 val_type: val_ty,
                 val_kind: ValueKind::ValReg,
-                val_loc: Location::none(),
+                val_loc: crate::types::DeclLoc::none(),
                 val_attributes: vec![],
                 val_path: None,
             },
@@ -4649,7 +4676,7 @@ mod tests {
                         SignatureItem::SigValue(Ident::create_local("x"), value_desc(impl_ty)),
                     ])),
                     md_attributes: vec![],
-                    md_loc: Location::none(),
+                    md_loc: crate::types::DeclLoc::none(),
                     md_path: None,
                 },
                 RecStatus::TrecNot,
@@ -4668,7 +4695,7 @@ mod tests {
                         SignatureItem::SigValue(Ident::create_local("x"), value_desc(sig_ty)),
                     ])),
                     md_attributes: vec![],
-                    md_loc: Location::none(),
+                    md_loc: crate::types::DeclLoc::none(),
                     md_path: None,
                 },
                 RecStatus::TrecNot,
@@ -4730,7 +4757,7 @@ mod tests {
             ModtypeDeclaration {
                 mtd_type: Some(ModuleType::MtySignature(std::sync::Arc::new(sig.clone()))),
                 mtd_attributes: vec![],
-                mtd_loc: Location::none(),
+                mtd_loc: crate::types::DeclLoc::none(),
             },
         );
 
@@ -4779,7 +4806,7 @@ mod tests {
             ext_args: ConstructorArguments::CstrTuple(vec![]),
             ext_ret_type: None,
             ext_private: crate::types::PrivateFlag::Public,
-            ext_loc: Location::none(),
+            ext_loc: crate::types::DeclLoc::none(),
             ext_attributes: vec![],
             ext_is_exception: true,
         };
@@ -4808,7 +4835,7 @@ mod tests {
                 ValueDescription {
                     val_type: val_ty_placeholder,
                     val_kind: ValueKind::ValReg,
-                    val_loc: Location::none(),
+                    val_loc: crate::types::DeclLoc::none(),
                     val_attributes: vec![],
                     val_path: None,
                 },
@@ -4823,7 +4850,7 @@ mod tests {
                     type_manifest: None,
                     type_variance: vec![],
                     type_newtype_level: None,
-                    type_loc: Location::none(),
+                    type_loc: crate::types::DeclLoc::none(),
                     type_attributes: vec![],
                     type_immediate: false,
                     type_representation: TypeRepresentation::Boxed,

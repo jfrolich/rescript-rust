@@ -298,22 +298,21 @@ fn has_no_export_config(structure: &[StructureItem], arena: &ParseArena) -> bool
     use crate::parser::longident::Longident;
 
     for item in structure {
-        match &*item.pstr_desc {
+        match &item.pstr_desc {
             StructureItemDesc::Pstr_attribute(attr) => {
                 let attr_name = arena.get_string(attr.0.txt);
                 if attr_name == "config" {
                     // Found @@config(...) - check if payload contains no_export
                     if let crate::parser::ast::Payload::PStr(items) = &attr.1 {
                         if let Some(eval_item) = items.first() {
-                            if let StructureItemDesc::Pstr_eval(eval_inner) = &*eval_item.pstr_desc
-                            {
+                            if let StructureItemDesc::Pstr_eval(eval_inner) = &eval_item.pstr_desc {
                                 let (ref expr_idx, _) = **eval_inner;
                                 let expr = arena.get_expr(*expr_idx);
-                                match &*expr.pexp_desc {
+                                match &expr.pexp_desc {
                                     // @@config({no_export: ...}) - record form
                                     ExpressionDesc::Pexp_record(inner) => {
-                                        let (ref fields, _) = **inner;
-                                        for field in fields {
+                                        let (ref fields, _) = *inner;
+                                        for field in arena.expr_field_list(*fields) {
                                             let lid = arena.get_longident(field.lid.txt);
                                             if let Longident::Lident(s) = lid {
                                                 if arena.get_string(*s) == "no_export" {
@@ -361,7 +360,7 @@ fn is_false_literal(expr_idx: crate::parse_arena::ExprIdx, arena: &ParseArena) -
     use crate::parser::longident::Longident;
 
     let expr = arena.get_expr(expr_idx);
-    if let ExpressionDesc::Pexp_construct(lid_loc, args) = &*expr.pexp_desc
+    if let ExpressionDesc::Pexp_construct(lid_loc, args) = &expr.pexp_desc
         && args.txt.is_empty()
     {
         let lid = arena.get_longident(lid_loc.txt);
@@ -395,13 +394,13 @@ fn wrap_no_export(arena: &mut ParseArena, structure: Vec<StructureItem>) -> Vec<
 
     // Build: include ((struct <items> end) : (sig end))
     let inner_mod = ModuleExpr {
-        pmod_desc: Box::new(ModuleExprDesc::Pmod_structure(Box::new(structure))),
+        pmod_desc: ModuleExprDesc::Pmod_structure(Box::new(structure)),
         pmod_loc: loc,
         pmod_attributes: Attributes::new(),
     };
 
     let empty_sig = ModuleType {
-        pmty_desc: Box::new(ModuleTypeDesc::Pmty_signature(Box::default())),
+        pmty_desc: ModuleTypeDesc::Pmty_signature(Box::default()),
         pmty_loc: loc,
         pmty_attributes: Attributes::new(),
     };
@@ -410,10 +409,7 @@ fn wrap_no_export(arena: &mut ParseArena, structure: Vec<StructureItem>) -> Vec<
     let empty_sig_idx = arena.push_mod_type(empty_sig);
 
     let constrained_mod = ModuleExpr {
-        pmod_desc: Box::new(ModuleExprDesc::Pmod_constraint(
-            inner_mod_idx,
-            empty_sig_idx,
-        )),
+        pmod_desc: ModuleExprDesc::Pmod_constraint(inner_mod_idx, empty_sig_idx),
         pmod_loc: loc,
         pmod_attributes: Attributes::new(),
     };
@@ -426,7 +422,7 @@ fn wrap_no_export(arena: &mut ParseArena, structure: Vec<StructureItem>) -> Vec<
     };
 
     vec![StructureItem {
-        pstr_desc: Box::new(StructureItemDesc::Pstr_include(Box::new(include_decl))),
+        pstr_desc: StructureItemDesc::Pstr_include(Box::new(include_decl)),
         pstr_loc: loc,
     }]
 }
@@ -448,32 +444,30 @@ mod tests {
     ) -> StructureItem {
         let name_idx = arena.intern(name);
         let pat_idx = arena.push_pat(Pattern {
-            ppat_desc: Box::new(PatternDesc::Ppat_var(Located {
+            ppat_desc: PatternDesc::Ppat_var(Located {
                 txt: name_idx,
                 loc: LocIdx::none(),
-            })),
+            }),
             ppat_loc: LocIdx::none(),
             ppat_attributes: Attributes::new(),
         });
+        let value_idx = arena.intern_string(&value.to_string());
         let expr_idx = arena.push_expr(Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(Constant::Integer(
-                std::borrow::Cow::Owned(value.to_string()),
-                None,
-            )))),
+            pexp_desc: ExpressionDesc::Pexp_constant(Constant::Integer(value_idx, None)),
             pexp_loc: LocIdx::none(),
             pexp_attributes: Attributes::new(),
         });
         StructureItem {
-            pstr_desc: Box::new(StructureItemDesc::Pstr_value(Box::new((
+            pstr_desc: StructureItemDesc::Pstr_value((
                 RecFlag::Nonrecursive,
-                vec![ValueBinding {
+                arena.push_vb_list(&[ValueBinding {
                     pvb_jsx_component: None,
                     pvb_pat: pat_idx,
                     pvb_expr: expr_idx,
                     pvb_attributes: Attributes::new(),
                     pvb_loc: LocIdx::none(),
-                }],
-            )))),
+                }]),
+            )),
             pstr_loc: LocIdx::none(),
         }
     }
@@ -488,10 +482,10 @@ mod tests {
         let lid_idx =
             arena.push_longident(Longident::ldot(Longident::lident(module_idx), name_idx));
         arena.push_expr(Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Located {
+            pexp_desc: ExpressionDesc::Pexp_ident(Located {
                 txt: lid_idx,
                 loc: LocIdx::none(),
-            })),
+            }),
             pexp_loc: LocIdx::none(),
             pexp_attributes: Attributes::new(),
         })
@@ -556,10 +550,10 @@ mod tests {
     fn test_with_dependencies() {
         let mut arena = make_test_arena();
         let ast = vec![StructureItem {
-            pstr_desc: Box::new(StructureItemDesc::Pstr_eval(Box::new((
+            pstr_desc: StructureItemDesc::Pstr_eval(Box::new((
                 make_module_ref_expr(&mut arena, "Array", "map"),
                 Attributes::new(),
-            )))),
+            ))),
             pstr_loc: LocIdx::none(),
         }];
 
@@ -582,17 +576,17 @@ mod tests {
         let mut arena = make_test_arena();
         let ast = vec![
             StructureItem {
-                pstr_desc: Box::new(StructureItemDesc::Pstr_eval(Box::new((
+                pstr_desc: StructureItemDesc::Pstr_eval(Box::new((
                     make_module_ref_expr(&mut arena, "Array", "map"),
                     Attributes::new(),
-                )))),
+                ))),
                 pstr_loc: LocIdx::none(),
             },
             StructureItem {
-                pstr_desc: Box::new(StructureItemDesc::Pstr_eval(Box::new((
+                pstr_desc: StructureItemDesc::Pstr_eval(Box::new((
                     make_module_ref_expr(&mut arena, "Js", "log"),
                     Attributes::new(),
-                )))),
+                ))),
                 pstr_loc: LocIdx::none(),
             },
         ];
@@ -673,10 +667,10 @@ mod tests {
         let output_path = std::path::Path::new("target/test_binary_ast_writer_current.ast");
         let mut arena = make_test_arena();
         let ast = vec![StructureItem {
-            pstr_desc: Box::new(StructureItemDesc::Pstr_eval(Box::new((
+            pstr_desc: StructureItemDesc::Pstr_eval(Box::new((
                 make_module_ref_expr(&mut arena, "Array", "map"),
                 Attributes::new(),
-            )))),
+            ))),
             pstr_loc: LocIdx::none(),
         }];
 

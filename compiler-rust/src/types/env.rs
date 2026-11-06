@@ -2277,7 +2277,7 @@ fn build_initial_env(ctx: &TypeContext) -> Env {
         type_manifest: None,
         type_variance: vec![],
         type_newtype_level: None,
-        type_loc: Location::none(),
+        type_loc: crate::types::DeclLoc::none(),
         type_attributes: vec![],
         type_immediate: immediate,
         type_representation: crate::types::TypeRepresentation::Boxed,
@@ -2291,7 +2291,7 @@ fn build_initial_env(ctx: &TypeContext) -> Env {
         cd_runtime_tag: None,
         cd_args: ConstructorArguments::CstrTuple(args),
         cd_res: None,
-        cd_loc: Location::none(),
+        cd_loc: crate::types::DeclLoc::none(),
         cd_attributes: vec![],
     };
     let variant_kind = |constructors: Vec<ConstructorDeclaration>| {
@@ -2362,7 +2362,7 @@ fn build_initial_env(ctx: &TypeContext) -> Env {
                         }),
                         cstr_generalized: cd.cd_res.is_some(),
                         cstr_private: decl.type_private,
-                        cstr_loc: Location::none(),
+                        cstr_loc: crate::types::DeclLoc::none(),
                         cstr_attributes:
                             crate::types::decl::constructor_description_attrs_for_variant(
                                 constrs, cd,
@@ -2598,7 +2598,7 @@ fn build_initial_env(ctx: &TypeContext) -> Env {
                     cd_runtime_tag: None,
                     cd_args: ConstructorArguments::CstrTuple(vec![tvar]),
                     cd_res: Some(type_unknown),
-                    cd_loc: Location::none(),
+                    cd_loc: crate::types::DeclLoc::none(),
                     cd_attributes: vec![],
                 }]),
                 type_representation: super::decl::TypeRepresentation::Unboxed,
@@ -2622,7 +2622,7 @@ fn build_initial_env(ctx: &TypeContext) -> Env {
                         "warn_on_literal_pattern".to_string(),
                     ),
                     attr_payload: crate::types::decl::AttributePayload::Structure(vec![]),
-                    attr_loc: Location::none(),
+                    attr_loc: crate::types::DeclLoc::none(),
                 };
                 let cstr_desc = ConstructorDescription {
                     cstr_name: id.name().to_string(),
@@ -2633,7 +2633,7 @@ fn build_initial_env(ctx: &TypeContext) -> Env {
                     cstr_kind: ConstructorKind::Extension(path.clone()),
                     cstr_generalized: false,
                     cstr_private: PrivateFlag::Public,
-                    cstr_loc: Location::none(),
+                    cstr_loc: crate::types::DeclLoc::none(),
                     cstr_attributes: vec![warn_on_literal_pattern_attr],
                     cstr_inlined: None,
                 };
@@ -2752,7 +2752,7 @@ mod tests {
         let desc = ValueDescription {
             val_type: TypeExprRef(0),
             val_kind: super::super::decl::ValueKind::ValReg,
-            val_loc: Location::none(),
+            val_loc: crate::types::DeclLoc::none(),
             val_attributes: vec![],
             val_path: None,
         };
@@ -2774,7 +2774,7 @@ mod tests {
             type_manifest: None,
             type_variance: vec![],
             type_newtype_level: None,
-            type_loc: Location::none(),
+            type_loc: crate::types::DeclLoc::none(),
             type_attributes: vec![],
             type_immediate: false,
             type_representation: crate::types::TypeRepresentation::Boxed,
@@ -2796,14 +2796,14 @@ mod tests {
         let desc1 = ValueDescription {
             val_type: TypeExprRef(1),
             val_kind: super::super::decl::ValueKind::ValReg,
-            val_loc: Location::none(),
+            val_loc: crate::types::DeclLoc::none(),
             val_attributes: vec![],
             val_path: None,
         };
         let desc2 = ValueDescription {
             val_type: TypeExprRef(2),
             val_kind: super::super::decl::ValueKind::ValReg,
-            val_loc: Location::none(),
+            val_loc: crate::types::DeclLoc::none(),
             val_attributes: vec![],
             val_path: None,
         };
@@ -2823,7 +2823,7 @@ mod tests {
         let desc = ValueDescription {
             val_type: TypeExprRef(0),
             val_kind: super::super::decl::ValueKind::ValReg,
-            val_loc: Location::none(),
+            val_loc: crate::types::DeclLoc::none(),
             val_attributes: vec![],
             val_path: None,
         };
@@ -2843,7 +2843,7 @@ mod tests {
         let desc = ValueDescription {
             val_type: TypeExprRef(0),
             val_kind: super::super::decl::ValueKind::ValReg,
-            val_loc: Location::none(),
+            val_loc: crate::types::DeclLoc::none(),
             val_attributes: vec![],
             val_path: None,
         };
@@ -2864,7 +2864,7 @@ mod tests {
             ModuleDeclaration {
                 md_type: ModuleType::MtySignature(std::sync::Arc::new(vec![])),
                 md_attributes: vec![],
-                md_loc: Location::none(),
+                md_loc: crate::types::DeclLoc::none(),
                 md_path: None,
             },
         );
@@ -2875,7 +2875,7 @@ mod tests {
             ModuleDeclaration {
                 md_type: ModuleType::MtyAlias(AliasPresence::MtaPresent, Path::pident(target_id)),
                 md_attributes: vec![],
-                md_loc: Location::none(),
+                md_loc: crate::types::DeclLoc::none(),
                 md_path: None,
             },
         );
@@ -2888,7 +2888,7 @@ mod tests {
             ModuleDeclaration {
                 md_type: ModuleType::MtySignature(std::sync::Arc::new(vec![])),
                 md_attributes: vec![],
-                md_loc: Location::none(),
+                md_loc: crate::types::DeclLoc::none(),
                 md_path: None,
             },
         );

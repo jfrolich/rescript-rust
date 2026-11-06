@@ -370,7 +370,7 @@ pub fn print_deps_program_with_source_map(
     mode: SourceMapMode,
     sources_content: bool,
     source_root: &str,
-    source_file_names: Arc<HashMap<StrIdx, String>>,
+    lam_locs: Arc<crate::lambda::LamLocTable>,
 ) -> (String, Option<String>) {
     let capacity = estimated_deps_program_output_capacity(program, directives, emit_header);
     let mut printer = JsPrinter::with_module_path_resolver_options_and_capacity(
@@ -386,7 +386,7 @@ pub fn print_deps_program_with_source_map(
             source_root.to_string(),
             sources_content,
         )
-        .with_source_file_names(source_file_names),
+        .with_lam_locs(lam_locs),
     );
     printer.print_deps_program_with_directives_and_options(program, directives, emit_header);
     let json = printer

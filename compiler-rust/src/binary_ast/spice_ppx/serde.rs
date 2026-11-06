@@ -68,7 +68,7 @@ fn payload_is_empty(attr: &Attribute) -> bool {
 }
 
 fn bool_value(expr: &Expression, arena: &ParseArena) -> Option<bool> {
-    match &*expr.pexp_desc {
+    match &expr.pexp_desc {
         ExpressionDesc::Pexp_construct(lid, args) if args.txt.is_empty() => {
             if longident_matches(arena, lid.txt, &["true"]) {
                 Some(true)
@@ -90,14 +90,14 @@ fn get_serde_legacy(attr: &Attribute, arena: &ParseArena) -> SpiceResult<(bool, 
         return Ok((false, false));
     }
     let expr = get_expression_from_payload(attr, arena)?;
-    let ExpressionDesc::Pexp_record(record) = &*expr.pexp_desc else {
+    let ExpressionDesc::Pexp_record(record) = &expr.pexp_desc else {
         return Err(invalid());
     };
-    let (fields, spread) = &**record;
+    let (fields, spread) = &*record;
     if spread.is_some() || fields.len() != 1 {
         return Err(invalid());
     }
-    let field = &fields[0];
+    let field = &arena.expr_field_list(*fields)[0];
     let value = arena.get_expr(field.expr);
     if longident_matches(arena, field.lid.txt, &["legacy"]) {
         let legacy = bool_value(value, arena).ok_or_else(invalid)?;
@@ -113,8 +113,8 @@ fn get_serde_legacy(attr: &Attribute, arena: &ParseArena) -> SpiceResult<(bool, 
 /// utils.ml `get_string_payload`.
 fn get_string_payload(attr: &Attribute, arena: &mut ParseArena) -> SpiceResult<StrIdx> {
     let expr = get_expression_from_payload(attr, arena)?;
-    match alias_constant(&expr, arena) {
-        Some(Constant::String(s)) => Ok(arena.intern_string(s.semantic())),
+    match super::alias_string_semantic(&expr, arena) {
+        Some(semantic) => Ok(arena.intern_string(&semantic)),
         _ => Err("Expected a string as attribute payload".to_string()),
     }
 }
@@ -140,10 +140,7 @@ pub(super) fn get_serde_from_attributes(
 }
 
 fn string_of_expr(expr: &Expression, arena: &ParseArena) -> Option<String> {
-    match alias_constant(expr, arena) {
-        Some(Constant::String(s)) => Some(s.semantic().to_string()),
-        _ => None,
-    }
+    super::alias_string_semantic(expr, arena)
 }
 
 /// serde.ml `name_of_alias`.
@@ -170,7 +167,7 @@ fn name_of_variant(decl: &ParsedVariantDecl, arena: &ParseArena) -> SpiceResult<
         None => Ok(spice_name),
         Some(tag) => match &tag.txt {
             crate::parser::ast::ConstructorTag::Pct_string(s) => {
-                let s = s.semantic();
+                let s = s.semantic(arena);
                 if decl.has_attr_as && s != spice_name {
                     Err("@as and @spice.as name the constructor differently".to_string())
                 } else {
@@ -234,14 +231,18 @@ pub(super) fn reject_flags(attrs: &[Attribute], arena: &ParseArena) -> SpiceResu
 
 /// serde.ml `str`: a `{*j|...|*j}` string, read back as source text.
 fn str_expr(arena: &mut ParseArena, s: &str) -> Expression {
-    let constant = crate::string_literal::string_from_source(s)
-        .map(Constant::String)
-        .unwrap_or_else(|| Constant::string(s));
+    let constant = match crate::string_literal::string_from_source(s) {
+        Some(literal) => Constant::String(arena.push_string_literal(&literal)),
+        None => arena.string_constant(s),
+    };
     expr_constant(constant, arena)
 }
 
 fn int_expr(arena: &mut ParseArena, i: usize) -> Expression {
-    expr_constant(Constant::Integer(Cow::Owned(i.to_string()), None), arena)
+    expr_constant(
+        Constant::Integer(arena.intern_string(&i.to_string()), None),
+        arena,
+    )
 }
 
 fn ident(arena: &mut ParseArena, name: &str) -> Expression {
@@ -394,9 +395,9 @@ fn validate(tag: Option<&str>, cases: &[SerdeCase], arena: &mut ParseArena) -> S
                     {
                         Ok(Some(attr)) => {
                             let expr = get_expression_from_payload(attr, arena)?;
-                            match &*expr.pexp_desc {
-                                ExpressionDesc::Pexp_constant(c) => match &**c {
-                                    Constant::String(s) => s.semantic().to_string(),
+                            match &expr.pexp_desc {
+                                ExpressionDesc::Pexp_constant(c) => match &*c {
+                                    Constant::String(s) => s.semantic(arena).to_string(),
                                     _ => txt,
                                 },
                                 _ => txt,
@@ -693,10 +694,10 @@ fn decode_untagged(
 fn pat_alias(pat: Pattern, name: &str, arena: &mut ParseArena) -> Pattern {
     let name = arena.intern_string(name);
     Pattern {
-        ppat_desc: Box::new(PatternDesc::Ppat_alias(
+        ppat_desc: PatternDesc::Ppat_alias(
             arena.push_pat(pat),
             Located::new(name, arena.dummy_loc()),
-        )),
+        ),
         ppat_loc: arena.dummy_loc(),
         ppat_attributes: Attributes::new(),
     }
@@ -1107,7 +1108,7 @@ pub(super) fn polyvariant_case(
 fn json_arr_head(arena: &mut ParseArena) -> Expression {
     let get = expr_ident_path(arena, &["Array", "getUnsafe"]);
     let json_arr = ident(arena, "json_arr");
-    let zero = expr_constant(Constant::Integer(Cow::Borrowed("0"), None), arena);
+    let zero = expr_constant(Constant::Integer(arena.intern_string(&"0"), None), arena);
     apply(arena, get, vec![json_arr, zero])
 }
 
@@ -1139,9 +1140,7 @@ fn alias_cases(
         .filter(|alias| !constructors.contains(alias))
         .map(|alias| {
             let pattern = Pattern {
-                ppat_desc: Box::new(PatternDesc::Ppat_constant(Box::new(Constant::string(
-                    alias,
-                )))),
+                ppat_desc: PatternDesc::Ppat_constant(arena.string_constant(alias)),
                 ppat_loc: arena.dummy_loc(),
                 ppat_attributes: Attributes::new(),
             };

@@ -1,5 +1,6 @@
 //! Indexed occurrence counting for `compiler/core/lam_pass_count.ml`.
 
+use crate::lambda::LamLoc;
 use ahash::AHashMap;
 
 use crate::ident::Ident;
@@ -314,7 +315,7 @@ mod tests {
                         }),
                     ),
                     FunctionAttribute::default(),
-                    crate::location::Location::none(),
+                    LamLoc::NONE,
                 ),
             ),
         );

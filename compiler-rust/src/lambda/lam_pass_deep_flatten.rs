@@ -4,6 +4,7 @@
 //! of named module-block bindings so downstream passes see a flat sequence of
 //! single bindings. Mirrors `Lam_pass_deep_flatten.deep_flatten`.
 
+use crate::lambda::LamLoc;
 use crate::lambda::map_box;
 use ahash::AHashMap as HashMap;
 
@@ -14,7 +15,6 @@ use crate::lambda::lam_hit::hit_variable;
 use crate::lambda::lam_primitive::{Mutable, Primitive};
 use crate::lambda::lam_util::refine_let;
 use crate::lambda::{Lambda, PrimInfo};
-use crate::location::Location;
 
 enum FlattenGroup {
     Single(LetKind, Ident, Lambda),
@@ -212,7 +212,7 @@ pub fn deep_flatten_owned_with_id_gen(lam: Lambda, id_gen: &IdGenerator) -> Lamb
                                         Lambda::prim(
                                             primitive,
                                             vec![Lambda::var(new_id)],
-                                            Location::none(),
+                                            LamLoc::NONE,
                                         ),
                                         inner,
                                     )
@@ -358,7 +358,7 @@ mod tests {
         Lambda::prim(
             Primitive::Pmakeblock(TagInfo::Tuple, Mutable::Immutable),
             args,
-            Location::none(),
+            LamLoc::NONE,
         )
     }
 
@@ -366,7 +366,7 @@ mod tests {
         Lambda::prim(
             Primitive::Pfield(index, FieldDbgInfo::Tuple),
             vec![Lambda::var(*id)],
-            Location::none(),
+            LamLoc::NONE,
         )
     }
 
@@ -489,7 +489,7 @@ mod tests {
             Lambda::prim(
                 Primitive::PnullUndefinedToOpt,
                 vec![Lambda::const_(Constant::JsNull)],
-                Location::none(),
+                LamLoc::NONE,
             ),
             Lambda::var(wrapped),
         );

@@ -7,6 +7,7 @@
 //! Every match arm and helper here corresponds to a specific line in
 //! `lam_pass_count.ml`. Do not add Rust-only logic.
 
+use crate::lambda::LamLoc;
 use ahash::AHashMap as HashMap;
 
 use crate::ident::Ident;
@@ -391,7 +392,7 @@ mod tests {
                 directive: None,
                 one_unit_arg: false,
             },
-            crate::location::Location::none(),
+            LamLoc::NONE,
         );
         let lam = Lambda::let_(LetKind::Strict, v, Lambda::Lconst(Constant::int(1)), func);
         let occ = collect_occurs(&lam);

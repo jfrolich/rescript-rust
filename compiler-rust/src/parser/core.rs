@@ -4,10 +4,8 @@
 //! stream into an AST. It mirrors `res_core.ml` from the OCaml implementation.
 
 use crate::location::Position;
-use crate::parse_arena::{CoreTypeIdx, LocIdx, ParseArena, PosIdx, StrIdx};
+use crate::parse_arena::{LocIdx, ParseArena, PosIdx, StrIdx};
 use crate::parser::DiagnosticCategory;
-
-use std::borrow::Cow;
 
 use super::ast::*;
 use super::grammar;
@@ -48,10 +46,10 @@ pub mod recover {
         let str_idx = arena.intern("rescript.exprhole");
         let id = mknoloc(str_idx);
         Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_extension(Box::new((
+            pexp_desc: ExpressionDesc::Pexp_extension(Box::new((
                 id,
                 Payload::PStr(Box::default()),
-            )))),
+            ))),
             pexp_loc: LocIdx::none(),
             pexp_attributes: Attributes::new(),
         }
@@ -62,10 +60,7 @@ pub mod recover {
         let str_idx = arena.intern("rescript.typehole");
         let id = mknoloc(str_idx);
         CoreType {
-            ptyp_desc: Box::new(CoreTypeDesc::Ptyp_extension(Box::new((
-                id,
-                Payload::PStr(Box::default()),
-            )))),
+            ptyp_desc: CoreTypeDesc::Ptyp_extension(Box::new((id, Payload::PStr(Box::default())))),
             ptyp_loc: LocIdx::none(),
             ptyp_attributes: Attributes::new(),
         }
@@ -76,10 +71,7 @@ pub mod recover {
         let str_idx = arena.intern("rescript.patternhole");
         let id = mknoloc(str_idx);
         Pattern {
-            ppat_desc: Box::new(PatternDesc::Ppat_extension(Box::new((
-                id,
-                Payload::PStr(Box::default()),
-            )))),
+            ppat_desc: PatternDesc::Ppat_extension(Box::new((id, Payload::PStr(Box::default())))),
             ppat_loc: LocIdx::none(),
             ppat_attributes: Attributes::new(),
         }
@@ -88,7 +80,7 @@ pub mod recover {
     /// Create a default module expression for error recovery.
     pub fn default_module_expr() -> ModuleExpr {
         ModuleExpr {
-            pmod_desc: Box::new(ModuleExprDesc::Pmod_structure(Box::default())),
+            pmod_desc: ModuleExprDesc::Pmod_structure(Box::default()),
             pmod_loc: LocIdx::none(),
             pmod_attributes: Attributes::new(),
         }
@@ -97,7 +89,7 @@ pub mod recover {
     /// Create a default module type for error recovery.
     pub fn default_module_type() -> ModuleType {
         ModuleType {
-            pmty_desc: Box::new(ModuleTypeDesc::Pmty_signature(Box::default())),
+            pmty_desc: ModuleTypeDesc::Pmty_signature(Box::default()),
             pmty_loc: LocIdx::none(),
             pmty_attributes: Attributes::new(),
         }
@@ -109,10 +101,10 @@ pub mod recover {
         let str_idx = arena.intern("rescript.sigitemhole");
         let id = mknoloc(str_idx);
         SignatureItem {
-            psig_desc: Box::new(SignatureItemDesc::Psig_extension(Box::new((
+            psig_desc: SignatureItemDesc::Psig_extension(Box::new((
                 (id, Payload::PStr(Box::default())),
                 Attributes::new(),
-            )))),
+            ))),
             psig_loc: LocIdx::none(),
         }
     }
@@ -726,18 +718,13 @@ pub fn doc_comment_to_attribute(
     let str_idx = arena.intern("res.doc");
     let name = with_loc(str_idx, loc);
     let expr = Expression {
-        pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(Constant::string(
-            &content.into(),
-        )))),
+        pexp_desc: ExpressionDesc::Pexp_constant(arena.string_constant(&content.into())),
         pexp_loc: loc,
         pexp_attributes: Attributes::new(),
     };
     let expr_idx = arena.push_expr(expr);
     let payload = Payload::PStr(Box::new(vec![StructureItem {
-        pstr_desc: Box::new(StructureItemDesc::Pstr_eval(Box::new((
-            expr_idx,
-            Attributes::new(),
-        )))),
+        pstr_desc: StructureItemDesc::Pstr_eval(Box::new((expr_idx, Attributes::new()))),
         pstr_loc: loc,
     }]));
     (name, payload)
@@ -803,7 +790,7 @@ pub mod ast_helper {
     /// Create an expression with the given description and location.
     pub fn make_expr(desc: ExpressionDesc, loc: Location) -> Expression {
         Expression {
-            pexp_desc: Box::new(desc),
+            pexp_desc: desc,
             pexp_loc: loc,
             pexp_attributes: Attributes::new(),
         }
@@ -812,7 +799,7 @@ pub mod ast_helper {
     /// Create a pattern with the given description and location.
     pub fn make_pat(desc: PatternDesc, loc: Location) -> Pattern {
         Pattern {
-            ppat_desc: Box::new(desc),
+            ppat_desc: desc,
             ppat_loc: loc,
             ppat_attributes: Attributes::new(),
         }
@@ -821,7 +808,7 @@ pub mod ast_helper {
     /// Create a type with the given description and location.
     pub fn make_typ(desc: CoreTypeDesc, loc: Location) -> CoreType {
         CoreType {
-            ptyp_desc: Box::new(desc),
+            ptyp_desc: desc,
             ptyp_loc: loc,
             ptyp_attributes: Attributes::new(),
         }
@@ -840,14 +827,17 @@ pub mod ast_helper {
 
     /// Create a constant expression.
     pub fn make_constant(constant: Constant, loc: Location) -> Expression {
-        make_expr(ExpressionDesc::Pexp_constant(Box::new(constant)), loc)
+        make_expr(ExpressionDesc::Pexp_constant(constant), loc)
     }
 
     /// Create a unit expression: () (requires parser for arena allocation)
     pub fn make_unit(p: &mut Parser<'_>, loc: Location) -> Expression {
         let lid_idx = p.push_lident_static("()");
         make_expr(
-            ExpressionDesc::Pexp_construct(with_loc(lid_idx, loc), ctor_args(Vec::new(), loc)),
+            ExpressionDesc::Pexp_construct(
+                with_loc(lid_idx, loc),
+                crate::parse_arena::Located::new(crate::parse_arena::ExprList::EMPTY, loc),
+            ),
             loc,
         )
     }
@@ -860,17 +850,18 @@ pub mod ast_helper {
         loc: Location,
     ) -> Expression {
         let funct = arena.push_expr(func);
-        let args_idx = args
+        let args_idx: Vec<_> = args
             .into_iter()
             .map(|(lbl, e)| (lbl, arena.push_expr(e)))
             .collect();
+        let args_idx = arena.push_apply_args(&args_idx);
         make_expr(
-            ExpressionDesc::Pexp_apply(Box::new(PexpApply {
+            ExpressionDesc::Pexp_apply(PexpApply {
                 funct,
                 args: args_idx,
                 partial: false,
                 transformed_jsx: false,
-            })),
+            }),
             loc,
         )
     }
@@ -884,17 +875,18 @@ pub mod ast_helper {
         partial: bool,
     ) -> Expression {
         let funct = arena.push_expr(func);
-        let args_idx = args
+        let args_idx: Vec<_> = args
             .into_iter()
             .map(|(lbl, e)| (lbl, arena.push_expr(e)))
             .collect();
+        let args_idx = arena.push_apply_args(&args_idx);
         make_expr(
-            ExpressionDesc::Pexp_apply(Box::new(PexpApply {
+            ExpressionDesc::Pexp_apply(PexpApply {
                 funct,
                 args: args_idx,
                 partial,
                 transformed_jsx: false,
-            })),
+            }),
             loc,
         )
     }
@@ -909,7 +901,7 @@ pub mod ast_helper {
     ) -> Expression {
         let body_idx = arena.push_expr(body);
         make_expr(
-            ExpressionDesc::Pexp_let(Box::new((rec_flag, bindings, body_idx))),
+            ExpressionDesc::Pexp_let((rec_flag, arena.push_vb_list(&bindings), body_idx)),
             loc,
         )
     }
@@ -918,7 +910,7 @@ pub mod ast_helper {
     /// The caller should push the string to the arena first using `arena.push_string()`.
     pub fn make_var_pat(str_idx: StrIdx, loc: LocIdx) -> Pattern {
         Pattern {
-            ppat_desc: Box::new(PatternDesc::Ppat_var(with_loc(str_idx, loc))),
+            ppat_desc: PatternDesc::Ppat_var(with_loc(str_idx, loc)),
             ppat_loc: loc,
             ppat_attributes: Attributes::new(),
         }
@@ -937,9 +929,15 @@ pub mod ast_helper {
         lid_loc: Location,
         ppat_loc: Location,
     ) -> Pattern {
-        let args = args.into_iter().map(|p| arena.push_pat(p)).collect();
+        let args = args
+            .into_iter()
+            .map(|p| arena.push_pat(p))
+            .collect::<Vec<_>>();
         make_pat(
-            PatternDesc::Ppat_construct(with_loc(lid_idx, lid_loc), ctor_args(args, args_loc)),
+            PatternDesc::Ppat_construct(
+                with_loc(lid_idx, lid_loc),
+                arena.pat_ctor_args(&args, args_loc),
+            ),
             ppat_loc,
         )
     }
@@ -964,7 +962,13 @@ pub mod ast_helper {
                 let nil_loc = p.arena_mut().mk_ghost_loc(loc);
                 let nil = with_loc(nil_idx, nil_loc);
                 make_pat(
-                    PatternDesc::Ppat_construct(nil, ctor_args(Vec::new(), nil_loc)),
+                    PatternDesc::Ppat_construct(
+                        nil,
+                        crate::parse_arena::Located::new(
+                            crate::parse_arena::PatList::EMPTY,
+                            nil_loc,
+                        ),
+                    ),
                     nil_loc,
                 )
             }
@@ -981,7 +985,11 @@ pub mod ast_helper {
             let result_idx = p.arena_mut().push_pat(result);
             let cons = with_loc(cons_idx, cons_loc);
             result = make_pat(
-                PatternDesc::Ppat_construct(cons, ctor_args(vec![item_idx, result_idx], cons_loc)),
+                PatternDesc::Ppat_construct(
+                    cons,
+                    p.arena_mut()
+                        .pat_ctor_args(&[item_idx, result_idx], cons_loc),
+                ),
                 cons_loc,
             );
         }
@@ -999,12 +1007,12 @@ pub mod ast_helper {
     /// This matches OCaml's behavior.
     pub fn make_type_constr(
         lid_idx: crate::parse_arena::LidentIdx,
-        args: Vec<CoreTypeIdx>,
+        args: crate::parse_arena::TypeList,
         lid_loc: Location,
         ptyp_loc: Location,
     ) -> CoreType {
         make_typ(
-            CoreTypeDesc::Ptyp_constr(Box::new((with_loc(lid_idx, lid_loc), args))),
+            CoreTypeDesc::Ptyp_constr((with_loc(lid_idx, lid_loc), args)),
             ptyp_loc,
         )
     }
@@ -1032,35 +1040,36 @@ pub fn make_unary_expr(
     operand: Expression,
 ) -> Expression {
     // Handle numeric literal negation specially
-    match (&token, &*operand.pexp_desc) {
+    match (&token, &operand.pexp_desc) {
         (Token::Plus | Token::PlusDot, ExpressionDesc::Pexp_constant(c))
-            if matches!(**c, Constant::Integer(..) | Constant::Float(..)) =>
+            if matches!(*c, Constant::Integer(..) | Constant::Float(..)) =>
         {
             // +n is just n
             return operand;
         }
-        (Token::Minus, ExpressionDesc::Pexp_constant(c))
-            if matches!(**c, Constant::Integer(..)) =>
-        {
-            if let Constant::Integer(ref n, ref suffix) = **c {
+        (Token::Minus, ExpressionDesc::Pexp_constant(c)) if matches!(*c, Constant::Integer(..)) => {
+            if let Constant::Integer(n, suffix) = *c {
+                let negated = negate_string(p.arena().get_string(n));
                 return Expression {
-                    pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(
-                        Constant::Integer(Cow::Owned(negate_string(n)), *suffix),
-                    ))),
+                    pexp_desc: ExpressionDesc::Pexp_constant(Constant::Integer(
+                        p.arena_mut().intern_string(&negated),
+                        suffix,
+                    )),
                     ..operand
                 };
             }
             unreachable!()
         }
         (Token::Minus | Token::MinusDot, ExpressionDesc::Pexp_constant(c))
-            if matches!(**c, Constant::Float(..)) =>
+            if matches!(*c, Constant::Float(..)) =>
         {
-            if let Constant::Float(ref n, ref suffix) = **c {
+            if let Constant::Float(n, suffix) = *c {
+                let negated = negate_string(p.arena().get_string(n));
                 return Expression {
-                    pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(Constant::Float(
-                        Cow::Owned(negate_string(n)),
-                        *suffix,
-                    )))),
+                    pexp_desc: ExpressionDesc::Pexp_constant(Constant::Float(
+                        p.arena_mut().intern_string(&negated),
+                        suffix,
+                    )),
                     ..operand
                 };
             }
@@ -1407,7 +1416,7 @@ mod tests {
         use crate::parse_arena::ParseArena;
         let mut arena = ParseArena::new();
         let expr = recover::default_expr(&mut arena);
-        assert!(matches!(*expr.pexp_desc, ExpressionDesc::Pexp_extension(_)));
+        assert!(matches!(expr.pexp_desc, ExpressionDesc::Pexp_extension(_)));
     }
 
     #[test]
@@ -1415,7 +1424,7 @@ mod tests {
         use crate::parse_arena::ParseArena;
         let mut arena = ParseArena::new();
         let pat = recover::default_pattern(&mut arena);
-        assert!(matches!(*pat.ppat_desc, PatternDesc::Ppat_extension(_)));
+        assert!(matches!(pat.ppat_desc, PatternDesc::Ppat_extension(_)));
     }
 
     #[test]
@@ -1423,7 +1432,7 @@ mod tests {
         use crate::parse_arena::ParseArena;
         let mut arena = ParseArena::new();
         let typ = recover::default_type(&mut arena);
-        assert!(matches!(*typ.ptyp_desc, CoreTypeDesc::Ptyp_extension(_)));
+        assert!(matches!(typ.ptyp_desc, CoreTypeDesc::Ptyp_extension(_)));
     }
 
     #[test]
@@ -1465,13 +1474,14 @@ mod tests {
     #[test]
     fn test_ast_helper_make_expr() {
         let loc = LocIdx::none();
+        let mut arena = ParseArena::new();
         let expr = ast_helper::make_expr(
-            ExpressionDesc::Pexp_constant(Box::new(Constant::Integer(Cow::Borrowed("42"), None))),
+            ExpressionDesc::Pexp_constant(Constant::Integer(arena.intern_string("42"), None)),
             loc,
         );
         assert!(matches!(
-            &*expr.pexp_desc,
-            ExpressionDesc::Pexp_constant(c) if matches!(&**c, Constant::Integer(..))
+            &expr.pexp_desc,
+            ExpressionDesc::Pexp_constant(Constant::Integer(..))
         ));
     }
 
@@ -1481,7 +1491,7 @@ mod tests {
         let str_idx = arena.push_string("x".to_string());
         let loc = LocIdx::none();
         let pat = ast_helper::make_var_pat(str_idx, loc);
-        assert!(matches!(*pat.ppat_desc, PatternDesc::Ppat_var(_)));
+        assert!(matches!(pat.ppat_desc, PatternDesc::Ppat_var(_)));
     }
 
     #[test]

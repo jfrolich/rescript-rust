@@ -10,7 +10,6 @@ use std::borrow::Cow;
 use std::sync::Arc;
 
 use crate::fast_hash::AHashMap;
-use crate::location::Location;
 use crate::parse_arena::LidentIdx;
 use crate::parser::ast::ClosedFlag;
 use crate::types::asttypes::{MutableFlag, PrivateFlag};
@@ -91,7 +90,7 @@ fn labels_of_keys(ctx: &TypeContext, keys: Vec<String>) -> Vec<LabelDescription>
                 lbl_all,
                 lbl_repres: RecordRepresentation::RecordRegular,
                 lbl_private: PrivateFlag::Public,
-                lbl_loc: Location::none(),
+                lbl_loc: crate::types::DeclLoc::none(),
                 lbl_attributes: Vec::new(),
             })
             .collect()

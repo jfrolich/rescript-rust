@@ -845,8 +845,9 @@ pub struct PrimitiveCoercion {
     pub pc_desc: crate::types::PrimitiveDescription,
     /// Type of the primitive (from the signature).
     pub pc_type: crate::types::TypeExprRef,
-    /// Location of the primitive declaration.
-    pub pc_loc: crate::location::Location,
+    /// Location of the primitive declaration (its `val_loc`), resolved
+    /// through the compilation's `TypeContext`.
+    pub pc_loc: crate::types::DeclLoc,
     /// Identifier for the primitive.
     pub pc_id: crate::ident::Ident,
 }

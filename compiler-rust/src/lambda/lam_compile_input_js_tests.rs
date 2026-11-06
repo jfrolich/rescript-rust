@@ -1,6 +1,7 @@
 //! Direct JS helper tests. These do not claim full indexed-consumer coverage.
 use super::*;
 use crate::js_ir::printer::{print_block, print_expression};
+use crate::lambda::LamLoc;
 use crate::lambda::lam_compile_input::{LambdaInput, LambdaInputView};
 use crate::lambda::lam_primitive::Mutable;
 
@@ -18,7 +19,7 @@ fn indexed_identity_module_emits_original_identifier_with_all_flags() {
                 },
             ),
             vec![target],
-            Location::none(),
+            LamLoc::NONE,
         )
     };
     for inline in [false, true] {
@@ -40,7 +41,7 @@ fn indexed_identity_module_emits_original_identifier_with_all_flags() {
                 } else {
                     Lambda::var(alias)
                 }],
-                loc: Location::none(),
+                loc: LamLoc::NONE,
             }));
             let body = if inline {
                 body
@@ -91,9 +92,9 @@ fn indexed_eta_emits_runtime_js_and_honors_function_guards() {
             Lambda::function_(
                 2,
                 vec![left, right],
-                Lambda::prim(Primitive::Pobjorder, args, Location::none()),
+                Lambda::prim(Primitive::Pobjorder, args, LamLoc::NONE),
                 attr,
-                crate::location::Location::none(),
+                LamLoc::NONE,
             ),
             [],
         );
@@ -144,7 +145,7 @@ fn primitive_js_boundary_preserves_prelude_and_shared_dynamic_import_allocator()
         )),
         vec![],
         vec![before],
-        &Location::none(),
+        &LamLoc::NONE,
     );
     assert_eq!(print_block(&compiled.prelude), prelude_text);
     let js = print_expression(&compiled.expr);

@@ -123,7 +123,7 @@ impl<'a> SigReadContext<'a> {
         let fields = &value.as_block().1;
         let val_type = self.read_type_expr(&fields[0]);
         let val_kind = self.read_value_kind(&fields[1]);
-        let val_loc = read_location(self.ctx, &fields[2]);
+        let val_loc = read_decl_loc(self.ctx, &fields[2]);
         let val_attributes = read_attributes(self.ctx, &fields[3]);
 
         ValueDescription {
@@ -185,7 +185,7 @@ impl<'a> SigReadContext<'a> {
             let (_, f) = tup.as_block();
             (f[0].as_int() as i32, f[1].as_int() as i32)
         });
-        let type_loc = read_location(self.ctx, &fields[7]);
+        let type_loc = read_decl_loc(self.ctx, &fields[7]);
         let type_attributes = read_attributes(self.ctx, &fields[8]);
         let type_immediate = fields[9].as_bool();
         let type_representation = if fields[10].as_int() == 1 {
@@ -428,7 +428,7 @@ impl<'a> SigReadContext<'a> {
         let ld_mutable = read_mutable_flag(&fields[2]);
         let ld_optional = fields[3].as_bool();
         let ld_type = self.read_type_expr(&fields[4]);
-        let ld_loc = read_location(self.ctx, &fields[5]);
+        let ld_loc = read_decl_loc(self.ctx, &fields[5]);
         let ld_attributes = read_attributes(self.ctx, &fields[6]);
 
         LabelDeclaration {
@@ -459,7 +459,7 @@ impl<'a> SigReadContext<'a> {
             .map(|tag| self.read_variant_literal_tag(tag));
         let cd_args = self.read_constructor_arguments(&fields[2]);
         let cd_res = fields[3].as_option().map(|te| self.read_type_expr(te));
-        let cd_loc = read_location(self.ctx, &fields[4]);
+        let cd_loc = read_decl_loc(self.ctx, &fields[4]);
         let cd_attributes = read_attributes(self.ctx, &fields[5]);
 
         ConstructorDeclaration {
@@ -521,7 +521,7 @@ impl<'a> SigReadContext<'a> {
         let ext_args = self.read_constructor_arguments(&fields[2]);
         let ext_ret_type = fields[3].as_option().map(|te| self.read_type_expr(te));
         let ext_private = read_private_flag(&fields[4]);
-        let ext_loc = read_location(self.ctx, &fields[5]);
+        let ext_loc = read_decl_loc(self.ctx, &fields[5]);
         let ext_attributes = read_attributes(self.ctx, &fields[6]);
         let ext_is_exception = fields[7].as_bool();
 
@@ -547,7 +547,7 @@ impl<'a> SigReadContext<'a> {
         let fields = &value.as_block().1;
         let md_type = self.read_module_type(&fields[0]);
         let md_attributes = read_attributes(self.ctx, &fields[1]);
-        let md_loc = read_location(self.ctx, &fields[2]);
+        let md_loc = read_decl_loc(self.ctx, &fields[2]);
 
         ModuleDeclaration {
             md_type,
@@ -567,7 +567,7 @@ impl<'a> SigReadContext<'a> {
         let fields = &value.as_block().1;
         let mtd_type = fields[0].as_option().map(|mt| self.read_module_type(mt));
         let mtd_attributes = read_attributes(self.ctx, &fields[1]);
-        let mtd_loc = read_location(self.ctx, &fields[2]);
+        let mtd_loc = read_decl_loc(self.ctx, &fields[2]);
 
         ModtypeDeclaration {
             mtd_type,
@@ -1029,20 +1029,26 @@ fn read_location(ctx: &TypeContext, value: &OcamlValue) -> Location {
         loc_start: read_position(ctx, &fields[0]),
         loc_end: read_position(ctx, &fields[1]),
         loc_ghost: fields[2].as_bool(),
+        origin: Default::default(),
     }
+}
+
+/// Read a Location.t into the location table of the arena being built.
+fn read_decl_loc(ctx: &TypeContext, value: &OcamlValue) -> crate::types::DeclLoc {
+    ctx.intern_loc(read_location(ctx, value))
 }
 
 fn read_attribute_name(
     ctx: &TypeContext,
     value: &OcamlValue,
-) -> crate::types::asttypes::Located<String> {
+) -> crate::types::asttypes::Located<String, crate::types::DeclLoc> {
     match value {
         OcamlValue::String(name) => crate::types::asttypes::Located::noloc(name.clone()),
         OcamlValue::Block(_, fields) if !fields.is_empty() => match &fields[0] {
             // `string Asttypes.loc` = `{txt; loc}`.
             OcamlValue::String(name) if fields.len() == 2 => crate::types::asttypes::Located {
                 txt: name.clone(),
-                loc: read_location(ctx, &fields[1]),
+                loc: read_decl_loc(ctx, &fields[1]),
             },
             OcamlValue::String(name) => crate::types::asttypes::Located::noloc(name.clone()),
             inner => crate::types::asttypes::Located::noloc(
@@ -1089,8 +1095,8 @@ fn read_attributes(ctx: &TypeContext, value: &OcamlValue) -> Vec<Attribute> {
                     attr_payload: payload,
                     attr_loc: fields
                         .get(2)
-                        .map(|loc| read_location(ctx, loc))
-                        .unwrap_or_else(Location::none),
+                        .map(|loc| read_decl_loc(ctx, loc))
+                        .unwrap_or_default(),
                 })
             }
             _ => None,
@@ -1344,13 +1350,13 @@ fn read_arg_label(ctx: &TypeContext, value: &OcamlValue) -> ArgLabel {
             // Labelled(string loc) - string loc is {txt: string; loc: Location.t}
             let loc_fields = &fields[0].as_block().1;
             let name = loc_fields[0].as_string().to_string();
-            ArgLabel::Labelled(Located::new(name, read_location(ctx, &loc_fields[1])))
+            ArgLabel::Labelled(Located::new(name, read_decl_loc(ctx, &loc_fields[1])))
         }
         OcamlValue::Block(1, fields) => {
             // Optional(string loc) - string loc is {txt: string; loc: Location.t}
             let loc_fields = &fields[0].as_block().1;
             let name = loc_fields[0].as_string().to_string();
-            ArgLabel::Optional(Located::new(name, read_location(ctx, &loc_fields[1])))
+            ArgLabel::Optional(Located::new(name, read_decl_loc(ctx, &loc_fields[1])))
         }
         _ => ArgLabel::Nolabel,
     }

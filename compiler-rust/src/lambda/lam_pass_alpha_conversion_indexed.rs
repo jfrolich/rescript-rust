@@ -2,6 +2,7 @@
 //! `compiler/core/lam_pass_alpha_conversion.ml` and `lam_eta_conversion.ml`.
 
 use crate::context::IdGenerator;
+use crate::lambda::LamLoc;
 use crate::lambda::indexed::{IndexedLambda, IndexedLambdaContext, NodeId, NodeSnapshot, NodeView};
 use crate::lambda::lam_compat::{FieldDbgInfo, LetKind};
 use crate::lambda::lam_constant::Constant;
@@ -69,13 +70,13 @@ fn transform_under_supply(
     let body = append_rebuilt(store, NodeSnapshot::Apply(function, shared, info));
     let mut result = append_rebuilt(
         store,
-        // lam_eta_conversion.ml:65 (before its removal): `~loc:Location.none`.
+        // lam_eta_conversion.ml:65 (before its removal): `~loc:LamLoc.none`.
         NodeSnapshot::Function(
             missing,
             extra_params,
             body,
             FunctionAttribute::default(),
-            crate::location::Location::none(),
+            LamLoc::NONE,
         ),
     );
     // `Ext_list.fold_left bindings rest` wraps each next binding outside the
@@ -309,14 +310,14 @@ mod tests {
     use crate::ident::IdentFlags;
     use crate::lambda::lam_compile_context::ExternalArityInfo;
     use crate::lambda::{Apply, Constant, Lambda};
-    use crate::location::Location;
+    use LamLoc;
 
     fn id(name: &str, stamp: i32) -> Ident {
         Ident::new(name, stamp, IdentFlags::NONE)
     }
     fn info(status: ApplyStatus) -> ApInfo {
         ApInfo {
-            loc: Location::none(),
+            loc: LamLoc::NONE,
             status,
         }
     }
@@ -339,7 +340,7 @@ mod tests {
     #[test]
     fn external_arity_queries_follow_edge_order_and_preserve_location() {
         let module = id("External", 0);
-        let location = Location::new_for_error("alpha.res", 10, 20);
+        let location = LamLoc::for_test(14);
         let access = |name: &str| {
             Lambda::prim(
                 Primitive::Pfield(0, FieldDbgInfo::Module { name: name.into() }),
@@ -397,7 +398,7 @@ mod tests {
                 .collect(),
             Lambda::const_(Constant::int(0)),
             FunctionAttribute::default(),
-            crate::location::Location::none(),
+            LamLoc::NONE,
         )
     }
 
@@ -580,7 +581,7 @@ mod tests {
                 Lambda::prim(
                     Primitive::Pfield(0, FieldDbgInfo::Module { name: name.into() }),
                     vec![Lambda::LglobalModule(module)],
-                    Location::none(),
+                    LamLoc::NONE,
                 ),
                 vec![Lambda::const_(Constant::int(0))],
                 ApplyStatus::Na,
@@ -622,7 +623,7 @@ mod tests {
                 vec![id("x", 3)],
                 Lambda::const_(Constant::int(0)),
                 FunctionAttribute::default(),
-                crate::location::Location::none(),
+                LamLoc::NONE,
             ),
             Lambda::let_(
                 LetKind::Strict,
@@ -632,7 +633,7 @@ mod tests {
                     vec![id("a", 4), id("b", 5)],
                     Lambda::const_(Constant::int(0)),
                     FunctionAttribute::default(),
-                    crate::location::Location::none(),
+                    LamLoc::NONE,
                 ),
                 apply(
                     Lambda::var(outer),
@@ -700,7 +701,7 @@ mod tests {
             vec![p, q],
             Lambda::var(p),
             FunctionAttribute::default(),
-            crate::location::Location::none(),
+            LamLoc::NONE,
         );
         for (args, over) in [
             (
@@ -759,7 +760,7 @@ mod tests {
                     ffi: Box::new(crate::lambda::lam_primitive::ExternalDecl::test_val("", 0)),
                 },
                 vec![],
-                Location::none(),
+                LamLoc::NONE,
             )
         };
         let function_expression = Lambda::let_(
@@ -776,7 +777,7 @@ mod tests {
                 vec![id("a", 3), id("b", 4), id("c", 5), id("d", 6)],
                 Lambda::const_(Constant::int(0)),
                 FunctionAttribute::default(),
-                crate::location::Location::none(),
+                LamLoc::NONE,
             ),
             apply(
                 function_expression,
@@ -854,7 +855,7 @@ mod tests {
                 vec![id("a", 2), id("b", 3)],
                 Lambda::const_(Constant::int(0)),
                 FunctionAttribute::default(),
-                crate::location::Location::none(),
+                LamLoc::NONE,
             ),
             apply(
                 Lambda::var(function),
@@ -920,7 +921,7 @@ mod tests {
                 vec![id("a", 2), id("b", 3)],
                 Lambda::const_(Constant::int(0)),
                 attr.clone(),
-                crate::location::Location::none(),
+                LamLoc::NONE,
             ),
             apply(
                 Lambda::var(function),
@@ -962,7 +963,7 @@ mod tests {
                     ffi: Box::new(crate::lambda::lam_primitive::ExternalDecl::test_val("", 0)),
                 },
                 vec![],
-                Location::none(),
+                LamLoc::NONE,
             )
         };
         // A direct known function gives one missing parameter and one captured
@@ -976,7 +977,7 @@ mod tests {
                 vec![id("x", 10), id("y", 11)],
                 Lambda::const_(Constant::int(0)),
                 FunctionAttribute::default(),
-                crate::location::Location::none(),
+                LamLoc::NONE,
             ),
             apply(
                 Lambda::var(known),

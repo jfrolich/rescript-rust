@@ -14,6 +14,7 @@ use crate::binary_ast::ppx::{
 };
 use crate::ident::Ident;
 use crate::js_ir::source_map::SourceMapBuilder;
+use crate::lambda::LamLoc;
 use crate::lambda::SwitchCaseTag;
 use ahash::{AHashMap as HashMap, AHashSet as HashSet};
 use std::borrow::Cow;
@@ -176,7 +177,7 @@ impl<'r> JsPrinter<'r> {
         self.source_map.take()
     }
 
-    fn mark_source_loc(&mut self, source_loc: Option<&crate::location::Location>) {
+    fn mark_source_loc(&mut self, source_loc: Option<&LamLoc>) {
         if let (Some(builder), Some(source_loc)) = (&mut self.source_map, source_loc) {
             builder.add_mapping(self.generated_line, self.generated_column, source_loc);
         }
@@ -518,7 +519,7 @@ impl<'r> JsPrinter<'r> {
         }
 
         // js_dump.ml:1321-1324.
-        self.mark_source_loc(stmt.source_loc.as_deref());
+        self.mark_source_loc(stmt.source_loc.as_ref());
         self.print_statement_desc(&stmt.desc, top_level);
     }
 
@@ -584,7 +585,7 @@ impl<'r> JsPrinter<'r> {
                     {
                         // js_dump.ml:1278-1280: `mark_source_loc f e.source_loc`
                         // before `pp_function`.
-                        self.mark_source_loc(source_loc.as_deref());
+                        self.mark_source_loc(source_loc.as_ref());
                         self.print_function_declaration(
                             &decl.ident,
                             *is_method,
@@ -1007,7 +1008,7 @@ impl<'r> JsPrinter<'r> {
                     ..
                 } = &value.desc
                 {
-                    self.mark_source_loc(value.source_loc.as_deref());
+                    self.mark_source_loc(value.source_loc.as_ref());
                     // OCaml reference: compiler/core/js_dump.ml:337-360 builds
                     // `set_env` including `Name_non_top id`, then
                     // compiler/core/js_dump.ml:411-414 prints the function in
@@ -1570,7 +1571,7 @@ impl<'r> JsPrinter<'r> {
         }
 
         if mark {
-            self.mark_source_loc(expr.source_loc.as_deref());
+            self.mark_source_loc(expr.source_loc.as_ref());
         }
         self.print_expression_desc(&expr.desc, level);
     }
@@ -2291,7 +2292,7 @@ impl<'r> JsPrinter<'r> {
             {
                 // js_dump.ml:470-472: `expression` marks the block's location
                 // before printing it.
-                self.mark_source_loc(expr.source_loc.as_deref());
+                self.mark_source_loc(expr.source_loc.as_ref());
                 self.print_exception_block_literal(level, elements, tag_info, include_stack);
                 true
             }

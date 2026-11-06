@@ -1,4 +1,5 @@
 use super::*;
+use crate::lambda::LamLoc;
 
 #[test]
 fn equal_flattened_staticcatch_handlers_share_one_switch_body() {
@@ -11,7 +12,7 @@ fn equal_flattened_staticcatch_handlers_share_one_switch_body() {
             Lambda::var(report),
             vec![Lambda::var(message)],
             ApInfo {
-                loc: Location::none(),
+                loc: LamLoc::NONE,
                 status: ApplyStatus::Na,
             },
         )),
@@ -90,7 +91,7 @@ fn staticcatch_trywith_return_keeps_bound_exit_effects_outside_try_like_ocaml() 
                     ap_func: Box::new(Lambda::var(x)),
                     ap_args: vec![],
                     ap_info: ApInfo {
-                        loc: Location::none(),
+                        loc: LamLoc::NONE,
                         status: ApplyStatus::Na,
                     },
                 }))],
@@ -103,7 +104,7 @@ fn staticcatch_trywith_return_keeps_bound_exit_effects_outside_try_like_ocaml() 
             ap_func: Box::new(Lambda::var(g)),
             ap_args: vec![],
             ap_info: ApInfo {
-                loc: Location::none(),
+                loc: LamLoc::NONE,
                 status: ApplyStatus::Na,
             },
         }))),
@@ -196,7 +197,7 @@ fn staticcatch_trywith_tail_loop_keeps_bound_exit_effects_outside_try_like_ocaml
                                 ap_func: Box::new(Lambda::var(read)),
                                 ap_args: vec![Lambda::var(acc)],
                                 ap_info: ApInfo {
-                                    loc: Location::none(),
+                                    loc: LamLoc::NONE,
                                     status: ApplyStatus::Na,
                                 },
                             }))],
@@ -209,13 +210,13 @@ fn staticcatch_trywith_tail_loop_keeps_bound_exit_effects_outside_try_like_ocaml
                         ap_func: Box::new(Lambda::var(loop_)),
                         ap_args: vec![Lambda::var(next_acc)],
                         ap_info: ApInfo {
-                            loc: Location::none(),
+                            loc: LamLoc::NONE,
                             status: ApplyStatus::Na,
                         },
                     }))),
                 ),
                 FunctionAttribute::default(),
-                crate::location::Location::none(),
+                LamLoc::NONE,
             ),
         )],
         Lambda::unit(),
@@ -282,7 +283,7 @@ fn nested_wrapped_staticcatch_trywith_tail_loops_lower_like_gpr_1701() {
             Mutable::Immutable,
         ),
         vec![Lambda::var(next_acc), Lambda::var(acc)],
-        Location::none(),
+        LamLoc::NONE,
     );
 
     let lam = Lambda::letrec(
@@ -307,7 +308,7 @@ fn nested_wrapped_staticcatch_trywith_tail_loops_lower_like_gpr_1701() {
                                                     )),
                                                     ap_args: vec![Lambda::var(inc)],
                                                     ap_info: ApInfo {
-                                                        loc: Location::none(),
+                                                        loc: LamLoc::NONE,
                                                         status: ApplyStatus::Na,
                                                     },
                                                 }))],
@@ -317,7 +318,7 @@ fn nested_wrapped_staticcatch_trywith_tail_loops_lower_like_gpr_1701() {
                                                 LetKind::StrictOpt,
                                                 exn,
                                                 crate::raw_lambda::lower::wrap_exn(
-                                                    Location::none(),
+                                                    LamLoc::NONE,
                                                     Lambda::var(raw_exn),
                                                 ),
                                                 Lambda::LstaticCatch(
@@ -335,11 +336,11 @@ fn nested_wrapped_staticcatch_trywith_tail_loops_lower_like_gpr_1701() {
                                                                         },
                                                                     ),
                                                                     vec![Lambda::var(exn)],
-                                                                    Location::none(),
+                                                                    LamLoc::NONE,
                                                                 ),
                                                                 Lambda::var(eof),
                                                             ],
-                                                            Location::none(),
+                                                            LamLoc::NONE,
                                                         ),
                                                         Lambda::Lapply(Box::new(Apply {
                                                             ap_func: Box::new(Lambda::var(
@@ -349,7 +350,7 @@ fn nested_wrapped_staticcatch_trywith_tail_loops_lower_like_gpr_1701() {
                                                                 acc,
                                                             )],
                                                             ap_info: ApInfo {
-                                                                loc: Location::none(),
+                                                                loc: LamLoc::NONE,
                                                                 status: ApplyStatus::Na,
                                                             },
                                                         })),
@@ -359,7 +360,7 @@ fn nested_wrapped_staticcatch_trywith_tail_loops_lower_like_gpr_1701() {
                                                     Box::new(Lambda::prim(
                                                         Primitive::Praise,
                                                         vec![Lambda::var(exn)],
-                                                        Location::none(),
+                                                        LamLoc::NONE,
                                                     )),
                                                 ),
                                             )),
@@ -369,24 +370,24 @@ fn nested_wrapped_staticcatch_trywith_tail_loops_lower_like_gpr_1701() {
                                             ap_func: Box::new(Lambda::var(loop_)),
                                             ap_args: vec![cons],
                                             ap_info: ApInfo {
-                                                loc: Location::none(),
+                                                loc: LamLoc::NONE,
                                                 status: ApplyStatus::Na,
                                             },
                                         }))),
                                     ),
-                                    FunctionAttribute::default(), crate::location::Location::none(),
+                                    FunctionAttribute::default(), LamLoc::NONE,
                                 ),
                         )],
                         Lambda::Lapply(Box::new(Apply {
                             ap_func: Box::new(Lambda::var(loop_)),
                             ap_args: vec![Lambda::const_(Constant::int(0))],
                             ap_info: ApInfo {
-                                loc: Location::none(),
+                                loc: LamLoc::NONE,
                                 status: ApplyStatus::Na,
                             },
                         })),
                     ),
-                    FunctionAttribute::default(), crate::location::Location::none(),
+                    FunctionAttribute::default(), LamLoc::NONE,
                 ),
         )],
         Lambda::prim(
@@ -395,7 +396,7 @@ fn nested_wrapped_staticcatch_trywith_tail_loops_lower_like_gpr_1701() {
                 Mutable::Immutable,
             ),
             vec![Lambda::var(outer)],
-            Location::none(),
+            LamLoc::NONE,
         ),
     );
 
@@ -644,7 +645,7 @@ fn nested_staticcatch_switch_forwarders_keep_collapsed_shared_return_like_gpr_36
                 Lambda::prim(
                     Primitive::Pfield(0, FieldDbgInfo::Variant),
                     vec![Lambda::var(state)],
-                    Location::none(),
+                    LamLoc::NONE,
                 ),
                 Lambda::static_raise(1, vec![Lambda::var(int_value)]),
             )),
@@ -659,16 +660,16 @@ fn nested_staticcatch_switch_forwarders_keep_collapsed_shared_return_like_gpr_36
                 Lambda::prim(
                     Primitive::Paddint,
                     vec![Lambda::var(int_param), Lambda::var(int_value)],
-                    Location::none(),
+                    LamLoc::NONE,
                 ),
                 FunctionAttribute::default(),
-                crate::location::Location::none(),
+                LamLoc::NONE,
             ),
             Lambda::apply(
                 Lambda::var(int_func),
                 vec![Lambda::const_(Constant::int(0))],
                 ApInfo {
-                    loc: Location::none(),
+                    loc: LamLoc::NONE,
                     status: ApplyStatus::Uncurry,
                 },
             ),
@@ -801,7 +802,7 @@ fn return_staticcatchs_keep_plain_handlers_inline_across_multiple_exit_sites() {
             Lambda::var(do_with_b),
             vec![Lambda::var(kind)],
             ApInfo {
-                loc: Location::none(),
+                loc: LamLoc::NONE,
                 status: ApplyStatus::Na,
             },
         )),
@@ -1082,12 +1083,12 @@ fn js_pipeline_keeps_single_case_staticcatch_unit_handler_as_fallthrough_guard()
                 return_unit: true,
                 ..Default::default()
             },
-            crate::location::Location::none(),
+            LamLoc::NONE,
         ),
         Lambda::prim(
             Primitive::Pmakeblock(TagInfo::ModuleExport(vec![run]), Mutable::Immutable),
             vec![Lambda::var(run)],
-            Location::none(),
+            LamLoc::NONE,
         ),
     );
 

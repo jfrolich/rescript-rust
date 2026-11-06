@@ -136,8 +136,8 @@ pub fn rename_record_field(arena: &ParseArena, attributes: &Attributes, name: &s
 /// OCaml `Translate_type_declarations.declared_field_name`: a declared field
 /// carries its runtime name; only the renaming that reaches gentype through
 /// an expression's attributes still has to be read off one.
-pub fn declared_field_name(ld: &LabelDeclaration) -> String {
-    crate::gentype::annotation::check_unsupported_decl_gentype_as_renaming(&ld.ld_attributes);
+pub fn declared_field_name(locs: &dyn crate::types::DeclLocs, ld: &LabelDeclaration) -> String {
+    crate::gentype::annotation::check_unsupported_decl_gentype_as_renaming(locs, &ld.ld_attributes);
     match &ld.ld_runtime_name {
         Some(s) => crate::string_literal::ocaml_escaped(s),
         None => unwrap_uppercase_exotic(ld.ld_id.name()).to_string(),
@@ -666,7 +666,7 @@ fn translate_label_declarations(
         .iter()
         .map(|label_declaration| {
             let attributes = &label_declaration.ld_attributes;
-            let name = declared_field_name(label_declaration);
+            let name = declared_field_name(ctx, label_declaration);
             let mutable_ = match label_declaration.ld_mutable {
                 MutableFlag::Mutable => Mutable::Mutable,
                 MutableFlag::Immutable => Mutable::Immutable,

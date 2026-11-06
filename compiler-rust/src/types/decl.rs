@@ -4,11 +4,11 @@
 //! module types, and signatures - the building blocks of module interfaces.
 
 use super::asttypes::{Located, MutableFlag, PrivateFlag};
+use super::decl_loc::DeclLoc;
 use super::path::Path;
 use super::type_expr::TypeExprRef;
 use super::variance::Variance;
 use crate::ident::Ident;
-use crate::location::Location;
 use serde::{Deserialize, Serialize};
 
 // ============================================================================
@@ -23,7 +23,7 @@ pub struct ValueDescription {
     /// Kind of value (regular or primitive)
     pub val_kind: ValueKind,
     /// Source location
-    pub val_loc: Location,
+    pub val_loc: DeclLoc,
     /// Attributes
     pub val_attributes: Vec<Attribute>,
     /// Full path to the value (for module items, None for local bindings)
@@ -85,7 +85,7 @@ pub struct TypeDeclaration {
     /// Newtype level (for local abstract types)
     pub type_newtype_level: Option<(i32, i32)>,
     /// Source location
-    pub type_loc: Location,
+    pub type_loc: DeclLoc,
     /// Attributes
     pub type_attributes: Vec<Attribute>,
     /// Is this type immediate (unboxed)?
@@ -291,7 +291,7 @@ pub struct LabelDeclaration {
     /// Field type
     pub ld_type: TypeExprRef,
     /// Source location
-    pub ld_loc: Location,
+    pub ld_loc: DeclLoc,
     /// Attributes
     pub ld_attributes: Vec<Attribute>,
 }
@@ -319,7 +319,7 @@ pub struct ConstructorDeclaration {
     /// Result type (for GADTs)
     pub cd_res: Option<TypeExprRef>,
     /// Source location
-    pub cd_loc: Location,
+    pub cd_loc: DeclLoc,
     /// Attributes
     pub cd_attributes: Vec<Attribute>,
 }
@@ -351,7 +351,7 @@ pub struct ExtensionConstructor {
     /// Private flag
     pub ext_private: PrivateFlag,
     /// Source location
-    pub ext_loc: Location,
+    pub ext_loc: DeclLoc,
     /// Attributes
     pub ext_attributes: Vec<Attribute>,
     /// Is this an exception?
@@ -382,7 +382,7 @@ pub struct ConstructorDescription {
     /// Private flag
     pub cstr_private: PrivateFlag,
     /// Source location
-    pub cstr_loc: Location,
+    pub cstr_loc: DeclLoc,
     /// Attributes
     pub cstr_attributes: Vec<Attribute>,
     /// Inlined record declaration (if any)
@@ -445,7 +445,7 @@ pub struct LabelDescription {
     /// Private flag
     pub lbl_private: PrivateFlag,
     /// Source location
-    pub lbl_loc: Location,
+    pub lbl_loc: DeclLoc,
     /// Attributes
     pub lbl_attributes: Vec<Attribute>,
 }
@@ -582,7 +582,7 @@ pub struct ModuleDeclaration {
     /// Attributes
     pub md_attributes: Vec<Attribute>,
     /// Source location
-    pub md_loc: Location,
+    pub md_loc: DeclLoc,
     /// Qualified path for this module when accessed through an opened parent.
     /// E.g., Pdot(Pident "Stdlib") "Console" for Console from opened Stdlib.
     pub md_path: Option<super::path::Path>,
@@ -596,7 +596,7 @@ pub struct ModtypeDeclaration {
     /// Attributes
     pub mtd_attributes: Vec<Attribute>,
     /// Source location
-    pub mtd_loc: Location,
+    pub mtd_loc: DeclLoc,
 }
 
 /// Recursive status for type/module declarations.
@@ -629,11 +629,11 @@ pub enum ExtStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Attribute {
     /// Attribute name
-    pub attr_name: Located<String>,
+    pub attr_name: Located<String, DeclLoc>,
     /// Attribute payload (simplified)
     pub attr_payload: AttributePayload,
     /// Source location
-    pub attr_loc: Location,
+    pub attr_loc: DeclLoc,
 }
 
 /// Attribute payload.
@@ -674,10 +674,12 @@ pub enum AttributePayload {
     StrTuple(Vec<String>),
 }
 
-/// Visitor over the locations of a signature (see [`walk_signature_locations`]).
+/// Visitor over the location handles of a signature (see
+/// [`walk_signature_locations`]). Type-expression labels are not visited:
+/// they belong to the type graph.
 pub trait SignatureLocationVisitor {
     /// A declaration or attribute-name location.
-    fn location(&mut self, loc: &mut Location);
+    fn location(&mut self, loc: &mut DeclLoc);
     /// An attribute: by default its own locations.
     fn attribute(&mut self, attr: &mut Attribute) {
         self.location(&mut attr.attr_loc);
@@ -685,12 +687,12 @@ pub trait SignatureLocationVisitor {
     }
 }
 
-/// Visit every `Location` of a signature: declaration locations and the
+/// Visit every location handle of a signature: declaration locations and the
 /// locations of their attributes, recursively through module types.
-pub fn for_each_signature_location(sig: &mut [SignatureItem], f: &mut dyn FnMut(&mut Location)) {
-    struct Locations<'a>(&'a mut dyn FnMut(&mut Location));
+pub fn for_each_signature_location(sig: &mut [SignatureItem], f: &mut dyn FnMut(&mut DeclLoc)) {
+    struct Locations<'a>(&'a mut dyn FnMut(&mut DeclLoc));
     impl SignatureLocationVisitor for Locations<'_> {
-        fn location(&mut self, loc: &mut Location) {
+        fn location(&mut self, loc: &mut DeclLoc) {
             (self.0)(loc);
         }
     }
@@ -792,7 +794,7 @@ pub fn internal_optional_attr() -> Attribute {
     Attribute {
         attr_name: Located::noloc(INTERNAL_OPTIONAL_ATTR_NAME.to_string()),
         attr_payload: AttributePayload::Structure(vec![]),
-        attr_loc: Location::none(),
+        attr_loc: DeclLoc::none(),
     }
 }
 

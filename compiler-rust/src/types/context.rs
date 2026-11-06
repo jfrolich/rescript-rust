@@ -579,6 +579,13 @@ pub struct TypeContext {
     /// OCaml `Env`'s usage tables (env.ml:27-53).
     usage: RefCell<super::usage::UsageTables>,
 
+    /// Locations of declarations and type labels this compilation built with
+    /// coordinates (`DeclLocKind::Local` handles; see `types::decl_loc`).
+    /// Empty for a location-free compilation, whose locations fit in their
+    /// handles.
+    decl_locs: super::decl_loc::OwnedDeclLocs,
+    decl_loc_owner: u32,
+
     /// Parser warnings of the snippets error reports re-parse
     /// (`Error_message_utils.Parser.parse_source`), printed before the error
     /// like OCaml's immediate `Location.prerr_warning`.
@@ -1110,6 +1117,12 @@ pub(crate) struct DeferredRenamedSig {
     renamed: std::sync::OnceLock<Arc<super::decl::Signature>>,
 }
 
+impl super::decl_loc::DeclLocs for TypeContext {
+    fn resolve_loc(&self, loc: super::DeclLoc) -> crate::location::Location {
+        TypeContext::resolve_loc(self, loc)
+    }
+}
+
 impl TypeContext {
     /// Create a new type context.
     pub fn new(id_gen: Arc<IdGenerator>) -> Self {
@@ -1160,6 +1173,8 @@ impl TypeContext {
             open_slots: RefCell::new(Vec::new()),
             open_slot_events: RefCell::new(Vec::new()),
             usage: RefCell::new(super::usage::UsageTables::default()),
+            decl_locs: Default::default(),
+            decl_loc_owner: super::decl_loc::next_table_owner(),
             reparse_warnings: RefCell::new(Vec::new()),
             report_warning_config: RefCell::new(None),
             variant_layouts: RefCell::new(Vec::new()),
@@ -2982,7 +2997,8 @@ impl TypeContext {
     ) {
         // OCaml compares the locations structurally (`<>`), so two
         // `Location.none`s are equal whichever way they were spelled here.
-        let same = self.location_key(&vd1.val_loc) == self.location_key(&vd2.val_loc);
+        let same = self.location_key(&self.resolve_loc(vd1.val_loc))
+            == self.location_key(&self.resolve_loc(vd2.val_loc));
         if !same {
             self.value_deps
                 .borrow_mut()
@@ -4263,6 +4279,94 @@ impl TypeContext {
         fresh
     }
 
+    /// Handle for a declaration, attribute or type-label location: a source
+    /// handle when it has no coordinates, else an entry of the table of the
+    /// arena being built (the worker store during a store build).
+    #[inline]
+    pub fn intern_loc(&self, loc: crate::location::Location) -> super::DeclLoc {
+        if let Some(source) = super::DeclLoc::source(&loc) {
+            return source;
+        }
+        self.intern_located_loc(loc)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn intern_located_loc(&self, loc: crate::location::Location) -> super::DeclLoc {
+        if self.in_store_build() {
+            return self.store.intern_decl_loc(loc);
+        }
+        super::DeclLoc::table(
+            super::decl_loc::DeclLocKind::Local,
+            self.decl_loc_owner,
+            self.decl_locs.intern(loc),
+        )
+    }
+
+    /// The location a handle of this compilation (or of the worker store or
+    /// shared pool it reads) denotes.
+    #[inline]
+    pub fn resolve_loc(&self, loc: super::DeclLoc) -> crate::location::Location {
+        match loc.source_location() {
+            Some(loc) => loc,
+            None => self.resolve_table_loc(loc),
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn resolve_table_loc(&self, loc: super::DeclLoc) -> crate::location::Location {
+        use super::decl_loc::DeclLocKind;
+        match loc.kind() {
+            DeclLocKind::Local => {
+                assert_eq!(
+                    loc.owner(),
+                    self.decl_loc_owner,
+                    "declaration location of another compilation"
+                );
+                self.decl_locs.get(loc.index())
+            }
+            DeclLocKind::Store => self.store.decl_loc(loc),
+            DeclLocKind::Shared => super::shared_store::page_location(
+                &self.shared_pages.borrow(),
+                loc.owner(),
+                loc.index(),
+            ),
+            DeclLocKind::Source | DeclLocKind::Portable => {
+                panic!("unresolvable declaration location {loc:?}")
+            }
+        }
+    }
+
+    /// Number of located entries in this compilation's own table.
+    pub fn local_decl_loc_count(&self) -> usize {
+        self.decl_locs.len()
+    }
+
+    /// A store build that keeps a location of this compilation must stay
+    /// private to it, like one that reads a compilation-local type node.
+    #[inline]
+    pub(crate) fn check_store_decl_loc(&self, loc: super::DeclLoc) {
+        if loc.kind() == super::decl_loc::DeclLocKind::Local {
+            self.poison_store_build_for("local-decl-loc");
+        }
+    }
+
+    /// Append an imported portable location table to this compilation's
+    /// table, returning the mapping of its handles.
+    pub(crate) fn import_decl_locs<'a>(
+        &self,
+        locations: impl IntoIterator<Item = crate::location::Location>,
+        files: &'a dyn Fn(crate::intern::StrIdx) -> crate::intern::StrIdx,
+    ) -> super::decl_loc::DeclLocImport<'a> {
+        super::decl_loc::DeclLocImport {
+            kind: super::decl_loc::DeclLocKind::Local,
+            owner: self.decl_loc_owner,
+            base: self.decl_locs.append(locations),
+            files,
+        }
+    }
+
     /// Whether allocations currently go to the worker store.
     #[inline(always)]
     pub(crate) fn in_store_build(&self) -> bool {
@@ -4893,7 +4997,7 @@ mod tests {
             type_manifest: None,
             type_variance: vec![],
             type_newtype_level: None,
-            type_loc: crate::location::Location::none(),
+            type_loc: crate::types::DeclLoc::none(),
             type_attributes: vec![],
             type_immediate: false,
             type_representation: super::super::TypeRepresentation::Boxed,
@@ -4919,6 +5023,7 @@ mod tests {
                         (TypeDesc::Tvar(None), GENERIC_LEVEL),
                         (TypeDesc::Tnil, GENERIC_LEVEL),
                     ],
+                    Vec::new(),
                     Vec::new(),
                 )
             })

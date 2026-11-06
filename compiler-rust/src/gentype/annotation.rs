@@ -96,13 +96,14 @@ fn from_expr(arena: &ParseArena, expr: &Expression) -> Option<AttributePayload> 
     {
         return Some(AttributePayload::StringPayload(s));
     }
-    match crate::ast_payload::unwrap_braces(arena, expr)
-        .pexp_desc
-        .as_ref()
-    {
-        ExpressionDesc::Pexp_constant(constant) => match constant.as_ref() {
-            Constant::Integer(n, _) => Some(AttributePayload::IntPayload(n.to_string())),
-            Constant::Float(s, _) => Some(AttributePayload::FloatPayload(s.to_string())),
+    match &crate::ast_payload::unwrap_braces(arena, expr).pexp_desc {
+        ExpressionDesc::Pexp_constant(constant) => match constant {
+            Constant::Integer(n, _) => Some(AttributePayload::IntPayload(
+                arena.get_string(*n).to_string(),
+            )),
+            Constant::Float(s, _) => Some(AttributePayload::FloatPayload(
+                arena.get_string(*s).to_string(),
+            )),
             _ => None,
         },
         ExpressionDesc::Pexp_construct(lid, _) => match arena.get_longident(lid.txt) {
@@ -114,7 +115,8 @@ fn from_expr(arena: &ParseArena, expr: &Expression) -> Option<AttributePayload> 
             _ => None,
         },
         ExpressionDesc::Pexp_tuple(exprs) => {
-            let payloads = exprs
+            let payloads = arena
+                .expr_list(*exprs)
                 .iter()
                 .filter_map(|expr_idx| from_expr(arena, arena.get_expr(*expr_idx)))
                 .collect();
@@ -139,7 +141,7 @@ pub fn get_attribute_payload(
             let payload = match payload {
                 Payload::PStr(items) => match items.first() {
                     None => Some(AttributePayload::UnrecognizedPayload),
-                    Some(structure_item) => match structure_item.pstr_desc.as_ref() {
+                    Some(structure_item) => match &structure_item.pstr_desc {
                         crate::parser::ast::StructureItemDesc::Pstr_eval(eval) => {
                             Some(from_expr(arena, arena.get_expr(eval.0))?)
                         }
@@ -609,7 +611,10 @@ fn warn_gentype_as_renaming_decl(loc: &Location) {
     );
 }
 
-pub fn check_unsupported_decl_gentype_as_renaming(attributes: &[crate::types::decl::Attribute]) {
+pub fn check_unsupported_decl_gentype_as_renaming(
+    locs: &dyn crate::types::DeclLocs,
+    attributes: &[crate::types::decl::Attribute],
+) {
     if let Some(attribute) = attributes
         .iter()
         .find(|attribute| tag_is_gentype_as(&attribute.attr_name.txt))
@@ -619,7 +624,7 @@ pub fn check_unsupported_decl_gentype_as_renaming(attributes: &[crate::types::de
                 .find(|attribute| tag_is_gentype(&attribute.attr_name.txt))
         })
     {
-        warn_gentype_as_renaming_decl(&attribute.attr_loc);
+        warn_gentype_as_renaming_decl(&locs.resolve_loc(attribute.attr_loc));
     }
 }
 

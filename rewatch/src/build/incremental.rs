@@ -914,7 +914,15 @@ pub fn parse_for_round(
         let stored_asts = build_state.stored_asts.lock().unwrap();
         modules
             .iter()
-            .filter(|module_name| !stored_asts.contains_key(&format!("{module_name}:impl")))
+            .filter(|module_name| {
+                // Namespace maps have no AST to parse.
+                build_state
+                    .build_state
+                    .modules
+                    .get(*module_name)
+                    .is_some_and(|module| matches!(module.source_type, SourceType::SourceFile(_)))
+                    && !stored_asts.contains_key(&format!("{module_name}:impl"))
+            })
             .cloned()
             .collect()
     };
