@@ -7,6 +7,7 @@
 //! The main function is `modtypes` which checks if one module type is
 //! a subtype of another.
 
+use crate::types::path::PathView;
 use std::cell::Cell;
 
 use crate::diagnostics::Warning;
@@ -881,29 +882,22 @@ impl PathSubstMap {
 }
 
 fn path_has_pos_hint(path: &Path) -> bool {
-    match path {
-        Path::Pident(_) => false,
-        Path::Pdot(parent, _, pos) => {
+    match path.view() {
+        PathView::Pident(_) => false,
+        PathView::Pdot(parent, _, pos) => {
             *pos != crate::types::path::NOPOS || path_has_pos_hint(parent)
         }
-        Path::Papply(functor, argument) => {
+        PathView::Papply(functor, argument) => {
             path_has_pos_hint(functor) || path_has_pos_hint(argument)
         }
     }
 }
 
 fn strip_pos_hints(path: &Path) -> Path {
-    match path {
-        Path::Pident(_) => path.clone(),
-        Path::Pdot(parent, name, _) => Path::Pdot(
-            std::sync::Arc::new(strip_pos_hints(parent)),
-            *name,
-            crate::types::path::NOPOS,
-        ),
-        Path::Papply(functor, argument) => Path::Papply(
-            std::sync::Arc::new(strip_pos_hints(functor)),
-            std::sync::Arc::new(strip_pos_hints(argument)),
-        ),
+    match path.view() {
+        PathView::Pident(_) => path.clone(),
+        PathView::Pdot(parent, name, _) => Path::pdot_pos(strip_pos_hints(parent), *name, crate::types::path::NOPOS),
+        PathView::Papply(functor, argument) => Path::papply(strip_pos_hints(functor), strip_pos_hints(argument)),
     }
 }
 
@@ -935,7 +929,7 @@ fn with_local_pident_module_type<R>(
     let mut visiting = HashSet::new();
 
     loop {
-        let Path::Pident(id) = &current else {
+        let PathView::Pident(id) = current.view() else {
             return None;
         };
         if id.is_persistent() || id.stamp() == 0 || !visiting.insert((current.clone(), namespace)) {
@@ -1069,10 +1063,10 @@ fn modtypes_inner(
         use crate::types::decl::SignatureItem as SigItem;
 
         fn should_try_env_lazy(path: &Path) -> bool {
-            match path {
-                Path::Pident(id) => id.is_persistent() || id.stamp() == 0,
-                Path::Pdot(_, _, _) => true,
-                Path::Papply(_, _) => false,
+            match path.view() {
+                PathView::Pident(id) => id.is_persistent() || id.stamp() == 0,
+                PathView::Pdot(_, _, _) => true,
+                PathView::Papply(_, _) => false,
             }
         }
 
@@ -1086,8 +1080,8 @@ fn modtypes_inner(
                 return None;
             }
 
-            let mty = match path {
-                Path::Pident(id) => match namespace {
+            let mty = match path.view() {
+                PathView::Pident(id) => match namespace {
                     PathNamespace::Module => {
                         env.lookup_module(&Path::pident(*id)).ok()?.md_type.clone()
                     }
@@ -1097,7 +1091,7 @@ fn modtypes_inner(
                         .mtd_type
                         .clone()?,
                 },
-                Path::Pdot(parent, name, _) => {
+                PathView::Pdot(parent, name, _) => {
                     let parent_mty = expand_local(env, parent, PathNamespace::Module, visiting)?;
                     let parent_sig = match &parent_mty {
                         ModuleType::MtySignature(sig) => sig.clone(),
@@ -1134,7 +1128,7 @@ fn modtypes_inner(
                         _ => None,
                     })?
                 }
-                Path::Papply(_, _) => return None,
+                PathView::Papply(_, _) => return None,
             };
             match &mty {
                 ModuleType::MtyIdent(next) => {
@@ -2541,17 +2535,10 @@ fn substitute_type_constructor_path(path: &Path, subst: &InclusionSubst) -> Path
     if let Some(replacement) = subst.type_paths.get(path) {
         return replacement;
     }
-    match path {
-        Path::Pident(_) => path.clone(),
-        Path::Pdot(prefix, name, pos) => Path::Pdot(
-            std::sync::Arc::new(substitute_module_path(prefix, subst)),
-            *name,
-            *pos,
-        ),
-        Path::Papply(functor, arg) => Path::Papply(
-            std::sync::Arc::new(substitute_type_constructor_path(functor, subst)),
-            std::sync::Arc::new(substitute_module_path(arg, subst)),
-        ),
+    match path.view() {
+        PathView::Pident(_) => path.clone(),
+        PathView::Pdot(prefix, name, pos) => Path::pdot_pos(substitute_module_path(prefix, subst), *name, *pos),
+        PathView::Papply(functor, arg) => Path::papply(substitute_type_constructor_path(functor, subst), substitute_module_path(arg, subst)),
     }
 }
 
@@ -2559,17 +2546,10 @@ fn substitute_module_path(path: &Path, subst: &InclusionSubst) -> Path {
     if let Some(replacement) = subst.module_paths.get(path) {
         return replacement;
     }
-    match path {
-        Path::Pident(_) => path.clone(),
-        Path::Pdot(prefix, name, pos) => Path::Pdot(
-            std::sync::Arc::new(substitute_module_path(prefix, subst)),
-            *name,
-            *pos,
-        ),
-        Path::Papply(functor, arg) => Path::Papply(
-            std::sync::Arc::new(substitute_module_path(functor, subst)),
-            std::sync::Arc::new(substitute_module_path(arg, subst)),
-        ),
+    match path.view() {
+        PathView::Pident(_) => path.clone(),
+        PathView::Pdot(prefix, name, pos) => Path::pdot_pos(substitute_module_path(prefix, subst), *name, *pos),
+        PathView::Papply(functor, arg) => Path::papply(substitute_module_path(functor, subst), substitute_module_path(arg, subst)),
     }
 }
 
@@ -2577,17 +2557,10 @@ fn substitute_modtype_path(path: &Path, subst: &InclusionSubst) -> Path {
     if let Some(replacement) = subst.modtype_paths.get(path) {
         return replacement;
     }
-    match path {
-        Path::Pident(_) => path.clone(),
-        Path::Pdot(prefix, name, pos) => Path::Pdot(
-            std::sync::Arc::new(substitute_module_path(prefix, subst)),
-            *name,
-            *pos,
-        ),
-        Path::Papply(functor, arg) => Path::Papply(
-            std::sync::Arc::new(substitute_modtype_path(functor, subst)),
-            std::sync::Arc::new(substitute_module_path(arg, subst)),
-        ),
+    match path.view() {
+        PathView::Pident(_) => path.clone(),
+        PathView::Pdot(prefix, name, pos) => Path::pdot_pos(substitute_module_path(prefix, subst), *name, *pos),
+        PathView::Papply(functor, arg) => Path::papply(substitute_modtype_path(functor, subst), substitute_module_path(arg, subst)),
     }
 }
 
@@ -3334,7 +3307,7 @@ fn type_manifest_is_absrow(type_ctx: &TypeContext, env: &Env, ty: TypeExprRef) -
         matches!(
             &*desc,
             TypeDesc::Tconstr {
-                path: Path::Pident(_),
+                path: PathView::Pident(_),
                 ..
             }
         )

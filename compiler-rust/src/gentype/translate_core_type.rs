@@ -4,6 +4,7 @@ use crate::gentype::gen_type_common::{
     Case as VariantCase, ClosedFlag as GenClosedFlag, Function, Label, LabelJs, Payload, Type,
     create_variant, dep_to_string, is_number, unknown,
 };
+use crate::types::path::PathView;
 use crate::parse_arena::ParseArena;
 use crate::parser::ast::ClosedFlag as AstClosedFlag;
 use crate::parser::longident::Longident;
@@ -20,15 +21,15 @@ pub fn remove_option(
 ) -> Option<(String, TypedCoreType)> {
     // Mirrors compiler/gentype/TranslateCoreType.ml:4-15.
     match (&core_type.ctyp_desc, label) {
-        (TypedCoreTypeDesc::Ttyp_constr(Path::Pident(id), _, args), ArgLabel::Optional(lbl))
+        (TypedCoreTypeDesc::Ttyp_constr(Path::pident(id), _, args), ArgLabel::Optional(lbl))
             if id.name() == "option" && args.len() == 1 =>
         {
             Some((lbl.txt.clone(), args[0].clone()))
         }
         (
-            TypedCoreTypeDesc::Ttyp_constr(Path::Pdot(name_space, id, _), _, args),
+            TypedCoreTypeDesc::Ttyp_constr(PathView::Pdot(name_space, id, _), _, args),
             ArgLabel::Optional(lbl),
-        ) if matches!(name_space.as_ref(), Path::Pident(ns) if ns.name() == "FB")
+        ) if matches!(name_space, Path::pident(ns) if ns.name() == "FB")
             && id == "option"
             && args.len() == 1 =>
         {

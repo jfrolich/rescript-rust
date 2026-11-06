@@ -3,6 +3,7 @@
 //! (compiler/ml/error_message_utils.ml), laid out through Format like
 //! OCaml's `Location.errorf` messages.
 
+use crate::types::path::PathView;
 use crate::parse_arena::{LocIdx, ParseArena};
 use crate::parser::formatter::{BoxKind, Formatter};
 use crate::types::asttypes::ArgLabel;
@@ -380,8 +381,8 @@ fn head_path(ctx: &TypeContext, ty: TypeExprRef) -> Option<Path> {
 }
 
 fn is_jsx_path(path: &Path, name: &str) -> bool {
-    matches!(path, Path::Pdot(parent, s, _)
-        if s == name && matches!(parent.as_ref(), Path::Pident(id) if id.name() == "Jsx"))
+    matches!(path.view(), PathView::Pdot(parent, s, _)
+        if s == name && matches!(parent, Path::pident(id) if id.name() == "Jsx"))
 }
 
 fn expands_to_jsx(ctx: &TypeContext, env: &Env, ty: TypeExprRef, name: &str) -> bool {
@@ -1228,12 +1229,12 @@ fn show_extra_help(ctx: &TypeContext, ppf: &mut Ppf<'_>, tr: &[TracePair]) {
     let (an, en) = match (&*ctx.borrow_desc(a), &*ctx.borrow_desc(e)) {
         (
             TypeDesc::Tconstr {
-                path: Path::Pident(ai),
+                path: PathView::Pident(ai),
                 args: aa,
                 ..
             },
             TypeDesc::Tconstr {
-                path: Path::Pident(ei),
+                path: PathView::Pident(ei),
                 args: ea,
                 ..
             },

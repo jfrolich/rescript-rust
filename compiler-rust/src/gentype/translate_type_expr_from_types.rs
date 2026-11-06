@@ -4,6 +4,7 @@ use crate::gentype::gen_type_common::{
     ArgType, Case as VariantCase, ClosedFlag, Dep, Field, Function, Ident, Label, LabelJs, Mutable,
     Optional, Payload, Type, create_variant, dep_to_string, ident, ident_with, is_number, unknown,
 };
+use crate::types::path::PathView;
 use crate::types::asttypes::ArgLabel;
 use crate::types::context::TypeContext;
 use crate::types::path::Path;
@@ -32,7 +33,7 @@ pub fn remove_option(
     // Mirrors compiler/gentype/TranslateTypeExprFromTypes.ml:5-12.
     match (type_expr_desc(ctx, type_expr), label) {
         (TypeDesc::Tconstr { path, args, .. }, ArgLabel::Optional(lbl))
-            if matches!(&path, Path::Pident(id) if id.name() == "option") && args.len() == 1 =>
+            if matches!(path.view(), PathView::Pident(id) if id.name() == "option") && args.len() == 1 =>
         {
             Some((lbl.txt.clone(), args[0]))
         }
@@ -43,18 +44,18 @@ pub fn remove_option(
 
 pub fn path_to_list(path: &Path) -> Vec<String> {
     // Mirrors compiler/gentype/TranslateTypeExprFromTypes.ml:14-22.
-    match path {
-        Path::Pident(id) if id.name().starts_with("Stdlib_") => {
+    match path.view() {
+        PathView::Pident(id) if id.name().starts_with("Stdlib_") => {
             let name = id.name();
             vec![name[7..].to_string(), "Stdlib".to_string()]
         }
-        Path::Pident(id) => vec![id.name().to_string()],
-        Path::Pdot(p, s, _) => {
+        PathView::Pident(id) => vec![id.name().to_string()],
+        PathView::Pdot(p, s, _) => {
             let mut out = vec![s.to_string()];
             out.extend(path_to_list(p));
             out
         }
-        Path::Papply(_, _) => vec![],
+        PathView::Papply(_, _) => vec![],
     }
 }
 

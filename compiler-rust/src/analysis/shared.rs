@@ -1,6 +1,7 @@
 //! Type printing and type walking: a port of analysis/src/shared.ml,
 //! print_type.ml and the type helpers of utils.ml.
 
+use crate::types::path::PathView;
 use crate::ident::Ident;
 use crate::types::decl::{RecStatus, TypeDeclaration};
 use crate::types::printtyp::{Printtyp, print_out_sig_item_doc_with, print_out_type_doc};
@@ -83,7 +84,7 @@ pub fn unwrap_if_option(types: &TypeContext, t: TypeExprRef) -> TypeExprRef {
         TypeDesc::Tlink(t1) | TypeDesc::Tsubst(t1) => unwrap_if_option(types, *t1),
         TypeDesc::Tpoly { body, vars } if vars.is_empty() => unwrap_if_option(types, *body),
         TypeDesc::Tconstr {
-            path: Path::Pident(id),
+            path: PathView::Pident(id),
             args,
             ..
         } if id.name() == "option" && args.len() == 1 => args[0],
@@ -93,10 +94,10 @@ pub fn unwrap_if_option(types: &TypeContext, t: TypeExprRef) -> TypeExprRef {
 
 /// `Shared_types.path_ident_to_string`.
 pub fn path_ident_to_string(p: &Path) -> String {
-    match p {
-        Path::Pident(id) => id.name().to_string(),
-        Path::Pdot(next, id, _) => format!("{}.{}", path_ident_to_string(next), id),
-        Path::Papply(..) => String::new(),
+    match p.view() {
+        PathView::Pident(id) => id.name().to_string(),
+        PathView::Pdot(next, id, _) => format!("{}.{}", path_ident_to_string(next), id),
+        PathView::Papply(..) => String::new(),
     }
 }
 

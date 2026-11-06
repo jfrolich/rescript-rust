@@ -15,6 +15,7 @@
 //! - `Env` - The main environment type
 //! - Lookup functions for values, types, and modules
 
+use crate::types::path::PathView;
 use super::asttypes::{MutableFlag, PrivateFlag};
 use super::context::TypeContext;
 use super::decl::{
@@ -1314,9 +1315,9 @@ impl Env {
         if path.same(prefix) {
             return true;
         }
-        match path {
-            Path::Pdot(parent, _, _) => Self::path_has_prefix(parent, prefix),
-            Path::Pident(_) | Path::Papply(_, _) => false,
+        match path.view() {
+            PathView::Pdot(parent, _, _) => Self::path_has_prefix(parent, prefix),
+            PathView::Pident(_) | PathView::Papply(_, _) => false,
         }
     }
 
@@ -1485,15 +1486,15 @@ impl Env {
 
     /// Find a value by path.
     pub fn lookup_value(&self, path: &Path) -> EnvResult<&ValueDescription> {
-        match path {
-            Path::Pident(id) => self
+        match path.view() {
+            PathView::Pident(id) => self
                 .data
                 .values
                 .find_by_ident(id)
                 .map(|v| v.as_ref())
                 .ok_or_else(|| EnvError::ValueNotFound(id.name().into())),
-            Path::Pdot(_, name, _) => self.find_value(name),
-            Path::Papply(_, _) => Err(EnvError::ValueNotFound("(functor application)".into())),
+            PathView::Pdot(_, name, _) => self.find_value(name),
+            PathView::Papply(_, _) => Err(EnvError::ValueNotFound("(functor application)".into())),
         }
     }
 
@@ -1602,8 +1603,8 @@ impl Env {
 
     /// Find a type by path.
     pub fn lookup_type(&self, path: &Path) -> EnvResult<&TypeDeclaration> {
-        match path {
-            Path::Pident(id) => self
+        match path.view() {
+            PathView::Pident(id) => self
                 .data
                 .types
                 .find_by_ident(id)
@@ -1618,7 +1619,7 @@ impl Env {
                 })
                 .map(|t| t.as_ref())
                 .ok_or_else(|| EnvError::TypeNotFound(id.name().into())),
-            Path::Pdot(parent, name, _) => {
+            PathView::Pdot(parent, name, _) => {
                 // Try to find the type through the parent module's signature first.
                 // Follow MtyIdent/MtyAlias to resolve the module type to a signature.
                 if let Ok(parent_md) = self.lookup_module(parent) {
@@ -1676,7 +1677,7 @@ impl Env {
                 // Fallback to name-based lookup
                 self.find_type(name)
             }
-            Path::Papply(_, _) => Err(EnvError::TypeNotFound("(functor application)".into())),
+            PathView::Papply(_, _) => Err(EnvError::TypeNotFound("(functor application)".into())),
         }
     }
 
@@ -1825,10 +1826,10 @@ impl Env {
 
     /// Check whether a module path is rooted in a functor parameter.
     pub fn is_functor_arg_path(&self, path: &Path) -> bool {
-        match path {
-            Path::Pident(id) => self.data.functor_args.contains(id),
-            Path::Pdot(parent, _, _) => self.is_functor_arg_path(parent),
-            Path::Papply(_, _) => true,
+        match path.view() {
+            PathView::Pident(id) => self.data.functor_args.contains(id),
+            PathView::Pdot(parent, _, _) => self.is_functor_arg_path(parent),
+            PathView::Papply(_, _) => true,
         }
     }
 
@@ -1891,12 +1892,12 @@ impl Env {
     }
 
     fn first_dotted_component_path(path: &Path) -> Option<Path> {
-        match path {
-            Path::Pdot(parent, name, pos) => match parent.as_ref() {
-                Path::Pident(_) => Some(Path::pdot_pos(parent.as_ref().clone(), *name, *pos)),
+        match path.view() {
+            PathView::Pdot(parent, name, pos) => match parent.view() {
+                PathView::Pident(_) => Some(Path::pdot_pos(parent.clone(), *name, *pos)),
                 _ => Self::first_dotted_component_path(parent),
             },
-            Path::Pident(_) | Path::Papply(_, _) => None,
+            PathView::Pident(_) | PathView::Papply(_, _) => None,
         }
     }
 
@@ -1970,7 +1971,7 @@ impl Env {
         path: &Path,
         f: impl FnOnce(&super::env_lazy::StoredModuleComponents) -> R,
     ) -> Option<R> {
-        let Path::Pident(id) = path else {
+        let PathView::Pident(id) = path.view() else {
             return None;
         };
         let components = self.data.module_components.find_by_ident(id)?;
@@ -1981,7 +1982,7 @@ impl Env {
         &self,
         path: &Path,
     ) -> Option<Arc<super::env_lazy::StoredModuleComponents>> {
-        let Path::Pident(id) = path else {
+        let PathView::Pident(id) = path.view() else {
             return None;
         };
         // OCaml compiler/ml/env.ml:1573-1578 stores component thunks in the
@@ -2022,8 +2023,8 @@ impl Env {
             }
             visiting.push(path.clone());
 
-            match path {
-                Path::Pident(id) => {
+            match path.view() {
+                PathView::Pident(id) => {
                     env.data
                         .modules
                         .find_by_ident(id)
@@ -2034,12 +2035,12 @@ impl Env {
                         .map(|m| m.as_ref())
                         .ok_or_else(|| EnvError::ModuleNotFound(id.name().into()))
                 }
-                Path::Pdot(parent, name, _) => {
+                PathView::Pdot(parent, name, _) => {
                     let parent_md = lookup_module_inner(env, parent, visiting)?;
                     lookup_submodule_in_module_type(env, &parent_md.md_type, name, visiting)
                         .ok_or_else(|| EnvError::ModuleNotFound((*name).into()))
                 }
-                Path::Papply(_, _) => Err(EnvError::ModuleNotFound("(functor application)".into())),
+                PathView::Papply(_, _) => Err(EnvError::ModuleNotFound("(functor application)".into())),
             }
         }
 
@@ -2059,17 +2060,17 @@ impl Env {
     /// Normalize the prefix of a value/extension path by following module aliases.
     /// Equivalent to OCaml's `Env.normalize_path_prefix`.
     pub fn normalize_path_prefix(&self, path: &Path) -> Path {
-        match path {
-            Path::Pdot(prefix, name, pos) => {
+        match path.view() {
+            PathView::Pdot(prefix, name, pos) => {
                 let normalized_prefix = self.normalize_path(prefix);
-                if normalized_prefix == **prefix {
+                if normalized_prefix == *prefix {
                     path.clone()
                 } else {
-                    Path::Pdot(std::sync::Arc::new(normalized_prefix), *name, *pos)
+                    Path::pdot_pos(normalized_prefix, *name, *pos)
                 }
             }
-            Path::Pident(_) => path.clone(),
-            Path::Papply(_, _) => panic!("normalize_path_prefix called on Papply"),
+            PathView::Pident(_) => path.clone(),
+            PathView::Papply(_, _) => panic!("normalize_path_prefix called on Papply"),
         }
     }
 
@@ -2078,13 +2079,13 @@ impl Env {
             return path.clone(); // Prevent infinite loops
         }
         // First, recursively normalize the prefix for Pdot paths
-        let path = match path {
-            Path::Pdot(p, s, pos) => {
+        let path = match path.view() {
+            PathView::Pdot(p, s, pos) => {
                 let p_norm = self.normalize_path_inner(p, depth + 1);
-                if p_norm == **p {
+                if p_norm == *p {
                     path.clone()
                 } else {
-                    Path::Pdot(std::sync::Arc::new(p_norm), *s, *pos)
+                    Path::pdot_pos(p_norm, *s, *pos)
                 }
             }
             _ => path.clone(),
@@ -2150,14 +2151,14 @@ impl Env {
 
     /// Find a module type by path.
     pub fn lookup_modtype(&self, path: &Path) -> EnvResult<&ModtypeDeclaration> {
-        match path {
-            Path::Pident(id) => self
+        match path.view() {
+            PathView::Pident(id) => self
                 .data
                 .modtypes
                 .find_by_ident(id)
                 .map(|m| m.as_ref())
                 .ok_or_else(|| EnvError::ModtypeNotFound(id.name().into())),
-            Path::Pdot(parent, name, _) => {
+            PathView::Pdot(parent, name, _) => {
                 // Try to find the modtype through the parent module's signature.
                 // First try ident-based lookup, then name-based for stamp mismatches.
                 let parent_md = self.lookup_module(parent).or_else(|_| {
@@ -2177,7 +2178,7 @@ impl Env {
                 }
                 Err(EnvError::ModtypeNotFound((*name).into()))
             }
-            Path::Papply(_, _) => Err(EnvError::ModtypeNotFound("(functor application)".into())),
+            PathView::Papply(_, _) => Err(EnvError::ModtypeNotFound("(functor application)".into())),
         }
     }
 
@@ -2744,11 +2745,11 @@ mod tests {
         let second_ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
         let second = initial_env(&second_ctx);
         assert_ne!(first.id(), second.id());
-        let int_path = Path::Pident(predef::ident_int());
+        let int_path = Path::pident(predef::ident_int());
         assert!(first.lookup_type(&int_path).is_ok());
         assert!(second.lookup_type(&int_path).is_ok());
         let option = second
-            .lookup_type(&Path::Pident(predef::ident_option()))
+            .lookup_type(&Path::pident(predef::ident_option()))
             .expect("option");
         for param in &option.type_params {
             assert!(

@@ -18,6 +18,7 @@
 //! However, multiple `TypeContext` instances can exist concurrently,
 //! one per compilation unit.
 
+use crate::types::path::PathView;
 use super::asttypes::{ArgLabel, PrivateFlag};
 use super::env::Env;
 use super::path::Path;
@@ -298,10 +299,10 @@ impl QualifiedModuleComponentsCacheKey {
     /// path rooted at a persistent unit, not scoped to one environment.
     pub(crate) fn is_worker_shareable(&self) -> bool {
         fn persistent_root(path: &Path) -> bool {
-            match path {
-                Path::Pident(id) => id.is_persistent(),
-                Path::Pdot(parent, _, _) => persistent_root(parent),
-                Path::Papply(_, _) => false,
+            match path.view() {
+                PathView::Pident(id) => id.is_persistent(),
+                PathView::Pdot(parent, _, _) => persistent_root(parent),
+                PathView::Papply(_, _) => false,
             }
         }
         self.env_id.is_none() && persistent_root(&self.path.0)
@@ -992,8 +993,8 @@ impl Eq for SamePathKey {}
 
 /// Hash consistent with `Path::same`: `Pdot` positions are ignored.
 fn hash_same_path<H: std::hash::Hasher>(path: &Path, state: &mut H) {
-    match path {
-        Path::Pident(id) => {
+    match path.view() {
+        PathView::Pident(id) => {
             if id.stamp() != 0 {
                 state.write_u8(0);
                 state.write_i32(id.stamp());
@@ -1002,12 +1003,12 @@ fn hash_same_path<H: std::hash::Hasher>(path: &Path, state: &mut H) {
                 std::hash::Hash::hash(&id.name_atom(), state);
             }
         }
-        Path::Pdot(parent, name, _) => {
+        PathView::Pdot(parent, name, _) => {
             state.write_u8(2);
             std::hash::Hash::hash(name, state);
             hash_same_path(parent, state);
         }
-        Path::Papply(functor, argument) => {
+        PathView::Papply(functor, argument) => {
             state.write_u8(3);
             hash_same_path(functor, state);
             hash_same_path(argument, state);
@@ -1776,13 +1777,13 @@ impl TypeContext {
         path: &Path,
     ) -> Option<Arc<super::decl::TypeDeclaration>> {
         fn persistent_dotted(path: &Path) -> bool {
-            match path {
-                Path::Pident(id) => id.is_persistent() || id.stamp() == 0,
-                Path::Pdot(parent, _, _) => persistent_dotted(parent),
-                Path::Papply(_, _) => false,
+            match path.view() {
+                PathView::Pident(id) => id.is_persistent() || id.stamp() == 0,
+                PathView::Pdot(parent, _, _) => persistent_dotted(parent),
+                PathView::Papply(_, _) => false,
             }
         }
-        if !matches!(path, Path::Pdot(..)) || !persistent_dotted(path) {
+        if !matches!(path.view(), PathView::Pdot(..)) || !persistent_dotted(path) {
             return None;
         }
         self.find_resolved_pdot_type(path)
@@ -4229,7 +4230,7 @@ impl TypeContext {
         let cmi = crate::cmi::cmi_format::read_cmi(&cmi_path.to_string_lossy()).ok()?;
         let mut sig_ctx = crate::cmi::sig_reader::SigReadContext::new(self);
         let mut sig = sig_ctx.read_signature(&cmi.cmi_sign);
-        let module_path = Path::Pident(Ident::create_persistent(module_name));
+        let module_path = Path::pident(Ident::create_persistent(module_name));
         // OCaml compiler/ml/env.ml:1000-1007 reaches `lookup_module_descr`
         // for dotted accesses, and env.ml:568-571/1516-1605 forces the
         // persistent structure's component lazy. Loading whichever CMI the

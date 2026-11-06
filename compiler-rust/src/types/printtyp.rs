@@ -9,6 +9,7 @@
 // Variant names follow OCaml's Outcometree constructors.
 #![allow(non_camel_case_types)]
 
+use crate::types::path::PathView;
 use crate::parser::doc::Doc;
 use crate::parser::longident::Longident;
 use crate::types::asttypes::ArgLabel;
@@ -225,10 +226,10 @@ impl<'a> Printtyp<'a> {
     // ------------------------------------------------------------------
 
     fn non_shadowed_pervasive_or_stdlib(&self, path: &Path) -> bool {
-        let Path::Pdot(parent, s, _) = path else {
+        let PathView::Pdot(parent, s, _) = path.view() else {
             return false;
         };
-        let Path::Pident(id) = parent.as_ref() else {
+        let PathView::Pident(id) = parent.view() else {
             return false;
         };
         if !(id.is_persistent() && matches!(id.name(), "Pervasives" | "Stdlib")) {
@@ -272,22 +273,22 @@ impl<'a> Printtyp<'a> {
         if let Some(relative) = self.unit_relative_path(path) {
             return relative;
         }
-        match path {
-            Path::Pident(id) => OutIdent::Oide_ident(self.ident_name(id)),
-            Path::Pdot(_, s, _) if self.non_shadowed_pervasive_or_stdlib(path) => {
+        match path.view() {
+            PathView::Pident(id) => OutIdent::Oide_ident(self.ident_name(id)),
+            PathView::Pdot(_, s, _) if self.non_shadowed_pervasive_or_stdlib(path) => {
                 OutIdent::Oide_ident(s.to_string())
             }
-            Path::Pdot(p, s, _) if p.name().starts_with("Stdlib_") => {
+            PathView::Pdot(p, s, _) if p.name().starts_with("Stdlib_") => {
                 let path_name = p.name();
                 OutIdent::Oide_dot(
                     Box::new(OutIdent::Oide_ident(path_name[7..].to_string())),
                     s.to_string(),
                 )
             }
-            Path::Pdot(p, s, _) => {
+            PathView::Pdot(p, s, _) => {
                 OutIdent::Oide_dot(Box::new(self.tree_of_path(p)), s.to_string())
             }
-            Path::Papply(p1, p2) => OutIdent::Oide_apply(
+            PathView::Papply(p1, p2) => OutIdent::Oide_apply(
                 Box::new(self.tree_of_path(p1)),
                 Box::new(self.tree_of_path(p2)),
             ),
@@ -1013,7 +1014,7 @@ impl<'a> Printtyp<'a> {
                 TypeDesc::Tvariant(row) => {
                     let row = btype::row_repr(self.ctx, &row);
                     match &row.row_name {
-                        Some((Path::Pident(id2), _)) if id2.same(id) => {
+                        Some((PathView::Pident(id2), _)) if id2.same(id) => {
                             self.ctx
                                 .new_generic_type(TypeDesc::Tvariant(Box::new(RowDesc {
                                     row_name: None,
@@ -1340,8 +1341,8 @@ impl<'a> Printtyp<'a> {
             if path.same(prefix) {
                 return Some(Vec::new());
             }
-            match path {
-                Path::Pdot(parent, name, _) => {
+            match path.view() {
+                PathView::Pdot(parent, name, _) => {
                     let mut rest = strip(parent, prefix)?;
                     rest.push(name.to_string());
                     Some(rest)
@@ -1405,7 +1406,7 @@ impl<'a> Printtyp<'a> {
             }
             if let SignatureItem::SigType(id, _, _) = item {
                 self.signature_types
-                    .push((id.name().to_string(), Path::Pident(*id)));
+                    .push((id.name().to_string(), Path::pident(*id)));
             }
         }
         self.signature_types.truncate(saved_visible);
@@ -2533,16 +2534,16 @@ impl<'a> Printtyp<'a> {
 
     fn path_same_name(&mut self, p1: &Path, p2: &Path) {
         match (p1, p2) {
-            (Path::Pident(id1), Path::Pident(id2)) => {
+            (PathView::Pident(id1), PathView::Pident(id2)) => {
                 if id1.name() == id2.name() && !id1.same(id2) {
                     self.add_unique(id1);
                     self.add_unique(id2);
                 }
             }
-            (Path::Pdot(p1, s1, _), Path::Pdot(p2, s2, _)) if s1 == s2 => {
+            (PathView::Pdot(p1, s1, _), PathView::Pdot(p2, s2, _)) if s1 == s2 => {
                 self.path_same_name(p1, p2)
             }
-            (Path::Papply(p1, p1b), Path::Papply(p2, p2b)) => {
+            (PathView::Papply(p1, p1b), PathView::Papply(p2, p2b)) => {
                 self.path_same_name(p1, p2);
                 self.path_same_name(p1b, p2b);
             }
@@ -2666,11 +2667,11 @@ impl<'a> Printtyp<'a> {
         let is_row_name = |s: &str| s.len() >= 4 && s.ends_with("#row");
         match &*self.ctx.borrow_desc(self.ctx.repr(t)) {
             TypeDesc::Tconstr {
-                path: Path::Pident(id),
+                path: PathView::Pident(id),
                 ..
             } if allow_ident => is_row_name(id.name()),
             TypeDesc::Tconstr {
-                path: Path::Pdot(_, s, _),
+                path: PathView::Pdot(_, s, _),
                 ..
             } => is_row_name(s),
             _ => false,
@@ -3137,11 +3138,11 @@ impl<'a> Printtyp<'a> {
 
     /// `Printtyp.path ppf p`.
     pub(crate) fn path_text(&self, p: &Path) -> String {
-        match p {
-            Path::Pident(id) => self.ident_name(id),
-            Path::Pdot(_, s, _) if self.non_shadowed_pervasive_or_stdlib(p) => s.to_string(),
-            Path::Pdot(parent, s, _) => format!("{}.{}", self.path_text(parent), s),
-            Path::Papply(p1, p2) => format!("{}({})", self.path_text(p1), self.path_text(p2)),
+        match p.view() {
+            PathView::Pident(id) => self.ident_name(id),
+            PathView::Pdot(_, s, _) if self.non_shadowed_pervasive_or_stdlib(p) => s.to_string(),
+            PathView::Pdot(parent, s, _) => format!("{}.{}", self.path_text(parent), s),
+            PathView::Papply(p1, p2) => format!("{}({})", self.path_text(p1), self.path_text(p2)),
         }
     }
 

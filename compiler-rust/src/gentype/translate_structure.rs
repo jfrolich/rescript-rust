@@ -1,5 +1,6 @@
 // Port of compiler/gentype/TranslateStructure.ml:1-366.
 
+use crate::types::path::PathView;
 use crate::gentype::gen_type_common::{ArgType, StringSet, Type};
 use crate::parse_arena::ParseArena;
 use crate::types::decl::ModuleType as DeclModuleType;
@@ -647,8 +648,8 @@ fn persistent_alias_module_type(
     path: &crate::types::path::Path,
 ) -> Option<DeclModuleType> {
     use crate::types::path::Path;
-    match path {
-        Path::Pident(id) => {
+    match path.view() {
+        PathView::Pident(id) => {
             if !id.is_persistent() {
                 return None;
             }
@@ -666,7 +667,7 @@ fn persistent_alias_module_type(
                 })
                 .or_else(|| env.lookup_module(path).ok().map(|md| md.md_type.clone()))
         }
-        Path::Pdot(parent, name, _) => {
+        PathView::Pdot(parent, name, _) => {
             let DeclModuleType::MtySignature(sig) = persistent_alias_module_type(ctx, env, parent)?
             else {
                 return None;
@@ -684,7 +685,7 @@ fn persistent_alias_module_type(
                 other => Some(other),
             }
         }
-        Path::Papply(..) => None,
+        PathView::Papply(..) => None,
     }
 }
 
