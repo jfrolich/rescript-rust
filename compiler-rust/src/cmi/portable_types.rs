@@ -22,12 +22,12 @@ use crate::parse_arena::ParseArena;
 use crate::parser::longident::Longident;
 use crate::types::asttypes::{ArgLabel, Located};
 use crate::types::context::TypeContext;
-use crate::types::decl_loc::{DeclLoc, DeclLocImport, DeclLocTable};
 use crate::types::decl::{
     ConstructorArguments, ConstructorDeclaration, ExtensionConstructor, LabelDeclaration,
     ModtypeDeclaration, ModuleDeclaration, ModuleType, Signature, SignatureItem, TypeDeclaration,
     TypeInlinedType, TypeKind, ValueDescription, ValueKind,
 };
+use crate::types::decl_loc::{DeclLoc, DeclLocImport, DeclLocTable};
 use crate::types::path::Path;
 use crate::types::thread_store::ThreadTypeStore;
 use crate::types::type_expr::{
@@ -820,8 +820,12 @@ impl<'a, 'f> TypeGraphSerializer<'a, 'f> {
     fn portable_label(&mut self, label: &ArgLabel) -> ArgLabel {
         match label {
             ArgLabel::Nolabel => ArgLabel::Nolabel,
-            ArgLabel::Labelled(l) => ArgLabel::Labelled(Located::new(l.txt.clone(), self.portable_loc(l.loc))),
-            ArgLabel::Optional(l) => ArgLabel::Optional(Located::new(l.txt.clone(), self.portable_loc(l.loc))),
+            ArgLabel::Labelled(l) => {
+                ArgLabel::Labelled(Located::new(l.txt.clone(), self.portable_loc(l.loc)))
+            }
+            ArgLabel::Optional(l) => {
+                ArgLabel::Optional(Located::new(l.txt.clone(), self.portable_loc(l.loc)))
+            }
         }
     }
 
@@ -892,7 +896,12 @@ impl<'a, 'f> TypeGraphSerializer<'a, 'f> {
             TypeDesc::Tarrow { args, ret } => PortableTypeDesc::Tarrow {
                 args: args
                     .iter()
-                    .map(|arg| (self.portable_label(arg.label()), self.serialize_type(arg.typ)))
+                    .map(|arg| {
+                        (
+                            self.portable_label(arg.label()),
+                            self.serialize_type(arg.typ),
+                        )
+                    })
                     .collect(),
                 ret: self.serialize_type(*ret),
             },
@@ -1444,10 +1453,7 @@ struct FileRemap<'a> {
 }
 
 impl<'a> FileRemap<'a> {
-    fn new(
-        names: &'a [(u32, String)],
-        intern: &'a dyn Fn(&str) -> crate::intern::StrIdx,
-    ) -> Self {
+    fn new(names: &'a [(u32, String)], intern: &'a dyn Fn(&str) -> crate::intern::StrIdx) -> Self {
         FileRemap {
             names: names
                 .iter()
@@ -1494,8 +1500,12 @@ fn import_signature_locations(sig: &mut Signature, locs: &DeclLocImport<'_>) {
 fn import_label(label: &ArgLabel, locs: &DeclLocImport<'_>) -> ArgLabel {
     match label {
         ArgLabel::Nolabel => ArgLabel::Nolabel,
-        ArgLabel::Labelled(l) => ArgLabel::Labelled(Located::new(l.txt.clone(), locs.import(l.loc))),
-        ArgLabel::Optional(l) => ArgLabel::Optional(Located::new(l.txt.clone(), locs.import(l.loc))),
+        ArgLabel::Labelled(l) => {
+            ArgLabel::Labelled(Located::new(l.txt.clone(), locs.import(l.loc)))
+        }
+        ArgLabel::Optional(l) => {
+            ArgLabel::Optional(Located::new(l.txt.clone(), locs.import(l.loc)))
+        }
     }
 }
 

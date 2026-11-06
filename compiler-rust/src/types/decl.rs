@@ -4,11 +4,11 @@
 //! module types, and signatures - the building blocks of module interfaces.
 
 use super::asttypes::{Located, MutableFlag, PrivateFlag};
+use super::decl_loc::DeclLoc;
 use super::path::Path;
 use super::type_expr::TypeExprRef;
 use super::variance::Variance;
 use crate::ident::Ident;
-use super::decl_loc::DeclLoc;
 use serde::{Deserialize, Serialize};
 
 // ============================================================================

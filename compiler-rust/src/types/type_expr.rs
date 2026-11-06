@@ -1304,9 +1304,8 @@ mod tests {
                 format!("TypeArg {{ lbl: Nolabel, typ: {:?} }}", typ)
             );
         }
-        let ctx = crate::types::TypeContext::new(std::sync::Arc::new(
-            crate::context::IdGenerator::new(),
-        ));
+        let ctx =
+            crate::types::TypeContext::new(std::sync::Arc::new(crate::context::IdGenerator::new()));
         for ghost in [false, true] {
             let loc = Location {
                 loc_start: Position::new(StrIdx(17), 3, 21, 24),

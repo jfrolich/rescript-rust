@@ -9924,7 +9924,12 @@ fn type_application(
                 )
             };
             argument_thunks.push(ApplyArgThunk::Provided {
-                label: apply_arg_label_for_param(param.label(), call_label, tctx.arena, tctx.type_ctx),
+                label: apply_arg_label_for_param(
+                    param.label(),
+                    call_label,
+                    tctx.arena,
+                    tctx.type_ctx,
+                ),
                 expr: arg_expr,
                 expected_ty: expected_arg_ty,
                 unify_ty: unify_arg_ty,
@@ -19175,7 +19180,10 @@ fn approx_type_for_rec_let(
                     } else {
                         ctx.new_var(None)
                     };
-                    TypeArg::new(convert_arg_label_for_ctx(&arg.lbl, tctx.arena, tctx.type_ctx), typ)
+                    TypeArg::new(
+                        convert_arg_label_for_ctx(&arg.lbl, tctx.arena, tctx.type_ctx),
+                        typ,
+                    )
                 })
                 .collect();
             let ret = approx_type_for_rec_let(tctx, env, tctx.arena.get_core_type(*ret));
@@ -19245,7 +19253,10 @@ fn type_approx_for_rec_let(
                     } else {
                         ctx.new_var(None)
                     };
-                    TypeArg::new(convert_arg_label_for_ctx(&param.p_lbl, tctx.arena, tctx.type_ctx), typ)
+                    TypeArg::new(
+                        convert_arg_label_for_ctx(&param.p_lbl, tctx.arena, tctx.type_ctx),
+                        typ,
+                    )
                 })
                 .collect();
             let ret = type_approx_for_rec_let(tctx, env, tctx.arena.get_expr(body))?;
@@ -24760,7 +24771,12 @@ fn lookup_label_by_expected_type(
     let (concrete_path, _actual_args, type_decl) =
         extract_concrete_record_type_info(record_ty, env, pers_env, ctx)?;
     // `lookup_from_type` marks the type used (typecore.ml:852-854).
-    mark_type_used(ctx, env, concrete_path.last(), ctx.resolve_loc(type_decl.type_loc));
+    mark_type_used(
+        ctx,
+        env,
+        concrete_path.last(),
+        ctx.resolve_loc(type_decl.type_loc),
+    );
     let (labels, repr) = match &type_decl.type_kind {
         crate::types::TypeKind::TypeRecord(labels, repr) => (labels, repr),
         _ => return None,
@@ -26512,7 +26528,8 @@ fn mark_module_lid_used(
         Longident::Lapply(_, _) => return None,
     };
     if !env.is_implicit_coercion() {
-        ctx.usage().mark_module_used(name, ctx.resolve_loc(md.md_loc));
+        ctx.usage()
+            .mark_module_used(name, ctx.resolve_loc(md.md_loc));
     }
     if let Some((loc, deprecations)) = report.as_mut()
         && let Some(deprecated) = deprecated_of_decl_attrs(&md.md_attributes)

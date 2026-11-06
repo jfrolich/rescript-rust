@@ -4591,9 +4591,11 @@ impl<'a> RawLambdaConverter<'a> {
                     self.apply_coercion_raw(loc, LetKind::Alias, cc_arg, RawLambda::var(param));
                 self.apply_coercion_result_raw(loc, strict, arg, param, carg, cc_res)
             }
-            ModuleCoercion::Tcoerce_primitive(pc) => {
-                self.transl_primitive_raw(&pc.pc_desc, pc.pc_type, self.type_ctx.resolve_loc(pc.pc_loc))
-            }
+            ModuleCoercion::Tcoerce_primitive(pc) => self.transl_primitive_raw(
+                &pc.pc_desc,
+                pc.pc_type,
+                self.type_ctx.resolve_loc(pc.pc_loc),
+            ),
             ModuleCoercion::Tcoerce_alias(env_ref, path, inner) => {
                 self.name_lambda_raw(strict, arg, |this, _| {
                     let translated = if let Some(env) = this.type_ctx.get_typed_env(*env_ref) {

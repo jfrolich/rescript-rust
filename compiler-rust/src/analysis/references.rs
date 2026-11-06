@@ -530,7 +530,11 @@ pub fn type_definition_for_loc_item(
             let (env, declared) = dig_constructor(session, &env, &path)?;
             Some((
                 session.file(env.file).uri.clone(),
-                Loc::of_location(&session.types(env.file).resolve_loc(declared.item.decl.type_loc)),
+                Loc::of_location(
+                    &session
+                        .types(env.file)
+                        .resolve_loc(declared.item.decl.type_loc),
+                ),
             ))
         }
     }

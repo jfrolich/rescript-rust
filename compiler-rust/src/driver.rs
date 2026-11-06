@@ -11182,8 +11182,8 @@ fn format_compunit_mismatch_report(
     error: &crate::types::includemod::IncludeModError,
 ) -> String {
     let file_loc = Location::in_file(StrIdx::default());
-    let loc = &direct_compunit_error_location(error)
-        .map_or(file_loc, |loc| type_ctx.resolve_loc(loc));
+    let loc =
+        &direct_compunit_error_location(error).map_or(file_loc, |loc| type_ctx.resolve_loc(loc));
     let mut message = String::new();
     message.push_str("  The implementation ");
     message.push_str(impl_name);
@@ -14608,12 +14608,11 @@ pub fn typecheck_preprocessed_signature_in_process(
     };
     // js_implementation.ml:62: `ignore (Includemod.signatures initial_env sg
     // sg)`, which marks the declarations of the interface used.
-    let sig_type =
-        crate::types::typemod::decl_signature_from_typed_signature(
-            &typed_signature,
-            arena,
-            &type_ctx,
-        );
+    let sig_type = crate::types::typemod::decl_signature_from_typed_signature(
+        &typed_signature,
+        arena,
+        &type_ctx,
+    );
     let _ = crate::types::includemod::compunit(
         &type_ctx, &env, filename, &sig_type, filename, &sig_type,
     );
@@ -14662,12 +14661,11 @@ pub fn typecheck_preprocessed_signature_in_process(
             true,
         )?;
     }
-    let decl_signature =
-        crate::types::typemod::decl_signature_from_typed_signature(
-            &typed_signature,
-            arena,
-            &type_ctx,
-        );
+    let decl_signature = crate::types::typemod::decl_signature_from_typed_signature(
+        &typed_signature,
+        arena,
+        &type_ctx,
+    );
 
     let typed_module_type = crate::types::typedtree::ModuleType {
         mty_desc: crate::types::typedtree::ModuleTypeDesc::Tmty_signature(typed_signature),

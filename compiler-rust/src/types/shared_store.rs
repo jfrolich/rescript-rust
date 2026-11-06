@@ -84,7 +84,10 @@ pub(crate) fn page_location(
     let graph = pages[(base >> PAGE_BITS) as usize]
         .get()
         .expect("shared declaration location refers to an unpublished graph");
-    assert_eq!(graph.base, base, "shared declaration location names no graph");
+    assert_eq!(
+        graph.base, base,
+        "shared declaration location names no graph"
+    );
     graph.locations[index]
 }
 
@@ -288,7 +291,9 @@ mod tests {
             })
             .unwrap();
         let second = pool
-            .publish(1, 0, |_| (vec![(TypeDesc::Tnil, 1)], Vec::new(), Vec::new()))
+            .publish(1, 0, |_| {
+                (vec![(TypeDesc::Tnil, 1)], Vec::new(), Vec::new())
+            })
             .unwrap();
         assert_eq!(second % PAGE_SIZE, 0);
         assert_ne!(base, second);
