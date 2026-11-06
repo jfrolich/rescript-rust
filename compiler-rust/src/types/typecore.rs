@@ -28437,18 +28437,6 @@ fn lookup_type_decl_for_path_with_cache_mode<'a>(
     if let Path::Pdot(parent, type_name, _) = type_path {
         let mut deferred_self_manifest_decl: Option<Arc<crate::types::decl::TypeDeclaration>> =
             None;
-        // Cache by `Path::same` identity for paths without a functor
-        // application (the old printed-name key excluded those too).
-        let cache_key = (!type_path.has_apply_prefix()).then_some(type_path);
-
-        // Check resolved-sig cache first to avoid re-creating fresh type copies.
-        // This approximates OCaml's components_of_module_maker lazy caching.
-        if let Some(cache_key) = cache_key {
-            if let Some(decl) = ctx.find_resolved_pdot_type(cache_key) {
-                return Some(decl);
-            }
-        }
-
         // Inline-record constructor paths are type paths whose parent is also a type path:
         // `<type_path>.<Constructor>`. Rebuild the synthetic record declaration from
         // the parent variant declaration so label disambiguation can recover field types.
@@ -28577,11 +28565,6 @@ fn lookup_type_decl_for_path_with_cache_mode<'a>(
                                         | crate::types::decl::ModuleType::MtyIdent(..)
                                 )
                             {
-                                if cache_mode.publishes()
-                                    && let Some(cache_key) = cache_key
-                                {
-                                    ctx.register_resolved_pdot_type(cache_key, decl.clone());
-                                }
                                 return Some(decl);
                             }
                         }
@@ -28602,11 +28585,6 @@ fn lookup_type_decl_for_path_with_cache_mode<'a>(
                         .as_ref()
                         .is_some_and(|stored_path| !stored_path.same(type_path))
                     {
-                        if cache_mode.publishes()
-                            && let Some(cache_key) = cache_key
-                        {
-                            ctx.register_resolved_pdot_type(cache_key, decl.clone());
-                        }
                         return Some(decl);
                     }
 
@@ -28620,11 +28598,6 @@ fn lookup_type_decl_for_path_with_cache_mode<'a>(
                 // Cache the resolved decl so subsequent lookups for the same
                 // Pdot path reuse the same type nodes (matching OCaml's
                 // components_of_module_maker lazy caching).
-                if cache_mode.publishes()
-                    && let Some(cache_key) = cache_key
-                {
-                    ctx.register_resolved_pdot_type(cache_key, decl.clone());
-                }
                 Some(decl)
             },
         ) {
@@ -28651,11 +28624,6 @@ fn lookup_type_decl_for_path_with_cache_mode<'a>(
                     cache_mode,
                 )
             {
-                if cache_mode.publishes()
-                    && let Some(cache_key) = cache_key
-                {
-                    ctx.register_resolved_pdot_type(cache_key, decl.clone());
-                }
                 return Some(decl);
             }
         }
@@ -28686,18 +28654,9 @@ fn lookup_type_decl_for_path_with_cache_mode<'a>(
                                 ctx,
                                 cache_mode,
                                 |components| {
-                                    components.lookup_type(type_name.as_str()).map(|(_, decl)| {
-                                        let decl = decl.clone();
-                                        if cache_mode.publishes()
-                                            && let Some(cache_key) = cache_key
-                                        {
-                                            ctx.register_resolved_pdot_type(
-                                                cache_key,
-                                                decl.clone(),
-                                            );
-                                        }
-                                        decl
-                                    })
+                                    components
+                                        .lookup_type(type_name.as_str())
+                                        .map(|(_, decl)| decl.clone())
                                 },
                             )
                         {

@@ -598,17 +598,6 @@ pub struct TypeContext {
     /// innermost last.
     copy_sessions: RefCell<Vec<CopySession>>,
 
-    /// Cache for type declarations resolved through module signatures (Pdot
-    /// paths). This approximates OCaml's components_of_module_maker lazy
-    /// caching.
-    resolved_pdot_type_cache: RefCell<
-        hashbrown::HashMap<
-            SamePathKey,
-            Arc<super::decl::TypeDeclaration>,
-            crate::fast_hash::FastState,
-        >,
-    >,
-
     /// Cache for resolved module signatures. Keyed by module path name.
     /// OCaml `compiler/ml/env.ml:1513-1514,1516-1588` stores forced module
     /// components behind lazy cells; cache hits share the already-substituted
@@ -956,21 +945,6 @@ impl std::hash::Hash for SamePathKey {
     }
 }
 
-/// Borrowed form of [`SamePathKey`], so lookups do not clone the path.
-struct SamePathRef<'a>(&'a Path);
-
-impl std::hash::Hash for SamePathRef<'_> {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        hash_same_path(self.0, state);
-    }
-}
-
-impl hashbrown::Equivalent<SamePathKey> for SamePathRef<'_> {
-    fn equivalent(&self, key: &SamePathKey) -> bool {
-        self.0.same(&key.0)
-    }
-}
-
 /// Key of `TypeContext::pdot_expansions`.
 #[derive(PartialEq, Eq, Hash)]
 struct PdotExpansionKey {
@@ -1116,7 +1090,6 @@ impl TypeContext {
             mutabilities: RefCell::new(Vec::new()),
             mutability_overlay: RefCell::new(crate::fast_hash::AHashMap::new()),
             copy_sessions: RefCell::new(Vec::new()),
-            resolved_pdot_type_cache: RefCell::new(hashbrown::HashMap::default()),
             resolved_module_sig_cache: RefCell::new(crate::fast_hash::AHashMap::new()),
             qualified_module_components_cache: RefCell::new(crate::fast_hash::AHashMap::new()),
             component_alias_sources: RefCell::new(crate::fast_hash::AHashMap::new()),
@@ -1398,30 +1371,6 @@ impl TypeContext {
         } else {
             format!("{prefix}{index}")
         }
-    }
-
-    /// Cache a type declaration resolved through module signatures (Pdot paths).
-    /// Keyed by `Path::same` identity; only paths without a functor
-    /// application are cached.
-    pub(crate) fn register_resolved_pdot_type(
-        &self,
-        path: &Path,
-        decl: Arc<super::decl::TypeDeclaration>,
-    ) {
-        self.resolved_pdot_type_cache
-            .borrow_mut()
-            .insert(SamePathKey(path.clone()), decl);
-    }
-
-    /// Look up a cached resolved Pdot type declaration.
-    pub(crate) fn find_resolved_pdot_type(
-        &self,
-        path: &Path,
-    ) -> Option<Arc<super::decl::TypeDeclaration>> {
-        self.resolved_pdot_type_cache
-            .borrow()
-            .get(&SamePathRef(path))
-            .cloned()
     }
 
     /// Cache a resolved module signature.
@@ -4552,29 +4501,6 @@ mod tests {
             Some(true)
         );
         assert_eq!(ctx.find_forced_type_path_compare(7, &ty, &ty), None);
-
-        // `SamePathKey` ignores `Pdot` positions; so must its borrowed probe.
-        let decl = std::sync::Arc::new(super::super::decl::TypeDeclaration {
-            type_params: vec![],
-            type_arity: 0,
-            type_kind: super::super::TypeKind::TypeAbstract,
-            type_private: PrivateFlag::Public,
-            type_manifest: None,
-            type_variance: vec![],
-            type_newtype_level: None,
-            type_loc: crate::types::DeclLoc::none(),
-            type_attributes: vec![],
-            type_immediate: false,
-            type_representation: super::super::TypeRepresentation::Boxed,
-            type_inlined_types: vec![],
-            type_path: None,
-        });
-        ctx.register_resolved_pdot_type(&ty, decl.clone());
-        let repositioned = Path::pdot_pos(module, "t", 9);
-        assert!(
-            ctx.find_resolved_pdot_type(&repositioned)
-                .is_some_and(|found| std::sync::Arc::ptr_eq(&found, &decl))
-        );
     }
 
     #[test]
