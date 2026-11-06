@@ -1348,13 +1348,13 @@ impl<'r> JsPrinter<'r> {
             ExpressionDesc::RawJsCode(info) => !info.is_stmt,
             ExpressionDesc::CamlBlock(_, _, tag_info) => matches!(
                 &**tag_info,
-                crate::lambda::TagInfo::Record { .. }
+                crate::lambda::TagInfo::Record(_)
                     | crate::lambda::TagInfo::Module(_)
                     | crate::lambda::TagInfo::PolyVar(_)
                     | crate::lambda::TagInfo::Extension
                     | crate::lambda::TagInfo::RecordExt { .. }
-                    | crate::lambda::TagInfo::RecordInlined { .. }
-                    | crate::lambda::TagInfo::Constructor { .. }
+                    | crate::lambda::TagInfo::RecordInlined(_)
+                    | crate::lambda::TagInfo::Constructor(_)
             ),
             ExpressionDesc::OptionalBlock(inner, true) => self.arrow_expr_needs_paren(inner),
             _ => false,
@@ -1462,11 +1462,12 @@ impl<'r> JsPrinter<'r> {
                 dup.as_ref().map(|dup| dup.as_ref()),
             )),
             ExpressionDesc::CamlBlock(elements, _, tag)
-                if matches!(**tag, crate::lambda::TagInfo::Record { .. }) =>
+                if matches!(**tag, crate::lambda::TagInfo::Record(_)) =>
             {
-                let crate::lambda::TagInfo::Record { fields, .. } = &**tag else {
+                let crate::lambda::TagInfo::Record(record) = &**tag else {
                     unreachable!()
                 };
+                let fields = &record.fields;
                 Some((
                     self.collect_jsx_fields_from_record_block(elements, fields)?,
                     None,
@@ -2215,7 +2216,8 @@ impl<'r> JsPrinter<'r> {
 
                 // Check if this is a record with field names
                 match &**tag_info {
-                    TagInfo::Record { fields, .. } if fields.len() == elements.len() => {
+                    TagInfo::Record(record) if record.fields.len() == elements.len() => {
+                        let fields = &record.fields;
                         if record_uses_array_syntax(fields) {
                             self.print_array_literal(elements);
                         } else {
@@ -2239,12 +2241,9 @@ impl<'r> JsPrinter<'r> {
                             );
                         }
                     }
-                    TagInfo::RecordInlined {
-                        name,
-                        fields,
-                        runtime,
-                        ..
-                    } if fields.len() == elements.len() => {
+                    TagInfo::RecordInlined(inlined) if inlined.fields.len() == elements.len() => {
+                        let (name, fields, runtime) =
+                            (&inlined.name, &inlined.fields, &inlined.runtime);
                         // js_dump.ml Blk_record_inlined: only a tagged block
                         // emits its tag field.
                         let tag_field = match &**runtime {
@@ -2305,11 +2304,8 @@ impl<'r> JsPrinter<'r> {
                             },
                         );
                     }
-                    TagInfo::Constructor {
-                        name,
-                        num_nonconst: _,
-                        runtime,
-                    } => {
+                    TagInfo::Constructor(constructor) => {
+                        let (name, runtime) = (&constructor.name, &constructor.runtime);
                         if name == "::" {
                             self.print_object_literal(
                                 level,
@@ -6096,22 +6092,24 @@ mod tests {
         let expr = Expression::new(ExpressionDesc::CamlBlock(
             vec![Expression::string("hello")],
             MutableFlag::Immutable,
-            Box::new(TagInfo::RecordInlined {
-                name: "One".to_string(),
-                num_nonconst: 1,
-                runtime: Box::new(crate::types::VariantBlock::Tagged(
-                    crate::types::TaggedBlock {
-                        tag: crate::types::VariantTag {
-                            name: "One".to_string(),
-                            literal: None,
+            Box::new(TagInfo::RecordInlined(Box::new(
+                crate::lambda::lam_tag_info::RecordInlinedTag {
+                    name: "One".to_string(),
+                    num_nonconst: 1,
+                    runtime: Box::new(crate::types::VariantBlock::Tagged(
+                        crate::types::TaggedBlock {
+                            tag: crate::types::VariantTag {
+                                name: "One".to_string(),
+                                literal: None,
+                            },
+                            tag_name: None,
                         },
-                        tag_name: None,
-                    },
-                )),
-                fields: vec![("name".to_string(), false)],
-                logical_field_count: None,
-                mutable_flag: crate::parser::ast::MutableFlag::Immutable,
-            }),
+                    )),
+                    fields: vec![("name".to_string(), false)],
+                    logical_field_count: None,
+                    mutable_flag: crate::parser::ast::MutableFlag::Immutable,
+                },
+            ))),
         ));
 
         assert_eq!(

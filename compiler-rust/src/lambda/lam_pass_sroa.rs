@@ -1,20 +1,20 @@
-//! Port of `compiler/core/lam_pass_sroa.ml`: scalar replacement of
-//! aggregates for local mutable blocks.
+//! `Lam_pass_sroa`: scalar replacement of local mutable blocks, over the
+//! Lambda arena.
 //!
 //! A block can be replaced by mutable scalar bindings when every occurrence
-//! of the block is a direct, statically indexed field read or write.
-//! JavaScript closures capture bindings, so direct accesses from nested
-//! functions remain eligible. Analysis is kept separate from rewriting so a
-//! failed eligibility check cannot partially transform the term.
+//! of it is a direct, statically indexed field read or write. JavaScript
+//! closures capture bindings, so accesses from nested functions remain
+//! eligible. Analysis is separate from rewriting so a failed eligibility
+//! check cannot partially transform the term.
 
 use crate::context::IdGenerator;
 use crate::ident::Ident;
+use crate::lambda::TagInfo;
+use crate::lambda::arena::{Lam, LamArena, Node};
 use crate::lambda::lam_analysis::no_side_effects;
 use crate::lambda::lam_compat::LetKind;
 use crate::lambda::lam_primitive::Primitive;
 use crate::lambda::lam_util::refine_let;
-use crate::lambda::lambda_traverse::{Mapped, shallow_exists, shallow_map_sharing};
-use crate::lambda::{Lambda, PrimInfo, TagInfo};
 use crate::parser::ast::MutableFlag;
 
 #[derive(Clone, Copy, Default)]
@@ -23,41 +23,38 @@ struct FieldUse {
     written: bool,
 }
 
-fn valid_field(uses: &[FieldUse], index: i32) -> bool {
-    index >= 0 && (index as usize) < uses.len()
-}
-
-/// The direct field access `lam` makes of `block`: the primitive's index and,
-/// for a write, the value written.
-enum Access<'a> {
+/// The direct field access `lam` makes of `block`.
+enum Access {
     Read(i32),
-    Write(i32, &'a Lambda),
+    Write(i32, Lam),
 }
 
-fn access_of<'a>(block: &Ident, lam: &'a Lambda) -> Option<Access<'a>> {
-    let Lambda::Lprim(prim) = lam else {
-        return None;
-    };
-    match (&prim.primitive, prim.args.as_slice()) {
-        (Primitive::Pfield(index, _), [Lambda::Lvar(id)]) if id == block => {
+fn access_of(a: &LamArena, block: &Ident, lam: Lam) -> Option<Access> {
+    let (primitive, args, _) = a.as_prim(lam)?;
+    match (primitive, args) {
+        (Primitive::Pfield(index, _), [v]) if a.as_var(*v).is_some_and(|v| v == *block) => {
             Some(Access::Read(*index))
         }
-        (Primitive::Psetfield(index, _), [Lambda::Lvar(id), value]) if id == block => {
-            Some(Access::Write(*index, value))
+        (Primitive::Psetfield(index, _), [v, value])
+            if a.as_var(*v).is_some_and(|v| v == *block) =>
+        {
+            Some(Access::Write(*index, *value))
         }
         _ => None,
     }
 }
 
-/// Does the block appear only as direct, in-range field reads and writes?
-/// While answering, record how every field is used. [`analyze`] and
-/// [`rewrite`] are a matched pair: `rewrite` handles exactly the occurrences
-/// `analyze` accepts.
-fn analyze(block: &Ident, uses: &mut [FieldUse], lam: &Lambda) -> bool {
-    match lam {
-        Lambda::Lvar(id) => id != block,
-        Lambda::Lassign(id, value) => id != block && analyze(block, uses, value),
-        _ => match access_of(block, lam) {
+fn valid_field(uses: &[FieldUse], index: i32) -> bool {
+    index >= 0 && (index as usize) < uses.len()
+}
+
+/// Is `block` used only as direct, in-range field reads and writes? Records
+/// how each field is used.
+fn analyze(a: &LamArena, block: &Ident, uses: &mut [FieldUse], lam: Lam) -> bool {
+    match a.node(lam) {
+        Node::Var(id) => a.ident(id) != *block,
+        Node::Assign { id, value } => a.ident(id) != *block && analyze(a, block, uses, value),
+        _ => match access_of(a, block, lam) {
             Some(Access::Read(index)) => {
                 if valid_field(uses, index) {
                     uses[index as usize].read = true;
@@ -69,47 +66,53 @@ fn analyze(block: &Ident, uses: &mut [FieldUse], lam: &Lambda) -> bool {
             Some(Access::Write(index, value)) => {
                 if valid_field(uses, index) {
                     uses[index as usize].written = true;
-                    analyze(block, uses, value)
+                    analyze(a, block, uses, value)
                 } else {
                     false
                 }
             }
-            None => !shallow_exists(lam, &mut |child| !analyze(block, uses, child)),
+            None => !shallow_exists(a, lam, &mut |a, x| !analyze(a, block, uses, x)),
         },
     }
 }
 
-fn discard_value(value: Lambda, body: Lambda) -> Lambda {
-    if no_side_effects(&value) {
+/// `Lambda_traverse.shallow_exists`, in its child order (the body of a
+/// `let rec` before its bindings).
+fn shallow_exists(a: &LamArena, lam: Lam, f: &mut impl FnMut(&LamArena, Lam) -> bool) -> bool {
+    if let Node::LetRec { values, body, .. } = a.node(lam) {
+        return f(a, body) || a.list(values).iter().any(|x| f(a, *x));
+    }
+    let mut found = false;
+    a.iter_children(lam, |x| {
+        if !found && f(a, x) {
+            found = true;
+        }
+    });
+    found
+}
+
+fn discard_value(a: &mut LamArena, value: Lam, body: Lam) -> Lam {
+    if no_side_effects(a, value) {
         body
     } else {
-        Lambda::seq(value, body)
+        a.seq(value, body)
     }
 }
 
-fn rewrite(block: &Ident, fields: &[Ident], uses: &[FieldUse], lam: Lambda) -> Mapped {
-    match access_of(block, &lam) {
-        Some(Access::Read(index)) => (Lambda::var(fields[index as usize]), true),
-        Some(Access::Write(index, _)) => {
-            let Lambda::Lprim(prim) = lam else {
-                unreachable!()
-            };
-            let PrimInfo { mut args, .. } = *prim;
-            let value = args.pop().expect("checked setfield value");
-            let (value, _) = rewrite(block, fields, uses, value);
+fn rewrite(a: &mut LamArena, block: &Ident, fields: &[Ident], uses: &[FieldUse], lam: Lam) -> Lam {
+    match access_of(a, block, lam) {
+        Some(Access::Read(index)) => a.var(fields[index as usize]),
+        Some(Access::Write(index, value)) => {
+            let value = rewrite(a, block, fields, uses, value);
             let index = index as usize;
             if !uses[index].read {
-                (discard_value(value, Lambda::unit()), true)
+                let unit = a.unit();
+                discard_value(a, value, unit)
             } else {
-                (Lambda::assign(fields[index], value), true)
+                a.assign(fields[index], value)
             }
         }
-        None => match &lam {
-            // Unreachable: `analyze` rejected the block for both of these.
-            Lambda::Lvar(id) if id == block => unreachable!("sroa: block escapes"),
-            Lambda::Lassign(id, _) if id == block => unreachable!("sroa: block reassigned"),
-            _ => shallow_map_sharing(lam, &mut |child| rewrite(block, fields, uses, child)),
-        },
+        None => a.shallow_map(lam, &mut |a, x| rewrite(a, block, fields, uses, x)),
     }
 }
 
@@ -119,125 +122,99 @@ fn fields_for_block(
     info: &TagInfo,
     field_count: usize,
 ) -> Vec<Ident> {
-    let fallback = || {
-        (0..field_count)
-            .map(|index| {
-                if index == 0 {
-                    *block
-                } else {
-                    block.rename(id_gen)
-                }
-            })
-            .collect::<Vec<_>>()
-    };
     if field_count == 1 {
         return vec![*block];
     }
     let named = |name: &str| id_gen.create(&format!("{}_{}", block.name(), name));
     match info {
-        TagInfo::Record { fields, .. } | TagInfo::RecordInlined { fields, .. } => {
-            if fields.len() == field_count {
-                return fields.iter().map(|(name, _)| named(name)).collect();
-            }
+        TagInfo::Record(_) | TagInfo::RecordInlined(_)
+            if info.record_fields().map(<[_]>::len) == Some(field_count) =>
+        {
+            let fields = info.record_fields().expect("record block");
+            return fields.iter().map(|(name, _)| named(name)).collect();
         }
-        TagInfo::RecordExt { fields, .. } => {
-            if fields.len() == field_count {
-                return fields.iter().map(|name| named(name)).collect();
-            }
+        TagInfo::RecordExt { fields, .. } if fields.len() == field_count => {
+            return fields.iter().map(|name| named(name)).collect();
         }
-        TagInfo::Tuple
-        | TagInfo::Constructor { .. }
-        | TagInfo::PolyVar(_)
-        | TagInfo::Module(_)
-        | TagInfo::ModuleExport(_)
-        | TagInfo::Extension
-        | TagInfo::Some
-        | TagInfo::SomeNotNested => {}
+        _ => {}
     }
-    fallback()
+    (0..field_count)
+        .map(|index| {
+            if index == 0 {
+                *block
+            } else {
+                block.rename(id_gen)
+            }
+        })
+        .collect()
 }
 
-/// `Lam_pass_sroa.replace`: replace a non-escaping local block with
-/// independent scalar values, or hand the pieces back when the block is used
-/// other than by direct field access.
+/// `Lam_pass_sroa.replace`: `None` when the block is used other than by
+/// direct field access.
 fn replace(
+    a: &mut LamArena,
     id_gen: &IdGenerator,
     block: &Ident,
     info: &TagInfo,
-    initializers: Vec<Lambda>,
-    body: Lambda,
-) -> Result<Lambda, (Vec<Lambda>, Lambda)> {
+    initializers: &[Lam],
+    body: Lam,
+) -> Option<Lam> {
     if initializers.is_empty() {
-        return Err((initializers, body));
+        return None;
     }
-    let field_count = initializers.len();
-    let mut uses = vec![FieldUse::default(); field_count];
-    if !analyze(block, &mut uses, &body) {
-        return Err((initializers, body));
+    let mut uses = vec![FieldUse::default(); initializers.len()];
+    if !analyze(a, block, &mut uses, body) {
+        return None;
     }
-    let fields = fields_for_block(id_gen, block, info, field_count);
-    let (mut body, _) = rewrite(block, &fields, &uses, body);
-    // `bind_fields` recurses before binding, so the innermost binding is the
-    // last field: fold from the right.
-    for (index, init) in initializers.into_iter().enumerate().rev() {
+    let fields = fields_for_block(id_gen, block, info, initializers.len());
+    let mut body = rewrite(a, block, &fields, &uses, body);
+    // `bind_fields` recurses before binding: the last field is innermost.
+    for (index, &init) in initializers.iter().enumerate().rev() {
         let use_ = uses[index];
-        // A never-read field needs no storage; its initializer and writes are
-        // retained only when they have effects. A read-only field can use a
-        // normal refined let, while a field that is both read and written
-        // still needs a mutable scalar binding.
         body = if !use_.read {
-            discard_value(init, body)
+            discard_value(a, init, body)
         } else if !use_.written {
-            refine_let(LetKind::Strict, fields[index], init, body)
+            refine_let(a, LetKind::Strict, fields[index], init, body)
         } else {
-            Lambda::let_(LetKind::Variable, fields[index], init, body)
+            a.let_(LetKind::Variable, fields[index], init, body)
         };
     }
-    Ok(body)
+    Some(body)
 }
 
-fn simplify_inner(id_gen: &IdGenerator, lam: Lambda) -> Mapped {
-    match lam {
-        Lambda::Llet(kind, block, init, body) => {
-            let (init, c1) = simplify_inner(id_gen, *init);
-            let (body, c2) = simplify_inner(id_gen, *body);
-            let eligible = matches!(kind, LetKind::Strict | LetKind::StrictOpt)
-                && matches!(&init, Lambda::Lprim(prim)
-                    if matches!(&prim.primitive, Primitive::Pmakeblock(info, _)
-                        if info.mutable_flag() != MutableFlag::Immutable));
-            if eligible {
-                let Lambda::Lprim(prim) = init else {
-                    unreachable!()
-                };
-                let PrimInfo {
-                    primitive,
-                    args,
-                    loc,
-                } = *prim;
-                let Primitive::Pmakeblock(info, mutable) = primitive else {
-                    unreachable!()
-                };
-                match replace(id_gen, &block, &info, args, body) {
-                    Ok(replacement) => (replacement, true),
-                    Err((args, body)) => {
-                        let init = Lambda::Lprim(Box::new(PrimInfo {
-                            primitive: Primitive::Pmakeblock(info, mutable),
-                            args,
-                            loc,
-                        }));
-                        (Lambda::let_(kind, block, init, body), c1 || c2)
-                    }
+fn simplify_inner(a: &mut LamArena, id_gen: &IdGenerator, lam: Lam) -> Lam {
+    match a.node(lam) {
+        Node::Let {
+            kind,
+            id,
+            value,
+            body,
+        } => {
+            let init = simplify_inner(a, id_gen, value);
+            let nbody = simplify_inner(a, id_gen, body);
+            let block = a.ident(id);
+            if matches!(kind, LetKind::Strict | LetKind::StrictOpt)
+                && let Node::Prim { args, info } = a.node(init)
+                && let Primitive::Pmakeblock(tag, _) = &a.prim_payload(info).primitive
+                && tag.mutable_flag() != MutableFlag::Immutable
+            {
+                let tag = tag.clone();
+                let args = a.list_vec(args);
+                if let Some(replacement) = replace(a, id_gen, &block, &tag, &args, nbody) {
+                    return replacement;
                 }
+            }
+            if init == value && nbody == body {
+                lam
             } else {
-                (Lambda::let_(kind, block, init, body), c1 || c2)
+                a.let_with(kind, id, init, nbody)
             }
         }
-        _ => shallow_map_sharing(lam, &mut |child| simplify_inner(id_gen, child)),
+        _ => a.shallow_map(lam, &mut |a, x| simplify_inner(a, id_gen, x)),
     }
 }
 
-/// `Lam_pass_sroa.simplify`: scalar-replace eligible local mutable blocks
-/// throughout a Lambda term.
-pub fn simplify(lam: Lambda, id_gen: &IdGenerator) -> Lambda {
-    simplify_inner(id_gen, lam).0
+/// `Lam_pass_sroa.simplify`.
+pub fn simplify(a: &mut LamArena, lam: Lam, id_gen: &IdGenerator) -> Lam {
+    simplify_inner(a, id_gen, lam)
 }

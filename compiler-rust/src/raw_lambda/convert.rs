@@ -550,33 +550,6 @@ pub struct RawLambdaDiagnostic {
     pub message: String,
 }
 
-pub(crate) struct IndexedRawLambda {
-    raw: RawLambda,
-    id_gen: std::sync::Arc<IdGenerator>,
-}
-
-impl IndexedRawLambda {
-    pub(crate) fn into_parts(self) -> (RawLambda, std::sync::Arc<IdGenerator>) {
-        (self.raw, self.id_gen)
-    }
-}
-
-enum RawLambdaIdGenerator {
-    Owned(IdGenerator),
-    Shared(std::sync::Arc<IdGenerator>),
-}
-
-impl std::ops::Deref for RawLambdaIdGenerator {
-    type Target = IdGenerator;
-
-    fn deref(&self) -> &Self::Target {
-        match self {
-            Self::Owned(generator) => generator,
-            Self::Shared(generator) => generator,
-        }
-    }
-}
-
 /// Converter from typedtree to raw lambda.
 pub struct RawLambdaConverter<'a> {
     arena: &'a ParseArena,
@@ -584,7 +557,7 @@ pub struct RawLambdaConverter<'a> {
     env: &'a crate::types::env::Env,
     persistent_env: Option<crate::cmi::persistent_env::PersistentEnv>,
     possible_required_modules: ahash::AHashSet<ModuleId>,
-    id_gen: RawLambdaIdGenerator,
+    id_gen: IdGenerator,
     next_static_raise: i32,
     next_negative_raise: i32,
     unit_name: String,
@@ -614,7 +587,7 @@ impl<'a> RawLambdaConverter<'a> {
             env,
             persistent_env: None,
             possible_required_modules: ahash::AHashSet::new(),
-            id_gen: RawLambdaIdGenerator::Owned(IdGenerator::new()),
+            id_gen: IdGenerator::new(),
             next_static_raise: 0,
             next_negative_raise: 0,
             unit_name: String::new(),
@@ -644,7 +617,7 @@ impl<'a> RawLambdaConverter<'a> {
             env,
             persistent_env: None,
             possible_required_modules: ahash::AHashSet::new(),
-            id_gen: RawLambdaIdGenerator::Owned(IdGenerator::with_start_stamp(start_stamp)),
+            id_gen: IdGenerator::with_start_stamp(start_stamp),
             next_static_raise: 0,
             next_negative_raise: 0,
             unit_name: String::new(),
@@ -675,7 +648,7 @@ impl<'a> RawLambdaConverter<'a> {
             env,
             persistent_env: None,
             possible_required_modules: ahash::AHashSet::new(),
-            id_gen: RawLambdaIdGenerator::Owned(IdGenerator::with_start_stamp(start_stamp)),
+            id_gen: IdGenerator::with_start_stamp(start_stamp),
             next_static_raise: 0,
             next_negative_raise: 0,
             unit_name,
@@ -690,50 +663,6 @@ impl<'a> RawLambdaConverter<'a> {
             hoisted_exports: Vec::new(),
             lam_locs: crate::raw_lambda::loc::LamLocBuilder::new(arena),
         }
-    }
-
-    /// Create the inactive indexed producer with the compilation-wide
-    /// identifier stream. Legacy constructors above retain stack-owned generators.
-    pub(crate) fn with_id_generator_and_unit_name(
-        arena: &'a ParseArena,
-        type_ctx: &'a TypeContext,
-        env: &'a crate::types::env::Env,
-        id_gen: std::sync::Arc<IdGenerator>,
-        unit_name: String,
-    ) -> Self {
-        Self {
-            arena,
-            type_ctx,
-            env,
-            persistent_env: None,
-            possible_required_modules: ahash::AHashSet::new(),
-            id_gen: RawLambdaIdGenerator::Shared(id_gen),
-            next_static_raise: 0,
-            next_negative_raise: 0,
-            unit_name,
-            no_assert_false: false,
-            noassert: false,
-            diagnostic: None,
-            warnings: Vec::new(),
-            warning_config: WarningConfig::new(),
-            suppress_inlined_attribute_check: 0,
-            preserve_expanded_sparse_records: false,
-            hoisted_functions: Vec::new(),
-            hoisted_exports: Vec::new(),
-            lam_locs: crate::raw_lambda::loc::LamLocBuilder::new(arena),
-        }
-    }
-
-    pub(crate) fn finish_indexed_raw(self, raw: RawLambda) -> IndexedRawLambda {
-        let RawLambdaIdGenerator::Shared(id_gen) = self.id_gen else {
-            panic!("indexed Raw Lambda requires the shared-generator converter")
-        };
-        IndexedRawLambda { raw, id_gen }
-    }
-
-    #[cfg(test)]
-    fn shares_id_generator(&self, generator: &std::sync::Arc<IdGenerator>) -> bool {
-        matches!(&self.id_gen, RawLambdaIdGenerator::Shared(owned) if std::sync::Arc::ptr_eq(owned, generator))
     }
 
     pub fn set_persistent_env(
@@ -2606,12 +2535,12 @@ impl<'a> RawLambdaConverter<'a> {
                 ExternalFfi::FfiBs(arg_types, result_type, decl) => {
                     let returns_unit = self.external_returns_unit(env, prim, val_type);
                     let call = RawLambda::prim(
-                        Primitive::PjsCall {
+                        Primitive::PjsCall(Box::new(crate::lambda::lam_primitive::JsCall {
                             prim_name: prim.prim_name.clone(),
                             arg_types: arg_types.clone(),
-                            ffi: Box::new(decl.clone()),
+                            ffi: decl.clone(),
                             transformed_jsx,
-                        },
+                        })),
                         argl,
                         self.lam_loc(loc),
                     );
@@ -2792,18 +2721,18 @@ impl<'a> RawLambdaConverter<'a> {
             let mut send_args = vec![receiver];
             send_args.extend(args);
             RawLambda::prim(
-                Primitive::PjsCall {
+                Primitive::PjsCall(Box::new(crate::lambda::lam_primitive::JsCall {
                     prim_name: name.to_string(),
                     arg_types: send_arg_types,
-                    ffi: Box::new(ExternalDecl {
+                    ffi: ExternalDecl {
                         kind,
                         module_: None,
                         scopes: scopes.to_vec(),
                         variadic,
                         effective_arity: arg_types.len() as i64 + 1,
-                    }),
+                    },
                     transformed_jsx: false,
-                },
+                })),
                 send_args,
                 node_loc,
             )
@@ -2854,10 +2783,10 @@ impl<'a> RawLambdaConverter<'a> {
             self.lam_loc(loc),
         );
         RawLambda::prim(
-            Primitive::PjsCall {
+            Primitive::PjsCall(Box::new(crate::lambda::lam_primitive::JsCall {
                 prim_name: "then".to_string(),
                 arg_types: vec![Param::dummy(), Param::dummy()],
-                ffi: Box::new(ExternalDecl {
+                ffi: ExternalDecl {
                     kind: DeclKind::DeclSend {
                         name: "then".to_string(),
                     },
@@ -2865,9 +2794,9 @@ impl<'a> RawLambdaConverter<'a> {
                     scopes: vec![],
                     variadic: false,
                     effective_arity: 2,
-                }),
+                },
                 transformed_jsx: false,
-            },
+            })),
             vec![
                 RawLambda::prim(
                     Primitive::Pimport(Box::new(ImportSource::ImportExternal {
@@ -3032,11 +2961,11 @@ impl<'a> RawLambdaConverter<'a> {
                             };
                             (runtime, layout.num_blocks() as i32)
                         });
-                TagInfo::Constructor {
+                TagInfo::Constructor(Box::new(crate::lambda::lam_tag_info::ConstructorTag {
                     name: cstr.cstr_name.clone(),
                     num_nonconst,
                     runtime: Box::new(runtime),
-                }
+                }))
             }
         }
     }
@@ -3236,11 +3165,11 @@ impl<'a> RawLambdaConverter<'a> {
                     if matches!(mutable_flag, ParserMutableFlag::Mutable) {
                         RawLambda::prim(
                             Primitive::Pmakeblock(
-                                TagInfo::Record {
+                                TagInfo::Record(Box::new(crate::lambda::lam_tag_info::RecordTag {
                                     fields: fields_info,
                                     logical_field_count,
                                     mutable_flag,
-                                },
+                                })),
                                 Mutable::Mutable,
                             ),
                             elems,
@@ -3249,11 +3178,11 @@ impl<'a> RawLambdaConverter<'a> {
                     } else {
                         self.raw_block_or_prim(
                             0,
-                            TagInfo::Record {
+                            TagInfo::Record(Box::new(crate::lambda::lam_tag_info::RecordTag {
                                 fields: fields_info,
                                 logical_field_count,
                                 mutable_flag,
-                            },
+                            })),
                             elems,
                             loc,
                         )
@@ -3274,14 +3203,16 @@ impl<'a> RawLambdaConverter<'a> {
                         unreachable!("inlined record must reference a block constructor")
                     };
                     let tag = representation.block_index(self.type_ctx) as i32;
-                    let tag_info = TagInfo::RecordInlined {
-                        name,
-                        num_nonconst: representation.num_blocks(self.type_ctx) as i32,
-                        fields: fields_info,
-                        logical_field_count,
-                        mutable_flag,
-                        runtime: Box::new(block),
-                    };
+                    let tag_info = TagInfo::RecordInlined(Box::new(
+                        crate::lambda::lam_tag_info::RecordInlinedTag {
+                            name,
+                            num_nonconst: representation.num_blocks(self.type_ctx) as i32,
+                            fields: fields_info,
+                            logical_field_count,
+                            mutable_flag,
+                            runtime: Box::new(block),
+                        },
+                    ));
                     // OCaml: if mut = Mutable then raise Not_constant
                     if matches!(mutable_flag, ParserMutableFlag::Mutable) {
                         RawLambda::prim(
@@ -7768,13 +7699,11 @@ mod tests {
                 if elements.is_empty()
                     && matches!(
                         &*tag_info,
-                        TagInfo::RecordInlined {
-                            name,
-                            num_nonconst,
-                            fields,
-                            mutable_flag: ParserMutableFlag::Immutable,
-                            ..
-                        } if name == "B" && *num_nonconst == 1 && fields.is_empty()
+                        TagInfo::RecordInlined(r)
+                            if r.name == "B"
+                                && r.num_nonconst == 1
+                                && r.fields.is_empty()
+                                && matches!(r.mutable_flag, ParserMutableFlag::Immutable)
                     )
         ));
     }
@@ -7928,162 +7857,6 @@ mod tests {
             panic!("expected raw function");
         };
         assert_eq!(func.attr.directive.as_deref(), Some("'use memo'"));
-    }
-
-    #[test]
-    fn indexed_producer_uses_one_generator_through_convert_lower_coerce_and_consumer() {
-        let arena = ParseArena::new();
-        let generator = std::sync::Arc::new(IdGenerator::with_start_stamp(100));
-        let ctx = TypeContext::new(generator.clone());
-        let env = initial_env(&ctx);
-        let mut converter = RawLambdaConverter::with_id_generator_and_unit_name(
-            &arena,
-            &ctx,
-            &env,
-            ctx.id_generator(),
-            "Fixture".into(),
-        );
-        assert!(converter.shares_id_generator(&generator));
-        let primitive_type = ctx.new_var(None);
-        let converted = converter.transl_primitive_raw(
-            &crate::types::PrimitiveDescription {
-                prim_name: "%addint".into(),
-                prim_arity: 2,
-                prim_kind: crate::types::decl::PrimKind::KindIntrinsic,
-                prim_native_float: false,
-                prim_from_constructor: false,
-            },
-            primitive_type,
-            SrcLoc::from(Location::none()),
-        );
-        let RawLambda::Lfunction(function) = converted else {
-            panic!("expected primitive conversion to allocate a wrapper")
-        };
-        assert_eq!(
-            function
-                .params
-                .iter()
-                .map(|id| (id.name(), id.stamp(), id.flags()))
-                .collect::<Vec<_>>(),
-            vec![
-                ("prim0", 102, crate::ident::IdentFlags::NONE),
-                ("prim1", 101, crate::ident::IdentFlags::NONE),
-            ]
-        );
-
-        let export = Ident::new("value", 1, crate::ident::IdentFlags::NONE);
-        let caught = Ident::new("caught", 7, crate::ident::IdentFlags::NONE);
-        let raw = RawLambda::Lprim(Box::new(RawPrimInfo {
-            primitive: Primitive::Pmakeblock(
-                crate::lambda::TagInfo::ModuleExport(vec![export]),
-                crate::lambda::lam_primitive::Mutable::Immutable,
-            ),
-            args: vec![RawLambda::LtryWith(
-                Box::new(RawLambda::unit()),
-                caught,
-                Box::new(RawLambda::var(caught)),
-            )],
-            loc: LamLoc::NONE,
-        }));
-        let indexed_raw = converter.finish_indexed_raw(raw);
-        let mut inline = |_: &Ident, _: &str| None;
-        let mut arity = |_: &Ident, _: &str| None;
-        let result =
-            crate::lambda::lam_compile_main_indexed::lower_and_optimize_for_pre_js_indexed(
-                indexed_raw,
-                vec![export],
-                &[],
-                &ahash::AHashSet::new(),
-                false,
-                &mut inline,
-                &mut arity,
-            )
-            .unwrap();
-        assert_eq!(
-            (
-                result.exports()[0].name(),
-                result.exports()[0].stamp(),
-                result.exports()[0].flags()
-            ),
-            ("value", 103, crate::ident::IdentFlags::NONE)
-        );
-        let consumer = result.generator().create("consumer");
-        assert_eq!(
-            (consumer.name(), consumer.stamp(), consumer.flags()),
-            ("consumer", 104, crate::ident::IdentFlags::NONE)
-        );
-        assert_eq!(generator.current_stamp(), 104);
-    }
-
-    #[test]
-    fn sealed_indexed_producer_threads_warning_config_and_observer() {
-        fn compile(
-            config: &crate::diagnostics::WarningConfig,
-        ) -> (
-            Result<bool, crate::lambda::lam_compile_main_indexed::IndexedPreJsError>,
-            Vec<crate::lambda::lam_compile_main_indexed::IndexedHoistedWarning>,
-        ) {
-            let arena = ParseArena::new();
-            let generator = std::sync::Arc::new(IdGenerator::with_start_stamp(20));
-            let ctx = TypeContext::new(generator.clone());
-            let env = initial_env(&ctx);
-            let converter = RawLambdaConverter::with_id_generator_and_unit_name(
-                &arena,
-                &ctx,
-                &env,
-                generator,
-                "Fixture".into(),
-            );
-            let export = Ident::new("value", 1, IdentFlags::NONE);
-            let raw = RawLambda::prim(
-                Primitive::Pmakeblock(
-                    crate::lambda::TagInfo::ModuleExport(vec![export]),
-                    crate::lambda::lam_primitive::Mutable::Immutable,
-                ),
-                vec![RawLambda::unit()],
-                LamLoc::NONE,
-            );
-            let hoisted_loc =
-                converter.lam_loc(Location::new_for_error("sealed-warning.res", 2, 4));
-            let indexed_raw = converter.finish_indexed_raw(raw);
-            let hoisted = crate::lambda::HoistedFunction {
-                binding: Ident::new("missing", 9, IdentFlags::NONE),
-                path: vec!["Missing".into()],
-                loc: hoisted_loc,
-                target_loc: LamLoc::NONE,
-            };
-            let mut inline = |_: &Ident, _: &str| None;
-            let mut arity = |_: &Ident, _: &str| None;
-            let mut warnings = Vec::new();
-            let result = crate::lambda::lam_compile_main_indexed::lower_and_optimize_for_pre_js_indexed_with_diagnostics(
-                indexed_raw,
-                vec![export],
-                &[hoisted],
-                &ahash::AHashSet::new(),
-                false,
-                &mut inline,
-                &mut arity,
-                config,
-                Some(&mut |warning: &crate::lambda::lam_compile_main_indexed::IndexedHoistedWarning| warnings.push(warning.clone())),
-                None,
-            )
-            .map(|backend| backend.check_fatal_warnings().is_err());
-            (result, warnings)
-        }
-
-        let mut disabled = crate::diagnostics::WarningConfig::new();
-        disabled.parse("-53").unwrap();
-        let (result, warnings) = compile(&disabled);
-        assert!(!result.unwrap());
-        assert!(warnings.is_empty());
-
-        let mut fatal = crate::diagnostics::WarningConfig::new();
-        fatal.parse_as_error("@53").unwrap();
-        let (result, warnings) = compile(&fatal);
-        assert!(result.unwrap());
-        assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].is_error);
-        assert_eq!(warnings[0].warning.number(), 53);
     }
 
     #[test]

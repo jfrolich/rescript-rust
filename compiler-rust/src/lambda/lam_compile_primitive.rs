@@ -14,66 +14,71 @@ use super::js_exp_make::{
     to_int32,
 };
 use super::lam_compile::{Compiled, LambdaCompiler};
-use crate::lambda::LamLoc;
-use super::lam_compile_input::{LambdaInputView, LambdaInputs};
 use crate::ident::Ident;
 use crate::js_ir::op::{LengthObject, MutableFlag, Number, PropertyName};
 use crate::js_ir::{BinOp, Block, CallInfo, Expression, ExpressionDesc, Statement};
+use crate::lambda::LamLoc;
+use crate::lambda::TagInfo;
+use crate::lambda::arena::{Lam, LamArena, LamList, PrimId, View};
 use crate::lambda::lam_compat::{Comparison, FieldDbgInfo};
 use crate::lambda::lam_primitive::{Mutable, Primitive};
-use crate::lambda::{Lambda, TagInfo};
 
 impl LambdaCompiler {
     pub(crate) fn compile_primitive(
         &mut self,
-        prim: &Primitive,
-        args: &[Lambda],
-        loc: &LamLoc,
+        a: &mut LamArena,
+        info: PrimId,
+        args: LamList,
     ) -> Compiled {
-        if let Some(compiled) =
-            self.compile_hoisted_external_field(prim, LambdaInputs::Recursive(args))
-        {
+        if let Some(compiled) = self.compile_hoisted_external_field(a, info, args) {
             return compiled;
         }
 
         let mut prelude = vec![];
-        let mut compiled_args = Vec::new();
-        for arg in args {
-            let compiled = self.compile_expr(arg);
+        let mut compiled_args = Vec::with_capacity(a.list_len(args));
+        for arg in a.list_small(args) {
+            let compiled = self.compile_expr(a, arg);
             prelude.extend(compiled.prelude);
             compiled_args.push(compiled.expr);
         }
-        self.compile_primitive_js(prim, compiled_args, prelude, loc)
+        let p = a.prim_payload(info);
+        self.compile_primitive_js(&p.primitive, compiled_args, prelude, &p.loc)
     }
 
     /// Descriptor lookup happens before argument compilation, as in
-    /// compiler/core/lam_compile.ml:284-302 and 1734-1757. The cursor is used
-    /// only during this read; no store borrow crosses recursive compilation.
+    /// compiler/core/lam_compile.ml:284-302 and 1734-1757.
     pub(crate) fn compile_hoisted_external_field(
         &mut self,
-        prim: &Primitive,
-        args: LambdaInputs<'_>,
+        a: &LamArena,
+        info: PrimId,
+        args: LamList,
     ) -> Option<Compiled> {
-        fn external_field_path<'a>(
-            prim: &'a Primitive,
-            args: LambdaInputs<'a>,
+        fn external_field_path(
+            a: &LamArena,
+            prim: &Primitive,
+            args: &[Lam],
             segments: &mut Vec<String>,
-        ) -> Option<&'a Ident> {
+        ) -> Option<Ident> {
             let Primitive::Pfield(_, FieldDbgInfo::Module { name }) = prim else {
                 return None;
             };
             segments.push(name.clone());
-            if args.len() != 1 {
+            let [arg] = args else {
                 return None;
-            }
-            match args.first()?.view() {
-                LambdaInputView::GlobalModule(id) => Some(id),
-                LambdaInputView::Prim(prim, args, _) => external_field_path(prim, args, segments),
+            };
+            match a.view(*arg) {
+                View::GlobalModule(id) => Some(id),
+                View::Prim(prim, args, _) => external_field_path(a, prim, args, segments),
                 _ => None,
             }
         }
         let mut reversed = Vec::new();
-        let id = external_field_path(prim, args, &mut reversed)?;
+        let id = external_field_path(
+            a,
+            &a.prim_payload(info).primitive,
+            a.list(args),
+            &mut reversed,
+        )?;
         if reversed.len() < 2 {
             return None;
         }
@@ -86,7 +91,7 @@ impl LambdaCompiler {
             prelude: Vec::new(),
             expr: Expression::qualified(
                 crate::js_ir::ModuleId {
-                    id: *id,
+                    id,
                     kind: crate::js_ir::Kind::Ml,
                     dynamic_import: false,
                 },
@@ -95,8 +100,8 @@ impl LambdaCompiler {
         })
     }
 
-    /// Lower already-compiled arguments. The recursive or indexed caller owns
-    /// traversal and releases Lambda-store borrows before invoking this helper.
+    /// Lower already-compiled arguments. The caller owns traversal of the
+    /// Lambda arguments.
     /// This is the Js_of_lam_primitive boundary in
     /// compiler/core/lam_compile_primitive.ml, not a Lambda compatibility step.
     pub(crate) fn compile_primitive_js(
@@ -602,14 +607,14 @@ impl LambdaCompiler {
             }
             Pdebugger => {
                 let mut statement = Statement::debugger();
-                statement.source_loc = (self.source_loc(loc));
+                statement.source_loc = self.source_loc(loc);
                 prelude.push(statement);
                 Expression::undefined(false)
             }
             Praise => {
                 let expr = first_arg(compiled_args).unwrap_or_else(|| Expression::undefined(false));
                 let mut statement = Statement::throw(expr);
-                statement.source_loc = (self.source_loc(loc));
+                statement.source_loc = self.source_loc(loc);
                 prelude.push(statement);
                 Expression::undefined(false)
             }
@@ -689,12 +694,13 @@ impl LambdaCompiler {
                 }
             }
             Pimport(source) => self.compile_import(loc, source),
-            PjsCall {
-                prim_name,
-                arg_types,
-                ffi,
-                transformed_jsx,
-            } => self.compile_js_call(prim_name, arg_types, ffi, *transformed_jsx, compiled_args),
+            PjsCall(call) => self.compile_js_call(
+                &call.prim_name,
+                &call.arg_types,
+                &call.ffi,
+                call.transformed_jsx,
+                compiled_args,
+            ),
             PextensionSlotEq => unreachable!("PextensionSlotEq is lowered in raw_lambda::lower"),
         };
 

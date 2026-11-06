@@ -12,23 +12,10 @@ use crate::parser::ast::MutableFlag;
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum TagInfo {
     /// Constructor block (variant)
-    Constructor {
-        name: String,
-        num_nonconst: i32,
-        /// Untagged scalar constructors are erased during typedtree
-        /// translation; they cannot form Lambda or JavaScript blocks.
-        runtime: Box<crate::types::TaggedBlock>,
-    },
+    Constructor(Box<ConstructorTag>),
 
     /// Inlined record (record inside a variant)
-    RecordInlined {
-        name: String,
-        num_nonconst: i32,
-        fields: Vec<(String, bool)>, // (name, optional)
-        logical_field_count: Option<usize>,
-        mutable_flag: MutableFlag,
-        runtime: Box<crate::types::VariantBlock>,
-    },
+    RecordInlined(Box<RecordInlinedTag>),
 
     /// Tuple
     Tuple,
@@ -37,11 +24,7 @@ pub enum TagInfo {
     PolyVar(String),
 
     /// Regular record
-    Record {
-        fields: Vec<(String, bool)>, // (name, optional)
-        logical_field_count: Option<usize>,
-        mutable_flag: MutableFlag,
-    },
+    Record(Box<RecordTag>),
 
     /// Module block
     Module(Vec<String>),
@@ -65,11 +48,46 @@ pub enum TagInfo {
     },
 }
 
+// The constructor and record payloads are boxed so `TagInfo` stays at 32
+// bytes and `Primitive::Pmakeblock` does not size every primitive.
+
+/// [`TagInfo::Constructor`] payload.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ConstructorTag {
+    pub name: String,
+    pub num_nonconst: i32,
+    /// Untagged scalar constructors are erased during typedtree
+    /// translation; they cannot form Lambda or JavaScript blocks.
+    pub runtime: Box<crate::types::TaggedBlock>,
+}
+
+/// [`TagInfo::RecordInlined`] payload.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct RecordInlinedTag {
+    pub name: String,
+    pub num_nonconst: i32,
+    /// `(name, optional)` per field.
+    pub fields: Vec<(String, bool)>,
+    pub logical_field_count: Option<usize>,
+    pub mutable_flag: MutableFlag,
+    pub runtime: Box<crate::types::VariantBlock>,
+}
+
+/// [`TagInfo::Record`] payload.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct RecordTag {
+    /// `(name, optional)` per field.
+    pub fields: Vec<(String, bool)>,
+    pub logical_field_count: Option<usize>,
+    pub mutable_flag: MutableFlag,
+}
+
 impl TagInfo {
     /// Label used by Lambda printers now that blocks carry no numeric tag.
     pub fn tag_label(&self) -> &str {
         match self {
-            TagInfo::Constructor { name, .. } | TagInfo::RecordInlined { name, .. } => name,
+            TagInfo::Constructor(c) => &c.name,
+            TagInfo::RecordInlined(r) => &r.name,
             _ => "0",
         }
     }
@@ -77,11 +95,11 @@ impl TagInfo {
     /// Get the mutable flag for this block type
     pub fn mutable_flag(&self) -> MutableFlag {
         match self {
-            TagInfo::RecordInlined { mutable_flag, .. }
-            | TagInfo::Record { mutable_flag, .. }
-            | TagInfo::RecordExt { mutable_flag, .. } => *mutable_flag,
+            TagInfo::RecordInlined(r) => r.mutable_flag,
+            TagInfo::Record(r) => r.mutable_flag,
+            TagInfo::RecordExt { mutable_flag, .. } => *mutable_flag,
             TagInfo::Tuple
-            | TagInfo::Constructor { .. }
+            | TagInfo::Constructor(_)
             | TagInfo::PolyVar(_)
             | TagInfo::Module(_)
             | TagInfo::ModuleExport(_)
@@ -93,17 +111,17 @@ impl TagInfo {
 
     /// Create a ref tag info (mutable record with "contents" field)
     pub fn ref_tag() -> Self {
-        TagInfo::Record {
+        TagInfo::Record(Box::new(RecordTag {
             fields: vec![("contents".to_string(), false)],
             logical_field_count: None,
             mutable_flag: MutableFlag::Mutable,
-        }
+        }))
     }
 
     /// Create a constructor tag info
     pub fn constructor(name: impl Into<String>, num_nonconst: i32) -> Self {
         let name = name.into();
-        TagInfo::Constructor {
+        TagInfo::Constructor(Box::new(ConstructorTag {
             runtime: Box::new(crate::types::TaggedBlock {
                 tag: crate::types::VariantTag {
                     name: name.clone(),
@@ -113,7 +131,7 @@ impl TagInfo {
             }),
             name,
             num_nonconst,
-        }
+        }))
     }
 
     /// Create a tuple tag info
@@ -128,27 +146,28 @@ impl TagInfo {
 
     /// Create a record tag info
     pub fn record(fields: Vec<(String, bool)>, mutable_flag: MutableFlag) -> Self {
-        TagInfo::Record {
+        TagInfo::Record(Box::new(RecordTag {
             fields,
             logical_field_count: None,
             mutable_flag,
-        }
+        }))
     }
 
     /// Number of fields visible to OCaml-shape optimization decisions.
     pub fn logical_field_count(&self) -> usize {
         match self {
-            TagInfo::Record {
-                fields,
-                logical_field_count,
-                ..
-            }
-            | TagInfo::RecordInlined {
-                fields,
-                logical_field_count,
-                ..
-            } => logical_field_count.unwrap_or(fields.len()),
+            TagInfo::Record(r) => r.logical_field_count.unwrap_or(r.fields.len()),
+            TagInfo::RecordInlined(r) => r.logical_field_count.unwrap_or(r.fields.len()),
             _ => 0,
+        }
+    }
+
+    /// `(name, optional)` per field of a record or inlined record block.
+    pub fn record_fields(&self) -> Option<&[(String, bool)]> {
+        match self {
+            TagInfo::Record(r) => Some(&r.fields),
+            TagInfo::RecordInlined(r) => Some(&r.fields),
+            _ => None,
         }
     }
 
@@ -165,10 +184,10 @@ mod tests {
     #[test]
     fn test_tag_values() {
         let cons = TagInfo::constructor("Some", 1);
-        assert!(matches!(cons, TagInfo::Constructor { .. }));
+        assert!(matches!(cons, TagInfo::Constructor(_)));
 
         let cons2 = TagInfo::constructor("Cons", 2);
-        assert!(matches!(cons2, TagInfo::Constructor { .. }));
+        assert!(matches!(cons2, TagInfo::Constructor(_)));
 
         let tuple = TagInfo::tuple();
         assert!(matches!(tuple, TagInfo::Tuple));
@@ -191,15 +210,11 @@ mod tests {
     fn test_ref_tag() {
         let ref_tag = TagInfo::ref_tag();
         match ref_tag {
-            TagInfo::Record {
-                fields,
-                mutable_flag,
-                ..
-            } => {
-                assert_eq!(fields.len(), 1);
-                assert_eq!(fields[0].0, "contents");
-                assert!(!fields[0].1); // not optional
-                assert_eq!(mutable_flag, MutableFlag::Mutable);
+            TagInfo::Record(r) => {
+                assert_eq!(r.fields.len(), 1);
+                assert_eq!(r.fields[0].0, "contents");
+                assert!(!r.fields[0].1); // not optional
+                assert_eq!(r.mutable_flag, MutableFlag::Mutable);
             }
             _ => panic!("Expected Record"),
         }

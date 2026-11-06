@@ -3614,24 +3614,30 @@ fn decode_cmj_tag_info(value: &OcamlValue) -> Option<TagInfo> {
         OcamlValue::Int(0) => Some(TagInfo::Tuple),
         OcamlValue::Int(1) => Some(TagInfo::PolyVar(String::new())),
         OcamlValue::Int(2) => Some(TagInfo::Extension),
-        OcamlValue::Block(0, fields) if fields.len() == 3 => Some(TagInfo::Constructor {
-            name: fields[0].as_string().to_string(),
-            num_nonconst: fields[1].as_int() as i32,
-            runtime: Box::new(tagged_block(&fields[2])?),
-        }),
-        OcamlValue::Block(1, fields) if fields.len() == 5 => Some(TagInfo::RecordInlined {
-            name: fields[0].as_string().to_string(),
-            num_nonconst: fields[1].as_int() as i32,
-            fields: record_fields(&fields[2])?,
-            logical_field_count: None,
-            mutable_flag: mutable_flag(&fields[3])?,
-            runtime: Box::new(block(&fields[4])?),
-        }),
-        OcamlValue::Block(2, fields) if fields.len() == 2 => Some(TagInfo::Record {
-            fields: record_fields(&fields[0])?,
-            logical_field_count: None,
-            mutable_flag: mutable_flag(&fields[1])?,
-        }),
+        OcamlValue::Block(0, fields) if fields.len() == 3 => Some(TagInfo::Constructor(Box::new(
+            crate::lambda::lam_tag_info::ConstructorTag {
+                name: fields[0].as_string().to_string(),
+                num_nonconst: fields[1].as_int() as i32,
+                runtime: Box::new(tagged_block(&fields[2])?),
+            },
+        ))),
+        OcamlValue::Block(1, fields) if fields.len() == 5 => Some(TagInfo::RecordInlined(
+            Box::new(crate::lambda::lam_tag_info::RecordInlinedTag {
+                name: fields[0].as_string().to_string(),
+                num_nonconst: fields[1].as_int() as i32,
+                fields: record_fields(&fields[2])?,
+                logical_field_count: None,
+                mutable_flag: mutable_flag(&fields[3])?,
+                runtime: Box::new(block(&fields[4])?),
+            }),
+        )),
+        OcamlValue::Block(2, fields) if fields.len() == 2 => Some(TagInfo::Record(Box::new(
+            crate::lambda::lam_tag_info::RecordTag {
+                fields: record_fields(&fields[0])?,
+                logical_field_count: None,
+                mutable_flag: mutable_flag(&fields[1])?,
+            },
+        ))),
         OcamlValue::Block(3, fields) if fields.len() == 1 => {
             Some(TagInfo::Module(decode_cmj_string_list(&fields[0])?))
         }
@@ -3750,12 +3756,12 @@ fn decode_cmj_primitive(value: &OcamlValue) -> Option<Primitive> {
             // `Lambda.mutable_flag_of_tag_info`: a block's mutability follows
             // from its shape.
             let mutable = match &tag_info {
-                TagInfo::Record { mutable_flag, .. }
-                | TagInfo::RecordInlined { mutable_flag, .. }
-                | TagInfo::RecordExt { mutable_flag, .. } => match mutable_flag {
-                    crate::parser::ast::MutableFlag::Mutable => Mutable::Mutable,
-                    crate::parser::ast::MutableFlag::Immutable => Mutable::Immutable,
-                },
+                TagInfo::Record(_) | TagInfo::RecordInlined(_) | TagInfo::RecordExt { .. } => {
+                    match tag_info.mutable_flag() {
+                        crate::parser::ast::MutableFlag::Mutable => Mutable::Mutable,
+                        crate::parser::ast::MutableFlag::Immutable => Mutable::Immutable,
+                    }
+                }
                 _ => Mutable::Immutable,
             };
             Some(Primitive::Pmakeblock(tag_info, mutable))
@@ -3764,12 +3770,14 @@ fn decode_cmj_primitive(value: &OcamlValue) -> Option<Primitive> {
             fields[0].as_int() as i32,
             decode_cmj_field_dbg_info(&fields[1])?,
         )),
-        OcamlValue::Block(4, fields) if fields.len() == 4 => Some(Primitive::PjsCall {
-            prim_name: fields[0].as_string().to_string(),
-            arg_types: crate::cmi::ffi_decode::params(&fields[1])?,
-            ffi: Box::new(crate::cmi::ffi_decode::external_decl(&fields[2])?),
-            transformed_jsx: fields[3].as_bool(),
-        }),
+        OcamlValue::Block(4, fields) if fields.len() == 4 => Some(Primitive::PjsCall(Box::new(
+            crate::lambda::lam_primitive::JsCall {
+                prim_name: fields[0].as_string().to_string(),
+                arg_types: crate::cmi::ffi_decode::params(&fields[1])?,
+                ffi: crate::cmi::ffi_decode::external_decl(&fields[2])?,
+                transformed_jsx: fields[3].as_bool(),
+            },
+        ))),
         OcamlValue::Block(8, fields) if fields.len() == 1 => {
             Some(Primitive::Pobjcomp(decode_cmj_comparison(&fields[0])?))
         }
