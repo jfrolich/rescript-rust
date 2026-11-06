@@ -6210,8 +6210,7 @@ fn format_expr_type_clash_report(
     };
 
     let actual_is_function = trace.iter().any(|(actual, _)| {
-        let actual = type_alias_full_expansion(type_ctx, *actual)
-            .or_else(|| rendered_alias_expansion(type_ctx, *actual, trace, true))
+        let actual = rendered_alias_expansion(type_ctx, *actual, trace, true)
             .unwrap_or_else(|| type_ctx.repr(*actual));
         matches!(&*type_ctx.borrow_desc(actual), TypeDesc::Tarrow { .. })
     });
@@ -6559,7 +6558,6 @@ fn format_expr_type_clash_report(
             | Some(TypeClashContext::JsxComponent)
     ) || plain_function_to_component
         || type_clash_string_to_polyvariant(type_ctx, trace)
-        || type_clash_string_to_variant(type_ctx, trace)
         || type_clash_array_to_tuple(type_ctx, trace)
         || type_clash_expected_unit_actual(type_ctx, trace).is_some()
         || type_clash_actual_promise(type_ctx, trace)
@@ -6854,12 +6852,6 @@ fn rendered_alias_expansion(
             && !type_is_polyvariant(type_ctx, expansion))
         .then_some(expansion);
     }
-    if let Some(expansion) = type_alias_expansion(type_ctx, ty)
-        && !type_expansion_same(type_ctx, ty, expansion)
-        && !type_is_polyvariant(type_ctx, expansion)
-    {
-        return Some(expand_promise_compat_alias(type_ctx, expansion));
-    }
 
     let first = trace.first()?;
     let (top_actual, top_expected) = *first;
@@ -6948,28 +6940,6 @@ fn printtyp_same_path(type_ctx: &TypeContext, t: TypeExprRef, t2: TypeExprRef) -
         }
         _ => false,
     }
-}
-
-fn expand_promise_compat_alias(type_ctx: &TypeContext, ty: TypeExprRef) -> TypeExprRef {
-    let mut current = type_ctx.repr(ty);
-    let mut seen = AHashSet::new();
-    while seen.insert(current) {
-        let desc = type_ctx.get_desc(current);
-        let TypeDesc::Tconstr { path, .. } = &*desc else {
-            return current;
-        };
-        let is_promise_alias = path.name() == "Promise.t" || path.name() == "Stdlib.Promise.t";
-        drop(desc);
-        match type_alias_expansion(type_ctx, current) {
-            Some(expansion)
-                if is_promise_alias && !type_expansion_same(type_ctx, current, expansion) =>
-            {
-                current = type_ctx.repr(expansion);
-            }
-            _ => return current,
-        }
-    }
-    current
 }
 
 fn format_array_type_clash_message(message: &str) -> String {
@@ -7310,10 +7280,6 @@ fn append_extra_type_clash_help(
         return;
     }
 
-    if append_string_to_variant_help(type_ctx, arena, source, loc, trace, message) {
-        return;
-    }
-
     if type_clash_actual_promise(type_ctx, trace) {
         message.push_str("\n\n");
         message.push_str("- Did you mean to await this promise before using it?");
@@ -7322,14 +7288,6 @@ fn append_extra_type_clash_help(
     }
 
     if append_jsx_element_type_clash_help(type_ctx, trace, message) {
-        return;
-    }
-
-    if append_braced_ident_record_help(type_ctx, arena, source, loc, context, trace, message) {
-        return;
-    }
-
-    if append_object_literal_record_help(type_ctx, arena, source, loc, trace, message) {
         return;
     }
 
@@ -7853,24 +7811,7 @@ fn type_expands_to_predef_path(
     ty: TypeExprRef,
     expected_path: &crate::types::path::Path,
 ) -> bool {
-    let mut current = type_ctx.repr(ty);
-    let mut seen = AHashSet::new();
-    loop {
-        if !seen.insert(current) {
-            return false;
-        }
-        if type_is_predef_path(type_ctx, current, expected_path) {
-            return true;
-        }
-        let Some(expansion) = type_alias_expansion(type_ctx, current) else {
-            return false;
-        };
-        let expansion = type_ctx.repr(expansion);
-        if type_expansion_same(type_ctx, current, expansion) {
-            return false;
-        }
-        current = expansion;
-    }
+    type_is_predef_path(type_ctx, type_ctx.repr(ty), expected_path)
 }
 
 fn type_clash_actual_promise(type_ctx: &TypeContext, trace: &[(TypeExprRef, TypeExprRef)]) -> bool {
@@ -8057,239 +7998,6 @@ fn runtime_coercion_compatible(
 ) -> bool {
     let env = crate::types::Env::empty();
     crate::types::ctype::subtype_now(type_ctx, &env, actual, expected).is_ok()
-        || runtime_record_coercion_compatible(type_ctx, actual, expected)
-        || runtime_variant_to_primitive_coercion_compatible(type_ctx, actual, expected)
-}
-
-fn runtime_record_coercion_compatible(
-    type_ctx: &TypeContext,
-    actual: TypeExprRef,
-    expected: TypeExprRef,
-) -> bool {
-    let Some((actual_repr, actual_fields)) = record_fields_for_type(type_ctx, actual) else {
-        return false;
-    };
-    let Some((expected_repr, expected_fields)) = record_fields_for_type(type_ctx, expected) else {
-        return false;
-    };
-    if actual_repr != expected_repr {
-        return false;
-    }
-
-    expected_fields.iter().all(|expected_field| {
-        let Some(actual_field) = actual_fields
-            .iter()
-            .find(|actual_field| actual_field.ld_id.name() == expected_field.ld_id.name())
-        else {
-            return false;
-        };
-        actual_field.ld_optional == expected_field.ld_optional
-            && label_declaration_runtime_name(actual_field)
-                == label_declaration_runtime_name(expected_field)
-            && runtime_field_type_compatible(type_ctx, actual_field.ld_type, expected_field.ld_type)
-    })
-}
-
-fn record_fields_for_type(
-    type_ctx: &TypeContext,
-    ty: TypeExprRef,
-) -> Option<(
-    crate::types::decl::RecordRepresentation,
-    Vec<crate::types::decl::LabelDeclaration>,
-)> {
-    let repr = type_ctx.repr(ty);
-    let desc = type_ctx.get_desc(repr);
-    let TypeDesc::Tconstr { path, .. } = &*desc else {
-        return None;
-    };
-    let decl = type_decl_for_path(type_ctx, path)?;
-    match decl.type_kind {
-        crate::types::decl::TypeKind::TypeRecord(fields, record_repr) => {
-            Some((record_repr, fields.into_vec()))
-        }
-        _ => None,
-    }
-}
-
-fn runtime_field_type_compatible(
-    type_ctx: &TypeContext,
-    actual: TypeExprRef,
-    expected: TypeExprRef,
-) -> bool {
-    type_ctx.repr(actual) == type_ctx.repr(expected)
-        || format_type_expr(type_ctx, actual) == format_type_expr(type_ctx, expected)
-        || {
-            let env = crate::types::Env::empty();
-            crate::types::ctype::subtype_now(type_ctx, &env, actual, expected).is_ok()
-        }
-}
-
-fn label_declaration_runtime_name(label: &crate::types::decl::LabelDeclaration) -> String {
-    // `Record_runtime.declaration_name`.
-    label.declaration_name()
-}
-
-fn runtime_variant_to_primitive_coercion_compatible(
-    type_ctx: &TypeContext,
-    actual: TypeExprRef,
-    expected: TypeExprRef,
-) -> bool {
-    let Some(expected_path) = primitive_coercion_target_path(type_ctx, expected) else {
-        return false;
-    };
-    let Some((actual_path, constructors, type_params, layout, unboxed)) =
-        variant_constructors_for_type(type_ctx, actual)
-    else {
-        return false;
-    };
-    if actual_path.same(&crate::types::predef::path_bool()) || !type_params.is_empty() {
-        return false;
-    }
-
-    constructors
-        .iter()
-        .enumerate()
-        .all(|(position, constructor)| {
-            variant_constructor_runtime_matches_primitive(
-                type_ctx,
-                constructor,
-                &layout.constructors[position],
-                unboxed,
-                &expected_path,
-            )
-        })
-}
-
-fn primitive_coercion_target_path(
-    type_ctx: &TypeContext,
-    ty: TypeExprRef,
-) -> Option<crate::types::Path> {
-    let repr = type_ctx.repr(ty);
-    let desc = type_ctx.get_desc(repr);
-    let TypeDesc::Tconstr { path, args, .. } = &*desc else {
-        return None;
-    };
-    if !args.is_empty() {
-        return None;
-    }
-    [
-        crate::types::predef::path_string(),
-        crate::types::predef::path_int(),
-        crate::types::predef::path_float(),
-        crate::types::predef::path_bigint(),
-    ]
-    .into_iter()
-    .find(|primitive_path| path.same(primitive_path))
-}
-
-fn variant_constructors_for_type(
-    type_ctx: &TypeContext,
-    ty: TypeExprRef,
-) -> Option<(
-    crate::types::Path,
-    Vec<crate::types::decl::ConstructorDeclaration>,
-    Vec<TypeExprRef>,
-    crate::types::VariantLayout,
-    bool,
-)> {
-    let repr = type_ctx.repr(ty);
-    let desc = type_ctx.get_desc(repr);
-    let TypeDesc::Tconstr { path, .. } = &*desc else {
-        return None;
-    };
-    let decl = type_decl_for_path(type_ctx, path)?;
-    match decl.type_kind {
-        crate::types::decl::TypeKind::TypeVariant(constructors, layout_ref) => {
-            let layout = type_ctx.variant_layout(layout_ref);
-            let unboxed = decl.type_representation == crate::types::TypeRepresentation::Unboxed
-                || layout.configuration().unboxed;
-            Some((
-                path.clone(),
-                constructors.into_vec(),
-                decl.type_params,
-                layout,
-                unboxed,
-            ))
-        }
-        _ => None,
-    }
-}
-
-fn variant_constructor_runtime_matches_primitive(
-    type_ctx: &TypeContext,
-    constructor: &crate::types::decl::ConstructorDeclaration,
-    case: &crate::types::VariantConstructorCase,
-    unboxed: bool,
-    target_path: &crate::types::Path,
-) -> bool {
-    match &constructor.cd_args {
-        crate::types::decl::ConstructorArguments::CstrTuple(args) if args.is_empty() => {
-            let tag = match case {
-                crate::types::VariantConstructorCase::Constant(tag) => &tag.literal,
-                crate::types::VariantConstructorCase::Block(_) => unreachable!(),
-            };
-            match variant_constructor_as_payload(tag) {
-                None | Some(VariantConstructorAsPayload::String) => {
-                    target_path.same(&crate::types::predef::path_string())
-                }
-                Some(VariantConstructorAsPayload::Int) => {
-                    target_path.same(&crate::types::predef::path_int())
-                }
-                Some(VariantConstructorAsPayload::Float) => {
-                    target_path.same(&crate::types::predef::path_float())
-                }
-                Some(VariantConstructorAsPayload::BigInt) => {
-                    target_path.same(&crate::types::predef::path_bigint())
-                }
-                Some(
-                    VariantConstructorAsPayload::Bool
-                    | VariantConstructorAsPayload::Null
-                    | VariantConstructorAsPayload::Undefined,
-                ) => false,
-            }
-        }
-        crate::types::decl::ConstructorArguments::CstrTuple(args) if args.len() == 1 && unboxed => {
-            !target_path.same(&crate::types::predef::path_int())
-                && type_expr_path_same(type_ctx, args[0], target_path)
-        }
-        _ => false,
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum VariantConstructorAsPayload {
-    String,
-    Int,
-    Float,
-    BigInt,
-    Bool,
-    Null,
-    Undefined,
-}
-
-fn variant_constructor_as_payload(
-    tag: &Option<crate::types::VariantLiteralTag>,
-) -> Option<VariantConstructorAsPayload> {
-    tag.as_ref().map(|tag| match tag {
-        crate::types::VariantLiteralTag::String(_) => VariantConstructorAsPayload::String,
-        crate::types::VariantLiteralTag::Int(_) => VariantConstructorAsPayload::Int,
-        crate::types::VariantLiteralTag::Float(_) => VariantConstructorAsPayload::Float,
-        crate::types::VariantLiteralTag::BigInt(_) => VariantConstructorAsPayload::BigInt,
-        crate::types::VariantLiteralTag::Bool(_) => VariantConstructorAsPayload::Bool,
-        crate::types::VariantLiteralTag::Null => VariantConstructorAsPayload::Null,
-        crate::types::VariantLiteralTag::Undefined => VariantConstructorAsPayload::Undefined,
-    })
-}
-
-fn type_expr_path_same(
-    type_ctx: &TypeContext,
-    ty: TypeExprRef,
-    target_path: &crate::types::Path,
-) -> bool {
-    matches!(
-        &*type_ctx.get_desc(type_ctx.repr(ty)),
-        TypeDesc::Tconstr { path, args, .. } if args.is_empty() && path.same(target_path)
-    )
 }
 
 fn source_text_is_constant(source_text: &str) -> bool {
@@ -8344,140 +8052,6 @@ fn append_string_to_polyvariant_help(
     true
 }
 
-fn append_string_to_variant_help(
-    type_ctx: &TypeContext,
-    arena: &ParseArena,
-    source: &str,
-    loc: LocIdx,
-    trace: &[(TypeExprRef, TypeExprRef)],
-    message: &mut String,
-) -> bool {
-    let Some((constructors, layout)) = trace.iter().copied().find_map(|(actual, expected)| {
-        (simple_type_constr_name(type_ctx, actual).as_deref() == Some("string"))
-            .then(|| concrete_variant_constructors(type_ctx, expected))
-            .flatten()
-    }) else {
-        return false;
-    };
-    let Some(source_literal) = source_text_at_loc(arena, source, loc) else {
-        return false;
-    };
-    let Some(string_value) = simple_string_literal_value(&source_literal) else {
-        return false;
-    };
-    let Some(constructor_name) =
-        constructors
-            .iter()
-            .enumerate()
-            .find_map(|(position, constructor)| {
-                let runtime_repr = variant_constructor_string_runtime_repr(
-                    constructor,
-                    &layout.constructors[position],
-                )?;
-                (runtime_repr == string_value).then(|| constructor.cd_id.name().to_string())
-            })
-    else {
-        return false;
-    };
-
-    message.push_str("\n\nPossible solutions:\n");
-    message.push_str("- The constant passed matches the runtime representation of one of the expected variant constructors. Did you mean to pass this as a variant constructor? If so, rewrite ");
-    message.push_str(INFO);
-    message.push_str(&source_literal);
-    message.push_str(RESET);
-    message.push_str(" to ");
-    message.push_str(INFO);
-    message.push_str(&constructor_name);
-    message.push_str(RESET);
-    true
-}
-
-fn concrete_variant_constructors(
-    type_ctx: &TypeContext,
-    ty: TypeExprRef,
-) -> Option<(
-    Vec<crate::types::decl::ConstructorDeclaration>,
-    crate::types::VariantLayout,
-)> {
-    let mut current = type_ctx.repr(ty);
-    let mut seen = Vec::new();
-
-    loop {
-        if seen.contains(&current) {
-            return None;
-        }
-        seen.push(current);
-
-        let desc = type_ctx.get_desc(current);
-        match &*desc {
-            TypeDesc::Tconstr { path, .. } => {
-                let decl = type_decl_for_path(type_ctx, path)?;
-                match decl.type_kind {
-                    crate::types::decl::TypeKind::TypeVariant(constructors, layout_ref) => {
-                        return Some((
-                            constructors.into_vec(),
-                            type_ctx.variant_layout(layout_ref),
-                        ));
-                    }
-                    crate::types::decl::TypeKind::TypeAbstract => {
-                        current = type_ctx.repr(decl.type_manifest?);
-                    }
-                    _ => return None,
-                }
-            }
-            TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) => {
-                current = type_ctx.repr(*next);
-            }
-            _ => return None,
-        }
-    }
-}
-
-fn type_decl_for_path(
-    type_ctx: &TypeContext,
-    path: &crate::types::Path,
-) -> Option<crate::types::TypeDeclaration> {
-    with_type_decl_for_path(type_ctx, path, |decl| decl.clone())
-}
-
-/// Look up the declaration for `path` (by stamp, then printed path, then head
-/// name) and apply `f` to it without cloning.
-fn with_type_decl_for_path<R>(
-    type_ctx: &TypeContext,
-    path: &crate::types::Path,
-    f: impl FnOnce(&crate::types::TypeDeclaration) -> R,
-) -> Option<R> {
-    if let crate::types::Path::Pident(id) = path
-        && id.stamp() != 0
-        && let Some(decl) = type_ctx.find_type_decl_by_stamp(id.stamp())
-    {
-        return Some(f(&decl));
-    }
-
-    if let Some(decl) = type_ctx.find_type_decl_by_path(&path.name()) {
-        return Some(f(&decl));
-    }
-
-    type_ctx
-        .find_type_decl(path.head_name())
-        .map(|decl| f(&decl))
-}
-
-fn variant_constructor_string_runtime_repr(
-    constructor: &crate::types::decl::ConstructorDeclaration,
-    case: &crate::types::VariantConstructorCase,
-) -> Option<String> {
-    let tag = match case {
-        crate::types::VariantConstructorCase::Constant(tag) => &tag.literal,
-        crate::types::VariantConstructorCase::Block(block) => &block.tag().literal,
-    };
-    match tag {
-        Some(crate::types::VariantLiteralTag::String(value)) => Some(value.clone()),
-        Some(_) => None,
-        None => Some(constructor.cd_id.name().to_string()),
-    }
-}
-
 fn type_clash_string_to_polyvariant(
     type_ctx: &TypeContext,
     trace: &[(TypeExprRef, TypeExprRef)],
@@ -8488,176 +8062,12 @@ fn type_clash_string_to_polyvariant(
     })
 }
 
-fn type_clash_string_to_variant(
-    type_ctx: &TypeContext,
-    trace: &[(TypeExprRef, TypeExprRef)],
-) -> bool {
-    trace.iter().copied().any(|(actual, expected)| {
-        simple_type_constr_name(type_ctx, actual).as_deref() == Some("string")
-            && concrete_variant_constructors(type_ctx, expected).is_some()
-    })
-}
-
 fn simple_string_literal_value(source_literal: &str) -> Option<String> {
     let quoted = source_literal.strip_prefix('"')?.strip_suffix('"')?;
     if quoted.contains('\\') {
         return None;
     }
     Some(quoted.to_string())
-}
-
-fn append_object_literal_record_help(
-    type_ctx: &TypeContext,
-    arena: &ParseArena,
-    source: &str,
-    loc: LocIdx,
-    trace: &[(TypeExprRef, TypeExprRef)],
-    message: &mut String,
-) -> bool {
-    let has_object_record_mismatch = [
-        bottom_type_clash_aliases(trace),
-        nested_type_clash_pair(type_ctx, trace),
-        trace.first().copied(),
-    ]
-    .into_iter()
-    .flatten()
-    .any(|(actual, expected)| {
-        type_is_object(type_ctx, actual) && type_is_record(type_ctx, expected)
-    });
-    if !has_object_record_mismatch {
-        return false;
-    }
-
-    message.push_str("\n\nYou're passing a ");
-    message.push_str(ERROR);
-    message.push_str("ReScript object");
-    message.push_str(RESET);
-    message.push_str(" where a ");
-    message.push_str(INFO);
-    message.push_str("record");
-    message.push_str(RESET);
-    message.push_str(
-        " is expected. Objects are written with quoted keys, and records with unquoted keys.",
-    );
-    message.push_str("\n\nPossible solutions: \n- Rewrite the object to a record");
-    if let Some(rewrite) = source_text_at_loc(arena, source, loc)
-        .and_then(|text| object_literal_to_record_rewrite(&text))
-    {
-        message.push_str(", like: ");
-        message.push_str(INFO);
-        message.push_str(&rewrite);
-        message.push_str(RESET);
-    }
-    message.push('\n');
-    message.push('\n');
-
-    true
-}
-
-fn append_braced_ident_record_help(
-    type_ctx: &TypeContext,
-    arena: &ParseArena,
-    source: &str,
-    loc: LocIdx,
-    context: &Option<TypeClashContext>,
-    trace: &[(TypeExprRef, TypeExprRef)],
-    message: &mut String,
-) -> bool {
-    if !matches!(context, Some(TypeClashContext::BracedIdent)) {
-        return false;
-    }
-    let Some((_, expected)) = trace.first().copied() else {
-        return false;
-    };
-    if !type_is_record(type_ctx, expected) {
-        return false;
-    }
-
-    let rewrite = source_text_at_loc(arena, source, loc)
-        .map(|text| braced_ident_record_rewrite(&text))
-        .unwrap_or_default();
-
-    message
-        .push_str("\n\nYou might have meant to pass this as a record, but wrote it as a block.\n");
-    message.push_str(
-        "Braces with a single identifier counts as a block, not a record with a single (punned) field.\n\n",
-    );
-    message.push_str("Possible solutions: \n");
-    message.push_str("- Write out the full record with field and value, like: ");
-    message.push_str(INFO);
-    message.push_str(&rewrite);
-    message.push_str(RESET);
-    message.push_str("\n- Return the expected record from the block");
-
-    true
-}
-
-fn braced_ident_record_rewrite(text: &str) -> String {
-    let ident = text
-        .trim()
-        .trim_start_matches('{')
-        .trim_end_matches('}')
-        .trim();
-    format!("{{{ident}: {ident}}}")
-}
-
-fn object_literal_to_record_rewrite(text: &str) -> Option<String> {
-    let mut output = String::with_capacity(text.len());
-    let chars: Vec<char> = text.chars().collect();
-    let mut index = 0;
-    let mut changed = false;
-
-    while index < chars.len() {
-        if chars[index] != '"' {
-            output.push(chars[index]);
-            index += 1;
-            continue;
-        }
-
-        let start = index + 1;
-        let mut end = start;
-        let mut escaped = false;
-        while end < chars.len() {
-            let ch = chars[end];
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == '"' {
-                break;
-            }
-            end += 1;
-        }
-        if end >= chars.len() {
-            return None;
-        }
-
-        let key: String = chars[start..end].iter().collect();
-        let mut after = end + 1;
-        while after < chars.len() && chars[after].is_whitespace() {
-            after += 1;
-        }
-        if after < chars.len() && chars[after] == ':' && is_record_field_rewrite_key(&key) {
-            output.push_str(&key);
-            changed = true;
-        } else {
-            output.push('"');
-            output.push_str(&key);
-            output.push('"');
-        }
-        index = end + 1;
-    }
-
-    changed.then_some(output)
-}
-
-fn is_record_field_rewrite_key(key: &str) -> bool {
-    let mut chars = key.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    (first == '_' || first.is_ascii_alphabetic())
-        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
 fn append_jsx_element_type_clash_help(
@@ -8946,93 +8356,8 @@ fn expanded_type_clash_entry(
     ty: TypeExprRef,
 ) -> (TypeExprRef, TypeExprRef) {
     let repr = type_ctx.repr(ty);
-    let expansion = type_ctx
-        .trace_expansion(repr)
-        .or_else(|| type_alias_expansion(type_ctx, repr))
-        .unwrap_or(repr);
+    let expansion = type_ctx.trace_expansion(repr).unwrap_or(repr);
     (repr, expansion)
-}
-
-fn type_alias_expansion(type_ctx: &TypeContext, ty: TypeExprRef) -> Option<TypeExprRef> {
-    let repr = type_ctx.repr(ty);
-    let desc = type_ctx.get_desc(repr);
-    let TypeDesc::Tconstr { path, args, .. } = &*desc else {
-        return None;
-    };
-    let path = path.clone();
-    let args = args.clone();
-    drop(desc);
-
-    let manifest = type_decl_manifest_for_path(type_ctx, &path)?;
-    let (params, manifest) = manifest;
-    let expansion = if params.len() == args.len() {
-        crate::types::ctype::subst_type_params(type_ctx, &params, &args, manifest)
-    } else {
-        manifest
-    };
-    Some(type_ctx.repr(expansion))
-}
-
-fn type_alias_full_expansion(type_ctx: &TypeContext, ty: TypeExprRef) -> Option<TypeExprRef> {
-    let original = type_ctx.repr(ty);
-    let mut current = original;
-    let mut seen = AHashSet::new();
-    let mut changed = false;
-
-    while seen.insert(current) {
-        let Some(next) = type_alias_expansion(type_ctx, current) else {
-            break;
-        };
-        let next = type_ctx.repr(next);
-        if next == current {
-            break;
-        }
-        current = next;
-        changed = true;
-    }
-
-    changed.then_some(current)
-}
-
-fn type_decl_manifest_for_path(
-    type_ctx: &TypeContext,
-    path: &crate::types::Path,
-) -> Option<(Vec<TypeExprRef>, TypeExprRef)> {
-    let from_decl = |decl: std::cell::Ref<'_, crate::types::TypeDeclaration>| {
-        decl.type_manifest
-            .map(|manifest| (decl.type_params.clone(), manifest))
-    };
-
-    // A predefined type (e.g. `promise`) has no manifest; resolving it by name
-    // could pick a user declaration that shadows it.
-    if let crate::types::Path::Pident(id) = path
-        && crate::types::predef::find_predef_ident(id.name())
-            .is_some_and(|predef| predef.stamp() == id.stamp())
-    {
-        return None;
-    }
-
-    // Once the declaration for `path` is found, its manifest (or lack of one)
-    // is the answer; falling back to another declaration with the same name
-    // would expand an unrelated type.
-    if let crate::types::Path::Pident(id) = path
-        && id.stamp() != 0
-        && let Some(decl) = type_ctx.find_type_decl_by_stamp(id.stamp())
-    {
-        return from_decl(decl);
-    }
-
-    if let Some(decl) = type_ctx.find_type_decl_by_path(&path.name()) {
-        return from_decl(decl);
-    }
-
-    if let Some(decl) = type_ctx.find_type_decl(path.head_name())
-        && let Some(result) = from_decl(decl)
-    {
-        return Some(result);
-    }
-
-    None
 }
 
 fn type_expansion_same(type_ctx: &TypeContext, ty: TypeExprRef, expansion: TypeExprRef) -> bool {
@@ -9453,25 +8778,6 @@ fn type_is_object(type_ctx: &TypeContext, ty: TypeExprRef) -> bool {
         &*type_ctx.borrow_desc(repr),
         TypeDesc::Tobject { .. } | TypeDesc::Tfield { .. }
     )
-}
-
-fn type_is_record(type_ctx: &TypeContext, ty: TypeExprRef) -> bool {
-    let repr = type_ctx.repr(ty);
-    match &*type_ctx.get_desc(repr) {
-        TypeDesc::Tconstr { path, .. } => type_path_is_record(type_ctx, path),
-        TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) => type_is_record(type_ctx, *next),
-        _ => false,
-    }
-}
-
-fn type_path_is_record(type_ctx: &TypeContext, path: &crate::types::Path) -> bool {
-    with_type_decl_for_path(type_ctx, path, |decl| {
-        matches!(
-            &decl.type_kind,
-            crate::types::decl::TypeKind::TypeRecord(_, _)
-        )
-    })
-    .unwrap_or(false)
 }
 
 fn type_is_dict(type_ctx: &TypeContext, ty: TypeExprRef) -> bool {

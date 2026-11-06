@@ -1742,7 +1742,6 @@ impl PersistentEnv {
         // before serialization. We only need to:
         // 1. Internalize types into the current TypeContext
         // 2. Collect alias rewrites
-        // 3. Register types by stamp (without cascading alias resolution)
         if let Some((portable_key, portable)) = self.portable_cache_entry(name) {
             if debug_pers {
                 eprintln!("[pers] portable {name} key={portable_key}");
@@ -1763,14 +1762,6 @@ impl PersistentEnv {
                 &effective_module_path,
                 &mut self.view_mut().alias_prefix_rewrites,
             );
-            let shared = ctx.thread_store().owns_signature(&ps.ps_sig);
-            register_sig_types_recursive(&ps.ps_sig, &effective_module_path, ctx, shared);
-            if !effective_module_path.same(&module_path) {
-                register_sig_types_recursive(&ps.ps_sig, &module_path, ctx, shared);
-            }
-            // `register_sig_types_recursive` already registers every
-            // declaration with a non-zero stamp under that stamp, in this
-            // order, so no separate by-stamp pass is needed.
             if should_register_lazy_raw_sig(&portable_key, &self.view.alias_prefix_rewrites)
                 && !ctx.has_raw_module_sig(&portable_key)
             {
@@ -1844,20 +1835,6 @@ impl PersistentEnv {
                 &effective_module_path,
                 &mut self.view_mut().alias_prefix_rewrites,
             );
-            // Reusing a worker `TypeContext` clears short-name and stamp-keyed
-            // declaration tables at unit boundaries because OCaml resets local
-            // stamps per unit (`compiler/ml/predef.ml:447`). A cache hit still
-            // has to re-install this module's declarations for the current unit;
-            // OCaml exposes the same ps_sig through the persistent table
-            // (`compiler/ml/env.ml:711-746`) without re-reading the CMI.
-            let shared = ctx.thread_store().owns_signature(&ps.ps_sig);
-            register_sig_types_recursive(&ps.ps_sig, &effective_module_path, ctx, shared);
-            if !effective_module_path.same(&module_path) {
-                register_sig_types_recursive(&ps.ps_sig, &module_path, ctx, shared);
-            }
-            // `register_sig_types_recursive` already registers every
-            // declaration with a non-zero stamp under that stamp, in this
-            // order, so no separate by-stamp pass is needed.
         }
 
         if should_register_lazy_raw_sig(cache_key, &self.view.alias_prefix_rewrites)
@@ -1902,7 +1879,6 @@ impl PersistentEnv {
             &effective_module_path,
             &mut self.view_mut().alias_prefix_rewrites,
         );
-        register_sig_types_recursive(&signature, &effective_module_path, ctx, false);
         let signature = Arc::new(signature);
         if should_register_lazy_raw_sig(name, &self.view.alias_prefix_rewrites) {
             ctx.register_raw_module_sig(name, signature.clone());
@@ -2930,97 +2906,6 @@ impl PersistentEnv {
     }
 }
 
-/// `module_path` is the path to the module containing this signature
-/// (e.g., `Pident(Js)` or `Pdot(Pident(Js), "Promise")`).
-/// `load_path` is used to resolve module aliases by loading CMI files.
-/// Install the type declarations of a loaded signature in this unit's
-/// registries. `shared` says the signature is owned by the worker store, so
-/// the `Arc` handles can be shared across compilations instead of cloned.
-fn register_sig_types_recursive(
-    sig: &Signature,
-    module_path: &Path,
-    ctx: &TypeContext,
-    shared: bool,
-) {
-    if shared {
-        let store = ctx.thread_store();
-        let registrations = store.sig_type_registrations(sig, module_path, || {
-            let mut registrations = Vec::new();
-            collect_sig_type_registrations(sig, module_path, ctx, &mut registrations);
-            registrations
-        });
-        ctx.register_sig_type_registrations(&registrations);
-        return;
-    }
-    for item in sig {
-        match item {
-            SignatureItem::SigType(id, decl, _) => {
-                let decl = if shared {
-                    ctx.thread_store().shared_type_decl(decl)
-                } else {
-                    decl.clone()
-                };
-                ctx.register_shared_type_decl(id.name(), decl.clone());
-                // Also register by stamp for precise lookup when name is ambiguous (e.g., "t")
-                if id.stamp() != 0 {
-                    ctx.register_shared_type_decl_by_stamp(id.stamp(), decl.clone());
-                }
-                // Register by fully qualified path for Pdot lookup (e.g., "Js.Promise.t")
-                let full_path = Path::pdot(module_path.clone(), id.name());
-                ctx.register_shared_type_decl_by_path(&full_path.name(), decl.clone());
-                ctx.register_shared_type_decl_by_exact_path(full_path, decl);
-            }
-            SignatureItem::SigModule(id, md, _) => {
-                let sub_path = Path::pdot(module_path.clone(), id.name());
-                match &md.md_type {
-                    ModuleType::MtySignature(sub_sig) => {
-                        // Recurse into sub-module signatures with extended path
-                        register_sig_types_recursive(sub_sig, &sub_path, ctx, shared);
-                    }
-                    // Match OCaml's lazy persistent-module behavior: don't eagerly
-                    // load aliased CMIs here just to pre-register their nested types.
-                    // Module-alias type lookup goes through module resolution later.
-                    ModuleType::MtyAlias(_, _) => {}
-                    _ => {}
-                }
-            }
-            _ => {}
-        }
-    }
-}
-
-/// The registrations `register_sig_types_recursive` installs for a
-/// store-owned signature, in installation order.
-fn collect_sig_type_registrations(
-    sig: &Signature,
-    module_path: &Path,
-    ctx: &TypeContext,
-    out: &mut Vec<crate::types::thread_store::SigTypeRegistration>,
-) {
-    for item in sig {
-        match item {
-            SignatureItem::SigType(id, decl, _) => {
-                let decl = ctx.thread_store().shared_type_decl(decl);
-                let qualified_path = Path::pdot(module_path.clone(), id.name());
-                out.push(crate::types::thread_store::SigTypeRegistration {
-                    name: smol_str::SmolStr::new_static(id.name()),
-                    stamp: id.stamp(),
-                    qualified_name: smol_str::SmolStr::new(qualified_path.name()),
-                    qualified_path,
-                    decl,
-                });
-            }
-            SignatureItem::SigModule(id, md, _) => {
-                if let ModuleType::MtySignature(sub_sig) = &md.md_type {
-                    let sub_path = Path::pdot(module_path.clone(), id.name());
-                    collect_sig_type_registrations(sub_sig, &sub_path, ctx, out);
-                }
-            }
-            _ => {}
-        }
-    }
-}
-
 #[cfg(test)]
 mod cmj_export_tests {
     use super::*;
@@ -3876,42 +3761,6 @@ fn decode_cmj_list<T>(
 /// For each signature item, we add the appropriate binding to the environment.
 ///
 /// Uses "opened" add methods so that these bindings do NOT shadow existing
-/// Recursively register all types from a module type (and sub-modules) by stamp.
-/// This ensures that types referenced in function signatures can be expanded
-/// during type unification, even when the type comes from a deeply nested module.
-pub(crate) fn register_types_by_stamp_recursive(md_type: &ModuleType, ctx: &TypeContext) {
-    if let ModuleType::MtySignature(sig) = md_type {
-        register_types_by_stamp_in_signature_recursive(sig, ctx, false);
-    }
-}
-
-fn register_types_by_stamp_in_signature_recursive(
-    sig: &Signature,
-    ctx: &TypeContext,
-    shared: bool,
-) {
-    for item in sig {
-        match item {
-            SignatureItem::SigType(id, decl, _) => {
-                if id.stamp() != 0 {
-                    let decl = if shared {
-                        ctx.thread_store().shared_type_decl(decl)
-                    } else {
-                        decl.clone()
-                    };
-                    ctx.register_shared_type_decl_by_stamp(id.stamp(), decl);
-                }
-            }
-            SignatureItem::SigModule(_, md, _) => {
-                if let ModuleType::MtySignature(sub_sig) = &md.md_type {
-                    register_types_by_stamp_in_signature_recursive(sub_sig, ctx, shared);
-                }
-            }
-            _ => {}
-        }
-    }
-}
-
 /// Substitute type paths in type expressions.
 ///
 /// This implements the equivalent of OCaml's `Subst.type_path` applied to type expressions.
@@ -6977,7 +6826,7 @@ pub fn open_signature_components_into_env(
     // table to `add_components`. The component table was built by
     // env.ml:1513-1588, including the env.ml:1530 `prefix_idents` substitution,
     // so an `open` must not apply a second signature-wide substitution here.
-    add_signature_to_env_with_options(sig_items, module_path, env, ctx, true, false, true, None);
+    add_signature_to_env_with_options(sig_items, module_path, env, ctx, true, false, None);
 }
 
 pub(crate) fn open_module_components_into_env(
@@ -7000,7 +6849,6 @@ fn add_signature_to_env_with_options(
     ctx: &TypeContext,
     as_opened: bool,
     apply_path_subst: bool,
-    register_loaded_types: bool,
     precomputed_components: Option<&crate::types::env_lazy::QualifiedModuleComponents>,
 ) {
     if as_opened {
@@ -7009,7 +6857,6 @@ fn add_signature_to_env_with_options(
             module_path,
             ctx,
             apply_path_subst,
-            register_loaded_types,
             precomputed_components,
         );
         env.add_prebuilt_open_layers(module_path.clone(), &layers);
@@ -7022,7 +6869,6 @@ fn add_signature_to_env_with_options(
         ctx,
         false,
         apply_path_subst,
-        register_loaded_types,
         precomputed_components,
         None,
     );
@@ -7034,7 +6880,6 @@ fn build_opened_layers(
     module_path: &Path,
     ctx: &TypeContext,
     apply_path_subst: bool,
-    register_loaded_types: bool,
     precomputed_components: Option<&crate::types::env_lazy::QualifiedModuleComponents>,
 ) -> crate::types::env::OpenedLayers {
     let mut out = None;
@@ -7045,7 +6890,6 @@ fn build_opened_layers(
         ctx,
         true,
         apply_path_subst,
-        register_loaded_types,
         precomputed_components,
         Some(&mut out),
     );
@@ -7065,7 +6909,6 @@ fn open_components_into_env(
             components.access_path(),
             ctx,
             false,
-            true,
             Some(components),
         )
     });
@@ -7080,7 +6923,6 @@ fn add_signature_to_env_with_options_inner(
     ctx: &TypeContext,
     as_opened: bool,
     apply_path_subst: bool,
-    register_loaded_types: bool,
     precomputed_components: Option<&crate::types::env_lazy::QualifiedModuleComponents>,
     opened_out: Option<&mut Option<crate::types::env::OpenedLayers>>,
 ) {
@@ -7179,15 +7021,6 @@ fn add_signature_to_env_with_options_inner(
                     opened_types.push((*id, decl.clone()));
                 } else {
                     env.add_type(*id, decl.clone());
-                }
-
-                // Also register in global type store for alias expansion
-                if register_loaded_types {
-                    ctx.register_shared_type_decl(id.name(), decl.clone());
-                    // Register by stamp for types from CMI modules (non-zero stamp)
-                    if id.stamp() != 0 {
-                        ctx.register_shared_type_decl_by_stamp(id.stamp(), decl.clone());
-                    }
                 }
 
                 // Also add constructors and labels from this type
@@ -7485,11 +7318,6 @@ fn add_signature_to_env_with_options_inner(
                     }
                 } else {
                     env.add_module(*id, md.clone());
-                }
-                // Recursively register types from sub-module signatures by stamp,
-                // so that types referenced in function return types can be expanded
-                if register_loaded_types {
-                    register_types_by_stamp_recursive(&md.md_type, ctx);
                 }
             }
             SignatureItem::SigModtype(id, mtd) => {
