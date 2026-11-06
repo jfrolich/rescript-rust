@@ -5,7 +5,7 @@ build:
 
 # In-process builds write no .cmt files: the doc command reads them from a watcher.
 test: build
-	../analysis_tests/with-watcher.sh ./test.sh
+	../analysis_tests/with-watcher.sh bash ./test.sh
 	yarn build
 
 clean:

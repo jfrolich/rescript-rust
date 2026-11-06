@@ -525,6 +525,12 @@ let rec lambda ~with_locs (lam : Lambda.t) =
       ident exn;
       lambda ~with_locs handler;
     ]
+  | Ltryfinally (body, finally) ->
+    Sexp.list [
+      Sexp.atom "Ltryfinally";
+      lambda ~with_locs body;
+      lambda ~with_locs finally;
+    ]
   | Lifthenelse (cond, then_, else_) ->
     Sexp.list [
       Sexp.atom "Lifthenelse";

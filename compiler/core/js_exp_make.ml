@@ -1059,7 +1059,21 @@ let rec simplify_and_ ~n (e1 : t) (e2 : t) : t option =
               {expression_desc = Typeof {expression_desc = Var ia}},
               {expression_desc = Str "boolean"} ) )
         when Js_op_util.same_vident ia ib ->
-        Some {expression_desc = Bool (not b); comment = None; source_loc = None}
+        (* A boolean other than [b] is [!b] *)
+        Some
+          {
+            expression_desc =
+              Bin
+                ( EqEqEq,
+                  {expression_desc = Var ib; comment = None; source_loc = None},
+                  {
+                    expression_desc = Bool (not b);
+                    comment = None;
+                    source_loc = None;
+                  } );
+            comment = None;
+            source_loc = None;
+          }
       | ( Bin
             ( EqEqEq,
               {expression_desc = Typeof {expression_desc = Var ia}},
@@ -1555,8 +1569,15 @@ let bool_comp (cmp : Lambda.comparison) ?comment (e0 : t) (e1 : t) =
       bin ?comment (Lam_compile_util.jsop_of_comp cmp) e0 e1)
   | _, _ -> bin ?comment (Lam_compile_util.jsop_of_comp cmp) e0 e1
 
+let float_comp (cmp : Lambda.comparison) ?comment (e0 : t) (e1 : t) =
+  match cmp with
+  | Ceq | Cneq -> int_comp cmp ?comment e0 e1
+  | Clt | Cgt | Cle | Cge ->
+    bin ?comment (Lam_compile_util.jsop_of_float_comp cmp) e0 e1
+
+(* The operands may be of any type, so they may be NaN *)
 let js_comp cmp ?comment e0 e1 =
-  bin ?comment (Lam_compile_util.jsop_of_comp cmp) e0 e1
+  bin ?comment (Lam_compile_util.jsop_of_float_comp cmp) e0 e1
 
 let rec int32_lsr ?comment (e1 : J.expression) (e2 : J.expression) :
     J.expression =

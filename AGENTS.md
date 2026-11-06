@@ -514,7 +514,7 @@ These principles apply to all performance-sensitive Rust code in the compiler, e
 - Build must pass before committing
 - **Commit atomically** - Each commit should address exactly one concern (one bug fix, one feature, one refactor). When making multiple related changes, split them into separate atomic commits. For example, if fixing a parity issue requires adding a new field to a struct and then using that field in parsing logic, make two commits: one for the struct change, one for the parsing logic. This makes it easier to review changes, bisect issues, revert specific changes if needed, and understand the evolution of the codebase. Each commit message should clearly describe what was changed and why.
 - Write each commit message as a record in the format of
-  [`.claude/skills/records/SKILL.md`](.claude/skills/records/SKILL.md), and
+  [`.agents/skills/records/SKILL.md`](.agents/skills/records/SKILL.md), and
   render review pages from records with `make semantic-diff`
 
 ### Stacked pull requests

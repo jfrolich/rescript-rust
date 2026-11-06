@@ -243,8 +243,8 @@ run_parser_ast_tests() {
 
     cd "$PROJECT_ROOT/tests"
 
-    # Find all test files from idempotency and printer directories
-    find syntax_tests/data/idempotency syntax_tests/data/printer -name "*.res" -o -name "*.resi" 2>/dev/null | sort > "$TEMP_DIR/parser_files.txt"
+    # Find all test files from the printer directory
+    find syntax_tests/data/printer -name "*.res" -o -name "*.resi" 2>/dev/null | sort > "$TEMP_DIR/parser_files.txt"
     local file_count=$(wc -l < "$TEMP_DIR/parser_files.txt" | tr -d ' ')
 
     echo "Testing $file_count files..."

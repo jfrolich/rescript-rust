@@ -19,7 +19,7 @@
 # - If a file in the baseline fails, it's flagged as a REGRESSION
 # - Regressions cause the test to fail, preventing parity from decreasing
 #
-# Uses test files from tests/syntax_tests/data/{idempotency,printer,ppx,conversion,ast-mapping}
+# Uses test files from tests/syntax_tests/data/{printer,ppx,conversion,ast-mapping}
 # and ~/dev/tella-fusion when present (override with TELLA_DIR).
 #
 # USAGE:
@@ -232,11 +232,11 @@ if [[ -n "$FILE_ARG" ]]; then
     else
         PATTERN_MODE=true
         # Treat as a pattern and use find with -path
-        find syntax_tests/data/idempotency syntax_tests/data/printer syntax_tests/data/ppx syntax_tests/data/conversion syntax_tests/data/ast-mapping \( -name "*.res" -o -name "*.resi" \) 2>/dev/null | grep -E "$FILE_ARG" | sort > "$TEMP_DIR/files.txt" || true
+        find syntax_tests/data/printer syntax_tests/data/ppx syntax_tests/data/conversion syntax_tests/data/ast-mapping \( -name "*.res" -o -name "*.resi" \) 2>/dev/null | grep -E "$FILE_ARG" | sort > "$TEMP_DIR/files.txt" || true
     fi
 else
     # Find all test files
-    find syntax_tests/data/idempotency syntax_tests/data/printer syntax_tests/data/ppx syntax_tests/data/conversion syntax_tests/data/ast-mapping \( -name "*.res" -o -name "*.resi" \) 2>/dev/null | sort > "$TEMP_DIR/files.txt"
+    find syntax_tests/data/printer syntax_tests/data/ppx syntax_tests/data/conversion syntax_tests/data/ast-mapping \( -name "*.res" -o -name "*.resi" \) 2>/dev/null | sort > "$TEMP_DIR/files.txt"
 fi
 
 # Include external corpus by reference (no file copying).

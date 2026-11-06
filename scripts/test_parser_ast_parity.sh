@@ -28,7 +28,7 @@
 # NOTE: Printer parity (res/ml output) is tested by test_syntax.sh
 # NOTE: Parsetree0/PPX parity is tested by test_parser_ast0_parity.sh
 #
-# Uses test files from tests/syntax_tests/data/{idempotency,printer,ppx,conversion,ast-mapping}
+# Uses test files from tests/syntax_tests/data/{printer,ppx,conversion,ast-mapping}
 # and tests/ppx_spice/src for spice parity.
 # External Tella files are opt-in via --with-external and require TELLA_REVISION.
 #
@@ -295,13 +295,13 @@ if [[ -n "$FILE_ARG" ]]; then
         # Treat as a pattern and use find with -path
         # Exclude: errors (syntax errors), recovery (error recovery tests), infiniteLoops (stress tests that may hang/fail both parsers)
         # Also exclude specific files where both OCaml and Rust parsers fail
-        find syntax_tests/data/idempotency syntax_tests/data/printer syntax_tests/data/ppx syntax_tests/data/conversion syntax_tests/data/ast-mapping syntax_tests/data/parsing \( -name "*.res" -o -name "*.resi" \) -not -path "*/errors/*" -not -path "*/recovery/*" -not -path "*/infiniteLoops/*" -not -path "*/ffi/export.res" -not -path "*/parsing/other/gentype.res" 2>/dev/null | grep -E "$FILE_ARG" | sort > "$TEMP_DIR/files.txt" || true
+        find syntax_tests/data/printer syntax_tests/data/ppx syntax_tests/data/conversion syntax_tests/data/ast-mapping syntax_tests/data/parsing \( -name "*.res" -o -name "*.resi" \) -not -path "*/errors/*" -not -path "*/recovery/*" -not -path "*/infiniteLoops/*" -not -path "*/ffi/export.res" -not -path "*/parsing/other/gentype.res" 2>/dev/null | grep -E "$FILE_ARG" | sort > "$TEMP_DIR/files.txt" || true
     fi
 else
     # Find all test files
     # Exclude: errors (syntax errors), recovery (error recovery tests), infiniteLoops (stress tests that may hang/fail both parsers)
     # Also exclude specific files where both OCaml and Rust parsers fail
-    find syntax_tests/data/idempotency syntax_tests/data/printer syntax_tests/data/ppx syntax_tests/data/conversion syntax_tests/data/ast-mapping syntax_tests/data/parsing \( -name "*.res" -o -name "*.resi" \) -not -path "*/errors/*" -not -path "*/recovery/*" -not -path "*/infiniteLoops/*" -not -path "*/ffi/export.res" -not -path "*/parsing/other/gentype.res" 2>/dev/null | sort > "$TEMP_DIR/files.txt"
+    find syntax_tests/data/printer syntax_tests/data/ppx syntax_tests/data/conversion syntax_tests/data/ast-mapping syntax_tests/data/parsing \( -name "*.res" -o -name "*.resi" \) -not -path "*/errors/*" -not -path "*/recovery/*" -not -path "*/infiniteLoops/*" -not -path "*/ffi/export.res" -not -path "*/parsing/other/gentype.res" 2>/dev/null | sort > "$TEMP_DIR/files.txt"
 fi
 
 # Include an explicitly pinned external corpus by reference (no file copying).

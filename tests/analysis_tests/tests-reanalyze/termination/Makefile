@@ -5,7 +5,7 @@ build:
 
 # In-process builds write no .cmt files: reanalyze reads them from a watcher.
 test: build
-	../../with-watcher.sh ./test.sh
+	../../with-watcher.sh bash ./test.sh
 
 clean:
 	yarn clean

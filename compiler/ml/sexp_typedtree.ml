@@ -451,13 +451,15 @@ and expression_desc ~with_locs desc =
       exn_cases_sexp;
       partial p;
     ]
-  | Texp_try (e, cases) ->
+  | Texp_try (e, cases, finally) ->
     let e_sexp = expression ~with_locs e in
     let cases_sexp = Sexp.list (List.map (case ~with_locs) cases) in
+    let finally_sexp = opt (expression ~with_locs) finally in
     Sexp.list [
       Sexp.atom "Texp_try";
       e_sexp;
       cases_sexp;
+      finally_sexp;
     ]
   | Texp_tuple l ->
     let items = List.map (expression ~with_locs) l in

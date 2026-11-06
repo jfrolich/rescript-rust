@@ -909,9 +909,17 @@ and tree_of_constructor_arguments ?printing_context = function
 
 and tree_of_constructor ?printing_context ~layout ~position cd =
   let name = Ident.name cd.cd_id in
-  let nullary = Ast_untagged_variants.is_nullary_variant cd.cd_args in
+  (* The [@as] of a nullary case or of a tagged case with a payload sets its
+     runtime tag; an untagged case is its payload *)
+  let tagged =
+    Ast_untagged_variants.is_nullary_variant cd.cd_args
+    ||
+    match Variant_runtime.constructor_at layout position with
+    | Block (Tagged _) -> true
+    | Block (Untagged _) | Constant _ -> false
+  in
   let repr =
-    if not nullary then None
+    if not tagged then None
     else
       let as_annotation = function
         | Variant_runtime.Null -> "@as(null)"
@@ -1596,7 +1604,7 @@ let print_variant_configuration_issue ppf
     let print_unboxed_status ppf unboxed name =
       fprintf ppf "@ - Variant @{<info>%s@} is @{<error>%s@}unboxed."
         (Path.name name)
-        (if unboxed then "not " else "")
+        (if unboxed then "" else "not ")
     in
     print_unboxed_status ppf left_unboxed left_variant_name;
     print_unboxed_status ppf right_unboxed right_variant_name;
