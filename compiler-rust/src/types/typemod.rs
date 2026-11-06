@@ -218,7 +218,7 @@ fn translate_type_declaration_params<'a>(
         let core_type = arena.get_core_type(*core_type_idx);
         let (typed_core_type, type_ref) = match &core_type.ptyp_desc {
             crate::parser::ast::CoreTypeDesc::Ptyp_any => {
-                let type_ref = ctx.new_var(Some("_".to_string()));
+                let type_ref = ctx.new_var(Some(crate::name::Name::new("_")));
                 (
                     TypedCoreType {
                         ctyp_desc: TypedCoreTypeDesc::Ttyp_var(None),
@@ -238,7 +238,7 @@ fn translate_type_declaration_params<'a>(
                         loc: core_type.ptyp_loc,
                     });
                 }
-                let type_ref = ctx.new_var(Some(name.to_string()));
+                let type_ref = ctx.new_var(Some(crate::name::Name::new(&name)));
                 (
                     TypedCoreType {
                         ctyp_desc: TypedCoreTypeDesc::Ttyp_var(Some(name.to_string())),
@@ -6518,9 +6518,9 @@ fn arg_labels_equal_for_abbrev_recursion(
 fn type_var_name_for_abbrev_recursion(
     ctx: &crate::types::context::TypeContext,
     ty: TypeExprRef,
-) -> Option<String> {
+) -> Option<crate::name::Name> {
     match &*ctx.get_desc(ctx.repr(ty)) {
-        TypeDesc::Tvar(name) | TypeDesc::Tunivar(name) => name.clone(),
+        TypeDesc::Tvar(name) | TypeDesc::Tunivar(name) => *name,
         _ => None,
     }
 }
@@ -11987,7 +11987,7 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                                 let param_ty = arena.get_core_type(*param_ty_idx);
                                 let param_ref = match &param_ty.ptyp_desc {
                                     crate::parser::ast::CoreTypeDesc::Ptyp_any => {
-                                        tctx.type_ctx.new_var(Some("_".to_string()))
+                                        tctx.type_ctx.new_var(Some(crate::name::Name::new("_")))
                                     }
                                     crate::parser::ast::CoreTypeDesc::Ptyp_var(name) => {
                                         let name = arena.get_string(*name);
@@ -11997,7 +11997,7 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                                                 loc: param_ty.ptyp_loc,
                                             });
                                         }
-                                        tctx.type_ctx.new_var(Some(name.to_string()))
+                                        tctx.type_ctx.new_var(Some(crate::name::Name::new(&name)))
                                     }
                                     _ => {
                                         let (_typed_param, param_ref) =
@@ -14398,9 +14398,8 @@ fn signature_item_contains_type(env: &Env, item: &crate::types::decl::SignatureI
     }
 }
 
-fn type_var_report_name(name: &Option<String>) -> String {
-    name.as_ref()
-        .map(|name| format!("'{name}"))
+fn type_var_report_name(name: Option<&str>) -> String {
+    name.map(|name| format!("'{name}"))
         .unwrap_or_else(|| "_".to_string())
 }
 
@@ -14540,7 +14539,7 @@ fn type_var_report_name_from_type_expr(
     ty: TypeExprRef,
 ) -> String {
     match &*ctx.get_desc(ctx.repr(ty)) {
-        TypeDesc::Tvar(name) | TypeDesc::Tunivar(name) => type_var_report_name(name),
+        TypeDesc::Tvar(name) | TypeDesc::Tunivar(name) => type_var_report_name(name.as_deref()),
         _ => "_".to_string(),
     }
 }
@@ -14603,7 +14602,7 @@ fn find_unbound_type_var_detail_in_single_type(
             fields.into_iter().find_map(|field| {
                 crate::types::ctype::deep_occur(ctx, unbound, field.typ).then_some(
                     UnboundTypeVarDetail::Method {
-                        name: field.name,
+                        name: field.name.to_string(),
                         ty: field.typ,
                     },
                 )
@@ -14676,9 +14675,8 @@ fn find_unbound_type_var_in_typed_core_type_before_closed_decl(
         TypedCoreTypeDesc::Ttyp_var(name) => {
             let ty = ctx.repr(ctyp.ctyp_type);
             match &*ctx.get_desc(ty) {
-                TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) => {
-                    (!allowed.contains(&ty)).then(|| (type_var_report_name(name), ctyp.ctyp_loc))
-                }
+                TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) => (!allowed.contains(&ty))
+                    .then(|| (type_var_report_name(name.as_deref()), ctyp.ctyp_loc)),
                 _ => None,
             }
         }
@@ -14720,9 +14718,8 @@ fn find_unbound_type_var_in_typed_core_type(
         TypedCoreTypeDesc::Ttyp_var(name) => {
             let ty = ctx.repr(ctyp.ctyp_type);
             match &*ctx.get_desc(ty) {
-                TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) => {
-                    (!allowed.contains(&ty)).then(|| (type_var_report_name(name), ctyp.ctyp_loc))
-                }
+                TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) => (!allowed.contains(&ty))
+                    .then(|| (type_var_report_name(name.as_deref()), ctyp.ctyp_loc)),
                 _ => None,
             }
         }
@@ -16942,7 +16939,7 @@ fn type_structure_item<'a>(
                             // type params are at the elevated level from begin_def and
                             // get properly generalized by end_def + generalize.
                             // OCaml creates type params with newvar() at !current_level.
-                            let type_ref = ctx.new_var(Some("_".to_string()));
+                            let type_ref = ctx.new_var(Some(crate::name::Name::new("_")));
                             (
                                 TypedCoreType {
                                     ctyp_desc: TypedCoreTypeDesc::Ttyp_var(None),
@@ -16962,7 +16959,7 @@ fn type_structure_item<'a>(
                                     loc: core_type.ptyp_loc,
                                 });
                             }
-                            let type_ref = ctx.new_var(Some(name.to_string()));
+                            let type_ref = ctx.new_var(Some(crate::name::Name::new(&name)));
                             (
                                 TypedCoreType {
                                     ctyp_desc: TypedCoreTypeDesc::Ttyp_var(Some(name.to_string())),
@@ -20154,7 +20151,7 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
                 let core_type = arena.get_core_type(*core_type_idx);
                 let (typed_core_type, type_ref) = match &core_type.ptyp_desc {
                     crate::parser::ast::CoreTypeDesc::Ptyp_any => {
-                        let type_ref = ctx.new_var(Some("_".to_string()));
+                        let type_ref = ctx.new_var(Some(crate::name::Name::new("_")));
                         (
                             TypedCoreType {
                                 ctyp_desc: TypedCoreTypeDesc::Ttyp_var(None),
@@ -20174,7 +20171,7 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
                                 loc: core_type.ptyp_loc,
                             });
                         }
-                        let type_ref = ctx.new_var(Some(name.to_string()));
+                        let type_ref = ctx.new_var(Some(crate::name::Name::new(&name)));
                         (
                             TypedCoreType {
                                 ctyp_desc: TypedCoreTypeDesc::Ttyp_var(Some(name.to_string())),

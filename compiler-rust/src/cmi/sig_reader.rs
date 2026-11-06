@@ -704,7 +704,9 @@ impl<'a> SigReadContext<'a> {
             OcamlValue::Block(tag, fields) => match tag {
                 0 => {
                     // Tvar(string option)
-                    let name = fields[0].as_option().map(|s| s.as_string().to_string());
+                    let name = fields[0]
+                        .as_option()
+                        .map(|s| crate::name::Name::new(s.as_string()));
                     TypeDesc::Tvar(name)
                 }
                 1 => {
@@ -751,7 +753,7 @@ impl<'a> SigReadContext<'a> {
                 }
                 5 => {
                     // Tfield {name; mutability: field_mutability ref; typ; rest}
-                    let name = fields[0].as_string().to_string();
+                    let name = crate::name::Name::new(fields[0].as_string());
                     let mutability = self.read_mutability_ref(&fields[1]);
                     let typ = self.read_type_expr(&fields[2]);
                     let rest = self.read_type_expr(&fields[3]);
@@ -779,7 +781,9 @@ impl<'a> SigReadContext<'a> {
                 }
                 9 => {
                     // Tunivar(string option)
-                    let name = fields[0].as_option().map(|s| s.as_string().to_string());
+                    let name = fields[0]
+                        .as_option()
+                        .map(|s| crate::name::Name::new(s.as_string()));
                     TypeDesc::Tunivar(name)
                 }
                 10 => {

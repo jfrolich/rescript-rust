@@ -64,7 +64,7 @@ pub struct PortableTypeEntry {
 /// TypeDesc with indices into `PortableTypeGraph.entries` instead of arena refs.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum PortableTypeDesc {
-    Tvar(Option<String>),
+    Tvar(Option<crate::name::Name>),
     Tarrow {
         args: Vec<(ArgLabel, usize)>,
         ret: usize,
@@ -78,7 +78,7 @@ pub enum PortableTypeDesc {
         fields: usize,
     },
     Tfield {
-        name: String,
+        name: crate::name::Name,
         /// Index into `PortableTypeGraph.mutabilities`.
         mutability: usize,
         typ: usize,
@@ -88,7 +88,7 @@ pub enum PortableTypeDesc {
     Tlink(usize),
     Tsubst(usize),
     Tvariant(PortableRowDesc),
-    Tunivar(Option<String>),
+    Tunivar(Option<crate::name::Name>),
     Tpoly {
         body: usize,
         vars: Vec<usize>,

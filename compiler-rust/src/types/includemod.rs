@@ -4179,7 +4179,7 @@ fn row_fields_equal_for_inclusion(
 fn flatten_object_fields_for_inclusion(
     type_ctx: &TypeContext,
     fields: TypeExprRef,
-) -> (Vec<(String, FieldKind, TypeExprRef)>, TypeExprRef) {
+) -> (Vec<ObjectFieldForInclusion>, TypeExprRef) {
     let mut flattened = Vec::new();
     let mut current = type_ctx.repr(fields);
     loop {
@@ -4206,13 +4206,13 @@ fn flatten_object_fields_for_inclusion(
     (flattened, current)
 }
 
-type ObjectFieldForInclusion = (String, FieldKind, TypeExprRef);
+type ObjectFieldForInclusion = (crate::name::Name, FieldKind, TypeExprRef);
 
 fn associate_object_fields_for_inclusion(
     impl_fields: Vec<ObjectFieldForInclusion>,
     sig_fields: Vec<ObjectFieldForInclusion>,
 ) -> (
-    Vec<(String, FieldKind, TypeExprRef, FieldKind, TypeExprRef)>,
+    Vec<(crate::name::Name, FieldKind, TypeExprRef, FieldKind, TypeExprRef)>,
     Vec<ObjectFieldForInclusion>,
     Vec<ObjectFieldForInclusion>,
 ) {

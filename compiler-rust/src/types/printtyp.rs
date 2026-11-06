@@ -166,7 +166,7 @@ pub(crate) struct Printtyp<'a> {
     ctx: &'a TypeContext,
     names: Vec<(TypeExprRef, String)>,
     name_counter: usize,
-    named_vars: Vec<String>,
+    named_vars: Vec<crate::name::Name>,
     weak_counter: usize,
     weak_var_map: Vec<(TypeExprRef, String)>,
     named_weak_vars: Vec<String>,
@@ -370,7 +370,7 @@ impl<'a> Printtyp<'a> {
             return name.clone();
         }
         let given = match &*self.ctx.borrow_desc(t) {
-            TypeDesc::Tvar(Some(name)) | TypeDesc::Tunivar(Some(name)) => Some(name.clone()),
+            TypeDesc::Tvar(Some(name)) | TypeDesc::Tunivar(Some(name)) => Some(name.to_string()),
             _ => None,
         };
         let name = match given {
@@ -800,7 +800,7 @@ impl<'a> Printtyp<'a> {
                     self.ctx.mutability_repr(f.mutability),
                     crate::types::asttypes::MutableFlag::Mutable
                 );
-                (f.name, mutable, f.typ)
+                (f.name.to_string(), mutable, f.typ)
             })
             .collect();
         present.sort_by(|(a, _, _), (b, _, _)| a.as_bytes().cmp(b.as_bytes()));

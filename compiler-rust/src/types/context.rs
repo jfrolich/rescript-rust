@@ -2511,17 +2511,17 @@ impl TypeContext {
     }
 
     /// Create a new type variable.
-    pub fn new_var(&self, name: Option<String>) -> TypeExprRef {
+    pub fn new_var(&self, name: Option<crate::name::Name>) -> TypeExprRef {
         self.new_type(TypeDesc::Tvar(name))
     }
 
     /// Create a new type variable at the global level.
-    pub fn new_global_var(&self, name: Option<String>) -> TypeExprRef {
+    pub fn new_global_var(&self, name: Option<crate::name::Name>) -> TypeExprRef {
         self.alloc_type(TypeDesc::Tvar(name), self.global_level.get())
     }
 
     /// Create a new generic type variable.
-    pub fn new_generic_var(&self, name: Option<String>) -> TypeExprRef {
+    pub fn new_generic_var(&self, name: Option<crate::name::Name>) -> TypeExprRef {
         self.new_generic_type(TypeDesc::Tvar(name))
     }
 
@@ -2673,7 +2673,7 @@ impl TypeContext {
     }
 
     /// Create a universal type variable.
-    pub fn new_univar(&self, name: Option<String>) -> TypeExprRef {
+    pub fn new_univar(&self, name: Option<crate::name::Name>) -> TypeExprRef {
         self.new_type(TypeDesc::Tunivar(name))
     }
 
@@ -5114,7 +5114,7 @@ mod tests {
         let id_gen = IdGenerator::new();
         let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
 
-        let v1 = ctx.new_var(Some("a".to_string()));
+        let v1 = ctx.new_var(Some(crate::name::Name::new("a")));
         let v2 = ctx.new_var(None);
 
         assert_ne!(v1, v2);
@@ -5372,11 +5372,11 @@ mod tests {
     #[test]
     fn mutation_trail_restores_repeated_changes() {
         let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
-        let ty = ctx.new_var(Some("original".to_string()));
+        let ty = ctx.new_var(Some(crate::name::Name::new("original")));
         let level = ctx.get_level(ty);
         let snapshot = ctx.snapshot_type_state();
 
-        ctx.set_desc(ty, TypeDesc::Tvar(Some("first".to_string())));
+        ctx.set_desc(ty, TypeDesc::Tvar(Some(crate::name::Name::new("first"))));
         ctx.set_desc(ty, TypeDesc::Tnil);
         ctx.set_level(ty, level + 1);
         ctx.set_level(ty, level + 2);
@@ -5393,7 +5393,7 @@ mod tests {
         ) {
             let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
             let types: Vec<_> = (0..8)
-                .map(|index| ctx.new_var(Some(format!("original-{index}"))))
+                .map(|index| ctx.new_var(Some(crate::name::Name::new(&format!("original-{index}")))))
                 .collect();
             let original_levels: Vec<_> = types.iter().map(|ty| ctx.get_level(*ty)).collect();
             let snapshot = ctx.snapshot_type_state();
@@ -5403,7 +5403,7 @@ mod tests {
                 let desc = if nil {
                     TypeDesc::Tnil
                 } else {
-                    TypeDesc::Tvar(Some(format!("mutated-{index}-{level}")))
+                    TypeDesc::Tvar(Some(crate::name::Name::new(&format!("mutated-{index}-{level}"))))
                 };
                 ctx.set_desc(ty, desc);
                 ctx.set_level(ty, level);
@@ -5424,9 +5424,9 @@ mod tests {
     #[test]
     fn mutation_trail_supports_nested_snapshots() {
         let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
-        let ty = ctx.new_var(Some("outer".to_string()));
+        let ty = ctx.new_var(Some(crate::name::Name::new("outer")));
         let outer = ctx.snapshot_type_state();
-        ctx.set_desc(ty, TypeDesc::Tvar(Some("middle".to_string())));
+        ctx.set_desc(ty, TypeDesc::Tvar(Some(crate::name::Name::new("middle"))));
 
         let inner = ctx.snapshot_type_state();
         ctx.set_desc(ty, TypeDesc::Tnil);
@@ -5442,9 +5442,9 @@ mod tests {
     #[test]
     fn mutation_trail_leaves_new_type_allocations_and_their_state_alive() {
         let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
-        let old = ctx.new_var(Some("old".to_string()));
+        let old = ctx.new_var(Some(crate::name::Name::new("old")));
         let snapshot = ctx.snapshot_type_state();
-        let allocated = ctx.new_var(Some("new".to_string()));
+        let allocated = ctx.new_var(Some(crate::name::Name::new("new")));
         ctx.set_desc(allocated, TypeDesc::Tnil);
         ctx.set_level(allocated, 42);
         ctx.set_desc(old, TypeDesc::Tnil);
@@ -5551,9 +5551,9 @@ mod tests {
     #[test]
     fn restoring_a_nested_snapshot_does_not_journal_the_restore() {
         let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
-        let ty = ctx.new_var(Some("original".to_string()));
+        let ty = ctx.new_var(Some(crate::name::Name::new("original")));
         let outer = ctx.snapshot_type_state();
-        ctx.set_desc(ty, TypeDesc::Tvar(Some("outer".to_string())));
+        ctx.set_desc(ty, TypeDesc::Tvar(Some(crate::name::Name::new("outer"))));
         let inner = ctx.snapshot_type_state();
         ctx.set_desc(ty, TypeDesc::Tnil);
 
@@ -5568,7 +5568,7 @@ mod tests {
     #[test]
     fn outer_backtrack_restores_committed_inner_mutations() {
         let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
-        let pre_type = ctx.new_var(Some("pre".to_string()));
+        let pre_type = ctx.new_var(Some(crate::name::Name::new("pre")));
         let pre_row = ctx.alloc_row_field(Some(RowField::Rpresent(None)));
         let pre_memo = ctx.alloc_abbrev_nil();
         let pre_abbrev = ctx.new_var(None);
@@ -5584,7 +5584,7 @@ mod tests {
         let initial_levels = ctx.current_def_level_state();
         let outer = ctx.snapshot_type_state();
 
-        let post_type = ctx.new_var(Some("post".to_string()));
+        let post_type = ctx.new_var(Some(crate::name::Name::new("post")));
         let post_row = ctx.alloc_row_field(Some(RowField::Rpresent(None)));
         let post_memo = ctx.alloc_abbrev_nil();
         let post_abbrev = ctx.new_var(None);
@@ -5660,9 +5660,9 @@ mod tests {
     #[test]
     fn restoring_an_outer_snapshot_invalidates_nested_snapshots() {
         let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
-        let ty = ctx.new_var(Some("original".to_string()));
+        let ty = ctx.new_var(Some(crate::name::Name::new("original")));
         let outer = ctx.snapshot_type_state();
-        ctx.set_desc(ty, TypeDesc::Tvar(Some("outer".to_string())));
+        ctx.set_desc(ty, TypeDesc::Tvar(Some(crate::name::Name::new("outer"))));
         let inner = ctx.snapshot_type_state();
         ctx.set_desc(ty, TypeDesc::Tnil);
 

@@ -345,7 +345,7 @@ impl IntoIterator for TypeArgList {
 #[derive(Debug, Clone)]
 pub enum TypeDesc {
     /// Type variable: `'a` or `'_a`
-    Tvar(Option<String>),
+    Tvar(Option<crate::name::Name>),
 
     /// N-ary arrow (function) type: `(arg1, ..., argN) -> ret`.
     ///
@@ -382,7 +382,7 @@ pub enum TypeDesc {
     /// Object field (types.ml `Tfield {name; mutability; typ; rest}`).
     Tfield {
         /// Field name
-        name: String,
+        name: crate::name::Name,
         /// The field's shared mutability cell; read its semantic value with
         /// `TypeContext::mutability_repr`.
         mutability: MutabilityRef,
@@ -405,7 +405,7 @@ pub enum TypeDesc {
     Tvariant(Box<RowDesc>),
 
     /// Universal type variable (from forall quantifier)
-    Tunivar(Option<String>),
+    Tunivar(Option<crate::name::Name>),
 
     /// Polymorphic type: `'a1 ... 'an. ty`
     Tpoly {
@@ -1250,7 +1250,7 @@ mod tests {
 
     #[test]
     fn test_type_expr_creation() {
-        let ty = TypeExpr::new(TypeDesc::Tvar(Some("a".to_string())), GENERIC_LEVEL, 1);
+        let ty = TypeExpr::new(TypeDesc::Tvar(Some(crate::name::Name::new("a"))), GENERIC_LEVEL, 1);
         assert_eq!(ty.id(), 1);
         assert_eq!(ty.level(), GENERIC_LEVEL);
         assert!(matches!(*ty.desc.borrow(), TypeDesc::Tvar(_)));

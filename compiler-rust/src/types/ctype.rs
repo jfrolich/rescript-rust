@@ -1607,7 +1607,7 @@ fn create_reified_constr(
     env: &mut Env,
     newtype_level: i32,
     level: i32,
-    name: Option<String>,
+    name: Option<crate::name::Name>,
 ) -> TypeExprRef {
     let prefix = name.map_or_else(|| "$".to_string(), |name| format!("$'{name}"));
     let name = ctx.next_reified_abstract_name(&prefix);
@@ -6608,7 +6608,7 @@ fn filter_method_field(
             ctx.set_level(rest_ty, level);
             let mutability = ctx.alloc_mutability(FieldMutability::Value(MutableFlag::Immutable));
             let linked = ctx.new_type(TypeDesc::Tfield {
-                name: method_name.to_string(),
+                name: crate::name::Name::new(method_name),
                 mutability,
                 typ: field_ty,
                 rest: rest_ty,
@@ -6716,7 +6716,7 @@ pub fn filter_object_field_for_write(
                 ctx.set_level(ty2, level);
                 let mutability = ctx.alloc_mutability(FieldMutability::Value(MutableFlag::Mutable));
                 let field = ctx.new_type(TypeDesc::Tfield {
-                    name: name.to_string(),
+                    name: crate::name::Name::new(name),
                     mutability,
                     typ: ty1,
                     rest: ty2,
@@ -8952,7 +8952,7 @@ fn unify_row_field(
 /// field's cell; read its class value with `TypeContext::mutability_repr`.
 #[derive(Debug, Clone)]
 pub(crate) struct FieldInfo {
-    pub(crate) name: String,
+    pub(crate) name: crate::name::Name,
     pub(crate) mutability: MutabilityRef,
     pub(crate) typ: TypeExprRef,
 }
@@ -12903,8 +12903,8 @@ pub(crate) fn copy_type_cached(
     // Enum to hold what action to take, avoiding borrow issues.
     enum CopyAction {
         ReturnSelf,
-        NewVar(Option<String>),
-        NewUnivar(Option<String>),
+        NewVar(Option<crate::name::Name>),
+        NewUnivar(Option<crate::name::Name>),
         Arrow {
             args: super::type_expr::TypeArgList,
             ret: TypeExprRef,
@@ -12918,7 +12918,7 @@ pub(crate) fn copy_type_cached(
             fields: TypeExprRef,
         },
         Field {
-            name: String,
+            name: crate::name::Name,
             mutability: MutabilityRef,
             typ: TypeExprRef,
             rest: TypeExprRef,
@@ -14252,7 +14252,7 @@ mod tests {
     fn failed_unification_backtracks_partial_type_mutations() {
         let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
         let mut state = UnifyState::new();
-        let variable = ctx.new_var(Some("kept".to_string()));
+        let variable = ctx.new_var(Some(crate::name::Name::new("kept")));
         let left = ctx.new_tuple(vec![variable, ctx.predef_int()]);
         let right = ctx.new_tuple(vec![ctx.predef_string(), ctx.predef_bool()]);
         let type_snapshot = ctx.snapshot_type_state();
@@ -14334,7 +14334,7 @@ mod tests {
 
         // Create a type at the current level
         ctx.begin_def();
-        let a = ctx.new_var(Some("a".to_string()));
+        let a = ctx.new_var(Some(crate::name::Name::new("a")));
         ctx.end_def();
 
         // Generalize it
@@ -14547,7 +14547,10 @@ mod tests {
         // The previous shallow container clone also shared TypeExprRef nodes.
         // Keep that sharing while independently owning writable metadata.
         assert_eq!(owned.type_params[0], manifest);
-        ctx.set_desc(manifest, TypeDesc::Tvar(Some("shared".to_string())));
+        ctx.set_desc(
+            manifest,
+            TypeDesc::Tvar(Some(crate::name::Name::new("shared"))),
+        );
         assert!(
             matches!(&*ctx.borrow_desc(first.type_manifest.unwrap()), TypeDesc::Tvar(Some(name)) if name == "shared")
         );

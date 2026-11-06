@@ -2851,7 +2851,7 @@ fn transl_type_inner(
             } else if let Some(&existing) = tctx.used_variables.get(&name_str) {
                 crate::types::instance(ctx, existing)
             } else {
-                let v = ctx.new_var(Some(name_str.clone()));
+                let v = ctx.new_var(Some(crate::name::Name::new(&name_str)));
                 tctx.used_variables.insert(name_str.clone(), v);
                 tctx.used_variable_locs.insert(name_str.clone(), loc);
                 v
@@ -3080,7 +3080,7 @@ fn transl_type_inner(
                 // recursive alias handling is fully ported.
                 if crate::types::occurs(ctx, alias_ty, inner_ty) {
                     tctx.used_variables.remove(&name_str);
-                    let fallback_alias_ty = ctx.new_var(Some(name_str.clone()));
+                    let fallback_alias_ty = ctx.new_var(Some(crate::name::Name::new(&name_str)));
                     crate::types::unify(ctx, &mut tctx.unify_state, fallback_alias_ty, inner_ty)
                         .map_err(|_| TypeCoreError::PatternTypeClash {
                             loc: Some(loc),
@@ -3103,9 +3103,11 @@ fn transl_type_inner(
                     let rename_desc = {
                         let proxy_desc = ctx.get_desc(proxy);
                         match &*proxy_desc {
-                            TypeDesc::Tvar(None) => Some(TypeDesc::Tvar(Some(name_str.clone()))),
+                            TypeDesc::Tvar(None) => {
+                                Some(TypeDesc::Tvar(Some(crate::name::Name::new(&name_str))))
+                            }
                             TypeDesc::Tunivar(None) => {
-                                Some(TypeDesc::Tunivar(Some(name_str.clone())))
+                                Some(TypeDesc::Tunivar(Some(crate::name::Name::new(&name_str))))
                             }
                             _ => None,
                         }
@@ -3145,7 +3147,7 @@ fn transl_type_inner(
             let new_univars: Vec<(String, TypeExprRef)> = var_names
                 .iter()
                 .map(|name| {
-                    let v = ctx.new_var(Some(name.clone()));
+                    let v = ctx.new_var(Some(crate::name::Name::new(&name)));
                     (name.clone(), v)
                 })
                 .collect();
@@ -3401,7 +3403,7 @@ fn transl_type_inner(
                                             inherit_ct.ptyp_loc,
                                             &mut field_entries,
                                             &mut field_insertions,
-                                            name.clone(),
+                                            name.to_string(),
                                             *typ,
                                             ctx.mutability_repr(*mutability),
                                         )?;
@@ -3461,7 +3463,7 @@ fn transl_type_inner(
                     .iter()
                     .fold(ty_init, |rest, (name, (field_ty, mutability))| {
                         ctx.new_type(TypeDesc::Tfield {
-                            name: name.clone(),
+                            name: crate::name::Name::new(name),
                             mutability: ctx.alloc_mutability(
                                 crate::types::type_expr::FieldMutability::Value(*mutability),
                             ),
@@ -16942,7 +16944,13 @@ fn object_valid_fields(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> Option<
     // `List.fold_left collect_fields []` over `Ctype.flatten_fields fields`
     // (sorted by name), prepending each field.
     let (fields, _) = crate::types::ctype::flatten_fields(ctx, fields);
-    Some(fields.into_iter().rev().map(|field| field.name).collect())
+    Some(
+        fields
+            .into_iter()
+            .rev()
+            .map(|field| field.name.to_string())
+            .collect(),
+    )
 }
 
 fn method_name_is_plain_ident(name: &str) -> bool {
@@ -17200,7 +17208,7 @@ fn type_object_literal(
         }
         let typ = ctx.new_poly(field.exp_type, vec![]);
         row = ctx.new_type(TypeDesc::Tfield {
-            name: name.txt.clone(),
+            name: crate::name::Name::new(&name.txt),
             mutability: ctx.alloc_mutability(crate::types::type_expr::FieldMutability::Value(
                 crate::types::asttypes::MutableFlag::Immutable,
             )),
@@ -20904,7 +20912,7 @@ where
     }
 
     enum CopyTypeExprPlan {
-        Tvar(Option<String>),
+        Tvar(Option<crate::name::Name>),
         Tarrow {
             args: crate::types::type_expr::TypeArgList,
             ret: TypeExprRef,
@@ -20918,7 +20926,7 @@ where
             fields: TypeExprRef,
         },
         Tfield {
-            name: String,
+            name: crate::name::Name,
             mutability: MutabilityRef,
             typ: TypeExprRef,
             rest: TypeExprRef,
@@ -20933,7 +20941,7 @@ where
             row_fixed: bool,
             row_name: Option<(Path, Vec<TypeExprRef>)>,
         },
-        Tunivar(Option<String>),
+        Tunivar(Option<crate::name::Name>),
         Tpoly {
             body: TypeExprRef,
             vars: crate::types::type_expr::TypeRefList,

@@ -386,7 +386,7 @@ pub fn translateTypeExprFromTypes_(
         },
         TypeDesc::Tvar(Some(s)) => Translation {
             dependencies: vec![],
-            type_: Type::TypeVar(s),
+            type_: Type::TypeVar(s.to_string()),
         },
         TypeDesc::Tconstr { path, args, .. }
             if path.name() == "Js.t" && args.len() == 1 && is_js_t_preserved(ctx, &args[0]) =>
@@ -716,7 +716,7 @@ fn get_field_types(
                 };
                 let translation =
                     translateTypeExprFromTypes_(ctx, config, type_vars_gen, type_env, &typ);
-                fields.push((name, mutable_, translation));
+                fields.push((name.to_string(), mutable_, translation));
                 closed_flag
             }
             TypeDesc::Tlink(te) => go(ctx, config, type_vars_gen, type_env, &te, fields),

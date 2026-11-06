@@ -9384,7 +9384,7 @@ fn object_field_mismatch_pair(
             && type_is_nil(type_ctx, *actual_rest)
             && type_is_nil(type_ctx, *expected_rest) =>
         {
-            Some((actual_name.clone(), *actual_ty, *expected_ty))
+            Some((actual_name.to_string(), *actual_ty, *expected_ty))
         }
         _ => None,
     };
@@ -9404,10 +9404,10 @@ fn object_field_missing_pair(
     let expected_desc = type_ctx.get_desc(expected_repr);
     let result = match (&*actual_desc, &*expected_desc) {
         (TypeDesc::Tnil | TypeDesc::Tconstr { .. }, TypeDesc::Tfield { name, typ, .. }) => {
-            Some((true, name.clone(), *typ))
+            Some((true, name.to_string(), *typ))
         }
         (TypeDesc::Tfield { name, typ, .. }, TypeDesc::Tnil | TypeDesc::Tconstr { .. }) => {
-            Some((false, name.clone(), *typ))
+            Some((false, name.to_string(), *typ))
         }
         _ => None,
     };

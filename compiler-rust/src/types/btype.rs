@@ -605,7 +605,7 @@ mod tests {
         let id_gen = IdGenerator::new();
         let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
 
-        let tvar = ctx.new_var(Some("a".to_string()));
+        let tvar = ctx.new_var(Some(crate::name::Name::new("a")));
         assert!(is_tvar(&ctx, tvar));
 
         let tuple = ctx.new_tuple(vec![tvar]);
