@@ -9787,9 +9787,9 @@ fn type_application(
     }
 
     #[derive(Clone)]
+    /// An omitted parameter: OCaml keeps its `lbl` (typecore.ml:4191-4200).
     struct OmittedArrow {
-        label: crate::types::ArgLabel,
-        arg_ty: TypeExprRef,
+        param: TypeArg,
     }
 
     fn parser_arg_label_name<'a>(label: &ArgLabel, arena: &'a ParseArena) -> &'a str {
@@ -10083,8 +10083,7 @@ fn type_application(
             && (total_app || has_nolabel_arg(args, &remaining_args))
         {
             ignored.push(OmittedArrow {
-                label: param.label().clone(),
-                arg_ty: param.typ,
+                param: param.clone(),
             });
             argument_thunks.push(ApplyArgThunk::SynthOptionalNone {
                 label: param.label().clone(),
@@ -10092,8 +10091,7 @@ fn type_application(
             });
         } else {
             omitted.push(OmittedArrow {
-                label: param.label().clone(),
-                arg_ty: param.typ,
+                param: param.clone(),
             });
             if !remaining_args.is_empty() {
                 argument_thunks.push(ApplyArgThunk::Omitted {
@@ -10124,7 +10122,7 @@ fn type_application(
                 let params = omitted
                     .iter()
                     .chain(&ignored)
-                    .map(|arg| TypeArg::new(arg.label.clone(), arg.arg_ty))
+                    .map(|arg| arg.param.clone())
                     .collect();
                 ctx.alloc_type_at_level(
                     TypeDesc::Tarrow {
@@ -10283,10 +10281,7 @@ fn type_application(
     } else {
         ctx.alloc_type_at_level(
             TypeDesc::Tarrow {
-                args: omitted
-                    .iter()
-                    .map(|arg| TypeArg::new(arg.label.clone(), arg.arg_ty))
-                    .collect(),
+                args: omitted.iter().map(|arg| arg.param.clone()).collect(),
                 ret: current_ty0,
             },
             function_level,

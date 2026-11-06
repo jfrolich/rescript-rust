@@ -3006,7 +3006,7 @@ fn expand_record_spread_label(
                     let new_args = arrow_args
                         .iter()
                         .zip(new_types)
-                        .map(|(arg, typ)| crate::types::TypeArg::new(arg.label().clone(), typ))
+                        .map(|(arg, typ)| arg.with_type(typ))
                         .collect();
                     with_original_level(
                         ctx,

@@ -174,6 +174,8 @@ struct ErrorSize<'a> {
     rpresent_none: bool,
     /// The `Tconstr` path blocks counted (see [`PathBlock`]).
     path_blocks: HashSet<PathBlockKey>,
+    /// The arrow argument label blocks counted, by allocation.
+    labels: HashSet<usize>,
 }
 
 /// The identity of a path block of the error.
@@ -229,6 +231,7 @@ impl<'a> ErrorSize<'a> {
             tag_names: HashSet::default(),
             rpresent_none: false,
             path_blocks: HashSet::default(),
+            labels: HashSet::default(),
         }
     }
 
@@ -1199,6 +1202,12 @@ impl<'a> ErrorSize<'a> {
                 // arg = {lbl; typ}
                 self.list(args, |size, arg| {
                     size.block(0, 2)?;
+                    // A copy of the arrow shares each `lbl` block.
+                    if let Some(block) = arg.label_block()
+                        && !size.labels.insert(block)
+                    {
+                        return size.type_expr(arg.typ);
+                    }
                     match arg.label() {
                         ArgLabel::Nolabel => {}
                         ArgLabel::Labelled(label) => {

@@ -6847,7 +6847,7 @@ fn subst_type(
                 let new_args = arrow_args
                     .iter()
                     .zip(new_types)
-                    .map(|(arg, typ)| super::TypeArg::new(arg.label().clone(), typ))
+                    .map(|(arg, typ)| arg.with_type(typ))
                     .collect();
                 drop(desc);
                 ctx.new_type(TypeDesc::Tarrow {
@@ -13871,12 +13871,7 @@ fn nondep_type_rec(
         TypeDesc::Tarrow { args, ret } => {
             let args = args
                 .iter()
-                .map(|arg| {
-                    Some(super::type_expr::TypeArg::new(
-                        arg.label().clone(),
-                        nondep_type_rec(ctx, env, mid, arg.typ, cache)?,
-                    ))
-                })
+                .map(|arg| Some(arg.with_type(nondep_type_rec(ctx, env, mid, arg.typ, cache)?)))
                 .collect::<Option<Vec<_>>>()?;
             let ret = nondep_type_rec(ctx, env, mid, *ret, cache)?;
             TypeDesc::Tarrow {

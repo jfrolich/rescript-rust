@@ -961,11 +961,13 @@ impl Default for TypeExprRefSet {
 
 /// An argument in a function type.
 ///
-/// OCaml types.ml:24 and btype.ml:422-423 preserve labels while mapping types.
-/// Keep the common unlabeled case inline; located labels retain owned metadata.
+/// OCaml types.ml:24 and btype.ml:511-512 preserve labels while mapping types:
+/// `{arg with typ = f arg.typ}` shares the `lbl` block. A located label is
+/// one shared allocation, so a clone or [`TypeArg::with_type`] keeps it; the
+/// common unlabeled case stays inline.
 #[derive(Clone)]
 pub struct TypeArg {
-    label: Option<Box<ArgLabel>>,
+    label: Option<std::sync::Arc<ArgLabel>>,
     /// The argument type (physical arena identity).
     pub typ: TypeExprRef,
 }
@@ -984,9 +986,24 @@ impl TypeArg {
     pub fn new(lbl: ArgLabel, typ: TypeExprRef) -> Self {
         let label = match lbl {
             ArgLabel::Nolabel => None,
-            label => Some(Box::new(label)),
+            label => Some(std::sync::Arc::new(label)),
         };
         Self { label, typ }
+    }
+
+    /// `{arg with typ}`: the same label block with another type.
+    pub fn with_type(&self, typ: TypeExprRef) -> Self {
+        Self {
+            label: self.label.clone(),
+            typ,
+        }
+    }
+
+    /// The address of the label block, if the argument is labelled.
+    pub fn label_block(&self) -> Option<usize> {
+        self.label
+            .as_ref()
+            .map(|label| std::sync::Arc::as_ptr(label) as usize)
     }
 
     /// Borrow the original label without copying or allocating metadata.
@@ -1422,8 +1439,15 @@ mod tests {
                 let address = arg.label() as *const ArgLabel;
                 let mut moved = arg;
                 assert_eq!(moved.label() as *const ArgLabel, address);
+                // `{arg with typ}` shares the `lbl` block (btype.ml:511-512).
                 let cloned = moved.clone();
-                assert_ne!(cloned.label() as *const ArgLabel, address);
+                assert_eq!(cloned.label() as *const ArgLabel, address);
+                assert_eq!(cloned.label_block(), moved.label_block());
+                let retyped = moved.with_type(TypeExprRef(9));
+                assert_eq!(retyped.label_block(), moved.label_block());
+                assert_eq!(retyped.typ, TypeExprRef(9));
+                let fresh = TypeArg::new(moved.label().clone(), typ);
+                assert_ne!(fresh.label_block(), moved.label_block());
                 assert_eq!(cloned.typ, typ);
                 let payload = match cloned.label() {
                     ArgLabel::Labelled(l) if !optional => l,
@@ -1441,15 +1465,9 @@ mod tests {
                 assert_eq!(resolved.loc_end.bol, 44);
                 assert_eq!(resolved.loc_end.cnum, 49);
                 assert_eq!(resolved.loc_ghost, ghost);
-                match moved.label.as_deref_mut().unwrap() {
-                    ArgLabel::Labelled(l) | ArgLabel::Optional(l) => {
-                        assert_ne!(l.txt.as_ptr(), payload.txt.as_ptr());
-                        l.txt.push_str("_changed");
-                        l.loc = crate::types::DeclLoc::none();
-                    }
-                    _ => unreachable!(),
-                }
-                // Replacement drops the original box; the independent clone survives.
+                drop(retyped);
+                drop(fresh);
+                // Replacement drops one handle; the clone keeps the label.
                 moved = TypeArg::unlabeled(TypeExprRef(7));
                 assert!(moved.label.is_none());
                 assert_eq!(cloned.label().label_name(), Some(name));
