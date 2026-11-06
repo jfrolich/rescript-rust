@@ -664,7 +664,7 @@ fn sexp_pattern_desc(
         PatternDesc::Tpat_var(id, _) => Sexp::list(vec![Sexp::atom("Tpat_var"), sexp_ident(id)]),
         PatternDesc::Tpat_alias(p, id, _) => Sexp::list(vec![
             Sexp::atom("Tpat_alias"),
-            sexp_pattern(arena, ctx, cx, p),
+            sexp_pattern(arena, ctx, cx, cx.ta.pattern(*p)),
             sexp_ident(id),
         ]),
         PatternDesc::Tpat_constant(c) => {
@@ -672,14 +672,14 @@ fn sexp_pattern_desc(
         }
         PatternDesc::Tpat_tuple(pats) => {
             let mut items = vec![Sexp::atom("Tpat_tuple")];
-            for p in pats.iter() {
+            for p in cx.ta.patterns(*pats) {
                 items.push(sexp_pattern(arena, ctx, cx, p));
             }
             Sexp::list(items)
         }
         PatternDesc::Tpat_construct(li, _, args) => {
             let mut arg_items = Vec::new();
-            for p in args.iter() {
+            for p in cx.ta.patterns(*args) {
                 arg_items.push(sexp_pattern(arena, ctx, cx, p));
             }
             Sexp::list(vec![
@@ -691,7 +691,10 @@ fn sexp_pattern_desc(
         PatternDesc::Tpat_variant(label, arg, _) => {
             let arg_sexp = match arg {
                 None => Sexp::atom("None"),
-                Some(p) => Sexp::list(vec![Sexp::atom("Some"), sexp_pattern(arena, ctx, cx, p)]),
+                Some(p) => Sexp::list(vec![
+                    Sexp::atom("Some"),
+                    sexp_pattern(arena, ctx, cx, cx.ta.pattern(*p)),
+                ]),
             };
             Sexp::list(vec![Sexp::atom("Tpat_variant"), string(label), arg_sexp])
         }
@@ -700,7 +703,7 @@ fn sexp_pattern_desc(
             for (li, _, p, opt_flag) in fields.iter() {
                 field_items.push(Sexp::list(vec![
                     sexp_longident_idx(arena, ctx, li.txt),
-                    sexp_pattern(arena, ctx, cx, p),
+                    sexp_pattern(arena, ctx, cx, cx.ta.pattern(*p)),
                     Sexp::atom(if *opt_flag { "optional" } else { "required" }),
                 ]));
             }
@@ -715,15 +718,15 @@ fn sexp_pattern_desc(
         }
         PatternDesc::Tpat_array(pats) => {
             let mut items = vec![Sexp::atom("Tpat_array")];
-            for p in pats.iter() {
+            for p in cx.ta.patterns(*pats) {
                 items.push(sexp_pattern(arena, ctx, cx, p));
             }
             Sexp::list(items)
         }
         PatternDesc::Tpat_or(p1, p2, _) => Sexp::list(vec![
             Sexp::atom("Tpat_or"),
-            sexp_pattern(arena, ctx, cx, p1),
-            sexp_pattern(arena, ctx, cx, p2),
+            sexp_pattern(arena, ctx, cx, cx.ta.pattern(*p1)),
+            sexp_pattern(arena, ctx, cx, cx.ta.pattern(*p2)),
         ]),
     }
 }

@@ -4126,7 +4126,11 @@ fn build_or_pat(
         .into_iter()
         .map(|(label, arg)| {
             Pattern::new(
-                PatternDesc::Tpat_variant(label, arg, RowDescRef(0)),
+                PatternDesc::Tpat_variant(
+                    label,
+                    arg.map(|p| tctx.typed.push_pattern(*p)),
+                    RowDescRef(0),
+                ),
                 ghost_loc,
                 ty,
                 tctx.type_ctx.store_typed_env(env),
@@ -4141,7 +4145,11 @@ fn build_or_pat(
     let first = iter.next().unwrap();
     let or_pat = iter.fold(first, |acc, pat0| {
         Pattern::new(
-            PatternDesc::Tpat_or(Box::new(pat0), Box::new(acc), None),
+            PatternDesc::Tpat_or(
+                tctx.typed.push_pattern(pat0),
+                tctx.typed.push_pattern(acc),
+                None,
+            ),
             ghost_loc,
             ty,
             tctx.type_ctx.store_typed_env(env),
@@ -4565,7 +4573,7 @@ fn type_pattern_inner(
             }
 
             Ok(Pattern::new(
-                PatternDesc::Tpat_tuple(typed_pats),
+                PatternDesc::Tpat_tuple(tctx.typed.push_patterns(typed_pats)),
                 loc,
                 expected_ty,
                 pat_env_ref,
@@ -4621,7 +4629,7 @@ fn type_pattern_inner(
 
             Ok(Pattern::new(
                 PatternDesc::Tpat_alias(
-                    Box::new(typed_inner),
+                    tctx.typed.push_pattern(typed_inner),
                     id,
                     convert_located_stridx(name, tctx.arena),
                 ),
@@ -4717,7 +4725,7 @@ fn type_pattern_inner(
                         // - alpha-rename branch 2 onto branch 1's ids,
                         // - keep only branch 1's bindings live after typing the or-pattern.
                         let alpha_env = merge_or_pattern_variables(tctx, loc, &p1_vars, &p2_vars)?;
-                        let typed_p2 = alpha_pattern(&alpha_env, &typed_p2);
+                        let typed_p2 = alpha_pattern(&mut tctx.typed, &alpha_env, &typed_p2);
                         state.restore_binding_checkpoint(initial_state);
                         state.pattern_variables.extend(p1_vars.iter().cloned());
                         state
@@ -4725,7 +4733,11 @@ fn type_pattern_inner(
                             .extend(p1_module_vars.iter().cloned());
 
                         Ok(Pattern::new(
-                            PatternDesc::Tpat_or(Box::new(typed_p1), Box::new(typed_p2), None),
+                            PatternDesc::Tpat_or(
+                                tctx.typed.push_pattern(typed_p1),
+                                tctx.typed.push_pattern(typed_p2),
+                                None,
+                            ),
                             loc,
                             expected_ty,
                             pat_env_ref,
@@ -4804,7 +4816,7 @@ fn type_pattern_inner(
             }
 
             Ok(Pattern::new(
-                PatternDesc::Tpat_array(typed_pats),
+                PatternDesc::Tpat_array(tctx.typed.push_patterns(typed_pats)),
                 loc,
                 expected_ty,
                 pat_env_ref,
@@ -5094,7 +5106,7 @@ fn refine_record_as_type_label(
     whole_pat: &Pattern,
     record_ty: TypeExprRef,
     label_desc: &crate::types::LabelDescription,
-    field_pat: Option<&Pattern>,
+    field_pat: Option<TPatIdx>,
 ) -> TypeCoreResult<()> {
     let ctx = tctx.type_ctx;
     let (_poly_vars, ty_arg, ty_res) = crate::types::ctype::instance_label(ctx, false, label_desc);
@@ -5109,7 +5121,8 @@ fn refine_record_as_type_label(
         && field_pat.is_some()
         && !arg_is_poly;
     if refinable {
-        let field_pat = field_pat.unwrap();
+        let field_pat = tctx.typed.pattern(field_pat.unwrap()).clone();
+        let field_pat = &field_pat;
         let field_as_ty = build_as_type(tctx, env, field_pat)?;
         unify_pattern_types(tctx, field_pat.pat_loc, field_as_ty, ty_arg)?;
     } else {
@@ -5129,11 +5142,14 @@ fn build_as_type(
 ) -> TypeCoreResult<TypeExprRef> {
     let ctx = tctx.type_ctx;
     match &pat.pat_desc {
-        PatternDesc::Tpat_alias(inner, _, _) => build_as_type(tctx, env, inner),
+        PatternDesc::Tpat_alias(inner, _, _) => {
+            build_as_type(tctx, env, &tctx.typed.pattern(*inner).clone())
+        }
         PatternDesc::Tpat_tuple(pats) => {
+            let pats = tctx.typed.pattern_list(*pats).to_vec();
             let tys: Vec<_> = pats
-                .iter()
-                .map(|p| build_as_type(tctx, env, p))
+                .into_iter()
+                .map(|p| build_as_type(tctx, env, &tctx.typed.pattern(p).clone()))
                 .collect::<TypeCoreResult<_>>()?;
             Ok(ctx.new_tuple(tys))
         }
@@ -5143,15 +5159,23 @@ fn build_as_type(
             if keep {
                 Ok(pat.pat_type)
             } else {
-                let arg_as_tys: Vec<_> = args
-                    .iter()
-                    .map(|arg| build_as_type(tctx, env, arg))
+                let arg_pats = tctx.typed.pattern_list(*args).to_vec();
+                let arg_as_tys: Vec<_> = arg_pats
+                    .into_iter()
+                    .map(|arg| build_as_type(tctx, env, &tctx.typed.pattern(arg).clone()))
                     .collect::<TypeCoreResult<_>>()?;
                 let (inst_arg_tys, ty_res) = crate::types::instance_constructor(ctx, cstr);
-                for ((arg_pat, arg_as_ty), inst_arg_ty) in
-                    args.iter().zip(arg_as_tys.iter()).zip(inst_arg_tys.iter())
+                let arg_locs: Vec<LocIdx> = tctx
+                    .typed
+                    .patterns(*args)
+                    .map(|arg_pat| arg_pat.pat_loc)
+                    .collect();
+                for ((arg_loc, arg_as_ty), inst_arg_ty) in arg_locs
+                    .into_iter()
+                    .zip(arg_as_tys.iter())
+                    .zip(inst_arg_tys.iter())
                 {
-                    unify_pattern_types(tctx, arg_pat.pat_loc, *arg_as_ty, *inst_arg_ty)?;
+                    unify_pattern_types(tctx, arg_loc, *arg_as_ty, *inst_arg_ty)?;
                 }
                 Ok(ty_res)
             }
@@ -5169,9 +5193,11 @@ fn build_as_type(
                 // then refines it through each label's instantiated arg/res types.
                 let ty = ctx.new_var(None);
                 let record_res = first_label.map(|lbl| lbl.lbl_res).unwrap_or(pat.pat_type);
-                let present_fields_by_pos: HashMap<i32, &Pattern> = fields
+                let present_fields_by_pos: HashMap<i32, TPatIdx> = fields
                     .iter()
-                    .map(|(_lid, label_desc, field_pat, _optional)| (label_desc.lbl_pos, field_pat))
+                    .map(|(_lid, label_desc, field_pat, _optional)| {
+                        (label_desc.lbl_pos, *field_pat)
+                    })
                     .collect();
 
                 let all_labels =
@@ -5230,7 +5256,7 @@ fn build_as_type(
         PatternDesc::Tpat_variant(label, opt_arg, _) => {
             // OCaml typecore.ml:488-498: create single-field open row with Rpresent
             let opt_ty = match opt_arg {
-                Some(p) => Some(build_as_type(tctx, env, p)?),
+                Some(p) => Some(build_as_type(tctx, env, &tctx.typed.pattern(*p).clone())?),
                 None => None,
             };
             let row = crate::types::type_expr::RowDesc {
@@ -5250,9 +5276,9 @@ fn build_as_type(
             // OCaml typecore.ml:526-534
             match opt_row {
                 None => {
-                    let ty1 = build_as_type(tctx, env, p1)?;
-                    let ty2 = build_as_type(tctx, env, p2)?;
-                    unify_pattern_types(tctx, p2.pat_loc, ty2, ty1)?;
+                    let ty1 = build_as_type(tctx, env, &tctx.typed.pattern(*p1).clone())?;
+                    let ty2 = build_as_type(tctx, env, &tctx.typed.pattern(*p2).clone())?;
+                    unify_pattern_types(tctx, tctx.typed.pattern(*p2).pat_loc, ty2, ty1)?;
                     Ok(ty1)
                 }
                 Some(row) => {
@@ -5374,94 +5400,91 @@ fn alpha_pattern_id<'a>(alpha_env: &'a [(Ident, Ident)], id: &Ident) -> Option<&
         .find_map(|(from, to)| if from.same(id) { Some(to) } else { None })
 }
 
-fn alpha_pattern(alpha_env: &[(Ident, Ident)], pat: &Pattern) -> Pattern {
-    match &pat.pat_desc {
-        PatternDesc::Tpat_var(id, name) => {
-            let pat_desc = alpha_pattern_id(alpha_env, id)
-                .map(|new_id| PatternDesc::Tpat_var(*new_id, name.clone()))
-                .unwrap_or(PatternDesc::Tpat_any);
-            Pattern {
-                pat_desc,
-                ..pat.clone()
-            }
-        }
+/// `alpha_pat` (typecore.ml): a copy of `pat` with its variables renamed
+/// through `alpha_env`. Children are copied into `ta`; the root is
+/// returned for the caller to store.
+fn alpha_pattern(ta: &mut TypedArena, alpha_env: &[(Ident, Ident)], pat: &Pattern) -> Pattern {
+    let pat_desc = match &pat.pat_desc {
+        PatternDesc::Tpat_var(id, name) => alpha_pattern_id(alpha_env, id)
+            .map(|new_id| PatternDesc::Tpat_var(*new_id, name.clone()))
+            .unwrap_or(PatternDesc::Tpat_any),
         PatternDesc::Tpat_alias(inner, id, name) => {
-            let new_inner = alpha_pattern(alpha_env, inner);
-            if let Some(new_id) = alpha_pattern_id(alpha_env, id) {
-                Pattern {
-                    pat_desc: PatternDesc::Tpat_alias(Box::new(new_inner), *new_id, name.clone()),
-                    ..pat.clone()
+            let new_inner = alpha_child(ta, alpha_env, *inner);
+            match alpha_pattern_id(alpha_env, id) {
+                Some(new_id) => {
+                    PatternDesc::Tpat_alias(ta.push_pattern(new_inner), *new_id, name.clone())
                 }
-            } else {
-                new_inner
+                None => return new_inner,
             }
         }
-        PatternDesc::Tpat_tuple(items) => Pattern {
-            pat_desc: PatternDesc::Tpat_tuple(
-                items
-                    .iter()
-                    .map(|item| alpha_pattern(alpha_env, item))
-                    .collect(),
-            ),
-            ..pat.clone()
-        },
-        PatternDesc::Tpat_construct(lid, cstr, args) => Pattern {
-            pat_desc: PatternDesc::Tpat_construct(
-                *lid,
-                cstr.clone(),
-                args.iter()
-                    .map(|arg| alpha_pattern(alpha_env, arg))
-                    .collect(),
-            ),
-            ..pat.clone()
-        },
-        PatternDesc::Tpat_variant(label, arg, row) => Pattern {
-            pat_desc: PatternDesc::Tpat_variant(
-                label.clone(),
-                arg.as_ref()
-                    .map(|arg| Box::new(alpha_pattern(alpha_env, arg))),
-                *row,
-            ),
-            ..pat.clone()
-        },
-        PatternDesc::Tpat_record(fields, closed, rest) => Pattern {
-            pat_desc: PatternDesc::Tpat_record(
-                fields
-                    .iter()
-                    .map(|(lid, lbl, field_pat, opt)| {
-                        (*lid, lbl.clone(), alpha_pattern(alpha_env, field_pat), *opt)
-                    })
-                    .collect(),
-                *closed,
-                rest.as_ref().map(|rest| {
-                    let mut rest = rest.clone();
-                    if let Some(new_id) = alpha_pattern_id(alpha_env, &rest.rest_ident) {
-                        rest.rest_ident = *new_id;
-                    }
-                    rest
-                }),
-            ),
-            ..pat.clone()
-        },
-        PatternDesc::Tpat_array(items) => Pattern {
-            pat_desc: PatternDesc::Tpat_array(
-                items
-                    .iter()
-                    .map(|item| alpha_pattern(alpha_env, item))
-                    .collect(),
-            ),
-            ..pat.clone()
-        },
-        PatternDesc::Tpat_or(left, right, row) => Pattern {
-            pat_desc: PatternDesc::Tpat_or(
-                Box::new(alpha_pattern(alpha_env, left)),
-                Box::new(alpha_pattern(alpha_env, right)),
-                row.clone(),
-            ),
-            ..pat.clone()
-        },
-        _ => pat.clone(),
+        PatternDesc::Tpat_tuple(items) => {
+            PatternDesc::Tpat_tuple(alpha_list(ta, alpha_env, *items))
+        }
+        PatternDesc::Tpat_construct(lid, cstr, args) => {
+            PatternDesc::Tpat_construct(*lid, cstr.clone(), alpha_list(ta, alpha_env, *args))
+        }
+        PatternDesc::Tpat_variant(label, arg, row) => PatternDesc::Tpat_variant(
+            label.clone(),
+            arg.map(|arg| {
+                let new_arg = alpha_child(ta, alpha_env, arg);
+                ta.push_pattern(new_arg)
+            }),
+            *row,
+        ),
+        PatternDesc::Tpat_record(fields, closed, rest) => PatternDesc::Tpat_record(
+            fields
+                .iter()
+                .map(|(lid, lbl, field_pat, opt)| {
+                    let new_field = alpha_child(ta, alpha_env, *field_pat);
+                    (*lid, lbl.clone(), ta.push_pattern(new_field), *opt)
+                })
+                .collect(),
+            *closed,
+            rest.as_ref().map(|rest| {
+                let mut rest = rest.clone();
+                if let Some(new_id) = alpha_pattern_id(alpha_env, &rest.rest_ident) {
+                    rest.rest_ident = *new_id;
+                }
+                rest
+            }),
+        ),
+        PatternDesc::Tpat_array(items) => {
+            PatternDesc::Tpat_array(alpha_list(ta, alpha_env, *items))
+        }
+        PatternDesc::Tpat_or(left, right, row) => {
+            let new_left = alpha_child(ta, alpha_env, *left);
+            let new_left = ta.push_pattern(new_left);
+            let new_right = alpha_child(ta, alpha_env, *right);
+            let new_right = ta.push_pattern(new_right);
+            PatternDesc::Tpat_or(new_left, new_right, row.clone())
+        }
+        _ => return pat.clone(),
+    };
+    Pattern {
+        pat_desc,
+        ..pat.clone()
     }
+}
+
+fn alpha_child(ta: &mut TypedArena, alpha_env: &[(Ident, Ident)], pat: TPatIdx) -> Pattern {
+    let pat = ta.pattern(pat).clone();
+    alpha_pattern(ta, alpha_env, &pat)
+}
+
+fn alpha_list(
+    ta: &mut TypedArena,
+    alpha_env: &[(Ident, Ident)],
+    items: crate::types::typedtree::TPatList,
+) -> crate::types::typedtree::TPatList {
+    let items: smallvec::SmallVec<[TPatIdx; 8]> = ta.pattern_list(items).into();
+    let renamed: smallvec::SmallVec<[TPatIdx; 8]> = items
+        .into_iter()
+        .map(|item| {
+            let new_item = alpha_child(ta, alpha_env, item);
+            ta.push_pattern(new_item)
+        })
+        .collect();
+    ta.push_pattern_list(&renamed)
 }
 
 // ============================================================================
@@ -5803,7 +5826,11 @@ fn type_pattern_construct(
     }
 
     Ok(Pattern::new(
-        PatternDesc::Tpat_construct(*lid, Arc::new(cstr_desc), typed_args),
+        PatternDesc::Tpat_construct(
+            *lid,
+            Arc::new(cstr_desc),
+            tctx.typed.push_patterns(typed_args),
+        ),
         loc,
         expected_ty,
         tctx.type_ctx.store_typed_env(env),
@@ -5901,7 +5928,11 @@ fn type_pattern_variant(
     };
 
     Ok(Pattern::new(
-        PatternDesc::Tpat_variant(label.to_string(), typed_arg, RowDescRef(0)),
+        PatternDesc::Tpat_variant(
+            label.to_string(),
+            typed_arg.map(|p| tctx.typed.push_pattern(*p)),
+            RowDescRef(0),
+        ),
         loc,
         expected_ty,
         tctx.type_ctx.store_typed_env(env),
@@ -6407,7 +6438,11 @@ fn type_pattern_record(
             };
             let some_cstr = make_some_constructor(ctx);
             Pattern::new(
-                PatternDesc::Tpat_construct(some_lid, Arc::new(some_cstr), vec![typed_inner]),
+                PatternDesc::Tpat_construct(
+                    some_lid,
+                    Arc::new(some_cstr),
+                    tctx.typed.push_patterns(vec![typed_inner]),
+                ),
                 parsed_pat.ppat_loc,
                 field_ty,
                 tctx.type_ctx.store_typed_env(env),
@@ -6540,7 +6575,16 @@ fn type_pattern_record(
     };
 
     Ok(Pattern::new(
-        PatternDesc::Tpat_record(typed_fields, closed_flag, typed_rest.map(Box::new)),
+        PatternDesc::Tpat_record(
+            typed_fields
+                .into_iter()
+                .map(|(lid, lbl, field_pat, optional)| {
+                    (lid, lbl, tctx.typed.push_pattern(field_pat), optional)
+                })
+                .collect(),
+            closed_flag,
+            typed_rest.map(Box::new),
+        ),
         loc,
         expected_ty,
         tctx.type_ctx.store_typed_env(env),
@@ -7160,7 +7204,7 @@ fn type_pattern_constraint(
             };
             Pattern {
                 pat_desc: crate::types::typedtree::PatternDesc::Tpat_alias(
-                    Box::new(any_pat),
+                    tctx.typed.push_pattern(any_pat),
                     id,
                     name,
                 ),
@@ -7341,7 +7385,11 @@ fn type_pattern_interval(
     let mut result = patterns.pop().unwrap();
     while let Some(pat_left) = patterns.pop() {
         result = Pattern::new(
-            PatternDesc::Tpat_or(Box::new(pat_left), Box::new(result), None),
+            PatternDesc::Tpat_or(
+                tctx.typed.push_pattern(pat_left),
+                tctx.typed.push_pattern(result),
+                None,
+            ),
             ghost_loc,
             expected_ty,
             EnvRef(0),
@@ -10344,6 +10392,9 @@ fn materialize_pattern_of_type(
     expected_ty: TypeExprRef,
     _loc: LocIdx,
 ) -> Option<crate::parse_arena::PatIdx> {
+    // The exported pattern's sub-patterns go to a scratch arena (see
+    // [`PatCase`]).
+    let ta = std::mem::take(&mut tctx.typed);
     let oracle = TypecoreParmatchOracle {
         tctx: &mut *tctx,
         env,
@@ -10352,17 +10403,20 @@ fn materialize_pattern_of_type(
         partial_explode: 0,
         none_type: None,
     };
-    let mut pm = crate::types::parmatch::Parmatch::new(oracle);
+    let mut pm = crate::types::parmatch::Parmatch::new(oracle, &ta);
     let pats = pm.pats_of_type(false, EnvRef(0), expected_ty);
-    if let [p] = pats.as_slice()
+    let result = if let [p] = pats.as_slice()
         && pm.is_any(*p)
     {
-        return None;
-    }
-    let orified = pm.orify_many(&pats);
-    let typed = pm.export(orified);
-    drop(pm);
-    Some(conv_counter_example(tctx, &typed, None))
+        None
+    } else {
+        let orified = pm.orify_many(&pats);
+        let typed = pm.export(orified);
+        drop(pm);
+        Some(conv_counter_example(tctx, &typed, None))
+    };
+    tctx.typed = ta;
+    result
 }
 
 fn report_unused_match_cases(
@@ -10384,7 +10438,11 @@ fn report_unused_match_cases(
         return;
     }
     if let [case] = cases
-        && unused_check_is_trivial(tctx.typed.pattern(case.c_lhs), case.c_guard.is_some())
+        && unused_check_is_trivial(
+            &tctx.typed,
+            tctx.typed.pattern(case.c_lhs),
+            case.c_guard.is_some(),
+        )
     {
         return;
     }
@@ -10422,7 +10480,7 @@ fn report_unused_match_pattern(
     ty_arg_check: TypeExprRef,
 ) {
     if !tctx.warning_config.is_active(&Warning::UnusedMatch)
-        || unused_check_is_trivial(tctx.typed.pattern(lhs), false)
+        || unused_check_is_trivial(&tctx.typed, tctx.typed.pattern(lhs), false)
     {
         return;
     }
@@ -10438,8 +10496,8 @@ fn report_unused_match_pattern(
 /// earlier rows `every_satisfiables` answers `Used`, the refinement is
 /// skipped (`pref = []`) and `check_ambiguous_bindings` only looks at
 /// guarded or-patterns, so nothing can be reported.
-fn unused_check_is_trivial(lhs: &Pattern, guarded: bool) -> bool {
-    !guarded && !pattern_contains_or(lhs)
+fn unused_check_is_trivial(ta: &TypedArena, lhs: &Pattern, guarded: bool) -> bool {
+    !guarded && !pattern_contains_or(ta, lhs)
 }
 
 /// A borrowed match case for the unused/ambiguous Parmatch checks.
@@ -10538,7 +10596,7 @@ fn run_unused_check(
             guarded: case.guarded,
         })
         .collect();
-    parmatch_check_unused(tctx, env, level, expected_ty, &refs);
+    parmatch_check_unused(tctx, &ta, env, level, expected_ty, &refs);
     if check_ambiguous {
         // Parmatch.check_ambiguous_bindings (typecore.ml:4486).
         let oracle = TypecoreParmatchOracle {
@@ -10549,7 +10607,7 @@ fn run_unused_check(
             partial_explode: 0,
             none_type: None,
         };
-        let mut pm = crate::types::parmatch::Parmatch::new(oracle);
+        let mut pm = crate::types::parmatch::Parmatch::new(oracle, &ta);
         let cases: Vec<_> = cases
             .into_iter()
             .map(|case| crate::types::parmatch::AmbiguousCase {
@@ -10911,20 +10969,23 @@ fn pressure_matrix_close_variant_type(tctx: &mut TypeCheckContext<'_>, env: &Env
     }
 }
 
-fn typed_pattern_has_variant(pat: &Pattern) -> bool {
+fn typed_pattern_has_variant(ta: &TypedArena, pat: &Pattern) -> bool {
     match &pat.pat_desc {
         PatternDesc::Tpat_variant(_, _, _) => true,
-        PatternDesc::Tpat_alias(inner, _, _) => typed_pattern_has_variant(inner),
+        PatternDesc::Tpat_alias(inner, _, _) => typed_pattern_has_variant(ta, ta.pattern(*inner)),
         PatternDesc::Tpat_or(left, right, _) => {
-            typed_pattern_has_variant(left) || typed_pattern_has_variant(right)
+            typed_pattern_has_variant(ta, ta.pattern(*left))
+                || typed_pattern_has_variant(ta, ta.pattern(*right))
         }
-        PatternDesc::Tpat_tuple(items) | PatternDesc::Tpat_array(items) => {
-            items.iter().any(typed_pattern_has_variant)
+        PatternDesc::Tpat_tuple(items) | PatternDesc::Tpat_array(items) => ta
+            .patterns(*items)
+            .any(|p| typed_pattern_has_variant(ta, p)),
+        PatternDesc::Tpat_construct(_, _, args) => {
+            ta.patterns(*args).any(|p| typed_pattern_has_variant(ta, p))
         }
-        PatternDesc::Tpat_construct(_, _, args) => args.iter().any(typed_pattern_has_variant),
         PatternDesc::Tpat_record(fields, _, _) => fields
             .iter()
-            .any(|(_, _, field_pat, _)| typed_pattern_has_variant(field_pat)),
+            .any(|(_, _, field_pat, _)| typed_pattern_has_variant(ta, ta.pattern(*field_pat))),
         PatternDesc::Tpat_any | PatternDesc::Tpat_var(_, _) | PatternDesc::Tpat_constant(_) => {
             false
         }
@@ -10948,17 +11009,22 @@ fn parmatch_pressure_variants(tctx: &mut TypeCheckContext<'_>, env: &Env, patl: 
     let Some(first) = patl.first() else {
         return;
     };
+    // The patterns' sub-patterns are read from the arena set aside for the
+    // check (see [`PatCase`]).
+    let ta = std::mem::take(&mut tctx.typed);
     let oracle = TypecoreParmatchOracle {
-        tctx,
+        tctx: &mut *tctx,
         env,
         expected_ty: first.pat_type,
         level: 0,
         partial_explode: 0,
         none_type: None,
     };
-    let mut pm = crate::types::parmatch::Parmatch::new(oracle);
+    let mut pm = crate::types::parmatch::Parmatch::new(oracle, &ta);
     let imported: Vec<_> = patl.iter().map(|pat| pm.import(pat)).collect();
     pm.pressure_variants(EnvRef(0), &imported);
+    drop(pm);
+    tctx.typed = ta;
 }
 
 fn add_pattern_variable_value(
@@ -11103,11 +11169,11 @@ fn type_match_cases_batch_non_gadt<'a>(
         // finalize_variant converts still-open Reither fields.
         if pending_cases
             .iter()
-            .any(|pending| typed_pattern_has_variant(&pending.typed_pat))
+            .any(|pending| typed_pattern_has_variant(&tctx.typed, &pending.typed_pat))
         {
             pressure_variants_on_match_cases(tctx, env, &pending_cases);
             for pending in pending_cases.iter_mut() {
-                finalize_variant_in_pattern(tctx, env, &mut pending.typed_pat, false);
+                finalize_variant_in_pattern(tctx, env, &pending.typed_pat, false);
             }
         }
         // OCaml typecore.ml:4422-4423: "Contaminating" unifications start here.
@@ -11144,20 +11210,13 @@ fn type_match_cases_batch_non_gadt<'a>(
             let lower_result = (|| -> TypeCoreResult<()> {
                 for pending in &pending_cases {
                     tctx.unify_state.set_env(&pending.case_env);
-                    let mut pat_error: Option<TypeCoreError> = None;
-                    iter_typed_pattern(&pending.typed_pat, &mut |pat| {
-                        if pat_error.is_some() {
-                            return;
-                        }
-                        let fresh = ctx.new_var(None);
-                        if let Err(err) =
-                            unify_pattern_types(tctx, pat.pat_loc, pat.pat_type, fresh)
-                        {
-                            pat_error = Some(err);
-                        }
+                    let mut nodes: Vec<(LocIdx, TypeExprRef)> = Vec::new();
+                    iter_typed_pattern(&tctx.typed, &pending.typed_pat, &mut |pat| {
+                        nodes.push((pat.pat_loc, pat.pat_type));
                     });
-                    if let Some(err) = pat_error {
-                        return Err(err);
+                    for (pat_loc, pat_type) in nodes {
+                        let fresh = ctx.new_var(None);
+                        unify_pattern_types(tctx, pat_loc, pat_type, fresh)?;
                     }
                 }
                 Ok(())
@@ -11168,7 +11227,7 @@ fn type_match_cases_batch_non_gadt<'a>(
             ctx.end_def();
             scope_open = false;
             for pending in &pending_cases {
-                iter_typed_pattern(&pending.typed_pat, &mut |pat| {
+                iter_typed_pattern(&tctx.typed, &pending.typed_pat, &mut |pat| {
                     crate::types::generalize(tctx.type_ctx, pat.pat_type);
                 });
             }
@@ -11559,12 +11618,65 @@ fn type_match(
 fn finalize_variant_in_pattern(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
-    pat: &mut Pattern,
+    pat: &Pattern,
     convert_closed_reither: bool,
 ) {
-    if let PatternDesc::Tpat_variant(tag, arg, _) = &pat.pat_desc {
+    let node = FinalizeVariantNode::of(&tctx.typed, pat);
+    finalize_variant_node(tctx, env, node, convert_closed_reither);
+}
+
+/// What [`finalize_variant_in_pattern`] reads from one pattern node, copied
+/// out so the walk can update the type checker while it descends.
+struct FinalizeVariantNode {
+    variant: Option<(String, Option<TPatIdx>)>,
+    pat_type: TypeExprRef,
+    children: smallvec::SmallVec<[TPatIdx; 4]>,
+}
+
+impl FinalizeVariantNode {
+    fn of(ta: &TypedArena, pat: &Pattern) -> Self {
+        let variant = match &pat.pat_desc {
+            PatternDesc::Tpat_variant(tag, arg, _) => Some((tag.clone(), *arg)),
+            _ => None,
+        };
+        let mut children: smallvec::SmallVec<[TPatIdx; 4]> = smallvec::SmallVec::new();
+        match &pat.pat_desc {
+            PatternDesc::Tpat_variant(_, arg, _) => children.extend(*arg),
+            PatternDesc::Tpat_alias(inner, _, _) => children.push(*inner),
+            PatternDesc::Tpat_or(left, right, _) => children.extend([*left, *right]),
+            PatternDesc::Tpat_tuple(items)
+            | PatternDesc::Tpat_array(items)
+            | PatternDesc::Tpat_construct(_, _, items) => {
+                children.extend_from_slice(ta.pattern_list(*items))
+            }
+            PatternDesc::Tpat_record(fields, _, _) => {
+                children.extend(fields.iter().map(|(_, _, field_pat, _)| *field_pat))
+            }
+            PatternDesc::Tpat_any | PatternDesc::Tpat_var(_, _) | PatternDesc::Tpat_constant(_) => {
+            }
+        }
+        FinalizeVariantNode {
+            variant,
+            pat_type: pat.pat_type,
+            children,
+        }
+    }
+}
+
+fn finalize_variant_node(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    node: FinalizeVariantNode,
+    convert_closed_reither: bool,
+) {
+    let FinalizeVariantNode {
+        variant,
+        pat_type,
+        children,
+    } = node;
+    if let Some((tag, arg)) = &variant {
         let ctx = tctx.type_ctx;
-        let expanded = crate::types::ctype::expand_head(ctx, env, pat.pat_type);
+        let expanded = crate::types::ctype::expand_head(ctx, env, pat_type);
         let repr = ctx.repr(expanded);
         let desc = ctx.get_desc(repr);
         if let TypeDesc::Tvariant(row) = &*desc {
@@ -11595,8 +11707,12 @@ fn finalize_variant_in_pattern(
                     );
                     if let Some(arg_pat) = arg.as_ref() {
                         for ty in types {
-                            let _ =
-                                unify_pattern_types(tctx, arg_pat.pat_loc, arg_pat.pat_type, ty);
+                            let _ = unify_pattern_types(
+                                tctx,
+                                tctx.typed.pattern(*arg_pat).pat_loc,
+                                tctx.typed.pattern(*arg_pat).pat_type,
+                                ty,
+                            );
                         }
                     }
                 }
@@ -11646,35 +11762,9 @@ fn finalize_variant_in_pattern(
     }
 
     // Recurse into sub-patterns
-    match &mut pat.pat_desc {
-        PatternDesc::Tpat_variant(_, arg, _) => {
-            if let Some(arg_pat) = arg {
-                finalize_variant_in_pattern(tctx, env, arg_pat, convert_closed_reither);
-            }
-        }
-        PatternDesc::Tpat_alias(inner, _, _) => {
-            finalize_variant_in_pattern(tctx, env, inner, convert_closed_reither);
-        }
-        PatternDesc::Tpat_or(left, right, _) => {
-            finalize_variant_in_pattern(tctx, env, left, convert_closed_reither);
-            finalize_variant_in_pattern(tctx, env, right, convert_closed_reither);
-        }
-        PatternDesc::Tpat_tuple(items) | PatternDesc::Tpat_array(items) => {
-            for item in items {
-                finalize_variant_in_pattern(tctx, env, item, convert_closed_reither);
-            }
-        }
-        PatternDesc::Tpat_construct(_, _, args) => {
-            for arg in args {
-                finalize_variant_in_pattern(tctx, env, arg, convert_closed_reither);
-            }
-        }
-        PatternDesc::Tpat_record(fields, _, _) => {
-            for (_, _, field_pat, _) in fields {
-                finalize_variant_in_pattern(tctx, env, field_pat, convert_closed_reither);
-            }
-        }
-        PatternDesc::Tpat_any | PatternDesc::Tpat_var(_, _) | PatternDesc::Tpat_constant(_) => {}
+    for child in children {
+        let child = FinalizeVariantNode::of(&tctx.typed, tctx.typed.pattern(child));
+        finalize_variant_node(tctx, env, child, convert_closed_reither);
     }
 }
 
@@ -12256,7 +12346,7 @@ fn type_case_pattern_impl<'a>(
             return Err(err);
         }
     };
-    iter_typed_pattern(&typed_pat, &mut |pat| {
+    iter_typed_pattern(&tctx.typed, &typed_pat, &mut |pat| {
         crate::types::generalize(tctx.type_ctx, pat.pat_type);
     });
 
@@ -12875,16 +12965,16 @@ fn type_function_nary(
         // the typed parameter with it before extending the environment.
         unify_pattern_types(tctx, typed.pat_loc, typed.pat_type, ctx.new_var(None))?;
         // typecore.ml:3711-3713.
-        if typed_pattern_has_variant(&typed) {
+        if typed_pattern_has_variant(&tctx.typed, &typed) {
             parmatch_pressure_variants(tctx, &body_env, &[&typed]);
-            finalize_variant_in_pattern(tctx, &body_env, &mut typed, false);
+            finalize_variant_in_pattern(tctx, &body_env, &typed, false);
         }
         // typecore.ml:3714: `List.iter (fun f -> f ()) !pattern_force`.
         run_globalize_forces(tctx, state.take_globalize_forces())?;
         if propagate {
             let parameter_instance = crate::types::instance(ctx, typ);
             unify_pattern_types(tctx, typed.pat_loc, typed.pat_type, parameter_instance)?;
-            iter_typed_pattern(&typed, &mut |pat| {
+            iter_typed_pattern(&tctx.typed, &typed, &mut |pat| {
                 crate::types::generalize(ctx, pat.pat_type)
             });
         }
@@ -12984,11 +13074,12 @@ fn type_function_nary(
         );
     }
 
-    fn parameter_ident(ctx: &TypeContext, pat: &Pattern) -> Option<Ident> {
+    fn parameter_ident(ta: &TypedArena, ctx: &TypeContext, pat: &Pattern) -> Option<Ident> {
         match &pat.pat_desc {
             PatternDesc::Tpat_var(id, _) | PatternDesc::Tpat_alias(_, id, _) => Some(*id),
             PatternDesc::Tpat_construct(_, _, args) if args.len() == 1 => {
-                parameter_ident(ctx, &args[0]).map(|id| ctx.rename_ident(&id))
+                parameter_ident(ta, ctx, ta.pattern(ta.pattern_list(*args)[0]))
+                    .map(|id| ctx.rename_ident(&id))
             }
             _ => None,
         }
@@ -13051,7 +13142,7 @@ fn type_function_nary(
         let fp_has_default = opt_param.is_some();
         let fp_param = match opt_param {
             Some(id) => id,
-            None => parameter_ident(ctx, tctx.typed.pattern(typed))
+            None => parameter_ident(&tctx.typed, ctx, tctx.typed.pattern(typed))
                 .unwrap_or_else(|| ctx.create_ident("param")),
         };
         typed_params.push(FunctionParam {
@@ -19457,34 +19548,34 @@ fn type_approx_for_rec_let(
     }
 }
 
-fn iter_typed_pattern<F: FnMut(&Pattern)>(pat: &Pattern, f: &mut F) {
+fn iter_typed_pattern<F: FnMut(&Pattern)>(ta: &TypedArena, pat: &Pattern, f: &mut F) {
     f(pat);
     match &pat.pat_desc {
         PatternDesc::Tpat_variant(_, arg, _) => {
             if let Some(arg_pat) = arg {
-                iter_typed_pattern(arg_pat, f);
+                iter_typed_pattern(ta, ta.pattern(*arg_pat), f);
             }
         }
         PatternDesc::Tpat_alias(inner, _, _) => {
-            iter_typed_pattern(inner, f);
+            iter_typed_pattern(ta, ta.pattern(*inner), f);
         }
         PatternDesc::Tpat_or(left, right, _) => {
-            iter_typed_pattern(left, f);
-            iter_typed_pattern(right, f);
+            iter_typed_pattern(ta, ta.pattern(*left), f);
+            iter_typed_pattern(ta, ta.pattern(*right), f);
         }
         PatternDesc::Tpat_tuple(items) | PatternDesc::Tpat_array(items) => {
-            for item in items {
-                iter_typed_pattern(item, f);
+            for item in ta.patterns(*items) {
+                iter_typed_pattern(ta, item, f);
             }
         }
         PatternDesc::Tpat_construct(_, _, args) => {
-            for arg in args {
-                iter_typed_pattern(arg, f);
+            for arg in ta.patterns(*args) {
+                iter_typed_pattern(ta, arg, f);
             }
         }
         PatternDesc::Tpat_record(fields, _, _) => {
             for (_, _, field_pat, _) in fields {
-                iter_typed_pattern(field_pat, f);
+                iter_typed_pattern(ta, ta.pattern(*field_pat), f);
             }
         }
         PatternDesc::Tpat_any | PatternDesc::Tpat_var(_, _) | PatternDesc::Tpat_constant(_) => {}
@@ -19498,35 +19589,42 @@ fn iter_typed_pattern<F: FnMut(&Pattern)>(pat: &Pattern, f: &mut F) {
 /// `pat_bound_idents`, so the observable warning order is the cons order
 /// (reverse traversal order). typecore.ml:4652-4670 iterates that list when
 /// registering unused-binding checks.
-fn typed_pattern_bound_idents(pat: &Pattern) -> Vec<(&Ident, &str, LocIdx)> {
+fn typed_pattern_bound_idents<'a>(
+    ta: &'a TypedArena,
+    pat: &'a Pattern,
+) -> Vec<(&'a Ident, &'a str, LocIdx)> {
     let mut out = Vec::new();
-    collect_typed_pattern_idents(pat, &mut out);
+    collect_typed_pattern_idents(ta, pat, &mut out);
     out.reverse();
     out
 }
 
 /// Collects bound identifiers in traversal order.
-fn collect_typed_pattern_idents<'a>(pat: &'a Pattern, out: &mut Vec<(&'a Ident, &'a str, LocIdx)>) {
+fn collect_typed_pattern_idents<'a>(
+    ta: &'a TypedArena,
+    pat: &'a Pattern,
+    out: &mut Vec<(&'a Ident, &'a str, LocIdx)>,
+) {
     match &pat.pat_desc {
         PatternDesc::Tpat_var(id, name) => {
             out.push((id, id.name(), name.loc));
         }
         PatternDesc::Tpat_alias(inner, id, name) => {
-            collect_typed_pattern_idents(inner, out);
+            collect_typed_pattern_idents(ta, ta.pattern(*inner), out);
             out.push((id, id.name(), name.loc));
         }
         PatternDesc::Tpat_tuple(items) | PatternDesc::Tpat_array(items) => {
-            for item in items {
-                collect_typed_pattern_idents(item, out);
+            for item in ta.patterns(*items) {
+                collect_typed_pattern_idents(ta, item, out);
             }
         }
         PatternDesc::Tpat_construct(_, _, args) => {
-            for arg in args {
-                collect_typed_pattern_idents(arg, out);
+            for arg in ta.patterns(*args) {
+                collect_typed_pattern_idents(ta, arg, out);
             }
         }
         PatternDesc::Tpat_variant(_, Some(arg), _) => {
-            collect_typed_pattern_idents(arg, out);
+            collect_typed_pattern_idents(ta, ta.pattern(*arg), out);
         }
         PatternDesc::Tpat_record(fields, _, rest) => {
             if let Some(rest) = rest {
@@ -19537,11 +19635,11 @@ fn collect_typed_pattern_idents<'a>(pat: &'a Pattern, out: &mut Vec<(&'a Ident, 
                 ));
             }
             for (_, _, field_pat, _) in fields {
-                collect_typed_pattern_idents(field_pat, out);
+                collect_typed_pattern_idents(ta, ta.pattern(*field_pat), out);
             }
         }
         PatternDesc::Tpat_or(left, _, _) => {
-            collect_typed_pattern_idents(left, out);
+            collect_typed_pattern_idents(ta, ta.pattern(*left), out);
         }
         PatternDesc::Tpat_any
         | PatternDesc::Tpat_constant(_)
@@ -19887,33 +19985,33 @@ fn rec_env_join(mut left: RecEnv, right: RecEnv) -> RecEnv {
     left
 }
 
-fn rec_pattern_variables(pat: &Pattern) -> Vec<Ident> {
-    fn collect(pat: &Pattern, vars: &mut Vec<Ident>) {
+fn rec_pattern_variables(ta: &TypedArena, pat: &Pattern) -> Vec<Ident> {
+    fn collect(ta: &TypedArena, pat: &Pattern, vars: &mut Vec<Ident>) {
         match &pat.pat_desc {
             PatternDesc::Tpat_var(id, _) => vars.push(*id),
             PatternDesc::Tpat_alias(inner, id, _) => {
-                collect(inner, vars);
+                collect(ta, ta.pattern(*inner), vars);
                 vars.push(*id);
             }
             PatternDesc::Tpat_tuple(items) | PatternDesc::Tpat_array(items) => {
-                for item in items {
-                    collect(item, vars);
+                for item in ta.patterns(*items) {
+                    collect(ta, item, vars);
                 }
             }
             PatternDesc::Tpat_construct(_, _, args) => {
-                for arg in args {
-                    collect(arg, vars);
+                for arg in ta.patterns(*args) {
+                    collect(ta, arg, vars);
                 }
             }
-            PatternDesc::Tpat_variant(_, Some(arg), _) => collect(arg, vars),
+            PatternDesc::Tpat_variant(_, Some(arg), _) => collect(ta, ta.pattern(*arg), vars),
             PatternDesc::Tpat_record(fields, _, _) => {
                 for (_, _, field_pat, _) in fields {
-                    collect(field_pat, vars);
+                    collect(ta, ta.pattern(*field_pat), vars);
                 }
             }
             PatternDesc::Tpat_or(left, right, _) => {
-                collect(left, vars);
-                collect(right, vars);
+                collect(ta, ta.pattern(*left), vars);
+                collect(ta, ta.pattern(*right), vars);
             }
             PatternDesc::Tpat_any
             | PatternDesc::Tpat_constant(_)
@@ -19921,14 +20019,16 @@ fn rec_pattern_variables(pat: &Pattern) -> Vec<Ident> {
         }
     }
     let mut vars = Vec::new();
-    collect(pat, &mut vars);
+    collect(ta, pat, &mut vars);
     vars
 }
 
-fn rec_pattern_is_destructuring(pat: &Pattern) -> bool {
+fn rec_pattern_is_destructuring(ta: &TypedArena, pat: &Pattern) -> bool {
     match &pat.pat_desc {
         PatternDesc::Tpat_any | PatternDesc::Tpat_var(_, _) => false,
-        PatternDesc::Tpat_alias(inner, _, _) => rec_pattern_is_destructuring(inner),
+        PatternDesc::Tpat_alias(inner, _, _) => {
+            rec_pattern_is_destructuring(ta, ta.pattern(*inner))
+        }
         PatternDesc::Tpat_constant(_)
         | PatternDesc::Tpat_tuple(_)
         | PatternDesc::Tpat_construct(_, _, _)
@@ -19936,7 +20036,8 @@ fn rec_pattern_is_destructuring(pat: &Pattern) -> bool {
         | PatternDesc::Tpat_record(_, _, _)
         | PatternDesc::Tpat_array(_) => true,
         PatternDesc::Tpat_or(left, right, _) => {
-            rec_pattern_is_destructuring(left) || rec_pattern_is_destructuring(right)
+            rec_pattern_is_destructuring(ta, ta.pattern(*left))
+                || rec_pattern_is_destructuring(ta, ta.pattern(*right))
         }
     }
 }
@@ -20021,12 +20122,12 @@ fn rec_case(
     case: &crate::types::typedtree::Case,
     scrutinee: RecUse,
 ) -> RecUse {
-    let scrutinee = if rec_pattern_is_destructuring(ta.pattern(case.c_lhs)) {
+    let scrutinee = if rec_pattern_is_destructuring(ta, ta.pattern(case.c_lhs)) {
         rec_use_inspect(scrutinee)
     } else {
         rec_use_discard(scrutinee)
     };
-    let vars = rec_pattern_variables(ta.pattern(case.c_lhs));
+    let vars = rec_pattern_variables(ta, ta.pattern(case.c_lhs));
     let case_env = if vars.is_empty() {
         std::borrow::Cow::Borrowed(env)
     } else {
@@ -20056,9 +20157,9 @@ fn rec_value_binding(
     env: &RecEnv,
     binding: &ValueBinding,
 ) -> (RecEnv, RecUse) {
-    let vars = rec_pattern_variables(ta.pattern(binding.vb_pat));
+    let vars = rec_pattern_variables(ta, ta.pattern(binding.vb_pat));
     let mut use_ = rec_expression(ta, ctx, env, binding.vb_expr);
-    if rec_pattern_is_destructuring(ta.pattern(binding.vb_pat)) {
+    if rec_pattern_is_destructuring(ta, ta.pattern(binding.vb_pat)) {
         use_ = rec_use_inspect(use_);
     }
     let mut binding_env = RecEnv::default();
@@ -20080,7 +20181,7 @@ fn rec_value_bindings(
             let mut ids = Vec::new();
             let mut use_ = RecUse::default();
             for binding in bindings {
-                ids.extend(rec_pattern_variables(ta.pattern(binding.vb_pat)));
+                ids.extend(rec_pattern_variables(ta, ta.pattern(binding.vb_pat)));
                 use_ = rec_use_join(use_, rec_expression(ta, ctx, env, binding.vb_expr));
             }
             let mut binding_env = RecEnv::default();
@@ -20489,7 +20590,7 @@ fn check_recursive_bindings(
 ) -> TypeCoreResult<()> {
     let ids = bindings
         .iter()
-        .flat_map(|binding| rec_pattern_variables(ta.pattern(binding.vb_pat)))
+        .flat_map(|binding| rec_pattern_variables(ta, ta.pattern(binding.vb_pat)))
         .collect::<Vec<_>>();
     for binding in bindings {
         if !rec_binding_rhs_is_exempt(ta, binding.vb_expr) {
@@ -20742,7 +20843,7 @@ fn type_let_bindings(
         // rows in let patterns before typing RHS expressions.
         // typecore.ml:4562-4567.
         for typed_pat in typed_patterns.iter_mut() {
-            if typed_pattern_has_variant(typed_pat) {
+            if typed_pattern_has_variant(&tctx.typed, typed_pat) {
                 parmatch_pressure_variants(tctx, env, &[&*typed_pat]);
                 finalize_variant_in_pattern(tctx, env, typed_pat, false);
             }
@@ -20822,7 +20923,23 @@ fn type_let_bindings(
                         let mut usage = tctx.type_ctx.usage();
                         (usage.new_cell(), usage.new_let_slot())
                     };
-                    for (id, name, _) in typed_pattern_bound_idents(typed_pat) {
+                    // Owned, since the checks below update `tctx`; variable
+                    // names are the identifiers' static names.
+                    let bound: Vec<(Ident, std::borrow::Cow<'static, str>)> =
+                        typed_pattern_bound_idents(&tctx.typed, typed_pat)
+                            .into_iter()
+                            .map(|(id, name, _)| {
+                                let name = if name == id.name() {
+                                    std::borrow::Cow::Borrowed(id.name())
+                                } else {
+                                    std::borrow::Cow::Owned(name.to_string())
+                                };
+                                (*id, name)
+                            })
+                            .collect();
+                    for (id, name) in bound {
+                        let id = &id;
+                        let name: &str = &name;
                         let Some(pv) = pvars.iter().find(|pv| pv.id.same(id)) else {
                             continue;
                         };
@@ -20939,16 +21056,24 @@ fn type_let_bindings(
         for binding in typed_bindings.iter() {
             let is_nonexp = is_nonexpansive_expression(tctx, binding.vb_expr);
             if !is_nonexp {
-                iter_typed_pattern(tctx.typed.pattern(binding.vb_pat), &mut |pat| {
-                    crate::types::ctype::generalize_expansive(ctx, env, pat.pat_type);
-                });
+                iter_typed_pattern(
+                    &tctx.typed,
+                    tctx.typed.pattern(binding.vb_pat),
+                    &mut |pat| {
+                        crate::types::ctype::generalize_expansive(ctx, env, pat.pat_type);
+                    },
+                );
             }
         }
 
         for binding in &typed_bindings {
-            iter_typed_pattern(tctx.typed.pattern(binding.vb_pat), &mut |pat| {
-                crate::types::generalize(ctx, pat.pat_type);
-            });
+            iter_typed_pattern(
+                &tctx.typed,
+                tctx.typed.pattern(binding.vb_pat),
+                &mut |pat| {
+                    crate::types::generalize(ctx, pat.pat_type);
+                },
+            );
         }
 
         if rec_flag == RecFlag::Recursive {
@@ -20956,7 +21081,8 @@ fn type_let_bindings(
                 match &tctx.typed.pattern(binding.vb_pat).pat_desc {
                     PatternDesc::Tpat_var(_, _) => {}
                     PatternDesc::Tpat_alias(inner, _, _)
-                        if matches!(&inner.pat_desc, PatternDesc::Tpat_any) => {}
+                        if matches!(tctx.typed.pattern(*inner).pat_desc, PatternDesc::Tpat_any) => {
+                    }
                     _ => {
                         return Err(TypeCoreError::IllegalLetrecPat {
                             loc: tctx.typed.pattern(binding.vb_pat).pat_loc,
@@ -29293,10 +29419,13 @@ mod tests {
         else {
             panic!("expected typed or-pattern");
         };
-        let crate::types::typedtree::PatternDesc::Tpat_var(left_id, _) = &left_pat.pat_desc else {
+        let crate::types::typedtree::PatternDesc::Tpat_var(left_id, _) =
+            &tctx.typed.pattern(left_pat).pat_desc
+        else {
             panic!("expected left branch variable");
         };
-        let crate::types::typedtree::PatternDesc::Tpat_var(right_id, _) = &right_pat.pat_desc
+        let crate::types::typedtree::PatternDesc::Tpat_var(right_id, _) =
+            &tctx.typed.pattern(right_pat).pat_desc
         else {
             panic!("expected right branch variable");
         };
@@ -29571,6 +29700,16 @@ fn pm_has_dict_pattern_attribute(arena: &ParseArena, pat: &Pattern) -> bool {
 }
 
 impl crate::types::parmatch::Oracle for TypecoreParmatchOracle<'_, '_> {
+    /// The checks run with the typed arena set aside (see [`PatCase`]), so
+    /// `tctx.typed` is scratch space here.
+    fn scratch(&self) -> &TypedArena {
+        &self.tctx.typed
+    }
+
+    fn scratch_mut(&mut self) -> &mut TypedArena {
+        &mut self.tctx.typed
+    }
+
     fn ctx(&self) -> &TypeContext {
         self.tctx.type_ctx
     }
@@ -29644,7 +29783,7 @@ impl crate::types::parmatch::Oracle for TypecoreParmatchOracle<'_, '_> {
     }
 
     fn print_pattern(&mut self, v: &Pattern) -> String {
-        print_counter_example(self.tctx.arena, v)
+        print_counter_example(&self.tctx.typed, self.tctx.arena, v)
     }
 
     fn pred(
@@ -29723,13 +29862,24 @@ impl crate::types::parmatch::Oracle for TypecoreParmatchOracle<'_, '_> {
 /// (translmod.ml:391 `Parmatch.irrefutable`).
 struct TranslParmatchOracle<'t> {
     ctx: &'t TypeContext,
+    ta: &'t TypedArena,
     arena: &'t ParseArena,
     env: &'t Env,
     persistent_env: &'t mut PersistentEnvSlot,
     none_type: Option<TypeExprRef>,
+    /// Counter-examples; `irrefutable` builds none.
+    scratch: TypedArena,
 }
 
 impl crate::types::parmatch::Oracle for TranslParmatchOracle<'_> {
+    fn scratch(&self) -> &TypedArena {
+        &self.scratch
+    }
+
+    fn scratch_mut(&mut self) -> &mut TypedArena {
+        &mut self.scratch
+    }
+
     fn ctx(&self) -> &TypeContext {
         self.ctx
     }
@@ -29783,7 +29933,7 @@ impl crate::types::parmatch::Oracle for TranslParmatchOracle<'_> {
     }
 
     fn print_pattern(&mut self, v: &Pattern) -> String {
-        print_counter_example(self.arena, v)
+        print_counter_example(&self.scratch, self.arena, v)
     }
 
     fn pred(
@@ -29844,6 +29994,7 @@ impl crate::types::parmatch::Oracle for TranslParmatchOracle<'_> {
 
 /// `Parmatch.irrefutable pat` (parmatch.ml:2260), as used by translmod.ml:391.
 pub(crate) fn parmatch_irrefutable(
+    ta: &TypedArena,
     ctx: &TypeContext,
     arena: &ParseArena,
     env: &Env,
@@ -29852,39 +30003,45 @@ pub(crate) fn parmatch_irrefutable(
 ) -> bool {
     let oracle = TranslParmatchOracle {
         ctx,
+        ta,
         arena,
         env,
         persistent_env,
         none_type: None,
+        scratch: TypedArena::new(),
     };
-    let mut pm = crate::types::parmatch::Parmatch::new(oracle);
+    let mut pm = crate::types::parmatch::Parmatch::new(oracle, ta);
     pm.irrefutable(pat)
 }
 
 /// Patterns that match every value of their type: wildcards, variables,
 /// and aliases and tuples of those.
-fn pattern_surely_irrefutable(p: &Pattern) -> bool {
+fn pattern_surely_irrefutable(ta: &TypedArena, p: &Pattern) -> bool {
     match &p.pat_desc {
         PatternDesc::Tpat_any | PatternDesc::Tpat_var(..) => true,
-        PatternDesc::Tpat_alias(p, _, _) => pattern_surely_irrefutable(p),
-        PatternDesc::Tpat_tuple(ps) => ps.iter().all(pattern_surely_irrefutable),
+        PatternDesc::Tpat_alias(p, _, _) => pattern_surely_irrefutable(ta, ta.pattern(*p)),
+        PatternDesc::Tpat_tuple(ps) => ta.patterns(*ps).all(|p| pattern_surely_irrefutable(ta, p)),
         _ => false,
     }
 }
 
-fn pattern_contains_or(p: &Pattern) -> bool {
+fn pattern_contains_or(ta: &TypedArena, p: &Pattern) -> bool {
     match &p.pat_desc {
         PatternDesc::Tpat_any | PatternDesc::Tpat_var(..) | PatternDesc::Tpat_constant(_) => false,
         PatternDesc::Tpat_or(..) => true,
-        PatternDesc::Tpat_alias(p, _, _) => pattern_contains_or(p),
+        PatternDesc::Tpat_alias(p, _, _) => pattern_contains_or(ta, ta.pattern(*p)),
         PatternDesc::Tpat_tuple(ps) | PatternDesc::Tpat_array(ps) => {
-            ps.iter().any(pattern_contains_or)
+            ta.patterns(*ps).any(|p| pattern_contains_or(ta, p))
         }
-        PatternDesc::Tpat_construct(_, _, ps) => ps.iter().any(pattern_contains_or),
-        PatternDesc::Tpat_variant(_, arg, _) => arg.as_deref().is_some_and(pattern_contains_or),
-        PatternDesc::Tpat_record(fields, _, _) => {
-            fields.iter().any(|(_, _, p, _)| pattern_contains_or(p))
+        PatternDesc::Tpat_construct(_, _, ps) => {
+            ta.patterns(*ps).any(|p| pattern_contains_or(ta, p))
         }
+        PatternDesc::Tpat_variant(_, arg, _) => {
+            arg.is_some_and(|arg| pattern_contains_or(ta, ta.pattern(arg)))
+        }
+        PatternDesc::Tpat_record(fields, _, _) => fields
+            .iter()
+            .any(|(_, _, p, _)| pattern_contains_or(ta, ta.pattern(*p))),
     }
 }
 
@@ -30009,8 +30166,8 @@ fn conv_counter_example(
         let none = LocIdx::none();
         match &pat.pat_desc {
             PatternDesc::Tpat_or(left, right, _) => {
-                let left = lp(tctx, left, counter, none);
-                let right = lp(tctx, right, counter, none);
+                let left = lp(tctx, &tctx.typed.pattern(*left).clone(), counter, none);
+                let right = lp(tctx, &tctx.typed.pattern(*right).clone(), counter, none);
                 push_parsed_pattern(arena, loc, P::Ppat_or(left, right))
             }
             PatternDesc::Tpat_var(_, name) if name.txt == "*extension*" => {
@@ -30025,11 +30182,16 @@ fn conv_counter_example(
                 loc,
                 P::Ppat_constant(untype_constant(constant, arena)),
             ),
-            PatternDesc::Tpat_alias(inner, _, _) => lp(tctx, inner, counter, loc),
+            PatternDesc::Tpat_alias(inner, _, _) => {
+                lp(tctx, &tctx.typed.pattern(*inner).clone(), counter, loc)
+            }
             PatternDesc::Tpat_tuple(items) => {
-                let items = items
-                    .iter()
-                    .map(|item| lp(tctx, item, counter, none))
+                let items = tctx
+                    .typed
+                    .pattern_list(*items)
+                    .to_vec()
+                    .into_iter()
+                    .map(|item| lp(tctx, &tctx.typed.pattern(item).clone(), counter, none))
                     .collect::<Vec<_>>();
                 push_parsed_pattern(
                     arena,
@@ -30043,9 +30205,12 @@ fn conv_counter_example(
                     .push((id.clone(), cstr.clone()));
                 let lid = Located::new(arena.push_typecheck_lident(&id), cstr_lid.loc);
                 // parmatch.ml Conv: `Location.mknoloc (List.map loop lst)`.
-                let items: Vec<_> = args
-                    .iter()
-                    .map(|arg| lp(tctx, arg, counter, none))
+                let items: Vec<_> = tctx
+                    .typed
+                    .pattern_list(*args)
+                    .to_vec()
+                    .into_iter()
+                    .map(|arg| lp(tctx, &tctx.typed.pattern(arg).clone(), counter, none))
                     .collect();
                 push_parsed_pattern(
                     arena,
@@ -30055,8 +30220,7 @@ fn conv_counter_example(
             }
             PatternDesc::Tpat_variant(label, arg, _) => {
                 let args: Vec<_> = arg
-                    .as_deref()
-                    .map(|arg| lp(tctx, arg, counter, none))
+                    .map(|arg| lp(tctx, &tctx.typed.pattern(arg).clone(), counter, none))
                     .into_iter()
                     .collect();
                 push_parsed_pattern(
@@ -30077,7 +30241,7 @@ fn conv_counter_example(
                             .push((id.clone(), lbl.clone()));
                         PatternRecordField {
                             lid: Located::new(arena.push_typecheck_lident(&id), none),
-                            pat: lp(tctx, p, counter, none),
+                            pat: lp(tctx, &tctx.typed.pattern(*p).clone(), counter, none),
                             opt: *optional,
                         }
                     })
@@ -30095,9 +30259,12 @@ fn conv_counter_example(
                 )
             }
             PatternDesc::Tpat_array(items) => {
-                let items = items
-                    .iter()
-                    .map(|item| lp(tctx, item, counter, none))
+                let items = tctx
+                    .typed
+                    .pattern_list(*items)
+                    .to_vec()
+                    .into_iter()
+                    .map(|item| lp(tctx, &tctx.typed.pattern(item).clone(), counter, none))
                     .collect::<Vec<_>>();
                 push_parsed_pattern(
                     arena,
@@ -30116,7 +30283,7 @@ fn conv_counter_example(
 }
 
 /// `Pattern_printer.print_pattern` (compiler/common/pattern_printer.ml).
-fn print_counter_example(arena: &ParseArena, typed: &Pattern) -> String {
+fn print_counter_example(ta: &TypedArena, arena: &ParseArena, typed: &Pattern) -> String {
     use crate::parser::ast::{PatternDesc as P, PatternRecordField};
 
     fn is_generated_optional_constructor(arena: &ParseArena, lid: LidentIdx) -> bool {
@@ -30132,7 +30299,7 @@ fn print_counter_example(arena: &ParseArena, typed: &Pattern) -> String {
         PresentNone,
     }
 
-    fn classify(arena: &ParseArena, pat: &Pattern) -> FieldState {
+    fn classify(ta: &TypedArena, arena: &ParseArena, pat: &Pattern) -> FieldState {
         match &pat.pat_desc {
             PatternDesc::Tpat_construct(lid, cstr, args)
                 if args.is_empty()
@@ -30146,7 +30313,7 @@ fn print_counter_example(arena: &ParseArena, typed: &Pattern) -> String {
                     && is_generated_optional_constructor(arena, lid.txt)
                     && cstr.cstr_name == "Some" =>
             {
-                match classify(arena, &args[0]) {
+                match classify(ta, arena, ta.pattern(ta.pattern_list(*args)[0])) {
                     FieldState::Missing | FieldState::PresentNone => FieldState::PresentNone,
                     FieldState::Normal => FieldState::Normal,
                 }
@@ -30155,36 +30322,55 @@ fn print_counter_example(arena: &ParseArena, typed: &Pattern) -> String {
         }
     }
 
-    fn strip_synthetic_some<'p>(arena: &ParseArena, pat: &'p Pattern) -> &'p Pattern {
+    fn strip_synthetic_some<'p>(
+        ta: &'p TypedArena,
+        arena: &ParseArena,
+        pat: &'p Pattern,
+    ) -> &'p Pattern {
         match &pat.pat_desc {
             PatternDesc::Tpat_construct(lid, cstr, args)
                 if args.len() == 1
                     && is_generated_optional_constructor(arena, lid.txt)
                     && cstr.cstr_name == "Some" =>
             {
-                &args[0]
+                ta.pattern(ta.pattern_list(*args)[0])
             }
             _ => pat,
         }
     }
 
-    fn untype(arena: &ParseArena, pat: &Pattern) -> crate::parse_arena::PatIdx {
+    /// The left operand of an or-pattern being printed: a stored pattern,
+    /// or an or-pattern regrouped by [`untype_or`].
+    enum OrOperand {
+        Pat(TPatIdx),
+        Or(Box<(OrOperand, TPatIdx)>),
+    }
+
+    /// `left | right`, printing `A | (B | C)` as `(A | B) | C`.
+    fn untype_or(
+        ta: &TypedArena,
+        arena: &ParseArena,
+        left: OrOperand,
+        right: TPatIdx,
+    ) -> crate::parse_arena::PatIdx {
+        if let PatternDesc::Tpat_or(p2, p3, _) = &ta.pattern(right).pat_desc {
+            return untype_or(ta, arena, OrOperand::Or(Box::new((left, *p2))), *p3);
+        }
+        let left = match left {
+            OrOperand::Pat(p) => untype(ta, arena, ta.pattern(p)),
+            OrOperand::Or(pair) => {
+                let (l, r) = *pair;
+                untype_or(ta, arena, l, r)
+            }
+        };
+        let right = untype(ta, arena, ta.pattern(right));
+        push_parsed_pattern(arena, LocIdx::none(), P::Ppat_or(left, right))
+    }
+
+    fn untype(ta: &TypedArena, arena: &ParseArena, pat: &Pattern) -> crate::parse_arena::PatIdx {
         let none = LocIdx::none();
         match &pat.pat_desc {
-            PatternDesc::Tpat_or(p1, inner, r_o) => {
-                if let PatternDesc::Tpat_or(p2, p3, r_i) = &inner.pat_desc {
-                    // A | (B | C) prints as (A | B) | C.
-                    let mut new_inner = pat.clone();
-                    new_inner.pat_desc = PatternDesc::Tpat_or(p1.clone(), p2.clone(), r_i.clone());
-                    let mut new_outer = pat.clone();
-                    new_outer.pat_desc =
-                        PatternDesc::Tpat_or(Box::new(new_inner), p3.clone(), r_o.clone());
-                    return untype(arena, &new_outer);
-                }
-                let left = untype(arena, p1);
-                let right = untype(arena, inner);
-                push_parsed_pattern(arena, none, P::Ppat_or(left, right))
-            }
+            PatternDesc::Tpat_or(p1, inner, _) => untype_or(ta, arena, OrOperand::Pat(*p1), *inner),
             PatternDesc::Tpat_any | PatternDesc::Tpat_var(_, _) => {
                 push_parsed_pattern(arena, none, P::Ppat_any)
             }
@@ -30193,11 +30379,11 @@ fn print_counter_example(arena: &ParseArena, typed: &Pattern) -> String {
                 none,
                 P::Ppat_constant(untype_constant(constant, arena)),
             ),
-            PatternDesc::Tpat_alias(inner, _, _) => untype(arena, inner),
+            PatternDesc::Tpat_alias(inner, _, _) => untype(ta, arena, ta.pattern(*inner)),
             PatternDesc::Tpat_tuple(items) => {
-                let items = items
-                    .iter()
-                    .map(|item| untype(arena, item))
+                let items = ta
+                    .patterns(*items)
+                    .map(|item| untype(ta, arena, item))
                     .collect::<Vec<_>>();
                 push_parsed_pattern(
                     arena,
@@ -30208,9 +30394,9 @@ fn print_counter_example(arena: &ParseArena, typed: &Pattern) -> String {
             PatternDesc::Tpat_construct(cstr_lid, cstr, args) => {
                 let lid = Located::new(arena.push_typecheck_lident(&cstr.cstr_name), cstr_lid.loc);
                 // pattern_printer.ml untype: `mknoloc (List.map loop lst)`.
-                let items: Vec<_> = args
-                    .iter()
-                    .map(|arg| untype(arena, arg))
+                let items: Vec<_> = ta
+                    .patterns(*args)
+                    .map(|arg| untype(ta, arena, arg))
                     .collect::<Vec<_>>();
                 push_parsed_pattern(
                     arena,
@@ -30220,8 +30406,7 @@ fn print_counter_example(arena: &ParseArena, typed: &Pattern) -> String {
             }
             PatternDesc::Tpat_variant(label, arg, _) => {
                 let args: Vec<_> = arg
-                    .as_deref()
-                    .map(|arg| untype(arena, arg))
+                    .map(|arg| untype(ta, arena, ta.pattern(arg)))
                     .into_iter()
                     .collect();
                 push_parsed_pattern(
@@ -30239,7 +30424,7 @@ fn print_counter_example(arena: &ParseArena, typed: &Pattern) -> String {
                     .iter()
                     .map(|(_, lbl, p, opt)| {
                         let state = if lbl.lbl_optional {
-                            classify(arena, p)
+                            classify(ta, arena, ta.pattern(*p))
                         } else {
                             FieldState::Normal
                         };
@@ -30265,9 +30450,16 @@ fn print_counter_example(arena: &ParseArena, typed: &Pattern) -> String {
                             }
                             FieldState::PresentNone => {
                                 saw_optional_rewrite = true;
-                                (*opt, untype(arena, strip_synthetic_some(arena, p)))
+                                (
+                                    *opt,
+                                    untype(
+                                        ta,
+                                        arena,
+                                        strip_synthetic_some(ta, arena, ta.pattern(*p)),
+                                    ),
+                                )
                             }
-                            FieldState::Normal => (*opt, untype(arena, p)),
+                            FieldState::Normal => (*opt, untype(ta, arena, ta.pattern(*p))),
                         };
                         PatternRecordField {
                             lid: Located::new(arena.push_typecheck_lident(&lbl.lbl_name), none),
@@ -30300,9 +30492,9 @@ fn print_counter_example(arena: &ParseArena, typed: &Pattern) -> String {
                 )
             }
             PatternDesc::Tpat_array(items) => {
-                let items = items
-                    .iter()
-                    .map(|item| untype(arena, item))
+                let items = ta
+                    .patterns(*items)
+                    .map(|item| untype(ta, arena, item))
                     .collect::<Vec<_>>();
                 push_parsed_pattern(
                     arena,
@@ -30313,7 +30505,7 @@ fn print_counter_example(arena: &ParseArena, typed: &Pattern) -> String {
         }
     }
 
-    let parsed = untype(arena, typed);
+    let parsed = untype(ta, arena, typed);
     let doc = crate::parser::printer::print_pattern(
         &crate::parser::printer::PrinterState::init(),
         arena.get_pat(parsed),
@@ -30347,12 +30539,11 @@ fn parmatch_check_partial(
     // An unguarded irrefutable case makes `exhaust` answer `Rnone` without
     // consulting the oracle, so the match is total and nothing is reported;
     // only the fragile-match check still needs the full analysis.
-    if cases
-        .iter()
-        .any(|case| !case.guarded && pattern_surely_irrefutable(tctx.typed.pattern(case.lhs)))
-        && !tctx
-            .warning_config
-            .is_active(&Warning::FragileMatch { typ: String::new() })
+    if cases.iter().any(|case| {
+        !case.guarded && pattern_surely_irrefutable(&tctx.typed, tctx.typed.pattern(case.lhs))
+    }) && !tctx
+        .warning_config
+        .is_active(&Warning::FragileMatch { typ: String::new() })
     {
         return crate::types::typedtree::Partial::Total;
     }
@@ -30372,7 +30563,7 @@ fn parmatch_check_partial(
         partial_explode: if cases.len() == 1 { 5 } else { 0 },
         none_type: None,
     };
-    let mut pm = crate::types::parmatch::Parmatch::new(oracle);
+    let mut pm = crate::types::parmatch::Parmatch::new(oracle, &ta);
     let partial = match pm.check_partial(hint, loc, &refs) {
         crate::types::parmatch::Partiality::Partial => crate::types::typedtree::Partial::Partial,
         crate::types::parmatch::Partiality::Total => crate::types::typedtree::Partial::Total,
@@ -30409,6 +30600,7 @@ fn case_refs(cases: &[crate::types::typedtree::Case]) -> Vec<PatCase> {
 /// `check_unused ~lev env expected_ty cases` (typecore.ml:1772-1776).
 fn parmatch_check_unused(
     tctx: &mut TypeCheckContext<'_>,
+    ta: &TypedArena,
     env: &Env,
     level: i32,
     expected_ty: TypeExprRef,
@@ -30422,6 +30614,6 @@ fn parmatch_check_unused(
         partial_explode: 0,
         none_type: None,
     };
-    let mut pm = crate::types::parmatch::Parmatch::new(oracle);
+    let mut pm = crate::types::parmatch::Parmatch::new(oracle, ta);
     pm.check_unused(cases);
 }

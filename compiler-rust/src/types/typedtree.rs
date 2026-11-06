@@ -26,8 +26,8 @@ use crate::types::asttypes::ArgLabel as TypeArgLabel;
 use crate::types::decl::ModuleType as DeclModuleType;
 pub use crate::types::tast_arena::{
     TArgList, TCaseList, TCoreTypeIdx, TCoreTypeList, TExprIdx, TExprList, TExtIdx, TFieldList,
-    TModExprIdx, TModTypeIdx, TParamList, TPatIdx, TSigItemList, TStrItemList, TValDescIdx,
-    TVbList, TypedArena,
+    TModExprIdx, TModTypeIdx, TParamList, TPatIdx, TPatList, TSigItemList, TStrItemList,
+    TValDescIdx, TVbList, TypedArena,
 };
 use crate::types::{
     ConstructorDescription, LabelDescription, Path, RowDesc, TypeExprRef, ValueDescription,
@@ -215,37 +215,37 @@ pub enum PatternDesc {
     Tpat_var(Ident, Loc<String>),
 
     /// Alias: `P as x`.
-    Tpat_alias(Box<Pattern>, Ident, Loc<String>),
+    Tpat_alias(TPatIdx, Ident, Loc<String>),
 
     /// Constant: `1`, `'a'`, `"hello"`, `1.0`.
     Tpat_constant(Constant),
 
     /// Tuple: `(P1, ..., Pn)`.
     /// Invariant: length >= 2.
-    Tpat_tuple(Vec<Pattern>),
+    Tpat_tuple(TPatList),
 
     /// Constructor: `C`, `C(P)`, `C(P1, ..., Pn)`.
     /// The description is shared like OCaml's physical `constructor_description`
     /// record, so pattern copies in exhaustiveness and matching stay cheap.
-    Tpat_construct(Loc<LidentIdx>, Arc<ConstructorDescription>, Vec<Pattern>),
+    Tpat_construct(Loc<LidentIdx>, Arc<ConstructorDescription>, TPatList),
 
     /// Variant: `` `A ``, `` `A(P) ``.
-    Tpat_variant(String, Option<Box<Pattern>>, RowDescRef),
+    Tpat_variant(String, Option<TPatIdx>, RowDescRef),
 
     /// Record: `{l1: P1, ..., ln: Pn}` or `{l1: P1, ..., _}`.
     /// The bool indicates whether the field is optional.
     Tpat_record(
-        Vec<(Loc<LidentIdx>, Arc<LabelDescription>, Pattern, bool)>,
+        Vec<(Loc<LidentIdx>, Arc<LabelDescription>, TPatIdx, bool)>,
         ClosedFlag,
         Option<Box<RecordPatternRest>>,
     ),
 
     /// Array: `[| P1, ..., Pn |]`.
-    Tpat_array(Vec<Pattern>),
+    Tpat_array(TPatList),
 
     /// Or-pattern: `P1 | P2`.
     /// The RowDesc is Some when translating type patterns.
-    Tpat_or(Box<Pattern>, Box<Pattern>, Option<Box<RowDesc>>),
+    Tpat_or(TPatIdx, TPatIdx, Option<Box<RowDesc>>),
 }
 
 /// Typed record-rest binding (compiler/ml/typedtree.ml:38-43).
@@ -1291,6 +1291,15 @@ mod node_size_tests {
         assert_eq!(size_of::<super::StructureItem>(), 96);
         assert_eq!(size_of::<super::TypedSignatureItem>(), 96);
         assert_eq!(size_of::<super::TypedCoreType>(), 80);
+    }
+
+    // Sub-patterns are handles into the TypedArena, so a pattern owns no
+    // boxed children.
+    #[test]
+    fn typed_patterns_stay_compact() {
+        use std::mem::size_of;
+        assert_eq!(size_of::<super::PatternDesc>(), 56);
+        assert_eq!(size_of::<super::Pattern>(), 96);
     }
 
     // Children live in the TypedArena: list-carrying nodes hold 4-byte

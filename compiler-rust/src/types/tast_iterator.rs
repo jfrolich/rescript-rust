@@ -261,25 +261,25 @@ pub fn walk_pat<'t, I: TastIterator<'t> + ?Sized>(sub: &mut I, p: &Pattern) {
         PatternDesc::Tpat_tuple(pats)
         | PatternDesc::Tpat_construct(_, _, pats)
         | PatternDesc::Tpat_array(pats) => {
-            for p in pats {
+            for p in sub.arena().patterns(*pats) {
                 sub.pat(p);
             }
         }
         PatternDesc::Tpat_variant(_, po, _) => {
             if let Some(p) = po {
-                sub.pat(p);
+                sub.pat(sub.arena().pattern(*p));
             }
         }
         PatternDesc::Tpat_record(fields, _, _) => {
             for (_, _, p, _) in fields {
-                sub.pat(p);
+                sub.pat(sub.arena().pattern(*p));
             }
         }
         PatternDesc::Tpat_or(p1, p2, _) => {
-            sub.pat(p1);
-            sub.pat(p2);
+            sub.pat(sub.arena().pattern(*p1));
+            sub.pat(sub.arena().pattern(*p2));
         }
-        PatternDesc::Tpat_alias(p, _, _) => sub.pat(p),
+        PatternDesc::Tpat_alias(p, _, _) => sub.pat(sub.arena().pattern(*p)),
     }
 }
 

@@ -131,7 +131,7 @@ pub fn translate_value_binding(
     value_binding: &ValueBinding,
 ) -> crate::gentype::translation::T {
     // Mirrors compiler/gentype/TranslateStructure.ml:103-123.
-    let id = match value_binding_id(ta.pattern(value_binding.vb_pat)) {
+    let id = match value_binding_id(ta, ta.pattern(value_binding.vb_pat)) {
         None => return crate::gentype::translation::empty(),
         Some(id) => id,
     };
@@ -723,11 +723,14 @@ fn persistent_alias_module_type(
     }
 }
 
-fn value_binding_id(pattern: &Pattern) -> Option<&crate::ident::Ident> {
+fn value_binding_id<'a>(
+    ta: &'a crate::types::typedtree::TypedArena,
+    pattern: &'a Pattern,
+) -> Option<&'a crate::ident::Ident> {
     match &pattern.pat_desc {
         PatternDesc::Tpat_var(id, _) => Some(id),
         PatternDesc::Tpat_alias(inner, id, _)
-            if matches!(inner.pat_desc, PatternDesc::Tpat_any) =>
+            if matches!(ta.pattern(*inner).pat_desc, PatternDesc::Tpat_any) =>
         {
             Some(id)
         }

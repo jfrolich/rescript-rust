@@ -7465,8 +7465,11 @@ fn compute_type_variance_fixpoint(
 /// Mirrors OCaml `Typedtree.bound_idents` traversal:
 /// - alias patterns visit the inner pattern first, then alias id
 /// - or-patterns visit only the left branch
-fn iter_bound_pattern_idents<'a, F>(pat: &'a crate::types::typedtree::Pattern, f: &mut F)
-where
+fn iter_bound_pattern_idents<'a, F>(
+    ta: &'a TypedArena,
+    pat: &'a crate::types::typedtree::Pattern,
+    f: &mut F,
+) where
     F: FnMut(&'a Ident),
 {
     use crate::types::typedtree::PatternDesc;
@@ -7474,23 +7477,27 @@ where
     match &pat.pat_desc {
         PatternDesc::Tpat_var(id, _) => f(id),
         PatternDesc::Tpat_alias(inner, id, _) => {
-            iter_bound_pattern_idents(inner, f);
+            iter_bound_pattern_idents(ta, ta.pattern(*inner), f);
             f(id);
         }
         PatternDesc::Tpat_tuple(pats)
         | PatternDesc::Tpat_construct(_, _, pats)
         | PatternDesc::Tpat_array(pats) => {
-            for p in pats {
-                iter_bound_pattern_idents(p, f);
+            for p in ta.patterns(*pats) {
+                iter_bound_pattern_idents(ta, p, f);
             }
         }
         PatternDesc::Tpat_record(fields, _, _) => {
             for (_, _, p, _) in fields {
-                iter_bound_pattern_idents(p, f);
+                iter_bound_pattern_idents(ta, ta.pattern(*p), f);
             }
         }
-        PatternDesc::Tpat_variant(_, Some(inner), _) => iter_bound_pattern_idents(inner, f),
-        PatternDesc::Tpat_or(left, _right, _) => iter_bound_pattern_idents(left, f),
+        PatternDesc::Tpat_variant(_, Some(inner), _) => {
+            iter_bound_pattern_idents(ta, ta.pattern(*inner), f)
+        }
+        PatternDesc::Tpat_or(left, _right, _) => {
+            iter_bound_pattern_idents(ta, ta.pattern(*left), f)
+        }
         PatternDesc::Tpat_any
         | PatternDesc::Tpat_constant(_)
         | PatternDesc::Tpat_variant(_, None, _) => {}
@@ -7498,6 +7505,7 @@ where
 }
 
 fn push_sig_values_from_env_pattern(
+    ta: &TypedArena,
     env: &Env,
     pat: &crate::types::typedtree::Pattern,
     sig_items: &mut Vec<crate::types::decl::SignatureItem>,
@@ -7513,7 +7521,7 @@ fn push_sig_values_from_env_pattern(
             sig_items.push(crate::types::decl::SignatureItem::SigValue(*id, value_desc));
         }
         PatternDesc::Tpat_alias(inner, id, _) => {
-            push_sig_values_from_env_pattern(env, inner, sig_items);
+            push_sig_values_from_env_pattern(ta, env, ta.pattern(*inner), sig_items);
             let value_desc = env
                 .lookup_value(&Path::Pident(*id))
                 .expect("let-bound alias missing from structure environment")
@@ -7521,8 +7529,8 @@ fn push_sig_values_from_env_pattern(
             sig_items.push(crate::types::decl::SignatureItem::SigValue(*id, value_desc));
         }
         PatternDesc::Tpat_tuple(pats) => {
-            for p in pats {
-                push_sig_values_from_env_pattern(env, p, sig_items);
+            for p in ta.patterns(*pats) {
+                push_sig_values_from_env_pattern(ta, env, p, sig_items);
             }
         }
         PatternDesc::Tpat_record(fields, _, rest) => {
@@ -7539,31 +7547,32 @@ fn push_sig_values_from_env_pattern(
                 ));
             }
             for (_, _, p, _) in fields {
-                push_sig_values_from_env_pattern(env, p, sig_items);
+                push_sig_values_from_env_pattern(ta, env, ta.pattern(*p), sig_items);
             }
         }
         PatternDesc::Tpat_construct(_, _, pats) | PatternDesc::Tpat_array(pats) => {
-            for p in pats {
-                push_sig_values_from_env_pattern(env, p, sig_items);
+            for p in ta.patterns(*pats) {
+                push_sig_values_from_env_pattern(ta, env, p, sig_items);
             }
         }
         PatternDesc::Tpat_variant(_, Some(inner), _) => {
-            push_sig_values_from_env_pattern(env, inner, sig_items);
+            push_sig_values_from_env_pattern(ta, env, ta.pattern(*inner), sig_items);
         }
         PatternDesc::Tpat_or(left, _, _) => {
-            push_sig_values_from_env_pattern(env, left, sig_items);
+            push_sig_values_from_env_pattern(ta, env, ta.pattern(*left), sig_items);
         }
         _ => {}
     }
 }
 
 fn extract_sig_values_from_pattern(
+    ta: &TypedArena,
     pat: &crate::types::typedtree::Pattern,
     ty: TypeExprRef,
     sig_items: &mut Vec<crate::types::decl::SignatureItem>,
 ) {
     use crate::types::decl::{SignatureItem as SigItem, ValueDescription};
-    iter_bound_pattern_idents(pat, &mut |id| {
+    iter_bound_pattern_idents(ta, pat, &mut |id| {
         sig_items.push(SigItem::SigValue(
             *id,
             ValueDescription {
@@ -14123,6 +14132,7 @@ fn extract_module_type_from_mod_expr_inner(
                     StructureItemDesc::Tstr_value(_, bindings) => {
                         for vb in ta.value_bindings(*bindings) {
                             extract_sig_values_from_pattern(
+                                ta,
                                 ta.pattern(vb.vb_pat),
                                 ta.pattern(vb.vb_pat).pat_type,
                                 &mut sig_items,
@@ -16795,6 +16805,7 @@ fn type_structure_item<'a>(
             let mut sig_items = Vec::new();
             for vb in &typed_bindings {
                 push_sig_values_from_env_pattern(
+                    &tctx.typed,
                     &new_env,
                     tctx.typed.pattern(vb.vb_pat),
                     &mut sig_items,

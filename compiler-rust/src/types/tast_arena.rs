@@ -79,6 +79,47 @@ arena_handle!(
     TValDescIdx
 );
 
+/// A list of typed patterns (tuple, constructor and array items).
+pub type TPatList = ArenaList<TPatIdx>;
+
+/// Handles with this bit set name patterns and pattern lists in an overlay
+/// (the match compiler's synthesized patterns), not in a [`TypedArena`].
+const OVERLAY_BIT: u32 = 1 << 31;
+
+impl TPatIdx {
+    /// The handle of the `index`th pattern of an overlay.
+    pub(crate) fn overlay(index: usize) -> Self {
+        let raw = u32::try_from(index + 1).expect("pattern overlay exceeds u32::MAX");
+        assert!(raw < OVERLAY_BIT, "pattern overlay too large");
+        Self(NonZeroU32::new(raw | OVERLAY_BIT).expect("non-zero"))
+    }
+
+    /// The overlay index, for an overlay handle.
+    pub(crate) fn overlay_index(self) -> Option<usize> {
+        let raw = self.0.get();
+        (raw & OVERLAY_BIT != 0).then(|| ((raw & !OVERLAY_BIT) - 1) as usize)
+    }
+}
+
+/// An overlay pattern list of `len` items at `index` in its list table.
+pub(crate) fn overlay_pattern_list(index: usize, len: usize) -> TPatList {
+    let start = u32::try_from(index).expect("pattern overlay exceeds u32::MAX");
+    assert!(start < OVERLAY_BIT, "pattern overlay too large");
+    ArenaList::from_range(
+        start | OVERLAY_BIT,
+        u32::try_from(len).expect("pattern list exceeds u32::MAX"),
+    )
+}
+
+/// The overlay list-table index, for a non-empty overlay pattern list.
+pub(crate) fn overlay_pattern_list_index(list: TPatList) -> Option<usize> {
+    if list.is_empty() {
+        return None;
+    }
+    let start = list.start();
+    (start & OVERLAY_BIT != 0).then(|| (start & !OVERLAY_BIT) as usize)
+}
+
 /// A list of typed core types (tuple and constructor arguments).
 pub type TCoreTypeList = ArenaList<TCoreTypeIdx>;
 
@@ -197,6 +238,7 @@ pub struct TypedArena {
     module_types: Vec<ModuleType>,
     core_types: Vec<TypedCoreType>,
     patterns: Vec<Pattern>,
+    pattern_lists: ListPool<TPatIdx>,
     extension_constructors: Vec<ExtensionConstructor>,
     value_descriptions: Vec<TypedValueDescription>,
     core_type_lists: ListPool<TCoreTypeIdx>,
@@ -381,6 +423,47 @@ impl TypedArena {
     #[inline]
     pub fn pattern(&self, idx: TPatIdx) -> &Pattern {
         &self.patterns[idx.index()]
+    }
+
+    /// The handle of `pat` when it is a pattern stored in this arena (found
+    /// by address, since the match compiler works on pattern references).
+    pub(crate) fn pattern_handle(&self, pat: &Pattern) -> Option<TPatIdx> {
+        let size = std::mem::size_of::<Pattern>();
+        let base = self.patterns.as_ptr() as usize;
+        let addr = pat as *const Pattern as usize;
+        let offset = addr.checked_sub(base)?;
+        let index = offset / size;
+        (offset % size == 0 && index < self.patterns.len()).then(|| TPatIdx::from_index(index))
+    }
+
+    /// A stored pattern, for the in-place updates the type checker makes
+    /// to a pattern it has just built.
+    #[inline]
+    pub fn pattern_mut(&mut self, idx: TPatIdx) -> &mut Pattern {
+        &mut self.patterns[idx.index()]
+    }
+
+    /// Store each pattern, then the list of their handles.
+    pub fn push_patterns(&mut self, pats: impl IntoIterator<Item = Pattern>) -> TPatList {
+        let handles: smallvec::SmallVec<[TPatIdx; 8]> =
+            pats.into_iter().map(|p| self.push_pattern(p)).collect();
+        self.pattern_lists.push_iter(handles)
+    }
+
+    /// Store a list of pattern handles.
+    pub fn push_pattern_list(&mut self, items: &[TPatIdx]) -> TPatList {
+        self.pattern_lists.push_iter(items.iter().copied())
+    }
+
+    /// The handles of a pattern list.
+    #[inline]
+    pub fn pattern_list(&self, list: TPatList) -> &[TPatIdx] {
+        self.pattern_lists.get(list)
+    }
+
+    /// The patterns of a list.
+    pub fn patterns(&self, list: TPatList) -> impl ExactSizeIterator<Item = &Pattern> + '_ {
+        self.pattern_list(list).iter().map(|&idx| self.pattern(idx))
     }
 
     /// Store an extension constructor.

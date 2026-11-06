@@ -43,7 +43,7 @@ use crate::types::typedtree::{
     ApplyArg, Case, Constant as TConstant, Expression, ExpressionDesc, FunctionParam,
     ModuleCoercion, ModuleExpr, ModuleExprDesc, Partial, Pattern, PatternDesc, RecordField,
     RecordLabelDefinition, Structure, StructureItem, StructureItemDesc, TExprIdx, TExprList,
-    TypedArena, ValueBinding,
+    TPatIdx, TypedArena, ValueBinding,
 };
 
 // Keep these aligned with compiler/ml/predef.ml's allocation order. The
@@ -276,21 +276,21 @@ fn raw_subst_idents_owned(subst: &HashMap<Ident, Ident>, lam: RawLambda) -> RawL
     }
 }
 
-fn iter_bound_pattern_idents<'a, F>(pat: &'a Pattern, f: &mut F)
+fn iter_bound_pattern_idents<'a, F>(ta: &'a TypedArena, pat: &'a Pattern, f: &mut F)
 where
     F: FnMut(&'a Ident),
 {
     match &pat.pat_desc {
         PatternDesc::Tpat_var(id, _) => f(id),
         PatternDesc::Tpat_alias(inner, id, _) => {
-            iter_bound_pattern_idents(inner, f);
+            iter_bound_pattern_idents(ta, ta.pattern(*inner), f);
             f(id);
         }
         PatternDesc::Tpat_tuple(pats)
         | PatternDesc::Tpat_construct(_, _, pats)
         | PatternDesc::Tpat_array(pats) => {
-            for pat in pats {
-                iter_bound_pattern_idents(pat, f);
+            for pat in ta.patterns(*pats) {
+                iter_bound_pattern_idents(ta, pat, f);
             }
         }
         PatternDesc::Tpat_record(fields, _, rest) => {
@@ -298,11 +298,13 @@ where
                 f(&rest.rest_ident);
             }
             for (_, _, pat, _) in fields {
-                iter_bound_pattern_idents(pat, f);
+                iter_bound_pattern_idents(ta, ta.pattern(*pat), f);
             }
         }
-        PatternDesc::Tpat_variant(_, Some(inner), _) => iter_bound_pattern_idents(inner, f),
-        PatternDesc::Tpat_or(left, _, _) => iter_bound_pattern_idents(left, f),
+        PatternDesc::Tpat_variant(_, Some(inner), _) => {
+            iter_bound_pattern_idents(ta, ta.pattern(*inner), f)
+        }
+        PatternDesc::Tpat_or(left, _, _) => iter_bound_pattern_idents(ta, ta.pattern(*left), f),
         PatternDesc::Tpat_any
         | PatternDesc::Tpat_constant(_)
         | PatternDesc::Tpat_variant(_, None, _) => {}
@@ -312,7 +314,7 @@ where
 fn let_bound_idents(ta: &TypedArena, bindings: &[ValueBinding]) -> Vec<Ident> {
     let mut ids = Vec::new();
     for binding in bindings {
-        iter_bound_pattern_idents(ta.pattern(binding.vb_pat), &mut |id| ids.push(*id));
+        iter_bound_pattern_idents(ta, ta.pattern(binding.vb_pat), &mut |id| ids.push(*id));
     }
     ids
 }
@@ -321,7 +323,7 @@ fn simple_let_binding_id(ta: &TypedArena, binding: &ValueBinding) -> Option<Iden
     match &ta.pattern(binding.vb_pat).pat_desc {
         PatternDesc::Tpat_var(id, _) => Some(*id),
         PatternDesc::Tpat_alias(inner, id, _)
-            if matches!(inner.pat_desc, PatternDesc::Tpat_any) =>
+            if matches!(ta.pattern(*inner).pat_desc, PatternDesc::Tpat_any) =>
         {
             Some(*id)
         }
@@ -332,7 +334,7 @@ fn simple_let_binding_id(ta: &TypedArena, binding: &ValueBinding) -> Option<Iden
 fn nonrecursive_alias_any_binding(ta: &TypedArena, binding: &ValueBinding) -> bool {
     matches!(
         &ta.pattern(binding.vb_pat).pat_desc,
-        PatternDesc::Tpat_alias(inner, _, _) if matches!(inner.pat_desc, PatternDesc::Tpat_any)
+        PatternDesc::Tpat_alias(inner, _, _) if matches!(ta.pattern(*inner).pat_desc, PatternDesc::Tpat_any)
     )
 }
 
@@ -980,6 +982,7 @@ impl<'a> RawLambdaConverter<'a> {
         self.sync_matching_stamps();
         let lambda = full_matching::compile_matching(
             self.type_ctx,
+            self.ta,
             &crate::raw_lambda::loc::LocArena::new(self.arena, &self.lam_locs),
             handler_fun,
             arg,
@@ -1006,6 +1009,7 @@ impl<'a> RawLambdaConverter<'a> {
         self.sync_matching_stamps();
         let lambda = full_matching::for_let(
             self.type_ctx,
+            self.ta,
             &crate::raw_lambda::loc::LocArena::new(self.arena, &self.lam_locs),
             self.loc(loc),
             param,
@@ -1027,6 +1031,7 @@ impl<'a> RawLambdaConverter<'a> {
         self.sync_matching_stamps();
         let lambda = full_matching::for_function(
             self.type_ctx,
+            self.ta,
             &crate::raw_lambda::loc::LocArena::new(self.arena, &self.lam_locs),
             self.loc(loc),
             param,
@@ -1046,6 +1051,7 @@ impl<'a> RawLambdaConverter<'a> {
         self.sync_matching_stamps();
         let lambda = full_matching::for_trywith(
             self.type_ctx,
+            self.ta,
             &crate::raw_lambda::loc::LocArena::new(self.arena, &self.lam_locs),
             param,
             pat_act_list,
@@ -1065,6 +1071,7 @@ impl<'a> RawLambdaConverter<'a> {
         self.sync_matching_stamps();
         let lambda = full_matching::for_multiple_match(
             self.type_ctx,
+            self.ta,
             &crate::raw_lambda::loc::LocArena::new(self.arena, &self.lam_locs),
             self.loc(loc),
             paraml,
@@ -1161,12 +1168,14 @@ impl<'a> RawLambdaConverter<'a> {
     fn id_of_pattern(&mut self, pat: &Pattern) -> Option<Ident> {
         match &pat.pat_desc {
             PatternDesc::Tpat_var(id, _) | PatternDesc::Tpat_alias(_, id, _) => Some(*id),
-            PatternDesc::Tpat_construct(_, _, args) if args.len() == 1 => match &args[0].pat_desc {
-                PatternDesc::Tpat_var(id, _) | PatternDesc::Tpat_alias(_, id, _) => {
-                    Some(self.rename_ident(id))
+            PatternDesc::Tpat_construct(_, _, args) if args.len() == 1 => {
+                match &self.ta.pattern(self.ta.pattern_list(*args)[0]).pat_desc {
+                    PatternDesc::Tpat_var(id, _) | PatternDesc::Tpat_alias(_, id, _) => {
+                        Some(self.rename_ident(id))
+                    }
+                    _ => None,
                 }
-                _ => None,
-            },
+            }
             _ => None,
         }
     }
@@ -1437,7 +1446,7 @@ impl<'a> RawLambdaConverter<'a> {
         let binding = match (&pat.pat_desc, lam) {
             (PatternDesc::Tpat_var(id, _), RawLambda::Lfunction(_)) => *id,
             (PatternDesc::Tpat_alias(inner, id, _), RawLambda::Lfunction(_))
-                if matches!(inner.pat_desc, PatternDesc::Tpat_any) =>
+                if matches!(self.ta.pattern(*inner).pat_desc, PatternDesc::Tpat_any) =>
             {
                 *id
             }
@@ -5633,6 +5642,7 @@ impl<'a> RawLambdaConverter<'a> {
                         match &self.ta.pattern(binding.vb_pat).pat_desc {
                             PatternDesc::Tpat_var(_, _) | PatternDesc::Tpat_alias(_, _, _) => {}
                             _ if !crate::types::typecore::parmatch_irrefutable(
+                                self.ta,
                                 self.type_ctx,
                                 self.arena,
                                 self.env,
@@ -6477,9 +6487,12 @@ impl<'a> RawLambdaConverter<'a> {
         scrut_id: &Ident,
         pat: &Pattern,
         cstr: &crate::types::ConstructorDescription,
-        args: &[Pattern],
+        args: &[TPatIdx],
         body: RawLambda,
     ) -> RawLambda {
+        let ta = self.ta;
+        let args: smallvec::SmallVec<[&Pattern; 4]> = args.iter().map(|&p| ta.pattern(p)).collect();
+        let args = args.as_slice();
         if cstr.cstr_inlined.is_some() {
             return match args {
                 [arg_pat] => {
@@ -6588,16 +6601,19 @@ impl<'a> RawLambdaConverter<'a> {
     fn is_irrefutable_pattern(&self, pat: &Pattern) -> bool {
         match &pat.pat_desc {
             PatternDesc::Tpat_any | PatternDesc::Tpat_var(_, _) => true,
-            PatternDesc::Tpat_alias(inner, _, _) => self.is_irrefutable_pattern(inner),
-            PatternDesc::Tpat_tuple(items) => {
-                items.iter().all(|pat| self.is_irrefutable_pattern(pat))
+            PatternDesc::Tpat_alias(inner, _, _) => {
+                self.is_irrefutable_pattern(self.ta.pattern(*inner))
             }
+            PatternDesc::Tpat_tuple(items) => self
+                .ta
+                .patterns(*items)
+                .all(|pat| self.is_irrefutable_pattern(pat)),
             // OCaml `Parmatch.irrefutable` = `le_pat pat omega`, which falls back to
             // `satisfiable` for arrays: an array pattern never covers every length.
             PatternDesc::Tpat_array(_) => false,
             PatternDesc::Tpat_record(fields, _, _) => fields
                 .iter()
-                .all(|(_, _, pat, _)| self.is_irrefutable_pattern(pat)),
+                .all(|(_, _, pat, _)| self.is_irrefutable_pattern(self.ta.pattern(*pat))),
             PatternDesc::Tpat_construct(_, cstr, args) => match cstr.cstr_kind {
                 crate::types::ConstructorKind::Extension(_) => false,
                 crate::types::ConstructorKind::Ordinary(reference) => {
@@ -6612,12 +6628,17 @@ impl<'a> RawLambdaConverter<'a> {
                         }
                         crate::types::VariantConstructorCase::Block(_) => {
                             has_one_constructor
-                                && args.iter().all(|pat| self.is_irrefutable_pattern(pat))
+                                && self
+                                    .ta
+                                    .patterns(*args)
+                                    .all(|pat| self.is_irrefutable_pattern(pat))
                         }
                     }
                 }
             },
-            PatternDesc::Tpat_variant(_, Some(inner), _) => self.is_irrefutable_pattern(inner),
+            PatternDesc::Tpat_variant(_, Some(inner), _) => {
+                self.is_irrefutable_pattern(self.ta.pattern(*inner))
+            }
             PatternDesc::Tpat_variant(_, None, _) => false,
             PatternDesc::Tpat_constant(_) | PatternDesc::Tpat_or(_, _, _) => false,
         }
@@ -6641,7 +6662,8 @@ impl<'a> RawLambdaConverter<'a> {
                 RawLambda::let_(LetKind::Alias, *id, scrut, body)
             }
             PatternDesc::Tpat_alias(inner, id, _) => {
-                let inner = self.bind_irrefutable_pattern_raw(inner, scrut.clone(), body);
+                let inner =
+                    self.bind_irrefutable_pattern_raw(self.ta.pattern(*inner), scrut.clone(), body);
                 // OCaml's bind_check: skip binding when scrut is already the same variable
                 if let RawLambda::Lvar(v) = &scrut {
                     if v.same(id) {
@@ -6660,7 +6682,7 @@ impl<'a> RawLambdaConverter<'a> {
                 };
                 let pat_loc = pat.pat_loc;
                 let mut result = body;
-                for (idx, item) in items.iter().enumerate() {
+                for (idx, item) in self.ta.patterns(*items).enumerate() {
                     let field = RawLambda::prim(
                         Primitive::Pfield(idx as i32, FieldDbgInfo::Tuple),
                         vec![RawLambda::var(tmp)],
@@ -6725,7 +6747,7 @@ impl<'a> RawLambdaConverter<'a> {
                     ),
                 > = HashMap::new();
                 for (lid, lbl, inner_pat, _) in fields.iter() {
-                    mentioned.insert(lbl.lbl_pos, (lid, lbl, inner_pat));
+                    mentioned.insert(lbl.lbl_pos, (lid, lbl, self.ta.pattern(*inner_pat)));
                 }
 
                 // Try to resolve all labels for this record type
@@ -6867,10 +6889,15 @@ impl<'a> RawLambdaConverter<'a> {
                         } else {
                             LetKind::Alias
                         };
-                        if let PatternDesc::Tpat_var(id, _) = &inner_pat.pat_desc {
+                        if let PatternDesc::Tpat_var(id, _) = &self.ta.pattern(*inner_pat).pat_desc
+                        {
                             result = RawLambda::let_(field_let_kind, *id, field, result);
                         } else {
-                            result = self.bind_irrefutable_pattern_raw(inner_pat, field, result);
+                            result = self.bind_irrefutable_pattern_raw(
+                                self.ta.pattern(*inner_pat),
+                                field,
+                                result,
+                            );
                         }
                     }
                 }
@@ -6890,7 +6917,7 @@ impl<'a> RawLambdaConverter<'a> {
                 };
                 let pat_loc = pat.pat_loc;
                 let mut result = body;
-                for (idx, item) in items.iter().enumerate() {
+                for (idx, item) in self.ta.patterns(*items).enumerate() {
                     let field = RawLambda::prim(
                         Primitive::Parrayrefs,
                         vec![
@@ -6909,9 +6936,12 @@ impl<'a> RawLambdaConverter<'a> {
             PatternDesc::Tpat_construct(_, cstr, args)
                 if constructor_payload_is_unboxed(self.type_ctx, cstr) =>
             {
-                args.first().map_or(body.clone(), |arg| {
-                    self.bind_irrefutable_pattern_raw(arg, scrut, body)
-                })
+                self.ta
+                    .pattern_list(*args)
+                    .first()
+                    .map_or(body.clone(), |arg| {
+                        self.bind_irrefutable_pattern_raw(self.ta.pattern(*arg), scrut, body)
+                    })
             }
             PatternDesc::Tpat_construct(_, cstr, args)
                 if matches!(
@@ -6930,8 +6960,13 @@ impl<'a> RawLambdaConverter<'a> {
                         (id, Some((id, scrut)))
                     }
                 };
-                let result =
-                    self.bind_constructor_args_irrefutably_raw(&scrut_id, pat, cstr, args, body);
+                let result = self.bind_constructor_args_irrefutably_raw(
+                    &scrut_id,
+                    pat,
+                    cstr,
+                    self.ta.pattern_list(*args),
+                    body,
+                );
                 match wrap_let {
                     Some((id, value)) => RawLambda::let_(LetKind::Alias, id, value, result),
                     None => result,
@@ -6943,7 +6978,7 @@ impl<'a> RawLambdaConverter<'a> {
                     vec![scrut],
                     self.lam_loc(pat.pat_loc),
                 );
-                self.bind_irrefutable_pattern_raw(inner, payload, body)
+                self.bind_irrefutable_pattern_raw(self.ta.pattern(*inner), payload, body)
             }
             _ => unreachable!("expected irrefutable pattern"),
         }
@@ -7001,8 +7036,10 @@ impl<'a> RawLambdaConverter<'a> {
                             }
                             let kind = match &self.ta.pattern(binding.vb_pat).pat_desc {
                                 PatternDesc::Tpat_alias(inner, _, _)
-                                    if matches!(inner.pat_desc, PatternDesc::Tpat_any)
-                                        && matches!(value, RawLambda::Lvar(_)) =>
+                                    if matches!(
+                                        self.ta.pattern(*inner).pat_desc,
+                                        PatternDesc::Tpat_any
+                                    ) && matches!(value, RawLambda::Lvar(_)) =>
                                 {
                                     LetKind::Alias
                                 }
@@ -7084,8 +7121,10 @@ impl<'a> RawLambdaConverter<'a> {
                         }
                         let kind = match &self.ta.pattern(binding.vb_pat).pat_desc {
                             PatternDesc::Tpat_alias(inner, _, _)
-                                if matches!(inner.pat_desc, PatternDesc::Tpat_any)
-                                    && matches!(value, RawLambda::Lvar(_)) =>
+                                if matches!(
+                                    self.ta.pattern(*inner).pat_desc,
+                                    PatternDesc::Tpat_any
+                                ) && matches!(value, RawLambda::Lvar(_)) =>
                             {
                                 LetKind::Alias
                             }
@@ -7173,21 +7212,26 @@ impl<'a> RawLambdaConverter<'a> {
         inline: InlineAttribute,
         loc: LocIdx,
     ) -> RawLambda {
-        fn pattern_binds_value(pattern: &Pattern) -> bool {
+        fn pattern_binds_value(ta: &TypedArena, pattern: &Pattern) -> bool {
             match &pattern.pat_desc {
                 PatternDesc::Tpat_var(_, _) | PatternDesc::Tpat_alias(_, _, _) => true,
                 PatternDesc::Tpat_tuple(items)
                 | PatternDesc::Tpat_array(items)
-                | PatternDesc::Tpat_construct(_, _, items) => items.iter().any(pattern_binds_value),
-                PatternDesc::Tpat_variant(_, Some(item), _) => pattern_binds_value(item),
+                | PatternDesc::Tpat_construct(_, _, items) => {
+                    ta.patterns(*items).any(|p| pattern_binds_value(ta, p))
+                }
+                PatternDesc::Tpat_variant(_, Some(item), _) => {
+                    pattern_binds_value(ta, ta.pattern(*item))
+                }
                 PatternDesc::Tpat_record(fields, _, rest) => {
                     rest.is_some()
                         || fields
                             .iter()
-                            .any(|(_, _, item, _)| pattern_binds_value(item))
+                            .any(|(_, _, item, _)| pattern_binds_value(ta, ta.pattern(*item)))
                 }
                 PatternDesc::Tpat_or(left, right, _) => {
-                    pattern_binds_value(left) || pattern_binds_value(right)
+                    pattern_binds_value(ta, ta.pattern(*left))
+                        || pattern_binds_value(ta, ta.pattern(*right))
                 }
                 _ => false,
             }
@@ -7222,7 +7266,7 @@ impl<'a> RawLambdaConverter<'a> {
         // `one_unit_arg` (translcore.ml:1015-1022) is computed after
         // `transl_function`, from the function's own type in `e.exp_env`.
         let one_unit_arg = match params {
-            [param] if !pattern_binds_value(self.ta.pattern(param.fp_pat)) => {
+            [param] if !pattern_binds_value(self.ta, self.ta.pattern(param.fp_pat)) => {
                 function.is_some_and(|function| self.function_takes_one_unit_arg(function))
             }
             _ => false,
@@ -7910,7 +7954,11 @@ mod tests {
         };
         let case = Case::simple(
             ta.push_pattern(Pattern::new(
-                PatternDesc::Tpat_construct(lid, std::sync::Arc::new(constructor), Vec::new()),
+                PatternDesc::Tpat_construct(
+                    lid,
+                    std::sync::Arc::new(constructor),
+                    crate::types::typedtree::TPatList::EMPTY,
+                ),
                 LocIdx::none(),
                 crate::types::TypeExprRef(0),
                 EnvRef(0),

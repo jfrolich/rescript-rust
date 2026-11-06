@@ -674,14 +674,16 @@ impl Processor<'_> {
             tt::PatternDesc::Tpat_tuple(pats)
             | tt::PatternDesc::Tpat_array(pats)
             | tt::PatternDesc::Tpat_construct(_, _, pats) => {
-                for p in pats {
+                for p in self.ctx.ta.patterns(*pats) {
                     self.handle_pattern(env, exported, items, None, p);
                 }
             }
-            tt::PatternDesc::Tpat_or(p, _, _) => self.handle_pattern(env, exported, items, None, p),
+            tt::PatternDesc::Tpat_or(p, _, _) => {
+                self.handle_pattern(env, exported, items, None, self.ctx.ta.pattern(*p))
+            }
             tt::PatternDesc::Tpat_record(record_items, _, rest) => {
                 for (_, _, p, _) in record_items {
-                    self.handle_pattern(env, exported, items, None, p);
+                    self.handle_pattern(env, exported, items, None, self.ctx.ta.pattern(*p));
                 }
                 if let Some(rest) = rest {
                     let name = self.ctx.located(&rest.rest_name);
@@ -701,7 +703,7 @@ impl Processor<'_> {
                 }
             }
             tt::PatternDesc::Tpat_variant(_, Some(p), _) => {
-                self.handle_pattern(env, exported, items, None, p)
+                self.handle_pattern(env, exported, items, None, self.ctx.ta.pattern(*p))
             }
             tt::PatternDesc::Tpat_variant(_, None, _)
             | tt::PatternDesc::Tpat_any
