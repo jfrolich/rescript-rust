@@ -2,7 +2,7 @@
 //! for interface digests: what dependents' compiles read of a value, and
 //! nothing else.
 //!
-//! - Source locations (`Location`, `Position`) are skipped: moving code does
+//! - Source locations (`Location`, `Position`, `DeclLoc`, `DeclLocTable`) are skipped: moving code does
 //!   not change what dependents compile.
 //! - Local identifiers are numbered in order of first appearance instead of
 //!   by stamp: stamps come from a per-compile counter, so the same code gets
@@ -244,7 +244,9 @@ impl<'a, 'h, H: Hasher> ser::Serializer for &'a mut Canonical<'h, H> {
     }
     fn serialize_struct(self, name: &'static str, _: usize) -> Result<Compound<'a, 'h, H>> {
         let fields = match name {
-            "Location" | "Position" => Fields::Skip,
+            // Declaration location handles and their tables number locations
+            // in allocation order; cache validity must not depend on that.
+            "Location" | "Position" | "DeclLoc" | "DeclLocTable" => Fields::Skip,
             "Ident" => Fields::Ident,
             _ => {
                 self.tag(18);
@@ -502,6 +504,37 @@ mod tests {
             global: Ident::new("Global", 0, IdentFlags::default()),
             value,
         }
+    }
+
+    #[test]
+    fn declaration_location_handles_do_not_count() {
+        #[derive(serde::Serialize)]
+        struct Decl {
+            loc: crate::types::DeclLoc,
+            table: crate::types::DeclLocTable,
+            value: i64,
+        }
+        let hash = |decl: &Decl| {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            Canonical::new(&mut hasher).hash(decl);
+            hasher.finish()
+        };
+        let mut located = crate::types::DeclLocTable::default();
+        let mut loc = Location::none();
+        loc.loc_start.line = 4;
+        let handle = located.intern(loc);
+        let a = Decl {
+            loc: handle,
+            table: located,
+            value: 1,
+        };
+        let b = Decl {
+            loc: crate::types::DeclLoc::none(),
+            table: Default::default(),
+            value: 1,
+        };
+        assert_eq!(hash(&a), hash(&b));
+        assert_ne!(hash(&a), hash(&Decl { value: 2, ..b }));
     }
 
     #[test]
