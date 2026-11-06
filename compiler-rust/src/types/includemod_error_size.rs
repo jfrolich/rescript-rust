@@ -46,11 +46,12 @@ use std::sync::Arc;
 use super::Path;
 use super::context::TypeContext;
 use super::decl::{
-    Attribute, AttributePayload, ConstructorArguments, ConstructorDeclaration, ExtensionConstructor,
-    LabelDeclaration, ModtypeDeclaration, ModuleDeclaration, ModuleType, PrimKind,
-    RecordRepresentation, Signature, SignatureItem, TypeDeclaration, TypeInlinedType, TypeKind,
-    ValueDescription, ValueKind,
+    Attribute, AttributePayload, ConstructorArguments, ConstructorDeclaration,
+    ExtensionConstructor, LabelDeclaration, ModtypeDeclaration, ModuleDeclaration, ModuleType,
+    PrimKind, RecordRepresentation, Signature, SignatureItem, TypeDeclaration, TypeInlinedType,
+    TypeKind, ValueDescription, ValueKind,
 };
+use super::includemod::{InclusionSubst, SubstEntry};
 use super::type_expr::{
     AbbrevMemo, AbbrevMemoRef, FieldMutability, MutabilityRef, PathBlock, PathBlockOwner, RowField,
     RowFieldRef, TypeDesc, TypeExprRef,
@@ -79,8 +80,9 @@ pub(crate) fn module_types_is_big(
     ctx: &TypeContext,
     actual: &ModuleType,
     expected: &ModuleType,
+    subst: &InclusionSubst,
 ) -> bool {
-    let mut size = ErrorSize::new(ctx);
+    let mut size = ErrorSize::new(ctx, subst);
     let walk = (|| {
         // Module_types (mty1, mty2)
         size.block(4, 2)?;
@@ -96,8 +98,9 @@ pub(crate) fn modtype_infos_is_big(
     id: &Ident,
     actual: &ModtypeDeclaration,
     expected: &ModtypeDeclaration,
+    subst: &InclusionSubst,
 ) -> bool {
-    let mut size = ErrorSize::new(ctx);
+    let mut size = ErrorSize::new(ctx, subst);
     let walk = (|| {
         size.block(5, 3)?;
         size.ident(id)?;
@@ -134,6 +137,8 @@ fn ident_key(id: &Ident) -> IdentKey {
 
 struct ErrorSize<'a> {
     ctx: &'a TypeContext,
+    /// The `subst` the expected side is copied with.
+    subst: &'a InclusionSubst,
     words: usize,
     idents: HashSet<IdentKey>,
     /// Type nodes by copy session (0 for the nodes themselves) and node.
@@ -143,10 +148,10 @@ struct ErrorSize<'a> {
     /// The current `with_copy_session` of `Subst` (subst.ml:235-306).
     session: u32,
     sessions: u32,
-    /// Identifiers bound by a copied signature: `rename_bound_idents` maps
-    /// each to one `Pident id'` block shared by every use.
+    /// Identifiers bound by a copied signature or functor: `Subst` maps each
+    /// to one `Pident id'` (`Mty_ident (Pident id')`) shared by every use
+    /// (subst.ml:310-336).
     renamed: HashSet<IdentKey>,
-    renamed_paths: HashSet<IdentKey>,
     abbrev_refs: HashSet<AbbrevMemoRef>,
     mutability_refs: HashSet<MutabilityRef>,
     row_field_refs: HashSet<RowFieldRef>,
@@ -171,19 +176,34 @@ struct ErrorSize<'a> {
     path_blocks: HashSet<PathBlockKey>,
 }
 
-/// The identity of the block a `Tconstr` path is.
+/// The identity of a path block of the error.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum PathBlockKey {
     /// The path allocated for this type node.
     Node(TypeExprRef),
     /// The global `Predef.path_X`, by the stamp of its ident.
     Predef(i32),
+    /// The target path of a substitution entry.
+    Target(Target),
+    /// The target `Mty_ident` of a module type substitution entry.
+    TargetMty(Target),
+}
+
+/// A substitution entry of the expected side's copy.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum Target {
+    /// An `add_*` call of includemod's `subst`.
+    Outer(SubstEntry),
+    /// The renaming of a bound identifier by `Subst.signature` or
+    /// `Subst.modtype` on a functor.
+    Renamed(IdentKey),
 }
 
 impl<'a> ErrorSize<'a> {
-    fn new(ctx: &'a TypeContext) -> Self {
+    fn new(ctx: &'a TypeContext, subst: &'a InclusionSubst) -> Self {
         Self {
             ctx,
+            subst,
             words: 0,
             idents: HashSet::default(),
             types: HashSet::default(),
@@ -191,7 +211,6 @@ impl<'a> ErrorSize<'a> {
             session: 0,
             sessions: 0,
             renamed: HashSet::default(),
-            renamed_paths: HashSet::default(),
             abbrev_refs: HashSet::default(),
             mutability_refs: HashSet::default(),
             row_field_refs: HashSet::default(),
@@ -295,15 +314,10 @@ impl<'a> ErrorSize<'a> {
         self.string()
     }
 
+    /// A path the walk reaches as it is (not through a `Subst` copy).
     fn path(&mut self, path: &Path) -> Walk {
+        debug_assert!(!self.substituted);
         match path {
-            Path::Pident(id) if self.substituted && self.renamed.contains(&ident_key(id)) => {
-                if !self.renamed_paths.insert(ident_key(id)) {
-                    return Ok(());
-                }
-                self.block(0, 1)?;
-                self.ident(id)
-            }
             Path::Pident(id) => {
                 self.block(0, 1)?;
                 self.ident(id)
@@ -322,11 +336,114 @@ impl<'a> ErrorSize<'a> {
     }
 
     fn shared_path(&mut self, path: &Arc<Path>) -> Walk {
-        // `Subst.module_path` and `type_path` rebuild every `Pdot`.
-        if !self.substituted && !self.paths.insert(Arc::as_ptr(path) as usize) {
+        if !self.paths.insert(Arc::as_ptr(path) as usize) {
             return Ok(());
         }
         self.path(path)
+    }
+
+    fn renamed_ident(&self, path: &Path) -> Option<Target> {
+        match path {
+            Path::Pident(id) if self.renamed.contains(&ident_key(id)) => {
+                Some(Target::Renamed(ident_key(id)))
+            }
+            _ => None,
+        }
+    }
+
+    /// The target path of a substitution entry: one block for every use.
+    fn target_path(&mut self, target: Target, path: &Path) -> Walk {
+        if !self.path_blocks.insert(PathBlockKey::Target(target)) {
+            return Ok(());
+        }
+        self.original(|size| size.path(path))
+    }
+
+    /// `Subst.type_path s p` (subst.ml:87-102). `kept` is the block of `p`
+    /// itself, which the copy returns when it does not replace it.
+    fn copied_type_path(&mut self, path: &Path, kept: Option<PathBlockKey>) -> Walk {
+        if let Some(target) = self.renamed_ident(path) {
+            return self.target_path(target, path);
+        }
+        if let Some((target, entry)) = self.subst.type_target(path) {
+            return self.target_path(Target::Outer(entry), &target);
+        }
+        match path {
+            Path::Pident(_) => {
+                if let Some(kept) = kept
+                    && !self.path_blocks.insert(kept)
+                {
+                    return Ok(());
+                }
+                self.original(|size| size.path(path))
+            }
+            _ => self.copied_dotted_path(path),
+        }
+    }
+
+    /// `Subst.module_path s p` (subst.ml:69-75). `kept` is the address of
+    /// `p`, returned by the copy when it is an unreplaced `Pident`.
+    fn copied_module_path(&mut self, path: &Path, kept: Option<usize>) -> Walk {
+        if let Some(target) = self.renamed_ident(path) {
+            return self.target_path(target, path);
+        }
+        if let Some((target, entry)) = self.subst.module_target(path) {
+            return self.target_path(Target::Outer(entry), &target);
+        }
+        match path {
+            Path::Pident(_) => {
+                if let Some(kept) = kept
+                    && !self.paths.insert(kept)
+                {
+                    return Ok(());
+                }
+                self.original(|size| size.path(path))
+            }
+            _ => self.copied_dotted_path(path),
+        }
+    }
+
+    /// A `Pdot` or `Papply` rebuilt around the copies of its module paths.
+    fn copied_dotted_path(&mut self, path: &Path) -> Walk {
+        match path {
+            Path::Pident(_) => unreachable!(),
+            Path::Pdot(prefix, _, _) => {
+                self.block(1, 3)?;
+                self.copied_module_path(prefix, Some(Arc::as_ptr(prefix) as usize))?;
+                self.string()
+            }
+            Path::Papply(functor, argument) => {
+                self.block(2, 2)?;
+                self.copied_module_path(functor, Some(Arc::as_ptr(functor) as usize))?;
+                self.copied_module_path(argument, Some(Arc::as_ptr(argument) as usize))
+            }
+        }
+    }
+
+    /// The `Mty_ident` target of a module type substitution, if any.
+    fn modtype_target(&self, path: &Path) -> Option<(Target, Path)> {
+        if let Some(target) = self.renamed_ident(path) {
+            return Some((target, path.clone()));
+        }
+        match path {
+            Path::Pident(_) => self
+                .subst
+                .modtype_target(path)
+                .map(|(target, entry)| (Target::Outer(entry), target)),
+            _ => None,
+        }
+    }
+
+    /// `Subst.modtype_path s p` (subst.ml:77-86): the path inside the
+    /// target `Mty_ident` of `p`, or `p` rebuilt.
+    fn copied_modtype_path(&mut self, path: &Path) -> Walk {
+        if let Some((target, target_path)) = self.modtype_target(path) {
+            return self.target_path(target, &target_path);
+        }
+        match path {
+            Path::Pident(_) => self.original(|size| size.path(path)),
+            _ => self.copied_dotted_path(path),
+        }
     }
 
     fn longident(&mut self, lid: &crate::parser::longident::Longident) -> Walk {
@@ -495,6 +612,9 @@ impl<'a> ErrorSize<'a> {
     }
 
     fn module_type(&mut self, mty: &ModuleType) -> Walk {
+        if self.substituted {
+            return self.copied_module_type(mty);
+        }
         match mty {
             ModuleType::MtyIdent(path) => {
                 self.block(0, 1)?;
@@ -517,6 +637,49 @@ impl<'a> ErrorSize<'a> {
             ModuleType::MtyAlias(_, path) => {
                 self.block(3, 2)?;
                 self.path(path)
+            }
+        }
+    }
+
+    /// `Subst.modtype s mty` (subst.ml:326-337).
+    fn copied_module_type(&mut self, mty: &ModuleType) -> Walk {
+        match mty {
+            ModuleType::MtyIdent(path) => {
+                if let Some((target, target_path)) = self.modtype_target(path) {
+                    // `Tbl.find id s.modtypes`: the shared `Mty_ident`.
+                    if !self.path_blocks.insert(PathBlockKey::TargetMty(target)) {
+                        return Ok(());
+                    }
+                    self.block(0, 1)?;
+                    return self.target_path(target, &target_path);
+                }
+                self.block(0, 1)?;
+                match path {
+                    // The original `mty`.
+                    Path::Pident(_) => self.original(|size| size.path(path)),
+                    _ => self.copied_dotted_path(path),
+                }
+            }
+            ModuleType::MtySignature(sig) => {
+                self.block(1, 1)?;
+                self.signature(sig)
+            }
+            ModuleType::MtyFunctor {
+                param,
+                param_type,
+                result,
+            } => {
+                // `Mty_functor (Ident.rename id, may_map (modtype s) arg,
+                //  modtype (add_module id (Pident id') s) res)`
+                self.block(2, 3)?;
+                self.ident(param)?;
+                self.option(param_type.as_deref(), |size, mty| size.module_type(mty))?;
+                self.renamed.insert(ident_key(param));
+                self.module_type(result)
+            }
+            ModuleType::MtyAlias(_, path) => {
+                self.block(3, 2)?;
+                self.copied_module_path(path, None)
             }
         }
     }
@@ -863,7 +1026,11 @@ impl<'a> ErrorSize<'a> {
     //  ext_loc; ext_attributes; ext_is_exception}
     fn extension_constructor_fields(&mut self, ext: &ExtensionConstructor) -> Walk {
         self.block(0, 8)?;
-        self.path(&ext.ext_type_path)?;
+        if self.substituted {
+            self.copied_type_path(&ext.ext_type_path, None)?;
+        } else {
+            self.path(&ext.ext_type_path)?;
+        }
         self.list(&ext.ext_type_params, |size, ty| size.type_expr(*ty))?;
         self.constructor_arguments(&ext.ext_args)?;
         self.option(ext.ext_ret_type.as_ref(), |size, ty| size.type_expr(*ty))?;
@@ -932,8 +1099,12 @@ impl<'a> ErrorSize<'a> {
         //                   has_undefined; has_other_literal}
         let facts = &layout.matching_facts;
         self.block(0, 6)?;
-        self.option(facts.tag_name.as_ref(), |size, _| size.tag_name(tag_attribute))?;
-        self.list(&facts.block_types, |size, block_type| size.block_type(block_type))?;
+        self.option(facts.tag_name.as_ref(), |size, _| {
+            size.tag_name(tag_attribute)
+        })?;
+        self.list(&facts.block_types, |size, block_type| {
+            size.block_type(block_type)
+        })?;
         // `literal_tags` (variant_runtime.ml `compute_matching_facts`): a
         // constant's literal is the payload of its tag's `Some`, already
         // counted, or a fresh `String name` sharing the tag's name string.
@@ -999,20 +1170,17 @@ impl<'a> ErrorSize<'a> {
     /// `Subst` copy keeps a `Pident` it does not rename and rebuilds the
     /// others (subst.ml:87-94).
     fn tconstr_path(&mut self, node: TypeExprRef, path: &Path, block: PathBlock) -> Walk {
-        let kept = match path {
-            Path::Pident(id) => !(self.substituted && self.renamed.contains(&ident_key(id))),
-            _ => !self.substituted,
+        let key = match (block.owner(), path) {
+            (PathBlockOwner::Own, _) => PathBlockKey::Node(node),
+            (PathBlockOwner::Of(owner), _) => PathBlockKey::Node(owner),
+            (PathBlockOwner::Predef, Path::Pident(id)) => PathBlockKey::Predef(id.stamp()),
+            (PathBlockOwner::Predef, _) => PathBlockKey::Node(node),
         };
-        if kept {
-            let key = match (block.owner(), path) {
-                (PathBlockOwner::Own, _) => PathBlockKey::Node(node),
-                (PathBlockOwner::Of(owner), _) => PathBlockKey::Node(owner),
-                (PathBlockOwner::Predef, Path::Pident(id)) => PathBlockKey::Predef(id.stamp()),
-                (PathBlockOwner::Predef, _) => PathBlockKey::Node(node),
-            };
-            if !self.path_blocks.insert(key) {
-                return Ok(());
-            }
+        if self.substituted {
+            return self.copied_type_path(path, Some(key));
+        }
+        if !self.path_blocks.insert(key) {
+            return Ok(());
         }
         self.path(path)
     }
@@ -1103,7 +1271,11 @@ impl<'a> ErrorSize<'a> {
             }
             TypeDesc::Tpackage { path, lids, args } => {
                 self.block(11, 3)?;
-                self.path(path)?;
+                if self.substituted {
+                    self.copied_modtype_path(path)?;
+                } else {
+                    self.path(path)?;
+                }
                 self.list(lids, |size, lid| size.longident(lid))?;
                 self.list(args.as_slice(), |size, ty| size.type_expr(*ty))
             }
@@ -1167,7 +1339,7 @@ impl<'a> ErrorSize<'a> {
                 self.type_expr(row.row_more)?;
                 self.option(row.row_name.as_ref(), |size, (path, tys)| {
                     size.block(0, 2)?;
-                    size.path(path)?;
+                    size.copied_type_path(path, None)?;
                     size.list(tys, |size, ty| size.type_expr(*ty))
                 })
             }

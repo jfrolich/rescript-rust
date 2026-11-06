@@ -119,6 +119,9 @@ pub enum IncludeModError {
         name: Ident,
         actual: ModtypeDeclaration,
         expected: ModtypeDeclaration,
+        /// The signature's declaration before `Subst.modtype_declaration
+        /// subst` (includemod.ml:415-419), and `subst`.
+        expected_source: Box<(ModtypeDeclaration, InclusionSubst)>,
         error: Box<IncludeModError>,
     },
     /// Equivalent module type declarations require a structure-field permutation.
@@ -127,6 +130,8 @@ pub enum IncludeModError {
     ModuleTypesMismatch {
         actual: Box<ModuleType>,
         expected: Box<ModuleType>,
+        /// The `subst` of `Subst.modtype subst mty2` (includemod.ml:186-196).
+        subst: Box<InclusionSubst>,
         error: Box<IncludeModError>,
     },
     /// A module alias normalized to a path whose compiled interface is missing.
@@ -141,6 +146,8 @@ pub enum IncludeModError {
         param: Ident,
         actual: Box<ModuleType>,
         expected: Box<ModuleType>,
+        /// `Subst.add_module param2 (Pident param1) subst` (includemod.ml:257-262).
+        subst: Box<InclusionSubst>,
         error: Box<IncludeModError>,
     },
     /// Nested include error reported in a module type position.
@@ -196,7 +203,14 @@ impl From<&str> for TypeDeclarationMismatchDetail {
 pub fn format_error(type_ctx: &TypeContext, filename: &str, error: &IncludeModError) -> String {
     let mut output = String::new();
     output.push_str("  Signature mismatch:\n");
-    format_include_error(type_ctx, filename, error, &mut Vec::new(), &mut output, &mut false);
+    format_include_error(
+        type_ctx,
+        filename,
+        error,
+        &mut Vec::new(),
+        &mut output,
+        &mut false,
+    );
     output
 }
 
@@ -206,7 +220,14 @@ pub(crate) fn format_error_without_signature_header(
     error: &IncludeModError,
 ) -> String {
     let mut output = String::new();
-    format_include_error(type_ctx, filename, error, &mut Vec::new(), &mut output, &mut false);
+    format_include_error(
+        type_ctx,
+        filename,
+        error,
+        &mut Vec::new(),
+        &mut output,
+        &mut false,
+    );
     output
 }
 
@@ -370,6 +391,7 @@ fn format_include_error(
             param,
             actual,
             expected,
+            subst,
             error,
         } => {
             // `modtypes` on the functor results (includemod.ml:388-396) runs
@@ -378,9 +400,11 @@ fn format_include_error(
             let is_last = module_types_entry_is_last(error);
             if is_last
                 || !elide_big_entry(
-                    || crate::types::includemod_error_size::module_types_is_big(
-                        type_ctx, actual, expected,
-                    ),
+                    || {
+                        crate::types::includemod_error_size::module_types_is_big(
+                            type_ctx, actual, expected, subst,
+                        )
+                    },
                     output,
                     elided,
                 )
@@ -397,12 +421,15 @@ fn format_include_error(
         IncludeModError::ModuleTypesMismatch {
             actual,
             expected,
+            subst,
             error,
         } if !module_types_entry_is_last(error)
             && elide_big_entry(
-                || crate::types::includemod_error_size::module_types_is_big(
-                    type_ctx, actual, expected,
-                ),
+                || {
+                    crate::types::includemod_error_size::module_types_is_big(
+                        type_ctx, actual, expected, subst,
+                    )
+                },
                 output,
                 elided,
             ) =>
@@ -415,12 +442,19 @@ fn format_include_error(
         IncludeModError::ModuleTypeDeclarationMismatch {
             name,
             actual,
-            expected,
+            expected_source,
             error,
+            ..
         } if elide_big_entry(
-            || crate::types::includemod_error_size::modtype_infos_is_big(
-                type_ctx, name, actual, expected,
-            ),
+            || {
+                crate::types::includemod_error_size::modtype_infos_is_big(
+                    type_ctx,
+                    name,
+                    actual,
+                    &expected_source.0,
+                    &expected_source.1,
+                )
+            },
             output,
             elided,
         ) =>
@@ -440,6 +474,7 @@ fn format_include_error(
             actual,
             expected,
             error,
+            ..
         } => {
             push_module_types_symptom(type_ctx, actual, expected, output);
             if !module_types_entry_is_last(error) {
@@ -658,6 +693,7 @@ fn format_include_error(
             actual,
             expected,
             error,
+            ..
         } => {
             output.push_str("  Module type declarations do not match:\n");
             output.push_str("    ");
@@ -808,16 +844,48 @@ fn format_extension_constructor(
     crate::types::printtyp::print_out_sig_item(&tree)
 }
 
-#[derive(Clone, Default)]
-struct InclusionSubst {
+/// The substitution `subst` of OCaml's `Includemod.modtypes`.
+///
+/// Each `Subst.add_type`/`add_module`/`add_modtype` call allocates its target
+/// (`Pident id1`, `Mty_ident (Pident id1)`) once, and every path it replaces
+/// shares that block. [`SubstEntry`] numbers those calls so the size of an
+/// error (`Includemod.is_big`) can count each target once.
+#[derive(Clone, Default, Debug)]
+pub struct InclusionSubst {
     type_paths: PathSubstMap,
     module_paths: PathSubstMap,
     modtype_paths: PathSubstMap,
+    entries: u32,
 }
+
+/// One `Subst.add_*` call of an [`InclusionSubst`].
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct SubstEntry(u32);
 
 impl InclusionSubst {
     fn is_empty(&self) -> bool {
         self.type_paths.is_empty() && self.module_paths.is_empty() && self.modtype_paths.is_empty()
+    }
+
+    /// A new `Subst.add_*` call, whose target the keys inserted with it share.
+    fn new_entry(&mut self) -> SubstEntry {
+        self.entries += 1;
+        SubstEntry(self.entries)
+    }
+
+    /// `Path_map.find path s.types`: the target and the call that added it.
+    pub(crate) fn type_target(&self, path: &Path) -> Option<(Path, SubstEntry)> {
+        self.type_paths.get_target(path)
+    }
+
+    /// `Path_map.find path s.modules`.
+    pub(crate) fn module_target(&self, path: &Path) -> Option<(Path, SubstEntry)> {
+        self.module_paths.get_target(path)
+    }
+
+    /// `Tbl.find id s.modtypes`: the path of the target `Mty_ident`.
+    pub(crate) fn modtype_target(&self, path: &Path) -> Option<(Path, SubstEntry)> {
+        self.modtype_paths.get_target(path)
     }
 }
 
@@ -829,16 +897,16 @@ impl InclusionSubst {
 /// that is `==`; the remaining `same`-but-not-`==` keys can only exist when the
 /// key or the queried path carries a position hint. `any_pos_key` records
 /// whether any key has one so the common case needs no full-map scan.
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Debug)]
 struct PathSubstMap {
-    map: HashMap<Path, Path>,
+    map: HashMap<Path, (Path, SubstEntry)>,
     any_pos_key: bool,
 }
 
 impl PathSubstMap {
-    fn insert(&mut self, key: Path, value: Path) {
+    fn insert(&mut self, key: Path, value: Path, entry: SubstEntry) {
         self.any_pos_key |= path_has_pos_hint(&key);
-        self.map.insert(key, value);
+        self.map.insert(key, (value, entry));
     }
 
     fn is_empty(&self) -> bool {
@@ -846,6 +914,10 @@ impl PathSubstMap {
     }
 
     fn get(&self, path: &Path) -> Option<Path> {
+        self.get_target(path).map(|(value, _)| value)
+    }
+
+    fn get_target(&self, path: &Path) -> Option<(Path, SubstEntry)> {
         if let Some(value) = self.map.get(path) {
             return Some(value.clone());
         }
@@ -978,6 +1050,7 @@ pub fn modtypes_with_warnings(
             IncludeModError::ModuleTypesMismatch {
                 actual: Box::new(mty_impl.clone()),
                 expected: Box::new(mty_sig.clone()),
+                subst: Box::new(subst.clone()),
                 error: Box::new(error),
             }
         }
@@ -999,6 +1072,7 @@ fn module_type_error_is_alias_unbound_module(
 /// errors from `try_modtypes` get one too unless either side is an alias, in
 /// which case the inner comparison already reported it.
 fn wrap_modtypes_error(
+    subst: &InclusionSubst,
     mty_impl: &ModuleType,
     mty_sig: &ModuleType,
     error: IncludeModError,
@@ -1012,6 +1086,7 @@ fn wrap_modtypes_error(
     IncludeModError::ModuleTypesMismatch {
         actual: Box::new(mty_impl.clone()),
         expected: Box::new(mty_sig.clone()),
+        subst: Box::new(subst.clone()),
         error: Box::new(error),
     }
 }
@@ -1218,7 +1293,7 @@ fn modtypes_inner(
                         sig_access_path,
                         warnings,
                     )
-                    .map_err(|error| wrap_modtypes_error(&expanded, mty_sig, error))
+                    .map_err(|error| wrap_modtypes_error(subst, &expanded, mty_sig, error))
                 }) {
                 coercion?
             } else {
@@ -1240,7 +1315,7 @@ fn modtypes_inner(
                     sig_access_path,
                     warnings,
                 )
-                .map_err(|error| wrap_modtypes_error(&expanded, mty_sig, error))?
+                .map_err(|error| wrap_modtypes_error(subst, &expanded, mty_sig, error))?
             };
             match pres_impl {
                 crate::types::decl::AliasPresence::MtaPresent => Ok(coercion),
@@ -1318,9 +1393,12 @@ fn modtypes_inner(
                 },
             );
             let mut result_subst = subst.clone();
-            result_subst
-                .module_paths
-                .insert(Path::pident(*param_sig), Path::pident(*param_impl));
+            let entry = result_subst.new_entry();
+            result_subst.module_paths.insert(
+                Path::pident(*param_sig),
+                Path::pident(*param_impl),
+                entry,
+            );
             let result_coercion = modtypes_inner(
                 type_ctx,
                 &result_env,
@@ -1334,6 +1412,7 @@ fn modtypes_inner(
                 param: *param_impl,
                 actual: result_impl.clone(),
                 expected: result_sig.clone(),
+                subst: Box::new(result_subst.clone()),
                 error: Box::new(error),
             })?;
 
@@ -1665,17 +1744,19 @@ fn register_paired_signature_substitution(
             // compiler/ml/subst.ml:87-95 then rewrites exact type paths before
             // recursively rewriting module prefixes.
             let impl_path = Path::pident(*impl_id);
+            let entry = subst.new_entry();
             subst
                 .type_paths
-                .insert(Path::pident(*sig_id), impl_path.clone());
+                .insert(Path::pident(*sig_id), impl_path.clone(), entry);
             if let Some(access_path) = sig_access_path {
                 subst.type_paths.insert(
                     Path::pdot(access_path.clone(), sig_id.name()),
                     impl_path.clone(),
+                    entry,
                 );
             }
             if let Some(sig_path) = &sig_decl.type_path {
-                subst.type_paths.insert(sig_path.clone(), impl_path);
+                subst.type_paths.insert(sig_path.clone(), impl_path, entry);
             }
         }
         (
@@ -1686,17 +1767,21 @@ fn register_paired_signature_substitution(
             // module-type substitutions; compiler/ml/subst.ml:69-75 applies
             // them to exact paths before dotted-prefix recursion.
             let impl_path = Path::pident(*impl_id);
+            let entry = subst.new_entry();
             subst
                 .module_paths
-                .insert(Path::pident(*sig_id), impl_path.clone());
+                .insert(Path::pident(*sig_id), impl_path.clone(), entry);
             if let Some(access_path) = sig_access_path {
                 subst.module_paths.insert(
                     Path::pdot(access_path.clone(), sig_id.name()),
                     impl_path.clone(),
+                    entry,
                 );
             }
             if let Some(sig_path) = &sig_decl.md_path {
-                subst.module_paths.insert(sig_path.clone(), impl_path);
+                subst
+                    .module_paths
+                    .insert(sig_path.clone(), impl_path, entry);
             }
         }
         (SignatureItem::SigModtype(impl_id, _), SignatureItem::SigModtype(sig_id, _)) => {
@@ -1704,9 +1789,10 @@ fn register_paired_signature_substitution(
             // `Subst.add_modtype id2 (Mty_ident (Pident id1))`. Dotted module
             // type paths are handled by Subst.modtype_path through their module
             // prefix (compiler/ml/subst.ml:77-86), not by a dotted modtype map.
+            let entry = subst.new_entry();
             subst
                 .modtype_paths
-                .insert(Path::pident(*sig_id), Path::pident(*impl_id));
+                .insert(Path::pident(*sig_id), Path::pident(*impl_id), entry);
         }
         _ => {}
     }
@@ -1879,6 +1965,7 @@ fn check_paired_signature_items(
                     IncludeModError::InModule {
                         name: *impl_id,
                         error: Box::new(wrap_modtypes_error(
+                            subst,
                             &impl_mty,
                             &sig_mod_decl.md_type,
                             error,
@@ -1899,6 +1986,7 @@ fn check_paired_signature_items(
                     *impl_id,
                     impl_modtype_decl,
                     &expected_modtype_decl,
+                    (sig_modtype_decl, subst),
                     warnings,
                 )?;
             }
@@ -2497,7 +2585,8 @@ pub(crate) fn substitute_type_declaration_self_path(
     to: &Path,
 ) -> TypeDeclaration {
     let mut subst = InclusionSubst::default();
-    subst.type_paths.insert(from.clone(), to.clone());
+    let entry = subst.new_entry();
+    subst.type_paths.insert(from.clone(), to.clone(), entry);
     substitute_type_declaration_paths(type_ctx, decl, &subst)
 }
 
@@ -3768,7 +3857,10 @@ fn compare_variant_declarations(
                 crate::types::VariantConstructorCase::Block(crate::types::VariantBlock::Tagged(
                     sig_block,
                 )),
-            ) = (&impl_layout.constructors[index], &sig_layout.constructors[index])
+            ) = (
+                &impl_layout.constructors[index],
+                &sig_layout.constructors[index],
+            )
             && impl_block.tag.literal != sig_block.tag.literal
         {
             return Some(format!(
@@ -4463,12 +4555,14 @@ fn constructor_arguments_equal_for_inclusion(
 }
 
 /// Check if module type declaration `impl_decl` is compatible with `sig_decl`.
+#[allow(clippy::too_many_arguments)]
 fn modtype_declarations(
     type_ctx: &TypeContext,
     env: &Env,
     id: Ident,
     impl_decl: &ModtypeDeclaration,
     sig_decl: &ModtypeDeclaration,
+    (sig_source, subst): (&ModtypeDeclaration, &InclusionSubst),
     warnings: &mut Vec<Warning>,
 ) -> IncludeModResult<()> {
     if let Some(warning) = deprecated_inclusion_warning(
@@ -4508,6 +4602,7 @@ fn modtype_declarations(
                 name: id,
                 actual: impl_decl.clone(),
                 expected: sig_decl.clone(),
+                expected_source: Box::new((sig_source.clone(), subst.clone())),
                 error: Box::new(with_modtype_context(id, error)),
             };
 

@@ -3212,7 +3212,7 @@ fn resolve_signature_through_env_module_type(
 
 fn strengthen_type_decl_for_module_access_path(
     ctx: &TypeContext,
-    module_access_path: &Path,
+    module_access_path: &Arc<Path>,
     id: &crate::ident::Ident,
     decl: &super::decl::TypeDeclaration,
 ) -> super::decl::TypeDeclaration {
@@ -3229,7 +3229,12 @@ fn strengthen_type_decl_for_module_access_path(
                 crate::types::TypeKind::TypeRecord(..) | crate::types::TypeKind::TypeVariant(..),
             )
     );
-    let qualified_type_path = Path::pdot(module_access_path.clone(), id.name());
+    // `Pdot (p, Ident.name id, nopos)` around the one `p` of the signature.
+    let qualified_type_path = Path::Pdot(
+        module_access_path.clone(),
+        id.name().into(),
+        crate::types::path::NOPOS,
+    );
 
     if keep_manifest {
         let mut strengthened = decl.clone();
@@ -3390,6 +3395,8 @@ fn strengthen_signature_for_module_access_path(
 ) -> super::decl::Signature {
     use super::decl::{SignatureItem, ValueKind};
 
+    // mtype.ml:40-91: every item is strengthened with the same `p`.
+    let module_access_path = &Arc::new(module_access_path.clone());
     let mut strengthened = Vec::with_capacity(sig.len());
     let mut env = env.clone();
     let mut index = 0;
@@ -3426,7 +3433,7 @@ fn strengthen_signature_for_module_access_path(
                 SignatureItem::SigTypext(*id, ext.clone(), *ext_status)
             }
             SignatureItem::SigModule(id, md, rec_status) => {
-                let child_path = Path::pdot_pos(module_access_path.clone(), id.name(), pos);
+                let child_path = Path::Pdot(module_access_path.clone(), id.name().into(), pos);
                 pos += 1;
                 let strengthened_md = strengthen_module_decl_for_module_access_path(
                     ctx,
@@ -3442,7 +3449,11 @@ fn strengthen_signature_for_module_access_path(
             SignatureItem::SigModtype(id, mtd) => {
                 let mut strengthened_mtd = mtd.clone();
                 if mtd.mtd_type.is_none() {
-                    let modtype_path = Path::pdot(module_access_path.clone(), id.name());
+                    let modtype_path = Path::Pdot(
+                        module_access_path.clone(),
+                        id.name().into(),
+                        crate::types::path::NOPOS,
+                    );
                     strengthened_mtd.mtd_type =
                         Some(super::decl::ModuleType::MtyIdent(modtype_path));
                 }
@@ -3695,7 +3706,7 @@ fn resolve_type_item_through_env_uncached<'a>(
                 super::decl::TypeDeclarationRef::owned(
                     strengthen_type_decl_for_module_access_path(
                         ctx,
-                        target_path,
+                        &Arc::new(target_path.clone()),
                         &id,
                         &resolved_decl,
                     ),
