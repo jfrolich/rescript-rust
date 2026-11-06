@@ -131,7 +131,7 @@ pub fn translate_value_binding(
     value_binding: &ValueBinding,
 ) -> crate::gentype::translation::T {
     // Mirrors compiler/gentype/TranslateStructure.ml:103-123.
-    let id = match value_binding_id(&value_binding.vb_pat) {
+    let id = match value_binding_id(ta.pattern(value_binding.vb_pat)) {
         None => return crate::gentype::translation::empty(),
         Some(id) => id,
     };
@@ -144,7 +144,7 @@ pub fn translate_value_binding(
     if crate::gentype::annotation::from_attributes(
         arena,
         config,
-        value_binding.vb_pat.pat_loc,
+        ta.pattern(value_binding.vb_pat).pat_loc,
         &value_binding.vb_attributes,
     ) == crate::gentype::annotation::T::GenType
     {
@@ -157,7 +157,7 @@ pub fn translate_value_binding(
             output_file_relative,
             resolver,
             type_env,
-            value_binding.vb_pat.pat_type,
+            ta.pattern(value_binding.vb_pat).pat_type,
             |t| add_annotations_to_function_type(arena, ta, config, value_binding.vb_expr, t),
             &name,
         )
@@ -491,7 +491,7 @@ pub fn translate_structure(
                 let value_bindings = ta
                     .value_bindings(*value_bindings)
                     .iter()
-                    .filter(|binding| match &binding.vb_pat.pat_desc {
+                    .filter(|binding| match &ta.pattern(binding.vb_pat).pat_desc {
                         PatternDesc::Tpat_var(id, _) => seen.insert(id.name().to_string()),
                         _ => true,
                     })

@@ -26,8 +26,8 @@ use crate::types::asttypes::ArgLabel as TypeArgLabel;
 use crate::types::decl::ModuleType as DeclModuleType;
 pub use crate::types::tast_arena::{
     TArgList, TCaseList, TCoreTypeIdx, TCoreTypeList, TExprIdx, TExprList, TExtIdx, TFieldList,
-    TModExprIdx, TModTypeIdx, TParamList, TSigItemList, TStrItemList, TValDescIdx, TVbList,
-    TypedArena,
+    TModExprIdx, TModTypeIdx, TParamList, TPatIdx, TSigItemList, TStrItemList, TValDescIdx,
+    TVbList, TypedArena,
 };
 use crate::types::{
     ConstructorDescription, LabelDescription, Path, RowDesc, TypeExprRef, ValueDescription,
@@ -410,14 +410,7 @@ pub enum ExpressionDesc {
     Texp_while(TExprIdx, TExprIdx),
 
     /// For loop: `for i = E1 to/downto E2 do E3 done`.
-    Texp_for(
-        Ident,
-        Box<Pattern>,
-        TExprIdx,
-        TExprIdx,
-        DirectionFlag,
-        TExprIdx,
-    ),
+    Texp_for(Ident, TPatIdx, TExprIdx, TExprIdx, DirectionFlag, TExprIdx),
 
     /// For-of loop: `for pat of iterable { body }` (upstream #7887).
     /// The pattern stored is the original parser pattern (as in OCaml's
@@ -512,7 +505,7 @@ pub struct FunctionParam {
     /// Identifier bound by generated Lambda.
     pub fp_param: Ident,
     /// Typed source pattern.
-    pub fp_pat: Pattern,
+    pub fp_pat: TPatIdx,
     /// Whether the parameter pattern is exhaustive.
     pub fp_partial: Partial,
     /// Optional parameter with a default value: `fp_pat` binds the option
@@ -529,7 +522,7 @@ pub struct FunctionParam {
 #[derive(Debug, Clone)]
 pub struct Case {
     /// Left-hand side pattern.
-    pub c_lhs: Pattern,
+    pub c_lhs: TPatIdx,
     /// Optional guard: `when E`.
     pub c_guard: Option<TExprIdx>,
     /// Right-hand side expression.
@@ -540,7 +533,7 @@ pub struct Case {
 #[derive(Debug, Clone)]
 pub struct ValueBinding {
     /// Binding pattern.
-    pub vb_pat: Pattern,
+    pub vb_pat: TPatIdx,
     /// Binding expression.
     pub vb_expr: TExprIdx,
     /// Attributes on the binding.
@@ -1208,7 +1201,7 @@ impl Expression {
 
 impl Case {
     /// Create a new case with pattern and expression (no guard).
-    pub fn simple(lhs: Pattern, rhs: TExprIdx) -> Self {
+    pub fn simple(lhs: TPatIdx, rhs: TExprIdx) -> Self {
         Case {
             c_lhs: lhs,
             c_guard: None,
@@ -1219,7 +1212,7 @@ impl Case {
 
 impl ValueBinding {
     /// Create a new value binding.
-    pub fn new(pat: Pattern, expr: TExprIdx, loc: LocIdx, attributes: Attributes) -> Self {
+    pub fn new(pat: TPatIdx, expr: TExprIdx, loc: LocIdx, attributes: Attributes) -> Self {
         ValueBinding {
             vb_pat: pat,
             vb_expr: expr,
@@ -1305,8 +1298,9 @@ mod node_size_tests {
     #[test]
     fn typed_list_items_stay_compact() {
         use std::mem::size_of;
-        assert_eq!(size_of::<super::Case>(), 104);
-        assert_eq!(size_of::<super::ValueBinding>(), 112);
+        assert_eq!(size_of::<super::Case>(), 12);
+        assert_eq!(size_of::<super::ValueBinding>(), 24);
+        assert_eq!(size_of::<super::FunctionParam>(), 64);
         assert_eq!(size_of::<super::ApplyArg>(), 48);
         assert_eq!(size_of::<super::RecordField>(), 40);
     }

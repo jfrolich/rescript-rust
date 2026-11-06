@@ -14123,8 +14123,8 @@ fn extract_module_type_from_mod_expr_inner(
                     StructureItemDesc::Tstr_value(_, bindings) => {
                         for vb in ta.value_bindings(*bindings) {
                             extract_sig_values_from_pattern(
-                                &vb.vb_pat,
-                                vb.vb_pat.pat_type,
+                                ta.pattern(vb.vb_pat),
+                                ta.pattern(vb.vb_pat).pat_type,
                                 &mut sig_items,
                             );
                         }
@@ -16794,7 +16794,11 @@ fn type_structure_item<'a>(
 
             let mut sig_items = Vec::new();
             for vb in &typed_bindings {
-                push_sig_values_from_env_pattern(&new_env, &vb.vb_pat, &mut sig_items);
+                push_sig_values_from_env_pattern(
+                    &new_env,
+                    tctx.typed.pattern(vb.vb_pat),
+                    &mut sig_items,
+                );
             }
 
             let desc = StructureItemDesc::Tstr_value(

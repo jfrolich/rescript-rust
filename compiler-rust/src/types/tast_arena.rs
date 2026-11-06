@@ -19,7 +19,7 @@ use crate::parse_arena::ArenaList;
 
 use super::typedtree::{
     ApplyArg, Case, Expression, ExtensionConstructor, FunctionParam, ModuleExpr, ModuleType,
-    RecordField, StructureItem, TypedCoreType, TypedSignatureItem, TypedValueDescription,
+    Pattern, RecordField, StructureItem, TypedCoreType, TypedSignatureItem, TypedValueDescription,
     ValueBinding,
 };
 
@@ -60,6 +60,11 @@ arena_handle!(
 arena_handle!(
     /// Handle of a typed core type (a type annotation) in a [`TypedArena`].
     TCoreTypeIdx
+);
+
+arena_handle!(
+    /// Handle of a typed pattern in a [`TypedArena`].
+    TPatIdx
 );
 
 arena_handle!(
@@ -191,6 +196,7 @@ pub struct TypedArena {
     module_exprs: Vec<ModuleExpr>,
     module_types: Vec<ModuleType>,
     core_types: Vec<TypedCoreType>,
+    patterns: Vec<Pattern>,
     extension_constructors: Vec<ExtensionConstructor>,
     value_descriptions: Vec<TypedValueDescription>,
     core_type_lists: ListPool<TCoreTypeIdx>,
@@ -361,6 +367,20 @@ impl TypedArena {
         self.core_type_list(list)
             .iter()
             .map(|&idx| self.core_type(idx))
+    }
+
+    /// Store a pattern.
+    #[inline]
+    pub fn push_pattern(&mut self, p: Pattern) -> TPatIdx {
+        let idx = TPatIdx::from_index(self.patterns.len());
+        self.patterns.push(p);
+        idx
+    }
+
+    /// A pattern by handle.
+    #[inline]
+    pub fn pattern(&self, idx: TPatIdx) -> &Pattern {
+        &self.patterns[idx.index()]
     }
 
     /// Store an extension constructor.

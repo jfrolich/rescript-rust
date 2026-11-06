@@ -725,7 +725,7 @@ impl Processor<'_> {
                         exported,
                         &mut items,
                         Some(&binding.vb_attributes),
-                        &binding.vb_pat,
+                        self.ctx.ta.pattern(binding.vb_pat),
                     );
                 }
                 for binding in self.ctx.ta.value_bindings(*bindings) {

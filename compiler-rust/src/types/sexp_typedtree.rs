@@ -944,7 +944,7 @@ fn sexp_expression_desc(
                     Sexp::list(vec![
                         sexp_type_arg_label(&param.fp_lbl),
                         sexp_ident(&param.fp_param),
-                        sexp_pattern(arena, ctx, cx, &param.fp_pat),
+                        sexp_pattern(arena, ctx, cx, cx.ta.pattern(param.fp_pat)),
                         sexp_partial(&param.fp_partial),
                     ])
                 })
@@ -1289,7 +1289,7 @@ fn sexp_expression_desc(
 
 fn sexp_case(arena: &ParseArena, ctx: &TypeContext, cx: Cx<'_>, c: &Case) -> Sexp {
     // Match OCaml eval order: lhs first, then guard, then rhs
-    let lhs_sexp = sexp_pattern(arena, ctx, cx, &c.c_lhs);
+    let lhs_sexp = sexp_pattern(arena, ctx, cx, cx.ta.pattern(c.c_lhs));
     let guard_sexp = match &c.c_guard {
         None => Sexp::atom("None"),
         Some(e) => Sexp::list(vec![
@@ -1314,7 +1314,7 @@ fn sexp_value_binding(
     };
     let mut items = vec![Sexp::atom("value_binding")];
     items.extend(loc_sexp);
-    items.push(sexp_pattern(arena, ctx, cx, &vb.vb_pat));
+    items.push(sexp_pattern(arena, ctx, cx, cx.ta.pattern(vb.vb_pat)));
     items.push(sexp_expression(arena, ctx, cx, vb.vb_expr));
     items.push(sexp_attributes(arena, cx, &vb.vb_attributes));
     Sexp::list(items)

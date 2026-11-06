@@ -138,7 +138,7 @@ pub trait TastIterator<'t> {
         }
     }
     fn value_binding(&mut self, vb: &ValueBinding) {
-        self.pat(&vb.vb_pat);
+        self.pat(self.arena().pattern(vb.vb_pat));
         let ta = self.arena();
         self.expr(ta.expr(vb.vb_expr));
     }
@@ -162,7 +162,7 @@ pub trait TastIterator<'t> {
 
 pub fn walk_case<'t, I: TastIterator<'t> + ?Sized>(sub: &mut I, c: &Case) {
     let ta = sub.arena();
-    sub.pat(&c.c_lhs);
+    sub.pat(sub.arena().pattern(c.c_lhs));
     if let Some(g) = c.c_guard {
         sub.expr(ta.expr(g));
     }
@@ -321,7 +321,7 @@ pub fn walk_expr<'t, I: TastIterator<'t> + ?Sized>(sub: &mut I, e: &Expression) 
         }
         ExpressionDesc::Texp_function { params, body, .. } => {
             for param in ta.function_params(*params) {
-                sub.pat(&param.fp_pat);
+                sub.pat(sub.arena().pattern(param.fp_pat));
             }
             sub.expr(ta.expr(*body));
         }

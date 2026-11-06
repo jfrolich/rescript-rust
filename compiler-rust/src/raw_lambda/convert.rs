@@ -309,16 +309,16 @@ where
     }
 }
 
-fn let_bound_idents(bindings: &[ValueBinding]) -> Vec<Ident> {
+fn let_bound_idents(ta: &TypedArena, bindings: &[ValueBinding]) -> Vec<Ident> {
     let mut ids = Vec::new();
     for binding in bindings {
-        iter_bound_pattern_idents(&binding.vb_pat, &mut |id| ids.push(*id));
+        iter_bound_pattern_idents(ta.pattern(binding.vb_pat), &mut |id| ids.push(*id));
     }
     ids
 }
 
-fn simple_let_binding_id(binding: &ValueBinding) -> Option<Ident> {
-    match &binding.vb_pat.pat_desc {
+fn simple_let_binding_id(ta: &TypedArena, binding: &ValueBinding) -> Option<Ident> {
+    match &ta.pattern(binding.vb_pat).pat_desc {
         PatternDesc::Tpat_var(id, _) => Some(*id),
         PatternDesc::Tpat_alias(inner, id, _)
             if matches!(inner.pat_desc, PatternDesc::Tpat_any) =>
@@ -329,9 +329,9 @@ fn simple_let_binding_id(binding: &ValueBinding) -> Option<Ident> {
     }
 }
 
-fn nonrecursive_alias_any_binding(binding: &ValueBinding) -> bool {
+fn nonrecursive_alias_any_binding(ta: &TypedArena, binding: &ValueBinding) -> bool {
     matches!(
-        &binding.vb_pat.pat_desc,
+        &ta.pattern(binding.vb_pat).pat_desc,
         PatternDesc::Tpat_alias(inner, _, _) if matches!(inner.pat_desc, PatternDesc::Tpat_any)
     )
 }
@@ -1138,10 +1138,10 @@ impl<'a> RawLambdaConverter<'a> {
     /// Convert typed tree cases to `(Pattern, action)` pairs for the full
     /// matching compiler. A guard stays data until matching knows its
     /// fallthrough (`compiler/ml/translcore.ml` `Matching.guarded`).
-    fn cases_to_pat_act_list<'c>(
+    fn cases_to_pat_act_list(
         &mut self,
-        cases: &'c [Case],
-    ) -> Vec<(&'c Pattern, full_matching::CaseAction)> {
+        cases: &[Case],
+    ) -> Vec<(&'a Pattern, full_matching::CaseAction)> {
         cases
             .iter()
             .map(|case| {
@@ -1153,7 +1153,7 @@ impl<'a> RawLambdaConverter<'a> {
                     ),
                     None => full_matching::CaseAction::unguarded(body),
                 };
-                (&case.c_lhs, act)
+                (self.ta.pattern(case.c_lhs), act)
             })
             .collect()
     }
@@ -1174,7 +1174,7 @@ impl<'a> RawLambdaConverter<'a> {
     fn name_pattern_ident(&mut self, default: &str, cases: &[Case]) -> Ident {
         cases
             .iter()
-            .find_map(|case| self.id_of_pattern(&case.c_lhs))
+            .find_map(|case| self.id_of_pattern(self.ta.pattern(case.c_lhs)))
             .unwrap_or_else(|| self.fresh_ident(default))
     }
 
@@ -5624,24 +5624,24 @@ impl<'a> RawLambdaConverter<'a> {
             }
             StructureItemDesc::Tstr_value(rec_flag, bindings) => {
                 let old_len = fields.len();
-                fields.extend(let_bound_idents(self.ta.value_bindings(*bindings)));
+                fields.extend(let_bound_idents(self.ta, self.ta.value_bindings(*bindings)));
                 let body =
                     self.convert_structure_items_raw(fields, rem, is_top_level, rootpath, cc, loc);
                 fields.truncate(old_len);
                 if is_top_level && *rec_flag == crate::parser::ast::RecFlag::Nonrecursive {
                     for binding in self.ta.value_bindings(*bindings) {
-                        match &binding.vb_pat.pat_desc {
+                        match &self.ta.pattern(binding.vb_pat).pat_desc {
                             PatternDesc::Tpat_var(_, _) | PatternDesc::Tpat_alias(_, _, _) => {}
                             _ if !crate::types::typecore::parmatch_irrefutable(
                                 self.type_ctx,
                                 self.arena,
                                 self.env,
                                 &mut self.persistent_env,
-                                &binding.vb_pat,
+                                self.ta.pattern(binding.vb_pat),
                             ) =>
                             {
                                 self.report_diagnostic(
-                                    self.loc(binding.vb_pat.pat_loc),
+                                    self.loc(self.ta.pattern(binding.vb_pat).pat_loc),
                                     "This pattern can fail to match, so it is not allowed in a top-level `let` binding.".to_string(),
                                 );
                                 // translmod.ml:392 raises here, so the binding
@@ -5984,7 +5984,7 @@ impl<'a> RawLambdaConverter<'a> {
                     // use the irrefutable path which correctly handles transparent field access.
                     if cases.len() == 1 && self.ta.cases(*cases)[0].c_guard.is_none() {
                         if let PatternDesc::Tpat_construct(_, cstr, _) =
-                            &self.ta.cases(*cases)[0].c_lhs.pat_desc
+                            &self.ta.pattern(self.ta.cases(*cases)[0].c_lhs).pat_desc
                         {
                             if matches!(
                                 cstr.cstr_kind,
@@ -6439,7 +6439,7 @@ impl<'a> RawLambdaConverter<'a> {
             return None;
         }
 
-        if !self.is_irrefutable_pattern(&cases[0].c_lhs) {
+        if !self.is_irrefutable_pattern(self.ta.pattern(cases[0].c_lhs)) {
             return None;
         }
 
@@ -6449,17 +6449,21 @@ impl<'a> RawLambdaConverter<'a> {
         // OCaml's compile_matching uses args=[(arg, Strict)], which means
         // when arg_to_var creates a temp for a non-variable scrutinee, it
         // gets a Strict binding. Match this for non-trivial patterns.
-        match (&cases[0].c_lhs.pat_desc, &scrut_lam) {
+        match (&self.ta.pattern(cases[0].c_lhs).pat_desc, &scrut_lam) {
             (PatternDesc::Tpat_var(_, _), _) | (_, RawLambda::Lvar(_)) => {
                 // Simple var pattern or variable scrutinee — no wrapping needed
-                Some(self.bind_irrefutable_pattern_raw(&cases[0].c_lhs, scrut_lam, body))
+                Some(self.bind_irrefutable_pattern_raw(
+                    self.ta.pattern(cases[0].c_lhs),
+                    scrut_lam,
+                    body,
+                ))
             }
             _ => {
                 // Non-variable scrutinee with complex pattern (record, tuple, etc.)
                 // OCaml's compile_matching binds with Strict via arg_to_var
                 let match_id = self.fresh_ident("match");
                 let bound = self.bind_irrefutable_pattern_raw(
-                    &cases[0].c_lhs,
+                    self.ta.pattern(cases[0].c_lhs),
                     RawLambda::Lvar(match_id),
                     body,
                 );
@@ -6964,8 +6968,8 @@ impl<'a> RawLambdaConverter<'a> {
         match rec_flag {
             crate::parser::ast::RecFlag::Nonrecursive => {
                 if bindings.iter().any(|binding| {
-                    simple_let_binding_id(binding).is_none()
-                        && !self.is_irrefutable_pattern(&binding.vb_pat)
+                    simple_let_binding_id(self.ta, binding).is_none()
+                        && !self.is_irrefutable_pattern(self.ta.pattern(binding.vb_pat))
                 }) {
                     // Use OCaml's simple_for_let / for_let approach via full matching compiler
                     let converted_bindings = bindings
@@ -6982,7 +6986,7 @@ impl<'a> RawLambdaConverter<'a> {
                             self.mark_js_hoisted_pattern(
                                 rootpath,
                                 &binding.vb_attributes,
-                                &binding.vb_pat,
+                                self.ta.pattern(binding.vb_pat),
                                 &value,
                                 self.ta.expr(binding.vb_expr).exp_loc,
                             );
@@ -6991,11 +6995,11 @@ impl<'a> RawLambdaConverter<'a> {
                         .collect::<Vec<_>>();
                     let mut acc = body;
                     for (binding, value) in converted_bindings.into_iter().rev() {
-                        if let Some(id) = simple_let_binding_id(binding) {
-                            if nonrecursive_alias_any_binding(binding) {
+                        if let Some(id) = simple_let_binding_id(self.ta, binding) {
+                            if nonrecursive_alias_any_binding(self.ta, binding) {
                                 self.next_raise_count();
                             }
-                            let kind = match &binding.vb_pat.pat_desc {
+                            let kind = match &self.ta.pattern(binding.vb_pat).pat_desc {
                                 PatternDesc::Tpat_alias(inner, _, _)
                                     if matches!(inner.pat_desc, PatternDesc::Tpat_any)
                                         && matches!(value, RawLambda::Lvar(_)) =>
@@ -7007,8 +7011,8 @@ impl<'a> RawLambdaConverter<'a> {
                             acc = RawLambda::let_(kind, id, value, acc);
                         } else {
                             // Use matching compiler's for_let (OCaml: Matching.for_let)
-                            let pat_act_list = vec![(&binding.vb_pat, acc.into())];
-                            let loc = binding.vb_pat.pat_loc;
+                            let pat_act_list = vec![(self.ta.pattern(binding.vb_pat), acc.into())];
+                            let loc = self.ta.pattern(binding.vb_pat).pat_loc;
                             let loc_for_handler = self.loc(loc);
                             let fname = self.basename_for_loc(loc_for_handler);
                             let arena = self.arena;
@@ -7065,7 +7069,7 @@ impl<'a> RawLambdaConverter<'a> {
                         self.mark_js_hoisted_pattern(
                             rootpath,
                             &binding.vb_attributes,
-                            &binding.vb_pat,
+                            self.ta.pattern(binding.vb_pat),
                             &value,
                             self.ta.expr(binding.vb_expr).exp_loc,
                         );
@@ -7074,11 +7078,11 @@ impl<'a> RawLambdaConverter<'a> {
                     .collect::<Vec<_>>();
                 let mut acc = body;
                 for (binding, value) in converted_bindings.into_iter().rev() {
-                    if let Some(id) = simple_let_binding_id(binding) {
-                        if nonrecursive_alias_any_binding(binding) {
+                    if let Some(id) = simple_let_binding_id(self.ta, binding) {
+                        if nonrecursive_alias_any_binding(self.ta, binding) {
                             self.next_raise_count();
                         }
-                        let kind = match &binding.vb_pat.pat_desc {
+                        let kind = match &self.ta.pattern(binding.vb_pat).pat_desc {
                             PatternDesc::Tpat_alias(inner, _, _)
                                 if matches!(inner.pat_desc, PatternDesc::Tpat_any)
                                     && matches!(value, RawLambda::Lvar(_)) =>
@@ -7088,11 +7092,11 @@ impl<'a> RawLambdaConverter<'a> {
                             _ => LetKind::Strict,
                         };
                         acc = RawLambda::let_(kind, id, value, acc);
-                    } else if self.is_irrefutable_pattern(&binding.vb_pat) {
+                    } else if self.is_irrefutable_pattern(self.ta.pattern(binding.vb_pat)) {
                         acc = self.for_let_with_synced_stamps(
-                            binding.vb_pat.pat_loc,
+                            self.ta.pattern(binding.vb_pat).pat_loc,
                             value,
-                            &binding.vb_pat,
+                            self.ta.pattern(binding.vb_pat),
                             acc,
                         );
                     }
@@ -7102,7 +7106,7 @@ impl<'a> RawLambdaConverter<'a> {
             crate::parser::ast::RecFlag::Recursive => {
                 if bindings
                     .iter()
-                    .all(|binding| simple_let_binding_id(binding).is_some())
+                    .all(|binding| simple_let_binding_id(self.ta, binding).is_some())
                 {
                     let lam_bindings = bindings
                         .iter()
@@ -7118,12 +7122,12 @@ impl<'a> RawLambdaConverter<'a> {
                             self.mark_js_hoisted_pattern(
                                 rootpath,
                                 &binding.vb_attributes,
-                                &binding.vb_pat,
+                                self.ta.pattern(binding.vb_pat),
                                 &value,
                                 self.ta.expr(binding.vb_expr).exp_loc,
                             );
                             (
-                                simple_let_binding_id(binding).expect("checked above"),
+                                simple_let_binding_id(self.ta, binding).expect("checked above"),
                                 value,
                             )
                         })
@@ -7140,14 +7144,14 @@ impl<'a> RawLambdaConverter<'a> {
                         self.mark_js_hoisted_pattern(
                             rootpath,
                             &binding.vb_attributes,
-                            &binding.vb_pat,
+                            self.ta.pattern(binding.vb_pat),
                             &value,
                             self.ta.expr(binding.vb_expr).exp_loc,
                         );
                         self.for_let_with_synced_stamps(
-                            binding.vb_pat.pat_loc,
+                            self.ta.pattern(binding.vb_pat).pat_loc,
                             value,
-                            &binding.vb_pat,
+                            self.ta.pattern(binding.vb_pat),
                             acc,
                         )
                     })
@@ -7204,13 +7208,13 @@ impl<'a> RawLambdaConverter<'a> {
         for param in params.iter().rev() {
             let pat = &param.fp_pat;
             let id = &param.fp_param;
-            lambda_body = match &pat.pat_desc {
+            lambda_body = match &self.ta.pattern(*pat).pat_desc {
                 PatternDesc::Tpat_any => lambda_body,
                 PatternDesc::Tpat_var(bound, _) if bound.same(id) => lambda_body,
                 _ => self.for_function_with_synced_stamps(
-                    pat.pat_loc,
+                    self.ta.pattern(*pat).pat_loc,
                     RawLambda::var(*id),
-                    vec![(pat, lambda_body.into())],
+                    vec![(self.ta.pattern(*pat), lambda_body.into())],
                     param.fp_partial,
                 ),
             };
@@ -7218,7 +7222,7 @@ impl<'a> RawLambdaConverter<'a> {
         // `one_unit_arg` (translcore.ml:1015-1022) is computed after
         // `transl_function`, from the function's own type in `e.exp_env`.
         let one_unit_arg = match params {
-            [param] if !pattern_binds_value(&param.fp_pat) => {
+            [param] if !pattern_binds_value(self.ta.pattern(param.fp_pat)) => {
                 function.is_some_and(|function| self.function_takes_one_unit_arg(function))
             }
             _ => false,
@@ -7905,13 +7909,13 @@ mod tests {
             cstr_inlined: None,
         };
         let case = Case::simple(
-            Pattern::new(
+            ta.push_pattern(Pattern::new(
                 PatternDesc::Tpat_construct(lid, std::sync::Arc::new(constructor), Vec::new()),
                 LocIdx::none(),
                 crate::types::TypeExprRef(0),
                 EnvRef(0),
                 Attributes::new(),
-            ),
+            )),
             ta.push_expr(Expression::new(
                 ExpressionDesc::Texp_constant(TConstant::Int(handler_value)),
                 LocIdx::none(),
@@ -7937,15 +7941,19 @@ mod tests {
         ))
     }
 
-    fn simple_value_binding(id: Ident, expr: TExprIdx) -> ValueBinding {
+    fn simple_value_binding(
+        ta: &mut crate::types::typedtree::TypedArena,
+        id: Ident,
+        expr: TExprIdx,
+    ) -> ValueBinding {
         ValueBinding {
-            vb_pat: Pattern::new(
+            vb_pat: ta.push_pattern(Pattern::new(
                 PatternDesc::Tpat_var(id, Located::mknoloc(id.name().to_string())),
                 LocIdx::none(),
                 crate::types::TypeExprRef(0),
                 EnvRef(0),
                 Attributes::new(),
-            ),
+            )),
             vb_expr: expr,
             vb_attributes: Attributes::new(),
             vb_loc: LocIdx::none(),
@@ -7988,6 +7996,7 @@ mod tests {
             EnvRef(0),
             Attributes::new(),
         );
+        let param_pat = typed_arena.push_pattern(param_pat);
         let expr = Expression::new(
             ExpressionDesc::Texp_function {
                 params: typed_arena.push_function_params([FunctionParam {
@@ -8329,14 +8338,14 @@ mod tests {
         let first_id = Ident::create_local("first");
         let second_id = Ident::create_local("second");
         let bindings = vec![
-            simple_value_binding(
-                first_id,
-                simple_extension_try(&mut arena, &mut typed_arena, "A", 1, 11),
-            ),
-            simple_value_binding(
-                second_id,
-                simple_extension_try(&mut arena, &mut typed_arena, "B", 2, 22),
-            ),
+            {
+                let expr = simple_extension_try(&mut arena, &mut typed_arena, "A", 1, 11);
+                simple_value_binding(&mut typed_arena, first_id, expr)
+            },
+            {
+                let expr = simple_extension_try(&mut arena, &mut typed_arena, "B", 2, 22);
+                simple_value_binding(&mut typed_arena, second_id, expr)
+            },
         ];
 
         let id_gen = IdGenerator::new();

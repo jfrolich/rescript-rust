@@ -39,7 +39,8 @@ use crate::types::type_expr::TypeExprRefSet;
 use crate::types::typedtree::{
     ArrowArg, Constant, EnvRef, Expression, ExpressionDesc, ModuleExpr, ModuleExprDesc, ModuleType,
     ModuleTypeConstraint, ModuleTypeDesc, Pattern, PatternDesc, StructureItem, StructureItemDesc,
-    TExprIdx, TExprList, TypedArena, TypedSignatureItem, TypedSignatureItemDesc, ValueBinding,
+    TExprIdx, TExprList, TPatIdx, TypedArena, TypedSignatureItem, TypedSignatureItemDesc,
+    ValueBinding,
 };
 use crate::types::{
     Env, Path, RowField, TypeArg, TypeContext, TypeDesc, TypeError, TypeExprRef, TypeExprRefMap,
@@ -10383,14 +10384,14 @@ fn report_unused_match_cases(
         return;
     }
     if let [case] = cases
-        && unused_check_is_trivial(&case.c_lhs, case.c_guard.is_some())
+        && unused_check_is_trivial(tctx.typed.pattern(case.c_lhs), case.c_guard.is_some())
     {
         return;
     }
-    let check_cases: Vec<UnusedCheckCase<'_>> = cases
+    let check_cases: Vec<UnusedCheckCase> = cases
         .iter()
         .map(|case| UnusedCheckCase {
-            lhs: &case.c_lhs,
+            lhs: case.c_lhs,
             guarded: case.c_guard.is_some(),
             guard_idents: case.c_guard.as_ref().map(|guard| {
                 let mut ids = Vec::new();
@@ -10415,12 +10416,13 @@ fn report_unused_match_cases(
 fn report_unused_match_pattern(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
-    lhs: &Pattern,
+    lhs: TPatIdx,
     delayed: bool,
     level: i32,
     ty_arg_check: TypeExprRef,
 ) {
-    if !tctx.warning_config.is_active(&Warning::UnusedMatch) || unused_check_is_trivial(lhs, false)
+    if !tctx.warning_config.is_active(&Warning::UnusedMatch)
+        || unused_check_is_trivial(tctx.typed.pattern(lhs), false)
     {
         return;
     }
@@ -10441,8 +10443,8 @@ fn unused_check_is_trivial(lhs: &Pattern, guarded: bool) -> bool {
 }
 
 /// A borrowed match case for the unused/ambiguous Parmatch checks.
-struct UnusedCheckCase<'a> {
-    lhs: &'a Pattern,
+struct UnusedCheckCase {
+    lhs: TPatIdx,
     guarded: bool,
     /// `all_rhs_idents` of the guard.
     guard_idents: Option<std::collections::BTreeSet<Ident>>,
@@ -10451,7 +10453,7 @@ struct UnusedCheckCase<'a> {
 fn register_unused_match_check(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
-    cases: Vec<UnusedCheckCase<'_>>,
+    cases: Vec<UnusedCheckCase>,
     delayed: bool,
     level: i32,
     ty_arg_check: TypeExprRef,
@@ -10467,7 +10469,7 @@ fn register_unused_match_check(
             cases: cases
                 .into_iter()
                 .map(|case| ParmatchCase {
-                    lhs: case.lhs.clone(),
+                    lhs: case.lhs,
                     guarded: case.guarded,
                     guard_idents: case.guard_idents,
                 })
@@ -10494,7 +10496,7 @@ fn run_delayed_unused_check(tctx: &mut TypeCheckContext<'_>, check: DelayedUnuse
         .cases
         .iter()
         .map(|case| UnusedCheckCase {
-            lhs: &case.lhs,
+            lhs: case.lhs,
             guarded: case.guarded,
             guard_idents: if check.check_ambiguous {
                 case.guard_idents.clone()
@@ -10519,17 +10521,20 @@ fn run_unused_check(
     env: &Env,
     level: i32,
     ty_arg_check: TypeExprRef,
-    cases: Vec<UnusedCheckCase<'_>>,
+    cases: Vec<UnusedCheckCase>,
     warning_config: WarningConfig,
     check_ambiguous: bool,
 ) {
     tctx.drain_open_slot_uses();
     let saved = std::mem::replace(&mut tctx.warning_config, warning_config);
     let expected_ty = crate::types::instance(tctx.type_ctx, ty_arg_check);
+    // The checker retypes counter-examples through `tctx` while it reads the
+    // case patterns; see [`PatCase`].
+    let ta = std::mem::take(&mut tctx.typed);
     let refs: Vec<_> = cases
         .iter()
         .map(|case| crate::types::parmatch::CaseRef {
-            lhs: case.lhs,
+            lhs: ta.pattern(case.lhs),
             guarded: case.guarded,
         })
         .collect();
@@ -10548,12 +10553,13 @@ fn run_unused_check(
         let cases: Vec<_> = cases
             .into_iter()
             .map(|case| crate::types::parmatch::AmbiguousCase {
-                lhs: case.lhs,
+                lhs: ta.pattern(case.lhs),
                 guard_idents: case.guard_idents,
             })
             .collect();
         pm.check_ambiguous_bindings(&cases);
     }
+    tctx.typed = ta;
     tctx.drain_open_slot_uses();
     tctx.warning_config = saved;
 }
@@ -11213,7 +11219,7 @@ fn type_match_cases_batch_non_gadt<'a>(
                 ..typed_body
             };
             typed_cases.push(crate::types::typedtree::Case {
-                c_lhs: pending.typed_pat,
+                c_lhs: tctx.typed.push_pattern(pending.typed_pat),
                 c_guard: typed_guard.map(|e| tctx.push_expr(e)),
                 c_rhs: tctx.push_expr(typed_body),
             });
@@ -12342,7 +12348,7 @@ fn type_pending_case_body(
         ..typed_body
     };
     Ok(crate::types::typedtree::Case {
-        c_lhs: pending.typed_pat,
+        c_lhs: tctx.typed.push_pattern(pending.typed_pat),
         c_guard: typed_guard.map(|e| tctx.push_expr(e)),
         c_rhs: tctx.push_expr(typed_body),
     })
@@ -13009,6 +13015,7 @@ fn type_function_nary(
         .zip(labels.iter())
         .zip(parameter_types.iter().copied())
     {
+        let typed = tctx.typed.push_pattern(typed);
         let partial = if is_simple_variable_pattern(tctx.arena, tctx.arena.get_pat(source.p_pat)) {
             Partial::Total
         } else {
@@ -13026,15 +13033,15 @@ fn type_function_nary(
                 None,
                 ty_arg_check,
                 loc,
-                &[crate::types::parmatch::CaseRef {
-                    lhs: &typed,
+                &[PatCase {
+                    lhs: typed,
                     guarded: false,
                 }],
             );
             report_unused_match_pattern(
                 tctx,
                 env,
-                &typed,
+                typed,
                 needs_exhaust_check || contains_polyvars,
                 check_level,
                 ty_arg_check,
@@ -13044,7 +13051,8 @@ fn type_function_nary(
         let fp_has_default = opt_param.is_some();
         let fp_param = match opt_param {
             Some(id) => id,
-            None => parameter_ident(ctx, &typed).unwrap_or_else(|| ctx.create_ident("param")),
+            None => parameter_ident(ctx, tctx.typed.pattern(typed))
+                .unwrap_or_else(|| ctx.create_ident("param")),
         };
         typed_params.push(FunctionParam {
             fp_lbl: label.clone(),
@@ -13203,7 +13211,7 @@ fn type_for(
     Ok(Expression::new(
         ExpressionDesc::Texp_for(
             loop_var_id,
-            Box::new(typed_pat),
+            tctx.typed.push_pattern(typed_pat),
             tctx.push_expr(typed_start),
             tctx.push_expr(typed_end),
             direction,
@@ -20013,12 +20021,12 @@ fn rec_case(
     case: &crate::types::typedtree::Case,
     scrutinee: RecUse,
 ) -> RecUse {
-    let scrutinee = if rec_pattern_is_destructuring(&case.c_lhs) {
+    let scrutinee = if rec_pattern_is_destructuring(ta.pattern(case.c_lhs)) {
         rec_use_inspect(scrutinee)
     } else {
         rec_use_discard(scrutinee)
     };
-    let vars = rec_pattern_variables(&case.c_lhs);
+    let vars = rec_pattern_variables(ta.pattern(case.c_lhs));
     let case_env = if vars.is_empty() {
         std::borrow::Cow::Borrowed(env)
     } else {
@@ -20048,9 +20056,9 @@ fn rec_value_binding(
     env: &RecEnv,
     binding: &ValueBinding,
 ) -> (RecEnv, RecUse) {
-    let vars = rec_pattern_variables(&binding.vb_pat);
+    let vars = rec_pattern_variables(ta.pattern(binding.vb_pat));
     let mut use_ = rec_expression(ta, ctx, env, binding.vb_expr);
-    if rec_pattern_is_destructuring(&binding.vb_pat) {
+    if rec_pattern_is_destructuring(ta.pattern(binding.vb_pat)) {
         use_ = rec_use_inspect(use_);
     }
     let mut binding_env = RecEnv::default();
@@ -20072,7 +20080,7 @@ fn rec_value_bindings(
             let mut ids = Vec::new();
             let mut use_ = RecUse::default();
             for binding in bindings {
-                ids.extend(rec_pattern_variables(&binding.vb_pat));
+                ids.extend(rec_pattern_variables(ta.pattern(binding.vb_pat)));
                 use_ = rec_use_join(use_, rec_expression(ta, ctx, env, binding.vb_expr));
             }
             let mut binding_env = RecEnv::default();
@@ -20481,7 +20489,7 @@ fn check_recursive_bindings(
 ) -> TypeCoreResult<()> {
     let ids = bindings
         .iter()
-        .flat_map(|binding| rec_pattern_variables(&binding.vb_pat))
+        .flat_map(|binding| rec_pattern_variables(ta.pattern(binding.vb_pat)))
         .collect::<Vec<_>>();
     for binding in bindings {
         if !rec_binding_rhs_is_exempt(ta, binding.vb_expr) {
@@ -20545,7 +20553,11 @@ fn report_let_partial_match_warning<'a>(
         // is observable because persistent type aliases may be forced while
         // identifiers for later bindings have not been allocated.
         let hint = if tctx.experimental_let_unwrap {
-            let expanded = crate::types::ctype::expand_head(ctx, env, binding.vb_pat.pat_type);
+            let expanded = crate::types::ctype::expand_head(
+                ctx,
+                env,
+                tctx.typed.pattern(binding.vb_pat).pat_type,
+            );
             let desc = ctx.get_desc(ctx.repr(expanded));
             match &*desc {
                 TypeDesc::Tconstr { path, .. }
@@ -20559,8 +20571,8 @@ fn report_let_partial_match_warning<'a>(
         } else {
             None
         };
-        let case = crate::types::parmatch::CaseRef {
-            lhs: &binding.vb_pat,
+        let case = PatCase {
+            lhs: binding.vb_pat,
             guarded: false,
         };
         parmatch_check_partial(
@@ -20568,8 +20580,8 @@ fn report_let_partial_match_warning<'a>(
             env,
             ctx.current_level(),
             hint,
-            binding.vb_pat.pat_type,
-            binding.vb_pat.pat_loc,
+            tctx.typed.pattern(binding.vb_pat).pat_type,
+            tctx.typed.pattern(binding.vb_pat).pat_loc,
             &[case],
         );
     }
@@ -20888,7 +20900,7 @@ fn type_let_bindings(
                 },
             )?;
             typed_bindings.push(ValueBinding::new(
-                typed_pat,
+                tctx.typed.push_pattern(typed_pat),
                 tctx.push_expr(typed_expr),
                 binding.pvb_loc,
                 binding.pvb_attributes.clone(),
@@ -20927,27 +20939,27 @@ fn type_let_bindings(
         for binding in typed_bindings.iter() {
             let is_nonexp = is_nonexpansive_expression(tctx, binding.vb_expr);
             if !is_nonexp {
-                iter_typed_pattern(&binding.vb_pat, &mut |pat| {
+                iter_typed_pattern(tctx.typed.pattern(binding.vb_pat), &mut |pat| {
                     crate::types::ctype::generalize_expansive(ctx, env, pat.pat_type);
                 });
             }
         }
 
         for binding in &typed_bindings {
-            iter_typed_pattern(&binding.vb_pat, &mut |pat| {
+            iter_typed_pattern(tctx.typed.pattern(binding.vb_pat), &mut |pat| {
                 crate::types::generalize(ctx, pat.pat_type);
             });
         }
 
         if rec_flag == RecFlag::Recursive {
             for binding in &typed_bindings {
-                match &binding.vb_pat.pat_desc {
+                match &tctx.typed.pattern(binding.vb_pat).pat_desc {
                     PatternDesc::Tpat_var(_, _) => {}
                     PatternDesc::Tpat_alias(inner, _, _)
                         if matches!(&inner.pat_desc, PatternDesc::Tpat_any) => {}
                     _ => {
                         return Err(TypeCoreError::IllegalLetrecPat {
-                            loc: binding.vb_pat.pat_loc,
+                            loc: tctx.typed.pattern(binding.vb_pat).pat_loc,
                         });
                     }
                 }
@@ -30314,7 +30326,7 @@ fn print_counter_example(arena: &ParseArena, typed: &Pattern) -> String {
 /// A match case for the Parmatch checks.
 #[derive(Clone)]
 struct ParmatchCase {
-    lhs: Pattern,
+    lhs: TPatIdx,
     guarded: bool,
     /// `all_rhs_idents` of the guard.
     guard_idents: Option<std::collections::BTreeSet<Ident>>,
@@ -30330,22 +30342,30 @@ fn parmatch_check_partial(
     hint: Option<&str>,
     expected_ty: TypeExprRef,
     loc: LocIdx,
-    cases: &[crate::types::parmatch::CaseRef<'_>],
+    cases: &[PatCase],
 ) -> crate::types::typedtree::Partial {
     // An unguarded irrefutable case makes `exhaust` answer `Rnone` without
     // consulting the oracle, so the match is total and nothing is reported;
     // only the fragile-match check still needs the full analysis.
     if cases
         .iter()
-        .any(|case| !case.guarded && pattern_surely_irrefutable(case.lhs))
+        .any(|case| !case.guarded && pattern_surely_irrefutable(tctx.typed.pattern(case.lhs)))
         && !tctx
             .warning_config
             .is_active(&Warning::FragileMatch { typ: String::new() })
     {
         return crate::types::typedtree::Partial::Total;
     }
+    let ta = std::mem::take(&mut tctx.typed);
+    let refs: Vec<_> = cases
+        .iter()
+        .map(|case| crate::types::parmatch::CaseRef {
+            lhs: ta.pattern(case.lhs),
+            guarded: case.guarded,
+        })
+        .collect();
     let oracle = TypecoreParmatchOracle {
-        tctx,
+        tctx: &mut *tctx,
         env,
         expected_ty,
         level,
@@ -30353,17 +30373,34 @@ fn parmatch_check_partial(
         none_type: None,
     };
     let mut pm = crate::types::parmatch::Parmatch::new(oracle);
-    match pm.check_partial(hint, loc, cases) {
+    let partial = match pm.check_partial(hint, loc, &refs) {
         crate::types::parmatch::Partiality::Partial => crate::types::typedtree::Partial::Partial,
         crate::types::parmatch::Partiality::Total => crate::types::typedtree::Partial::Total,
-    }
+    };
+    drop(pm);
+    tctx.typed = ta;
+    partial
 }
 
-fn case_refs(cases: &[crate::types::typedtree::Case]) -> Vec<crate::types::parmatch::CaseRef<'_>> {
+/// A match case's pattern side, for the exhaustiveness checks.
+///
+/// The checks retype counter-examples through the type checker while they
+/// read the case patterns, so they set the typed arena aside for their
+/// duration: the case patterns are read from it, and whatever the
+/// counter-example typing stores goes to an empty scratch arena that is
+/// dropped afterwards, like the type state it backtracks
+/// (typecore.ml:1741-1760).
+#[derive(Clone, Copy)]
+struct PatCase {
+    lhs: TPatIdx,
+    guarded: bool,
+}
+
+fn case_refs(cases: &[crate::types::typedtree::Case]) -> Vec<PatCase> {
     cases
         .iter()
-        .map(|case| crate::types::parmatch::CaseRef {
-            lhs: &case.c_lhs,
+        .map(|case| PatCase {
+            lhs: case.c_lhs,
             guarded: case.c_guard.is_some(),
         })
         .collect()

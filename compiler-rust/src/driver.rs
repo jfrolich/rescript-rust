@@ -12131,7 +12131,7 @@ fn moregen_link_structure(
         match &item.str_desc {
             crate::types::typedtree::StructureItemDesc::Tstr_value(_, bindings) => {
                 for binding in ta.value_bindings(*bindings) {
-                    let Some(name) = extract_pat_name(&binding.vb_pat) else {
+                    let Some(name) = extract_pat_name(ta.pattern(binding.vb_pat)) else {
                         continue;
                     };
                     let Some(&iface_ty) = iface_val_types.get(&name) else {
@@ -12140,7 +12140,7 @@ fn moregen_link_structure(
                     let iface_inst = crate::types::ctype::instance(type_ctx, iface_ty);
                     moregen_link(
                         type_ctx,
-                        binding.vb_pat.pat_type,
+                        ta.pattern(binding.vb_pat).pat_type,
                         iface_inst,
                         &mut ahash::AHashSet::new(),
                     );
@@ -12161,7 +12161,7 @@ fn moregen_link_structure(
                         );
                         moregen_link(
                             type_ctx,
-                            binding.vb_pat.pat_type,
+                            ta.pattern(binding.vb_pat).pat_type,
                             desc.val_type,
                             &mut ahash::AHashSet::new(),
                         );
