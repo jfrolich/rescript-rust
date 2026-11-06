@@ -6,7 +6,6 @@
 //! - Signatures (module types)
 //! - Functor application and coercion
 
-use crate::types::path::PathView;
 use crate::diagnostics::{Warning, WarningConfig};
 use crate::fast_hash::{AHashMap as HashMap, AHashSet as HashSet};
 use crate::ident::Ident;
@@ -24,6 +23,7 @@ use crate::parser::ast::{
 use crate::parser::longident::Longident;
 use crate::types::Variance as TypesVariance;
 use crate::types::env::Env;
+use crate::types::path::PathView;
 use crate::types::type_expr::{LOWEST_LEVEL, TypeExprRef};
 use crate::types::typecore::{
     TypeCheckContext, TypeCoreError, resolve_type_constructor_path, transl_type, transl_type_fixed,
@@ -1446,7 +1446,10 @@ fn rewrite_included_path_to_local(
             if rewritten_functor.is_none() && rewritten_arg.is_none() {
                 None
             } else {
-                Some(Path::papply(rewritten_functor.unwrap_or(*functor), rewritten_arg.unwrap_or(*arg)))
+                Some(Path::papply(
+                    rewritten_functor.unwrap_or(*functor),
+                    rewritten_arg.unwrap_or(*arg),
+                ))
             }
         }
     }
@@ -2000,8 +2003,15 @@ fn module_type_is_self_alias(mty: &crate::types::decl::ModuleType, id: &Ident) -
 fn rewrite_module_path_prefix(path: &Path, old_param: &Ident, new_prefix: &Path) -> Path {
     match path.view() {
         PathView::Pident(id) if id.same(old_param) => new_prefix.clone(),
-        PathView::Pdot(prefix, name, pos) => Path::pdot_pos(rewrite_module_path_prefix(prefix, old_param, new_prefix), *name, *pos),
-        PathView::Papply(functor, arg) => Path::papply(rewrite_module_path_prefix(functor, old_param, new_prefix), rewrite_module_path_prefix(arg, old_param, new_prefix)),
+        PathView::Pdot(prefix, name, pos) => Path::pdot_pos(
+            rewrite_module_path_prefix(prefix, old_param, new_prefix),
+            *name,
+            *pos,
+        ),
+        PathView::Papply(functor, arg) => Path::papply(
+            rewrite_module_path_prefix(functor, old_param, new_prefix),
+            rewrite_module_path_prefix(arg, old_param, new_prefix),
+        ),
         _ => path.clone(),
     }
 }
@@ -2488,15 +2498,10 @@ fn rewrite_module_path_prefix_with_aliases(
             }
             Path::pdot_pos(rewritten_prefix, *name, *pos)
         }
-        PathView::Papply(functor, arg) => Path::papply(rewrite_module_path_prefix_with_aliases(
-                functor,
-                old_param,
-                arg_aliases,
-            ), rewrite_module_path_prefix_with_aliases(
-                arg,
-                old_param,
-                arg_aliases,
-            )),
+        PathView::Papply(functor, arg) => Path::papply(
+            rewrite_module_path_prefix_with_aliases(functor, old_param, arg_aliases),
+            rewrite_module_path_prefix_with_aliases(arg, old_param, arg_aliases),
+        ),
         _ => path.clone(),
     }
 }
@@ -11747,22 +11752,20 @@ fn normalize_module_alias_path_inner(
                 Path::pdot_pos(normalized_prefix, *name, *pos)
             }
         }
-        PathView::Papply(functor, arg) => Path::papply(normalize_module_alias_path_inner(
+        PathView::Papply(functor, arg) => Path::papply(
+            normalize_module_alias_path_inner(
                 env,
                 pers_env,
                 ctx,
                 original,
                 functor,
                 check_missing,
-            )?, normalize_module_alias_path_inner(
-                env,
-                pers_env,
-                ctx,
-                original,
-                arg,
-                check_missing,
-            )?),
-        PathView::Pident(id) if check_missing && id.is_persistent() && !env.has_module_ident(id) => {
+            )?,
+            normalize_module_alias_path_inner(env, pers_env, ctx, original, arg, check_missing)?,
+        ),
+        PathView::Pident(id)
+            if check_missing && id.is_persistent() && !env.has_module_ident(id) =>
+        {
             if let Some(pers) = pers_env.as_mut()
                 && pers.find_pers_struct(id.name(), ctx).is_none()
                 && pers.last_error().is_none()
@@ -13240,9 +13243,8 @@ fn strip_self_module_prefix_in_sig(
                         }
                     }
                 }
-                rewrite_self_path(prefix, module_id, direct_items).map(|rewritten_prefix| {
-                    Path::pdot_pos(rewritten_prefix, *name, *pos)
-                })
+                rewrite_self_path(prefix, module_id, direct_items)
+                    .map(|rewritten_prefix| Path::pdot_pos(rewritten_prefix, *name, *pos))
             }
             _ => None,
         }
@@ -13530,9 +13532,7 @@ fn localize_alias_child_module_sig_paths_in_structure_sig(
 
 fn module_expr_has_dotted_alias_child_modules(mod_expr: &ModuleExpr) -> bool {
     match &mod_expr.mod_desc {
-        ModuleExprDesc::Tmod_ident(path, _) if matches!(path.view(), PathView::Pdot(..)) => {
-            true
-        }
+        ModuleExprDesc::Tmod_ident(path, _) if matches!(path.view(), PathView::Pdot(..)) => true,
         ModuleExprDesc::Tmod_structure(structure) => {
             structure_has_dotted_alias_child_modules(structure)
         }
@@ -14215,7 +14215,9 @@ fn extract_module_type_from_mod_expr_inner(
                             if let ModuleExprDesc::Tmod_ident(path, _) = &incl.incl_mod.mod_desc {
                                 let mod_name: Option<&str> = match path.view() {
                                     crate::types::path::PathView::Pident(id) => Some(id.name()),
-                                    crate::types::path::PathView::Pdot(_, name, _) => Some(name.as_ref()),
+                                    crate::types::path::PathView::Pdot(_, name, _) => {
+                                        Some(name.as_ref())
+                                    }
                                     _ => None,
                                 };
                                 if let Some(mod_name) = mod_name {
@@ -15605,8 +15607,13 @@ fn recmodule_substitute_module_path(path: &Path, subst: &[(Ident, Path)]) -> Pat
             .iter()
             .find_map(|(old_id, new_path)| old_id.same(id).then(|| new_path.clone()))
             .unwrap_or_else(|| path.clone()),
-        PathView::Pdot(prefix, name, pos) => Path::pdot_pos(recmodule_substitute_module_path(prefix, subst), *name, *pos),
-        PathView::Papply(functor, arg) => Path::papply(recmodule_substitute_module_path(functor, subst), recmodule_substitute_module_path(arg, subst)),
+        PathView::Pdot(prefix, name, pos) => {
+            Path::pdot_pos(recmodule_substitute_module_path(prefix, subst), *name, *pos)
+        }
+        PathView::Papply(functor, arg) => Path::papply(
+            recmodule_substitute_module_path(functor, subst),
+            recmodule_substitute_module_path(arg, subst),
+        ),
     }
 }
 

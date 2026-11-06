@@ -18,7 +18,6 @@
 //! However, multiple `TypeContext` instances can exist concurrently,
 //! one per compilation unit.
 
-use crate::types::path::PathView;
 use super::asttypes::{ArgLabel, PrivateFlag};
 use super::env::Env;
 use super::path::Path;
@@ -31,6 +30,7 @@ use crate::context::IdGenerator;
 use crate::ident::Ident;
 use crate::intern::StrIdx;
 use crate::parse_arena::LidentIdx;
+use crate::types::path::PathView;
 use std::cell::{Cell, RefCell};
 use std::ops::Deref;
 use std::ptr::NonNull;

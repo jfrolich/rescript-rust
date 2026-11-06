@@ -3,11 +3,11 @@
 //! (compiler/ml/error_message_utils.ml), laid out through Format like
 //! OCaml's `Location.errorf` messages.
 
-use crate::types::path::PathView;
 use crate::parse_arena::{LocIdx, ParseArena};
 use crate::parser::formatter::{BoxKind, Formatter};
 use crate::types::asttypes::ArgLabel;
 use crate::types::path::Path;
+use crate::types::path::PathView;
 use crate::types::predef;
 use crate::types::printtyp::{Printtyp, TAG_ERROR, TAG_INFO, TAG_RESET, TracePair, expand_trace};
 use crate::types::type_expr::{TypeDesc, TypeExprRef};
@@ -1229,14 +1229,10 @@ fn show_extra_help(ctx: &TypeContext, ppf: &mut Ppf<'_>, tr: &[TracePair]) {
     let (an, en) = match (&*ctx.borrow_desc(a), &*ctx.borrow_desc(e)) {
         (
             TypeDesc::Tconstr {
-                path: ap,
-                args: aa,
-                ..
+                path: ap, args: aa, ..
             },
             TypeDesc::Tconstr {
-                path: ep,
-                args: ea,
-                ..
+                path: ep, args: ea, ..
             },
         ) if aa.is_empty() && ea.is_empty() => match (ap.view(), ep.view()) {
             (PathView::Pident(ai), PathView::Pident(ei)) => {

@@ -9,13 +9,13 @@
 // Variant names follow OCaml's Outcometree constructors.
 #![allow(non_camel_case_types)]
 
-use crate::types::path::PathView;
 use crate::parser::doc::Doc;
 use crate::parser::longident::Longident;
 use crate::types::asttypes::ArgLabel;
 use crate::types::btype;
 use crate::types::context::TypeContext;
 use crate::types::path::Path;
+use crate::types::path::PathView;
 use crate::types::type_expr::{GENERIC_LEVEL, RowDesc, RowField, TypeDesc, TypeExprRef};
 
 // ============================================================================
@@ -1014,13 +1014,12 @@ impl<'a> Printtyp<'a> {
                 TypeDesc::Tvariant(row) => {
                     let row = btype::row_repr(self.ctx, &row);
                     match &row.row_name {
-                        Some((p, _)) if p.as_pident().is_some_and(|id2| id2.same(id)) => {
-                            self.ctx
-                                .new_generic_type(TypeDesc::Tvariant(Box::new(RowDesc {
-                                    row_name: None,
-                                    ..row
-                                })))
-                        }
+                        Some((p, _)) if p.as_pident().is_some_and(|id2| id2.same(id)) => self
+                            .ctx
+                            .new_generic_type(TypeDesc::Tvariant(Box::new(RowDesc {
+                                row_name: None,
+                                ..row
+                            }))),
                         _ => ty,
                     }
                 }

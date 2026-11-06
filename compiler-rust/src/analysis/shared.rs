@@ -1,9 +1,9 @@
 //! Type printing and type walking: a port of analysis/src/shared.ml,
 //! print_type.ml and the type helpers of utils.ml.
 
-use crate::types::path::PathView;
 use crate::ident::Ident;
 use crate::types::decl::{RecStatus, TypeDeclaration};
+use crate::types::path::PathView;
 use crate::types::printtyp::{Printtyp, print_out_sig_item_doc_with, print_out_type_doc};
 use crate::types::{Path, TypeContext, TypeDesc, TypeExprRef};
 

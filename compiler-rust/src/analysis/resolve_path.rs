@@ -1,8 +1,8 @@
 //! A port of analysis/src/resolve_path.ml.
 
-use crate::types::path::PathView;
 use super::shared_types::*;
 use crate::types::Path;
+use crate::types::path::PathView;
 
 /// The modules a command can reach: OCaml's `state` plus `package`. Files
 /// load lazily and stay put once loaded, so `&File`s stay valid across

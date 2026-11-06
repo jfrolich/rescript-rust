@@ -3,8 +3,8 @@
 //! This stage ports the OCaml raw-lambda structure shape first and then
 //! incrementally ports expression lowering from `translcore.ml`.
 
-use crate::types::path::PathView;
 use crate::fast_hash::{AHashMap as HashMap, AHashSet as HashSet};
+use crate::types::path::PathView;
 use std::borrow::Cow;
 use std::path::Path as StdPath;
 
@@ -3941,7 +3941,8 @@ impl<'a> RawLambdaConverter<'a> {
                 .ok()
                 .map(|md| md.md_type.clone())
                 .or_else(|| {
-                    if let crate::types::path::PathView::Pdot(prefix, name, _) = module_path.view() {
+                    if let crate::types::path::PathView::Pdot(prefix, name, _) = module_path.view()
+                    {
                         // OCaml compiler/ml/env.ml:903-913 normalizes dotted
                         // paths through find_module; recover the same nested
                         // module type from the parent signature when this env
@@ -4021,11 +4022,12 @@ impl<'a> RawLambdaConverter<'a> {
         }
 
         match path.view() {
-            crate::types::path::PathView::Pident(id) if id.is_persistent() || id.is_global() => self
-                .persistent_env
-                .as_mut()
-                .and_then(|pers| pers.find_pers_struct(id.name(), self.type_ctx))
-                .is_some(),
+            crate::types::path::PathView::Pident(id) if id.is_persistent() || id.is_global() => {
+                self.persistent_env
+                    .as_mut()
+                    .and_then(|pers| pers.find_pers_struct(id.name(), self.type_ctx))
+                    .is_some()
+            }
             _ => false,
         }
     }
@@ -4094,8 +4096,15 @@ impl<'a> RawLambdaConverter<'a> {
         force_root: bool,
     ) -> crate::types::Path {
         let path = match path.view() {
-            crate::types::path::PathView::Pdot(prefix, name, pos) => crate::types::Path::pdot_pos(self.normalize_module_path_with_root_force(env, prefix, force_root), *name, *pos),
-            crate::types::path::PathView::Papply(left, right) => crate::types::Path::papply(self.normalize_module_path_with_root_force(env, left, force_root), self.normalize_module_path_with_root_force(env, right, force_root)),
+            crate::types::path::PathView::Pdot(prefix, name, pos) => crate::types::Path::pdot_pos(
+                self.normalize_module_path_with_root_force(env, prefix, force_root),
+                *name,
+                *pos,
+            ),
+            crate::types::path::PathView::Papply(left, right) => crate::types::Path::papply(
+                self.normalize_module_path_with_root_force(env, left, force_root),
+                self.normalize_module_path_with_root_force(env, right, force_root),
+            ),
             crate::types::path::PathView::Pident(id) => {
                 if force_root {
                     self.force_persistent_normalized_prefix(env, id);
@@ -4147,7 +4156,9 @@ impl<'a> RawLambdaConverter<'a> {
             }
         }
 
-        if matches!(path.view(), crate::types::path::PathView::Pdot(..)) || Self::path_may_follow_mty_ident(&path) {
+        if matches!(path.view(), crate::types::path::PathView::Pdot(..))
+            || Self::path_may_follow_mty_ident(&path)
+        {
             if let Some(alias_target) = crate::types::typecore::module_alias_target_for_path(
                 &path,
                 env,
@@ -4209,8 +4220,15 @@ impl<'a> RawLambdaConverter<'a> {
         path: &crate::types::Path,
     ) -> crate::types::Path {
         let path = match path.view() {
-            crate::types::path::PathView::Pdot(prefix, name, pos) => crate::types::Path::pdot_pos(self.normalize_value_prefix_path_in_env(env, prefix), *name, *pos),
-            crate::types::path::PathView::Papply(left, right) => crate::types::Path::papply(self.normalize_value_prefix_path_in_env(env, left), self.normalize_value_prefix_path_in_env(env, right)),
+            crate::types::path::PathView::Pdot(prefix, name, pos) => crate::types::Path::pdot_pos(
+                self.normalize_value_prefix_path_in_env(env, prefix),
+                *name,
+                *pos,
+            ),
+            crate::types::path::PathView::Papply(left, right) => crate::types::Path::papply(
+                self.normalize_value_prefix_path_in_env(env, left),
+                self.normalize_value_prefix_path_in_env(env, right),
+            ),
             crate::types::path::PathView::Pident(id) => {
                 self.force_persistent_normalized_prefix(env, id);
                 path.clone()
@@ -4259,7 +4277,9 @@ impl<'a> RawLambdaConverter<'a> {
             }
         }
 
-        if matches!(path.view(), crate::types::path::PathView::Pdot(..)) || Self::path_may_follow_mty_ident(&path) {
+        if matches!(path.view(), crate::types::path::PathView::Pdot(..))
+            || Self::path_may_follow_mty_ident(&path)
+        {
             if let Some(alias_target) = crate::types::typecore::module_alias_target_for_path(
                 &path,
                 env,
@@ -4302,7 +4322,11 @@ impl<'a> RawLambdaConverter<'a> {
         path: &crate::types::Path,
     ) -> crate::types::Path {
         match path.view() {
-            crate::types::path::PathView::Pdot(prefix, name, pos) => crate::types::Path::pdot_pos(self.normalize_value_prefix_path_in_env(env, prefix), *name, *pos),
+            crate::types::path::PathView::Pdot(prefix, name, pos) => crate::types::Path::pdot_pos(
+                self.normalize_value_prefix_path_in_env(env, prefix),
+                *name,
+                *pos,
+            ),
             crate::types::path::PathView::Pident(_) => path.clone(),
             crate::types::path::PathView::Papply(_, _) => path.clone(),
         }
@@ -4426,8 +4450,7 @@ impl<'a> RawLambdaConverter<'a> {
                         self.note_possible_required_module(id);
                         return;
                     }
-                } else if self.env.lookup_module(path).is_err()
-                {
+                } else if self.env.lookup_module(path).is_err() {
                     self.note_possible_required_module(id);
                     return;
                 }

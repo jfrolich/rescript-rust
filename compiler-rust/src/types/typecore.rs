@@ -25,7 +25,6 @@
 #![allow(non_camel_case_types)]
 #![allow(dead_code)]
 
-use crate::types::path::PathView;
 use crate::diagnostics::{Warning, WarningConfig};
 use crate::fast_hash::{AHashMap as HashMap, AHashSet as HashSet};
 use crate::ident::Ident;
@@ -36,6 +35,7 @@ use crate::parser::ast::{
     Pattern as ParsedPattern, PexpApply, RecFlag,
 };
 use crate::parser::longident::Longident;
+use crate::types::path::PathView;
 use crate::types::type_expr::TypeExprRefSet;
 use crate::types::typedtree::{
     ArrowArg, Constant, EnvRef, Expression, ExpressionDesc, ModuleExpr, ModuleExprDesc, ModuleType,
@@ -23331,8 +23331,7 @@ fn type_contains_unresolved_local_path(
     let desc = ctx.borrow_desc(repr);
     match &*desc {
         TypeDesc::Tconstr { path, args, .. } => {
-            let has_local_head =
-                matches!(path_root_module(path).view(), crate::types::path::PathView::Pident(id) if !id.is_persistent());
+            let has_local_head = matches!(path_root_module(path).view(), crate::types::path::PathView::Pident(id) if !id.is_persistent());
             // OCaml compiler/ml/env.ml:781-813 reads component descriptors for
             // type lookup without forcing env.ml:1568's module-declaration
             // thunk. This unresolved-path probe uses the explicit no-publish
@@ -25205,10 +25204,10 @@ fn qualify_module_local_type_paths_with_alias_lookup_in_place<'a>(
             return Some(new_prefix.clone());
         }
         match path.view() {
-            PathView::Pdot(prefix, name, pos) => rewrite_path_prefix(prefix, old_prefix, new_prefix)
-                .map(|rewritten_prefix| {
-                    Path::pdot_pos(rewritten_prefix, *name, *pos)
-                }),
+            PathView::Pdot(prefix, name, pos) => {
+                rewrite_path_prefix(prefix, old_prefix, new_prefix)
+                    .map(|rewritten_prefix| Path::pdot_pos(rewritten_prefix, *name, *pos))
+            }
             _ => None,
         }
     }
@@ -25220,10 +25219,10 @@ fn qualify_module_local_type_paths_with_alias_lookup_in_place<'a>(
     ) -> Option<Path> {
         match path.view() {
             PathView::Pident(id) if id.name() == flat_head => Some(new_prefix.clone()),
-            PathView::Pdot(prefix, name, pos) => rewrite_flattened_head_prefix(
-                prefix, flat_head, new_prefix,
-            )
-            .map(|rewritten_prefix| Path::pdot_pos(rewritten_prefix, *name, *pos)),
+            PathView::Pdot(prefix, name, pos) => {
+                rewrite_flattened_head_prefix(prefix, flat_head, new_prefix)
+                    .map(|rewritten_prefix| Path::pdot_pos(rewritten_prefix, *name, *pos))
+            }
             _ => None,
         }
     }
@@ -25288,11 +25287,8 @@ fn qualify_module_local_type_paths_with_alias_lookup_in_place<'a>(
     fn prepend_module_prefix(path: &Path, prefix: &Path) -> Option<Path> {
         match path.view() {
             PathView::Pident(id) => Some(Path::pdot(prefix.clone(), id.name())),
-            PathView::Pdot(parent, name, pos) => {
-                prepend_module_prefix(parent, prefix).map(|rewritten_parent| {
-                    Path::pdot_pos(rewritten_parent, *name, *pos)
-                })
-            }
+            PathView::Pdot(parent, name, pos) => prepend_module_prefix(parent, prefix)
+                .map(|rewritten_parent| Path::pdot_pos(rewritten_parent, *name, *pos)),
             PathView::Papply(_, _) => None,
         }
     }
@@ -25363,14 +25359,16 @@ fn qualify_module_local_type_paths_with_alias_lookup_in_place<'a>(
                 }
                 let direct_alias_target_reexported_by_parent = if direct_alias_target_type {
                     match (module_access_path.view(), path.view()) {
-                        (PathView::Pdot(selected_parent, _, _), PathView::Pdot(_, type_name, _)) => env
-                            .find_type_with_path(type_name)
-                            .ok()
-                            .is_some_and(|(selected_path, _)| {
+                        (
+                            PathView::Pdot(selected_parent, _, _),
+                            PathView::Pdot(_, type_name, _),
+                        ) => env.find_type_with_path(type_name).ok().is_some_and(
+                            |(selected_path, _)| {
                                 selected_path
                                     .parent()
                                     .is_some_and(|parent| parent.same(selected_parent))
-                            }),
+                            },
+                        ),
                         _ => false,
                     }
                 } else {
@@ -27595,8 +27593,7 @@ fn qualify_resolved_signature_for_access_path_inner(
 ) -> crate::types::decl::Signature {
     let should_rebind_direct_type_family = should_rebind_direct_sig_type_family(mty, access_path);
     let access_path_has_local_root = matches!(path_root_module(access_path).view(), crate::types::path::PathView::Pident(id) if !id.is_persistent() && id.stamp() != 0);
-    let access_path_has_persistent_root =
-        matches!(path_root_module(access_path).view(), crate::types::path::PathView::Pident(id) if id.is_persistent());
+    let access_path_has_persistent_root = matches!(path_root_module(access_path).view(), crate::types::path::PathView::Pident(id) if id.is_persistent());
     if ctx.compiler_counters_enabled() {
         let kind = if let Some(old_name) = resolved_name {
             match access_path.view() {
@@ -28629,9 +28626,7 @@ fn lookup_type_decl_for_path_with_cache_mode<'a>(
                 // remain visible to variant disambiguation.
                 if self_manifest {
                     if let PathView::Pident(parent_id) = parent.view() {
-                        if let Some(md) =
-                            lookup_pident_module_for_path(env, parent, parent_id)
-                        {
+                        if let Some(md) = lookup_pident_module_for_path(env, parent, parent_id) {
                             // Preserve local alias access paths. For bindings like
                             // `module Functions = WasmBindings__Functions`, deferring
                             // here falls through to the alias target's global

@@ -11,13 +11,13 @@
 //! These operations are the building blocks for more complex type
 //! operations like unification and generalization.
 
-use crate::types::path::PathView;
 use super::context::TypeContext;
 use super::decl::{ConstructorArguments, TypeKind};
 use super::type_expr::{
     AbbrevMemo, AbbrevMemoRef, LOWEST_LEVEL, PIVOT_LEVEL, RowDesc, RowField, RowFieldRef, TypeDesc,
     TypeExprRef,
 };
+use crate::types::path::PathView;
 use std::borrow::Cow;
 
 // ============================================================================

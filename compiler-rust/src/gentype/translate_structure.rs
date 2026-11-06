@@ -1,9 +1,9 @@
 // Port of compiler/gentype/TranslateStructure.ml:1-366.
 
-use crate::types::path::PathView;
 use crate::gentype::gen_type_common::{ArgType, StringSet, Type};
 use crate::parse_arena::ParseArena;
 use crate::types::decl::ModuleType as DeclModuleType;
+use crate::types::path::PathView;
 use crate::types::typedtree::{
     Expression, ExpressionDesc, FunctionParam, ModuleBinding, ModuleExprDesc, ModuleTypeConstraint,
     Pattern, PatternDesc, Structure, StructureItem, StructureItemDesc, ValueBinding,

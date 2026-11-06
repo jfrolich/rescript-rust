@@ -3,8 +3,8 @@
 //! This follows the same split as OCaml's `typeopt.ml`, which `translcore.ml`
 //! consults when deciding raw-lambda shapes such as `Blk_some_not_nested`.
 
-use crate::types::path::PathView;
 use crate::fast_hash::AHashSet as HashSet;
+use crate::types::path::PathView;
 
 use crate::types::context::TypeContext;
 use crate::types::decl::{
@@ -455,7 +455,9 @@ fn type_is_builtin_object_uncached(ctx: &TypeContext, env: &Env, ty: TypeExprRef
     match &*ctx.get_desc(ty) {
         TypeDesc::Tobject { .. } => true,
         TypeDesc::Tconstr { path, args, .. } => {
-            if matches!(path.view(), crate::types::path::PathView::Pident(id) if id.name() == "dict") && args.len() == 1 {
+            if matches!(path.view(), crate::types::path::PathView::Pident(id) if id.name() == "dict")
+                && args.len() == 1
+            {
                 true
             } else {
                 path.name_eq(JS_DICT_T) || path.name_eq(JS_DICT_T_LEGACY)

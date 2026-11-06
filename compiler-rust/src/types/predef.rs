@@ -4,9 +4,9 @@
 //! allocated sequentially starting from 1. After all predefs are created,
 //! the stamp counter is set to 999 so user identifiers start at 1000.
 
-use crate::types::path::PathView;
 use crate::ident::{Ident, IdentFlags};
 use crate::types::path::Path;
+use crate::types::path::PathView;
 
 // ============================================================================
 // Predef type ident stamps (matching OCaml's allocation order in predef.ml)

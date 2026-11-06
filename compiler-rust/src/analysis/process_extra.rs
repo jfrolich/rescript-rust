@@ -1,7 +1,6 @@
 //! References and located items of a module: a port of
 //! analysis/src/process_extra.ml.
 
-use crate::types::path::PathView;
 use super::process_attributes::{self as attrs, Attrs};
 use super::process_cmt::{Annots, Ctx, dig};
 use super::resolve_path::{self, Resolution};
@@ -10,6 +9,7 @@ use crate::ident::{Ident, IdentFlags};
 use crate::parse_arena::{LidentIdx, LocIdx};
 use crate::parser::longident::Longident;
 use crate::types::decl::ConstructorDescription;
+use crate::types::path::PathView;
 use crate::types::tast_iterator::{self as ti, TastIterator};
 use crate::types::typedtree as tt;
 use crate::types::{Path, TypeDesc, TypeExprRef};
@@ -455,7 +455,8 @@ impl ExtraIterator<'_, '_> {
                 Some((t, tip)) => self.add_for_path(path, txt, l, t, tip),
                 None => self.add_for_path_parent(path, l),
             }
-            if let (PathView::Pdot(pinner, _, _), Longident::Ldot(inner, name)) = (path.view(), txt) {
+            if let (PathView::Pdot(pinner, _, _), Longident::Ldot(inner, name)) = (path.view(), txt)
+            {
                 let name_len = self.ctx.arena.get_string(*name).len() as i32;
                 self.add_for_longident(None, pinner, inner, loc.chop_location_end(name_len + 1));
             }

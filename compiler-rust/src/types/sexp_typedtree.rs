@@ -1,6 +1,5 @@
 //! Sexp printer for Typedtree - used for parity testing between OCaml and Rust compilers
 
-use crate::types::path::PathView;
 use crate::ident::Ident;
 use crate::parse_arena::{LidentIdx, LocIdx, ParseArena};
 use crate::parser::ast::{
@@ -11,6 +10,7 @@ use crate::types::asttypes::ArgLabel as TypeArgLabel;
 use crate::types::btype;
 use crate::types::context::TypeContext;
 use crate::types::path::Path;
+use crate::types::path::PathView;
 use crate::types::type_expr::{RowDesc, RowField, TypeDesc, TypeExprRef};
 use crate::types::typedtree::{
     Case, Constant, Expression, ExpressionDesc, ExtensionConstructor, ExtensionConstructorKind,

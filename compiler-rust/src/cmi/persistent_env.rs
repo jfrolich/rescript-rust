@@ -5672,17 +5672,20 @@ fn substitute_type_path(
             );
             Path::pdot_pos(rewritten_prefix, *name, *pos)
         }
-        PathView::Papply(left, right) => Path::papply(substitute_module_path(
+        PathView::Papply(left, right) => Path::papply(
+            substitute_module_path(
                 left,
                 module_stamp_map,
                 module_name_map,
                 protected_module_head,
-            ), substitute_module_path(
+            ),
+            substitute_module_path(
                 right,
                 module_stamp_map,
                 module_name_map,
                 protected_module_head,
-            )),
+            ),
+        ),
     }
 }
 
@@ -5720,17 +5723,20 @@ fn substitute_module_path(
             );
             Path::pdot_pos(rewritten_prefix, *name, *pos)
         }
-        PathView::Papply(left, right) => Path::papply(substitute_module_path(
+        PathView::Papply(left, right) => Path::papply(
+            substitute_module_path(
                 left,
                 module_stamp_map,
                 module_name_map,
                 protected_module_head,
-            ), substitute_module_path(
+            ),
+            substitute_module_path(
                 right,
                 module_stamp_map,
                 module_name_map,
                 protected_module_head,
-            )),
+            ),
+        ),
     }
 }
 
@@ -7131,9 +7137,7 @@ fn add_signature_to_env_with_options_inner(
         )
     };
     for item in sig_items.iter() {
-        let slot_path = |name: &str, p: i32| {
-            Path::pdot_pos(module_path.clone(), name, p)
-        };
+        let slot_path = |name: &str, p: i32| Path::pdot_pos(module_path.clone(), name, p);
         match item {
             SignatureItem::SigValue(id, desc) => {
                 // Add value binding with qualified path
@@ -7393,23 +7397,15 @@ fn add_signature_to_env_with_options_inner(
                                     path
                                 }
                             }
-                            PathView::Pdot(prefix, name, pos) => Path::pdot_pos(go(
-                                    prefix.clone(),
-                                    module_path,
-                                    module_name,
-                                    access_path,
-                                ), *name, *pos),
-                            PathView::Papply(functor, arg) => Path::papply(go(
-                                    functor.clone(),
-                                    module_path,
-                                    module_name,
-                                    access_path,
-                                ), go(
-                                    arg.clone(),
-                                    module_path,
-                                    module_name,
-                                    access_path,
-                                )),
+                            PathView::Pdot(prefix, name, pos) => Path::pdot_pos(
+                                go(prefix.clone(), module_path, module_name, access_path),
+                                *name,
+                                *pos,
+                            ),
+                            PathView::Papply(functor, arg) => Path::papply(
+                                go(functor.clone(), module_path, module_name, access_path),
+                                go(arg.clone(), module_path, module_name, access_path),
+                            ),
                         }
                     }
                     go(path, module_path, id.name(), &access_path)

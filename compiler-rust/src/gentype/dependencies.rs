@@ -1,8 +1,8 @@
 // Port of compiler/gentype/Dependencies.ml:1-73.
 
-use crate::types::path::PathView;
 use crate::gentype::gen_type_common::{Dep, dep_to_string};
 use crate::types::Path;
+use crate::types::path::PathView;
 
 pub fn handle_namespace(name: &str, dep: &Dep) -> Dep {
     match dep {

@@ -15,7 +15,6 @@
 //! - `Env` - The main environment type
 //! - Lookup functions for values, types, and modules
 
-use crate::types::path::PathView;
 use super::asttypes::{MutableFlag, PrivateFlag};
 use super::context::TypeContext;
 use super::decl::{
@@ -28,6 +27,7 @@ use super::type_expr::{TypeDesc, TypeExprRef};
 use crate::fast_hash::{AHashMap as HashMap, AHashSet as HashSet};
 use crate::ident::{Ident, IdentFlags};
 use crate::location::Location;
+use crate::types::path::PathView;
 use std::cell::RefCell;
 use std::sync::Arc;
 
@@ -2040,7 +2040,9 @@ impl Env {
                     lookup_submodule_in_module_type(env, &parent_md.md_type, name, visiting)
                         .ok_or_else(|| EnvError::ModuleNotFound((*name).into()))
                 }
-                PathView::Papply(_, _) => Err(EnvError::ModuleNotFound("(functor application)".into())),
+                PathView::Papply(_, _) => {
+                    Err(EnvError::ModuleNotFound("(functor application)".into()))
+                }
             }
         }
 
@@ -2178,7 +2180,9 @@ impl Env {
                 }
                 Err(EnvError::ModtypeNotFound((*name).into()))
             }
-            PathView::Papply(_, _) => Err(EnvError::ModtypeNotFound("(functor application)".into())),
+            PathView::Papply(_, _) => {
+                Err(EnvError::ModtypeNotFound("(functor application)".into()))
+            }
         }
     }
 

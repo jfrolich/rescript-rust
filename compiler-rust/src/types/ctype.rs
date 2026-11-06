@@ -22,7 +22,6 @@
 //! Type errors are represented as `TypeError` with detailed information
 //! about what went wrong during unification or other operations.
 
-use crate::types::path::PathView;
 use super::asttypes::{Label, MutableFlag, PrivateFlag};
 use super::btype::{self, iter_type_expr, row_fixed, row_more, row_repr, row_repr_ref};
 use super::context::TypeContext;
@@ -36,6 +35,7 @@ use super::type_expr::{
 use super::variance::{Variance, VarianceFlag};
 use crate::fast_hash::{AHashMap as HashMap, AHashSet as HashSet};
 use crate::ident::Ident;
+use crate::types::path::PathView;
 use std::sync::Arc;
 
 fn in_process_module_resolution_env(
@@ -2430,7 +2430,8 @@ fn update_level_expand_with_lookup_capture(
                 // without a lookup (see `get_level_with_lookup_capture`), so
                 // it needs no copy unless it is recorded or expanded.
                 let persistent_level = (path_root_is_persistent(path)
-                    && (pending_type_lookup_paths.is_none() || !matches!(path.view(), PathView::Pdot(..))))
+                    && (pending_type_lookup_paths.is_none()
+                        || !matches!(path.view(), PathView::Pdot(..))))
                 .then(|| path.binding_time());
                 let path_level = match persistent_level {
                     Some(path_level) => path_level,
@@ -3472,7 +3473,10 @@ fn lookup_component_module_sig_type(
 ) -> Option<(crate::ident::Ident, Arc<super::decl::TypeDeclaration>)> {
     use super::decl::SignatureItem;
 
-    if matches!(module_path.view(), PathView::Pdot(..) | PathView::Papply(..)) {
+    if matches!(
+        module_path.view(),
+        PathView::Pdot(..) | PathView::Papply(..)
+    ) {
         let mut persistent_env = in_process_module_resolution_env(ctx);
         // OCaml compiler/ml/env.ml:781-793 resolves dotted module descriptors
         // through `comp_components`, and env.ml:800-813 then reads `comp_types`.
@@ -4098,9 +4102,7 @@ fn pdot_expansion(
                     ctx,
                 )
                 .filter(|target_module_path| !target_module_path.same(parent))
-                .map(|target_module_path| {
-                    Path::pdot_pos(target_module_path, *type_name, *pos)
-                });
+                .map(|target_module_path| Path::pdot_pos(target_module_path, *type_name, *pos));
                 if let Some(target) = target {
                     return PdotExpansion::Rewrite(target);
                 }
@@ -4698,7 +4700,9 @@ pub(crate) fn cyclic_abbrev(ctx: &TypeContext, env: &Env, id: &Ident, ty: TypeEx
             TypeDesc::Tconstr { path, .. } => path.clone(),
             _ => return false,
         };
-        if matches!(path.view(), crate::types::path::PathView::Pident(p) if p.same(id)) || seen.contains(&ty) {
+        if matches!(path.view(), crate::types::path::PathView::Pident(p) if p.same(id))
+            || seen.contains(&ty)
+        {
             return true;
         }
         match expand_abbrev_opt_once(ctx, env, ty) {

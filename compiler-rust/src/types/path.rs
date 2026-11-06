@@ -94,9 +94,7 @@ fn node_hash(view: &PathView) -> u64 {
             mix(2, parent.0.node_hash),
             mix(name.content_hash(), u64::from(pos as u32)),
         ),
-        PathView::Papply(functor, arg) => {
-            mix(mix(3, functor.0.node_hash), arg.0.node_hash)
-        }
+        PathView::Papply(functor, arg) => mix(mix(3, functor.0.node_hash), arg.0.node_hash),
     }
 }
 

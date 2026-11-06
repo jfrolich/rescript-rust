@@ -6,8 +6,8 @@
 //! each lookup. This module provides the cached qualified view that the hot
 //! module-resolution paths use as their source of truth.
 
-use crate::types::path::PathView;
 use crate::fast_hash::AHashMap as HashMap;
+use crate::types::path::PathView;
 use std::cell::{OnceCell, RefCell};
 use std::sync::Arc;
 
@@ -1752,7 +1752,9 @@ fn access_path_is_direct_opened_component(env: &super::env::Env, access_path: &P
     // compiler/ml/env.ml:1874-1877, which adds opened component bindings
     // without a root module binding. Test that origin in Env rather than
     // matching root names.
-    access_path.parent().is_some_and(|p| p.as_pident().is_some())
+    access_path
+        .parent()
+        .is_some_and(|p| p.as_pident().is_some())
         && env.path_starts_with_opened_component(access_path)
 }
 
@@ -1894,7 +1896,9 @@ fn build_local_module_components(
         } else {
             let Some((raw_sig, resolved_name)) = (match &md.md_type {
                 super::decl::ModuleType::MtyAlias(_, alias_path)
-                    if alias_path.as_pident().is_some_and(|alias_id| alias_id.is_persistent())
+                    if alias_path
+                        .as_pident()
+                        .is_some_and(|alias_id| alias_id.is_persistent())
                         && cache_mode.forces_alias_sig() =>
                 {
                     let alias_id = alias_path.as_pident().expect("guarded Pident");
