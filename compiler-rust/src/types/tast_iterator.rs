@@ -251,7 +251,7 @@ pub fn walk_extension_constructor<'t, I: TastIterator<'t> + ?Sized>(
 }
 
 pub fn walk_pat<'t, I: TastIterator<'t> + ?Sized>(sub: &mut I, p: &Pattern) {
-    for (extra, _, _) in p.pat_extra.iter() {
+    for (extra, _, _) in sub.arena().pat_extra(p).iter() {
         if let PatExtra::Tpat_constraint(ct) = extra {
             sub.typ(sub.arena().core_type(*ct));
         }
@@ -300,7 +300,7 @@ fn walk_record_fields<'t, I: TastIterator<'t> + ?Sized>(
 }
 
 pub fn walk_expr<'t, I: TastIterator<'t> + ?Sized>(sub: &mut I, e: &Expression) {
-    for (extra, _, _) in e.exp_extra.iter() {
+    for (extra, _, _) in sub.arena().exp_extra(e).iter() {
         match extra {
             ExpExtra::Texp_constraint(ct) | ExpExtra::Texp_coerce { target: ct, .. } => {
                 sub.typ(sub.arena().core_type(*ct))

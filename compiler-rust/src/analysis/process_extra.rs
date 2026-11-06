@@ -532,8 +532,10 @@ impl ExtraIterator<'_, '_> {
             txt: name.txt.clone(),
             loc: self.loc(name.loc),
         };
-        let has_unpack = pattern
-            .pat_extra
+        let has_unpack = self
+            .ctx
+            .ta
+            .pat_extra(pattern)
             .iter()
             .any(|(extra, _, _)| matches!(extra, tt::PatExtra::Tpat_unpack));
         let unpacked = if has_unpack {
@@ -548,7 +550,10 @@ impl ExtraIterator<'_, '_> {
         } else {
             None
         };
-        let attributes = Attrs::Parsed(pattern.pat_attributes.as_slice(), self.ctx.arena);
+        let attributes = Attrs::Parsed(
+            self.ctx.ta.pat_attributes(pattern).as_slice(),
+            self.ctx.arena,
+        );
         match unpacked {
             Some(path) => {
                 let extent = name.loc;
@@ -662,8 +667,10 @@ impl<'a> TastIterator<'a> for ExtraIterator<'a, '_> {
                         loc: self.loc(rest.rest_name.loc),
                     };
                     let extent = name.loc;
-                    let attributes =
-                        Attrs::Parsed(pattern.pat_attributes.as_slice(), self.ctx.arena);
+                    let attributes = Attrs::Parsed(
+                        self.ctx.ta.pat_attributes(pattern).as_slice(),
+                        self.ctx.arena,
+                    );
                     self.add_for_declared_pattern(
                         rest.rest_ident.binding_time(),
                         name,

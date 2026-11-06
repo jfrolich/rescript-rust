@@ -4083,7 +4083,6 @@ fn build_or_pat(
                     LocIdx::none(),
                     ty,
                     tctx.type_ctx.store_typed_env(env),
-                    Attributes::new(),
                 );
                 pats.push((label.to_string(), Some(Box::new(arg_pat))));
                 fields.push((
@@ -4134,7 +4133,6 @@ fn build_or_pat(
                 ghost_loc,
                 ty,
                 tctx.type_ctx.store_typed_env(env),
-                Attributes::new(),
             )
         })
         .collect();
@@ -4153,7 +4151,6 @@ fn build_or_pat(
             ghost_loc,
             ty,
             tctx.type_ctx.store_typed_env(env),
-            Attributes::new(),
         )
     });
 
@@ -4488,13 +4485,11 @@ fn type_pattern_inner(
                 }
             }
 
-            Ok(Pattern::new(
-                PatternDesc::Tpat_any,
-                loc,
-                expected_ty,
-                pat_env_ref,
-                pat.ppat_attributes.clone(),
-            ))
+            Ok({
+                let typed_node = Pattern::new(PatternDesc::Tpat_any, loc, expected_ty, pat_env_ref);
+                tctx.typed
+                    .with_pat_attributes(typed_node, pat.ppat_attributes.clone())
+            })
         }
 
         PD::Ppat_var(name) => {
@@ -4514,13 +4509,16 @@ fn type_pattern_inner(
                     tctx.arena,
                 )?
             };
-            Ok(Pattern::new(
-                PatternDesc::Tpat_var(id, convert_located_stridx(name, tctx.arena)),
-                loc,
-                expected_ty,
-                pat_env_ref,
-                pat.ppat_attributes.clone(),
-            ))
+            Ok({
+                let typed_node = Pattern::new(
+                    PatternDesc::Tpat_var(id, convert_located_stridx(name, tctx.arena)),
+                    loc,
+                    expected_ty,
+                    pat_env_ref,
+                );
+                tctx.typed
+                    .with_pat_attributes(typed_node, pat.ppat_attributes.clone())
+            })
         }
 
         PD::Ppat_constant(cst) => {
@@ -4531,13 +4529,16 @@ fn type_pattern_inner(
             // Unify with expected type
             unify_pattern_types(tctx, loc, ty, expected_ty)?;
 
-            Ok(Pattern::new(
-                PatternDesc::Tpat_constant(constant),
-                loc,
-                expected_ty,
-                pat_env_ref,
-                pat.ppat_attributes.clone(),
-            ))
+            Ok({
+                let typed_node = Pattern::new(
+                    PatternDesc::Tpat_constant(constant),
+                    loc,
+                    expected_ty,
+                    pat_env_ref,
+                );
+                tctx.typed
+                    .with_pat_attributes(typed_node, pat.ppat_attributes.clone())
+            })
         }
 
         PD::Ppat_tuple(pats) => {
@@ -4572,13 +4573,16 @@ fn type_pattern_inner(
                 typed_pats.push(typed_pat);
             }
 
-            Ok(Pattern::new(
-                PatternDesc::Tpat_tuple(tctx.typed.push_patterns(typed_pats)),
-                loc,
-                expected_ty,
-                pat_env_ref,
-                pat.ppat_attributes.clone(),
-            ))
+            Ok({
+                let typed_node = Pattern::new(
+                    PatternDesc::Tpat_tuple(tctx.typed.push_patterns(typed_pats)),
+                    loc,
+                    expected_ty,
+                    pat_env_ref,
+                );
+                tctx.typed
+                    .with_pat_attributes(typed_node, pat.ppat_attributes.clone())
+            })
         }
 
         PD::Ppat_alias(inner_pat_idx, name) => {
@@ -4627,17 +4631,20 @@ fn type_pattern_inner(
             let id =
                 state.enter_variable(tctx.type_ctx, loc, name, ty_var, true, false, tctx.arena)?;
 
-            Ok(Pattern::new(
-                PatternDesc::Tpat_alias(
-                    tctx.typed.push_pattern(typed_inner),
-                    id,
-                    convert_located_stridx(name, tctx.arena),
-                ),
-                loc,
-                expected_ty,
-                pat_env_ref,
-                pat.ppat_attributes.clone(),
-            ))
+            Ok({
+                let typed_node = Pattern::new(
+                    PatternDesc::Tpat_alias(
+                        tctx.typed.push_pattern(typed_inner),
+                        id,
+                        convert_located_stridx(name, tctx.arena),
+                    ),
+                    loc,
+                    expected_ty,
+                    pat_env_ref,
+                );
+                tctx.typed
+                    .with_pat_attributes(typed_node, pat.ppat_attributes.clone())
+            })
         }
 
         PD::Ppat_or(p1_idx, p2_idx) => {
@@ -4732,17 +4739,20 @@ fn type_pattern_inner(
                             .module_variables
                             .extend(p1_module_vars.iter().cloned());
 
-                        Ok(Pattern::new(
-                            PatternDesc::Tpat_or(
-                                tctx.typed.push_pattern(typed_p1),
-                                tctx.typed.push_pattern(typed_p2),
-                                None,
-                            ),
-                            loc,
-                            expected_ty,
-                            pat_env_ref,
-                            pat.ppat_attributes.clone(),
-                        ))
+                        Ok({
+                            let typed_node = Pattern::new(
+                                PatternDesc::Tpat_or(
+                                    tctx.typed.push_pattern(typed_p1),
+                                    tctx.typed.push_pattern(typed_p2),
+                                    None,
+                                ),
+                                loc,
+                                expected_ty,
+                                pat_env_ref,
+                            );
+                            tctx.typed
+                                .with_pat_attributes(typed_node, pat.ppat_attributes.clone())
+                        })
                     }
                 }
             })();
@@ -4815,13 +4825,16 @@ fn type_pattern_inner(
                 typed_pats.push(typed_pat);
             }
 
-            Ok(Pattern::new(
-                PatternDesc::Tpat_array(tctx.typed.push_patterns(typed_pats)),
-                loc,
-                expected_ty,
-                pat_env_ref,
-                pat.ppat_attributes.clone(),
-            ))
+            Ok({
+                let typed_node = Pattern::new(
+                    PatternDesc::Tpat_array(tctx.typed.push_patterns(typed_pats)),
+                    loc,
+                    expected_ty,
+                    pat_env_ref,
+                );
+                tctx.typed
+                    .with_pat_attributes(typed_node, pat.ppat_attributes.clone())
+            })
         }
 
         PD::Ppat_construct(lid, sargs) => {
@@ -4967,18 +4980,21 @@ fn type_pattern_inner(
                 true,
                 tctx.arena,
             )?;
-            let typed_pat = Pattern::new(
+            let mut typed_pat = Pattern::new(
                 PatternDesc::Tpat_var(id, convert_located_stridx(name, tctx.arena)),
                 loc,
                 expected_ty,
                 pat_env_ref,
-                Attributes::new(),
             );
-            Ok(typed_pat.with_pat_extra(
-                crate::types::typedtree::PatExtra::Tpat_unpack,
-                loc,
-                pat.ppat_attributes.clone(),
-            ))
+            tctx.typed.push_pat_extra(
+                &mut typed_pat,
+                (
+                    crate::types::typedtree::PatExtra::Tpat_unpack,
+                    loc,
+                    pat.ppat_attributes.clone(),
+                ),
+            );
+            Ok(typed_pat)
         }
 
         PD::Ppat_type(lid) => {
@@ -4986,15 +5002,15 @@ fn type_pattern_inner(
             // OCaml typecore.ml:1663-1671: build_or_pat expands into Tpat_variant or-patterns
             let (path, or_pat, ty) = build_or_pat(tctx, env, loc, lid)?;
             unify_pattern_types(tctx, loc, ty, expected_ty)?;
-            let result = Pattern {
-                pat_extra: vec![(
+            let mut result = or_pat;
+            tctx.typed.set_pat_extra(
+                &mut result,
+                vec![(
                     crate::types::typedtree::PatExtra::Tpat_type(path, *lid),
                     loc,
                     pat.ppat_attributes.clone(),
-                )]
-                .into(),
-                ..or_pat
-            };
+                )],
+            );
             Ok(result)
         }
 
@@ -5825,17 +5841,20 @@ fn type_pattern_construct(
         )?);
     }
 
-    Ok(Pattern::new(
-        PatternDesc::Tpat_construct(
-            *lid,
-            Arc::new(cstr_desc),
-            tctx.typed.push_patterns(typed_args),
-        ),
-        loc,
-        expected_ty,
-        tctx.type_ctx.store_typed_env(env),
-        pat.ppat_attributes.clone(),
-    ))
+    Ok({
+        let typed_node = Pattern::new(
+            PatternDesc::Tpat_construct(
+                *lid,
+                Arc::new(cstr_desc),
+                tctx.typed.push_patterns(typed_args),
+            ),
+            loc,
+            expected_ty,
+            tctx.type_ctx.store_typed_env(env),
+        );
+        tctx.typed
+            .with_pat_attributes(typed_node, pat.ppat_attributes.clone())
+    })
 }
 
 fn variant_payload_type_from_expected(
@@ -5927,17 +5946,20 @@ fn type_pattern_variant(
         _ => None,
     };
 
-    Ok(Pattern::new(
-        PatternDesc::Tpat_variant(
-            label.to_string(),
-            typed_arg.map(|p| tctx.typed.push_pattern(*p)),
-            RowDescRef(0),
-        ),
-        loc,
-        expected_ty,
-        tctx.type_ctx.store_typed_env(env),
-        pat.ppat_attributes.clone(),
-    ))
+    Ok({
+        let typed_node = Pattern::new(
+            PatternDesc::Tpat_variant(
+                label.to_string(),
+                typed_arg.map(|p| tctx.typed.push_pattern(*p)),
+                RowDescRef(0),
+            ),
+            loc,
+            expected_ty,
+            tctx.type_ctx.store_typed_env(env),
+        );
+        tctx.typed
+            .with_pat_attributes(typed_node, pat.ppat_attributes.clone())
+    })
 }
 
 fn find_pattern_record_qual(
@@ -6446,7 +6468,6 @@ fn type_pattern_record(
                 parsed_pat.ppat_loc,
                 field_ty,
                 tctx.type_ctx.store_typed_env(env),
-                Attributes::new(),
             )
         } else {
             type_pattern_inner(
@@ -6574,22 +6595,25 @@ fn type_pattern_record(
         None => None,
     };
 
-    Ok(Pattern::new(
-        PatternDesc::Tpat_record(
-            typed_fields
-                .into_iter()
-                .map(|(lid, lbl, field_pat, optional)| {
-                    (lid, lbl, tctx.typed.push_pattern(field_pat), optional)
-                })
-                .collect(),
-            closed_flag,
-            typed_rest.map(Box::new),
-        ),
-        loc,
-        expected_ty,
-        tctx.type_ctx.store_typed_env(env),
-        pat.ppat_attributes.clone(),
-    ))
+    Ok({
+        let typed_node = Pattern::new(
+            PatternDesc::Tpat_record(
+                typed_fields
+                    .into_iter()
+                    .map(|(lid, lbl, field_pat, optional)| {
+                        (lid, lbl, tctx.typed.push_pattern(field_pat), optional)
+                    })
+                    .collect(),
+                closed_flag,
+                typed_rest.map(Box::new),
+            ),
+            loc,
+            expected_ty,
+            tctx.type_ctx.store_typed_env(env),
+        );
+        tctx.typed
+            .with_pat_attributes(typed_node, pat.ppat_attributes.clone())
+    })
 }
 
 // ============================================================================
@@ -7198,28 +7222,27 @@ fn type_pattern_constraint(
             // to match OCaml's {p with pat_desc = Tpat_any} behavior.
             let any_pat = Pattern {
                 pat_desc: crate::types::typedtree::PatternDesc::Tpat_any,
-                pat_attributes: Attributes::new(),
                 pat_type: typed_inner.pat_type,
                 ..typed_inner.clone()
             };
-            Pattern {
+            let any_pat = tctx.typed.with_pat_attributes(any_pat, Attributes::new());
+            let mut alias = Pattern {
                 pat_desc: crate::types::typedtree::PatternDesc::Tpat_alias(
                     tctx.typed.push_pattern(any_pat),
                     id,
                     name,
                 ),
                 pat_type: constraint_ty,
-                pat_extra: vec![constraint_extra].into(),
                 ..typed_inner
-            }
+            };
+            tctx.typed.set_pat_extra(&mut alias, vec![constraint_extra]);
+            alias
         }
         _ => {
             let mut typed_inner = typed_inner;
             typed_inner.pat_type = constraint_ty;
-            let mut extras = Vec::with_capacity(typed_inner.pat_extra.len() + 1);
-            extras.push(constraint_extra);
-            extras.extend(typed_inner.pat_extra);
-            typed_inner.pat_extra = extras.into();
+            tctx.typed
+                .prepend_pat_extra(&mut typed_inner, constraint_extra);
             typed_inner
         }
     };
@@ -7299,14 +7322,14 @@ fn type_pattern_constraint_poly_var(
                 pat.ppat_attributes.clone(),
             );
 
-            Ok(Pattern {
-                pat_desc: PatternDesc::Tpat_var(id, convert_located_stridx(&name, tctx.arena)),
-                pat_loc: lloc,
-                pat_type: ctype_ty,
-                pat_env: tctx.type_ctx.store_typed_env(env),
-                pat_attributes: Attributes::new(),
-                pat_extra: vec![constraint_extra].into(),
-            })
+            let mut typed_pat = Pattern::new(
+                PatternDesc::Tpat_var(id, convert_located_stridx(&name, tctx.arena)),
+                lloc,
+                ctype_ty,
+                tctx.type_ctx.store_typed_env(env),
+            );
+            tctx.typed.push_pat_extra(&mut typed_pat, constraint_extra);
+            Ok(typed_pat)
         }
         _ => {
             drop(ctype_desc);
@@ -7376,7 +7399,6 @@ fn type_pattern_interval(
                 ghost_loc,
                 expected_ty,
                 EnvRef(0),
-                Attributes::new(),
             )
         })
         .collect();
@@ -7393,12 +7415,13 @@ fn type_pattern_interval(
             ghost_loc,
             expected_ty,
             EnvRef(0),
-            Attributes::new(),
         );
     }
 
     result.pat_loc = loc;
-    result.pat_attributes = pat.ppat_attributes.clone();
+    let result = tctx
+        .typed
+        .with_pat_attributes(result, pat.ppat_attributes.clone());
 
     Ok(result)
 }
@@ -7458,7 +7481,7 @@ fn type_statement<'a>(
     let context = type_clash_context_in_statement(expr);
     unify_expression_types(
         tctx,
-        proper_exp_loc(&typed),
+        proper_exp_loc(&tctx.typed, &typed),
         typed.exp_type,
         expected_ty,
         context,
@@ -7788,11 +7811,10 @@ fn type_expect_with_recarg_unscoped<'a>(
             // typecore.ml: type the inner expression, then prepend the
             // braces node's attributes.
             let inner = tctx.arena.get_expr(braces.expr);
-            let mut exp = type_expect_with_recarg(tctx, env, inner, expected_ty, context, recarg)?;
+            let exp = type_expect_with_recarg(tctx, env, inner, expected_ty, context, recarg)?;
             let mut attrs = expr.pexp_attributes.clone();
-            attrs.extend(exp.exp_attributes.iter().cloned());
-            exp.exp_attributes = attrs;
-            Ok(exp)
+            attrs.extend(tctx.typed.exp_attributes(&exp).iter().cloned());
+            Ok(tctx.typed.with_exp_attributes(exp, attrs))
         }
         ED::Pexp_regexp(_) => unreachable!("Lowered by the built-in frontend mapper."),
         ED::Pexp_ident(lid) => {
@@ -7856,13 +7878,16 @@ fn type_expect_with_recarg_unscoped<'a>(
             let ty = crate::types::instance(ctx, desc.val_type);
             rue_unify(tctx, loc, ty, expected_ty, context)?;
 
-            Ok(Expression::new(
-                ExpressionDesc::Texp_ident(path, *lid, desc),
-                loc,
-                ty,
-                tctx.type_ctx.store_typed_env(env),
-                expr.pexp_attributes.clone(),
-            ))
+            Ok({
+                let typed_node = Expression::new(
+                    ExpressionDesc::Texp_ident(path, *lid, desc),
+                    loc,
+                    ty,
+                    tctx.type_ctx.store_typed_env(env),
+                );
+                tctx.typed
+                    .with_exp_attributes(typed_node, expr.pexp_attributes.clone())
+            })
         }
 
         ED::Pexp_constant(cst) => {
@@ -7873,13 +7898,16 @@ fn type_expect_with_recarg_unscoped<'a>(
             // OCaml: rue { ... exp_type = type_constant cst; ... }
             rue_unify(tctx, loc, ty, expected_ty, context)?;
 
-            Ok(Expression::new(
-                ExpressionDesc::Texp_constant(constant),
-                loc,
-                ty,
-                exp_env_ref,
-                expr.pexp_attributes.clone(),
-            ))
+            Ok({
+                let typed_node = Expression::new(
+                    ExpressionDesc::Texp_constant(constant),
+                    loc,
+                    ty,
+                    exp_env_ref,
+                );
+                tctx.typed
+                    .with_exp_attributes(typed_node, expr.pexp_attributes.clone())
+            })
         }
 
         ED::Pexp_break => {
@@ -7889,13 +7917,12 @@ fn type_expect_with_recarg_unscoped<'a>(
             let unit_ty = env.type_unit(ctx);
             // `rue`: `unify env unit (instance ty_expected)` (typecore.ml:3051-3074).
             rue_unify(tctx, loc, unit_ty, expected_ty, context)?;
-            Ok(Expression::new(
-                ExpressionDesc::Texp_break,
-                loc,
-                unit_ty,
-                exp_env_ref,
-                expr.pexp_attributes.clone(),
-            ))
+            Ok({
+                let typed_node =
+                    Expression::new(ExpressionDesc::Texp_break, loc, unit_ty, exp_env_ref);
+                tctx.typed
+                    .with_exp_attributes(typed_node, expr.pexp_attributes.clone())
+            })
         }
 
         ED::Pexp_continue => {
@@ -7905,13 +7932,12 @@ fn type_expect_with_recarg_unscoped<'a>(
             let unit_ty = env.type_unit(ctx);
             // `rue`: `unify env unit (instance ty_expected)` (typecore.ml:3051-3074).
             rue_unify(tctx, loc, unit_ty, expected_ty, context)?;
-            Ok(Expression::new(
-                ExpressionDesc::Texp_continue,
-                loc,
-                unit_ty,
-                exp_env_ref,
-                expr.pexp_attributes.clone(),
-            ))
+            Ok({
+                let typed_node =
+                    Expression::new(ExpressionDesc::Texp_continue, loc, unit_ty, exp_env_ref);
+                tctx.typed
+                    .with_exp_attributes(typed_node, expr.pexp_attributes.clone())
+            })
         }
 
         ED::Pexp_tuple(exprs) => {
@@ -7942,13 +7968,16 @@ fn type_expect_with_recarg_unscoped<'a>(
             // Keep sharing: create fresh Ttuple from sub-expression types
             // (matches OCaml: exp_type = newty (Ttuple (List.map (fun e -> e.exp_type) expl)))
             let result_ty = ctx.new_tuple(typed_exprs.iter().map(|e| e.exp_type).collect());
-            Ok(Expression::new(
-                ExpressionDesc::Texp_tuple(tctx.typed.push_exprs(typed_exprs)),
-                loc,
-                result_ty,
-                exp_env_ref,
-                expr.pexp_attributes.clone(),
-            ))
+            Ok({
+                let typed_node = Expression::new(
+                    ExpressionDesc::Texp_tuple(tctx.typed.push_exprs(typed_exprs)),
+                    loc,
+                    result_ty,
+                    exp_env_ref,
+                );
+                tctx.typed
+                    .with_exp_attributes(typed_node, expr.pexp_attributes.clone())
+            })
         }
 
         ED::Pexp_let(inner) => {
@@ -7980,17 +8009,20 @@ fn type_expect_with_recarg_unscoped<'a>(
                 check_recursive_bindings(&tctx.typed, tctx.type_ctx, &typed_bindings)?;
             }
 
-            Ok(Expression::new(
-                ExpressionDesc::Texp_let(
-                    *rec_flag,
-                    tctx.typed.push_value_bindings(typed_bindings),
-                    tctx.push_expr(typed_body),
-                ),
-                loc,
-                body_type,
-                exp_env_ref,
-                expr.pexp_attributes.clone(),
-            ))
+            Ok({
+                let typed_node = Expression::new(
+                    ExpressionDesc::Texp_let(
+                        *rec_flag,
+                        tctx.typed.push_value_bindings(typed_bindings),
+                        tctx.push_expr(typed_body),
+                    ),
+                    loc,
+                    body_type,
+                    exp_env_ref,
+                );
+                tctx.typed
+                    .with_exp_attributes(typed_node, expr.pexp_attributes.clone())
+            })
         }
 
         ED::Pexp_sequence(e1_idx, e2_idx) => {
@@ -8010,13 +8042,19 @@ fn type_expect_with_recarg_unscoped<'a>(
             let typed_e2 = type_expect(tctx, env, e2, expected_ty, None)?;
             let e2_type = typed_e2.exp_type;
 
-            Ok(Expression::new(
-                ExpressionDesc::Texp_sequence(tctx.push_expr(typed_e1), tctx.push_expr(typed_e2)),
-                loc,
-                e2_type,
-                exp_env_ref,
-                expr.pexp_attributes.clone(),
-            ))
+            Ok({
+                let typed_node = Expression::new(
+                    ExpressionDesc::Texp_sequence(
+                        tctx.push_expr(typed_e1),
+                        tctx.push_expr(typed_e2),
+                    ),
+                    loc,
+                    e2_type,
+                    exp_env_ref,
+                );
+                tctx.typed
+                    .with_exp_attributes(typed_node, expr.pexp_attributes.clone())
+            })
         }
 
         ED::Pexp_ifthenelse(_) | ED::Pexp_ternary(_) => {
@@ -8065,17 +8103,20 @@ fn type_expect_with_recarg_unscoped<'a>(
                     )?;
                     let then_exp_type = typed_then.exp_type;
 
-                    Ok(Expression::new(
-                        ExpressionDesc::Texp_ifthenelse(
-                            tctx.push_expr(typed_cond),
-                            tctx.push_expr(typed_then),
-                            Some(tctx.push_expr(typed_else)),
-                        ),
-                        loc,
-                        then_exp_type,
-                        exp_env_ref,
-                        expr.pexp_attributes.clone(),
-                    ))
+                    Ok({
+                        let typed_node = Expression::new(
+                            ExpressionDesc::Texp_ifthenelse(
+                                tctx.push_expr(typed_cond),
+                                tctx.push_expr(typed_then),
+                                Some(tctx.push_expr(typed_else)),
+                            ),
+                            loc,
+                            then_exp_type,
+                            exp_env_ref,
+                        );
+                        tctx.typed
+                            .with_exp_attributes(typed_node, expr.pexp_attributes.clone())
+                    })
                 }
                 None => {
                     // Match OCaml Pexp_ifthenelse without else:
@@ -8088,17 +8129,20 @@ fn type_expect_with_recarg_unscoped<'a>(
                     let then_exp_type = typed_then.exp_type;
                     rue_unify(tctx, loc, then_exp_type, expected_ty, context)?;
 
-                    Ok(Expression::new(
-                        ExpressionDesc::Texp_ifthenelse(
-                            tctx.push_expr(typed_cond),
-                            tctx.push_expr(typed_then),
-                            None,
-                        ),
-                        loc,
-                        then_exp_type,
-                        exp_env_ref,
-                        expr.pexp_attributes.clone(),
-                    ))
+                    Ok({
+                        let typed_node = Expression::new(
+                            ExpressionDesc::Texp_ifthenelse(
+                                tctx.push_expr(typed_cond),
+                                tctx.push_expr(typed_then),
+                                None,
+                            ),
+                            loc,
+                            then_exp_type,
+                            exp_env_ref,
+                        );
+                        tctx.typed
+                            .with_exp_attributes(typed_node, expr.pexp_attributes.clone())
+                    })
                 }
             }
         }
@@ -8125,13 +8169,19 @@ fn type_expect_with_recarg_unscoped<'a>(
             let result_unit_ty = env.type_unit(ctx);
             rue_unify(tctx, loc, result_unit_ty, expected_ty, context)?;
 
-            Ok(Expression::new(
-                ExpressionDesc::Texp_while(tctx.push_expr(typed_cond), tctx.push_expr(typed_body)),
-                loc,
-                result_unit_ty,
-                exp_env_ref,
-                expr.pexp_attributes.clone(),
-            ))
+            Ok({
+                let typed_node = Expression::new(
+                    ExpressionDesc::Texp_while(
+                        tctx.push_expr(typed_cond),
+                        tctx.push_expr(typed_body),
+                    ),
+                    loc,
+                    result_unit_ty,
+                    exp_env_ref,
+                );
+                tctx.typed
+                    .with_exp_attributes(typed_node, expr.pexp_attributes.clone())
+            })
         }
 
         ED::Pexp_assert(e_idx) => {
@@ -8159,13 +8209,16 @@ fn type_expect_with_recarg_unscoped<'a>(
                 }
             };
 
-            Ok(Expression::new(
-                ExpressionDesc::Texp_assert(tctx.push_expr(typed_e)),
-                loc,
-                exp_type,
-                exp_env_ref,
-                expr.pexp_attributes.clone(),
-            ))
+            Ok({
+                let typed_node = Expression::new(
+                    ExpressionDesc::Texp_assert(tctx.push_expr(typed_e)),
+                    loc,
+                    exp_type,
+                    exp_env_ref,
+                );
+                tctx.typed
+                    .with_exp_attributes(typed_node, expr.pexp_attributes.clone())
+            })
         }
 
         ED::Pexp_array(exprs) => {
@@ -8195,13 +8248,16 @@ fn type_expect_with_recarg_unscoped<'a>(
             // `ty`, then stores `exp_type = instance env ty_expected` rather
             // than the temporary array node.
             let exp_type = crate::types::instance(ctx, expected_ty);
-            Ok(Expression::new(
-                ExpressionDesc::Texp_array(tctx.typed.push_exprs(typed_exprs)),
-                loc,
-                exp_type,
-                exp_env_ref,
-                expr.pexp_attributes.clone(),
-            ))
+            Ok({
+                let typed_node = Expression::new(
+                    ExpressionDesc::Texp_array(tctx.typed.push_exprs(typed_exprs)),
+                    loc,
+                    exp_type,
+                    exp_env_ref,
+                );
+                tctx.typed
+                    .with_exp_attributes(typed_node, expr.pexp_attributes.clone())
+            })
         }
 
         // compiler/ml/typecore.ml Pexp_template: validate every segment, type
@@ -8232,16 +8288,19 @@ fn type_expect_with_recarg_unscoped<'a>(
             ctx.end_def();
             let exp_type = crate::types::instance(ctx, env.type_string(ctx));
             rue_unify(tctx, loc, exp_type, expected_ty, context)?;
-            Ok(Expression::new(
-                ExpressionDesc::Texp_template {
-                    segments,
-                    values: tctx.typed.push_exprs(values),
-                },
-                loc,
-                exp_type,
-                exp_env_ref,
-                expr.pexp_attributes.clone(),
-            ))
+            Ok({
+                let typed_node = Expression::new(
+                    ExpressionDesc::Texp_template {
+                        segments,
+                        values: tctx.typed.push_exprs(values),
+                    },
+                    loc,
+                    exp_type,
+                    exp_env_ref,
+                );
+                tctx.typed
+                    .with_exp_attributes(typed_node, expr.pexp_attributes.clone())
+            })
         }
 
         // compiler/ml/typecore.ml Pexp_tagged_template: the tag must be a
@@ -8292,17 +8351,20 @@ fn type_expect_with_recarg_unscoped<'a>(
                 .iter()
                 .map(|source| tctx.arena.get_string(source.txt).to_string())
                 .collect();
-            Ok(Expression::new(
-                ExpressionDesc::Texp_tagged_template {
-                    tag: tctx.push_expr(tag),
-                    raw_sources,
-                    values: tctx.typed.push_exprs(values),
-                },
-                loc,
-                output_ty,
-                exp_env_ref,
-                expr.pexp_attributes.clone(),
-            ))
+            Ok({
+                let typed_node = Expression::new(
+                    ExpressionDesc::Texp_tagged_template {
+                        tag: tctx.push_expr(tag),
+                        raw_sources,
+                        values: tctx.typed.push_exprs(values),
+                    },
+                    loc,
+                    output_ty,
+                    exp_env_ref,
+                );
+                tctx.typed
+                    .with_exp_attributes(typed_node, expr.pexp_attributes.clone())
+            })
         }
 
         ED::Pexp_apply(inner) => {
@@ -9057,8 +9119,8 @@ fn instance_if_generic(ctx: &TypeContext, ty: TypeExprRef) -> TypeExprRef {
 /// the top-level node and preserves distinct physical identities in the typed tree.
 /// `proper_exp_loc` (typecore.ml:2260-2266): the location of the outermost
 /// constraint/coercion in `exp_extra`, else the expression's location.
-fn proper_exp_loc(exp: &Expression) -> LocIdx {
-    exp.exp_extra
+fn proper_exp_loc(ta: &TypedArena, exp: &Expression) -> LocIdx {
+    ta.exp_extra(exp)
         .iter()
         .find_map(|(extra, loc, _)| match extra {
             crate::types::typedtree::ExpExtra::Texp_constraint(_)
@@ -9318,18 +9380,21 @@ fn translate_unified_ops(
                 },
             ];
 
-            Some(Ok(Expression::new(
-                ExpressionDesc::Texp_apply {
-                    funct: tctx.push_expr(typed_funct.clone()),
-                    args: tctx.typed.push_apply_args(typed_args),
-                    partial: false,
-                    transformed_jsx,
-                },
-                loc,
-                result_ty,
-                tctx.type_ctx.store_typed_env(env),
-                attributes.to_vec().into(),
-            )))
+            Some(Ok({
+                let typed_node = Expression::new(
+                    ExpressionDesc::Texp_apply {
+                        funct: tctx.push_expr(typed_funct.clone()),
+                        args: tctx.typed.push_apply_args(typed_args),
+                        partial: false,
+                        transformed_jsx,
+                    },
+                    loc,
+                    result_ty,
+                    tctx.type_ctx.store_typed_env(env),
+                );
+                tctx.typed
+                    .with_exp_attributes(typed_node, attributes.to_vec().into())
+            }))
         }
         UnifiedOpForm::Unary if args.len() == 1 => {
             let arg_expr = tctx.arena.get_expr(args[0].1);
@@ -9365,18 +9430,21 @@ fn translate_unified_ops(
                 expression: Some(tctx.push_expr(arg)),
             }];
 
-            Some(Ok(Expression::new(
-                ExpressionDesc::Texp_apply {
-                    funct: tctx.push_expr(typed_funct.clone()),
-                    args: tctx.typed.push_apply_args(typed_args),
-                    partial: false,
-                    transformed_jsx,
-                },
-                loc,
-                result_ty,
-                tctx.type_ctx.store_typed_env(env),
-                attributes.to_vec().into(),
-            )))
+            Some(Ok({
+                let typed_node = Expression::new(
+                    ExpressionDesc::Texp_apply {
+                        funct: tctx.push_expr(typed_funct.clone()),
+                        args: tctx.typed.push_apply_args(typed_args),
+                        partial: false,
+                        transformed_jsx,
+                    },
+                    loc,
+                    result_ty,
+                    tctx.type_ctx.store_typed_env(env),
+                );
+                tctx.typed
+                    .with_exp_attributes(typed_node, attributes.to_vec().into())
+            }))
         }
         _ => None, // Wrong number of args for the form
     }
@@ -10190,7 +10258,6 @@ fn type_application(
                         wrapped_loc,
                         option_ty,
                         wrapped_env,
-                        Attributes::new(),
                     )
                 } else {
                     typed_arg
@@ -10214,7 +10281,6 @@ fn type_application(
                     none_loc,
                     option_ty,
                     tctx.type_ctx.store_typed_env(env),
-                    Attributes::new(),
                 );
                 typed_args.push(ApplyArg {
                     label,
@@ -10274,18 +10340,21 @@ fn type_application(
     // OCaml: rue { ... exp_type = ty_res; ... }
     rue_unify(tctx, loc, result_ty, expected_ty, context)?;
 
-    Ok(Expression::new(
-        ExpressionDesc::Texp_apply {
-            funct: tctx.push_expr(typed_funct),
-            args: tctx.typed.push_apply_args(typed_args),
-            partial,
-            transformed_jsx,
-        },
-        loc,
-        result_ty,
-        tctx.type_ctx.store_typed_env(env),
-        attributes.to_vec().into(),
-    ))
+    Ok({
+        let typed_node = Expression::new(
+            ExpressionDesc::Texp_apply {
+                funct: tctx.push_expr(typed_funct),
+                args: tctx.typed.push_apply_args(typed_args),
+                partial,
+                transformed_jsx,
+            },
+            loc,
+            result_ty,
+            tctx.type_ctx.store_typed_env(env),
+        );
+        tctx.typed
+            .with_exp_attributes(typed_node, attributes.to_vec().into())
+    })
 }
 
 fn extendable_fragile_match_path(path: &Path) -> bool {
@@ -10378,8 +10447,8 @@ fn finish_non_gadt_type_cases(
     Ok(partial)
 }
 
-fn pattern_from_variant_spread_attr(arena: &ParseArena, pat: &Pattern) -> bool {
-    pat.pat_attributes
+fn pattern_from_variant_spread_attr(arena: &ParseArena, attrs: &Attributes) -> bool {
+    attrs
         .iter()
         .any(|attr| arena.get_string(attr.0.txt) == PAT_FROM_VARIANT_SPREAD_ATTRIBUTE)
 }
@@ -11599,18 +11668,21 @@ fn type_match(
 
     // Keep sharing: match OCaml's `exp_type = instance env ty_expected`
     let result_ty = crate::types::instance(ctx, expected_ty);
-    Ok(Expression::new(
-        ExpressionDesc::Texp_match(
-            tctx.push_expr(typed_scrutinee),
-            tctx.typed.push_cases(typed_val_cases),
-            tctx.typed.push_cases(typed_exn_cases),
-            partial,
-        ),
-        loc,
-        result_ty,
-        tctx.type_ctx.store_typed_env(env),
-        attributes.to_vec().into(),
-    ))
+    Ok({
+        let typed_node = Expression::new(
+            ExpressionDesc::Texp_match(
+                tctx.push_expr(typed_scrutinee),
+                tctx.typed.push_cases(typed_val_cases),
+                tctx.typed.push_cases(typed_exn_cases),
+                partial,
+            ),
+            loc,
+            result_ty,
+            tctx.type_ctx.store_typed_env(env),
+        );
+        tctx.typed
+            .with_exp_attributes(typed_node, attributes.to_vec().into())
+    })
 }
 
 /// Finalize variant patterns: convert Reither fields to Rpresent in open rows.
@@ -12501,16 +12573,19 @@ fn type_try(
     // Keep sharing: use typed_body.exp_type instead of expected_ty
     // (matches OCaml: exp_type = body.exp_type)
     let result_ty = typed_body.exp_type;
-    Ok(Expression::new(
-        ExpressionDesc::Texp_try(
-            tctx.push_expr(typed_body),
-            tctx.typed.push_cases(typed_handlers),
-        ),
-        loc,
-        result_ty,
-        tctx.type_ctx.store_typed_env(env),
-        attributes.to_vec().into(),
-    ))
+    Ok({
+        let typed_node = Expression::new(
+            ExpressionDesc::Texp_try(
+                tctx.push_expr(typed_body),
+                tctx.typed.push_cases(typed_handlers),
+            ),
+            loc,
+            result_ty,
+            tctx.type_ctx.store_typed_env(env),
+        );
+        tctx.typed
+            .with_exp_attributes(typed_node, attributes.to_vec().into())
+    })
 }
 
 fn desugar_nary_function_defaults(
@@ -13070,7 +13145,6 @@ fn type_function_nary(
             loc,
             body_type,
             EnvRef(0),
-            Attributes::new(),
         );
     }
 
@@ -13172,17 +13246,20 @@ fn type_function_nary(
         }),
     );
     tctx.loop_depth = saved_loop_depth;
-    Ok(Expression::new(
-        ExpressionDesc::Texp_function {
-            params: tctx.typed.push_function_params(typed_params),
-            body: tctx.push_expr(typed_body),
-            async_: is_async,
-        },
-        loc,
-        exp_type,
-        EnvRef(0),
-        attributes.to_vec().into(),
-    ))
+    Ok({
+        let typed_node = Expression::new(
+            ExpressionDesc::Texp_function {
+                params: tctx.typed.push_function_params(typed_params),
+                body: tctx.push_expr(typed_body),
+                async_: is_async,
+            },
+            loc,
+            exp_type,
+            EnvRef(0),
+        );
+        tctx.typed
+            .with_exp_attributes(typed_node, attributes.to_vec().into())
+    })
 }
 
 fn type_for(
@@ -13299,20 +13376,23 @@ fn type_for(
     let result_unit_ty = env.type_unit(ctx);
     rue_unify(tctx, loc, result_unit_ty, expected_ty, context)?;
 
-    Ok(Expression::new(
-        ExpressionDesc::Texp_for(
-            loop_var_id,
-            tctx.typed.push_pattern(typed_pat),
-            tctx.push_expr(typed_start),
-            tctx.push_expr(typed_end),
-            direction,
-            tctx.push_expr(typed_body),
-        ),
-        loc,
-        result_unit_ty,
-        tctx.type_ctx.store_typed_env(env),
-        attributes.to_vec().into(),
-    ))
+    Ok({
+        let typed_node = Expression::new(
+            ExpressionDesc::Texp_for(
+                loop_var_id,
+                tctx.typed.push_pattern(typed_pat),
+                tctx.push_expr(typed_start),
+                tctx.push_expr(typed_end),
+                direction,
+                tctx.push_expr(typed_body),
+            ),
+            loc,
+            result_unit_ty,
+            tctx.type_ctx.store_typed_env(env),
+        );
+        tctx.typed
+            .with_exp_attributes(typed_node, attributes.to_vec().into())
+    })
 }
 
 /// Type check a `for ... of` / `for await ... of` loop. Mirrors
@@ -13477,13 +13557,16 @@ fn type_for_of(
         )
     };
 
-    Ok(Expression::new(
-        desc,
-        loc,
-        result_unit_ty,
-        tctx.type_ctx.store_typed_env(env),
-        attributes.to_vec().into(),
-    ))
+    Ok({
+        let typed_node = Expression::new(
+            desc,
+            loc,
+            result_unit_ty,
+            tctx.type_ctx.store_typed_env(env),
+        );
+        tctx.typed
+            .with_exp_attributes(typed_node, attributes.to_vec().into())
+    })
 }
 
 /// Type check constructor application.
@@ -13772,17 +13855,20 @@ fn type_construct(
         return Err(TypeCoreError::PrivateType { loc, ty: result_ty });
     }
 
-    Ok(Expression::new(
-        ExpressionDesc::Texp_construct(
-            *lid,
-            std::sync::Arc::new(cstr_desc),
-            tctx.typed.push_exprs(typed_args),
-        ),
-        loc,
-        result_ty,
-        tctx.type_ctx.store_typed_env(env),
-        attributes.to_vec().into(),
-    ))
+    Ok({
+        let typed_node = Expression::new(
+            ExpressionDesc::Texp_construct(
+                *lid,
+                std::sync::Arc::new(cstr_desc),
+                tctx.typed.push_exprs(typed_args),
+            ),
+            loc,
+            result_ty,
+            tctx.type_ctx.store_typed_env(env),
+        );
+        tctx.typed
+            .with_exp_attributes(typed_node, attributes.to_vec().into())
+    })
 }
 
 /// Type check polymorphic variant.
@@ -13838,13 +13924,19 @@ fn type_variant(
         if let Some((arg_ty, arg_ty0)) = expected_payload {
             let typed_arg = type_expect(tctx, env, arg_expr, arg_ty, None)?;
             unify_expression_types(tctx, loc, typed_arg.exp_type, arg_ty0, None)?;
-            return Ok(Expression::new(
-                ExpressionDesc::Texp_variant(label.to_string(), Some(tctx.push_expr(typed_arg))),
-                loc,
-                expected_inst,
-                tctx.type_ctx.store_typed_env(env),
-                attributes.to_vec().into(),
-            ));
+            return Ok({
+                let typed_node = Expression::new(
+                    ExpressionDesc::Texp_variant(
+                        label.to_string(),
+                        Some(tctx.push_expr(typed_arg)),
+                    ),
+                    loc,
+                    expected_inst,
+                    tctx.type_ctx.store_typed_env(env),
+                );
+                tctx.typed
+                    .with_exp_attributes(typed_node, attributes.to_vec().into())
+            });
         }
 
         let arg_ty = ctx.new_var(None);
@@ -13864,13 +13956,16 @@ fn type_variant(
         });
         // OCaml: rue { ... exp_type = variant_row; ... }
         rue_unify(tctx, loc, variant_ty, expected_ty, context)?;
-        return Ok(Expression::new(
-            ExpressionDesc::Texp_variant(label.to_string(), Some(tctx.push_expr(typed_arg))),
-            loc,
-            variant_ty,
-            tctx.type_ctx.store_typed_env(env),
-            attributes.to_vec().into(),
-        ));
+        return Ok({
+            let typed_node = Expression::new(
+                ExpressionDesc::Texp_variant(label.to_string(), Some(tctx.push_expr(typed_arg))),
+                loc,
+                variant_ty,
+                tctx.type_ctx.store_typed_env(env),
+            );
+            tctx.typed
+                .with_exp_attributes(typed_node, attributes.to_vec().into())
+        });
     }
 
     // Constant polymorphic variants (`#Tag`) use an explicit one-field open row.
@@ -13888,13 +13983,16 @@ fn type_variant(
     // OCaml: rue { ... exp_type = variant_row; ... }
     rue_unify(tctx, loc, variant_ty, expected_ty, context)?;
 
-    Ok(Expression::new(
-        ExpressionDesc::Texp_variant(label.to_string(), None),
-        loc,
-        variant_ty,
-        tctx.type_ctx.store_typed_env(env),
-        attributes.to_vec().into(),
-    ))
+    Ok({
+        let typed_node = Expression::new(
+            ExpressionDesc::Texp_variant(label.to_string(), None),
+            loc,
+            variant_ty,
+            tctx.type_ctx.store_typed_env(env),
+        );
+        tctx.typed
+            .with_exp_attributes(typed_node, attributes.to_vec().into())
+    })
 }
 
 fn record_labels_match_ids(
@@ -15107,7 +15205,6 @@ fn type_record(
                 wrapped_loc,
                 label_desc.lbl_arg,
                 wrapped_env,
-                Attributes::new(),
             )
         } else {
             typed_expr
@@ -15809,13 +15906,16 @@ fn type_record(
         }
     };
 
-    Ok(Expression::new(
-        exp_desc,
-        loc,
-        record_exp_ty,
-        tctx.type_ctx.store_typed_env(env),
-        attributes.to_vec().into(),
-    ))
+    Ok({
+        let typed_node = Expression::new(
+            exp_desc,
+            loc,
+            record_exp_ty,
+            tctx.type_ctx.store_typed_env(env),
+        );
+        tctx.typed
+            .with_exp_attributes(typed_node, attributes.to_vec().into())
+    })
 }
 
 fn attributes_include_jsx_component_props(attrs: &[crate::types::decl::Attribute]) -> bool {
@@ -16327,18 +16427,27 @@ fn type_field(
     // OCaml compiler/ml/typecore.ml:2993-3005 types `Pexp_field` by
     // `type_label_access`, `instance_label`, and `unify_exp`, then returns
     // `ty_arg` without recursively forcing paths inside the field argument type.
-    unify_expression_types(tctx, proper_exp_loc(&typed_record), ty_exp, ty_res, None)?;
-    Ok(Expression::new(
-        ExpressionDesc::Texp_field(
-            tctx.push_expr(typed_record),
-            *field_lid,
-            std::sync::Arc::new(label_desc),
-        ),
-        loc,
-        field_ty,
-        tctx.type_ctx.store_typed_env(env),
-        attributes.to_vec().into(),
-    ))
+    unify_expression_types(
+        tctx,
+        proper_exp_loc(&tctx.typed, &typed_record),
+        ty_exp,
+        ty_res,
+        None,
+    )?;
+    Ok({
+        let typed_node = Expression::new(
+            ExpressionDesc::Texp_field(
+                tctx.push_expr(typed_record),
+                *field_lid,
+                std::sync::Arc::new(label_desc),
+            ),
+            loc,
+            field_ty,
+            tctx.type_ctx.store_typed_env(env),
+        );
+        tctx.typed
+            .with_exp_attributes(typed_node, attributes.to_vec().into())
+    })
 }
 
 /// Type check field assignment.
@@ -16582,7 +16691,7 @@ fn type_setfield(
     // OCaml typecore.ml:2953: `unify_exp env record ty_record`.
     unify_expression_types(
         tctx,
-        proper_exp_loc(&typed_record),
+        proper_exp_loc(&tctx.typed, &typed_record),
         typed_record.exp_type,
         ty_record,
         None,
@@ -16618,18 +16727,21 @@ fn type_setfield(
     // Predef.type_unit }`, i.e. `unify_exp env exp (instance env ty_expected)`.
     rue_unify(tctx, loc, unit_ty, expected_ty, context)?;
 
-    Ok(Expression::new(
-        ExpressionDesc::Texp_setfield(
-            tctx.push_expr(typed_record),
-            *field_lid,
-            std::sync::Arc::new(label_desc),
-            tctx.push_expr(typed_value),
-        ),
-        loc,
-        unit_ty,
-        tctx.type_ctx.store_typed_env(env),
-        attributes.to_vec().into(),
-    ))
+    Ok({
+        let typed_node = Expression::new(
+            ExpressionDesc::Texp_setfield(
+                tctx.push_expr(typed_record),
+                *field_lid,
+                std::sync::Arc::new(label_desc),
+                tctx.push_expr(typed_value),
+            ),
+            loc,
+            unit_ty,
+            tctx.type_ctx.store_typed_env(env),
+        );
+        tctx.typed
+            .with_exp_attributes(typed_node, attributes.to_vec().into())
+    })
 }
 
 /// Type check type constraint.
@@ -16683,29 +16795,25 @@ fn type_constraint(
 
     let mut result = typed_inner;
     result.exp_type = result_ty;
-    let mut extras = Vec::with_capacity(result.exp_extra.len() + 1);
-    extras.push((
+    let extra = (
         crate::types::typedtree::ExpExtra::Texp_constraint(tctx.typed.push_core_type(typed_ctype)),
         loc,
         attributes.to_vec().into(),
-    ));
-    extras.extend(result.exp_extra);
-    result.exp_extra = extras.into();
+    );
+    tctx.typed.prepend_exp_extra(&mut result, extra);
     Ok(result)
 }
 
 /// OCaml stores expression extras with list-cons, so outer wrappers appear
 /// before inner wrappers in `exp_extra`.
 fn prepend_exp_extra(
+    ta: &mut TypedArena,
     mut expr: Expression,
     extra: crate::types::typedtree::ExpExtra,
     loc: LocIdx,
     attrs: Attributes,
 ) -> Expression {
-    let mut extras = Vec::with_capacity(expr.exp_extra.len() + 1);
-    extras.push((extra, loc, attrs));
-    extras.extend(expr.exp_extra);
-    expr.exp_extra = extras.into();
+    ta.prepend_exp_extra(&mut expr, (extra, loc, attrs));
     expr
 }
 
@@ -16795,11 +16903,13 @@ fn type_coerce(
 
     // Return the inner expression with the coercion as exp_extra
     // The expression type becomes the target type after coercion
+    let target = tctx.typed.push_core_type(to_typed_ctype);
     let mut result = prepend_exp_extra(
+        &mut tctx.typed,
         typed_inner,
         crate::types::typedtree::ExpExtra::Texp_coerce {
             source_type,
-            target: tctx.typed.push_core_type(to_typed_ctype),
+            target,
             target_type,
         },
         loc,
@@ -16907,6 +17017,7 @@ fn type_open(
 
     // Return expression with Texp_open in exp_extra (matching OCaml)
     Ok(prepend_exp_extra(
+        &mut tctx.typed,
         typed_body,
         crate::types::typedtree::ExpExtra::Texp_open(*override_flag, path, *lid, EnvRef(0)),
         loc,
@@ -17098,18 +17209,21 @@ fn type_await(
 
     // Return the expression - await just unwraps the promise
     // In JavaScript, this is a runtime operation
-    Ok(Expression::new(
-        ExpressionDesc::Texp_apply {
-            funct: tctx.push_expr(typed_inner),
-            args: crate::types::typedtree::TArgList::EMPTY, // Await is a special form, not a regular application
-            partial: false,
-            transformed_jsx: false,
-        },
-        loc,
-        expected_ty,
-        tctx.type_ctx.store_typed_env(env),
-        attributes.to_vec().into(),
-    ))
+    Ok({
+        let typed_node = Expression::new(
+            ExpressionDesc::Texp_apply {
+                funct: tctx.push_expr(typed_inner),
+                args: crate::types::typedtree::TArgList::EMPTY, // Await is a special form, not a regular application
+                partial: false,
+                transformed_jsx: false,
+            },
+            loc,
+            expected_ty,
+            tctx.type_ctx.store_typed_env(env),
+        );
+        tctx.typed
+            .with_exp_attributes(typed_node, attributes.to_vec().into())
+    })
 }
 
 /// typecore.ml `object_valid_fields`.
@@ -17214,19 +17328,22 @@ fn type_object_get(
 
     rue_unify(tctx, loc, field_ty, expected_ty, context)?;
 
-    Ok(Expression::new(
-        ExpressionDesc::Texp_object_get(
-            tctx.push_expr(typed_obj),
-            Located {
-                txt: field.txt.to_string(),
-                loc: field.loc,
-            },
-        ),
-        loc,
-        field_ty,
-        EnvRef(0),
-        attributes.to_vec().into(),
-    ))
+    Ok({
+        let typed_node = Expression::new(
+            ExpressionDesc::Texp_object_get(
+                tctx.push_expr(typed_obj),
+                Located {
+                    txt: field.txt.to_string(),
+                    loc: field.loc,
+                },
+            ),
+            loc,
+            field_ty,
+            EnvRef(0),
+        );
+        tctx.typed
+            .with_exp_attributes(typed_node, attributes.to_vec().into())
+    })
 }
 
 /// typecore.ml `Pexp_object_set`.
@@ -17278,20 +17395,23 @@ fn type_object_set(
     let value = type_object_field_value(tctx, env, svalue, typ)?;
     let unit_ty = env.type_unit(ctx);
     rue_unify(tctx, loc, unit_ty, expected_ty, context)?;
-    Ok(Expression::new(
-        ExpressionDesc::Texp_object_set(
-            tctx.push_expr(typed_obj),
-            Located {
-                txt: field.txt.to_string(),
-                loc: field.loc,
-            },
-            tctx.push_expr(value),
-        ),
-        loc,
-        unit_ty,
-        EnvRef(0),
-        attributes.to_vec().into(),
-    ))
+    Ok({
+        let typed_node = Expression::new(
+            ExpressionDesc::Texp_object_set(
+                tctx.push_expr(typed_obj),
+                Located {
+                    txt: field.txt.to_string(),
+                    loc: field.loc,
+                },
+                tctx.push_expr(value),
+            ),
+            loc,
+            unit_ty,
+            EnvRef(0),
+        );
+        tctx.typed
+            .with_exp_attributes(typed_node, attributes.to_vec().into())
+    })
 }
 
 /// typecore.ml `type_object_field_value`: introduce the right-hand side of an
@@ -17390,13 +17510,16 @@ fn type_object_literal(
     }
     let exp_type = ctx.new_type(TypeDesc::Tobject { fields: row });
     rue_unify(tctx, loc, exp_type, expected_ty, context)?;
-    Ok(Expression::new(
-        ExpressionDesc::Texp_object_literal(fields),
-        loc,
-        exp_type,
-        EnvRef(0),
-        attributes.to_vec().into(),
-    ))
+    Ok({
+        let typed_node = Expression::new(
+            ExpressionDesc::Texp_object_literal(fields),
+            loc,
+            exp_type,
+            EnvRef(0),
+        );
+        tctx.typed
+            .with_exp_attributes(typed_node, attributes.to_vec().into())
+    })
 }
 
 /// Type check let exception.
@@ -17628,16 +17751,19 @@ fn type_letexception(
     };
     let body_ty = typed_body.exp_type;
 
-    Ok(Expression::new(
-        ExpressionDesc::Texp_letexception(
-            tctx.typed.push_extension_constructor(typed_ext_constr),
-            tctx.push_expr(typed_body),
-        ),
-        loc,
-        body_ty,
-        tctx.type_ctx.store_typed_env(env),
-        attributes.to_vec().into(),
-    ))
+    Ok({
+        let typed_node = Expression::new(
+            ExpressionDesc::Texp_letexception(
+                tctx.typed.push_extension_constructor(typed_ext_constr),
+                tctx.push_expr(typed_body),
+            ),
+            loc,
+            body_ty,
+            tctx.type_ctx.store_typed_env(env),
+        );
+        tctx.typed
+            .with_exp_attributes(typed_node, attributes.to_vec().into())
+    })
 }
 
 /// Type check extension expression.
@@ -17706,13 +17832,16 @@ fn type_extension_expr(
         let ctx = tctx.type_ctx;
         let ty = ctx.new_generic_constr(crate::types::predef::path_extension_constructor(), vec![]);
         rue_unify(tctx, loc, ty, expected_ty, None)?;
-        return Ok(Expression::new(
-            ExpressionDesc::Texp_extension_constructor(constructor_lid, path),
-            loc,
-            ty,
-            ctx.store_typed_env(env),
-            attributes.to_vec().into(),
-        ));
+        return Ok({
+            let typed_node = Expression::new(
+                ExpressionDesc::Texp_extension_constructor(constructor_lid, path),
+                loc,
+                ty,
+                ctx.store_typed_env(env),
+            );
+            tctx.typed
+                .with_exp_attributes(typed_node, attributes.to_vec().into())
+        });
     }
 
     Err(builtin_extension_error(tctx.arena, extension))
@@ -18482,21 +18611,24 @@ fn type_letmodule(
     tctx.set_unify_env(&body_env);
     unify_expression_types(tctx, loc, letmodule_ty, rewritten_ty, None)?;
 
-    Ok(Expression::new(
-        crate::types::typedtree::ExpressionDesc::Texp_letmodule(
-            mod_id,
-            Located {
-                txt: mod_name_str.clone(),
-                loc: name.loc,
-            },
-            tctx.typed.push_module_expr(typed_mod),
-            tctx.push_expr(typed_body),
-        ),
-        loc,
-        letmodule_ty,
-        EnvRef(0),
-        attributes.to_vec().into(),
-    ))
+    Ok({
+        let typed_node = Expression::new(
+            crate::types::typedtree::ExpressionDesc::Texp_letmodule(
+                mod_id,
+                Located {
+                    txt: mod_name_str.clone(),
+                    loc: name.loc,
+                },
+                tctx.typed.push_module_expr(typed_mod),
+                tctx.push_expr(typed_body),
+            ),
+            loc,
+            letmodule_ty,
+            EnvRef(0),
+        );
+        tctx.typed
+            .with_exp_attributes(typed_node, attributes.to_vec().into())
+    })
 }
 
 fn pack_type_path_has_local_module_dependency(
@@ -18917,13 +19049,16 @@ fn type_pack(
     }
     rue_result?;
 
-    Ok(Expression::new(
-        ExpressionDesc::Texp_pack(tctx.typed.push_module_expr(wrapped_module)),
-        loc,
-        packed_type,
-        tctx.type_ctx.store_typed_env(env),
-        attributes.to_vec().into(),
-    ))
+    Ok({
+        let typed_node = Expression::new(
+            ExpressionDesc::Texp_pack(tctx.typed.push_module_expr(wrapped_module)),
+            loc,
+            packed_type,
+            tctx.type_ctx.store_typed_env(env),
+        );
+        tctx.typed
+            .with_exp_attributes(typed_node, attributes.to_vec().into())
+    })
 }
 
 /// The module type of `Pmod_unpack` on a module pattern variable, as typed
@@ -19063,7 +19198,6 @@ fn type_expect_with_module_unpacks(
         unpack.loc_idx,
         unpack_inst_ty,
         tctx.type_ctx.store_typed_env(env),
-        Attributes::new(),
     );
     let unpack_module = crate::types::typedtree::ModuleExpr {
         mod_desc: crate::types::typedtree::ModuleExprDesc::Tmod_unpack(
@@ -19101,18 +19235,21 @@ fn type_expect_with_module_unpacks(
         ));
     }
     let wrapped_ty = letmodule_ty;
-    Ok(Expression::new(
-        crate::types::typedtree::ExpressionDesc::Texp_letmodule(
-            letmod_id,
-            unpack.name.clone(),
-            tctx.typed.push_module_expr(unpack_module),
-            tctx.push_expr(typed_body),
-        ),
-        body.pexp_loc,
-        wrapped_ty,
-        tctx.type_ctx.store_typed_env(env),
-        modulepat_attrs.into(),
-    ))
+    Ok({
+        let typed_node = Expression::new(
+            crate::types::typedtree::ExpressionDesc::Texp_letmodule(
+                letmod_id,
+                unpack.name.clone(),
+                tctx.typed.push_module_expr(unpack_module),
+                tctx.push_expr(typed_body),
+            ),
+            body.pexp_loc,
+            wrapped_ty,
+            tctx.type_ctx.store_typed_env(env),
+        );
+        tctx.typed
+            .with_exp_attributes(typed_node, modulepat_attrs.into())
+    })
 }
 
 fn has_internal_expansive_attribute(
@@ -19130,7 +19267,7 @@ fn is_nonexpansive_expression(tctx: &TypeCheckContext<'_>, exp: TExprIdx) -> boo
 
 /// `Typecore.is_nonexpansive` on an expression that may not be stored yet.
 fn is_nonexpansive_node(tctx: &TypeCheckContext<'_>, exp: &Expression) -> bool {
-    if has_internal_expansive_attribute(tctx.arena, &exp.exp_attributes) {
+    if has_internal_expansive_attribute(tctx.arena, tctx.typed.exp_attributes(exp)) {
         return true;
     }
 
@@ -29693,8 +29830,8 @@ fn pm_row_of(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> crate::types::typ
     }
 }
 
-fn pm_has_dict_pattern_attribute(arena: &ParseArena, pat: &Pattern) -> bool {
-    pat.pat_attributes
+fn pm_has_dict_pattern_attribute(arena: &ParseArena, attrs: &Attributes) -> bool {
+    attrs
         .iter()
         .any(|attr| arena.get_string(attr.0.txt) == DICT_PATTERN_ATTRIBUTE)
 }
@@ -29825,12 +29962,12 @@ impl crate::types::parmatch::Oracle for TypecoreParmatchOracle<'_, '_> {
             .get_or_insert_with(|| ctx.new_type(TypeDesc::Ttuple(Default::default())))
     }
 
-    fn has_dict_pattern_attribute(&self, pat: &Pattern) -> bool {
-        pm_has_dict_pattern_attribute(self.tctx.arena, pat)
+    fn has_dict_pattern_attribute(&self, attrs: &Attributes) -> bool {
+        pm_has_dict_pattern_attribute(self.tctx.arena, attrs)
     }
 
-    fn is_pat_from_variant_spread(&self, pat: &Pattern) -> bool {
-        pattern_from_variant_spread_attr(self.tctx.arena, pat)
+    fn is_pat_from_variant_spread(&self, attrs: &Attributes) -> bool {
+        pattern_from_variant_spread_attr(self.tctx.arena, attrs)
     }
 
     fn is_predef_some_lid(&self, lid: LidentIdx) -> bool {
@@ -29960,12 +30097,12 @@ impl crate::types::parmatch::Oracle for TranslParmatchOracle<'_> {
             .get_or_insert_with(|| ctx.new_type(TypeDesc::Ttuple(Default::default())))
     }
 
-    fn has_dict_pattern_attribute(&self, pat: &Pattern) -> bool {
-        pm_has_dict_pattern_attribute(self.arena, pat)
+    fn has_dict_pattern_attribute(&self, attrs: &Attributes) -> bool {
+        pm_has_dict_pattern_attribute(self.arena, attrs)
     }
 
-    fn is_pat_from_variant_spread(&self, pat: &Pattern) -> bool {
-        pattern_from_variant_spread_attr(self.arena, pat)
+    fn is_pat_from_variant_spread(&self, attrs: &Attributes) -> bool {
+        pattern_from_variant_spread_attr(self.arena, attrs)
     }
 
     fn is_predef_some_lid(&self, lid: LidentIdx) -> bool {

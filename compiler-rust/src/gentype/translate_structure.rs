@@ -94,7 +94,7 @@ pub fn add_annotations_to_fields(
     let mut field = field.clone();
     field.name_js = crate::gentype::translate_type_declarations::rename_record_field(
         arena,
-        &ta.expr(expr).exp_attributes,
+        ta.exp_attributes(ta.expr(expr)),
         &field.name_js,
     );
     let mut fields = vec![field];

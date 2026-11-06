@@ -1612,7 +1612,7 @@ impl<'a> RawLambdaConverter<'a> {
 
     /// Mirrors `Translattribute.check_attribute` for expression attributes.
     fn check_expr_attribute(&mut self, expr: &Expression) {
-        for (located_name, _) in expr.exp_attributes.iter() {
+        for (located_name, _) in self.ta.exp_attributes(expr).iter() {
             let name = self.arena.get_string(located_name.txt);
             match name {
                 "inline" => {
@@ -5847,7 +5847,7 @@ impl<'a> RawLambdaConverter<'a> {
     }
 
     fn convert_expr_raw(&mut self, expr: &Expression) -> RawLambda {
-        self.with_warning_scope(&expr.exp_attributes, |this| {
+        self.with_warning_scope(self.ta.exp_attributes(expr), |this| {
             this.convert_expr_raw_unscoped(expr)
         })
     }
@@ -5908,8 +5908,8 @@ impl<'a> RawLambdaConverter<'a> {
                 async_,
             } => {
                 let directive =
-                    Self::get_directive_attribute_from(&expr.exp_attributes, self.arena);
-                let inline = self.get_inline_attribute_from(&expr.exp_attributes);
+                    Self::get_directive_attribute_from(self.ta.exp_attributes(expr), self.arena);
+                let inline = self.get_inline_attribute_from(self.ta.exp_attributes(expr));
                 self.convert_nary_function_raw(
                     Some(expr),
                     self.ta.function_params(*params),
@@ -7360,7 +7360,8 @@ impl<'a> RawLambdaConverter<'a> {
                         return if rest.is_empty() {
                             base
                         } else {
-                            let inlined = self.get_inlined_attribute_from(&funct.exp_attributes);
+                            let inlined =
+                                self.get_inlined_attribute_from(self.ta.exp_attributes(funct));
                             self.transl_apply_raw(base, rest, loc, transformed_jsx, None, inlined)
                         };
                     }
@@ -7424,14 +7425,15 @@ impl<'a> RawLambdaConverter<'a> {
                     return if rest.is_empty() {
                         base
                     } else {
-                        let inlined = self.get_inlined_attribute_from(&funct.exp_attributes);
+                        let inlined =
+                            self.get_inlined_attribute_from(self.ta.exp_attributes(funct));
                         self.transl_apply_raw(base, rest, loc, transformed_jsx, None, inlined)
                     };
                 }
             }
         }
 
-        let inlined = self.get_inlined_attribute_from(&funct.exp_attributes);
+        let inlined = self.get_inlined_attribute_from(self.ta.exp_attributes(funct));
         let funct_lam =
             self.with_inlined_attribute_check_suppressed(|this| this.convert_expr_raw(funct));
         let uncurried_partial_application = if partial {
@@ -7859,7 +7861,6 @@ mod tests {
             LocIdx::none(),
             crate::types::TypeExprRef(0),
             EnvRef(0),
-            Attributes::new(),
         );
         let cstr = crate::types::ConstructorDescription {
             cstr_name: "B".to_string(),
@@ -7962,14 +7963,12 @@ mod tests {
                 LocIdx::none(),
                 crate::types::TypeExprRef(0),
                 EnvRef(0),
-                Attributes::new(),
             )),
             ta.push_expr(Expression::new(
                 ExpressionDesc::Texp_constant(TConstant::Int(handler_value)),
                 LocIdx::none(),
                 crate::types::TypeExprRef(0),
                 EnvRef(0),
-                Attributes::new(),
             )),
         );
         let body = ta.push_expr(Expression::new(
@@ -7977,7 +7976,6 @@ mod tests {
             LocIdx::none(),
             crate::types::TypeExprRef(0),
             EnvRef(0),
-            Attributes::new(),
         ));
         let cases = ta.push_cases([case]);
         ta.push_expr(Expression::new(
@@ -7985,7 +7983,6 @@ mod tests {
             LocIdx::none(),
             crate::types::TypeExprRef(0),
             EnvRef(0),
-            Attributes::new(),
         ))
     }
 
@@ -8000,7 +7997,6 @@ mod tests {
                 LocIdx::none(),
                 crate::types::TypeExprRef(0),
                 EnvRef(0),
-                Attributes::new(),
             )),
             vb_expr: expr,
             vb_attributes: Attributes::new(),
@@ -8042,7 +8038,6 @@ mod tests {
             LocIdx::none(),
             any_ty,
             EnvRef(0),
-            Attributes::new(),
         );
         let param_pat = typed_arena.push_pattern(param_pat);
         let expr = Expression::new(
@@ -8059,15 +8054,14 @@ mod tests {
                     LocIdx::none(),
                     any_ty,
                     EnvRef(0),
-                    Attributes::new(),
                 )),
                 async_: false,
             },
             LocIdx::none(),
             any_ty,
             EnvRef(0),
-            directive_attrs,
         );
+        let expr = typed_arena.with_exp_attributes(expr, directive_attrs);
 
         let mut converter = RawLambdaConverter::new(&arena, &typed_arena, &ctx, &env);
         let RawLambda::Lfunction(func) = converter.convert_expr_raw(&expr) else {
@@ -8323,7 +8317,6 @@ mod tests {
             LocIdx::none(),
             crate::types::TypeExprRef(0),
             EnvRef(0),
-            Attributes::new(),
         );
 
         let id_gen = IdGenerator::new();

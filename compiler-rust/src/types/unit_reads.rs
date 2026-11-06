@@ -124,7 +124,7 @@ impl<'a> TastIterator<'a> for Collector<'a> {
     }
 
     fn expr(&mut self, e: &Expression) {
-        for (extra, _, _) in e.exp_extra.iter() {
+        for (extra, _, _) in self.ta.exp_extra(e).iter() {
             if let ExpExtra::Texp_open(_, path, _, _) = extra {
                 self.path(path, Kind::Module);
             }
@@ -149,7 +149,7 @@ impl<'a> TastIterator<'a> for Collector<'a> {
     }
 
     fn pat(&mut self, p: &Pattern) {
-        for (extra, _, _) in p.pat_extra.iter() {
+        for (extra, _, _) in self.ta.pat_extra(p).iter() {
             if let PatExtra::Tpat_type(path, _) = extra {
                 self.path(path, Kind::Type);
             }

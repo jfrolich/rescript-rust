@@ -423,7 +423,6 @@ static OMEGA: std::sync::LazyLock<Pattern> = std::sync::LazyLock::new(|| {
         LocIdx::none(),
         TypeExprRef(0),
         EnvRef(0),
-        Attributes::new(),
     )
 });
 
@@ -455,7 +454,7 @@ fn bump_raise_count(next_raise_count: &mut i32) -> i32 {
 
 /// Make a pattern with given desc, type, and env.
 fn make_pat(desc: PatternDesc, ty: TypeExprRef, env: EnvRef) -> Pattern {
-    Pattern::new(desc, LocIdx::none(), ty, env, Attributes::new())
+    Pattern::new(desc, LocIdx::none(), ty, env)
 }
 
 /// Compare two typed constants.
@@ -746,10 +745,9 @@ fn with_desc(q: &Pattern, pat_desc: PatternDesc) -> Pattern {
     Pattern {
         pat_desc,
         pat_loc: q.pat_loc,
-        pat_extra: q.pat_extra.clone(),
+        pat_cold: q.pat_cold,
         pat_type: q.pat_type,
         pat_env: q.pat_env,
-        pat_attributes: q.pat_attributes.clone(),
     }
 }
 
@@ -5111,10 +5109,9 @@ fn matcher_constr_arity1<'p>(
                         let or_pat = Pattern {
                             pat_desc: PatternDesc::Tpat_or(pa.handle(a1), pa.handle(a2), None),
                             pat_loc: LocIdx::none(),
-                            pat_extra: Default::default(),
+                            pat_cold: None,
                             pat_type: a1.pat_type,
                             pat_env: a1.pat_env,
-                            pat_attributes: Attributes::new(),
                         };
                         let mut result = vec![&*pa.alloc(or_pat)];
                         result.extend(rem.iter().cloned());

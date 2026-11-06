@@ -74,10 +74,10 @@ pub(crate) trait Oracle {
     fn placeholder_lid(&self) -> LidentIdx;
     /// `Ctype.none`.
     fn none_type(&mut self) -> TypeExprRef;
-    /// Whether the pattern carries the `res.dictPattern` attribute.
-    fn has_dict_pattern_attribute(&self, pat: &Pattern) -> bool;
-    /// Whether the pattern carries `res.patFromVariantSpread`.
-    fn is_pat_from_variant_spread(&self, pat: &Pattern) -> bool;
+    /// Whether pattern attributes include `res.dictPattern`.
+    fn has_dict_pattern_attribute(&self, attrs: &crate::parser::ast::Attributes) -> bool;
+    /// Whether pattern attributes include `res.patFromVariantSpread`.
+    fn is_pat_from_variant_spread(&self, attrs: &crate::parser::ast::Attributes) -> bool;
     /// Whether `lid` is `Ldot (Lident "*predef*", "Some")`.
     fn is_predef_some_lid(&self, lid: LidentIdx) -> bool;
     /// Whether a constructor's runtime representation is a block whose
@@ -2407,9 +2407,11 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
         };
         let attributes = node
             .src
-            .map(|src| src.pat_attributes.clone())
+            .map(|src| self.ta.pat_attributes(src).clone())
             .unwrap_or_default();
-        Pattern::new(desc, node.loc, ty, node.env, attributes)
+        self.oracle
+            .scratch_mut()
+            .with_pat_attributes(Pattern::new(desc, node.loc, ty, node.env), attributes)
     }
 
     /// `initial_matrix casel` (parmatch.ml:1783-1787).
@@ -2627,9 +2629,10 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
     }
 
     fn node_has_dict_pattern(&self, p: P) -> bool {
-        self.node(p)
-            .src
-            .is_some_and(|src| self.oracle.has_dict_pattern_attribute(src))
+        self.node(p).src.is_some_and(|src| {
+            self.oracle
+                .has_dict_pattern_attribute(self.ta.pat_attributes(src))
+        })
     }
 
     /// `contains_dict_pattern` (parmatch.ml:1960-1968) on a node.
@@ -2778,9 +2781,10 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                 Answer::Upartial(ps) => {
                     for p in ps {
                         let node = self.node(p);
-                        let from_spread = node
-                            .src
-                            .is_some_and(|src| self.oracle.is_pat_from_variant_spread(src));
+                        let from_spread = node.src.is_some_and(|src| {
+                            self.oracle
+                                .is_pat_from_variant_spread(self.ta.pat_attributes(src))
+                        });
                         if !from_spread {
                             let loc = node.loc;
                             self.oracle.warn(loc, ParmatchWarning::UnusedPat);

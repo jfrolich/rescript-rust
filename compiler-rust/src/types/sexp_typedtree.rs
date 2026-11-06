@@ -597,7 +597,7 @@ fn sexp_pattern(arena: &ParseArena, ctx: &TypeContext, cx: Cx<'_>, p: &Pattern) 
         vec![]
     };
     let mut extras = Vec::new();
-    for (extra, loc, attrs) in p.pat_extra.iter() {
+    for (extra, loc, attrs) in cx.ta.pat_extra(p).iter() {
         extras.push(sexp_pat_extra(arena, ctx, cx, extra, *loc, attrs));
     }
     let desc = sexp_pattern_desc(arena, ctx, cx, &p.pat_desc);
@@ -743,12 +743,12 @@ fn sexp_expression(arena: &ParseArena, ctx: &TypeContext, cx: Cx<'_>, e: TExprId
         vec![]
     };
     let mut extras = Vec::new();
-    for (extra, loc, attrs) in e.exp_extra.iter() {
+    for (extra, loc, attrs) in cx.ta.exp_extra(e).iter() {
         extras.push(sexp_exp_extra(arena, ctx, cx, extra, *loc, attrs));
     }
     let desc = sexp_expression_desc(arena, ctx, cx, &e.exp_desc, e.exp_type);
     let ty = sexp_type_expr(arena, ctx, e.exp_type);
-    let attrs = sexp_attributes(arena, cx, &e.exp_attributes);
+    let attrs = sexp_attributes(arena, cx, cx.ta.exp_attributes(e));
 
     let mut items = vec![Sexp::atom("expression")];
     items.extend(loc_sexp);

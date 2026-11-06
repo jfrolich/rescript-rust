@@ -635,9 +635,14 @@ impl Processor<'_> {
                 let stamp = ident.binding_time();
                 // Detect first-class module unpack patterns and register them
                 // as modules.
-                let unpack_loc = pat.pat_extra.iter().find_map(|(extra, loc, _)| {
-                    matches!(extra, tt::PatExtra::Tpat_unpack).then_some(*loc)
-                });
+                let unpack_loc = self
+                    .ctx
+                    .ta
+                    .pat_extra(pat)
+                    .iter()
+                    .find_map(|(extra, loc, _)| {
+                        matches!(extra, tt::PatExtra::Tpat_unpack).then_some(*loc)
+                    });
                 let unpacked_path = unpack_loc.and_then(|_| {
                     match &*self.ctx.types.get_desc(dig(self.ctx.types, pat.pat_type)) {
                         TypeDesc::Tpackage { path, .. } => Some(path.clone()),

@@ -18,10 +18,12 @@ use std::num::NonZeroU32;
 use crate::parse_arena::ArenaList;
 
 use super::typedtree::{
-    ApplyArg, Case, Expression, ExtensionConstructor, FunctionParam, ModuleExpr, ModuleType,
-    Pattern, RecordField, StructureItem, TypedCoreType, TypedSignatureItem, TypedValueDescription,
-    ValueBinding,
+    ApplyArg, Case, ExpExtra, Expression, ExtensionConstructor, FunctionParam, ModuleExpr,
+    ModuleType, PatExtra, Pattern, RecordField, StructureItem, TypedCoreType, TypedSignatureItem,
+    TypedValueDescription, ValueBinding,
 };
+use crate::parse_arena::LocIdx;
+use crate::parser::ast::Attributes;
 
 macro_rules! arena_handle {
     ($(#[$doc:meta])* $name:ident) => {
@@ -66,6 +68,38 @@ arena_handle!(
     /// Handle of a typed pattern in a [`TypedArena`].
     TPatIdx
 );
+
+arena_handle!(
+    /// Handle of the cold data (extras and attributes) of an expression.
+    TExpColdIdx
+);
+
+arena_handle!(
+    /// Handle of the cold data (extras and attributes) of a pattern.
+    TPatColdIdx
+);
+
+/// One `exp_extra` entry: the wrapper, its location and its attributes.
+pub type ExpExtraItem = (ExpExtra, LocIdx, Attributes);
+
+/// One `pat_extra` entry: the wrapper, its location and its attributes.
+pub type PatExtraItem = (PatExtra, LocIdx, Attributes);
+
+/// The rarely present fields of an expression (`exp_extra`,
+/// `exp_attributes`), kept out of the node. Only nodes with either one get
+/// a record.
+#[derive(Debug, Clone, Default)]
+pub struct ExpCold {
+    extra: Vec<ExpExtraItem>,
+    attributes: Attributes,
+}
+
+/// The rarely present fields of a pattern (`pat_extra`, `pat_attributes`).
+#[derive(Debug, Clone, Default)]
+pub struct PatCold {
+    extra: Vec<PatExtraItem>,
+    attributes: Attributes,
+}
 
 arena_handle!(
     /// Handle of a typed extension constructor (`exception` or `type t +=`
@@ -249,6 +283,123 @@ pub struct TypedArena {
     record_fields: ListPool<RecordField>,
     structure_items: ListPool<StructureItem>,
     signature_items: ListPool<TypedSignatureItem>,
+    exp_colds: Vec<ExpCold>,
+    pat_colds: Vec<PatCold>,
+}
+
+/// Accessors for the cold data of expressions and patterns. Records are
+/// never updated in place: a node copy shares its record, so each change
+/// stores a new one, which keeps OCaml's value semantics for
+/// `exp_extra`/`pat_extra` (`compiler/ml/typedtree.ml`).
+impl TypedArena {
+    /// `exp_extra`, outermost wrapper first.
+    #[inline]
+    pub fn exp_extra(&self, e: &Expression) -> &[ExpExtraItem] {
+        match e.exp_cold {
+            Some(idx) => &self.exp_colds[idx.index()].extra,
+            None => &[],
+        }
+    }
+
+    /// `exp_attributes`.
+    #[inline]
+    pub fn exp_attributes(&self, e: &Expression) -> &Attributes {
+        match e.exp_cold {
+            Some(idx) => &self.exp_colds[idx.index()].attributes,
+            None => &Attributes::EMPTY,
+        }
+    }
+
+    fn update_exp_cold(&mut self, e: &mut Expression, f: impl FnOnce(&mut ExpCold)) {
+        let mut cold = match e.exp_cold {
+            Some(idx) => self.exp_colds[idx.index()].clone(),
+            None => ExpCold::default(),
+        };
+        f(&mut cold);
+        e.exp_cold = if cold.extra.is_empty() && cold.attributes.is_empty() {
+            None
+        } else {
+            let idx = TExpColdIdx::from_index(self.exp_colds.len());
+            self.exp_colds.push(cold);
+            Some(idx)
+        };
+    }
+
+    /// `e` with `exp_attributes` set to `attributes`.
+    pub fn with_exp_attributes(&mut self, mut e: Expression, attributes: Attributes) -> Expression {
+        if attributes.is_empty() && e.exp_cold.is_none() {
+            return e;
+        }
+        self.update_exp_cold(&mut e, |cold| cold.attributes = attributes);
+        e
+    }
+
+    /// Add an innermost `exp_extra` wrapper.
+    pub fn push_exp_extra(&mut self, e: &mut Expression, item: ExpExtraItem) {
+        self.update_exp_cold(e, |cold| cold.extra.push(item));
+    }
+
+    /// Add an outermost `exp_extra` wrapper.
+    pub fn prepend_exp_extra(&mut self, e: &mut Expression, item: ExpExtraItem) {
+        self.update_exp_cold(e, |cold| cold.extra.insert(0, item));
+    }
+
+    /// `pat_extra`, outermost wrapper first.
+    #[inline]
+    pub fn pat_extra(&self, p: &Pattern) -> &[PatExtraItem] {
+        match p.pat_cold {
+            Some(idx) => &self.pat_colds[idx.index()].extra,
+            None => &[],
+        }
+    }
+
+    /// `pat_attributes`.
+    #[inline]
+    pub fn pat_attributes(&self, p: &Pattern) -> &Attributes {
+        match p.pat_cold {
+            Some(idx) => &self.pat_colds[idx.index()].attributes,
+            None => &Attributes::EMPTY,
+        }
+    }
+
+    fn update_pat_cold(&mut self, p: &mut Pattern, f: impl FnOnce(&mut PatCold)) {
+        let mut cold = match p.pat_cold {
+            Some(idx) => self.pat_colds[idx.index()].clone(),
+            None => PatCold::default(),
+        };
+        f(&mut cold);
+        p.pat_cold = if cold.extra.is_empty() && cold.attributes.is_empty() {
+            None
+        } else {
+            let idx = TPatColdIdx::from_index(self.pat_colds.len());
+            self.pat_colds.push(cold);
+            Some(idx)
+        };
+    }
+
+    /// `p` with `pat_attributes` set to `attributes`.
+    pub fn with_pat_attributes(&mut self, mut p: Pattern, attributes: Attributes) -> Pattern {
+        if attributes.is_empty() && p.pat_cold.is_none() {
+            return p;
+        }
+        self.update_pat_cold(&mut p, |cold| cold.attributes = attributes);
+        p
+    }
+
+    /// Add an innermost `pat_extra` wrapper.
+    pub fn push_pat_extra(&mut self, p: &mut Pattern, item: PatExtraItem) {
+        self.update_pat_cold(p, |cold| cold.extra.push(item));
+    }
+
+    /// Replace `pat_extra`.
+    pub fn set_pat_extra(&mut self, p: &mut Pattern, extra: Vec<PatExtraItem>) {
+        self.update_pat_cold(p, |cold| cold.extra = extra);
+    }
+
+    /// Add an outermost `pat_extra` wrapper.
+    pub fn prepend_pat_extra(&mut self, p: &mut Pattern, item: PatExtraItem) {
+        self.update_pat_cold(p, |cold| cold.extra.insert(0, item));
+    }
 }
 
 macro_rules! list_pool_accessors {
