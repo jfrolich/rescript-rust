@@ -1074,14 +1074,16 @@ fn print_extra_type_clash_help_by_types(
         if let Some(string_value) = extract_string_constant(ctx, &text) {
             let variant_constructors: Vec<String> =
                 row.row_fields.iter().map(|(l, _)| l.to_string()).collect();
-            let reprinted = reprint_expr_at_loc(ctx, arena, source, loc, |_, exp| {
+            let reprinted = reprint_expr_at_loc(ctx, arena, source, loc, |a, exp| {
                 let crate::parser::ast::ExpressionDesc::Pexp_constant(c) = &exp.pexp_desc else {
                     return None;
                 };
                 let crate::parser::ast::Constant::String(payload) = &*c else {
                     return None;
                 };
-                let s = payload.semantic(arena).to_string();
+                // The constant was re-parsed into `a`; its string index means
+                // nothing in the module's own arena.
+                let s = payload.semantic(a).to_string();
                 Some(crate::parser::ast::Expression {
                     pexp_desc: crate::parser::ast::ExpressionDesc::Pexp_variant(Box::new((
                         std::borrow::Cow::Owned(s),
@@ -2161,4 +2163,33 @@ pub(super) fn print_explain_unbound_type(
     printer.pp_type_expr(ppf, tv);
     ppf.str(" is unbound");
     ppf.close_box();
+}
+
+#[cfg(test)]
+mod tests {
+    /// The string-to-polymorphic-variant hint re-parses the constant into its
+    /// own arena; the suggested constructor must come from that arena.
+    #[test]
+    fn string_constant_hint_names_the_matching_polymorphic_variant() {
+        let runtime = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo root")
+            .join("node_modules")
+            .join("@rescript")
+            .join("runtime");
+        let options = crate::driver::CompilerOptions {
+            runtime_path: Some(runtime),
+            ..crate::driver::CompilerOptions::default()
+        };
+        let source = "let doStuff = (b: [#ONE | #TWO]) => b\n\nlet x = doStuff(\"ONE\")\n";
+        let err = crate::driver::compile_source_to_js_with_options(source, "A.res", &options)
+            .expect_err("a string is not a polymorphic variant");
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("matches one of the expected polymorphic variant"),
+            "{message}"
+        );
+        assert!(message.contains("#ONE"), "{message}");
+        assert!(!message.contains("#doStuff"), "{message}");
+    }
 }
