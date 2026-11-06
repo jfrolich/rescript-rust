@@ -600,8 +600,9 @@ pub struct RawLambdaConverter<'a> {
     preserve_expanded_sparse_records: bool,
     /// `!Clflags.jsx_preserve`: JSX calls become `Pjsx` elements.
     jsx_preserve: bool,
-    hoisted_functions: Vec<crate::lambda::HoistedFunction>,
-    hoisted_exports: Vec<crate::lambda::HoistedExport>,
+    /// `Translmod.implementation.flat_make_paths`, set by the driver from the
+    /// final signature.
+    flat_make_paths: Vec<crate::lambda::FlatMakePath>,
     /// Location handles attached to the nodes this conversion builds.
     lam_locs: crate::raw_lambda::loc::LamLocBuilder,
 }
@@ -630,8 +631,7 @@ impl<'a> RawLambdaConverter<'a> {
             warning_config: WarningConfig::new(),
             preserve_expanded_sparse_records: false,
             jsx_preserve: false,
-            hoisted_functions: Vec::new(),
-            hoisted_exports: Vec::new(),
+            flat_make_paths: Vec::new(),
             lam_locs: crate::raw_lambda::loc::LamLocBuilder::new(arena),
         }
     }
@@ -660,8 +660,7 @@ impl<'a> RawLambdaConverter<'a> {
             warning_config: WarningConfig::new(),
             preserve_expanded_sparse_records: false,
             jsx_preserve: false,
-            hoisted_functions: Vec::new(),
-            hoisted_exports: Vec::new(),
+            flat_make_paths: Vec::new(),
             lam_locs: crate::raw_lambda::loc::LamLocBuilder::new(arena),
         }
     }
@@ -691,8 +690,7 @@ impl<'a> RawLambdaConverter<'a> {
             warning_config: WarningConfig::new(),
             preserve_expanded_sparse_records: false,
             jsx_preserve: false,
-            hoisted_functions: Vec::new(),
-            hoisted_exports: Vec::new(),
+            flat_make_paths: Vec::new(),
             lam_locs: crate::raw_lambda::loc::LamLocBuilder::new(arena),
         }
     }
@@ -723,8 +721,7 @@ impl<'a> RawLambdaConverter<'a> {
             warning_config: WarningConfig::new(),
             preserve_expanded_sparse_records: false,
             jsx_preserve: false,
-            hoisted_functions: Vec::new(),
-            hoisted_exports: Vec::new(),
+            flat_make_paths: Vec::new(),
             lam_locs: crate::raw_lambda::loc::LamLocBuilder::new(arena),
         }
     }
@@ -784,12 +781,21 @@ impl<'a> RawLambdaConverter<'a> {
         std::mem::take(&mut self.warnings)
     }
 
-    pub fn take_hoisted_functions(&mut self) -> Vec<crate::lambda::HoistedFunction> {
-        std::mem::take(&mut self.hoisted_functions)
+    /// `Translmod.flat_make_paths final_env signature`, computed by the
+    /// caller from the unit's final signature once translation is done (as
+    /// `Translmod.transl_implementation` does), and checked against the
+    /// export list of the translated `lam`.
+    pub fn set_flat_make_paths(
+        &mut self,
+        lam: &RawLambda,
+        paths: Vec<crate::lambda::FlatMakePath>,
+    ) {
+        self.flat_make_paths = paths;
+        self.check_flat_make_exports(lam);
     }
 
-    pub fn take_hoisted_exports(&mut self) -> Vec<crate::lambda::HoistedExport> {
-        std::mem::take(&mut self.hoisted_exports)
+    pub fn take_flat_make_paths(&mut self) -> Vec<crate::lambda::FlatMakePath> {
+        std::mem::take(&mut self.flat_make_paths)
     }
 
     fn report_unknown_builtin_primitive(&mut self, loc: SrcLoc, prim_name: &str) {
@@ -1110,22 +1116,12 @@ impl<'a> RawLambdaConverter<'a> {
         }
     }
 
-    /// The node handle of a hoisted-function location, resolved back to its
-    /// arena index for warnings (`LocIdx::none` without coordinates).
-    fn loc_idx_for_lam_loc(&self, loc: LamLoc) -> LocIdx {
-        match self.lam_locs.get(loc) {
-            Some(loc) => self.loc_idx_for_location(&loc),
-            None => self.arena.none_loc(),
-        }
-    }
-
     fn loc_arena(&self) -> crate::raw_lambda::loc::LocArena<'_> {
         crate::raw_lambda::loc::LocArena::new(self.arena, &self.lam_locs)
     }
 
-    /// The table resolving every location handle in the converted Lambda
-    /// (and the hoisted functions). Location-free arenas give an opaque
-    /// table without coordinate rows.
+    /// The table resolving every location handle in the converted Lambda.
+    /// Location-free arenas give an opaque table without coordinate rows.
     pub fn take_lam_locs(&self) -> crate::lambda::LamLocTable {
         self.lam_locs.take_table(self.arena)
     }
@@ -1403,111 +1399,6 @@ impl<'a> RawLambdaConverter<'a> {
         rootpath
             .as_ref()
             .map(|path| crate::types::Path::pdot(path.clone(), field.name().to_string()))
-    }
-
-    fn loc_idx_for_location(&self, loc: &Location) -> LocIdx {
-        (0..self.arena.location_count())
-            .map(|index| LocIdx(index as u32))
-            .find(|index| self.arena.to_location(*index) == *loc)
-            .unwrap_or_else(|| self.arena.none_loc())
-    }
-
-    /// Mirrors `Translcore.mark_js_hoisted_pattern` and
-    /// `Translmod.js_hoist_handler` from upstream 8bf91cb18.
-    fn mark_js_hoisted_pattern(
-        &mut self,
-        rootpath: &Option<crate::types::Path>,
-        attrs: &crate::parser::ast::Attributes,
-        pat: &Pattern,
-        lam: &RawLambda,
-        target_loc: LocIdx,
-    ) {
-        // `Translattribute.find_attribute` (translattribute.ml:28-38): a
-        // repeated attribute reports warning 54 at the second one and counts
-        // as absent.
-        let mut matching = attrs
-            .iter()
-            .filter(|(name, _)| self.arena.get_string(name.txt) == "res.hoistedFunction");
-        let Some((attr_name, payload)) = matching.next() else {
-            return;
-        };
-        if let Some((second, _)) = matching.next() {
-            self.report_warning(
-                second.loc,
-                Warning::DuplicatedAttribute {
-                    name: "res.hoistedFunction".to_string(),
-                },
-            );
-            return;
-        }
-        let warning_loc = attr_name.loc;
-        if !matches!(payload, crate::parser::ast::Payload::PStr(items) if items.is_empty()) {
-            self.report_warning(
-                warning_loc,
-                Warning::AttributePayload {
-                    attr: "res.hoistedFunction".to_string(),
-                    message: "This attribute does not accept a payload".to_string(),
-                },
-            );
-            return;
-        }
-        let binding = match (&pat.pat_desc, lam) {
-            (PatternDesc::Tpat_var(id, _), RawLambda::Lfunction(_)) => *id,
-            (PatternDesc::Tpat_alias(inner, id, _), RawLambda::Lfunction(_))
-                if matches!(inner.pat_desc, PatternDesc::Tpat_any) =>
-            {
-                *id
-            }
-            _ => {
-                self.report_warning(
-                    warning_loc,
-                    Warning::MisplacedAttribute {
-                        name: "res.hoistedFunction".to_string(),
-                    },
-                );
-                return;
-            }
-        };
-        let Some(path) = rootpath.as_ref() else {
-            self.report_warning(
-                warning_loc,
-                Warning::MisplacedAttribute {
-                    name: "res.hoistedFunction".to_string(),
-                },
-            );
-            return;
-        };
-        let Ok((_head, segments)) = path.flatten() else {
-            self.report_warning(
-                warning_loc,
-                Warning::MisplacedAttribute {
-                    name: "res.hoistedFunction".to_string(),
-                },
-            );
-            return;
-        };
-        if segments.is_empty() {
-            self.report_warning(
-                warning_loc,
-                Warning::MisplacedAttribute {
-                    name: "res.hoistedFunction".to_string(),
-                },
-            );
-            return;
-        }
-        let mut segments = segments.into_iter().map(str::to_string).collect::<Vec<_>>();
-        segments.push(binding.name().to_string());
-        // Structure translation visits the continuation first. Prepending keeps
-        // the same source order as OCaml's `js_hoisted := item :: !js_hoisted`.
-        self.hoisted_functions.insert(
-            0,
-            crate::lambda::HoistedFunction {
-                binding,
-                path: segments,
-                loc: self.lam_loc(attr_name.loc),
-                target_loc: self.lam_loc(target_loc),
-            },
-        );
     }
 
     /// Find an inline-style attribute, matching OCaml's
@@ -3528,218 +3419,60 @@ impl<'a> RawLambdaConverter<'a> {
         })
     }
 
-    fn materialize_hoisted_exports(&mut self, lam: RawLambda) -> RawLambda {
-        fn collect_groups(lam: &RawLambda, groups: &mut HashMap<Ident, RawLambda>) {
+    /// The export-name check of `Lam_compile_main.flat_make_aliases`: a flat
+    /// `A$B$make` export must not take a name the unit already exports (the
+    /// printer renames other bindings), and every path starts at an exported
+    /// module. It depends only on the export list and the paths, so it runs
+    /// as soon as both are known; a translation error is reported first.
+    fn check_flat_make_exports(&mut self, lam: &RawLambda) {
+        fn terminal_exports(lam: &RawLambda) -> Option<&[Ident]> {
             match lam {
-                RawLambda::Llet(_, id, value, body) => {
-                    groups.insert(*id, (**value).clone());
-                    collect_groups(value, groups);
-                    collect_groups(body, groups);
-                }
-                RawLambda::Lletrec(bindings, body) => {
-                    groups.extend(bindings.iter().cloned());
-                    for (_, value) in bindings {
-                        collect_groups(value, groups);
-                    }
-                    collect_groups(body, groups);
-                }
-                RawLambda::Lsequence(left, body) => {
-                    collect_groups(left, groups);
-                    collect_groups(body, groups);
-                }
-                _ => {}
+                RawLambda::Llet(_, _, _, body)
+                | RawLambda::Lletrec(_, body)
+                | RawLambda::Lsequence(_, body) => terminal_exports(body),
+                RawLambda::Lprim(prim) => match &prim.primitive {
+                    Primitive::Pmakeblock(TagInfo::ModuleExport(ids), _) => Some(ids),
+                    _ => None,
+                },
+                _ => None,
             }
         }
-        fn terminal_exports(lam: &RawLambda) -> Vec<Ident> {
-            match lam {
-                RawLambda::Llet(_, _, _, body) | RawLambda::Lletrec(_, body) => {
-                    terminal_exports(body)
-                }
-                RawLambda::Lsequence(_, body) => terminal_exports(body),
-                RawLambda::Lprim(__prim1)
-                    if matches!(
-                        __prim1.as_ref(),
-                        RawPrimInfo {
-                            primitive: Primitive::Pmakeblock(TagInfo::ModuleExport(_ids), _),
-                            ..
-                        }
-                    ) =>
-                {
-                    let RawPrimInfo {
-                        primitive: Primitive::Pmakeblock(TagInfo::ModuleExport(ids), _),
-                        ..
-                    } = __prim1.as_ref()
-                    else {
-                        unreachable!()
-                    };
-                    ids.clone()
-                }
-                _ => Vec::new(),
-            }
+        if self.flat_make_paths.is_empty() {
+            return;
         }
-        fn resolve_binding(
-            lam: &RawLambda,
-            groups: &HashMap<Ident, RawLambda>,
-            seen: &mut HashSet<Ident>,
-        ) -> (RawLambda, Option<Ident>) {
-            match lam {
-                RawLambda::Lvar(id) => {
-                    if !seen.insert(*id) {
-                        return (lam.clone(), Some(*id));
-                    }
-                    match groups.get(id) {
-                        Some(alias @ (RawLambda::Lvar(_) | RawLambda::Lprim(_))) => {
-                            resolve_binding(alias, groups, seen)
-                        }
-                        Some(resolved) => (resolved.clone(), Some(*id)),
-                        None => (lam.clone(), Some(*id)),
-                    }
-                }
-                RawLambda::Lprim(__prim0)
-                    if matches!(__prim0.as_ref(), RawPrimInfo {
-                    primitive: Primitive::Pfield(pos, _),
-                    args,
-                    ..
-                } if args.len() == 1) =>
-                {
-                    let RawPrimInfo {
-                        primitive: Primitive::Pfield(pos, _),
-                        args,
-                        ..
-                    } = __prim0.as_ref()
-                    else {
-                        unreachable!()
-                    };
-
-                    let (base, _) = resolve_binding(&args[0], groups, seen);
-                    if let RawLambda::Lprim(__prim201) = base
-                        && let RawPrimInfo {
-                            primitive: Primitive::Pmakeblock(TagInfo::Module(_), _),
-                            args,
-                            ..
-                        } = __prim201.as_ref()
-                    {
-                        if let Some(field) =
-                            usize::try_from(*pos).ok().and_then(|pos| args.get(pos))
-                        {
-                            return resolve_binding(field, groups, seen);
-                        }
-                    }
-                    (lam.clone(), None)
-                }
-                _ => (lam.clone(), None),
-            }
-        }
-        fn find_path(
-            lam: &RawLambda,
-            fields: &[String],
-            groups: &HashMap<Ident, RawLambda>,
-            positions: &mut Vec<(i32, String)>,
-        ) -> Option<(Option<Ident>, RawLambda)> {
-            if fields.is_empty() {
-                let (target, id) = resolve_binding(lam, groups, &mut HashSet::new());
-                return Some((id, target));
-            }
-            let (mut resolved, _) = resolve_binding(lam, groups, &mut HashSet::new());
-            resolved = loop {
-                match resolved {
-                    RawLambda::Llet(_, _, _, body)
-                    | RawLambda::Lletrec(_, body)
-                    | RawLambda::Lsequence(_, body) => resolved = *body,
-                    other => break other,
-                }
-            };
-            let RawLambda::Lprim(__prim200) = resolved else {
-                return None;
-            };
-            let RawPrimInfo {
-                primitive: Primitive::Pmakeblock(TagInfo::Module(names), _),
-                args,
-                ..
-            } = __prim200.as_ref()
-            else {
-                return None;
-            };
-            let pos = names.iter().position(|name| name == &fields[0])?;
-            let arg = args.get(pos)?;
-            positions.push((pos as i32, fields[0].clone()));
-            find_path(arg, &fields[1..], groups, positions)
-        }
-        fn unwrap_exotic(name: &str) -> &str {
-            if name.len() >= 3 && name.starts_with("\\\"") && name.ends_with('"') {
-                &name[2..name.len() - 1]
-            } else {
-                name
-            }
-        }
-        if self.hoisted_functions.is_empty() {
-            return lam;
-        }
-        let mut groups = HashMap::new();
-        collect_groups(&lam, &mut groups);
-        let exported_modules = terminal_exports(&lam)
-            .into_iter()
-            .map(|id| (id.name().to_string(), id))
-            .collect::<HashMap<_, _>>();
-        let mut occupied = groups
-            .keys()
+        let exports = terminal_exports(lam).unwrap_or_default();
+        let mut occupied = exports
+            .iter()
             .map(|id| crate::js_ir::printer::convert_ident_name(id.name()))
             .collect::<HashSet<_>>();
-        let mut validated = Vec::new();
-        let hoisted_functions = self.hoisted_functions.clone();
-        for hoisted in hoisted_functions {
-            let Some((top, fields)) = hoisted.path.split_first() else {
-                continue;
-            };
-            let resolved = exported_modules.get(top).and_then(|top_id| {
-                let module = groups.get(top_id)?;
-                let mut positions = Vec::new();
-                let (target_id, _target) = find_path(module, fields, &groups, &mut positions)?;
-                Some((*top_id, positions, target_id))
-            });
-            let Some((_top_id, _positions, Some(target_id))) = resolved else {
-                self.report_warning(
-                    self.loc_idx_for_lam_loc(hoisted.loc),
-                    Warning::MisplacedAttribute {
-                        name: "res.hoistedFunction".to_string(),
-                    },
-                );
-                continue;
-            };
-            if !hoisted.binding.same(&target_id) {
-                self.report_warning(
-                    self.loc_idx_for_lam_loc(hoisted.loc),
-                    Warning::MisplacedAttribute {
-                        name: "res.hoistedFunction".to_string(),
-                    },
-                );
-                continue;
-            }
-            let export_name = hoisted
-                .path
+        // `Location.in_file (Location.get_input_name ())`.
+        let loc = Location::in_file(Default::default());
+        for path in &self.flat_make_paths {
+            let names = path
                 .iter()
-                .map(|part| unwrap_exotic(part))
-                .collect::<Vec<_>>()
-                .join("$");
-            let js_name = crate::js_ir::printer::convert_ident_name(&export_name);
+                .map(|step| step.name.as_str())
+                .collect::<Vec<_>>();
+            let name = crate::lambda::flat_export_name(&names);
+            let js_name = crate::js_ir::printer::convert_ident_name(&name);
             if occupied.contains(&js_name) {
-                self.report_diagnostic(
-                    self.lam_locs.get(hoisted.target_loc).unwrap_or_else(Location::none),
-                    format!(
-                        "Cannot hoist this function as `{export_name}` because that name is already used by a top-level binding."
-                    ),
+                let message = format!(
+                    "Cannot export `{}` as `{name}` because that name is already exported.",
+                    names.join(".")
                 );
-                continue;
+                self.report_diagnostic(loc, message);
+                return;
+            }
+            let top = names[0];
+            if !exports.iter().any(|id| id.name() == top) {
+                let message = format!(
+                    "Internal error: no export for module `{top}` of `{}`.",
+                    names.join(".")
+                );
+                self.report_diagnostic(loc, message);
+                return;
             }
             occupied.insert(js_name);
-            self.hoisted_exports.push(crate::lambda::HoistedExport {
-                path: hoisted.path.clone(),
-                export_name,
-            });
-            validated.push(hoisted);
         }
-        self.hoisted_functions = validated;
-        lam
     }
 
     /// Convert a structure into raw lambda.
@@ -3769,7 +3502,7 @@ impl<'a> RawLambdaConverter<'a> {
             SrcLoc::Decl(Location::none()),
         );
         self.type_ctx.set_typeopt_cache(false);
-        self.materialize_hoisted_exports(result)
+        result
     }
 
     fn pure_module(module_expr: &ModuleExpr) -> LetKind {
@@ -5612,7 +5345,7 @@ impl<'a> RawLambdaConverter<'a> {
                         }
                     }
                 }
-                self.convert_let_with_body_raw_at_root(*rec_flag, bindings, body, rootpath)
+                self.convert_let_with_body_raw(*rec_flag, bindings, body)
             }
             StructureItemDesc::Tstr_module(binding) => {
                 let old_len = fields.len();
@@ -6920,16 +6653,6 @@ impl<'a> RawLambdaConverter<'a> {
         bindings: &[ValueBinding],
         body: RawLambda,
     ) -> RawLambda {
-        self.convert_let_with_body_raw_at_root(rec_flag, bindings, body, &None)
-    }
-
-    fn convert_let_with_body_raw_at_root(
-        &mut self,
-        rec_flag: crate::parser::ast::RecFlag,
-        bindings: &[ValueBinding],
-        body: RawLambda,
-        rootpath: &Option<crate::types::Path>,
-    ) -> RawLambda {
         match rec_flag {
             crate::parser::ast::RecFlag::Nonrecursive => {
                 if bindings.iter().any(|binding| {
@@ -6948,13 +6671,6 @@ impl<'a> RawLambdaConverter<'a> {
                                 self.get_inline_attribute_from(&binding.vb_attributes);
                             value =
                                 self.apply_inline_attribute_raw(value, binding.vb_loc, inline_attr);
-                            self.mark_js_hoisted_pattern(
-                                rootpath,
-                                &binding.vb_attributes,
-                                &binding.vb_pat,
-                                &value,
-                                binding.vb_expr.exp_loc,
-                            );
                             (binding, value)
                         })
                         .collect::<Vec<_>>();
@@ -7031,13 +6747,6 @@ impl<'a> RawLambdaConverter<'a> {
                         // OCaml's transl_let applies inline attributes from vb_attributes
                         let inline_attr = self.get_inline_attribute_from(&binding.vb_attributes);
                         value = self.apply_inline_attribute_raw(value, binding.vb_loc, inline_attr);
-                        self.mark_js_hoisted_pattern(
-                            rootpath,
-                            &binding.vb_attributes,
-                            &binding.vb_pat,
-                            &value,
-                            binding.vb_expr.exp_loc,
-                        );
                         (binding, value)
                     })
                     .collect::<Vec<_>>();
@@ -7084,13 +6793,6 @@ impl<'a> RawLambdaConverter<'a> {
                                 self.get_inline_attribute_from(&binding.vb_attributes);
                             value =
                                 self.apply_inline_attribute_raw(value, binding.vb_loc, inline_attr);
-                            self.mark_js_hoisted_pattern(
-                                rootpath,
-                                &binding.vb_attributes,
-                                &binding.vb_pat,
-                                &value,
-                                binding.vb_expr.exp_loc,
-                            );
                             (
                                 simple_let_binding_id(binding).expect("checked above"),
                                 value,
@@ -7106,13 +6808,6 @@ impl<'a> RawLambdaConverter<'a> {
                         });
                         let inline_attr = self.get_inline_attribute_from(&binding.vb_attributes);
                         value = self.apply_inline_attribute_raw(value, binding.vb_loc, inline_attr);
-                        self.mark_js_hoisted_pattern(
-                            rootpath,
-                            &binding.vb_attributes,
-                            &binding.vb_pat,
-                            &value,
-                            binding.vb_expr.exp_loc,
-                        );
                         self.for_let_with_synced_stamps(
                             binding.vb_pat.pat_loc,
                             value,
@@ -8065,76 +7760,6 @@ mod tests {
             ("consumer", 104, crate::ident::IdentFlags::NONE)
         );
         assert_eq!(generator.current_stamp(), 104);
-    }
-
-    #[test]
-    fn sealed_indexed_producer_threads_warning_config_and_observer() {
-        fn compile(
-            config: &crate::diagnostics::WarningConfig,
-        ) -> (
-            Result<bool, crate::lambda::lam_compile_main_indexed::IndexedPreJsError>,
-            Vec<crate::lambda::lam_compile_main_indexed::IndexedHoistedWarning>,
-        ) {
-            let arena = ParseArena::new();
-            let generator = std::sync::Arc::new(IdGenerator::with_start_stamp(20));
-            let ctx = TypeContext::new(generator.clone());
-            let env = initial_env(&ctx);
-            let converter = RawLambdaConverter::with_id_generator_and_unit_name(
-                &arena,
-                &ctx,
-                &env,
-                generator,
-                "Fixture".into(),
-            );
-            let export = Ident::new("value", 1, IdentFlags::NONE);
-            let raw = RawLambda::prim(
-                Primitive::Pmakeblock(
-                    crate::lambda::TagInfo::ModuleExport(vec![export]),
-                    crate::lambda::lam_primitive::Mutable::Immutable,
-                ),
-                vec![RawLambda::unit()],
-                LamLoc::NONE,
-            );
-            let hoisted_loc =
-                converter.lam_loc(Location::new_for_error("sealed-warning.res", 2, 4));
-            let indexed_raw = converter.finish_indexed_raw(raw);
-            let hoisted = crate::lambda::HoistedFunction {
-                binding: Ident::new("missing", 9, IdentFlags::NONE),
-                path: vec!["Missing".into()],
-                loc: hoisted_loc,
-                target_loc: LamLoc::NONE,
-            };
-            let mut inline = |_: &Ident, _: &str| None;
-            let mut arity = |_: &Ident, _: &str| None;
-            let mut warnings = Vec::new();
-            let result = crate::lambda::lam_compile_main_indexed::lower_and_optimize_for_pre_js_indexed_with_diagnostics(
-                indexed_raw,
-                vec![export],
-                &[hoisted],
-                &ahash::AHashSet::new(),
-                &mut inline,
-                &mut arity,
-                config,
-                Some(&mut |warning: &crate::lambda::lam_compile_main_indexed::IndexedHoistedWarning| warnings.push(warning.clone())),
-                None,
-            )
-            .map(|backend| backend.check_fatal_warnings().is_err());
-            (result, warnings)
-        }
-
-        let mut disabled = crate::diagnostics::WarningConfig::new();
-        disabled.parse("-53").unwrap();
-        let (result, warnings) = compile(&disabled);
-        assert!(!result.unwrap());
-        assert!(warnings.is_empty());
-
-        let mut fatal = crate::diagnostics::WarningConfig::new();
-        fatal.parse_as_error("@53").unwrap();
-        let (result, warnings) = compile(&fatal);
-        assert!(result.unwrap());
-        assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].is_error);
-        assert_eq!(warnings[0].warning.number(), 53);
     }
 
     #[test]

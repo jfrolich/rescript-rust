@@ -3765,6 +3765,33 @@ fn type_mod_error_to_anyhow_styled(
             2,
         )
         .into(),
+        TypeModError::JsNameClash {
+            loc,
+            kind,
+            other_kind,
+            js_name,
+            other_loc,
+        } => UserDiagnostic::new(
+            format_compiler_error_report_from_location(
+                source,
+                filename,
+                &loc,
+                &render_js_name_clash_message(
+                    kind,
+                    other_kind,
+                    &js_name,
+                    &code_frame::format_location(
+                        &crate::types::includemod::location_filename(
+                            type_ctx, filename, &other_loc,
+                        ),
+                        &other_loc.loc_start,
+                        &other_loc.loc_end,
+                    ),
+                ),
+            ),
+            2,
+        )
+        .into(),
         TypeModError::InvalidUntaggedVariantDefinition { loc, reason } => UserDiagnostic::new(
             format_compiler_error_report_from_location(
                 source,
@@ -4267,16 +4294,6 @@ fn push_compiler_report_location(output: &mut String, location: &str) {
     output.push_str("\n\n");
 }
 
-/// OCaml `Bs_exception.Bs_duplicate_exports` ("%s is exported twice",
-/// compiler/depends/bs_exception.ml:50), reported without a location.
-fn duplicate_export_error(filename: &str, name: &str) -> anyhow::Error {
-    UserDiagnostic::new(
-        format_compiler_error_report_for_file(filename, &format!("{name} is exported twice")),
-        2,
-    )
-    .into()
-}
-
 fn format_compiler_error_report_for_file(filename: &str, message: &str) -> String {
     let mut output = String::new();
     push_compiler_report_intro(&mut output, "We've found a bug for you!");
@@ -4361,6 +4378,54 @@ fn format_repeated_name_report(
     }
     let message = String::from_utf8(buf).unwrap_or_default();
     format_compiler_error_report(arena, source, filename, loc, &message)
+}
+
+/// typemod.ml `Js_name_clash`: "@[This %s has the same JavaScript name %s@ as
+/// the %s at @{<loc>%a@}.@ Rename one of them.@]".
+fn render_js_name_clash_message(
+    kind: &str,
+    other_kind: &str,
+    js_name: &str,
+    other_location: &str,
+) -> String {
+    let mut buf = Vec::new();
+    {
+        let mut ppf = crate::parser::formatter::Formatter::new(&mut buf);
+        ppf.set_margin(76);
+        ppf.open_box(crate::parser::formatter::BoxKind::Box, 0);
+        ppf.print(format_args!(
+            "This {kind} has the same JavaScript name {js_name}"
+        ));
+        ppf.space();
+        ppf.print(format_args!("as the {other_kind} at "));
+        if code_frame::should_enable_color() {
+            // `@{<loc>...@}` around `Location.print_loc`, which prints
+            // `@{<filename>%s@}:@{<dim>%s@}` (compiler/ml/location.ml:75-93);
+            // semantic tag markers take no width (compiler/ext/misc.ml:327-350).
+            let (file, range) = other_location
+                .split_once(':')
+                .unwrap_or((other_location, ""));
+            ppf.string_as(0, "\x1b[1m");
+            ppf.string_as(0, "\x1b[36m");
+            ppf.str(file);
+            ppf.string_as(0, "\x1b[0m");
+            if !range.is_empty() {
+                ppf.str(":");
+                ppf.string_as(0, "\x1b[2m");
+                ppf.str(range);
+                ppf.string_as(0, "\x1b[0m");
+            }
+            ppf.string_as(0, "\x1b[0m");
+        } else {
+            ppf.str(other_location);
+        }
+        ppf.str(".");
+        ppf.space();
+        ppf.str("Rename one of them.");
+        ppf.close_box();
+        ppf.flush();
+    }
+    String::from_utf8(buf).unwrap_or_default()
 }
 
 /// `non_generalizable_msg` (typemod.ml:1805-1812) around the fallback
@@ -10724,6 +10789,20 @@ fn compile_source_to_js_with_options_inner(
     let (inferred_simple_signature, inferred_implementation_coercion) = if !has_resi {
         let simple_signature =
             crate::types::includemod::simplify_signature(&typed_structure.str_type);
+        // typemod.ml `type_implementation_more`: `check_js_names ~toplevel:true
+        // simple_sg` before the inferred-signature inclusion.
+        if let Err(e) = crate::types::typemod::check_js_names(&type_ctx, true, &simple_signature) {
+            let suppress_info_style =
+                !tctx.warnings.is_empty() && !crate::parser::code_frame::should_enable_color();
+            return Err(type_mod_error_to_anyhow(
+                e,
+                &type_ctx,
+                parser.arena(),
+                source,
+                filename,
+                suppress_info_style,
+            ));
+        }
         let implementation_coercion = crate::types::includemod::compunit(
             &type_ctx,
             &env,
@@ -10869,8 +10948,29 @@ fn compile_source_to_js_with_options_inner(
     }
     let raw_lambda =
         raw_converter.convert_structure_with_coercion(&typed_structure, &implementation_coercion);
+    let interface_signature = if has_resi {
+        implementation_interface_signature(
+            &mut tctx,
+            &type_ctx,
+            source_file_for_interface,
+            current_unit_name.as_deref(),
+        )
+    } else {
+        None
+    };
+    let flat_make_paths = flat_make_paths_of_signature(
+        &mut tctx,
+        &type_ctx,
+        &final_env,
+        if has_resi {
+            interface_signature.as_deref().map(Vec::as_slice)
+        } else {
+            inferred_simple_signature.as_deref()
+        },
+    );
+    raw_converter.set_flat_make_paths(&raw_lambda, flat_make_paths);
     let raw_warnings = raw_converter.take_warnings();
-    let hoisted_functions = raw_converter.take_hoisted_functions();
+    let flat_make_paths = raw_converter.take_flat_make_paths();
     let lam_locs = raw_converter.take_lam_locs();
     if let Some(diagnostic) = raw_converter.take_diagnostic() {
         // A Translmod error escapes before `Warnings.check_fatal`.
@@ -10922,9 +11022,6 @@ fn compile_source_to_js_with_options_inner(
     // lam_compile_main.ml:288-290: the first pass of Lam_compile_main.compile.
     let lowered_lambda =
         crate::lambda::lam_pass_collapse_var_aliases::collapse(lowered_lambda, &export_idents);
-    if let Some(name) = crate::lambda::lam_compile_main::duplicate_export_name(&lowered_lambda) {
-        return Err(duplicate_export_error(filename, &name));
-    }
 
     #[cfg(test)]
     if let Some(trace) = discriminator_trace.as_deref_mut() {
@@ -10983,7 +11080,7 @@ fn compile_source_to_js_with_options_inner(
     compiler.set_source_map_enabled(
         options.source_map != crate::js_ir::source_map::SourceMapMode::None,
     );
-    compiler.set_hoisted_functions(hoisted_functions);
+    compiler.set_flat_make_paths(flat_make_paths);
     compiler.set_lam_locs(lam_locs);
     let program = compiler.compile_deps_program_with_possible_required_modules(
         &lowered_lambda,
@@ -11416,6 +11513,50 @@ fn check_compunit_inclusion_for_errors(
     }
 }
 
+/// The signature `Typemod.type_implementation_more` returns with an
+/// interface (`dclsig`, read from the interface unit), for
+/// `Translmod.transl_implementation`.
+fn implementation_interface_signature(
+    tctx: &mut TypeCheckContext<'_>,
+    type_ctx: &TypeContext,
+    source_file: &str,
+    unit_name: Option<&str>,
+) -> Option<std::sync::Arc<crate::types::decl::Signature>> {
+    if !source_file.ends_with(".res") {
+        return None;
+    }
+    let module_name = interface_unit_name(unit_name, source_file);
+    if module_name.is_empty() {
+        return None;
+    }
+    let pers = tctx.persistent_env.as_mut()?;
+    let raw_in_process_sig = if pers.is_in_process_mode() {
+        type_ctx.get_gentype_raw_module_sig(&module_name)
+    } else {
+        None
+    };
+    raw_in_process_sig.or_else(|| pers.read_raw_sig_shared(&module_name, type_ctx))
+}
+
+/// `Translmod.flat_make_paths final_env signature`, run after the structure
+/// is translated (translmod.ml `transl_implementation`).
+fn flat_make_paths_of_signature(
+    tctx: &mut TypeCheckContext<'_>,
+    type_ctx: &TypeContext,
+    final_env: &Env,
+    signature: Option<&[crate::types::decl::SignatureItem]>,
+) -> Vec<crate::lambda::FlatMakePath> {
+    match signature {
+        Some(signature) => crate::types::typemod::flat_make_paths(
+            type_ctx,
+            final_env,
+            &mut tctx.persistent_env,
+            signature,
+        ),
+        None => Vec::new(),
+    }
+}
+
 /// The unit name an implementation's interface is registered under: the
 /// compile's unit name when known (namespaced, `A-Ns`), else the file's.
 fn interface_unit_name(unit_name: Option<&str>, source_file: &str) -> String {
@@ -11744,6 +11885,21 @@ pub fn typecheck_interface_source(
         parser.arena(),
         &type_ctx,
     );
+    // js_implementation.ml `after_parsing_sig`: `Typemod.check_js_names
+    // ~toplevel:true sg` before the self-inclusion.
+    if let Err(e) = crate::types::typemod::check_js_names(&type_ctx, true, &sig_type) {
+        let suppress_info_style =
+            !tctx.warnings.is_empty() && !crate::parser::code_frame::should_enable_color();
+        emit_type_warnings(parser.arena(), source, filename, &tctx.warnings);
+        return Err(type_mod_error_to_anyhow(
+            e,
+            &type_ctx,
+            parser.arena(),
+            source,
+            filename,
+            suppress_info_style,
+        ));
+    }
     let _ = crate::types::includemod::compunit(
         &type_ctx, &env, filename, &sig_type, filename, &sig_type,
     );
@@ -13131,7 +13287,6 @@ pub struct InProcessCompileResult {
     /// `.cmj` `persistent_closed_lambda` exports for cross-module inlining
     /// (lam_stats_export.ml:53-89).
     pub cmj_export_lambdas: crate::lambda::CmjExportLambdas,
-    pub hoisted_exports: Vec<crate::lambda::HoistedExport>,
     /// Intermediate-representation sexps, populated when
     /// `CompilerOptions::capture_intermediates` is true (for the playground).
     pub typed_tree_sexp: String,
@@ -13148,8 +13303,7 @@ pub struct InProcessCompileResult {
 pub struct InProcessPreJsCompileResult {
     pub lowered_lambda: crate::lambda::Lambda,
     pub possible_required_modules: AHashSet<ModuleId>,
-    pub hoisted_functions: Vec<crate::lambda::HoistedFunction>,
-    pub hoisted_exports: Vec<crate::lambda::HoistedExport>,
+    pub flat_make_paths: Vec<crate::lambda::FlatMakePath>,
     pub ident_stamp_at_js_boundary: i32,
     pub file_directives: Vec<String>,
     pub debug: bool,
@@ -13157,8 +13311,8 @@ pub struct InProcessPreJsCompileResult {
     pub signature: crate::types::decl::Signature,
     pub pers_struct: Option<PortablePersStruct>,
     pub new_alias_rewrites: ahash::AHashMap<String, crate::types::path::Path>,
-    /// Resolves the location handles of `lowered_lambda` and
-    /// `hoisted_functions`; outlives the parse arena and typed tree.
+    /// Resolves the location handles of `lowered_lambda`; outlives the parse
+    /// arena and typed tree.
     pub lam_locs: crate::lambda::LamLocTable,
     /// Intermediate-representation sexps, populated when
     /// `CompilerOptions::capture_intermediates` is true (for the playground).
@@ -13181,7 +13335,6 @@ pub struct InProcessJsMetadataReady {
     pub cmj_export_constants: ahash::AHashMap<String, CmjExportConstant>,
     pub cmj_export_arities: ahash::AHashMap<String, CmjExportArity>,
     pub cmj_export_lambdas: crate::lambda::CmjExportLambdas,
-    pub hoisted_exports: Vec<crate::lambda::HoistedExport>,
     pub pers_struct: Option<PortablePersStruct>,
     pub new_alias_rewrites: ahash::AHashMap<String, crate::types::path::Path>,
 }
@@ -13440,11 +13593,11 @@ type JsBackendOutput = (
 );
 
 /// Build the `LambdaCompiler` for one JS output target: resolve local module
-/// path overrides for the possibly-required modules and install the hoisted
-/// functions.
+/// path overrides for the possibly-required modules and install the flat
+/// `make` export paths.
 #[allow(clippy::too_many_arguments)]
 fn js_backend_compiler(
-    hoisted_functions: Vec<crate::lambda::HoistedFunction>,
+    flat_make_paths: Vec<crate::lambda::FlatMakePath>,
     possible_required_modules: &AHashSet<ModuleId>,
     options: &CompilerOptions,
     output_path: Option<&FsPath>,
@@ -13481,7 +13634,7 @@ fn js_backend_compiler(
     compiler.set_source_map_enabled(
         options.source_map != crate::js_ir::source_map::SourceMapMode::None,
     );
-    compiler.set_hoisted_functions(hoisted_functions);
+    compiler.set_flat_make_paths(flat_make_paths);
     compiler.set_lam_locs(lam_locs);
     compiler
 }
@@ -13529,7 +13682,7 @@ fn finish_js_backend(
 #[allow(clippy::too_many_arguments)]
 fn compile_js_program_for_output(
     lowered_lambda: &crate::lambda::Lambda,
-    hoisted_functions: &[crate::lambda::HoistedFunction],
+    flat_make_paths: &[crate::lambda::FlatMakePath],
     possible_required_modules: &AHashSet<ModuleId>,
     options: &CompilerOptions,
     output_path: Option<&FsPath>,
@@ -13546,7 +13699,7 @@ fn compile_js_program_for_output(
     )
     .entered();
     let mut compiler = js_backend_compiler(
-        hoisted_functions.to_vec(),
+        flat_make_paths.to_vec(),
         possible_required_modules,
         options,
         output_path,
@@ -13569,7 +13722,7 @@ fn compile_js_program_for_output(
 #[allow(clippy::too_many_arguments)]
 fn compile_js_program_for_output_owned(
     lowered_lambda: crate::lambda::Lambda,
-    hoisted_functions: Vec<crate::lambda::HoistedFunction>,
+    flat_make_paths: Vec<crate::lambda::FlatMakePath>,
     possible_required_modules: AHashSet<ModuleId>,
     options: &CompilerOptions,
     output_path: Option<&FsPath>,
@@ -13587,7 +13740,7 @@ fn compile_js_program_for_output_owned(
     )
     .entered();
     let mut compiler = js_backend_compiler(
-        hoisted_functions,
+        flat_make_paths,
         &possible_required_modules,
         options,
         output_path,
@@ -13949,6 +14102,29 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         let simple_signature =
             crate::types::includemod::simplify_signature(&typed_structure.str_type);
         if !has_interface {
+            // typemod.ml `type_implementation_more`: `check_js_names
+            // ~toplevel:true simple_sg` before the inferred-signature inclusion.
+            if let Err(e) =
+                crate::types::typemod::check_js_names(&type_ctx, true, &simple_signature)
+            {
+                if !arena.stores_locations() {
+                    return Err(LocationRetry::Diagnostic.into());
+                }
+                let warnings = format_type_warnings_lazy(arena, &source, filename, &tctx.warnings);
+                let suppress_info_style =
+                    !tctx.warnings.is_empty() && !crate::parser::code_frame::should_enable_color();
+                return Err(prefix_diagnostic(
+                    &warnings,
+                    type_mod_error_to_anyhow(
+                        e,
+                        &type_ctx,
+                        arena,
+                        source(),
+                        filename,
+                        suppress_info_style,
+                    ),
+                ));
+            }
             inferred_implementation_coercion = Some(
                 crate::types::includemod::compunit(
                     &type_ctx,
@@ -14204,8 +14380,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         raw_diagnostic,
         raw_possible_required_modules,
         raw_lambda_current_stamp,
-        hoisted_functions,
-        hoisted_exports,
+        flat_make_paths,
         lam_locs,
     ) = match crate::timing::measure(crate::timing::Phase::Lambda, || {
         let _phase = info_span!("compiler.raw_lambda").entered();
@@ -14255,12 +14430,30 @@ pub fn compile_preprocessed_structure_in_process_until_js(
             Ok(raw_lambda) => raw_lambda,
             Err(payload) => return Err(payload),
         };
+        // The signature `type_implementation_more` returns: the interface's,
+        // or the inferred one saved for this unit above.
+        let final_signature = if has_interface {
+            implementation_interface_signature(
+                &mut tctx,
+                &type_ctx,
+                filename,
+                options.current_unit_name().as_deref(),
+            )
+        } else {
+            type_ctx.get_gentype_raw_module_sig(module_name)
+        };
+        let flat_make_paths = flat_make_paths_of_signature(
+            &mut tctx,
+            &type_ctx,
+            &final_env,
+            final_signature.as_deref().map(Vec::as_slice),
+        );
+        raw_converter.set_flat_make_paths(&raw_lambda, flat_make_paths);
         let raw_warnings = raw_converter.take_warnings();
         let raw_diagnostic = raw_converter.take_diagnostic();
         let possible_required_modules = raw_converter.take_possible_required_modules();
         let raw_lambda_current_stamp = raw_converter.current_stamp();
-        let hoisted_functions = raw_converter.take_hoisted_functions();
-        let hoisted_exports = raw_converter.take_hoisted_exports();
+        let flat_make_paths = raw_converter.take_flat_make_paths();
         let lam_locs = raw_converter.take_lam_locs();
         Ok((
             raw_lambda,
@@ -14268,8 +14461,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
             raw_diagnostic,
             possible_required_modules,
             raw_lambda_current_stamp,
-            hoisted_functions,
-            hoisted_exports,
+            flat_make_paths,
             lam_locs,
         ))
     }) {
@@ -14391,9 +14583,6 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     let lowered_lambda = crate::timing::measure(crate::timing::Phase::Lambda, || {
         crate::lambda::lam_pass_collapse_var_aliases::collapse(lowered_lambda, &export_idents)
     });
-    if let Some(name) = crate::lambda::lam_compile_main::duplicate_export_name(&lowered_lambda) {
-        return Err(duplicate_export_error(filename, &name));
-    }
     let mut possible_required_modules =
         crate::lambda::lam_compile::collect_possible_required_modules_for_lambda(&lowered_lambda);
     possible_required_modules.extend(raw_possible_required_modules);
@@ -14435,8 +14624,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     Ok(InProcessPreJsCompileResult {
         lowered_lambda,
         possible_required_modules,
-        hoisted_functions,
-        hoisted_exports,
+        flat_make_paths,
         ident_stamp_at_js_boundary,
         file_directives,
         debug,
@@ -14523,7 +14711,7 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
                 lowered_lambda
                     .as_ref()
                     .expect("lowered lambda retained for multiple JS targets"),
-                &pre_js.hoisted_functions,
+                &pre_js.flat_make_paths,
                 &pre_js.possible_required_modules,
                 options,
                 primary_output_path,
@@ -14537,7 +14725,7 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
                 lowered_lambda
                     .take()
                     .expect("lowered lambda consumed by single JS target"),
-                std::mem::take(&mut pre_js.hoisted_functions),
+                std::mem::take(&mut pre_js.flat_make_paths),
                 std::mem::take(&mut pre_js.possible_required_modules),
                 options,
                 primary_output_path,
@@ -14563,7 +14751,6 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
             cmj_export_constants: std::mem::take(&mut cmj_export_constants),
             cmj_export_arities: std::mem::take(&mut cmj_export_arities),
             cmj_export_lambdas: std::mem::take(&mut cmj_export_lambdas),
-            hoisted_exports: pre_js.hoisted_exports.clone(),
             pers_struct: pre_js.pers_struct.take(),
             new_alias_rewrites: std::mem::take(&mut pre_js.new_alias_rewrites),
         })?;
@@ -14584,7 +14771,7 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
                     lowered_lambda
                         .as_ref()
                         .expect("lowered lambda retained for secondary JS targets"),
-                    &pre_js.hoisted_functions,
+                    &pre_js.flat_make_paths,
                     &pre_js.possible_required_modules,
                     options,
                     Some(&target.path),
@@ -14678,7 +14865,6 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
         cmj_export_constants,
         cmj_export_arities,
         cmj_export_lambdas,
-        hoisted_exports: pre_js.hoisted_exports,
         typed_tree_sexp: pre_js.typed_tree_sexp,
         raw_lambda_sexp: pre_js.raw_lambda_sexp,
         lambda_sexp: pre_js.lambda_sexp,
@@ -14776,6 +14962,20 @@ pub fn typecheck_preprocessed_signature_in_process(
         arena,
         &type_ctx,
     );
+    // js_implementation.ml `after_parsing_sig`: `Typemod.check_js_names
+    // ~toplevel:true sg` before the self-inclusion.
+    if let Err(e) = crate::types::typemod::check_js_names(&type_ctx, true, &sig_type) {
+        if !arena.stores_locations() {
+            return Err(LocationRetry::Diagnostic.into());
+        }
+        let warnings = format_type_warnings_lazy(arena, &source, filename, &tctx.warnings);
+        let suppress_info_style =
+            !tctx.warnings.is_empty() && !crate::parser::code_frame::should_enable_color();
+        return Err(prefix_diagnostic(
+            &warnings,
+            type_mod_error_to_anyhow(e, &type_ctx, arena, source(), filename, suppress_info_style),
+        ));
+    }
     let _ = crate::types::includemod::compunit(
         &type_ctx, &env, filename, &sig_type, filename, &sig_type,
     );

@@ -113,7 +113,7 @@ pub fn translate_constr(
 
     match (path_list.as_slice(), params_translation) {
         (["bool"], []) => tr(common::boolean_t()),
-        (["int"] | ["float"], []) => tr(common::number_t()),
+        (["int"] | ["char"] | ["float"], []) => tr(common::number_t()),
         (["string"] | ["Stdlib", "String", "t"], []) => tr(common::string_t()),
         (["Stdlib", "BigInt", "t"], []) => tr(common::bigint_t()),
         (["Stdlib", "Date", "t"], []) => tr(common::date_t()),

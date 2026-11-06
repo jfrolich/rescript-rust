@@ -1224,15 +1224,9 @@ impl LambdaCompiler {
                     [] => import,
                     [name] => self.wrap_then_path(import, &[js_export_name(name)]),
                     _ => {
-                        // a nested path is importable when the target is a
-                        // hoisted root-level export; the cmj knows
-                        let hoisted = self.module_path_resolver.as_ref().and_then(|resolver| {
-                            resolver.module_cmj_hoisted_export(module_.name(), path)
-                        });
-                        match hoisted {
-                            Some(hoisted_name) => {
-                                self.wrap_then_path(import, &[js_export_name(&hoisted_name)])
-                            }
+                        // a nested `make` is importable through its flat export
+                        match crate::lambda::flat_make_name(path) {
+                            Some(name) => self.wrap_then_path(import, &[js_export_name(&name)]),
                             None => {
                                 self.report_diagnostic(loc, invalid);
                                 Expression::undefined(false)

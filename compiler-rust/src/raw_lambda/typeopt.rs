@@ -228,51 +228,44 @@ pub(crate) fn type_cannot_contain_undefined_no_env(ctx: &TypeContext, ty: TypeEx
 /// For an unboxed variant type with a single constructor and single arg,
 /// returns the arg type (recursively expanded). Returns None for recursive types.
 /// Simplified version of OCaml's Typedecl.get_unboxed_type_representation.
+/// typedecl.ml `get_unboxed_type_representation`, with 100 fuel (PR#7424).
 fn get_unboxed_type_representation(
     ctx: &TypeContext,
     env: &Env,
     ty: TypeExprRef,
 ) -> Option<TypeExprRef> {
-    let mut visited = HashSet::new();
-    get_unboxed_repr_rec(ctx, env, ty, &mut visited)
-}
-
-fn get_unboxed_repr_rec(
-    ctx: &TypeContext,
-    env: &Env,
-    ty: TypeExprRef,
-    visited: &mut HashSet<TypeExprRef>,
-) -> Option<TypeExprRef> {
-    if !visited.insert(ty) {
-        return None; // Recursive type
-    }
-    match &*ctx.get_desc(ty) {
-        TypeDesc::Tconstr { path, args: _, .. } => {
-            let decl = find_type_decl(ctx, env, path)?;
-            if decl.type_representation != crate::types::TypeRepresentation::Unboxed {
-                return Some(ty);
-            }
-            match &decl.type_kind {
-                TypeKind::TypeVariant(cdecls, _) if cdecls.len() == 1 => {
-                    match &cdecls[0].cd_args {
-                        ConstructorArguments::CstrTuple(tys) if tys.len() == 1 => {
-                            let arg_ty = tys[0];
-                            // Substitute type parameters if needed
-                            // For simple cases (no type params), use arg_ty directly
-                            get_unboxed_repr_rec(ctx, env, arg_ty, visited)
-                        }
-                        ConstructorArguments::CstrRecord(labels) if labels.len() == 1 => {
-                            let arg_ty = labels[0].ld_type;
-                            get_unboxed_repr_rec(ctx, env, arg_ty, visited)
-                        }
-                        _ => Some(ty),
-                    }
-                }
-                _ => Some(ty),
-            }
+    fn go(ctx: &TypeContext, env: &Env, ty: TypeExprRef, fuel: i32) -> Option<TypeExprRef> {
+        if fuel < 0 {
+            return None;
         }
-        _ => Some(ty),
+        let ty = ctx.repr(crate::types::ctype::expand_head_opt(ctx, env, ty));
+        let (path, args) = match &*ctx.get_desc(ty) {
+            TypeDesc::Tconstr { path, args, .. } => (path.clone(), args.clone()),
+            _ => return Some(ty),
+        };
+        let Some(decl) = find_type_decl(ctx, env, &path) else {
+            return Some(ty);
+        };
+        if decl.type_representation != crate::types::TypeRepresentation::Unboxed {
+            return Some(ty);
+        }
+        let ty2 = match &decl.type_kind {
+            TypeKind::TypeRecord(labels, _) if labels.len() == 1 => labels[0].ld_type,
+            TypeKind::TypeVariant(cdecls, _) if cdecls.len() == 1 => match &cdecls[0].cd_args {
+                ConstructorArguments::CstrTuple(tys) if tys.len() == 1 => tys[0],
+                ConstructorArguments::CstrRecord(labels) if labels.len() == 1 => labels[0].ld_type,
+                _ => return Some(ty),
+            },
+            // A recursive unboxed type declaration being checked.
+            TypeKind::TypeAbstract => return None,
+            // Only the above can be unboxed (OCaml asserts).
+            _ => return Some(ty),
+        };
+        let applied =
+            crate::types::ctype::apply(ctx, env, &decl.type_params, ty2, args.as_slice())?;
+        go(ctx, env, applied, fuel - 1)
     }
+    go(ctx, env, ty, 100)
 }
 
 pub(crate) fn scrape_ty(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> TypeExprRef {

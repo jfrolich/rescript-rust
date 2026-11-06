@@ -2497,8 +2497,9 @@ fn build_initial_env(ctx: &TypeContext) -> Env {
         );
     }
     {
-        // Upstream compiler/ml/predef.ml:367-376: first-class tags are an
-        // abstract, invariant two-parameter builtin type.
+        // Upstream compiler/ml/predef.ml:364-372: first-class tags are an
+        // abstract two-parameter builtin type, contravariant in the
+        // parameter and covariant in the output.
         let param = ctx.new_generic_var(None);
         let output = ctx.new_generic_var(None);
         add_type_with_constrs(
@@ -2508,8 +2509,8 @@ fn build_initial_env(ctx: &TypeContext) -> Env {
                 type_params: vec![param, output],
                 type_arity: 2,
                 type_variance: vec![
-                    crate::types::variance::Variance::full(),
-                    crate::types::variance::Variance::full(),
+                    crate::types::variance::Variance::covariant().conjugate(),
+                    crate::types::variance::Variance::covariant(),
                 ],
                 ..decl_abstr(2, false)
             },

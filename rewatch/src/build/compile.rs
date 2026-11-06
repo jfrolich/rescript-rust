@@ -2352,7 +2352,6 @@ fn in_memory_module_info_for_package(
     cmj_export_constants: AHashMap<String, CmjExportConstant>,
     cmj_export_arities: AHashMap<String, CmjExportArity>,
     cmj_export_lambdas: rescript_compiler::lambda::CmjExportLambdas,
-    hoisted_exports: Vec<rescript_compiler::lambda::HoistedExport>,
     is_runtime: bool,
 ) -> InMemoryModuleInfo {
     let package_outputs = package_outputs(package, root_config, &source_path);
@@ -2360,7 +2359,6 @@ fn in_memory_module_info_for_package(
         .with_package_outputs(package_outputs)
         .with_cmj_export_arities(cmj_export_arities)
         .with_cmj_export_lambdas(cmj_export_lambdas)
-        .with_cmj_hoisted_exports(hoisted_exports)
         .with_package(
             package.name.clone(),
             package.path.clone(),
@@ -2378,7 +2376,6 @@ fn js_metadata_registry_updates_for_package(
     cmj_export_constants: AHashMap<String, CmjExportConstant>,
     cmj_export_arities: AHashMap<String, CmjExportArity>,
     cmj_export_lambdas: rescript_compiler::lambda::CmjExportLambdas,
-    hoisted_exports: Vec<rescript_compiler::lambda::HoistedExport>,
     is_runtime: bool,
     has_interface: bool,
     interface_registry_update: Option<PendingRegistryUpdate>,
@@ -2393,7 +2390,6 @@ fn js_metadata_registry_updates_for_package(
         cmj_export_constants,
         cmj_export_arities,
         cmj_export_lambdas,
-        hoisted_exports,
         is_runtime,
     );
 
@@ -3291,8 +3287,7 @@ fn compile_runtime_module_from_source(
         true,
     )
     .with_cmj_export_arities(compile_result.cmj_export_arities)
-    .with_cmj_export_lambdas(compile_result.cmj_export_lambdas)
-    .with_cmj_hoisted_exports(compile_result.hoisted_exports);
+    .with_cmj_export_lambdas(compile_result.cmj_export_lambdas);
 
     let published: &AHashMap<String, rescript_compiler::types::path::Path> = if has_runtime_interface {
         &interface_alias_rewrites
@@ -3802,7 +3797,6 @@ fn compile_module_in_process_to_js_boundary(
         AHashMap::new(),
         AHashMap::new(),
         Default::default(),
-        Vec::new(),
         is_runtime,
     );
 
@@ -4238,7 +4232,6 @@ fn finish_in_process_js_inner(
             metadata.cmj_export_constants,
             metadata.cmj_export_arities,
             metadata.cmj_export_lambdas,
-            metadata.hoisted_exports,
             is_runtime,
         );
         let registry_updates = vec![PendingRegistryUpdate {
@@ -4284,7 +4277,6 @@ fn finish_in_process_js_inner(
             compile_result.cmj_export_constants.clone(),
             compile_result.cmj_export_arities.clone(),
             compile_result.cmj_export_lambdas.clone(),
-            compile_result.hoisted_exports.clone(),
             is_runtime,
             has_interface,
             metadata_interface_registry_update,

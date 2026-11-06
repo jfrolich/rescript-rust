@@ -2205,7 +2205,16 @@ pub(crate) fn print_out_sig_item_doc_with(item: &OutSigItem, print_name_as_is: b
                     private_doc,
                     print_record_declaration_doc(false, record),
                 ]),
-                typ => Doc::concat(vec![Doc::text(" = "), print_out_type_doc(typ)]),
+                // res_outcome_printer.ml: a manifest prints `= manifest = private
+                // kind`, and every other kind takes the private keyword too.
+                OutType::Otyp_manifest(manifest, typ) => Doc::concat(vec![
+                    Doc::text(" = "),
+                    print_out_type_doc(manifest),
+                    Doc::text(" = "),
+                    private_doc,
+                    print_out_type_doc(typ),
+                ]),
+                typ => Doc::concat(vec![Doc::text(" = "), private_doc, print_out_type_doc(typ)]),
             };
             let constraints = if decl.cstrs.is_empty() {
                 Doc::nil()

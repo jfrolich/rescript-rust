@@ -472,7 +472,7 @@ fn read_cmt(cmt_file: &str) -> ! {
             );
             panic!("Fatal error: exception Cmt_format.Error(_)")
         }
-        Ok(data) if data.starts_with(b"Caml1999I039") => {
+        Ok(data) if data.starts_with(crate::cmi::cmi_format::CMI_MAGIC) => {
             panic!("Fatal error: exception Cmt_format.Error(_)")
         }
         _ => {

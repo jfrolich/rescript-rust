@@ -694,7 +694,16 @@ let rec print_out_sig_item_doc ?(print_name_as_is = false)
             private_doc;
             print_record_declaration_doc ~inline:false record;
           ]
-      | typ -> Doc.concat [Doc.text " = "; print_out_type_doc typ]
+      | Otyp_manifest (manifest, typ) ->
+        Doc.concat
+          [
+            Doc.text " = ";
+            print_out_type_doc manifest;
+            Doc.text " = ";
+            private_doc;
+            print_out_type_doc typ;
+          ]
+      | typ -> Doc.concat [Doc.text " = "; private_doc; print_out_type_doc typ]
     in
     let constraints =
       match out_type_decl.otype_cstrs with
@@ -928,10 +937,6 @@ let print_out_module_type fmt out_module_type =
   Format.pp_print_string fmt
     (Doc.to_string ~width:80 (print_out_module_type_doc out_module_type))
 
-let print_out_type_extension fmt type_extension =
-  Format.pp_print_string fmt
-    (Doc.to_string ~width:80 (print_out_type_extension_doc type_extension))
-
 (* Not supported in ReScript *)
 (* Oprint.out_class_type *)
 let setup =
@@ -939,5 +944,4 @@ let setup =
     (Oprint.out_type := print_out_type;
      Oprint.out_module_type := print_out_module_type;
      Oprint.out_sig_item := print_out_sig_item;
-     Oprint.out_signature := print_out_signature;
-     Oprint.out_type_extension := print_out_type_extension)
+     Oprint.out_signature := print_out_signature)

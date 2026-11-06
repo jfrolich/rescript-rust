@@ -1339,17 +1339,6 @@ impl super::ast_iter::AstIter for UnusedAttributeSweep<'_> {
         super::ast_iter::walk_extension(self, arena, ext);
     }
 
-    fn value_binding(&mut self, arena: &ParseArena, vb: &ValueBinding) {
-        // OCaml `Bs_builtin_ppx.mark_hoisted_function_attributes` marks
-        // `@res.hoistedFunction` on every let binding during mapping.
-        for attr in vb.pvb_attributes.iter() {
-            if arena.get_string(attr.0.txt) == "res.hoistedFunction" {
-                arena.mark_used_attribute(attr);
-            }
-        }
-        super::ast_iter::walk_value_binding(self, arena, vb);
-    }
-
     fn expr(&mut self, arena: &ParseArena, idx: ExprIdx) {
         // `Pexp_constant` runs the literal check and then sweeps only its
         // attributes, without `super.expr` (bs_ast_invariant.ml).

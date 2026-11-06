@@ -5,7 +5,7 @@
 //! # File Format
 //!
 //! A CMI file consists of:
-//! 1. Magic number: "Caml1999I039" (12 bytes)
+//! 1. Magic number: "ResCmi040" (9 bytes)
 //! 2. Marshal'd value: (cmi_name: string, cmi_sign: Types.signature_item list)
 //! 3. Marshal'd value: crcs: (string * Digest.t option) list
 //! 4. Marshal'd value: flags: pers_flags list
@@ -15,7 +15,11 @@ use std::io::{self, Cursor};
 use super::marshal_reader::{MarshalError, MarshalReader, OcamlValue};
 
 /// CMI magic number
-const CMI_MAGIC: &[u8; 12] = b"Caml1999I039";
+pub(crate) const CMI_MAGIC: &[u8; 9] = b"ResCmi040";
+
+/// Earlier compilers wrote OCaml-style magic numbers (cmi_format.ml
+/// `legacy_magic_prefix`).
+const LEGACY_MAGIC_PREFIX: &[u8] = b"Caml1999I";
 
 /// CMI file contents (generic, before type interpretation).
 #[derive(Debug)]
@@ -72,7 +76,7 @@ impl std::fmt::Display for CmiError {
             }
             CmiError::WrongVersion(path, older_newer) => write!(
                 f,
-                "{path}\nis not a compiled interface for this version of OCaml.\nIt seems to be for {older_newer} version of OCaml."
+                "{path}\nis not a compiled interface for this version of ReScript.\nIt seems to be for {older_newer} version of ReScript."
             ),
             CmiError::Corrupted(path) => write!(f, "Corrupted compiled interface\n{path}"),
             CmiError::Marshal(e) => write!(f, "marshal error: {}", e),
@@ -91,16 +95,20 @@ pub fn read_cmi(filename: &str) -> Result<CmiInfos, CmiError> {
 
 /// Read a CMI file from bytes.
 pub fn read_cmi_from_bytes(data: &[u8], filename: &str) -> Result<CmiInfos, CmiError> {
-    if data.len() < 12 {
+    // cmi_format.ml `read_cmi_channel`: `really_input_string` of the magic's
+    // length raises End_of_file (Corrupted) on a shorter file.
+    if data.len() < CMI_MAGIC.len() {
         return Err(CmiError::Corrupted(filename.to_string()));
     }
 
     // Check magic number
-    let magic = &data[..12];
+    let magic = &data[..CMI_MAGIC.len()];
     if magic != CMI_MAGIC {
-        // Check if it's a different version
-        if magic.starts_with(b"Caml1999I") {
-            let older_newer = if magic < CMI_MAGIC {
+        // The same prefix up to the trailing three-digit counter is another
+        // version; an OCaml-style magic was written by an earlier compiler.
+        let pre_len = CMI_MAGIC.len() - 3;
+        if magic[..pre_len] == CMI_MAGIC[..pre_len] {
+            let older_newer = if magic < &CMI_MAGIC[..] {
                 "an older"
             } else {
                 "a newer"
@@ -110,10 +118,16 @@ pub fn read_cmi_from_bytes(data: &[u8], filename: &str) -> Result<CmiInfos, CmiE
                 older_newer.to_string(),
             ));
         }
+        if magic.starts_with(LEGACY_MAGIC_PREFIX) {
+            return Err(CmiError::WrongVersion(
+                filename.to_string(),
+                "an older".to_string(),
+            ));
+        }
         return Err(CmiError::NotAnInterface(filename.to_string()));
     }
 
-    let mut cursor = Cursor::new(&data[12..]);
+    let mut cursor = Cursor::new(&data[CMI_MAGIC.len()..]);
 
     // Read first marshal'd value: (cmi_name, cmi_sign)
     let mut reader = MarshalReader::new();
@@ -162,17 +176,18 @@ pub fn read_cmi_from_bytes(data: &[u8], filename: &str) -> Result<CmiInfos, CmiE
 /// cmi_format.ml:67-76), without decoding its signature.
 pub fn read_cmi_crcs(filename: &str) -> Option<Vec<(String, Option<[u8; 16]>)>> {
     let data = std::fs::read(filename).ok()?;
-    if data.len() < 12 || &data[..12] != CMI_MAGIC {
+    if !data.starts_with(CMI_MAGIC) {
         return None;
     }
     // Skip the (name, signature) value: a 20-byte marshal header whose
     // second word is the data length (intern.c `caml_input_val_from_bytes`).
-    let header = data.get(12..32)?;
+    let start = CMI_MAGIC.len();
+    let header = data.get(start..start + 20)?;
     if header[..4] != [0x84, 0x95, 0xA6, 0xBE] {
         return None;
     }
     let data_len = u32::from_be_bytes([header[4], header[5], header[6], header[7]]) as usize;
-    let crcs_start = 32usize.checked_add(data_len)?;
+    let crcs_start = (start + 20).checked_add(data_len)?;
     let mut cursor = Cursor::new(data.get(crcs_start..)?);
     let mut reader = MarshalReader::new();
     let crcs_value = reader.read_with_header(&mut cursor).ok()?;
@@ -234,10 +249,26 @@ mod tests {
 
     #[test]
     fn test_magic_check() {
-        let data = b"Caml1999I039"; // too short, no marshal data
+        let data = b"ResCmi040"; // too short, no marshal data
         let result = read_cmi_from_bytes(data, "test.cmi");
         // Should fail due to missing marshal data, but magic is valid
-        assert!(result.is_err());
+        assert!(matches!(result, Err(CmiError::Corrupted(_))));
+    }
+
+    #[test]
+    fn other_magic_versions_are_wrong_versions() {
+        // cmi_format.ml `read_cmi_channel`: another counter of the same magic,
+        // and an OCaml-style magic of earlier compilers.
+        for (data, older_newer) in [
+            (&b"ResCmi039xxxx"[..], "an older"),
+            (&b"ResCmi041xxxx"[..], "a newer"),
+            (&b"Caml1999I039xxxx"[..], "an older"),
+        ] {
+            match read_cmi_from_bytes(data, "test.cmi") {
+                Err(CmiError::WrongVersion(_, found)) => assert_eq!(found, older_newer),
+                other => panic!("expected a wrong version, got {other:?}"),
+            }
+        }
     }
 
     #[test]

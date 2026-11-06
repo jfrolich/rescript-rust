@@ -263,7 +263,7 @@ impl<'a> IndexedJsConsumer<'a> {
             let NodeView::Prim(primitive, nodes, _) = self.context.store().view(node) else {
                 unreachable!()
             };
-            if let Some(compiled) = self.compiler.compile_hoisted_external_field(
+            if let Some(compiled) = self.compiler.compile_flat_make_field(
                 primitive,
                 LambdaInputs::Indexed {
                     store: self.context.store(),

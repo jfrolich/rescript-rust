@@ -360,7 +360,12 @@ pub struct LambdaCompiler {
     /// cross-module inlining (compiler/core/lam_stats_export.ml:53-89).
     pub(crate) cmj_export_lambdas: crate::lambda::CmjExportLambdas,
     pub(crate) cmj_export_arities: AHashMap<String, CmjExportArity>,
-    hoisted_functions: Vec<crate::lambda::HoistedFunction>,
+    /// `Translmod.implementation.flat_make_paths`.
+    flat_make_paths: Vec<crate::lambda::FlatMakePath>,
+    /// `Lam_stats.awaited_units`: locals bound to an awaited compilation
+    /// unit, `let d = await import(Unit)`; reads of nested `make` values
+    /// through them use the flat exports too.
+    pub(crate) awaited_units: ahash::AHashSet<Ident>,
     /// Resolves the location handles of the Lambda being compiled and of the
     /// JS IR built from it; imported lambdas are rebased into it.
     lam_locs: LamLocTable,
@@ -480,7 +485,8 @@ impl LambdaCompiler {
             cmj_export_constants: AHashMap::new(),
             cmj_export_lambdas: Default::default(),
             cmj_export_arities: AHashMap::new(),
-            hoisted_functions: Vec::new(),
+            flat_make_paths: Vec::new(),
+            awaited_units: ahash::AHashSet::new(),
             lam_locs: LamLocTable::opaque(),
             if_return_finished: AHashMap::new(),
             external_module_ids: AHashMap::new(),
@@ -542,8 +548,8 @@ impl LambdaCompiler {
         )
     }
 
-    pub fn set_hoisted_functions(&mut self, hoisted: Vec<crate::lambda::HoistedFunction>) {
-        self.hoisted_functions = hoisted;
+    pub fn set_flat_make_paths(&mut self, paths: Vec<crate::lambda::FlatMakePath>) {
+        self.flat_make_paths = paths;
     }
 
     /// Compile a Lambda expression into a JS IR program.
@@ -669,10 +675,14 @@ impl LambdaCompiler {
                 )
             },
         );
-        let simplified_result = crate::lambda::lam_compile_main::add_hoisted_function_aliases(
+        let simplified_result = crate::lambda::lam_compile_main::add_flat_make_aliases(
             simplified_result,
-            &self.hoisted_functions,
+            &self.flat_make_paths,
         );
+        // lam_compile_main.ml: `awaited_units = awaited_units groups`, after
+        // the flat aliases are added.
+        self.awaited_units =
+            crate::lambda::lam_compile_main::awaited_units(&simplified_result.lambda);
         self.cmj_export_constants =
             collect_cmj_export_constants_from_simplified_lambda(&simplified_result.lambda);
         self.cmj_export_lambdas = if self.cross_module_inline {
@@ -1665,7 +1675,7 @@ impl LambdaCompiler {
                 if let Some((op, lhs, rhs)) = short_circuit_primitive(&info.primitive, &info.args) {
                     return self.compile_short_circuit_expr(op, lhs, rhs);
                 }
-                if let Some(compiled) = self.compile_hoisted_external_field(
+                if let Some(compiled) = self.compile_flat_make_field(
                     &info.primitive,
                     super::lam_compile_input::LambdaInputs::Recursive(&info.args),
                 ) {

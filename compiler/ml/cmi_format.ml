@@ -35,6 +35,9 @@ let input_cmi ic =
   let flags = input_value ic in
   {cmi_name = name; cmi_sign = sign; cmi_crcs = crcs; cmi_flags = flags}
 
+(* Earlier compilers wrote OCaml-style magic numbers *)
+let legacy_magic_prefix = "Caml1999I"
+
 let read_cmi_channel filename ic =
   try
     let buffer =
@@ -50,6 +53,8 @@ let read_cmi_channel filename ic =
            if buffer < Config.cmi_magic_number then "an older" else "a newer"
          in
          raise (Error (Wrong_version_interface (filename, msg)))
+       else if String.starts_with ~prefix:legacy_magic_prefix buffer then
+         raise (Error (Wrong_version_interface (filename, "an older")))
        else raise (Error (Not_an_interface filename)));
     let cmi = input_cmi ic in
     cmi
@@ -61,20 +66,8 @@ let read_cmi filename =
     (fun () -> read_cmi_channel filename ic)
     ~finally:(fun () -> close_in_noerr ic)
 
-let output_cmi filename oc cmi =
-  (* beware: the provided signature must have been substituted for saving *)
-  output_string oc Config.cmi_magic_number;
-  output_value oc (cmi.cmi_name, cmi.cmi_sign);
-  flush oc;
-  let crc = Digest.file (Compiler_request_state.resolve_path filename) in
-  let crcs = (cmi.cmi_name, Some crc) :: cmi.cmi_crcs in
-  output_value oc crcs;
-  output_value oc cmi.cmi_flags;
-  crc
-
-(* This function is also called by [save_cmt] as cmi_format is subset of
-       cmt_format, so dont close the channel yet
-*)
+(* Writes the .cmi file, keeping an existing one with the same contents
+   when [check_exists] is given *)
 let create_cmi ?check_exists filename (cmi : cmi_infos) =
   (* beware: the provided signature must have been substituted for saving *)
   let content =
@@ -123,8 +116,8 @@ let report_error ppf = function
       filename
   | Wrong_version_interface (filename, older_newer) ->
     fprintf ppf
-      "%a@ is not a compiled interface for this version of OCaml.@.It seems to \
-       be for %s version of OCaml."
+      "%a@ is not a compiled interface for this version of ReScript.@.It seems \
+       to be for %s version of ReScript."
       Location.print_filename filename older_newer
   | Corrupted_interface filename ->
     fprintf ppf "Corrupted compiled interface@ %a" Location.print_filename

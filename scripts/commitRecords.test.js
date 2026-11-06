@@ -114,6 +114,28 @@ Review: Does a PPX still see the extension? Yes: the v0 bridge maps it back,
 ${SIGNED}
 `;
 
+test("the renderer imports no packages: the workflow runs it without node_modules", async () => {
+  const seen = new Set();
+  /** @param {string} file */
+  const visit = async file => {
+    if (seen.has(file)) return;
+    seen.add(file);
+    const source = await fs.readFile(file, "utf8");
+    for (const [, spec] of source.matchAll(
+      /^(?:import|export)\b[^"'`;]*?\bfrom\s+["']([^"']+)["']/gm,
+    )) {
+      assert.ok(
+        spec.startsWith("./") || spec.startsWith("node:"),
+        `${path.basename(file)} imports ${spec}`,
+      );
+      if (spec.startsWith("./"))
+        await visit(path.resolve(path.dirname(file), spec));
+    }
+  };
+  await visit(script);
+  assert.ok(seen.size > 3, [...seen].join(", "));
+});
+
 test("a minimal record draws its identity and subject", async () => {
   const html = await render(
     async (git, dir) => {
@@ -132,9 +154,8 @@ test("a minimal record draws its identity and subject", async () => {
   has(html, "<h3>Fix a typo</h3>");
   assert.match(
     html,
-    /<div class="meta"><code>[0-9a-f]{9}<\/code> · A Person · [A-Z][a-z]{2} \d{2}, \d{4} · <a href="https:\/\/github.com\/rescript-lang\/rescript\/pull\/7">#7<\/a><\/div>/,
+    /<div class="meta"><code>[0-9a-f]{9}<\/code> · A Person \+ B Person · [A-Z][a-z]{2} \d{2}, \d{4}, \d{2}:\d{2} UTC · <a href="https:\/\/github.com\/rescript-lang\/rescript\/pull\/7">#7<\/a><\/div>/,
   );
-  has(html, '<div class="meta">with B Person</div>');
   lacks(html, '<div class="below">');
   lacks(html, "Signed-off-by");
   lacks(html, "Co-Authored-By");
@@ -428,6 +449,18 @@ test("a line with a colon is prose unless it names a section", async () => {
   lacks(html, '<h4 class="change">');
 });
 
+test("a section's name wrapped onto a line of a paragraph is prose", async () => {
+  const html = await renderOne(
+    `Require a description\n\nIt requires prose or a\nWhy: section, and an example.\nWhy: alone after a blank line is a section.\n\nWhy: Here it is.\n\n${SIGNED}\n`,
+  );
+  has(
+    html,
+    "<p>It requires prose or a Why: section, and an example. Why: alone after a blank line is a section.</p>",
+  );
+  assert.equal(html.split('<section class="block k-why">').length - 1, 1);
+  has(html, "<p>Here it is.</p>");
+});
+
 test("a character literal with a Unicode escape is one string token", async () => {
   const html = await renderOne(
     `Match a range\n\nExample:\n    switch c { | '\\u{100}' .. '\\u{1100}' => 1 | _ => 0 }\n\n${SIGNED}\n`,
@@ -446,7 +479,7 @@ test("Breaking and Review sections right above the sign-off are drawn", async ()
   );
   has(html, '<article class="card breaking"');
   has(html, '<ul class="review"><li>Is -bs-x still read? No.</li></ul>');
-  has(html, '<div class="meta">with B Person</div>');
+  has(html, "</code> · A Person + B Person · ");
   lacks(html, "Signed-off-by");
 });
 
@@ -493,7 +526,8 @@ test("trailers of any key end the message and are not drawn", async () => {
   const html = await renderOne(
     `Fix a thing\n\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>\nClaude-Session: https://claude.ai/code/session_x\n${SIGNED}\n`,
   );
-  has(html, '<div class="meta">with Claude Opus 5.5</div>');
+  has(html, " · A Person + Claude · ");
+  lacks(html, "Opus");
   lacks(html, "Claude-Session");
   lacks(html, "session_x");
   lacks(html, '<section class="block');
@@ -819,4 +853,176 @@ ${SIGNED}
   has(html, '<span class="ln elide" style="--r:3;--c:1;--i:0">…</span>');
   has(html, '<span class="ln elide" style="--r:3;--c:2;--i:0">… ');
   has(html, '<span class="ln del" style="--r:2;--c:1;--i:0">');
+});
+
+test("--markdown draws every commit into the comment, with the page's link", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "commit-records-"));
+  const git = (/** @type {string[]} */ ...a) =>
+    execFileSync("git", a, { cwd: dir, encoding: "utf8" }).trim();
+  git("init", "-q", "-b", "main");
+  git("config", "user.name", "A Person");
+  git("config", "user.email", "a@example.com");
+  await commit(git, dir, { "a.txt": "a\n" }, "base");
+  await commit(git, dir, {}, `First change\n\n${SIGNED}`);
+  await commit(git, dir, {}, `Second change\n\n${SIGNED}`);
+  const md = path.join(dir, "comment.md");
+  const r = spawnSync(
+    "node",
+    [
+      script,
+      ...["--out", path.join(dir, "page.html"), "--markdown", md],
+      ...["--url", "https://cdn.example/pr-1/index.html", "HEAD~2..HEAD"],
+    ],
+    { cwd: dir, encoding: "utf8" },
+  );
+  assert.equal(r.status, 0, r.stderr);
+  const comment = await fs.readFile(md, "utf8");
+  has(
+    comment,
+    "### Changelog\n\nNo changelog entry.\n\n### [Semantic Diff](https://cdn.example/pr-1/index.html)\n\n2 commits · [Full page](https://cdn.example/pr-1/index.html)\n\n<details",
+  );
+  has(comment, "First change");
+  has(comment, "Second change");
+});
+
+test("the comment lists the changelog entries a range adds, breaking first", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "commit-records-"));
+  const git = (/** @type {string[]} */ ...a) =>
+    execFileSync("git", a, { cwd: dir, encoding: "utf8" }).trim();
+  git("init", "-q", "-b", "main");
+  git("config", "user.name", "A Person");
+  git("config", "user.email", "a@example.com");
+  await commit(
+    git,
+    dir,
+    { "changes/README.md": "readme\n", "changes/old.fix.md": "- Old.\n" },
+    "base",
+  );
+  const base = git("rev-parse", "HEAD");
+  await commit(
+    git,
+    dir,
+    {
+      "changes/watch.fix.md": "- Recover the watcher.\n",
+      "changes/gone.breaking.md": "- Drop -x.\n",
+      "changes/Bad Name.md": "- ?\n",
+      "changes/README.md": "readme, edited\n",
+    },
+    `Fix and break\n\n${SIGNED}`,
+  );
+  // An entry added and then removed again is no entry of the range.
+  await commit(
+    git,
+    dir,
+    { "changes/tmp.polish.md": "- Tmp.\n" },
+    `Add\n\n${SIGNED}`,
+  );
+  git("rm", "-q", "changes/tmp.polish.md");
+  git("commit", "-q", "-m", `Remove\n\n${SIGNED}`);
+  const md = path.join(dir, "comment.md");
+  const r = spawnSync(
+    "node",
+    [
+      script,
+      ...["--out", path.join(dir, "page.html"), "--markdown", md],
+      `${base}..HEAD`,
+    ],
+    { cwd: dir, encoding: "utf8" },
+  );
+  assert.equal(r.status, 0, r.stderr);
+  const comment = await fs.readFile(md, "utf8");
+  has(
+    comment,
+    "### Changelog\n\n- :boom: Drop -x.\n- :bug: Recover the watcher.\n- :grey_question: `Bad Name.md`\n\n",
+  );
+  lacks(comment, "Old.");
+  lacks(comment, "Tmp.");
+  lacks(comment, "readme");
+  has(comment, "but no commit says what it breaks");
+});
+
+test("--logins draws an author by the GitHub login, linked, others by name", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "commit-records-"));
+  const git = (/** @type {string[]} */ ...a) =>
+    execFileSync("git", a, { cwd: dir, encoding: "utf8" }).trim();
+  git("init", "-q", "-b", "main");
+  git("config", "user.name", "A Person");
+  git("config", "user.email", "a@example.com");
+  await commit(git, dir, { "a.txt": "a\n" }, "base");
+  await commit(
+    git,
+    dir,
+    {},
+    `Known\n\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>\n${SIGNED}`,
+  );
+  const known = git("rev-parse", "HEAD");
+  await commit(git, dir, {}, `Unknown\n\n${SIGNED}`);
+  await commit(git, dir, {}, `Odd login\n\n${SIGNED}`);
+  const odd = git("rev-parse", "HEAD");
+  const logins = path.join(dir, "logins.txt");
+  await fs.writeFile(logins, `${known} a-person\n${odd} bot[bot]\n`);
+  const out = path.join(dir, "page.html");
+  const md = path.join(dir, "comment.md");
+  const r = spawnSync(
+    "node",
+    [
+      script,
+      ...["--out", out, "--markdown", md, "--logins", logins],
+      "HEAD~3..HEAD",
+    ],
+    { cwd: dir, encoding: "utf8" },
+  );
+  assert.equal(r.status, 0, r.stderr);
+  const html = await fs.readFile(out, "utf8");
+  has(
+    html,
+    '</code> · <a href="https://github.com/a-person">a-person</a> + Claude · ',
+  );
+  const comment = await fs.readFile(md, "utf8");
+  has(comment, " · [a-person](https://github.com/a-person) + Claude · ");
+  const card = (/** @type {string} */ subject) =>
+    comment.split("<details").find(d => d.includes(`<b>${subject}</b>`)) ?? "";
+  has(card("Unknown"), " · A Person · ");
+  has(card("Odd login"), " · A Person · ");
+  lacks(comment, "@a-person");
+});
+
+test("--previous marks the commits the last push added or edited", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "commit-records-"));
+  const git = (/** @type {string[]} */ ...a) =>
+    execFileSync("git", a, { cwd: dir, encoding: "utf8" }).trim();
+  git("init", "-q", "-b", "main");
+  git("config", "user.name", "A Person");
+  git("config", "user.email", "a@example.com");
+  await commit(git, dir, { "a.txt": "a\n" }, "base");
+  const base = git("rev-parse", "HEAD");
+  await commit(git, dir, {}, `Kept\n\n${SIGNED}`);
+  await commit(git, dir, {}, `Edited\n\nFirst words.\n\n${SIGNED}`);
+  await commit(git, dir, {}, `Dropped\n\n${SIGNED}`);
+  const previous = git("rev-parse", "HEAD");
+  // A force push: the last commit dropped, the one below reworded, one added.
+  git("reset", "-q", "--hard", "HEAD~2");
+  await commit(git, dir, {}, `Edited\n\nOther words.\n\n${SIGNED}`);
+  await commit(git, dir, {}, `Added\n\n${SIGNED}`);
+  const md = path.join(dir, "comment.md");
+  const r = spawnSync(
+    "node",
+    [
+      script,
+      ...["--out", path.join(dir, "page.html"), "--markdown", md],
+      ...["--previous", previous, `${base}..HEAD`],
+    ],
+    { cwd: dir, encoding: "utf8" },
+  );
+  assert.equal(r.status, 0, r.stderr);
+  const comment = await fs.readFile(md, "utf8");
+  has(comment, "<summary><b>Kept</b></summary>");
+  const marked = (/** @type {string} */ subject) =>
+    comment.split("<details").find(d => d.includes(`<b>${subject}</b>`)) ?? "";
+  lacks(marked("Kept"), "✨");
+  lacks(marked("Kept"), "✏️");
+  has(marked("Edited"), "<summary>✏️ <b>Edited</b></summary>");
+  has(marked("Edited"), " · edited</sub>");
+  has(marked("Added"), "<summary>✨ <b>Added</b></summary>");
+  has(marked("Added"), " · new</sub>");
 });

@@ -88,21 +88,43 @@ pub use lam_loc::{CmjExportLambdas, LamLoc, LamLocTable};
 pub use lam_primitive::Primitive;
 pub use lam_tag_info::TagInfo;
 
-/// Source binding selected by `@res.hoistedFunction` for a flat JS export.
-/// Mirrors `Lambda.hoisted_function` in `compiler/ml/lambda.ml`.
-#[derive(Debug, Clone)]
-pub struct HoistedFunction {
-    pub binding: Ident,
-    pub path: Vec<String>,
-    pub loc: LamLoc,
-    pub target_loc: LamLoc,
+/// `Translmod.flat_make_step`: a module field on the way to a nested `make`,
+/// its runtime position (counted as in `Env`) and its source name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FlatMakeStep {
+    pub pos: i32,
+    pub name: String,
 }
 
-/// CMJ lookup entry for a successfully materialized flat export.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct HoistedExport {
-    pub path: Vec<String>,
-    pub export_name: String,
+/// `Translmod.flat_make_path`.
+pub type FlatMakePath = Vec<FlatMakeStep>;
+
+/// `Translmod.flat_export_name`: the segments, each unwrapped from `\"..."`,
+/// joined with `$`.
+pub fn flat_export_name<S: AsRef<str>>(path: &[S]) -> String {
+    path.iter()
+        .map(|part| {
+            let part = part.as_ref();
+            if part.len() >= 3 && part.starts_with("\\\"") && part.ends_with('"') {
+                &part[2..part.len() - 1]
+            } else {
+                part
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("$")
+}
+
+/// `Translmod.flat_make_name`: the flat export a read of this source path
+/// from another module goes through, `Some("A$B$make")` for `A.B.make` and
+/// `None` for other paths.
+pub fn flat_make_name<S: AsRef<str>>(path: &[S]) -> Option<String> {
+    match path {
+        [_, _, ..] if path.last().is_some_and(|last| last.as_ref() == "make") => {
+            Some(flat_export_name(path))
+        }
+        _ => None,
+    }
 }
 
 /// Application status for function calls
@@ -247,35 +269,12 @@ fn is_decimal_index(name: &str, i: usize) -> bool {
         && name.parse::<usize>() == Ok(i)
 }
 
-/// OCaml `float_of_string` for the spellings a literal tag can carry.
-fn ocaml_float_of_string(s: &str) -> Option<f64> {
-    if let Some(value) = crate::js_ir::printer::parse_hex_float_literal(s) {
-        return Some(value);
-    }
-    s.replace('_', "").parse::<f64>().ok()
-}
-
-/// lambda.ml `literal_denotes_same`: runtime equality rather than equality
-/// of tags; bigint spellings are not compared.
+/// lambda.ml `literal_denotes_same` = `Variant_runtime.same_literal_value`.
 fn literal_denotes_same(
     a: &crate::types::VariantLiteralTag,
     b: &crate::types::VariantLiteralTag,
 ) -> bool {
-    use crate::types::VariantLiteralTag as L;
-    match (a, b) {
-        (L::String(x), L::String(y)) => x == y,
-        // lambda.ml:824 compares through `Int32.of_int`.
-        (L::Int(x), L::Int(y)) => *x as i32 == *y as i32,
-        (L::Float(x), L::Float(y)) => {
-            matches!((ocaml_float_of_string(x), ocaml_float_of_string(y)), (Some(x), Some(y)) if x == y)
-        }
-        (L::Int(x), L::Float(y)) | (L::Float(y), L::Int(x)) => {
-            ocaml_float_of_string(y).is_some_and(|y| f64::from(*x as i32) == y)
-        }
-        (L::Bool(x), L::Bool(y)) => x == y,
-        (L::Null, L::Null) | (L::Undefined, L::Undefined) => true,
-        _ => false,
-    }
+    crate::types::variant_runtime::same_literal_value(a, b)
 }
 
 /// lambda.ml `value_has_block_type`, mirroring `Dynamic_checks`.

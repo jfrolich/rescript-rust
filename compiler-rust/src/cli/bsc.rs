@@ -1040,7 +1040,7 @@ fn check_gentype_cmt_file(cmt_file: &Path) -> Result<()> {
     // Cmt_format.read_cmt raises Cmt_format.Error(Not_a_typedtree _) when the
     // selected file contains a compiled interface without typedtree data.
     const CMT_MAGIC: &[u8; 12] = b"Caml1999T039";
-    const CMI_MAGIC: &[u8; 12] = b"Caml1999I039";
+    const CMI_MAGIC: &[u8] = crate::cmi::cmi_format::CMI_MAGIC;
 
     let data = fs::read(cmt_file).with_context(|| cmt_file.display().to_string())?;
     if data.len() < CMT_MAGIC.len() {
@@ -1052,7 +1052,7 @@ fn check_gentype_cmt_file(cmt_file: &Path) -> Result<()> {
         return Ok(());
     }
 
-    if magic == CMI_MAGIC {
+    if magic.starts_with(CMI_MAGIC) {
         let _ = io::stdout().flush();
         return Err(UserDiagnostic::new(
             "Fatal error: exception Cmt_format.Error(_)\n".to_string(),

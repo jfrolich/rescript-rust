@@ -3476,6 +3476,17 @@ pub enum TypeModError {
         /// Previous definition location.
         repeated_loc: LocIdx,
     },
+    /// `Js_name_clash` (typemod.ml `check_js_names`): two runtime components
+    /// of one module get the same JavaScript name.
+    JsNameClash {
+        /// The later component.
+        loc: Location,
+        kind: &'static str,
+        other_kind: &'static str,
+        js_name: String,
+        /// The earlier component.
+        other_loc: Location,
+    },
     /// A record declaration mixes object-type spread syntax with record fields.
     ObjectSpreadWithRecordField {
         /// Source location to report.
@@ -5482,6 +5493,52 @@ fn check_duplicate_typed_label_declarations(
     Ok(())
 }
 
+/// typemod.ml `check_js_names`: two runtime components of a module must not
+/// get the same JavaScript name. The module's fields, and the exports of a
+/// compilation unit, are named by `Ext_ident.convert`, which maps both
+/// `delete` and `$$delete` to `$$delete` and `\"a-b"` like `a$b`. The exports
+/// of a compilation unit keep `default` as written. Values are checked after
+/// `simplify_signature`, so a value that is shadowed by one of the same name
+/// is not a field.
+pub(crate) fn check_js_names(
+    ctx: &crate::types::context::TypeContext,
+    toplevel: bool,
+    sg: &[crate::types::decl::SignatureItem],
+) -> TypeModResult<()> {
+    use crate::types::decl::{SignatureItem as S, ValueKind};
+    let mut seen: HashMap<String, (&'static str, crate::types::DeclLoc)> = HashMap::default();
+    for item in sg {
+        let (kind, id, loc) = match item {
+            S::SigValue(_, desc) if matches!(desc.val_kind, ValueKind::ValPrim(_)) => continue,
+            S::SigType(..) | S::SigModtype(..) | S::SigClass | S::SigClassType => continue,
+            S::SigValue(id, desc) => ("value", id, desc.val_loc),
+            S::SigTypext(id, ext, _) => ("extension constructor", id, ext.ext_loc),
+            S::SigModule(id, md, _) => ("module", id, md.md_loc),
+        };
+        let name = id.name();
+        let js_name = if toplevel && name == "default" {
+            name.to_string()
+        } else {
+            crate::js_ir::printer::convert_ident_name(name)
+        };
+        match seen.get(&js_name) {
+            Some((other_kind, other_loc)) => {
+                return Err(TypeModError::JsNameClash {
+                    loc: ctx.resolve_loc(loc),
+                    kind,
+                    other_kind,
+                    js_name,
+                    other_loc: ctx.resolve_loc(*other_loc),
+                });
+            }
+            None => {
+                seen.insert(js_name, (kind, loc));
+            }
+        }
+    }
+    Ok(())
+}
+
 #[derive(Default)]
 struct Names {
     types: HashMap<String, LocIdx>,
@@ -5717,7 +5774,7 @@ impl AstUntaggedVariantError {
     pub fn message_text(&self) -> String {
         match self {
             AstUntaggedVariantError::InvalidVariantAsAnnotation => {
-                "A variant case annotation @as(...) must be a string, integer, boolean, null, or undefined.".to_string()
+                "A variant case annotation @as(...) must be a string, integer, float, bigint, boolean, null, or undefined.".to_string()
             }
             AstUntaggedVariantError::VariantAsIntegerOutOfRange(value) => format!(
                 "The integer {value} in this variant case's @as annotation is out of range."
@@ -5989,44 +6046,72 @@ fn get_untagged_constructor_block_type(
     })
 }
 
+/// ast_untagged_variants.ml `add_literal`: the literal's spelling, and its
+/// `Variant_runtime.literal_value_key` unless it is a string literal (a case
+/// without `@as` counts as its name).
 fn variant_tag_literal(
     constructor_name: &str,
     tag: &Option<crate::types::VariantLiteralTag>,
-) -> (bool, String) {
+) -> (Option<String>, String) {
+    use crate::types::VariantLiteralTag as L;
     match tag {
-        Some(crate::types::VariantLiteralTag::String(value)) => (true, value.clone()),
-        Some(crate::types::VariantLiteralTag::Int(value)) => (false, value.to_string()),
-        Some(crate::types::VariantLiteralTag::Float(value)) => (false, value.clone()),
-        Some(crate::types::VariantLiteralTag::BigInt(value)) => (false, value.clone()),
-        Some(crate::types::VariantLiteralTag::Bool(value)) => {
-            (false, if *value { "true" } else { "false" }.to_string())
+        Some(L::String(value)) => (None, value.clone()),
+        None => (None, constructor_name.to_string()),
+        Some(literal) => {
+            let spelling = match literal {
+                L::Int(value) => value.to_string(),
+                L::Float(value) => value.clone(),
+                L::BigInt(value) => format!("{value}n"),
+                L::Bool(value) => if *value { "true" } else { "false" }.to_string(),
+                L::Null => "null".to_string(),
+                L::Undefined => "undefined".to_string(),
+                L::String(_) => unreachable!("handled above"),
+            };
+            (Some(literal.value_key()), spelling)
         }
-        Some(crate::types::VariantLiteralTag::Null) => (false, "null".to_string()),
-        Some(crate::types::VariantLiteralTag::Undefined) => (false, "undefined".to_string()),
-        None => (true, constructor_name.to_string()),
     }
 }
 
+/// `add_string_literal` / `add_nonstring_literal` of
+/// ast_untagged_variants.ml `check_invariant`: other literals are keyed by
+/// the JavaScript value they denote, with the spelling of the first one.
 fn add_variant_literal(
     loc: &Location,
     tag: &Option<crate::types::VariantLiteralTag>,
     constructor_name: &str,
     string_literals: &mut HashSet<String>,
-    nonstring_literals: &mut HashSet<String>,
+    nonstring_literals: &mut HashMap<String, String>,
 ) -> TypeModResult<()> {
-    let (is_string, literal) = variant_tag_literal(constructor_name, tag);
-    let set = if is_string {
-        string_literals
-    } else {
-        nonstring_literals
-    };
-    if set.contains(&literal) {
-        return Err(invalid_untagged_variant_definition(
-            *loc,
-            format!("Duplicate literal {literal}."),
-        ));
+    let (key, literal) = variant_tag_literal(constructor_name, tag);
+    match key {
+        None => {
+            if string_literals.contains(&literal) {
+                return Err(invalid_untagged_variant_definition(
+                    *loc,
+                    format!("Duplicate literal {literal}."),
+                ));
+            }
+            string_literals.insert(literal);
+        }
+        Some(key) => {
+            match nonstring_literals.get(&key) {
+                Some(earlier) if *earlier == literal => {
+                    return Err(invalid_untagged_variant_definition(
+                        *loc,
+                        format!("Duplicate literal {literal}."),
+                    ));
+                }
+                Some(earlier) => {
+                    return Err(invalid_untagged_variant_definition(
+                        *loc,
+                        format!("The literal {literal} is the same JavaScript value as {earlier}."),
+                    ));
+                }
+                None => {}
+            }
+            nonstring_literals.insert(key, literal);
+        }
     }
-    set.insert(literal);
     Ok(())
 }
 
@@ -6056,7 +6141,7 @@ fn check_variant_well_formed(
     }
 
     let mut string_literals_consts = HashSet::default();
-    let mut nonstring_literals_consts = HashSet::default();
+    let mut nonstring_literals_consts = HashMap::default();
     for (loc, name, tag) in &consts {
         add_variant_literal(
             &ctx.resolve_loc(*loc),
@@ -6069,7 +6154,7 @@ fn check_variant_well_formed(
 
     if !is_untagged_def {
         let mut string_literals_blocks = HashSet::default();
-        let mut nonstring_literals_blocks = HashSet::default();
+        let mut nonstring_literals_blocks = HashMap::default();
         for (loc, name, tag, _) in &blocks {
             add_variant_literal(
                 &ctx.resolve_loc(*loc),
@@ -6109,8 +6194,8 @@ fn check_variant_well_formed(
                 // payload only receives the booleans that are not literal
                 // cases. A partial overlap is allowed, like for strings and
                 // numbers.
-                if nonstring_literals_consts.contains("true")
-                    && nonstring_literals_consts.contains("false")
+                if nonstring_literals_consts.contains_key("true")
+                    && nonstring_literals_consts.contains_key("false")
                 {
                     return Err(invalid_untagged_variant_definition(
                         ctx.resolve_loc(*loc),
@@ -6985,6 +7070,129 @@ fn mtype_scrape(
         }
         _ => mty.clone(),
     }
+}
+
+/// `Translmod.flat_make_paths` (translmod.ml): the nested `make` values of a
+/// compilation unit's final signature, which are also exported under a flat
+/// name such as `A$B$make`. React Server Components can only pass a client
+/// module's top-level exports to the client, so `Lib.A.B.make` must not be
+/// reached through the module object. Producer and consumer derive these
+/// paths from the signature alone. Each step carries the field's runtime
+/// position, counted as in `Env`.
+///
+/// OCaml adds every level's signature to the environment
+/// (`Env.add_signature`) before scraping its submodules; only `Mty_ident`
+/// reads that environment, so Rust materializes it when one is scraped.
+pub(crate) fn flat_make_paths(
+    ctx: &crate::types::context::TypeContext,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    sg: &[crate::types::decl::SignatureItem],
+) -> Vec<crate::lambda::FlatMakePath> {
+    use crate::lambda::FlatMakeStep;
+    use crate::types::decl::{ModuleType as Mty, SignatureItem as S, ValueKind};
+
+    struct Scope<'a> {
+        base: &'a Env,
+        /// The compilation unit's signature.
+        top: &'a [S],
+        /// The scraped signatures of the enclosing submodules, outermost
+        /// first.
+        nested: Vec<std::sync::Arc<crate::types::decl::Signature>>,
+        /// `envs[i]` is `base` with the first `i + 1` levels added.
+        envs: Vec<Env>,
+    }
+
+    impl Scope<'_> {
+        fn depth(&self) -> usize {
+            1 + self.nested.len()
+        }
+
+        fn level(&self, index: usize) -> &[S] {
+            if index == 0 {
+                self.top
+            } else {
+                &self.nested[index - 1]
+            }
+        }
+
+        fn env(&mut self) -> Env {
+            while self.envs.len() < self.depth() {
+                let mut env = self.envs.last().unwrap_or(self.base).clone();
+                for item in self.level(self.envs.len()) {
+                    crate::types::includemod::add_sig_item_to_env(item, &mut env);
+                }
+                self.envs.push(env);
+            }
+            self.envs.last().unwrap_or(self.base).clone()
+        }
+    }
+
+    fn of_signature(
+        ctx: &crate::types::context::TypeContext,
+        pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+        scope: &mut Scope<'_>,
+        rev_path: &mut Vec<FlatMakeStep>,
+        acc: &mut Vec<crate::lambda::FlatMakePath>,
+    ) {
+        let depth = scope.depth();
+        let mut pos = 0;
+        let mut index = 0;
+        while index < scope.level(depth - 1).len() {
+            let item = &scope.level(depth - 1)[index];
+            index += 1;
+            match item {
+                S::SigValue(_, desc) if matches!(desc.val_kind, ValueKind::ValPrim(_)) => {}
+                S::SigValue(id, _) => {
+                    if !rev_path.is_empty() && id.name() == "make" {
+                        let mut path = rev_path.clone();
+                        path.push(FlatMakeStep {
+                            pos,
+                            name: "make".to_string(),
+                        });
+                        acc.push(path);
+                    }
+                    pos += 1;
+                }
+                S::SigTypext(..) => pos += 1,
+                S::SigModule(id, md, _) => {
+                    let name = id.name().to_string();
+                    let scraped = match &md.md_type {
+                        Mty::MtySignature(sg) => Some(sg.clone()),
+                        Mty::MtyIdent(_) => {
+                            let md_type = md.md_type.clone();
+                            let env = scope.env();
+                            match mtype_scrape(ctx, &env, pers_env, &md_type) {
+                                Mty::MtySignature(sg) => Some(sg),
+                                _ => None,
+                            }
+                        }
+                        Mty::MtyAlias(..) | Mty::MtyFunctor { .. } => None,
+                    };
+                    if let Some(sub) = scraped {
+                        rev_path.push(FlatMakeStep { pos, name });
+                        scope.nested.push(sub);
+                        of_signature(ctx, pers_env, scope, rev_path, acc);
+                        scope.nested.pop();
+                        scope.envs.truncate(scope.depth());
+                        rev_path.pop();
+                    }
+                    pos += 1;
+                }
+                S::SigType(..) | S::SigModtype(..) | S::SigClass | S::SigClassType => {}
+            }
+        }
+    }
+
+    let mut acc = Vec::new();
+    let mut scope = Scope {
+        base: env,
+        top: sg,
+        nested: Vec::new(),
+        envs: Vec::new(),
+    };
+    of_signature(ctx, pers_env, &mut scope, &mut Vec::new(), &mut acc);
+    acc
 }
 
 /// `Mtype.type_paths` (mtype.ml:200-225).
@@ -15185,6 +15393,15 @@ fn type_module_expr_with_alias_inner<'a>(
             // shrinks the signature, `wrap_constraint` runs the inclusion
             // check at compiler/ml/typemod.ml:1205-1217.
             let simplified_structure_sig = simplified_structure_signature(&structure);
+            // typemod.ml: `check_js_names ~toplevel:false sg'` on the
+            // simplified signature.
+            check_js_names(
+                tctx.type_ctx,
+                false,
+                simplified_structure_sig
+                    .as_deref()
+                    .unwrap_or(&structure.str_type),
+            )?;
 
             let md = ModuleExpr {
                 mod_desc: ModuleExprDesc::Tmod_structure(structure),
@@ -16060,6 +16277,13 @@ fn transl_modtype<'a>(
             .unwrap_or_else(|_| {
                 crate::types::decl::ModuleType::MtySignature(std::sync::Arc::new(vec![]))
             });
+    // typemod.ml `transl_modtype_aux`: `check_js_names ~toplevel:false
+    // sg.sig_type` for a written signature.
+    if let (TMtyDesc::Tmty_signature(_), crate::types::decl::ModuleType::MtySignature(sig_type)) =
+        (&typed.mty_desc, &typed.mty_type)
+    {
+        check_js_names(tctx.type_ctx, false, sig_type)?;
+    }
     Ok(typed)
 }
 

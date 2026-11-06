@@ -10,13 +10,22 @@
  *   node scripts/commitRecords.js --out review.html <rev>...
  *   node scripts/commitRecords.js --out review.html <base>..<tip>...
  *   --pr <number> and --title <text> head the page with the pull request.
+ *   --markdown <file> also draws the records as the pull request's comment
+ *   (scripts/recordMarkdown.js), linking the page at --url <url>.
+ *   --logins <file>, lines `<sha> <login>`, names the GitHub accounts of
+ *   the commits' authors, drawn in place of their names. With
+ *   --previous <rev>, the pull request's head before the last push, the
+ *   comment marks the commits that push added or whose message it edited.
  */
 
 import { execFileSync } from "node:child_process";
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
+import { categories, parseFragment } from "./changelogFragments.js";
+import { commentMarkdown } from "./recordMarkdown.js";
 import { CSS, esc, pageBody, pageTitle, parseRecord } from "./recordRender.js";
 
 /** @import { CommitRecord, Group } from "./recordRender.js" */
+/** @import { ChangelogEntry } from "./recordMarkdown.js" */
 
 /** @param {string[]} args */
 const git = args =>
@@ -27,19 +36,134 @@ const git = args =>
   });
 
 /**
- * The record of one commit: its short hash, author, date and message.
+ * The changelog entries a range adds or changes: the fragments under
+ * `changes/` that differ between its ends, as the tip has them, breaking
+ * changes first and then in the changelog's order. A fragment that doesn't
+ * parse is drawn by its name; the changelog check reports why.
+ * @param {string} base
+ * @param {string} tip
+ * @returns {ChangelogEntry[]}
+ */
+function changelog(base, tip) {
+  const order = Object.keys(categories);
+  return git([
+    "diff",
+    "--name-only",
+    "--no-renames",
+    "--diff-filter=AM",
+    base,
+    tip,
+    "--",
+    "changes/",
+  ])
+    .split("\n")
+    .filter(f => /^changes\/[^/]+\.md$/.test(f) && f !== "changes/README.md")
+    .map(f => {
+      const name = f.slice("changes/".length);
+      try {
+        const { category, text } = parseFragment(
+          name,
+          git(["show", `${tip}:${f}`]),
+        );
+        const emoji =
+          /:\w+:/.exec(
+            categories[/** @type {keyof typeof categories} */ (category)],
+          )?.[0] ?? "";
+        return { category, emoji, text };
+      } catch {
+        return {
+          category: "",
+          emoji: ":grey_question:",
+          text: `- \`${name}\``,
+        };
+      }
+    })
+    .sort((a, b) => {
+      const rank = (/** @type {ChangelogEntry} */ e) =>
+        e.category ? order.indexOf(e.category) : order.length;
+      return rank(a) - rank(b);
+    });
+}
+
+const MONTHS = "Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec".split(" ");
+
+/** A time as `Oct 23, 2026, 14:41 UTC`, as the cards and the comment print it. */
+const utc = (/** @type {Date} */ d) => {
+  const two = (/** @type {number} */ n) => String(n).padStart(2, "0");
+  return `${MONTHS[d.getUTCMonth()]} ${two(d.getUTCDate())}, ${d.getUTCFullYear()}, ${two(d.getUTCHours())}:${two(d.getUTCMinutes())} UTC`;
+};
+
+/** A commit's message, trimmed. @param {string} rev */
+const message = rev => git(["show", "-s", "--format=%B", rev]).trim();
+
+/** The messages of the records read, by short hash. */
+const messages = new Map();
+
+/**
+ * The record of one commit: its short hash, author, author date (in UTC,
+ * to the minute) and message.
  * @param {string} rev
  * @returns {CommitRecord}
  */
 function readRecord(rev) {
   const show = (/** @type {string[]} */ ...format) =>
     git(["show", "-s", ...format, rev]);
-  return parseRecord({
+  const record = parseRecord({
     sha: show("--format=%h", "--abbrev=9").trim(),
     author: show("--format=%an").trim(),
-    date: show("--format=%ad", "--date=format:%b %d, %Y").trim(),
+    login: logins.get(show("--format=%H").trim()),
+    date: utc(new Date(show("--format=%aI").trim())),
     message: show("--format=%B"),
   });
+  messages.set(record.sha, message(rev));
+  return record;
+}
+
+/**
+ * What the last push changed, against the head before it: the records it
+ * added (`new`) or whose message it edited under the same subject
+ * (`edited`), by short hash. The previous commits are those of `previous`
+ * that the range's base lacks.
+ * @param {CommitRecord[]} records
+ * @param {string} base
+ * @param {string} previous
+ */
+function lastPush(records, base, previous) {
+  const before = git([
+    "rev-list",
+    "--no-merges",
+    previous,
+    `^${git(["merge-base", base, previous]).trim()}`,
+  ])
+    .split("\n")
+    .filter(Boolean)
+    .map(message);
+  const subject = (/** @type {string} */ m) => m.split("\n")[0];
+  const kept = new Set(before);
+  const subjects = new Set(before.map(subject));
+  /** @type {Map<string, "new" | "edited">} */
+  const changes = new Map();
+  for (const r of records) {
+    const m = messages.get(r.sha) ?? "";
+    if (!kept.has(m))
+      changes.set(r.sha, subjects.has(subject(m)) ? "edited" : "new");
+  }
+  return changes;
+}
+
+/**
+ * The comment's marks of the last push, or none when the previous head
+ * can't be read, so that the comment is still drawn.
+ * @param {CommitRecord[]} records
+ * @param {string} base
+ * @param {string} previous
+ */
+function marks(records, base, previous) {
+  try {
+    return { changes: lastPush(records, base, previous) };
+  } catch {
+    return {};
+  }
 }
 
 /**
@@ -61,22 +185,57 @@ const options = {};
 /** @type {string[]} */
 const targets = [];
 for (let i = 0; i < args.length; i++) {
-  if (["--out", "--pr", "--title"].includes(args[i]) && i + 1 < args.length)
+  if (
+    [
+      "--out",
+      "--pr",
+      "--title",
+      "--markdown",
+      "--url",
+      "--previous",
+      "--logins",
+    ].includes(args[i]) &&
+    i + 1 < args.length
+  )
     options[args[i].slice(2)] = args[++i];
   else targets.push(args[i]);
 }
 const outFile = options.out;
 if (!outFile) {
   console.error(
-    "usage: commitRecords.js --out <page.html> [--pr <number>] [--title <text>] <rev | base..tip>...",
+    "usage: commitRecords.js --out <page.html> [--pr <number>] [--title <text>] [--markdown <comment.md> [--url <page url>] [--previous <rev>]] [--logins <file>] <rev | base..tip>...",
   );
   process.exit(1);
 }
+/** The GitHub logins of the commits' authors, by full sha. */
+const logins = new Map(
+  (options.logins ? readFileSync(options.logins, "utf8") : "")
+    .split("\n")
+    .map(l => l.trim().split(/\s+/))
+    .filter(f => f.length === 2)
+    .map(([sha, login]) => [sha, login]),
+);
 const heading = {
   pr: (options.pr ?? "").replace(/\D/g, ""),
   title: options.title ?? "",
 };
-const body = pageBody(targets.map(group), heading);
+const groups = targets.map(group);
+const body = pageBody(groups, heading);
+if (options.markdown) {
+  const [base, tip] = targets[targets.length - 1].split("..");
+  const records = groups.flatMap(g => g.records);
+  writeFileSync(
+    options.markdown,
+    commentMarkdown(groups, {
+      url: options.url,
+      ...(tip ? { changelog: changelog(base, tip) } : {}),
+      ...(options.previous && tip
+        ? marks(records, base, options.previous)
+        : {}),
+    }),
+  );
+  console.log(options.markdown);
+}
 const head = `<title>${esc(pageTitle(heading))}</title>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=STIX+Two+Text:ital,wght@0,400;0,500;1,400&display=swap">
 <style>${CSS}</style>`;

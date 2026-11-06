@@ -6972,6 +6972,34 @@ fn subst_with_memo(
     fresh_body
 }
 
+/// ctype.ml `apply env params body args` = `subst env generic_level Public
+/// (ref Mnil) None params args body`; `None` for OCaml's `Cannot_apply`.
+pub(crate) fn apply(
+    ctx: &TypeContext,
+    env: &Env,
+    params: &[TypeExprRef],
+    body: TypeExprRef,
+    args: &[TypeExprRef],
+) -> Option<TypeExprRef> {
+    if params.len() != args.len() {
+        return None;
+    }
+    let old_level = ctx.current_level();
+    ctx.set_current_level(GENERIC_LEVEL);
+    let body0 = ctx.new_var(None);
+    ctx.set_current_abbreviations(ctx.alloc_abbrev(AbbrevMemo::Mnil));
+    let (fresh_params, fresh_body) = instance_parameterized_type(ctx, params, body);
+    ctx.set_current_abbreviations(AbbrevMemoRef::nil());
+    let mut unify_state = UnifyState::new();
+    unify_state.set_env(env);
+    let mut ok = unify_var(ctx, &mut unify_state, body0, fresh_body).is_ok();
+    for (p, a) in fresh_params.iter().zip(args.iter()) {
+        ok = ok && unify_var(ctx, &mut unify_state, *p, *a).is_ok();
+    }
+    ctx.set_current_level(old_level);
+    ok.then_some(fresh_body)
+}
+
 // ============================================================================
 // Core Unification
 // ============================================================================

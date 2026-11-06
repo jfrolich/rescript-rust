@@ -29,9 +29,7 @@ impl LambdaCompiler {
         args: &[Lambda],
         loc: &LamLoc,
     ) -> Compiled {
-        if let Some(compiled) =
-            self.compile_hoisted_external_field(prim, LambdaInputs::Recursive(args))
-        {
+        if let Some(compiled) = self.compile_flat_make_field(prim, LambdaInputs::Recursive(args)) {
             return compiled;
         }
 
@@ -45,52 +43,67 @@ impl LambdaCompiler {
         self.compile_primitive_js(prim, compiled_args, prelude, loc)
     }
 
-    /// Descriptor lookup happens before argument compilation, as in
-    /// compiler/core/lam_compile.ml:284-302 and 1734-1757. The cursor is used
-    /// only during this read; no store borrow crosses recursive compilation.
-    pub(crate) fn compile_hoisted_external_field(
+    /// lam_compile.ml `flat_make_field`: every nested `make` is also exported
+    /// under a flat name (see `Translmod.implementation`), so a read
+    /// `Pfield "make" (Pfield "B" (Pfield "A" (Lglobal_module Other)))` is
+    /// emitted as `Other.A$B$make` rather than through the module objects.
+    /// The same holds below a local bound to the awaited module,
+    /// `let d = await import(Other)`. Other reads are left to the caller.
+    pub(crate) fn compile_flat_make_field(
         &mut self,
         prim: &Primitive,
         args: LambdaInputs<'_>,
     ) -> Option<Compiled> {
-        fn external_field_path<'a>(
+        enum Base<'a> {
+            Global(&'a Ident),
+            Awaited(&'a Ident),
+        }
+        fn extract_field_path<'a>(
+            awaited_units: &ahash::AHashSet<Ident>,
             prim: &'a Primitive,
             args: LambdaInputs<'a>,
-            segments: &mut Vec<String>,
-        ) -> Option<&'a Ident> {
+            segments: &mut Vec<&'a str>,
+        ) -> Option<Base<'a>> {
             let Primitive::Pfield(_, FieldDbgInfo::Module { name }) = prim else {
                 return None;
             };
-            segments.push(name.clone());
             if args.len() != 1 {
                 return None;
             }
+            segments.push(name);
             match args.first()?.view() {
-                LambdaInputView::GlobalModule(id) => Some(id),
-                LambdaInputView::Prim(prim, args, _) => external_field_path(prim, args, segments),
+                LambdaInputView::Prim(prim, args, _) => {
+                    extract_field_path(awaited_units, prim, args, segments)
+                }
+                LambdaInputView::GlobalModule(id) => Some(Base::Global(id)),
+                LambdaInputView::Var(id) if awaited_units.contains(id) => Some(Base::Awaited(id)),
                 _ => None,
             }
         }
         let mut reversed = Vec::new();
-        let id = external_field_path(prim, args, &mut reversed)?;
-        if reversed.len() < 2 {
-            return None;
-        }
+        let base = extract_field_path(&self.awaited_units, prim, args, &mut reversed)?;
         reversed.reverse();
-        let export_name = self
-            .module_path_resolver
-            .as_ref()?
-            .module_cmj_hoisted_export(id.name(), &reversed)?;
-        Some(Compiled {
-            prelude: Vec::new(),
-            expr: Expression::qualified(
+        let name = crate::lambda::flat_make_name(&reversed)?;
+        let expr = match base {
+            // `E.ml_var_dot id name`
+            Base::Global(id) => Expression::qualified(
                 crate::js_ir::ModuleId {
                     id: *id,
                     kind: crate::js_ir::Kind::Ml,
                     dynamic_import: false,
                 },
-                Some(export_name),
+                Some(name),
             ),
+            // `E.dot (E.var id) name`
+            Base::Awaited(id) => Expression::new(crate::js_ir::ExpressionDesc::StaticIndex(
+                Box::new(Expression::var(*id)),
+                name,
+                None,
+            )),
+        };
+        Some(Compiled {
+            prelude: Vec::new(),
+            expr,
         })
     }
 

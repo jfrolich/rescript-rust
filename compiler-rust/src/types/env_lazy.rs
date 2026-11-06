@@ -1765,6 +1765,42 @@ fn build_local_module_components(
     ctx: &super::context::TypeContext,
     cache_mode: super::typecore::ComponentLookupApi,
 ) -> Option<QualifiedModuleComponents> {
+    // OCaml compiler/ml/env.ml:1504-1505 stores each parent component module
+    // in the evolving `env` with `store_module` (env.ml:1642-1659), whose
+    // `modules` entry is `Env_lazy.create (Subst.identity, md)`. A child alias
+    // `module Aliased = One` keeps `Mty_alias (Pident One)` in the raw item, so
+    // env.ml:1364-1371 `scrape_alias` resolves it through that local entry, and
+    // forcing it with `subst_modtype_maker` (env.ml:446-448) renames nothing.
+    // Loaded unit signatures carry the qualified `Unit.One` spelling
+    // (`substitute_sig_decl_paths_in_place`); resolve such a sibling alias
+    // through the same local entry instead of the parent's `comp_modules`
+    // thunk (env.ml:1568), which applies the prefix substitution.
+    let sibling_alias_md;
+    let md = match (parent_substitution_context, &md.md_type) {
+        (
+            Some((parent_access_path, parent_sig)),
+            super::decl::ModuleType::MtyAlias(presence, Path::Pdot(alias_parent, alias_name, _)),
+        ) if alias_parent.same(parent_access_path) => {
+            let sibling_id = parent_sig.iter().find_map(|item| match item {
+                SignatureItem::SigModule(id, _, _) if id.name() == alias_name.as_str() => Some(*id),
+                _ => None,
+            });
+            match sibling_id {
+                Some(sibling_id) if env.find_module_same(&sibling_id).is_ok() => {
+                    sibling_alias_md = ModuleDeclaration {
+                        md_type: super::decl::ModuleType::MtyAlias(
+                            presence.clone(),
+                            Path::pident(sibling_id),
+                        ),
+                        ..md.clone()
+                    };
+                    &sibling_alias_md
+                }
+                _ => md,
+            }
+        }
+        _ => md,
+    };
     if ctx.persistent_env_is_in_process()
         && let super::decl::ModuleType::MtyAlias(_, Path::Pident(alias_id))
         | super::decl::ModuleType::MtyIdent(Path::Pident(alias_id)) = &md.md_type

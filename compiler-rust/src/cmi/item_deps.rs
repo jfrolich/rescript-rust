@@ -2,7 +2,8 @@
 //!
 //! A compiled unit publishes a digest for each of its top-level items (its
 //! declaration plus the JS metadata other modules' code generation reads for
-//! it: constants, arities, inlinable lambdas, hoisted exports) and one
+//! it: constants, arities and inlinable lambdas; the flat `make` exports
+//! follow from the declaration) and one
 //! module-level part (`@`: purity, package, file). A dependent records which
 //! items of each unit it read: the paths its typed tree mentions, closed over
 //! the declarations of what it read (reading `N.f : M.t => unit` also reads
@@ -148,20 +149,6 @@ pub fn item_digests(
     if let Some(ps) = ps {
         let ps = ps.signature();
         let graph = super::portable_types::HashGraph::of(&ps.type_graph);
-        // Hoisted exports grouped by their top-level name, in their original
-        // relative order.
-        let mut hoisted_by_name: ahash::AHashMap<&str, Vec<&crate::lambda::HoistedExport>> =
-            ahash::AHashMap::new();
-        if let Some(info) = info {
-            for hoisted in info.cmj_hoisted_exports.iter() {
-                if let Some(first) = hoisted.path.first() {
-                    hoisted_by_name
-                        .entry(first.as_str())
-                        .or_default()
-                        .push(hoisted);
-                }
-            }
-        }
         for item in &ps.ps_sig {
             let Some(key) = sig_item_key(item) else {
                 continue;
@@ -180,9 +167,6 @@ pub fn item_digests(
                 canonical.hash(&info.cmj_export_constants.get(name));
                 canonical.hash(&info.cmj_export_arities.get(name));
                 canonical.hash(&info.cmj_export_lambdas.get(name));
-                for hoisted in hoisted_by_name.get(name).into_iter().flatten() {
-                    canonical.hash(*hoisted);
-                }
             }
             digests.insert(key, hasher.finish());
         }

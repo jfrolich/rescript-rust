@@ -91,6 +91,58 @@ pub enum LiteralTag {
     Undefined,
 }
 
+/// OCaml `float_of_string` for the spellings a literal tag can carry.
+pub(crate) fn ocaml_float_of_string(s: &str) -> Option<f64> {
+    if let Some(value) = crate::js_ir::printer::parse_hex_float_literal(s) {
+        return Some(value);
+    }
+    s.replace('_', "").parse::<f64>().ok()
+}
+
+/// variant_runtime.ml `number_key`: `-0.` and `0.` are equal for `===`.
+/// OCaml spells every other number exactly with `%h`; the key is internal, so
+/// the exact bit pattern serves the same equality.
+fn number_key(x: f64) -> String {
+    if x == 0.0 {
+        "number:0".to_string()
+    } else if x.is_nan() {
+        "number:nan".to_string()
+    } else {
+        format!("number:{:x}", x.to_bits())
+    }
+}
+
+impl LiteralTag {
+    /// variant_runtime.ml `literal_value_key`: a key that two literals share
+    /// exactly when they are the same JavaScript value, as `===` compares
+    /// them. Ints are emitted as 32-bit numbers, so `1`, `1.0` and
+    /// `4294967297` share one, while `1n` is a bigint.
+    pub fn value_key(&self) -> String {
+        match self {
+            Self::Int(i) => number_key(f64::from(*i as i32)),
+            Self::Float(f) => match ocaml_float_of_string(f) {
+                Some(x) => number_key(x),
+                None => format!("number:{f}"),
+            },
+            Self::BigInt(i) => {
+                let (positive, digits) = crate::types::typecore::parse_bigint_literal(i);
+                // Bigint_utils.to_string
+                let sign = if positive || digits == "0" { "" } else { "-" };
+                format!("bigint:{sign}{digits}")
+            }
+            Self::Bool(b) => if *b { "true" } else { "false" }.to_string(),
+            Self::Null => "null".to_string(),
+            Self::Undefined => "undefined".to_string(),
+            Self::String(s) => format!("string:{s}"),
+        }
+    }
+}
+
+/// variant_runtime.ml `same_literal_value`.
+pub fn same_literal_value(a: &LiteralTag, b: &LiteralTag) -> bool {
+    a.value_key() == b.value_key()
+}
+
 /// OCaml `Variant_runtime.tag_type`: information used to recognize a
 /// constructor during matching. A literal identifies a constant or an
 /// object's tag; a payload shape identifies a value represented directly by

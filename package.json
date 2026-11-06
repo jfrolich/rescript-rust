@@ -61,8 +61,8 @@
     "changelog:preview": "node scripts/changelog.js preview",
     "changelog:release": "node scripts/changelog.js release",
     "changelog:open": "node scripts/changelog.js open",
-    "test-changelog": "node --test scripts/changelog.test.js",
-    "test-commit-records": "node --test scripts/commitRecords.test.js"
+    "test-changelog": "node --test scripts/changelog.test.js scripts/magicNumbers.test.js",
+    "test-commit-records": "node --test scripts/commitRecords.test.js scripts/recordMarkdown.test.js"
   },
   "files": [
     "CHANGELOG.md",

@@ -39,8 +39,10 @@ pub fn flatten_long_ident(arena: &ParseArena, lid: &Longident) -> ModulePathList
     }
 }
 
+/// process_attributes.ml `find_doc_attribute` reads doc comments only from
+/// `@res.doc`.
 fn is_doc_name(name: &str) -> bool {
-    matches!(name, "ocaml.doc" | "ns.doc" | "res.doc")
+    name == "res.doc"
 }
 
 /// `find_doc_attribute`.

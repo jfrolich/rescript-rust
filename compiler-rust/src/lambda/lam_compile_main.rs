@@ -52,30 +52,26 @@ pub(crate) fn module_export_ids(lam: &Lambda) -> Option<&[Ident]> {
     }
 }
 
-/// Flat export name for a hoisted function path: each `\"quoted"` segment is
-/// unquoted and the segments are joined with `$`.
-pub(crate) fn hoisted_export_name(path: &[String]) -> String {
-    path.iter()
-        .map(|part| {
-            if part.len() >= 3 && part.starts_with("\\\"") && part.ends_with('"') {
-                &part[2..part.len() - 1]
-            } else {
-                part.as_str()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("$")
-}
-
-/// Insert flat hoisted-function aliases after simplification/coercion, matching
-/// `js_hoisted_aliases` and the group append in `compiler/core/lam_compile_main.ml`.
-pub fn add_hoisted_function_aliases(
+/// `Lam_compile_main.flat_make_aliases`, appended as `Single (Alias, id,
+/// lam)` groups after coercion: every nested `make` of the final signature is
+/// also exported under its flat name (see `Translmod.implementation`). The
+/// alias resolves the source path through toplevel aliases and known module
+/// blocks. When that ends at a toplevel binding, the alias names it
+/// (`let A$B$make = make`), which bundlers can drop when it is unused. When it
+/// ends at a module of another compilation unit, possibly awaited, the alias
+/// reads that unit's flat export (`let A$make = Other.B$make`), so a
+/// re-exported client component never reads `make` from a client reference.
+/// Otherwise it reads the value through the module objects. The paths carry
+/// the runtime field positions, which a coerced module block shares with its
+/// signature. The name check that raises in OCaml runs at the end of
+/// translation (`RawLambdaConverter::check_flat_make_exports`).
+pub fn add_flat_make_aliases(
     mut simplified: SimplifiedForJsBackend,
-    hoisted: &[crate::lambda::HoistedFunction],
+    paths: &[crate::lambda::FlatMakePath],
 ) -> SimplifiedForJsBackend {
-    use std::collections::{HashMap, HashSet};
+    use ahash::AHashMap;
 
-    fn collect_groups<'a>(lam: &'a Lambda, groups: &mut HashMap<Ident, &'a Lambda>) {
+    fn collect_groups<'a>(lam: &'a Lambda, groups: &mut AHashMap<Ident, &'a Lambda>) {
         match lam {
             Lambda::Llet(_, id, value, body) => {
                 groups.insert(*id, value);
@@ -88,63 +84,6 @@ pub fn add_hoisted_function_aliases(
             Lambda::Lsequence(_, body) => collect_groups(body, groups),
             _ => {}
         }
-    }
-    fn resolve_binding<'a>(
-        lam: &'a Lambda,
-        groups: &HashMap<Ident, &'a Lambda>,
-        seen: &mut HashSet<Ident>,
-    ) -> (&'a Lambda, Option<Ident>) {
-        match lam {
-            Lambda::Lvar(id) => {
-                if !seen.insert(*id) {
-                    return (lam, Some(*id));
-                }
-                match groups.get(id).copied() {
-                    Some(alias @ (Lambda::Lvar(_) | Lambda::Lprim(_))) => {
-                        resolve_binding(alias, groups, seen)
-                    }
-                    Some(resolved) => (resolved, Some(*id)),
-                    None => (lam, Some(*id)),
-                }
-            }
-            Lambda::Lprim(info) => {
-                let (Primitive::Pfield(pos, _), [arg]) = (&info.primitive, info.args.as_slice())
-                else {
-                    return (lam, None);
-                };
-                let (base, _) = resolve_binding(arg, groups, seen);
-                if let Lambda::Lprim(base) = base
-                    && let Primitive::Pmakeblock(TagInfo::Module(_), _) = &base.primitive
-                    && let Some(field) = usize::try_from(*pos)
-                        .ok()
-                        .and_then(|pos| base.args.get(pos))
-                {
-                    return resolve_binding(field, groups, seen);
-                }
-                (lam, None)
-            }
-            _ => (lam, None),
-        }
-    }
-    fn find_path(
-        lam: &Lambda,
-        fields: &[String],
-        groups: &HashMap<Ident, &Lambda>,
-        positions: &mut Vec<(i32, String)>,
-    ) -> Option<Option<Ident>> {
-        if fields.is_empty() {
-            return Some(resolve_binding(lam, groups, &mut HashSet::new()).1);
-        }
-        let (resolved, _) = resolve_binding(lam, groups, &mut HashSet::new());
-        let Lambda::Lprim(info) = resolved else {
-            return None;
-        };
-        let Primitive::Pmakeblock(TagInfo::Module(names), _) = &info.primitive else {
-            return None;
-        };
-        let pos = names.iter().position(|name| name == &fields[0])?;
-        positions.push((pos as i32, fields[0].clone()));
-        find_path(info.args.get(pos)?, &fields[1..], groups, positions)
     }
     fn append_aliases(lam: Lambda, aliases: &[(Ident, Lambda)]) -> Lambda {
         match lam {
@@ -188,55 +127,188 @@ pub fn add_hoisted_function_aliases(
         }
     }
 
-    if hoisted.is_empty() {
+    if paths.is_empty() {
         return simplified;
     }
-    let mut aliases = Vec::new();
+    let mut aliases = Vec::with_capacity(paths.len());
     {
-        let mut groups = HashMap::new();
+        let mut groups = AHashMap::new();
         collect_groups(&simplified.lambda, &mut groups);
-        let exported = module_export_ids(&simplified.lambda)
-            .unwrap_or_default()
-            .iter()
-            .map(|id| (id.name().to_string(), *id))
-            .collect::<HashMap<_, _>>();
-        for item in hoisted {
-            let Some((top, fields)) = item.path.split_first() else {
-                continue;
-            };
-            let Some(top_id) = exported.get(top) else {
-                continue;
-            };
-            let Some(module) = groups.get(top_id) else {
-                continue;
-            };
-            let mut positions = Vec::new();
-            let Some(Some(target_id)) = find_path(module, fields, &groups, &mut positions) else {
-                continue;
-            };
-            if !target_id.same(&item.binding) {
-                continue;
+        let exported = module_export_ids(&simplified.lambda).unwrap_or_default();
+        let bindings = FlatAliasBindings {
+            is_toplevel: &|id| groups.contains_key(id),
+            followed: &|id| {
+                groups
+                    .get(id)
+                    .filter(|bound| is_followed_binding(bound))
+                    .map(|bound| (*bound).clone())
+            },
+        };
+        for path in paths {
+            if let Some((id, alias)) =
+                flat_make_alias(path, exported, &bindings, &simplified.meta.id_gen)
+            {
+                aliases.push((id, alias));
             }
-            let export_name = hoisted_export_name(&item.path);
-            let id = simplified.meta.id_gen.create(&export_name);
-            let mut access = Lambda::var(*top_id);
-            for (pos, name) in positions {
-                access = Lambda::prim(
-                    Primitive::Pfield(pos, crate::lambda::FieldDbgInfo::Module { name }),
-                    vec![access],
-                    item.loc,
-                );
-            }
-            aliases.push((id, access));
         }
     }
-    // Each new alias was prepended in OCaml order.
-    aliases.reverse();
     simplified.lambda = append_aliases(simplified.lambda, &aliases);
     let alias_ids = aliases.iter().map(|(id, _)| *id).collect::<Vec<_>>();
     simplified.meta.exports.extend(alias_ids.iter().cloned());
     simplified.meta.export_idents.extend(alias_ids);
     simplified
+}
+
+/// The toplevel bindings `flat_make_aliases` reads (`group_map`).
+pub(crate) struct FlatAliasBindings<'a> {
+    /// `Map_ident.mem id group_map`.
+    pub(crate) is_toplevel: &'a dyn Fn(&Ident) -> bool,
+    /// The bound value of a toplevel binding `resolve` follows: one that
+    /// holds a module or an alias (see [`is_followed_binding`]).
+    pub(crate) followed: &'a dyn Fn(&Ident) -> Option<Lambda>,
+}
+
+/// `resolve` follows a toplevel binding bound to `Lvar`, `Lglobal_module`, a
+/// module field read or a block.
+pub(crate) fn is_followed_binding(bound: &Lambda) -> bool {
+    match bound {
+        Lambda::Lvar(_) | Lambda::LglobalModule(_) => true,
+        Lambda::Lprim(info) => matches!(
+            info.primitive,
+            Primitive::Pfield(_, crate::lambda::FieldDbgInfo::Module { .. })
+                | Primitive::Pmakeblock(_, _)
+        ),
+        _ => false,
+    }
+}
+
+/// One alias of `Lam_compile_main.flat_make_aliases`: the flat export
+/// identifier and the value it is bound to. `None` when the path does not
+/// start at an export, which the translation check has already reported.
+pub(crate) fn flat_make_alias(
+    path: &crate::lambda::FlatMakePath,
+    exports: &[Ident],
+    bindings: &FlatAliasBindings<'_>,
+    id_gen: &crate::context::IdGenerator,
+) -> Option<(Ident, Lambda)> {
+    use crate::lambda::{FieldDbgInfo, LamLoc};
+    use ahash::AHashSet;
+
+    /// Reads only toplevel bindings and other compilation units, so it can
+    /// be evaluated again in the alias.
+    fn is_path(lam: &Lambda, bindings: &FlatAliasBindings<'_>) -> bool {
+        match lam {
+            Lambda::Lvar(id) => (bindings.is_toplevel)(id),
+            Lambda::LglobalModule(_) => true,
+            Lambda::Lprim(info) => match (&info.primitive, info.args.as_slice()) {
+                (Primitive::Pfield(_, FieldDbgInfo::Module { .. }), [base]) => {
+                    is_path(base, bindings)
+                }
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+    /// Follows toplevel bindings that hold a module or an alias, and reads of
+    /// known module block fields.
+    fn resolve(seen: &AHashSet<Ident>, lam: &Lambda, bindings: &FlatAliasBindings<'_>) -> Lambda {
+        match lam {
+            Lambda::Lvar(id) if !seen.contains(id) => match (bindings.followed)(id) {
+                Some(bound) => {
+                    let mut seen = seen.clone();
+                    seen.insert(*id);
+                    resolve(&seen, &bound, bindings)
+                }
+                None => lam.clone(),
+            },
+            Lambda::Lprim(info) => match (&info.primitive, info.args.as_slice()) {
+                (Primitive::Pfield(pos, FieldDbgInfo::Module { name }), [base]) => {
+                    let base = resolve(seen, base, bindings);
+                    if let Lambda::Lprim(block) = &base
+                        && let Primitive::Pmakeblock(TagInfo::Module(names), _) = &block.primitive
+                        && let Ok(index) = usize::try_from(*pos)
+                        && names.get(index).is_some_and(|field| field == name)
+                    {
+                        return resolve(seen, &block.args[index], bindings);
+                    }
+                    Lambda::prim(info.primitive.clone(), vec![base], info.loc)
+                }
+                _ => lam.clone(),
+            },
+            _ => lam.clone(),
+        }
+    }
+
+    let names = path
+        .iter()
+        .map(|step| step.name.as_str())
+        .collect::<Vec<_>>();
+    let name = crate::lambda::flat_export_name(&names);
+    // `Map_string` built by folding the exports left to right: a later
+    // export of the same name wins.
+    let top_id = exports.iter().rev().find(|id| id.name() == names[0])?;
+    // `Location.in_file (Location.get_input_name ())`: a ghost location,
+    // without a source mapping.
+    let mut read = Lambda::var(*top_id);
+    for step in &path[1..] {
+        read = Lambda::prim(
+            Primitive::Pfield(
+                step.pos,
+                FieldDbgInfo::Module {
+                    name: step.name.clone(),
+                },
+            ),
+            vec![read],
+            LamLoc::NONE,
+        );
+    }
+    let resolved = resolve(&AHashSet::new(), &read, bindings);
+    let alias = if is_path(&resolved, bindings) {
+        resolved
+    } else {
+        read
+    };
+    Some((id_gen.create(&name), alias))
+}
+
+/// `Lam_compile_main.is_awaited_unit`: `await import(Unit)` of a whole
+/// compilation unit.
+pub(crate) fn is_awaited_unit(lam: &Lambda) -> bool {
+    let Lambda::Lprim(info) = lam else {
+        return false;
+    };
+    let (Primitive::Pawait, [Lambda::Lprim(import)]) = (&info.primitive, info.args.as_slice())
+    else {
+        return false;
+    };
+    matches!(
+        &import.primitive,
+        Primitive::Pimport(source)
+            if matches!(
+                source.as_ref(),
+                crate::lambda::lam_primitive::ImportSource::ImportModule { path, .. }
+                    if path.is_empty()
+            )
+    )
+}
+
+/// `Lam_compile_main.awaited_units` (see `Lam_stats.awaited_units`): every
+/// local bound to an awaited compilation unit, at any depth.
+pub fn awaited_units(lam: &Lambda) -> ahash::AHashSet<Ident> {
+    fn collect(lam: &Lambda, units: &mut ahash::AHashSet<Ident>) {
+        if let Lambda::Llet(_, id, bound, _) = lam
+            && is_awaited_unit(bound)
+        {
+            units.insert(*id);
+        }
+        crate::lambda::lambda_traverse::shallow_exists(lam, &mut |child| {
+            collect(child, units);
+            false
+        });
+    }
+    let mut units = ahash::AHashSet::new();
+    collect(lam, &mut units);
+    units
 }
 
 /// Direct port of `compiler/core/lam_compile_main.ml:148-200` pipeline.
@@ -374,19 +446,6 @@ pub fn simplify_for_js_backend_with_external_inline_and_meta_owned(
 
 /// Direct port of `compiler/core/lam_coercion.ml:82-172` — `handle_exports`
 /// applied to the trailing module-export `Pmakeblock`.
-/// OCaml `Lam_coercion.handle_exports` (lam_coercion.ml:83-98) raises
-/// `Bs_duplicate_exports` for the first export name seen twice while folding
-/// the export list from the right.
-pub fn duplicate_export_name(lam: &Lambda) -> Option<String> {
-    let export_ids = module_export_ids(lam)?;
-    let mut seen = ahash::AHashSet::new();
-    export_ids
-        .iter()
-        .rev()
-        .find(|id| !seen.insert(id.name().to_string()))
-        .map(|id| id.name().to_string())
-}
-
 fn handle_exports(mut meta: LamStats, lam: Lambda) -> SimplifiedForJsBackend {
     let lambda = rewrite_export_makeblock(&mut meta, lam);
     SimplifiedForJsBackend { lambda, meta }
