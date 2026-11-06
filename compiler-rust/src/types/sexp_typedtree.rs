@@ -1555,7 +1555,7 @@ fn sexp_module_expr_desc(
                 None => Sexp::atom("None"),
                 Some(mt) => Sexp::list(vec![
                     Sexp::atom("Some"),
-                    sexp_module_type(arena, ctx, cx, mt),
+                    sexp_module_type(arena, ctx, cx, cx.ta.module_type(*mt)),
                 ]),
             };
             let me_sexp = sexp_module_expr(arena, ctx, cx, cx.ta.module_expr(*me));
@@ -1577,7 +1577,7 @@ fn sexp_module_expr_desc(
             let constraint_sexp = match constraint_ {
                 ModuleTypeConstraint::Tmodtype_implicit => Sexp::atom("implicit"),
                 ModuleTypeConstraint::Tmodtype_explicit(mt) => {
-                    let mt_sexp = sexp_module_type(arena, ctx, cx, mt);
+                    let mt_sexp = sexp_module_type(arena, ctx, cx, cx.ta.module_type(*mt));
                     Sexp::list(vec![Sexp::atom("explicit"), mt_sexp])
                 }
             };
@@ -2082,20 +2082,20 @@ fn sexp_module_type_desc(
                 None => Sexp::atom("None"),
                 Some(mt) => Sexp::list(vec![
                     Sexp::atom("Some"),
-                    sexp_module_type(arena, ctx, cx, mt),
+                    sexp_module_type(arena, ctx, cx, cx.ta.module_type(*mt)),
                 ]),
             };
             Sexp::list(vec![
                 Sexp::atom("Tmty_functor"),
                 sexp_ident(id),
                 mt_arg_sexp,
-                sexp_module_type(arena, ctx, cx, mt_res),
+                sexp_module_type(arena, ctx, cx, cx.ta.module_type(*mt_res)),
             ])
         }
         ModuleTypeDesc::Tmty_with(mt, constraints) => {
             // OCaml evaluates mt_sexp BEFORE constraints (via let binding).
             // Must match to get identical DFS encounter order for type nodes.
-            let mt_sexp = sexp_module_type(arena, ctx, cx, mt);
+            let mt_sexp = sexp_module_type(arena, ctx, cx, cx.ta.module_type(*mt));
             let mut constraint_sexps = Vec::new();
             for (p, _, wc) in constraints.iter() {
                 constraint_sexps.push(Sexp::list(vec![
@@ -2257,7 +2257,12 @@ fn sexp_typed_module_declaration(
         string(&md.md_name.txt),
     ];
     items.extend(loc_sexp);
-    items.push(sexp_module_type(arena, ctx, cx, &md.md_type));
+    items.push(sexp_module_type(
+        arena,
+        ctx,
+        cx,
+        cx.ta.module_type(md.md_type),
+    ));
     items.push(sexp_attributes(arena, cx, &md.md_attributes));
     Sexp::list(items)
 }
@@ -2275,7 +2280,12 @@ fn sexp_include_description(
     };
     let mut items = vec![Sexp::atom("include_description")];
     items.extend(loc_sexp);
-    items.push(sexp_module_type(arena, ctx, cx, &incl.incl_mod));
+    items.push(sexp_module_type(
+        arena,
+        ctx,
+        cx,
+        cx.ta.module_type(incl.incl_mod),
+    ));
     items.push(sexp_attributes(arena, cx, &incl.incl_attributes));
     Sexp::list(items)
 }
@@ -2295,7 +2305,7 @@ fn sexp_module_type_declaration(
         None => Sexp::atom("None"),
         Some(mt) => Sexp::list(vec![
             Sexp::atom("Some"),
-            sexp_module_type(arena, ctx, cx, mt),
+            sexp_module_type(arena, ctx, cx, cx.ta.module_type(*mt)),
         ]),
     };
     let mut items = vec![

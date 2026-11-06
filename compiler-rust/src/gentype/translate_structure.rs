@@ -282,6 +282,7 @@ pub fn translate_module_binding(
                         crate::gentype::translate_signature::translate_signature(
                             ctx,
                             arena,
+                            ta,
                             &config,
                             output_file_relative,
                             resolver,
@@ -387,6 +388,7 @@ pub fn translate_structure_item(
             crate::gentype::translate_signature::translate_module_type_declaration(
                 ctx,
                 arena,
+                ta,
                 config,
                 output_file_relative,
                 resolver,
@@ -582,6 +584,7 @@ fn translate_module_constraint(
                     crate::gentype::translate_signature::translate_signature(
                         ctx,
                         arena,
+                        ta,
                         config,
                         output_file_relative,
                         resolver,
@@ -614,17 +617,18 @@ fn translate_module_constraint(
         }
         (_, ModuleTypeConstraint::Tmodtype_explicit(module_type), _)
             if matches!(
-                module_type.mty_desc,
+                ta.module_type(*module_type).mty_desc,
                 crate::types::typedtree::ModuleTypeDesc::Tmty_signature(_)
             ) =>
         {
             if let crate::types::typedtree::ModuleTypeDesc::Tmty_signature(signature) =
-                &module_type.mty_desc
+                &ta.module_type(*module_type).mty_desc
             {
                 crate::gentype::translation::combine(
                     crate::gentype::translate_signature::translate_signature(
                         ctx,
                         arena,
+                        ta,
                         config,
                         output_file_relative,
                         resolver,

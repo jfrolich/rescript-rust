@@ -319,7 +319,9 @@ pub fn module_type_declaration_check_annotation(
         &module_type_declaration.mtd_attributes,
     ) || match module_type_declaration.mtd_type.as_ref() {
         None => false,
-        Some(module_type) => module_type_check_annotation(arena, ta, check_annotation, module_type),
+        Some(module_type) => {
+            module_type_check_annotation(arena, ta, check_annotation, ta.module_type(*module_type))
+        }
     }
 }
 
@@ -331,7 +333,12 @@ pub fn module_declaration_check_annotation(
 ) -> bool {
     // Mirrors compiler/gentype/Annotation.ml:202-205.
     check_annotation(module_declaration.md_loc, &module_declaration.md_attributes)
-        || module_type_check_annotation(arena, ta, check_annotation, &module_declaration.md_type)
+        || module_type_check_annotation(
+            arena,
+            ta,
+            check_annotation,
+            ta.module_type(module_declaration.md_type),
+        )
 }
 
 pub fn signature_item_check_annotation(
@@ -458,7 +465,12 @@ pub fn module_expr_check_annotation(
             module_expr_check_annotation(arena, ta, check_annotation, ta.module_expr(*module_expr))
                 || match module_type_constraint {
                     ModuleTypeConstraint::Tmodtype_explicit(module_type) => {
-                        module_type_check_annotation(arena, ta, check_annotation, module_type)
+                        module_type_check_annotation(
+                            arena,
+                            ta,
+                            check_annotation,
+                            ta.module_type(*module_type),
+                        )
                     }
                     ModuleTypeConstraint::Tmodtype_implicit => false,
                 }

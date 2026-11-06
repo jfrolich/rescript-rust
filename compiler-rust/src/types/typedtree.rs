@@ -25,8 +25,8 @@ use crate::parser::ast::{
 use crate::types::asttypes::ArgLabel as TypeArgLabel;
 use crate::types::decl::ModuleType as DeclModuleType;
 pub use crate::types::tast_arena::{
-    TArgList, TCaseList, TExprIdx, TExprList, TFieldList, TModExprIdx, TParamList, TVbList,
-    TypedArena,
+    TArgList, TCaseList, TExprIdx, TExprList, TFieldList, TModExprIdx, TModTypeIdx, TParamList,
+    TVbList, TypedArena,
 };
 use crate::types::{
     ConstructorDescription, LabelDescription, Path, RowDesc, TypeExprRef, ValueDescription,
@@ -681,7 +681,7 @@ pub enum ModuleExprDesc {
     /// Functor application.
     Tmod_apply(TModExprIdx, TModExprIdx, ModuleCoercion),
     /// Functor.
-    Tmod_functor(Ident, Loc<String>, Option<Box<ModuleType>>, TModExprIdx),
+    Tmod_functor(Ident, Loc<String>, Option<TModTypeIdx>, TModExprIdx),
     /// Constraint.
     Tmod_constraint(
         TModExprIdx,
@@ -716,9 +716,9 @@ pub enum ModuleTypeDesc {
     /// Signature: `sig ... end` / `{ ... }`.
     Tmty_signature(TypedSignature),
     /// Functor type: `functor (X : MT1) -> MT2`.
-    Tmty_functor(Ident, Loc<String>, Option<Box<ModuleType>>, Box<ModuleType>),
+    Tmty_functor(Ident, Loc<String>, Option<TModTypeIdx>, TModTypeIdx),
     /// With constraint: `MT with ...`.
-    Tmty_with(Box<ModuleType>, Vec<(Path, Loc<LidentIdx>, WithConstraint)>),
+    Tmty_with(TModTypeIdx, Vec<(Path, Loc<LidentIdx>, WithConstraint)>),
     /// Typeof: `module type of ME`.
     Tmty_typeof(TModExprIdx),
     /// Alias: `(module M)`.
@@ -768,7 +768,7 @@ pub enum TypedSignatureItemDesc {
 pub struct TypedModuleDeclaration {
     pub md_id: Ident,
     pub md_name: Loc<String>,
-    pub md_type: ModuleType,
+    pub md_type: TModTypeIdx,
     pub md_attributes: Attributes,
     pub md_loc: LocIdx,
 }
@@ -776,7 +776,7 @@ pub struct TypedModuleDeclaration {
 /// Include description (for signatures, matches OCaml's `Typedtree.include_description`).
 #[derive(Debug, Clone)]
 pub struct IncludeDescription {
-    pub incl_mod: ModuleType,
+    pub incl_mod: TModTypeIdx,
     pub incl_type: Vec<crate::types::decl::SignatureItem>,
     pub incl_attributes: Attributes,
     pub incl_loc: LocIdx,
@@ -786,7 +786,7 @@ pub struct IncludeDescription {
 #[derive(Debug, Clone)]
 pub enum ModuleTypeConstraint {
     /// Explicit signature.
-    Tmodtype_explicit(Box<ModuleType>),
+    Tmodtype_explicit(TModTypeIdx),
     /// Implicit (no constraint).
     Tmodtype_implicit,
 }
@@ -1013,7 +1013,7 @@ pub struct ModuleTypeDeclaration {
     /// Module type name with location.
     pub mtd_name: Loc<String>,
     /// Module type (None for abstract).
-    pub mtd_type: Option<ModuleType>,
+    pub mtd_type: Option<TModTypeIdx>,
     /// Attributes.
     pub mtd_attributes: Attributes,
     /// Location.
@@ -1276,8 +1276,17 @@ mod node_size_tests {
     #[test]
     fn typed_expression_sizes_stay_compact() {
         use std::mem::size_of;
-        assert_eq!(size_of::<super::ExpressionDesc>(), 64);
-        assert_eq!(size_of::<super::Expression>(), 104);
+        assert_eq!(size_of::<super::ExpressionDesc>(), 56);
+        assert_eq!(size_of::<super::Expression>(), 96);
+    }
+
+    // Module expression and module type children are arena handles.
+    #[test]
+    fn typed_module_nodes_stay_compact() {
+        use std::mem::size_of;
+        assert_eq!(size_of::<super::ModuleExpr>(), 184);
+        assert_eq!(size_of::<super::ModuleType>(), 112);
+        assert_eq!(size_of::<super::ModuleTypeDesc>(), 56);
     }
 
     // Children live in the TypedArena: list-carrying nodes hold 4-byte

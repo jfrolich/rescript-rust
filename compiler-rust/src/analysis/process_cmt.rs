@@ -494,8 +494,11 @@ impl Processor<'_> {
         md: &tt::TypedModuleDeclaration,
     ) -> ModuleItem {
         let name = self.ctx.located(&md.md_name);
-        let item =
-            self.for_type_module(&name.txt, &env.add_module(&name.txt), &md.md_type.mty_type);
+        let item = self.for_type_module(
+            &name.txt,
+            &env.add_module(&name.txt),
+            &self.ctx.ta.module_type(md.md_type).mty_type,
+        );
         let stamps = &mut self.stamps;
         let declared = add_declared(
             name,
@@ -546,7 +549,7 @@ impl Processor<'_> {
                 .map(|md| self.for_module_declaration(env, exported, md))
                 .collect(),
             tt::TypedSignatureItemDesc::Tsig_include(incl) => {
-                let env = match &incl.incl_mod.mty_desc {
+                let env = match &self.ctx.ta.module_type(incl.incl_mod).mty_desc {
                     tt::ModuleTypeDesc::Tmty_ident(path, _)
                     | tt::ModuleTypeDesc::Tmty_alias(path, _) => ProcessEnv {
                         module_path: ModulePath::IncludedModule(
@@ -724,7 +727,11 @@ impl Processor<'_> {
                 };
                 let name = self.ctx.located(&mtd.mtd_name);
                 let env = env.add_module_type(&name.txt);
-                let item = self.for_type_module(&name.txt, &env, &mtd_type.mty_type);
+                let item = self.for_type_module(
+                    &name.txt,
+                    &env,
+                    &self.ctx.ta.module_type(*mtd_type).mty_type,
+                );
                 let stamps = &mut self.stamps;
                 let declared = add_declared(
                     name,
@@ -836,7 +843,8 @@ impl Processor<'_> {
             tt::ModuleExprDesc::Tmod_functor(ident, arg_name, maybe_type, result) => {
                 if let Some(t) = maybe_type {
                     let name = self.ctx.located(arg_name);
-                    let kind = self.for_type_module(&name.txt, env, &t.mty_type);
+                    let kind =
+                        self.for_type_module(&name.txt, env, &self.ctx.ta.module_type(*t).mty_type);
                     let stamp = ident.binding_time();
                     let extent = name.loc;
                     let declared = attrs::new_declared(

@@ -10729,14 +10729,14 @@ fn collect_module_expr_ident_heads(
         }
         ModuleExprDesc::Tmod_functor(_, _, mty, body) => {
             if let Some(mty) = mty {
-                collect_module_type_ident_heads(ta, mty, ids);
+                collect_module_type_ident_heads(ta, ta.module_type(*mty), ids);
             }
             collect_module_expr_ident_heads(ta, ta.module_expr(*body), ids);
         }
         ModuleExprDesc::Tmod_constraint(module_expr, _, constraint, _) => {
             collect_module_expr_ident_heads(ta, ta.module_expr(*module_expr), ids);
             if let ModuleTypeConstraint::Tmodtype_explicit(mty) = constraint {
-                collect_module_type_ident_heads(ta, mty, ids);
+                collect_module_type_ident_heads(ta, ta.module_type(*mty), ids);
             }
         }
         ModuleExprDesc::Tmod_unpack(expr, _) => {
@@ -10756,12 +10756,12 @@ fn collect_module_type_ident_heads(
         }
         ModuleTypeDesc::Tmty_functor(_, _, param, body) => {
             if let Some(param) = param {
-                collect_module_type_ident_heads(ta, param, ids);
+                collect_module_type_ident_heads(ta, ta.module_type(*param), ids);
             }
-            collect_module_type_ident_heads(ta, body, ids);
+            collect_module_type_ident_heads(ta, ta.module_type(*body), ids);
         }
         ModuleTypeDesc::Tmty_with(module_type, _) => {
-            collect_module_type_ident_heads(ta, module_type, ids);
+            collect_module_type_ident_heads(ta, ta.module_type(*module_type), ids);
         }
         ModuleTypeDesc::Tmty_ident(_, _)
         | ModuleTypeDesc::Tmty_signature(_)
@@ -19674,15 +19674,14 @@ fn typed_module_expr_uses_ident(ta: &TypedArena, module_expr: &ModuleExpr, targe
                 || typed_module_expr_uses_ident(ta, ta.module_expr(*arg), target)
         }
         ModuleExprDesc::Tmod_functor(_, _, arg, body) => {
-            arg.as_deref()
-                .is_some_and(|arg| typed_module_type_uses_ident(ta, arg, target))
+            arg.is_some_and(|arg| typed_module_type_uses_ident(ta, ta.module_type(arg), target))
                 || typed_module_expr_uses_ident(ta, ta.module_expr(*body), target)
         }
         ModuleExprDesc::Tmod_constraint(inner, _, constraint, _) => {
             typed_module_expr_uses_ident(ta, ta.module_expr(*inner), target)
                 || match constraint {
                     ModuleTypeConstraint::Tmodtype_explicit(module_type) => {
-                        typed_module_type_uses_ident(ta, module_type, target)
+                        typed_module_type_uses_ident(ta, ta.module_type(*module_type), target)
                     }
                     ModuleTypeConstraint::Tmodtype_implicit => false,
                 }
@@ -19698,11 +19697,12 @@ fn typed_module_type_uses_ident(ta: &TypedArena, module_type: &ModuleType, targe
             typed_module_expr_uses_ident(ta, ta.module_expr(*module_expr), target)
         }
         ModuleTypeDesc::Tmty_functor(_, _, arg, body) => {
-            arg.as_deref()
-                .is_some_and(|arg| typed_module_type_uses_ident(ta, arg, target))
-                || typed_module_type_uses_ident(ta, body, target)
+            arg.is_some_and(|arg| typed_module_type_uses_ident(ta, ta.module_type(arg), target))
+                || typed_module_type_uses_ident(ta, ta.module_type(*body), target)
         }
-        ModuleTypeDesc::Tmty_with(inner, _) => typed_module_type_uses_ident(ta, inner, target),
+        ModuleTypeDesc::Tmty_with(inner, _) => {
+            typed_module_type_uses_ident(ta, ta.module_type(*inner), target)
+        }
         ModuleTypeDesc::Tmty_signature(signature) => signature
             .sig_items
             .iter()
@@ -19718,17 +19718,18 @@ fn typed_signature_item_uses_ident(
 ) -> bool {
     match &item.sig_desc {
         TypedSignatureItemDesc::Tsig_module(decl) => {
-            typed_module_type_uses_ident(ta, &decl.md_type, target)
+            typed_module_type_uses_ident(ta, ta.module_type(decl.md_type), target)
         }
         TypedSignatureItemDesc::Tsig_recmodule(decls) => decls
             .iter()
-            .any(|decl| typed_module_type_uses_ident(ta, &decl.md_type, target)),
-        TypedSignatureItemDesc::Tsig_modtype(decl) => decl
-            .mtd_type
-            .as_ref()
-            .is_some_and(|module_type| typed_module_type_uses_ident(ta, module_type, target)),
+            .any(|decl| typed_module_type_uses_ident(ta, ta.module_type(decl.md_type), target)),
+        TypedSignatureItemDesc::Tsig_modtype(decl) => {
+            decl.mtd_type.as_ref().is_some_and(|module_type| {
+                typed_module_type_uses_ident(ta, ta.module_type(*module_type), target)
+            })
+        }
         TypedSignatureItemDesc::Tsig_include(include) => {
-            typed_module_type_uses_ident(ta, &include.incl_mod, target)
+            typed_module_type_uses_ident(ta, ta.module_type(include.incl_mod), target)
         }
         TypedSignatureItemDesc::Tsig_value(_)
         | TypedSignatureItemDesc::Tsig_type(_, _)
@@ -19752,10 +19753,11 @@ fn typed_structure_item_uses_ident(ta: &TypedArena, item: &StructureItem, target
         StructureItemDesc::Tstr_recmodule(bindings) => bindings.iter().any(|binding| {
             typed_module_expr_uses_ident(ta, ta.module_expr(binding.mb_expr), target)
         }),
-        StructureItemDesc::Tstr_modtype(decl) => decl
-            .mtd_type
-            .as_ref()
-            .is_some_and(|module_type| typed_module_type_uses_ident(ta, module_type, target)),
+        StructureItemDesc::Tstr_modtype(decl) => {
+            decl.mtd_type.as_ref().is_some_and(|module_type| {
+                typed_module_type_uses_ident(ta, ta.module_type(*module_type), target)
+            })
+        }
         StructureItemDesc::Tstr_include(include) => {
             typed_module_expr_uses_ident(ta, ta.module_expr(include.incl_mod), target)
         }

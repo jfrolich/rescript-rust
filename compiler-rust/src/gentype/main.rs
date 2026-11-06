@@ -306,6 +306,7 @@ pub fn translate_typed_artifact(
             crate::gentype::translate_signature::translate_signature(
                 artifact.ctx,
                 artifact.arena,
+                artifact.ta,
                 config,
                 output_file_relative,
                 resolver,
@@ -394,6 +395,7 @@ pub fn typed_artifact_translate_type_declarations(
                 crate::gentype::translate_signature::translate_signature_item(
                     artifact.ctx,
                     artifact.arena,
+                    artifact.ta,
                     config,
                     output_file_relative,
                     resolver,

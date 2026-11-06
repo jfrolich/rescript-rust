@@ -11699,6 +11699,7 @@ pub fn typecheck_interface_source(
     // js_implementation.ml:62: `ignore (Includemod.signatures initial_env sg
     // sg)`, which marks the declarations of the interface used.
     let sig_type = crate::types::typemod::decl_signature_from_typed_signature(
+        &tctx.typed,
         &typed_signature,
         parser.arena(),
         &type_ctx,
@@ -14775,6 +14776,7 @@ pub fn typecheck_preprocessed_signature_in_process(
     // js_implementation.ml:62: `ignore (Includemod.signatures initial_env sg
     // sg)`, which marks the declarations of the interface used.
     let sig_type = crate::types::typemod::decl_signature_from_typed_signature(
+        &tctx.typed,
         &typed_signature,
         arena,
         &type_ctx,
@@ -14842,6 +14844,7 @@ pub fn typecheck_preprocessed_signature_in_process(
         )?;
     }
     let decl_signature = crate::types::typemod::decl_signature_from_typed_signature(
+        &tctx.typed,
         &typed_signature,
         arena,
         &type_ctx,

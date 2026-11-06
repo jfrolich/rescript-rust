@@ -18,8 +18,42 @@ use std::num::NonZeroU32;
 use crate::parse_arena::ArenaList;
 
 use super::typedtree::{
-    ApplyArg, Case, Expression, FunctionParam, ModuleExpr, RecordField, ValueBinding,
+    ApplyArg, Case, Expression, FunctionParam, ModuleExpr, ModuleType, RecordField, ValueBinding,
 };
+
+macro_rules! arena_handle {
+    ($(#[$doc:meta])* $name:ident) => {
+        $(#[$doc])*
+        ///
+        /// Stored as `index + 1` so the `Option` of a handle is four bytes.
+        #[derive(Clone, Copy, PartialEq, Eq, Hash)]
+        pub struct $name(NonZeroU32);
+
+        impl $name {
+            #[inline]
+            fn from_index(index: usize) -> Self {
+                let raw = u32::try_from(index + 1).expect("typed arena exceeds u32::MAX");
+                Self(NonZeroU32::new(raw).expect("index + 1 is non-zero"))
+            }
+
+            #[inline]
+            fn index(self) -> usize {
+                (self.0.get() - 1) as usize
+            }
+        }
+
+        impl std::fmt::Debug for $name {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, concat!(stringify!($name), "({})"), self.index())
+            }
+        }
+    };
+}
+
+arena_handle!(
+    /// Handle of a typed module type in a [`TypedArena`].
+    TModTypeIdx
+);
 
 /// Handle of a typed expression in a [`TypedArena`].
 ///
@@ -129,6 +163,7 @@ pub struct TypedArena {
     exprs: Vec<Expression>,
     expr_lists: ListPool<TExprIdx>,
     module_exprs: Vec<ModuleExpr>,
+    module_types: Vec<ModuleType>,
     cases: ListPool<Case>,
     value_bindings: ListPool<ValueBinding>,
     apply_args: ListPool<ApplyArg>,
@@ -233,6 +268,20 @@ impl TypedArena {
     #[inline]
     pub fn module_expr(&self, idx: TModExprIdx) -> &ModuleExpr {
         &self.module_exprs[idx.index()]
+    }
+
+    /// Store a module type.
+    #[inline]
+    pub fn push_module_type(&mut self, m: ModuleType) -> TModTypeIdx {
+        let idx = TModTypeIdx::from_index(self.module_types.len());
+        self.module_types.push(m);
+        idx
+    }
+
+    /// A module type by handle.
+    #[inline]
+    pub fn module_type(&self, idx: TModTypeIdx) -> &ModuleType {
+        &self.module_types[idx.index()]
     }
 
     /// Number of stored expressions.

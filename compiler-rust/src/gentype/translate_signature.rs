@@ -55,6 +55,7 @@ pub fn translate_signature_value(
 pub fn translate_module_declaration(
     ctx: &crate::types::context::TypeContext,
     arena: &ParseArena,
+    ta: &crate::types::typedtree::TypedArena,
     config: &crate::gentype::config::T,
     output_file_relative: &str,
     resolver: &crate::gentype::module_resolver::Resolver,
@@ -67,11 +68,12 @@ pub fn translate_module_declaration(
         crate::gentype::log_::item(&format!("Translate Module Declaration {name}\n"));
     }
     let type_env = crate::gentype::type_env::new_module(name, type_env);
-    match &module_declaration.md_type.mty_desc {
+    match &ta.module_type(module_declaration.md_type).mty_desc {
         ModuleTypeDesc::Tmty_signature(signature) => {
             crate::gentype::translation::combine(translate_signature(
                 ctx,
                 arena,
+                ta,
                 config,
                 output_file_relative,
                 resolver,
@@ -86,6 +88,7 @@ pub fn translate_module_declaration(
                     crate::gentype::translation::combine(translate_signature(
                         ctx,
                         arena,
+                        ta,
                         config,
                         output_file_relative,
                         resolver,
@@ -105,6 +108,7 @@ pub fn translate_module_declaration(
 pub fn translate_module_type_declaration(
     ctx: &crate::types::context::TypeContext,
     arena: &ParseArena,
+    ta: &crate::types::typedtree::TypedArena,
     config: &crate::gentype::config::T,
     output_file_relative: &str,
     resolver: &crate::gentype::module_resolver::Resolver,
@@ -120,7 +124,7 @@ pub fn translate_module_type_declaration(
     }
     match &module_type_declaration.mtd_type {
         None => crate::gentype::translation::empty(),
-        Some(mtd_type) => match &mtd_type.mty_desc {
+        Some(mtd_type) => match &ta.module_type(*mtd_type).mty_desc {
             ModuleTypeDesc::Tmty_signature(signature) => {
                 let name = module_type_declaration.mtd_id.name();
                 let mut signature_without_values = signature.clone();
@@ -130,6 +134,7 @@ pub fn translate_module_type_declaration(
                 crate::gentype::translation::combine(translate_signature(
                     ctx,
                     arena,
+                    ta,
                     config,
                     output_file_relative,
                     resolver,
@@ -137,7 +142,7 @@ pub fn translate_module_type_declaration(
                         name,
                         signature.clone(),
                         crate::types::typemod::decl_signature_from_typed_signature(
-                            signature, arena, ctx,
+                            ta, signature, arena, ctx,
                         ),
                         type_env,
                     ),
@@ -156,6 +161,7 @@ pub fn translate_module_type_declaration(
 pub fn translate_signature_item(
     ctx: &crate::types::context::TypeContext,
     arena: &ParseArena,
+    ta: &crate::types::typedtree::TypedArena,
     config: &crate::gentype::config::T,
     output_file_relative: &str,
     resolver: &crate::gentype::module_resolver::Resolver,
@@ -215,6 +221,7 @@ pub fn translate_signature_item(
         TypedSignatureItemDesc::Tsig_module(module_declaration) => translate_module_declaration(
             ctx,
             arena,
+            ta,
             config,
             output_file_relative,
             resolver,
@@ -233,6 +240,7 @@ pub fn translate_signature_item(
             translate_module_type_declaration(
                 ctx,
                 arena,
+                ta,
                 &config,
                 output_file_relative,
                 resolver,
@@ -252,6 +260,7 @@ pub fn translate_signature_item(
 pub fn translate_signature(
     ctx: &crate::types::context::TypeContext,
     arena: &ParseArena,
+    ta: &crate::types::typedtree::TypedArena,
     config: &crate::gentype::config::T,
     output_file_relative: &str,
     resolver: &crate::gentype::module_resolver::Resolver,
@@ -269,6 +278,7 @@ pub fn translate_signature(
             translate_signature_item(
                 ctx,
                 arena,
+                ta,
                 config,
                 output_file_relative,
                 resolver,

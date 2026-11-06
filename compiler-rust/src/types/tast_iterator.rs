@@ -35,7 +35,7 @@ pub trait TastIterator<'t> {
         self.module_expr(self.arena().module_expr(mb.mb_expr))
     }
     fn module_declaration(&mut self, md: &TypedModuleDeclaration) {
-        self.module_type(&md.md_type)
+        self.module_type(self.arena().module_type(md.md_type))
     }
     fn module_expr(&mut self, m: &ModuleExpr) {
         walk_module_expr(self, m)
@@ -45,7 +45,7 @@ pub trait TastIterator<'t> {
     }
     fn module_type_declaration(&mut self, mtd: &ModuleTypeDeclaration) {
         if let Some(t) = &mtd.mtd_type {
-            self.module_type(t);
+            self.module_type(self.arena().module_type(*t));
         }
     }
     fn package_type(&mut self, pack: &PackageType) {
@@ -430,7 +430,9 @@ pub fn walk_signature_item<'t, I: TastIterator<'t> + ?Sized>(
             }
         }
         TypedSignatureItemDesc::Tsig_modtype(mtd) => sub.module_type_declaration(mtd),
-        TypedSignatureItemDesc::Tsig_include(incl) => sub.module_type(&incl.incl_mod),
+        TypedSignatureItemDesc::Tsig_include(incl) => {
+            sub.module_type(sub.arena().module_type(incl.incl_mod))
+        }
         TypedSignatureItemDesc::Tsig_open(_) | TypedSignatureItemDesc::Tsig_attribute(_) => {}
     }
 }
@@ -441,12 +443,12 @@ pub fn walk_module_type<'t, I: TastIterator<'t> + ?Sized>(sub: &mut I, m: &Modul
         ModuleTypeDesc::Tmty_signature(sg) => sub.signature(sg),
         ModuleTypeDesc::Tmty_functor(_, _, arg, res) => {
             if let Some(arg) = arg {
-                sub.module_type(arg);
+                sub.module_type(sub.arena().module_type(*arg));
             }
-            sub.module_type(res);
+            sub.module_type(sub.arena().module_type(*res));
         }
         ModuleTypeDesc::Tmty_with(mt, constraints) => {
-            sub.module_type(mt);
+            sub.module_type(sub.arena().module_type(*mt));
             for (_, _, c) in constraints {
                 sub.with_constraint(c);
             }
@@ -461,7 +463,7 @@ pub fn walk_module_expr<'t, I: TastIterator<'t> + ?Sized>(sub: &mut I, m: &Modul
         ModuleExprDesc::Tmod_structure(st) => sub.structure(st),
         ModuleExprDesc::Tmod_functor(_, _, mt, me) => {
             if let Some(mt) = mt {
-                sub.module_type(mt);
+                sub.module_type(sub.arena().module_type(*mt));
             }
             sub.module_expr(sub.arena().module_expr(*me));
         }
@@ -472,7 +474,7 @@ pub fn walk_module_expr<'t, I: TastIterator<'t> + ?Sized>(sub: &mut I, m: &Modul
         ModuleExprDesc::Tmod_constraint(me, _, constraint, _) => {
             sub.module_expr(sub.arena().module_expr(*me));
             if let ModuleTypeConstraint::Tmodtype_explicit(mt) = constraint {
-                sub.module_type(mt);
+                sub.module_type(sub.arena().module_type(*mt));
             }
         }
         ModuleExprDesc::Tmod_unpack(e, _) => {

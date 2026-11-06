@@ -31,9 +31,9 @@ use crate::types::typecore::{
 use crate::types::typedtree::{
     EnvRef, Expression, IncludeDeclaration, IncludeDescription, ModuleBinding, ModuleCoercion,
     ModuleExpr, ModuleExprDesc, ModuleType, ModuleTypeDeclaration, OpenDeclaration, Structure,
-    StructureItem, StructureItemDesc, TypeExtension, TypedArena, TypedConstructorArguments,
-    TypedConstructorDeclaration, TypedCoreType, TypedCoreTypeDesc, TypedLabelDeclaration,
-    TypedTypeDeclaration, TypedTypeKind,
+    StructureItem, StructureItemDesc, TModTypeIdx, TypeExtension, TypedArena,
+    TypedConstructorArguments, TypedConstructorDeclaration, TypedCoreType, TypedCoreTypeDesc,
+    TypedLabelDeclaration, TypedTypeDeclaration, TypedTypeKind,
 };
 use crate::types::{Path, TypeDesc};
 
@@ -7149,7 +7149,7 @@ fn transl_recmodule_modtypes<'a>(
                 txt: name.clone(),
                 loc: *name_loc,
             },
-            md_type: typed_mty,
+            md_type: tctx.typed.push_module_type(typed_mty),
             md_attributes: attrs.clone(),
             md_loc: *mb_loc,
         });
@@ -7157,7 +7157,10 @@ fn transl_recmodule_modtypes<'a>(
 
     let mut env1 = env.clone();
     for decl in &dcl1 {
-        env1.add_module(decl.md_id, empty_module_decl(decl.md_type.mty_type.clone()));
+        env1.add_module(
+            decl.md_id,
+            empty_module_decl(tctx.typed.module_type(decl.md_type).mty_type.clone()),
+        );
     }
     // OCaml transl_recmodule_modtypes checks recursive-module type
     // declarations after the first transition environment is built.
@@ -7169,7 +7172,7 @@ fn transl_recmodule_modtypes<'a>(
             arena.get_mod_type(*mty_idx).pmty_loc,
             &mod_ids,
             &decl.md_id,
-            &decl.md_type.mty_type,
+            &tctx.typed.module_type(decl.md_type).mty_type,
         )?;
     }
 
@@ -7182,7 +7185,7 @@ fn transl_recmodule_modtypes<'a>(
                 txt: name.clone(),
                 loc: *name_loc,
             },
-            md_type: typed_mty,
+            md_type: tctx.typed.push_module_type(typed_mty),
             md_attributes: attrs.clone(),
             md_loc: *mb_loc,
         });
@@ -7190,7 +7193,10 @@ fn transl_recmodule_modtypes<'a>(
 
     let mut rec_env = env.clone();
     for decl in &dcl2 {
-        rec_env.add_module(decl.md_id, empty_module_decl(decl.md_type.mty_type.clone()));
+        rec_env.add_module(
+            decl.md_id,
+            empty_module_decl(tctx.typed.module_type(decl.md_type).mty_type.clone()),
+        );
     }
     // And again after the second transition environment, before body
     // typing and recursive module inclusion.
@@ -7202,7 +7208,7 @@ fn transl_recmodule_modtypes<'a>(
             arena.get_mod_type(*mty_idx).pmty_loc,
             &mod_ids,
             &decl.md_id,
-            &decl.md_type.mty_type,
+            &tctx.typed.module_type(decl.md_type).mty_type,
         )?;
     }
     Ok((dcl2, rec_env, mod_ids))
@@ -11864,12 +11870,32 @@ fn force_persistent_sigs_for_normalize_path(
 
 /// Translate a parsed module type (signature) into a decl::ModuleType.
 /// Used for recursive module constraint signatures to populate the environment.
+/// The typed module type already built for a parsed one: the node
+/// `transl_modtype` is finishing, or a child it stored in the typed arena.
+#[derive(Clone, Copy)]
+enum MtyHint<'h> {
+    Node(&'h crate::types::typedtree::ModuleType),
+    Stored(TModTypeIdx),
+}
+
+impl<'h> MtyHint<'h> {
+    fn get<'x>(self, ta: &'x TypedArena) -> &'x crate::types::typedtree::ModuleType
+    where
+        'h: 'x,
+    {
+        match self {
+            MtyHint::Node(node) => node,
+            MtyHint::Stored(idx) => ta.module_type(idx),
+        }
+    }
+}
+
 fn translate_module_type_to_decl_with_typed_hint<'a>(
     tctx: &mut TypeCheckContext<'a>,
     env: &Env,
     arena: &'a ParseArena,
     mty: &crate::parser::ast::ModuleType,
-    typed_hint: Option<&crate::types::typedtree::ModuleType>,
+    typed_hint: Option<MtyHint<'_>>,
 ) -> TypeModResult<crate::types::decl::ModuleType> {
     use crate::parser::ast::ModuleTypeDesc as PMtyDesc;
     use crate::types::decl::{
@@ -11882,22 +11908,22 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
         PMtyDesc::Pmty_signature(sig_items) => {
             let mut items = Vec::new();
             let mut sig_env = env.clone();
-            let typed_sig_items = match typed_hint.map(|hint| &hint.mty_desc) {
-                Some(TypedMtyDesc::Tmty_signature(sig)) => Some(sig.sig_items.as_slice()),
-                _ => None,
-            };
-            if let Some(TypedMtyDesc::Tmty_signature(sig)) = typed_hint.map(|hint| &hint.mty_desc) {
+            if let Some(TypedMtyDesc::Tmty_signature(sig)) =
+                typed_hint.map(|hint| &hint.get(&tctx.typed).mty_desc)
+            {
                 // OCaml typemod.ml:709-712 builds `Mty_signature sg.sig_type`
                 // from the already translated signature, and typemod.ml:879-883
                 // computes `sg.sig_type` once. Reusing the typed signature here
                 // avoids rewalking the parsed signature and recreating constructor
                 // identifiers after `transl_modtype`.
                 return Ok(DeclMty::MtySignature(std::sync::Arc::new(
-                    decl_signature_from_typed_signature(sig, arena, tctx.type_ctx),
+                    decl_signature_from_typed_signature(&tctx.typed, sig, arena, tctx.type_ctx),
                 )));
             }
-            for (sig_index, sig_item) in sig_items.iter().enumerate() {
-                let typed_sig_item = typed_sig_items.and_then(|items| items.get(sig_index));
+            for sig_item in sig_items.iter() {
+                // A typed signature hint returns above, so the items are
+                // translated without one.
+                let typed_sig_item: Option<&crate::types::typedtree::TypedSignatureItem> = None;
                 match &sig_item.psig_desc {
                     crate::parser::ast::SignatureItemDesc::Psig_value(vd) => {
                         let val_name = arena.get_string(vd.pval_name.txt);
@@ -12315,11 +12341,12 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                         let (mod_id, typed_inner_mty) =
                             match typed_sig_item.map(|item| &item.sig_desc) {
                                 Some(TypedSigDesc::Tsig_module(typed_md)) => {
-                                    (typed_md.md_id, Some(&typed_md.md_type))
+                                    (typed_md.md_id, Some(MtyHint::Stored(typed_md.md_type)))
                                 }
                                 _ => (tctx.type_ctx.create_ident(mod_name), None),
                             };
-                        let inner_mty = match typed_inner_mty.and_then(decl_module_type_from_typed)
+                        let inner_mty = match typed_inner_mty
+                            .and_then(|hint| decl_module_type_from_typed(hint.get(&tctx.typed)))
                         {
                             Some(mty) => {
                                 // OCaml compiler/ml/typemod.ml:806-834 stores
@@ -12361,11 +12388,13 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                         let (modtype_id, typed_inner_mty) =
                             match typed_sig_item.map(|item| &item.sig_desc) {
                                 Some(TypedSigDesc::Tsig_modtype(typed_mtd)) => {
-                                    (typed_mtd.mtd_id, typed_mtd.mtd_type.as_ref())
+                                    (typed_mtd.mtd_id, typed_mtd.mtd_type.map(MtyHint::Stored))
                                 }
                                 _ => (tctx.type_ctx.create_ident(modtype_name), None),
                             };
-                        let mtd_type = match typed_inner_mty.and_then(decl_module_type_from_typed) {
+                        let mtd_type = match typed_inner_mty
+                            .and_then(|hint| decl_module_type_from_typed(hint.get(&tctx.typed)))
+                        {
                             Some(mty) => Some(mty),
                             None => pmtd
                                 .pmtd_type
@@ -12481,10 +12510,12 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
         PMtyDesc::Pmty_functor(args) => {
             let (name, param_type, result_type_idx) = &**args;
             let (param_id, typed_param_mty, typed_result_mty) =
-                match typed_hint.map(|hint| &hint.mty_desc) {
-                    Some(TypedMtyDesc::Tmty_functor(param, _name, param_mty, result_mty)) => {
-                        (*param, param_mty.as_deref(), Some(result_mty.as_ref()))
-                    }
+                match typed_hint.map(|hint| &hint.get(&tctx.typed).mty_desc) {
+                    Some(TypedMtyDesc::Tmty_functor(param, _name, param_mty, result_mty)) => (
+                        *param,
+                        param_mty.map(MtyHint::Stored),
+                        Some(MtyHint::Stored(*result_mty)),
+                    ),
                     _ => (
                         tctx.type_ctx.create_ident(arena.get_string(name.txt)),
                         None,
@@ -12493,7 +12524,9 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                 };
             let param_decl = match param_type {
                 Some(pt_idx) => {
-                    let decl = match typed_param_mty.and_then(decl_module_type_from_typed) {
+                    let decl = match typed_param_mty
+                        .and_then(|hint| decl_module_type_from_typed(hint.get(&tctx.typed)))
+                    {
                         Some(mty) => {
                             // OCaml compiler/ml/typemod.ml:713-724 reuses
                             // `arg.mty_type` as `ty_arg` when building
@@ -12525,7 +12558,9 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                     md_path: None,
                 },
             );
-            let result_decl = match typed_result_mty.and_then(decl_module_type_from_typed) {
+            let result_decl = match typed_result_mty
+                .and_then(|hint| decl_module_type_from_typed(hint.get(&tctx.typed)))
+            {
                 Some(mty) => {
                     // OCaml compiler/ml/typemod.ml:721-724 stores
                     // `res.mty_type` in the functor result. Reusing it keeps
@@ -12548,8 +12583,8 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
         }
         PMtyDesc::Pmty_with(args) => {
             let (body_idx, constraints) = &**args;
-            let typed_body_hint = match typed_hint.map(|hint| &hint.mty_desc) {
-                Some(TypedMtyDesc::Tmty_with(body, _constraints)) => Some(body.as_ref()),
+            let typed_body_hint = match typed_hint.map(|hint| &hint.get(&tctx.typed).mty_desc) {
+                Some(TypedMtyDesc::Tmty_with(body, _constraints)) => Some(MtyHint::Stored(*body)),
                 _ => None,
             };
             let base_mty = translate_module_type_to_decl_with_typed_hint(
@@ -12614,9 +12649,13 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
         }
         PMtyDesc::Pmty_typeof(me_idx) => {
             let me = arena.get_mod_expr(*me_idx);
-            match typed_hint.map(|hint| &hint.mty_desc) {
-                Some(TypedMtyDesc::Tmty_typeof(typed_me)) => {
-                    let typed_mod_type = tctx.typed.module_expr(*typed_me).mod_type.clone();
+            let typed_me = match typed_hint.map(|hint| &hint.get(&tctx.typed).mty_desc) {
+                Some(TypedMtyDesc::Tmty_typeof(typed_me)) => Some(*typed_me),
+                _ => None,
+            };
+            match typed_me {
+                Some(typed_me) => {
+                    let typed_mod_type = tctx.typed.module_expr(typed_me).mod_type.clone();
                     module_type_of_typed_module_expr(tctx, env, arena, me, &typed_mod_type)
                 }
                 _ => {
@@ -13106,6 +13145,7 @@ fn anchor_local_module_aliases_to_owner(
 /// Used both in extract_module_type_from_mod_expr_with_ctx and in transl_signature
 /// to add modules to sig_env for subsequent items.
 pub(crate) fn decl_signature_from_typed_signature(
+    ta: &TypedArena,
     sig: &crate::types::typedtree::TypedSignature,
     arena: &ParseArena,
     ctx: &crate::types::context::TypeContext,
@@ -13164,7 +13204,7 @@ pub(crate) fn decl_signature_from_typed_signature(
                 out.push(SigItem::SigModule(
                     md.md_id,
                     ModuleDeclaration {
-                        md_type: decl_module_type_from_typed(&md.md_type).unwrap_or(
+                        md_type: decl_module_type_from_typed(ta.module_type(md.md_type)).unwrap_or(
                             crate::types::decl::ModuleType::MtySignature(std::sync::Arc::new(
                                 vec![],
                             )),
@@ -13181,11 +13221,10 @@ pub(crate) fn decl_signature_from_typed_signature(
                     out.push(SigItem::SigModule(
                         md.md_id,
                         ModuleDeclaration {
-                            md_type: decl_module_type_from_typed(&md.md_type).unwrap_or(
-                                crate::types::decl::ModuleType::MtySignature(std::sync::Arc::new(
-                                    vec![],
+                            md_type: decl_module_type_from_typed(ta.module_type(md.md_type))
+                                .unwrap_or(crate::types::decl::ModuleType::MtySignature(
+                                    std::sync::Arc::new(vec![]),
                                 )),
-                            ),
                             md_attributes: parser_attrs_to_decl_attrs(
                                 arena,
                                 ctx,
@@ -13206,7 +13245,9 @@ pub(crate) fn decl_signature_from_typed_signature(
                 out.push(SigItem::SigModtype(
                     mtd.mtd_id,
                     ModtypeDeclaration {
-                        mtd_type: mtd.mtd_type.as_ref().and_then(decl_module_type_from_typed),
+                        mtd_type: mtd
+                            .mtd_type
+                            .and_then(|mty| decl_module_type_from_typed(ta.module_type(mty))),
                         mtd_attributes: parser_attrs_to_decl_attrs(arena, ctx, &mtd.mtd_attributes),
                         mtd_loc: ctx.intern_loc(arena.to_location(mtd.mtd_loc)),
                     },
@@ -14202,10 +14243,9 @@ fn extract_module_type_from_mod_expr_inner(
                     }
                     StructureItemDesc::Tstr_modtype(mtd) => {
                         let modtype_decl = crate::types::decl::ModtypeDeclaration {
-                            mtd_type: mtd
-                                .mtd_type
-                                .as_ref()
-                                .and_then(decl_module_type_from_typed_module_type),
+                            mtd_type: mtd.mtd_type.and_then(|mty| {
+                                decl_module_type_from_typed_module_type(ta.module_type(mty))
+                            }),
                             mtd_attributes: vec![],
                             mtd_loc: crate::types::DeclLoc::none(),
                         };
@@ -14335,8 +14375,7 @@ fn extract_module_type_from_mod_expr_inner(
         }
         ModuleExprDesc::Tmod_functor(param_id, _name, param_mty, body) => {
             let decl_param_mty = param_mty
-                .as_deref()
-                .and_then(decl_module_type_from_typed_module_type);
+                .and_then(|mty| decl_module_type_from_typed_module_type(ta.module_type(mty)));
 
             let body_env_storage: Option<Env>;
             let body_env = if let Some(parent_env) = env {
@@ -14407,7 +14446,7 @@ fn extract_module_type_from_mod_expr_inner(
             // exposed by a constrained module expression.
             let constrained = match modtype_constraint {
                 crate::types::typedtree::ModuleTypeConstraint::Tmodtype_explicit(mty) => {
-                    decl_module_type_from_typed_module_type(mty)
+                    decl_module_type_from_typed_module_type(ta.module_type(*mty))
                 }
                 crate::types::typedtree::ModuleTypeConstraint::Tmodtype_implicit => {
                     Some(constrained_mty.clone()).or_else(|| {
@@ -15357,7 +15396,7 @@ fn type_module_expr_with_alias_inner<'a>(
                         txt: param_name,
                         loc: name.loc,
                     },
-                    typed_param_type,
+                    typed_param_type.map(|mty| tctx.typed.push_module_type(*mty)),
                     tctx.typed.push_module_expr(typed_body),
                 ),
                 mod_loc: loc,
@@ -15526,15 +15565,14 @@ fn type_module_expr_with_alias_inner<'a>(
                 crate::types::decl::ModuleType::MtySignature(std::sync::Arc::new(vec![])),
             );
             let typed_mod_for_unused_check = typed_mod.clone();
+            let typed_mty_idx = tctx.typed.push_module_type(typed_mty.clone());
             let constrained = wrap_constraint_with_decl_mty(
                 tctx,
                 env,
                 typed_mod,
                 typed_mty.clone(),
                 decl_mty.clone(),
-                crate::types::typedtree::ModuleTypeConstraint::Tmodtype_explicit(Box::new(
-                    typed_mty,
-                )),
+                crate::types::typedtree::ModuleTypeConstraint::Tmodtype_explicit(typed_mty_idx),
                 loc,
                 mod_expr.pmod_attributes.clone(),
             )?;
@@ -16021,8 +16059,8 @@ fn transl_modtype<'a>(
                     txt: arena.get_string(name.txt).to_string(),
                     loc: name.loc,
                 },
-                typed_param,
-                Box::new(typed_result),
+                typed_param.map(|mty| tctx.typed.push_module_type(*mty)),
+                tctx.typed.push_module_type(typed_result),
             )
         }
         PMtyDesc::Pmty_with(inner) => {
@@ -16043,7 +16081,7 @@ fn transl_modtype<'a>(
             }
             let typed_constraints =
                 transl_with_constraints(tctx, env, arena, base_mty.as_ref(), constraints, loc)?;
-            TMtyDesc::Tmty_with(Box::new(typed_body), typed_constraints)
+            TMtyDesc::Tmty_with(tctx.typed.push_module_type(typed_body), typed_constraints)
         }
         PMtyDesc::Pmty_typeof(me_idx) => {
             let me = arena.get_mod_expr(*me_idx);
@@ -16088,11 +16126,14 @@ fn transl_modtype<'a>(
         mty_loc: loc,
         mty_attributes: attrs,
     };
-    typed.mty_type =
-        translate_module_type_to_decl_with_typed_hint(tctx, env, arena, smty, Some(&typed))
-            .unwrap_or_else(|_| {
-                crate::types::decl::ModuleType::MtySignature(std::sync::Arc::new(vec![]))
-            });
+    typed.mty_type = translate_module_type_to_decl_with_typed_hint(
+        tctx,
+        env,
+        arena,
+        smty,
+        Some(MtyHint::Node(&typed)),
+    )
+    .unwrap_or_else(|_| crate::types::decl::ModuleType::MtySignature(std::sync::Arc::new(vec![])));
     Ok(typed)
 }
 
@@ -16271,7 +16312,7 @@ pub fn transl_signature<'a>(
                         txt: name_str,
                         loc: md.pmd_name.loc,
                     },
-                    md_type: typed_mty,
+                    md_type: tctx.typed.push_module_type(typed_mty),
                     md_attributes: md.pmd_attributes.clone(),
                     md_loc: md.pmd_loc,
                 })
@@ -16328,7 +16369,7 @@ pub fn transl_signature<'a>(
                         txt: name_str,
                         loc: mtd.pmtd_name.loc,
                     },
-                    mtd_type: typed_mty,
+                    mtd_type: typed_mty.map(|mty| tctx.typed.push_module_type(mty)),
                     mtd_attributes: mtd.pmtd_attributes.clone(),
                     mtd_loc: mtd.pmtd_loc,
                 })
@@ -16346,7 +16387,7 @@ pub fn transl_signature<'a>(
                 check_included_signature_names(&mut names, item.psig_loc, &include_sig)?;
                 add_signature_items_to_env(tctx.type_ctx, &include_sig, &mut sig_env)?;
                 TSigDesc::Tsig_include(IncludeDescription {
-                    incl_mod: typed_mty,
+                    incl_mod: tctx.typed.push_module_type(typed_mty),
                     incl_type: include_sig,
                     incl_attributes: incl.pincl_attributes.clone(),
                     incl_loc: incl.pincl_loc,
@@ -19433,7 +19474,7 @@ fn type_structure_item<'a>(
                 new_env.add_module(
                     decl.md_id,
                     crate::types::decl::ModuleDeclaration {
-                        md_type: decl.md_type.mty_type.clone(),
+                        md_type: tctx.typed.module_type(decl.md_type).mty_type.clone(),
                         md_attributes: parser_attrs_to_decl_attrs(arena, tctx.type_ctx, attrs),
                         md_loc: tctx.intern_loc(arena.to_location(*mb_loc)),
                         md_path: None,
@@ -19484,7 +19525,7 @@ fn type_structure_item<'a>(
                 let include_decl_mty = recmodule_subst_modtype(
                     tctx.type_ctx,
                     &inclusion_subst,
-                    &decl.md_type.mty_type,
+                    &tctx.typed.module_type(decl.md_type).mty_type,
                 );
                 let include_actual_mty = recmodule_subst_and_strengthen(
                     tctx.type_ctx,
@@ -19497,12 +19538,10 @@ fn type_structure_item<'a>(
                     tctx,
                     &inclusion_env,
                     typed_inner,
-                    decl.md_type.mty_type.clone(),
+                    tctx.typed.module_type(decl.md_type).mty_type.clone(),
                     include_actual_mty,
                     include_decl_mty,
-                    crate::types::typedtree::ModuleTypeConstraint::Tmodtype_explicit(Box::new(
-                        decl.md_type.clone(),
-                    )),
+                    crate::types::typedtree::ModuleTypeConstraint::Tmodtype_explicit(decl.md_type),
                     inner_loc,
                     Attributes::new(),
                 )?;
@@ -19575,7 +19614,7 @@ fn type_structure_item<'a>(
                     txt: mtd_name_str.to_string(),
                     loc: mtd.pmtd_name.loc,
                 },
-                mtd_type: typed_mty,
+                mtd_type: typed_mty.map(|mty| tctx.typed.push_module_type(mty)),
                 mtd_attributes: mtd.pmtd_attributes.clone(),
                 mtd_loc: mtd.pmtd_loc,
             });
