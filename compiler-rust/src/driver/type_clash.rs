@@ -1074,14 +1074,15 @@ fn print_extra_type_clash_help_by_types(
         if let Some(string_value) = extract_string_constant(ctx, &text) {
             let variant_constructors: Vec<String> =
                 row.row_fields.iter().map(|(l, _)| l.to_string()).collect();
-            let reprinted = reprint_expr_at_loc(ctx, arena, source, loc, |_, exp| {
+            let reprinted = reprint_expr_at_loc(ctx, arena, source, loc, |sub_arena, exp| {
                 let crate::parser::ast::ExpressionDesc::Pexp_constant(c) = &exp.pexp_desc else {
                     return None;
                 };
                 let crate::parser::ast::Constant::String(payload) = &*c else {
                     return None;
                 };
-                let s = payload.semantic(arena).to_string();
+                // The payload belongs to the re-parsed expression's arena.
+                let s = payload.semantic(sub_arena).to_string();
                 Some(crate::parser::ast::Expression {
                     pexp_desc: crate::parser::ast::ExpressionDesc::Pexp_variant(Box::new((
                         std::borrow::Cow::Owned(s),
