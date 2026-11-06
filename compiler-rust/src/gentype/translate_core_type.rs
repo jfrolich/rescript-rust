@@ -9,7 +9,7 @@ use crate::parser::ast::ClosedFlag as AstClosedFlag;
 use crate::parser::longident::Longident;
 use crate::types::asttypes::ArgLabel;
 use crate::types::context::TypeContext;
-use crate::types::path::Path;
+use crate::types::path::PathView;
 use crate::types::typedtree::{
     ObjectField, ObjectFieldDesc, RowFieldDesc, RowFieldType, TypedCoreType, TypedCoreTypeDesc,
 };
@@ -20,17 +20,16 @@ pub fn remove_option(
 ) -> Option<(String, TypedCoreType)> {
     // Mirrors compiler/gentype/TranslateCoreType.ml:4-15.
     match (&core_type.ctyp_desc, label) {
-        (TypedCoreTypeDesc::Ttyp_constr(Path::Pident(id), _, args), ArgLabel::Optional(lbl))
-            if id.name() == "option" && args.len() == 1 =>
+        (TypedCoreTypeDesc::Ttyp_constr(path, _, args), ArgLabel::Optional(lbl))
+            if path.as_pident().is_some_and(|id| id.name() == "option") && args.len() == 1 =>
         {
             Some((lbl.txt.clone(), args[0].clone()))
         }
-        (
-            TypedCoreTypeDesc::Ttyp_constr(Path::Pdot(name_space, id, _), _, args),
-            ArgLabel::Optional(lbl),
-        ) if matches!(name_space.as_ref(), Path::Pident(ns) if ns.name() == "FB")
-            && id == "option"
-            && args.len() == 1 =>
+        (TypedCoreTypeDesc::Ttyp_constr(path, _, args), ArgLabel::Optional(lbl))
+            if matches!(path.view(), PathView::Pdot(name_space, id, _)
+                if matches!(name_space.view(), PathView::Pident(ns) if ns.name() == "FB")
+                    && id == "option")
+                && args.len() == 1 =>
         {
             Some((lbl.txt.clone(), args[0].clone()))
         }

@@ -26,7 +26,7 @@
 //! let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
 //!
 //! // Create types
-//! let t1 = ctx.new_var(Some("a".to_string()));
+//! let t1 = ctx.new_var(Some(crate::name::Name::new("a")));
 //! let t2 = ctx.new_var(None);
 //! let func = ctx.new_arrow_simple(t1, t2);
 //! ```
@@ -71,7 +71,7 @@ pub use decl::{
     TypeDeclaration, TypeInlinedType, TypeKind, TypeRepresentation, ValueDescription, ValueKind,
     may_equal_constructor, same_constructor,
 };
-pub use path::{NOPOS, Path, Typath};
+pub use path::{NOPOS, Path, PathView, Typath};
 pub(crate) use type_expr::TypeExprRefMap;
 pub use type_expr::{
     AbbrevMemo, AbbrevMemoRef, FieldMutability, GENERIC_LEVEL, LOWEST_LEVEL, MutabilityRef,
@@ -140,8 +140,8 @@ mod tests {
         let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
 
         // Create a simple function type: 'a -> 'b
-        let a = ctx.new_var(Some("a".to_string()));
-        let b = ctx.new_var(Some("b".to_string()));
+        let a = ctx.new_var(Some(crate::name::Name::new("a")));
+        let b = ctx.new_var(Some(crate::name::Name::new("b")));
         let _func = ctx.new_arrow_simple(a, b);
 
         // Create a path

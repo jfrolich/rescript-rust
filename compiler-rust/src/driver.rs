@@ -5,6 +5,7 @@
 
 mod type_clash;
 
+use crate::types::path::PathView;
 use std::borrow::Cow;
 use std::ffi::OsString;
 use std::fmt;
@@ -4936,7 +4937,7 @@ fn format_unbound_type_declaration_variable_report(
                     labels.iter().map(|l| l.ld_type).collect()
                 }
             };
-            let typ_ti = type_ctx.new_generic_type(TypeDesc::Ttuple(tys.into()));
+            let typ_ti = type_ctx.new_generic_type(TypeDesc::Ttuple(type_ctx.new_type_list(&tys)));
             let mut printer = TypeExprPrinter::new(type_ctx);
             printer.reset();
             printer.mark_loops(typ_ti);
@@ -6941,9 +6942,10 @@ fn printtyp_same_path(type_ctx: &TypeContext, t: TypeExprRef, t2: TypeExprRef) -
         ) => {
             p1.same(p2)
                 && a1.len() == a2.len()
-                && a1
+                && type_ctx
+                    .type_list(a1)
                     .iter()
-                    .zip(a2.iter())
+                    .zip(type_ctx.type_list(a2).iter())
                     .all(|(x, y)| type_ctx.repr(*x) == type_ctx.repr(*y))
         }
         _ => false,
@@ -7437,7 +7439,7 @@ fn escaped_constructor_path_in_type(
             if var_level < path.binding_time() {
                 return Some(path.name());
             }
-            for arg in args {
+            for arg in type_ctx.type_list(args).iter() {
                 if let Some(path) =
                     escaped_constructor_path_in_type(type_ctx, *arg, var_level, seen)
                 {
@@ -7447,7 +7449,7 @@ fn escaped_constructor_path_in_type(
             None
         }
         TypeDesc::Tpackage { args, .. } | TypeDesc::Ttuple(args) => {
-            for arg in args {
+            for arg in type_ctx.type_list(args).iter() {
                 if let Some(path) =
                     escaped_constructor_path_in_type(type_ctx, *arg, var_level, seen)
                 {
@@ -7456,7 +7458,8 @@ fn escaped_constructor_path_in_type(
             }
             None
         }
-        TypeDesc::Tarrow { args, ret } => args
+        TypeDesc::Tarrow { args, ret } => type_ctx
+            .type_args(args)
             .iter()
             .find_map(|arg| escaped_constructor_path_in_type(type_ctx, arg.typ, var_level, seen))
             .or_else(|| escaped_constructor_path_in_type(type_ctx, *ret, var_level, seen)),
@@ -7467,6 +7470,7 @@ fn escaped_constructor_path_in_type(
             escaped_constructor_path_in_type(type_ctx, *fields, var_level, seen)
         }
         TypeDesc::Tvariant(row) => {
+            let row = &type_ctx.row_desc(row);
             for (_, field) in &row.row_fields {
                 match field {
                     crate::types::type_expr::RowField::Rpresent(Some(arg)) => {
@@ -7833,16 +7837,12 @@ fn type_is_predef_path(
 fn type_is_jsx_component(type_ctx: &TypeContext, ty: TypeExprRef) -> bool {
     let repr = type_ctx.repr(ty);
     match &*type_ctx.get_desc(repr) {
-        TypeDesc::Tconstr {
-            path: crate::types::path::Path::Pdot(parent, name, _),
-            ..
-        } => {
-            name == "component"
-                && matches!(
-                    parent.as_ref(),
-                    crate::types::path::Path::Pident(id) if id.name() == "Jsx"
-                )
-        }
+        TypeDesc::Tconstr { path, .. } => matches!(
+            path.view(),
+            crate::types::path::PathView::Pdot(parent, name, _)
+                if name == "component"
+                    && parent.as_pident().is_some_and(|id| id.name() == "Jsx")
+        ),
         TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) => type_is_jsx_component(type_ctx, *next),
         _ => false,
     }
@@ -8447,7 +8447,7 @@ fn with_type_decl_for_path<R>(
     path: &crate::types::Path,
     f: impl FnOnce(&crate::types::TypeDeclaration) -> R,
 ) -> Option<R> {
-    if let crate::types::Path::Pident(id) = path
+    if let crate::types::path::PathView::Pident(id) = path.view()
         && id.stamp() != 0
         && let Some(decl) = type_ctx.find_type_decl_by_stamp(id.stamp())
     {
@@ -8716,7 +8716,7 @@ fn append_jsx_element_type_clash_help(
         TypeDesc::Tconstr { path, args, .. }
             if args.len() == 1 && path.same(&crate::types::predef::path_array()) =>
         {
-            if type_is_jsx_element_named(type_ctx, args[0]) {
+            if type_is_jsx_element_named(type_ctx, type_ctx.type_list_at(args, 0)) {
                 message.push_str("\n\nIn JSX, all content must be JSX elements. You can convert array to a JSX element with ");
                 message.push_str(INFO);
                 message.push_str("React.array");
@@ -8966,7 +8966,12 @@ fn type_alias_expansion(type_ctx: &TypeContext, ty: TypeExprRef) -> Option<TypeE
     let manifest = type_decl_manifest_for_path(type_ctx, &path)?;
     let (params, manifest) = manifest;
     let expansion = if params.len() == args.len() {
-        crate::types::ctype::subst_type_params(type_ctx, &params, &args, manifest)
+        crate::types::ctype::subst_type_params(
+            type_ctx,
+            &params,
+            &type_ctx.type_list(args),
+            manifest,
+        )
     } else {
         manifest
     };
@@ -9005,7 +9010,7 @@ fn type_decl_manifest_for_path(
 
     // A predefined type (e.g. `promise`) has no manifest; resolving it by name
     // could pick a user declaration that shadows it.
-    if let crate::types::Path::Pident(id) = path
+    if let crate::types::path::PathView::Pident(id) = path.view()
         && crate::types::predef::find_predef_ident(id.name())
             .is_some_and(|predef| predef.stamp() == id.stamp())
     {
@@ -9015,7 +9020,7 @@ fn type_decl_manifest_for_path(
     // Once the declaration for `path` is found, its manifest (or lack of one)
     // is the answer; falling back to another declaration with the same name
     // would expand an unrelated type.
-    if let crate::types::Path::Pident(id) = path
+    if let crate::types::path::PathView::Pident(id) = path.view()
         && id.stamp() != 0
         && let Some(decl) = type_ctx.find_type_decl_by_stamp(id.stamp())
     {
@@ -9230,7 +9235,7 @@ fn polyvariant_row(
     let repr = type_ctx.repr(ty);
     let desc = type_ctx.get_desc(repr);
     let row = match &*desc {
-        TypeDesc::Tvariant(row) => crate::types::btype::row_repr(type_ctx, row),
+        TypeDesc::Tvariant(row) => crate::types::btype::row_repr(type_ctx, &type_ctx.row_desc(row)),
         _ => return None,
     };
     Some(row)
@@ -9387,7 +9392,7 @@ fn object_field_mismatch_pair(
             && type_is_nil(type_ctx, *actual_rest)
             && type_is_nil(type_ctx, *expected_rest) =>
         {
-            Some((actual_name.clone(), *actual_ty, *expected_ty))
+            Some((actual_name.to_string(), *actual_ty, *expected_ty))
         }
         _ => None,
     };
@@ -9407,10 +9412,10 @@ fn object_field_missing_pair(
     let expected_desc = type_ctx.get_desc(expected_repr);
     let result = match (&*actual_desc, &*expected_desc) {
         (TypeDesc::Tnil | TypeDesc::Tconstr { .. }, TypeDesc::Tfield { name, typ, .. }) => {
-            Some((true, name.clone(), *typ))
+            Some((true, name.to_string(), *typ))
         }
         (TypeDesc::Tfield { name, typ, .. }, TypeDesc::Tnil | TypeDesc::Tconstr { .. }) => {
-            Some((false, name.clone(), *typ))
+            Some((false, name.to_string(), *typ))
         }
         _ => None,
     };
@@ -9865,7 +9870,12 @@ fn collect_expected_function_arguments(
 
         match &*type_ctx.get_desc(repr) {
             TypeDesc::Tarrow { args: params, ret } => {
-                args.extend(params.iter().map(|arg| (arg.label().clone(), arg.typ)));
+                args.extend(
+                    type_ctx
+                        .type_args(params)
+                        .iter()
+                        .map(|arg| (arg.label().to_arg_label(), arg.typ)),
+                );
                 current = *ret;
             }
             TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) => current = *next,
@@ -10152,7 +10162,12 @@ fn collect_function_arg_labels(
 
         match &*type_ctx.get_desc(current) {
             TypeDesc::Tarrow { args, ret } => {
-                labels.extend(args.iter().map(|arg| arg.label().clone()));
+                labels.extend(
+                    type_ctx
+                        .type_args(args)
+                        .iter()
+                        .map(|arg| arg.label().to_arg_label()),
+                );
                 current = *ret;
             }
             _ => break,
@@ -10176,13 +10191,14 @@ fn format_package_type_expr_for_error(
     let TypeDesc::Tpackage { path, lids, args } = desc else {
         return format_type_expr(type_ctx, ty);
     };
+    let lids = type_ctx.package_lids(lids);
     if lids.is_empty() {
         return format_type_expr(type_ctx, ty);
     }
 
     let constraints = lids
         .iter()
-        .zip(args.iter())
+        .zip(type_ctx.type_list(args).iter())
         .map(|(lid, arg)| {
             format!(
                 "type {} = {}",
@@ -12193,18 +12209,17 @@ fn extract_pat_name(pat: &crate::types::typedtree::Pattern) -> Option<String> {
 /// impl has local Pident while iface has qualified Pdot, so we compare
 /// the leaf name instead.
 fn moregen_paths_compatible(p1: &crate::types::Path, p2: &crate::types::Path) -> bool {
-    use crate::types::Path;
     if p1.same(p2) {
         return true;
     }
-    let leaf1 = match p1 {
-        Path::Pident(id) => id.name(),
-        Path::Pdot(_, name, _) => name.as_str(),
+    let leaf1 = match p1.view() {
+        PathView::Pident(id) => id.name(),
+        PathView::Pdot(_, name, _) => name.as_str(),
         _ => return false,
     };
-    let leaf2 = match p2 {
-        Path::Pident(id) => id.name(),
-        Path::Pdot(_, name, _) => name.as_str(),
+    let leaf2 = match p2.view() {
+        PathView::Pident(id) => id.name(),
+        PathView::Pdot(_, name, _) => name.as_str(),
         _ => return false,
     };
     leaf1 == leaf2
@@ -12254,7 +12269,7 @@ fn moregen_link(
             let a2 = a2.clone();
             drop(impl_desc);
             drop(iface_desc);
-            for (a, b) in a1.iter().zip(a2.iter()) {
+            for (a, b) in ctx.type_list(a1).iter().zip(ctx.type_list(a2).iter()) {
                 moregen_link(ctx, *a, *b, visited);
             }
         }
@@ -12264,7 +12279,7 @@ fn moregen_link(
             let (a1, a2, r1, r2) = (a1.clone(), a2.clone(), *r1, *r2);
             drop(impl_desc);
             drop(iface_desc);
-            for (a1, a2) in a1.iter().zip(&a2) {
+            for (a1, a2) in ctx.type_args(a1).iter().zip(ctx.type_args(a2).iter()) {
                 moregen_link(ctx, a1.typ, a2.typ, visited);
             }
             moregen_link(ctx, r1, r2, visited);
@@ -12274,7 +12289,7 @@ fn moregen_link(
             let t2 = t2.clone();
             drop(impl_desc);
             drop(iface_desc);
-            for (a, b) in t1.iter().zip(t2.iter()) {
+            for (a, b) in ctx.type_list(t1).iter().zip(ctx.type_list(t2).iter()) {
                 moregen_link(ctx, *a, *b, visited);
             }
         }
