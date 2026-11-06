@@ -124,8 +124,15 @@ impl SharedTypePool {
     pub(crate) fn fresh_ident_origin(&self) -> crate::ident::IdentOrigin {
         use crate::ident::IdentOrigin;
         let span = IdentOrigin::SHARED.end - IdentOrigin::SHARED.start;
-        let n = self.next_ident_origin.fetch_add(1, Ordering::Relaxed);
-        IdentOrigin::new(IdentOrigin::SHARED.start + n % span)
+        // Stop counting at the end of the range, so the counter cannot wrap
+        // however often an exhausted pool is asked.
+        let n = self
+            .next_ident_origin
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+                (n < span).then_some(n + 1)
+            })
+            .unwrap_or(span);
+        IdentOrigin::nth_in(IdentOrigin::SHARED, n)
     }
 
     fn new(generation: u64) -> Self {
@@ -284,6 +291,26 @@ pub(crate) fn pool_for(generation: u64) -> Arc<SharedTypePool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The pool's last origin is handed out once; after that every request
+    /// fails and the counter stays at the end of the range.
+    #[test]
+    fn the_pool_runs_out_of_origins_without_wrapping() {
+        use crate::ident::IdentOrigin;
+        let pool = SharedTypePool::new(u64::MAX);
+        let first = pool.fresh_ident_origin();
+        assert_eq!(first.get(), IdentOrigin::SHARED.start);
+        let span = IdentOrigin::SHARED.end - IdentOrigin::SHARED.start;
+        pool.next_ident_origin.store(span - 1, Ordering::Relaxed);
+        assert_eq!(pool.fresh_ident_origin().get(), IdentOrigin::SHARED.end - 1);
+        for _ in 0..2 {
+            let again = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                pool.fresh_ident_origin()
+            }));
+            assert!(again.is_err());
+            assert_eq!(pool.next_ident_origin.load(Ordering::Relaxed), span);
+        }
+    }
 
     #[test]
     fn published_graphs_are_readable_from_other_threads() {
