@@ -140,10 +140,11 @@ pub fn field_flatten_get(
                 // lam_util.ml:214-224.
                 Constant::Block {
                     tag_info, elements, ..
-                } if matches!(**tag_info, TagInfo::Record { .. }) => {
-                    let TagInfo::Record { fields, .. } = &**tag_info else {
+                } if matches!(**tag_info, TagInfo::Record(_)) => {
+                    let TagInfo::Record(record) = &**tag_info else {
                         unreachable!()
                     };
+                    let fields = &record.fields;
                     match info {
                         FieldDbgInfo::Record { name } => fields
                             .iter()

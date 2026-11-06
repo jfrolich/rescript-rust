@@ -205,7 +205,8 @@ fn runtime_value_kind(c: &Constant) -> ValueKind {
         },
         Constant::Block { tag_info, .. } => match &**tag_info {
             TagInfo::Tuple => ValueKind::IsArray,
-            TagInfo::Record { fields, .. } => {
+            TagInfo::Record(record) => {
+                let fields = &record.fields;
                 if !fields.is_empty()
                     && fields
                         .iter()
@@ -797,10 +798,10 @@ impl Lambda {
                 }),
             Lambda::Lconst(Constant::Block { tag_info, elements }) => {
                 let runtime = match &*tag_info {
-                    TagInfo::Constructor { runtime, .. } => {
-                        Some(crate::types::VariantBlock::Tagged((**runtime).clone()))
+                    TagInfo::Constructor(c) => {
+                        Some(crate::types::VariantBlock::Tagged((*c.runtime).clone()))
                     }
-                    TagInfo::RecordInlined { runtime, .. } => Some((**runtime).clone()),
+                    TagInfo::RecordInlined(r) => Some((*r.runtime).clone()),
                     _ => None,
                 };
                 switch
@@ -1857,7 +1858,11 @@ mod node_size_tests {
     #[test]
     fn lambda_node_sizes_stay_compact() {
         use std::mem::size_of;
-        assert_eq!(size_of::<super::Primitive>(), 88);
+        // Constructor/record block tags and JS call specs are boxed
+        // (`ConstructorTag`, `RecordTag`, `RecordInlinedTag`, `JsCall`).
+        assert_eq!(size_of::<super::TagInfo>(), 32);
+        assert_eq!(size_of::<super::Primitive>(), 40);
+        assert_eq!(size_of::<super::arena::PrimPayload>(), 48);
         assert_eq!(size_of::<super::Constant>(), 56);
         assert_eq!(size_of::<super::Lambda>(), 56);
     }

@@ -2212,18 +2212,10 @@ impl LambdaCompiler {
             return None;
         };
 
-        if !matches!(
-            tag_info,
-            TagInfo::Record { .. }
-                | TagInfo::Constructor {
-                    num_nonconst: 1,
-                    ..
-                }
-                | TagInfo::RecordInlined {
-                    num_nonconst: 1,
-                    ..
-                }
-        ) {
+        if !matches!(tag_info, TagInfo::Record(_))
+            && !matches!(tag_info, TagInfo::Constructor(c) if c.num_nonconst == 1)
+            && !matches!(tag_info, TagInfo::RecordInlined(r) if r.num_nonconst == 1)
+        {
             return None;
         }
 
@@ -2269,10 +2261,10 @@ impl LambdaCompiler {
 
     fn recursive_dummy_object_expr(tag_info: &TagInfo) -> Expression {
         match tag_info {
-            TagInfo::Record { .. }
+            TagInfo::Record(_)
             | TagInfo::Module(_)
-            | TagInfo::Constructor { .. }
-            | TagInfo::RecordInlined { .. }
+            | TagInfo::Constructor(_)
+            | TagInfo::RecordInlined(_)
             | TagInfo::PolyVar(_)
             | TagInfo::Extension
             | TagInfo::RecordExt { .. } => Expression::new(ExpressionDesc::Object(None, vec![])),
@@ -2290,14 +2282,16 @@ impl LambdaCompiler {
         index: usize,
     ) -> Option<SetFieldDbgInfo> {
         match tag_info {
-            TagInfo::Record { fields, .. } => fields
+            TagInfo::Record(record) => record
+                .fields
                 .get(index)
                 .map(|(name, _)| SetFieldDbgInfo::RecordSet(name.clone())),
-            TagInfo::RecordInlined { fields, .. } => fields
+            TagInfo::RecordInlined(inlined) => inlined
+                .fields
                 .get(index)
                 .map(|(name, _)| SetFieldDbgInfo::RecordInlineSet(name.clone())),
-            TagInfo::Constructor { name, .. } => {
-                Some(SetFieldDbgInfo::RecordInlineSet(if name == "::" {
+            TagInfo::Constructor(constructor) => Some(SetFieldDbgInfo::RecordInlineSet(
+                if constructor.name == "::" {
                     match index {
                         0 => "hd".to_string(),
                         1 => "tl".to_string(),
@@ -2305,8 +2299,8 @@ impl LambdaCompiler {
                     }
                 } else {
                     format!("_{}", index)
-                }))
-            }
+                },
+            )),
             _ => None,
         }
     }

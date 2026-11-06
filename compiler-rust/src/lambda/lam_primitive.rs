@@ -62,6 +62,16 @@ impl ImportSource {
     }
 }
 
+/// [`Primitive::PjsCall`] payload: a JS FFI call expanded from the
+/// external's spec at translation.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct JsCall {
+    pub prim_name: String,
+    pub arg_types: Vec<Param>,
+    pub ffi: ExternalDecl,
+    pub transformed_jsx: bool,
+}
+
 /// Primitive operations
 ///
 /// These are built-in operations that compile directly to JavaScript.
@@ -95,12 +105,9 @@ pub enum Primitive {
     // ==================== External Call ====================
     /// JavaScript FFI call
     /// JS FFI calls, expanded from the external's spec at translation.
-    PjsCall {
-        prim_name: String,
-        arg_types: Vec<Param>,
-        ffi: Box<ExternalDecl>,
-        transformed_jsx: bool,
-    },
+    /// Boxed: a call carries an external spec several times larger than
+    /// the other primitives.
+    PjsCall(Box<JsCall>),
 
     /// Create a JavaScript object
     PjsObjectCreate(Vec<ObjParam>),
@@ -508,18 +515,12 @@ impl Primitive {
             },
             // lam_primitive.ml:250-254: Pjs_call only checks
             // prim_name + arg_types + ffi (NOT transformed_jsx).
-            PjsCall {
-                prim_name,
-                arg_types,
-                ffi,
-                transformed_jsx: _,
-            } => match other {
-                PjsCall {
-                    prim_name: pn,
-                    arg_types: at,
-                    ffi: f,
-                    transformed_jsx: _,
-                } => prim_name == pn && arg_types == at && ffi == f,
+            PjsCall(call) => match other {
+                PjsCall(other) => {
+                    call.prim_name == other.prim_name
+                        && call.arg_types == other.arg_types
+                        && call.ffi == other.ffi
+                }
                 _ => false,
             },
             // lam_primitive.ml:255-258

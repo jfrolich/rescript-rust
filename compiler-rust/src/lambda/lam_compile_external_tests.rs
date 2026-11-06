@@ -42,10 +42,10 @@ fn import_attributes_exact_lowered_lambda_keeps_aliases_before_logs_through_js_p
 fn lowers_js_var_without_args_to_a_value() {
     let mut compiler = LambdaCompiler::new();
     let lam = Lambda::prim(
-        Primitive::PjsCall {
+        Primitive::PjsCall(Box::new(crate::lambda::lam_primitive::JsCall {
             prim_name: "process".to_string(),
             arg_types: vec![],
-            ffi: Box::new(ExternalDecl {
+            ffi: ExternalDecl {
                 kind: DeclKind::DeclVal {
                     name: "process".to_string(),
                 },
@@ -53,9 +53,9 @@ fn lowers_js_var_without_args_to_a_value() {
                 scopes: vec![],
                 variadic: false,
                 effective_arity: 0,
-            }),
+            },
             transformed_jsx: false,
-        },
+        })),
         vec![],
         LamLoc::NONE,
     );
@@ -75,10 +75,10 @@ fn lowers_js_var_without_args_to_a_value() {
 fn lowers_js_var_calls_with_runtime_args_even_without_external_arg_metadata() {
     let mut compiler = LambdaCompiler::new();
     let lam = Lambda::prim(
-        Primitive::PjsCall {
+        Primitive::PjsCall(Box::new(crate::lambda::lam_primitive::JsCall {
             prim_name: "foo1".to_string(),
             arg_types: vec![],
-            ffi: Box::new(ExternalDecl {
+            ffi: ExternalDecl {
                 kind: DeclKind::DeclVal {
                     name: "foo1".to_string(),
                 },
@@ -86,9 +86,9 @@ fn lowers_js_var_calls_with_runtime_args_even_without_external_arg_metadata() {
                 scopes: vec![],
                 variadic: false,
                 effective_arity: 0,
-            }),
+            },
             transformed_jsx: false,
-        },
+        })),
         vec![Lambda::Lconst(Constant::Int {
             i: 10,
             comment: None,
@@ -129,10 +129,10 @@ fn lowers_js_var_calls_with_runtime_args_even_without_external_arg_metadata() {
 fn lowers_module_external_calls_to_namespace_imports() {
     let mut compiler = LambdaCompiler::new();
     let lam = Lambda::prim(
-        Primitive::PjsCall {
+        Primitive::PjsCall(Box::new(crate::lambda::lam_primitive::JsCall {
             prim_name: "describe".to_string(),
             arg_types: vec![],
-            ffi: Box::new(ExternalDecl {
+            ffi: ExternalDecl {
                 kind: DeclKind::DeclVal {
                     name: "describe".to_string(),
                 },
@@ -140,9 +140,9 @@ fn lowers_module_external_calls_to_namespace_imports() {
                 scopes: vec![],
                 variadic: false,
                 effective_arity: 1,
-            }),
+            },
             transformed_jsx: false,
-        },
+        })),
         vec![],
         LamLoc::NONE,
     );
@@ -255,10 +255,10 @@ fn lowers_pjs_object_set_to_property_assignments() {
 fn lowers_spliced_js_calls_by_flattening_literal_variadic_arrays() {
     let mut compiler = LambdaCompiler::new();
     let lam = Lambda::prim(
-        Primitive::PjsCall {
+        Primitive::PjsCall(Box::new(crate::lambda::lam_primitive::JsCall {
             prim_name: "join".to_string(),
             arg_types: vec![Param::dummy()],
-            ffi: Box::new(ExternalDecl {
+            ffi: ExternalDecl {
                 kind: DeclKind::DeclVal {
                     name: "join".to_string(),
                 },
@@ -266,9 +266,9 @@ fn lowers_spliced_js_calls_by_flattening_literal_variadic_arrays() {
                 scopes: vec![],
                 variadic: true,
                 effective_arity: 1,
-            }),
+            },
             transformed_jsx: false,
-        },
+        })),
         vec![Lambda::prim(
             Primitive::Pmakearray,
             vec![
@@ -306,10 +306,10 @@ fn lowers_js_new_to_new_expression() {
     let mut compiler = LambdaCompiler::new();
     let arg = Ident::create_local("prim");
     let lam = Lambda::prim(
-        Primitive::PjsCall {
+        Primitive::PjsCall(Box::new(crate::lambda::lam_primitive::JsCall {
             prim_name: "URL".to_string(),
             arg_types: vec![],
-            ffi: Box::new(ExternalDecl {
+            ffi: ExternalDecl {
                 kind: DeclKind::DeclNew {
                     name: "URL".to_string(),
                 },
@@ -317,9 +317,9 @@ fn lowers_js_new_to_new_expression() {
                 scopes: vec![],
                 variadic: false,
                 effective_arity: 1,
-            }),
+            },
             transformed_jsx: false,
-        },
+        })),
         vec![Lambda::var(arg)],
         LamLoc::NONE,
     );
@@ -355,7 +355,7 @@ fn lowers_js_call_omits_trailing_optional_undefined_args_like_ocaml() {
     let mut compiler = LambdaCompiler::new();
     let date = Ident::create_local("date");
     let lam = Lambda::prim(
-        Primitive::PjsCall {
+        Primitive::PjsCall(Box::new(crate::lambda::lam_primitive::JsCall {
             prim_name: "formatDate".to_string(),
             arg_types: vec![
                 Param {
@@ -371,7 +371,7 @@ fn lowers_js_call_omits_trailing_optional_undefined_args_like_ocaml() {
                     arg_label: LabelNoname::ArgOptional,
                 },
             ],
-            ffi: Box::new(ExternalDecl {
+            ffi: ExternalDecl {
                 kind: DeclKind::DeclVal {
                     name: "formatDate".to_string(),
                 },
@@ -379,9 +379,9 @@ fn lowers_js_call_omits_trailing_optional_undefined_args_like_ocaml() {
                 scopes: vec![],
                 variadic: false,
                 effective_arity: 1,
-            }),
+            },
             transformed_jsx: false,
-        },
+        })),
         vec![
             Lambda::var(date),
             Lambda::const_(Constant::JsUndefined { is_unit: false }),
@@ -404,7 +404,7 @@ fn lowers_js_call_omits_trailing_optional_undefined_args_like_ocaml() {
 fn lowers_js_send_omits_trailing_optional_undefined_args_like_ocaml() {
     let mut compiler = LambdaCompiler::new();
     let lam = Lambda::prim(
-        Primitive::PjsCall {
+        Primitive::PjsCall(Box::new(crate::lambda::lam_primitive::JsCall {
             prim_name: "toString".to_string(),
             arg_types: vec![
                 Param {
@@ -416,7 +416,7 @@ fn lowers_js_send_omits_trailing_optional_undefined_args_like_ocaml() {
                     arg_label: LabelNoname::ArgOptional,
                 },
             ],
-            ffi: Box::new(ExternalDecl {
+            ffi: ExternalDecl {
                 kind: DeclKind::DeclSend {
                     name: "toString".to_string(),
                 },
@@ -424,9 +424,9 @@ fn lowers_js_send_omits_trailing_optional_undefined_args_like_ocaml() {
                 scopes: vec![],
                 variadic: false,
                 effective_arity: 2,
-            }),
+            },
             transformed_jsx: false,
-        },
+        })),
         vec![
             Lambda::const_(Constant::Float("42.".to_string())),
             Lambda::const_(Constant::JsUndefined { is_unit: false }),
@@ -442,7 +442,7 @@ fn lowers_js_send_omits_trailing_optional_undefined_args_like_ocaml() {
 fn lowers_js_new_omits_trailing_optional_undefined_args_like_ocaml() {
     let mut compiler = LambdaCompiler::new();
     let lam = Lambda::prim(
-        Primitive::PjsCall {
+        Primitive::PjsCall(Box::new(crate::lambda::lam_primitive::JsCall {
             prim_name: "RegExp".to_string(),
             arg_types: vec![
                 Param {
@@ -454,7 +454,7 @@ fn lowers_js_new_omits_trailing_optional_undefined_args_like_ocaml() {
                     arg_label: LabelNoname::ArgOptional,
                 },
             ],
-            ffi: Box::new(ExternalDecl {
+            ffi: ExternalDecl {
                 kind: DeclKind::DeclNew {
                     name: "RegExp".to_string(),
                 },
@@ -462,9 +462,9 @@ fn lowers_js_new_omits_trailing_optional_undefined_args_like_ocaml() {
                 scopes: vec![],
                 variadic: false,
                 effective_arity: 1,
-            }),
+            },
             transformed_jsx: false,
-        },
+        })),
         vec![
             Lambda::const_(Constant::String("ab+c".to_string())),
             Lambda::const_(Constant::JsUndefined { is_unit: false }),
@@ -480,7 +480,7 @@ fn lowers_js_new_omits_trailing_optional_undefined_args_like_ocaml() {
 fn lowers_external_polyvar_string_and_int_args_like_ocaml() {
     let mut compiler = LambdaCompiler::new();
     let lam = Lambda::prim(
-        Primitive::PjsCall {
+        Primitive::PjsCall(Box::new(crate::lambda::lam_primitive::JsCall {
             prim_name: "consume".to_string(),
             arg_types: vec![
                 Param {
@@ -502,7 +502,7 @@ fn lowers_external_polyvar_string_and_int_args_like_ocaml() {
                     arg_label: LabelNoname::ArgEmpty,
                 },
             ],
-            ffi: Box::new(ExternalDecl {
+            ffi: ExternalDecl {
                 kind: DeclKind::DeclVal {
                     name: "consume".to_string(),
                 },
@@ -510,9 +510,9 @@ fn lowers_external_polyvar_string_and_int_args_like_ocaml() {
                 scopes: vec![],
                 variadic: false,
                 effective_arity: 1,
-            }),
+            },
             transformed_jsx: false,
-        },
+        })),
         vec![
             Lambda::const_(Constant::Pointer("in_".to_string())),
             Lambda::const_(Constant::Pointer("on_open".to_string())),
@@ -528,7 +528,7 @@ fn lowers_external_polyvar_string_and_int_args_like_ocaml() {
 fn lowers_external_polyvar_payload_args_to_two_js_args_like_ocaml() {
     let mut compiler = LambdaCompiler::new();
     let lam = Lambda::prim(
-        Primitive::PjsCall {
+        Primitive::PjsCall(Box::new(crate::lambda::lam_primitive::JsCall {
             prim_name: "handle".to_string(),
             arg_types: vec![Param {
                 arg_type: Attr::PolyVar {
@@ -536,7 +536,7 @@ fn lowers_external_polyvar_payload_args_to_two_js_args_like_ocaml() {
                 },
                 arg_label: LabelNoname::ArgEmpty,
             }],
-            ffi: Box::new(ExternalDecl {
+            ffi: ExternalDecl {
                 kind: DeclKind::DeclVal {
                     name: "handle".to_string(),
                 },
@@ -544,9 +544,9 @@ fn lowers_external_polyvar_payload_args_to_two_js_args_like_ocaml() {
                 scopes: vec![],
                 variadic: false,
                 effective_arity: 1,
-            }),
+            },
             transformed_jsx: false,
-        },
+        })),
         vec![Lambda::const_(Constant::Block {
             tag_info: Box::new(TagInfo::PolyVar("b".to_string())),
             elements: vec![Constant::Pointer("b".to_string()), Constant::int(2)],
@@ -600,13 +600,13 @@ let _ = log1(arg_pair)
 fn lowers_marshaled_constant_args_in_js_call() {
     let mut compiler = LambdaCompiler::new();
     let lam = Lambda::prim(
-        Primitive::PjsCall {
+        Primitive::PjsCall(Box::new(crate::lambda::lam_primitive::JsCall {
             prim_name: "somefn".to_string(),
             arg_types: vec![Param {
                 arg_type: Attr::ArgCst(Cst::ArgJsonLit("{foo:true}".to_string())),
                 arg_label: LabelNoname::ArgEmpty,
             }],
-            ffi: Box::new(ExternalDecl {
+            ffi: ExternalDecl {
                 kind: DeclKind::DeclVal {
                     name: "somefn".to_string(),
                 },
@@ -614,9 +614,9 @@ fn lowers_marshaled_constant_args_in_js_call() {
                 scopes: vec!["somescope".to_string()],
                 variadic: false,
                 effective_arity: 1,
-            }),
+            },
             transformed_jsx: false,
-        },
+        })),
         vec![],
         LamLoc::NONE,
     );
@@ -1104,7 +1104,7 @@ fn lowers_js_object_create_with_nonduplicable_optional_field_after_object_temp_l
 fn lowers_ignored_js_call_args_to_ocaml_sequence_effects() {
     let mut compiler = LambdaCompiler::new();
     let lam = Lambda::prim(
-        Primitive::PjsCall {
+        Primitive::PjsCall(Box::new(crate::lambda::lam_primitive::JsCall {
             prim_name: "somefn".to_string(),
             arg_types: vec![
                 Param {
@@ -1116,7 +1116,7 @@ fn lowers_ignored_js_call_args_to_ocaml_sequence_effects() {
                     arg_label: LabelNoname::ArgEmpty,
                 },
             ],
-            ffi: Box::new(ExternalDecl {
+            ffi: ExternalDecl {
                 kind: DeclKind::DeclVal {
                     name: "somefn".to_string(),
                 },
@@ -1124,9 +1124,9 @@ fn lowers_ignored_js_call_args_to_ocaml_sequence_effects() {
                 scopes: vec![],
                 variadic: false,
                 effective_arity: 1,
-            }),
+            },
             transformed_jsx: false,
-        },
+        })),
         vec![
             Lambda::Lsequence(
                 Box::new(Lambda::prim(

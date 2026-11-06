@@ -212,8 +212,8 @@ impl Simplifier<'_, '_> {
         // 7432: no optimization of the component of a JSX call in preserve
         // mode.
         if self.jsx_preserve
-            && matches!(primitive, Primitive::PjsCall { prim_name, .. }
-                if prim_name == "jsx" || prim_name == "jsxs")
+            && matches!(primitive, Primitive::PjsCall(call)
+                if call.prim_name == "jsx" || call.prim_name == "jsxs")
             && a.list(args)
                 .first()
                 .is_some_and(|f| matches!(a.as_prim(*f), Some((Primitive::Pfield(_, _), _, _))))

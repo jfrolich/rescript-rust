@@ -127,9 +127,10 @@ fn fields_for_block(
     }
     let named = |name: &str| id_gen.create(&format!("{}_{}", block.name(), name));
     match info {
-        TagInfo::Record { fields, .. } | TagInfo::RecordInlined { fields, .. }
-            if fields.len() == field_count =>
+        TagInfo::Record(_) | TagInfo::RecordInlined(_)
+            if info.record_fields().map(<[_]>::len) == Some(field_count) =>
         {
+            let fields = info.record_fields().expect("record block");
             return fields.iter().map(|(name, _)| named(name)).collect();
         }
         TagInfo::RecordExt { fields, .. } if fields.len() == field_count => {

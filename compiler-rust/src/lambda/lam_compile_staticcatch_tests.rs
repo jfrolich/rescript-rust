@@ -279,7 +279,7 @@ fn nested_wrapped_staticcatch_trywith_tail_loops_lower_like_gpr_1701() {
     let eof = Ident::create_local("End_of_file");
     let cons = Lambda::prim(
         Primitive::Pmakeblock(
-            TagInfo::Constructor {
+            TagInfo::Constructor(Box::new(crate::lambda::lam_tag_info::ConstructorTag {
                 name: "::".to_string(),
                 num_nonconst: 1,
                 runtime: Box::new(crate::types::TaggedBlock {
@@ -289,7 +289,7 @@ fn nested_wrapped_staticcatch_trywith_tail_loops_lower_like_gpr_1701() {
                     },
                     tag_name: None,
                 }),
-            },
+            })),
             Mutable::Immutable,
         ),
         vec![Lambda::var(next_acc), Lambda::var(acc)],

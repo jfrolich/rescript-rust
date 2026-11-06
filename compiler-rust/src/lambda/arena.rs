@@ -1372,10 +1372,10 @@ impl LamArena {
                 .or(acts.fail),
             Constant::Block { tag_info, .. } => {
                 let runtime = match &**tag_info {
-                    TagInfo::Constructor { runtime, .. } => {
-                        Some(crate::types::VariantBlock::Tagged((**runtime).clone()))
+                    TagInfo::Constructor(c) => {
+                        Some(crate::types::VariantBlock::Tagged((*c.runtime).clone()))
                     }
-                    TagInfo::RecordInlined { runtime, .. } => Some((**runtime).clone()),
+                    TagInfo::RecordInlined(r) => Some((*r.runtime).clone()),
                     _ => None,
                 };
                 block_keys

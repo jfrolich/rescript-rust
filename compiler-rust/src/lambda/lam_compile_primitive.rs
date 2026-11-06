@@ -694,12 +694,13 @@ impl LambdaCompiler {
                 }
             }
             Pimport(source) => self.compile_import(loc, source),
-            PjsCall {
-                prim_name,
-                arg_types,
-                ffi,
-                transformed_jsx,
-            } => self.compile_js_call(prim_name, arg_types, ffi, *transformed_jsx, compiled_args),
+            PjsCall(call) => self.compile_js_call(
+                &call.prim_name,
+                &call.arg_types,
+                &call.ffi,
+                call.transformed_jsx,
+                compiled_args,
+            ),
             PextensionSlotEq => unreachable!("PextensionSlotEq is lowered in raw_lambda::lower"),
         };
 

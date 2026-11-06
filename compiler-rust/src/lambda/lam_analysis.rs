@@ -148,7 +148,7 @@ pub(crate) fn is_pure_primitive(prim: &Primitive, second_constant: Option<&Const
         // Impure primitives
         Primitive::PtaggedTemplate(_)
         | Primitive::PjsApply
-        | Primitive::PjsCall { .. }
+        | Primitive::PjsCall(_)
         | Primitive::PinitMod
         | Primitive::PupdateMod
         | Primitive::PjsObjectGet(_)
@@ -198,7 +198,7 @@ pub(crate) fn size_constant(c: &Constant) -> i32 {
             tag_info, elements, ..
         } => {
             let missing_fields = match &**tag_info {
-                TagInfo::Record { .. } | TagInfo::RecordInlined { .. } => tag_info
+                TagInfo::Record(_) | TagInfo::RecordInlined(_) => tag_info
                     .logical_field_count()
                     .saturating_sub(elements.len()),
                 _ => 0,
@@ -318,7 +318,7 @@ fn size_inner(a: &LamArena, lam: Lam) -> Option<i32> {
                     }
                 }
                 Primitive::Pmakeblock(
-                    tag_info @ (TagInfo::Record { .. } | TagInfo::RecordInlined { .. }),
+                    tag_info @ (TagInfo::Record(_) | TagInfo::RecordInlined(_)),
                     _,
                 ) => {
                     let missing = tag_info.logical_field_count().saturating_sub(args.len());

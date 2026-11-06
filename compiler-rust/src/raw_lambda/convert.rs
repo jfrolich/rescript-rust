@@ -2535,12 +2535,12 @@ impl<'a> RawLambdaConverter<'a> {
                 ExternalFfi::FfiBs(arg_types, result_type, decl) => {
                     let returns_unit = self.external_returns_unit(env, prim, val_type);
                     let call = RawLambda::prim(
-                        Primitive::PjsCall {
+                        Primitive::PjsCall(Box::new(crate::lambda::lam_primitive::JsCall {
                             prim_name: prim.prim_name.clone(),
                             arg_types: arg_types.clone(),
-                            ffi: Box::new(decl.clone()),
+                            ffi: decl.clone(),
                             transformed_jsx,
-                        },
+                        })),
                         argl,
                         self.lam_loc(loc),
                     );
@@ -2721,18 +2721,18 @@ impl<'a> RawLambdaConverter<'a> {
             let mut send_args = vec![receiver];
             send_args.extend(args);
             RawLambda::prim(
-                Primitive::PjsCall {
+                Primitive::PjsCall(Box::new(crate::lambda::lam_primitive::JsCall {
                     prim_name: name.to_string(),
                     arg_types: send_arg_types,
-                    ffi: Box::new(ExternalDecl {
+                    ffi: ExternalDecl {
                         kind,
                         module_: None,
                         scopes: scopes.to_vec(),
                         variadic,
                         effective_arity: arg_types.len() as i64 + 1,
-                    }),
+                    },
                     transformed_jsx: false,
-                },
+                })),
                 send_args,
                 node_loc,
             )
@@ -2783,10 +2783,10 @@ impl<'a> RawLambdaConverter<'a> {
             self.lam_loc(loc),
         );
         RawLambda::prim(
-            Primitive::PjsCall {
+            Primitive::PjsCall(Box::new(crate::lambda::lam_primitive::JsCall {
                 prim_name: "then".to_string(),
                 arg_types: vec![Param::dummy(), Param::dummy()],
-                ffi: Box::new(ExternalDecl {
+                ffi: ExternalDecl {
                     kind: DeclKind::DeclSend {
                         name: "then".to_string(),
                     },
@@ -2794,9 +2794,9 @@ impl<'a> RawLambdaConverter<'a> {
                     scopes: vec![],
                     variadic: false,
                     effective_arity: 2,
-                }),
+                },
                 transformed_jsx: false,
-            },
+            })),
             vec![
                 RawLambda::prim(
                     Primitive::Pimport(Box::new(ImportSource::ImportExternal {
@@ -2961,11 +2961,11 @@ impl<'a> RawLambdaConverter<'a> {
                             };
                             (runtime, layout.num_blocks() as i32)
                         });
-                TagInfo::Constructor {
+                TagInfo::Constructor(Box::new(crate::lambda::lam_tag_info::ConstructorTag {
                     name: cstr.cstr_name.clone(),
                     num_nonconst,
                     runtime: Box::new(runtime),
-                }
+                }))
             }
         }
     }
@@ -3165,11 +3165,11 @@ impl<'a> RawLambdaConverter<'a> {
                     if matches!(mutable_flag, ParserMutableFlag::Mutable) {
                         RawLambda::prim(
                             Primitive::Pmakeblock(
-                                TagInfo::Record {
+                                TagInfo::Record(Box::new(crate::lambda::lam_tag_info::RecordTag {
                                     fields: fields_info,
                                     logical_field_count,
                                     mutable_flag,
-                                },
+                                })),
                                 Mutable::Mutable,
                             ),
                             elems,
@@ -3178,11 +3178,11 @@ impl<'a> RawLambdaConverter<'a> {
                     } else {
                         self.raw_block_or_prim(
                             0,
-                            TagInfo::Record {
+                            TagInfo::Record(Box::new(crate::lambda::lam_tag_info::RecordTag {
                                 fields: fields_info,
                                 logical_field_count,
                                 mutable_flag,
-                            },
+                            })),
                             elems,
                             loc,
                         )
@@ -3203,14 +3203,16 @@ impl<'a> RawLambdaConverter<'a> {
                         unreachable!("inlined record must reference a block constructor")
                     };
                     let tag = representation.block_index(self.type_ctx) as i32;
-                    let tag_info = TagInfo::RecordInlined {
-                        name,
-                        num_nonconst: representation.num_blocks(self.type_ctx) as i32,
-                        fields: fields_info,
-                        logical_field_count,
-                        mutable_flag,
-                        runtime: Box::new(block),
-                    };
+                    let tag_info = TagInfo::RecordInlined(Box::new(
+                        crate::lambda::lam_tag_info::RecordInlinedTag {
+                            name,
+                            num_nonconst: representation.num_blocks(self.type_ctx) as i32,
+                            fields: fields_info,
+                            logical_field_count,
+                            mutable_flag,
+                            runtime: Box::new(block),
+                        },
+                    ));
                     // OCaml: if mut = Mutable then raise Not_constant
                     if matches!(mutable_flag, ParserMutableFlag::Mutable) {
                         RawLambda::prim(
@@ -7697,13 +7699,11 @@ mod tests {
                 if elements.is_empty()
                     && matches!(
                         &*tag_info,
-                        TagInfo::RecordInlined {
-                            name,
-                            num_nonconst,
-                            fields,
-                            mutable_flag: ParserMutableFlag::Immutable,
-                            ..
-                        } if name == "B" && *num_nonconst == 1 && fields.is_empty()
+                        TagInfo::RecordInlined(r)
+                            if r.name == "B"
+                                && r.num_nonconst == 1
+                                && r.fields.is_empty()
+                                && matches!(r.mutable_flag, ParserMutableFlag::Immutable)
                     )
         ));
     }

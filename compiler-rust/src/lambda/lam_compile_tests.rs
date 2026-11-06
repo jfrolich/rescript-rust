@@ -156,10 +156,10 @@ fn external_module_with_attrs(
 
 fn js_var_external(name: &str, external_module_name: Option<ExternalModuleName>) -> Lambda {
     Lambda::prim(
-        Primitive::PjsCall {
+        Primitive::PjsCall(Box::new(crate::lambda::lam_primitive::JsCall {
             prim_name: name.to_string(),
             arg_types: vec![],
-            ffi: Box::new(ExternalDecl {
+            ffi: ExternalDecl {
                 kind: DeclKind::DeclVal {
                     name: name.to_string(),
                 },
@@ -167,9 +167,9 @@ fn js_var_external(name: &str, external_module_name: Option<ExternalModuleName>)
                 scopes: vec![],
                 variadic: false,
                 effective_arity: 0,
-            }),
+            },
             transformed_jsx: false,
-        },
+        })),
         vec![],
         LamLoc::NONE,
     )
@@ -318,12 +318,12 @@ fn recursive_binding_groups_share_dependency_vector_like_ocaml() {
 fn console_log_effect(arg: Lambda) -> Lambda {
     Lambda::seq(
         Lambda::prim(
-            Primitive::PjsCall {
+            Primitive::PjsCall(Box::new(crate::lambda::lam_primitive::JsCall {
                 prim_name: "console.log".to_string(),
                 arg_types: vec![],
-                ffi: Box::new(crate::lambda::lam_primitive::ExternalDecl::test_val("", 0)),
+                ffi: crate::lambda::lam_primitive::ExternalDecl::test_val("", 0),
                 transformed_jsx: false,
-            },
+            })),
             vec![arg],
             LamLoc::NONE,
         ),
@@ -6592,18 +6592,20 @@ fn js_flatten_and_mark_dead_materializes_strictopt_identity_optional_record_fiel
                             Expression::undefined(false),
                         ],
                         MutableFlag::Immutable,
-                        Box::new(TagInfo::Record {
-                            fields: vec![
-                                ("id".to_string(), true),
-                                ("name".to_string(), true),
-                                ("title".to_string(), true),
-                                ("className".to_string(), true),
-                                ("x".to_string(), true),
-                                ("y".to_string(), true),
-                            ],
-                            logical_field_count: None,
-                            mutable_flag: crate::parser::ast::MutableFlag::Immutable,
-                        }),
+                        Box::new(TagInfo::Record(Box::new(
+                            crate::lambda::lam_tag_info::RecordTag {
+                                fields: vec![
+                                    ("id".to_string(), true),
+                                    ("name".to_string(), true),
+                                    ("title".to_string(), true),
+                                    ("className".to_string(), true),
+                                    ("x".to_string(), true),
+                                    ("y".to_string(), true),
+                                ],
+                                logical_field_count: None,
+                                mutable_flag: crate::parser::ast::MutableFlag::Immutable,
+                            },
+                        ))),
                     ))),
                     property: LetKind::StrictOpt,
                     ident_info: IdentInfo::default(),
@@ -6719,15 +6721,17 @@ fn js_flatten_and_mark_dead_materializes_strict_identity_optional_record_fields_
                             )),
                         ],
                         MutableFlag::Immutable,
-                        Box::new(TagInfo::Record {
-                            fields: vec![
-                                ("pk".to_string(), false),
-                                ("exportStatus".to_string(), true),
-                                ("instantPlayerEligible".to_string(), true),
-                            ],
-                            logical_field_count: None,
-                            mutable_flag: crate::parser::ast::MutableFlag::Immutable,
-                        }),
+                        Box::new(TagInfo::Record(Box::new(
+                            crate::lambda::lam_tag_info::RecordTag {
+                                fields: vec![
+                                    ("pk".to_string(), false),
+                                    ("exportStatus".to_string(), true),
+                                    ("instantPlayerEligible".to_string(), true),
+                                ],
+                                logical_field_count: None,
+                                mutable_flag: crate::parser::ast::MutableFlag::Immutable,
+                            },
+                        ))),
                     ))),
                     property: LetKind::Strict,
                     ident_info: IdentInfo::default(),
@@ -6831,22 +6835,26 @@ fn js_flatten_and_mark_dead_keeps_alias_bound_deep_constant_records_inline_like_
                                     Expression::number(Number::int(3)),
                                 ],
                                 MutableFlag::Immutable,
-                                Box::new(TagInfo::Record {
-                                    fields: vec![
-                                        ("xx".to_string(), false),
-                                        ("yy".to_string(), false),
-                                    ],
-                                    logical_field_count: None,
-                                    mutable_flag: crate::parser::ast::MutableFlag::Immutable,
-                                }),
+                                Box::new(TagInfo::Record(Box::new(
+                                    crate::lambda::lam_tag_info::RecordTag {
+                                        fields: vec![
+                                            ("xx".to_string(), false),
+                                            ("yy".to_string(), false),
+                                        ],
+                                        logical_field_count: None,
+                                        mutable_flag: crate::parser::ast::MutableFlag::Immutable,
+                                    },
+                                ))),
                             )),
                         ],
                         MutableFlag::Immutable,
-                        Box::new(TagInfo::Record {
-                            fields: vec![("a".to_string(), false), ("b".to_string(), false)],
-                            logical_field_count: None,
-                            mutable_flag: crate::parser::ast::MutableFlag::Immutable,
-                        }),
+                        Box::new(TagInfo::Record(Box::new(
+                            crate::lambda::lam_tag_info::RecordTag {
+                                fields: vec![("a".to_string(), false), ("b".to_string(), false)],
+                                logical_field_count: None,
+                                mutable_flag: crate::parser::ast::MutableFlag::Immutable,
+                            },
+                        ))),
                     ))),
                     property: LetKind::Alias,
                     ident_info: IdentInfo::default(),
@@ -6995,11 +7003,11 @@ fn top_level_record_field_assignments_on_pure_fresh_literals_collapse_to_rhs_eff
             vec![
                 Lambda::prim(
                     Primitive::Pmakeblock(
-                        TagInfo::Record {
+                        TagInfo::Record(Box::new(crate::lambda::lam_tag_info::RecordTag {
                             fields: vec![("x".to_string(), false)],
                             logical_field_count: None,
                             mutable_flag: crate::parser::ast::MutableFlag::Mutable,
-                        },
+                        })),
                         Mutable::Immutable,
                     ),
                     vec![Lambda::const_(Constant::int(3))],
@@ -7620,11 +7628,13 @@ fn lowers_record_pfield_from_pure_caml_block_directly_like_ocaml() {
         &Expression::new(ExpressionDesc::CamlBlock(
             vec![Expression::var(value)],
             MutableFlag::Immutable,
-            Box::new(TagInfo::Record {
-                fields: vec![("d".to_string(), false)],
-                logical_field_count: None,
-                mutable_flag: crate::parser::ast::MutableFlag::Immutable,
-            }),
+            Box::new(TagInfo::Record(Box::new(
+                crate::lambda::lam_tag_info::RecordTag {
+                    fields: vec![("d".to_string(), false)],
+                    logical_field_count: None,
+                    mutable_flag: crate::parser::ast::MutableFlag::Immutable,
+                },
+            ))),
         )),
     );
 
@@ -7649,17 +7659,19 @@ fn lowers_cons_pfield_from_pure_caml_block_directly_like_ocaml() {
         &Expression::new(ExpressionDesc::CamlBlock(
             vec![Expression::var(head), Expression::var(tail)],
             MutableFlag::Immutable,
-            Box::new(TagInfo::Constructor {
-                name: "::".to_string(),
-                num_nonconst: 1,
-                runtime: Box::new(crate::types::TaggedBlock {
-                    tag: crate::types::VariantTag {
-                        name: "::".to_string(),
-                        literal: None,
-                    },
-                    tag_name: None,
-                }),
-            }),
+            Box::new(TagInfo::Constructor(Box::new(
+                crate::lambda::lam_tag_info::ConstructorTag {
+                    name: "::".to_string(),
+                    num_nonconst: 1,
+                    runtime: Box::new(crate::types::TaggedBlock {
+                        tag: crate::types::VariantTag {
+                            name: "::".to_string(),
+                            literal: None,
+                        },
+                        tag_name: None,
+                    }),
+                },
+            ))),
         )),
     );
     let tail_expr = compiler.compile_field_access(
@@ -7668,17 +7680,19 @@ fn lowers_cons_pfield_from_pure_caml_block_directly_like_ocaml() {
         &Expression::new(ExpressionDesc::CamlBlock(
             vec![Expression::var(head), Expression::var(tail)],
             MutableFlag::Immutable,
-            Box::new(TagInfo::Constructor {
-                name: "::".to_string(),
-                num_nonconst: 1,
-                runtime: Box::new(crate::types::TaggedBlock {
-                    tag: crate::types::VariantTag {
-                        name: "::".to_string(),
-                        literal: None,
-                    },
-                    tag_name: None,
-                }),
-            }),
+            Box::new(TagInfo::Constructor(Box::new(
+                crate::lambda::lam_tag_info::ConstructorTag {
+                    name: "::".to_string(),
+                    num_nonconst: 1,
+                    runtime: Box::new(crate::types::TaggedBlock {
+                        tag: crate::types::VariantTag {
+                            name: "::".to_string(),
+                            literal: None,
+                        },
+                        tag_name: None,
+                    }),
+                },
+            ))),
         )),
     );
 

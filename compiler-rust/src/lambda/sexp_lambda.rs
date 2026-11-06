@@ -178,41 +178,26 @@ fn mutable_sexp(m: &Mutable) -> Sexp {
 // Tag info
 fn tag_info(info: &TagInfo) -> Sexp {
     match info {
-        TagInfo::Constructor {
-            name,
-            num_nonconst,
-            runtime,
-        } => Sexp::list(vec![
+        TagInfo::Constructor(c) => Sexp::list(vec![
             Sexp::atom("Blk_constructor"),
-            string(name),
-            int(*num_nonconst),
-            variant_tagged_block(runtime),
+            string(&c.name),
+            int(c.num_nonconst),
+            variant_tagged_block(&c.runtime),
         ]),
         TagInfo::Tuple => Sexp::atom("Blk_tuple"),
         TagInfo::PolyVar(_) => Sexp::atom("Blk_poly_var"),
-        TagInfo::Record {
-            fields,
-            mutable_flag,
-            ..
-        } => Sexp::list(vec![
+        TagInfo::Record(r) => Sexp::list(vec![
             Sexp::atom("Blk_record"),
-            Sexp::list(fields.iter().map(|(name, _)| string(name)).collect()),
-            mutable_flag_sexp(mutable_flag),
+            Sexp::list(r.fields.iter().map(|(name, _)| string(name)).collect()),
+            mutable_flag_sexp(&r.mutable_flag),
         ]),
-        TagInfo::RecordInlined {
-            name,
-            num_nonconst,
-            fields,
-            mutable_flag,
-            runtime,
-            ..
-        } => Sexp::list(vec![
+        TagInfo::RecordInlined(r) => Sexp::list(vec![
             Sexp::atom("Blk_record_inlined"),
-            string(name),
-            int(*num_nonconst),
-            variant_block(runtime),
-            Sexp::list(fields.iter().map(|(name, _)| string(name)).collect()),
-            mutable_flag_sexp(mutable_flag),
+            string(&r.name),
+            int(r.num_nonconst),
+            variant_block(&r.runtime),
+            Sexp::list(r.fields.iter().map(|(name, _)| string(name)).collect()),
+            mutable_flag_sexp(&r.mutable_flag),
         ]),
         TagInfo::Module(fields) => {
             let mut items = vec![Sexp::atom("Blk_module")];
@@ -485,14 +470,10 @@ fn primitive(prim: &Primitive, _with_locs: bool) -> Sexp {
                 .chain(excluded.iter().map(|label| string(label)))
                 .collect(),
         ),
-        Primitive::PjsCall {
-            prim_name,
-            transformed_jsx,
-            ..
-        } => Sexp::list(vec![
+        Primitive::PjsCall(call) => Sexp::list(vec![
             Sexp::atom("Pjs_call"),
-            string(prim_name),
-            bool_sexp(*transformed_jsx),
+            string(&call.prim_name),
+            bool_sexp(call.transformed_jsx),
         ]),
         Primitive::PjsObjectCreate(_) => Sexp::atom("Pjs_object_create"),
         Primitive::Praise => Sexp::atom("Praise"),
