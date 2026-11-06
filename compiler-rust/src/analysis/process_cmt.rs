@@ -739,7 +739,10 @@ impl Processor<'_> {
                 vec![module_item_of(&declared)]
             }
             tt::StructureItemDesc::Tstr_include(incl) => {
-                let env = match get_module_path(&incl.incl_mod.mod_desc) {
+                let env = match get_module_path(
+                    self.ctx.ta,
+                    &self.ctx.ta.module_expr(incl.incl_mod).mod_desc,
+                ) {
                     Some(path) => ProcessEnv {
                         module_path: ModulePath::IncludedModule(
                             path,
@@ -781,7 +784,11 @@ impl Processor<'_> {
         mb: &tt::ModuleBinding,
     ) -> ModuleItem {
         let name = self.ctx.located(&mb.mb_name);
-        let item = self.for_module(env, &mb.mb_expr.mod_desc, &name.txt);
+        let item = self.for_module(
+            env,
+            &self.ctx.ta.module_expr(mb.mb_expr).mod_desc,
+            &name.txt,
+        );
         let stamps = &mut self.stamps;
         let declared = add_declared(
             name,
@@ -843,17 +850,20 @@ impl Processor<'_> {
                     );
                     self.stamps.add_module(stamp, declared);
                 }
-                self.for_module(env, &result.mod_desc, module_name)
+                self.for_module(env, &self.ctx.ta.module_expr(*result).mod_desc, module_name)
             }
-            tt::ModuleExprDesc::Tmod_apply(functor, _, _) => {
-                self.for_module(env, &functor.mod_desc, module_name)
-            }
+            tt::ModuleExprDesc::Tmod_apply(functor, _, _) => self.for_module(
+                env,
+                &self.ctx.ta.module_expr(*functor).mod_desc,
+                module_name,
+            ),
             tt::ModuleExprDesc::Tmod_unpack(_, module_type) => {
                 let env = env.add_module(module_name);
                 self.for_type_module(module_name, &env, module_type)
             }
             tt::ModuleExprDesc::Tmod_constraint(expr, typ, _, _) => {
-                let mod_kind = self.for_module(env, &expr.mod_desc, module_name);
+                let mod_kind =
+                    self.for_module(env, &self.ctx.ta.module_expr(*expr).mod_desc, module_name);
                 let env = env.add_module(module_name);
                 let mod_type_kind = self.for_type_module(module_name, &env, typ);
                 Module::Constraint(Box::new(mod_kind), Box::new(mod_type_kind))
@@ -868,7 +878,8 @@ impl Processor<'_> {
         match &ta.expr(e).exp_desc {
             tt::ExpressionDesc::Texp_letmodule(id, name, mexpr, body) => {
                 let stamp = id.binding_time();
-                let item = self.for_module(env, &mexpr.mod_desc, &name.txt);
+                let item =
+                    self.for_module(env, &self.ctx.ta.module_expr(*mexpr).mod_desc, &name.txt);
                 let name = self.ctx.located(name);
                 let extent = name.loc;
                 let declared = attrs::new_declared(
@@ -966,11 +977,18 @@ impl Processor<'_> {
 }
 
 /// `get_module_path`.
-fn get_module_path(mod_desc: &tt::ModuleExprDesc) -> Option<crate::types::Path> {
+fn get_module_path(
+    ta: &tt::TypedArena,
+    mod_desc: &tt::ModuleExprDesc,
+) -> Option<crate::types::Path> {
     match mod_desc {
         tt::ModuleExprDesc::Tmod_ident(path, _) => Some(path.clone()),
-        tt::ModuleExprDesc::Tmod_apply(functor, _, _) => get_module_path(&functor.mod_desc),
-        tt::ModuleExprDesc::Tmod_constraint(expr, _, _, _) => get_module_path(&expr.mod_desc),
+        tt::ModuleExprDesc::Tmod_apply(functor, _, _) => {
+            get_module_path(ta, &ta.module_expr(*functor).mod_desc)
+        }
+        tt::ModuleExprDesc::Tmod_constraint(expr, _, _, _) => {
+            get_module_path(ta, &ta.module_expr(*expr).mod_desc)
+        }
         tt::ModuleExprDesc::Tmod_structure(_)
         | tt::ModuleExprDesc::Tmod_functor(..)
         | tt::ModuleExprDesc::Tmod_unpack(..) => None,

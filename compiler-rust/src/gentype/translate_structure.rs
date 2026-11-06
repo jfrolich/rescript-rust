@@ -190,23 +190,23 @@ pub fn translate_module_binding(
     crate::gentype::type_env::update_module_item(module_item, type_env);
     let type_env = crate::gentype::type_env::new_module(name, type_env);
 
-    match &module_binding.mb_expr.mod_desc {
+    match &ta.module_expr(module_binding.mb_expr).mod_desc {
         ModuleExprDesc::Tmod_ident(path, _) => {
             let dep = crate::gentype::dependencies::from_path(&config, &type_env, path);
             let internal = crate::gentype::dependencies::is_internal(&dep);
             crate::gentype::type_env::add_module_equation(dep, internal, &type_env);
-            let scraped_module_type =
-                ctx.get_typed_env(module_binding.mb_expr.mod_env)
-                    .and_then(|env| {
-                        scrape_direct_persistent_alias_for_gentype(
-                            ctx,
-                            env.as_ref(),
-                            &module_binding.mb_expr.mod_type,
-                        )
-                    });
+            let scraped_module_type = ctx
+                .get_typed_env(ta.module_expr(module_binding.mb_expr).mod_env)
+                .and_then(|env| {
+                    scrape_direct_persistent_alias_for_gentype(
+                        ctx,
+                        env.as_ref(),
+                        &ta.module_expr(module_binding.mb_expr).mod_type,
+                    )
+                });
             let module_type = scraped_module_type
                 .as_ref()
-                .unwrap_or(&module_binding.mb_expr.mod_type);
+                .unwrap_or(&ta.module_expr(module_binding.mb_expr).mod_type);
             match module_type {
                 DeclModuleType::MtySignature(signature) => crate::gentype::translation::combine(
                     crate::gentype::translate_signature_from_types::translate_signature_from_types(
@@ -245,22 +245,24 @@ pub fn translate_module_binding(
                 ))
             }
         }
-        ModuleExprDesc::Tmod_apply(_, _, _) => match &module_binding.mb_expr.mod_type {
-            DeclModuleType::MtySignature(signature) => crate::gentype::translation::combine(
-                crate::gentype::translate_signature_from_types::translate_signature_from_types(
-                    ctx,
-                    arena,
-                    &config,
-                    output_file_relative,
-                    resolver,
-                    &type_env,
-                    signature,
+        ModuleExprDesc::Tmod_apply(_, _, _) => {
+            match &ta.module_expr(module_binding.mb_expr).mod_type {
+                DeclModuleType::MtySignature(signature) => crate::gentype::translation::combine(
+                    crate::gentype::translate_signature_from_types::translate_signature_from_types(
+                        ctx,
+                        arena,
+                        &config,
+                        output_file_relative,
+                        resolver,
+                        &type_env,
+                        signature,
+                    ),
                 ),
-            ),
-            DeclModuleType::MtyIdent(_) => not_implemented("Mty_ident"),
-            DeclModuleType::MtyFunctor { .. } => not_implemented("Mty_functor"),
-            DeclModuleType::MtyAlias(_, _) => not_implemented("Mty_alias"),
-        },
+                DeclModuleType::MtyIdent(_) => not_implemented("Mty_ident"),
+                DeclModuleType::MtyFunctor { .. } => not_implemented("Mty_functor"),
+                DeclModuleType::MtyAlias(_, _) => not_implemented("Mty_alias"),
+            }
+        }
         ModuleExprDesc::Tmod_unpack(_, module_type) => match module_type {
             DeclModuleType::MtySignature(signature) => crate::gentype::translation::combine(
                 crate::gentype::translate_signature_from_types::translate_signature_from_types(
@@ -306,7 +308,7 @@ pub fn translate_module_binding(
             output_file_relative,
             resolver,
             &type_env,
-            module_expr,
+            ta.module_expr(*module_expr),
             module_type,
             module_type_constraint,
             coercion,
@@ -415,9 +417,10 @@ pub fn translate_structure_item(
             // compiler/gentype/TranslateStructure.ml:309-331 before falling
             // back to signature-from-types include translation.
             if let ModuleExprDesc::Tmod_constraint(inner, _, _, _) =
-                &include_declaration.incl_mod.mod_desc
+                &ta.module_expr(include_declaration.incl_mod).mod_desc
             {
-                if let ModuleExprDesc::Tmod_structure(structure) = &inner.mod_desc {
+                if let ModuleExprDesc::Tmod_structure(structure) = &ta.module_expr(*inner).mod_desc
+                {
                     if let [struct_item1] = structure.str_items.as_slice() {
                         if matches!(struct_item1.str_desc, StructureItemDesc::Tstr_primitive(_)) {
                             return translate_structure_item(

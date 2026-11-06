@@ -32,7 +32,7 @@ pub trait TastIterator<'t> {
         walk_extension_constructor(self, ext)
     }
     fn module_binding(&mut self, mb: &ModuleBinding) {
-        self.module_expr(&mb.mb_expr)
+        self.module_expr(self.arena().module_expr(mb.mb_expr))
     }
     fn module_declaration(&mut self, md: &TypedModuleDeclaration) {
         self.module_type(&md.md_type)
@@ -187,7 +187,9 @@ pub fn walk_structure_item<'t, I: TastIterator<'t> + ?Sized>(sub: &mut I, item: 
             }
         }
         StructureItemDesc::Tstr_modtype(mtd) => sub.module_type_declaration(mtd),
-        StructureItemDesc::Tstr_include(incl) => sub.module_expr(&incl.incl_mod),
+        StructureItemDesc::Tstr_include(incl) => {
+            sub.module_expr(sub.arena().module_expr(incl.incl_mod))
+        }
         StructureItemDesc::Tstr_open(_) | StructureItemDesc::Tstr_attribute(_) => {}
     }
 }
@@ -399,14 +401,14 @@ pub fn walk_expr<'t, I: TastIterator<'t> + ?Sized>(sub: &mut I, e: &Expression) 
             }
         }
         ExpressionDesc::Texp_letmodule(_, _, m, body) => {
-            sub.module_expr(m);
+            sub.module_expr(sub.arena().module_expr(*m));
             sub.expr(ta.expr(*body));
         }
         ExpressionDesc::Texp_letexception(cd, body) => {
             sub.extension_constructor(cd);
             sub.expr(ta.expr(*body));
         }
-        ExpressionDesc::Texp_pack(m) => sub.module_expr(m),
+        ExpressionDesc::Texp_pack(m) => sub.module_expr(sub.arena().module_expr(*m)),
     }
 }
 
@@ -449,7 +451,7 @@ pub fn walk_module_type<'t, I: TastIterator<'t> + ?Sized>(sub: &mut I, m: &Modul
                 sub.with_constraint(c);
             }
         }
-        ModuleTypeDesc::Tmty_typeof(me) => sub.module_expr(me),
+        ModuleTypeDesc::Tmty_typeof(me) => sub.module_expr(sub.arena().module_expr(*me)),
     }
 }
 
@@ -461,14 +463,14 @@ pub fn walk_module_expr<'t, I: TastIterator<'t> + ?Sized>(sub: &mut I, m: &Modul
             if let Some(mt) = mt {
                 sub.module_type(mt);
             }
-            sub.module_expr(me);
+            sub.module_expr(sub.arena().module_expr(*me));
         }
         ModuleExprDesc::Tmod_apply(m1, m2, _) => {
-            sub.module_expr(m1);
-            sub.module_expr(m2);
+            sub.module_expr(sub.arena().module_expr(*m1));
+            sub.module_expr(sub.arena().module_expr(*m2));
         }
         ModuleExprDesc::Tmod_constraint(me, _, constraint, _) => {
-            sub.module_expr(me);
+            sub.module_expr(sub.arena().module_expr(*me));
             if let ModuleTypeConstraint::Tmodtype_explicit(mt) = constraint {
                 sub.module_type(mt);
             }

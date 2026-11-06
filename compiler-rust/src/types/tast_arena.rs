@@ -17,7 +17,9 @@ use std::num::NonZeroU32;
 
 use crate::parse_arena::ArenaList;
 
-use super::typedtree::{ApplyArg, Case, Expression, FunctionParam, RecordField, ValueBinding};
+use super::typedtree::{
+    ApplyArg, Case, Expression, FunctionParam, ModuleExpr, RecordField, ValueBinding,
+};
 
 /// Handle of a typed expression in a [`TypedArena`].
 ///
@@ -41,6 +43,29 @@ impl TExprIdx {
 impl std::fmt::Debug for TExprIdx {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "TExprIdx({})", self.index())
+    }
+}
+
+/// Handle of a typed module expression in a [`TypedArena`].
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TModExprIdx(NonZeroU32);
+
+impl TModExprIdx {
+    #[inline]
+    fn from_index(index: usize) -> Self {
+        let raw = u32::try_from(index + 1).expect("typed module arena exceeds u32::MAX");
+        Self(NonZeroU32::new(raw).expect("index + 1 is non-zero"))
+    }
+
+    #[inline]
+    fn index(self) -> usize {
+        (self.0.get() - 1) as usize
+    }
+}
+
+impl std::fmt::Debug for TModExprIdx {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "TModExprIdx({})", self.index())
     }
 }
 
@@ -103,6 +128,7 @@ impl<T> ListPool<T> {
 pub struct TypedArena {
     exprs: Vec<Expression>,
     expr_lists: ListPool<TExprIdx>,
+    module_exprs: Vec<ModuleExpr>,
     cases: ListPool<Case>,
     value_bindings: ListPool<ValueBinding>,
     apply_args: ListPool<ApplyArg>,
@@ -193,6 +219,20 @@ impl TypedArena {
     /// The expressions of a list.
     pub fn exprs(&self, list: TExprList) -> impl ExactSizeIterator<Item = &Expression> + '_ {
         self.expr_list(list).iter().map(|&idx| self.expr(idx))
+    }
+
+    /// Store a module expression.
+    #[inline]
+    pub fn push_module_expr(&mut self, m: ModuleExpr) -> TModExprIdx {
+        let idx = TModExprIdx::from_index(self.module_exprs.len());
+        self.module_exprs.push(m);
+        idx
+    }
+
+    /// A module expression by handle.
+    #[inline]
+    pub fn module_expr(&self, idx: TModExprIdx) -> &ModuleExpr {
+        &self.module_exprs[idx.index()]
     }
 
     /// Number of stored expressions.

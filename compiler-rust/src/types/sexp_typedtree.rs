@@ -1263,7 +1263,7 @@ fn sexp_expression_desc(
         ExpressionDesc::Texp_letmodule(id, _, me, e) => Sexp::list(vec![
             Sexp::atom("Texp_letmodule"),
             sexp_ident(id),
-            sexp_module_expr(arena, ctx, cx, me),
+            sexp_module_expr(arena, ctx, cx, cx.ta.module_expr(*me)),
             sexp_expression(arena, ctx, cx, *e),
         ]),
         ExpressionDesc::Texp_letexception(ec, e) => Sexp::list(vec![
@@ -1277,7 +1277,7 @@ fn sexp_expression_desc(
         ]),
         ExpressionDesc::Texp_pack(me) => Sexp::list(vec![
             Sexp::atom("Texp_pack"),
-            sexp_module_expr(arena, ctx, cx, me),
+            sexp_module_expr(arena, ctx, cx, cx.ta.module_expr(*me)),
         ]),
         ExpressionDesc::Texp_extension_constructor(lid, path) => Sexp::list(vec![
             Sexp::atom("Texp_extension_constructor"),
@@ -1558,7 +1558,7 @@ fn sexp_module_expr_desc(
                     sexp_module_type(arena, ctx, cx, mt),
                 ]),
             };
-            let me_sexp = sexp_module_expr(arena, ctx, cx, me);
+            let me_sexp = sexp_module_expr(arena, ctx, cx, cx.ta.module_expr(*me));
             Sexp::list(vec![
                 Sexp::atom("Tmod_functor"),
                 sexp_ident(id),
@@ -1568,12 +1568,12 @@ fn sexp_module_expr_desc(
         }
         ModuleExprDesc::Tmod_apply(me1, me2, _) => Sexp::list(vec![
             Sexp::atom("Tmod_apply"),
-            sexp_module_expr(arena, ctx, cx, me1),
-            sexp_module_expr(arena, ctx, cx, me2),
+            sexp_module_expr(arena, ctx, cx, cx.ta.module_expr(*me1)),
+            sexp_module_expr(arena, ctx, cx, cx.ta.module_expr(*me2)),
         ]),
         ModuleExprDesc::Tmod_constraint(me, _, constraint_, _) => {
             // Match OCaml eval order: module_expr first, then constraint
-            let me_sexp = sexp_module_expr(arena, ctx, cx, me);
+            let me_sexp = sexp_module_expr(arena, ctx, cx, cx.ta.module_expr(*me));
             let constraint_sexp = match constraint_ {
                 ModuleTypeConstraint::Tmodtype_implicit => Sexp::atom("implicit"),
                 ModuleTypeConstraint::Tmodtype_explicit(mt) => {
@@ -2012,7 +2012,12 @@ fn sexp_module_binding(
         string(&mb.mb_name.txt),
     ];
     items.extend(loc_sexp);
-    items.push(sexp_module_expr(arena, ctx, cx, &mb.mb_expr));
+    items.push(sexp_module_expr(
+        arena,
+        ctx,
+        cx,
+        cx.ta.module_expr(mb.mb_expr),
+    ));
     items.push(sexp_attributes(arena, cx, &mb.mb_attributes));
     Sexp::list(items)
 }
@@ -2106,7 +2111,7 @@ fn sexp_module_type_desc(
         }
         ModuleTypeDesc::Tmty_typeof(me) => Sexp::list(vec![
             Sexp::atom("Tmty_typeof"),
-            sexp_module_expr(arena, ctx, cx, me),
+            sexp_module_expr(arena, ctx, cx, cx.ta.module_expr(*me)),
         ]),
         ModuleTypeDesc::Tmty_alias(p, _) => {
             Sexp::list(vec![Sexp::atom("Tmty_alias"), sexp_path(p)])
@@ -2351,7 +2356,12 @@ fn sexp_include_declaration(
     };
     let mut items = vec![Sexp::atom("include_declaration")];
     items.extend(loc_sexp);
-    items.push(sexp_module_expr(arena, ctx, cx, &incl.incl_mod));
+    items.push(sexp_module_expr(
+        arena,
+        ctx,
+        cx,
+        cx.ta.module_expr(incl.incl_mod),
+    ));
     items.push(sexp_attributes(arena, cx, &incl.incl_attributes));
     Sexp::list(items)
 }

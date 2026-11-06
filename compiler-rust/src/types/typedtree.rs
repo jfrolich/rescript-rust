@@ -25,7 +25,8 @@ use crate::parser::ast::{
 use crate::types::asttypes::ArgLabel as TypeArgLabel;
 use crate::types::decl::ModuleType as DeclModuleType;
 pub use crate::types::tast_arena::{
-    TArgList, TCaseList, TExprIdx, TExprList, TFieldList, TParamList, TVbList, TypedArena,
+    TArgList, TCaseList, TExprIdx, TExprList, TFieldList, TModExprIdx, TParamList, TVbList,
+    TypedArena,
 };
 use crate::types::{
     ConstructorDescription, LabelDescription, Path, RowDesc, TypeExprRef, ValueDescription,
@@ -452,7 +453,7 @@ pub enum ExpressionDesc {
     Texp_object_literal(Vec<(Loc<String>, TExprIdx)>),
 
     /// Let module: `let module M = ME in E`.
-    Texp_letmodule(Ident, Loc<String>, Box<ModuleExpr>, TExprIdx),
+    Texp_letmodule(Ident, Loc<String>, TModExprIdx, TExprIdx),
 
     /// Let exception: `let exception C of T in E`.
     Texp_letexception(Box<ExtensionConstructor>, TExprIdx),
@@ -461,7 +462,7 @@ pub enum ExpressionDesc {
     Texp_assert(TExprIdx),
 
     /// Pack: `(module M : MT)`.
-    Texp_pack(Box<ModuleExpr>),
+    Texp_pack(TModExprIdx),
 
     /// Extension constructor: `[%extension_constructor C]`.
     Texp_extension_constructor(Loc<LidentIdx>, Path),
@@ -678,12 +679,12 @@ pub enum ModuleExprDesc {
     /// Structure.
     Tmod_structure(Structure),
     /// Functor application.
-    Tmod_apply(Box<ModuleExpr>, Box<ModuleExpr>, ModuleCoercion),
+    Tmod_apply(TModExprIdx, TModExprIdx, ModuleCoercion),
     /// Functor.
-    Tmod_functor(Ident, Loc<String>, Option<Box<ModuleType>>, Box<ModuleExpr>),
+    Tmod_functor(Ident, Loc<String>, Option<Box<ModuleType>>, TModExprIdx),
     /// Constraint.
     Tmod_constraint(
-        Box<ModuleExpr>,
+        TModExprIdx,
         DeclModuleType,
         ModuleTypeConstraint,
         ModuleCoercion,
@@ -719,7 +720,7 @@ pub enum ModuleTypeDesc {
     /// With constraint: `MT with ...`.
     Tmty_with(Box<ModuleType>, Vec<(Path, Loc<LidentIdx>, WithConstraint)>),
     /// Typeof: `module type of ME`.
-    Tmty_typeof(Box<ModuleExpr>),
+    Tmty_typeof(TModExprIdx),
     /// Alias: `(module M)`.
     Tmty_alias(Path, Loc<LidentIdx>),
 }
@@ -997,7 +998,7 @@ pub struct ModuleBinding {
     /// Module name with location.
     pub mb_name: Loc<String>,
     /// Module expression.
-    pub mb_expr: ModuleExpr,
+    pub mb_expr: TModExprIdx,
     /// Module attributes.
     pub mb_attributes: Attributes,
     /// Location.
@@ -1036,7 +1037,7 @@ pub struct OpenDeclaration {
 #[derive(Debug, Clone)]
 pub struct IncludeDeclaration {
     /// Included module expression.
-    pub incl_mod: ModuleExpr,
+    pub incl_mod: TModExprIdx,
     /// Included module type.
     pub incl_type: Vec<crate::types::decl::SignatureItem>,
     /// Attributes.
@@ -1290,4 +1291,3 @@ mod node_size_tests {
         assert_eq!(size_of::<super::RecordField>(), 40);
     }
 }
-

@@ -12174,7 +12174,7 @@ fn moregen_link_structure(
                 }
             }
             crate::types::typedtree::StructureItemDesc::Tstr_module(mb) => {
-                moregen_link_mod_expr(type_ctx, ta, &mb.mb_expr, iface_val_types);
+                moregen_link_mod_expr(type_ctx, ta, ta.module_expr(mb.mb_expr), iface_val_types);
             }
             _ => {}
         }
@@ -12192,7 +12192,7 @@ fn moregen_link_mod_expr(
             moregen_link_structure(type_ctx, ta, s, iface_val_types);
         }
         crate::types::typedtree::ModuleExprDesc::Tmod_constraint(inner, _, _, _) => {
-            moregen_link_mod_expr(type_ctx, ta, inner, iface_val_types);
+            moregen_link_mod_expr(type_ctx, ta, ta.module_expr(*inner), iface_val_types);
         }
         _ => {}
     }

@@ -421,7 +421,7 @@ pub fn structure_item_check_annotation(
                 arena,
                 ta,
                 check_annotation,
-                &include_declaration.incl_mod,
+                ta.module_expr(include_declaration.incl_mod),
             )
         }
         StructureItemDesc::Tstr_modtype(module_type_declaration) => {
@@ -455,7 +455,7 @@ pub fn module_expr_check_annotation(
             structure_check_annotation(arena, ta, check_annotation, structure)
         }
         ModuleExprDesc::Tmod_constraint(module_expr, _, module_type_constraint, _) => {
-            module_expr_check_annotation(arena, ta, check_annotation, module_expr)
+            module_expr_check_annotation(arena, ta, check_annotation, ta.module_expr(*module_expr))
                 || match module_type_constraint {
                     ModuleTypeConstraint::Tmodtype_explicit(module_type) => {
                         module_type_check_annotation(arena, ta, check_annotation, module_type)
@@ -478,7 +478,12 @@ pub fn module_binding_check_annotation(
 ) -> bool {
     // Mirrors compiler/gentype/Annotation.ml:278-281.
     check_annotation(module_binding.mb_loc, &module_binding.mb_attributes)
-        || module_expr_check_annotation(arena, ta, check_annotation, &module_binding.mb_expr)
+        || module_expr_check_annotation(
+            arena,
+            ta,
+            check_annotation,
+            ta.module_expr(module_binding.mb_expr),
+        )
 }
 
 pub fn structure_check_annotation(

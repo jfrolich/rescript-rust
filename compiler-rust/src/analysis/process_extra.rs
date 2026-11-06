@@ -477,15 +477,15 @@ impl ExtraIterator<'_, '_> {
     fn handle_module_expr(&mut self, expr: &tt::ModuleExprDesc) {
         match expr {
             tt::ModuleExprDesc::Tmod_constraint(expr, _, _, _) => {
-                self.handle_module_expr(&expr.mod_desc)
+                self.handle_module_expr(&self.ctx.ta.module_expr(*expr).mod_desc)
             }
             tt::ModuleExprDesc::Tmod_ident(path, lid) => self.add_for_lident(None, path, lid),
             tt::ModuleExprDesc::Tmod_functor(_, _, _, result) => {
-                self.handle_module_expr(&result.mod_desc)
+                self.handle_module_expr(&self.ctx.ta.module_expr(*result).mod_desc)
             }
             tt::ModuleExprDesc::Tmod_apply(obj, arg, _) => {
-                self.handle_module_expr(&obj.mod_desc);
-                self.handle_module_expr(&arg.mod_desc);
+                self.handle_module_expr(&self.ctx.ta.module_expr(*obj).mod_desc);
+                self.handle_module_expr(&self.ctx.ta.module_expr(*arg).mod_desc);
             }
             _ => {}
         }
@@ -579,9 +579,11 @@ impl<'a> TastIterator<'a> for ExtraIterator<'a, '_> {
     fn structure_item(&mut self, item: &tt::StructureItem) {
         match &item.str_desc {
             tt::StructureItemDesc::Tstr_include(incl) => {
-                self.handle_module_expr(&incl.incl_mod.mod_desc)
+                self.handle_module_expr(&self.ctx.ta.module_expr(incl.incl_mod).mod_desc)
             }
-            tt::StructureItemDesc::Tstr_module(mb) => self.handle_module_expr(&mb.mb_expr.mod_desc),
+            tt::StructureItemDesc::Tstr_module(mb) => {
+                self.handle_module_expr(&self.ctx.ta.module_expr(mb.mb_expr).mod_desc)
+            }
             tt::StructureItemDesc::Tstr_open(open) => {
                 let lid = tt::Loc {
                     txt: open.open_txt.txt,

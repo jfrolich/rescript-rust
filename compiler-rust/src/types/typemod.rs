@@ -1234,15 +1234,17 @@ fn path_of_parsed_module_expr(mod_expr: &ParsedModuleExpr, arena: &ParseArena) -
 
 /// Try to convert a typed module expression to a module path.
 /// Mirrors OCaml `Typemod.path_of_module` for applicative functor paths.
-fn path_of_typed_module_expr(mod_expr: &ModuleExpr) -> Option<Path> {
+fn path_of_typed_module_expr(ta: &TypedArena, mod_expr: &ModuleExpr) -> Option<Path> {
     match &mod_expr.mod_desc {
         ModuleExprDesc::Tmod_ident(path, _) => Some(path.clone()),
         ModuleExprDesc::Tmod_apply(functor, arg, _) => {
-            let functor_path = path_of_typed_module_expr(functor)?;
-            let arg_path = path_of_typed_module_expr(arg)?;
+            let functor_path = path_of_typed_module_expr(ta, ta.module_expr(*functor))?;
+            let arg_path = path_of_typed_module_expr(ta, ta.module_expr(*arg))?;
             Some(Path::papply(functor_path, arg_path))
         }
-        ModuleExprDesc::Tmod_constraint(inner, _, _, _) => path_of_typed_module_expr(inner),
+        ModuleExprDesc::Tmod_constraint(inner, _, _, _) => {
+            path_of_typed_module_expr(ta, ta.module_expr(*inner))
+        }
         ModuleExprDesc::Tmod_structure(_)
         | ModuleExprDesc::Tmod_functor(_, _, _, _)
         | ModuleExprDesc::Tmod_unpack(_, _) => None,
@@ -1343,11 +1345,12 @@ fn find_existing_loc_idx(arena: &ParseArena, target: &Location) -> Option<LocIdx
 }
 
 fn include_module_alias_heads(
+    ta: &TypedArena,
     mod_expr: &ModuleExpr,
     pers_env: Option<&crate::cmi::persistent_env::PersistentEnv>,
     ctx: &crate::types::context::TypeContext,
 ) -> Vec<String> {
-    let Some(root_path) = include_module_root_path(mod_expr) else {
+    let Some(root_path) = include_module_root_path(ta, mod_expr) else {
         return Vec::new();
     };
     // OCaml's include path localization follows the component paths produced by
@@ -1371,10 +1374,12 @@ fn include_module_alias_heads(
     heads
 }
 
-fn include_module_root_path(mod_expr: &ModuleExpr) -> Option<Path> {
+fn include_module_root_path(ta: &TypedArena, mod_expr: &ModuleExpr) -> Option<Path> {
     match &mod_expr.mod_desc {
         ModuleExprDesc::Tmod_ident(path, _) => Some(path.clone()),
-        ModuleExprDesc::Tmod_constraint(inner, _, _, _) => include_module_root_path(inner),
+        ModuleExprDesc::Tmod_constraint(inner, _, _, _) => {
+            include_module_root_path(ta, ta.module_expr(*inner))
+        }
         _ => None,
     }
 }
@@ -7607,6 +7612,7 @@ fn sig_type_rec_statuses(
 }
 
 fn decl_module_type_from_typed_module_expr_for_sig(
+    ta: &TypedArena,
     mod_expr: &ModuleExpr,
 ) -> Option<crate::types::decl::ModuleType> {
     match &mod_expr.mod_desc {
@@ -7620,7 +7626,7 @@ fn decl_module_type_from_typed_module_expr_for_sig(
             _,
             crate::types::typedtree::ModuleTypeConstraint::Tmodtype_implicit,
             _,
-        ) => match &inner.mod_desc {
+        ) => match &ta.module_expr(*inner).mod_desc {
             ModuleExprDesc::Tmod_structure(structure) => Some(
                 crate::types::decl::ModuleType::MtySignature(std::sync::Arc::new(
                     crate::types::includemod::simplify_signature(&structure.str_type),
@@ -12610,7 +12616,8 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
             let me = arena.get_mod_expr(*me_idx);
             match typed_hint.map(|hint| &hint.mty_desc) {
                 Some(TypedMtyDesc::Tmty_typeof(typed_me)) => {
-                    module_type_of_typed_module_expr(tctx, env, arena, me, typed_me)
+                    let typed_mod_type = tctx.typed.module_expr(*typed_me).mod_type.clone();
+                    module_type_of_typed_module_expr(tctx, env, arena, me, &typed_mod_type)
                 }
                 _ => {
                     let (_typed_me, module_type) = type_module_type_of(tctx, env, arena, me)?;
@@ -13461,6 +13468,7 @@ fn localize_exported_structure_module_type(
 }
 
 fn localize_alias_child_module_sig_paths_in_structure_sig(
+    ta: &TypedArena,
     sig: &mut [crate::types::decl::SignatureItem],
     structure: &Structure,
     module_path: &Path,
@@ -13469,6 +13477,7 @@ fn localize_alias_child_module_sig_paths_in_structure_sig(
     use crate::types::decl::{ModuleType as DeclMty, SignatureItem};
 
     fn localize_alias_child_module_sig(
+        ta: &TypedArena,
         sub_sig: &mut [crate::types::decl::SignatureItem],
         child_path: &Path,
         mod_expr: &ModuleExpr,
@@ -13487,6 +13496,7 @@ fn localize_alias_child_module_sig_paths_in_structure_sig(
 
         if let ModuleExprDesc::Tmod_structure(sub_structure) = &mod_expr.mod_desc {
             localize_alias_child_module_sig_paths_in_structure_sig(
+                ta,
                 sub_sig,
                 sub_structure,
                 child_path,
@@ -13511,9 +13521,10 @@ fn localize_alias_child_module_sig_paths_in_structure_sig(
                     if let DeclMty::MtySignature(sub_sig) = &mut md.md_type {
                         let child_path = Path::pdot(module_path.clone(), id.name());
                         localize_alias_child_module_sig(
+                            ta,
                             crate::types::decl::signature_mut(sub_sig),
                             &child_path,
-                            &mb.mb_expr,
+                            ta.module_expr(mb.mb_expr),
                             type_ctx,
                         );
                     }
@@ -13534,9 +13545,10 @@ fn localize_alias_child_module_sig_paths_in_structure_sig(
                         if let DeclMty::MtySignature(sub_sig) = &mut md.md_type {
                             let child_path = Path::pdot(module_path.clone(), id.name());
                             localize_alias_child_module_sig(
+                                ta,
                                 crate::types::decl::signature_mut(sub_sig),
                                 &child_path,
-                                &mb.mb_expr,
+                                ta.module_expr(mb.mb_expr),
                                 type_ctx,
                             );
                         }
@@ -13549,11 +13561,11 @@ fn localize_alias_child_module_sig_paths_in_structure_sig(
     }
 }
 
-fn module_expr_has_dotted_alias_child_modules(mod_expr: &ModuleExpr) -> bool {
+fn module_expr_has_dotted_alias_child_modules(ta: &TypedArena, mod_expr: &ModuleExpr) -> bool {
     match &mod_expr.mod_desc {
         ModuleExprDesc::Tmod_ident(Path::Pdot(..), _) => true,
         ModuleExprDesc::Tmod_structure(structure) => {
-            structure_has_dotted_alias_child_modules(structure)
+            structure_has_dotted_alias_child_modules(ta, structure)
         }
         ModuleExprDesc::Tmod_ident(_, _)
         | ModuleExprDesc::Tmod_apply(_, _, _)
@@ -13563,44 +13575,50 @@ fn module_expr_has_dotted_alias_child_modules(mod_expr: &ModuleExpr) -> bool {
     }
 }
 
-fn structure_has_dotted_alias_child_modules(structure: &Structure) -> bool {
+fn structure_has_dotted_alias_child_modules(ta: &TypedArena, structure: &Structure) -> bool {
     structure.str_items.iter().any(|item| match &item.str_desc {
         StructureItemDesc::Tstr_module(mb) => {
-            module_expr_has_dotted_alias_child_modules(&mb.mb_expr)
+            module_expr_has_dotted_alias_child_modules(ta, ta.module_expr(mb.mb_expr))
         }
         StructureItemDesc::Tstr_recmodule(mbs) => mbs
             .iter()
-            .any(|mb| module_expr_has_dotted_alias_child_modules(&mb.mb_expr)),
+            .any(|mb| module_expr_has_dotted_alias_child_modules(ta, ta.module_expr(mb.mb_expr))),
         _ => false,
     })
 }
 
-fn module_expr_contains_unpack_for_sig_localization(mod_expr: &ModuleExpr) -> bool {
+fn module_expr_contains_unpack_for_sig_localization(
+    ta: &TypedArena,
+    mod_expr: &ModuleExpr,
+) -> bool {
     match &mod_expr.mod_desc {
         ModuleExprDesc::Tmod_ident(_, _) => false,
         ModuleExprDesc::Tmod_structure(structure) => {
             structure.str_items.iter().any(|item| match &item.str_desc {
                 StructureItemDesc::Tstr_module(mb) => {
-                    module_expr_contains_unpack_for_sig_localization(&mb.mb_expr)
+                    module_expr_contains_unpack_for_sig_localization(ta, ta.module_expr(mb.mb_expr))
                 }
-                StructureItemDesc::Tstr_recmodule(mbs) => mbs
-                    .iter()
-                    .any(|mb| module_expr_contains_unpack_for_sig_localization(&mb.mb_expr)),
+                StructureItemDesc::Tstr_recmodule(mbs) => mbs.iter().any(|mb| {
+                    module_expr_contains_unpack_for_sig_localization(ta, ta.module_expr(mb.mb_expr))
+                }),
                 StructureItemDesc::Tstr_include(include) => {
-                    module_expr_contains_unpack_for_sig_localization(&include.incl_mod)
+                    module_expr_contains_unpack_for_sig_localization(
+                        ta,
+                        ta.module_expr(include.incl_mod),
+                    )
                 }
                 _ => false,
             })
         }
         ModuleExprDesc::Tmod_apply(functor, arg, _) => {
-            module_expr_contains_unpack_for_sig_localization(functor)
-                || module_expr_contains_unpack_for_sig_localization(arg)
+            module_expr_contains_unpack_for_sig_localization(ta, ta.module_expr(*functor))
+                || module_expr_contains_unpack_for_sig_localization(ta, ta.module_expr(*arg))
         }
         ModuleExprDesc::Tmod_functor(_, _, _, body) => {
-            module_expr_contains_unpack_for_sig_localization(body)
+            module_expr_contains_unpack_for_sig_localization(ta, ta.module_expr(*body))
         }
         ModuleExprDesc::Tmod_constraint(inner, _, _, _) => {
-            module_expr_contains_unpack_for_sig_localization(inner)
+            module_expr_contains_unpack_for_sig_localization(ta, ta.module_expr(*inner))
         }
         ModuleExprDesc::Tmod_unpack(_, _) => true,
     }
@@ -13655,6 +13673,7 @@ fn localize_raw_unpack_module_type_family(
 }
 
 fn localize_raw_unpack_modules_in_structure_sig(
+    ta: &TypedArena,
     sig: &[crate::types::decl::SignatureItem],
     structure: &Structure,
     type_ctx: &crate::types::context::TypeContext,
@@ -13675,12 +13694,17 @@ fn localize_raw_unpack_modules_in_structure_sig(
                         continue;
                     }
                     if let DeclMty::MtySignature(sub_sig) = &md.md_type {
-                        if module_expr_contains_unpack_for_sig_localization(&mb.mb_expr) {
+                        if module_expr_contains_unpack_for_sig_localization(
+                            ta,
+                            ta.module_expr(mb.mb_expr),
+                        ) {
                             localize_raw_unpack_module_type_family(sub_sig, &mb.mb_id, type_ctx);
                         }
-                        if let ModuleExprDesc::Tmod_structure(sub_structure) = &mb.mb_expr.mod_desc
+                        if let ModuleExprDesc::Tmod_structure(sub_structure) =
+                            &ta.module_expr(mb.mb_expr).mod_desc
                         {
                             localize_raw_unpack_modules_in_structure_sig(
+                                ta,
                                 sub_sig,
                                 sub_structure,
                                 type_ctx,
@@ -13702,15 +13726,19 @@ fn localize_raw_unpack_modules_in_structure_sig(
                             continue;
                         }
                         if let DeclMty::MtySignature(sub_sig) = &md.md_type {
-                            if module_expr_contains_unpack_for_sig_localization(&mb.mb_expr) {
+                            if module_expr_contains_unpack_for_sig_localization(
+                                ta,
+                                ta.module_expr(mb.mb_expr),
+                            ) {
                                 localize_raw_unpack_module_type_family(
                                     sub_sig, &mb.mb_id, type_ctx,
                                 );
                             }
                             if let ModuleExprDesc::Tmod_structure(sub_structure) =
-                                &mb.mb_expr.mod_desc
+                                &ta.module_expr(mb.mb_expr).mod_desc
                             {
                                 localize_raw_unpack_modules_in_structure_sig(
+                                    ta,
                                     sub_sig,
                                     sub_structure,
                                     type_ctx,
@@ -13975,26 +14003,33 @@ fn extract_module_type_from_mod_expr_inner(
 
     use crate::types::includemod::add_sig_item_to_env;
 
-    fn module_expr_contains_unpack(mod_expr: &ModuleExpr) -> bool {
+    fn module_expr_contains_unpack(ta: &TypedArena, mod_expr: &ModuleExpr) -> bool {
         match &mod_expr.mod_desc {
             ModuleExprDesc::Tmod_ident(_, _) => false,
             ModuleExprDesc::Tmod_structure(structure) => {
                 structure.str_items.iter().any(|item| match &item.str_desc {
-                    StructureItemDesc::Tstr_module(mb) => module_expr_contains_unpack(&mb.mb_expr),
+                    StructureItemDesc::Tstr_module(mb) => {
+                        module_expr_contains_unpack(ta, ta.module_expr(mb.mb_expr))
+                    }
                     StructureItemDesc::Tstr_recmodule(mbs) => mbs
                         .iter()
-                        .any(|mb| module_expr_contains_unpack(&mb.mb_expr)),
+                        .any(|mb| module_expr_contains_unpack(ta, ta.module_expr(mb.mb_expr))),
                     StructureItemDesc::Tstr_include(include) => {
-                        module_expr_contains_unpack(&include.incl_mod)
+                        module_expr_contains_unpack(ta, ta.module_expr(include.incl_mod))
                     }
                     _ => false,
                 })
             }
             ModuleExprDesc::Tmod_apply(functor, arg, _) => {
-                module_expr_contains_unpack(functor) || module_expr_contains_unpack(arg)
+                module_expr_contains_unpack(ta, ta.module_expr(*functor))
+                    || module_expr_contains_unpack(ta, ta.module_expr(*arg))
             }
-            ModuleExprDesc::Tmod_functor(_, _, _, body) => module_expr_contains_unpack(body),
-            ModuleExprDesc::Tmod_constraint(inner, _, _, _) => module_expr_contains_unpack(inner),
+            ModuleExprDesc::Tmod_functor(_, _, _, body) => {
+                module_expr_contains_unpack(ta, ta.module_expr(*body))
+            }
+            ModuleExprDesc::Tmod_constraint(inner, _, _, _) => {
+                module_expr_contains_unpack(ta, ta.module_expr(*inner))
+            }
             ModuleExprDesc::Tmod_unpack(_, _) => true,
         }
     }
@@ -14010,15 +14045,16 @@ fn extract_module_type_from_mod_expr_inner(
             let needs_precise_structure_sig =
                 structure.str_items.iter().any(|item| match &item.str_desc {
                     StructureItemDesc::Tstr_recmodule(_) => true,
-                    StructureItemDesc::Tstr_module(mb) => {
-                        !matches!(mb.mb_expr.mod_desc, ModuleExprDesc::Tmod_ident(_, _))
-                    }
+                    StructureItemDesc::Tstr_module(mb) => !matches!(
+                        ta.module_expr(mb.mb_expr).mod_desc,
+                        ModuleExprDesc::Tmod_ident(_, _)
+                    ),
                     _ => false,
                 });
             if !has_include && needs_precise_structure_sig {
                 let sig = structure.str_type.clone();
                 if let Some(type_ctx) = type_ctx {
-                    localize_raw_unpack_modules_in_structure_sig(&sig, structure, type_ctx);
+                    localize_raw_unpack_modules_in_structure_sig(ta, &sig, structure, type_ctx);
                 }
                 return Some(DeclMty::MtySignature(std::sync::Arc::new(sig)));
             }
@@ -14054,11 +14090,11 @@ fn extract_module_type_from_mod_expr_inner(
                         }
                     }
                     StructureItemDesc::Tstr_module(mb) => {
-                        let inner_mty = preserve_structure_module_alias(&mb.mb_expr)
+                        let inner_mty = preserve_structure_module_alias(ta.module_expr(mb.mb_expr))
                             .or_else(|| {
                                 extract_module_type_from_mod_expr_inner(
                                     ta,
-                                    &mb.mb_expr,
+                                    ta.module_expr(mb.mb_expr),
                                     current_env,
                                     type_ctx,
                                 )
@@ -14091,16 +14127,17 @@ fn extract_module_type_from_mod_expr_inner(
                     }
                     StructureItemDesc::Tstr_recmodule(mbs) => {
                         for mb in mbs {
-                            let inner_mty = preserve_structure_module_alias(&mb.mb_expr)
-                                .or_else(|| {
-                                    extract_module_type_from_mod_expr_inner(
-                                        ta,
-                                        &mb.mb_expr,
-                                        current_env,
-                                        type_ctx,
-                                    )
-                                })
-                                .unwrap_or(DeclMty::MtySignature(std::sync::Arc::new(vec![])));
+                            let inner_mty =
+                                preserve_structure_module_alias(ta.module_expr(mb.mb_expr))
+                                    .or_else(|| {
+                                        extract_module_type_from_mod_expr_inner(
+                                            ta,
+                                            ta.module_expr(mb.mb_expr),
+                                            current_env,
+                                            type_ctx,
+                                        )
+                                    })
+                                    .unwrap_or(DeclMty::MtySignature(std::sync::Arc::new(vec![])));
                             let inner_mty = if matches!(inner_mty, DeclMty::MtyAlias(..)) {
                                 inner_mty
                             } else {
@@ -14191,7 +14228,7 @@ fn extract_module_type_from_mod_expr_inner(
                         if !included {
                             if let Some(inner_mty) = extract_module_type_from_mod_expr_inner(
                                 ta,
-                                &incl.incl_mod,
+                                ta.module_expr(incl.incl_mod),
                                 current_env,
                                 type_ctx,
                             ) {
@@ -14235,7 +14272,9 @@ fn extract_module_type_from_mod_expr_inner(
                             }
                         }
                         if !included {
-                            if let ModuleExprDesc::Tmod_ident(path, _) = &incl.incl_mod.mod_desc {
+                            if let ModuleExprDesc::Tmod_ident(path, _) =
+                                &ta.module_expr(incl.incl_mod).mod_desc
+                            {
                                 let mod_name: Option<&str> = match path {
                                     crate::types::Path::Pident(id) => Some(id.name()),
                                     crate::types::Path::Pdot(_, name, _) => Some(name.as_ref()),
@@ -14319,7 +14358,12 @@ fn extract_module_type_from_mod_expr_inner(
                 None
             };
 
-            let result_mty = extract_module_type_from_mod_expr_inner(ta, body, body_env, type_ctx)?;
+            let result_mty = extract_module_type_from_mod_expr_inner(
+                ta,
+                ta.module_expr(*body),
+                body_env,
+                type_ctx,
+            )?;
             Some(DeclMty::MtyFunctor {
                 param: *param_id,
                 param_type: decl_param_mty.map(Box::new),
@@ -14327,8 +14371,12 @@ fn extract_module_type_from_mod_expr_inner(
             })
         }
         ModuleExprDesc::Tmod_apply(functor, _arg, _) => {
-            let extracted_functor_mty =
-                extract_module_type_from_mod_expr_inner(ta, functor, env, type_ctx);
+            let extracted_functor_mty = extract_module_type_from_mod_expr_inner(
+                ta,
+                ta.module_expr(*functor),
+                env,
+                type_ctx,
+            );
             if let Some(functor_mty) = extracted_functor_mty {
                 let resolved_functor_mty = match &functor_mty {
                     DeclMty::MtyIdent(path) | DeclMty::MtyAlias(_, path) => env
@@ -14340,7 +14388,9 @@ fn extract_module_type_from_mod_expr_inner(
                     return Some(*result);
                 }
             }
-            if let (Some(env), ModuleExprDesc::Tmod_ident(path, _)) = (env, &functor.mod_desc) {
+            if let (Some(env), ModuleExprDesc::Tmod_ident(path, _)) =
+                (env, &ta.module_expr(*functor).mod_desc)
+            {
                 if let Ok(md) = env.lookup_module(path) {
                     if let DeclMty::MtyFunctor { result, .. } = &md.md_type {
                         return Some((**result).clone());
@@ -14360,18 +14410,23 @@ fn extract_module_type_from_mod_expr_inner(
                     decl_module_type_from_typed_module_type(mty)
                 }
                 crate::types::typedtree::ModuleTypeConstraint::Tmodtype_implicit => {
-                    Some(constrained_mty.clone()).or_else(|| match &inner.mod_desc {
-                        ModuleExprDesc::Tmod_structure(structure) => {
-                            Some(DeclMty::MtySignature(std::sync::Arc::new(
-                                crate::types::includemod::simplify_signature(&structure.str_type),
-                            )))
+                    Some(constrained_mty.clone()).or_else(|| {
+                        match &ta.module_expr(*inner).mod_desc {
+                            ModuleExprDesc::Tmod_structure(structure) => {
+                                Some(DeclMty::MtySignature(std::sync::Arc::new(
+                                    crate::types::includemod::simplify_signature(
+                                        &structure.str_type,
+                                    ),
+                                )))
+                            }
+                            _ => None,
                         }
-                        _ => None,
                     })
                 }
             };
-            constrained
-                .or_else(|| extract_module_type_from_mod_expr_inner(ta, inner, env, type_ctx))
+            constrained.or_else(|| {
+                extract_module_type_from_mod_expr_inner(ta, ta.module_expr(*inner), env, type_ctx)
+            })
         }
     }
 }
@@ -15163,7 +15218,7 @@ fn type_module_expr_with_alias_inner<'a>(
 
                 Ok(ModuleExpr {
                     mod_desc: ModuleExprDesc::Tmod_constraint(
-                        Box::new(inner),
+                        tctx.typed.push_module_expr(inner),
                         constrained_mod_type,
                         crate::types::typedtree::ModuleTypeConstraint::Tmodtype_implicit,
                         ModuleCoercion::Tcoerce_alias(
@@ -15223,7 +15278,7 @@ fn type_module_expr_with_alias_inner<'a>(
                     .map_err(|err| TypeModError::SignatureMismatch { loc, error: err })?;
                 Ok(ModuleExpr {
                     mod_desc: ModuleExprDesc::Tmod_constraint(
-                        Box::new(md),
+                        tctx.typed.push_module_expr(md),
                         simplified.clone(),
                         crate::types::typedtree::ModuleTypeConstraint::Tmodtype_implicit,
                         coercion,
@@ -15303,7 +15358,7 @@ fn type_module_expr_with_alias_inner<'a>(
                         loc: name.loc,
                     },
                     typed_param_type,
-                    Box::new(typed_body),
+                    tctx.typed.push_module_expr(typed_body),
                 ),
                 mod_loc: loc,
                 mod_type: functor_mty,
@@ -15322,7 +15377,7 @@ fn type_module_expr_with_alias_inner<'a>(
             // forcing during argument typing must happen before functor
             // substitution can allocate hidden identifiers.
             let typed_arg = type_module_expr_with_alias(tctx, env, arena, arg, false, true)?;
-            let arg_path = path_of_typed_module_expr(&typed_arg);
+            let arg_path = path_of_typed_module_expr(&tctx.typed, &typed_arg);
             let typed_functor = type_module_expr_with_alias(
                 tctx,
                 env,
@@ -15444,8 +15499,8 @@ fn type_module_expr_with_alias_inner<'a>(
             };
             let typed_apply = ModuleExpr {
                 mod_desc: ModuleExprDesc::Tmod_apply(
-                    Box::new(typed_functor),
-                    Box::new(typed_arg),
+                    tctx.typed.push_module_expr(typed_functor),
+                    tctx.typed.push_module_expr(typed_arg),
                     coercion,
                 ),
                 mod_loc: loc,
@@ -15616,7 +15671,7 @@ fn wrap_constraint_with_decl_and_arg_mty<'a>(
 
     Ok(ModuleExpr {
         mod_desc: ModuleExprDesc::Tmod_constraint(
-            Box::new(arg),
+            tctx.typed.push_module_expr(arg),
             decl_mty.clone(),
             explicit,
             coercion,
@@ -15703,7 +15758,7 @@ fn wrap_recmodule_constraint_with_inclusion_mtys<'a>(
 
     Ok(ModuleExpr {
         mod_desc: ModuleExprDesc::Tmod_constraint(
-            Box::new(arg),
+            tctx.typed.push_module_expr(arg),
             output_decl_mty.clone(),
             explicit,
             coercion,
@@ -15865,10 +15920,10 @@ fn module_type_of_typed_module_expr<'a>(
     env: &Env,
     arena: &'a ParseArena,
     mod_expr: &ParsedModuleExpr,
-    typed_mod_expr: &ModuleExpr,
+    typed_mod_type: &crate::types::decl::ModuleType,
 ) -> TypeModResult<crate::types::decl::ModuleType> {
     let module_type = remove_module_type_aliases_for_typeof(
-        &typed_mod_expr.mod_type,
+        typed_mod_type,
         env,
         &mut tctx.persistent_env,
         tctx.type_ctx,
@@ -15890,7 +15945,7 @@ fn type_module_type_of<'a>(
 ) -> TypeModResult<(ModuleExpr, crate::types::decl::ModuleType)> {
     let typed_mod_expr = type_module_type_of_expr_raw(tctx, env, arena, mod_expr)?;
     let module_type =
-        module_type_of_typed_module_expr(tctx, env, arena, mod_expr, &typed_mod_expr)?;
+        module_type_of_typed_module_expr(tctx, env, arena, mod_expr, &typed_mod_expr.mod_type)?;
     Ok((typed_mod_expr, module_type))
 }
 
@@ -15993,7 +16048,7 @@ fn transl_modtype<'a>(
         PMtyDesc::Pmty_typeof(me_idx) => {
             let me = arena.get_mod_expr(*me_idx);
             let (typed_me, _module_type) = type_module_type_of(tctx, env, arena, me)?;
-            TMtyDesc::Tmty_typeof(Box::new(typed_me))
+            TMtyDesc::Tmty_typeof(tctx.typed.push_module_expr(typed_me))
         }
         PMtyDesc::Pmty_alias(lid) => {
             check_recursive_module_reference_lid(lid, arena, env)?;
@@ -19224,10 +19279,11 @@ fn type_structure_item<'a>(
 
             // Extend environment with the new module
             let mut new_env = env.clone();
-            let mut decl_mod_type = decl_module_type_from_typed_module_expr_for_sig(&typed_mod)
-                .unwrap_or_else(|| {
-                    crate::types::decl::ModuleType::MtySignature(std::sync::Arc::new(vec![]))
-                });
+            let mut decl_mod_type =
+                decl_module_type_from_typed_module_expr_for_sig(&tctx.typed, &typed_mod)
+                    .unwrap_or_else(|| {
+                        crate::types::decl::ModuleType::MtySignature(std::sync::Arc::new(vec![]))
+                    });
             anchor_local_module_aliases_to_owner(&mut decl_mod_type, &Path::pident(mod_id));
             // OCaml compiler/ml/typemod.ml:1451-1471 stores
             // `enrich_module_type anchor name modl.mod_type env` directly in the
@@ -19245,7 +19301,7 @@ fn type_structure_item<'a>(
             let localized_decl_mod_type = match &decl_mod_type {
                 crate::types::decl::ModuleType::MtySignature(sig) => {
                     if let ModuleExprDesc::Tmod_structure(structure) = &typed_mod.mod_desc {
-                        if !structure_has_dotted_alias_child_modules(structure) {
+                        if !structure_has_dotted_alias_child_modules(&tctx.typed, structure) {
                             decl_mod_type.clone()
                         } else {
                             let mut sig = crate::types::typecore::copy_lookup_signature_for_subst(
@@ -19253,6 +19309,7 @@ fn type_structure_item<'a>(
                                 tctx.type_ctx,
                             );
                             localize_alias_child_module_sig_paths_in_structure_sig(
+                                &tctx.typed,
                                 &mut sig,
                                 structure,
                                 &Path::pident(mod_id),
@@ -19298,7 +19355,7 @@ fn type_structure_item<'a>(
                     txt: mod_name_str.to_string(),
                     loc: mb.pmb_name.loc,
                 },
-                mb_expr: typed_mod,
+                mb_expr: tctx.typed.push_module_expr(typed_mod),
                 mb_attributes: mb.pmb_attributes.clone(),
                 mb_loc: mb.pmb_loc,
             });
@@ -19455,7 +19512,7 @@ fn type_structure_item<'a>(
                         txt: name,
                         loc: name_loc,
                     },
-                    mb_expr: typed_mod,
+                    mb_expr: tctx.typed.push_module_expr(typed_mod),
                     mb_attributes: attrs,
                     mb_loc,
                 });
@@ -19468,7 +19525,7 @@ fn type_structure_item<'a>(
                     crate::types::decl::SignatureItem::SigModule(
                         mb.mb_id,
                         crate::types::decl::ModuleDeclaration {
-                            md_type: mb.mb_expr.mod_type.clone(),
+                            md_type: tctx.typed.module_expr(mb.mb_expr).mod_type.clone(),
                             md_attributes: parser_attrs_to_decl_attrs(
                                 arena,
                                 tctx.type_ctx,
@@ -19700,8 +19757,9 @@ fn type_structure_item<'a>(
                     sig_items,
                     tctx.type_ctx,
                 );
-                let include_root_path = include_module_root_path(&typed_mod);
+                let include_root_path = include_module_root_path(&tctx.typed, &typed_mod);
                 let include_alias_heads = include_module_alias_heads(
+                    &tctx.typed,
                     &typed_mod,
                     tctx.persistent_env.as_ref(),
                     tctx.type_ctx,
@@ -19957,7 +20015,7 @@ fn type_structure_item<'a>(
                 .or(stored_include_sig)
                 .unwrap_or_default();
             let desc = StructureItemDesc::Tstr_include(IncludeDeclaration {
-                incl_mod: typed_mod,
+                incl_mod: tctx.typed.push_module_expr(typed_mod),
                 incl_type: item_sig.clone(),
                 incl_attributes: incl.pincl_attributes.clone(),
                 incl_loc: incl.pincl_loc,
@@ -21054,7 +21112,7 @@ mod tests {
         }
     }
 
-    fn type_test_structure(source: &str) -> Structure {
+    fn type_test_structure(source: &str) -> (Structure, TypedArena) {
         crate::ident::Ident::set_current_time(999);
         let id_gen = IdGenerator::with_start_stamp(999);
         let _ = id_gen.next_stamp();
@@ -21066,12 +21124,12 @@ mod tests {
         let mut tctx = TypeCheckContext::new(&type_ctx, arena);
         let env = initial_env(&type_ctx);
         let (typed, _) = type_structure(&mut tctx, &env, arena, &structure).expect("typecheck");
-        typed
+        (typed, tctx.take_typed_arena())
     }
 
     #[test]
     fn constrained_include_structure_localizes_alias_path() {
-        let typed = type_test_structure(
+        let (typed, ta) = type_test_structure(
             r#"
 module M' = {
   module N = {
@@ -21095,11 +21153,14 @@ module M3: {
             .iter()
             .find_map(|item| match &item.str_desc {
                 StructureItemDesc::Tstr_module(binding) if binding.mb_id.name() == "M3" => {
-                    let ModuleExprDesc::Tmod_constraint(inner, _, _, _) = &binding.mb_expr.mod_desc
+                    let ModuleExprDesc::Tmod_constraint(inner, _, _, _) =
+                        &ta.module_expr(binding.mb_expr).mod_desc
                     else {
                         panic!("expected constrained module");
                     };
-                    let ModuleExprDesc::Tmod_structure(structure) = &inner.mod_desc else {
+                    let ModuleExprDesc::Tmod_structure(structure) =
+                        &ta.module_expr(*inner).mod_desc
+                    else {
                         panic!("expected inner structure");
                     };
                     Some(structure)

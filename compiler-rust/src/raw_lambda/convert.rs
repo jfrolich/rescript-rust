@@ -2653,17 +2653,22 @@ impl<'a> RawLambdaConverter<'a> {
             );
             None
         };
-        fn module_path(me: &ModuleExpr) -> Option<&crate::types::path::Path> {
+        fn module_path<'m>(
+            ta: &'m TypedArena,
+            me: &'m ModuleExpr,
+        ) -> Option<&'m crate::types::path::Path> {
             match &me.mod_desc {
                 ModuleExprDesc::Tmod_ident(path, _) => Some(path),
-                ModuleExprDesc::Tmod_constraint(me, _, _, _) => module_path(me),
+                ModuleExprDesc::Tmod_constraint(me, _, _, _) => {
+                    module_path(ta, ta.module_expr(*me))
+                }
                 _ => None,
             }
         }
         match &arg.exp_desc {
-            ExpressionDesc::Texp_pack(me) => match module_path(me) {
+            ExpressionDesc::Texp_pack(me) => match module_path(self.ta, self.ta.module_expr(*me)) {
                 Some(path) => {
-                    let env = self.env_for_module_expr(me);
+                    let env = self.env_for_module_expr(self.ta.module_expr(*me));
                     self.import_of_global_path(true, arg.exp_loc, env.as_deref(), path)
                 }
                 None => unsupported(self, arg.exp_loc),
@@ -3788,10 +3793,12 @@ impl<'a> RawLambdaConverter<'a> {
         self.materialize_hoisted_exports(result)
     }
 
-    fn pure_module(module_expr: &ModuleExpr) -> LetKind {
+    fn pure_module(ta: &TypedArena, module_expr: &ModuleExpr) -> LetKind {
         match &module_expr.mod_desc {
             ModuleExprDesc::Tmod_ident(_, _) => LetKind::Alias,
-            ModuleExprDesc::Tmod_constraint(inner, _, _, _) => Self::pure_module(inner),
+            ModuleExprDesc::Tmod_constraint(inner, _, _, _) => {
+                Self::pure_module(ta, ta.module_expr(*inner))
+            }
             _ => LetKind::Strict,
         }
     }
@@ -4434,7 +4441,7 @@ impl<'a> RawLambdaConverter<'a> {
 
         match &module_expr.mod_desc {
             ModuleExprDesc::Tmod_constraint(inner, _, _, _) => {
-                self.note_possible_required_modules_from_module_expr(inner);
+                self.note_possible_required_modules_from_module_expr(self.ta.module_expr(*inner));
             }
             ModuleExprDesc::Tmod_ident(path, _) => {
                 if let Some(env) = self.env_for_module_expr(module_expr) {
@@ -4450,7 +4457,7 @@ impl<'a> RawLambdaConverter<'a> {
     fn note_possible_required_modules_from_empty_include(&mut self, module_expr: &ModuleExpr) {
         match &module_expr.mod_desc {
             ModuleExprDesc::Tmod_constraint(inner, _, _, _) => {
-                self.note_possible_required_modules_from_empty_include(inner);
+                self.note_possible_required_modules_from_empty_include(self.ta.module_expr(*inner));
             }
             ModuleExprDesc::Tmod_ident(crate::types::Path::Pident(id), _) => {
                 if let Some(env) = self.env_for_module_expr(module_expr) {
@@ -4896,7 +4903,11 @@ impl<'a> RawLambdaConverter<'a> {
             }
             ModuleExprDesc::Tmod_constraint(inner, _, _, inner_cc) => {
                 let composed = Self::compose_coercions_raw(cc, inner_cc);
-                self.convert_module_expr_raw_with_coercion(inner, rootpath, &composed)
+                self.convert_module_expr_raw_with_coercion(
+                    self.ta.module_expr(*inner),
+                    rootpath,
+                    &composed,
+                )
             }
             ModuleExprDesc::Tmod_ident(path, _) => {
                 let loc = module_expr.mod_loc;
@@ -4938,7 +4949,11 @@ impl<'a> RawLambdaConverter<'a> {
                     LetKind::Alias,
                     *param,
                     arg,
-                    self.convert_module_expr_raw_with_coercion(body, &body_path, res_coercion),
+                    self.convert_module_expr_raw_with_coercion(
+                        self.ta.module_expr(*body),
+                        &body_path,
+                        res_coercion,
+                    ),
                 );
                 RawLambda::function_(
                     1,
@@ -4954,17 +4969,22 @@ impl<'a> RawLambdaConverter<'a> {
             }
             ModuleExprDesc::Tmod_apply(funct, arg, ccarg) => {
                 let loc = module_expr.mod_loc;
-                let inlined = self.get_inlined_attribute_from(&funct.mod_attributes);
+                let inlined =
+                    self.get_inlined_attribute_from(&self.ta.module_expr(*funct).mod_attributes);
                 let funct_lam = self.with_inlined_attribute_check_suppressed(|this| {
                     this.convert_module_expr_raw_with_coercion(
-                        funct,
+                        self.ta.module_expr(*funct),
                         &None,
                         &ModuleCoercion::Tcoerce_none,
                     )
                 });
                 let apply = RawLambda::Lapply(Box::new(crate::raw_lambda::RawApply {
                     ap_func: Box::new(funct_lam),
-                    ap_args: vec![self.convert_module_expr_raw_with_coercion(arg, &None, ccarg)],
+                    ap_args: vec![self.convert_module_expr_raw_with_coercion(
+                        self.ta.module_expr(*arg),
+                        &None,
+                        ccarg,
+                    )],
                     ap_info: ApInfo {
                         loc: self.lam_loc(loc),
                         inlined,
@@ -5027,22 +5047,24 @@ impl<'a> RawLambdaConverter<'a> {
                 // module is an alias (Mty_alias), use 0a + Alias to match OCaml.
                 if matches!(composed, ModuleCoercion::Tcoerce_alias(..))
                     && matches!(
-                        inner.mod_type,
+                        self.ta.module_expr(*inner).mod_type,
                         crate::types::decl::ModuleType::MtyAlias(_, _)
                     )
                 {
                     // OCaml recurses with `transl_module` into `inner` first,
                     // which checks its attributes (translmod.ml:278-279).
-                    self.check_module_attribute(inner);
-                    self.note_possible_required_modules_from_module_expr(inner);
+                    self.check_module_attribute(self.ta.module_expr(*inner));
+                    self.note_possible_required_modules_from_module_expr(
+                        self.ta.module_expr(*inner),
+                    );
                     return self.apply_coercion_raw(
-                        inner.mod_loc,
+                        self.ta.module_expr(*inner).mod_loc,
                         LetKind::Alias,
                         &composed,
                         RawLambda::const_(Constant::ModuleAlias),
                     );
                 }
-                self.convert_module_expr_for_pack_inner(inner, &composed)
+                self.convert_module_expr_for_pack_inner(self.ta.module_expr(*inner), &composed)
             }
             ModuleExprDesc::Tmod_ident(path, _) => {
                 // Check if this ident is an alias with Tcoerce_alias coercion.
@@ -5152,7 +5174,7 @@ impl<'a> RawLambdaConverter<'a> {
                     // Fall through to try the inner module
                 }
                 // Recurse into the inner module expr - this gets the actual structure type
-                return self.get_decl_module_type(inner, env);
+                return self.get_decl_module_type(self.ta.module_expr(*inner), env);
             }
             ModuleExprDesc::Tmod_structure(structure) => {
                 // Build MtySignature from the structure's str_type (which is decl::Signature)
@@ -5555,10 +5577,12 @@ impl<'a> RawLambdaConverter<'a> {
             .iter()
             .map(|mb| {
                 let id = mb.mb_id;
-                let loc = mb.mb_expr.mod_loc;
-                let shape = self.init_shape(&mb.mb_expr);
-                let rhs = self
-                    .convert_module_expr_raw(&mb.mb_expr, &Self::field_path(rootpath, &mb.mb_id));
+                let loc = self.ta.module_expr(mb.mb_expr).mod_loc;
+                let shape = self.init_shape(self.ta.module_expr(mb.mb_expr));
+                let rhs = self.convert_module_expr_raw(
+                    self.ta.module_expr(mb.mb_expr),
+                    &Self::field_path(rootpath, &mb.mb_id),
+                );
                 RecModuleBinding {
                     id,
                     loc: self.loc(loc),
@@ -5643,7 +5667,7 @@ impl<'a> RawLambdaConverter<'a> {
                     self.convert_structure_items_raw(fields, rem, is_top_level, rootpath, cc, loc);
                 fields.truncate(old_len);
                 let mut module_body = self.convert_module_expr_raw(
-                    &binding.mb_expr,
+                    self.ta.module_expr(binding.mb_expr),
                     &Self::field_path(rootpath, &binding.mb_id),
                 );
                 // Apply @inline attribute from module binding (matches OCaml's
@@ -5653,7 +5677,7 @@ impl<'a> RawLambdaConverter<'a> {
                     self.apply_inline_attribute_raw(module_body, binding.mb_loc, inline_attr);
 
                 RawLambda::let_(
-                    Self::pure_module(&binding.mb_expr),
+                    Self::pure_module(self.ta, self.ta.module_expr(binding.mb_expr)),
                     binding.mb_id,
                     module_body,
                     body,
@@ -5686,7 +5710,9 @@ impl<'a> RawLambdaConverter<'a> {
             StructureItemDesc::Tstr_include(incl) => {
                 let ids = Self::include_bound_idents(&incl.incl_type);
                 if ids.is_empty() {
-                    self.note_possible_required_modules_from_empty_include(&incl.incl_mod);
+                    self.note_possible_required_modules_from_empty_include(
+                        self.ta.module_expr(incl.incl_mod),
+                    );
                 }
                 let old_len = fields.len();
                 fields.extend(ids.iter().map(|(id, _)| *id));
@@ -5697,9 +5723,9 @@ impl<'a> RawLambdaConverter<'a> {
                 let body = self.rebind_included_idents_raw(&mid, &ids, body, incl.incl_loc);
 
                 RawLambda::let_(
-                    Self::pure_module(&incl.incl_mod),
+                    Self::pure_module(self.ta, self.ta.module_expr(incl.incl_mod)),
                     mid,
-                    self.convert_module_expr_raw(&incl.incl_mod, &None),
+                    self.convert_module_expr_raw(self.ta.module_expr(incl.incl_mod), &None),
                     body,
                 )
             }
@@ -6180,7 +6206,7 @@ impl<'a> RawLambdaConverter<'a> {
             ExpressionDesc::Texp_letmodule(id, _, modl, body) => RawLambda::let_(
                 LetKind::Strict,
                 *id,
-                self.convert_module_expr_raw(modl, &None),
+                self.convert_module_expr_raw(self.ta.module_expr(*modl), &None),
                 self.convert_expr_raw(self.ta.expr(*body)),
             ),
             ExpressionDesc::Texp_letexception(ext, body) => RawLambda::let_(
@@ -6192,7 +6218,9 @@ impl<'a> RawLambdaConverter<'a> {
             ExpressionDesc::Texp_extension_constructor(_, path) => {
                 self.translate_extension_path_raw(path, SrcLoc::from(expr.exp_loc))
             }
-            ExpressionDesc::Texp_pack(modl) => self.convert_module_expr_for_pack_raw(modl),
+            ExpressionDesc::Texp_pack(modl) => {
+                self.convert_module_expr_for_pack_raw(self.ta.module_expr(*modl))
+            }
             ExpressionDesc::Texp_assert(inner_expr) => {
                 if matches!(
                     self.ta.expr(*inner_expr).exp_desc,

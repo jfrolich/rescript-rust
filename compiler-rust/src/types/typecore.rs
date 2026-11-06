@@ -10650,14 +10650,14 @@ fn collect_expression_ident_heads(ta: &TypedArena, exp: TExprIdx, ids: &mut Vec<
             }
         }
         ExpressionDesc::Texp_letmodule(_, _, module_expr, body) => {
-            collect_module_expr_ident_heads(ta, module_expr, ids);
+            collect_module_expr_ident_heads(ta, ta.module_expr(*module_expr), ids);
             collect_expression_ident_heads(ta, *body, ids);
         }
         ExpressionDesc::Texp_letexception(_, body) => {
             collect_expression_ident_heads(ta, *body, ids);
         }
         ExpressionDesc::Texp_pack(module_expr) => {
-            collect_module_expr_ident_heads(ta, module_expr, ids);
+            collect_module_expr_ident_heads(ta, ta.module_expr(*module_expr), ids);
         }
         ExpressionDesc::Texp_constant(_)
         | ExpressionDesc::Texp_variant(_, None)
@@ -10699,15 +10699,19 @@ fn collect_module_expr_ident_heads(
                         }
                     }
                     StructureItemDesc::Tstr_module(binding) => {
-                        collect_module_expr_ident_heads(ta, &binding.mb_expr, ids);
+                        collect_module_expr_ident_heads(ta, ta.module_expr(binding.mb_expr), ids);
                     }
                     StructureItemDesc::Tstr_recmodule(bindings) => {
                         for binding in bindings {
-                            collect_module_expr_ident_heads(ta, &binding.mb_expr, ids);
+                            collect_module_expr_ident_heads(
+                                ta,
+                                ta.module_expr(binding.mb_expr),
+                                ids,
+                            );
                         }
                     }
                     StructureItemDesc::Tstr_include(include) => {
-                        collect_module_expr_ident_heads(ta, &include.incl_mod, ids);
+                        collect_module_expr_ident_heads(ta, ta.module_expr(include.incl_mod), ids);
                     }
                     StructureItemDesc::Tstr_primitive(_)
                     | StructureItemDesc::Tstr_type(_, _)
@@ -10720,17 +10724,17 @@ fn collect_module_expr_ident_heads(
             }
         }
         ModuleExprDesc::Tmod_apply(functor, arg, _) => {
-            collect_module_expr_ident_heads(ta, functor, ids);
-            collect_module_expr_ident_heads(ta, arg, ids);
+            collect_module_expr_ident_heads(ta, ta.module_expr(*functor), ids);
+            collect_module_expr_ident_heads(ta, ta.module_expr(*arg), ids);
         }
         ModuleExprDesc::Tmod_functor(_, _, mty, body) => {
             if let Some(mty) = mty {
                 collect_module_type_ident_heads(ta, mty, ids);
             }
-            collect_module_expr_ident_heads(ta, body, ids);
+            collect_module_expr_ident_heads(ta, ta.module_expr(*body), ids);
         }
         ModuleExprDesc::Tmod_constraint(module_expr, _, constraint, _) => {
-            collect_module_expr_ident_heads(ta, module_expr, ids);
+            collect_module_expr_ident_heads(ta, ta.module_expr(*module_expr), ids);
             if let ModuleTypeConstraint::Tmodtype_explicit(mty) = constraint {
                 collect_module_type_ident_heads(ta, mty, ids);
             }
@@ -10748,7 +10752,7 @@ fn collect_module_type_ident_heads(
 ) {
     match &module_type.mty_desc {
         ModuleTypeDesc::Tmty_typeof(module_expr) => {
-            collect_module_expr_ident_heads(ta, module_expr, ids);
+            collect_module_expr_ident_heads(ta, ta.module_expr(*module_expr), ids);
         }
         ModuleTypeDesc::Tmty_functor(_, _, param, body) => {
             if let Some(param) = param {
@@ -18358,7 +18362,7 @@ fn type_letmodule(
                 txt: mod_name_str.clone(),
                 loc: name.loc,
             },
-            Box::new(typed_mod),
+            tctx.typed.push_module_expr(typed_mod),
             tctx.push_expr(typed_body),
         ),
         loc,
@@ -18580,7 +18584,10 @@ fn type_pack(
         }
     }
 
-    fn packed_module_path_from_expr(expr: &crate::types::typedtree::ModuleExpr) -> Option<Path> {
+    fn packed_module_path_from_expr(
+        ta: &TypedArena,
+        expr: &crate::types::typedtree::ModuleExpr,
+    ) -> Option<Path> {
         match &expr.mod_desc {
             crate::types::typedtree::ModuleExprDesc::Tmod_ident(path, _) => Some(path.clone()),
             // Matches compiler/ml/typemod.ml:1687-1691 exactly: OCaml accepts
@@ -18590,7 +18597,7 @@ fn type_pack(
                 _,
                 crate::types::typedtree::ModuleTypeConstraint::Tmodtype_implicit,
                 _,
-            ) => match &inner.mod_desc {
+            ) => match &ta.module_expr(*inner).mod_desc {
                 crate::types::typedtree::ModuleExprDesc::Tmod_ident(path, _) => Some(path.clone()),
                 _ => None,
             },
@@ -18601,7 +18608,7 @@ fn type_pack(
     // Matches compiler/ml/typemod.ml:1686-1694: use a direct module path for
     // identifiers and implicit constraints over identifiers; otherwise enter a
     // fresh `%M` module before building constrained package paths.
-    let packed_module_path = packed_module_path_from_expr(&typed_module);
+    let packed_module_path = packed_module_path_from_expr(&tctx.typed, &typed_module);
     let (pack_arg_base_path, package_env) = match packed_module_path.clone() {
         Some(path) => (Some(path), env.clone()),
         None => {
@@ -18754,7 +18761,7 @@ fn type_pack(
     })?;
     let wrapped_module = crate::types::typedtree::ModuleExpr {
         mod_desc: crate::types::typedtree::ModuleExprDesc::Tmod_constraint(
-            Box::new(typed_module),
+            tctx.typed.push_module_expr(typed_module),
             decl_package_mty.clone(),
             crate::types::typedtree::ModuleTypeConstraint::Tmodtype_implicit,
             coercion,
@@ -18784,7 +18791,7 @@ fn type_pack(
     rue_result?;
 
     Ok(Expression::new(
-        ExpressionDesc::Texp_pack(Box::new(wrapped_module)),
+        ExpressionDesc::Texp_pack(tctx.typed.push_module_expr(wrapped_module)),
         loc,
         packed_type,
         tctx.type_ctx.store_typed_env(env),
@@ -18971,7 +18978,7 @@ fn type_expect_with_module_unpacks(
         crate::types::typedtree::ExpressionDesc::Texp_letmodule(
             letmod_id,
             unpack.name.clone(),
-            Box::new(unpack_module),
+            tctx.typed.push_module_expr(unpack_module),
             tctx.push_expr(typed_body),
         ),
         body.pexp_loc,
@@ -19072,10 +19079,12 @@ fn is_nonexpansive_node(tctx: &TypeCheckContext<'_>, exp: &Expression) -> bool {
         }
         ExpressionDesc::Texp_sequence(_, expr) => is_nonexpansive_expression(tctx, *expr),
         ExpressionDesc::Texp_letmodule(_, _, module_expr, expr) => {
-            is_nonexpansive_module_expr(tctx, module_expr)
+            is_nonexpansive_module_expr(tctx, tctx.typed.module_expr(*module_expr))
                 && is_nonexpansive_expression(tctx, *expr)
         }
-        ExpressionDesc::Texp_pack(module_expr) => is_nonexpansive_module_expr(tctx, module_expr),
+        ExpressionDesc::Texp_pack(module_expr) => {
+            is_nonexpansive_module_expr(tctx, tctx.typed.module_expr(*module_expr))
+        }
         ExpressionDesc::Texp_assert(expr) => is_nonexpansive_expression(tctx, *expr),
         ExpressionDesc::Texp_apply {
             funct,
@@ -19150,7 +19159,7 @@ fn is_nonexpansive_module_expr(
             is_nonexpansive_expression(tctx, *expr)
         }
         crate::types::typedtree::ModuleExprDesc::Tmod_constraint(inner, _, _, _) => {
-            is_nonexpansive_module_expr(tctx, inner)
+            is_nonexpansive_module_expr(tctx, tctx.typed.module_expr(*inner))
         }
         crate::types::typedtree::ModuleExprDesc::Tmod_structure(structure) => {
             structure.str_items.iter().all(|item| match &item.str_desc {
@@ -19166,14 +19175,16 @@ fn is_nonexpansive_module_expr(
                     .iter()
                     .all(|binding| is_nonexpansive_expression(tctx, binding.vb_expr)),
                 crate::types::typedtree::StructureItemDesc::Tstr_module(binding) => {
-                    is_nonexpansive_module_expr(tctx, &binding.mb_expr)
+                    is_nonexpansive_module_expr(tctx, tctx.typed.module_expr(binding.mb_expr))
                 }
                 crate::types::typedtree::StructureItemDesc::Tstr_include(include_decl) => {
-                    is_nonexpansive_module_expr(tctx, &include_decl.incl_mod)
+                    is_nonexpansive_module_expr(tctx, tctx.typed.module_expr(include_decl.incl_mod))
                 }
-                crate::types::typedtree::StructureItemDesc::Tstr_recmodule(bindings) => bindings
-                    .iter()
-                    .all(|binding| is_nonexpansive_module_expr(tctx, &binding.mb_expr)),
+                crate::types::typedtree::StructureItemDesc::Tstr_recmodule(bindings) => {
+                    bindings.iter().all(|binding| {
+                        is_nonexpansive_module_expr(tctx, tctx.typed.module_expr(binding.mb_expr))
+                    })
+                }
                 crate::types::typedtree::StructureItemDesc::Tstr_exception(ext) => matches!(
                     ext.ext_kind,
                     crate::types::typedtree::ExtensionConstructorKind::Text_rebind(_, _)
@@ -19632,7 +19643,7 @@ pub(crate) fn typed_expression_uses_ident(ta: &TypedArena, expr: TExprIdx, targe
             // OCaml compiler/ml/typecore.ml:4610-4655 records value-use
             // callbacks while typing the RHS, and typecore.ml:3399-3425 /
             // typemod.ml:1358-1377 type the let-module RHS before the body.
-            typed_module_expr_uses_ident(ta, module_expr, target)
+            typed_module_expr_uses_ident(ta, ta.module_expr(*module_expr), target)
                 || typed_expression_uses_ident(ta, *body, target)
         }
         ExpressionDesc::Texp_letexception(_, body) => {
@@ -19643,7 +19654,7 @@ pub(crate) fn typed_expression_uses_ident(ta: &TypedArena, expr: TExprIdx, targe
             // typemod.ml:1358-1377 type packed module expressions by typing
             // the underlying module expression, so local value uses inside
             // `Pmod_unpack` count for warning 26/27.
-            typed_module_expr_uses_ident(ta, module_expr, target)
+            typed_module_expr_uses_ident(ta, ta.module_expr(*module_expr), target)
         }
         ExpressionDesc::Texp_constant(_)
         | ExpressionDesc::Texp_break
@@ -19659,16 +19670,16 @@ fn typed_module_expr_uses_ident(ta: &TypedArena, module_expr: &ModuleExpr, targe
             .iter()
             .any(|item| typed_structure_item_uses_ident(ta, item, target)),
         ModuleExprDesc::Tmod_apply(func, arg, _) => {
-            typed_module_expr_uses_ident(ta, func, target)
-                || typed_module_expr_uses_ident(ta, arg, target)
+            typed_module_expr_uses_ident(ta, ta.module_expr(*func), target)
+                || typed_module_expr_uses_ident(ta, ta.module_expr(*arg), target)
         }
         ModuleExprDesc::Tmod_functor(_, _, arg, body) => {
             arg.as_deref()
                 .is_some_and(|arg| typed_module_type_uses_ident(ta, arg, target))
-                || typed_module_expr_uses_ident(ta, body, target)
+                || typed_module_expr_uses_ident(ta, ta.module_expr(*body), target)
         }
         ModuleExprDesc::Tmod_constraint(inner, _, constraint, _) => {
-            typed_module_expr_uses_ident(ta, inner, target)
+            typed_module_expr_uses_ident(ta, ta.module_expr(*inner), target)
                 || match constraint {
                     ModuleTypeConstraint::Tmodtype_explicit(module_type) => {
                         typed_module_type_uses_ident(ta, module_type, target)
@@ -19684,7 +19695,7 @@ fn typed_module_expr_uses_ident(ta: &TypedArena, module_expr: &ModuleExpr, targe
 fn typed_module_type_uses_ident(ta: &TypedArena, module_type: &ModuleType, target: &Ident) -> bool {
     match &module_type.mty_desc {
         ModuleTypeDesc::Tmty_typeof(module_expr) => {
-            typed_module_expr_uses_ident(ta, module_expr, target)
+            typed_module_expr_uses_ident(ta, ta.module_expr(*module_expr), target)
         }
         ModuleTypeDesc::Tmty_functor(_, _, arg, body) => {
             arg.as_deref()
@@ -19736,17 +19747,17 @@ fn typed_structure_item_uses_ident(ta: &TypedArena, item: &StructureItem, target
             .iter()
             .any(|binding| typed_expression_uses_ident(ta, binding.vb_expr, target)),
         StructureItemDesc::Tstr_module(binding) => {
-            typed_module_expr_uses_ident(ta, &binding.mb_expr, target)
+            typed_module_expr_uses_ident(ta, ta.module_expr(binding.mb_expr), target)
         }
-        StructureItemDesc::Tstr_recmodule(bindings) => bindings
-            .iter()
-            .any(|binding| typed_module_expr_uses_ident(ta, &binding.mb_expr, target)),
+        StructureItemDesc::Tstr_recmodule(bindings) => bindings.iter().any(|binding| {
+            typed_module_expr_uses_ident(ta, ta.module_expr(binding.mb_expr), target)
+        }),
         StructureItemDesc::Tstr_modtype(decl) => decl
             .mtd_type
             .as_ref()
             .is_some_and(|module_type| typed_module_type_uses_ident(ta, module_type, target)),
         StructureItemDesc::Tstr_include(include) => {
-            typed_module_expr_uses_ident(ta, &include.incl_mod, target)
+            typed_module_expr_uses_ident(ta, ta.module_expr(include.incl_mod), target)
         }
         StructureItemDesc::Tstr_primitive(_)
         | StructureItemDesc::Tstr_type(_, _)
@@ -20065,14 +20076,14 @@ fn rec_module_expr(
             rec_use_guard(rec_structure(ta, ctx, env, structure))
         }
         crate::types::typedtree::ModuleExprDesc::Tmod_functor(_, _, _, body) => {
-            rec_use_delay(rec_module_expr(ta, ctx, env, body))
+            rec_use_delay(rec_module_expr(ta, ctx, env, ta.module_expr(*body)))
         }
         crate::types::typedtree::ModuleExprDesc::Tmod_apply(functor, arg, _) => rec_use_join(
-            rec_use_inspect(rec_module_expr(ta, ctx, env, functor)),
-            rec_use_inspect(rec_module_expr(ta, ctx, env, arg)),
+            rec_use_inspect(rec_module_expr(ta, ctx, env, ta.module_expr(*functor))),
+            rec_use_inspect(rec_module_expr(ta, ctx, env, ta.module_expr(*arg))),
         ),
         crate::types::typedtree::ModuleExprDesc::Tmod_constraint(inner, _, _, coercion) => {
-            let use_ = rec_module_expr(ta, ctx, env, inner);
+            let use_ = rec_module_expr(ta, ctx, env, ta.module_expr(*inner));
             if matches!(
                 coercion,
                 crate::types::typedtree::ModuleCoercion::Tcoerce_none
@@ -20118,20 +20129,28 @@ fn rec_structure_item(
             rec_value_bindings(ta, ctx, *rec_flag, env, ta.value_bindings(*bindings))
         }
         crate::types::typedtree::StructureItemDesc::Tstr_module(binding) => {
-            let use_ = rec_module_expr(ta, ctx, env, &binding.mb_expr);
+            let use_ = rec_module_expr(ta, ctx, env, ta.module_expr(binding.mb_expr));
             let mut item_env = RecEnv::default();
             item_env.insert(binding.mb_id, use_.clone());
             (item_env, use_)
         }
         crate::types::typedtree::StructureItemDesc::Tstr_recmodule(bindings) => {
             let use_ = bindings.iter().fold(RecUse::default(), |use_, binding| {
-                rec_use_join(use_, rec_module_expr(ta, ctx, env, &binding.mb_expr))
+                rec_use_join(
+                    use_,
+                    rec_module_expr(ta, ctx, env, ta.module_expr(binding.mb_expr)),
+                )
             });
             (RecEnv::default(), rec_use_inspect(use_))
         }
         crate::types::typedtree::StructureItemDesc::Tstr_include(include_decl) => (
             RecEnv::default(),
-            rec_use_inspect(rec_module_expr(ta, ctx, env, &include_decl.incl_mod)),
+            rec_use_inspect(rec_module_expr(
+                ta,
+                ctx,
+                env,
+                ta.module_expr(include_decl.incl_mod),
+            )),
         ),
         crate::types::typedtree::StructureItemDesc::Tstr_primitive(_)
         | crate::types::typedtree::StructureItemDesc::Tstr_type(_, _)
@@ -20158,7 +20177,7 @@ fn rec_expression(ta: &TypedArena, ctx: &TypeContext, env: &RecEnv, expr: TExprI
             )
         }
         ExpressionDesc::Texp_letmodule(id, _, module_expr, body) => {
-            let module_use = rec_module_expr(ta, ctx, env, module_expr);
+            let module_use = rec_module_expr(ta, ctx, env, ta.module_expr(*module_expr));
             let mut body_env = env.clone();
             body_env.insert(*id, module_use.clone());
             rec_use_join(
@@ -20360,7 +20379,9 @@ fn rec_expression(ta: &TypedArena, ctx: &TypeContext, env: &RecEnv, expr: TExprI
             rec_use_inspect(rec_expression(ta, ctx, env, *base))
         }
         ExpressionDesc::Texp_letexception(_, body) => rec_expression(ta, ctx, env, *body),
-        ExpressionDesc::Texp_pack(module_expr) => rec_module_expr(ta, ctx, env, module_expr),
+        ExpressionDesc::Texp_pack(module_expr) => {
+            rec_module_expr(ta, ctx, env, ta.module_expr(*module_expr))
+        }
         ExpressionDesc::Texp_try(body, cases) => {
             let cases_use = ta
                 .cases(*cases)
