@@ -25,8 +25,9 @@ use crate::parser::ast::{
 use crate::types::asttypes::ArgLabel as TypeArgLabel;
 use crate::types::decl::ModuleType as DeclModuleType;
 pub use crate::types::tast_arena::{
-    TArgList, TCaseList, TCoreTypeIdx, TCoreTypeList, TExprIdx, TExprList, TFieldList, TModExprIdx,
-    TModTypeIdx, TParamList, TSigItemList, TStrItemList, TVbList, TypedArena,
+    TArgList, TCaseList, TCoreTypeIdx, TCoreTypeList, TExprIdx, TExprList, TExtIdx, TFieldList,
+    TModExprIdx, TModTypeIdx, TParamList, TSigItemList, TStrItemList, TValDescIdx, TVbList,
+    TypedArena,
 };
 use crate::types::{
     ConstructorDescription, LabelDescription, Path, RowDesc, TypeExprRef, ValueDescription,
@@ -456,7 +457,7 @@ pub enum ExpressionDesc {
     Texp_letmodule(Ident, Loc<String>, TModExprIdx, TExprIdx),
 
     /// Let exception: `let exception C of T in E`.
-    Texp_letexception(Box<ExtensionConstructor>, TExprIdx),
+    Texp_letexception(TExtIdx, TExprIdx),
 
     /// Assert: `assert E`.
     Texp_assert(TExprIdx),
@@ -751,10 +752,10 @@ pub struct TypedSignatureItem {
 /// Typed signature item description (matches OCaml's `Typedtree.signature_item_desc`).
 #[derive(Debug, Clone)]
 pub enum TypedSignatureItemDesc {
-    Tsig_value(TypedValueDescription),
+    Tsig_value(TValDescIdx),
     Tsig_type(RecFlag, Vec<TypedTypeDeclaration>),
     Tsig_typext(TypeExtension),
-    Tsig_exception(ExtensionConstructor),
+    Tsig_exception(TExtIdx),
     Tsig_module(TypedModuleDeclaration),
     Tsig_recmodule(Vec<TypedModuleDeclaration>),
     Tsig_modtype(ModuleTypeDeclaration),
@@ -854,13 +855,13 @@ pub enum StructureItemDesc {
     /// Value binding: `let P = E`.
     Tstr_value(RecFlag, TVbList),
     /// Primitive declaration: `external f : t = "..."`.
-    Tstr_primitive(TypedValueDescription),
+    Tstr_primitive(TValDescIdx),
     /// Type declaration: `type t = ...`.
     Tstr_type(RecFlag, Vec<TypedTypeDeclaration>),
     /// Type extension: `type t += ...`.
     Tstr_typext(TypeExtension),
     /// Exception declaration: `exception C`.
-    Tstr_exception(ExtensionConstructor),
+    Tstr_exception(TExtIdx),
     /// Module binding: `module M = ME`.
     Tstr_module(ModuleBinding),
     /// Recursive modules: `module rec M = ...`.
@@ -1287,6 +1288,16 @@ mod node_size_tests {
         assert_eq!(size_of::<super::ModuleExpr>(), 184);
         assert_eq!(size_of::<super::ModuleType>(), 112);
         assert_eq!(size_of::<super::ModuleTypeDesc>(), 56);
+    }
+
+    // Structure and signature items keep their large payloads (value
+    // descriptions, extension constructors) behind arena handles.
+    #[test]
+    fn typed_items_stay_compact() {
+        use std::mem::size_of;
+        assert_eq!(size_of::<super::StructureItem>(), 96);
+        assert_eq!(size_of::<super::TypedSignatureItem>(), 96);
+        assert_eq!(size_of::<super::TypedCoreType>(), 80);
     }
 
     // Children live in the TypedArena: list-carrying nodes hold 4-byte

@@ -18,8 +18,9 @@ use std::num::NonZeroU32;
 use crate::parse_arena::ArenaList;
 
 use super::typedtree::{
-    ApplyArg, Case, Expression, FunctionParam, ModuleExpr, ModuleType, RecordField, StructureItem,
-    TypedCoreType, TypedSignatureItem, ValueBinding,
+    ApplyArg, Case, Expression, ExtensionConstructor, FunctionParam, ModuleExpr, ModuleType,
+    RecordField, StructureItem, TypedCoreType, TypedSignatureItem, TypedValueDescription,
+    ValueBinding,
 };
 
 macro_rules! arena_handle {
@@ -59,6 +60,18 @@ arena_handle!(
 arena_handle!(
     /// Handle of a typed core type (a type annotation) in a [`TypedArena`].
     TCoreTypeIdx
+);
+
+arena_handle!(
+    /// Handle of a typed extension constructor (`exception` or `type t +=`
+    /// constructor) in a [`TypedArena`].
+    TExtIdx
+);
+
+arena_handle!(
+    /// Handle of a typed value description (`external` or signature `let`)
+    /// in a [`TypedArena`].
+    TValDescIdx
 );
 
 /// A list of typed core types (tuple and constructor arguments).
@@ -178,6 +191,8 @@ pub struct TypedArena {
     module_exprs: Vec<ModuleExpr>,
     module_types: Vec<ModuleType>,
     core_types: Vec<TypedCoreType>,
+    extension_constructors: Vec<ExtensionConstructor>,
+    value_descriptions: Vec<TypedValueDescription>,
     core_type_lists: ListPool<TCoreTypeIdx>,
     cases: ListPool<Case>,
     value_bindings: ListPool<ValueBinding>,
@@ -346,6 +361,34 @@ impl TypedArena {
         self.core_type_list(list)
             .iter()
             .map(|&idx| self.core_type(idx))
+    }
+
+    /// Store an extension constructor.
+    #[inline]
+    pub fn push_extension_constructor(&mut self, ext: ExtensionConstructor) -> TExtIdx {
+        let idx = TExtIdx::from_index(self.extension_constructors.len());
+        self.extension_constructors.push(ext);
+        idx
+    }
+
+    /// An extension constructor by handle.
+    #[inline]
+    pub fn extension_constructor(&self, idx: TExtIdx) -> &ExtensionConstructor {
+        &self.extension_constructors[idx.index()]
+    }
+
+    /// Store a value description.
+    #[inline]
+    pub fn push_value_description(&mut self, vd: TypedValueDescription) -> TValDescIdx {
+        let idx = TValDescIdx::from_index(self.value_descriptions.len());
+        self.value_descriptions.push(vd);
+        idx
+    }
+
+    /// A value description by handle.
+    #[inline]
+    pub fn value_description(&self, idx: TValDescIdx) -> &TypedValueDescription {
+        &self.value_descriptions[idx.index()]
     }
 
     /// Number of stored expressions.

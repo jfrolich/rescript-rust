@@ -5698,16 +5698,16 @@ impl<'a> RawLambdaConverter<'a> {
             }
             StructureItemDesc::Tstr_exception(ext) => {
                 let old_len = fields.len();
-                fields.push(ext.ext_id);
+                fields.push(self.ta.extension_constructor(*ext).ext_id);
                 let body =
                     self.convert_structure_items_raw(fields, rem, is_top_level, rootpath, cc, loc);
                 fields.truncate(old_len);
                 RawLambda::let_(
                     LetKind::Strict,
-                    ext.ext_id,
+                    self.ta.extension_constructor(*ext).ext_id,
                     self.transl_extension_constructor_raw(
-                        Self::field_path(rootpath, &ext.ext_id),
-                        ext,
+                        Self::field_path(rootpath, &self.ta.extension_constructor(*ext).ext_id),
+                        self.ta.extension_constructor(*ext),
                     ),
                     body,
                 )
@@ -6216,8 +6216,8 @@ impl<'a> RawLambdaConverter<'a> {
             ),
             ExpressionDesc::Texp_letexception(ext, body) => RawLambda::let_(
                 LetKind::Strict,
-                ext.ext_id,
-                self.transl_extension_constructor_raw(None, ext),
+                self.ta.extension_constructor(*ext).ext_id,
+                self.transl_extension_constructor_raw(None, self.ta.extension_constructor(*ext)),
                 self.convert_expr_raw(self.ta.expr(*body)),
             ),
             ExpressionDesc::Texp_extension_constructor(_, path) => {

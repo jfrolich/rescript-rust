@@ -373,7 +373,7 @@ pub fn translate_structure_item(
                 output_file_relative,
                 resolver,
                 type_env,
-                value_description,
+                ta.value_description(*value_description),
             )
         }
         StructureItemDesc::Tstr_module(module_binding) => translate_module_binding(

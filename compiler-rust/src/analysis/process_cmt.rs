@@ -537,14 +537,23 @@ impl Processor<'_> {
                 let stamps = &mut self.stamps;
                 let declared = add_declared(
                     Located {
-                        txt: vd.val_name.txt.clone(),
-                        loc: Loc::of_idx(self.ctx.arena, vd.val_name.loc),
+                        txt: self.ctx.ta.value_description(*vd).val_name.txt.clone(),
+                        loc: Loc::of_idx(
+                            self.ctx.arena,
+                            self.ctx.ta.value_description(*vd).val_name.loc,
+                        ),
                     },
-                    Loc::of_idx(self.ctx.arena, vd.val_loc),
-                    vd.val_id.binding_time(),
+                    Loc::of_idx(self.ctx.arena, self.ctx.ta.value_description(*vd).val_loc),
+                    self.ctx.ta.value_description(*vd).val_id.binding_time(),
                     env,
-                    self.ctx.ta.core_type(vd.val_desc).ctyp_type,
-                    Attrs::Parsed(vd.val_attributes.as_slice(), self.ctx.arena),
+                    self.ctx
+                        .ta
+                        .core_type(self.ctx.ta.value_description(*vd).val_desc)
+                        .ctyp_type,
+                    Attrs::Parsed(
+                        self.ctx.ta.value_description(*vd).val_attributes.as_slice(),
+                        self.ctx.arena,
+                    ),
                     Some((exported, ExportedKind::Value)),
                     |stamp, d| stamps.add_value(stamp, d),
                 );
@@ -774,15 +783,24 @@ impl Processor<'_> {
                     self.for_type_signature_item(&env, exported, item)
                 })
             }
-            tt::StructureItemDesc::Tstr_primitive(vd) if !self.primitive_is_fragment(vd) => {
+            tt::StructureItemDesc::Tstr_primitive(vd)
+                if !self.primitive_is_fragment(self.ctx.ta.value_description(*vd)) =>
+            {
                 let stamps = &mut self.stamps;
                 let declared = add_declared(
-                    self.ctx.located(&vd.val_name),
-                    Loc::of_idx(self.ctx.arena, vd.val_loc),
-                    vd.val_id.binding_time(),
+                    self.ctx
+                        .located(&self.ctx.ta.value_description(*vd).val_name),
+                    Loc::of_idx(self.ctx.arena, self.ctx.ta.value_description(*vd).val_loc),
+                    self.ctx.ta.value_description(*vd).val_id.binding_time(),
                     env,
-                    self.ctx.ta.core_type(vd.val_desc).ctyp_type,
-                    Attrs::Parsed(vd.val_attributes.as_slice(), self.ctx.arena),
+                    self.ctx
+                        .ta
+                        .core_type(self.ctx.ta.value_description(*vd).val_desc)
+                        .ctyp_type,
+                    Attrs::Parsed(
+                        self.ctx.ta.value_description(*vd).val_attributes.as_slice(),
+                        self.ctx.arena,
+                    ),
                     Some((exported, ExportedKind::Value)),
                     |stamp, d| stamps.add_value(stamp, d),
                 );

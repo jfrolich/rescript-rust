@@ -193,9 +193,9 @@ pub fn translate_signature_item(
             let is_import = crate::gentype::annotation::has_attribute(
                 arena,
                 crate::gentype::annotation::tag_is_gentype_import,
-                &value_description.val_attributes,
+                &ta.value_description(*value_description).val_attributes,
             );
-            if value_description.val_prim.is_some() || is_import {
+            if ta.value_description(*value_description).val_prim.is_some() || is_import {
                 crate::gentype::translation::translate_primitive(
                     ta,
                     ctx,
@@ -204,11 +204,12 @@ pub fn translate_signature_item(
                     output_file_relative,
                     resolver,
                     type_env,
-                    value_description,
+                    ta.value_description(*value_description),
                 )
             } else {
-                let module_item =
-                    crate::gentype::runtime::new_module_item(value_description.val_id.name());
+                let module_item = crate::gentype::runtime::new_module_item(
+                    ta.value_description(*value_description).val_id.name(),
+                );
                 crate::gentype::type_env::update_module_item(module_item, type_env);
                 translate_signature_value(
                     ta,
@@ -218,7 +219,7 @@ pub fn translate_signature_item(
                     output_file_relative,
                     resolver,
                     type_env,
-                    value_description,
+                    ta.value_description(*value_description),
                 )
             }
         }

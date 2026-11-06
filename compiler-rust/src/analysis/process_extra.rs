@@ -598,20 +598,26 @@ impl<'a> TastIterator<'a> for ExtraIterator<'a, '_> {
 
     fn signature_item(&mut self, item: &tt::TypedSignatureItem) {
         if let tt::TypedSignatureItemDesc::Tsig_value(vd) = &item.sig_desc {
-            let stamp = vd.val_id.binding_time();
+            let stamp = self.ctx.ta.value_description(*vd).val_id.binding_time();
             if self.file.stamps.find_value(stamp).is_none() {
                 let name = Located {
-                    txt: vd.val_name.txt.clone(),
-                    loc: self.loc(vd.val_name.loc),
+                    txt: self.ctx.ta.value_description(*vd).val_name.txt.clone(),
+                    loc: self.loc(self.ctx.ta.value_description(*vd).val_name.loc),
                 };
                 let declared = attrs::new_declared(
-                    self.ctx.ta.core_type(vd.val_desc).ctyp_type,
-                    self.loc(vd.val_loc),
+                    self.ctx
+                        .ta
+                        .core_type(self.ctx.ta.value_description(*vd).val_desc)
+                        .ctyp_type,
+                    self.loc(self.ctx.ta.value_description(*vd).val_loc),
                     name.clone(),
                     stamp,
                     ModulePath::NotVisible,
                     false,
-                    Attrs::Parsed(vd.val_attributes.as_slice(), self.ctx.arena),
+                    Attrs::Parsed(
+                        self.ctx.ta.value_description(*vd).val_attributes.as_slice(),
+                        self.ctx.arena,
+                    ),
                 );
                 self.file.stamps.add_value(stamp, declared);
                 add_reference(&mut self.extra, stamp, name.loc);
@@ -620,7 +626,10 @@ impl<'a> TastIterator<'a> for ExtraIterator<'a, '_> {
                     name.loc,
                     LocType::Typed(
                         name.txt,
-                        self.ctx.ta.core_type(vd.val_desc).ctyp_type,
+                        self.ctx
+                            .ta
+                            .core_type(self.ctx.ta.value_description(*vd).val_desc)
+                            .ctyp_type,
                         LocKind::Definition(stamp, Tip::Value),
                     ),
                 );

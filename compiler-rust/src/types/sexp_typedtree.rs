@@ -1268,7 +1268,7 @@ fn sexp_expression_desc(
         ]),
         ExpressionDesc::Texp_letexception(ec, e) => Sexp::list(vec![
             Sexp::atom("Texp_letexception"),
-            sexp_extension_constructor(arena, ctx, cx, ec),
+            sexp_extension_constructor(arena, ctx, cx, cx.ta.extension_constructor(*ec)),
             sexp_expression(arena, ctx, cx, *e),
         ]),
         ExpressionDesc::Texp_assert(e) => Sexp::list(vec![
@@ -1950,7 +1950,7 @@ fn sexp_structure_item_desc(
             ])
         }
         StructureItemDesc::Tstr_primitive(vd) => {
-            let vd_sexp = sexp_value_description(arena, ctx, cx, vd);
+            let vd_sexp = sexp_value_description(arena, ctx, cx, cx.ta.value_description(*vd));
             Sexp::list(vec![Sexp::atom("Tstr_primitive"), vd_sexp])
         }
         StructureItemDesc::Tstr_type(flag, tds) => {
@@ -1970,7 +1970,7 @@ fn sexp_structure_item_desc(
         ]),
         StructureItemDesc::Tstr_exception(ec) => Sexp::list(vec![
             Sexp::atom("Tstr_exception"),
-            sexp_extension_constructor(arena, ctx, cx, ec),
+            sexp_extension_constructor(arena, ctx, cx, cx.ta.extension_constructor(*ec)),
         ]),
         StructureItemDesc::Tstr_module(mb) => Sexp::list(vec![
             Sexp::atom("Tstr_module"),
@@ -2196,7 +2196,7 @@ fn sexp_typed_signature_item_desc(
     match desc {
         TypedSignatureItemDesc::Tsig_value(vd) => Sexp::list(vec![
             Sexp::atom("Tsig_value"),
-            sexp_value_description(arena, ctx, cx, vd),
+            sexp_value_description(arena, ctx, cx, cx.ta.value_description(*vd)),
         ]),
         TypedSignatureItemDesc::Tsig_type(flag, tds) => {
             let mut td_sexps = Vec::new();
@@ -2215,7 +2215,7 @@ fn sexp_typed_signature_item_desc(
         ]),
         TypedSignatureItemDesc::Tsig_exception(ec) => Sexp::list(vec![
             Sexp::atom("Tsig_exception"),
-            sexp_extension_constructor(arena, ctx, cx, ec),
+            sexp_extension_constructor(arena, ctx, cx, cx.ta.extension_constructor(*ec)),
         ]),
         TypedSignatureItemDesc::Tsig_module(md) => Sexp::list(vec![
             Sexp::atom("Tsig_module"),

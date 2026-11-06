@@ -354,9 +354,10 @@ pub fn signature_item_check_annotation(
                 check_annotation(type_declaration.typ_loc, &type_declaration.typ_attributes)
             })
         }
-        TypedSignatureItemDesc::Tsig_value(value_description) => {
-            check_annotation(value_description.val_loc, &value_description.val_attributes)
-        }
+        TypedSignatureItemDesc::Tsig_value(value_description) => check_annotation(
+            ta.value_description(*value_description).val_loc,
+            &ta.value_description(*value_description).val_attributes,
+        ),
         TypedSignatureItemDesc::Tsig_module(module_declaration) => {
             module_declaration_check_annotation(arena, ta, check_annotation, module_declaration)
         }
@@ -411,9 +412,10 @@ pub fn structure_item_check_annotation(
             .value_bindings(*value_bindings)
             .iter()
             .any(|vb| check_annotation(vb.vb_loc, &vb.vb_attributes)),
-        StructureItemDesc::Tstr_primitive(value_description) => {
-            check_annotation(value_description.val_loc, &value_description.val_attributes)
-        }
+        StructureItemDesc::Tstr_primitive(value_description) => check_annotation(
+            ta.value_description(*value_description).val_loc,
+            &ta.value_description(*value_description).val_attributes,
+        ),
         StructureItemDesc::Tstr_module(module_binding) => {
             module_binding_check_annotation(arena, ta, check_annotation, module_binding)
         }

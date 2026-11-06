@@ -17530,7 +17530,10 @@ fn type_letexception(
     let body_ty = typed_body.exp_type;
 
     Ok(Expression::new(
-        ExpressionDesc::Texp_letexception(Box::new(typed_ext_constr), tctx.push_expr(typed_body)),
+        ExpressionDesc::Texp_letexception(
+            tctx.typed.push_extension_constructor(typed_ext_constr),
+            tctx.push_expr(typed_body),
+        ),
         loc,
         body_ty,
         tctx.type_ctx.store_typed_env(env),
@@ -19214,7 +19217,7 @@ fn is_nonexpansive_module_expr(
                     })
                 }
                 crate::types::typedtree::StructureItemDesc::Tstr_exception(ext) => matches!(
-                    ext.ext_kind,
+                    tctx.typed.extension_constructor(*ext).ext_kind,
                     crate::types::typedtree::ExtensionConstructorKind::Text_rebind(_, _)
                 ),
                 crate::types::typedtree::StructureItemDesc::Tstr_typext(type_extension) => {

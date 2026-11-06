@@ -178,10 +178,14 @@ pub fn walk_structure_item<'t, I: TastIterator<'t> + ?Sized>(sub: &mut I, item: 
         StructureItemDesc::Tstr_value(rec_flag, vbs) => {
             sub.value_bindings(rec_flag, sub.arena().value_bindings(*vbs))
         }
-        StructureItemDesc::Tstr_primitive(vd) => sub.value_description(vd),
+        StructureItemDesc::Tstr_primitive(vd) => {
+            sub.value_description(sub.arena().value_description(*vd))
+        }
         StructureItemDesc::Tstr_type(rec_flag, decls) => sub.type_declarations(rec_flag, decls),
         StructureItemDesc::Tstr_typext(te) => sub.type_extension(te),
-        StructureItemDesc::Tstr_exception(ext) => sub.extension_constructor(ext),
+        StructureItemDesc::Tstr_exception(ext) => {
+            sub.extension_constructor(sub.arena().extension_constructor(*ext))
+        }
         StructureItemDesc::Tstr_module(mb) => sub.module_binding(mb),
         StructureItemDesc::Tstr_recmodule(mbs) => {
             for mb in mbs {
@@ -409,7 +413,7 @@ pub fn walk_expr<'t, I: TastIterator<'t> + ?Sized>(sub: &mut I, e: &Expression) 
             sub.expr(ta.expr(*body));
         }
         ExpressionDesc::Texp_letexception(cd, body) => {
-            sub.extension_constructor(cd);
+            sub.extension_constructor(sub.arena().extension_constructor(*cd));
             sub.expr(ta.expr(*body));
         }
         ExpressionDesc::Texp_pack(m) => sub.module_expr(sub.arena().module_expr(*m)),
@@ -421,12 +425,16 @@ pub fn walk_signature_item<'t, I: TastIterator<'t> + ?Sized>(
     item: &TypedSignatureItem,
 ) {
     match &item.sig_desc {
-        TypedSignatureItemDesc::Tsig_value(vd) => sub.value_description(vd),
+        TypedSignatureItemDesc::Tsig_value(vd) => {
+            sub.value_description(sub.arena().value_description(*vd))
+        }
         TypedSignatureItemDesc::Tsig_type(rec_flag, decls) => {
             sub.type_declarations(rec_flag, decls)
         }
         TypedSignatureItemDesc::Tsig_typext(te) => sub.type_extension(te),
-        TypedSignatureItemDesc::Tsig_exception(ext) => sub.extension_constructor(ext),
+        TypedSignatureItemDesc::Tsig_exception(ext) => {
+            sub.extension_constructor(sub.arena().extension_constructor(*ext))
+        }
         TypedSignatureItemDesc::Tsig_module(md) => sub.module_declaration(md),
         TypedSignatureItemDesc::Tsig_recmodule(mds) => {
             for md in mds {

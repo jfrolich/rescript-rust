@@ -11933,7 +11933,9 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                     crate::parser::ast::SignatureItemDesc::Psig_value(vd) => {
                         let val_name = arena.get_string(vd.pval_name.txt);
                         let val_id = match typed_sig_item.map(|item| &item.sig_desc) {
-                            Some(TypedSigDesc::Tsig_value(typed_vd)) => typed_vd.val_id,
+                            Some(TypedSigDesc::Tsig_value(typed_vd)) => {
+                                tctx.typed.value_description(*typed_vd).val_id
+                            }
                             _ => tctx.type_ctx.create_ident(val_name),
                         };
                         // Use transl_type_scheme pattern: begin_def/end_def/generalize
@@ -13164,6 +13166,7 @@ pub(crate) fn decl_signature_from_typed_signature(
     for item in ta.signature_items(sig.sig_items) {
         match &item.sig_desc {
             TypedSignatureItemDesc::Tsig_value(vd) => {
+                let vd = ta.value_description(*vd);
                 // typedecl.ml:1878-1915: the value's kind as typed.
                 let val_kind = vd.val_kind.clone();
                 out.push(SigItem::SigValue(
@@ -13200,8 +13203,8 @@ pub(crate) fn decl_signature_from_typed_signature(
             }
             TypedSignatureItemDesc::Tsig_exception(ext) => {
                 out.push(SigItem::SigTypext(
-                    ext.ext_id,
-                    ext.ext_type.clone(),
+                    ta.extension_constructor(*ext).ext_id,
+                    ta.extension_constructor(*ext).ext_type.clone(),
                     crate::types::decl::ExtStatus::TextException,
                 ));
             }
@@ -14127,6 +14130,7 @@ fn extract_module_type_from_mod_expr_inner(
                         }
                     }
                     StructureItemDesc::Tstr_primitive(vd) => {
+                        let vd = ta.value_description(*vd);
                         let id = vd.val_id;
                         let value_desc = ValueDescription {
                             val_type: ta.core_type(vd.val_desc).ctyp_type,
@@ -14238,8 +14242,8 @@ fn extract_module_type_from_mod_expr_inner(
                     }
                     StructureItemDesc::Tstr_exception(ext_cstr) => {
                         sig_items.push(SigItem::SigTypext(
-                            ext_cstr.ext_id,
-                            ext_cstr.ext_type.clone(),
+                            ta.extension_constructor(*ext_cstr).ext_id,
+                            ta.extension_constructor(*ext_cstr).ext_type.clone(),
                             crate::types::decl::ExtStatus::TextException,
                         ));
                     }
@@ -16279,18 +16283,21 @@ pub fn transl_signature<'a>(
                     },
                 );
                 let val_prim = vd.pval_prim.clone();
-                TSigDesc::Tsig_value(crate::types::typedtree::TypedValueDescription {
-                    val_id: id,
-                    val_name: Located {
-                        txt: name_str,
-                        loc: vd.pval_name.loc,
+                let val_desc = tctx.typed.push_core_type(typed_ctype);
+                TSigDesc::Tsig_value(tctx.typed.push_value_description(
+                    crate::types::typedtree::TypedValueDescription {
+                        val_id: id,
+                        val_name: Located {
+                            txt: name_str,
+                            loc: vd.pval_name.loc,
+                        },
+                        val_desc,
+                        val_prim,
+                        val_kind,
+                        val_loc: vd.pval_loc,
+                        val_attributes: vd.pval_attributes.clone(),
                     },
-                    val_desc: tctx.typed.push_core_type(typed_ctype),
-                    val_prim,
-                    val_kind,
-                    val_loc: vd.pval_loc,
-                    val_attributes: vd.pval_attributes.clone(),
-                })
+                ))
             }
             PSigDesc::Psig_type(inner) => {
                 let (ref rec_flag, ref decls) = **inner;
@@ -16884,19 +16891,21 @@ fn type_structure_item<'a>(
             let val_kind = val_desc_for_env.val_kind.clone();
             new_env.add_value(id, val_desc_for_env);
 
-            let desc =
-                StructureItemDesc::Tstr_primitive(crate::types::typedtree::TypedValueDescription {
+            let val_desc = tctx.typed.push_core_type(typed_ctype);
+            let desc = StructureItemDesc::Tstr_primitive(tctx.typed.push_value_description(
+                crate::types::typedtree::TypedValueDescription {
                     val_id: id,
                     val_name: Located {
                         txt: name_str,
                         loc: vd.pval_name.loc,
                     },
-                    val_desc: tctx.typed.push_core_type(typed_ctype),
+                    val_desc,
                     val_prim,
                     val_kind,
                     val_loc: vd.pval_loc,
                     val_attributes: vd.pval_attributes.clone(),
-                });
+                },
+            ));
             Ok((
                 StructureItem {
                     str_desc: desc,
@@ -19382,8 +19391,8 @@ fn type_structure_item<'a>(
                 ),
                 ext_is_exception: true,
             };
-            let desc =
-                StructureItemDesc::Tstr_exception(crate::types::typedtree::ExtensionConstructor {
+            let desc = StructureItemDesc::Tstr_exception(tctx.typed.push_extension_constructor(
+                crate::types::typedtree::ExtensionConstructor {
                     ext_id: id,
                     ext_name: crate::parse_arena::Located {
                         txt: name_str,
@@ -19393,7 +19402,8 @@ fn type_structure_item<'a>(
                     ext_kind,
                     ext_loc: ext_constr.pext_loc,
                     ext_attributes: ext_constr.pext_attributes.clone(),
-                });
+                },
+            ));
             Ok((
                 StructureItem {
                     str_desc: desc,
