@@ -18,6 +18,8 @@ use std::sync::Arc;
 pub struct Ctx<'a> {
     pub arena: &'a ParseArena,
     pub types: &'a TypeContext,
+    /// Node storage of the typed tree.
+    pub ta: &'a tt::TypedArena,
 }
 
 impl Ctx<'_> {
@@ -703,7 +705,7 @@ impl Processor<'_> {
                     );
                 }
                 for binding in bindings {
-                    self.scan_let_modules(env, &binding.vb_expr);
+                    self.scan_let_modules(env, binding.vb_expr);
                 }
                 items
             }
@@ -861,8 +863,9 @@ impl Processor<'_> {
 
     /// `scan_let_modules`: register `let module M = ...` bindings inside
     /// expressions as local modules.
-    fn scan_let_modules(&mut self, env: &ProcessEnv, e: &tt::Expression) {
-        match &e.exp_desc {
+    fn scan_let_modules(&mut self, env: &ProcessEnv, e: tt::TExprIdx) {
+        let ta = self.ctx.ta;
+        match &ta.expr(e).exp_desc {
             tt::ExpressionDesc::Texp_letmodule(id, name, mexpr, body) => {
                 let stamp = id.binding_time();
                 let item = self.for_module(env, &mexpr.mod_desc, &name.txt);
@@ -878,55 +881,55 @@ impl Processor<'_> {
                     Attrs::Decl(&[]),
                 );
                 self.stamps.add_module(stamp, declared);
-                self.scan_let_modules(env, body);
+                self.scan_let_modules(env, *body);
             }
             tt::ExpressionDesc::Texp_let(_, bindings, body) => {
                 for binding in bindings {
-                    self.scan_let_modules(env, &binding.vb_expr);
+                    self.scan_let_modules(env, binding.vb_expr);
                 }
-                self.scan_let_modules(env, body);
+                self.scan_let_modules(env, *body);
             }
             tt::ExpressionDesc::Texp_apply { funct, args, .. } => {
-                self.scan_let_modules(env, funct);
+                self.scan_let_modules(env, *funct);
                 for arg in args {
-                    if let Some(e) = &arg.expression {
+                    if let Some(e) = arg.expression {
                         self.scan_let_modules(env, e);
                     }
                 }
             }
             tt::ExpressionDesc::Texp_tuple(exprs) => {
-                for e in exprs {
-                    self.scan_let_modules(env, e);
+                for e in ta.expr_list(*exprs) {
+                    self.scan_let_modules(env, *e);
                 }
             }
             tt::ExpressionDesc::Texp_sequence(e1, e2) => {
-                self.scan_let_modules(env, e1);
-                self.scan_let_modules(env, e2);
+                self.scan_let_modules(env, *e1);
+                self.scan_let_modules(env, *e2);
             }
             tt::ExpressionDesc::Texp_match(e, cases, exn_cases, _) => {
-                self.scan_let_modules(env, e);
+                self.scan_let_modules(env, *e);
                 for case in cases.iter().chain(exn_cases) {
-                    if let Some(g) = &case.c_guard {
+                    if let Some(g) = case.c_guard {
                         self.scan_let_modules(env, g);
                     }
-                    self.scan_let_modules(env, &case.c_rhs);
+                    self.scan_let_modules(env, case.c_rhs);
                 }
             }
-            tt::ExpressionDesc::Texp_function { body, .. } => self.scan_let_modules(env, body),
+            tt::ExpressionDesc::Texp_function { body, .. } => self.scan_let_modules(env, *body),
             tt::ExpressionDesc::Texp_try(e, cases) => {
-                self.scan_let_modules(env, e);
+                self.scan_let_modules(env, *e);
                 for case in cases {
-                    if let Some(g) = &case.c_guard {
+                    if let Some(g) = case.c_guard {
                         self.scan_let_modules(env, g);
                     }
-                    self.scan_let_modules(env, &case.c_rhs);
+                    self.scan_let_modules(env, case.c_rhs);
                 }
             }
             tt::ExpressionDesc::Texp_ifthenelse(e1, e2, e3) => {
-                self.scan_let_modules(env, e1);
-                self.scan_let_modules(env, e2);
+                self.scan_let_modules(env, *e1);
+                self.scan_let_modules(env, *e2);
                 if let Some(e3) = e3 {
-                    self.scan_let_modules(env, e3);
+                    self.scan_let_modules(env, *e3);
                 }
             }
             _ => {}

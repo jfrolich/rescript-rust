@@ -43,6 +43,8 @@ pub enum TypedArtifactAnnots<'a> {
 pub struct TypedArtifact<'a> {
     pub annots: TypedArtifactAnnots<'a>,
     pub arena: &'a ParseArena,
+    /// Node storage of the typed tree in `annots`.
+    pub ta: &'a crate::types::typedtree::TypedArena,
     pub ctx: &'a TypeContext,
     pub source_file: Option<&'a str>,
     pub compiler_module_name: crate::gentype::module_name::T,
@@ -290,6 +292,7 @@ pub fn translate_typed_artifact(
             crate::gentype::translate_structure::translate_structure(
                 artifact.ctx,
                 artifact.arena,
+                artifact.ta,
                 config,
                 output_file_relative,
                 resolver,
@@ -372,6 +375,7 @@ pub fn typed_artifact_translate_type_declarations(
                 crate::gentype::translate_structure::translate_structure_item(
                     artifact.ctx,
                     artifact.arena,
+                    artifact.ta,
                     config,
                     output_file_relative,
                     resolver,

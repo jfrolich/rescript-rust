@@ -63,6 +63,7 @@ impl Loaded {
         Ctx {
             arena: self.source.parsed.arena(),
             types: &self.source.typed.type_ctx,
+            ta: &self.source.typed.typed_arena,
         }
     }
 }
@@ -154,6 +155,7 @@ fn load_source(source: TypedSource, module_name: &str, id: ModuleId) -> Loaded {
     let ctx = Ctx {
         arena: source.parsed.arena(),
         types: &source.typed.type_ctx,
+        ta: &source.typed.typed_arena,
     };
     let annots = match &source.typed.typed {
         ToolingTyped::Implementation(structure) => {

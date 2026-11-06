@@ -39,7 +39,7 @@ use crate::types::type_expr::TypeExprRefSet;
 use crate::types::typedtree::{
     ArrowArg, Constant, EnvRef, Expression, ExpressionDesc, ModuleExpr, ModuleExprDesc, ModuleType,
     ModuleTypeConstraint, ModuleTypeDesc, Pattern, PatternDesc, StructureItem, StructureItemDesc,
-    TypedSignatureItem, TypedSignatureItemDesc, ValueBinding,
+    TExprIdx, TExprList, TypedArena, TypedSignatureItem, TypedSignatureItemDesc, ValueBinding,
 };
 use crate::types::{
     Env, Path, RowField, TypeArg, TypeContext, TypeDesc, TypeError, TypeExprRef, TypeExprRefMap,
@@ -1181,6 +1181,9 @@ pub struct TypeCheckContext<'a> {
     pub type_ctx: &'a TypeContext,
     /// Parse arena for location conversion and longident allocation.
     pub arena: &'a ParseArena,
+    /// Node storage of the typed tree being built. Consumers receive it
+    /// through [`TypeCheckContext::take_typed_arena`] once typing is done.
+    pub typed: TypedArena,
     /// Unification state.
     pub unify_state: UnifyState,
     /// Newtype level (for local type definitions).
@@ -1371,6 +1374,7 @@ impl<'a> TypeCheckContext<'a> {
         TypeCheckContext {
             type_ctx,
             arena,
+            typed: TypedArena::new(),
             unify_state: UnifyState::new(),
             newtype_level: None,
             diagnostics: Vec::new(),
@@ -1402,6 +1406,24 @@ impl<'a> TypeCheckContext<'a> {
             module_expr_semantic_types: HashMap::new(),
             applicative_functor_body_depth: 0,
         }
+    }
+
+    /// Hand the typed tree's node storage to its consumers. Nodes typed
+    /// afterwards go to a fresh arena.
+    pub fn take_typed_arena(&mut self) -> TypedArena {
+        std::mem::take(&mut self.typed)
+    }
+
+    /// Store a typed expression.
+    #[inline]
+    pub fn push_expr(&mut self, expr: Expression) -> TExprIdx {
+        self.typed.push_expr(expr)
+    }
+
+    /// A stored typed expression.
+    #[inline]
+    pub fn expr(&self, idx: TExprIdx) -> &Expression {
+        self.typed.expr(idx)
     }
 
     /// Set the environment for type alias expansion during unification.
@@ -7852,7 +7874,7 @@ fn type_expect_with_recarg_unscoped<'a>(
             // (matches OCaml: exp_type = newty (Ttuple (List.map (fun e -> e.exp_type) expl)))
             let result_ty = ctx.new_tuple(typed_exprs.iter().map(|e| e.exp_type).collect());
             Ok(Expression::new(
-                ExpressionDesc::Texp_tuple(typed_exprs),
+                ExpressionDesc::Texp_tuple(tctx.typed.push_exprs(typed_exprs)),
                 loc,
                 result_ty,
                 exp_env_ref,
@@ -7886,11 +7908,11 @@ fn type_expect_with_recarg_unscoped<'a>(
             let body_type = typed_body.exp_type;
             // OCaml typecore.ml:2452-2458 runs Rec_check after typing the body.
             if *rec_flag == RecFlag::Recursive {
-                check_recursive_bindings(tctx.type_ctx, &typed_bindings)?;
+                check_recursive_bindings(&tctx.typed, tctx.type_ctx, &typed_bindings)?;
             }
 
             Ok(Expression::new(
-                ExpressionDesc::Texp_let(*rec_flag, typed_bindings, Box::new(typed_body)),
+                ExpressionDesc::Texp_let(*rec_flag, typed_bindings, tctx.push_expr(typed_body)),
                 loc,
                 body_type,
                 exp_env_ref,
@@ -7916,7 +7938,7 @@ fn type_expect_with_recarg_unscoped<'a>(
             let e2_type = typed_e2.exp_type;
 
             Ok(Expression::new(
-                ExpressionDesc::Texp_sequence(Box::new(typed_e1), Box::new(typed_e2)),
+                ExpressionDesc::Texp_sequence(tctx.push_expr(typed_e1), tctx.push_expr(typed_e2)),
                 loc,
                 e2_type,
                 exp_env_ref,
@@ -7972,9 +7994,9 @@ fn type_expect_with_recarg_unscoped<'a>(
 
                     Ok(Expression::new(
                         ExpressionDesc::Texp_ifthenelse(
-                            Box::new(typed_cond),
-                            Box::new(typed_then),
-                            Some(Box::new(typed_else)),
+                            tctx.push_expr(typed_cond),
+                            tctx.push_expr(typed_then),
+                            Some(tctx.push_expr(typed_else)),
                         ),
                         loc,
                         then_exp_type,
@@ -7995,8 +8017,8 @@ fn type_expect_with_recarg_unscoped<'a>(
 
                     Ok(Expression::new(
                         ExpressionDesc::Texp_ifthenelse(
-                            Box::new(typed_cond),
-                            Box::new(typed_then),
+                            tctx.push_expr(typed_cond),
+                            tctx.push_expr(typed_then),
                             None,
                         ),
                         loc,
@@ -8031,7 +8053,7 @@ fn type_expect_with_recarg_unscoped<'a>(
             rue_unify(tctx, loc, result_unit_ty, expected_ty, context)?;
 
             Ok(Expression::new(
-                ExpressionDesc::Texp_while(Box::new(typed_cond), Box::new(typed_body)),
+                ExpressionDesc::Texp_while(tctx.push_expr(typed_cond), tctx.push_expr(typed_body)),
                 loc,
                 result_unit_ty,
                 exp_env_ref,
@@ -8065,7 +8087,7 @@ fn type_expect_with_recarg_unscoped<'a>(
             };
 
             Ok(Expression::new(
-                ExpressionDesc::Texp_assert(Box::new(typed_e)),
+                ExpressionDesc::Texp_assert(tctx.push_expr(typed_e)),
                 loc,
                 exp_type,
                 exp_env_ref,
@@ -8101,7 +8123,7 @@ fn type_expect_with_recarg_unscoped<'a>(
             // than the temporary array node.
             let exp_type = crate::types::instance(ctx, expected_ty);
             Ok(Expression::new(
-                ExpressionDesc::Texp_array(typed_exprs),
+                ExpressionDesc::Texp_array(tctx.typed.push_exprs(typed_exprs)),
                 loc,
                 exp_type,
                 exp_env_ref,
@@ -8138,7 +8160,10 @@ fn type_expect_with_recarg_unscoped<'a>(
             let exp_type = crate::types::instance(ctx, env.type_string(ctx));
             rue_unify(tctx, loc, exp_type, expected_ty, context)?;
             Ok(Expression::new(
-                ExpressionDesc::Texp_template { segments, values },
+                ExpressionDesc::Texp_template {
+                    segments,
+                    values: tctx.typed.push_exprs(values),
+                },
                 loc,
                 exp_type,
                 exp_env_ref,
@@ -8196,9 +8221,9 @@ fn type_expect_with_recarg_unscoped<'a>(
                 .collect();
             Ok(Expression::new(
                 ExpressionDesc::Texp_tagged_template {
-                    tag: Box::new(tag),
+                    tag: tctx.push_expr(tag),
                     raw_sources,
-                    values,
+                    values: tctx.typed.push_exprs(values),
                 },
                 loc,
                 output_ty,
@@ -9212,17 +9237,17 @@ fn translate_unified_ops(
             let typed_args = vec![
                 ApplyArg {
                     label: convert_arg_label_for_ctx(&args[0].0, tctx.arena, tctx.type_ctx),
-                    expression: Some(lhs),
+                    expression: Some(tctx.push_expr(lhs)),
                 },
                 ApplyArg {
                     label: convert_arg_label_for_ctx(&args[1].0, tctx.arena, tctx.type_ctx),
-                    expression: Some(rhs),
+                    expression: Some(tctx.push_expr(rhs)),
                 },
             ];
 
             Some(Ok(Expression::new(
                 ExpressionDesc::Texp_apply {
-                    funct: Box::new(typed_funct.clone()),
+                    funct: tctx.push_expr(typed_funct.clone()),
                     args: typed_args,
                     partial: false,
                     transformed_jsx,
@@ -9264,12 +9289,12 @@ fn translate_unified_ops(
 
             let typed_args = vec![ApplyArg {
                 label: convert_arg_label_for_ctx(&args[0].0, tctx.arena, tctx.type_ctx),
-                expression: Some(arg),
+                expression: Some(tctx.push_expr(arg)),
             }];
 
             Some(Ok(Expression::new(
                 ExpressionDesc::Texp_apply {
-                    funct: Box::new(typed_funct.clone()),
+                    funct: tctx.push_expr(typed_funct.clone()),
                     args: typed_args,
                     partial: false,
                     transformed_jsx,
@@ -10087,7 +10112,7 @@ fn type_application(
                                 loc: tctx.arena.none_loc(),
                             },
                             std::sync::Arc::new(make_some_constructor(ctx)),
-                            vec![typed_arg],
+                            tctx.typed.push_exprs(vec![typed_arg]),
                         ),
                         wrapped_loc,
                         option_ty,
@@ -10099,7 +10124,7 @@ fn type_application(
                 };
                 typed_args.push(ApplyArg {
                     label,
-                    expression: Some(typed_arg),
+                    expression: Some(tctx.push_expr(typed_arg)),
                 });
             }
             ApplyArgThunk::SynthOptionalNone { label, option_ty } => {
@@ -10111,7 +10136,7 @@ fn type_application(
                             loc: none_loc,
                         },
                         std::sync::Arc::new(make_none_constructor(ctx)),
-                        vec![],
+                        TExprList::EMPTY,
                     ),
                     none_loc,
                     option_ty,
@@ -10120,7 +10145,7 @@ fn type_application(
                 );
                 typed_args.push(ApplyArg {
                     label,
-                    expression: Some(none_expr),
+                    expression: Some(tctx.push_expr(none_expr)),
                 });
             }
             ApplyArgThunk::Omitted { label } => {
@@ -10178,7 +10203,7 @@ fn type_application(
 
     Ok(Expression::new(
         ExpressionDesc::Texp_apply {
-            funct: Box::new(typed_funct),
+            funct: tctx.push_expr(typed_funct),
             args: typed_args,
             partial,
             transformed_jsx,
@@ -10345,7 +10370,7 @@ fn report_unused_match_cases(
             guarded: case.c_guard.is_some(),
             guard_idents: case.c_guard.as_ref().map(|guard| {
                 let mut ids = Vec::new();
-                collect_expression_ident_heads(guard, &mut ids);
+                collect_expression_ident_heads(&tctx.typed, *guard, &mut ids);
                 ids.into_iter().collect()
             }),
         })
@@ -10509,60 +10534,60 @@ fn run_unused_check(
     tctx.warning_config = saved;
 }
 
-fn collect_expression_ident_heads(exp: &Expression, ids: &mut Vec<Ident>) {
-    match &exp.exp_desc {
+fn collect_expression_ident_heads(ta: &TypedArena, exp: TExprIdx, ids: &mut Vec<Ident>) {
+    match &ta.expr(exp).exp_desc {
         ExpressionDesc::Texp_ident(path, _, _) => {
             ids.extend(path.heads().into_iter().cloned());
         }
         ExpressionDesc::Texp_let(_, bindings, body) => {
             for binding in bindings {
-                collect_expression_ident_heads(&binding.vb_expr, ids);
+                collect_expression_ident_heads(ta, binding.vb_expr, ids);
             }
-            collect_expression_ident_heads(body, ids);
+            collect_expression_ident_heads(ta, *body, ids);
         }
         ExpressionDesc::Texp_function { body, .. } => {
-            collect_expression_ident_heads(body, ids);
+            collect_expression_ident_heads(ta, *body, ids);
         }
         ExpressionDesc::Texp_apply { funct, args, .. } => {
-            collect_expression_ident_heads(funct, ids);
+            collect_expression_ident_heads(ta, *funct, ids);
             for arg in args {
-                if let Some(expr) = &arg.expression {
-                    collect_expression_ident_heads(expr, ids);
+                if let Some(expr) = arg.expression {
+                    collect_expression_ident_heads(ta, expr, ids);
                 }
             }
         }
         ExpressionDesc::Texp_tagged_template { tag, values, .. } => {
-            collect_expression_ident_heads(tag, ids);
-            for value in values {
-                collect_expression_ident_heads(value, ids);
+            collect_expression_ident_heads(ta, *tag, ids);
+            for value in ta.expr_list(*values) {
+                collect_expression_ident_heads(ta, *value, ids);
             }
         }
         ExpressionDesc::Texp_template { values, .. } => {
-            for value in values {
-                collect_expression_ident_heads(value, ids);
+            for value in ta.expr_list(*values) {
+                collect_expression_ident_heads(ta, *value, ids);
             }
         }
         ExpressionDesc::Texp_match(scrutinee, cases, exn_cases, _) => {
-            collect_expression_ident_heads(scrutinee, ids);
-            collect_case_expression_ident_heads(cases, ids);
-            collect_case_expression_ident_heads(exn_cases, ids);
+            collect_expression_ident_heads(ta, *scrutinee, ids);
+            collect_case_expression_ident_heads(ta, cases, ids);
+            collect_case_expression_ident_heads(ta, exn_cases, ids);
         }
         ExpressionDesc::Texp_try(scrutinee, cases) => {
-            collect_expression_ident_heads(scrutinee, ids);
-            collect_case_expression_ident_heads(cases, ids);
+            collect_expression_ident_heads(ta, *scrutinee, ids);
+            collect_case_expression_ident_heads(ta, cases, ids);
         }
         ExpressionDesc::Texp_tuple(items) | ExpressionDesc::Texp_array(items) => {
-            for item in items {
-                collect_expression_ident_heads(item, ids);
+            for item in ta.expr_list(*items) {
+                collect_expression_ident_heads(ta, *item, ids);
             }
         }
         ExpressionDesc::Texp_construct(_, _, args) => {
-            for arg in args {
-                collect_expression_ident_heads(arg, ids);
+            for arg in ta.expr_list(*args) {
+                collect_expression_ident_heads(ta, *arg, ids);
             }
         }
         ExpressionDesc::Texp_variant(_, Some(arg)) => {
-            collect_expression_ident_heads(arg, ids);
+            collect_expression_ident_heads(ta, *arg, ids);
         }
         ExpressionDesc::Texp_record {
             fields,
@@ -10578,57 +10603,57 @@ fn collect_expression_ident_heads(exp: &Expression, ids: &mut Vec<Ident>) {
                 if let crate::types::typedtree::RecordLabelDefinition::Overridden(_, expr) =
                     definition
                 {
-                    collect_expression_ident_heads(expr, ids);
+                    collect_expression_ident_heads(ta, *expr, ids);
                 }
             }
             if let Some(expr) = extended_expression {
-                collect_expression_ident_heads(expr, ids);
+                collect_expression_ident_heads(ta, *expr, ids);
             }
         }
         ExpressionDesc::Texp_field(expr, _, _) | ExpressionDesc::Texp_assert(expr) => {
-            collect_expression_ident_heads(expr, ids);
+            collect_expression_ident_heads(ta, *expr, ids);
         }
         ExpressionDesc::Texp_setfield(expr1, _, _, expr2)
         | ExpressionDesc::Texp_sequence(expr1, expr2)
         | ExpressionDesc::Texp_while(expr1, expr2)
         | ExpressionDesc::Texp_for_of(_, _, expr1, expr2)
         | ExpressionDesc::Texp_for_await_of(_, _, expr1, expr2) => {
-            collect_expression_ident_heads(expr1, ids);
-            collect_expression_ident_heads(expr2, ids);
+            collect_expression_ident_heads(ta, *expr1, ids);
+            collect_expression_ident_heads(ta, *expr2, ids);
         }
         ExpressionDesc::Texp_ifthenelse(cond, then_, else_) => {
-            collect_expression_ident_heads(cond, ids);
-            collect_expression_ident_heads(then_, ids);
+            collect_expression_ident_heads(ta, *cond, ids);
+            collect_expression_ident_heads(ta, *then_, ids);
             if let Some(else_) = else_ {
-                collect_expression_ident_heads(else_, ids);
+                collect_expression_ident_heads(ta, *else_, ids);
             }
         }
         ExpressionDesc::Texp_for(_, _, start, stop, _, body) => {
-            collect_expression_ident_heads(start, ids);
-            collect_expression_ident_heads(stop, ids);
-            collect_expression_ident_heads(body, ids);
+            collect_expression_ident_heads(ta, *start, ids);
+            collect_expression_ident_heads(ta, *stop, ids);
+            collect_expression_ident_heads(ta, *body, ids);
         }
         ExpressionDesc::Texp_object_get(receiver, _) => {
-            collect_expression_ident_heads(receiver, ids);
+            collect_expression_ident_heads(ta, *receiver, ids);
         }
         ExpressionDesc::Texp_object_set(receiver, _, value) => {
-            collect_expression_ident_heads(receiver, ids);
-            collect_expression_ident_heads(value, ids);
+            collect_expression_ident_heads(ta, *receiver, ids);
+            collect_expression_ident_heads(ta, *value, ids);
         }
         ExpressionDesc::Texp_object_literal(fields) => {
             for (_, field) in fields {
-                collect_expression_ident_heads(field, ids);
+                collect_expression_ident_heads(ta, *field, ids);
             }
         }
         ExpressionDesc::Texp_letmodule(_, _, module_expr, body) => {
-            collect_module_expr_ident_heads(module_expr, ids);
-            collect_expression_ident_heads(body, ids);
+            collect_module_expr_ident_heads(ta, module_expr, ids);
+            collect_expression_ident_heads(ta, *body, ids);
         }
         ExpressionDesc::Texp_letexception(_, body) => {
-            collect_expression_ident_heads(body, ids);
+            collect_expression_ident_heads(ta, *body, ids);
         }
         ExpressionDesc::Texp_pack(module_expr) => {
-            collect_module_expr_ident_heads(module_expr, ids);
+            collect_module_expr_ident_heads(ta, module_expr, ids);
         }
         ExpressionDesc::Texp_constant(_)
         | ExpressionDesc::Texp_variant(_, None)
@@ -10639,41 +10664,46 @@ fn collect_expression_ident_heads(exp: &Expression, ids: &mut Vec<Ident>) {
 }
 
 fn collect_case_expression_ident_heads(
+    ta: &TypedArena,
     cases: &[crate::types::typedtree::Case],
     ids: &mut Vec<Ident>,
 ) {
     for case in cases {
-        if let Some(guard) = &case.c_guard {
-            collect_expression_ident_heads(guard, ids);
+        if let Some(guard) = case.c_guard {
+            collect_expression_ident_heads(ta, guard, ids);
         }
-        collect_expression_ident_heads(&case.c_rhs, ids);
+        collect_expression_ident_heads(ta, case.c_rhs, ids);
     }
 }
 
-fn collect_module_expr_ident_heads(module_expr: &ModuleExpr, ids: &mut Vec<Ident>) {
+fn collect_module_expr_ident_heads(
+    ta: &TypedArena,
+    module_expr: &ModuleExpr,
+    ids: &mut Vec<Ident>,
+) {
     match &module_expr.mod_desc {
         ModuleExprDesc::Tmod_ident(_, _) => {}
         ModuleExprDesc::Tmod_structure(structure) => {
             for item in &structure.str_items {
                 match &item.str_desc {
                     StructureItemDesc::Tstr_eval(expr, _) => {
-                        collect_expression_ident_heads(expr, ids);
+                        collect_expression_ident_heads(ta, *expr, ids);
                     }
                     StructureItemDesc::Tstr_value(_, bindings) => {
                         for binding in bindings {
-                            collect_expression_ident_heads(&binding.vb_expr, ids);
+                            collect_expression_ident_heads(ta, binding.vb_expr, ids);
                         }
                     }
                     StructureItemDesc::Tstr_module(binding) => {
-                        collect_module_expr_ident_heads(&binding.mb_expr, ids);
+                        collect_module_expr_ident_heads(ta, &binding.mb_expr, ids);
                     }
                     StructureItemDesc::Tstr_recmodule(bindings) => {
                         for binding in bindings {
-                            collect_module_expr_ident_heads(&binding.mb_expr, ids);
+                            collect_module_expr_ident_heads(ta, &binding.mb_expr, ids);
                         }
                     }
                     StructureItemDesc::Tstr_include(include) => {
-                        collect_module_expr_ident_heads(&include.incl_mod, ids);
+                        collect_module_expr_ident_heads(ta, &include.incl_mod, ids);
                     }
                     StructureItemDesc::Tstr_primitive(_)
                     | StructureItemDesc::Tstr_type(_, _)
@@ -10686,40 +10716,44 @@ fn collect_module_expr_ident_heads(module_expr: &ModuleExpr, ids: &mut Vec<Ident
             }
         }
         ModuleExprDesc::Tmod_apply(functor, arg, _) => {
-            collect_module_expr_ident_heads(functor, ids);
-            collect_module_expr_ident_heads(arg, ids);
+            collect_module_expr_ident_heads(ta, functor, ids);
+            collect_module_expr_ident_heads(ta, arg, ids);
         }
         ModuleExprDesc::Tmod_functor(_, _, mty, body) => {
             if let Some(mty) = mty {
-                collect_module_type_ident_heads(mty, ids);
+                collect_module_type_ident_heads(ta, mty, ids);
             }
-            collect_module_expr_ident_heads(body, ids);
+            collect_module_expr_ident_heads(ta, body, ids);
         }
         ModuleExprDesc::Tmod_constraint(module_expr, _, constraint, _) => {
-            collect_module_expr_ident_heads(module_expr, ids);
+            collect_module_expr_ident_heads(ta, module_expr, ids);
             if let ModuleTypeConstraint::Tmodtype_explicit(mty) = constraint {
-                collect_module_type_ident_heads(mty, ids);
+                collect_module_type_ident_heads(ta, mty, ids);
             }
         }
         ModuleExprDesc::Tmod_unpack(expr, _) => {
-            collect_expression_ident_heads(expr, ids);
+            collect_expression_ident_heads(ta, *expr, ids);
         }
     }
 }
 
-fn collect_module_type_ident_heads(module_type: &ModuleType, ids: &mut Vec<Ident>) {
+fn collect_module_type_ident_heads(
+    ta: &TypedArena,
+    module_type: &ModuleType,
+    ids: &mut Vec<Ident>,
+) {
     match &module_type.mty_desc {
         ModuleTypeDesc::Tmty_typeof(module_expr) => {
-            collect_module_expr_ident_heads(module_expr, ids);
+            collect_module_expr_ident_heads(ta, module_expr, ids);
         }
         ModuleTypeDesc::Tmty_functor(_, _, param, body) => {
             if let Some(param) = param {
-                collect_module_type_ident_heads(param, ids);
+                collect_module_type_ident_heads(ta, param, ids);
             }
-            collect_module_type_ident_heads(body, ids);
+            collect_module_type_ident_heads(ta, body, ids);
         }
         ModuleTypeDesc::Tmty_with(module_type, _) => {
-            collect_module_type_ident_heads(module_type, ids);
+            collect_module_type_ident_heads(ta, module_type, ids);
         }
         ModuleTypeDesc::Tmty_ident(_, _)
         | ModuleTypeDesc::Tmty_signature(_)
@@ -11152,8 +11186,8 @@ fn type_match_cases_batch_non_gadt<'a>(
             };
             typed_cases.push(crate::types::typedtree::Case {
                 c_lhs: pending.typed_pat,
-                c_guard: typed_guard,
-                c_rhs: typed_body,
+                c_guard: typed_guard.map(|e| tctx.push_expr(e)),
+                c_rhs: tctx.push_expr(typed_body),
             });
         }
         Ok(typed_cases)
@@ -11205,7 +11239,7 @@ fn type_match(
         }
     };
     ctx.end_def();
-    let is_expansive = !is_nonexpansive_expression(tctx, &typed_scrutinee);
+    let is_expansive = !is_nonexpansive_node(tctx, &typed_scrutinee);
     if is_expansive {
         crate::types::ctype::generalize_expansive(ctx, env, typed_scrutinee.exp_type);
     }
@@ -11340,13 +11374,9 @@ fn type_match(
     if has_generalized_value_patterns {
         let shared_case_body_ty = crate::types::instance(ctx, expected_ty);
         for case in &typed_val_cases {
-            unify_expression_types(
-                tctx,
-                case.c_rhs.exp_loc,
-                case.c_rhs.exp_type,
-                shared_case_body_ty,
-                None,
-            )?;
+            let rhs = tctx.expr(case.c_rhs);
+            let (rhs_loc, rhs_type) = (rhs.exp_loc, rhs.exp_type);
+            unify_expression_types(tctx, rhs_loc, rhs_type, shared_case_body_ty, None)?;
         }
     }
 
@@ -11478,7 +11508,7 @@ fn type_match(
     let result_ty = crate::types::instance(ctx, expected_ty);
     Ok(Expression::new(
         ExpressionDesc::Texp_match(
-            Box::new(typed_scrutinee),
+            tctx.push_expr(typed_scrutinee),
             typed_val_cases,
             typed_exn_cases,
             partial,
@@ -12285,8 +12315,8 @@ fn type_pending_case_body(
     };
     Ok(crate::types::typedtree::Case {
         c_lhs: pending.typed_pat,
-        c_guard: typed_guard,
-        c_rhs: typed_body,
+        c_guard: typed_guard.map(|e| tctx.push_expr(e)),
+        c_rhs: tctx.push_expr(typed_body),
     })
 }
 
@@ -12348,7 +12378,7 @@ fn type_try(
     // (matches OCaml: exp_type = body.exp_type)
     let result_ty = typed_body.exp_type;
     Ok(Expression::new(
-        ExpressionDesc::Texp_try(Box::new(typed_body), typed_handlers),
+        ExpressionDesc::Texp_try(tctx.push_expr(typed_body), typed_handlers),
         loc,
         result_ty,
         tctx.type_ctx.store_typed_env(env),
@@ -12871,13 +12901,15 @@ fn type_function_nary(
             }
             let mut typed_bindings = typed_bindings;
             match typed_bindings.as_mut_slice() {
-                [vb] => match &mut vb.vb_expr.exp_desc {
-                    ExpressionDesc::Texp_match(scrut, _, _, _) => match &mut scrut.exp_desc {
-                        ExpressionDesc::Texp_ident(path, _, _) => {
-                            *path = Path::Pident(param_id);
+                [vb] => match tctx.typed.expr(vb.vb_expr).exp_desc {
+                    ExpressionDesc::Texp_match(scrut, _, _, _) => {
+                        match &mut tctx.typed.expr_mut(scrut).exp_desc {
+                            ExpressionDesc::Texp_ident(path, _, _) => {
+                                *path = Path::Pident(param_id);
+                            }
+                            _ => unreachable!("an optional default's scrutinee is its carrier"),
                         }
-                        _ => unreachable!("an optional default's scrutinee is its carrier"),
-                    },
+                    }
                     _ => unreachable!("an optional default binds a match"),
                 },
                 _ => unreachable!("an optional default is a single binding"),
@@ -12903,7 +12935,11 @@ fn type_function_nary(
     for (typed_bindings, _let_env) in default_lets.into_iter().rev() {
         let body_type = typed_body.exp_type;
         typed_body = Expression::new(
-            ExpressionDesc::Texp_let(RecFlag::Nonrecursive, typed_bindings, Box::new(typed_body)),
+            ExpressionDesc::Texp_let(
+                RecFlag::Nonrecursive,
+                typed_bindings,
+                tctx.push_expr(typed_body),
+            ),
             loc,
             body_type,
             EnvRef(0),
@@ -13009,7 +13045,7 @@ fn type_function_nary(
     Ok(Expression::new(
         ExpressionDesc::Texp_function {
             params: typed_params,
-            body: Box::new(typed_body),
+            body: tctx.push_expr(typed_body),
             async_: is_async,
         },
         loc,
@@ -13137,10 +13173,10 @@ fn type_for(
         ExpressionDesc::Texp_for(
             loop_var_id,
             Box::new(typed_pat),
-            Box::new(typed_start),
-            Box::new(typed_end),
+            tctx.push_expr(typed_start),
+            tctx.push_expr(typed_end),
             direction,
-            Box::new(typed_body),
+            tctx.push_expr(typed_body),
         ),
         loc,
         result_unit_ty,
@@ -13299,15 +13335,15 @@ fn type_for_of(
         ExpressionDesc::Texp_for_await_of(
             loop_var_id,
             pat_box,
-            Box::new(typed_iterable),
-            Box::new(typed_body),
+            tctx.push_expr(typed_iterable),
+            tctx.push_expr(typed_body),
         )
     } else {
         ExpressionDesc::Texp_for_of(
             loop_var_id,
             pat_box,
-            Box::new(typed_iterable),
-            Box::new(typed_body),
+            tctx.push_expr(typed_iterable),
+            tctx.push_expr(typed_body),
         )
     };
 
@@ -13607,7 +13643,11 @@ fn type_construct(
     }
 
     Ok(Expression::new(
-        ExpressionDesc::Texp_construct(*lid, std::sync::Arc::new(cstr_desc), typed_args),
+        ExpressionDesc::Texp_construct(
+            *lid,
+            std::sync::Arc::new(cstr_desc),
+            tctx.typed.push_exprs(typed_args),
+        ),
         loc,
         result_ty,
         tctx.type_ctx.store_typed_env(env),
@@ -13669,7 +13709,7 @@ fn type_variant(
             let typed_arg = type_expect(tctx, env, arg_expr, arg_ty, None)?;
             unify_expression_types(tctx, loc, typed_arg.exp_type, arg_ty0, None)?;
             return Ok(Expression::new(
-                ExpressionDesc::Texp_variant(label.to_string(), Some(Box::new(typed_arg))),
+                ExpressionDesc::Texp_variant(label.to_string(), Some(tctx.push_expr(typed_arg))),
                 loc,
                 expected_inst,
                 tctx.type_ctx.store_typed_env(env),
@@ -13695,7 +13735,7 @@ fn type_variant(
         // OCaml: rue { ... exp_type = variant_row; ... }
         rue_unify(tctx, loc, variant_ty, expected_ty, context)?;
         return Ok(Expression::new(
-            ExpressionDesc::Texp_variant(label.to_string(), Some(Box::new(typed_arg))),
+            ExpressionDesc::Texp_variant(label.to_string(), Some(tctx.push_expr(typed_arg))),
             loc,
             variant_ty,
             tctx.type_ctx.store_typed_env(env),
@@ -14932,7 +14972,7 @@ fn type_record(
                 ExpressionDesc::Texp_construct(
                     some_lid,
                     std::sync::Arc::new(some_cstr),
-                    vec![typed_expr],
+                    tctx.typed.push_exprs(vec![typed_expr]),
                 ),
                 wrapped_loc,
                 label_desc.lbl_arg,
@@ -14952,7 +14992,7 @@ fn type_record(
         let entry = (
             field.lid,
             Arc::new(label_desc),
-            RecordLabelDefinition::Overridden(field.lid, final_expr),
+            RecordLabelDefinition::Overridden(field.lid, tctx.push_expr(final_expr)),
             false, // OCaml Texp_record always uses false for this flag
         );
         let entry_idx = explicit_entries.len();
@@ -15613,7 +15653,7 @@ fn type_record(
             // alias-expanded record type path.
             all_labels,
             omitted_loc: loc,
-            extended_expression: typed_base.map(Box::new),
+            extended_expression: typed_base.map(Box::new).map(|e| tctx.push_expr(*e)),
         }
     } else {
         // OCaml compiler/ml/typecore.ml:2767-2788: a non-empty field array
@@ -15635,7 +15675,7 @@ fn type_record(
         ExpressionDesc::Texp_record {
             fields: typed_fields,
             empty_representation,
-            extended_expression: typed_base.map(Box::new),
+            extended_expression: typed_base.map(Box::new).map(|e| tctx.push_expr(*e)),
         }
     };
 
@@ -16160,7 +16200,7 @@ fn type_field(
     unify_expression_types(tctx, proper_exp_loc(&typed_record), ty_exp, ty_res, None)?;
     Ok(Expression::new(
         ExpressionDesc::Texp_field(
-            Box::new(typed_record),
+            tctx.push_expr(typed_record),
             *field_lid,
             std::sync::Arc::new(label_desc),
         ),
@@ -16450,10 +16490,10 @@ fn type_setfield(
 
     Ok(Expression::new(
         ExpressionDesc::Texp_setfield(
-            Box::new(typed_record),
+            tctx.push_expr(typed_record),
             *field_lid,
             std::sync::Arc::new(label_desc),
-            Box::new(typed_value),
+            tctx.push_expr(typed_value),
         ),
         loc,
         unit_ty,
@@ -16930,7 +16970,7 @@ fn type_await(
     // In JavaScript, this is a runtime operation
     Ok(Expression::new(
         ExpressionDesc::Texp_apply {
-            funct: Box::new(typed_inner),
+            funct: tctx.push_expr(typed_inner),
             args: vec![], // Await is a special form, not a regular application
             partial: false,
             transformed_jsx: false,
@@ -17046,7 +17086,7 @@ fn type_object_get(
 
     Ok(Expression::new(
         ExpressionDesc::Texp_object_get(
-            Box::new(typed_obj),
+            tctx.push_expr(typed_obj),
             Located {
                 txt: field.txt.to_string(),
                 loc: field.loc,
@@ -17110,12 +17150,12 @@ fn type_object_set(
     rue_unify(tctx, loc, unit_ty, expected_ty, context)?;
     Ok(Expression::new(
         ExpressionDesc::Texp_object_set(
-            Box::new(typed_obj),
+            tctx.push_expr(typed_obj),
             Located {
                 txt: field.txt.to_string(),
                 loc: field.loc,
             },
-            Box::new(value),
+            tctx.push_expr(value),
         ),
         loc,
         unit_ty,
@@ -17183,7 +17223,7 @@ fn type_object_literal(
 ) -> TypeCoreResult<Expression> {
     let ctx = tctx.type_ctx;
     let mut seen: HashMap<String, TypeExprRef> = HashMap::new();
-    let mut fields: Vec<(Located<String>, Expression)> = Vec::with_capacity(sfields.len());
+    let mut fields: Vec<(Located<String>, TExprIdx)> = Vec::with_capacity(sfields.len());
     for (name, sfield) in sfields {
         let sfield = tctx.arena.get_expr(*sfield);
         let field = match seen.get(name.txt.as_ref()).copied() {
@@ -17199,7 +17239,7 @@ fn type_object_literal(
                 txt: name.txt.to_string(),
                 loc: name.loc,
             },
-            field,
+            tctx.push_expr(field),
         ));
     }
     let mut emitted: HashSet<&str> = HashSet::new();
@@ -17208,7 +17248,7 @@ fn type_object_literal(
         if !emitted.insert(name.txt.as_str()) {
             continue;
         }
-        let typ = ctx.new_poly(field.exp_type, vec![]);
+        let typ = ctx.new_poly(tctx.expr(*field).exp_type, vec![]);
         row = ctx.new_type(TypeDesc::Tfield {
             name: name.txt.clone(),
             mutability: ctx.alloc_mutability(crate::types::type_expr::FieldMutability::Value(
@@ -17454,7 +17494,7 @@ fn type_letexception(
     let body_ty = typed_body.exp_type;
 
     Ok(Expression::new(
-        ExpressionDesc::Texp_letexception(Box::new(typed_ext_constr), Box::new(typed_body)),
+        ExpressionDesc::Texp_letexception(Box::new(typed_ext_constr), tctx.push_expr(typed_body)),
         loc,
         body_ty,
         tctx.type_ctx.store_typed_env(env),
@@ -18312,7 +18352,7 @@ fn type_letmodule(
                 loc: name.loc,
             },
             Box::new(typed_mod),
-            Box::new(typed_body),
+            tctx.push_expr(typed_body),
         ),
         loc,
         letmodule_ty,
@@ -18885,7 +18925,7 @@ fn type_expect_with_module_unpacks(
     );
     let unpack_module = crate::types::typedtree::ModuleExpr {
         mod_desc: crate::types::typedtree::ModuleExprDesc::Tmod_unpack(
-            unpack_expr,
+            tctx.push_expr(unpack_expr),
             decl_mty.clone(),
         ),
         mod_loc: unpack.loc_idx,
@@ -18924,7 +18964,7 @@ fn type_expect_with_module_unpacks(
             letmod_id,
             unpack.name.clone(),
             Box::new(unpack_module),
-            Box::new(typed_body),
+            tctx.push_expr(typed_body),
         ),
         body.pexp_loc,
         wrapped_ty,
@@ -18942,7 +18982,12 @@ fn has_internal_expansive_attribute(
         .any(|attr| arena.get_string(attr.0.txt) == "internal.expansive")
 }
 
-fn is_nonexpansive_expression(tctx: &TypeCheckContext<'_>, exp: &Expression) -> bool {
+fn is_nonexpansive_expression(tctx: &TypeCheckContext<'_>, exp: TExprIdx) -> bool {
+    is_nonexpansive_node(tctx, tctx.expr(exp))
+}
+
+/// `Typecore.is_nonexpansive` on an expression that may not be stored yet.
+fn is_nonexpansive_node(tctx: &TypeCheckContext<'_>, exp: &Expression) -> bool {
     if has_internal_expansive_attribute(tctx.arena, &exp.exp_attributes) {
         return true;
     }
@@ -18954,29 +18999,33 @@ fn is_nonexpansive_expression(tctx: &TypeCheckContext<'_>, exp: &Expression) -> 
         ExpressionDesc::Texp_let(_, bindings, body) => {
             bindings
                 .iter()
-                .all(|binding| is_nonexpansive_expression(tctx, &binding.vb_expr))
-                && is_nonexpansive_expression(tctx, body)
+                .all(|binding| is_nonexpansive_expression(tctx, binding.vb_expr))
+                && is_nonexpansive_expression(tctx, *body)
         }
         ExpressionDesc::Texp_function { .. } => true,
         ExpressionDesc::Texp_match(scrutinee, cases, exn_cases, _) => {
             exn_cases.is_empty()
-                && is_nonexpansive_expression(tctx, scrutinee)
+                && is_nonexpansive_expression(tctx, *scrutinee)
                 && cases.iter().all(|case| {
                     case.c_guard
                         .as_ref()
-                        .is_none_or(|guard| is_nonexpansive_expression(tctx, guard))
-                        && is_nonexpansive_expression(tctx, &case.c_rhs)
+                        .is_none_or(|guard| is_nonexpansive_expression(tctx, *guard))
+                        && is_nonexpansive_expression(tctx, case.c_rhs)
                 })
         }
-        ExpressionDesc::Texp_tuple(items) => items
+        ExpressionDesc::Texp_tuple(items) => tctx
+            .typed
+            .expr_list(*items)
             .iter()
-            .all(|item| is_nonexpansive_expression(tctx, item)),
-        ExpressionDesc::Texp_construct(_, _, items) => items
+            .all(|item| is_nonexpansive_expression(tctx, *item)),
+        ExpressionDesc::Texp_construct(_, _, items) => tctx
+            .typed
+            .expr_list(*items)
             .iter()
-            .all(|item| is_nonexpansive_expression(tctx, item)),
+            .all(|item| is_nonexpansive_expression(tctx, *item)),
         ExpressionDesc::Texp_variant(_, maybe_arg) => maybe_arg
-            .as_deref()
-            .is_none_or(|arg| is_nonexpansive_expression(tctx, arg)),
+            .as_ref()
+            .is_none_or(|arg| is_nonexpansive_expression(tctx, *arg)),
         ExpressionDesc::Texp_record {
             fields,
             extended_expression,
@@ -18992,7 +19041,7 @@ fn is_nonexpansive_expression(tctx: &TypeCheckContext<'_>, exp: &Expression) -> 
                 .all(|(_, label, definition, _)| match definition {
                     crate::types::typedtree::RecordLabelDefinition::Overridden(_, expr) => {
                         label.lbl_mut == crate::types::MutableFlag::Immutable
-                            && is_nonexpansive_expression(tctx, expr)
+                            && is_nonexpansive_expression(tctx, *expr)
                     }
                     crate::types::typedtree::RecordLabelDefinition::Kept(_)
                     | crate::types::typedtree::RecordLabelDefinition::OmittedOptionalNone(_, _) => {
@@ -19000,23 +19049,24 @@ fn is_nonexpansive_expression(tctx: &TypeCheckContext<'_>, exp: &Expression) -> 
                     }
                 })
                 && extended_expression
-                    .as_deref()
-                    .is_none_or(|expr| is_nonexpansive_expression(tctx, expr))
+                    .as_ref()
+                    .is_none_or(|expr| is_nonexpansive_expression(tctx, *expr))
         }
-        ExpressionDesc::Texp_field(expr, _, _) => is_nonexpansive_expression(tctx, expr),
+        ExpressionDesc::Texp_field(expr, _, _) => is_nonexpansive_expression(tctx, *expr),
         ExpressionDesc::Texp_array(_) => false,
         ExpressionDesc::Texp_ifthenelse(_, ifso, ifnot) => {
-            is_nonexpansive_expression(tctx, ifso)
+            is_nonexpansive_expression(tctx, *ifso)
                 && ifnot
-                    .as_deref()
-                    .is_none_or(|expr| is_nonexpansive_expression(tctx, expr))
+                    .as_ref()
+                    .is_none_or(|expr| is_nonexpansive_expression(tctx, *expr))
         }
-        ExpressionDesc::Texp_sequence(_, expr) => is_nonexpansive_expression(tctx, expr),
+        ExpressionDesc::Texp_sequence(_, expr) => is_nonexpansive_expression(tctx, *expr),
         ExpressionDesc::Texp_letmodule(_, _, module_expr, expr) => {
-            is_nonexpansive_module_expr(tctx, module_expr) && is_nonexpansive_expression(tctx, expr)
+            is_nonexpansive_module_expr(tctx, module_expr)
+                && is_nonexpansive_expression(tctx, *expr)
         }
         ExpressionDesc::Texp_pack(module_expr) => is_nonexpansive_module_expr(tctx, module_expr),
-        ExpressionDesc::Texp_assert(expr) => is_nonexpansive_expression(tctx, expr),
+        ExpressionDesc::Texp_assert(expr) => is_nonexpansive_expression(tctx, *expr),
         ExpressionDesc::Texp_apply {
             funct,
             args,
@@ -19033,7 +19083,7 @@ fn is_nonexpansive_expression(tctx: &TypeCheckContext<'_>, exp: &Expression) -> 
             // abstract typed coercion and preserves the nonexpansiveness of
             // the component function value supplied to it.
             if matches!(
-                &funct.exp_desc,
+                &tctx.expr(*funct).exp_desc,
                 ExpressionDesc::Texp_ident(_, _, desc)
                     if matches!(
                         &desc.val_kind,
@@ -19044,28 +19094,28 @@ fn is_nonexpansive_expression(tctx: &TypeCheckContext<'_>, exp: &Expression) -> 
                 return args.iter().all(|arg| {
                     arg.expression
                         .as_ref()
-                        .is_none_or(|expr| is_nonexpansive_expression(tctx, expr))
+                        .is_none_or(|expr| is_nonexpansive_expression(tctx, *expr))
                 });
             }
             if let Some((first_arg, rest_args)) = args.split_first() {
                 if first_arg.expression.is_none() {
-                    return is_nonexpansive_expression(tctx, funct)
+                    return is_nonexpansive_expression(tctx, *funct)
                         && rest_args.iter().all(|arg| {
                             arg.expression
                                 .as_ref()
-                                .is_none_or(|expr| is_nonexpansive_expression(tctx, expr))
+                                .is_none_or(|expr| is_nonexpansive_expression(tctx, *expr))
                         });
                 }
             }
 
-            if let ExpressionDesc::Texp_ident(_, _, desc) = &funct.exp_desc {
+            if let ExpressionDesc::Texp_ident(_, _, desc) = &tctx.expr(*funct).exp_desc {
                 if let crate::types::ValueKind::ValPrim(prim) = &desc.val_kind {
                     if prim.prim_name == "%raise"
                         && args.len() == 1
                         && matches!(args[0].label, crate::types::ArgLabel::Nolabel)
                     {
                         if let Some(arg_expr) = &args[0].expression {
-                            return is_nonexpansive_expression(tctx, arg_expr);
+                            return is_nonexpansive_expression(tctx, *arg_expr);
                         }
                     }
                 }
@@ -19084,7 +19134,7 @@ fn is_nonexpansive_module_expr(
         crate::types::typedtree::ModuleExprDesc::Tmod_ident(_, _) => true,
         crate::types::typedtree::ModuleExprDesc::Tmod_functor(_, _, _, _) => true,
         crate::types::typedtree::ModuleExprDesc::Tmod_unpack(expr, _) => {
-            is_nonexpansive_expression(tctx, expr)
+            is_nonexpansive_expression(tctx, *expr)
         }
         crate::types::typedtree::ModuleExprDesc::Tmod_constraint(inner, _, _, _) => {
             is_nonexpansive_module_expr(tctx, inner)
@@ -19099,7 +19149,7 @@ fn is_nonexpansive_module_expr(
                 crate::types::typedtree::StructureItemDesc::Tstr_attribute(_) => true,
                 crate::types::typedtree::StructureItemDesc::Tstr_value(_, bindings) => bindings
                     .iter()
-                    .all(|binding| is_nonexpansive_expression(tctx, &binding.vb_expr)),
+                    .all(|binding| is_nonexpansive_expression(tctx, binding.vb_expr)),
                 crate::types::typedtree::StructureItemDesc::Tstr_module(binding) => {
                     is_nonexpansive_module_expr(tctx, &binding.mb_expr)
                 }
@@ -19137,7 +19187,7 @@ fn check_univars_or_less_general(
     vars: &[TypeExprRef],
 ) -> TypeCoreResult<()> {
     let ctx = tctx.type_ctx;
-    if expans && !is_nonexpansive_expression(tctx, exp) {
+    if expans && !is_nonexpansive_node(tctx, exp) {
         crate::types::ctype::generalize_expansive(ctx, env, exp.exp_type);
     }
 
@@ -19435,14 +19485,19 @@ fn collect_typed_pattern_idents<'a>(pat: &'a Pattern, out: &mut Vec<(&'a Ident, 
     }
 }
 
-fn typed_case_uses_ident(case: &crate::types::typedtree::Case, target: &Ident) -> bool {
+fn typed_case_uses_ident(
+    ta: &TypedArena,
+    case: &crate::types::typedtree::Case,
+    target: &Ident,
+) -> bool {
     case.c_guard
         .as_ref()
-        .is_some_and(|guard| typed_expression_uses_ident(guard, target))
-        || typed_expression_uses_ident(&case.c_rhs, target)
+        .is_some_and(|guard| typed_expression_uses_ident(ta, *guard, target))
+        || typed_expression_uses_ident(ta, case.c_rhs, target)
 }
 
-pub(crate) fn typed_expression_uses_ident(expr: &Expression, target: &Ident) -> bool {
+pub(crate) fn typed_expression_uses_ident(ta: &TypedArena, expr: TExprIdx, target: &Ident) -> bool {
+    let expr = ta.expr(expr);
     match &expr.exp_desc {
         ExpressionDesc::Texp_ident(path, _, _) => {
             matches!(path, Path::Pident(id) if id.same(target))
@@ -19450,46 +19505,53 @@ pub(crate) fn typed_expression_uses_ident(expr: &Expression, target: &Ident) -> 
         ExpressionDesc::Texp_let(_, bindings, body) => {
             bindings
                 .iter()
-                .any(|binding| typed_expression_uses_ident(&binding.vb_expr, target))
-                || typed_expression_uses_ident(body, target)
+                .any(|binding| typed_expression_uses_ident(ta, binding.vb_expr, target))
+                || typed_expression_uses_ident(ta, *body, target)
         }
-        ExpressionDesc::Texp_function { body, .. } => typed_expression_uses_ident(body, target),
+        ExpressionDesc::Texp_function { body, .. } => {
+            typed_expression_uses_ident(ta, *body, target)
+        }
         ExpressionDesc::Texp_apply { funct, args, .. } => {
-            typed_expression_uses_ident(funct, target)
+            typed_expression_uses_ident(ta, *funct, target)
                 || args.iter().any(|arg| {
                     arg.expression
                         .as_ref()
-                        .is_some_and(|expr| typed_expression_uses_ident(expr, target))
+                        .is_some_and(|expr| typed_expression_uses_ident(ta, *expr, target))
                 })
         }
         ExpressionDesc::Texp_tagged_template { tag, values, .. } => {
-            typed_expression_uses_ident(tag, target)
-                || values
+            typed_expression_uses_ident(ta, *tag, target)
+                || ta
+                    .expr_list(*values)
                     .iter()
-                    .any(|value| typed_expression_uses_ident(value, target))
+                    .any(|value| typed_expression_uses_ident(ta, *value, target))
         }
-        ExpressionDesc::Texp_template { values, .. } => values
+        ExpressionDesc::Texp_template { values, .. } => ta
+            .expr_list(*values)
             .iter()
-            .any(|value| typed_expression_uses_ident(value, target)),
+            .any(|value| typed_expression_uses_ident(ta, *value, target)),
         ExpressionDesc::Texp_match(scrutinee, value_cases, exn_cases, _) => {
-            typed_expression_uses_ident(scrutinee, target)
+            typed_expression_uses_ident(ta, *scrutinee, target)
                 || value_cases
                     .iter()
                     .chain(exn_cases.iter())
-                    .any(|case| typed_case_uses_ident(case, target))
+                    .any(|case| typed_case_uses_ident(ta, case, target))
         }
         ExpressionDesc::Texp_try(body, cases) => {
-            typed_expression_uses_ident(body, target)
-                || cases.iter().any(|case| typed_case_uses_ident(case, target))
+            typed_expression_uses_ident(ta, *body, target)
+                || cases
+                    .iter()
+                    .any(|case| typed_case_uses_ident(ta, case, target))
         }
         ExpressionDesc::Texp_tuple(items)
         | ExpressionDesc::Texp_array(items)
-        | ExpressionDesc::Texp_construct(_, _, items) => items
+        | ExpressionDesc::Texp_construct(_, _, items) => ta
+            .expr_list(*items)
             .iter()
-            .any(|item| typed_expression_uses_ident(item, target)),
+            .any(|item| typed_expression_uses_ident(ta, *item, target)),
         ExpressionDesc::Texp_variant(_, payload) => payload
-            .as_deref()
-            .is_some_and(|expr| typed_expression_uses_ident(expr, target)),
+            .as_ref()
+            .is_some_and(|expr| typed_expression_uses_ident(ta, *expr, target)),
         ExpressionDesc::Texp_record {
             fields,
             extended_expression,
@@ -19504,61 +19566,64 @@ pub(crate) fn typed_expression_uses_ident(expr: &Expression, target: &Ident) -> 
                 matches!(
                     definition,
                     crate::types::typedtree::RecordLabelDefinition::Overridden(_, expr)
-                        if typed_expression_uses_ident(expr, target)
+                        if typed_expression_uses_ident(ta, *expr, target)
                 )
             }) || extended_expression
-                .as_deref()
-                .is_some_and(|expr| typed_expression_uses_ident(expr, target))
+                .as_ref()
+                .is_some_and(|expr| typed_expression_uses_ident(ta, *expr, target))
         }
         ExpressionDesc::Texp_field(base, _, _) | ExpressionDesc::Texp_assert(base) => {
-            typed_expression_uses_ident(base, target)
+            typed_expression_uses_ident(ta, *base, target)
         }
         ExpressionDesc::Texp_setfield(base, _, _, value) => {
-            typed_expression_uses_ident(base, target) || typed_expression_uses_ident(value, target)
+            typed_expression_uses_ident(ta, *base, target)
+                || typed_expression_uses_ident(ta, *value, target)
         }
         ExpressionDesc::Texp_ifthenelse(cond, then_expr, else_expr) => {
-            typed_expression_uses_ident(cond, target)
-                || typed_expression_uses_ident(then_expr, target)
+            typed_expression_uses_ident(ta, *cond, target)
+                || typed_expression_uses_ident(ta, *then_expr, target)
                 || else_expr
-                    .as_deref()
-                    .is_some_and(|expr| typed_expression_uses_ident(expr, target))
+                    .as_ref()
+                    .is_some_and(|expr| typed_expression_uses_ident(ta, *expr, target))
         }
         ExpressionDesc::Texp_sequence(first, second)
         | ExpressionDesc::Texp_while(first, second)
         | ExpressionDesc::Texp_for_of(_, _, first, second)
         | ExpressionDesc::Texp_for_await_of(_, _, first, second) => {
-            typed_expression_uses_ident(first, target)
-                || typed_expression_uses_ident(second, target)
+            typed_expression_uses_ident(ta, *first, target)
+                || typed_expression_uses_ident(ta, *second, target)
         }
         ExpressionDesc::Texp_for(_, _, start, stop, _, body) => {
-            typed_expression_uses_ident(start, target)
-                || typed_expression_uses_ident(stop, target)
-                || typed_expression_uses_ident(body, target)
+            typed_expression_uses_ident(ta, *start, target)
+                || typed_expression_uses_ident(ta, *stop, target)
+                || typed_expression_uses_ident(ta, *body, target)
         }
         ExpressionDesc::Texp_object_get(receiver, _) => {
-            typed_expression_uses_ident(receiver, target)
+            typed_expression_uses_ident(ta, *receiver, target)
         }
         ExpressionDesc::Texp_object_set(receiver, _, value) => {
-            typed_expression_uses_ident(receiver, target)
-                || typed_expression_uses_ident(value, target)
+            typed_expression_uses_ident(ta, *receiver, target)
+                || typed_expression_uses_ident(ta, *value, target)
         }
         ExpressionDesc::Texp_object_literal(fields) => fields
             .iter()
-            .any(|(_, field)| typed_expression_uses_ident(field, target)),
+            .any(|(_, field)| typed_expression_uses_ident(ta, *field, target)),
         ExpressionDesc::Texp_letmodule(_, _, module_expr, body) => {
             // OCaml compiler/ml/typecore.ml:4610-4655 records value-use
             // callbacks while typing the RHS, and typecore.ml:3399-3425 /
             // typemod.ml:1358-1377 type the let-module RHS before the body.
-            typed_module_expr_uses_ident(module_expr, target)
-                || typed_expression_uses_ident(body, target)
+            typed_module_expr_uses_ident(ta, module_expr, target)
+                || typed_expression_uses_ident(ta, *body, target)
         }
-        ExpressionDesc::Texp_letexception(_, body) => typed_expression_uses_ident(body, target),
+        ExpressionDesc::Texp_letexception(_, body) => {
+            typed_expression_uses_ident(ta, *body, target)
+        }
         ExpressionDesc::Texp_pack(module_expr) => {
             // OCaml compiler/ml/typecore.ml:3518-3528 and
             // typemod.ml:1358-1377 type packed module expressions by typing
             // the underlying module expression, so local value uses inside
             // `Pmod_unpack` count for warning 26/27.
-            typed_module_expr_uses_ident(module_expr, target)
+            typed_module_expr_uses_ident(ta, module_expr, target)
         }
         ExpressionDesc::Texp_constant(_)
         | ExpressionDesc::Texp_break
@@ -19567,67 +19632,72 @@ pub(crate) fn typed_expression_uses_ident(expr: &Expression, target: &Ident) -> 
     }
 }
 
-fn typed_module_expr_uses_ident(module_expr: &ModuleExpr, target: &Ident) -> bool {
+fn typed_module_expr_uses_ident(ta: &TypedArena, module_expr: &ModuleExpr, target: &Ident) -> bool {
     match &module_expr.mod_desc {
         ModuleExprDesc::Tmod_structure(structure) => structure
             .str_items
             .iter()
-            .any(|item| typed_structure_item_uses_ident(item, target)),
+            .any(|item| typed_structure_item_uses_ident(ta, item, target)),
         ModuleExprDesc::Tmod_apply(func, arg, _) => {
-            typed_module_expr_uses_ident(func, target) || typed_module_expr_uses_ident(arg, target)
+            typed_module_expr_uses_ident(ta, func, target)
+                || typed_module_expr_uses_ident(ta, arg, target)
         }
         ModuleExprDesc::Tmod_functor(_, _, arg, body) => {
             arg.as_deref()
-                .is_some_and(|arg| typed_module_type_uses_ident(arg, target))
-                || typed_module_expr_uses_ident(body, target)
+                .is_some_and(|arg| typed_module_type_uses_ident(ta, arg, target))
+                || typed_module_expr_uses_ident(ta, body, target)
         }
         ModuleExprDesc::Tmod_constraint(inner, _, constraint, _) => {
-            typed_module_expr_uses_ident(inner, target)
+            typed_module_expr_uses_ident(ta, inner, target)
                 || match constraint {
                     ModuleTypeConstraint::Tmodtype_explicit(module_type) => {
-                        typed_module_type_uses_ident(module_type, target)
+                        typed_module_type_uses_ident(ta, module_type, target)
                     }
                     ModuleTypeConstraint::Tmodtype_implicit => false,
                 }
         }
-        ModuleExprDesc::Tmod_unpack(expr, _) => typed_expression_uses_ident(expr, target),
+        ModuleExprDesc::Tmod_unpack(expr, _) => typed_expression_uses_ident(ta, *expr, target),
         ModuleExprDesc::Tmod_ident(_, _) => false,
     }
 }
 
-fn typed_module_type_uses_ident(module_type: &ModuleType, target: &Ident) -> bool {
+fn typed_module_type_uses_ident(ta: &TypedArena, module_type: &ModuleType, target: &Ident) -> bool {
     match &module_type.mty_desc {
         ModuleTypeDesc::Tmty_typeof(module_expr) => {
-            typed_module_expr_uses_ident(module_expr, target)
+            typed_module_expr_uses_ident(ta, module_expr, target)
         }
         ModuleTypeDesc::Tmty_functor(_, _, arg, body) => {
             arg.as_deref()
-                .is_some_and(|arg| typed_module_type_uses_ident(arg, target))
-                || typed_module_type_uses_ident(body, target)
+                .is_some_and(|arg| typed_module_type_uses_ident(ta, arg, target))
+                || typed_module_type_uses_ident(ta, body, target)
         }
-        ModuleTypeDesc::Tmty_with(inner, _) => typed_module_type_uses_ident(inner, target),
+        ModuleTypeDesc::Tmty_with(inner, _) => typed_module_type_uses_ident(ta, inner, target),
         ModuleTypeDesc::Tmty_signature(signature) => signature
             .sig_items
             .iter()
-            .any(|item| typed_signature_item_uses_ident(item, target)),
+            .any(|item| typed_signature_item_uses_ident(ta, item, target)),
         ModuleTypeDesc::Tmty_ident(_, _) | ModuleTypeDesc::Tmty_alias(_, _) => false,
     }
 }
 
-fn typed_signature_item_uses_ident(item: &TypedSignatureItem, target: &Ident) -> bool {
+fn typed_signature_item_uses_ident(
+    ta: &TypedArena,
+    item: &TypedSignatureItem,
+    target: &Ident,
+) -> bool {
     match &item.sig_desc {
         TypedSignatureItemDesc::Tsig_module(decl) => {
-            typed_module_type_uses_ident(&decl.md_type, target)
+            typed_module_type_uses_ident(ta, &decl.md_type, target)
         }
         TypedSignatureItemDesc::Tsig_recmodule(decls) => decls
             .iter()
-            .any(|decl| typed_module_type_uses_ident(&decl.md_type, target)),
+            .any(|decl| typed_module_type_uses_ident(ta, &decl.md_type, target)),
         TypedSignatureItemDesc::Tsig_modtype(decl) => decl
             .mtd_type
             .as_ref()
-            .is_some_and(|module_type| typed_module_type_uses_ident(module_type, target)),
+            .is_some_and(|module_type| typed_module_type_uses_ident(ta, module_type, target)),
         TypedSignatureItemDesc::Tsig_include(include) => {
-            typed_module_type_uses_ident(&include.incl_mod, target)
+            typed_module_type_uses_ident(ta, &include.incl_mod, target)
         }
         TypedSignatureItemDesc::Tsig_value(_)
         | TypedSignatureItemDesc::Tsig_type(_, _)
@@ -19638,24 +19708,24 @@ fn typed_signature_item_uses_ident(item: &TypedSignatureItem, target: &Ident) ->
     }
 }
 
-fn typed_structure_item_uses_ident(item: &StructureItem, target: &Ident) -> bool {
+fn typed_structure_item_uses_ident(ta: &TypedArena, item: &StructureItem, target: &Ident) -> bool {
     match &item.str_desc {
-        StructureItemDesc::Tstr_eval(expr, _) => typed_expression_uses_ident(expr, target),
+        StructureItemDesc::Tstr_eval(expr, _) => typed_expression_uses_ident(ta, *expr, target),
         StructureItemDesc::Tstr_value(_, bindings) => bindings
             .iter()
-            .any(|binding| typed_expression_uses_ident(&binding.vb_expr, target)),
+            .any(|binding| typed_expression_uses_ident(ta, binding.vb_expr, target)),
         StructureItemDesc::Tstr_module(binding) => {
-            typed_module_expr_uses_ident(&binding.mb_expr, target)
+            typed_module_expr_uses_ident(ta, &binding.mb_expr, target)
         }
         StructureItemDesc::Tstr_recmodule(bindings) => bindings
             .iter()
-            .any(|binding| typed_module_expr_uses_ident(&binding.mb_expr, target)),
+            .any(|binding| typed_module_expr_uses_ident(ta, &binding.mb_expr, target)),
         StructureItemDesc::Tstr_modtype(decl) => decl
             .mtd_type
             .as_ref()
-            .is_some_and(|module_type| typed_module_type_uses_ident(module_type, target)),
+            .is_some_and(|module_type| typed_module_type_uses_ident(ta, module_type, target)),
         StructureItemDesc::Tstr_include(include) => {
-            typed_module_expr_uses_ident(&include.incl_mod, target)
+            typed_module_expr_uses_ident(ta, &include.incl_mod, target)
         }
         StructureItemDesc::Tstr_primitive(_)
         | StructureItemDesc::Tstr_type(_, _)
@@ -19817,12 +19887,13 @@ fn rec_is_ref_value(desc: &ValueDescription) -> bool {
     )
 }
 
-fn rec_expression_class(expr: &Expression) -> RecExpressionClass {
+fn rec_expression_class(ta: &TypedArena, expr: TExprIdx) -> RecExpressionClass {
+    let expr = ta.expr(expr);
     match &expr.exp_desc {
         ExpressionDesc::Texp_let(_, _, body)
         | ExpressionDesc::Texp_letmodule(_, _, _, body)
         | ExpressionDesc::Texp_sequence(_, body)
-        | ExpressionDesc::Texp_letexception(_, body) => rec_expression_class(body),
+        | ExpressionDesc::Texp_letexception(_, body) => rec_expression_class(ta, *body),
         ExpressionDesc::Texp_ident(_, _, _)
         | ExpressionDesc::Texp_constant(_)
         | ExpressionDesc::Texp_tuple(_)
@@ -19843,7 +19914,7 @@ fn rec_expression_class(expr: &Expression) -> RecExpressionClass {
         | ExpressionDesc::Texp_break
         | ExpressionDesc::Texp_continue => RecExpressionClass::Static,
         ExpressionDesc::Texp_apply { funct, .. } => {
-            if matches!(&funct.exp_desc, ExpressionDesc::Texp_ident(_, _, desc) if rec_is_ref_value(desc))
+            if matches!(&ta.expr(*funct).exp_desc, ExpressionDesc::Texp_ident(_, _, desc) if rec_is_ref_value(desc))
             {
                 RecExpressionClass::Static
             } else {
@@ -19862,11 +19933,17 @@ fn rec_expression_class(expr: &Expression) -> RecExpressionClass {
     }
 }
 
-fn rec_option_expression(ctx: &TypeContext, env: &RecEnv, expr: Option<&Expression>) -> RecUse {
-    expr.map_or_else(RecUse::default, |expr| rec_expression(ctx, env, expr))
+fn rec_option_expression(
+    ta: &TypedArena,
+    ctx: &TypeContext,
+    env: &RecEnv,
+    expr: Option<&TExprIdx>,
+) -> RecUse {
+    expr.map_or_else(RecUse::default, |expr| rec_expression(ta, ctx, env, *expr))
 }
 
 fn rec_case(
+    ta: &TypedArena,
     ctx: &TypeContext,
     env: &RecEnv,
     case: &crate::types::typedtree::Case,
@@ -19890,15 +19967,25 @@ fn rec_case(
     rec_use_join(
         scrutinee,
         rec_use_join(
-            rec_expression(ctx, &case_env, &case.c_rhs),
-            rec_use_inspect(rec_option_expression(ctx, &case_env, case.c_guard.as_ref())),
+            rec_expression(ta, ctx, &case_env, case.c_rhs),
+            rec_use_inspect(rec_option_expression(
+                ta,
+                ctx,
+                &case_env,
+                case.c_guard.as_ref(),
+            )),
         ),
     )
 }
 
-fn rec_value_binding(ctx: &TypeContext, env: &RecEnv, binding: &ValueBinding) -> (RecEnv, RecUse) {
+fn rec_value_binding(
+    ta: &TypedArena,
+    ctx: &TypeContext,
+    env: &RecEnv,
+    binding: &ValueBinding,
+) -> (RecEnv, RecUse) {
     let vars = rec_pattern_variables(&binding.vb_pat);
-    let mut use_ = rec_expression(ctx, env, &binding.vb_expr);
+    let mut use_ = rec_expression(ta, ctx, env, binding.vb_expr);
     if rec_pattern_is_destructuring(&binding.vb_pat) {
         use_ = rec_use_inspect(use_);
     }
@@ -19910,6 +19997,7 @@ fn rec_value_binding(ctx: &TypeContext, env: &RecEnv, binding: &ValueBinding) ->
 }
 
 fn rec_value_bindings(
+    ta: &TypedArena,
     ctx: &TypeContext,
     rec_flag: RecFlag,
     env: &RecEnv,
@@ -19921,7 +20009,7 @@ fn rec_value_bindings(
             let mut use_ = RecUse::default();
             for binding in bindings {
                 ids.extend(rec_pattern_variables(&binding.vb_pat));
-                use_ = rec_use_join(use_, rec_expression(ctx, env, &binding.vb_expr));
+                use_ = rec_use_join(use_, rec_expression(ta, ctx, env, binding.vb_expr));
             }
             let mut binding_env = RecEnv::default();
             for id in ids {
@@ -19934,7 +20022,7 @@ fn rec_value_bindings(
             let mut use_ = RecUse::default();
             let mut current_env = env.clone();
             for binding in bindings {
-                let (binding_env, binding_use) = rec_value_binding(ctx, &current_env, binding);
+                let (binding_env, binding_use) = rec_value_binding(ta, ctx, &current_env, binding);
                 current_env = rec_env_join(current_env, binding_env.clone());
                 out_env = rec_env_join(out_env, binding_env);
                 use_ = rec_use_join(use_, binding_use);
@@ -19945,6 +20033,7 @@ fn rec_value_bindings(
 }
 
 fn rec_module_expr(
+    ta: &TypedArena,
     ctx: &TypeContext,
     env: &RecEnv,
     module_expr: &crate::types::typedtree::ModuleExpr,
@@ -19952,17 +20041,17 @@ fn rec_module_expr(
     match &module_expr.mod_desc {
         crate::types::typedtree::ModuleExprDesc::Tmod_ident(path, _) => rec_path(env, path),
         crate::types::typedtree::ModuleExprDesc::Tmod_structure(structure) => {
-            rec_use_guard(rec_structure(ctx, env, structure))
+            rec_use_guard(rec_structure(ta, ctx, env, structure))
         }
         crate::types::typedtree::ModuleExprDesc::Tmod_functor(_, _, _, body) => {
-            rec_use_delay(rec_module_expr(ctx, env, body))
+            rec_use_delay(rec_module_expr(ta, ctx, env, body))
         }
         crate::types::typedtree::ModuleExprDesc::Tmod_apply(functor, arg, _) => rec_use_join(
-            rec_use_inspect(rec_module_expr(ctx, env, functor)),
-            rec_use_inspect(rec_module_expr(ctx, env, arg)),
+            rec_use_inspect(rec_module_expr(ta, ctx, env, functor)),
+            rec_use_inspect(rec_module_expr(ta, ctx, env, arg)),
         ),
         crate::types::typedtree::ModuleExprDesc::Tmod_constraint(inner, _, _, coercion) => {
-            let use_ = rec_module_expr(ctx, env, inner);
+            let use_ = rec_module_expr(ta, ctx, env, inner);
             if matches!(
                 coercion,
                 crate::types::typedtree::ModuleCoercion::Tcoerce_none
@@ -19973,12 +20062,13 @@ fn rec_module_expr(
             }
         }
         crate::types::typedtree::ModuleExprDesc::Tmod_unpack(expr, _) => {
-            rec_expression(ctx, env, expr)
+            rec_expression(ta, ctx, env, *expr)
         }
     }
 }
 
 fn rec_structure(
+    ta: &TypedArena,
     ctx: &TypeContext,
     env: &RecEnv,
     structure: &crate::types::typedtree::Structure,
@@ -19986,7 +20076,7 @@ fn rec_structure(
     let mut current_env = env.clone();
     let mut use_ = RecUse::default();
     for item in &structure.str_items {
-        let (item_env, item_use) = rec_structure_item(ctx, &current_env, item);
+        let (item_env, item_use) = rec_structure_item(ta, ctx, &current_env, item);
         current_env = rec_env_join(current_env, item_env);
         use_ = rec_use_join(use_, item_use);
     }
@@ -19994,32 +20084,33 @@ fn rec_structure(
 }
 
 fn rec_structure_item(
+    ta: &TypedArena,
     ctx: &TypeContext,
     env: &RecEnv,
     item: &crate::types::typedtree::StructureItem,
 ) -> (RecEnv, RecUse) {
     match &item.str_desc {
         crate::types::typedtree::StructureItemDesc::Tstr_eval(expr, _) => {
-            (RecEnv::default(), rec_expression(ctx, env, expr))
+            (RecEnv::default(), rec_expression(ta, ctx, env, *expr))
         }
         crate::types::typedtree::StructureItemDesc::Tstr_value(rec_flag, bindings) => {
-            rec_value_bindings(ctx, *rec_flag, env, bindings)
+            rec_value_bindings(ta, ctx, *rec_flag, env, bindings)
         }
         crate::types::typedtree::StructureItemDesc::Tstr_module(binding) => {
-            let use_ = rec_module_expr(ctx, env, &binding.mb_expr);
+            let use_ = rec_module_expr(ta, ctx, env, &binding.mb_expr);
             let mut item_env = RecEnv::default();
             item_env.insert(binding.mb_id, use_.clone());
             (item_env, use_)
         }
         crate::types::typedtree::StructureItemDesc::Tstr_recmodule(bindings) => {
             let use_ = bindings.iter().fold(RecUse::default(), |use_, binding| {
-                rec_use_join(use_, rec_module_expr(ctx, env, &binding.mb_expr))
+                rec_use_join(use_, rec_module_expr(ta, ctx, env, &binding.mb_expr))
             });
             (RecEnv::default(), rec_use_inspect(use_))
         }
         crate::types::typedtree::StructureItemDesc::Tstr_include(include_decl) => (
             RecEnv::default(),
-            rec_use_inspect(rec_module_expr(ctx, env, &include_decl.incl_mod)),
+            rec_use_inspect(rec_module_expr(ta, ctx, env, &include_decl.incl_mod)),
         ),
         crate::types::typedtree::StructureItemDesc::Tstr_primitive(_)
         | crate::types::typedtree::StructureItemDesc::Tstr_type(_, _)
@@ -20033,96 +20124,108 @@ fn rec_structure_item(
     }
 }
 
-fn rec_expression(ctx: &TypeContext, env: &RecEnv, expr: &Expression) -> RecUse {
+fn rec_expression(ta: &TypedArena, ctx: &TypeContext, env: &RecEnv, expr: TExprIdx) -> RecUse {
+    let expr = ta.expr(expr);
     match &expr.exp_desc {
         ExpressionDesc::Texp_ident(path, _, _) => rec_path(env, path),
         ExpressionDesc::Texp_let(rec_flag, bindings, body) => {
-            let (binding_env, binding_use) = rec_value_bindings(ctx, *rec_flag, env, bindings);
+            let (binding_env, binding_use) = rec_value_bindings(ta, ctx, *rec_flag, env, bindings);
             rec_use_join(
                 rec_use_discard(binding_use),
-                rec_expression(ctx, &rec_env_join(env.clone(), binding_env), body),
+                rec_expression(ta, ctx, &rec_env_join(env.clone(), binding_env), *body),
             )
         }
         ExpressionDesc::Texp_letmodule(id, _, module_expr, body) => {
-            let module_use = rec_module_expr(ctx, env, module_expr);
+            let module_use = rec_module_expr(ta, ctx, env, module_expr);
             let mut body_env = env.clone();
             body_env.insert(*id, module_use.clone());
             rec_use_join(
                 rec_use_discard(module_use),
-                rec_expression(ctx, &body_env, body),
+                rec_expression(ta, ctx, &body_env, *body),
             )
         }
         ExpressionDesc::Texp_match(scrutinee, value_cases, exn_cases, _) => {
-            let scrutinee_use = rec_expression(ctx, env, scrutinee);
+            let scrutinee_use = rec_expression(ta, ctx, env, *scrutinee);
             let value_use = value_cases.iter().fold(RecUse::default(), |use_, case| {
-                rec_use_join(use_, rec_case(ctx, env, case, scrutinee_use.clone()))
+                rec_use_join(use_, rec_case(ta, ctx, env, case, scrutinee_use.clone()))
             });
             let exn_use = exn_cases.iter().fold(RecUse::default(), |use_, case| {
-                rec_use_join(use_, rec_expression(ctx, env, &case.c_rhs))
+                rec_use_join(use_, rec_expression(ta, ctx, env, case.c_rhs))
             });
             rec_use_join(value_use, exn_use)
         }
         ExpressionDesc::Texp_for(_, _, start, stop, _, body) => rec_use_join(
             rec_use_join(
-                rec_use_inspect(rec_expression(ctx, env, start)),
-                rec_use_inspect(rec_expression(ctx, env, stop)),
+                rec_use_inspect(rec_expression(ta, ctx, env, *start)),
+                rec_use_inspect(rec_expression(ta, ctx, env, *stop)),
             ),
-            rec_use_discard(rec_expression(ctx, env, body)),
+            rec_use_discard(rec_expression(ta, ctx, env, *body)),
         ),
         ExpressionDesc::Texp_for_of(_, _, iterable, body)
         | ExpressionDesc::Texp_for_await_of(_, _, iterable, body) => rec_use_join(
-            rec_use_inspect(rec_expression(ctx, env, iterable)),
-            rec_use_discard(rec_expression(ctx, env, body)),
+            rec_use_inspect(rec_expression(ta, ctx, env, *iterable)),
+            rec_use_discard(rec_expression(ta, ctx, env, *body)),
         ),
         ExpressionDesc::Texp_constant(_)
         | ExpressionDesc::Texp_break
         | ExpressionDesc::Texp_continue
         | ExpressionDesc::Texp_extension_constructor(_, _) => RecUse::default(),
         ExpressionDesc::Texp_apply { funct, args, .. } => {
-            if matches!(&funct.exp_desc, ExpressionDesc::Texp_ident(_, _, desc) if rec_is_ref_value(desc))
+            if matches!(&ta.expr(*funct).exp_desc, ExpressionDesc::Texp_ident(_, _, desc) if rec_is_ref_value(desc))
                 && args.len() == 1
                 && args[0].expression.is_some()
             {
                 return rec_use_guard(rec_expression(
+                    ta,
                     ctx,
                     env,
-                    args[0].expression.as_ref().expect("checked is_some"),
+                    args[0].expression.expect("checked is_some"),
                 ));
             }
             let args_use = args.iter().fold(RecUse::default(), |use_, arg| {
                 rec_use_join(
                     use_,
-                    rec_option_expression(ctx, env, arg.expression.as_ref()),
+                    rec_option_expression(ta, ctx, env, arg.expression.as_ref()),
                 )
             });
             rec_use_join(
-                rec_use_inspect(rec_expression(ctx, env, funct)),
+                rec_use_inspect(rec_expression(ta, ctx, env, *funct)),
                 rec_use_inspect(args_use),
             )
         }
         ExpressionDesc::Texp_tagged_template { tag, values, .. } => {
-            let values_use = values.iter().fold(RecUse::default(), |use_, value| {
-                rec_use_join(use_, rec_expression(ctx, env, value))
-            });
+            let values_use = ta
+                .expr_list(*values)
+                .iter()
+                .fold(RecUse::default(), |use_, value| {
+                    rec_use_join(use_, rec_expression(ta, ctx, env, *value))
+                });
             rec_use_join(
-                rec_use_inspect(rec_expression(ctx, env, tag)),
+                rec_use_inspect(rec_expression(ta, ctx, env, *tag)),
                 rec_use_inspect(values_use),
             )
         }
-        ExpressionDesc::Texp_template { values, .. } => {
-            rec_use_guard(values.iter().fold(RecUse::default(), |use_, value| {
-                rec_use_join(use_, rec_expression(ctx, env, value))
-            }))
-        }
-        ExpressionDesc::Texp_tuple(items) | ExpressionDesc::Texp_array(items) => {
-            rec_use_guard(items.iter().fold(RecUse::default(), |use_, item| {
-                rec_use_join(use_, rec_expression(ctx, env, item))
-            }))
-        }
+        ExpressionDesc::Texp_template { values, .. } => rec_use_guard(
+            ta.expr_list(*values)
+                .iter()
+                .fold(RecUse::default(), |use_, value| {
+                    rec_use_join(use_, rec_expression(ta, ctx, env, *value))
+                }),
+        ),
+        ExpressionDesc::Texp_tuple(items) | ExpressionDesc::Texp_array(items) => rec_use_guard(
+            ta.expr_list(*items)
+                .iter()
+                .fold(RecUse::default(), |use_, item| {
+                    rec_use_join(use_, rec_expression(ta, ctx, env, *item))
+                }),
+        ),
         ExpressionDesc::Texp_construct(_, desc, items) => {
-            let args_use = items.iter().fold(RecUse::default(), |use_, item| {
-                rec_use_join(use_, rec_expression(ctx, env, item))
-            });
+            let args_use = ta
+                .expr_list(*items)
+                .iter()
+                .fold(RecUse::default(), |use_, item| {
+                    rec_use_join(use_, rec_expression(ta, ctx, env, *item))
+                });
             let payload_is_unboxed = match desc.cstr_kind {
                 crate::types::ConstructorKind::Ordinary(reference) => matches!(
                     reference.representation(ctx),
@@ -20144,7 +20247,7 @@ fn rec_expression(ctx: &TypeContext, env: &RecEnv, expr: &Expression) -> RecUse 
             rec_use_join(constructor_use, args_use)
         }
         ExpressionDesc::Texp_variant(_, payload) => {
-            rec_use_guard(rec_option_expression(ctx, env, payload.as_deref()))
+            rec_use_guard(rec_option_expression(ta, ctx, env, payload.as_ref()))
         }
         ExpressionDesc::Texp_record {
             fields,
@@ -20161,7 +20264,7 @@ fn rec_expression(ctx: &TypeContext, env: &RecEnv, expr: &Expression) -> RecUse 
                 .fold(RecUse::default(), |use_, (_, _, def, _)| {
                     let field_use = match def {
                         crate::types::typedtree::RecordLabelDefinition::Overridden(_, expr) => {
-                            rec_expression(ctx, env, expr)
+                            rec_expression(ta, ctx, env, *expr)
                         }
                         crate::types::typedtree::RecordLabelDefinition::Kept(_)
                         | crate::types::typedtree::RecordLabelDefinition::OmittedOptionalNone(
@@ -20173,7 +20276,7 @@ fn rec_expression(ctx: &TypeContext, env: &RecEnv, expr: &Expression) -> RecUse 
                 });
             let record_use = rec_use_join(
                 fields_use,
-                rec_option_expression(ctx, env, extended_expression.as_deref()),
+                rec_option_expression(ta, ctx, env, extended_expression.as_ref()),
             );
             let unboxed = fields.first().is_some_and(|(_, label, _, _)| {
                 matches!(
@@ -20188,52 +20291,55 @@ fn rec_expression(ctx: &TypeContext, env: &RecEnv, expr: &Expression) -> RecUse 
             }
         }
         ExpressionDesc::Texp_ifthenelse(cond, ifso, ifnot) => rec_use_join(
-            rec_use_inspect(rec_expression(ctx, env, cond)),
+            rec_use_inspect(rec_expression(ta, ctx, env, *cond)),
             rec_use_join(
-                rec_expression(ctx, env, ifso),
-                rec_option_expression(ctx, env, ifnot.as_deref()),
+                rec_expression(ta, ctx, env, *ifso),
+                rec_option_expression(ta, ctx, env, ifnot.as_ref()),
             ),
         ),
         ExpressionDesc::Texp_setfield(base, _, _, value) => rec_use_join(
-            rec_use_inspect(rec_expression(ctx, env, base)),
-            rec_use_inspect(rec_expression(ctx, env, value)),
+            rec_use_inspect(rec_expression(ta, ctx, env, *base)),
+            rec_use_inspect(rec_expression(ta, ctx, env, *value)),
         ),
         ExpressionDesc::Texp_sequence(first, second) => rec_use_join(
-            rec_use_discard(rec_expression(ctx, env, first)),
-            rec_expression(ctx, env, second),
+            rec_use_discard(rec_expression(ta, ctx, env, *first)),
+            rec_expression(ta, ctx, env, *second),
         ),
         ExpressionDesc::Texp_while(cond, body) => rec_use_join(
-            rec_use_inspect(rec_expression(ctx, env, cond)),
-            rec_use_discard(rec_expression(ctx, env, body)),
+            rec_use_inspect(rec_expression(ta, ctx, env, *cond)),
+            rec_use_discard(rec_expression(ta, ctx, env, *body)),
         ),
         ExpressionDesc::Texp_object_get(receiver, _) => {
-            rec_use_inspect(rec_expression(ctx, env, receiver))
+            rec_use_inspect(rec_expression(ta, ctx, env, *receiver))
         }
         ExpressionDesc::Texp_object_set(receiver, _, value) => rec_use_join(
-            rec_use_inspect(rec_expression(ctx, env, receiver)),
-            rec_use_inspect(rec_expression(ctx, env, value)),
+            rec_use_inspect(rec_expression(ta, ctx, env, *receiver)),
+            rec_use_inspect(rec_expression(ta, ctx, env, *value)),
         ),
         ExpressionDesc::Texp_object_literal(fields) => {
             rec_use_inspect(fields.iter().fold(RecUse::default(), |use_, (_, field)| {
-                rec_use_join(use_, rec_expression(ctx, env, field))
+                rec_use_join(use_, rec_expression(ta, ctx, env, *field))
             }))
         }
         ExpressionDesc::Texp_field(base, _, _) | ExpressionDesc::Texp_assert(base) => {
-            rec_use_inspect(rec_expression(ctx, env, base))
+            rec_use_inspect(rec_expression(ta, ctx, env, *base))
         }
-        ExpressionDesc::Texp_letexception(_, body) => rec_expression(ctx, env, body),
-        ExpressionDesc::Texp_pack(module_expr) => rec_module_expr(ctx, env, module_expr),
+        ExpressionDesc::Texp_letexception(_, body) => rec_expression(ta, ctx, env, *body),
+        ExpressionDesc::Texp_pack(module_expr) => rec_module_expr(ta, ctx, env, module_expr),
         ExpressionDesc::Texp_try(body, cases) => {
             let cases_use = cases.iter().fold(RecUse::default(), |use_, case| {
-                rec_use_join(use_, rec_expression(ctx, env, &case.c_rhs))
+                rec_use_join(use_, rec_expression(ta, ctx, env, case.c_rhs))
             });
-            rec_use_join(rec_expression(ctx, env, body), cases_use)
+            rec_use_join(rec_expression(ta, ctx, env, *body), cases_use)
         }
-        ExpressionDesc::Texp_function { body, .. } => rec_use_delay(rec_expression(ctx, env, body)),
+        ExpressionDesc::Texp_function { body, .. } => {
+            rec_use_delay(rec_expression(ta, ctx, env, *body))
+        }
     }
 }
 
-fn rec_binding_rhs_is_exempt(expr: &Expression) -> bool {
+fn rec_binding_rhs_is_exempt(ta: &TypedArena, expr: TExprIdx) -> bool {
+    let expr = ta.expr(expr);
     match &expr.exp_desc {
         ExpressionDesc::Texp_function { .. } => true,
         ExpressionDesc::Texp_record { fields, .. }
@@ -20241,7 +20347,7 @@ fn rec_binding_rhs_is_exempt(expr: &Expression) -> bool {
             matches!(
                 fields.as_slice(),
                 [(_, _, crate::types::typedtree::RecordLabelDefinition::Overridden(_, expr), _)]
-                    if matches!(expr.exp_desc, ExpressionDesc::Texp_function { .. })
+                    if matches!(ta.expr(*expr).exp_desc, ExpressionDesc::Texp_function { .. })
             )
         }
         _ => false,
@@ -20249,10 +20355,13 @@ fn rec_binding_rhs_is_exempt(expr: &Expression) -> bool {
 }
 
 fn check_recursive_expression(
+    ta: &TypedArena,
     ctx: &TypeContext,
     idlist: &[Ident],
-    expr: &Expression,
+    expr: TExprIdx,
 ) -> TypeCoreResult<()> {
+    let expr_idx = expr;
+    let expr = ta.expr(expr_idx);
     let env = idlist
         .iter()
         .cloned()
@@ -20260,13 +20369,13 @@ fn check_recursive_expression(
             env.insert(id, rec_use_single(id, RecAccess::Unguarded));
             env
         });
-    let use_ = rec_expression(ctx, &env, expr);
+    let use_ = rec_expression(ta, ctx, &env, expr_idx);
     let has_unguarded = use_
         .values()
         .any(|access| matches!(access, RecAccess::Unguarded | RecAccess::Dereferenced));
     let has_dependency = !use_.is_empty();
     if has_unguarded
-        || (has_dependency && rec_expression_class(expr) == RecExpressionClass::Dynamic)
+        || (has_dependency && rec_expression_class(ta, expr_idx) == RecExpressionClass::Dynamic)
     {
         Err(TypeCoreError::IllegalLetrecExpr { loc: expr.exp_loc })
     } else {
@@ -20274,14 +20383,18 @@ fn check_recursive_expression(
     }
 }
 
-fn check_recursive_bindings(ctx: &TypeContext, bindings: &[ValueBinding]) -> TypeCoreResult<()> {
+fn check_recursive_bindings(
+    ta: &TypedArena,
+    ctx: &TypeContext,
+    bindings: &[ValueBinding],
+) -> TypeCoreResult<()> {
     let ids = bindings
         .iter()
         .flat_map(|binding| rec_pattern_variables(&binding.vb_pat))
         .collect::<Vec<_>>();
     for binding in bindings {
-        if !rec_binding_rhs_is_exempt(&binding.vb_expr) {
-            check_recursive_expression(ctx, &ids, &binding.vb_expr)?;
+        if !rec_binding_rhs_is_exempt(ta, binding.vb_expr) {
+            check_recursive_expression(ta, ctx, &ids, binding.vb_expr)?;
         }
     }
     Ok(())
@@ -20685,7 +20798,7 @@ fn type_let_bindings(
             )?;
             typed_bindings.push(ValueBinding::new(
                 typed_pat,
-                typed_expr,
+                tctx.push_expr(typed_expr),
                 binding.pvb_loc,
                 binding.pvb_attributes.clone(),
             ));
@@ -20721,7 +20834,7 @@ fn type_let_bindings(
         // Match OCaml typecore.ml `type_let`: generalize over every typed
         // subpattern (not just root binding types) using iter_pattern.
         for binding in typed_bindings.iter() {
-            let is_nonexp = is_nonexpansive_expression(tctx, &binding.vb_expr);
+            let is_nonexp = is_nonexpansive_expression(tctx, binding.vb_expr);
             if !is_nonexp {
                 iter_typed_pattern(&binding.vb_pat, &mut |pat| {
                     crate::types::ctype::generalize_expansive(ctx, env, pat.pat_type);
@@ -20848,7 +20961,7 @@ pub fn type_expression<'a>(
     // End definition scope
     type_ctx.end_def();
 
-    if !is_nonexpansive_expression(tctx, &typed_expr) {
+    if !is_nonexpansive_node(tctx, &typed_expr) {
         crate::types::ctype::generalize_expansive(type_ctx, env, typed_expr.exp_type);
     }
 
@@ -20871,7 +20984,7 @@ pub fn type_binding<'a>(
         type_let_bindings(tctx, env, rec_flag, bindings, false, LetCheck::Toplevel)?;
     // OCaml typemod.ml:1411-1415 runs Rec_check right after type_binding.
     if rec_flag == RecFlag::Recursive {
-        check_recursive_bindings(tctx.type_ctx, &typed_bindings)?;
+        check_recursive_bindings(&tctx.typed, tctx.type_ctx, &typed_bindings)?;
     }
     Ok((typed_bindings, new_env))
 }

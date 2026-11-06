@@ -46,6 +46,7 @@ impl SeenTypes {
 
 struct Collector<'a> {
     ctx: &'a TypeContext,
+    ta: &'a TypedArena,
     seen: SeenTypes,
     out: Vec<UnitRead>,
 }
@@ -117,7 +118,11 @@ impl Collector<'_> {
     }
 }
 
-impl TastIterator for Collector<'_> {
+impl<'a> TastIterator<'a> for Collector<'a> {
+    fn arena(&self) -> &'a TypedArena {
+        self.ta
+    }
+
     fn expr(&mut self, e: &Expression) {
         for (extra, _, _) in e.exp_extra.iter() {
             if let ExpExtra::Texp_open(_, path, _, _) = extra {
@@ -238,11 +243,13 @@ fn opened(opens: &[String]) -> impl Iterator<Item = UnitRead> + '_ {
 /// command line (read as whole modules).
 pub fn structure_reads(
     ctx: &TypeContext,
+    ta: &TypedArena,
     structure: &Structure,
     opens: &[String],
 ) -> Vec<UnitRead> {
     let mut collector = Collector {
         ctx,
+        ta,
         seen: SeenTypes::default(),
         out: opened(opens).collect(),
     };
@@ -253,11 +260,13 @@ pub fn structure_reads(
 /// The reads of an interface.
 pub fn signature_reads(
     ctx: &TypeContext,
+    ta: &TypedArena,
     signature: &TypedSignature,
     opens: &[String],
 ) -> Vec<UnitRead> {
     let mut collector = Collector {
         ctx,
+        ta,
         seen: SeenTypes::default(),
         out: opened(opens).collect(),
     };

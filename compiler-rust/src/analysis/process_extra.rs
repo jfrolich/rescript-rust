@@ -571,7 +571,11 @@ impl ExtraIterator<'_, '_> {
     }
 }
 
-impl TastIterator for ExtraIterator<'_, '_> {
+impl<'a> TastIterator<'a> for ExtraIterator<'a, '_> {
+    fn arena(&self) -> &'a tt::TypedArena {
+        self.ctx.ta
+    }
+
     fn structure_item(&mut self, item: &tt::StructureItem) {
         match &item.str_desc {
             tt::StructureItemDesc::Tstr_include(incl) => {
@@ -711,7 +715,7 @@ impl TastIterator for ExtraIterator<'_, '_> {
                 }
             }
             tt::ExpressionDesc::Texp_field(inner, lid, _) => {
-                self.add_for_field(inner.exp_type, expression.exp_type, lid)
+                self.add_for_field(self.ctx.ta.expr(*inner).exp_type, expression.exp_type, lid)
             }
             _ => {}
         }

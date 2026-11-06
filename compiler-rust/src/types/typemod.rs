@@ -15532,7 +15532,10 @@ fn type_module_expr_with_alias_inner<'a>(
                 .insert(mod_expr.pmod_loc, unpack_mty.clone());
 
             Ok(ModuleExpr {
-                mod_desc: ModuleExprDesc::Tmod_unpack(typed_expr, unpack_mty.clone()),
+                mod_desc: ModuleExprDesc::Tmod_unpack(
+                    tctx.push_expr(typed_expr),
+                    unpack_mty.clone(),
+                ),
                 mod_loc: loc,
                 mod_type: unpack_mty,
                 mod_env: env_ref,
@@ -16592,7 +16595,7 @@ fn type_structure_item<'a>(
                 type_expression(tctx, env, arena.get_expr(*expr)).map_err(TypeModError::CoreError)
             })?;
 
-            let desc = StructureItemDesc::Tstr_eval(typed_expr, attrs.clone());
+            let desc = StructureItemDesc::Tstr_eval(tctx.push_expr(typed_expr), attrs.clone());
             Ok((
                 StructureItem {
                     str_desc: desc,

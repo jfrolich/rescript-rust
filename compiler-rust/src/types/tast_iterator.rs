@@ -6,12 +6,17 @@
 //! OCaml `Tast_iterator.default_iterator.<field> iter x` idiom). The `env`
 //! and `module_coercion` callbacks only ever visit environments, which no
 //! Rust consumer inspects, so they are not modelled.
+//!
+//! Children are stored in the typed tree's arena, so an iterator also
+//! names the [`TypedArena`] it walks (`'t` is the arena's lifetime).
 
 use super::typedtree::*;
 use crate::parser::ast::RecFlag;
 
 /// `Tast_iterator.iterator`.
-pub trait TastIterator {
+pub trait TastIterator<'t> {
+    /// The arena holding the nodes of the tree being walked.
+    fn arena(&self) -> &'t TypedArena;
     fn case(&mut self, c: &Case) {
         walk_case(self, c)
     }
@@ -132,7 +137,8 @@ pub trait TastIterator {
     }
     fn value_binding(&mut self, vb: &ValueBinding) {
         self.pat(&vb.vb_pat);
-        self.expr(&vb.vb_expr);
+        let ta = self.arena();
+        self.expr(ta.expr(vb.vb_expr));
     }
     fn value_bindings(&mut self, _rec_flag: &RecFlag, vbs: &[ValueBinding]) {
         for vb in vbs {
@@ -152,17 +158,21 @@ pub trait TastIterator {
     }
 }
 
-pub fn walk_case<I: TastIterator + ?Sized>(sub: &mut I, c: &Case) {
+pub fn walk_case<'t, I: TastIterator<'t> + ?Sized>(sub: &mut I, c: &Case) {
+    let ta = sub.arena();
     sub.pat(&c.c_lhs);
-    if let Some(g) = &c.c_guard {
-        sub.expr(g);
+    if let Some(g) = c.c_guard {
+        sub.expr(ta.expr(g));
     }
-    sub.expr(&c.c_rhs);
+    sub.expr(ta.expr(c.c_rhs));
 }
 
-pub fn walk_structure_item<I: TastIterator + ?Sized>(sub: &mut I, item: &StructureItem) {
+pub fn walk_structure_item<'t, I: TastIterator<'t> + ?Sized>(sub: &mut I, item: &StructureItem) {
     match &item.str_desc {
-        StructureItemDesc::Tstr_eval(e, _) => sub.expr(e),
+        StructureItemDesc::Tstr_eval(e, _) => {
+            let ta = sub.arena();
+            sub.expr(ta.expr(*e))
+        }
         StructureItemDesc::Tstr_value(rec_flag, vbs) => sub.value_bindings(rec_flag, vbs),
         StructureItemDesc::Tstr_primitive(vd) => sub.value_description(vd),
         StructureItemDesc::Tstr_type(rec_flag, decls) => sub.type_declarations(rec_flag, decls),
@@ -180,7 +190,10 @@ pub fn walk_structure_item<I: TastIterator + ?Sized>(sub: &mut I, item: &Structu
     }
 }
 
-fn walk_constructor_args<I: TastIterator + ?Sized>(sub: &mut I, args: &ConstructorArgument) {
+fn walk_constructor_args<'t, I: TastIterator<'t> + ?Sized>(
+    sub: &mut I,
+    args: &ConstructorArgument,
+) {
     match args {
         ConstructorArgument::Cstr_tuple(types) => {
             for t in types {
@@ -195,7 +208,10 @@ fn walk_constructor_args<I: TastIterator + ?Sized>(sub: &mut I, args: &Construct
     }
 }
 
-pub fn walk_type_declaration<I: TastIterator + ?Sized>(sub: &mut I, td: &TypedTypeDeclaration) {
+pub fn walk_type_declaration<'t, I: TastIterator<'t> + ?Sized>(
+    sub: &mut I,
+    td: &TypedTypeDeclaration,
+) {
     for (c1, c2, _) in &td.typ_cstrs {
         sub.typ(c1);
         sub.typ(c2);
@@ -209,7 +225,7 @@ pub fn walk_type_declaration<I: TastIterator + ?Sized>(sub: &mut I, td: &TypedTy
     }
 }
 
-pub fn walk_extension_constructor<I: TastIterator + ?Sized>(
+pub fn walk_extension_constructor<'t, I: TastIterator<'t> + ?Sized>(
     sub: &mut I,
     ext: &ExtensionConstructor,
 ) {
@@ -224,7 +240,7 @@ pub fn walk_extension_constructor<I: TastIterator + ?Sized>(
     }
 }
 
-pub fn walk_pat<I: TastIterator + ?Sized>(sub: &mut I, p: &Pattern) {
+pub fn walk_pat<'t, I: TastIterator<'t> + ?Sized>(sub: &mut I, p: &Pattern) {
     for (extra, _, _) in p.pat_extra.iter() {
         if let PatExtra::Tpat_constraint(ct) = extra {
             sub.typ(ct);
@@ -257,28 +273,30 @@ pub fn walk_pat<I: TastIterator + ?Sized>(sub: &mut I, p: &Pattern) {
     }
 }
 
-fn walk_record_fields<I: TastIterator + ?Sized>(
+fn walk_record_fields<'t, I: TastIterator<'t> + ?Sized>(
     sub: &mut I,
     fields: &[RecordField],
-    extended: &Option<Box<Expression>>,
+    extended: Option<TExprIdx>,
 ) {
+    let ta = sub.arena();
     for (_, _, def, _) in fields {
         if let RecordLabelDefinition::Overridden(_, e) = def {
-            sub.expr(e);
+            sub.expr(ta.expr(*e));
         }
     }
     if let Some(e) = extended {
-        sub.expr(e);
+        sub.expr(ta.expr(e));
     }
 }
 
-pub fn walk_expr<I: TastIterator + ?Sized>(sub: &mut I, e: &Expression) {
+pub fn walk_expr<'t, I: TastIterator<'t> + ?Sized>(sub: &mut I, e: &Expression) {
     for (extra, _, _) in e.exp_extra.iter() {
         match extra {
             ExpExtra::Texp_constraint(ct) | ExpExtra::Texp_coerce { target: ct, .. } => sub.typ(ct),
             ExpExtra::Texp_open(..) | ExpExtra::Texp_newtype(_) => {}
         }
     }
+    let ta = sub.arena();
     match &e.exp_desc {
         ExpressionDesc::Texp_ident(..)
         | ExpressionDesc::Texp_constant(_)
@@ -287,41 +305,41 @@ pub fn walk_expr<I: TastIterator + ?Sized>(sub: &mut I, e: &Expression) {
         | ExpressionDesc::Texp_extension_constructor(..) => {}
         ExpressionDesc::Texp_let(rec_flag, vbs, body) => {
             sub.value_bindings(rec_flag, vbs);
-            sub.expr(body);
+            sub.expr(ta.expr(*body));
         }
         ExpressionDesc::Texp_function { params, body, .. } => {
             for param in params {
                 sub.pat(&param.fp_pat);
             }
-            sub.expr(body);
+            sub.expr(ta.expr(*body));
         }
         ExpressionDesc::Texp_apply { funct, args, .. } => {
-            sub.expr(funct);
+            sub.expr(ta.expr(*funct));
             for arg in args {
-                if let Some(e) = &arg.expression {
-                    sub.expr(e);
+                if let Some(e) = arg.expression {
+                    sub.expr(ta.expr(e));
                 }
             }
         }
         ExpressionDesc::Texp_match(e, cases, exn_cases, _) => {
-            sub.expr(e);
+            sub.expr(ta.expr(*e));
             sub.cases(cases);
             sub.cases(exn_cases);
         }
         ExpressionDesc::Texp_try(e, cases) => {
-            sub.expr(e);
+            sub.expr(ta.expr(*e));
             sub.cases(cases);
         }
         ExpressionDesc::Texp_tuple(es)
         | ExpressionDesc::Texp_construct(_, _, es)
         | ExpressionDesc::Texp_array(es) => {
-            for e in es {
+            for e in ta.exprs(*es) {
                 sub.expr(e);
             }
         }
         ExpressionDesc::Texp_variant(_, eo) => {
             if let Some(e) = eo {
-                sub.expr(e);
+                sub.expr(ta.expr(*e));
             }
         }
         ExpressionDesc::Texp_record {
@@ -333,62 +351,67 @@ pub fn walk_expr<I: TastIterator + ?Sized>(sub: &mut I, e: &Expression) {
             fields,
             extended_expression,
             ..
-        } => walk_record_fields(sub, fields, extended_expression),
-        ExpressionDesc::Texp_field(e, _, _) | ExpressionDesc::Texp_assert(e) => sub.expr(e),
+        } => walk_record_fields(sub, fields, *extended_expression),
+        ExpressionDesc::Texp_field(e, _, _) | ExpressionDesc::Texp_assert(e) => {
+            sub.expr(ta.expr(*e))
+        }
         ExpressionDesc::Texp_setfield(e1, _, _, e2)
         | ExpressionDesc::Texp_sequence(e1, e2)
         | ExpressionDesc::Texp_while(e1, e2)
         | ExpressionDesc::Texp_for_of(_, _, e1, e2)
         | ExpressionDesc::Texp_for_await_of(_, _, e1, e2) => {
-            sub.expr(e1);
-            sub.expr(e2);
+            sub.expr(ta.expr(*e1));
+            sub.expr(ta.expr(*e2));
         }
         ExpressionDesc::Texp_tagged_template { tag, values, .. } => {
-            sub.expr(tag);
-            for value in values {
+            sub.expr(ta.expr(*tag));
+            for value in ta.exprs(*values) {
                 sub.expr(value);
             }
         }
         ExpressionDesc::Texp_template { values, .. } => {
-            for value in values {
+            for value in ta.exprs(*values) {
                 sub.expr(value);
             }
         }
         ExpressionDesc::Texp_ifthenelse(e1, e2, e3) => {
-            sub.expr(e1);
-            sub.expr(e2);
+            sub.expr(ta.expr(*e1));
+            sub.expr(ta.expr(*e2));
             if let Some(e3) = e3 {
-                sub.expr(e3);
+                sub.expr(ta.expr(*e3));
             }
         }
         ExpressionDesc::Texp_for(_, _, e1, e2, _, e3) => {
-            sub.expr(e1);
-            sub.expr(e2);
-            sub.expr(e3);
+            sub.expr(ta.expr(*e1));
+            sub.expr(ta.expr(*e2));
+            sub.expr(ta.expr(*e3));
         }
-        ExpressionDesc::Texp_object_get(e, _) => sub.expr(e),
+        ExpressionDesc::Texp_object_get(e, _) => sub.expr(ta.expr(*e)),
         ExpressionDesc::Texp_object_set(e, _, v) => {
-            sub.expr(e);
-            sub.expr(v);
+            sub.expr(ta.expr(*e));
+            sub.expr(ta.expr(*v));
         }
         ExpressionDesc::Texp_object_literal(fields) => {
             for (_, e) in fields {
-                sub.expr(e);
+                sub.expr(ta.expr(*e));
             }
         }
         ExpressionDesc::Texp_letmodule(_, _, m, body) => {
             sub.module_expr(m);
-            sub.expr(body);
+            sub.expr(ta.expr(*body));
         }
         ExpressionDesc::Texp_letexception(cd, body) => {
             sub.extension_constructor(cd);
-            sub.expr(body);
+            sub.expr(ta.expr(*body));
         }
         ExpressionDesc::Texp_pack(m) => sub.module_expr(m),
     }
 }
 
-pub fn walk_signature_item<I: TastIterator + ?Sized>(sub: &mut I, item: &TypedSignatureItem) {
+pub fn walk_signature_item<'t, I: TastIterator<'t> + ?Sized>(
+    sub: &mut I,
+    item: &TypedSignatureItem,
+) {
     match &item.sig_desc {
         TypedSignatureItemDesc::Tsig_value(vd) => sub.value_description(vd),
         TypedSignatureItemDesc::Tsig_type(rec_flag, decls) => {
@@ -408,7 +431,7 @@ pub fn walk_signature_item<I: TastIterator + ?Sized>(sub: &mut I, item: &TypedSi
     }
 }
 
-pub fn walk_module_type<I: TastIterator + ?Sized>(sub: &mut I, m: &ModuleType) {
+pub fn walk_module_type<'t, I: TastIterator<'t> + ?Sized>(sub: &mut I, m: &ModuleType) {
     match &m.mty_desc {
         ModuleTypeDesc::Tmty_ident(..) | ModuleTypeDesc::Tmty_alias(..) => {}
         ModuleTypeDesc::Tmty_signature(sg) => sub.signature(sg),
@@ -428,7 +451,7 @@ pub fn walk_module_type<I: TastIterator + ?Sized>(sub: &mut I, m: &ModuleType) {
     }
 }
 
-pub fn walk_module_expr<I: TastIterator + ?Sized>(sub: &mut I, m: &ModuleExpr) {
+pub fn walk_module_expr<'t, I: TastIterator<'t> + ?Sized>(sub: &mut I, m: &ModuleExpr) {
     match &m.mod_desc {
         ModuleExprDesc::Tmod_ident(..) => {}
         ModuleExprDesc::Tmod_structure(st) => sub.structure(st),
@@ -448,11 +471,14 @@ pub fn walk_module_expr<I: TastIterator + ?Sized>(sub: &mut I, m: &ModuleExpr) {
                 sub.module_type(mt);
             }
         }
-        ModuleExprDesc::Tmod_unpack(e, _) => sub.expr(e),
+        ModuleExprDesc::Tmod_unpack(e, _) => {
+            let ta = sub.arena();
+            sub.expr(ta.expr(*e))
+        }
     }
 }
 
-pub fn walk_typ<I: TastIterator + ?Sized>(sub: &mut I, t: &TypedCoreType) {
+pub fn walk_typ<'t, I: TastIterator<'t> + ?Sized>(sub: &mut I, t: &TypedCoreType) {
     match &t.ctyp_desc {
         TypedCoreTypeDesc::Ttyp_var(_) => {}
         TypedCoreTypeDesc::Ttyp_arrow(args, ret) => {

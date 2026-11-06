@@ -24,6 +24,7 @@ use crate::parser::ast::{
 };
 use crate::types::asttypes::ArgLabel as TypeArgLabel;
 use crate::types::decl::ModuleType as DeclModuleType;
+pub use crate::types::tast_arena::{TExprIdx, TExprList, TypedArena};
 use crate::types::{
     ConstructorDescription, LabelDescription, Path, RowDesc, TypeExprRef, ValueDescription,
 };
@@ -309,12 +310,12 @@ pub enum ExpressionDesc {
     Texp_constant(Constant),
 
     /// Let binding: `let P = E in E'`.
-    Texp_let(RecFlag, Vec<ValueBinding>, Box<Expression>),
+    Texp_let(RecFlag, Vec<ValueBinding>, TExprIdx),
 
     /// Function expression. Mirrors `compiler/ml/typedtree.ml`.
     Texp_function {
         params: Vec<FunctionParam>,
-        body: Box<Expression>,
+        body: TExprIdx,
         /// Whether this is an async function.
         async_: bool,
     },
@@ -322,7 +323,7 @@ pub enum ExpressionDesc {
     /// Application: `E(E1, ..., En)`.
     /// Uses the ApplyArg representation.
     Texp_apply {
-        funct: Box<Expression>,
+        funct: TExprIdx,
         args: Vec<ApplyArg>,
         /// Whether this is a partial application.
         partial: bool,
@@ -332,19 +333,19 @@ pub enum ExpressionDesc {
 
     /// Match: `switch E { | P1 => E1 | ... }`.
     /// The two case lists are (value cases, exception cases).
-    Texp_match(Box<Expression>, Vec<Case>, Vec<Case>, Partial),
+    Texp_match(TExprIdx, Vec<Case>, Vec<Case>, Partial),
 
     /// Try: `try E catch { | P1 => E1 | ... }`.
-    Texp_try(Box<Expression>, Vec<Case>),
+    Texp_try(TExprIdx, Vec<Case>),
 
     /// Tuple: `(E1, ..., En)`.
-    Texp_tuple(Vec<Expression>),
+    Texp_tuple(TExprList),
 
     /// Constructor: `C`, `C(E)`, `C(E1, ..., En)`.
-    Texp_construct(Loc<LidentIdx>, Arc<ConstructorDescription>, Vec<Expression>),
+    Texp_construct(Loc<LidentIdx>, Arc<ConstructorDescription>, TExprList),
 
     /// Variant: `` `A ``, `` `A(E) ``.
-    Texp_variant(String, Option<Box<Expression>>),
+    Texp_variant(String, Option<TExprIdx>),
 
     /// Record: `{l1: E1, ..., ln: En}` or `{...E0, l1: E1, ...}`.
     /// Fields are (lid, label_desc, definition, optional).
@@ -356,7 +357,7 @@ pub enum ExpressionDesc {
         /// from `fields[0]`. Only the empty-field case (typecore.ml:2772-2788)
         /// carries it separately; sparse storage keeps the common node small.
         empty_representation: Option<Box<crate::types::RecordRepresentation>>,
-        extended_expression: Option<Box<Expression>>,
+        extended_expression: Option<TExprIdx>,
     },
 
     /// Intentional Rust performance representation for large regular records
@@ -376,28 +377,23 @@ pub enum ExpressionDesc {
         fields: Vec<RecordField>,
         all_labels: std::sync::Arc<Vec<LabelDescription>>,
         omitted_loc: LocIdx,
-        extended_expression: Option<Box<Expression>>,
+        extended_expression: Option<TExprIdx>,
     },
 
     /// Field access: `E.l`.
-    Texp_field(Box<Expression>, Loc<LidentIdx>, Arc<LabelDescription>),
+    Texp_field(TExprIdx, Loc<LidentIdx>, Arc<LabelDescription>),
 
     /// Field mutation: `E.l = E'`.
-    Texp_setfield(
-        Box<Expression>,
-        Loc<LidentIdx>,
-        Arc<LabelDescription>,
-        Box<Expression>,
-    ),
+    Texp_setfield(TExprIdx, Loc<LidentIdx>, Arc<LabelDescription>, TExprIdx),
 
     /// Array literal: `[E1, ..., En]`.
-    Texp_array(Vec<Expression>),
+    Texp_array(TExprList),
 
     /// If-then-else: `if E1 then E2 else E3`.
-    Texp_ifthenelse(Box<Expression>, Box<Expression>, Option<Box<Expression>>),
+    Texp_ifthenelse(TExprIdx, TExprIdx, Option<TExprIdx>),
 
     /// Sequence: `E1; E2`.
-    Texp_sequence(Box<Expression>, Box<Expression>),
+    Texp_sequence(TExprIdx, TExprIdx),
 
     /// `break` (upstream #8348). Exits the nearest enclosing loop.
     Texp_break,
@@ -407,43 +403,33 @@ pub enum ExpressionDesc {
     Texp_continue,
 
     /// While loop: `while E1 do E2 done`.
-    Texp_while(Box<Expression>, Box<Expression>),
+    Texp_while(TExprIdx, TExprIdx),
 
     /// For loop: `for i = E1 to/downto E2 do E3 done`.
     Texp_for(
         Ident,
         Box<Pattern>,
-        Box<Expression>,
-        Box<Expression>,
+        TExprIdx,
+        TExprIdx,
         DirectionFlag,
-        Box<Expression>,
+        TExprIdx,
     ),
 
     /// For-of loop: `for pat of iterable { body }` (upstream #7887).
     /// The pattern stored is the original parser pattern (as in OCaml's
     /// `Texp_for_of of Ident.t * Parsetree.pattern * expression * expression`).
-    Texp_for_of(
-        Ident,
-        Box<crate::parser::ast::Pattern>,
-        Box<Expression>,
-        Box<Expression>,
-    ),
+    Texp_for_of(Ident, Box<crate::parser::ast::Pattern>, TExprIdx, TExprIdx),
 
     /// For-await-of loop: `for await pat of asyncIterable { body }` (upstream #7887).
-    Texp_for_await_of(
-        Ident,
-        Box<crate::parser::ast::Pattern>,
-        Box<Expression>,
-        Box<Expression>,
-    ),
+    Texp_for_await_of(Ident, Box<crate::parser::ast::Pattern>, TExprIdx, TExprIdx),
 
     /// A typed JavaScript tagged template: the typed `tag`, the exact raw
     /// segment sources (which may contain invalid escapes), and the typed
     /// interpolated values. There is always one more raw source than value.
     Texp_tagged_template {
-        tag: Box<Expression>,
+        tag: TExprIdx,
         raw_sources: Vec<String>,
-        values: Vec<Expression>,
+        values: TExprList,
     },
 
     /// A typed ordinary backquoted template: validated segments carrying
@@ -451,26 +437,26 @@ pub enum ExpressionDesc {
     /// always one more segment than value.
     Texp_template {
         segments: Vec<crate::string_literal::TemplateSegment>,
-        values: Vec<Expression>,
+        values: TExprList,
     },
 
     /// Object property read: `E["name"]`.
-    Texp_object_get(Box<Expression>, Loc<String>),
+    Texp_object_get(TExprIdx, Loc<String>),
 
     /// Object property write: `E["name"] = V`.
-    Texp_object_set(Box<Expression>, Loc<String>, Box<Expression>),
+    Texp_object_set(TExprIdx, Loc<String>, TExprIdx),
 
     /// Object literal: `{"a": E, ...}`, fields in source order.
-    Texp_object_literal(Vec<(Loc<String>, Expression)>),
+    Texp_object_literal(Vec<(Loc<String>, TExprIdx)>),
 
     /// Let module: `let module M = ME in E`.
-    Texp_letmodule(Ident, Loc<String>, Box<ModuleExpr>, Box<Expression>),
+    Texp_letmodule(Ident, Loc<String>, Box<ModuleExpr>, TExprIdx),
 
     /// Let exception: `let exception C of T in E`.
-    Texp_letexception(Box<ExtensionConstructor>, Box<Expression>),
+    Texp_letexception(Box<ExtensionConstructor>, TExprIdx),
 
     /// Assert: `assert E`.
-    Texp_assert(Box<Expression>),
+    Texp_assert(TExprIdx),
 
     /// Pack: `(module M : MT)`.
     Texp_pack(Box<ModuleExpr>),
@@ -487,7 +473,7 @@ pub enum RecordLabelDefinition {
     /// Label is kept from extended expression.
     Kept(TypeExprRef),
     /// Label is overridden with new expression.
-    Overridden(Loc<LidentIdx>, Expression),
+    Overridden(Loc<LidentIdx>, TExprIdx),
     /// Intentional Rust performance representation for an omitted optional label
     /// synthesized as `None`.
     ///
@@ -511,7 +497,7 @@ pub struct ApplyArg {
     /// Argument label.
     pub label: TypeArgLabel,
     /// Argument expression, or None for omitted labeled arguments.
-    pub expression: Option<Expression>,
+    pub expression: Option<TExprIdx>,
 }
 
 /// A function parameter. Mirrors `compiler/ml/typedtree.ml`.
@@ -541,9 +527,9 @@ pub struct Case {
     /// Left-hand side pattern.
     pub c_lhs: Pattern,
     /// Optional guard: `when E`.
-    pub c_guard: Option<Expression>,
+    pub c_guard: Option<TExprIdx>,
     /// Right-hand side expression.
-    pub c_rhs: Expression,
+    pub c_rhs: TExprIdx,
 }
 
 /// A value binding in a let expression.
@@ -552,7 +538,7 @@ pub struct ValueBinding {
     /// Binding pattern.
     pub vb_pat: Pattern,
     /// Binding expression.
-    pub vb_expr: Expression,
+    pub vb_expr: TExprIdx,
     /// Attributes on the binding.
     pub vb_attributes: Attributes,
     /// Location of the binding.
@@ -701,7 +687,7 @@ pub enum ModuleExprDesc {
         ModuleCoercion,
     ),
     /// Unpack.
-    Tmod_unpack(Expression, DeclModuleType),
+    Tmod_unpack(TExprIdx, DeclModuleType),
 }
 
 /// Module type (matches OCaml's `Typedtree.module_type`).
@@ -861,7 +847,7 @@ pub struct StructureItem {
 #[derive(Debug, Clone)]
 pub enum StructureItemDesc {
     /// Evaluated expression: `E`.
-    Tstr_eval(Expression, Attributes),
+    Tstr_eval(TExprIdx, Attributes),
     /// Value binding: `let P = E`.
     Tstr_value(RecFlag, Vec<ValueBinding>),
     /// Primitive declaration: `external f : t = "..."`.
@@ -1218,7 +1204,7 @@ impl Expression {
 
 impl Case {
     /// Create a new case with pattern and expression (no guard).
-    pub fn simple(lhs: Pattern, rhs: Expression) -> Self {
+    pub fn simple(lhs: Pattern, rhs: TExprIdx) -> Self {
         Case {
             c_lhs: lhs,
             c_guard: None,
@@ -1229,7 +1215,7 @@ impl Case {
 
 impl ValueBinding {
     /// Create a new value binding.
-    pub fn new(pat: Pattern, expr: Expression, loc: LocIdx, attributes: Attributes) -> Self {
+    pub fn new(pat: Pattern, expr: TExprIdx, loc: LocIdx, attributes: Attributes) -> Self {
         ValueBinding {
             vb_pat: pat,
             vb_expr: expr,
