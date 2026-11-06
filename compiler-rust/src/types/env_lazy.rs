@@ -1752,7 +1752,7 @@ fn access_path_is_direct_opened_component(env: &super::env::Env, access_path: &P
     // compiler/ml/env.ml:1874-1877, which adds opened component bindings
     // without a root module binding. Test that origin in Env rather than
     // matching root names.
-    matches!(access_path.parent(), Some(Path::pident(_)))
+    access_path.parent().is_some_and(|p| p.as_pident().is_some())
         && env.path_starts_with_opened_component(access_path)
 }
 
@@ -1767,8 +1767,9 @@ fn build_local_module_components(
     cache_mode: super::typecore::ComponentLookupApi,
 ) -> Option<QualifiedModuleComponents> {
     if ctx.persistent_env_is_in_process()
-        && let super::decl::ModuleType::MtyAlias(_, Path::pident(alias_id))
-        | super::decl::ModuleType::MtyIdent(PathView::Pident(alias_id)) = &md.md_type
+        && let super::decl::ModuleType::MtyAlias(_, alias_path)
+        | super::decl::ModuleType::MtyIdent(alias_path) = &md.md_type
+        && let PathView::Pident(alias_id) = alias_path.view()
         && alias_id.is_persistent()
         && cache_mode.forces_alias_sig()
     {
@@ -1815,7 +1816,8 @@ fn build_local_module_components(
     // (env.ml:475-477).
     if cache_mode.forces_alias_sig()
         && !matches!(md.md_type, super::decl::ModuleType::MtyAlias(..))
-        && let Some(source @ PathView::Pdot(parent, name, _)) = source_prefix
+        && let Some(source) = source_prefix
+        && let PathView::Pdot(parent, name, _) = source.view()
         && !source.same(access_path)
     {
         let _ = crate::types::typecore::lookup_module_in_resolved_path(
@@ -1891,9 +1893,11 @@ fn build_local_module_components(
             resolved
         } else {
             let Some((raw_sig, resolved_name)) = (match &md.md_type {
-                super::decl::ModuleType::MtyAlias(_, Path::pident(alias_id))
-                    if alias_id.is_persistent() && cache_mode.forces_alias_sig() =>
+                super::decl::ModuleType::MtyAlias(_, alias_path)
+                    if alias_path.as_pident().is_some_and(|alias_id| alias_id.is_persistent())
+                        && cache_mode.forces_alias_sig() =>
                 {
+                    let alias_id = alias_path.as_pident().expect("guarded Pident");
                     // OCaml compiler/ml/env.ml:1517 calls `scrape_alias` before
                     // building component tables; env.ml:1440-1446 resolves
                     // `Mty_alias (_, path)` with `find_module`, whose `Pident`
@@ -1925,15 +1929,17 @@ fn build_local_module_components(
         parent_substitution_context
             .as_ref()
             .and_then(|(_, parent_sig)| match &md.md_type {
-                super::decl::ModuleType::MtyAlias(_, Path::pident(alias_id))
-                    if parent_sig.iter().any(|item| {
-                        matches!(
-                            item,
-                            SignatureItem::SigModule(id, _, _) if id.same(alias_id)
-                        )
-                    }) =>
-                {
-                    Some(alias_id.name().to_string())
+                super::decl::ModuleType::MtyAlias(_, alias_path) => {
+                    let alias_id = alias_path.as_pident()?;
+                    parent_sig
+                        .iter()
+                        .any(|item| {
+                            matches!(
+                                item,
+                                SignatureItem::SigModule(id, _, _) if id.same(alias_id)
+                            )
+                        })
+                        .then(|| alias_id.name().to_string())
                 }
                 _ => None,
             });

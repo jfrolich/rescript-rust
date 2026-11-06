@@ -4094,8 +4094,8 @@ impl<'a> RawLambdaConverter<'a> {
         force_root: bool,
     ) -> crate::types::Path {
         let path = match path.view() {
-            crate::types::path::PathView::Pdot(prefix, name, pos) => crate::types::Path::pdot_pos(self.normalize_module_path_with_root_force(env, prefix, force_root),, name.clone(), *pos),
-            crate::types::path::PathView::Papply(left, right) => crate::types::Path::papply(self.normalize_module_path_with_root_force(env, left, force_root),, self.normalize_module_path_with_root_force(env, right, force_root),),
+            crate::types::path::PathView::Pdot(prefix, name, pos) => crate::types::Path::pdot_pos(self.normalize_module_path_with_root_force(env, prefix, force_root), *name, *pos),
+            crate::types::path::PathView::Papply(left, right) => crate::types::Path::papply(self.normalize_module_path_with_root_force(env, left, force_root), self.normalize_module_path_with_root_force(env, right, force_root)),
             crate::types::path::PathView::Pident(id) => {
                 if force_root {
                     self.force_persistent_normalized_prefix(env, id);
@@ -4104,7 +4104,7 @@ impl<'a> RawLambdaConverter<'a> {
             }
         };
 
-        if let crate::types::path::PathView::Pdot(parent, name, _) = &path
+        if let crate::types::path::PathView::Pdot(parent, name, _) = path.view()
             && let Some(md) = self.force_qualified_module_for_normalization(env, parent, name)
             && let crate::types::decl::ModuleType::MtyAlias(_, alias_target) = &md.md_type
             && !alias_target.same(&path)
@@ -4112,7 +4112,7 @@ impl<'a> RawLambdaConverter<'a> {
             return self.normalize_module_path_with_root_force(env, alias_target, force_root);
         }
 
-        if matches!(&path, crate::types::path::PathView::Pdot(..))
+        if matches!(path.view(), crate::types::path::PathView::Pdot(..))
             && let Some(alias_target) = crate::types::typecore::module_alias_target_for_path(
                 &path,
                 env,
@@ -4147,7 +4147,7 @@ impl<'a> RawLambdaConverter<'a> {
             }
         }
 
-        if matches!(&path, crate::types::path::PathView::Pdot(..)) || Self::path_may_follow_mty_ident(&path) {
+        if matches!(path.view(), crate::types::path::PathView::Pdot(..)) || Self::path_may_follow_mty_ident(&path) {
             if let Some(alias_target) = crate::types::typecore::module_alias_target_for_path(
                 &path,
                 env,
@@ -4419,16 +4419,14 @@ impl<'a> RawLambdaConverter<'a> {
             ModuleExprDesc::Tmod_constraint(inner, _, _, _) => {
                 self.note_possible_required_modules_from_empty_include(inner);
             }
-            ModuleExprDesc::Tmod_ident(crate::types::path::PathView::Pident(id), _) => {
+            ModuleExprDesc::Tmod_ident(path, _) if path.as_pident().is_some() => {
+                let id = path.as_pident().expect("guarded Pident");
                 if let Some(env) = self.env_for_module_expr(module_expr) {
-                    if env.lookup_module(&crate::types::Path::pident(*id)).is_err() {
+                    if env.lookup_module(path).is_err() {
                         self.note_possible_required_module(id);
                         return;
                     }
-                } else if self
-                    .env
-                    .lookup_module(&crate::types::Path::pident(*id))
-                    .is_err()
+                } else if self.env.lookup_module(path).is_err()
                 {
                     self.note_possible_required_module(id);
                     return;
@@ -7134,7 +7132,6 @@ impl<'a> RawLambdaConverter<'a> {
     /// the expanded function type takes one unlabelled argument whose
     /// expanded type is a `Pident` named `unit`.
     fn function_takes_one_unit_arg(&self, function: &Expression) -> bool {
-        use crate::types::Path;
         use crate::types::asttypes::ArgLabel;
         use crate::types::type_expr::TypeDesc;
         let env = self.env_for_expr(function);
@@ -7155,8 +7152,8 @@ impl<'a> RawLambdaConverter<'a> {
         let arg_type = ctx.repr(crate::types::ctype::expand_head(ctx, env, arg_type));
         matches!(
             &*ctx.get_desc(arg_type),
-            TypeDesc::Tconstr { path: PathView::Pident(id), args, .. }
-                if id.name() == "unit" && args.is_empty()
+            TypeDesc::Tconstr { path, args, .. }
+                if path.as_pident().is_some_and(|id| id.name() == "unit") && args.is_empty()
         )
     }
 
@@ -8450,7 +8447,7 @@ mod tests {
 
         let mut converter = RawLambdaConverter::new(&arena, &ctx, &env);
         let lowered = converter.translate_module_path_raw(
-            &crate::types::path::PathView::Pident(side_effect),
+            &crate::types::path::Path::pident(side_effect),
             SrcLoc::from(Location::none()),
         );
         let possible_required_modules = converter.take_possible_required_modules();

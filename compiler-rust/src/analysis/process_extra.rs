@@ -455,7 +455,7 @@ impl ExtraIterator<'_, '_> {
                 Some((t, tip)) => self.add_for_path(path, txt, l, t, tip),
                 None => self.add_for_path_parent(path, l),
             }
-            if let (PathView::Pdot(pinner, _, _), Longident::Ldot(inner, name)) = (path, txt) {
+            if let (PathView::Pdot(pinner, _, _), Longident::Ldot(inner, name)) = (path.view(), txt) {
                 let name_len = self.ctx.arena.get_string(*name).len() as i32;
                 self.add_for_longident(None, pinner, inner, loc.chop_location_end(name_len + 1));
             }

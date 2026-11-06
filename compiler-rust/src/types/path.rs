@@ -299,6 +299,15 @@ impl Path {
         &self.0.view
     }
 
+    /// The identifier of a `Pident` path.
+    #[inline]
+    pub fn as_pident(self) -> Option<&'static Ident> {
+        match self.view() {
+            PathView::Pident(id) => Some(id),
+            _ => None,
+        }
+    }
+
     /// Get the parent module path (strip the last component).
     /// For `Pdot(parent, name, _)`, returns `Some(parent)`.
     /// For `Pident(_)` and `Papply(..)`, returns `None`.

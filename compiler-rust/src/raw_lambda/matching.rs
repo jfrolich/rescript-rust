@@ -6893,7 +6893,6 @@ fn get_extension_cases(
 /// Translate a path to a RawLambda access expression.
 /// Equivalent to OCaml's `transl_normal_path`.
 fn transl_normal_path(path: &crate::types::path::Path) -> RawLambda {
-    use crate::types::path::Path;
     match path.view() {
         PathView::Pident(id) => {
             if id.is_global() {
@@ -8449,7 +8448,7 @@ fn resolve_labels_from_type(
         }
     }
 
-    if let crate::types::path::PathView::Pident(ref id) = path.view() {
+    if let crate::types::path::PathView::Pident(id) = path.view() {
         if id.stamp() != 0 {
             if let Some(decl) = ctx_ref.find_type_decl_by_stamp(id.stamp()) {
                 if let crate::types::TypeKind::TypeRecord(ref labels, ref repr) = decl.type_kind {
@@ -8495,7 +8494,7 @@ fn resolve_labels_from_type(
 
     // Handle inline records: path is Pdot(parent_type, constructor_name, _)
     // Look up the parent type declaration and find the constructor's inline record
-    if let crate::types::path::PathView::Pdot(ref parent_path, ref cstr_name, _) = path.view() {
+    if let crate::types::path::PathView::Pdot(parent_path, cstr_name, _) = path.view() {
         // Try to find the parent type declaration
         let parent_decl = env
             .lookup_type(parent_path)
@@ -8512,7 +8511,7 @@ fn resolve_labels_from_type(
                     .map(|d| d.clone())
             })
             .or_else(|| {
-                if let crate::types::path::PathView::Pident(ref id) = parent_path.view() {
+                if let crate::types::path::PathView::Pident(id) = parent_path.view() {
                     if id.stamp() != 0 {
                         ctx_ref
                             .find_type_decl_by_stamp(id.stamp())

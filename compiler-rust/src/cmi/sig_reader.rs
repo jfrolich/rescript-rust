@@ -8,7 +8,6 @@
 //! Each OCaml variant constructor gets an integer tag assigned in definition order.
 //! Records are blocks with tag 0. See the tag tables in the module-level comments below.
 
-use crate::types::path::PathView;
 use crate::ident::Ident;
 use crate::location::{Location, Position};
 use crate::types::asttypes::{ArgLabel, Located, MutableFlag, PrivateFlag};
@@ -995,13 +994,13 @@ fn read_path(value: &OcamlValue) -> Path {
     match value {
         OcamlValue::Block(0, fields) => {
             let id = read_ident(&fields[0]);
-            PathView::Pident(id)
+            Path::pident(id)
         }
         OcamlValue::Block(1, fields) => {
             let prefix = read_path(&fields[0]);
             let name = fields[1].as_string().to_string();
             let pos = fields[2].as_int() as i32;
-            Path::pdot_pos(prefix, name.into(), pos)
+            Path::pdot_pos(prefix, name, pos)
         }
         OcamlValue::Block(2, fields) => {
             let f = read_path(&fields[0]);

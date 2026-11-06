@@ -7132,7 +7132,7 @@ fn add_signature_to_env_with_options_inner(
     };
     for item in sig_items.iter() {
         let slot_path = |name: &str, p: i32| {
-            Path::pdot_pos(module_path.clone(), name.to_string().into(), p)
+            Path::pdot_pos(module_path.clone(), name, p)
         };
         match item {
             SignatureItem::SigValue(id, desc) => {
@@ -7382,7 +7382,7 @@ fn add_signature_to_env_with_options_inner(
                         match path.view() {
                             PathView::Pident(alias_id) => {
                                 if alias_id.is_persistent() {
-                                    return PathView::Pident(alias_id);
+                                    return path;
                                 }
                                 let clean = alias_id.name();
                                 if clean == module_name {
@@ -7390,7 +7390,7 @@ fn add_signature_to_env_with_options_inner(
                                 } else if clean == module_path.last() {
                                     module_path.clone()
                                 } else {
-                                    PathView::Pident(alias_id)
+                                    path
                                 }
                             }
                             PathView::Pdot(prefix, name, pos) => Path::pdot_pos(go(
@@ -7398,7 +7398,7 @@ fn add_signature_to_env_with_options_inner(
                                     module_path,
                                     module_name,
                                     access_path,
-                                ), name, pos),
+                                ), *name, *pos),
                             PathView::Papply(functor, arg) => Path::papply(go(
                                     functor.clone(),
                                     module_path,
@@ -7428,9 +7428,8 @@ fn add_signature_to_env_with_options_inner(
                 if as_opened {
                     let direct_persistent_alias = matches!(
                         &md.md_type,
-                        ModuleType::MtyAlias(_, Path::pident(alias_id))
-                            | ModuleType::MtyIdent(PathView::Pident(alias_id))
-                            if alias_id.is_persistent()
+                        ModuleType::MtyAlias(_, alias_path) | ModuleType::MtyIdent(alias_path)
+                            if alias_path.as_pident().is_some_and(|alias_id| alias_id.is_persistent())
                     );
                     if direct_persistent_alias && precomputed_components.is_some() {
                         // OCaml compiler/ml/env.ml:1516-1518 scrapes a

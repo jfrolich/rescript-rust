@@ -7834,16 +7834,12 @@ fn type_is_predef_path(
 fn type_is_jsx_component(type_ctx: &TypeContext, ty: TypeExprRef) -> bool {
     let repr = type_ctx.repr(ty);
     match &*type_ctx.get_desc(repr) {
-        TypeDesc::Tconstr {
-            path: crate::types::path::PathView::Pdot(parent, name, _),
-            ..
-        } => {
-            name == "component"
-                && matches!(
-                    parent,
-                    crate::types::path::Path::pident(id) if id.name() == "Jsx"
-                )
-        }
+        TypeDesc::Tconstr { path, .. } => matches!(
+            path.view(),
+            crate::types::path::PathView::Pdot(parent, name, _)
+                if name == "component"
+                    && parent.as_pident().is_some_and(|id| id.name() == "Jsx")
+        ),
         TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) => type_is_jsx_component(type_ctx, *next),
         _ => false,
     }
@@ -12194,7 +12190,6 @@ fn extract_pat_name(pat: &crate::types::typedtree::Pattern) -> Option<String> {
 /// impl has local Pident while iface has qualified Pdot, so we compare
 /// the leaf name instead.
 fn moregen_paths_compatible(p1: &crate::types::Path, p2: &crate::types::Path) -> bool {
-    use crate::types::Path;
     if p1.same(p2) {
         return true;
     }

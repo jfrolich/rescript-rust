@@ -1014,7 +1014,7 @@ impl<'a> Printtyp<'a> {
                 TypeDesc::Tvariant(row) => {
                     let row = btype::row_repr(self.ctx, &row);
                     match &row.row_name {
-                        Some((PathView::Pident(id2), _)) if id2.same(id) => {
+                        Some((p, _)) if p.as_pident().is_some_and(|id2| id2.same(id)) => {
                             self.ctx
                                 .new_generic_type(TypeDesc::Tvariant(Box::new(RowDesc {
                                     row_name: None,
@@ -2533,7 +2533,7 @@ impl<'a> Printtyp<'a> {
     }
 
     fn path_same_name(&mut self, p1: &Path, p2: &Path) {
-        match (p1, p2) {
+        match (p1.view(), p2.view()) {
             (PathView::Pident(id1), PathView::Pident(id2)) => {
                 if id1.name() == id2.name() && !id1.same(id2) {
                     self.add_unique(id1);
@@ -2666,14 +2666,11 @@ impl<'a> Printtyp<'a> {
     fn is_constr_row(&self, allow_ident: bool, t: TypeExprRef) -> bool {
         let is_row_name = |s: &str| s.len() >= 4 && s.ends_with("#row");
         match &*self.ctx.borrow_desc(self.ctx.repr(t)) {
-            TypeDesc::Tconstr {
-                path: PathView::Pident(id),
-                ..
-            } if allow_ident => is_row_name(id.name()),
-            TypeDesc::Tconstr {
-                path: PathView::Pdot(_, s, _),
-                ..
-            } => is_row_name(s),
+            TypeDesc::Tconstr { path, .. } => match path.view() {
+                PathView::Pident(id) => allow_ident && is_row_name(id.name()),
+                PathView::Pdot(_, s, _) => is_row_name(s),
+                PathView::Papply(..) => false,
+            },
             _ => false,
         }
     }

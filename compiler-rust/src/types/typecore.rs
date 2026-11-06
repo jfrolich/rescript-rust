@@ -9412,7 +9412,7 @@ fn lookup_qualified_value_for_arity_suggestion(
                 .map(|(pos, _, vd)| (components.access_path().clone(), pos, vd))
         })
     {
-        let path = Path::pdot_pos(mod_path, value_name.to_string().into(), pos as i32);
+        let path = Path::pdot_pos(mod_path, value_name, pos as i32);
         let result = (path, Arc::new(vd));
         ctx.register_resolved_module_value(
             &module_path,
@@ -12633,10 +12633,8 @@ fn type_function_nary_with_newtypes(
                     }
                     if matches!(
                         &*ctx.get_desc(ty),
-                        TypeDesc::Tconstr {
-                            path: PathView::Pident(id),
-                            ..
-                        } if id.same(target_id)
+                        TypeDesc::Tconstr { path, .. }
+                            if path.as_pident().is_some_and(|id| id.same(target_id))
                     ) {
                         *used = true;
                         crate::types::link_type(ctx, ty, replacement_ty);
@@ -14179,7 +14177,7 @@ fn select_record_type_from_qualified_label_scope(
     if let Longident::Lident(module_idx) = module_lid.as_ref() {
         let module_name = arena.get_string(*module_idx);
         if let Ok((module_path, md)) = env.find_module_with_path(module_name) {
-            if matches!(&module_path, Path::pident(id) if !id.is_persistent() && id.stamp() != 0)
+            if matches!(module_path.view(), crate::types::path::PathView::Pident(id) if !id.is_persistent() && id.stamp() != 0)
                 && let Some(record_ty) = select_record_type_in_unforced_module_decl(
                     ctx,
                     &module_path,
@@ -16860,10 +16858,8 @@ fn type_newtype(
 
             let should_replace = matches!(
                 &*ctx.get_desc(ty),
-                TypeDesc::Tconstr {
-                    path: PathView::Pident(id),
-                    ..
-                } if id.same(target_id)
+                TypeDesc::Tconstr { path, .. }
+                    if path.as_pident().is_some_and(|id| id.same(target_id))
             );
 
             if should_replace {
@@ -18324,8 +18320,8 @@ fn pack_type_path_has_local_module_dependency(
 ) -> bool {
     if matches!(path.view(), PathView::Pdot(..))
         && matches!(
-            path_root_module(path),
-            Path::pident(id) if !id.is_persistent() && id.name() == "%M"
+            path_root_module(path).view(),
+            PathView::Pident(id) if !id.is_persistent() && id.name() == "%M"
         )
     {
         let Some(decl) = lookup_type_decl_for_path(path, env, pers_env, ctx) else {
@@ -19439,7 +19435,7 @@ fn typed_case_uses_ident(case: &crate::types::typedtree::Case, target: &Ident) -
 pub(crate) fn typed_expression_uses_ident(expr: &Expression, target: &Ident) -> bool {
     match &expr.exp_desc {
         ExpressionDesc::Texp_ident(path, _, _) => {
-            matches!(path, Path::pident(id) if id.same(target))
+            matches!(path.view(), crate::types::path::PathView::Pident(id) if id.same(target))
         }
         ExpressionDesc::Texp_let(_, bindings, body) => {
             bindings
@@ -22038,7 +22034,7 @@ impl Env {
                             },
                         )
                     {
-                        let path = Path::pdot_pos(mod_path, value_name.to_string().into(), pos as i32);
+                        let path = Path::pdot_pos(mod_path, value_name, pos as i32);
                         let result = (path, Arc::new(vd));
                         ctx.register_resolved_module_value(
                             &module_path,
@@ -23315,7 +23311,7 @@ fn path_non_apply_root_is_persistent_or_global(path: &Path) -> bool {
 }
 
 fn is_local_module_access_path(path: &Path) -> bool {
-    matches!(path_root_module(path), Path::pident(id) if !id.is_persistent())
+    matches!(path_root_module(path).view(), crate::types::path::PathView::Pident(id) if !id.is_persistent())
 }
 
 fn type_contains_unresolved_local_path(
@@ -23336,7 +23332,7 @@ fn type_contains_unresolved_local_path(
     match &*desc {
         TypeDesc::Tconstr { path, args, .. } => {
             let has_local_head =
-                matches!(path_root_module(path), Path::pident(id) if !id.is_persistent());
+                matches!(path_root_module(path).view(), crate::types::path::PathView::Pident(id) if !id.is_persistent());
             // OCaml compiler/ml/env.ml:781-813 reads component descriptors for
             // type lookup without forcing env.ml:1568's module-declaration
             // thunk. This unresolved-path probe uses the explicit no-publish
@@ -25366,7 +25362,7 @@ fn qualify_module_local_type_paths_with_alias_lookup_in_place<'a>(
                     normalized_alias_target = Some(normalized);
                 }
                 let direct_alias_target_reexported_by_parent = if direct_alias_target_type {
-                    match (module_access_path, &path) {
+                    match (module_access_path.view(), path.view()) {
                         (PathView::Pdot(selected_parent, _, _), PathView::Pdot(_, type_name, _)) => env
                             .find_type_with_path(type_name)
                             .ok()
@@ -25479,7 +25475,7 @@ fn qualify_module_local_type_paths_with_alias_lookup_in_place<'a>(
                 // A bare `Pident` is only rewritten when it is the component's
                 // own binder (checked above).
                 if !path_parent_has_module_suffix
-                    && !matches!(path, Path::pident(_))
+                    && !matches!(path.view(), crate::types::path::PathView::Pident(_))
                     && let Some(candidate) = prepend_module_prefix(&path, module_access_path)
                     && !candidate.same(&path)
                     && lookup_type_decl_for_qualification_probe(&candidate, env, pers_env, ctx)
@@ -26160,10 +26156,10 @@ fn strengthen_sig_module_decls_for_module_access_path(
 
 fn module_type_has_hidden_unpack_ident(mty: &crate::types::decl::ModuleType) -> bool {
     match mty {
-        crate::types::decl::ModuleType::MtyIdent(Path::pident(id))
-        | crate::types::decl::ModuleType::MtyAlias(_, PathView::Pident(id)) => {
-            id.name().starts_with("__") || id.is_persistent()
-        }
+        crate::types::decl::ModuleType::MtyIdent(path)
+        | crate::types::decl::ModuleType::MtyAlias(_, path) => path
+            .as_pident()
+            .is_some_and(|id| id.name().starts_with("__") || id.is_persistent()),
         _ => false,
     }
 }
@@ -26278,7 +26274,7 @@ fn module_components_cache_key(
     module_path: &Path,
     env: &Env,
 ) -> Option<crate::types::context::QualifiedModuleComponentsCacheKey> {
-    if matches!(module_path, Path::papply(_, _)) {
+    if matches!(module_path.view(), PathView::Papply(_, _)) {
         // OCaml compiler/ml/env.ml:1744-1756 caches
         // `components_of_functor_appl` per argument path in `fcomp_cache`.
         // A Papply has no stable flattened head, but the full path is still
@@ -26792,8 +26788,8 @@ pub(crate) fn open_module_lid_components_into_env(
     // same component-view path rather than rebuilding from a detached signature.
     if let Longident::Lident(mod_idx) = lid {
         let mod_name = arena.get_string(*mod_idx);
-        if let Ok((PathView::Pdot(parent, child_name, _), _)) =
-            lookup_env.find_module_with_path(mod_name)
+        if let Ok((selected_path, _)) = lookup_env.find_module_with_path(mod_name)
+            && let PathView::Pdot(parent, child_name, _) = selected_path.view()
         {
             // OCaml compiler/ml/typetexp.ml:144-151 calls
             // compiler/ml/env.ml:1036-1055 `lookup_module` before
@@ -26856,10 +26852,11 @@ fn build_module_components_from_parent_path(
                 |components| {
                     components.lookup_module(module_name.as_str()).and_then(
                         |(runtime_pos, _, md)| match &md.md_type {
-                            crate::types::decl::ModuleType::MtyAlias(_, Path::pident(alias_id))
-                            | crate::types::decl::ModuleType::MtyIdent(PathView::Pident(alias_id))
-                                if alias_id.is_persistent() =>
-                            {
+                            crate::types::decl::ModuleType::MtyAlias(_, alias_path)
+                            | crate::types::decl::ModuleType::MtyIdent(alias_path) => {
+                                let alias_id = alias_path
+                                    .as_pident()
+                                    .filter(|alias_id| alias_id.is_persistent())?;
                                 Some((
                                     runtime_pos,
                                     alias_id.name().to_string(),
@@ -27597,9 +27594,9 @@ fn qualify_resolved_signature_for_access_path_inner(
     force_generalize_values: bool,
 ) -> crate::types::decl::Signature {
     let should_rebind_direct_type_family = should_rebind_direct_sig_type_family(mty, access_path);
-    let access_path_has_local_root = matches!(path_root_module(access_path), Path::pident(id) if !id.is_persistent() && id.stamp() != 0);
+    let access_path_has_local_root = matches!(path_root_module(access_path).view(), crate::types::path::PathView::Pident(id) if !id.is_persistent() && id.stamp() != 0);
     let access_path_has_persistent_root =
-        matches!(path_root_module(access_path), Path::pident(id) if id.is_persistent());
+        matches!(path_root_module(access_path).view(), crate::types::path::PathView::Pident(id) if id.is_persistent());
     if ctx.compiler_counters_enabled() {
         let kind = if let Some(old_name) = resolved_name {
             match access_path.view() {
@@ -27634,10 +27631,10 @@ fn qualify_resolved_signature_for_access_path_inner(
     // sharing must come from compiler/ml/subst.ml:303-309.
     let mut sig = copy_lookup_signature_for_subst(resolved_sig, ctx);
     let alias_requires_exact_persistent_prefix = matches!(
-        (mty, access_path),
+        (mty, access_path.view()),
         (
             crate::types::decl::ModuleType::MtyAlias(_, target),
-            Path::pident(id),
+            PathView::Pident(id),
         ) if id.is_persistent() && !target.same(access_path)
     );
     let mut alias_module_strengthen_path = None;
@@ -27670,9 +27667,11 @@ fn qualify_resolved_signature_for_access_path_inner(
     if let Some(old_name) = resolved_name {
         let resolved_alias_to_persistent_root = matches!(
             mty,
-            crate::types::decl::ModuleType::MtyAlias(_, Path::pident(alias_id))
-                | crate::types::decl::ModuleType::MtyIdent(PathView::Pident(alias_id))
-                if alias_id.is_persistent() && alias_id.name() == old_name
+            crate::types::decl::ModuleType::MtyAlias(_, alias_path)
+                | crate::types::decl::ModuleType::MtyIdent(alias_path)
+                if alias_path
+                    .as_pident()
+                    .is_some_and(|alias_id| alias_id.is_persistent() && alias_id.name() == old_name)
         );
         if resolved_alias_to_persistent_root {
             // OCaml compiler/ml/env.ml:1516-1518 scrapes aliases before
@@ -27708,7 +27707,7 @@ fn qualify_resolved_signature_for_access_path_inner(
         }
     }
     let alias_access_is_persistent_child = matches!(
-        (mty, access_path),
+        (mty, access_path.view()),
         (
             crate::types::decl::ModuleType::MtyAlias(_, _),
             PathView::Pdot(parent, _, _),
@@ -28216,7 +28215,7 @@ fn build_module_signature_for_path(
         return resolved;
     }
 
-    if matches!(module_path, Path::papply(_, _)) {
+    if matches!(module_path.view(), PathView::Papply(_, _)) {
         return None;
     }
 

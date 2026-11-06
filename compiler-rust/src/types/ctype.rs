@@ -2819,15 +2819,15 @@ fn normalize_module_path_through_components(
         PathView::Pdot(parent, name, pos) => {
             let parent =
                 normalize_module_path_through_components(ctx, load_paths, parent, visiting)
-                    .unwrap_or_else(|| (**parent).clone());
+                    .unwrap_or_else(|| *parent);
             Path::pdot_pos(parent, *name, *pos)
         }
         PathView::Papply(functor, arg) => {
             let functor =
                 normalize_module_path_through_components(ctx, load_paths, functor, visiting)
-                    .unwrap_or_else(|| (**functor).clone());
+                    .unwrap_or_else(|| *functor);
             let arg = normalize_module_path_through_components(ctx, load_paths, arg, visiting)
-                .unwrap_or_else(|| (**arg).clone());
+                .unwrap_or_else(|| *arg);
             Path::papply(functor, arg)
         }
         PathView::Pident(_) => module_path.clone(),
@@ -4316,7 +4316,7 @@ fn try_expand_head_with_mode(
                     }
                     PathView::Papply(_, _) => false,
                 };
-                local_env_type_is_authoritative = matches!(&path, Path::pident(id) if !id.is_persistent() && id.stamp() != 0)
+                local_env_type_is_authoritative = matches!(path.view(), crate::types::path::PathView::Pident(id) if !id.is_persistent() && id.stamp() != 0)
                     && exact_lookup;
                 if exact_lookup {
                     let self_manifest = env_decl.type_manifest.is_some_and(|manifest| {
@@ -4490,7 +4490,7 @@ fn try_expand_head_with_mode(
             // Env.find_type_expansion and then Env.normalize_path. Rust's
             // global declaration store is not an Env lookup boundary and must
             // not bypass normalize_path's persistent-module force.
-            let allow_global_fallbacks = matches!(&path, Path::pident(id) if id.is_persistent())
+            let allow_global_fallbacks = matches!(path.view(), crate::types::path::PathView::Pident(id) if id.is_persistent())
                 && matches!(mode, ExpandHeadMode::General);
 
             // 2. Try stamp-based global store (for CMI types with non-zero stamps)
@@ -4698,7 +4698,7 @@ pub(crate) fn cyclic_abbrev(ctx: &TypeContext, env: &Env, id: &Ident, ty: TypeEx
             TypeDesc::Tconstr { path, .. } => path.clone(),
             _ => return false,
         };
-        if matches!(&path, Path::pident(p) if p.same(id)) || seen.contains(&ty) {
+        if matches!(path.view(), crate::types::path::PathView::Pident(p) if p.same(id)) || seen.contains(&ty) {
             return true;
         }
         match expand_abbrev_opt_once(ctx, env, ty) {
@@ -13546,11 +13546,10 @@ fn normalize_type_rec(
         // ctype.ml:4058-4065 (PR#7348): name the private row type by its
         // declaration instead of the `#row` type.
         let renamed = match &*ctx.get_desc(tm) {
-            TypeDesc::Tconstr {
-                path: PathView::Pdot(m, i, pos),
-                args,
-                ..
-            } => {
+            TypeDesc::Tconstr { path, args, .. } => {
+                let PathView::Pdot(m, i, pos) = path.view() else {
+                    unreachable!("is_constr_row implies a dotted Tconstr")
+                };
                 let i = i.as_str();
                 let i_prime = &i[..i.len() - 4];
                 TypeDesc::Tconstr {
@@ -14503,7 +14502,7 @@ mod tests {
         let original_manifest = ctx.repr(original_manifest);
         assert!(matches!(
             &*ctx.get_desc(original_manifest),
-            TypeDesc::Tconstr { path, .. } if matches!(path, crate::types::Path::pident(id) if id.name() == "u")
+            TypeDesc::Tconstr { path, .. } if matches!(path.view(), crate::types::path::PathView::Pident(id) if id.name() == "u")
         ));
     }
 

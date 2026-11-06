@@ -289,8 +289,8 @@ pub fn compute_type_graph_fingerprint(entries: &HashGraph<'_>, sig: &Signature) 
 /// Hash a Path using only names, not stamps. This makes the fingerprint stable
 /// across recompilations where dependency stamps may shift.
 fn hash_path_by_name(hasher: &mut impl Hasher, path: &Path) {
-    use crate::types::path::Path as P;
-    match path {
+    use crate::types::path::PathView as P;
+    match path.view() {
         P::Pident(ident) => {
             0u8.hash(hasher);
             ident.name().hash(hasher);

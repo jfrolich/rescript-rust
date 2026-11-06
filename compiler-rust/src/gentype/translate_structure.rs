@@ -647,7 +647,6 @@ fn persistent_alias_module_type(
     env: &crate::types::env::Env,
     path: &crate::types::path::Path,
 ) -> Option<DeclModuleType> {
-    use crate::types::path::Path;
     match path.view() {
         PathView::Pident(id) => {
             if !id.is_persistent() {

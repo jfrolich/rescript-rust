@@ -1186,9 +1186,9 @@ mod tests {
     fn compact_type_node_sizes() {
         use std::mem::size_of;
         assert_eq!(size_of::<crate::ident::Ident>(), 16);
-        assert_eq!(size_of::<Path>(), 24);
-        assert!(size_of::<TypeDesc>() <= 72);
-        assert!(size_of::<TypeExpr>() <= 88);
+        assert_eq!(size_of::<Path>(), 8);
+        assert!(size_of::<TypeDesc>() <= 48);
+        assert!(size_of::<TypeExpr>() <= 64);
     }
 
     #[test]

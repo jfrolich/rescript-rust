@@ -382,7 +382,7 @@ fn head_path(ctx: &TypeContext, ty: TypeExprRef) -> Option<Path> {
 
 fn is_jsx_path(path: &Path, name: &str) -> bool {
     matches!(path.view(), PathView::Pdot(parent, s, _)
-        if s == name && matches!(parent, Path::pident(id) if id.name() == "Jsx"))
+        if s == name && matches!(parent.view(), crate::types::path::PathView::Pident(id) if id.name() == "Jsx"))
 }
 
 fn expands_to_jsx(ctx: &TypeContext, env: &Env, ty: TypeExprRef, name: &str) -> bool {
@@ -1229,16 +1229,21 @@ fn show_extra_help(ctx: &TypeContext, ppf: &mut Ppf<'_>, tr: &[TracePair]) {
     let (an, en) = match (&*ctx.borrow_desc(a), &*ctx.borrow_desc(e)) {
         (
             TypeDesc::Tconstr {
-                path: PathView::Pident(ai),
+                path: ap,
                 args: aa,
                 ..
             },
             TypeDesc::Tconstr {
-                path: PathView::Pident(ei),
+                path: ep,
                 args: ea,
                 ..
             },
-        ) if aa.is_empty() && ea.is_empty() => (ai.name().to_string(), ei.name().to_string()),
+        ) if aa.is_empty() && ea.is_empty() => match (ap.view(), ep.view()) {
+            (PathView::Pident(ai), PathView::Pident(ei)) => {
+                (ai.name().to_string(), ei.name().to_string())
+            }
+            _ => return,
+        },
         _ => return,
     };
     let converter = match (an.as_str(), en.as_str()) {

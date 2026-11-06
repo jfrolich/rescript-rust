@@ -3306,10 +3306,7 @@ fn type_manifest_is_absrow(type_ctx: &TypeContext, env: &Env, ty: TypeExprRef) -
         let desc = type_ctx.get_desc(ty);
         matches!(
             &*desc,
-            TypeDesc::Tconstr {
-                path: PathView::Pident(_),
-                ..
-            }
+            TypeDesc::Tconstr { path, .. } if path.as_pident().is_some()
         )
     };
     if !is_pident_constr {

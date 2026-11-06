@@ -83,11 +83,11 @@ pub fn unwrap_if_option(types: &TypeContext, t: TypeExprRef) -> TypeExprRef {
     match &*types.get_desc(t) {
         TypeDesc::Tlink(t1) | TypeDesc::Tsubst(t1) => unwrap_if_option(types, *t1),
         TypeDesc::Tpoly { body, vars } if vars.is_empty() => unwrap_if_option(types, *body),
-        TypeDesc::Tconstr {
-            path: PathView::Pident(id),
-            args,
-            ..
-        } if id.name() == "option" && args.len() == 1 => args[0],
+        TypeDesc::Tconstr { path, args, .. }
+            if path.as_pident().is_some_and(|id| id.name() == "option") && args.len() == 1 =>
+        {
+            args[0]
+        }
         _ => t,
     }
 }

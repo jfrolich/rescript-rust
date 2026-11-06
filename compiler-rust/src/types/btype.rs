@@ -14,7 +14,6 @@
 use crate::types::path::PathView;
 use super::context::TypeContext;
 use super::decl::{ConstructorArguments, TypeKind};
-use super::path::Path;
 use super::type_expr::{
     AbbrevMemo, AbbrevMemoRef, LOWEST_LEVEL, PIVOT_LEVEL, RowDesc, RowField, RowFieldRef, TypeDesc,
     TypeExprRef,

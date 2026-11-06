@@ -455,7 +455,7 @@ fn type_is_builtin_object_uncached(ctx: &TypeContext, env: &Env, ty: TypeExprRef
     match &*ctx.get_desc(ty) {
         TypeDesc::Tobject { .. } => true,
         TypeDesc::Tconstr { path, args, .. } => {
-            if matches!(path, Path::pident(id) if id.name() == "dict") && args.len() == 1 {
+            if matches!(path.view(), crate::types::path::PathView::Pident(id) if id.name() == "dict") && args.len() == 1 {
                 true
             } else {
                 path.name_eq(JS_DICT_T) || path.name_eq(JS_DICT_T_LEGACY)
