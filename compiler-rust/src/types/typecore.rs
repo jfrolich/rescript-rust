@@ -10708,7 +10708,7 @@ fn collect_module_expr_ident_heads(
     match &module_expr.mod_desc {
         ModuleExprDesc::Tmod_ident(_, _) => {}
         ModuleExprDesc::Tmod_structure(structure) => {
-            for item in &structure.str_items {
+            for item in ta.structure_items(structure.str_items) {
                 match &item.str_desc {
                     StructureItemDesc::Tstr_eval(expr, _) => {
                         collect_expression_ident_heads(ta, *expr, ids);
@@ -19186,8 +19186,11 @@ fn is_nonexpansive_module_expr(
         crate::types::typedtree::ModuleExprDesc::Tmod_constraint(inner, _, _, _) => {
             is_nonexpansive_module_expr(tctx, tctx.typed.module_expr(*inner))
         }
-        crate::types::typedtree::ModuleExprDesc::Tmod_structure(structure) => {
-            structure.str_items.iter().all(|item| match &item.str_desc {
+        crate::types::typedtree::ModuleExprDesc::Tmod_structure(structure) => tctx
+            .typed
+            .structure_items(structure.str_items)
+            .iter()
+            .all(|item| match &item.str_desc {
                 crate::types::typedtree::StructureItemDesc::Tstr_eval(_, _) => true,
                 crate::types::typedtree::StructureItemDesc::Tstr_primitive(_) => true,
                 crate::types::typedtree::StructureItemDesc::Tstr_type(_, _) => true,
@@ -19222,8 +19225,7 @@ fn is_nonexpansive_module_expr(
                         )
                     })
                 }
-            })
-        }
+            }),
         crate::types::typedtree::ModuleExprDesc::Tmod_apply(_, _, _) => false,
     }
 }
@@ -19690,8 +19692,8 @@ pub(crate) fn typed_expression_uses_ident(ta: &TypedArena, expr: TExprIdx, targe
 
 fn typed_module_expr_uses_ident(ta: &TypedArena, module_expr: &ModuleExpr, target: &Ident) -> bool {
     match &module_expr.mod_desc {
-        ModuleExprDesc::Tmod_structure(structure) => structure
-            .str_items
+        ModuleExprDesc::Tmod_structure(structure) => ta
+            .structure_items(structure.str_items)
             .iter()
             .any(|item| typed_structure_item_uses_ident(ta, item, target)),
         ModuleExprDesc::Tmod_apply(func, arg, _) => {
@@ -19728,8 +19730,8 @@ fn typed_module_type_uses_ident(ta: &TypedArena, module_type: &ModuleType, targe
         ModuleTypeDesc::Tmty_with(inner, _) => {
             typed_module_type_uses_ident(ta, ta.module_type(*inner), target)
         }
-        ModuleTypeDesc::Tmty_signature(signature) => signature
-            .sig_items
+        ModuleTypeDesc::Tmty_signature(signature) => ta
+            .signature_items(signature.sig_items)
             .iter()
             .any(|item| typed_signature_item_uses_ident(ta, item, target)),
         ModuleTypeDesc::Tmty_ident(_, _) | ModuleTypeDesc::Tmty_alias(_, _) => false,
@@ -20134,7 +20136,7 @@ fn rec_structure(
 ) -> RecUse {
     let mut current_env = env.clone();
     let mut use_ = RecUse::default();
-    for item in &structure.str_items {
+    for item in ta.structure_items(structure.str_items) {
         let (item_env, item_use) = rec_structure_item(ta, ctx, &current_env, item);
         current_env = rec_env_join(current_env, item_env);
         use_ = rec_use_join(use_, item_use);

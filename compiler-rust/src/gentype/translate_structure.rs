@@ -287,7 +287,7 @@ pub fn translate_module_binding(
                             output_file_relative,
                             resolver,
                             &type_env,
-                            &signature,
+                            ta.signature_items(signature.sig_items),
                         ),
                     ),
                 }
@@ -425,7 +425,7 @@ pub fn translate_structure_item(
             {
                 if let ModuleExprDesc::Tmod_structure(structure) = &ta.module_expr(*inner).mod_desc
                 {
-                    if let [struct_item1] = structure.str_items.as_slice() {
+                    if let [struct_item1] = ta.structure_items(structure.str_items) {
                         if matches!(struct_item1.str_desc, StructureItemDesc::Tstr_primitive(_)) {
                             return translate_structure_item(
                                 ctx,
@@ -484,8 +484,8 @@ pub fn translate_structure(
     }
 
     let mut seen = StringSet::new();
-    let mut items = Vec::with_capacity(structure.str_items.len());
-    for item in structure.str_items.iter().rev() {
+    let mut items = Vec::with_capacity(ta.structure_items(structure.str_items).len());
+    for item in ta.structure_items(structure.str_items).iter().rev() {
         match &item.str_desc {
             StructureItemDesc::Tstr_value(_, value_bindings) => {
                 let value_bindings = ta
@@ -591,7 +591,7 @@ fn translate_module_constraint(
                         output_file_relative,
                         resolver,
                         &type_env,
-                        &signature,
+                        ta.signature_items(signature.sig_items),
                     ),
                 ),
             }
@@ -635,7 +635,7 @@ fn translate_module_constraint(
                         output_file_relative,
                         resolver,
                         type_env,
-                        signature,
+                        ta.signature_items(signature.sig_items),
                     ),
                 )
             } else {

@@ -74,7 +74,7 @@ pub trait TastIterator<'t> {
         }
     }
     fn signature(&mut self, s: &TypedSignature) {
-        for item in &s.sig_items {
+        for item in self.arena().signature_items(s.sig_items) {
             self.signature_item(item);
         }
     }
@@ -82,7 +82,7 @@ pub trait TastIterator<'t> {
         walk_signature_item(self, item)
     }
     fn structure(&mut self, s: &Structure) {
-        for item in &s.str_items {
+        for item in self.arena().structure_items(s.str_items) {
             self.structure_item(item);
         }
     }

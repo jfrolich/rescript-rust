@@ -18,8 +18,8 @@ use std::num::NonZeroU32;
 use crate::parse_arena::ArenaList;
 
 use super::typedtree::{
-    ApplyArg, Case, Expression, FunctionParam, ModuleExpr, ModuleType, RecordField, TypedCoreType,
-    ValueBinding,
+    ApplyArg, Case, Expression, FunctionParam, ModuleExpr, ModuleType, RecordField, StructureItem,
+    TypedCoreType, TypedSignatureItem, ValueBinding,
 };
 
 macro_rules! arena_handle {
@@ -126,6 +126,10 @@ pub type TArgList = ArenaList<ApplyArg>;
 pub type TParamList = ArenaList<FunctionParam>;
 /// The fields of a record expression.
 pub type TFieldList = ArenaList<RecordField>;
+/// The items of a structure.
+pub type TStrItemList = ArenaList<StructureItem>;
+/// The items of a signature.
+pub type TSigItemList = ArenaList<TypedSignatureItem>;
 
 /// One pool of list items. A list is a contiguous range, pushed in one go.
 #[derive(Debug)]
@@ -180,6 +184,8 @@ pub struct TypedArena {
     apply_args: ListPool<ApplyArg>,
     function_params: ListPool<FunctionParam>,
     record_fields: ListPool<RecordField>,
+    structure_items: ListPool<StructureItem>,
+    signature_items: ListPool<TypedSignatureItem>,
 }
 
 macro_rules! list_pool_accessors {
@@ -207,6 +213,8 @@ list_pool_accessors! {
     push_apply_args, apply_args, apply_args, ApplyArg;
     push_function_params, function_params, function_params, FunctionParam;
     push_record_fields, record_fields, record_fields, RecordField;
+    push_structure_items, structure_items, structure_items, StructureItem;
+    push_signature_items, signature_items, signature_items, TypedSignatureItem;
 }
 
 impl TypedArena {

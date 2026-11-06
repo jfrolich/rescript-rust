@@ -12127,7 +12127,7 @@ fn moregen_link_structure(
     structure: &crate::types::typedtree::Structure,
     iface_val_types: &ahash::AHashMap<String, crate::types::type_expr::TypeExprRef>,
 ) {
-    for item in &structure.str_items {
+    for item in ta.structure_items(structure.str_items) {
         match &item.str_desc {
             crate::types::typedtree::StructureItemDesc::Tstr_value(_, bindings) => {
                 for binding in ta.value_bindings(*bindings) {

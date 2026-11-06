@@ -79,7 +79,7 @@ pub fn translate_module_declaration(
                 output_file_relative,
                 resolver,
                 &type_env,
-                signature,
+                ta.signature_items(signature.sig_items),
             ))
         }
         ModuleTypeDesc::Tmty_ident(path, _) => {
@@ -94,7 +94,7 @@ pub fn translate_module_declaration(
                         output_file_relative,
                         resolver,
                         &type_env,
-                        &signature,
+                        ta.signature_items(signature.sig_items),
                     ))
                 }
             }
@@ -128,10 +128,10 @@ pub fn translate_module_type_declaration(
         Some(mtd_type) => match &ta.module_type(*mtd_type).mty_desc {
             ModuleTypeDesc::Tmty_signature(signature) => {
                 let name = module_type_declaration.mtd_id.name();
-                let mut signature_without_values = signature.clone();
-                signature_without_values
-                    .sig_items
-                    .retain(|item| !matches!(item.sig_desc, TypedSignatureItemDesc::Tsig_value(_)));
+                let signature_without_values = ta
+                    .signature_items(signature.sig_items)
+                    .iter()
+                    .filter(|item| !matches!(item.sig_desc, TypedSignatureItemDesc::Tsig_value(_)));
                 crate::gentype::translation::combine(translate_signature(
                     ctx,
                     arena,
@@ -147,7 +147,7 @@ pub fn translate_module_type_declaration(
                         ),
                         type_env,
                     ),
-                    &signature_without_values,
+                    signature_without_values,
                 ))
             }
             ModuleTypeDesc::Tmty_ident(_, _) => not_implemented("Tmty_ident"),
@@ -261,7 +261,7 @@ pub fn translate_signature_item(
     }
 }
 
-pub fn translate_signature(
+pub fn translate_signature<'s>(
     ctx: &crate::types::context::TypeContext,
     arena: &ParseArena,
     ta: &crate::types::typedtree::TypedArena,
@@ -269,15 +269,14 @@ pub fn translate_signature(
     output_file_relative: &str,
     resolver: &crate::gentype::module_resolver::Resolver,
     type_env: &crate::gentype::type_env::T,
-    signature: &TypedSignature,
+    signature_items: impl IntoIterator<Item = &'s crate::types::typedtree::TypedSignatureItem>,
 ) -> Vec<crate::gentype::translation::T> {
     // Mirrors compiler/gentype/TranslateSignature.ml:163-169.
     if crate::gentype::debug::translation.load(std::sync::atomic::Ordering::Relaxed) {
         crate::gentype::log_::item("Translate Signature\n");
     }
-    signature
-        .sig_items
-        .iter()
+    signature_items
+        .into_iter()
         .map(|signature_item| {
             translate_signature_item(
                 ctx,

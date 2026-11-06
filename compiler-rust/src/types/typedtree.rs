@@ -26,7 +26,7 @@ use crate::types::asttypes::ArgLabel as TypeArgLabel;
 use crate::types::decl::ModuleType as DeclModuleType;
 pub use crate::types::tast_arena::{
     TArgList, TCaseList, TCoreTypeIdx, TCoreTypeList, TExprIdx, TExprList, TFieldList, TModExprIdx,
-    TModTypeIdx, TParamList, TVbList, TypedArena,
+    TModTypeIdx, TParamList, TSigItemList, TStrItemList, TVbList, TypedArena,
 };
 use crate::types::{
     ConstructorDescription, LabelDescription, Path, RowDesc, TypeExprRef, ValueDescription,
@@ -737,7 +737,7 @@ pub enum WithConstraint {
 /// Typed signature (matches OCaml's `Typedtree.signature`).
 #[derive(Debug, Clone)]
 pub struct TypedSignature {
-    pub sig_items: Vec<TypedSignatureItem>,
+    pub sig_items: TSigItemList,
 }
 
 /// Typed signature item (matches OCaml's `Typedtree.signature_item`).
@@ -828,7 +828,7 @@ pub struct PrimitiveCoercion {
 #[derive(Debug, Clone)]
 pub struct Structure {
     /// Structure items.
-    pub str_items: Vec<StructureItem>,
+    pub str_items: TStrItemList,
     /// Inferred signature items for this structure.
     pub str_type: Vec<crate::types::decl::SignatureItem>,
     /// Final environment.

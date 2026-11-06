@@ -849,7 +849,7 @@ impl Processor<'_> {
                 Module::Structure(Arc::new(self.for_structure(
                     module_name,
                     &env,
-                    &structure.str_items,
+                    self.ctx.ta.structure_items(structure.str_items),
                 )))
             }
             tt::ModuleExprDesc::Tmod_functor(ident, arg_name, maybe_type, result) => {

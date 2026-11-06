@@ -387,9 +387,11 @@ pub fn signature_check_annotation(
     signature: &TypedSignature,
 ) -> bool {
     // Mirrors compiler/gentype/Annotation.ml:228-231.
-    signature.sig_items.iter().any(|signature_item| {
-        signature_item_check_annotation(arena, ta, check_annotation, signature_item)
-    })
+    ta.signature_items(signature.sig_items)
+        .iter()
+        .any(|signature_item| {
+            signature_item_check_annotation(arena, ta, check_annotation, signature_item)
+        })
 }
 
 pub fn structure_item_check_annotation(
@@ -505,9 +507,11 @@ pub fn structure_check_annotation(
     structure: &Structure,
 ) -> bool {
     // Mirrors compiler/gentype/Annotation.ml:283-286.
-    structure.str_items.iter().any(|structure_item| {
-        structure_item_check_annotation(arena, ta, check_annotation, structure_item)
-    })
+    ta.structure_items(structure.str_items)
+        .iter()
+        .any(|structure_item| {
+            structure_item_check_annotation(arena, ta, check_annotation, structure_item)
+        })
 }
 
 pub fn import_from_string(import_string: &str) -> Import {

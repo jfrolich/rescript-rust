@@ -1902,7 +1902,7 @@ fn sexp_label_declaration(
 
 fn sexp_structure(arena: &ParseArena, ctx: &TypeContext, cx: Cx<'_>, str: &Structure) -> Sexp {
     let mut items = vec![Sexp::atom("structure")];
-    for si in str.str_items.iter() {
+    for si in cx.ta.structure_items(str.str_items).iter() {
         items.push(sexp_structure_item(arena, ctx, cx, si));
     }
     Sexp::list(items)
@@ -2162,7 +2162,7 @@ fn sexp_typed_signature(
     sig: &crate::types::typedtree::TypedSignature,
 ) -> Sexp {
     let mut items = vec![Sexp::atom("signature")];
-    for si in sig.sig_items.iter() {
+    for si in cx.ta.signature_items(sig.sig_items).iter() {
         items.push(sexp_typed_signature_item(arena, ctx, cx, si));
     }
     Sexp::list(items)

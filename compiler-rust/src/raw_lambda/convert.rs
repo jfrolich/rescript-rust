@@ -409,8 +409,13 @@ fn config_payload_flags_contains(
     })
 }
 
-fn structure_has_config_string(structure: &Structure, value: &str, arena: &ParseArena) -> bool {
-    structure.str_items.iter().any(|item| {
+fn structure_has_config_string(
+    ta: &TypedArena,
+    structure: &Structure,
+    value: &str,
+    arena: &ParseArena,
+) -> bool {
+    ta.structure_items(structure.str_items).iter().any(|item| {
         let StructureItemDesc::Tstr_attribute(attr) = &item.str_desc else {
             return false;
         };
@@ -3773,7 +3778,7 @@ impl<'a> RawLambdaConverter<'a> {
         structure: &Structure,
         cc: &ModuleCoercion,
     ) -> RawLambda {
-        if structure_has_config_string(structure, "-bs-noassertfalse", self.arena) {
+        if structure_has_config_string(self.ta, structure, "-bs-noassertfalse", self.arena) {
             self.no_assert_false = true;
         }
         self.register_signature_type_paths(None, &structure.str_type);
@@ -3783,7 +3788,7 @@ impl<'a> RawLambdaConverter<'a> {
         let mut fields = Vec::new();
         let result = self.convert_structure_items_raw(
             &mut fields,
-            &structure.str_items,
+            self.ta.structure_items(structure.str_items),
             true,
             &self.global_path(),
             cc,
@@ -4894,7 +4899,7 @@ impl<'a> RawLambdaConverter<'a> {
                 let mut fields = Vec::new();
                 self.convert_structure_items_raw(
                     &mut fields,
-                    &structure.str_items,
+                    self.ta.structure_items(structure.str_items),
                     false,
                     rootpath,
                     cc,
@@ -8284,7 +8289,7 @@ mod tests {
         let first_try = simple_extension_try(&mut arena, &mut typed_arena, "A", 1, 11);
         let second_try = simple_extension_try(&mut arena, &mut typed_arena, "B", 2, 22);
         let structure = Structure {
-            str_items: vec![
+            str_items: typed_arena.push_structure_items(vec![
                 StructureItem {
                     str_desc: StructureItemDesc::Tstr_eval(first_try, Attributes::new()),
                     str_loc: LocIdx::none(),
@@ -8295,7 +8300,7 @@ mod tests {
                     str_loc: LocIdx::none(),
                     str_env: EnvRef(0),
                 },
-            ],
+            ]),
             str_type: Vec::new(),
             str_final_env: EnvRef(0),
         };

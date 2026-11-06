@@ -311,7 +311,7 @@ pub fn translate_typed_artifact(
                 output_file_relative,
                 resolver,
                 &type_env,
-                signature,
+                artifact.ta.signature_items(signature.sig_items),
             )
         }
         TypedArtifactAnnots::Packed
@@ -370,8 +370,9 @@ pub fn typed_artifact_translate_type_declarations(
     // translation under the CMT path before EmitJs asks for it recursively.
     let type_env = crate::gentype::type_env::root();
     let translations = match artifact.annots {
-        TypedArtifactAnnots::Implementation(structure) => structure
-            .str_items
+        TypedArtifactAnnots::Implementation(structure) => artifact
+            .ta
+            .structure_items(structure.str_items)
             .iter()
             .filter(|item| structure_item_is_declaration(item))
             .map(|item| {
@@ -387,8 +388,9 @@ pub fn typed_artifact_translate_type_declarations(
                 )
             })
             .collect(),
-        TypedArtifactAnnots::Interface(signature) => signature
-            .sig_items
+        TypedArtifactAnnots::Interface(signature) => artifact
+            .ta
+            .signature_items(signature.sig_items)
             .iter()
             .filter(|item| signature_item_is_declaration(item))
             .map(|item| {
