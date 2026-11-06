@@ -3716,6 +3716,12 @@ fn compile_with_location_retry<T>(
     if local_retry {
         // Warning sites and location-valued constants belong to this module.
         // No first-attempt signature or JavaScript has been published.
+        log::debug!(
+            "Retrying {} with source locations",
+            ast.retry_source()
+                .map(|source| source.file_path.display().to_string())
+                .unwrap_or_default()
+        );
         return super::parse::reparse_with_locations(ast).and_then(|located| compile(&located, options));
     }
     if !build.diagnostic_locations && build.dump.is_none() && result.is_err() {

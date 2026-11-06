@@ -26,7 +26,7 @@ pub type InputCmtTranslateTypeDeclarations<'a> = dyn Fn(
         &str,
         &crate::gentype::module_resolver::Resolver,
         &str,
-    ) -> std::sync::Arc<Vec<code_item::TypeDeclaration>>
+    ) -> std::sync::Arc<code_item::TypeDeclarations>
     + 'a;
 
 pub type GetCmtFile<'a> = dyn Fn(&str) -> String + 'a;
@@ -123,6 +123,7 @@ pub fn code_item_to_string(
 }
 
 pub fn emit_export_type(
+    locs: &dyn crate::types::DeclLocs,
     emitters: crate::gentype::emitters::T,
     config: &crate::gentype::config::T,
     type_name_is_interface: &impl Fn(&str) -> bool,
@@ -144,7 +145,7 @@ pub fn emit_export_type(
                         crate::gentype::resolved_name::to_string(&export_type.resolved_type_name)
                     )
                 },
-                &export_type.loc,
+                &locs.resolve_loc(export_type.loc),
                 "Warning genType",
             );
             Some(true)
@@ -189,6 +190,7 @@ pub fn type_name_is_interface(
 }
 
 pub fn emit_export_from_type_declaration(
+    locs: &dyn crate::types::DeclLocs,
     config: &crate::gentype::config::T,
     emitters: crate::gentype::emitters::T,
     env: Env,
@@ -199,6 +201,7 @@ pub fn emit_export_from_type_declaration(
     (
         env,
         emit_export_type(
+            locs,
             emitters,
             config,
             type_name_is_interface,
@@ -208,6 +211,7 @@ pub fn emit_export_from_type_declaration(
 }
 
 pub fn emit_export_from_type_declarations(
+    locs: &dyn crate::types::DeclLocs,
     config: &crate::gentype::config::T,
     emitters: crate::gentype::emitters::T,
     env: Env,
@@ -219,6 +223,7 @@ pub fn emit_export_from_type_declarations(
         (env, emitters),
         |(env, emitters), export_from_type_declaration| {
             emit_export_from_type_declaration(
+                locs,
                 config,
                 emitters,
                 env,
@@ -517,7 +522,7 @@ pub fn emit_code_item(
                     type_vars,
                 }) => {
                     let export_type = code_item::ExportType {
-                        loc: crate::location::Location::none(),
+                        loc: crate::types::DeclLoc::none(),
                         name_as: None,
                         opaque: Some(false),
                         type_: props_type,
@@ -526,7 +531,13 @@ pub fn emit_code_item(
                         doc_string: doc_string.clone(),
                     };
                     config.emit_import_react = true;
-                    emit_export_type(emitters, config, type_name_is_interface, &export_type)
+                    emit_export_type(
+                        &crate::types::DeclLocTable::default(),
+                        emitters,
+                        config,
+                        type_name_is_interface,
+                        &export_type,
+                    )
                 }
                 None => emitters,
             };
@@ -685,8 +696,12 @@ pub fn read_cmt_files_recursively(
                         .and_then(|s| s.to_str())
                         .and_then(|s| s.rsplit_once('.').map(|(stem, _)| stem.to_string()))
                         .unwrap_or_else(|| cmt_file.to_string());
-                    let export_type_map_from_cmt =
-                        create_export_type_map(config, &file, true, &type_declarations);
+                    let export_type_map_from_cmt = create_export_type_map(
+                        config,
+                        &file,
+                        true,
+                        &type_declarations.declarations,
+                    );
                     update_type_map_from_other_files(
                         config,
                         &import_type.type_name,
@@ -697,6 +712,7 @@ pub fn read_cmt_files_recursively(
                     env.cmt_to_export_type_map
                         .insert(cmt_file.to_string(), export_type_map_from_cmt);
                     let new_import_types = type_declarations
+                        .declarations
                         .iter()
                         .flat_map(|type_declaration| type_declaration.import_types.iter().cloned())
                         .collect::<Vec<_>>();
@@ -933,6 +949,7 @@ pub fn propagate_annotation_to_sub_types(
 
 #[allow(non_snake_case)]
 pub fn emit_translation_as_string(
+    locs: &dyn crate::types::DeclLocs,
     config: &mut crate::gentype::config::T,
     file_name: &crate::gentype::module_name::T,
     get_cmt_file: &GetCmtFile<'_>,
@@ -1018,6 +1035,7 @@ pub fn emit_translation_as_string(
     );
     let env_for_type_declarations = env.clone();
     let (env, emitters) = emit_export_from_type_declarations(
+        locs,
         config,
         emitters,
         env,

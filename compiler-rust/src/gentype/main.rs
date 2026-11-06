@@ -12,7 +12,7 @@ use crate::types::typedtree::{
     TypedSignatureItemDesc,
 };
 
-type InProcessTypeDeclarations = Vec<crate::gentype::code_item::TypeDeclaration>;
+type InProcessTypeDeclarations = crate::gentype::code_item::TypeDeclarations;
 
 /// The GenType type declarations of one typed artifact, encoded. Every
 /// compiled module registers its declarations, but only modules importing its
@@ -431,6 +431,7 @@ pub fn input_cmt_translate_type_declarations(
 }
 
 pub fn emit_translation(
+    locs: &dyn crate::types::DeclLocs,
     config: &mut crate::gentype::config::T,
     file_name: &crate::gentype::module_name::T,
     output_file: &str,
@@ -442,6 +443,7 @@ pub fn emit_translation(
 ) -> std::io::Result<()> {
     // Mirrors compiler/gentype/GenTypeMain.ml:72-83.
     let code_text = crate::gentype::emit_js::emit_translation_as_string(
+        locs,
         config,
         file_name,
         get_cmt_file,
@@ -547,7 +549,10 @@ pub fn process_typed_artifact(
         register_in_process_type_declarations(
             &artifact.compiler_module_name,
             &cmt_file,
-            type_declaration_translation.type_declarations,
+            crate::gentype::code_item::TypeDeclarations::portable(
+                type_declaration_translation.type_declarations,
+                artifact.ctx,
+            ),
         );
     }
     if artifact.declarations_only {
@@ -573,6 +578,7 @@ pub fn process_typed_artifact(
         // annotations skip the copy.
         let mut config = config.clone();
         emit_translation(
+            artifact.ctx,
             &mut config,
             &artifact.file_name,
             &output_file,
