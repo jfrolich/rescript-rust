@@ -4,7 +4,7 @@ use ahash::{AHashMap as HashMap, AHashSet as HashSet};
 
 use crate::ident::Ident;
 use crate::lambda::arena::{Lam, LamArena, Node};
-use crate::lambda::lam_analysis_arena::no_side_effects;
+use crate::lambda::lam_analysis::no_side_effects;
 
 /// High penalty for loop usage (variables used in loops can't be safely inlined).
 const LOOP_USE: i32 = 100;

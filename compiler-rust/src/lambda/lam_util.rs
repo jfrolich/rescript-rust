@@ -1,15 +1,15 @@
 //! `Lam_util` over the Lambda arena: `refine_let` and `field_flatten_get`.
 
 use crate::ident::Ident;
+use crate::lambda::LamLoc;
 use crate::lambda::arena::{Lam, LamArena, Node};
-use crate::lambda::lam_analysis_arena::no_side_effects;
+use crate::lambda::lam_analysis::no_side_effects;
 use crate::lambda::lam_compat::{FieldDbgInfo, LetKind};
 use crate::lambda::lam_constant::Constant;
-use crate::lambda::lam_hit_arena::hit_variable;
+use crate::lambda::lam_hit::hit_variable;
 use crate::lambda::lam_primitive::Primitive;
 use crate::lambda::lam_stats::{Element, IdKind, IdentTable};
 use crate::lambda::lam_tag_info::TagInfo;
-use crate::lambda::LamLoc;
 
 /// `is_safe_to_alias` (lam_util.ml:79-98).
 fn is_safe_to_alias(a: &LamArena, lam: Lam) -> bool {

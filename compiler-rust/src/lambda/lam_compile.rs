@@ -19,8 +19,7 @@ use crate::js_ir::{
     StringClause, VIdent, VariableDeclaration, block_last_is_terminal, unnest_block,
 };
 use crate::lambda::arena::{
-    ApplyId, CatchId, IdentId, Lam, LamArena, LamList, Node, PrimId, StrSwitchId, SwitchId,
-    View,
+    ApplyId, CatchId, IdentId, Lam, LamArena, LamList, Node, PrimId, StrSwitchId, SwitchId, View,
 };
 use crate::lambda::js_pass_external_shadow::apply_external_shadow_pass;
 use crate::lambda::js_pass_flatten_and_mark_dead::{
@@ -33,10 +32,10 @@ use crate::lambda::js_shake::{
     move_reused_same_name_export_binding_to_export_tail,
     move_same_name_export_alias_to_export_tail, resolve_tail_move_replacement_expression,
 };
-use crate::lambda::lam_analysis_arena as lam_analysis;
-use crate::lambda::lam_analysis_arena::{free_variables, has_exit_code};
+use crate::lambda::lam_analysis;
+use crate::lambda::lam_analysis::{free_variables, has_exit_code};
 use crate::lambda::lam_arity::Arity;
-use crate::lambda::lam_closure_arena::is_closed_with_map;
+use crate::lambda::lam_closure::is_closed_with_map;
 use crate::lambda::lam_compat::{LetKind, SetFieldDbgInfo};
 use crate::lambda::lam_compile_context::ExternalArityInfo;
 use crate::lambda::lam_constant::{Constant, PointerInfo};
@@ -611,7 +610,7 @@ impl LambdaCompiler {
                     .cloned()
                     .map(cmj_export_arity_to_external)
                 };
-                crate::lambda::lam_compile_main_arena::simplify_in_arena(
+                crate::lambda::lam_compile_main::simplify_in_arena(
                     arena,
                     lam,
                     jsx_preserve,
@@ -619,13 +618,12 @@ impl LambdaCompiler {
                     &mut external_arity,
                 )
             });
-        crate::lambda::lam_compile_main_arena::add_hoisted_function_aliases(
+        crate::lambda::lam_compile_main::add_hoisted_function_aliases(
             &mut simplified,
             &self.hoisted_functions,
         );
-        self.cmj_export_arities =
-            crate::lambda::lam_compile_main_arena::cmj_export_arities(&simplified);
-        let crate::lambda::lam_compile_main_arena::Simplified {
+        self.cmj_export_arities = crate::lambda::lam_compile_main::cmj_export_arities(&simplified);
+        let crate::lambda::lam_compile_main::Simplified {
             arena: mut a,
             lam: root,
             meta,
@@ -647,7 +645,7 @@ impl LambdaCompiler {
         // 1614. Seed Rust's JS-lowering generator past every existing Lambda
         // stamp before `compile_expr` creates temporary identifiers.
         let js_lowering_start_stamp =
-            crate::lambda::lam_beta_reduce_arena::max_ident_stamp_in_lambda(&a, root)
+            crate::lambda::lam_beta_reduce::max_ident_stamp_in_lambda(&a, root)
                 .max(crate::ident::Ident::current_local_stamp());
         self.id_gen.set_current_stamp(js_lowering_start_stamp);
         crate::ident::Ident::set_current_time(js_lowering_start_stamp);
@@ -1036,8 +1034,7 @@ impl LambdaCompiler {
     ) -> Compiled {
         let mut compiled = self.compile_apply_call_inner(a, func, args, info);
         if compiled.expr.source_loc.is_none() {
-            compiled.expr.source_loc =
-                self.source_loc(&a.apply_payload(info).info.loc);
+            compiled.expr.source_loc = self.source_loc(&a.apply_payload(info).info.loc);
         }
         compiled
     }
@@ -1186,7 +1183,7 @@ impl LambdaCompiler {
             let (_, param_map) = is_closed_with_map(a, &exports, &f.params, body);
             let mut ident_tbl = crate::lambda::lam_stats::IdentTable::new();
             let arg_list = a.list_small(args);
-            let reduced = crate::lambda::lam_beta_reduce_arena::propagate_beta_reduce_with_map(
+            let reduced = crate::lambda::lam_beta_reduce::propagate_beta_reduce_with_map(
                 a,
                 &mut ident_tbl,
                 &self.id_gen,
@@ -1423,8 +1420,7 @@ impl LambdaCompiler {
             Node::Apply { func, args, info } => {
                 let mut compiled = self.compile_apply_call(a, func, args, info);
                 if compiled.expr.source_loc.is_none() {
-                    compiled.expr.source_loc =
-                        self.source_loc(&a.apply_payload(info).info.loc);
+                    compiled.expr.source_loc = self.source_loc(&a.apply_payload(info).info.loc);
                 }
                 compiled
             }
@@ -2851,8 +2847,7 @@ impl LambdaCompiler {
                 let mut compiled = self.compile_apply_call(a, func, args, info);
                 // lam_compile.ml:1606-1609: `with_source_loc ap_loc (E.call ...)`.
                 if compiled.expr.source_loc.is_none() {
-                    compiled.expr.source_loc = self
-                        .source_loc(&a.apply_payload(info).info.loc);
+                    compiled.expr.source_loc = self.source_loc(&a.apply_payload(info).info.loc);
                 }
                 let mut block = compiled.prelude;
                 block.push(Statement::return_(compiled.expr));
@@ -5657,17 +5652,13 @@ impl LambdaCompiler {
             return Some(handler.handler);
         }
 
-        let subst: crate::lambda::lam_subst_arena::Subst = handler
+        let subst: crate::lambda::lam_subst::Subst = handler
             .bindings
             .iter()
             .copied()
             .zip(a.list(args).iter().copied())
             .collect();
-        Some(crate::lambda::lam_subst_arena::subst(
-            a,
-            &subst,
-            handler.handler,
-        ))
+        Some(crate::lambda::lam_subst::subst(a, &subst, handler.handler))
     }
 
     fn return_staticcatch_requires_explicit_jump(
@@ -7116,11 +7107,11 @@ fn collect_cmj_export_lambdas_from_simplified_lambda(
                 if matches!(func.attr.inline, crate::lambda::InlineAttribute::Always)
                     || func.attr.is_a_functor =>
             {
-                crate::lambda::lam_closure_arena::is_closed(a, value)
+                crate::lambda::lam_closure::is_closed(a, value)
             }
             _ => {
                 lam_analysis::size(a, value) < lam_analysis::SMALL_INLINE_SIZE
-                    && crate::lambda::lam_closure_arena::free_variables_with_stats(
+                    && crate::lambda::lam_closure::free_variables_with_stats(
                         a,
                         &Default::default(),
                         Default::default(),

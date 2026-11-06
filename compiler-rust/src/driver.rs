@@ -10881,7 +10881,7 @@ fn compile_source_to_js_with_options_inner(
         &export_idents,
     );
     if let Some(name) =
-        crate::lambda::lam_compile_main_arena::duplicate_export_name(&lowered_arena, lowered_root)
+        crate::lambda::lam_compile_main::duplicate_export_name(&lowered_arena, lowered_root)
     {
         return Err(duplicate_export_error(filename, &name));
     }
@@ -14372,7 +14372,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         arena: lowered_arena,
         root: lowered_root,
     };
-    if let Some(name) = crate::lambda::lam_compile_main_arena::duplicate_export_name(
+    if let Some(name) = crate::lambda::lam_compile_main::duplicate_export_name(
         &lowered_lambda.arena,
         lowered_lambda.root,
     ) {

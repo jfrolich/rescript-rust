@@ -11,10 +11,10 @@ use crate::context::IdGenerator;
 use crate::ident::Ident;
 use crate::lambda::TagInfo;
 use crate::lambda::arena::{Lam, LamArena, Node};
-use crate::lambda::lam_analysis_arena::no_side_effects;
+use crate::lambda::lam_analysis::no_side_effects;
 use crate::lambda::lam_compat::LetKind;
 use crate::lambda::lam_primitive::Primitive;
-use crate::lambda::lam_util_arena::refine_let;
+use crate::lambda::lam_util::refine_let;
 use crate::parser::ast::MutableFlag;
 
 #[derive(Clone, Copy, Default)]

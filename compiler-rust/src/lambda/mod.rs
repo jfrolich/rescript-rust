@@ -30,39 +30,38 @@ pub mod js_pass_record_rest;
 pub mod js_pass_tailcall_inline;
 pub mod js_shake;
 pub mod js_stmt_make;
-pub mod lam_analysis_arena;
+pub mod lam_analysis;
 pub mod lam_arity;
-pub mod lam_beta_reduce_arena;
-pub mod lam_closure_arena;
+pub mod lam_beta_reduce;
+pub mod lam_closure;
 pub mod lam_coercion;
 pub mod lam_compat;
 pub mod lam_compile;
 pub mod lam_compile_const;
 pub mod lam_compile_context;
 pub mod lam_compile_external;
-pub mod lam_compile_main_arena;
+pub mod lam_compile_main;
 pub mod lam_compile_primitive;
 pub mod lam_compile_variant;
-pub mod lam_loc;
 pub mod lam_constant;
 pub mod lam_hash_ident;
-pub mod lam_hit_arena;
-pub mod lam_pass_alpha_conversion_arena;
+pub mod lam_hit;
+pub mod lam_loc;
+pub mod lam_pass_alpha_conversion;
 pub mod lam_pass_collapse_var_aliases;
-pub mod lam_pass_collect_arena;
-pub mod lam_pass_deep_flatten_arena;
-pub mod lam_pass_exits_arena;
+pub mod lam_pass_collect;
+pub mod lam_pass_deep_flatten;
+pub mod lam_pass_exits;
 pub mod lam_pass_guard_raises;
-pub mod lam_pass_guard_raises_arena;
-pub mod lam_pass_lets_dce_arena;
-pub mod lam_pass_remove_alias_arena;
-pub mod lam_pass_sroa_arena;
+pub mod lam_pass_lets_dce;
+pub mod lam_pass_remove_alias;
+pub mod lam_pass_sroa;
 pub mod lam_primitive;
 pub mod lam_print;
 pub mod lam_stats;
-pub mod lam_subst_arena;
+pub mod lam_subst;
 pub mod lam_tag_info;
-pub mod lam_util_arena;
+pub mod lam_util;
 pub mod lambda_traverse;
 pub mod printlambda;
 pub mod sexp_lambda;
@@ -70,9 +69,9 @@ pub mod sexp_lambda;
 use crate::ident::Ident;
 pub use lam_compat::{Comparison, FieldDbgInfo, LetKind, SetFieldDbgInfo};
 pub use lam_constant::Constant;
+pub use lam_loc::{CmjExportLambdas, LamLoc, LamLocTable};
 pub use lam_primitive::Primitive;
 pub use lam_tag_info::TagInfo;
-pub use lam_loc::{CmjExportLambdas, LamLoc, LamLocTable};
 
 /// Source binding selected by `@res.hoistedFunction` for a flat JS export.
 /// Mirrors `Lambda.hoisted_function` in `compiler/ml/lambda.ml`.
@@ -1786,7 +1785,10 @@ mod tests {
         );
         // The constructor keeps the shape; the final pass moves the code.
         assert!(matches!(if_expr, Lambda::LifThenElse(..)));
-        let if_expr = crate::lambda::lam_pass_guard_raises::guard_raises(if_expr);
+        let mut a = crate::lambda::arena::LamArena::new();
+        let root = a.import(&if_expr);
+        let root = crate::lambda::lam_pass_guard_raises::guard_raises(&mut a, root);
+        let if_expr = a.export(root);
 
         match if_expr {
             Lambda::Lsequence(first, second) => {
@@ -1826,11 +1828,7 @@ mod tests {
         );
 
         let if_expr = Lambda::if_(
-            Lambda::prim(
-                Primitive::Pisint,
-                vec![Lambda::var(value)],
-                LamLoc::NONE,
-            ),
+            Lambda::prim(Primitive::Pisint, vec![Lambda::var(value)], LamLoc::NONE),
             inner_if.clone(),
             Lambda::false_(),
         );

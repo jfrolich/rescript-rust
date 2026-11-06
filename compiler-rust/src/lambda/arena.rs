@@ -23,6 +23,7 @@
 //! mutated in place. The whole arena is freed at once with its compilation.
 
 use crate::ident::Ident;
+use crate::lambda::LamLoc;
 use crate::lambda::lam_compat::{self, Comparison, LetKind};
 use crate::lambda::lam_constant::{self, Constant};
 use crate::lambda::lam_primitive::Primitive;
@@ -31,7 +32,6 @@ use crate::lambda::{
     ApInfo, Apply, DirectionFlag, FunctionAttribute, LFunction, Lambda, LambdaSwitch, PrimInfo,
     SwitchDispatch, SwitchKey,
 };
-use crate::lambda::LamLoc;
 
 macro_rules! handle {
     ($(#[$m:meta])* $name:ident) => {

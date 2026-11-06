@@ -7,12 +7,12 @@ use ahash::AHashMap as HashMap;
 
 use crate::context::IdGenerator;
 use crate::ident::Ident;
+use crate::lambda::LamLoc;
 use crate::lambda::arena::{IdentId, Lam, LamArena, LamList, Node};
 use crate::lambda::lam_compat::LetKind;
-use crate::lambda::lam_hit_arena::hit_variable;
+use crate::lambda::lam_hit::hit_variable;
 use crate::lambda::lam_primitive::{Mutable, Primitive};
-use crate::lambda::lam_util_arena::{refine_let, refine_let_original};
-use crate::lambda::LamLoc;
+use crate::lambda::lam_util::{refine_let, refine_let_original};
 
 enum Group {
     Single(LetKind, Ident, Lam),

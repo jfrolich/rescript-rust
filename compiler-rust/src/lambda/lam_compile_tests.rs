@@ -6,6 +6,7 @@ pub(super) use crate::js_ir::{
     ModulePathResolver, print_block, print_deps_program, print_deps_program_with_directives,
     print_expression,
 };
+pub(super) use crate::lambda::LamLoc;
 pub(super) use crate::lambda::LambdaSwitch;
 pub(super) use crate::lambda::js_exp_make::{
     int32_band, int32_bxor, int32_mul, ocaml_typeof_expr, raw_typeof_comparison,
@@ -23,7 +24,6 @@ pub(super) use crate::lambda::{
     ApInfo, Apply, ApplyStatus, Comparison, FieldDbgInfo, FunctionAttribute, InlineAttribute,
     Lambda,
 };
-pub(super) use crate::lambda::LamLoc;
 use std::fs;
 pub(super) use std::path::PathBuf;
 pub(super) use tempfile::tempdir;
@@ -2899,8 +2899,7 @@ fn compile_deps_program_keeps_gpr_1438_fallthrough_return_outside_switch() {
         ),
     );
 
-    let simplified =
-        simplify_tree_for_js_backend(&lam);
+    let simplified = simplify_tree_for_js_backend(&lam);
     let mut direct_compiler = LambdaCompiler::new();
     let direct_body =
         direct_compiler.compile_return_block_tree(extract_first_function_body(&simplified));
@@ -8675,8 +8674,11 @@ fn recursive_self_tailcalls_preserve_ocaml_loop_ordering() {
     // does not seed the lowering generator from the input Lambda. Construct
     // this fixture with that same generator, as OCaml's Ext_ident.create does.
     assert!(
-        compiler.id_gen.current_stamp()
-            >= { let mut a = LamArena::new(); let l = a.import(&lam); crate::lambda::lam_beta_reduce_arena::max_ident_stamp_in_lambda(&a, l) }
+        compiler.id_gen.current_stamp() >= {
+            let mut a = LamArena::new();
+            let l = a.import(&lam);
+            crate::lambda::lam_beta_reduce::max_ident_stamp_in_lambda(&a, l)
+        }
     );
     let compiled = compiler.compile_expr_tree(&lam);
     let rendered = print_block(&compiled.prelude);

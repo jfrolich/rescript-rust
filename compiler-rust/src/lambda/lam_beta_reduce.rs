@@ -4,17 +4,17 @@ use ahash::AHashMap as HashMap;
 
 use crate::context::IdGenerator;
 use crate::ident::Ident;
+use crate::lambda::LamLoc;
 use crate::lambda::arena::{Lam, LamArena, Node};
-use crate::lambda::lam_analysis_arena::no_side_effects;
-use crate::lambda::lam_closure_arena::StatsMap;
+use crate::lambda::lam_analysis::no_side_effects;
+use crate::lambda::lam_closure::StatsMap;
 use crate::lambda::lam_compat::LetKind;
 use crate::lambda::lam_hash_ident::reference_fold_order;
-use crate::lambda::lam_pass_collect_arena::kind_of_lambda_block;
+use crate::lambda::lam_pass_collect::kind_of_lambda_block;
 use crate::lambda::lam_primitive::{Mutable, Primitive};
 use crate::lambda::lam_stats::{IdKind, IdentTable};
-use crate::lambda::lam_subst_arena::Subst;
-use crate::lambda::lam_util_arena::refine_let;
-use crate::lambda::LamLoc;
+use crate::lambda::lam_subst::Subst;
+use crate::lambda::lam_util::refine_let;
 
 /// `Lam_beta_reduce_util.simple_beta_reduce`: a body that is one primitive
 /// or one call of a variable or module field, whose operands are variables

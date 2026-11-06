@@ -16,14 +16,14 @@ use crate::js_ir::{
     BinOp, Block, CallInfo, Expression, ExpressionDesc, ModuleId, Statement, VariableDeclaration,
     expression_has_no_side_effects,
 };
+use crate::lambda::LamLoc;
+use crate::lambda::TagInfo;
 use crate::lambda::arena::{FuncId, Lam, LamArena, View};
 use crate::lambda::lam_compat::{FieldDbgInfo, LetKind};
 use crate::lambda::lam_primitive::{
     Attr, DeclKind, ExternalDecl, ExternalModuleName, ImportSource, Label, LabelNoname,
     ModuleBindName, ModuleSource, Mutable, ObjParam, Param, Primitive,
 };
-use crate::lambda::LamLoc;
-use crate::lambda::TagInfo;
 
 pub(crate) fn external_module_import_attributes(
     module_name: &ExternalModuleName,

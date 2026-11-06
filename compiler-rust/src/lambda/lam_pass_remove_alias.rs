@@ -3,20 +3,20 @@
 //! the metadata `Lam_pass_collect` recorded.
 
 use crate::ident::Ident;
+use crate::lambda::LamLoc;
 use crate::lambda::arena::{Lam, LamArena, Node};
-use crate::lambda::lam_analysis_arena::{lfunction_can_be_inlined, ok_to_inline_fun_when_app};
-use crate::lambda::lam_beta_reduce_arena::{propagate_beta_reduce, propagate_beta_reduce_with_map};
-use crate::lambda::lam_closure_arena::is_closed_with_map;
+use crate::lambda::lam_analysis::{lfunction_can_be_inlined, ok_to_inline_fun_when_app};
+use crate::lambda::lam_beta_reduce::{propagate_beta_reduce, propagate_beta_reduce_with_map};
+use crate::lambda::lam_closure::is_closed_with_map;
 use crate::lambda::lam_compat::{Comparison, FieldDbgInfo};
 use crate::lambda::lam_compile_context::{BoxedNullable, RecFlag};
 use crate::lambda::lam_constant::Constant;
-use crate::lambda::lam_hit_arena::hit_variable;
+use crate::lambda::lam_hit::hit_variable;
 use crate::lambda::lam_primitive::Primitive;
 use crate::lambda::lam_stats::{IdKind, IdentTable, LamStats};
 use crate::lambda::lam_tag_info::TagInfo;
-use crate::lambda::lam_util_arena::field_flatten_get;
+use crate::lambda::lam_util::field_flatten_get;
 use crate::lambda::{ApInfo, Lambda};
-use crate::lambda::LamLoc;
 
 /// Rust counterpart to `Lam_compile_env.query_external_id_info` used by
 /// `Lam_pass_remove_alias.simplify_alias` (lam_pass_remove_alias.ml:143-159).
@@ -285,7 +285,7 @@ impl Simplifier<'_, '_> {
             if let Some(Lambda::Lfunction(f)) = (self.external_inline)(&module_id, &field_name)
                 && f.params.len() == arg_list.len()
                 && external_inline_args_are_allowed(a, &arg_list, self.ident_tbl)
-                && crate::lambda::lam_analysis_arena::attr_can_be_inlined(&f.attr)
+                && crate::lambda::lam_analysis::attr_can_be_inlined(&f.attr)
             {
                 let body = a.import(&f.body);
                 let reduced = self.beta(a, &f.params, body, &arg_list);

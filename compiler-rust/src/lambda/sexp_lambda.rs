@@ -3,8 +3,8 @@
 //! This module provides S-expression output for Lambda IR that matches
 //! the OCaml compiler's output, enabling parity testing between implementations.
 
-use std::io::Write;
 use crate::lambda::LamLoc;
+use std::io::Write;
 
 use crate::lambda::lam_compat::{Comparison, FieldDbgInfo, LetKind, SetFieldDbgInfo};
 use crate::lambda::lam_constant::Constant;
@@ -820,8 +820,8 @@ pub fn print_lambda_with_locs(lam: &Lambda, out: &mut impl Write) -> std::io::Re
 #[cfg(test)]
 mod tests {
     use super::{Sexp, constant, escape_ocaml_string, switch_key};
-    use crate::lambda::lam_constant::Constant;
     use crate::lambda::LamLoc;
+    use crate::lambda::lam_constant::Constant;
 
     #[test]
     fn sexp_layout_indents_multi_item_lists() {

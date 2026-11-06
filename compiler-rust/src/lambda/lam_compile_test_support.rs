@@ -167,7 +167,7 @@ pub(crate) fn recursive_binding_groups_tree(bindings: &[(Ident, Lambda)]) -> Vec
 pub(crate) fn simplify_tree_for_js_backend(lam: &Lambda) -> Lambda {
     let mut no_external_inline = |_: &Ident, _: &str| None;
     let mut no_external_arity = |_: &Ident, _: &str| None;
-    let s = crate::lambda::lam_compile_main_arena::simplify_for_js_backend(
+    let s = crate::lambda::lam_compile_main::simplify_for_js_backend(
         lam,
         false,
         &mut no_external_inline,

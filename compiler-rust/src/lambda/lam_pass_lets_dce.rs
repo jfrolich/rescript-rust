@@ -5,12 +5,12 @@ use ahash::AHashMap as HashMap;
 
 use crate::ident::Ident;
 use crate::lambda::arena::{Lam, LamArena, Node};
-use crate::lambda::lam_analysis_arena::{lfunction_can_be_inlined, no_side_effects};
-use crate::lambda::lam_beta_reduce_arena::no_names_beta_reduce;
+use crate::lambda::lam_analysis::{lfunction_can_be_inlined, no_side_effects};
+use crate::lambda::lam_beta_reduce::no_names_beta_reduce;
 use crate::lambda::lam_compat::LetKind;
 use crate::lambda::lam_constant::Constant;
 use crate::lambda::lam_primitive::Primitive;
-use crate::lambda::lam_util_arena::refine_let_original;
+use crate::lambda::lam_util::refine_let_original;
 
 /// Equivalent of OCaml's `Lam_pass_count.used_info` (lam_pass_count.ml:15-23).
 /// `Default` is OCaml's `dummy_info` (lam_pass_count.ml:30).

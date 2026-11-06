@@ -3,16 +3,16 @@
 
 use crate::context::IdGenerator;
 use crate::ident::Ident;
+use crate::lambda::LamLoc;
 use crate::lambda::arena::{Lam, LamArena, LamList, Node};
 use crate::lambda::lam_arity::Arity;
 use crate::lambda::lam_compat::{FieldDbgInfo, LetKind};
 use crate::lambda::lam_constant::Constant;
-use crate::lambda::lam_pass_collect_arena::ExternalArityResolver;
-use crate::lambda::lam_pass_collect_arena::get_arity_with_external_arity;
+use crate::lambda::lam_pass_collect::ExternalArityResolver;
+use crate::lambda::lam_pass_collect::get_arity_with_external_arity;
 use crate::lambda::lam_primitive::Primitive;
 use crate::lambda::lam_stats::LamStats;
 use crate::lambda::{ApInfo, ApplyStatus, FunctionAttribute};
-use crate::lambda::LamLoc;
 
 /// `Lam_pass_alpha_conversion.alpha_conversion`
 /// (lam_pass_alpha_conversion.ml:25-129).

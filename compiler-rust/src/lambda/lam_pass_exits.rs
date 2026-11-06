@@ -6,10 +6,10 @@ use ahash::AHashMap as HashMap;
 use crate::context::IdGenerator;
 use crate::ident::Ident;
 use crate::lambda::arena::{IdentSpan, Lam, LamArena, Node};
-use crate::lambda::lam_analysis_arena::EXIT_INLINE_SIZE;
-use crate::lambda::lam_analysis_arena::size;
+use crate::lambda::lam_analysis::EXIT_INLINE_SIZE;
+use crate::lambda::lam_analysis::size;
 use crate::lambda::lam_compat::LetKind;
-use crate::lambda::lam_subst_arena::{Subst, subst_lambda};
+use crate::lambda::lam_subst::{Subst, subst_lambda};
 
 /// `Lam_exit_count.collection`: occurrence count per exit label
 /// (lam_exit_count.ml:25).

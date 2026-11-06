@@ -11,21 +11,21 @@ use crate::cmi::persistent_env::CmjExportArity;
 use crate::ident::Ident;
 use crate::lambda::arena::{Lam, LamArena, Node};
 use crate::lambda::lam_arity::Arity;
-use crate::lambda::lam_beta_reduce_arena::max_ident_stamp_in_lambda;
+use crate::lambda::lam_beta_reduce::max_ident_stamp_in_lambda;
 use crate::lambda::lam_compat::{FieldDbgInfo, LetKind};
 use crate::lambda::lam_compile_context::RecFlag;
-use crate::lambda::lam_pass_alpha_conversion_arena::alpha_conversion;
-use crate::lambda::lam_pass_collect_arena::ExternalArityResolver;
-use crate::lambda::lam_pass_collect_arena::{collect_info_with_external_arity, get_arity};
-use crate::lambda::lam_pass_deep_flatten_arena::deep_flatten;
-use crate::lambda::lam_pass_exits_arena::simplify_exits;
-use crate::lambda::lam_pass_lets_dce_arena::simplify_lets;
-use crate::lambda::lam_pass_remove_alias_arena::ExternalInlineResolver;
-use crate::lambda::lam_pass_remove_alias_arena::simplify_alias;
+use crate::lambda::lam_pass_alpha_conversion::alpha_conversion;
+use crate::lambda::lam_pass_collect::ExternalArityResolver;
+use crate::lambda::lam_pass_collect::{collect_info_with_external_arity, get_arity};
+use crate::lambda::lam_pass_deep_flatten::deep_flatten;
+use crate::lambda::lam_pass_exits::simplify_exits;
+use crate::lambda::lam_pass_lets_dce::simplify_lets;
+use crate::lambda::lam_pass_remove_alias::ExternalInlineResolver;
+use crate::lambda::lam_pass_remove_alias::simplify_alias;
 use crate::lambda::lam_primitive::{Mutable, Primitive};
 use crate::lambda::lam_stats::{Element, IdKind, LamStats};
 use crate::lambda::lam_tag_info::TagInfo;
-use crate::lambda::{HoistedFunction, lam_pass_guard_raises_arena, lam_pass_sroa_arena};
+use crate::lambda::{HoistedFunction, lam_pass_guard_raises, lam_pass_sroa};
 
 /// The simplified program and the `Lam_stats.t` it was simplified with
 /// (lam_coercion.ml:200-208). CMJ export arities are read from the final
@@ -147,11 +147,11 @@ pub fn simplify_in_arena(
     // lam_compile_main.ml:193
     let lam = simplify_lets(a, lam);
     // Scalar replacement of local mutable blocks.
-    let lam = lam_pass_sroa_arena::simplify(a, lam, &id_gen);
+    let lam = lam_pass_sroa::simplify(a, lam, &id_gen);
     // lam_compile_main.ml:200
     let lam = simplify_exits(a, lam, &id_gen);
     // Last, after every pass that can produce `if a then raise e else c`.
-    let lam = lam_pass_guard_raises_arena::guard_raises(a, lam);
+    let lam = lam_pass_guard_raises::guard_raises(a, lam);
     // lam_compile_main.ml:212, lam_coercion.ml:196
     let lam = handle_exports(a, &mut meta, lam);
     let arena = std::mem::take(a);
@@ -279,12 +279,7 @@ pub fn add_hoisted_function_aliases(s: &mut Simplified, hoisted: &[HoistedFuncti
         if !target.same(&item.binding) {
             continue;
         }
-        let id = s
-            .meta
-            .id_gen
-            .create(&hoisted_export_name(
-                &item.path,
-            ));
+        let id = s.meta.id_gen.create(&hoisted_export_name(&item.path));
         let mut access = a.var(*top_id);
         for (pos, name) in positions {
             access = a.prim(
