@@ -1275,7 +1275,19 @@ mod node_size_tests {
     #[test]
     fn typed_expression_sizes_stay_compact() {
         use std::mem::size_of;
-        assert_eq!(size_of::<super::ExpressionDesc>(), 72);
-        assert_eq!(size_of::<super::Expression>(), 112);
+        assert_eq!(size_of::<super::ExpressionDesc>(), 64);
+        assert_eq!(size_of::<super::Expression>(), 104);
+    }
+
+    // Children live in the TypedArena: list-carrying nodes hold 4-byte
+    // handles and 8-byte list ranges instead of inline subtrees.
+    #[test]
+    fn typed_list_items_stay_compact() {
+        use std::mem::size_of;
+        assert_eq!(size_of::<super::Case>(), 104);
+        assert_eq!(size_of::<super::ValueBinding>(), 112);
+        assert_eq!(size_of::<super::ApplyArg>(), 48);
+        assert_eq!(size_of::<super::RecordField>(), 40);
     }
 }
+
