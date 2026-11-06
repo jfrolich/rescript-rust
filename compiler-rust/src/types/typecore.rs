@@ -14442,7 +14442,7 @@ fn type_record(
     // Keep explicit overrides keyed by lbl_pos so we can reconstruct full fields.
     type ExplicitOverrideEntry = (
         Located<LidentIdx>,
-        crate::types::LabelDescription,
+        Arc<crate::types::LabelDescription>,
         RecordLabelDefinition,
         bool,
     );
@@ -14948,15 +14948,16 @@ fn type_record(
         let mut final_expr = final_expr;
         final_expr.exp_type = crate::types::ctype::instance(ctx, final_expr.exp_type);
 
+        let explicit_lbl_pos = label_desc.lbl_pos;
         let entry = (
             field.lid,
-            label_desc.clone(),
+            Arc::new(label_desc),
             RecordLabelDefinition::Overridden(field.lid, final_expr),
             false, // OCaml Texp_record always uses false for this flag
         );
         let entry_idx = explicit_entries.len();
         explicit_entries.push(Some(entry));
-        explicit_overrides.insert(label_desc.lbl_pos, entry_idx);
+        explicit_overrides.insert(explicit_lbl_pos, entry_idx);
         explicit_overrides_in_order.push(entry_idx);
     }
 
@@ -15246,10 +15247,11 @@ fn type_record(
                         lbl_arg: ty_arg,
                         ..raw_label_desc.clone()
                     };
+                    let kept_ty = label_desc.lbl_arg;
                     typed_fields.push((
                         placeholder_lid,
-                        label_desc.clone(),
-                        RecordLabelDefinition::Kept(label_desc.lbl_arg),
+                        Arc::new(label_desc),
+                        RecordLabelDefinition::Kept(kept_ty),
                         false,
                     ));
                     continue;
@@ -15268,7 +15270,7 @@ fn type_record(
                     };
                     typed_fields.push((
                         label_lid,
-                        label_desc,
+                        Arc::new(label_desc),
                         RecordLabelDefinition::OmittedOptionalNone(label_lid, option_ty),
                         false,
                     ));
@@ -15354,10 +15356,11 @@ fn type_record(
                         lbl_attributes: label_decl.ld_attributes.clone(),
                     }
                 };
+                let kept_ty = label_desc.lbl_arg;
                 typed_fields.push((
                     placeholder_lid,
-                    label_desc.clone(),
-                    RecordLabelDefinition::Kept(label_desc.lbl_arg),
+                    Arc::new(label_desc),
+                    RecordLabelDefinition::Kept(kept_ty),
                     false,
                 ));
                 continue;
@@ -15403,7 +15406,7 @@ fn type_record(
                 };
                 typed_fields.push((
                     label_lid,
-                    label_desc,
+                    Arc::new(label_desc),
                     RecordLabelDefinition::OmittedOptionalNone(label_lid, option_ty),
                     false,
                 ));

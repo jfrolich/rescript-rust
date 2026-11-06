@@ -500,7 +500,7 @@ pub enum RecordLabelDefinition {
 
 pub type RecordField = (
     Loc<LidentIdx>,
-    LabelDescription,
+    Arc<LabelDescription>,
     RecordLabelDefinition,
     bool,
 );

@@ -458,14 +458,7 @@ fn raw_record_setfield_access(lbl: &LabelDescription) -> Option<(i32, SetFieldDb
     Some((pos, info))
 }
 
-fn raw_record_mutable_flag(
-    fields: &[(
-        Located<LidentIdx>,
-        LabelDescription,
-        RecordLabelDefinition,
-        bool,
-    )],
-) -> ParserMutableFlag {
+fn raw_record_mutable_flag(fields: &[RecordField]) -> ParserMutableFlag {
     fields
         .iter()
         .find(|(_, lbl, _, _)| lbl.lbl_mut == TypeMutableFlag::Mutable)
@@ -3155,12 +3148,7 @@ impl<'a> RawLambdaConverter<'a> {
     fn convert_record_raw(
         &mut self,
         loc: SrcLoc,
-        fields: &[(
-            Located<LidentIdx>,
-            LabelDescription,
-            RecordLabelDefinition,
-            bool,
-        )],
+        fields: &[RecordField],
         base: Option<&Expression>,
         empty_repres: Option<RecordRepresentation>,
         logical_field_count: Option<usize>,
@@ -3410,7 +3398,7 @@ impl<'a> RawLambdaConverter<'a> {
                 };
                 expanded.push((
                     label_lid,
-                    label.clone(),
+                    std::sync::Arc::new(label.clone()),
                     RecordLabelDefinition::OmittedOptionalNone(label_lid, label.lbl_arg),
                     false,
                 ));
@@ -3427,7 +3415,7 @@ impl<'a> RawLambdaConverter<'a> {
                 };
                 expanded.push((
                     label_lid,
-                    label.clone(),
+                    std::sync::Arc::new(label.clone()),
                     RecordLabelDefinition::Kept(label.lbl_arg),
                     false,
                 ));
