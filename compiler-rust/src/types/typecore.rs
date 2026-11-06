@@ -28426,13 +28426,7 @@ pub(crate) fn alias_target_for_module_path<'a>(
                 // `find_module_descr` and the component table; it does not
                 // force env.ml:1568's `comp_modules` thunk just to inspect a
                 // module alias while comparing constructor result paths.
-                components
-                    .lookup_module(module_name.as_str())
-                    .and_then(|(_, _, md)| match &md.md_type {
-                        crate::types::decl::ModuleType::MtyAlias(_, target)
-                        | crate::types::decl::ModuleType::MtyIdent(target) => Some(target.clone()),
-                        _ => None,
-                    })
+                components.lookup_module_alias_target(module_name.as_str(), true)
             })?
         }
         Path::Papply(_, _) => None,
@@ -28469,12 +28463,7 @@ pub(crate) fn module_alias_target_for_path<'a>(
                 // compiler/ml/subst.ml:378-400-style identifier renaming
                 // before OCaml's env.ml:865-882 `find_module` path asks for
                 // the module declaration itself.
-                components
-                    .lookup_module(module_name.as_str())
-                    .and_then(|(_, _, md)| match &md.md_type {
-                        crate::types::decl::ModuleType::MtyAlias(_, target) => Some(target.clone()),
-                        _ => None,
-                    })
+                components.lookup_module_alias_target(module_name.as_str(), false)
             })?
         }
         Path::Papply(_, _) => None,
@@ -28499,13 +28488,7 @@ fn raw_alias_target_for_module_path<'a>(
                 // rewriting of copied type paths, so inspect the component
                 // declaration without running compiler/ml/subst.ml:378-400
                 // child-signature identifier freshening.
-                components
-                    .lookup_module(module_name.as_str())
-                    .and_then(|(_, _, md)| match &md.md_type {
-                        crate::types::decl::ModuleType::MtyAlias(_, target)
-                        | crate::types::decl::ModuleType::MtyIdent(target) => Some(target.clone()),
-                        _ => None,
-                    })
+                components.lookup_module_alias_target(module_name.as_str(), true)
             })?
         }
         Path::Papply(_, _) => None,

@@ -1869,7 +1869,7 @@ impl PersistentEnv {
         // Apply path substitution: rewrite Tconstr paths from internal
         // (e.g., Pident "ref") to qualified (e.g., Pdot(Pident "Pervasives") "ref").
         substitute_type_paths_in_sig(&signature, &module_path, ctx);
-        substitute_sig_decl_paths_in_place(&mut signature, &module_path);
+        qualify_unit_sig_decl_paths_in_place(&mut signature, &module_path);
 
         // Also recursively substitute paths in sub-module signatures.
         substitute_submodule_paths(&signature, &module_path, ctx);
@@ -4186,7 +4186,12 @@ fn freshen_signature_bound_idents_rec(
     };
 
     substitute_type_paths_in_sig_items(sig_items, &combined_maps, ctx, visited, false);
-    substitute_sig_decl_paths_in_place_with_maps_rec(sig_items, &combined_maps, false);
+    substitute_sig_decl_paths_in_place_with_maps_rec(
+        sig_items,
+        &combined_maps,
+        false,
+        AliasTargets::Substitute,
+    );
 
     for item in sig_items.iter_mut() {
         match item {
@@ -4462,6 +4467,32 @@ fn build_subst_maps_for_module(sig_items: &[SignatureItem], module_path: &Path) 
     build_subst_maps(sig_items, module_path)
 }
 
+/// The module type of a component module declaration as forcing its
+/// `comp_modules` thunk returns it (compiler/ml/env.ml:446-448, 1568), for
+/// declarations that are paths: OCaml compiler/ml/subst.ml:345-364
+/// `Subst.modtype` rewrites an `Mty_ident` target through the modtype table
+/// and an `Mty_alias` target through `module_path`, renaming no binder. The
+/// substitution is the component's `prefix_idents` one (env.ml:1530), built
+/// from `sig_items` at `module_path` as `freshen_component_module_declaration_bound_idents`
+/// builds it. Persistent targets are not bound by that substitution.
+pub(crate) fn substitute_component_module_type_path(
+    module_type: &ModuleType,
+    sig_items: &[SignatureItem],
+    module_path: &Path,
+) -> Option<ModuleType> {
+    let target = match module_type {
+        ModuleType::MtyAlias(_, target) | ModuleType::MtyIdent(target) => target,
+        _ => return None,
+    };
+    if target.head().is_persistent() {
+        return Some(module_type.clone());
+    }
+    let mut module_type = module_type.clone();
+    let maps = build_subst_maps(sig_items, module_path);
+    substitute_module_type_paths_with_maps(&mut module_type, &maps);
+    Some(module_type)
+}
+
 pub fn substitute_sig_path(path: &Path, sig_items: &[SignatureItem], module_path: &Path) -> Path {
     let maps = build_subst_maps_for_module(sig_items, module_path);
     substitute_type_path(
@@ -4475,6 +4506,27 @@ pub fn substitute_sig_path(path: &Path, sig_items: &[SignatureItem], module_path
 }
 
 fn substitute_module_type_paths_with_maps(module_type: &mut ModuleType, maps: &SubstMaps) {
+    substitute_module_type_paths_with_maps_mode(module_type, maps, AliasTargets::Substitute);
+}
+
+/// Whether a declaration-path substitution also rewrites `Mty_alias` targets.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AliasTargets {
+    Substitute,
+    /// Leave alias targets as the raw signature has them. OCaml
+    /// compiler/ml/env.ml:677 and env.ml:1970 keep `ps_sig` as
+    /// `Subst.signature Subst.identity sign`, so `module Aliased = One` stays
+    /// `Mty_alias (Pident One)`; compiler/ml/subst.ml:358-364 rewrites the
+    /// target only when env.ml:1568's `comp_modules` thunk is forced
+    /// (env.ml:446-448, `freshen_module_type_bound_idents_rec` here).
+    KeepRaw,
+}
+
+fn substitute_module_type_paths_with_maps_mode(
+    module_type: &mut ModuleType,
+    maps: &SubstMaps,
+    alias_targets: AliasTargets,
+) {
     match module_type {
         ModuleType::MtyIdent(path) => {
             *path = substitute_type_path(
@@ -4487,32 +4539,41 @@ fn substitute_module_type_paths_with_maps(module_type: &mut ModuleType, maps: &S
             );
         }
         ModuleType::MtyAlias(_, path) => {
-            *path = substitute_module_path(
-                path,
-                &maps.module_stamp_map,
-                &maps.module_name_map,
-                maps.protected_module_head.as_ref(),
-            );
+            if alias_targets == AliasTargets::Substitute {
+                *path = substitute_module_path(
+                    path,
+                    &maps.module_stamp_map,
+                    &maps.module_name_map,
+                    maps.protected_module_head.as_ref(),
+                );
+            }
         }
         ModuleType::MtySignature(sig) => {
-            substitute_sig_decl_paths_in_place_with_maps(
+            substitute_sig_decl_paths_in_place_with_maps_rec(
                 crate::types::decl::signature_mut(sig),
                 maps,
+                true,
+                alias_targets,
             );
         }
         ModuleType::MtyFunctor {
             param_type, result, ..
         } => {
             if let Some(param_type) = param_type.as_mut() {
-                substitute_module_type_paths_with_maps(param_type, maps);
+                substitute_module_type_paths_with_maps_mode(param_type, maps, alias_targets);
             }
-            substitute_module_type_paths_with_maps(result, maps);
+            substitute_module_type_paths_with_maps_mode(result, maps, alias_targets);
         }
     }
 }
 
 fn substitute_sig_decl_paths_in_place_with_maps(sig_items: &mut [SignatureItem], maps: &SubstMaps) {
-    substitute_sig_decl_paths_in_place_with_maps_rec(sig_items, maps, true);
+    substitute_sig_decl_paths_in_place_with_maps_rec(
+        sig_items,
+        maps,
+        true,
+        AliasTargets::Substitute,
+    );
 }
 
 /// Substitute the declaration paths of `sig_items`; without `recurse`, the
@@ -4521,6 +4582,7 @@ fn substitute_sig_decl_paths_in_place_with_maps_rec(
     sig_items: &mut [SignatureItem],
     maps: &SubstMaps,
     recurse: bool,
+    alias_targets: AliasTargets,
 ) {
     if maps.is_empty() {
         return;
@@ -4574,12 +4636,16 @@ fn substitute_sig_decl_paths_in_place_with_maps_rec(
                     );
                 }
                 if recurse {
-                    substitute_module_type_paths_with_maps(&mut md.md_type, maps);
+                    substitute_module_type_paths_with_maps_mode(
+                        &mut md.md_type,
+                        maps,
+                        alias_targets,
+                    );
                 }
             }
             SignatureItem::SigModtype(_, mtd) => {
                 if recurse && let Some(module_type) = mtd.mtd_type.as_mut() {
-                    substitute_module_type_paths_with_maps(module_type, maps);
+                    substitute_module_type_paths_with_maps_mode(module_type, maps, alias_targets);
                 }
             }
             SignatureItem::SigClass | SignatureItem::SigClassType => {}
@@ -4590,6 +4656,14 @@ fn substitute_sig_decl_paths_in_place_with_maps_rec(
 pub fn substitute_sig_decl_paths_in_place(sig_items: &mut [SignatureItem], module_path: &Path) {
     let maps = build_subst_maps_for_module(sig_items, module_path);
     substitute_sig_decl_paths_in_place_with_maps(sig_items, &maps);
+}
+
+/// Qualify the declaration paths Rust caches on a loaded unit's signature
+/// (`type_path`, `val_path`, `md_path`), keeping module alias targets raw as
+/// OCaml's `ps_sig` keeps them (see [`AliasTargets::KeepRaw`]).
+pub fn qualify_unit_sig_decl_paths_in_place(sig_items: &mut [SignatureItem], module_path: &Path) {
+    let maps = build_subst_maps_for_module(sig_items, module_path);
+    substitute_sig_decl_paths_in_place_with_maps_rec(sig_items, &maps, true, AliasTargets::KeepRaw);
 }
 
 fn substitute_type_paths_in_sig_with_maps(

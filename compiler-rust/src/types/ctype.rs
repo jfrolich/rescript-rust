@@ -2685,7 +2685,7 @@ pub(crate) fn resolve_module_signature_through_cmi_shared(
             // Without this, types have bare Pident paths that cause
             // incorrect path qualification through resolve_module_lid_impl.
             crate::cmi::persistent_env::substitute_type_paths_in_sig(&sig, module_path, ctx);
-            crate::cmi::persistent_env::substitute_sig_decl_paths_in_place(&mut sig, module_path);
+            crate::cmi::persistent_env::qualify_unit_sig_decl_paths_in_place(&mut sig, module_path);
             // Also recursively substitute submodule paths.
             crate::cmi::persistent_env::substitute_submodule_paths(&sig, module_path, ctx);
             Some(Arc::new(sig))

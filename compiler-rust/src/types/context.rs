@@ -2004,12 +2004,7 @@ impl TypeContext {
         self.poison_store_build_for("read:find_module_alias_in_components");
         let key = QualifiedModuleComponentsCacheKey::new(parent_path.clone(), None);
         self.with_qualified_module_components(&key, |components| {
-            let (_, _, md) = components.lookup_module(module_name)?;
-            match &md.md_type {
-                super::decl::ModuleType::MtyAlias(_, target) => Some(target.clone()),
-                super::decl::ModuleType::MtyIdent(target) => Some(target.clone()),
-                _ => None,
-            }
+            components.lookup_module_alias_target(module_name, true)
         })
         .flatten()
     }
@@ -4243,7 +4238,7 @@ impl TypeContext {
         // force requested lets the Rust force point consume the same
         // `Subst.signature` stamps instead of special-casing one module family.
         crate::cmi::persistent_env::substitute_type_paths_in_sig(&sig, &module_path, self);
-        crate::cmi::persistent_env::substitute_sig_decl_paths_in_place(&mut sig, &module_path);
+        crate::cmi::persistent_env::qualify_unit_sig_decl_paths_in_place(&mut sig, &module_path);
         crate::cmi::persistent_env::substitute_submodule_paths(&sig, &module_path, self);
         Some(Arc::new(sig))
     }

@@ -706,6 +706,32 @@ fn strengthen_view_types(
     }
 }
 
+/// The declaration `store_module` puts in the evolving `env` for a child of a
+/// component table built from an alias-scraped signature. OCaml
+/// compiler/ml/env.ml:1364-1376 `scrape_alias` strengthens the signature it
+/// reaches through an alias with `~aliasable:true`, and compiler/ml/mtype.ml:
+/// 93-97 `strengthen_decl` turns each child module that is not already an
+/// alias into `Mty_alias (Mta_present, P.child)`; env.ml:1504-1505 then stores
+/// that declaration, so a sibling alias resolved through it reaches
+/// `find_module P.child` (env.ml:865-882). `strengthen_source` is `P` when the
+/// table's items are named through another module path than its access path.
+fn strengthened_child_env_decl(
+    md: &ModuleDeclaration,
+    child_name: &str,
+    strengthen_source: Option<&Path>,
+) -> ModuleDeclaration {
+    match strengthen_source {
+        Some(source) if !matches!(md.md_type, ModuleType::MtyAlias(..)) => ModuleDeclaration {
+            md_type: ModuleType::MtyAlias(
+                super::decl::AliasPresence::MtaPresent,
+                Path::pdot(source.clone(), child_name),
+            ),
+            ..md.clone()
+        },
+        _ => md.clone(),
+    }
+}
+
 fn scan_child_component_from_signature(
     access_path: &Path,
     source_prefix: Option<&Path>,
@@ -742,11 +768,12 @@ fn scan_child_component_from_signature(
                 let runtime_pos = state.runtime_pos;
                 let child_access_path =
                     qualified_submodule_access_path(access_path, id.name(), runtime_pos, md);
+                let strengthen_source = source_prefix.filter(|source| !source.same(access_path));
                 let stored = {
                     let working_env = state.working_env_mut();
                     working_env.add_module_with_component_context(
                         *id,
-                        md.clone(),
+                        strengthened_child_env_decl(md, id.name(), strengthen_source),
                         md.clone(),
                         child_access_path,
                         Some((access_path.clone(), signature.clone())),
@@ -1323,6 +1350,31 @@ impl QualifiedModuleComponents {
         }
     }
 
+    /// The target of component module `name` when it is a module alias (or,
+    /// with `include_ident`, a module type path), as forcing its
+    /// `comp_modules` thunk (compiler/ml/env.ml:865-882, 446-448) returns
+    /// it: the raw declaration under this table's `prefix_idents`
+    /// substitution. Reading it renames no binder, as `Subst.modtype` on a
+    /// path renames none (compiler/ml/subst.ml:345-364).
+    pub(crate) fn lookup_module_alias_target(
+        &self,
+        name: &str,
+        include_ident: bool,
+    ) -> Option<Path> {
+        let (_, _, md) = self.lookup_module(name)?;
+        if !include_ident && !matches!(md.md_type, ModuleType::MtyAlias(..)) {
+            return None;
+        }
+        match crate::cmi::persistent_env::substitute_component_module_type_path(
+            &md.md_type,
+            &self.signature,
+            self.access_path(),
+        )? {
+            ModuleType::MtyAlias(_, target) | ModuleType::MtyIdent(target) => Some(target),
+            _ => None,
+        }
+    }
+
     pub(crate) fn lookup_child_components(
         &self,
         name: &str,
@@ -1765,42 +1817,6 @@ fn build_local_module_components(
     ctx: &super::context::TypeContext,
     cache_mode: super::typecore::ComponentLookupApi,
 ) -> Option<QualifiedModuleComponents> {
-    // OCaml compiler/ml/env.ml:1504-1505 stores each parent component module
-    // in the evolving `env` with `store_module` (env.ml:1642-1659), whose
-    // `modules` entry is `Env_lazy.create (Subst.identity, md)`. A child alias
-    // `module Aliased = One` keeps `Mty_alias (Pident One)` in the raw item, so
-    // env.ml:1364-1371 `scrape_alias` resolves it through that local entry, and
-    // forcing it with `subst_modtype_maker` (env.ml:446-448) renames nothing.
-    // Loaded unit signatures carry the qualified `Unit.One` spelling
-    // (`substitute_sig_decl_paths_in_place`); resolve such a sibling alias
-    // through the same local entry instead of the parent's `comp_modules`
-    // thunk (env.ml:1568), which applies the prefix substitution.
-    let sibling_alias_md;
-    let md = match (parent_substitution_context, &md.md_type) {
-        (
-            Some((parent_access_path, parent_sig)),
-            super::decl::ModuleType::MtyAlias(presence, Path::Pdot(alias_parent, alias_name, _)),
-        ) if alias_parent.same(parent_access_path) => {
-            let sibling_id = parent_sig.iter().find_map(|item| match item {
-                SignatureItem::SigModule(id, _, _) if id.name() == alias_name.as_str() => Some(*id),
-                _ => None,
-            });
-            match sibling_id {
-                Some(sibling_id) if env.find_module_same(&sibling_id).is_ok() => {
-                    sibling_alias_md = ModuleDeclaration {
-                        md_type: super::decl::ModuleType::MtyAlias(
-                            presence.clone(),
-                            Path::pident(sibling_id),
-                        ),
-                        ..md.clone()
-                    };
-                    &sibling_alias_md
-                }
-                _ => md,
-            }
-        }
-        _ => md,
-    };
     if ctx.persistent_env_is_in_process()
         && let super::decl::ModuleType::MtyAlias(_, Path::Pident(alias_id))
         | super::decl::ModuleType::MtyIdent(Path::Pident(alias_id)) = &md.md_type
@@ -2090,11 +2106,15 @@ fn build_local_module_components(
                 if let Some(working_env) = working_env.as_mut() {
                     let child_access_path =
                         qualified_submodule_access_path(access_path, id.name(), runtime_pos, qmd);
-                    let env_decl = if use_qualified_items_for_env {
-                        qmd.clone()
-                    } else {
-                        child_md.clone()
-                    };
+                    let env_decl = strengthened_child_env_decl(
+                        if use_qualified_items_for_env {
+                            qmd
+                        } else {
+                            child_md
+                        },
+                        id.name(),
+                        source_prefix.filter(|source| !source.same(access_path)),
+                    );
                     // OCaml compiler/ml/env.ml:1573-1578 stores the child
                     // component thunk with the final substitution built by
                     // env.ml:1530-1531/1454-1486 `prefix_idents`. Rust
