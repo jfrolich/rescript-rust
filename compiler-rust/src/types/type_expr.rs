@@ -462,8 +462,9 @@ impl std::fmt::Debug for TypeArgList {
     }
 }
 
-/// Type descriptor - the actual content of a type expression.
-#[derive(Debug, Clone)]
+/// Type descriptor - the actual content of a type expression. Every
+/// payload is a handle, so descriptors are plain `Copy` values.
+#[derive(Debug, Clone, Copy)]
 pub enum TypeDesc {
     /// Type variable: `'a` or `'_a`
     Tvar(Option<crate::name::Name>),
