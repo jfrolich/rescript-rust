@@ -4269,17 +4269,23 @@ fn type_mod_error_to_anyhow_styled(
             )
             .into()
         }
-        TypeModError::NonrecursiveGadt { loc } => UserDiagnostic::new(
-            format_compiler_error_report_raw_message(
-                arena,
-                source,
-                filename,
-                *loc,
-                "  GADT case syntax cannot be used in a 'nonrec' block.",
-            ),
-            2,
-        )
-        .into(),
+        TypeModError::NonrecursiveGadt { loc } => {
+            // typedecl.ml:2334-2337: "@[GADTs require recursive type
+            // syntax.@ Define your type using `type rec` instead of
+            // `type`.@]".
+            let message = type_clash::render_error_message(|ppf| {
+                ppf.open_box(crate::parser::formatter::BoxKind::Box, 0);
+                ppf.str("GADTs require recursive type syntax.");
+                ppf.space();
+                ppf.str("Define your type using `type rec` instead of `type`.");
+                ppf.close_box();
+            });
+            UserDiagnostic::new(
+                format_compiler_error_report_formatted(arena, source, filename, *loc, &message),
+                2,
+            )
+            .into()
+        }
         TypeModError::NonGeneralizable { loc, typ } => UserDiagnostic::new(
             format_non_generalizable_report(source, filename, loc, type_ctx, *typ),
             2,

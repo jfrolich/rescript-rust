@@ -1259,29 +1259,6 @@ impl super::ast_iter::AstIter for UnusedAttributeSweep<'_> {
         super::ast_iter::walk_type_declaration(self, arena, td);
     }
 
-    fn structure_item(&mut self, arena: &ParseArena, item: &StructureItem) {
-        if self.stopped {
-            return;
-        }
-        // `Pstr_type (Nonrecursive, [{ptype_kind = Ptype_variant ({pcd_res =
-        // Some _} :: _)}])` raises (bs_ast_invariant.ml:81-89).
-        if let StructureItemDesc::Pstr_type(inner) = &item.pstr_desc {
-            let (rec_flag, decls) = &**inner;
-            if *rec_flag == RecFlag::Nonrecursive
-                && let [decl] = decls.as_slice()
-                && let TypeKind::Ptype_variant(cstrs) = &decl.ptype_kind
-                && cstrs.first().is_some_and(|cd| cd.pcd_res.is_some())
-            {
-                self.raise(
-                    item.pstr_loc,
-                    "GADTs require recursive type syntax.\nDefine your type using `type rec` instead of `type`.\nExample: type rec t = ...",
-                );
-                return;
-            }
-        }
-        super::ast_iter::walk_structure_item(self, arena, item);
-    }
-
     fn value_description(&mut self, arena: &ParseArena, vd: &ValueDescription) {
         if self.stopped {
             return;
