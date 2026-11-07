@@ -89,6 +89,15 @@ impl std::ops::Deref for OcamlString {
 }
 
 impl OcamlString {
+    /// A string decoded at `allocation` (scope in the high half).
+    #[cfg(test)]
+    pub(crate) fn decoded(text: &str, allocation: u64) -> Self {
+        Self {
+            text: text.to_string(),
+            allocation,
+        }
+    }
+
     pub fn as_str(&self) -> &str {
         &self.text
     }

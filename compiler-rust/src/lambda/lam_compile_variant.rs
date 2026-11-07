@@ -475,7 +475,7 @@ impl LambdaCompiler {
     /// `e instanceof C`.
     fn is_instance_of(&self, instance: &crate::types::VariantInstance, expr: Expression) -> Expression {
         match instance {
-            crate::types::VariantInstance::Array => Expression::call(
+            crate::types::VariantInstance::Array(_) => Expression::call(
                 self.static_index(
                     Expression::var(Ident::create_persistent("Array")),
                     "isArray",

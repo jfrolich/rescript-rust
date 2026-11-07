@@ -270,8 +270,10 @@ fn set_field_dbg_info(info: &SetFieldDbgInfo) -> Sexp {
 
 fn variant_instance(instance: &crate::types::VariantInstance) -> Sexp {
     match instance {
-        crate::types::VariantInstance::Array => Sexp::atom("Array"),
-        crate::types::VariantInstance::Class { name, ancestors } => Sexp::list(vec![
+        crate::types::VariantInstance::Array(_) => Sexp::atom("Array"),
+        crate::types::VariantInstance::Class {
+            name, ancestors, ..
+        } => Sexp::list(vec![
             Sexp::atom("Class"),
             string(name),
             Sexp::list(ancestors.iter().map(|ancestor| string(ancestor)).collect()),

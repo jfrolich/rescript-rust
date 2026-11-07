@@ -523,7 +523,7 @@ fn select_tree<A: Clone>(
             (Test::Equals(literal), Value::Literal(v)) => same_literal_value(v, literal),
             (Test::Equals(_), Value::Object | Value::Array) => false,
             (Test::Typeof(kind), _) => kind_of(value).as_ref() == Some(kind),
-            (Test::Instance(Instance::Array), _) => *value == Value::Array,
+            (Test::Instance(Instance::Array(_)), _) => *value == Value::Array,
             (Test::Instance(Instance::Class { .. }), _) => false,
             (Test::NotNull, _) => *value != Value::Literal(LiteralTag::Null),
             (Test::Not(test), _) => !holds(p, *test, value, on_test),
@@ -942,6 +942,7 @@ mod tests {
         BlockType::Instance(Instance::Class {
             name: name.to_string(),
             ancestors: ancestors.iter().map(|a| a.to_string()).collect(),
+            blocks: crate::types::ClassBlocks::fresh(ancestors.len()),
         })
     }
 
@@ -1035,7 +1036,7 @@ mod tests {
                     BlockType::Symbol,
                     BlockType::Function,
                     BlockType::Object,
-                    BlockType::Instance(Instance::Array),
+                    BlockType::Instance(Instance::Array(crate::types::ShapeAllocation::fresh())),
                     class("Date", &[]),
                     class("Animal", &[]),
                     class("Dog", &["Animal"]),
@@ -1086,8 +1087,12 @@ mod tests {
                 Value::Literal(LiteralTag::Null | LiteralTag::Undefined) => None,
                 Value::Object => Some(BlockType::Object),
                 Value::Array => {
-                    if declared(&BlockType::Instance(Instance::Array)) {
-                        Some(BlockType::Instance(Instance::Array))
+                    if declared(&BlockType::Instance(Instance::Array(
+                        crate::types::ShapeAllocation::fresh(),
+                    ))) {
+                        Some(BlockType::Instance(Instance::Array(
+                            crate::types::ShapeAllocation::fresh(),
+                        )))
                     } else {
                         Some(BlockType::Object)
                     }
@@ -1115,7 +1120,7 @@ mod tests {
                 BlockType::Bigint => values.push(Value::Literal(LiteralTag::BigInt("77".into()))),
                 BlockType::Boolean => values.push(Value::Literal(LiteralTag::Bool(false))),
                 BlockType::Object => values.push(Value::Object),
-                BlockType::Instance(Instance::Array) => values.push(Value::Array),
+                BlockType::Instance(Instance::Array(_)) => values.push(Value::Array),
                 BlockType::Unknown => {
                     values.extend([Value::Object, Value::Array, Value::Literal(s("fresh"))])
                 }

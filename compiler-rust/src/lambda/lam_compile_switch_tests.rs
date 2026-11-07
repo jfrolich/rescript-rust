@@ -785,7 +785,9 @@ fn small_untagged_object_value_switches_keep_ocaml_runtime_guards() {
                     tag_name: None,
                     block_types: vec![
                         crate::types::VariantBlockType::Instance(
-                            crate::types::VariantInstance::Array,
+                            crate::types::VariantInstance::Array(
+                                crate::types::ShapeAllocation::fresh(),
+                            ),
                         ),
                         crate::types::VariantBlockType::Object,
                     ],
@@ -997,7 +999,9 @@ fn default_only_untagged_object_return_keeps_literal_default_branch_outside_obje
                     tag_name: None,
                     block_types: vec![
                         crate::types::VariantBlockType::Instance(
-                            crate::types::VariantInstance::Array,
+                            crate::types::VariantInstance::Array(
+                                crate::types::ShapeAllocation::fresh(),
+                            ),
                         ),
                         crate::types::VariantBlockType::Object,
                     ],

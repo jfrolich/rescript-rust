@@ -330,7 +330,12 @@ impl DeclLocTable {
 
     /// A new import owns new allocations, including for two live stores.
     /// Retain sharing within each producer scope, but never its namespace.
-    pub(crate) fn remap_for_import(&mut self, files: &dyn Fn(StrIdx) -> StrIdx) {
+    /// Returns the new scope of each producer scope, which the shapes of the
+    /// import follow too (`variant_runtime::ShapeImport`).
+    pub(crate) fn remap_for_import(
+        &mut self,
+        files: &dyn Fn(StrIdx) -> StrIdx,
+    ) -> crate::fast_hash::AHashMap<u64, u64> {
         for loc in &mut self.locations {
             loc.loc_start.file_name = files(loc.loc_start.file_name);
             loc.loc_end.file_name = files(loc.loc_end.file_name);
@@ -343,6 +348,7 @@ impl DeclLocTable {
         }
         self.index.clear();
         self.instance_index.clear();
+        scopes
     }
 
     /// The location of a portable or source handle.
@@ -540,6 +546,8 @@ pub(crate) struct DeclLocImport<'a> {
     pub(crate) base: usize,
     pub(crate) instances: Vec<usize>,
     pub(crate) files: &'a dyn Fn(StrIdx) -> StrIdx,
+    /// The new scope of each producer scope of the imported table.
+    pub(crate) scopes: crate::fast_hash::AHashMap<u64, u64>,
 }
 
 impl DeclLocImport<'_> {
@@ -739,6 +747,7 @@ mod tests {
             base: 10,
             instances: Vec::new(),
             files: &renamed,
+            scopes: Default::default(),
         };
         let imported = import.import(h2);
         assert_eq!(imported.kind(), DeclLocKind::Store);

@@ -2263,6 +2263,14 @@ pub fn initial_env(ctx: &TypeContext) -> Env {
     env
 }
 
+/// The blocks of the shape of the builtin declaration numbered `block`:
+/// `Predef.common_initial_env` makes each builtin declaration once.
+fn predef_shape(block: u32) -> crate::types::ShapeBlocks {
+    crate::types::ShapeBlocks {
+        block: crate::types::ShapeAllocation::predef(block),
+    }
+}
+
 fn build_initial_env(ctx: &TypeContext) -> Env {
     let mut env = Env::empty();
 
@@ -2415,7 +2423,7 @@ fn build_initial_env(ctx: &TypeContext) -> Env {
                 cstr(predef::ident_true(), vec![]),
             ]),
             type_immediate: true,
-            type_shape: ValueShape::recognized_as(BlockType::Boolean),
+            type_shape: ValueShape::recognized_as(BlockType::Boolean, predef_shape(1)),
             ..decl_abstr(0, true)
         },
         ctx,
@@ -2423,32 +2431,33 @@ fn build_initial_env(ctx: &TypeContext) -> Env {
     // predef.ml `recognized_as`: what `typeof` or `instanceof` recognizes a
     // builtin type's values by, as an annotation states it for a declared
     // type.
-    let recognized_as = |block_type: BlockType, decl: TypeDeclaration| TypeDeclaration {
-        type_shape: ValueShape::recognized_as(block_type),
-        ..decl
-    };
+    let recognized_as =
+        |block_type: BlockType, block: u32, decl: TypeDeclaration| TypeDeclaration {
+            type_shape: ValueShape::recognized_as(block_type, predef_shape(block)),
+            ..decl
+        };
     add_type_with_constrs(
         &mut env,
         predef::ident_int(),
-        recognized_as(BlockType::Number, decl_abstr(0, true)),
+        recognized_as(BlockType::Number, 2, decl_abstr(0, true)),
         ctx,
     );
     add_type_with_constrs(
         &mut env,
         predef::ident_float(),
-        recognized_as(BlockType::Number, decl_abstr(0, false)),
+        recognized_as(BlockType::Number, 3, decl_abstr(0, false)),
         ctx,
     );
     add_type_with_constrs(
         &mut env,
         predef::ident_bigint(),
-        recognized_as(BlockType::Bigint, decl_abstr(0, false)),
+        recognized_as(BlockType::Bigint, 4, decl_abstr(0, false)),
         ctx,
     );
     add_type_with_constrs(
         &mut env,
         predef::ident_string(),
-        recognized_as(BlockType::String, decl_abstr(0, false)),
+        recognized_as(BlockType::String, 5, decl_abstr(0, false)),
         ctx,
     );
     add_type_with_constrs(
@@ -2519,12 +2528,21 @@ fn build_initial_env(ctx: &TypeContext) -> Env {
                 type_params: vec![tvar],
                 type_arity: 1,
                 type_variance: vec![crate::types::variance::Variance::covariant()],
-                type_shape: ValueShape::recognized_as(BlockType::Instance(
-                    crate::types::VariantInstance::Class {
+                // A constant: its blocks and its name string are static.
+                type_shape: ValueShape::recognized_as(
+                    BlockType::Instance(crate::types::VariantInstance::Class {
                         name: "Promise".to_string(),
                         ancestors: Vec::new(),
-                    },
-                )),
+                        blocks: crate::types::ClassBlocks {
+                            block: crate::types::ShapeAllocation::predef(10),
+                            name: crate::types::ShapeString::Allocation(
+                                crate::types::ShapeAllocation::predef(11),
+                            ),
+                            ancestors: Vec::new(),
+                        },
+                    }),
+                    predef_shape(6),
+                ),
                 ..decl_abstr(1, false)
             },
             ctx,
@@ -2558,9 +2576,13 @@ fn build_initial_env(ctx: &TypeContext) -> Env {
         TypeDeclaration {
             type_params: vec![ctx.new_generic_var(None)],
             type_variance: vec![crate::types::variance::Variance::full()],
-            type_shape: ValueShape::recognized_as(BlockType::Instance(
-                crate::types::VariantInstance::Array,
-            )),
+            type_shape: ValueShape::recognized_as(
+                // A constant: its `InstanceType Array` block is static.
+                BlockType::Instance(crate::types::VariantInstance::Array(
+                    crate::types::ShapeAllocation::predef(12),
+                )),
+                predef_shape(8),
+            ),
             ..decl_abstr(1, false)
         },
         ctx,
@@ -2617,7 +2639,7 @@ fn build_initial_env(ctx: &TypeContext) -> Env {
                 type_params: vec![tvar],
                 type_arity: 1,
                 type_variance: vec![crate::types::variance::Variance::full()],
-                type_shape: ValueShape::recognized_as(BlockType::Object),
+                type_shape: ValueShape::recognized_as(BlockType::Object, predef_shape(9)),
                 ..decl_abstr(1, false)
             },
             ctx,

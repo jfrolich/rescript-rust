@@ -191,9 +191,13 @@ impl<'a, 'h, H: Hasher> ser::Serializer for &'a mut Canonical<'h, H> {
     }
     fn serialize_newtype_struct<T: Serialize + ?Sized>(
         self,
-        _: &'static str,
+        name: &'static str,
         value: &T,
     ) -> Result<()> {
+        // Which heap block a shape's part is, not its meaning.
+        if name == "ShapeAllocation" {
+            return Ok(());
+        }
         value.serialize(self)
     }
     fn serialize_newtype_variant<T: Serialize + ?Sized>(
@@ -250,7 +254,7 @@ impl<'a, 'h, H: Hasher> ser::Serializer for &'a mut Canonical<'h, H> {
             // allocation order; cache validity must not depend on that.
             "Location" | "Position" | "LamLoc" | "DeclLoc" | "DeclLocTable" => Fields::Skip,
             // The physical sharing of a saved graph, not its meaning.
-            "PortableIdentities" => Fields::Skip,
+            "PortableIdentities" | "ShapeBlocks" | "ClassBlocks" => Fields::Skip,
             "Ident" => Fields::Ident,
             _ => {
                 self.tag(18);

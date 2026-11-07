@@ -2158,16 +2158,21 @@ fn internalize_signature_into_store(
             "thread store arena grew during internalization"
         );
     }
+    let mut shapes = crate::types::variant_runtime::ShapeImport::new(&locs.scopes);
     let layout_remap: Vec<_> = graph
         .variant_layouts
         .iter()
         .cloned()
-        .map(|layout| store.alloc_complete_variant_layout(layout))
+        .map(|mut layout| {
+            shapes.layout(&mut layout);
+            store.alloc_complete_variant_layout(layout)
+        })
         .collect();
     let mut sig = portable_sig.clone();
     ids.signature(&mut sig, store);
     remap_signature_refs(&mut sig, &remap, &layout_remap);
     import_signature_locations(&mut sig, locs);
+    shapes.signature(&mut sig);
     sig
 }
 
@@ -2222,6 +2227,7 @@ fn internalize_signature_into_shared(
 ) -> Option<Signature> {
     let mut remap = Vec::new();
     let mut sig = portable_sig.clone();
+    let mut scopes = crate::fast_hash::AHashMap::default();
     let map = |file| files.map(file);
     let base = pool.publish(graph.entries.len(), graph.variant_layouts.len(), |base| {
         remap = (0..graph.entries.len())
@@ -2250,11 +2256,20 @@ fn internalize_signature_into_shared(
             })
             .collect();
         ids.signature(&mut sig, &sink);
-        (nodes, graph.variant_layouts.clone(), {
-            let mut table = locations.clone();
-            table.remap_for_import(&map);
-            table
-        })
+        let mut table = locations.clone();
+        scopes = table.remap_for_import(&map);
+        let mut shapes = crate::types::variant_runtime::ShapeImport::new(&scopes);
+        let layouts = graph
+            .variant_layouts
+            .iter()
+            .cloned()
+            .map(|mut layout| {
+                shapes.layout(&mut layout);
+                layout
+            })
+            .collect();
+        shapes.signature(&mut sig);
+        (nodes, layouts, table)
     })?;
     let layout_remap: Vec<_> = (0..graph.variant_layouts.len())
         .map(|i| crate::types::VariantLayoutRef::from_shared_index(base + i as u32))
@@ -2276,6 +2291,7 @@ fn shared_decl_locs<'a>(
         base: 0,
         instances: Vec::new(),
         files,
+        scopes: Default::default(),
     }
 }
 
@@ -2382,11 +2398,15 @@ fn internalize_signature(
         ctx.set_desc(remap[i], desc);
     }
 
+    let mut shapes = crate::types::variant_runtime::ShapeImport::new(&locs.scopes);
     let layout_remap: Vec<_> = graph
         .variant_layouts
         .iter()
         .cloned()
-        .map(|layout| ctx.alloc_complete_variant_layout(layout))
+        .map(|mut layout| {
+            shapes.layout(&mut layout);
+            ctx.alloc_complete_variant_layout(layout)
+        })
         .collect();
 
     // Phase 3: clone and remap the signature.
@@ -2394,6 +2414,7 @@ fn internalize_signature(
     ids.signature(&mut sig, ctx);
     remap_signature_refs(&mut sig, &remap, &layout_remap);
     import_signature_locations(&mut sig, locs);
+    shapes.signature(&mut sig);
     sig
 }
 

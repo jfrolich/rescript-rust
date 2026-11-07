@@ -4297,7 +4297,7 @@ pub(super) fn single_complete_array_block_switch(
                         literal: crate::types::VariantLiteralTag::String("Cons".to_string()),
                     },
                     block_type: crate::types::VariantBlockType::Instance(
-                        crate::types::VariantInstance::Array,
+                        crate::types::VariantInstance::Array(crate::types::ShapeAllocation::fresh()),
                     ),
                 },
             )),
@@ -4307,7 +4307,7 @@ pub(super) fn single_complete_array_block_switch(
         sw_dispatch: crate::lambda::SwitchDispatch::Variant(crate::types::VariantMatchingFacts {
             tag_name: None,
             block_types: vec![crate::types::VariantBlockType::Instance(
-                crate::types::VariantInstance::Array,
+                crate::types::VariantInstance::Array(crate::types::ShapeAllocation::fresh()),
             )],
             literal_tags: vec![crate::types::VariantLiteralTag::Undefined],
         }),

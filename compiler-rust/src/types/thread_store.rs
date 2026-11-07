@@ -330,7 +330,7 @@ impl ThreadTypeStore {
         files: &'a dyn Fn(crate::intern::StrIdx) -> crate::intern::StrIdx,
     ) -> super::decl_loc::DeclLocImport<'a> {
         let mut table = table.clone();
-        table.remap_for_import(files);
+        let scopes = table.remap_for_import(files);
         let (base, instances) = self.decl_locs.append_portable(&table);
         super::decl_loc::DeclLocImport {
             kind: super::decl_loc::DeclLocKind::Store,
@@ -338,6 +338,7 @@ impl ThreadTypeStore {
             base,
             instances,
             files,
+            scopes,
         }
     }
 
@@ -353,6 +354,7 @@ impl ThreadTypeStore {
             base: self.decl_locs.append(locations),
             instances: Vec::new(),
             files,
+            scopes: Default::default(),
         }
     }
 

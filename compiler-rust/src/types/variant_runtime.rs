@@ -11,21 +11,103 @@ use super::context::TypeContext;
 /// value is recognized by. `name` is the global constructor's path, such as
 /// `"Date"` or `"Intl.Locale"`, and `ancestors` are the paths of its
 /// superclasses that are declared too, nearest first. Arrays are recognized
-/// by `Array.isArray` instead.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+/// by `Array.isArray` instead. Two instances are equal when their names and
+/// ancestors are, as OCaml's `=` compares them; `blocks` only tells which
+/// classes are one value.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum Instance {
-    Array,
+    /// Arrays, and which `InstanceType Array` block this value is: a
+    /// constant of the code that builds it (predef.ml, variant_layout.ml
+    /// `payload_kind`) or a block of an unmarshalled interface.
+    Array(ShapeAllocation),
     Class {
         name: String,
         ancestors: Vec<String>,
+        /// Which OCaml blocks this value is.
+        blocks: ClassBlocks,
     },
+}
+
+impl PartialEq for Instance {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Array(_), Self::Array(_)) => true,
+            (
+                Self::Class {
+                    name: name1,
+                    ancestors: ancestors1,
+                    ..
+                },
+                Self::Class {
+                    name: name2,
+                    ancestors: ancestors2,
+                    ..
+                },
+            ) => name1 == name2 && ancestors1 == ancestors2,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for Instance {}
+
+impl std::hash::Hash for Instance {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        match self {
+            Self::Array(_) => 0u8.hash(state),
+            Self::Class {
+                name, ancestors, ..
+            } => {
+                1u8.hash(state);
+                name.hash(state);
+                ancestors.hash(state);
+            }
+        }
+    }
+}
+
+/// The physical identity of the OCaml heap blocks of an `InstanceType
+/// (Class {name; ancestors})` value, which `Includemod.is_big` counts once
+/// each (includemod_error_size.rs). Kinds are values in Rust, so the identity
+/// is carried here and copied with the kind: a layout's untagged payload
+/// kind is the block of the payload type's shape (variant_layout.ml
+/// `payload_kind`), and `Variant_layout.declaration_shape` keeps the
+/// superclass's list of ancestors and puts a cell holding the superclass's
+/// name string in front of it. Interface digests skip it.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ClassBlocks {
+    /// The `InstanceType` block, with the `Class` block allocated with it.
+    pub block: ShapeAllocation,
+    /// The name string.
+    pub name: ShapeString,
+    /// The cons cell and the string of each ancestor, nearest first.
+    pub ancestors: Vec<(ShapeAllocation, ShapeString)>,
+}
+
+impl ClassBlocks {
+    /// The blocks of a class whose name and ancestors are strings of their
+    /// own.
+    pub fn fresh(ancestors: usize) -> Self {
+        ClassBlocks {
+            block: ShapeAllocation::fresh(),
+            name: ShapeString::Allocation(ShapeAllocation::fresh()),
+            ancestors: (0..ancestors)
+                .map(|_| {
+                    (
+                        ShapeAllocation::fresh(),
+                        ShapeString::Allocation(ShapeAllocation::fresh()),
+                    )
+                })
+                .collect(),
+        }
+    }
 }
 
 impl Instance {
     /// variant_runtime.ml `Instance.to_string`.
     pub fn as_str(&self) -> &str {
         match self {
-            Self::Array => "Array",
+            Self::Array(_) => "Array",
             Self::Class { name, .. } => name,
         }
     }
@@ -101,12 +183,227 @@ pub enum ValueShape {
     NeverUndefined,
     /// `@instanceOf` or `@typeOf`: a payload of this kind, with the class's
     /// declared superclasses.
-    RecognizedAs(Box<BlockType>),
+    RecognizedAs(Box<RecognizedShape>),
 }
 
 impl ValueShape {
-    pub fn recognized_as(block_type: BlockType) -> Self {
-        Self::RecognizedAs(Box::new(block_type))
+    /// A `Recognized_as block_type` allocated with `blocks`.
+    pub fn recognized_as(block_type: BlockType, blocks: ShapeBlocks) -> Self {
+        Self::RecognizedAs(Box::new(RecognizedShape { block_type, blocks }))
+    }
+
+    /// The kind a `Recognized_as` shape states.
+    pub fn block_type(&self) -> Option<&BlockType> {
+        match self {
+            Self::RecognizedAs(shape) => Some(&shape.block_type),
+            Self::Unstated | Self::NeverUndefined => None,
+        }
+    }
+}
+
+/// A `Recognized_as block_type` value and the OCaml heap blocks it is made
+/// of. Two shapes are equal when their kinds are, as OCaml's `=` compares
+/// them; the blocks only tell which shapes are one value.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RecognizedShape {
+    /// The kind stated.
+    pub block_type: BlockType,
+    /// Which `Recognized_as` block this value is.
+    pub blocks: ShapeBlocks,
+}
+
+impl PartialEq for RecognizedShape {
+    fn eq(&self, other: &Self) -> bool {
+        self.block_type == other.block_type
+    }
+}
+
+impl Eq for RecognizedShape {}
+
+impl std::hash::Hash for RecognizedShape {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.block_type.hash(state);
+    }
+}
+
+/// The physical identity of the `Recognized_as` block of a shape, which
+/// `Includemod.is_big` counts once (includemod_error_size.rs). Shapes are
+/// values in Rust, so the identity is carried here: a restated
+/// `@notUndefined` keeps the abbreviated type's shape
+/// (variant_layout.ml `declaration_shape`), and `Subst` and copied
+/// declarations keep a declaration's shape (compiler/ml/subst.ml:286). The
+/// blocks of a class are its [`ClassBlocks`]. It never takes part in
+/// equality, and interface digests skip it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ShapeBlocks {
+    /// The `Recognized_as` block.
+    pub block: ShapeAllocation,
+}
+
+impl ShapeBlocks {
+    /// A `Recognized_as` block no other shape holds.
+    pub fn fresh() -> Self {
+        ShapeBlocks {
+            block: ShapeAllocation::fresh(),
+        }
+    }
+}
+
+/// One heap block of a shape. Each allocation is a distinct value within
+/// the process; an import of a stored interface gives its allocations new
+/// values, as unmarshalling allocates new blocks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct ShapeAllocation(u64);
+
+impl ShapeAllocation {
+    /// Allocations below this are static: `Predef`'s, which it makes once,
+    /// and constants of the compiler's code.
+    const FIRST_FRESH: u64 = 1 << 32;
+
+    /// A block no other shape holds.
+    pub fn fresh() -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 =
+            std::sync::atomic::AtomicU64::new(ShapeAllocation::FIRST_FRESH);
+        ShapeAllocation(
+            NEXT.fetch_update(
+                std::sync::atomic::Ordering::Relaxed,
+                std::sync::atomic::Ordering::Relaxed,
+                |next| next.checked_add(1),
+            )
+            .expect("shape allocations exhausted"),
+        )
+    }
+
+    /// A block of `Predef.common_initial_env`, which builds each builtin
+    /// declaration once.
+    pub const fn predef(index: u32) -> Self {
+        ShapeAllocation(index as u64)
+    }
+
+    /// The `InstanceType Array` constant of variant_layout.ml
+    /// `payload_kind`, the kind of a tuple.
+    pub const TUPLE_ARRAY: ShapeAllocation = ShapeAllocation(13);
+
+    /// Whether this is a static block, which an import keeps.
+    pub fn is_predef(self) -> bool {
+        self.0 < Self::FIRST_FRESH
+    }
+}
+
+/// Which string a class name or an ancestor is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum ShapeString {
+    /// The payload string of the `@instanceOf("...")` attribute whose name
+    /// location has this allocation identity:
+    /// `Ast_payload.semantic_string_of_payload` returns a string constant's
+    /// own string.
+    Attribute {
+        /// [`super::decl_loc::LocationIdentity::scope`].
+        scope: u64,
+        /// [`super::decl_loc::LocationIdentity::location`].
+        location: u32,
+    },
+    /// A string of its own.
+    Allocation(ShapeAllocation),
+}
+
+impl ShapeString {
+    /// The payload string of the attribute named at `loc`; a string of its
+    /// own when that location has no allocation identity to share.
+    pub(crate) fn attribute(ctx: &TypeContext, loc: super::DeclLoc) -> Self {
+        match ctx.location_identity(loc) {
+            Some(identity) => ShapeString::Attribute {
+                scope: identity.scope,
+                location: identity.location,
+            },
+            None => ShapeString::Allocation(ShapeAllocation::fresh()),
+        }
+    }
+}
+
+/// The shapes and payload kinds of an imported interface, given new
+/// allocations as unmarshalling allocates new blocks. Sharing within the
+/// import is kept. An attribute string follows its location's scope through
+/// the same map as the location table (`DeclLocTable::remap_for_import`).
+pub(crate) struct ShapeImport<'a> {
+    scopes: &'a crate::fast_hash::AHashMap<u64, u64>,
+    other_scopes: crate::fast_hash::AHashMap<u64, u64>,
+    allocations: crate::fast_hash::AHashMap<ShapeAllocation, ShapeAllocation>,
+}
+
+impl<'a> ShapeImport<'a> {
+    pub(crate) fn new(scopes: &'a crate::fast_hash::AHashMap<u64, u64>) -> Self {
+        ShapeImport {
+            scopes,
+            other_scopes: Default::default(),
+            allocations: Default::default(),
+        }
+    }
+
+    fn allocation(&mut self, allocation: ShapeAllocation) -> ShapeAllocation {
+        if allocation.is_predef() {
+            return allocation;
+        }
+        *self
+            .allocations
+            .entry(allocation)
+            .or_insert_with(ShapeAllocation::fresh)
+    }
+
+    fn string(&mut self, string: ShapeString) -> ShapeString {
+        match string {
+            ShapeString::Attribute { scope, location } => {
+                let scope = match self.scopes.get(&scope) {
+                    Some(scope) => *scope,
+                    // An attribute of a declaration the interface does not
+                    // hold: still one string within the import.
+                    None => *self
+                        .other_scopes
+                        .entry(scope)
+                        .or_insert_with(|| (super::decl_loc::next_table_owner() as u64) << 32),
+                };
+                ShapeString::Attribute { scope, location }
+            }
+            ShapeString::Allocation(allocation) => {
+                ShapeString::Allocation(self.allocation(allocation))
+            }
+        }
+    }
+
+    pub(crate) fn block_type(&mut self, block_type: &mut BlockType) {
+        if let BlockType::Instance(Instance::Array(block)) = block_type {
+            *block = self.allocation(*block);
+        }
+        if let BlockType::Instance(Instance::Class { blocks, .. }) = block_type {
+            blocks.block = self.allocation(blocks.block);
+            blocks.name = self.string(blocks.name);
+            for (cell, string) in &mut blocks.ancestors {
+                *cell = self.allocation(*cell);
+                *string = self.string(*string);
+            }
+        }
+    }
+
+    pub(crate) fn value_shape(&mut self, shape: &mut ValueShape) {
+        if let ValueShape::RecognizedAs(shape) = shape {
+            shape.blocks.block = self.allocation(shape.blocks.block);
+            self.block_type(&mut shape.block_type);
+        }
+    }
+
+    pub(crate) fn layout(&mut self, layout: &mut Layout) {
+        for case in &mut layout.constructors {
+            if let ConstructorCase::Block(Block::Untagged { block_type, .. }) = case {
+                self.block_type(block_type);
+            }
+        }
+        for block_type in &mut layout.matching_facts.block_types {
+            self.block_type(block_type);
+        }
+    }
+
+    pub(crate) fn signature(&mut self, sig: &mut [super::decl::SignatureItem]) {
+        super::decl::for_each_signature_shape(sig, &mut |shape| self.value_shape(shape));
     }
 }
 
@@ -500,5 +797,100 @@ mod hex_float_tests {
             "0x0.0000000000001p-1022"
         );
         assert_eq!(ocaml_hex_float(f64::INFINITY), "infinity");
+    }
+}
+
+#[cfg(test)]
+mod shape_import_tests {
+    use super::*;
+
+    fn class(name: &str, blocks: ClassBlocks) -> BlockType {
+        BlockType::Instance(Instance::Class {
+            name: name.to_string(),
+            ancestors: blocks.ancestors.iter().map(|_| "A".to_string()).collect(),
+            blocks,
+        })
+    }
+
+    fn class_blocks(block_type: &BlockType) -> &ClassBlocks {
+        match block_type {
+            BlockType::Instance(Instance::Class { blocks, .. }) => blocks,
+            _ => panic!("a class"),
+        }
+    }
+
+    /// An import allocates new blocks but keeps the sharing between the
+    /// shapes and layouts it imports; `Predef`'s blocks are its own.
+    #[test]
+    fn imports_get_new_blocks_and_keep_their_sharing() {
+        let a_name = ShapeString::Attribute {
+            scope: 7 << 32,
+            location: 1,
+        };
+        let a = ClassBlocks {
+            block: ShapeAllocation::fresh(),
+            name: a_name,
+            ancestors: Vec::new(),
+        };
+        let cell = ShapeAllocation::fresh();
+        let b = ClassBlocks {
+            block: ShapeAllocation::fresh(),
+            name: ShapeString::Allocation(ShapeAllocation::fresh()),
+            ancestors: vec![(cell, a_name)],
+        };
+        let shape = ShapeBlocks::fresh();
+        let mut shapes = vec![
+            ValueShape::recognized_as(class("A", a.clone()), shape),
+            // A restated shape.
+            ValueShape::recognized_as(class("A", a.clone()), shape),
+            ValueShape::recognized_as(class("B", b.clone()), ShapeBlocks::fresh()),
+            ValueShape::recognized_as(
+                BlockType::String,
+                ShapeBlocks {
+                    block: ShapeAllocation::predef(5),
+                },
+            ),
+        ];
+        let mut layout = Layout {
+            unboxed: true,
+            constructors: Vec::new(),
+            matching_facts: MatchingFacts {
+                tag_name: None,
+                block_types: vec![class("A", a.clone())],
+                literal_tags: Vec::new(),
+            },
+        };
+        let original = shapes.clone();
+        let scopes = [(7 << 32, 9 << 32)].into_iter().collect();
+        let mut import = ShapeImport::new(&scopes);
+        for shape in &mut shapes {
+            import.value_shape(shape);
+        }
+        import.layout(&mut layout);
+        let recognized = |shape: &ValueShape| match shape {
+            ValueShape::RecognizedAs(shape) => (**shape).clone(),
+            _ => panic!("recognized"),
+        };
+        let [a1, a2, b1, string] = [0, 1, 2, 3].map(|i| recognized(&shapes[i]));
+        assert_eq!(shapes, original);
+        assert_ne!(a1.blocks, recognized(&original[0]).blocks);
+        assert_eq!(a1.blocks, a2.blocks);
+        let (a1, b1) = (class_blocks(&a1.block_type), class_blocks(&b1.block_type));
+        assert_ne!(a1.block, a.block);
+        assert_eq!(
+            a1.block,
+            class_blocks(&layout.matching_facts.block_types[0]).block
+        );
+        assert_eq!(
+            a1.name,
+            ShapeString::Attribute {
+                scope: 9 << 32,
+                location: 1
+            }
+        );
+        assert_eq!(b1.ancestors[0].1, a1.name);
+        assert_ne!(b1.ancestors[0].0, cell);
+        assert_ne!(b1.name, b.name);
+        assert_eq!(string.blocks.block, ShapeAllocation::predef(5));
     }
 }

@@ -716,6 +716,49 @@ pub fn for_each_signature_location(sig: &mut [SignatureItem], f: &mut dyn FnMut(
     walk_signature_locations(sig, &mut Locations(f));
 }
 
+/// Visit the `type_shape` of every type declaration of a signature,
+/// recursively through module types.
+pub fn for_each_signature_shape(
+    sig: &mut [SignatureItem],
+    f: &mut dyn FnMut(&mut crate::types::ValueShape),
+) {
+    fn module_type(mty: &mut ModuleType, f: &mut dyn FnMut(&mut crate::types::ValueShape)) {
+        match mty {
+            ModuleType::MtySignature(sig) => {
+                for_each_signature_shape(&mut std::sync::Arc::make_mut(sig)[..], f)
+            }
+            ModuleType::MtyFunctor {
+                param_type, result, ..
+            } => {
+                if let Some(param) = param_type {
+                    module_type(param, f);
+                }
+                module_type(result, f);
+            }
+            ModuleType::MtyIdent(_) | ModuleType::MtyAlias(..) => {}
+        }
+    }
+    for item in sig {
+        match item {
+            SignatureItem::SigType(_, td, _) => {
+                if matches!(td.type_shape, crate::types::ValueShape::RecognizedAs(_)) {
+                    f(&mut std::sync::Arc::make_mut(td).type_shape);
+                }
+            }
+            SignatureItem::SigModule(_, md, _) => module_type(&mut md.md_type, f),
+            SignatureItem::SigModtype(_, mtd) => {
+                if let Some(mty) = &mut mtd.mtd_type {
+                    module_type(mty, f);
+                }
+            }
+            SignatureItem::SigValue(..)
+            | SignatureItem::SigTypext(..)
+            | SignatureItem::SigClass
+            | SignatureItem::SigClassType => {}
+        }
+    }
+}
+
 /// Walk the declarations of a signature, recursively through module types,
 /// reporting their locations and attributes to `v`.
 pub fn walk_signature_locations(sig: &mut [SignatureItem], v: &mut dyn SignatureLocationVisitor) {

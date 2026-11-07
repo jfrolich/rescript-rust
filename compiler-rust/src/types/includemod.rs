@@ -3366,8 +3366,8 @@ fn compare_runtime_annotations(
                 ),
             }
         }
-        crate::types::ValueShape::RecognizedAs(block_type2) => {
-            let declared2 = Some(block_type2.as_ref());
+        crate::types::ValueShape::RecognizedAs(shape2) => {
+            let declared2 = Some(&shape2.block_type);
             // What the first declaration states, or what its structure gives.
             let mut env = env.clone();
             let ty = first_type(&mut env);

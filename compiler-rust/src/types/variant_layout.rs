@@ -22,8 +22,8 @@ use crate::types::path::Path;
 use crate::types::type_expr::{TypeDesc, TypeExprRef};
 use crate::types::typemod::{AstUntaggedVariantError, TypeModError, TypeModResult};
 use crate::types::variant_runtime::{
-    Block, BlockType, Configuration, ConstructorCase, Instance, Layout, LiteralTag, Tag,
-    TaggedBlock, ValueShape,
+    Block, BlockType, ClassBlocks, Configuration, ConstructorCase, Instance, Layout, LiteralTag,
+    ShapeAllocation, ShapeBlocks, ShapeString, Tag, TaggedBlock, ValueShape,
 };
 
 /// ast_untagged_variants.ml `runtime_annotation`: what `@notUndefined`,
@@ -132,16 +132,20 @@ fn runtime_annotation_to_string(annotation: &RuntimeAnnotation) -> String {
 /// declaration's annotations state, for error messages.
 pub(crate) fn describe_declared_block_type(block_type: Option<&BlockType>) -> String {
     match block_type {
-        Some(BlockType::Instance(Instance::Class { name, ancestors })) if ancestors.is_empty() => {
+        Some(BlockType::Instance(Instance::Class {
+            name, ancestors, ..
+        })) if ancestors.is_empty() => {
             format!("instances of {name}")
         }
-        Some(BlockType::Instance(Instance::Class { name, ancestors })) => {
+        Some(BlockType::Instance(Instance::Class {
+            name, ancestors, ..
+        })) => {
             format!(
                 "instances of {name}, a subclass of {}",
                 ancestors.join(" and ")
             )
         }
-        Some(BlockType::Instance(Instance::Array)) => "arrays".to_string(),
+        Some(BlockType::Instance(Instance::Array(_))) => "arrays".to_string(),
         Some(block_type) => format!("values whose typeof is \"{}\"", typeof_name(block_type)),
         None => "no runtime class or typeof".to_string(),
     }
@@ -319,7 +323,7 @@ pub(crate) fn value_shape(ctx: &TypeContext, env: &Env, t: TypeExprRef) -> Value
 /// have.
 pub(crate) fn recognized_as(ctx: &TypeContext, env: &Env, t: TypeExprRef) -> Option<BlockType> {
     match value_shape(ctx, env, t) {
-        ValueShape::RecognizedAs(block_type) => Some(*block_type),
+        ValueShape::RecognizedAs(shape) => Some(shape.block_type),
         ValueShape::Unstated | ValueShape::NeverUndefined => None,
     }
 }
@@ -334,7 +338,11 @@ pub(crate) fn payload_kind(ctx: &TypeContext, env: &Env, t: TypeExprRef) -> Opti
     }
     let expanded = crate::types::ctype::expand_head_opt(ctx, env, t);
     let path = match &*ctx.get_desc(expanded) {
-        TypeDesc::Ttuple(_) => return Some(BlockType::Instance(Instance::Array)),
+        TypeDesc::Ttuple(_) => {
+            return Some(BlockType::Instance(Instance::Array(
+                ShapeAllocation::TUPLE_ARRAY,
+            )));
+        }
         TypeDesc::Tarrow { .. } => return Some(BlockType::Function),
         TypeDesc::Tobject { .. } => return Some(BlockType::Object),
         TypeDesc::Tconstr { path, .. } => path.clone(),
@@ -360,24 +368,53 @@ pub(crate) fn declaration_shape(
     Ok(
         match declared_runtime_annotation(ctx, decl).map_err(annotation_error)? {
             None => ValueShape::Unstated,
-            Some(RuntimeAnnotation::TypeOf(block_type)) => ValueShape::recognized_as(block_type),
+            Some(RuntimeAnnotation::TypeOf(block_type)) => {
+                ValueShape::recognized_as(block_type, ShapeBlocks::fresh())
+            }
             Some(RuntimeAnnotation::InstanceOf(name)) => {
-                let ancestors = match decl.type_manifest.map(|m| recognized_as(ctx, env, m)) {
-                    Some(Some(BlockType::Instance(Instance::Class {
-                        name: inner,
-                        ancestors,
-                    }))) => {
-                        // An annotation repeating the abbreviated type's, as a
-                        // module alias does, states no new class.
-                        if inner == name {
-                            ancestors
-                        } else {
-                            std::iter::once(inner).chain(ancestors).collect()
+                // The name is the attribute's payload string.
+                let name_string = decl
+                    .type_attributes
+                    .iter()
+                    .find(|attr| attr.attr_name.txt == INSTANCE_OF)
+                    .map(|attr| ShapeString::attribute(ctx, attr.attr_name.loc))
+                    .expect("an @instanceOf annotation is an attribute");
+                let (ancestors, ancestor_blocks) =
+                    match decl.type_manifest.and_then(|m| recognized_as(ctx, env, m)) {
+                        Some(BlockType::Instance(Instance::Class {
+                            name: inner,
+                            ancestors,
+                            blocks,
+                        })) => {
+                            // An annotation repeating the abbreviated type's, as a
+                            // module alias does, states no new class: its list of
+                            // ancestors is kept. Otherwise a cell holding the
+                            // superclass's name string is put in front of it.
+                            if inner == name {
+                                (ancestors, blocks.ancestors)
+                            } else {
+                                (
+                                    std::iter::once(inner).chain(ancestors).collect(),
+                                    std::iter::once((ShapeAllocation::fresh(), blocks.name))
+                                        .chain(blocks.ancestors)
+                                        .collect(),
+                                )
+                            }
                         }
-                    }
-                    _ => Vec::new(),
-                };
-                ValueShape::recognized_as(BlockType::Instance(Instance::Class { name, ancestors }))
+                        _ => (Vec::new(), Vec::new()),
+                    };
+                ValueShape::recognized_as(
+                    BlockType::Instance(Instance::Class {
+                        name,
+                        ancestors,
+                        blocks: ClassBlocks {
+                            block: ShapeAllocation::fresh(),
+                            name: name_string,
+                            ancestors: ancestor_blocks,
+                        },
+                    }),
+                    ShapeBlocks::fresh(),
+                )
             }
             Some(RuntimeAnnotation::NotUndefined) => {
                 // Restating a kind the abbreviated type is recognized by keeps it.
@@ -460,7 +497,7 @@ fn get_block_type(
 fn at_most_one_of_kind(kind: &BlockType) -> String {
     let kind = match kind {
         BlockType::Object => "an object type".to_string(),
-        BlockType::Instance(Instance::Array) => "an array or tuple type".to_string(),
+        BlockType::Instance(Instance::Array(_)) => "an array or tuple type".to_string(),
         BlockType::Instance(instance) => format!("an instance of {}", instance.as_str()),
         BlockType::Function => "a function type".to_string(),
         BlockType::String => "a string type".to_string(),
@@ -552,10 +589,16 @@ fn check_invariant(
     // by its name.
     let mut kinds: Vec<BlockType> = Vec::new();
     let kind_key = |kind: &BlockType| match kind {
-        BlockType::Instance(Instance::Class { name, .. }) => BlockType::Instance(Instance::Class {
-            name: name.clone(),
-            ancestors: Vec::new(),
-        }),
+        BlockType::Instance(Instance::Class { name, blocks, .. }) => {
+            BlockType::Instance(Instance::Class {
+                name: name.clone(),
+                ancestors: Vec::new(),
+                blocks: ClassBlocks {
+                    ancestors: Vec::new(),
+                    ..blocks.clone()
+                },
+            })
+        }
         kind => kind.clone(),
     };
     for (loc, block) in blocks {
@@ -734,6 +777,7 @@ pub(crate) fn check_manifest_annotation(
                 BlockType::Instance(Instance::Class {
                     name: ancestor,
                     ancestors,
+                    ..
                 }) => (
                     ancestor.clone(),
                     std::iter::once(ancestor)
@@ -754,7 +798,7 @@ pub(crate) fn check_manifest_annotation(
                 Ok(())
             }
         }
-        (RuntimeAnnotation::InstanceOf(name), Some(BlockType::Instance(Instance::Array))) => {
+        (RuntimeAnnotation::InstanceOf(name), Some(BlockType::Instance(Instance::Array(_)))) => {
             error(AstUntaggedVariantError::SubclassOfArray(name.clone()))
         }
         (RuntimeAnnotation::InstanceOf(_) | RuntimeAnnotation::TypeOf(_), Some(inner)) => {
@@ -762,7 +806,7 @@ pub(crate) fn check_manifest_annotation(
                 BlockType::Instance(Instance::Class { name, .. }) => {
                     runtime_annotation_to_string(&RuntimeAnnotation::InstanceOf(name.clone()))
                 }
-                BlockType::Instance(Instance::Array) => "Array.isArray".to_string(),
+                BlockType::Instance(Instance::Array(_)) => "Array.isArray".to_string(),
                 block_type => {
                     runtime_annotation_to_string(&RuntimeAnnotation::TypeOf(block_type.clone()))
                 }

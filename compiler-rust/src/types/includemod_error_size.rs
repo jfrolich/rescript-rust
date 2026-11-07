@@ -130,6 +130,15 @@ type IdentKey = (i32, usize, u32);
 
 type AttributeKey = (String, LocationKey);
 
+/// A class name string of a shape (see [`crate::types::ShapeString`]).
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum ShapeStringKey {
+    /// The payload string of the `@instanceOf` attribute named at this
+    /// location.
+    Attribute(LocationKey),
+    Allocation(crate::types::ShapeAllocation),
+}
+
 fn ident_key(id: &Ident) -> IdentKey {
     (id.stamp(), id.name().as_ptr() as usize, id.origin().get())
 }
@@ -174,6 +183,11 @@ struct ErrorSize<'a> {
     /// `@tag` attributes whose decoded name has been counted: a variant's
     /// layout holds that string as its tag name.
     tag_names: HashSet<AttributeKey>,
+    /// The `Recognized_as` and `InstanceType` blocks and the ancestor cells
+    /// of shapes and payload kinds counted.
+    shape_blocks: HashSet<crate::types::ShapeAllocation>,
+    /// The class name strings counted, `@instanceOf` payloads included.
+    shape_strings: HashSet<ShapeStringKey>,
     /// The static `Rpresent None` of the type checker.
     rpresent_none: bool,
     /// The `Tconstr` path blocks counted (see [`PathBlock`]).
@@ -247,6 +261,8 @@ impl<'a> ErrorSize<'a> {
             inline_const_name: false,
             attributes: HashSet::default(),
             tag_names: HashSet::default(),
+            shape_blocks: HashSet::default(),
+            shape_strings: HashSet::default(),
             rpresent_none: false,
             path_blocks: HashSet::default(),
             labels: HashSet::default(),
@@ -640,6 +656,17 @@ impl<'a> ErrorSize<'a> {
                 self.block(0, 2)?;
                 self.string()?;
             }
+            AttributePayload::Str(_) if attr.attr_name.txt == "instanceOf" => {
+                // The semantic string is the class name of the declaration's
+                // shape.
+                self.block(0, 3)?;
+                self.string_literal_blocks()?;
+                self.string()?;
+                let key = ShapeStringKey::Attribute(self.location_key(attr.attr_name.loc));
+                if self.shape_strings.insert(key) {
+                    self.string()?;
+                }
+            }
             AttributePayload::Str(_)
             | AttributePayload::Deprecated { .. }
             | AttributePayload::Structure(_)
@@ -658,11 +685,17 @@ impl<'a> ErrorSize<'a> {
 
     /// `Pexp_constant (Pconst_string {source; semantic})`.
     fn string_constant(&mut self) -> Walk {
-        self.block(2, 1)?;
-        self.block(2, 1)?;
-        self.block(0, 2)?;
+        self.string_literal_blocks()?;
         self.string()?;
         self.string()
+    }
+
+    /// The blocks of `Pexp_constant (Pconst_string (Valid {source;
+    /// semantic}))` without its strings.
+    fn string_literal_blocks(&mut self) -> Walk {
+        self.block(2, 1)?;
+        self.block(2, 1)?;
+        self.block(0, 2)
     }
 
     /// A location of the payload expression, with positions of its own.
@@ -1205,26 +1238,63 @@ impl<'a> ErrorSize<'a> {
         }
     }
 
-    /// `type_shape`: `Unstated` and `Never_undefined` are immediate.
+    /// `type_shape`: `Unstated` and `Never_undefined` are immediate. A
+    /// `Recognized_as` block is counted once (see
+    /// [`crate::types::ShapeBlocks`]).
     fn value_shape(&mut self, shape: &crate::types::ValueShape) -> Walk {
-        match shape {
-            crate::types::ValueShape::Unstated | crate::types::ValueShape::NeverUndefined => Ok(()),
-            crate::types::ValueShape::RecognizedAs(block_type) => {
-                self.block(0, 1)?;
-                self.block_type(block_type)
-            }
+        let crate::types::ValueShape::RecognizedAs(shape) = shape else {
+            return Ok(());
+        };
+        if !self.shape_blocks.insert(shape.blocks.block) {
+            return Ok(());
         }
+        self.block(0, 1)?;
+        self.block_type(&shape.block_type)
+    }
+
+    fn shape_string(&mut self, string: crate::types::ShapeString) -> Walk {
+        let key = match string {
+            crate::types::ShapeString::Attribute { scope, location } => {
+                ShapeStringKey::Attribute(LocationKey::Allocation(scope, location))
+            }
+            crate::types::ShapeString::Allocation(allocation) => {
+                ShapeStringKey::Allocation(allocation)
+            }
+        };
+        if self.shape_strings.insert(key) {
+            self.string()?;
+        }
+        Ok(())
     }
 
     fn block_type(&mut self, block_type: &BlockType) -> Walk {
         match block_type {
-            BlockType::Instance(crate::types::VariantInstance::Array) => self.block(0, 1),
-            // `InstanceType (Class {name; ancestors})`
-            BlockType::Instance(crate::types::VariantInstance::Class { ancestors, .. }) => {
+            // A static or unmarshalled `InstanceType Array` block, counted
+            // once.
+            BlockType::Instance(crate::types::VariantInstance::Array(block)) => {
+                if self.shape_blocks.insert(*block) {
+                    self.block(0, 1)?;
+                }
+                Ok(())
+            }
+            // `InstanceType (Class {name; ancestors})`, its blocks, cells and
+            // strings counted once each (see [`crate::types::ClassBlocks`]).
+            BlockType::Instance(crate::types::VariantInstance::Class { blocks, .. }) => {
+                if !self.shape_blocks.insert(blocks.block) {
+                    return Ok(());
+                }
                 self.block(0, 1)?;
                 self.block(0, 2)?;
-                self.string()?;
-                self.list(ancestors, |size, _| size.string())
+                self.shape_string(blocks.name)?;
+                for (cell, string) in &blocks.ancestors {
+                    if !self.shape_blocks.insert(*cell) {
+                        // The rest of the list is that cell's.
+                        break;
+                    }
+                    self.block(0, 2)?;
+                    self.shape_string(*string)?;
+                }
+                Ok(())
             }
             _ => Ok(()),
         }
@@ -1570,6 +1640,88 @@ mod location_tests {
         assert_eq!(size.words, 15); // separate dot, shared prefix and name
         assert!(size.path(&c).is_ok());
         assert_eq!(size.words, 20); // separate dot and equal-text string
+    }
+
+    /// `@instanceOf("A") type a` and `@instanceOf("B") type b = a`: the
+    /// shape of `b` puts a cell holding `a`'s name string in front of `a`'s
+    /// ancestors (variant_layout.ml `declaration_shape`); a restated
+    /// `@notUndefined` keeps a whole shape, and a layout's payload kind is the
+    /// `InstanceType` block of the payload type's shape.
+    #[test]
+    fn shapes_count_shared_blocks_once() {
+        use crate::types::{
+            ClassBlocks, ShapeAllocation, ShapeBlocks, ShapeString, ValueShape, VariantInstance,
+        };
+        let ctx = TypeContext::new(Arc::new(crate::context::IdGenerator::new()));
+        let subst = InclusionSubst::default();
+        let scope = ctx.fresh_location_scope();
+        let attribute_loc = |location| {
+            ctx.intern_loc_with_identity(
+                crate::location::Location::none(),
+                LocationIdentity {
+                    scope,
+                    location,
+                    start: 2 * location,
+                    end: 2 * location + 1,
+                },
+            )
+        };
+        let (a_loc, b_loc) = (attribute_loc(1), attribute_loc(2));
+        let a_name = ShapeString::attribute(&ctx, a_loc);
+        assert!(matches!(a_name, ShapeString::Attribute { .. }));
+        let a_kind = BlockType::Instance(VariantInstance::Class {
+            name: "A".to_string(),
+            ancestors: Vec::new(),
+            blocks: ClassBlocks {
+                block: ShapeAllocation::fresh(),
+                name: a_name,
+                ancestors: Vec::new(),
+            },
+        });
+        let a = ValueShape::recognized_as(a_kind.clone(), ShapeBlocks::fresh());
+        let b = ValueShape::recognized_as(
+            BlockType::Instance(VariantInstance::Class {
+                name: "B".to_string(),
+                ancestors: vec!["A".to_string()],
+                blocks: ClassBlocks {
+                    block: ShapeAllocation::fresh(),
+                    name: ShapeString::attribute(&ctx, b_loc),
+                    ancestors: vec![(ShapeAllocation::fresh(), a_name)],
+                },
+            }),
+            ShapeBlocks::fresh(),
+        );
+        let mut size = ErrorSize::new(&ctx, &subst);
+        assert!(size.value_shape(&a).is_ok());
+        // Recognized_as 2 + InstanceType 2 + Class 3 + name 1
+        assert_eq!(size.words, 8);
+        assert!(size.value_shape(&b).is_ok());
+        // b's blocks, its name and one cell; the cell holds a's name
+        assert_eq!(size.words, 8 + 8 + 3);
+        assert!(size.value_shape(&b.clone()).is_ok());
+        assert!(size.block_type(&a_kind).is_ok());
+        assert_eq!(size.words, 19);
+        // An equal shape allocated again is another value.
+        let a_again = ValueShape::recognized_as(a_kind.clone(), ShapeBlocks::fresh());
+        assert!(size.value_shape(&a_again).is_ok());
+        assert_eq!(size.words, 21);
+
+        // The payload of a's `@instanceOf("A")` is a's name string.
+        let attribute = |loc| Attribute {
+            attr_name: crate::types::asttypes::Located {
+                txt: "instanceOf".to_string(),
+                loc,
+            },
+            attr_payload: AttributePayload::Str("A".to_string()),
+            attr_loc: crate::types::DeclLoc::none(),
+        };
+        let mut alone = ErrorSize::new(&ctx, &subst);
+        assert!(alone.attributes(&[attribute(a_loc)]).is_ok());
+        let mut after_shape = ErrorSize::new(&ctx, &subst);
+        assert!(after_shape.value_shape(&a).is_ok());
+        let shape_words = after_shape.words;
+        assert!(after_shape.attributes(&[attribute(a_loc)]).is_ok());
+        assert_eq!(after_shape.words - shape_words, alone.words - 1);
     }
 
     #[test]
