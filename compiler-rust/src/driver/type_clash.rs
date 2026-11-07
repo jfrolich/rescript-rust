@@ -1177,9 +1177,15 @@ fn print_extra_type_clash_help_by_types(
         }
         None => false,
     };
+    // error_message_utils.ml:775-779: the coercion targets the whole
+    // expected type, not the innermost mismatch.
+    let target_type = match top_level_types {
+        Some((_, t2_top)) => t2_top,
+        None => b2,
+    };
     let target_type_string = {
-        printer.reset_and_mark_loops(b2);
-        printer.type_expr(b2)
+        printer.reset_and_mark_loops(target_type);
+        printer.type_expr(target_type)
     };
     let target_expr_text = extract_text_at_loc(arena, source, loc);
     let suggested_rewrite = parse_and_reprint(
