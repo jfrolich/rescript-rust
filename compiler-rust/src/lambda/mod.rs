@@ -285,7 +285,7 @@ pub(crate) fn untagged_plan_with<'s, A: Clone>(
     sw_failaction: Option<A>,
     sw_dispatch: &'s SwitchDispatch,
     same: impl Fn(&A, &A) -> bool,
-) -> Option<untagged_dispatch::Tree<A>> {
+) -> Option<untagged_dispatch::Plan<A>> {
     let SwitchDispatch::Variant(facts) = sw_dispatch else {
         return None;
     };
@@ -327,7 +327,7 @@ pub(crate) fn untagged_plan_with<'s, A: Clone>(
 }
 
 /// lambda.ml `untagged_plan` over the arms of a tree switch.
-pub(crate) fn untagged_plan(switch: &LambdaSwitch) -> Option<untagged_dispatch::Tree<&Lambda>> {
+pub(crate) fn untagged_plan(switch: &LambdaSwitch) -> Option<untagged_dispatch::Plan<&Lambda>> {
     let consts: Vec<(SwitchKey, &Lambda)> =
         switch.sw_consts.iter().map(|(k, l)| (k.clone(), l)).collect();
     let blocks: Vec<(SwitchKey, &Lambda)> =

@@ -17,7 +17,9 @@ use crate::js_ir::{
 };
 use crate::lambda::lam_compat::LetKind;
 use crate::lambda::{Lambda, LambdaSwitch, SwitchCaseTag, SwitchDispatch, SwitchKey};
-use crate::lambda::untagged_dispatch::{Clause as UntaggedClause, Test as UntaggedTest, Tree};
+use crate::lambda::untagged_dispatch::{
+    Clause as UntaggedClause, Plan, Test as UntaggedTest, TestId, Tree, TreeId,
+};
 
 /// The continuation an untagged plan is printed in: OCaml's `Assign`,
 /// return and effect `Lam_compile_context.continuation`s.
@@ -29,6 +31,17 @@ pub(crate) enum UntaggedMode<'r> {
     /// self calls are jumps (the `TailLoopState` passed alongside).
     TailLoopReturn,
     Effect,
+}
+
+/// What printing one plan shares across its nodes: lam_compile.ml
+/// `compile_untagged_plan`'s closure over the scrutinee, the default action
+/// and the blocks compiled for it.
+pub(crate) struct UntaggedEmit<'m, 'e, 'p> {
+    mode: UntaggedMode<'m>,
+    scrut: &'e Expression,
+    fallback: Option<&'p Lambda>,
+    plan: &'e Plan<&'p Lambda>,
+    fallback_blocks: Vec<(bool, Block)>,
 }
 
 /// The loop state of [`UntaggedMode::TailLoopReturn`].
@@ -515,7 +528,7 @@ impl LambdaCompiler {
         mut tail_loop: TailLoop<'_>,
         scrut: &Lambda,
         switch: &LambdaSwitch,
-        plan: &Tree<&Lambda>,
+        plan: &Plan<&Lambda>,
     ) -> Block {
         let scrut_compiled = self.compile_expr(scrut);
         let payload_only = switch.sw_consts_full && switch.sw_consts.is_empty();
@@ -577,40 +590,52 @@ impl LambdaCompiler {
         tail_loop: &mut TailLoop<'_>,
         scrut: &Expression,
         fallback: Option<&Lambda>,
-        plan: &Tree<&Lambda>,
+        plan: &Plan<&Lambda>,
     ) -> Block {
         // The default action is compiled once and shared by every path to it,
         // per whether it is printed inside a `switch`.
-        let mut fallback_blocks: Vec<(bool, Block)> = Vec::new();
-        self.emit_untagged_tree(mode, tail_loop, scrut, fallback, plan, &mut fallback_blocks)
+        let mut emit = UntaggedEmit {
+            mode,
+            scrut,
+            fallback,
+            plan,
+            fallback_blocks: Vec::new(),
+        };
+        self.emit_untagged_tree(&mut emit, tail_loop, plan.root())
     }
 
-    fn untagged_test_expr(&self, scrut: &Expression, test: &UntaggedTest) -> Expression {
-        match test {
+    fn untagged_typeof_expr(scrut: &Expression, block_type: &crate::types::VariantBlockType) -> Expression {
+        raw_typeof_comparison(
+            scrut.clone(),
+            BinOp::EqEqEq,
+            block_type
+                .typeof_name()
+                .expect("a typeof test is on a kind with a typeof name"),
+        )
+    }
+
+    fn untagged_test_expr(&self, plan: &Plan<&Lambda>, scrut: &Expression, test: TestId) -> Expression {
+        match plan.test(test) {
             UntaggedTest::Equals(literal) => Expression::bin(
                 BinOp::EqEqEq,
                 scrut.clone(),
                 Self::switch_case_expr(&Self::literal_tag_value(literal)),
             ),
-            UntaggedTest::Typeof(block_type) => raw_typeof_comparison(
-                scrut.clone(),
-                BinOp::EqEqEq,
-                block_type
-                    .typeof_name()
-                    .expect("a typeof test is on a kind with a typeof name"),
-            ),
+            UntaggedTest::Typeof(block_type) => Self::untagged_typeof_expr(scrut, block_type),
             UntaggedTest::Instance(instance) => self.is_instance_of(instance, scrut.clone()),
             UntaggedTest::NotNull => Expression::not(self.is_null_expr(scrut.clone())),
-            UntaggedTest::Not(test) => Expression::not(self.untagged_test_expr(scrut, test)),
+            UntaggedTest::Not(test) => {
+                Expression::not(self.untagged_test_expr(plan, scrut, *test))
+            }
             UntaggedTest::And(test1, test2) => Expression::bin(
                 BinOp::And,
-                self.untagged_test_expr(scrut, test1),
-                self.untagged_test_expr(scrut, test2),
+                self.untagged_test_expr(plan, scrut, *test1),
+                self.untagged_test_expr(plan, scrut, *test2),
             ),
             UntaggedTest::Or(test1, test2) => Expression::bin(
                 BinOp::Or,
-                self.untagged_test_expr(scrut, test1),
-                self.untagged_test_expr(scrut, test2),
+                self.untagged_test_expr(plan, scrut, *test1),
+                self.untagged_test_expr(plan, scrut, *test2),
             ),
         }
     }
@@ -637,18 +662,18 @@ impl LambdaCompiler {
 
     fn untagged_fallback_block(
         &mut self,
-        mode: UntaggedMode<'_>,
+        emit: &mut UntaggedEmit<'_, '_, '_>,
         tail_loop: &mut TailLoop<'_>,
-        fallback: Option<&Lambda>,
-        fallback_blocks: &mut Vec<(bool, Block)>,
     ) -> Block {
         let in_switch = self.switch_depth > 0;
-        if let Some((_, block)) = fallback_blocks.iter().find(|(key, _)| *key == in_switch) {
+        if let Some((_, block)) = emit.fallback_blocks.iter().find(|(key, _)| *key == in_switch) {
             return block.clone();
         }
-        let lam = fallback.expect("a plan reaches the fallback only when the switch has one");
-        let block = self.untagged_output_block(mode, tail_loop, lam);
-        fallback_blocks.push((in_switch, block.clone()));
+        let lam = emit
+            .fallback
+            .expect("a plan reaches the fallback only when the switch has one");
+        let block = self.untagged_output_block(emit.mode, tail_loop, lam);
+        emit.fallback_blocks.push((in_switch, block.clone()));
         block
     }
 
@@ -665,61 +690,59 @@ impl LambdaCompiler {
 
     fn emit_untagged_tree(
         &mut self,
-        mode: UntaggedMode<'_>,
+        emit: &mut UntaggedEmit<'_, '_, '_>,
         tail_loop: &mut TailLoop<'_>,
-        scrut: &Expression,
-        fallback: Option<&Lambda>,
-        tree: &Tree<&Lambda>,
-        fallback_blocks: &mut Vec<(bool, Block)>,
+        tree: TreeId,
     ) -> Block {
-        match tree {
-            Tree::Run(lam) => self.untagged_output_block(mode, tail_loop, lam),
-            Tree::Fallback => self.untagged_fallback_block(mode, tail_loop, fallback, fallback_blocks),
+        let plan = emit.plan;
+        match plan.tree(tree) {
+            Tree::Run(lam) => self.untagged_output_block(emit.mode, tail_loop, lam),
+            Tree::Fallback => self.untagged_fallback_block(emit, tail_loop),
             Tree::Skip => vec![],
             Tree::If(test, then_, else_) => {
                 // Bodies are compiled in the order they are printed, which
                 // numbers loop labels top to bottom.
-                let then_ = self.emit_untagged_tree(mode, tail_loop, scrut, fallback, then_, fallback_blocks);
-                let else_ = self.emit_untagged_tree(mode, tail_loop, scrut, fallback, else_, fallback_blocks);
-                let cond = self.untagged_test_expr(scrut, test);
-                Self::untagged_if(mode, cond, then_, else_)
+                let then_ = self.emit_untagged_tree(emit, tail_loop, *then_);
+                let else_ = self.emit_untagged_tree(emit, tail_loop, *else_);
+                let cond = self.untagged_test_expr(plan, emit.scrut, *test);
+                Self::untagged_if(emit.mode, cond, then_, else_)
             }
-            Tree::Block(tree) => {
-                let block = self.emit_untagged_tree(mode, tail_loop, scrut, fallback, tree, fallback_blocks);
+            Tree::Block(inner) => {
+                let block = self.emit_untagged_tree(emit, tail_loop, *inner);
                 vec![Statement::block(block)]
             }
             Tree::SwitchValue(clauses, default) => self.with_switch_depth(|this| {
-                let default =
-                    this.emit_untagged_tree(mode, tail_loop, scrut, fallback, default, fallback_blocks);
+                let default = this.emit_untagged_tree(emit, tail_loop, *default);
                 let default = (!default.is_empty()).then_some(default);
-                let clauses = clauses
+                let clauses = plan
+                    .value_clauses(*clauses)
                     .iter()
                     .map(|(literal, clause)| StringClause {
                         tag_type: Self::literal_tag_value(literal),
-                        clause: this.emit_untagged_clause(mode, tail_loop, fallback, clause, fallback_blocks),
+                        clause: this.emit_untagged_clause(emit, tail_loop, clause),
                     })
                     .collect();
                 vec![Statement::new(StatementDesc::StringSwitch(
-                    scrut.clone(),
+                    emit.scrut.clone(),
                     clauses,
                     default,
                 ))]
             }),
             Tree::SwitchTypeof(clauses, default)
-                if clauses.len() == 1 && matches!(clauses[0].1, UntaggedClause::Body(_)) =>
+                if clauses.len() == 1
+                    && matches!(plan.typeof_clauses(*clauses)[0].1, UntaggedClause::Body(_)) =>
             {
                 // One kind is an `if`, so its bodies are not in a `switch`.
-                let (block_type, clause) = &clauses[0];
-                let clause = self.emit_untagged_clause(mode, tail_loop, fallback, clause, fallback_blocks);
-                let default =
-                    self.emit_untagged_tree(mode, tail_loop, scrut, fallback, default, fallback_blocks);
-                let cond = self.untagged_test_expr(scrut, &UntaggedTest::Typeof(block_type.clone()));
-                Self::untagged_if(mode, cond, clause.body, default)
+                let (block_type, clause) = &plan.typeof_clauses(*clauses)[0];
+                let clause = self.emit_untagged_clause(emit, tail_loop, clause);
+                let default = self.emit_untagged_tree(emit, tail_loop, *default);
+                let cond = Self::untagged_typeof_expr(emit.scrut, block_type);
+                Self::untagged_if(emit.mode, cond, clause.body, default)
             }
             Tree::SwitchTypeof(clauses, default) => self.with_switch_depth(|this| {
-                let default =
-                    this.emit_untagged_tree(mode, tail_loop, scrut, fallback, default, fallback_blocks);
-                let clauses = clauses
+                let default = this.emit_untagged_tree(emit, tail_loop, *default);
+                let clauses = plan
+                    .typeof_clauses(*clauses)
                     .iter()
                     .map(|(block_type, clause)| StringClause {
                         tag_type: SwitchCaseTag::String(
@@ -728,11 +751,11 @@ impl LambdaCompiler {
                                 .expect("a typeof switch is on kinds with a typeof name")
                                 .to_string(),
                         ),
-                        clause: this.emit_untagged_clause(mode, tail_loop, fallback, clause, fallback_blocks),
+                        clause: this.emit_untagged_clause(emit, tail_loop, clause),
                     })
                     .collect();
                 vec![Statement::new(StatementDesc::StringSwitch(
-                    ocaml_typeof_expr(scrut.clone()),
+                    ocaml_typeof_expr(emit.scrut.clone()),
                     clauses,
                     Some(default),
                 ))]
@@ -742,20 +765,23 @@ impl LambdaCompiler {
 
     fn emit_untagged_clause(
         &mut self,
-        mode: UntaggedMode<'_>,
+        emit: &mut UntaggedEmit<'_, '_, '_>,
         tail_loop: &mut TailLoop<'_>,
-        fallback: Option<&Lambda>,
         clause: &UntaggedClause<&Lambda>,
-        fallback_blocks: &mut Vec<(bool, Block)>,
     ) -> CaseClause {
-        match clause {
-            UntaggedClause::FallsThrough(lam) => CaseClause {
-                source_loc: lam.and_then(|lam| self.source_loc_of_lam(lam)),
-                ..empty_switch_case_clause()
-            },
-            UntaggedClause::Body(Tree::Run(lam)) => {
+        let body = match clause {
+            UntaggedClause::FallsThrough(lam) => {
+                return CaseClause {
+                    source_loc: lam.and_then(|lam| self.source_loc_of_lam(lam)),
+                    ..empty_switch_case_clause()
+                };
+            }
+            UntaggedClause::Body(body) => emit.plan.tree(*body),
+        };
+        match body {
+            Tree::Run(lam) => {
                 let lam: &Lambda = lam;
-                let (body, should_break) = match mode {
+                let (body, should_break) = match emit.mode {
                     // `Js_output.to_break_block`: the assignment needs a
                     // `break` unless it finishes; an `if` drops the flag.
                     UntaggedMode::Assign(result) => {
@@ -789,8 +815,8 @@ impl LambdaCompiler {
                     comment: None,
                 }
             }
-            UntaggedClause::Body(Tree::Fallback) => {
-                let block = self.untagged_fallback_block(mode, tail_loop, fallback, fallback_blocks);
+            Tree::Fallback => {
+                let block = self.untagged_fallback_block(emit, tail_loop);
                 CaseClause {
                     should_break: !block_last_is_return_throw_or_continue(&block),
                     body: block,
@@ -798,7 +824,7 @@ impl LambdaCompiler {
                     comment: None,
                 }
             }
-            UntaggedClause::Body(_) => unreachable!("a clause body is a Run or the Fallback"),
+            _ => unreachable!("a clause body is a Run or the Fallback"),
         }
     }
 
