@@ -5284,6 +5284,7 @@ mod tests {
             type_attributes: vec![],
             type_immediate: false,
             type_representation: super::super::TypeRepresentation::Boxed,
+            type_shape: crate::types::ValueShape::Unstated,
             type_inlined_types: vec![],
             type_path: None,
         });

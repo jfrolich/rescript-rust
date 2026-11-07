@@ -8380,17 +8380,14 @@ fn variant_constructors_for_type(
 fn variant_constructor_runtime_matches_primitive(
     type_ctx: &TypeContext,
     constructor: &crate::types::decl::ConstructorDeclaration,
-    case: &crate::types::VariantConstructorCase,
+    _case: &crate::types::VariantConstructorCase,
     unboxed: bool,
     target_path: &crate::types::Path,
 ) -> bool {
     match &constructor.cd_args {
         crate::types::decl::ConstructorArguments::CstrTuple(args) if args.is_empty() => {
-            let tag = match case {
-                crate::types::VariantConstructorCase::Constant(tag) => &tag.literal,
-                crate::types::VariantConstructorCase::Block(_) => unreachable!(),
-            };
-            match variant_constructor_as_payload(tag) {
+            // variant_coercion.ml: the messages name the declared `@as`.
+            match variant_constructor_as_payload(&constructor.cd_runtime_tag) {
                 None | Some(VariantConstructorAsPayload::String) => {
                     target_path.same(&crate::types::predef::path_string())
                 }
@@ -8625,8 +8622,10 @@ fn with_type_decl_for_path<R>(
         .map(|decl| f(&decl))
 }
 
+/// error_message_utils.ml `print_extra_type_clash_help`:
+/// `Variant_runtime.constructor_tag layout position`, a string or nothing.
 fn variant_constructor_string_runtime_repr(
-    constructor: &crate::types::decl::ConstructorDeclaration,
+    _constructor: &crate::types::decl::ConstructorDeclaration,
     case: &crate::types::VariantConstructorCase,
 ) -> Option<String> {
     let tag = match case {
@@ -8634,9 +8633,8 @@ fn variant_constructor_string_runtime_repr(
         crate::types::VariantConstructorCase::Block(block) => &block.tag().literal,
     };
     match tag {
-        Some(crate::types::VariantLiteralTag::String(value)) => Some(value.clone()),
-        Some(_) => None,
-        None => Some(constructor.cd_id.name().to_string()),
+        crate::types::VariantLiteralTag::String(value) => Some(value.clone()),
+        _ => None,
     }
 }
 

@@ -403,20 +403,6 @@ impl Default for LambdaCompiler {
 }
 
 impl LambdaCompiler {
-    pub(crate) fn grouped_switch_default<'a>(
-        &self,
-        saturated: bool,
-        failaction: Option<&'a Lambda>,
-    ) -> GroupedSwitchDefault<'a> {
-        if saturated {
-            GroupedSwitchDefault::Complete
-        } else if let Some(fallback) = failaction {
-            GroupedSwitchDefault::Default(fallback)
-        } else {
-            GroupedSwitchDefault::NonComplete
-        }
-    }
-
     pub(crate) fn grouped_switch_cases<'a, T: Clone, F>(
         &self,
         cases: &'a [(T, Lambda)],
@@ -4026,6 +4012,17 @@ impl LambdaCompiler {
         switch: &LambdaSwitch,
         tail_loop: &mut TailLoopState,
     ) -> Block {
+        // As in `compile_switch_return_block`: the plan enters the switch
+        // context only for the bodies of its `switch` statements.
+        if let Some(plan) = super::untagged_plan(switch) {
+            return self.compile_untagged_switch(
+                super::lam_compile_variant::UntaggedMode::TailLoopReturn,
+                Some(tail_loop),
+                scrut,
+                switch,
+                &plan,
+            );
+        }
         self.with_switch_depth(|this| {
             this.compile_tail_loop_switch_return_block_inner(scrut, switch, tail_loop)
         })
@@ -5070,6 +5067,17 @@ impl LambdaCompiler {
         scrut: &Lambda,
         switch: &LambdaSwitch,
     ) -> Block {
+        // An untagged plan enters the switch context only for the bodies of
+        // its `switch` statements (lam_compile.ml `compile_untagged_plan`).
+        if let Some(plan) = super::untagged_plan(switch) {
+            return self.compile_untagged_switch(
+                super::lam_compile_variant::UntaggedMode::Assign(result),
+                None,
+                scrut,
+                switch,
+                &plan,
+            );
+        }
         self.with_switch_depth(|this| {
             this.compile_switch_assignment_block_inner(result, scrut, switch)
         })
@@ -5081,18 +5089,6 @@ impl LambdaCompiler {
         scrut: &Lambda,
         switch: &LambdaSwitch,
     ) -> Block {
-        if self.uses_untagged_variant_switch(switch) {
-            let scrut_compiled = self.compile_expr(scrut);
-            let (mut block, scrut_expr) =
-                self.bind_switch_scrutinee_once(scrut_compiled.prelude, scrut_compiled.expr);
-            block.extend(
-                self.compile_untagged_variant_switch_assignment_statements(
-                    result, scrut_expr, switch,
-                ),
-            );
-            return block;
-        }
-
         if self.uses_named_variant_switch(switch) {
             let scrut_compiled = self.compile_expr(scrut);
             let (mut block, scrut_expr) = if self.named_variant_switch_needs_bound_scrutinee(switch)
@@ -5222,6 +5218,15 @@ impl LambdaCompiler {
     }
 
     fn compile_switch_return_block(&mut self, scrut: &Lambda, switch: &LambdaSwitch) -> Block {
+        if let Some(plan) = super::untagged_plan(switch) {
+            return self.compile_untagged_switch(
+                super::lam_compile_variant::UntaggedMode::Return,
+                None,
+                scrut,
+                switch,
+                &plan,
+            );
+        }
         self.with_switch_depth(|this| this.compile_switch_return_block_inner(scrut, switch))
     }
 
@@ -5230,15 +5235,6 @@ impl LambdaCompiler {
         scrut: &Lambda,
         switch: &LambdaSwitch,
     ) -> Block {
-        if self.uses_untagged_variant_switch(switch) {
-            let scrut_compiled = self.compile_expr(scrut);
-            let (mut block, scrut_expr) =
-                self.bind_switch_scrutinee_once(scrut_compiled.prelude, scrut_compiled.expr);
-            block
-                .extend(self.compile_untagged_variant_switch_return_statements(scrut_expr, switch));
-            return block;
-        }
-
         if self.uses_named_variant_switch(switch) {
             let scrut_compiled = self.compile_expr(scrut);
             let (mut block, scrut_expr) = if self.named_variant_switch_needs_bound_scrutinee(switch)
@@ -5369,6 +5365,15 @@ impl LambdaCompiler {
     }
 
     fn compile_switch_effect_block(&mut self, scrut: &Lambda, switch: &LambdaSwitch) -> Block {
+        if let Some(plan) = super::untagged_plan(switch) {
+            return self.compile_untagged_switch(
+                super::lam_compile_variant::UntaggedMode::Effect,
+                None,
+                scrut,
+                switch,
+                &plan,
+            );
+        }
         self.with_switch_depth(|this| this.compile_switch_effect_block_inner(scrut, switch))
     }
 
@@ -5377,19 +5382,6 @@ impl LambdaCompiler {
         scrut: &Lambda,
         switch: &LambdaSwitch,
     ) -> Block {
-        if self.uses_untagged_variant_switch(switch) {
-            let scrut_compiled = self.compile_expr(scrut);
-            let (mut block, scrut_expr) =
-                self.bind_switch_scrutinee_once(scrut_compiled.prelude, scrut_compiled.expr);
-            let dispatch =
-                self.compile_untagged_variant_switch_effect_statements(scrut_expr, switch);
-            // lam_compile.ml `compile_general_cases`: the dispatch is built
-            // from `S.if_`s, which keep a condition only when it has side
-            // effects (js_stmt_make.ml `if_`).
-            block.extend(dispatch);
-            return block;
-        }
-
         if self.uses_named_variant_switch(switch) {
             let scrut_compiled = self.compile_expr(scrut);
             let (mut block, scrut_expr) = if self.named_variant_switch_needs_bound_scrutinee(switch)
@@ -6805,13 +6797,6 @@ fn merge_terminal_guard_fallthrough_else(block: Block) -> Block {
     ))]
 }
 
-pub(crate) fn trailing_return_expression(block: &[Statement]) -> Option<&Expression> {
-    let stmt = block.last()?;
-    let StatementDesc::Return(expr) = &stmt.desc else {
-        return None;
-    };
-    Some(expr)
-}
 
 fn function_has_self_tailcall(tail_targets: &[Ident], lam: &Lambda) -> bool {
     match lam {
@@ -8534,13 +8519,6 @@ fn collect_modules_from_expression(expr: &Expression, modules: &mut OcamlModuleS
         | ExpressionDesc::Undefined { .. }
         | ExpressionDesc::Null => {}
     }
-}
-
-#[derive(Clone, Copy)]
-pub(crate) enum GroupedSwitchDefault<'a> {
-    Complete,
-    NonComplete,
-    Default(&'a Lambda),
 }
 
 pub(crate) fn pointer_info_comment_text(comment: Option<&PointerInfo>) -> Option<String> {

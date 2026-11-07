@@ -200,7 +200,8 @@ impl<'a> SigReadContext<'a> {
     ///  8: type_attributes: attributes
     ///  9: type_immediate: bool
     /// 10: type_representation
-    /// 11: type_inlined_types: type_inlined_type list
+    /// 11: type_shape: Variant_runtime.value_shape
+    /// 12: type_inlined_types: type_inlined_type list
     fn read_type_declaration(&mut self, value: &OcamlValue) -> TypeDeclaration {
         let fields = &value.as_block().1;
 
@@ -230,7 +231,8 @@ impl<'a> SigReadContext<'a> {
         } else {
             TypeRepresentation::Boxed
         };
-        let type_inlined_types = self.read_type_inlined_types(&fields[11]);
+        let type_shape = decode_value_shape(&fields[11]);
+        let type_inlined_types = self.read_type_inlined_types(&fields[12]);
 
         TypeDeclaration {
             type_params,
@@ -244,6 +246,7 @@ impl<'a> SigReadContext<'a> {
             type_attributes,
             type_immediate,
             type_representation,
+            type_shape,
             type_inlined_types,
             type_path: None,
         }
@@ -413,9 +416,7 @@ impl<'a> SigReadContext<'a> {
         let (_, fields) = value.as_block();
         crate::types::VariantTag {
             name: fields[0].as_string().to_string(),
-            literal: fields[1]
-                .as_option()
-                .map(|v| self.read_variant_literal_tag(v)),
+            literal: self.read_variant_literal_tag(&fields[1]),
         }
     }
 
@@ -1520,45 +1521,45 @@ fn read_alias_presence(value: &OcamlValue) -> AliasPresence {
     }
 }
 
-/// Decode a marshalled `Variant_runtime.block_type`.
+/// Decode a marshalled `Variant_runtime.block_type`: the constant
+/// constructors in declaration order, `InstanceType` the only block.
 pub(crate) fn decode_variant_block_type(value: &OcamlValue) -> crate::types::VariantBlockType {
     use crate::types::{VariantBlockType as B, VariantInstance as I};
     match value {
-        OcamlValue::Int(0) => B::Int,
+        OcamlValue::Int(0) => B::Number,
         OcamlValue::Int(1) => B::String,
-        OcamlValue::Int(2) => B::Float,
-        OcamlValue::Int(3) => B::Bigint,
-        OcamlValue::Int(4) => B::Boolean,
+        OcamlValue::Int(2) => B::Bigint,
+        OcamlValue::Int(3) => B::Boolean,
+        OcamlValue::Int(4) => B::Symbol,
         OcamlValue::Int(5) => B::Function,
         OcamlValue::Int(6) => B::Object,
         OcamlValue::Int(7) => B::Unknown,
-        OcamlValue::Block(0, fields) => B::Instance(match fields[0].as_int() {
-            0 => I::Array,
-            1 => I::ArrayBuffer,
-            2 => I::BigInt64Array,
-            3 => I::BigUint64Array,
-            4 => I::Blob,
-            5 => I::DataView,
-            6 => I::Date,
-            7 => I::File,
-            8 => I::Float32Array,
-            9 => I::Float64Array,
-            10 => I::Int16Array,
-            11 => I::Int32Array,
-            12 => I::Int8Array,
-            13 => I::Promise,
-            14 => I::RegExp,
-            15 => I::Uint16Array,
-            16 => I::Uint32Array,
-            17 => I::Uint8Array,
-            18 => I::Uint8ClampedArray,
-            19 => I::Set,
-            20 => I::Map,
-            21 => I::WeakSet,
-            22 => I::WeakMap,
-            n => panic!("invalid variant instance {n}"),
+        OcamlValue::Block(0, fields) => B::Instance(match &fields[0] {
+            OcamlValue::Int(0) => I::Array,
+            OcamlValue::Block(0, class) => I::Class {
+                name: class[0].as_string().to_string(),
+                ancestors: class[1]
+                    .as_list()
+                    .iter()
+                    .map(|ancestor| ancestor.as_string().to_string())
+                    .collect(),
+            },
+            other => panic!("invalid variant instance {other:?}"),
         }),
-        _ => panic!("invalid variant block type"),
+        other => panic!("invalid variant block type {other:?}"),
+    }
+}
+
+/// Decode a marshalled `Variant_runtime.value_shape`.
+pub(crate) fn decode_value_shape(value: &OcamlValue) -> crate::types::ValueShape {
+    use crate::types::ValueShape;
+    match value {
+        OcamlValue::Int(0) => ValueShape::Unstated,
+        OcamlValue::Int(1) => ValueShape::NeverUndefined,
+        OcamlValue::Block(0, fields) => {
+            ValueShape::recognized_as(decode_variant_block_type(&fields[0]))
+        }
+        other => panic!("invalid value shape {other:?}"),
     }
 }
 

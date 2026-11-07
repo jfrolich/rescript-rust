@@ -352,6 +352,7 @@ fn build_type_constructors(
                     type_attributes: vec![],
                     type_immediate: false,
                     type_representation: crate::types::TypeRepresentation::Boxed,
+                    type_shape: crate::types::ValueShape::Unstated,
                     type_inlined_types: vec![],
                     type_path: None,
                 };
@@ -524,6 +525,7 @@ fn build_constructors_for_name(
                             type_attributes: vec![],
                             type_immediate: false,
                             type_representation: crate::types::TypeRepresentation::Boxed,
+                            type_shape: crate::types::ValueShape::Unstated,
                             type_inlined_types: vec![],
                             type_path: None,
                         };

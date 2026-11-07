@@ -10503,11 +10503,11 @@ fn report_unused_match_cases(
         && tctx
             .warning_config
             .is_active(&Warning::AmbiguousPattern { vars: Vec::new() });
-    if !tctx.warning_config.is_active(&Warning::UnusedMatch) && !check_ambiguous {
+    if !unused_check_is_active(tctx) && !check_ambiguous {
         return;
     }
     if let [case] = cases
-        && unused_check_is_trivial(&case.c_lhs, case.c_guard.is_some())
+        && unused_check_is_trivial(tctx.type_ctx, &case.c_lhs, case.c_guard.is_some())
     {
         return;
     }
@@ -10544,8 +10544,7 @@ fn report_unused_match_pattern(
     level: i32,
     ty_arg_check: TypeExprRef,
 ) {
-    if !tctx.warning_config.is_active(&Warning::UnusedMatch) || unused_check_is_trivial(lhs, false)
-    {
+    if !unused_check_is_active(tctx) || unused_check_is_trivial(tctx.type_ctx, lhs, false) {
         return;
     }
     let case = UnusedCheckCase {
@@ -10560,8 +10559,22 @@ fn report_unused_match_pattern(
 /// earlier rows `every_satisfiables` answers `Used`, the refinement is
 /// skipped (`pref = []`) and `check_ambiguous_bindings` only looks at
 /// guarded or-patterns, so nothing can be reported.
-fn unused_check_is_trivial(lhs: &Pattern, guarded: bool) -> bool {
-    !guarded && !pattern_contains_or(lhs)
+fn unused_check_is_trivial(ctx: &TypeContext, lhs: &Pattern, guarded: bool) -> bool {
+    // A shadowed payload is reported even in a single case without
+    // or-patterns (parmatch.ml `check_shadowed_payloads`).
+    !guarded
+        && !pattern_contains_or(lhs)
+        && !crate::types::parmatch::has_shadowed_payloads(ctx, lhs)
+}
+
+/// parmatch.ml `check_unused` runs when warning 11 or 12 is active: the
+/// shadowed-payload check reports through either.
+fn unused_check_is_active(tctx: &TypeCheckContext<'_>) -> bool {
+    tctx.warning_config.is_active(&Warning::UnusedMatch {
+        reason: String::new(),
+    }) || tctx.warning_config.is_active(&Warning::UnusedPat {
+        reason: String::new(),
+    })
 }
 
 /// A borrowed match case for the unused/ambiguous Parmatch checks.
@@ -12857,6 +12870,7 @@ fn type_function_nary_with_newtypes(
                         type_attributes: vec![],
                         type_immediate: false,
                         type_representation: crate::types::decl::TypeRepresentation::Boxed,
+                        type_shape: crate::types::ValueShape::Unstated,
                         type_inlined_types: vec![],
                         type_path: None,
                     },
@@ -16229,6 +16243,7 @@ fn inline_record_decl_from_variant_type(
                 type_attributes: vec![],
                 type_immediate: false,
                 type_representation: crate::types::TypeRepresentation::Boxed,
+                type_shape: crate::types::ValueShape::Unstated,
                 type_inlined_types: vec![],
                 type_path: None,
             });
@@ -17118,6 +17133,7 @@ fn type_newtype(
                 type_attributes: vec![],
                 type_immediate: false,
                 type_representation: crate::types::decl::TypeRepresentation::Boxed,
+                type_shape: crate::types::ValueShape::Unstated,
                 type_inlined_types: vec![],
                 type_path: None,
             },
@@ -17626,6 +17642,7 @@ fn type_letexception(
                         type_attributes: vec![],
                         type_immediate: false,
                         type_representation: crate::types::TypeRepresentation::Boxed,
+                        type_shape: crate::types::ValueShape::Unstated,
                         type_inlined_types: vec![],
                         type_path: None,
                     };
@@ -21736,6 +21753,7 @@ where
         type_attributes: decl.type_attributes.clone(),
         type_immediate: decl.type_immediate,
         type_representation: decl.type_representation,
+        type_shape: decl.type_shape.clone(),
         type_inlined_types: decl
             .type_inlined_types
             .iter()
@@ -26170,6 +26188,7 @@ fn lookup_constructor_by_expected_type(
                             type_attributes: vec![],
                             type_immediate: false,
                             type_representation: crate::types::TypeRepresentation::Boxed,
+                            type_shape: crate::types::ValueShape::Unstated,
                             type_inlined_types: vec![],
                             type_path: None,
                         };
@@ -28944,6 +28963,7 @@ fn lookup_type_decl_for_path_with_cache_mode<'a>(
                                 type_attributes: vec![],
                                 type_immediate: false,
                                 type_representation: crate::types::TypeRepresentation::Boxed,
+                                type_shape: crate::types::ValueShape::Unstated,
                                 type_inlined_types: vec![],
                                 type_path: None,
                             }));
@@ -29638,8 +29658,12 @@ fn parmatch_warning(warning: &crate::types::parmatch::ParmatchWarning) -> Warnin
             example: example.clone(),
         },
         W::FragileMatch(typ) => Warning::FragileMatch { typ: typ.clone() },
-        W::UnusedMatch => Warning::UnusedMatch,
-        W::UnusedPat => Warning::UnusedPat,
+        W::UnusedMatch(reason) => Warning::UnusedMatch {
+            reason: reason.clone(),
+        },
+        W::UnusedPat(reason) => Warning::UnusedPat {
+            reason: reason.clone(),
+        },
         W::UnreachableCase => Warning::UnreachableCase,
         W::AmbiguousPattern(vars) => Warning::AmbiguousPattern { vars: vars.clone() },
     }

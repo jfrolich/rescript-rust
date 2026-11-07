@@ -1,12 +1,10 @@
-===== B_user.res =====
+We've found a bug for you!
+  /.../fixtures/Cross_runtime_annotation_functor_argument/B_user.res:10:23-31
 
-  [1;31mWe've found a bug for you![0m
-  [36m/.../fixtures/Cross_runtime_annotation_functor_argument/B_user.res[0m:[2m10:23-31[0m
-
-   8 [2m│[0m }
-   9 [2m│[0m 
-  [1;31m10[0m [2m│[0m module Applied = Make([1;31mA_classes[0m)
-  11 [2m│[0m 
+   8 │ }
+   9 │ 
+  10 │ module Applied = Make(A_classes)
+  11 │ 
 
   Signature mismatch:
   ...
@@ -14,9 +12,9 @@
     type dog = A_classes.dog
   is not included in
     type dog
-  [36m/.../fixtures/Cross_runtime_annotation_functor_argument/B_user.res[0m:[2m4:24-31[0m:
+  /.../fixtures/Cross_runtime_annotation_functor_argument/B_user.res:4:24-31:
     Expected declaration
-  [36m/.../fixtures/Cross_runtime_annotation_functor_argument/A_classes.res[0m:[2m2:20-44[0m:
+  /.../fixtures/Cross_runtime_annotation_functor_argument/A_classes.res:2:20-44:
     Actual declaration
   Their runtime representations differ:
   the first declaration states instances of Dog, a subclass of Animal,

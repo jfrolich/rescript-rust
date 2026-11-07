@@ -3039,6 +3039,12 @@ pub(crate) fn type_declarations(
         }
     }
 
+    // includecore.ml: `compare_runtime_annotations env id decl1 decl2` once
+    // the manifests agree.
+    if let Some(detail) = compare_runtime_annotations(type_ctx, env, id, impl_decl, sig_decl) {
+        return Err(type_decl_mismatch(id, impl_decl, sig_decl, detail));
+    }
+
     let canonical_unboxed = |decl: &TypeDeclaration| {
         decl.type_representation == crate::types::TypeRepresentation::Unboxed
             || decl.variant_layout_ref().is_some_and(|layout_ref| {
@@ -3321,6 +3327,62 @@ fn compare_record_declarations_with_param_map(
     }
 
     None
+}
+
+/// includecore.ml `compare_runtime_annotations`: what the second
+/// declaration states about its values at run time must hold for the first.
+/// Values are recognized by the class or `typeof` the second states, so the
+/// first must state the same; stating nothing hides it. `@notUndefined` lets
+/// clients unbox `option` of the type, so the first must be a type that
+/// cannot hold `undefined` either, or one whose representation the compiler
+/// does not see.
+fn compare_runtime_annotations(
+    type_ctx: &TypeContext,
+    env: &Env,
+    id: Ident,
+    impl_decl: &TypeDeclaration,
+    sig_decl: &TypeDeclaration,
+) -> Option<String> {
+    // The second declaration's shape was resolved in its own environment, so
+    // it is what users of the second declaration see.
+    let first_type = |env: &mut Env| {
+        // `Env.add_type ~check:false id decl1 env` and
+        // `Btype.newgenty (Tconstr (Pident id, decl1.type_params, ref Mnil))`.
+        env.add_type(id, impl_decl.clone());
+        type_ctx.new_generic_constr(Path::pident(id), impl_decl.type_params.clone())
+    };
+    match &sig_decl.type_shape {
+        crate::types::ValueShape::Unstated => None,
+        crate::types::ValueShape::NeverUndefined => {
+            let mut env = env.clone();
+            let ty = first_type(&mut env);
+            match crate::raw_lambda::typeopt::undefinedness(type_ctx, &env, ty) {
+                crate::raw_lambda::typeopt::Undefinedness::CannotBeUndefined
+                | crate::raw_lambda::typeopt::Undefinedness::Unseen => None,
+                crate::raw_lambda::typeopt::Undefinedness::StandsForAnother
+                | crate::raw_lambda::typeopt::Undefinedness::CanBeUndefined => Some(
+                    "Their runtime representations differ:\nthe second declaration is @notUndefined,\nbut the first declaration can hold undefined."
+                        .to_string(),
+                ),
+            }
+        }
+        crate::types::ValueShape::RecognizedAs(block_type2) => {
+            let declared2 = Some(block_type2.as_ref());
+            // What the first declaration states, or what its structure gives.
+            let mut env = env.clone();
+            let ty = first_type(&mut env);
+            let declared1 = crate::types::variant_layout::payload_kind(type_ctx, &env, ty);
+            if declared1.as_ref() == declared2 {
+                None
+            } else {
+                Some(format!(
+                    "Their runtime representations differ:\nthe first declaration states {},\nthe second declaration states {}.",
+                    crate::types::variant_layout::describe_declared_block_type(declared1.as_ref()),
+                    crate::types::variant_layout::describe_declared_block_type(declared2),
+                ))
+            }
+        }
+    }
 }
 
 fn type_decl_mismatch(
@@ -4719,6 +4781,7 @@ mod tests {
             type_attributes: vec![],
             type_immediate: false,
             type_representation: TypeRepresentation::Boxed,
+            type_shape: crate::types::ValueShape::Unstated,
             type_inlined_types: vec![],
             type_path,
         }
@@ -5002,6 +5065,7 @@ mod tests {
                     type_attributes: vec![],
                     type_immediate: false,
                     type_representation: TypeRepresentation::Boxed,
+                    type_shape: crate::types::ValueShape::Unstated,
                     type_inlined_types: vec![],
                     type_path: None,
                 }),

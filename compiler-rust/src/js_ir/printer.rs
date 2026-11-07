@@ -2958,7 +2958,7 @@ fn call_argument_needs_extra_group_indent(
 }
 
 fn variant_tag_to_switch(tag: &crate::types::VariantTag) -> Option<SwitchCaseTag> {
-    match tag.literal.as_ref()? {
+    match &tag.literal {
         crate::types::VariantLiteralTag::String(value) => {
             Some(SwitchCaseTag::String(value.clone()))
         }
@@ -6022,7 +6022,7 @@ mod tests {
                     crate::types::TaggedBlock {
                         tag: crate::types::VariantTag {
                             name: "One".to_string(),
-                            literal: None,
+                            literal: crate::types::VariantLiteralTag::String("One".to_string()),
                         },
                         tag_name: None,
                     },

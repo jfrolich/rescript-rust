@@ -941,7 +941,7 @@ mod tests {
         ] {
             let condition = Constant::Constructor(VariantTag {
                 name: "C".into(),
-                literal: Some(tag_type),
+                literal: tag_type,
             });
             let result = rebuild_indexed(Lambda::LifThenElse(
                 Box::new(Lambda::Lconst(condition)),
@@ -953,7 +953,7 @@ mod tests {
 
         let int_tag = VariantTag {
             name: "One".into(),
-            literal: Some(crate::types::VariantLiteralTag::Int(1)),
+            literal: crate::types::VariantLiteralTag::Int(1),
         };
         let result = rebuild_indexed(Lambda::Lswitch(
             Box::new(Lambda::Lconst(Constant::int(1))),
@@ -982,7 +982,7 @@ mod tests {
                     SwitchKey::Constructor(crate::types::VariantConstructorCase::Constant(
                         VariantTag {
                             name: "One".into(),
-                            literal: Some(crate::types::VariantLiteralTag::Int(1)),
+                            literal: crate::types::VariantLiteralTag::Int(1),
                         },
                     )),
                     Lambda::true_(),
@@ -1001,11 +1001,11 @@ mod tests {
         ] {
             let left = Constant::Constructor(VariantTag {
                 name: "A".into(),
-                literal: None,
+                literal: crate::types::VariantLiteralTag::String("A".into()),
             });
             let right = Constant::Constructor(VariantTag {
                 name: "B".into(),
-                literal: None,
+                literal: crate::types::VariantLiteralTag::String("B".into()),
             });
             let result = rebuild_indexed(Lambda::Lprim(Box::new(crate::lambda::PrimInfo {
                 primitive: Primitive::Pintcomp(operation),

@@ -29,7 +29,8 @@
 //! - signatures, type declarations and path prefixes by their `Arc`s;
 //! - variant layouts by their `layout_ref` handle, whose tags share their
 //!   name string with the constructor's `Ident.t` and their literal with the
-//!   constructor's `cd_runtime_tag` (variant_layout.ml `get_tag`);
+//!   payload of the constructor's `cd_runtime_tag`
+//!   (ast_untagged_variants.ml `declared_tag`);
 //! - an `Ident.t` by its stamp and name, its name string being its own;
 //! - locations and positions by scoped parser/decoder allocation identities,
 //!   retained across portable interfaces independently of coordinate interning;
@@ -159,6 +160,9 @@ struct ErrorSize<'a> {
     /// Constructors whose `cd_runtime_tag` block has been counted, keyed by
     /// the constructor ident: the layout tag shares it.
     runtime_tags: HashSet<IdentKey>,
+    /// Constructors whose declared `@as` literal has been counted: the
+    /// `cd_runtime_tag` option and the layout tag share it.
+    runtime_tag_literals: HashSet<IdentKey>,
     signatures: HashSet<usize>,
     type_declarations: HashSet<usize>,
     paths: HashSet<usize>,
@@ -233,6 +237,7 @@ impl<'a> ErrorSize<'a> {
             row_field_refs: HashSet::default(),
             layouts: HashSet::default(),
             runtime_tags: HashSet::default(),
+            runtime_tag_literals: HashSet::default(),
             signatures: HashSet::default(),
             type_declarations: HashSet::default(),
             paths: HashSet::default(),
@@ -982,7 +987,7 @@ impl<'a> ErrorSize<'a> {
     }
 
     fn type_declaration(&mut self, decl: &TypeDeclaration) -> Walk {
-        self.block(0, 12)?;
+        self.block(0, 13)?;
         self.list(&decl.type_params, |size, ty| size.type_expr(*ty))?;
         match &decl.type_kind {
             TypeKind::TypeAbstract | TypeKind::TypeOpen => {}
@@ -1011,6 +1016,8 @@ impl<'a> ErrorSize<'a> {
         }
         self.decl_loc(decl.type_loc)?;
         self.attributes(&decl.type_attributes)?;
+        // `type_shape`, which `Subst` keeps.
+        self.original(|size| size.value_shape(&decl.type_shape))?;
         // Record {type_name; labels}, which `Subst` keeps.
         self.original(|size| {
             size.list(&decl.type_inlined_types, |size, inlined| {
@@ -1055,7 +1062,10 @@ impl<'a> ErrorSize<'a> {
             && self.runtime_tags.insert(ident_key(&cd.cd_id))
         {
             self.block(0, 1)?;
-            self.literal_tag(tag)?;
+            // The layout's tag holds the same literal.
+            if self.runtime_tag_literals.insert(ident_key(&cd.cd_id)) {
+                self.literal_tag(tag)?;
+            }
         }
         self.constructor_arguments(&cd.cd_args)?;
         self.option(cd.cd_res.as_ref(), |size, ty| size.type_expr(*ty))?;
@@ -1126,7 +1136,7 @@ impl<'a> ErrorSize<'a> {
         // constructor_case array
         self.block(0, layout.constructors.len())?;
         for (position, case) in layout.constructors.iter().enumerate() {
-            let owner = constructors.get(position).map(|cd| &cd.cd_id);
+            let owner = constructors.get(position);
             match case {
                 ConstructorCase::Constant(tag) => {
                     self.block(0, 1)?;
@@ -1153,28 +1163,16 @@ impl<'a> ErrorSize<'a> {
                 }
             }
         }
-        // matching_facts = {tag_name; block_types; literal_tags; has_null;
-        //                   has_undefined; has_other_literal}
+        // matching_facts = {tag_name; block_types; literal_tags}, whose
+        // lists share their elements with the constructor cases
+        // (variant_runtime.ml `compute_matching_facts`).
         let facts = &layout.matching_facts;
-        self.block(0, 6)?;
+        self.block(0, 3)?;
         self.option(facts.tag_name.as_ref(), |size, _| {
             size.tag_name(tag_attribute)
         })?;
-        self.list(&facts.block_types, |size, block_type| {
-            size.block_type(block_type)
-        })?;
-        // `literal_tags` (variant_runtime.ml `compute_matching_facts`): a
-        // constant's literal is the payload of its tag's `Some`, already
-        // counted, or a fresh `String name` sharing the tag's name string.
-        for case in &layout.constructors {
-            let ConstructorCase::Constant(tag) = case else {
-                continue;
-            };
-            self.block(0, 2)?;
-            if tag.literal.is_none() {
-                self.block(0, 1)?;
-            }
-        }
+        self.list(&facts.block_types, |_, _| Ok(()))?;
+        self.list(&facts.literal_tags, |_, _| Ok(()))?;
         Ok(())
     }
 
@@ -1187,26 +1185,47 @@ impl<'a> ErrorSize<'a> {
         }
     }
 
-    /// `{name; literal}`: the name is the constructor's ident name and the
-    /// literal its `cd_runtime_tag` (variant_layout.ml `get_tag`).
-    fn tag(&mut self, tag: &Tag, owner: Option<&Ident>) -> Walk {
+    /// `{name; literal}` (ast_untagged_variants.ml `declared_tag`): the name
+    /// is the constructor's ident name, and the literal the payload of its
+    /// `cd_runtime_tag`, or else a fresh `String name` sharing that name.
+    fn tag(&mut self, tag: &Tag, owner: Option<&ConstructorDeclaration>) -> Walk {
         self.block(0, 2)?;
-        if owner.is_none() {
+        let Some(cd) = owner else {
             self.string()?;
+            return self.literal_tag(&tag.literal);
+        };
+        match &cd.cd_runtime_tag {
+            Some(_) => {
+                if self.runtime_tag_literals.insert(ident_key(&cd.cd_id)) {
+                    self.literal_tag(&tag.literal)?;
+                }
+                Ok(())
+            }
+            None => self.block(0, 1),
         }
-        if let Some(literal) = &tag.literal {
-            let shared = owner.is_some_and(|id| self.runtime_tags.contains(&ident_key(id)));
-            if !shared {
+    }
+
+    /// `type_shape`: `Unstated` and `Never_undefined` are immediate.
+    fn value_shape(&mut self, shape: &crate::types::ValueShape) -> Walk {
+        match shape {
+            crate::types::ValueShape::Unstated | crate::types::ValueShape::NeverUndefined => Ok(()),
+            crate::types::ValueShape::RecognizedAs(block_type) => {
                 self.block(0, 1)?;
-                self.literal_tag(literal)?;
+                self.block_type(block_type)
             }
         }
-        Ok(())
     }
 
     fn block_type(&mut self, block_type: &BlockType) -> Walk {
         match block_type {
-            BlockType::Instance(_) => self.block(0, 1),
+            BlockType::Instance(crate::types::VariantInstance::Array) => self.block(0, 1),
+            // `InstanceType (Class {name; ancestors})`
+            BlockType::Instance(crate::types::VariantInstance::Class { ancestors, .. }) => {
+                self.block(0, 1)?;
+                self.block(0, 2)?;
+                self.string()?;
+                self.list(ancestors, |size, _| size.string())
+            }
             _ => Ok(()),
         }
     }

@@ -1167,14 +1167,9 @@ impl<'a> Printtyp<'a> {
         let repr = if !tagged {
             None
         } else {
-            let tag_type = layout.and_then(|layout| match layout.constructors.get(position) {
-                Some(crate::types::VariantConstructorCase::Constant(tag)) => tag.literal.clone(),
-                Some(crate::types::VariantConstructorCase::Block(block)) => {
-                    block.tag().literal.clone()
-                }
-                None => None,
-            });
-            match tag_type {
+            // printtyp.ml: the declared `@as`, `Option.map as_annotation
+            // cd.cd_runtime_tag`.
+            match cd.cd_runtime_tag.clone() {
                 Some(crate::types::VariantLiteralTag::Null) => Some("@as(null)".to_string()),
                 Some(crate::types::VariantLiteralTag::Undefined) => {
                     Some("@as(undefined)".to_string())

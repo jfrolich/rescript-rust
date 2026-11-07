@@ -70,6 +70,12 @@ impl LambdaCompiler {
                     unreachable!()
                 };
                 match &tag.runtime_tag {
+                    // lam_compile_const.ml: `Const_constructor {name = "[]"}`
+                    // is the number 0.
+                    _ if tag.name == "[]" => Expression::with_comment(
+                        ExpressionDesc::Number(Number::int(*i)),
+                        tag.name.clone(),
+                    ),
                     Some(ConstructorRuntimeTag::Int(value)) => Self::compile_runtime_int(*value),
                     // OCaml `Js_exp_make.tag_type`: `String s -> str s`.
                     Some(ConstructorRuntimeTag::String(value)) => {
@@ -99,30 +105,29 @@ impl LambdaCompiler {
                     None => Expression::number(Number::int(*i)),
                 }
             }
+            // lam_compile_const.ml: `Const_constructor {name = "[]"}` is the
+            // number 0, any other constant its literal (`E.literal_tag`).
+            Constant::Constructor(tag) if tag.name == "[]" => {
+                Expression::with_comment(ExpressionDesc::Number(Number::int(0)), tag.name.clone())
+            }
             Constant::Constructor(tag) => match &tag.literal {
-                Some(crate::types::VariantLiteralTag::Int(value)) => {
+                crate::types::VariantLiteralTag::Int(value) => {
                     Expression::number(Number::int(*value as i32))
                 }
-                // lam_compile_const.ml `E.tag_type t`: `String s -> str s`.
-                Some(crate::types::VariantLiteralTag::String(value)) => {
+                crate::types::VariantLiteralTag::String(value) => {
                     Expression::new(ExpressionDesc::Str(value.clone()))
                 }
-                Some(crate::types::VariantLiteralTag::Float(value)) => {
+                crate::types::VariantLiteralTag::Float(value) => {
                     Expression::number(Number::float(value.clone()))
                 }
                 // js_exp_make.ml `literal_tag`: `Bigint_utils.parse_bigint`.
-                Some(crate::types::VariantLiteralTag::BigInt(value)) => {
+                crate::types::VariantLiteralTag::BigInt(value) => {
                     let (positive, digits) = crate::types::typecore::parse_bigint_literal(value);
                     Expression::number(Number::bigint(positive, digits))
                 }
-                Some(crate::types::VariantLiteralTag::Bool(value)) => Expression::bool(*value),
-                Some(crate::types::VariantLiteralTag::Null) => Expression::null(),
-                Some(crate::types::VariantLiteralTag::Undefined) => Expression::undefined(false),
-                None if tag.name == "[]" => Expression::with_comment(
-                    ExpressionDesc::Number(Number::int(0)),
-                    tag.name.clone(),
-                ),
-                None => Expression::string(tag.name.clone()),
+                crate::types::VariantLiteralTag::Bool(value) => Expression::bool(*value),
+                crate::types::VariantLiteralTag::Null => Expression::null(),
+                crate::types::VariantLiteralTag::Undefined => Expression::undefined(false),
             },
             Constant::NativeInt { i, comment } => {
                 match pointer_info_comment_text(comment.as_ref().map(|v| &**v)) {

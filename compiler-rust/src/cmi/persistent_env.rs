@@ -3463,20 +3463,8 @@ fn decode_cmj_variant_tag(value: &OcamlValue) -> Option<crate::types::VariantTag
     }
     Some(crate::types::VariantTag {
         name: fields[0].as_string().to_string(),
-        literal: decode_cmj_variant_literal_tag_option(&fields[1])?,
+        literal: decode_cmj_variant_literal_tag(&fields[1])?,
     })
-}
-
-fn decode_cmj_variant_literal_tag_option(
-    value: &OcamlValue,
-) -> Option<Option<crate::types::VariantLiteralTag>> {
-    match value {
-        OcamlValue::Int(0) => Some(None),
-        OcamlValue::Block(0, fields) if fields.len() == 1 => {
-            Some(Some(decode_cmj_variant_literal_tag(&fields[0])?))
-        }
-        _ => None,
-    }
 }
 
 /// `Variant_runtime.literal_tag`.
@@ -7944,6 +7932,7 @@ fn add_signature_to_env_with_options_inner(
                                         type_immediate: false,
                                         type_representation:
                                             crate::types::TypeRepresentation::Boxed,
+                                        type_shape: crate::types::ValueShape::Unstated,
                                         type_inlined_types: vec![],
                                         type_path: None,
                                     };

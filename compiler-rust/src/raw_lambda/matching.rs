@@ -5199,7 +5199,7 @@ fn rejects_nested_some(ctx_ref: &TypeContext, p: &Pattern) -> bool {
                 if !constructor_has_optional_shape(cstr) =>
             {
                 match reference.representation(ctx_ref) {
-                    ConstructorCase::Constant(tag) => tag.literal != Some(LiteralTag::Undefined),
+                    ConstructorCase::Constant(tag) => tag.literal != LiteralTag::Undefined,
                     ConstructorCase::Block(Block::Untagged {
                         block_type: BlockType::Object | BlockType::Unknown,
                         ..
@@ -7559,7 +7559,7 @@ fn switch_defaults_on_undefined(sw: &RawLambdaSwitch) -> bool {
                 && !(sw.sw_consts_full && !sw.sw_consts.is_empty())
                 && sw.sw_consts.iter().all(|(key, _)| match key {
                     crate::lambda::SwitchKey::Constructor(ConstructorCase::Constant(tag)) => {
-                        tag.literal != Some(LiteralTag::Undefined)
+                        tag.literal != LiteralTag::Undefined
                     }
                     _ => true,
                 })

@@ -1613,7 +1613,7 @@ mod tests {
                 ),
                 Lambda::const_(Constant::Constructor(crate::types::VariantTag {
                     name: "Done".into(),
-                    literal: None,
+                    literal: crate::types::VariantLiteralTag::String("Done".into()),
                 })),
                 Lambda::const_(Constant::JsNull),
             ],

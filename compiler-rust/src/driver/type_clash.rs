@@ -1119,10 +1119,9 @@ fn print_extra_type_clash_help_by_types(
             let layout = ctx.with_variant_layout(*layout, |l| l.clone());
             let matching = constructors.iter().enumerate().find_map(|(position, cd)| {
                 let constructor_name = cd.cd_id.name().to_string();
-                let runtime_repr = match constructor_tag(&layout, position) {
-                    Some(crate::types::variant_runtime::LiteralTag::String(s)) => Some(s),
-                    Some(_) => None,
-                    None => Some(constructor_name.clone()),
+                let runtime_repr = match layout.constructor_tag(position) {
+                    crate::types::variant_runtime::LiteralTag::String(s) => Some(s.clone()),
+                    _ => None,
                 };
                 (runtime_repr.as_deref() == Some(string_value.as_str())).then_some(constructor_name)
             });
@@ -1206,17 +1205,6 @@ fn print_extra_type_clash_help_by_types(
                 ppf.cut();
             }
         }
-    }
-}
-
-/// `Variant_runtime.constructor_tag layout position`.
-fn constructor_tag(
-    layout: &crate::types::variant_runtime::Layout,
-    position: usize,
-) -> Option<crate::types::variant_runtime::LiteralTag> {
-    match layout.constructors.get(position)? {
-        crate::types::variant_runtime::ConstructorCase::Constant(tag) => tag.literal.clone(),
-        crate::types::variant_runtime::ConstructorCase::Block(block) => block.tag().literal.clone(),
     }
 }
 

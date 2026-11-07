@@ -268,18 +268,29 @@ fn set_field_dbg_info(info: &SetFieldDbgInfo) -> Sexp {
     }
 }
 
+fn variant_instance(instance: &crate::types::VariantInstance) -> Sexp {
+    match instance {
+        crate::types::VariantInstance::Array => Sexp::atom("Array"),
+        crate::types::VariantInstance::Class { name, ancestors } => Sexp::list(vec![
+            Sexp::atom("Class"),
+            string(name),
+            Sexp::list(ancestors.iter().map(|ancestor| string(ancestor)).collect()),
+        ]),
+    }
+}
+
 fn variant_block_type(block: &crate::types::VariantBlockType) -> Sexp {
     use crate::types::VariantBlockType as B;
     match block {
-        B::Int => Sexp::atom("IntType"),
+        B::Number => Sexp::atom("NumberType"),
         B::String => Sexp::atom("StringType"),
-        B::Float => Sexp::atom("FloatType"),
         B::Bigint => Sexp::atom("BigintType"),
         B::Boolean => Sexp::atom("BooleanType"),
         B::Instance(instance) => Sexp::list(vec![
             Sexp::atom("InstanceType"),
-            Sexp::atom(instance.as_str()),
+            variant_instance(instance),
         ]),
+        B::Symbol => Sexp::atom("SymbolType"),
         B::Function => Sexp::atom("FunctionType"),
         B::Object => Sexp::atom("ObjectType"),
         B::Unknown => Sexp::atom("UnknownType"),
@@ -325,10 +336,7 @@ fn variant_tag(tag: &crate::types::VariantTag) -> Sexp {
     Sexp::list(vec![
         Sexp::atom("tag"),
         string(&tag.name),
-        tag.literal.as_ref().map_or_else(
-            || Sexp::atom("None"),
-            |literal| Sexp::list(vec![Sexp::atom("Some"), variant_literal_tag(literal)]),
-        ),
+        variant_literal_tag(&tag.literal),
     ])
 }
 
@@ -352,9 +360,6 @@ fn variant_matching_facts(facts: &crate::types::VariantMatchingFacts) -> Sexp {
         ),
         Sexp::list(facts.block_types.iter().map(variant_block_type).collect()),
         Sexp::list(facts.literal_tags.iter().map(variant_literal_tag).collect()),
-        bool_sexp(facts.has_null),
-        bool_sexp(facts.has_undefined),
-        bool_sexp(facts.has_other_literal),
     ])
 }
 
@@ -1038,7 +1043,7 @@ mod tests {
         let constant_key = crate::lambda::SwitchKey::Constructor(
             crate::types::VariantConstructorCase::Constant(crate::types::VariantTag {
                 name: "Null".to_string(),
-                literal: None,
+                literal: crate::types::VariantLiteralTag::String("Null".to_string()),
             }),
         );
         let block_key =
@@ -1046,7 +1051,7 @@ mod tests {
                 crate::types::VariantBlock::Tagged(crate::types::TaggedBlock {
                     tag: crate::types::VariantTag {
                         name: "Boolean".to_string(),
-                        literal: None,
+                        literal: crate::types::VariantLiteralTag::String("Boolean".to_string()),
                     },
                     tag_name: None,
                 }),

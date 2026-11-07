@@ -105,9 +105,11 @@ impl TagInfo {
         let name = name.into();
         TagInfo::Constructor {
             runtime: Box::new(crate::types::TaggedBlock {
+                // ast_untagged_variants.ml `generated_tag`: a constructor
+                // the compiler generates is represented by its name.
                 tag: crate::types::VariantTag {
                     name: name.clone(),
-                    literal: None,
+                    literal: crate::types::VariantLiteralTag::String(name.clone()),
                 },
                 tag_name: None,
             }),

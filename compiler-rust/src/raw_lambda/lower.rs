@@ -403,8 +403,10 @@ fn collect_exported_idents(raw: &RawLambda, exports: &mut HashSet<Ident>) {
 pub(crate) fn lower_constant(constant: Constant) -> Constant {
     match constant {
         Constant::Constructor(tag) if tag.name == "()" => Constant::JsUndefined { is_unit: true },
+        // lambda.ml `const_constructor`: the empty list stays a constructor,
+        // printed as `0 /* [] */`.
         Constant::Constructor(tag) => match tag.literal {
-            Some(crate::types::VariantLiteralTag::Int(value)) => Constant::Int {
+            crate::types::VariantLiteralTag::Int(value) if tag.name != "[]" => Constant::Int {
                 i: value as i32,
                 comment: None,
             },
@@ -1438,7 +1440,7 @@ mod tests {
                     crate::lambda::SwitchKey::Constructor(
                         crate::types::VariantConstructorCase::Constant(crate::types::VariantTag {
                             name: "A".to_string(),
-                            literal: None,
+                            literal: crate::types::VariantLiteralTag::String("A".to_string()),
                         }),
                     ),
                     RawLambda::const_(Constant::int(0)),
@@ -1453,9 +1455,6 @@ mod tests {
                         literal_tags: vec![crate::types::VariantLiteralTag::String(
                             "A".to_string().clone(),
                         )],
-                        has_null: false,
-                        has_undefined: false,
-                        has_other_literal: true,
                     },
                 ),
             }),
@@ -1511,7 +1510,9 @@ mod tests {
                             crate::types::VariantConstructorCase::Constant(
                                 crate::types::VariantTag {
                                     name: "A".to_string(),
-                                    literal: None,
+                                    literal: crate::types::VariantLiteralTag::String(
+                                        "A".to_string(),
+                                    ),
                                 },
                             ),
                         ),
@@ -1522,7 +1523,9 @@ mod tests {
                             crate::types::VariantConstructorCase::Constant(
                                 crate::types::VariantTag {
                                     name: "B".to_string(),
-                                    literal: None,
+                                    literal: crate::types::VariantLiteralTag::String(
+                                        "B".to_string(),
+                                    ),
                                 },
                             ),
                         ),
@@ -1540,9 +1543,6 @@ mod tests {
                             crate::types::VariantLiteralTag::String("B".to_string().clone()),
                             crate::types::VariantLiteralTag::String("A".to_string().clone()),
                         ],
-                        has_null: false,
-                        has_undefined: false,
-                        has_other_literal: true,
                     },
                 ),
             }),

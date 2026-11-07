@@ -67,7 +67,7 @@ fn predef_exception_ident(name: &str, stamp: i32) -> Ident {
 fn recmodule_function_shape_constant() -> Constant {
     Constant::Constructor(crate::types::VariantTag {
         name: "Function".to_string(),
-        literal: None,
+        literal: crate::types::VariantLiteralTag::String("Function".to_string()),
     })
 }
 
@@ -353,9 +353,9 @@ fn label_runtime_name(lbl: &LabelDescription) -> String {
 }
 
 fn constructor_runtime_tag(
-    tag: &Option<crate::types::VariantLiteralTag>,
+    tag: &crate::types::VariantLiteralTag,
 ) -> Option<ConstructorRuntimeTag> {
-    tag.as_ref().map(|tag| match tag {
+    Some(match tag {
         crate::types::VariantLiteralTag::Int(value) => {
             ConstructorRuntimeTag::Int(i64::from(*value as i32))
         }
@@ -7523,6 +7523,7 @@ mod tests {
                 type_attributes: vec![],
                 type_immediate: false,
                 type_representation: crate::types::TypeRepresentation::Boxed,
+                type_shape: crate::types::ValueShape::Unstated,
                 type_inlined_types: vec![],
                 type_path: None,
             })),
@@ -7965,6 +7966,7 @@ mod tests {
             type_attributes: vec![],
             type_immediate: false,
             type_representation: crate::types::TypeRepresentation::Boxed,
+            type_shape: crate::types::ValueShape::Unstated,
             type_inlined_types: vec![],
             type_path: None,
         }
@@ -8611,8 +8613,8 @@ mod tests {
             init_v,
             Constant::Constructor(crate::types::VariantTag {
                 name,
-                literal: None,
-            }) if name == "Function"
+                literal: crate::types::VariantLiteralTag::String(literal),
+            }) if name == "Function" && literal == "Function"
         ));
     }
 }

@@ -92,6 +92,10 @@ pub struct TypeDeclaration {
     pub type_immediate: bool,
     /// Runtime representation for single-payload unboxing.
     pub type_representation: TypeRepresentation,
+    /// OCaml `type_shape`: what the declaration itself states about its
+    /// values at run time, resolved in its own environment when it is
+    /// declared (`Variant_layout.resolve_shapes`).
+    pub type_shape: super::variant_runtime::ValueShape,
     /// Inlined types (for record printing)
     pub type_inlined_types: Vec<TypeInlinedType>,
     /// Qualified path for this type (e.g., Pdot(Pident "Pervasives") "ref").

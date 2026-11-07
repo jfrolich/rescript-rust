@@ -7,74 +7,107 @@
 
 use super::context::TypeContext;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+/// OCaml `Variant_runtime.Instance.t`: a JavaScript class whose instances a
+/// value is recognized by. `name` is the global constructor's path, such as
+/// `"Date"` or `"Intl.Locale"`, and `ancestors` are the paths of its
+/// superclasses that are declared too, nearest first. Arrays are recognized
+/// by `Array.isArray` instead.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Instance {
     Array,
-    ArrayBuffer,
-    BigInt64Array,
-    BigUint64Array,
-    Blob,
-    DataView,
-    Date,
-    File,
-    Float32Array,
-    Float64Array,
-    Int16Array,
-    Int32Array,
-    Int8Array,
-    Promise,
-    RegExp,
-    Uint16Array,
-    Uint32Array,
-    Uint8Array,
-    Uint8ClampedArray,
-    Set,
-    Map,
-    WeakSet,
-    WeakMap,
+    Class {
+        name: String,
+        ancestors: Vec<String>,
+    },
 }
 
 impl Instance {
-    pub fn as_str(self) -> &'static str {
+    /// variant_runtime.ml `Instance.to_string`.
+    pub fn as_str(&self) -> &str {
         match self {
             Self::Array => "Array",
-            Self::ArrayBuffer => "ArrayBuffer",
-            Self::BigInt64Array => "BigInt64Array",
-            Self::BigUint64Array => "BigUint64Array",
-            Self::Blob => "Blob",
-            Self::DataView => "DataView",
-            Self::Date => "Date",
-            Self::File => "File",
-            Self::Float32Array => "Float32Array",
-            Self::Float64Array => "Float64Array",
-            Self::Int16Array => "Int16Array",
-            Self::Int32Array => "Int32Array",
-            Self::Int8Array => "Int8Array",
-            Self::Promise => "Promise",
-            Self::RegExp => "RegExp",
-            Self::Uint16Array => "Uint16Array",
-            Self::Uint32Array => "Uint32Array",
-            Self::Uint8Array => "Uint8Array",
-            Self::Uint8ClampedArray => "Uint8ClampedArray",
-            Self::Set => "Set",
-            Self::Map => "Map",
-            Self::WeakSet => "WeakSet",
-            Self::WeakMap => "WeakMap",
+            Self::Class { name, .. } => name,
+        }
+    }
+
+    /// variant_runtime.ml `Instance.is_subclass`: whether every instance of
+    /// `self` is an instance of `of_` too, without the two being the same
+    /// class.
+    pub fn is_subclass(&self, of_: &Instance) -> bool {
+        match (self, of_) {
+            (Self::Class { ancestors, .. }, Self::Class { name, .. }) => ancestors.contains(name),
+            _ => false,
         }
     }
 }
 
+/// OCaml `Variant_runtime.block_type`: the runtime representation of an
+/// untagged block (a case with a payload).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum BlockType {
-    Int,
+    /// `int` and `float` alike.
+    Number,
     String,
-    Float,
     Bigint,
     Boolean,
     Instance(Instance),
+    Symbol,
     Function,
     Object,
     Unknown,
+}
+
+/// variant_runtime.ml `typeof_kinds`: the payload kinds recognized by
+/// `typeof`, with the name it returns.
+const TYPEOF_KINDS: [(BlockType, &str); 7] = [
+    (BlockType::String, "string"),
+    (BlockType::Number, "number"),
+    (BlockType::Bigint, "bigint"),
+    (BlockType::Boolean, "boolean"),
+    (BlockType::Symbol, "symbol"),
+    (BlockType::Function, "function"),
+    (BlockType::Object, "object"),
+];
+
+impl BlockType {
+    /// variant_runtime.ml `typeof_name`: what `typeof` returns for values of a
+    /// kind it recognizes; `None` for instances and unknown payloads.
+    pub fn typeof_name(&self) -> Option<&'static str> {
+        TYPEOF_KINDS
+            .iter()
+            .find(|(kind, _)| kind == self)
+            .map(|(_, name)| *name)
+    }
+
+    /// variant_runtime.ml `block_type_of_typeof`.
+    pub fn of_typeof(name: &str) -> Option<BlockType> {
+        TYPEOF_KINDS
+            .iter()
+            .find(|(_, kind)| *kind == name)
+            .map(|(block_type, _)| block_type.clone())
+    }
+}
+
+/// OCaml `Variant_runtime.value_shape`: what a type declaration states about
+/// its values at run time, through `@notUndefined`, `@instanceOf` or
+/// `@typeOf`. Each level implies the one before. The recognized kind is boxed
+/// so that the common `Unstated` case keeps declarations small.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+pub enum ValueShape {
+    /// Nothing: an abbreviation has the shape of the type it abbreviates.
+    #[default]
+    Unstated,
+    /// `@notUndefined`.
+    NeverUndefined,
+    /// `@instanceOf` or `@typeOf`: a payload of this kind, with the class's
+    /// declared superclasses.
+    RecognizedAs(Box<BlockType>),
+}
+
+impl ValueShape {
+    pub fn recognized_as(block_type: BlockType) -> Self {
+        Self::RecognizedAs(Box::new(block_type))
+    }
 }
 
 /// OCaml `Variant_runtime.literal_tag`: the literal value a constructor is
@@ -102,14 +135,47 @@ pub(crate) fn ocaml_float_of_string(s: &str) -> Option<f64> {
 /// variant_runtime.ml `number_key`: `-0.` and `0.` are equal for `===`.
 /// OCaml spells every other number exactly with `%h`; the key is internal, so
 /// the exact bit pattern serves the same equality.
+/// variant_runtime.ml `number_key`: `-0.` and `0.` are equal for `===`;
+/// `%h` is exact for every other number.
 fn number_key(x: f64) -> String {
     if x == 0.0 {
         "number:0".to_string()
-    } else if x.is_nan() {
-        "number:nan".to_string()
     } else {
-        format!("number:{:x}", x.to_bits())
+        format!("number:{}", ocaml_hex_float(x))
     }
+}
+
+/// OCaml's `Printf.sprintf "%h"` (`caml_hexstring_of_float`): `0x1p+0`,
+/// `-0x1.8p-1`, `0x0.0000000000001p-1022` for a subnormal, `infinity`,
+/// `nan`.
+fn ocaml_hex_float(x: f64) -> String {
+    if x.is_nan() {
+        return "nan".to_string();
+    }
+    if x.is_infinite() {
+        return if x > 0.0 { "infinity" } else { "-infinity" }.to_string();
+    }
+    let bits = x.to_bits();
+    let sign = if bits >> 63 == 1 { "-" } else { "" };
+    let biased_exp = ((bits >> 52) & 0x7ff) as i64;
+    let mantissa = bits & ((1u64 << 52) - 1);
+    let (lead, exp) = if biased_exp == 0 {
+        // Zero or subnormal.
+        (0, if mantissa == 0 { 0 } else { -1022 })
+    } else {
+        (1, biased_exp - 1023)
+    };
+    let mut frac = format!("{mantissa:013x}");
+    while frac.ends_with('0') {
+        frac.pop();
+    }
+    let frac = if frac.is_empty() {
+        String::new()
+    } else {
+        format!(".{frac}")
+    };
+    let exp_sign = if exp < 0 { "-" } else { "+" };
+    format!("{sign}0x{lead}{frac}p{exp_sign}{}", exp.abs())
 }
 
 impl LiteralTag {
@@ -153,28 +219,12 @@ pub enum TagType {
     PayloadShape(BlockType),
 }
 
-/// OCaml `Variant_runtime.tag`: a constructor's name and its optional
-/// explicitly declared runtime literal.
+/// OCaml `Variant_runtime.tag`: a constructor's name and its runtime
+/// literal: what `@as` states, or the name itself.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Tag {
     pub name: String,
-    pub literal: Option<LiteralTag>,
-}
-
-/// OCaml `Variant_runtime.matchable_tag`: a tag widened for matching, where
-/// an untagged payload shape can take part alongside declared literals.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct MatchableTag {
-    pub name: String,
-    pub tag_type: Option<TagType>,
-}
-
-/// OCaml `Variant_runtime.to_matchable_tag`.
-pub fn to_matchable_tag(tag: &Tag) -> MatchableTag {
-    MatchableTag {
-        name: tag.name.clone(),
-        tag_type: tag.literal.clone().map(TagType::Literal),
-    }
+    pub literal: LiteralTag,
 }
 
 /// OCaml `Variant_runtime.tagged_block`.
@@ -229,11 +279,11 @@ pub struct Configuration {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MatchingFacts {
     pub tag_name: Option<String>,
+    /// Runtime shapes of the untagged payload constructors, in declaration
+    /// order.
     pub block_types: Vec<BlockType>,
+    /// Runtime values of all nullary constructors, in declaration order.
     pub literal_tags: Vec<LiteralTag>,
-    pub has_null: bool,
-    pub has_undefined: bool,
-    pub has_other_literal: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -329,38 +379,19 @@ pub struct ConstructorReference {
 }
 
 impl Layout {
+    /// variant_runtime.ml `make_layout` / `compute_matching_facts`.
     pub fn new(configuration: Configuration, constructors: Vec<ConstructorCase>) -> Self {
         let mut block_types = Vec::new();
         let mut literal_tags = Vec::new();
-        let mut has_null = false;
-        let mut has_undefined = false;
-        let mut has_other_literal = false;
         for case in &constructors {
             match case {
-                ConstructorCase::Constant(tag) => {
-                    // Without an `@as`, a nullary constructor is its own name.
-                    let literal = tag
-                        .literal
-                        .clone()
-                        .unwrap_or_else(|| LiteralTag::String(tag.name.clone()));
-                    match literal {
-                        LiteralTag::Null => has_null = true,
-                        LiteralTag::Undefined => has_undefined = true,
-                        _ => has_other_literal = true,
-                    }
-                    literal_tags.push(literal);
+                ConstructorCase::Constant(tag) => literal_tags.push(tag.literal.clone()),
+                ConstructorCase::Block(Block::Untagged { block_type, .. }) => {
+                    block_types.push(block_type.clone())
                 }
-                ConstructorCase::Block(block) => {
-                    if let Block::Untagged { block_type, .. } = block {
-                        block_types.push(block_type.clone());
-                    }
-                }
+                ConstructorCase::Block(Block::Tagged(_)) => {}
             }
         }
-        // OCaml conses each tag onto the front of its list; build in source
-        // order and reverse once to get the same order.
-        block_types.reverse();
-        literal_tags.reverse();
         Self {
             unboxed: configuration.unboxed,
             constructors,
@@ -368,10 +399,16 @@ impl Layout {
                 tag_name: configuration.tag_name,
                 block_types,
                 literal_tags,
-                has_null,
-                has_undefined,
-                has_other_literal,
             },
+        }
+    }
+
+    /// variant_runtime.ml `constructor_tag`: the literal of a constant
+    /// constructor, or of the tag of a tagged one.
+    pub fn constructor_tag(&self, position: usize) -> &LiteralTag {
+        match &self.constructors[position] {
+            ConstructorCase::Constant(tag) => &tag.literal,
+            ConstructorCase::Block(block) => &block.tag().literal,
         }
     }
 
@@ -420,10 +457,13 @@ pub fn plain_layout(
     let constructors = cases
         .into_iter()
         .map(|(name, has_payload)| {
-            let tag = Tag {
-                name,
-                literal: None,
+            // The empty list is the number 0.
+            let literal = if name == "[]" {
+                LiteralTag::Int(0)
+            } else {
+                LiteralTag::String(name.clone())
             };
+            let tag = Tag { name, literal };
             if has_payload {
                 ConstructorCase::Block(Block::Tagged(TaggedBlock {
                     tag,
@@ -441,4 +481,24 @@ pub fn plain_layout(
         },
         constructors,
     ))
+}
+
+#[cfg(test)]
+mod hex_float_tests {
+    use super::ocaml_hex_float;
+
+    #[test]
+    fn matches_ocaml_percent_h() {
+        // Values printed by OCaml's `Printf.sprintf "%h"`.
+        assert_eq!(ocaml_hex_float(1.0), "0x1p+0");
+        assert_eq!(ocaml_hex_float(2.0), "0x1p+1");
+        assert_eq!(ocaml_hex_float(1.5), "0x1.8p+0");
+        assert_eq!(ocaml_hex_float(-0.5), "-0x1p-1");
+        assert_eq!(ocaml_hex_float(0.1), "0x1.999999999999ap-4");
+        assert_eq!(
+            ocaml_hex_float(f64::from_bits(1)),
+            "0x0.0000000000001p-1022"
+        );
+        assert_eq!(ocaml_hex_float(f64::INFINITY), "infinity");
+    }
 }

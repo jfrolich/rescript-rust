@@ -275,7 +275,7 @@ fn nested_wrapped_staticcatch_trywith_tail_loops_lower_like_gpr_1701() {
                 runtime: Box::new(crate::types::TaggedBlock {
                     tag: crate::types::VariantTag {
                         name: "::".to_string(),
-                        literal: None,
+                        literal: crate::types::VariantLiteralTag::String("::".to_string()),
                     },
                     tag_name: None,
                 }),
@@ -586,7 +586,9 @@ fn nested_staticcatch_switch_forwarders_keep_collapsed_shared_return_like_gpr_36
                             crate::types::VariantConstructorCase::Constant(
                                 crate::types::VariantTag {
                                     name: "Empty".to_string(),
-                                    literal: None,
+                                    literal: crate::types::VariantLiteralTag::String(
+                                        "Empty".to_string(),
+                                    ),
                                 },
                             ),
                         ),
@@ -600,7 +602,9 @@ fn nested_staticcatch_switch_forwarders_keep_collapsed_shared_return_like_gpr_36
                                     crate::types::VariantBlock::Tagged(crate::types::TaggedBlock {
                                         tag: crate::types::VariantTag {
                                             name: "Int1".to_string(),
-                                            literal: None,
+                                            literal: crate::types::VariantLiteralTag::String(
+                                                "Int1".to_string(),
+                                            ),
                                         },
                                         tag_name: None,
                                     }),
@@ -614,7 +618,9 @@ fn nested_staticcatch_switch_forwarders_keep_collapsed_shared_return_like_gpr_36
                                     crate::types::VariantBlock::Tagged(crate::types::TaggedBlock {
                                         tag: crate::types::VariantTag {
                                             name: "Int2".to_string(),
-                                            literal: None,
+                                            literal: crate::types::VariantLiteralTag::String(
+                                                "Int2".to_string(),
+                                            ),
                                         },
                                         tag_name: None,
                                     }),
@@ -631,9 +637,6 @@ fn nested_staticcatch_switch_forwarders_keep_collapsed_shared_return_like_gpr_36
                             literal_tags: vec![crate::types::VariantLiteralTag::String(
                                 "Empty".to_string().clone(),
                             )],
-                            has_null: false,
-                            has_undefined: false,
-                            has_other_literal: true,
                         },
                     ),
                 }),
@@ -839,7 +842,9 @@ fn single_case_staticcatch_wrapped_named_variant_return_switch_falls_through_to_
                             crate::types::VariantConstructorCase::Constant(
                                 crate::types::VariantTag {
                                     name: "One".to_string(),
-                                    literal: None,
+                                    literal: crate::types::VariantLiteralTag::String(
+                                        "One".to_string(),
+                                    ),
                                 },
                             ),
                         ),
@@ -855,9 +860,6 @@ fn single_case_staticcatch_wrapped_named_variant_return_switch_falls_through_to_
                             literal_tags: vec![crate::types::VariantLiteralTag::String(
                                 "One".to_string().clone(),
                             )],
-                            has_null: false,
-                            has_undefined: false,
-                            has_other_literal: true,
                         },
                     ),
                 }),
@@ -910,7 +912,7 @@ fn single_case_staticcatch_wrapped_named_variant_non_unit_return_switch_falls_th
                     crate::lambda::SwitchKey::Constructor(
                         crate::types::VariantConstructorCase::Constant(crate::types::VariantTag {
                             name: "One".to_string(),
-                            literal: None,
+                            literal: crate::types::VariantLiteralTag::String("One".to_string()),
                         }),
                     ),
                     Lambda::const_(Constant::int(1)),
@@ -925,9 +927,6 @@ fn single_case_staticcatch_wrapped_named_variant_non_unit_return_switch_falls_th
                         literal_tags: vec![crate::types::VariantLiteralTag::String(
                             "One".to_string().clone(),
                         )],
-                        has_null: false,
-                        has_undefined: false,
-                        has_other_literal: true,
                     },
                 ),
             }),
@@ -973,7 +972,9 @@ fn single_case_staticcatch_wrapped_named_variant_unit_handler_falls_through_like
                             crate::types::VariantConstructorCase::Constant(
                                 crate::types::VariantTag {
                                     name: "One".to_string(),
-                                    literal: None,
+                                    literal: crate::types::VariantLiteralTag::String(
+                                        "One".to_string(),
+                                    ),
                                 },
                             ),
                         ),
@@ -989,9 +990,6 @@ fn single_case_staticcatch_wrapped_named_variant_unit_handler_falls_through_like
                             literal_tags: vec![crate::types::VariantLiteralTag::String(
                                 "One".to_string().clone(),
                             )],
-                            has_null: false,
-                            has_undefined: false,
-                            has_other_literal: true,
                         },
                     ),
                 }),
@@ -1050,7 +1048,9 @@ fn js_pipeline_keeps_single_case_staticcatch_unit_handler_as_fallthrough_guard()
                                 crate::types::VariantConstructorCase::Constant(
                                     crate::types::VariantTag {
                                         name: "One".to_string(),
-                                        literal: None,
+                                        literal: crate::types::VariantLiteralTag::String(
+                                            "One".to_string(),
+                                        ),
                                     },
                                 ),
                             ),
@@ -1066,9 +1066,6 @@ fn js_pipeline_keeps_single_case_staticcatch_unit_handler_as_fallthrough_guard()
                                 literal_tags: vec![crate::types::VariantLiteralTag::String(
                                     "One".to_string().clone(),
                                 )],
-                                has_null: false,
-                                has_undefined: false,
-                                has_other_literal: true,
                             },
                         ),
                     }),

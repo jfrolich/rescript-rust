@@ -22,6 +22,7 @@
 //! - [`print`] - Pretty printing for debugging
 //! - [`compile_context`] - Compilation context for Lambda to JS IR
 
+pub(crate) mod untagged_dispatch;
 pub mod indexed;
 pub mod js_exp_make;
 pub mod js_pass_external_shadow;
@@ -210,36 +211,32 @@ impl std::fmt::Display for SwitchKey {
     }
 }
 
-/// lambda.ml `value_kind`: constants classified by the JavaScript value
-/// emitted for them, not by their source constructor.
-enum ValueKind {
-    IsLiteral(crate::types::VariantLiteralTag),
-    IsObject,
-    IsArray,
-    UnknownValue,
-}
-
-/// lambda.ml `runtime_value_kind`.
-fn runtime_value_kind(c: &Constant) -> ValueKind {
+/// lambda.ml `untagged_value`: the JavaScript value a constant is emitted as
+/// by `Lam_compile_const` and `Js_dump`, not its source constructor. A
+/// constant of another representation keeps the dispatch at run time.
+pub(crate) fn untagged_value(c: &Constant) -> Option<untagged_dispatch::Value> {
     use crate::types::VariantLiteralTag as L;
-    match c {
-        Constant::String(s) | Constant::ImmString(s) => ValueKind::IsLiteral(L::String(s.clone())),
-        Constant::Int { i, .. } => ValueKind::IsLiteral(L::Int(i64::from(*i))),
-        Constant::NativeInt { i, .. } => ValueKind::IsLiteral(L::Int(i64::from(*i as i32))),
-        Constant::Float(f) => ValueKind::IsLiteral(L::Float(f.clone())),
-        Constant::JsTrue => ValueKind::IsLiteral(L::Bool(true)),
-        Constant::JsFalse => ValueKind::IsLiteral(L::Bool(false)),
-        Constant::JsNull => ValueKind::IsLiteral(L::Null),
-        Constant::JsUndefined { .. } => ValueKind::IsLiteral(L::Undefined),
-        Constant::Pointer(name) => ValueKind::IsLiteral(L::String(name.clone())),
-        Constant::Constructor(tag) => match &tag.literal {
-            None if tag.name == "[]" => ValueKind::IsLiteral(L::Int(0)),
-            None => ValueKind::IsLiteral(L::String(tag.name.clone())),
-            Some(L::BigInt(_)) => ValueKind::UnknownValue,
-            Some(literal) => ValueKind::IsLiteral(literal.clone()),
-        },
+    use untagged_dispatch::Value;
+    Some(match c {
+        Constant::String(s) | Constant::ImmString(s) => Value::Literal(L::String(s.clone())),
+        Constant::Int { i, .. } => Value::Literal(L::Int(i64::from(*i))),
+        Constant::NativeInt { i, .. } => Value::Literal(L::Int(i64::from(*i as i32))),
+        Constant::Float(f) => Value::Literal(L::Float(f.clone())),
+        Constant::JsTrue => Value::Literal(L::Bool(true)),
+        Constant::JsFalse => Value::Literal(L::Bool(false)),
+        Constant::JsNull => Value::Literal(L::Null),
+        Constant::JsUndefined { .. } => Value::Literal(L::Undefined),
+        // `Const_polyvar name`.
+        Constant::Pointer(name) => Value::Literal(L::String(name.clone())),
+        Constant::Constructor(tag) => Value::Literal(tag.literal.clone()),
+        // `Bigint_utils.to_string sign digits`.
+        Constant::BigInt { negative, value } => Value::Literal(L::BigInt(if *negative {
+            format!("-{value}")
+        } else {
+            value.clone()
+        })),
         Constant::Block { tag_info, .. } => match &**tag_info {
-            TagInfo::Tuple => ValueKind::IsArray,
+            TagInfo::Tuple => Value::Array,
             TagInfo::Record { fields, .. } => {
                 if !fields.is_empty()
                     && fields
@@ -247,17 +244,15 @@ fn runtime_value_kind(c: &Constant) -> ValueKind {
                         .enumerate()
                         .all(|(i, (name, _))| is_decimal_index(name, i))
                 {
-                    ValueKind::IsArray
+                    Value::Array
                 } else {
-                    ValueKind::IsObject
+                    Value::Object
                 }
             }
-            _ => ValueKind::IsObject,
+            _ => Value::Object,
         },
-        Constant::Char(_) | Constant::BigInt { .. } | Constant::Some(_) | Constant::ModuleAlias => {
-            ValueKind::UnknownValue
-        }
-    }
+        Constant::Char(_) | Constant::Some(_) | Constant::ModuleAlias => return None,
+    })
 }
 
 /// `name = string_of_int i` without allocating: canonical decimal digits
@@ -269,7 +264,8 @@ fn is_decimal_index(name: &str, i: usize) -> bool {
         && name.parse::<usize>() == Ok(i)
 }
 
-/// lambda.ml `literal_denotes_same` = `Variant_runtime.same_literal_value`.
+/// lambda.ml `literal_denotes_same` = `Variant_runtime.same_literal_value`:
+/// runtime equality, rather than equality of tags.
 fn literal_denotes_same(
     a: &crate::types::VariantLiteralTag,
     b: &crate::types::VariantLiteralTag,
@@ -277,89 +273,87 @@ fn literal_denotes_same(
     crate::types::variant_runtime::same_literal_value(a, b)
 }
 
-/// lambda.ml `value_has_block_type`, mirroring `Dynamic_checks`.
-fn value_has_block_type(
-    block_types: &[crate::types::VariantBlockType],
-    kind: &ValueKind,
-    block_type: &crate::types::VariantBlockType,
-) -> bool {
-    use crate::types::{VariantBlockType as B, VariantInstance as I, VariantLiteralTag as L};
-    match (block_type, kind) {
-        (B::Int | B::Float, ValueKind::IsLiteral(L::Int(_) | L::Float(_))) => true,
-        (B::String, ValueKind::IsLiteral(L::String(_))) => true,
-        (B::Boolean, ValueKind::IsLiteral(L::Bool(_))) => true,
-        (B::Object, ValueKind::IsObject) => true,
-        (B::Instance(I::Array), ValueKind::IsArray) => true,
-        (B::Object, ValueKind::IsArray) => !block_types.contains(&B::Instance(I::Array)),
-        (B::Unknown, ValueKind::IsLiteral(_) | ValueKind::IsObject | ValueKind::IsArray) => true,
-        _ => false,
-    }
-}
-
-enum UntaggedAction {
-    /// The case decided by the constant (`None`: no case of the switch).
-    Case(Option<Lambda>),
-    /// The constant's runtime shape cannot be named here.
-    Undecided,
-}
-
-/// lambda.ml `switch`'s `untagged_action`.
-fn untagged_action(
-    facts: &crate::types::VariantMatchingFacts,
-    cst: &Constant,
-    switch: &LambdaSwitch,
-) -> UntaggedAction {
-    let literal_of_tag = |tag: &crate::types::VariantTag| match &tag.literal {
-        Some(literal) => literal.clone(),
-        None => crate::types::VariantLiteralTag::String(tag.name.clone()),
+/// lambda.ml `untagged_plan`: the dispatch of a switch on an untagged
+/// variant, which the code generator prints and constant folding evaluates.
+/// A switch with literal arms and no payload arm left is a plain switch on
+/// the literals. `arm` names an arm's action as the plan's body.
+pub(crate) fn untagged_plan_with<'s, A: Clone>(
+    sw_consts_full: bool,
+    sw_consts: &'s [(SwitchKey, A)],
+    sw_blocks_full: bool,
+    sw_blocks: &'s [(SwitchKey, A)],
+    sw_failaction: Option<A>,
+    sw_dispatch: &'s SwitchDispatch,
+    same: impl Fn(&A, &A) -> bool,
+) -> Option<untagged_dispatch::Tree<A>> {
+    let SwitchDispatch::Variant(facts) = sw_dispatch else {
+        return None;
     };
-    let kind = runtime_value_kind(cst);
-    match &kind {
-        ValueKind::UnknownValue => UntaggedAction::Undecided,
-        ValueKind::IsLiteral(literal)
-            if facts
-                .literal_tags
-                .iter()
-                .any(|tag| literal_denotes_same(literal, tag)) =>
-        {
-            // The literal side wins, exactly as it does at runtime.
-            UntaggedAction::Case(
-                switch
-                    .sw_consts
-                    .iter()
-                    .find(|(key, _)| match key {
-                        SwitchKey::Constructor(crate::types::VariantConstructorCase::Constant(
-                            tag,
-                        )) => literal_denotes_same(literal, &literal_of_tag(tag)),
-                        _ => false,
-                    })
-                    .map(|(_, action)| action.clone()),
-            )
-        }
-        _ => {
-            // Not a declared literal, so the payload's runtime shape decides.
-            let matches_block = |block_type: &crate::types::VariantBlockType| {
-                value_has_block_type(&facts.block_types, &kind, block_type)
-            };
-            if facts.block_types.iter().any(matches_block) {
-                UntaggedAction::Case(
-                    switch
-                        .sw_blocks
-                        .iter()
-                        .find(|(key, _)| match key {
-                            SwitchKey::Constructor(
-                                crate::types::VariantConstructorCase::Block(
-                                    crate::types::VariantBlock::Untagged { block_type, .. },
-                                ),
-                            ) => matches_block(block_type),
-                            _ => false,
-                        })
-                        .map(|(_, action)| action.clone()),
-                )
-            } else {
-                UntaggedAction::Undecided
+    if facts.block_types.is_empty()
+        || !((sw_consts_full && sw_consts.is_empty()) || !(sw_blocks_full && sw_blocks.is_empty()))
+    {
+        return None;
+    }
+    let literal_arms = sw_consts
+        .iter()
+        .map(|(key, action)| match key {
+            SwitchKey::Constructor(crate::types::VariantConstructorCase::Constant(tag)) => {
+                Some((tag.literal.clone(), action.clone()))
             }
+            SwitchKey::Constructor(crate::types::VariantConstructorCase::Block(_))
+            | SwitchKey::Int(_) => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let payload_arms = sw_blocks
+        .iter()
+        .map(|(key, action)| match key {
+            SwitchKey::Constructor(crate::types::VariantConstructorCase::Block(
+                crate::types::VariantBlock::Untagged { block_type, .. },
+            )) => Some((block_type.clone(), action.clone())),
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some(untagged_dispatch::plan(
+        same,
+        untagged_dispatch::Input {
+            facts,
+            literal_arms,
+            payload_arms,
+            literals_complete: sw_consts_full,
+            payloads_complete: sw_blocks_full,
+            fallback: sw_failaction,
+        },
+    ))
+}
+
+/// lambda.ml `untagged_plan` over the arms of a tree switch.
+pub(crate) fn untagged_plan(switch: &LambdaSwitch) -> Option<untagged_dispatch::Tree<&Lambda>> {
+    let consts: Vec<(SwitchKey, &Lambda)> =
+        switch.sw_consts.iter().map(|(k, l)| (k.clone(), l)).collect();
+    let blocks: Vec<(SwitchKey, &Lambda)> =
+        switch.sw_blocks.iter().map(|(k, l)| (k.clone(), l)).collect();
+    untagged_plan_with(
+        switch.sw_consts_full,
+        &consts,
+        switch.sw_blocks_full,
+        &blocks,
+        switch.sw_failaction.as_deref(),
+        &switch.sw_dispatch,
+        |a: &&Lambda, b: &&Lambda| lambda_eq_approx(a, b),
+    )
+}
+
+/// lambda.ml `switch`'s `same_runtime`: blocks compared by runtime value.
+pub(crate) fn same_block_runtime(
+    block: &crate::types::VariantBlock,
+    case: &crate::types::VariantBlock,
+) -> bool {
+    match (block, case) {
+        (crate::types::VariantBlock::Tagged(block), crate::types::VariantBlock::Tagged(case)) => {
+            block.tag_name == case.tag_name
+                && literal_denotes_same(&block.tag.literal, &case.tag.literal)
         }
+        _ => block == case,
     }
 }
 
@@ -777,46 +771,72 @@ impl Lambda {
 
     /// Create a switch using OCaml's `Lam.switch` smart constructor.
     pub fn switch(scrutinee: Lambda, switch: LambdaSwitch) -> Self {
-        // lambda.ml `switch`: an untagged variant is dispatched on the value,
-        // so a constant scrutinee is decided here rather than by the
-        // constructor it was written with. Undecided keeps the switch.
+        let keep = |scrutinee: Lambda, switch: LambdaSwitch| {
+            Lambda::Lswitch(Box::new(scrutinee), Box::new(switch))
+        };
+        // lambda.ml `action_or_switch`.
+        fn action_or_switch(
+            action: Option<Lambda>,
+            scrutinee: Lambda,
+            switch: LambdaSwitch,
+        ) -> Lambda {
+            match action {
+                Some(action) => action,
+                None => match &switch.sw_failaction {
+                    Some(action) => (**action).clone(),
+                    None => Lambda::Lswitch(Box::new(scrutinee), Box::new(switch)),
+                },
+            }
+        }
+        // An untagged variant is dispatched on the value, so a constant
+        // scrutinee takes the arm the generated code takes for its JavaScript
+        // value, not the arm of the constructor it was written with.
         if let Lambda::Lconst(cst) = &scrutinee
             && let SwitchDispatch::Variant(facts) = &switch.sw_dispatch
             && !facts.block_types.is_empty()
         {
-            return match untagged_action(facts, cst, &switch) {
-                UntaggedAction::Case(action) => action
-                    .or_else(|| switch.sw_failaction.as_deref().cloned())
-                    .unwrap_or_else(|| Lambda::Lswitch(Box::new(scrutinee), Box::new(switch))),
-                UntaggedAction::Undecided => Lambda::Lswitch(Box::new(scrutinee), Box::new(switch)),
+            let outcome = match (untagged_plan(&switch), untagged_value(cst)) {
+                (Some(plan), Some(value)) => Some(
+                    match untagged_dispatch::select(&plan, &value, &mut |_| ()) {
+                        untagged_dispatch::Outcome::Arm(action) => Some(Some(action.clone())),
+                        untagged_dispatch::Outcome::Default => Some(None),
+                        untagged_dispatch::Outcome::Nothing => None,
+                    },
+                ),
+                _ => None,
+            };
+            return match outcome.flatten() {
+                Some(Some(action)) => action,
+                Some(None) => action_or_switch(None, scrutinee, switch),
+                None => keep(scrutinee, switch),
             };
         }
         match scrutinee {
             Lambda::Lconst(Constant::Constructor(tag)) => {
+                // By runtime value: a coercion accepts `@as(1.)` for `@as(1.0)`.
                 let action = switch.sw_consts.iter().find(|(key, _)| matches!(
                     key,
                     SwitchKey::Constructor(crate::types::VariantConstructorCase::Constant(candidate))
-                        if candidate == &tag
-                ));
-                action
-                    .map(|(_, branch)| branch.clone())
-                    .or_else(|| switch.sw_failaction.as_deref().cloned())
-                    .unwrap_or_else(|| {
-                        Lambda::Lswitch(
-                            Box::new(Lambda::Lconst(Constant::Constructor(tag))),
-                            Box::new(switch),
-                        )
-                    })
+                        if literal_denotes_same(&tag.literal, &candidate.literal)
+                )).map(|(_, branch)| branch.clone());
+                action_or_switch(action, Lambda::Lconst(Constant::Constructor(tag)), switch)
             }
-            Lambda::Lconst(constant @ Constant::Int { i, .. }) => switch
-                .sw_consts
-                .iter()
-                .find(|(key, _)| matches!(key, SwitchKey::Int(value) if *value == i))
-                .map(|(_, branch)| branch.clone())
-                .or_else(|| switch.sw_failaction.as_deref().cloned())
-                .unwrap_or_else(|| {
-                    Lambda::Lswitch(Box::new(Lambda::Lconst(constant)), Box::new(switch))
-                }),
+            Lambda::Lconst(constant @ Constant::Int { i, .. }) => {
+                let literal = crate::types::VariantLiteralTag::Int(i64::from(i));
+                let action = switch
+                    .sw_consts
+                    .iter()
+                    .find(|(key, _)| match key {
+                        SwitchKey::Int(value) => *value == i,
+                        // A constant represented as a number, compared by value.
+                        SwitchKey::Constructor(crate::types::VariantConstructorCase::Constant(
+                            tag,
+                        )) => literal_denotes_same(&literal, &tag.literal),
+                        SwitchKey::Constructor(_) => false,
+                    })
+                    .map(|(_, branch)| branch.clone());
+                action_or_switch(action, Lambda::Lconst(constant), switch)
+            }
             Lambda::Lconst(Constant::Block { tag_info, elements }) => {
                 let runtime = match &*tag_info {
                     TagInfo::Constructor { runtime, .. } => {
@@ -825,7 +845,7 @@ impl Lambda {
                     TagInfo::RecordInlined { runtime, .. } => Some((**runtime).clone()),
                     _ => None,
                 };
-                switch
+                let action = switch
                     .sw_blocks
                     .iter()
                     .find(|(key, _)| matches!(
@@ -833,18 +853,16 @@ impl Lambda {
                         (
                             SwitchKey::Constructor(crate::types::VariantConstructorCase::Block(candidate)),
                             Some(runtime)
-                        ) if candidate == runtime
+                        ) if same_block_runtime(runtime, candidate)
                     ))
-                    .map(|(_, branch)| branch.clone())
-                    .or_else(|| switch.sw_failaction.as_deref().cloned())
-                    .unwrap_or_else(|| {
-                        Lambda::Lswitch(
-                            Box::new(Lambda::Lconst(Constant::Block { tag_info, elements })),
-                            Box::new(switch),
-                        )
-                    })
+                    .map(|(_, branch)| branch.clone());
+                action_or_switch(
+                    action,
+                    Lambda::Lconst(Constant::Block { tag_info, elements }),
+                    switch,
+                )
             }
-            other => Lambda::Lswitch(Box::new(other), Box::new(switch)),
+            other => keep(other, switch),
         }
     }
 

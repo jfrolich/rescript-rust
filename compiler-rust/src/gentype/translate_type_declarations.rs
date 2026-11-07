@@ -108,18 +108,19 @@ pub fn create_case(
     VariantCase { label_js }
 }
 
-fn create_variant_case(label: &str, tag: &Option<crate::types::VariantLiteralTag>) -> VariantCase {
+/// translate_type_declarations.ml `create_variant_case`: the case's runtime
+/// literal, which is its name when it has no `@as`.
+fn create_variant_case(tag: &crate::types::VariantLiteralTag) -> VariantCase {
     let label_js = match tag {
-        Some(crate::types::VariantLiteralTag::String(value)) => {
+        crate::types::VariantLiteralTag::String(value) => {
             LabelJs::StringLabel(crate::gentype::emit_text::escape_string_contents(value))
         }
-        Some(crate::types::VariantLiteralTag::Int(value)) => LabelJs::IntLabel(value.to_string()),
-        Some(crate::types::VariantLiteralTag::Float(value)) => LabelJs::FloatLabel(value.clone()),
-        Some(crate::types::VariantLiteralTag::BigInt(value)) => LabelJs::IntLabel(value.clone()),
-        Some(crate::types::VariantLiteralTag::Bool(value)) => LabelJs::BoolLabel(*value),
-        Some(crate::types::VariantLiteralTag::Null) => LabelJs::NullLabel,
-        Some(crate::types::VariantLiteralTag::Undefined) => LabelJs::UndefinedLabel,
-        None => LabelJs::StringLabel(label.to_string()),
+        crate::types::VariantLiteralTag::Int(value) => LabelJs::IntLabel(value.to_string()),
+        crate::types::VariantLiteralTag::Float(value) => LabelJs::FloatLabel(value.clone()),
+        crate::types::VariantLiteralTag::BigInt(value) => LabelJs::IntLabel(value.clone()),
+        crate::types::VariantLiteralTag::Bool(value) => LabelJs::BoolLabel(*value),
+        crate::types::VariantLiteralTag::Null => LabelJs::NullLabel,
+        crate::types::VariantLiteralTag::Undefined => LabelJs::UndefinedLabel,
     };
     VariantCase { label_js }
 }
@@ -449,7 +450,6 @@ fn traslate_declaration_kind_with_attribute_info(
                         }
                     };
                     let tag = tag.clone();
-                    let name = constructor_declaration.cd_id.name().to_string();
                     let args_translation = match &constructor_declaration.cd_args {
                         ConstructorArguments::CstrTuple(type_exprs) => {
                             crate::gentype::translate_type_expr_from_types::translate_type_exprs_from_types(
@@ -484,25 +484,25 @@ fn traslate_declaration_kind_with_attribute_info(
                             .flat_map(|translation| translation.dependencies.clone())
                             .collect::<Vec<_>>(),
                     );
-                    (name, tag, arg_types, import_types)
+                    (tag, arg_types, import_types)
                 })
                 .collect::<Vec<_>>();
 
             let no_payloads = variants
                 .iter()
-                .filter(|(_, _, arg_types, _)| arg_types.is_empty())
-                .map(|(name, tag, _, _)| create_variant_case(name, tag))
+                .filter(|(_, arg_types, _)| arg_types.is_empty())
+                .map(|(tag, _, _)| create_variant_case(tag))
                 .collect::<Vec<_>>();
             let payloads = variants
                 .iter()
-                .filter(|(_, _, arg_types, _)| !arg_types.is_empty())
-                .map(|(name, tag, arg_types, _)| {
+                .filter(|(_, arg_types, _)| !arg_types.is_empty())
+                .map(|(tag, arg_types, _)| {
                     let type_ = match arg_types.as_slice() {
                         [type_] => type_.clone(),
                         _ => Type::Tuple(arg_types.clone()),
                     };
                     Payload {
-                        case: create_variant_case(name, tag),
+                        case: create_variant_case(tag),
                         t: type_,
                     }
                 })
@@ -532,7 +532,7 @@ fn traslate_declaration_kind_with_attribute_info(
             };
             let import_types = variants
                 .into_iter()
-                .flat_map(|(_, _, _, import_types)| import_types)
+                .flat_map(|(_, _, import_types)| import_types)
                 .collect();
             return_type_declaration(code_item::TypeDeclaration {
                 export_from_type_declaration,

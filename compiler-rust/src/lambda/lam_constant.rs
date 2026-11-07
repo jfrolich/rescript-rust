@@ -193,7 +193,7 @@ impl Constant {
             Constant::ModuleAlias | Constant::JsUndefined { .. } => Some(0),
             // A constructor represented by `undefined`, `@as(undefined)`.
             Constant::Constructor(tag)
-                if matches!(tag.literal, Some(crate::types::VariantLiteralTag::Undefined)) =>
+                if matches!(tag.literal, crate::types::VariantLiteralTag::Undefined) =>
             {
                 Some(0)
             }
@@ -286,18 +286,14 @@ impl Constant {
             Constant::Int { i, .. } => *i != 0,
             Constant::NativeInt { i, .. } => *i != 0,
             Constant::Constructor(tag) => match &tag.literal {
-                None => tag.name != "[]",
-                Some(crate::types::VariantLiteralTag::String(value)) => !value.is_empty(),
-                Some(crate::types::VariantLiteralTag::Int(value)) => *value != 0,
-                Some(crate::types::VariantLiteralTag::Bool(value)) => *value,
-                Some(
-                    crate::types::VariantLiteralTag::Null
-                    | crate::types::VariantLiteralTag::Undefined,
-                ) => false,
-                Some(
-                    crate::types::VariantLiteralTag::Float(_)
-                    | crate::types::VariantLiteralTag::BigInt(_),
-                ) => true,
+                crate::types::VariantLiteralTag::String(value) => !value.is_empty(),
+                crate::types::VariantLiteralTag::Int(value) => *value != 0,
+                crate::types::VariantLiteralTag::Bool(value) => *value,
+                crate::types::VariantLiteralTag::Null | crate::types::VariantLiteralTag::Undefined => {
+                    false
+                }
+                crate::types::VariantLiteralTag::Float(_)
+                | crate::types::VariantLiteralTag::BigInt(_) => true,
             },
             Constant::Char(c) => *c != 0,
             Constant::JsFalse

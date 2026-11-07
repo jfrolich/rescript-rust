@@ -1,21 +1,19 @@
-===== Hidden.res =====
+We've found a bug for you!
+  /.../fixtures/Cross_not_undefined_option_implementation/Hidden.res:1:1-20
 
-  [1;31mWe've found a bug for you![0m
-  [36m/.../fixtures/Cross_not_undefined_option_implementation/Hidden.res[0m:[2m1:1-20[0m
-
-  [1;31m1[0m [2m│[0m [1;31mtype t = option<int>[0m
-  2 [2m│[0m let none: t = None
-  3 [2m│[0m 
+  1 │ type t = option<int>
+  2 │ let none: t = None
+  3 │ 
 
   The implementation /.../fixtures/Cross_not_undefined_option_implementation/Hidden.res
-  does not match the interface /.../fixtures/Cross_not_undefined_option_implementation/hidden.cmi:
+  does not match the interface /.../fixtures/Cross_not_undefined_option_implementation/Hidden.resi:
   Type declarations do not match:
     type t = option<int>
   is not included in
     type t
-  [36m/.../fixtures/Cross_not_undefined_option_implementation/Hidden.resi[0m:[2m1:15-20[0m:
+  /.../fixtures/Cross_not_undefined_option_implementation/Hidden.resi:1:15-20:
     Expected declaration
-  [36m/.../fixtures/Cross_not_undefined_option_implementation/Hidden.res[0m:[2m1:1-20[0m:
+  /.../fixtures/Cross_not_undefined_option_implementation/Hidden.res:1:1-20:
     Actual declaration
   Their runtime representations differ:
   the second declaration is @notUndefined,

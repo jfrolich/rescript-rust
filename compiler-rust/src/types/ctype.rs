@@ -1566,6 +1566,7 @@ fn add_gadt_equation(
         type_attributes: vec![],
         type_immediate: false,
         type_representation: super::TypeRepresentation::Boxed,
+        type_shape: crate::types::ValueShape::Unstated,
         type_inlined_types: vec![],
         type_path: None,
     };
@@ -1594,6 +1595,7 @@ fn reified_type_decl(newtype_level: i32) -> super::TypeDeclaration {
         type_attributes: vec![],
         type_immediate: false,
         type_representation: super::TypeRepresentation::Boxed,
+        type_shape: crate::types::ValueShape::Unstated,
         type_inlined_types: vec![],
         type_path: None,
     }
@@ -4963,14 +4965,19 @@ fn variant_constructor_as_payload(
     })
 }
 
-fn variant_constructor_tag(
-    layout: &crate::types::VariantLayout,
-    position: usize,
-) -> &Option<crate::types::VariantLiteralTag> {
-    match &layout.constructors[position] {
-        crate::types::VariantConstructorCase::Constant(tag) => &tag.literal,
-        crate::types::VariantConstructorCase::Block(block) => &block.tag().literal,
-    }
+/// variant_coercion.ml `variant_representation_matches`: the runtime
+/// literals of `Variant_runtime.constructor_tag layout position`, compared
+/// by value.
+fn variant_representation_matches(
+    layout1: &crate::types::VariantLayout,
+    position1: usize,
+    layout2: &crate::types::VariantLayout,
+    position2: usize,
+) -> bool {
+    crate::types::variant_runtime::same_literal_value(
+        layout1.constructor_tag(position1),
+        layout2.constructor_tag(position2),
+    )
 }
 
 fn variant_constructor_covers_primitive(
@@ -5013,7 +5020,6 @@ fn can_coerce_polyvariant_to_variant(
     ctx: &TypeContext,
     row: &RowDesc,
     constructors: &[crate::types::decl::ConstructorDeclaration],
-    layout: &crate::types::VariantLayout,
     unboxed: bool,
 ) -> bool {
     // OCaml compiler/ml/variant_coercion.ml:246-286 accepts only closed
@@ -5021,18 +5027,15 @@ fn can_coerce_polyvariant_to_variant(
     // the target variant constructor runtime representation.
     row.row_fields.iter().all(|(label, field)| {
         matches!(btype::row_field_repr(ctx, field), RowField::Rpresent(None))
-            && constructors
-                .iter()
-                .enumerate()
-                .any(|(position, constructor)| {
-                    variant_constructor_matches_polyvariant_label(
-                        ctx,
-                        constructor,
-                        variant_constructor_tag(layout, position),
-                        label,
-                        unboxed,
-                    )
-                })
+            && constructors.iter().any(|constructor| {
+                variant_constructor_matches_polyvariant_label(
+                    ctx,
+                    constructor,
+                    &constructor.cd_runtime_tag,
+                    label,
+                    unboxed,
+                )
+            })
     })
 }
 
@@ -5084,14 +5087,12 @@ fn variant_row_is_subtype_of_primitive(
 fn variant_runtime_representation_issues(
     ctx: &TypeContext,
     constructors: &[crate::types::decl::ConstructorDeclaration],
-    layout: &crate::types::VariantLayout,
     target_path: &Path,
     unboxed: bool,
 ) -> Vec<VariantRuntimeRepresentationIssue> {
     constructors
         .iter()
-        .enumerate()
-        .filter_map(|(position, constructor)| {
+        .filter_map(|constructor| {
             let constructor_name = constructor.cd_id.name().to_string();
             match &constructor.cd_args {
                 crate::types::decl::ConstructorArguments::CstrTuple(args)
@@ -5114,8 +5115,8 @@ fn variant_runtime_representation_issues(
                     }
                 }
                 crate::types::decl::ConstructorArguments::CstrTuple(args) if args.is_empty() => {
-                    let as_payload =
-                        variant_constructor_as_payload(variant_constructor_tag(layout, position));
+                    // variant_coercion.ml: the messages name the declared `@as`.
+                    let as_payload = variant_constructor_as_payload(&constructor.cd_runtime_tag);
                     let matches_as_payload = match as_payload {
                         None | Some(VariantConstructorAsPayload::String) => {
                             target_path.same(&crate::types::predef::path_string())
@@ -5716,24 +5717,14 @@ pub(crate) fn extract_concrete_typedecl(
 fn can_try_coerce_variant_to_primitive_opt(
     ctx: &TypeContext,
     concrete: Option<(Path, Path, crate::types::TypeDeclaration)>,
-) -> Option<(
-    Path,
-    Vec<crate::types::decl::ConstructorDeclaration>,
-    crate::types::VariantLayout,
-    bool,
-)> {
+) -> Option<(Path, Vec<crate::types::decl::ConstructorDeclaration>, bool)> {
     let (_, path, decl) = concrete?;
     match &decl.type_kind {
-        crate::types::TypeKind::TypeVariant(constructors, layout_ref)
+        crate::types::TypeKind::TypeVariant(constructors, _)
             if decl.type_params.is_empty() && !path.same(&crate::types::predef::path_bool()) =>
         {
             let unboxed = variant_runtime_configuration(ctx, &decl).unboxed;
-            Some((
-                path,
-                constructors.to_vec(),
-                ctx.variant_layout(*layout_ref),
-                unboxed,
-            ))
+            Some((path, constructors.to_vec(), unboxed))
         }
         _ => None,
     }
@@ -5934,7 +5925,7 @@ fn subtype_rec(
                 .is_some() =>
         {
             // Primitive to an eligible unboxed variant.
-            let (p, constructors, _, unboxed) = can_try_coerce_variant_to_primitive_opt(
+            let (p, constructors, unboxed) = can_try_coerce_variant_to_primitive_opt(
                 ctx,
                 extract_concrete_typedecl(ctx, env, t2),
             )
@@ -5978,13 +5969,12 @@ fn subtype_rec(
                 .is_some() =>
         {
             // Variant to a primitive.
-            let (p, constructors, layout, unboxed) = can_try_coerce_variant_to_primitive_opt(
+            let (p, constructors, unboxed) = can_try_coerce_variant_to_primitive_opt(
                 ctx,
                 extract_concrete_typedecl(ctx, env, t1),
             )
             .expect("checked above");
-            let issues =
-                variant_runtime_representation_issues(ctx, &constructors, &layout, path, unboxed);
+            let issues = variant_runtime_representation_issues(ctx, &constructors, path, unboxed);
             if !issues.is_empty() {
                 push_subtype_cstr(
                     cstrs,
@@ -6041,13 +6031,11 @@ fn subtype_rec(
             // Polymorphic variant to variant.
             let row = row_repr(ctx, row);
             if let Some((_, _, decl)) = extract_concrete_typedecl(ctx, env, t2)
-                && let crate::types::TypeKind::TypeVariant(constructors, layout_ref) =
-                    &decl.type_kind
+                && let crate::types::TypeKind::TypeVariant(constructors, _) = &decl.type_kind
                 && can_coerce_polyvariant_to_variant(
                     ctx,
                     &row,
                     constructors,
-                    &ctx.variant_layout(*layout_ref),
                     variant_runtime_configuration(ctx, &decl).unboxed,
                 )
             {
@@ -6470,8 +6458,7 @@ fn subtype_concrete_typedecls(
                             },
                         )),
                     ) => {
-                        if variant_constructor_tag(&layout1, position1)
-                            == variant_constructor_tag(&layout2, *position2)
+                        if variant_representation_matches(&layout1, position1, &layout2, *position2)
                         {
                             let (violations, mut tl1, mut tl2) =
                                 check_record_fields(fields1, fields2);
@@ -6502,8 +6489,7 @@ fn subtype_concrete_typedecls(
                             },
                         )),
                     ) => {
-                        if variant_constructor_tag(&layout1, position1)
-                            == variant_constructor_tag(&layout2, *position2)
+                        if variant_representation_matches(&layout1, position1, &layout2, *position2)
                         {
                             let mut probe = cstrs.clone();
                             match subtype_list(ctx, env, subtypes, trace, tl1, tl2, &mut probe) {
@@ -12088,6 +12074,7 @@ pub fn instance_constructor_in_pattern(
             type_attributes: vec![],
             type_immediate: false,
             type_representation: super::decl::TypeRepresentation::Boxed,
+            type_shape: crate::types::ValueShape::Unstated,
             type_inlined_types: vec![],
             type_path: None,
         };
@@ -14225,6 +14212,7 @@ pub fn nondep_type_decl(
         type_immediate: decl.type_immediate,
         type_representation: decl.type_representation,
         type_path: decl.type_path.clone(),
+        type_shape: decl.type_shape.clone(),
         type_inlined_types: decl.type_inlined_types.clone(),
     })
 }
@@ -14551,6 +14539,7 @@ mod tests {
             type_attributes: vec![],
             type_immediate: false,
             type_representation: crate::types::TypeRepresentation::Boxed,
+            type_shape: crate::types::ValueShape::Unstated,
             type_inlined_types: vec![],
             type_path,
         }
@@ -14889,6 +14878,7 @@ mod tests {
             type_attributes: vec![],
             type_immediate: false,
             type_representation: crate::types::TypeRepresentation::Boxed,
+            type_shape: crate::types::ValueShape::Unstated,
             type_inlined_types: vec![],
             type_path: None,
         };
@@ -14904,6 +14894,7 @@ mod tests {
             type_attributes: vec![],
             type_immediate: false,
             type_representation: crate::types::TypeRepresentation::Boxed,
+            type_shape: crate::types::ValueShape::Unstated,
             type_inlined_types: vec![],
             type_path: None,
         };

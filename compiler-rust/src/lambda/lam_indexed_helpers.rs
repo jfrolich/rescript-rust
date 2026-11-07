@@ -207,41 +207,13 @@ fn append_if(
                         | Constant::Float(_)
                         | Constant::BigInt { .. }
                         | Constant::Block { .. } => Some(true),
-                        Constant::Constructor(tag) => match &tag.literal {
-                            None => Some(tag.name != "[]"),
-                            Some(crate::types::VariantLiteralTag::String(value)) => {
-                                Some(!value.is_empty())
-                            }
-                            Some(crate::types::VariantLiteralTag::Int(value)) => Some(*value != 0),
-                            Some(crate::types::VariantLiteralTag::Bool(value)) => Some(*value),
-                            Some(
-                                crate::types::VariantLiteralTag::Null
-                                | crate::types::VariantLiteralTag::Undefined,
-                            ) => Some(false),
-                            Some(
-                                crate::types::VariantLiteralTag::Float(_)
-                                | crate::types::VariantLiteralTag::BigInt(_),
-                            ) => None,
-                        },
+                        Constant::Constructor(tag) => constructor_truthiness(&tag.literal),
                         Constant::NativeInt { .. } => None,
                     }
                 }
                 inner_truthy(inner)
             }
-            Constant::Constructor(tag) => match &tag.literal {
-                None => Some(tag.name != "[]"),
-                Some(crate::types::VariantLiteralTag::String(value)) => Some(!value.is_empty()),
-                Some(crate::types::VariantLiteralTag::Int(value)) => Some(*value != 0),
-                Some(crate::types::VariantLiteralTag::Bool(value)) => Some(*value),
-                Some(
-                    crate::types::VariantLiteralTag::Null
-                    | crate::types::VariantLiteralTag::Undefined,
-                ) => Some(false),
-                Some(
-                    crate::types::VariantLiteralTag::Float(_)
-                    | crate::types::VariantLiteralTag::BigInt(_),
-                ) => None,
-            },
+            Constant::Constructor(tag) => constructor_truthiness(&tag.literal),
             // OCaml Lambda has no native-int constant in this branch.
             Constant::NativeInt { .. } => None,
         };
@@ -422,10 +394,13 @@ pub(crate) fn append_rebuilt(store: &mut IndexedLambda, node: NodeSnapshot) -> N
                     NodeView::Const(Constant::Constructor(left)),
                     NodeView::Const(Constant::Constructor(right)),
                 ) = (store.view(*left), store.view(*right))
-                && left.literal.is_none()
-                && right.literal.is_none()
             {
-                let equal = left.name == right.name;
+                // lambda.ml `prim`: constants are compared by their runtime
+                // values.
+                let equal = crate::types::variant_runtime::same_literal_value(
+                    &left.literal,
+                    &right.literal,
+                );
                 let result = match operation {
                     crate::lambda::Comparison::Eq => equal,
                     crate::lambda::Comparison::Neq => !equal,
@@ -458,6 +433,44 @@ pub(crate) fn append_rebuilt(store: &mut IndexedLambda, node: NodeSnapshot) -> N
             fail_action,
             dispatch,
         } => {
+            // lambda.ml `switch`: an untagged variant is dispatched on the
+            // value, so a constant scrutinee takes the arm the generated code
+            // takes for its JavaScript value.
+            if let NodeView::Const(cst) = store.view(scrutinee)
+                && let crate::lambda::SwitchDispatch::Variant(facts) = &dispatch
+                && !facts.block_types.is_empty()
+            {
+                let value = crate::lambda::untagged_value(cst);
+                let plan = crate::lambda::untagged_plan_with(
+                    consts_full,
+                    &consts,
+                    blocks_full,
+                    &blocks,
+                    fail_action,
+                    &dispatch,
+                    |a: &NodeId, b: &NodeId| eq_approx(store, *a, *b),
+                );
+                if let (Some(plan), Some(value)) = (plan, value) {
+                    match crate::lambda::untagged_dispatch::select(&plan, &value, &mut |_| ()) {
+                        crate::lambda::untagged_dispatch::Outcome::Arm(action) => return action,
+                        crate::lambda::untagged_dispatch::Outcome::Default => {
+                            if let Some(action) = fail_action {
+                                return action;
+                            }
+                        }
+                        crate::lambda::untagged_dispatch::Outcome::Nothing => {}
+                    }
+                }
+                return store.append(NodeSnapshot::Switch {
+                    scrutinee,
+                    consts_full,
+                    consts,
+                    blocks_full,
+                    blocks,
+                    fail_action,
+                    dispatch,
+                });
+            }
             let known_constant = matches!(
                 store.view(scrutinee),
                 NodeView::Const(
@@ -465,13 +478,14 @@ pub(crate) fn append_rebuilt(store: &mut IndexedLambda, node: NodeSnapshot) -> N
                 )
             );
             let selected = match store.view(scrutinee) {
-                NodeView::Const(Constant::Constructor(tag)) => consts.iter().find(|(key, _)| matches!(key, crate::lambda::SwitchKey::Constructor(crate::types::VariantConstructorCase::Constant(candidate)) if candidate == tag)).map(|(_, node)| *node),
+                // By runtime value: a coercion accepts `@as(1.)` for `@as(1.0)`.
+                NodeView::Const(Constant::Constructor(tag)) => consts.iter().find(|(key, _)| matches!(key, crate::lambda::SwitchKey::Constructor(crate::types::VariantConstructorCase::Constant(candidate)) if crate::types::variant_runtime::same_literal_value(&candidate.literal, &tag.literal))).map(|(_, node)| *node),
                 NodeView::Const(Constant::Int { i, comment }) => consts.iter().find(|(key, _)| {
                     matches!(key, crate::lambda::SwitchKey::Int(value) if value == i)
                         || comment.is_none() && matches!(key,
                             crate::lambda::SwitchKey::Constructor(
                                 crate::types::VariantConstructorCase::Constant(tag)
-                            ) if matches!(tag.literal, Some(crate::types::VariantLiteralTag::Int(value)) if value == i64::from(*i))
+                            ) if crate::types::variant_runtime::same_literal_value(&crate::types::VariantLiteralTag::Int(i64::from(*i)), &tag.literal)
                         )
                 }).map(|(_, node)| *node),
                 NodeView::Const(Constant::Block { tag_info, .. }) => {
@@ -480,7 +494,7 @@ pub(crate) fn append_rebuilt(store: &mut IndexedLambda, node: NodeSnapshot) -> N
                         crate::lambda::TagInfo::RecordInlined { runtime, .. } => Some((**runtime).clone()),
                         _ => None,
                     };
-                    blocks.iter().find(|(key, _)| matches!((key, runtime.as_ref()), (crate::lambda::SwitchKey::Constructor(crate::types::VariantConstructorCase::Block(candidate)), Some(runtime)) if candidate == runtime)).map(|(_, node)| *node)
+                    blocks.iter().find(|(key, _)| matches!((key, runtime.as_ref()), (crate::lambda::SwitchKey::Constructor(crate::types::VariantConstructorCase::Block(candidate)), Some(runtime)) if crate::lambda::same_block_runtime(runtime, candidate))).map(|(_, node)| *node)
                 }
                 _ => None,
             };
@@ -672,5 +686,18 @@ pub(crate) fn map_children(
         }
         NodeSnapshot::Assign(id, x) => NodeSnapshot::Assign(id, map(store, x)),
         leaf => leaf,
+    }
+}
+
+/// lambda.ml `eval_const_as_bool` of `Const_constructor {literal}`: the
+/// truthiness of the canonical runtime representation.
+fn constructor_truthiness(literal: &crate::types::VariantLiteralTag) -> Option<bool> {
+    use crate::types::VariantLiteralTag as L;
+    match literal {
+        L::String(value) => Some(!value.is_empty()),
+        L::Int(value) => Some(*value != 0),
+        L::Bool(value) => Some(*value),
+        L::Null | L::Undefined => Some(false),
+        L::Float(_) | L::BigInt(_) => None,
     }
 }

@@ -43,9 +43,9 @@ pub enum Warning {
     /// Warning 10: Statement has non-unit type.
     StatementType,
     /// Warning 11: Unused match case.
-    UnusedMatch,
+    UnusedMatch { reason: String },
     /// Warning 12: Unused sub-pattern.
-    UnusedPat,
+    UnusedPat { reason: String },
     /// Warning 14: Illegal backslash escape.
     IllegalBackslash,
     /// Warning 16: Unerasable optional argument.
@@ -174,8 +174,8 @@ impl Warning {
             Warning::AllClausesGuarded => 8,
             Warning::NonClosedRecordPattern { .. } => 9,
             Warning::StatementType => 10,
-            Warning::UnusedMatch => 11,
-            Warning::UnusedPat => 12,
+            Warning::UnusedMatch { .. } => 11,
+            Warning::UnusedPat { .. } => 12,
             Warning::IllegalBackslash => 14,
             Warning::UnerasableOptionalArgument => 16,
             Warning::UnusedArgument => 20,
@@ -290,8 +290,14 @@ impl Warning {
                  If this is on purpose, wrap it with `ignore`."
                     .to_string()
             }
-            Warning::UnusedMatch => "this match case is unused.".to_string(),
-            Warning::UnusedPat => "this sub-pattern is unused.".to_string(),
+            Warning::UnusedMatch { reason } if reason.is_empty() => {
+                "this match case is unused.".to_string()
+            }
+            Warning::UnusedMatch { reason } => format!("this match case is unused.\n{reason}"),
+            Warning::UnusedPat { reason } if reason.is_empty() => {
+                "this sub-pattern is unused.".to_string()
+            }
+            Warning::UnusedPat { reason } => format!("this sub-pattern is unused.\n{reason}"),
             Warning::IllegalBackslash => "illegal backslash escape in string.".to_string(),
             Warning::UnerasableOptionalArgument => {
                 "This optional parameter in final position will, in practice, not be optional.\n\

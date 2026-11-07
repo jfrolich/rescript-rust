@@ -13,10 +13,7 @@ use crate::types::env::Env;
 use crate::types::path::Path;
 use crate::types::type_expr::{TypeDesc, TypeExprRef};
 
-const NOT_UNDEFINED_ATTR: &str = "notUndefined";
 const UNTAGGED_ATTR: &str = "unboxed";
-const JS_DICT_T: &str = "Js.Dict.t";
-const JS_DICT_T_LEGACY: &str = "Js_dict.t";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum BuiltinPathTest {
@@ -58,7 +55,6 @@ pub(crate) fn type_cannot_contain_undefined(ctx: &TypeContext, env: &Env, ty: Ty
 }
 
 const TYPEOPT_CANNOT_CONTAIN_UNDEFINED: u8 = 0;
-const TYPEOPT_BUILTIN_OBJECT: u8 = 1;
 const TYPEOPT_BASE_UNIT: u8 = 2;
 const TYPEOPT_BASE_BOOL: u8 = 3;
 
@@ -70,7 +66,18 @@ fn type_cannot_contain_undefined_rec(
     ty: TypeExprRef,
     visiting: &[Path],
 ) -> bool {
+    use crate::types::ValueShape;
+    // typeopt.ml `cannot_contain_undefined`: a value declared to be a class
+    // instance or to have a `typeof` other than "undefined" is not
+    // undefined. The payload of an `@unboxed` wrapper is declared only after
+    // scraping.
+    if crate::types::variant_layout::value_shape(ctx, env, ty) != ValueShape::Unstated {
+        return true;
+    }
     let ty = scrape_ty(ctx, env, ty);
+    if crate::types::variant_layout::value_shape(ctx, env, ty) != ValueShape::Unstated {
+        return true;
+    }
 
     match &*ctx.get_desc(ty) {
         TypeDesc::Tconstr { path, .. } => match type_is_builtin_path_but_option(path) {
@@ -81,9 +88,8 @@ fn type_cannot_contain_undefined_rec(
                     return false;
                 };
                 match &decl.type_kind {
-                    TypeKind::TypeAbstract => {
-                        decl.type_attributes.iter().any(is_not_undefined_attr)
-                    }
+                    // Its shape was read from the scraped type above.
+                    TypeKind::TypeAbstract => false,
                     TypeKind::TypeOpen => false,
                     TypeKind::TypeRecord(_, _) => true,
                     TypeKind::TypeVariant(cdecls, _)
@@ -100,7 +106,7 @@ fn type_cannot_contain_undefined_rec(
                         let visiting: Vec<Path> =
                             std::iter::once(path.clone()).chain(visiting.iter().cloned()).collect();
                         let visiting = visiting.as_slice();
-                        let mut check_case = |cd: &crate::types::ConstructorDeclaration,
+                        let check_case = |cd: &crate::types::ConstructorDeclaration,
                                               case: Option<
                             &crate::types::VariantConstructorCase,
                         >| {
@@ -108,7 +114,7 @@ fn type_cannot_contain_undefined_rec(
                                 case,
                                 Some(crate::types::VariantConstructorCase::Constant(
                                     crate::types::VariantTag {
-                                        literal: Some(crate::types::VariantLiteralTag::Undefined),
+                                        literal: crate::types::VariantLiteralTag::Undefined,
                                         ..
                                     }
                                 ))
@@ -128,27 +134,21 @@ fn type_cannot_contain_undefined_rec(
                                 match &cd.cd_args {
                                     ConstructorArguments::CstrTuple(args) => {
                                         match args.as_slice() {
-                                            [arg] => {
-                                                type_is_builtin_object(ctx, env, *arg)
-                                                    || type_cannot_contain_undefined_rec(
-                                                        ctx, env, *arg, visiting,
-                                                    )
-                                            }
+                                            [arg] => type_cannot_contain_undefined_rec(
+                                                ctx, env, *arg, visiting,
+                                            ),
                                             [] => true,
                                             [_, _, ..] => true,
                                         }
                                     }
                                     ConstructorArguments::CstrRecord(labels) => {
                                         match labels.as_slice() {
-                                            [label] => {
-                                                type_is_builtin_object(ctx, env, label.ld_type)
-                                                    || type_cannot_contain_undefined_rec(
-                                                        ctx,
-                                                        env,
-                                                        label.ld_type,
-                                                        visiting,
-                                                    )
-                                            }
+                                            [label] => type_cannot_contain_undefined_rec(
+                                                ctx,
+                                                env,
+                                                label.ld_type,
+                                                visiting,
+                                            ),
                                             [] | [_, _, ..] => true,
                                         }
                                     }
@@ -189,6 +189,69 @@ fn type_cannot_contain_undefined_rec(
 /// Checks type descriptor directly for types that are always safe
 /// (Ttuple, Tarrow, Tvariant, Tpackage, Tconstr for builtin types).
 /// Also tries to expand Tconstr types via type declarations.
+/// typeopt.ml `abstractness`: whether a type is an abstract type whose
+/// representation the compiler does not see, one that stands for another
+/// type (a functor parameter's or a locally abstract type), or neither.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Abstractness {
+    Opaque,
+    StandsForAnother,
+    NotAbstract,
+}
+
+/// typeopt.ml `abstractness`.
+pub(crate) fn abstractness(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> Abstractness {
+    let expanded = crate::types::ctype::expand_head_opt(ctx, env, ty);
+    let path = match &*ctx.get_desc(expanded) {
+        TypeDesc::Tconstr { path, .. } => path.clone(),
+        _ => return Abstractness::NotAbstract,
+    };
+    match crate::types::ctype::lookup_type_decl_for_path(ctx, env, &path) {
+        Some(decl)
+            if matches!(decl.type_kind, TypeKind::TypeAbstract) && decl.type_manifest.is_none() =>
+        {
+            if decl.type_newtype_level.is_some() || env.is_functor_arg_path(&path) {
+                Abstractness::StandsForAnother
+            } else if crate::types::predef::type_is_builtin_path_but_option(&path).is_some() {
+                Abstractness::NotAbstract
+            } else {
+                Abstractness::Opaque
+            }
+        }
+        _ => Abstractness::NotAbstract,
+    }
+}
+
+/// typeopt.ml `undefinedness`: whether a type can hold `undefined`, as far
+/// as the compiler sees.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Undefinedness {
+    CannotBeUndefined,
+    Unseen,
+    StandsForAnother,
+    CanBeUndefined,
+}
+
+/// typeopt.ml `undefinedness`: an opaque abstract type or a JavaScript
+/// object type has a representation the compiler does not see.
+pub(crate) fn undefinedness(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> Undefinedness {
+    if type_cannot_contain_undefined(ctx, env, ty) {
+        return Undefinedness::CannotBeUndefined;
+    }
+    match abstractness(ctx, env, ty) {
+        Abstractness::Opaque => Undefinedness::Unseen,
+        Abstractness::StandsForAnother => Undefinedness::StandsForAnother,
+        Abstractness::NotAbstract => {
+            let expanded = crate::types::ctype::expand_head_opt(ctx, env, ty);
+            if matches!(&*ctx.get_desc(expanded), TypeDesc::Tobject { .. }) {
+                Undefinedness::Unseen
+            } else {
+                Undefinedness::CanBeUndefined
+            }
+        }
+    }
+}
+
 pub(crate) fn type_cannot_contain_undefined_no_env(ctx: &TypeContext, ty: TypeExprRef) -> bool {
     fn rec(ctx: &TypeContext, ty: TypeExprRef, seen: &mut HashSet<TypeExprRef>) -> bool {
         let ty = ctx.repr(ty);
@@ -202,14 +265,14 @@ pub(crate) fn type_cannot_contain_undefined_no_env(ctx: &TypeContext, ty: TypeEx
                 BuiltinPathTest::NotApplicable => {
                     if let Some(decl) = find_type_decl(ctx, &crate::types::env::Env::empty(), path)
                     {
+                        if decl.type_shape != crate::types::ValueShape::Unstated {
+                            return true;
+                        }
                         if let Some(manifest) = decl.type_manifest {
                             return rec(ctx, manifest, seen);
                         }
                         match &decl.type_kind {
                             TypeKind::TypeRecord(_, _) => true,
-                            TypeKind::TypeAbstract => {
-                                decl.type_attributes.iter().any(is_not_undefined_attr)
-                            }
                             _ => false,
                         }
                     } else {
@@ -423,33 +486,8 @@ pub(crate) fn find_type_decl<'a>(
         .or_else(|| env.lookup_type(path).ok().map(TypeDeclarationRef::Borrowed))
 }
 
-fn is_not_undefined_attr(attr: &Attribute) -> bool {
-    attr.attr_name.txt == NOT_UNDEFINED_ATTR
-}
-
 pub(crate) fn has_untagged(attrs: &[Attribute]) -> bool {
     attrs.iter().any(|attr| attr.attr_name.txt == UNTAGGED_ATTR)
-}
-
-pub(crate) fn type_is_builtin_object(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> bool {
-    ctx.typeopt_answer(env.id(), ty, TYPEOPT_BUILTIN_OBJECT, || {
-        type_is_builtin_object_uncached(ctx, env, ty)
-    })
-}
-
-fn type_is_builtin_object_uncached(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> bool {
-    let ty = scrape_ty(ctx, env, ty);
-    match &*ctx.get_desc(ty) {
-        TypeDesc::Tobject { .. } => true,
-        TypeDesc::Tconstr { path, args, .. } => {
-            if matches!(path, Path::Pident(id) if id.name() == "dict") && args.len() == 1 {
-                true
-            } else {
-                path.name_eq(JS_DICT_T) || path.name_eq(JS_DICT_T_LEGACY)
-            }
-        }
-        _ => false,
-    }
 }
 
 fn is_option_like_variant(cdecls: &[crate::types::decl::ConstructorDeclaration]) -> bool {
@@ -495,16 +533,6 @@ mod tests {
     use crate::types::decl::TypeDeclaration;
 
     #[test]
-    fn builtin_object_recognizes_object_types() {
-        let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
-        let fields = ctx.new_type(TypeDesc::Tnil);
-        let object = ctx.new_type(TypeDesc::Tobject { fields });
-
-        assert!(type_is_builtin_object(&ctx, &Env::empty(), object));
-    }
-
-    #[test]
     fn base_type_expands_strengthened_local_path_by_identity() {
         let id_gen = IdGenerator::new();
         let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
@@ -524,6 +552,7 @@ mod tests {
                 type_attributes: vec![],
                 type_immediate: false,
                 type_representation: crate::types::TypeRepresentation::Boxed,
+                type_shape: crate::types::ValueShape::Unstated,
                 type_inlined_types: vec![],
                 type_path: Some(path.clone()),
             },
@@ -553,6 +582,7 @@ mod tests {
                 type_attributes: vec![],
                 type_immediate: false,
                 type_representation: crate::types::TypeRepresentation::Boxed,
+                type_shape: crate::types::ValueShape::Unstated,
                 type_inlined_types: vec![],
                 type_path: None,
             },

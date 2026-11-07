@@ -282,6 +282,7 @@ fn fixed_row_placeholder_decl(
         type_attributes: parser_attrs_to_decl_attrs(arena, ctx, &decl.ptype_attributes),
         type_immediate: false,
         type_representation: crate::types::TypeRepresentation::Boxed,
+        type_shape: crate::types::ValueShape::Unstated,
         type_inlined_types: vec![],
         type_path: Some(Path::pident(*row_id)),
     }
@@ -314,6 +315,7 @@ fn translate_fixed_row_type_declaration<'a>(
         type_attributes,
         type_immediate: false,
         type_representation: crate::types::TypeRepresentation::Boxed,
+        type_shape: crate::types::ValueShape::Unstated,
         type_inlined_types: vec![],
         type_path,
     };
@@ -562,6 +564,7 @@ fn rebound_constructor_args(
         type_attributes: vec![],
         type_immediate: false,
         type_representation: crate::types::TypeRepresentation::Boxed,
+        type_shape: crate::types::ValueShape::Unstated,
         type_inlined_types: vec![],
         type_path: None,
     };
@@ -5049,54 +5052,27 @@ fn parser_attrs_have_unboxed(arena: &ParseArena, attrs: &Attributes) -> bool {
     parser_attrs_have_name(arena, attrs, "unboxed")
 }
 
-fn check_untagged_variant_constructor_arities(
+/// typedecl.ml `transl_declaration`: `Ast_untagged_variants.
+/// check_runtime_annotation ~loc:ptype_loc ~is_abstract_or_abbreviation:
+/// (ptype_kind = Ptype_abstract) ptype_attributes`.
+fn check_declaration_runtime_annotation(
     arena: &ParseArena,
     decl: &crate::parser::ast::TypeDeclaration,
 ) -> TypeModResult<()> {
-    // Only checked when `get_representation_from_attributes` is `Unboxed`
-    // (typedecl.ml:396-413).
-    if !parser_attrs_have_unboxed(arena, &decl.ptype_attributes) {
-        return Ok(());
-    }
-
-    let crate::parser::ast::TypeKind::Ptype_variant(constructors) = &decl.ptype_kind else {
-        return Ok(());
-    };
-
-    for constructor in constructors {
-        if let crate::parser::ast::ConstructorArguments::Pcstr_tuple(args) = &constructor.pcd_args {
-            if args.len() > 1 {
-                let constructor_name = arena.get_string(constructor.pcd_name.txt);
-                return Err(TypeModError::InvalidUntaggedVariantDefinition {
-                    loc: arena.to_location(decl.ptype_loc),
-                    reason: format!("Constructor {constructor_name} has more than one argument."),
-                });
-            }
+    let attrs = decl.ptype_attributes.iter().map(|(name, payload)| {
+        crate::types::variant_layout::AnnotationAttribute {
+            name: arena.get_string(name.txt),
+            semantic: crate::ast_payload::semantic_string_of_payload(arena, payload)
+                .ok()
+                .flatten(),
+            loc: arena.to_location(name.loc),
         }
-    }
-
-    Ok(())
-}
-
-fn check_not_undefined_type_attribute(
-    arena: &ParseArena,
-    decl: &crate::parser::ast::TypeDeclaration,
-) -> TypeModResult<()> {
-    if !parser_attrs_have_name(arena, &decl.ptype_attributes, "notUndefined") {
-        return Ok(());
-    }
-
-    if matches!(
-        (&decl.ptype_kind, decl.ptype_manifest),
-        (crate::parser::ast::TypeKind::Ptype_abstract, None)
-    ) {
-        Ok(())
-    } else {
-        Err(TypeModError::InvalidAttribute {
-            loc: decl.ptype_loc,
-            message: "@notUndefined can only be used on abstract types".to_string(),
-        })
-    }
+    });
+    crate::types::variant_layout::check_runtime_annotation(
+        arena.to_location(decl.ptype_loc),
+        matches!(decl.ptype_kind, crate::parser::ast::TypeKind::Ptype_abstract),
+        attrs,
+    )
 }
 
 fn check_unboxed_type_attributes(
@@ -5109,7 +5085,8 @@ fn check_unboxed_type_attributes(
         return Ok(());
     }
 
-    check_untagged_variant_constructor_arities(arena, decl)?;
+    // typedecl.ml: an untagged variant's constructors are checked when its
+    // layout is computed.
 
     match &decl.ptype_kind {
         crate::parser::ast::TypeKind::Ptype_abstract => Err(TypeModError::BadUnboxedAttribute {
@@ -5851,6 +5828,19 @@ pub enum AstUntaggedVariantError {
         /// Whether the constructor's payload is an inline record with one field.
         single_field_record: bool,
     },
+    InvalidInstanceOf,
+    UnsupportedInstanceOf(String, crate::types::variant_layout::UnsupportedClass),
+    InvalidTypeOf(String),
+    ConflictingRuntimeAnnotations,
+    DuplicateRuntimeAnnotation(String),
+    RuntimeAnnotationOnTypeParameter(String),
+    RuntimeAnnotationOnRepresentedType(String),
+    RuntimeAnnotationOnUnrelatedType(String),
+    RuntimeAnnotationContradictsManifest(String, String),
+    SubclassOfArray(String),
+    SubclassOfPublicAbbreviation(String, String),
+    ClassOnPublicAbbreviation(String),
+    ClassTwiceInChain(String),
 }
 
 impl AstUntaggedVariantError {
@@ -5890,6 +5880,70 @@ impl AstUntaggedVariantError {
                 }
                 message
             }
+            AstUntaggedVariantError::InvalidInstanceOf => {
+                "@instanceOf expects the name of a global class, such as @instanceOf(\"Date\") or @instanceOf(\"Intl.Locale\").".to_string()
+            }
+            AstUntaggedVariantError::UnsupportedInstanceOf(name, reason) => {
+                use crate::types::variant_layout::UnsupportedClass;
+                match reason {
+                    UnsupportedClass::ThroughGlobalThis => {
+                        let rest = name.split('.').skip(1).collect::<Vec<_>>().join(".");
+                        format!(
+                            "Write @instanceOf(\"{rest}\") without \"globalThis.\": the compiler reads the class through globalThis itself where a local binding shadows it."
+                        )
+                    }
+                    UnsupportedClass::EveryValueOf(type_of) => format!(
+                        "Every {type_of} is an instance of {name}, so @instanceOf(\"{name}\") cannot tell cases apart. Use @typeOf(\"{type_of}\") instead."
+                    ),
+                    UnsupportedClass::WrapperOf(type_of) => format!(
+                        "Values of type {type_of} are primitives, not instances of {name}. Use @typeOf(\"{type_of}\") instead."
+                    ),
+                    UnsupportedClass::ArrayClass => {
+                        "Arrays are recognized by Array.isArray. Use array<_> as the payload type instead of @instanceOf(\"Array\").".to_string()
+                    }
+                    UnsupportedClass::NotAClass => {
+                        format!("{name} is not a class, so it cannot be used with @instanceOf.")
+                    }
+                }
+            }
+            AstUntaggedVariantError::InvalidTypeOf(name) => format!(
+                "@typeOf expects one of \"string\", \"number\", \"bigint\", \"boolean\", \"symbol\", \"function\" or \"object\"{}.",
+                if name.is_empty() {
+                    String::new()
+                } else {
+                    format!(", not \"{name}\"")
+                }
+            ),
+            AstUntaggedVariantError::DuplicateRuntimeAnnotation(attribute) => {
+                format!("Duplicate @{attribute} annotation; a type can have only one.")
+            }
+            AstUntaggedVariantError::RuntimeAnnotationOnTypeParameter(attribute) => format!(
+                "@{attribute} cannot describe the type of a functor parameter, of a recursive module being defined, or a locally abstract type: such a type stands for another one, whose values can be anything."
+            ),
+            AstUntaggedVariantError::ConflictingRuntimeAnnotations => {
+                "A type can have only one of @notUndefined, @instanceOf and @typeOf. @instanceOf and @typeOf already imply @notUndefined.".to_string()
+            }
+            AstUntaggedVariantError::RuntimeAnnotationOnRepresentedType(attribute) => format!(
+                "@{attribute} can only be used on abstract types and type abbreviations, whose runtime representation it describes."
+            ),
+            AstUntaggedVariantError::RuntimeAnnotationOnUnrelatedType(attribute) => format!(
+                "@{attribute} on a type abbreviation must describe an abstract type, or a type with the same annotation. The abbreviated type already has a runtime representation the compiler knows, or can be undefined."
+            ),
+            AstUntaggedVariantError::RuntimeAnnotationContradictsManifest(outer, inner) => format!(
+                "This annotation, {outer}, contradicts the abbreviated type, whose values are recognized by {inner}."
+            ),
+            AstUntaggedVariantError::SubclassOfArray(name) => format!(
+                "@instanceOf(\"{name}\") cannot describe the values of an array type: they are recognized by Array.isArray, and subclasses of Array are not supported."
+            ),
+            AstUntaggedVariantError::ClassOnPublicAbbreviation(name) => format!(
+                "A class must be declared on an abstract type or a private abbreviation: write `= private ...`, so that values of the abbreviated type are not instances of {name} without a coercion, and another abbreviation cannot declare them instances of another class."
+            ),
+            AstUntaggedVariantError::SubclassOfPublicAbbreviation(name, ancestor) => format!(
+                "A subclass must be a private abbreviation: write `= private ...` so that instances of {ancestor} cannot be used as instances of {name} without a coercion."
+            ),
+            AstUntaggedVariantError::ClassTwiceInChain(name) => format!(
+                "{name} appears twice in this chain of abbreviations, so it would be its own superclass."
+            ),
         }
     }
 }
@@ -6012,450 +6066,10 @@ fn check_variant_tag_field_conflicts(
     Ok(())
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum UntaggedVariantBlockType {
-    Int,
-    String,
-    Float,
-    Bigint,
-    Boolean,
-    Instance(String),
-    Function,
-    Object,
-    Unknown,
-}
-
-fn invalid_untagged_variant_definition(loc: Location, reason: impl Into<String>) -> TypeModError {
-    TypeModError::InvalidUntaggedVariantDefinition {
-        loc,
-        reason: reason.into(),
-    }
-}
-
-fn extract_concrete_untagged_type_decl(
-    ctx: &crate::types::context::TypeContext,
-    env: &Env,
-    ty: TypeExprRef,
-) -> Option<crate::types::decl::TypeDeclaration> {
-    let mut current = ctx.repr(ty);
-    for _ in 0..20 {
-        let crate::types::type_expr::TypeDesc::Tconstr { path, .. } = &*ctx.get_desc(current)
-        else {
-            return None;
-        };
-        let decl = find_type_decl_for_path(env, ctx, path)?;
-        if !matches!(decl.type_kind, crate::types::decl::TypeKind::TypeAbstract) {
-            return Some(decl);
-        }
-        current = crate::types::ctype::expand_head_once(ctx, env, current)?;
-        current = ctx.repr(current);
-    }
-    None
-}
-
-fn get_untagged_block_type_from_type(
-    ctx: &crate::types::context::TypeContext,
-    env: &Env,
-    ty: TypeExprRef,
-) -> Option<UntaggedVariantBlockType> {
-    if let crate::types::type_expr::TypeDesc::Tconstr { path, .. } = &*ctx.get_desc(ty) {
-        if let Some(instance) = type_to_instanceof_backed_obj_name(path) {
-            return Some(UntaggedVariantBlockType::Instance(instance.to_string()));
-        }
-    }
-
-    let expanded = crate::types::ctype::expand_head(ctx, env, ty);
-    match &*ctx.get_desc(expanded) {
-        crate::types::type_expr::TypeDesc::Tconstr { path, .. } => {
-            if let Some(instance) = type_to_instanceof_backed_obj_name(path) {
-                Some(UntaggedVariantBlockType::Instance(instance.to_string()))
-            } else {
-                match path.head_name() {
-                    "string" => Some(UntaggedVariantBlockType::String),
-                    "int" => Some(UntaggedVariantBlockType::Int),
-                    "float" => Some(UntaggedVariantBlockType::Float),
-                    "bigint" => Some(UntaggedVariantBlockType::Bigint),
-                    "bool" => Some(UntaggedVariantBlockType::Boolean),
-                    _ if crate::raw_lambda::typeopt::type_is_builtin_object(ctx, env, expanded) => {
-                        Some(UntaggedVariantBlockType::Object)
-                    }
-                    _ => None,
-                }
-            }
-        }
-        crate::types::type_expr::TypeDesc::Tarrow { .. } => {
-            Some(UntaggedVariantBlockType::Function)
-        }
-        crate::types::type_expr::TypeDesc::Ttuple(_) => {
-            Some(UntaggedVariantBlockType::Instance("Array".to_string()))
-        }
-        _ => None,
-    }
-}
-
-/// variant_layout.ml `get_block`: a block is untagged exactly when its type
-/// is `@unboxed` (`configuration.unboxed`).
-fn get_untagged_constructor_block_type(
-    ctx: &crate::types::context::TypeContext,
-    env: &Env,
-    constructor: &crate::types::decl::ConstructorDeclaration,
-    unboxed: bool,
-) -> TypeModResult<Option<UntaggedVariantBlockType>> {
-    if !unboxed {
-        return Ok(None);
-    }
-
-    // variant_layout.ml `get_block_type`: an untagged constructor carries at
-    // most one payload.
-    if let crate::types::decl::ConstructorArguments::CstrTuple(args) = &constructor.cd_args
-        && args.len() > 1
-    {
-        return Err(TypeModError::InvalidUntaggedVariantDefinition {
-            loc: ctx.resolve_loc(constructor.cd_loc),
-            reason: format!(
-                "Constructor {} has more than one argument.",
-                constructor.cd_id.name()
-            ),
-        });
-    }
-
-    Ok(match &constructor.cd_args {
-        crate::types::decl::ConstructorArguments::CstrTuple(args) => match args.as_slice() {
-            [arg] => get_untagged_block_type_from_type(ctx, env, *arg).or_else(|| {
-                match extract_concrete_untagged_type_decl(ctx, env, *arg) {
-                    Some(decl) => match decl.type_kind {
-                        crate::types::decl::TypeKind::TypeRecord(
-                            _,
-                            crate::types::decl::RecordRepresentation::RecordUnboxed(_),
-                        ) => Some(UntaggedVariantBlockType::Unknown),
-                        crate::types::decl::TypeKind::TypeRecord(_, _) => {
-                            Some(UntaggedVariantBlockType::Object)
-                        }
-                        _ => Some(UntaggedVariantBlockType::Unknown),
-                    },
-                    // OCaml ast_untagged_variants.ml:get_block_type classifies
-                    // failed concrete-declaration extraction as UnknownType.
-                    None => Some(UntaggedVariantBlockType::Unknown),
-                }
-            }),
-            [_, _, ..] => unreachable!("rejected above"),
-            [] => None,
-        },
-        crate::types::decl::ConstructorArguments::CstrRecord(_) => {
-            Some(UntaggedVariantBlockType::Object)
-        }
-    })
-}
-
-/// ast_untagged_variants.ml `add_literal`: the literal's spelling, and its
-/// `Variant_runtime.literal_value_key` unless it is a string literal (a case
-/// without `@as` counts as its name).
-fn variant_tag_literal(
-    constructor_name: &str,
-    tag: &Option<crate::types::VariantLiteralTag>,
-) -> (Option<String>, String) {
-    use crate::types::VariantLiteralTag as L;
-    match tag {
-        Some(L::String(value)) => (None, value.clone()),
-        None => (None, constructor_name.to_string()),
-        Some(literal) => {
-            let spelling = match literal {
-                L::Int(value) => value.to_string(),
-                L::Float(value) => value.clone(),
-                L::BigInt(value) => format!("{value}n"),
-                L::Bool(value) => if *value { "true" } else { "false" }.to_string(),
-                L::Null => "null".to_string(),
-                L::Undefined => "undefined".to_string(),
-                L::String(_) => unreachable!("handled above"),
-            };
-            (Some(literal.value_key()), spelling)
-        }
-    }
-}
-
-/// `add_string_literal` / `add_nonstring_literal` of
-/// ast_untagged_variants.ml `check_invariant`: other literals are keyed by
-/// the JavaScript value they denote, with the spelling of the first one.
-fn add_variant_literal(
-    loc: &Location,
-    tag: &Option<crate::types::VariantLiteralTag>,
-    constructor_name: &str,
-    string_literals: &mut HashSet<String>,
-    nonstring_literals: &mut HashMap<String, String>,
-) -> TypeModResult<()> {
-    let (key, literal) = variant_tag_literal(constructor_name, tag);
-    match key {
-        None => {
-            if string_literals.contains(&literal) {
-                return Err(invalid_untagged_variant_definition(
-                    *loc,
-                    format!("Duplicate literal {literal}."),
-                ));
-            }
-            string_literals.insert(literal);
-        }
-        Some(key) => {
-            match nonstring_literals.get(&key) {
-                Some(earlier) if *earlier == literal => {
-                    return Err(invalid_untagged_variant_definition(
-                        *loc,
-                        format!("Duplicate literal {literal}."),
-                    ));
-                }
-                Some(earlier) => {
-                    return Err(invalid_untagged_variant_definition(
-                        *loc,
-                        format!("The literal {literal} is the same JavaScript value as {earlier}."),
-                    ));
-                }
-                None => {}
-            }
-            nonstring_literals.insert(key, literal);
-        }
-    }
-    Ok(())
-}
-
-fn check_variant_well_formed(
-    ctx: &crate::types::context::TypeContext,
-    env: &Env,
-    constructors: &[crate::types::decl::ConstructorDeclaration],
-    is_untagged_def: bool,
-) -> TypeModResult<()> {
-    check_variant_tag_field_conflicts(ctx, constructors)?;
-
-    let mut consts = Vec::new();
-    let mut blocks = Vec::new();
-    for constructor in constructors {
-        // `get_cstr_loc_tag`: the declaration's decoded `@as`.
-        let tag = constructor.cd_runtime_tag.clone();
-        let name = constructor.cd_id.name().to_string();
-        if matches!(
-            &constructor.cd_args,
-            crate::types::decl::ConstructorArguments::CstrTuple(args) if args.is_empty()
-        ) {
-            consts.push((constructor.cd_loc, name, tag));
-        } else {
-            let block_type =
-                get_untagged_constructor_block_type(ctx, env, constructor, is_untagged_def)?;
-            blocks.push((constructor.cd_loc, name, tag, block_type));
-        }
-    }
-
-    let mut string_literals_consts = HashSet::default();
-    let mut nonstring_literals_consts = HashMap::default();
-    for (loc, name, tag) in &consts {
-        add_variant_literal(
-            &ctx.resolve_loc(*loc),
-            tag,
-            name,
-            &mut string_literals_consts,
-            &mut nonstring_literals_consts,
-        )?;
-    }
-
-    if !is_untagged_def {
-        let mut string_literals_blocks = HashSet::default();
-        let mut nonstring_literals_blocks = HashMap::default();
-        for (loc, name, tag, _) in &blocks {
-            add_variant_literal(
-                &ctx.resolve_loc(*loc),
-                tag,
-                name,
-                &mut string_literals_blocks,
-                &mut nonstring_literals_blocks,
-            )?;
-        }
-        return Ok(());
-    }
-
-    let mut instance_types: HashMap<String, usize> = HashMap::default();
-    let mut function_types = 0usize;
-    let mut object_types = 0usize;
-    let mut string_types = 0usize;
-    let mut number_types = 0usize;
-    let mut bigint_types = 0usize;
-    let mut boolean_types = 0usize;
-    let mut unknown_types = 0usize;
-
-    for (loc, name, _tag, block_type) in &blocks {
-        let Some(block_type) = block_type else {
-            continue;
-        };
-        match block_type {
-            UntaggedVariantBlockType::Unknown => unknown_types += 1,
-            UntaggedVariantBlockType::Object => object_types += 1,
-            UntaggedVariantBlockType::Instance(instance) => {
-                *instance_types.entry(instance.clone()).or_insert(0) += 1;
-            }
-            UntaggedVariantBlockType::Function => function_types += 1,
-            UntaggedVariantBlockType::Int | UntaggedVariantBlockType::Float => number_types += 1,
-            UntaggedVariantBlockType::Bigint => bigint_types += 1,
-            UntaggedVariantBlockType::Boolean => {
-                // Literal cases are matched before payload cases, so a boolean
-                // payload only receives the booleans that are not literal
-                // cases. A partial overlap is allowed, like for strings and
-                // numbers.
-                if nonstring_literals_consts.contains_key("true")
-                    && nonstring_literals_consts.contains_key("false")
-                {
-                    return Err(invalid_untagged_variant_definition(
-                        ctx.resolve_loc(*loc),
-                        format!(
-                            "Case {name} can never match: both true and false are already cases of this variant."
-                        ),
-                    ));
-                }
-                boolean_types += 1
-            }
-            UntaggedVariantBlockType::String => string_types += 1,
-        }
-
-        if unknown_types != 0 && blocks.len() != 1 {
-            return Err(invalid_untagged_variant_definition(
-                ctx.resolve_loc(*loc),
-                format!(
-                    "Case {name} has a payload that is not of one of the recognized shapes (object, array, etc). Then it must be the only case with payloads."
-                ),
-            ));
-        }
-        if object_types > 1 {
-            return Err(invalid_untagged_variant_definition(
-                ctx.resolve_loc(*loc),
-                "At most one case can be an object type.",
-            ));
-        }
-        for (instance, count) in &instance_types {
-            if *count > 1 {
-                let instance_description = if instance == "Array" {
-                    "an array or tuple".to_string()
-                } else {
-                    format!("a {instance}")
-                };
-                return Err(invalid_untagged_variant_definition(
-                    ctx.resolve_loc(*loc),
-                    format!("At most one case can be {instance_description} type."),
-                ));
-            }
-        }
-        if function_types > 1 {
-            return Err(invalid_untagged_variant_definition(
-                ctx.resolve_loc(*loc),
-                "At most one case can be a function type.",
-            ));
-        }
-        if string_types > 1 {
-            return Err(invalid_untagged_variant_definition(
-                ctx.resolve_loc(*loc),
-                "At most one case can be a string type.",
-            ));
-        }
-        if number_types > 1 {
-            return Err(invalid_untagged_variant_definition(
-                ctx.resolve_loc(*loc),
-                "At most one case can be a number type (int or float).",
-            ));
-        }
-        if bigint_types > 1 {
-            return Err(invalid_untagged_variant_definition(
-                ctx.resolve_loc(*loc),
-                "At most one case can be a bigint type.",
-            ));
-        }
-        if boolean_types > 1 {
-            return Err(invalid_untagged_variant_definition(
-                ctx.resolve_loc(*loc),
-                "At most one case can be a boolean type.",
-            ));
-        }
-    }
-
-    Ok(())
-}
-
-fn canonical_variant_block_type(
-    block_type: UntaggedVariantBlockType,
-) -> crate::types::VariantBlockType {
-    use crate::types::{VariantBlockType as B, VariantInstance as I};
-    match block_type {
-        UntaggedVariantBlockType::Int => B::Int,
-        UntaggedVariantBlockType::String => B::String,
-        UntaggedVariantBlockType::Float => B::Float,
-        UntaggedVariantBlockType::Bigint => B::Bigint,
-        UntaggedVariantBlockType::Boolean => B::Boolean,
-        UntaggedVariantBlockType::Function => B::Function,
-        UntaggedVariantBlockType::Object => B::Object,
-        UntaggedVariantBlockType::Unknown => B::Unknown,
-        UntaggedVariantBlockType::Instance(name) => B::Instance(match name.as_str() {
-            "Array" => I::Array,
-            "ArrayBuffer" => I::ArrayBuffer,
-            "BigInt64Array" => I::BigInt64Array,
-            "BigUint64Array" => I::BigUint64Array,
-            "Blob" => I::Blob,
-            "DataView" => I::DataView,
-            "Date" => I::Date,
-            "File" => I::File,
-            "Float32Array" => I::Float32Array,
-            "Float64Array" => I::Float64Array,
-            "Int16Array" => I::Int16Array,
-            "Int32Array" => I::Int32Array,
-            "Int8Array" => I::Int8Array,
-            "Promise" => I::Promise,
-            "RegExp" => I::RegExp,
-            "Uint16Array" => I::Uint16Array,
-            "Uint32Array" => I::Uint32Array,
-            "Uint8Array" => I::Uint8Array,
-            "Uint8ClampedArray" => I::Uint8ClampedArray,
-            "Set" => I::Set,
-            "Map" => I::Map,
-            "WeakSet" => I::WeakSet,
-            "WeakMap" => I::WeakMap,
-            _ => unreachable!("instance classifier returned an unknown instance"),
-        }),
-    }
-}
-
-fn derive_variant_layout(
-    ctx: &crate::types::context::TypeContext,
-    env: &Env,
-    decl: &crate::types::decl::TypeDeclaration,
-    constructors: &[crate::types::decl::ConstructorDeclaration],
-) -> TypeModResult<crate::types::VariantLayout> {
-    let mut cases = Vec::with_capacity(constructors.len());
-    for constructor in constructors {
-        let name = constructor.cd_id.name().to_string();
-        let tag = crate::types::VariantTag {
-            name,
-            literal: constructor.cd_runtime_tag.clone(),
-        };
-        if matches!(&constructor.cd_args, crate::types::ConstructorArguments::CstrTuple(args) if args.is_empty())
-        {
-            cases.push(crate::types::VariantConstructorCase::Constant(tag));
-        } else {
-            // variant_layout.ml `get_block`.
-            let tag_name = process_variant_tag_name(ctx, &constructor.cd_attributes)?;
-            let unboxed = has_decl_attr(&decl.type_attributes, "unboxed");
-            let block = match get_untagged_constructor_block_type(ctx, env, constructor, unboxed)? {
-                Some(block_type) => crate::types::VariantBlock::Untagged {
-                    tag,
-                    block_type: canonical_variant_block_type(block_type),
-                },
-                None => {
-                    crate::types::VariantBlock::Tagged(crate::types::TaggedBlock { tag, tag_name })
-                }
-            };
-            cases.push(crate::types::VariantConstructorCase::Block(block));
-        }
-    }
-    Ok(crate::types::VariantLayout::new(
-        crate::types::VariantConfiguration {
-            unboxed: has_decl_attr(&decl.type_attributes, "unboxed"),
-            tag_name: process_variant_tag_name(ctx, &decl.type_attributes)?,
-        },
-        cases,
-    ))
-}
-
+/// typedecl.ml `transl_type_decl`: compute the canonical runtime layout of a
+/// variant declaration (`check_tag_field_conflicts`, then
+/// `Variant_layout.layout_from_type_variant`), which also validates the
+/// untagged invariants with the whole recursive group in the environment.
 fn check_variant_declaration_well_formed(
     ctx: &crate::types::context::TypeContext,
     env: &Env,
@@ -6464,74 +6078,46 @@ fn check_variant_declaration_well_formed(
     let crate::types::decl::TypeKind::TypeVariant(constructors, _) = &decl.type_kind else {
         return Ok(());
     };
-
-    check_variant_well_formed(
+    check_variant_tag_field_conflicts(ctx, constructors)?;
+    let configuration = crate::types::VariantConfiguration {
+        unboxed: has_decl_attr(&decl.type_attributes, "unboxed"),
+        tag_name: process_variant_tag_name(ctx, &decl.type_attributes)?,
+    };
+    let layout = crate::types::variant_layout::layout_from_type_variant(
         ctx,
         env,
+        configuration,
         constructors,
-        has_decl_attr(&decl.type_attributes, "unboxed"),
+        |cstr| process_variant_tag_name(ctx, &cstr.cd_attributes),
     )?;
     if let Some(layout_ref) = decl.variant_layout_ref() {
-        let layout = derive_variant_layout(ctx, env, decl, constructors)?;
         ctx.complete_variant_layout(layout_ref, layout);
     }
     Ok(())
 }
 
-fn type_to_instanceof_backed_obj_name(path: &Path) -> Option<&'static str> {
-    // OCaml compiler/ml/ast_untagged_variants.ml:243-266 recognizes the
-    // flattened `Stdlib_File.t` and `Stdlib_Blob.t` paths after expansion.
-    // Rust can still hold the selected `Stdlib.File.t` / `Stdlib.Blob.t`
-    // component paths before expansion, so recognize both representations.
-    let parent = match path {
-        Path::Pident(id) => {
-            return match id.name() {
-                "array" => Some("Array"),
-                "promise" => Some("Promise"),
-                _ => None,
-            };
-        }
-        Path::Pdot(parent, type_name, _) if type_name == "t" => parent.as_ref(),
-        _ => return None,
-    };
-    match parent {
-        // `Stdlib_X.t`
-        Path::Pident(id) => match id.name() {
-            "Stdlib_ArrayBuffer" => Some("ArrayBuffer"),
-            "Stdlib_Date" => Some("Date"),
-            "Stdlib_RegExp" => Some("RegExp"),
-            "Stdlib_File" => Some("File"),
-            "Stdlib_Blob" => Some("Blob"),
-            _ => None,
-        },
-        // `Stdlib.X.t`
-        Path::Pdot(root, module_name, _) if matches!(root.as_ref(), Path::Pident(id) if id.name() == "Stdlib") => {
-            match module_name.as_str() {
-                "ArrayBuffer" => Some("ArrayBuffer"),
-                "BigInt64Array" => Some("BigInt64Array"),
-                "BigUint64Array" => Some("BigUint64Array"),
-                "DataView" => Some("DataView"),
-                "Float32Array" => Some("Float32Array"),
-                "Float64Array" => Some("Float64Array"),
-                "Int16Array" => Some("Int16Array"),
-                "Int32Array" => Some("Int32Array"),
-                "Int8Array" => Some("Int8Array"),
-                "Uint16Array" => Some("Uint16Array"),
-                "Uint32Array" => Some("Uint32Array"),
-                "Uint8Array" => Some("Uint8Array"),
-                "Uint8ClampedArray" => Some("Uint8ClampedArray"),
-                "File" => Some("File"),
-                "Blob" => Some("Blob"),
-                "Set" => Some("Set"),
-                "Map" => Some("Map"),
-                "WeakSet" => Some("WeakSet"),
-                "WeakMap" => Some("WeakMap"),
-                "Promise" => Some("Promise"),
-                _ => None,
-            }
-        }
-        _ => None,
-    }
+/// typedecl.ml `transl_type_decl`: `Variant_layout.resolve_shapes ~env
+/// decls` before the final environment is built, so every copy of a
+/// declaration of the group carries what it states about its values at run
+/// time, resolved in the environment it is declared in.
+fn resolve_declaration_group_shapes(
+    ctx: &crate::types::context::TypeContext,
+    env: &Env,
+    ids: &[Ident],
+    decls: &[crate::types::decl::TypeDeclaration],
+) -> TypeModResult<Vec<(Ident, crate::types::ValueShape)>> {
+    let shapes = crate::types::variant_layout::resolve_shapes(ctx, env, ids, decls)?;
+    Ok(ids.iter().copied().zip(shapes).collect())
+}
+
+fn shape_for(
+    shapes: &[(Ident, crate::types::ValueShape)],
+    id: &Ident,
+) -> Option<crate::types::ValueShape> {
+    shapes
+        .iter()
+        .find(|(shape_id, _)| shape_id.same(id))
+        .map(|(_, shape)| shape.clone())
 }
 
 fn touch_manifest_cyclic_abbrev_check(
@@ -8821,10 +8407,12 @@ struct WithTypeConstraint {
     /// constraint: OCaml's `Typedecl.transl_with_constraint`
     /// (compiler/ml/typedecl.ml:1997-1998) gives the replacing declaration
     /// these, and `merge_constraint` (compiler/ml/typemod.ml:349-355) puts it
-    /// in the signature.
+    /// in the signature, with the `type_shape` its annotations state
+    /// (`Variant_layout.declaration_shape ~env decl`, typedecl.ml:2062-2064).
     decl_loc: Option<(
         crate::types::DeclLoc,
         Vec<crate::types::decl::Attribute>,
+        crate::types::ValueShape,
     )>,
 }
 
@@ -9411,9 +8999,10 @@ fn apply_with_type_constraints_to_module_type(
                             if td.type_params.is_empty() {
                                 td.type_manifest = Some(constraint.manifest);
                             }
-                            if let Some((loc, attrs)) = &constraint.decl_loc {
+                            if let Some((loc, attrs, shape)) = &constraint.decl_loc {
                                 td.type_loc = *loc;
                                 td.type_attributes = attrs.clone();
+                                td.type_shape = shape.clone();
                             }
                             rewritten_sig.push(SignatureItem::SigType(
                                 *id,
@@ -9737,17 +9326,44 @@ fn collect_pmty_with_type_constraints<'a>(
                     let (_, manifest_ty) = transl_type(tctx, env, arena.get_core_type(manifest))?;
                     let longident = tctx.resolve_lid(lid.txt).clone();
                     let path = flatten_package_constraint_path(&longident, arena, tctx.type_ctx);
+                    let type_attributes =
+                        parser_attrs_to_decl_attrs(arena, tctx.type_ctx, &decl.ptype_attributes);
+                    // typedecl.ml:2062-2064: the replacing declaration's shape.
+                    let shape = crate::types::variant_layout::declaration_shape(
+                        tctx.type_ctx,
+                        env,
+                        &crate::types::TypeDeclaration {
+                            type_params: vec![],
+                            type_arity: 0,
+                            type_kind: crate::types::TypeKind::TypeAbstract,
+                            type_private: match decl.ptype_private {
+                                crate::parser::ast::PrivateFlag::Public => {
+                                    crate::types::PrivateFlag::Public
+                                }
+                                crate::parser::ast::PrivateFlag::Private => {
+                                    crate::types::PrivateFlag::Private
+                                }
+                            },
+                            type_manifest: Some(manifest_ty),
+                            type_variance: vec![],
+                            type_newtype_level: None,
+                            type_loc: crate::types::DeclLoc::none(),
+                            type_attributes: type_attributes.clone(),
+                            type_immediate: false,
+                            type_representation: crate::types::TypeRepresentation::Boxed,
+                            type_shape: crate::types::ValueShape::Unstated,
+                            type_inlined_types: vec![],
+                            type_path: None,
+                        },
+                    )?;
                     out.push(WithTypeConstraint {
                         path,
                         manifest: manifest_ty,
                         kind: WithTypeConstraintKind::Manifest,
                         decl_loc: Some((
                             tctx.intern_ast_loc(arena, decl.ptype_loc),
-                            parser_attrs_to_decl_attrs(
-                                arena,
-                                tctx.type_ctx,
-                                &decl.ptype_attributes,
-                            ),
+                            type_attributes,
+                            shape,
                         )),
                     });
                 }
@@ -12311,6 +11927,7 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                                 type_attributes: vec![],
                                 type_immediate: false,
                                 type_representation: crate::types::TypeRepresentation::Boxed,
+                                type_shape: crate::types::ValueShape::Unstated,
                                 type_inlined_types: vec![],
                                 type_path: Some(Path::pident(type_id)),
                             };
@@ -12550,7 +12167,6 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                             );
                             let decl_has_unboxed_attr =
                                 parser_attrs_have_unboxed(arena, &decl.ptype_attributes);
-                            check_untagged_variant_constructor_arities(arena, decl)?;
                             let typed_type_decl_hint =
                                 typed_type_decls.and_then(|typed_decls| typed_decls.get(decl_idx));
                             let type_representation = typed_type_decl_hint
@@ -12618,20 +12234,18 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                                 type_attributes,
                                 type_immediate,
                                 type_representation,
+                                type_shape: typed_type_decls
+                                    .and_then(|typed_decls| typed_decls.get(decl_idx))
+                                    .map(|typed_decl| typed_decl.typ_type.type_shape.clone())
+                                    .unwrap_or_default(),
                                 type_inlined_types: vec![],
                                 type_path: Some(Path::pident(type_id)),
                             };
-                            if let crate::types::TypeKind::TypeVariant(constructors, layout_ref) =
-                                &type_decl.type_kind
-                            {
-                                let layout = derive_variant_layout(
-                                    tctx.type_ctx,
-                                    &sig_env,
-                                    &type_decl,
-                                    constructors,
-                                )?;
-                                tctx.type_ctx.complete_variant_layout(*layout_ref, layout);
-                            }
+                            check_variant_declaration_well_formed(
+                                tctx.type_ctx,
+                                &sig_env,
+                                &type_decl,
+                            )?;
                             sig_env.add_type(type_id, type_decl.clone());
                             items.push(SigItem::SigType(
                                 type_id,
@@ -13038,6 +12652,7 @@ fn approx_abstract_type_decl(
         type_attributes: vec![],
         type_immediate: false,
         type_representation: crate::types::TypeRepresentation::Boxed,
+        type_shape: crate::types::ValueShape::Unstated,
         type_inlined_types: vec![],
         type_path: None,
     }
@@ -17269,6 +16884,7 @@ fn type_structure_item<'a>(
                         ),
                         type_immediate: false,
                         type_representation: crate::types::TypeRepresentation::Boxed,
+                        type_shape: crate::types::ValueShape::Unstated,
                         type_inlined_types: vec![],
                         type_path: Some(Path::pident(*type_id)),
                     };
@@ -17381,7 +16997,7 @@ fn type_structure_item<'a>(
                 let type_id = declared_type_ids[decl_idx];
                 let saved_type_variables = std::mem::take(&mut tctx.type_variables);
 
-                check_not_undefined_type_attribute(arena, decl)?;
+                check_declaration_runtime_annotation(arena, decl)?;
 
                 // Create the type path for self-reference
                 let type_path = Path::pident(type_id);
@@ -17635,6 +17251,7 @@ fn type_structure_item<'a>(
                                                 type_attributes: vec![],
                                                 type_immediate: false,
                                                 type_representation: crate::types::TypeRepresentation::Boxed,
+                                                type_shape: crate::types::ValueShape::Unstated,
                                                 type_inlined_types: vec![],
                                                 type_path: None,
                                             };
@@ -17996,6 +17613,7 @@ fn type_structure_item<'a>(
                                         type_immediate: false,
                                         type_representation:
                                             crate::types::TypeRepresentation::Boxed,
+                                        type_shape: crate::types::ValueShape::Unstated,
                                         type_inlined_types: vec![],
                                         type_path: None,
                                     };
@@ -18418,6 +18036,7 @@ fn type_structure_item<'a>(
                     type_attributes,
                     type_immediate,
                     type_representation,
+                    type_shape: crate::types::ValueShape::Unstated,
                     type_inlined_types: vec![],
                     type_path: None,
                 };
@@ -18520,6 +18139,43 @@ fn type_structure_item<'a>(
                 }
                 for decl in internal_decls_for_generalize.iter_mut() {
                     decl.type_inlined_types = inline_types.clone();
+                }
+            }
+            // typedecl.ml:1578-1580: what each declaration states about its
+            // values at run time, resolved in the environment it is declared
+            // in (`Variant_layout.resolve_shapes ~env decls`).
+            {
+                let ids: Vec<Ident> = final_env_entries.iter().map(|(id, ..)| *id).collect();
+                let group: Vec<crate::types::TypeDeclaration> =
+                    final_env_entries.iter().map(|(_, decl, ..)| decl.clone()).collect();
+                let shapes = resolve_declaration_group_shapes(ctx, env, &ids, &group)?;
+                for (type_id, decl, _, _) in final_env_entries.iter_mut() {
+                    if let Some(shape) = shape_for(&shapes, type_id) {
+                        decl.type_shape = shape;
+                    }
+                }
+                for typed_decl in typed_tree_decls.iter_mut() {
+                    if let Some(shape) = shape_for(&shapes, &typed_decl.typ_id) {
+                        typed_decl.typ_type.type_shape = shape;
+                    }
+                }
+                if internal_decls_for_generalize.len() == ids.len() {
+                    for (decl, id) in internal_decls_for_generalize.iter_mut().zip(&ids) {
+                        if let Some(shape) = shape_for(&shapes, id) {
+                            decl.type_shape = shape;
+                        }
+                    }
+                }
+                for typed_decl in &typed_tree_decls {
+                    if typed_decl.typ_type.type_shape != crate::types::ValueShape::Unstated {
+                        ctx.register_type_decl(&typed_decl.typ_name.txt, typed_decl.typ_type.clone());
+                        if typed_decl.typ_id.stamp() != 0 {
+                            ctx.register_type_decl_by_stamp(
+                                typed_decl.typ_id.stamp(),
+                                typed_decl.typ_type.clone(),
+                            );
+                        }
+                    }
                 }
             }
             // typedecl.ml:1535-1538: `List.fold_right (fun (id, decl) env ->
@@ -18630,6 +18286,15 @@ fn type_structure_item<'a>(
             // check_constraints over the finalized declaration group.
             for decl in &internal_decls_for_generalize {
                 check_variant_declaration_well_formed(ctx, &new_env, decl)?;
+            }
+            // typedecl.ml:1650-1653 `check_manifest_annotation` over the group.
+            for (sdecl, decl) in decls.iter().zip(original_internal_decls_for_checks.iter()) {
+                crate::types::variant_layout::check_manifest_annotation(
+                    ctx,
+                    arena.to_location(sdecl.ptype_loc),
+                    &new_env,
+                    decl,
+                )?;
             }
             // typedecl.ml:1603 `List.iter2 (check_constraints ...) sdecl_list decls`.
             for (sdecl, decl) in decls.iter().zip(original_internal_decls_for_checks.iter()) {
@@ -19020,6 +18685,7 @@ fn type_structure_item<'a>(
                                     type_attributes: vec![],
                                     type_immediate: false,
                                     type_representation: crate::types::TypeRepresentation::Boxed,
+                                    type_shape: crate::types::ValueShape::Unstated,
                                     type_inlined_types: vec![],
                                     type_path: None,
                                 };
@@ -19400,6 +19066,7 @@ fn type_structure_item<'a>(
                                 type_attributes: vec![],
                                 type_immediate: false,
                                 type_representation: crate::types::TypeRepresentation::Boxed,
+                                type_shape: crate::types::ValueShape::Unstated,
                                 type_inlined_types: vec![],
                                 type_path: None,
                             };
@@ -20547,6 +20214,7 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
                 ),
                 type_immediate: false,
                 type_representation: crate::types::TypeRepresentation::Boxed,
+                type_shape: crate::types::ValueShape::Unstated,
                 type_inlined_types: vec![],
                 type_path: Some(Path::pident(*type_id)),
             };
@@ -20600,7 +20268,7 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
             let type_id = declared_type_ids[decl_idx];
             let type_path = Path::pident(type_id);
 
-            check_not_undefined_type_attribute(arena, decl)?;
+            check_declaration_runtime_annotation(arena, decl)?;
 
             // OCaml: reset_type_variables() before each type declaration
             tctx.reset_type_variables();
@@ -21182,6 +20850,7 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
                 type_attributes,
                 type_immediate,
                 type_representation,
+                type_shape: crate::types::ValueShape::Unstated,
                 type_inlined_types: vec![],
                 type_path: Some(type_path),
             };
@@ -21229,6 +20898,27 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
             }
         }
     }
+    // typedecl.ml:1578-1580 `Variant_layout.resolve_shapes ~env decls`.
+    let loop_result = loop_result.and_then(|()| {
+        let ids: Vec<Ident> = if has_fixed_rows {
+            type_entry_ids.clone()
+        } else {
+            declared_type_ids.clone()
+        };
+        let shapes =
+            resolve_declaration_group_shapes(ctx, env, &ids, &internal_decls_for_generalize)?;
+        for (decl, id) in internal_decls_for_generalize.iter_mut().zip(&ids) {
+            if let Some(shape) = shape_for(&shapes, id) {
+                decl.type_shape = shape;
+            }
+        }
+        for typed_decl in typed_tree_decls.iter_mut() {
+            if let Some(shape) = shape_for(&shapes, &typed_decl.typ_id) {
+                typed_decl.typ_type.type_shape = shape;
+            }
+        }
+        Ok(())
+    });
     // typedecl.ml:1540-1546 `update_type` (typedecl.ml:110-124) in the final
     // env (typedecl.ml:1534-1538): unify each recursive stub's manifest
     // variable with the declared type.
@@ -21341,6 +21031,15 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
     // untagged checks before check_constraints and compute_properties_fixpoint.
     for decl in &internal_decls_for_generalize {
         check_variant_declaration_well_formed(ctx, &variance_env, decl)?;
+    }
+    // typedecl.ml:1650-1653 `check_manifest_annotation` over the group.
+    for (sdecl, decl) in decls.iter().zip(original_internal_decls_for_checks.iter()) {
+        crate::types::variant_layout::check_manifest_annotation(
+            ctx,
+            arena.to_location(sdecl.ptype_loc),
+            &variance_env,
+            decl,
+        )?;
     }
     for (sdecl, decl) in decls.iter().zip(original_internal_decls_for_checks.iter()) {
         check_constraints(

@@ -61,6 +61,7 @@ pub mod unit_reads;
 pub mod usage;
 pub mod variance;
 pub mod variant_runtime;
+pub(crate) mod variant_layout;
 
 // Re-exports for convenience
 pub use asttypes::{ArgLabel, Label, Located, MutableFlag, PrivateFlag};
@@ -85,8 +86,8 @@ pub use variant_runtime::{
     Block as VariantBlock, BlockType as VariantBlockType, Configuration as VariantConfiguration,
     ConstructorCase as VariantConstructorCase, ConstructorReference, Instance as VariantInstance,
     Layout as VariantLayout, LayoutRef as VariantLayoutRef, LiteralTag as VariantLiteralTag,
-    MatchableTag as VariantMatchableTag, MatchingFacts as VariantMatchingFacts, Tag as VariantTag,
-    TagType as VariantTagType, TaggedBlock,
+    MatchingFacts as VariantMatchingFacts, Tag as VariantTag, TagType as VariantTagType,
+    TaggedBlock, ValueShape,
 };
 
 // btype exports
