@@ -315,6 +315,62 @@ fn strtod(buf: &[u8]) -> Option<f64> {
     text.parse::<f64>().ok().map(apply)
 }
 
+/// C's `printf("%.*g", precision, v)` for a finite `v`.
+pub fn format_g(v: f64, precision: usize) -> String {
+    let p = precision.max(1);
+    if v == 0.0 {
+        return if v.is_sign_negative() { "-0" } else { "0" }.to_string();
+    }
+    let sci = format!("{:.*e}", p - 1, v);
+    let (mantissa, exponent) = sci.split_once('e').expect("exponent");
+    let x: i32 = exponent.parse().expect("exponent value");
+    if x < -4 || x >= p as i32 {
+        let mantissa = strip_fraction_zeros(mantissa);
+        let sign = if x < 0 { '-' } else { '+' };
+        format!("{mantissa}e{sign}{:02}", x.abs())
+    } else {
+        let decimals = (p as i32 - 1 - x) as usize;
+        strip_fraction_zeros(&format!("{v:.decimals$}")).to_string()
+    }
+}
+
+fn strip_fraction_zeros(s: &str) -> &str {
+    if s.contains('.') {
+        s.trim_end_matches('0').trim_end_matches('.')
+    } else {
+        s
+    }
+}
+
+/// compiler/core/js_number.ml `to_string`: an integer when `int_of_float`
+/// gives the number back, else the shortest of `%.12g`, `%.15g` and `%.18g`
+/// that reads back as it.
+pub fn js_number_to_string(v: f64) -> String {
+    if v == f64::INFINITY {
+        return "Infinity".to_string();
+    }
+    if v == f64::NEG_INFINITY {
+        return "-Infinity".to_string();
+    }
+    if v.is_nan() {
+        return "NaN".to_string();
+    }
+    // `int_of_float` truncates to a native 63-bit OCaml int: out of range it
+    // does not give the number back.
+    let truncated = v as i64;
+    let vint = (truncated << 1) >> 1;
+    if vint as f64 == v {
+        return vint.to_string();
+    }
+    for precision in [12, 15] {
+        let s = format_g(v, precision);
+        if float_of_string(&s) == Some(v) {
+            return s;
+        }
+    }
+    format_g(v, 18)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -375,6 +431,59 @@ mod tests {
                 let got = float_of_string(s).map_or("NONE".to_string(), |x| {
                     crate::types::variant_runtime::ocaml_hex_float(x)
                 });
+                (*s, *expected, got)
+            })
+            .filter(|(_, expected, got)| expected != got)
+            .collect();
+        assert!(mismatches.is_empty(), "{mismatches:?}");
+    }
+
+    /// js_number.ml `to_string (float_of_string s)`, run by OCaml 5.5.2:
+    /// subnormals, rounding past 53 bits, the 63-bit integer boundary, and
+    /// the switches between `%.12g`, `%.15g` and `%.18g`.
+    #[test]
+    fn hex_literal_javascript_matches_ocaml() {
+        let cases: &[(&str, &str)] = &[
+            ("0x1p-1074", "4.94065645841e-324"),
+            ("0x1.00000000000008p0", "1"),
+            ("0x1.00000000000018p0", "1.00000000000000044"),
+            ("0x123456789abcdef12p0", "2.09882954794206454e+19"),
+            ("0x1p-1075", "0"),
+            ("0x1.8p-1074", "9.88131291682e-324"),
+            ("0x0.0000000000001p-1022", "4.94065645841e-324"),
+            ("0x1.fffffffffffff8p1023", "Infinity"),
+            ("0x1p62", "4.6116860184273879e+18"),
+            ("0x1.8p62", "6.91752902764108186e+18"),
+            ("-0x1p62", "-4611686018427387904"),
+            ("-0x1.8p62", "-6.91752902764108186e+18"),
+            ("0x1p63", "9.22337203685477581e+18"),
+            ("0x1.fffffffffffffp61", "4611686018427387392"),
+            ("0x1p52", "4503599627370496"),
+            ("0x1p53", "9007199254740992"),
+            ("0x1.8p0", "1.5"),
+            ("0x1.999999999999ap-4", "0.1"),
+            ("0x1p-4", "0.0625"),
+            ("0x1p-14", "6.103515625e-05"),
+            ("0x1p-15", "3.0517578125e-05"),
+            ("0x1.4p-17", "9.5367431640625e-06"),
+            ("0x1p70", "1.1805916207174113e+21"),
+            ("0x1.23p40", "1249835483136"),
+            ("0x1.23p-40", "1.03383968053094577e-12"),
+            ("-0x0p0", "0"),
+            ("0x1.5555555555555p-2", "0.333333333333333315"),
+            ("0xffffffffffffp0", "281474976710655"),
+            ("0x1.fffffffffffffp1023", "1.79769313486231571e+308"),
+            ("0x1p-1022", "2.22507385850720138e-308"),
+            ("0x1.0000000000001p0", "1.00000000000000022"),
+            ("0x3.243f6a8885a3p0", "3.14159265358979312"),
+            ("0x1p100", "1.2676506002282294e+30"),
+            ("0x1.6345785d8ap+59", "800000000000000000"),
+            ("0x1.c6bf52634p+52", "8000000000000000"),
+        ];
+        let mismatches: Vec<_> = cases
+            .iter()
+            .map(|(s, expected)| {
+                let got = js_number_to_string(float_of_string(s).expect("a float"));
                 (*s, *expected, got)
             })
             .filter(|(_, expected, got)| expected != got)

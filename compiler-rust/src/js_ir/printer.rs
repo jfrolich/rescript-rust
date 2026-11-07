@@ -3116,26 +3116,7 @@ fn is_hex_float_literal(float_str: &str) -> bool {
 /// `to_string (float_of_string float_str)`.
 fn normalize_hex_float_literal(float_str: &str) -> Option<String> {
     let value = crate::ocaml_float::float_of_string(float_str)?;
-    Some(js_number_to_string(value))
-}
-
-fn js_number_to_string(value: f64) -> String {
-    // OCaml converts every hexadecimal float through float_of_string and then
-    // Js_number.to_string; see compiler/core/js_number.ml:42-57 and 93-97.
-    if value == f64::INFINITY {
-        "Infinity".to_string()
-    } else if value == f64::NEG_INFINITY {
-        "-Infinity".to_string()
-    } else if value.is_nan() {
-        "NaN".to_string()
-    } else {
-        let int_value = value as i64;
-        if int_value as f64 == value {
-            int_value.to_string()
-        } else {
-            value.to_string()
-        }
-    }
+    Some(crate::ocaml_float::js_number_to_string(value))
 }
 
 fn transform_float_literal(float_str: &str) -> String {
