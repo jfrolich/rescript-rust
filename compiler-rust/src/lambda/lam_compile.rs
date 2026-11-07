@@ -4899,7 +4899,14 @@ impl LambdaCompiler {
                     return block;
                 }
 
+                // lam_compile.ml `Llet`: `Js_output.append_output args_code
+                // body` keeps only `args_code` when it is finished (a
+                // `throw` from `Praise`, a `break` or `continue`), as in the
+                // effect and return continuations.
                 let mut block = self.compile_let_binding(*kind, id, value);
+                if lambda_is_unconditional_exit(value) || block_finishes_output(&block) {
+                    return block;
+                }
                 block.extend(self.compile_assign_to_target_block(result, body));
                 block
             }
@@ -4914,7 +4921,12 @@ impl LambdaCompiler {
                 block
             }
             Lambda::Lsequence(first, second) => {
+                // lam_compile.ml `Lsequence`: a finished first part drops
+                // the second (`Js_output.append_output`).
                 let mut block = self.compile_effect_block(first);
+                if lambda_is_unconditional_exit(first) || block_finishes_output(&block) {
+                    return block;
+                }
                 block.extend(self.compile_assign_to_target_block(result, second));
                 block
             }
@@ -6047,9 +6059,27 @@ impl LambdaCompiler {
             return None;
         }
 
+        // lam_compile.ml `compile_staticraise`: `Ext_list.fold_right2 largs
+        // bindings exit_assignment (fun larg bind acc -> append_output
+        // (compile larg) acc)`. The nested fold is an argument of `f`, so
+        // the last argument is compiled first; an argument whose output is
+        // finished (a `throw`) drops everything after it, the exit code
+        // assignment included (`Js_output.append_output`).
+        let mut compiled: Vec<Block> = handler
+            .bindings
+            .iter()
+            .zip(args)
+            .rev()
+            .map(|(binding, arg)| self.compile_assign_to_target_block(binding, arg))
+            .collect();
+        compiled.reverse();
         let mut block = Vec::new();
-        for (binding, arg) in handler.bindings.iter().zip(args) {
-            block.extend(self.compile_assign_to_target_block(binding, arg));
+        for arg_block in compiled {
+            let finished = block_finishes_output(&arg_block);
+            block.extend(arg_block);
+            if finished {
+                return Some(block);
+            }
         }
         block.push(Statement::exp(Expression::bin(
             BinOp::Eq,
