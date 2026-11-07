@@ -129,9 +129,32 @@ pub(crate) struct SharedTypePool {
     next_longident_idx: AtomicU32,
     /// The next origin of an identifier block of a published graph.
     next_ident_origin: AtomicU32,
+    name_provenance: RwLock<super::path_provenance::PathProvenance>,
 }
 
 impl SharedTypePool {
+    /// Cold allocation evidence, published before a signature becomes visible.
+    pub(crate) fn record_ident_name(
+        &self,
+        id: &crate::ident::Ident,
+        allocation: super::path_provenance::NameAllocation,
+    ) {
+        self.name_provenance
+            .write()
+            .unwrap()
+            .record_name(id, allocation);
+    }
+
+    pub(crate) fn ident_name_allocation(
+        &self,
+        id: &crate::ident::Ident,
+    ) -> Option<super::path_provenance::NameAllocation> {
+        if !crate::ident::IdentOrigin::SHARED.contains(&id.origin().get()) {
+            return None;
+        }
+        self.name_provenance.read().unwrap().name(id)
+    }
+
     /// An identifier origin for a graph being published.
     pub(crate) fn fresh_ident_origin(&self) -> crate::ident::IdentOrigin {
         use crate::ident::IdentOrigin;
@@ -159,6 +182,7 @@ impl SharedTypePool {
             longident_names: RwLock::new(HashMap::new()),
             next_longident_idx: AtomicU32::new(SHARED_LONGIDENT_IDX_BASE),
             next_ident_origin: AtomicU32::new(0),
+            name_provenance: Default::default(),
         }
     }
 

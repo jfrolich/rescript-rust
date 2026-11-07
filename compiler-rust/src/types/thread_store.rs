@@ -254,6 +254,7 @@ impl ThreadTypeStore {
         id: &crate::ident::Ident,
     ) -> Option<super::path_provenance::NameAllocation> {
         self.path_provenance.borrow().name(id)
+            .or_else(|| self.shared.ident_name_allocation(id))
     }
 
     pub(crate) fn dotted_from_ident(
