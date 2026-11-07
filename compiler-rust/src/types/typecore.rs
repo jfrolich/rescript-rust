@@ -25488,30 +25488,36 @@ fn qualify_module_local_type_paths_with_alias_lookup_in_place<'a>(
 ) {
     use crate::types::type_expr::RowField;
 
-    fn rewrite_path_prefix(path: &Path, old_prefix: &Path, new_prefix: &Path) -> Option<Path> {
+    // Rebuilt dots keep their suffix strings (compiler/ml/subst.ml:69-100).
+    fn rewrite_path_prefix(
+        ctx: &TypeContext,
+        path: &Path,
+        old_prefix: &Path,
+        new_prefix: &Path,
+    ) -> Option<Path> {
         if path.same(old_prefix) {
             return Some(new_prefix.clone());
         }
         match path {
-            Path::Pdot(prefix, name, pos) => rewrite_path_prefix(prefix, old_prefix, new_prefix)
-                .map(|rewritten_prefix| {
-                    Path::Pdot(std::sync::Arc::new(rewritten_prefix), *name, *pos)
-                }),
+            Path::Pdot(prefix, _, _) => rewrite_path_prefix(ctx, prefix, old_prefix, new_prefix)
+                .map(|rewritten| ctx.copy_dotted_with_prefix(path, std::sync::Arc::new(rewritten))),
             _ => None,
         }
     }
 
     fn rewrite_flattened_head_prefix(
+        ctx: &TypeContext,
         path: &Path,
         flat_head: &str,
         new_prefix: &Path,
     ) -> Option<Path> {
         match path {
             Path::Pident(id) if id.name() == flat_head => Some(new_prefix.clone()),
-            Path::Pdot(prefix, name, pos) => rewrite_flattened_head_prefix(
-                prefix, flat_head, new_prefix,
-            )
-            .map(|rewritten_prefix| Path::Pdot(std::sync::Arc::new(rewritten_prefix), *name, *pos)),
+            Path::Pdot(prefix, _, _) => {
+                rewrite_flattened_head_prefix(ctx, prefix, flat_head, new_prefix).map(|rewritten| {
+                    ctx.copy_dotted_with_prefix(path, std::sync::Arc::new(rewritten))
+                })
+            }
             _ => None,
         }
     }
@@ -25552,6 +25558,7 @@ fn qualify_module_local_type_paths_with_alias_lookup_in_place<'a>(
     }
 
     fn rewrite_with_flattened_heads(
+        ctx: &TypeContext,
         path: &Path,
         alias_path: &Path,
         module_access_path: &Path,
@@ -25565,7 +25572,8 @@ fn qualify_module_local_type_paths_with_alias_lookup_in_place<'a>(
         }
 
         for flat_head in flat_heads {
-            let rewritten = rewrite_flattened_head_prefix(path, &flat_head, module_access_path);
+            let rewritten =
+                rewrite_flattened_head_prefix(ctx, path, &flat_head, module_access_path);
             if rewritten.is_some() {
                 return rewritten;
             }
@@ -25573,14 +25581,15 @@ fn qualify_module_local_type_paths_with_alias_lookup_in_place<'a>(
         None
     }
 
-    fn prepend_module_prefix(path: &Path, prefix: &Path) -> Option<Path> {
+    fn prepend_module_prefix(ctx: &TypeContext, path: &Path, prefix: &Path) -> Option<Path> {
         match path {
-            Path::Pident(id) => Some(Path::pdot(prefix.clone(), id.name())),
-            Path::Pdot(parent, name, pos) => {
-                prepend_module_prefix(parent, prefix).map(|rewritten_parent| {
-                    Path::Pdot(std::sync::Arc::new(rewritten_parent), *name, *pos)
-                })
-            }
+            Path::Pident(id) => Some(ctx.dotted_from_ident(
+                std::sync::Arc::new(prefix.clone()),
+                *id,
+                crate::types::path::NOPOS,
+            )),
+            Path::Pdot(parent, _, _) => prepend_module_prefix(ctx, parent, prefix)
+                .map(|rewritten| ctx.copy_dotted_with_prefix(path, std::sync::Arc::new(rewritten))),
             Path::Papply(_, _) => None,
         }
     }
@@ -25686,9 +25695,11 @@ fn qualify_module_local_type_paths_with_alias_lookup_in_place<'a>(
                     // own component and are rebased below.
                     let normalized_alias_target = normalized_alias_target
                         .unwrap_or_else(|| env.normalize_path(&alias_target));
-                    rewritten_path = rewrite_path_prefix(&path, &alias_target, module_access_path);
+                    rewritten_path =
+                        rewrite_path_prefix(ctx, &path, &alias_target, module_access_path);
                     if rewritten_path.is_none() {
                         rewritten_path = rewrite_with_flattened_heads(
+                            ctx,
                             &path,
                             &alias_target,
                             module_access_path,
@@ -25697,6 +25708,7 @@ fn qualify_module_local_type_paths_with_alias_lookup_in_place<'a>(
                     }
                     if rewritten_path.is_none() && !normalized_alias_target.same(&alias_target) {
                         rewritten_path = rewrite_with_flattened_heads(
+                            ctx,
                             &path,
                             &normalized_alias_target,
                             module_access_path,
@@ -25766,7 +25778,7 @@ fn qualify_module_local_type_paths_with_alias_lookup_in_place<'a>(
                 // own binder (checked above).
                 if !path_parent_has_module_suffix
                     && !matches!(path, Path::Pident(_))
-                    && let Some(candidate) = prepend_module_prefix(&path, module_access_path)
+                    && let Some(candidate) = prepend_module_prefix(ctx, &path, module_access_path)
                     && !candidate.same(&path)
                     && lookup_type_decl_for_qualification_probe(&candidate, env, pers_env, ctx)
                         .is_some()
