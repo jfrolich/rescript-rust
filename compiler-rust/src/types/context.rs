@@ -4442,8 +4442,47 @@ impl TypeContext {
         }
     }
 
-    /// Append an imported portable location table to this compilation's
-    /// table, returning the mapping of its handles.
+    /// Allocation identity, if retained by the location's owning table.
+    pub(crate) fn location_identity(
+        &self,
+        loc: super::DeclLoc,
+    ) -> Option<super::decl_loc::LocationIdentity> {
+        use super::decl_loc::DeclLocKind;
+        match loc.kind() {
+            DeclLocKind::Source => None,
+            DeclLocKind::Local => {
+                assert_eq!(loc.owner(), self.decl_loc_owner);
+                self.decl_locs.identity(loc.index())
+            }
+            DeclLocKind::Store => self.store.decl_loc_identity(loc),
+            DeclLocKind::Shared => super::shared_store::page_location_identity(
+                &self.shared_pages.borrow(),
+                loc.owner(),
+                loc.index(),
+            ),
+            DeclLocKind::Portable => panic!("portable location outside its table"),
+        }
+    }
+
+    /// Import coordinates and allocation identities into a fresh namespace.
+    pub(crate) fn import_portable_decl_locs<'a>(
+        &self,
+        table: &super::decl_loc::DeclLocTable,
+        files: &'a dyn Fn(crate::intern::StrIdx) -> crate::intern::StrIdx,
+    ) -> super::decl_loc::DeclLocImport<'a> {
+        let mut table = table.clone();
+        table.remap_for_import(files);
+        let (base, instances) = self.decl_locs.append_portable(&table);
+        super::decl_loc::DeclLocImport {
+            kind: super::decl_loc::DeclLocKind::Local,
+            owner: self.decl_loc_owner,
+            base,
+            instances,
+            files,
+        }
+    }
+
+    #[cfg(test)]
     pub(crate) fn import_decl_locs<'a>(
         &self,
         locations: impl IntoIterator<Item = crate::location::Location>,
@@ -4453,6 +4492,7 @@ impl TypeContext {
             kind: super::decl_loc::DeclLocKind::Local,
             owner: self.decl_loc_owner,
             base: self.decl_locs.append(locations),
+            instances: Vec::new(),
             files,
         }
     }
@@ -5118,7 +5158,7 @@ mod tests {
                         (TypeDesc::Tnil, GENERIC_LEVEL),
                     ],
                     Vec::new(),
-                    Vec::new(),
+                    Default::default(),
                 )
             })
             .expect("pool has room");

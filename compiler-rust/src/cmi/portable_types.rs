@@ -1339,11 +1339,15 @@ impl<'a, 'f> TypeGraphSerializer<'a, 'f> {
 
     /// The portable handle of a location of the serialized context.
     fn portable_loc(&mut self, loc: DeclLoc) -> DeclLoc {
+        let identity = self.ctx.location_identity(loc);
         let mut loc = self.ctx.resolve_loc(loc);
         self.remap_loc(&mut loc);
         self.file_names.insert(loc.loc_start.file_name.raw());
         self.file_names.insert(loc.loc_end.file_name.raw());
-        self.locations.intern(loc)
+        match identity {
+            Some(identity) => self.locations.intern_with_identity(loc, identity),
+            None => self.locations.intern(loc),
+        }
     }
 
     fn portable_label(&mut self, label: &ArgLabel) -> ArgLabel {
@@ -1821,14 +1825,14 @@ pub fn internalize_pers_struct(pps: Arc<PortablePersStruct>, ctx: &TypeContext) 
         let intern = |name: &str| store.intern_longident_name(name);
         let files = FileRemap::new(&portable.cmi_longident_names, &intern);
         let map = |file| files.map(file);
-        let locs = store.import_decl_locs(files.locations(&portable.locations), &map);
+        let locs = store.import_portable_decl_locs(&portable.locations, &map);
         internalize_signature_into_store(&portable.ps_sig, &portable.type_graph, &locs, store)
     } else {
         let portable = pps.signature();
         let intern = |name: &str| ctx.intern_cmi_longident_name(name);
         let files = FileRemap::new(&portable.cmi_longident_names, &intern);
         let map = |file| files.map(file);
-        let locs = ctx.import_decl_locs(files.locations(&portable.locations), &map);
+        let locs = ctx.import_portable_decl_locs(&portable.locations, &map);
         internalize_signature(&portable.ps_sig, &portable.type_graph, &locs, ctx)
     };
     let ps = Arc::new(PersStruct {
@@ -1945,11 +1949,11 @@ fn internalize_signature_into_shared(
             })
             .collect();
         ids.signature(&mut sig, &sink);
-        (
-            nodes,
-            graph.variant_layouts.clone(),
-            files.locations(locations).collect(),
-        )
+        (nodes, graph.variant_layouts.clone(), {
+            let mut table = locations.clone();
+            table.remap_for_import(&map);
+            table
+        })
     })?;
     let layout_remap: Vec<_> = (0..graph.variant_layouts.len())
         .map(|i| crate::types::VariantLayoutRef::from_shared_index(base + i as u32))
@@ -1969,6 +1973,7 @@ fn shared_decl_locs<'a>(
         kind: crate::types::decl_loc::DeclLocKind::Shared,
         owner: base,
         base: 0,
+        instances: Vec::new(),
         files,
     }
 }
@@ -1982,7 +1987,7 @@ pub(crate) fn internalize_raw_signature(
     let intern = |name: &str| ctx.intern_cmi_longident_name(name);
     let files = FileRemap::new(&names, &intern);
     let map = |file| files.map(file);
-    let locs = ctx.import_decl_locs(files.locations(&raw.raw_locations), &map);
+    let locs = ctx.import_portable_decl_locs(&raw.raw_locations, &map);
     Some(internalize_signature(
         &raw.raw_ps_sig,
         &raw.raw_type_graph,
@@ -2024,19 +2029,6 @@ impl<'a> FileRemap<'a> {
         let fresh = (self.intern)(name);
         self.fresh.borrow_mut().insert(raw, fresh);
         fresh
-    }
-
-    /// The entries of a portable table, naming their files in the importer.
-    fn locations<'t>(
-        &'t self,
-        table: &'t DeclLocTable,
-    ) -> impl Iterator<Item = crate::location::Location> + 't {
-        table.locations().iter().map(|loc| {
-            let mut loc = *loc;
-            loc.loc_start.file_name = self.map(loc.loc_start.file_name);
-            loc.loc_end.file_name = self.map(loc.loc_end.file_name);
-            loc
-        })
     }
 }
 
@@ -2538,6 +2530,136 @@ mod identity_tests {
             path_of(&importer, again[at[1]]).1,
             PathBlockOwner::Of(again[at[0]])
         );
+    }
+
+    #[test]
+    fn location_allocations_survive_cold_warm_store_and_shared_imports() {
+        use crate::types::decl_loc::LocationIdentity;
+        let source = TypeContext::new(Arc::new(IdGenerator::new()));
+        let mut coordinate = crate::location::Location::none();
+        coordinate.loc_start.line = 3;
+        coordinate.loc_end.line = 3;
+        let scope = source.fresh_location_scope();
+        let first = source.intern_loc_with_identity(
+            coordinate,
+            LocationIdentity {
+                scope,
+                location: 1,
+                start: 10,
+                end: 11,
+            },
+        );
+        let second = source.intern_loc_with_identity(
+            coordinate,
+            LocationIdentity {
+                scope,
+                location: 2,
+                start: 11,
+                end: 12,
+            },
+        );
+        let typ = source.new_var(None);
+        let sig: Signature = [first, first, second]
+            .into_iter()
+            .map(|loc| {
+                SignatureItem::SigValue(
+                    crate::ident::Ident::create_persistent("value"),
+                    ValueDescription {
+                        val_type: typ,
+                        val_kind: ValueKind::ValReg,
+                        val_loc: loc,
+                        val_attributes: vec![],
+                        val_path: None,
+                    },
+                )
+            })
+            .collect::<Vec<_>>()
+            .into();
+        let save = |ctx: &TypeContext, sig: &Signature| {
+            serialize_signature(sig, ctx, None, &mut crate::fast_hash::AHashSet::new())
+        };
+        let saved = save(&source, &sig);
+        assert_eq!(saved.2.len(), 1, "coordinates still intern once");
+        let cold = crate::binser::Encoded::encode(&saved).decode();
+        drop(source);
+        let verify = |ctx: &TypeContext, sig: &Signature| {
+            let handles: Vec<_> = sig
+                .iter()
+                .map(|item| match item {
+                    SignatureItem::SigValue(_, value) => value.val_loc,
+                    _ => panic!("value"),
+                })
+                .collect();
+            assert_eq!(handles[0], handles[1]);
+            assert_ne!(handles[0], handles[2]);
+            assert_eq!(ctx.resolve_loc(handles[0]), ctx.resolve_loc(handles[2]));
+            let a = ctx.location_identity(handles[0]).unwrap();
+            let b = ctx.location_identity(handles[2]).unwrap();
+            assert_eq!(a.scope, b.scope);
+            assert_ne!(a.location, b.location);
+            assert_eq!(a.end, b.start, "shared position survives");
+            assert_ne!(a.start, b.end, "equal coordinates do not merge positions");
+            a.scope
+        };
+        let target = TypeContext::new(Arc::new(IdGenerator::new()));
+        let identity = |file| file;
+        let load = |saved: &(Signature, PortableTypeGraph, DeclLocTable)| {
+            let locs = target.import_portable_decl_locs(&saved.2, &identity);
+            internalize_signature(&saved.0, &saved.1, &locs, &target)
+        };
+        let warm = load(&saved);
+        let cold_loaded = load(&cold);
+        let warm_scope = verify(&target, &warm);
+        assert_ne!(warm_scope, scope);
+        assert_ne!(warm_scope, verify(&target, &cold_loaded));
+        let worker_a = TypeContext::new(Arc::new(IdGenerator::new()));
+        let worker_b = TypeContext::new(Arc::new(IdGenerator::new()));
+        let store_load = |ctx: &TypeContext| {
+            let locs = ctx
+                .thread_store()
+                .import_portable_decl_locs(&saved.2, &identity);
+            internalize_signature_into_store(&saved.0, &saved.1, &locs, ctx.thread_store())
+        };
+        let a = store_load(&worker_a);
+        let b = store_load(&worker_b);
+        assert_ne!(verify(&worker_a, &a), verify(&worker_b, &b));
+        let a = load(&save(&worker_a, &a));
+        let b = load(&save(&worker_b, &b));
+        assert_ne!(verify(&target, &a), verify(&target, &b));
+
+        let intern = |name: &str| {
+            target
+                .thread_store()
+                .shared_pool()
+                .intern_longident_name(name)
+        };
+        let files = FileRemap::new(&[], &intern);
+        let shared = internalize_signature_into_shared(
+            &saved.0,
+            &saved.1,
+            &saved.2,
+            &files,
+            target.thread_store().shared_pool(),
+        )
+        .unwrap();
+        let shared_scope = verify(&target, &shared);
+        assert_ne!(shared_scope, warm_scope);
+        let roundtrip = load(&save(&target, &shared));
+        assert_ne!(verify(&target, &roundtrip), shared_scope);
+
+        let digest = |value: &(Signature, PortableTypeGraph, DeclLocTable)| {
+            let mut hash = std::collections::hash_map::DefaultHasher::new();
+            crate::cmi::digest_ser::Canonical::new(&mut hash).hash(value);
+            std::hash::Hasher::finish(&hash)
+        };
+        let mut without = saved.clone();
+        without.2 = DeclLocTable::default();
+        assert_eq!(digest(&saved), digest(&without));
+        assert_eq!(std::mem::size_of::<DeclLoc>(), 8);
+        assert_eq!(std::mem::size_of::<crate::ident::Ident>(), 16);
+        assert_eq!(std::mem::size_of::<Path>(), 24);
+        assert_eq!(std::mem::size_of::<TypeDesc>(), 64);
+        assert_eq!(std::mem::size_of::<crate::types::TypeExpr>(), 80);
     }
 
     #[test]

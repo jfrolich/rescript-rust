@@ -261,8 +261,34 @@ impl ThreadTypeStore {
         )
     }
 
-    /// Append an imported portable location table, returning the mapping of
-    /// its handles into this store.
+    /// Allocation identity of a location owned by this store.
+    pub(crate) fn decl_loc_identity(
+        &self,
+        loc: super::DeclLoc,
+    ) -> Option<super::decl_loc::LocationIdentity> {
+        assert_eq!(loc.owner(), self.decl_loc_owner);
+        self.decl_locs.identity(loc.index())
+    }
+
+    /// Import coordinates and allocation identities into a fresh namespace.
+    pub(crate) fn import_portable_decl_locs<'a>(
+        &self,
+        table: &super::decl_loc::DeclLocTable,
+        files: &'a dyn Fn(crate::intern::StrIdx) -> crate::intern::StrIdx,
+    ) -> super::decl_loc::DeclLocImport<'a> {
+        let mut table = table.clone();
+        table.remap_for_import(files);
+        let (base, instances) = self.decl_locs.append_portable(&table);
+        super::decl_loc::DeclLocImport {
+            kind: super::decl_loc::DeclLocKind::Store,
+            owner: self.decl_loc_owner,
+            base,
+            instances,
+            files,
+        }
+    }
+
+    #[cfg(test)]
     pub(crate) fn import_decl_locs<'a>(
         &self,
         locations: impl IntoIterator<Item = crate::location::Location>,
@@ -272,6 +298,7 @@ impl ThreadTypeStore {
             kind: super::decl_loc::DeclLocKind::Store,
             owner: self.decl_loc_owner,
             base: self.decl_locs.append(locations),
+            instances: Vec::new(),
             files,
         }
     }

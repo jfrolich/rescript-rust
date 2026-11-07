@@ -59,7 +59,7 @@ pub(crate) struct SharedGraph {
     layouts: Box<[Layout]>,
     /// Locations of the graph's declarations and type labels
     /// (`DeclLocKind::Shared` handles naming this graph by `base`).
-    locations: Box<[crate::location::Location]>,
+    locations: super::decl_loc::DeclLocTable,
 }
 
 /// Internalization slot of one portable dependency signature.
@@ -88,7 +88,19 @@ pub(crate) fn page_location(
         graph.base, base,
         "shared declaration location names no graph"
     );
-    graph.locations[index]
+    graph.locations.get(index)
+}
+
+pub(crate) fn page_location_identity(
+    pages: &[OnceLock<Arc<SharedGraph>>],
+    base: u32,
+    index: usize,
+) -> Option<super::decl_loc::LocationIdentity> {
+    let graph = pages[(base >> PAGE_BITS) as usize]
+        .get()
+        .expect("shared location refers to an unpublished graph");
+    assert_eq!(graph.base, base);
+    graph.locations.identity(index)
 }
 
 /// Resolve shared node `idx` through a page table.
@@ -105,7 +117,7 @@ pub(crate) fn page_node(pages: &[OnceLock<Arc<SharedGraph>>], idx: u32) -> &Shar
 pub(crate) type SharedGraphParts = (
     Vec<(TypeDesc, i32)>,
     Vec<Layout>,
-    Vec<crate::location::Location>,
+    super::decl_loc::DeclLocTable,
 );
 
 pub(crate) struct SharedTypePool {
@@ -213,7 +225,7 @@ impl SharedTypePool {
                 })
                 .collect(),
             layouts: built_layouts.into_boxed_slice(),
-            locations: locations.into_boxed_slice(),
+            locations,
         });
         for page in (base >> PAGE_BITS)..(end >> PAGE_BITS) {
             let published = self.pages[page as usize].set(graph.clone());
@@ -330,13 +342,15 @@ mod tests {
                         (TypeDesc::Tnil, 9),
                     ],
                     Vec::new(),
-                    vec![crate::location::Location::in_file(StrIdx::from_raw(4))],
+                    [crate::location::Location::in_file(StrIdx::from_raw(4))]
+                        .into_iter()
+                        .collect(),
                 )
             })
             .unwrap();
         let second = pool
             .publish(1, 0, |_| {
-                (vec![(TypeDesc::Tnil, 1)], Vec::new(), Vec::new())
+                (vec![(TypeDesc::Tnil, 1)], Vec::new(), Default::default())
             })
             .unwrap();
         assert_eq!(second % PAGE_SIZE, 0);

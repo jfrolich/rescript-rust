@@ -194,13 +194,16 @@ pub trait DeclLocs {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct DeclLocTable {
     locations: Vec<Location>,
+    instances: Vec<LocationInstance>,
+    #[serde(skip)]
+    instance_index: crate::fast_hash::AHashMap<(u64, u32), u32>,
     #[serde(skip)]
     index: crate::fast_hash::AHashMap<Location, u32>,
 }
 
 impl PartialEq for DeclLocTable {
     fn eq(&self, other: &Self) -> bool {
-        self.locations == other.locations
+        self.locations == other.locations && self.instances == other.instances
     }
 }
 
@@ -236,6 +239,10 @@ impl DeclLocTable {
                 .collect();
         }
         let next = self.locations.len();
+        assert!(
+            next < IDENTITY_INDEX_BIT,
+            "portable coordinate table exhausted"
+        );
         let index = *self.index.entry(loc).or_insert_with(|| {
             self.locations.push(loc);
             next as u32
@@ -243,12 +250,116 @@ impl DeclLocTable {
         DeclLoc::table(DeclLocKind::Portable, 0, index as usize)
     }
 
+    /// Keep allocation sharing independently of coordinate interning. Identity
+    /// keys come from the producer, never from the coordinate values.
+    pub(crate) fn intern_with_identity(
+        &mut self,
+        loc: Location,
+        identity: LocationIdentity,
+    ) -> DeclLoc {
+        // Even a coordinate-free value may denote a real decoded allocation.
+        // Give it a coordinate entry instead of converting it to a source handle.
+        if self.index.len() != self.locations.len() {
+            self.index = self
+                .locations
+                .iter()
+                .enumerate()
+                .map(|(i, loc)| (*loc, i as u32))
+                .collect();
+        }
+        let next = self.locations.len();
+        assert!(
+            next < IDENTITY_INDEX_BIT,
+            "portable coordinate table exhausted"
+        );
+        let coordinate = *self.index.entry(loc).or_insert_with(|| {
+            self.locations.push(loc);
+            next as u32
+        });
+        if self.instance_index.len() != self.instances.len() {
+            self.instance_index = self
+                .instances
+                .iter()
+                .enumerate()
+                .map(|(i, entry)| ((entry.identity.scope, entry.identity.location), i as u32))
+                .collect();
+        }
+        let key = (identity.scope, identity.location);
+        let index = if let Some(&index) = self.instance_index.get(&key) {
+            assert_eq!(
+                self.instances[index as usize],
+                LocationInstance {
+                    coordinate,
+                    identity
+                }
+            );
+            index
+        } else {
+            let index = self.instances.len();
+            assert!(
+                index < IDENTITY_INDEX_BIT,
+                "portable provenance table exhausted"
+            );
+            self.instances.push(LocationInstance {
+                coordinate,
+                identity,
+            });
+            self.instance_index.insert(key, index as u32);
+            index as u32
+        };
+        DeclLoc::table(
+            DeclLocKind::Portable,
+            0,
+            IDENTITY_INDEX_BIT | index as usize,
+        )
+    }
+
+    pub(crate) fn identity(&self, index: usize) -> Option<LocationIdentity> {
+        (index & IDENTITY_INDEX_BIT != 0)
+            .then(|| self.instances[index & !IDENTITY_INDEX_BIT].identity)
+    }
+
+    pub(crate) fn get(&self, index: usize) -> Location {
+        let coordinate = if index & IDENTITY_INDEX_BIT == 0 {
+            index
+        } else {
+            self.instances[index & !IDENTITY_INDEX_BIT].coordinate as usize
+        };
+        self.locations[coordinate]
+    }
+
+    /// A new import owns new allocations, including for two live stores.
+    /// Retain sharing within each producer scope, but never its namespace.
+    pub(crate) fn remap_for_import(&mut self, files: &dyn Fn(StrIdx) -> StrIdx) {
+        for loc in &mut self.locations {
+            loc.loc_start.file_name = files(loc.loc_start.file_name);
+            loc.loc_end.file_name = files(loc.loc_end.file_name);
+        }
+        let mut scopes = crate::fast_hash::AHashMap::default();
+        for instance in &mut self.instances {
+            instance.identity.scope = *scopes
+                .entry(instance.identity.scope)
+                .or_insert_with(|| (next_table_owner() as u64) << 32);
+        }
+        self.index.clear();
+        self.instance_index.clear();
+    }
+
     /// The location of a portable or source handle.
     pub fn resolve(&self, loc: DeclLoc) -> Location {
         match loc.kind() {
             DeclLocKind::Source => loc.source_location().unwrap(),
-            DeclLocKind::Portable => self.locations[loc.index()],
+            DeclLocKind::Portable => self.get(loc.index()),
             kind => panic!("{kind:?} declaration location resolved by a portable table"),
+        }
+    }
+}
+
+impl FromIterator<Location> for DeclLocTable {
+    fn from_iter<T: IntoIterator<Item = Location>>(iter: T) -> Self {
+        Self {
+            locations: iter.into_iter().collect(),
+            ..Self::default()
         }
     }
 }
@@ -263,7 +374,7 @@ impl DeclLocs for DeclLocTable {
 /// scope is assigned by the owner of the source allocations, never inferred
 /// from coordinates. Copies retain these keys; equal coordinates alone do
 /// not imply a shared allocation.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub(crate) struct LocationIdentity {
     pub(crate) scope: u64,
     pub(crate) location: u32,
@@ -276,7 +387,7 @@ pub(crate) struct LocationIdentity {
 // and pay for no provenance storage.
 const IDENTITY_INDEX_BIT: usize = 1 << 27;
 
-#[derive(Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct LocationInstance {
     coordinate: u32,
     identity: LocationIdentity,
@@ -362,6 +473,38 @@ impl OwnedDeclLocs {
         base
     }
 
+    /// Append coordinates and map the portable allocation handles separately.
+    pub(crate) fn append_portable(&self, table: &DeclLocTable) -> (usize, Vec<usize>) {
+        let base = self.append(table.locations.iter().copied());
+        let mut owned = self.instances.borrow_mut();
+        let mut index = self.instance_index.borrow_mut();
+        let instances = table
+            .instances
+            .iter()
+            .map(|entry| {
+                let offset = owned.len();
+                assert!(
+                    offset < IDENTITY_INDEX_BIT,
+                    "declaration provenance table exhausted"
+                );
+                owned.push(LocationInstance {
+                    coordinate: u32::try_from(base + entry.coordinate as usize).unwrap(),
+                    identity: entry.identity,
+                });
+                assert!(
+                    index
+                        .insert(
+                            (entry.identity.scope, entry.identity.location),
+                            offset as u32
+                        )
+                        .is_none()
+                );
+                IDENTITY_INDEX_BIT | offset
+            })
+            .collect();
+        (base, instances)
+    }
+
     pub(crate) fn get(&self, index: usize) -> Location {
         let coordinate = if index & IDENTITY_INDEX_BIT == 0 {
             index
@@ -389,11 +532,13 @@ pub(crate) fn next_table_owner() -> u32 {
 
 /// How the handles of a portable table map into the table of an importing
 /// owner: portable entry `i` becomes entry `base + i` of `kind`/`owner`, and
-/// source handles rename their file.
+/// source handles rename their file. Provenance handles use the separately
+/// mapped instance indices (shared graphs keep their own table unchanged).
 pub(crate) struct DeclLocImport<'a> {
     pub(crate) kind: DeclLocKind,
     pub(crate) owner: u32,
     pub(crate) base: usize,
+    pub(crate) instances: Vec<usize>,
     pub(crate) files: &'a dyn Fn(StrIdx) -> StrIdx,
 }
 
@@ -401,7 +546,15 @@ impl DeclLocImport<'_> {
     pub(crate) fn import(&self, loc: DeclLoc) -> DeclLoc {
         match loc.kind() {
             DeclLocKind::Source => loc.with_source_file((self.files)(loc.source_file().unwrap())),
-            DeclLocKind::Portable => DeclLoc::table(self.kind, self.owner, self.base + loc.index()),
+            DeclLocKind::Portable => {
+                let index =
+                    if loc.index() & IDENTITY_INDEX_BIT != 0 && self.kind != DeclLocKind::Shared {
+                        self.instances[loc.index() & !IDENTITY_INDEX_BIT]
+                    } else {
+                        self.base + loc.index()
+                    };
+                DeclLoc::table(self.kind, self.owner, index)
+            }
             kind => panic!("{kind:?} declaration location in a portable signature"),
         }
     }
@@ -584,6 +737,7 @@ mod tests {
             kind: DeclLocKind::Store,
             owner: 7,
             base: 10,
+            instances: Vec::new(),
             files: &renamed,
         };
         let imported = import.import(h2);
