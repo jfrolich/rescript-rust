@@ -3765,12 +3765,17 @@ fn resolve_type_through_env<'a>(
 pub(crate) fn normalize_path_full(ctx: &TypeContext, env: &Env, path: &Path) -> Path {
     // Normalization only reads module-level bindings (see `Env::scope_id`).
     let env_id = env.scope_id();
-    if let Some(cached) = ctx.find_normalized_path_full(env_id, path) {
-        return cached;
-    }
-    let normalized = normalize_path_full_inner(ctx, env, path, 0, &mut HashSet::new(), true, false);
-    ctx.register_normalized_path_full(env_id, path, normalized.clone());
-    normalized
+    let recipe = match ctx.find_normalized_path_full(env_id, path) {
+        Some(recipe) => recipe,
+        None => {
+            let (_, recipe) =
+                normalize_path_full_inner(ctx, env, path, 0, &mut HashSet::new(), true, false);
+            let recipe = std::sync::Arc::new(recipe);
+            ctx.register_normalized_path_full(env_id, path, recipe.clone());
+            recipe
+        }
+    };
+    recipe.materialize(ctx, path)
 }
 
 pub(crate) fn normalize_path_full_strict(
@@ -3845,12 +3850,17 @@ pub(crate) fn force_normalize_path_full_side_effects(
     // those side effects at the OCaml compare point, while repeated label
     // disambiguation compares observe the already-forced lazy state.
     let env_id = env.scope_id();
-    if let Some(cached) = ctx.find_forced_normalized_path_full(env_id, path) {
-        return cached;
-    }
-    let normalized = normalize_path_full_inner(ctx, env, path, 0, &mut HashSet::new(), true, true);
-    ctx.register_forced_normalized_path_full(env_id, path, normalized.clone());
-    normalized
+    let recipe = match ctx.find_forced_normalized_path_full(env_id, path) {
+        Some(recipe) => recipe,
+        None => {
+            let (_, recipe) =
+                normalize_path_full_inner(ctx, env, path, 0, &mut HashSet::new(), true, true);
+            let recipe = std::sync::Arc::new(recipe);
+            ctx.register_forced_normalized_path_full(env_id, path, recipe.clone());
+            recipe
+        }
+    };
+    recipe.materialize(ctx, path)
 }
 
 fn normalize_path_forward_only(ctx: &TypeContext, env: &Env, path: &Path) -> Path {
@@ -3858,13 +3868,17 @@ fn normalize_path_forward_only(ctx: &TypeContext, env: &Env, path: &Path) -> Pat
     // memoize it per `Env::scope_id`; unification asks for the same abstract
     // type heads many times per scope.
     let env_id = env.scope_id();
-    if let Some(cached) = ctx.find_normalized_path_forward(env_id, path) {
-        return cached;
-    }
-    let normalized =
-        normalize_path_full_inner(ctx, env, path, 0, &mut HashSet::new(), false, false);
-    ctx.register_normalized_path_forward(env_id, path, normalized.clone());
-    normalized
+    let recipe = match ctx.find_normalized_path_forward(env_id, path) {
+        Some(recipe) => recipe,
+        None => {
+            let (_, recipe) =
+                normalize_path_full_inner(ctx, env, path, 0, &mut HashSet::new(), false, false);
+            let recipe = std::sync::Arc::new(recipe);
+            ctx.register_normalized_path_forward(env_id, path, recipe.clone());
+            recipe
+        }
+    };
+    recipe.materialize(ctx, path)
 }
 
 fn normalize_path_full_inner(
@@ -3875,9 +3889,9 @@ fn normalize_path_full_inner(
     visiting: &mut HashSet<Path>,
     allow_reverse_local_aliases: bool,
     force_module_lookup_side_effects: bool,
-) -> Path {
+) -> (Path, NormRecipe) {
     if depth > 20 {
-        return path.clone();
+        return (path.clone(), NormRecipe::Same);
     }
 
     if let Path::Pdot(parent, module_name, _) = path {
@@ -3899,11 +3913,11 @@ fn normalize_path_full_inner(
             // through env.ml:865-875. Side-effectful compare_type_path calls
             // skip this shortcut so compiler/ml/env.ml:903-914 can reach
             // find_module at env.ml:865-882 and force component module thunks.
-            return normalize_path_full_inner(
+            return normalize_alias_target(
                 ctx,
                 env,
-                &alias_path,
-                depth + 1,
+                alias_path.clone(),
+                depth,
                 visiting,
                 allow_reverse_local_aliases,
                 force_module_lookup_side_effects,
@@ -3915,13 +3929,12 @@ fn normalize_path_full_inner(
     // compiler/ml/env.ml:903-910 handles both `Pdot` prefixes and both sides
     // of `Papply`; functor arguments use lax normalization but still force
     // local module-declaration thunks through env.ml:865-875.
-    let path = match path {
+    // env.ml:868-872 rebuilds every `Pdot`/`Papply` with a fresh block and
+    // returns a `Pident` itself. `path` below is the logical value used for
+    // lookups; `recipe` says how each call allocates its result.
+    let (path, recipe) = match path {
         Path::Pdot(p, s, pos) => {
-            // OCaml compiler/ml/env.ml:903-914 normalizes a dotted path's
-            // prefix before `find_module ~alias:true` inspects the path at
-            // env.ml:865-882. Component aliases already handled above model the
-            // descriptor-table path from env.ml:781-793.
-            let p_norm = normalize_path_full_inner(
+            let (p_norm, p_recipe) = normalize_path_full_inner(
                 ctx,
                 env,
                 p,
@@ -3930,15 +3943,13 @@ fn normalize_path_full_inner(
                 allow_reverse_local_aliases,
                 force_module_lookup_side_effects,
             );
-            if p_norm == **p {
-                path.clone()
-            } else {
-                let _ = (s, pos);
-                ctx.copy_dotted_with_prefix(path, std::sync::Arc::new(p_norm))
-            }
+            (
+                Path::Pdot(std::sync::Arc::new(p_norm), *s, *pos),
+                NormRecipe::Dot(Box::new(p_recipe)),
+            )
         }
         Path::Papply(p1, p2) => {
-            let p1_norm = normalize_path_full_inner(
+            let (p1_norm, p1_recipe) = normalize_path_full_inner(
                 ctx,
                 env,
                 p1,
@@ -3947,7 +3958,7 @@ fn normalize_path_full_inner(
                 allow_reverse_local_aliases,
                 force_module_lookup_side_effects,
             );
-            let p2_norm = normalize_path_full_inner(
+            let (p2_norm, p2_recipe) = normalize_path_full_inner(
                 ctx,
                 env,
                 p2,
@@ -3956,13 +3967,12 @@ fn normalize_path_full_inner(
                 allow_reverse_local_aliases,
                 force_module_lookup_side_effects,
             );
-            if p1_norm == **p1 && p2_norm == **p2 {
-                path.clone()
-            } else {
-                Path::Papply(std::sync::Arc::new(p1_norm), std::sync::Arc::new(p2_norm))
-            }
+            (
+                Path::Papply(std::sync::Arc::new(p1_norm), std::sync::Arc::new(p2_norm)),
+                NormRecipe::Apply(Box::new(p1_recipe), Box::new(p2_recipe)),
+            )
         }
-        _ => path.clone(),
+        _ => (path.clone(), NormRecipe::Same),
     };
 
     // Match OCaml compiler/ml/ctype.ml:1367-1372 and
@@ -3991,11 +4001,11 @@ fn normalize_path_full_inner(
         // Use the same forward alias fact when Rust already has the qualified
         // component table, so `expand_head` observes aliases such as
         // `Js.File -> Js_file` without forcing the full persistent signature.
-        return normalize_path_full_inner(
+        return normalize_alias_target(
             ctx,
             env,
-            &alias_path,
-            depth + 1,
+            alias_path,
+            depth,
             visiting,
             allow_reverse_local_aliases,
             force_module_lookup_side_effects,
@@ -4010,17 +4020,17 @@ fn normalize_path_full_inner(
     // skip the freshening side effects that determine later identifier stamps.
     if matches!(path, Path::Pdot(..)) {
         if !visiting.insert(path.clone()) {
-            return path;
+            return (path, recipe);
         }
         let mut resolve_visiting = HashSet::new();
         if let Some(super::decl::ModuleType::MtyAlias(_, alias_path)) =
             resolve_module_type_through_env_path(ctx, env, &path, &mut resolve_visiting)
         {
-            return normalize_path_full_inner(
+            return normalize_alias_target(
                 ctx,
                 env,
-                &alias_path,
-                depth + 1,
+                alias_path.clone(),
+                depth,
                 visiting,
                 allow_reverse_local_aliases,
                 force_module_lookup_side_effects,
@@ -4039,11 +4049,11 @@ fn normalize_path_full_inner(
             // opened component tables. Do not let an opened alias such as
             // `Webapi.Dom` satisfy normalization of the persistent runtime
             // root `Dom`; env.ml:872-874 would force `Dom.ps_sig` first.
-            return normalize_path_full_inner(
+            return normalize_alias_target(
                 ctx,
                 env,
-                alias_path,
-                depth + 1,
+                alias_path.clone(),
+                depth,
                 visiting,
                 allow_reverse_local_aliases,
                 force_module_lookup_side_effects,
@@ -4051,7 +4061,81 @@ fn normalize_path_full_inner(
         }
     }
 
-    path
+    (path, recipe)
+}
+
+/// Follow a module alias: env.ml:878 `normalize_path lax env path1`, where
+/// `path1` is the declaration's stored alias path.
+#[allow(clippy::too_many_arguments)]
+fn normalize_alias_target(
+    ctx: &TypeContext,
+    env: &Env,
+    alias_path: Path,
+    depth: usize,
+    visiting: &mut HashSet<Path>,
+    allow_reverse_local_aliases: bool,
+    force_module_lookup_side_effects: bool,
+) -> (Path, NormRecipe) {
+    let (normalized, recipe) = normalize_path_full_inner(
+        ctx,
+        env,
+        &alias_path,
+        depth + 1,
+        visiting,
+        allow_reverse_local_aliases,
+        force_module_lookup_side_effects,
+    );
+    (
+        normalized,
+        NormRecipe::Alias(std::sync::Arc::new(alias_path), Box::new(recipe)),
+    )
+}
+
+/// How `Env.normalize_path` (env.ml:868-888) allocates its result, relative
+/// to the path it was called on. A resolution cache keeps the logical
+/// decisions; every call still builds its own fresh `Pdot`/`Papply` blocks,
+/// keeps an unchanged `Pident` (the caller's own prefix block) and the
+/// alias declaration's path, and retains each rebuilt suffix string.
+#[derive(Debug)]
+pub(crate) enum NormRecipe {
+    /// The path itself, unchanged.
+    Same,
+    /// A fresh `Pdot` around the normalized prefix of the dotted path.
+    Dot(Box<NormRecipe>),
+    /// A fresh `Papply` around both normalized module paths.
+    Apply(Box<NormRecipe>, Box<NormRecipe>),
+    /// Continue from a module alias's stored path.
+    Alias(std::sync::Arc<Path>, Box<NormRecipe>),
+}
+
+impl NormRecipe {
+    pub(crate) fn materialize(&self, ctx: &TypeContext, origin: &Path) -> Path {
+        match (self, origin) {
+            (NormRecipe::Same, _) => origin.clone(),
+            (NormRecipe::Alias(target, recipe), _) => recipe.materialize(ctx, target),
+            (NormRecipe::Dot(prefix), Path::Pdot(..)) => {
+                let p = ctx.dotted_prefix(origin);
+                ctx.copy_dotted_with_prefix(origin, prefix.materialize_shared(ctx, &p))
+            }
+            (NormRecipe::Apply(functor, argument), Path::Papply(f, a)) => Path::Papply(
+                functor.materialize_shared(ctx, f),
+                argument.materialize_shared(ctx, a),
+            ),
+            _ => unreachable!("normalization recipe does not match its path"),
+        }
+    }
+
+    fn materialize_shared(
+        &self,
+        ctx: &TypeContext,
+        origin: &std::sync::Arc<Path>,
+    ) -> std::sync::Arc<Path> {
+        match self {
+            NormRecipe::Same => origin.clone(),
+            NormRecipe::Alias(target, recipe) => recipe.materialize_shared(ctx, target),
+            _ => std::sync::Arc::new(self.materialize(ctx, origin)),
+        }
+    }
 }
 
 /// has a manifest (i.e., `type t = <body>`), expand it by substituting
@@ -13836,7 +13920,7 @@ fn nondep_type_rec(
             path_block,
         } => {
             if path.is_free(mid) {
-                let normalized_path = env.normalize_path_prefix(path);
+                let normalized_path = env.normalize_path_prefix(ctx, path);
                 if normalized_path != *path && !normalized_path.is_free(mid) {
                     // OCaml `nondep_type_rec` expands parameter-dependent
                     // constructors with `expand_abbrev` (compiler/ml/ctype.ml:4319-4324).
@@ -14226,6 +14310,105 @@ mod tests {
     use crate::types::decl::{
         ModuleDeclaration, ModuleType, RecStatus, SignatureItem, TypeDeclaration, TypeKind,
     };
+
+    #[test]
+    fn repeated_normalization_allocates_fresh_dots_from_cached_resolution() {
+        use crate::types::decl::AliasPresence;
+        let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
+        let mut env = Env::empty();
+        let m = ctx.create_ident("M");
+        let a = ctx.create_ident("A");
+        let b = ctx.create_ident("B");
+        let module = |md_type| ModuleDeclaration {
+            md_type,
+            md_attributes: vec![],
+            md_loc: crate::types::DeclLoc::none(),
+            md_path: None,
+        };
+        let inner = module(ModuleType::MtySignature(std::sync::Arc::new(vec![])));
+        env.add_module(
+            m,
+            module(ModuleType::MtySignature(std::sync::Arc::new(vec![
+                SignatureItem::SigModule(a, inner, RecStatus::TrecNot),
+            ]))),
+        );
+        env.add_module(
+            b,
+            module(ModuleType::MtyAlias(
+                AliasPresence::MtaPresent,
+                Path::pident(m),
+            )),
+        );
+
+        // `M.A`: no alias, so each call returns its own fresh `Pdot` around
+        // the caller's `Pident` block, keeping the suffix string.
+        let root = std::sync::Arc::new(Path::pident(m));
+        let source = ctx.dotted_from_ident(root.clone(), a, 0);
+        let first = normalize_path_full(&ctx, &env, &source);
+        assert!(
+            ctx.find_normalized_path_full(env.scope_id(), &source)
+                .is_some()
+        );
+        let second = normalize_path_full(&ctx, &env, &source);
+        assert_eq!(first, source);
+        assert_eq!(second, source);
+        let keys: Vec<_> = [&source, &first, &second]
+            .iter()
+            .map(|p| ctx.dotted_allocation(p).unwrap().key())
+            .collect();
+        assert!(keys[0] != keys[1] && keys[1] != keys[2] && keys[0] != keys[2]);
+        for p in [&first, &second] {
+            let allocation = ctx.dotted_allocation(p).unwrap();
+            assert!(std::sync::Arc::ptr_eq(&allocation.prefix, &root));
+            assert_eq!(allocation.name, ctx.ident_name_allocation(&a));
+        }
+        // A distinct, equal-valued input hits the same cache entry, but the
+        // result keeps that input's own prefix block.
+        let other_root = std::sync::Arc::new(Path::pident(m));
+        let other = ctx.dotted_from_ident(other_root.clone(), a, 0);
+        let third = normalize_path_full(&ctx, &env, &other);
+        assert!(std::sync::Arc::ptr_eq(
+            &ctx.dotted_allocation(&third).unwrap().prefix,
+            &other_root
+        ));
+
+        // `B.A` through `B = M`: the prefix comes from the alias's stored path,
+        // the same block on every call; the dot itself is fresh.
+        let through_alias = ctx.dotted_from_ident(std::sync::Arc::new(Path::pident(b)), a, 0);
+        let x = normalize_path_full(&ctx, &env, &through_alias);
+        let y = normalize_path_full(&ctx, &env, &through_alias);
+        assert!(x.same(&source) && y.same(&source));
+        let (x, y) = (
+            ctx.dotted_allocation(&x).unwrap(),
+            ctx.dotted_allocation(&y).unwrap(),
+        );
+        assert_ne!(x.key(), y.key());
+        assert!(std::sync::Arc::ptr_eq(&x.prefix, &y.prefix));
+        assert_eq!(x.name, ctx.ident_name_allocation(&a));
+
+        // `Env.normalize_path_prefix` (env.ml:898-902) also rebuilds the dot
+        // every call and keeps an unaliased `Pident` prefix block.
+        let p = env.normalize_path_prefix(&ctx, &source);
+        let q = env.normalize_path_prefix(&ctx, &source);
+        let (p, q) = (
+            ctx.dotted_allocation(&p).unwrap(),
+            ctx.dotted_allocation(&q).unwrap(),
+        );
+        assert_ne!(p.key(), q.key());
+        assert_ne!(p.key(), keys[0]);
+        assert!(std::sync::Arc::ptr_eq(&p.prefix, &root));
+        assert_eq!(p.name, q.name);
+        let aliased = env.normalize_path_prefix(&ctx, &through_alias);
+        assert!(aliased.same(&source));
+        assert_eq!(
+            ctx.dotted_allocation(&aliased).unwrap().name,
+            ctx.ident_name_allocation(&a)
+        );
+        // `Env.normalize_path` follows the alias and rebuilds the dot.
+        let full = env.normalize_path(&ctx, &through_alias);
+        assert!(full.same(&source));
+        assert_ne!(ctx.dotted_allocation(&full).unwrap().key(), keys[0]);
+    }
 
     #[test]
     fn private_row_rename_keeps_prefix_without_reusing_a_tracked_carrier() {

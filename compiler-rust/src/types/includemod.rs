@@ -1509,8 +1509,8 @@ fn modtypes_inner(
                 // side can expand, only normalized prefix identity succeeds.
                 let sig_path = substitute_modtype_path(sig_path, subst);
                 if env
-                    .normalize_path_prefix(path)
-                    .same(&env.normalize_path_prefix(&sig_path))
+                    .normalize_path_prefix(type_ctx, path)
+                    .same(&env.normalize_path_prefix(type_ctx, &sig_path))
                 {
                     Ok(ModuleCoercion::Tcoerce_none)
                 } else if let Some(expanded) =
@@ -1547,8 +1547,8 @@ fn modtypes_inner(
             let path = substitute_modtype_path(path, subst);
             if let ModuleType::MtyIdent(impl_path) = mty_impl
                 && env
-                    .normalize_path_prefix(impl_path)
-                    .same(&env.normalize_path_prefix(&path))
+                    .normalize_path_prefix(type_ctx, impl_path)
+                    .same(&env.normalize_path_prefix(type_ctx, &path))
             {
                 return Ok(ModuleCoercion::Tcoerce_none);
             }

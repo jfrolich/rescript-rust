@@ -2048,44 +2048,56 @@ impl Env {
     }
 
     /// Normalize a path by following module aliases.
-    /// Equivalent to OCaml's `Env.normalize_path`.
-    /// For `Pdot(p, s)`, first normalizes the prefix `p`, then checks
-    /// if the resulting module is an alias and follows it.
-    /// For `Pident(id)`, checks if it's a module alias and follows it.
-    pub fn normalize_path(&self, path: &Path) -> Path {
-        self.normalize_path_inner(path, 0)
+    /// Equivalent to OCaml's `Env.normalize_path` (env.ml:868-888): every
+    /// `Pdot` is rebuilt with a fresh block around its normalized prefix and
+    /// keeps its suffix string; an unchanged `Pident` is returned itself.
+    pub fn normalize_path(&self, ctx: &TypeContext, path: &Path) -> Path {
+        self.normalize_path_inner(ctx, path, 0)
     }
 
     /// Normalize the prefix of a value/extension path by following module aliases.
-    /// Equivalent to OCaml's `Env.normalize_path_prefix`.
-    pub fn normalize_path_prefix(&self, path: &Path) -> Path {
+    /// Equivalent to OCaml's `Env.normalize_path_prefix` (env.ml:898-902),
+    /// which always builds a fresh `Pdot`.
+    pub fn normalize_path_prefix(&self, ctx: &TypeContext, path: &Path) -> Path {
         match path {
-            Path::Pdot(prefix, name, pos) => {
-                let normalized_prefix = self.normalize_path(prefix);
-                if normalized_prefix == **prefix {
-                    path.clone()
-                } else {
-                    Path::Pdot(std::sync::Arc::new(normalized_prefix), *name, *pos)
-                }
+            Path::Pdot(..) => {
+                let prefix = self.normalize_shared_path(ctx, &ctx.dotted_prefix(path), 0);
+                ctx.copy_dotted_with_prefix(path, prefix)
             }
             Path::Pident(_) => path.clone(),
             Path::Papply(_, _) => panic!("normalize_path_prefix called on Papply"),
         }
     }
 
-    fn normalize_path_inner(&self, path: &Path, depth: usize) -> Path {
+    /// `normalize_path` of a shared prefix: the prefix block itself when it is
+    /// a `Pident` that is not an alias.
+    fn normalize_shared_path(
+        &self,
+        ctx: &TypeContext,
+        path: &Arc<Path>,
+        depth: usize,
+    ) -> Arc<Path> {
+        if let Path::Pident(_) = path.as_ref()
+            && !matches!(
+                self.lookup_module(path)
+                    .map(|md| matches!(md.md_type, super::decl::ModuleType::MtyAlias(..))),
+                Ok(true)
+            )
+        {
+            return path.clone();
+        }
+        Arc::new(self.normalize_path_inner(ctx, path, depth))
+    }
+
+    fn normalize_path_inner(&self, ctx: &TypeContext, path: &Path, depth: usize) -> Path {
         if depth > 20 {
             return path.clone(); // Prevent infinite loops
         }
         // First, recursively normalize the prefix for Pdot paths
         let path = match path {
-            Path::Pdot(p, s, pos) => {
-                let p_norm = self.normalize_path_inner(p, depth + 1);
-                if p_norm == **p {
-                    path.clone()
-                } else {
-                    Path::Pdot(std::sync::Arc::new(p_norm), *s, *pos)
-                }
+            Path::Pdot(..) => {
+                let prefix = self.normalize_shared_path(ctx, &ctx.dotted_prefix(path), depth + 1);
+                ctx.copy_dotted_with_prefix(path, prefix)
             }
             _ => path.clone(),
         };
@@ -2093,7 +2105,7 @@ impl Env {
         // Then check if the path itself is a module alias
         if let Ok(md) = self.lookup_module(&path) {
             if let super::decl::ModuleType::MtyAlias(_, alias_path) = &md.md_type {
-                return self.normalize_path_inner(alias_path, depth + 1);
+                return self.normalize_path_inner(ctx, alias_path, depth + 1);
             }
         }
         path

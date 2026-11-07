@@ -23252,7 +23252,7 @@ fn extract_variant_type_path_from_expected_with_persistent_env(
                     };
                     if next_path.same(&current) {
                         // Self-manifest cycle: try normalize_path as fallback
-                        let normalized = env.normalize_path(&current);
+                        let normalized = env.normalize_path(ctx, &current);
                         if normalized.same(&current) {
                             return None;
                         }
@@ -23371,7 +23371,7 @@ fn expand_type_path_for_compare(
         // cached the same path before the OCaml-equivalent lazy force.
         crate::types::ctype::force_normalize_path_full_side_effects(ctx, env, path)
     } else {
-        env.normalize_path(path)
+        env.normalize_path(ctx, path)
     };
     if !normalized.same(path) {
         let expanded = expand_type_path_for_compare(
@@ -25655,7 +25655,7 @@ fn qualify_module_local_type_paths_with_alias_lookup_in_place<'a>(
                 let mut direct_alias_target_type =
                     direct_alias_target_parent.is_some_and(|parent| parent.same(&alias_target));
                 if !direct_alias_target_type {
-                    let normalized = env.normalize_path(&alias_target);
+                    let normalized = env.normalize_path(ctx, &alias_target);
                     direct_alias_target_type =
                         direct_alias_target_parent.is_some_and(|parent| parent.same(&normalized));
                     normalized_alias_target = Some(normalized);
@@ -25694,7 +25694,7 @@ fn qualify_module_local_type_paths_with_alias_lookup_in_place<'a>(
                     // WasmBindings__Functions.err, are the selected module's
                     // own component and are rebased below.
                     let normalized_alias_target = normalized_alias_target
-                        .unwrap_or_else(|| env.normalize_path(&alias_target));
+                        .unwrap_or_else(|| env.normalize_path(ctx, &alias_target));
                     rewritten_path =
                         rewrite_path_prefix(ctx, &path, &alias_target, module_access_path);
                     if rewritten_path.is_none() {

@@ -7109,7 +7109,7 @@ fn transl_extension_path(
     // OCaml: transl_extension_path = transl_value_path = fun env path ->
     //   transl_normal_path (Env.normalize_path_prefix env path)
     if let Some(typed_env) = ctx_ref.get_typed_env(env) {
-        let normalized = typed_env.normalize_path_prefix(path);
+        let normalized = typed_env.normalize_path_prefix(ctx_ref, path);
         // If normalization didn't resolve (still Pdot chain), try via type context's
         // resolved module sig cache for persistent module aliases
         let normalized = normalize_path_via_ctx(ctx_ref, &normalized);

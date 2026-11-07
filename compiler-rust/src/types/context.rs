@@ -745,7 +745,7 @@ pub struct TypeContext {
     >,
 
     /// Cached full normalize_path results keyed by environment identity.
-    normalized_path_full_cache: RefCell<ScopedPathMap<Path>>,
+    normalized_path_full_cache: RefCell<ScopedPathMap<Arc<super::ctype::NormRecipe>>>,
     /// Answers of `raw_lambda::typeopt` queries while the finished typed tree
     /// is lowered (`None` outside that phase): the types no longer change.
     typeopt_answers: RefCell<Option<crate::fast_hash::AHashMap<(u64, TypeExprRef, u8), bool>>>,
@@ -761,7 +761,7 @@ pub struct TypeContext {
 
     /// Cached forward-only (unification) normalize_path results, keyed like
     /// `normalized_path_full_cache`.
-    normalized_path_forward_cache: RefCell<ScopedPathMap<Path>>,
+    normalized_path_forward_cache: RefCell<ScopedPathMap<Arc<super::ctype::NormRecipe>>>,
 
     /// `occur_univar` argument masks per (scope, constructor path): bit `i`
     /// is set when argument `i` has a may-positive or may-negative variance;
@@ -773,7 +773,7 @@ pub struct TypeContext {
     type_newtype_levels: RefCell<ScopedPathMap<Option<i32>>>,
 
     /// Cached side-effectful normalize_path results keyed by environment identity.
-    forced_normalized_path_full_cache: RefCell<ScopedPathMap<Path>>,
+    forced_normalized_path_full_cache: RefCell<ScopedPathMap<Arc<super::ctype::NormRecipe>>>,
 
     /// Cached side-effectful type-path comparisons keyed by environment identity.
     forced_type_path_compare_cache:
@@ -2257,7 +2257,7 @@ impl TypeContext {
         &self,
         env_id: u64,
         original_path: &Path,
-        normalized_path: Path,
+        normalized_path: Arc<super::ctype::NormRecipe>,
     ) {
         self.normalized_path_full_cache
             .borrow_mut()
@@ -2312,7 +2312,7 @@ impl TypeContext {
         &self,
         env_id: u64,
         original_path: &Path,
-        normalized_path: Path,
+        normalized_path: Arc<super::ctype::NormRecipe>,
     ) {
         self.normalized_path_forward_cache
             .borrow_mut()
@@ -2323,7 +2323,7 @@ impl TypeContext {
         &self,
         env_id: u64,
         original_path: &Path,
-    ) -> Option<Path> {
+    ) -> Option<Arc<super::ctype::NormRecipe>> {
         self.normalized_path_forward_cache
             .borrow()
             .get(&ScopedPathRef(env_id, original_path))
@@ -2335,7 +2335,7 @@ impl TypeContext {
         &self,
         env_id: u64,
         original_path: &Path,
-    ) -> Option<Path> {
+    ) -> Option<Arc<super::ctype::NormRecipe>> {
         self.normalized_path_full_cache
             .borrow()
             .get(&ScopedPathRef(env_id, original_path))
@@ -2347,7 +2347,7 @@ impl TypeContext {
         &self,
         env_id: u64,
         original_path: &Path,
-        normalized_path: Path,
+        normalized_path: Arc<super::ctype::NormRecipe>,
     ) {
         self.poison_store_build_for("register_forced_normalized_path_full");
         self.forced_normalized_path_full_cache
@@ -2360,7 +2360,7 @@ impl TypeContext {
         &self,
         env_id: u64,
         original_path: &Path,
-    ) -> Option<Path> {
+    ) -> Option<Arc<super::ctype::NormRecipe>> {
         self.forced_normalized_path_full_cache
             .borrow()
             .get(&ScopedPathRef(env_id, original_path))
@@ -4439,6 +4439,16 @@ impl TypeContext {
             Some(allocation) => self.dotted_with_name(prefix, *text, allocation.name, *pos),
             None => super::Path::Pdot(prefix, *text, *pos),
         }
+    }
+
+    /// The prefix block of a `Pdot`: the recorded shared prefix of a tracked
+    /// construction (its own `Arc` is only the allocation carrier).
+    pub(crate) fn dotted_prefix(&self, path: &super::Path) -> Arc<super::Path> {
+        let super::Path::Pdot(carrier, _, _) = path else {
+            panic!("expected dotted path");
+        };
+        self.dotted_allocation(path)
+            .map_or_else(|| carrier.clone(), |allocation| allocation.prefix)
     }
 
     pub(crate) fn dotted_allocation(

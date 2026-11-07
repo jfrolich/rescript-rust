@@ -12098,7 +12098,7 @@ fn normalize_module_alias_path_inner(
         );
     }
 
-    let env_normalized = env.normalize_path(&path);
+    let env_normalized = env.normalize_path(ctx, &path);
     if !env_normalized.same(&path) {
         normalize_module_alias_path_inner(
             env,
