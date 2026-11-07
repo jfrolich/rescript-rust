@@ -1426,6 +1426,15 @@ impl<'a> TypeCheckContext<'a> {
         self.type_ctx.intern_loc(loc)
     }
 
+    /// Preserve the parser's allocation identities at the declaration boundary.
+    pub fn intern_ast_loc(
+        &self,
+        arena: &ParseArena,
+        index: crate::parse_arena::LocIdx,
+    ) -> crate::types::DeclLoc {
+        self.type_ctx.intern_ast_loc(arena, index)
+    }
+
     /// `TypeContext::resolve_loc`.
     #[inline]
     pub fn resolve_loc(&self, loc: crate::types::DeclLoc) -> Location {
@@ -2354,11 +2363,11 @@ fn convert_arg_label_for_ctx(
         crate::parser::ast::ArgLabel::Nolabel => crate::types::ArgLabel::Nolabel,
         crate::parser::ast::ArgLabel::Labelled(s) => crate::types::ArgLabel::labelled(
             arena.get_string(s.txt).to_string(),
-            ctx.intern_loc(arena.to_location(s.loc)),
+            ctx.intern_ast_loc(arena, s.loc),
         ),
         crate::parser::ast::ArgLabel::Optional(s) => crate::types::ArgLabel::optional(
             arena.get_string(s.txt).to_string(),
-            ctx.intern_loc(arena.to_location(s.loc)),
+            ctx.intern_ast_loc(arena, s.loc),
         ),
     }
 }
@@ -9842,7 +9851,7 @@ fn type_application(
                 ArgLabel::Labelled(loc) | ArgLabel::Optional(loc) => {
                     crate::types::ArgLabel::labelled(
                         arena.get_string(loc.txt).to_string(),
-                        ctx.intern_loc(arena.to_location(loc.loc)),
+                        ctx.intern_ast_loc(arena, loc.loc),
                     )
                 }
             },
@@ -9851,7 +9860,7 @@ fn type_application(
                 ArgLabel::Labelled(loc) | ArgLabel::Optional(loc) => {
                     crate::types::ArgLabel::optional(
                         arena.get_string(loc.txt).to_string(),
-                        ctx.intern_loc(arena.to_location(loc.loc)),
+                        ctx.intern_ast_loc(arena, loc.loc),
                     )
                 }
             },
@@ -17595,7 +17604,7 @@ fn type_letexception(
                             },
                             ld_optional: label.pld_optional,
                             ld_type: poly_ty_ref,
-                            ld_loc: tctx.intern_loc(arena.to_location(label.pld_loc)),
+                            ld_loc: tctx.intern_ast_loc(arena, label.pld_loc),
                             ld_attributes: vec![],
                         });
                     }
@@ -17684,7 +17693,7 @@ fn type_letexception(
         cstr_generalized: false,
         cstr_private: crate::types::PrivateFlag::Public,
         // `Datarepr.extension_descr`: `cstr_loc = ext.ext_loc = pext_loc`.
-        cstr_loc: tctx.intern_loc(arena.to_location(ext_constr.pext_loc)),
+        cstr_loc: tctx.intern_ast_loc(arena, ext_constr.pext_loc),
         cstr_attributes: vec![],
         cstr_inlined: cstr_inlined.clone(),
     };
@@ -17719,7 +17728,7 @@ fn type_letexception(
             ext_args,
             ext_ret_type: ext_ret_ty,
             ext_private: crate::types::PrivateFlag::Public,
-            ext_loc: tctx.intern_loc(arena.to_location(ext_constr.pext_loc)),
+            ext_loc: tctx.intern_ast_loc(arena, ext_constr.pext_loc),
             ext_attributes: vec![],
             ext_is_exception: true,
         },

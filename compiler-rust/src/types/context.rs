@@ -587,6 +587,7 @@ pub struct TypeContext {
     /// handles.
     decl_locs: super::decl_loc::OwnedDeclLocs,
     decl_loc_owner: u32,
+    next_parse_location_scope: Cell<u32>,
 
     /// Parser warnings of the snippets error reports re-parse
     /// (`Error_message_utils.Parser.parse_source`), printed before the error
@@ -1178,6 +1179,7 @@ impl TypeContext {
             usage: RefCell::new(super::usage::UsageTables::default()),
             decl_locs: Default::default(),
             decl_loc_owner: super::decl_loc::next_table_owner(),
+            next_parse_location_scope: Cell::new(1),
             reparse_warnings: RefCell::new(Vec::new()),
             report_warning_config: RefCell::new(None),
             variant_layouts: RefCell::new(Vec::new()),
@@ -4323,9 +4325,43 @@ impl TypeContext {
         fresh
     }
 
-    /// Handle for a declaration, attribute or type-label location: a source
-    /// handle when it has no coordinates, else an entry of the table of the
-    /// arena being built (the worker store during a store build).
+    /// Retain parser allocation identity alongside interned coordinates.
+    /// The arena's lazily assigned scope survives moves and later contexts.
+    pub fn intern_ast_loc(
+        &self,
+        arena: &crate::parse_arena::ParseArena,
+        index: crate::parse_arena::LocIdx,
+    ) -> super::DeclLoc {
+        let loc = arena.to_location(index);
+        if !arena.stores_locations() {
+            return self.intern_loc(loc);
+        }
+        let scope = arena.declaration_location_scope(|| {
+            let next = self.next_parse_location_scope.get();
+            self.next_parse_location_scope.set(
+                next.checked_add(1)
+                    .expect("parser location scopes exhausted"),
+            );
+            ((self.decl_loc_owner as u64) << 32) | next as u64
+        });
+        let source = arena.get_location(index);
+        let identity = super::decl_loc::LocationIdentity {
+            scope,
+            location: index.0,
+            start: source.loc_start.0,
+            end: source.loc_end.0,
+        };
+        if self.in_store_build() {
+            return self.store.intern_decl_loc_with_identity(loc, identity);
+        }
+        super::DeclLoc::table(
+            super::decl_loc::DeclLocKind::Local,
+            self.decl_loc_owner,
+            self.decl_locs.intern_with_identity(loc, identity),
+        )
+    }
+
+    /// Intern a coordinate-only location from a non-parser boundary.
     #[inline]
     pub fn intern_loc(&self, loc: crate::location::Location) -> super::DeclLoc {
         if let Some(source) = super::DeclLoc::source(&loc) {

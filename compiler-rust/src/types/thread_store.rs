@@ -249,6 +249,18 @@ impl ThreadTypeStore {
         )
     }
 
+    pub(crate) fn intern_decl_loc_with_identity(
+        &self,
+        loc: crate::location::Location,
+        identity: super::decl_loc::LocationIdentity,
+    ) -> super::DeclLoc {
+        super::DeclLoc::table(
+            super::decl_loc::DeclLocKind::Store,
+            self.decl_loc_owner,
+            self.decl_locs.intern_with_identity(loc, identity),
+        )
+    }
+
     /// Append an imported portable location table, returning the mapping of
     /// its handles into this store.
     pub(crate) fn import_decl_locs<'a>(

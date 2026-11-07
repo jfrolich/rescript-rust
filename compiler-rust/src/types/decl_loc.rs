@@ -379,7 +379,12 @@ impl OwnedDeclLocs {
 /// Identity of a `TypeContext` or worker store table, carried by its handles.
 pub(crate) fn next_table_owner() -> u32 {
     static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
-    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    NEXT.fetch_update(
+        std::sync::atomic::Ordering::Relaxed,
+        std::sync::atomic::Ordering::Relaxed,
+        |next| next.checked_add(1),
+    )
+    .expect("declaration location owners exhausted")
 }
 
 /// How the handles of a portable table map into the table of an importing
@@ -475,6 +480,42 @@ mod tests {
                 table.intern_with_identity(loc, LocationIdentity { end: 9, ..identity })
             }))
             .is_err()
+        );
+    }
+
+    #[test]
+    fn parser_allocation_handles_survive_arena_moves_and_separate_arenas() {
+        use crate::context::IdGenerator;
+        use crate::parse_arena::ParseArena;
+        use crate::types::TypeContext;
+        let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
+        let make_arena = || {
+            let mut arena = ParseArena::new();
+            let start = arena.push_pos(StrIdx(1), 1, 0, 2);
+            let end = arena.push_pos(StrIdx(1), 1, 0, 3);
+            let a = arena.mk_loc(start, end);
+            let b = arena.mk_loc(start, end);
+            (arena, a, b)
+        };
+        let (arena, a, b) = make_arena();
+        let first = ctx.intern_ast_loc(&arena, a);
+        let moved = Box::new(arena);
+        assert_eq!(first, ctx.intern_ast_loc(&moved, a));
+        let distinct = ctx.intern_ast_loc(&moved, b);
+        assert_ne!(first, distinct);
+        assert_eq!(ctx.resolve_loc(first), ctx.resolve_loc(distinct));
+        let (other, a, _) = make_arena();
+        assert_ne!(first, ctx.intern_ast_loc(&other, a));
+        assert_eq!(ctx.local_decl_loc_count(), 1);
+
+        let mut free = ParseArena::with_locations(false);
+        let a = free.mk_loc(free.none_pos(), free.none_pos());
+        let loc = ctx.intern_ast_loc(&free, a);
+        assert_eq!(loc.kind(), DeclLocKind::Source);
+        assert_eq!(
+            ctx.local_decl_loc_count(),
+            1,
+            "location-free builds allocate no records"
         );
     }
 

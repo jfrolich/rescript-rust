@@ -474,6 +474,9 @@ pub struct ParseArena {
     /// but allocate no position or location records. Full locations are populated
     /// only by a fresh diagnostic compilation.
     store_locations: bool,
+    /// Assigned once by the first consuming context. The numeric scope
+    /// survives arena moves and needs no address-based registration.
+    declaration_location_scope: std::sync::OnceLock<u64>,
     next_location_identity: std::sync::atomic::AtomicU32,
     /// Location-free builds: `next_location_identity` when parsing (including
     /// the frontend) finished. Up to here each identity is the index the same
@@ -988,6 +991,7 @@ impl Default for ParseArena {
 
         Self {
             store_locations: true,
+            declaration_location_scope: std::sync::OnceLock::new(),
             next_location_identity: std::sync::atomic::AtomicU32::new(2),
             parse_location_slots: None,
             reimported_location_identities: std::sync::Mutex::new(Vec::new()),
@@ -1355,6 +1359,10 @@ impl ParseArena {
         }
         self.position_file_names.insert(file_name);
         self.last_position_file_name = Some(file_name);
+    }
+
+    pub(crate) fn declaration_location_scope(&self, allocate: impl FnOnce() -> u64) -> u64 {
+        *self.declaration_location_scope.get_or_init(allocate)
     }
 
     /// Push a position into the arena and return its index.

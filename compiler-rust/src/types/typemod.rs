@@ -278,7 +278,7 @@ fn fixed_row_placeholder_decl(
         type_manifest: None,
         type_variance: (0..arity).map(|_| TypesVariance::full()).collect(),
         type_newtype_level: None,
-        type_loc: ctx.intern_loc(arena.to_location(decl.ptype_loc)),
+        type_loc: ctx.intern_ast_loc(arena, decl.ptype_loc),
         type_attributes: parser_attrs_to_decl_attrs(arena, ctx, &decl.ptype_attributes),
         type_immediate: false,
         type_representation: crate::types::TypeRepresentation::Boxed,
@@ -310,7 +310,7 @@ fn translate_fixed_row_type_declaration<'a>(
         type_manifest: None,
         type_variance: typ_params.iter().map(|(_, variance)| *variance).collect(),
         type_newtype_level: None,
-        type_loc: tctx.intern_loc(arena.to_location(decl.ptype_loc)),
+        type_loc: tctx.intern_ast_loc(arena, decl.ptype_loc),
         type_attributes,
         type_immediate: false,
         type_representation: crate::types::TypeRepresentation::Boxed,
@@ -589,7 +589,7 @@ fn parser_attr_to_decl_attr(
             if attr_name == "deprecated"
                 && let Some(payload) = parser_deprecated_payload_to_decl_payload(arena, items)
             {
-                let loc = ctx.intern_loc(arena.to_location(name.loc));
+                let loc = ctx.intern_ast_loc(arena, name.loc);
                 return crate::types::decl::Attribute {
                     attr_name: crate::types::asttypes::Located {
                         txt: attr_name.to_string(),
@@ -679,7 +679,7 @@ fn parser_attr_to_decl_attr(
         ParsedPayload::PTyp(_) => crate::types::decl::AttributePayload::Ident("<core_type>".into()),
         ParsedPayload::PPat(_) => crate::types::decl::AttributePayload::Ident("<pattern>".into()),
     };
-    let loc = ctx.intern_loc(arena.to_location(name.loc));
+    let loc = ctx.intern_ast_loc(arena, name.loc);
     crate::types::decl::Attribute {
         attr_name: crate::types::asttypes::Located {
             txt: arena.get_string(name.txt).to_string(),
@@ -12219,7 +12219,7 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                                         ),
                                     ),
                                 },
-                                val_loc: tctx.intern_loc(arena.to_location(sig_item.psig_loc)),
+                                val_loc: tctx.intern_ast_loc(arena, sig_item.psig_loc),
                                 val_attributes: vec![],
                                 val_path: None,
                             },
@@ -12425,7 +12425,7 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                                                         ld_mutable: mutable_flag,
                                                         ld_optional: label.pld_optional,
                                                         ld_type: lbl_type,
-                                                        ld_loc: tctx.intern_loc(arena.to_location(label.pld_loc)),
+                                                        ld_loc: tctx.intern_ast_loc(arena, label.pld_loc),
                                                         ld_attributes: vec![],
                                                     });
                                                 }
@@ -12449,7 +12449,7 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                                                 None => None,
                                             },
                                             cd_loc: tctx
-                                                .intern_loc(arena.to_location(cstr.pcd_loc)),
+                                                .intern_ast_loc(arena, cstr.pcd_loc),
                                             cd_attributes: vec![],
                                         });
                                     }
@@ -12486,7 +12486,7 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                                             ld_mutable: mutable_flag,
                                             ld_optional: label.pld_optional,
                                             ld_type: lbl_type,
-                                            ld_loc: tctx.intern_loc(arena.to_location(label.pld_loc)),
+                                            ld_loc: tctx.intern_ast_loc(arena, label.pld_loc),
                                             ld_attributes: vec![],
                                         });
                                     }
@@ -12567,7 +12567,7 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                                     .map(|typed_decl| typed_decl.typ_type.type_variance.clone())
                                     .unwrap_or(type_variance),
                                 type_newtype_level: None,
-                                type_loc: tctx.intern_loc(arena.to_location(decl.ptype_loc)),
+                                type_loc: tctx.intern_ast_loc(arena, decl.ptype_loc),
                                 type_attributes,
                                 type_immediate,
                                 type_representation,
@@ -13411,7 +13411,7 @@ pub(crate) fn decl_signature_from_typed_signature(
                         val_kind,
                         // typedecl.ml:1883-1889: `Types.val_loc` is the
                         // signature item loc (typemod.ml:755-757).
-                        val_loc: ctx.intern_loc(arena.to_location(item.sig_loc)),
+                        val_loc: ctx.intern_ast_loc(arena, item.sig_loc),
                         val_attributes: parser_attrs_to_decl_attrs(arena, ctx, &vd.val_attributes),
                         val_path: None,
                     },
@@ -13453,7 +13453,7 @@ pub(crate) fn decl_signature_from_typed_signature(
                             )),
                         ),
                         md_attributes: parser_attrs_to_decl_attrs(arena, ctx, &md.md_attributes),
-                        md_loc: ctx.intern_loc(arena.to_location(md.md_loc)),
+                        md_loc: ctx.intern_ast_loc(arena, md.md_loc),
                         md_path: None,
                     },
                     crate::types::decl::RecStatus::TrecNot,
@@ -13474,7 +13474,7 @@ pub(crate) fn decl_signature_from_typed_signature(
                                 ctx,
                                 &md.md_attributes,
                             ),
-                            md_loc: ctx.intern_loc(arena.to_location(md.md_loc)),
+                            md_loc: ctx.intern_ast_loc(arena, md.md_loc),
                             md_path: None,
                         },
                         if i == 0 {
@@ -13491,7 +13491,7 @@ pub(crate) fn decl_signature_from_typed_signature(
                     ModtypeDeclaration {
                         mtd_type: mtd.mtd_type.as_ref().and_then(decl_module_type_from_typed),
                         mtd_attributes: parser_attrs_to_decl_attrs(arena, ctx, &mtd.mtd_attributes),
-                        mtd_loc: ctx.intern_loc(arena.to_location(mtd.mtd_loc)),
+                        mtd_loc: ctx.intern_ast_loc(arena, mtd.mtd_loc),
                     },
                 ));
             }
@@ -16541,7 +16541,7 @@ pub fn transl_signature<'a>(
                     crate::types::decl::ModuleDeclaration {
                         md_type: decl_mty,
                         md_attributes: vec![],
-                        md_loc: tctx.intern_loc(arena.to_location(md.pmd_loc)),
+                        md_loc: tctx.intern_ast_loc(arena, md.pmd_loc),
                         md_path: None,
                     },
                 );
@@ -17059,7 +17059,7 @@ fn type_structure_item<'a>(
             let val_desc_for_env = crate::types::ValueDescription {
                 val_type: val_ty,
                 val_kind: crate::types::ValueKind::ValPrim(prim_desc),
-                val_loc: tctx.intern_loc(arena.to_location(loc)),
+                val_loc: tctx.intern_ast_loc(arena, loc),
                 val_attributes,
                 val_path: None,
             };
@@ -17198,7 +17198,7 @@ fn type_structure_item<'a>(
                         type_manifest: decl.ptype_manifest.map(|_| ctx.new_var(None)),
                         type_variance: (0..arity).map(|_| TypesVariance::full()).collect(),
                         type_newtype_level: None,
-                        type_loc: tctx.intern_loc(arena.to_location(decl.ptype_loc)),
+                        type_loc: tctx.intern_ast_loc(arena, decl.ptype_loc),
                         type_attributes: parser_attrs_to_decl_attrs(
                             arena,
                             tctx.type_ctx,
@@ -17714,7 +17714,7 @@ fn type_structure_item<'a>(
                                             ld_mutable: mutable_flag,
                                             ld_optional: lbl.pld_optional,
                                             ld_type: internal_type_ref,
-                                            ld_loc: tctx.intern_loc(arena.to_location(lbl.pld_loc)),
+                                            ld_loc: tctx.intern_ast_loc(arena, lbl.pld_loc),
                                             ld_attributes: parser_attrs_to_decl_attrs(
                                                 arena, tctx.type_ctx,
                                                 &lbl.pld_attributes,
@@ -17952,7 +17952,7 @@ fn type_structure_item<'a>(
                                 cd_runtime_tag: runtime_tag.clone(),
                                 cd_args: internal_cd_args,
                                 cd_res: internal_cd_res,
-                                cd_loc: tctx.intern_loc(arena.to_location(cstr.pcd_loc)),
+                                cd_loc: tctx.intern_ast_loc(arena, cstr.pcd_loc),
                                 cd_attributes: combined_decl_attrs.clone(),
                             });
 
@@ -18007,7 +18007,7 @@ fn type_structure_item<'a>(
                                     cstr_private: parser_private_to_type_private(
                                         decl.ptype_private,
                                     ),
-                                    cstr_loc: tctx.intern_loc(arena.to_location(cstr.pcd_loc)),
+                                    cstr_loc: tctx.intern_ast_loc(arena, cstr.pcd_loc),
                                     cstr_attributes:
                                         crate::types::decl::constructor_description_attrs_for_variant(
                                             &internal_cstrs,
@@ -18093,7 +18093,7 @@ fn type_structure_item<'a>(
                                 ld_mutable: mutable_flag,
                                 ld_optional: lbl.pld_optional,
                                 ld_type: internal_type_ref,
-                                ld_loc: tctx.intern_loc(arena.to_location(lbl.pld_loc)),
+                                ld_loc: tctx.intern_ast_loc(arena, lbl.pld_loc),
                                 ld_attributes: parser_attrs_to_decl_attrs(
                                     arena,
                                     tctx.type_ctx,
@@ -18351,7 +18351,7 @@ fn type_structure_item<'a>(
                     type_manifest: manifest_type_ref,
                     type_variance: typ_params.iter().map(|(_, v)| *v).collect(),
                     type_newtype_level: None,
-                    type_loc: tctx.intern_loc(arena.to_location(decl.ptype_loc)),
+                    type_loc: tctx.intern_ast_loc(arena, decl.ptype_loc),
                     type_attributes,
                     type_immediate,
                     type_representation,
@@ -18936,7 +18936,7 @@ fn type_structure_item<'a>(
                                         },
                                         ld_optional: label.pld_optional,
                                         ld_type: internal_ty_ref,
-                                        ld_loc: tctx.intern_loc(arena.to_location(label.pld_loc)),
+                                        ld_loc: tctx.intern_ast_loc(arena, label.pld_loc),
                                         ld_attributes: vec![],
                                     });
                                 }
@@ -19083,7 +19083,7 @@ fn type_structure_item<'a>(
                     cstr_generalized: ext_ret_ty.is_some(),
                     cstr_private: ext_private,
                     // `Datarepr.extension_descr`: `cstr_loc = ext.ext_loc`.
-                    cstr_loc: tctx.intern_loc(arena.to_location(ec.pext_loc)),
+                    cstr_loc: tctx.intern_ast_loc(arena, ec.pext_loc),
                     cstr_attributes: parser_attrs_to_decl_attrs(
                         arena,
                         tctx.type_ctx,
@@ -19105,7 +19105,7 @@ fn type_structure_item<'a>(
                         ext_args,
                         ext_ret_type: ext_ret_ty,
                         ext_private,
-                        ext_loc: tctx.intern_loc(arena.to_location(ec.pext_loc)),
+                        ext_loc: tctx.intern_ast_loc(arena, ec.pext_loc),
                         ext_attributes: parser_attrs_to_decl_attrs(
                             arena,
                             tctx.type_ctx,
@@ -19316,7 +19316,7 @@ fn type_structure_item<'a>(
                                     },
                                     ld_optional: label.pld_optional,
                                     ld_type: internal_ty_ref,
-                                    ld_loc: tctx.intern_loc(arena.to_location(label.pld_loc)),
+                                    ld_loc: tctx.intern_ast_loc(arena, label.pld_loc),
                                     ld_attributes: vec![],
                                 });
                             }
@@ -19493,7 +19493,7 @@ fn type_structure_item<'a>(
                 cstr_generalized: ext_ret_ty.is_some(),
                 cstr_private: crate::types::PrivateFlag::Public,
                 // `Datarepr.extension_descr`: `cstr_loc = ext.ext_loc`.
-                cstr_loc: tctx.intern_loc(arena.to_location(ext_constr.pext_loc)),
+                cstr_loc: tctx.intern_ast_loc(arena, ext_constr.pext_loc),
                 // `Datarepr.extension_descr`: `cstr_attributes = ext.ext_attributes`
                 // (typedecl.ml `ext_attributes = sext.pext_attributes`).
                 cstr_attributes: parser_attrs_to_decl_attrs(
@@ -19525,7 +19525,7 @@ fn type_structure_item<'a>(
                 ext_args,
                 ext_ret_type: ext_ret_ty,
                 ext_private: crate::types::PrivateFlag::Public,
-                ext_loc: tctx.intern_loc(arena.to_location(ext_constr.pext_loc)),
+                ext_loc: tctx.intern_ast_loc(arena, ext_constr.pext_loc),
                 ext_attributes: parser_attrs_to_decl_attrs(
                     arena,
                     tctx.type_ctx,
@@ -19632,7 +19632,7 @@ fn type_structure_item<'a>(
                 crate::types::decl::ModuleDeclaration {
                     md_type: localized_decl_mod_type,
                     md_attributes: module_attributes.clone(),
-                    md_loc: tctx.intern_loc(arena.to_location(mb.pmb_loc)),
+                    md_loc: tctx.intern_ast_loc(arena, mb.pmb_loc),
                     md_path: None,
                 },
             );
@@ -19644,7 +19644,7 @@ fn type_structure_item<'a>(
                 crate::types::decl::ModuleDeclaration {
                     md_type: item_sig_mod_type,
                     md_attributes: module_attributes,
-                    md_loc: tctx.intern_loc(arena.to_location(mb.pmb_loc)),
+                    md_loc: tctx.intern_ast_loc(arena, mb.pmb_loc),
                     md_path: None,
                 },
                 crate::types::decl::RecStatus::TrecNot,
@@ -19736,7 +19736,7 @@ fn type_structure_item<'a>(
                     crate::types::decl::ModuleDeclaration {
                         md_type: decl.md_type.mty_type.clone(),
                         md_attributes: parser_attrs_to_decl_attrs(arena, tctx.type_ctx, attrs),
-                        md_loc: tctx.intern_loc(arena.to_location(*mb_loc)),
+                        md_loc: tctx.intern_ast_loc(arena, *mb_loc),
                         md_path: None,
                     },
                 );
@@ -19832,7 +19832,7 @@ fn type_structure_item<'a>(
                                 tctx.type_ctx,
                                 &mb.mb_attributes,
                             ),
-                            md_loc: tctx.intern_loc(arena.to_location(mb.mb_loc)),
+                            md_loc: tctx.intern_ast_loc(arena, mb.mb_loc),
                             md_path: None,
                         },
                         sig_rec_status(RecFlag::Recursive, index),
@@ -19888,7 +19888,7 @@ fn type_structure_item<'a>(
             let decl_mtd = crate::types::decl::ModtypeDeclaration {
                 mtd_type: decl_mtd_type,
                 mtd_attributes,
-                mtd_loc: tctx.intern_loc(arena.to_location(mtd.pmtd_loc)),
+                mtd_loc: tctx.intern_ast_loc(arena, mtd.pmtd_loc),
             };
             new_env.add_modtype(mtd_id, decl_mtd.clone());
 
@@ -20476,7 +20476,7 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
                 type_manifest: decl.ptype_manifest.map(|_| ctx.new_var(None)),
                 type_variance: (0..arity).map(|_| TypesVariance::full()).collect(),
                 type_newtype_level: None,
-                type_loc: tctx.intern_loc(arena.to_location(decl.ptype_loc)),
+                type_loc: tctx.intern_ast_loc(arena, decl.ptype_loc),
                 type_attributes: parser_attrs_to_decl_attrs(
                     arena,
                     tctx.type_ctx,
@@ -20680,7 +20680,7 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
                             ld_mutable: mutable_flag,
                             ld_optional: label.pld_optional,
                             ld_type: internal_lbl_type,
-                            ld_loc: tctx.intern_loc(arena.to_location(label.pld_loc)),
+                            ld_loc: tctx.intern_ast_loc(arena, label.pld_loc),
                             ld_attributes: parser_attrs_to_decl_attrs(
                                 arena,
                                 tctx.type_ctx,
@@ -20911,7 +20911,7 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
                                         ld_mutable: mutable_flag,
                                         ld_optional: label.pld_optional,
                                         ld_type: internal_lbl_type,
-                                        ld_loc: tctx.intern_loc(arena.to_location(label.pld_loc)),
+                                        ld_loc: tctx.intern_ast_loc(arena, label.pld_loc),
                                         ld_attributes: parser_attrs_to_decl_attrs(
                                             arena,
                                             tctx.type_ctx,
@@ -20978,7 +20978,7 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
                             cd_runtime_tag: runtime_tag.clone(),
                             cd_args: internal_args,
                             cd_res: internal_res,
-                            cd_loc: tctx.intern_loc(arena.to_location(cstr.pcd_loc)),
+                            cd_loc: tctx.intern_ast_loc(arena, cstr.pcd_loc),
                             cd_attributes: {
                                 let mut attrs = tag_attrs.clone();
                                 attrs.extend(cstr.pcd_attributes.iter().cloned());
@@ -21115,7 +21115,7 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
                 type_manifest: manifest_type_ref,
                 type_variance: typ_params.iter().map(|(_, variance)| *variance).collect(),
                 type_newtype_level: None,
-                type_loc: tctx.intern_loc(arena.to_location(decl.ptype_loc)),
+                type_loc: tctx.intern_ast_loc(arena, decl.ptype_loc),
                 type_attributes,
                 type_immediate,
                 type_representation,
