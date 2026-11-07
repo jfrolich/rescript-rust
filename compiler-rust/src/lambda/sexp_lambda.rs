@@ -589,6 +589,8 @@ fn primitive(prim: &Primitive, _with_locs: bool) -> Sexp {
         Primitive::Pmakedict => Sexp::atom("Pmakedict"),
         Primitive::PdictHas => Sexp::atom("Pdict_has"),
         Primitive::PdictSpread => Sexp::atom("Pdict_spread"),
+        Primitive::ParraySpread => Sexp::atom("Parray_spread"),
+        Primitive::PlistSpread => Sexp::atom("Plist_spread"),
         Primitive::Parrayrefu => Sexp::atom("Parrayrefu"),
         Primitive::Parraysetu => Sexp::atom("Parraysetu"),
         Primitive::Parrayrefs => Sexp::atom("Parrayrefs"),

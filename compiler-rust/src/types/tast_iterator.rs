@@ -324,7 +324,8 @@ pub fn walk_expr<I: TastIterator + ?Sized>(sub: &mut I, e: &Expression) {
         }
         ExpressionDesc::Texp_tuple(es)
         | ExpressionDesc::Texp_construct(_, _, es)
-        | ExpressionDesc::Texp_array(es) => {
+        | ExpressionDesc::Texp_array(es)
+        | ExpressionDesc::Texp_spread(_, es) => {
             for e in es {
                 sub.expr(e);
             }

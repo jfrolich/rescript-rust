@@ -1167,6 +1167,16 @@ fn sexp_expression_desc(
             }
             Sexp::list(items)
         }
+        ExpressionDesc::Texp_spread(kind, parts) => {
+            let mut items = vec![
+                Sexp::atom("Texp_spread"),
+                Sexp::atom(crate::parser::sexp::spread_kind(*kind)),
+            ];
+            for e in parts.iter() {
+                items.push(sexp_expression(arena, ctx, with_locs, e));
+            }
+            Sexp::list(items)
+        }
         ExpressionDesc::Texp_dict(entries) => {
             let mut items = vec![Sexp::atom("Texp_dict")];
             for entry in entries.iter() {

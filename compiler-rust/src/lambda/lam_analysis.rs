@@ -262,6 +262,9 @@ pub(crate) fn is_pure_primitive(prim: &Primitive, second_constant: Option<&Const
         | Primitive::PjsObjectGet(_)
         | Primitive::PjsObjectSet(_)
         | Primitive::Pdebugger
+        // Runtime calls, like the `Lapply` they were parsed into.
+        | Primitive::ParraySpread
+        | Primitive::PlistSpread
         | Primitive::PjsFnMethod
         | Primitive::Pawait
         | Primitive::Parraysetu

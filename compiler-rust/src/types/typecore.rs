@@ -10773,7 +10773,9 @@ fn collect_expression_ident_heads(exp: &Expression, ids: &mut Vec<Ident>) {
                 collect_expression_ident_heads(finally, ids);
             }
         }
-        ExpressionDesc::Texp_tuple(items) | ExpressionDesc::Texp_array(items) => {
+        ExpressionDesc::Texp_tuple(items)
+        | ExpressionDesc::Texp_array(items)
+        | ExpressionDesc::Texp_spread(_, items) => {
             for item in items {
                 collect_expression_ident_heads(item, ids);
             }
@@ -19776,6 +19778,7 @@ pub(crate) fn typed_expression_uses_ident(expr: &Expression, target: &Ident) -> 
         }
         ExpressionDesc::Texp_tuple(items)
         | ExpressionDesc::Texp_array(items)
+        | ExpressionDesc::Texp_spread(_, items)
         | ExpressionDesc::Texp_construct(_, _, items) => items
             .iter()
             .any(|item| typed_expression_uses_ident(item, target)),
@@ -20153,8 +20156,12 @@ fn rec_expression_class(expr: &Expression) -> RecExpressionClass {
                 RecExpressionClass::Dynamic
             }
         }
-        // A dict is built by calls, see `Translcore`.
+        // A dict literal is built by the `Pmakedict` and `Pdict_spread`
+        // primitives, and an array or list literal with spreads by
+        // `Parray_spread` or `Plist_spread`, see `Translcore`
+        // (compiler/ml/rec_check.ml `classify_expression`).
         ExpressionDesc::Texp_dict(_)
+        | ExpressionDesc::Texp_spread(_, _)
         | ExpressionDesc::Texp_match(_, _, _, _)
         | ExpressionDesc::Texp_ifthenelse(_, _, _)
         | ExpressionDesc::Texp_object_get(_, _)
@@ -20421,6 +20428,12 @@ fn rec_expression(ctx: &TypeContext, env: &RecEnv, expr: &Expression) -> RecUse 
         ExpressionDesc::Texp_tuple(items) | ExpressionDesc::Texp_array(items) => {
             rec_use_guard(items.iter().fold(RecUse::default(), |use_, item| {
                 rec_use_join(use_, rec_expression(ctx, env, item))
+            }))
+        }
+        // compiler/ml/rec_check.ml: `Use.inspect (list expression env parts)`.
+        ExpressionDesc::Texp_spread(_, parts) => {
+            rec_use_inspect(parts.iter().fold(RecUse::default(), |use_, part| {
+                rec_use_join(use_, rec_expression(ctx, env, part))
             }))
         }
         ExpressionDesc::Texp_dict(entries) => {

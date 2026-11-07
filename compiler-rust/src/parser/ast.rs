@@ -679,6 +679,17 @@ pub enum DictEntry {
     Pdict_spread(ExprIdx),
 }
 
+/// The kind of a literal with spreads (compiler/ml/parsetree.ml
+/// `spread_kind`).
+#[allow(non_camel_case_types)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SpreadKind {
+    /// `[E1, ...E2]`
+    Spread_array,
+    /// `list{...E1, E2}`
+    Spread_list,
+}
+
 /// Record-rest pattern binding (`...Type.t as name`).
 /// Mirrors OCaml compiler/ml/parsetree.ml:164-168 `record_pat_rest`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

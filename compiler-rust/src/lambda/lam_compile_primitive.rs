@@ -558,6 +558,18 @@ impl LambdaCompiler {
                 }
                 _ => Expression::undefined(false),
             },
+            // lam_compile_primitive.ml `Parray_spread`/`Plist_spread`:
+            // `E.runtime_call Primitive_modules.array|list "spread" args`.
+            ParraySpread => self.runtime_call_expr(
+                "Primitive_array",
+                "spread",
+                std::mem::take(&mut compiled_args),
+            ),
+            PlistSpread => self.runtime_call_expr(
+                "Primitive_list",
+                "spread",
+                std::mem::take(&mut compiled_args),
+            ),
             // `{...target, ...source}`, with the rows of dict literals in place.
             PdictSpread => Expression::new(ExpressionDesc::Object(
                 compiled_args

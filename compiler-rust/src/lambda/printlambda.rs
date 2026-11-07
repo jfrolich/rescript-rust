@@ -312,6 +312,8 @@ fn primitive<W: Write>(f: &mut Formatter<W>, prim: &Primitive) {
         Primitive::Pmakelist => s(f, "makelist"),
         Primitive::Pmakedict => s(f, "makedict"),
         Primitive::PdictSpread => s(f, "dict.spread"),
+        Primitive::ParraySpread => s(f, "array.spread"),
+        Primitive::PlistSpread => s(f, "list.spread"),
         Primitive::PdictHas => s(f, "dict.has"),
         Primitive::PisNull => s(f, "is_null"),
         Primitive::PisUndefined => s(f, "is_undefined"),

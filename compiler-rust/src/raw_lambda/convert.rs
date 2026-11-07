@@ -5820,6 +5820,25 @@ impl<'a> RawLambdaConverter<'a> {
                 RawLambda::prim(Primitive::Pmakearray, elems, self.lam_loc(expr.exp_loc))
             }
             ExpressionDesc::Texp_dict(entries) => self.convert_dict_raw(expr, entries),
+            // translcore.ml `Texp_spread`: `Parray_spread` or `Plist_spread` of
+            // a `Pmakearray` of the parts, which compiles to the runtime's
+            // `Primitive_array.spread` or `Primitive_list.spread`.
+            ExpressionDesc::Texp_spread(kind, parts) => {
+                let primitive = match kind {
+                    crate::parser::ast::SpreadKind::Spread_array => Primitive::ParraySpread,
+                    crate::parser::ast::SpreadKind::Spread_list => Primitive::PlistSpread,
+                };
+                let parts = parts
+                    .iter()
+                    .map(|part| self.convert_expr_raw(part))
+                    .collect::<Vec<_>>();
+                let loc = self.lam_loc(expr.exp_loc);
+                RawLambda::prim(
+                    primitive,
+                    vec![RawLambda::prim(Primitive::Pmakearray, parts, loc.clone())],
+                    loc,
+                )
+            }
             ExpressionDesc::Texp_sequence(a, b) => {
                 // OCaml builds `Lsequence (transl_exp a, transl_exp b)`, and the
                 // constructor arguments are evaluated right-to-left. Match that

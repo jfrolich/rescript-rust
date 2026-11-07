@@ -234,6 +234,14 @@ pub(crate) fn quote_string(s: &str) -> String {
     quote_string_literal(unwrap_uppercase_exotic(s))
 }
 
+/// The constructor name of a `spread_kind`.
+pub(crate) fn spread_kind(kind: SpreadKind) -> &'static str {
+    match kind {
+        SpreadKind::Spread_array => "Spread_array",
+        SpreadKind::Spread_list => "Spread_list",
+    }
+}
+
 pub(crate) fn map_empty<T, F>(items: &[T], f: F) -> Vec<Sexp>
 where
     F: Fn(&T) -> Sexp,

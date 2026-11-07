@@ -415,6 +415,10 @@ pub enum ExpressionDesc {
     /// Dict literal: `dict{"k1": E1, ...E2}`.
     Texp_dict(Vec<DictEntry>),
 
+    /// An array or list literal with spreads: the arrays or lists it
+    /// concatenates, see `parser::ast_spread` (typedtree.ml `Texp_spread`).
+    Texp_spread(crate::parser::ast::SpreadKind, Vec<Expression>),
+
     /// If-then-else: `if E1 then E2 else E3`.
     Texp_ifthenelse(Box<Expression>, Box<Expression>, Option<Box<Expression>>),
 

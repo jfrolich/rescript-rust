@@ -304,6 +304,14 @@ pub enum Primitive {
     Pmakedict,
     /// `{...target, ...sources}`
     PdictSpread,
+
+    // ==================== Spread Primitives ====================
+    /// `Primitive_array.spread(parts)`: the concatenation of an array of
+    /// arrays (lambda.ml `Parray_spread`).
+    ParraySpread,
+    /// `Primitive_list.spread(parts)`: the concatenation of an array of lists
+    /// (lambda.ml `Plist_spread`).
+    PlistSpread,
     /// Dict has key
     PdictHas,
 
@@ -466,6 +474,8 @@ impl Primitive {
             | Pmakedict
             | PdictSpread
             | PdictHas
+            | ParraySpread
+            | PlistSpread
             | Pawait
             | PjsApply
             | PvalFromOption

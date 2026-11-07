@@ -3706,6 +3706,8 @@ fn decode_cmj_primitive(value: &OcamlValue) -> Option<Primitive> {
         OcamlValue::Int(92) => Some(Primitive::PisPolyVarBlock),
         OcamlValue::Int(93) => Some(Primitive::PjsFnMethod),
         OcamlValue::Int(94) => Some(Primitive::PdictSpread),
+        OcamlValue::Int(95) => Some(Primitive::ParraySpread),
+        OcamlValue::Int(96) => Some(Primitive::PlistSpread),
         OcamlValue::Block(0, fields) if fields.len() == 1 => {
             let tag_info = decode_cmj_tag_info(&fields[0])?;
             // `Lambda.mutable_flag_of_tag_info`: a block's mutability follows

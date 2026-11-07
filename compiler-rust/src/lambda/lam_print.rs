@@ -248,6 +248,8 @@ pub fn format_primitive(p: &Primitive, f: &mut fmt::Formatter<'_>) -> fmt::Resul
         Primitive::Pmakelist => write!(f, "makelist"),
         Primitive::Pmakedict => write!(f, "makedict"),
         Primitive::PdictSpread => write!(f, "dict.spread"),
+        Primitive::ParraySpread => write!(f, "array.spread"),
+        Primitive::PlistSpread => write!(f, "list.spread"),
         Primitive::PdictHas => write!(f, "dict.has"),
         Primitive::Parrayrefu => write!(f, "array.unsafe_get"),
         Primitive::Parraysetu => write!(f, "array.unsafe_set"),
