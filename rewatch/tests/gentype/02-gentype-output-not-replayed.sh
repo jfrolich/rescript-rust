@@ -10,8 +10,8 @@ source "../utils.sh"
 
 bold "Test: GenType notes follow their module's warnings and are not replayed"
 
+# The temporary fixture is left in place for inspection.
 fixture=$(mktemp -d 2>/dev/null || mktemp -d -t rewatch-gentype-replay)
-trap "rm -rf '$fixture'" EXIT
 
 mkdir -p "$fixture/src"
 
@@ -51,8 +51,12 @@ fail() {
   exit 1
 }
 
-output=$(rewatch build 2>&1 | sed 's/\x1b\[[0-9;]*m//g')
-[ ${PIPESTATUS[0]} -eq 0 ] || fail "Clean build failed" "$output"
+strip_ansi() { sed 's/\x1b\[[0-9;]*m//g'; }
+
+if ! output=$(rewatch build 2>&1); then
+  fail "Clean build failed" "$output"
+fi
+output=$(printf "%s\n" "$output" | strip_ansi)
 
 warning_line=$(printf "%s\n" "$output" | grep -n 'unused variable a' | head -1 | cut -d: -f1)
 note_line=$(printf "%s\n" "$output" | grep -n 'Annotation payload is ignored' | head -1 | cut -d: -f1)
@@ -71,8 +75,10 @@ fi
 
 # Recompile only B: A's warning is replayed, its genType note is not.
 printf '\n// edit\n' >> src/B.res
-output=$(rewatch build 2>&1 | sed 's/\x1b\[[0-9;]*m//g')
-[ ${PIPESTATUS[0]} -eq 0 ] || fail "Rebuild failed" "$output"
+if ! output=$(rewatch build 2>&1); then
+  fail "Rebuild failed" "$output"
+fi
+output=$(printf "%s\n" "$output" | strip_ansi)
 printf "%s\n" "$output" | grep -q 'unused variable a' ||
   fail "The rebuild did not replay A's warning" "$output"
 if printf "%s\n" "$output" | grep -q 'Warning genType'; then
