@@ -24,40 +24,15 @@ pub fn code_block(code: &str) -> String {
     format!("```rescript\n{code}\n```")
 }
 
-/// `Uri.encode_uri_component`.
-fn encode_uri_component(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    for c in text.chars() {
-        match c {
-            '"' | '\'' => out.push_str("%22"),
-            ':' => out.push_str("%3A"),
-            ';' => out.push_str("%3B"),
-            '/' => out.push_str("%2F"),
-            '\\' => out.push_str("%5C"),
-            ',' => out.push_str("%2C"),
-            '&' => out.push_str("%26"),
-            '[' => out.push_str("%5B"),
-            ']' => out.push_str("%5D"),
-            '#' => out.push_str("%23"),
-            '$' => out.push_str("%24"),
-            '+' => out.push_str("%2B"),
-            '=' => out.push_str("%3D"),
-            '?' => out.push_str("%3F"),
-            '@' => out.push_str("%40"),
-            '%' => out.push_str("%25"),
-            c => out.push(c),
-        }
-    }
-    out
-}
-
-/// `Markdown.go_to_definition_text`.
+/// `Markdown.go_to_definition_text`: a file link with one-based line and
+/// column fragments (`Markdown.make_goto_command`).
 fn go_to_definition_text(style: UriStyle, file_uri: &str, pos: Pos) -> String {
     let (line, character) = pos.line_col();
-    let args = format!("[\"{}\",{},{}]", style.to_string(file_uri), line, character);
     format!(
-        "\nGo to: [Type definition](command:rescript-vscode.go_to_location?{})",
-        encode_uri_component(&args)
+        "\nGo to: [Type definition]({}#L{},{})",
+        style.to_string(file_uri),
+        line + 1,
+        character + 1
     )
 }
 
@@ -502,5 +477,26 @@ impl Hover<'_, '_> {
                 )
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// tests/analysis_tests/tests/src/expected/Hover.res.txt:129: the link
+    /// names the file and the one-based line and column.
+    #[test]
+    fn links_to_definitions_by_file_fragment() {
+        let pos = Pos {
+            line: 111,
+            bol: 100,
+            cnum: 102,
+        };
+        let test = UriStyle { strip_path: true };
+        assert_eq!(
+            go_to_definition_text(test, "/a/b/Hover.res", pos),
+            "\nGo to: [Type definition](Hover.res#L111,3)"
+        );
     }
 }
