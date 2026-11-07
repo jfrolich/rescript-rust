@@ -513,8 +513,11 @@ fn decl_attribute_payload_is_empty(payload: &crate::types::decl::AttributePayloa
 fn decl_attribute_payload_as_string(
     payload: &crate::types::decl::AttributePayload,
 ) -> Option<String> {
-    // Annotation.ml reads strings with `Ast_payload.semantic_string_of_expression`.
-    payload.semantic_string().map(str::to_string)
+    // Annotation.ml reads strings with `Ast_payload.semantic_string_of_expression`,
+    // which raises on a template with an invalid escape (only a PPX makes
+    // one); genType has no error channel here, so such a payload reads as
+    // no string.
+    payload.semantic_string().ok().flatten().map(str::to_string)
 }
 
 fn decl_attribute_payload_as_int(payload: &crate::types::decl::AttributePayload) -> Option<i32> {
@@ -584,8 +587,8 @@ pub fn get_decl_attribute_import_renaming(
     let attribute_import = get_decl_attribute_payload(tag_is_gentype_import, attributes);
     let gentype_as_renaming = get_decl_gentype_as_renaming(attributes);
     match attribute_import {
-        Some(payload) if payload.semantic_string().is_some() => (
-            payload.semantic_string().map(str::to_string),
+        Some(payload) if decl_attribute_payload_as_string(payload).is_some() => (
+            decl_attribute_payload_as_string(payload),
             gentype_as_renaming,
         ),
         Some(crate::types::decl::AttributePayload::StrTuple(strings)) => match strings.as_slice() {

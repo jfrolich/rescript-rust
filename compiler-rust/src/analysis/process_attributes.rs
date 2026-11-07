@@ -18,8 +18,9 @@ pub enum Attrs<'a> {
     Decl(&'a [decl::Attribute]),
 }
 
-/// `Ast_payload.semantic_string_of_expression`. OCaml raises on an invalid
-/// escape; the compiler has already rejected such a file.
+/// `Ast_payload.semantic_string_of_expression`. OCaml raises on a template
+/// with an invalid escape, which only a PPX makes; the editor analysis
+/// reads it as no string.
 fn string_constant(arena: &ParseArena, e: ExprIdx) -> Option<String> {
     crate::ast_payload::semantic_string_of_expression(arena, arena.get_expr(e))
         .ok()
@@ -60,7 +61,11 @@ pub fn find_doc_attribute(attrs: Attrs<'_>) -> Option<String> {
             if !is_doc_name(&attr.attr_name.txt) {
                 return None;
             }
-            attr.attr_payload.semantic_string().map(str::to_string)
+            attr.attr_payload
+                .semantic_string()
+                .ok()
+                .flatten()
+                .map(str::to_string)
         }),
     }
 }

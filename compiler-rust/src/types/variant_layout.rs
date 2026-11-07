@@ -155,11 +155,28 @@ pub(crate) fn describe_declared_block_type(block_type: Option<&BlockType>) -> St
 /// semantic string of its payload, and the location of its name.
 pub(crate) struct AnnotationAttribute<'a> {
     pub name: &'a str,
-    pub semantic: Option<String>,
+    /// `Ast_payload.semantic_string_of_payload`, or the location of the
+    /// template it raises on.
+    pub semantic: Result<Option<String>, Location>,
     pub loc: Location,
 }
 
-pub(crate) type AnnotationResult<T> = Result<T, (Location, AstUntaggedVariantError)>;
+pub(crate) type AnnotationResult<T> = Result<T, AnnotationError>;
+
+/// An error `process_runtime_annotation` raises.
+pub(crate) enum AnnotationError {
+    /// `Ast_untagged_variants.Error`.
+    Untagged(Location, AstUntaggedVariantError),
+    /// `Ast_payload.semantic_string_of_payload` on a template with an
+    /// invalid escape.
+    InvalidStringEscape(Location),
+}
+
+impl From<(Location, AstUntaggedVariantError)> for AnnotationError {
+    fn from((loc, error): (Location, AstUntaggedVariantError)) -> Self {
+        AnnotationError::Untagged(loc, error)
+    }
+}
 
 /// ast_untagged_variants.ml `process_runtime_annotation`: the
 /// `@notUndefined`, `@instanceOf` or `@typeOf` annotation among `attrs`,
@@ -174,26 +191,42 @@ pub(crate) fn process_runtime_annotation<'a>(
         let annotation = if attr.name == NOT_UNDEFINED {
             RuntimeAnnotation::NotUndefined
         } else if attr.name == INSTANCE_OF {
-            match attr.semantic {
+            match attr
+                .semantic
+                .map_err(AnnotationError::InvalidStringEscape)?
+            {
                 Some(name) if is_class_path(&name) => match unsupported_class(&name) {
                     None => RuntimeAnnotation::InstanceOf(name),
                     Some(reason) => {
-                        return Err((
+                        return Err(AnnotationError::Untagged(
                             attr_loc,
                             AstUntaggedVariantError::UnsupportedInstanceOf(name, reason),
                         ));
                     }
                 },
-                _ => return Err((attr_loc, AstUntaggedVariantError::InvalidInstanceOf)),
+                _ => {
+                    return Err(AnnotationError::Untagged(
+                        attr_loc,
+                        AstUntaggedVariantError::InvalidInstanceOf,
+                    ));
+                }
             }
         } else if attr.name == TYPE_OF {
-            match attr.semantic {
+            match attr
+                .semantic
+                .map_err(AnnotationError::InvalidStringEscape)?
+            {
                 Some(name) => match BlockType::of_typeof(&name) {
                     Some(block_type) => RuntimeAnnotation::TypeOf(block_type),
-                    None => return Err((attr_loc, AstUntaggedVariantError::InvalidTypeOf(name))),
+                    None => {
+                        return Err(AnnotationError::Untagged(
+                            attr_loc,
+                            AstUntaggedVariantError::InvalidTypeOf(name),
+                        ));
+                    }
                 },
                 None => {
-                    return Err((
+                    return Err(AnnotationError::Untagged(
                         attr_loc,
                         AstUntaggedVariantError::InvalidTypeOf(String::new()),
                     ));
@@ -207,7 +240,7 @@ pub(crate) fn process_runtime_annotation<'a>(
     match annotations.as_slice() {
         [] => Ok(None),
         [_] => Ok(annotations.pop()),
-        [first, second, ..] => Err((
+        [first, second, ..] => Err(AnnotationError::Untagged(
             loc,
             if runtime_attribute_name(first) == runtime_attribute_name(second) {
                 AstUntaggedVariantError::DuplicateRuntimeAnnotation(
@@ -228,7 +261,11 @@ pub(crate) fn decl_annotation_attributes<'a>(
 ) -> impl Iterator<Item = AnnotationAttribute<'a>> + 'a {
     attrs.iter().map(move |attr| AnnotationAttribute {
         name: attr.attr_name.txt.as_str(),
-        semantic: attr.attr_payload.semantic_string().map(str::to_string),
+        semantic: attr
+            .attr_payload
+            .semantic_string()
+            .map(|semantic| semantic.map(str::to_string))
+            .map_err(|loc| ctx.resolve_loc(loc)),
         loc: if attr.attr_name.txt == NOT_UNDEFINED
             || attr.attr_name.txt == INSTANCE_OF
             || attr.attr_name.txt == TYPE_OF
@@ -252,10 +289,12 @@ fn declared_runtime_annotation(
     )
 }
 
-fn annotation_error(err: (Location, AstUntaggedVariantError)) -> TypeModError {
-    TypeModError::AstUntaggedVariantError {
-        loc: err.0,
-        error: err.1,
+fn annotation_error(err: impl Into<AnnotationError>) -> TypeModError {
+    match err.into() {
+        AnnotationError::Untagged(loc, error) => {
+            TypeModError::AstUntaggedVariantError { loc, error }
+        }
+        AnnotationError::InvalidStringEscape(loc) => TypeModError::InvalidStringEscape { loc },
     }
 }
 

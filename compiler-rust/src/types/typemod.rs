@@ -588,6 +588,7 @@ fn parser_private_to_type_private(
 /// interpolation.
 fn semantic_string_payload(
     arena: &ParseArena,
+    ctx: &crate::types::context::TypeContext,
     expr: &crate::parser::ast::Expression,
 ) -> Option<crate::types::decl::SemanticStringPayload> {
     let mut braces = 0;
@@ -603,10 +604,12 @@ fn semantic_string_payload(
     if braces == 0 && !template {
         return None;
     }
-    // An invalid escape is a syntax error, so a parsed template decodes.
-    let semantic = crate::ast_payload::semantic_string_of_expression(arena, inner)
-        .ok()
-        .flatten()?;
+    // The parser rejects an invalid escape, but a PPX's template reaches
+    // here undecoded; readers raise on it.
+    let semantic = match crate::ast_payload::semantic_string_of_expression(arena, inner) {
+        Ok(semantic) => Ok(semantic?),
+        Err(error) => Err(ctx.intern_ast_loc(arena, error.loc)),
+    };
     Some(crate::types::decl::SemanticStringPayload {
         semantic,
         braces,
@@ -643,7 +646,7 @@ fn parser_attr_to_decl_attr(
                 {
                     let (expr_idx, _attrs) = eval_box.as_ref();
                     let expr = arena.get_expr(*expr_idx);
-                    if let Some(payload) = semantic_string_payload(arena, expr) {
+                    if let Some(payload) = semantic_string_payload(arena, ctx, expr) {
                         crate::types::decl::AttributePayload::SemanticString(Box::new(payload))
                     } else if let crate::parser::ast::ExpressionDesc::Pexp_constant(c) =
                         &expr.pexp_desc
@@ -3581,6 +3584,10 @@ pub enum TypeModError {
     },
     /// Invalid type declaration attribute usage.
     InvalidAttribute { loc: LocIdx, message: String },
+    /// `Ast_payload.semantic_string_of_expression` on a template with an
+    /// invalid escape: `Location.raise_errorf ~loc:pexp_loc "Invalid string
+    /// escape sequence"` (compiler/ml/ast_payload.ml:39-51).
+    InvalidStringEscape { loc: Location },
     /// `@unboxed` was used on a declaration shape that cannot be unboxed.
     BadUnboxedAttribute { loc: LocIdx, message: String },
     /// `@immediate` was used on a type that can contain pointer values.
@@ -5101,8 +5108,7 @@ fn check_declaration_runtime_annotation(
         crate::types::variant_layout::AnnotationAttribute {
             name: arena.get_string(name.txt),
             semantic: crate::ast_payload::semantic_string_of_payload(arena, payload)
-                .ok()
-                .flatten(),
+                .map_err(|error| arena.to_location(error.loc)),
             loc: arena.to_location(name.loc),
         }
     });
@@ -6061,8 +6067,14 @@ fn process_variant_tag_name(
             ));
         }
         // `Ast_payload.semantic_string_of_payload`.
-        if let Some(value) = attr.attr_payload.semantic_string() {
-            tag_name = Some(value.to_string());
+        match attr.attr_payload.semantic_string() {
+            Ok(Some(value)) => tag_name = Some(value.to_string()),
+            Ok(None) => {}
+            Err(loc) => {
+                return Err(TypeModError::InvalidStringEscape {
+                    loc: ctx.resolve_loc(loc),
+                });
+            }
         }
         if tag_name.is_none() {
             return Err(ast_untagged_variant_error(
@@ -21269,6 +21281,78 @@ mod tests {
         let env = initial_env(&type_ctx);
         let (typed, _) = type_structure(&mut tctx, &env, arena, &structure).expect("typecheck");
         typed
+    }
+
+    /// Type-check `source` after turning the payload `"BAD"` of its first
+    /// type declaration's attribute into the template `{js|Fo\xo|js}`, as a
+    /// PPX may emit it (compiler/ml/ast_mapper_from0.ml
+    /// `template_source_from0` keeps a `js` source unchecked). Returns the
+    /// error and the location of the payload expression.
+    fn type_with_ppx_invalid_template(source: &str) -> (TypeModError, Location) {
+        crate::ident::Ident::set_current_time(999);
+        let id_gen = IdGenerator::with_start_stamp(999);
+        let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
+        let mut parser = Parser::new("test.res", source);
+        let structure = module::parse_structure(&mut parser);
+        assert!(!parser.has_errors(), "parse failed");
+        let mut arena = parser.into_arena();
+        let crate::parser::ast::StructureItemDesc::Pstr_type(group) = &structure[0].pstr_desc
+        else {
+            panic!("expected a type declaration");
+        };
+        let (_, ParsedPayload::PStr(items)) = &group.1[0].ptype_attributes[0] else {
+            panic!("expected a structure payload");
+        };
+        let crate::parser::ast::StructureItemDesc::Pstr_eval(eval) = &items[0].pstr_desc else {
+            panic!("expected an expression payload");
+        };
+        let expr_idx = eval.0;
+        let source_idx = arena.intern("Fo\\xo");
+        let expr = arena.get_expr_mut(expr_idx);
+        let loc = expr.pexp_loc;
+        expr.pexp_desc = crate::parser::ast::ExpressionDesc::Pexp_template(Box::new(
+            crate::parser::ast::PexpTemplate {
+                source_segments: vec![crate::parser::ast::Loc {
+                    txt: source_idx,
+                    loc,
+                }],
+                values: vec![],
+            },
+        ));
+        let mut tctx = TypeCheckContext::new(&type_ctx, &arena);
+        let env = initial_env(&type_ctx);
+        let error = type_structure(&mut tctx, &env, &arena, &structure)
+            .err()
+            .expect("an invalid escape is an error");
+        (error, arena.to_location(loc))
+    }
+
+    /// The OCaml reference reports `Invalid string escape sequence` at the
+    /// payload when a PPX gives `@instanceOf`, `@typeOf` or `@tag` such a
+    /// template (`Ast_payload.semantic_string_of_expression`,
+    /// compiler/ml/ast_payload.ml:39-51), e.g. for `@instanceOf("BAD")` at
+    /// 1:13-17.
+    #[test]
+    fn ppx_template_with_invalid_escape_is_reported_at_the_payload() {
+        for source in [
+            "@instanceOf(\"BAD\")\ntype a\n",
+            "@typeOf(\"BAD\")\ntype a\n",
+            "@tag(\"BAD\")\ntype t = A({x: int}) | B\n",
+        ] {
+            let (error, payload_loc) = type_with_ppx_invalid_template(source);
+            match error {
+                TypeModError::InvalidStringEscape { loc } => {
+                    assert_eq!(loc, payload_loc, "{source}")
+                }
+                other => panic!("{source}: {other:?}"),
+            }
+        }
+        let (_, loc) = type_with_ppx_invalid_template("@instanceOf(\"BAD\")\ntype a\n");
+        let column = |pos: crate::location::Position| pos.cnum - pos.bol;
+        assert_eq!(
+            (loc.loc_start.line, column(loc.loc_start), column(loc.loc_end)),
+            (1, 12, 17)
+        );
     }
 
     #[test]

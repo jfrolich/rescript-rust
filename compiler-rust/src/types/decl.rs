@@ -701,8 +701,11 @@ pub enum AttributePayload {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SemanticStringPayload {
     /// `Ast_payload.semantic_string_of_expression`: what JavaScript
-    /// evaluates the string to.
-    pub semantic: String,
+    /// evaluates the string to; or, for a backquoted string with an invalid
+    /// escape (only a PPX makes one: the parser rejects them), the
+    /// template's `pexp_loc`, where reading it raises "Invalid string escape
+    /// sequence" (compiler/ml/ast_payload.ml:39-51).
+    pub semantic: Result<String, DeclLoc>,
     /// The `Pexp_braces` around it.
     pub braces: u32,
     /// A backquoted string rather than a string constant.
@@ -710,11 +713,24 @@ pub struct SemanticStringPayload {
 }
 
 impl AttributePayload {
-    /// `Ast_payload.semantic_string_of_payload`.
-    pub fn semantic_string(&self) -> Option<&str> {
+    /// `Ast_payload.semantic_string_of_payload`; `Err` is the location of
+    /// a template it raises on.
+    pub fn semantic_string(&self) -> Result<Option<&str>, DeclLoc> {
         match self {
-            AttributePayload::Str(semantic) => Some(semantic),
-            AttributePayload::SemanticString(payload) => Some(&payload.semantic),
+            AttributePayload::Str(semantic) => Ok(Some(semantic)),
+            AttributePayload::SemanticString(payload) => match &payload.semantic {
+                Ok(semantic) => Ok(Some(semantic)),
+                Err(loc) => Err(*loc),
+            },
+            _ => Ok(None),
+        }
+    }
+
+    /// The location of the template a [`Self::SemanticString`] payload
+    /// failed to decode.
+    pub fn invalid_escape_loc_mut(&mut self) -> Option<&mut DeclLoc> {
+        match self {
+            AttributePayload::SemanticString(payload) => payload.semantic.as_mut().err(),
             _ => None,
         }
     }
@@ -730,6 +746,9 @@ pub trait SignatureLocationVisitor {
     fn attribute(&mut self, attr: &mut Attribute) {
         self.location(&mut attr.attr_loc);
         self.location(&mut attr.attr_name.loc);
+        if let Some(loc) = attr.attr_payload.invalid_escape_loc_mut() {
+            self.location(loc);
+        }
     }
 }
 

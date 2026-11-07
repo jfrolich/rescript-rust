@@ -1268,7 +1268,7 @@ impl SigReadContext<'_> {
                         if attr_name.txt == "deprecated" {
                             read_deprecated_attribute_payload(&fields[1])
                         } else {
-                            read_attribute_payload(&fields[1])
+                            read_attribute_payload(&fields[1], &mut |loc| self.read_decl_loc(loc))
                         }
                     } else {
                         AttributePayload::Empty
@@ -1368,12 +1368,16 @@ fn read_first_string(value: &OcamlValue) -> Option<String> {
 
 /// Read an attribute payload from a CMI.
 /// OCaml payload type: attribute_payload = PStr | PSig | PTyp | PPat
-fn read_attribute_payload(value: &OcamlValue) -> AttributePayload {
+/// `read_loc` decodes the location of a template that fails to decode.
+fn read_attribute_payload(
+    value: &OcamlValue,
+    read_loc: &mut dyn FnMut(&OcamlValue) -> crate::types::DeclLoc,
+) -> AttributePayload {
     match value {
         // PStr(structure) — tag 0
         OcamlValue::Block(0, fields) if !fields.is_empty() => {
             let structure = &fields[0];
-            if let Some(payload) = semantic_string_payload(structure) {
+            if let Some(payload) = semantic_string_payload(structure, read_loc) {
                 return AttributePayload::SemanticString(Box::new(payload));
             }
             if let Some(name) = extract_ident_payload_name(structure) {
@@ -1399,6 +1403,7 @@ fn read_attribute_payload(value: &OcamlValue) -> AttributePayload {
 /// besides a bare string constant (compiler/ml/ast_payload.ml:39-51).
 fn semantic_string_payload(
     structure: &OcamlValue,
+    read_loc: &mut dyn FnMut(&OcamlValue) -> crate::types::DeclLoc,
 ) -> Option<crate::types::decl::SemanticStringPayload> {
     // [item]
     let OcamlValue::Block(0, cons) = structure else {
@@ -1433,7 +1438,7 @@ fn semantic_string_payload(
                     return None;
                 };
                 return Some(crate::types::decl::SemanticStringPayload {
-                    semantic: string_literal_semantic(&literal[0])?,
+                    semantic: Ok(string_literal_semantic(&literal[0])?),
                     braces,
                     template: false,
                 });
@@ -1452,8 +1457,12 @@ fn semantic_string_payload(
                     return None;
                 };
                 let source = segment[0].as_string_opt()?;
+                // `Location.raise_errorf ~loc:pexp_loc` when it does not
+                // decode (compiler/ml/ast_payload.ml:39-51).
+                let semantic = crate::string_literal::decode_js_template_escapes(source)
+                    .ok_or_else(|| read_loc(&record[1]));
                 return Some(crate::types::decl::SemanticStringPayload {
-                    semantic: crate::string_literal::decode_js_template_escapes(source)?,
+                    semantic,
                     braces,
                     template: true,
                 });
@@ -1794,14 +1803,15 @@ mod tests {
             let item = block(0, vec![block(0, vec![e, OcamlValue::Int(0)]), loc()]);
             block(0, vec![block(0, vec![item, OcamlValue::Int(0)])])
         };
-        let semantic = |e| match read_attribute_payload(&payload(e)) {
-            AttributePayload::SemanticString(payload) => Some(*payload),
-            _ => None,
-        };
+        let semantic =
+            |e| match read_attribute_payload(&payload(e), &mut |_| crate::types::DeclLoc::none()) {
+                AttributePayload::SemanticString(payload) => Some(*payload),
+                _ => None,
+            };
         assert_eq!(
             semantic(template("Intl\\u{2E}Locale", OcamlValue::Int(0))),
             Some(SemanticStringPayload {
-                semantic: "Intl.Locale".to_string(),
+                semantic: Ok("Intl.Locale".to_string()),
                 braces: 0,
                 template: true,
             })
@@ -1809,7 +1819,7 @@ mod tests {
         assert_eq!(
             semantic(braces(braces(template("Foo", OcamlValue::Int(0))))),
             Some(SemanticStringPayload {
-                semantic: "Foo".to_string(),
+                semantic: Ok("Foo".to_string()),
                 braces: 2,
                 template: true,
             })
@@ -1819,11 +1829,21 @@ mod tests {
             Some((1, false))
         );
         assert!(matches!(
-            read_attribute_payload(&payload(string())),
+            read_attribute_payload(&payload(string()), &mut |_| crate::types::DeclLoc::none()),
             AttributePayload::Str(_)
         ));
         let interpolated = block(0, vec![string(), OcamlValue::Int(0)]);
         assert_eq!(semantic(template("F", interpolated)), None);
+        // A template that does not decode keeps its location for readers
+        // to raise at.
+        assert!(matches!(
+            semantic(template("Fo\\xo", OcamlValue::Int(0))),
+            Some(SemanticStringPayload {
+                semantic: Err(_),
+                braces: 0,
+                template: true,
+            })
+        ));
     }
 
     /// A class's blocks read twice are one value, and its name is the
@@ -2131,7 +2151,9 @@ mod tests {
     #[test]
     fn reads_cmi_null_ident_payload_as_ident_not_string() {
         assert_eq!(
-            read_attribute_payload(&cmi_ident_pstr("null")),
+            read_attribute_payload(&cmi_ident_pstr("null"), &mut |_| {
+                crate::types::DeclLoc::none()
+            }),
             AttributePayload::Ident("null".to_string())
         );
     }
@@ -2139,7 +2161,9 @@ mod tests {
     #[test]
     fn reads_cmi_undefined_ident_payload_as_ident_not_string() {
         assert_eq!(
-            read_attribute_payload(&cmi_ident_pstr("undefined")),
+            read_attribute_payload(&cmi_ident_pstr("undefined"), &mut |_| {
+                crate::types::DeclLoc::none()
+            }),
             AttributePayload::Ident("undefined".to_string())
         );
     }
@@ -2147,11 +2171,15 @@ mod tests {
     #[test]
     fn keeps_cmi_string_literal_payload_distinct_from_identifier_payload() {
         assert_eq!(
-            read_attribute_payload(&cmi_string_pstr("null")),
+            read_attribute_payload(&cmi_string_pstr("null"), &mut |_| {
+                crate::types::DeclLoc::none()
+            }),
             AttributePayload::Str("null".to_string())
         );
         assert_eq!(
-            read_attribute_payload(&cmi_string_pstr("fulfilled")),
+            read_attribute_payload(&cmi_string_pstr("fulfilled"), &mut |_| {
+                crate::types::DeclLoc::none()
+            }),
             AttributePayload::Str("fulfilled".to_string())
         );
     }

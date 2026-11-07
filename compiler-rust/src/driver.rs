@@ -719,6 +719,9 @@ fn strip_saved_signature_locations(sig: &mut [crate::types::decl::SignatureItem]
         fn attribute(&mut self, attr: &mut Attribute) {
             self.location(&mut attr.attr_loc);
             self.location(&mut attr.attr_name.loc);
+            if let Some(loc) = attr.attr_payload.invalid_escape_loc_mut() {
+                self.location(loc);
+            }
         }
     }
     crate::types::decl::walk_signature_locations(sig, &mut Strip);
@@ -4225,6 +4228,16 @@ fn type_mod_error_to_anyhow_styled(
         }
         TypeModError::UnboundTypeVarExt { loc, name } => UserDiagnostic::new(
             format_unbound_type_variable_report(arena, source, filename, *loc, name),
+            2,
+        )
+        .into(),
+        TypeModError::InvalidStringEscape { loc } => UserDiagnostic::new(
+            format_compiler_error_report_from_location(
+                source,
+                filename,
+                loc,
+                "Invalid string escape sequence",
+            ),
             2,
         )
         .into(),
