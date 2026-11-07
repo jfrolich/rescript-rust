@@ -1561,24 +1561,33 @@ impl<'a> RawLambdaConverter<'a> {
     /// Extract `@directive("...")` from function expression attributes,
     /// matching OCaml's `extract_directive_for_fn`.
     fn get_directive_attribute_from(
+        &mut self,
         attrs: &crate::parser::ast::Attributes,
-        arena: &ParseArena,
     ) -> Option<String> {
-        // translcore.ml `extract_directive_for_fn`: the first `directive`
-        // attribute whose payload is a string, read by
-        // `Ast_payload.semantic_string_of_payload`.
+        // translcore.ml:946-950 `extract_directive_for_fn`: the first
+        // `directive` attribute whose payload is a string, read by
+        // `Ast_payload.semantic_string_of_payload`, which raises on an
+        // invalid template.
         for (located_name, payload) in attrs.iter() {
-            if arena.get_string(located_name.txt) != "directive" {
+            if self.arena.get_string(located_name.txt) != "directive" {
                 continue;
             }
-            if let Some(directive) = crate::ast_payload::semantic_string_of_payload(arena, payload)
-                .ok()
-                .flatten()
-            {
-                return Some(directive);
+            match crate::ast_payload::semantic_string_of_payload(self.arena, payload) {
+                Ok(Some(directive)) => return Some(directive),
+                Ok(None) => {}
+                Err(error) => {
+                    self.report_payload_error(error);
+                    return None;
+                }
             }
         }
         None
+    }
+
+    /// Raises an `Ast_payload` reader's error (`Location.raise_errorf`).
+    fn report_payload_error(&mut self, error: crate::ast_payload::PayloadError) {
+        let loc = self.loc(error.loc);
+        self.report_diagnostic(loc, error.message.to_string());
     }
 
     /// Apply an inline attribute to a raw function, matching OCaml's
@@ -5453,25 +5462,25 @@ impl<'a> RawLambdaConverter<'a> {
     fn warning_attribute_spec(
         &self,
         attr: &crate::parser::ast::Attribute,
-    ) -> Option<(bool, String)> {
+    ) -> Result<Option<(bool, String)>, crate::ast_payload::PayloadError> {
         let name = self.arena.get_string(attr.0.txt);
         let is_error = name == "warnerror";
         if !is_error && name != "warning" {
-            return None;
+            return Ok(None);
         }
         let crate::parser::ast::Payload::PStr(items) = &attr.1 else {
-            return None;
+            return Ok(None);
         };
         let [item] = items.as_slice() else {
-            return None;
+            return Ok(None);
         };
         let crate::parser::ast::StructureItemDesc::Pstr_eval(eval) = &item.pstr_desc else {
-            return None;
+            return Ok(None);
         };
         let expr = self.arena.get_expr(eval.0);
         // builtin_attributes.ml `string_of_payload`.
-        let spec = crate::ast_payload::semantic_string_of_expression(self.arena, expr).ok()??;
-        Some((is_error, spec))
+        let spec = crate::ast_payload::semantic_string_of_expression(self.arena, expr)?;
+        Ok(spec.map(|spec| (is_error, spec)))
     }
 
     fn with_warning_scope<T>(
@@ -5483,14 +5492,23 @@ impl<'a> RawLambdaConverter<'a> {
             return f(self);
         }
         let previous = self.warning_config.clone();
-        // `Builtin_attributes.warning_attribute` (builtin_attributes.ml:180-212):
-        // an unusable payload is reported, a usable one updates the state.
+        // `Builtin_attributes.warning_attribute` (builtin_attributes.ml:141-160):
+        // an unusable payload is reported, a usable one updates the state, and
+        // an invalid template raises (`string_of_payload`); the typing scopes
+        // of the same attributes raised first.
         for attr in attrs.iter().rev() {
             let name = self.arena.get_string(attr.0.txt);
             if !matches!(name, "warning" | "warnerror") {
                 continue;
             }
-            let Some((is_error, spec)) = self.warning_attribute_spec(attr) else {
+            let spec = match self.warning_attribute_spec(attr) {
+                Ok(spec) => spec,
+                Err(error) => {
+                    self.report_payload_error(error);
+                    continue;
+                }
+            };
+            let Some((is_error, spec)) = spec else {
                 self.report_warning(
                     attr.0.loc,
                     Warning::AttributePayload {
@@ -5584,8 +5602,7 @@ impl<'a> RawLambdaConverter<'a> {
                 body,
                 async_,
             } => {
-                let directive =
-                    Self::get_directive_attribute_from(&expr.exp_attributes, self.arena);
+                let directive = self.get_directive_attribute_from(&expr.exp_attributes);
                 let inline = self.get_inline_attribute_from(&expr.exp_attributes);
                 self.convert_nary_function_raw(
                     Some(expr),
