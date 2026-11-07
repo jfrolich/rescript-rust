@@ -3946,6 +3946,7 @@ impl TypeSubstPaths {
 struct SubstMaps {
     type_stamp_map: TypeSubstPaths,
     type_name_map: HashMap<String, Path>,
+    target_blocks: HashMap<crate::types::context::SamePathKey, crate::types::type_expr::PathBlock>,
     module_stamp_map: ModuleStampSubstMap,
     module_name_map: HashMap<String, Path>,
     protected_module_head: Option<(i32, String)>,
@@ -3969,6 +3970,7 @@ impl Default for SubstMaps {
         Self {
             type_stamp_map: TypeSubstPaths::default(),
             type_name_map: subst_map(),
+            target_blocks: subst_map(),
             module_stamp_map: subst_map(),
             module_name_map: subst_map(),
             protected_module_head: None,
@@ -4036,7 +4038,12 @@ fn build_subst_maps(
     maps
 }
 
-fn insert_type_subst_path(maps: &mut SubstMaps, old_id: &Ident, new_id: &Ident) {
+fn insert_type_subst_path(maps: &mut SubstMaps, old_id: &Ident, new_id: &Ident, ctx: &TypeContext) {
+    // One allocation per Subst.add_type target, shared by all uses.
+    maps.target_blocks.insert(
+        crate::types::context::SamePathKey::new(Path::pident(*old_id)),
+        ctx.fresh_path_block(),
+    );
     let new_path = Path::pident(*new_id);
     if old_id.stamp() != 0 {
         maps.type_stamp_map.stamps.insert(old_id.stamp(), new_path);
@@ -4059,6 +4066,41 @@ fn insert_module_subst_path(maps: &mut SubstMaps, old_id: &Ident, new_id: &Ident
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn renamed_substitution_target_keeps_one_path_block() {
+        use crate::types::typecore::{AllocatedTypePathMap, CopiedTypePath, copy_type_expr_mapping_paths};
+        use crate::types::type_expr::{PathBlock, TypeExprRefMap};
+        let ctx = TypeContext::new(Arc::new(crate::context::IdGenerator::new()));
+        let old = ctx.create_ident("t");
+        let new = ctx.rename_ident(&old);
+        let mut maps = SubstMaps::default();
+        insert_type_subst_path(&mut maps, &old, &new, &ctx);
+        let mapper = AllocatedTypePathMap(|path: &Path| CopiedTypePath {
+            path: substitute_type_path(path, &maps.type_stamp_map, &maps.type_name_map,
+                &maps.module_stamp_map, &maps.module_name_map, None),
+            block: maps.target_blocks.get(&crate::types::context::SamePathKey::new(path.clone())).copied(),
+        });
+        let a = ctx.new_generic_constr(Path::pident(old), vec![]);
+        let b = ctx.new_generic_constr(Path::pident(old), vec![]);
+        let unrelated = ctx.create_ident("t");
+        let c = ctx.new_generic_constr(Path::pident(unrelated), vec![]);
+        let mut cache = TypeExprRefMap::new();
+        let mut blocks = Vec::new();
+        for ty in [a, b, c] {
+            let copied = copy_type_expr_mapping_paths(&ctx, ty, &mut cache, &mapper);
+            let desc = ctx.get_desc(copied);
+            let TypeDesc::Tconstr { path, path_block, .. } = &*desc else { panic!("constructor") };
+            assert!(path.same(&Path::pident(if ty == c { unrelated } else { new })));
+            blocks.push(*path_block);
+        }
+        assert_eq!(blocks[0], blocks[1]);
+        assert_ne!(blocks[0], PathBlock::OWN);
+        assert_eq!(blocks[2], PathBlock::OWN.copied_from(c));
+        let mut separate = SubstMaps::default();
+        insert_type_subst_path(&mut separate, &old, &new, &ctx);
+        assert_ne!(maps.target_blocks, separate.target_blocks);
+    }
 
     #[test]
     fn component_substitution_keeps_equal_valued_target_allocation() {
@@ -4141,6 +4183,7 @@ fn merge_subst_maps(parent: &SubstMaps, child: &SubstMaps) -> SubstMaps {
         .qualified
         .extend(child.type_stamp_map.qualified.clone());
     merged.type_name_map.extend(child.type_name_map.clone());
+    merged.target_blocks.extend(child.target_blocks.clone());
     merged
         .module_stamp_map
         .extend(child.module_stamp_map.clone());
@@ -4254,13 +4297,13 @@ fn freshen_signature_bound_idents_rec(
             SignatureItem::SigType(id, _, _) => {
                 let old_id = *id;
                 let new_id = ctx.rename_ident(&old_id);
-                insert_type_subst_path(&mut local_maps, &old_id, &new_id);
+                insert_type_subst_path(&mut local_maps, &old_id, &new_id, ctx);
                 *id = new_id;
             }
             SignatureItem::SigModtype(id, _) => {
                 let old_id = *id;
                 let new_id = ctx.rename_ident(&old_id);
-                insert_type_subst_path(&mut local_maps, &old_id, &new_id);
+                insert_type_subst_path(&mut local_maps, &old_id, &new_id, ctx);
                 *id = new_id;
             }
             SignatureItem::SigModule(id, _, _) => {
@@ -4319,13 +4362,13 @@ fn freshened_signature_ident_plan(
             }
             SignatureItem::SigType(id, _, _) => {
                 let new_id = ctx.rename_ident(id);
-                insert_type_subst_path(&mut local_maps, id, &new_id);
+                insert_type_subst_path(&mut local_maps, id, &new_id, ctx);
                 new_idents.push(Some(new_id));
             }
             SignatureItem::SigModtype(id, mtd) => {
                 has_nested_module_types |= mtd.mtd_type.is_some();
                 let new_id = ctx.rename_ident(id);
-                insert_type_subst_path(&mut local_maps, id, &new_id);
+                insert_type_subst_path(&mut local_maps, id, &new_id, ctx);
                 new_idents.push(Some(new_id));
             }
             SignatureItem::SigModule(id, _, _) => {
@@ -4409,8 +4452,11 @@ pub(crate) fn freshened_signature_bound_idents_from_kind(
     let (new_idents, local_maps, has_nested_module_types) =
         freshened_signature_ident_plan(sig_items, ctx);
     let maps_empty = local_maps.is_empty();
-    let rewrite_type_path = |path: &Path| {
-        if maps_empty {
+    let rewrite_type_path = crate::types::typecore::AllocatedTypePathMap(|path: &Path| {
+        let block = local_maps.target_blocks.get(
+            &crate::types::context::SamePathKey::new(path.clone()),
+        ).copied();
+        let path = if maps_empty {
             path.clone()
         } else {
             substitute_type_path(
@@ -4421,8 +4467,9 @@ pub(crate) fn freshened_signature_bound_idents_from_kind(
                 &local_maps.module_name_map,
                 local_maps.protected_module_head.as_ref(),
             )
-        }
-    };
+        };
+        crate::types::typecore::CopiedTypePath { path, block }
+    });
     let rewrite_module_path = |path: &Path| {
         if maps_empty {
             path.clone()

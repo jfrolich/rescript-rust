@@ -21143,19 +21143,44 @@ pub fn type_binding<'a>(
     Ok((typed_bindings, new_env))
 }
 
+/// A substitution result can carry the allocation of its stored target.
+/// OCaml Subst.type_path returns that target itself, not a fresh path block.
+pub(crate) struct CopiedTypePath {
+    pub path: Path,
+    pub block: Option<crate::types::type_expr::PathBlock>,
+}
+
+pub(crate) trait CopyTypePath {
+    fn copy_path(&self, path: &Path) -> CopiedTypePath;
+}
+
+impl<F: Fn(&Path) -> Path> CopyTypePath for F {
+    fn copy_path(&self, path: &Path) -> CopiedTypePath {
+        CopiedTypePath { path: self(path), block: None }
+    }
+}
+
+pub(crate) struct AllocatedTypePathMap<F>(pub F);
+
+impl<F: Fn(&Path) -> CopiedTypePath> CopyTypePath for AllocatedTypePathMap<F> {
+    fn copy_path(&self, path: &Path) -> CopiedTypePath {
+        (self.0)(path)
+    }
+}
+
 fn clone_copy_lookup_path(path: &Path) -> Path {
     path.clone()
 }
 
 /// `Subst.type_expr` with a type/module path map: copies the graph keeping
 /// generic levels and physical sharing, rewriting paths through `map_path`.
-pub(crate) fn copy_type_expr_mapping_paths(
+pub(crate) fn copy_type_expr_mapping_paths<TP: CopyTypePath>(
     ctx: &TypeContext,
     ty: TypeExprRef,
     cache: &mut TypeExprRefMap<TypeExprRef>,
-    map_path: &dyn Fn(&Path) -> Path,
+    map_path: &TP,
 ) -> TypeExprRef {
-    copy_lookup_type_expr_with_paths(ctx, ty, cache, &|p: &Path| map_path(p))
+    copy_lookup_type_expr_with_paths(ctx, ty, cache, map_path)
 }
 
 fn copy_lookup_type_expr_with_paths<TP>(
@@ -21165,7 +21190,7 @@ fn copy_lookup_type_expr_with_paths<TP>(
     type_path: &TP,
 ) -> TypeExprRef
 where
-    TP: Fn(&Path) -> Path,
+    TP: CopyTypePath,
 {
     use crate::types::type_expr::{MutabilityRef, RowDesc, RowField};
 
@@ -21267,15 +21292,16 @@ where
                 path_block,
                 ..
             } => {
-                let new_path = type_path(path);
+                let mapped = type_path.copy_path(path);
+                let new_path = mapped.path;
                 // `Subst.type_path` returns an unmapped `Pident` itself
                 // (subst.ml:87-94); a mapped or rebuilt path is another block.
-                let path_block = match (path, &new_path) {
+                let path_block = mapped.block.unwrap_or_else(|| match (path, &new_path) {
                     (Path::Pident(id), Path::Pident(new_id)) if id.same(new_id) => {
                         path_block.copied_from(ty)
                     }
                     _ => crate::types::type_expr::PathBlock::OWN,
-                };
+                });
                 CopyTypeExprPlan::Tconstr {
                     path: new_path,
                     args: args.clone(),
@@ -21333,7 +21359,7 @@ where
                 vars: vars.clone(),
             },
             TypeDesc::Tpackage { path, lids, args } => CopyTypeExprPlan::Tpackage {
-                path: type_path(path),
+                path: type_path.copy_path(path).path,
                 lids: *lids.clone(),
                 args: args.clone(),
             },
@@ -21459,7 +21485,7 @@ where
                     // `Tconstr` path (compiler/ml/subst.ml:226-231).
                     row_name: row_name.as_ref().map(|(path, args)| {
                         (
-                            type_path(path),
+                            type_path.copy_path(path).path,
                             args.iter()
                                 .map(|t| {
                                     copy_lookup_type_expr_with_paths(ctx, *t, cache, type_path)
@@ -21519,7 +21545,7 @@ fn copy_lookup_constructor_args_with_paths<TP>(
     type_path: &TP,
 ) -> crate::types::decl::ConstructorArguments
 where
-    TP: Fn(&Path) -> Path,
+    TP: CopyTypePath,
 {
     match args {
         crate::types::decl::ConstructorArguments::CstrTuple(items) => {
@@ -21569,7 +21595,7 @@ fn copy_lookup_type_kind_with_paths<TP>(
     type_path: &TP,
 ) -> crate::types::decl::TypeKind
 where
-    TP: Fn(&Path) -> Path,
+    TP: CopyTypePath,
 {
     match kind {
         crate::types::decl::TypeKind::TypeAbstract => crate::types::decl::TypeKind::TypeAbstract,
@@ -21637,7 +21663,7 @@ fn copy_lookup_type_inlined_with_paths<TP>(
     type_path: &TP,
 ) -> crate::types::decl::TypeInlinedType
 where
-    TP: Fn(&Path) -> Path,
+    TP: CopyTypePath,
 {
     match inlined {
         crate::types::decl::TypeInlinedType::Record { type_name, labels } => {
@@ -21680,7 +21706,7 @@ fn copy_lookup_type_decl_with_paths<TP>(
     type_path: &TP,
 ) -> crate::types::decl::TypeDeclaration
 where
-    TP: Fn(&Path) -> Path,
+    TP: CopyTypePath,
 {
     crate::types::decl::TypeDeclaration {
         type_params: decl
@@ -21705,7 +21731,7 @@ where
             .iter()
             .map(|inlined| copy_lookup_type_inlined_with_paths(inlined, ctx, cache, type_path))
             .collect(),
-        type_path: decl.type_path.as_ref().map(type_path),
+        type_path: decl.type_path.as_ref().map(|path| type_path.copy_path(path).path),
     }
 }
 
@@ -21732,14 +21758,14 @@ fn copy_lookup_value_description_with_paths<TP>(
     type_path: &TP,
 ) -> crate::types::decl::ValueDescription
 where
-    TP: Fn(&Path) -> Path,
+    TP: CopyTypePath,
 {
     crate::types::decl::ValueDescription {
         val_type: copy_lookup_type_expr_with_paths(ctx, desc.val_type, cache, type_path),
         val_kind: desc.val_kind.clone(),
         val_loc: desc.val_loc,
         val_attributes: desc.val_attributes.clone(),
-        val_path: desc.val_path.as_ref().map(type_path),
+        val_path: desc.val_path.as_ref().map(|path| type_path.copy_path(path).path),
     }
 }
 
@@ -21760,10 +21786,10 @@ fn copy_lookup_extension_constructor_with_paths<TP>(
     type_path: &TP,
 ) -> crate::types::decl::ExtensionConstructor
 where
-    TP: Fn(&Path) -> Path,
+    TP: CopyTypePath,
 {
     crate::types::decl::ExtensionConstructor {
-        ext_type_path: type_path(&ext.ext_type_path),
+        ext_type_path: type_path.copy_path(&ext.ext_type_path).path,
         ext_type_params: ext
             .ext_type_params
             .iter()
@@ -21796,12 +21822,12 @@ fn copy_lookup_module_type_with_paths<TP, MP>(
     module_path: &MP,
 ) -> crate::types::decl::ModuleType
 where
-    TP: Fn(&Path) -> Path,
+    TP: CopyTypePath,
     MP: Fn(&Path) -> Path,
 {
     match module_type {
         crate::types::decl::ModuleType::MtyIdent(path) => {
-            crate::types::decl::ModuleType::MtyIdent(type_path(path))
+            crate::types::decl::ModuleType::MtyIdent(type_path.copy_path(path).path)
         }
         crate::types::decl::ModuleType::MtyAlias(alias, path) => {
             crate::types::decl::ModuleType::MtyAlias(*alias, module_path(path))
@@ -21859,7 +21885,7 @@ fn copy_lookup_signature_with_paths<TP, MP>(
     module_path: &MP,
 ) -> crate::types::decl::Signature
 where
-    TP: Fn(&Path) -> Path,
+    TP: CopyTypePath,
     MP: Fn(&Path) -> Path,
 {
     copy_lookup_signature_with_paths_and_idents(
@@ -21881,7 +21907,7 @@ fn copy_lookup_signature_with_paths_and_idents<TP, MP, I>(
     mut new_idents: Option<I>,
 ) -> crate::types::decl::Signature
 where
-    TP: Fn(&Path) -> Path,
+    TP: CopyTypePath,
     MP: Fn(&Path) -> Path,
     I: Iterator<Item = Option<Ident>>,
 {
@@ -21928,7 +21954,7 @@ where
                             ),
                             md_attributes: md.md_attributes.clone(),
                             md_loc: md.md_loc,
-                            md_path: md.md_path.as_ref().map(type_path),
+                            md_path: md.md_path.as_ref().map(|path| type_path.copy_path(path).path),
                         },
                         *rec_status,
                     )
@@ -22147,7 +22173,7 @@ pub(crate) fn copy_lookup_signature_for_subst_with_paths<TP, MP>(
     module_path: &MP,
 ) -> crate::types::decl::Signature
 where
-    TP: Fn(&Path) -> Path,
+    TP: CopyTypePath,
     MP: Fn(&Path) -> Path,
 {
     if ctx.compiler_counters_enabled() {
@@ -22171,7 +22197,7 @@ pub(crate) fn copy_lookup_signature_for_subst_with_paths_and_idents<TP, MP>(
     new_idents: Vec<Option<Ident>>,
 ) -> crate::types::decl::Signature
 where
-    TP: Fn(&Path) -> Path,
+    TP: CopyTypePath,
     MP: Fn(&Path) -> Path,
 {
     if ctx.compiler_counters_enabled() {
