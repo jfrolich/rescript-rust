@@ -334,7 +334,11 @@ impl<'a> ErrorSize<'a> {
     }
 
     fn ident_name(&mut self, id: &Ident) -> Walk {
-        if self.ident_names.insert(self.ctx.ident_name_allocation(id)) {
+        self.name(self.ctx.ident_name_allocation(id))
+    }
+
+    fn name(&mut self, allocation: super::path_provenance::NameAllocation) -> Walk {
+        if self.ident_names.insert(allocation) {
             self.string()?;
         }
         Ok(())
@@ -349,7 +353,7 @@ impl<'a> ErrorSize<'a> {
             }
             self.block(1, 3)?;
             self.shared_path(&allocation.prefix)?;
-            return self.ident_name(&allocation.name);
+            return self.name(allocation.name);
         }
         match path {
             Path::Pident(id) => {
@@ -445,7 +449,7 @@ impl<'a> ErrorSize<'a> {
                 &allocation.prefix,
                 Some(Arc::as_ptr(&allocation.prefix) as usize),
             )?;
-            return self.ident_name(&allocation.name);
+            return self.name(allocation.name);
         }
         match path {
             Path::Pident(_) => unreachable!(),
@@ -1512,6 +1516,40 @@ impl<'a> ErrorSize<'a> {
 mod location_tests {
     use super::*;
     use crate::types::decl_loc::LocationIdentity;
+
+    #[test]
+    fn dotted_paths_count_shared_names_and_distinct_blocks() {
+        use crate::types::path_provenance::NameAllocation;
+        let ctx = TypeContext::new(Arc::new(crate::context::IdGenerator::new()));
+        let subst = InclusionSubst::default();
+        let id = ctx.create_ident("x");
+        let name = NameAllocation::Source {
+            scope: ctx.fresh_location_scope(),
+            string: 1,
+        };
+        ctx.record_ident_name(&id, name);
+        let prefix = Arc::new(Path::Pident(id));
+        let a = ctx.dotted_with_name(prefix.clone(), "x".into(), name, 0);
+        let b = ctx.dotted_with_name(prefix.clone(), "x".into(), name, 0);
+        let c = ctx.dotted_with_name(
+            prefix,
+            "x".into(),
+            NameAllocation::Source {
+                scope: ctx.fresh_location_scope(),
+                string: 1,
+            },
+            0,
+        );
+        let mut size = ErrorSize::new(&ctx, &subst);
+        assert!(size.path(&a).is_ok());
+        assert_eq!(size.words, 11); // dot4 + pident2 + ident4 + shared name1
+        assert!(size.path(&a.clone()).is_ok());
+        assert_eq!(size.words, 11);
+        assert!(size.path(&b).is_ok());
+        assert_eq!(size.words, 15); // separate dot, shared prefix and name
+        assert!(size.path(&c).is_ok());
+        assert_eq!(size.words, 20); // separate dot and equal-text string
+    }
 
     #[test]
     fn locations_count_allocations_not_equal_coordinates() {

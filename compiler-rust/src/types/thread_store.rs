@@ -257,13 +257,16 @@ impl ThreadTypeStore {
             .or_else(|| self.shared.ident_name_allocation(id))
     }
 
-    pub(crate) fn dotted_from_ident(
+    pub(crate) fn dotted_with_name(
         &self,
         prefix: Arc<super::Path>,
-        id: crate::ident::Ident,
+        text: crate::name::Name,
+        name: super::path_provenance::NameAllocation,
         pos: i32,
     ) -> super::Path {
-        self.path_provenance.borrow_mut().dotted(prefix, id, pos)
+        self.path_provenance
+            .borrow_mut()
+            .dotted(prefix, text, name, pos)
     }
 
     pub(crate) fn dotted_allocation(

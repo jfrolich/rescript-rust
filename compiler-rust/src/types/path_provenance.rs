@@ -19,7 +19,8 @@ pub(crate) struct DottedAllocation {
     /// is a value-equivalent copy of `prefix`; it is not a second OCaml prefix.
     carrier: Arc<Path>,
     pub(crate) prefix: Arc<Path>,
-    pub(crate) name: Ident,
+    pub(crate) name: NameAllocation,
+    text: crate::name::Name,
     position: i32,
 }
 
@@ -70,16 +71,23 @@ impl PathProvenance {
     /// A single allocation of `Pdot(prefix, Ident.name name, pos)`.
     /// Clone the resulting Path to retain that allocation. To construct a new
     /// Pdot, call this again rather than reusing its carrier for another suffix.
-    pub(crate) fn dotted(&mut self, prefix: Arc<Path>, name: Ident, pos: i32) -> Path {
+    pub(crate) fn dotted(
+        &mut self,
+        prefix: Arc<Path>,
+        text: crate::name::Name,
+        name: NameAllocation,
+        pos: i32,
+    ) -> Path {
         let carrier = Arc::new((*prefix).clone());
         let entry = DottedAllocation {
             carrier: carrier.clone(),
             prefix,
             name,
+            text,
             position: pos,
         };
         assert!(self.dotted.insert(entry.key(), entry).is_none());
-        Path::Pdot(carrier, name.name_atom(), pos)
+        Path::Pdot(carrier, text, pos)
     }
 
     pub(crate) fn get(&self, path: &Path) -> Option<&DottedAllocation> {
@@ -87,11 +95,7 @@ impl PathProvenance {
             return None;
         };
         let entry = self.dotted.get(&(Arc::as_ptr(carrier) as usize))?;
-        assert_eq!(
-            *name,
-            entry.name.name_atom(),
-            "path carrier reused for another suffix"
-        );
+        assert_eq!(*name, entry.text, "path carrier reused for another suffix");
         assert_eq!(
             *position, entry.position,
             "path carrier reused for another position"
@@ -151,10 +155,25 @@ mod tests {
         let root = Arc::new(Path::Pident(Ident::create_persistent("Root")));
         let equal_root = Arc::new((*root).clone());
         let name = Ident::create_persistent("t");
-        let a = table.dotted(root.clone(), name, -1);
+        let a = table.dotted(
+            root.clone(),
+            name.name_atom(),
+            NameAllocation::of_ident(&name),
+            -1,
+        );
         let copy = a.clone();
-        let b = table.dotted(root.clone(), name, -1);
-        let c = table.dotted(equal_root.clone(), name, -1);
+        let b = table.dotted(
+            root.clone(),
+            name.name_atom(),
+            NameAllocation::of_ident(&name),
+            -1,
+        );
+        let c = table.dotted(
+            equal_root.clone(),
+            name.name_atom(),
+            NameAllocation::of_ident(&name),
+            -1,
+        );
         assert_eq!(a, b);
         assert_eq!(b, c);
         assert_eq!(

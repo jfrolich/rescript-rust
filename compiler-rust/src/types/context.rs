@@ -4406,10 +4406,22 @@ impl TypeContext {
         id: crate::ident::Ident,
         pos: i32,
     ) -> super::Path {
+        self.dotted_with_name(prefix, id.name_atom(), self.ident_name_allocation(&id), pos)
+    }
+
+    pub(crate) fn dotted_with_name(
+        &self,
+        prefix: Arc<super::Path>,
+        text: crate::name::Name,
+        name: super::path_provenance::NameAllocation,
+        pos: i32,
+    ) -> super::Path {
         if self.in_store_build() {
-            self.store.dotted_from_ident(prefix, id, pos)
+            self.store.dotted_with_name(prefix, text, name, pos)
         } else {
-            self.path_provenance.borrow_mut().dotted(prefix, id, pos)
+            self.path_provenance
+                .borrow_mut()
+                .dotted(prefix, text, name, pos)
         }
     }
 

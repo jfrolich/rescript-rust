@@ -51,7 +51,7 @@ pub struct SigReadContext<'a> {
     /// Retained `Ident.t` blocks, each with its own [`IdentOrigin`].
     ident_origins: AHashMap<usize, (OcamlValue, IdentOrigin)>,
     /// `Path.t` blocks: a path read twice is one `Arc`.
-    paths: AHashMap<usize, Arc<Path>>,
+    paths: AHashMap<usize, (OcamlValue, Arc<Path>)>,
     /// `Pident` blocks held by `Tconstr` nodes, each its own path block.
     pident_blocks: AHashMap<usize, PathBlock>,
     /// `Tvar`/`Tunivar` descriptor blocks, by the first node holding one.
@@ -974,7 +974,7 @@ impl<'a> SigReadContext<'a> {
 
     fn read_shared_path(&mut self, value: &OcamlValue) -> Arc<Path> {
         let address = block_address(value);
-        if let Some(path) = address.and_then(|address| self.paths.get(&address)) {
+        if let Some((_, path)) = address.and_then(|address| self.paths.get(&address)) {
             return path.clone();
         }
         let path = Arc::new(match value {
@@ -983,7 +983,20 @@ impl<'a> SigReadContext<'a> {
                 let prefix = self.read_shared_path(&fields[0]);
                 let name = fields[1].as_string().to_string();
                 let pos = fields[2].as_int() as i32;
-                Path::Pdot(prefix, name.into(), pos)
+                let allocation = match &fields[1] {
+                    OcamlValue::String(decoded) => decoded.allocation(),
+                    _ => None,
+                };
+                if let Some((scope, string)) = allocation {
+                    self.ctx.dotted_with_name(
+                        prefix,
+                        name.into(),
+                        crate::types::path_provenance::NameAllocation::Source { scope, string },
+                        pos,
+                    )
+                } else {
+                    Path::Pdot(prefix, name.into(), pos)
+                }
             }
             OcamlValue::Block(2, fields) => {
                 let f = self.read_shared_path(&fields[0]);
@@ -993,7 +1006,7 @@ impl<'a> SigReadContext<'a> {
             _ => Path::Pident(Ident::create_persistent("?")), // fallback
         });
         if let Some(address) = address {
-            self.paths.insert(address, path.clone());
+            self.paths.insert(address, (value.clone(), path.clone()));
         }
         path
     }
@@ -1612,6 +1625,52 @@ mod tests {
             retained.upgrade().is_none(),
             "reader releases retained allocation"
         );
+    }
+
+    #[test]
+    fn decoded_dotted_paths_keep_blocks_prefixes_and_name_strings() {
+        use crate::cmi::marshal_reader::MarshalReader;
+        let mut marshal = MarshalReader::new();
+        let name = marshal
+            .read_value(&mut std::io::Cursor::new([0x21, b'x']))
+            .unwrap();
+        let equal = marshal
+            .read_value(&mut std::io::Cursor::new([0x21, b'x']))
+            .unwrap();
+        let id = block(
+            0,
+            vec![OcamlValue::Int(1001), name.clone(), OcamlValue::Int(0)],
+        );
+        let prefix = block(0, vec![id.clone()]);
+        let dot = |name: OcamlValue| block(1, vec![prefix.clone(), name, OcamlValue::Int(0)]);
+        let raw_a = dot(name.clone());
+        let raw_b = dot(name);
+        let raw_c = dot(equal);
+        let ctx = TypeContext::new(Arc::new(crate::context::IdGenerator::new()));
+        let mut reader = SigReadContext::new(&ctx);
+        let a = reader.read_path(&raw_a);
+        let copy = reader.read_path(&raw_a);
+        let b = reader.read_path(&raw_b);
+        let c = reader.read_path(&raw_c);
+        let a = ctx.dotted_allocation(&a).unwrap();
+        let b = ctx.dotted_allocation(&b).unwrap();
+        let c = ctx.dotted_allocation(&c).unwrap();
+        assert_eq!(a.key(), ctx.dotted_allocation(&copy).unwrap().key());
+        assert_ne!(a.key(), b.key());
+        assert!(Arc::ptr_eq(&a.prefix, &b.prefix));
+        assert!(Arc::ptr_eq(&a.prefix, &c.prefix));
+        assert_eq!(a.name, b.name);
+        assert_ne!(a.name, c.name);
+        assert_eq!(a.name, ctx.ident_name_allocation(&reader.read_ident(&id)));
+        let OcamlValue::Block(_, fields) = &raw_a else {
+            unreachable!()
+        };
+        let retained = Arc::downgrade(fields);
+        drop(raw_a);
+        assert!(retained.upgrade().is_some());
+        drop(reader);
+        assert!(retained.upgrade().is_none());
+        assert_eq!(ctx.dotted_allocation(&copy).unwrap().name, a.name);
     }
 
     #[test]
