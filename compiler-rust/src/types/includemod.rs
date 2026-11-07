@@ -228,57 +228,132 @@ impl From<&str> for TypeDeclarationMismatchDetail {
     }
 }
 
-pub fn format_error(type_ctx: &TypeContext, filename: &str, error: &IncludeModError) -> String {
-    let mut output = String::new();
-    output.push_str("  Signature mismatch:\n");
-    format_include_error(
-        type_ctx,
-        filename,
-        error,
-        &mut Vec::new(),
-        &mut output,
-        &mut false,
-    );
-    output
+/// The formatter an inclusion report prints into.
+type Ppf<'b> = crate::parser::formatter::Formatter<&'b mut Vec<u8>>;
+
+/// `Format.pp_print_string`: a string as wide as its bytes (format.ml
+/// `pp_print_string` measures `String.length`).
+fn pp_text(ppf: &mut Ppf<'_>, s: &str) {
+    ppf.string_as(s.len(), s);
 }
 
+/// `Typemod.report_error (Not_included errs)` (typemod.ml:1862-1863):
+/// `@[<v>Signature mismatch:@ %a@]` around `Includemod.report_error`.
+pub fn format_error(type_ctx: &TypeContext, filename: &str, error: &IncludeModError) -> String {
+    render_include_report(type_ctx, filename, error, true)
+}
+
+/// `Includemod.report_error` alone (includemod.ml:662-673), as the `with`
+/// constraint and interface reports print it under their own heading.
 pub(crate) fn format_error_without_signature_header(
     type_ctx: &TypeContext,
     filename: &str,
     error: &IncludeModError,
 ) -> String {
-    let mut output = String::new();
-    format_include_error(
-        type_ctx,
-        filename,
-        error,
-        &mut Vec::new(),
-        &mut output,
-        &mut false,
-    );
-    output
+    render_include_report(type_ctx, filename, error, false)
+}
+
+/// Print an inclusion report at column 2, the column of a report's message
+/// in its vertical box, with each line ending in a newline.
+fn render_include_report(
+    type_ctx: &TypeContext,
+    filename: &str,
+    error: &IncludeModError,
+    signature_header: bool,
+) -> String {
+    let mut buf = Vec::new();
+    {
+        let mut ppf = crate::parser::formatter::Formatter::new(&mut buf);
+        ppf.string_as(2, "");
+        if signature_header {
+            ppf.open_vbox(0);
+            pp_text(&mut ppf, "Signature mismatch:");
+            ppf.space();
+        }
+        // `report_error`'s `@[<v>%a%a@]` (includemod.ml:673).
+        ppf.open_vbox(0);
+        let mut report = IncludeReport {
+            ppf,
+            started: false,
+            elided: false,
+        };
+        format_include_error(type_ctx, filename, error, &mut Vec::new(), &mut report);
+        let mut ppf = report.ppf;
+        ppf.close_box();
+        if signature_header {
+            ppf.close_box();
+        }
+        ppf.flush();
+    }
+    if buf.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("  ");
+    out.push_str(&String::from_utf8_lossy(&buf));
+    out.push('\n');
+    out
+}
+
+/// The vertical box of `Includemod.report_error` (includemod.ml:662-673),
+/// whose entries are each followed by `@ ` but the last: `started` records
+/// whether an entry was printed, so the break goes before every later one.
+/// `elided` is `pe` negated: whether `...` stands for a big entry already.
+struct IncludeReport<'b> {
+    ppf: Ppf<'b>,
+    started: bool,
+    elided: bool,
+}
+
+impl IncludeReport<'_> {
+    /// The `@ ` between two entries of the report.
+    fn begin_entry(&mut self) {
+        if self.started {
+            self.ppf.space();
+        }
+        self.started = true;
+    }
 }
 
 /// OCaml `Includemod.show_loc` (includemod.ml:489-490):
-/// `@\n@[<2>%a:@ %s@]`, which stays on one line when it fits the 78-column
-/// margin and otherwise breaks with a 2-space indent.
-fn push_show_loc(output: &mut String, location: &str, message: &str) {
-    // Width is measured on the plain text; colour codes are Format tags.
-    let fits = 2 + location.len() + 2 + message.len() <= 77;
-    let location = code_frame::colorize_location(location);
-    if fits {
-        output.push_str("  ");
-        output.push_str(&location);
-        output.push_str(": ");
-        output.push_str(message);
-        output.push('\n');
-    } else {
-        output.push_str("  ");
-        output.push_str(&location);
-        output.push_str(":\n    ");
-        output.push_str(message);
-        output.push('\n');
-    }
+/// `@\n@[<2>%a:@ %s@]`, with `Location.print_loc` (location.ml:77-95)
+/// writing the file name and range in zero-width colour tags.
+fn pp_show_loc(ppf: &mut Ppf<'_>, location: &str, message: &str) {
+    ppf.newline();
+    ppf.open_box(crate::parser::formatter::BoxKind::Box, 2);
+    ppf.string_as(location.len(), &code_frame::colorize_location(location));
+    pp_text(ppf, ":");
+    ppf.space();
+    pp_text(ppf, message);
+    ppf.close_box();
+}
+
+/// `show_loc` of a declaration location, resolved to its file.
+fn pp_show_decl_loc(
+    ppf: &mut Ppf<'_>,
+    type_ctx: &TypeContext,
+    filename: &str,
+    loc: crate::types::DeclLoc,
+    message: &str,
+) {
+    let loc = type_ctx.resolve_loc(loc);
+    let location = code_frame::format_location(
+        &location_filename(type_ctx, filename, &loc),
+        &loc.loc_start,
+        &loc.loc_end,
+    );
+    pp_show_loc(ppf, &location, message);
+}
+
+/// `show_locs` (includemod.ml:492-494): the expected declaration first.
+fn pp_show_locs(
+    ppf: &mut Ppf<'_>,
+    type_ctx: &TypeContext,
+    filename: &str,
+    actual: crate::types::DeclLoc,
+    expected: crate::types::DeclLoc,
+) {
+    pp_show_decl_loc(ppf, type_ctx, filename, expected, "Expected declaration");
+    pp_show_decl_loc(ppf, type_ctx, filename, actual, "Actual declaration");
 }
 
 /// One step of `Includemod.error` contexts (includemod.ml:28-32).
@@ -289,45 +364,83 @@ enum IncludeContext {
     Body(Ident),
 }
 
-/// `Includemod.context` (includemod.ml:591-631) for a context listed from
-/// the outermost step, when it fits on one line.
-fn include_context_text(cxt: &[IncludeContext]) -> String {
-    fn argname(id: &Ident) -> &str {
-        if id.name() == "*" { "" } else { id.name() }
-    }
-    fn context(cxt: &[IncludeContext]) -> String {
-        match cxt {
-            [IncludeContext::Module(id), rem @ ..] => format!("module {}{}", id.name(), args(rem)),
-            [IncludeContext::Modtype(id), rem @ ..] => {
-                format!("module type {} = {}", id.name(), context_mty(rem))
-            }
-            [IncludeContext::Body(x), rem @ ..] => {
-                format!("functor ({}) -> {}", argname(x), context_mty(rem))
-            }
-            [] => "<here>".to_string(),
+/// `Includemod.context` (includemod.ml:587-608) for a context listed from
+/// the outermost step.
+fn pp_context(ppf: &mut Ppf<'_>, cxt: &[IncludeContext]) {
+    use crate::parser::formatter::BoxKind;
+    match cxt {
+        // `@[<2>module %a%a@]`
+        [IncludeContext::Module(id), rem @ ..] => {
+            ppf.open_box(BoxKind::Box, 2);
+            pp_text(ppf, "module ");
+            pp_text(ppf, id.name());
+            pp_context_args(ppf, rem);
+            ppf.close_box();
         }
-    }
-    fn context_mty(cxt: &[IncludeContext]) -> String {
-        match cxt {
-            [IncludeContext::Module(_) | IncludeContext::Modtype(_), ..] => {
-                format!("sig {} end", context(cxt))
-            }
-            _ => context(cxt),
+        // `@[<2>module type %a =@ %a@]`
+        [IncludeContext::Modtype(id), rem @ ..] => {
+            ppf.open_box(BoxKind::Box, 2);
+            pp_text(ppf, "module type ");
+            pp_text(ppf, id.name());
+            pp_text(ppf, " =");
+            ppf.space();
+            pp_context_mty(ppf, rem);
+            ppf.close_box();
         }
-    }
-    fn args(cxt: &[IncludeContext]) -> String {
-        match cxt {
-            [IncludeContext::Body(x), rem @ ..] => format!("({}){}", argname(x), args(rem)),
-            _ => format!(" : {}", context_mty(cxt)),
+        // `functor (%s) ->@ %a`
+        [IncludeContext::Body(x), rem @ ..] => {
+            pp_text(ppf, "functor (");
+            pp_text(ppf, context_argname(x));
+            pp_text(ppf, ") ->");
+            ppf.space();
+            pp_context_mty(ppf, rem);
         }
+        [] => pp_text(ppf, "<here>"),
     }
-    context(cxt)
 }
 
-/// The context part of `include_err` (includemod.ml:633-650): nothing at the
-/// top, `In module A.B:` inside plain submodules, otherwise
-/// `At position <context>`.
-fn push_include_context(cxt: &[IncludeContext], output: &mut String) {
+/// `context_mty`: `@[<2>sig@ %a@;<1 -2>end@]` around a module step.
+fn pp_context_mty(ppf: &mut Ppf<'_>, cxt: &[IncludeContext]) {
+    match cxt {
+        [IncludeContext::Module(_) | IncludeContext::Modtype(_), ..] => {
+            ppf.open_box(crate::parser::formatter::BoxKind::Box, 2);
+            pp_text(ppf, "sig");
+            ppf.space();
+            pp_context(ppf, cxt);
+            ppf.break_(1, -2);
+            pp_text(ppf, "end");
+            ppf.close_box();
+        }
+        _ => pp_context(ppf, cxt),
+    }
+}
+
+/// `args`: the functor parameters of a module step, then ` :@ %a`.
+fn pp_context_args(ppf: &mut Ppf<'_>, cxt: &[IncludeContext]) {
+    match cxt {
+        [IncludeContext::Body(x), rem @ ..] => {
+            pp_text(ppf, "(");
+            pp_text(ppf, context_argname(x));
+            pp_text(ppf, ")");
+            pp_context_args(ppf, rem);
+        }
+        _ => {
+            pp_text(ppf, " :");
+            ppf.space();
+            pp_context_mty(ppf, cxt);
+        }
+    }
+}
+
+/// `argname`: the anonymous parameter `*` prints as nothing.
+fn context_argname(id: &Ident) -> &str {
+    if id.name() == "*" { "" } else { id.name() }
+}
+
+/// The context part of `include_err` (includemod.ml:616-625): nothing at the
+/// top, `In module A.B:@ ` inside plain submodules, otherwise
+/// `@[<hv 2>At position@ %a@]@ `.
+fn pp_include_context(ppf: &mut Ppf<'_>, cxt: &[IncludeContext]) {
     if cxt.is_empty() {
         return;
     }
@@ -335,7 +448,8 @@ fn push_include_context(cxt: &[IncludeContext], output: &mut String) {
         .iter()
         .all(|step| matches!(step, IncludeContext::Module(_)))
     {
-        output.push_str("  In module ");
+        // `Printtyp.path` of `path_of_context`: the module names joined by
+        // dots.
         let names: Vec<&str> = cxt
             .iter()
             .map(|step| match step {
@@ -343,26 +457,32 @@ fn push_include_context(cxt: &[IncludeContext], output: &mut String) {
                 _ => unreachable!(),
             })
             .collect();
-        output.push_str(&names.join("."));
-        output.push_str(":\n");
+        pp_text(ppf, "In module ");
+        pp_text(ppf, &names.join("."));
+        pp_text(ppf, ":");
+        ppf.space();
     } else {
-        output.push_str("  At position ");
-        output.push_str(&include_context_text(cxt));
-        output.push('\n');
+        ppf.open_hvbox(2);
+        pp_text(ppf, "At position");
+        ppf.space();
+        pp_context(ppf, cxt);
+        ppf.close_box();
+        ppf.space();
     }
 }
 
-/// `include_err'` in `report_error` (includemod.ml:669-676): an entry that
+/// `include_err'` in `report_error` (includemod.ml:666-671): an entry that
 /// is not the last one prints only when its symptom is not big; the first big
 /// one prints `...` in place of its context and symptom, later ones nothing.
 /// Returns whether the entry was elided.
-fn elide_big_entry(is_big: impl FnOnce() -> bool, output: &mut String, elided: &mut bool) -> bool {
+fn elide_big_entry(is_big: impl FnOnce() -> bool, report: &mut IncludeReport<'_>) -> bool {
     if !is_big() {
         return false;
     }
-    if !*elided {
-        output.push_str("  ...\n");
-        *elided = true;
+    if !report.elided {
+        report.begin_entry();
+        pp_text(&mut report.ppf, "...");
+        report.elided = true;
     }
     true
 }
@@ -374,44 +494,90 @@ fn module_types_entry_is_last(error: &IncludeModError) -> bool {
     matches!(error, IncludeModError::ModuleTypeMismatch { .. })
 }
 
-/// `Module_types` in `include_symptom` (includemod.ml:566-569).
-fn push_module_types_symptom(
-    type_ctx: &TypeContext,
-    actual: &ModuleType,
-    expected: &ModuleType,
-    output: &mut String,
-) {
-    let actual_text = format_module_type(type_ctx, actual);
-    let expected_text = format_module_type(type_ctx, expected);
-    output.push_str(&format_modules_do_not_match(&actual_text, &expected_text));
+/// `@[<hv 2>%s@ %a@;<1 -2>%s@ %a@]`, the two-sided layout of the
+/// `Value_descriptions`, `Extension_constructors`, `Module_types` and
+/// `Modtype_infos` symptoms (includemod.ml:548-578), each side a doc of the
+/// outcome printer.
+fn pp_two_sided(ppf: &mut Ppf<'_>, heading: &str, actual: &str, between: &str, expected: &str) {
+    ppf.open_hvbox(2);
+    pp_text(ppf, heading);
+    ppf.space();
+    crate::types::printtyp::pp_doc(ppf, actual);
+    ppf.break_(1, -2);
+    pp_text(ppf, between);
+    ppf.space();
+    crate::types::printtyp::pp_doc(ppf, expected);
+    ppf.close_box();
 }
 
-/// `report_error` (includemod.ml:663-676) over Rust's nested error tree: each
+/// `include_err` (includemod.ml:627-629) of a `Module_types` entry:
+/// `@[<v>%a%a@]` of its context and symptom (includemod.ml:566-569).
+fn pp_module_types_entry(
+    report: &mut IncludeReport<'_>,
+    type_ctx: &TypeContext,
+    cxt: &[IncludeContext],
+    actual: &ModuleType,
+    expected: &ModuleType,
+) {
+    report.begin_entry();
+    let ppf = &mut report.ppf;
+    ppf.open_vbox(0);
+    pp_include_context(ppf, cxt);
+    pp_two_sided(
+        ppf,
+        "Modules do not match:",
+        &format_module_type(type_ctx, actual),
+        "is not included in",
+        &format_module_type(type_ctx, expected),
+    );
+    ppf.close_box();
+}
+
+/// The lines of a message rendered before printing, each after a break of
+/// the vertical box it is printed in.
+fn pp_lines_after_breaks(ppf: &mut Ppf<'_>, message: &str) {
+    for line in message.lines() {
+        ppf.space();
+        pp_text(ppf, line);
+    }
+}
+
+/// The lines of a message rendered before printing, separated by breaks of
+/// the vertical box it is printed in.
+fn pp_lines(ppf: &mut Ppf<'_>, message: &str) {
+    for (index, line) in message.lines().enumerate() {
+        if index > 0 {
+            ppf.space();
+        }
+        pp_text(ppf, line);
+    }
+}
+
+/// `report_error` (includemod.ml:662-673) over Rust's nested error tree: each
 /// entry of OCaml's flat error list is printed with its own context.
 fn format_include_error(
     type_ctx: &TypeContext,
     filename: &str,
     error: &IncludeModError,
     cxt: &mut Vec<IncludeContext>,
-    output: &mut String,
-    elided: &mut bool,
+    report: &mut IncludeReport<'_>,
 ) {
     match error {
         IncludeModError::SignatureMismatch(errors) => {
             for error in errors {
-                format_include_error(type_ctx, filename, error, cxt, output, elided);
+                format_include_error(type_ctx, filename, error, cxt, report);
             }
             return;
         }
         IncludeModError::InModule { name, error } => {
             cxt.push(IncludeContext::Module(*name));
-            format_include_error(type_ctx, filename, error, cxt, output, elided);
+            format_include_error(type_ctx, filename, error, cxt, report);
             cxt.pop();
             return;
         }
         IncludeModError::AtModtype { name, error } => {
             cxt.push(IncludeContext::Modtype(*name));
-            format_include_error(type_ctx, filename, error, cxt, output, elided);
+            format_include_error(type_ctx, filename, error, cxt, report);
             cxt.pop();
             return;
         }
@@ -433,15 +599,13 @@ fn format_include_error(
                             type_ctx, actual, expected, subst,
                         )
                     },
-                    output,
-                    elided,
+                    report,
                 )
             {
-                push_include_context(cxt, output);
-                push_module_types_symptom(type_ctx, actual, expected, output);
+                pp_module_types_entry(report, type_ctx, cxt, actual, expected);
             }
             if !is_last {
-                format_include_error(type_ctx, filename, error, cxt, output, elided);
+                format_include_error(type_ctx, filename, error, cxt, report);
             }
             cxt.pop();
             return;
@@ -451,18 +615,23 @@ fn format_include_error(
             expected,
             subst,
             error,
-        } if !module_types_entry_is_last(error)
-            && elide_big_entry(
-                || {
-                    crate::types::includemod_error_size::module_types_is_big(
-                        type_ctx, actual, expected, subst,
-                    )
-                },
-                output,
-                elided,
-            ) =>
-        {
-            format_include_error(type_ctx, filename, error, cxt, output, elided);
+        } => {
+            let is_last = module_types_entry_is_last(error);
+            if is_last
+                || !elide_big_entry(
+                    || {
+                        crate::types::includemod_error_size::module_types_is_big(
+                            type_ctx, actual, expected, subst,
+                        )
+                    },
+                    report,
+                )
+            {
+                pp_module_types_entry(report, type_ctx, cxt, actual, expected);
+            }
+            if !is_last {
+                format_include_error(type_ctx, filename, error, cxt, report);
+            }
             return;
         }
         // `Modtype_infos` always has the reasons of `check_modtype_equiv`
@@ -470,53 +639,62 @@ fn format_include_error(
         IncludeModError::ModuleTypeDeclarationMismatch {
             name,
             actual,
+            expected,
             expected_source,
             error,
-            ..
-        } if elide_big_entry(
-            || {
-                crate::types::includemod_error_size::modtype_infos_is_big(
-                    type_ctx,
-                    name,
-                    actual,
-                    &expected_source.0,
-                    &expected_source.1,
-                )
-            },
-            output,
-            elided,
-        ) =>
-        {
-            format_include_error(type_ctx, filename, error, cxt, output, elided);
+        } => {
+            if !elide_big_entry(
+                || {
+                    crate::types::includemod_error_size::modtype_infos_is_big(
+                        type_ctx,
+                        name,
+                        actual,
+                        &expected_source.0,
+                        &expected_source.1,
+                    )
+                },
+                report,
+            ) {
+                // `include_err` (includemod.ml:627-629) of `Modtype_infos`
+                // (includemod.ml:570-574).
+                report.begin_entry();
+                let ppf = &mut report.ppf;
+                ppf.open_vbox(0);
+                pp_include_context(ppf, cxt);
+                pp_two_sided(
+                    ppf,
+                    "Module type declarations do not match:",
+                    &format_modtype_declaration(type_ctx, name, actual),
+                    "does not match",
+                    &format_modtype_declaration(type_ctx, name, expected),
+                );
+                ppf.close_box();
+            }
+            format_include_error(type_ctx, filename, error, cxt, report);
             return;
         }
         _ => {}
     }
-    push_include_context(cxt, output);
+    // `include_err` (includemod.ml:627-629): `@[<v>%a%a@]` of the context and
+    // the symptom.
+    report.begin_entry();
+    let ppf = &mut report.ppf;
+    ppf.open_vbox(0);
+    pp_include_context(ppf, cxt);
     match error {
         IncludeModError::SignatureMismatch(_)
         | IncludeModError::InModule { .. }
         | IncludeModError::AtModtype { .. }
-        | IncludeModError::InFunctorBody { .. } => unreachable!(),
+        | IncludeModError::InFunctorBody { .. }
+        | IncludeModError::ModuleTypesMismatch { .. }
+        | IncludeModError::ModuleTypeDeclarationMismatch { .. } => unreachable!(),
         // Taken out by `escaped` before an inclusion error is reported.
         IncludeModError::InvalidStringEscape { .. } => {
             unreachable!("an invalid escape escapes inclusion checking")
         }
-        IncludeModError::ModuleTypesMismatch {
-            actual,
-            expected,
-            error,
-            ..
-        } => {
-            push_module_types_symptom(type_ctx, actual, expected, output);
-            if !module_types_entry_is_last(error) {
-                format_include_error(type_ctx, filename, error, cxt, output, elided);
-            }
-        }
         IncludeModError::UnboundModulePath { path } => {
-            output.push_str("  Unbound module ");
-            output.push_str(&path.name());
-            output.push('\n');
+            pp_text(ppf, "Unbound module ");
+            pp_text(ppf, &path.name());
         }
         IncludeModError::TypeDeclarationMismatch {
             name,
@@ -525,114 +703,46 @@ fn format_include_error(
             detail,
         } => {
             // includemod.ml:555-561:
-            // "@[<hv>%s:@;<1 2>%a@ %s@;<1 2>%a@]" -- one line when it fits.
+            // `@[<v>@[<hv>%s:@;<1 2>%a@ %s@;<1 2>%a@]%a%a@]`.
             let actual_text = format_type_declaration(type_ctx, name, actual);
             let expected_text = format_type_declaration(type_ctx, name, expected);
-            if hv_fits_on_one_line(&[
-                "Type declarations do not match:",
-                &actual_text,
-                "is not included in",
-                &expected_text,
-            ]) {
-                output.push_str("  Type declarations do not match: ");
-                output.push_str(&actual_text);
-                output.push_str(" is not included in ");
-                output.push_str(&expected_text);
-                output.push('\n');
-            } else {
-                output.push_str("  Type declarations do not match:\n");
-                output.push_str("    ");
-                output.push_str(&actual_text);
-                output.push('\n');
-                output.push_str("  is not included in\n");
-                output.push_str("    ");
-                output.push_str(&expected_text);
-                output.push('\n');
-            }
-            push_show_loc(
-                output,
-                &{
-                    let loc = type_ctx.resolve_loc(expected.type_loc);
-                    code_frame::format_location(
-                        &location_filename(type_ctx, filename, &loc),
-                        &loc.loc_start,
-                        &loc.loc_end,
-                    )
-                },
-                "Expected declaration",
-            );
-            push_show_loc(
-                output,
-                &{
-                    let loc = type_ctx.resolve_loc(actual.type_loc);
-                    code_frame::format_location(
-                        &location_filename(type_ctx, filename, &loc),
-                        &loc.loc_start,
-                        &loc.loc_end,
-                    )
-                },
-                "Actual declaration",
-            );
-            for line in detail.message().lines() {
-                output.push_str("  ");
-                output.push_str(line);
-                output.push('\n');
-            }
+            ppf.open_vbox(0);
+            ppf.open_hvbox(0);
+            pp_text(ppf, "Type declarations do not match:");
+            ppf.break_(1, 2);
+            crate::types::printtyp::pp_doc(ppf, &actual_text);
+            ppf.space();
+            pp_text(ppf, "is not included in");
+            ppf.break_(1, 2);
+            crate::types::printtyp::pp_doc(ppf, &expected_text);
+            ppf.close_box();
+            pp_show_locs(ppf, type_ctx, filename, actual.type_loc, expected.type_loc);
+            // `Includecore.report_type_mismatch` (includecore.ml:244-249):
+            // `@ %a.` for each mismatch, in the vertical box.
+            pp_lines_after_breaks(ppf, detail.message());
+            ppf.close_box();
         }
         IncludeModError::ExtensionConstructorMismatch {
             name,
             actual,
             expected,
         } => {
-            output.push_str("  Extension declarations do not match:\n");
-            output.push_str("    ");
-            output.push_str(&format_extension_constructor(type_ctx, name, actual));
-            output.push('\n');
-            output.push_str("  is not included in\n");
-            output.push_str("    ");
-            output.push_str(&format_extension_constructor(type_ctx, name, expected));
-            output.push('\n');
-            push_show_loc(
-                output,
-                &{
-                    let loc = type_ctx.resolve_loc(expected.ext_loc);
-                    code_frame::format_location(
-                        &location_filename(type_ctx, filename, &loc),
-                        &loc.loc_start,
-                        &loc.loc_end,
-                    )
-                },
-                "Expected declaration",
+            pp_two_sided(
+                ppf,
+                "Extension declarations do not match:",
+                &format_extension_constructor(type_ctx, name, actual),
+                "is not included in",
+                &format_extension_constructor(type_ctx, name, expected),
             );
-            push_show_loc(
-                output,
-                &{
-                    let loc = type_ctx.resolve_loc(actual.ext_loc);
-                    code_frame::format_location(
-                        &location_filename(type_ctx, filename, &loc),
-                        &loc.loc_start,
-                        &loc.loc_end,
-                    )
-                },
-                "Actual declaration",
-            );
+            pp_show_locs(ppf, type_ctx, filename, actual.ext_loc, expected.ext_loc);
         }
         IncludeModError::MissingField { id, loc, kind } => {
-            output.push_str("  The ");
-            output.push_str(kind);
-            output.push_str(" `");
-            output.push_str(id.name());
-            output.push_str("' is required but not provided\n");
-            let loc = type_ctx.resolve_loc(*loc);
-            push_show_loc(
-                output,
-                &code_frame::format_location(
-                    &location_filename(type_ctx, filename, &loc),
-                    &loc.loc_start,
-                    &loc.loc_end,
-                ),
-                "Expected declaration",
-            );
+            pp_text(ppf, "The ");
+            pp_text(ppf, kind);
+            pp_text(ppf, " `");
+            pp_text(ppf, id.name());
+            pp_text(ppf, "' is required but not provided");
+            pp_show_decl_loc(ppf, type_ctx, filename, *loc, "Expected declaration");
         }
         IncludeModError::ValueTypeMismatch {
             name,
@@ -640,33 +750,16 @@ fn format_include_error(
             expected,
             arity_mismatch,
         } => {
-            let actual_text = format_value_description(type_ctx, name, actual);
-            let expected_text = format_value_description(type_ctx, name, expected);
-            let inline_width = "  Values do not match: ".len()
-                + actual_text.len()
-                + " is not included in ".len()
-                + expected_text.len();
-            // includemod.ml:549-552 prints "@[<hv 2>Values do not match:@ %a@;<1
-            // -2>is not included in@ %a@]" from column 2; the hv box stays on
-            // one line only when it fits the report's margin (at most 77
-            // columns including the indentation).
-            if !actual_text.contains('\n') && !expected_text.contains('\n') && inline_width <= 77 {
-                output.push_str("  Values do not match: ");
-                output.push_str(&actual_text);
-                output.push_str(" is not included in ");
-                output.push_str(&expected_text);
-                output.push('\n');
-            } else {
-                // The descriptions are emitted with `Format.pp_print_string`
-                // (res_outcome_printer.ml:963-965), so their own line breaks
-                // are copied verbatim and the box indentation does not apply
-                // to continuation lines.
-                output.push_str("  Values do not match:\n    ");
-                output.push_str(&actual_text);
-                output.push_str("\n  is not included in\n    ");
-                output.push_str(&expected_text);
-                output.push('\n');
-            }
+            pp_two_sided(
+                ppf,
+                "Values do not match:",
+                &format_value_description(type_ctx, name, actual),
+                "is not included in",
+                &format_value_description(type_ctx, name, expected),
+            );
+            // `show_arity_mismatch` (includemod.ml:530-542): `@\n@[The
+            // implementation contains a function taking %s where the
+            // interface expects one taking %s.@]`.
             if let Some((actual_arity, expected_arity)) = arity_mismatch {
                 let arguments = |arity: usize| {
                     if arity == 1 {
@@ -675,81 +768,42 @@ fn format_include_error(
                         format!("{arity} arguments")
                     }
                 };
-                output.push_str("  The implementation contains a function taking ");
-                output.push_str(&arguments(*actual_arity));
-                output.push_str(" where the interface expects one taking ");
-                output.push_str(&arguments(*expected_arity));
-                output.push_str(".\n");
+                ppf.newline();
+                ppf.open_box(crate::parser::formatter::BoxKind::Box, 0);
+                pp_text(
+                    ppf,
+                    &format!(
+                        "The implementation contains a function taking {} where the interface expects one taking {}.",
+                        arguments(*actual_arity),
+                        arguments(*expected_arity)
+                    ),
+                );
+                ppf.close_box();
             }
-            push_show_loc(
-                output,
-                &{
-                    let loc = type_ctx.resolve_loc(expected.val_loc);
-                    code_frame::format_location(
-                        &location_filename(type_ctx, filename, &loc),
-                        &loc.loc_start,
-                        &loc.loc_end,
-                    )
-                },
-                "Expected declaration",
-            );
-            push_show_loc(
-                output,
-                &{
-                    let loc = type_ctx.resolve_loc(actual.val_loc);
-                    code_frame::format_location(
-                        &location_filename(type_ctx, filename, &loc),
-                        &loc.loc_start,
-                        &loc.loc_end,
-                    )
-                },
-                "Actual declaration",
-            );
+            pp_show_locs(ppf, type_ctx, filename, actual.val_loc, expected.val_loc);
         }
         IncludeModError::TypeMismatch { name, reason } => {
-            output.push_str("  Type declarations do not match: ");
-            output.push_str(name.name());
-            output.push_str("\n  ");
-            output.push_str(reason);
-            output.push('\n');
+            pp_text(ppf, "Type declarations do not match: ");
+            pp_text(ppf, name.name());
+            pp_lines_after_breaks(ppf, reason);
         }
         IncludeModError::ModuleTypeMismatch { name, reason } => {
-            output.push_str("  Modules do not match: ");
-            output.push_str(name.name());
-            output.push_str("\n  ");
-            output.push_str(reason);
-            output.push('\n');
-        }
-        IncludeModError::ModuleTypeDeclarationMismatch {
-            name,
-            actual,
-            expected,
-            error,
-            ..
-        } => {
-            output.push_str("  Module type declarations do not match:\n");
-            output.push_str("    ");
-            output.push_str(&format_modtype_declaration(type_ctx, name, actual));
-            output.push('\n');
-            output.push_str("  does not match\n");
-            output.push_str("    ");
-            output.push_str(&format_modtype_declaration(type_ctx, name, expected));
-            output.push('\n');
-            format_include_error(type_ctx, filename, error, cxt, output, elided);
+            pp_text(ppf, "Modules do not match: ");
+            pp_text(ppf, name.name());
+            pp_lines_after_breaks(ppf, reason);
         }
         IncludeModError::ModtypePermutation => {
-            output.push_str("  Illegal permutation of structure fields\n");
+            pp_text(ppf, "Illegal permutation of structure fields");
         }
         IncludeModError::FunctorParamMismatch(reason)
         | IncludeModError::FunctorResultMismatch(reason) => {
-            output.push_str("  ");
-            output.push_str(reason);
-            output.push('\n');
+            pp_lines(ppf, reason);
         }
         IncludeModError::NotAFunctor => {
-            output.push_str("  Not a functor.\n");
+            pp_text(ppf, "Not a functor.");
         }
     }
+    ppf.close_box();
 }
 
 pub(crate) fn location_filename(type_ctx: &TypeContext, fallback: &str, loc: &Location) -> String {
@@ -759,60 +813,10 @@ pub(crate) fn location_filename(type_ctx: &TypeContext, fallback: &str, loc: &Lo
         .unwrap_or_else(|| fallback.to_string())
 }
 
-/// Whether an `@[<hv>` box at column 2 holding `parts` separated by break
-/// hints stays on one line under the Format margin. Multi-line parts contain
-/// forced breaks, so the box cannot be horizontal.
-fn hv_fits_on_one_line(parts: &[&str]) -> bool {
-    if parts.iter().any(|part| part.contains('\n')) {
-        return false;
-    }
-    let mut buf = Vec::new();
-    {
-        let mut ppf = crate::parser::formatter::Formatter::new(&mut buf);
-        ppf.string_as(2, "");
-        ppf.open_box(crate::parser::formatter::BoxKind::HV, 0);
-        for (index, part) in parts.iter().enumerate() {
-            if index > 0 {
-                ppf.break_(1, 2);
-            }
-            ppf.string_as(part.chars().count(), part);
-        }
-        ppf.close_box();
-        ppf.flush();
-    }
-    !buf.contains(&b'\n')
-}
-
 // Declarations and module types print through `Printtyp`'s outcome trees and
 // `Res_outcome_printer` (printtyp.ml:1007-1192, res_outcome_printer.ml:481-842),
-// each rendered as one Doc string at width 80.
-
-/// `Module_types` in `include_symptom` (includemod.ml:566-569):
-/// `@[<hv 2>Modules do not match:@ %a@;<1 -2>is not included in@ %a@]`,
-/// where each module type is one `pp_print_string` of the outcome printer's
-/// rendering (res_outcome_printer.ml:1063-1065), laid out at column 2 of the
-/// error's vertical box.
-fn format_modules_do_not_match(actual: &str, expected: &str) -> String {
-    let mut buf = Vec::new();
-    {
-        let mut ppf = crate::parser::formatter::Formatter::new(&mut buf);
-        ppf.string_as(2, "");
-        ppf.open_hvbox(2);
-        ppf.string("Modules do not match:");
-        ppf.break_(1, 0);
-        ppf.string(actual);
-        ppf.break_(1, -2);
-        ppf.string("is not included in");
-        ppf.break_(1, 0);
-        ppf.string(expected);
-        ppf.close_box();
-        ppf.flush();
-    }
-    let mut out = String::from("  ");
-    out.push_str(&String::from_utf8_lossy(&buf));
-    out.push('\n');
-    out
-}
+// each rendered as one Doc string at width 80 that `pp_doc` prints into a
+// report's boxes.
 
 pub(crate) fn format_module_type(type_ctx: &TypeContext, mty: &ModuleType) -> String {
     let tree = crate::types::printtyp::Printtyp::new(type_ctx).tree_of_modtype(mty, false);

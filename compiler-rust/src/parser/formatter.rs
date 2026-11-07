@@ -162,6 +162,11 @@ impl<W: Write> Formatter<W> {
         self.pp_rinit();
     }
 
+    /// The margin (OCaml `pp_get_margin`).
+    pub fn margin(&self) -> usize {
+        self.margin as usize
+    }
+
     /// Get current column position
     pub fn column(&self) -> usize {
         (self.margin - self.space_left).max(0) as usize

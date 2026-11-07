@@ -4532,7 +4532,8 @@ fn render_non_generalizable_message(intro: &str, rendered_type: &str) -> String 
         ppf.str(intro);
         ppf.cut();
         ppf.string_as(0, TAG_ERROR);
-        ppf.str(rendered_type);
+        // `type_scheme` or `modtype` (typemod.ml:1906-1924).
+        crate::types::printtyp::pp_doc(ppf, rendered_type);
         ppf.string_as(0, TAG_RESET);
         ppf.close_box();
         ppf.cut();
@@ -4942,7 +4943,7 @@ fn format_cannot_apply_module_report(
         ppf.open_box(crate::parser::formatter::BoxKind::Box, 0);
         ppf.str("This module is not a functor; it has type");
         ppf.space();
-        ppf.string_as(rendered_module_type.len(), &rendered_module_type);
+        crate::types::printtyp::pp_doc(ppf, &rendered_module_type);
         ppf.close_box();
     });
     format_compiler_error_report_formatted(arena, source, filename, loc, &message)
@@ -4979,13 +4980,13 @@ fn format_cannot_eliminate_dependency_report(
         crate::types::includemod::format_module_type_full_paths(type_ctx, mty);
     // typemod.ml:1819-1823: "@[This functor has type@ %a@ The parameter
     // cannot be eliminated in the result type.@  Bind the argument to a
-    // module identifier.@]"; the outcome printer hands Format the module
-    // type as one string (res_outcome_printer.ml:1063-1065).
+    // module identifier.@]", the module type printed by `pp_doc`
+    // (res_outcome_printer.ml:426-440).
     let message = type_clash::render_error_message(|ppf| {
         ppf.open_box(crate::parser::formatter::BoxKind::Box, 0);
         ppf.str("This functor has type");
         ppf.space();
-        ppf.string_as(rendered_module_type.len(), &rendered_module_type);
+        crate::types::printtyp::pp_doc(ppf, &rendered_module_type);
         ppf.space();
         ppf.str("The parameter cannot be eliminated in the result type.");
         ppf.space();
@@ -5009,7 +5010,7 @@ fn format_structure_expected_report(
         ppf.open_box(crate::parser::formatter::BoxKind::Box, 0);
         ppf.str("This module is not a structure; it has type");
         ppf.space();
-        ppf.string_as(rendered_module_type.len(), &rendered_module_type);
+        crate::types::printtyp::pp_doc(ppf, &rendered_module_type);
         ppf.close_box();
     });
     format_compiler_error_report_formatted(arena, source, filename, loc, &message)
@@ -5214,7 +5215,8 @@ fn format_unbound_type_declaration_variable_report(
             message.push_str(".\n");
             message.push_str(&format_explain_unbound_gen(
                 "case",
-                &format!("{case_name} of {args_text}"),
+                &format!("{case_name} of "),
+                &args_text,
                 &var_text,
             ));
             return format_compiler_error_report_raw_message(
@@ -5264,25 +5266,26 @@ fn format_unbound_type_declaration_variable_report(
         };
         message.push_str(".\n");
         message.push_str(&format_explain_unbound_gen(
-            kwd,
-            &format!("{label}{ty_text}"),
-            &var_text,
+            kwd, &label, &ty_text, &var_text,
         ));
     }
     format_compiler_error_report_raw_message(arena, source, filename, loc, &message)
 }
 
 /// `explain_unbound_gen` (typedecl.ml:2080-2090) after the `.@.` flush:
-/// `@[<hov2>In %s@ %a@;<1 -2>the variable %a is unbound@]` from column 0.
-fn format_explain_unbound_gen(kwd: &str, item: &str, var: &str) -> String {
+/// `@[<hov2>In %s@ %a@;<1 -2>the variable %a is unbound@]` from column 0,
+/// the item printed by `explain_unbound`'s `%s%a` (typedecl.ml:2149-2151):
+/// its label, then its type.
+fn format_explain_unbound_gen(kwd: &str, label: &str, item_type: &str, var: &str) -> String {
     type_clash::render_error_message_at_column0(|ppf| {
         ppf.open_hovbox(2);
         ppf.str(&format!("In {kwd}"));
         ppf.space();
-        ppf.string_as(item.chars().count(), item);
+        ppf.string_as(label.len(), label);
+        crate::types::printtyp::pp_doc(ppf, item_type);
         ppf.break_(1, -2);
         ppf.str("the variable ");
-        ppf.string_as(var.chars().count(), var);
+        crate::types::printtyp::pp_doc(ppf, var);
         ppf.str(" is unbound");
         ppf.close_box();
     })
@@ -6012,15 +6015,13 @@ fn format_wrong_name_report(
     // typecore.ml:4963-4971:
     //   @[<v>@[<2>The %s @{<error>%s@} does not belong to type @{<info>%a@}@]@,@,
     //   @[<2>%s type@ @{<info>%a@}@]@]
-    // The type is one Format string, measured by its byte length even when
-    // the outcome printer broke it over several lines.
+    // The type prints through `pp_doc` (res_outcome_printer.ml:426-440).
     let path_text = printer.string_of_path(path);
     let message = {
         let mut buf = Vec::new();
         {
             use crate::parser::formatter::{BoxKind, Formatter};
-            // The report body sits in a box two columns in; raw newlines of
-            // the type string are not indented.
+            // The report body sits in a box two columns in.
             let mut ppf = Formatter::new(&mut buf);
             ppf.set_margin(78);
             ppf.str("  ");
@@ -6041,7 +6042,7 @@ fn format_wrong_name_report(
             ppf.print(format_args!("{expected} type"));
             ppf.space();
             ppf.string_as(0, INFO);
-            ppf.string_as(type_text.len(), &type_text);
+            crate::types::printtyp::pp_doc(&mut ppf, &type_text);
             ppf.string_as(0, RESET);
             ppf.close_box();
             ppf.close_box();
@@ -10274,7 +10275,7 @@ fn format_uncurried_arity_mismatch_report(
         ppf.cut();
         ppf.str("The function has type:");
         ppf.space();
-        ppf.str(&type_text);
+        crate::types::printtyp::pp_doc(ppf, &type_text);
         if !is_fallback {
             ppf.cut();
         }

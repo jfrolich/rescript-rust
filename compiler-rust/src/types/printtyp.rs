@@ -2449,6 +2449,27 @@ pub(crate) fn print_out_type(out_type: &OutType) -> String {
     print_out_type_doc(out_type).to_string(80)
 }
 
+/// `pp_doc` (res_outcome_printer.ml:426-440): print a doc rendered at width
+/// 80 into a Format box. Each line break of a multi-line doc is a newline of
+/// the enclosing box, so the following lines are indented with the box, and
+/// the first line claims the whole margin, so the box breaks around the doc
+/// instead of continuing on the doc's last line.
+pub(crate) fn pp_doc<W: std::io::Write>(ppf: &mut Formatter<W>, rendered: &str) {
+    if !rendered.contains('\n') {
+        ppf.string_as(rendered.len(), rendered);
+        return;
+    }
+    for (index, line) in rendered.split('\n').enumerate() {
+        if index == 0 {
+            let margin = ppf.margin();
+            ppf.string_as(margin, line);
+        } else {
+            ppf.newline();
+            ppf.string_as(line.len(), line);
+        }
+    }
+}
+
 // ============================================================================
 // Unification errors (compiler/ml/printtyp.ml:1219-1567)
 // ============================================================================
@@ -2483,10 +2504,6 @@ pub(crate) fn expand_trace(
     out
 }
 
-/// `pp_print_string` of a rendered type, measured by its byte length.
-fn pp_type_text<W: std::io::Write>(ppf: &mut Formatter<W>, text: &str) {
-    ppf.string_as(text.len(), text);
-}
 
 fn open_tag<W: std::io::Write>(ppf: &mut Formatter<W>, tag: &str) {
     ppf.string_as(0, tag);
@@ -2796,8 +2813,9 @@ impl<'a> Printtyp<'a> {
         ppf: &mut Formatter<W>,
         ty: TypeExprRef,
     ) {
+        // `print_out_type` (res_outcome_printer.ml:442).
         let text = self.type_expr(ty);
-        pp_type_text(ppf, &text);
+        pp_doc(ppf, &text);
     }
 
     /// `super_type_expansion ~tag t ppf t'`.
@@ -3890,5 +3908,60 @@ impl<'a> Printtyp<'a> {
         ppf.break_(1, 2);
         self.type_path_expansion(ppf, &tp0.0, &tp0.1);
         ppf.close_box();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pp_doc;
+    use crate::parser::formatter::Formatter;
+
+    /// `@[<hv 2>Modules do not match:@ %a@;<1 -2>is not included in@ %a@]`
+    /// (includemod.ml:566-569) at column 2, the sides printed by `pp_doc`.
+    fn modules_do_not_match(actual: &str, expected: &str) -> String {
+        let mut buf = Vec::new();
+        {
+            let mut ppf = Formatter::new(&mut buf);
+            ppf.string_as(2, "");
+            ppf.open_hvbox(2);
+            ppf.str("Modules do not match:");
+            ppf.space();
+            pp_doc(&mut ppf, actual);
+            ppf.break_(1, -2);
+            ppf.str("is not included in");
+            ppf.space();
+            pp_doc(&mut ppf, expected);
+            ppf.close_box();
+            ppf.flush();
+        }
+        String::from_utf8(buf).unwrap()
+    }
+
+    #[test]
+    fn pp_doc_indents_every_line_of_a_multi_line_doc_with_its_box() {
+        // The upstream example of bf272baf34.
+        assert_eq!(
+            modules_do_not_match("{\n  type t = int\n}", "{\n  type t = X.t\n}"),
+            "Modules do not match:\n    {\n      type t = int\n    }\n  is not included in\n    {\n      type t = X.t\n    }"
+        );
+    }
+
+    #[test]
+    fn pp_doc_breaks_the_box_around_a_short_multi_line_doc() {
+        // A multi-line doc claims the whole margin, so the box breaks even
+        // though every line is short, and a single-line doc after it starts
+        // on its own line.
+        assert_eq!(
+            modules_do_not_match("{\n  let unrelated: string\n}", "HasFoo"),
+            "Modules do not match:\n    {\n      let unrelated: string\n    }\n  is not included in\n    HasFoo"
+        );
+    }
+
+    #[test]
+    fn pp_doc_prints_a_single_line_doc_as_one_string() {
+        assert_eq!(
+            modules_do_not_match("S", "T"),
+            "Modules do not match: S is not included in T"
+        );
     }
 }
