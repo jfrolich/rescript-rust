@@ -320,6 +320,42 @@ impl Doc {
         }
     }
 
+    /// Whether a line suffix (a trailing line comment) in the document is still
+    /// queued at its end, because no line break of a group that breaks follows
+    /// it (`Res_doc.has_pending_line_suffix`, res_doc.ml:125-142). Groups that
+    /// only break for lack of width count as flat. Text after the document on
+    /// the same line would precede the comment.
+    pub fn has_pending_line_suffix(&self) -> bool {
+        // `pending`: a line suffix is queued; `broken`: the innermost
+        // enclosing group is printed in break mode, so its line breaks flush
+        // the queue.
+        fn walk(doc: &Doc, broken: bool, pending: bool) -> bool {
+            match doc {
+                Doc::LineSuffix(_) => true,
+                Doc::LineBreak(_) => pending && !broken,
+                Doc::Nil | Doc::Text(_) | Doc::BreakParent => pending,
+                Doc::Indent(doc) => walk(doc, broken, pending),
+                Doc::Concat(docs) => docs
+                    .iter()
+                    .fold(pending, |pending, doc| walk(doc, broken, pending)),
+                Doc::Group { should_break, doc } => {
+                    walk(doc, should_break.get() || doc.will_break(), pending)
+                }
+                Doc::IfBreaks {
+                    yes,
+                    no,
+                    broken: if_broken,
+                } => walk(
+                    if broken || if_broken.get() { yes } else { no },
+                    broken,
+                    pending,
+                ),
+                Doc::CustomLayout(docs) => docs.iter().any(|doc| walk(doc, false, pending)),
+            }
+        }
+        walk(self, false, false)
+    }
+
     /// Check if the document fits within the given width.
     ///
     /// Mirrors `Res_doc.fits` (`compiler/syntax/src/res_doc.ml:143-185`):

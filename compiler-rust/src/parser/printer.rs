@@ -894,6 +894,54 @@ pub fn add_parens(doc: Doc) -> Doc {
     ]))
 }
 
+/// The operand of `switch`, `try`, `if`, `while` or a loop, which is followed
+/// by more code on the same line (res_printer.ml:3168-3173). A line comment
+/// still pending at its end would move after that code, into the block, so
+/// the operand goes into parentheses with the comment before the `)`.
+fn print_operand_before_brace(doc: Doc) -> Doc {
+    if doc.has_pending_line_suffix() {
+        add_operand_parens(doc)
+    } else {
+        doc
+    }
+}
+
+/// An operand followed by a block, see [`print_operand_before_brace`], with
+/// the parentheses or braces it needs (res_printer.ml:3175-3183).
+fn print_block_operand(
+    state: &PrinterState,
+    expr: &Expression,
+    cmt_tbl: &mut CommentTable,
+    arena: &ParseArena,
+) -> Doc {
+    let doc = print_expression_with_comments(state, expr, cmt_tbl, arena);
+    print_operand_before_brace(match parens::expr(arena, expr) {
+        ParenKind::Parenthesized => add_operand_parens(doc),
+        ParenKind::Braced(braces) => print_braces(doc, expr, braces, arena),
+        ParenKind::Nothing => doc,
+    })
+}
+
+/// Parentheses around such an operand, or around one that needs them, such as
+/// a coercion (res_printer.ml:3185-3198). They break when a line comment is
+/// still pending at the end of the operand, so that the comment stays before
+/// the `)`.
+fn add_operand_parens(doc: Doc) -> Doc {
+    if doc.has_pending_line_suffix() {
+        Doc::breakable_group(
+            Doc::concat(vec![
+                Doc::lparen(),
+                Doc::indent(Doc::concat(vec![Doc::soft_line(), doc])),
+                Doc::soft_line(),
+                Doc::rparen(),
+            ]),
+            true,
+        )
+    } else {
+        add_parens(doc)
+    }
+}
+
 /// Print an expression with braces at the given location.
 pub fn print_braces(doc: Doc, expr: &Expression, braces_loc: LocIdx, arena: &ParseArena) -> Doc {
     let over_multiple_lines = arena.loc_start(braces_loc).line != arena.loc_end(braces_loc).line;
@@ -1506,20 +1554,25 @@ pub fn print_expression(
             let cond = arena.get_expr(*cond_idx);
             let body = arena.get_expr(*body_idx);
             // Match OCaml: first check Parens.expr for braces, then apply block expr logic
+            let cond_parens = parens::expr(arena, cond);
+            let is_parenthesized = matches!(cond_parens, ParenKind::Parenthesized);
             let condition = {
                 let doc = print_expression_with_comments(state, cond, cmt_tbl, arena);
-                match parens::expr(arena, cond) {
-                    ParenKind::Parenthesized => add_parens(doc),
+                match cond_parens {
+                    ParenKind::Parenthesized => add_operand_parens(doc),
                     ParenKind::Braced(braces) => print_braces(doc, cond, braces, arena),
                     ParenKind::Nothing => doc,
                 }
             };
-            // Check if condition is a block expression - if not, add parens on break
-            let cond_doc = if parsetree_viewer::is_block_expr(arena, cond) {
-                condition
-            } else {
-                Doc::group(Doc::if_breaks(add_parens(condition.clone()), condition))
-            };
+            // res_printer.ml:3702-3706: a condition with its own parentheses
+            // or a block keeps them; any other gets parentheses when it breaks.
+            let cond_doc = print_operand_before_brace(
+                if is_parenthesized || parsetree_viewer::is_block_expr(arena, cond) {
+                    condition
+                } else {
+                    Doc::group(Doc::if_breaks(add_parens(condition.clone()), condition))
+                },
+            );
             Doc::breakable_group(
                 Doc::concat(vec![
                     Doc::text("while "),
@@ -1535,14 +1588,7 @@ pub fn print_expression(
             let (ref pat, ref iterable_idx, ref body_idx) = **inner;
             let iterable = arena.get_expr(*iterable_idx);
             let body = arena.get_expr(*body_idx);
-            let iterable_doc = {
-                let doc = print_expression_with_comments(state, iterable, cmt_tbl, arena);
-                match parens::expr(arena, iterable) {
-                    ParenKind::Parenthesized => add_parens(doc),
-                    ParenKind::Braced(loc) => print_braces(doc, iterable, loc, arena),
-                    ParenKind::Nothing => doc,
-                }
-            };
+            let iterable_doc = print_block_operand(state, iterable, cmt_tbl, arena);
             let lead = if matches!(&e.pexp_desc, ExpressionDesc::Pexp_for_await_of(_)) {
                 "for await "
             } else {
@@ -1570,24 +1616,8 @@ pub fn print_expression(
                 DirectionFlag::Upto => " to ",
                 DirectionFlag::Downto => " downto ",
             };
-            // Handle parens for from_expr
-            let start_doc = {
-                let doc = print_expression_with_comments(state, start, cmt_tbl, arena);
-                match parens::expr(arena, start) {
-                    ParenKind::Parenthesized => add_parens(doc),
-                    ParenKind::Braced(loc) => print_braces(doc, start, loc, arena),
-                    ParenKind::Nothing => doc,
-                }
-            };
-            // Handle parens for to_expr
-            let finish_doc = {
-                let doc = print_expression_with_comments(state, finish, cmt_tbl, arena);
-                match parens::expr(arena, finish) {
-                    ParenKind::Parenthesized => add_parens(doc),
-                    ParenKind::Braced(loc) => print_braces(doc, finish, loc, arena),
-                    ParenKind::Nothing => doc,
-                }
-            };
+            let start_doc = print_block_operand(state, start, cmt_tbl, arena);
+            let finish_doc = print_block_operand(state, finish, cmt_tbl, arena);
             Doc::breakable_group(
                 Doc::concat(vec![
                     Doc::text("for "),
@@ -2626,7 +2656,7 @@ fn print_if_chain(
                 } else {
                     let doc = print_expression_with_comments(state, if_expr, cmt_tbl, arena);
                     match parens::expr(arena, if_expr) {
-                        ParenKind::Parenthesized => add_parens(doc),
+                        ParenKind::Parenthesized => add_operand_parens(doc),
                         ParenKind::Braced(loc) => print_braces(doc, if_expr, loc, arena),
                         ParenKind::Nothing => Doc::if_breaks(add_parens(doc.clone()), doc),
                     }
@@ -2637,7 +2667,8 @@ fn print_if_chain(
 
                 Doc::concat(vec![
                     if_txt,
-                    Doc::group(condition),
+                    // res_printer.ml:3222.
+                    print_operand_before_brace(Doc::group(condition)),
                     Doc::space(),
                     print_expression_block(state, true, then_expr_to_print, cmt_tbl, arena),
                 ])
@@ -7479,15 +7510,8 @@ fn print_match_expression(
     cmt_tbl: &mut CommentTable,
     arena: &ParseArena,
 ) -> Doc {
-    // Match OCaml: the scrutinee expression goes through Parens.expr for brace handling
-    let scrutinee = {
-        let doc = print_expression_with_comments(state, expr, cmt_tbl, arena);
-        match parens::expr(arena, expr) {
-            ParenKind::Parenthesized => add_parens(doc),
-            ParenKind::Braced(braces) => print_braces(doc, expr, braces, arena),
-            ParenKind::Nothing => doc,
-        }
-    };
+    // res_printer.ml:3840: `print_block_operand`.
+    let scrutinee = print_block_operand(state, expr, cmt_tbl, arena);
     // print_cases_with_braces returns the full { cases } block
     let cases_block = print_cases_with_braces(state, cases, cmt_tbl, arena);
     Doc::concat(vec![
@@ -7508,14 +7532,8 @@ fn print_try_expression(
     cmt_tbl: &mut CommentTable,
     arena: &ParseArena,
 ) -> Doc {
-    let body = {
-        let doc = print_expression_with_comments(state, expr, cmt_tbl, arena);
-        match parens::expr(arena, expr) {
-            ParenKind::Parenthesized => add_parens(doc),
-            ParenKind::Braced(braces) => print_braces(doc, expr, braces, arena),
-            ParenKind::Nothing => doc,
-        }
-    };
+    // res_printer.ml:3821: `print_block_operand`.
+    let body = print_block_operand(state, expr, cmt_tbl, arena);
     let catch_doc = if cases.is_empty() {
         Doc::nil()
     } else {
