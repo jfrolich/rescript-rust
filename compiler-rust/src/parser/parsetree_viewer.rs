@@ -570,28 +570,6 @@ pub fn collect_list_patterns<'a>(
 }
 
 // ============================================================================
-// Array Collection
-// ============================================================================
-
-/// Collect expressions from an array (or tuple).
-pub fn collect_array_expressions<'a>(
-    arena: &'a ParseArena,
-    expr: &'a Expression,
-) -> (Vec<&'a Expression>, Option<&'a Expression>) {
-    match &expr.pexp_desc {
-        ExpressionDesc::Pexp_array(exprs) => (
-            arena
-                .expr_list(*exprs)
-                .iter()
-                .map(|idx| arena.get_expr(*idx))
-                .collect(),
-            None,
-        ),
-        _ => (vec![], Some(expr)),
-    }
-}
-
-// ============================================================================
 // Function Analysis
 // ============================================================================
 
@@ -761,43 +739,6 @@ pub fn fun_expr<'a>(
 // ============================================================================
 // Attribute Processing
 // ============================================================================
-
-/// Check if expression has spread attribute (...).
-pub fn has_spread_attr(arena: &ParseArena, attrs: &Attributes) -> bool {
-    attrs
-        .iter()
-        .any(|attr| arena.get_string(attr.0.txt) == "res.spread")
-}
-
-/// Check if pattern has spread attribute (...).
-pub fn pattern_has_spread_attr(arena: &ParseArena, attrs: &Attributes) -> bool {
-    has_spread_attr(arena, attrs)
-}
-
-/// Check if expression is `Primitive_array.spread` with @res.spread attribute.
-/// This is the desugared form of `[...xs, a, b]`.
-pub fn is_spread_belt_array_concat(arena: &ParseArena, expr: &Expression) -> bool {
-    is_primitive_spread(arena, expr, "Primitive_array")
-}
-
-/// Check if expression is `Primitive_list.spread` with @res.spread attribute.
-/// This is the desugared form of `list{...xs, a, b}`.
-pub fn is_spread_belt_list_concat(arena: &ParseArena, expr: &Expression) -> bool {
-    is_primitive_spread(arena, expr, "Primitive_list")
-}
-
-fn is_primitive_spread(arena: &ParseArena, expr: &Expression, module_name: &str) -> bool {
-    let ExpressionDesc::Pexp_ident(loc_idx) = &expr.pexp_desc else {
-        return false;
-    };
-    let Longident::Ldot(parent, name_idx) = arena.get_longident(loc_idx.txt) else {
-        return false;
-    };
-    matches!(parent.as_ref(), Longident::Lident(base_idx)
-        if arena.get_string(*base_idx) == module_name)
-        && arena.get_string(*name_idx) == "spread"
-        && has_spread_attr(arena, &expr.pexp_attributes)
-}
 
 /// Attributes on a module expression print before it and bind less tightly
 /// than an application or a constraint.

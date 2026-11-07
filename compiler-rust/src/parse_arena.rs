@@ -2096,30 +2096,6 @@ impl ParseArena {
         self.static_array_lidents.belt_list_concat_many
     }
 
-    /// Fresh `Ldot(Lident "Primitive_array", "spread")` for one desugared occurrence.
-    /// OCaml builds this longident inline at each spread site
-    /// (compiler/syntax/src/res_core.ml:4528), so every occurrence allocates a
-    /// new Longident block; only the name strings are static.
-    pub fn fresh_belt_array_spread_lid(&mut self) -> LidentIdx {
-        let module_str = self.strings.intern("Primitive_array");
-        let spread_str = self.strings.intern("spread");
-        self.longidents.push(Longident::Ldot(
-            Box::new(Longident::Lident(module_str)),
-            spread_str,
-        ))
-    }
-
-    /// Fresh `Ldot(Lident "Primitive_list", "spread")` for one desugared occurrence.
-    /// See `fresh_belt_array_spread_lid`; OCaml site is res_core.ml:4386.
-    pub fn fresh_belt_list_spread_lid(&mut self) -> LidentIdx {
-        let module_str = self.strings.intern("Primitive_list");
-        let spread_str = self.strings.intern("spread");
-        self.longidents.push(Longident::Ldot(
-            Box::new(Longident::Lident(module_str)),
-            spread_str,
-        ))
-    }
-
     /// Get the static `Stdlib_RegExp.t` longident index used for `%re`.
     pub fn regexp_t_lident(&self) -> LidentIdx {
         self.static_regexp_t_lident

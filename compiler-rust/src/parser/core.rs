@@ -610,16 +610,6 @@ pub fn parse_ident(p: &mut Parser<'_>, msg: &str, start_pos_idx: PosIdx) -> (Str
 }
 
 // ============================================================================
-// Special Attributes
-// ============================================================================
-
-/// Create the spread attribute `@res.spread`.
-pub fn spread_attr(arena: &mut ParseArena) -> Attribute {
-    let str_idx = arena.intern("res.spread");
-    (mknoloc(str_idx), Payload::PStr(Box::default()))
-}
-
-// ============================================================================
 // Parsing Context
 // ============================================================================
 
