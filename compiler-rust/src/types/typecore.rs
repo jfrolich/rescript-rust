@@ -22138,6 +22138,7 @@ fn rewrite_child_module_prefixes_from_sig(
     skip_child_name: Option<&str>,
     ctx: &crate::types::context::TypeContext,
 ) {
+    let new_parent_path = Arc::new(new_parent_path.clone());
     let mut prefixes = Vec::new();
     for item in source_sig {
         if let crate::types::decl::SignatureItem::SigModule(id, _, _) = item {
@@ -22145,7 +22146,8 @@ fn rewrite_child_module_prefixes_from_sig(
                 continue;
             }
             let old_prefix = Path::pdot(old_parent_path.clone(), id.name().to_string());
-            let new_prefix = Path::pdot(new_parent_path.clone(), id.name().to_string());
+            let new_prefix =
+                ctx.dotted_from_ident(new_parent_path.clone(), *id, crate::types::path::NOPOS);
             prefixes.push((old_prefix, new_prefix));
         }
     }
@@ -26414,7 +26416,9 @@ fn strengthen_sig_for_module_access_path(
 fn strengthen_sig_module_decls_for_module_access_path(
     sig_items: &mut [crate::types::decl::SignatureItem],
     module_access_path: &Path,
+    ctx: &TypeContext,
 ) {
+    let module_access_path = Arc::new(module_access_path.clone());
     let mut runtime_pos = 0i32;
 
     for item in sig_items.iter_mut() {
@@ -26436,11 +26440,7 @@ fn strengthen_sig_module_decls_for_module_access_path(
                 if !matches!(md.md_type, crate::types::decl::ModuleType::MtyAlias(..)) {
                     md.md_type = crate::types::decl::ModuleType::MtyAlias(
                         crate::types::decl::AliasPresence::MtaPresent,
-                        Path::pdot_pos(
-                            module_access_path.clone(),
-                            id.name().to_string(),
-                            runtime_pos,
-                        ),
+                        ctx.dotted_from_ident(module_access_path.clone(), *id, runtime_pos),
                     );
                 }
                 runtime_pos += 1;
@@ -26494,10 +26494,12 @@ pub(crate) fn rebind_direct_sig_type_family_to_access_path(
 ) {
     use crate::types::decl::SignatureItem;
 
+    let access_path = Arc::new(access_path.clone());
     let mut rewrites = Vec::<(Path, Path)>::new();
     for item in sig_items.iter() {
         if let SignatureItem::SigType(id, decl, _) = item {
-            let rebound_path = Path::pdot(access_path.clone(), id.name());
+            let rebound_path =
+                ctx.dotted_from_ident(access_path.clone(), *id, crate::types::path::NOPOS);
             if let Some(old_path) = decl.type_path.as_ref() {
                 if !old_path.same(&rebound_path) {
                     rewrites.push((old_path.clone(), rebound_path.clone()));
@@ -27846,16 +27848,18 @@ fn rewrite_alias_pident_child_prefixes(
     access_path: &Path,
     ctx: &crate::types::context::TypeContext,
 ) {
-    let child_names = sig
+    let child_ids = sig
         .iter()
         .filter_map(|item| match item {
-            crate::types::decl::SignatureItem::SigModule(id, _, _) => Some(id.name().to_string()),
+            crate::types::decl::SignatureItem::SigModule(id, _, _) => Some(*id),
             _ => None,
         })
         .collect::<Vec<_>>();
-    for child_name in child_names {
-        let old_prefix = Path::pdot(target.clone(), child_name.clone());
-        let new_prefix = Path::pdot(access_path.clone(), child_name);
+    let access_path = Arc::new(access_path.clone());
+    for child_id in child_ids {
+        let old_prefix = Path::pdot(target.clone(), child_id.name());
+        let new_prefix =
+            ctx.dotted_from_ident(access_path.clone(), child_id, crate::types::path::NOPOS);
         let rewrite_target = std::sync::Arc::new(new_prefix.clone());
         crate::cmi::persistent_env::rewrite_sig_by_path_prefix(
             sig,
@@ -28110,7 +28114,7 @@ fn qualify_resolved_signature_for_access_path_inner(
         }
     }
     if let Some(strengthen_path) = alias_module_strengthen_path.as_ref() {
-        strengthen_sig_module_decls_for_module_access_path(&mut sig, strengthen_path);
+        strengthen_sig_module_decls_for_module_access_path(&mut sig, strengthen_path, ctx);
     }
     crate::cmi::persistent_env::substitute_type_paths_in_sig(&sig, access_path, ctx);
     crate::cmi::persistent_env::substitute_sig_decl_paths_in_place(&mut sig, access_path, ctx);
@@ -29146,6 +29150,87 @@ mod tests {
     use super::*;
     use crate::context::IdGenerator;
     use std::borrow::Cow;
+
+    #[test]
+    fn child_strengthening_and_alias_prefixes_keep_binder_name_allocations() {
+        use crate::types::decl::{
+            AliasPresence, ModuleDeclaration, ModuleType, RecStatus, SignatureItem,
+        };
+        let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+        let mut arena = ParseArena::new();
+        let name = arena.push_string("Child");
+        let first = ctx.create_ast_ident(&arena, name);
+        let second = ctx.create_ast_ident(&arena, name);
+        let root = Path::Pident(ctx.create_ident("Root"));
+        let module = |id| {
+            SignatureItem::SigModule(
+                id,
+                ModuleDeclaration {
+                    md_type: ModuleType::MtySignature(Arc::new(vec![])),
+                    md_attributes: vec![],
+                    md_loc: Default::default(),
+                    md_path: None,
+                },
+                RecStatus::TrecNot,
+            )
+        };
+        let mut sig = vec![module(first), module(second)];
+        strengthen_sig_module_decls_for_module_access_path(&mut sig, &root, &ctx);
+        let allocations: Vec<_> = sig
+            .iter()
+            .map(|item| {
+                let SignatureItem::SigModule(_, md, _) = item else {
+                    panic!("module")
+                };
+                let ModuleType::MtyAlias(AliasPresence::MtaPresent, path) = &md.md_type else {
+                    panic!("alias")
+                };
+                ctx.dotted_allocation(path).unwrap()
+            })
+            .collect();
+        assert!(Arc::ptr_eq(&allocations[0].prefix, &allocations[1].prefix));
+        assert_eq!(allocations[0].name, ctx.ident_name_allocation(&first));
+        assert_eq!(allocations[0].name, allocations[1].name);
+        assert_ne!(allocations[0].key(), allocations[1].key());
+        strengthen_sig_module_decls_for_module_access_path(&mut sig, &root, &ctx);
+        let SignatureItem::SigModule(_, md, _) = &sig[0] else {
+            panic!("module")
+        };
+        let ModuleType::MtyAlias(_, path) = &md.md_type else {
+            panic!("alias")
+        };
+        assert_eq!(
+            ctx.dotted_allocation(path).unwrap().key(),
+            allocations[0].key()
+        );
+
+        let source = Path::Pident(ctx.create_ident("Source"));
+        let child =
+            ctx.dotted_from_ident(Arc::new(source.clone()), first, crate::types::path::NOPOS);
+        let type_name = ctx.create_ident("t");
+        let ty_path = ctx.dotted_from_ident(Arc::new(child), type_name, crate::types::path::NOPOS);
+        let ty = ctx.new_generic_constr(ty_path, vec![]);
+        sig.push(SignatureItem::SigValue(
+            ctx.create_ident("value"),
+            crate::types::decl::ValueDescription {
+                val_type: ty,
+                val_kind: crate::types::decl::ValueKind::ValReg,
+                val_loc: Default::default(),
+                val_attributes: vec![],
+                val_path: None,
+            },
+        ));
+        rewrite_alias_pident_child_prefixes(&mut sig, &source, &root, &ctx);
+        let desc = ctx.get_desc(ty);
+        let TypeDesc::Tconstr { path, .. } = &*desc else {
+            panic!("constructor")
+        };
+        let leaf = ctx.dotted_allocation(path).unwrap();
+        let child = ctx.dotted_allocation(&leaf.prefix).unwrap();
+        assert!(child.prefix.same(&root));
+        assert_eq!(child.name, ctx.ident_name_allocation(&first));
+        assert_eq!(leaf.name, ctx.ident_name_allocation(&type_name));
+    }
 
     #[test]
     fn value_usage_marks_all_declarations_with_the_same_key() {

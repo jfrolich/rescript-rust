@@ -7529,7 +7529,13 @@ pub fn substitute_submodule_paths(
 
     for item in sig_items {
         if let SignatureItem::SigModule(id, md, _) = item {
-            let sub_path = Path::pdot(module_path.clone(), id.name());
+            let sub_path = module_path_target(
+                id,
+                &parent_maps.module_stamp_map,
+                &parent_maps.module_name_map,
+                parent_maps.protected_module_head.as_ref(),
+            )
+            .expect("child module has no prefix substitution");
             if let ModuleType::MtySignature(sub_sig) = &md.md_type {
                 substitute_type_paths_in_sig_with_maps(sub_sig, &parent_maps, ctx);
                 restore_child_self_manifests_from_parent_scope(

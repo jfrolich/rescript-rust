@@ -2939,6 +2939,8 @@ pub(crate) fn resolve_type_item_through_modules(
     )
     .unwrap_or_else(|| module_path.clone());
 
+    let type_module_path = std::sync::Arc::new(type_module_path);
+
     // Register ALL types in the final signature by stamp for future lookups.
     // This is important because type manifests may reference sibling types
     // (e.g., type component<'a> = componentLike<'a, element>), and those
@@ -2955,7 +2957,7 @@ pub(crate) fn resolve_type_item_through_modules(
                 type_items += 1;
             }
             let qualified_decl =
-                qualify_type_decl_for_module_access_path(&type_module_path, id, decl);
+                qualify_type_decl_for_module_access_path(ctx, &type_module_path, id, decl);
             // Register every type by stamp
             if id.stamp() != 0 {
                 let should_register = {
@@ -3266,11 +3268,13 @@ fn strengthen_type_decl_for_module_access_path(
 }
 
 fn qualify_type_decl_for_module_access_path(
-    module_access_path: &Path,
+    ctx: &TypeContext,
+    module_access_path: &std::sync::Arc<Path>,
     id: &crate::ident::Ident,
     decl: &super::decl::TypeDeclaration,
 ) -> super::decl::TypeDeclaration {
-    let qualified_type_path = Path::pdot(module_access_path.clone(), id.name());
+    let qualified_type_path =
+        ctx.dotted_from_ident(module_access_path.clone(), *id, crate::types::path::NOPOS);
 
     // OCaml `Env.find_type` resolves dotted paths through module components
     // (compiler/ml/env.ml:800-823), and component construction substitutes
@@ -14213,6 +14217,58 @@ mod tests {
     use crate::types::decl::{
         ModuleDeclaration, ModuleType, RecStatus, SignatureItem, TypeDeclaration, TypeKind,
     };
+
+    #[test]
+    fn qualified_and_rebound_declarations_keep_binder_name_allocations() {
+        let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
+        let mut arena = crate::parse_arena::ParseArena::new();
+        let text = arena.push_string("t");
+        let first = ctx.create_ast_ident(&arena, text);
+        let second = ctx.create_ast_ident(&arena, text);
+        let root = std::sync::Arc::new(Path::Pident(ctx.create_ident("Root")));
+        let manifest = ctx.new_var(None);
+        let decl = manifest_decl(manifest, None);
+        let a = qualify_type_decl_for_module_access_path(&ctx, &root, &first, &decl);
+        let b = qualify_type_decl_for_module_access_path(&ctx, &root, &second, &decl);
+        let a_alloc = ctx
+            .dotted_allocation(a.type_path.as_ref().unwrap())
+            .unwrap();
+        let b_alloc = ctx
+            .dotted_allocation(b.type_path.as_ref().unwrap())
+            .unwrap();
+        assert!(std::sync::Arc::ptr_eq(&a_alloc.prefix, &root));
+        assert!(std::sync::Arc::ptr_eq(&a_alloc.prefix, &b_alloc.prefix));
+        assert_eq!(a_alloc.name, ctx.ident_name_allocation(&first));
+        assert_eq!(a_alloc.name, b_alloc.name);
+        assert_ne!(a_alloc.key(), b_alloc.key());
+        assert_eq!(a.type_manifest, Some(manifest));
+        assert!(decl.type_path.is_none());
+
+        let old = Path::Pident(ctx.create_ident("Old"));
+        let ty = ctx.new_generic_constr(old.clone(), vec![]);
+        let mut sig = vec![SignatureItem::SigType(
+            first,
+            std::sync::Arc::new(manifest_decl(ty, Some(old))),
+            RecStatus::TrecNot,
+        )];
+        super::super::typecore::rebind_direct_sig_type_family_to_access_path(&ctx, &root, &mut sig);
+        let SignatureItem::SigType(_, rebound, _) = &sig[0] else {
+            panic!("type")
+        };
+        let rebound_alloc = ctx
+            .dotted_allocation(rebound.type_path.as_ref().unwrap())
+            .unwrap();
+        assert_eq!(rebound_alloc.name, ctx.ident_name_allocation(&first));
+        assert!(rebound_alloc.prefix.same(&root));
+        let desc = ctx.get_desc(ty);
+        let TypeDesc::Tconstr { path, .. } = &*desc else {
+            panic!("constructor")
+        };
+        assert_eq!(
+            ctx.dotted_allocation(path).unwrap().key(),
+            rebound_alloc.key()
+        );
+    }
 
     fn manifest_decl(manifest: TypeExprRef, type_path: Option<Path>) -> TypeDeclaration {
         TypeDeclaration {
