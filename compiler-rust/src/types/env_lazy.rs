@@ -533,6 +533,7 @@ fn build_constructors_for_name(
                     &ext.ext_type_path,
                     signature,
                     access_path,
+                    ctx,
                 );
                 let cstr_res = ctx.new_generic_constr(ext_type_path, ext.ext_type_params.clone());
                 constructors.insert(
@@ -686,19 +687,19 @@ fn strengthen_view_types(
     source: &Path,
     ctx: &super::context::TypeContext,
 ) {
+    let source = &Arc::new(source.clone());
     for item in sig.iter_mut() {
         match item {
             SignatureItem::SigType(id, decl, _) => {
-                *decl = Arc::new(
-                    super::typecore::strengthen_type_decl_for_module_access_path(
-                        ctx, source, id, decl,
-                    ),
-                );
+                *decl = Arc::new(super::typecore::strengthen_type_decl_with_shared_prefix(
+                    ctx, source, id, decl,
+                ));
             }
             SignatureItem::SigModtype(id, mtd) if mtd.mtd_type.is_none() => {
-                mtd.mtd_type = Some(super::decl::ModuleType::MtyIdent(Path::pdot(
+                mtd.mtd_type = Some(super::decl::ModuleType::MtyIdent(ctx.dotted_from_ident(
                     source.clone(),
-                    id.name(),
+                    *id,
+                    super::path::NOPOS,
                 )));
             }
             _ => {}
@@ -1214,6 +1215,7 @@ impl QualifiedModuleComponents {
                 Arc::new(crate::cmi::persistent_env::build_value_subst_maps(
                     self.signature.as_ref(),
                     self.access_path(),
+                    ctx,
                 ))
             })
             .clone();
@@ -1360,6 +1362,7 @@ impl QualifiedModuleComponents {
         &self,
         name: &str,
         include_ident: bool,
+        ctx: &super::context::TypeContext,
     ) -> Option<Path> {
         let (_, _, md) = self.lookup_module(name)?;
         if !include_ident && !matches!(md.md_type, ModuleType::MtyAlias(..)) {
@@ -1369,6 +1372,7 @@ impl QualifiedModuleComponents {
             &md.md_type,
             &self.signature,
             self.access_path(),
+            ctx,
         )? {
             ModuleType::MtyAlias(_, target) | ModuleType::MtyIdent(target) => Some(target),
             _ => None,
@@ -2034,6 +2038,7 @@ fn build_local_module_components(
             &mut qualified_sig,
             parent_sig,
             parent_access_path,
+            ctx,
         );
     }
     if raw_sig.len() != qualified_sig.len() {

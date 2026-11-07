@@ -193,6 +193,7 @@ pub(crate) struct ThreadTypeStore {
     /// (`DeclLocKind::Store` handles; see `types::decl_loc`).
     decl_locs: super::decl_loc::OwnedDeclLocs,
     decl_loc_owner: u32,
+    path_provenance: RefCell<super::path_provenance::PathProvenance>,
 }
 
 impl ThreadTypeStore {
@@ -233,8 +234,25 @@ impl ThreadTypeStore {
             generation,
             shared: super::shared_store::pool_for(generation),
             decl_locs: Default::default(),
+            path_provenance: Default::default(),
             decl_loc_owner: super::decl_loc::next_table_owner(),
         }
+    }
+
+    pub(crate) fn dotted_from_ident(
+        &self,
+        prefix: Arc<super::Path>,
+        id: crate::ident::Ident,
+        pos: i32,
+    ) -> super::Path {
+        self.path_provenance.borrow_mut().dotted(prefix, id, pos)
+    }
+
+    pub(crate) fn dotted_allocation(
+        &self,
+        path: &super::Path,
+    ) -> Option<super::path_provenance::DottedAllocation> {
+        self.path_provenance.borrow().get(path).cloned()
     }
 
     /// Store handle for a declaration location built into the store.

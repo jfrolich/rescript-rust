@@ -2698,7 +2698,11 @@ pub(crate) fn resolve_module_signature_through_cmi_shared(
             // Without this, types have bare Pident paths that cause
             // incorrect path qualification through resolve_module_lid_impl.
             crate::cmi::persistent_env::substitute_type_paths_in_sig(&sig, module_path, ctx);
-            crate::cmi::persistent_env::qualify_unit_sig_decl_paths_in_place(&mut sig, module_path);
+            crate::cmi::persistent_env::qualify_unit_sig_decl_paths_in_place(
+                &mut sig,
+                module_path,
+                ctx,
+            );
             // Also recursively substitute submodule paths.
             crate::cmi::persistent_env::substitute_submodule_paths(&sig, module_path, ctx);
             Some(Arc::new(sig))
@@ -3242,11 +3246,8 @@ fn strengthen_type_decl_for_module_access_path(
             )
     );
     // `Pdot (p, Ident.name id, nopos)` around the one `p` of the signature.
-    let qualified_type_path = Path::Pdot(
-        module_access_path.clone(),
-        id.name().into(),
-        crate::types::path::NOPOS,
-    );
+    let qualified_type_path =
+        ctx.dotted_from_ident(module_access_path.clone(), *id, crate::types::path::NOPOS);
 
     if keep_manifest {
         let mut strengthened = decl.clone();
@@ -3445,7 +3446,7 @@ fn strengthen_signature_for_module_access_path(
                 SignatureItem::SigTypext(*id, ext.clone(), *ext_status)
             }
             SignatureItem::SigModule(id, md, rec_status) => {
-                let child_path = Path::Pdot(module_access_path.clone(), id.name().into(), pos);
+                let child_path = ctx.dotted_from_ident(module_access_path.clone(), *id, pos);
                 pos += 1;
                 let strengthened_md = strengthen_module_decl_for_module_access_path(
                     ctx,
@@ -3461,9 +3462,9 @@ fn strengthen_signature_for_module_access_path(
             SignatureItem::SigModtype(id, mtd) => {
                 let mut strengthened_mtd = mtd.clone();
                 if mtd.mtd_type.is_none() {
-                    let modtype_path = Path::Pdot(
+                    let modtype_path = ctx.dotted_from_ident(
                         module_access_path.clone(),
-                        id.name().into(),
+                        *id,
                         crate::types::path::NOPOS,
                     );
                     strengthened_mtd.mtd_type =

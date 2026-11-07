@@ -1870,7 +1870,7 @@ impl PersistentEnv {
         // Apply path substitution: rewrite Tconstr paths from internal
         // (e.g., Pident "ref") to qualified (e.g., Pdot(Pident "Pervasives") "ref").
         substitute_type_paths_in_sig(&signature, &module_path, ctx);
-        qualify_unit_sig_decl_paths_in_place(&mut signature, &module_path);
+        qualify_unit_sig_decl_paths_in_place(&mut signature, &module_path, ctx);
 
         // Also recursively substitute paths in sub-module signatures.
         substitute_submodule_paths(&signature, &module_path, ctx);
@@ -3960,14 +3960,20 @@ impl SubstMaps {
     }
 }
 
-fn build_subst_maps(sig_items: &[SignatureItem], module_path: &Path) -> SubstMaps {
+fn build_subst_maps(
+    sig_items: &[SignatureItem],
+    module_path: &Path,
+    ctx: &TypeContext,
+) -> SubstMaps {
     let mut maps = SubstMaps::default();
     maps.protected_module_head = nonpersistent_path_head(module_path);
 
+    let prefix = Arc::new(module_path.clone());
     for item in sig_items {
         match item {
             SignatureItem::SigType(id, _, _) | SignatureItem::SigModtype(id, _) => {
-                let qualified_path = Path::pdot(module_path.clone(), id.name());
+                let qualified_path =
+                    ctx.dotted_from_ident(prefix.clone(), *id, crate::types::path::NOPOS);
                 if id.stamp() != 0 {
                     // OCaml Subst uses identifier identity for non-persistent ids.
                     maps.type_stamp_map.insert(id.stamp(), qualified_path);
@@ -3978,7 +3984,8 @@ fn build_subst_maps(sig_items: &[SignatureItem], module_path: &Path) -> SubstMap
                 }
             }
             SignatureItem::SigModule(id, _, _) => {
-                let qualified_path = Path::pdot(module_path.clone(), id.name());
+                let qualified_path =
+                    ctx.dotted_from_ident(prefix.clone(), *id, crate::types::path::NOPOS);
                 if id.stamp() != 0 {
                     // OCaml Subst uses identifier identity for non-persistent ids.
                     insert_module_stamp_subst(&mut maps.module_stamp_map, id, qualified_path);
@@ -4421,7 +4428,9 @@ pub(crate) fn freshen_functor_component_module_type(
     // forced through env.ml:865-882.
     let mut copied = crate::types::typecore::copy_lookup_module_type_for_subst(module_type, ctx);
     let maps = parent_context
-        .map(|(parent_module_path, parent_sig)| build_subst_maps(parent_sig, parent_module_path))
+        .map(|(parent_module_path, parent_sig)| {
+            build_subst_maps(parent_sig, parent_module_path, ctx)
+        })
         .unwrap_or_default();
     freshen_module_type_bound_idents_with_maps(&mut copied, &maps, ctx);
     copied
@@ -4441,7 +4450,7 @@ pub(crate) fn freshen_component_modtype_declaration_bound_idents(
         // references inside module types (for example Belt_Id.cmp) are rooted
         // at the component access path before lookup observes them.
         *module_type = crate::types::typecore::copy_lookup_module_type_for_subst(module_type, ctx);
-        let maps = build_subst_maps(parent_sig, parent_module_path);
+        let maps = build_subst_maps(parent_sig, parent_module_path, ctx);
         freshen_module_type_bound_idents_with_maps(module_type, &maps, ctx);
     }
 }
@@ -4457,15 +4466,19 @@ pub(crate) fn freshen_component_module_declaration_bound_idents(
     // `Subst.modtype sub md.md_type`, with `sub` built by env.ml:1530.
     // Subst.modtype freshens signature binders at compiler/ml/subst.ml:352-364.
     md.md_type = crate::types::typecore::copy_lookup_module_type_for_subst(&md.md_type, ctx);
-    let maps = build_subst_maps(parent_sig, parent_module_path);
+    let maps = build_subst_maps(parent_sig, parent_module_path, ctx);
     freshen_module_type_bound_idents_with_maps(&mut md.md_type, &maps, ctx);
 }
 
-fn build_subst_maps_for_module(sig_items: &[SignatureItem], module_path: &Path) -> SubstMaps {
+fn build_subst_maps_for_module(
+    sig_items: &[SignatureItem],
+    module_path: &Path,
+    ctx: &TypeContext,
+) -> SubstMaps {
     // OCaml compiler/ml/env.ml:1530-1538 builds substitution maps from the
     // component signature with `prefix_idents`, and compiler/ml/subst.ml:69-95
     // rewrites module paths only through those explicit maps.
-    build_subst_maps(sig_items, module_path)
+    build_subst_maps(sig_items, module_path, ctx)
 }
 
 /// The module type of a component module declaration as forcing its
@@ -4480,6 +4493,7 @@ pub(crate) fn substitute_component_module_type_path(
     module_type: &ModuleType,
     sig_items: &[SignatureItem],
     module_path: &Path,
+    ctx: &TypeContext,
 ) -> Option<ModuleType> {
     let target = match module_type {
         ModuleType::MtyAlias(_, target) | ModuleType::MtyIdent(target) => target,
@@ -4489,13 +4503,18 @@ pub(crate) fn substitute_component_module_type_path(
         return Some(module_type.clone());
     }
     let mut module_type = module_type.clone();
-    let maps = build_subst_maps(sig_items, module_path);
+    let maps = build_subst_maps(sig_items, module_path, ctx);
     substitute_module_type_paths_with_maps(&mut module_type, &maps);
     Some(module_type)
 }
 
-pub fn substitute_sig_path(path: &Path, sig_items: &[SignatureItem], module_path: &Path) -> Path {
-    let maps = build_subst_maps_for_module(sig_items, module_path);
+pub fn substitute_sig_path(
+    path: &Path,
+    sig_items: &[SignatureItem],
+    module_path: &Path,
+    ctx: &TypeContext,
+) -> Path {
+    let maps = build_subst_maps_for_module(sig_items, module_path, ctx);
     substitute_type_path(
         path,
         &maps.type_stamp_map,
@@ -4654,16 +4673,24 @@ fn substitute_sig_decl_paths_in_place_with_maps_rec(
     }
 }
 
-pub fn substitute_sig_decl_paths_in_place(sig_items: &mut [SignatureItem], module_path: &Path) {
-    let maps = build_subst_maps_for_module(sig_items, module_path);
+pub fn substitute_sig_decl_paths_in_place(
+    sig_items: &mut [SignatureItem],
+    module_path: &Path,
+    ctx: &TypeContext,
+) {
+    let maps = build_subst_maps_for_module(sig_items, module_path, ctx);
     substitute_sig_decl_paths_in_place_with_maps(sig_items, &maps);
 }
 
 /// Qualify the declaration paths Rust caches on a loaded unit's signature
 /// (`type_path`, `val_path`, `md_path`), keeping module alias targets raw as
 /// OCaml's `ps_sig` keeps them (see [`AliasTargets::KeepRaw`]).
-pub fn qualify_unit_sig_decl_paths_in_place(sig_items: &mut [SignatureItem], module_path: &Path) {
-    let maps = build_subst_maps_for_module(sig_items, module_path);
+pub fn qualify_unit_sig_decl_paths_in_place(
+    sig_items: &mut [SignatureItem],
+    module_path: &Path,
+    ctx: &TypeContext,
+) {
+    let maps = build_subst_maps_for_module(sig_items, module_path, ctx);
     substitute_sig_decl_paths_in_place_with_maps_rec(sig_items, &maps, true, AliasTargets::KeepRaw);
 }
 
@@ -4874,7 +4901,7 @@ pub fn substitute_type_paths_in_child_sig(
     parent_module_path: &Path,
     ctx: &TypeContext,
 ) {
-    let parent_maps = build_subst_maps(parent_sig, parent_module_path);
+    let parent_maps = build_subst_maps(parent_sig, parent_module_path, ctx);
     substitute_type_paths_in_sig_with_maps(child_sig, &parent_maps, ctx);
     // OCaml compiler/ml/env.ml:1454-1486 builds `prefix_idents` from the real
     // signature binders, and compiler/ml/subst.ml:69-95 rewrites module paths
@@ -4899,8 +4926,9 @@ pub fn substitute_module_alias_paths_in_child_sig(
     child_sig: &mut [SignatureItem],
     parent_sig: &[SignatureItem],
     parent_module_path: &Path,
+    ctx: &TypeContext,
 ) {
-    let maps = build_subst_maps(parent_sig, parent_module_path);
+    let maps = build_subst_maps(parent_sig, parent_module_path, ctx);
     for item in child_sig.iter_mut() {
         if let SignatureItem::SigModule(_, md, _) = item
             && let ModuleType::MtyAlias(_, path) = &mut md.md_type
@@ -5018,7 +5046,7 @@ pub fn substitute_type_paths_in_sig(
     module_path: &Path,
     ctx: &TypeContext,
 ) {
-    let maps = build_subst_maps_for_module(sig_items, module_path);
+    let maps = build_subst_maps_for_module(sig_items, module_path, ctx);
     let type_stamp_map = &maps.type_stamp_map;
     // OCaml compiler/ml/env.ml:1530-1538 builds a component substitution with
     // `prefix_idents`, then compiler/ml/subst.ml:87-95 and subst.ml:303-309
@@ -5032,7 +5060,7 @@ pub fn substitute_type_paths_in_sig(
             SignatureItem::SigType(id, _, _) | SignatureItem::SigModtype(id, _) => {
                 direct_type_name_map
                     .entry(id.name().to_string())
-                    .or_insert_with(|| Path::pdot(module_path.clone(), id.name()));
+                    .or_insert_with(|| maps.type_stamp_map[&id.stamp()].clone());
             }
             _ => {}
         }
@@ -5566,8 +5594,12 @@ pub struct ValueSubstMaps {
     direct_type_name_map: HashMap<String, Path>,
 }
 
-pub fn build_value_subst_maps(sig_items: &[SignatureItem], module_path: &Path) -> ValueSubstMaps {
-    let maps = build_subst_maps_for_module(sig_items, module_path);
+pub fn build_value_subst_maps(
+    sig_items: &[SignatureItem],
+    module_path: &Path,
+    ctx: &TypeContext,
+) -> ValueSubstMaps {
+    let maps = build_subst_maps_for_module(sig_items, module_path, ctx);
     // OCaml compiler/ml/env.ml:1530-1538 builds component substitutions with
     // `prefix_idents`, then compiler/ml/subst.ml:303-309 applies
     // `Subst.value_description`. In-process persistent signatures can preserve
@@ -5579,7 +5611,7 @@ pub fn build_value_subst_maps(sig_items: &[SignatureItem], module_path: &Path) -
             SignatureItem::SigType(id, _, _) | SignatureItem::SigModtype(id, _) => {
                 direct_type_name_map
                     .entry(id.name().to_string())
-                    .or_insert_with(|| Path::pdot(module_path.clone(), id.name()));
+                    .or_insert_with(|| maps.type_stamp_map[&id.stamp()].clone());
             }
             _ => {}
         }
@@ -5596,7 +5628,7 @@ pub fn substitute_type_paths_in_value_from_sig(
     module_path: &Path,
     ctx: &TypeContext,
 ) {
-    let value_maps = build_value_subst_maps(sig_items, module_path);
+    let value_maps = build_value_subst_maps(sig_items, module_path, ctx);
     substitute_type_paths_in_value_with_maps(desc, &value_maps, sig_items, module_path, ctx);
 }
 
@@ -5645,7 +5677,17 @@ pub fn substitute_type_paths_in_value_with_maps(
                 continue;
             };
             let old_path = Path::pdot(alias_source.clone(), id.name());
-            let new_path = Path::pdot(module_path.clone(), id.name());
+            // Reuse the component's one prefix_idents target, including
+            // its allocation, for every selected value description.
+            let new_path = match item {
+                SignatureItem::SigType(..) => direct_type_name_map.get(id.name()).cloned(),
+                SignatureItem::SigModule(..) if id.stamp() != 0 => module_stamp_map
+                    .get(&id.stamp())
+                    .map(|(_, path)| path.clone()),
+                SignatureItem::SigModule(..) => module_name_map.get(id.name()).cloned(),
+                _ => unreachable!(),
+            }
+            .expect("component binder has no prefix substitution");
             if old_path.same(&new_path) {
                 continue;
             }
@@ -6935,7 +6977,7 @@ pub fn substitute_submodule_paths(
     // Match OCaml `prefix_idents`/`Subst` behavior: when descending into a
     // submodule, keep parent substitutions visible so child signatures can
     // reference parent-defined types through qualified paths.
-    let parent_maps = build_subst_maps(sig_items, module_path);
+    let parent_maps = build_subst_maps(sig_items, module_path, ctx);
 
     for item in sig_items {
         if let SignatureItem::SigModule(id, md, _) = item {
@@ -7189,7 +7231,7 @@ fn add_signature_to_env_with_options_inner(
     let mut sig_subst_maps: Option<SubstMaps> = None;
     let mut substitute_path = |path: &Path| {
         let maps = sig_subst_maps
-            .get_or_insert_with(|| build_subst_maps_for_module(sig_items, module_path));
+            .get_or_insert_with(|| build_subst_maps_for_module(sig_items, module_path, ctx));
         substitute_type_path(
             path,
             &maps.type_stamp_map,

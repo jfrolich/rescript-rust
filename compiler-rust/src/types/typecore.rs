@@ -26235,6 +26235,15 @@ pub(crate) fn strengthen_type_decl_for_module_access_path<'a>(
     id: &Ident,
     decl: &crate::types::decl::TypeDeclaration,
 ) -> crate::types::decl::TypeDeclaration {
+    strengthen_type_decl_with_shared_prefix(ctx, &Arc::new(module_access_path.clone()), id, decl)
+}
+
+pub(crate) fn strengthen_type_decl_with_shared_prefix(
+    ctx: &crate::types::context::TypeContext,
+    module_access_path: &Arc<Path>,
+    id: &Ident,
+    decl: &crate::types::decl::TypeDeclaration,
+) -> crate::types::decl::TypeDeclaration {
     // Match OCaml mtype.ml strengthen_sig:
     // keep existing manifests for public types and private record/variant
     // types; otherwise attach a self-manifest alias for this access path.
@@ -26253,7 +26262,8 @@ pub(crate) fn strengthen_type_decl_for_module_access_path<'a>(
     }
 
     let mut strengthened = decl.clone();
-    let manifest_path = Path::pdot(module_access_path.clone(), id.name());
+    let manifest_path =
+        ctx.dotted_from_ident(module_access_path.clone(), *id, crate::types::path::NOPOS);
     let manifest = ctx.new_generic_constr(manifest_path, decl.type_params.clone());
     strengthened.type_manifest = Some(manifest);
     if matches!(decl.type_kind, crate::types::TypeKind::TypeAbstract) {
@@ -26267,6 +26277,7 @@ fn strengthen_sig_for_module_access_path(
     module_access_path: &Path,
     sig_items: &[crate::types::decl::SignatureItem],
 ) -> crate::types::decl::Signature {
+    let module_access_path = &Arc::new(module_access_path.clone());
     let mut strengthened = Vec::with_capacity(sig_items.len());
     let mut runtime_pos = 0i32;
 
@@ -26298,7 +26309,7 @@ fn strengthen_sig_for_module_access_path(
                 // declarations by adding a self manifest at `Pdot(p, id)`.
                 strengthened.push(crate::types::decl::SignatureItem::SigType(
                     *id,
-                    std::sync::Arc::new(strengthen_type_decl_for_module_access_path(
+                    std::sync::Arc::new(strengthen_type_decl_with_shared_prefix(
                         ctx,
                         module_access_path,
                         id,
@@ -26330,11 +26341,7 @@ fn strengthen_sig_for_module_access_path(
                 ) {
                     strengthened_md.md_type = crate::types::decl::ModuleType::MtyAlias(
                         crate::types::decl::AliasPresence::MtaPresent,
-                        Path::pdot_pos(
-                            module_access_path.clone(),
-                            id.name().to_string(),
-                            runtime_pos,
-                        ),
+                        ctx.dotted_from_ident(module_access_path.clone(), *id, runtime_pos),
                     );
                 }
                 strengthened.push(crate::types::decl::SignatureItem::SigModule(
@@ -26350,7 +26357,11 @@ fn strengthen_sig_for_module_access_path(
                 let mut strengthened_decl = decl.clone();
                 if strengthened_decl.mtd_type.is_none() {
                     strengthened_decl.mtd_type = Some(crate::types::decl::ModuleType::MtyIdent(
-                        Path::pdot(module_access_path.clone(), id.name().to_string()),
+                        ctx.dotted_from_ident(
+                            module_access_path.clone(),
+                            *id,
+                            crate::types::path::NOPOS,
+                        ),
                     ));
                 }
                 strengthened.push(crate::types::decl::SignatureItem::SigModtype(
@@ -28047,7 +28058,7 @@ fn qualify_resolved_signature_for_access_path_inner(
         strengthen_sig_module_decls_for_module_access_path(&mut sig, strengthen_path);
     }
     crate::cmi::persistent_env::substitute_type_paths_in_sig(&sig, access_path, ctx);
-    crate::cmi::persistent_env::substitute_sig_decl_paths_in_place(&mut sig, access_path);
+    crate::cmi::persistent_env::substitute_sig_decl_paths_in_place(&mut sig, access_path, ctx);
     if force_generalize_values {
         crate::types::ctype::force_generalize_signature_values(ctx, &sig);
     }
@@ -28433,7 +28444,11 @@ fn build_module_signature_for_path(
                 }
             }
             crate::cmi::persistent_env::substitute_type_paths_in_sig(&sig, &access_path, ctx);
-            crate::cmi::persistent_env::substitute_sig_decl_paths_in_place(&mut sig, &access_path);
+            crate::cmi::persistent_env::substitute_sig_decl_paths_in_place(
+                &mut sig,
+                &access_path,
+                ctx,
+            );
             crate::types::ctype::force_generalize_signature_values(ctx, &sig);
             let flattened_heads = pers_env
                 .as_ref()
@@ -28552,7 +28567,7 @@ pub(crate) fn alias_target_for_module_path<'a>(
                 // `find_module_descr` and the component table; it does not
                 // force env.ml:1568's `comp_modules` thunk just to inspect a
                 // module alias while comparing constructor result paths.
-                components.lookup_module_alias_target(module_name.as_str(), true)
+                components.lookup_module_alias_target(module_name.as_str(), true, ctx)
             })?
         }
         Path::Papply(_, _) => None,
@@ -28589,7 +28604,7 @@ pub(crate) fn module_alias_target_for_path<'a>(
                 // compiler/ml/subst.ml:378-400-style identifier renaming
                 // before OCaml's env.ml:865-882 `find_module` path asks for
                 // the module declaration itself.
-                components.lookup_module_alias_target(module_name.as_str(), false)
+                components.lookup_module_alias_target(module_name.as_str(), false, ctx)
             })?
         }
         Path::Papply(_, _) => None,
@@ -28614,7 +28629,7 @@ fn raw_alias_target_for_module_path<'a>(
                 // rewriting of copied type paths, so inspect the component
                 // declaration without running compiler/ml/subst.ml:378-400
                 // child-signature identifier freshening.
-                components.lookup_module_alias_target(module_name.as_str(), true)
+                components.lookup_module_alias_target(module_name.as_str(), true, ctx)
             })?
         }
         Path::Papply(_, _) => None,

@@ -139,6 +139,8 @@ struct ErrorSize<'a> {
     subst: &'a InclusionSubst,
     words: usize,
     idents: HashSet<IdentKey>,
+    ident_names: HashSet<IdentKey>,
+    dotted_blocks: HashSet<usize>,
     /// Type nodes by copy session (0 for the nodes themselves) and node.
     types: HashSet<(u32, TypeExprRef)>,
     /// Walking the `Subst` copy rather than the declarations themselves.
@@ -219,6 +221,8 @@ impl<'a> ErrorSize<'a> {
             subst,
             words: 0,
             idents: HashSet::default(),
+            ident_names: HashSet::default(),
+            dotted_blocks: HashSet::default(),
             types: HashSet::default(),
             substituted: false,
             session: 0,
@@ -326,12 +330,27 @@ impl<'a> ErrorSize<'a> {
             return Ok(());
         }
         self.block(0, 3)?;
-        self.string()
+        self.ident_name(id)
+    }
+
+    fn ident_name(&mut self, id: &Ident) -> Walk {
+        if self.ident_names.insert(ident_key(id)) {
+            self.string()?;
+        }
+        Ok(())
     }
 
     /// A path the walk reaches as it is (not through a `Subst` copy).
     fn path(&mut self, path: &Path) -> Walk {
         debug_assert!(!self.substituted);
+        if let Some(allocation) = self.ctx.dotted_allocation(path) {
+            if !self.dotted_blocks.insert(allocation.key()) {
+                return Ok(());
+            }
+            self.block(1, 3)?;
+            self.shared_path(&allocation.prefix)?;
+            return self.ident_name(&allocation.name);
+        }
         match path {
             Path::Pident(id) => {
                 self.block(0, 1)?;
@@ -420,6 +439,14 @@ impl<'a> ErrorSize<'a> {
 
     /// A `Pdot` or `Papply` rebuilt around the copies of its module paths.
     fn copied_dotted_path(&mut self, path: &Path) -> Walk {
+        if let Some(allocation) = self.ctx.dotted_allocation(path) {
+            self.block(1, 3)?;
+            self.copied_module_path(
+                &allocation.prefix,
+                Some(Arc::as_ptr(&allocation.prefix) as usize),
+            )?;
+            return self.ident_name(&allocation.name);
+        }
         match path {
             Path::Pident(_) => unreachable!(),
             Path::Pdot(prefix, _, _) => {

@@ -45,6 +45,7 @@ pub mod includemod;
 pub(crate) mod includemod_error_size;
 pub(crate) mod parmatch;
 pub mod path;
+pub(crate) mod path_provenance;
 pub mod predef;
 pub mod printtyp;
 pub mod record_runtime;

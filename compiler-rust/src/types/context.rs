@@ -587,6 +587,7 @@ pub struct TypeContext {
     /// handles.
     decl_locs: super::decl_loc::OwnedDeclLocs,
     decl_loc_owner: u32,
+    path_provenance: RefCell<super::path_provenance::PathProvenance>,
     next_parse_location_scope: Cell<u32>,
 
     /// Parser warnings of the snippets error reports re-parse
@@ -1178,6 +1179,7 @@ impl TypeContext {
             open_slot_events: RefCell::new(Vec::new()),
             usage: RefCell::new(super::usage::UsageTables::default()),
             decl_locs: Default::default(),
+            path_provenance: Default::default(),
             decl_loc_owner: super::decl_loc::next_table_owner(),
             next_parse_location_scope: Cell::new(1),
             reparse_warnings: RefCell::new(Vec::new()),
@@ -2009,7 +2011,7 @@ impl TypeContext {
         self.poison_store_build_for("read:find_module_alias_in_components");
         let key = QualifiedModuleComponentsCacheKey::new(parent_path.clone(), None);
         self.with_qualified_module_components(&key, |components| {
-            components.lookup_module_alias_target(module_name, true)
+            components.lookup_module_alias_target(module_name, true, self)
         })
         .flatten()
     }
@@ -4289,7 +4291,11 @@ impl TypeContext {
         // force requested lets the Rust force point consume the same
         // `Subst.signature` stamps instead of special-casing one module family.
         crate::cmi::persistent_env::substitute_type_paths_in_sig(&sig, &module_path, self);
-        crate::cmi::persistent_env::qualify_unit_sig_decl_paths_in_place(&mut sig, &module_path);
+        crate::cmi::persistent_env::qualify_unit_sig_decl_paths_in_place(
+            &mut sig,
+            &module_path,
+            self,
+        );
         crate::cmi::persistent_env::substitute_submodule_paths(&sig, &module_path, self);
         Some(Arc::new(sig))
     }
@@ -4345,6 +4351,32 @@ impl TypeContext {
             end: source.loc_end.0,
         };
         self.intern_loc_with_identity(loc, identity)
+    }
+
+    /// Construct the exact `Pdot(p, Ident.name id, pos)` allocation while
+    /// keeping Path's compact representation and the source prefix's sharing.
+    pub(crate) fn dotted_from_ident(
+        &self,
+        prefix: Arc<super::Path>,
+        id: crate::ident::Ident,
+        pos: i32,
+    ) -> super::Path {
+        if self.in_store_build() {
+            self.store.dotted_from_ident(prefix, id, pos)
+        } else {
+            self.path_provenance.borrow_mut().dotted(prefix, id, pos)
+        }
+    }
+
+    pub(crate) fn dotted_allocation(
+        &self,
+        path: &super::Path,
+    ) -> Option<super::path_provenance::DottedAllocation> {
+        self.path_provenance
+            .borrow()
+            .get(path)
+            .cloned()
+            .or_else(|| self.store.dotted_allocation(path))
     }
 
     /// A scope for one parser arena or decoded interface. Uses the existing

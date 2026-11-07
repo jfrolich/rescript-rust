@@ -13774,7 +13774,9 @@ fn localize_alias_child_module_sig_paths_in_structure_sig(
                 type_ctx, child_path, sub_sig,
             );
             crate::cmi::persistent_env::substitute_type_paths_in_sig(sub_sig, child_path, type_ctx);
-            crate::cmi::persistent_env::substitute_sig_decl_paths_in_place(sub_sig, child_path);
+            crate::cmi::persistent_env::substitute_sig_decl_paths_in_place(
+                sub_sig, child_path, type_ctx,
+            );
         }
 
         if let ModuleExprDesc::Tmod_structure(sub_structure) = &mod_expr.mod_desc {
