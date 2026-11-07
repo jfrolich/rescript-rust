@@ -59,9 +59,8 @@ use super::js_exp_make::{
 };
 use super::js_stmt_make::{block_finishes_output, block_terminates, strict_single_return_expr};
 use super::lam_coercion::{
-    ExtractedExports, block_declares_initialized_ident,
-    can_reuse_existing_undefined_export_binding, collect_declared_idents, extract_toplevel_exports,
-    insert_rebound_export_before_equivalent_later_binding,
+    ExtractedExports, can_reuse_existing_undefined_export_binding, collect_declared_idents,
+    extract_toplevel_exports, insert_rebound_export_before_equivalent_later_binding,
     keeps_declared_same_name_function_export_alias, max_ident_stamp_in_block,
     max_ident_stamp_in_expression, push_effect_expression, push_s_exp, push_s_if_empty,
     resolve_declared_same_name_self_alias_target, resolve_export_aliases,
@@ -2249,67 +2248,54 @@ impl LambdaCompiler {
         }
     }
 
-    /// lam_compile.ml:521-539 `compile_recursive_lets_aux`: the bindings are
-    /// compiled with `Ext_list.fold_right`, so the last one first, each
-    /// output is `append_output`ed onto the outputs after it (starting from
-    /// `Js_output.dummy`), and the collected placeholder declarations are
-    /// put in front.
+    /// lam_compile.ml:521-539 `compile_recursive_lets`: the group, which
+    /// `Lambda_scc.bind_rec` already split, is put in
+    /// `functions_before_values` order (lam_compile.ml:222-238); then
+    /// `compile_recursive_lets_aux` compiles the bindings with
+    /// `Ext_list.fold_right`, so the last one first, `append_output`s each
+    /// output onto the outputs after it (starting from `Js_output.dummy`),
+    /// and puts the collected placeholder declarations in front.
     fn compile_recursive_bindings_output(&mut self, bindings: &[(Ident, Lambda)]) -> BlockOutput {
-        let dependencies = recursive_binding_dependencies(bindings);
-        let groups = recursive_binding_groups(bindings, &dependencies);
-        let mut output = BlockOutput::dummy();
-        for group in groups.iter().rev() {
-            if let [index] = group.as_slice() {
-                if !dependencies[*index].contains(index) {
-                    let (id, expr) = &bindings[*index];
-                    // OCaml's `compile_recursive_let` (lam_compile.ml:380-486)
-                    // routes every non-self-referencing binding through
-                    // `Declare(Alias, id)`. Using `Strict` here breaks the
-                    // `js_pass_flatten_and_mark_dead` skip for all-deep-constant
-                    // alias bindings (lam_pass_lets_dce.ml + the implicit
-                    // skip behind the Variable arm).
-                    let code = self.compile_let_binding_output(LetKind::Alias, id, expr);
-                    output = code.append(output);
-                    continue;
-                }
-            }
-
-            let recursive_functions = recursive_function_bindings_in_group(bindings, group);
-            let recursive_function_tail_targets = direct_recursive_function_tail_targets_with_group(
-                bindings,
-                group,
-                &recursive_functions,
-            );
-            let recursive_function_ids: AHashSet<_> =
-                recursive_function_tail_targets.keys().cloned().collect();
-            let mut group_output = BlockOutput::dummy();
-            let mut declarations = vec![];
-            for &index in group.iter().rev() {
-                let (id, expr) = &bindings[index];
-                let (code, binding_declarations) = self.compile_recursive_binding(
-                    id,
-                    expr,
-                    bindings,
-                    group,
-                    recursive_function_tail_targets
-                        .get(id)
-                        .map(Vec::as_slice)
-                        .unwrap_or(&[]),
-                    &recursive_functions,
-                    &recursive_function_ids,
-                );
-                group_output = code.append(group_output);
-                // `Ext_list.append declare_ids ids`.
-                let mut later = std::mem::take(&mut declarations);
-                declarations = binding_declarations;
-                declarations.append(&mut later);
-            }
-            if !declarations.is_empty() {
-                group_output = BlockOutput::make(declarations).append(group_output);
-            }
-            output = group_output.append(output);
+        if bindings.is_empty() {
+            return BlockOutput::dummy();
         }
-        output
+        let mut group: Vec<usize> = (0..bindings.len()).collect();
+        sort_recursive_binding_group(bindings, &mut group);
+        let recursive_functions = recursive_function_bindings_in_group(bindings, &group);
+        let recursive_function_tail_targets = direct_recursive_function_tail_targets_with_group(
+            bindings,
+            &group,
+            &recursive_functions,
+        );
+        let recursive_function_ids: AHashSet<_> =
+            recursive_function_tail_targets.keys().cloned().collect();
+        let mut output = BlockOutput::dummy();
+        let mut declarations = vec![];
+        for &index in group.iter().rev() {
+            let (id, expr) = &bindings[index];
+            let (code, binding_declarations) = self.compile_recursive_binding(
+                id,
+                expr,
+                bindings,
+                &group,
+                recursive_function_tail_targets
+                    .get(id)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]),
+                &recursive_functions,
+                &recursive_function_ids,
+            );
+            output = code.append(output);
+            // `Ext_list.append declare_ids ids`.
+            let mut later = std::mem::take(&mut declarations);
+            declarations = binding_declarations;
+            declarations.append(&mut later);
+        }
+        if declarations.is_empty() {
+            output
+        } else {
+            BlockOutput::make(declarations).append(output)
+        }
     }
 
     fn compile_recursive_binding(
@@ -2351,14 +2337,6 @@ impl LambdaCompiler {
             }
         }
 
-        if group.len() == 1 {
-            if let Some(output) =
-                self.try_compile_recursive_singleton_binding_without_placeholder(id, expr)
-            {
-                return (output, vec![]);
-            }
-        }
-
         match expr {
             Lambda::Lprim(info)
                 if matches!(info.primitive, Primitive::Pmakeblock(_, _))
@@ -2369,8 +2347,10 @@ impl LambdaCompiler {
             {
                 // lam_compile.ml:429-431: `compile_lambda` under
                 // `Declare (Alias, id)`.
-                let compiled = self.compile_expr(expr);
-                (declare_compiled(LetKind::Alias, id, compiled), vec![])
+                (
+                    self.compile_let_binding_output(LetKind::Alias, id, expr),
+                    vec![],
+                )
             }
             Lambda::Lprim(info) if matches!(info.primitive, Primitive::Pmakeblock(_, _)) => {
                 if let Some(effects) =
@@ -2407,26 +2387,11 @@ impl LambdaCompiler {
                 // under `Declare (Alias, id)` (lam_compile.ml:497-519): the
                 // value's prelude precedes a normal declaration, and a
                 // finished value keeps no declaration.
-                let compiled = self.compile_expr(expr);
-                (declare_compiled(LetKind::Alias, id, compiled), vec![])
+                (
+                    self.compile_let_binding_output(LetKind::Alias, id, expr),
+                    vec![],
+                )
             }
-        }
-    }
-
-    fn try_compile_recursive_singleton_binding_without_placeholder(
-        &mut self,
-        id: &Ident,
-        expr: &Lambda,
-    ) -> Option<BlockOutput> {
-        if !matches!(expr, Lambda::Llet(..)) {
-            return None;
-        }
-
-        let output = self.compile_let_binding_output(LetKind::Alias, id, expr);
-        if block_declares_initialized_ident(&output.block, id) {
-            Some(output)
-        } else {
-            None
         }
     }
 
@@ -6727,97 +6692,6 @@ fn recursive_function_binding_value(expr: &Lambda) -> Option<LFunction> {
     }
 }
 
-fn recursive_binding_dependencies(bindings: &[(Ident, Lambda)]) -> Vec<Vec<usize>> {
-    let index_by_id = bindings
-        .iter()
-        .enumerate()
-        .map(|(index, (id, _))| (*id, index))
-        .collect::<AHashMap<_, _>>();
-
-    // OCaml's `Lam_scc.preprocess_deps` builds `node_vec` with
-    // `Array.make ... (Vec_int.empty ())`, so every slot aliases the same
-    // mutable vector (`compiler/core/lam_scc.ml:73-89`). Each binding's hits
-    // are therefore appended into one shared adjacency list before
-    // `Ext_scc.graph` consumes it (`compiler/ext/ext_scc.ml:39-96`).
-    let mut shared_dependencies = Vec::new();
-    for (_, expr) in bindings {
-        let mut dependencies = free_variables(expr)
-            .into_iter()
-            .filter_map(|id| index_by_id.get(&id).copied())
-            .collect::<Vec<_>>();
-        dependencies.sort_unstable();
-        dependencies.dedup();
-        shared_dependencies.extend(dependencies);
-    }
-
-    vec![shared_dependencies; bindings.len()]
-}
-
-fn strongly_connected_binding_components(deps: &[Vec<usize>]) -> Vec<Vec<usize>> {
-    struct TarjanState {
-        index: usize,
-        stack: Vec<usize>,
-        on_stack: Vec<bool>,
-        indices: Vec<Option<usize>>,
-        lowlink: Vec<usize>,
-        components: Vec<Vec<usize>>,
-    }
-
-    fn strong_connect(node: usize, deps: &[Vec<usize>], state: &mut TarjanState) {
-        state.indices[node] = Some(state.index);
-        state.lowlink[node] = state.index;
-        state.index += 1;
-        state.stack.push(node);
-        state.on_stack[node] = true;
-
-        for &dep in &deps[node] {
-            if state.indices[dep].is_none() {
-                strong_connect(dep, deps, state);
-                state.lowlink[node] = state.lowlink[node].min(state.lowlink[dep]);
-            } else if state.on_stack[dep] {
-                state.lowlink[node] =
-                    state.lowlink[node].min(state.indices[dep].expect("visited node"));
-            }
-        }
-
-        if state.lowlink[node] == state.indices[node].expect("visited node") {
-            let mut component = Vec::new();
-            loop {
-                let current = state.stack.pop().expect("tarjan stack");
-                state.on_stack[current] = false;
-                component.push(current);
-                if current == node {
-                    break;
-                }
-            }
-            // OCaml's `Ext_scc.graph` slices the stack from the SCC root to
-            // the top (`compiler/ext/ext_scc.ml:80-92`), preserving stack
-            // order inside the component. Rust pops from the top, so reverse
-            // the popped list before later recursive-let compilation.
-            component.reverse();
-            state.components.push(component);
-        }
-    }
-
-    let len = deps.len();
-    let mut state = TarjanState {
-        index: 1,
-        stack: Vec::new(),
-        on_stack: vec![false; len],
-        indices: vec![None; len],
-        lowlink: vec![0; len],
-        components: Vec::new(),
-    };
-
-    for node in 0..len {
-        if state.indices[node].is_none() {
-            strong_connect(node, deps, &mut state);
-        }
-    }
-
-    state.components
-}
-
 fn binding_is_ocaml_scc_function(bindings: &[(Ident, Lambda)], index: usize) -> bool {
     matches!(bindings[index].1, Lambda::Lfunction(_))
 }
@@ -6833,26 +6707,6 @@ fn sort_recursive_binding_group(bindings: &[(Ident, Lambda)], group: &mut [usize
         return;
     }
     group.sort_by_key(|index| !binding_is_ocaml_scc_function(bindings, *index));
-}
-
-fn recursive_binding_groups(
-    bindings: &[(Ident, Lambda)],
-    dependencies: &[Vec<usize>],
-) -> Vec<Vec<usize>> {
-    match bindings.len() {
-        0 => vec![],
-        1 => vec![vec![0]],
-        _ => {
-            let mut groups = strongly_connected_binding_components(dependencies);
-            if groups.len() <= 1 {
-                groups = vec![(0..bindings.len()).collect()];
-            }
-            for group in &mut groups {
-                sort_recursive_binding_group(bindings, group);
-            }
-            groups
-        }
-    }
 }
 
 fn recursive_function_bindings(bindings: &[(Ident, Lambda)]) -> AHashMap<Ident, LFunction> {

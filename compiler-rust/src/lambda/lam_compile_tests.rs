@@ -230,83 +230,6 @@ fn test_unit_function(ident: Ident) -> (Ident, Lambda) {
     )
 }
 
-fn recursive_group_names(bindings: &[(Ident, Lambda)]) -> Vec<Vec<String>> {
-    let dependencies = recursive_binding_dependencies(bindings);
-    recursive_binding_groups(bindings, &dependencies)
-        .into_iter()
-        .map(|group| {
-            group
-                .into_iter()
-                .map(|index| bindings[index].0.name().to_string())
-                .collect()
-        })
-        .collect()
-}
-
-#[test]
-fn recursive_binding_groups_keep_earlier_caller_before_later_self_recursive_helper() {
-    let copy_buckets = Ident::create_local("copyBuckets");
-    let copy_bucket = Ident::create_local("copyBucket");
-    let copy_aux = Ident::create_local("copyAuxCont");
-    let (copy_buckets, copy_buckets_lam) = test_function_calling(copy_buckets, &copy_bucket);
-    let (copy_bucket, copy_bucket_lam) = test_function_calling(copy_bucket, &copy_aux);
-    let (copy_aux, copy_aux_lam) = test_function_calling(copy_aux, &copy_aux);
-
-    let bindings = vec![
-        (copy_buckets, copy_buckets_lam),
-        (copy_bucket, copy_bucket_lam),
-        (copy_aux, copy_aux_lam),
-    ];
-
-    assert_eq!(
-        recursive_group_names(&bindings),
-        vec![
-            vec!["copyBucket".to_string(), "copyAuxCont".to_string()],
-            vec!["copyBuckets".to_string()],
-        ]
-    );
-}
-
-#[test]
-fn recursive_binding_groups_keep_earlier_self_recursive_helper_before_later_caller() {
-    let copy_buckets = Ident::create_local("copyBuckets");
-    let copy_bucket = Ident::create_local("copyBucket");
-    let copy_aux = Ident::create_local("copyAuxCont");
-    let (copy_aux, copy_aux_lam) = test_function_calling(copy_aux, &copy_aux);
-    let (copy_buckets, copy_buckets_lam) = test_function_calling(copy_buckets, &copy_bucket);
-    let (copy_bucket, copy_bucket_lam) = test_function_calling(copy_bucket, &copy_aux);
-
-    let bindings = vec![
-        (copy_aux, copy_aux_lam),
-        (copy_buckets, copy_buckets_lam),
-        (copy_bucket, copy_bucket_lam),
-    ];
-
-    assert_eq!(
-        recursive_group_names(&bindings),
-        vec![
-            vec!["copyAuxCont".to_string(), "copyBucket".to_string()],
-            vec!["copyBuckets".to_string()],
-        ]
-    );
-}
-
-#[test]
-fn recursive_binding_groups_share_dependency_vector_like_ocaml() {
-    let timer_expired = Ident::create_local("timerExpired");
-    let call = Ident::create_local("call");
-    let (timer_expired, timer_expired_lam) =
-        test_function_calling_two(timer_expired, &call, &timer_expired);
-    let (call, call_lam) = test_unit_function(call);
-
-    let bindings = vec![(timer_expired, timer_expired_lam), (call, call_lam)];
-
-    assert_eq!(
-        recursive_group_names(&bindings),
-        vec![vec!["timerExpired".to_string(), "call".to_string()]]
-    );
-}
-
 fn console_log_effect(arg: Lambda) -> Lambda {
     Lambda::seq(
         Lambda::prim(
@@ -8963,4 +8886,34 @@ fn assign_of_a_raise_keeps_its_assignment() {
     };
     assert!(matches!(throw.desc, StatementDesc::Throw(_)));
     assert!(matches!(assign.desc, StatementDesc::Exp(_)));
+}
+
+/// lam_compile.ml:222-238, 535-539: a `let rec` group is compiled as
+/// `Lambda_scc.bind_rec` left it, with functions before values, and is not
+/// split again.
+#[test]
+fn recursive_lets_put_functions_before_values_without_resplitting() {
+    let value = Ident::create_local("value");
+    let first = Ident::create_local("first");
+    let second = Ident::create_local("second");
+    let (first, first_lam) = test_function_calling(first, &first);
+    let (second, second_lam) = test_function_calling(second, &second);
+    let lam = Lambda::Lletrec(
+        vec![
+            (value, Lambda::const_(Constant::int(3))),
+            (second, second_lam),
+            (first, first_lam),
+        ],
+        Box::new(Lambda::const_(Constant::int(0))),
+    );
+    let output = LambdaCompiler::new().compile_effect_block_output(&lam);
+    let names: Vec<_> = output
+        .block
+        .iter()
+        .filter_map(|stmt| match &stmt.desc {
+            StatementDesc::Variable(declaration) => Some(declaration.ident.name().to_string()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(names, ["second", "first", "value"]);
 }
