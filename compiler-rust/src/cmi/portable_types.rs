@@ -79,8 +79,19 @@ pub struct PortableIdentities {
     signature_idents: Vec<u32>,
     /// Name-string allocation class, indexed by identifier block number.
     ident_names: Vec<u32>,
+    /// Path allocations in postorder, graph paths then signature paths.
+    paths: Vec<PortablePathAllocation>,
     /// The `lbl` blocks of labelled arrow arguments, in entry order.
     labels: Vec<u32>,
+}
+
+/// `Subst` rebuilds dotted/application blocks, but retains Pident prefixes
+/// and suffix strings (compiler/ml/subst.ml:69-100). Unknown evidence stays
+/// unknown; interned text is never an allocation key.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct PortablePathAllocation {
+    block: u32,
+    name: u32,
 }
 
 impl PortableIdentities {
@@ -999,6 +1010,47 @@ fn map_signature_identifiers(
     }
     walk(sig, f, &mut Prefixes::new());
 }
+/// Visit only path roots outside the type graph. The callback owns recursive
+/// path traversal; declaration identifiers are handled by the identifier pass.
+fn map_signature_paths(sig: &mut [SignatureItem], f: &mut dyn FnMut(&Path) -> Path) {
+    fn optional(path: &mut Option<Path>, f: &mut dyn FnMut(&Path) -> Path) {
+        if let Some(p) = path {
+            *p = f(p);
+        }
+    }
+    fn module_type(mty: &mut ModuleType, f: &mut dyn FnMut(&Path) -> Path) {
+        match mty {
+            ModuleType::MtyIdent(p) | ModuleType::MtyAlias(_, p) => *p = f(p),
+            ModuleType::MtySignature(sig) => map_signature_paths(&mut Arc::make_mut(sig)[..], f),
+            ModuleType::MtyFunctor {
+                param_type, result, ..
+            } => {
+                if let Some(param_type) = param_type {
+                    module_type(param_type, f);
+                }
+                module_type(result, f);
+            }
+        }
+    }
+    for item in sig {
+        match item {
+            SignatureItem::SigValue(_, vd) => optional(&mut vd.val_path, f),
+            SignatureItem::SigType(_, td, _) => optional(&mut Arc::make_mut(td).type_path, f),
+            SignatureItem::SigTypext(_, ext, _) => ext.ext_type_path = f(&ext.ext_type_path),
+            SignatureItem::SigModule(_, md, _) => {
+                optional(&mut md.md_path, f);
+                module_type(&mut md.md_type, f);
+            }
+            SignatureItem::SigModtype(_, mtd) => {
+                if let Some(mty) = &mut mtd.mtd_type {
+                    module_type(mty, f);
+                }
+            }
+            SignatureItem::SigClass | SignatureItem::SigClassType => {}
+        }
+    }
+}
+
 /// The blocks of the saved copy of `nodes` (see [`PortableIdentities`]),
 /// numbered in entry order from the identities of the source graph.
 #[cfg(test)]
@@ -1081,11 +1133,61 @@ fn saved_signature_identities(
         }
     }
 
+    fn save_path(
+        path: &Path,
+        owner: Option<usize>,
+        ctx: &TypeContext,
+        prefixes: &mut Numbering<usize>,
+        names: &mut Numbering<crate::types::path_provenance::NameAllocation>,
+        out: &mut Vec<PortablePathAllocation>,
+    ) {
+        let mut evidence = PortablePathAllocation {
+            block: PortableIdentities::NONE,
+            name: PortableIdentities::NONE,
+        };
+        match path {
+            Path::Pident(_) => {
+                if let Some(owner) = owner {
+                    evidence.block = prefixes.number(owner);
+                }
+            }
+            Path::Pdot(prefix, _, _) => {
+                let allocation = ctx.dotted_allocation(path);
+                let prefix = allocation.as_ref().map_or(prefix, |a| &a.prefix);
+                save_path(
+                    prefix,
+                    Some(Arc::as_ptr(prefix) as usize),
+                    ctx,
+                    prefixes,
+                    names,
+                    out,
+                );
+                if let Some(allocation) = allocation {
+                    evidence.name = names.number(allocation.name);
+                }
+            }
+            Path::Papply(functor, argument) => {
+                for prefix in [functor, argument] {
+                    save_path(
+                        prefix,
+                        Some(Arc::as_ptr(prefix) as usize),
+                        ctx,
+                        prefixes,
+                        names,
+                        out,
+                    );
+                }
+            }
+        }
+        out.push(evidence);
+    }
+
     let mut ids = PortableIdentities::default();
     let mut paths = Numbering::<Block>::default();
     let mut vars = Numbering::<Block>::default();
     let mut idents = Numbering::default();
     let mut names = Numbering::default();
+    let mut prefixes = Numbering::default();
     let mut labels = Numbering::<usize>::default();
     for &node in nodes {
         let desc = ctx.get_desc(node);
@@ -1094,6 +1196,7 @@ fn saved_signature_identities(
                 path, path_block, ..
             } => {
                 push_idents(path, ctx, &mut idents, &mut names, &mut ids);
+                save_path(path, None, ctx, &mut prefixes, &mut names, &mut ids.paths);
                 // `type_path` keeps a `Pident` (subst.ml:87-94).
                 match (path, path_block.owner()) {
                     (Path::Pident(_), PathBlockOwner::Own) => paths.number(Block::Node(node)),
@@ -1127,11 +1230,13 @@ fn saved_signature_identities(
             }
             TypeDesc::Tpackage { path, .. } => {
                 push_idents(path, ctx, &mut idents, &mut names, &mut ids);
+                save_path(path, None, ctx, &mut prefixes, &mut names, &mut ids.paths);
                 PortableIdentities::NONE
             }
             TypeDesc::Tvariant(row) => {
                 if let Some((path, _)) = &row.row_name {
                     push_idents(path, ctx, &mut idents, &mut names, &mut ids);
+                    save_path(path, None, ctx, &mut prefixes, &mut names, &mut ids.paths);
                 }
                 PortableIdentities::NONE
             }
@@ -1143,6 +1248,12 @@ fn saved_signature_identities(
         let number = number_ident(id, ctx, &mut idents, &mut names, &mut ids.ident_names);
         ids.signature_idents.push(number);
     });
+    // Cloning the signature leaves all source path carriers retained. The
+    // callback observes them without rebuilding any prefix allocations.
+    map_signature_paths(&mut sig.clone(), &mut |path| {
+        save_path(path, None, ctx, &mut prefixes, &mut names, &mut ids.paths);
+        path.clone()
+    });
     ids
 }
 
@@ -1153,6 +1264,8 @@ struct ImportedIdentities<'g> {
     ids: &'g PortableIdentities,
     name_scope: u64,
     idents: usize,
+    paths: usize,
+    prefixes: AHashMap<u32, Arc<Path>>,
     labels: usize,
     path_blocks: AHashMap<u32, TypeExprRef>,
     var_descs: AHashMap<u32, TypeExprRef>,
@@ -1170,6 +1283,8 @@ impl<'g> ImportedIdentities<'g> {
                 (crate::types::decl_loc::next_table_owner() as u64) << 32
             },
             idents: 0,
+            paths: 0,
+            prefixes: AHashMap::new(),
             labels: 0,
             path_blocks: AHashMap::new(),
             var_descs: AHashMap::new(),
@@ -1253,25 +1368,60 @@ impl<'g> ImportedIdentities<'g> {
         id
     }
 
-    /// `path` with the origins of its saved identifiers.
-    fn path<S: TypeNodeSink>(&mut self, path: &Path, sink: &S) -> Path {
-        if !self.present() {
-            return path.clone();
+    /// Remap names and retained Pident prefixes. Every dotted/application
+    /// occurrence is fresh, as in the saved Subst copy, not source deduplication.
+    fn shared_path<S: TypeNodeSink>(&mut self, path: &Path, sink: &S, graph: bool) -> Arc<Path> {
+        let mapped = self.mapped_path(path, sink, graph);
+        let evidence = &self.ids.paths[self.paths - 1];
+        if evidence.block != PortableIdentities::NONE {
+            self.prefixes
+                .entry(evidence.block)
+                .or_insert_with(|| Arc::new(mapped))
+                .clone()
+        } else {
+            Arc::new(mapped)
         }
-        match path {
-            Path::Pident(id) => {
+    }
+
+    fn mapped_path<S: TypeNodeSink>(&mut self, path: &Path, sink: &S, graph: bool) -> Path {
+        let mapped = match path {
+            Path::Pident(id) if graph => {
                 let number = self.ids.path_idents[self.idents];
                 self.idents += 1;
                 Path::Pident(self.ident(number, id, sink))
             }
+            Path::Pident(_) => path.clone(),
             Path::Pdot(prefix, name, pos) => {
-                Path::Pdot(Arc::new(self.path(prefix, sink)), *name, *pos)
+                let prefix = self.shared_path(prefix, sink, graph);
+                let evidence = &self.ids.paths[self.paths];
+                if evidence.name != PortableIdentities::NONE {
+                    sink.dotted_with_name(
+                        prefix,
+                        *name,
+                        crate::types::path_provenance::NameAllocation::Source {
+                            scope: self.name_scope,
+                            string: evidence.name,
+                        },
+                        *pos,
+                    )
+                } else {
+                    Path::Pdot(prefix, *name, *pos)
+                }
             }
             Path::Papply(functor, argument) => {
-                let functor = Arc::new(self.path(functor, sink));
-                Path::Papply(functor, Arc::new(self.path(argument, sink)))
+                let functor = self.shared_path(functor, sink, graph);
+                Path::Papply(functor, self.shared_path(argument, sink, graph))
             }
+        };
+        self.paths += 1;
+        mapped
+    }
+
+    fn path<S: TypeNodeSink>(&mut self, path: &Path, sink: &S) -> Path {
+        if !self.present() {
+            return path.clone();
         }
+        self.mapped_path(path, sink, true)
     }
 
     fn signature<S: TypeNodeSink>(&mut self, sig: &mut Signature, sink: &S) {
@@ -1289,6 +1439,12 @@ impl<'g> ImportedIdentities<'g> {
         assert!(
             numbers.next().is_none(),
             "unused signature identifier identities"
+        );
+        map_signature_paths(sig, &mut |path| self.mapped_path(path, sink, false));
+        assert_eq!(
+            self.paths,
+            self.ids.paths.len(),
+            "unused saved path evidence"
         );
     }
 
@@ -1741,6 +1897,13 @@ pub(crate) trait TypeNodeSink {
     fn longident_name(&self, name: &str) -> crate::intern::StrIdx;
     /// The origin of an identifier block of an imported graph.
     fn fresh_ident_origin(&self) -> crate::ident::IdentOrigin;
+    fn dotted_with_name(
+        &self,
+        prefix: Arc<Path>,
+        text: crate::name::Name,
+        name: crate::types::path_provenance::NameAllocation,
+        pos: i32,
+    ) -> Path;
     fn record_ident_name(
         &self,
         id: &crate::ident::Ident,
@@ -1766,6 +1929,16 @@ fn internalize_mutabilities<S: TypeNodeSink>(
 }
 
 impl TypeNodeSink for TypeContext {
+    fn dotted_with_name(
+        &self,
+        prefix: Arc<Path>,
+        text: crate::name::Name,
+        name: crate::types::path_provenance::NameAllocation,
+        pos: i32,
+    ) -> Path {
+        TypeContext::dotted_with_name(self, prefix, text, name, pos)
+    }
+
     fn record_ident_name(
         &self,
         id: &crate::ident::Ident,
@@ -1792,6 +1965,16 @@ impl TypeNodeSink for TypeContext {
 }
 
 impl TypeNodeSink for ThreadTypeStore {
+    fn dotted_with_name(
+        &self,
+        prefix: Arc<Path>,
+        text: crate::name::Name,
+        name: crate::types::path_provenance::NameAllocation,
+        pos: i32,
+    ) -> Path {
+        ThreadTypeStore::dotted_with_name(self, prefix, text, name, pos)
+    }
+
     fn record_ident_name(
         &self,
         id: &crate::ident::Ident,
@@ -1958,6 +2141,16 @@ struct SharedSink<'a> {
 }
 
 impl TypeNodeSink for SharedSink<'_> {
+    fn dotted_with_name(
+        &self,
+        prefix: Arc<Path>,
+        text: crate::name::Name,
+        name: crate::types::path_provenance::NameAllocation,
+        pos: i32,
+    ) -> Path {
+        self.pool.dotted_with_name(prefix, text, name, pos)
+    }
+
     fn record_ident_name(
         &self,
         id: &crate::ident::Ident,
@@ -2730,6 +2923,137 @@ mod identity_tests {
         assert_eq!(std::mem::size_of::<Path>(), 24);
         assert_eq!(std::mem::size_of::<TypeDesc>(), 64);
         assert_eq!(std::mem::size_of::<crate::types::TypeExpr>(), 80);
+    }
+
+    #[test]
+    fn dotted_allocations_survive_saved_cold_warm_store_and_shared_imports() {
+        let save_sig = |ctx: &TypeContext, sig: &Signature| {
+            serialize_signature(sig, ctx, None, &mut crate::fast_hash::AHashSet::new())
+        };
+        let saved = {
+            let source = TypeContext::new(Arc::new(IdGenerator::new()));
+            let mut arena = ParseArena::new();
+            let name = arena.push_string("same");
+            let equal = arena.push_string("same");
+            let id = source.create_ast_ident(&arena, name);
+            let other = source.create_ast_ident(&arena, equal);
+            let prefix = Arc::new(Path::Pident(id));
+            let a = source.dotted_from_ident(prefix.clone(), id, 0);
+            let b = source.dotted_from_ident(prefix, other, 0);
+            let c = source.dotted_from_ident(Arc::new(Path::Pident(id)), id, 0);
+            let nested = source.dotted_from_ident(Arc::new(a.clone()), id, 0);
+            let sig: Signature = [a.clone(), a, b, c]
+                .into_iter()
+                .map(|path| {
+                    SignatureItem::SigValue(
+                        id,
+                        ValueDescription {
+                            val_type: source.new_generic_constr(path, vec![]),
+                            val_kind: ValueKind::ValReg,
+                            val_loc: DeclLoc::default(),
+                            val_attributes: vec![],
+                            val_path: Some(nested.clone()),
+                        },
+                    )
+                })
+                .collect::<Vec<_>>()
+                .into();
+            save_sig(&source, &sig)
+        };
+        let verify = |ctx: &TypeContext, sig: &Signature| {
+            let mut dots = Vec::new();
+            let mut nested_dots = Vec::new();
+            for item in sig.iter() {
+                let SignatureItem::SigValue(id, value) = item else {
+                    panic!("value")
+                };
+                let (path, _) = path_of(ctx, value.val_type);
+                let dot = ctx.dotted_allocation(&path).expect("graph dotted evidence");
+                let nested = ctx
+                    .dotted_allocation(value.val_path.as_ref().unwrap())
+                    .expect("signature dotted evidence");
+                let inner = ctx
+                    .dotted_allocation(&nested.prefix)
+                    .expect("nested dotted evidence");
+                assert_eq!(nested.name, ctx.ident_name_allocation(id));
+                assert_eq!(inner.name, nested.name);
+                assert_ne!(inner.key(), dot.key());
+                nested_dots.push((nested, inner));
+                dots.push(dot);
+            }
+            for (i, dot) in dots.iter().enumerate() {
+                for other in &dots[i + 1..] {
+                    assert_ne!(dot.key(), other.key());
+                }
+            }
+            assert!(Arc::ptr_eq(&dots[0].prefix, &dots[1].prefix));
+            assert!(Arc::ptr_eq(&dots[0].prefix, &dots[2].prefix));
+            assert!(!Arc::ptr_eq(&dots[0].prefix, &dots[3].prefix));
+            assert_eq!(dots[0].name, dots[1].name);
+            assert_eq!(dots[0].name, dots[3].name);
+            assert_ne!(dots[0].name, dots[2].name);
+            for (i, (outer, inner)) in nested_dots.iter().enumerate() {
+                assert!(Arc::ptr_eq(&dots[0].prefix, &inner.prefix));
+                assert_eq!(dots[0].name, inner.name);
+                for (next_outer, next_inner) in &nested_dots[i + 1..] {
+                    assert_ne!(outer.key(), next_outer.key());
+                    assert_ne!(inner.key(), next_inner.key());
+                }
+            }
+            dots[0].name
+        };
+        let target = TypeContext::new(Arc::new(IdGenerator::new()));
+        let locs = target.import_decl_locs(std::iter::empty(), &|file| file);
+        let decoded = crate::binser::Encoded::encode(&saved).decode();
+        let warm = internalize_signature(&saved.0, &saved.1, &locs, &target);
+        let cold = internalize_signature(&decoded.0, &decoded.1, &locs, &target);
+        assert_ne!(verify(&target, &warm), verify(&target, &cold));
+        let workers: Vec<_> = (0..2)
+            .map(|_| TypeContext::new(Arc::new(IdGenerator::new())))
+            .collect();
+        let mut names = Vec::new();
+        for worker in &workers {
+            let store = worker.thread_store();
+            let locs = store.import_decl_locs(std::iter::empty(), &|file| file);
+            let imported = internalize_signature_into_store(&saved.0, &saved.1, &locs, store);
+            names.push(verify(worker, &imported));
+            let again = save_sig(worker, &imported);
+            let imported = internalize_signature(
+                &again.0,
+                &again.1,
+                &target.import_decl_locs(std::iter::empty(), &|file| file),
+                &target,
+            );
+            names.push(verify(&target, &imported));
+        }
+        for (i, a) in names.iter().enumerate() {
+            for b in &names[i + 1..] {
+                assert_ne!(a, b);
+            }
+        }
+        let intern = |name: &str| target.intern_cmi_longident_name(name);
+        let files = FileRemap::new(&[], &intern);
+        let shared = internalize_signature_into_shared(
+            &saved.0,
+            &saved.1,
+            &saved.2,
+            &files,
+            target.thread_store().shared_pool(),
+        )
+        .unwrap();
+        let shared_name = verify(&target, &shared);
+        assert_ne!(shared_name, verify(&target, &warm));
+        let again = save_sig(&target, &shared);
+        let imported = internalize_signature(&again.0, &again.1, &locs, &target);
+        assert_ne!(shared_name, verify(&target, &imported));
+        let digest = |value: &(Signature, PortableTypeGraph, DeclLocTable)| {
+            let mut hash = std::collections::hash_map::DefaultHasher::new();
+            crate::cmi::digest_ser::Canonical::new(&mut hash).hash(value);
+            std::hash::Hasher::finish(&hash)
+        };
+        let mut without = saved.clone();
+        without.1.identities.paths.clear();
+        assert_eq!(digest(&saved), digest(&without));
     }
 
     #[test]

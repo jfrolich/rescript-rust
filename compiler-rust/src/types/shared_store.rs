@@ -129,17 +129,45 @@ pub(crate) struct SharedTypePool {
     next_longident_idx: AtomicU32,
     /// The next origin of an identifier block of a published graph.
     next_ident_origin: AtomicU32,
-    name_provenance: RwLock<super::path_provenance::PathProvenance>,
+    path_provenance: RwLock<super::path_provenance::PathProvenance>,
 }
 
 impl SharedTypePool {
+    pub(crate) fn dotted_with_name(
+        &self,
+        prefix: Arc<super::Path>,
+        text: crate::name::Name,
+        name: super::path_provenance::NameAllocation,
+        pos: i32,
+    ) -> super::Path {
+        self.path_provenance
+            .write()
+            .unwrap()
+            .dotted(prefix, text, name, pos)
+    }
+
+    pub(crate) fn dotted_allocation(
+        &self,
+        path: &super::Path,
+    ) -> Option<super::path_provenance::DottedAllocation> {
+        // Published paths contain shared-origin identifiers. Ordinary local
+        // paths need no read lock on the pool's cold provenance table.
+        if path
+            .head_opt()
+            .is_some_and(|id| !crate::ident::IdentOrigin::SHARED.contains(&id.origin().get()))
+        {
+            return None;
+        }
+        self.path_provenance.read().unwrap().get(path).cloned()
+    }
+
     /// Cold allocation evidence, published before a signature becomes visible.
     pub(crate) fn record_ident_name(
         &self,
         id: &crate::ident::Ident,
         allocation: super::path_provenance::NameAllocation,
     ) {
-        self.name_provenance
+        self.path_provenance
             .write()
             .unwrap()
             .record_name(id, allocation);
@@ -152,7 +180,7 @@ impl SharedTypePool {
         if !crate::ident::IdentOrigin::SHARED.contains(&id.origin().get()) {
             return None;
         }
-        self.name_provenance.read().unwrap().name(id)
+        self.path_provenance.read().unwrap().name(id)
     }
 
     /// An identifier origin for a graph being published.
@@ -182,7 +210,7 @@ impl SharedTypePool {
             longident_names: RwLock::new(HashMap::new()),
             next_longident_idx: AtomicU32::new(SHARED_LONGIDENT_IDX_BASE),
             next_ident_origin: AtomicU32::new(0),
-            name_provenance: Default::default(),
+            path_provenance: Default::default(),
         }
     }
 

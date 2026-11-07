@@ -273,7 +273,11 @@ impl ThreadTypeStore {
         &self,
         path: &super::Path,
     ) -> Option<super::path_provenance::DottedAllocation> {
-        self.path_provenance.borrow().get(path).cloned()
+        self.path_provenance
+            .borrow()
+            .get(path)
+            .cloned()
+            .or_else(|| self.shared.dotted_allocation(path))
     }
 
     /// Store handle for a declaration location built into the store.
