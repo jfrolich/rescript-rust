@@ -12,7 +12,33 @@ use crate::types::typedtree::{
     TypedSignatureItemDesc,
 };
 
-type InProcessTypeDeclarations = crate::gentype::code_item::TypeDeclarations;
+/// One typed artifact's GenType type declarations, or the report of the
+/// exception their translation raised. OCaml translates them only when an
+/// importing module's output needs them (EmitJs.ml:437-453), so an invalid
+/// string escape (Ast_payload.ml:39-51) in them fails that importer's
+/// compile, not the declaring module's.
+type InProcessTypeDeclarations = Result<crate::gentype::code_item::TypeDeclarations, String>;
+
+/// Why GenType fails a compile: an I/O error, or the report of an exception
+/// OCaml GenType leaves uncaught, so bsc fails with it (an invalid string
+/// escape in an annotation payload, Ast_payload.ml:39-51).
+#[derive(Debug)]
+pub enum Error {
+    /// Reading or writing the generated file failed.
+    Io(std::io::Error),
+    /// The compiler error report of the exception GenType raised.
+    Raised(String),
+}
+
+impl From<std::io::Error> for Error {
+    fn from(error: std::io::Error) -> Self {
+        Error::Io(error)
+    }
+}
+
+/// Renders an invalid string escape GenType read in the artifact's file as
+/// the compiler error bsc prints for it.
+pub type RenderEscape<'a> = dyn Fn(crate::gentype::annotation::InvalidEscape) -> String + 'a;
 
 /// The GenType type declarations of one typed artifact, encoded. Every
 /// compiled module registers its declarations, but only modules importing its
@@ -52,6 +78,7 @@ pub struct TypedArtifact<'a> {
     /// import its types; generate no output (a module compiled only for its
     /// interface).
     pub declarations_only: bool,
+    pub render_escape: &'a RenderEscape<'a>,
 }
 
 fn in_process_type_declarations_cache() -> &'static InProcessTypeDeclarationsCache {
@@ -138,16 +165,13 @@ fn has_in_process_type_declarations(cmt_file: &Path) -> bool {
         .unwrap_or(false)
 }
 
-fn lookup_in_process_type_declarations(
-    cmt_file: &str,
-) -> Option<std::sync::Arc<InProcessTypeDeclarations>> {
+fn lookup_in_process_type_declarations(cmt_file: &str) -> Option<InProcessTypeDeclarations> {
     let key = normalize_cmt_cache_key(cmt_file);
     in_process_type_declarations_cache()
         .lock()
         .ok()
         .and_then(|cache| cache.by_cmt.get(&key).cloned())
         .and_then(|encoded| encoded.try_decode())
-        .map(std::sync::Arc::new)
 }
 
 fn register_in_process_type_declarations(
@@ -223,9 +247,13 @@ fn get_cmt_file_for_typed_artifact_import(project_root: &str, cmt: &str) -> Stri
 }
 
 pub fn typed_artifact_check_annotations(
-    check_annotation: &impl Fn(&ParseArena, LocIdx, &Attributes) -> bool,
+    check_annotation: &impl Fn(
+        &ParseArena,
+        LocIdx,
+        &Attributes,
+    ) -> crate::gentype::annotation::Read<bool>,
     artifact: &TypedArtifact<'_>,
-) -> bool {
+) -> crate::gentype::annotation::Read<bool> {
     // Mirrors compiler/gentype/GenTypeMain.ml:3-10 for in-memory typed
     // artifacts, using the same Annotation traversal that CMT decoding feeds.
     match artifact.annots {
@@ -245,7 +273,7 @@ pub fn typed_artifact_check_annotations(
         }
         TypedArtifactAnnots::Packed
         | TypedArtifactAnnots::PartialImplementation
-        | TypedArtifactAnnots::PartialInterface => false,
+        | TypedArtifactAnnots::PartialInterface => Ok(false),
     }
 }
 
@@ -280,7 +308,7 @@ pub fn translate_typed_artifact(
     output_file_relative: &str,
     resolver: &crate::gentype::module_resolver::Resolver,
     artifact: &TypedArtifact<'_>,
-) -> crate::gentype::translation::T {
+) -> crate::gentype::annotation::Read<crate::gentype::translation::T> {
     // Mirrors compiler/gentype/GenTypeMain.ml:53-70 for in-memory artifacts.
     let type_env = crate::gentype::type_env::root_for_current_module_names(
         current_module_names_for_typed_artifact(artifact),
@@ -295,7 +323,7 @@ pub fn translate_typed_artifact(
                 resolver,
                 &type_env,
                 structure,
-            )
+            )?
         }
         TypedArtifactAnnots::Interface(signature) => {
             crate::gentype::translate_signature::translate_signature(
@@ -306,7 +334,7 @@ pub fn translate_typed_artifact(
                 resolver,
                 &type_env,
                 signature,
-            )
+            )?
         }
         TypedArtifactAnnots::Packed
         | TypedArtifactAnnots::PartialImplementation
@@ -314,9 +342,11 @@ pub fn translate_typed_artifact(
             vec![]
         }
     };
-    crate::gentype::translation::add_type_declarations_from_module_equations(
-        &type_env,
-        crate::gentype::translation::combine(translations),
+    Ok(
+        crate::gentype::translation::add_type_declarations_from_module_equations(
+            &type_env,
+            crate::gentype::translation::combine(translations),
+        ),
     )
 }
 
@@ -357,7 +387,7 @@ pub fn typed_artifact_translate_type_declarations(
     output_file_relative: &str,
     resolver: &crate::gentype::module_resolver::Resolver,
     artifact: &TypedArtifact<'_>,
-) -> crate::gentype::translation::T {
+) -> crate::gentype::annotation::Read<crate::gentype::translation::T> {
     // Mirrors compiler/gentype/GenTypeMain.ml:26-52 for Rust's in-process
     // typedtree path. OCaml reopens the imported CMT at EmitJs.ml:437-453;
     // Rust already has the typed artifact here, so cache the same declaration
@@ -379,7 +409,7 @@ pub fn typed_artifact_translate_type_declarations(
                     item,
                 )
             })
-            .collect(),
+            .collect::<crate::gentype::annotation::Read<_>>()?,
         TypedArtifactAnnots::Interface(signature) => signature
             .sig_items
             .iter()
@@ -395,16 +425,18 @@ pub fn typed_artifact_translate_type_declarations(
                     item,
                 )
             })
-            .collect(),
+            .collect::<crate::gentype::annotation::Read<_>>()?,
         TypedArtifactAnnots::Packed
         | TypedArtifactAnnots::PartialImplementation
         | TypedArtifactAnnots::PartialInterface => {
             vec![]
         }
     };
-    crate::gentype::translation::add_type_declarations_from_module_equations(
-        &type_env,
-        crate::gentype::translation::combine(translations),
+    Ok(
+        crate::gentype::translation::add_type_declarations_from_module_equations(
+            &type_env,
+            crate::gentype::translation::combine(translations),
+        ),
     )
 }
 
@@ -413,11 +445,12 @@ pub fn input_cmt_translate_type_declarations(
     _output_file_relative: &str,
     _resolver: &crate::gentype::module_resolver::Resolver,
     cmt_file: &str,
-) -> std::sync::Arc<InProcessTypeDeclarations> {
+) -> Result<std::sync::Arc<crate::gentype::code_item::TypeDeclarations>, String> {
     // This is the Rust callback boundary used by emit_js.rs for
-    // compiler/gentype/EmitJs.ml:449-453.
+    // compiler/gentype/EmitJs.ml:449-453: the declarations are translated
+    // here in OCaml, so an exception their translation raised is raised here.
     match lookup_in_process_type_declarations(cmt_file) {
-        Some(type_declarations) => type_declarations,
+        Some(type_declarations) => type_declarations.map(std::sync::Arc::new),
         None => read_cmt(cmt_file),
     }
 }
@@ -432,7 +465,7 @@ pub fn emit_translation(
     get_cmt_file: &crate::gentype::emit_js::GetCmtFile<'_>,
     source_file: &str,
     translation: &crate::gentype::translation::T,
-) -> std::io::Result<()> {
+) -> Result<(), Error> {
     // Mirrors compiler/gentype/GenTypeMain.ml:72-83.
     let code_text = crate::gentype::emit_js::emit_translation_as_string(
         locs,
@@ -443,7 +476,8 @@ pub fn emit_translation(
         output_file_relative,
         resolver,
         translation,
-    );
+    )
+    .map_err(Error::Raised)?;
     let source_file = Path::new(source_file)
         .file_name()
         .and_then(|s| s.to_str())
@@ -457,7 +491,10 @@ pub fn emit_translation(
         crate::gentype::emit_type::file_header(source_file),
         code_text
     );
-    crate::gentype::generated_files::write_file_if_required(output_file, &file_contents)
+    Ok(crate::gentype::generated_files::write_file_if_required(
+        output_file,
+        &file_contents,
+    )?)
 }
 
 fn read_cmt(cmt_file: &str) -> ! {
@@ -492,7 +529,7 @@ pub fn process_typed_artifact(
     config: &crate::gentype::config::T,
     shared_resolver: Option<&crate::gentype::module_resolver::Resolver>,
     artifact: TypedArtifact<'_>,
-) -> std::io::Result<()> {
+) -> Result<(), Error> {
     // Mirrors compiler/gentype/GenTypeMain.ml:136-175, but starts from the
     // typedtree already produced in-process instead of re-reading a .cmt/.cmti.
     // The OCaml call site is compiler/core/js_implementation.ml:33-34 and
@@ -530,21 +567,29 @@ pub fn process_typed_artifact(
     let resolver = shared_resolver
         .or(local_resolver.as_ref())
         .expect("GenType resolver must be available");
-    let type_declaration_translation = typed_artifact_translate_type_declarations(
+    let raised = |escape| Error::Raised((artifact.render_escape)(escape));
+    // An exception here is raised where OCaml translates these declarations:
+    // in an importer's EmitJs (see `InProcessTypeDeclarations`), or in this
+    // module's own translation below.
+    let type_declarations = typed_artifact_translate_type_declarations(
         config,
         &output_file_relative,
         resolver,
         &artifact,
-    );
+    )
+    .map(|translation| {
+        crate::gentype::code_item::TypeDeclarations::portable(
+            translation.type_declarations,
+            artifact.ctx,
+        )
+    })
+    .map_err(artifact.render_escape);
     if let Some(cmt_file) = cmt_file_for_typed_artifact(config, &source_file, artifact.is_interface)
     {
         register_in_process_type_declarations(
             &artifact.compiler_module_name,
             &cmt_file,
-            crate::gentype::code_item::TypeDeclarations::portable(
-                type_declaration_translation.type_declarations,
-                artifact.ctx,
-            ),
+            type_declarations,
         );
     }
     if artifact.declarations_only {
@@ -557,13 +602,15 @@ pub fn process_typed_artifact(
                 crate::gentype::annotation::tag_is_one_of_the_gentype_annotations,
                 attributes,
             )
-            .is_some()
+            .map(|payload| payload.is_some())
         },
         &artifact,
-    );
+    )
+    .map_err(raised)?;
     if has_gentype_annotations {
         let translation =
-            translate_typed_artifact(config, &output_file_relative, resolver, &artifact);
+            translate_typed_artifact(config, &output_file_relative, resolver, &artifact)
+                .map_err(raised)?;
         let project_root = config.project_root.clone();
         let get_cmt_file = |cmt: &str| get_cmt_file_for_typed_artifact_import(&project_root, cmt);
         // Only emitting mutates the config; modules without GenType
@@ -623,4 +670,236 @@ fn cmt_file_for_typed_artifact(
             .to_string_lossy()
             .to_string(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::context::IdGenerator;
+    use crate::parser::{Parser, module};
+    use crate::types::{TypeCheckContext, initial_env};
+
+    /// Run GenType on `source`, compiled as `src/{module}.res` of the project
+    /// at `root`, with every `"BAD"` string replaced by the one-segment
+    /// template `Fo\xo` a PPX can produce (its `\x` escape is invalid). An
+    /// invalid escape renders as `Invalid string escape sequence at <cnum>`.
+    fn gentype_with_bad_strings(root: &Path, module: &str, source: &str) -> Result<(), String> {
+        let id_gen = IdGenerator::with_start_stamp(999);
+        let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
+        let source_file = format!("src/{module}.res");
+        let mut parser = Parser::new(&source_file, source);
+        let structure = module::parse_structure(&mut parser);
+        assert!(!parser.has_errors(), "parse failed");
+        let mut arena = parser.into_arena();
+        struct BadStrings(Vec<crate::parse_arena::ExprIdx>);
+        impl crate::binary_ast::ast_iter::AstIter for BadStrings {
+            fn expr(&mut self, arena: &ParseArena, idx: crate::parse_arena::ExprIdx) {
+                if let crate::parser::ast::ExpressionDesc::Pexp_constant(constant) =
+                    &arena.get_expr(idx).pexp_desc
+                    && let crate::parser::ast::Constant::String(value) = constant
+                    && value.semantic(arena) == "BAD"
+                {
+                    self.0.push(idx);
+                }
+                crate::binary_ast::ast_iter::walk_expr(self, arena, idx);
+            }
+        }
+        let mut found = BadStrings(Vec::new());
+        crate::binary_ast::ast_iter::walk_structure(&mut found, &arena, &structure);
+        let source_idx = arena.intern("Fo\\xo");
+        for expr_idx in found.0 {
+            let loc = arena.get_expr(expr_idx).pexp_loc;
+            arena.get_expr_mut(expr_idx).pexp_desc =
+                crate::parser::ast::ExpressionDesc::Pexp_template(Box::new(
+                    crate::parser::ast::PexpTemplate {
+                        source_segments: vec![crate::parser::ast::Loc {
+                            txt: source_idx,
+                            loc,
+                        }],
+                        values: vec![],
+                    },
+                ));
+        }
+        crate::types::typecore::prepare_typecheck_arena(&mut arena);
+        let mut tctx = TypeCheckContext::new(&type_ctx, &arena);
+        let env = initial_env(&type_ctx);
+        let (typed, _) = crate::types::typemod::type_structure(&mut tctx, &env, &arena, &structure)
+            .unwrap_or_else(|error| panic!("{module} type checks: {error:?}"));
+        drop(tctx);
+        let config = crate::gentype::config::build_config_from_cli_args(
+            None,
+            &[
+                "-bs-project-root".to_string(),
+                root.to_string_lossy().into_owned(),
+                "-bs-gentype".to_string(),
+            ],
+        );
+        let render_escape = |escape| match escape {
+            crate::gentype::annotation::InvalidEscape::Parsed(loc) => format!(
+                "Invalid string escape sequence at {}",
+                arena.to_location(loc).loc_start.cnum
+            ),
+            crate::gentype::annotation::InvalidEscape::Decl(loc) => format!(
+                "Invalid string escape sequence at {}",
+                type_ctx.resolve_loc(loc).loc_start.cnum
+            ),
+        };
+        let result = process_typed_artifact(
+            &config,
+            None,
+            TypedArtifact {
+                annots: TypedArtifactAnnots::Implementation(&typed),
+                arena: &arena,
+                ctx: &type_ctx,
+                source_file: Some(&source_file),
+                compiler_module_name: module.to_string(),
+                file_name: crate::gentype::paths::get_module_name_from_source_path(&source_file),
+                is_interface: false,
+                declarations_only: false,
+                render_escape: &render_escape,
+            },
+        );
+        match result {
+            Ok(()) => Ok(()),
+            Err(Error::Raised(report)) => Err(report),
+            Err(Error::Io(error)) => panic!("GenType I/O error: {error}"),
+        }
+    }
+
+    fn project(name: &str) -> PathBuf {
+        let root =
+            std::env::temp_dir().join(format!("gentype-escape-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("src")).expect("create project");
+        root
+    }
+
+    fn generated(root: &Path, module: &str) -> Option<String> {
+        std::fs::read_to_string(root.join(format!("src/{module}.gen.tsx"))).ok()
+    }
+
+    /// GenTypeMain.ml:93-107 and Translation.ml read annotation payloads
+    /// with Ast_payload.semantic_string_of_expression, which raises on an
+    /// invalid escape: the compile fails at the template and writes no
+    /// output. A valid backquoted or braced payload reads as its string.
+    #[test]
+    fn gentype_payload_readers_raise_on_an_invalid_template() {
+        let root = project("readers");
+        for (module, source, raised) in [
+            // The annotation check reads the first annotation's payload.
+            (
+                "EscCheck",
+                "@genType.as(\"BAD\") @genType\nlet x = 1\n",
+                Some(12),
+            ),
+            // Annotation.ml:54-62: a tuple payload reads its last element first.
+            (
+                "EscTuple",
+                "@genType.import((\"BAD\", \"BAD\")) external x: int => int = \"x\"\n",
+                Some(24),
+            ),
+            // TranslateTypeDeclarations.ml:56: a field's unsupported
+            // `@genType.as` (its `@as` is read by the type checker).
+            (
+                "EscField",
+                "@genType\ntype t = {@genType.as(\"BAD\") a: int}\n",
+                Some(31),
+            ),
+            (
+                "EscOk",
+                "@genType.as(`ok`) @genType\nlet x = 1\n@genType.as({\"fine\"}) @genType\nlet y = 2\n",
+                None,
+            ),
+        ] {
+            let result = gentype_with_bad_strings(&root, module, source);
+            match raised {
+                Some(cnum) => {
+                    assert_eq!(
+                        result,
+                        Err(format!("Invalid string escape sequence at {cnum}")),
+                        "{module}"
+                    );
+                    assert_eq!(generated(&root, module), None, "{module} writes no output");
+                }
+                None => {
+                    assert_eq!(result, Ok(()), "{module}");
+                    let output = generated(&root, module).expect("EscOk output");
+                    assert!(output.contains("export const ok"), "{output}");
+                    assert!(output.contains("export const fine"), "{output}");
+                }
+            }
+        }
+    }
+
+    /// EmitJs.ml:437-453 translates a module's type declarations only when an
+    /// importer's output needs them, so an invalid escape there does not fail
+    /// the declaring module (without GenType annotations of its own) and is
+    /// raised by the importer's lookup.
+    #[test]
+    fn gentype_declaration_escapes_raise_where_an_importer_reads_them() {
+        let root = project("lazy");
+        let declaring = "type t = {@genType.as(\"BAD\") a: int}\n";
+        assert_eq!(
+            gentype_with_bad_strings(&root, "EscDecls", declaring),
+            Ok(())
+        );
+        let config = crate::gentype::config::build_config_from_cli_args(None, &[]);
+        let cmt_file = cmt_file_for_typed_artifact(&config, "src/EscDecls.res", false).unwrap();
+        let resolver =
+            crate::gentype::module_resolver::create_lazy_resolver(&config, &[], |_| false);
+        let mut config = config;
+        assert_eq!(
+            input_cmt_translate_type_declarations(&mut config, "", &resolver, &cmt_file).err(),
+            Some("Invalid string escape sequence at 22".to_string())
+        );
+    }
+
+    /// The error is the compiling file's own: files compiled in parallel,
+    /// each with its own context, keep their output.
+    #[test]
+    fn gentype_escape_errors_stay_with_their_file_under_parallel_compiles() {
+        let root = project("parallel");
+        let results = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..8)
+                .map(|i| {
+                    let root = &root;
+                    scope.spawn(move || {
+                        let (module, source) = match i % 2 {
+                            0 => (
+                                format!("EscBad{i}"),
+                                "@genType.as(\"BAD\") @genType\nlet x = 1\n",
+                            ),
+                            _ => (
+                                format!("EscGood{i}"),
+                                "@genType.as(`ok`) @genType\nlet x = 1\n",
+                            ),
+                        };
+                        (
+                            module.clone(),
+                            gentype_with_bad_strings(root, &module, source),
+                        )
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        for (module, result) in results {
+            if module.starts_with("EscBad") {
+                assert_eq!(
+                    result,
+                    Err("Invalid string escape sequence at 12".to_string())
+                );
+                assert_eq!(generated(&root, &module), None, "{module}");
+            } else {
+                assert_eq!(result, Ok(()), "{module}");
+                assert!(
+                    generated(&root, &module)
+                        .unwrap()
+                        .contains("export const ok")
+                );
+            }
+        }
+    }
 }

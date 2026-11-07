@@ -4596,12 +4596,16 @@ fn parsed_signature_has_gentype_ignore_interface(
     signature.iter().any(|item| match &item.psig_desc {
         SignatureItemDesc::Psig_attribute(attribute) => {
             let attributes = Attributes::from_vec(vec![attribute.as_ref().clone()]);
-            crate::gentype::annotation::get_attribute_payload(
-                arena,
-                crate::gentype::annotation::tag_is_gentype_ignore_interface,
-                &attributes,
+            // An undecodable payload still names the tag; the interface
+            // compile, which reads it as OCaml does, has failed on it.
+            !matches!(
+                crate::gentype::annotation::get_attribute_payload(
+                    arena,
+                    crate::gentype::annotation::tag_is_gentype_ignore_interface,
+                    &attributes,
+                ),
+                Ok(None)
             )
-            .is_some()
         }
         _ => false,
     })
@@ -11029,6 +11033,7 @@ fn compile_source_to_js_with_options_inner(
             crate::gentype::main::TypedArtifactAnnots::Implementation(&typed_structure),
             parser.arena(),
             &type_ctx,
+            &|| source.to_string(),
             source_file_for_interface,
             &module_name,
             false,
@@ -13554,11 +13559,38 @@ pub struct InProcessInterfaceResult {
     pub unit_reads: Vec<crate::cmi::item_deps::UnitRead>,
 }
 
+/// The compiler error bsc reports for an invalid string escape GenType read
+/// (Ast_payload.ml:39-51), which GenType does not catch.
+fn gentype_escape_report(
+    arena: &ParseArena,
+    type_ctx: &TypeContext,
+    source: &str,
+    filename: &str,
+    escape: crate::gentype::annotation::InvalidEscape,
+) -> String {
+    const MESSAGE: &str = "Invalid string escape sequence";
+    match escape {
+        crate::gentype::annotation::InvalidEscape::Parsed(loc) => {
+            format_compiler_error_report(arena, source, filename, loc, MESSAGE)
+        }
+        crate::gentype::annotation::InvalidEscape::Decl(loc) => {
+            format_compiler_error_report_from_external_location(
+                type_ctx,
+                filename,
+                &type_ctx.resolve_loc(loc),
+                MESSAGE,
+            )
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn process_gentype_typed_artifact_if_enabled<'a>(
     options: &CompilerOptions,
     annots: crate::gentype::main::TypedArtifactAnnots<'a>,
     arena: &'a ParseArena,
     type_ctx: &'a TypeContext,
+    source: &dyn Fn() -> String,
     filename: &str,
     module_name: &str,
     is_interface: bool,
@@ -13569,7 +13601,9 @@ fn process_gentype_typed_artifact_if_enabled<'a>(
     // Mirrors compiler/core/js_implementation.ml:33-34 and 170, but uses the
     // in-memory typedtree that Rust already has instead of reopening the CMT
     // saved by compiler/ml/typemod.ml:1763-1764 and 1785-1787.
-    crate::timing::measure(crate::timing::Phase::Gentype, || {
+    let render_escape =
+        |escape| gentype_escape_report(arena, type_ctx, &source(), filename, escape);
+    let result = crate::timing::measure(crate::timing::Phase::Gentype, || {
         crate::gentype::main::process_typed_artifact(
             config,
             options.gentype_resolver.as_deref(),
@@ -13588,10 +13622,20 @@ fn process_gentype_typed_artifact_if_enabled<'a>(
                 file_name: crate::gentype::paths::get_module_name_from_source_path(filename),
                 is_interface,
                 declarations_only: options.gentype_declarations_only,
+                render_escape: &render_escape,
             },
         )
-    })
-    .with_context(|| format!("GenType failed for {filename}"))
+    });
+    match result {
+        Ok(()) => Ok(()),
+        // bsc fails with the exception GenType raised.
+        Err(crate::gentype::main::Error::Raised(report)) => {
+            Err(UserDiagnostic::new(report, 2).into())
+        }
+        Err(crate::gentype::main::Error::Io(error)) => {
+            Err(anyhow::Error::new(error).context(format!("GenType failed for {filename}")))
+        }
+    }
 }
 
 /// Type-check an interface source in process, running the frontend as the
@@ -14574,6 +14618,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
             crate::gentype::main::TypedArtifactAnnots::Implementation(&typed_structure),
             arena,
             &type_ctx,
+            &|| source().to_string(),
             filename,
             module_name,
             false,
@@ -15229,25 +15274,58 @@ pub fn typecheck_preprocessed_signature_in_process(
             dumps.push((kind, latin1_dump(buf)));
         }
     }
-    let gentype_ignore_interface = options.gentype_config.is_some()
-        && crate::gentype::annotation::signature_check_annotation(
+    if options.gentype_config.is_some() {
+        // GenTypeMain.ml:93-107 reads the interface's annotations in one
+        // walk: each attribute list's `ignoreInterface` payload, then its
+        // annotation payload, up to the first annotated item. Either read
+        // raises on an invalid string escape (Ast_payload.ml:39-51).
+        crate::gentype::annotation::signature_check_annotation(
             arena,
             &|_loc, attributes| {
                 crate::gentype::annotation::get_attribute_payload(
                     arena,
                     crate::gentype::annotation::tag_is_gentype_ignore_interface,
                     attributes,
-                )
-                .is_some()
+                )?;
+                Ok(crate::gentype::annotation::get_attribute_payload(
+                    arena,
+                    crate::gentype::annotation::tag_is_one_of_the_gentype_annotations,
+                    attributes,
+                )?
+                .is_some())
             },
             &typed_signature,
-        );
+        )
+        .map_err(|escape| {
+            UserDiagnostic::new(
+                gentype_escape_report(arena, &type_ctx, &source(), filename, escape),
+                2,
+            )
+        })?;
+    }
+    let gentype_ignore_interface = options.gentype_config.is_some()
+        && crate::gentype::annotation::signature_check_annotation(
+            arena,
+            &|_loc, attributes| {
+                Ok(!matches!(
+                    crate::gentype::annotation::get_attribute_payload(
+                        arena,
+                        crate::gentype::annotation::tag_is_gentype_ignore_interface,
+                        attributes,
+                    ),
+                    Ok(None)
+                ))
+            },
+            &typed_signature,
+        )
+        .unwrap_or(true);
     if !gentype_ignore_interface {
         process_gentype_typed_artifact_if_enabled(
             options,
             crate::gentype::main::TypedArtifactAnnots::Interface(&typed_signature),
             arena,
             &type_ctx,
+            &|| source().to_string(),
             filename,
             module_name,
             true,

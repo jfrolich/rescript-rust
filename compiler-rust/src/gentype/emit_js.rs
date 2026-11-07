@@ -26,7 +26,7 @@ pub type InputCmtTranslateTypeDeclarations<'a> = dyn Fn(
         &str,
         &crate::gentype::module_resolver::Resolver,
         &str,
-    ) -> std::sync::Arc<code_item::TypeDeclarations>
+    ) -> Result<std::sync::Arc<code_item::TypeDeclarations>, String>
     + 'a;
 
 pub type GetCmtFile<'a> = dyn Fn(&str) -> String + 'a;
@@ -644,7 +644,7 @@ pub fn read_cmt_files_recursively(
     output_file_relative: &str,
     resolver: &crate::gentype::module_resolver::Resolver,
     import_type: &code_item::ImportType,
-) -> Env {
+) -> Result<Env, String> {
     // Mirrors compiler/gentype/EmitJs.ml:417-484.
     fn update_type_map_from_other_files(
         config: &crate::gentype::config::T,
@@ -682,7 +682,7 @@ pub fn read_cmt_files_recursively(
                         export_type_map_from_cmt,
                         &mut env.export_type_map_from_other_files,
                     );
-                    env
+                    Ok(env)
                 }
                 None => {
                     let type_declarations = input_cmt_translate_type_declarations(
@@ -690,7 +690,7 @@ pub fn read_cmt_files_recursively(
                         output_file_relative,
                         resolver,
                         cmt_file,
-                    );
+                    )?;
                     let file = Path::new(cmt_file)
                         .file_name()
                         .and_then(|s| s.to_str())
@@ -716,21 +716,23 @@ pub fn read_cmt_files_recursively(
                         .iter()
                         .flat_map(|type_declaration| type_declaration.import_types.iter().cloned())
                         .collect::<Vec<_>>();
-                    new_import_types.iter().fold(env, |env, new_import_type| {
-                        read_cmt_files_recursively(
-                            config,
-                            env,
-                            get_cmt_file,
-                            input_cmt_translate_type_declarations,
-                            output_file_relative,
-                            resolver,
-                            new_import_type,
-                        )
-                    })
+                    new_import_types
+                        .iter()
+                        .try_fold(env, |env, new_import_type| {
+                            read_cmt_files_recursively(
+                                config,
+                                env,
+                                get_cmt_file,
+                                input_cmt_translate_type_declarations,
+                                output_file_relative,
+                                resolver,
+                                new_import_type,
+                            )
+                        })
                 }
             }
         }
-        _ => env,
+        _ => Ok(env),
     }
 }
 
@@ -744,7 +746,7 @@ pub fn emit_import_type(
     resolver: &crate::gentype::module_resolver::Resolver,
     type_name_is_interface: &impl Fn(&Env, &str) -> bool,
     import_type: &code_item::ImportType,
-) -> (Env, crate::gentype::emitters::T) {
+) -> Result<(Env, crate::gentype::emitters::T), String> {
     // Mirrors compiler/gentype/EmitJs.ml:486-500.
     let env = read_cmt_files_recursively(
         config,
@@ -754,7 +756,7 @@ pub fn emit_import_type(
         output_file_relative,
         resolver,
         import_type,
-    );
+    )?;
     let emitters = crate::gentype::emit_type::emit_import_type_as(
         emitters,
         config,
@@ -763,7 +765,7 @@ pub fn emit_import_type(
         &|type_name| type_name_is_interface(&env, type_name),
         &import_type.import_path,
     );
-    (env, emitters)
+    Ok((env, emitters))
 }
 
 pub fn emit_import_types(
@@ -776,11 +778,11 @@ pub fn emit_import_types(
     resolver: &crate::gentype::module_resolver::Resolver,
     type_name_is_interface: &impl Fn(&Env, &str) -> bool,
     import_types: &[code_item::ImportType],
-) -> (Env, crate::gentype::emitters::T) {
+) -> Result<(Env, crate::gentype::emitters::T), String> {
     // Mirrors compiler/gentype/EmitJs.ml:502-511.
     import_types
         .iter()
-        .fold((env, emitters), |(env, emitters), import_type| {
+        .try_fold((env, emitters), |(env, emitters), import_type| {
             emit_import_type(
                 config,
                 emitters,
@@ -957,7 +959,7 @@ pub fn emit_translation_as_string(
     output_file_relative: &str,
     resolver: &crate::gentype::module_resolver::Resolver,
     translation: &crate::gentype::translation::T,
-) -> String {
+) -> Result<String, String> {
     // Mirrors compiler/gentype/EmitJs.ml:604-711.
     let initial_env = Env {
         requires: BTreeMap::new(),
@@ -1032,7 +1034,7 @@ pub fn emit_translation_as_string(
         resolver,
         &type_name_is_interface_for_env,
         &import_types,
-    );
+    )?;
     let env_for_type_declarations = env.clone();
     let (env, emitters) = emit_export_from_type_declarations(
         locs,
@@ -1104,7 +1106,7 @@ pub fn emit_translation_as_string(
         file_name,
         &module_items_emitter,
     );
-    crate::gentype::emitters::to_string(
+    Ok(crate::gentype::emitters::to_string(
         "\n\n",
         emit_requires(
             env.imported_value_or_component,
@@ -1113,5 +1115,5 @@ pub fn emit_translation_as_string(
             &env.requires,
             emit_requires(false, true, config, &env.requires_early, emitters),
         ),
-    )
+    ))
 }

@@ -134,15 +134,15 @@ pub fn translate_value<F>(
     type_expr: crate::types::type_expr::TypeExprRef,
     add_annotations_to_function: F,
     name: &str,
-) -> T
+) -> crate::gentype::annotation::Read<T>
 where
     F: Fn(Type) -> Type,
 {
-    let name_as = match crate::gentype::annotation::get_gentype_as_renaming(arena, attributes) {
+    let name_as = match crate::gentype::annotation::get_gentype_as_renaming(arena, attributes)? {
         Some(s) => s,
         _ => name.to_string(),
     };
-    translate_value_with_name_as(
+    Ok(translate_value_with_name_as(
         ctx,
         Some(name_as),
         config,
@@ -153,7 +153,7 @@ where
         type_expr,
         add_annotations_to_function,
         name,
-    )
+    ))
 }
 
 pub fn translate_value_with_name_as<F>(
@@ -220,7 +220,7 @@ pub fn translate_primitive(
     resolver: &crate::gentype::module_resolver::Resolver,
     type_env: &crate::gentype::type_env::T,
     value_description: &TypedValueDescription,
-) -> T {
+) -> crate::gentype::annotation::Read<T> {
     if crate::gentype::debug::translation.load(std::sync::atomic::Ordering::Relaxed) {
         crate::gentype::log_::item("Translate Primitive\n");
     }
@@ -243,14 +243,14 @@ pub fn translate_primitive(
         config,
         type_env,
         &value_description.val_desc,
-    );
+    )?;
     let (attribute_import, attribute_renaming) =
         crate::gentype::annotation::get_attribute_import_renaming(
             arena,
             &value_description.val_attributes,
-        );
+        )?;
 
-    match attribute_import {
+    Ok(match attribute_import {
         Some(import_string) => {
             let as_path = match attribute_renaming {
                 Some(as_path) => as_path,
@@ -281,7 +281,7 @@ pub fn translate_primitive(
             code_items: vec![],
             type_declarations: vec![],
         },
-    }
+    })
 }
 
 pub fn add_type_declarations_from_module_equations(
