@@ -145,7 +145,7 @@ pub fn translate_constr(
         ) => tr(ident(name)),
         (["Stdlib", "Symbol", "t"], []) => tr(ident("symbol")),
         (["Stdlib", "Intl", intl_module, "t"], []) => tr(ident(&format!("Intl.{intl_module}"))),
-        (["Stdlib", "Error", "t"] | ["Stdlib", "JsError", "t"], []) => tr(ident("Error")),
+        (["Stdlib", "JsError", "t"], []) => tr(ident("Error")),
         (["Stdlib", "Iterable", "t"] | ["iterable"], [param]) => {
             with_type(param, builtin(vec![param.type_.clone()], "Iterable"))
         }

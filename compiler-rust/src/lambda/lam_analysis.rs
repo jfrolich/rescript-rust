@@ -109,19 +109,9 @@ pub fn no_side_effects(lam: &Lambda) -> bool {
         // Assignments are not pure
         Lambda::Lassign(_, _) => false,
 
-        // Function application - special case for known pure functions
-        Lambda::Lapply(apply) => {
-            // Special case: Lazy.from_fun application
-            if let Lambda::Lprim(prim_info) = &*apply.ap_func {
-                if let Primitive::Pfield(_, FieldDbgInfo::Module { name }) = &prim_info.primitive {
-                    if name == "from_fun" && apply.ap_args.len() == 1 {
-                        return no_side_effects(&apply.ap_args[0]);
-                    }
-                }
-            }
-            // General function application is not pure
-            false
-        }
+        // lam_analysis.ml:137: an application is not known to be pure (we
+        // need purity analysis).
+        Lambda::Lapply(_) => false,
     }
 }
 

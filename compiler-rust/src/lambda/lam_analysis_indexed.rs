@@ -7,8 +7,6 @@ use crate::ident::Ident;
 use crate::lambda::indexed::{IndexedLambda, NodeId, NodeView};
 use crate::lambda::lam_analysis::is_pure_primitive;
 use crate::lambda::lam_closure::{BoundIdents, Position, StatsMap, VarStats, param_map_of_list};
-use crate::lambda::lam_compat::FieldDbgInfo;
-use crate::lambda::lam_primitive::Primitive;
 
 pub(crate) fn hit_variable(store: &IndexedLambda, target: &Ident, node: NodeId) -> bool {
     hit_variables(store, std::slice::from_ref(target), node)
@@ -104,12 +102,9 @@ pub(crate) fn no_side_effects(store: &IndexedLambda, node: NodeId) -> bool {
                 .all(|(_, node)| no_side_effects(store, *node))
                 && no_side_effects(store, body)
         }
-        NodeView::Apply(function, args, _) => matches!(
-            store.view(function),
-            NodeView::Prim(Primitive::Pfield(_, FieldDbgInfo::Module { name }), _, _)
-                if name == "from_fun" && args.len() == 1 && no_side_effects(store, args[0])
-        ),
-        NodeView::Switch { .. }
+        // lam_analysis.ml:137: an application is not known to be pure.
+        NodeView::Apply(_, _, _)
+        | NodeView::Switch { .. }
         | NodeView::StringSwitch(_, _, _)
         | NodeView::StaticRaise(_, _)
         | NodeView::StaticCatch(_, _, _, _)
