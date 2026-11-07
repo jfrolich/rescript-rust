@@ -510,6 +510,7 @@ impl ExtraIterator<'_, '_> {
                 ModulePath::NotVisible,
                 false,
                 attributes,
+                self.ctx.raised,
             );
             self.file.stamps.add_value(stamp, declared);
             add_reference(&mut self.extra, stamp, name.loc);
@@ -561,6 +562,7 @@ impl ExtraIterator<'_, '_> {
                     ModulePath::NotVisible,
                     false,
                     attributes,
+                    self.ctx.raised,
                 );
                 self.file.stamps.add_module(stamp, declared);
             }
@@ -607,6 +609,7 @@ impl TastIterator for ExtraIterator<'_, '_> {
                     ModulePath::NotVisible,
                     false,
                     Attrs::Parsed(vd.val_attributes.as_slice(), self.ctx.arena),
+                    self.ctx.raised,
                 );
                 self.file.stamps.add_value(stamp, declared);
                 add_reference(&mut self.extra, stamp, name.loc);

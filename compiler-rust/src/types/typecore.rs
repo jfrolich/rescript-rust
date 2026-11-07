@@ -834,6 +834,10 @@ pub enum TypeCoreError {
 
     /// A template segment with an invalid escape sequence.
     InvalidStringEscapeSequence { loc: LocIdx },
+    /// A declaration attribute's template with an invalid escape, raised
+    /// where a use reads it (`Ast_payload.semantic_string_of_expression`,
+    /// ast_payload.ml:39-51); the declaration may be in another unit.
+    InvalidStringEscapeAt { loc: Location },
     /// typetexp.ml `Ptyp_arrow`: `Location.raise_errorf` for a fixed argument
     /// (`Parg_fixed`), which external processing removes before typing.
     FixedArgumentOutsideExternal { loc: LocIdx },
@@ -3044,8 +3048,10 @@ fn transl_type_inner(
                 lid.loc,
                 &decl.type_attributes,
                 Some(crate::types::context::DeprecatedContext::Reference),
-            );
-            if let Some(warning) = deprecated_warning_for_type(&path, &decl) {
+            )?;
+            if let Some(warning) = deprecated_warning_for_type(&path, &decl)
+                .map_err(|loc| invalid_escape_at(tctx.type_ctx, loc))?
+            {
                 tctx.report_warning(lid.loc, warning);
             }
 
@@ -5853,9 +5859,10 @@ fn type_pattern_construct(
     );
     // typecore.ml:1393: `Builtin_attributes.check_deprecated loc
     // constr.cstr_attributes constr.cstr_name`.
-    record_deprecated_used(tctx, loc, &cstr_desc.cstr_attributes, None);
+    record_deprecated_used(tctx, loc, &cstr_desc.cstr_attributes, None)?;
     if let Some(warning) =
         deprecated_warning_from_attrs(&cstr_desc.cstr_name, &cstr_desc.cstr_attributes)
+            .map_err(|loc| invalid_escape_at(tctx.type_ctx, loc))?
     {
         tctx.report_warning(loc, warning);
     }
@@ -7554,22 +7561,34 @@ fn type_clash_context_in_statement(expr: &ParsedExpression) -> Option<TypeClashC
 fn deprecated_warning_from_attrs(
     name: &str,
     attrs: &[crate::types::decl::Attribute],
-) -> Option<Warning> {
-    let (reason, can_be_automigrated) = deprecated_attr_payload(attrs)?;
-    Some(deprecated_warning(name, reason, can_be_automigrated))
+) -> Result<Option<Warning>, crate::types::DeclLoc> {
+    Ok(deprecated_attr_payload(attrs)?
+        .map(|(reason, can_be_automigrated)| deprecated_warning(name, reason, can_be_automigrated)))
 }
 
-/// `Builtin_attributes.deprecated_of_attrs` (builtin_attributes.ml:76-80).
-fn deprecated_of_decl_attrs(attrs: &[crate::types::decl::Attribute]) -> Option<String> {
-    let attr = attrs
+/// `Builtin_attributes.deprecated_of_attrs` (builtin_attributes.ml:59-62):
+/// `string_of_opt_payload` of the first `deprecated` attribute, the record
+/// form reading as `""`; `Err` where it raises.
+pub(crate) fn deprecated_of_decl_attrs(
+    attrs: &[crate::types::decl::Attribute],
+) -> Result<Option<String>, crate::types::DeclLoc> {
+    let Some(attr) = attrs
         .iter()
-        .find(|attr| matches!(attr.attr_name.txt.as_str(), "deprecated"))?;
-    Some(match &attr.attr_payload {
-        // `string_of_opt_payload` (builtin_attributes.ml:28-31): the record
-        // form has no string payload.
-        crate::types::decl::AttributePayload::Str(reason) => reason.clone(),
-        _ => String::new(),
-    })
+        .find(|attr| matches!(attr.attr_name.txt.as_str(), "deprecated"))
+    else {
+        return Ok(None);
+    };
+    Ok(Some(attr.attr_payload.deprecated_string_of_opt_payload()?.to_string()))
+}
+
+/// The error a reader of a declaration attribute raises at `loc`.
+pub(crate) fn invalid_escape_at(
+    ctx: &crate::types::context::TypeContext,
+    loc: crate::types::DeclLoc,
+) -> TypeCoreError {
+    TypeCoreError::InvalidStringEscapeAt {
+        loc: ctx.resolve_loc(loc),
+    }
 }
 
 /// The `deprecated` flag of the components of a module inside a loaded
@@ -7604,7 +7623,10 @@ fn signature_submodule_deprecated(
         _ => None,
     })?;
     if rest.is_empty() {
-        return deprecated_of_decl_attrs(&md.md_attributes);
+        // `Env.store_module` (env.ml:1649) read this payload when the
+        // module was defined, raising there on an invalid escape.
+        return deprecated_of_decl_attrs(&md.md_attributes)
+            .expect("the module's definition read its deprecated payload");
     }
     match &md.md_type {
         ModuleType::MtySignature(items) => {
@@ -7634,23 +7656,16 @@ fn persistent_path_components(path: &Path) -> Option<(String, Vec<String>)> {
     }
 }
 
-fn deprecated_attr_payload(attrs: &[crate::types::decl::Attribute]) -> Option<(&str, bool)> {
-    for attr in attrs {
-        if attr.attr_name.txt != "deprecated" {
-            continue;
-        }
-        return Some(match &attr.attr_payload {
-            crate::types::decl::AttributePayload::Deprecated {
-                reason,
-                can_be_automigrated,
-                ..
-            } => (reason.as_str(), *can_be_automigrated),
-            crate::types::decl::AttributePayload::Str(reason) => (reason.as_str(), false),
-            crate::types::decl::AttributePayload::Empty => ("", false),
-            _ => ("", false),
-        });
+/// `Builtin_attributes.deprecated_of_attrs_with_migrate`
+/// (builtin_attributes.ml:68-112): the first `deprecated` attribute's reason
+/// and whether it can be automigrated; `Err` where a reader raises.
+fn deprecated_attr_payload(
+    attrs: &[crate::types::decl::Attribute],
+) -> Result<Option<(&str, bool)>, crate::types::DeclLoc> {
+    match attrs.iter().find(|attr| attr.attr_name.txt == "deprecated") {
+        Some(attr) => attr.attr_payload.deprecated_with_migrate(),
+        None => Ok(None),
     }
-    None
 }
 
 /// `Cmt_utils.record_deprecated_used` from `Builtin_attributes.check_deprecated`
@@ -7661,36 +7676,40 @@ fn record_deprecated_used(
     loc: LocIdx,
     attrs: &[crate::types::decl::Attribute],
     context: Option<crate::types::context::DeprecatedContext>,
-) {
+) -> Result<(), TypeCoreError> {
     use crate::types::decl::AttributePayload;
     let Some(attr) = attrs
         .iter()
         .find(|attr| matches!(attr.attr_name.txt.as_str(), "deprecated"))
     else {
-        return;
+        return Ok(());
     };
-    let (text, migrate, migrate_in_pipe_chain) = match &attr.attr_payload {
+    // builtin_attributes.ml:114-124: only a use `deprecated_of_attrs_with_migrate`
+    // finds deprecated is recorded.
+    let Some((text, _)) = attr
+        .attr_payload
+        .deprecated_with_migrate()
+        .map_err(|loc| invalid_escape_at(tctx.type_ctx, loc))?
+    else {
+        return Ok(());
+    };
+    let (migrate, migrate_in_pipe_chain) = match &attr.attr_payload {
         AttributePayload::Deprecated {
-            reason,
             migrate,
             migrate_in_pipe_chain,
             ..
-        } => (
-            reason.clone(),
-            migrate.clone(),
-            migrate_in_pipe_chain.clone(),
-        ),
-        AttributePayload::Str(reason) => (reason.clone(), None, None),
-        _ => (String::new(), None, None),
+        } => (migrate.clone(), migrate_in_pipe_chain.clone()),
+        _ => (None, None),
     };
     tctx.type_ctx
         .record_deprecated_used(crate::types::context::DeprecatedUse {
             source_loc: tctx.arena.to_location(loc),
-            text,
+            text: text.to_string(),
             migrate,
             migrate_in_pipe_chain,
             context,
         });
+    Ok(())
 }
 
 fn deprecated_warning(name: &str, reason: &str, can_be_automigrated: bool) -> Warning {
@@ -7708,27 +7727,18 @@ fn deprecated_warning(name: &str, reason: &str, can_be_automigrated: bool) -> Wa
     }
 }
 
-fn deprecated_warning_for_value(path: &Path, desc: &ValueDescription) -> Option<Warning> {
-    let (reason, can_be_automigrated) = deprecated_attr_payload(&desc.val_attributes)?;
-    let name = path.name();
-    Some(deprecated_warning(
-        name.as_str(),
-        reason,
-        can_be_automigrated,
-    ))
+fn deprecated_warning_for_value(
+    path: &Path,
+    desc: &ValueDescription,
+) -> Result<Option<Warning>, crate::types::DeclLoc> {
+    deprecated_warning_from_attrs(path.name().as_str(), &desc.val_attributes)
 }
 
 fn deprecated_warning_for_type(
     path: &Path,
     decl: &crate::types::decl::TypeDeclaration,
-) -> Option<Warning> {
-    let (reason, can_be_automigrated) = deprecated_attr_payload(&decl.type_attributes)?;
-    let name = path.name();
-    Some(deprecated_warning(
-        name.as_str(),
-        reason,
-        can_be_automigrated,
-    ))
+) -> Result<Option<Warning>, crate::types::DeclLoc> {
+    deprecated_warning_from_attrs(path.name().as_str(), &decl.type_attributes)
 }
 
 /// Type check an expression against an expected type.
@@ -7878,8 +7888,10 @@ fn type_expect_with_recarg_unscoped<'a>(
                 lid.loc,
                 &desc.val_attributes,
                 Some(deprecated_context),
-            );
-            if let Some(warning) = deprecated_warning_for_value(&path, &desc) {
+            )?;
+            if let Some(warning) = deprecated_warning_for_value(&path, &desc)
+                .map_err(|loc| invalid_escape_at(tctx.type_ctx, loc))?
+            {
                 tctx.report_warning(lid.loc, warning);
             }
             check_inlined_record_escape(ctx, loc, desc.val_type, recarg)?;
@@ -9649,7 +9661,7 @@ fn find_arity_suggestion_for_function(
     env: &Env,
     function_lid: &Longident,
     target_arity: usize,
-) -> Option<String> {
+) -> Result<Option<String>, TypeCoreError> {
     let function_name = tctx.longident_to_string(function_lid);
     let base_name = strip_arity_suffix(&function_name);
     let candidate = if target_arity == 1 {
@@ -9657,13 +9669,21 @@ fn find_arity_suggestion_for_function(
     } else {
         format!("{base_name}{target_arity}")
     };
-    let (path, desc) = lookup_value_for_arity_suggestion(tctx, env, function_lid, &candidate)?;
-    if deprecated_warning_for_value(&path, &desc).is_some() {
-        return None;
+    let Some((path, desc)) = lookup_value_for_arity_suggestion(tctx, env, function_lid, &candidate)
+    else {
+        return Ok(None);
+    };
+    // typecore.ml:5175: `deprecated_of_attrs`, raising where
+    // `string_of_opt_payload` raises.
+    if deprecated_of_decl_attrs(&desc.val_attributes)
+        .map_err(|loc| invalid_escape_at(tctx.type_ctx, loc))?
+        .is_some()
+    {
+        return Ok(None);
     }
     let expanded_type = crate::types::ctype::expand_head(tctx.type_ctx, env, desc.val_type);
-    (function_arity_for_suggestion(tctx.type_ctx, expanded_type) == target_arity)
-        .then(|| format_arity_suggestion_path(&path))
+    Ok((function_arity_for_suggestion(tctx.type_ctx, expanded_type) == target_arity)
+        .then(|| format_arity_suggestion_path(&path)))
 }
 
 fn find_arity_suggestion_for_expression(
@@ -9671,9 +9691,9 @@ fn find_arity_suggestion_for_expression(
     env: &Env,
     funct: &Expression,
     target_arity: usize,
-) -> Option<String> {
+) -> Result<Option<String>, TypeCoreError> {
     let ExpressionDesc::Texp_ident(_, lid, _) = &funct.exp_desc else {
-        return None;
+        return Ok(None);
     };
     find_arity_suggestion_for_function(tctx, env, tctx.arena.get_longident(lid.txt), target_arity)
 }
@@ -10010,7 +10030,7 @@ fn type_application(
     let function_arity = declared_params.len();
     if total_app && args.len() > function_arity {
         let arity_suggestion =
-            find_arity_suggestion_for_expression(tctx, env, &typed_funct, args.len());
+            find_arity_suggestion_for_expression(tctx, env, &typed_funct, args.len())?;
         return Err(TypeCoreError::UncurriedArityMismatch {
             loc: funct.pexp_loc,
             function_type: typed_funct.exp_type,
@@ -10289,7 +10309,7 @@ fn type_application(
     // the arity error.
     if total_app && !fully_applied {
         let arity_suggestion =
-            find_arity_suggestion_for_expression(tctx, env, &typed_funct, args.len());
+            find_arity_suggestion_for_expression(tctx, env, &typed_funct, args.len())?;
         return Err(TypeCoreError::UncurriedArityMismatch {
             loc: funct.pexp_loc,
             function_type: typed_funct.exp_type,
@@ -13834,9 +13854,10 @@ fn type_construct(
     );
     // typecore.ml:4229: `Builtin_attributes.check_deprecated loc
     // constr.cstr_attributes constr.cstr_name`.
-    record_deprecated_used(tctx, loc, &cstr_desc.cstr_attributes, None);
+    record_deprecated_used(tctx, loc, &cstr_desc.cstr_attributes, None)?;
     if let Some(warning) =
         deprecated_warning_from_attrs(&cstr_desc.cstr_name, &cstr_desc.cstr_attributes)
+            .map_err(|loc| invalid_escape_at(tctx.type_ctx, loc))?
     {
         tctx.report_warning(loc, warning);
     }
@@ -18933,6 +18954,7 @@ fn type_pack(
         &mut inclusion_warnings,
     );
     crate::types::typemod::report_inclusion_warnings(tctx, typed_module_loc, inclusion_warnings);
+    let coercion_result = crate::types::includemod::escaped(ctx, coercion_result)?;
     let coercion = coercion_result.map_err(|error| {
         TypeCoreError::ModuleError(Box::new(
             crate::types::typemod::TypeModError::SignatureMismatch {
@@ -20603,12 +20625,12 @@ fn report_let_partial_match_warnings<'a>(
     tctx: &mut TypeCheckContext<'a>,
     env: &Env,
     bindings: &[ValueBinding],
-) {
+) -> Result<(), TypeCoreError> {
     let arena = tctx.arena;
     for binding in bindings {
-        // typecore.ml:4681-4700: each check runs in the binding's warning
+        // typecore.ml:5051-5053: each check runs in the binding's warning
         // scope (`Builtin_attributes.warning_scope ~ppwarning:false attrs`).
-        let _ = crate::types::typemod::with_warning_scope(
+        crate::types::typemod::with_warning_scope(
             tctx,
             arena,
             &binding.vb_attributes,
@@ -20617,8 +20639,9 @@ fn report_let_partial_match_warnings<'a>(
                 report_let_partial_match_warning(tctx, env, binding);
                 Ok::<(), TypeCoreError>(())
             },
-        );
+        )?;
     }
+    Ok(())
 }
 
 fn report_let_partial_match_warning<'a>(
@@ -21009,7 +21032,7 @@ fn type_let_bindings(
             )?;
         }
 
-        report_let_partial_match_warnings(tctx, env, &typed_bindings);
+        report_let_partial_match_warnings(tctx, env, &typed_bindings)?;
 
         // End definition level
         ctx.end_def();
@@ -26921,7 +26944,10 @@ fn mark_module_lid_used(
             .mark_module_used(name, ctx.resolve_loc(md.md_loc));
     }
     if let Some((loc, deprecations)) = report.as_mut()
+        // `Env.store_module` (env.ml:1649) read this payload when the
+        // module entered the environment, raising there on an invalid escape.
         && let Some(deprecated) = deprecated_of_decl_attrs(&md.md_attributes)
+            .expect("the module's definition read its deprecated payload")
     {
         deprecations.push(ModuleDeprecation::Resolved {
             loc: *loc,

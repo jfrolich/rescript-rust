@@ -2254,7 +2254,11 @@ impl PersistentEnv {
             }
             let signature =
                 crate::binary_ast::ppx::rewrite_signature(&signature, parser.arena_mut()).ok()?;
-            let deprecated = crate::types::typemod::deprecated_of_sig(parser.arena(), &signature);
+            // The dependency's own compile raises on an invalid escape here
+            // (typemod.ml:1825, js_implementation.ml:59): like a type error
+            // below, it leaves nothing to load.
+            let deprecated =
+                crate::types::typemod::deprecated_of_sig(parser.arena(), &signature).ok()?;
 
             crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
             let mut tctx = TypeCheckContext::new(ctx, parser.arena());
@@ -2313,7 +2317,11 @@ impl PersistentEnv {
         };
         let structure =
             crate::binary_ast::ppx::rewrite_structure(&structure, parser.arena_mut()).ok()?;
-        let deprecated = crate::types::typemod::deprecated_of_str(parser.arena(), &structure);
+        // The dependency's own compile raises on an invalid escape here
+            // (typemod.ml:1825, js_implementation.ml:59): like a type error
+            // below, it leaves nothing to load.
+            let deprecated =
+                crate::types::typemod::deprecated_of_str(parser.arena(), &structure).ok()?;
 
         crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
         let mut tctx = TypeCheckContext::new(ctx, parser.arena());

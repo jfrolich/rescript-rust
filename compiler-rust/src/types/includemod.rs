@@ -17,10 +17,9 @@ use crate::types::Path;
 use crate::types::asttypes::MutableFlag as FieldKind;
 use crate::types::ctype;
 use crate::types::decl::{
-    Attribute, AttributePayload, ConstructorArguments, ConstructorDeclaration,
-    ExtensionConstructor, LabelDeclaration, ModtypeDeclaration, ModuleDeclaration, ModuleType,
-    RecStatus, Signature, SignatureItem, TypeDeclaration, TypeInlinedType, TypeKind,
-    ValueDescription, ValueKind,
+    Attribute, ConstructorArguments, ConstructorDeclaration, ExtensionConstructor,
+    LabelDeclaration, ModtypeDeclaration, ModuleDeclaration, ModuleType, RecStatus, Signature,
+    SignatureItem, TypeDeclaration, TypeInlinedType, TypeKind, ValueDescription, ValueKind,
 };
 use crate::types::env::Env;
 use crate::types::type_expr::{RowDesc, RowField, TypeDesc};
@@ -35,26 +34,11 @@ use crate::{parser::code_frame, types::ArgLabel};
 /// Result type for inclusion checking.
 pub type IncludeModResult<T> = Result<T, IncludeModError>;
 
-fn deprecated_payload_from_attrs<'a>(
-    attrs: &'a [Attribute],
-    names: &[&str],
-) -> Option<&'a AttributePayload> {
-    attrs
-        .iter()
-        .find(|attr| names.iter().any(|name| attr.attr_name.txt == *name))
-        .map(|attr| &attr.attr_payload)
-}
-
-fn deprecated_payload_reason(payload: &AttributePayload) -> &str {
-    match payload {
-        AttributePayload::Deprecated { reason, .. } | AttributePayload::Str(reason) => {
-            reason.as_str()
-        }
-        AttributePayload::Empty => "",
-        _ => "",
-    }
-}
-
+/// `Builtin_attributes.check_deprecated_inclusion`
+/// (builtin_attributes.ml:119-122): `deprecated_of_attrs` of both sides,
+/// whose `string_of_opt_payload` reads the record form as `""` and raises
+/// on an invalid template. The pair is evaluated right to left, as
+/// ocamlopt evaluates tuples: the signature's attributes first.
 fn deprecated_inclusion_warning(
     type_ctx: &TypeContext,
     name: &str,
@@ -62,28 +46,72 @@ fn deprecated_inclusion_warning(
     sig_attrs: &[Attribute],
     def_loc: crate::types::DeclLoc,
     use_loc: crate::types::DeclLoc,
-) -> Option<Warning> {
-    let impl_payload = deprecated_payload_from_attrs(impl_attrs, &["deprecated"])?;
-    if deprecated_payload_from_attrs(sig_attrs, &["deprecated"]).is_some() {
-        return None;
-    }
-    let reason = deprecated_payload_reason(impl_payload);
+) -> IncludeModResult<Option<Warning>> {
+    let invalid_escape = |loc| IncludeModError::InvalidStringEscape { loc };
+    let sig_reason =
+        crate::types::typecore::deprecated_of_decl_attrs(sig_attrs).map_err(invalid_escape)?;
+    let impl_reason =
+        crate::types::typecore::deprecated_of_decl_attrs(impl_attrs).map_err(invalid_escape)?;
+    let (Some(reason), None) = (impl_reason, sig_reason) else {
+        return Ok(None);
+    };
     let message = if reason.is_empty() {
         name.to_string()
     } else {
         format!("{name}\n  {reason}")
     };
-    Some(Warning::Deprecated {
+    Ok(Some(Warning::Deprecated {
         message,
         def_loc: type_ctx.resolve_loc(def_loc),
         use_loc: type_ctx.resolve_loc(use_loc),
         can_be_automigrated: false,
-    })
+    }))
+}
+
+/// An inclusion check's result, with a payload reader's error taken out:
+/// it is a `Location.Error`, not an `Includemod.Error`, so it escapes the
+/// check and whatever reports its errors.
+pub fn escaped<T>(
+    type_ctx: &TypeContext,
+    result: IncludeModResult<T>,
+) -> Result<IncludeModResult<T>, crate::types::typecore::TypeCoreError> {
+    match result
+        .as_ref()
+        .err()
+        .and_then(IncludeModError::invalid_string_escape)
+    {
+        Some(loc) => Err(crate::types::typecore::invalid_escape_at(type_ctx, loc)),
+        None => Ok(result),
+    }
+}
+
+impl IncludeModError {
+    /// The location of the first payload reader's error in checking order,
+    /// wherever the error that carries it was nested: OCaml raises it at
+    /// once, before any error the check would have reported.
+    fn invalid_string_escape(&self) -> Option<crate::types::DeclLoc> {
+        match self {
+            IncludeModError::InvalidStringEscape { loc } => Some(*loc),
+            IncludeModError::ModuleTypeDeclarationMismatch { error, .. }
+            | IncludeModError::ModuleTypesMismatch { error, .. }
+            | IncludeModError::InModule { error, .. }
+            | IncludeModError::InFunctorBody { error, .. }
+            | IncludeModError::AtModtype { error, .. } => error.invalid_string_escape(),
+            IncludeModError::SignatureMismatch(errors) => errors
+                .iter()
+                .find_map(IncludeModError::invalid_string_escape),
+            _ => None,
+        }
+    }
 }
 
 /// Errors that can occur during module inclusion checking.
 #[derive(Debug, Clone)]
 pub enum IncludeModError {
+    /// A `@deprecated` payload with an invalid escape: its reader's
+    /// `Location.Error` (ast_payload.ml:39-51), which escapes inclusion
+    /// checking.
+    InvalidStringEscape { loc: crate::types::DeclLoc },
     /// Missing signature field in implementation.
     MissingField {
         id: Ident,
@@ -470,6 +498,10 @@ fn format_include_error(
         | IncludeModError::InModule { .. }
         | IncludeModError::AtModtype { .. }
         | IncludeModError::InFunctorBody { .. } => unreachable!(),
+        // Taken out by `escaped` before an inclusion error is reported.
+        IncludeModError::InvalidStringEscape { .. } => {
+            unreachable!("an invalid escape escapes inclusion checking")
+        }
         IncludeModError::ModuleTypesMismatch {
             actual,
             expected,
@@ -1928,7 +1960,7 @@ fn check_paired_signature_items(
                     &sig_mod_decl.md_attributes,
                     impl_mod_decl.md_loc,
                     sig_mod_decl.md_loc,
-                ) {
+                )? {
                     warnings.push(warning);
                 }
                 // includemod.ml:399: `Env.mark_module_used env (Ident.name
@@ -2246,7 +2278,7 @@ fn value_descriptions(
         &sig_desc.val_attributes,
         impl_desc.val_loc,
         sig_desc.val_loc,
-    ) {
+    )? {
         warnings.push(warning);
     }
 
@@ -2950,7 +2982,7 @@ pub(crate) fn type_declarations(
         &sig_decl.type_attributes,
         impl_decl.type_loc,
         sig_decl.type_loc,
-    ) {
+    )? {
         warnings.push(warning);
     }
 
@@ -3131,7 +3163,7 @@ pub(crate) fn type_declarations(
                         .expect("variant declaration layout"),
                 ),
                 warnings,
-            ) {
+            )? {
                 return Err(type_decl_mismatch(id, impl_decl, sig_decl, detail));
             }
         }
@@ -3790,7 +3822,7 @@ fn compare_variant_declarations(
     impl_layout: crate::types::VariantLayout,
     sig_layout: crate::types::VariantLayout,
     warnings: &mut Vec<Warning>,
-) -> Option<String> {
+) -> IncludeModResult<Option<String>> {
     let param_map = build_type_param_map(type_ctx, impl_params, sig_params);
     // OCaml compiler/ml/includecore.ml:392 starts variant comparison at 1,
     // so diagnostics report constructor positions as 1-based.
@@ -3801,12 +3833,12 @@ fn compare_variant_declarations(
         let impl_constructor = &impl_constructors[index];
         let sig_constructor = &sig_constructors[index];
         if impl_constructor.cd_id.name() != sig_constructor.cd_id.name() {
-            return Some(format!(
+            return Ok(Some(format!(
                 "Fields number {} have different names, {} and {}.",
                 index + 1,
                 impl_constructor.cd_id.name(),
                 sig_constructor.cd_id.name()
-            ));
+            )));
         }
         if let Some(warning) = deprecated_inclusion_warning(
             type_ctx,
@@ -3815,7 +3847,7 @@ fn compare_variant_declarations(
             &sig_constructor.cd_attributes,
             impl_constructor.cd_loc,
             sig_constructor.cd_loc,
-        ) {
+        )? {
             warnings.push(warning);
         }
 
@@ -3829,10 +3861,10 @@ fn compare_variant_declarations(
                         impl_res,
                         sig_res,
                     ) {
-                        return Some(format!(
+                        return Ok(Some(format!(
                             "The types for field {} are not equal.",
                             impl_constructor.cd_id.name()
-                        ));
+                        )));
                     }
                     (
                         build_type_param_map(type_ctx, &[impl_res], &[sig_res]),
@@ -3841,10 +3873,10 @@ fn compare_variant_declarations(
                     )
                 }
                 (Some(_), None) | (None, Some(_)) => {
-                    return Some(format!(
+                    return Ok(Some(format!(
                         "The types for field {} are not equal.",
                         impl_constructor.cd_id.name()
-                    ));
+                    )));
                 }
                 (None, None) => (param_map.clone(), impl_params.to_vec(), sig_params.to_vec()),
             };
@@ -3863,17 +3895,17 @@ fn compare_variant_declarations(
                     impl_labels,
                     sig_labels,
                 ) {
-                    return Some(detail);
+                    return Ok(Some(detail));
                 }
             }
             (
                 ConstructorArguments::CstrTuple(impl_args),
                 ConstructorArguments::CstrTuple(sig_args),
             ) if impl_args.len() != sig_args.len() => {
-                return Some(format!(
+                return Ok(Some(format!(
                     "The arities for field {} differ.",
                     impl_constructor.cd_id.name()
-                ));
+                )));
             }
             (
                 ConstructorArguments::CstrTuple(impl_args),
@@ -3887,18 +3919,18 @@ fn compare_variant_declarations(
                         *impl_arg,
                         *sig_arg,
                     ) {
-                        return Some(format!(
+                        return Ok(Some(format!(
                             "The types for field {} are not equal.",
                             impl_constructor.cd_id.name()
-                        ));
+                        )));
                     }
                 }
             }
             _ => {
-                return Some(format!(
+                return Ok(Some(format!(
                     "The types for field {} are not equal.",
                     impl_constructor.cd_id.name()
-                ));
+                )));
             }
         }
 
@@ -3913,10 +3945,10 @@ fn compare_variant_declarations(
             };
             impl_tag != sig_tag
         } {
-            return Some(format!(
+            return Ok(Some(format!(
                 "The internal representations for case {} are not equal.",
                 impl_constructor.cd_id.name()
-            ));
+            )));
         }
         // includecore.ml `compare_variants`: a tagged case with a payload
         // carries its tag in the object; an untagged one is its payload,
@@ -3935,29 +3967,29 @@ fn compare_variant_declarations(
             )
             && impl_block.tag.literal != sig_block.tag.literal
         {
-            return Some(format!(
+            return Ok(Some(format!(
                 "The internal representations for case {} are not equal.",
                 impl_constructor.cd_id.name()
-            ));
+            )));
         }
 
         index += 1;
     }
 
     if let Some(constructor) = sig_constructors.get(index) {
-        return Some(format!(
+        return Ok(Some(format!(
             "The field {} is only present in the second declaration.",
             constructor.cd_id.name()
-        ));
+        )));
     }
     if let Some(constructor) = impl_constructors.get(index) {
-        return Some(format!(
+        return Ok(Some(format!(
             "The field {} is only present in the first declaration.",
             constructor.cd_id.name()
-        ));
+        )));
     }
 
-    None
+    Ok(None)
 }
 
 fn constructor_is_nullary(constructor: &ConstructorDeclaration) -> bool {
@@ -4646,7 +4678,7 @@ fn modtype_declarations(
         &sig_decl.mtd_attributes,
         impl_decl.mtd_loc,
         sig_decl.mtd_loc,
-    ) {
+    )? {
         warnings.push(warning);
     }
 

@@ -56,13 +56,22 @@ pub struct Loaded {
     pub source: TypedSource,
     pub file: File,
     pub extra: Extra,
+    /// An attribute reader's error raised by a command reading this module.
+    pub raised: super::process_attributes::Raised,
 }
 
 impl Loaded {
+    /// The error a command's attribute reader raised on this module.
+    fn raised_error(&self) -> Option<String> {
+        let error = self.raised.get()?;
+        Some(invalid_escape_message(&self.ctx(), error))
+    }
+
     pub fn ctx(&self) -> Ctx<'_> {
         Ctx {
             arena: self.source.parsed.arena(),
             types: &self.source.typed.type_ctx,
+            raised: &self.raised,
         }
     }
 }
@@ -73,6 +82,9 @@ pub struct ProjectSession<'p> {
     ids: HashMap<String, usize>,
     /// Two slots per module: implementation, then interface.
     slots: Vec<OnceCell<Option<Loaded>>>,
+    /// The first error an attribute reader raised loading a module, which
+    /// ends the command (OCaml's raise is not caught).
+    failure: std::cell::RefCell<Option<String>>,
 }
 
 impl<'p> ProjectSession<'p> {
@@ -88,6 +100,7 @@ impl<'p> ProjectSession<'p> {
             project,
             ids,
             slots,
+            failure: std::cell::RefCell::new(None),
         }
     }
 
@@ -101,9 +114,27 @@ impl<'p> ProjectSession<'p> {
         self.slots[id]
             .get_or_init(|| {
                 let source = self.project.typecheck(module_name, interface)?;
-                Some(load_source(source, module_name, id))
+                match load_source(source, module_name, id) {
+                    Ok(loaded) => Some(loaded),
+                    Err(error) => {
+                        self.failure.borrow_mut().get_or_insert(error);
+                        None
+                    }
+                }
             })
             .as_ref()
+    }
+
+    /// The error that ends the command: the first an attribute reader
+    /// raised loading a module, then one raised reading a loaded module.
+    pub fn failure(&self) -> Option<String> {
+        if let Some(failure) = self.failure.borrow().clone() {
+            return Some(failure);
+        }
+        self.slots
+            .iter()
+            .filter_map(|slot| slot.get().and_then(Option::as_ref))
+            .find_map(Loaded::raised_error)
     }
 
     /// The module loaded as `id`, when it is.
@@ -149,11 +180,43 @@ impl<'p> ProjectSession<'p> {
     }
 }
 
-fn load_source(source: TypedSource, module_name: &str, id: ModuleId) -> Loaded {
+/// "Invalid string escape sequence" at the template an attribute reader
+/// raised on (ast_payload.ml:39-51).
+fn invalid_escape_message(
+    ctx: &Ctx<'_>,
+    error: super::process_attributes::InvalidEscape,
+) -> String {
+    let (loc, file) = match error {
+        super::process_attributes::InvalidEscape::Parsed(loc) => {
+            let loc = ctx.arena.to_location(loc);
+            let file = ctx.arena.get_string(loc.loc_start.file_name).to_string();
+            (loc, file)
+        }
+        super::process_attributes::InvalidEscape::Decl(loc) => {
+            let loc = ctx.types.resolve_loc(loc);
+            let file = ctx
+                .types
+                .resolve_cmi_longident_component(loc.loc_start.file_name)
+                .unwrap_or_default();
+            (loc, file)
+        }
+    };
+    format!(
+        "File \"{file}\", line {}, characters {}-{}:\nInvalid string escape sequence",
+        loc.loc_start.line,
+        loc.loc_start.cnum - loc.loc_start.bol,
+        loc.loc_end.cnum - loc.loc_start.bol,
+    )
+}
+
+/// Load a module, failing where an attribute reader raises.
+fn load_source(source: TypedSource, module_name: &str, id: ModuleId) -> Result<Loaded, String> {
     let uri = source.path.to_string_lossy().into_owned();
+    let raised = super::process_attributes::Raised::default();
     let ctx = Ctx {
         arena: source.parsed.arena(),
         types: &source.typed.type_ctx,
+        raised: &raised,
     };
     let annots = match &source.typed.typed {
         ToolingTyped::Implementation(structure) => {
@@ -170,11 +233,15 @@ fn load_source(source: TypedSource, module_name: &str, id: ModuleId) -> Loaded {
         }
         None => (File::create(module_name, uri, id), Extra::default()),
     };
-    Loaded {
+    if let Some(error) = raised.get() {
+        return Err(invalid_escape_message(&ctx, error));
+    }
+    Ok(Loaded {
         source,
         file,
         extra,
-    }
+        raised,
+    })
 }
 
 impl Session for ProjectSession<'_> {

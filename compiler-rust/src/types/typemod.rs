@@ -627,7 +627,7 @@ fn parser_attr_to_decl_attr(
     let attr_payload = match payload {
         ParsedPayload::PStr(items) => {
             if attr_name == "deprecated"
-                && let Some(payload) = parser_deprecated_payload_to_decl_payload(arena, items)
+                && let Some(payload) = parser_deprecated_payload_to_decl_payload(arena, ctx, items)
             {
                 let loc = ctx.intern_ast_loc(arena, name.loc);
                 return crate::types::decl::Attribute {
@@ -734,6 +734,18 @@ fn parser_attr_to_decl_attr(
     }
 }
 
+/// `Env.store_module` (env.ml:1649) reads the entering declaration's
+/// `Builtin_attributes.deprecated_of_attrs`, raising where
+/// `string_of_opt_payload` raises.
+fn store_module_deprecated(
+    ctx: &crate::types::context::TypeContext,
+    attrs: &[crate::types::decl::Attribute],
+) -> TypeModResult<()> {
+    crate::types::typecore::deprecated_of_decl_attrs(attrs)
+        .map_err(|loc| crate::types::typecore::invalid_escape_at(ctx, loc))?;
+    Ok(())
+}
+
 fn parser_attrs_to_decl_attrs(
     arena: &ParseArena,
     ctx: &crate::types::context::TypeContext,
@@ -745,47 +757,58 @@ fn parser_attrs_to_decl_attrs(
         .collect()
 }
 
+/// The error `Ast_payload.semantic_string_of_expression` raises on a
+/// template with an invalid escape (ast_payload.ml:39-51).
+pub(crate) fn invalid_string_escape(
+    error: crate::ast_payload::PayloadError,
+) -> crate::types::typecore::TypeCoreError {
+    crate::types::typecore::TypeCoreError::InvalidStringEscapeSequence { loc: error.loc }
+}
+
 fn parser_warning_attribute_payload<'a>(
     arena: &'a ParseArena,
     payload: &'a ParsedPayload,
-) -> Option<(String, LocIdx)> {
+) -> Result<Option<(String, LocIdx)>, crate::types::typecore::TypeCoreError> {
     let ParsedPayload::PStr(items) = payload else {
-        return None;
+        return Ok(None);
     };
     let [item] = items.as_slice() else {
-        return None;
+        return Ok(None);
     };
     let ParsedStructureItemDesc::Pstr_eval(eval_box) = &item.pstr_desc else {
-        return None;
+        return Ok(None);
     };
     let (expr_idx, _attrs) = eval_box.as_ref();
     // builtin_attributes.ml `string_of_payload`: the payload's semantic
-    // string. `@ppwarning` is reported at the payload item's `pstr_loc`.
+    // string, raising on an invalid template. `@ppwarning` is reported at
+    // the payload item's `pstr_loc`.
     let spec = crate::ast_payload::semantic_string_of_expression(arena, arena.get_expr(*expr_idx))
-        .ok()??;
-    Some((spec, item.pstr_loc))
+        .map_err(invalid_string_escape)?;
+    Ok(spec.map(|spec| (spec, item.pstr_loc)))
 }
 
 fn apply_warning_attribute(
     tctx: &mut TypeCheckContext<'_>,
     arena: &ParseArena,
     attr: &ParsedAttribute,
-) {
-    apply_warning_attribute_with_ppwarning(tctx, arena, attr, true);
+) -> Result<(), crate::types::typecore::TypeCoreError> {
+    apply_warning_attribute_with_ppwarning(tctx, arena, attr, true)
 }
 
+/// `Builtin_attributes.warning_attribute` (builtin_attributes.ml:141-160),
+/// raising where `string_of_payload` raises.
 fn apply_warning_attribute_with_ppwarning(
     tctx: &mut TypeCheckContext<'_>,
     arena: &ParseArena,
     attr: &ParsedAttribute,
     ppwarning: bool,
-) {
+) -> Result<(), crate::types::typecore::TypeCoreError> {
     let (name, payload) = attr;
     let attr_name = arena.get_string(name.txt);
     match attr_name {
         "warning" | "warnerror" => {
             let errflag = attr_name == "warnerror";
-            let Some((spec, _loc)) = parser_warning_attribute_payload(arena, payload) else {
+            let Some((spec, _loc)) = parser_warning_attribute_payload(arena, payload)? else {
                 tctx.report_warning(
                     name.loc,
                     Warning::AttributePayload {
@@ -793,7 +816,7 @@ fn apply_warning_attribute_with_ppwarning(
                         message: "A single string literal is expected".to_string(),
                     },
                 );
-                return;
+                return Ok(());
             };
 
             let mut config = WarningConfig::new();
@@ -810,7 +833,7 @@ fn apply_warning_attribute_with_ppwarning(
                         message: "Ill-formed list of warnings".to_string(),
                     },
                 );
-                return;
+                return Ok(());
             }
 
             if errflag {
@@ -820,7 +843,7 @@ fn apply_warning_attribute_with_ppwarning(
             }
         }
         "ppwarning" if ppwarning => {
-            if let Some((message, loc)) = parser_warning_attribute_payload(arena, payload) {
+            if let Some((message, loc)) = parser_warning_attribute_payload(arena, payload)? {
                 tctx.report_warning(
                     loc,
                     Warning::Preprocessor {
@@ -831,6 +854,7 @@ fn apply_warning_attribute_with_ppwarning(
         }
         _ => {}
     }
+    Ok(())
 }
 
 pub(crate) fn with_warning_scope<'a, T, E, F>(
@@ -841,6 +865,7 @@ pub(crate) fn with_warning_scope<'a, T, E, F>(
     f: F,
 ) -> Result<T, E>
 where
+    E: From<crate::types::typecore::TypeCoreError>,
     F: FnOnce(&mut TypeCheckContext<'a>) -> Result<T, E>,
 {
     if attrs.is_empty() {
@@ -849,11 +874,15 @@ where
 
     tctx.drain_open_slot_uses();
     let previous_config = tctx.warning_config.clone();
-    // OCaml compiler/ml/builtin_attributes.ml:215-223 applies warning
+    // OCaml compiler/ml/builtin_attributes.ml:162-171 applies warning
     // attributes in reverse order inside a saved warning state, then restores
-    // the previous state after the scoped typing operation.
+    // the previous state after the scoped typing operation, or when an
+    // attribute or the operation raises.
     for attr in attrs.iter().rev() {
-        apply_warning_attribute_with_ppwarning(tctx, arena, attr, ppwarning);
+        if let Err(error) = apply_warning_attribute_with_ppwarning(tctx, arena, attr, ppwarning) {
+            tctx.warning_config = previous_config;
+            return Err(error.into());
+        }
     }
     let result = f(tctx);
     tctx.drain_open_slot_uses();
@@ -867,16 +896,19 @@ fn enter_warning_scope(
     tctx: &mut TypeCheckContext<'_>,
     arena: &ParseArena,
     attrs: &Attributes,
-) -> Option<WarningConfig> {
+) -> Result<Option<WarningConfig>, crate::types::typecore::TypeCoreError> {
     if attrs.is_empty() {
-        return None;
+        return Ok(None);
     }
     tctx.drain_open_slot_uses();
     let previous_config = tctx.warning_config.clone();
     for attr in attrs.iter().rev() {
-        apply_warning_attribute_with_ppwarning(tctx, arena, attr, true);
+        if let Err(error) = apply_warning_attribute_with_ppwarning(tctx, arena, attr, true) {
+            tctx.warning_config = previous_config;
+            return Err(error);
+        }
     }
-    Some(previous_config)
+    Ok(Some(previous_config))
 }
 
 fn exit_warning_scope(tctx: &mut TypeCheckContext<'_>, previous: Option<WarningConfig>) {
@@ -886,74 +918,60 @@ fn exit_warning_scope(tctx: &mut TypeCheckContext<'_>, previous: Option<WarningC
     }
 }
 
-/// `Builtin_attributes.deprecated_of_attrs` (builtin_attributes.ml:76-80) on
-/// one parser attribute: `Some (string_of_opt_payload p)` for `deprecated`.
-fn parser_deprecated_of_attr(arena: &ParseArena, attr: &ParsedAttribute) -> Option<String> {
+/// `Builtin_attributes.deprecated_of_attrs` (builtin_attributes.ml:59-62) on
+/// one parser attribute: `Some (string_of_opt_payload p)` for `deprecated`,
+/// raising where `string_of_payload` raises.
+fn parser_deprecated_of_attr(
+    arena: &ParseArena,
+    attr: &ParsedAttribute,
+) -> Result<Option<String>, crate::ast_payload::PayloadError> {
     let (name, payload) = attr;
     if !matches!(arena.get_string(name.txt), "deprecated") {
-        return None;
+        return Ok(None);
     }
-    // `string_of_opt_payload` (builtin_attributes.ml:23-31).
-    let string = match payload {
-        ParsedPayload::PStr(items) => match items.as_slice() {
-            [item] => match &item.pstr_desc {
-                ParsedStructureItemDesc::Pstr_eval(eval_box) => {
-                    match &arena.get_expr(eval_box.0).pexp_desc {
-                        crate::parser::ast::ExpressionDesc::Pexp_constant(c) => match c {
-                            crate::parser::ast::Constant::String(value) => {
-                                Some(value.semantic(arena).to_string())
-                            }
-                            _ => None,
-                        },
-                        _ => None,
-                    }
-                }
-                _ => None,
-            },
-            _ => None,
-        },
-        _ => None,
-    };
-    Some(string.unwrap_or_default())
+    // `string_of_opt_payload` (builtin_attributes.ml:21-24).
+    let string = crate::ast_payload::semantic_string_of_payload(arena, payload)?;
+    Ok(Some(string.unwrap_or_default()))
 }
 
-/// `Builtin_attributes.deprecated_of_str` (builtin_attributes.ml:178-183):
+/// `Builtin_attributes.deprecated_of_str` (builtin_attributes.ml:131-136):
 /// the unit's leading floating attributes decide its `Deprecated` flag
-/// (typemod.ml:1778).
+/// (typemod.ml:1825).
 pub(crate) fn deprecated_of_str(
     arena: &ParseArena,
     items: &[ParsedStructureItem],
-) -> Option<String> {
+) -> Result<Option<String>, crate::ast_payload::PayloadError> {
     for item in items {
         let ParsedStructureItemDesc::Pstr_attribute(attr) = &item.pstr_desc else {
-            return None;
+            return Ok(None);
         };
-        if let Some(txt) = parser_deprecated_of_attr(arena, attr) {
-            return Some(txt);
+        if let Some(txt) = parser_deprecated_of_attr(arena, attr)? {
+            return Ok(Some(txt));
         }
     }
-    None
+    Ok(None)
 }
 
-/// `Builtin_attributes.deprecated_of_sig` (builtin_attributes.ml:171-176),
-/// used for interfaces (js_implementation.ml:66).
+/// `Builtin_attributes.deprecated_of_sig` (builtin_attributes.ml:124-129),
+/// used for interfaces (js_implementation.ml:59).
 pub(crate) fn deprecated_of_sig(
     arena: &ParseArena,
     items: &[crate::parser::ast::SignatureItem],
-) -> Option<String> {
+) -> Result<Option<String>, crate::ast_payload::PayloadError> {
     for item in items {
         let crate::parser::ast::SignatureItemDesc::Psig_attribute(attr) = &item.psig_desc else {
-            return None;
+            return Ok(None);
         };
-        if let Some(txt) = parser_deprecated_of_attr(arena, attr) {
-            return Some(txt);
+        if let Some(txt) = parser_deprecated_of_attr(arena, attr)? {
+            return Ok(Some(txt));
         }
     }
-    None
+    Ok(None)
 }
 
 fn parser_deprecated_payload_to_decl_payload(
     arena: &ParseArena,
+    ctx: &crate::types::context::TypeContext,
     items: &[ParsedStructureItem],
 ) -> Option<crate::types::decl::AttributePayload> {
     let [item] = items else {
@@ -967,18 +985,19 @@ fn parser_deprecated_payload_to_decl_payload(
     let expr = crate::ast_payload::unwrap_braces(arena, arena.get_expr(*expr_idx));
 
     // The plain `string_of_payload` form (builtin_attributes.ml
-    // `string_of_payload`); `Deprecated` is kept for the record form.
-    if let Some(reason) = crate::ast_payload::semantic_string_of_expression(arena, expr)
-        .ok()
-        .flatten()
-    {
-        return Some(crate::types::decl::AttributePayload::Str(reason));
+    // `string_of_payload`); `Deprecated` is kept for the record form. A
+    // template that does not decode is left to the general payload, a
+    // `SemanticString` keeping the location its readers raise at.
+    match crate::ast_payload::semantic_string_of_expression(arena, expr) {
+        Ok(Some(reason)) => return Some(crate::types::decl::AttributePayload::Str(reason)),
+        Ok(None) => {}
+        Err(_) => return None,
     }
     match &expr.pexp_desc {
         crate::parser::ast::ExpressionDesc::Pexp_constant(_) => None,
         crate::parser::ast::ExpressionDesc::Pexp_record(record) => {
             let fields = arena.expr_field_list(record.0);
-            let mut reason = None;
+            let mut reason = Ok(None);
             let mut can_be_automigrated = false;
             let mut migrate = None;
             let mut migrate_in_pipe_chain = None;
@@ -991,29 +1010,28 @@ fn parser_deprecated_payload_to_decl_payload(
                 writer.fragment()
             };
             for field in fields {
-                let field_name = arena.lident_last(field.lid.txt);
-                if field_name == "reason" {
+                // builtin_attributes.ml:75-96 match `Lident` field names.
+                let is_field = |name| arena.is_lident(field.lid.txt, name);
+                if is_field("reason") && matches!(reason, Ok(None)) {
+                    // builtin_attributes.ml:72-78: the first `reason` field
+                    // that is a string; reading one raises on a template
+                    // with an invalid escape.
                     let field_expr = arena.get_expr(field.expr);
-                    if let Some(value) =
-                        crate::ast_payload::semantic_string_of_expression(arena, field_expr)
-                            .ok()
-                            .flatten()
-                    {
-                        reason = Some(value);
-                    }
-                } else if field_name == "migrate" {
+                    reason = crate::ast_payload::semantic_string_of_expression(arena, field_expr)
+                        .map_err(|error| ctx.intern_ast_loc(arena, error.loc));
+                } else if is_field("migrate") {
                     can_be_automigrated = true;
                     if migrate.is_none() {
                         migrate = Some(marshal_template(field.expr));
                     }
-                } else if field_name == "migrateInPipeChain" {
+                } else if is_field("migrateInPipeChain") {
                     can_be_automigrated = true;
                     if migrate_in_pipe_chain.is_none() {
                         migrate_in_pipe_chain = Some(marshal_template(field.expr));
                     }
                 }
             }
-            reason.map(|reason| crate::types::decl::AttributePayload::Deprecated {
+            Some(crate::types::decl::AttributePayload::Deprecated {
                 reason,
                 can_be_automigrated,
                 migrate,
@@ -9485,6 +9503,8 @@ fn collect_pmty_with_type_constraints<'a>(
                             &mut inclusion_warnings,
                         );
                         report_inclusion_warnings(tctx, loc, inclusion_warnings);
+                        let inclusion_result =
+                            crate::types::includemod::escaped(tctx.type_ctx, inclusion_result)?;
                         inclusion_result.map_err(|error| TypeModError::WithMismatch {
                             loc,
                             lid: longident.clone(),
@@ -9740,13 +9760,18 @@ fn check_usage_of_path_of_substituted_item(
                 return;
             }
             if paths.iter().any(|path| path_is_strict_prefix(path, arg)) {
-                if let Err(error) = retype_applicative_functor_type(tctx, env, funct, arg) {
-                    result = Err(TypeModError::WithMakesApplicativeFunctorIllTyped {
-                        loc,
-                        lid: lid.clone(),
-                        path: referenced_path.clone(),
-                        error,
-                    });
+                let retyped = retype_applicative_functor_type(tctx, env, funct, arg);
+                match crate::types::includemod::escaped(tctx.type_ctx, retyped) {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => {
+                        result = Err(TypeModError::WithMakesApplicativeFunctorIllTyped {
+                            loc,
+                            lid: lid.clone(),
+                            path: referenced_path.clone(),
+                            error,
+                        });
+                    }
+                    Err(error) => result = Err(error.into()),
                 }
             }
         });
@@ -10200,6 +10225,8 @@ fn transl_with_constraints<'a>(
                             &mut inclusion_warnings,
                         );
                         report_inclusion_warnings(tctx, loc, inclusion_warnings);
+                        let inclusion_result =
+                            crate::types::includemod::escaped(tctx.type_ctx, inclusion_result)?;
                         inclusion_result.map_err(|error| TypeModError::WithMismatch {
                             loc,
                             lid: longident.clone(),
@@ -10258,6 +10285,8 @@ fn transl_with_constraints<'a>(
                             &mut inclusion_warnings,
                         );
                         report_inclusion_warnings(tctx, loc, inclusion_warnings);
+                        let inclusion_result =
+                            crate::types::includemod::escaped(tctx.type_ctx, inclusion_result)?;
                         inclusion_result.map_err(|error| TypeModError::WithMismatch {
                             loc,
                             lid: longident.clone(),
@@ -15282,6 +15311,8 @@ fn type_module_expr_with_alias_inner<'a>(
                     &mut inclusion_warnings,
                 );
                 report_inclusion_warnings(tctx, loc, inclusion_warnings);
+                let coercion_result =
+                    crate::types::includemod::escaped(tctx.type_ctx, coercion_result)?;
                 let coercion = coercion_result
                     .map_err(|err| TypeModError::SignatureMismatch { loc, error: err })?;
                 Ok(ModuleExpr {
@@ -15448,6 +15479,8 @@ fn type_module_expr_with_alias_inner<'a>(
                         &mut inclusion_warnings,
                     );
                     report_inclusion_warnings(tctx, arg.pmod_loc, inclusion_warnings);
+                    let coercion_result =
+                        crate::types::includemod::escaped(tctx.type_ctx, coercion_result)?;
                     coercion_result.map_err(|err| TypeModError::SignatureMismatch {
                         loc: arg.pmod_loc,
                         error: err,
@@ -15684,6 +15717,8 @@ fn wrap_constraint_with_decl_and_arg_mty<'a>(
         &mut inclusion_warnings,
     );
     report_inclusion_warnings(tctx, error_loc, inclusion_warnings);
+    let coercion_result =
+        crate::types::includemod::escaped(tctx.type_ctx, coercion_result)?;
     let coercion = coercion_result.map_err(|err| TypeModError::SignatureMismatch {
         loc: error_loc,
         error: err,
@@ -15771,6 +15806,8 @@ fn wrap_recmodule_constraint_with_inclusion_mtys<'a>(
         &mut inclusion_warnings,
     );
     report_inclusion_warnings(tctx, error_loc, inclusion_warnings);
+    let coercion_result =
+        crate::types::includemod::escaped(tctx.type_ctx, coercion_result)?;
     let coercion = coercion_result.map_err(|err| TypeModError::SignatureMismatch {
         loc: error_loc,
         error: err,
@@ -16303,6 +16340,12 @@ pub fn transl_signature<'a>(
                 let decl_mty = decl_module_type_from_typed(&typed_mty).unwrap_or(
                     crate::types::decl::ModuleType::MtySignature(std::sync::Arc::new(vec![])),
                 );
+                // typemod.ml:836-843: `Env.enter_module_declaration` of a
+                // declaration carrying `pmd_attributes`.
+                store_module_deprecated(
+                    tctx.type_ctx,
+                    &parser_attrs_to_decl_attrs(arena, tctx.type_ctx, &md.pmd_attributes),
+                )?;
                 sig_env.add_module(
                     id,
                     crate::types::decl::ModuleDeclaration {
@@ -16465,7 +16508,8 @@ pub fn transl_signature<'a>(
                 })
             }
             PSigDesc::Psig_attribute(attr) => {
-                apply_warning_attribute(tctx, arena, attr);
+                // typemod.ml:906.
+                apply_warning_attribute(tctx, arena, attr)?;
                 TSigDesc::Tsig_attribute((**attr).clone())
             }
             PSigDesc::Psig_extension(inner) => {
@@ -17079,7 +17123,12 @@ fn type_structure_item<'a>(
                 tctx.drain_open_slot_uses();
                 let decl_warning_config = tctx.warning_config.clone();
                 for attr in decl.ptype_attributes.iter().rev() {
-                    apply_warning_attribute_with_ppwarning(tctx, arena, attr, true);
+                    if let Err(error) =
+                        apply_warning_attribute_with_ppwarning(tctx, arena, attr, true)
+                    {
+                        tctx.warning_config = decl_warning_config;
+                        return Err(error.into());
+                    }
                 }
                 let type_name = decl.ptype_name.txt;
                 let type_name_str = arena.get_string(type_name);
@@ -17249,7 +17298,7 @@ fn type_structure_item<'a>(
                             // typedecl.ml:589-591: each constructor is made in
                             // `Builtin_attributes.warning_scope pcd_attributes`.
                             let cstr_warning_scope =
-                                enter_warning_scope(tctx, arena, &cstr.pcd_attributes);
+                                enter_warning_scope(tctx, arena, &cstr.pcd_attributes)?;
                             // Handle variant spread expansion
                             // Like OCaml's typedecl.ml: spread markers return None (filtered out)
                             // and expanded constructors get real types from the source type
@@ -17832,7 +17881,7 @@ fn type_structure_item<'a>(
                             // typedecl.ml:223: `transl_labels` translates each
                             // label in `warning_scope pld_attributes`.
                             let label_warning_scope =
-                                enter_warning_scope(tctx, arena, &lbl.pld_attributes);
+                                enter_warning_scope(tctx, arena, &lbl.pld_attributes)?;
                             let (typed_core_type, type_ref) =
                                 transl_label_type(tctx, &temp_env, arena, lbl, true)?;
                             exit_warning_scope(tctx, label_warning_scope);
@@ -19446,6 +19495,8 @@ fn type_structure_item<'a>(
             let item_sig_mod_type = localized_decl_mod_type.clone();
             let module_attributes =
                 parser_attrs_to_decl_attrs(arena, tctx.type_ctx, &mb.pmb_attributes);
+            // typemod.ml:1517: `Env.enter_module_declaration id md env`.
+            store_module_deprecated(tctx.type_ctx, &module_attributes)?;
             new_env.add_module(
                 mod_id,
                 crate::types::decl::ModuleDeclaration {
@@ -19550,11 +19601,14 @@ fn type_structure_item<'a>(
             // `Env.add_module_declaration ~check:true`.
             let mut new_env = env.clone();
             for ((name, _, _, _, attrs, mb_loc), decl) in rec_bindings.iter().zip(dcl2.iter()) {
+                let md_attributes = parser_attrs_to_decl_attrs(arena, tctx.type_ctx, attrs);
+                // typemod.ml:1591: `Env.add_module_declaration ~check:true`.
+                store_module_deprecated(tctx.type_ctx, &md_attributes)?;
                 new_env.add_module(
                     decl.md_id,
                     crate::types::decl::ModuleDeclaration {
                         md_type: decl.md_type.mty_type.clone(),
-                        md_attributes: parser_attrs_to_decl_attrs(arena, tctx.type_ctx, attrs),
+                        md_attributes,
                         md_loc: tctx.intern_ast_loc(arena, *mb_loc),
                         md_path: None,
                     },
@@ -20152,7 +20206,8 @@ fn type_structure_item<'a>(
 
         ParsedStructureItemDesc::Pstr_attribute(attr) => {
             // Attribute: @@attr
-            apply_warning_attribute(tctx, arena, attr);
+            // typemod.ml:1643.
+            apply_warning_attribute(tctx, arena, attr)?;
             let desc = StructureItemDesc::Tstr_attribute((**attr).clone());
             Ok((
                 StructureItem {
@@ -20350,7 +20405,12 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
             tctx.drain_open_slot_uses();
             let decl_warning_config = tctx.warning_config.clone();
             for attr in decl.ptype_attributes.iter().rev() {
-                apply_warning_attribute_with_ppwarning(tctx, arena, attr, true);
+                if let Err(error) =
+                    apply_warning_attribute_with_ppwarning(tctx, arena, attr, true)
+                {
+                    tctx.warning_config = decl_warning_config;
+                    return Err(error.into());
+                }
             }
             let type_name = decl.ptype_name.txt;
             let type_name_str = arena.get_string(type_name);
@@ -21325,6 +21385,113 @@ mod tests {
             .err()
             .expect("an invalid escape is an error");
         (error, arena.to_location(loc))
+    }
+
+    /// Types `source` after turning every `"BAD"` string into the template
+    /// `Fo\xo`, which has an invalid escape, as a PPX may; the result and
+    /// the locations of the rewritten strings, in source order.
+    fn type_with_bad_strings(source: &str) -> (TypeModResult<()>, Vec<Location>) {
+        crate::ident::Ident::set_current_time(999);
+        let id_gen = IdGenerator::with_start_stamp(999);
+        let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
+        let mut parser = Parser::new("test.res", source);
+        let structure = module::parse_structure(&mut parser);
+        assert!(!parser.has_errors(), "parse failed");
+        let mut arena = parser.into_arena();
+        // The `"BAD"` string expressions, found by walking the parsed tree
+        // (attribute payloads included).
+        struct BadStrings(Vec<crate::parse_arena::ExprIdx>);
+        impl crate::binary_ast::ast_iter::AstIter for BadStrings {
+            fn expr(&mut self, arena: &ParseArena, idx: crate::parse_arena::ExprIdx) {
+                if let crate::parser::ast::ExpressionDesc::Pexp_constant(constant) =
+                    &arena.get_expr(idx).pexp_desc
+                    && let crate::parser::ast::Constant::String(value) = constant
+                    && value.semantic(arena) == "BAD"
+                {
+                    self.0.push(idx);
+                }
+                crate::binary_ast::ast_iter::walk_expr(self, arena, idx);
+            }
+        }
+        let mut found = BadStrings(Vec::new());
+        crate::binary_ast::ast_iter::walk_structure(&mut found, &arena, &structure);
+        let source_idx = arena.intern("Fo\\xo");
+        let mut locs = Vec::new();
+        for expr_idx in found.0 {
+            let loc = arena.get_expr(expr_idx).pexp_loc;
+            locs.push(loc);
+            arena.get_expr_mut(expr_idx).pexp_desc =
+                crate::parser::ast::ExpressionDesc::Pexp_template(Box::new(
+                    crate::parser::ast::PexpTemplate {
+                        source_segments: vec![crate::parser::ast::Loc {
+                            txt: source_idx,
+                            loc,
+                        }],
+                        values: vec![],
+                    },
+                ));
+        }
+        crate::types::typecore::prepare_typecheck_arena(&mut arena);
+        let mut tctx = TypeCheckContext::new(&type_ctx, &arena);
+        let env = initial_env(&type_ctx);
+        let result = type_structure(&mut tctx, &env, &arena, &structure).map(|_| ());
+        let mut locs: Vec<Location> = locs.into_iter().map(|loc| arena.to_location(loc)).collect();
+        locs.sort_by_key(|loc| loc.loc_start.cnum);
+        (result, locs)
+    }
+
+    /// The type checker's readers raise where OCaml's raise
+    /// (`Builtin_attributes.warning_attribute`, `check_deprecated_inclusion`,
+    /// `Env.store_module`), at the template; a valid backquoted or braced
+    /// payload reads as its string, and unknown attributes are not read.
+    #[test]
+    fn type_checker_payload_readers_raise_on_an_invalid_template() {
+        let column = |loc: &Location| (loc.loc_start.cnum - loc.loc_start.bol);
+        for (source, raised) in [
+            // typemod.ml:1430 `warning_scope` of a value binding.
+            ("@warning(\"BAD\") let x = 1\n", 0),
+            // typedecl.ml:589-591: a constructor's warning scope.
+            ("type t = @warning(\"BAD\") A | B\n", 0),
+            // Reverse order (builtin_attributes.ml:164): the last attribute
+            // is read first.
+            ("@warning(\"BAD\") @warning(\"BAD\") let x = 1\n", 1),
+            // includecore.ml:45 through the constraint's inclusion: the
+            // signature side is read first.
+            (
+                concat!(
+                    "module M: { @deprecated(\"BAD\") let x: int } = ",
+                    "{ @deprecated(\"BAD\") let x = 1 }\n",
+                ),
+                0,
+            ),
+            // env.ml:1649 when the module enters the environment.
+            ("@deprecated(\"BAD\") module M = {}\n", 0),
+        ] {
+            let (result, locs) = type_with_bad_strings(source);
+            let loc = match result {
+                Err(TypeModError::CoreError(TypeCoreError::InvalidStringEscapeSequence { .. })) => {
+                    None
+                }
+                Err(TypeModError::CoreError(TypeCoreError::InvalidStringEscapeAt { loc })) => {
+                    Some(loc)
+                }
+                other => panic!("{source}: {other:?}"),
+            };
+            if let Some(loc) = loc {
+                assert_eq!(column(&loc), column(&locs[raised]), "{source}");
+            }
+        }
+        for source in [
+            "@deprecated({reason: `ok`}) let x = 1\n@deprecated({\"ok\"}) let y = 1\n",
+            "@warning(`-27`) let f = u => 1\n",
+            "@whatever(\"BAD\") let x = 1\n",
+            // The record form reads as no string where the inclusion reads it
+            // (builtin_attributes.ml:21-24, 59-62).
+            "@deprecated({reason: \"BAD\"}) let x = 1\n",
+        ] {
+            let (result, _) = type_with_bad_strings(source);
+            assert!(result.is_ok(), "{source}: {result:?}");
+        }
     }
 
     /// The OCaml reference reports `Invalid string escape sequence` at the

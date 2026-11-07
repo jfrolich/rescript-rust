@@ -1266,7 +1266,9 @@ impl SigReadContext<'_> {
                     }
                     let payload = if fields.len() > 1 {
                         if attr_name.txt == "deprecated" {
-                            read_deprecated_attribute_payload(&fields[1])
+                            read_deprecated_attribute_payload(&fields[1], &mut |loc| {
+                                self.read_decl_loc(loc)
+                            })
                         } else {
                             read_attribute_payload(&fields[1], &mut |loc| self.read_decl_loc(loc))
                         }
@@ -1472,67 +1474,135 @@ fn semantic_string_payload(
     }
 }
 
-fn read_deprecated_attribute_payload(value: &OcamlValue) -> AttributePayload {
-    match value {
-        OcamlValue::Block(0, fields) if !fields.is_empty() => {
-            let structure = &fields[0];
-            // `string_of_payload` (builtin_attributes.ml:23-26): a single
-            // string constant is the plain `@deprecated("reason")` form.
-            if let Some(reason) = plain_string_payload(structure) {
-                return AttributePayload::Str(reason);
-            }
-            let Some(reason) = extract_str_payload_string(structure) else {
-                return AttributePayload::Empty;
-            };
-            AttributePayload::Deprecated {
-                reason,
-                can_be_automigrated: deprecated_payload_has_migration_template(structure),
-                migrate: None,
-                migrate_in_pipe_chain: None,
-            }
-        }
-        _ => AttributePayload::Empty,
-    }
+/// A `@deprecated` payload: the record form `deprecated_of_attrs_with_migrate`
+/// reads (builtin_attributes.ml:68-112), or the payload `string_of_payload`
+/// reads.
+fn read_deprecated_attribute_payload(
+    value: &OcamlValue,
+    read_loc: &mut dyn FnMut(&OcamlValue) -> crate::types::DeclLoc,
+) -> AttributePayload {
+    deprecated_record_payload(value, read_loc)
+        .unwrap_or_else(|| read_attribute_payload(value, read_loc))
 }
 
-/// `PStr [{pstr_desc = Pstr_eval ({pexp_desc = Pexp_constant
-/// (Pconst_string payload)}, _)}]`, given the marshaled structure list.
-fn plain_string_payload(structure: &OcamlValue) -> Option<String> {
-    let OcamlValue::Block(0, cons) = structure else {
+/// `PStr [{pstr_desc = Pstr_eval ({pexp_desc = Pexp_record (fields, _)}, _)}]`
+/// after `Ast_payload.unwrap_payload_expression`, given the marshaled
+/// `PStr` payload.
+fn deprecated_record_payload(
+    value: &OcamlValue,
+    read_loc: &mut dyn FnMut(&OcamlValue) -> crate::types::DeclLoc,
+) -> Option<AttributePayload> {
+    // PStr structure
+    let OcamlValue::Block(0, payload) = value else {
+        return None;
+    };
+    let OcamlValue::Block(0, cons) = payload.first()? else {
         return None;
     };
     let [item, OcamlValue::Int(0)] = cons.as_ref() else {
         return None;
     };
+    // {pstr_desc = Pstr_eval (e, _); pstr_loc}
     let OcamlValue::Block(0, item) = item else {
         return None;
     };
-    // Pstr_eval (expression, attributes)
     let OcamlValue::Block(0, eval) = item.first()? else {
         return None;
     };
-    let OcamlValue::Block(0, expr) = eval.first()? else {
+    // Pexp_record (fields, _), tag 11 in parsetree.ml `expression_desc`.
+    let OcamlValue::Block(11, record) = &unwrap_braces_value(eval.first()?)?[0] else {
         return None;
     };
-    // `Ast_payload.unwrap_payload_expression`: look through
-    // `Pexp_braces {expr; braces_loc}` (tag 0).
-    let mut expr = expr;
-    while let Some(OcamlValue::Block(0, braces)) = expr.first() {
-        let OcamlValue::Block(0, inner) = braces.first()? else {
+    let mut reason = Ok(None);
+    let mut can_be_automigrated = false;
+    let mut fields = record.first()?;
+    // record_element list: {lid = {txt; loc}; x; opt}
+    while let OcamlValue::Block(0, cell) = fields {
+        if let OcamlValue::Block(0, field) = &cell[0] {
+            match lident_name(&field[0]) {
+                // builtin_attributes.ml:72-78: the first `reason` field that
+                // is a string.
+                Some("reason") if matches!(reason, Ok(None)) => {
+                    reason = expression_semantic_string(&field[1], read_loc);
+                }
+                Some("migrate" | "migrateInPipeChain") => can_be_automigrated = true,
+                _ => {}
+            }
+        }
+        fields = &cell[1];
+    }
+    Some(AttributePayload::Deprecated {
+        reason,
+        can_be_automigrated,
+        migrate: None,
+        migrate_in_pipe_chain: None,
+    })
+}
+
+/// The `Lident` name of a marshaled `Longident.t loc`.
+fn lident_name(lid: &OcamlValue) -> Option<&str> {
+    let OcamlValue::Block(0, lid) = lid else {
+        return None;
+    };
+    let OcamlValue::Block(0, lident) = lid.first()? else {
+        return None;
+    };
+    lident.first()?.as_string_opt()
+}
+
+/// The fields of a marshaled expression record under its `Pexp_braces`
+/// (`Ast_payload.unwrap_braces`).
+fn unwrap_braces_value(expression: &OcamlValue) -> Option<&[OcamlValue]> {
+    let mut expression = expression;
+    loop {
+        let OcamlValue::Block(0, record) = expression else {
             return None;
         };
-        expr = inner;
+        match record.first()? {
+            // Pexp_braces {expr; braces_loc}
+            OcamlValue::Block(0, inner) => expression = inner.first()?,
+            _ => return Some(record),
+        }
     }
-    // Pexp_constant constant (tag 2: `Pexp_braces` and `Pexp_ident` precede
-    // it in parsetree.ml `expression_desc`)
-    let OcamlValue::Block(2, constant) = expr.first()? else {
-        return None;
+}
+
+/// `Ast_payload.semantic_string_of_expression` (ast_payload.ml:39-51) of a
+/// marshaled expression; `Err` is the template's `pexp_loc` where it raises.
+fn expression_semantic_string(
+    expression: &OcamlValue,
+    read_loc: &mut dyn FnMut(&OcamlValue) -> crate::types::DeclLoc,
+) -> Result<Option<String>, crate::types::DeclLoc> {
+    let Some(record) = unwrap_braces_value(expression) else {
+        return Ok(None);
     };
-    // Pconst_string payload
-    let OcamlValue::Block(2, string) = constant.first()? else {
-        return None;
-    };
-    string_literal_semantic(string.first()?)
+    match &record[0] {
+        // Pexp_constant (Pconst_string literal)
+        OcamlValue::Block(2, constant) => match constant.first() {
+            Some(OcamlValue::Block(2, literal)) => {
+                Ok(literal.first().and_then(string_literal_semantic))
+            }
+            _ => Ok(None),
+        },
+        // Pexp_template {source_segments = [{txt}]; values = []}
+        OcamlValue::Block(38, template) => {
+            let (Some(OcamlValue::Block(0, segments)), Some(OcamlValue::Int(0))) =
+                (template.first(), template.get(1))
+            else {
+                return Ok(None);
+            };
+            let [OcamlValue::Block(0, segment), OcamlValue::Int(0)] = segments.as_ref() else {
+                return Ok(None);
+            };
+            let Some(source) = segment.first().and_then(OcamlValue::as_string_opt) else {
+                return Ok(None);
+            };
+            match crate::string_literal::decode_js_template_escapes(source) {
+                Some(semantic) => Ok(Some(semantic)),
+                None => Err(read_loc(&record[1])),
+            }
+        }
+        _ => Ok(None),
+    }
 }
 
 /// `String_literal.string_semantic` of a marshaled `String_literal.payload`:
@@ -1549,20 +1619,6 @@ fn string_literal_semantic(payload: &OcamlValue) -> Option<String> {
         },
         _ => None,
     }
-}
-
-fn deprecated_payload_has_migration_template(value: &OcamlValue) -> bool {
-    fn visit(value: &OcamlValue, depth: usize) -> bool {
-        if depth > 16 {
-            return false;
-        }
-        match value {
-            OcamlValue::String(value) => matches!(value.as_str(), "migrate" | "migrateInPipeChain"),
-            OcamlValue::Block(_, fields) => fields.iter().any(|field| visit(field, depth + 1)),
-            _ => false,
-        }
-    }
-    visit(value, 0)
 }
 
 /// Try to extract an identifier-like payload from a marshaled PStr payload.

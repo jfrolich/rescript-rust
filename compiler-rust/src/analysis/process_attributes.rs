@@ -18,13 +18,45 @@ pub enum Attrs<'a> {
     Decl(&'a [decl::Attribute]),
 }
 
-/// `Ast_payload.semantic_string_of_expression`. OCaml raises on a template
-/// with an invalid escape, which only a PPX makes; the editor analysis
-/// reads it as no string.
-fn string_constant(arena: &ParseArena, e: ExprIdx) -> Option<String> {
+/// The location of a template with an invalid escape (only a PPX makes
+/// one), where `Ast_payload.semantic_string_of_expression` raises
+/// (ast_payload.ml:39-51): in the parse tree or a declaration's attribute.
+#[derive(Debug, Clone, Copy)]
+pub enum InvalidEscape {
+    Parsed(crate::parse_arena::LocIdx),
+    Decl(crate::types::DeclLoc),
+}
+
+/// The first error a reader raises while a module is processed. OCaml's
+/// raise ends the analysis command (nothing catches it); the session turns
+/// this into the command's error once the module is built.
+#[derive(Default)]
+pub struct Raised(std::cell::Cell<Option<InvalidEscape>>);
+
+impl Raised {
+    /// The value a reader returned, keeping its error if it raised.
+    pub fn read<T>(&self, read: Result<Option<T>, InvalidEscape>) -> Option<T> {
+        match read {
+            Ok(value) => value,
+            Err(error) => {
+                if self.0.get().is_none() {
+                    self.0.set(Some(error));
+                }
+                None
+            }
+        }
+    }
+
+    /// The first error raised.
+    pub fn get(&self) -> Option<InvalidEscape> {
+        self.0.get()
+    }
+}
+
+/// `Ast_payload.semantic_string_of_expression`.
+fn string_constant(arena: &ParseArena, e: ExprIdx) -> Result<Option<String>, InvalidEscape> {
     crate::ast_payload::semantic_string_of_expression(arena, arena.get_expr(e))
-        .ok()
-        .flatten()
+        .map_err(|error| InvalidEscape::Parsed(error.loc))
 }
 
 /// `Utils.flatten_long_ident` without its options.
@@ -46,40 +78,55 @@ fn is_doc_name(name: &str) -> bool {
     name == "res.doc"
 }
 
-/// `find_doc_attribute`.
-pub fn find_doc_attribute(attrs: Attrs<'_>) -> Option<String> {
+/// `find_doc_attribute`: the first `res.doc` payload that is a string,
+/// raising where its reader raises.
+pub fn find_doc_attribute(attrs: Attrs<'_>) -> Result<Option<String>, InvalidEscape> {
     match attrs {
-        Attrs::Parsed(attrs, arena) => attrs.iter().find_map(|(name, payload)| {
-            if !is_doc_name(arena.get_string(name.txt)) {
-                return None;
+        Attrs::Parsed(attrs, arena) => {
+            for (name, payload) in attrs {
+                if !is_doc_name(arena.get_string(name.txt)) {
+                    continue;
+                }
+                if let Some(doc) = crate::ast_payload::semantic_string_of_payload(arena, payload)
+                    .map_err(|error| InvalidEscape::Parsed(error.loc))?
+                {
+                    return Ok(Some(doc));
+                }
             }
-            crate::ast_payload::semantic_string_of_payload(arena, payload)
-                .ok()
-                .flatten()
-        }),
-        Attrs::Decl(attrs) => attrs.iter().find_map(|attr| {
-            if !is_doc_name(&attr.attr_name.txt) {
-                return None;
+            Ok(None)
+        }
+        Attrs::Decl(attrs) => {
+            for attr in attrs {
+                if !is_doc_name(&attr.attr_name.txt) {
+                    continue;
+                }
+                if let Some(doc) = attr
+                    .attr_payload
+                    .semantic_string()
+                    .map_err(InvalidEscape::Decl)?
+                {
+                    return Ok(Some(doc.to_string()));
+                }
             }
-            attr.attr_payload
-                .semantic_string()
-                .ok()
-                .flatten()
-                .map(str::to_string)
-        }),
+            Ok(None)
+        }
     }
 }
 
-/// `find_deprecated_attribute`.
-pub fn find_deprecated_attribute(attrs: Attrs<'_>) -> Option<String> {
+/// `find_deprecated_attribute`, raising where its reader raises.
+pub fn find_deprecated_attribute(attrs: Attrs<'_>) -> Result<Option<String>, InvalidEscape> {
     match attrs {
         Attrs::Parsed(attrs, arena) => {
-            let (_, payload) = attrs
-                .iter()
-                .find(|attr| is_parsed_deprecated(arena, attr))?;
+            let Some((_, payload)) = attrs.iter().find(|attr| is_parsed_deprecated(arena, attr))
+            else {
+                return Ok(None);
+            };
             parsed_deprecated_reason(arena, payload)
         }
-        Attrs::Decl(attrs) => decl_deprecated_reason(attrs.iter().find(|a| is_decl_deprecated(a))?),
+        Attrs::Decl(attrs) => match attrs.iter().find(|a| is_decl_deprecated(a)) {
+            Some(attr) => decl_deprecated_reason(attr),
+            None => Ok(None),
+        },
     }
 }
 
@@ -92,37 +139,48 @@ fn is_decl_deprecated(attr: &decl::Attribute) -> bool {
 }
 
 /// The reason of a found `@deprecated` attribute.
-fn parsed_deprecated_reason(arena: &ParseArena, payload: &Payload) -> Option<String> {
+fn parsed_deprecated_reason(
+    arena: &ParseArena,
+    payload: &Payload,
+) -> Result<Option<String>, InvalidEscape> {
     let Some(e) = payload_expression(payload) else {
-        return Some(String::new());
+        return Ok(Some(String::new()));
     };
-    if let Some(msg) = string_constant(arena, e) {
-        return Some(msg);
+    if let Some(msg) = string_constant(arena, e)? {
+        return Ok(Some(msg));
     }
-    match &arena.get_expr(e).pexp_desc {
+    let expr = crate::ast_payload::unwrap_braces(arena, arena.get_expr(e));
+    match &expr.pexp_desc {
         ExpressionDesc::Pexp_record(record) => {
+            // process_attributes.ml:25-33: every `reason` field is read, the
+            // last string kept.
             let mut reason = String::new();
             for field in arena.expr_field_list(record.0) {
                 if let Longident::Lident(txt) = arena.get_longident(field.lid.txt)
                     && arena.get_string(*txt) == "reason"
-                    && let Some(msg) = string_constant(arena, field.expr)
+                    && let Some(msg) = string_constant(arena, field.expr)?
                 {
                     reason = msg;
                 }
             }
-            Some(reason)
+            Ok(Some(reason))
         }
-        _ => None,
+        _ => Ok(None),
     }
 }
 
 /// The reason of a found `@deprecated` declaration attribute.
-fn decl_deprecated_reason(attr: &decl::Attribute) -> Option<String> {
+fn decl_deprecated_reason(attr: &decl::Attribute) -> Result<Option<String>, InvalidEscape> {
     match &attr.attr_payload {
-        decl::AttributePayload::Str(msg) => Some(msg.clone()),
-        decl::AttributePayload::Deprecated { reason, .. } => Some(reason.clone()),
-        decl::AttributePayload::Empty => Some(String::new()),
-        _ => None,
+        decl::AttributePayload::Deprecated { reason, .. } => match reason {
+            Ok(reason) => Ok(Some(reason.clone().unwrap_or_default())),
+            Err(loc) => Err(InvalidEscape::Decl(*loc)),
+        },
+        decl::AttributePayload::Empty => Ok(Some(String::new())),
+        payload => Ok(payload
+            .semantic_string()
+            .map_err(InvalidEscape::Decl)?
+            .map(str::to_string)),
     }
 }
 
@@ -172,18 +230,22 @@ pub fn find_editor_complete_from_attribute(attrs: Attrs<'_>) -> Vec<ModulePathLi
 }
 
 /// `find_deprecated_attribute (List.rev attributes)`.
-fn reversed_deprecated(attrs: Attrs<'_>) -> Option<String> {
+fn reversed_deprecated(attrs: Attrs<'_>) -> Result<Option<String>, InvalidEscape> {
     match attrs {
         Attrs::Parsed(attrs, arena) => {
-            let (_, payload) = attrs
+            match attrs
                 .iter()
                 .rev()
-                .find(|attr| is_parsed_deprecated(arena, attr))?;
-            parsed_deprecated_reason(arena, payload)
+                .find(|attr| is_parsed_deprecated(arena, attr))
+            {
+                Some((_, payload)) => parsed_deprecated_reason(arena, payload),
+                None => Ok(None),
+            }
         }
-        Attrs::Decl(attrs) => {
-            decl_deprecated_reason(attrs.iter().rev().find(|a| is_decl_deprecated(a))?)
-        }
+        Attrs::Decl(attrs) => match attrs.iter().rev().find(|a| is_decl_deprecated(a)) {
+            Some(attr) => decl_deprecated_reason(attr),
+            None => Ok(None),
+        },
     }
 }
 
@@ -196,15 +258,23 @@ pub fn new_declared<T>(
     module_path: ModulePath,
     is_exported: bool,
     attributes: Attrs<'_>,
+    raised: &Raised,
 ) -> Declared<T> {
+    // process_attributes.ml:41-52: ocamlopt builds the record right to
+    // left, reading the docstring first.
+    let docstring = raised
+        .read(find_doc_attribute(attributes))
+        .into_iter()
+        .collect();
+    let deprecated = raised.read(reversed_deprecated(attributes));
     Declared {
         name,
         stamp,
         extent_loc: extent,
         is_exported,
         module_path,
-        deprecated: reversed_deprecated(attributes),
-        docstring: find_doc_attribute(attributes).into_iter().collect(),
+        deprecated,
+        docstring,
         item,
     }
 }

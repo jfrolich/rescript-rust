@@ -2957,6 +2957,9 @@ fn type_mod_error_to_anyhow_styled(
             2,
         )
         .into(),
+        TypeModError::CoreError(TypeCoreError::InvalidStringEscapeAt { loc }) => {
+            invalid_string_escape_report(type_ctx, filename, &loc)
+        }
         TypeModError::CoreError(TypeCoreError::InvalidStringEscapeSequence { loc }) => UserDiagnostic::new(
             format_compiler_error_report(arena, source, filename, *loc, "Invalid string escape sequence"),
             2,
@@ -4231,16 +4234,9 @@ fn type_mod_error_to_anyhow_styled(
             2,
         )
         .into(),
-        TypeModError::InvalidStringEscape { loc } => UserDiagnostic::new(
-            format_compiler_error_report_from_location(
-                source,
-                filename,
-                loc,
-                "Invalid string escape sequence",
-            ),
-            2,
-        )
-        .into(),
+        TypeModError::InvalidStringEscape { loc } => {
+            invalid_string_escape_report(type_ctx, filename, loc)
+        }
         TypeModError::AstUntaggedVariantError { loc, error } => {
             let message = error.message_text();
             UserDiagnostic::new(
@@ -5763,6 +5759,52 @@ fn read_in_process_source(filename: &str) -> String {
 }
 
 /// An error report preceded by the warnings printed before it.
+/// An error raised once a unit is typed: the warnings reported so far, then
+/// its report (the in-process compiles read the source only to report).
+fn in_process_typed_unit_error<'s>(
+    err: TypeModError,
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &dyn Fn() -> &'s str,
+    filename: &str,
+    warnings: &[TypeCoreWarning],
+) -> anyhow::Error {
+    if !arena.stores_locations() {
+        return LocationRetry::Diagnostic.into();
+    }
+    let prefix = format_type_warnings_lazy(arena, source, filename, warnings);
+    let suppress_info_style =
+        !warnings.is_empty() && !crate::parser::code_frame::should_enable_color();
+    prefix_diagnostic(
+        &prefix,
+        type_mod_error_to_anyhow(err, type_ctx, arena, source(), filename, suppress_info_style),
+    )
+}
+
+/// "Invalid string escape sequence" (ast_payload.ml:39-51) at a declaration
+/// attribute's location, which may be in another unit's source.
+fn invalid_string_escape_report(
+    type_ctx: &TypeContext,
+    filename: &str,
+    loc: &Location,
+) -> anyhow::Error {
+    UserDiagnostic::new(
+        format_compiler_error_report_from_external_location(
+            type_ctx,
+            filename,
+            loc,
+            "Invalid string escape sequence",
+        ),
+        2,
+    )
+    .into()
+}
+
+/// The error a unit-level payload reader raises (ast_payload.ml:39-51).
+fn payload_type_error(error: crate::ast_payload::PayloadError) -> TypeModError {
+    TypeModError::CoreError(crate::types::typemod::invalid_string_escape(error))
+}
+
 fn prefix_diagnostic(prefix: &str, err: anyhow::Error) -> anyhow::Error {
     if prefix.is_empty() {
         return err;
@@ -10883,8 +10925,25 @@ fn compile_source_to_js_with_options_inner(
             &typed_structure.str_type,
             "(inferred signature)",
             &simple_signature,
-        )
-        .map_err(|e| anyhow!("Inferred signature inclusion failed: {e:?}"))?;
+        );
+        // A payload reader's error escapes the inclusion (includecore.ml:45).
+        let implementation_coercion =
+            match crate::types::includemod::escaped(&type_ctx, implementation_coercion) {
+                Ok(coercion) => coercion,
+                Err(e) => {
+                    emit_type_warnings(parser.arena(), source, filename, &tctx.warnings);
+                    return Err(type_mod_error_to_anyhow(
+                        e.into(),
+                        &type_ctx,
+                        parser.arena(),
+                        source,
+                        filename,
+                        !tctx.warnings.is_empty()
+                            && !crate::parser::code_frame::should_enable_color(),
+                    ));
+                }
+            }
+            .map_err(|e| anyhow!("Inferred signature inclusion failed: {e:?}"))?;
         if let Err(e) =
             crate::types::typemod::check_nongen_schemes(&type_ctx, &final_env, &simple_signature)
         {
@@ -11557,7 +11616,7 @@ fn check_compunit_inclusion_for_errors(
     rename_saved_signature_idents(type_ctx, target_sig.as_ref());
 
     let mut inclusion_warnings = Vec::new();
-    match crate::types::includemod::compunit_with_warnings(
+    let inclusion = crate::types::includemod::compunit_with_warnings(
         type_ctx,
         env,
         source_file,
@@ -11566,7 +11625,16 @@ fn check_compunit_inclusion_for_errors(
         &interface_source_name(source_file),
         target_sig.as_ref(),
         &mut inclusion_warnings,
-    ) {
+    );
+    // A payload reader's error escapes the inclusion (includecore.ml:45).
+    let inclusion = match crate::types::includemod::escaped(type_ctx, inclusion) {
+        Ok(inclusion) => inclusion,
+        Err(TypeCoreError::InvalidStringEscapeAt { loc }) => {
+            return Err(invalid_string_escape_report(type_ctx, filename, &loc));
+        }
+        Err(_) => unreachable!("`escaped` only raises an invalid escape"),
+    };
+    match inclusion {
         Ok(coercion) => Ok(Some(CompunitInclusion {
             coercion,
             warnings: inclusion_warnings,
@@ -11975,9 +12043,24 @@ pub fn typecheck_interface_source(
             suppress_info_style,
         ));
     }
-    let _ = crate::types::includemod::compunit(
+    // js_implementation.ml:56: `ignore (Includemod.signatures initial_env sg
+    // sg)` drops the coercion; a payload reader's error escapes it.
+    let self_inclusion = crate::types::includemod::compunit(
         &type_ctx, &env, filename, &sig_type, filename, &sig_type,
     );
+    if let Err(e) = crate::types::includemod::escaped(&type_ctx, self_inclusion) {
+        let suppress_info_style =
+            !tctx.warnings.is_empty() && !crate::parser::code_frame::should_enable_color();
+        emit_type_warnings(parser.arena(), source, filename, &tctx.warnings);
+        return Err(type_mod_error_to_anyhow(
+            e.into(),
+            &type_ctx,
+            parser.arena(),
+            source,
+            filename,
+            suppress_info_style,
+        ));
+    }
     // js_implementation.ml:64 `Delayed_checks.force_delayed_checks ()`.
     tctx.flush_value_usage_checks();
     emit_type_warnings(parser.arena(), source, filename, &tctx.warnings);
@@ -12760,13 +12843,18 @@ fn run_file_level_flags(
     true
 }
 
+/// `Ast_payload.semantic_string_of_payload`, raising its error as a
+/// directive payload error.
 fn extract_single_string_payload(
     payload: &Payload,
     arena: &crate::parse_arena::ParseArena,
-) -> Option<String> {
-    crate::ast_payload::semantic_string_of_payload(arena, payload)
-        .ok()
-        .flatten()
+) -> std::result::Result<Option<String>, DirectivePayloadError> {
+    crate::ast_payload::semantic_string_of_payload(arena, payload).map_err(|error| {
+        DirectivePayloadError {
+            loc: error.loc,
+            message: error.message,
+        }
+    })
 }
 
 fn extract_file_directives_from_structure(
@@ -12783,7 +12871,7 @@ fn extract_file_directives_from_structure(
             continue;
         }
         // ast_config.ml process_directives: read the payload's semantic string.
-        let Some(directive) = extract_single_string_payload(&attr.1, arena) else {
+        let Some(directive) = extract_single_string_payload(&attr.1, arena)? else {
             return Err(DirectivePayloadError {
                 loc: item.pstr_loc,
                 message: "Expected a string literal.",
@@ -14221,16 +14309,29 @@ pub fn compile_preprocessed_structure_in_process_until_js(
                     ),
                 ));
             }
+            let inferred_inclusion = crate::types::includemod::compunit(
+                &type_ctx,
+                &env,
+                filename,
+                &typed_structure.str_type,
+                "(inferred signature)",
+                &simple_signature,
+            );
+            // A payload reader's error escapes the inclusion (includecore.ml:45).
+            let inferred_inclusion =
+                crate::types::includemod::escaped(&type_ctx, inferred_inclusion).map_err(|e| {
+                    in_process_typed_unit_error(
+                        e.into(),
+                        &type_ctx,
+                        arena,
+                        &source,
+                        filename,
+                        &tctx.warnings,
+                    )
+                })?;
             inferred_implementation_coercion = Some(
-                crate::types::includemod::compunit(
-                    &type_ctx,
-                    &env,
-                    filename,
-                    &typed_structure.str_type,
-                    "(inferred signature)",
-                    &simple_signature,
-                )
-                .map_err(|e| anyhow!("Inferred signature inclusion failed: {e:?}"))?,
+                inferred_inclusion
+                    .map_err(|e| anyhow!("Inferred signature inclusion failed: {e:?}"))?,
             );
             if let Err(e) = crate::types::typemod::check_nongen_schemes(
                 &type_ctx,
@@ -14384,12 +14485,24 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         // which Lambda translation reads next (Typeopt expansions).
         let signature_for_save =
             crate::types::typecore::copy_lookup_signature_for_subst(&signature_for_save, &type_ctx);
-        // typemod.ml:1778: `Builtin_attributes.deprecated_of_str ast`.
+        // typemod.ml:1825: `Builtin_attributes.deprecated_of_str ast`, raising
+        // where `string_of_payload` raises.
+        let deprecated =
+            crate::types::typemod::deprecated_of_str(arena, structure).map_err(|error| {
+                in_process_typed_unit_error(
+                    payload_type_error(error),
+                    &type_ctx,
+                    arena,
+                    &source,
+                    filename,
+                    &tctx.warnings,
+                )
+            })?;
         internal_env.register_in_memory_signature(
             module_name,
             signature_for_save,
             filename,
-            crate::types::typemod::deprecated_of_str(arena, structure),
+            deprecated,
             Vec::new(),
             &type_ctx,
         );
@@ -15074,9 +15187,21 @@ pub fn typecheck_preprocessed_signature_in_process(
             type_mod_error_to_anyhow(e, &type_ctx, arena, source(), filename, suppress_info_style),
         ));
     }
-    let _ = crate::types::includemod::compunit(
+    // js_implementation.ml:56: `ignore (Includemod.signatures initial_env sg
+    // sg)` drops the coercion; a payload reader's error escapes it.
+    let self_inclusion = crate::types::includemod::compunit(
         &type_ctx, &env, filename, &sig_type, filename, &sig_type,
     );
+    if let Err(e) = crate::types::includemod::escaped(&type_ctx, self_inclusion) {
+        return Err(in_process_typed_unit_error(
+            e.into(),
+            &type_ctx,
+            arena,
+            &source,
+            filename,
+            &tctx.warnings,
+        ));
+    }
     // js_implementation.ml:64 `Delayed_checks.force_delayed_checks ()`.
     tctx.flush_value_usage_checks();
     let mut located_warnings = None;
@@ -15191,11 +15316,23 @@ pub fn typecheck_preprocessed_signature_in_process(
     }
     strip_saved_extension_locations(&mut saved_signature);
     let crcs = Vec::new();
+    // js_implementation.ml:59: `Builtin_attributes.deprecated_of_sig ast`.
+    let deprecated =
+        crate::types::typemod::deprecated_of_sig(arena, signature).map_err(|error| {
+            in_process_typed_unit_error(
+                payload_type_error(error),
+                &type_ctx,
+                arena,
+                &source,
+                filename,
+                &tctx.warnings,
+            )
+        })?;
     internal_env.register_in_memory_signature(
         module_name,
         saved_signature,
         filename,
-        crate::types::typemod::deprecated_of_sig(arena, signature),
+        deprecated,
         crcs,
         &type_ctx,
     );

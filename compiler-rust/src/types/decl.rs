@@ -675,7 +675,12 @@ pub enum AttributePayload {
     /// Record-form `@deprecated({reason, migrate})` payload with optional
     /// migration metadata (the plain string form is `Str`).
     Deprecated {
-        reason: String,
+        /// The first `reason` field that is a semantic string
+        /// (builtin_attributes.ml:72-78 `List.find_map`): `Ok(None)` when
+        /// there is none, which `deprecated_of_attrs_with_migrate` reads as
+        /// not deprecated; `Err` the location of a template with an invalid
+        /// escape met first, where reading it raises.
+        reason: Result<Option<String>, DeclLoc>,
         can_be_automigrated: bool,
         /// The `migrate` template expression, marshalled in the current
         /// parsetree layout (`Cmt_utils.deprecated_used.migration_template`).
@@ -727,11 +732,40 @@ impl AttributePayload {
     }
 
     /// The location of the template a [`Self::SemanticString`] payload
-    /// failed to decode.
+    /// failed to decode, or a record-form `@deprecated`'s `reason`.
     pub fn invalid_escape_loc_mut(&mut self) -> Option<&mut DeclLoc> {
         match self {
             AttributePayload::SemanticString(payload) => payload.semantic.as_mut().err(),
+            AttributePayload::Deprecated { reason, .. } => reason.as_mut().err(),
             _ => None,
+        }
+    }
+
+    /// `Builtin_attributes.string_of_opt_payload` (builtin_attributes.ml:21-24)
+    /// of a `@deprecated` payload, as `deprecated_of_attrs` reads it: the
+    /// semantic string, or `""` (the record form included); `Err` where
+    /// `string_of_payload` raises.
+    pub fn deprecated_string_of_opt_payload(&self) -> Result<&str, DeclLoc> {
+        Ok(self.semantic_string()?.unwrap_or(""))
+    }
+
+    /// `Builtin_attributes.deprecated_of_attrs_with_migrate`
+    /// (builtin_attributes.ml:68-112) of a `@deprecated` payload: the reason
+    /// and whether a migration template makes it automigratable, `None` for
+    /// a record without a `reason`; `Err` where a reader raises.
+    pub fn deprecated_with_migrate(&self) -> Result<Option<(&str, bool)>, DeclLoc> {
+        match self {
+            AttributePayload::Deprecated {
+                reason,
+                can_be_automigrated,
+                ..
+            } => match reason {
+                Ok(reason) => Ok(reason
+                    .as_deref()
+                    .map(|reason| (reason, *can_be_automigrated))),
+                Err(loc) => Err(*loc),
+            },
+            _ => Ok(Some((self.deprecated_string_of_opt_payload()?, false))),
         }
     }
 }

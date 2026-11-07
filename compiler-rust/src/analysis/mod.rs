@@ -298,6 +298,9 @@ pub fn run(request: &Request, project: &dyn session::Project) -> Result<Vec<u8>,
         }
         [] => return Err("no command".to_string()),
     }
+    if let Some(failure) = cli.session.failure() {
+        return Err(failure);
+    }
     Ok(out.into_bytes())
 }
 
