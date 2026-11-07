@@ -15545,6 +15545,20 @@ mod tests {
         assert_eq!(unformatted, b"let x = 1\r\n");
     }
 
+    /// tests/syntax_tests/data/printer/expr/coerce.res:15-19: a labelled
+    /// parameter's default is a constrained or coerced expression
+    /// (res_core.ml:1931), so the printed defaults, which drop their
+    /// parentheses as OCaml's printer does, parse and print again unchanged.
+    #[test]
+    fn labelled_default_is_constrained_or_coerced() {
+        let source = b"let foo = (~a=(3:int), b) => 34\nlet foo = (~a=(3:>int), b) => 34\nlet foo = (~a=(3:int:>int), b) => 34\n";
+        let printed = "let foo = (~a=3: int, b) => 34\nlet foo = (~a=3 :> int, b) => 34\nlet foo = (~a=(3: int) :> int, b) => 34\n";
+        let formatted = super::format_source(source, "A.res").unwrap();
+        assert_eq!(String::from_utf8_lossy(&formatted), printed);
+        let again = super::format_source(&formatted, "A.res").unwrap();
+        assert_eq!(String::from_utf8_lossy(&again), printed);
+    }
+
     /// GenTypeMain.ml:93-107's walk over a parsed interface whose `"BAD"`
     /// strings are replaced with a PPX's undecodable template `Fo\xo`:
     /// `Ok(ignore_interface)`, or the offset of the template it raised at.

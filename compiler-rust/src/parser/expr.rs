@@ -1174,23 +1174,9 @@ fn parse_parameter(p: &mut Parser<'_>) -> Option<super::core::FundefParameter> {
                 p.next();
                 (label, pat, None)
             } else {
-                let expr = parse_expr(p);
-                // Check for type annotation after default: ~name = default : type
-                // The type constraint goes on the expression, not the pattern
-                let expr = if p.token == Token::Colon {
-                    p.next();
-                    let typ = super::typ::parse_typ_expr(p);
-                    let loc = p.mk_loc_spanning(expr.pexp_loc, typ.ptyp_loc);
-                    let expr_idx = p.arena_mut().push_expr(expr);
-                    let typ_idx = p.arena_mut().push_core_type(typ);
-                    Expression {
-                        pexp_desc: ExpressionDesc::Pexp_constraint(Box::new((expr_idx, typ_idx))),
-                        pexp_loc: loc,
-                        pexp_attributes: Attributes::new(),
-                    }
-                } else {
-                    expr
-                };
+                // res_core.ml:1931: the default is a constrained or coerced
+                // expression (`~a=3: int`, `~a=3 :> int`, `~a=(3: int) :> int`).
+                let expr = parse_constrained_or_coerced_expr(p);
 
                 // OCaml typecore rewrites optional defaults through a synthetic
                 // ghost span from lhs start to default end. Seed that span here
