@@ -2834,7 +2834,9 @@ fn normalize_module_path_through_components(
             let parent =
                 normalize_module_path_through_components(ctx, load_paths, parent, visiting)
                     .unwrap_or_else(|| (**parent).clone());
-            Path::Pdot(std::sync::Arc::new(parent), *name, *pos)
+            // env.ml:868-870 rebuilds the dot but keeps its suffix string.
+            let _ = (name, pos);
+            ctx.copy_dotted_with_prefix(module_path, std::sync::Arc::new(parent))
         }
         Path::Papply(functor, arg) => {
             let functor =
@@ -3931,7 +3933,8 @@ fn normalize_path_full_inner(
             if p_norm == **p {
                 path.clone()
             } else {
-                Path::Pdot(std::sync::Arc::new(p_norm), *s, *pos)
+                let _ = (s, pos);
+                ctx.copy_dotted_with_prefix(path, std::sync::Arc::new(p_norm))
             }
         }
         Path::Papply(p1, p2) => {
@@ -13675,14 +13678,20 @@ fn normalize_type_rec(
         // declaration instead of the `#row` type.
         let renamed = match &*ctx.get_desc(tm) {
             TypeDesc::Tconstr {
-                path: Path::Pdot(m, i, pos),
+                path: path @ Path::Pdot(m, i, pos),
                 args,
                 ..
             } => {
                 let i = i.as_str();
                 let i_prime = &i[..i.len() - 4];
+                // `String.sub` allocates a fresh suffix string (ctype.ml:4061);
+                // keep the original prefix allocation, never a tracked carrier
+                // reused for another suffix.
+                let prefix = ctx
+                    .dotted_allocation(path)
+                    .map_or_else(|| m.clone(), |allocation| allocation.prefix);
                 TypeDesc::Tconstr {
-                    path: Path::Pdot(m.clone(), crate::name::Name::new(i_prime), *pos),
+                    path: Path::Pdot(prefix, crate::name::Name::new(i_prime), *pos),
                     args: args.clone(),
                     abbrev: ctx.alloc_abbrev_nil(),
                     path_block: crate::types::type_expr::PathBlock::OWN,
@@ -14217,6 +14226,46 @@ mod tests {
     use crate::types::decl::{
         ModuleDeclaration, ModuleType, RecStatus, SignatureItem, TypeDeclaration, TypeKind,
     };
+
+    #[test]
+    fn private_row_rename_keeps_prefix_without_reusing_a_tracked_carrier() {
+        let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
+        let root = std::sync::Arc::new(Path::Pident(ctx.create_ident("M")));
+        let row_id = ctx.create_ident("t#row");
+        let row_path = ctx.dotted_from_ident(root.clone(), row_id, crate::types::path::NOPOS);
+        let row_more = ctx.new_constr(row_path, vec![]);
+        let ty = ctx.new_type(TypeDesc::Tvariant(Box::new(
+            crate::types::type_expr::RowDesc {
+                row_fields: Vec::new().into(),
+                row_more,
+                row_closed: false,
+                row_fixed: false,
+                row_name: None,
+            },
+        )));
+        normalize_type(&ctx, &super::super::env::Env::empty(), ty);
+        // ctype.ml:4065 renames the variant node itself.
+        let desc = ctx.get_desc(ctx.repr(ty));
+        let TypeDesc::Tconstr {
+            path: Path::Pdot(prefix, name, _),
+            ..
+        } = &*desc
+        else {
+            panic!("renamed constructor")
+        };
+        assert_eq!(name.as_str(), "t");
+        // ctype.ml:4058-4065 shares the original prefix; the suffix is a fresh
+        // `String.sub` string, so the renamed dot carries no suffix evidence.
+        assert!(std::sync::Arc::ptr_eq(prefix, &root));
+        assert!(ctx.dotted_allocation(&desc_path(&desc)).is_none());
+    }
+
+    fn desc_path(desc: &TypeDesc) -> Path {
+        match desc {
+            TypeDesc::Tconstr { path, .. } => path.clone(),
+            _ => unreachable!(),
+        }
+    }
 
     #[test]
     fn qualified_and_rebound_declarations_keep_binder_name_allocations() {
