@@ -13,10 +13,12 @@ fn expression(owner: &mut IndexedJsConsumer<'_>, node: NodeId) -> Compiled {
         NodeView::Const(value) => Compiled {
             prelude: vec![],
             expr: LambdaCompiler::compile_constant(value),
+            finished: OutputFinished::False,
         },
         NodeView::Var(id) => Compiled {
             prelude: vec![],
             expr: Expression::var(*id),
+            finished: OutputFinished::False,
         },
         NodeView::GlobalModule(id) => Compiled {
             prelude: vec![],
@@ -28,6 +30,7 @@ fn expression(owner: &mut IndexedJsConsumer<'_>, node: NodeId) -> Compiled {
                 },
                 None,
             ),
+            finished: OutputFinished::False,
         },
         NodeView::Apply(..) => owner.application(node, &mut expression),
         NodeView::Prim(..) => owner.primitive(node, &mut expression),

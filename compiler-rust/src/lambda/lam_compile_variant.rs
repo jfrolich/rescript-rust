@@ -6,9 +6,7 @@
 use super::js_exp_make::{ocaml_typeof_expr, raw_typeof_comparison};
 use super::js_stmt_make::block_terminates;
 use super::lam_coercion::push_s_if_empty;
-use super::lam_compile::{
-    Compiled, LambdaCompiler, TailLoopState,
-};
+use super::lam_compile::{Compiled, LambdaCompiler, OutputFinished, TailLoopState};
 use crate::ident::Ident;
 use crate::js_ir::op::{IdentInfo, Number};
 use crate::js_ir::{
@@ -138,6 +136,7 @@ impl LambdaCompiler {
             return Compiled {
                 prelude,
                 expr: Expression::var(tmp),
+                finished: OutputFinished::False,
             };
         }
         self.with_switch_depth(|this| this.compile_switch_inner(scrut, switch))
@@ -176,6 +175,7 @@ impl LambdaCompiler {
             return Compiled {
                 prelude,
                 expr: Expression::var(tmp),
+                finished: OutputFinished::False,
             };
         }
 
@@ -234,6 +234,7 @@ impl LambdaCompiler {
         Compiled {
             prelude,
             expr: Expression::var(tmp),
+            finished: OutputFinished::False,
         }
     }
 
@@ -294,6 +295,7 @@ impl LambdaCompiler {
             return Compiled {
                 prelude,
                 expr: Expression::var(tmp),
+                finished: OutputFinished::False,
             };
         }
 
@@ -344,6 +346,7 @@ impl LambdaCompiler {
         Compiled {
             prelude,
             expr: Expression::var(tmp),
+            finished: OutputFinished::False,
         }
     }
 

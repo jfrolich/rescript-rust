@@ -48,6 +48,7 @@ impl IndexedJsConsumer<'_> {
         Compiled {
             prelude: output.block,
             expr: output.value.expect("NeedValue short circuit"),
+            finished: OutputFinished::False,
         }
     }
 

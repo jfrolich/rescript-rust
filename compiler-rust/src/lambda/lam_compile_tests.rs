@@ -8682,3 +8682,129 @@ mod lam_compile_external_tests;
 mod lam_compile_integration_tests;
 mod lam_compile_staticcatch_tests;
 mod lam_compile_switch_tests;
+
+fn raise_boom() -> Lambda {
+    Lambda::prim(
+        Primitive::Praise,
+        vec![Lambda::const_(Constant::string("boom"))],
+        LamLoc::NONE,
+    )
+}
+
+/// A static catch, which allocates an `exit` identifier when compiled.
+fn allocating_catch() -> Lambda {
+    Lambda::LstaticCatch(
+        Box::new(Lambda::LstaticRaise(7, vec![])),
+        (7, vec![]),
+        Box::new(Lambda::const_(Constant::int(1))),
+    )
+}
+
+/// The stamp the next fresh identifier gets after compiling `compile`.
+fn next_stamp_after(compile: impl FnOnce(&mut LambdaCompiler)) -> i32 {
+    let mut compiler = LambdaCompiler::new();
+    compile(&mut compiler);
+    compiler.fresh_ident("probe").stamp()
+}
+
+/// js_output.ml:118-138 `append_output`, through lam_compile.ml:1867-1877
+/// (`Llet`) and 1905-1910 (`Lsequence`): a raise finishes the output in an
+/// `Assign`, `Declare` or `EffectCall` continuation, and what follows is
+/// dropped from the JavaScript but still compiled, so it allocates the
+/// identifiers it would have allocated.
+#[test]
+fn finished_output_drops_but_compiles_what_follows() {
+    let result = Ident::create_local("result");
+    let bound = Ident::create_local("bound");
+    let seq = Lambda::seq(raise_boom(), allocating_catch());
+    let let_ = Lambda::let_(LetKind::Strict, bound, raise_boom(), allocating_catch());
+
+    for lam in [&seq, &let_] {
+        let mut compiler = LambdaCompiler::new();
+        let assign = compiler.compile_assign_to_target_output(&result, lam);
+        assert_eq!(assign.finished, OutputFinished::True);
+        let [stmt] = assign.block.as_slice() else {
+            panic!("expected only the throw, got {:?}", assign.block);
+        };
+        assert!(matches!(stmt.desc, StatementDesc::Throw(_)));
+
+        let effect = LambdaCompiler::new().compile_effect_block_output(lam);
+        assert_eq!(effect.finished, OutputFinished::True);
+        assert_eq!(effect.block.len(), 1);
+
+        let declare =
+            LambdaCompiler::new().compile_let_binding_output(LetKind::Strict, &result, lam);
+        assert_eq!(declare.finished, OutputFinished::True);
+        assert_eq!(declare.block.len(), 1);
+
+        let compiled = LambdaCompiler::new().compile_expr(lam);
+        assert_eq!(compiled.finished, OutputFinished::True);
+    }
+
+    // The dropped catch still allocated its `exit` identifier.
+    let raise_only = next_stamp_after(|c| {
+        c.compile_assign_to_target_output(&result, &raise_boom());
+    });
+    let raise_then_catch = next_stamp_after(|c| {
+        c.compile_assign_to_target_output(&result, &seq);
+    });
+    assert!(raise_then_catch > raise_only);
+}
+
+/// lam_compile.ml:1063-1101: a static catch is `append_output (make
+/// declares) (append_output lbody (make cases))`, so a body that raises
+/// finishes the catch, and its handler is compiled and dropped.
+#[test]
+fn static_catch_carries_its_body_finished_flag() {
+    let result = Ident::create_local("result");
+    let catch = Lambda::LstaticCatch(
+        Box::new(raise_boom()),
+        (3, vec![]),
+        Box::new(allocating_catch()),
+    );
+    let mut compiler = LambdaCompiler::new();
+    let output = compiler.compile_assign_to_target_output(&result, &catch);
+    assert_eq!(output.finished, OutputFinished::True);
+    assert!(
+        !output
+            .block
+            .iter()
+            .any(|stmt| matches!(stmt.desc, StatementDesc::If(..))),
+        "the handler dispatch is dropped: {:?}",
+        output.block
+    );
+    let without_handler_allocation = next_stamp_after(|c| {
+        c.compile_assign_to_target_output(
+            &result,
+            &Lambda::LstaticCatch(
+                Box::new(raise_boom()),
+                (3, vec![]),
+                Box::new(Lambda::const_(Constant::int(1))),
+            ),
+        );
+    });
+    let with_handler_allocation = next_stamp_after(|c| {
+        c.compile_assign_to_target_output(&result, &catch);
+    });
+    assert!(with_handler_allocation > without_handler_allocation);
+}
+
+/// Only `Praise`, `Lbreak` and `Lcontinue` finish an output outside a return
+/// (lam_compile.ml:1682, 1934, 1949): an `if` whose branches both raise is
+/// a plain `make`, so what follows it is kept.
+#[test]
+fn conditional_of_raises_is_not_finished() {
+    let result = Ident::create_local("result");
+    let cond = Ident::create_local("cond");
+    let lam = Lambda::seq(
+        Lambda::if_(Lambda::var(cond), raise_boom(), raise_boom()),
+        Lambda::const_(Constant::int(2)),
+    );
+    let output = LambdaCompiler::new().compile_assign_to_target_output(&result, &lam);
+    assert_eq!(output.finished, OutputFinished::False);
+    assert!(
+        output.block.len() >= 2,
+        "the assignment is kept: {:?}",
+        output.block
+    );
+}

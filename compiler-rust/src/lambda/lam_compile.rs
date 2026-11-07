@@ -69,11 +69,66 @@ use super::lam_coercion::{
 };
 use super::lam_compile_variant::{empty_switch_case_clause, stable_group_switch_cases};
 
-/// Compilation result for an expression: prelude statements plus a value expression.
+/// `Js_output.finished` (compiler/core/js_output.ml:28-31): whether a
+/// compiled output's control has left (a `throw` from `Praise`, a `break`,
+/// a `continue`, or a `return` in a return continuation), so that
+/// `append_output` drops what is appended after it; `Dummy` is
+/// `Js_output.dummy`'s.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OutputFinished {
+    True,
+    False,
+    Dummy,
+}
+
+/// A `Js_output.t` whose value is `None`: what OCaml's statement
+/// continuations (`Declare`, `Assign`, `EffectCall`) produce.
+#[derive(Debug, Clone)]
+pub(crate) struct BlockOutput {
+    pub(crate) block: Block,
+    pub(crate) finished: OutputFinished,
+}
+
+impl BlockOutput {
+    /// `Js_output.make block`.
+    pub(crate) fn make(block: Block) -> Self {
+        Self {
+            block,
+            finished: OutputFinished::False,
+        }
+    }
+
+    /// `Js_output.append_output` (js_output.ml:118-138) of two outputs
+    /// without a value: a finished first output is kept as it is, an empty
+    /// `dummy` second one is dropped, an empty first one gives the second,
+    /// and otherwise the blocks are joined under the second's flag. Both
+    /// outputs are compiled before this is called, as in OCaml.
+    pub(crate) fn append(self, next: Self) -> Self {
+        if self.finished == OutputFinished::True
+            || (next.block.is_empty() && next.finished == OutputFinished::Dummy)
+        {
+            return self;
+        }
+        if self.block.is_empty() {
+            return next;
+        }
+        let mut block = self.block;
+        block.extend(next.block);
+        Self {
+            block,
+            finished: next.finished,
+        }
+    }
+}
+
+/// Compilation result for an expression: prelude statements plus a value
+/// expression, and the `output_finished` flag of the `Js_output.t` that
+/// OCaml's `compile_lambda` returns for it.
 #[derive(Debug, Clone)]
 pub(crate) struct Compiled {
     pub(crate) prelude: Block,
     pub(crate) expr: Expression,
+    pub(crate) finished: OutputFinished,
 }
 
 /// Owner-private result of inspecting one indexed external-field application.
@@ -1112,6 +1167,7 @@ impl LambdaCompiler {
                 args,
                 call_info_of_apply_status(apply.ap_info.status),
             ),
+            finished: OutputFinished::False,
         }
     }
 
@@ -1351,7 +1407,11 @@ impl LambdaCompiler {
                 _ => Expression::call(func, args, CallInfo::default()),
             },
         };
-        Some(Compiled { prelude, expr })
+        Some(Compiled {
+            prelude,
+            expr,
+            finished: OutputFinished::False,
+        })
     }
 
     fn apply_with_arity(
@@ -1518,6 +1578,7 @@ impl LambdaCompiler {
         let Compiled {
             mut prelude,
             expr: init_expr,
+            ..
         } = self.compile_expr(init);
         let mut props = Vec::with_capacity(overrides.len());
         for (field_info, override_lam) in overrides {
@@ -1542,6 +1603,7 @@ impl LambdaCompiler {
                     props,
                 )))
             },
+            finished: OutputFinished::False,
         })
     }
 
@@ -1550,6 +1612,7 @@ impl LambdaCompiler {
             Lambda::Lvar(id) => Compiled {
                 prelude: vec![],
                 expr: Expression::var(*id),
+                finished: OutputFinished::False,
             },
             Lambda::LglobalModule(id) => {
                 let module = ModuleId {
@@ -1560,11 +1623,13 @@ impl LambdaCompiler {
                 Compiled {
                     prelude: vec![],
                     expr: Expression::qualified(module, None),
+                    finished: OutputFinished::False,
                 }
             }
             Lambda::Lconst(cst) => Compiled {
                 prelude: vec![],
                 expr: Self::compile_constant(cst),
+                finished: OutputFinished::False,
             },
             Lambda::Lapply(apply) => {
                 let mut compiled = self.compile_apply_call(apply);
@@ -1578,6 +1643,7 @@ impl LambdaCompiler {
                     return Compiled {
                         prelude: vec![],
                         expr,
+                        finished: OutputFinished::False,
                     };
                 }
                 let params = if func.attr.one_unit_arg {
@@ -1611,6 +1677,7 @@ impl LambdaCompiler {
                 Compiled {
                     prelude: vec![],
                     expr,
+                    finished: OutputFinished::False,
                 }
             }
             Lambda::Llet(kind, id, value, body) => {
@@ -1635,24 +1702,29 @@ impl LambdaCompiler {
                     Lambda::Lprim(prim)
                         if matches!(prim.primitive, Primitive::Pmakeblock(TagInfo::ModuleExport(_), _))
                 );
-                let mut prelude = if is_top_level_let {
+                let binding = if is_top_level_let {
                     self.with_fresh_loop_label_counter(|this| {
-                        this.compile_let_binding(*kind, id, value)
+                        this.compile_let_binding_output(*kind, id, value)
                     })
                 } else {
-                    self.compile_let_binding(*kind, id, value)
+                    self.compile_let_binding_output(*kind, id, value)
                 };
+                // lam_compile.ml:1867-1877: the body is compiled, then
+                // `append_output` keeps a finished binding alone.
                 let body_compiled = self.compile_expr(body);
-                if block_terminates(&prelude) {
+                let mut prelude = binding.block;
+                if binding.finished == OutputFinished::True {
                     return Compiled {
                         prelude,
                         expr: body_compiled.expr,
+                        finished: OutputFinished::True,
                     };
                 }
                 prelude.extend(body_compiled.prelude);
                 Compiled {
                     prelude,
                     expr: body_compiled.expr,
+                    finished: body_compiled.finished,
                 }
             }
             Lambda::Lletrec(bindings, body) => {
@@ -1678,6 +1750,7 @@ impl LambdaCompiler {
                 Compiled {
                     prelude,
                     expr: body_compiled.expr,
+                    finished: body_compiled.finished,
                 }
             }
             Lambda::Lprim(info) => {
@@ -1705,10 +1778,11 @@ impl LambdaCompiler {
                 self.compile_string_switch(scrut, cases, default.as_deref())
             }
             Lambda::LstaticRaise(id, args) => {
-                if let Some(prelude) = self.compile_static_raise_jump_block(*id, args) {
+                if let Some(output) = self.compile_static_raise_jump_output(*id, args) {
                     return Compiled {
-                        prelude,
+                        prelude: output.block,
                         expr: Expression::undefined(false),
+                        finished: output.finished,
                     };
                 }
                 if let Some(handler) = self.resolve_static_raise(*id, args) {
@@ -1722,6 +1796,7 @@ impl LambdaCompiler {
                 Compiled {
                     prelude: vec![Statement::throw(expr)],
                     expr: Expression::undefined(false),
+                    finished: OutputFinished::False,
                 }
             }
             Lambda::LstaticCatch(body, (label, bindings), handler) => {
@@ -1756,6 +1831,7 @@ impl LambdaCompiler {
                     Compiled {
                         prelude,
                         expr: Expression::var(result),
+                        finished: OutputFinished::False,
                     }
                 } else {
                     self.compile_staticcatch_expr(*label, bindings, body, handler)
@@ -1775,6 +1851,7 @@ impl LambdaCompiler {
                 Compiled {
                     prelude,
                     expr: Expression::var(result),
+                    finished: OutputFinished::False,
                 }
             }
             Lambda::LtryFinally(body, finally) => {
@@ -1791,6 +1868,7 @@ impl LambdaCompiler {
                 Compiled {
                     prelude,
                     expr: Expression::var(result),
+                    finished: OutputFinished::False,
                 }
             }
             Lambda::LifThenElse(cond, then_, else_) => {
@@ -1806,6 +1884,7 @@ impl LambdaCompiler {
                             then_compiled.expr,
                             else_compiled.expr,
                         ),
+                        finished: OutputFinished::False,
                     }
                 } else {
                     let tmp = self.fresh_tmp_ident();
@@ -1821,6 +1900,7 @@ impl LambdaCompiler {
                     Compiled {
                         prelude,
                         expr: Expression::var(tmp),
+                        finished: OutputFinished::False,
                     }
                 }
             }
@@ -1843,15 +1923,8 @@ impl LambdaCompiler {
                 } else {
                     self.compile_effect_output(a)
                 };
-                // OCaml's Lbreak / Lcontinue compile to `Js_output.make ...
-                // ~output_finished:True` (compiler/core/lam_compile.ml:1928,
-                // 1943). `Js_output.append_output` then drops the tail's
-                // contribution when the head is finished. Mirror that here:
-                // when the sequence head is an exit terminator, skip typing
-                // the tail entirely — its statements are unreachable.
-                if lambda_is_unconditional_exit(a) {
-                    return first;
-                }
+                // lam_compile.ml:1905-1910: both parts are compiled, then
+                // `append_output` drops the second after a finished first.
                 let second = self.compile_expr(b);
                 self.append_effect_output(first, second)
             }
@@ -1869,6 +1942,7 @@ impl LambdaCompiler {
                 Compiled {
                     prelude: vec![Statement::while_with_label(label, cond_expr, body_block)],
                     expr: Expression::undefined(false),
+                    finished: OutputFinished::False,
                 }
             }
             Lambda::Lfor(var, start, end, dir, body) => {
@@ -1899,9 +1973,11 @@ impl LambdaCompiler {
                 } else {
                     Statement::break_()
                 };
+                // lam_compile.ml:1934, 1949: `~output_finished:True`.
                 Compiled {
                     prelude: vec![stmt],
                     expr: Expression::undefined(false),
+                    finished: OutputFinished::True,
                 }
             }
             Lambda::Lcontinue => {
@@ -1915,9 +1991,11 @@ impl LambdaCompiler {
                 } else {
                     Statement::continue_()
                 };
+                // lam_compile.ml:1934, 1949: `~output_finished:True`.
                 Compiled {
                     prelude: vec![stmt],
                     expr: Expression::undefined(false),
+                    finished: OutputFinished::True,
                 }
             }
             Lambda::Lassign(id, value) => {
@@ -1933,6 +2011,7 @@ impl LambdaCompiler {
                 Compiled {
                     prelude,
                     expr: Expression::undefined(false),
+                    finished: OutputFinished::False,
                 }
             }
         }
@@ -2053,6 +2132,7 @@ impl LambdaCompiler {
             return Compiled {
                 prelude,
                 expr: Expression::undefined(false),
+                finished: OutputFinished::False,
             };
         }
 
@@ -2079,6 +2159,7 @@ impl LambdaCompiler {
                 return Compiled {
                     prelude,
                     expr: Expression::undefined(false),
+                    finished: OutputFinished::False,
                 };
             }
             push_loop(
@@ -2098,6 +2179,7 @@ impl LambdaCompiler {
                 return Compiled {
                     prelude,
                     expr: Expression::undefined(false),
+                    finished: OutputFinished::False,
                 };
             }
             push_loop(&mut prelude, None, finish_compiled.expr);
@@ -2106,6 +2188,7 @@ impl LambdaCompiler {
         Compiled {
             prelude,
             expr: Expression::undefined(false),
+            finished: OutputFinished::False,
         }
     }
 
@@ -2129,6 +2212,7 @@ impl LambdaCompiler {
             return Compiled {
                 prelude,
                 expr: Expression::undefined(false),
+                finished: OutputFinished::False,
             };
         }
 
@@ -2157,6 +2241,7 @@ impl LambdaCompiler {
         Compiled {
             prelude,
             expr: Expression::undefined(false),
+            finished: OutputFinished::False,
         }
     }
 
@@ -2470,14 +2555,23 @@ impl LambdaCompiler {
     }
 
     fn compile_let_binding(&mut self, kind: LetKind, id: &Ident, value: &Lambda) -> Block {
+        self.compile_let_binding_output(kind, id, value).block
+    }
+
+    /// `compile_lambda {cxt with continuation = Declare (kind, id)} value`.
+    fn compile_let_binding_output(
+        &mut self,
+        kind: LetKind,
+        id: &Ident,
+        value: &Lambda,
+    ) -> BlockOutput {
         match value {
             Lambda::Llet(inner_kind, inner_id, inner_value, body) => {
-                let mut block = self.compile_let_binding(*inner_kind, inner_id, inner_value);
-                if block_terminates(&block) {
-                    return block;
-                }
-                block.extend(self.compile_let_binding(kind, id, body));
-                block
+                // lam_compile.ml:1867-1877: compile the binding, then the
+                // body, then `append_output`.
+                let binding = self.compile_let_binding_output(*inner_kind, inner_id, inner_value);
+                let body = self.compile_let_binding_output(kind, id, body);
+                binding.append(body)
             }
             Lambda::LstaticCatch(body, (label, bindings), handler) => {
                 // OCaml's `compile_staticcatch` (lam_compile.ml:937-1017)
@@ -2488,35 +2582,30 @@ impl LambdaCompiler {
                 // unconditionally. Take that path here; the
                 // `with_static_handler` inline shortcut is a Rust-only
                 // optimization with no OCaml analog for `Declare`.
-                let mut block = vec![Statement::variable(VariableDeclaration {
-                    ident: *id,
-                    value: None,
-                    property: kind,
-                    ident_info: IdentInfo::default(),
-                })];
+                let declaration =
+                    BlockOutput::make(vec![Statement::variable(VariableDeclaration {
+                        ident: *id,
+                        value: None,
+                        property: kind,
+                        ident_info: IdentInfo::default(),
+                    })]);
                 let (handlers, flat_body) = flatten_nested_caches(*label, bindings, body, handler);
-                if handlers.len() > 1 {
+                let catch = if handlers.len() > 1 {
                     // lam_compile.ml:935 + 989-996 — `Declare (kind, id)`
                     // with flattened multi-handler code_table.
-                    block.extend(
-                        self.compile_multi_staticcatch_assignment_block(id, &handlers, flat_body),
-                    );
+                    self.compile_multi_staticcatch_assignment_output(id, &handlers, flat_body)
                 } else {
-                    block.extend(
-                        self.compile_staticcatch_assignment_block(
-                            id, *label, bindings, body, handler,
-                        ),
-                    );
-                }
-                block
+                    self.compile_staticcatch_assignment_output(id, *label, bindings, body, handler)
+                };
+                declaration.append(catch)
             }
             Lambda::LifThenElse(cond, then_, else_) => {
-                self.compile_if_binding_block(kind, id, cond, then_, else_)
+                BlockOutput::make(self.compile_if_binding_block(kind, id, cond, then_, else_))
             }
             Lambda::LtryWith(body, exn, handler) => {
                 let body_block = self.compile_assign_to_target_block(id, body);
                 let handler_block = self.compile_assign_to_target_block(id, handler);
-                vec![
+                BlockOutput::make(vec![
                     Statement::variable(VariableDeclaration {
                         ident: *id,
                         value: None,
@@ -2524,13 +2613,13 @@ impl LambdaCompiler {
                         ident_info: IdentInfo::default(),
                     }),
                     self.try_statement(body_block, exn, handler_block),
-                ]
+                ])
             }
             Lambda::LtryFinally(body, finally) => {
                 let try_statement = self.compile_try_finally(body, finally, |this, lam| {
                     this.compile_assign_to_target_block(id, lam)
                 });
-                vec![
+                BlockOutput::make(vec![
                     Statement::variable(VariableDeclaration {
                         ident: *id,
                         value: None,
@@ -2538,7 +2627,7 @@ impl LambdaCompiler {
                         ident_info: IdentInfo::default(),
                     }),
                     try_statement,
-                ]
+                ])
             }
             Lambda::Lsequence(first, second) => {
                 // OCaml compiler/core/lam_compile.ml:1862-1869 compiles an
@@ -2549,49 +2638,35 @@ impl LambdaCompiler {
                 // compiler/core/js_stmt_make.ml:62-67 turn a final unit
                 // `Undefined` into `let id;` instead of binding a
                 // `(effect, undefined)` expression.
-                let mut block = self.compile_effect_block(first);
-                if lambda_is_unconditional_exit(first) || block_finishes_output(&block) {
-                    return block;
-                }
-                block.extend(self.compile_let_binding(kind, id, second));
-                block
+                // lam_compile.ml:1905-1910: both parts are compiled first.
+                let first = self.compile_effect_block_output(first);
+                let second = self.compile_let_binding_output(kind, id, second);
+                first.append(second)
             }
             Lambda::Lswitch(scrut, switch) => {
-                self.compile_switch_binding_block(kind, id, scrut, switch)
+                BlockOutput::make(self.compile_switch_binding_block(kind, id, scrut, switch))
             }
             Lambda::LstringSwitch(scrut, cases, default) => {
-                self.compile_string_switch_binding_block(kind, id, scrut, cases, default.as_deref())
+                BlockOutput::make(self.compile_string_switch_binding_block(
+                    kind,
+                    id,
+                    scrut,
+                    cases,
+                    default.as_deref(),
+                ))
             }
             Lambda::Lprim(info) => {
                 if let Some((op, lhs, rhs)) = short_circuit_primitive(&info.primitive, &info.args) {
-                    return self.compile_short_circuit_binding_block(kind, id, op, lhs, rhs);
+                    return BlockOutput::make(
+                        self.compile_short_circuit_binding_block(kind, id, op, lhs, rhs),
+                    );
                 }
                 let value_compiled = self.compile_expr(value);
-                let mut block = value_compiled.prelude;
-                if block_terminates(&block) {
-                    return block;
-                }
-                block.push(Statement::variable(VariableDeclaration {
-                    ident: *id,
-                    value: Some(value_compiled.expr),
-                    property: kind,
-                    ident_info: IdentInfo::default(),
-                }));
-                block
+                declare_compiled(kind, id, value_compiled)
             }
             _ => {
                 let value_compiled = self.compile_expr(value);
-                let mut block = value_compiled.prelude;
-                if block_terminates(&block) {
-                    return block;
-                }
-                block.push(Statement::variable(VariableDeclaration {
-                    ident: *id,
-                    value: Some(value_compiled.expr),
-                    property: kind,
-                    ident_info: IdentInfo::default(),
-                }));
-                block
+                declare_compiled(kind, id, value_compiled)
             }
         }
     }
@@ -2604,7 +2679,17 @@ impl LambdaCompiler {
         // result doesn't hide its literal-last terminal from the outer
         // `block_last_is_return_throw_or_continue` check
         // (js_stmt_make.ml:186-193).
-        unnest_block(self.compile_effect_block_inner(lam))
+        self.compile_effect_block_output(lam).block
+    }
+
+    /// `compile_lambda {cxt with continuation = EffectCall Not_tail} lam`,
+    /// with the output's `finished` flag.
+    pub(crate) fn compile_effect_block_output(&mut self, lam: &Lambda) -> BlockOutput {
+        let output = self.compile_effect_block_inner(lam);
+        BlockOutput {
+            block: unnest_block(output.block),
+            finished: output.finished,
+        }
     }
 
     /// A grouped switch case that falls through to the next one. OCaml still
@@ -2628,50 +2713,37 @@ impl LambdaCompiler {
         block
     }
 
-    fn compile_effect_block_inner(&mut self, lam: &Lambda) -> Block {
+    fn compile_effect_block_inner(&mut self, lam: &Lambda) -> BlockOutput {
         match lam {
             Lambda::Llet(kind, id, value, body) => {
                 if let Some(compiled) = self.try_compile_record_spread(id, value, body) {
                     let mut block = compiled.prelude;
                     push_effect_expression(&mut block, compiled.expr);
-                    return block;
+                    return BlockOutput::make(block);
                 }
-
-                let mut block = self.compile_let_binding(*kind, id, value);
-                // Mirror OCaml's output_finished:True from Lbreak/Lcontinue:
-                // if the binding's RHS is an unconditional exit, the body is
-                // unreachable and must not be emitted. block_finishes_output
-                // only recognises Return/Throw (Break/Continue inside a switch
-                // case must not terminate the enclosing block), so check the
-                // Lambda form directly.
-                if lambda_is_unconditional_exit(value) || block_finishes_output(&block) {
-                    return block;
-                }
-                block.extend(self.compile_effect_block(body));
-                block
+                // lam_compile.ml:1867-1877: compile the binding, then the
+                // body, then `append_output`.
+                let binding = self.compile_let_binding_output(*kind, id, value);
+                let body = self.compile_effect_block_output(body);
+                binding.append(body)
             }
             Lambda::Lletrec(bindings, body) => {
                 // Mirror OCaml's Lletrec arm (lam_compile.ml:1770-1783): emit
                 // bindings then compile body in the SAME continuation. The
                 // catch-all `_ => compile_expr(lam)` would force the body
                 // through `NeedValue`, losing the effect/tail context.
-                let mut block = self.compile_recursive_bindings(bindings);
-                if block_finishes_output(&block) {
-                    return block;
-                }
-                block.extend(self.compile_effect_block(body));
-                block
+                let bindings = BlockOutput::make(self.compile_recursive_bindings(bindings));
+                let body = self.compile_effect_block_output(body);
+                bindings.append(body)
             }
             Lambda::LifThenElse(cond, then_, else_) => {
-                self.compile_if_effect_block(cond, then_, else_)
+                BlockOutput::make(self.compile_if_effect_block(cond, then_, else_))
             }
             Lambda::Lsequence(first, second) => {
-                let mut block = self.compile_effect_block(first);
-                if lambda_is_unconditional_exit(first) || block_finishes_output(&block) {
-                    return block;
-                }
-                block.extend(self.compile_effect_block(second));
-                block
+                // lam_compile.ml:1905-1910: both parts are compiled first.
+                let first = self.compile_effect_block_output(first);
+                let second = self.compile_effect_block_output(second);
+                first.append(second)
             }
             Lambda::LstaticCatch(body, (label, bindings), handler) => {
                 // OCaml's `compile_staticcatch` (lam_compile.ml:937-1017) only
@@ -2687,26 +2759,36 @@ impl LambdaCompiler {
                 if handlers.len() > 1 {
                     // lam_compile.ml:935 + 1000-1010 — `EffectCall Not_tail`
                     // with flattened multi-handler code_table.
-                    self.compile_multi_staticcatch_effect_block(&handlers, flat_body)
+                    self.compile_multi_staticcatch_effect_output(&handlers, flat_body)
                 } else {
-                    self.compile_staticcatch_effect_block(*label, bindings, body, handler)
+                    self.compile_staticcatch_effect_output(*label, bindings, body, handler)
                 }
             }
             Lambda::LtryWith(body, exn, handler) => {
                 let body_block = self.compile_effect_block(body);
                 let handler_block = self.compile_effect_block(handler);
-                vec![self.try_statement(body_block, exn, handler_block)]
+                BlockOutput::make(vec![self.try_statement(body_block, exn, handler_block)])
             }
             Lambda::LtryFinally(body, finally) => {
-                vec![self.compile_try_finally(body, finally, |this, lam| this.compile_effect_block(lam))]
+                BlockOutput::make(vec![self.compile_try_finally(
+                    body,
+                    finally,
+                    |this, lam| this.compile_effect_block(lam),
+                )])
             }
-            Lambda::Lswitch(scrut, switch) => self.compile_switch_effect_block(scrut, switch),
-            Lambda::LstringSwitch(scrut, cases, default) => {
-                self.compile_string_switch_effect_block(scrut, cases, default.as_deref())
+            Lambda::Lswitch(scrut, switch) => {
+                BlockOutput::make(self.compile_switch_effect_block(scrut, switch))
             }
+            Lambda::LstringSwitch(scrut, cases, default) => BlockOutput::make(
+                self.compile_string_switch_effect_block(scrut, cases, default.as_deref()),
+            ),
             _ => {
                 let compiled = self.compile_expr(lam);
-                self.compiled_to_effect_block(compiled)
+                let finished = compiled.finished;
+                BlockOutput {
+                    block: self.compiled_to_effect_block(compiled),
+                    finished,
+                }
             }
         }
     }
@@ -2825,7 +2907,11 @@ impl LambdaCompiler {
                     Expression::bin(BinOp::Or, lhs_compiled.expr, rhs_compiled.expr)
                 }
             };
-            return Compiled { prelude, expr };
+            return Compiled {
+                prelude,
+                expr,
+                finished: OutputFinished::False,
+            };
         }
 
         let tmp = self.fresh_tmp_ident();
@@ -2851,6 +2937,7 @@ impl LambdaCompiler {
         Compiled {
             prelude,
             expr: Expression::var(tmp),
+            finished: OutputFinished::False,
         }
     }
 
@@ -2933,11 +3020,14 @@ impl LambdaCompiler {
                     return block;
                 }
 
-                let mut block = self.compile_let_binding(*kind, id, value);
-                if block_finishes_output(&block) {
-                    return block;
+                // lam_compile.ml:1867-1877: compile the binding, then the
+                // body, then `append_output`.
+                let binding = self.compile_let_binding_output(*kind, id, value);
+                let body = self.compile_return_block(body);
+                let mut block = binding.block;
+                if binding.finished != OutputFinished::True {
+                    block.extend(body);
                 }
-                block.extend(self.compile_return_block(body));
                 block
             }
             Lambda::Lletrec(bindings, body) => {
@@ -2983,11 +3073,13 @@ impl LambdaCompiler {
                 block
             }
             Lambda::Lsequence(first, second) => {
-                let mut block = self.compile_effect_block(first);
-                if block_finishes_output(&block) {
-                    return block;
+                // lam_compile.ml:1905-1910: both parts are compiled first.
+                let first = self.compile_effect_block_output(first);
+                let second = self.compile_return_block(second);
+                let mut block = first.block;
+                if first.finished != OutputFinished::True {
+                    block.extend(second);
                 }
-                block.extend(self.compile_return_block(second));
                 block
             }
             Lambda::LstaticRaise(id, args) => {
@@ -3888,7 +3980,11 @@ impl LambdaCompiler {
                 vec![self.try_statement(body_block, exn, handler_block)]
             }
             Lambda::LtryFinally(body, finally) => {
-                vec![self.compile_try_finally(body, finally, |this, lam| this.compile_return_block(lam))]
+                vec![
+                    self.compile_try_finally(body, finally, |this, lam| {
+                        this.compile_return_block(lam)
+                    }),
+                ]
             }
             Lambda::Lswitch(scrut, switch) => {
                 self.compile_tail_loop_switch_return_block(scrut, switch, tail_loop)
@@ -4238,18 +4334,21 @@ impl LambdaCompiler {
                     return compiled;
                 }
 
-                let mut prelude = self.compile_let_binding(*kind, id, value);
-                if block_terminates(&prelude) {
+                let binding = self.compile_let_binding_output(*kind, id, value);
+                let body_compiled = self.compile_effect_output(body);
+                let mut prelude = binding.block;
+                if binding.finished == OutputFinished::True {
                     return Compiled {
                         prelude,
                         expr: Expression::undefined(false),
+                        finished: OutputFinished::True,
                     };
                 }
-                let body_compiled = self.compile_effect_output(body);
                 prelude.extend(body_compiled.prelude);
                 Compiled {
                     prelude,
                     expr: body_compiled.expr,
+                    finished: body_compiled.finished,
                 }
             }
             Lambda::Lapply(apply) => self.compile_apply_call(apply),
@@ -4266,17 +4365,23 @@ impl LambdaCompiler {
                 let handler_block = self.compile_effect_block(handler);
                 compiled_from_effect_block(vec![self.try_statement(body_block, exn, handler_block)])
             }
-            Lambda::LtryFinally(body, finally) => compiled_from_effect_block(vec![
-                self.compile_try_finally(body, finally, |this, lam| this.compile_effect_block(lam)),
-            ]),
+            Lambda::LtryFinally(body, finally) => {
+                compiled_from_effect_block(vec![self.compile_try_finally(
+                    body,
+                    finally,
+                    |this, lam| this.compile_effect_block(lam),
+                )])
+            }
             Lambda::LstaticCatch(body, (label, bindings), handler) => {
                 let (handlers, flat_body) = flatten_nested_caches(*label, bindings, body, handler);
                 if handlers.len() > 1 {
                     // lam_compile.ml:935 + 1000-1010 — multi-handler
                     // explicit-jump arm for an effect-value continuation.
+                    let output = self.compile_multi_staticcatch_effect_output(&handlers, flat_body);
                     return Compiled {
-                        prelude: self.compile_multi_staticcatch_effect_block(&handlers, flat_body),
+                        prelude: output.block,
                         expr: Expression::undefined(false),
+                        finished: output.finished,
                     };
                 }
                 // OCaml's `Lsequence` compiles its head with
@@ -4284,28 +4389,36 @@ impl LambdaCompiler {
                 // (lam_compile.ml:984-1059), that continuation always falls
                 // through to the explicit-jump arm. Keep the same shape here
                 // instead of inlining the handler at every raise site.
+                let output =
+                    self.compile_staticcatch_effect_output(*label, bindings, body, handler);
                 Compiled {
-                    prelude: self.compile_staticcatch_effect_block(*label, bindings, body, handler),
+                    prelude: output.block,
                     expr: Expression::undefined(false),
+                    finished: output.finished,
                 }
             }
             Lambda::Lswitch(scrut, switch) => Compiled {
                 prelude: self.compile_switch_effect_block(scrut, switch),
                 expr: Expression::undefined(false),
+                finished: OutputFinished::False,
             },
             Lambda::LstringSwitch(scrut, cases, default) => Compiled {
                 prelude: self.compile_string_switch_effect_block(scrut, cases, default.as_deref()),
                 expr: Expression::undefined(false),
+                finished: OutputFinished::False,
             },
             _ => self.compile_expr(lam),
         }
     }
 
+    /// `Js_output.append_output` (js_output.ml:118-138) of two compiled
+    /// outputs.
     fn append_effect_output(&self, first: Compiled, second: Compiled) -> Compiled {
-        if block_finishes_output(&first.prelude) {
+        if first.finished == OutputFinished::True {
             return Compiled {
                 prelude: first.prelude,
                 expr: Expression::undefined(false),
+                finished: OutputFinished::True,
             };
         }
 
@@ -4318,6 +4431,7 @@ impl LambdaCompiler {
                 return Compiled {
                     prelude: vec![],
                     expr: js_seq(first.expr, second.expr),
+                    finished: second.finished,
                 };
             }
         }
@@ -4330,6 +4444,7 @@ impl LambdaCompiler {
         Compiled {
             prelude,
             expr: second.expr,
+            finished: second.finished,
         }
     }
 
@@ -4887,6 +5002,16 @@ impl LambdaCompiler {
     }
 
     pub(crate) fn compile_assign_to_target_block(&mut self, result: &Ident, lam: &Lambda) -> Block {
+        self.compile_assign_to_target_output(result, lam).block
+    }
+
+    /// `compile_lambda {cxt with continuation = Assign result} lam`, with
+    /// the output's `finished` flag.
+    pub(crate) fn compile_assign_to_target_output(
+        &mut self,
+        result: &Ident,
+        lam: &Lambda,
+    ) -> BlockOutput {
         match lam {
             Lambda::Llet(kind, id, value, body) => {
                 if let Some(compiled) = self.try_compile_record_spread(id, value, body) {
@@ -4896,20 +5021,70 @@ impl LambdaCompiler {
                         Expression::var(*result),
                         compiled.expr,
                     )));
-                    return block;
+                    return BlockOutput::make(block);
                 }
-
-                // lam_compile.ml `Llet`: `Js_output.append_output args_code
-                // body` keeps only `args_code` when it is finished (a
-                // `throw` from `Praise`, a `break` or `continue`), as in the
-                // effect and return continuations.
-                let mut block = self.compile_let_binding(*kind, id, value);
-                if lambda_is_unconditional_exit(value) || block_finishes_output(&block) {
-                    return block;
-                }
-                block.extend(self.compile_assign_to_target_block(result, body));
-                block
+                // lam_compile.ml:1867-1877: compile the binding, then the
+                // body, then `append_output`, which keeps a finished binding
+                // alone.
+                let binding = self.compile_let_binding_output(*kind, id, value);
+                let body = self.compile_assign_to_target_output(result, body);
+                binding.append(body)
             }
+            Lambda::Lsequence(first, second) => {
+                // lam_compile.ml:1905-1910.
+                let first = self.compile_effect_block_output(first);
+                let second = self.compile_assign_to_target_output(result, second);
+                first.append(second)
+            }
+            Lambda::LstaticCatch(body, (label, bindings), handler) => {
+                // OCaml's `compile_staticcatch` (lam_compile.ml:1063-1101)
+                // takes the explicit-jump arm for an `Assign` continuation.
+                let (handlers, flat_body) = flatten_nested_caches(*label, bindings, body, handler);
+                if handlers.len() > 1 {
+                    self.compile_multi_staticcatch_assignment_output(result, &handlers, flat_body)
+                } else {
+                    self.compile_staticcatch_assignment_output(
+                        result, *label, bindings, body, handler,
+                    )
+                }
+            }
+            Lambda::LstaticRaise(id, args) => {
+                // OCaml's `compile_staticraise` (lam_compile.ml:969-986)
+                // ignores the enclosing Assign continuation and emits only the
+                // argument assignments + `exit = N`.
+                if let Some(output) = self.compile_static_raise_jump_output(*id, args) {
+                    return output;
+                }
+                if let Some(handler) = self.resolve_static_raise(*id, args) {
+                    return self.compile_assign_to_target_output(result, &handler);
+                }
+                let compiled = self.compile_expr(lam);
+                assign_compiled(result, compiled)
+            }
+            Lambda::Lapply(_)
+            | Lambda::LtryWith(..)
+            | Lambda::LtryFinally(..)
+            | Lambda::LifThenElse(..)
+            | Lambda::Lswitch(..)
+            | Lambda::LstringSwitch(..) => {
+                BlockOutput::make(self.compile_assign_to_target_unfinished_block(result, lam))
+            }
+            Lambda::Lprim(info)
+                if short_circuit_primitive(&info.primitive, &info.args).is_some() =>
+            {
+                BlockOutput::make(self.compile_assign_to_target_unfinished_block(result, lam))
+            }
+            _ => {
+                let compiled = self.compile_expr(lam);
+                assign_compiled(result, compiled)
+            }
+        }
+    }
+
+    /// The arms of `compile_lambda {cxt with continuation = Assign result}`
+    /// whose output is never finished.
+    fn compile_assign_to_target_unfinished_block(&mut self, result: &Ident, lam: &Lambda) -> Block {
+        match lam {
             Lambda::Lapply(apply) => {
                 let compiled = self.compile_apply_call(apply);
                 let mut block = compiled.prelude;
@@ -4919,35 +5094,6 @@ impl LambdaCompiler {
                     compiled.expr,
                 )));
                 block
-            }
-            Lambda::Lsequence(first, second) => {
-                // lam_compile.ml `Lsequence`: a finished first part drops
-                // the second (`Js_output.append_output`).
-                let mut block = self.compile_effect_block(first);
-                if lambda_is_unconditional_exit(first) || block_finishes_output(&block) {
-                    return block;
-                }
-                block.extend(self.compile_assign_to_target_block(result, second));
-                block
-            }
-            Lambda::LstaticCatch(body, (label, bindings), handler) => {
-                // OCaml's `compile_staticcatch` (lam_compile.ml:937-1017)
-                // gates pseudo-jmp on `EffectCall (Maybe_tail_is_return
-                // (Tail_with_name {in_staticcatch=false}))`. For an `Assign`
-                // continuation — which is where `compile_assign_to_target_block`
-                // sits — the match falls into the explicit-jump arm at
-                // lam_compile.ml:1005-1010 (`| Assign _ -> ...`). Take the
-                // explicit-jump path unconditionally; the `with_static_handler`
-                // shortcut is a Rust-only optimization with no OCaml analog in
-                // this continuation.
-                let (handlers, flat_body) = flatten_nested_caches(*label, bindings, body, handler);
-                if handlers.len() > 1 {
-                    self.compile_multi_staticcatch_assignment_block(result, &handlers, flat_body)
-                } else {
-                    self.compile_staticcatch_assignment_block(
-                        result, *label, bindings, body, handler,
-                    )
-                }
             }
             Lambda::LtryWith(body, exn, handler) => {
                 let body_block = self.compile_assign_to_target_block(result, body);
@@ -5001,30 +5147,6 @@ impl LambdaCompiler {
             }
             Lambda::LstringSwitch(scrut, cases, default) => self
                 .compile_string_switch_assignment_block(result, scrut, cases, default.as_deref()),
-            Lambda::LstaticRaise(id, args) => {
-                // OCaml's `compile_staticraise` (lam_compile.ml:887-904) ignores
-                // the enclosing Assign continuation and emits only the argument
-                // assignments + `exit = N`. Without this arm we would fall
-                // through to the generic case below, which appends a spurious
-                // `result = undefined` after the jump even though control has
-                // already transferred to the post-body exit dispatch.
-                if let Some(block) = self.compile_static_raise_jump_block(*id, args) {
-                    return block;
-                }
-                if let Some(handler) = self.resolve_static_raise(*id, args) {
-                    return self.compile_assign_to_target_block(result, &handler);
-                }
-                let compiled = self.compile_expr(lam);
-                let mut block = compiled.prelude;
-                if !block_terminates(&block) {
-                    block.push(Statement::exp(Expression::bin(
-                        BinOp::Eq,
-                        Expression::var(*result),
-                        compiled.expr,
-                    )));
-                }
-                block
-            }
             Lambda::Lprim(info)
                 if short_circuit_primitive(&info.primitive, &info.args).is_some() =>
             {
@@ -5058,18 +5180,7 @@ impl LambdaCompiler {
                 }
                 block
             }
-            _ => {
-                let compiled = self.compile_expr(lam);
-                let mut block = compiled.prelude;
-                if !block_terminates(&block) {
-                    block.push(Statement::exp(Expression::bin(
-                        BinOp::Eq,
-                        Expression::var(*result),
-                        compiled.expr,
-                    )));
-                }
-                block
-            }
+            _ => unreachable!("compile_assign_to_target_output handles {lam:?}"),
         }
     }
 
@@ -5402,8 +5513,7 @@ impl LambdaCompiler {
             } else {
                 (scrut_compiled.prelude, scrut_compiled.expr)
             };
-            let dispatch =
-                self.compile_named_variant_switch_effect_statements(scrut_expr, switch);
+            let dispatch = self.compile_named_variant_switch_effect_statements(scrut_expr, switch);
             // lam_compile.ml `compile_general_cases`: the dispatch is built
             // from `S.if_`s, which keep a condition only when it has side
             // effects (js_stmt_make.ml `if_`).
@@ -6049,6 +6159,15 @@ impl LambdaCompiler {
     }
 
     fn compile_static_raise_jump_block(&mut self, label: i32, args: &[Lambda]) -> Option<Block> {
+        self.compile_static_raise_jump_output(label, args)
+            .map(|output| output.block)
+    }
+
+    fn compile_static_raise_jump_output(
+        &mut self,
+        label: i32,
+        args: &[Lambda],
+    ) -> Option<BlockOutput> {
         let handler = self
             .static_jump_handlers
             .iter()
@@ -6065,28 +6184,22 @@ impl LambdaCompiler {
         // the last argument is compiled first; an argument whose output is
         // finished (a `throw`) drops everything after it, the exit code
         // assignment included (`Js_output.append_output`).
-        let mut compiled: Vec<Block> = handler
-            .bindings
-            .iter()
-            .zip(args)
-            .rev()
-            .map(|(binding, arg)| self.compile_assign_to_target_block(binding, arg))
-            .collect();
-        compiled.reverse();
-        let mut block = Vec::new();
-        for arg_block in compiled {
-            let finished = block_finishes_output(&arg_block);
-            block.extend(arg_block);
-            if finished {
-                return Some(block);
-            }
-        }
-        block.push(Statement::exp(Expression::bin(
+        let exit_assignment = BlockOutput::make(vec![Statement::exp(Expression::bin(
             BinOp::Eq,
             Expression::var(handler.exit_id),
             Expression::number(Number::int(handler.exit_code)),
-        )));
-        Some(block)
+        ))]);
+        let output =
+            handler
+                .bindings
+                .iter()
+                .zip(args)
+                .rev()
+                .fold(exit_assignment, |acc, (binding, arg)| {
+                    let output = self.compile_assign_to_target_output(binding, arg);
+                    output.append(acc)
+                });
+        Some(output)
     }
 
     fn staticcatch_declarations(&self, exit_id: &Ident, bindings: &[Ident]) -> Block {
@@ -6123,59 +6236,73 @@ impl LambdaCompiler {
         body: &Lambda,
         handler: &Lambda,
     ) -> Block {
+        self.compile_staticcatch_assignment_output(result, label, bindings, body, handler)
+            .block
+    }
+
+    /// lam_compile.ml:1063-1101 `compile_staticcatch`, explicit jumps: the
+    /// body and then the handler are compiled, and the output is
+    /// `append_output (make declares) (append_output lbody (make cases))`,
+    /// so a finished body drops the handler and finishes the catch.
+    fn compile_staticcatch_assignment_output(
+        &mut self,
+        result: &Ident,
+        label: i32,
+        bindings: &[Ident],
+        body: &Lambda,
+        handler: &Lambda,
+    ) -> BlockOutput {
         let exit_id = self.fresh_ident("exit");
         let exit_code = self.next_static_jump_exit_code();
-        let mut block = self.staticcatch_declarations(&exit_id, bindings);
-        let (body_block, handler_block) =
+        let declarations = self.staticcatch_declarations(&exit_id, bindings);
+        let (body_output, handler_block) =
             self.with_static_jump_handler(label, &exit_id, bindings, |this| {
-                let body_block = this.compile_assign_to_target_block(result, body);
-                let handler_block = if block_terminates(&body_block) {
-                    vec![]
-                } else {
-                    this.compile_assign_to_target_block(result, handler)
-                };
-                (body_block, handler_block)
+                let body_output = this.compile_assign_to_target_output(result, body);
+                let handler_block = this.compile_assign_to_target_block(result, handler);
+                (body_output, handler_block)
             });
-        block.extend(body_block);
-        if !block_terminates(&block) && !handler_block.is_empty() {
-            block.push(Statement::if_(
+        let cases = if handler_block.is_empty() {
+            BlockOutput::make(vec![])
+        } else {
+            BlockOutput::make(vec![Statement::if_(
                 self.staticcatch_exit_test(&exit_id, exit_code),
                 handler_block,
                 vec![],
-            ));
-        }
-        block
+            )])
+        };
+        BlockOutput::make(declarations).append(body_output.append(cases))
     }
 
-    fn compile_staticcatch_effect_block(
+    /// lam_compile.ml:1063-1101 `compile_staticcatch`, explicit jumps: the
+    /// body and then the handler are compiled, and the output is
+    /// `append_output (make declares) (append_output lbody (make cases))`,
+    /// so a finished body drops the handler and finishes the catch.
+    fn compile_staticcatch_effect_output(
         &mut self,
         label: i32,
         bindings: &[Ident],
         body: &Lambda,
         handler: &Lambda,
-    ) -> Block {
+    ) -> BlockOutput {
         let exit_id = self.fresh_ident("exit");
         let exit_code = self.next_static_jump_exit_code();
-        let mut block = self.staticcatch_declarations(&exit_id, bindings);
-        let (body_block, handler_block) =
+        let declarations = self.staticcatch_declarations(&exit_id, bindings);
+        let (body_output, handler_block) =
             self.with_static_jump_handler(label, &exit_id, bindings, |this| {
-                let body_block = this.compile_effect_block(body);
-                let handler_block = if block_terminates(&body_block) {
-                    vec![]
-                } else {
-                    this.compile_effect_block(handler)
-                };
-                (body_block, handler_block)
+                let body_output = this.compile_effect_block_output(body);
+                let handler_block = this.compile_effect_block(handler);
+                (body_output, handler_block)
             });
-        block.extend(body_block);
-        if !block_terminates(&block) && !handler_block.is_empty() {
-            block.push(Statement::if_(
+        let cases = if handler_block.is_empty() {
+            BlockOutput::make(vec![])
+        } else {
+            BlockOutput::make(vec![Statement::if_(
                 self.staticcatch_exit_test(&exit_id, exit_code),
                 handler_block,
                 vec![],
-            ));
-        }
-        block
+            )])
+        };
+        BlockOutput::make(declarations).append(body_output.append(cases))
     }
 
     fn compile_staticcatch_return_block(
@@ -6263,6 +6390,7 @@ impl LambdaCompiler {
         Compiled {
             prelude,
             expr: Expression::var(result),
+            finished: OutputFinished::False,
         }
     }
 
@@ -6432,28 +6560,26 @@ impl LambdaCompiler {
         block
     }
 
-    fn compile_multi_staticcatch_effect_block(
+    /// [`Self::compile_staticcatch_effect_output`] for a flattened code
+    /// table: every handler is compiled after the body.
+    fn compile_multi_staticcatch_effect_output(
         &mut self,
         handlers: &[FlatHandler],
         body: &Lambda,
-    ) -> Block {
-        let (exit_id, first_code, mut block) = self.emit_multi_staticcatch_prelude(handlers);
-        let body_block = self.compile_effect_block(body);
-        let grouped_handlers = if block_terminates(&body_block) {
-            Vec::new()
-        } else {
+    ) -> BlockOutput {
+        let (exit_id, first_code, declarations) = self.emit_multi_staticcatch_prelude(handlers);
+        let body_output = self.compile_effect_block_output(body);
+        let grouped_handlers =
             self.compile_grouped_staticcatch_handlers(handlers, first_code, |this, handler| {
                 this.compile_effect_block(handler)
-            })
-        };
+            });
         self.pop_multi_staticcatch_handlers(handlers.len());
-        block.extend(body_block);
-        if !block_terminates(&block) {
-            if let Some(dispatch) = self.compile_exit_dispatch(&exit_id, grouped_handlers, false) {
-                block.push(dispatch);
-            }
-        }
-        block
+        let cases = BlockOutput::make(
+            self.compile_exit_dispatch(&exit_id, grouped_handlers, false)
+                .into_iter()
+                .collect(),
+        );
+        BlockOutput::make(declarations).append(body_output.append(cases))
     }
 
     fn compile_multi_staticcatch_assignment_block(
@@ -6462,23 +6588,31 @@ impl LambdaCompiler {
         handlers: &[FlatHandler],
         body: &Lambda,
     ) -> Block {
-        let (exit_id, first_code, mut block) = self.emit_multi_staticcatch_prelude(handlers);
-        let body_block = self.compile_assign_to_target_block(result, body);
-        let grouped_handlers = if block_terminates(&body_block) {
-            Vec::new()
-        } else {
+        self.compile_multi_staticcatch_assignment_output(result, handlers, body)
+            .block
+    }
+
+    /// [`Self::compile_staticcatch_effect_output`] for a flattened code
+    /// table: every handler is compiled after the body.
+    fn compile_multi_staticcatch_assignment_output(
+        &mut self,
+        result: &Ident,
+        handlers: &[FlatHandler],
+        body: &Lambda,
+    ) -> BlockOutput {
+        let (exit_id, first_code, declarations) = self.emit_multi_staticcatch_prelude(handlers);
+        let body_output = self.compile_assign_to_target_output(result, body);
+        let grouped_handlers =
             self.compile_grouped_staticcatch_handlers(handlers, first_code, |this, handler| {
                 this.compile_assign_to_target_block(result, handler)
-            })
-        };
+            });
         self.pop_multi_staticcatch_handlers(handlers.len());
-        block.extend(body_block);
-        if !block_terminates(&block) {
-            if let Some(dispatch) = self.compile_exit_dispatch(&exit_id, grouped_handlers, false) {
-                block.push(dispatch);
-            }
-        }
-        block
+        let cases = BlockOutput::make(
+            self.compile_exit_dispatch(&exit_id, grouped_handlers, false)
+                .into_iter()
+                .collect(),
+        );
+        BlockOutput::make(declarations).append(body_output.append(cases))
     }
 
     fn compile_multi_staticcatch_tail_loop_return_block(
@@ -6543,13 +6677,42 @@ fn normalize_if_assignment_merge_order(
     }
 }
 
-/// True if this Lambda unconditionally transfers control out of the
-/// enclosing block — its compiled form has no usable fall-through. Matches
-/// OCaml's `Js_output.output_finished:True`: `Lbreak` and `Lcontinue` set
-/// it directly (lam_compile.ml:1928, 1943); nothing else in this code path
-/// is compiled with that flag.
-fn lambda_is_unconditional_exit(lam: &Lambda) -> bool {
-    matches!(lam, Lambda::Lbreak | Lambda::Lcontinue)
+/// `Declare (kind, id)` of a value compiled as `NeedValue`: a finished output
+/// (lam_compile.ml:1682, 1934, 1949) is kept as it is, without the
+/// declaration, as `Praise` ignores its continuation.
+fn declare_compiled(kind: LetKind, id: &Ident, compiled: Compiled) -> BlockOutput {
+    let mut block = compiled.prelude;
+    if compiled.finished == OutputFinished::True {
+        return BlockOutput {
+            block,
+            finished: OutputFinished::True,
+        };
+    }
+    block.push(Statement::variable(VariableDeclaration {
+        ident: *id,
+        value: Some(compiled.expr),
+        property: kind,
+        ident_info: IdentInfo::default(),
+    }));
+    BlockOutput::make(block)
+}
+
+/// `Assign result` of a value compiled as `NeedValue`; a finished output
+/// stays as it is (see [`declare_compiled`]).
+fn assign_compiled(result: &Ident, compiled: Compiled) -> BlockOutput {
+    let mut block = compiled.prelude;
+    if compiled.finished == OutputFinished::True {
+        return BlockOutput {
+            block,
+            finished: OutputFinished::True,
+        };
+    }
+    block.push(Statement::exp(Expression::bin(
+        BinOp::Eq,
+        Expression::var(*result),
+        compiled.expr,
+    )));
+    BlockOutput::make(block)
 }
 
 /// Per-module `.cmj` export table lookup through a memo table that also
@@ -6826,7 +6989,6 @@ fn merge_terminal_guard_fallthrough_else(block: Block) -> Block {
         rest.to_vec(),
     ))]
 }
-
 
 fn function_has_self_tailcall(tail_targets: &[Ident], lam: &Lambda) -> bool {
     match lam {
@@ -7658,6 +7820,7 @@ pub(crate) fn compiled_from_effect_block(mut block: Block) -> Compiled {
                 Compiled {
                     prelude: vec![],
                     expr,
+                    finished: OutputFinished::False,
                 }
             }
             StatementDesc::Block(inner) if comment.is_none() => compiled_from_effect_block(inner),
@@ -7668,6 +7831,7 @@ pub(crate) fn compiled_from_effect_block(mut block: Block) -> Compiled {
                     comment,
                 }],
                 expr: Expression::undefined(false),
+                finished: OutputFinished::False,
             },
         };
     }
@@ -7675,6 +7839,7 @@ pub(crate) fn compiled_from_effect_block(mut block: Block) -> Compiled {
     Compiled {
         prelude: block,
         expr: Expression::undefined(false),
+        finished: OutputFinished::False,
     }
 }
 
@@ -7795,9 +7960,7 @@ pub(crate) fn lambda_has_exit(lam: &Lambda) -> bool {
         Lambda::LstaticRaise(_, _) => true,
         Lambda::LstaticCatch(body, (_, _), handler)
         | Lambda::LtryWith(body, _, handler)
-        | Lambda::LtryFinally(body, handler) => {
-            lambda_has_exit(body) || lambda_has_exit(handler)
-        }
+        | Lambda::LtryFinally(body, handler) => lambda_has_exit(body) || lambda_has_exit(handler),
         Lambda::Lsequence(first, second) => lambda_has_exit(first) || lambda_has_exit(second),
         Lambda::Lwhile(cond, body) => lambda_has_exit(cond) || lambda_has_exit(body),
         Lambda::Lfor(_, start, finish, _, body) => {
@@ -7901,9 +8064,7 @@ fn return_output_finished_like_ocaml(
         Lambda::Lswitch(_, _)
         | Lambda::LstringSwitch(_, _, _)
         | Lambda::LtryWith(_, _, _)
-        | Lambda::LtryFinally(_, _) => {
-            Some(false)
-        }
+        | Lambda::LtryFinally(_, _) => Some(false),
         Lambda::LstaticCatch(body, (label, bindings), handler) => {
             let (code_table, inner_body) = flatten_nested_caches(*label, bindings, body, handler);
             // lam_compile.ml:1022-1047: only the single-exit pseudo-jump arm
@@ -8235,12 +8396,10 @@ fn lambda_static_raise_count_to_label(lam: &Lambda, label: i32, arity: usize) ->
         }
         Lambda::LstaticCatch(body, (_, _), handler)
         | Lambda::LtryWith(body, _, handler)
-        | Lambda::LtryFinally(body, handler) => {
-            add_count(
-                lambda_static_raise_count_to_label(body, label, arity),
-                lambda_static_raise_count_to_label(handler, label, arity),
-            )
-        }
+        | Lambda::LtryFinally(body, handler) => add_count(
+            lambda_static_raise_count_to_label(body, label, arity),
+            lambda_static_raise_count_to_label(handler, label, arity),
+        ),
         Lambda::Lsequence(first, second) => add_count(
             lambda_static_raise_count_to_label(first, label, arity),
             lambda_static_raise_count_to_label(second, label, arity),

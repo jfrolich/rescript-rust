@@ -23,6 +23,7 @@ impl IndexedJsConsumer<'_> {
                 return Compiled {
                     prelude: vec![],
                     expr,
+                    finished: OutputFinished::False,
                 };
             }
         }
@@ -67,6 +68,7 @@ impl IndexedJsConsumer<'_> {
                 async_: attr.async_,
                 directive: (attr.directive).map(Box::new),
             }),
+            finished: OutputFinished::False,
         }
     }
 
@@ -88,6 +90,7 @@ impl IndexedJsConsumer<'_> {
         Compiled {
             prelude: vec![Statement::while_with_label(label, condition, body)],
             expr: Expression::undefined(true),
+            finished: OutputFinished::False,
         }
     }
 
@@ -161,6 +164,7 @@ impl IndexedJsConsumer<'_> {
         Compiled {
             prelude,
             expr: Expression::undefined(true),
+            finished: OutputFinished::False,
         }
     }
 
@@ -198,6 +202,7 @@ impl IndexedJsConsumer<'_> {
         Compiled {
             prelude,
             expr: Expression::undefined(true),
+            finished: OutputFinished::False,
         }
     }
 
@@ -221,6 +226,7 @@ impl IndexedJsConsumer<'_> {
         Compiled {
             prelude: vec![statement],
             expr: Expression::undefined(false),
+            finished: OutputFinished::False,
         }
     }
 
@@ -243,6 +249,7 @@ impl IndexedJsConsumer<'_> {
         Compiled {
             prelude,
             expr: Expression::undefined(true),
+            finished: OutputFinished::False,
         }
     }
 }

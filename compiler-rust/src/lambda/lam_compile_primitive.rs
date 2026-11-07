@@ -13,7 +13,7 @@ use super::js_exp_make::{
     int32_pow, is_nullish_literal, is_optional_block, is_type_object_expr, is_zero_int,
     js_expr_no_side_effects, js_seq, ocaml_typeof_expr, runtime_compare_call_args, to_int32,
 };
-use super::lam_compile::{Compiled, LambdaCompiler};
+use super::lam_compile::{Compiled, LambdaCompiler, OutputFinished};
 use super::lam_compile_input::{LambdaInputView, LambdaInputs};
 use crate::ident::Ident;
 use crate::js_ir::op::{LengthObject, MutableFlag, Number, PropertyName};
@@ -105,6 +105,7 @@ impl LambdaCompiler {
         Some(Compiled {
             prelude: Vec::new(),
             expr,
+            finished: OutputFinished::False,
         })
     }
 
@@ -751,7 +752,18 @@ impl LambdaCompiler {
             PextensionSlotEq => unreachable!("PextensionSlotEq is lowered in raw_lambda::lower"),
         };
 
-        Compiled { prelude, expr }
+        // lam_compile.ml:1672-1682: `Praise` makes a finished output in
+        // every continuation.
+        let finished = if matches!(prim, Praise) {
+            OutputFinished::True
+        } else {
+            OutputFinished::False
+        };
+        Compiled {
+            prelude,
+            expr,
+            finished,
+        }
     }
 
     fn compile_object_comparison(

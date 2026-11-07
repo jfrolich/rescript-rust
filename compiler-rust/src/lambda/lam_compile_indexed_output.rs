@@ -3,12 +3,8 @@
 use super::context::{Continuation, TailType};
 use super::*;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Finished {
-    True,
-    False,
-    Dummy,
-}
+/// The tree compiler's and this consumer's `Js_output.finished` are one type.
+pub(super) use crate::lambda::lam_compile::OutputFinished as Finished;
 
 pub(super) struct Output {
     pub(super) block: Block,

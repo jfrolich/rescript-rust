@@ -41,13 +41,14 @@ impl<'a> IndexedJsConsumer<'a> {
                 Output {
                     block: compiled.prelude,
                     value: Some(compiled.expr),
-                    finished: Finished::False,
+                    finished: compiled.finished,
                 }
             },
         );
         Compiled {
             prelude: output.block,
             expr: output.value.expect("NeedValue application"),
+            finished: OutputFinished::False,
         }
     }
 
@@ -111,6 +112,7 @@ impl<'a> IndexedJsConsumer<'a> {
                             Compiled {
                                 prelude: output.block,
                                 expr: output.value.expect("call argument"),
+                                finished: OutputFinished::False,
                             }
                         });
                     let function = Expression::qualified(module, Some(field_name));
@@ -149,6 +151,7 @@ impl<'a> IndexedJsConsumer<'a> {
                 Compiled {
                     prelude: output.block,
                     expr: output.value.expect("call argument"),
+                    finished: OutputFinished::False,
                 }
             },
         );
@@ -317,6 +320,7 @@ impl<'a> IndexedJsConsumer<'a> {
                 self.compiler.try_statement(body, &exception, handler),
             ],
             expr: Expression::var(result),
+            finished: OutputFinished::False,
         }
     }
 }
