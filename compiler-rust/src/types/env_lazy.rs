@@ -684,10 +684,9 @@ pub(crate) struct QualifiedModuleComponents {
 /// there; their views take `source` as their own source prefix.
 fn strengthen_view_types(
     sig: &mut [SignatureItem],
-    source: &Path,
+    source: &Arc<Path>,
     ctx: &super::context::TypeContext,
 ) {
-    let source = &Arc::new(source.clone());
     for item in sig.iter_mut() {
         match item {
             SignatureItem::SigType(id, decl, _) => {
@@ -718,14 +717,16 @@ fn strengthen_view_types(
 /// table's items are named through another module path than its access path.
 fn strengthened_child_env_decl(
     md: &ModuleDeclaration,
-    child_name: &str,
-    strengthen_source: Option<&Path>,
+    id: Ident,
+    strengthen_source: Option<&Arc<Path>>,
+    runtime_pos: usize,
+    ctx: &super::context::TypeContext,
 ) -> ModuleDeclaration {
     match strengthen_source {
         Some(source) if !matches!(md.md_type, ModuleType::MtyAlias(..)) => ModuleDeclaration {
             md_type: ModuleType::MtyAlias(
                 super::decl::AliasPresence::MtaPresent,
-                Path::pdot(source.clone(), child_name),
+                ctx.dotted_from_ident(source.clone(), id, runtime_pos as i32),
             ),
             ..md.clone()
         },
@@ -734,12 +735,13 @@ fn strengthened_child_env_decl(
 }
 
 fn scan_child_component_from_signature(
-    access_path: &Path,
-    source_prefix: Option<&Path>,
+    access_path: &Arc<Path>,
+    source_prefix: Option<&Arc<Path>>,
     signature: &Arc<Signature>,
     child_components: &mut HashMap<String, Option<(usize, Arc<StoredModuleComponents>)>>,
     state: &mut ChildComponentScanState,
     child_name: &str,
+    ctx: &super::context::TypeContext,
 ) -> (Option<(usize, Arc<StoredModuleComponents>)>, usize) {
     let start_index = state.next_index;
     let mut found = None;
@@ -768,25 +770,27 @@ fn scan_child_component_from_signature(
             SignatureItem::SigModule(id, md, _) => {
                 let runtime_pos = state.runtime_pos;
                 let child_access_path =
-                    qualified_submodule_access_path(access_path, id.name(), runtime_pos, md);
+                    ctx.dotted_from_ident(access_path.clone(), *id, runtime_pos as i32);
                 let strengthen_source = source_prefix.filter(|source| !source.same(access_path));
                 let stored = {
                     let working_env = state.working_env_mut();
                     working_env.add_module_with_component_context(
                         *id,
-                        strengthened_child_env_decl(md, id.name(), strengthen_source),
+                        strengthened_child_env_decl(md, *id, strengthen_source, runtime_pos, ctx),
                         md.clone(),
                         child_access_path,
-                        Some((access_path.clone(), signature.clone())),
+                        Some(((**access_path).clone(), signature.clone())),
                     );
                     working_env
                         .local_module_components_arc(&Path::pident(*id))
                         .map(|stored| (runtime_pos, stored))
                 };
                 if let (Some(source), Some((_, stored))) = (source_prefix, &stored) {
-                    let _ = stored
-                        .source_prefix
-                        .set(Path::pdot(source.clone(), id.name()));
+                    let _ = stored.source_prefix.set(ctx.dotted_from_ident(
+                        source.clone(),
+                        *id,
+                        runtime_pos as i32,
+                    ));
                 }
                 // OCaml `Tbl.add` shadows earlier entries with the same name
                 // (compiler/ml/env.ml:1577-1578), so keep the latest scanned
@@ -882,6 +886,8 @@ impl QualifiedModuleComponents {
         child_component_scan_complete: bool,
         ctx: &super::context::TypeContext,
     ) -> Self {
+        let value_source_prefix = value_source_prefix.map(Arc::new);
+        let shared_access_path = Arc::new(access_path.clone());
         // An in-process unit's signature names its own items through the unit
         // (`Unit.t`); OCaml's `prefix_idents` puts them at the component path
         // (env.ml:1454-1481, 1530-1538). Re-root a copy once, so values,
@@ -916,10 +922,14 @@ impl QualifiedModuleComponents {
                     }
                     let (old_prefix, new_prefix) = match item {
                         SignatureItem::SigModule(id, _, _) => (
-                            Path::pdot(source.clone(), id.name()),
-                            Path::pdot(access_path.clone(), id.name()),
+                            Path::pdot((**source).clone(), id.name()),
+                            ctx.dotted_from_ident(
+                                shared_access_path.clone(),
+                                *id,
+                                super::path::NOPOS,
+                            ),
                         ),
-                        _ => (source.clone(), access_path.clone()),
+                        _ => ((**source).clone(), access_path.clone()),
                     };
                     crate::cmi::persistent_env::rewrite_sig_by_path_prefix(
                         std::slice::from_ref(item),
@@ -960,7 +970,7 @@ impl QualifiedModuleComponents {
                     | super::decl::ModuleType::MtyIdent(alias_source) = &md.md_type
                 {
                     let component_path =
-                        Path::pdot_pos(access_path.clone(), id.name(), runtime_pos as i32);
+                        ctx.dotted_from_ident(shared_access_path.clone(), *id, runtime_pos as i32);
                     // OCaml compiler/ml/env.ml:1517 `scrape_alias` follows
                     // the module declaration's alias path through
                     // env.ml:865-882 `find_module`, then env.ml:1530-1578
@@ -996,7 +1006,7 @@ impl QualifiedModuleComponents {
             .collect();
 
         Self {
-            access_path: Arc::new(access_path),
+            access_path: shared_access_path,
             signature,
             tables: Arc::new(StructureComponentTables {
                 index,
@@ -1018,7 +1028,7 @@ impl QualifiedModuleComponents {
                 opened_layers: OnceCell::new(),
             }),
             compiler_counters_enabled: ctx.compiler_counters_enabled(),
-            value_source_prefix: value_source_prefix.map(Arc::new),
+            value_source_prefix,
         }
     }
 
@@ -1385,13 +1395,14 @@ impl QualifiedModuleComponents {
         ctx: &super::context::TypeContext,
     ) -> Option<(usize, Arc<StoredModuleComponents>)> {
         self.force_entry(ForcedKind::ChildComponents, name, ctx, || {
-            self.lookup_child_components_inner(name)
+            self.lookup_child_components_inner(name, ctx)
         })
     }
 
     fn lookup_child_components_inner(
         &self,
         name: &str,
+        ctx: &super::context::TypeContext,
     ) -> Option<(usize, Arc<StoredModuleComponents>)> {
         if let Some(cached) = self.tables.child_components.borrow().get(name).cloned() {
             if self.compiler_counters_enabled {
@@ -1413,12 +1424,13 @@ impl QualifiedModuleComponents {
 
         let mut child_components = self.tables.child_components.borrow_mut();
         let (built, scanned_items) = scan_child_component_from_signature(
-            self.access_path(),
-            self.value_source_prefix.as_deref(),
+            &self.access_path,
+            self.value_source_prefix.as_ref(),
             &self.signature,
             &mut child_components,
             &mut scan,
             name,
+            ctx,
         );
         if self.compiler_counters_enabled {
             crate::perf_counters::record_lazy_scan(
@@ -1448,7 +1460,7 @@ impl QualifiedModuleComponents {
         let (idx, runtime_pos) = self.cached_module_index(name)?;
         if let Some((id, md)) = self.tables.qualified_modules.borrow().get(name).cloned() {
             let selected_path =
-                qualified_submodule_access_path(self.access_path.as_ref(), name, runtime_pos, &md);
+                submodule_lookup_path(self.access_path.as_ref(), name, runtime_pos, &md);
             if !module_decl_is_self_alias_for_access_path(&md, &selected_path) {
                 return Some((runtime_pos, id, md));
             }
@@ -1470,12 +1482,8 @@ impl QualifiedModuleComponents {
             // consumption.
             if let Some((id, md)) = ctx.find_qualified_module_decl(self.access_path.as_ref(), name)
             {
-                let selected_path = qualified_submodule_access_path(
-                    self.access_path.as_ref(),
-                    name,
-                    runtime_pos,
-                    &md,
-                );
+                let selected_path =
+                    submodule_lookup_path(self.access_path.as_ref(), name, runtime_pos, &md);
                 if !module_decl_is_self_alias_for_access_path(&md, &selected_path) {
                     self.tables
                         .qualified_modules
@@ -1489,12 +1497,8 @@ impl QualifiedModuleComponents {
             }
             for source_prefix in ctx.alias_sources_for_component_path(self.access_path.as_ref()) {
                 if let Some((id, md)) = ctx.find_qualified_module_decl(&source_prefix, name) {
-                    let selected_path = qualified_submodule_access_path(
-                        self.access_path.as_ref(),
-                        name,
-                        runtime_pos,
-                        &md,
-                    );
+                    let selected_path =
+                        submodule_lookup_path(self.access_path.as_ref(), name, runtime_pos, &md);
                     if module_decl_is_self_alias_for_access_path(&md, &selected_path) {
                         continue;
                     }
@@ -1523,12 +1527,8 @@ impl QualifiedModuleComponents {
                 let Some((id, md)) = ctx.find_qualified_module_decl(&component_path, name) else {
                     continue;
                 };
-                let selected_path = qualified_submodule_access_path(
-                    self.access_path.as_ref(),
-                    name,
-                    runtime_pos,
-                    &md,
-                );
+                let selected_path =
+                    submodule_lookup_path(self.access_path.as_ref(), name, runtime_pos, &md);
                 if !module_decl_is_self_alias_for_access_path(&md, &selected_path) {
                     // Same sharing as above, but reached from the flattened backing
                     // component view after the selected path forced the declaration.
@@ -1652,29 +1652,15 @@ impl QualifiedModuleComponents {
     }
 }
 
-fn qualified_submodule_access_path(
+/// Ephemeral semantic lookup/comparison key, never retained as a component
+/// path. Stored component paths use dotted_from_ident with the shared root.
+fn submodule_lookup_path(
     parent_access_path: &Path,
     module_name: &str,
     runtime_pos: usize,
     _md: &ModuleDeclaration,
 ) -> Path {
-    if path_non_apply_root_is_persistent_or_global(parent_access_path) {
-        // OCaml compiler/ml/env.ml:1454-1481 `prefix_idents` creates
-        // component paths as `Pdot(root, name, pos)`, and env.ml:1573-1578
-        // stores child component thunks under that prefixed path. Do not let an
-        // alias module's own `md_path` replace the selected component path.
-        Path::pdot_pos(
-            parent_access_path.clone(),
-            module_name.to_string(),
-            runtime_pos as i32,
-        )
-    } else {
-        Path::pdot_pos(
-            parent_access_path.clone(),
-            module_name.to_string(),
-            runtime_pos as i32,
-        )
-    }
+    Path::pdot_pos(parent_access_path.clone(), module_name, runtime_pos as i32)
 }
 
 fn module_decl_is_self_alias_for_access_path(md: &ModuleDeclaration, access_path: &Path) -> bool {
@@ -1745,7 +1731,7 @@ fn self_alias_raw_parent_module_item(
     md: &ModuleDeclaration,
     ctx: &super::context::TypeContext,
 ) -> Option<(Ident, ModuleDeclaration, Signature, Path)> {
-    let selected_path = qualified_submodule_access_path(access_path, module_name, runtime_pos, md);
+    let selected_path = submodule_lookup_path(access_path, module_name, runtime_pos, md);
     let is_self_alias = matches!(
         &md.md_type,
         super::decl::ModuleType::MtyAlias(_, target)
@@ -2044,7 +2030,9 @@ fn build_local_module_components(
     if raw_sig.len() != qualified_sig.len() {
         return None;
     }
-    if let Some(source) = source_prefix
+    let shared_source_prefix = source_prefix.map(|source| Arc::new(source.clone()));
+    let shared_access_path = Arc::new(access_path.clone());
+    if let Some(source) = shared_source_prefix.as_ref()
         && !source.same(access_path)
     {
         // A child of an in-process unit's components: its items name each
@@ -2110,15 +2098,19 @@ fn build_local_module_components(
             (SignatureItem::SigModule(id, child_md, _), SignatureItem::SigModule(_, qmd, _)) => {
                 if let Some(working_env) = working_env.as_mut() {
                     let child_access_path =
-                        qualified_submodule_access_path(access_path, id.name(), runtime_pos, qmd);
+                        ctx.dotted_from_ident(shared_access_path.clone(), *id, runtime_pos as i32);
                     let env_decl = strengthened_child_env_decl(
                         if use_qualified_items_for_env {
                             qmd
                         } else {
                             child_md
                         },
-                        id.name(),
-                        source_prefix.filter(|source| !source.same(access_path)),
+                        *id,
+                        shared_source_prefix
+                            .as_ref()
+                            .filter(|source| !source.same(access_path)),
+                        runtime_pos,
+                        ctx,
                     );
                     // OCaml compiler/ml/env.ml:1573-1578 stores the child
                     // component thunk with the final substitution built by
@@ -2391,5 +2383,118 @@ impl StoredModuleComponents {
                 .insert(arg_path.clone(), (substituted.clone(), piece));
         }
         Some(substituted)
+    }
+}
+
+#[cfg(test)]
+mod provenance_tests {
+    use super::*;
+
+    #[test]
+    fn scanned_child_paths_share_the_component_root_and_keep_cached_allocations() {
+        let ctx =
+            super::super::context::TypeContext::new(Arc::new(crate::context::IdGenerator::new()));
+        let root = Path::Pident(ctx.create_ident("Root"));
+        let first = ctx.create_ident("First");
+        let second = ctx.create_ident("Second");
+        let module = |id| {
+            SignatureItem::SigModule(
+                id,
+                ModuleDeclaration {
+                    md_type: ModuleType::MtySignature(Arc::new(vec![])),
+                    md_attributes: vec![],
+                    md_loc: Default::default(),
+                    md_path: None,
+                },
+                super::super::decl::RecStatus::TrecNot,
+            )
+        };
+        let components =
+            QualifiedModuleComponents::new(root, vec![module(first), module(second)], &ctx);
+        let (first_pos, a) = components.lookup_child_components("First", &ctx).unwrap();
+        let (second_pos, b) = components.lookup_child_components("Second", &ctx).unwrap();
+        assert_eq!((first_pos, second_pos), (0, 1));
+        let first_allocation = ctx.dotted_allocation(&a.access_path).unwrap();
+        let second_allocation = ctx.dotted_allocation(&b.access_path).unwrap();
+        assert!(Arc::ptr_eq(
+            &first_allocation.prefix,
+            &components.access_path
+        ));
+        assert!(Arc::ptr_eq(
+            &first_allocation.prefix,
+            &second_allocation.prefix
+        ));
+        assert_ne!(first_allocation.key(), second_allocation.key());
+        assert_eq!(first_allocation.name, ctx.ident_name_allocation(&first));
+        assert_eq!(second_allocation.name, ctx.ident_name_allocation(&second));
+        let (_, again) = components.lookup_child_components("First", &ctx).unwrap();
+        assert_eq!(
+            ctx.dotted_allocation(&again.access_path).unwrap().key(),
+            first_allocation.key()
+        );
+    }
+
+    #[test]
+    fn strengthened_children_and_modtypes_share_source_prefix_and_names() {
+        let ctx =
+            super::super::context::TypeContext::new(Arc::new(crate::context::IdGenerator::new()));
+        let mut arena = crate::parse_arena::ParseArena::new();
+        let name = arena.push_string("Shared");
+        let module_id = ctx.create_ast_ident(&arena, name);
+        let modtype_id = ctx.create_ast_ident(&arena, name);
+        let source = Arc::new(Path::Pident(ctx.create_ident("Source")));
+        let mut sig = vec![SignatureItem::SigModtype(
+            modtype_id,
+            super::super::decl::ModtypeDeclaration {
+                mtd_type: None,
+                mtd_attributes: vec![],
+                mtd_loc: Default::default(),
+            },
+        )];
+        strengthen_view_types(&mut sig, &source, &ctx);
+        let md = ModuleDeclaration {
+            md_type: ModuleType::MtySignature(Arc::new(vec![])),
+            md_attributes: vec![],
+            md_loc: Default::default(),
+            md_path: None,
+        };
+        let child = strengthened_child_env_decl(&md, module_id, Some(&source), 3, &ctx);
+        let ModuleType::MtyAlias(_, path) = &child.md_type else {
+            panic!("alias")
+        };
+        assert!(matches!(path, Path::Pdot(_, _, 3)));
+        let child_allocation = ctx.dotted_allocation(path).unwrap();
+        let SignatureItem::SigModtype(_, mtd) = &sig[0] else {
+            panic!("modtype")
+        };
+        let Some(ModuleType::MtyIdent(path)) = &mtd.mtd_type else {
+            panic!("ident")
+        };
+        let mtd_allocation = ctx.dotted_allocation(path).unwrap();
+        assert!(Arc::ptr_eq(&child_allocation.prefix, &source));
+        assert!(Arc::ptr_eq(
+            &child_allocation.prefix,
+            &mtd_allocation.prefix
+        ));
+        assert_eq!(child_allocation.name, mtd_allocation.name);
+        assert_eq!(child_allocation.name, ctx.ident_name_allocation(&module_id));
+        assert_ne!(child_allocation.key(), mtd_allocation.key());
+        let unchanged = strengthened_child_env_decl(&child, module_id, Some(&source), 3, &ctx);
+        let ModuleType::MtyAlias(_, path) = &unchanged.md_type else {
+            panic!("alias")
+        };
+        assert_eq!(
+            ctx.dotted_allocation(path).unwrap().key(),
+            child_allocation.key()
+        );
+        let separate_source = Arc::new((*source).clone());
+        let separate = strengthened_child_env_decl(&md, module_id, Some(&separate_source), 3, &ctx);
+        let ModuleType::MtyAlias(_, path) = &separate.md_type else {
+            panic!("alias")
+        };
+        assert!(!Arc::ptr_eq(
+            &ctx.dotted_allocation(path).unwrap().prefix,
+            &source
+        ));
     }
 }
