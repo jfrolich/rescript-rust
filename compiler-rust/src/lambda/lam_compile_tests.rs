@@ -2041,6 +2041,7 @@ fn coerce_toplevel_exports_moves_same_name_literal_binding_to_tail_across_later_
             exports: vec![exported],
             values: vec![Expression::var(exported)],
         },
+        OutputFinished::False,
     );
     let exports = resolve_export_aliases(&block, exports);
 
@@ -2866,12 +2867,12 @@ fn compile_deps_program_keeps_gpr_1438_fallthrough_return_outside_switch() {
     );
 
     let exports = if let Some(mut exports) = extract_toplevel_exports(compiled.expr, &mut block) {
-        if block_terminates(&block) {
+        if compiled.finished == OutputFinished::True {
             for value in &mut exports.values {
                 *value = Expression::undefined(false);
             }
         }
-        compiler.coerce_toplevel_exports(&mut block, exports)
+        compiler.coerce_toplevel_exports(&mut block, exports, compiled.finished)
     } else {
         vec![]
     };
@@ -8943,4 +8944,23 @@ fn return_static_catch_drops_the_handler_of_a_returning_body() {
         c.compile_return_output(&lam);
     });
     assert!(allocating > plain, "the dropped handler is compiled");
+}
+
+/// lam_compile.ml:1320-1334 `compile_assign` appends the assignment to the
+/// value's block without asking whether it ends in a `throw`; its output is
+/// a plain `make`, so it does not finish what follows.
+#[test]
+fn assign_of_a_raise_keeps_its_assignment() {
+    let target = Ident::create_local("target");
+    let compiled =
+        LambdaCompiler::new().compile_expr(&Lambda::Lassign(target, Box::new(raise_boom())));
+    assert_eq!(compiled.finished, OutputFinished::False);
+    let [throw, assign] = compiled.prelude.as_slice() else {
+        panic!(
+            "expected the throw and the assignment, got {:?}",
+            compiled.prelude
+        );
+    };
+    assert!(matches!(throw.desc, StatementDesc::Throw(_)));
+    assert!(matches!(assign.desc, StatementDesc::Exp(_)));
 }

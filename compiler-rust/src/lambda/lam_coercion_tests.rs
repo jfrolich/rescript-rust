@@ -26,6 +26,7 @@ fn coerce_toplevel_exports_reuses_existing_undefined_binding() {
             exports: vec![alias, other],
             values: vec![Expression::undefined(false), Expression::var(other)],
         },
+        crate::lambda::lam_compile::OutputFinished::False,
     );
 
     assert_eq!(exports, vec![alias, other]);
@@ -71,6 +72,7 @@ fn coerce_toplevel_exports_keeps_undefined_rebound_after_later_effects() {
             exports: vec![alias],
             values: vec![Expression::undefined(false)],
         },
+        crate::lambda::lam_compile::OutputFinished::False,
     );
 
     let [decl, effect, rebound] = block.as_slice() else {
@@ -108,6 +110,7 @@ fn coerce_toplevel_exports_skips_unreachable_undefined_placeholder_after_throw()
             exports: vec![exported],
             values: vec![Expression::undefined(false)],
         },
+        crate::lambda::lam_compile::OutputFinished::True,
     );
 
     assert_eq!(exports, vec![exported]);
@@ -150,6 +153,7 @@ fn coerce_and_resolve_keep_declared_same_name_export_aliases() {
             exports: vec![exported],
             values: vec![Expression::var(target)],
         },
+        crate::lambda::lam_compile::OutputFinished::False,
     );
     let exports = resolve_export_aliases(&block, exports);
 
@@ -216,6 +220,7 @@ fn coerce_and_resolve_keep_declared_same_name_function_export_aliases_with_multi
             exports: vec![exported],
             values: vec![Expression::var(target)],
         },
+        crate::lambda::lam_compile::OutputFinished::False,
     );
     let exports = resolve_export_aliases(&block, exports);
 
@@ -295,6 +300,7 @@ fn coerce_toplevel_exports_reuses_existing_same_name_alias_binding_for_matching_
             exports: vec![exported],
             values: vec![Expression::var(target)],
         },
+        crate::lambda::lam_compile::OutputFinished::False,
     );
     let exports = resolve_export_aliases(&block, exports);
 
@@ -337,6 +343,7 @@ fn coerce_toplevel_exports_reuses_existing_same_name_alias_binding_for_matching_
             exports: vec![exported],
             values: vec![Expression::qualified(set_gen, Some("empty".to_string()))],
         },
+        crate::lambda::lam_compile::OutputFinished::False,
     );
     let exports = resolve_export_aliases(&block, exports);
 
@@ -395,6 +402,7 @@ fn coerce_toplevel_exports_keeps_same_name_function_alias_binding_before_later_e
             exports: vec![exported],
             values: vec![Expression::var(declared_alias)],
         },
+        crate::lambda::lam_compile::OutputFinished::False,
     );
     let exports = resolve_export_aliases(&block, exports);
 
@@ -507,6 +515,7 @@ fn coerce_toplevel_exports_keeps_same_name_function_alias_chain_before_later_eff
             exports: vec![exported],
             values: vec![Expression::var(declared_alias)],
         },
+        crate::lambda::lam_compile::OutputFinished::False,
     );
     let exports = resolve_export_aliases(&block, exports);
 
@@ -633,6 +642,7 @@ fn coerce_toplevel_exports_moves_same_name_recursive_function_alias_to_tail_with
             exports: vec![exported],
             values: vec![Expression::var(fib)],
         },
+        crate::lambda::lam_compile::OutputFinished::False,
     );
     let exports = resolve_export_aliases(&block, exports);
 
@@ -750,6 +760,7 @@ fn coerce_toplevel_exports_moves_same_name_export_strict_module_field_binding_to
             exports: vec![exported],
             values: vec![Expression::var(declared_alias)],
         },
+        crate::lambda::lam_compile::OutputFinished::False,
     );
     let exports = resolve_export_aliases(&block, exports);
 
@@ -837,6 +848,7 @@ fn coerce_toplevel_exports_moves_same_name_literal_binding_to_tail_when_reused()
             exports: vec![exported],
             values: vec![Expression::var(declared)],
         },
+        crate::lambda::lam_compile::OutputFinished::False,
     );
     let exports = resolve_export_aliases(&block, exports);
 
@@ -910,6 +922,7 @@ fn coerce_toplevel_exports_keeps_same_name_literal_binding_used_by_later_functio
             exports: vec![exported],
             values: vec![Expression::var(exported)],
         },
+        crate::lambda::lam_compile::OutputFinished::False,
     );
     let exports = resolve_export_aliases(&block, exports);
 
@@ -1009,6 +1022,7 @@ fn coerce_toplevel_exports_moves_same_name_literal_binding_to_tail_across_later_
             exports: vec![exported],
             values: vec![Expression::var(exported)],
         },
+        crate::lambda::lam_compile::OutputFinished::False,
     );
     let exports = resolve_export_aliases(&block, exports);
 
@@ -1122,6 +1136,7 @@ fn coerce_toplevel_exports_rewrites_later_initializers_through_materialized_root
             exports: vec![exported],
             values: vec![Expression::var(exported)],
         },
+        crate::lambda::lam_compile::OutputFinished::False,
     );
     let exports = resolve_export_aliases(&block, exports);
 
@@ -1243,6 +1258,7 @@ fn coerce_toplevel_exports_keeps_same_name_qualified_alias_before_later_function
             exports: vec![exported],
             values: vec![Expression::var(exported)],
         },
+        crate::lambda::lam_compile::OutputFinished::False,
     );
     let exports = resolve_export_aliases(&block, exports);
 
@@ -1313,6 +1329,7 @@ fn coerce_toplevel_exports_keeps_same_name_module_field_binding_before_later_eff
             exports: vec![exported],
             values: vec![Expression::var(declared)],
         },
+        crate::lambda::lam_compile::OutputFinished::False,
     );
     let exports = resolve_export_aliases(&block, exports);
 
@@ -1387,6 +1404,7 @@ fn coerce_toplevel_exports_keeps_same_name_runtime_module_field_alias_before_unu
             exports: vec![exported],
             values: vec![Expression::var(exported)],
         },
+        crate::lambda::lam_compile::OutputFinished::False,
     );
     let exports = resolve_export_aliases(&block, exports);
 
@@ -1463,6 +1481,7 @@ fn coerce_toplevel_exports_keeps_distinct_import_alias_for_late_export_tail() {
             exports: vec![exported],
             values: vec![Expression::var(bar)],
         },
+        crate::lambda::lam_compile::OutputFinished::False,
     );
     let exports = resolve_export_aliases(&block, exports);
 
@@ -1546,6 +1565,7 @@ fn coerce_toplevel_exports_keeps_same_name_export_alias_binding_used_by_later_to
             exports: vec![int_hash, y],
             values: vec![Expression::var(int_hash), Expression::var(y)],
         },
+        crate::lambda::lam_compile::OutputFinished::False,
     );
     let exports = resolve_export_aliases(&block, exports);
 
@@ -1614,6 +1634,7 @@ fn coerce_toplevel_exports_keeps_same_name_import_alias_binding_before_top_level
             exports: vec![exported],
             values: vec![Expression::var(exported)],
         },
+        crate::lambda::lam_compile::OutputFinished::False,
     );
     let exports = resolve_export_aliases(&block, exports);
 
@@ -1710,6 +1731,7 @@ fn coerce_toplevel_exports_moves_function_alias_binding_to_tail_when_later_effec
             exports: vec![exported],
             values: vec![Expression::var(exported)],
         },
+        crate::lambda::lam_compile::OutputFinished::False,
     );
     let exports = resolve_export_aliases(&block, exports);
 
@@ -1810,6 +1832,7 @@ fn coerce_toplevel_exports_keeps_same_name_local_value_alias_binding_for_non_fun
             exports: vec![exported],
             values: vec![Expression::var(exported)],
         },
+        crate::lambda::lam_compile::OutputFinished::False,
     );
     let exports = resolve_export_aliases(&block, exports);
 
@@ -1872,6 +1895,7 @@ fn coerce_toplevel_exports_moves_same_name_ml_module_field_alias_to_tail_across_
             exports: vec![exported],
             values: vec![Expression::var(exported)],
         },
+        crate::lambda::lam_compile::OutputFinished::False,
     );
     let exports = resolve_export_aliases(&block, exports);
 
@@ -1954,6 +1978,7 @@ fn coerce_toplevel_exports_moves_same_name_ml_module_field_alias_with_different_
             exports: vec![exported],
             values: vec![Expression::var(exported)],
         },
+        crate::lambda::lam_compile::OutputFinished::False,
     );
     let exports = resolve_export_aliases(&block, exports);
 
@@ -2036,6 +2061,7 @@ fn coerce_toplevel_exports_keeps_same_name_qualified_value_alias_binding_before_
             exports: vec![exported],
             values: vec![Expression::qualified(module, Some("default".to_string()))],
         },
+        crate::lambda::lam_compile::OutputFinished::False,
     );
     let exports = resolve_export_aliases(&block, exports);
 

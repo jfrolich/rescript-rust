@@ -13,7 +13,7 @@ fn import_attributes_exact_lowered_lambda_keeps_aliases_before_logs_through_js_p
         .expect("expected ImportAttributes-style lambda to end in a module export block");
     assert_import_attributes_alias_block_shape(&block, "after export extraction");
 
-    let exports = compiler.coerce_toplevel_exports(&mut block, exports);
+    let exports = compiler.coerce_toplevel_exports(&mut block, exports, compiled.finished);
     let exports = resolve_export_aliases(&block, exports);
     let program = Program::new(block, exports);
     assert_import_attributes_alias_block_shape(&program.block, "after top-level export coercion");

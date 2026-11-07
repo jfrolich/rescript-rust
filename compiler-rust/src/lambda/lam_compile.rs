@@ -773,12 +773,17 @@ impl LambdaCompiler {
             let (exports, name_reservations) = {
                 let _phase = info_span!("compiler.lambda_exports").entered();
                 if let Some(mut exports) = extract_toplevel_exports(compiled.expr, &mut block) {
-                    if block_terminates(&block) {
+                    // lam_compile_main.ml:390-395: a finished toplevel output.
+                    if compiled.finished == OutputFinished::True {
                         for value in &mut exports.values {
                             *value = Expression::undefined(false);
                         }
                     }
-                    self.coerce_toplevel_exports_with_name_reservations(&mut block, exports)
+                    self.coerce_toplevel_exports_with_name_reservations(
+                        &mut block,
+                        exports,
+                        compiled.finished,
+                    )
                 } else {
                     (vec![], vec![])
                 }
@@ -787,7 +792,7 @@ impl LambdaCompiler {
             // toplevel always throws, the groups after the throw are dropped
             // and the identifiers they bind are undeclared. Declare each such
             // exported identifier after the throw.
-            if block_terminates(&block) {
+            if compiled.finished == OutputFinished::True {
                 let declared: AHashSet<Ident> = block
                     .iter()
                     .filter_map(|stmt| match &stmt.desc {
@@ -972,8 +977,9 @@ impl LambdaCompiler {
         &mut self,
         block: &mut Block,
         extracted: ExtractedExports,
+        finished: OutputFinished,
     ) -> Vec<Ident> {
-        self.coerce_toplevel_exports_with_name_reservations(block, extracted)
+        self.coerce_toplevel_exports_with_name_reservations(block, extracted, finished)
             .0
     }
 
@@ -981,6 +987,7 @@ impl LambdaCompiler {
         &mut self,
         block: &mut Block,
         extracted: ExtractedExports,
+        finished: OutputFinished,
     ) -> (Vec<Ident>, Vec<Ident>) {
         let mut max_stamp = max_ident_stamp_in_block(block);
         for export in &extracted.exports {
@@ -993,7 +1000,7 @@ impl LambdaCompiler {
 
         let mut declared = AHashSet::new();
         collect_declared_idents(block, &mut declared);
-        let block_ended = block_terminates(block);
+        let block_ended = finished == OutputFinished::True;
 
         let mut exports = Vec::with_capacity(extracted.exports.len());
         // OCaml `lam_coercion.ml` can replace an original export id with a
@@ -2024,15 +2031,15 @@ impl LambdaCompiler {
                 }
             }
             Lambda::Lassign(id, value) => {
+                // lam_compile.ml:1320-1334 `compile_assign`: the assignment
+                // is appended to the value's block unconditionally.
                 let compiled = self.compile_expr(value);
                 let mut prelude = compiled.prelude;
-                if !block_terminates(&prelude) {
-                    prelude.push(Statement::exp(Expression::bin(
-                        BinOp::Eq,
-                        Expression::var(*id),
-                        compiled.expr,
-                    )));
-                }
+                prelude.push(Statement::exp(Expression::bin(
+                    BinOp::Eq,
+                    Expression::var(*id),
+                    compiled.expr,
+                )));
                 Compiled {
                     prelude,
                     expr: Expression::undefined(false),
@@ -2153,13 +2160,6 @@ impl LambdaCompiler {
         let loop_label = self.pop_loop();
 
         let mut prelude = start_compiled.prelude;
-        if block_terminates(&prelude) {
-            return Compiled {
-                prelude,
-                expr: Expression::undefined(false),
-                finished: OutputFinished::False,
-            };
-        }
 
         let push_loop = |block: &mut Block, init: Option<Expression>, finish: Expression| {
             block.push(Statement::for_range(
@@ -2180,13 +2180,6 @@ impl LambdaCompiler {
             );
         } else if js_expr_no_side_effects(&start_compiled.expr) {
             prelude.extend(finish_compiled.prelude);
-            if block_terminates(&prelude) {
-                return Compiled {
-                    prelude,
-                    expr: Expression::undefined(false),
-                    finished: OutputFinished::False,
-                };
-            }
             push_loop(
                 &mut prelude,
                 Some(start_compiled.expr),
@@ -2200,13 +2193,6 @@ impl LambdaCompiler {
                 ident_info: IdentInfo::default(),
             }));
             prelude.extend(finish_compiled.prelude);
-            if block_terminates(&prelude) {
-                return Compiled {
-                    prelude,
-                    expr: Expression::undefined(false),
-                    finished: OutputFinished::False,
-                };
-            }
             push_loop(&mut prelude, None, finish_compiled.expr);
         }
 
@@ -2233,13 +2219,6 @@ impl LambdaCompiler {
     ) -> Compiled {
         let iterable_compiled = self.compile_expr(iterable);
         let mut prelude = iterable_compiled.prelude;
-        if block_terminates(&prelude) {
-            return Compiled {
-                prelude,
-                expr: Expression::undefined(false),
-                finished: OutputFinished::False,
-            };
-        }
 
         // Match OCaml: when the loop variable is not actually used by the
         // body, emit a fresh placeholder so the source name doesn't leak.
@@ -2931,13 +2910,11 @@ impl LambdaCompiler {
         }));
 
         let mut then_block = rhs_compiled.prelude;
-        if !block_terminates(&then_block) {
-            then_block.push(Statement::exp(Expression::bin(
-                BinOp::Eq,
-                Expression::var(tmp),
-                rhs_compiled.expr,
-            )));
-        }
+        then_block.push(Statement::exp(Expression::bin(
+            BinOp::Eq,
+            Expression::var(tmp),
+            rhs_compiled.expr,
+        )));
 
         let test = op.test_expr(lhs_compiled.expr);
         prelude.push(Statement::if_(test, then_block, vec![]));
@@ -2987,9 +2964,7 @@ impl LambdaCompiler {
         }));
 
         let mut then_block = rhs_compiled.prelude;
-        if !block_terminates(&then_block) {
-            then_block.push(self.result_assignment(id, rhs_compiled.expr));
-        }
+        then_block.push(self.result_assignment(id, rhs_compiled.expr));
 
         block.push(Statement::if_(
             op.test_expr(lhs_compiled.expr),
@@ -4046,17 +4021,6 @@ impl LambdaCompiler {
         let else_block = self.compile_tail_loop_return_block(else_, tail_loop);
 
         let mut block = cond_compiled.prelude;
-        if let (Some(then_expr), Some(else_expr)) = (
-            single_return_expression(&then_block),
-            single_return_expression(&else_block),
-        ) {
-            block.push(Statement::return_(Expression::cond(
-                cond_compiled.expr,
-                then_expr,
-                else_expr,
-            )));
-            return BlockOutput::make(block);
-        }
 
         // Mirror OCaml's Lifthenelse compile (lam_compile.ml:1428-1436), which
         // calls `Js_output.output_as_block` on each compiled branch — that
@@ -4458,9 +4422,11 @@ impl LambdaCompiler {
         }
     }
 
+    /// `Js_output.output_as_block` (js_output.ml:82-86) of a `NeedValue`
+    /// output: a finished output's value is dropped.
     fn compiled_to_effect_block(&self, compiled: Compiled) -> Block {
         let mut block = compiled.prelude;
-        if block_finishes_output(&block) {
+        if compiled.finished == OutputFinished::True {
             return block;
         }
         push_effect_expression(&mut block, compiled.expr);
@@ -6958,16 +6924,6 @@ fn lower_ocaml_for_range_direction<'a>(
         (crate::lambda::DirectionFlag::Upto, _) => (finish, ForDirection::Upto),
         (crate::lambda::DirectionFlag::Downto, _) => (finish, ForDirection::Downto),
     }
-}
-
-fn single_return_expression(block: &Block) -> Option<Expression> {
-    let [stmt] = block.as_slice() else {
-        return None;
-    };
-    let StatementDesc::Return(expr) = &stmt.desc else {
-        return None;
-    };
-    Some(expr.clone())
 }
 
 fn block_last_is_continue(block: &Block) -> bool {
