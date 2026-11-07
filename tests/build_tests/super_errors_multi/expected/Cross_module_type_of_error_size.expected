@@ -1,0 +1,61 @@
+We've found a bug for you!
+  /.../fixtures/Cross_module_type_of_error_size/Use.res:6:5-11:1
+
+   4 │     let x: int
+   5 │   }
+   6 │ } = {
+   7 │   module type T = {
+   . │ ...
+  10 │   }
+  11 │ }
+  12 │ 
+
+  Signature mismatch:
+  ...
+  Module type declarations do not match:
+    module type T = {
+  module N: {
+    type s
+    module Deep: {
+      type d
+    }
+  }
+  let x: string
+}
+  does not match
+    module type T = {
+  module N: {
+    type s
+    module Deep: {
+      type d
+    }
+  }
+  let x: int
+}
+  At position module type T = <here>
+  Modules do not match:
+    {
+  module N: {
+    type s
+    module Deep: {
+      type d
+    }
+  }
+  let x: string
+}
+  is not included in
+    {
+  module N: {
+    type s
+    module Deep: {
+      type d
+    }
+  }
+  let x: int
+}
+  At position module type T = <here>
+  Values do not match: let x: string is not included in let x: int
+  /.../fixtures/Cross_module_type_of_error_size/Use.res:4:5-14:
+    Expected declaration
+  /.../fixtures/Cross_module_type_of_error_size/Use.res:9:5-17:
+    Actual declaration

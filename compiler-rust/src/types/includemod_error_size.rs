@@ -162,6 +162,9 @@ struct ErrorSize<'a> {
     /// to one `Pident id'` (`Mty_ident (Pident id')`) shared by every use
     /// (subst.ml:310-336).
     renamed: HashSet<IdentKey>,
+    /// The `Ident.rename` blocks of those identifiers counted: a block of
+    /// their own sharing the original's name string.
+    renamed_idents: HashSet<IdentKey>,
     abbrev_refs: HashSet<AbbrevMemoRef>,
     mutability_refs: HashSet<MutabilityRef>,
     row_field_refs: HashSet<RowFieldRef>,
@@ -246,6 +249,7 @@ impl<'a> ErrorSize<'a> {
             session: 0,
             sessions: 0,
             renamed: HashSet::default(),
+            renamed_idents: HashSet::default(),
             abbrev_refs: HashSet::default(),
             mutability_refs: HashSet::default(),
             row_field_refs: HashSet::default(),
@@ -411,11 +415,38 @@ impl<'a> ErrorSize<'a> {
     }
 
     /// The target path of a substitution entry: one block for every use.
+    /// A renamed identifier's is `Pident id'`.
     fn target_path(&mut self, target: Target, path: &Path) -> Walk {
         if !self.path_blocks.insert(PathBlockKey::Target(target)) {
             return Ok(());
         }
-        self.original(|size| size.path(path))
+        match (target, path) {
+            (Target::Renamed(_), Path::Pident(id)) => {
+                self.block(0, 1)?;
+                self.renamed_ident_block(id)
+            }
+            _ => self.original(|size| size.path(path)),
+        }
+    }
+
+    /// `Ident.rename id` (compiler/ext/ident.ml:62-65): `{id with stamp}`, a
+    /// block of its own sharing the name string of `id`.
+    fn renamed_ident_block(&mut self, id: &Ident) -> Walk {
+        if !self.renamed_idents.insert(ident_key(id)) {
+            return Ok(());
+        }
+        self.block(0, 3)?;
+        self.ident_name(id)
+    }
+
+    /// The identifier a signature item or functor binds: in a `Subst` copy,
+    /// its renaming (subst.ml `rename_bound_idents`, `modtype`).
+    fn binder(&mut self, id: &Ident) -> Walk {
+        if self.substituted {
+            self.renamed_ident_block(id)
+        } else {
+            self.ident(id)
+        }
     }
 
     /// `Subst.type_path s p` (subst.ml:87-102). `kept` is the block of `p`
@@ -804,7 +835,7 @@ impl<'a> ErrorSize<'a> {
                 // `Mty_functor (Ident.rename id, may_map (modtype s) arg,
                 //  modtype (add_module id (Pident id') s) res)`
                 self.block(2, 3)?;
-                self.ident(param)?;
+                self.renamed_ident_block(param)?;
                 self.option(param_type.as_deref(), |size, mty| size.module_type(mty))?;
                 self.renamed.insert(ident_key(param));
                 self.module_type(result)
@@ -841,27 +872,27 @@ impl<'a> ErrorSize<'a> {
         match item {
             SignatureItem::SigValue(id, vd) => {
                 self.block(0, 2)?;
-                self.ident(id)?;
+                self.binder(id)?;
                 self.value_description(vd)
             }
             SignatureItem::SigType(id, decl, _) => {
                 self.block(1, 3)?;
-                self.ident(id)?;
+                self.binder(id)?;
                 self.shared_type_declaration(decl)
             }
             SignatureItem::SigTypext(id, ext, _) => {
                 self.block(2, 3)?;
-                self.ident(id)?;
+                self.binder(id)?;
                 self.extension_constructor(ext)
             }
             SignatureItem::SigModule(id, md, _) => {
                 self.block(3, 3)?;
-                self.ident(id)?;
+                self.binder(id)?;
                 self.module_declaration(md)
             }
             SignatureItem::SigModtype(id, mtd) => {
                 self.block(4, 2)?;
-                self.ident(id)?;
+                self.binder(id)?;
                 self.modtype_declaration(mtd)
             }
             SignatureItem::SigClass | SignatureItem::SigClassType => Ok(()),
