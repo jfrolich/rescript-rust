@@ -228,10 +228,7 @@ pub(crate) fn decl_annotation_attributes<'a>(
 ) -> impl Iterator<Item = AnnotationAttribute<'a>> + 'a {
     attrs.iter().map(move |attr| AnnotationAttribute {
         name: attr.attr_name.txt.as_str(),
-        semantic: match &attr.attr_payload {
-            crate::types::decl::AttributePayload::Str(value) => Some(value.clone()),
-            _ => None,
-        },
+        semantic: attr.attr_payload.semantic_string().map(str::to_string),
         loc: if attr.attr_name.txt == NOT_UNDEFINED
             || attr.attr_name.txt == INSTANCE_OF
             || attr.attr_name.txt == TYPE_OF
@@ -377,7 +374,15 @@ pub(crate) fn declaration_shape(
                     .type_attributes
                     .iter()
                     .find(|attr| attr.attr_name.txt == INSTANCE_OF)
-                    .map(|attr| ShapeString::attribute(ctx, attr.attr_name.loc))
+                    .map(|attr| match &attr.attr_payload {
+                        // A backquoted string decodes to a fresh string.
+                        crate::types::decl::AttributePayload::SemanticString(payload)
+                            if payload.template =>
+                        {
+                            ShapeString::Allocation(ShapeAllocation::fresh())
+                        }
+                        _ => ShapeString::attribute(ctx, attr.attr_name.loc),
+                    })
                     .expect("an @instanceOf annotation is an attribute");
                 let (ancestors, ancestor_blocks) =
                     match decl.type_manifest.and_then(|m| recognized_as(ctx, env, m)) {

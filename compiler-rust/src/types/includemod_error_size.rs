@@ -667,6 +667,43 @@ impl<'a> ErrorSize<'a> {
                     self.string()?;
                 }
             }
+            AttributePayload::SemanticString(payload) => {
+                self.block(0, 3)?;
+                for _ in 0..payload.braces {
+                    // Pexp_braces {expr; braces_loc}, `braces_loc` with
+                    // positions of its own, and the enclosed expression, which
+                    // keeps the same `pexp_loc`.
+                    self.block(0, 2)?;
+                    self.payload_location()?;
+                    self.block(0, 3)?;
+                }
+                if payload.template {
+                    // Pexp_template {source_segments = [{txt; loc}]; values =
+                    // []}: the segment's location shares one position with
+                    // `pexp_loc`. The decoded string is a fresh one
+                    // (`String_literal.decode_js_template_escapes`).
+                    self.block(38, 2)?;
+                    self.block(0, 2)?;
+                    self.block(0, 2)?;
+                    self.string()?;
+                    self.block(0, 3)?;
+                    self.block(0, 4)?;
+                } else if attr.attr_name.txt == "instanceOf" {
+                    // The semantic string is the class name of the
+                    // declaration's shape.
+                    self.string_literal_blocks()?;
+                    self.string()?;
+                    let key = ShapeStringKey::Attribute(self.location_key(attr.attr_name.loc));
+                    if self.shape_strings.insert(key) {
+                        self.string()?;
+                    }
+                } else {
+                    self.string_constant()?;
+                    if attr.attr_name.txt == "tag" {
+                        self.tag_names.insert(self.attribute_key(attr));
+                    }
+                }
+            }
             AttributePayload::Str(_)
             | AttributePayload::Deprecated { .. }
             | AttributePayload::Structure(_)
@@ -1036,6 +1073,13 @@ impl<'a> ErrorSize<'a> {
                     .type_attributes
                     .iter()
                     .find(|attr| attr.attr_name.txt == "tag")
+                    // A backquoted name decodes to a string of its own.
+                    .filter(|attr| {
+                        !matches!(
+                            &attr.attr_payload,
+                            AttributePayload::SemanticString(payload) if payload.template
+                        )
+                    })
                     .map(|attr| self.attribute_key(attr));
                 self.layout(*layout, constructors, tag_attribute.as_ref())?;
             }

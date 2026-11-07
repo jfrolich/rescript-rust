@@ -60,10 +60,7 @@ pub fn find_doc_attribute(attrs: Attrs<'_>) -> Option<String> {
             if !is_doc_name(&attr.attr_name.txt) {
                 return None;
             }
-            match &attr.attr_payload {
-                decl::AttributePayload::Str(s) => Some(s.clone()),
-                _ => None,
-            }
+            attr.attr_payload.semantic_string().map(str::to_string)
         }),
     }
 }

@@ -685,10 +685,39 @@ pub enum AttributePayload {
     },
     /// Structure payload (list of string pairs)
     Structure(Vec<(String, String)>),
+    /// A string payload that is not a bare string constant but that
+    /// `Ast_payload.semantic_string_of_payload` reads: one in braces, or a
+    /// backquoted string without interpolation.
+    SemanticString(Box<SemanticStringPayload>),
     /// A tuple of string constants, such as the `("./module", "Name")` of
     /// `@genType.import`, which genType reads back from a stored signature
     /// (compiler/gentype/annotation.ml:136-148).
     StrTuple(Vec<String>),
+}
+
+/// The expression of an [`AttributePayload::SemanticString`]: `braces`
+/// `Pexp_braces` around a string constant, or around `Pexp_template
+/// {source_segments = [_]; values = []}` when `template`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SemanticStringPayload {
+    /// `Ast_payload.semantic_string_of_expression`: what JavaScript
+    /// evaluates the string to.
+    pub semantic: String,
+    /// The `Pexp_braces` around it.
+    pub braces: u32,
+    /// A backquoted string rather than a string constant.
+    pub template: bool,
+}
+
+impl AttributePayload {
+    /// `Ast_payload.semantic_string_of_payload`.
+    pub fn semantic_string(&self) -> Option<&str> {
+        match self {
+            AttributePayload::Str(semantic) => Some(semantic),
+            AttributePayload::SemanticString(payload) => Some(&payload.semantic),
+            _ => None,
+        }
+    }
 }
 
 /// Visitor over the location handles of a signature (see

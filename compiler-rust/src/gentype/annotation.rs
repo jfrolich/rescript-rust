@@ -513,10 +513,8 @@ fn decl_attribute_payload_is_empty(payload: &crate::types::decl::AttributePayloa
 fn decl_attribute_payload_as_string(
     payload: &crate::types::decl::AttributePayload,
 ) -> Option<String> {
-    match payload {
-        crate::types::decl::AttributePayload::Str(s) => Some(s.clone()),
-        _ => None,
-    }
+    // Annotation.ml reads strings with `Ast_payload.semantic_string_of_expression`.
+    payload.semantic_string().map(str::to_string)
 }
 
 fn decl_attribute_payload_as_int(payload: &crate::types::decl::AttributePayload) -> Option<i32> {
@@ -586,9 +584,10 @@ pub fn get_decl_attribute_import_renaming(
     let attribute_import = get_decl_attribute_payload(tag_is_gentype_import, attributes);
     let gentype_as_renaming = get_decl_gentype_as_renaming(attributes);
     match attribute_import {
-        Some(crate::types::decl::AttributePayload::Str(import_string)) => {
-            (Some(import_string.clone()), gentype_as_renaming)
-        }
+        Some(payload) if payload.semantic_string().is_some() => (
+            payload.semantic_string().map(str::to_string),
+            gentype_as_renaming,
+        ),
         Some(crate::types::decl::AttributePayload::StrTuple(strings)) => match strings.as_slice() {
             [import_string, rename_string] => {
                 (Some(import_string.clone()), Some(rename_string.clone()))

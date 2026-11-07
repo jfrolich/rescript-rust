@@ -1373,6 +1373,9 @@ fn read_attribute_payload(value: &OcamlValue) -> AttributePayload {
         // PStr(structure) — tag 0
         OcamlValue::Block(0, fields) if !fields.is_empty() => {
             let structure = &fields[0];
+            if let Some(payload) = semantic_string_payload(structure) {
+                return AttributePayload::SemanticString(Box::new(payload));
+            }
             if let Some(name) = extract_ident_payload_name(structure) {
                 return match name.as_str() {
                     "true" => AttributePayload::Bool(true),
@@ -1387,6 +1390,76 @@ fn read_attribute_payload(value: &OcamlValue) -> AttributePayload {
             }
         }
         _ => AttributePayload::Empty,
+    }
+}
+
+/// `PStr [{pstr_desc = Pstr_eval (e, _)}]` where `e` is braces around a
+/// string constant, or a backquoted string without interpolation in braces
+/// or not: the payloads `Ast_payload.semantic_string_of_payload` reads
+/// besides a bare string constant (compiler/ml/ast_payload.ml:39-51).
+fn semantic_string_payload(
+    structure: &OcamlValue,
+) -> Option<crate::types::decl::SemanticStringPayload> {
+    // [item]
+    let OcamlValue::Block(0, cons) = structure else {
+        return None;
+    };
+    if !matches!(cons.get(1), Some(OcamlValue::Int(0))) {
+        return None;
+    }
+    // {pstr_desc = Pstr_eval (e, _); pstr_loc}
+    let OcamlValue::Block(0, item) = &cons[0] else {
+        return None;
+    };
+    let OcamlValue::Block(0, eval) = &item[0] else {
+        return None;
+    };
+    // {pexp_desc; pexp_loc; pexp_attributes}
+    let mut expression = &eval[0];
+    let mut braces = 0;
+    loop {
+        let OcamlValue::Block(0, record) = expression else {
+            return None;
+        };
+        match &record[0] {
+            // Pexp_braces {expr; braces_loc}
+            OcamlValue::Block(0, inner) => {
+                braces += 1;
+                expression = &inner[0];
+            }
+            // Pexp_constant (Pconst_string literal)
+            OcamlValue::Block(2, constant) if braces > 0 => {
+                let OcamlValue::Block(2, literal) = &constant[0] else {
+                    return None;
+                };
+                return Some(crate::types::decl::SemanticStringPayload {
+                    semantic: string_literal_semantic(&literal[0])?,
+                    braces,
+                    template: false,
+                });
+            }
+            // Pexp_template {source_segments = [{txt}]; values = []}
+            OcamlValue::Block(38, template) => {
+                let OcamlValue::Block(0, segments) = &template[0] else {
+                    return None;
+                };
+                if !matches!(segments.get(1), Some(OcamlValue::Int(0)))
+                    || !matches!(template.get(1), Some(OcamlValue::Int(0)))
+                {
+                    return None;
+                }
+                let OcamlValue::Block(0, segment) = &segments[0] else {
+                    return None;
+                };
+                let source = segment[0].as_string_opt()?;
+                return Some(crate::types::decl::SemanticStringPayload {
+                    semantic: crate::string_literal::decode_js_template_escapes(source)?,
+                    braces,
+                    template: true,
+                });
+            }
+            _ => return None,
+        }
     }
 }
 
@@ -1685,6 +1758,72 @@ mod tests {
 
     fn block(tag: u8, fields: Vec<OcamlValue>) -> OcamlValue {
         OcamlValue::Block(tag, Arc::from(fields))
+    }
+
+    /// `Ast_payload.semantic_string_of_payload` reads braces and backquoted
+    /// strings without interpolation; an interpolated one is no string.
+    #[test]
+    fn attribute_payloads_keep_semantic_strings_in_braces_and_templates() {
+        use crate::types::decl::SemanticStringPayload;
+        let loc = || OcamlValue::Int(0);
+        let expression = |desc| block(0, vec![desc, loc(), OcamlValue::Int(0)]);
+        let braces = |inner| expression(block(0, vec![inner, loc()]));
+        let string = || {
+            expression(block(
+                2,
+                vec![block(
+                    2,
+                    vec![block(
+                        0,
+                        vec![
+                            OcamlValue::String("A\\x".into()),
+                            OcamlValue::String("A\\x".into()),
+                        ],
+                    )],
+                )],
+            ))
+        };
+        let template = |source: &str, values| {
+            let segment = block(0, vec![OcamlValue::String(source.into()), loc()]);
+            expression(block(
+                38,
+                vec![block(0, vec![segment, OcamlValue::Int(0)]), values],
+            ))
+        };
+        let payload = |e| {
+            let item = block(0, vec![block(0, vec![e, OcamlValue::Int(0)]), loc()]);
+            block(0, vec![block(0, vec![item, OcamlValue::Int(0)])])
+        };
+        let semantic = |e| match read_attribute_payload(&payload(e)) {
+            AttributePayload::SemanticString(payload) => Some(*payload),
+            _ => None,
+        };
+        assert_eq!(
+            semantic(template("Intl\\u{2E}Locale", OcamlValue::Int(0))),
+            Some(SemanticStringPayload {
+                semantic: "Intl.Locale".to_string(),
+                braces: 0,
+                template: true,
+            })
+        );
+        assert_eq!(
+            semantic(braces(braces(template("Foo", OcamlValue::Int(0))))),
+            Some(SemanticStringPayload {
+                semantic: "Foo".to_string(),
+                braces: 2,
+                template: true,
+            })
+        );
+        assert_eq!(
+            semantic(braces(string())).map(|p| (p.braces, p.template)),
+            Some((1, false))
+        );
+        assert!(matches!(
+            read_attribute_payload(&payload(string())),
+            AttributePayload::Str(_)
+        ));
+        let interpolated = block(0, vec![string(), OcamlValue::Int(0)]);
+        assert_eq!(semantic(template("F", interpolated)), None);
     }
 
     /// A class's blocks read twice are one value, and its name is the

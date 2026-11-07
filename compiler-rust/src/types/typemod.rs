@@ -580,6 +580,38 @@ fn parser_private_to_type_private(
     }
 }
 
+/// A payload expression that `Ast_payload.semantic_string_of_expression`
+/// reads (compiler/ml/ast_payload.ml:39-51) other than a bare string
+/// constant: braces around a string, or a backquoted string without
+/// interpolation.
+fn semantic_string_payload(
+    arena: &ParseArena,
+    expr: &crate::parser::ast::Expression,
+) -> Option<crate::types::decl::SemanticStringPayload> {
+    let mut braces = 0;
+    let mut inner = expr;
+    while let crate::parser::ast::ExpressionDesc::Pexp_braces(b) = &inner.pexp_desc {
+        braces += 1;
+        inner = arena.get_expr(b.expr);
+    }
+    let template = matches!(
+        inner.pexp_desc,
+        crate::parser::ast::ExpressionDesc::Pexp_template(_)
+    );
+    if braces == 0 && !template {
+        return None;
+    }
+    // An invalid escape is a syntax error, so a parsed template decodes.
+    let semantic = crate::ast_payload::semantic_string_of_expression(arena, inner)
+        .ok()
+        .flatten()?;
+    Some(crate::types::decl::SemanticStringPayload {
+        semantic,
+        braces,
+        template,
+    })
+}
+
 fn parser_attr_to_decl_attr(
     arena: &ParseArena,
     ctx: &crate::types::context::TypeContext,
@@ -609,7 +641,11 @@ fn parser_attr_to_decl_attr(
                 {
                     let (expr_idx, _attrs) = eval_box.as_ref();
                     let expr = arena.get_expr(*expr_idx);
-                    if let crate::parser::ast::ExpressionDesc::Pexp_constant(c) = &expr.pexp_desc {
+                    if let Some(payload) = semantic_string_payload(arena, expr) {
+                        crate::types::decl::AttributePayload::SemanticString(Box::new(payload))
+                    } else if let crate::parser::ast::ExpressionDesc::Pexp_constant(c) =
+                        &expr.pexp_desc
+                    {
                         match c {
                             crate::parser::ast::Constant::String(value) => {
                                 crate::types::decl::AttributePayload::Str(
@@ -6022,8 +6058,9 @@ fn process_variant_tag_name(
                 AstUntaggedVariantError::DuplicatedBsAs,
             ));
         }
-        if let crate::types::decl::AttributePayload::Str(value) = &attr.attr_payload {
-            tag_name = Some(value.clone());
+        // `Ast_payload.semantic_string_of_payload`.
+        if let Some(value) = attr.attr_payload.semantic_string() {
+            tag_name = Some(value.to_string());
         }
         if tag_name.is_none() {
             return Err(ast_untagged_variant_error(

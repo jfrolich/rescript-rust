@@ -1,0 +1,8 @@
+
+  [1;31mWe've found a bug for you![0m
+  [36m/.../fixtures/tag_template_interpolated.res[0m:[2m1:1-4[0m
+
+  [1;31m1[0m [2m│[0m [1;31m@tag[0m(`k${"i"}nd`) type t = A({x: int}) | B({y: string})
+  2 [2m│[0m 
+
+  A variant tag annotation @tag(...) must be a string

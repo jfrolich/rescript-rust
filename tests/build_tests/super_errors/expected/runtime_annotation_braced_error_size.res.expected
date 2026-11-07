@@ -1,0 +1,32 @@
+
+  [1;31mWe've found a bug for you![0m
+  [36m/.../fixtures/runtime_annotation_braced_error_size.res[0m:[2m6:5-11:1[0m
+
+   4 [2m│[0m     let x: int
+   5 [2m│[0m   }
+   [1;31m6[0m [2m│[0m } = [1;31m{[0m
+   [1;31m7[0m [2m│[0m [1;31m  module type T = {[0m
+   [2m.[0m [2m│[0m [2m...[0m
+  [1;31m10[0m [2m│[0m [1;31m  }[0m
+  [1;31m11[0m [2m│[0m [1;31m}[0m
+  12 [2m│[0m 
+
+  Signature mismatch:
+  ...
+  At position module type T = <here>
+  Modules do not match:
+    {
+  type foo
+  let x: string
+}
+  is not included in
+    {
+  type foo
+  let x: int
+}
+  At position module type T = <here>
+  Values do not match: let x: string is not included in let x: int
+  [36m/.../fixtures/runtime_annotation_braced_error_size.res[0m:[2m4:5-14[0m:
+    Expected declaration
+  [36m/.../fixtures/runtime_annotation_braced_error_size.res[0m:[2m9:5-17[0m:
+    Actual declaration
