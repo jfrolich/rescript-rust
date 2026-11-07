@@ -2924,10 +2924,13 @@ impl LambdaCompiler {
             return block;
         }
 
+        // compile_sequand / compile_sequor `Declare (_kind, v)`: the target
+        // is declared with `~kind:Variable` once the right side needs
+        // statements (lam_compile.ml:1128-1135, 1168-1175).
         block.push(Statement::variable(VariableDeclaration {
             ident: *id,
             value: Some(op.default_expr()),
-            property: kind,
+            property: LetKind::Variable,
             ident_info: IdentInfo::default(),
         }));
 

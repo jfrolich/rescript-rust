@@ -8942,3 +8942,32 @@ fn for_loop_compiles_its_finish_bound_before_its_start_bound() {
         "the finish bound allocates first: {stamps:?}"
     );
 }
+
+/// compile_sequand / compile_sequor in a `Declare (_kind, v)` continuation
+/// declare the target with `~kind:Variable` when the right side needs
+/// statements (lam_compile.ml:1128-1135, 1168-1175).
+#[test]
+fn short_circuit_declaration_with_statements_is_a_variable() {
+    let flag = Ident::create_local("flag");
+    let target = Ident::create_local("target");
+    let output = LambdaCompiler::new().compile_let_binding_output(
+        LetKind::Strict,
+        &target,
+        &Lambda::prim(
+            Primitive::Psequand,
+            vec![Lambda::var(flag), allocating_catch()],
+            LamLoc::NONE,
+        ),
+    );
+    let declaration = output
+        .block
+        .iter()
+        .find_map(|stmt| match &stmt.desc {
+            StatementDesc::Variable(declaration) if declaration.ident.same(&target) => {
+                Some(declaration)
+            }
+            _ => None,
+        })
+        .expect("the target is declared");
+    assert_eq!(declaration.property, LetKind::Variable);
+}
