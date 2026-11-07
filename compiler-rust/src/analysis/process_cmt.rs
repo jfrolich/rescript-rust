@@ -329,7 +329,8 @@ impl Processor<'_> {
         module_type: &decl::ModuleType,
     ) -> Module {
         match module_type {
-            decl::ModuleType::MtyIdent(path) | decl::ModuleType::MtyAlias(_, path) => {
+            decl::ModuleType::MtyIdent(_) | decl::ModuleType::MtyAlias(..) => {
+                let path = module_type.ident_or_alias_path().unwrap();
                 Module::Ident(path.clone())
             }
             decl::ModuleType::MtySignature(signature) => {

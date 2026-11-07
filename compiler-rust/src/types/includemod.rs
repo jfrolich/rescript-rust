@@ -1013,7 +1013,7 @@ fn with_local_pident_module_type<R>(
             ModuleType::MtyAlias(_, next)
                 if !(next.same(&current) && namespace == PathNamespace::Module) =>
             {
-                current = next.clone();
+                current = crate::types::Path::clone(&next);
                 namespace = PathNamespace::Module;
             }
             _ => return Some(f(&mty)),
@@ -1304,7 +1304,9 @@ fn modtypes_inner(
                                 type_ctx, env, &impl_path, &mty,
                             )
                         })
-                        .unwrap_or_else(|| ModuleType::MtyAlias(*pres_impl, impl_path.clone()));
+                        .unwrap_or_else(|| {
+                            ModuleType::MtyAlias(*pres_impl, std::sync::Arc::new(impl_path.clone()))
+                        });
                 // includemod.ml:231: `modtypes ~loc env cxt subst mty1 mty2`.
                 modtypes_inner(
                     type_ctx,
@@ -2691,7 +2693,13 @@ fn substitute_module_type_paths_no_freshen(
     match mty {
         ModuleType::MtyIdent(path) => ModuleType::MtyIdent(substitute_modtype_path(path, subst)),
         ModuleType::MtyAlias(presence, path) => {
-            ModuleType::MtyAlias(*presence, substitute_module_path(path, subst))
+            // `Subst.module_path` (subst.ml:69-75): an unreplaced `Pident`
+            // target is the block itself.
+            let target = match path.as_ref() {
+                Path::Pident(_) if subst.module_paths.get(path).is_none() => path.clone(),
+                _ => std::sync::Arc::new(substitute_module_path(path, subst)),
+            };
+            ModuleType::MtyAlias(*presence, target)
         }
         ModuleType::MtyFunctor {
             param,

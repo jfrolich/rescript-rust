@@ -820,7 +820,9 @@ fn visit_signature_identifiers(sig: &[SignatureItem], f: &mut dyn FnMut(&crate::
     }
     fn module_type(mty: &ModuleType, f: &mut dyn FnMut(&crate::ident::Ident)) {
         match mty {
-            ModuleType::MtyIdent(p) | ModuleType::MtyAlias(_, p) => path(p, f),
+            ModuleType::MtyIdent(_) | ModuleType::MtyAlias(..) => {
+                path(mty.ident_or_alias_path().unwrap(), f)
+            }
             ModuleType::MtySignature(sig) => {
                 visit_signature_identifiers(sig, f);
             }
@@ -940,7 +942,9 @@ fn map_signature_identifiers(
         prefixes: &mut Prefixes,
     ) {
         match mty {
-            ModuleType::MtyIdent(p) | ModuleType::MtyAlias(_, p) => path(p, f, prefixes),
+            ModuleType::MtyIdent(p) => path(p, f, prefixes),
+            // The target is a shared block, remapped once per source block.
+            ModuleType::MtyAlias(_, p) => prefix(p, f, prefixes),
             ModuleType::MtySignature(sig) => {
                 walk(&mut Arc::make_mut(sig)[..], f, prefixes);
             }
@@ -1020,7 +1024,16 @@ fn map_signature_paths(sig: &mut [SignatureItem], f: &mut dyn FnMut(&Path) -> Pa
     }
     fn module_type(mty: &mut ModuleType, f: &mut dyn FnMut(&Path) -> Path) {
         match mty {
-            ModuleType::MtyIdent(p) | ModuleType::MtyAlias(_, p) => *p = f(p),
+            ModuleType::MtyIdent(p) => *p = f(p),
+            ModuleType::MtyAlias(_, p) => {
+                let mapped = f(p);
+                // Saving keeps an unreplaced `Pident` target block and
+                // rebuilds a dotted one (subst.ml:69-75); the identifier pass
+                // already remapped the `Pident` block per source block.
+                if !matches!(p.as_ref(), Path::Pident(_)) {
+                    *p = Arc::new(mapped);
+                }
+            }
             ModuleType::MtySignature(sig) => map_signature_paths(&mut Arc::make_mut(sig)[..], f),
             ModuleType::MtyFunctor {
                 param_type, result, ..

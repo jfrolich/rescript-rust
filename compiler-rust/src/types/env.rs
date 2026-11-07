@@ -1349,7 +1349,8 @@ impl Env {
                 .modules
                 .visible_local_entries()
                 .filter_map(|(id, decl)| match &decl.md_type {
-                    ModuleType::MtyAlias(_, target) | ModuleType::MtyIdent(target) => {
+                    ModuleType::MtyAlias(..) | ModuleType::MtyIdent(_) => {
+                        let target = decl.md_type.ident_or_alias_path().unwrap();
                         Some((*id, target.clone()))
                     }
                     _ => None,
@@ -1643,8 +1644,9 @@ impl Env {
                                 }
                                 None
                             }
-                            super::decl::ModuleType::MtyIdent(type_path)
-                            | super::decl::ModuleType::MtyAlias(_, type_path) => {
+                            super::decl::ModuleType::MtyIdent(_)
+                            | super::decl::ModuleType::MtyAlias(..) => {
+                                let type_path = mty.ident_or_alias_path().unwrap();
                                 if let Ok(mtd) = env.lookup_modtype(type_path) {
                                     if let Some(resolved) = &mtd.mtd_type {
                                         return find_type_in_module_type(
@@ -2004,7 +2006,8 @@ impl Env {
                     SignatureItem::SigModule(id, md, _) if id.name() == name => Some(md),
                     _ => None,
                 }),
-                ModuleType::MtyAlias(_, alias_path) | ModuleType::MtyIdent(alias_path) => {
+                ModuleType::MtyAlias(..) | ModuleType::MtyIdent(_) => {
+                    let alias_path = mty.ident_or_alias_path().unwrap();
                     let md = lookup_module_inner(env, alias_path, visiting).ok()?;
                     lookup_submodule_in_module_type(env, &md.md_type, name, visiting)
                 }
@@ -2052,7 +2055,7 @@ impl Env {
     /// `Pdot` is rebuilt with a fresh block around its normalized prefix and
     /// keeps its suffix string; an unchanged `Pident` is returned itself.
     pub fn normalize_path(&self, ctx: &TypeContext, path: &Path) -> Path {
-        self.normalize_path_inner(ctx, path, 0)
+        Path::clone(&self.normalize_shared_path(ctx, &Arc::new(path.clone()), 0))
     }
 
     /// Normalize the prefix of a value/extension path by following module aliases.
@@ -2069,44 +2072,29 @@ impl Env {
         }
     }
 
-    /// `normalize_path` of a shared prefix: the prefix block itself when it is
-    /// a `Pident` that is not an alias.
+    /// `normalize_path` of a path block: a fresh `Pdot` around the normalized
+    /// prefix, then an alias's own stored target block (env.ml:868-878); a
+    /// `Pident` that is not an alias is the block itself.
     fn normalize_shared_path(
         &self,
         ctx: &TypeContext,
         path: &Arc<Path>,
         depth: usize,
     ) -> Arc<Path> {
-        if let Path::Pident(_) = path.as_ref()
-            && !matches!(
-                self.lookup_module(path)
-                    .map(|md| matches!(md.md_type, super::decl::ModuleType::MtyAlias(..))),
-                Ok(true)
-            )
-        {
-            return path.clone();
-        }
-        Arc::new(self.normalize_path_inner(ctx, path, depth))
-    }
-
-    fn normalize_path_inner(&self, ctx: &TypeContext, path: &Path, depth: usize) -> Path {
         if depth > 20 {
             return path.clone(); // Prevent infinite loops
         }
-        // First, recursively normalize the prefix for Pdot paths
-        let path = match path {
+        let path = match path.as_ref() {
             Path::Pdot(..) => {
                 let prefix = self.normalize_shared_path(ctx, &ctx.dotted_prefix(path), depth + 1);
-                ctx.copy_dotted_with_prefix(path, prefix)
+                Arc::new(ctx.copy_dotted_with_prefix(path, prefix))
             }
             _ => path.clone(),
         };
-
-        // Then check if the path itself is a module alias
-        if let Ok(md) = self.lookup_module(&path) {
-            if let super::decl::ModuleType::MtyAlias(_, alias_path) = &md.md_type {
-                return self.normalize_path_inner(ctx, alias_path, depth + 1);
-            }
+        if let Ok(md) = self.lookup_module(&path)
+            && let super::decl::ModuleType::MtyAlias(_, alias_path) = &md.md_type
+        {
+            return self.normalize_shared_path(ctx, alias_path, depth + 1);
         }
         path
     }
@@ -2886,7 +2874,10 @@ mod tests {
         env.add_module(
             alias_id,
             ModuleDeclaration {
-                md_type: ModuleType::MtyAlias(AliasPresence::MtaPresent, Path::pident(target_id)),
+                md_type: ModuleType::MtyAlias(
+                    AliasPresence::MtaPresent,
+                    std::sync::Arc::new(Path::pident(target_id)),
+                ),
                 md_attributes: vec![],
                 md_loc: crate::types::DeclLoc::none(),
                 md_path: None,

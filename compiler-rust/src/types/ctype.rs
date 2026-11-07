@@ -2726,8 +2726,8 @@ pub(crate) fn resolve_module_signature_through_cmi_shared(
                                 );
                                 Some(sig.clone())
                             }
-                            ModuleType::MtyAlias(_, alias_path)
-                            | ModuleType::MtyIdent(alias_path) => {
+                            ModuleType::MtyAlias(..) | ModuleType::MtyIdent(_) => {
+                                let alias_path = md.md_type.ident_or_alias_path().unwrap();
                                 resolve_module_signature_through_cmi_shared(
                                     ctx, load_paths, alias_path, visiting,
                                 )
@@ -2793,8 +2793,8 @@ fn resolve_module_signature_through_persistent_env_shared(
                     if id.name() == module_name {
                         resolved = match &md.md_type {
                             ModuleType::MtySignature(sig) => Some(sig.clone()),
-                            ModuleType::MtyAlias(_, alias_path)
-                            | ModuleType::MtyIdent(alias_path) => {
+                            ModuleType::MtyAlias(..) | ModuleType::MtyIdent(_) => {
+                                let alias_path = md.md_type.ident_or_alias_path().unwrap();
                                 resolve_module_signature_through_persistent_env_shared(
                                     ctx, alias_path, visiting,
                                 )
@@ -2877,7 +2877,7 @@ fn normalize_module_path_through_components(
         // only as declaration metadata; the caller still caches the lookup
         // under the original access path.
         normalize_module_path_through_components(ctx, load_paths, &alias_path, visiting)
-            .or(Some(alias_path))
+            .or(Some(crate::types::Path::clone(&alias_path)))
     } else {
         Some(normalized_path)
     }
@@ -3213,7 +3213,8 @@ fn resolve_signature_through_env_module_type(
         // truth for this access path. Reusing it preserves the same sharing
         // shape OCaml keeps in components_of_module_maker.
         ModuleType::MtySignature(sig) => Some((**sig).clone()),
-        ModuleType::MtyAlias(_, path) | ModuleType::MtyIdent(path) => {
+        ModuleType::MtyAlias(..) | ModuleType::MtyIdent(_) => {
+            let path = mty.ident_or_alias_path().unwrap();
             let mut no_persistent_env = None;
             if let Some((_, sig)) = crate::types::typecore::resolve_module_signature_for_path(
                 path,
@@ -3390,9 +3391,10 @@ fn strengthen_module_decl_for_module_access_path(
     let mut strengthened = md.clone();
     strengthened.md_type = match &md.md_type {
         ModuleType::MtyAlias(..) => md.md_type.clone(),
-        _ if aliasable => {
-            ModuleType::MtyAlias(AliasPresence::MtaPresent, module_access_path.clone())
-        }
+        _ if aliasable => ModuleType::MtyAlias(
+            AliasPresence::MtaPresent,
+            std::sync::Arc::new(module_access_path.clone()),
+        ),
         _ => strengthen_module_type_for_module_access_path(
             ctx,
             env,
@@ -4070,7 +4072,7 @@ fn normalize_path_full_inner(
 fn normalize_alias_target(
     ctx: &TypeContext,
     env: &Env,
-    alias_path: Path,
+    alias_path: std::sync::Arc<Path>,
     depth: usize,
     visiting: &mut HashSet<Path>,
     allow_reverse_local_aliases: bool,
@@ -4085,10 +4087,7 @@ fn normalize_alias_target(
         allow_reverse_local_aliases,
         force_module_lookup_side_effects,
     );
-    (
-        normalized,
-        NormRecipe::Alias(std::sync::Arc::new(alias_path), Box::new(recipe)),
-    )
+    (normalized, NormRecipe::Alias(alias_path, Box::new(recipe)))
 }
 
 /// How `Env.normalize_path` (env.ml:868-888) allocates its result, relative
@@ -14332,11 +14331,22 @@ mod tests {
                 SignatureItem::SigModule(a, inner, RecStatus::TrecNot),
             ]))),
         );
+        // Two alias declarations with equal but separately allocated targets.
+        let b_target = std::sync::Arc::new(Path::pident(m));
+        let c = ctx.create_ident("C");
+        let c_target = std::sync::Arc::new(Path::pident(m));
         env.add_module(
             b,
             module(ModuleType::MtyAlias(
                 AliasPresence::MtaPresent,
-                Path::pident(m),
+                b_target.clone(),
+            )),
+        );
+        env.add_module(
+            c,
+            module(ModuleType::MtyAlias(
+                AliasPresence::MtaPresent,
+                c_target.clone(),
             )),
         );
 
@@ -14383,8 +14393,35 @@ mod tests {
             ctx.dotted_allocation(&y).unwrap(),
         );
         assert_ne!(x.key(), y.key());
-        assert!(std::sync::Arc::ptr_eq(&x.prefix, &y.prefix));
+        // The cached route and the direct Env route reach the declaration's
+        // own target block, the same one on every call.
+        assert!(std::sync::Arc::ptr_eq(&x.prefix, &b_target));
+        assert!(std::sync::Arc::ptr_eq(&y.prefix, &b_target));
+        assert!(
+            ctx.find_normalized_path_full(env.scope_id(), &through_alias)
+                .is_some()
+        );
         assert_eq!(x.name, ctx.ident_name_allocation(&a));
+        let direct = env.normalize_path(&ctx, &through_alias);
+        assert!(std::sync::Arc::ptr_eq(
+            &ctx.dotted_allocation(&direct).unwrap().prefix,
+            &b_target
+        ));
+        // An equal-valued target of another declaration is its own block.
+        let through_c = ctx.dotted_from_ident(std::sync::Arc::new(Path::pident(c)), a, 0);
+        let z = normalize_path_full(&ctx, &env, &through_c);
+        assert!(z.same(&source));
+        let z_prefix = ctx.dotted_allocation(&z).unwrap().prefix;
+        assert!(std::sync::Arc::ptr_eq(&z_prefix, &c_target));
+        assert!(!std::sync::Arc::ptr_eq(&z_prefix, &b_target));
+        let direct_c = env.normalize_path_prefix(&ctx, &through_c);
+        assert!(std::sync::Arc::ptr_eq(
+            &ctx.dotted_allocation(&direct_c).unwrap().prefix,
+            &c_target
+        ));
+        // A copy of the declaration shares its target block.
+        let copied = crate::types::typecore::copy_alias_target(&b_target);
+        assert!(std::sync::Arc::ptr_eq(&copied, &b_target));
 
         // `Env.normalize_path_prefix` (env.ml:898-902) also rebuilds the dot
         // every call and keeps an unaliased `Pident` prefix block.

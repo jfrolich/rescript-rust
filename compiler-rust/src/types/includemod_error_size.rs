@@ -692,7 +692,8 @@ impl<'a> ErrorSize<'a> {
             }
             ModuleType::MtyAlias(_, path) => {
                 self.block(3, 2)?;
-                self.path(path)
+                // The target is a shared path block.
+                self.shared_path(path)
             }
         }
     }
@@ -735,7 +736,8 @@ impl<'a> ErrorSize<'a> {
             }
             ModuleType::MtyAlias(_, path) => {
                 self.block(3, 2)?;
-                self.copied_module_path(path, None)
+                // `module_path s p` returns an unreplaced `Pident` block itself.
+                self.copied_module_path(path, Some(Arc::as_ptr(path) as usize))
             }
         }
     }

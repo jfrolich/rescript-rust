@@ -645,7 +645,9 @@ impl<'a> SigReadContext<'a> {
             }
             OcamlValue::Block(3, fields) => {
                 let presence = read_alias_presence(&fields[0]);
-                let path = self.read_path(&fields[1]);
+                // The decoded target block, shared by every declaration
+                // holding it.
+                let path = self.read_shared_path(&fields[1]);
                 ModuleType::MtyAlias(presence, path)
             }
             _ => {

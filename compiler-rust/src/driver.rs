@@ -11256,7 +11256,7 @@ fn build_name_based_coercion(
                 {
                     ModuleCoercion::Tcoerce_alias(
                         EnvRef(0),
-                        impl_path.clone(),
+                        crate::types::Path::clone(&impl_path),
                         Box::new(ModuleCoercion::Tcoerce_none),
                     )
                 } else {
@@ -11272,7 +11272,7 @@ fn build_name_based_coercion(
                 // coercion at the same boundary.
                 ModuleCoercion::Tcoerce_alias(
                     EnvRef(0),
-                    impl_path.clone(),
+                    crate::types::Path::clone(&impl_path),
                     Box::new(ModuleCoercion::Tcoerce_none),
                 )
             }
@@ -15235,7 +15235,10 @@ mod tests {
         let module_id = Ident::create_local("Alias");
         let target_id = Ident::create_persistent("Alias_Target");
         let md = ModuleDeclaration {
-            md_type: ModuleType::MtyAlias(AliasPresence::MtaAbsent, TypePath::pident(target_id)),
+            md_type: ModuleType::MtyAlias(
+                AliasPresence::MtaAbsent,
+                std::sync::Arc::new(TypePath::pident(target_id)),
+            ),
             md_attributes: vec![],
             md_loc: crate::types::DeclLoc::none(),
             md_path: None,

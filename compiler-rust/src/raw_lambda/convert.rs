@@ -3651,7 +3651,8 @@ impl<'a> RawLambdaConverter<'a> {
                             }
                             _ => None,
                         }),
-                    ModuleType::MtyAlias(_, alias_path) | ModuleType::MtyIdent(alias_path) => {
+                    other @ (ModuleType::MtyAlias(..) | ModuleType::MtyIdent(_)) => {
+                        let alias_path = other.ident_or_alias_path().unwrap().clone();
                         if alias_path.same(module_path) {
                             return None;
                         }
@@ -3711,7 +3712,8 @@ impl<'a> RawLambdaConverter<'a> {
 
             match mty {
                 ModuleType::MtySignature(sig) => runtime_field_position(&sig, field_name),
-                ModuleType::MtyAlias(_, alias_path) | ModuleType::MtyIdent(alias_path) => {
+                other @ (ModuleType::MtyAlias(..) | ModuleType::MtyIdent(_)) => {
+                    let alias_path = other.ident_or_alias_path().unwrap().clone();
                     if alias_path.same(module_path) {
                         return None;
                     }
@@ -8028,7 +8030,7 @@ mod tests {
                     crate::types::decl::ModuleDeclaration {
                         md_type: crate::types::decl::ModuleType::MtyAlias(
                             crate::types::decl::AliasPresence::MtaPresent,
-                            crate::types::Path::Pident(local_n),
+                            std::sync::Arc::new(crate::types::Path::Pident(local_n)),
                         ),
                         md_attributes: Vec::new(),
                         md_loc: crate::types::DeclLoc::none(),
@@ -8196,7 +8198,7 @@ mod tests {
             mod_loc: crate::parse_arena::LocIdx::default(),
             mod_type: crate::types::decl::ModuleType::MtyAlias(
                 crate::types::decl::AliasPresence::MtaAbsent,
-                crate::types::Path::Pident(side_effect),
+                std::sync::Arc::new(crate::types::Path::Pident(side_effect)),
             ),
             mod_env: EnvRef(0),
             mod_attributes: Attributes::new(),
@@ -8229,7 +8231,7 @@ mod tests {
             mod_loc: crate::parse_arena::LocIdx::default(),
             mod_type: crate::types::decl::ModuleType::MtyAlias(
                 crate::types::decl::AliasPresence::MtaPresent,
-                crate::types::Path::Pident(side_effect),
+                std::sync::Arc::new(crate::types::Path::Pident(side_effect)),
             ),
             mod_env: EnvRef(0),
             mod_attributes: Attributes::new(),
@@ -8412,7 +8414,7 @@ mod tests {
                                             crate::types::decl::ModuleDeclaration {
                                                 md_type: crate::types::decl::ModuleType::MtyAlias(
                                                     crate::types::decl::AliasPresence::MtaPresent,
-                                                    main_path.clone(),
+                                                    std::sync::Arc::new(main_path.clone()),
                                                 ),
                                                 md_attributes: Vec::new(),
                                                 md_loc: crate::types::DeclLoc::none(),

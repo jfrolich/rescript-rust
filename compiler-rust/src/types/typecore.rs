@@ -2839,7 +2839,7 @@ fn module_alias_error_for_lid(
         Some(TypeCoreError::CannotScrapeAlias {
             loc,
             lid: lid.clone(),
-            path: alias_path.clone(),
+            path: crate::types::Path::clone(&alias_path),
         })
     } else {
         None
@@ -17787,7 +17787,7 @@ fn resolve_alias_root_from_module_type(
     use crate::types::decl::ModuleType as DeclMty;
 
     match mty {
-        DeclMty::MtyAlias(_, alias_path) => Some(alias_path.clone()),
+        DeclMty::MtyAlias(_, alias_path) => Some(crate::types::Path::clone(&alias_path)),
         DeclMty::MtyIdent(path) => match path {
             Path::Pident(id) => {
                 let name = id.name();
@@ -21172,6 +21172,16 @@ fn clone_copy_lookup_path(path: &Path) -> Path {
     path.clone()
 }
 
+/// `Subst.module_path` of an alias target with no substitution
+/// (subst.ml:69-75): a `Pident` target is the block itself, a dotted one is
+/// rebuilt around its prefix.
+pub(crate) fn copy_alias_target(path: &std::sync::Arc<Path>) -> std::sync::Arc<Path> {
+    match path.as_ref() {
+        Path::Pident(_) => path.clone(),
+        _ => std::sync::Arc::new(Path::clone(path)),
+    }
+}
+
 /// `Subst.type_expr` with a type/module path map: copies the graph keeping
 /// generic levels and physical sharing, rewriting paths through `map_path`.
 pub(crate) fn copy_type_expr_mapping_paths<TP: CopyTypePath>(
@@ -21823,7 +21833,7 @@ fn copy_lookup_module_type_with_paths<TP, MP>(
 ) -> crate::types::decl::ModuleType
 where
     TP: CopyTypePath,
-    MP: Fn(&Path) -> Path,
+    MP: Fn(&std::sync::Arc<Path>) -> std::sync::Arc<Path>,
 {
     match module_type {
         crate::types::decl::ModuleType::MtyIdent(path) => {
@@ -21873,7 +21883,7 @@ fn copy_lookup_module_type(
         ctx,
         cache,
         &clone_copy_lookup_path,
-        &clone_copy_lookup_path,
+        &copy_alias_target,
     )
 }
 
@@ -21886,7 +21896,7 @@ fn copy_lookup_signature_with_paths<TP, MP>(
 ) -> crate::types::decl::Signature
 where
     TP: CopyTypePath,
-    MP: Fn(&Path) -> Path,
+    MP: Fn(&std::sync::Arc<Path>) -> std::sync::Arc<Path>,
 {
     copy_lookup_signature_with_paths_and_idents(
         sig_items,
@@ -21908,7 +21918,7 @@ fn copy_lookup_signature_with_paths_and_idents<TP, MP, I>(
 ) -> crate::types::decl::Signature
 where
     TP: CopyTypePath,
-    MP: Fn(&Path) -> Path,
+    MP: Fn(&std::sync::Arc<Path>) -> std::sync::Arc<Path>,
     I: Iterator<Item = Option<Ident>>,
 {
     sig_items
@@ -21998,7 +22008,7 @@ fn copy_lookup_signature(
         ctx,
         cache,
         &clone_copy_lookup_path,
-        &clone_copy_lookup_path,
+        &copy_alias_target,
     )
 }
 
@@ -22178,7 +22188,7 @@ pub(crate) fn copy_lookup_signature_for_subst_with_paths<TP, MP>(
 ) -> crate::types::decl::Signature
 where
     TP: CopyTypePath,
-    MP: Fn(&Path) -> Path,
+    MP: Fn(&std::sync::Arc<Path>) -> std::sync::Arc<Path>,
 {
     if ctx.compiler_counters_enabled() {
         crate::perf_counters::record_signature_copy(
@@ -22202,7 +22212,7 @@ pub(crate) fn copy_lookup_signature_for_subst_with_paths_and_idents<TP, MP>(
 ) -> crate::types::decl::Signature
 where
     TP: CopyTypePath,
-    MP: Fn(&Path) -> Path,
+    MP: Fn(&std::sync::Arc<Path>) -> std::sync::Arc<Path>,
 {
     if ctx.compiler_counters_enabled() {
         crate::perf_counters::record_signature_copy(
@@ -26383,7 +26393,11 @@ fn strengthen_sig_for_module_access_path(
                 ) {
                     strengthened_md.md_type = crate::types::decl::ModuleType::MtyAlias(
                         crate::types::decl::AliasPresence::MtaPresent,
-                        ctx.dotted_from_ident(module_access_path.clone(), *id, runtime_pos),
+                        std::sync::Arc::new(ctx.dotted_from_ident(
+                            module_access_path.clone(),
+                            *id,
+                            runtime_pos,
+                        )),
                     );
                 }
                 strengthened.push(crate::types::decl::SignatureItem::SigModule(
@@ -26452,7 +26466,11 @@ fn strengthen_sig_module_decls_for_module_access_path(
                 if !matches!(md.md_type, crate::types::decl::ModuleType::MtyAlias(..)) {
                     md.md_type = crate::types::decl::ModuleType::MtyAlias(
                         crate::types::decl::AliasPresence::MtaPresent,
-                        ctx.dotted_from_ident(module_access_path.clone(), *id, runtime_pos),
+                        std::sync::Arc::new(ctx.dotted_from_ident(
+                            module_access_path.clone(),
+                            *id,
+                            runtime_pos,
+                        )),
                     );
                 }
                 runtime_pos += 1;
@@ -26467,11 +26485,8 @@ fn strengthen_sig_module_decls_for_module_access_path(
 }
 
 fn module_type_has_hidden_unpack_ident(mty: &crate::types::decl::ModuleType) -> bool {
-    match mty {
-        crate::types::decl::ModuleType::MtyIdent(Path::Pident(id))
-        | crate::types::decl::ModuleType::MtyAlias(_, Path::Pident(id)) => {
-            id.name().starts_with("__") || id.is_persistent()
-        }
+    match mty.ident_or_alias_path() {
+        Some(Path::Pident(id)) => id.name().starts_with("__") || id.is_persistent(),
         _ => false,
     }
 }
@@ -27167,17 +27182,12 @@ fn build_module_components_from_parent_path(
                 cache_mode,
                 |components| {
                     components.lookup_module(module_name.as_str()).and_then(
-                        |(runtime_pos, _, md)| match &md.md_type {
-                            crate::types::decl::ModuleType::MtyAlias(_, Path::Pident(alias_id))
-                            | crate::types::decl::ModuleType::MtyIdent(Path::Pident(alias_id))
-                                if alias_id.is_persistent() =>
-                            {
-                                Some((
-                                    runtime_pos,
-                                    alias_id.name().to_string(),
-                                    components.access_path().clone(),
-                                ))
-                            }
+                        |(runtime_pos, _, md)| match md.md_type.ident_or_alias_path() {
+                            Some(Path::Pident(alias_id)) if alias_id.is_persistent() => Some((
+                                runtime_pos,
+                                alias_id.name().to_string(),
+                                components.access_path().clone(),
+                            )),
                             _ => None,
                         },
                     )
@@ -28000,9 +28010,8 @@ fn qualify_resolved_signature_for_access_path_inner(
     }
     if let Some(old_name) = resolved_name {
         let resolved_alias_to_persistent_root = matches!(
-            mty,
-            crate::types::decl::ModuleType::MtyAlias(_, Path::Pident(alias_id))
-                | crate::types::decl::ModuleType::MtyIdent(Path::Pident(alias_id))
+            mty.ident_or_alias_path(),
+            Some(Path::Pident(alias_id))
                 if alias_id.is_persistent() && alias_id.name() == old_name
         );
         if resolved_alias_to_persistent_root {
@@ -28062,7 +28071,7 @@ fn qualify_resolved_signature_for_access_path_inner(
         // Web__MediaStream`: env.ml:1008-1013 selects the child component path,
         // then env.ml:1542-1556 exposes value/type descriptions through that
         // selected path rather than the flattened backing unit.
-        match target {
+        match target.as_ref() {
             Path::Pident(alias_id) => {
                 // OCaml compiler/ml/env.ml:1517 scrapes the persistent alias
                 // target, then env.ml:1530 builds the current component
@@ -28093,7 +28102,7 @@ fn qualify_resolved_signature_for_access_path_inner(
         && alias_requires_exact_persistent_prefix
         && !target.same(access_path)
     {
-        match target {
+        match target.as_ref() {
             Path::Pdot(..) => {
                 rewrite_alias_pdot_target(&mut sig, target, access_path, pers_env, ctx);
             }
@@ -28480,7 +28489,7 @@ fn build_module_signature_for_path(
             }
             if let crate::types::decl::ModuleType::MtyAlias(_, ref target) = md.md_type {
                 if !target.same(&access_path) {
-                    match target {
+                    match target.as_ref() {
                         Path::Pdot(..) => {
                             let rewrite_target = std::sync::Arc::new(access_path.clone());
                             crate::cmi::persistent_env::rewrite_sig_by_path_prefix(
@@ -28638,8 +28647,10 @@ pub(crate) fn alias_target_for_module_path<'a>(
             // alias answer alias-target scraping for an already-selected path.
             let md = env.find_module_same(id).ok()?;
             match &md.md_type {
-                crate::types::decl::ModuleType::MtyAlias(_, target)
-                | crate::types::decl::ModuleType::MtyIdent(target) => Some(target.clone()),
+                crate::types::decl::ModuleType::MtyAlias(..)
+                | crate::types::decl::ModuleType::MtyIdent(_) => {
+                    md.md_type.ident_or_alias_path().cloned()
+                }
                 _ => None,
             }
         }
@@ -28653,6 +28664,7 @@ pub(crate) fn alias_target_for_module_path<'a>(
                 // force env.ml:1568's `comp_modules` thunk just to inspect a
                 // module alias while comparing constructor result paths.
                 components.lookup_module_alias_target(module_name.as_str(), true, ctx)
+                    .map(|target| Path::clone(&target))
             })?
         }
         Path::Papply(_, _) => None,
@@ -28674,7 +28686,9 @@ pub(crate) fn module_alias_target_for_path<'a>(
             // compiler/ml/ctype.ml:1367-1372 normalizes the path.
             let md = env.find_module_same(id).ok()?;
             match &md.md_type {
-                crate::types::decl::ModuleType::MtyAlias(_, target) => Some(target.clone()),
+                crate::types::decl::ModuleType::MtyAlias(_, target) => {
+                    Some(crate::types::Path::clone(&target))
+                }
                 _ => None,
             }
         }
@@ -28690,6 +28704,7 @@ pub(crate) fn module_alias_target_for_path<'a>(
                 // before OCaml's env.ml:865-882 `find_module` path asks for
                 // the module declaration itself.
                 components.lookup_module_alias_target(module_name.as_str(), false, ctx)
+                    .map(|target| Path::clone(&target))
             })?
         }
         Path::Papply(_, _) => None,
@@ -28715,6 +28730,7 @@ fn raw_alias_target_for_module_path<'a>(
                 // declaration without running compiler/ml/subst.ml:378-400
                 // child-signature identifier freshening.
                 components.lookup_module_alias_target(module_name.as_str(), true, ctx)
+                    .map(|target| Path::clone(&target))
             })?
         }
         Path::Papply(_, _) => None,
@@ -29074,7 +29090,8 @@ fn lookup_type_decl_for_path_with_cache_mode<'a>(
             if let Some(md) = lookup_pident_module_for_path(env, parent.as_ref(), parent_id) {
                 use crate::types::decl::ModuleType;
                 match &md.md_type {
-                    ModuleType::MtyAlias(_, alias_path) | ModuleType::MtyIdent(alias_path) => {
+                    ModuleType::MtyAlias(..) | ModuleType::MtyIdent(_) => {
+                        let alias_path = md.md_type.ident_or_alias_path().unwrap();
                         let resolved_path = Path::pdot(alias_path.clone(), type_name.as_str());
                         if let Some(decl) = ctx.find_type_decl_by_path(&resolved_path.name()) {
                             return Some(Arc::new(decl.clone()));

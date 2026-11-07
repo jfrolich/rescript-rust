@@ -886,7 +886,9 @@ impl ModuleRegistry {
                     // `type_module_aux` is `Mty_alias (Mta_absent, path)`.
                     md_type: ModuleType::MtyAlias(
                         AliasPresence::MtaAbsent,
-                        Path::Pident(Ident::create_persistent(internal_name.as_str())),
+                        Arc::new(Path::Pident(Ident::create_persistent(
+                            internal_name.as_str(),
+                        ))),
                     ),
                     md_attributes: vec![],
                     md_loc: crate::types::DeclLoc::none(),
@@ -2845,7 +2847,9 @@ impl PersistentEnv {
                     // `type_module_aux` is `Mty_alias (Mta_absent, path)`.
                     md_type: ModuleType::MtyAlias(
                         AliasPresence::MtaAbsent,
-                        Path::Pident(Ident::create_persistent(internal_name.as_str())),
+                        Arc::new(Path::Pident(Ident::create_persistent(
+                            internal_name.as_str(),
+                        ))),
                     ),
                     md_attributes: vec![],
                     md_loc: crate::types::DeclLoc::none(),
@@ -4068,6 +4072,51 @@ mod tests {
     use super::*;
 
     #[test]
+    fn alias_targets_keep_their_block_or_take_the_stored_substitution_target() {
+        use crate::types::decl::AliasPresence;
+        let ctx = TypeContext::new(Arc::new(crate::context::IdGenerator::new()));
+        let kept = ctx.create_ident("Kept");
+        let renamed = ctx.create_ident("Renamed");
+        let mut maps = SubstMaps::default();
+        insert_module_stamp_subst(
+            &mut maps.module_stamp_map,
+            &renamed,
+            Path::Pident(ctx.create_ident("Fresh")),
+        );
+        let stored = maps
+            .module_stamp_map
+            .get(&renamed.stamp())
+            .unwrap()
+            .1
+            .clone();
+        let alias =
+            |target: &Arc<Path>| ModuleType::MtyAlias(AliasPresence::MtaPresent, target.clone());
+        let target_of = |mty: &ModuleType| match mty {
+            ModuleType::MtyAlias(_, target) => target.clone(),
+            _ => panic!("alias"),
+        };
+        // subst.ml:69-75: an unreplaced `Pident` target is the block itself.
+        let kept_target = Arc::new(Path::Pident(kept));
+        let mut a = alias(&kept_target);
+        substitute_module_type_paths_with_maps(&ctx, &mut a, &maps);
+        assert!(Arc::ptr_eq(&target_of(&a), &kept_target));
+        // A replaced target is the substitution's one stored target block,
+        // shared by separately allocated equal sources.
+        let (first, second) = (
+            Arc::new(Path::Pident(renamed)),
+            Arc::new(Path::Pident(renamed)),
+        );
+        let (mut b, mut c) = (alias(&first), alias(&second));
+        substitute_module_type_paths_with_maps(&ctx, &mut b, &maps);
+        substitute_module_type_paths_with_maps(&ctx, &mut c, &maps);
+        assert!(Arc::ptr_eq(&target_of(&b), &stored));
+        assert!(Arc::ptr_eq(&target_of(&c), &stored));
+        // The lookup copy shares the target block.
+        let copied = crate::types::typecore::copy_alias_target(&kept_target);
+        assert!(Arc::ptr_eq(&copied, &kept_target));
+    }
+
+    #[test]
     fn signature_prefix_rewrites_share_targets_across_types_and_declarations() {
         for by_name in [false, true] {
             for shallow in [false, true] {
@@ -4093,7 +4142,7 @@ mod tests {
                         crate::types::decl::ModuleDeclaration {
                             md_type: ModuleType::MtyAlias(
                                 crate::types::decl::AliasPresence::MtaPresent,
-                                source.clone(),
+                                Arc::new(source.clone()),
                             ),
                             md_loc: Default::default(),
                             md_attributes: vec![],
@@ -4497,7 +4546,7 @@ fn freshen_module_type_bound_idents_rec(
                 // `module_path` to `Mty_alias` targets. Using the type path
                 // map here leaves freshly included sibling aliases pointing at
                 // stale module identifiers instead of the renamed module id.
-                *path = substitute_module_path(
+                *path = substitute_shared_module_path(
                     ctx,
                     path,
                     &maps.module_stamp_map,
@@ -4732,11 +4781,13 @@ pub(crate) fn freshened_signature_bound_idents_from_kind(
         };
         crate::types::typecore::CopiedTypePath { path, block }
     });
-    let rewrite_module_path = |path: &Path| {
+    // Alias targets: the stored substitution target, or an unreplaced
+    // `Pident` block itself (subst.ml:69-75).
+    let rewrite_module_path = |path: &Arc<Path>| {
         if maps_empty {
-            path.clone()
+            crate::types::typecore::copy_alias_target(path)
         } else {
-            substitute_module_path(
+            substitute_shared_module_path(
                 ctx,
                 path,
                 &local_maps.module_stamp_map,
@@ -4894,7 +4945,9 @@ pub(crate) fn substitute_component_module_type_path(
     ctx: &TypeContext,
 ) -> Option<ModuleType> {
     let target = match module_type {
-        ModuleType::MtyAlias(_, target) | ModuleType::MtyIdent(target) => target,
+        ModuleType::MtyAlias(..) | ModuleType::MtyIdent(_) => {
+            module_type.ident_or_alias_path().unwrap()
+        }
         _ => return None,
     };
     if target.head().is_persistent() {
@@ -4965,7 +5018,7 @@ fn substitute_module_type_paths_with_maps_mode(
         }
         ModuleType::MtyAlias(_, path) => {
             if alias_targets == AliasTargets::Substitute {
-                *path = substitute_module_path(
+                *path = substitute_shared_module_path(
                     ctx,
                     path,
                     &maps.module_stamp_map,
@@ -5362,7 +5415,7 @@ pub fn substitute_module_alias_paths_in_child_sig(
         if let SignatureItem::SigModule(_, md, _) = item
             && let ModuleType::MtyAlias(_, path) = &mut md.md_type
         {
-            *path = substitute_module_path(
+            *path = substitute_shared_module_path(
                 ctx,
                 path,
                 &maps.module_stamp_map,
@@ -6478,9 +6531,17 @@ fn rewrite_module_type_prefix_paths(
     ctx: &TypeContext,
 ) {
     match module_type {
-        ModuleType::MtyIdent(path) | ModuleType::MtyAlias(_, path) => {
+        ModuleType::MtyIdent(path) => {
             if let Some(rewritten) = rewrite_path_prefix(path, old_name, new_prefix, ctx) {
                 *path = rewritten;
+            }
+        }
+        ModuleType::MtyAlias(_, path) => {
+            // A replaced `Pident` target is the shared replacement block.
+            if matches!(path.as_ref(), Path::Pident(id) if id.name() == old_name) {
+                *path = new_prefix.clone();
+            } else if let Some(rewritten) = rewrite_path_prefix(path, old_name, new_prefix, ctx) {
+                *path = Arc::new(rewritten);
             }
         }
         ModuleType::MtySignature(sig) => {
@@ -6971,11 +7032,21 @@ fn rewrite_module_type_by_path_prefix(
     ctx: &TypeContext,
 ) {
     match module_type {
-        ModuleType::MtyIdent(path) | ModuleType::MtyAlias(_, path) => {
+        ModuleType::MtyIdent(path) => {
             if let Some(rewritten) =
                 rewrite_path_with_shared_prefix(path, old_prefix, new_prefix, ctx)
             {
                 *path = rewritten;
+            }
+        }
+        ModuleType::MtyAlias(_, path) => {
+            // A replaced whole target is the shared replacement block.
+            if path.same(old_prefix) {
+                *path = new_prefix.clone();
+            } else if let Some(rewritten) =
+                rewrite_path_with_shared_prefix(path, old_prefix, new_prefix, ctx)
+            {
+                *path = Arc::new(rewritten);
             }
         }
         ModuleType::MtySignature(sig) => {
@@ -7587,9 +7658,8 @@ fn collect_alias_rewrites<S: AliasRewriteSink>(
 ) {
     for item in sig_items {
         if let SignatureItem::SigModule(id, md, _) = item {
-            if let ModuleType::MtyAlias(_, alias_path) | ModuleType::MtyIdent(alias_path) =
-                &md.md_type
-            {
+            if let ModuleType::MtyAlias(..) | ModuleType::MtyIdent(_) = &md.md_type {
+                let alias_path = md.md_type.ident_or_alias_path().unwrap();
                 // OCaml compiler/ml/env.ml:1517 scrapes aliases before
                 // env.ml:1530-1538 prefixes component identifiers. Rust can store
                 // that alias-shaped module as either MtyAlias or MtyIdent after CMI
@@ -8093,8 +8163,14 @@ fn add_signature_to_env_with_options_inner(
                 };
                 md.md_type = match md.md_type {
                     ModuleType::MtyAlias(alias_presence, alias_path) => {
-                        let rewritten = substitute_path(&alias_path);
-                        ModuleType::MtyAlias(alias_presence, normalize_hidden_alias_path(rewritten))
+                        let rewritten = normalize_hidden_alias_path(substitute_path(&alias_path));
+                        // An unrewritten target keeps its block.
+                        let target = if rewritten.same(&alias_path) {
+                            alias_path
+                        } else {
+                            Arc::new(rewritten)
+                        };
+                        ModuleType::MtyAlias(alias_presence, target)
                     }
                     ModuleType::MtyIdent(path) => {
                         let rewritten = substitute_path(&path);
@@ -8104,10 +8180,8 @@ fn add_signature_to_env_with_options_inner(
                 };
                 if as_opened {
                     let direct_persistent_alias = matches!(
-                        &md.md_type,
-                        ModuleType::MtyAlias(_, Path::Pident(alias_id))
-                            | ModuleType::MtyIdent(Path::Pident(alias_id))
-                            if alias_id.is_persistent()
+                        md.md_type.ident_or_alias_path(),
+                        Some(Path::Pident(alias_id)) if alias_id.is_persistent()
                     );
                     if direct_persistent_alias && precomputed_components.is_some() {
                         // OCaml compiler/ml/env.ml:1516-1518 scrapes a

@@ -472,8 +472,21 @@ pub enum ModuleType {
         param_type: Option<Box<ModuleType>>,
         result: Box<ModuleType>,
     },
-    /// Module alias
-    MtyAlias(AliasPresence, Path),
+    /// Module alias. The target is a shared path block, like a `Pdot`
+    /// prefix: copies of the declaration share it, and `Subst.module_path`
+    /// returns an unreplaced `Pident` target itself (subst.ml:69-75).
+    MtyAlias(AliasPresence, std::sync::Arc<Path>),
+}
+
+impl ModuleType {
+    /// The path of an `Mty_ident` or an `Mty_alias`.
+    pub fn ident_or_alias_path(&self) -> Option<&Path> {
+        match self {
+            ModuleType::MtyIdent(path) => Some(path),
+            ModuleType::MtyAlias(_, path) => Some(path),
+            _ => None,
+        }
+    }
 }
 
 /// Alias presence flag.

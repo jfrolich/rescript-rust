@@ -2007,7 +2007,7 @@ impl TypeContext {
         &self,
         parent_path: &Path,
         module_name: &str,
-    ) -> Option<Path> {
+    ) -> Option<Arc<Path>> {
         self.poison_store_build_for("read:find_module_alias_in_components");
         let key = QualifiedModuleComponentsCacheKey::new(parent_path.clone(), None);
         self.with_qualified_module_components(&key, |components| {

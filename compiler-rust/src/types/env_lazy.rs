@@ -638,6 +638,11 @@ struct StructureComponentTables {
     // signature.
     child_components: RefCell<HashMap<String, Option<(usize, Arc<StoredModuleComponents>)>>>,
     child_component_scan: RefCell<ChildComponentScanState>,
+    /// The `Mty_alias`/`Mty_ident` target of each child module after the
+    /// component substitution (and whether it is an alias). OCaml forces a
+    /// `comp_modules` declaration once per table (env.ml:1568), so every
+    /// lookup sees the same substituted target block.
+    module_alias_targets: RefCell<HashMap<String, Option<(bool, Arc<Path>)>>>,
     // The component substitution for value lookups depends only on the
     // signature and access path; build it once per component table.
     value_subst_maps: RefCell<Option<Arc<crate::cmi::persistent_env::ValueSubstMaps>>>,
@@ -727,7 +732,7 @@ fn strengthened_child_env_decl(
         Some(source) if !matches!(md.md_type, ModuleType::MtyAlias(..)) => ModuleDeclaration {
             md_type: ModuleType::MtyAlias(
                 super::decl::AliasPresence::MtaPresent,
-                ctx.dotted_from_ident(source.clone(), id, runtime_pos as i32),
+                std::sync::Arc::new(ctx.dotted_from_ident(source.clone(), id, runtime_pos as i32)),
             ),
             ..md.clone()
         },
@@ -968,9 +973,10 @@ impl QualifiedModuleComponents {
             if take_alias {
                 let (idx, runtime_pos) = *alias_items.next().expect("peeked alias item");
                 if let SignatureItem::SigModule(id, md, _) = &signature[idx]
-                    && let super::decl::ModuleType::MtyAlias(_, alias_source)
-                    | super::decl::ModuleType::MtyIdent(alias_source) = &md.md_type
+                    && let super::decl::ModuleType::MtyAlias(..)
+                    | super::decl::ModuleType::MtyIdent(_) = &md.md_type
                 {
+                    let alias_source = md.md_type.ident_or_alias_path().unwrap();
                     let component_path =
                         ctx.dotted_from_ident(shared_access_path.clone(), *id, runtime_pos as i32);
                     // OCaml compiler/ml/env.ml:1517 `scrape_alias` follows
@@ -1024,6 +1030,7 @@ impl QualifiedModuleComponents {
                 } else {
                     ChildComponentScanState::new()
                 }),
+                module_alias_targets: RefCell::new(HashMap::new()),
                 value_subst_maps: RefCell::new(None),
                 in_store: std::cell::Cell::new(super::thread_store::store_build_active()),
                 store_pieces: RefCell::new(Default::default()),
@@ -1375,20 +1382,33 @@ impl QualifiedModuleComponents {
         name: &str,
         include_ident: bool,
         ctx: &super::context::TypeContext,
-    ) -> Option<Path> {
+    ) -> Option<Arc<Path>> {
         let (_, _, md) = self.lookup_module(name)?;
         if !include_ident && !matches!(md.md_type, ModuleType::MtyAlias(..)) {
             return None;
         }
-        match crate::cmi::persistent_env::substitute_component_module_type_path(
+        if let Some(cached) = self.tables.module_alias_targets.borrow().get(name) {
+            return cached
+                .as_ref()
+                .filter(|(alias, _)| include_ident || *alias)
+                .map(|(_, target)| target.clone());
+        }
+        let target = crate::cmi::persistent_env::substitute_component_module_type_path(
             &md.md_type,
             &self.signature,
             self.access_path(),
             ctx,
-        )? {
-            ModuleType::MtyAlias(_, target) | ModuleType::MtyIdent(target) => Some(target),
+        )
+        .and_then(|mty| match mty {
+            ModuleType::MtyAlias(_, target) => Some((true, target)),
+            ModuleType::MtyIdent(target) => Some((false, Arc::new(target))),
             _ => None,
-        }
+        });
+        self.tables
+            .module_alias_targets
+            .borrow_mut()
+            .insert(name.to_string(), target.clone());
+        target.map(|(_, target)| target)
     }
 
     pub(crate) fn lookup_child_components(
@@ -1810,8 +1830,7 @@ fn build_local_module_components(
     cache_mode: super::typecore::ComponentLookupApi,
 ) -> Option<QualifiedModuleComponents> {
     if ctx.persistent_env_is_in_process()
-        && let super::decl::ModuleType::MtyAlias(_, Path::Pident(alias_id))
-        | super::decl::ModuleType::MtyIdent(Path::Pident(alias_id)) = &md.md_type
+        && let Some(Path::Pident(alias_id)) = md.md_type.ident_or_alias_path()
         && alias_id.is_persistent()
         && cache_mode.forces_alias_sig()
     {
@@ -1876,7 +1895,7 @@ fn build_local_module_components(
         // alias with `find_module`, and env.ml:865-882 forces the final
         // env.ml:1568 `comp_modules` thunk for that target before returning
         // the module type whose signature is used below.
-        match alias_path {
+        match alias_path.as_ref() {
             Path::Pdot(parent, name, _) => {
                 if cache_mode.forces_alias_sig() {
                     // OCaml compiler/ml/env.ml:1517 calls `scrape_alias` for
@@ -1933,8 +1952,12 @@ fn build_local_module_components(
         if let Some(resolved) = env.resolve_module_type(&md.md_type, pers_env, ctx, cache_mode) {
             resolved
         } else {
-            let Some((raw_sig, resolved_name)) = (match &md.md_type {
-                super::decl::ModuleType::MtyAlias(_, Path::Pident(alias_id))
+            let alias_target = match &md.md_type {
+                super::decl::ModuleType::MtyAlias(_, target) => Some(target.as_ref()),
+                _ => None,
+            };
+            let Some((raw_sig, resolved_name)) = (match alias_target {
+                Some(Path::Pident(alias_id))
                     if alias_id.is_persistent() && cache_mode.forces_alias_sig() =>
                 {
                     // OCaml compiler/ml/env.ml:1517 calls `scrape_alias` before
@@ -1967,18 +1990,22 @@ fn build_local_module_components(
     let pident_sibling_alias_name =
         parent_substitution_context
             .as_ref()
-            .and_then(|(_, parent_sig)| match &md.md_type {
-                super::decl::ModuleType::MtyAlias(_, Path::Pident(alias_id))
-                    if parent_sig.iter().any(|item| {
+            .and_then(|(_, parent_sig)| {
+                let super::decl::ModuleType::MtyAlias(_, target) = &md.md_type else {
+                    return None;
+                };
+                let Path::Pident(alias_id) = target.as_ref() else {
+                    return None;
+                };
+                parent_sig
+                    .iter()
+                    .any(|item| {
                         matches!(
                             item,
                             SignatureItem::SigModule(id, _, _) if id.same(alias_id)
                         )
-                    }) =>
-                {
-                    Some(alias_id.name().to_string())
-                }
-                _ => None,
+                    })
+                    .then(|| alias_id.name().to_string())
             });
     let shared_access_path = Arc::new(access_path.clone());
     let mut qualified_sig = crate::types::typecore::qualify_resolved_signature_for_local_components(
@@ -2466,7 +2493,7 @@ mod provenance_tests {
         let ModuleType::MtyAlias(_, path) = &child.md_type else {
             panic!("alias")
         };
-        assert!(matches!(path, Path::Pdot(_, _, 3)));
+        assert!(matches!(path.as_ref(), Path::Pdot(_, _, 3)));
         let child_allocation = ctx.dotted_allocation(path).unwrap();
         let SignatureItem::SigModtype(_, mtd) = &sig[0] else {
             panic!("modtype")

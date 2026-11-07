@@ -1778,8 +1778,7 @@ fn rewrite_included_module_type_paths_to_local(
     visited: &mut HashSet<TypeExprRef>,
 ) {
     match mty {
-        crate::types::decl::ModuleType::MtyIdent(path)
-        | crate::types::decl::ModuleType::MtyAlias(_, path) => {
+        crate::types::decl::ModuleType::MtyIdent(path) => {
             if let Some(rewritten) = rewrite_included_path_to_local(
                 path,
                 include_root_path,
@@ -1789,6 +1788,18 @@ fn rewrite_included_module_type_paths_to_local(
                 local_modtype_ids,
             ) {
                 *path = rewritten;
+            }
+        }
+        crate::types::decl::ModuleType::MtyAlias(_, path) => {
+            if let Some(rewritten) = rewrite_included_path_to_local(
+                path,
+                include_root_path,
+                include_alias_heads,
+                local_type_ids,
+                local_module_ids,
+                local_modtype_ids,
+            ) {
+                *path = std::sync::Arc::new(rewritten);
             }
         }
         crate::types::decl::ModuleType::MtySignature(sig) => {
@@ -1941,8 +1952,9 @@ fn rewrite_included_signature_paths_to_local(
                     md.md_path = Some(Path::Pident(*id));
                 }
                 let keep_strengthened_alias_target = match &md.md_type {
-                    crate::types::decl::ModuleType::MtyAlias(_, path)
-                    | crate::types::decl::ModuleType::MtyIdent(path) => {
+                    crate::types::decl::ModuleType::MtyAlias(..)
+                    | crate::types::decl::ModuleType::MtyIdent(_) => {
+                        let path = md.md_type.ident_or_alias_path().unwrap();
                         // OCaml keeps the strengthened alias target from the
                         // included module path: `type_module` strengthens child
                         // modules to `Mty_alias` (compiler/ml/mtype.ml:98-102),
@@ -1994,10 +2006,8 @@ fn rewrite_included_signature_paths_to_local(
 
 fn module_type_is_self_alias(mty: &crate::types::decl::ModuleType, id: &Ident) -> bool {
     matches!(
-        mty,
-        crate::types::decl::ModuleType::MtyAlias(_, Path::Pident(alias_id))
-            | crate::types::decl::ModuleType::MtyIdent(Path::Pident(alias_id))
-            if alias_id.same(id)
+        mty.ident_or_alias_path(),
+        Some(Path::Pident(alias_id)) if alias_id.same(id)
     )
 }
 
@@ -2309,7 +2319,11 @@ fn substitute_functor_param_in_module_type(
         }
         DeclMty::MtyAlias(alias_presence, path) => DeclMty::MtyAlias(
             *alias_presence,
-            rewrite_module_path_prefix(path, old_param, arg_path),
+            // An unreplaced `Pident` target is the block itself (subst.ml:69-75).
+            match path.as_ref() {
+                Path::Pident(id) if !id.same(old_param) => path.clone(),
+                _ => std::sync::Arc::new(rewrite_module_path_prefix(path, old_param, arg_path)),
+            },
         ),
         DeclMty::MtyFunctor {
             param,
@@ -2740,7 +2754,16 @@ fn substitute_functor_param_aliases_in_module_type(
         )),
         DeclMty::MtyAlias(alias_presence, path) => DeclMty::MtyAlias(
             *alias_presence,
-            rewrite_module_path_prefix_with_aliases(path, old_param, arg_aliases),
+            // Only dotted targets are rebuilt; a `Pident` target is the block
+            // itself.
+            match path.as_ref() {
+                Path::Pident(_) => path.clone(),
+                _ => std::sync::Arc::new(rewrite_module_path_prefix_with_aliases(
+                    path,
+                    old_param,
+                    arg_aliases,
+                )),
+            },
         ),
         DeclMty::MtyFunctor {
             param,
@@ -2822,7 +2845,8 @@ pub(crate) fn find_type_decl_for_path(
                 use crate::types::decl::ModuleType;
                 use crate::types::decl::SignatureItem;
                 match &module_desc.md_type {
-                    ModuleType::MtyAlias(_, alias_path) | ModuleType::MtyIdent(alias_path) => {
+                    ModuleType::MtyAlias(..) | ModuleType::MtyIdent(_) => {
+                        let alias_path = module_desc.md_type.ident_or_alias_path().unwrap();
                         let resolved_path = Path::pdot(alias_path.clone(), type_name.as_str());
                         if let Some(type_decl) = ctx.find_type_decl_by_path(&resolved_path.name()) {
                             return Some((*type_decl).clone());
@@ -7936,7 +7960,10 @@ pub(crate) fn decl_module_type_from_typed_module_expr_for_constraint_arg(
             // constrained alias modules. Keeping the alias absent here lets
             // includemod emit the required Tcoerce_alias instead of collapsing
             // the constrained alias back to a bare module-alias constant.
-            Some(DeclMty::MtyAlias(AliasPresence::MtaAbsent, path.clone()))
+            Some(DeclMty::MtyAlias(
+                AliasPresence::MtaAbsent,
+                std::sync::Arc::new(path.clone()),
+            ))
         }
         ModuleExprDesc::Tmod_structure(structure) => Some(DeclMty::MtySignature(
             std::sync::Arc::new(structure.str_type.clone()),
@@ -8102,7 +8129,8 @@ fn lookup_module_path_for_module_expr<'a>(
     if !tctx.transparent_modules
         && let Longident::Lident(mod_idx) = lid
         && let Ok((_, md)) = env.find_module_with_id(arena.get_string(*mod_idx))
-        && let crate::types::decl::ModuleType::MtyAlias(_, Path::Pident(target)) = &md.md_type
+        && let crate::types::decl::ModuleType::MtyAlias(_, target) = &md.md_type
+        && let Path::Pident(target) = target.as_ref()
         && target.is_persistent()
         && let Some(pers) = tctx.persistent_env.as_mut()
     {
@@ -8242,9 +8270,10 @@ pub(crate) fn unbound_modtype_alternatives(
 
 fn alias_of_module_type(
     mty: &crate::types::decl::ModuleType,
-) -> Option<(crate::types::decl::AliasPresence, Path)> {
+) -> Option<(crate::types::decl::AliasPresence, std::sync::Arc<Path>)> {
     match mty {
         crate::types::decl::ModuleType::MtyAlias(alias_presence, alias_path) => {
+            // The declaration's own target block.
             Some((*alias_presence, alias_path.clone()))
         }
         _ => None,
@@ -8304,7 +8333,7 @@ fn lookup_module_alias_by_lid(
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &crate::types::context::TypeContext,
-) -> Option<(crate::types::decl::AliasPresence, Path)> {
+) -> Option<(crate::types::decl::AliasPresence, std::sync::Arc<Path>)> {
     use crate::parser::longident::Longident;
 
     match lid {
@@ -8321,7 +8350,11 @@ fn lookup_module_alias_by_lid(
             {
                 return Some((
                     alias_presence,
-                    Path::pdot(alias_path, submod_name.to_string()),
+                    std::sync::Arc::new(Path::Pdot(
+                        alias_path,
+                        submod_name.into(),
+                        crate::types::path::NOPOS,
+                    )),
                 ));
             }
             crate::types::typecore::with_resolved_module_components_for_lid(
@@ -8357,7 +8390,7 @@ pub fn lookup_module_type_by_lid(
         lid: &crate::parser::longident::Longident,
         arena: &ParseArena,
         env: &Env,
-    ) -> Option<(crate::types::decl::AliasPresence, Path)> {
+    ) -> Option<(crate::types::decl::AliasPresence, std::sync::Arc<Path>)> {
         match lid {
             Longident::Lident(mod_idx) => {
                 let mod_name = arena.get_string(*mod_idx);
@@ -8374,7 +8407,7 @@ pub fn lookup_module_type_by_lid(
         env: &Env,
         pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
         ctx: &crate::types::context::TypeContext,
-    ) -> Option<(crate::types::decl::AliasPresence, Path)> {
+    ) -> Option<(crate::types::decl::AliasPresence, std::sync::Arc<Path>)> {
         if let Longident::Lident(mod_idx) = lid {
             let mod_name = arena.get_string(*mod_idx);
             if env.find_module(mod_name).is_err() {
@@ -8460,7 +8493,11 @@ pub fn lookup_module_type_by_lid(
                 {
                     return Some(DeclMty::MtyAlias(
                         alias_presence,
-                        Path::pdot(alias_path, submod_name.to_string()),
+                        std::sync::Arc::new(Path::Pdot(
+                            alias_path,
+                            submod_name.into(),
+                            crate::types::path::NOPOS,
+                        )),
                     ));
                 }
                 return Some(found);
@@ -8493,7 +8530,11 @@ pub fn lookup_module_type_by_lid(
                 {
                     DeclMty::MtyAlias(
                         alias_presence,
-                        Path::pdot(alias_path, submod_name.to_string()),
+                        std::sync::Arc::new(Path::Pdot(
+                            alias_path,
+                            submod_name.into(),
+                            crate::types::path::NOPOS,
+                        )),
                     )
                 } else {
                     found
@@ -8532,7 +8573,10 @@ fn freshened_signature_from_module_type<'a>(
         match scrape_alias_module_type(mty, env, &mut tctx.persistent_env, tctx.type_ctx) {
             Some(DeclMty::MtySignature(sig)) => std::sync::Arc::unwrap_or_clone(sig),
             Some(DeclMty::MtyAlias(_, path)) => {
-                return Err(TypeModError::CannotScrapeAlias { loc, path });
+                return Err(TypeModError::CannotScrapeAlias {
+                    loc,
+                    path: Path::clone(&path),
+                });
             }
             Some(_) => {
                 return Err(TypeModError::CoreError(TypeCoreError::SignatureExpected {
@@ -9095,7 +9139,8 @@ fn apply_package_constraints_to_module_type(
                     rewrite_package_constraints_over_sig(sig, constraints);
                 finish_rewritten_package_sig(env, rewritten_sig, nested_modules, pers_env, ctx)
             }
-            DeclMty::MtyAlias(_, path) | DeclMty::MtyIdent(path) => {
+            DeclMty::MtyAlias(..) | DeclMty::MtyIdent(_) => {
+                let path = mty.ident_or_alias_path().unwrap();
                 resolve_path_package_constraints(env, path, constraints, pers_env, ctx, visiting)
             }
             _ => None,
@@ -9419,7 +9464,8 @@ fn apply_with_type_constraints_to_module_type(
                 rewrite_signature_with_constraints(env, sig, constraints, pers_env, ctx)
                     .map(|signature| DeclMty::MtySignature(std::sync::Arc::new(signature)))
             }
-            DeclMty::MtyIdent(path) | DeclMty::MtyAlias(_, path) => {
+            DeclMty::MtyIdent(_) | DeclMty::MtyAlias(..) => {
+                let path = mty.ident_or_alias_path().unwrap();
                 if !visiting.insert(path.clone()) {
                     return None;
                 }
@@ -9553,9 +9599,8 @@ pub(crate) fn package_modtype_signature_expected(
 fn parent_path_for_module_type(mty: &crate::types::decl::ModuleType) -> Option<Path> {
     use crate::types::decl::ModuleType as DeclMty;
 
-    match mty {
-        DeclMty::MtyIdent(Path::Pdot(parent, _, _))
-        | DeclMty::MtyAlias(_, Path::Pdot(parent, _, _)) => Some(parent.as_ref().clone()),
+    match mty.ident_or_alias_path() {
+        Some(Path::Pdot(parent, _, _)) => Some(parent.as_ref().clone()),
         _ => None,
     }
 }
@@ -9576,7 +9621,7 @@ fn cannot_scrape_alias_path_for_module_type<'a>(
         &mut tctx.persistent_env,
         tctx.type_ctx,
     )
-    .or_else(|| Some(path.clone()))
+    .or_else(|| Some(crate::types::Path::clone(&path)))
 }
 
 fn check_module_type_extracts_signature<'a>(
@@ -9593,7 +9638,10 @@ fn check_module_type_extracts_signature<'a>(
 
     match scrape_alias_module_type(mty, env, &mut tctx.persistent_env, tctx.type_ctx) {
         Some(DeclMty::MtySignature(_)) => Ok(()),
-        Some(DeclMty::MtyAlias(_, path)) => Err(TypeModError::CannotScrapeAlias { loc, path }),
+        Some(DeclMty::MtyAlias(_, path)) => Err(TypeModError::CannotScrapeAlias {
+            loc,
+            path: Path::clone(&path),
+        }),
         Some(_) => Err(TypeModError::CoreError(TypeCoreError::SignatureExpected {
             loc,
         })),
@@ -10192,7 +10240,8 @@ fn check_usage_of_path_of_substituted_item(
                 );
                 check_module_type(tctx, &result_env, paths, result, loc, lid)
             }
-            DeclMty::MtyIdent(path) | DeclMty::MtyAlias(_, path) => {
+            DeclMty::MtyIdent(_) | DeclMty::MtyAlias(..) => {
+                let path = mty.ident_or_alias_path().unwrap();
                 check_path(tctx, env, paths, path, loc, lid)
             }
         }
@@ -10215,7 +10264,7 @@ fn check_usage_of_path_of_substituted_item(
                             loc,
                             lid: lid.clone(),
                             id: *id,
-                            path: aliased_path.clone(),
+                            path: crate::types::Path::clone(&aliased_path),
                         });
                     }
                 }
@@ -12928,7 +12977,10 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                 false,
                 mty.pmty_loc,
             )?;
-            Ok(DeclMty::MtyAlias(AliasPresence::MtaAbsent, path))
+            Ok(DeclMty::MtyAlias(
+                AliasPresence::MtaAbsent,
+                std::sync::Arc::new(path),
+            ))
         }
         // OCaml `compiler/ml/typemod.ml:519-520` (approx_modtype) and
         // `compiler/ml/typemod.ml:743-744` (transl_modtype_aux).
@@ -13215,7 +13267,10 @@ fn approx_modtype_rec<'a>(
                 false,
                 mty.pmty_loc,
             )?;
-            Ok(DeclMty::MtyAlias(AliasPresence::MtaAbsent, path))
+            Ok(DeclMty::MtyAlias(
+                AliasPresence::MtaAbsent,
+                std::sync::Arc::new(path),
+            ))
         }
         PMtyDesc::Pmty_signature(sig_items) => Ok(DeclMty::MtySignature(std::sync::Arc::new(
             approx_signature(tctx, env, arena, sig_items)?,
@@ -13708,9 +13763,8 @@ fn localize_exported_structure_module_type(
 ) -> crate::types::decl::ModuleType {
     use crate::types::decl::ModuleType as DeclMty;
 
-    let (path, env, type_ctx) = match (mty.clone(), env, type_ctx) {
-        (DeclMty::MtyAlias(_, path), Some(env), Some(type_ctx))
-        | (DeclMty::MtyIdent(path), Some(env), Some(type_ctx)) => (path, env, type_ctx),
+    let (path, env, type_ctx) = match (mty.ident_or_alias_path(), env, type_ctx) {
+        (Some(path), Some(env), Some(type_ctx)) => (path.clone(), env, type_ctx),
         _ => return mty,
     };
 
@@ -14032,9 +14086,10 @@ fn extract_module_type_from_mod_expr_inner(
         use crate::types::decl::{AliasPresence, ModuleType as DeclMty};
 
         match &mod_expr.mod_desc {
-            ModuleExprDesc::Tmod_ident(path, _) => {
-                Some(DeclMty::MtyAlias(AliasPresence::MtaAbsent, path.clone()))
-            }
+            ModuleExprDesc::Tmod_ident(path, _) => Some(DeclMty::MtyAlias(
+                AliasPresence::MtaAbsent,
+                std::sync::Arc::new(path.clone()),
+            )),
             _ => None,
         }
     }
@@ -14160,7 +14215,8 @@ fn extract_module_type_from_mod_expr_inner(
         ) -> Option<crate::types::decl::Signature> {
             match mty {
                 DeclMty::MtySignature(sig) => Some((**sig).clone()),
-                DeclMty::MtyIdent(path) | DeclMty::MtyAlias(_, path) => {
+                DeclMty::MtyIdent(_) | DeclMty::MtyAlias(..) => {
+                    let path = mty.ident_or_alias_path().unwrap();
                     resolve_path(path, env, type_ctx, visiting)
                 }
                 _ => None,
@@ -14491,7 +14547,8 @@ fn extract_module_type_from_mod_expr_inner(
                                     other => current_env
                                         .and_then(|env| resolve_modtype_to_sig_in_env(&other, env, type_ctx))
                                         .or_else(|| match &other {
-                                            DeclMty::MtyIdent(path) | DeclMty::MtyAlias(_, path) => {
+                                            DeclMty::MtyIdent(_) | DeclMty::MtyAlias(..) => {
+                                                let path = other.ident_or_alias_path().unwrap();
                                                 let name = path.last();
                                                 sig_items.iter().rev().find_map(|item| match item {
                                                     SigItem::SigModtype(id, mtd)
@@ -14622,8 +14679,11 @@ fn extract_module_type_from_mod_expr_inner(
                 extract_module_type_from_mod_expr_inner(functor, env, type_ctx);
             if let Some(functor_mty) = extracted_functor_mty {
                 let resolved_functor_mty = match &functor_mty {
-                    DeclMty::MtyIdent(path) | DeclMty::MtyAlias(_, path) => env
-                        .and_then(|env| resolve_module_type_path_in_env(path, env, type_ctx))
+                    DeclMty::MtyIdent(_) | DeclMty::MtyAlias(..) => env
+                        .and_then(|env| {
+                            let path = functor_mty.ident_or_alias_path().unwrap();
+                            resolve_module_type_path_in_env(path, env, type_ctx)
+                        })
                         .unwrap_or(functor_mty),
                     _ => functor_mty,
                 };
@@ -15355,7 +15415,7 @@ fn type_module_expr_with_alias_inner<'a>(
             };
             let alias_mod_type = crate::types::decl::ModuleType::MtyAlias(
                 crate::types::decl::AliasPresence::MtaAbsent,
-                semantic_alias_path,
+                std::sync::Arc::new(semantic_alias_path),
             );
             let wraps_alias = !alias
                 && matches!(
@@ -15429,7 +15489,7 @@ fn type_module_expr_with_alias_inner<'a>(
                 let mut inner = ident_mod;
                 inner.mod_type = crate::types::decl::ModuleType::MtyAlias(
                     crate::types::decl::AliasPresence::MtaAbsent,
-                    path_clone.clone(),
+                    std::sync::Arc::new(path_clone.clone()),
                 );
                 let constrained_mod_type = resolve_module_path_module_type(
                     &alias_target,
@@ -21499,9 +21559,8 @@ module M3: {
         // OCaml compiler/ml/subst.ml:345-356 and compiler/ml/subst.ml:379
         // localize module aliases through `Subst.modtype` while copying a signature.
         assert!(matches!(
-            &n_prime_decl.md_type,
-            crate::types::decl::ModuleType::MtyAlias(_, Path::Pident(id))
-                if id.same(&local_n)
+            n_prime_decl.md_type.ident_or_alias_path(),
+            Some(Path::Pident(id)) if id.same(&local_n)
         ));
     }
 }
