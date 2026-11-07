@@ -7620,6 +7620,10 @@ fn simplified_structure_signature(structure: &Structure) -> Option<crate::types:
 
 /// Look up the semantic module type for a longident by searching env and persistent env.
 /// Returns a `decl::ModuleType` (the semantic type), not the `typedtree::ModuleType` (the syntactic type tree).
+///
+/// The result is the path `Env.lookup_module` builds (compiler/ml/env.ml:
+/// 1036-1074): a fresh `Pident (Ident.create_persistent s)` for a unit and
+/// a fresh `Pdot (p, s, pos)` per step, named by the longident's strings.
 pub fn lookup_module_path_by_lid(
     lid: &crate::parser::longident::Longident,
     arena: &ParseArena,
@@ -7627,21 +7631,39 @@ pub fn lookup_module_path_by_lid(
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &crate::types::context::TypeContext,
 ) -> Option<Path> {
+    lookup_module_paths_by_lid(lid, arena, env, pers_env, ctx).map(|(_, lookup)| lookup)
+}
+
+/// The access path whose components each step of [`lookup_module_path_by_lid`]
+/// reads, and the path that lookup returns.
+fn lookup_module_paths_by_lid(
+    lid: &crate::parser::longident::Longident,
+    arena: &ParseArena,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &crate::types::context::TypeContext,
+) -> Option<(Path, Path)> {
     use crate::parser::longident::Longident;
 
     match lid {
         Longident::Lident(mod_idx) => {
             let mod_name = arena.get_string(*mod_idx);
             if let Ok((id, md)) = env.find_module_with_id(mod_name) {
-                if let Some(path) = &md.md_path {
-                    return Some(path.clone());
-                }
-                return Some(Path::pident(*id));
+                let access = md.md_path.clone().unwrap_or_else(|| Path::pident(*id));
+                // `IdTbl.find_name` (env.ml:284-301): `Pident id`, or
+                // `Pdot (root, s, pos)` around the root of an open.
+                let (lookup, _) = env
+                    .find_module_with_path(mod_name)
+                    .expect("a module find_module_with_id finds has a path");
+                return Some((access, lookup));
             }
             if let Some(pers) = pers_env.as_mut() {
                 if pers.find_pers_struct(mod_name, ctx).is_some() {
                     // env.ml:1012: `Pident (Ident.create_persistent s)`.
-                    return Some(Path::pident(ctx.create_ast_persistent_ident(arena, *mod_idx)));
+                    return Some((
+                        Path::pident(Ident::create_persistent(mod_name)),
+                        Path::pident(ctx.create_ast_persistent_ident(arena, *mod_idx)),
+                    ));
                 }
             }
             None
@@ -7654,9 +7676,10 @@ pub fn lookup_module_path_by_lid(
             // parent components (compiler/ml/env.ml:1064-1073). It does not
             // force the final child module's signature while merely building
             // the path.
-            let parent_path = lookup_module_path_by_lid(prefix, arena, env, pers_env, ctx)?;
-            crate::types::typecore::with_resolved_module_components_for_path(
-                &parent_path,
+            let (parent_access, parent_lookup) =
+                lookup_module_paths_by_lid(prefix, arena, env, pers_env, ctx)?;
+            let (access, pos) = crate::types::typecore::with_resolved_module_components_for_path(
+                &parent_access,
                 env,
                 pers_env,
                 ctx,
@@ -7664,21 +7687,30 @@ pub fn lookup_module_path_by_lid(
                     components
                         .lookup_module(submod_name)
                         .map(|(runtime_pos, _, _md)| {
-                            Path::pdot_pos(
-                                components.access_path().clone(),
-                                submod_name.to_string(),
+                            (
+                                Path::pdot_pos(
+                                    components.access_path().clone(),
+                                    submod_name.to_string(),
+                                    runtime_pos as i32,
+                                ),
                                 runtime_pos as i32,
                             )
                         })
                 },
             )
-            .flatten()
-            .map(|path| crate::types::typecore::with_lookup_prefix(ctx, arena, env, prefix, path))
+            .flatten()?;
+            let lookup = ctx.create_ast_dotted(arena, parent_lookup, *submod_idx, pos);
+            Some((access, lookup))
         }
         Longident::Lapply(functor, arg) => {
-            let functor_path = lookup_module_path_by_lid(functor, arena, env, pers_env, ctx)?;
-            let arg_path = lookup_module_path_by_lid(arg, arena, env, pers_env, ctx)?;
-            Some(Path::papply(functor_path, arg_path))
+            let (functor_access, functor_lookup) =
+                lookup_module_paths_by_lid(functor, arena, env, pers_env, ctx)?;
+            let (arg_access, arg_lookup) =
+                lookup_module_paths_by_lid(arg, arena, env, pers_env, ctx)?;
+            Some((
+                Path::papply(functor_access, arg_access),
+                Path::papply(functor_lookup, arg_lookup),
+            ))
         }
     }
 }
@@ -7788,28 +7820,30 @@ pub fn lookup_modtype_path_by_lid(
         }
         Longident::Ldot(prefix, submodtype_idx) => {
             let submodtype_name = arena.get_string(*submodtype_idx);
-            if let Some(path) = crate::types::typecore::with_resolved_module_components_for_lid(
+            // env.ml:1091-1099: `Pdot (p, s, pos)` around the path
+            // `lookup_module_descr` returns for the prefix.
+            if let Some(path) = crate::types::typecore::with_module_descr_for_lid(
                 prefix,
                 arena,
                 env,
                 pers_env,
                 ctx,
-                |components| {
+                |lookup_path, components| {
                     components
                         .lookup_qualified_modtype(submodtype_name, ctx)
                         .map(|_| {
-                            Path::pdot(
-                                components.access_path().clone(),
-                                submodtype_name.to_string(),
+                            ctx.create_ast_dotted(
+                                arena,
+                                lookup_path.clone(),
+                                *submodtype_idx,
+                                crate::types::path::NOPOS,
                             )
                         })
                 },
             )
             .flatten()
             {
-                return Some(crate::types::typecore::with_lookup_prefix(
-                    ctx, arena, env, prefix, path,
-                ));
+                return Some(path);
             }
             let parent_path = lookup_module_path_by_lid(prefix, arena, env, pers_env, ctx)?;
             crate::types::typecore::lookup_modtype_in_resolved_path(

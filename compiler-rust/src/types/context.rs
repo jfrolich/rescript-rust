@@ -4353,6 +4353,28 @@ impl TypeContext {
         id
     }
 
+    /// `Pdot (p, s, pos)` of a lookup step (compiler/ml/env.ml:966-978,
+    /// env.ml:1012-1014, env.ml:1091-1099): a fresh block around the path of
+    /// the prefix's lookup, named by the longident's string.
+    pub(crate) fn create_ast_dotted(
+        &self,
+        arena: &crate::parse_arena::ParseArena,
+        prefix: super::Path,
+        name: crate::intern::StrIdx,
+        pos: i32,
+    ) -> super::Path {
+        let scope = arena.declaration_location_scope(|| self.fresh_location_scope());
+        self.dotted_with_name(
+            Arc::new(prefix),
+            crate::name::Name::from(arena.get_string(name)),
+            super::path_provenance::NameAllocation::Source {
+                scope,
+                string: name.0,
+            },
+            pos,
+        )
+    }
+
     pub(crate) fn record_ident_name(
         &self,
         id: &Ident,
