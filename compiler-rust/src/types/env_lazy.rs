@@ -170,7 +170,7 @@ fn reroot_constructor_descriptions(
     let mentions = |ty: super::type_expr::TypeExprRef| {
         crate::cmi::persistent_env::type_expr_mentions_path_prefixes(ty, &prefixes, ctx)
     };
-    let map_path = |p: &Path| crate::cmi::persistent_env::reroot_path(p, &prefixes);
+    let map_path = crate::cmi::persistent_env::reroot_path_mapper(&prefixes, ctx);
     for desc in descs.iter_mut() {
         if !(desc.cstr_args.iter().any(|t| mentions(*t))
             || desc.cstr_existentials.iter().any(|t| mentions(*t))
@@ -203,7 +203,7 @@ fn reroot_label_descriptions(
     let mentions = |ty: super::type_expr::TypeExprRef| {
         crate::cmi::persistent_env::type_expr_mentions_path_prefixes(ty, &prefixes, ctx)
     };
-    let map_path = |p: &Path| crate::cmi::persistent_env::reroot_path(p, &prefixes);
+    let map_path = crate::cmi::persistent_env::reroot_path_mapper(&prefixes, ctx);
     for desc in descs.iter_mut() {
         if !(mentions(desc.lbl_arg) || mentions(desc.lbl_res)) {
             continue;

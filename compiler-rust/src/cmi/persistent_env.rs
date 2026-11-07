@@ -4068,6 +4068,79 @@ mod tests {
     use super::*;
 
     #[test]
+    fn scoped_rerooting_keeps_suffix_names_and_target_prefix_allocations() {
+        let ctx = TypeContext::new(Arc::new(crate::context::IdGenerator::new()));
+        let root = Arc::new(Path::Pident(ctx.create_ident("Root")));
+        let name = ctx.create_ident("t");
+        let source = ctx.dotted_from_ident(root.clone(), name, 7);
+        let target = Path::Pident(ctx.create_ident("Target"));
+        let pairs = vec![((*root).clone(), target.clone())];
+        let mapper = reroot_path_mapper(&pairs, &ctx);
+        let a = mapper(&source);
+        let b = mapper(&source);
+        let a = ctx.dotted_allocation(&a).unwrap();
+        let b = ctx.dotted_allocation(&b).unwrap();
+        assert_ne!(a.key(), b.key());
+        assert_eq!(a.name, ctx.ident_name_allocation(&name));
+        assert_eq!(a.name, b.name);
+        assert!(Arc::ptr_eq(&a.prefix, &b.prefix));
+        assert!(a.prefix.same(&target));
+        let separate = reroot_path_mapper(&pairs, &ctx)(&source);
+        assert!(!Arc::ptr_eq(
+            &a.prefix,
+            &ctx.dotted_allocation(&separate).unwrap().prefix
+        ));
+
+        let nested = ctx.dotted_from_ident(Arc::new(source.clone()), name, 9);
+        let nested_copy = mapper(&nested);
+        let outer = ctx.dotted_allocation(&nested_copy).unwrap();
+        let inner = ctx.dotted_allocation(&outer.prefix).unwrap();
+        assert_eq!(outer.name, a.name);
+        assert_eq!(inner.name, a.name);
+        assert_ne!(inner.key(), a.key());
+        assert!(Arc::ptr_eq(&inner.prefix, &a.prefix));
+        let untouched =
+            ctx.dotted_from_ident(Arc::new(Path::Pident(ctx.create_ident("Other"))), name, 7);
+        let unchanged = mapper(&untouched);
+        assert_eq!(
+            ctx.dotted_allocation(&untouched).unwrap().key(),
+            ctx.dotted_allocation(&unchanged).unwrap().key()
+        );
+
+        // A second explicit replacement has its own allocation even when its
+        // target is equal. No structural identity inference is permitted.
+        let other = Path::Pident(ctx.create_ident("OtherSource"));
+        let other_dot = ctx.dotted_from_ident(Arc::new(other.clone()), name, 7);
+        let pairs = vec![((*root).clone(), target.clone()), (other, target.clone())];
+        let mapper = reroot_path_mapper(&pairs, &ctx);
+        let first = mapper(&source);
+        let second = mapper(&other_dot);
+        assert!(!Arc::ptr_eq(
+            &ctx.dotted_allocation(&first).unwrap().prefix,
+            &ctx.dotted_allocation(&second).unwrap().prefix,
+        ));
+
+        // Both linear and indexed lookup choose the first matching pair,
+        // rather than preferring the nearest matching ancestor.
+        for count in [2, 6] {
+            let mut pairs = vec![
+                ((*root).clone(), target.clone()),
+                (source.clone(), Path::Pident(ctx.create_ident("Later"))),
+            ];
+            for _ in 2..count {
+                pairs.push((Path::Pident(ctx.create_ident("Unused")), target.clone()));
+            }
+            let prefixes = PathPrefixes::new(&pairs);
+            assert_eq!(prefixes.matching_prefix(&nested), Some(0));
+            assert!(prefixes.targets.get().is_none());
+            let copied = rewrite_path_by_path_prefixes(&nested, &prefixes, &ctx).unwrap();
+            let outer = ctx.dotted_allocation(&copied).unwrap();
+            let inner = ctx.dotted_allocation(&outer.prefix).unwrap();
+            assert!(inner.prefix.same(&target));
+        }
+    }
+
+    #[test]
     fn dotted_substitution_keeps_suffix_names_and_module_prefix_allocations() {
         let ctx = TypeContext::new(Arc::new(crate::context::IdGenerator::new()));
         let root_id = ctx.create_ident("Root");
@@ -5771,7 +5844,7 @@ pub fn reroot_value_description(
         return;
     }
     let mut cache = crate::types::type_expr::TypeExprRefMap::new();
-    let map_path = |p: &Path| reroot_path(p, prefixes);
+    let map_path = reroot_path_mapper(prefixes, ctx);
     desc.val_type = crate::types::typecore::copy_type_expr_mapping_paths(
         ctx,
         desc.val_type,
@@ -5797,10 +5870,14 @@ fn component_alias_sources(module_path: &Path, ctx: &TypeContext) -> Vec<Path> {
     sources
 }
 
-/// Rewrite `path` through the first matching `(old, new)` prefix pair.
-pub fn reroot_path(path: &Path, prefixes: &[(Path, Path)]) -> Path {
-    rewrite_path_by_path_prefixes(path, &PathPrefixes::new(prefixes))
-        .unwrap_or_else(|| path.clone())
+/// Build one scoped mapper so all uses of a replacement prefix retain the
+/// same allocation. Matching remains ordered by the original prefix list.
+pub fn reroot_path_mapper<'a>(
+    prefixes: &'a [(Path, Path)],
+    ctx: &'a TypeContext,
+) -> impl Fn(&Path) -> Path + 'a {
+    let prefixes = PathPrefixes::new(prefixes);
+    move |path| rewrite_path_by_path_prefixes(path, &prefixes, ctx).unwrap_or_else(|| path.clone())
 }
 
 /// Whether any type constructor or package path reachable from `ty` starts
@@ -5820,7 +5897,7 @@ pub fn type_expr_mentions_path_prefixes(
             return false;
         }
         let desc = ctx.get_desc(ty);
-        let hit = |p: &Path| rewrite_path_by_path_prefixes(p, prefixes).is_some();
+        let hit = |p: &Path| prefixes.matching_prefix(p).is_some();
         match &*desc {
             TypeDesc::Tconstr { path, args, .. } => {
                 hit(path) || args.iter().any(|a| walk(*a, prefixes, ctx, visited))
@@ -6708,6 +6785,7 @@ fn rewrite_path_by_path_prefix(path: &Path, old_prefix: &Path, new_prefix: &Path
 /// prefix (compared with `Path::same`) to its first position.
 struct PathPrefixes<'a> {
     pairs: &'a [(Path, Path)],
+    targets: std::cell::OnceCell<Vec<Arc<Path>>>,
     index: Option<ahash::AHashMap<crate::types::context::SamePathKey, usize>>,
 }
 
@@ -6723,37 +6801,89 @@ impl<'a> PathPrefixes<'a> {
             }
             index
         });
-        PathPrefixes { pairs, index }
+        PathPrefixes {
+            pairs,
+            targets: std::cell::OnceCell::new(),
+            index,
+        }
     }
 }
 
-fn rewrite_path_by_path_prefixes(path: &Path, prefixes: &PathPrefixes<'_>) -> Option<Path> {
-    let Some(index) = &prefixes.index else {
-        for (old_prefix, new_prefix) in prefixes.pairs {
-            if let Some(rewritten) = rewrite_path_by_path_prefix(path, old_prefix, new_prefix) {
-                return Some(rewritten);
+impl PathPrefixes<'_> {
+    fn matching_prefix(&self, path: &Path) -> Option<usize> {
+        if self.index.is_none() {
+            return self.pairs.iter().position(|(old, _)| {
+                let mut ancestor = path;
+                loop {
+                    if ancestor.same(old) {
+                        return true;
+                    }
+                    match ancestor {
+                        Path::Pdot(inner, _, _) => ancestor = inner,
+                        _ => return false,
+                    }
+                }
+            });
+        }
+        // Preserve first-pair order, not nearest-ancestor order.
+        let index = self.index.as_ref().unwrap();
+        let mut first: Option<usize> = None;
+        let mut ancestor = path;
+        loop {
+            if let Some(&position) =
+                index.get(&crate::types::context::SamePathKey::new(ancestor.clone()))
+            {
+                first = Some(first.map_or(position, |found| found.min(position)));
+            }
+            match ancestor {
+                Path::Pdot(inner, _, _) => ancestor = inner,
+                _ => break,
             }
         }
-        return None;
-    };
-    // The scan above returns the first prefix, in list order, equal to the
-    // path or one of its `Pdot` ancestors. Find that prefix through the index,
-    // then rewrite with it exactly as the scan would.
-    let mut first: Option<usize> = None;
-    let mut ancestor = path;
-    loop {
-        if let Some(&position) =
-            index.get(&crate::types::context::SamePathKey::new(ancestor.clone()))
-        {
-            first = Some(first.map_or(position, |found| found.min(position)));
-        }
-        match ancestor {
-            Path::Pdot(inner, _, _) => ancestor = inner,
-            _ => break,
-        }
+        first
     }
-    let (old_prefix, new_prefix) = &prefixes.pairs[first?];
-    rewrite_path_by_path_prefix(path, old_prefix, new_prefix)
+}
+
+fn rewrite_path_with_shared_prefix(
+    path: &Path,
+    old_prefix: &Path,
+    new_prefix: &Arc<Path>,
+    ctx: &TypeContext,
+) -> Option<Path> {
+    if path.same(old_prefix) {
+        return Some((**new_prefix).clone());
+    }
+    match path {
+        Path::Pdot(inner, _, _) => {
+            let prefix = if inner.same(old_prefix) {
+                new_prefix.clone()
+            } else {
+                Arc::new(rewrite_path_with_shared_prefix(
+                    inner, old_prefix, new_prefix, ctx,
+                )?)
+            };
+            // Subst.module_path/type_path rebuild dotted blocks, but retain
+            // their suffix strings (compiler/ml/subst.ml:69-100).
+            Some(ctx.copy_dotted_with_prefix(path, prefix))
+        }
+        _ => None,
+    }
+}
+
+fn rewrite_path_by_path_prefixes(
+    path: &Path,
+    prefixes: &PathPrefixes<'_>,
+    ctx: &TypeContext,
+) -> Option<Path> {
+    let position = prefixes.matching_prefix(path)?;
+    let targets = prefixes.targets.get_or_init(|| {
+        prefixes
+            .pairs
+            .iter()
+            .map(|(_, target)| Arc::new(target.clone()))
+            .collect()
+    });
+    rewrite_path_with_shared_prefix(path, &prefixes.pairs[position].0, &targets[position], ctx)
 }
 
 fn rewrite_module_type_by_path_prefix(
@@ -7014,7 +7144,7 @@ fn rewrite_type_expr_by_path_prefixes(
     let desc = ctx.get_desc(ty_ref);
     match &*desc {
         TypeDesc::Tconstr { path, args, .. } => {
-            if let Some(new_path) = rewrite_path_by_path_prefixes(path, prefixes) {
+            if let Some(new_path) = rewrite_path_by_path_prefixes(path, prefixes, ctx) {
                 let mut new_desc = (*desc).clone();
                 if let TypeDesc::Tconstr { ref mut path, .. } = new_desc {
                     *path = new_path;
@@ -7054,7 +7184,7 @@ fn rewrite_type_expr_by_path_prefixes(
         }
         TypeDesc::Tvariant(row) => {
             if let Some((path, _)) = &row.row_name
-                && let Some(new_path) = rewrite_path_by_path_prefixes(path, prefixes)
+                && let Some(new_path) = rewrite_path_by_path_prefixes(path, prefixes, ctx)
             {
                 let mut new_desc = (*desc).clone();
                 if let TypeDesc::Tvariant(ref mut row) = new_desc
@@ -7085,7 +7215,7 @@ fn rewrite_type_expr_by_path_prefixes(
             }
         }
         TypeDesc::Tpackage { path, args, .. } => {
-            if let Some(new_path) = rewrite_path_by_path_prefixes(path, prefixes) {
+            if let Some(new_path) = rewrite_path_by_path_prefixes(path, prefixes, ctx) {
                 let mut new_desc = (*desc).clone();
                 if let TypeDesc::Tpackage { ref mut path, .. } = new_desc {
                     *path = new_path;
