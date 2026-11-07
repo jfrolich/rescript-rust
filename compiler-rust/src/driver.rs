@@ -10526,9 +10526,11 @@ pub fn run_implementation_frontend(
     let structure =
         apply_external_structure_ppxs(options, filename, parser.arena_mut(), structure)?;
     let frontend_warnings =
-        ppx::collect_leading_builtin_warning_attributes(&structure, parser.arena());
+        ppx::collect_leading_builtin_warning_attributes(&structure, parser.arena())
+            .map_err(|err| ppx_error_to_anyhow(err, parser.arena(), source, filename))?;
     let frontend_warning_specs =
-        ppx::collect_leading_builtin_warning_attribute_specs(&structure, parser.arena());
+        ppx::collect_leading_builtin_warning_attribute_specs(&structure, parser.arena())
+            .map_err(|err| ppx_error_to_anyhow(err, parser.arena(), source, filename))?;
     let mut ppx_warnings_have_errors = parser_warnings_have_errors
         | format_ppx_warnings_with_config(
             parser.arena(),
@@ -11743,9 +11745,11 @@ pub fn run_interface_frontend(
     let signature =
         apply_external_signature_ppxs(options, filename, parser.arena_mut(), signature)?;
     let frontend_warnings =
-        ppx::collect_leading_builtin_warning_signature_attributes(&signature, parser.arena());
+        ppx::collect_leading_builtin_warning_signature_attributes(&signature, parser.arena())
+            .map_err(|err| ppx_error_to_anyhow(err, parser.arena(), source, filename))?;
     let frontend_warning_specs =
-        ppx::collect_leading_builtin_warning_signature_attribute_specs(&signature, parser.arena());
+        ppx::collect_leading_builtin_warning_signature_attribute_specs(&signature, parser.arena())
+            .map_err(|err| ppx_error_to_anyhow(err, parser.arena(), source, filename))?;
     let mut ppx_warnings_have_errors = parser_warnings_have_errors
         | format_ppx_warnings_with_config(
             parser.arena(),
@@ -13980,8 +13984,10 @@ pub fn typecheck_structure_for_tooling(
     registry: &ModuleRegistry,
 ) -> ToolingTypedModule {
     let file_config = extract_file_config_from_structure(structure, arena);
+    // The frontend raised on any payload these cannot read.
     let frontend_warning_specs =
-        ppx::collect_leading_builtin_warning_attribute_specs(structure, arena);
+        ppx::collect_leading_builtin_warning_attribute_specs(structure, arena)
+            .expect("the frontend read these attributes");
     let type_ctx = fresh_type_context();
     let typed = {
         let (mut tctx, env) = in_process_type_check_context(
@@ -14023,8 +14029,10 @@ pub fn typecheck_signature_for_tooling(
     registry: &ModuleRegistry,
 ) -> ToolingTypedModule {
     let file_config = extract_file_config_from_signature(signature, arena);
+    // The frontend raised on any payload these cannot read.
     let frontend_warning_specs =
-        ppx::collect_leading_builtin_warning_signature_attribute_specs(signature, arena);
+        ppx::collect_leading_builtin_warning_signature_attribute_specs(signature, arena)
+            .expect("the frontend read these attributes");
     let type_ctx = fresh_type_context();
     let typed = {
         let (mut tctx, env) = in_process_type_check_context(
@@ -14091,8 +14099,10 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         )
     };
     let file_config = extract_file_config_from_structure(structure, arena);
+    // The frontend raised on any payload these cannot read.
     let frontend_warning_specs =
-        ppx::collect_leading_builtin_warning_attribute_specs(structure, arena);
+        ppx::collect_leading_builtin_warning_attribute_specs(structure, arena)
+            .expect("the frontend read these attributes");
 
     log::debug!(
         "[compile_source_in_process] {} type-check start",
@@ -14974,8 +14984,10 @@ pub fn typecheck_preprocessed_signature_in_process(
     )
     .entered();
     let file_config = extract_file_config_from_signature(signature, arena);
+    // The frontend raised on any payload these cannot read.
     let frontend_warning_specs =
-        ppx::collect_leading_builtin_warning_signature_attribute_specs(signature, arena);
+        ppx::collect_leading_builtin_warning_signature_attribute_specs(signature, arena)
+            .expect("the frontend read these attributes");
 
     let type_ctx = fresh_type_context();
     let (mut tctx, env) = in_process_type_check_context(

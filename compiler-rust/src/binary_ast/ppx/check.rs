@@ -102,7 +102,17 @@ impl<'a> Checker<'a> {
                         // bs_builtin_ppx.ml:553-554: the expression, then the
                         // attributes; the pattern is not mapped.
                         self.expr(vb.pvb_expr)?;
-                        self.attributes(&vb.pvb_attributes)
+                        self.attributes(&vb.pvb_attributes)?;
+                        // bs_builtin_ppx.ml:590-601: an `@inline` string
+                        // binding reads the expression's semantic string.
+                        if find_inline_payload_expr(&vb.pvb_attributes, self.arena).is_some() {
+                            let expr = self.arena.get_expr(vb.pvb_expr);
+                            inline_string_semantic(
+                                crate::ast_payload::unwrap_braces(self.arena, expr),
+                                self.arena,
+                            )?;
+                        }
+                        Ok(())
                     }
                     (RecFlag::Nonrecursive, _) => self.value_bindings_flattened(&bindings),
                     (RecFlag::Recursive, _) => {
@@ -187,6 +197,11 @@ impl<'a> Checker<'a> {
                 if is_rs_external(&vd.pval_attributes, &vd.pval_prim, self.arena) {
                     self.external(vd)
                 } else {
+                    // bs_builtin_ppx.ml:471-480: the semantic string of an
+                    // `@inline` string payload.
+                    if let Some(expr) = find_inline_payload_expr(&vd.pval_attributes, self.arena) {
+                        inline_string_semantic(expr, self.arena)?;
+                    }
                     self.value_description(vd)
                 }
             }
@@ -920,7 +935,8 @@ impl<'a> Checker<'a> {
                 self.warnings.push(PpxWarning {
                     loc,
                     warning: Warning::BsTodo {
-                        message: payload_semantic_string(payload, self.arena),
+                        // ast_exp_extension.ml:31.
+                        message: payload_semantic_string(payload, self.arena)?,
                     },
                 });
                 Ok(())

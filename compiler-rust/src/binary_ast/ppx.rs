@@ -984,13 +984,13 @@ fn collect_builtin_warning_attribute(
     attr: &Attribute,
     arena: &ParseArena,
     warnings: &mut Vec<PpxWarning>,
-) {
+) -> PpxResult<()> {
     let (name, payload) = attr;
     let attr_name = arena.get_string(name.txt);
     match attr_name {
         "warning" | "warnerror" => {
             let errflag = attr_name == "warnerror";
-            if let Some(spec) = payload_semantic_string(payload, arena) {
+            if let Some(spec) = payload_semantic_string(payload, arena)? {
                 if !warning_spec_parse_ok(&spec, errflag) {
                     warnings.push(PpxWarning {
                         loc: name.loc,
@@ -1011,7 +1011,7 @@ fn collect_builtin_warning_attribute(
             }
         }
         "ppwarning" => {
-            if let Some(message) = payload_semantic_string(payload, arena) {
+            if let Some(message) = payload_semantic_string(payload, arena)? {
                 // builtin_attributes.ml:202-212 reports at the item's `pstr_loc`.
                 let Payload::PStr(items) = payload else {
                     unreachable!("a single string literal payload is a structure");
@@ -1024,24 +1024,24 @@ fn collect_builtin_warning_attribute(
         }
         _ => {}
     }
+    Ok(())
 }
 
 fn builtin_warning_attribute_spec(
     attr: &Attribute,
     arena: &ParseArena,
-) -> Option<WarningAttributeSpec> {
+) -> PpxResult<Option<WarningAttributeSpec>> {
     let (name, payload) = attr;
     let attr_name = arena.get_string(name.txt);
-    match attr_name {
+    Ok(match attr_name {
         "warning" | "warnerror" => {
-            let spec = payload_semantic_string(payload, arena)?;
-            Some(WarningAttributeSpec {
+            payload_semantic_string(payload, arena)?.map(|spec| WarningAttributeSpec {
                 spec,
                 as_error: attr_name == "warnerror",
             })
         }
         _ => None,
-    }
+    })
 }
 
 /// The floating attributes (`@@attr`) at the start of a structure.
@@ -1060,15 +1060,17 @@ fn leading_signature_attributes(signature: &[SignatureItem]) -> impl Iterator<It
     })
 }
 
+/// `Builtin_attributes.warning_attribute` over `attrs`, which raises on a
+/// payload `string_of_payload` cannot read (builtin_attributes.ml:19-22).
 fn collect_builtin_warning_attributes<'a>(
     attrs: impl Iterator<Item = &'a Attribute>,
     arena: &ParseArena,
-) -> Vec<PpxWarning> {
+) -> PpxResult<Vec<PpxWarning>> {
     let mut warnings = Vec::new();
     for attr in attrs {
-        collect_builtin_warning_attribute(attr, arena, &mut warnings);
+        collect_builtin_warning_attribute(attr, arena, &mut warnings)?;
     }
-    warnings
+    Ok(warnings)
 }
 
 /// Mirrors `Bs_ast_invariant.iter_warnings_on_stru`: only leading floating
@@ -1076,7 +1078,7 @@ fn collect_builtin_warning_attributes<'a>(
 pub fn collect_leading_builtin_warning_attributes(
     structure: &[StructureItem],
     arena: &ParseArena,
-) -> Vec<PpxWarning> {
+) -> PpxResult<Vec<PpxWarning>> {
     collect_builtin_warning_attributes(leading_structure_attributes(structure), arena)
 }
 
@@ -1086,9 +1088,9 @@ pub fn collect_leading_builtin_warning_attributes(
 pub fn collect_leading_builtin_warning_attribute_specs(
     structure: &[StructureItem],
     arena: &ParseArena,
-) -> Vec<WarningAttributeSpec> {
+) -> PpxResult<Vec<WarningAttributeSpec>> {
     leading_structure_attributes(structure)
-        .filter_map(|attr| builtin_warning_attribute_spec(attr, arena))
+        .filter_map(|attr| builtin_warning_attribute_spec(attr, arena).transpose())
         .collect()
 }
 
@@ -1097,7 +1099,7 @@ pub fn collect_leading_builtin_warning_attribute_specs(
 pub fn collect_leading_builtin_warning_signature_attributes(
     signature: &[SignatureItem],
     arena: &ParseArena,
-) -> Vec<PpxWarning> {
+) -> PpxResult<Vec<PpxWarning>> {
     collect_builtin_warning_attributes(leading_signature_attributes(signature), arena)
 }
 
@@ -1105,9 +1107,9 @@ pub fn collect_leading_builtin_warning_signature_attributes(
 pub fn collect_leading_builtin_warning_signature_attribute_specs(
     signature: &[SignatureItem],
     arena: &ParseArena,
-) -> Vec<WarningAttributeSpec> {
+) -> PpxResult<Vec<WarningAttributeSpec>> {
     leading_signature_attributes(signature)
-        .filter_map(|attr| builtin_warning_attribute_spec(attr, arena))
+        .filter_map(|attr| builtin_warning_attribute_spec(attr, arena).transpose())
         .collect()
 }
 
@@ -1939,7 +1941,7 @@ fn validate_external_attribute_payload_errors(
                 // ast_external_process.ml: an empty payload is fine; otherwise
                 // reject a `json` literal, then require a semantic string.
                 if !payload_is_empty_str(payload) {
-                    if payload_semantic_string(payload, arena).is_none() {
+                    if payload_semantic_string(payload, arena)?.is_none() {
                         return Err(PpxError::at_loc(attr_name.loc, "Invalid payload"));
                     }
                 }
@@ -1949,7 +1951,7 @@ fn validate_external_attribute_payload_errors(
                     continue;
                 }
                 let strings =
-                    match payload_string_literals_or_error_loc(payload, arena, attr_name.loc) {
+                    match payload_string_literals_or_error_loc(payload, arena, attr_name.loc)? {
                         Ok(strings) => strings,
                         Err(loc) => {
                             return Err(PpxError::at_loc(loc, "expect string tuple list"));
@@ -1961,7 +1963,7 @@ fn validate_external_attribute_payload_errors(
             }
             "scope" => {
                 let scopes =
-                    match payload_string_literals_or_error_loc(payload, arena, attr_name.loc) {
+                    match payload_string_literals_or_error_loc(payload, arena, attr_name.loc)? {
                         Ok(scopes) => scopes,
                         Err(loc) => {
                             return Err(PpxError::at_loc(loc, "expect string tuple list"));
@@ -2177,7 +2179,7 @@ fn validate_external_attribute_errors(
         args.is_empty(),
         vd.pval_loc,
         arena,
-    );
+    )?;
 
     if desc.mk_obj {
         if external_desc_is_plain_obj(&desc) {
@@ -2349,7 +2351,7 @@ fn refine_arg_type(nolabel: bool, typ: &CoreType, arena: &ParseArena) -> Attr {
                     return Attr::ArgCst(Cst::ArgIntLit(i as i64));
                 }
                 // Then a semantic string, then a `json` literal.
-                match get_payload_string_or_json(payload, arena) {
+                match checked(get_payload_string_or_json(payload, arena)) {
                     Some(AsStringPayload::Str(s)) => return Attr::ArgCst(Cst::ArgStringLit(s)),
                     Some(AsStringPayload::Json { source, .. }) => {
                         return Attr::ArgCst(Cst::ArgJsonLit(source));
@@ -2414,20 +2416,16 @@ fn payload_is_empty_str(payload: &Payload) -> bool {
     matches!(payload, Payload::PStr(items) if items.is_empty())
 }
 
-/// OCaml `Ast_payload.semantic_string_of_payload`; an invalid template escape
-/// (which OCaml raises) yields `None`.
-fn payload_semantic_string(payload: &Payload, arena: &ParseArena) -> Option<String> {
-    crate::ast_payload::semantic_string_of_payload(arena, payload)
-        .ok()
-        .flatten()
+/// OCaml `Ast_payload.semantic_string_of_payload`, which raises "Invalid
+/// string escape sequence" on a template that does not decode.
+fn payload_semantic_string(payload: &Payload, arena: &ParseArena) -> PpxResult<Option<String>> {
+    crate::ast_payload::semantic_string_of_payload(arena, payload).map_err(payload_error)
 }
 
-/// OCaml `Ast_payload.semantic_string_of_expression`; an invalid template
-/// escape (which OCaml raises) yields `None`.
-fn expr_semantic_string(expr: &Expression, arena: &ParseArena) -> Option<String> {
-    crate::ast_payload::semantic_string_of_expression(arena, expr)
-        .ok()
-        .flatten()
+/// OCaml `Ast_payload.semantic_string_of_expression`, which raises like
+/// [`payload_semantic_string`].
+fn expr_semantic_string(expr: &Expression, arena: &ParseArena) -> PpxResult<Option<String>> {
+    crate::ast_payload::semantic_string_of_expression(arena, expr).map_err(payload_error)
 }
 
 fn payload_error(error: crate::ast_payload::PayloadError) -> PpxError {
@@ -2504,26 +2502,32 @@ fn payload_single_record_fields_without_spread<'a>(
     }
 }
 
-fn payload_string_literals(payload: &Payload, arena: &ParseArena) -> Option<Vec<String>> {
+fn payload_string_literals(
+    payload: &Payload,
+    arena: &ParseArena,
+) -> PpxResult<Option<Vec<String>>> {
     match payload {
-        Payload::PStr(items) if items.is_empty() => Some(Vec::new()),
+        Payload::PStr(items) if items.is_empty() => Ok(Some(Vec::new())),
         Payload::PStr(items) if items.len() == 1 => {
             let StructureItemDesc::Pstr_eval(eval_inner) = &items[0].pstr_desc else {
-                return None;
+                return Ok(None);
             };
             let (expr, _) = &**eval_inner;
             match &crate::ast_payload::unwrap_braces(arena, arena.get_expr(*expr)).pexp_desc {
                 ExpressionDesc::Pexp_tuple(exprs) => {
                     let mut result = Vec::with_capacity(exprs.len());
                     for expr in arena.expr_list(*exprs).iter() {
-                        result.push(expr_semantic_string(arena.get_expr(*expr), arena)?);
+                        match expr_semantic_string(arena.get_expr(*expr), arena)? {
+                            Some(s) => result.push(s),
+                            None => return Ok(None),
+                        }
                     }
-                    Some(result)
+                    Ok(Some(result))
                 }
-                _ => Some(vec![expr_semantic_string(arena.get_expr(*expr), arena)?]),
+                _ => Ok(expr_semantic_string(arena.get_expr(*expr), arena)?.map(|s| vec![s])),
             }
         }
-        _ => None,
+        _ => Ok(None),
     }
 }
 
@@ -2531,32 +2535,32 @@ fn payload_string_literals_or_error_loc(
     payload: &Payload,
     arena: &ParseArena,
     default_loc: LocIdx,
-) -> Result<Vec<String>, LocIdx> {
+) -> PpxResult<Result<Vec<String>, LocIdx>> {
     match payload {
-        Payload::PStr(items) if items.is_empty() => Ok(Vec::new()),
+        Payload::PStr(items) if items.is_empty() => Ok(Ok(Vec::new())),
         Payload::PStr(items) if items.len() == 1 => {
             let StructureItemDesc::Pstr_eval(eval_inner) = &items[0].pstr_desc else {
-                return Err(default_loc);
+                return Ok(Err(default_loc));
             };
             let (expr, _) = &**eval_inner;
             match &crate::ast_payload::unwrap_braces(arena, arena.get_expr(*expr)).pexp_desc {
                 ExpressionDesc::Pexp_tuple(exprs) => {
                     let mut result = Vec::with_capacity(exprs.len());
                     for expr in arena.expr_list(*exprs).iter() {
-                        match expr_semantic_string(arena.get_expr(*expr), arena) {
+                        match expr_semantic_string(arena.get_expr(*expr), arena)? {
                             Some(s) => result.push(s),
-                            None => return Err(items[0].pstr_loc),
+                            None => return Ok(Err(items[0].pstr_loc)),
                         }
                     }
-                    Ok(result)
+                    Ok(Ok(result))
                 }
-                _ => match expr_semantic_string(arena.get_expr(*expr), arena) {
+                _ => Ok(match expr_semantic_string(arena.get_expr(*expr), arena)? {
                     Some(s) => Ok(vec![s]),
                     None => Err(default_loc),
-                },
+                }),
             }
         }
-        _ => Err(default_loc),
+        _ => Ok(Err(default_loc)),
     }
 }
 
@@ -2568,7 +2572,7 @@ fn get_as_string_attr(attrs: &[Attribute], arena: &ParseArena) -> Option<String>
         let name = arena.get_string(attr_name.txt);
         if name == "as" {
             // Try to get string payload
-            if let Some(s) = payload_semantic_string(payload, arena) {
+            if let Some(s) = checked(payload_semantic_string(payload, arena)) {
                 arena.mark_used_attribute(attr);
                 return Some(s);
             }
@@ -2625,7 +2629,7 @@ fn validate_string_as_attrs(attrs: &[Attribute], arena: &ParseArena) -> PpxResul
                 "Duplicate @as annotation; only one @as is allowed here.",
             ));
         }
-        if get_payload_string(payload, arena).is_none() {
+        if get_payload_string(payload, arena)?.is_none() {
             return Err(PpxError::at_loc(
                 attr_name.loc,
                 "Expected a string literal.",
@@ -2675,7 +2679,7 @@ fn validate_string_or_int_as_attrs(attrs: &[Attribute], arena: &mut ParseArena) 
             seen_as = true;
             continue;
         }
-        let Some(as_payload) = get_payload_string_or_json(payload, arena) else {
+        let Some(as_payload) = get_payload_string_or_json(payload, arena)? else {
             return Err(PpxError::at_loc(
                 attr_name.loc,
                 "The @as payload must be an integer, string, or JSON literal.",
@@ -3584,7 +3588,7 @@ fn parse_external_attrs(
     no_arguments: bool,
     pval_loc: LocIdx,
     arena: &ParseArena,
-) -> ExternalDesc {
+) -> PpxResult<ExternalDesc> {
     let mut desc = ExternalDesc::default();
 
     for (attr_name, payload) in attrs {
@@ -3610,7 +3614,7 @@ fn parse_external_attrs(
         match name {
             "val" => {
                 let name =
-                    get_payload_string(payload, arena).unwrap_or_else(|| prim_name.to_string());
+                    get_payload_string(payload, arena)?.unwrap_or_else(|| prim_name.to_string());
                 if no_arguments {
                     desc.val_name = Some(name);
                 } else {
@@ -3619,7 +3623,7 @@ fn parse_external_attrs(
             }
             "module" => {
                 if let Some((bundle, import_attributes)) =
-                    get_module_import_attributes(payload, arena)
+                    get_module_import_attributes(payload, arena)?
                 {
                     desc.external_module_name = Some(bundle);
                     desc.module_bind_name = None;
@@ -3627,7 +3631,7 @@ fn parse_external_attrs(
                     continue;
                 }
 
-                let strings = get_payload_strings(payload, arena);
+                let strings = get_payload_strings(payload, arena)?;
                 match strings.len() {
                     0 => {
                         // @module with no payload - module_as_val, bundle = prim_name
@@ -3650,22 +3654,22 @@ fn parse_external_attrs(
             }
             "send" => {
                 desc.send_name = Some(
-                    get_payload_string(payload, arena).unwrap_or_else(|| prim_name.to_string()),
+                    get_payload_string(payload, arena)?.unwrap_or_else(|| prim_name.to_string()),
                 );
             }
             "new" => {
-                let payload_name = get_payload_string(payload, arena);
+                let payload_name = get_payload_string(payload, arena)?;
                 desc.new_name_from_payload = payload_name.is_some();
                 desc.new_name = Some(payload_name.unwrap_or_else(|| prim_name.to_string()));
             }
             "get" => {
                 desc.get_name = Some(
-                    get_payload_string(payload, arena).unwrap_or_else(|| prim_name.to_string()),
+                    get_payload_string(payload, arena)?.unwrap_or_else(|| prim_name.to_string()),
                 );
             }
             "set" => {
                 desc.set_name = Some(
-                    get_payload_string(payload, arena).unwrap_or_else(|| prim_name.to_string()),
+                    get_payload_string(payload, arena)?.unwrap_or_else(|| prim_name.to_string()),
                 );
             }
             "get_index" => {
@@ -3678,7 +3682,7 @@ fn parse_external_attrs(
                 desc.splice = true;
             }
             "scope" => {
-                let scopes = get_payload_strings(payload, arena);
+                let scopes = get_payload_strings(payload, arena)?;
                 if !scopes.is_empty() {
                     desc.scopes = scopes;
                 }
@@ -3719,11 +3723,14 @@ fn parse_external_attrs(
         desc.call_name = Some(prim_name.to_string());
     }
 
-    desc
+    Ok(desc)
 }
 
 /// OCaml `Ast_payload.semantic_string_of_payload`.
-fn get_payload_string(payload: &current::Payload, arena: &ParseArena) -> Option<String> {
+fn get_payload_string(
+    payload: &current::Payload,
+    arena: &ParseArena,
+) -> PpxResult<Option<String>> {
     payload_semantic_string(payload, arena)
 }
 
@@ -3892,10 +3899,15 @@ enum AsStringPayload {
 fn get_payload_string_or_json(
     payload: &current::Payload,
     arena: &ParseArena,
-) -> Option<AsStringPayload> {
-    if let Some(s) = payload_semantic_string(payload, arena) {
-        return Some(AsStringPayload::Str(s));
+) -> PpxResult<Option<AsStringPayload>> {
+    if let Some(s) = payload_semantic_string(payload, arena)? {
+        return Ok(Some(AsStringPayload::Str(s)));
     }
+    Ok(json_as_payload(payload, arena))
+}
+
+/// The `json` literal case of [`get_payload_string_or_json`].
+fn json_as_payload(payload: &current::Payload, arena: &ParseArena) -> Option<AsStringPayload> {
     let current::Payload::PStr(items) = payload else {
         return None;
     };
@@ -3929,8 +3941,8 @@ fn get_payload_string_or_json(
 
 /// Extract multiple strings from attribute payload (mirrors OCaml's Ast_payload.assert_strings)
 /// Handles: @attr("str"), @attr(("str1", "str2", ...)), @attr (empty → [])
-fn get_payload_strings(payload: &current::Payload, arena: &ParseArena) -> Vec<String> {
-    payload_string_literals(payload, arena).unwrap_or_default()
+fn get_payload_strings(payload: &current::Payload, arena: &ParseArena) -> PpxResult<Vec<String>> {
+    Ok(payload_string_literals(payload, arena)?.unwrap_or_default())
 }
 
 fn validate_module_import_attributes_payload(
@@ -3962,7 +3974,7 @@ fn validate_module_import_attributes_payload(
         };
         match arena.get_string(*field_name_idx) {
             "from" => {
-                if expr_semantic_string(arena.get_expr(field.expr), arena).is_some() {
+                if expr_semantic_string(arena.get_expr(field.expr), arena)?.is_some() {
                     from_name = true;
                 }
             }
@@ -3995,7 +4007,7 @@ fn validate_module_import_attributes_payload(
     for field in with_fields {
         // OCaml checks the value shape before the key (ast_external_process.ml:283-293).
         let field_expr = arena.get_expr(field.expr);
-        let is_string = expr_semantic_string(field_expr, arena).is_some();
+        let is_string = expr_semantic_string(field_expr, arena)?.is_some();
         if !is_string {
             return Err(PpxError::at_loc(
                 field_expr.pexp_loc,
@@ -4018,20 +4030,20 @@ fn validate_module_import_attributes_payload(
 fn get_module_import_attributes(
     payload: &current::Payload,
     arena: &ParseArena,
-) -> Option<(String, ImportAttributes)> {
+) -> PpxResult<Option<(String, ImportAttributes)>> {
     let current::Payload::PStr(items) = payload else {
-        return None;
+        return Ok(None);
     };
     if items.len() != 1 {
-        return None;
+        return Ok(None);
     }
     let StructureItemDesc::Pstr_eval(eval_inner) = &items[0].pstr_desc else {
-        return None;
+        return Ok(None);
     };
     let (expr_idx, _) = &**eval_inner;
     let expr = crate::ast_payload::unwrap_braces(arena, arena.get_expr(*expr_idx));
     let ExpressionDesc::Pexp_record(record_inner) = &expr.pexp_desc else {
-        return None;
+        return Ok(None);
     };
     let (fields, _) = &*record_inner;
 
@@ -4044,7 +4056,7 @@ fn get_module_import_attributes(
         };
         match arena.get_string(*field_name_idx) {
             "from" => {
-                if let Some(name) = expr_semantic_string(arena.get_expr(field.expr), arena) {
+                if let Some(name) = expr_semantic_string(arena.get_expr(field.expr), arena)? {
                     from_name = Some(name);
                 }
             }
@@ -4063,7 +4075,7 @@ fn get_module_import_attributes(
                         continue;
                     };
                     let Some(value) =
-                        expr_semantic_string(arena.get_expr(import_field.expr), arena)
+                        expr_semantic_string(arena.get_expr(import_field.expr), arena)?
                     else {
                         continue;
                     };
@@ -4079,10 +4091,10 @@ fn get_module_import_attributes(
         }
     }
 
-    match (from_name, with_fields) {
+    Ok(match (from_name, with_fields) {
         (Some(from_name), Some(with_fields)) => Some((from_name, with_fields)),
         _ => None,
-    }
+    })
 }
 
 /// Build FFI type from external description and type info
@@ -4333,13 +4345,13 @@ pub fn encode_external(vd: &ValueDescription, arena: &mut ParseArena) -> Encoded
     // regardless of ignored. Use list_of_arrow directly.
     let no_arguments = list_of_arrow_args(&vd_type, arena).is_empty();
 
-    let desc = parse_external_attrs(
+    let desc = checked(parse_external_attrs(
         &vd.pval_attributes,
         prim_name.as_str(),
         no_arguments,
         vd.pval_loc,
         arena,
-    );
+    ));
 
     let (ffi, has_relative_path) = if desc.mk_obj {
         // @obj external: build FfiObjCreate with field names
@@ -4552,7 +4564,7 @@ fn transform_inline_sig_value(
 
     // bs_builtin_ppx.ml `signature_item_mapper`: an ordinary string or a
     // non-interpolated template becomes an inline string of its semantic value.
-    if let Some(semantic) = inline_string_semantic(&expr, arena) {
+    if let Some(semantic) = checked(inline_string_semantic(&expr, arena)) {
         let prim = inline_string_primitive(&semantic);
         return Some(ValueDescription {
             pval_jsx_component: None,
@@ -4631,7 +4643,7 @@ fn transform_inline_sig_value(
 /// The `Pexp_constant (Pconst_string _) | Pexp_template {source_segments =
 /// [_]; values = []}` case of OCaml's `@inline` handling: the expression's
 /// semantic string.
-fn inline_string_semantic(expr: &Expression, arena: &ParseArena) -> Option<String> {
+fn inline_string_semantic(expr: &Expression, arena: &ParseArena) -> PpxResult<Option<String>> {
     match &expr.pexp_desc {
         ExpressionDesc::Pexp_constant(c) if matches!(&*c, Constant::String(_)) => {
             expr_semantic_string(expr, arena)
@@ -4641,8 +4653,15 @@ fn inline_string_semantic(expr: &Expression, arena: &ParseArena) -> Option<Strin
         {
             expr_semantic_string(expr, arena)
         }
-        _ => None,
+        _ => Ok(None),
     }
+}
+
+/// A payload read in the rewrite, which runs only on a tree the check pass
+/// (`ppx/check.rs`) accepted after raising, in the mapper's order, where the
+/// OCaml readers raise on the same payload.
+fn checked<T>(read: PpxResult<T>) -> T {
+    read.expect("the check pass raised on this payload")
 }
 
 /// Create a type for a simple builtin type (string, int, float, bool)
@@ -4679,7 +4698,7 @@ fn transform_inline_binding(
     // `(Ast_payload.unwrap_braces pvb_expr).pexp_desc`.
     let expr = &crate::ast_payload::unwrap_braces(arena, expr).clone();
     // @inline let x = "string" (or a non-interpolated template)
-    if let Some(semantic) = inline_string_semantic(expr, arena) {
+    if let Some(semantic) = checked(inline_string_semantic(expr, arena)) {
         let prim = inline_string_primitive(&semantic);
         return Some(StructureItem {
             pstr_desc: StructureItemDesc::Pstr_primitive(Box::new(ValueDescription {
@@ -4801,7 +4820,7 @@ fn handle_extension(
 /// to `"<file>:<line>:<start>-<end> - Todo[: message]"`, located at the
 /// extension name. The warning is emitted by the warning pre-pass.
 fn handle_todo(payload: &Payload, arena: &mut ParseArena, loc: LocIdx) -> Expression {
-    let todo_message = payload_semantic_string(payload, arena);
+    let todo_message = checked(payload_semantic_string(payload, arena));
     let start = arena.loc_start(loc);
     let end = arena.loc_end(loc);
     let mut text = format!(
@@ -11293,6 +11312,39 @@ fn rewrite_signature_item_no_spice(item: &SignatureItem, arena: &mut ParseArena)
 mod tests {
     use super::*;
     use crate::parser::{Parser, module};
+
+    /// `Builtin_attributes.warning_attribute` reads `@@warning` with
+    /// `string_of_payload`, which raises on a PPX's template with an invalid
+    /// escape (ast_payload.ml:39-51): the frontend reports it instead of
+    /// treating the payload as no string.
+    #[test]
+    fn leading_warning_attribute_with_invalid_template_is_an_error() {
+        let mut parser = crate::parser::Parser::new("test.res", "@@warning(\"BAD\")\nlet x = 1\n");
+        let structure = crate::parser::module::parse_structure(&mut parser);
+        let mut arena = parser.into_arena();
+        let StructureItemDesc::Pstr_attribute(attr) = &structure[0].pstr_desc else {
+            panic!("expected a floating attribute");
+        };
+        let Payload::PStr(items) = &attr.1 else {
+            panic!("expected a structure payload");
+        };
+        let StructureItemDesc::Pstr_eval(eval) = &items[0].pstr_desc else {
+            panic!("expected an expression payload");
+        };
+        let expr_idx = eval.0;
+        let source_idx = arena.intern("Fo\\xo");
+        let expr = arena.get_expr_mut(expr_idx);
+        let loc = expr.pexp_loc;
+        expr.pexp_desc = ExpressionDesc::Pexp_template(Box::new(crate::parser::ast::PexpTemplate {
+            source_segments: vec![Located { txt: source_idx, loc }],
+            values: vec![],
+        }));
+        let error = collect_leading_builtin_warning_attributes(&structure, &arena)
+            .err()
+            .expect("an invalid escape is an error");
+        assert_eq!(error.message_text(), "Invalid string escape sequence");
+        assert_eq!(error.loc(), Some(loc));
+    }
 
     fn parse_structure(source: &str) -> (ParseArena, Vec<StructureItem>) {
         let mut parser = Parser::new("test.res", source);
