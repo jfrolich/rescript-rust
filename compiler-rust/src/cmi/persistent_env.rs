@@ -3901,10 +3901,10 @@ fn register_types_by_stamp_in_signature_recursive(
 /// in-process compilation stores signatures produced by independent compiler
 /// contexts whose local stamp counters can overlap.
 /// The `name_map` maps type names (for persistent idents with stamp 0) to their qualified paths.
-type ModuleStampSubstMap = HashMap<i32, (String, Path)>;
+type ModuleStampSubstMap = HashMap<i32, (String, Arc<Path>)>;
 
 fn insert_module_stamp_subst(map: &mut ModuleStampSubstMap, id: &Ident, path: Path) {
-    map.insert(id.stamp(), (id.name().to_string(), path));
+    map.insert(id.stamp(), (id.name().to_string(), Arc::new(path)));
 }
 
 fn nonpersistent_path_head(path: &Path) -> Option<(i32, String)> {
@@ -3948,7 +3948,7 @@ struct SubstMaps {
     type_name_map: HashMap<String, Path>,
     target_blocks: HashMap<crate::types::context::SamePathKey, crate::types::type_expr::PathBlock>,
     module_stamp_map: ModuleStampSubstMap,
-    module_name_map: HashMap<String, Path>,
+    module_name_map: HashMap<String, Arc<Path>>,
     protected_module_head: Option<(i32, String)>,
 }
 
@@ -4028,7 +4028,7 @@ fn build_subst_maps(
                 } else {
                     // Persistent ids (stamp=0) rewrite by name.
                     maps.module_name_map
-                        .insert(id.name().to_string(), qualified_path);
+                        .insert(id.name().to_string(), Arc::new(qualified_path));
                 }
             }
             _ => {}
@@ -4059,13 +4059,82 @@ fn insert_module_subst_path(maps: &mut SubstMaps, old_id: &Ident, new_id: &Ident
         insert_module_stamp_subst(&mut maps.module_stamp_map, old_id, new_path);
     } else {
         maps.module_name_map
-            .insert(old_id.name().to_string(), new_path);
+            .insert(old_id.name().to_string(), Arc::new(new_path));
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dotted_substitution_keeps_suffix_names_and_module_prefix_allocations() {
+        let ctx = TypeContext::new(Arc::new(crate::context::IdGenerator::new()));
+        let root_id = ctx.create_ident("Root");
+        let root = Arc::new(Path::Pident(root_id));
+        let name = ctx.create_ident("t");
+        let source = ctx.dotted_from_ident(root.clone(), name, 7);
+        let types = TypeSubstPaths::default();
+        let type_names = HashMap::new();
+        let mut modules = ModuleStampSubstMap::new();
+        let module_names = HashMap::new();
+        let copy = |modules: &ModuleStampSubstMap| {
+            substitute_type_path(
+                &ctx,
+                &source,
+                &types,
+                &type_names,
+                modules,
+                &module_names,
+                None,
+            )
+        };
+        let a = copy(&modules);
+        let b = copy(&modules);
+        let original = ctx.dotted_allocation(&source).unwrap();
+        let a = ctx.dotted_allocation(&a).unwrap();
+        let b = ctx.dotted_allocation(&b).unwrap();
+        assert_ne!(original.key(), a.key());
+        assert_ne!(a.key(), b.key());
+        assert_eq!(original.name, a.name);
+        assert_eq!(a.name, b.name);
+        assert!(Arc::ptr_eq(&a.prefix, &root));
+        assert!(Arc::ptr_eq(&a.prefix, &b.prefix));
+        // One stored module substitution target is shared by separate uses.
+        let target = ctx.create_ident("Other");
+        insert_module_stamp_subst(&mut modules, &root_id, Path::Pident(target));
+        let a = copy(&modules);
+        let b = copy(&modules);
+        let a = ctx.dotted_allocation(&a).unwrap();
+        let b = ctx.dotted_allocation(&b).unwrap();
+        assert!(Arc::ptr_eq(&a.prefix, &b.prefix));
+        assert!(!Arc::ptr_eq(&a.prefix, &root));
+        assert!(a.prefix.same(&Path::Pident(target)));
+        assert_eq!(a.name, original.name);
+        // Equal target text/value inserted separately still allocates separately.
+        let mut separate = ModuleStampSubstMap::new();
+        insert_module_stamp_subst(&mut separate, &root_id, Path::Pident(target));
+        let c = copy(&separate);
+        assert!(!Arc::ptr_eq(
+            &a.prefix,
+            &ctx.dotted_allocation(&c).unwrap().prefix
+        ));
+        // Nested dots are rebuilt, but their unchanged terminal prefix is retained.
+        let nested = ctx.dotted_from_ident(Arc::new(source), name, 9);
+        let copied = substitute_module_path(
+            &ctx,
+            &nested,
+            &ModuleStampSubstMap::new(),
+            &module_names,
+            None,
+        );
+        let outer = ctx.dotted_allocation(&copied).unwrap();
+        let inner = ctx.dotted_allocation(&outer.prefix).unwrap();
+        assert_ne!(inner.key(), original.key());
+        assert!(Arc::ptr_eq(&inner.prefix, &root));
+        assert_eq!(inner.name, original.name);
+        assert_eq!(outer.name, original.name);
+    }
 
     #[test]
     fn renamed_substitution_target_keeps_one_path_block() {
@@ -4077,9 +4146,19 @@ mod tests {
         let mut maps = SubstMaps::default();
         insert_type_subst_path(&mut maps, &old, &new, &ctx);
         let mapper = AllocatedTypePathMap(|path: &Path| CopiedTypePath {
-            path: substitute_type_path(path, &maps.type_stamp_map, &maps.type_name_map,
-                &maps.module_stamp_map, &maps.module_name_map, None),
-            block: maps.target_blocks.get(&crate::types::context::SamePathKey::new(path.clone())).copied(),
+            path: substitute_type_path(
+                &ctx,
+                path,
+                &maps.type_stamp_map,
+                &maps.type_name_map,
+                &maps.module_stamp_map,
+                &maps.module_name_map,
+                None,
+            ),
+            block: maps
+                .target_blocks
+                .get(&crate::types::context::SamePathKey::new(path.clone()))
+                .copied(),
         });
         let a = ctx.new_generic_constr(Path::pident(old), vec![]);
         let b = ctx.new_generic_constr(Path::pident(old), vec![]);
@@ -4127,7 +4206,7 @@ mod tests {
                 &types,
                 &names,
                 &modules,
-                &names,
+                &HashMap::new(),
                 None,
                 &ctx,
                 &mut HashSet::new(),
@@ -4144,7 +4223,15 @@ mod tests {
         }
         // An equal-spelled but different binding is not this substitution's key.
         let unrelated = Path::pdot(Path::Pident(Ident::create_local("Component")), "t");
-        let result = substitute_type_path(&unrelated, &types, &names, &modules, &names, None);
+        let result = substitute_type_path(
+            &ctx,
+            &unrelated,
+            &types,
+            &names,
+            &modules,
+            &HashMap::new(),
+            None,
+        );
         assert!(ctx.dotted_allocation(&result).is_none());
         assert!(!result.same(&target));
     }
@@ -4223,6 +4310,7 @@ fn freshen_module_type_bound_idents_rec(
                 // type/modtype id map here, with dotted prefixes still going
                 // through `module_path` like compiler/ml/subst.ml:78-84.
                 *path = substitute_type_path(
+                    ctx,
                     path,
                     &maps.type_stamp_map,
                     &maps.type_name_map,
@@ -4239,6 +4327,7 @@ fn freshen_module_type_bound_idents_rec(
                 // map here leaves freshly included sibling aliases pointing at
                 // stale module identifiers instead of the renamed module id.
                 *path = substitute_module_path(
+                    ctx,
                     path,
                     &maps.module_stamp_map,
                     &maps.module_name_map,
@@ -4326,6 +4415,7 @@ fn freshen_signature_bound_idents_rec(
 
     substitute_type_paths_in_sig_items(sig_items, &combined_maps, ctx, visited, false);
     substitute_sig_decl_paths_in_place_with_maps_rec(
+        ctx,
         sig_items,
         &combined_maps,
         false,
@@ -4460,6 +4550,7 @@ pub(crate) fn freshened_signature_bound_idents_from_kind(
             path.clone()
         } else {
             substitute_type_path(
+                ctx,
                 path,
                 &local_maps.type_stamp_map,
                 &local_maps.type_name_map,
@@ -4475,6 +4566,7 @@ pub(crate) fn freshened_signature_bound_idents_from_kind(
             path.clone()
         } else {
             substitute_module_path(
+                ctx,
                 path,
                 &local_maps.module_stamp_map,
                 &local_maps.module_name_map,
@@ -4521,7 +4613,7 @@ pub(crate) fn substitute_functor_result_module_path(
         insert_module_stamp_subst(&mut maps.module_stamp_map, old_param, arg_path.clone());
     } else {
         maps.module_name_map
-            .insert(old_param.name().to_string(), arg_path.clone());
+            .insert(old_param.name().to_string(), Arc::new(arg_path.clone()));
     }
     freshen_module_type_bound_idents_with_maps(&mut copied, &maps, ctx);
     copied
@@ -4543,7 +4635,7 @@ pub(crate) fn substitute_module_type_with_module_path_subst(
             insert_module_stamp_subst(&mut maps.module_stamp_map, id, path.clone());
         } else {
             maps.module_name_map
-                .insert(id.name().to_string(), path.clone());
+                .insert(id.name().to_string(), Arc::new(path.clone()));
         }
     }
     freshen_module_type_bound_idents_with_maps(&mut copied, &maps, ctx);
@@ -4639,7 +4731,7 @@ pub(crate) fn substitute_component_module_type_path(
     }
     let mut module_type = module_type.clone();
     let maps = build_subst_maps(sig_items, module_path, ctx);
-    substitute_module_type_paths_with_maps(&mut module_type, &maps);
+    substitute_module_type_paths_with_maps(ctx, &mut module_type, &maps);
     Some(module_type)
 }
 
@@ -4651,6 +4743,7 @@ pub fn substitute_sig_path(
 ) -> Path {
     let maps = build_subst_maps_for_module(sig_items, module_path, ctx);
     substitute_type_path(
+        ctx,
         path,
         &maps.type_stamp_map,
         &maps.type_name_map,
@@ -4660,8 +4753,12 @@ pub fn substitute_sig_path(
     )
 }
 
-fn substitute_module_type_paths_with_maps(module_type: &mut ModuleType, maps: &SubstMaps) {
-    substitute_module_type_paths_with_maps_mode(module_type, maps, AliasTargets::Substitute);
+fn substitute_module_type_paths_with_maps(
+    ctx: &TypeContext,
+    module_type: &mut ModuleType,
+    maps: &SubstMaps,
+) {
+    substitute_module_type_paths_with_maps_mode(ctx, module_type, maps, AliasTargets::Substitute);
 }
 
 /// Whether a declaration-path substitution also rewrites `Mty_alias` targets.
@@ -4678,6 +4775,7 @@ enum AliasTargets {
 }
 
 fn substitute_module_type_paths_with_maps_mode(
+    ctx: &TypeContext,
     module_type: &mut ModuleType,
     maps: &SubstMaps,
     alias_targets: AliasTargets,
@@ -4685,6 +4783,7 @@ fn substitute_module_type_paths_with_maps_mode(
     match module_type {
         ModuleType::MtyIdent(path) => {
             *path = substitute_type_path(
+                ctx,
                 path,
                 &maps.type_stamp_map,
                 &maps.type_name_map,
@@ -4696,6 +4795,7 @@ fn substitute_module_type_paths_with_maps_mode(
         ModuleType::MtyAlias(_, path) => {
             if alias_targets == AliasTargets::Substitute {
                 *path = substitute_module_path(
+                    ctx,
                     path,
                     &maps.module_stamp_map,
                     &maps.module_name_map,
@@ -4705,6 +4805,7 @@ fn substitute_module_type_paths_with_maps_mode(
         }
         ModuleType::MtySignature(sig) => {
             substitute_sig_decl_paths_in_place_with_maps_rec(
+                ctx,
                 crate::types::decl::signature_mut(sig),
                 maps,
                 true,
@@ -4715,15 +4816,20 @@ fn substitute_module_type_paths_with_maps_mode(
             param_type, result, ..
         } => {
             if let Some(param_type) = param_type.as_mut() {
-                substitute_module_type_paths_with_maps_mode(param_type, maps, alias_targets);
+                substitute_module_type_paths_with_maps_mode(ctx, param_type, maps, alias_targets);
             }
-            substitute_module_type_paths_with_maps_mode(result, maps, alias_targets);
+            substitute_module_type_paths_with_maps_mode(ctx, result, maps, alias_targets);
         }
     }
 }
 
-fn substitute_sig_decl_paths_in_place_with_maps(sig_items: &mut [SignatureItem], maps: &SubstMaps) {
+fn substitute_sig_decl_paths_in_place_with_maps(
+    ctx: &TypeContext,
+    sig_items: &mut [SignatureItem],
+    maps: &SubstMaps,
+) {
     substitute_sig_decl_paths_in_place_with_maps_rec(
+        ctx,
         sig_items,
         maps,
         true,
@@ -4734,6 +4840,7 @@ fn substitute_sig_decl_paths_in_place_with_maps(sig_items: &mut [SignatureItem],
 /// Substitute the declaration paths of `sig_items`; without `recurse`, the
 /// module types of nested modules and module types are left alone.
 fn substitute_sig_decl_paths_in_place_with_maps_rec(
+    ctx: &TypeContext,
     sig_items: &mut [SignatureItem],
     maps: &SubstMaps,
     recurse: bool,
@@ -4748,6 +4855,7 @@ fn substitute_sig_decl_paths_in_place_with_maps_rec(
             SignatureItem::SigValue(_, desc) => {
                 if let Some(path) = desc.val_path.as_mut() {
                     *path = substitute_type_path(
+                        ctx,
                         path,
                         &maps.type_stamp_map,
                         &maps.type_name_map,
@@ -4760,6 +4868,7 @@ fn substitute_sig_decl_paths_in_place_with_maps_rec(
             SignatureItem::SigType(_, decl, _) => {
                 if let Some(path) = std::sync::Arc::make_mut(decl).type_path.as_mut() {
                     *path = substitute_type_path(
+                        ctx,
                         path,
                         &maps.type_stamp_map,
                         &maps.type_name_map,
@@ -4771,6 +4880,7 @@ fn substitute_sig_decl_paths_in_place_with_maps_rec(
             }
             SignatureItem::SigTypext(_, ext, _) => {
                 ext.ext_type_path = substitute_type_path(
+                    ctx,
                     &ext.ext_type_path,
                     &maps.type_stamp_map,
                     &maps.type_name_map,
@@ -4782,6 +4892,7 @@ fn substitute_sig_decl_paths_in_place_with_maps_rec(
             SignatureItem::SigModule(_, md, _) => {
                 if let Some(path) = md.md_path.as_mut() {
                     *path = substitute_type_path(
+                        ctx,
                         path,
                         &maps.type_stamp_map,
                         &maps.type_name_map,
@@ -4792,6 +4903,7 @@ fn substitute_sig_decl_paths_in_place_with_maps_rec(
                 }
                 if recurse {
                     substitute_module_type_paths_with_maps_mode(
+                        ctx,
                         &mut md.md_type,
                         maps,
                         alias_targets,
@@ -4800,7 +4912,12 @@ fn substitute_sig_decl_paths_in_place_with_maps_rec(
             }
             SignatureItem::SigModtype(_, mtd) => {
                 if recurse && let Some(module_type) = mtd.mtd_type.as_mut() {
-                    substitute_module_type_paths_with_maps_mode(module_type, maps, alias_targets);
+                    substitute_module_type_paths_with_maps_mode(
+                        ctx,
+                        module_type,
+                        maps,
+                        alias_targets,
+                    );
                 }
             }
             SignatureItem::SigClass | SignatureItem::SigClassType => {}
@@ -4814,7 +4931,7 @@ pub fn substitute_sig_decl_paths_in_place(
     ctx: &TypeContext,
 ) {
     let maps = build_subst_maps_for_module(sig_items, module_path, ctx);
-    substitute_sig_decl_paths_in_place_with_maps(sig_items, &maps);
+    substitute_sig_decl_paths_in_place_with_maps(ctx, sig_items, &maps);
 }
 
 /// Qualify the declaration paths Rust caches on a loaded unit's signature
@@ -4826,7 +4943,13 @@ pub fn qualify_unit_sig_decl_paths_in_place(
     ctx: &TypeContext,
 ) {
     let maps = build_subst_maps_for_module(sig_items, module_path, ctx);
-    substitute_sig_decl_paths_in_place_with_maps_rec(sig_items, &maps, true, AliasTargets::KeepRaw);
+    substitute_sig_decl_paths_in_place_with_maps_rec(
+        ctx,
+        sig_items,
+        &maps,
+        true,
+        AliasTargets::KeepRaw,
+    );
 }
 
 fn substitute_type_paths_in_sig_with_maps(
@@ -5069,6 +5192,7 @@ pub fn substitute_module_alias_paths_in_child_sig(
             && let ModuleType::MtyAlias(_, path) = &mut md.md_type
         {
             *path = substitute_module_path(
+                ctx,
                 path,
                 &maps.module_stamp_map,
                 &maps.module_name_map,
@@ -5481,7 +5605,7 @@ fn substitute_type_expr_path(
     type_stamp_map: &TypeSubstPaths,
     type_name_map: &HashMap<String, Path>,
     module_stamp_map: &ModuleStampSubstMap,
-    module_name_map: &HashMap<String, Path>,
+    module_name_map: &HashMap<String, Arc<Path>>,
     protected_module_head: Option<&(i32, String)>,
     ctx: &TypeContext,
     visited: &mut HashSet<usize>,
@@ -5502,6 +5626,7 @@ fn substitute_type_expr_path(
         match &*desc {
             TypeDesc::Tconstr { path, args, .. } => {
                 let new_path = substitute_type_path(
+                    ctx,
                     path,
                     type_stamp_map,
                     type_name_map,
@@ -5552,6 +5677,7 @@ fn substitute_type_expr_path(
                 // polymorphic-variant row_name paths while copying the row.
                 if let Some((path, _)) = &row.row_name {
                     let new_path = substitute_type_path(
+                        ctx,
                         path,
                         type_stamp_map,
                         type_name_map,
@@ -5593,6 +5719,7 @@ fn substitute_type_expr_path(
                 // Package paths are module-type paths; OCaml substitutes these through
                 // `Subst.modtype`, not just module substitution.
                 let new_path = substitute_type_path(
+                    ctx,
                     path,
                     type_stamp_map,
                     type_name_map,
@@ -5833,8 +5960,10 @@ pub fn substitute_type_paths_in_value_with_maps(
                 SignatureItem::SigType(..) => direct_type_name_map.get(id.name()).cloned(),
                 SignatureItem::SigModule(..) if id.stamp() != 0 => module_stamp_map
                     .get(&id.stamp())
-                    .map(|(_, path)| path.clone()),
-                SignatureItem::SigModule(..) => module_name_map.get(id.name()).cloned(),
+                    .map(|(_, path)| (**path).clone()),
+                SignatureItem::SigModule(..) => {
+                    module_name_map.get(id.name()).map(|path| (**path).clone())
+                }
                 _ => unreachable!(),
             }
             .expect("component binder has no prefix substitution");
@@ -5862,7 +5991,7 @@ fn direct_manifest_substitution_would_self_alias(
     type_stamp_map: &TypeSubstPaths,
     type_name_map: &HashMap<String, Path>,
     module_stamp_map: &ModuleStampSubstMap,
-    module_name_map: &HashMap<String, Path>,
+    module_name_map: &HashMap<String, Arc<Path>>,
     protected_module_head: Option<&(i32, String)>,
 ) -> bool {
     let manifest = ctx.repr(manifest);
@@ -5875,6 +6004,7 @@ fn direct_manifest_substitution_would_self_alias(
     }
 
     let substituted = substitute_type_path(
+        ctx,
         path,
         type_stamp_map,
         type_name_map,
@@ -5885,12 +6015,53 @@ fn direct_manifest_substitution_would_self_alias(
     substituted.same(&Path::pdot(module_path.clone(), id.name()))
 }
 
+/// A Subst module target already is one path allocation; an unchanged Pident
+/// returns the original prefix. Neither case creates a new prefix block.
+fn substitute_shared_module_path(
+    ctx: &TypeContext,
+    path: &Arc<Path>,
+    module_stamp_map: &ModuleStampSubstMap,
+    module_name_map: &HashMap<String, Arc<Path>>,
+    protected_module_head: Option<&(i32, String)>,
+) -> Arc<Path> {
+    if let Path::Pident(id) = path.as_ref() {
+        let target =
+            module_path_target(id, module_stamp_map, module_name_map, protected_module_head);
+        return target.unwrap_or(path).clone();
+    }
+    Arc::new(substitute_module_path(
+        ctx,
+        path,
+        module_stamp_map,
+        module_name_map,
+        protected_module_head,
+    ))
+}
+
+fn module_path_target<'a>(
+    id: &Ident,
+    module_stamp_map: &'a ModuleStampSubstMap,
+    module_name_map: &'a HashMap<String, Arc<Path>>,
+    protected_module_head: Option<&(i32, String)>,
+) -> Option<&'a Arc<Path>> {
+    if id.stamp() != 0 {
+        let protected = protected_module_head
+            .is_some_and(|(stamp, name)| *stamp == id.stamp() && name == id.name());
+        module_stamp_map
+            .get(&id.stamp())
+            .and_then(|(_, path)| (!protected).then_some(path))
+    } else {
+        module_name_map.get(id.name())
+    }
+}
+
 fn substitute_type_path(
+    ctx: &TypeContext,
     path: &Path,
     type_stamp_map: &TypeSubstPaths,
     type_name_map: &HashMap<String, Path>,
     module_stamp_map: &ModuleStampSubstMap,
-    module_name_map: &HashMap<String, Path>,
+    module_name_map: &HashMap<String, Arc<Path>>,
     protected_module_head: Option<&(i32, String)>,
 ) -> Path {
     if !type_stamp_map.qualified.is_empty()
@@ -5918,79 +6089,79 @@ fn substitute_type_path(
                     .unwrap_or_else(|| path.clone())
             }
         }
-        Path::Pdot(prefix, name, pos) => {
-            let rewritten_prefix = substitute_module_path(
+        Path::Pdot(prefix, _, _) => {
+            let allocation = ctx.dotted_allocation(path);
+            let prefix = allocation.as_ref().map_or(prefix, |a| &a.prefix);
+            let rewritten_prefix = substitute_shared_module_path(
+                ctx,
                 prefix,
                 module_stamp_map,
                 module_name_map,
                 protected_module_head,
             );
-            Path::Pdot(std::sync::Arc::new(rewritten_prefix), *name, *pos)
+            ctx.copy_dotted_with_prefix(path, rewritten_prefix)
         }
         Path::Papply(left, right) => Path::Papply(
-            std::sync::Arc::new(substitute_module_path(
+            substitute_shared_module_path(
+                ctx,
                 left,
                 module_stamp_map,
                 module_name_map,
                 protected_module_head,
-            )),
-            std::sync::Arc::new(substitute_module_path(
+            ),
+            substitute_shared_module_path(
+                ctx,
                 right,
                 module_stamp_map,
                 module_name_map,
                 protected_module_head,
-            )),
+            ),
         ),
     }
 }
 
 fn substitute_module_path(
+    ctx: &TypeContext,
     path: &Path,
     module_stamp_map: &ModuleStampSubstMap,
-    module_name_map: &HashMap<String, Path>,
+    module_name_map: &HashMap<String, Arc<Path>>,
     protected_module_head: Option<&(i32, String)>,
 ) -> Path {
     match path {
-        Path::Pident(ident) => {
-            if ident.stamp() != 0 {
-                let protected = protected_module_head
-                    .is_some_and(|(stamp, name)| *stamp == ident.stamp() && name == ident.name());
-                // OCaml compiler/ml/subst.ml:69-76 `module_path` rewrites
-                // non-persistent ids through Ident.find_same only. It does not
-                // fall back to declaration names or flattened path spelling.
-                module_stamp_map
-                    .get(&ident.stamp())
-                    .and_then(|(_, path)| (!protected).then(|| path.clone()))
-                    .unwrap_or_else(|| path.clone())
-            } else {
-                module_name_map
-                    .get(ident.name())
-                    .cloned()
-                    .unwrap_or_else(|| path.clone())
-            }
-        }
-        Path::Pdot(prefix, name, pos) => {
-            let rewritten_prefix = substitute_module_path(
+        Path::Pident(ident) => module_path_target(
+            ident,
+            module_stamp_map,
+            module_name_map,
+            protected_module_head,
+        )
+        .map_or_else(|| path.clone(), |target| (**target).clone()),
+        Path::Pdot(prefix, _, _) => {
+            let allocation = ctx.dotted_allocation(path);
+            let prefix = allocation.as_ref().map_or(prefix, |a| &a.prefix);
+            let rewritten_prefix = substitute_shared_module_path(
+                ctx,
                 prefix,
                 module_stamp_map,
                 module_name_map,
                 protected_module_head,
             );
-            Path::Pdot(std::sync::Arc::new(rewritten_prefix), *name, *pos)
+            ctx.copy_dotted_with_prefix(path, rewritten_prefix)
         }
         Path::Papply(left, right) => Path::Papply(
-            std::sync::Arc::new(substitute_module_path(
+            substitute_shared_module_path(
+                ctx,
                 left,
                 module_stamp_map,
                 module_name_map,
                 protected_module_head,
-            )),
-            std::sync::Arc::new(substitute_module_path(
+            ),
+            substitute_shared_module_path(
+                ctx,
                 right,
                 module_stamp_map,
                 module_name_map,
                 protected_module_head,
-            )),
+            ),
         ),
     }
 }
@@ -7391,6 +7562,7 @@ fn add_signature_to_env_with_options_inner(
         let maps = sig_subst_maps
             .get_or_insert_with(|| build_subst_maps_for_module(sig_items, module_path, ctx));
         substitute_type_path(
+            ctx,
             path,
             &maps.type_stamp_map,
             &maps.type_name_map,

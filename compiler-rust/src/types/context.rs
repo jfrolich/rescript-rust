@@ -4425,6 +4425,22 @@ impl TypeContext {
         }
     }
 
+    /// Rebuild a Pdot as Subst.module_path/type_path do, retaining its suffix
+    /// string allocation (compiler/ml/subst.ml:69-100), not its block identity.
+    pub(crate) fn copy_dotted_with_prefix(
+        &self,
+        source: &super::Path,
+        prefix: Arc<super::Path>,
+    ) -> super::Path {
+        let super::Path::Pdot(_, text, pos) = source else {
+            panic!("expected dotted source path");
+        };
+        match self.dotted_allocation(source) {
+            Some(allocation) => self.dotted_with_name(prefix, *text, allocation.name, *pos),
+            None => super::Path::Pdot(prefix, *text, *pos),
+        }
+    }
+
     pub(crate) fn dotted_allocation(
         &self,
         path: &super::Path,
