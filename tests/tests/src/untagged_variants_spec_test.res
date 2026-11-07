@@ -2,7 +2,7 @@ open Mocha
 open Test_utils
 
 /***
-Pins the rules stated in compiler/ml/UNTAGGED_VARIANTS.md. Each block names
+Pins the rules stated in compiler/ml/UntaggedVariants.md. Each block names
 the rule it pins. Values are passed through [id], whose [@inline(never)] keeps
 them away from constant folding, so the assertions observe the generated
 dispatch. [raw] injects a JavaScript value a case's type does not describe;
@@ -313,10 +313,12 @@ describe(__MODULE__, () => {
   })
 
   test("rule 10: a value outside every case lands in the unchecked branch", () => {
+    eq(__LOC__, intOrStringName(id(raw(true))), "string")
+    // Folding a constant agrees with the dispatch
     eq(__LOC__, intOrStringName(raw(true)), "string")
     eq(__LOC__, twoInstancesName(raw({"x": 1})), "RegExp")
     let thenable = %raw(`{then: (resolve) => resolve(1)}`)
-    eq(__LOC__, promiseOrFloatName(raw(thenable)), "float")
+    eq(__LOC__, promiseOrFloatName(raw(thenable)), "promise")
   })
 
   test("rule 12: option of an untagged variant", () => {
@@ -329,7 +331,7 @@ describe(__MODULE__, () => {
     // distinct from `None`, an unboxed one does not.
     eq(__LOC__, someWithOpaque(OPaque(raw(Nullable.undefined))) == None, false)
     eq(__LOC__, someWithVariable(Var(raw(Nullable.undefined))) == None, false)
-    eq(__LOC__, someWithBlob(BBlob(raw(Nullable.undefined))) == None, false)
+    eq(__LOC__, someWithBlob(BBlob(raw(Nullable.undefined))) == None, true)
     eq(__LOC__, someWithDate(DDate(raw(Nullable.undefined))) == None, true)
     eq(__LOC__, someWithRecord(RRecord(raw(Nullable.undefined))) == None, true)
     eq(__LOC__, someWithInlineRecord(raw(Nullable.undefined)) == None, false)
@@ -337,12 +339,12 @@ describe(__MODULE__, () => {
     eq(__LOC__, someWithUnboxedString(UString(raw(Nullable.undefined))) == None, true)
   })
 
-  test("rule 13: @notUndefined unboxes option of a variant holding the type", () => {
+  test("rule 5: @notUndefined unboxes option of a variant holding the type", () => {
     eq(__LOC__, someWithDefined(Defined(raw(Nullable.undefined))) == None, true)
     eq(__LOC__, raw(someWithDefined(Defined(raw(5)))), 5)
   })
 
-  test("rule 14: @tag and @as on a tagged variant", () => {
+  test("rule 13: @tag and @as on a tagged variant", () => {
     eq(__LOC__, raw(id(TA({x: 1}))), {"kind": "TA", "x": 1})
     eq(__LOC__, raw(id(TB({y: 1}))), {"kind": "bee", "y": 1})
     eq(__LOC__, raw(id(TC)), "TC")

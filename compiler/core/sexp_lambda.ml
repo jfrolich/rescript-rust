@@ -92,17 +92,20 @@ let mutable_flag_sexp = function
   | Immutable -> Sexp.atom "Immutable"
 
 (* Semantic variant runtime information. *)
-let variant_instance instance =
-  Sexp.atom (Variant_runtime.Instance.to_string instance)
+let variant_instance = function
+  | Variant_runtime.Instance.Array -> Sexp.atom "Array"
+  | Class {name; ancestors} ->
+    Sexp.list
+      [Sexp.atom "Class"; string name; Sexp.list (List.map string ancestors)]
 
 let variant_block_type = function
-  | Variant_runtime.IntType -> Sexp.atom "IntType"
+  | Variant_runtime.NumberType -> Sexp.atom "NumberType"
   | StringType -> Sexp.atom "StringType"
-  | FloatType -> Sexp.atom "FloatType"
   | BigintType -> Sexp.atom "BigintType"
   | BooleanType -> Sexp.atom "BooleanType"
   | InstanceType instance ->
     Sexp.list [Sexp.atom "InstanceType"; variant_instance instance]
+  | SymbolType -> Sexp.atom "SymbolType"
   | FunctionType -> Sexp.atom "FunctionType"
   | ObjectType -> Sexp.atom "ObjectType"
   | UnknownType -> Sexp.atom "UnknownType"
@@ -121,9 +124,7 @@ let variant_tag ({name; literal} : Variant_runtime.tag) =
     [
       Sexp.atom "tag";
       string name;
-      (match literal with
-      | None -> Sexp.atom "None"
-      | Some literal -> Sexp.list [Sexp.atom "Some"; variant_literal_tag literal]);
+      variant_literal_tag literal;
     ]
 
 let variant_tagged_block ({tag; tag_name} : Variant_runtime.tagged_block) =
@@ -149,14 +150,7 @@ let variant_constructor_case = function
   | Block block -> Sexp.list [Sexp.atom "Block"; variant_block block]
 
 let variant_matching_facts
-    ({
-       tag_name;
-       block_types;
-       literal_tags;
-       has_null;
-       has_undefined;
-       has_other_literal;
-     } : Variant_runtime.matching_facts) =
+    ({tag_name; block_types; literal_tags} : Variant_runtime.matching_facts) =
   Sexp.list
     [
       Sexp.atom "matching_facts";
@@ -165,9 +159,6 @@ let variant_matching_facts
       | Some name -> Sexp.list [Sexp.atom "Some"; string name]);
       Sexp.list (List.map variant_block_type block_types);
       Sexp.list (List.map variant_literal_tag literal_tags);
-      bool has_null;
-      bool has_undefined;
-      bool has_other_literal;
     ]
 
 (* Tag info *)
