@@ -398,8 +398,10 @@ fn open_direct_persistent_module(
         return None;
     }
     let pers = pers_env.as_mut()?;
-    if pers.open_module(module_name, env, ctx) {
-        Some(Path::pident(Ident::create_persistent(module_name)))
+    // env.ml:1012: `Pident (Ident.create_persistent s)`.
+    let root = Path::pident(ctx.create_ast_persistent_ident(arena, *module_idx));
+    if pers.open_module(module_name, root.clone(), env, ctx) {
+        Some(root)
     } else {
         None
     }
@@ -7638,7 +7640,8 @@ pub fn lookup_module_path_by_lid(
             }
             if let Some(pers) = pers_env.as_mut() {
                 if pers.find_pers_struct(mod_name, ctx).is_some() {
-                    return Some(Path::pident(Ident::create_persistent(mod_name)));
+                    // env.ml:1012: `Pident (Ident.create_persistent s)`.
+                    return Some(Path::pident(ctx.create_ast_persistent_ident(arena, *mod_idx)));
                 }
             }
             None
@@ -7670,6 +7673,7 @@ pub fn lookup_module_path_by_lid(
                 },
             )
             .flatten()
+            .map(|path| crate::types::typecore::with_lookup_prefix(ctx, arena, env, prefix, path))
         }
         Longident::Lapply(functor, arg) => {
             let functor_path = lookup_module_path_by_lid(functor, arena, env, pers_env, ctx)?;
@@ -7803,7 +7807,9 @@ pub fn lookup_modtype_path_by_lid(
             )
             .flatten()
             {
-                return Some(path);
+                return Some(crate::types::typecore::with_lookup_prefix(
+                    ctx, arena, env, prefix, path,
+                ));
             }
             let parent_path = lookup_module_path_by_lid(prefix, arena, env, pers_env, ctx)?;
             crate::types::typecore::lookup_modtype_in_resolved_path(

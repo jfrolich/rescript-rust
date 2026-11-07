@@ -2777,7 +2777,11 @@ pub(crate) fn resolve_type_constructor_path(
                     })
                 },
             ) {
-                return (Path::pdot(mod_path, type_name.to_string()), Some(decl));
+                let path = Path::pdot(mod_path, type_name.to_string());
+                return (
+                    with_lookup_prefix(tctx.type_ctx, tctx.arena, env, prefix, path),
+                    Some(decl),
+                );
             }
             if let Some(module_path) = env.resolve_module_access_path_for_lid(
                 prefix,
@@ -16981,8 +16985,11 @@ fn type_open(
                     // builder at env.ml:1516-1588 applies prefix substitution
                     // and `Subst.modtype_declaration` through the cached
                     // component table instead of forcing `ps_sig`.
-                    if pers.open_module(mod_name, &mut open_env, tctx.type_ctx) {
-                        Some(Path::pident(Ident::create_persistent(mod_name)))
+                    // env.ml:1012: `Pident (Ident.create_persistent s)`.
+                    let root =
+                        Path::pident(tctx.type_ctx.create_ast_persistent_ident(tctx.arena, *mod_idx));
+                    if pers.open_module(mod_name, root.clone(), &mut open_env, tctx.type_ctx) {
+                        Some(root)
                     } else {
                         None
                     }
@@ -17987,6 +17994,57 @@ fn unbound_value_module_suggestion(
 
 /// OCaml `Typetexp.find_type` (compiler/ml/typetexp.ml): resolve a type
 /// constructor or raise the narrowed unbound-module / unbound-type error.
+/// The path `Env.lookup_module_descr` builds for `lid`
+/// (compiler/ml/env.ml:966-978): for the root, the path `find_name` returns
+/// from `env.components` (a fresh `Pident id`, or a fresh `Pdot (root, s,
+/// pos)` through an open, env.ml:284-301), or else a fresh `Pident
+/// (Ident.create_persistent s)` named by the longident's string; then a
+/// fresh `Pdot (p, s, pos)` per step. `resolved` is the access path of the
+/// components the lookup found, which gives the steps' positions. `None`
+/// when the two do not have the same steps.
+pub(crate) fn lookup_descr_path(
+    ctx: &crate::types::context::TypeContext,
+    arena: &ParseArena,
+    env: &Env,
+    lid: &Longident,
+    resolved: &Path,
+) -> Option<Path> {
+    match (lid, resolved) {
+        (Longident::Lident(name), _) => match env.find_module_with_path(arena.get_string(*name)) {
+            Ok((path, _)) => Some(path),
+            Err(_) => match resolved {
+                Path::Pident(id) if id.is_persistent() => {
+                    Some(Path::pident(ctx.create_ast_persistent_ident(arena, *name)))
+                }
+                _ => None,
+            },
+        },
+        (Longident::Ldot(prefix, _), Path::Pdot(resolved_prefix, name, pos)) => {
+            let prefix = lookup_descr_path(ctx, arena, env, prefix, resolved_prefix)?;
+            Some(Path::pdot_pos(prefix, *name, *pos))
+        }
+        _ => None,
+    }
+}
+
+/// `Pdot (p, s, pos)` where `p` is the path `Env.lookup_module_descr
+/// prefix` builds (see [`lookup_descr_path`]) and `path` the one found
+/// through the prefix's components.
+pub(crate) fn with_lookup_prefix(
+    ctx: &crate::types::context::TypeContext,
+    arena: &ParseArena,
+    env: &Env,
+    prefix: &Longident,
+    path: Path,
+) -> Path {
+    if let Path::Pdot(resolved_prefix, name, pos) = &path
+        && let Some(prefix) = lookup_descr_path(ctx, arena, env, prefix, resolved_prefix)
+    {
+        return Path::pdot_pos(prefix, *name, *pos);
+    }
+    path
+}
+
 pub(crate) fn find_type_for_lid(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
@@ -27161,9 +27219,16 @@ pub(crate) fn open_module_lid_components_into_env(
             );
         }
     }
+    // The open's root is the path `Env.lookup_module` builds for `lid`.
     let mut wrapper = |components: &crate::types::env_lazy::QualifiedModuleComponents| {
-        let path = components.access_path().clone();
-        crate::cmi::persistent_env::open_module_components_into_env(components, target_env, ctx);
+        let path = lookup_descr_path(ctx, arena, lookup_env, lid, components.access_path())
+            .unwrap_or_else(|| components.access_path().clone());
+        crate::cmi::persistent_env::open_module_components_into_env(
+            components,
+            path.clone(),
+            target_env,
+            ctx,
+        );
         Some(path)
     };
     with_resolved_module_components_for_lid_inner(

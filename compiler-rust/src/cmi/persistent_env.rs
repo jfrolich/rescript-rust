@@ -2668,7 +2668,16 @@ impl PersistentEnv {
         Some(())
     }
 
-    pub fn open_module(&mut self, name: &str, env: &mut Env, ctx: &TypeContext) -> bool {
+    /// Open the persistent unit `name` under `root`, the path of the open
+    /// (env.ml `open_signature`: the `Pdot (root, name, pos)` of opened
+    /// names share it).
+    pub fn open_module(
+        &mut self,
+        name: &str,
+        root: Path,
+        env: &mut Env,
+        ctx: &TypeContext,
+    ) -> bool {
         // Don't rename at open time — OCaml's ps_sig is only forced later
         // when find_module is called from normalize_path during type expansion.
         let ps = match self.find_pers_struct(name, ctx) {
@@ -2743,7 +2752,7 @@ impl PersistentEnv {
                 ctx.register_qualified_module_components_arc(components_key, components.clone());
                 components
             });
-        open_components_into_env(&components, env, ctx);
+        open_components_into_env(&components, root, env, ctx);
         true
     }
 
@@ -7686,6 +7695,7 @@ pub fn open_signature_components_into_env(
 
 pub(crate) fn open_module_components_into_env(
     components: &crate::types::env_lazy::QualifiedModuleComponents,
+    root: Path,
     env: &mut Env,
     ctx: &TypeContext,
 ) {
@@ -7694,7 +7704,7 @@ pub(crate) fn open_module_components_into_env(
     // same component table into the opened environment. Reuse the component view
     // that module lookup already forced so opened `comp_modules` and
     // `comp_components` share the same lazy state.
-    open_components_into_env(components, env, ctx);
+    open_components_into_env(components, root, env, ctx);
 }
 
 fn add_signature_to_env_with_options(
@@ -7760,6 +7770,7 @@ fn build_opened_layers(
 /// layer tables when another Env already opened it.
 fn open_components_into_env(
     components: &crate::types::env_lazy::QualifiedModuleComponents,
+    root: Path,
     env: &mut Env,
     ctx: &TypeContext,
 ) {
@@ -7773,7 +7784,7 @@ fn open_components_into_env(
             Some(components),
         )
     });
-    env.add_prebuilt_open_layers(components.access_path().clone(), &layers);
+    env.add_prebuilt_open_layers(root, &layers);
 }
 
 #[allow(clippy::too_many_arguments)]

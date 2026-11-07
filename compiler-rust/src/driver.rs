@@ -12188,7 +12188,12 @@ pub fn load_pervasives(
 ) {
     if !nopervasives {
         // Try to load and open Pervasives
-        if pers_env.open_module("Pervasives", env, ctx) {
+        if pers_env.open_module(
+            "Pervasives",
+            crate::types::Path::pident(crate::ident::Ident::create_persistent("Pervasives")),
+            env,
+            ctx,
+        ) {
             env.mark_implicit_open_root("Pervasives");
             // OCaml `Res_compmisc.initial_env` opens implicit modules through
             // `type_open` (compiler/core/res_compmisc.ml:48-63). In in-process
@@ -12201,7 +12206,12 @@ pub fn load_pervasives(
         }
 
         // Try to load and open Stdlib
-        if pers_env.open_module("Stdlib", env, ctx) {
+        if pers_env.open_module(
+            "Stdlib",
+            crate::types::Path::pident(crate::ident::Ident::create_persistent("Stdlib")),
+            env,
+            ctx,
+        ) {
             env.mark_implicit_open_root("Stdlib");
             // Same implicit-open behavior as above; keep the opened bindings,
             // but let explicit module lookup use the persistent registry.
@@ -12216,7 +12226,12 @@ pub fn load_pervasives(
                 continue;
             }
         }
-        if pers_env.open_module(module_name, env, ctx) {
+        if pers_env.open_module(
+            module_name,
+            crate::types::Path::pident(crate::ident::Ident::create_persistent(module_name.as_str())),
+            env,
+            ctx,
+        ) {
             // OCaml compiler/core/res_compmisc.ml:42-66 applies command-line
             // `-open` modules through Typemod.type_open_ (typemod.ml:83-96),
             // which calls Env.open_signature (env.ml:1874-1877). That exposes

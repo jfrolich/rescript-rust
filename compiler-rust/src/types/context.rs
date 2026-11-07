@@ -4332,6 +4332,27 @@ impl TypeContext {
         id
     }
 
+    /// `Ident.create_persistent s` for one lookup of a persistent unit
+    /// (compiler/ml/env.ml:973, env.ml:1012): an `Ident.t` block of its own,
+    /// named by the longident's string.
+    pub(crate) fn create_ast_persistent_ident(
+        &self,
+        arena: &crate::parse_arena::ParseArena,
+        name: crate::intern::StrIdx,
+    ) -> Ident {
+        let id =
+            Ident::create_persistent(arena.get_string(name)).with_origin(self.fresh_ident_origin());
+        let scope = arena.declaration_location_scope(|| self.fresh_location_scope());
+        self.record_ident_name(
+            &id,
+            super::path_provenance::NameAllocation::Source {
+                scope,
+                string: name.0,
+            },
+        );
+        id
+    }
+
     pub(crate) fn record_ident_name(
         &self,
         id: &Ident,

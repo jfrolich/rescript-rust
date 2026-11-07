@@ -265,7 +265,9 @@ impl OpenedLayers {
 /// open.
 #[derive(Debug, Clone)]
 struct IdOpened<T> {
-    root: Option<Path>,
+    /// The open's root path, one block shared by every lookup through the
+    /// open and by all the tables it opens (env.ml `add_components`).
+    root: Option<Arc<Path>>,
     components: Arc<OpenedMap<(Ident, T, i32)>>,
     next: Arc<IdTbl<T>>,
     /// The open's `using` callback (OCaml `IdTbl.opened.using`), as a slot
@@ -463,13 +465,13 @@ impl<T: Clone> IdTbl<T> {
         components: Vec<(Ident, T, i32)>,
         slot: Option<u32>,
     ) {
-        self.add_open_layer_table(root, Arc::new(id_open_table(components)), slot);
+        self.add_open_layer_table(Arc::new(root), Arc::new(id_open_table(components)), slot);
     }
 
     /// Open a prebuilt layer table (possibly shared with other Envs).
     fn add_open_layer_table(
         &mut self,
-        root: Path,
+        root: Arc<Path>,
         components: Arc<OpenedMap<(Ident, T, i32)>>,
         slot: Option<u32>,
     ) {
@@ -584,7 +586,8 @@ impl<T: Clone> IdTbl<T> {
                     let path = opened
                         .root
                         .as_ref()
-                        .map(|root| Path::pdot_pos(root.clone(), key, *pos))
+                        // env.ml:293: `Pdot (root, name, pos)`.
+                        .map(|root| Path::Pdot(root.clone(), key, *pos))
                         .unwrap_or_else(|| Path::pident(*id));
                     (path, value)
                 })
@@ -1842,6 +1845,7 @@ impl Env {
         self.bump_scope();
         self.invalidate_module_alias_caches();
         let slot = self.data.pending_open_slot;
+        let root = Arc::new(root);
         let data = self.data_mut();
         data.values
             .add_open_layer_table(root.clone(), layers.values.clone(), slot);
