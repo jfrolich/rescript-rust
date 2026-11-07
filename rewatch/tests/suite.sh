@@ -98,6 +98,7 @@ fi
 
 # GenType tests
 ./gentype/01-gentype-project-root.sh &&
+./gentype/02-gentype-output-not-replayed.sh &&
 
 # Watch tests
 ./watch/01-watch-recompile.sh &&
