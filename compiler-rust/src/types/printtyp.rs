@@ -2547,8 +2547,10 @@ impl<'a> Printtyp<'a> {
                 &empty
             }
         };
-        let n1 = crate::types::ctype::force_normalize_path_full_side_effects(self.ctx, env, p1);
+        // OCaml evaluates the arguments of `Path.same` right to left, so
+        // `p2` is normalized, and what it reaches forced, before `p1`.
         let n2 = crate::types::ctype::force_normalize_path_full_side_effects(self.ctx, env, p2);
+        let n1 = crate::types::ctype::force_normalize_path_full_side_effects(self.ctx, env, p1);
         n1.same(&n2)
     }
 
