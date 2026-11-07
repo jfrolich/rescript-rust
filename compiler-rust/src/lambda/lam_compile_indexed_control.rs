@@ -223,10 +223,12 @@ impl IndexedJsConsumer<'_> {
         } else {
             Statement::continue_label(label)
         };
+        // lam_compile.ml:1934, 1949: `break` and `continue` finish the
+        // output.
         Compiled {
             prelude: vec![statement],
             expr: Expression::undefined(false),
-            finished: OutputFinished::False,
+            finished: OutputFinished::True,
         }
     }
 

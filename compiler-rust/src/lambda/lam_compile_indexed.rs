@@ -48,7 +48,7 @@ impl<'a> IndexedJsConsumer<'a> {
         Compiled {
             prelude: output.block,
             expr: output.value.expect("NeedValue application"),
-            finished: OutputFinished::False,
+            finished: output.finished,
         }
     }
 

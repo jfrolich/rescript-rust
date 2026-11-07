@@ -50,7 +50,7 @@ fn expression(owner: &mut IndexedJsConsumer<'_>, node: NodeId) -> Compiled {
 fn assign(owner: &mut IndexedJsConsumer<'_>, id: &Ident, node: NodeId) -> Block {
     let compiled = expression(owner, node);
     let mut block = compiled.prelude;
-    if !block_terminates(&block) {
+    if compiled.finished != OutputFinished::True {
         block.push(Statement::exp(Expression::bin(
             BinOp::Eq,
             Expression::var(*id),
@@ -280,7 +280,7 @@ fn normal_calls_visit_arguments_then_function_rtl_but_emit_source_order() {
 fn effect(owner: &mut IndexedJsConsumer<'_>, node: NodeId) -> Block {
     let compiled = expression(owner, node);
     let mut block = compiled.prelude;
-    if !block_terminates(&block) {
+    if compiled.finished != OutputFinished::True {
         crate::lambda::lam_coercion::push_s_exp(&mut block, compiled.expr);
     }
     block
@@ -289,7 +289,7 @@ fn effect(owner: &mut IndexedJsConsumer<'_>, node: NodeId) -> Block {
 fn return_body(owner: &mut IndexedJsConsumer<'_>, node: NodeId) -> Block {
     let compiled = expression(owner, node);
     let mut block = compiled.prelude;
-    if !block_terminates(&block) {
+    if compiled.finished != OutputFinished::True {
         block.push(Statement::return_(compiled.expr));
     }
     block
@@ -441,6 +441,8 @@ fn indexed_while_exit_labels_are_lazy_and_shared_by_the_current_loop() {
             owner.compiler.switch_depth += 1;
             let first = owner.loop_exit(child);
             let second = owner.loop_exit(child);
+            // lam_compile.ml:1934, 1949.
+            assert_eq!(first.finished, OutputFinished::True);
             owner.compiler.switch_depth -= 1;
             assert_eq!(print_block(&first.prelude), print_block(&second.prelude));
             first.prelude
