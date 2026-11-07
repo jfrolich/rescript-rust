@@ -55,7 +55,12 @@ impl NameAllocation {
 pub(crate) struct PathProvenance {
     dotted: AHashMap<usize, DottedAllocation>,
     names: AHashMap<IdentNameKey, NameAllocation>,
+    /// Table size at which unreachable dots are next released.
+    next_sweep: usize,
 }
+
+/// Smallest table size at which a sweep runs.
+const FIRST_SWEEP: usize = 4096;
 
 impl PathProvenance {
     pub(crate) fn record_name(&mut self, id: &Ident, allocation: NameAllocation) {
@@ -86,8 +91,29 @@ impl PathProvenance {
             text,
             position: pos,
         };
+        if self.dotted.len() >= self.next_sweep.max(FIRST_SWEEP) {
+            self.release_unreachable();
+        }
         assert!(self.dotted.insert(entry.key(), entry).is_none());
         Path::Pdot(carrier, text, pos)
+    }
+
+    /// The shared prefix and suffix name allocation of a tracked dot, without
+    /// copying its record.
+    pub(crate) fn parts(&self, path: &Path) -> Option<(&Arc<Path>, NameAllocation)> {
+        self.get(path).map(|entry| (&entry.prefix, entry.name))
+    }
+
+    /// Drop the entries no path can reach. A dot is looked up only through a
+    /// `Path` holding its carrier, so a carrier held by this table alone
+    /// belongs to a dropped allocation. Dropping the entry frees that carrier;
+    /// a later allocation at the same address gets a new entry. Sweeps run
+    /// when the table has doubled since the last one, so each insertion pays
+    /// amortized constant work.
+    fn release_unreachable(&mut self) {
+        self.dotted
+            .retain(|_, entry| Arc::strong_count(&entry.carrier) > 1);
+        self.next_sweep = self.dotted.len() * 2;
     }
 
     pub(crate) fn get(&self, path: &Path) -> Option<&DottedAllocation> {
@@ -200,5 +226,40 @@ mod tests {
         );
         assert_eq!(std::mem::size_of::<Path>(), 24);
         assert_eq!(std::mem::size_of::<Ident>(), 16);
+    }
+
+    #[test]
+    fn dropped_dots_are_released_while_reachable_ones_keep_their_evidence() {
+        let mut table = PathProvenance::default();
+        let root = Arc::new(Path::Pident(Ident::create_persistent("Root")));
+        let name = Ident::create_persistent("t");
+        let make = |table: &mut PathProvenance| {
+            table.dotted(
+                root.clone(),
+                name.name_atom(),
+                NameAllocation::of_ident(&name),
+                -1,
+            )
+        };
+        let kept = make(&mut table);
+        let kept_key = table.get(&kept).unwrap().key();
+        let dropped = make(&mut table);
+        let dropped_carrier = Arc::downgrade(&table.get(&dropped).unwrap().carrier);
+        drop(dropped);
+        // Fill past the sweep threshold with dots nobody holds.
+        for _ in 0..FIRST_SWEEP {
+            drop(make(&mut table));
+        }
+        assert!(
+            dropped_carrier.upgrade().is_none(),
+            "an unreachable dot's carrier is freed"
+        );
+        let entry = table.get(&kept).expect("a reachable dot keeps its entry");
+        assert_eq!(entry.key(), kept_key);
+        assert!(Arc::ptr_eq(&entry.prefix, &root));
+        assert!(table.dotted.len() < FIRST_SWEEP);
+        // A dot made after the sweep is new evidence, never an old entry.
+        let fresh = make(&mut table);
+        assert_ne!(table.get(&fresh).unwrap().key(), kept_key);
     }
 }

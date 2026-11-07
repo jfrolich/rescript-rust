@@ -146,6 +146,22 @@ impl SharedTypePool {
             .dotted(prefix, text, name, pos)
     }
 
+    pub(crate) fn dotted_parts(
+        &self,
+        path: &super::Path,
+    ) -> Option<(Arc<super::Path>, super::path_provenance::NameAllocation)> {
+        if path
+            .head_opt()
+            .is_some_and(|id| !crate::ident::IdentOrigin::SHARED.contains(&id.origin().get()))
+        {
+            return None;
+        }
+        let table = self.path_provenance.read().unwrap();
+        table
+            .parts(path)
+            .map(|(prefix, name)| (prefix.clone(), name))
+    }
+
     pub(crate) fn dotted_allocation(
         &self,
         path: &super::Path,

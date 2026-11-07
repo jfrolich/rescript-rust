@@ -4435,10 +4435,41 @@ impl TypeContext {
         let super::Path::Pdot(_, text, pos) = source else {
             panic!("expected dotted source path");
         };
-        match self.dotted_allocation(source) {
-            Some(allocation) => self.dotted_with_name(prefix, *text, allocation.name, *pos),
+        match self.dotted_parts(source) {
+            Some((_, name)) => self.dotted_with_name(prefix, *text, name, *pos),
             None => super::Path::Pdot(prefix, *text, *pos),
         }
+    }
+
+    /// `Pdot (f p, s, pos)` for a dotted `source` with prefix block `p`: a
+    /// fresh dot keeping the suffix string allocation, with one provenance
+    /// lookup for both the prefix and the suffix.
+    pub(crate) fn rebuild_dotted(
+        &self,
+        source: &super::Path,
+        f: impl FnOnce(&Arc<super::Path>) -> Arc<super::Path>,
+    ) -> super::Path {
+        let super::Path::Pdot(carrier, text, pos) = source else {
+            panic!("expected dotted source path");
+        };
+        match self.dotted_parts(source) {
+            Some((prefix, name)) => self.dotted_with_name(f(&prefix), *text, name, *pos),
+            None => super::Path::Pdot(f(carrier), *text, *pos),
+        }
+    }
+
+    /// The shared prefix and suffix name allocation of a tracked dot.
+    pub(crate) fn dotted_parts(
+        &self,
+        path: &super::Path,
+    ) -> Option<(Arc<super::Path>, super::path_provenance::NameAllocation)> {
+        if !matches!(path, super::Path::Pdot(..)) {
+            return None;
+        }
+        if let Some((prefix, name)) = self.path_provenance.borrow().parts(path) {
+            return Some((prefix.clone(), name));
+        }
+        self.store.dotted_parts(path)
     }
 
     /// The prefix block of a `Pdot`: the recorded shared prefix of a tracked
@@ -4447,8 +4478,8 @@ impl TypeContext {
         let super::Path::Pdot(carrier, _, _) = path else {
             panic!("expected dotted path");
         };
-        self.dotted_allocation(path)
-            .map_or_else(|| carrier.clone(), |allocation| allocation.prefix)
+        self.dotted_parts(path)
+            .map_or_else(|| carrier.clone(), |(prefix, _)| prefix)
     }
 
     pub(crate) fn dotted_allocation(

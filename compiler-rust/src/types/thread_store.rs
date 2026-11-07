@@ -269,6 +269,16 @@ impl ThreadTypeStore {
             .dotted(prefix, text, name, pos)
     }
 
+    pub(crate) fn dotted_parts(
+        &self,
+        path: &super::Path,
+    ) -> Option<(Arc<super::Path>, super::path_provenance::NameAllocation)> {
+        if let Some((prefix, name)) = self.path_provenance.borrow().parts(path) {
+            return Some((prefix.clone(), name));
+        }
+        self.shared.dotted_parts(path)
+    }
+
     pub(crate) fn dotted_allocation(
         &self,
         path: &super::Path,

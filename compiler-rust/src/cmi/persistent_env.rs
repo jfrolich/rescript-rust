@@ -6317,18 +6317,15 @@ fn substitute_type_path(
                     .unwrap_or_else(|| path.clone())
             }
         }
-        Path::Pdot(prefix, _, _) => {
-            let allocation = ctx.dotted_allocation(path);
-            let prefix = allocation.as_ref().map_or(prefix, |a| &a.prefix);
-            let rewritten_prefix = substitute_shared_module_path(
+        Path::Pdot(..) => ctx.rebuild_dotted(path, |prefix| {
+            substitute_shared_module_path(
                 ctx,
                 prefix,
                 module_stamp_map,
                 module_name_map,
                 protected_module_head,
-            );
-            ctx.copy_dotted_with_prefix(path, rewritten_prefix)
-        }
+            )
+        }),
         Path::Papply(left, right) => Path::Papply(
             substitute_shared_module_path(
                 ctx,
@@ -6363,18 +6360,15 @@ fn substitute_module_path(
             protected_module_head,
         )
         .map_or_else(|| path.clone(), |target| (**target).clone()),
-        Path::Pdot(prefix, _, _) => {
-            let allocation = ctx.dotted_allocation(path);
-            let prefix = allocation.as_ref().map_or(prefix, |a| &a.prefix);
-            let rewritten_prefix = substitute_shared_module_path(
+        Path::Pdot(..) => ctx.rebuild_dotted(path, |prefix| {
+            substitute_shared_module_path(
                 ctx,
                 prefix,
                 module_stamp_map,
                 module_name_map,
                 protected_module_head,
-            );
-            ctx.copy_dotted_with_prefix(path, rewritten_prefix)
-        }
+            )
+        }),
         Path::Papply(left, right) => Path::Papply(
             substitute_shared_module_path(
                 ctx,

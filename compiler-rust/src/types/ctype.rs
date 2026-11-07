@@ -4113,8 +4113,7 @@ impl NormRecipe {
             (NormRecipe::Same, _) => origin.clone(),
             (NormRecipe::Alias(target, recipe), _) => recipe.materialize(ctx, target),
             (NormRecipe::Dot(prefix), Path::Pdot(..)) => {
-                let p = ctx.dotted_prefix(origin);
-                ctx.copy_dotted_with_prefix(origin, prefix.materialize_shared(ctx, &p))
+                ctx.rebuild_dotted(origin, |p| prefix.materialize_shared(ctx, p))
             }
             (NormRecipe::Apply(functor, argument), Path::Papply(f, a)) => Path::Papply(
                 functor.materialize_shared(ctx, f),

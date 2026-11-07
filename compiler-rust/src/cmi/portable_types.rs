@@ -1270,6 +1270,29 @@ fn saved_signature_identities(
     ids
 }
 
+/// A table indexed by the dense numbers [`PortableIdentities`] assigns.
+struct Numbered<T>(Vec<Option<T>>);
+
+impl<T> Default for Numbered<T> {
+    fn default() -> Self {
+        Numbered(Vec::new())
+    }
+}
+
+impl<T> Numbered<T> {
+    fn get(&self, number: u32) -> Option<&T> {
+        self.0.get(number as usize)?.as_ref()
+    }
+
+    fn insert(&mut self, number: u32, value: T) {
+        let index = number as usize;
+        if index >= self.0.len() {
+            self.0.resize_with(index + 1, || None);
+        }
+        self.0[index] = Some(value);
+    }
+}
+
 /// The importer's side of [`PortableIdentities`]: each saved block becomes
 /// the block of the first node imported with it, each saved identifier a
 /// fresh origin, each saved label one allocation.
@@ -1278,12 +1301,12 @@ struct ImportedIdentities<'g> {
     name_scope: u64,
     idents: usize,
     paths: usize,
-    prefixes: AHashMap<u32, Arc<Path>>,
+    prefixes: Numbered<Arc<Path>>,
     labels: usize,
-    path_blocks: AHashMap<u32, TypeExprRef>,
-    var_descs: AHashMap<u32, TypeExprRef>,
-    origins: AHashMap<u32, crate::ident::IdentOrigin>,
-    label_args: AHashMap<u32, TypeArg>,
+    path_blocks: Numbered<TypeExprRef>,
+    var_descs: Numbered<TypeExprRef>,
+    origins: Numbered<crate::ident::IdentOrigin>,
+    label_args: Numbered<TypeArg>,
 }
 
 impl<'g> ImportedIdentities<'g> {
@@ -1297,12 +1320,12 @@ impl<'g> ImportedIdentities<'g> {
             },
             idents: 0,
             paths: 0,
-            prefixes: AHashMap::new(),
+            prefixes: Numbered::default(),
             labels: 0,
-            path_blocks: AHashMap::new(),
-            var_descs: AHashMap::new(),
-            origins: AHashMap::new(),
-            label_args: AHashMap::new(),
+            path_blocks: Numbered::default(),
+            var_descs: Numbered::default(),
+            origins: Numbered::default(),
+            label_args: Numbered::default(),
         }
     }
 
@@ -1314,11 +1337,11 @@ impl<'g> ImportedIdentities<'g> {
     }
 
     fn block_of(
-        numbers: &mut AHashMap<u32, TypeExprRef>,
+        numbers: &mut Numbered<TypeExprRef>,
         number: u32,
         node: TypeExprRef,
     ) -> Option<TypeExprRef> {
-        match numbers.get(&number) {
+        match numbers.get(number) {
             Some(&owner) => Some(owner),
             None => {
                 numbers.insert(number, node);
@@ -1363,7 +1386,7 @@ impl<'g> ImportedIdentities<'g> {
         id: &crate::ident::Ident,
         sink: &S,
     ) -> crate::ident::Ident {
-        if let Some(origin) = self.origins.get(&number) {
+        if let Some(origin) = self.origins.get(number) {
             return id.with_origin(*origin);
         }
         let origin = sink.fresh_ident_origin();
@@ -1387,10 +1410,12 @@ impl<'g> ImportedIdentities<'g> {
         let mapped = self.mapped_path(path, sink, graph);
         let evidence = &self.ids.paths[self.paths - 1];
         if evidence.block != PortableIdentities::NONE {
-            self.prefixes
-                .entry(evidence.block)
-                .or_insert_with(|| Arc::new(mapped))
-                .clone()
+            if let Some(prefix) = self.prefixes.get(evidence.block) {
+                return prefix.clone();
+            }
+            let prefix = Arc::new(mapped);
+            self.prefixes.insert(evidence.block, prefix.clone());
+            prefix
         } else {
             Arc::new(mapped)
         }
@@ -1467,7 +1492,7 @@ impl<'g> ImportedIdentities<'g> {
         }
         let number = self.ids.labels[self.labels];
         self.labels += 1;
-        if let Some(arg) = self.label_args.get(&number) {
+        if let Some(arg) = self.label_args.get(number) {
             return arg.with_type(typ);
         }
         let arg = TypeArg::new(import_label(label, locs), typ);

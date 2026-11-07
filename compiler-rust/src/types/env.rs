@@ -2064,8 +2064,7 @@ impl Env {
     pub fn normalize_path_prefix(&self, ctx: &TypeContext, path: &Path) -> Path {
         match path {
             Path::Pdot(..) => {
-                let prefix = self.normalize_shared_path(ctx, &ctx.dotted_prefix(path), 0);
-                ctx.copy_dotted_with_prefix(path, prefix)
+                ctx.rebuild_dotted(path, |prefix| self.normalize_shared_path(ctx, prefix, 0))
             }
             Path::Pident(_) => path.clone(),
             Path::Papply(_, _) => panic!("normalize_path_prefix called on Papply"),
@@ -2085,10 +2084,9 @@ impl Env {
             return path.clone(); // Prevent infinite loops
         }
         let path = match path.as_ref() {
-            Path::Pdot(..) => {
-                let prefix = self.normalize_shared_path(ctx, &ctx.dotted_prefix(path), depth + 1);
-                Arc::new(ctx.copy_dotted_with_prefix(path, prefix))
-            }
+            Path::Pdot(..) => Arc::new(ctx.rebuild_dotted(path, |prefix| {
+                self.normalize_shared_path(ctx, prefix, depth + 1)
+            })),
             _ => path.clone(),
         };
         if let Ok(md) = self.lookup_module(&path)
