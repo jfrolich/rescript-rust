@@ -3516,3 +3516,327 @@ enum DictEntry0<'e> {
     Row(current::StringLoc, &'e pt0::Expression),
     Spread(&'e pt0::Expression),
 }
+
+#[cfg(test)]
+mod tests {
+    //! The v0 encoding of literals with spreads, as
+    //! tests/ounit_tests/ounit_ast_mapper0_tests.ml
+    //! `test_spread_literal_through_ast0` checks it for the OCaml mapper.
+
+    use super::*;
+    use crate::location::{Located as OldLocated, Location, Position};
+
+    fn sexp_locs(structure: &[current::StructureItem], arena: &ParseArena) -> String {
+        let mut out = Vec::new();
+        crate::parser::sexp_locs::print_structure(structure, arena, &mut out);
+        String::from_utf8(out).expect("utf-8 sexp")
+    }
+
+    fn attr_names(attrs: &pt0::Attributes) -> Vec<String> {
+        attrs.iter().map(|(name, _)| name.txt.clone()).collect()
+    }
+
+    /// Source literals: the wire is the marked call, and the literal comes
+    /// back with its locations and attributes.
+    #[test]
+    fn spread_literal_roundtrips_through_ast0() {
+        for (source, wire_module) in [
+            ("[...a]", "Primitive_array"),
+            ("[1, ...a, 2, 3, ...b, 4]", "Primitive_array"),
+            ("[...[1, 2], 3, ...[]]", "Primitive_array"),
+            ("[...[...a, 1], ...a]", "Primitive_array"),
+            ("@attr [1, ...(a: array<int>)]", "Primitive_array"),
+            ("list{...a, 1}", "Primitive_list"),
+            ("list{1, ...a, 2, 3, ...b}", "Primitive_list"),
+            ("list{...list{1, 2}, ...a}", "Primitive_list"),
+            ("list{...list{...a, 1}, ...a, 2}", "Primitive_list"),
+        ] {
+            let text = format!("let x = {source}");
+            let mut parser = crate::parser::Parser::new("Spread.res", &text);
+            let structure = crate::parser::module::parse_structure(&mut parser);
+            assert!(parser.diagnostics().is_empty(), "{source} parses");
+            let mut arena = parser.into_arena();
+            let before = sexp_locs(&structure, &arena);
+            let tree0 = super::super::mapper_to0::map_structure(&mut arena, &structure);
+            let pt0::StructureItemDesc::Value(_, bindings) = &tree0[0].pstr_desc else {
+                panic!("expected a let binding: {source}");
+            };
+            let wire = &bindings[0].pvb_expr;
+            let pt0::ExpressionDesc::Apply(funct, _) = &wire.pexp_desc else {
+                panic!("expected a spread call: {source}");
+            };
+            let pt0::ExpressionDesc::Ident(lid) = &funct.pexp_desc else {
+                panic!("expected a spread function: {source}");
+            };
+            let Longident::Ldot(module, name) = &lid.txt else {
+                panic!("expected Module.spread: {source}");
+            };
+            let Longident::Lident(module) = &**module else {
+                panic!("expected Module.spread: {source}");
+            };
+            assert_eq!(arena.get_string(*module), wire_module, "{source}");
+            assert_eq!(arena.get_string(*name), "spread", "{source}");
+            assert_eq!(
+                attr_names(&funct.pexp_attributes),
+                ["res.spread"],
+                "{source}"
+            );
+            let back = map_structure(&mut arena, &tree0).expect("no mapper error");
+            let current::StructureItemDesc::Pstr_value((_, bindings)) = &back[0].pstr_desc else {
+                panic!("expected a let binding back: {source}");
+            };
+            let expr = arena.get_expr(arena.vb_list(*bindings)[0].pvb_expr);
+            assert!(
+                matches!(expr.pexp_desc, current::ExpressionDesc::Pexp_spread(..)),
+                "expected Pexp_spread back: {source}"
+            );
+            // Locations included: the parsed literal has real ones.
+            assert_eq!(before, sexp_locs(&back, &arena), "{source} roundtrips");
+        }
+    }
+
+    fn source_loc(start: i32, end: i32) -> Location {
+        Location {
+            loc_start: Position::new(StrIdx::default(), 1, 0, start),
+            loc_end: Position::new(StrIdx::default(), 1, 0, end),
+            loc_ghost: false,
+            origin: Default::default(),
+        }
+    }
+
+    fn expr0(desc: pt0::ExpressionDesc, loc: Location, attrs: pt0::Attributes) -> pt0::Expression {
+        pt0::Expression {
+            pexp_desc: desc,
+            pexp_loc: loc,
+            pexp_attributes: attrs,
+        }
+    }
+
+    fn ident0(arena: &mut ParseArena, module: Option<&str>, name: &str) -> pt0::Expression {
+        let name = arena.intern(name);
+        let txt = match module {
+            Some(module) => {
+                Longident::Ldot(Box::new(Longident::Lident(arena.intern(module))), name)
+            }
+            None => Longident::Lident(name),
+        };
+        expr0(
+            pt0::ExpressionDesc::Ident(OldLocated {
+                txt,
+                loc: Location::none(),
+            }),
+            Location::none(),
+            vec![],
+        )
+    }
+
+    fn marker() -> pt0::Attribute {
+        (
+            OldLocated {
+                txt: "res.spread".to_string(),
+                loc: Location::none(),
+            },
+            pt0::Payload::PStr(vec![]),
+        )
+    }
+
+    /// `Primitive_<module>.spread([parts])`, with the `res.spread` marker on
+    /// `spread` when `marked`.
+    fn spread_call(
+        arena: &mut ParseArena,
+        module: &str,
+        marked: bool,
+        parts: Vec<pt0::Expression>,
+    ) -> pt0::Expression {
+        let mut funct = ident0(arena, Some(module), "spread");
+        if marked {
+            funct.pexp_attributes.push(marker());
+        }
+        expr0(
+            pt0::ExpressionDesc::Apply(
+                Box::new(funct),
+                vec![(
+                    pt0::ArgLabel::Nolabel,
+                    expr0(pt0::ExpressionDesc::Array(parts), Location::none(), vec![]),
+                )],
+            ),
+            Location::none(),
+            vec![],
+        )
+    }
+
+    fn one() -> pt0::Expression {
+        expr0(
+            pt0::ExpressionDesc::Constant(pt0::Constant::Integer("1".to_string(), None)),
+            Location::none(),
+            vec![],
+        )
+    }
+
+    /// The element kinds (`item`/`spread`) and the descs' constructor names
+    /// of the expression `e` maps back to, or `None` when it is no spread.
+    fn decode(
+        arena: &mut ParseArena,
+        e: pt0::Expression,
+    ) -> Option<(current::SpreadKind, Vec<String>)> {
+        let item = pt0::StructureItem {
+            pstr_desc: pt0::StructureItemDesc::Eval(e, vec![]),
+            pstr_loc: Location::none(),
+        };
+        let back = map_structure(arena, &[item]).expect("no mapper error");
+        let current::StructureItemDesc::Pstr_eval(eval) = &back[0].pstr_desc else {
+            panic!("expected an evaluation back");
+        };
+        let expr = arena.get_expr(eval.0);
+        let current::ExpressionDesc::Pexp_spread(kind, elements) = expr.pexp_desc else {
+            return None;
+        };
+        let elements = arena
+            .spread_element_list(elements)
+            .iter()
+            .map(|element| {
+                let (tag, e) = match *element {
+                    current::SpreadElement::Pspread_item(e) => ("item", e),
+                    current::SpreadElement::Pspread(e) => ("spread", e),
+                };
+                let desc = match &arena.get_expr(e).pexp_desc {
+                    current::ExpressionDesc::Pexp_array(_) => "array",
+                    current::ExpressionDesc::Pexp_ident(_) => "ident",
+                    current::ExpressionDesc::Pexp_constant(_) => "constant",
+                    current::ExpressionDesc::Pexp_construct(..) => "construct",
+                    _ => "other",
+                };
+                format!("{tag} {desc}")
+            })
+            .collect();
+        Some((kind, elements))
+    }
+
+    /// A call built by a PPX: parts that aren't generated array literals or
+    /// `::`/`[]` chains (ghost, without attributes) are spreads, which
+    /// concatenates the same values.
+    #[test]
+    fn ppx_built_spread_calls_through_ast0() {
+        let mut arena = ParseArena::new();
+        let a = ident0(&mut arena, None, "a");
+        let array = |loc, attrs| expr0(pt0::ExpressionDesc::Array(vec![one()]), loc, attrs);
+
+        // A non-ghost array part stays a spread.
+        let e = spread_call(
+            &mut arena,
+            "Primitive_array",
+            true,
+            vec![array(source_loc(0, 3), vec![]), a.clone()],
+        );
+        assert_eq!(
+            decode(&mut arena, e),
+            Some((
+                current::SpreadKind::Spread_array,
+                vec!["spread array".into(), "spread ident".into()]
+            ))
+        );
+        // A ghost array part without attributes is items.
+        let e = spread_call(
+            &mut arena,
+            "Primitive_array",
+            true,
+            vec![array(Location::none(), vec![]), a.clone()],
+        );
+        assert_eq!(
+            decode(&mut arena, e),
+            Some((
+                current::SpreadKind::Spread_array,
+                vec!["item constant".into(), "spread ident".into()]
+            ))
+        );
+        // A ghost array part with an attribute stays a spread.
+        let e = spread_call(
+            &mut arena,
+            "Primitive_array",
+            true,
+            vec![array(Location::none(), vec![marker()]), a.clone()],
+        );
+        assert_eq!(
+            decode(&mut arena, e),
+            Some((
+                current::SpreadKind::Spread_array,
+                vec!["spread array".into(), "spread ident".into()]
+            ))
+        );
+
+        // List parts: a generated `1 :: a` is the item and the spread; a
+        // generated `1 :: []` is the item; a non-ghost cons or one whose
+        // argument tuple carries an attribute stays a spread.
+        let cons = |arena: &mut ParseArena, loc, tuple_attrs, tail| {
+            let lid = arena.intern("::");
+            expr0(
+                pt0::ExpressionDesc::Construct(
+                    OldLocated {
+                        txt: Longident::Lident(lid),
+                        loc,
+                    },
+                    Some(Box::new(expr0(
+                        pt0::ExpressionDesc::Tuple(vec![one(), tail]),
+                        loc,
+                        tuple_attrs,
+                    ))),
+                ),
+                loc,
+                vec![],
+            )
+        };
+        let nil = |arena: &mut ParseArena| {
+            let lid = arena.intern("[]");
+            expr0(
+                pt0::ExpressionDesc::Construct(
+                    OldLocated {
+                        txt: Longident::Lident(lid),
+                        loc: Location::none(),
+                    },
+                    None,
+                ),
+                Location::none(),
+                vec![],
+            )
+        };
+        let part = cons(&mut arena, Location::none(), vec![], a.clone());
+        let tail = nil(&mut arena);
+        let last = cons(&mut arena, Location::none(), vec![], tail);
+        let e = spread_call(&mut arena, "Primitive_list", true, vec![part, last]);
+        assert_eq!(
+            decode(&mut arena, e),
+            Some((
+                current::SpreadKind::Spread_list,
+                vec![
+                    "item constant".into(),
+                    "spread ident".into(),
+                    "item constant".into()
+                ]
+            ))
+        );
+        let part = cons(&mut arena, source_loc(0, 6), vec![], a.clone());
+        let e = spread_call(&mut arena, "Primitive_list", true, vec![part]);
+        assert_eq!(
+            decode(&mut arena, e),
+            Some((
+                current::SpreadKind::Spread_list,
+                vec!["spread construct".into()]
+            ))
+        );
+        let part = cons(&mut arena, Location::none(), vec![marker()], a.clone());
+        let e = spread_call(&mut arena, "Primitive_list", true, vec![part]);
+        assert_eq!(
+            decode(&mut arena, e),
+            Some((
+                current::SpreadKind::Spread_list,
+                vec!["spread construct".into()]
+            ))
+        );
+
+        // Without the marker, or of another module, it stays a call.
+        let e = spread_call(&mut arena, "Primitive_array", false, vec![a.clone()]);
+        assert_eq!(decode(&mut arena, e), None);
+        let e = spread_call(&mut arena, "Primitive_dict", true, vec![a.clone()]);
+        assert_eq!(decode(&mut arena, e), None);
+    }
+}

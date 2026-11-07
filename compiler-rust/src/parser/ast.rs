@@ -1579,6 +1579,19 @@ mod tests {
         assert_send_sync::<ClosedFlag>();
     }
 
+    /// `Pexp_spread` keeps its elements in an arena list pool, so the node
+    /// adds no payload to `ExpressionDesc`.
+    #[test]
+    fn spread_literal_layout() {
+        use std::mem::size_of;
+        assert_eq!(size_of::<SpreadKind>(), 1);
+        assert_eq!(size_of::<SpreadElement>(), 8);
+        assert_eq!(size_of::<SpreadElementList>(), 8);
+        assert_eq!(size_of::<ExpressionDesc>(), EXPRESSION_DESC_SIZE);
+    }
+
+    const EXPRESSION_DESC_SIZE: usize = 24;
+
     #[test]
     #[ignore]
     fn measure_ast_sizes() {
