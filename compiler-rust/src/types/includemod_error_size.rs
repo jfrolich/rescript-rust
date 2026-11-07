@@ -139,7 +139,7 @@ struct ErrorSize<'a> {
     subst: &'a InclusionSubst,
     words: usize,
     idents: HashSet<IdentKey>,
-    ident_names: HashSet<IdentKey>,
+    ident_names: HashSet<super::path_provenance::NameAllocation>,
     dotted_blocks: HashSet<usize>,
     /// Type nodes by copy session (0 for the nodes themselves) and node.
     types: HashSet<(u32, TypeExprRef)>,
@@ -334,7 +334,7 @@ impl<'a> ErrorSize<'a> {
     }
 
     fn ident_name(&mut self, id: &Ident) -> Walk {
-        if self.ident_names.insert(ident_key(id)) {
+        if self.ident_names.insert(self.ctx.ident_name_allocation(id)) {
             self.string()?;
         }
         Ok(())

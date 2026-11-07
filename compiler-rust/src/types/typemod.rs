@@ -12405,7 +12405,6 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                                                     Vec::with_capacity(labels.len());
                                                 for label in labels {
                                                     check_extra_as_attribute(arena, label)?;
-                                                    let lbl_name = arena.get_string(label.pld_name.txt);
                                                     let (_typed_label_ty, lbl_type) =
                                                         transl_label_type(tctx, &sig_env, arena, label, false)?;
                                                     let lbl_type =
@@ -12418,7 +12417,7 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                                                             crate::types::MutableFlag::Mutable
                                                         }
                                                     };
-                                                    let label_id = tctx.type_ctx.create_ident(lbl_name);
+                                                    let label_id = tctx.type_ctx.create_ast_ident(arena, label.pld_name.txt);
                                                     record_labels.push(crate::types::LabelDeclaration {
                                                         ld_id: label_id,
                                                         ld_runtime_name: crate::types::record_runtime::parsetree_runtime_name(label, arena),
@@ -12467,7 +12466,6 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                                     let mut record_labels = Vec::with_capacity(labels.len());
                                     for label in labels {
                                         check_extra_as_attribute(arena, label)?;
-                                        let lbl_name = arena.get_string(label.pld_name.txt);
                                         let (_typed_label_ty, lbl_type) =
                                             transl_label_type(tctx, &sig_env, arena, label, false)?;
                                         let lbl_type = tctx.type_ctx.new_poly(lbl_type, vec![]);
@@ -12479,7 +12477,7 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                                                 crate::types::MutableFlag::Mutable
                                             }
                                         };
-                                        let label_id = tctx.type_ctx.create_ident(lbl_name);
+                                        let label_id = tctx.type_ctx.create_ast_ident(arena, label.pld_name.txt);
                                         record_labels.push(crate::types::LabelDeclaration {
                                             ld_id: label_id,
                                             ld_runtime_name: crate::types::record_runtime::parsetree_runtime_name(label, arena),
@@ -16439,7 +16437,7 @@ pub fn transl_signature<'a>(
                 // Env.enter_value creates the value ident. Keep the same order so
                 // lazy signature forcing during type translation consumes stamps
                 // before the signature value id.
-                let id = ctx.create_ident(&name_str);
+                let id = ctx.create_ast_ident(arena, vd.pval_name.txt);
                 // typedecl.ml:1918-1919: `Env.enter_value ~check:(fun s ->
                 // Unused_value_declaration s)`.
                 // `Types.val_loc` is the signature item loc passed by
@@ -17709,7 +17707,7 @@ fn type_structure_item<'a>(
                                             } if vars.is_empty() => *body,
                                             _ => poly_type_ref,
                                         };
-                                        let label_id = ctx.create_ident(lbl_name_str);
+                                        let label_id = ctx.create_ast_ident(arena, lbl.pld_name.txt);
                                         internal_labels.push(crate::types::LabelDeclaration {
                                             ld_id: label_id,
                                             ld_runtime_name: crate::types::record_runtime::parsetree_runtime_name(lbl, arena),
@@ -18087,7 +18085,7 @@ fn type_structure_item<'a>(
                                 }
                                 _ => poly_type_ref,
                             };
-                            let label_id = ctx.create_ident(lbl_name_str);
+                            let label_id = ctx.create_ast_ident(arena, lbl.pld_name.txt);
                             internal_labels.push(crate::types::LabelDeclaration {
                                 ld_id: label_id,
                                 ld_runtime_name:
@@ -18905,7 +18903,7 @@ fn type_structure_item<'a>(
                                         }
                                         _ => poly_ty_ref,
                                     };
-                                    let label_id = ctx.create_ident(&label_name);
+                                    let label_id = ctx.create_ast_ident(arena, label.pld_name.txt);
                                     typed_labels.push(crate::types::typedtree::LabelDeclaration {
                                         ld_id: label_id,
                                         ld_name: crate::parse_arena::Located {
@@ -19285,7 +19283,7 @@ fn type_structure_item<'a>(
                                     }
                                     _ => poly_ty_ref,
                                 };
-                                let label_id = ctx.create_ident(&label_name);
+                                let label_id = ctx.create_ast_ident(arena, label.pld_name.txt);
                                 typed_labels.push(crate::types::typedtree::LabelDeclaration {
                                     ld_id: label_id,
                                     ld_name: crate::parse_arena::Located {
@@ -20673,7 +20671,7 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
                                 crate::types::MutableFlag::Mutable
                             }
                         };
-                        let label_id = ctx.create_ident(lbl_name);
+                        let label_id = ctx.create_ast_ident(arena, label.pld_name.txt);
                         internal_labels.push(crate::types::LabelDeclaration {
                             ld_id: label_id,
                             ld_runtime_name: crate::types::record_runtime::parsetree_runtime_name(
@@ -20903,7 +20901,7 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
                                             crate::types::MutableFlag::Mutable
                                         }
                                     };
-                                    let label_id = ctx.create_ident(lbl_name);
+                                    let label_id = ctx.create_ast_ident(arena, label.pld_name.txt);
                                     internal_record_labels.push(crate::types::LabelDeclaration {
                                         ld_id: label_id,
                                         ld_runtime_name:

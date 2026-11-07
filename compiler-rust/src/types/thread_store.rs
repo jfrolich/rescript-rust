@@ -239,6 +239,23 @@ impl ThreadTypeStore {
         }
     }
 
+    pub(crate) fn record_ident_name(
+        &self,
+        id: &crate::ident::Ident,
+        allocation: super::path_provenance::NameAllocation,
+    ) {
+        self.path_provenance
+            .borrow_mut()
+            .record_name(id, allocation);
+    }
+
+    pub(crate) fn ident_name_allocation(
+        &self,
+        id: &crate::ident::Ident,
+    ) -> Option<super::path_provenance::NameAllocation> {
+        self.path_provenance.borrow().name(id)
+    }
+
     pub(crate) fn dotted_from_ident(
         &self,
         prefix: Arc<super::Path>,

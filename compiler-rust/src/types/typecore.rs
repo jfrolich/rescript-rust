@@ -1123,7 +1123,7 @@ impl PatternState {
             });
         }
 
-        let id = type_ctx.create_ident(name_str);
+        let id = type_ctx.create_ast_ident(arena, name.txt);
         let full_loc = arena.to_location(loc);
         let full_name = crate::parse_arena::Located {
             txt: name_str.to_string(),
@@ -17573,7 +17573,7 @@ fn type_letexception(
                             ctyp_loc: typed_ct.ctyp_loc,
                             ctyp_attributes: Attributes::new(),
                         };
-                        let label_id = ctx.create_ident(&label_name);
+                        let label_id = ctx.create_ast_ident(arena, label.pld_name.txt);
                         typed_labels.push(crate::types::typedtree::LabelDeclaration {
                             ld_id: label_id,
                             ld_name: crate::parse_arena::Located {

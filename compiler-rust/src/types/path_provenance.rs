@@ -29,14 +29,44 @@ impl DottedAllocation {
     }
 }
 
+type IdentNameKey = (i32, crate::name::Name, u32);
+
+fn name_key(id: &Ident) -> IdentNameKey {
+    (id.stamp(), id.name_atom(), id.origin().get())
+}
+
+/// The source allocation of a name string, independent of its interned text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum NameAllocation {
+    Ident(IdentNameKey),
+    Source { scope: u64, string: u32 },
+}
+
+impl NameAllocation {
+    pub(crate) fn of_ident(id: &Ident) -> Self {
+        Self::Ident(name_key(id))
+    }
+}
+
 /// Owned by a compilation, worker store, or shared-pool publication scope.
 /// No address survives its retained allocation and no contents are used as keys.
 #[derive(Default)]
 pub(crate) struct PathProvenance {
     dotted: AHashMap<usize, DottedAllocation>,
+    names: AHashMap<IdentNameKey, NameAllocation>,
 }
 
 impl PathProvenance {
+    pub(crate) fn record_name(&mut self, id: &Ident, allocation: NameAllocation) {
+        if let Some(previous) = self.names.insert(name_key(id), allocation) {
+            assert_eq!(previous, allocation, "identifier name allocation changed");
+        }
+    }
+
+    pub(crate) fn name(&self, id: &Ident) -> Option<NameAllocation> {
+        self.names.get(&name_key(id)).copied()
+    }
+
     /// A single allocation of `Pdot(prefix, Ident.name name, pos)`.
     /// Clone the resulting Path to retain that allocation. To construct a new
     /// Pdot, call this again rather than reusing its carrier for another suffix.
@@ -73,6 +103,47 @@ impl PathProvenance {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_names_share_by_parser_allocation_not_spelling() {
+        use crate::types::context::TypeContext;
+        let ctx = TypeContext::new(Arc::new(crate::context::IdGenerator::new()));
+        let mut arena = crate::parse_arena::ParseArena::new();
+        let name = arena.push_string("field");
+        let equal_name = arena.push_string("field");
+        assert_ne!(name, equal_name);
+        let label = ctx.create_ast_ident(&arena, name);
+        let accessor = ctx.create_ast_ident(&arena, name);
+        let unrelated = ctx.create_ast_ident(&arena, equal_name);
+        assert_ne!(label.stamp(), accessor.stamp());
+        assert_eq!(
+            ctx.ident_name_allocation(&label),
+            ctx.ident_name_allocation(&accessor)
+        );
+        assert_ne!(
+            ctx.ident_name_allocation(&label),
+            ctx.ident_name_allocation(&unrelated)
+        );
+        let renamed = ctx.rename_ident(&accessor);
+        assert_eq!(
+            ctx.ident_name_allocation(&label),
+            ctx.ident_name_allocation(&renamed)
+        );
+        let mut other = crate::parse_arena::ParseArena::new();
+        let other_name = other.push_string("field");
+        let other_id = ctx.create_ast_ident(&other, other_name);
+        assert_ne!(
+            ctx.ident_name_allocation(&label),
+            ctx.ident_name_allocation(&other_id)
+        );
+        let moved = Box::new(arena);
+        let copied = ctx.create_ast_ident(&moved, name);
+        assert_eq!(
+            ctx.ident_name_allocation(&label),
+            ctx.ident_name_allocation(&copied)
+        );
+        assert_eq!(std::mem::size_of::<Ident>(), 16);
+    }
 
     #[test]
     fn dotted_allocations_keep_prefix_sharing_without_content_keys() {

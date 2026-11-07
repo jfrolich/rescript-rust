@@ -4312,6 +4312,47 @@ impl TypeContext {
         self.id_gen.create(name)
     }
 
+    /// `Ident.create` retains the source string (compiler/ext/ident.ml:28-33).
+    /// A parser StrIdx identifies its allocation, including PPX copies, whereas
+    /// the interned Name held by Ident identifies only its text.
+    pub fn create_ast_ident(
+        &self,
+        arena: &crate::parse_arena::ParseArena,
+        name: crate::intern::StrIdx,
+    ) -> Ident {
+        let id = self.create_ident(arena.get_string(name));
+        let scope = arena.declaration_location_scope(|| self.fresh_location_scope());
+        self.record_ident_name(
+            &id,
+            super::path_provenance::NameAllocation::Source {
+                scope,
+                string: name.0,
+            },
+        );
+        id
+    }
+
+    fn record_ident_name(&self, id: &Ident, allocation: super::path_provenance::NameAllocation) {
+        if self.in_store_build() {
+            self.store.record_ident_name(id, allocation);
+        } else {
+            self.path_provenance
+                .borrow_mut()
+                .record_name(id, allocation);
+        }
+    }
+
+    pub(crate) fn ident_name_allocation(
+        &self,
+        id: &Ident,
+    ) -> super::path_provenance::NameAllocation {
+        self.path_provenance
+            .borrow()
+            .name(id)
+            .or_else(|| self.store.ident_name_allocation(id))
+            .unwrap_or_else(|| super::path_provenance::NameAllocation::of_ident(id))
+    }
+
     /// Fresh binder for shared store data. The compilation's own stamp stream
     /// advances exactly as it would have (and later users replay that), but
     /// the binder gets a store stamp so it can never be `Ident::same` as an
@@ -4827,6 +4868,12 @@ impl TypeContext {
 
     /// Rename an identifier using the typing context's shared stamp source.
     pub fn rename_ident(&self, id: &Ident) -> Ident {
+        let fresh = self.rename_ident_stamp(id);
+        self.record_ident_name(&fresh, self.ident_name_allocation(id));
+        fresh
+    }
+
+    fn rename_ident_stamp(&self, id: &Ident) -> Ident {
         if self.in_store_build() {
             if self.reserved_rename_stamps.get().is_some() {
                 // A deferred rename uses stamps this compilation reserved.
