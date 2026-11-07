@@ -3917,9 +3917,34 @@ fn nonpersistent_path_head(path: &Path) -> Option<(i32, String)> {
     }
 }
 
+/// The type-path domain of a component substitution. In-process signatures
+/// retain qualified declaration paths as well as their original binders.
+/// Both denote the same explicit substitution entry, not equivalent spellings.
+/// OCaml `Subst.type_path` checks its Path_map before descending (subst.ml:87-94).
+#[derive(Clone, Debug)]
+struct TypeSubstPaths {
+    stamps: HashMap<i32, Path>,
+    qualified: HashMap<crate::types::context::SamePathKey, Path>,
+}
+
+impl Default for TypeSubstPaths {
+    fn default() -> Self {
+        Self {
+            stamps: subst_map(),
+            qualified: subst_map(),
+        }
+    }
+}
+
+impl TypeSubstPaths {
+    fn is_empty(&self) -> bool {
+        self.stamps.is_empty() && self.qualified.is_empty()
+    }
+}
+
 #[derive(Clone, Debug)]
 struct SubstMaps {
-    type_stamp_map: HashMap<i32, Path>,
+    type_stamp_map: TypeSubstPaths,
     type_name_map: HashMap<String, Path>,
     module_stamp_map: ModuleStampSubstMap,
     module_name_map: HashMap<String, Path>,
@@ -3942,7 +3967,7 @@ fn subst_map<K, V>() -> HashMap<K, V> {
 impl Default for SubstMaps {
     fn default() -> Self {
         Self {
-            type_stamp_map: subst_map(),
+            type_stamp_map: TypeSubstPaths::default(),
             type_name_map: subst_map(),
             module_stamp_map: subst_map(),
             module_name_map: subst_map(),
@@ -3974,9 +3999,18 @@ fn build_subst_maps(
             SignatureItem::SigType(id, _, _) | SignatureItem::SigModtype(id, _) => {
                 let qualified_path =
                     ctx.dotted_from_ident(prefix.clone(), *id, crate::types::path::NOPOS);
+                if let SignatureItem::SigType(_, decl, _) = item
+                    && let Some(source) = &decl.type_path
+                    && matches!(source, Path::Pdot(..))
+                {
+                    maps.type_stamp_map.qualified.insert(
+                        crate::types::context::SamePathKey::new(source.clone()),
+                        qualified_path.clone(),
+                    );
+                }
                 if id.stamp() != 0 {
                     // OCaml Subst uses identifier identity for non-persistent ids.
-                    maps.type_stamp_map.insert(id.stamp(), qualified_path);
+                    maps.type_stamp_map.stamps.insert(id.stamp(), qualified_path);
                 } else {
                     // Persistent ids (stamp=0) rewrite by name.
                     maps.type_name_map
@@ -4005,7 +4039,7 @@ fn build_subst_maps(
 fn insert_type_subst_path(maps: &mut SubstMaps, old_id: &Ident, new_id: &Ident) {
     let new_path = Path::pident(*new_id);
     if old_id.stamp() != 0 {
-        maps.type_stamp_map.insert(old_id.stamp(), new_path);
+        maps.type_stamp_map.stamps.insert(old_id.stamp(), new_path);
     } else {
         maps.type_name_map
             .insert(old_id.name().to_string(), new_path);
@@ -4025,6 +4059,53 @@ fn insert_module_subst_path(maps: &mut SubstMaps, old_id: &Ident, new_id: &Ident
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn component_substitution_keeps_equal_valued_target_allocation() {
+        let ctx = TypeContext::new(Arc::new(crate::context::IdGenerator::new()));
+        let root_id = Ident::create_local("Component");
+        let root = Arc::new(Path::Pident(root_id));
+        let binder = Ident::create_local("t");
+        let source = Path::pdot((*root).clone(), binder.name_atom());
+        let target = ctx.dotted_from_ident(root, binder, crate::types::path::NOPOS);
+        assert_eq!(source, target);
+        assert!(!same_path_allocation(&source, &target));
+        let mut types = TypeSubstPaths::default();
+        types.qualified.insert(
+            crate::types::context::SamePathKey::new(source.clone()),
+            target.clone(),
+        );
+        let names = HashMap::new();
+        let modules = ModuleStampSubstMap::new();
+        let a = ctx.new_generic_constr(source.clone(), vec![]);
+        let b = ctx.new_generic_constr(source.clone(), vec![]);
+        for node in [a, b] {
+            substitute_type_expr_path(
+                node,
+                &types,
+                &names,
+                &modules,
+                &names,
+                None,
+                &ctx,
+                &mut HashSet::new(),
+            );
+            let desc = ctx.get_desc(node);
+            let TypeDesc::Tconstr { path, .. } = &*desc else {
+                panic!("constructor")
+            };
+            assert!(same_path_allocation(path, &target));
+            assert_eq!(
+                ctx.dotted_allocation(path).unwrap().key(),
+                ctx.dotted_allocation(&target).unwrap().key()
+            );
+        }
+        // An equal-spelled but different binding is not this substitution's key.
+        let unrelated = Path::pdot(Path::Pident(Ident::create_local("Component")), "t");
+        let result = substitute_type_path(&unrelated, &types, &names, &modules, &names, None);
+        assert!(ctx.dotted_allocation(&result).is_none());
+        assert!(!result.same(&target));
+    }
 
     #[test]
     fn reads_belt_map_string_empty_as_closed_undefined_constant_from_cmj() {
@@ -4051,7 +4132,14 @@ mod tests {
 
 fn merge_subst_maps(parent: &SubstMaps, child: &SubstMaps) -> SubstMaps {
     let mut merged = parent.clone();
-    merged.type_stamp_map.extend(child.type_stamp_map.clone());
+    merged
+        .type_stamp_map
+        .stamps
+        .extend(child.type_stamp_map.stamps.clone());
+    merged
+        .type_stamp_map
+        .qualified
+        .extend(child.type_stamp_map.qualified.clone());
     merged.type_name_map.extend(child.type_name_map.clone());
     merged
         .module_stamp_map
@@ -5060,7 +5148,7 @@ pub fn substitute_type_paths_in_sig(
             SignatureItem::SigType(id, _, _) | SignatureItem::SigModtype(id, _) => {
                 direct_type_name_map
                     .entry(id.name().to_string())
-                    .or_insert_with(|| maps.type_stamp_map[&id.stamp()].clone());
+                    .or_insert_with(|| maps.type_stamp_map.stamps[&id.stamp()].clone());
             }
             _ => {}
         }
@@ -5277,6 +5365,10 @@ pub(crate) fn substitute_type_paths_in_sig_with_stamp_map(
     if stamp_map.is_empty() {
         return;
     }
+    let stamp_map = &TypeSubstPaths {
+        stamps: stamp_map.clone(),
+        qualified: subst_map(),
+    };
     let empty: HashMap<String, Path> = HashMap::new();
     let empty_module_stamp: ModuleStampSubstMap = HashMap::new();
     let mut visited = HashSet::new();
@@ -5325,10 +5417,21 @@ pub(crate) fn substitute_type_paths_in_sig_with_stamp_map(
     }
 }
 
+/// Whether retaining the old path would retain the substitution result's
+/// actual carrier. Equal path values can still be different allocations.
+fn same_path_allocation(left: &Path, right: &Path) -> bool {
+    match (left, right) {
+        (Path::Pident(a), Path::Pident(b)) => a == b && a.origin() == b.origin(),
+        (Path::Pdot(a, an, ap), Path::Pdot(b, bn, bp)) => Arc::ptr_eq(a, b) && an == bn && ap == bp,
+        (Path::Papply(a, aa), Path::Papply(b, ba)) => Arc::ptr_eq(a, b) && Arc::ptr_eq(aa, ba),
+        _ => false,
+    }
+}
+
 /// Recursively walk a type expression and substitute Tconstr paths.
 fn substitute_type_expr_path(
     initial_ty_ref: TypeExprRef,
-    type_stamp_map: &HashMap<i32, Path>,
+    type_stamp_map: &TypeSubstPaths,
     type_name_map: &HashMap<String, Path>,
     module_stamp_map: &ModuleStampSubstMap,
     module_name_map: &HashMap<String, Path>,
@@ -5359,7 +5462,7 @@ fn substitute_type_expr_path(
                     module_name_map,
                     protected_module_head,
                 );
-                if new_path != *path {
+                if !same_path_allocation(&new_path, path) {
                     let mut new_desc = (*desc).clone();
                     if let TypeDesc::Tconstr { ref mut path, .. } = new_desc {
                         *path = new_path;
@@ -5409,7 +5512,7 @@ fn substitute_type_expr_path(
                         module_name_map,
                         protected_module_head,
                     );
-                    if new_path != *path {
+                    if !same_path_allocation(&new_path, path) {
                         let mut new_desc = (*desc).clone();
                         if let TypeDesc::Tvariant(ref mut row) = new_desc
                             && let Some((ref mut path, _)) = row.row_name
@@ -5450,7 +5553,7 @@ fn substitute_type_expr_path(
                     module_name_map,
                     protected_module_head,
                 );
-                if new_path != *path {
+                if !same_path_allocation(&new_path, path) {
                     let mut new_desc = (*desc).clone();
                     if let TypeDesc::Tpackage { ref mut path, .. } = new_desc {
                         *path = new_path;
@@ -5611,7 +5714,7 @@ pub fn build_value_subst_maps(
             SignatureItem::SigType(id, _, _) | SignatureItem::SigModtype(id, _) => {
                 direct_type_name_map
                     .entry(id.name().to_string())
-                    .or_insert_with(|| maps.type_stamp_map[&id.stamp()].clone());
+                    .or_insert_with(|| maps.type_stamp_map.stamps[&id.stamp()].clone());
             }
             _ => {}
         }
@@ -5709,7 +5812,7 @@ fn direct_manifest_substitution_would_self_alias(
     id: &Ident,
     manifest: TypeExprRef,
     module_path: &Path,
-    type_stamp_map: &HashMap<i32, Path>,
+    type_stamp_map: &TypeSubstPaths,
     type_name_map: &HashMap<String, Path>,
     module_stamp_map: &ModuleStampSubstMap,
     module_name_map: &HashMap<String, Path>,
@@ -5737,12 +5840,19 @@ fn direct_manifest_substitution_would_self_alias(
 
 fn substitute_type_path(
     path: &Path,
-    type_stamp_map: &HashMap<i32, Path>,
+    type_stamp_map: &TypeSubstPaths,
     type_name_map: &HashMap<String, Path>,
     module_stamp_map: &ModuleStampSubstMap,
     module_name_map: &HashMap<String, Path>,
     protected_module_head: Option<&(i32, String)>,
 ) -> Path {
+    if !type_stamp_map.qualified.is_empty()
+        && let Some(target) = type_stamp_map
+            .qualified
+            .get(&crate::types::context::SamePathKey::new(path.clone()))
+    {
+        return target.clone();
+    }
     match path {
         Path::Pident(ident) => {
             if ident.stamp() != 0 {
@@ -5750,6 +5860,7 @@ fn substitute_type_path(
                 // non-persistent ids through Ident.find_same only. It does not
                 // fall back to declaration names or flattened path spelling.
                 type_stamp_map
+                    .stamps
                     .get(&ident.stamp())
                     .cloned()
                     .unwrap_or_else(|| path.clone())
