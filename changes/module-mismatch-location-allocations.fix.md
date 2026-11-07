@@ -1,0 +1,1 @@
+- Preserve distinct location allocations when deciding whether Rust compiler module-mismatch diagnostics should be abbreviated.

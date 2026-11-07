@@ -31,11 +31,9 @@
 //!   name string with the constructor's `Ident.t` and their literal with the
 //!   constructor's `cd_runtime_tag` (variant_layout.ml `get_tag`);
 //! - an `Ident.t` by its stamp and name, its name string being its own;
-//! - a `Location.t` and a `Lexing.position` by their coordinates: a
-//!   position record is made once per token boundary by the scanner and a
-//!   location once per source node, which declarations derived from that
-//!   node share (typedecl.ml gives `t#row` the `ptype_loc` of `t`); and a
-//!   file name string by the file, one per compiled source.
+//! - locations and positions by scoped parser/decoder allocation identities,
+//!   retained across portable interfaces independently of coordinate interning;
+//!   a file name string by the file, one per compiled source.
 //!
 //! String contents never count, so the decision does not depend on the
 //! length of identifiers or of the source file name.
@@ -60,7 +58,7 @@ use super::variant_runtime::{
     Block as VariantBlock, BlockType, ConstructorCase, LayoutRef, LiteralTag, Tag,
 };
 use crate::ident::Ident;
-use crate::location::{Location, Position};
+use crate::location::Position;
 use crate::types::DeclLoc;
 use crate::types::asttypes::{ArgLabel, Located};
 use crate::types::external_ffi_types::{
@@ -110,28 +108,26 @@ pub(crate) fn modtype_infos_is_big(
     walk.is_err()
 }
 
+/// Allocation-bearing declarations retain parser or decoded block keys.
+/// Source-only handles denote the location-free representation, including
+/// the canonical absent location. Other legacy handles own their positions.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-struct PositionKey {
-    file: u32,
-    line: i32,
-    bol: i32,
-    cnum: i32,
+enum LocationKey {
+    Allocation(u64, u32),
+    Handle(DeclLoc),
 }
 
-fn position_key(pos: &Position) -> PositionKey {
-    PositionKey {
-        file: pos.file_name.0,
-        line: pos.line,
-        bol: pos.bol,
-        cnum: pos.cnum,
-    }
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum PositionKey {
+    Allocation(u64, u32),
+    Handle(DeclLoc, bool),
 }
 
 /// An `Ident.t` block: its stamp and name, and the marshal block it was
 /// decoded from (0 for an identifier of the compilation).
 type IdentKey = (i32, usize, u32);
 
-type AttributeKey = (String, PositionKey, PositionKey);
+type AttributeKey = (String, LocationKey);
 
 fn ident_key(id: &Ident) -> IdentKey {
     (id.stamp(), id.name().as_ptr() as usize, id.origin().get())
@@ -165,7 +161,7 @@ struct ErrorSize<'a> {
     type_declarations: HashSet<usize>,
     paths: HashSet<usize>,
     positions: HashSet<PositionKey>,
-    locations: HashSet<(PositionKey, PositionKey, bool)>,
+    locations: HashSet<LocationKey>,
     files: HashSet<u32>,
     inline_const_name: bool,
     attributes: HashSet<AttributeKey>,
@@ -486,8 +482,8 @@ impl<'a> ErrorSize<'a> {
     }
 
     // Lexing.position = {pos_fname; pos_lnum; pos_bol; pos_cnum}
-    fn position(&mut self, pos: &Position) -> Walk {
-        if !self.positions.insert(position_key(pos)) {
+    fn position(&mut self, pos: &Position, key: PositionKey) -> Walk {
+        if !self.positions.insert(key) {
             return Ok(());
         }
         self.block(0, 4)?;
@@ -497,24 +493,36 @@ impl<'a> ErrorSize<'a> {
         Ok(())
     }
 
-    // Location.t = {loc_start; loc_end; loc_ghost}
-    fn location(&mut self, loc: &Location) -> Walk {
-        let key = (
-            position_key(&loc.loc_start),
-            position_key(&loc.loc_end),
-            loc.loc_ghost,
-        );
-        if !self.locations.insert(key) {
+    fn location_key(&self, loc: DeclLoc) -> LocationKey {
+        match self.ctx.location_identity(loc) {
+            Some(id) => LocationKey::Allocation(id.scope, id.location),
+            None => LocationKey::Handle(loc),
+        }
+    }
+
+    // Location.t = {loc_start; loc_end; loc_ghost}. Subst.loc keeps the
+    // original record and its positions (compiler/ml/subst.ml:57-58).
+    fn decl_loc(&mut self, handle: DeclLoc) -> Walk {
+        if !self.locations.insert(self.location_key(handle)) {
             return Ok(());
         }
         self.block(0, 3)?;
-        self.position(&loc.loc_start)?;
-        self.position(&loc.loc_end)
-    }
-
-    fn decl_loc(&mut self, loc: DeclLoc) -> Walk {
-        let loc = self.ctx.resolve_loc(loc);
-        self.location(&loc)
+        let loc = self.ctx.resolve_loc(handle);
+        let (start, end) = match self.ctx.location_identity(handle) {
+            Some(id) => (
+                PositionKey::Allocation(id.scope, id.start),
+                PositionKey::Allocation(id.scope, id.end),
+            ),
+            None => (
+                PositionKey::Handle(handle, false),
+                PositionKey::Handle(
+                    handle,
+                    handle.kind() != super::decl_loc::DeclLocKind::Source,
+                ),
+            ),
+        };
+        self.position(&loc.loc_start, start)?;
+        self.position(&loc.loc_end, end)
     }
 
     // 'a loc = {txt; loc}
@@ -528,11 +536,9 @@ impl<'a> ErrorSize<'a> {
     /// (typedecl.ml `copy_tag_attr_from_decl`): its name location identifies
     /// it.
     fn attribute_key(&self, attr: &Attribute) -> AttributeKey {
-        let loc = self.ctx.resolve_loc(attr.attr_name.loc);
         (
             attr.attr_name.txt.clone(),
-            position_key(&loc.loc_start),
-            position_key(&loc.loc_end),
+            self.location_key(attr.attr_name.loc),
         )
     }
 
@@ -1472,5 +1478,58 @@ impl<'a> ErrorSize<'a> {
                 self.mutability_ref(target)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod location_tests {
+    use super::*;
+    use crate::types::decl_loc::LocationIdentity;
+
+    #[test]
+    fn locations_count_allocations_not_equal_coordinates() {
+        let ctx = TypeContext::new(Arc::new(crate::context::IdGenerator::new()));
+        let subst = InclusionSubst::default();
+        let scope = ctx.fresh_location_scope();
+        let mut loc = crate::location::Location::none();
+        loc.loc_start.line = 1;
+        loc.loc_end.line = 1;
+        let a = ctx.intern_loc_with_identity(
+            loc,
+            LocationIdentity {
+                scope,
+                location: 1,
+                start: 10,
+                end: 11,
+            },
+        );
+        let b = ctx.intern_loc_with_identity(
+            loc,
+            LocationIdentity {
+                scope,
+                location: 2,
+                start: 11,
+                end: 12,
+            },
+        );
+        let c = ctx.intern_loc_with_identity(
+            loc,
+            LocationIdentity {
+                scope,
+                location: 3,
+                start: 13,
+                end: 14,
+            },
+        );
+        assert_eq!(ctx.local_decl_loc_count(), 1);
+        let mut size = ErrorSize::new(&ctx, &subst);
+        assert!(size.decl_loc(a).is_ok());
+        assert_eq!(size.words, 15); // location + two positions + filename
+        assert!(size.decl_loc(a).is_ok());
+        assert_eq!(size.words, 15);
+        assert!(size.decl_loc(b).is_ok());
+        assert_eq!(size.words, 24); // new location and one new position
+        assert!(size.decl_loc(c).is_ok());
+        assert_eq!(size.words, 38); // new location and two new positions
     }
 }
