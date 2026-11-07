@@ -1184,6 +1184,11 @@ impl ParseArena {
         self.record_position_file_name(file_name);
     }
 
+    /// The file this arena's source was parsed from.
+    pub fn source_file(&self) -> StrIdx {
+        self.absent_position.file_name
+    }
+
     pub fn stores_locations(&self) -> bool {
         self.store_locations
     }
@@ -2252,6 +2257,14 @@ impl ParseArena {
                 .get((raw - self.synthetic_string_base) as usize)
                 .expect("typechecker synthetic string read before initialization")
         }
+    }
+
+    /// The name of `idx` when it is a file this arena's positions are in
+    /// (its source file included, with or without stored locations).
+    pub fn own_file_name(&self, idx: StrIdx) -> Option<&str> {
+        self.position_file_names
+            .contains(&idx)
+            .then(|| self.get_string(idx))
     }
 
     /// File names referenced by source positions in this arena.

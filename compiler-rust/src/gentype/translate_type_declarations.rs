@@ -220,7 +220,7 @@ pub fn traslate_declaration_kind_from_decl_attributes(
     arena: &ParseArena,
     config: &crate::gentype::config::T,
     loc: Location,
-    loc_file: &str,
+    loc_file: &dyn Fn() -> String,
     output_file_relative: &str,
     resolver: &crate::gentype::module_resolver::Resolver,
     type_attributes: &[DeclAttribute],

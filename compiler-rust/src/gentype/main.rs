@@ -37,6 +37,9 @@ pub struct Outcome {
     /// raises after printing `notes`, which fails the compile (an invalid
     /// string escape in an annotation payload, Ast_payload.ml:39-51).
     pub result: Result<Option<Output>, String>,
+    /// A note was rendered from a location-free parse: the compile must be
+    /// retried with locations, as for its warnings.
+    pub needs_locations: bool,
 }
 
 impl Default for Outcome {
@@ -45,8 +48,14 @@ impl Default for Outcome {
         Outcome {
             notes: Vec::new(),
             result: Ok(None),
+            needs_locations: false,
         }
     }
+}
+
+/// Whether notes rendered from `artifact`'s parse need it to have locations.
+fn needs_locations(artifact: &TypedArtifact<'_>, noted: bool) -> bool {
+    noted && !artifact.arena.stores_locations()
 }
 
 impl Outcome {
@@ -54,6 +63,7 @@ impl Outcome {
         Outcome {
             notes: Vec::new(),
             result: Err(report),
+            needs_locations: false,
         }
     }
 
@@ -62,6 +72,7 @@ impl Outcome {
         Outcome {
             notes: notes.take(),
             result: result.map(Some),
+            needs_locations: false,
         }
     }
 
@@ -633,13 +644,15 @@ impl Output {
 #[derive(Debug, Clone)]
 pub enum InterfaceRead {
     /// Only the type declarations were registered (`declarations_only`).
-    DeclarationsOnly,
+    DeclarationsOnly { needs_locations: bool },
     /// The report of the exception the annotation walk raised.
     Raised(String),
     Read {
         /// `@genType.ignoreInterface` seen by the walk, which stops at the
         /// first annotated item.
         ignore_interface: bool,
+        /// Notes were rendered from a location-free parse of the interface.
+        needs_locations: bool,
         /// The interface's output, planned when the walk did not select
         /// the implementation: what to write, or the report of the
         /// exception translating or emitting raised. `None` when the walk
@@ -709,7 +722,7 @@ fn register_type_declarations(
     prepared: &Prepared,
     resolver: &crate::gentype::module_resolver::Resolver,
     artifact: &TypedArtifact<'_>,
-) {
+) -> bool {
     let notes = std::rc::Rc::new(crate::gentype::log_::Notes::default());
     let result = typed_artifact_translate_type_declarations(
         config,
@@ -729,6 +742,7 @@ fn register_type_declarations(
         notes: notes.take(),
         result,
     };
+    let noted = !type_declarations.notes.is_empty();
     if let Some(cmt_file) =
         cmt_file_for_typed_artifact(config, &prepared.source_file, artifact.is_interface)
     {
@@ -738,6 +752,7 @@ fn register_type_declarations(
             type_declarations,
         );
     }
+    noted
 }
 
 /// GenTypeMain.ml:165-175 up to the write: the output of an artifact whose
@@ -834,9 +849,12 @@ pub fn process_typed_artifact(
     let resolver = shared_resolver
         .or(prepared.local_resolver.as_ref())
         .expect("GenType resolver must be available");
-    register_type_declarations(config, &prepared, resolver, &artifact);
+    let noted = register_type_declarations(config, &prepared, resolver, &artifact);
     if artifact.declarations_only {
-        return Outcome::default();
+        return Outcome {
+            needs_locations: needs_locations(&artifact, noted),
+            ..Outcome::default()
+        };
     }
     let ignore_interface = std::cell::Cell::new(false);
     let has_gentype_annotations = match typed_artifact_check_annotations(
@@ -857,7 +875,11 @@ pub fn process_typed_artifact(
         &notes,
         has_gentype_annotations,
     );
-    Outcome::after(&notes, result)
+    let outcome = Outcome::after(&notes, result);
+    Outcome {
+        needs_locations: needs_locations(&artifact, noted || !outcome.notes.is_empty()),
+        ..outcome
+    }
 }
 
 /// Read a module's typed interface for its implementation's compile
@@ -873,9 +895,11 @@ pub fn read_interface_artifact(
     let resolver = shared_resolver
         .or(prepared.local_resolver.as_ref())
         .expect("GenType resolver must be available");
-    register_type_declarations(config, &prepared, resolver, &artifact);
+    let noted = register_type_declarations(config, &prepared, resolver, &artifact);
     if artifact.declarations_only {
-        return InterfaceRead::DeclarationsOnly;
+        return InterfaceRead::DeclarationsOnly {
+            needs_locations: needs_locations(&artifact, noted),
+        };
     }
     let ignore_interface = std::cell::Cell::new(false);
     let has_gentype_annotations = match typed_artifact_check_annotations(
@@ -888,20 +912,39 @@ pub fn read_interface_artifact(
         Err(escape) => return InterfaceRead::Raised((artifact.render_escape)(escape)),
     };
     let ignore_interface = ignore_interface.get();
+    let output = (!ignore_interface).then(|| {
+        let notes = std::rc::Rc::new(crate::gentype::log_::Notes::default());
+        let result = plan_output(
+            config,
+            &prepared,
+            resolver,
+            &artifact,
+            &notes,
+            has_gentype_annotations,
+        );
+        Outcome::after(&notes, result)
+    });
+    let noted = noted
+        || output
+            .as_ref()
+            .is_some_and(|output| !output.notes.is_empty());
     InterfaceRead::Read {
         ignore_interface,
-        output: (!ignore_interface).then(|| {
-            let notes = std::rc::Rc::new(crate::gentype::log_::Notes::default());
-            let result = plan_output(
-                config,
-                &prepared,
-                resolver,
-                &artifact,
-                &notes,
-                has_gentype_annotations,
-            );
-            Outcome::after(&notes, result)
-        }),
+        needs_locations: needs_locations(&artifact, noted),
+        output,
+    }
+}
+
+impl InterfaceRead {
+    /// Notes were rendered from a location-free parse of the interface.
+    pub fn needs_locations(&self) -> bool {
+        match self {
+            InterfaceRead::DeclarationsOnly { needs_locations }
+            | InterfaceRead::Read {
+                needs_locations, ..
+            } => *needs_locations,
+            InterfaceRead::Raised(_) => false,
+        }
     }
 }
 
@@ -917,13 +960,14 @@ pub fn process_implementation_with_interface(
     artifact: TypedArtifact<'_>,
 ) -> Outcome {
     let (ignore_interface, interface_output) = match interface {
-        InterfaceRead::DeclarationsOnly => {
+        InterfaceRead::DeclarationsOnly { .. } => {
             return process_typed_artifact(config, shared_resolver, artifact);
         }
         InterfaceRead::Raised(report) => return Outcome::raised(report),
         InterfaceRead::Read {
             ignore_interface,
             output,
+            ..
         } => (ignore_interface, output),
     };
     if artifact.declarations_only {
@@ -949,6 +993,7 @@ pub fn process_implementation_with_interface(
         &artifact,
     );
     let notes = notes.take();
+    let walk_needs_locations = needs_locations(&artifact, !notes.is_empty());
     let outcome = match walked {
         Err(escape) => Outcome::raised((artifact.render_escape)(escape)),
         // The implementation's annotations were read above; its own walk
@@ -959,6 +1004,7 @@ pub fn process_implementation_with_interface(
         Ok(_) => interface_output.unwrap_or_default(),
     };
     Outcome {
+        needs_locations: outcome.needs_locations || walk_needs_locations,
         notes: notes.into_iter().chain(outcome.notes).collect(),
         result: outcome.result,
     }

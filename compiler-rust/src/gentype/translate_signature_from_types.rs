@@ -51,7 +51,7 @@ pub fn translate_type_declaration_from_types(
         arena,
         config,
         ctx.resolve_loc(type_declaration.type_loc),
-        &crate::gentype::annotation::decl_file(ctx, arena, type_declaration.type_loc),
+        &|| crate::gentype::annotation::decl_file(ctx, arena, type_declaration.type_loc),
         output_file_relative,
         resolver,
         &type_declaration.type_attributes,
@@ -161,7 +161,7 @@ pub fn translate_signature_item_from_types(
             if crate::gentype::annotation::from_decl_attributes(
                 config,
                 &crate::gentype::type_env::notes(type_env),
-                &crate::gentype::annotation::decl_file(ctx, arena, value_description.val_loc),
+                &|| crate::gentype::annotation::decl_file(ctx, arena, value_description.val_loc),
                 &val_loc,
                 &value_description.val_attributes,
             )? == crate::gentype::annotation::T::GenType

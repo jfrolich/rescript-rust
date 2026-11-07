@@ -196,28 +196,37 @@ const GENTYPE_AS_RENAMING: &str =
     "\n@genType.as is not supported anymore in type definitions. Use @as from the language.";
 
 /// The file a parsed location is in, as Location.get_pos_info names it.
+/// A location-free parse has none: a compile whose GenType prints a note
+/// from one is retried with locations (`Outcome::needs_locations`).
 pub fn parsed_file(arena: &ParseArena, loc: &Location) -> String {
+    if !arena.stores_locations() {
+        return String::new();
+    }
     arena.get_string(loc.loc_start.file_name).to_string()
 }
 
-/// The file a declaration location is in: the compiling unit's own (a
-/// source or compilation-local location, whose file name is in `arena`), or
-/// another unit's, named by the context's file table.
+/// The file a declaration location is in. The handle's kind does not say
+/// which unit it came from (an imported declaration keeps a source handle),
+/// so the file index's owner does: importing a declaration renames its file
+/// into the context's file table (`DeclLocImport::files`, interned by
+/// `TypeContext::intern_cmi_longident_name` or the shared pool), and any
+/// other file is one of the compiling unit's own, named by its parse arena.
 pub fn decl_file(
     ctx: &crate::types::context::TypeContext,
     arena: &ParseArena,
     loc: crate::types::DeclLoc,
 ) -> String {
-    use crate::types::decl_loc::DeclLocKind;
     let resolved = ctx.resolve_loc(loc);
     if resolved.is_none() {
         return String::new();
     }
-    match loc.kind() {
-        DeclLocKind::Source | DeclLocKind::Local => parsed_file(arena, &resolved),
-        _ => ctx
-            .resolve_cmi_longident_component(resolved.loc_start.file_name)
-            .unwrap_or_default(),
+    let file = resolved.loc_start.file_name;
+    match ctx.resolve_cmi_longident_component(file) {
+        Some(imported) => imported,
+        None => arena
+            .own_file_name(file)
+            .unwrap_or_else(|| panic!("declaration location in an unknown file {file:?}"))
+            .to_string(),
     }
 }
 
@@ -724,7 +733,7 @@ pub fn check_unsupported_decl_gentype_as_renaming(
 pub fn from_decl_attributes(
     config: &crate::gentype::config::T,
     notes: &crate::gentype::log_::Notes,
-    file: &str,
+    file: &dyn Fn() -> String,
     loc: &Location,
     attributes: &[crate::types::decl::Attribute],
 ) -> Read<T> {
@@ -741,7 +750,7 @@ pub fn from_decl_attributes(
             && !decl_attribute_payload_is_empty(payload)
         {
             notes.info(
-                file,
+                &file(),
                 loc,
                 "Warning genType",
                 "Annotation payload is ignored",
@@ -770,4 +779,48 @@ pub fn update_config_for_decl_module(
 
 fn singleton_attribute(attribute: &Attribute) -> Attributes {
     Attributes::from_vec(vec![attribute.clone()])
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::location::{Location, LocationOrigin, Position};
+
+    fn source_handle(file: crate::intern::StrIdx) -> crate::types::DeclLoc {
+        let pos = Position::new(file, 0, 0, 0);
+        crate::types::DeclLoc::source(&Location {
+            loc_start: pos,
+            loc_end: pos,
+            loc_ghost: false,
+            origin: LocationOrigin::default(),
+        })
+        .expect("a coordinate-free location")
+    }
+
+    /// A declaration imported from another unit keeps a source handle, its
+    /// file renamed into the context's file table: its notes name that file,
+    /// whether or not the compiling unit's parse stores locations.
+    #[test]
+    fn decl_file_names_the_unit_a_declaration_came_from() {
+        for store_locations in [true, false] {
+            let parser = crate::parser::Parser::with_locations(
+                "src/B.res".to_string(),
+                "module M = A\n",
+                store_locations,
+            );
+            let arena = parser.into_arena();
+            let ctx = crate::types::context::TypeContext::new(std::sync::Arc::new(
+                crate::context::IdGenerator::new(),
+            ));
+            let imported = ctx.intern_cmi_longident_name("src/A.res");
+            assert_eq!(
+                super::decl_file(&ctx, &arena, source_handle(imported)),
+                "src/A.res"
+            );
+            let own = arena.source_file();
+            assert_eq!(
+                super::decl_file(&ctx, &arena, source_handle(own)),
+                "src/B.res"
+            );
+        }
+    }
 }

@@ -4650,8 +4650,10 @@ fn parsed_signature_read_input(
 /// compile path does not have typed, so the parsed `.resi` stands in for
 /// the walk and the interface's output is not this compile's.
 fn interface_source_gentype_read(source_file: &str) -> crate::gentype::main::InterfaceRead {
+    // The walk renders no notes.
     let not_selected = crate::gentype::main::InterfaceRead::Read {
         ignore_interface: false,
+        needs_locations: false,
         output: None,
     };
     let intf_name = interface_source_name(source_file);
@@ -4668,6 +4670,7 @@ fn interface_source_gentype_read(source_file: &str) -> crate::gentype::main::Int
     match parsed_signature_read_input(parser.arena(), &signature, &ignore_interface) {
         Ok(_) => crate::gentype::main::InterfaceRead::Read {
             ignore_interface: ignore_interface.get(),
+            needs_locations: false,
             output: None,
         },
         Err(crate::gentype::annotation::InvalidEscape::Parsed(loc)) => {
@@ -14741,6 +14744,11 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     } else {
         None
     };
+    // A GenType note quotes a location: like a warning, it needs a located
+    // parse (`place_location_free_warnings`).
+    if gentype.as_ref().is_some_and(|outcome| outcome.needs_locations) {
+        return Err(LocationRetry::Warning.into());
+    }
 
     let lambda_start_stamp = synchronize_lambda_start_stamp(&type_ctx);
 
@@ -15406,6 +15414,9 @@ pub fn typecheck_preprocessed_signature_in_process(
         true,
         crate::gentype::main::read_interface_artifact,
     );
+    if gentype.as_ref().is_some_and(crate::gentype::main::InterfaceRead::needs_locations) {
+        return Err(LocationRetry::Warning.into());
+    }
     let decl_signature = crate::types::typemod::decl_signature_from_typed_signature(
         &typed_signature,
         arena,
@@ -15616,6 +15627,65 @@ mod tests {
             super::apply_gentype_outcome(Some(outcome), "", &filename.to_string_lossy()).unwrap();
         assert!(printed.contains("Annotation payload is ignored"), "{printed}");
         assert!(output.exists());
+    }
+
+    /// A GenType note quotes a location, so a compile from a location-free
+    /// parse whose GenType prints one asks to be retried with locations, as
+    /// for a warning, instead of rendering it from the location-free parse.
+    #[test]
+    fn location_free_compile_with_a_gentype_note_is_retried_with_locations() {
+        let root = std::env::temp_dir().join(format!("gentype-unlocated-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        let filename = root.join("src/Unlocated.res").to_string_lossy().into_owned();
+        let mut options = super::CompilerOptions::default();
+        options.gentype_config = Some(std::sync::Arc::new(
+            crate::gentype::config::build_config_from_cli_args(
+                None,
+                &[
+                    "-bs-project-root".to_string(),
+                    root.to_string_lossy().into_owned(),
+                    "-bs-gentype".to_string(),
+                ],
+            ),
+        ));
+        let registry = crate::cmi::persistent_env::ModuleRegistry::new();
+        let compile = |source: &str| {
+            let mut parser =
+                crate::parser::Parser::with_locations(filename.clone(), source, false);
+            let structure = crate::parser::module::parse_structure(&mut parser);
+            let mut out = String::new();
+            let frontend = super::run_implementation_frontend(
+                &mut parser,
+                structure,
+                source,
+                &filename,
+                &options,
+                &mut out,
+            )
+            .expect("frontend");
+            let mut arena = parser.into_arena();
+            assert!(!arena.stores_locations());
+            crate::types::typecore::prepare_typecheck_arena(&mut arena);
+            super::compile_preprocessed_structure_in_process(
+                &arena,
+                &frontend.structure,
+                &filename,
+                "Unlocated",
+                &options,
+                &registry,
+                false,
+                None,
+            )
+            .map(|result| result.gentype)
+        };
+        let error = compile("@genType(`x`) let x = 1\n").err().expect("retried");
+        assert!(matches!(
+            error.downcast_ref::<super::LocationRetry>(),
+            Some(super::LocationRetry::Warning)
+        ));
+        // Without notes the location-free compile stands.
+        let outcome = compile("@genType let x = 1\n").expect("compiles").expect("GenType ran");
+        assert!(outcome.notes.is_empty() && !outcome.needs_locations);
     }
 
     use super::build_name_based_coercion;
