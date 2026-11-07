@@ -98,6 +98,16 @@ impl BlockOutput {
         }
     }
 
+    /// An output whose `output_finished` is `True`: a `return`
+    /// (js_output.ml:51, 59), a raise (lam_compile.ml:1682) or a jump back
+    /// to a self tail call loop (lam_compile.ml:1538, 1626).
+    pub(crate) fn finished(block: Block) -> Self {
+        Self {
+            block,
+            finished: OutputFinished::True,
+        }
+    }
+
     /// `Js_output.dummy` (js_output.ml:38).
     pub(crate) fn dummy() -> Self {
         Self {
@@ -394,7 +404,6 @@ pub struct LambdaCompiler {
     /// `Js_output.output_finished` of each `Lifthenelse` compiled in a
     /// return continuation, keyed by the address of its `then` branch: only
     /// the `return e ? a : b` arm sets it (lam_compile.ml:1514-1518).
-    if_return_finished: AHashMap<usize, bool>,
     pub(crate) module_path_resolver: Option<ModulePathResolver>,
     pub(crate) jsx_preserve: bool,
     pub(crate) check_div_by_zero: bool,
@@ -537,7 +546,6 @@ impl LambdaCompiler {
             flat_make_paths: Vec::new(),
             awaited_units: ahash::AHashSet::new(),
             lam_locs: LamLocTable::opaque(),
-            if_return_finished: AHashMap::new(),
             external_module_ids: AHashMap::new(),
             dynamic_import_modules: Vec::new(),
             static_handlers: Vec::new(),
@@ -680,7 +688,6 @@ impl LambdaCompiler {
         .entered();
         self.external_module_ids.clear();
         self.dynamic_import_modules.clear();
-        self.if_return_finished.clear();
         let simplified_result = crate::timing::measure(
             crate::timing::Phase::LambdaOptimization,
             || {
@@ -2263,10 +2270,6 @@ impl LambdaCompiler {
         }
     }
 
-    fn compile_recursive_bindings(&mut self, bindings: &[(Ident, Lambda)]) -> Block {
-        self.compile_recursive_bindings_output(bindings).block
-    }
-
     /// lam_compile.ml:521-539 `compile_recursive_lets_aux`: the bindings are
     /// compiled with `Ext_list.fold_right`, so the last one first, each
     /// output is `append_output`ed onto the outputs after it (starting from
@@ -2996,16 +2999,16 @@ impl LambdaCompiler {
         block
     }
 
-    fn compile_short_circuit_return_block(
+    fn compile_short_circuit_return_output(
         &mut self,
         op: ShortCircuitOp,
         lhs: &Lambda,
         rhs: &Lambda,
-    ) -> Block {
+    ) -> BlockOutput {
         let default = op.default_lambda();
         match op {
-            ShortCircuitOp::And => self.compile_if_return_block(lhs, rhs, &default),
-            ShortCircuitOp::Or => self.compile_if_return_block(lhs, &default, rhs),
+            ShortCircuitOp::And => self.compile_if_return_output(lhs, rhs, &default),
+            ShortCircuitOp::Or => self.compile_if_return_output(lhs, &default, rhs),
         }
     }
 
@@ -3013,27 +3016,31 @@ impl LambdaCompiler {
         // Mirror OCaml's invariant that consumers go through
         // `Js_output.output_as_block` (js_output.ml:82-86) which calls
         // `unnest_block` on `compile_lambda` results.
-        unnest_block(self.compile_return_block_inner(lam))
+        self.compile_return_output(lam).block
     }
 
-    fn compile_return_block_inner(&mut self, lam: &Lambda) -> Block {
+    /// `compile_lambda {cxt with continuation = EffectCall
+    /// (Maybe_tail_is_return _)} lam`, with the output's `finished` flag.
+    pub(crate) fn compile_return_output(&mut self, lam: &Lambda) -> BlockOutput {
+        let output = self.compile_return_output_inner(lam);
+        BlockOutput {
+            block: unnest_block(output.block),
+            finished: output.finished,
+        }
+    }
+
+    fn compile_return_output_inner(&mut self, lam: &Lambda) -> BlockOutput {
         match lam {
             Lambda::Llet(kind, id, value, body) => {
                 if let Some(compiled) = self.try_compile_record_spread(id, value, body) {
-                    let mut block = compiled.prelude;
-                    block.push(Statement::return_(compiled.expr));
-                    return block;
+                    return return_compiled(compiled);
                 }
 
                 // lam_compile.ml:1867-1877: compile the binding, then the
                 // body, then `append_output`.
                 let binding = self.compile_let_binding_output(*kind, id, value);
-                let body = self.compile_return_block(body);
-                let mut block = binding.block;
-                if binding.finished != OutputFinished::True {
-                    block.extend(body);
-                }
-                block
+                let body = self.compile_return_output(body);
+                binding.append(body)
             }
             Lambda::Lletrec(bindings, body) => {
                 // Mirror OCaml's `Lletrec` arm in `compile_lambda`
@@ -3047,12 +3054,8 @@ impl LambdaCompiler {
                 // `if (cond) return true; else { return call(args); }` that
                 // `js_pass_tailcall_inline` can later inline.
                 let recursive = self.compile_recursive_bindings_output(bindings);
-                let body = self.compile_return_block(body);
-                let mut block = recursive.block;
-                if recursive.finished != OutputFinished::True {
-                    block.extend(body);
-                }
-                block
+                let body = self.compile_return_output(body);
+                recursive.append(body)
             }
             Lambda::Lapply(apply) => {
                 let mut compiled = self.compile_apply_call(apply);
@@ -3060,50 +3063,40 @@ impl LambdaCompiler {
                 if compiled.expr.source_loc.is_none() {
                     compiled.expr.source_loc = self.source_loc(&apply.ap_info.loc);
                 }
-                let mut block = compiled.prelude;
-                block.push(Statement::return_(compiled.expr));
-                block
+                return_compiled(compiled)
             }
-            Lambda::LifThenElse(cond, then_, else_) => self
-                .compile_if_unit_return_tail_block(cond, then_, else_)
-                .unwrap_or_else(|| self.compile_if_return_block(cond, then_, else_)),
+            Lambda::LifThenElse(cond, then_, else_) => {
+                // Both branches are `undefined`: OCaml's `return e ? undefined
+                // : undefined` (lam_compile.ml:1533-1537), finished.
+                match self.compile_if_unit_return_tail_block(cond, then_, else_) {
+                    Some(block) => BlockOutput::finished(block),
+                    None => self.compile_if_return_output(cond, then_, else_),
+                }
+            }
             Lambda::Lprim(info) => {
                 if let Some((op, lhs, rhs)) = short_circuit_primitive(&info.primitive, &info.args) {
-                    return self.compile_short_circuit_return_block(op, lhs, rhs);
+                    return self.compile_short_circuit_return_output(op, lhs, rhs);
                 }
-                let compiled = self.compile_expr(lam);
-                let mut block = compiled.prelude;
-                if !block_terminates(&block) {
-                    block.push(Statement::return_(compiled.expr));
-                }
-                block
+                return_compiled(self.compile_expr(lam))
             }
             Lambda::Lsequence(first, second) => {
                 // lam_compile.ml:1905-1910: both parts are compiled first.
                 let first = self.compile_effect_block_output(first);
-                let second = self.compile_return_block(second);
-                let mut block = first.block;
-                if first.finished != OutputFinished::True {
-                    block.extend(second);
-                }
-                block
+                let second = self.compile_return_output(second);
+                first.append(second)
             }
             Lambda::LstaticRaise(id, args) => {
-                if let Some(block) = self.compile_static_raise_jump_block(*id, args) {
-                    return block;
+                if let Some(output) = self.compile_static_raise_jump_output(*id, args) {
+                    return output;
                 }
-                if let Some(block) = self.compile_fallthrough_static_raise_return_block(*id, args) {
-                    return block;
+                if let Some(output) = self.compile_fallthrough_static_raise_return_output(*id, args)
+                {
+                    return output;
                 }
                 if let Some(handler) = self.resolve_static_raise(*id, args) {
-                    return self.compile_return_block(&handler);
+                    return self.compile_return_output(&handler);
                 }
-                let compiled = self.compile_expr(lam);
-                let mut block = compiled.prelude;
-                if !block_terminates(&block) {
-                    block.push(Statement::return_(compiled.expr));
-                }
-                block
+                return_compiled(self.compile_expr(lam))
             }
             Lambda::LstaticCatch(body, (label, bindings), handler)
                 if flatten_nested_caches(*label, bindings, body, handler)
@@ -3116,19 +3109,19 @@ impl LambdaCompiler {
                 // entries goes through the multi-handler explicit-jump arm
                 // (lam_compile.ml:1000-1010 for `EffectCall tail_type`).
                 let (handlers, flat_body) = flatten_nested_caches(*label, bindings, body, handler);
-                self.compile_multi_staticcatch_return_block(&handlers, flat_body)
+                self.compile_multi_staticcatch_return_output(&handlers, flat_body)
             }
             Lambda::LstaticCatch(body, (label, bindings), handler)
                 if self.uses_fallthrough_staticcatch_return(body, *label, bindings, handler) =>
             {
-                self.compile_fallthrough_staticcatch_return_block(*label, bindings, body, handler)
+                self.compile_fallthrough_staticcatch_return_output(*label, bindings, body, handler)
             }
             Lambda::LstaticCatch(body, (label, bindings), handler)
                 if self.uses_pseudo_fallthrough_staticcatch_return(
                     body, *label, bindings, handler,
                 ) =>
             {
-                self.compile_fallthrough_staticcatch_return_block(*label, bindings, body, handler)
+                self.compile_fallthrough_staticcatch_return_output(*label, bindings, body, handler)
             }
             Lambda::LstaticCatch(body, (label, bindings), handler)
                 if bindings.is_empty()
@@ -3141,7 +3134,7 @@ impl LambdaCompiler {
                     && !self.handler_returns_unit_undefined(bindings, handler)
                     && no_static_raise_in_handler_like_ocaml(handler) =>
             {
-                self.compile_fallthrough_staticcatch_return_block(*label, bindings, body, handler)
+                self.compile_fallthrough_staticcatch_return_output(*label, bindings, body, handler)
             }
             Lambda::LstaticCatch(body, (label, bindings), handler) => {
                 let requires_explicit_jump = (self.return_unit_stack.last().copied() == Some(true)
@@ -3150,7 +3143,7 @@ impl LambdaCompiler {
                     || self
                         .return_staticcatch_requires_explicit_jump(*label, bindings, body, handler);
                 if requires_explicit_jump {
-                    self.compile_staticcatch_return_block(*label, bindings, body, handler)
+                    self.compile_staticcatch_return_output(*label, bindings, body, handler)
                 } else if no_static_raise_in_handler_like_ocaml(handler)
                     && !lambda_contains_staticcatch(handler)
                     && lambda_contains_static_raise_to_label(body, *label, bindings.len())
@@ -3170,7 +3163,7 @@ impl LambdaCompiler {
                     // fallthrough path from firing on handlers whose
                     // tail-loop body contains an inner closure with a
                     // static_raise.
-                    self.compile_fallthrough_staticcatch_return_block(
+                    self.compile_fallthrough_staticcatch_return_output(
                         *label, bindings, body, handler,
                     )
                 } else if lambda_contains_static_raise_to_label(body, *label, bindings.len()) {
@@ -3184,10 +3177,10 @@ impl LambdaCompiler {
                     // inlines the handler at every raise site via
                     // `resolve_static_raise`, while OCaml emits it ONCE
                     // gated by `if (exit === N)` after the body.
-                    self.compile_staticcatch_return_block(*label, bindings, body, handler)
+                    self.compile_staticcatch_return_output(*label, bindings, body, handler)
                 } else {
                     self.with_static_handler(*label, bindings, handler, |this| {
-                        this.compile_return_block(body)
+                        this.compile_return_output(body)
                     })
                 }
             }
@@ -3200,25 +3193,24 @@ impl LambdaCompiler {
                 // `compile_staticcatch`'s pseudo-jump arm.
                 let body_block = self.with_try_body_context(|this| this.compile_return_block(body));
                 let handler_block = self.compile_return_block(handler);
-                vec![self.try_statement(body_block, exn, handler_block)]
+                BlockOutput::make(vec![self.try_statement(body_block, exn, handler_block)])
             }
             Lambda::LtryFinally(body, finally) => {
-                vec![self.compile_try_finally(body, finally, |this, lam| {
-                    this.with_try_body_context(|this| this.compile_return_block(lam))
-                })]
+                BlockOutput::make(vec![self.compile_try_finally(
+                    body,
+                    finally,
+                    |this, lam| this.with_try_body_context(|this| this.compile_return_block(lam)),
+                )])
             }
-            Lambda::Lswitch(scrut, switch) => self.compile_switch_return_block(scrut, switch),
-            Lambda::LstringSwitch(scrut, cases, default) => {
-                self.compile_string_switch_return_block(scrut, cases, default.as_deref())
+            // compile_switch / compile_stringswitch return `Js_output.make`
+            // (lam_compile.ml:822).
+            Lambda::Lswitch(scrut, switch) => {
+                BlockOutput::make(self.compile_switch_return_block(scrut, switch))
             }
-            _ => {
-                let compiled = self.compile_expr(lam);
-                let mut block = compiled.prelude;
-                if !block_terminates(&block) {
-                    block.push(Statement::return_(compiled.expr));
-                }
-                block
-            }
+            Lambda::LstringSwitch(scrut, cases, default) => BlockOutput::make(
+                self.compile_string_switch_return_block(scrut, cases, default.as_deref()),
+            ),
+            _ => return_compiled(self.compile_expr(lam)),
         }
     }
 
@@ -3362,11 +3354,14 @@ impl LambdaCompiler {
         )
     }
 
-    fn compile_fallthrough_static_raise_return_block(
+    /// lam_compile.ml:969-986 `compile_staticraise` to a pseudo jump
+    /// (`order_id < 0`): the arguments are assigned, folded last first onto
+    /// `Js_output.make []`.
+    fn compile_fallthrough_static_raise_return_output(
         &mut self,
         label: i32,
         args: &[Lambda],
-    ) -> Option<Block> {
+    ) -> Option<BlockOutput> {
         let bindings = self
             .fallthrough_return_handlers
             .iter()
@@ -3378,24 +3373,31 @@ impl LambdaCompiler {
             return None;
         }
 
-        let mut block = Vec::new();
-        for (arg, binding) in args.iter().zip(&bindings) {
-            if matches!(arg, Lambda::Lvar(id) if id.same(binding)) {
-                continue;
-            }
-            block.extend(self.compile_assign_to_target_block(binding, arg));
-        }
-        Some(block)
+        let output = args.iter().zip(&bindings).rev().fold(
+            BlockOutput::make(vec![]),
+            |acc, (arg, binding)| {
+                if matches!(arg, Lambda::Lvar(id) if id.same(binding)) {
+                    return acc;
+                }
+                self.compile_assign_to_target_output(binding, arg)
+                    .append(acc)
+            },
+        );
+        Some(output)
     }
 
-    fn compile_fallthrough_staticcatch_return_block(
+    /// lam_compile.ml:1022-1047, the pseudo-jump arm of
+    /// `compile_staticcatch`: `append_output (make declares) (append_output
+    /// lbody (compile_lambda lambda_cxt handler))`, with the handler compiled
+    /// after the body.
+    fn compile_fallthrough_staticcatch_return_output(
         &mut self,
         label: i32,
         bindings: &[Ident],
         body: &Lambda,
         handler: &Lambda,
-    ) -> Block {
-        let mut block: Block = bindings
+    ) -> BlockOutput {
+        let declarations: Block = bindings
             .iter()
             .map(|binding| {
                 Statement::variable(VariableDeclaration {
@@ -3406,25 +3408,26 @@ impl LambdaCompiler {
                 })
             })
             .collect();
-        let body_block = self.with_fallthrough_return_handler(label, bindings, |this| {
-            this.compile_return_block(body)
+        let body_output = self.with_fallthrough_return_handler(label, bindings, |this| {
+            this.compile_return_output(body)
         });
-        block.extend(body_block);
-        if !block_terminates(&block) {
-            block.extend(self.compile_return_block(handler));
-        }
-        block
+        let handler_output = self.compile_return_output(handler);
+        BlockOutput::make(declarations).append(body_output.append(handler_output))
     }
 
-    fn compile_fallthrough_staticcatch_tail_loop_return_block(
+    /// lam_compile.ml:1022-1047, the pseudo-jump arm of
+    /// `compile_staticcatch`: `append_output (make declares) (append_output
+    /// lbody (compile_lambda lambda_cxt handler))`, with the handler compiled
+    /// after the body.
+    fn compile_fallthrough_staticcatch_tail_loop_return_output(
         &mut self,
         label: i32,
         bindings: &[Ident],
         body: &Lambda,
         handler: &Lambda,
         tail_loop: &mut TailLoopState,
-    ) -> Block {
-        let mut block: Block = bindings
+    ) -> BlockOutput {
+        let declarations: Block = bindings
             .iter()
             .map(|binding| {
                 Statement::variable(VariableDeclaration {
@@ -3435,23 +3438,11 @@ impl LambdaCompiler {
                 })
             })
             .collect();
-        let body_block = self.with_fallthrough_return_handler(label, bindings, |this| {
-            this.compile_tail_loop_return_block(body, tail_loop)
+        let body_output = self.with_fallthrough_return_handler(label, bindings, |this| {
+            this.compile_tail_loop_return_output(body, tail_loop)
         });
-        block.extend(body_block);
-        if !block_terminates(&block) {
-            block.extend(self.compile_tail_loop_return_block(handler, tail_loop));
-        }
-        block
-    }
-
-    /// Whether the current return continuation is no longer OCaml's
-    /// `Tail_with_name {in_staticcatch = false}` (lam_compile.ml:1022-1028).
-    pub(crate) fn in_staticcatch_like_ocaml(&self) -> bool {
-        self.try_body_depth > 0
-            || !self.fallthrough_return_handlers.is_empty()
-            || !self.static_handlers.is_empty()
-            || !self.static_jump_handlers.is_empty()
+        let handler_output = self.compile_tail_loop_return_output(handler, tail_loop);
+        BlockOutput::make(declarations).append(body_output.append(handler_output))
     }
 
     fn uses_fallthrough_staticcatch_return(
@@ -3675,7 +3666,9 @@ impl LambdaCompiler {
             }
 
             let (_, body, _) = &grouped_cases[group_end];
-            let compiled_body = self.compile_return_block(body);
+            let compiled_output = self.compile_return_output(body);
+            let compiled_finished = compiled_output.finished;
+            let compiled_body = compiled_output.block;
             let group_falls_through = compiled_body.is_empty();
             // Mirror OCaml's `compile_general_cases`: it feeds each last
             // grouped case through `Js_output.to_break_block`, then gates the
@@ -3684,7 +3677,7 @@ impl LambdaCompiler {
             // compiler/core/js_output.ml:88-100). When a case resolves to a
             // fallthrough static-raise handler, the empty body still needs a
             // `break;` so the appended handler runs once after the switch.
-            let should_break = self.return_case_needs_break_like_ocaml(body, &compiled_body);
+            let should_break = return_case_needs_break(body, compiled_finished);
 
             for (tag, case_lam, _) in &grouped_cases[group_start..group_end] {
                 clauses.push((
@@ -3723,28 +3716,39 @@ impl LambdaCompiler {
         }
     }
 
-    pub(crate) fn compile_hoisted_named_string_return_tail(&mut self, body: &Lambda) -> Block {
+    pub(crate) fn compile_hoisted_named_string_return_tail(
+        &mut self,
+        body: &Lambda,
+    ) -> BlockOutput {
         self.compile_hoisted_static_raise_chain_return_tail(body)
-            .unwrap_or_else(|| self.compile_return_block(body))
+            .unwrap_or_else(|| self.compile_return_output(body))
     }
 
-    fn compile_hoisted_static_raise_chain_return_tail(&mut self, lam: &Lambda) -> Option<Block> {
+    /// Inlines the handler of a static raise in a string switch's shared
+    /// return tail. The parts are joined with `append` after all of them
+    /// are compiled; the arguments are compiled last first, as
+    /// `compile_staticraise`'s `Ext_list.fold_right2` does
+    /// (lam_compile.ml:969-986).
+    fn compile_hoisted_static_raise_chain_return_tail(
+        &mut self,
+        lam: &Lambda,
+    ) -> Option<BlockOutput> {
         match lam {
             Lambda::Llet(kind, id, value, body) => {
-                let mut block = self.compile_let_binding(*kind, id, value);
-                if block_finishes_output(&block) {
-                    return Some(block);
+                let binding = self.compile_let_binding_output(*kind, id, value);
+                match self.compile_hoisted_static_raise_chain_return_tail(body) {
+                    Some(body) => Some(binding.append(body)),
+                    None if binding.finished == OutputFinished::True => Some(binding),
+                    None => None,
                 }
-                block.extend(self.compile_hoisted_static_raise_chain_return_tail(body)?);
-                Some(block)
             }
             Lambda::Lsequence(first, second) => {
-                let mut block = self.compile_effect_block(first);
-                if block_finishes_output(&block) {
-                    return Some(block);
+                let first = self.compile_effect_block_output(first);
+                match self.compile_hoisted_static_raise_chain_return_tail(second) {
+                    Some(second) => Some(first.append(second)),
+                    None if first.finished == OutputFinished::True => Some(first),
+                    None => None,
                 }
-                block.extend(self.compile_hoisted_static_raise_chain_return_tail(second)?);
-                Some(block)
             }
             Lambda::LstaticRaise(label, args) => {
                 let handler_index = self.static_handlers.iter().rposition(|handler| {
@@ -3753,24 +3757,21 @@ impl LambdaCompiler {
                 let handler = self.static_handlers[handler_index].clone();
                 let removed = self.static_handlers.remove(handler_index);
 
-                let mut block = Vec::new();
-                for (arg, binding) in args.iter().zip(&handler.bindings) {
-                    if matches!(arg, Lambda::Lvar(id) if id.same(binding)) {
-                        continue;
-                    }
-                    block.extend(self.compile_let_binding(LetKind::Strict, binding, arg));
-                    if block_finishes_output(&block) {
-                        self.static_handlers.insert(handler_index, removed);
-                        return Some(block);
-                    }
-                }
-
-                block.extend(
-                    self.compile_hoisted_static_raise_chain_return_tail(&handler.handler)
-                        .unwrap_or_else(|| self.compile_return_block(&handler.handler)),
+                let arguments = args.iter().zip(&handler.bindings).rev().fold(
+                    BlockOutput::dummy(),
+                    |acc, (arg, binding)| {
+                        if matches!(arg, Lambda::Lvar(id) if id.same(binding)) {
+                            return acc;
+                        }
+                        self.compile_let_binding_output(LetKind::Strict, binding, arg)
+                            .append(acc)
+                    },
                 );
+                let handler_output = self
+                    .compile_hoisted_static_raise_chain_return_tail(&handler.handler)
+                    .unwrap_or_else(|| self.compile_return_output(&handler.handler));
                 self.static_handlers.insert(handler_index, removed);
-                Some(block)
+                Some(arguments.append(handler_output))
             }
             _ => None,
         }
@@ -3849,65 +3850,71 @@ impl LambdaCompiler {
     ) -> Block {
         // Mirror OCaml's invariant that consumers of `compile_lambda` go
         // through `Js_output.output_as_block` which calls `unnest_block`.
-        unnest_block(self.compile_tail_loop_return_block_inner(lam, tail_loop))
+        self.compile_tail_loop_return_output(lam, tail_loop).block
     }
 
-    fn compile_tail_loop_return_block_inner(
+    /// [`Self::compile_return_output`] in a function body compiled as a
+    /// self tail call loop.
+    pub(crate) fn compile_tail_loop_return_output(
         &mut self,
         lam: &Lambda,
         tail_loop: &mut TailLoopState,
-    ) -> Block {
+    ) -> BlockOutput {
+        let output = self.compile_tail_loop_return_output_inner(lam, tail_loop);
+        BlockOutput {
+            block: unnest_block(output.block),
+            finished: output.finished,
+        }
+    }
+
+    fn compile_tail_loop_return_output_inner(
+        &mut self,
+        lam: &Lambda,
+        tail_loop: &mut TailLoopState,
+    ) -> BlockOutput {
         match lam {
             Lambda::Llet(kind, id, value, body) => {
-                let mut block = self.compile_let_binding(*kind, id, value);
-                block.extend(self.compile_tail_loop_return_block(body, tail_loop));
-                block
+                // lam_compile.ml:1867-1877.
+                let binding = self.compile_let_binding_output(*kind, id, value);
+                let body = self.compile_tail_loop_return_output(body, tail_loop);
+                binding.append(body)
             }
             Lambda::Lapply(apply) => {
+                // lam_compile.ml:1538, 1626: the jump back to the loop is
+                // finished.
                 if let Some(block) = self.try_compile_self_tailcall_block(apply, tail_loop) {
-                    return block;
+                    return BlockOutput::finished(block);
                 }
-                let compiled = self.compile_apply_call(apply);
-                let mut block = compiled.prelude;
-                block.push(Statement::return_(compiled.expr));
-                block
+                return_compiled(self.compile_apply_call(apply))
             }
             Lambda::LifThenElse(cond, then_, else_) => {
-                self.compile_tail_loop_if_return_block(cond, then_, else_, tail_loop)
+                self.compile_tail_loop_if_return_output(cond, then_, else_, tail_loop)
             }
             Lambda::Lprim(info) => {
                 if let Some((op, lhs, rhs)) = short_circuit_primitive(&info.primitive, &info.args) {
                     return self
-                        .compile_short_circuit_tail_loop_return_block(op, lhs, rhs, tail_loop);
+                        .compile_short_circuit_tail_loop_return_output(op, lhs, rhs, tail_loop);
                 }
-                let compiled = self.compile_expr(lam);
-                let mut block = compiled.prelude;
-                if !block_terminates(&block) {
-                    block.push(Statement::return_(compiled.expr));
-                }
-                block
+                return_compiled(self.compile_expr(lam))
             }
             Lambda::Lsequence(first, second) => {
-                let mut block = self.compile_effect_block(first);
-                block.extend(self.compile_tail_loop_return_block(second, tail_loop));
-                block
+                // lam_compile.ml:1905-1910.
+                let first = self.compile_effect_block_output(first);
+                let second = self.compile_tail_loop_return_output(second, tail_loop);
+                first.append(second)
             }
             Lambda::LstaticRaise(id, args) => {
-                if let Some(block) = self.compile_static_raise_jump_block(*id, args) {
-                    return block;
+                if let Some(output) = self.compile_static_raise_jump_output(*id, args) {
+                    return output;
                 }
-                if let Some(block) = self.compile_fallthrough_static_raise_return_block(*id, args) {
-                    return block;
+                if let Some(output) = self.compile_fallthrough_static_raise_return_output(*id, args)
+                {
+                    return output;
                 }
                 if let Some(handler) = self.resolve_static_raise(*id, args) {
-                    return self.compile_tail_loop_return_block(&handler, tail_loop);
+                    return self.compile_tail_loop_return_output(&handler, tail_loop);
                 }
-                let compiled = self.compile_expr(lam);
-                let mut block = compiled.prelude;
-                if !block_terminates(&block) {
-                    block.push(Statement::return_(compiled.expr));
-                }
-                block
+                return_compiled(self.compile_expr(lam))
             }
             Lambda::LstaticCatch(body, (label, bindings), handler) => {
                 // lam_compile.ml:935 — `flatten_nested_caches` is the first
@@ -3916,7 +3923,7 @@ impl LambdaCompiler {
                 // (lam_compile.ml:1000-1010).
                 let (handlers, flat_body) = flatten_nested_caches(*label, bindings, body, handler);
                 if handlers.len() > 1 {
-                    return self.compile_multi_staticcatch_tail_loop_return_block(
+                    return self.compile_multi_staticcatch_tail_loop_return_output(
                         &handlers, flat_body, tail_loop,
                     );
                 }
@@ -3928,11 +3935,11 @@ impl LambdaCompiler {
                     || self
                         .return_staticcatch_requires_explicit_jump(*label, bindings, body, handler);
                 if uses_fallthrough {
-                    self.compile_fallthrough_staticcatch_tail_loop_return_block(
+                    self.compile_fallthrough_staticcatch_tail_loop_return_output(
                         *label, bindings, body, handler, tail_loop,
                     )
                 } else if requires_explicit_jump {
-                    self.compile_staticcatch_tail_loop_return_block(
+                    self.compile_staticcatch_tail_loop_return_output(
                         *label, bindings, body, handler, tail_loop,
                     )
                 } else if no_static_raise_in_handler_like_ocaml(handler)
@@ -3953,7 +3960,7 @@ impl LambdaCompiler {
                     // the spurious outer explicit-jump layer that
                     // miss_colon_test saw when `lambda_contains_static_raise`
                     // over-counted.
-                    self.compile_fallthrough_staticcatch_tail_loop_return_block(
+                    self.compile_fallthrough_staticcatch_tail_loop_return_output(
                         *label, bindings, body, handler, tail_loop,
                     )
                 } else if lambda_contains_static_raise_to_label(body, *label, bindings.len()) {
@@ -3965,12 +3972,12 @@ impl LambdaCompiler {
                     // at every raise site via `resolve_static_raise`.
                     // Prefer explicit-jump to match OCaml's single-emission
                     // shape on miss_colon_test / gpr_1698_test.
-                    self.compile_staticcatch_tail_loop_return_block(
+                    self.compile_staticcatch_tail_loop_return_output(
                         *label, bindings, body, handler, tail_loop,
                     )
                 } else {
                     self.with_static_handler(*label, bindings, handler, |this| {
-                        this.compile_tail_loop_return_block(body, tail_loop)
+                        this.compile_tail_loop_return_output(body, tail_loop)
                     })
                 }
             }
@@ -3983,43 +3990,38 @@ impl LambdaCompiler {
                 // handler can still trigger the self-tailcall loop.
                 let body_block = self.compile_return_block(body);
                 let handler_block = self.compile_tail_loop_return_block(handler, tail_loop);
-                vec![self.try_statement(body_block, exn, handler_block)]
+                BlockOutput::make(vec![self.try_statement(body_block, exn, handler_block)])
             }
             Lambda::LtryFinally(body, finally) => {
-                vec![
-                    self.compile_try_finally(body, finally, |this, lam| {
-                        this.compile_return_block(lam)
-                    }),
-                ]
+                BlockOutput::make(vec![self.compile_try_finally(
+                    body,
+                    finally,
+                    |this, lam| this.compile_return_block(lam),
+                )])
             }
-            Lambda::Lswitch(scrut, switch) => {
-                self.compile_tail_loop_switch_return_block(scrut, switch, tail_loop)
-            }
-            Lambda::LstringSwitch(scrut, cases, default) => self
-                .compile_tail_loop_string_switch_return_block(
+            Lambda::Lswitch(scrut, switch) => BlockOutput::make(
+                self.compile_tail_loop_switch_return_block(scrut, switch, tail_loop),
+            ),
+            Lambda::LstringSwitch(scrut, cases, default) => {
+                BlockOutput::make(self.compile_tail_loop_string_switch_return_block(
                     scrut,
                     cases,
                     default.as_deref(),
                     tail_loop,
-                ),
-            _ => {
-                let compiled = self.compile_expr(lam);
-                let mut block = compiled.prelude;
-                if !block_terminates(&block) {
-                    block.push(Statement::return_(compiled.expr));
-                }
-                block
+                ))
             }
+            _ => return_compiled(self.compile_expr(lam)),
         }
     }
 
-    fn compile_tail_loop_if_return_block(
+    /// [`Self::compile_if_return_output`] in a self tail call loop.
+    fn compile_tail_loop_if_return_output(
         &mut self,
         cond: &Lambda,
         then_: &Lambda,
         else_: &Lambda,
         tail_loop: &mut TailLoopState,
-    ) -> Block {
+    ) -> BlockOutput {
         let cond_compiled = self.compile_expr(cond);
         // lam_compile.ml:1514-1518: compile both branches in
         // `NeedValue should_return` first and emit `return e ? a : b` when
@@ -4037,7 +4039,7 @@ impl LambdaCompiler {
                     then_value.expr,
                     else_value.expr,
                 )));
-                return block;
+                return BlockOutput::finished(block);
             }
         }
         let then_block = self.compile_tail_loop_return_block(then_, tail_loop);
@@ -4053,7 +4055,7 @@ impl LambdaCompiler {
                 then_expr,
                 else_expr,
             )));
-            return block;
+            return BlockOutput::make(block);
         }
 
         // Mirror OCaml's Lifthenelse compile (lam_compile.ml:1428-1436), which
@@ -4084,26 +4086,26 @@ impl LambdaCompiler {
                 vec![],
             )));
             block.extend(then_block);
-            return block;
+            return BlockOutput::make(block);
         }
         block.push(Statement::if_(cond_expr, then_block, else_block));
-        block
+        BlockOutput::make(block)
     }
 
-    fn compile_short_circuit_tail_loop_return_block(
+    fn compile_short_circuit_tail_loop_return_output(
         &mut self,
         op: ShortCircuitOp,
         lhs: &Lambda,
         rhs: &Lambda,
         tail_loop: &mut TailLoopState,
-    ) -> Block {
+    ) -> BlockOutput {
         let default = op.default_lambda();
         match op {
             ShortCircuitOp::And => {
-                self.compile_tail_loop_if_return_block(lhs, rhs, &default, tail_loop)
+                self.compile_tail_loop_if_return_output(lhs, rhs, &default, tail_loop)
             }
             ShortCircuitOp::Or => {
-                self.compile_tail_loop_if_return_block(lhs, &default, rhs, tail_loop)
+                self.compile_tail_loop_if_return_output(lhs, &default, rhs, tail_loop)
             }
         }
     }
@@ -4168,7 +4170,9 @@ impl LambdaCompiler {
             }
 
             let (_, body, _) = &grouped_cases[group_end];
-            let compiled_body = self.compile_tail_loop_return_block(body, tail_loop);
+            let compiled_output = self.compile_tail_loop_return_output(body, tail_loop);
+            let compiled_finished = compiled_output.finished;
+            let compiled_body = compiled_output.block;
             let group_falls_through = compiled_body.is_empty();
             // Tail-loop lowering is Rust-specific, but it must preserve OCaml's
             // `compile_general_cases` break semantics: the last grouped case
@@ -4176,7 +4180,7 @@ impl LambdaCompiler {
             // that break only when the source lambda has an exit
             // (compiler/core/lam_compile.ml:613-624;
             // compiler/core/js_output.ml:88-100).
-            let should_break = self.return_case_needs_break_like_ocaml(body, &compiled_body);
+            let should_break = return_case_needs_break(body, compiled_finished);
 
             for (tag, case_lam, _) in &grouped_cases[group_start..group_end] {
                 cases.push((
@@ -4844,9 +4848,15 @@ impl LambdaCompiler {
         Some(result)
     }
 
-    fn compile_if_return_block(&mut self, cond: &Lambda, then_: &Lambda, else_: &Lambda) -> Block {
-        let key = then_ as *const Lambda as usize;
-        self.if_return_finished.insert(key, false);
+    /// lam_compile.ml:1400-1545 `compile_ifthenelse` in a return
+    /// continuation: `return e ? a : b` is finished (lines 1533-1537); the
+    /// `S.if_` fallback is a plain `Js_output.make`.
+    fn compile_if_return_output(
+        &mut self,
+        cond: &Lambda,
+        then_: &Lambda,
+        else_: &Lambda,
+    ) -> BlockOutput {
         let cond_compiled = self.compile_expr(cond);
         let then_block_raw = self.compile_return_block(then_);
         let else_block_raw = self.compile_return_block(else_);
@@ -4867,14 +4877,13 @@ impl LambdaCompiler {
                 self.try_fold_effect_only_return_tail(&then_block_raw),
                 self.try_fold_effect_only_return_tail(&else_block_raw),
             ) {
-                self.if_return_finished.insert(key, true);
                 let mut block = cond_compiled.prelude;
                 block.push(Statement::return_(Expression::cond(
                     cond_compiled.expr,
                     then_seq,
                     else_seq,
                 )));
-                return block;
+                return BlockOutput::finished(block);
             }
         }
 
@@ -4888,14 +4897,13 @@ impl LambdaCompiler {
         let then_value = self.compile_expr(then_);
         let else_value = self.compile_expr(else_);
         if then_value.prelude.is_empty() && else_value.prelude.is_empty() {
-            self.if_return_finished.insert(key, true);
             let mut block = cond_compiled.prelude;
             block.push(Statement::return_(Expression::cond(
                 cond_compiled.expr,
                 then_value.expr,
                 else_value.expr,
             )));
-            return block;
+            return BlockOutput::finished(block);
         }
 
         // Keep the raw `[Return(Seq(...))]` shape so OCaml's `S.if_` rules
@@ -4912,7 +4920,7 @@ impl LambdaCompiler {
             then_block_raw,
             else_block_raw,
         ));
-        block
+        BlockOutput::make(block)
     }
 
     pub(crate) fn compile_test_return_block(
@@ -4999,9 +5007,13 @@ impl LambdaCompiler {
         vec![Statement::if_(cond, then_fallback, else_fallback)]
     }
 
+    /// A switch case in an `Assign result` continuation:
+    /// `Js_output.to_break_block` (js_output.ml:88-100) breaks unless the
+    /// output is finished.
     pub(crate) fn compile_switch_value_block(&mut self, result: &Ident, lam: &Lambda) -> Block {
-        let mut block = self.compile_assign_to_target_block(result, lam);
-        if !block_terminates(&block) {
+        let output = self.compile_assign_to_target_output(result, lam);
+        let mut block = output.block;
+        if output.finished != OutputFinished::True {
             block.push(Statement::break_());
         }
         block
@@ -5393,13 +5405,15 @@ impl LambdaCompiler {
             }
 
             let (_, body, _) = &grouped_cases[group_end];
-            let compiled_body = self.compile_return_block(body);
+            let compiled_output = self.compile_return_output(body);
+            let compiled_finished = compiled_output.finished;
+            let compiled_body = compiled_output.block;
             let group_falls_through = compiled_body.is_empty();
             // Mirror OCaml's `lam_compile.ml` pseudo-jmp emission: when a
             // case body resolved away through a fallthrough static-raise
             // handler, OCaml still prints an explicit `break;` to exit the
             // switch so the subsequent appended handler reads cleanly.
-            let should_break = self.return_case_needs_break_like_ocaml(body, &compiled_body);
+            let should_break = return_case_needs_break(body, compiled_finished);
 
             for (tag, case_lam, _) in &grouped_cases[group_start..group_end] {
                 cases.push((
@@ -5540,11 +5554,13 @@ impl LambdaCompiler {
             .map(|(tag, body, is_last)| {
                 let clause = if is_last {
                     let source_loc = self.source_loc_of_lam(body);
-                    let body_block = self.compile_effect_block(body);
-                    let body = self.with_block_source_loc(body, body_block);
+                    // `Js_output.to_break_block` (js_output.ml:88-100).
+                    let body_output = self.compile_effect_block_output(body);
+                    let should_break = body_output.finished != OutputFinished::True;
+                    let body = self.with_block_source_loc(body, body_output.block);
                     crate::js_ir::CaseClause {
                         source_loc,
-                        should_break: !block_terminates(&body),
+                        should_break,
                         body,
                         comment: None,
                     }
@@ -5624,11 +5640,13 @@ impl LambdaCompiler {
             .map(|(tag, body, is_last)| {
                 let clause = if is_last {
                     let source_loc = self.source_loc_of_lam(body);
-                    let body_block = self.compile_effect_block(body);
-                    let body = self.with_block_source_loc(body, body_block);
+                    // `Js_output.to_break_block` (js_output.ml:88-100).
+                    let body_output = self.compile_effect_block_output(body);
+                    let should_break = body_output.finished != OutputFinished::True;
+                    let body = self.with_block_source_loc(body, body_output.block);
                     crate::js_ir::CaseClause {
                         source_loc,
-                        should_break: !block_terminates(&body),
+                        should_break,
                         body,
                         comment: None,
                     }
@@ -6164,11 +6182,6 @@ impl LambdaCompiler {
         i32::try_from(depth + 1).expect("static jump handler depth fits in i32")
     }
 
-    fn compile_static_raise_jump_block(&mut self, label: i32, args: &[Lambda]) -> Option<Block> {
-        self.compile_static_raise_jump_output(label, args)
-            .map(|output| output.block)
-    }
-
     fn compile_static_raise_jump_output(
         &mut self,
         label: i32,
@@ -6311,67 +6324,67 @@ impl LambdaCompiler {
         BlockOutput::make(declarations).append(body_output.append(cases))
     }
 
-    fn compile_staticcatch_return_block(
+    /// [`Self::compile_staticcatch_effect_output`] in a return continuation
+    /// (lam_compile.ml:1063-1101).
+    fn compile_staticcatch_return_output(
         &mut self,
         label: i32,
         bindings: &[Ident],
         body: &Lambda,
         handler: &Lambda,
-    ) -> Block {
+    ) -> BlockOutput {
         let exit_id = self.fresh_ident("exit");
         let exit_code = self.next_static_jump_exit_code();
-        let mut block = self.staticcatch_declarations(&exit_id, bindings);
-        let (body_block, handler_block) =
+        let declarations = self.staticcatch_declarations(&exit_id, bindings);
+        let (body_output, handler_block) =
             self.with_static_jump_handler(label, &exit_id, bindings, |this| {
-                let body_block = this.compile_return_block(body);
-                let handler_block = if block_terminates(&body_block) {
-                    vec![]
-                } else {
-                    this.compile_return_block(handler)
-                };
-                (body_block, handler_block)
+                let body_output = this.compile_return_output(body);
+                let handler_block = this.compile_return_output(handler).block;
+                (body_output, handler_block)
             });
-        block.extend(body_block);
-        if !block_terminates(&block) && !handler_block.is_empty() {
-            block.push(Statement::if_(
+        let cases = if handler_block.is_empty() {
+            BlockOutput::make(vec![])
+        } else {
+            BlockOutput::make(vec![Statement::if_(
                 self.staticcatch_exit_test(&exit_id, exit_code),
                 handler_block,
                 vec![],
-            ));
-        }
-        block
+            )])
+        };
+        BlockOutput::make(declarations).append(body_output.append(cases))
     }
 
-    fn compile_staticcatch_tail_loop_return_block(
+    /// [`Self::compile_staticcatch_effect_output`] in a return continuation
+    /// (lam_compile.ml:1063-1101).
+    fn compile_staticcatch_tail_loop_return_output(
         &mut self,
         label: i32,
         bindings: &[Ident],
         body: &Lambda,
         handler: &Lambda,
         tail_loop: &mut TailLoopState,
-    ) -> Block {
+    ) -> BlockOutput {
         let exit_id = self.fresh_ident("exit");
         let exit_code = self.next_static_jump_exit_code();
-        let mut block = self.staticcatch_declarations(&exit_id, bindings);
-        let (body_block, handler_block) =
+        let declarations = self.staticcatch_declarations(&exit_id, bindings);
+        let (body_output, handler_block) =
             self.with_static_jump_handler(label, &exit_id, bindings, |this| {
-                let body_block = this.compile_tail_loop_return_block(body, tail_loop);
-                let handler_block = if block_terminates(&body_block) {
-                    vec![]
-                } else {
-                    this.compile_tail_loop_return_block(handler, tail_loop)
-                };
-                (body_block, handler_block)
+                let body_output = this.compile_tail_loop_return_output(body, tail_loop);
+                let handler_block = this
+                    .compile_tail_loop_return_output(handler, tail_loop)
+                    .block;
+                (body_output, handler_block)
             });
-        block.extend(body_block);
-        if !block_terminates(&block) && !handler_block.is_empty() {
-            block.push(Statement::if_(
+        let cases = if handler_block.is_empty() {
+            BlockOutput::make(vec![])
+        } else {
+            BlockOutput::make(vec![Statement::if_(
                 self.staticcatch_exit_test(&exit_id, exit_code),
                 handler_block,
                 vec![],
-            ));
-        }
-        block
+            )])
+        };
+        BlockOutput::make(declarations).append(body_output.append(cases))
     }
 
     fn compile_staticcatch_expr(
@@ -6463,8 +6476,8 @@ impl LambdaCompiler {
         &mut self,
         handlers: &'a [FlatHandler],
         first_code: i32,
-        mut compile: impl FnMut(&mut Self, &Lambda) -> Block,
-    ) -> Vec<(i32, Block, bool, &'a Lambda)> {
+        mut compile: impl FnMut(&mut Self, &Lambda) -> BlockOutput,
+    ) -> Vec<(i32, BlockOutput, bool, &'a Lambda)> {
         let cases = handlers
             .iter()
             .enumerate()
@@ -6478,12 +6491,12 @@ impl LambdaCompiler {
         stable_group_switch_cases(cases, |_, _| true)
             .into_iter()
             .map(|(code, handler, is_last)| {
-                let block = if is_last {
+                let output = if is_last {
                     compile(self, handler)
                 } else {
-                    Vec::new()
+                    BlockOutput::make(Vec::new())
                 };
-                (code, block, is_last, handler)
+                (code, output, is_last, handler)
             })
             .collect()
     }
@@ -6496,14 +6509,15 @@ impl LambdaCompiler {
     fn compile_exit_dispatch(
         &self,
         exit_id: &Ident,
-        handlers: Vec<(i32, Block, bool, &Lambda)>,
+        handlers: Vec<(i32, BlockOutput, bool, &Lambda)>,
         is_return_context: bool,
     ) -> Option<Statement> {
         if handlers.is_empty() {
             return None;
         }
         if handlers.len() == 1 {
-            let (code, handler_block, _, _) = handlers.into_iter().next().unwrap();
+            let (code, handler_output, _, _) = handlers.into_iter().next().unwrap();
+            let handler_block = handler_output.block;
             if handler_block.is_empty() {
                 return None;
             }
@@ -6517,15 +6531,16 @@ impl LambdaCompiler {
         // clauses for all but the last case of an equal-Lambda group.
         let clauses: Vec<(i32, CaseClause)> = handlers
             .into_iter()
-            .map(|(code, body, is_last, handler_lam)| {
+            .map(|(code, output, is_last, handler_lam)| {
+                // `Js_output.to_break_block` (js_output.ml:88-100).
                 let should_break = is_last
-                    && !block_terminates(&body)
+                    && output.finished != OutputFinished::True
                     && (!is_return_context || has_exit_code(handler_lam, |_| true));
                 (
                     code,
                     CaseClause {
                         source_loc: None,
-                        body,
+                        body: output.block,
                         should_break,
                         comment: None,
                     },
@@ -6539,31 +6554,26 @@ impl LambdaCompiler {
         )))
     }
 
-    fn compile_multi_staticcatch_return_block(
+    /// [`Self::compile_multi_staticcatch_effect_output`] in a return
+    /// continuation.
+    fn compile_multi_staticcatch_return_output(
         &mut self,
         handlers: &[FlatHandler],
         body: &Lambda,
-    ) -> Block {
-        let (exit_id, first_code, mut block) = self.emit_multi_staticcatch_prelude(handlers);
-        let body_block = self.compile_return_block(body);
-        // If the body already terminates (e.g. every path returned), OCaml
-        // would still emit the dispatch but it'd be dead. Match
-        // `compile_staticcatch_return_block`'s current behavior: skip it.
-        let grouped_handlers = if block_terminates(&body_block) {
-            Vec::new()
-        } else {
+    ) -> BlockOutput {
+        let (exit_id, first_code, declarations) = self.emit_multi_staticcatch_prelude(handlers);
+        let body_output = self.compile_return_output(body);
+        let grouped_handlers =
             self.compile_grouped_staticcatch_handlers(handlers, first_code, |this, handler| {
-                this.compile_return_block(handler)
-            })
-        };
+                this.compile_return_output(handler)
+            });
         self.pop_multi_staticcatch_handlers(handlers.len());
-        block.extend(body_block);
-        if !block_terminates(&block) {
-            if let Some(dispatch) = self.compile_exit_dispatch(&exit_id, grouped_handlers, true) {
-                block.push(dispatch);
-            }
-        }
-        block
+        let cases = BlockOutput::make(
+            self.compile_exit_dispatch(&exit_id, grouped_handlers, true)
+                .into_iter()
+                .collect(),
+        );
+        BlockOutput::make(declarations).append(body_output.append(cases))
     }
 
     /// [`Self::compile_staticcatch_effect_output`] for a flattened code
@@ -6577,7 +6587,7 @@ impl LambdaCompiler {
         let body_output = self.compile_effect_block_output(body);
         let grouped_handlers =
             self.compile_grouped_staticcatch_handlers(handlers, first_code, |this, handler| {
-                this.compile_effect_block(handler)
+                this.compile_effect_block_output(handler)
             });
         self.pop_multi_staticcatch_handlers(handlers.len());
         let cases = BlockOutput::make(
@@ -6610,7 +6620,7 @@ impl LambdaCompiler {
         let body_output = self.compile_assign_to_target_output(result, body);
         let grouped_handlers =
             self.compile_grouped_staticcatch_handlers(handlers, first_code, |this, handler| {
-                this.compile_assign_to_target_block(result, handler)
+                this.compile_assign_to_target_output(result, handler)
             });
         self.pop_multi_staticcatch_handlers(handlers.len());
         let cases = BlockOutput::make(
@@ -6621,29 +6631,27 @@ impl LambdaCompiler {
         BlockOutput::make(declarations).append(body_output.append(cases))
     }
 
-    fn compile_multi_staticcatch_tail_loop_return_block(
+    /// [`Self::compile_multi_staticcatch_effect_output`] in a return
+    /// continuation.
+    fn compile_multi_staticcatch_tail_loop_return_output(
         &mut self,
         handlers: &[FlatHandler],
         body: &Lambda,
         tail_loop: &mut TailLoopState,
-    ) -> Block {
-        let (exit_id, first_code, mut block) = self.emit_multi_staticcatch_prelude(handlers);
-        let body_block = self.compile_tail_loop_return_block(body, tail_loop);
-        let grouped_handlers = if block_terminates(&body_block) {
-            Vec::new()
-        } else {
+    ) -> BlockOutput {
+        let (exit_id, first_code, declarations) = self.emit_multi_staticcatch_prelude(handlers);
+        let body_output = self.compile_tail_loop_return_output(body, tail_loop);
+        let grouped_handlers =
             self.compile_grouped_staticcatch_handlers(handlers, first_code, |this, handler| {
-                this.compile_tail_loop_return_block(handler, tail_loop)
-            })
-        };
+                this.compile_tail_loop_return_output(handler, tail_loop)
+            });
         self.pop_multi_staticcatch_handlers(handlers.len());
-        block.extend(body_block);
-        if !block_terminates(&block) {
-            if let Some(dispatch) = self.compile_exit_dispatch(&exit_id, grouped_handlers, true) {
-                block.push(dispatch);
-            }
-        }
-        block
+        let cases = BlockOutput::make(
+            self.compile_exit_dispatch(&exit_id, grouped_handlers, true)
+                .into_iter()
+                .collect(),
+        );
+        BlockOutput::make(declarations).append(body_output.append(cases))
     }
 
     fn collect_required_module_set(&self, block: &Block) -> OcamlModuleSet {
@@ -6701,6 +6709,17 @@ fn declare_compiled(kind: LetKind, id: &Ident, compiled: Compiled) -> BlockOutpu
         ident_info: IdentInfo::default(),
     }));
     BlockOutput::make(block)
+}
+
+/// `output_of_block_and_expression (EffectCall (Maybe_tail_is_return _))`
+/// (js_output.ml:57-59) of a value compiled as `NeedValue`: a `return`,
+/// which finishes the output. A finished value (a raise) stays as it is.
+fn return_compiled(compiled: Compiled) -> BlockOutput {
+    let mut block = compiled.prelude;
+    if compiled.finished != OutputFinished::True {
+        block.push(Statement::return_(compiled.expr));
+    }
+    BlockOutput::finished(block)
 }
 
 /// `Assign result` of a value compiled as `NeedValue`; a finished output
@@ -7983,141 +8002,12 @@ pub(crate) fn lambda_has_exit(lam: &Lambda) -> bool {
     }
 }
 
-impl LambdaCompiler {
-    pub(crate) fn return_case_needs_break_like_ocaml(
-        &self,
-        body: &Lambda,
-        compiled_body: &Block,
-    ) -> bool {
-        return_switch_case_needs_break_like_ocaml(
-            body,
-            compiled_body,
-            self.in_staticcatch_like_ocaml(),
-            &self.if_return_finished,
-        )
-    }
-}
-
-fn return_switch_case_needs_break_like_ocaml(
-    body: &Lambda,
-    compiled_body: &Block,
-    in_staticcatch: bool,
-    if_finished: &AHashMap<usize, bool>,
-) -> bool {
-    if !lambda_has_exit(body) {
-        return false;
-    }
-    if !block_terminates(compiled_body) {
-        return true;
-    }
-    return_output_is_compound_like_ocaml(body, compiled_body, in_staticcatch, if_finished)
-}
-
-fn return_output_is_compound_like_ocaml(
-    body: &Lambda,
-    compiled_body: &Block,
-    in_staticcatch: bool,
-    if_finished: &AHashMap<usize, bool>,
-) -> bool {
-    if let Some(finished) = return_output_finished_like_ocaml(body, in_staticcatch, if_finished) {
-        return !finished;
-    }
-    match body {
-        Lambda::Llet(_, _, _, body) | Lambda::Lletrec(_, body) | Lambda::Lsequence(_, body) => {
-            return_output_is_compound_like_ocaml(body, compiled_body, in_staticcatch, if_finished)
-        }
-        // `compile_general_cases` uses `Js_output.to_break_block`, then gates
-        // it with `Lam_exit_code.has_exit` in return continuation
-        // (compiler/core/lam_compile.ml:610-624). `to_break_block` only
-        // suppresses `break` when `output_finished=True`
-        // (compiler/core/js_output.ml:88-100); it does not do structural JS
-        // termination analysis. Compound return forms like the generic
-        // `Lifthenelse` EffectCall fallback keep `output_finished=False`
-        // (compiler/core/lam_compile.ml:1456-1531), so OCaml prints `break;`
-        // even if every generated branch returns.
-        Lambda::LifThenElse(_, _, _)
-        | Lambda::Lswitch(_, _)
-        | Lambda::LstringSwitch(_, _, _)
-        | Lambda::LstaticCatch(_, _, _)
-        | Lambda::LtryWith(_, _, _)
-        | Lambda::LtryFinally(_, _) => return_block_has_multi_test_guard_chain(compiled_body),
-        _ => false,
-    }
-}
-
-/// `Js_output.output_finished` of `compile_lambda` in an
-/// `EffectCall (Maybe_tail_is_return _)` continuation, where it does not
-/// `None` means the form is not modelled here.
-fn return_output_finished_like_ocaml(
-    lam: &Lambda,
-    in_staticcatch: bool,
-    if_finished: &AHashMap<usize, bool>,
-) -> Option<bool> {
-    match lam {
-        // `compile_let`/`compile_sequence` append the binding or effect output
-        // to the body output (js_output.ml `append_output`), so the body's
-        // flag wins.
-        Lambda::Llet(_, _, _, body) | Lambda::Lletrec(_, body) | Lambda::Lsequence(_, body) => {
-            return_output_finished_like_ocaml(body, in_staticcatch, if_finished)
-        }
-        // compile_ifthenelse: recorded by `compile_if_return_block`.
-        Lambda::LifThenElse(_, then_, _) => if_finished
-            .get(&(then_.as_ref() as *const Lambda as usize))
-            .copied(),
-        // compile_switch (lam_compile.ml:822) and compile_stringswitch return
-        // `Js_output.make` without `~output_finished`, and so does the
-        // `S.try_` built for `Ltrywith`.
-        Lambda::Lswitch(_, _)
-        | Lambda::LstringSwitch(_, _, _)
-        | Lambda::LtryWith(_, _, _)
-        | Lambda::LtryFinally(_, _) => Some(false),
-        Lambda::LstaticCatch(body, (label, bindings), handler) => {
-            let (code_table, inner_body) = flatten_nested_caches(*label, bindings, body, handler);
-            // lam_compile.ml:1022-1047: only the single-exit pseudo-jump arm
-            // (tail position, not already in a static catch, handler without
-            // static raises) ends with the handler output; the exit-variable
-            // arm ends with `Js_output.make (compile_cases ...)`.
-            let [entry] = code_table.as_slice() else {
-                return Some(false);
-            };
-            if in_staticcatch || !no_static_raise_in_handler_like_ocaml(&entry.handler) {
-                return Some(false);
-            }
-            // `append_output declares (append_output lbody handler)`: a
-            // finished body wins, otherwise the handler's flag is kept.
-            match return_output_finished_like_ocaml(inner_body, true, if_finished)? {
-                true => Some(true),
-                false => {
-                    return_output_finished_like_ocaml(&entry.handler, in_staticcatch, if_finished)
-                }
-            }
-        }
-        _ => None,
-    }
-}
-
-fn return_block_has_multi_test_guard_chain(block: &Block) -> bool {
-    // OCaml's `S.if_` folding happens while compiling each conditional
-    // (compiler/core/js_stmt_make.ml:244-250). A single top-level test can
-    // still be emitted as an `output_finished=True` return block, while
-    // guard chains that leave multiple sibling tests in the switch case are
-    // the `output_finished=False` shape observed by `to_break_block`.
-    count_top_level_if_statements(block) > 1
-}
-
-fn count_top_level_if_statements(block: &Block) -> usize {
-    block
-        .iter()
-        .map(count_top_level_if_statements_in_stmt)
-        .sum()
-}
-
-fn count_top_level_if_statements_in_stmt(stmt: &Statement) -> usize {
-    match &stmt.desc {
-        StatementDesc::If(_, _, _) => 1,
-        StatementDesc::Block(block) => count_top_level_if_statements(block),
-        _ => 0,
-    }
+/// The `should_break` of a switch case in a return continuation:
+/// `Js_output.to_break_block` (js_output.ml:88-100) breaks unless the output
+/// is finished, and `compile_general_cases` keeps the break only when the
+/// case has an exit (lam_compile.ml:610-624).
+pub(crate) fn return_case_needs_break(body: &Lambda, finished: OutputFinished) -> bool {
+    lambda_has_exit(body) && finished != OutputFinished::True
 }
 
 fn lambda_contains_staticcatch(lam: &Lambda) -> bool {

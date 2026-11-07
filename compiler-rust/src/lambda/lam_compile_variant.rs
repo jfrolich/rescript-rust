@@ -4,9 +4,10 @@
 //! Extracted from `lam_compile.rs` for organization.
 
 use super::js_exp_make::{ocaml_typeof_expr, raw_typeof_comparison};
-use super::js_stmt_make::block_terminates;
 use super::lam_coercion::push_s_if_empty;
-use super::lam_compile::{Compiled, LambdaCompiler, OutputFinished, TailLoopState};
+use super::lam_compile::{
+    Compiled, LambdaCompiler, OutputFinished, TailLoopState, return_case_needs_break,
+};
 use crate::ident::Ident;
 use crate::js_ir::op::{IdentInfo, Number};
 use crate::js_ir::{
@@ -788,27 +789,27 @@ impl LambdaCompiler {
                     // `Js_output.to_break_block`: the assignment needs a
                     // `break` unless it finishes; an `if` drops the flag.
                     UntaggedMode::Assign(result) => {
-                        let body = self.compile_assign_to_target_block(result, lam);
-                        let should_break = !block_terminates(&body);
-                        (body, should_break)
+                        let output = self.compile_assign_to_target_output(result, lam);
+                        let should_break = output.finished != OutputFinished::True;
+                        (output.block, should_break)
                     }
                     UntaggedMode::Return => {
-                        let body = self.compile_return_block(lam);
-                        let should_break = self.return_case_needs_break_like_ocaml(lam, &body);
-                        (body, should_break)
+                        let output = self.compile_return_output(lam);
+                        let should_break = return_case_needs_break(lam, output.finished);
+                        (output.block, should_break)
                     }
                     UntaggedMode::TailLoopReturn => {
-                        let body = self.compile_tail_loop_return_block(
+                        let output = self.compile_tail_loop_return_output(
                             lam,
                             tail_loop.as_deref_mut().expect("a tail loop"),
                         );
-                        let should_break = self.return_case_needs_break_like_ocaml(lam, &body);
-                        (body, should_break)
+                        let should_break = return_case_needs_break(lam, output.finished);
+                        (output.block, should_break)
                     }
                     UntaggedMode::Effect => {
-                        let body = self.compile_effect_block(lam);
-                        let should_break = !block_terminates(&body);
-                        (body, should_break)
+                        let output = self.compile_effect_block_output(lam);
+                        let should_break = output.finished != OutputFinished::True;
+                        (output.block, should_break)
                     }
                 };
                 CaseClause {
@@ -1244,12 +1245,14 @@ impl LambdaCompiler {
                 }
 
                 let (_, body, _) = &grouped_cases[group_end];
-                let compiled_body = self.compile_hoisted_named_string_return_tail(body);
+                let compiled_output = self.compile_hoisted_named_string_return_tail(body);
+                let compiled_finished = compiled_output.finished;
+                let compiled_body = compiled_output.block;
                 let hoist_shared_tail = group_start != group_end
                     && group_end + 1 == grouped_cases.len()
                     && self.should_hoist_grouped_named_string_return_tail(body)
                     && !compiled_body.is_empty()
-                    && block_terminates(&compiled_body);
+                    && compiled_finished == OutputFinished::True;
 
                 for (tag, case_lam, _) in &grouped_cases[group_start..group_end] {
                     clauses.push(StringClause {
@@ -1273,8 +1276,7 @@ impl LambdaCompiler {
                         // (compiler/core/lam_compile.ml:610-624) and
                         // `Js_output.to_break_block`
                         // (compiler/core/js_output.ml:88-100).
-                        let should_break =
-                            self.return_case_needs_break_like_ocaml(body, &compiled_body);
+                        let should_break = return_case_needs_break(body, compiled_finished);
                         CaseClause {
                             source_loc: self.source_loc_of_lam(body),
                             body: self.with_block_source_loc(body, compiled_body),
@@ -1370,12 +1372,14 @@ impl LambdaCompiler {
             }
 
             let (_, body, _) = &grouped_cases[group_end];
-            let compiled_body = self.compile_tail_loop_return_block(body, tail_loop);
+            let compiled_output = self.compile_tail_loop_return_output(body, tail_loop);
+            let compiled_finished = compiled_output.finished;
+            let compiled_body = compiled_output.block;
             let group_falls_through = compiled_body.is_empty();
             // Mirror `compile_general_cases` + `Js_output.to_break_block`
             // (compiler/core/lam_compile.ml:610-624;
             // compiler/core/js_output.ml:88-100).
-            let should_break = self.return_case_needs_break_like_ocaml(body, &compiled_body);
+            let should_break = return_case_needs_break(body, compiled_finished);
 
             for (tag, case_lam, _) in &grouped_cases[group_start..group_end] {
                 clauses.push((
@@ -1474,11 +1478,13 @@ impl LambdaCompiler {
             .map(|(tag, body, is_last)| {
                 let clause = if is_last {
                     let source_loc = self.source_loc_of_lam(body);
-                    let body_block = self.compile_effect_block(body);
-                    let body = self.with_block_source_loc(body, body_block);
+                    // `Js_output.to_break_block` (js_output.ml:88-100).
+                    let body_output = self.compile_effect_block_output(body);
+                    let should_break = body_output.finished != OutputFinished::True;
+                    let body = self.with_block_source_loc(body, body_output.block);
                     CaseClause {
                         source_loc,
-                        should_break: !block_terminates(&body),
+                        should_break,
                         body,
                         comment: None,
                     }

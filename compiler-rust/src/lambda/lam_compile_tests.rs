@@ -8874,3 +8874,73 @@ fn recursive_lets_carry_a_raising_binding_flag() {
     });
     assert!(with_dropped > raise_only);
 }
+
+fn call_of(callee: Ident) -> Lambda {
+    Lambda::apply(Lambda::var(callee), vec![], test_apply_info())
+}
+
+/// lam_compile.ml:1533-1537: in a return continuation, an `if` whose
+/// branches are plain values is `return e ? a : b`, which is finished; the
+/// `S.if_` fallback is a `Js_output.make`, which is not, even when every
+/// branch returns.
+#[test]
+fn return_if_is_finished_only_as_a_conditional_return() {
+    let cond = Ident::create_local("cond");
+    let callee = Ident::create_local("callee");
+    let values = Lambda::if_(
+        Lambda::var(cond),
+        Lambda::const_(Constant::int(1)),
+        Lambda::const_(Constant::int(2)),
+    );
+    let output = LambdaCompiler::new().compile_return_output(&values);
+    assert_eq!(output.finished, OutputFinished::True);
+
+    // A static catch needs statements under `NeedValue`.
+    let statements = Lambda::if_(
+        Lambda::var(cond),
+        allocating_catch(),
+        Lambda::seq(call_of(callee), allocating_catch()),
+    );
+    let output = LambdaCompiler::new().compile_return_output(&statements);
+    assert_eq!(output.finished, OutputFinished::False);
+}
+
+/// A `return` finishes the output (js_output.ml:57-59), so a static catch
+/// whose body returns drops its handler dispatch after compiling it
+/// (lam_compile.ml:1063-1101).
+#[test]
+fn return_static_catch_drops_the_handler_of_a_returning_body() {
+    let callee = Ident::create_local("callee");
+    let catch = |handler: Lambda| {
+        Lambda::LstaticCatch(
+            Box::new(Lambda::seq(
+                Lambda::if_(
+                    Lambda::var(callee),
+                    Lambda::LstaticRaise(5, vec![]),
+                    Lambda::const_(Constant::int(0)),
+                ),
+                call_of(callee),
+            )),
+            (5, vec![]),
+            Box::new(handler),
+        )
+    };
+    let lam = catch(allocating_catch());
+    let output = LambdaCompiler::new().compile_return_output(&lam);
+    assert_eq!(output.finished, OutputFinished::True);
+    assert!(
+        matches!(
+            output.block.last().map(|stmt| &stmt.desc),
+            Some(StatementDesc::Return(_))
+        ),
+        "the body's return ends the output: {:?}",
+        output.block
+    );
+    let plain = next_stamp_after(|c| {
+        c.compile_return_output(&catch(Lambda::const_(Constant::int(1))));
+    });
+    let allocating = next_stamp_after(|c| {
+        c.compile_return_output(&lam);
+    });
+    assert!(allocating > plain, "the dropped handler is compiled");
+}
