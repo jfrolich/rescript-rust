@@ -8917,3 +8917,28 @@ fn recursive_lets_put_functions_before_values_without_resplitting() {
         .collect();
     assert_eq!(names, ["second", "first", "value"]);
 }
+
+/// lam_compile.ml:1232: compile_for builds the tuple `(compile_lambda
+/// new_cxt start, compile_lambda new_cxt finish)`, which OCaml evaluates
+/// right to left, so the finish bound allocates first; the emitted block
+/// still puts the start bound's statements first (lines 1256-1270).
+#[test]
+fn for_loop_compiles_its_finish_bound_before_its_start_bound() {
+    let index = Ident::create_local("i");
+    let lam = Lambda::Lfor(
+        index,
+        Box::new(allocating_catch()),
+        Box::new(allocating_catch()),
+        crate::lambda::DirectionFlag::Upto,
+        Box::new(Lambda::const_(Constant::JsUndefined { is_unit: true })),
+    );
+    let compiled = LambdaCompiler::new().compile_expr(&lam);
+    let stamps = declared_exit_stamps(&compiled.prelude);
+    let [start_exit, finish_exit] = stamps.as_slice() else {
+        panic!("expected two exit declarations, got {:?}", compiled.prelude);
+    };
+    assert!(
+        start_exit > finish_exit,
+        "the finish bound allocates first: {stamps:?}"
+    );
+}

@@ -2148,9 +2148,12 @@ impl LambdaCompiler {
         dir: &crate::lambda::DirectionFlag,
         body: &Lambda,
     ) -> Compiled {
-        let start_compiled = self.compile_expr(start);
+        // lam_compile.ml:1232: `(compile_lambda new_cxt start,
+        // compile_lambda new_cxt finish)` is a tuple, which OCaml evaluates
+        // right to left, so the finish bound is compiled first.
         let (finish, direction) = lower_ocaml_for_range_direction(dir, end);
         let finish_compiled = self.compile_expr(finish);
+        let start_compiled = self.compile_expr(start);
         // Push a fresh loop frame before compiling the body so any
         // nested `Lbreak`/`Lcontinue` resolves against this for-loop.
         // See OCaml `push_loop` in compiler/core/lam_compile.ml.
