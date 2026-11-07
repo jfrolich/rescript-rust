@@ -432,7 +432,10 @@ pub fn is_pattern_start(token: &Token<'_>) -> bool {
 
 /// Check if a token can start a parameter.
 pub fn is_parameter_start(token: &Token<'_>) -> bool {
-    matches!(token, Token::Typ | Token::Tilde | Token::Dot) || is_pattern_start(token)
+    matches!(
+        token,
+        Token::Typ | Token::Tilde | Token::Dot | Token::DocComment { .. }
+    ) || is_pattern_start(token)
 }
 
 /// Check if a token can start a string field declaration.
