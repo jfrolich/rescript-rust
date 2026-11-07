@@ -428,13 +428,19 @@ impl<W: Write> Formatter<W> {
         }
     }
 
-    /// Push a token on the scan stack (matching OCaml's scan_push)
-    /// If b is true, set_size is called first (for breaks)
+    /// Push a token on the scan stack (OCaml 5.5 `scan_push`). A break hint
+    /// goes through `pp_enqueue_break`: the pending break's size is set
+    /// before the rightward position grows by this break's own width.
     fn scan_push(&mut self, b: bool, elem: QueueElem) {
         let queue_index = self.queue_abs_end();
-        self.pp_enqueue(elem);
         if b {
+            // `pp_enqueue_break`.
+            let length = elem.length;
+            self.queue.push_back(elem);
             self.set_size(true);
+            self.right_total += length;
+        } else {
+            self.pp_enqueue(elem);
         }
         let scan_elem = ScanElem {
             left_total: self.right_total,
