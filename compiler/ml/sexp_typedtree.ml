@@ -511,6 +511,14 @@ and expression_desc ~with_locs desc =
         Sexp.list [Sexp.atom "Tdict_spread"; expression ~with_locs e]
     in
     Sexp.list (Sexp.atom "Texp_dict" :: List.map entry entries)
+  | Texp_spread (kind, parts) ->
+    let kind =
+      match kind with
+      | Spread_array -> "Spread_array"
+      | Spread_list -> "Spread_list"
+    in
+    let parts = List.map (expression ~with_locs) parts in
+    Sexp.list (Sexp.atom "Texp_spread" :: Sexp.atom kind :: parts)
   | Texp_ifthenelse (e1, e2, e3) ->
     let e1_sexp = expression ~with_locs e1 in
     let e2_sexp = expression ~with_locs e2 in

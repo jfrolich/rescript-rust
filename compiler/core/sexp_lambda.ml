@@ -398,6 +398,8 @@ let primitive (prim : Lambda.primitive) =
   | Pmakedict -> Sexp.atom "Pmakedict"
   | Pdict_has -> Sexp.atom "Pdict_has"
   | Pdict_spread -> Sexp.atom "Pdict_spread"
+  | Parray_spread -> Sexp.atom "Parray_spread"
+  | Plist_spread -> Sexp.atom "Plist_spread"
   | Parrayrefu -> Sexp.atom "Parrayrefu"
   | Parraysetu -> Sexp.atom "Parraysetu"
   | Parrayrefs -> Sexp.atom "Parrayrefs"

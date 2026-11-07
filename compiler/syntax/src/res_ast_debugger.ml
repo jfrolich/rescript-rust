@@ -720,6 +720,22 @@ module Sexp_ast = struct
                      Sexp.list [Sexp.atom "Pdict_spread"; expression e])
                  entries);
           ]
+      | Pexp_spread (kind, elements) ->
+        Sexp.list
+          [
+            Sexp.atom "Pexp_spread";
+            Sexp.atom
+              (match kind with
+              | Parsetree.Spread_array -> "Spread_array"
+              | Spread_list -> "Spread_list");
+            Sexp.list
+              (map_empty
+                 ~f:(function
+                   | Parsetree.Pspread_item e ->
+                     Sexp.list [Sexp.atom "Pspread_item"; expression e]
+                   | Pspread e -> Sexp.list [Sexp.atom "Pspread"; expression e])
+                 elements);
+          ]
       | Pexp_ifthenelse (expr1, expr2, opt_expr) ->
         Sexp.list
           [
@@ -1899,6 +1915,22 @@ module SexpAstWithLocs = struct
                    | Pdict_spread e ->
                      Sexp.list [Sexp.atom "Pdict_spread"; expression e])
                  entries);
+          ]
+      | Pexp_spread (kind, elements) ->
+        Sexp.list
+          [
+            Sexp.atom "Pexp_spread";
+            Sexp.atom
+              (match kind with
+              | Parsetree.Spread_array -> "Spread_array"
+              | Spread_list -> "Spread_list");
+            Sexp.list
+              (map_empty
+                 ~f:(function
+                   | Parsetree.Pspread_item e ->
+                     Sexp.list [Sexp.atom "Pspread_item"; expression e]
+                   | Pspread e -> Sexp.list [Sexp.atom "Pspread"; expression e])
+                 elements);
           ]
       | Pexp_ifthenelse (expr1, expr2, opt_expr) ->
         Sexp.list
