@@ -4590,7 +4590,7 @@ fn compare_definition_constructors(
         let actual_constructor = &actual[idx];
         if expected_constructor.cd_id.name() != actual_constructor.cd_id.name() {
             return Some(format!(
-                "Fields number {} have different names, {} and {}.",
+                "Constructors number {} have different names, {} and {}.",
                 idx + 1,
                 expected_constructor.cd_id.name(),
                 actual_constructor.cd_id.name()
@@ -4617,7 +4617,7 @@ fn compare_definition_constructors(
                 crate::types::decl::ConstructorArguments::CstrTuple(actual_args),
             ) if expected_args.len() != actual_args.len() => {
                 return Some(format!(
-                    "The arities for field {} differ.",
+                    "The arities for constructor {} differ.",
                     expected_constructor.cd_id.name()
                 ));
             }
@@ -4635,7 +4635,7 @@ fn compare_definition_constructors(
                         *actual_arg,
                     ) {
                         return Some(format!(
-                            "The types for field {} are not equal.",
+                            "The types for constructor {} are not equal.",
                             expected_constructor.cd_id.name()
                         ));
                     }
@@ -4643,7 +4643,7 @@ fn compare_definition_constructors(
             }
             _ => {
                 return Some(format!(
-                    "The types for field {} are not equal.",
+                    "The types for constructor {} are not equal.",
                     expected_constructor.cd_id.name()
                 ));
             }

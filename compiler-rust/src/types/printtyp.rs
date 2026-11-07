@@ -2397,7 +2397,7 @@ fn print_out_extension_constructor_doc(ext: &OutExtensionConstructor) -> Doc {
         Doc::text("type "),
         print_ident_like(&ext.type_name, false, false),
         print_extension_type_params_doc(&ext.type_params),
-        Doc::text(" += "),
+        Doc::text(" +="),
         Doc::line(),
         if ext.private {
             Doc::text("private ")

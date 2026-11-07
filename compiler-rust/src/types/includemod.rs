@@ -387,11 +387,11 @@ fn pp_context(ppf: &mut Ppf<'_>, cxt: &[IncludeContext]) {
             pp_context_mty(ppf, rem);
             ppf.close_box();
         }
-        // `functor (%s) ->@ %a`
+        // `(%s) =>@ %a`
         [IncludeContext::Body(x), rem @ ..] => {
-            pp_text(ppf, "functor (");
+            pp_text(ppf, "(");
             pp_text(ppf, context_argname(x));
-            pp_text(ppf, ") ->");
+            pp_text(ppf, ") =>");
             ppf.space();
             pp_context_mty(ppf, rem);
         }
@@ -399,37 +399,28 @@ fn pp_context(ppf: &mut Ppf<'_>, cxt: &[IncludeContext]) {
     }
 }
 
-/// `context_mty`: `@[<2>sig@ %a@;<1 -2>end@]` around a module step.
+/// `context_mty`: `@[<2>{@ %a@;<1 -2>}@]` around a module step.
 fn pp_context_mty(ppf: &mut Ppf<'_>, cxt: &[IncludeContext]) {
     match cxt {
         [IncludeContext::Module(_) | IncludeContext::Modtype(_), ..] => {
             ppf.open_box(crate::parser::formatter::BoxKind::Box, 2);
-            pp_text(ppf, "sig");
+            pp_text(ppf, "{");
             ppf.space();
             pp_context(ppf, cxt);
             ppf.break_(1, -2);
-            pp_text(ppf, "end");
+            pp_text(ppf, "}");
             ppf.close_box();
         }
         _ => pp_context(ppf, cxt),
     }
 }
 
-/// `args`: the functor parameters of a module step, then ` :@ %a`.
+/// `args`: `:@ %a`, the module step's type, a functor's parameters
+/// included.
 fn pp_context_args(ppf: &mut Ppf<'_>, cxt: &[IncludeContext]) {
-    match cxt {
-        [IncludeContext::Body(x), rem @ ..] => {
-            pp_text(ppf, "(");
-            pp_text(ppf, context_argname(x));
-            pp_text(ppf, ")");
-            pp_context_args(ppf, rem);
-        }
-        _ => {
-            pp_text(ppf, " :");
-            ppf.space();
-            pp_context_mty(ppf, cxt);
-        }
-    }
+    pp_text(ppf, ":");
+    ppf.space();
+    pp_context_mty(ppf, cxt);
 }
 
 /// `argname`: the anonymous parameter `*` prints as nothing.
@@ -741,7 +732,7 @@ fn format_include_error(
             pp_text(ppf, kind);
             pp_text(ppf, " `");
             pp_text(ppf, id.name());
-            pp_text(ppf, "' is required but not provided");
+            pp_text(ppf, "` is required but not provided");
             pp_show_decl_loc(ppf, type_ctx, filename, *loc, "Expected declaration");
         }
         IncludeModError::ValueTypeMismatch {
@@ -3838,7 +3829,7 @@ fn compare_variant_declarations(
         let sig_constructor = &sig_constructors[index];
         if impl_constructor.cd_id.name() != sig_constructor.cd_id.name() {
             return Ok(Some(format!(
-                "Fields number {} have different names, {} and {}.",
+                "Constructors number {} have different names, {} and {}.",
                 index + 1,
                 impl_constructor.cd_id.name(),
                 sig_constructor.cd_id.name()
@@ -3866,7 +3857,7 @@ fn compare_variant_declarations(
                         sig_res,
                     ) {
                         return Ok(Some(format!(
-                            "The types for field {} are not equal.",
+                            "The types for constructor {} are not equal.",
                             impl_constructor.cd_id.name()
                         )));
                     }
@@ -3878,7 +3869,7 @@ fn compare_variant_declarations(
                 }
                 (Some(_), None) | (None, Some(_)) => {
                     return Ok(Some(format!(
-                        "The types for field {} are not equal.",
+                        "The types for constructor {} are not equal.",
                         impl_constructor.cd_id.name()
                     )));
                 }
@@ -3907,7 +3898,7 @@ fn compare_variant_declarations(
                 ConstructorArguments::CstrTuple(sig_args),
             ) if impl_args.len() != sig_args.len() => {
                 return Ok(Some(format!(
-                    "The arities for field {} differ.",
+                    "The arities for constructor {} differ.",
                     impl_constructor.cd_id.name()
                 )));
             }
@@ -3924,7 +3915,7 @@ fn compare_variant_declarations(
                         *sig_arg,
                     ) {
                         return Ok(Some(format!(
-                            "The types for field {} are not equal.",
+                            "The types for constructor {} are not equal.",
                             impl_constructor.cd_id.name()
                         )));
                     }
@@ -3932,7 +3923,7 @@ fn compare_variant_declarations(
             }
             _ => {
                 return Ok(Some(format!(
-                    "The types for field {} are not equal.",
+                    "The types for constructor {} are not equal.",
                     impl_constructor.cd_id.name()
                 )));
             }
@@ -3982,13 +3973,13 @@ fn compare_variant_declarations(
 
     if let Some(constructor) = sig_constructors.get(index) {
         return Ok(Some(format!(
-            "The field {} is only present in the second declaration.",
+            "The constructor {} is only present in the second declaration.",
             constructor.cd_id.name()
         )));
     }
     if let Some(constructor) = impl_constructors.get(index) {
         return Ok(Some(format!(
-            "The field {} is only present in the first declaration.",
+            "The constructor {} is only present in the first declaration.",
             constructor.cd_id.name()
         )));
     }
@@ -5115,5 +5106,47 @@ mod tests {
         assert_eq!(signature_values(&sig).len(), 1);
         assert_eq!(signature_types(&sig).len(), 1);
         assert_eq!(signature_modules(&sig).len(), 0);
+    }
+
+    /// The context part of `include_err` (includemod.ml:616-625), printed
+    /// at column 2 as in a report.
+    fn include_context_text(cxt: &[IncludeContext]) -> String {
+        let mut buf = Vec::new();
+        {
+            let mut ppf = crate::parser::formatter::Formatter::new(&mut buf);
+            ppf.string_as(2, "");
+            ppf.open_vbox(0);
+            pp_include_context(&mut ppf, cxt);
+            pp_text(&mut ppf, "Modules do not match");
+            ppf.close_box();
+            ppf.flush();
+        }
+        String::from_utf8(buf).unwrap()
+    }
+
+    #[test]
+    fn include_context_writes_functor_positions_in_rescript_syntax() {
+        // The upstream example of b7fed40f06: the body of functor `F`
+        // declared in module `M`'s signature.
+        let f = Ident::create_local("F");
+        let x = Ident::create_local("X");
+        assert_eq!(
+            include_context_text(&[IncludeContext::Module(f), IncludeContext::Body(x)]),
+            "At position module F: (X) => <here>\n  Modules do not match"
+        );
+        let y = Ident::create_local("Y");
+        assert_eq!(
+            include_context_text(&[IncludeContext::Body(x), IncludeContext::Module(y)]),
+            "At position (X) => { module Y: <here> }\n  Modules do not match"
+        );
+        let t = Ident::create_local("T");
+        assert_eq!(
+            include_context_text(&[IncludeContext::Modtype(t), IncludeContext::Module(y)]),
+            "At position module type T = { module Y: <here> }\n  Modules do not match"
+        );
+        assert_eq!(
+            include_context_text(&[IncludeContext::Module(f), IncludeContext::Module(y)]),
+            "In module F.Y:\n  Modules do not match"
+        );
     }
 }
