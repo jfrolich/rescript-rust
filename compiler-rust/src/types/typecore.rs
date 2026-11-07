@@ -11097,7 +11097,7 @@ fn add_pattern_variable_value(
     let desc = ValueDescription {
         val_type: pv.ty,
         val_kind: crate::types::ValueKind::ValReg,
-        val_loc: tctx.intern_loc(pv.loc),
+        val_loc: tctx.intern_ast_loc(tctx.arena, pv.loc_idx),
         val_attributes: vec![],
         val_path: None,
     };
@@ -12853,7 +12853,7 @@ fn type_function_nary_with_newtypes(
                         type_manifest: None,
                         type_variance: vec![],
                         type_newtype_level: Some((level, level)),
-                        type_loc: tctx.intern_loc(convert_loc(loc, tctx.arena)),
+                        type_loc: tctx.intern_ast_loc(tctx.arena, loc),
                         type_attributes: vec![],
                         type_immediate: false,
                         type_representation: crate::types::decl::TypeRepresentation::Boxed,
@@ -13370,7 +13370,7 @@ fn type_for(
             val_kind: crate::types::ValueKind::ValReg,
             // Match OCaml `type_for`: for-index value descriptions use the
             // enclosing `for` expression location.
-            val_loc: tctx.intern_loc(val_loc),
+            val_loc: tctx.intern_ast_loc(tctx.arena, loc),
             val_attributes: vec![],
             val_path: None,
         };
@@ -13578,7 +13578,7 @@ fn type_for_of(
         let desc = ValueDescription {
             val_type: pv.ty,
             val_kind: crate::types::ValueKind::ValReg,
-            val_loc: tctx.intern_loc(val_loc),
+            val_loc: tctx.intern_ast_loc(tctx.arena, loc),
             val_attributes: vec![],
             val_path: None,
         };
@@ -17114,7 +17114,7 @@ fn type_newtype(
                 type_manifest: None,
                 type_variance: vec![],
                 type_newtype_level: Some((level, level)),
-                type_loc: tctx.intern_loc(convert_loc(loc, tctx.arena)),
+                type_loc: tctx.intern_ast_loc(tctx.arena, loc),
                 type_attributes: vec![],
                 type_immediate: false,
                 type_representation: crate::types::decl::TypeRepresentation::Boxed,
@@ -19084,7 +19084,7 @@ fn type_expect_with_module_unpacks(
         .unwrap_or(ValueDescription {
             val_type: unpack.ty,
             val_kind: crate::types::ValueKind::ValReg,
-            val_loc: tctx.intern_loc(unpack.loc),
+            val_loc: tctx.intern_ast_loc(tctx.arena, unpack.loc_idx),
             val_attributes: vec![],
             val_path: None,
         });
@@ -20753,7 +20753,7 @@ fn type_let_bindings(
                     let desc = ValueDescription {
                         val_type: pv.ty,
                         val_kind: crate::types::ValueKind::ValReg,
-                        val_loc: tctx.intern_loc(pv.loc),
+                        val_loc: tctx.intern_ast_loc(tctx.arena, pv.loc_idx),
                         val_attributes: vec![],
                         val_path: None,
                     };
@@ -21027,7 +21027,7 @@ fn type_let_bindings(
                 let desc = ValueDescription {
                     val_type: pv.ty,
                     val_kind: crate::types::ValueKind::ValReg,
-                    val_loc: tctx.intern_loc(pv.loc),
+                    val_loc: tctx.intern_ast_loc(tctx.arena, pv.loc_idx),
                     val_attributes: vec![],
                     val_path: None,
                 };

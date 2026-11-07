@@ -8779,7 +8779,7 @@ struct WithTypeConstraint {
     /// these, and `merge_constraint` (compiler/ml/typemod.ml:349-355) puts it
     /// in the signature.
     decl_loc: Option<(
-        crate::location::Location,
+        crate::types::DeclLoc,
         Vec<crate::types::decl::Attribute>,
     )>,
 }
@@ -9367,7 +9367,7 @@ fn apply_with_type_constraints_to_module_type(
                                 td.type_manifest = Some(constraint.manifest);
                             }
                             if let Some((loc, attrs)) = &constraint.decl_loc {
-                                td.type_loc = ctx.intern_loc(*loc);
+                                td.type_loc = *loc;
                                 td.type_attributes = attrs.clone();
                             }
                             rewritten_sig.push(SignatureItem::SigType(
@@ -9694,7 +9694,7 @@ fn collect_pmty_with_type_constraints<'a>(
                         manifest: manifest_ty,
                         kind: WithTypeConstraintKind::Manifest,
                         decl_loc: Some((
-                            arena.to_location(decl.ptype_loc),
+                            tctx.intern_ast_loc(arena, decl.ptype_loc),
                             parser_attrs_to_decl_attrs(
                                 arena,
                                 tctx.type_ctx,

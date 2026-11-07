@@ -58,6 +58,11 @@ pub struct SigReadContext<'a> {
     var_descs: AHashMap<usize, TypeExprRef>,
     /// Labelled `arg_label` blocks of arrows, as an argument holding it.
     labels: AHashMap<usize, TypeArg>,
+    location_scope: u64,
+    /// Retained marshal blocks keep pointer keys valid even if this reader
+    /// is reused after the caller drops a previously decoded value tree.
+    location_blocks: AHashMap<usize, (OcamlValue, u32)>,
+    location_positions: AHashMap<u32, Position>,
 }
 
 /// The address of a marshalled block's fields, which identifies the block.
@@ -81,6 +86,9 @@ impl<'a> SigReadContext<'a> {
             pident_blocks: AHashMap::new(),
             var_descs: AHashMap::new(),
             labels: AHashMap::new(),
+            location_scope: ctx.fresh_location_scope(),
+            location_blocks: AHashMap::new(),
+            location_positions: AHashMap::new(),
         }
     }
 
@@ -152,8 +160,8 @@ impl<'a> SigReadContext<'a> {
         let fields = &value.as_block().1;
         let val_type = self.read_type_expr(&fields[0]);
         let val_kind = self.read_value_kind(&fields[1]);
-        let val_loc = read_decl_loc(self.ctx, &fields[2]);
-        let val_attributes = read_attributes(self.ctx, &fields[3]);
+        let val_loc = self.read_decl_loc(&fields[2]);
+        let val_attributes = self.read_attributes(&fields[3]);
 
         ValueDescription {
             val_type,
@@ -214,8 +222,8 @@ impl<'a> SigReadContext<'a> {
             let (_, f) = tup.as_block();
             (f[0].as_int() as i32, f[1].as_int() as i32)
         });
-        let type_loc = read_decl_loc(self.ctx, &fields[7]);
-        let type_attributes = read_attributes(self.ctx, &fields[8]);
+        let type_loc = self.read_decl_loc(&fields[7]);
+        let type_attributes = self.read_attributes(&fields[8]);
         let type_immediate = fields[9].as_bool();
         let type_representation = if fields[10].as_int() == 1 {
             TypeRepresentation::Unboxed
@@ -457,8 +465,8 @@ impl<'a> SigReadContext<'a> {
         let ld_mutable = read_mutable_flag(&fields[2]);
         let ld_optional = fields[3].as_bool();
         let ld_type = self.read_type_expr(&fields[4]);
-        let ld_loc = read_decl_loc(self.ctx, &fields[5]);
-        let ld_attributes = read_attributes(self.ctx, &fields[6]);
+        let ld_loc = self.read_decl_loc(&fields[5]);
+        let ld_attributes = self.read_attributes(&fields[6]);
 
         LabelDeclaration {
             ld_id,
@@ -488,8 +496,8 @@ impl<'a> SigReadContext<'a> {
             .map(|tag| self.read_variant_literal_tag(tag));
         let cd_args = self.read_constructor_arguments(&fields[2]);
         let cd_res = fields[3].as_option().map(|te| self.read_type_expr(te));
-        let cd_loc = read_decl_loc(self.ctx, &fields[4]);
-        let cd_attributes = read_attributes(self.ctx, &fields[5]);
+        let cd_loc = self.read_decl_loc(&fields[4]);
+        let cd_attributes = self.read_attributes(&fields[5]);
 
         ConstructorDeclaration {
             cd_id,
@@ -550,8 +558,8 @@ impl<'a> SigReadContext<'a> {
         let ext_args = self.read_constructor_arguments(&fields[2]);
         let ext_ret_type = fields[3].as_option().map(|te| self.read_type_expr(te));
         let ext_private = read_private_flag(&fields[4]);
-        let ext_loc = read_decl_loc(self.ctx, &fields[5]);
-        let ext_attributes = read_attributes(self.ctx, &fields[6]);
+        let ext_loc = self.read_decl_loc(&fields[5]);
+        let ext_attributes = self.read_attributes(&fields[6]);
         let ext_is_exception = fields[7].as_bool();
 
         ExtensionConstructor {
@@ -575,8 +583,8 @@ impl<'a> SigReadContext<'a> {
     fn read_module_declaration(&mut self, value: &OcamlValue) -> ModuleDeclaration {
         let fields = &value.as_block().1;
         let md_type = self.read_module_type(&fields[0]);
-        let md_attributes = read_attributes(self.ctx, &fields[1]);
-        let md_loc = read_decl_loc(self.ctx, &fields[2]);
+        let md_attributes = self.read_attributes(&fields[1]);
+        let md_loc = self.read_decl_loc(&fields[2]);
 
         ModuleDeclaration {
             md_type,
@@ -595,8 +603,8 @@ impl<'a> SigReadContext<'a> {
     fn read_modtype_declaration(&mut self, value: &OcamlValue) -> ModtypeDeclaration {
         let fields = &value.as_block().1;
         let mtd_type = fields[0].as_option().map(|mt| self.read_module_type(mt));
-        let mtd_attributes = read_attributes(self.ctx, &fields[1]);
-        let mtd_loc = read_decl_loc(self.ctx, &fields[2]);
+        let mtd_attributes = self.read_attributes(&fields[1]);
+        let mtd_loc = self.read_decl_loc(&fields[2]);
 
         ModtypeDeclaration {
             mtd_type,
@@ -915,12 +923,12 @@ impl<'a> SigReadContext<'a> {
         let fields = &value.as_block().1;
         let typ = self.read_type_expr(&fields[1]);
         let Some(address) = block_address(&fields[0]) else {
-            return TypeArg::new(read_arg_label(self.ctx, &fields[0]), typ);
+            return TypeArg::new(self.read_arg_label(&fields[0]), typ);
         };
         if let Some(arg) = self.labels.get(&address) {
             return arg.with_type(typ);
         }
-        let arg = TypeArg::new(read_arg_label(self.ctx, &fields[0]), typ);
+        let arg = TypeArg::new(self.read_arg_label(&fields[0]), typ);
         self.labels.insert(address, arg.clone());
         arg
     }
@@ -1112,6 +1120,115 @@ fn read_ident_value(value: &OcamlValue) -> Ident {
     }
 }
 
+impl SigReadContext<'_> {
+    fn location_block(&mut self, value: &OcamlValue) -> u32 {
+        let key = block_address(value).expect("location and position must be marshal blocks");
+        let next = u32::try_from(self.location_blocks.len())
+            .expect("decoded location block identities exhausted");
+        self.location_blocks
+            .entry(key)
+            .or_insert_with(|| (value.clone(), next))
+            .1
+    }
+    /// Decode a location without merging equal-coordinate allocations.
+    fn read_decl_loc(&mut self, value: &OcamlValue) -> crate::types::DeclLoc {
+        let fields = &value.as_block().1;
+        let identity = crate::types::decl_loc::LocationIdentity {
+            scope: self.location_scope,
+            location: self.location_block(value),
+            start: self.location_block(&fields[0]),
+            end: self.location_block(&fields[1]),
+        };
+        let start = *self
+            .location_positions
+            .entry(identity.start)
+            .or_insert_with(|| read_position(self.ctx, &fields[0]));
+        let end = *self
+            .location_positions
+            .entry(identity.end)
+            .or_insert_with(|| read_position(self.ctx, &fields[1]));
+        self.ctx.intern_loc_with_identity(
+            Location {
+                loc_start: start,
+                loc_end: end,
+                loc_ghost: fields[2].as_bool(),
+                origin: Default::default(),
+            },
+            identity,
+        )
+    }
+    fn read_attribute_name(
+        &mut self,
+        value: &OcamlValue,
+    ) -> crate::types::asttypes::Located<String, crate::types::DeclLoc> {
+        match value {
+            OcamlValue::String(name) => crate::types::asttypes::Located::noloc(name.clone()),
+            OcamlValue::Block(_, fields) if !fields.is_empty() => match &fields[0] {
+                // `string Asttypes.loc` = `{txt; loc}`.
+                OcamlValue::String(name) if fields.len() == 2 => crate::types::asttypes::Located {
+                    txt: name.clone(),
+                    loc: self.read_decl_loc(&fields[1]),
+                },
+                OcamlValue::String(name) => crate::types::asttypes::Located::noloc(name.clone()),
+                inner => crate::types::asttypes::Located::noloc(
+                    read_first_string(inner).unwrap_or_else(|| "?".to_string()),
+                ),
+            },
+            other => crate::types::asttypes::Located::noloc(
+                read_first_string(other).unwrap_or_else(|| "?".to_string()),
+            ),
+        }
+    }
+    /// Preserve the attribute payload forms observed by the JS backend.
+    fn read_attributes(&mut self, value: &OcamlValue) -> Vec<Attribute> {
+        value
+            .as_list()
+            .iter()
+            .filter_map(|attr| match attr {
+                OcamlValue::Block(_, fields) if !fields.is_empty() => {
+                    let attr_name = self.read_attribute_name(&fields[0]);
+                    let payload = if fields.len() > 1 {
+                        if attr_name.txt == "deprecated" {
+                            read_deprecated_attribute_payload(&fields[1])
+                        } else {
+                            read_attribute_payload(&fields[1])
+                        }
+                    } else {
+                        AttributePayload::Empty
+                    };
+                    Some(Attribute {
+                        attr_name,
+                        attr_payload: payload,
+                        attr_loc: fields
+                            .get(2)
+                            .map(|loc| self.read_decl_loc(loc))
+                            .unwrap_or_default(),
+                    })
+                }
+                _ => None,
+            })
+            .collect()
+    }
+    fn read_arg_label(&mut self, value: &OcamlValue) -> ArgLabel {
+        match value {
+            OcamlValue::Int(0) => ArgLabel::Nolabel,
+            OcamlValue::Block(0, fields) => {
+                // Labelled(string loc) - string loc is {txt: string; loc: Location.t}
+                let loc_fields = &fields[0].as_block().1;
+                let name = loc_fields[0].as_string().to_string();
+                ArgLabel::Labelled(Located::new(name, self.read_decl_loc(&loc_fields[1])))
+            }
+            OcamlValue::Block(1, fields) => {
+                // Optional(string loc) - string loc is {txt: string; loc: Location.t}
+                let loc_fields = &fields[0].as_block().1;
+                let name = loc_fields[0].as_string().to_string();
+                ArgLabel::Optional(Located::new(name, self.read_decl_loc(&loc_fields[1])))
+            }
+            _ => ArgLabel::Nolabel,
+        }
+    }
+}
+
 /// Read a Lexing.position.
 fn read_position(ctx: &TypeContext, value: &OcamlValue) -> Position {
     let fields = &value.as_block().1;
@@ -1124,86 +1241,12 @@ fn read_position(ctx: &TypeContext, value: &OcamlValue) -> Position {
     }
 }
 
-/// Read a Location.t.
-fn read_location(ctx: &TypeContext, value: &OcamlValue) -> Location {
-    let fields = &value.as_block().1;
-    Location {
-        loc_start: read_position(ctx, &fields[0]),
-        loc_end: read_position(ctx, &fields[1]),
-        loc_ghost: fields[2].as_bool(),
-        origin: Default::default(),
-    }
-}
-
-/// Read a Location.t into the location table of the arena being built.
-fn read_decl_loc(ctx: &TypeContext, value: &OcamlValue) -> crate::types::DeclLoc {
-    ctx.intern_loc(read_location(ctx, value))
-}
-
-fn read_attribute_name(
-    ctx: &TypeContext,
-    value: &OcamlValue,
-) -> crate::types::asttypes::Located<String, crate::types::DeclLoc> {
-    match value {
-        OcamlValue::String(name) => crate::types::asttypes::Located::noloc(name.clone()),
-        OcamlValue::Block(_, fields) if !fields.is_empty() => match &fields[0] {
-            // `string Asttypes.loc` = `{txt; loc}`.
-            OcamlValue::String(name) if fields.len() == 2 => crate::types::asttypes::Located {
-                txt: name.clone(),
-                loc: read_decl_loc(ctx, &fields[1]),
-            },
-            OcamlValue::String(name) => crate::types::asttypes::Located::noloc(name.clone()),
-            inner => crate::types::asttypes::Located::noloc(
-                read_first_string(inner).unwrap_or_else(|| "?".to_string()),
-            ),
-        },
-        other => crate::types::asttypes::Located::noloc(
-            read_first_string(other).unwrap_or_else(|| "?".to_string()),
-        ),
-    }
-}
-
 fn read_first_string(value: &OcamlValue) -> Option<String> {
     match value {
         OcamlValue::String(s) => Some(s.clone()),
         OcamlValue::Block(_, fields) => fields.iter().find_map(read_first_string),
         _ => None,
     }
-}
-
-/// Read attributes from a CMI declaration.
-///
-/// The JS backend relies on simple constructor `@as(...)` payloads from loaded
-/// interfaces, so preserve the payload forms the OCaml backend observes for
-/// null/undefined identifiers and simple string literals.
-fn read_attributes(ctx: &TypeContext, value: &OcamlValue) -> Vec<Attribute> {
-    value
-        .as_list()
-        .iter()
-        .filter_map(|attr| match attr {
-            OcamlValue::Block(_, fields) if !fields.is_empty() => {
-                let attr_name = read_attribute_name(ctx, &fields[0]);
-                let payload = if fields.len() > 1 {
-                    if attr_name.txt == "deprecated" {
-                        read_deprecated_attribute_payload(&fields[1])
-                    } else {
-                        read_attribute_payload(&fields[1])
-                    }
-                } else {
-                    AttributePayload::Empty
-                };
-                Some(Attribute {
-                    attr_name,
-                    attr_payload: payload,
-                    attr_loc: fields
-                        .get(2)
-                        .map(|loc| read_decl_loc(ctx, loc))
-                        .unwrap_or_default(),
-                })
-            }
-            _ => None,
-        })
-        .collect()
 }
 
 /// Read an attribute payload from a CMI.
@@ -1441,29 +1484,6 @@ fn read_mutable_flag(value: &OcamlValue) -> MutableFlag {
     }
 }
 
-/// Read arg_label.
-///
-/// Nolabel is constant (Int(0)).
-/// Non-constants: Labelled = Block(0), Optional = Block(1).
-fn read_arg_label(ctx: &TypeContext, value: &OcamlValue) -> ArgLabel {
-    match value {
-        OcamlValue::Int(0) => ArgLabel::Nolabel,
-        OcamlValue::Block(0, fields) => {
-            // Labelled(string loc) - string loc is {txt: string; loc: Location.t}
-            let loc_fields = &fields[0].as_block().1;
-            let name = loc_fields[0].as_string().to_string();
-            ArgLabel::Labelled(Located::new(name, read_decl_loc(ctx, &loc_fields[1])))
-        }
-        OcamlValue::Block(1, fields) => {
-            // Optional(string loc) - string loc is {txt: string; loc: Location.t}
-            let loc_fields = &fields[0].as_block().1;
-            let name = loc_fields[0].as_string().to_string();
-            ArgLabel::Optional(Located::new(name, read_decl_loc(ctx, &loc_fields[1])))
-        }
-        _ => ArgLabel::Nolabel,
-    }
-}
-
 /// Read alias_presence.
 fn read_alias_presence(value: &OcamlValue) -> AliasPresence {
     match value.as_int() {
@@ -1528,6 +1548,60 @@ mod tests {
 
     /// An unmarshalled block is one heap block however many fields point to
     /// it (intern.c shares it); a block with equal contents is another.
+    #[test]
+    fn decoded_locations_keep_block_identity_and_retain_address_keys() {
+        let ctx = TypeContext::new(Arc::new(crate::context::IdGenerator::new()));
+        let mut reader = SigReadContext::new(&ctx);
+        let position = || {
+            block(
+                0,
+                vec![
+                    OcamlValue::String("source.res".into()),
+                    OcamlValue::Int(1),
+                    OcamlValue::Int(0),
+                    OcamlValue::Int(2),
+                ],
+            )
+        };
+        let start = position();
+        let end = position();
+        let location = || block(0, vec![start.clone(), end.clone(), OcamlValue::Int(0)]);
+        let a = location();
+        let b = location();
+        let first = reader.read_decl_loc(&a);
+        assert_eq!(first, reader.read_decl_loc(&a));
+        let distinct = reader.read_decl_loc(&b);
+        assert_ne!(first, distinct);
+        assert_eq!(ctx.resolve_loc(first), ctx.resolve_loc(distinct));
+        assert_eq!(ctx.local_decl_loc_count(), 1);
+        assert_eq!(
+            reader.location_blocks.len(),
+            4,
+            "two locations share their two positions"
+        );
+        assert_ne!(reader.location_block(&start), reader.location_block(&end));
+        let OcamlValue::Block(_, fields) = &a else {
+            unreachable!()
+        };
+        let retained = Arc::downgrade(fields);
+        drop(a);
+        assert!(
+            retained.upgrade().is_some(),
+            "cached address remains allocated"
+        );
+        let mut other = SigReadContext::new(&ctx);
+        assert_ne!(
+            distinct,
+            other.read_decl_loc(&b),
+            "separate decoded scopes remain distinct"
+        );
+        drop(reader);
+        assert!(
+            retained.upgrade().is_none(),
+            "reader releases retained allocation"
+        );
+    }
+
     #[test]
     fn decoded_identifiers_and_paths_keep_their_marshal_block_identity() {
         let ctx = TypeContext::new(Arc::new(crate::context::IdGenerator::new()));

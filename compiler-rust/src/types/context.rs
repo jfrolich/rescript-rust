@@ -4336,14 +4336,7 @@ impl TypeContext {
         if !arena.stores_locations() {
             return self.intern_loc(loc);
         }
-        let scope = arena.declaration_location_scope(|| {
-            let next = self.next_parse_location_scope.get();
-            self.next_parse_location_scope.set(
-                next.checked_add(1)
-                    .expect("parser location scopes exhausted"),
-            );
-            ((self.decl_loc_owner as u64) << 32) | next as u64
-        });
+        let scope = arena.declaration_location_scope(|| self.fresh_location_scope());
         let source = arena.get_location(index);
         let identity = super::decl_loc::LocationIdentity {
             scope,
@@ -4351,6 +4344,23 @@ impl TypeContext {
             start: source.loc_start.0,
             end: source.loc_end.0,
         };
+        self.intern_loc_with_identity(loc, identity)
+    }
+
+    /// A scope for one parser arena or decoded interface. Uses the existing
+    /// table-owner namespace and never reuses an ordinal.
+    pub(crate) fn fresh_location_scope(&self) -> u64 {
+        let next = self.next_parse_location_scope.get();
+        self.next_parse_location_scope
+            .set(next.checked_add(1).expect("location scopes exhausted"));
+        ((self.decl_loc_owner as u64) << 32) | next as u64
+    }
+
+    pub(crate) fn intern_loc_with_identity(
+        &self,
+        loc: crate::location::Location,
+        identity: super::decl_loc::LocationIdentity,
+    ) -> super::DeclLoc {
         if self.in_store_build() {
             return self.store.intern_decl_loc_with_identity(loc, identity);
         }
