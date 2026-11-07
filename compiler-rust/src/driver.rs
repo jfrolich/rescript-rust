@@ -779,12 +779,18 @@ pub fn format_source_with(
     filename: &str,
     ignore_parse_errors: bool,
 ) -> (String, Option<Vec<u8>>) {
-    let source = crate::source_text::latin1_bytes_to_string(source.to_vec());
+    // res_multi_printer.ml:24-31 `Res_line_endings.preserve`: print the
+    // source with LF line endings and give the result CRLF ones when the
+    // source's first line break is CRLF.
+    let raw_source = crate::source_text::latin1_bytes_to_string(source.to_vec());
+    let crlf = crate::parser::line_endings::uses_crlf(&raw_source);
+    let source = crate::parser::line_endings::to_lf(&raw_source);
+    let source: &str = &source;
     let is_interface = filename.ends_with(".resi");
-    let mut parser = Parser::new(filename, &source);
+    let mut parser = Parser::new(filename, source);
     let (report, output) = if is_interface {
         let signature = module::parse_signature(&mut parser);
-        let report = parse_diagnostics_report(&parser, &source, filename);
+        let report = parse_diagnostics_report(&parser, source, filename);
         if parser.has_errors() && !ignore_parse_errors {
             return (report, None);
         }
@@ -797,7 +803,7 @@ pub fn format_source_with(
         (report, output)
     } else {
         let structure = module::parse_structure(&mut parser);
-        let report = parse_diagnostics_report(&parser, &source, filename);
+        let report = parse_diagnostics_report(&parser, source, filename);
         if parser.has_errors() && !ignore_parse_errors {
             return (report, None);
         }
@@ -808,6 +814,11 @@ pub fn format_source_with(
             parser.arena_mut(),
         );
         (report, output)
+    };
+    let output = if crlf {
+        crate::parser::line_endings::to_crlf(&output)
+    } else {
+        output
     };
     (report, Some(output.chars().map(|c| c as u8).collect()))
 }
@@ -15519,6 +15530,23 @@ pub fn typecheck_preprocessed_signature_in_process(
 
 #[cfg(test)]
 mod tests {
+    /// tests/syntax_tests/res_test.ml:27-56: formatting keeps a file's line
+    /// endings, also inside comments, template literals and raw JS, and
+    /// formatting the result again changes nothing.
+    #[test]
+    fn format_keeps_line_endings() {
+        let lf = "/* a\n multi-line comment */\nlet s = `line 1\nline 2`\nlet r = %raw(`\n  function () {\n    return 1\n  }\n`)\n";
+        let crlf = crate::parser::line_endings::to_crlf(lf);
+        for source in [lf, crlf.as_str()] {
+            let formatted = super::format_source(source.as_bytes(), "A.res").unwrap();
+            assert_eq!(String::from_utf8_lossy(&formatted), source);
+            let again = super::format_source(&formatted, "A.res").unwrap();
+            assert_eq!(again, formatted);
+        }
+        let unformatted = super::format_source(b"let  x  =  1\r\n", "A.res").unwrap();
+        assert_eq!(unformatted, b"let x = 1\r\n");
+    }
+
     /// GenTypeMain.ml:93-107's walk over a parsed interface whose `"BAD"`
     /// strings are replaced with a PPX's undecodable template `Fo\xo`:
     /// `Ok(ignore_interface)`, or the offset of the template it raised at.

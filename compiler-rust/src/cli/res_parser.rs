@@ -163,6 +163,18 @@ fn run(args: Vec<String>) {
 
     let filename = args.file.to_string_lossy().to_string();
 
+    // res_cli.ml:96-98: the tokens target bypasses parsing and scans the file
+    // as it is.
+    if args.print == "tokens" {
+        print_tokens(&source, &filename, &mut io::stdout());
+        return;
+    }
+
+    // res_cli.ml:86-88: read sources with LF line endings, so a CRLF file
+    // prints like an LF one, also inside comments, template literals and raw
+    // JS.
+    let source = crate::parser::line_endings::to_lf(&source).into_owned();
+
     // Determine if we're parsing an interface
     let is_interface = args.interface || filename.ends_with(".resi") || filename.ends_with(".mli");
 

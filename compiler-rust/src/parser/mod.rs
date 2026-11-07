@@ -49,6 +49,7 @@ pub mod expr;
 pub mod formatter;
 pub mod grammar;
 pub mod jsx_ppx;
+pub mod line_endings;
 pub mod longident;
 pub mod ml_printer;
 pub mod module;
