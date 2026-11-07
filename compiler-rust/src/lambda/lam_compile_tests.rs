@@ -8943,6 +8943,32 @@ fn for_loop_compiles_its_finish_bound_before_its_start_bound() {
     );
 }
 
+/// lam_compile.ml:375-388 and 1581-1587: a recursive function's body is
+/// compiled with `ret.id` set to the function itself, and only a call with
+/// `Ident.same ret.id fn_id` becomes the loop; a call through an alias in
+/// the same group stays a call.
+#[test]
+fn recursive_function_loops_only_on_calls_to_itself() {
+    let compile = |callee_is_alias: bool| {
+        let function = Ident::create_local("f");
+        let alias = Ident::create_local("g");
+        let target = if callee_is_alias { alias } else { function };
+        let (function, function_lam) = test_function_calling(function, &target);
+        let lam = Lambda::Lletrec(
+            vec![(function, function_lam), (alias, Lambda::var(function))],
+            Box::new(Lambda::const_(Constant::int(0))),
+        );
+        print_block(
+            &LambdaCompiler::new()
+                .compile_effect_block_output(&lam)
+                .block,
+        )
+    };
+    assert!(compile(false).contains("while"), "{}", compile(false));
+    let through_alias = compile(true);
+    assert!(!through_alias.contains("while"), "{through_alias}");
+}
+
 /// compile_sequand / compile_sequor in a `Declare (_kind, v)` continuation
 /// declare the target with `~kind:Variable` when the right side needs
 /// statements (lam_compile.ml:1128-1135, 1168-1175).

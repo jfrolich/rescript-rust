@@ -2264,30 +2264,12 @@ impl LambdaCompiler {
         }
         let mut group: Vec<usize> = (0..bindings.len()).collect();
         sort_recursive_binding_group(bindings, &mut group);
-        let recursive_functions = recursive_function_bindings_in_group(bindings, &group);
-        let recursive_function_tail_targets = direct_recursive_function_tail_targets_with_group(
-            bindings,
-            &group,
-            &recursive_functions,
-        );
-        let recursive_function_ids: AHashSet<_> =
-            recursive_function_tail_targets.keys().cloned().collect();
         let mut output = BlockOutput::dummy();
         let mut declarations = vec![];
         for &index in group.iter().rev() {
             let (id, expr) = &bindings[index];
-            let (code, binding_declarations) = self.compile_recursive_binding(
-                id,
-                expr,
-                bindings,
-                &group,
-                recursive_function_tail_targets
-                    .get(id)
-                    .map(Vec::as_slice)
-                    .unwrap_or(&[]),
-                &recursive_functions,
-                &recursive_function_ids,
-            );
+            let (code, binding_declarations) =
+                self.compile_recursive_binding(id, expr, bindings, &group);
             output = code.append(output);
             // `Ext_list.append declare_ids ids`.
             let mut later = std::mem::take(&mut declarations);
@@ -2307,37 +2289,22 @@ impl LambdaCompiler {
         expr: &Lambda,
         all_bindings: &[(Ident, Lambda)],
         group: &[usize],
-        tail_targets: &[Ident],
-        recursive_functions: &AHashMap<Ident, LFunction>,
-        recursive_function_ids: &AHashSet<Ident>,
     ) -> (BlockOutput, Block) {
         if let Some(func) = recursive_function_binding_value(expr) {
+            // lam_compile.ml:375-388: the function body is compiled under
+            // `Tail_with_name {label = Some ret}` with `ret.id = id`, and
+            // compile_apply starts the loop only for `Ident.same ret.id
+            // fn_id` (lam_compile.ml:1581-1587): an alias is no target.
+            let tail_targets = [*id];
             return (
                 BlockOutput::make(vec![Statement::variable(VariableDeclaration {
                     ident: *id,
-                    value: Some(self.compile_recursive_function_expr(id, &func, tail_targets)),
+                    value: Some(self.compile_recursive_function_expr(id, &func, &tail_targets)),
                     property: LetKind::Alias,
                     ident_info: IdentInfo::default(),
                 })]),
                 vec![],
             );
-        }
-
-        if let Some(target) = recursive_function_binding_alias_target(expr, recursive_functions) {
-            if recursive_function_ids
-                .iter()
-                .any(|function_id| target.same(function_id))
-            {
-                return (
-                    BlockOutput::make(vec![Statement::variable(VariableDeclaration {
-                        ident: *id,
-                        value: Some(Expression::var(target)),
-                        property: LetKind::Alias,
-                        ident_info: IdentInfo::default(),
-                    })]),
-                    vec![],
-                );
-            }
         }
 
         match expr {
@@ -6715,42 +6682,6 @@ fn sort_recursive_binding_group(bindings: &[(Ident, Lambda)], group: &mut [usize
     group.sort_by_key(|index| !binding_is_ocaml_scc_function(bindings, *index));
 }
 
-fn recursive_function_bindings(bindings: &[(Ident, Lambda)]) -> AHashMap<Ident, LFunction> {
-    bindings
-        .iter()
-        .filter_map(|(id, expr)| recursive_function_binding_value(expr).map(|func| (*id, func)))
-        .collect()
-}
-
-fn recursive_function_bindings_in_group(
-    bindings: &[(Ident, Lambda)],
-    group: &[usize],
-) -> AHashMap<Ident, LFunction> {
-    group
-        .iter()
-        .filter_map(|&index| {
-            let (id, expr) = &bindings[index];
-            recursive_function_binding_value(expr).map(|func| (*id, func))
-        })
-        .collect()
-}
-
-fn recursive_function_binding_alias_target(
-    expr: &Lambda,
-    recursive_functions: &AHashMap<Ident, LFunction>,
-) -> Option<Ident> {
-    let lookup = |target: &Ident| {
-        recursive_functions
-            .iter()
-            .find(|(function_id, _)| target.same(function_id))
-    };
-
-    match expr {
-        Lambda::Lvar(target) => lookup(target).map(|(function_id, _)| *function_id),
-        _ => None,
-    }
-}
-
 fn lower_ocaml_for_range_direction<'a>(
     direction: &crate::lambda::DirectionFlag,
     finish: &'a Lambda,
@@ -6895,63 +6826,6 @@ fn function_has_self_tailcall(tail_targets: &[Ident], lam: &Lambda) -> bool {
         | Lambda::Lfor_await_of(_, _, _)
         | Lambda::Lassign(_, _) => false,
     }
-}
-
-fn direct_recursive_function_tail_targets(
-    bindings: &[(Ident, Lambda)],
-) -> AHashMap<Ident, Vec<Ident>> {
-    let recursive_functions = recursive_function_bindings(bindings);
-    direct_recursive_function_tail_targets_with_bindings(bindings, &recursive_functions)
-}
-
-fn direct_recursive_function_tail_targets_with_group(
-    bindings: &[(Ident, Lambda)],
-    group: &[usize],
-    recursive_functions: &AHashMap<Ident, LFunction>,
-) -> AHashMap<Ident, Vec<Ident>> {
-    let mut tail_targets: AHashMap<Ident, Vec<Ident>> = recursive_functions
-        .keys()
-        .cloned()
-        .map(|id| {
-            let targets = vec![id];
-            (id, targets)
-        })
-        .collect();
-
-    for &index in group {
-        let (id, expr) = &bindings[index];
-        let Some(function_id) = recursive_function_binding_alias_target(expr, recursive_functions)
-        else {
-            continue;
-        };
-        tail_targets.entry(function_id).or_default().push(*id);
-    }
-
-    tail_targets
-}
-
-fn direct_recursive_function_tail_targets_with_bindings(
-    bindings: &[(Ident, Lambda)],
-    recursive_functions: &AHashMap<Ident, LFunction>,
-) -> AHashMap<Ident, Vec<Ident>> {
-    let mut tail_targets: AHashMap<Ident, Vec<Ident>> = recursive_functions
-        .keys()
-        .cloned()
-        .map(|id| {
-            let targets = vec![id];
-            (id, targets)
-        })
-        .collect();
-
-    for (id, expr) in bindings {
-        let Some(function_id) = recursive_function_binding_alias_target(expr, recursive_functions)
-        else {
-            continue;
-        };
-        tail_targets.entry(function_id).or_default().push(*id);
-    }
-
-    tail_targets
 }
 
 fn module_sort_name(module: &ModuleId) -> &str {
