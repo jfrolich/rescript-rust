@@ -4068,6 +4068,104 @@ mod tests {
     use super::*;
 
     #[test]
+    fn signature_prefix_rewrites_share_targets_across_types_and_declarations() {
+        for by_name in [false, true] {
+            for shallow in [false, true] {
+                let ctx = TypeContext::new(Arc::new(crate::context::IdGenerator::new()));
+                let root = Arc::new(Path::Pident(ctx.create_ident("Source")));
+                let name = ctx.create_ident("t");
+                let source = ctx.dotted_from_ident(root.clone(), name, 7);
+                let target = Arc::new(Path::Pident(ctx.create_ident("Target")));
+                let ty = ctx.new_generic_constr(source.clone(), vec![]);
+                let mut sig = vec![
+                    SignatureItem::SigValue(
+                        ctx.create_ident("value"),
+                        crate::types::decl::ValueDescription {
+                            val_type: ty,
+                            val_kind: crate::types::decl::ValueKind::ValReg,
+                            val_loc: Default::default(),
+                            val_attributes: vec![],
+                            val_path: Some(source.clone()),
+                        },
+                    ),
+                    SignatureItem::SigModule(
+                        ctx.create_ident("Child"),
+                        crate::types::decl::ModuleDeclaration {
+                            md_type: ModuleType::MtyAlias(
+                                crate::types::decl::AliasPresence::MtaPresent,
+                                source.clone(),
+                            ),
+                            md_loc: Default::default(),
+                            md_attributes: vec![],
+                            md_path: Some(source.clone()),
+                        },
+                        RecStatus::TrecNot,
+                    ),
+                ];
+                match (by_name, shallow) {
+                    (true, true) => {
+                        rewrite_module_prefix_in_sig_shallow(&sig, "Source", &target, &ctx);
+                        rewrite_module_prefix_paths_in_sig_shallow(
+                            &mut sig, "Source", &target, &ctx,
+                        );
+                    }
+                    (true, false) => {
+                        rewrite_module_prefix_in_sig(&sig, "Source", &target, &ctx);
+                        rewrite_module_prefix_paths_in_sig(&mut sig, "Source", &target, &ctx);
+                    }
+                    (false, true) => {
+                        rewrite_sig_by_path_prefix(&sig, &root, &target, &ctx);
+                        rewrite_sig_paths_by_path_prefix_shallow(&mut sig, &root, &target, &ctx);
+                    }
+                    (false, false) => {
+                        rewrite_sig_by_path_prefix(&sig, &root, &target, &ctx);
+                        rewrite_sig_paths_by_path_prefix(&mut sig, &root, &target, &ctx);
+                    }
+                }
+                let desc = ctx.get_desc(ty);
+                let TypeDesc::Tconstr { path, .. } = &*desc else {
+                    panic!("constructor")
+                };
+                let type_allocation = ctx.dotted_allocation(path).unwrap();
+                let SignatureItem::SigValue(_, value) = &sig[0] else {
+                    panic!("value")
+                };
+                let value_allocation = ctx
+                    .dotted_allocation(value.val_path.as_ref().unwrap())
+                    .unwrap();
+                assert!(Arc::ptr_eq(&type_allocation.prefix, &target));
+                assert!(Arc::ptr_eq(&value_allocation.prefix, &target));
+                assert_ne!(type_allocation.key(), value_allocation.key());
+                assert_eq!(type_allocation.name, ctx.ident_name_allocation(&name));
+                assert_eq!(type_allocation.name, value_allocation.name);
+                let SignatureItem::SigModule(_, child, _) = &sig[1] else {
+                    panic!("child")
+                };
+                let ModuleType::MtyAlias(_, alias) = &child.md_type else {
+                    panic!("alias")
+                };
+                for path in [alias, child.md_path.as_ref().unwrap()] {
+                    let allocation = ctx.dotted_allocation(path).unwrap();
+                    if shallow {
+                        assert_eq!(
+                            allocation.key(),
+                            ctx.dotted_allocation(&source).unwrap().key()
+                        );
+                    } else {
+                        assert!(Arc::ptr_eq(&allocation.prefix, &target));
+                        assert_eq!(allocation.name, type_allocation.name);
+                        assert_ne!(allocation.key(), type_allocation.key());
+                    }
+                }
+                let unknown = Path::pdot((*root).clone(), "unknown");
+                let copied =
+                    rewrite_path_with_shared_prefix(&unknown, &root, &target, &ctx).unwrap();
+                assert!(ctx.dotted_allocation(&copied).is_none());
+            }
+        }
+    }
+
+    #[test]
     fn scoped_rerooting_keeps_suffix_names_and_target_prefix_allocations() {
         let ctx = TypeContext::new(Arc::new(crate::context::IdGenerator::new()));
         let root = Arc::new(Path::Pident(ctx.create_ident("Root")));
@@ -6034,13 +6132,13 @@ pub fn substitute_type_paths_in_value_with_maps(
             // Reuse the component's one prefix_idents target, including
             // its allocation, for every selected value description.
             let new_path = match item {
-                SignatureItem::SigType(..) => direct_type_name_map.get(id.name()).cloned(),
+                SignatureItem::SigType(..) => {
+                    direct_type_name_map.get(id.name()).cloned().map(Arc::new)
+                }
                 SignatureItem::SigModule(..) if id.stamp() != 0 => module_stamp_map
                     .get(&id.stamp())
-                    .map(|(_, path)| (**path).clone()),
-                SignatureItem::SigModule(..) => {
-                    module_name_map.get(id.name()).map(|path| (**path).clone())
-                }
+                    .map(|(_, path)| path.clone()),
+                SignatureItem::SigModule(..) => module_name_map.get(id.name()).cloned(),
                 _ => unreachable!(),
             }
             .expect("component binder has no prefix substitution");
@@ -6250,7 +6348,7 @@ fn substitute_module_path(
 fn rewrite_type_expr_prefix(
     ty_ref: TypeExprRef,
     old_name: &str,
-    new_prefix: &Path,
+    new_prefix: &Arc<Path>,
     ctx: &TypeContext,
     visited: &mut HashSet<usize>,
 ) {
@@ -6262,7 +6360,7 @@ fn rewrite_type_expr_prefix(
 
     match &*desc {
         TypeDesc::Tconstr { path, args, .. } => {
-            let rewritten = rewrite_path_prefix(path, old_name, new_prefix);
+            let rewritten = rewrite_path_prefix(path, old_name, new_prefix, ctx);
             if let Some(new_path) = rewritten {
                 let mut new_desc = (*desc).clone();
                 if let TypeDesc::Tconstr { ref mut path, .. } = new_desc {
@@ -6306,7 +6404,7 @@ fn rewrite_type_expr_prefix(
         }
         TypeDesc::Tvariant(row) => {
             if let Some((path, _)) = &row.row_name
-                && let Some(new_path) = rewrite_path_prefix(path, old_name, new_prefix)
+                && let Some(new_path) = rewrite_path_prefix(path, old_name, new_prefix, ctx)
             {
                 let mut new_desc = (*desc).clone();
                 if let TypeDesc::Tvariant(ref mut row) = new_desc
@@ -6337,7 +6435,7 @@ fn rewrite_type_expr_prefix(
             }
         }
         TypeDesc::Tpackage { path, args, .. } => {
-            if let Some(new_path) = rewrite_path_prefix(path, old_name, new_prefix) {
+            if let Some(new_path) = rewrite_path_prefix(path, old_name, new_prefix, ctx) {
                 let mut new_desc = (*desc).clone();
                 if let TypeDesc::Tpackage { ref mut path, .. } = new_desc {
                     *path = new_path;
@@ -6354,24 +6452,20 @@ fn rewrite_type_expr_prefix(
 
 /// Rewrite a path's module prefix from an old name to a new path.
 /// Returns Some(new_path) if rewritten, None if unchanged.
-fn rewrite_path_prefix(path: &Path, old_name: &str, new_prefix: &Path) -> Option<Path> {
+fn rewrite_path_prefix(
+    path: &Path,
+    old_name: &str,
+    new_prefix: &Arc<Path>,
+    ctx: &TypeContext,
+) -> Option<Path> {
     match path {
-        // Pident("Belt_Array") → new_prefix (e.g., Pdot(Pident("Belt"), "Array"))
-        Path::Pident(id) if id.name() == old_name => Some(new_prefix.clone()),
-        // Pdot(Pident("Belt_Array"), "t", pos) → Pdot(new_prefix, "t", pos)
-        Path::Pdot(inner, name, pos) => {
-            if let Path::Pident(id) = inner.as_ref() {
-                if id.name() == old_name {
-                    return Some(Path::Pdot(
-                        std::sync::Arc::new(new_prefix.clone()),
-                        *name,
-                        *pos,
-                    ));
-                }
-            }
-            // Recursively check deeper paths
-            let rewritten_inner = rewrite_path_prefix(inner, old_name, new_prefix);
-            rewritten_inner.map(|new_inner| Path::Pdot(std::sync::Arc::new(new_inner), *name, *pos))
+        Path::Pident(id) if id.name() == old_name => Some((**new_prefix).clone()),
+        Path::Pdot(inner, _, _) => {
+            let prefix = match inner.as_ref() {
+                Path::Pident(id) if id.name() == old_name => new_prefix.clone(),
+                _ => Arc::new(rewrite_path_prefix(inner, old_name, new_prefix, ctx)?),
+            };
+            Some(ctx.copy_dotted_with_prefix(path, prefix))
         }
         _ => None,
     }
@@ -6380,11 +6474,12 @@ fn rewrite_path_prefix(path: &Path, old_name: &str, new_prefix: &Path) -> Option
 fn rewrite_module_type_prefix_paths(
     module_type: &mut ModuleType,
     old_name: &str,
-    new_prefix: &Path,
+    new_prefix: &Arc<Path>,
+    ctx: &TypeContext,
 ) {
     match module_type {
         ModuleType::MtyIdent(path) | ModuleType::MtyAlias(_, path) => {
-            if let Some(rewritten) = rewrite_path_prefix(path, old_name, new_prefix) {
+            if let Some(rewritten) = rewrite_path_prefix(path, old_name, new_prefix, ctx) {
                 *path = rewritten;
             }
         }
@@ -6393,15 +6488,16 @@ fn rewrite_module_type_prefix_paths(
                 crate::types::decl::signature_mut(sig),
                 old_name,
                 new_prefix,
+                ctx,
             );
         }
         ModuleType::MtyFunctor {
             param_type, result, ..
         } => {
             if let Some(param_type) = param_type.as_mut() {
-                rewrite_module_type_prefix_paths(param_type, old_name, new_prefix);
+                rewrite_module_type_prefix_paths(param_type, old_name, new_prefix, ctx);
             }
-            rewrite_module_type_prefix_paths(result, old_name, new_prefix);
+            rewrite_module_type_prefix_paths(result, old_name, new_prefix, ctx);
         }
     }
 }
@@ -6409,42 +6505,43 @@ fn rewrite_module_type_prefix_paths(
 pub fn rewrite_module_prefix_paths_in_sig(
     sig_items: &mut [SignatureItem],
     old_name: &str,
-    new_prefix: &Path,
+    new_prefix: &Arc<Path>,
+    ctx: &TypeContext,
 ) {
     for item in sig_items {
         match item {
             SignatureItem::SigValue(_, desc) => {
                 if let Some(path) = desc.val_path.as_mut() {
-                    if let Some(rewritten) = rewrite_path_prefix(path, old_name, new_prefix) {
+                    if let Some(rewritten) = rewrite_path_prefix(path, old_name, new_prefix, ctx) {
                         *path = rewritten;
                     }
                 }
             }
             SignatureItem::SigType(_, decl, _) => {
                 if let Some(path) = std::sync::Arc::make_mut(decl).type_path.as_mut() {
-                    if let Some(rewritten) = rewrite_path_prefix(path, old_name, new_prefix) {
+                    if let Some(rewritten) = rewrite_path_prefix(path, old_name, new_prefix, ctx) {
                         *path = rewritten;
                     }
                 }
             }
             SignatureItem::SigTypext(_, ext, _) => {
                 if let Some(rewritten) =
-                    rewrite_path_prefix(&ext.ext_type_path, old_name, new_prefix)
+                    rewrite_path_prefix(&ext.ext_type_path, old_name, new_prefix, ctx)
                 {
                     ext.ext_type_path = rewritten;
                 }
             }
             SignatureItem::SigModule(_, md, _) => {
                 if let Some(path) = md.md_path.as_mut() {
-                    if let Some(rewritten) = rewrite_path_prefix(path, old_name, new_prefix) {
+                    if let Some(rewritten) = rewrite_path_prefix(path, old_name, new_prefix, ctx) {
                         *path = rewritten;
                     }
                 }
-                rewrite_module_type_prefix_paths(&mut md.md_type, old_name, new_prefix);
+                rewrite_module_type_prefix_paths(&mut md.md_type, old_name, new_prefix, ctx);
             }
             SignatureItem::SigModtype(_, mtd) => {
                 if let Some(module_type) = mtd.mtd_type.as_mut() {
-                    rewrite_module_type_prefix_paths(module_type, old_name, new_prefix);
+                    rewrite_module_type_prefix_paths(module_type, old_name, new_prefix, ctx);
                 }
             }
             SignatureItem::SigClass | SignatureItem::SigClassType => {}
@@ -6459,27 +6556,28 @@ pub fn rewrite_module_prefix_paths_in_sig(
 pub fn rewrite_module_prefix_paths_in_sig_shallow(
     sig_items: &mut [SignatureItem],
     old_name: &str,
-    new_prefix: &Path,
+    new_prefix: &Arc<Path>,
+    ctx: &TypeContext,
 ) {
     for item in sig_items {
         match item {
             SignatureItem::SigValue(_, desc) => {
                 if let Some(path) = desc.val_path.as_mut()
-                    && let Some(rewritten) = rewrite_path_prefix(path, old_name, new_prefix)
+                    && let Some(rewritten) = rewrite_path_prefix(path, old_name, new_prefix, ctx)
                 {
                     *path = rewritten;
                 }
             }
             SignatureItem::SigType(_, decl, _) => {
                 if let Some(path) = std::sync::Arc::make_mut(decl).type_path.as_mut()
-                    && let Some(rewritten) = rewrite_path_prefix(path, old_name, new_prefix)
+                    && let Some(rewritten) = rewrite_path_prefix(path, old_name, new_prefix, ctx)
                 {
                     *path = rewritten;
                 }
             }
             SignatureItem::SigTypext(_, ext, _) => {
                 if let Some(rewritten) =
-                    rewrite_path_prefix(&ext.ext_type_path, old_name, new_prefix)
+                    rewrite_path_prefix(&ext.ext_type_path, old_name, new_prefix, ctx)
                 {
                     ext.ext_type_path = rewritten;
                 }
@@ -6499,7 +6597,7 @@ pub fn rewrite_module_prefix_paths_in_sig_shallow(
 pub fn rewrite_module_prefix_in_sig(
     sig_items: &[SignatureItem],
     old_name: &str,
-    new_prefix: &Path,
+    new_prefix: &Arc<Path>,
     ctx: &TypeContext,
 ) {
     let mut visited = HashSet::new();
@@ -6513,7 +6611,7 @@ pub fn rewrite_module_prefix_in_sig(
 pub fn rewrite_module_prefix_in_sig_shallow(
     sig_items: &[SignatureItem],
     old_name: &str,
-    new_prefix: &Path,
+    new_prefix: &Arc<Path>,
     ctx: &TypeContext,
 ) {
     let mut visited = HashSet::new();
@@ -6618,7 +6716,7 @@ pub fn rewrite_module_prefix_in_sig_shallow(
 fn rewrite_module_type_prefix_in_module_type(
     module_type: &ModuleType,
     old_name: &str,
-    new_prefix: &Path,
+    new_prefix: &Arc<Path>,
     ctx: &TypeContext,
     visited: &mut HashSet<usize>,
 ) {
@@ -6643,7 +6741,7 @@ fn rewrite_module_type_prefix_in_module_type(
 fn rewrite_module_prefix_in_sig_with_visited(
     sig_items: &[SignatureItem],
     old_name: &str,
-    new_prefix: &Path,
+    new_prefix: &Arc<Path>,
     ctx: &TypeContext,
     visited: &mut HashSet<usize>,
 ) {
@@ -6761,26 +6859,6 @@ fn rewrite_module_prefix_in_sig_with_visited(
 /// E.g., with old_prefix=Pdot(Pident("Js"),"Json") and new_prefix=Pident("J"):
 ///   Pdot(Pdot(Pident("Js"),"Json"),"Kind") → Pdot(Pident("J"),"Kind")
 ///   Pdot(Pdot(Pdot(Pident("Js"),"Json"),"Kind"),"t") → Pdot(Pdot(Pident("J"),"Kind"),"t")
-fn rewrite_path_by_path_prefix(path: &Path, old_prefix: &Path, new_prefix: &Path) -> Option<Path> {
-    if path.same(old_prefix) {
-        return Some(new_prefix.clone());
-    }
-    match path {
-        Path::Pdot(inner, name, pos) => {
-            if inner.same(old_prefix) {
-                return Some(Path::Pdot(
-                    std::sync::Arc::new(new_prefix.clone()),
-                    *name,
-                    *pos,
-                ));
-            }
-            rewrite_path_by_path_prefix(inner, old_prefix, new_prefix)
-                .map(|new_inner| Path::Pdot(std::sync::Arc::new(new_inner), *name, *pos))
-        }
-        _ => None,
-    }
-}
-
 /// Prefix rewrites `(old, new)` tried in order, with an index from each old
 /// prefix (compared with `Path::same`) to its first position.
 struct PathPrefixes<'a> {
@@ -6889,11 +6967,14 @@ fn rewrite_path_by_path_prefixes(
 fn rewrite_module_type_by_path_prefix(
     module_type: &mut ModuleType,
     old_prefix: &Path,
-    new_prefix: &Path,
+    new_prefix: &Arc<Path>,
+    ctx: &TypeContext,
 ) {
     match module_type {
         ModuleType::MtyIdent(path) | ModuleType::MtyAlias(_, path) => {
-            if let Some(rewritten) = rewrite_path_by_path_prefix(path, old_prefix, new_prefix) {
+            if let Some(rewritten) =
+                rewrite_path_with_shared_prefix(path, old_prefix, new_prefix, ctx)
+            {
                 *path = rewritten;
             }
         }
@@ -6902,15 +6983,16 @@ fn rewrite_module_type_by_path_prefix(
                 crate::types::decl::signature_mut(sig),
                 old_prefix,
                 new_prefix,
+                ctx,
             );
         }
         ModuleType::MtyFunctor {
             param_type, result, ..
         } => {
             if let Some(param_type) = param_type.as_mut() {
-                rewrite_module_type_by_path_prefix(param_type, old_prefix, new_prefix);
+                rewrite_module_type_by_path_prefix(param_type, old_prefix, new_prefix, ctx);
             }
-            rewrite_module_type_by_path_prefix(result, old_prefix, new_prefix);
+            rewrite_module_type_by_path_prefix(result, old_prefix, new_prefix, ctx);
         }
     }
 }
@@ -6918,14 +7000,15 @@ fn rewrite_module_type_by_path_prefix(
 pub fn rewrite_sig_paths_by_path_prefix(
     sig_items: &mut [SignatureItem],
     old_prefix: &Path,
-    new_prefix: &Path,
+    new_prefix: &Arc<Path>,
+    ctx: &TypeContext,
 ) {
     for item in sig_items {
         match item {
             SignatureItem::SigValue(_, desc) => {
                 if let Some(path) = desc.val_path.as_mut() {
                     if let Some(rewritten) =
-                        rewrite_path_by_path_prefix(path, old_prefix, new_prefix)
+                        rewrite_path_with_shared_prefix(path, old_prefix, new_prefix, ctx)
                     {
                         *path = rewritten;
                     }
@@ -6934,7 +7017,7 @@ pub fn rewrite_sig_paths_by_path_prefix(
             SignatureItem::SigType(_, decl, _) => {
                 if let Some(path) = std::sync::Arc::make_mut(decl).type_path.as_mut() {
                     if let Some(rewritten) =
-                        rewrite_path_by_path_prefix(path, old_prefix, new_prefix)
+                        rewrite_path_with_shared_prefix(path, old_prefix, new_prefix, ctx)
                     {
                         *path = rewritten;
                     }
@@ -6942,7 +7025,7 @@ pub fn rewrite_sig_paths_by_path_prefix(
             }
             SignatureItem::SigTypext(_, ext, _) => {
                 if let Some(rewritten) =
-                    rewrite_path_by_path_prefix(&ext.ext_type_path, old_prefix, new_prefix)
+                    rewrite_path_with_shared_prefix(&ext.ext_type_path, old_prefix, new_prefix, ctx)
                 {
                     ext.ext_type_path = rewritten;
                 }
@@ -6950,16 +7033,16 @@ pub fn rewrite_sig_paths_by_path_prefix(
             SignatureItem::SigModule(_, md, _) => {
                 if let Some(path) = md.md_path.as_mut() {
                     if let Some(rewritten) =
-                        rewrite_path_by_path_prefix(path, old_prefix, new_prefix)
+                        rewrite_path_with_shared_prefix(path, old_prefix, new_prefix, ctx)
                     {
                         *path = rewritten;
                     }
                 }
-                rewrite_module_type_by_path_prefix(&mut md.md_type, old_prefix, new_prefix);
+                rewrite_module_type_by_path_prefix(&mut md.md_type, old_prefix, new_prefix, ctx);
             }
             SignatureItem::SigModtype(_, mtd) => {
                 if let Some(module_type) = mtd.mtd_type.as_mut() {
-                    rewrite_module_type_by_path_prefix(module_type, old_prefix, new_prefix);
+                    rewrite_module_type_by_path_prefix(module_type, old_prefix, new_prefix, ctx);
                 }
             }
             SignatureItem::SigClass | SignatureItem::SigClassType => {}
@@ -6974,14 +7057,15 @@ pub fn rewrite_sig_paths_by_path_prefix(
 pub fn rewrite_sig_paths_by_path_prefix_shallow(
     sig_items: &mut [SignatureItem],
     old_prefix: &Path,
-    new_prefix: &Path,
+    new_prefix: &Arc<Path>,
+    ctx: &TypeContext,
 ) {
     for item in sig_items {
         match item {
             SignatureItem::SigValue(_, desc) => {
                 if let Some(path) = desc.val_path.as_mut()
                     && let Some(rewritten) =
-                        rewrite_path_by_path_prefix(path, old_prefix, new_prefix)
+                        rewrite_path_with_shared_prefix(path, old_prefix, new_prefix, ctx)
                 {
                     *path = rewritten;
                 }
@@ -6989,14 +7073,14 @@ pub fn rewrite_sig_paths_by_path_prefix_shallow(
             SignatureItem::SigType(_, decl, _) => {
                 if let Some(path) = std::sync::Arc::make_mut(decl).type_path.as_mut()
                     && let Some(rewritten) =
-                        rewrite_path_by_path_prefix(path, old_prefix, new_prefix)
+                        rewrite_path_with_shared_prefix(path, old_prefix, new_prefix, ctx)
                 {
                     *path = rewritten;
                 }
             }
             SignatureItem::SigTypext(_, ext, _) => {
                 if let Some(rewritten) =
-                    rewrite_path_by_path_prefix(&ext.ext_type_path, old_prefix, new_prefix)
+                    rewrite_path_with_shared_prefix(&ext.ext_type_path, old_prefix, new_prefix, ctx)
                 {
                     ext.ext_type_path = rewritten;
                 }
@@ -7016,7 +7100,7 @@ pub fn rewrite_sig_paths_by_path_prefix_shallow(
 fn rewrite_type_expr_by_path_prefix_in(
     ty_ref: TypeExprRef,
     old_prefix: &Path,
-    new_prefix: &Path,
+    new_prefix: &Arc<Path>,
     ctx: &TypeContext,
     visited: &mut HashSet<usize>,
 ) {
@@ -7027,7 +7111,9 @@ fn rewrite_type_expr_by_path_prefix_in(
     let desc = ctx.get_desc(ty_ref);
     match &*desc {
         TypeDesc::Tconstr { path, args, .. } => {
-            if let Some(new_path) = rewrite_path_by_path_prefix(path, old_prefix, new_prefix) {
+            if let Some(new_path) =
+                rewrite_path_with_shared_prefix(path, old_prefix, new_prefix, ctx)
+            {
                 let mut new_desc = (*desc).clone();
                 if let TypeDesc::Tconstr { ref mut path, .. } = new_desc {
                     *path = new_path;
@@ -7070,7 +7156,8 @@ fn rewrite_type_expr_by_path_prefix_in(
         }
         TypeDesc::Tvariant(row) => {
             if let Some((path, _)) = &row.row_name
-                && let Some(new_path) = rewrite_path_by_path_prefix(path, old_prefix, new_prefix)
+                && let Some(new_path) =
+                    rewrite_path_with_shared_prefix(path, old_prefix, new_prefix, ctx)
             {
                 let mut new_desc = (*desc).clone();
                 if let TypeDesc::Tvariant(ref mut row) = new_desc
@@ -7105,7 +7192,9 @@ fn rewrite_type_expr_by_path_prefix_in(
             }
         }
         TypeDesc::Tpackage { path, args, .. } => {
-            if let Some(new_path) = rewrite_path_by_path_prefix(path, old_prefix, new_prefix) {
+            if let Some(new_path) =
+                rewrite_path_with_shared_prefix(path, old_prefix, new_prefix, ctx)
+            {
                 let mut new_desc = (*desc).clone();
                 if let TypeDesc::Tpackage { ref mut path, .. } = new_desc {
                     *path = new_path;
@@ -7124,7 +7213,7 @@ fn rewrite_type_expr_by_path_prefix_in(
 pub fn rewrite_type_expr_by_path_prefix(
     ty_ref: TypeExprRef,
     old_prefix: &Path,
-    new_prefix: &Path,
+    new_prefix: &Arc<Path>,
     ctx: &TypeContext,
 ) {
     let mut visited = HashSet::new();
@@ -7236,7 +7325,7 @@ fn rewrite_type_expr_by_path_prefixes(
 pub fn rewrite_sig_by_path_prefix(
     sig_items: &[SignatureItem],
     old_prefix: &Path,
-    new_prefix: &Path,
+    new_prefix: &Arc<Path>,
     ctx: &TypeContext,
 ) {
     let mut visited = HashSet::new();

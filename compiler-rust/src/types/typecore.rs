@@ -22107,6 +22107,7 @@ fn rewrite_flattened_alias_head_prefixes(
         }
     }
 
+    let rewrite_target = std::sync::Arc::new(access_path.clone());
     for source_prefix in source_prefixes {
         // OCaml compiler/ml/env.ml:1517 scrapes aliases before
         // env.ml:1530-1538 `prefix_idents`, then compiler/ml/subst.ml:303-309
@@ -22117,13 +22118,14 @@ fn rewrite_flattened_alias_head_prefixes(
         crate::cmi::persistent_env::rewrite_sig_by_path_prefix(
             sig,
             &source_prefix,
-            access_path,
+            &rewrite_target,
             ctx,
         );
         crate::cmi::persistent_env::rewrite_sig_paths_by_path_prefix(
             sig,
             &source_prefix,
-            access_path,
+            &rewrite_target,
+            ctx,
         );
     }
 }
@@ -26515,10 +26517,11 @@ pub(crate) fn rebind_direct_sig_type_family_to_access_path(
     });
 
     for (old_path, rebound_path) in rewrites {
+        let rewrite_target = std::sync::Arc::new(rebound_path.clone());
         crate::cmi::persistent_env::rewrite_sig_by_path_prefix(
             sig_items,
             &old_path,
-            &rebound_path,
+            &rewrite_target,
             ctx,
         );
         // OCaml compiler/ml/env.ml:1530-1538 builds the component substitution
@@ -26530,7 +26533,8 @@ pub(crate) fn rebind_direct_sig_type_family_to_access_path(
         crate::cmi::persistent_env::rewrite_sig_paths_by_path_prefix(
             sig_items,
             &old_path,
-            &rebound_path,
+            &rewrite_target,
+            ctx,
         );
     }
 }
@@ -27852,8 +27856,19 @@ fn rewrite_alias_pident_child_prefixes(
     for child_name in child_names {
         let old_prefix = Path::pdot(target.clone(), child_name.clone());
         let new_prefix = Path::pdot(access_path.clone(), child_name);
-        crate::cmi::persistent_env::rewrite_sig_by_path_prefix(sig, &old_prefix, &new_prefix, ctx);
-        crate::cmi::persistent_env::rewrite_sig_paths_by_path_prefix(sig, &old_prefix, &new_prefix);
+        let rewrite_target = std::sync::Arc::new(new_prefix.clone());
+        crate::cmi::persistent_env::rewrite_sig_by_path_prefix(
+            sig,
+            &old_prefix,
+            &rewrite_target,
+            ctx,
+        );
+        crate::cmi::persistent_env::rewrite_sig_paths_by_path_prefix(
+            sig,
+            &old_prefix,
+            &rewrite_target,
+            ctx,
+        );
     }
 }
 
@@ -27865,14 +27880,20 @@ fn rewrite_alias_pdot_target(
     pers_env: &Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &crate::types::context::TypeContext,
 ) {
-    crate::cmi::persistent_env::rewrite_sig_by_path_prefix(sig, target, access_path, ctx);
+    let rewrite_target = std::sync::Arc::new(access_path.clone());
+    crate::cmi::persistent_env::rewrite_sig_by_path_prefix(sig, target, &rewrite_target, ctx);
     // OCaml compiler/ml/env.ml:1567-1579 keeps child module
     // declarations/components as separate lazy thunks. For an alias such as
     // `module J = Js.Json`, compiler/ml/mtype.ml:98-102 strengthens `Kind` to
     // the scraped target `Js.Json.Kind`, while compiler/ml/env.ml:1530 and
     // compiler/ml/subst.ml:87-95 expose the selected component path as
     // `J.Kind`. Do not rewrite the child module declaration alias itself here.
-    crate::cmi::persistent_env::rewrite_sig_paths_by_path_prefix_shallow(sig, target, access_path);
+    crate::cmi::persistent_env::rewrite_sig_paths_by_path_prefix_shallow(
+        sig,
+        target,
+        &rewrite_target,
+        ctx,
+    );
     // OCaml compiler/ml/env.ml:1517 scrapes the alias target and
     // compiler/ml/env.ml:1530-1538 then prefixes the selected component path.
     // If the scraped target came from a flattened runtime unit such as
@@ -27976,28 +27997,32 @@ fn qualify_resolved_signature_for_access_path_inner(
             // compiler/ml/subst.ml:303-309 value-description substitution only
             // sees this component level. Leave nested module signatures for
             // their own env.ml:1568/1573 lazy component thunks.
+            let prefix_target = std::sync::Arc::new(access_path.clone());
             crate::cmi::persistent_env::rewrite_module_prefix_in_sig_shallow(
                 &sig,
                 old_name,
-                access_path,
+                &prefix_target,
                 ctx,
             );
             crate::cmi::persistent_env::rewrite_module_prefix_paths_in_sig_shallow(
                 &mut sig,
                 old_name,
-                access_path,
+                &prefix_target,
+                ctx,
             );
         } else {
+            let prefix_target = std::sync::Arc::new(access_path.clone());
             crate::cmi::persistent_env::rewrite_module_prefix_in_sig(
                 &sig,
                 old_name,
-                access_path,
+                &prefix_target,
                 ctx,
             );
             crate::cmi::persistent_env::rewrite_module_prefix_paths_in_sig(
                 &mut sig,
                 old_name,
-                access_path,
+                &prefix_target,
+                ctx,
             );
         }
     }
@@ -28028,16 +28053,18 @@ fn qualify_resolved_signature_for_access_path_inner(
                 // substitution with `prefix_idents`. Apply that substitution
                 // only at this signature level; nested child component thunks
                 // keep their own env.ml:1568/1573 lazy substitution boundary.
+                let prefix_target = std::sync::Arc::new(access_path.clone());
                 crate::cmi::persistent_env::rewrite_module_prefix_in_sig_shallow(
                     &sig,
                     alias_id.name(),
-                    access_path,
+                    &prefix_target,
                     ctx,
                 );
                 crate::cmi::persistent_env::rewrite_module_prefix_paths_in_sig_shallow(
                     &mut sig,
                     alias_id.name(),
-                    access_path,
+                    &prefix_target,
+                    ctx,
                 );
             }
             Path::Pdot(..) => {
@@ -28064,16 +28091,18 @@ fn qualify_resolved_signature_for_access_path_inner(
                 // to the current signature level so nested module
                 // value types keep explicit persistent paths until
                 // their own component thunk runs.
+                let prefix_target = std::sync::Arc::new(access_path.clone());
                 crate::cmi::persistent_env::rewrite_module_prefix_in_sig_shallow(
                     &sig,
                     alias_id.name(),
-                    access_path,
+                    &prefix_target,
                     ctx,
                 );
                 crate::cmi::persistent_env::rewrite_module_prefix_paths_in_sig_shallow(
                     &mut sig,
                     alias_id.name(),
-                    access_path,
+                    &prefix_target,
+                    ctx,
                 );
                 rewrite_alias_pident_child_prefixes(&mut sig, target, access_path, ctx);
             }
@@ -28222,16 +28251,18 @@ fn build_module_signature_for_path(
                         // (`Belt.Id`), rewrite the whole prefix back to the
                         // exact unit (`Belt_Id`), not only child-module
                         // prefixes.
+                        let rewrite_target = std::sync::Arc::new(access_path.clone());
                         crate::cmi::persistent_env::rewrite_sig_by_path_prefix(
                             &sig,
                             &qualified_alias_path,
-                            &access_path,
+                            &rewrite_target,
                             ctx,
                         );
                         crate::cmi::persistent_env::rewrite_sig_paths_by_path_prefix(
                             &mut sig,
                             &qualified_alias_path,
-                            &access_path,
+                            &rewrite_target,
+                            ctx,
                         );
                         rewrite_flattened_alias_child_prefixes(
                             &sig,
@@ -28271,16 +28302,18 @@ fn build_module_signature_for_path(
                             |components| {
                                 let mut sig =
                                     copy_lookup_signature_for_subst(components.signature(), ctx);
+                                let rewrite_target = std::sync::Arc::new(access_path.clone());
                                 crate::cmi::persistent_env::rewrite_sig_by_path_prefix(
                                     &sig,
                                     &qualified_alias_path,
-                                    &access_path,
+                                    &rewrite_target,
                                     ctx,
                                 );
                                 crate::cmi::persistent_env::rewrite_sig_paths_by_path_prefix(
                                     &mut sig,
                                     &qualified_alias_path,
-                                    &access_path,
+                                    &rewrite_target,
+                                    ctx,
                                 );
                                 rewrite_flattened_alias_child_prefixes(
                                     &sig,
@@ -28320,16 +28353,18 @@ fn build_module_signature_for_path(
                         .into_iter()
                         .next()
                     {
+                        let rewrite_target = std::sync::Arc::new(access_path.clone());
                         crate::cmi::persistent_env::rewrite_sig_by_path_prefix(
                             &sig,
                             &qualified_alias_path,
-                            &access_path,
+                            &rewrite_target,
                             ctx,
                         );
                         crate::cmi::persistent_env::rewrite_sig_paths_by_path_prefix(
                             &mut sig,
                             &qualified_alias_path,
-                            &access_path,
+                            &rewrite_target,
+                            ctx,
                         );
                         rewrite_flattened_alias_child_prefixes(
                             &sig,
@@ -28362,16 +28397,18 @@ fn build_module_signature_for_path(
                         |components| {
                             let mut sig =
                                 copy_lookup_signature_for_subst(components.signature(), ctx);
+                            let rewrite_target = std::sync::Arc::new(access_path.clone());
                             crate::cmi::persistent_env::rewrite_sig_by_path_prefix(
                                 &sig,
                                 &qualified_alias_path,
-                                &access_path,
+                                &rewrite_target,
                                 ctx,
                             );
                             crate::cmi::persistent_env::rewrite_sig_paths_by_path_prefix(
                                 &mut sig,
                                 &qualified_alias_path,
-                                &access_path,
+                                &rewrite_target,
+                                ctx,
                             );
                             rewrite_flattened_alias_child_prefixes(
                                 &sig,
@@ -28410,16 +28447,18 @@ fn build_module_signature_for_path(
             }
             if let Some(ref old_name) = resolved_name {
                 if should_rewrite_nested_alias_self_path(ctx, old_name, &resolved_parent_path) {
+                    let prefix_target = std::sync::Arc::new(access_path.clone());
                     crate::cmi::persistent_env::rewrite_module_prefix_in_sig(
                         &sig,
                         old_name,
-                        &access_path,
+                        &prefix_target,
                         ctx,
                     );
                     crate::cmi::persistent_env::rewrite_module_prefix_paths_in_sig(
                         &mut sig,
                         old_name,
-                        &access_path,
+                        &prefix_target,
+                        ctx,
                     );
                 }
             }
@@ -28427,16 +28466,18 @@ fn build_module_signature_for_path(
                 if !target.same(&access_path) {
                     match target {
                         Path::Pdot(..) => {
+                            let rewrite_target = std::sync::Arc::new(access_path.clone());
                             crate::cmi::persistent_env::rewrite_sig_by_path_prefix(
                                 &sig,
                                 target,
-                                &access_path,
+                                &rewrite_target,
                                 ctx,
                             );
                             crate::cmi::persistent_env::rewrite_sig_paths_by_path_prefix(
                                 &mut sig,
                                 target,
-                                &access_path,
+                                &rewrite_target,
+                                ctx,
                             );
                             rewrite_flattened_alias_head_prefixes(
                                 &mut sig,
@@ -28447,16 +28488,18 @@ fn build_module_signature_for_path(
                             );
                         }
                         Path::Pident(alias_id) => {
+                            let prefix_target = std::sync::Arc::new(access_path.clone());
                             crate::cmi::persistent_env::rewrite_module_prefix_in_sig(
                                 &sig,
                                 alias_id.name(),
-                                &access_path,
+                                &prefix_target,
                                 ctx,
                             );
                             crate::cmi::persistent_env::rewrite_module_prefix_paths_in_sig(
                                 &mut sig,
                                 alias_id.name(),
-                                &access_path,
+                                &prefix_target,
+                                ctx,
                             );
                             rewrite_alias_pident_child_prefixes(
                                 &mut sig,

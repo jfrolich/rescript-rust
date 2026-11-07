@@ -376,6 +376,7 @@ fn build_type_constructors(
                             // already gone through compiler/ml/subst.ml:303-309.
                             // Mirror that component-prefix substitution before
                             // exposing the constructor description table.
+                            let new_prefix = Arc::new(new_prefix);
                             for arg in &args {
                                 crate::cmi::persistent_env::rewrite_type_expr_by_path_prefix(
                                     *arg,
@@ -923,13 +924,13 @@ impl QualifiedModuleComponents {
                     let (old_prefix, new_prefix) = match item {
                         SignatureItem::SigModule(id, _, _) => (
                             Path::pdot((**source).clone(), id.name()),
-                            ctx.dotted_from_ident(
+                            Arc::new(ctx.dotted_from_ident(
                                 shared_access_path.clone(),
                                 *id,
                                 super::path::NOPOS,
-                            ),
+                            )),
                         ),
-                        _ => ((**source).clone(), access_path.clone()),
+                        _ => ((**source).clone(), shared_access_path.clone()),
                     };
                     crate::cmi::persistent_env::rewrite_sig_by_path_prefix(
                         std::slice::from_ref(item),
@@ -941,7 +942,8 @@ impl QualifiedModuleComponents {
                 crate::cmi::persistent_env::rewrite_sig_paths_by_path_prefix_shallow(
                     &mut rerooted,
                     source,
-                    &access_path,
+                    &shared_access_path,
+                    ctx,
                 );
                 strengthen_view_types(&mut rerooted, source, ctx);
                 Arc::new(rerooted)
@@ -1206,7 +1208,7 @@ impl QualifiedModuleComponents {
             crate::cmi::persistent_env::rewrite_sig_by_path_prefix(
                 &[SignatureItem::SigValue(*id, desc.clone())],
                 source,
-                self.access_path(),
+                &self.access_path,
                 ctx,
             );
         }
@@ -1978,6 +1980,7 @@ fn build_local_module_components(
                 }
                 _ => None,
             });
+    let shared_access_path = Arc::new(access_path.clone());
     let mut qualified_sig = crate::types::typecore::qualify_resolved_signature_for_local_components(
         access_path,
         &md.md_type,
@@ -2011,13 +2014,14 @@ fn build_local_module_components(
             crate::cmi::persistent_env::rewrite_sig_by_path_prefix(
                 &qualified_sig,
                 &target_prefix,
-                access_path,
+                &shared_access_path,
                 ctx,
             );
             crate::cmi::persistent_env::rewrite_sig_paths_by_path_prefix(
                 &mut qualified_sig,
                 &target_prefix,
-                access_path,
+                &shared_access_path,
+                ctx,
             );
         }
         crate::cmi::persistent_env::substitute_module_alias_paths_in_child_sig(
@@ -2031,7 +2035,6 @@ fn build_local_module_components(
         return None;
     }
     let shared_source_prefix = source_prefix.map(|source| Arc::new(source.clone()));
-    let shared_access_path = Arc::new(access_path.clone());
     if let Some(source) = shared_source_prefix.as_ref()
         && !source.same(access_path)
     {
@@ -2041,13 +2044,14 @@ fn build_local_module_components(
         crate::cmi::persistent_env::rewrite_sig_by_path_prefix(
             &qualified_sig,
             source,
-            access_path,
+            &shared_access_path,
             ctx,
         );
         crate::cmi::persistent_env::rewrite_sig_paths_by_path_prefix(
             &mut qualified_sig,
             source,
-            access_path,
+            &shared_access_path,
+            ctx,
         );
         strengthen_view_types(&mut qualified_sig, source, ctx);
     }

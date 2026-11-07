@@ -13735,16 +13735,13 @@ fn localize_exported_structure_module_type(
     };
 
     let mut sig = sig;
-    crate::cmi::persistent_env::rewrite_sig_by_path_prefix(
-        &sig,
-        &path,
-        &Path::pident(*local_id),
-        type_ctx,
-    );
+    let rewrite_target = std::sync::Arc::new(Path::pident(*local_id));
+    crate::cmi::persistent_env::rewrite_sig_by_path_prefix(&sig, &path, &rewrite_target, type_ctx);
     crate::cmi::persistent_env::rewrite_sig_paths_by_path_prefix(
         &mut sig,
         &path,
-        &Path::pident(*local_id),
+        &rewrite_target,
+        type_ctx,
     );
     strip_self_module_prefix_in_sig(&sig, local_id, type_ctx);
     DeclMty::MtySignature(std::sync::Arc::new(sig))
@@ -13941,7 +13938,13 @@ fn localize_raw_unpack_module_type_family(
     });
 
     for (old_path, new_path) in rewrites {
-        crate::cmi::persistent_env::rewrite_sig_by_path_prefix(sig, &old_path, &new_path, type_ctx);
+        let rewrite_target = std::sync::Arc::new(new_path.clone());
+        crate::cmi::persistent_env::rewrite_sig_by_path_prefix(
+            sig,
+            &old_path,
+            &rewrite_target,
+            type_ctx,
+        );
     }
     strip_self_module_prefix_in_sig(sig, local_id, type_ctx);
 }
