@@ -421,17 +421,6 @@ pub enum LiteralTag {
     Undefined,
 }
 
-/// OCaml `float_of_string` for the spellings a literal tag can carry.
-pub(crate) fn ocaml_float_of_string(s: &str) -> Option<f64> {
-    if let Some(value) = crate::js_ir::printer::parse_hex_float_literal(s) {
-        return Some(value);
-    }
-    s.replace('_', "").parse::<f64>().ok()
-}
-
-/// variant_runtime.ml `number_key`: `-0.` and `0.` are equal for `===`.
-/// OCaml spells every other number exactly with `%h`; the key is internal, so
-/// the exact bit pattern serves the same equality.
 /// variant_runtime.ml `number_key`: `-0.` and `0.` are equal for `===`;
 /// `%h` is exact for every other number.
 fn number_key(x: f64) -> String {
@@ -444,10 +433,10 @@ fn number_key(x: f64) -> String {
 
 /// OCaml's `Printf.sprintf "%h"` (`caml_hexstring_of_float`): `0x1p+0`,
 /// `-0x1.8p-1`, `0x0.0000000000001p-1022` for a subnormal, `infinity`,
-/// `nan`.
-fn ocaml_hex_float(x: f64) -> String {
+/// `nan`, and `-nan` for a NaN with its sign bit set.
+pub(crate) fn ocaml_hex_float(x: f64) -> String {
     if x.is_nan() {
-        return "nan".to_string();
+        return if x.is_sign_negative() { "-nan" } else { "nan" }.to_string();
     }
     if x.is_infinite() {
         return if x > 0.0 { "infinity" } else { "-infinity" }.to_string();
@@ -483,7 +472,7 @@ impl LiteralTag {
     pub fn value_key(&self) -> String {
         match self {
             Self::Int(i) => number_key(f64::from(*i as i32)),
-            Self::Float(f) => match ocaml_float_of_string(f) {
+            Self::Float(f) => match crate::ocaml_float::float_of_string(f) {
                 Some(x) => number_key(x),
                 None => format!("number:{f}"),
             },
@@ -782,21 +771,94 @@ pub fn plain_layout(
 
 #[cfg(test)]
 mod hex_float_tests {
-    use super::ocaml_hex_float;
+    use super::{LiteralTag, ocaml_hex_float};
 
+    /// `Printf.sprintf "%h"` of OCaml 5.5.2 (`caml_hexstring_of_float`) on
+    /// signed zeros, NaNs of either sign and other payloads, infinities, the
+    /// subnormal and normal boundaries and ordinary numbers, by bit pattern.
     #[test]
     fn matches_ocaml_percent_h() {
-        // Values printed by OCaml's `Printf.sprintf "%h"`.
-        assert_eq!(ocaml_hex_float(1.0), "0x1p+0");
-        assert_eq!(ocaml_hex_float(2.0), "0x1p+1");
-        assert_eq!(ocaml_hex_float(1.5), "0x1.8p+0");
-        assert_eq!(ocaml_hex_float(-0.5), "-0x1p-1");
-        assert_eq!(ocaml_hex_float(0.1), "0x1.999999999999ap-4");
-        assert_eq!(
-            ocaml_hex_float(f64::from_bits(1)),
-            "0x0.0000000000001p-1022"
-        );
-        assert_eq!(ocaml_hex_float(f64::INFINITY), "infinity");
+        let mismatches = [
+            (0x0000000000000000, "0x0p+0"),
+            (0x8000000000000000, "-0x0p+0"),
+            (0x7ff8000000000000, "nan"),
+            (0xfff8000000000000, "-nan"),
+            (0x7ff0000000000001, "nan"),
+            (0xfff0000000000001, "-nan"),
+            (0x7ff4000000000000, "nan"),
+            (0x7ff0000000000000, "infinity"),
+            (0xfff0000000000000, "-infinity"),
+            (0x0000000000000001, "0x0.0000000000001p-1022"),
+            (0x8000000000000001, "-0x0.0000000000001p-1022"),
+            (0x000fffffffffffff, "0x0.fffffffffffffp-1022"),
+            (0x0008000000000000, "0x0.8p-1022"),
+            (0x0010000000000000, "0x1p-1022"),
+            (0x8010000000000000, "-0x1p-1022"),
+            (0x7fefffffffffffff, "0x1.fffffffffffffp+1023"),
+            (0x3ff0000000000000, "0x1p+0"),
+            (0x3ff8000000000000, "0x1.8p+0"),
+            (0xbfe8000000000000, "-0x1.8p-1"),
+            (0x4000000000000000, "0x1p+1"),
+            (0x3fb999999999999a, "0x1.999999999999ap-4"),
+            (0x0000000000000010, "0x0.000000000001p-1022"),
+            (0x0001000000000000, "0x0.1p-1022"),
+            (0x3ff0000000000001, "0x1.0000000000001p+0"),
+        ]
+        .into_iter()
+        .filter(|(bits, expected)| ocaml_hex_float(f64::from_bits(*bits)) != *expected)
+        .map(|(bits, expected)| (bits, expected, ocaml_hex_float(f64::from_bits(bits))))
+        .collect::<Vec<_>>();
+        assert!(mismatches.is_empty(), "{mismatches:x?}");
+    }
+
+    /// variant_runtime.ml `literal_value_key` (`float_of_string_opt`, then
+    /// `number_key`) of OCaml 5.5.2 on float spellings: overflow and
+    /// underflow, subnormals, signed zeros, underscores, hex floats, and
+    /// the spellings only a PPX can give a literal.
+    #[test]
+    fn float_literal_keys_match_ocaml() {
+        let mismatches = [
+            ("1e400", "number:infinity"),
+            ("-1e400", "number:-infinity"),
+            ("4.9e-324", "number:0x0.0000000000001p-1022"),
+            ("5e-324", "number:0x0.0000000000001p-1022"),
+            ("2.2250738585072014e-308", "number:0x1p-1022"),
+            ("2.225073858507201e-308", "number:0x0.fffffffffffffp-1022"),
+            ("-0.0", "number:0"),
+            ("0.0", "number:0"),
+            ("0.", "number:0"),
+            ("1_000.5", "number:0x1.f44p+9"),
+            ("0x1p-1074", "number:0x0.0000000000001p-1022"),
+            ("0x1.fffffffffffffp1023", "number:0x1.fffffffffffffp+1023"),
+            ("1.", "number:0x1p+0"),
+            ("1.e5", "number:0x1.86ap+16"),
+            ("1E+5", "number:0x1.86ap+16"),
+            ("0x1P4", "number:0x1p+4"),
+            ("0x.8p1", "number:0x1p+0"),
+            ("1e-400", "number:0"),
+            ("-1e-400", "number:0"),
+            ("nan", "number:nan"),
+            ("-nan", "number:-nan"),
+            ("infinity", "number:infinity"),
+            ("-inf", "number:-infinity"),
+            ("1.5_", "number:0x1.8p+0"),
+            ("0x1_0p0", "number:0x1p+4"),
+            ("1e1_0", "number:0x1.2a05f2p+33"),
+            ("+1.5", "number:0x1.8p+0"),
+            ("  1.5", "number:0x1.8p+0"),
+            ("1.5e", "number:1.5e"),
+        ]
+        .into_iter()
+        .map(|(spelling, expected)| {
+            (
+                spelling,
+                expected,
+                LiteralTag::Float(spelling.to_string()).value_key(),
+            )
+        })
+        .filter(|(_, expected, key)| key != expected)
+        .collect::<Vec<_>>();
+        assert!(mismatches.is_empty(), "{mismatches:?}");
     }
 }
 

@@ -50,6 +50,7 @@ pub mod lambda;
 pub mod location;
 pub mod misc;
 pub mod name;
+pub mod ocaml_float;
 pub mod parse_arena;
 pub mod parser;
 /// Optional aggregate compiler performance counters.

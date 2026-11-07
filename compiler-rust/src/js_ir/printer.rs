@@ -3112,57 +3112,11 @@ fn is_hex_float_literal(float_str: &str) -> bool {
     matches!(bytes.get(cur), Some(b'0')) && matches!(bytes.get(cur + 1), Some(b'x' | b'X'))
 }
 
+/// js_number.ml `caml_float_literal_to_js_string` on a hexadecimal literal:
+/// `to_string (float_of_string float_str)`.
 fn normalize_hex_float_literal(float_str: &str) -> Option<String> {
-    let value = parse_hex_float_literal(float_str)?;
+    let value = crate::ocaml_float::float_of_string(float_str)?;
     Some(js_number_to_string(value))
-}
-
-pub(crate) fn parse_hex_float_literal(float_str: &str) -> Option<f64> {
-    let (negative, digits) = if let Some(rest) = float_str.strip_prefix('-') {
-        (true, rest)
-    } else if let Some(rest) = float_str.strip_prefix('+') {
-        (false, rest)
-    } else {
-        (false, float_str)
-    };
-
-    let digits = digits
-        .strip_prefix("0x")
-        .or_else(|| digits.strip_prefix("0X"))?;
-    let digits = digits.replace('_', "");
-    if digits.is_empty() {
-        return None;
-    }
-
-    let (mantissa, exponent) = if let Some((mantissa, exponent)) =
-        digits.split_once('p').or_else(|| digits.split_once('P'))
-    {
-        (mantissa, exponent.parse::<i32>().ok()?)
-    } else {
-        (digits.as_str(), 0)
-    };
-
-    let (whole, fractional) = mantissa.split_once('.').unwrap_or((mantissa, ""));
-    if whole.is_empty() && fractional.is_empty() {
-        return None;
-    }
-
-    let mut value = 0.0f64;
-    for byte in whole.bytes().chain(fractional.bytes()) {
-        value = value * 16.0 + hex_digit_value(byte)? as f64;
-    }
-    value *= 2.0f64.powi(exponent - (fractional.len() as i32 * 4));
-
-    Some(if negative { -value } else { value })
-}
-
-fn hex_digit_value(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
-    }
 }
 
 fn js_number_to_string(value: f64) -> String {
