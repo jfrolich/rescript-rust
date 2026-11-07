@@ -2620,15 +2620,25 @@ fn substitute_type_constructor_path(path: &Path, subst: &InclusionSubst) -> Path
     }
     match path {
         Path::Pident(_) => path.clone(),
-        Path::Pdot(prefix, name, pos) => Path::Pdot(
-            std::sync::Arc::new(substitute_module_path(prefix, subst)),
-            *name,
-            *pos,
-        ),
+        Path::Pdot(prefix, name, pos) => {
+            Path::Pdot(substitute_module_path_block(prefix, subst), *name, *pos)
+        }
         Path::Papply(functor, arg) => Path::Papply(
             std::sync::Arc::new(substitute_type_constructor_path(functor, subst)),
-            std::sync::Arc::new(substitute_module_path(arg, subst)),
+            substitute_module_path_block(arg, subst),
         ),
+    }
+}
+
+/// `Subst.module_path s p` (subst.ml:69-75) on a shared path block: an
+/// unreplaced `Pident` is `p` itself, so its uses keep sharing one block.
+fn substitute_module_path_block(
+    path: &std::sync::Arc<Path>,
+    subst: &InclusionSubst,
+) -> std::sync::Arc<Path> {
+    match path.as_ref() {
+        Path::Pident(_) if subst.module_paths.get(path).is_none() => path.clone(),
+        _ => std::sync::Arc::new(substitute_module_path(path, subst)),
     }
 }
 
@@ -2638,14 +2648,12 @@ fn substitute_module_path(path: &Path, subst: &InclusionSubst) -> Path {
     }
     match path {
         Path::Pident(_) => path.clone(),
-        Path::Pdot(prefix, name, pos) => Path::Pdot(
-            std::sync::Arc::new(substitute_module_path(prefix, subst)),
-            *name,
-            *pos,
-        ),
+        Path::Pdot(prefix, name, pos) => {
+            Path::Pdot(substitute_module_path_block(prefix, subst), *name, *pos)
+        }
         Path::Papply(functor, arg) => Path::Papply(
-            std::sync::Arc::new(substitute_module_path(functor, subst)),
-            std::sync::Arc::new(substitute_module_path(arg, subst)),
+            substitute_module_path_block(functor, subst),
+            substitute_module_path_block(arg, subst),
         ),
     }
 }
@@ -2656,14 +2664,12 @@ fn substitute_modtype_path(path: &Path, subst: &InclusionSubst) -> Path {
     }
     match path {
         Path::Pident(_) => path.clone(),
-        Path::Pdot(prefix, name, pos) => Path::Pdot(
-            std::sync::Arc::new(substitute_module_path(prefix, subst)),
-            *name,
-            *pos,
-        ),
+        Path::Pdot(prefix, name, pos) => {
+            Path::Pdot(substitute_module_path_block(prefix, subst), *name, *pos)
+        }
         Path::Papply(functor, arg) => Path::Papply(
             std::sync::Arc::new(substitute_modtype_path(functor, subst)),
-            std::sync::Arc::new(substitute_module_path(arg, subst)),
+            substitute_module_path_block(arg, subst),
         ),
     }
 }
@@ -2695,11 +2701,7 @@ fn substitute_module_type_paths_no_freshen(
         ModuleType::MtyAlias(presence, path) => {
             // `Subst.module_path` (subst.ml:69-75): an unreplaced `Pident`
             // target is the block itself.
-            let target = match path.as_ref() {
-                Path::Pident(_) if subst.module_paths.get(path).is_none() => path.clone(),
-                _ => std::sync::Arc::new(substitute_module_path(path, subst)),
-            };
-            ModuleType::MtyAlias(*presence, target)
+            ModuleType::MtyAlias(*presence, substitute_module_path_block(path, subst))
         }
         ModuleType::MtyFunctor {
             param,
