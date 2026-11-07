@@ -1,12 +1,10 @@
-===== User.res =====
+Warning number 3
+  /.../fixtures/Cross_deprecated_with_automigration/User.res:2:13-25
 
-  [1;33mWarning number 3[0m
-  [36m/.../fixtures/Cross_deprecated_with_automigration/User.res[0m:[2m2:13-25[0m
-
-  1 [2m│[0m let values = list{1, 2}
-  [1;33m2[0m [2m│[0m let first = [1;33mLegacy.getExn[0m(values, 0)
-  3 [2m│[0m let incremented = first + 1
-  4 [2m│[0m let _ = incremented
+  1 │ let values = list{1, 2}
+  2 │ let first = Legacy.getExn(values, 0)
+  3 │ let incremented = first + 1
+  4 │ let _ = incremented
 
   deprecated: Legacy.getExn
   Use `getOrThrow` instead
