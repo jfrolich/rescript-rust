@@ -174,10 +174,9 @@ pub(crate) struct Printtyp<'a> {
     delayed: Vec<TypeExprRef>,
     /// `unique_names`: identifiers printed as `Ident.unique_toplevel_name`.
     unique_names: Vec<(crate::ident::Ident, String)>,
-    /// `Env.lookup_type (Lident s) !printing_env` for
-    /// `non_shadowed_pervasive_or_stdlib`; `None` stands for `Env.empty`,
-    /// where every lookup fails.
-    printing_env_lookup_type: Option<Box<dyn Fn(&str) -> Option<Path> + 'a>>,
+    /// `!printing_env`, set by `wrap_printing_env`; `None` stands for
+    /// `Env.empty`.
+    printing_env: Option<crate::types::env::Env>,
     /// Types added to the printing environment by `tree_of_signature_rec`
     /// (`Env.add_signature`), most recent last. Only the first
     /// `signature_types_visible` entries are in scope; later entries are
@@ -207,7 +206,7 @@ impl<'a> Printtyp<'a> {
             aliased: Vec::new(),
             delayed: Vec::new(),
             unique_names: Vec::new(),
-            printing_env_lookup_type: None,
+            printing_env: None,
             signature_types: Vec::new(),
             signature_types_visible: 0,
             inlined_types: None,
@@ -215,9 +214,9 @@ impl<'a> Printtyp<'a> {
         }
     }
 
-    /// `set_printing_env`: resolve unqualified type names in `lookup`.
-    pub(crate) fn set_printing_env(&mut self, lookup: Box<dyn Fn(&str) -> Option<Path> + 'a>) {
-        self.printing_env_lookup_type = Some(lookup);
+    /// `set_printing_env env`.
+    pub(crate) fn set_printing_env(&mut self, env: &crate::types::env::Env) {
+        self.printing_env = Some(env.clone());
     }
 
     // ------------------------------------------------------------------
@@ -241,11 +240,13 @@ impl<'a> Printtyp<'a> {
         {
             return path.same(found);
         }
-        match &self.printing_env_lookup_type {
+        // `Env.lookup_type (Lident s) !printing_env`; every lookup fails in
+        // `Env.empty`.
+        match &self.printing_env {
             None => true,
-            Some(lookup) => match lookup(s) {
-                Some(found) => path.same(&found),
-                None => true,
+            Some(env) => match env.find_type_with_path(s) {
+                Ok((found, _)) => path.same(&found),
+                Err(_) => true,
             },
         }
     }
@@ -2500,7 +2501,9 @@ impl<'a> Printtyp<'a> {
         matches!(&*self.ctx.borrow_desc(self.ctx.repr(t)), TypeDesc::Tvar(..))
     }
 
-    /// `same_path` (printtyp.ml:1219-1232); `best_type_path` is `(p, Id)`.
+    /// `same_path` (printtyp.ml:1187-1204); `best_type_path` is `(p, Id)`.
+    /// A module alias names the same type as its target, so both paths are
+    /// compared after `Env.normalize_path None !printing_env`.
     pub(crate) fn same_path(&self, t: TypeExprRef, t2: TypeExprRef) -> bool {
         let t = self.ctx.repr(t);
         let t2 = self.ctx.repr(t2);
@@ -2520,7 +2523,7 @@ impl<'a> Printtyp<'a> {
                     ..
                 },
             ) => {
-                p1.same(p2)
+                self.normalized_paths_same(p1, p2)
                     && tl1.len() == tl2.len()
                     && tl1
                         .iter()
@@ -2529,6 +2532,24 @@ impl<'a> Printtyp<'a> {
             }
             _ => false,
         }
+    }
+
+    /// `Path.same (Env.normalize_path None env p1) (Env.normalize_path None
+    /// env p2)` with `env = !printing_env` (printtyp.ml:1196-1201). The
+    /// normalization runs through Env's `find_module ~alias:true`, forcing
+    /// what it reaches, as in OCaml.
+    fn normalized_paths_same(&self, p1: &Path, p2: &Path) -> bool {
+        let empty;
+        let env = match &self.printing_env {
+            Some(env) => env,
+            None => {
+                empty = crate::types::env::Env::empty();
+                &empty
+            }
+        };
+        let n1 = crate::types::ctype::force_normalize_path_full_side_effects(self.ctx, env, p1);
+        let n2 = crate::types::ctype::force_normalize_path_full_side_effects(self.ctx, env, p2);
+        n1.same(&n2)
     }
 
     fn path_same_name(&mut self, p1: &Path, p2: &Path) {

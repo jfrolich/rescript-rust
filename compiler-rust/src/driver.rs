@@ -5994,9 +5994,7 @@ fn format_wrong_name_report(
     // `Printtyp.path` under `wrap_printing_env env` (typecore.ml:5253-5254).
     let mut printer = crate::types::printtyp::Printtyp::new(type_ctx);
     if let Some(env) = env {
-        printer.set_printing_env(Box::new(move |name| {
-            env.find_type_with_path(name).ok().map(|(p, _)| p)
-        }));
+        printer.set_printing_env(&env);
     }
     // typecore.ml:4963-4971:
     //   @[<v>@[<2>The %s @{<error>%s@} does not belong to type @{<info>%a@}@]@,@,

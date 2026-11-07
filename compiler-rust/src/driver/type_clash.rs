@@ -1542,10 +1542,7 @@ fn print_contextual_unification_error(
 
 fn printer_with_env<'c>(ctx: &'c TypeContext, env: &Env) -> Printtyp<'c> {
     let mut printer = Printtyp::new(ctx);
-    let lookup_env = env.clone();
-    printer.set_printing_env(Box::new(move |name| {
-        lookup_env.find_type_with_path(name).ok().map(|(p, _)| p)
-    }));
+    printer.set_printing_env(env);
     printer
 }
 
