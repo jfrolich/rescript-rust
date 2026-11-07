@@ -598,6 +598,12 @@ impl<'a> DependencyCollector<'a> {
                     }
                 }
             }
+            // compiler/ml/depend.ml Pexp_spread.
+            ExpressionDesc::Pexp_spread(_, elements) => {
+                for element in self.arena.spread_element_list(*elements) {
+                    self.add_expr_idx(element.expr());
+                }
+            }
             ExpressionDesc::Pexp_construct(lid, args) => {
                 self.add_lident_idx(lid.txt);
                 for arg in self.arena.expr_list(args.txt) {

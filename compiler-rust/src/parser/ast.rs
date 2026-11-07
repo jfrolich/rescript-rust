@@ -13,8 +13,8 @@ use std::borrow::Cow;
 
 use crate::parse_arena::{
     ApplyArgs, ArityIdx, CaseList, CoreTypeIdx, ExprFieldList, ExprIdx, ExprList, LidentIdx,
-    LocIdx, Located, ModExprIdx, ModTypeIdx, PatFieldList, PatIdx, PatList, PosIdx, StrIdx,
-    TypeList, VbList,
+    LocIdx, Located, ModExprIdx, ModTypeIdx, PatFieldList, PatIdx, PatList, PosIdx,
+    SpreadElementList, StrIdx, TypeList, VbList,
 };
 use serde::{Deserialize, Serialize};
 
@@ -690,6 +690,25 @@ pub enum SpreadKind {
     Spread_list,
 }
 
+/// An element of a literal with spreads (compiler/ml/parsetree.ml
+/// `spread_element`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SpreadElement {
+    /// `E`
+    Pspread_item(ExprIdx),
+    /// `...E`
+    Pspread(ExprIdx),
+}
+
+impl SpreadElement {
+    /// The element's expression, item or spread.
+    pub fn expr(self) -> ExprIdx {
+        match self {
+            SpreadElement::Pspread_item(e) | SpreadElement::Pspread(e) => e,
+        }
+    }
+}
+
 /// Record-rest pattern binding (`...Type.t as name`).
 /// Mirrors OCaml compiler/ml/parsetree.ml:164-168 `record_pat_rest`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -862,6 +881,11 @@ pub enum ExpressionDesc {
     Pexp_array(ExprList),
     /// Dict: `dict{"k1": E1, ...E2}`.
     Pexp_dict(Box<Vec<DictEntry>>),
+    /// Literal with spreads: `[E1, ...E2]` or `list{...E1, E2}`. The parser
+    /// produces it only for literals that need it: an array literal without
+    /// a spread is `Pexp_array`, and a list literal whose only spread is its
+    /// tail is a chain of `::` constructors (parsetree.ml `Pexp_spread`).
+    Pexp_spread(SpreadKind, SpreadElementList),
     /// If-then-else: `if E1 { E2 } else { E3 }`.
     Pexp_ifthenelse(Box<(ExprIdx, ExprIdx, Option<ExprIdx>)>),
     /// Ternary: `E1 ? E2 : E3`.

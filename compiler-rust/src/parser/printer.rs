@@ -1298,52 +1298,13 @@ pub fn print_expression(
             let (_, _, _) = *inner;
             print_expression_block(state, true, e, cmt_tbl, arena)
         }
-        // Spread array: Primitive_array.spread([xs, [a, b]]) -> [...xs, a, b]
-        ExpressionDesc::Pexp_apply(apply_inner)
-            if apply_inner.args.len() == 1
-                && matches!(&arena.apply_args(apply_inner.args)[0].0, ArgLabel::Nolabel)
-                && matches!(
-                    &arena
-                        .get_expr(arena.apply_args(apply_inner.args)[0].1)
-                        .pexp_desc,
-                    ExpressionDesc::Pexp_array(_)
-                )
-                && parsetree_viewer::is_spread_belt_array_concat(
-                    arena,
-                    arena.get_expr(apply_inner.funct),
-                ) =>
-        {
-            let PexpApply { .. } = *apply_inner;
-            let args = arena.apply_args(apply_inner.args);
-            if let ExpressionDesc::Pexp_array(sub_lists) = &arena.get_expr(args[0].1).pexp_desc {
-                print_belt_array_concat_apply(state, arena.expr_list(*sub_lists), cmt_tbl, arena)
-            } else {
-                Doc::nil() // Should never happen due to guard
-            }
-        }
-        // Spread list: Primitive_list.spread([xs, [a, b]]) -> list{...xs, a, b}
-        ExpressionDesc::Pexp_apply(apply_inner)
-            if apply_inner.args.len() == 1
-                && matches!(&arena.apply_args(apply_inner.args)[0].0, ArgLabel::Nolabel)
-                && matches!(
-                    &arena
-                        .get_expr(arena.apply_args(apply_inner.args)[0].1)
-                        .pexp_desc,
-                    ExpressionDesc::Pexp_array(_)
-                )
-                && parsetree_viewer::is_spread_belt_list_concat(
-                    arena,
-                    arena.get_expr(apply_inner.funct),
-                ) =>
-        {
-            let PexpApply { .. } = *apply_inner;
-            let args = arena.apply_args(apply_inner.args);
-            if let ExpressionDesc::Pexp_array(sub_lists) = &arena.get_expr(args[0].1).pexp_desc {
-                print_belt_list_concat_apply(state, arena.expr_list(*sub_lists), cmt_tbl, arena)
-            } else {
-                Doc::nil() // Should never happen due to guard
-            }
-        }
+        ExpressionDesc::Pexp_spread(kind, elements) => print_spread_expr(
+            state,
+            *kind,
+            arena.spread_element_list(*elements),
+            cmt_tbl,
+            arena,
+        ),
         // Function application
         ExpressionDesc::Pexp_apply(inner) => {
             let PexpApply {
@@ -3317,132 +3278,60 @@ fn print_tagged_template_literal(
     Doc::concat(vec![tag_doc, Doc::text("`"), content, Doc::text("`")])
 }
 
-/// Print spread array syntax: Primitive_array.spread([xs, [a, b]]) -> [...xs, a, b]
-fn print_belt_array_concat_apply(
+/// res_printer.ml `print_spread_expr`: an array or list literal with
+/// spreads, its items and spreads in source order.
+fn print_spread_expr(
     state: &PrinterState,
-    sub_lists: &[ExprIdx],
+    kind: SpreadKind,
+    elements: &[SpreadElement],
     cmt_tbl: &mut CommentTable,
     arena: &ParseArena,
 ) -> Doc {
-    // Collect all elements (regular and spread) into a flat list with commas
-    let mut elements: Vec<Doc> = Vec::new();
-
-    for sub_list_idx in sub_lists {
-        let sub_list = arena.get_expr(*sub_list_idx);
-        let (expressions, spread) = parsetree_viewer::collect_array_expressions(arena, sub_list);
-
-        // Print regular expressions
-        for expr in expressions {
-            if !elements.is_empty() {
-                elements.push(Doc::text(","));
-                elements.push(Doc::line());
-            }
-            let doc = print_expression_with_comments(state, expr, cmt_tbl, arena);
-            let doc = match parens::expr_allowing_coercion(arena, expr) {
-                ParenKind::Parenthesized => add_parens(doc),
-                ParenKind::Braced(braces) => print_braces(doc, expr, braces, arena),
-                ParenKind::Nothing => doc,
-            };
-            elements.push(doc);
+    let expr_doc = |cmt_tbl: &mut CommentTable, expr: &Expression| {
+        let doc = print_expression(state, expr, cmt_tbl, arena);
+        match parens::expr_allowing_coercion(arena, expr) {
+            ParenKind::Parenthesized => add_parens(doc),
+            ParenKind::Braced(braces) => print_braces(doc, expr, braces, arena),
+            ParenKind::Nothing => doc,
         }
-
-        // Print spread expression if present
-        if let Some(expr) = spread {
-            if !elements.is_empty() {
-                elements.push(Doc::text(","));
-                elements.push(Doc::line());
+    };
+    let element_docs: Vec<Doc> = elements
+        .iter()
+        .map(|element| match *element {
+            SpreadElement::Pspread_item(idx) => {
+                let expr = arena.get_expr(idx);
+                let doc = expr_doc(cmt_tbl, expr);
+                print_comments(doc, cmt_tbl, expr.pexp_loc, arena)
             }
-
-            // Extract leading comments to print before dotdotdot
-            let full_loc = arena.to_location(expr.pexp_loc);
-            let leading_comments = cmt_tbl.remove_leading_comments_by_loc(expr.pexp_loc, arena);
-            let leading_comments_doc =
-                print_leading_comments_with(Doc::nil(), leading_comments, &full_loc);
-
-            // Print expression (without leading comments which we extracted above)
-            let expr_doc = {
-                let doc = print_expression(state, expr, cmt_tbl, arena);
-                match parens::expr_allowing_coercion(arena, expr) {
-                    ParenKind::Parenthesized => add_parens(doc),
-                    ParenKind::Braced(braces) => print_braces(doc, expr, braces, arena),
-                    ParenKind::Nothing => doc,
-                }
-            };
-
-            // Extract and print trailing comments
-            let trailing_comments = cmt_tbl.remove_trailing_comments_by_loc(expr.pexp_loc, arena);
-            let expr_with_trailing =
-                print_trailing_comments_with(expr_doc, trailing_comments, &full_loc);
-
-            elements.push(leading_comments_doc);
-            elements.push(Doc::dotdotdot());
-            elements.push(expr_with_trailing);
-        }
-    }
-
+            SpreadElement::Pspread(idx) => {
+                // The leading comments go before the dots, so they're taken
+                // before the expression is printed.
+                let expr = arena.get_expr(idx);
+                let full_loc = arena.to_location(expr.pexp_loc);
+                let leading_comments = cmt_tbl.remove_leading_comments_by_loc(expr.pexp_loc, arena);
+                let leading_comments_doc =
+                    print_leading_comments_with(Doc::nil(), leading_comments, &full_loc);
+                let doc = expr_doc(cmt_tbl, expr);
+                let trailing_comments =
+                    cmt_tbl.remove_trailing_comments_by_loc(expr.pexp_loc, arena);
+                let doc = print_trailing_comments_with(doc, trailing_comments, &full_loc);
+                Doc::concat(vec![leading_comments_doc, Doc::dotdotdot(), doc])
+            }
+        })
+        .collect();
+    let (opening, closing) = match kind {
+        SpreadKind::Spread_array => (Doc::lbracket(), Doc::rbracket()),
+        SpreadKind::Spread_list => (Doc::text("list{"), Doc::rbrace()),
+    };
     Doc::group(Doc::concat(vec![
-        Doc::lbracket(),
-        Doc::indent(Doc::concat(vec![Doc::soft_line(), Doc::concat(elements)])),
+        opening,
+        Doc::indent(Doc::concat(vec![
+            Doc::soft_line(),
+            Doc::join(Doc::concat(vec![Doc::text(","), Doc::line()]), element_docs),
+        ])),
         Doc::trailing_comma(),
         Doc::soft_line(),
-        Doc::rbracket(),
-    ]))
-}
-
-/// Print spread list syntax: Primitive_list.spread([xs, [a, b]]) -> list{...xs, a, b}
-fn print_belt_list_concat_apply(
-    state: &PrinterState,
-    sub_lists: &[ExprIdx],
-    cmt_tbl: &mut CommentTable,
-    arena: &ParseArena,
-) -> Doc {
-    // Collect all elements (regular and spread) into a flat list with commas
-    let mut elements: Vec<Doc> = Vec::new();
-
-    for sub_list_idx in sub_lists {
-        let sub_list = arena.get_expr(*sub_list_idx);
-        let (expressions, spread) = parsetree_viewer::collect_list_expressions(arena, sub_list);
-
-        // Print regular expressions
-        for expr in expressions {
-            if !elements.is_empty() {
-                elements.push(Doc::text(","));
-                elements.push(Doc::line());
-            }
-            let doc = print_expression_with_comments(state, expr, cmt_tbl, arena);
-            let doc = match parens::expr_allowing_coercion(arena, expr) {
-                ParenKind::Parenthesized => add_parens(doc),
-                ParenKind::Braced(braces) => print_braces(doc, expr, braces, arena),
-                ParenKind::Nothing => doc,
-            };
-            elements.push(doc);
-        }
-
-        // Print spread expression if present
-        if let Some(expr) = spread {
-            if !elements.is_empty() {
-                elements.push(Doc::text(","));
-                elements.push(Doc::line());
-            }
-            let expr_doc = {
-                let doc = print_expression_with_comments(state, expr, cmt_tbl, arena);
-                match parens::expr_allowing_coercion(arena, expr) {
-                    ParenKind::Parenthesized => add_parens(doc),
-                    ParenKind::Braced(braces) => print_braces(doc, expr, braces, arena),
-                    ParenKind::Nothing => doc,
-                }
-            };
-            elements.push(Doc::dotdotdot());
-            elements.push(expr_doc);
-        }
-    }
-
-    Doc::group(Doc::concat(vec![
-        Doc::text("list{"),
-        Doc::indent(Doc::concat(vec![Doc::soft_line(), Doc::concat(elements)])),
-        Doc::trailing_comma(),
-        Doc::soft_line(),
-        Doc::rbrace(),
+        closing,
     ]))
 }
 

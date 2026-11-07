@@ -256,6 +256,7 @@ fn is_simple_expression_with_arena(expr: &Expression, arena: &ParseArena) -> boo
             | ExpressionDesc::Pexp_tuple(_)
             | ExpressionDesc::Pexp_array(_)
             | ExpressionDesc::Pexp_dict(_)
+            | ExpressionDesc::Pexp_spread(..)
             | ExpressionDesc::Pexp_record(_)
             | ExpressionDesc::Pexp_constraint(_)
             | ExpressionDesc::Pexp_coerce(_)
@@ -1981,6 +1982,33 @@ fn print_expression_inner<W: Write>(
                 }
             }
             f.string("}");
+            f.close_box();
+        }
+        ExpressionDesc::Pexp_spread(kind, elements) => {
+            // OCaml: pp f "@[<hv2>%s%a%s@]" opening (list element ~sep:",@;"),
+            // where an item is `simple_expr ctxt` and a spread "...%a".
+            let (opening, closing) = match kind {
+                SpreadKind::Spread_array => ("[", "]"),
+                SpreadKind::Spread_list => ("list{", "}"),
+            };
+            f.open_box(BoxKind::HV, 2);
+            f.string(opening);
+            for (i, element) in arena.spread_element_list(*elements).iter().enumerate() {
+                if i > 0 {
+                    f.string(",");
+                    f.space();
+                }
+                match element {
+                    SpreadElement::Pspread_item(e) => {
+                        print_expression_simple_ctx(f, arena, arena.get_expr(*e), ctx);
+                    }
+                    SpreadElement::Pspread(e) => {
+                        f.string("...");
+                        print_expression_simple_ctx(f, arena, arena.get_expr(*e), ctx);
+                    }
+                }
+            }
+            f.string(closing);
             f.close_box();
         }
         ExpressionDesc::Pexp_array(elems) => {

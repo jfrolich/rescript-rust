@@ -4224,6 +4224,24 @@ fn transform_expression(
                     .collect(),
             ))
         }
+        ExpressionDesc::Pexp_spread(kind, elements) => {
+            let elements = arena.spread_element_list(elements).to_vec();
+            let elements: Vec<SpreadElement> = elements
+                .into_iter()
+                .map(|element| {
+                    let mut transform = |e: ExprIdx| {
+                        let e_expr = arena.get_expr(e).clone();
+                        let transformed = transform_expression(e_expr, config, arena);
+                        arena.push_expr(transformed)
+                    };
+                    match element {
+                        SpreadElement::Pspread_item(e) => SpreadElement::Pspread_item(transform(e)),
+                        SpreadElement::Pspread(e) => SpreadElement::Pspread(transform(e)),
+                    }
+                })
+                .collect();
+            ExpressionDesc::Pexp_spread(kind, arena.push_spread_element_list(&elements))
+        }
         ExpressionDesc::Pexp_dict(entries) => ExpressionDesc::Pexp_dict(Box::new(
             entries
                 .into_iter()
@@ -5145,6 +5163,11 @@ fn expression_may_change(expr: &Expression, arena: &ParseArena, memo: &mut Vec<u
         ExpressionDesc::Pexp_dict(entries) => entries.iter().any(|entry| match entry {
             DictEntry::Pdict_entry(_, e) | DictEntry::Pdict_spread(e) => child(*e, memo),
         }),
+        ExpressionDesc::Pexp_spread(_, elements) => arena
+            .spread_element_list(*elements)
+            .to_vec()
+            .iter()
+            .any(|element| child(element.expr(), memo)),
         ExpressionDesc::Pexp_construct(_, args) => arena
             .expr_list(args.txt)
             .iter()

@@ -184,6 +184,11 @@ fn expression_has_string_literal(
                 expression_has_string_literal(arena.get_expr(*e), value, arena)
             }
         }),
+        ED::Pexp_spread(_, elements) => {
+            arena.spread_element_list(*elements).iter().any(|element| {
+                expression_has_string_literal(arena.get_expr(element.expr()), value, arena)
+            })
+        }
         ED::Pexp_construct(_, args) => arena
             .expr_list(args.txt)
             .iter()
@@ -1993,6 +1998,10 @@ fn invalid_enabled_let_unwrap_in_expr(
             .expr_list(*items)
             .iter()
             .find_map(|item| invalid_enabled_let_unwrap_in_expr(*item, arena)),
+        ExpressionDesc::Pexp_spread(_, elements) => arena
+            .spread_element_list(*elements)
+            .iter()
+            .find_map(|element| invalid_enabled_let_unwrap_in_expr(element.expr(), arena)),
         ExpressionDesc::Pexp_construct(_, payload) => arena
             .expr_list(payload.txt)
             .iter()
@@ -2189,6 +2198,10 @@ fn disabled_let_unwrap_loc_in_expr(expr: ExprIdx, arena: &ParseArena) -> Option<
             .expr_list(*items)
             .iter()
             .find_map(|item| disabled_let_unwrap_loc_in_expr(*item, arena)),
+        ExpressionDesc::Pexp_spread(_, elements) => arena
+            .spread_element_list(*elements)
+            .iter()
+            .find_map(|element| disabled_let_unwrap_loc_in_expr(element.expr(), arena)),
         ExpressionDesc::Pexp_construct(_, payload) => arena
             .expr_list(payload.txt)
             .iter()

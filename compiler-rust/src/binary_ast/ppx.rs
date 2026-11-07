@@ -37,7 +37,7 @@ use crate::parser::longident::Longident;
 
 use super::spice_ppx;
 use crate::parser::ast::{
-    Extension, PexpBraces, PexpRaw, PrimitiveRepr, PstrRaw, RawKind, RawSource,
+    Extension, PexpBraces, PexpRaw, PrimitiveRepr, PstrRaw, RawKind, RawSource, SpreadElement,
 };
 use crate::types::external_ffi_types::{
     Attr, Cst, DeclKind, ExternalDecl, ExternalFfi, ExternalModuleName, ImportAttributes,
@@ -8286,6 +8286,26 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
                 *lid,
                 arena.push_expr(rw2),
             )))
+        }
+
+        // ast_mapper.ml `Pexp_spread`: map the items and spreads in order.
+        ExpressionDesc::Pexp_spread(kind, elements) => {
+            let elements = arena.spread_element_list(*elements).to_vec();
+            let elements: Vec<SpreadElement> = elements
+                .into_iter()
+                .map(|element| {
+                    let mut rewrite = |e: ExprIdx| {
+                        let e = arena.get_expr(e).clone();
+                        let rw = rewrite_expression(&e, arena);
+                        arena.push_expr(rw)
+                    };
+                    match element {
+                        SpreadElement::Pspread_item(e) => SpreadElement::Pspread_item(rewrite(e)),
+                        SpreadElement::Pspread(e) => SpreadElement::Pspread(rewrite(e)),
+                    }
+                })
+                .collect();
+            ExpressionDesc::Pexp_spread(*kind, arena.push_spread_element_list(&elements))
         }
 
         ExpressionDesc::Pexp_dict(entries) => ExpressionDesc::Pexp_dict(Box::new(

@@ -640,6 +640,94 @@ impl<'a> Mapper<'a> {
         self.dict_rows(super::ast_dict::LITERAL_MARKER, e).map(rows)
     }
 
+    /// ast_mapper_from0.ml `E.spread_elements`: the kind and elements of an
+    /// array or list literal with spreads encoded as a call, see
+    /// `mapper_to0::spread_call`.
+    fn spread_elements<'e>(
+        &self,
+        e: &'e pt0::Expression,
+    ) -> Option<(current::SpreadKind, Vec<SpreadElement0<'e>>)> {
+        fn generated(e: &pt0::Expression) -> bool {
+            e.pexp_loc.loc_ghost && e.pexp_attributes.is_empty()
+        }
+        let lident_is = |lid: &Longident, name: &str| matches!(lid, Longident::Lident(n) if self.str_eq(*n, name));
+        let list_part = |mut e: &'e pt0::Expression| {
+            let mut elements = Vec::new();
+            loop {
+                match &e.pexp_desc {
+                    pt0::ExpressionDesc::Construct(lid, Some(arg))
+                        if lident_is(&lid.txt, "::")
+                            && arg.pexp_attributes.is_empty()
+                            && generated(e) =>
+                    {
+                        if let pt0::ExpressionDesc::Tuple(items) = &arg.pexp_desc
+                            && let [item, tail] = items.as_slice()
+                        {
+                            elements.push(SpreadElement0::Item(item));
+                            e = tail;
+                            continue;
+                        }
+                        elements.push(SpreadElement0::Spread(e));
+                    }
+                    pt0::ExpressionDesc::Construct(lid, None)
+                        if lident_is(&lid.txt, "[]") && generated(e) => {}
+                    _ => elements.push(SpreadElement0::Spread(e)),
+                }
+                return elements;
+            }
+        };
+        let array_part = |e: &'e pt0::Expression| match &e.pexp_desc {
+            pt0::ExpressionDesc::Array(items) if generated(e) => {
+                items.iter().map(SpreadElement0::Item).collect()
+            }
+            _ => vec![SpreadElement0::Spread(e)],
+        };
+        let pt0::ExpressionDesc::Apply(func, args) = &e.pexp_desc else {
+            return None;
+        };
+        let pt0::ExpressionDesc::Ident(lid) = &func.pexp_desc else {
+            return None;
+        };
+        let Longident::Ldot(module, member) = &lid.txt else {
+            return None;
+        };
+        let Longident::Lident(module) = &**module else {
+            return None;
+        };
+        if !self.str_eq(*member, "spread")
+            || !matches!(func.pexp_attributes.as_slice(),
+                [(name, pt0::Payload::PStr(items))]
+                    if items.is_empty() && name.txt == super::mapper_to0::SPREAD_MARKER)
+        {
+            return None;
+        }
+        let [(pt0::ArgLabel::Nolabel, arg)] = args.as_slice() else {
+            return None;
+        };
+        let pt0::ExpressionDesc::Array(parts) = &arg.pexp_desc else {
+            return None;
+        };
+        if !arg.pexp_attributes.is_empty() {
+            return None;
+        }
+        // `kind_of_module_name`
+        let module = self.arena.get_string(*module);
+        if module == crate::parser::ast_spread::module_name(current::SpreadKind::Spread_array) {
+            Some((
+                current::SpreadKind::Spread_array,
+                parts.iter().flat_map(array_part).collect(),
+            ))
+        } else if module == crate::parser::ast_spread::module_name(current::SpreadKind::Spread_list)
+        {
+            Some((
+                current::SpreadKind::Spread_list,
+                parts.iter().flat_map(list_part).collect(),
+            ))
+        } else {
+            None
+        }
+    }
+
     /// ast_mapper_from0.ml `map_constant ~loc`.
     fn map_constant(&mut self, c: &pt0::Constant, loc: LocIdx) -> current::Constant {
         match c {
@@ -1619,6 +1707,32 @@ impl<'a> Mapper<'a> {
                 .collect();
             return current::Expression {
                 pexp_desc: current::ExpressionDesc::Pexp_dict(Box::new(entries)),
+                pexp_loc: loc,
+                pexp_attributes: attrs,
+            };
+        }
+
+        // ast_mapper_from0.ml `Pexp_apply _ when spread_elements e`: the call
+        // encoding an array or list literal with spreads.
+        if matches!(expr.pexp_desc, pt0::ExpressionDesc::Apply(..))
+            && let Some((kind, elements)) = self.spread_elements(expr)
+        {
+            let elements: Vec<current::SpreadElement> = elements
+                .into_iter()
+                .map(|element| match element {
+                    SpreadElement0::Item(item) => {
+                        current::SpreadElement::Pspread_item(self.push_expr(item))
+                    }
+                    SpreadElement0::Spread(spread) => {
+                        current::SpreadElement::Pspread(self.push_expr(spread))
+                    }
+                })
+                .collect();
+            return current::Expression {
+                pexp_desc: current::ExpressionDesc::Pexp_spread(
+                    kind,
+                    self.arena.push_spread_element_list(&elements),
+                ),
                 pexp_loc: loc,
                 pexp_attributes: attrs,
             };
@@ -3389,6 +3503,12 @@ fn v0_object_literal_rows(
     rows.iter()
         .all(|(lid, _)| matches!(lid.txt, Longident::Lident(_)))
         .then_some(rows.as_slice())
+}
+
+/// An element of a v0 literal with spreads decoded by `spread_elements`.
+enum SpreadElement0<'e> {
+    Item(&'e pt0::Expression),
+    Spread(&'e pt0::Expression),
 }
 
 /// An entry of a v0 dict literal decoded by `dict_entries`.

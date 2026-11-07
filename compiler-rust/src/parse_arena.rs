@@ -528,6 +528,8 @@ pub struct ParseArena {
     expr_field_lists: ListPool<ExpressionRecordField>,
     pat_field_lists: ListPool<PatternRecordField>,
     case_lists: ListPool<Case>,
+    /// Pool behind the elements of `Pexp_spread`.
+    spread_element_lists: ListPool<crate::parser::ast::SpreadElement>,
     /// N-ary source parameter lists keyed by the function body's arena index.
     ///
     /// `PexpFun` keeps only a compact first-parameter fallback for frozen-v0 PPX
@@ -1015,6 +1017,7 @@ impl Default for ParseArena {
             expr_field_lists: ListPool::default(),
             pat_field_lists: ListPool::default(),
             case_lists: ListPool::default(),
+            spread_element_lists: ListPool::default(),
             nary_fun_params_by_first_pattern: HashMap::new(),
             nary_fun_param_lists: ListPool::default(),
             nary_fun_unknown_arity_by_first_pattern: HashMap::new(),
@@ -1698,6 +1701,19 @@ impl ParseArena {
         let ghost = InternedLocation::new(loc.loc_start, loc.loc_end, true);
         let slot = self.synthetic_locations.len();
         self.synthetic_locations.push(Box::new(ghost));
+        LocIdx::from_u32(SYNTHETIC_LOCATION_BASE + slot as u32)
+    }
+
+    /// A typechecker-generated ghost location from `start` to `end` (OCaml
+    /// `{Location.loc_start; loc_end; loc_ghost = true}`), appended to the
+    /// synthetic storage like `push_typecheck_ghost_loc`.
+    pub fn push_typecheck_ghost_span(&self, start: PosIdx, end: PosIdx) -> LocIdx {
+        if !self.store_locations {
+            return self.fresh_location_identity(true);
+        }
+        let slot = self.synthetic_locations.len();
+        self.synthetic_locations
+            .push(Box::new(InternedLocation::new(start, end, true)));
         LocIdx::from_u32(SYNTHETIC_LOCATION_BASE + slot as u32)
     }
 
@@ -2748,6 +2764,29 @@ impl ParseArena {
         self.case_lists.get(list)
     }
 
+    /// Store the elements of a literal with spreads.
+    pub fn push_spread_element_list(
+        &mut self,
+        items: &[crate::parser::ast::SpreadElement],
+    ) -> SpreadElementList {
+        self.spread_element_lists.push(items)
+    }
+
+    /// `push_spread_element_list` for nodes the type checker synthesizes.
+    pub fn push_shared_spread_element_list(
+        &self,
+        items: &[crate::parser::ast::SpreadElement],
+    ) -> SpreadElementList {
+        self.spread_element_lists.push_shared(items)
+    }
+
+    pub fn spread_element_list(
+        &self,
+        list: SpreadElementList,
+    ) -> &[crate::parser::ast::SpreadElement] {
+        self.spread_element_lists.get(list)
+    }
+
     /// The arguments of a `Pexp_apply`, in source order.
     pub fn apply_args(&self, args: ApplyArgs) -> &[(ArgLabel, ExprIdx)] {
         self.apply_args.get(args)
@@ -3465,6 +3504,8 @@ pub type ExprFieldList = ArenaList<ExpressionRecordField>;
 pub type PatFieldList = ArenaList<PatternRecordField>;
 /// The cases of a `switch` or `try`.
 pub type CaseList = ArenaList<Case>;
+/// The elements of a literal with spreads (`Pexp_spread`).
+pub type SpreadElementList = ArenaList<crate::parser::ast::SpreadElement>;
 
 /// Lists pushed through a shared arena reference (by the type checker) set
 /// this bit in `ArenaList::start`; the rest is the slot in `ListPool::shared`.

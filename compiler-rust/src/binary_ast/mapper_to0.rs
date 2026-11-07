@@ -24,6 +24,55 @@ use crate::parser::longident::Longident;
 
 use super::parsetree0 as pt0;
 
+/// `Ast_mapper_to0.spread_marker`: the attribute on the `spread` of the
+/// call encoding a literal with spreads.
+pub const SPREAD_MARKER: &str = "res.spread";
+
+/// `Ast_mapper_to0.spread_call`: v0 has no array or list literals with
+/// spreads, `Pexp_spread`: they're the calls of `Primitive_array.spread` and
+/// `Primitive_list.spread` they used to be parsed into, whose `spread` carries
+/// the `res.spread` marker. The argument is an array of the
+/// `Ast_spread.parts`; `Ast_mapper_from0` decodes the parts with ghost
+/// locations back into the items.
+pub fn spread_call(
+    arena: &mut ParseArena,
+    loc: LocIdx,
+    attrs: current::Attributes,
+    kind: current::SpreadKind,
+    elements: &[current::SpreadElement],
+) -> current::Expression {
+    let marker = arena.intern(SPREAD_MARKER);
+    let module = arena.intern(crate::parser::ast_spread::module_name(kind));
+    let spread = arena.intern("spread");
+    let lid = arena.push_longident(Longident::Ldot(Box::new(Longident::Lident(module)), spread));
+    let funct = arena.push_expr(current::Expression {
+        pexp_desc: current::ExpressionDesc::Pexp_ident(Located::new(lid, loc)),
+        pexp_loc: loc,
+        pexp_attributes: current::Attributes::from_vec(vec![(
+            crate::parser::core::mknoloc(marker),
+            current::Payload::PStr(Box::default()),
+        )]),
+    });
+    let parts = crate::parser::ast_spread::parts(&mut &mut *arena, kind, elements);
+    let parts = arena.push_expr_list(&parts);
+    let array = arena.push_expr(current::Expression {
+        pexp_desc: current::ExpressionDesc::Pexp_array(parts),
+        pexp_loc: loc,
+        pexp_attributes: current::Attributes::new(),
+    });
+    let args = arena.push_apply_args(&[(current::ArgLabel::Nolabel, array)]);
+    current::Expression {
+        pexp_desc: current::ExpressionDesc::Pexp_apply(PexpApply {
+            funct,
+            args,
+            partial: false,
+            transformed_jsx: false,
+        }),
+        pexp_loc: loc,
+        pexp_attributes: attrs,
+    }
+}
+
 // ========== Public API ==========
 
 /// Convert a structure from current parsetree to parsetree0
@@ -1294,6 +1343,19 @@ impl<'a> Mapper<'a> {
             inner.pexp_attributes = attrs;
             return inner;
         }
+        if let current::ExpressionDesc::Pexp_spread(kind, elements) = &expr.pexp_desc {
+            // ast_mapper_to0.ml Pexp_spread: v0 has no spread literals,
+            // they're the calls they used to be parsed into.
+            let elements = self.arena.spread_element_list(*elements).to_vec();
+            let call = spread_call(
+                self.arena,
+                expr.pexp_loc,
+                expr.pexp_attributes.clone(),
+                *kind,
+                &elements,
+            );
+            return self.map_expression(&call);
+        }
         if let current::ExpressionDesc::Pexp_dict(entries) = &expr.pexp_desc {
             // ast_mapper_to0.ml Pexp_dict: v0 has no dict literals, they're
             // the calls they used to be parsed into.
@@ -1702,6 +1764,9 @@ impl<'a> Mapper<'a> {
             }
             current::ExpressionDesc::Pexp_dict(_) => {
                 unreachable!("dict literals are encoded by map_expression_with_owner")
+            }
+            current::ExpressionDesc::Pexp_spread(..) => {
+                unreachable!("spread literals are encoded by map_expression_with_owner")
             }
             current::ExpressionDesc::Pexp_array(exprs) => pt0::ExpressionDesc::Array(
                 self.arena

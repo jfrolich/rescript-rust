@@ -5133,6 +5133,16 @@ impl<'a> LocCloner<'a> {
                     }
                 }
             }
+            ExpressionDesc::Pexp_spread(_, elements) => {
+                let mut new_elements = self.arena.spread_element_list(*elements).to_vec();
+                for element in new_elements.iter_mut() {
+                    match element {
+                        crate::parser::ast::SpreadElement::Pspread_item(e)
+                        | crate::parser::ast::SpreadElement::Pspread(e) => self.expression_idx(e),
+                    }
+                }
+                *elements = self.arena.push_spread_element_list(&new_elements);
+            }
             ExpressionDesc::Pexp_construct(lid, args) => {
                 self.located(lid);
                 self.located(&mut *args);

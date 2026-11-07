@@ -1680,6 +1680,15 @@ fn walk_expression(
             let rows = parsetree_viewer::dict_expr_rows(arena, expr.pexp_loc, entries);
             walk_list(&[Node::Expression(&rows)], t, comments, arena);
         }
+        // res_comments_table.ml `Pexp_spread`: the items and spreads in order.
+        ExpressionDesc::Pexp_spread(_, elements) => {
+            let nodes: Vec<Node<'_>> = arena
+                .spread_element_list(*elements)
+                .iter()
+                .map(|element| Node::ExpressionIdx(element.expr()))
+                .collect();
+            walk_list(&nodes, t, comments, arena);
+        }
         ExpressionDesc::Pexp_braces(braces) if is_block_expr_idx(arena, braces.expr) => {
             let inner = arena.get_expr(braces.expr).clone();
             walk_expression(&inner, t, comments, arena);
@@ -2384,51 +2393,6 @@ fn walk_expression(
                             }
                         }
                     }
-                }
-            }
-
-            // Special case for Primitive_array.spread (spread array syntax).
-            // Match OCaml: flatten all sub-array expressions and walk them together.
-            if args.len() == 1 && parsetree_viewer::is_spread_belt_array_concat(arena, &funct_expr)
-            {
-                let (_, arg_idx) = &args[0];
-                let arg = arena.get_expr(*arg_idx);
-                if let ExpressionDesc::Pexp_array(sub_arrays) = &arg.pexp_desc {
-                    let mut all_expr_idxs: Vec<ExprIdx> = Vec::new();
-                    for sub_array_idx in arena.expr_list(*sub_arrays).iter() {
-                        let sub_array = arena.get_expr(*sub_array_idx);
-                        if let ExpressionDesc::Pexp_array(exprs) = &sub_array.pexp_desc {
-                            all_expr_idxs.extend(arena.expr_list(*exprs).iter().copied());
-                        } else {
-                            all_expr_idxs.push(*sub_array_idx);
-                        }
-                    }
-                    let nodes: Vec<Node<'_>> =
-                        all_expr_idxs.into_iter().map(Node::ExpressionIdx).collect();
-                    walk_list(&nodes, t, comments, arena);
-                    return;
-                }
-            }
-
-            // Special case for Primitive_list.spread (spread list syntax).
-            // Match OCaml: flatten all sub-list expressions and walk them together.
-            if args.len() == 1 && parsetree_viewer::is_spread_belt_list_concat(arena, &funct_expr) {
-                let (_, arg_idx) = &args[0];
-                let arg = arena.get_expr(*arg_idx);
-                if let ExpressionDesc::Pexp_array(sub_lists) = &arg.pexp_desc {
-                    let mut all_exprs: Vec<Expression> = Vec::new();
-                    for sub_list_idx in arena.expr_list(*sub_lists).iter() {
-                        let sub_list = arena.get_expr(*sub_list_idx);
-                        let (exprs, spread) =
-                            parsetree_viewer::collect_list_expressions(arena, sub_list);
-                        all_exprs.extend(exprs.into_iter().cloned());
-                        if let Some(spread_expr) = spread {
-                            all_exprs.push(spread_expr.clone());
-                        }
-                    }
-                    let nodes: Vec<Node<'_>> = all_exprs.iter().map(Node::Expression).collect();
-                    walk_list(&nodes, t, comments, arena);
-                    return;
                 }
             }
 

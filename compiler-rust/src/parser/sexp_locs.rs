@@ -783,6 +783,24 @@ fn expression(expr: &Expression, arena: &ParseArena) -> Sexp {
                     .collect()
             }),
         ]),
+        ExpressionDesc::Pexp_spread(kind, elements) => Sexp::list(vec![
+            Sexp::atom("Pexp_spread"),
+            Sexp::atom(crate::parser::sexp::spread_kind(*kind)),
+            Sexp::list(map_empty_with_arena(
+                arena.spread_element_list(*elements),
+                arena,
+                |element, arena| match element {
+                    SpreadElement::Pspread_item(e) => Sexp::list(vec![
+                        Sexp::atom("Pspread_item"),
+                        expression(arena.get_expr(*e), arena),
+                    ]),
+                    SpreadElement::Pspread(e) => Sexp::list(vec![
+                        Sexp::atom("Pspread"),
+                        expression(arena.get_expr(*e), arena),
+                    ]),
+                },
+            )),
+        ]),
         ExpressionDesc::Pexp_ifthenelse(inner) => {
             let (ref cond, ref then_e, ref opt_else) = **inner;
             Sexp::list(vec![

@@ -491,6 +491,12 @@ pub fn walk_expr<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, idx: ExprId
                 }
             }
         }
+        // compiler/ml/ast_iterator.ml Pexp_spread: items and spreads in order.
+        ExpressionDesc::Pexp_spread(_, elements) => {
+            for element in arena.spread_element_list(*elements) {
+                v.expr(arena, element.expr());
+            }
+        }
         ExpressionDesc::Pexp_construct(_, args) => {
             for arg in arena.expr_list(args.txt) {
                 v.expr(arena, *arg);

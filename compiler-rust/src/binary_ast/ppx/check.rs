@@ -994,6 +994,12 @@ impl<'a> Checker<'a> {
                 }
                 Ok(())
             }
+            ExpressionDesc::Pexp_spread(_, elements) => {
+                for element in self.arena.spread_element_list(*elements).to_vec() {
+                    self.expr(element.expr())?;
+                }
+                Ok(())
+            }
             ExpressionDesc::Pexp_template(template) => {
                 for value in &template.values {
                     self.expr(*value)?;

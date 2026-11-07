@@ -22,9 +22,9 @@ use crate::parser::ast::{
     ModuleExprDesc, ModuleType, ModuleTypeDeclaration, ModuleTypeDesc, MutableFlag, ObjectField,
     OpenDescription, OverrideFlag, Pattern, PatternDesc, PatternRecordField, Payload, PexpApply,
     PexpFun, PrimitiveRepr, PrivateFlag, RecFlag, RecordPatRest, RowField, SignatureItem,
-    SignatureItemDesc, StringConst, StringLoc, StructureItem, StructureItemDesc, TypeArg,
-    TypeDeclaration, TypeExtension, TypeKind, ValueBinding, ValueConstraint, ValueDescription,
-    Variance, WithConstraint,
+    SignatureItemDesc, SpreadElement, SpreadKind, StringConst, StringLoc, StructureItem,
+    StructureItemDesc, TypeArg, TypeDeclaration, TypeExtension, TypeKind, ValueBinding,
+    ValueConstraint, ValueDescription, Variance, WithConstraint,
 };
 use crate::parser::longident::Longident;
 
@@ -1345,6 +1345,30 @@ impl Marshal for DictEntry {
     }
 }
 
+impl Marshal for SpreadKind {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
+        w.write_int(match self {
+            SpreadKind::Spread_array => 0,
+            SpreadKind::Spread_list => 1,
+        });
+    }
+}
+
+impl Marshal for SpreadElement {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
+        match self {
+            SpreadElement::Pspread_item(e) => {
+                w.write_block_header(0, 1);
+                e.marshal(w);
+            }
+            SpreadElement::Pspread(e) => {
+                w.write_block_header(1, 1);
+                e.marshal(w);
+            }
+        }
+    }
+}
+
 impl Marshal for ExpressionRecordField {
     fn marshal(&self, w: &mut MarshalWriter<'_>) {
         // record_element = { lid: Longident.t loc; x: 'a; opt: bool }
@@ -1468,29 +1492,32 @@ impl Marshal for ExpressionDesc {
         // Pexp_field = tag 12
         // Pexp_setfield = tag 13
         // Pexp_array = tag 14
-        // Pexp_ifthenelse = tag 16
-        // Pexp_ternary = tag 17
-        // Pexp_sequence = tag 18
-        // Pexp_while = tag 19
-        // Pexp_for = tag 20
-        // Pexp_constraint = tag 21
-        // Pexp_coerce = tag 22
-        // Pexp_object_get = tag 23
-        // Pexp_object_set = tag 24
-        // Pexp_object_literal = tag 25
-        // Pexp_letmodule = tag 26
-        // Pexp_letexception = tag 27
-        // Pexp_assert = tag 28
-        // Pexp_pack = tag 29
-        // Pexp_open = tag 30
-        // Pexp_extension = tag 31
-        // Pexp_await = tag 32
-        // Pexp_jsx_element = tag 33
-        // Pexp_for_of = tag 34
-        // Pexp_for_await_of = tag 35
-        // Pexp_regexp = tag 36
-        // Pexp_template = tag 37
-        // Pexp_tagged_template = tag 38
+        // Pexp_dict = tag 15
+        // Pexp_spread = tag 16
+        // Pexp_ifthenelse = tag 17
+        // Pexp_ternary = tag 18
+        // Pexp_sequence = tag 19
+        // Pexp_while = tag 20
+        // Pexp_for = tag 21
+        // Pexp_constraint = tag 22
+        // Pexp_coerce = tag 23
+        // Pexp_object_get = tag 24
+        // Pexp_object_set = tag 25
+        // Pexp_object_literal = tag 26
+        // Pexp_letmodule = tag 27
+        // Pexp_letexception = tag 28
+        // Pexp_assert = tag 29
+        // Pexp_pack = tag 30
+        // Pexp_open = tag 31
+        // Pexp_extension = tag 32
+        // Pexp_raw = tag 33
+        // Pexp_await = tag 34
+        // Pexp_jsx_element = tag 35
+        // Pexp_for_of = tag 36
+        // Pexp_for_await_of = tag 37
+        // Pexp_regexp = tag 38
+        // Pexp_template = tag 39
+        // Pexp_tagged_template = tag 40
         // Constant constructors (no payload):
         // Pexp_break = int 0
         // Pexp_continue = int 1
@@ -1503,13 +1530,13 @@ impl Marshal for ExpressionDesc {
                 braces.braces_loc.marshal(w);
             }
             ExpressionDesc::Pexp_ternary(inner) => {
-                w.write_block_header(17, 3);
+                w.write_block_header(18, 3);
                 inner.0.marshal(w);
                 inner.1.marshal(w);
                 inner.2.marshal(w);
             }
             ExpressionDesc::Pexp_regexp(regexp) => {
-                w.write_block_header(37, 2);
+                w.write_block_header(38, 2);
                 w.write_str(&regexp.pattern);
                 w.write_str(&regexp.flags);
             }
@@ -1649,30 +1676,35 @@ impl Marshal for ExpressionDesc {
                 w.write_block_header(15, 1);
                 entries.marshal(w);
             }
+            ExpressionDesc::Pexp_spread(kind, elements) => {
+                w.write_block_header(16, 2);
+                kind.marshal(w);
+                elements.marshal(w);
+            }
             ExpressionDesc::Pexp_ifthenelse(inner) => {
                 let (ref e1, ref e2, ref e3) = **inner;
                 let else_idx = w
                     .current_expr_idx()
                     .and_then(|owner| w.get_arena().if_else_branch(owner))
                     .or(*e3);
-                w.write_block_header(16, 3);
+                w.write_block_header(17, 3);
                 e1.marshal(w);
                 e2.marshal(w);
                 else_idx.marshal(w);
             }
             ExpressionDesc::Pexp_sequence(e1, e2) => {
-                w.write_block_header(18, 2);
+                w.write_block_header(19, 2);
                 e1.marshal(w);
                 e2.marshal(w);
             }
             ExpressionDesc::Pexp_while(e1, e2) => {
-                w.write_block_header(19, 2);
+                w.write_block_header(20, 2);
                 e1.marshal(w);
                 e2.marshal(w);
             }
             ExpressionDesc::Pexp_for(inner) => {
                 let (ref pat, ref e1, ref e2, ref dir, ref e3) = **inner;
-                w.write_block_header(20, 5);
+                w.write_block_header(21, 5);
                 pat.marshal(w);
                 e1.marshal(w);
                 e2.marshal(w);
@@ -1681,37 +1713,37 @@ impl Marshal for ExpressionDesc {
             }
             ExpressionDesc::Pexp_constraint(inner) => {
                 let (ref e, ref t) = **inner;
-                w.write_block_header(21, 2);
+                w.write_block_header(22, 2);
                 e.marshal(w);
                 t.marshal(w);
             }
             ExpressionDesc::Pexp_coerce(inner) => {
                 // Pexp_coerce of expression * core_type
                 let (ref e, _, ref t) = **inner;
-                w.write_block_header(22, 2);
+                w.write_block_header(23, 2);
                 e.marshal(w);
                 t.marshal(w);
             }
             ExpressionDesc::Pexp_object_get(inner) => {
                 let (ref e, ref label) = **inner;
-                w.write_block_header(23, 2);
+                w.write_block_header(24, 2);
                 e.marshal(w);
                 label.marshal(w);
             }
             ExpressionDesc::Pexp_object_set(inner) => {
                 let (ref e, ref label, ref v) = **inner;
-                w.write_block_header(24, 3);
+                w.write_block_header(25, 3);
                 e.marshal(w);
                 label.marshal(w);
                 v.marshal(w);
             }
             ExpressionDesc::Pexp_object_literal(fields) => {
-                w.write_block_header(25, 1);
+                w.write_block_header(26, 1);
                 fields.marshal(w);
             }
             ExpressionDesc::Pexp_letmodule(inner) => {
                 let (ref name, ref me, ref body) = **inner;
-                w.write_block_header(26, 3);
+                w.write_block_header(27, 3);
                 name.marshal(w);
                 w.enter_letmodule_expr();
                 me.marshal(w);
@@ -1720,37 +1752,37 @@ impl Marshal for ExpressionDesc {
             }
             ExpressionDesc::Pexp_letexception(inner) => {
                 let (ref ec, ref body) = **inner;
-                w.write_block_header(27, 2);
+                w.write_block_header(28, 2);
                 ec.marshal(w);
                 body.marshal(w);
             }
             ExpressionDesc::Pexp_assert(e) => {
-                w.write_block_header(28, 1);
+                w.write_block_header(29, 1);
                 e.marshal(w);
             }
             ExpressionDesc::Pexp_newtype(_) => {
                 unreachable!("Pexp_newtype is eliminated from the current n-ary parsetree")
             }
             ExpressionDesc::Pexp_pack(me) => {
-                w.write_block_header(29, 1);
+                w.write_block_header(30, 1);
                 w.enter_pack();
                 me.marshal(w);
                 w.exit_pack();
             }
             ExpressionDesc::Pexp_open(inner) => {
                 let (ref flag, ref lid, ref e) = **inner;
-                w.write_block_header(30, 3);
+                w.write_block_header(31, 3);
                 flag.marshal(w);
                 w.write_lident_loc_shared(lid.txt, lid.loc);
                 e.marshal(w);
             }
             ExpressionDesc::Pexp_extension(ext) => {
-                w.write_block_header(31, 1);
+                w.write_block_header(32, 1);
                 marshal_extension(ext, w, Some(EmptyPayloadShareKind::ParserAttr));
             }
             ExpressionDesc::Pexp_raw(raw) => {
                 // Pexp_raw of {kind; name_loc; source}
-                w.write_block_header(32, 3);
+                w.write_block_header(33, 3);
                 w.write_int(match raw.kind {
                     crate::parser::ast::RawKind::Expression => 0,
                     crate::parser::ast::RawKind::Function => 1,
@@ -1759,34 +1791,34 @@ impl Marshal for ExpressionDesc {
                 marshal_raw_source(&raw.source, w);
             }
             ExpressionDesc::Pexp_await(e) => {
-                w.write_block_header(33, 1);
+                w.write_block_header(34, 1);
                 e.marshal(w);
             }
             ExpressionDesc::Pexp_jsx_element(jsx) => {
-                w.write_block_header(34, 1);
+                w.write_block_header(35, 1);
                 jsx.marshal(w);
             }
             ExpressionDesc::Pexp_for_of(inner) => {
-                let (ref pat, ref iterable, ref body) = **inner;
-                w.write_block_header(35, 3);
-                pat.marshal(w);
-                iterable.marshal(w);
-                body.marshal(w);
-            }
-            ExpressionDesc::Pexp_for_await_of(inner) => {
                 let (ref pat, ref iterable, ref body) = **inner;
                 w.write_block_header(36, 3);
                 pat.marshal(w);
                 iterable.marshal(w);
                 body.marshal(w);
             }
+            ExpressionDesc::Pexp_for_await_of(inner) => {
+                let (ref pat, ref iterable, ref body) = **inner;
+                w.write_block_header(37, 3);
+                pat.marshal(w);
+                iterable.marshal(w);
+                body.marshal(w);
+            }
             ExpressionDesc::Pexp_template(template) => {
-                w.write_block_header(38, 2);
+                w.write_block_header(39, 2);
                 template.source_segments.marshal(w);
                 template.values.marshal(w);
             }
             ExpressionDesc::Pexp_tagged_template(template) => {
-                w.write_block_header(39, 3);
+                w.write_block_header(40, 3);
                 template.tag.marshal(w);
                 template.raw_sources.marshal(w);
                 template.values.marshal(w);

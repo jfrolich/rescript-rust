@@ -2404,271 +2404,127 @@ fn parse_tuple_expr(p: &mut Parser<'_>, start_pos_idx: PosIdx, first: Expression
 // Collection Expressions
 // ============================================================================
 
-/// Parse an array expression [e1, e2, ...].
-/// - `[a, b, c]` becomes `Pexp_array(Box::new([a, b, c]))`
-/// - `[...xs, a, b]` becomes `Primitive_array.spread([xs, [a, b]])`
+/// OCaml `parse_array_exp` (compiler/syntax/src/res_core.ml:4221-4239): an
+/// array literal is a `Pexp_array` of its items when it has no spread, and a
+/// `Pexp_spread Spread_array` of its elements in source order otherwise.
 fn parse_array_expr(p: &mut Parser<'_>) -> Expression {
     let start_pos_idx = p.start_pos_idx();
     p.expect(Token::Lbracket);
-
-    // OCaml res_core.ml:4498-4502: `parse_comma_delimited_reversed_list
-    // ~grammar:ExprList ~closing:Rbracket ~f:parse_spread_expr_region_with_loc`.
-    let mut items: Vec<(bool, Expression)> = super::core::parse_comma_delimited_reversed_list(
+    let elements = super::core::parse_comma_delimited_region(
         p,
         Grammar::ExprList,
         Token::Rbracket,
-        parse_spread_expr_region_with_loc,
-    )
-    .into_iter()
-    .map(|(is_spread, expr, _, _)| (is_spread, expr))
-    .collect();
-    items.reverse();
+        parse_spread_element_region,
+    );
     p.expect(Token::Rbracket);
     let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-
-    // Check if there are any spreads
-    let has_spread = items.iter().any(|(is_spread, _)| *is_spread);
-
-    if !has_spread {
-        // Simple case: no spread, just return array
-        let elements: Vec<ExprIdx> = items
+    let pexp_desc = if elements.iter().all(|element| element.is_item()) {
+        let items: Vec<ExprIdx> = elements
             .into_iter()
-            .map(|(_, e)| p.arena_mut().push_expr(e))
+            .map(|element| p.arena_mut().push_expr(element.into_expr()))
             .collect();
-        return Expression {
-            pexp_desc: ExpressionDesc::Pexp_array(p.arena_mut().push_expr_list(&elements)),
-            pexp_loc: loc,
-            pexp_attributes: Attributes::new(),
-        };
-    }
-
-    // With spread: [...xs, a, b, ...ys, c] becomes Primitive_array.spread([xs, [a, b], ys, [c]])
-    // Split into segments: each spread item becomes its own array element,
-    // consecutive non-spread items become a single array
-    let mut array_items: Vec<Expression> = vec![];
-    let mut current_non_spread: Vec<ExprIdx> = vec![];
-
-    for (is_spread, expr) in items {
-        if is_spread {
-            // Flush any accumulated non-spread items as an array
-            if !current_non_spread.is_empty() {
-                array_items.push(Expression {
-                    pexp_desc: ExpressionDesc::Pexp_array(
-                        p.arena_mut()
-                            .push_expr_list(&std::mem::take(&mut current_non_spread)),
-                    ),
-                    pexp_loc: loc,
-                    pexp_attributes: Attributes::new(),
-                });
-            }
-            // Add the spread item directly
-            array_items.push(expr);
-        } else {
-            current_non_spread.push(p.arena_mut().push_expr(expr));
-        }
-    }
-
-    // Flush remaining non-spread items
-    if !current_non_spread.is_empty() {
-        array_items.push(Expression {
-            pexp_desc: ExpressionDesc::Pexp_array(
-                p.arena_mut().push_expr_list(&current_non_spread),
-            ),
-            pexp_loc: loc,
-            pexp_attributes: Attributes::new(),
-        });
-    }
-
-    // Create Primitive_array.spread([...])
-    let array_items_idx: Vec<ExprIdx> = array_items
-        .into_iter()
-        .map(|e| p.arena_mut().push_expr(e))
-        .collect();
-    let outer_array = Expression {
-        pexp_desc: ExpressionDesc::Pexp_array(p.arena_mut().push_expr_list(&array_items_idx)),
-        pexp_loc: loc,
-        pexp_attributes: Attributes::new(),
+        ExpressionDesc::Pexp_array(p.arena_mut().push_expr_list(&items))
+    } else {
+        let elements = push_spread_elements(p, elements);
+        ExpressionDesc::Pexp_spread(SpreadKind::Spread_array, elements)
     };
-
-    // OCaml builds the Primitive_array.spread longident inline at each spread
-    // site (res_core.ml:4528), allocating fresh Longident blocks per occurrence.
-    let lid_idx = p.arena_mut().fresh_belt_array_spread_lid();
-    let spread_idx = p.arena_mut().intern("res.spread");
-    let concat_many = Expression {
-        pexp_desc: ExpressionDesc::Pexp_ident(with_loc(lid_idx, loc)),
-        pexp_loc: loc,
-        pexp_attributes: Attributes::from_vec(vec![(
-            mknoloc(spread_idx),
-            Payload::PStr(Box::default()),
-        )]),
-    };
-
-    let funct_idx = p.arena_mut().push_expr(concat_many);
-    let outer_array_idx = p.arena_mut().push_expr(outer_array);
     Expression {
-        pexp_desc: ExpressionDesc::Pexp_apply(PexpApply {
-            funct: funct_idx,
-            args: p
-                .arena_mut()
-                .push_apply_args(&[(ArgLabel::Nolabel, outer_array_idx)]),
-            partial: false,
-            transformed_jsx: false,
-        }),
+        pexp_desc,
         pexp_loc: loc,
         pexp_attributes: Attributes::new(),
     }
 }
 
-/// Parse a list expression list{e1, e2, ...} and lower to nested :: constructors.
-/// - `list{1, 2, 3}` becomes `1 :: (2 :: (3 :: []))`
-/// - `list{1, 2, ...rest}` becomes `1 :: (2 :: rest)`
-/// - `list{...xs, ...ys}` becomes `Primitive_list.spread([xs, ys])`
-/// - `list{...xs, 1, ...ys}` becomes `Primitive_list.spread([xs, 1 :: ys])`
-///
-/// OCaml `parse_spread_expr_region_with_loc` (res_core.ml:4334-4343).
-fn parse_spread_expr_region_with_loc(
-    p: &mut Parser<'_>,
-) -> Option<(bool, Expression, PosIdx, PosIdx)> {
-    let start_pos_idx = p.prev_end_pos_idx();
+/// A parsed element of an array or list literal, before it is stored in the
+/// arena.
+enum ParsedSpreadElement {
+    Item(Expression),
+    Spread(Expression),
+}
+
+impl ParsedSpreadElement {
+    fn is_item(&self) -> bool {
+        matches!(self, ParsedSpreadElement::Item(_))
+    }
+
+    fn into_expr(self) -> Expression {
+        match self {
+            ParsedSpreadElement::Item(expr) | ParsedSpreadElement::Spread(expr) => expr,
+        }
+    }
+}
+
+/// OCaml `parse_spread_element_region` (compiler/syntax/src/res_core.ml:4185-4192):
+/// `...E` is a `Pspread`, any other expression a `Pspread_item`.
+fn parse_spread_element_region(p: &mut Parser<'_>) -> Option<ParsedSpreadElement> {
     if p.token == Token::DotDotDot {
         p.next();
-        let expr = parse_constrained_or_coerced_expr(p);
-        Some((true, expr, start_pos_idx, p.prev_end_pos_idx()))
+        Some(ParsedSpreadElement::Spread(
+            parse_constrained_or_coerced_expr(p),
+        ))
     } else if grammar::is_expr_start(&p.token) {
-        let expr = parse_constrained_or_coerced_expr(p);
-        Some((false, expr, start_pos_idx, p.prev_end_pos_idx()))
+        Some(ParsedSpreadElement::Item(
+            parse_constrained_or_coerced_expr(p),
+        ))
     } else {
         None
     }
 }
 
-fn parse_list_expr(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression {
-    // Token::List already consumed the opening '{'
-    // Each item is (is_spread, expr, spread_start_pos)
-    // For spread items, spread_start_pos is before `...`; for non-spread, it's at the expr start
-    // OCaml res_core.ml:4370-4373: `parse_comma_delimited_reversed_list
-    // ~grammar:ListExpr ~closing:Rbrace ~f:parse_spread_expr_region_with_loc`.
-    let mut items: Vec<(bool, Expression, PosIdx, PosIdx)> =
-        super::core::parse_comma_delimited_reversed_list(
-            p,
-            Grammar::ListExpr,
-            Token::Rbrace,
-            parse_spread_expr_region_with_loc,
-        );
-    items.reverse();
-
-    p.expect(Token::Rbrace);
-    let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-
-    // Split items into segments by spread boundaries
-    // Each segment is (non_spread_items, optional_spread)
-    let segments = split_list_by_spread(items);
-
-    match segments.len() {
-        0 => {
-            // Empty list: list{} → []
-            // OCaml: {expr with pexp_loc = loc} - overwrite ghost pexp_loc with original location
-            let mut expr = make_empty_list(p, loc);
-            expr.pexp_loc = loc;
-            expr
-        }
-        1 => {
-            // Single segment: just build with :: constructors
-            // OCaml: spread expression keeps its original location in single segment case
-            let (exprs, spread, _, _) = segments.into_iter().next().unwrap();
-            let mut result = make_list_expression_simple(p, loc, exprs, spread);
-            // The outermost expression should have the full list location
-            result.pexp_loc = loc;
-            result
-        }
-        _ => {
-            // Multiple segments: use Primitive_list.spread([...])
-            // OCaml uses segment locations for sub-expressions
-            let sub_exprs: Vec<ExprIdx> = segments
-                .into_iter()
-                .map(|(exprs, spread, seg_start, seg_end)| {
-                    let expr = make_list_expression_with_loc(p, exprs, spread, seg_start, seg_end);
-                    p.arena_mut().push_expr(expr)
-                })
-                .collect();
-
-            let array_expr = Expression {
-                pexp_desc: ExpressionDesc::Pexp_array(p.arena_mut().push_expr_list(&sub_exprs)),
-                pexp_loc: loc,
-                pexp_attributes: Attributes::new(),
-            };
-
-            // OCaml builds the Primitive_list.spread longident inline at each
-            // spread site (res_core.ml:4386), allocating fresh Longident blocks.
-            let lid_idx = p.arena_mut().fresh_belt_list_spread_lid();
-            let spread_idx = p.arena_mut().intern("res.spread");
-            let concat_many_ident = Expression {
-                pexp_desc: ExpressionDesc::Pexp_ident(Loc { txt: lid_idx, loc }),
-                pexp_loc: loc,
-                // Add the res.spread attribute to match OCaml
-                pexp_attributes: Attributes::from_vec(vec![(
-                    mknoloc(spread_idx),
-                    Payload::PStr(Box::default()),
-                )]),
-            };
-
-            let funct_idx = p.arena_mut().push_expr(concat_many_ident);
-            let array_expr_idx = p.arena_mut().push_expr(array_expr);
-            Expression {
-                pexp_desc: ExpressionDesc::Pexp_apply(PexpApply {
-                    funct: funct_idx,
-                    args: p
-                        .arena_mut()
-                        .push_apply_args(&[(ArgLabel::Nolabel, array_expr_idx)]),
-                    partial: false,
-                    transformed_jsx: false,
-                }),
-                pexp_loc: loc,
-                pexp_attributes: Attributes::new(),
+/// Store the elements of a `Pexp_spread`, in source order.
+fn push_spread_elements(
+    p: &mut Parser<'_>,
+    elements: Vec<ParsedSpreadElement>,
+) -> crate::parse_arena::SpreadElementList {
+    let elements: Vec<SpreadElement> = elements
+        .into_iter()
+        .map(|element| match element {
+            ParsedSpreadElement::Item(expr) => {
+                SpreadElement::Pspread_item(p.arena_mut().push_expr(expr))
             }
-        }
-    }
+            ParsedSpreadElement::Spread(expr) => {
+                SpreadElement::Pspread(p.arena_mut().push_expr(expr))
+            }
+        })
+        .collect();
+    p.arena_mut().push_spread_element_list(&elements)
 }
 
-/// Split list items by spread into segments.
-/// Each segment contains (non_spread_items, optional_spread_at_end).
-/// A spread at the beginning of items starts a new segment.
-/// Segment data: (non_spread_exprs, optional_spread, segment_start, segment_end)
-/// OCaml tracks segment extents: start is first non-spread item (or spread), end is spread/last item
-type ListSegment = (Vec<Expression>, Option<Expression>, PosIdx, PosIdx);
-
-fn split_list_by_spread(items: Vec<(bool, Expression, PosIdx, PosIdx)>) -> Vec<ListSegment> {
-    // OCaml processes items in reverse using fold_left, building segments as:
-    // - spread: create new segment ([], spread, spread_start, spread_end)
-    // - non-spread with existing segment: prepend to segment, update start to non-spread's start
-    // - non-spread with empty: create ([item], None, item_start, item_end)
-    //
-    // We'll process forward then reverse to match OCaml's final order.
-    let mut segments: Vec<ListSegment> = vec![];
-
-    // Process in reverse to match OCaml's fold_left from reversed list
-    for (is_spread, expr, item_start, item_end) in items.into_iter().rev() {
-        if is_spread {
-            // Spread: create new segment
-            segments.push((vec![], Some(expr), item_start, item_end));
-        } else if let Some(last) = segments.last_mut() {
-            // Non-spread with existing segment: prepend and update start
-            last.0.push(expr);
-            last.2 = item_start;
-        } else {
-            // Non-spread with no segments: create segment with no spread
-            segments.push((vec![expr], None, item_start, item_end));
+/// OCaml `parse_list_expr` (compiler/syntax/src/res_core.ml:4194-4210): items,
+/// possibly followed by a spread, are a chain of `::`
+/// (`Ast_helper.Exp.make_list_expression`); any other list literal with
+/// spreads is a `Pexp_spread Spread_list` of its elements in source order.
+/// `Token::List` already consumed the opening `{`.
+fn parse_list_expr(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression {
+    let elements = super::core::parse_comma_delimited_region(
+        p,
+        Grammar::ListExpr,
+        Token::Rbrace,
+        parse_spread_element_region,
+    );
+    p.expect(Token::Rbrace);
+    let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+    // OCaml `items_and_tail`: only items, or items and a final spread.
+    let spreads = elements.iter().filter(|element| !element.is_item()).count();
+    let items_and_tail =
+        spreads == 0 || (spreads == 1 && elements.last().is_some_and(|element| !element.is_item()));
+    if !items_and_tail {
+        let elements = push_spread_elements(p, elements);
+        return Expression {
+            pexp_desc: ExpressionDesc::Pexp_spread(SpreadKind::Spread_list, elements),
+            pexp_loc: loc,
+            pexp_attributes: Attributes::new(),
+        };
+    }
+    let mut items: Vec<Expression> = Vec::with_capacity(elements.len());
+    let mut tail = None;
+    for element in elements {
+        match element {
+            ParsedSpreadElement::Item(expr) => items.push(expr),
+            ParsedSpreadElement::Spread(expr) => tail = Some(expr),
         }
     }
-
-    // Reverse each segment's exprs (they were added in reverse order)
-    for seg in &mut segments {
-        seg.0.reverse();
-    }
-
-    // Reverse segments to get correct order
-    segments.reverse();
-    segments
+    make_list_expression(p, loc, items, tail)
 }
 
 /// Build an empty list expression `[]` with ghost locations.
@@ -2692,11 +2548,11 @@ fn make_empty_list(p: &mut Parser<'_>, loc: Location) -> Expression {
     }
 }
 
-/// Build a list expression from items and optional spread tail (simple version)
-/// Used for single-segment lists where OCaml does NOT update spread location
-/// `[e1, e2]` → `e1 :: (e2 :: [])`
-/// `[e1, e2, ...rest]` → `e1 :: (e2 :: rest)`
-fn make_list_expression_simple(
+/// OCaml `Ast_helper.Exp.make_list_expression loc seq ext_opt`
+/// (compiler/ml/ast_helper.ml:237-261):
+/// `[e1, e2]` → `e1 :: (e2 :: [])`, `[e1, e2, ...rest]` → `e1 :: (e2 :: rest)`,
+/// with the outermost expression located at `loc`.
+fn make_list_expression(
     p: &mut Parser<'_>,
     loc: Location,
     exprs: Vec<Expression>,
@@ -2730,67 +2586,9 @@ fn make_list_expression_simple(
             pexp_attributes: Attributes::new(),
         };
     }
+    // OCaml: `{expr with pexp_loc = loc}`.
+    acc.pexp_loc = loc;
     acc
-}
-
-/// Build a list expression for multi-segment lists with explicit segment locations
-/// OCaml uses the segment's start/end for the sub-expression location
-/// And updates the final expression's pexp_loc to segment extent
-fn make_list_expression_with_loc(
-    p: &mut Parser<'_>,
-    exprs: Vec<Expression>,
-    spread: Option<Expression>,
-    seg_start: PosIdx,
-    seg_end: PosIdx,
-) -> Expression {
-    let seg_loc = p.mk_loc_idx(seg_start, seg_end);
-
-    // Use expression-context list constructor lidents (from ast_helper.ml)
-    let nil_idx = p.expr_nil();
-    let cons_idx = p.expr_cons();
-
-    // Build the list using cons cells
-    let list_end_idx = seg_end;
-    let mut acc = spread.unwrap_or_else(|| {
-        // Empty list with ghost location (same as OCaml's make_list_expression)
-        let ghost_loc = LocIdx::none();
-        Expression {
-            pexp_desc: ExpressionDesc::Pexp_construct(
-                Loc {
-                    txt: nil_idx,
-                    loc: ghost_loc,
-                },
-                crate::parse_arena::Located::new(crate::parse_arena::ExprList::EMPTY, ghost_loc),
-            ),
-            pexp_loc: ghost_loc,
-            pexp_attributes: Attributes::new(),
-        }
-    });
-
-    for item in exprs.into_iter().rev() {
-        // Reuse the existing PosIdx from item.pexp_loc to match OCaml's sharing
-        let item_start_idx = p.loc_start_idx(item.pexp_loc);
-        let cons_loc = p.mk_loc_idx(item_start_idx, list_end_idx);
-        let item_idx = p.arena_mut().push_expr(item);
-        let acc_idx = p.arena_mut().push_expr(acc);
-        acc = Expression {
-            pexp_desc: ExpressionDesc::Pexp_construct(
-                Loc {
-                    txt: cons_idx,
-                    loc: cons_loc,
-                },
-                p.arena_mut().expr_ctor_args(&[item_idx, acc_idx], cons_loc),
-            ),
-            pexp_loc: cons_loc,
-            pexp_attributes: Attributes::new(),
-        };
-    }
-
-    // OCaml: `{expr with pexp_loc = loc}` updates outermost expression's location
-    Expression {
-        pexp_loc: seg_loc,
-        ..acc
-    }
 }
 
 /// OCaml `parse_dict_expr` (compiler/syntax/src/res_core.ml): a dict literal

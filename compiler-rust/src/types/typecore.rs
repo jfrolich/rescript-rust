@@ -8291,6 +8291,51 @@ fn type_expect_with_recarg_unscoped<'a>(
             ))
         }
 
+        // compiler/ml/typecore.ml Pexp_spread: the literal is typed as the
+        // arrays or lists it concatenates (`Ast_spread.parts`), each against a
+        // fresh generic container of the element type, so the items keep the
+        // errors of array and list literals.
+        ED::Pexp_spread(kind, elements) => {
+            let kind = *kind;
+            let container_type = |ty| {
+                let path = match kind {
+                    crate::parser::ast::SpreadKind::Spread_array => {
+                        crate::types::predef::path_array()
+                    }
+                    crate::parser::ast::SpreadKind::Spread_list => {
+                        crate::types::predef::path_list()
+                    }
+                };
+                ctx.new_generic_predef_constr(path, vec![ty])
+            };
+            let ty = ctx.new_generic_var(None);
+            unify_expression_types(tctx, loc, container_type(ty), expected_ty, None)?;
+            let mut store = tctx.arena;
+            let sparts = crate::parser::ast_spread::parts(
+                &mut store,
+                kind,
+                tctx.arena.spread_element_list(*elements),
+            );
+            let mut parts = Vec::with_capacity(sparts.len());
+            for spart in sparts {
+                parts.push(type_expect(
+                    tctx,
+                    env,
+                    tctx.arena.get_expr(spart),
+                    container_type(ty),
+                    None,
+                )?);
+            }
+            let exp_type = crate::types::instance(ctx, expected_ty);
+            Ok(Expression::new(
+                ExpressionDesc::Texp_spread(kind, parts),
+                loc,
+                exp_type,
+                exp_env_ref,
+                expr.pexp_attributes.clone(),
+            ))
+        }
+
         // compiler/ml/typecore.ml Pexp_template: validate every segment, type
         // the values as string-concatenation operands.
         ED::Pexp_template(template) => {
@@ -12108,6 +12153,11 @@ fn collect_lident_idents_in_expression(
                         collect_lident_idents_in_expression(arena, arena.get_expr(*e), out)
                     }
                 }
+            }
+        }
+        ED::Pexp_spread(_, elements) => {
+            for element in arena.spread_element_list(*elements) {
+                collect_lident_idents_in_expression(arena, arena.get_expr(element.expr()), out);
             }
         }
         ED::Pexp_construct(_, args) => {
