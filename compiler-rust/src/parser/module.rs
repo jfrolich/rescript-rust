@@ -2200,10 +2200,14 @@ fn parse_type_declaration_body(
 
     // Parse optional manifest and/or kind (and ReScript's `type t = T = ...` equation form).
     // OCaml: if token is Bar, call expect Equal to generate "Did you forget a `=` here?" error
-    let (manifest, kind, private) =
+    let (manifest, kind, private, repr_attrs) =
         parse_type_equation_and_representation(p, inline_ctx, &current_type_name_path);
 
     let cstrs = parse_type_constraints(p);
+    // res_core.ml:6195-6196, 6246-6247: attributes in front of a record or
+    // open representation go on the declaration, after its own attributes.
+    let mut attrs = attrs;
+    attrs.extend(repr_attrs);
 
     // Use decl_start_idx for the start position to enable sharing with structure_item
     let loc = p.mk_loc_idx_to_prev_end(decl_start_idx);
@@ -2222,15 +2226,24 @@ fn parse_type_declaration_body(
 
 type TypeEquation = (Option<CoreTypeIdx>, TypeKind, PrivateFlag);
 
+/// A [`TypeEquation`] and the attributes found in front of a record or open
+/// representation, which belong to the type declaration.
+type TypeEquationAttrs = (Option<CoreTypeIdx>, TypeKind, PrivateFlag, Attributes);
+
 /// OCaml `parse_type_equation_and_representation`
-/// (compiler/syntax/src/res_core.ml:6320-6395).
+/// (compiler/syntax/src/res_core.ml:6088-6175).
 fn parse_type_equation_and_representation(
     p: &mut Parser<'_>,
     inline_ctx: Option<&RefCell<InlineTypesContext>>,
     current_type_name_path: &Vec<StrIdx>,
-) -> TypeEquation {
+) -> TypeEquationAttrs {
     if !matches!(p.token, Token::Equal | Token::Bar) {
-        return (None, TypeKind::Ptype_abstract, PrivateFlag::Public);
+        return (
+            None,
+            TypeKind::Ptype_abstract,
+            PrivateFlag::Public,
+            Attributes::new(),
+        );
     }
     if p.token == Token::Bar {
         p.expect(Token::Equal);
@@ -2239,12 +2252,18 @@ fn parse_type_equation_and_representation(
     match p.token {
         Token::Uident(_) => parse_type_equation_or_constr_decl(p),
         Token::Lbrace => {
-            parse_record_or_object_decl(p, inline_ctx, inline_ctx.map(|_| current_type_name_path))
+            let (manifest, kind, private) = parse_record_or_object_decl(
+                p,
+                inline_ctx,
+                inline_ctx.map(|_| current_type_name_path),
+            );
+            (manifest, kind, private, Attributes::new())
         }
         Token::Private => parse_private_eq_or_repr(p),
         Token::Bar | Token::DotDot | Token::DocComment { .. } => {
-            let (private, kind) = parse_type_representation(p, None, None);
-            (None, kind, private)
+            let (private, kind, attrs) =
+                parse_type_representation(p, inline_ctx, Some(current_type_name_path));
+            (None, kind, private, attrs)
         }
         Token::At => {
             // Look past the attributes (and doc comments): a representation-like
@@ -2271,8 +2290,9 @@ fn parse_type_equation_and_representation(
                 }
             });
             if is_representation_after_attrs {
-                let (private, kind) = parse_type_representation(p, None, None);
-                (None, kind, private)
+                let (private, kind, attrs) =
+                    parse_type_representation(p, inline_ctx, Some(current_type_name_path));
+                (None, kind, private, attrs)
             } else {
                 parse_manifest_and_representation(p, inline_ctx, current_type_name_path)
             }
@@ -2287,21 +2307,26 @@ fn parse_manifest_and_representation(
     p: &mut Parser<'_>,
     inline_ctx: Option<&RefCell<InlineTypesContext>>,
     current_type_name_path: &Vec<StrIdx>,
-) -> TypeEquation {
+) -> TypeEquationAttrs {
     let typ = typ::parse_typ_expr(p);
     let manifest = Some(p.arena_mut().push_core_type(typ));
     if p.token == Token::Equal {
         p.next();
-        let (private, kind) =
+        let (private, kind, attrs) =
             parse_type_representation(p, inline_ctx, Some(current_type_name_path));
-        (manifest, kind, private)
+        (manifest, kind, private, attrs)
     } else {
-        (manifest, TypeKind::Ptype_abstract, PrivateFlag::Public)
+        (
+            manifest,
+            TypeKind::Ptype_abstract,
+            PrivateFlag::Public,
+            Attributes::new(),
+        )
     }
 }
 
-/// OCaml `parse_type_equation_or_constr_decl` (res_core.ml:5822-5874).
-fn parse_type_equation_or_constr_decl(p: &mut Parser<'_>) -> TypeEquation {
+/// OCaml `parse_type_equation_or_constr_decl` (res_core.ml:5605-5651).
+fn parse_type_equation_or_constr_decl(p: &mut Parser<'_>) -> TypeEquationAttrs {
     let is_type_path = p.lookahead(|state| {
         state.next();
         state.token == Token::Dot
@@ -2311,6 +2336,7 @@ fn parse_type_equation_or_constr_decl(p: &mut Parser<'_>) -> TypeEquation {
             None,
             TypeKind::Ptype_variant(parse_constructors_without_leading_bar(p)),
             PrivateFlag::Public,
+            Attributes::new(),
         );
     }
     let uident_start_pos_idx = p.start_pos_idx();
@@ -2324,8 +2350,13 @@ fn parse_type_equation_or_constr_decl(p: &mut Parser<'_>) -> TypeEquation {
     match p.token {
         Token::Equal => {
             p.next();
-            let (private, kind) = parse_type_representation(p, None, None);
-            (Some(p.arena_mut().push_core_type(typ)), kind, private)
+            let (private, kind, attrs) = parse_type_representation(p, None, None);
+            (
+                Some(p.arena_mut().push_core_type(typ)),
+                kind,
+                private,
+                attrs,
+            )
         }
         Token::EqualGreater => {
             p.next();
@@ -2352,31 +2383,33 @@ fn parse_type_equation_or_constr_decl(p: &mut Parser<'_>) -> TypeEquation {
                 Some(p.arena_mut().push_core_type(typ)),
                 TypeKind::Ptype_abstract,
                 PrivateFlag::Public,
+                Attributes::new(),
             )
         }
         _ => (
             Some(p.arena_mut().push_core_type(typ)),
             TypeKind::Ptype_abstract,
             PrivateFlag::Public,
+            Attributes::new(),
         ),
     }
 }
 
-/// OCaml `parse_private_eq_or_repr` (res_core.ml:6081-6097).
-fn parse_private_eq_or_repr(p: &mut Parser<'_>) -> TypeEquation {
+/// OCaml `parse_private_eq_or_repr` (res_core.ml:5856-5872).
+fn parse_private_eq_or_repr(p: &mut Parser<'_>) -> TypeEquationAttrs {
     p.expect(Token::Private);
     match p.token {
         Token::Lbrace => {
             let (manifest, kind, _) = parse_record_or_object_decl(p, None, None);
-            (manifest, kind, PrivateFlag::Private)
+            (manifest, kind, PrivateFlag::Private, Attributes::new())
         }
         Token::Uident(_) => {
-            let (manifest, kind, _) = parse_type_equation_or_constr_decl(p);
-            (manifest, kind, PrivateFlag::Private)
+            let (manifest, kind, _, attrs) = parse_type_equation_or_constr_decl(p);
+            (manifest, kind, PrivateFlag::Private, attrs)
         }
         Token::Bar | Token::DotDot => {
-            let (_, kind) = parse_type_representation(p, None, None);
-            (None, kind, PrivateFlag::Private)
+            let (_, kind, attrs) = parse_type_representation(p, None, None);
+            (None, kind, PrivateFlag::Private, attrs)
         }
         ref t if grammar::is_typ_expr_start(t) => {
             let typ = typ::parse_typ_expr(p);
@@ -2384,32 +2417,34 @@ fn parse_private_eq_or_repr(p: &mut Parser<'_>) -> TypeEquation {
                 Some(p.arena_mut().push_core_type(typ)),
                 TypeKind::Ptype_abstract,
                 PrivateFlag::Private,
+                Attributes::new(),
             )
         }
         _ => {
-            let (_, kind) = parse_type_representation(p, None, None);
-            (None, kind, PrivateFlag::Private)
+            let (_, kind, attrs) = parse_type_representation(p, None, None);
+            (None, kind, PrivateFlag::Private, attrs)
         }
     }
 }
 
-/// OCaml `parse_type_representation` (res_core.ml:5640-5692).
+/// OCaml `parse_type_representation` (res_core.ml:5413-5468). Attributes
+/// and doc comments in front of a record or `..` have no node of their own:
+/// they are returned for the caller to put on the type declaration.
 fn parse_type_representation(
     p: &mut Parser<'_>,
     inline_ctx: Option<&RefCell<InlineTypesContext>>,
     current_type_name_path: Option<&Vec<StrIdx>>,
-) -> (PrivateFlag, TypeKind) {
+) -> (PrivateFlag, TypeKind, Attributes) {
     p.leave_breadcrumb(grammar::Grammar::TypeRepresentation);
     let private = if p.optional(&Token::Private) {
         PrivateFlag::Private
     } else {
         PrivateFlag::Public
     };
+    let mut attrs = Attributes::new();
     let kind = match p.token {
-        Token::Bar | Token::Uident(_) | Token::DocComment { .. } => {
-            TypeKind::Ptype_variant(parse_constructors(p))
-        }
-        Token::At => {
+        Token::Bar | Token::Uident(_) => TypeKind::Ptype_variant(parse_constructors(p)),
+        Token::At | Token::DocComment { .. } => {
             let after_attrs = p.lookahead(|state| {
                 parse_attributes(state);
                 super::core::skip_doc_comments(state);
@@ -2421,8 +2456,7 @@ fn parse_type_representation(
             });
             match after_attrs {
                 0 => {
-                    parse_attributes(p);
-                    super::core::skip_doc_comments(p);
+                    attrs = parse_attributes(p);
                     TypeKind::Ptype_record(parse_record_declaration(
                         p,
                         inline_ctx,
@@ -2430,11 +2464,11 @@ fn parse_type_representation(
                     ))
                 }
                 1 => {
-                    parse_attributes(p);
-                    super::core::skip_doc_comments(p);
+                    attrs = parse_attributes(p);
                     p.next();
                     TypeKind::Ptype_open
                 }
+                // Leave the attributes for the first constructor.
                 _ => TypeKind::Ptype_variant(parse_constructors(p)),
             }
         }
@@ -2453,7 +2487,7 @@ fn parse_type_representation(
         }
     };
     p.eat_breadcrumb();
-    (private, kind)
+    (private, kind, attrs)
 }
 
 /// OCaml `parse_type_param` (compiler/syntax/src/res_core.ml).
