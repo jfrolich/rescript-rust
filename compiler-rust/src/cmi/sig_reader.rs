@@ -48,8 +48,8 @@ pub struct SigReadContext<'a> {
     /// context exists, so an address names one block. They feed only
     /// `Includemod.is_big` (includemod_error_size.rs).
     ///
-    /// `Ident.t` blocks, each with its own [`IdentOrigin`].
-    ident_origins: AHashMap<usize, IdentOrigin>,
+    /// Retained `Ident.t` blocks, each with its own [`IdentOrigin`].
+    ident_origins: AHashMap<usize, (OcamlValue, IdentOrigin)>,
     /// `Path.t` blocks: a path read twice is one `Arc`.
     paths: AHashMap<usize, Arc<Path>>,
     /// `Pident` blocks held by `Tconstr` nodes, each its own path block.
@@ -945,11 +945,21 @@ impl<'a> SigReadContext<'a> {
             return id;
         };
         let ctx = self.ctx;
-        let origin = *self
+        let origin = self
             .ident_origins
             .entry(address)
-            .or_insert_with(|| ctx.fresh_ident_origin());
-        id.with_origin(origin)
+            .or_insert_with(|| (value.clone(), ctx.fresh_ident_origin()))
+            .1;
+        let id = id.with_origin(origin);
+        if let OcamlValue::String(name) = &value.as_block().1[1] {
+            if let Some((scope, string)) = name.allocation() {
+                ctx.record_ident_name(
+                    &id,
+                    crate::types::path_provenance::NameAllocation::Source { scope, string },
+                );
+            }
+        }
+        id
     }
 
     /// Read a Path.t.
@@ -1162,14 +1172,16 @@ impl SigReadContext<'_> {
         value: &OcamlValue,
     ) -> crate::types::asttypes::Located<String, crate::types::DeclLoc> {
         match value {
-            OcamlValue::String(name) => crate::types::asttypes::Located::noloc(name.clone()),
+            OcamlValue::String(name) => crate::types::asttypes::Located::noloc(name.to_string()),
             OcamlValue::Block(_, fields) if !fields.is_empty() => match &fields[0] {
                 // `string Asttypes.loc` = `{txt; loc}`.
                 OcamlValue::String(name) if fields.len() == 2 => crate::types::asttypes::Located {
-                    txt: name.clone(),
+                    txt: name.to_string(),
                     loc: self.read_decl_loc(&fields[1]),
                 },
-                OcamlValue::String(name) => crate::types::asttypes::Located::noloc(name.clone()),
+                OcamlValue::String(name) => {
+                    crate::types::asttypes::Located::noloc(name.to_string())
+                }
                 inner => crate::types::asttypes::Located::noloc(
                     read_first_string(inner).unwrap_or_else(|| "?".to_string()),
                 ),
@@ -1243,7 +1255,7 @@ fn read_position(ctx: &TypeContext, value: &OcamlValue) -> Position {
 
 fn read_first_string(value: &OcamlValue) -> Option<String> {
     match value {
-        OcamlValue::String(s) => Some(s.clone()),
+        OcamlValue::String(s) => Some(s.to_string()),
         OcamlValue::Block(_, fields) => fields.iter().find_map(read_first_string),
         _ => None,
     }
@@ -1341,7 +1353,7 @@ fn plain_string_payload(structure: &OcamlValue) -> Option<String> {
 fn string_literal_semantic(payload: &OcamlValue) -> Option<String> {
     match payload {
         OcamlValue::Block(0, fields) => match fields.as_ref() {
-            [OcamlValue::String(_), OcamlValue::String(semantic)] => Some(semantic.clone()),
+            [OcamlValue::String(_), OcamlValue::String(semantic)] => Some(semantic.to_string()),
             _ => None,
         },
         OcamlValue::Block(1, fields) => match fields.as_ref() {
@@ -1358,7 +1370,7 @@ fn deprecated_payload_has_migration_template(value: &OcamlValue) -> bool {
             return false;
         }
         match value {
-            OcamlValue::String(value) => value == "migrate" || value == "migrateInPipeChain",
+            OcamlValue::String(value) => matches!(value.as_str(), "migrate" | "migrateInPipeChain"),
             OcamlValue::Block(_, fields) => fields.iter().any(|field| visit(field, depth + 1)),
             _ => false,
         }
@@ -1388,7 +1400,7 @@ fn extract_ident_payload_name(structure: &OcamlValue) -> Option<String> {
                     ) =>
             {
                 match &fields[0] {
-                    OcamlValue::String(name) => Some(name.clone()),
+                    OcamlValue::String(name) => Some(name.to_string()),
                     _ => None,
                 }
             }
@@ -1603,6 +1615,55 @@ mod tests {
     }
 
     #[test]
+    fn decoded_identifier_names_keep_shared_string_tokens() {
+        use crate::cmi::marshal_reader::MarshalReader;
+        let payload = [
+            0xb0, // three identifiers
+            0xb0, 0x6a, 0x21, b'x', 0x40, // first name allocation
+            0xb0, 0x6b, 0x04, 2, 0x40, // shared name, distinct identifier
+            0xb0, 0x6c, 0x21, b'x', 0x40, // equal text, new allocation
+        ];
+        let ctx = TypeContext::new(Arc::new(crate::context::IdGenerator::new()));
+        let values = MarshalReader::new()
+            .read_value(&mut std::io::Cursor::new(payload))
+            .unwrap();
+        let mut reader = SigReadContext::new(&ctx);
+        let (_, fields) = values.as_block();
+        let a = reader.read_ident(&fields[0]);
+        let b = reader.read_ident(&fields[1]);
+        let c = reader.read_ident(&fields[2]);
+        assert_ne!(a.origin(), b.origin());
+        assert_eq!(ctx.ident_name_allocation(&a), ctx.ident_name_allocation(&b));
+        assert_ne!(ctx.ident_name_allocation(&a), ctx.ident_name_allocation(&c));
+        let renamed = ctx.rename_ident(&a);
+        assert_eq!(
+            ctx.ident_name_allocation(&a),
+            ctx.ident_name_allocation(&renamed)
+        );
+        let other_values = MarshalReader::new()
+            .read_value(&mut std::io::Cursor::new(payload))
+            .unwrap();
+        let other = reader.read_ident(&other_values.as_block().1[0]);
+        assert_ne!(
+            ctx.ident_name_allocation(&a),
+            ctx.ident_name_allocation(&other)
+        );
+        let OcamlValue::Block(_, ident_fields) = &fields[0] else {
+            unreachable!()
+        };
+        let retained = Arc::downgrade(ident_fields);
+        drop(values);
+        drop(other_values);
+        assert!(
+            retained.upgrade().is_some(),
+            "identifier address stays live"
+        );
+        drop(reader);
+        assert!(retained.upgrade().is_none());
+        assert_eq!(ctx.ident_name_allocation(&a), ctx.ident_name_allocation(&b));
+    }
+
+    #[test]
     fn decoded_identifiers_and_paths_keep_their_marshal_block_identity() {
         let ctx = TypeContext::new(Arc::new(crate::context::IdGenerator::new()));
         let mut reader = SigReadContext::new(&ctx);
@@ -1664,7 +1725,7 @@ mod tests {
             0,
             vec![block(
                 0,
-                vec![block(0, vec![OcamlValue::String(name.to_string())])],
+                vec![block(0, vec![OcamlValue::String(name.into())])],
             )],
         )
     }
@@ -1682,8 +1743,8 @@ mod tests {
                         vec![block(
                             0,
                             vec![
-                                OcamlValue::String(value.to_string()),
-                                OcamlValue::String(value.to_string()),
+                                OcamlValue::String(value.into()),
+                                OcamlValue::String(value.into()),
                             ],
                         )],
                     )],

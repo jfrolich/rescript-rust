@@ -3070,7 +3070,7 @@ fn decode_cmj_export_constants(value: &OcamlValue) -> Option<HashMap<String, Cmj
             continue;
         }
         let name = match &entry_fields[0] {
-            OcamlValue::String(name) => name.clone(),
+            OcamlValue::String(name) => name.to_string(),
             _ => continue,
         };
         let Some(constant) = decode_cmj_persistent_closed_constant(&entry_fields[2]) else {
@@ -3096,7 +3096,7 @@ fn decode_cmj_export_arities(value: &OcamlValue) -> Option<HashMap<String, CmjEx
             continue;
         }
         let name = match &entry_fields[0] {
-            OcamlValue::String(name) => name.clone(),
+            OcamlValue::String(name) => name.to_string(),
             _ => continue,
         };
         let Some(arity) = decode_cmj_export_arity(&entry_fields[1]) else {
@@ -3180,7 +3180,7 @@ fn decode_cmj_export_lambdas(value: &OcamlValue) -> Option<HashMap<String, Lambd
             continue;
         }
         let name = match &entry_fields[0] {
-            OcamlValue::String(name) => name.clone(),
+            OcamlValue::String(name) => name.to_string(),
             _ => continue,
         };
         let Some(lambda) = decode_cmj_persistent_closed_lambda(&entry_fields[2]) else {

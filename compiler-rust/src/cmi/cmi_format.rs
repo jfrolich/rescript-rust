@@ -273,7 +273,7 @@ mod tests {
 
     #[test]
     fn malformed_crcs_and_flags_are_rejected() {
-        let s = |v: &str| OcamlValue::String(v.to_string());
+        let s = |v: &str| OcamlValue::String(v.into());
         let block = |tag, fields: Vec<OcamlValue>| OcamlValue::Block(tag, fields.into());
         let cons = |head, tail| block(0, vec![head, tail]);
         let nil = OcamlValue::Int(0);

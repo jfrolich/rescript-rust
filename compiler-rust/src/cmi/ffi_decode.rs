@@ -24,7 +24,7 @@ fn list(value: &OcamlValue) -> Vec<&OcamlValue> {
 
 fn string(value: &OcamlValue) -> Option<String> {
     match value {
-        OcamlValue::String(s) => Some(s.clone()),
+        OcamlValue::String(s) => Some(s.to_string()),
         _ => None,
     }
 }

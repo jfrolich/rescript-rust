@@ -4332,7 +4332,11 @@ impl TypeContext {
         id
     }
 
-    fn record_ident_name(&self, id: &Ident, allocation: super::path_provenance::NameAllocation) {
+    pub(crate) fn record_ident_name(
+        &self,
+        id: &Ident,
+        allocation: super::path_provenance::NameAllocation,
+    ) {
         if self.in_store_build() {
             self.store.record_ident_name(id, allocation);
         } else {
