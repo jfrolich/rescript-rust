@@ -4458,6 +4458,31 @@ mod tests {
     use std::time::SystemTime;
     use tempfile::TempDir;
 
+    /// The runtime's stored interfaces are keyed by the compiler that
+    /// encoded them: another compiler's key misses them.
+    #[test]
+    fn runtime_interfaces_of_another_compiler_are_not_read() {
+        let temp_dir = TempDir::new().expect("temp dir should be created");
+        let db = temp_dir.path().join("rescript.sqlite");
+        let store = |hash: &str| RuntimeStore {
+            db: db.clone(),
+            compiler_hash: hash.to_string(),
+        };
+        let runtime_root = temp_dir.path().join("runtime");
+        fs::create_dir_all(&runtime_root).expect("runtime directory should be created");
+        let paths = vec![("Stdlib".to_string(), runtime_root.join("Stdlib.res"))];
+        let old_key = store("old").key(&runtime_root, &paths);
+        let new_key = store("new").key(&runtime_root, &paths);
+        assert_ne!(old_key, new_key);
+        super::super::state_db::write_runtime_interfaces(
+            &db,
+            &old_key,
+            &[("Stdlib".to_string(), vec![1, 2, 3])],
+        );
+        assert!(super::super::state_db::read_runtime_interfaces(&db, &old_key).is_some());
+        assert!(super::super::state_db::read_runtime_interfaces(&db, &new_key).is_none());
+    }
+
     fn test_project_context(root: &Path) -> ProjectContext {
         let config = config::tests::create_config(config::tests::CreateConfigArgs {
             name: "test-root".to_string(),
