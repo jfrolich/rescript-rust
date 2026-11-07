@@ -14,16 +14,16 @@
   Signature mismatch:
   Modules do not match:
     {
-  let o0: int
-  let f: (~k0: int=?) => int
-  let v: int
-}
+      let o0: int
+      let f: (~k0: int=?) => int
+      let v: int
+    }
   is not included in
     {
-  let o0: int
-  let f: (~k0: int=?) => int
-  let v: string
-}
+      let o0: int
+      let f: (~k0: int=?) => int
+      let v: string
+    }
   Values do not match: let v: int is not included in let v: string
   [36m/.../fixtures/module_types_printed_at_399_words.res[0m:[2m5:3-15[0m:
     Expected declaration

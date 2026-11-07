@@ -15,33 +15,33 @@
   ...
   Module type declarations do not match:
     module type S = {
-  let x0: int
-  let x1: int
-  let x2: int
-  let v: int
-}
+      let x0: int
+      let x1: int
+      let x2: int
+      let v: int
+    }
   does not match
     module type S = {
-  let x0: int
-  let x1: int
-  let x2: int
-  let v: string
-}
+      let x0: int
+      let x1: int
+      let x2: int
+      let v: string
+    }
   At position module type S = <here>
   Modules do not match:
     {
-  let x0: int
-  let x1: int
-  let x2: int
-  let v: int
-}
+      let x0: int
+      let x1: int
+      let x2: int
+      let v: int
+    }
   is not included in
     {
-  let x0: int
-  let x1: int
-  let x2: int
-  let v: string
-}
+      let x0: int
+      let x1: int
+      let x2: int
+      let v: string
+    }
   At position module type S = <here>
   Values do not match: let v: int is not included in let v: string
   [36m/.../fixtures/modtype_infos_after_elided_module_types.res[0m:[2m8:5-17[0m:

@@ -12,12 +12,12 @@
   Signature mismatch:
   Modules do not match:
     {
-  type t<'a> = 'a => unit
-}
+      type t<'a> = 'a => unit
+    }
   is not included in
     {
-  type t<+'a>
-}
+      type t<+'a>
+    }
   Type declarations do not match:
     type t<'a> = 'a => unit
   is not included in

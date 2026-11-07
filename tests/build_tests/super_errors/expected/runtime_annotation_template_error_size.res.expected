@@ -15,25 +15,25 @@
   ...
   Module type declarations do not match:
     module type T = {
-  type foo
-  let x: string
-}
+      type foo
+      let x: string
+    }
   does not match
     module type T = {
-  type foo
-  let x: int
-}
+      type foo
+      let x: int
+    }
   At position module type T = <here>
   Modules do not match:
     {
-  type foo
-  let x: string
-}
+      type foo
+      let x: string
+    }
   is not included in
     {
-  type foo
-  let x: int
-}
+      type foo
+      let x: int
+    }
   At position module type T = <here>
   Values do not match: let x: string is not included in let x: int
   [36m/.../fixtures/runtime_annotation_template_error_size.res[0m:[2m4:5-14[0m:

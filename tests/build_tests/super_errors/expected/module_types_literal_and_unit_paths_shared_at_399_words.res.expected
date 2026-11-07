@@ -12,20 +12,7 @@
   13 [2m│[0m 
 
   Signature mismatch:
-  Modules do not match:
-    {
-  let x0: int
-  type z<'a0>
-  let u0: unit
-  let v: int
-}
-  is not included in
-    {
-  let x0: int
-  type z<'a0>
-  let u0: unit
-  let v: string
-}
+  ...
   Values do not match: let v: int is not included in let v: string
   [36m/.../fixtures/module_types_literal_and_unit_paths_shared_at_399_words.res[0m:[2m6:3-15[0m:
     Expected declaration

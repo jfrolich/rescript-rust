@@ -951,6 +951,7 @@ and tree_of_label ?printing_context l =
     | _ -> l.ld_type
   in
   ( Ident.name l.ld_id,
+    l.ld_runtime_name,
     l.ld_mutable = Mutable,
     opt,
     tree_of_typexp ?printing_context false typ )
@@ -1704,6 +1705,13 @@ let print_record_field_subtype_violation ppf
     fprintf ppf
       "The field @{<info>%s@} is missing in record @{<info>%s@}, but present \
        in record @{<info>%s@}"
+      label
+      (Path.name right_record_name)
+      (Path.name left_record_name)
+  | Mutable_mismatch {label} ->
+    fprintf ppf
+      "The field @{<info>%s@} is mutable in record @{<info>%s@}, but not in \
+       record @{<info>%s@}. A coercion can't make a field writable."
       label
       (Path.name right_record_name)
       (Path.name left_record_name)

@@ -6,12 +6,12 @@ We've found a bug for you!
   In module Inner:
   Modules do not match:
     {
-  let value: string
-}
+      let value: string
+    }
   is not included in
     {
-  let value: int
-}
+      let value: int
+    }
   In module Inner:
   Values do not match: let value: string is not included in let value: int
   /.../fixtures/Iface_module_types/Foo.resi:2:3-16:

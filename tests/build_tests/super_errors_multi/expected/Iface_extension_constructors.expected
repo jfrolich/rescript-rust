@@ -4,9 +4,9 @@ We've found a bug for you!
   The implementation /.../fixtures/Iface_extension_constructors/Foo.res
   does not match the interface /.../fixtures/Iface_extension_constructors/Foo.resi:
   Extension declarations do not match:
-    type t +=  Boom(string)
+    type t += Boom(string)
   is not included in
-    type t +=  Boom(int)
+    type t += Boom(int)
   /.../fixtures/Iface_extension_constructors/Foo.res:
     Expected declaration
   /.../fixtures/Iface_extension_constructors/Foo.res:4:3-16:
