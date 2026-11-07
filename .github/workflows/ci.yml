@@ -214,7 +214,7 @@ jobs:
 
       - name: "Syntax: Run tests"
         env:
-          ROUNDTRIP_TEST: ${{ runner.os == 'Windows' && '0' || '1' }}
+          ROUNDTRIP_TEST: 1
         run: ./scripts/test_syntax.sh
         shell: bash
 
@@ -632,6 +632,10 @@ jobs:
           fi
           echo "path=$dir" >> "$GITHUB_OUTPUT"
           cp -r tests/package_tests/installation_test/* "$dir"
+          # The compiled stdlib tests run against the installed runtime. Their
+          # Test.mjs imports @babel/code-frame, which tests/tests depends on.
+          cp -r tests/tests/src/stdlib "$dir/stdlib"
+          echo "code-frame=$(node -p 'require("./tests/tests/package.json").dependencies["@babel/code-frame"]')" >> "$GITHUB_OUTPUT"
 
       - name: Install ReScript package
         run: |
@@ -639,7 +643,8 @@ jobs:
           npm i --no-audit \
             "https://pkg.pr.new/rescript-lang/rescript@${COMMIT_SHA}" \
             "https://pkg.pr.new/rescript-lang/rescript/@rescript/runtime@${COMMIT_SHA}" \
-            "https://pkg.pr.new/rescript-lang/rescript/@rescript/belt@${COMMIT_SHA}"
+            "https://pkg.pr.new/rescript-lang/rescript/@rescript/belt@${COMMIT_SHA}" \
+            "@babel/code-frame@${{ steps.tmp-dir.outputs.code-frame }}"
         shell: bash
         working-directory: ${{ steps.tmp-dir.outputs.path }}
 
@@ -660,6 +665,16 @@ jobs:
 
       - name: Test packaged CLI subcommands and watch shutdown
         run: node packaged-cli-smoke.mjs
+        shell: bash
+        working-directory: ${{ steps.tmp-dir.outputs.path }}
+
+      # build-compiler runs the stdlib tests on the Node.js version in .nvmrc,
+      # this job on the oldest supported one, so tests of APIs missing there
+      # must stay out of Stdlib_TestSuite and Stdlib_TempTests.
+      - name: Run stdlib tests
+        run: |
+          node stdlib/Stdlib_TestSuite.mjs
+          node stdlib/Stdlib_TempTests.mjs
         shell: bash
         working-directory: ${{ steps.tmp-dir.outputs.path }}
 
@@ -702,6 +717,10 @@ jobs:
           fi
           echo "path=$dir" >> "$GITHUB_OUTPUT"
           cp -r tests/package_tests/installation_test/* "$dir"
+          # The compiled stdlib tests run against the installed runtime. Their
+          # Test.mjs imports @babel/code-frame, which tests/tests depends on.
+          cp -r tests/tests/src/stdlib "$dir/stdlib"
+          echo "code-frame=$(node -p 'require("./tests/tests/package.json").dependencies["@babel/code-frame"]')" >> "$GITHUB_OUTPUT"
 
       - name: Install ReScript package
         run: |
@@ -710,7 +729,8 @@ jobs:
           pnpm --config.block-exotic-subdeps=false i \
             "https://pkg.pr.new/rescript-lang/rescript@${COMMIT_SHA}" \
             "https://pkg.pr.new/rescript-lang/rescript/@rescript/runtime@${COMMIT_SHA}" \
-            "https://pkg.pr.new/rescript-lang/rescript/@rescript/belt@${COMMIT_SHA}"
+            "https://pkg.pr.new/rescript-lang/rescript/@rescript/belt@${COMMIT_SHA}" \
+            "@babel/code-frame@${{ steps.tmp-dir.outputs.code-frame }}"
         shell: bash
         working-directory: ${{ steps.tmp-dir.outputs.path }}
 
@@ -726,6 +746,16 @@ jobs:
           cp rescript-with-belt.json rescript.json
           pnpm rescript build
           node src/BeltTest.mjs
+        shell: bash
+        working-directory: ${{ steps.tmp-dir.outputs.path }}
+
+      # build-compiler runs the stdlib tests on the Node.js version in .nvmrc,
+      # this job on the oldest supported one, so tests of APIs missing there
+      # must stay out of Stdlib_TestSuite and Stdlib_TempTests.
+      - name: Run stdlib tests
+        run: |
+          node stdlib/Stdlib_TestSuite.mjs
+          node stdlib/Stdlib_TempTests.mjs
         shell: bash
         working-directory: ${{ steps.tmp-dir.outputs.path }}
 
