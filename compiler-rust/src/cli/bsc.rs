@@ -654,6 +654,7 @@ fn compile_in_process(
     // warnings belong to the interface compile, so they are not printed.
     let interface_path = source_path.with_extension("resi");
     let has_interface = opts.read_cmi && interface_path.is_file();
+    let mut gentype_interface = None;
     if has_interface {
         let bytes = fs::read(&interface_path)
             .with_context(|| format!("Failed to read {}", interface_path.display()))?;
@@ -668,6 +669,7 @@ fn compile_in_process(
             &interface_options,
             &registry,
         )?;
+        gentype_interface = interface.gentype;
         if let Some(pers_struct) = interface.pers_struct {
             registry.register_module_arc(
                 &module_name,
@@ -719,12 +721,17 @@ fn compile_in_process(
         &options,
         &registry,
         has_interface,
+        gentype_interface,
     )?;
     eprint!("{}", result.warnings);
     // OCaml prints the requested dumps and still emits the JavaScript.
     print_dumps(&result.dumps);
     if targets.is_empty() {
         print!("{}", result.js_output);
+        print!(
+            "{}",
+            crate::driver::apply_gentype_outcome(result.gentype, "", &filename)?
+        );
         return Ok(());
     }
     for output in &result.js_outputs {
@@ -733,6 +740,10 @@ fn compile_in_process(
         }
         fs::write(&output.path, &output.code)?;
     }
+    print!(
+        "{}",
+        crate::driver::apply_gentype_outcome(result.gentype, "", &filename)?
+    );
     Ok(())
 }
 

@@ -23,6 +23,9 @@ pub struct TypeEnv {
     pub parent: Option<T>,
     pub type_equations: StringMap<Type>,
     pub current_module_names: Vec<String>,
+    /// The warnings of the translation this environment belongs to, shared
+    /// by the whole tree.
+    pub notes: Rc<crate::gentype::log_::Notes>,
 }
 
 #[derive(Debug, Clone)]
@@ -40,6 +43,10 @@ pub fn create_type_env(name: &str, parent: Option<T>) -> T {
         .as_ref()
         .map(|parent| parent.borrow().current_module_names.clone())
         .unwrap_or_default();
+    let notes = parent
+        .as_ref()
+        .map(|parent| parent.borrow().notes.clone())
+        .unwrap_or_default();
     Rc::new(RefCell::new(TypeEnv {
         map: StringMap::new(),
         map_module_types: StringMap::new(),
@@ -49,12 +56,18 @@ pub fn create_type_env(name: &str, parent: Option<T>) -> T {
         parent,
         type_equations: StringMap::new(),
         current_module_names,
+        notes,
     }))
 }
 
 pub fn root() -> T {
     // Mirrors compiler/gentype/TypeEnv.ml:29.
     create_type_env("__root__", None)
+}
+
+/// The warnings sink of `type_env`'s translation.
+pub fn notes(type_env: &T) -> Rc<crate::gentype::log_::Notes> {
+    type_env.borrow().notes.clone()
 }
 
 pub fn root_for_current_module_names(module_names: Vec<String>) -> T {

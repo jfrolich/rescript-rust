@@ -127,11 +127,12 @@ fn create_variant_case(tag: &crate::types::VariantLiteralTag) -> VariantCase {
 
 pub fn rename_record_field(
     arena: &ParseArena,
+    notes: &crate::gentype::log_::Notes,
     attributes: &Attributes,
     name: &str,
 ) -> crate::gentype::annotation::Read<String> {
     // Mirrors compiler/gentype/TranslateTypeDeclarations.ml:39-53.
-    crate::gentype::annotation::check_unsupported_gentype_as_renaming(arena, attributes)?;
+    crate::gentype::annotation::check_unsupported_gentype_as_renaming(arena, notes, attributes)?;
     Ok(
         match crate::gentype::annotation::get_as_string(arena, attributes)? {
             Some(s) => crate::string_literal::ocaml_escaped(&s),
@@ -144,11 +145,15 @@ pub fn rename_record_field(
 /// carries its runtime name; only the renaming that reaches gentype through
 /// an expression's attributes still has to be read off one.
 pub fn declared_field_name(
-    locs: &dyn crate::types::DeclLocs,
+    ctx: &crate::types::context::TypeContext,
+    arena: &ParseArena,
+    notes: &crate::gentype::log_::Notes,
     ld: &LabelDeclaration,
 ) -> crate::gentype::annotation::Read<String> {
     crate::gentype::annotation::check_unsupported_decl_gentype_as_renaming(
-        locs,
+        ctx,
+        arena,
+        notes,
         &ld.ld_attributes,
     )?;
     Ok(match &ld.ld_runtime_name {
@@ -174,8 +179,13 @@ pub fn traslate_declaration_kind(
 ) -> crate::gentype::annotation::Read<Vec<code_item::TypeDeclaration>> {
     // Mirrors compiler/gentype/TranslateTypeDeclarations.ml:54-321.
     let doc_string = crate::gentype::annotation::doc_string_from_attrs(arena, type_attributes)?;
-    let annotation =
-        crate::gentype::annotation::from_attributes(arena, config, loc_idx, type_attributes)?;
+    let annotation = crate::gentype::annotation::from_attributes(
+        arena,
+        config,
+        &crate::gentype::type_env::notes(type_env),
+        loc_idx,
+        type_attributes,
+    )?;
     let opaque = match annotation == crate::gentype::annotation::T::GenTypeOpaque {
         true => Some(true),
         false => None,
@@ -210,6 +220,7 @@ pub fn traslate_declaration_kind_from_decl_attributes(
     arena: &ParseArena,
     config: &crate::gentype::config::T,
     loc: Location,
+    loc_file: &str,
     output_file_relative: &str,
     resolver: &crate::gentype::module_resolver::Resolver,
     type_attributes: &[DeclAttribute],
@@ -224,8 +235,13 @@ pub fn traslate_declaration_kind_from_decl_attributes(
     // been converted out of parser payloads, so compute the same annotation
     // facts from decl::Attribute instead of using an empty parser attribute set.
     let doc_string = crate::gentype::annotation::doc_string_from_decl_attrs(type_attributes)?;
-    let annotation =
-        crate::gentype::annotation::from_decl_attributes(config, &loc, type_attributes)?;
+    let annotation = crate::gentype::annotation::from_decl_attributes(
+        config,
+        &crate::gentype::type_env::notes(type_env),
+        loc_file,
+        &loc,
+        type_attributes,
+    )?;
     let opaque = match annotation == crate::gentype::annotation::T::GenTypeOpaque {
         true => Some(true),
         false => None,
@@ -665,7 +681,7 @@ pub fn translate_type_declarations(
 
 fn translate_label_declarations(
     ctx: &crate::types::context::TypeContext,
-    _arena: &ParseArena,
+    arena: &ParseArena,
     config: &crate::gentype::config::T,
     type_env: &crate::gentype::type_env::T,
     inline: bool,
@@ -673,11 +689,12 @@ fn translate_label_declarations(
     label_declarations: &[LabelDeclaration],
 ) -> crate::gentype::annotation::Read<crate::gentype::translate_type_expr_from_types::Translation> {
     // Mirrors compiler/gentype/TranslateTypeDeclarations.ml:91-143.
+    let notes = crate::gentype::type_env::notes(type_env);
     let field_translations = label_declarations
         .iter()
         .map(|label_declaration| {
             let attributes = &label_declaration.ld_attributes;
-            let name = declared_field_name(ctx, label_declaration)?;
+            let name = declared_field_name(ctx, arena, &notes, label_declaration)?;
             let mutable_ = match label_declaration.ld_mutable {
                 MutableFlag::Mutable => Mutable::Mutable,
                 MutableFlag::Immutable => Mutable::Immutable,

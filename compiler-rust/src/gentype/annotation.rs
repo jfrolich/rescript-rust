@@ -192,28 +192,56 @@ pub fn get_gentype_as_renaming(
     )
 }
 
-fn warn_gentype_as_renaming(loc: &Location) {
+const GENTYPE_AS_RENAMING: &str =
+    "\n@genType.as is not supported anymore in type definitions. Use @as from the language.";
+
+/// The file a parsed location is in, as Location.get_pos_info names it.
+pub fn parsed_file(arena: &ParseArena, loc: &Location) -> String {
+    arena.get_string(loc.loc_start.file_name).to_string()
+}
+
+/// The file a declaration location is in: the compiling unit's own (a
+/// source or compilation-local location, whose file name is in `arena`), or
+/// another unit's, named by the context's file table.
+pub fn decl_file(
+    ctx: &crate::types::context::TypeContext,
+    arena: &ParseArena,
+    loc: crate::types::DeclLoc,
+) -> String {
+    use crate::types::decl_loc::DeclLocKind;
+    let resolved = ctx.resolve_loc(loc);
+    if resolved.is_none() {
+        return String::new();
+    }
+    match loc.kind() {
+        DeclLocKind::Source | DeclLocKind::Local => parsed_file(arena, &resolved),
+        _ => ctx
+            .resolve_cmi_longident_component(resolved.loc_start.file_name)
+            .unwrap_or_default(),
+    }
+}
+
+fn warn_gentype_as_renaming(notes: &crate::gentype::log_::Notes, arena: &ParseArena, loc: LocIdx) {
     // Mirrors compiler/gentype/Annotation.ml:106-121.
-    crate::gentype::log_::color::setup();
-    crate::gentype::log_::info(
-        || {
-            "\n@genType.as is not supported anymore in type definitions. Use @as from the language."
-                .to_string()
-        },
-        loc,
+    let loc = arena.to_location(loc);
+    notes.info(
+        &parsed_file(arena, &loc),
+        &loc,
         "Warning genType",
+        GENTYPE_AS_RENAMING,
     );
 }
 
 pub fn check_unsupported_gentype_as_renaming(
     arena: &ParseArena,
+    notes: &crate::gentype::log_::Notes,
     attributes: &Attributes,
 ) -> Read<()> {
     match get_attribute_payload(arena, tag_is_gentype_as, attributes)? {
-        Some((loc, _)) => warn_gentype_as_renaming(&arena.to_location(loc)),
+        Some((loc, _)) => warn_gentype_as_renaming(notes, arena, loc),
         None => {
             if let Some((loc, _)) = get_attribute_payload(arena, tag_is_gentype, attributes)? {
-                warn_gentype_as_renaming(&arena.to_location(loc));
+                warn_gentype_as_renaming(notes, arena, loc);
             }
         }
     }
@@ -285,6 +313,7 @@ pub fn has_attribute(
 pub fn from_attributes(
     arena: &ParseArena,
     config: &crate::gentype::config::T,
+    notes: &crate::gentype::log_::Notes,
     loc: LocIdx,
     attributes: &Attributes,
 ) -> Read<T> {
@@ -304,12 +333,12 @@ pub fn from_attributes(
             match get_attribute_payload(arena, tag_is_gentype, attributes)? {
                 Some((_, AttributePayload::UnrecognizedPayload)) | None => {}
                 Some(_) => {
-                    crate::gentype::log_::color::setup();
                     let location = arena.to_location(loc);
-                    crate::gentype::log_::info(
-                        || "Annotation payload is ignored".to_string(),
+                    notes.info(
+                        &parsed_file(arena, &location),
                         &location,
                         "Warning genType",
+                        "Annotation payload is ignored",
                     );
                 }
             }
@@ -668,20 +697,10 @@ pub fn get_decl_attribute_import_renaming(
     })
 }
 
-fn warn_gentype_as_renaming_decl(loc: &Location) {
-    crate::gentype::log_::color::setup();
-    crate::gentype::log_::info(
-        || {
-            "\n@genType.as is not supported anymore in type definitions. Use @as from the language."
-                .to_string()
-        },
-        loc,
-        "Warning genType",
-    );
-}
-
 pub fn check_unsupported_decl_gentype_as_renaming(
-    locs: &dyn crate::types::DeclLocs,
+    ctx: &crate::types::context::TypeContext,
+    arena: &ParseArena,
+    notes: &crate::gentype::log_::Notes,
     attributes: &[crate::types::decl::Attribute],
 ) -> Read<()> {
     // Annotation.ml:107-121: `get_attribute_payload tag_is_gentype_as`, then
@@ -691,13 +710,21 @@ pub fn check_unsupported_decl_gentype_as_renaming(
         None => find_decl_attribute(tag_is_gentype, attributes)?,
     };
     if let Some(attribute) = attribute {
-        warn_gentype_as_renaming_decl(&locs.resolve_loc(attribute.attr_loc));
+        let loc = ctx.resolve_loc(attribute.attr_loc);
+        notes.info(
+            &decl_file(ctx, arena, attribute.attr_loc),
+            &loc,
+            "Warning genType",
+            GENTYPE_AS_RENAMING,
+        );
     }
     Ok(())
 }
 
 pub fn from_decl_attributes(
     config: &crate::gentype::config::T,
+    notes: &crate::gentype::log_::Notes,
+    file: &str,
     loc: &Location,
     attributes: &[crate::types::decl::Attribute],
 ) -> Read<T> {
@@ -713,11 +740,11 @@ pub fn from_decl_attributes(
         if let Some(payload) = get_decl_attribute_payload(tag_is_gentype, attributes)?
             && !decl_attribute_payload_is_empty(payload)
         {
-            crate::gentype::log_::color::setup();
-            crate::gentype::log_::info(
-                || "Annotation payload is ignored".to_string(),
+            notes.info(
+                file,
                 loc,
                 "Warning genType",
+                "Annotation payload is ignored",
             );
         }
         T::GenType

@@ -17,22 +17,67 @@ use crate::types::typedtree::{
 /// importing module's output needs them (EmitJs.ml:437-453), so an invalid
 /// string escape (Ast_payload.ml:39-51) in them fails that importer's
 /// compile, not the declaring module's.
-type InProcessTypeDeclarations = Result<crate::gentype::code_item::TypeDeclarations, String>;
-
-/// Why GenType fails a compile: an I/O error, or the report of an exception
-/// OCaml GenType leaves uncaught, so bsc fails with it (an invalid string
-/// escape in an annotation payload, Ast_payload.ml:39-51).
-#[derive(Debug)]
-pub enum Error {
-    /// Reading or writing the generated file failed.
-    Io(std::io::Error),
-    /// The compiler error report of the exception GenType raised.
-    Raised(String),
+/// The warnings their translation prints go with them: an importer that
+/// reads them prints them (they are not printed when nothing reads them).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct InProcessTypeDeclarations {
+    notes: Vec<String>,
+    result: Result<crate::gentype::code_item::TypeDeclarations, String>,
 }
 
-impl From<std::io::Error> for Error {
-    fn from(error: std::io::Error) -> Self {
-        Error::Io(error)
+/// What GenType does for a compile. OCaml runs GenType after the unit's
+/// JavaScript is written (js_implementation.ml:164-171), so the compile
+/// computes this where it has the typed tree and applies it after writing
+/// the JavaScript; a compile that fails before then never applies it.
+#[derive(Debug, Clone)]
+pub struct Outcome {
+    /// The genType warnings the run prints (Log_.ml:99-104), in order.
+    pub notes: Vec<String>,
+    /// The generated file's action, or the report of the exception GenType
+    /// raises after printing `notes`, which fails the compile (an invalid
+    /// string escape in an annotation payload, Ast_payload.ml:39-51).
+    pub result: Result<Option<Output>, String>,
+}
+
+impl Default for Outcome {
+    /// Nothing to print or write.
+    fn default() -> Self {
+        Outcome {
+            notes: Vec::new(),
+            result: Ok(None),
+        }
+    }
+}
+
+impl Outcome {
+    fn raised(report: String) -> Self {
+        Outcome {
+            notes: Vec::new(),
+            result: Err(report),
+        }
+    }
+
+    /// `result`, after the warnings `notes` collected.
+    fn after(notes: &crate::gentype::log_::Notes, result: Result<Output, String>) -> Self {
+        Outcome {
+            notes: notes.take(),
+            result: result.map(Some),
+        }
+    }
+
+    /// Write the file. Returns the text GenType prints (its notes), then
+    /// `Err(report)` when it raised after printing them. The caller prints
+    /// the text where the compile's output goes.
+    pub fn apply(self) -> std::io::Result<(String, Result<(), String>)> {
+        let printed = self.notes.concat();
+        Ok(match self.result {
+            Ok(Some(output)) => {
+                output.apply()?;
+                (printed, Ok(()))
+            }
+            Ok(None) => (printed, Ok(())),
+            Err(report) => (printed, Err(report)),
+        })
     }
 }
 
@@ -307,12 +352,14 @@ pub fn translate_typed_artifact(
     config: &crate::gentype::config::T,
     output_file_relative: &str,
     resolver: &crate::gentype::module_resolver::Resolver,
+    notes: &std::rc::Rc<crate::gentype::log_::Notes>,
     artifact: &TypedArtifact<'_>,
 ) -> crate::gentype::annotation::Read<crate::gentype::translation::T> {
     // Mirrors compiler/gentype/GenTypeMain.ml:53-70 for in-memory artifacts.
     let type_env = crate::gentype::type_env::root_for_current_module_names(
         current_module_names_for_typed_artifact(artifact),
     );
+    type_env.borrow_mut().notes = notes.clone();
     let translations = match artifact.annots {
         TypedArtifactAnnots::Implementation(structure) => {
             crate::gentype::translate_structure::translate_structure(
@@ -386,6 +433,7 @@ pub fn typed_artifact_translate_type_declarations(
     config: &crate::gentype::config::T,
     output_file_relative: &str,
     resolver: &crate::gentype::module_resolver::Resolver,
+    notes: &std::rc::Rc<crate::gentype::log_::Notes>,
     artifact: &TypedArtifact<'_>,
 ) -> crate::gentype::annotation::Read<crate::gentype::translation::T> {
     // Mirrors compiler/gentype/GenTypeMain.ml:26-52 for Rust's in-process
@@ -393,6 +441,7 @@ pub fn typed_artifact_translate_type_declarations(
     // Rust already has the typed artifact here, so cache the same declaration
     // translation under the CMT path before EmitJs asks for it recursively.
     let type_env = crate::gentype::type_env::root();
+    type_env.borrow_mut().notes = notes.clone();
     let translations = match artifact.annots {
         TypedArtifactAnnots::Implementation(structure) => structure
             .str_items
@@ -441,6 +490,7 @@ pub fn typed_artifact_translate_type_declarations(
 }
 
 pub fn input_cmt_translate_type_declarations(
+    notes: &crate::gentype::log_::Notes,
     _config: &mut crate::gentype::config::T,
     _output_file_relative: &str,
     _resolver: &crate::gentype::module_resolver::Resolver,
@@ -448,27 +498,38 @@ pub fn input_cmt_translate_type_declarations(
 ) -> Result<std::sync::Arc<crate::gentype::code_item::TypeDeclarations>, String> {
     // This is the Rust callback boundary used by emit_js.rs for
     // compiler/gentype/EmitJs.ml:449-453: the declarations are translated
-    // here in OCaml, so an exception their translation raised is raised here.
+    // here in OCaml, so the warnings their translation prints are printed,
+    // and an exception it raised is raised, here.
     match lookup_in_process_type_declarations(cmt_file) {
-        Some(type_declarations) => type_declarations.map(std::sync::Arc::new),
+        Some(InProcessTypeDeclarations {
+            notes: translation_notes,
+            result,
+        }) => {
+            notes.extend(translation_notes);
+            result.map(std::sync::Arc::new)
+        }
         None => read_cmt(cmt_file),
     }
 }
 
-pub fn emit_translation(
+/// The generated file's contents, or the report of the exception emitting
+/// raised (an imported module's declarations, `InProcessTypeDeclarations`).
+#[allow(clippy::too_many_arguments)]
+pub fn emit_translation_contents(
     locs: &dyn crate::types::DeclLocs,
+    notes: &crate::gentype::emit_js::EmitNotes<'_>,
     config: &mut crate::gentype::config::T,
     file_name: &crate::gentype::module_name::T,
-    output_file: &str,
     output_file_relative: &str,
     resolver: &crate::gentype::module_resolver::Resolver,
     get_cmt_file: &crate::gentype::emit_js::GetCmtFile<'_>,
     source_file: &str,
     translation: &crate::gentype::translation::T,
-) -> Result<(), Error> {
-    // Mirrors compiler/gentype/GenTypeMain.ml:72-83.
+) -> Result<String, String> {
+    // Mirrors compiler/gentype/GenTypeMain.ml:72-83, up to the write.
     let code_text = crate::gentype::emit_js::emit_translation_as_string(
         locs,
+        notes,
         config,
         file_name,
         get_cmt_file,
@@ -476,8 +537,7 @@ pub fn emit_translation(
         output_file_relative,
         resolver,
         translation,
-    )
-    .map_err(Error::Raised)?;
+    )?;
     let source_file = Path::new(source_file)
         .file_name()
         .and_then(|s| s.to_str())
@@ -486,15 +546,11 @@ pub fn emit_translation(
     // `char` per source byte; OCaml writes those bytes unchanged, so turn
     // them back into the UTF-8 they spell.
     let code_text = crate::source_text::decode_internal_utf8_runs(&code_text);
-    let file_contents = format!(
+    Ok(format!(
         "{}\n{}\n",
         crate::gentype::emit_type::file_header(source_file),
         code_text
-    );
-    Ok(crate::gentype::generated_files::write_file_if_required(
-        output_file,
-        &file_contents,
-    )?)
+    ))
 }
 
 fn read_cmt(cmt_file: &str) -> ! {
@@ -525,16 +581,88 @@ fn read_cmt(cmt_file: &str) -> ! {
     }
 }
 
-pub fn process_typed_artifact(
+/// What GenType does with a typed artifact's generated file
+/// (GenTypeMain.ml:165-175).
+#[derive(Debug, Clone)]
+pub enum Output {
+    /// Write `contents` unless the file already has them.
+    Write {
+        output_file: String,
+        contents: String,
+    },
+    /// The artifact has type errors: log, keep the file.
+    TypeError { output_file: String },
+    /// No annotations: log and remove the file.
+    NoMatch { output_file: String },
+}
+
+impl Output {
+    fn apply(self) -> std::io::Result<()> {
+        match self {
+            Output::Write {
+                output_file,
+                contents,
+            } => crate::gentype::generated_files::write_file_if_required(&output_file, &contents),
+            Output::TypeError { output_file } => {
+                crate::gentype::generated_files::log_file_action(
+                    crate::gentype::generated_files::FileAction::TypeError,
+                    &output_file,
+                );
+                Ok(())
+            }
+            Output::NoMatch { output_file } => {
+                crate::gentype::generated_files::log_file_action(
+                    crate::gentype::generated_files::FileAction::NoMatch,
+                    &output_file,
+                );
+                if Path::new(&output_file).exists() {
+                    std::fs::remove_file(&output_file)?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+/// GenType's reading of a module's interface (GenTypeMain.ml:91-107). OCaml
+/// reads it in the implementation's compile, where `Paths.get_cmt_file`
+/// selects the `.cmti` (an interface compile's `.cmti` selects nothing,
+/// Paths.ml:59-85), so nothing here is raised or written: the
+/// implementation's compile does that, in OCaml's order
+/// ([`process_implementation_with_interface`]).
+#[derive(Debug, Clone)]
+pub enum InterfaceRead {
+    /// Only the type declarations were registered (`declarations_only`).
+    DeclarationsOnly,
+    /// The report of the exception the annotation walk raised.
+    Raised(String),
+    Read {
+        /// `@genType.ignoreInterface` seen by the walk, which stops at the
+        /// first annotated item.
+        ignore_interface: bool,
+        /// The interface's output, planned when the walk did not select
+        /// the implementation: what to write, or the report of the
+        /// exception translating or emitting raised. `None` when the walk
+        /// selected the implementation, or when the caller read only the
+        /// interface's source (whose output is then not this compile's).
+        output: Option<Outcome>,
+    },
+}
+
+/// The paths and resolver GenType derives for one typed artifact
+/// (GenTypeMain.ml:136-163).
+struct Prepared {
+    source_file: String,
+    output_file: String,
+    output_file_relative: String,
+    local_resolver: Option<crate::gentype::module_resolver::Resolver>,
+}
+
+fn prepare(
     config: &crate::gentype::config::T,
     shared_resolver: Option<&crate::gentype::module_resolver::Resolver>,
-    artifact: TypedArtifact<'_>,
-) -> Result<(), Error> {
-    // Mirrors compiler/gentype/GenTypeMain.ml:136-175, but starts from the
-    // typedtree already produced in-process instead of re-reading a .cmt/.cmti.
-    // The OCaml call site is compiler/core/js_implementation.ml:33-34 and
-    // compiler/core/js_implementation.ml:170 after Typemod saved the CMT at
-    // compiler/ml/typemod.ml:1763-1764 or compiler/ml/typemod.ml:1785-1787.
+    artifact: &TypedArtifact<'_>,
+) -> Prepared {
     if crate::gentype::debug::basic.load(std::sync::atomic::Ordering::Relaxed) {
         crate::gentype::log_::item(&format!(
             "Typed artifact {}\n",
@@ -564,18 +692,31 @@ pub fn process_typed_artifact(
             |fname| fname == "React.res" || fname == "ReasonReact.res",
         )
     });
-    let resolver = shared_resolver
-        .or(local_resolver.as_ref())
-        .expect("GenType resolver must be available");
-    let raised = |escape| Error::Raised((artifact.render_escape)(escape));
-    // An exception here is raised where OCaml translates these declarations:
-    // in an importer's EmitJs (see `InProcessTypeDeclarations`), or in this
-    // module's own translation below.
-    let type_declarations = typed_artifact_translate_type_declarations(
+    Prepared {
+        source_file,
+        output_file,
+        output_file_relative,
+        local_resolver,
+    }
+}
+
+/// Register the artifact's type declarations for importers. An exception
+/// their translation raises is raised where OCaml translates them: in an
+/// importer's EmitJs (see `InProcessTypeDeclarations`), or in this module's
+/// own translation.
+fn register_type_declarations(
+    config: &crate::gentype::config::T,
+    prepared: &Prepared,
+    resolver: &crate::gentype::module_resolver::Resolver,
+    artifact: &TypedArtifact<'_>,
+) {
+    let notes = std::rc::Rc::new(crate::gentype::log_::Notes::default());
+    let result = typed_artifact_translate_type_declarations(
         config,
-        &output_file_relative,
+        &prepared.output_file_relative,
         resolver,
-        &artifact,
+        &notes,
+        artifact,
     )
     .map(|translation| {
         crate::gentype::code_item::TypeDeclarations::portable(
@@ -584,7 +725,12 @@ pub fn process_typed_artifact(
         )
     })
     .map_err(artifact.render_escape);
-    if let Some(cmt_file) = cmt_file_for_typed_artifact(config, &source_file, artifact.is_interface)
+    let type_declarations = InProcessTypeDeclarations {
+        notes: notes.take(),
+        result,
+    };
+    if let Some(cmt_file) =
+        cmt_file_for_typed_artifact(config, &prepared.source_file, artifact.is_interface)
     {
         register_in_process_type_declarations(
             &artifact.compiler_module_name,
@@ -592,56 +738,230 @@ pub fn process_typed_artifact(
             type_declarations,
         );
     }
-    if artifact.declarations_only {
-        return Ok(());
-    }
-    let has_gentype_annotations = typed_artifact_check_annotations(
-        &|arena, _loc, attributes| {
-            crate::gentype::annotation::get_attribute_payload(
-                arena,
-                crate::gentype::annotation::tag_is_one_of_the_gentype_annotations,
-                attributes,
-            )
-            .map(|payload| payload.is_some())
-        },
-        &artifact,
-    )
-    .map_err(raised)?;
+}
+
+/// GenTypeMain.ml:165-175 up to the write: the output of an artifact whose
+/// annotation walk found `has_gentype_annotations`.
+fn plan_output(
+    config: &crate::gentype::config::T,
+    prepared: &Prepared,
+    resolver: &crate::gentype::module_resolver::Resolver,
+    artifact: &TypedArtifact<'_>,
+    notes: &std::rc::Rc<crate::gentype::log_::Notes>,
+    has_gentype_annotations: bool,
+) -> Result<Output, String> {
+    let output_file = prepared.output_file.clone();
     if has_gentype_annotations {
-        let translation =
-            translate_typed_artifact(config, &output_file_relative, resolver, &artifact)
-                .map_err(raised)?;
+        let translation = translate_typed_artifact(
+            config,
+            &prepared.output_file_relative,
+            resolver,
+            notes,
+            artifact,
+        )
+        .map_err(artifact.render_escape)?;
+        let decl_file = |loc: crate::types::DeclLoc| {
+            crate::gentype::annotation::decl_file(artifact.ctx, artifact.arena, loc)
+        };
+        let emit_notes = crate::gentype::emit_js::EmitNotes {
+            notes,
+            file: &decl_file,
+        };
         let project_root = config.project_root.clone();
         let get_cmt_file = |cmt: &str| get_cmt_file_for_typed_artifact_import(&project_root, cmt);
         // Only emitting mutates the config; modules without GenType
         // annotations skip the copy.
         let mut config = config.clone();
-        emit_translation(
+        let contents = emit_translation_contents(
             artifact.ctx,
+            &emit_notes,
             &mut config,
             &artifact.file_name,
-            &output_file,
-            &output_file_relative,
+            &prepared.output_file_relative,
             resolver,
             &get_cmt_file,
-            &source_file,
+            &prepared.source_file,
             &translation,
         )?;
-    } else if typed_artifact_has_type_errors(&artifact) {
-        crate::gentype::generated_files::log_file_action(
-            crate::gentype::generated_files::FileAction::TypeError,
-            &output_file,
-        );
+        Ok(Output::Write {
+            output_file,
+            contents,
+        })
+    } else if typed_artifact_has_type_errors(artifact) {
+        Ok(Output::TypeError { output_file })
     } else {
-        crate::gentype::generated_files::log_file_action(
-            crate::gentype::generated_files::FileAction::NoMatch,
-            &output_file,
-        );
-        if Path::new(&output_file).exists() {
-            std::fs::remove_file(&output_file)?;
-        }
+        Ok(Output::NoMatch { output_file })
     }
-    Ok(())
+}
+
+/// GenTypeMain.ml:94-104: the annotation check of `read_input_cmt`, which
+/// reads each attribute list's `ignoreInterface` payload, then its
+/// annotation payload; either read raises on an invalid escape.
+pub fn read_input_check_annotation(
+    ignore_interface: &std::cell::Cell<bool>,
+    arena: &ParseArena,
+    attributes: &Attributes,
+) -> crate::gentype::annotation::Read<bool> {
+    if crate::gentype::annotation::get_attribute_payload(
+        arena,
+        crate::gentype::annotation::tag_is_gentype_ignore_interface,
+        attributes,
+    )?
+    .is_some()
+    {
+        ignore_interface.set(true);
+    }
+    Ok(crate::gentype::annotation::get_attribute_payload(
+        arena,
+        crate::gentype::annotation::tag_is_one_of_the_gentype_annotations,
+        attributes,
+    )?
+    .is_some())
+}
+
+/// GenType for a module without an interface (GenTypeMain.ml:136-175, with
+/// `read_input_cmt`'s implementation case).
+pub fn process_typed_artifact(
+    config: &crate::gentype::config::T,
+    shared_resolver: Option<&crate::gentype::module_resolver::Resolver>,
+    artifact: TypedArtifact<'_>,
+) -> Outcome {
+    // Mirrors compiler/gentype/GenTypeMain.ml:136-175, but starts from the
+    // typedtree already produced in-process instead of re-reading a .cmt.
+    // The OCaml call site is compiler/core/js_implementation.ml:170 after
+    // Typemod saved the CMT at compiler/ml/typemod.ml:1785-1787.
+    let prepared = prepare(config, shared_resolver, &artifact);
+    let resolver = shared_resolver
+        .or(prepared.local_resolver.as_ref())
+        .expect("GenType resolver must be available");
+    register_type_declarations(config, &prepared, resolver, &artifact);
+    if artifact.declarations_only {
+        return Outcome::default();
+    }
+    let ignore_interface = std::cell::Cell::new(false);
+    let has_gentype_annotations = match typed_artifact_check_annotations(
+        &|arena, _loc, attributes| {
+            read_input_check_annotation(&ignore_interface, arena, attributes)
+        },
+        &artifact,
+    ) {
+        Ok(has_gentype_annotations) => has_gentype_annotations,
+        Err(escape) => return Outcome::raised((artifact.render_escape)(escape)),
+    };
+    let notes = std::rc::Rc::new(crate::gentype::log_::Notes::default());
+    let result = plan_output(
+        config,
+        &prepared,
+        resolver,
+        &artifact,
+        &notes,
+        has_gentype_annotations,
+    );
+    Outcome::after(&notes, result)
+}
+
+/// Read a module's typed interface for its implementation's compile
+/// (GenTypeMain.ml:91-107): register its type declarations, walk its
+/// annotations, and plan its output unless the walk selected the
+/// implementation. Nothing is raised or written here.
+pub fn read_interface_artifact(
+    config: &crate::gentype::config::T,
+    shared_resolver: Option<&crate::gentype::module_resolver::Resolver>,
+    artifact: TypedArtifact<'_>,
+) -> InterfaceRead {
+    let prepared = prepare(config, shared_resolver, &artifact);
+    let resolver = shared_resolver
+        .or(prepared.local_resolver.as_ref())
+        .expect("GenType resolver must be available");
+    register_type_declarations(config, &prepared, resolver, &artifact);
+    if artifact.declarations_only {
+        return InterfaceRead::DeclarationsOnly;
+    }
+    let ignore_interface = std::cell::Cell::new(false);
+    let has_gentype_annotations = match typed_artifact_check_annotations(
+        &|arena, _loc, attributes| {
+            read_input_check_annotation(&ignore_interface, arena, attributes)
+        },
+        &artifact,
+    ) {
+        Ok(has_gentype_annotations) => has_gentype_annotations,
+        Err(escape) => return InterfaceRead::Raised((artifact.render_escape)(escape)),
+    };
+    let ignore_interface = ignore_interface.get();
+    InterfaceRead::Read {
+        ignore_interface,
+        output: (!ignore_interface).then(|| {
+            let notes = std::rc::Rc::new(crate::gentype::log_::Notes::default());
+            let result = plan_output(
+                config,
+                &prepared,
+                resolver,
+                &artifact,
+                &notes,
+                has_gentype_annotations,
+            );
+            Outcome::after(&notes, result)
+        }),
+    }
+}
+
+/// GenType for a module with an interface, in its implementation's compile
+/// (GenTypeMain.ml:108-134, then 165-175): raise what reading the interface
+/// raised, walk the implementation's annotations (warning that each is
+/// ignored while no `@genType.ignoreInterface` was seen), then write the
+/// selected artifact's output.
+pub fn process_implementation_with_interface(
+    config: &crate::gentype::config::T,
+    shared_resolver: Option<&crate::gentype::module_resolver::Resolver>,
+    interface: InterfaceRead,
+    artifact: TypedArtifact<'_>,
+) -> Outcome {
+    let (ignore_interface, interface_output) = match interface {
+        InterfaceRead::DeclarationsOnly => {
+            return process_typed_artifact(config, shared_resolver, artifact);
+        }
+        InterfaceRead::Raised(report) => return Outcome::raised(report),
+        InterfaceRead::Read {
+            ignore_interface,
+            output,
+        } => (ignore_interface, output),
+    };
+    if artifact.declarations_only {
+        return process_typed_artifact(config, shared_resolver, artifact);
+    }
+    let ignore_interface = std::cell::Cell::new(ignore_interface);
+    let notes = crate::gentype::log_::Notes::default();
+    let walked = typed_artifact_check_annotations(
+        &|arena, loc, attributes| {
+            let annotated = read_input_check_annotation(&ignore_interface, arena, attributes)?;
+            if annotated && !ignore_interface.get() {
+                // GenTypeMain.ml:116-121.
+                let loc = arena.to_location(loc);
+                notes.info(
+                    &crate::gentype::annotation::parsed_file(arena, &loc),
+                    &loc,
+                    "Warning genType",
+                    "Annotation is ignored as there's a .resi file",
+                );
+            }
+            Ok(annotated)
+        },
+        &artifact,
+    );
+    let notes = notes.take();
+    let outcome = match walked {
+        Err(escape) => Outcome::raised((artifact.render_escape)(escape)),
+        // The implementation's annotations were read above; its own walk
+        // reads the same payloads again.
+        Ok(_) if ignore_interface.get() => {
+            process_typed_artifact(config, shared_resolver, artifact)
+        }
+        Ok(_) => interface_output.unwrap_or_default(),
+    };
+    Outcome {
+        notes: notes.into_iter().chain(outcome.notes).collect(),
+        result: outcome.result,
+    }
 }
 
 fn cmt_file_for_typed_artifact(
@@ -684,6 +1004,15 @@ mod tests {
     /// template `Fo\xo` a PPX can produce (its `\x` escape is invalid). An
     /// invalid escape renders as `Invalid string escape sequence at <cnum>`.
     fn gentype_with_bad_strings(root: &Path, module: &str, source: &str) -> Result<(), String> {
+        gentype_outcome(root, module, source)
+            .apply()
+            .expect("GenType I/O")
+            .1
+    }
+
+    /// What GenType does for `source` (see `gentype_with_bad_strings`), not
+    /// yet applied.
+    fn gentype_outcome(root: &Path, module: &str, source: &str) -> Outcome {
         let id_gen = IdGenerator::with_start_stamp(999);
         let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let source_file = format!("src/{module}.res");
@@ -744,7 +1073,7 @@ mod tests {
                 type_ctx.resolve_loc(loc).loc_start.cnum
             ),
         };
-        let result = process_typed_artifact(
+        process_typed_artifact(
             &config,
             None,
             TypedArtifact {
@@ -758,12 +1087,7 @@ mod tests {
                 declarations_only: false,
                 render_escape: &render_escape,
             },
-        );
-        match result {
-            Ok(()) => Ok(()),
-            Err(Error::Raised(report)) => Err(report),
-            Err(Error::Io(error)) => panic!("GenType I/O error: {error}"),
-        }
+        )
     }
 
     fn project(name: &str) -> PathBuf {
@@ -847,10 +1171,82 @@ mod tests {
         let resolver =
             crate::gentype::module_resolver::create_lazy_resolver(&config, &[], |_| false);
         let mut config = config;
+        let notes = crate::gentype::log_::Notes::default();
         assert_eq!(
-            input_cmt_translate_type_declarations(&mut config, "", &resolver, &cmt_file).err(),
+            input_cmt_translate_type_declarations(&notes, &mut config, "", &resolver, &cmt_file)
+                .err(),
             Some("Invalid string escape sequence at 22".to_string())
         );
+    }
+
+    /// GenType's warnings (Log_.info) are part of the outcome, which prints
+    /// them and writes the file only when applied: after the JavaScript, as
+    /// js_implementation.ml:164-171 runs GenType, so a compile that fails or
+    /// is retried before then prints and writes nothing.
+    #[test]
+    fn gentype_warnings_and_output_wait_for_the_outcome_to_be_applied() {
+        let root = project("notes");
+        // Annotation.ml:170-176: a `@genType` payload is ignored, with a note.
+        let outcome = gentype_outcome(&root, "EscNote", "@genType(`x`) let x = 1\n");
+        assert_eq!(outcome.notes.len(), 1, "{:?}", outcome.notes);
+        let note = &outcome.notes[0];
+        assert!(note.contains("Annotation payload is ignored"), "{note}");
+        assert!(note.contains("src/EscNote.res:1:"), "{note}");
+        assert!(!note.contains("<source>"), "{note}");
+        assert_eq!(generated(&root, "EscNote"), None);
+        let (printed, result) = outcome.apply().expect("GenType I/O");
+        assert!(
+            printed.contains("Annotation payload is ignored"),
+            "{printed}"
+        );
+        assert_eq!(result, Ok(()));
+        assert!(generated(&root, "EscNote").is_some());
+        // A raise keeps the notes printed before it.
+        let outcome = gentype_outcome(
+            &root,
+            "EscNoteBad",
+            "@genType(`x`) let x = 1\n@genType.as(\"BAD\") @genType let y = 2\n",
+        );
+        assert_eq!(outcome.notes.len(), 1, "{:?}", outcome.notes);
+        assert!(outcome.result.is_err());
+    }
+
+    /// A module's cached declaration translation keeps its warnings: the
+    /// declaring module without annotations prints none, and an importer's
+    /// EmitJs lookup (EmitJs.ml:437-453) prints them, each time it reads.
+    #[test]
+    fn gentype_declaration_warnings_wait_for_an_importer_to_read_them() {
+        let root = project("lazynotes");
+        let declaring = "type t = {@genType.as(`y`) a: int}\n";
+        let outcome = gentype_outcome(&root, "EscDeclNotes", declaring);
+        assert!(outcome.notes.is_empty(), "{:?}", outcome.notes);
+        let config = crate::gentype::config::build_config_from_cli_args(None, &[]);
+        let cmt_file = cmt_file_for_typed_artifact(&config, "src/EscDeclNotes.res", false).unwrap();
+        let resolver =
+            crate::gentype::module_resolver::create_lazy_resolver(&config, &[], |_| false);
+        let mut config = config;
+        for _ in 0..2 {
+            let notes = crate::gentype::log_::Notes::default();
+            assert!(
+                input_cmt_translate_type_declarations(
+                    &notes,
+                    &mut config,
+                    "",
+                    &resolver,
+                    &cmt_file
+                )
+                .is_ok()
+            );
+            let notes = notes.take();
+            assert_eq!(notes.len(), 1, "{notes:?}");
+            assert!(
+                notes[0].contains("@genType.as is not supported anymore"),
+                "{notes:?}"
+            );
+            assert!(notes[0].contains("src/EscDeclNotes.res:1:"), "{notes:?}");
+            // Log_.ml:99-102's box indents the body's leading line break.
+            assert!(notes[0].contains("\n  \n  @genType.as is not"), "{notes:?}");
+        }
     }
 
     /// The error is the compiling file's own: files compiled in parallel,

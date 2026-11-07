@@ -3272,6 +3272,7 @@ fn compile_runtime_module_from_source(
         &options,
         &local_registry,
         has_runtime_interface,
+        None,
     )
     .map_err(|err| {
         anyhow!(
@@ -3804,7 +3805,7 @@ fn compile_module_in_process_to_js_boundary(
     // Build a local registry that includes the .resi result (if any).
     let mut local_registry = registry.clone();
     let mut interface_registry_update: Option<PendingRegistryUpdate> = None;
-    let mut gentype_ignore_interface = false;
+    let mut gentype_interface = None;
     // The interface's warnings, reported before the implementation's (the
     // subprocess path compiles the interface first).
     let mut interface_warnings = String::new();
@@ -3880,7 +3881,7 @@ fn compile_module_in_process_to_js_boundary(
 
         // Register the .resi's PersStruct in the local registry so the
         // .res compilation can find it for moregen constraints.
-        gentype_ignore_interface = intf_result.gentype_ignore_interface;
+        gentype_interface = intf_result.gentype;
         let intf_fingerprint = intf_result
             .pers_struct
             .as_ref()
@@ -4006,7 +4007,7 @@ fn compile_module_in_process_to_js_boundary(
                             options,
                             &local_registry,
                             has_interface,
-                            gentype_ignore_interface,
+                            gentype_interface.clone(),
                             signature_hook,
                         )
                     })
@@ -4200,7 +4201,10 @@ fn finish_in_process_js_inner(
         .get_package(&module.package_name)
         .expect("Package not found");
     // The warnings bsc prints to stderr, filtered like the subprocess path.
-    let warning = visible_compiler_warnings(&std::mem::take(&mut pre_js.warnings), package.is_local_dep);
+    let mut compiler_warnings = std::mem::take(&mut pre_js.warnings);
+    let mut warning = visible_compiler_warnings(&compiler_warnings, package.is_local_dep);
+    // GenType runs once the JavaScript is written (js_implementation.ml:164-171).
+    let gentype = pre_js.gentype.take();
     let _span = if tracing::enabled!(tracing::Level::INFO) {
         info_span!(
             parent: &parent_span,
@@ -4338,6 +4342,19 @@ fn finish_in_process_js_inner(
         if let Some(write_start) = write_start {
             write_duration = write_start.elapsed();
         }
+    }
+
+    // What GenType prints follows the compile's warnings and goes with them,
+    // so a first pass the build retries with locations prints nothing.
+    let gentype_printed = rescript_compiler::driver::apply_gentype_outcome(
+        gentype,
+        &compiler_warnings,
+        &source_abs.to_string_lossy(),
+    )
+    .map_err(|err| in_process_compile_error(&module_name, err))?;
+    if !gentype_printed.is_empty() {
+        compiler_warnings.push_str(&gentype_printed);
+        warning = visible_compiler_warnings(&compiler_warnings, package.is_local_dep);
     }
 
     if let Some(js_post_build) = &package.config.js_post_build {

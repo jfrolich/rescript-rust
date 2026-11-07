@@ -27,6 +27,7 @@ pub fn translate_signature_value(
         match crate::gentype::annotation::from_attributes(
             arena,
             config,
+            &crate::gentype::type_env::notes(type_env),
             value_description.val_loc,
             &value_description.val_attributes,
         )? {

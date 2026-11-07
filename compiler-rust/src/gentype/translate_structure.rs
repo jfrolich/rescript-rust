@@ -68,6 +68,7 @@ pub fn add_annotations_to_types(
 pub fn add_annotations_to_fields(
     arena: &ParseArena,
     config: &crate::gentype::config::T,
+    notes: &crate::gentype::log_::Notes,
     expr: &Expression,
     fields: &[crate::gentype::gen_type_common::Field],
     arg_types: &[ArgType],
@@ -80,10 +81,11 @@ pub fn add_annotations_to_fields(
         ));
     };
     let (next_fields1, types1) =
-        add_annotations_to_fields(arena, config, expr, next_fields, arg_types)?;
+        add_annotations_to_fields(arena, config, notes, expr, next_fields, arg_types)?;
     let mut field = field.clone();
     field.name_js = crate::gentype::translate_type_declarations::rename_record_field(
         arena,
+        notes,
         &expr.exp_attributes,
         &field.name_js,
     )?;
@@ -132,6 +134,7 @@ pub fn translate_value_binding(
     if crate::gentype::annotation::from_attributes(
         arena,
         config,
+        &crate::gentype::type_env::notes(type_env),
         value_binding.vb_pat.pat_loc,
         &value_binding.vb_attributes,
     )? == crate::gentype::annotation::T::GenType
