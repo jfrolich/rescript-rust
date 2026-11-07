@@ -8808,3 +8808,69 @@ fn conditional_of_raises_is_not_finished() {
         output.block
     );
 }
+
+fn declared_exit_stamps(block: &Block) -> Vec<i32> {
+    let mut stamps = vec![];
+    for stmt in block {
+        if let StatementDesc::Variable(declaration) = &stmt.desc {
+            if declaration.ident.name() == "exit" {
+                stamps.push(declaration.ident.stamp());
+            }
+        }
+    }
+    stamps
+}
+
+/// lam_compile.ml:521-539 `compile_recursive_lets_aux` folds the bindings
+/// with `Ext_list.fold_right`, so the last binding is compiled first, and
+/// joins the outputs with `append_output`.
+#[test]
+fn recursive_lets_compile_last_binding_first() {
+    let first = Ident::create_local("first");
+    let second = Ident::create_local("second");
+    let lam = Lambda::Lletrec(
+        vec![(first, allocating_catch()), (second, allocating_catch())],
+        Box::new(Lambda::const_(Constant::int(0))),
+    );
+    let output = LambdaCompiler::new().compile_effect_block_output(&lam);
+    let stamps = declared_exit_stamps(&output.block);
+    let [first_exit, second_exit] = stamps.as_slice() else {
+        panic!("expected two exit declarations, got {:?}", output.block);
+    };
+    assert!(
+        first_exit > second_exit,
+        "the second binding allocates first: {stamps:?}"
+    );
+}
+
+/// A recursive binding whose value raises finishes the group's output, and
+/// `append_output` drops the bindings after it and the body, all of which
+/// are still compiled.
+#[test]
+fn recursive_lets_carry_a_raising_binding_flag() {
+    let first = Ident::create_local("first");
+    let second = Ident::create_local("second");
+    let lam = Lambda::Lletrec(
+        vec![(first, raise_boom()), (second, allocating_catch())],
+        Box::new(allocating_catch()),
+    );
+    let mut compiler = LambdaCompiler::new();
+    let output = compiler.compile_effect_block_output(&lam);
+    assert_eq!(output.finished, OutputFinished::True);
+    let [stmt] = output.block.as_slice() else {
+        panic!("expected only the throw, got {:?}", output.block);
+    };
+    assert!(matches!(stmt.desc, StatementDesc::Throw(_)));
+    let compiled = LambdaCompiler::new().compile_expr(&lam);
+    assert_eq!(compiled.finished, OutputFinished::True);
+    let raise_only = next_stamp_after(|c| {
+        c.compile_effect_block_output(&Lambda::Lletrec(
+            vec![(first, raise_boom())],
+            Box::new(Lambda::const_(Constant::int(0))),
+        ));
+    });
+    let with_dropped = next_stamp_after(|c| {
+        c.compile_effect_block_output(&lam);
+    });
+    assert!(with_dropped > raise_only);
+}

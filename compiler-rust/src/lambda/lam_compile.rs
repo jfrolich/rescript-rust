@@ -98,6 +98,14 @@ impl BlockOutput {
         }
     }
 
+    /// `Js_output.dummy` (js_output.ml:38).
+    pub(crate) fn dummy() -> Self {
+        Self {
+            block: vec![],
+            finished: OutputFinished::Dummy,
+        }
+    }
+
     /// `Js_output.append_output` (js_output.ml:118-138) of two outputs
     /// without a value: a finished first output is kept as it is, an empty
     /// `dummy` second one is dropped, an empty first one gives the second,
@@ -1738,14 +1746,24 @@ impl LambdaCompiler {
                     Lambda::Lprim(prim)
                         if matches!(prim.primitive, Primitive::Pmakeblock(TagInfo::ModuleExport(_), _))
                 );
-                let mut prelude = if is_top_level {
+                let recursive = if is_top_level {
                     self.with_fresh_loop_label_counter(|this| {
-                        this.compile_recursive_bindings(bindings)
+                        this.compile_recursive_bindings_output(bindings)
                     })
                 } else {
-                    self.compile_recursive_bindings(bindings)
+                    self.compile_recursive_bindings_output(bindings)
                 };
+                // lam_compile.ml:1878-1895: the bindings, then the body, then
+                // `append_output`.
                 let body_compiled = self.compile_expr(body);
+                let mut prelude = recursive.block;
+                if recursive.finished == OutputFinished::True {
+                    return Compiled {
+                        prelude,
+                        expr: body_compiled.expr,
+                        finished: OutputFinished::True,
+                    };
+                }
                 prelude.extend(body_compiled.prelude);
                 Compiled {
                     prelude,
@@ -2246,10 +2264,19 @@ impl LambdaCompiler {
     }
 
     fn compile_recursive_bindings(&mut self, bindings: &[(Ident, Lambda)]) -> Block {
-        let dependencies = recursive_binding_dependencies(bindings);
-        let mut block = vec![];
+        self.compile_recursive_bindings_output(bindings).block
+    }
 
-        for group in recursive_binding_groups(bindings, &dependencies) {
+    /// lam_compile.ml:521-539 `compile_recursive_lets_aux`: the bindings are
+    /// compiled with `Ext_list.fold_right`, so the last one first, each
+    /// output is `append_output`ed onto the outputs after it (starting from
+    /// `Js_output.dummy`), and the collected placeholder declarations are
+    /// put in front.
+    fn compile_recursive_bindings_output(&mut self, bindings: &[(Ident, Lambda)]) -> BlockOutput {
+        let dependencies = recursive_binding_dependencies(bindings);
+        let groups = recursive_binding_groups(bindings, &dependencies);
+        let mut output = BlockOutput::dummy();
+        for group in groups.iter().rev() {
             if let [index] = group.as_slice() {
                 if !dependencies[*index].contains(index) {
                     let (id, expr) = &bindings[*index];
@@ -2259,29 +2286,29 @@ impl LambdaCompiler {
                     // `js_pass_flatten_and_mark_dead` skip for all-deep-constant
                     // alias bindings (lam_pass_lets_dce.ml + the implicit
                     // skip behind the Variable arm).
-                    block.extend(self.compile_let_binding(LetKind::Alias, id, expr));
+                    let code = self.compile_let_binding_output(LetKind::Alias, id, expr);
+                    output = code.append(output);
                     continue;
                 }
             }
 
-            let recursive_functions = recursive_function_bindings_in_group(bindings, &group);
+            let recursive_functions = recursive_function_bindings_in_group(bindings, group);
             let recursive_function_tail_targets = direct_recursive_function_tail_targets_with_group(
                 bindings,
-                &group,
+                group,
                 &recursive_functions,
             );
             let recursive_function_ids: AHashSet<_> =
                 recursive_function_tail_targets.keys().cloned().collect();
+            let mut group_output = BlockOutput::dummy();
             let mut declarations = vec![];
-            let mut effects = vec![];
-
-            for &index in &group {
+            for &index in group.iter().rev() {
                 let (id, expr) = &bindings[index];
-                let (binding_decls, binding_effects) = self.compile_recursive_binding(
+                let (code, binding_declarations) = self.compile_recursive_binding(
                     id,
                     expr,
                     bindings,
-                    &group,
+                    group,
                     recursive_function_tail_targets
                         .get(id)
                         .map(Vec::as_slice)
@@ -2289,15 +2316,18 @@ impl LambdaCompiler {
                     &recursive_functions,
                     &recursive_function_ids,
                 );
-                declarations.extend(binding_decls);
-                effects.extend(binding_effects);
+                group_output = code.append(group_output);
+                // `Ext_list.append declare_ids ids`.
+                let mut later = std::mem::take(&mut declarations);
+                declarations = binding_declarations;
+                declarations.append(&mut later);
             }
-
-            declarations.extend(effects);
-            block.extend(declarations);
+            if !declarations.is_empty() {
+                group_output = BlockOutput::make(declarations).append(group_output);
+            }
+            output = group_output.append(output);
         }
-
-        block
+        output
     }
 
     fn compile_recursive_binding(
@@ -2309,16 +2339,16 @@ impl LambdaCompiler {
         tail_targets: &[Ident],
         recursive_functions: &AHashMap<Ident, LFunction>,
         recursive_function_ids: &AHashSet<Ident>,
-    ) -> (Block, Block) {
+    ) -> (BlockOutput, Block) {
         if let Some(func) = recursive_function_binding_value(expr) {
             return (
-                vec![],
-                vec![Statement::variable(VariableDeclaration {
+                BlockOutput::make(vec![Statement::variable(VariableDeclaration {
                     ident: *id,
                     value: Some(self.compile_recursive_function_expr(id, &func, tail_targets)),
                     property: LetKind::Alias,
                     ident_info: IdentInfo::default(),
-                })],
+                })]),
+                vec![],
             );
         }
 
@@ -2328,22 +2358,22 @@ impl LambdaCompiler {
                 .any(|function_id| target.same(function_id))
             {
                 return (
-                    vec![],
-                    vec![Statement::variable(VariableDeclaration {
+                    BlockOutput::make(vec![Statement::variable(VariableDeclaration {
                         ident: *id,
                         value: Some(Expression::var(target)),
                         property: LetKind::Alias,
                         ident_info: IdentInfo::default(),
-                    })],
+                    })]),
+                    vec![],
                 );
             }
         }
 
         if group.len() == 1 {
-            if let Some(block) =
+            if let Some(output) =
                 self.try_compile_recursive_singleton_binding_without_placeholder(id, expr)
             {
-                return (vec![], block);
+                return (output, vec![]);
             }
         }
 
@@ -2355,73 +2385,48 @@ impl LambdaCompiler {
                         .iter()
                         .all(|arg| matches!(arg, Lambda::Lfunction(_) | Lambda::Lconst(_))) =>
             {
+                // lam_compile.ml:429-431: `compile_lambda` under
+                // `Declare (Alias, id)`.
                 let compiled = self.compile_expr(expr);
-                let mut effects = compiled.prelude;
-                if !block_terminates(&effects) {
-                    effects.push(Statement::variable(VariableDeclaration {
-                        ident: *id,
-                        value: Some(compiled.expr),
-                        property: LetKind::Alias,
-                        ident_info: IdentInfo::default(),
-                    }));
-                }
-                (vec![], effects)
+                (declare_compiled(LetKind::Alias, id, compiled), vec![])
             }
             Lambda::Lprim(info) if matches!(info.primitive, Primitive::Pmakeblock(_, _)) => {
                 if let Some(effects) =
                     self.compile_recursive_self_binding_makeblock(id, info, all_bindings, group)
                 {
-                    return (vec![], effects);
+                    return (BlockOutput::make(effects), vec![]);
                 }
 
                 let tag_info = match &info.primitive {
                     Primitive::Pmakeblock(tag_info, _) => tag_info,
                     _ => unreachable!("guard must preserve Pmakeblock"),
                 };
+                // lam_compile.ml:479-495: `NeedValue Not_tail`, then
+                // `Js_output.make (b @ [updateDummy])`, which is not finished.
                 let compiled = self.compile_expr(expr);
                 let mut effects = compiled.prelude;
-                if !block_terminates(&effects) {
-                    effects.push(Statement::exp(self.runtime_call_expr(
-                        "Primitive_object",
-                        "updateDummy",
-                        vec![Expression::var(*id), compiled.expr],
-                    )));
-                }
+                effects.push(Statement::exp(self.runtime_call_expr(
+                    "Primitive_object",
+                    "updateDummy",
+                    vec![Expression::var(*id), compiled.expr],
+                )));
                 (
+                    BlockOutput::make(effects),
                     vec![Statement::variable(VariableDeclaration {
                         ident: *id,
                         value: Some(Self::recursive_dummy_object_expr(tag_info)),
                         property: LetKind::Variable,
                         ident_info: IdentInfo::default(),
                     })],
-                    effects,
                 )
             }
             _ => {
-                let compiled = self.compile_expr(expr);
-                let mut effects = compiled.prelude;
-                if block_terminates(&effects) {
-                    return (
-                        vec![Statement::variable(VariableDeclaration {
-                            ident: *id,
-                            value: None,
-                            property: LetKind::Strict,
-                            ident_info: IdentInfo::default(),
-                        })],
-                        effects,
-                    );
-                }
                 // OCaml `compile_recursive_let`'s catch-all compiles directly
-                // under `Declare (Alias, id)` (`lam_compile.ml:552-553`).  The
-                // value's prelude therefore precedes a normal declaration; it
-                // does not introduce a placeholder plus a later assignment.
-                effects.push(Statement::variable(VariableDeclaration {
-                    ident: *id,
-                    value: Some(compiled.expr),
-                    property: LetKind::Alias,
-                    ident_info: IdentInfo::default(),
-                }));
-                (vec![], effects)
+                // under `Declare (Alias, id)` (lam_compile.ml:497-519): the
+                // value's prelude precedes a normal declaration, and a
+                // finished value keeps no declaration.
+                let compiled = self.compile_expr(expr);
+                (declare_compiled(LetKind::Alias, id, compiled), vec![])
             }
         }
     }
@@ -2430,14 +2435,14 @@ impl LambdaCompiler {
         &mut self,
         id: &Ident,
         expr: &Lambda,
-    ) -> Option<Block> {
+    ) -> Option<BlockOutput> {
         if !matches!(expr, Lambda::Llet(..)) {
             return None;
         }
 
-        let block = self.compile_let_binding(LetKind::Alias, id, expr);
-        if block_declares_initialized_ident(&block, id) {
-            Some(block)
+        let output = self.compile_let_binding_output(LetKind::Alias, id, expr);
+        if block_declares_initialized_ident(&output.block, id) {
+            Some(output)
         } else {
             None
         }
@@ -2732,7 +2737,7 @@ impl LambdaCompiler {
                 // bindings then compile body in the SAME continuation. The
                 // catch-all `_ => compile_expr(lam)` would force the body
                 // through `NeedValue`, losing the effect/tail context.
-                let bindings = BlockOutput::make(self.compile_recursive_bindings(bindings));
+                let bindings = self.compile_recursive_bindings_output(bindings);
                 let body = self.compile_effect_block_output(body);
                 bindings.append(body)
             }
@@ -3041,11 +3046,12 @@ impl LambdaCompiler {
                 // `return cond1 || cond2 || call(args);` instead of
                 // `if (cond) return true; else { return call(args); }` that
                 // `js_pass_tailcall_inline` can later inline.
-                let mut block = self.compile_recursive_bindings(bindings);
-                if block_finishes_output(&block) {
-                    return block;
+                let recursive = self.compile_recursive_bindings_output(bindings);
+                let body = self.compile_return_block(body);
+                let mut block = recursive.block;
+                if recursive.finished != OutputFinished::True {
+                    block.extend(body);
                 }
-                block.extend(self.compile_return_block(body));
                 block
             }
             Lambda::Lapply(apply) => {
