@@ -175,3 +175,132 @@ pub(crate) fn simplify_tree_for_js_backend(lam: &Lambda) -> Lambda {
     );
     s.arena.export(s.lam)
 }
+
+/// Tree form of [`ExtractedExports`].
+#[derive(Debug)]
+pub(crate) struct TreeExtractedExports {
+    pub(crate) exports: Vec<Ident>,
+    pub(crate) values: Vec<Expression>,
+}
+
+/// `resolve_export_aliases` over a tree block.
+pub(crate) fn resolve_export_aliases_tree(block: &Block, exports: Vec<Ident>) -> Vec<Ident> {
+    let mut j = JsArena::new();
+    let block = import_block_vec(&mut j, block);
+    crate::lambda::lam_coercion::resolve_export_aliases(&mut j, &block, exports)
+}
+
+impl LambdaCompiler {
+    pub(crate) fn compile_program_tree(&mut self, lam: &Lambda) -> crate::js_ir::Program {
+        self.compile_program(lam).to_tree()
+    }
+
+    pub(crate) fn compile_deps_program_tree(&mut self, lam: &Lambda) -> crate::js_ir::DepsProgram {
+        self.compile_deps_program(lam).to_tree()
+    }
+
+    pub(crate) fn compile_deps_program_with_possible_required_modules_tree(
+        &mut self,
+        lam: &Lambda,
+        extra: &AHashSet<ModuleId>,
+    ) -> crate::js_ir::DepsProgram {
+        self.compile_deps_program_with_possible_required_modules(lam, extra)
+            .to_tree()
+    }
+
+    /// Export coercion over a tree block.
+    pub(crate) fn coerce_toplevel_exports(
+        &mut self,
+        block: &mut Block,
+        extracted: TreeExtractedExports,
+    ) -> Vec<Ident> {
+        let mut j = JsArena::new();
+        let mut arena_block = import_block_vec(&mut j, block);
+        let values = extracted
+            .values
+            .iter()
+            .map(|value| import_expr(&mut j, value))
+            .collect();
+        let (exports, _) = self.coerce_toplevel_exports_with_name_reservations(
+            &mut j,
+            &mut arena_block,
+            ExtractedExports {
+                exports: extracted.exports,
+                values,
+            },
+        );
+        *block = arena_block
+            .iter()
+            .map(|stmt| crate::js_ir::arena_tree::export_stmt(&j, *stmt))
+            .collect();
+        exports
+    }
+}
+
+/// Tree-program wrappers over the arena JS passes.
+pub(crate) mod tree_passes {
+    use crate::js_ir::arena::JsDepsProgram;
+    use crate::js_ir::{Block, DepsProgram, Expression};
+
+    fn via_arena(
+        deps: DepsProgram,
+        pass: impl FnOnce(JsDepsProgram) -> JsDepsProgram,
+    ) -> DepsProgram {
+        pass(JsDepsProgram::from_tree(&deps)).to_tree()
+    }
+
+    pub(crate) fn apply_js_flatten_pass(deps: DepsProgram) -> DepsProgram {
+        via_arena(
+            deps,
+            crate::lambda::js_pass_flatten_and_mark_dead::apply_js_flatten_pass,
+        )
+    }
+
+    pub(crate) fn apply_external_shadow_pass(deps: DepsProgram) -> DepsProgram {
+        via_arena(
+            deps,
+            crate::lambda::js_pass_external_shadow::apply_external_shadow_pass,
+        )
+    }
+
+    pub(crate) fn apply_js_tailcall_inline_pass(deps: DepsProgram) -> DepsProgram {
+        via_arena(
+            deps,
+            crate::lambda::js_pass_tailcall_inline::apply_js_tailcall_inline_pass,
+        )
+    }
+
+    pub(crate) fn apply_js_flatten_and_mark_dead_pass(
+        deps: DepsProgram,
+        jsx_preserve: bool,
+    ) -> DepsProgram {
+        via_arena(deps, |d| {
+            crate::lambda::js_pass_flatten_and_mark_dead::apply_js_flatten_and_mark_dead_pass(
+                d,
+                jsx_preserve,
+            )
+        })
+    }
+
+    pub(crate) fn apply_js_shake_pass(deps: DepsProgram) -> DepsProgram {
+        via_arena(deps, crate::lambda::js_shake::apply_js_shake_pass)
+    }
+
+    /// `extract_toplevel_exports` over tree values.
+    pub(crate) fn extract_toplevel_exports(
+        expr: Expression,
+        block: &mut Block,
+    ) -> Option<super::TreeExtractedExports> {
+        use crate::js_ir::arena_tree::{export_expr, export_stmt, import_block_vec, import_expr};
+        let mut j = crate::js_ir::arena::JsArena::new();
+        let mut arena_block = import_block_vec(&mut j, block);
+        let expr = import_expr(&mut j, &expr);
+        let extracted =
+            crate::lambda::lam_coercion::extract_toplevel_exports(&mut j, expr, &mut arena_block);
+        *block = arena_block.iter().map(|s| export_stmt(&j, *s)).collect();
+        extracted.map(|e| super::TreeExtractedExports {
+            exports: e.exports,
+            values: e.values.iter().map(|v| export_expr(&j, *v)).collect(),
+        })
+    }
+}

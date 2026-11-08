@@ -12,11 +12,17 @@ use std::sync::Arc;
 use crate::cmi::persistent_env::{CmjExportArity, CmjExportConstant};
 use crate::context::IdGenerator;
 use crate::ident::Ident;
+use crate::js_ir::arena::{
+    Block as JsBlock, Expr as JsExpr, ExprKind as JsExprKind, JsArena,
+    JsDepsProgram as DepsProgram, JsProgram as Program, Stmt as JsStmt, StmtKind as JsStmtKind,
+};
+use crate::js_ir::arena_tree::{import_block_vec, import_expr};
+use crate::js_ir::build::{exp as JE, stmt as JS};
 use crate::js_ir::op::{IdentInfo, Kind, MutableFlag, Number, PropertyName, UsedStats};
 use crate::js_ir::{
-    BinOp, Block, CallArity, CallInfo, CallKind, CaseClause, DepsProgram, Expression,
-    ExpressionDesc, ForDirection, ModuleId, ModulePathResolver, Program, Statement, StatementDesc,
-    StringClause, VIdent, VariableDeclaration, block_last_is_terminal, unnest_block,
+    BinOp, Block, CallArity, CallInfo, CallKind, CaseClause, Expression, ExpressionDesc,
+    ForDirection, ModuleId, ModulePathResolver, Statement, StatementDesc, StringClause, VIdent,
+    VariableDeclaration, block_last_is_terminal, unnest_block,
 };
 use crate::lambda::arena::{
     ApplyId, CatchId, IdentId, Lam, LamArena, LamList, Node, PrimId, StrSwitchId, SwitchId, View,
@@ -32,6 +38,7 @@ use crate::lambda::js_shake::{
     move_reused_same_name_export_binding_to_export_tail,
     move_same_name_export_alias_to_export_tail, resolve_tail_move_replacement_expression,
 };
+use crate::lambda::js_stmt_make::block_terminates as block_terminates_js;
 use crate::lambda::lam_analysis;
 use crate::lambda::lam_analysis::{free_variables, has_exit_code};
 use crate::lambda::lam_arity::Arity;
@@ -44,19 +51,22 @@ use crate::lambda::{ApplyStatus, Lambda, SwitchCaseTag, SwitchKey, TagInfo};
 use crate::lambda::{LamLoc, LamLocTable};
 use tracing::info_span;
 
-use super::js_exp_make::{
+use super::js_exp_make_tree::{
     block_with_return_expr_iife, int_expr, int_literal, js_expr_no_side_effects, js_seq,
     remove_pure_subexpression, to_int32,
 };
-use super::js_stmt_make::{block_finishes_output, block_terminates, strict_single_return_expr};
+use super::js_stmt_make_tree::{
+    block_finishes_output, block_terminates, strict_single_return_expr,
+};
 use super::lam_coercion::{
-    ExtractedExports, block_declares_initialized_ident,
-    can_reuse_existing_undefined_export_binding, collect_declared_idents, extract_toplevel_exports,
-    insert_rebound_export_before_equivalent_later_binding,
+    ExtractedExports, can_reuse_existing_undefined_export_binding, collect_declared_idents,
+    extract_toplevel_exports, insert_rebound_export_before_equivalent_later_binding,
     keeps_declared_same_name_function_export_alias, max_ident_stamp_in_block,
-    max_ident_stamp_in_expression, push_effect_expression, push_s_exp,
-    resolve_declared_same_name_self_alias_target, resolve_export_aliases,
-    reusable_same_name_export_binding,
+    max_ident_stamp_in_expression, resolve_declared_same_name_self_alias_target,
+    resolve_export_aliases, reusable_same_name_export_binding,
+};
+use super::lam_coercion_tree::{
+    block_declares_initialized_ident, push_effect_expression, push_s_exp,
 };
 use super::lam_compile_variant::{empty_switch_case_clause, stable_group_switch_cases};
 
@@ -94,10 +104,10 @@ struct FlatHandler {
 
 // OCaml's export coercion only reuses direct variables and module-field
 // projections while folding `pairs` (`compiler/core/lam_coercion.ml:99-121`).
-fn reusable_export_value_candidate(value: &Expression) -> bool {
-    match &value.desc {
-        ExpressionDesc::Var(_) => true,
-        ExpressionDesc::StaticIndex(target, _, _) => reusable_export_value_candidate(target),
+fn reusable_export_value_candidate(j: &JsArena, value: JsExpr) -> bool {
+    match j.ek(value) {
+        JsExprKind::Var(_) | JsExprKind::Qualified(_) => true,
+        JsExprKind::StaticIndex(target, _, _) => reusable_export_value_candidate(j, target),
         _ => false,
     }
 }
@@ -654,16 +664,29 @@ impl LambdaCompiler {
                 let _phase = info_span!("compiler.lambda_compile_expr").entered();
                 self.compile_expr(&mut a, root)
             };
-            let mut block = compiled.prelude;
+            // Tree-to-arena boundary: the producer still builds the tree IR.
+            let mut j = JsArena::new();
+            let mut block = import_block_vec(&mut j, &compiled.prelude);
+            let compiled_expr = import_expr(&mut j, &compiled.expr);
+            // The tree can be deep: free it without recursion.
+            let Compiled { mut prelude, expr } = compiled;
+            prelude.push(Statement {
+                source_loc: None,
+                desc: StatementDesc::Exp(expr),
+                comment: None,
+            });
+            crate::js_ir::dispose_program_nonrecursive(crate::js_ir::Program::new(prelude, vec![]));
             let (exports, name_reservations) = {
                 let _phase = info_span!("compiler.lambda_exports").entered();
-                if let Some(mut exports) = extract_toplevel_exports(compiled.expr, &mut block) {
-                    if block_terminates(&block) {
+                if let Some(mut exports) =
+                    extract_toplevel_exports(&mut j, compiled_expr, &mut block)
+                {
+                    if block_terminates_js(&j, &block) {
                         for value in &mut exports.values {
-                            *value = Expression::undefined(false);
+                            *value = JE::undefined(false, &mut j);
                         }
                     }
-                    self.coerce_toplevel_exports_with_name_reservations(&mut block, exports)
+                    self.coerce_toplevel_exports_with_name_reservations(&mut j, &mut block, exports)
                 } else {
                     (vec![], vec![])
                 }
@@ -672,31 +695,34 @@ impl LambdaCompiler {
             // toplevel always throws, the groups after the throw are dropped
             // and the identifiers they bind are undeclared. Declare each such
             // exported identifier after the throw.
-            if block_terminates(&block) {
+            if block_terminates_js(&j, &block) {
                 let declared: AHashSet<Ident> = block
                     .iter()
-                    .filter_map(|stmt| match &stmt.desc {
-                        StatementDesc::Variable(decl) => Some(decl.ident),
+                    .filter_map(|stmt| match j.sk(*stmt) {
+                        JsStmtKind::Variable(v) => Some(j.var(v).ident),
                         _ => None,
                     })
                     .collect();
                 for id in &exports {
                     if !declared.contains(id) {
-                        block.push(Statement::variable(VariableDeclaration {
-                            ident: *id,
-                            value: None,
-                            property: LetKind::Strict,
-                            ident_info: IdentInfo::default(),
-                        }));
+                        let stmt = JS::define(*id, None, LetKind::Strict, &mut j);
+                        block.push(stmt);
                     }
                 }
             }
-            let exports = resolve_export_aliases(&block, exports);
+            let exports = resolve_export_aliases(&mut j, &block, exports);
             let side_effect = module_side_effect_reason(&a, root);
             drop(a);
 
+            let export_set = exports.iter().copied().collect();
             let mut deps = DepsProgram {
-                program: Program::new_with_name_reservations(block, exports, name_reservations),
+                program: Program {
+                    arena: j,
+                    block,
+                    exports,
+                    export_set,
+                    name_reservations,
+                },
                 modules: vec![],
                 side_effect,
             };
@@ -726,7 +752,12 @@ impl LambdaCompiler {
             };
             {
                 let _phase = info_span!("compiler.js_required_modules").entered();
-                let mut required_modules = self.collect_required_module_set(&deps.program.block);
+                let mut required_modules = OcamlModuleSet::new();
+                collect_modules_from_js_block(
+                    &deps.program.arena,
+                    &deps.program.block,
+                    &mut required_modules,
+                );
                 for module in std::mem::take(&mut self.dynamic_import_modules) {
                     if required_module_side_effect_reason(
                         self.module_path_resolver.as_ref(),
@@ -854,32 +885,24 @@ impl LambdaCompiler {
         }
     }
 
-    fn coerce_toplevel_exports(
-        &mut self,
-        block: &mut Block,
-        extracted: ExtractedExports,
-    ) -> Vec<Ident> {
-        self.coerce_toplevel_exports_with_name_reservations(block, extracted)
-            .0
-    }
-
     fn coerce_toplevel_exports_with_name_reservations(
         &mut self,
-        block: &mut Block,
+        j: &mut JsArena,
+        block: &mut JsBlock,
         extracted: ExtractedExports,
     ) -> (Vec<Ident>, Vec<Ident>) {
-        let mut max_stamp = max_ident_stamp_in_block(block);
+        let mut max_stamp = max_ident_stamp_in_block(j, block);
         for export in &extracted.exports {
             max_stamp = max_stamp.max(export.stamp());
         }
         for value in &extracted.values {
-            max_stamp = max_stamp.max(max_ident_stamp_in_expression(value));
+            max_stamp = max_stamp.max(max_ident_stamp_in_expression(j, *value));
         }
         self.id_gen.set_current_stamp(max_stamp);
 
         let mut declared = AHashSet::new();
-        collect_declared_idents(block, &mut declared);
-        let block_ended = block_terminates(block);
+        collect_declared_idents(j, block, &mut declared);
+        let block_ended = block_terminates_js(j, block);
 
         let mut exports = Vec::with_capacity(extracted.exports.len());
         // OCaml `lam_coercion.ml` can replace an original export id with a
@@ -891,107 +914,93 @@ impl LambdaCompiler {
         let mut name_reservations = Vec::new();
         let mut rebound_exports = Vec::new();
 
-        let extracted_len = extracted.exports.len();
         // OCaml's `compiler/core/lam_coercion.ml:82-121` folds over export ids
         // and lambda values, only allocating a renamed export when the branch
         // actually emits a rebound group (`compiler/core/lam_coercion.ml:113-120`
-        // and `compiler/core/lam_coercion.ml:140-156`). Mirror that here: borrow
-        // during classification and clone only for the selected output shape.
-        for index in 0..extracted_len {
+        // and `compiler/core/lam_coercion.ml:140-156`).
+        for index in 0..extracted.exports.len() {
             let export = &extracted.exports[index];
-            let value = &extracted.values[index];
+            let value = extracted.values[index];
             let later_exports = &extracted.exports[index + 1..];
-            let exact_self_export = matches!(
-                &value.desc,
-                ExpressionDesc::Var(VIdent::Id(target)) if target.same(export)
-            );
+            let value_var = match j.ek(value) {
+                JsExprKind::Var(target) => Some(j.ident(target)),
+                _ => None,
+            };
+            let exact_self_export = value_var.is_some_and(|target| target.same(export));
             // OCaml's `Lvar id` branch only changes the export list/set and
             // emits no rebound group when the value is already the same
             // physical identifier (`compiler/core/lam_coercion.ml:99-111`).
             // Keep that source binding in place instead of tail-moving it.
-            if !exact_self_export {
-                if let Some((late_value, property)) =
-                    move_same_name_export_alias_to_export_tail(block, export, value)
-                {
-                    exports.push(*export);
-                    rebound_exports.push(Statement::variable(VariableDeclaration {
-                        ident: *export,
-                        value: Some(late_value),
-                        property,
-                        ident_info: IdentInfo::default(),
-                    }));
+            if !exact_self_export
+                && let Some((late_value, property)) =
+                    move_same_name_export_alias_to_export_tail(j, block, export, value)
+            {
+                exports.push(*export);
+                rebound_exports.push(JS::define(*export, Some(late_value), property, j));
+                continue;
+            }
+            if let Some(target) = value_var
+                && target.name() == export.name()
+            {
+                if declared.contains(export) {
+                    let selected =
+                        if keeps_declared_same_name_function_export_alias(j, block, export) {
+                            *export
+                        } else {
+                            resolve_declared_same_name_self_alias_target(j, block, export)
+                                .unwrap_or(*export)
+                        };
+                    if !selected.same(export) {
+                        name_reservations.push(*export);
+                    }
+                    exports.push(selected);
+                    continue;
+                }
+                if declared.contains(&target) {
+                    let start = JE::var(target, j);
+                    let resolved =
+                        resolve_tail_move_replacement_expression(j, block, start, &target, false);
+                    let selected = match j.ek(resolved) {
+                        JsExprKind::Var(resolved_target) => j.ident(resolved_target),
+                        _ => target,
+                    };
+                    if !selected.same(export) {
+                        name_reservations.push(*export);
+                    }
+                    exports.push(selected);
                     continue;
                 }
             }
-            if let ExpressionDesc::Var(VIdent::Id(target)) = &value.desc {
-                if target.name() == export.name() {
-                    if declared.contains(export) {
-                        let selected =
-                            if keeps_declared_same_name_function_export_alias(block, export) {
-                                *export
-                            } else {
-                                resolve_declared_same_name_self_alias_target(block, export)
-                                    .unwrap_or(*export)
-                            };
-                        if !selected.same(export) {
-                            name_reservations.push(*export);
-                        }
-                        exports.push(selected);
-                        continue;
-                    }
-                    if declared.contains(target) {
-                        let resolved = resolve_tail_move_replacement_expression(
-                            block,
-                            &Expression::var(*target),
-                            target,
-                            false,
-                        );
-                        let selected = match resolved.desc {
-                            ExpressionDesc::Var(VIdent::Id(resolved_target)) => resolved_target,
-                            _ => *target,
-                        };
-                        if !selected.same(export) {
-                            name_reservations.push(*export);
-                        }
-                        exports.push(selected);
-                        continue;
-                    }
-                }
-            }
-            if matches!(&value.desc, ExpressionDesc::Undefined { .. })
+            if matches!(j.ek(value), JsExprKind::Undefined { .. })
                 && ((declared.contains(export)
-                    && can_reuse_existing_undefined_export_binding(block, export))
+                    && can_reuse_existing_undefined_export_binding(j, block, export))
                     || block_ended)
             {
                 exports.push(*export);
                 continue;
             }
-            if reusable_export_value_candidate(value) {
+            if reusable_export_value_candidate(j, value) {
                 // Same OCaml export fold as above: reusable same-name bindings
                 // only arise from variable/module-field export values. See
                 // compiler/core/lam_coercion.ml:99-121.
                 if let Some((late_value, property)) =
-                    move_reused_same_name_export_binding_to_export_tail(block, export, value)
+                    move_reused_same_name_export_binding_to_export_tail(j, block, export, value)
                 {
                     exports.push(*export);
-                    rebound_exports.push(Statement::variable(VariableDeclaration {
-                        ident: *export,
-                        value: Some(late_value),
-                        property,
-                        ident_info: IdentInfo::default(),
-                    }));
+                    rebound_exports.push(JS::define(*export, Some(late_value), property, j));
                     continue;
                 }
-                if keeps_declared_same_name_reusable_export_binding(block, export, value) {
+                if keeps_declared_same_name_reusable_export_binding(j, block, export, value) {
                     exports.push(*export);
                     continue;
                 }
-                if let Some(reused) = reusable_same_name_export_binding(block, export, value) {
+                if let Some(reused) = reusable_same_name_export_binding(j, block, export, value) {
                     exports.push(reused);
                     continue;
                 }
             }
             if let Some(inserted_export) = insert_rebound_export_before_equivalent_later_binding(
+                j,
                 block,
                 export,
                 value,
@@ -1003,18 +1012,13 @@ impl LambdaCompiler {
 
             let rebound = self.id_gen.create(export.name());
             name_reservations.push(*export);
-            let property = if matches!(&value.desc, ExpressionDesc::Var(VIdent::Id(_))) {
+            let property = if value_var.is_some() {
                 LetKind::Alias
             } else {
                 LetKind::Strict
             };
             exports.push(rebound);
-            rebound_exports.push(Statement::variable(VariableDeclaration {
-                ident: rebound,
-                value: Some(value.clone()),
-                property,
-                ident_info: IdentInfo::default(),
-            }));
+            rebound_exports.push(JS::define(rebound, Some(value), property, j));
         }
 
         // OCaml compiler/core/lam_coercion.ml:160-172 folds original flattened
@@ -7892,6 +7896,122 @@ fn collect_modules_from_expression(expr: &Expression, modules: &mut OcamlModuleS
         | ExpressionDesc::Number(_)
         | ExpressionDesc::Undefined { .. }
         | ExpressionDesc::Null => {}
+    }
+}
+
+fn collect_modules_from_js_list(
+    j: &JsArena,
+    block: crate::js_ir::arena::StmtList,
+    modules: &mut OcamlModuleSet,
+) {
+    collect_modules_from_js_block(j, j.stmts(block), modules);
+}
+
+fn collect_modules_from_js_block(j: &JsArena, block: &[JsStmt], modules: &mut OcamlModuleSet) {
+    for stmt in block {
+        collect_modules_from_js_statement(j, *stmt, modules);
+    }
+}
+
+fn collect_modules_from_js_statement(j: &JsArena, stmt: JsStmt, modules: &mut OcamlModuleSet) {
+    let list = |b, m: &mut OcamlModuleSet| collect_modules_from_js_list(j, b, m);
+    match j.sk(stmt) {
+        JsStmtKind::Block(block) => list(block, modules),
+        JsStmtKind::Variable(v) => {
+            let decl = j.var(v);
+            match decl.ident_info.used_stats {
+                UsedStats::DeadPure => {}
+                UsedStats::DeadNonPure => {
+                    if let Some(value) = decl.value
+                        && !matches!(j.ek(value), JsExprKind::Var(_) | JsExprKind::Qualified(_))
+                    {
+                        collect_modules_from_js_expression(j, value, modules);
+                    }
+                }
+                _ => {
+                    if let Some(value) = decl.value {
+                        collect_modules_from_js_expression(j, value, modules);
+                    }
+                }
+            }
+        }
+        JsStmtKind::Exp(expr) | JsStmtKind::Throw(expr) | JsStmtKind::Return(expr) => {
+            collect_modules_from_js_expression(j, expr, modules)
+        }
+        JsStmtKind::If(cond, then_block, else_block) => {
+            collect_modules_from_js_expression(j, cond, modules);
+            list(then_block, modules);
+            list(else_block, modules);
+        }
+        JsStmtKind::While(_, cond, body) => {
+            collect_modules_from_js_expression(j, cond, modules);
+            list(body, modules);
+        }
+        JsStmtKind::ForRange(info) => {
+            let info = j.for_range(info);
+            if let Some(init) = info.init {
+                collect_modules_from_js_expression(j, init, modules);
+            }
+            collect_modules_from_js_expression(j, info.end, modules);
+            list(info.body, modules);
+        }
+        JsStmtKind::ForOf(info) | JsStmtKind::ForAwaitOf(info) => {
+            let info = j.for_of(info);
+            collect_modules_from_js_expression(j, info.iterable, modules);
+            list(info.body, modules);
+        }
+        JsStmtKind::IntSwitch(expr, info) => {
+            collect_modules_from_js_expression(j, expr, modules);
+            let info = j.int_switch(info);
+            for (_, clause) in &info.clauses {
+                list(clause.body, modules);
+            }
+            if let Some(default) = info.default {
+                list(default, modules);
+            }
+        }
+        JsStmtKind::StringSwitch(expr, info) => {
+            collect_modules_from_js_expression(j, expr, modules);
+            let info = j.string_switch(info);
+            for clause in &info.clauses {
+                list(clause.clause.body, modules);
+            }
+            if let Some(default) = info.default {
+                list(default, modules);
+            }
+        }
+        JsStmtKind::Try(info) => {
+            let info = j.try_info(info);
+            list(info.body, modules);
+            if let Some((_, handler_block)) = info.catch {
+                list(handler_block, modules);
+            }
+            if let Some(finalizer_block) = info.finally {
+                list(finalizer_block, modules);
+            }
+        }
+        JsStmtKind::Debugger | JsStmtKind::Break(_) | JsStmtKind::Continue(_) => {}
+    }
+}
+
+fn collect_modules_from_js_expression(j: &JsArena, expr: JsExpr, modules: &mut OcamlModuleSet) {
+    match j.ek(expr) {
+        JsExprKind::Qualified(q) => {
+            let (module, _) = j.qual(q);
+            if !module.dynamic_import {
+                modules.insert(module.clone());
+            }
+        }
+        JsExprKind::OptionalBlock(inner, identity) => {
+            if !identity {
+                modules.insert(runtime_module_id("Primitive_option"));
+            }
+            collect_modules_from_js_expression(j, inner, modules);
+        }
+        JsExprKind::Fun(f) => collect_modules_from_js_list(j, j.fun(f).body, modules),
+        _ => crate::js_ir::walk::each_child(j, expr, |child| {
+            collect_modules_from_js_expression(j, child, modules)
+        }),
     }
 }
 

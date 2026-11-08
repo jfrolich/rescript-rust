@@ -3,7 +3,7 @@
 //! Port of `lam_compile_external_call.ml` + `lam_compile_external_obj.ml`.
 //! Extracted from `lam_compile.rs` for organization.
 
-use super::js_exp_make::{
+use super::js_exp_make_tree::{
     external_polyvar_int_dispatch, external_polyvar_string_dispatch, int_expr, js_seq,
     poly_var_tag_access, poly_var_value_access, runtime_member_for_eta_wrapped_primitive,
     string_switch_iife,

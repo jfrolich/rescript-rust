@@ -3,9 +3,9 @@
 //! Port of `js_of_lam_variant.ml` + variant/switch compilation logic.
 //! Extracted from `lam_compile.rs` for organization.
 
-use super::js_exp_make::{ocaml_typeof_expr, raw_typeof_comparison};
-use super::js_stmt_make::{block_terminates, strict_single_return_expr};
-use super::lam_coercion::push_s_exp;
+use super::js_exp_make_tree::{ocaml_typeof_expr, raw_typeof_comparison};
+use super::js_stmt_make_tree::{block_terminates, strict_single_return_expr};
+use super::lam_coercion_tree::push_s_exp;
 use super::lam_compile::{
     Compiled, GroupedSwitchDefault, LambdaCompiler, StrSw, Sw, TailLoopState,
     trailing_return_expression,

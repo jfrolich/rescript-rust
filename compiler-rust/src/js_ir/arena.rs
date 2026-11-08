@@ -932,6 +932,10 @@ impl JsArena {
     }
 }
 
+/// An owned block under construction: statement handles that become a
+/// [`StmtList`] when a node is built from them.
+pub type Block = Vec<Stmt>;
+
 /// A JS program: its arena plus the top-level statements (`J.program`).
 #[derive(Debug, Clone)]
 pub struct JsProgram {

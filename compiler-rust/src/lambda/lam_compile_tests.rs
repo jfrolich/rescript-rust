@@ -1,17 +1,22 @@
+pub(super) use super::test_support::resolve_export_aliases_tree as resolve_export_aliases;
+pub(super) use super::test_support::tree_passes::{
+    apply_external_shadow_pass, apply_js_flatten_and_mark_dead_pass, apply_js_flatten_pass,
+    apply_js_shake_pass, apply_js_tailcall_inline_pass, extract_toplevel_exports,
+};
 pub(super) use super::test_support::*;
 use super::*;
 pub(super) use crate::cmi::persistent_env::PersistentEnv;
 pub(super) use crate::js_ir::op::{ImportAttributes as JsImportAttributes, PropertyName};
+pub(super) use crate::js_ir::{DepsProgram, Program};
 pub(super) use crate::js_ir::{
     ModulePathResolver, print_block, print_deps_program, print_deps_program_with_directives,
     print_expression,
 };
 pub(super) use crate::lambda::LamLoc;
 pub(super) use crate::lambda::LambdaSwitch;
-pub(super) use crate::lambda::js_exp_make::{
+pub(super) use crate::lambda::js_exp_make_tree::{
     int32_band, int32_bxor, int32_mul, ocaml_typeof_expr, raw_typeof_comparison,
 };
-pub(super) use crate::lambda::lam_coercion::resolve_export_aliases;
 pub(super) use crate::lambda::lam_compile_external::external_module_import_attributes;
 pub(super) use crate::lambda::lam_constant::{
     Constant, ConstructorRuntimeTag, ConstructorTag, PointerInfo,
@@ -491,7 +496,7 @@ fn compile_raw_js_trims_outer_whitespace_before_js_ir_printing() {
         LamLoc::NONE,
     );
 
-    let program = compiler.compile_program(&lam);
+    let program = compiler.compile_program_tree(&lam);
     let raw_code = program
         .block
         .iter()
@@ -1361,7 +1366,7 @@ fn compile_effectful_underscore_binding_from_nested_js_function_calls_survives_s
         },
         ap_transformed_jsx: false,
     }));
-    let program = compiler.compile_program(&Lambda::let_(
+    let program = compiler.compile_program_tree(&Lambda::let_(
         LetKind::Strict,
         unused,
         nested_call,
@@ -1695,7 +1700,7 @@ fn compile_deps_program_reuses_same_name_export_targets() {
         ),
     );
 
-    let deps = compiler.compile_deps_program(&lam);
+    let deps = compiler.compile_deps_program_tree(&lam);
 
     let [exported] = deps.program.exports.as_slice() else {
         panic!("expected a single export");
@@ -1785,7 +1790,7 @@ fn compile_deps_program_keeps_exported_call_result_before_rebound_constant_block
         ),
     );
 
-    let deps = compiler.compile_deps_program(&lam);
+    let deps = compiler.compile_deps_program_tree(&lam);
     let rendered = print_deps_program(&deps, None);
     let res_idx = rendered
         .find("let res = 3;")
@@ -1821,7 +1826,7 @@ fn compile_deps_program_rebinds_different_name_exports_after_effects() {
         ),
     );
 
-    let deps = compiler.compile_deps_program(&lam);
+    let deps = compiler.compile_deps_program_tree(&lam);
 
     let [exported] = deps.program.exports.as_slice() else {
         panic!("expected a single export");
@@ -1885,7 +1890,7 @@ fn compile_deps_program_rebinds_exported_constants_after_surviving_function_bind
         ),
     );
 
-    let deps = compiler.compile_deps_program(&lam);
+    let deps = compiler.compile_deps_program_tree(&lam);
 
     assert_eq!(
         deps.program
@@ -1974,7 +1979,7 @@ fn compile_deps_program_rebinds_marshaled_string_exports_after_surviving_functio
         ),
     );
 
-    let deps = compiler.compile_deps_program(&lam);
+    let deps = compiler.compile_deps_program_tree(&lam);
 
     assert_eq!(
         deps.program
@@ -2012,7 +2017,7 @@ fn compile_deps_program_keeps_same_name_export_aliases_for_unbound_globals() {
         ),
     );
 
-    let deps = compiler.compile_deps_program(&lam);
+    let deps = compiler.compile_deps_program_tree(&lam);
 
     let [exported] = deps.program.exports.as_slice() else {
         panic!("expected a single export");
@@ -2075,7 +2080,7 @@ fn coerce_toplevel_exports_moves_same_name_literal_binding_to_tail_across_later_
 
     let exports = compiler.coerce_toplevel_exports(
         &mut block,
-        ExtractedExports {
+        TreeExtractedExports {
             exports: vec![exported],
             values: vec![Expression::var(exported)],
         },
@@ -2146,7 +2151,7 @@ fn compile_deps_program_declares_export_left_unbound_by_throwing_binding() {
         export_block,
     );
 
-    let deps = compiler.compile_deps_program(&lam);
+    let deps = compiler.compile_deps_program_tree(&lam);
 
     assert_eq!(deps.program.exports, vec![exported]);
     // lam_compile_main.ml `declare_undeclared_exports`: the export the
@@ -2212,7 +2217,7 @@ fn compile_deps_program_declares_export_left_unbound_by_nested_throwing_binding(
         export_block,
     );
 
-    let deps = compiler.compile_deps_program(&lam);
+    let deps = compiler.compile_deps_program_tree(&lam);
 
     assert_eq!(deps.program.exports, vec![exported]);
     // lam_compile_main.ml `declare_undeclared_exports`: the export the
@@ -2541,7 +2546,7 @@ fn lowers_expression_sequences_to_js_comma_expressions() {
         }))),
         Box::new(Lambda::const_(Constant::none())),
     );
-    let program = compiler.compile_program(&Lambda::prim(
+    let program = compiler.compile_program_tree(&Lambda::prim(
         Primitive::Pmakearray,
         vec![sequence],
         LamLoc::NONE,
@@ -3324,7 +3329,7 @@ fn unit_return_function_flips_effect_guard_into_early_return() {
         ),
     );
 
-    let deps = compiler.compile_deps_program(&lam);
+    let deps = compiler.compile_deps_program_tree(&lam);
     let rendered = print_deps_program(&deps, None);
     // OCaml compiles the assignment as a statement whatever the
     // continuation (`compile_assign`), so the tail `else` is
@@ -3373,7 +3378,7 @@ fn unit_return_function_with_for_loop_tail_keeps_negative_guard() {
         ),
     );
 
-    let deps = compiler.compile_deps_program(&lam);
+    let deps = compiler.compile_deps_program_tree(&lam);
     let rendered = print_deps_program(&deps, None);
     assert!(
         rendered.contains("if (!cond) {"),
@@ -3422,7 +3427,7 @@ fn unit_return_function_with_else_for_loop_tail_keeps_negative_guard() {
         ),
     );
 
-    let deps = compiler.compile_deps_program(&lam);
+    let deps = compiler.compile_deps_program_tree(&lam);
     let rendered = print_deps_program(&deps, None);
     assert!(
         rendered.contains("if (cond) {"),
@@ -3478,7 +3483,7 @@ fn unit_return_function_with_local_while_tail_keeps_negative_guard() {
         ),
     );
 
-    let deps = compiler.compile_deps_program(&lam);
+    let deps = compiler.compile_deps_program_tree(&lam);
     let rendered = print_deps_program(&deps, None);
     assert!(
         rendered.contains("if (!cond) {"),
@@ -4774,7 +4779,7 @@ fn flattens_value_sequences_back_to_effect_statements_at_toplevel() {
         }))),
         Box::new(Lambda::const_(Constant::none())),
     );
-    let program = compiler.compile_program(&lam);
+    let program = compiler.compile_program_tree(&lam);
 
     let [stmt] = program.block.as_slice() else {
         panic!("expected a single expression statement");
@@ -4845,7 +4850,7 @@ fn effect_context_calls_with_arg_preludes_skip_intermediate_call_temps() {
         ap_transformed_jsx: false,
     }));
 
-    let program = compiler.compile_program(&lam);
+    let program = compiler.compile_program_tree(&lam);
     let rendered = print_block(&program.block);
     assert!(
         !rendered.contains("let call ="),
@@ -5379,7 +5384,7 @@ fn top_level_if_effects_drop_trailing_pure_undefined_branch_suffixes() {
         )),
     );
 
-    let program = compiler.compile_program(&lam);
+    let program = compiler.compile_program_tree(&lam);
     let rendered = print_block(&program.block);
     assert!(
         !rendered.contains("undefined;"),
@@ -7030,7 +7035,7 @@ fn top_level_record_field_assignments_on_pure_fresh_literals_collapse_to_rhs_eff
         Lambda::unit(),
     );
 
-    let rendered = print_block(&compiler.compile_program(&lam).block);
+    let rendered = print_block(&compiler.compile_program_tree(&lam).block);
     assert!(
         rendered.contains("console.log(\"hi\")"),
         "expected the sequenced logging effect to remain, got:\n{rendered}"
@@ -7380,7 +7385,7 @@ fn lowers_psome_immediates_to_identity_optional_block_like_ocaml() {
 fn lowers_pval_from_option_optional_block_to_inner_value() {
     let mut compiler = LambdaCompiler::new();
     let value = Ident::create_local("value");
-    let program = compiler.compile_program(&Lambda::prim(
+    let program = compiler.compile_program_tree(&Lambda::prim(
         Primitive::PvalFromOption,
         vec![Lambda::prim(
             Primitive::PsomeNotNest,

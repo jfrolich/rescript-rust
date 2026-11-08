@@ -24,8 +24,9 @@ use crate::cmi::portable_types::PortablePersStruct;
 use crate::context::IdGenerator;
 use crate::diagnostics::WarningConfig;
 use crate::ident::Ident;
+use crate::js_ir::arena::JsDepsProgram as DepsProgram;
 use crate::js_ir::{
-    DepsProgram, Kind, ModuleFormat, ModuleId, ModulePathResolutionError, ModulePathResolver,
+    Kind, ModuleFormat, ModuleId, ModulePathResolutionError, ModulePathResolver,
     print_deps_program_with_directives_and_options, print_deps_program_with_source_map,
 };
 use crate::lambda::lam_compile::LambdaCompiler;
@@ -13932,7 +13933,7 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
         })?;
     }
     let mut rendered_programs = if options.skip_js_render {
-        crate::js_ir::dispose_deps_program_nonrecursive(program);
+        drop(program);
         Vec::new()
     } else {
         let mut rendered_programs = vec![(
@@ -14000,15 +14001,15 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
                     code: std::mem::take(&mut primary_js),
                     source_map: primary_source_map,
                 });
-                crate::js_ir::dispose_deps_program_nonrecursive(primary_program);
+                drop(primary_program);
                 String::new()
             } else {
-                crate::js_ir::dispose_deps_program_nonrecursive(primary_program);
+                drop(primary_program);
                 primary_js
             };
             for (path, program, module_path_resolver, lam_locs) in rendered_programs {
                 let Some(path) = path else {
-                    crate::js_ir::dispose_deps_program_nonrecursive(program);
+                    drop(program);
                     continue;
                 };
                 let (code, source_map) = render_js_program(
@@ -14021,7 +14022,7 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
                     Some(&path),
                     lam_locs,
                 );
-                crate::js_ir::dispose_deps_program_nonrecursive(program);
+                drop(program);
                 js_outputs.push(JsOutput {
                     path,
                     code,

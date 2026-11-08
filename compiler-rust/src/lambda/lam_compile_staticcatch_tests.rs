@@ -419,7 +419,7 @@ fn nested_wrapped_staticcatch_trywith_tail_loops_lower_like_gpr_1701() {
         ),
     );
 
-    let deps = compiler.compile_deps_program(&lam);
+    let deps = compiler.compile_deps_program_tree(&lam);
     let rendered = print_deps_program(&deps, None);
 
     assert!(
@@ -1115,7 +1115,7 @@ fn js_pipeline_keeps_single_case_staticcatch_unit_handler_as_fallthrough_guard()
         ),
     );
 
-    let deps = compiler.compile_deps_program(&lam);
+    let deps = compiler.compile_deps_program_tree(&lam);
     let rendered = print_deps_program(&deps, None);
     assert!(
         rendered.contains("if (action === \"One\") {"),

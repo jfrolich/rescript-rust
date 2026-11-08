@@ -3,7 +3,7 @@
 //! Port of `lam_compile_const.ml`.
 //! Extracted from `lam_compile.rs` for organization.
 
-use super::js_exp_make::{
+use super::js_exp_make_tree::{
     js_expr_no_side_effects, poly_var_tag_access, poly_var_value_access, pure_indexed_block_item,
     pure_record_field_item,
 };

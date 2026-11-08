@@ -15,6 +15,7 @@
 
 pub mod arena;
 pub mod arena_tree;
+pub mod build;
 pub mod op;
 pub mod printer;
 pub mod program_printer;

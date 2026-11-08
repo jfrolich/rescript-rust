@@ -96,7 +96,7 @@ fn lowers_js_var_calls_with_runtime_args_even_without_external_arg_metadata() {
         LamLoc::NONE,
     );
 
-    let program = compiler.compile_program(&lam);
+    let program = compiler.compile_program_tree(&lam);
     let [stmt] = program.block.as_slice() else {
         panic!("expected a single expression statement");
     };
@@ -147,7 +147,7 @@ fn lowers_module_external_calls_to_namespace_imports() {
         LamLoc::NONE,
     );
 
-    let deps = compiler.compile_deps_program(&lam);
+    let deps = compiler.compile_deps_program_tree(&lam);
     assert!(matches!(
         deps.modules.as_slice(),
         [ModuleId {
@@ -228,7 +228,7 @@ fn lowers_pjs_object_get_to_method_calls() {
         ap_transformed_jsx: false,
     }));
 
-    let program = compiler.compile_program(&lam);
+    let program = compiler.compile_program_tree(&lam);
     let rendered = print_block(&program.block);
     assert_eq!(rendered, "john.say(\"hey\", \"jude\");");
 }
@@ -246,7 +246,7 @@ fn lowers_pjs_object_set_to_property_assignments() {
         LamLoc::NONE,
     );
 
-    let program = compiler.compile_program(&lam);
+    let program = compiler.compile_program_tree(&lam);
     let rendered = print_block(&program.block);
     assert_eq!(rendered, "student1.name = \"Mary\";");
 }
@@ -280,7 +280,7 @@ fn lowers_spliced_js_calls_by_flattening_literal_variadic_arrays() {
         LamLoc::NONE,
     );
 
-    let program = compiler.compile_program(&lam);
+    let program = compiler.compile_program_tree(&lam);
     let rendered = print_block(&program.block);
     assert_eq!(rendered, "Path.join(\".\", \"Node_path_test\");");
 }
@@ -288,7 +288,7 @@ fn lowers_spliced_js_calls_by_flattening_literal_variadic_arrays() {
 #[test]
 fn lowers_default_module_values_in_dynamic_imports() {
     let mut compiler = LambdaCompiler::new();
-    let program = compiler.compile_program(&Lambda::prim(
+    let program = compiler.compile_program_tree(&Lambda::prim(
         Primitive::Pimport(Box::new(ImportSource::ImportExternal {
             module_: external_module("a"),
             path: vec!["default".to_string()],
@@ -324,7 +324,7 @@ fn lowers_js_new_to_new_expression() {
         LamLoc::NONE,
     );
 
-    let program = compiler.compile_program(&lam);
+    let program = compiler.compile_program_tree(&lam);
     let [stmt] = program.block.as_slice() else {
         panic!("expected a single expression statement");
     };
@@ -434,7 +434,7 @@ fn lowers_js_send_omits_trailing_optional_undefined_args_like_ocaml() {
         LamLoc::NONE,
     );
 
-    let rendered = print_block(&compiler.compile_program(&lam).block);
+    let rendered = print_block(&compiler.compile_program_tree(&lam).block);
     assert_eq!(rendered, "(42).toString();");
 }
 
@@ -472,7 +472,7 @@ fn lowers_js_new_omits_trailing_optional_undefined_args_like_ocaml() {
         LamLoc::NONE,
     );
 
-    let rendered = print_block(&compiler.compile_program(&lam).block);
+    let rendered = print_block(&compiler.compile_program_tree(&lam).block);
     assert_eq!(rendered, "new RegExp(\"ab+c\");");
 }
 
@@ -520,7 +520,7 @@ fn lowers_external_polyvar_string_and_int_args_like_ocaml() {
         LamLoc::NONE,
     );
 
-    let rendered = print_block(&compiler.compile_program(&lam).block);
+    let rendered = print_block(&compiler.compile_program_tree(&lam).block);
     assert_eq!(rendered, "consume(\"in\", 3);");
 }
 
@@ -554,7 +554,7 @@ fn lowers_external_polyvar_payload_args_to_two_js_args_like_ocaml() {
         LamLoc::NONE,
     );
 
-    let rendered = print_block(&compiler.compile_program(&lam).block);
+    let rendered = print_block(&compiler.compile_program_tree(&lam).block);
     assert_eq!(rendered, "handle(\"renamed\", 2);");
 }
 
@@ -621,7 +621,7 @@ fn lowers_marshaled_constant_args_in_js_call() {
         LamLoc::NONE,
     );
 
-    let program = compiler.compile_program(&lam);
+    let program = compiler.compile_program_tree(&lam);
     let [stmt] = program.block.as_slice() else {
         panic!("expected a single expression statement");
     };
@@ -1304,7 +1304,7 @@ fn compile_deps_program_keeps_exported_dict_initializer_object_literals() {
         ),
     );
 
-    let deps = compiler.compile_deps_program(&lam);
+    let deps = compiler.compile_deps_program_tree(&lam);
 
     let [stmt] = deps.program.block.as_slice() else {
         panic!("expected one exported dict binding");
@@ -1399,9 +1399,9 @@ fn js_pass_pipeline_preserves_dict_has_in_operator_through_typeof() {
 #[test]
 fn collects_static_module_dependencies() {
     let mut compiler = LambdaCompiler::new();
-    let deps = compiler.compile_deps_program(&Lambda::global_module(Ident::create_persistent(
-        "Belt_List",
-    )));
+    let deps = compiler.compile_deps_program_tree(&Lambda::global_module(
+        Ident::create_persistent("Belt_List"),
+    ));
 
     assert_eq!(deps.modules.len(), 1);
     assert_eq!(deps.modules[0].id.name(), "Belt_List");
@@ -1439,7 +1439,7 @@ fn dynamic_import_only_possible_required_modules_still_mark_effects_like_ocaml()
         dynamic_import: true,
     }]);
     let deps =
-        compiler.compile_deps_program_with_possible_required_modules(&Lambda::unit(), &extras);
+        compiler.compile_deps_program_with_possible_required_modules_tree(&Lambda::unit(), &extras);
 
     assert_eq!(deps.modules.len(), 1);
     assert!(deps.modules[0].dynamic_import);
@@ -1665,7 +1665,7 @@ fn preserves_impure_side_effect_only_ml_dependencies_from_lambda() {
     let side_effect = Ident::create_persistent("Side_effect");
     let include_binding = Ident::create_local("include");
     let mut compiler = LambdaCompiler::with_module_path_resolver(Some(resolver));
-    let deps = compiler.compile_deps_program(&Lambda::let_(
+    let deps = compiler.compile_deps_program_tree(&Lambda::let_(
         LetKind::Alias,
         include_binding,
         Lambda::global_module(side_effect),
@@ -1768,7 +1768,7 @@ fn resolves_runtime_dynamic_import_to_string_path() {
         false,
     );
     let mut compiler = LambdaCompiler::with_module_path_resolver(Some(resolver));
-    let program = compiler.compile_program(&Lambda::prim(
+    let program = compiler.compile_program_tree(&Lambda::prim(
         Primitive::Pimport(Box::new(ImportSource::ImportModule {
             module_: Ident::create_persistent("Belt_List"),
             path: vec![],

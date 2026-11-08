@@ -3,7 +3,7 @@
 //! Port of `lam_compile_primitive.ml`.
 //! Extracted from `lam_compile.rs` for organization.
 
-use super::js_exp_make::{
+use super::js_exp_make_tree::{
     bool_literal, both_bigint_literals, both_bool_literals, both_float_literals, both_int_literals,
     both_string_literals, compare_bigint_literals, compare_bool_literals, compare_string_literals,
     comparison_to_binop, comparison_to_runtime_member, compile_int_equality,
@@ -134,7 +134,7 @@ impl LambdaCompiler {
             Ptemplate(segments) if segments.len() == 1 && compiled_args.is_empty() => {
                 Expression::new(ExpressionDesc::TemplateLiteral(segments[0].clone()))
             }
-            Ptemplate(segments) => crate::lambda::js_exp_make::interpolated_template(
+            Ptemplate(segments) => crate::lambda::js_exp_make_tree::interpolated_template(
                 segments.clone(),
                 std::mem::take(&mut compiled_args),
             ),

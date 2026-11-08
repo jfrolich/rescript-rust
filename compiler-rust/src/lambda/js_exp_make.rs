@@ -1,134 +1,132 @@
 //! Expression smart constructors for JS IR.
 //!
 //! Port of `js_exp_make.ml` — expression-level helpers used during
-//! Lambda-to-JS compilation.
+//! Lambda-to-JS compilation. Builders take the arena last (see
+//! `js_ir::build`).
 
-use crate::js_ir::op::{Kind, Number};
-use crate::js_ir::{
-    BinOp, Block, CallInfo, CaseClause, Expression, ExpressionDesc, Statement, StatementDesc,
-    StringClause, VIdent, expression_has_no_side_effects,
+use crate::js_ir::CallInfo;
+use crate::js_ir::arena::{
+    Block, Clause, Expr, ExprKind, FunInfo, JsArena, StmtKind, StringClauseInfo,
 };
+use crate::js_ir::build::{exp as E, expression_has_no_side_effects, int_of, stmt as S};
+use crate::js_ir::op::{BinOp, Kind, Number};
 use crate::lambda::lam_compat::Comparison;
 use crate::lambda::lam_primitive::Primitive;
 use crate::lambda::{SwitchCaseTag, TagInfo};
 
-pub(crate) fn js_expr_no_side_effects(expr: &Expression) -> bool {
-    match &expr.desc {
-        ExpressionDesc::Undefined { .. }
-        | ExpressionDesc::Null
-        | ExpressionDesc::Bool(_)
-        | ExpressionDesc::Var(_)
-        | ExpressionDesc::Fun { .. }
-        | ExpressionDesc::Number(_)
-        | ExpressionDesc::Str(_)
-        | ExpressionDesc::TemplateLiteral(_)
-        | ExpressionDesc::JsonLiteral(_) => true,
-        ExpressionDesc::StaticIndex(target, _, _) => js_expr_no_side_effects(target),
-        ExpressionDesc::StringIndex(left, right)
-        | ExpressionDesc::ArrayIndex(left, right)
-        | ExpressionDesc::In(left, right)
-        | ExpressionDesc::StringAppend(left, right)
-        | ExpressionDesc::Seq(left, right) => {
-            js_expr_no_side_effects(left) && js_expr_no_side_effects(right)
+pub(crate) fn js_expr_no_side_effects(a: &JsArena, expr: Expr) -> bool {
+    let pure = |e: Expr| js_expr_no_side_effects(a, e);
+    match a.ek(expr) {
+        ExprKind::Undefined { .. }
+        | ExprKind::Null
+        | ExprKind::Bool(_)
+        | ExprKind::Var(_)
+        | ExprKind::Qualified(_)
+        | ExprKind::Fun(_)
+        | ExprKind::Number(_)
+        | ExprKind::Str(_)
+        | ExprKind::TemplateLiteral(_)
+        | ExprKind::JsonLiteral(_) => true,
+        ExprKind::StaticIndex(target, _, _) => pure(target),
+        ExprKind::StringIndex(left, right)
+        | ExprKind::ArrayIndex(left, right)
+        | ExprKind::In(left, right)
+        | ExprKind::StringAppend(left, right)
+        | ExprKind::Seq(left, right) => pure(left) && pure(right),
+        ExprKind::IsNullOrUndefined(inner)
+        | ExprKind::Length(inner, _)
+        | ExprKind::Typeof(inner)
+        | ExprKind::JsNot(inner)
+        | ExprKind::JsBnot(inner)
+        | ExprKind::CamlBlockTag(inner, _)
+        | ExprKind::OptionalBlock(inner, _) => pure(inner),
+        ExprKind::Array(items, _) | ExprKind::CamlBlock(items, _, _) => {
+            a.exprs(items).iter().all(|e| pure(*e))
         }
-        ExpressionDesc::IsNullOrUndefined(inner)
-        | ExpressionDesc::Length(inner, _)
-        | ExpressionDesc::Typeof(inner)
-        | ExpressionDesc::JsNot(inner)
-        | ExpressionDesc::JsBnot(inner)
-        | ExpressionDesc::CamlBlockTag(inner, _)
-        | ExpressionDesc::OptionalBlock(inner, _) => js_expr_no_side_effects(inner),
-        ExpressionDesc::Array(items, _) => items.iter().all(js_expr_no_side_effects),
-        ExpressionDesc::CamlBlock(items, _, _) => items.iter().all(js_expr_no_side_effects),
-        ExpressionDesc::Object(dup, props) => {
-            dup.as_deref().is_none_or(js_expr_no_side_effects)
-                && props
-                    .iter()
-                    .all(|(_, value)| js_expr_no_side_effects(value))
+        ExprKind::Object(dup, props) => {
+            dup.is_none_or(pure) && a.props(props).iter().all(|(_, value)| pure(*value))
         }
-        ExpressionDesc::Cond(test, consequent, alternate) => {
-            js_expr_no_side_effects(test)
-                && js_expr_no_side_effects(consequent)
-                && js_expr_no_side_effects(alternate)
+        ExprKind::Cond(test, consequent, alternate) => {
+            pure(test) && pure(consequent) && pure(alternate)
         }
-        ExpressionDesc::Bin(BinOp::Eq, _, _) => false,
-        ExpressionDesc::Bin(op @ (BinOp::Pow | BinOp::Div | BinOp::Mod), left, right) => {
+        ExprKind::Bin(BinOp::Eq, _, _) => false,
+        ExprKind::Bin(op @ (BinOp::Pow | BinOp::Div | BinOp::Mod), left, right) => {
             // js_analyzer.ml: on BigInt operands these throw (`**` on a
             // negative exponent, `/` and `%` on a zero divisor). The operand
             // types are not known here, so only a literal right operand that
             // cannot throw is taken as pure.
-            let safe_literal = match &right.desc {
-                ExpressionDesc::Number(Number::BigInt(lit)) => {
-                    if *op == BinOp::Pow {
-                        lit.positive
-                    } else {
-                        lit.value != "0"
+            let safe_literal = match a.ek(right) {
+                ExprKind::Number(n) => match a.number(n) {
+                    Number::BigInt(lit) => {
+                        if op == BinOp::Pow {
+                            lit.positive
+                        } else {
+                            lit.value != "0"
+                        }
                     }
-                }
-                ExpressionDesc::Number(Number::Int { i, .. }) => *op == BinOp::Pow || *i != 0,
-                ExpressionDesc::Number(Number::Float(_)) => true,
+                    Number::Int { i, .. } => op == BinOp::Pow || *i != 0,
+                    Number::Float(_) => true,
+                },
                 _ => false,
             };
-            safe_literal && js_expr_no_side_effects(left)
+            safe_literal && pure(left)
         }
-        ExpressionDesc::Bin(_, left, right) => {
-            js_expr_no_side_effects(left) && js_expr_no_side_effects(right)
+        ExprKind::Bin(_, left, right) => pure(left) && pure(right),
+        ExprKind::TaggedTemplate(tag, _, values) => {
+            pure(tag) && a.exprs(values).iter().all(|e| pure(*e))
         }
-        ExpressionDesc::TaggedTemplate(tag, _, values) => {
-            js_expr_no_side_effects(tag) && values.iter().all(js_expr_no_side_effects)
-        }
-        ExpressionDesc::InterpolatedTemplate { values, .. } => {
-            values.iter().all(js_expr_no_side_effects)
-        }
-        ExpressionDesc::FlatCall(_, _)
-        | ExpressionDesc::Call(_, _, _)
-        | ExpressionDesc::New(_, _)
-        | ExpressionDesc::RawJsCode(_)
-        | ExpressionDesc::Await(_)
-        | ExpressionDesc::Spread(_)
-        | ExpressionDesc::RecordRest(_, _) => false,
+        ExprKind::InterpolatedTemplate(_, values) => a.exprs(values).iter().all(|e| pure(*e)),
+        ExprKind::FlatCall(_, _)
+        | ExprKind::Call(_, _, _)
+        | ExprKind::New(_, _)
+        | ExprKind::RawJsCode(_)
+        | ExprKind::Await(_)
+        | ExprKind::Spread(_)
+        | ExprKind::RecordRest(_, _) => false,
     }
 }
 
 /// js_exp_make.ml:36-50 `remove_pure_sub_exp`: an impure expression is kept
 /// as it is (`Some x`), including its comment and source location.
-pub(crate) fn remove_pure_subexpression(expr: Expression) -> Option<Expression> {
-    match expr.desc {
-        ExpressionDesc::Var(_)
-        | ExpressionDesc::Str(_)
-        | ExpressionDesc::TemplateLiteral(_)
-        | ExpressionDesc::JsonLiteral(_)
-        | ExpressionDesc::Number(_) => None,
-        ExpressionDesc::ArrayIndex(ref left, ref right) => {
-            if is_pure_subexpression(left.as_ref()) && is_pure_subexpression(right.as_ref()) {
+pub(crate) fn remove_pure_subexpression(expr: Expr, j: &mut JsArena) -> Option<Expr> {
+    match j.ek(expr) {
+        ExprKind::Var(_)
+        | ExprKind::Qualified(_)
+        | ExprKind::Str(_)
+        | ExprKind::TemplateLiteral(_)
+        | ExprKind::JsonLiteral(_)
+        | ExprKind::Number(_) => None,
+        ExprKind::ArrayIndex(left, right) => {
+            if is_pure_subexpression(j, left) && is_pure_subexpression(j, right) {
                 None
             } else {
                 Some(expr)
             }
         }
-        ExpressionDesc::Array(ref items, _) => {
-            if items.iter().all(is_pure_subexpression) {
+        ExprKind::Array(items, _) => {
+            if j.exprs(items).iter().all(|e| is_pure_subexpression(j, *e)) {
                 None
             } else {
                 Some(expr)
             }
         }
-        ExpressionDesc::Seq(left, right) => {
-            match (
-                remove_pure_subexpression(*left),
-                remove_pure_subexpression(*right),
-            ) {
+        ExprKind::Seq(left, right) => {
+            let left = remove_pure_subexpression(left, j);
+            let right = remove_pure_subexpression(right, j);
+            match (left, right) {
                 (None, None) => None,
                 // `{x with expression_desc = Seq (u, v)}`.
                 (Some(left), Some(right)) => {
-                    let mut seq = js_seq(left, right);
-                    if seq.source_loc.is_none() {
-                        seq.source_loc = expr.source_loc;
+                    let seq = js_seq(left, right, j);
+                    let mut cold = j.expr_cold(seq);
+                    let outer = j.expr_cold(expr);
+                    if cold.source_loc.is_none() {
+                        cold.source_loc = outer.source_loc;
                     }
-                    if seq.comment.is_none() {
-                        seq.comment = expr.comment;
+                    if cold.comment.is_none() {
+                        cold.comment = outer.comment;
                     }
-                    Some(seq)
+                    Some(j.with_expr_cold(seq, cold))
                 }
                 (None, Some(right)) => Some(right),
                 (Some(left), None) => Some(left),
@@ -139,17 +137,18 @@ pub(crate) fn remove_pure_subexpression(expr: Expression) -> Option<Expression> 
 }
 
 /// Borrowed form of `remove_pure_subexpression(expr).is_none()`.
-pub(crate) fn is_pure_subexpression(expr: &Expression) -> bool {
-    match &expr.desc {
-        ExpressionDesc::Var(_)
-        | ExpressionDesc::Str(_)
-        | ExpressionDesc::TemplateLiteral(_)
-        | ExpressionDesc::JsonLiteral(_)
-        | ExpressionDesc::Number(_) => true,
-        ExpressionDesc::ArrayIndex(left, right) | ExpressionDesc::Seq(left, right) => {
-            is_pure_subexpression(left) && is_pure_subexpression(right)
+pub(crate) fn is_pure_subexpression(a: &JsArena, expr: Expr) -> bool {
+    match a.ek(expr) {
+        ExprKind::Var(_)
+        | ExprKind::Qualified(_)
+        | ExprKind::Str(_)
+        | ExprKind::TemplateLiteral(_)
+        | ExprKind::JsonLiteral(_)
+        | ExprKind::Number(_) => true,
+        ExprKind::ArrayIndex(left, right) | ExprKind::Seq(left, right) => {
+            is_pure_subexpression(a, left) && is_pure_subexpression(a, right)
         }
-        ExpressionDesc::Array(items, _) => items.iter().all(is_pure_subexpression),
+        ExprKind::Array(items, _) => a.exprs(items).iter().all(|e| is_pure_subexpression(a, *e)),
         _ => false,
     }
 }
@@ -213,67 +212,67 @@ pub(crate) enum NullishLiteral {
     Undefined,
 }
 
-pub(crate) fn is_nullish_literal(expr: &Expression) -> Option<NullishLiteral> {
-    match expr.desc {
-        ExpressionDesc::Null => Some(NullishLiteral::Null),
-        ExpressionDesc::Undefined { .. } => Some(NullishLiteral::Undefined),
+pub(crate) fn is_nullish_literal(a: &JsArena, expr: Expr) -> Option<NullishLiteral> {
+    match a.ek(expr) {
+        ExprKind::Null => Some(NullishLiteral::Null),
+        ExprKind::Undefined { .. } => Some(NullishLiteral::Undefined),
         _ => None,
     }
 }
 
-pub(crate) fn is_nullish_eq_impossible_non_null_expr(expr: &Expression) -> bool {
+pub(crate) fn is_nullish_eq_impossible_non_null_expr(a: &JsArena, expr: Expr) -> bool {
     matches!(
-        expr.desc,
-        ExpressionDesc::Bool(_)
-            | ExpressionDesc::Number(_)
-            | ExpressionDesc::Typeof(_)
-            | ExpressionDesc::Fun { .. }
-            | ExpressionDesc::Array(_, _)
-            | ExpressionDesc::CamlBlock(_, _, _)
-    ) && js_expr_no_side_effects(expr)
+        a.ek(expr),
+        ExprKind::Bool(_)
+            | ExprKind::Number(_)
+            | ExprKind::Typeof(_)
+            | ExprKind::Fun(_)
+            | ExprKind::Array(_, _)
+            | ExprKind::CamlBlock(_, _, _)
+    ) && js_expr_no_side_effects(a, expr)
 }
 
 pub(crate) fn compile_nullish_strict_comparison(
     cmp: Comparison,
-    left: Expression,
-    right: Expression,
-) -> Expression {
-    match (is_nullish_literal(&left), is_nullish_literal(&right)) {
+    left: Expr,
+    right: Expr,
+    j: &mut JsArena,
+) -> Expr {
+    match (is_nullish_literal(j, left), is_nullish_literal(j, right)) {
         (Some(NullishLiteral::Null), Some(NullishLiteral::Null))
         | (Some(NullishLiteral::Undefined), Some(NullishLiteral::Undefined)) => {
-            return Expression::bool(matches!(cmp, Comparison::Eq));
+            return E::bool(matches!(cmp, Comparison::Eq), j);
         }
         (Some(NullishLiteral::Null), Some(NullishLiteral::Undefined))
         | (Some(NullishLiteral::Undefined), Some(NullishLiteral::Null)) => {
-            return Expression::bool(matches!(cmp, Comparison::Neq));
+            return E::bool(matches!(cmp, Comparison::Neq), j);
         }
         _ => {}
     }
 
-    if is_nullish_literal(&left).is_some() && is_nullish_eq_impossible_non_null_expr(&right) {
-        return Expression::bool(matches!(cmp, Comparison::Neq));
+    if is_nullish_literal(j, left).is_some() && is_nullish_eq_impossible_non_null_expr(j, right) {
+        return E::bool(matches!(cmp, Comparison::Neq), j);
     }
 
-    if is_nullish_literal(&right).is_some() && is_nullish_eq_impossible_non_null_expr(&left) {
-        return Expression::bool(matches!(cmp, Comparison::Neq));
+    if is_nullish_literal(j, right).is_some() && is_nullish_eq_impossible_non_null_expr(j, left) {
+        return E::bool(matches!(cmp, Comparison::Neq), j);
     }
 
     // OCaml's `eq_null_undefined_boolean` / `neq_null_undefined_boolean`
     // (js_exp_make.ml:1743-1771) construct the final comparison via raw
     // `{expression_desc = Bin (EqEqEq | NotEqEq, a, b); ...}`. This bypasses
     // the `triple_equal` fold that would otherwise collapse
-    // `Optional_block === Undefined` to `false_`. Use `raw_bin_expression`
-    // here to match that behavior — an `Expression::bin` call would route
-    // through `fold_strict_equality` and incorrectly fold the comparison.
-    crate::js_ir::raw_bin_expression(comparison_to_binop(cmp), left, right)
+    // `Optional_block === Undefined` to `false_`.
+    E::raw_bin(comparison_to_binop(cmp), left, right, j)
 }
 
 pub(crate) fn compile_raw_comparison(
     cmp: Comparison,
-    left: Expression,
-    right: Expression,
-) -> Expression {
-    Expression::bin(comparison_to_binop(cmp), left, right)
+    left: Expr,
+    right: Expr,
+    j: &mut JsArena,
+) -> Expr {
+    E::bin(comparison_to_binop(cmp), left, right, j)
 }
 
 pub(crate) fn compare_bool_literals(cmp: Comparison, left: bool, right: bool) -> bool {
@@ -287,52 +286,66 @@ pub(crate) fn compare_bool_literals(cmp: Comparison, left: bool, right: bool) ->
     }
 }
 
-pub(crate) fn compile_int_equality(left: Expression, right: Expression) -> Expression {
-    match (&left.desc, &right.desc) {
-        (
-            ExpressionDesc::Number(Number::Float(left_float)),
-            ExpressionDesc::Number(Number::Float(right_float)),
-        ) if left_float.f == right_float.f => Expression::bool(true),
-        // OCaml's `float_equal` (= `int_equal`) folds Number Int,Number Int
-        // via `bool (i0 = i1)` at `js_exp_make.ml:1217`.
-        (
-            ExpressionDesc::Number(Number::Int { i: left_int, .. }),
-            ExpressionDesc::Number(Number::Int { i: right_int, .. }),
-        ) => Expression::bool(left_int == right_int),
-        // OCaml's `Js_exp_make.int_equal` (= float_equal) constructs a raw
-        // `Bin (EqEqEq, e0, e1)` without going through `bin`/`triple_equal`,
-        // so `3 === null` from `Pintcomp Ceq` stays as the literal comparison
-        // rather than folding to `false` via the nullish-impossible rule in
-        // triple_equal. `Expression::bin`'s `fold_strict_comparison` would
-        // fold here, so we bypass it with the raw constructor.
-        _ => crate::js_ir::raw_bin_expression(comparison_to_binop(Comparison::Eq), left, right),
+fn float_literal(a: &JsArena, e: Expr) -> Option<&str> {
+    match a.ek(e) {
+        ExprKind::Number(n) => match a.number(n) {
+            Number::Float(f) => Some(&f.f),
+            _ => None,
+        },
+        _ => None,
     }
 }
 
-pub(crate) fn runtime_compare_call_args(expr: &Expression) -> Option<(&Expression, &Expression)> {
-    let ExpressionDesc::Call(func, args, _) = &expr.desc else {
+fn bigint_literal(a: &JsArena, e: Expr) -> Option<&crate::js_ir::op::BigIntLit> {
+    match a.ek(e) {
+        ExprKind::Number(n) => match a.number(n) {
+            Number::BigInt(b) => Some(b),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+pub(crate) fn compile_int_equality(left: Expr, right: Expr, j: &mut JsArena) -> Expr {
+    if let (Some(l), Some(r)) = (float_literal(j, left), float_literal(j, right))
+        && l == r
+    {
+        return E::bool(true, j);
+    }
+    // OCaml's `float_equal` (= `int_equal`) folds Number Int,Number Int
+    // via `bool (i0 = i1)` at `js_exp_make.ml:1217`.
+    if let (Some(l), Some(r)) = (int_of(j, left), int_of(j, right)) {
+        return E::bool(l == r, j);
+    }
+    // OCaml's `Js_exp_make.int_equal` (= float_equal) constructs a raw
+    // `Bin (EqEqEq, e0, e1)` without going through `bin`/`triple_equal`,
+    // so `3 === null` from `Pintcomp Ceq` stays as the literal comparison.
+    E::raw_bin(comparison_to_binop(Comparison::Eq), left, right, j)
+}
+
+pub(crate) fn runtime_compare_call_args(a: &JsArena, expr: Expr) -> Option<(Expr, Expr)> {
+    let ExprKind::Call(func, args, _) = a.ek(expr) else {
         return None;
     };
-    let ExpressionDesc::Var(VIdent::Qualified(module, Some(member))) = &func.desc else {
+    let ExprKind::Qualified(q) = a.ek(func) else {
         return None;
     };
-    if !matches!(module.kind, Kind::Runtime) || member != "compare" {
+    let (module, member) = a.qual(q);
+    if !matches!(module.kind, Kind::Runtime) || member != Some("compare") {
         return None;
     }
 
-    match args.as_slice() {
-        [left, right] => Some((left, right)),
+    match a.exprs(args) {
+        [left, right] => Some((*left, *right)),
         _ => None,
     }
 }
 
 /// js_exp_make.ml `string_comp`: literal operands fold by comparing their
 /// semantic values.
-pub(crate) fn compare_string_literals(left: &Expression, right: &Expression) -> Option<bool> {
-    match (
-        left.string_literal_semantic(),
-        right.string_literal_semantic(),
-    ) {
+pub(crate) fn compare_string_literals(a: &JsArena, left: Expr, right: Expr) -> Option<bool> {
+    use crate::js_ir::build::string_literal_semantic as lit;
+    match (lit(a, left), lit(a, right)) {
         (Some(left), Some(right)) => Some(left == right),
         _ => None,
     }
@@ -347,126 +360,93 @@ fn significant_bigint_digits(digits: &str) -> impl Iterator<Item = char> + '_ {
         .skip_while(|c| *c == '0')
 }
 
-pub(crate) fn compare_bigint_literals(left: &Expression, right: &Expression) -> Option<bool> {
-    match (&left.desc, &right.desc) {
-        (
-            ExpressionDesc::Number(Number::BigInt(left_bigint)),
-            ExpressionDesc::Number(Number::BigInt(right_bigint)),
-        ) => Some(
-            left_bigint.positive == right_bigint.positive
-                && significant_bigint_digits(&left_bigint.value)
-                    .eq(significant_bigint_digits(&right_bigint.value)),
+pub(crate) fn compare_bigint_literals(a: &JsArena, left: Expr, right: Expr) -> Option<bool> {
+    match (bigint_literal(a, left), bigint_literal(a, right)) {
+        (Some(l), Some(r)) => Some(
+            l.positive == r.positive
+                && significant_bigint_digits(&l.value).eq(significant_bigint_digits(&r.value)),
         ),
         _ => None,
     }
 }
 
-pub(crate) fn is_optional_block(expr: &Expression) -> bool {
-    matches!(expr.desc, ExpressionDesc::OptionalBlock(_, _))
+pub(crate) fn is_optional_block(a: &JsArena, expr: Expr) -> bool {
+    matches!(a.ek(expr), ExprKind::OptionalBlock(_, _))
 }
 
-fn is_number_or_undefined(expr: &Expression) -> bool {
-    matches!(
-        expr.desc,
-        ExpressionDesc::Number(_) | ExpressionDesc::Undefined { .. }
-    )
+fn is_number_or_undefined(a: &JsArena, expr: Expr) -> bool {
+    matches!(a.ek(expr), ExprKind::Number(_) | ExprKind::Undefined { .. })
 }
 
-pub(crate) fn js_seq(left: Expression, right: Expression) -> Expression {
-    let Expression {
-        source_loc,
-        desc,
-        comment,
-    } = left;
-    let left = match desc {
-        ExpressionDesc::Seq(first, second) if is_number_or_undefined(&second) => {
-            return js_seq(*first, right);
+pub(crate) fn js_seq(left: Expr, right: Expr, j: &mut JsArena) -> Expr {
+    if let ExprKind::Seq(first, second) = j.ek(left) {
+        if is_number_or_undefined(j, second) {
+            return js_seq(first, right, j);
         }
-        ExpressionDesc::Seq(first, second) if is_number_or_undefined(&first) => {
-            return js_seq(*second, right);
+        if is_number_or_undefined(j, first) {
+            return js_seq(second, right, j);
         }
-        desc => Expression {
-            source_loc,
-            desc,
-            comment,
-        },
-    };
-    let Expression {
-        source_loc,
-        desc,
-        comment,
-    } = right;
-    let right = match desc {
-        ExpressionDesc::Seq(first, second) if is_number_or_undefined(&first) => {
-            return js_seq(left, *second);
+    }
+    if let ExprKind::Seq(first, second) = j.ek(right) {
+        if is_number_or_undefined(j, first) {
+            return js_seq(left, second, j);
         }
-        ExpressionDesc::Seq(first, second) if is_number_or_undefined(&second) => {
-            return js_seq(js_seq(left, *first), *second);
+        if is_number_or_undefined(j, second) {
+            let inner = js_seq(left, first, j);
+            return js_seq(inner, second, j);
         }
-        desc => Expression {
-            source_loc,
-            desc,
-            comment,
-        },
-    };
+    }
     if matches!(
-        left.desc,
-        ExpressionDesc::Number(_) | ExpressionDesc::Var(_) | ExpressionDesc::Undefined { .. }
+        j.ek(left),
+        ExprKind::Number(_)
+            | ExprKind::Var(_)
+            | ExprKind::Qualified(_)
+            | ExprKind::Undefined { .. }
     ) {
         return right;
     }
 
-    Expression::new(ExpressionDesc::Seq(Box::new(left), Box::new(right)))
+    E::seq(left, right, j)
 }
 
-pub(crate) fn bool_literal(expr: &Expression) -> Option<bool> {
-    match expr.desc {
-        ExpressionDesc::Bool(value) => Some(value),
+pub(crate) fn bool_literal(a: &JsArena, expr: Expr) -> Option<bool> {
+    match a.ek(expr) {
+        ExprKind::Bool(value) => Some(value),
         _ => None,
     }
 }
 
-pub(crate) fn both_bool_literals(left: &Expression, right: &Expression) -> bool {
-    bool_literal(left).is_some() && bool_literal(right).is_some()
+pub(crate) fn both_bool_literals(a: &JsArena, left: Expr, right: Expr) -> bool {
+    bool_literal(a, left).is_some() && bool_literal(a, right).is_some()
 }
 
-pub(crate) fn both_int_literals(left: &Expression, right: &Expression) -> bool {
-    int_literal(left).is_some() && int_literal(right).is_some()
+pub(crate) fn both_int_literals(a: &JsArena, left: Expr, right: Expr) -> bool {
+    int_literal(a, left).is_some() && int_literal(a, right).is_some()
 }
 
-pub(crate) fn both_float_literals(left: &Expression, right: &Expression) -> bool {
-    matches!(left.desc, ExpressionDesc::Number(Number::Float(_)))
-        && matches!(right.desc, ExpressionDesc::Number(Number::Float(_)))
+pub(crate) fn both_float_literals(a: &JsArena, left: Expr, right: Expr) -> bool {
+    float_literal(a, left).is_some() && float_literal(a, right).is_some()
 }
 
-pub(crate) fn both_bigint_literals(left: &Expression, right: &Expression) -> bool {
-    matches!(left.desc, ExpressionDesc::Number(Number::BigInt(_)))
-        && matches!(right.desc, ExpressionDesc::Number(Number::BigInt(_)))
+pub(crate) fn both_bigint_literals(a: &JsArena, left: Expr, right: Expr) -> bool {
+    bigint_literal(a, left).is_some() && bigint_literal(a, right).is_some()
 }
 
-pub(crate) fn both_string_literals(left: &Expression, right: &Expression) -> bool {
-    matches!(
-        left.desc,
-        ExpressionDesc::Str(_) | ExpressionDesc::TemplateLiteral(_)
-    ) && matches!(
-        right.desc,
-        ExpressionDesc::Str(_) | ExpressionDesc::TemplateLiteral(_)
-    )
+pub(crate) fn both_string_literals(a: &JsArena, left: Expr, right: Expr) -> bool {
+    matches!(a.ek(left), ExprKind::Str(_) | ExprKind::TemplateLiteral(_))
+        && matches!(a.ek(right), ExprKind::Str(_) | ExprKind::TemplateLiteral(_))
 }
 
-pub(crate) fn int_expr(value: i32) -> Expression {
-    Expression::number(Number::int(value))
+pub(crate) fn int_expr(value: i32, j: &mut JsArena) -> Expr {
+    E::int(value, j)
 }
 
-pub(crate) fn int_literal(expr: &Expression) -> Option<i32> {
-    match &expr.desc {
-        ExpressionDesc::Number(Number::Int { i, .. }) => Some(*i),
-        _ => None,
-    }
+pub(crate) fn int_literal(a: &JsArena, expr: Expr) -> Option<i32> {
+    int_of(a, expr)
 }
 
-pub(crate) fn is_zero_int(expr: &Expression) -> bool {
-    int_literal(expr) == Some(0)
+pub(crate) fn is_zero_int(a: &JsArena, expr: Expr) -> bool {
+    int_literal(a, expr) == Some(0)
 }
 
 pub(crate) fn positive_power_of_two_shift(value: i32) -> Option<u32> {
@@ -482,38 +462,55 @@ pub(crate) fn positive_power_of_two_shift(value: i32) -> Option<u32> {
     }
 }
 
-pub(crate) fn to_int32(expr: Expression) -> Expression {
-    int32_bor(expr, int_expr(0))
+pub(crate) fn to_int32(expr: Expr, j: &mut JsArena) -> Expr {
+    let zero = int_expr(0, j);
+    int32_bor(expr, zero, j)
 }
 
-pub(crate) fn int32_add(left: Expression, right: Expression) -> Expression {
-    match (int_literal(&left), int_literal(&right)) {
-        (Some(lhs), Some(rhs)) => int_expr(lhs.wrapping_add(rhs)),
-        _ => to_int32(Expression::bin(BinOp::Plus, left, right)),
+pub(crate) fn int32_add(left: Expr, right: Expr, j: &mut JsArena) -> Expr {
+    match (int_literal(j, left), int_literal(j, right)) {
+        (Some(lhs), Some(rhs)) => int_expr(lhs.wrapping_add(rhs), j),
+        _ => {
+            let sum = E::bin(BinOp::Plus, left, right, j);
+            to_int32(sum, j)
+        }
     }
 }
 
-pub(crate) fn int32_minus(left: Expression, right: Expression) -> Expression {
-    match (int_literal(&left), int_literal(&right)) {
-        (Some(lhs), Some(rhs)) => int_expr(lhs.wrapping_sub(rhs)),
-        _ => to_int32(Expression::bin(BinOp::Minus, left, right)),
+pub(crate) fn int32_minus(left: Expr, right: Expr, j: &mut JsArena) -> Expr {
+    match (int_literal(j, left), int_literal(j, right)) {
+        (Some(lhs), Some(rhs)) => int_expr(lhs.wrapping_sub(rhs), j),
+        _ => {
+            let diff = E::bin(BinOp::Minus, left, right, j);
+            to_int32(diff, j)
+        }
     }
 }
 
-pub(crate) fn int32_mul(left: Expression, right: Expression) -> Expression {
-    match (int_literal(&left), int_literal(&right)) {
-        (_, Some(0)) if expression_has_no_side_effects(&left) => int_expr(0),
-        (Some(0), _) if expression_has_no_side_effects(&right) => int_expr(0),
-        (Some(lhs), Some(rhs)) => int_expr(lhs.wrapping_mul(rhs)),
+pub(crate) fn int32_mul(left: Expr, right: Expr, j: &mut JsArena) -> Expr {
+    let mul = |left, right, j: &mut JsArena| {
+        let product = E::bin(BinOp::Mul, left, right, j);
+        to_int32(product, j)
+    };
+    match (int_literal(j, left), int_literal(j, right)) {
+        (_, Some(0)) if expression_has_no_side_effects(j, left) => int_expr(0, j),
+        (Some(0), _) if expression_has_no_side_effects(j, right) => int_expr(0, j),
+        (Some(lhs), Some(rhs)) => int_expr(lhs.wrapping_mul(rhs), j),
         (_, Some(rhs)) => match positive_power_of_two_shift(rhs) {
-            Some(shift) => int32_lsl(left, int_expr(shift as i32)),
-            None => to_int32(Expression::bin(BinOp::Mul, left, right)),
+            Some(shift) => {
+                let shift = int_expr(shift as i32, j);
+                int32_lsl(left, shift, j)
+            }
+            None => mul(left, right, j),
         },
         (Some(lhs), _) => match positive_power_of_two_shift(lhs) {
-            Some(shift) => int32_lsl(right, int_expr(shift as i32)),
-            None => to_int32(Expression::bin(BinOp::Mul, left, right)),
+            Some(shift) => {
+                let shift = int_expr(shift as i32, j);
+                int32_lsl(right, shift, j)
+            }
+            None => mul(left, right, j),
         },
-        _ => to_int32(Expression::bin(BinOp::Mul, left, right)),
+        _ => mul(left, right, j),
     }
 }
 
@@ -527,224 +524,222 @@ pub(crate) fn ocaml_int32_pow(base: i32, exponent: i32) -> i32 {
     }
 }
 
-pub(crate) fn int32_pow(left: Expression, right: Expression) -> Expression {
-    match (int_literal(&left), int_literal(&right)) {
-        (Some(lhs), Some(rhs)) => int_expr(ocaml_int32_pow(lhs, rhs)),
-        _ => to_int32(Expression::bin(BinOp::Pow, left, right)),
+pub(crate) fn int32_pow(left: Expr, right: Expr, j: &mut JsArena) -> Expr {
+    match (int_literal(j, left), int_literal(j, right)) {
+        (Some(lhs), Some(rhs)) => int_expr(ocaml_int32_pow(lhs, rhs), j),
+        _ => {
+            let pow = E::bin(BinOp::Pow, left, right, j);
+            to_int32(pow, j)
+        }
     }
 }
 
-pub(crate) fn int32_lsl(left: Expression, right: Expression) -> Expression {
-    match (int_literal(&left), int_literal(&right)) {
-        (Some(lhs), Some(rhs)) => int_expr(lhs.wrapping_shl(rhs as u32)),
-        _ => Expression::bin(BinOp::Lsl, left, right),
+pub(crate) fn int32_lsl(left: Expr, right: Expr, j: &mut JsArena) -> Expr {
+    match (int_literal(j, left), int_literal(j, right)) {
+        (Some(lhs), Some(rhs)) => int_expr(lhs.wrapping_shl(rhs as u32), j),
+        _ => E::bin(BinOp::Lsl, left, right, j),
     }
 }
 
-/// Moves the left operand out of a `Bin` expression the caller has already
-/// matched.
-fn into_bin_left(expr: Expression) -> Expression {
-    match expr.desc {
-        ExpressionDesc::Bin(_, inner, _) => *inner,
-        _ => unreachable!("into_bin_left expects a Bin expression"),
+/// The operands of `Bin(op, left, right)`.
+fn bin_parts(a: &JsArena, e: Expr, op: BinOp) -> Option<(Expr, Expr)> {
+    match a.ek(e) {
+        ExprKind::Bin(o, l, r) if o == op => Some((l, r)),
+        _ => None,
     }
 }
 
-pub(crate) fn int32_bor(left: Expression, right: Expression) -> Expression {
-    match (&left.desc, &right.desc) {
-        (
-            ExpressionDesc::Number(Number::Int { i: lhs, .. }),
-            ExpressionDesc::Number(Number::Int { i: rhs, .. }),
-        ) => int_expr(*lhs | *rhs),
-        (_, ExpressionDesc::Bin(BinOp::Lsr, _, shift)) if is_zero_int(shift.as_ref()) => {
-            int32_bor(left, into_bin_left(right))
+pub(crate) fn int32_bor(left: Expr, right: Expr, j: &mut JsArena) -> Expr {
+    if let (Some(lhs), Some(rhs)) = (int_literal(j, left), int_literal(j, right)) {
+        return int_expr(lhs | rhs, j);
+    }
+    if let Some((inner, shift)) = bin_parts(j, right, BinOp::Lsr)
+        && is_zero_int(j, shift)
+    {
+        return int32_bor(left, inner, j);
+    }
+    if let Some((inner, shift)) = bin_parts(j, left, BinOp::Lsr) {
+        if is_zero_int(j, shift) {
+            return int32_bor(inner, right, j);
         }
-        (ExpressionDesc::Bin(BinOp::Lsr, _, shift), _) if is_zero_int(shift.as_ref()) => {
-            int32_bor(into_bin_left(left), right)
+        if is_zero_int(j, right) && int_literal(j, shift).is_some_and(|value| value > 0) {
+            return left;
         }
-        (ExpressionDesc::Bin(BinOp::Lsr, _, shift), _)
-            if is_zero_int(&right)
-                && int_literal(shift.as_ref()).is_some_and(|value| value > 0) =>
-        {
-            left
+    }
+    if let Some((inner, truncation)) = bin_parts(j, left, BinOp::Bor)
+        && is_zero_int(j, right)
+        && is_zero_int(j, truncation)
+    {
+        return int32_bor(inner, right, j);
+    }
+    E::bin(BinOp::Bor, left, right, j)
+}
+
+pub(crate) fn int32_lsr(left: Expr, right: Expr, j: &mut JsArena) -> Expr {
+    if let (Some(lhs), Some(rhs)) = (int_literal(j, left), int_literal(j, right)) {
+        return int_expr(((lhs as u32) >> (rhs as u32)) as i32, j);
+    }
+    if bin_parts(j, left, BinOp::Lsr).is_some() && is_zero_int(j, right) {
+        return left;
+    }
+    if let Some((inner, truncation)) = bin_parts(j, left, BinOp::Bor)
+        && is_zero_int(j, right)
+        && is_zero_int(j, truncation)
+    {
+        return int32_lsr(inner, right, j);
+    }
+    // OCaml returns the raw logical shift here rather than applying
+    // `to_int32` (`compiler/core/js_exp_make.ml:1447-1456`).
+    E::bin(BinOp::Lsr, left, right, j)
+}
+
+pub(crate) fn int32_bxor(left: Expr, right: Expr, j: &mut JsArena) -> Expr {
+    if let (Some(lhs), Some(rhs)) = (int_literal(j, left), int_literal(j, right)) {
+        return int_expr(lhs ^ rhs, j);
+    }
+    if let Some((inner, shift)) = bin_parts(j, right, BinOp::Lsr)
+        && is_zero_int(j, shift)
+    {
+        return int32_bxor(left, inner, j);
+    }
+    if let Some((inner, shift)) = bin_parts(j, left, BinOp::Lsr)
+        && is_zero_int(j, shift)
+    {
+        return int32_bxor(inner, right, j);
+    }
+    E::bin(BinOp::Bxor, left, right, j)
+}
+
+pub(crate) fn int32_band(left: Expr, right: Expr, j: &mut JsArena) -> Expr {
+    if let Some((inner, zero)) = bin_parts(j, left, BinOp::Bor)
+        && is_zero_int(j, zero)
+    {
+        return int32_band(inner, right, j);
+    }
+    E::bin(BinOp::Band, left, right, j)
+}
+
+pub(crate) fn ocaml_typeof_expr(expr: Expr, j: &mut JsArena) -> Expr {
+    match j.ek(expr) {
+        ExprKind::Number(_) | ExprKind::Length(_, _) => E::string("number", j),
+        ExprKind::Str(_) | ExprKind::TemplateLiteral(_) => E::string("string", j),
+        ExprKind::Array(_, _) => E::string("object", j),
+        ExprKind::Bool(_) => E::string("boolean", j),
+        _ => {
+            let inner = j.with_expr_loc(expr, None);
+            j.expr(ExprKind::Typeof(inner))
         }
-        (ExpressionDesc::Bin(BinOp::Bor, _, truncation), _)
-            if is_zero_int(&right) && is_zero_int(truncation.as_ref()) =>
-        {
-            int32_bor(into_bin_left(left), right)
-        }
-        _ => Expression::bin(BinOp::Bor, left, right),
     }
 }
 
-pub(crate) fn int32_lsr(left: Expression, right: Expression) -> Expression {
-    match (&left.desc, &right.desc) {
-        (
-            ExpressionDesc::Number(Number::Int { i: lhs, .. }),
-            ExpressionDesc::Number(Number::Int { i: rhs, .. }),
-        ) => int_expr(((*lhs as u32) >> (*rhs as u32)) as i32),
-        (ExpressionDesc::Bin(BinOp::Lsr, _, _), _) if is_zero_int(&right) => left,
-        (ExpressionDesc::Bin(BinOp::Bor, _, truncation), _)
-            if is_zero_int(&right) && is_zero_int(truncation.as_ref()) =>
-        {
-            int32_lsr(into_bin_left(left), right)
-        }
-        // OCaml returns the raw logical shift here rather than applying
-        // `to_int32` (`compiler/core/js_exp_make.ml:1447-1456`).
-        _ => Expression::bin(BinOp::Lsr, left, right),
-    }
+pub(crate) fn raw_typeof_comparison(
+    expr: Expr,
+    op: BinOp,
+    type_name: &str,
+    j: &mut JsArena,
+) -> Expr {
+    let typeof_expr = ocaml_typeof_expr(expr, j);
+    let name = E::string(type_name, j);
+    E::bin(op, typeof_expr, name, j)
 }
 
-pub(crate) fn int32_bxor(left: Expression, right: Expression) -> Expression {
-    match (&left.desc, &right.desc) {
-        (
-            ExpressionDesc::Number(Number::Int { i: lhs, .. }),
-            ExpressionDesc::Number(Number::Int { i: rhs, .. }),
-        ) => int_expr(*lhs ^ *rhs),
-        (_, ExpressionDesc::Bin(BinOp::Lsr, _, shift)) if is_zero_int(shift.as_ref()) => {
-            int32_bxor(left, into_bin_left(right))
-        }
-        (ExpressionDesc::Bin(BinOp::Lsr, _, shift), _) if is_zero_int(shift.as_ref()) => {
-            int32_bxor(into_bin_left(left), right)
-        }
-        _ => Expression::bin(BinOp::Bxor, left, right),
-    }
+pub(crate) fn is_type_number_expr(expr: Expr, j: &mut JsArena) -> Expr {
+    raw_typeof_comparison(expr, BinOp::EqEqEq, "number", j)
 }
 
-pub(crate) fn int32_band(left: Expression, right: Expression) -> Expression {
-    match &left.desc {
-        ExpressionDesc::Bin(BinOp::Bor, _, zero) if is_zero_int(zero.as_ref()) => {
-            int32_band(into_bin_left(left), right)
-        }
-        _ => Expression::bin(BinOp::Band, left, right),
-    }
-}
-
-pub(crate) fn ocaml_typeof_expr(expr: Expression) -> Expression {
-    let Expression {
-        source_loc: _,
-        desc,
-        comment,
-    } = expr;
-    match desc {
-        ExpressionDesc::Number(_) | ExpressionDesc::Length(_, _) => Expression::string("number"),
-        ExpressionDesc::Str(_) | ExpressionDesc::TemplateLiteral(_) => Expression::string("string"),
-        ExpressionDesc::Array(_, _) => Expression::string("object"),
-        ExpressionDesc::Bool(_) => Expression::string("boolean"),
-        desc => Expression::new(ExpressionDesc::Typeof(Box::new(Expression {
-            source_loc: None,
-            desc,
-            comment,
-        }))),
-    }
-}
-
-pub(crate) fn raw_typeof_comparison(expr: Expression, op: BinOp, type_name: &str) -> Expression {
-    Expression::bin(op, ocaml_typeof_expr(expr), Expression::string(type_name))
-}
-
-pub(crate) fn is_type_number_expr(expr: Expression) -> Expression {
-    raw_typeof_comparison(expr, BinOp::EqEqEq, "number")
-}
-
-pub(crate) fn pure_indexed_block_item(target: &Expression, idx: i32) -> Option<Expression> {
-    if !js_expr_no_side_effects(target) {
+pub(crate) fn pure_indexed_block_item(a: &JsArena, target: Expr, idx: i32) -> Option<Expr> {
+    if !js_expr_no_side_effects(a, target) {
         return None;
     }
 
     let index = usize::try_from(idx).ok()?;
-    match &target.desc {
-        ExpressionDesc::Array(items, _) | ExpressionDesc::CamlBlock(items, _, _) => {
-            items.get(index).cloned()
+    match a.ek(target) {
+        ExprKind::Array(items, _) | ExprKind::CamlBlock(items, _, _) => {
+            a.exprs(items).get(index).copied()
+        }
+        _ => None,
+    }
+}
+
+fn record_block_field(a: &JsArena, target: Expr, field: &str) -> Option<Option<Expr>> {
+    match a.ek(target) {
+        ExprKind::CamlBlock(items, _, tag)
+            if matches!(a.tag(tag), TagInfo::Record(_) | TagInfo::RecordInlined(_)) =>
+        {
+            let fields = a.tag(tag).record_fields().expect("record block");
+            for (item, (field_name, _)) in a.exprs(items).iter().zip(fields.iter()) {
+                if field_name == field {
+                    return Some(Some(*item));
+                }
+            }
+            Some(None)
         }
         _ => None,
     }
 }
 
 pub(crate) fn pure_record_field_item(
-    target: &Expression,
+    a: &JsArena,
+    target: Expr,
     field: &str,
     idx: i32,
-) -> Option<Expression> {
-    if !js_expr_no_side_effects(target) {
+) -> Option<Expr> {
+    if !js_expr_no_side_effects(a, target) {
         return None;
     }
 
-    match &target.desc {
-        ExpressionDesc::CamlBlock(items, _, tag)
-            if matches!(**tag, TagInfo::Record(_) | TagInfo::RecordInlined(_)) =>
-        {
-            let fields = tag.record_fields().expect("record block");
-            for (item, (field_name, _)) in items.iter().zip(fields.iter()) {
-                if field_name == field {
-                    return Some(item.clone());
-                }
-            }
-            None
-        }
-        _ => pure_indexed_block_item(target, idx),
+    match record_block_field(a, target, field) {
+        Some(found) => found,
+        None => pure_indexed_block_item(a, target, idx),
     }
 }
 
 pub(crate) fn direct_projection_from_pure_literal(
-    target: &Expression,
+    a: &JsArena,
+    target: Expr,
     field: Option<&str>,
     index: Option<i32>,
-) -> Option<Expression> {
-    if !js_expr_no_side_effects(target) {
+) -> Option<Expr> {
+    if !js_expr_no_side_effects(a, target) {
         return None;
     }
 
-    match &target.desc {
-        ExpressionDesc::CamlBlock(items, _, tag)
-            if matches!(**tag, TagInfo::Record(_) | TagInfo::RecordInlined(_)) =>
+    match a.ek(target) {
+        ExprKind::CamlBlock(items, _, tag)
+            if matches!(a.tag(tag), TagInfo::Record(_) | TagInfo::RecordInlined(_)) =>
         {
-            let fields = tag.record_fields().expect("record block");
             if let Some(field) = field {
-                for (item, (field_name, _)) in items.iter().zip(fields.iter()) {
-                    if field_name == field {
-                        return Some(item.clone());
-                    }
-                }
-                None
+                record_block_field(a, target, field).flatten()
             } else {
                 let index = usize::try_from(index?).ok()?;
-                items.get(index).cloned()
+                a.exprs(items).get(index).copied()
             }
         }
-        ExpressionDesc::Array(items, _) | ExpressionDesc::CamlBlock(items, _, _) => {
+        ExprKind::Array(items, _) | ExprKind::CamlBlock(items, _, _) => {
             let index = usize::try_from(index?).ok()?;
-            items.get(index).cloned()
+            a.exprs(items).get(index).copied()
         }
         _ => None,
     }
 }
 
-pub(crate) fn poly_var_tag_access(target: &Expression) -> Expression {
-    match &target.desc {
-        ExpressionDesc::CamlBlock(items, _, _) if js_expr_no_side_effects(target) => items
+pub(crate) fn poly_var_tag_access(target: Expr, j: &mut JsArena) -> Expr {
+    match j.ek(target) {
+        ExprKind::CamlBlock(items, _, _) if js_expr_no_side_effects(j, target) => *j
+            .exprs(items)
             .first()
-            .cloned()
             .expect("polyvariant tag access expects a tag element"),
-        _ => Expression::new(ExpressionDesc::StaticIndex(
-            Box::new(target.clone()),
-            "NAME".to_string(),
-            Some(0),
-        )),
+        _ => E::static_index(target, "NAME", Some(0), j),
     }
 }
 
-pub(crate) fn poly_var_value_access(target: &Expression) -> Expression {
-    match &target.desc {
-        ExpressionDesc::CamlBlock(items, _, _) if js_expr_no_side_effects(target) => items
+pub(crate) fn poly_var_value_access(target: Expr, j: &mut JsArena) -> Expr {
+    match j.ek(target) {
+        ExprKind::CamlBlock(items, _, _) if js_expr_no_side_effects(j, target) => *j
+            .exprs(items)
             .get(1)
-            .cloned()
             .expect("polyvariant value access expects a payload element"),
-        _ => Expression::new(ExpressionDesc::StaticIndex(
-            Box::new(target.clone()),
-            "VAL".to_string(),
-            Some(1),
-        )),
+        _ => E::static_index(target, "VAL", Some(1), j),
     }
 }
 
@@ -767,68 +762,75 @@ pub(crate) fn external_polyvar_int_dispatch(dispatches: &[(String, i64)], txt: &
         .unwrap_or_else(|| panic!("missing polyvariant int dispatch for {txt}"))
 }
 
-pub(crate) fn string_switch_iife(
-    scrutinee: Expression,
-    cases: Vec<(String, Expression)>,
-) -> Expression {
-    let clauses = cases
-        .into_iter()
-        .map(|(tag, value)| StringClause {
-            tag_type: SwitchCaseTag::String(tag),
-            clause: CaseClause {
-                source_loc: None,
-                body: vec![Statement::return_(value)],
-                should_break: false,
-                comment: None,
-            },
-        })
-        .collect();
-    Expression::call(
-        Expression::new(ExpressionDesc::Fun {
-            is_method: false,
-            params: vec![],
-            body: vec![Statement::new(StatementDesc::StringSwitch(
-                scrutinee, clauses, None,
-            ))],
-            env: Default::default(),
-            return_unit: false,
-            async_: false,
-            directive: None,
-        }),
-        vec![],
-        CallInfo::default(),
-    )
+/// `function () { body }` called with no arguments.
+pub(crate) fn iife(body: &[crate::js_ir::arena::Stmt], j: &mut JsArena) -> Expr {
+    let f = fun_expr(false, &[], body, false, false, j);
+    E::call(f, &[], CallInfo::default(), j)
 }
 
-pub(crate) fn block_with_return_expr_iife(mut block: Block, expr: Expression) -> Expression {
+/// A function expression (`J.Fun`).
+pub(crate) fn fun_expr(
+    is_method: bool,
+    params: &[crate::ident::Ident],
+    body: &[crate::js_ir::arena::Stmt],
+    return_unit: bool,
+    async_: bool,
+    j: &mut JsArena,
+) -> Expr {
+    let params = j.ident_list(params);
+    let body = j.stmt_list(body);
+    let f = j.fun_id(FunInfo {
+        is_method,
+        params,
+        body,
+        return_unit,
+        async_,
+        directive: None,
+    });
+    j.expr(ExprKind::Fun(f))
+}
+
+pub(crate) fn string_switch_iife(
+    scrutinee: Expr,
+    cases: Vec<(String, Expr)>,
+    j: &mut JsArena,
+) -> Expr {
+    let clauses = cases
+        .into_iter()
+        .map(|(tag, value)| {
+            let ret = S::return_(value, j);
+            StringClauseInfo {
+                tag_type: SwitchCaseTag::String(tag),
+                clause: Clause {
+                    source_loc: None,
+                    body: j.stmt_list(&[ret]),
+                    should_break: false,
+                    comment: None,
+                },
+            }
+        })
+        .collect();
+    let switch = S::string_switch(scrutinee, clauses, None, j);
+    iife(&[switch], j)
+}
+
+pub(crate) fn block_with_return_expr_iife(mut block: Block, expr: Expr, j: &mut JsArena) -> Expr {
     if block.is_empty() {
         return expr;
     }
 
-    block.push(Statement::return_(expr));
-    Expression::call(
-        Expression::new(ExpressionDesc::Fun {
-            is_method: false,
-            params: vec![],
-            body: block,
-            env: Default::default(),
-            return_unit: false,
-            async_: false,
-            directive: None,
-        }),
-        vec![],
-        CallInfo::default(),
-    )
+    block.push(S::return_(expr, j));
+    iife(&block, j)
 }
 
-pub(crate) fn is_type_object_expr(expr: Expression) -> Expression {
-    raw_typeof_comparison(expr, BinOp::EqEqEq, "object")
+pub(crate) fn is_type_object_expr(expr: Expr, j: &mut JsArena) -> Expr {
+    raw_typeof_comparison(expr, BinOp::EqEqEq, "object", j)
 }
 
-pub(crate) fn int_bnot(expr: Expression) -> Expression {
-    match int_literal(&expr) {
-        Some(value) => int_expr(!value),
-        None => Expression::new(ExpressionDesc::JsBnot(Box::new(expr))),
+pub(crate) fn int_bnot(expr: Expr, j: &mut JsArena) -> Expr {
+    match int_literal(j, expr) {
+        Some(value) => int_expr(!value, j),
+        None => j.expr(ExprKind::JsBnot(expr)),
     }
 }
 
@@ -836,16 +838,17 @@ pub(crate) fn int_bnot(expr: Expression) -> Expression {
 /// neighbouring segments; a template left without values is a literal.
 pub(crate) fn interpolated_template(
     segments: Vec<crate::string_literal::TemplateSegment>,
-    values: Vec<Expression>,
-) -> Expression {
+    values: Vec<Expr>,
+    j: &mut JsArena,
+) -> Expr {
     use crate::string_literal::{concat_template, template_from_semantic};
-    fn literal_segment(value: &Expression) -> Option<crate::string_literal::TemplateSegment> {
-        if value.comment.is_some() {
+    fn literal_segment(a: &JsArena, value: Expr) -> Option<crate::string_literal::TemplateSegment> {
+        if a.expr_comment(value).is_some() {
             return None;
         }
-        match &value.desc {
-            ExpressionDesc::Str(semantic) => Some(template_from_semantic(semantic)),
-            ExpressionDesc::TemplateLiteral(segment) => Some(segment.clone()),
+        match a.ek(value) {
+            ExprKind::Str(semantic) => Some(template_from_semantic(a.text(semantic))),
+            ExprKind::TemplateLiteral(segment) => Some(a.template(segment).clone()),
             _ => None,
         }
     }
@@ -863,7 +866,7 @@ pub(crate) fn interpolated_template(
     let mut merged_segments = Vec::new();
     let mut merged_values = Vec::new();
     for (next_segment, value) in segments.zip(values) {
-        match literal_segment(&value) {
+        match literal_segment(j, value) {
             Some(literal) => {
                 parts.push(literal);
                 parts.push(next_segment);
@@ -877,13 +880,16 @@ pub(crate) fn interpolated_template(
     }
     merged_segments.push(concat_template(&parts));
     if merged_segments.len() == 1 && merged_values.is_empty() {
-        Expression::new(ExpressionDesc::TemplateLiteral(
-            merged_segments.pop().expect("one segment"),
-        ))
+        let t = j.template_id(merged_segments.pop().expect("one segment"));
+        j.expr(ExprKind::TemplateLiteral(t))
     } else {
-        Expression::new(ExpressionDesc::InterpolatedTemplate {
-            segments: merged_segments,
-            values: merged_values,
-        })
+        let segments = j.segments_id(merged_segments);
+        let values = j.expr_list(&merged_values);
+        j.expr(ExprKind::InterpolatedTemplate(segments, values))
     }
+}
+
+/// Whether `stmt` is a `Variable` declaration (for statement filters).
+pub(crate) fn is_variable(a: &JsArena, stmt: crate::js_ir::arena::Stmt) -> bool {
+    matches!(a.sk(stmt), StmtKind::Variable(_))
 }

@@ -22,7 +22,7 @@ fn coerce_toplevel_exports_reuses_existing_undefined_binding() {
 
     let exports = compiler.coerce_toplevel_exports(
         &mut block,
-        ExtractedExports {
+        TreeExtractedExports {
             exports: vec![alias, other],
             values: vec![Expression::undefined(false), Expression::var(other)],
         },
@@ -67,7 +67,7 @@ fn coerce_toplevel_exports_keeps_undefined_rebound_after_later_effects() {
 
     let exports = compiler.coerce_toplevel_exports(
         &mut block,
-        ExtractedExports {
+        TreeExtractedExports {
             exports: vec![alias],
             values: vec![Expression::undefined(false)],
         },
@@ -104,7 +104,7 @@ fn coerce_toplevel_exports_skips_unreachable_undefined_placeholder_after_throw()
 
     let exports = compiler.coerce_toplevel_exports(
         &mut block,
-        ExtractedExports {
+        TreeExtractedExports {
             exports: vec![exported],
             values: vec![Expression::undefined(false)],
         },
@@ -146,7 +146,7 @@ fn coerce_and_resolve_keep_declared_same_name_export_aliases() {
 
     let exports = compiler.coerce_toplevel_exports(
         &mut block,
-        ExtractedExports {
+        TreeExtractedExports {
             exports: vec![exported],
             values: vec![Expression::var(target)],
         },
@@ -212,7 +212,7 @@ fn coerce_and_resolve_keep_declared_same_name_function_export_aliases_with_multi
 
     let exports = compiler.coerce_toplevel_exports(
         &mut block,
-        ExtractedExports {
+        TreeExtractedExports {
             exports: vec![exported],
             values: vec![Expression::var(target)],
         },
@@ -291,7 +291,7 @@ fn coerce_toplevel_exports_reuses_existing_same_name_alias_binding_for_matching_
 
     let exports = compiler.coerce_toplevel_exports(
         &mut block,
-        ExtractedExports {
+        TreeExtractedExports {
             exports: vec![exported],
             values: vec![Expression::var(target)],
         },
@@ -333,7 +333,7 @@ fn coerce_toplevel_exports_reuses_existing_same_name_alias_binding_for_matching_
 
     let exports = compiler.coerce_toplevel_exports(
         &mut block,
-        ExtractedExports {
+        TreeExtractedExports {
             exports: vec![exported],
             values: vec![Expression::qualified(set_gen, Some("empty".to_string()))],
         },
@@ -391,7 +391,7 @@ fn coerce_toplevel_exports_keeps_same_name_function_alias_binding_before_later_e
 
     let exports = compiler.coerce_toplevel_exports(
         &mut block,
-        ExtractedExports {
+        TreeExtractedExports {
             exports: vec![exported],
             values: vec![Expression::var(declared_alias)],
         },
@@ -503,7 +503,7 @@ fn coerce_toplevel_exports_keeps_same_name_function_alias_chain_before_later_eff
 
     let exports = compiler.coerce_toplevel_exports(
         &mut block,
-        ExtractedExports {
+        TreeExtractedExports {
             exports: vec![exported],
             values: vec![Expression::var(declared_alias)],
         },
@@ -629,7 +629,7 @@ fn coerce_toplevel_exports_moves_same_name_recursive_function_alias_to_tail_with
 
     let exports = compiler.coerce_toplevel_exports(
         &mut block,
-        ExtractedExports {
+        TreeExtractedExports {
             exports: vec![exported],
             values: vec![Expression::var(fib)],
         },
@@ -746,7 +746,7 @@ fn coerce_toplevel_exports_moves_same_name_export_strict_module_field_binding_to
 
     let exports = compiler.coerce_toplevel_exports(
         &mut block,
-        ExtractedExports {
+        TreeExtractedExports {
             exports: vec![exported],
             values: vec![Expression::var(declared_alias)],
         },
@@ -833,7 +833,7 @@ fn coerce_toplevel_exports_moves_same_name_literal_binding_to_tail_when_reused()
 
     let exports = compiler.coerce_toplevel_exports(
         &mut block,
-        ExtractedExports {
+        TreeExtractedExports {
             exports: vec![exported],
             values: vec![Expression::var(declared)],
         },
@@ -906,7 +906,7 @@ fn coerce_toplevel_exports_keeps_same_name_literal_binding_used_by_later_functio
 
     let exports = compiler.coerce_toplevel_exports(
         &mut block,
-        ExtractedExports {
+        TreeExtractedExports {
             exports: vec![exported],
             values: vec![Expression::var(exported)],
         },
@@ -1005,7 +1005,7 @@ fn coerce_toplevel_exports_moves_same_name_literal_binding_to_tail_across_later_
 
     let exports = compiler.coerce_toplevel_exports(
         &mut block,
-        ExtractedExports {
+        TreeExtractedExports {
             exports: vec![exported],
             values: vec![Expression::var(exported)],
         },
@@ -1118,7 +1118,7 @@ fn coerce_toplevel_exports_rewrites_later_initializers_through_materialized_root
 
     let exports = compiler.coerce_toplevel_exports(
         &mut block,
-        ExtractedExports {
+        TreeExtractedExports {
             exports: vec![exported],
             values: vec![Expression::var(exported)],
         },
@@ -1239,7 +1239,7 @@ fn coerce_toplevel_exports_keeps_same_name_qualified_alias_before_later_function
 
     let exports = compiler.coerce_toplevel_exports(
         &mut block,
-        ExtractedExports {
+        TreeExtractedExports {
             exports: vec![exported],
             values: vec![Expression::var(exported)],
         },
@@ -1309,7 +1309,7 @@ fn coerce_toplevel_exports_keeps_same_name_module_field_binding_before_later_eff
 
     let exports = compiler.coerce_toplevel_exports(
         &mut block,
-        ExtractedExports {
+        TreeExtractedExports {
             exports: vec![exported],
             values: vec![Expression::var(declared)],
         },
@@ -1383,7 +1383,7 @@ fn coerce_toplevel_exports_keeps_same_name_runtime_module_field_alias_before_unu
 
     let exports = compiler.coerce_toplevel_exports(
         &mut block,
-        ExtractedExports {
+        TreeExtractedExports {
             exports: vec![exported],
             values: vec![Expression::var(exported)],
         },
@@ -1459,7 +1459,7 @@ fn coerce_toplevel_exports_keeps_distinct_import_alias_for_late_export_tail() {
 
     let exports = compiler.coerce_toplevel_exports(
         &mut block,
-        ExtractedExports {
+        TreeExtractedExports {
             exports: vec![exported],
             values: vec![Expression::var(bar)],
         },
@@ -1542,7 +1542,7 @@ fn coerce_toplevel_exports_keeps_same_name_export_alias_binding_used_by_later_to
 
     let exports = compiler.coerce_toplevel_exports(
         &mut block,
-        ExtractedExports {
+        TreeExtractedExports {
             exports: vec![int_hash, y],
             values: vec![Expression::var(int_hash), Expression::var(y)],
         },
@@ -1610,7 +1610,7 @@ fn coerce_toplevel_exports_keeps_same_name_import_alias_binding_before_top_level
 
     let exports = compiler.coerce_toplevel_exports(
         &mut block,
-        ExtractedExports {
+        TreeExtractedExports {
             exports: vec![exported],
             values: vec![Expression::var(exported)],
         },
@@ -1706,7 +1706,7 @@ fn coerce_toplevel_exports_moves_function_alias_binding_to_tail_when_later_effec
 
     let exports = compiler.coerce_toplevel_exports(
         &mut block,
-        ExtractedExports {
+        TreeExtractedExports {
             exports: vec![exported],
             values: vec![Expression::var(exported)],
         },
@@ -1806,7 +1806,7 @@ fn coerce_toplevel_exports_keeps_same_name_local_value_alias_binding_for_non_fun
 
     let exports = compiler.coerce_toplevel_exports(
         &mut block,
-        ExtractedExports {
+        TreeExtractedExports {
             exports: vec![exported],
             values: vec![Expression::var(exported)],
         },
@@ -1868,7 +1868,7 @@ fn coerce_toplevel_exports_moves_same_name_ml_module_field_alias_to_tail_across_
 
     let exports = compiler.coerce_toplevel_exports(
         &mut block,
-        ExtractedExports {
+        TreeExtractedExports {
             exports: vec![exported],
             values: vec![Expression::var(exported)],
         },
@@ -1950,7 +1950,7 @@ fn coerce_toplevel_exports_moves_same_name_ml_module_field_alias_with_different_
 
     let exports = compiler.coerce_toplevel_exports(
         &mut block,
-        ExtractedExports {
+        TreeExtractedExports {
             exports: vec![exported],
             values: vec![Expression::var(exported)],
         },
@@ -2032,7 +2032,7 @@ fn coerce_toplevel_exports_keeps_same_name_qualified_value_alias_binding_before_
 
     let exports = compiler.coerce_toplevel_exports(
         &mut block,
-        ExtractedExports {
+        TreeExtractedExports {
             exports: vec![exported],
             values: vec![Expression::qualified(module, Some("default".to_string()))],
         },
