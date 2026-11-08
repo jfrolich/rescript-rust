@@ -185,7 +185,7 @@ fn lowers_module_external_calls_to_namespace_imports() {
 #[test]
 fn translates_external_module_values_to_qualified_members_like_ocaml() {
     let mut compiler = LambdaCompiler::new();
-    let expr = compiler.translate_scoped_module_value(
+    let expr = compiler.translate_scoped_module_value_tree(
         Some(&external_module("react/jsx-runtime")),
         "jsx",
         &[],
@@ -806,7 +806,7 @@ fn lowers_js_object_create_with_optional_polyvar_string_field_inline_like_ocaml(
 #[test]
 fn bind_switch_scrutinee_once_uses_tmp_name_like_ocaml() {
     let mut compiler = LambdaCompiler::new();
-    let (prelude, expr) = compiler.bind_switch_scrutinee_once(
+    let (prelude, expr) = compiler.bind_switch_scrutinee_once_tree(
         vec![],
         Expression::call(
             Expression::var(Ident::create_local("compute")),
@@ -1448,7 +1448,7 @@ fn dynamic_import_only_possible_required_modules_still_mark_effects_like_ocaml()
 
 #[test]
 fn required_modules_skip_dead_pure_external_bindings_like_printer() {
-    let compiler = LambdaCompiler::new();
+    let mut compiler = LambdaCompiler::new();
     let mut dead_info = IdentInfo::default();
     dead_info.used_stats = UsedStats::DeadPure;
     let block = vec![Statement::variable(VariableDeclaration {
@@ -1469,7 +1469,7 @@ fn required_modules_skip_dead_pure_external_bindings_like_printer() {
         ident_info: dead_info,
     })];
 
-    let modules = compiler.collect_required_modules(&block);
+    let modules = compiler.collect_required_modules_tree(&block);
 
     assert!(
         modules.is_empty(),
@@ -1479,7 +1479,7 @@ fn required_modules_skip_dead_pure_external_bindings_like_printer() {
 
 #[test]
 fn sorts_external_module_dependencies_by_module_name() {
-    let compiler = LambdaCompiler::new();
+    let mut compiler = LambdaCompiler::new();
     let block = vec![
         Statement::exp(Expression::qualified(
             ModuleId {
@@ -1507,7 +1507,7 @@ fn sorts_external_module_dependencies_by_module_name() {
         )),
     ];
 
-    let modules = compiler.collect_required_modules(&block);
+    let modules = compiler.collect_required_modules_tree(&block);
 
     assert_eq!(modules.len(), 2);
     assert_eq!(module_sort_name(&modules[0]), "react-intl");
@@ -1516,7 +1516,7 @@ fn sorts_external_module_dependencies_by_module_name() {
 
 #[test]
 fn sorts_required_modules_by_length_before_bytes() {
-    let compiler = LambdaCompiler::new();
+    let mut compiler = LambdaCompiler::new();
     let block = vec![
         Statement::exp(Expression::qualified(
             ModuleId {
@@ -1540,7 +1540,7 @@ fn sorts_required_modules_by_length_before_bytes() {
         )),
     ];
 
-    let modules = compiler.collect_required_modules(&block);
+    let modules = compiler.collect_required_modules_tree(&block);
 
     assert_eq!(modules.len(), 2);
     assert_eq!(module_sort_name(&modules[0]), "mocha");
@@ -1549,7 +1549,7 @@ fn sorts_required_modules_by_length_before_bytes() {
 
 #[test]
 fn required_modules_match_ocaml_sort_across_same_name_import_pairs() {
-    let compiler = LambdaCompiler::new();
+    let mut compiler = LambdaCompiler::new();
     let some_default = ModuleId {
         id: Ident::create_local("SomeEs6Module"),
         kind: Kind::External {
@@ -1612,7 +1612,7 @@ fn required_modules_match_ocaml_sort_across_same_name_import_pairs() {
         )),
     ];
 
-    let modules = compiler.collect_required_modules(&block);
+    let modules = compiler.collect_required_modules_tree(&block);
 
     assert_eq!(
         modules,

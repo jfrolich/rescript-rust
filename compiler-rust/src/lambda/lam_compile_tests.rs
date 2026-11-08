@@ -1,4 +1,7 @@
 pub(super) use super::test_support::resolve_export_aliases_tree as resolve_export_aliases;
+pub(super) use super::test_support::tree_ops::{
+    int_expr, int32_band, int32_bxor, int32_mul, ocaml_typeof_expr, to_int32,
+};
 pub(super) use super::test_support::tree_passes::{
     apply_external_shadow_pass, apply_js_flatten_and_mark_dead_pass, apply_js_flatten_pass,
     apply_js_shake_pass, apply_js_tailcall_inline_pass, extract_toplevel_exports,
@@ -7,16 +10,17 @@ pub(super) use super::test_support::*;
 use super::*;
 pub(super) use crate::cmi::persistent_env::PersistentEnv;
 pub(super) use crate::js_ir::op::{ImportAttributes as JsImportAttributes, PropertyName};
-pub(super) use crate::js_ir::{DepsProgram, Program};
+pub(super) use crate::js_ir::{
+    Block, CaseClause, DepsProgram, Expression, ExpressionDesc, Program, Statement, StatementDesc,
+    StringClause, VIdent, VariableDeclaration,
+};
 pub(super) use crate::js_ir::{
     ModulePathResolver, print_block, print_deps_program, print_deps_program_with_directives,
     print_expression,
 };
 pub(super) use crate::lambda::LamLoc;
 pub(super) use crate::lambda::LambdaSwitch;
-pub(super) use crate::lambda::js_exp_make_tree::{
-    int32_band, int32_bxor, int32_mul, ocaml_typeof_expr, raw_typeof_comparison,
-};
+pub(super) use crate::lambda::js_exp_make::raw_typeof_comparison;
 pub(super) use crate::lambda::lam_compile_external::external_module_import_attributes;
 pub(super) use crate::lambda::lam_constant::{
     Constant, ConstructorRuntimeTag, ConstructorTag, PointerInfo,
@@ -514,7 +518,7 @@ fn compile_raw_js_trims_outer_whitespace_before_js_ir_printing() {
 
 #[test]
 fn compile_constant_named_constructor_uses_string_runtime_name() {
-    let compiled = LambdaCompiler::compile_constant(&Constant::Int {
+    let compiled = compile_constant_tree(&Constant::Int {
         i: 0,
         comment: Some(Box::new(PointerInfo::Constructor(ConstructorTag {
             name: "NoParam".to_string(),
@@ -535,7 +539,7 @@ fn compile_constant_named_constructor_uses_string_runtime_name() {
 
 #[test]
 fn compile_constant_constructor_runtime_tag_uses_runtime_literal() {
-    let compiled = LambdaCompiler::compile_constant(&Constant::Int {
+    let compiled = compile_constant_tree(&Constant::Int {
         i: 0,
         comment: Some(Box::new(PointerInfo::Constructor(ConstructorTag {
             name: "Three".to_string(),
@@ -556,7 +560,7 @@ fn compile_constant_constructor_runtime_tag_uses_runtime_literal() {
 
 #[test]
 fn compile_constant_empty_list_keeps_numeric_zero_with_pointer_comment() {
-    let compiled = LambdaCompiler::compile_constant(&Constant::Int {
+    let compiled = compile_constant_tree(&Constant::Int {
         i: 0,
         comment: Some(Box::new(PointerInfo::Constructor(ConstructorTag {
             name: "[]".to_string(),
@@ -580,10 +584,9 @@ fn compile_constant_empty_list_keeps_numeric_zero_with_pointer_comment() {
 
 #[test]
 fn compile_constant_some_unit_boxes_undefined_none_encoding() {
-    let compiled =
-        LambdaCompiler::compile_constant(&Constant::Some(Box::new(Constant::JsUndefined {
-            is_unit: true,
-        })));
+    let compiled = compile_constant_tree(&Constant::Some(Box::new(Constant::JsUndefined {
+        is_unit: true,
+    })));
 
     assert!(matches!(
         compiled,
@@ -608,7 +611,7 @@ fn compile_constant_some_unit_boxes_undefined_none_encoding() {
 fn compile_constant_escapes_semantic_strings() {
     // lam_compile_const.ml: `Const_string s -> E.str s`, printed by
     // `Js_dump_string.pp_string`.
-    let compiled = LambdaCompiler::compile_constant(&Constant::String("\\\"".to_string()));
+    let compiled = compile_constant_tree(&Constant::String("\\\"".to_string()));
 
     assert!(matches!(
         compiled,
@@ -623,7 +626,7 @@ fn compile_constant_escapes_semantic_strings() {
 #[test]
 fn switch_case_expr_escapes_string_tags() {
     // js_exp_make.ml `tag_type`: `String s -> str s`.
-    let compiled = LambdaCompiler::switch_case_expr(&SwitchCaseTag::String("\\\"".to_string()));
+    let compiled = switch_case_expr_tree(&SwitchCaseTag::String("\\\"".to_string()));
 
     assert!(matches!(
         compiled,
@@ -637,9 +640,9 @@ fn switch_case_expr_escapes_string_tags() {
 
 #[test]
 fn compile_constant_nested_some_none_preserves_nested_optional_boxes() {
-    let compiled = LambdaCompiler::compile_constant(&Constant::Some(Box::new(Constant::Some(
-        Box::new(Constant::JsUndefined { is_unit: false }),
-    ))));
+    let compiled = compile_constant_tree(&Constant::Some(Box::new(Constant::Some(Box::new(
+        Constant::JsUndefined { is_unit: false },
+    )))));
 
     assert_eq!(
         print_expression(&compiled),
@@ -2525,8 +2528,8 @@ fn block_finishes_output_ignores_switch_case_breaks() {
         ))]),
     ))];
 
-    assert!(block_terminates(&block));
-    assert!(!block_finishes_output(&block));
+    assert!(block_terminates_tree(&block));
+    assert!(!block_finishes_output_tree(&block));
 }
 
 #[test]
@@ -2921,7 +2924,7 @@ fn compile_deps_program_keeps_gpr_1438_fallthrough_return_outside_switch() {
     );
 
     let exports = if let Some(mut exports) = extract_toplevel_exports(compiled.expr, &mut block) {
-        if block_terminates(&block) {
+        if block_terminates_tree(&block) {
             for value in &mut exports.values {
                 *value = Expression::undefined(false);
             }
@@ -4149,7 +4152,7 @@ fn if_value_branches_keep_assignment_continuation_through_let_bindings() {
 
 #[test]
 fn assignment_merge_applies_js_not_swap_before_conditional_like_ocaml() {
-    let compiler = LambdaCompiler::new();
+    let mut compiler = LambdaCompiler::new();
     let result = Ident::create_local("result");
     let value = Ident::create_local("value");
     let cond = Expression::not(Expression::is_null_or_undefined(Expression::var(value)));
@@ -4164,7 +4167,7 @@ fn assignment_merge_applies_js_not_swap_before_conditional_like_ocaml() {
         Expression::undefined(false),
     ))];
 
-    let block = compiler.compile_test_assignment_block(&result, cond, then_block, else_block);
+    let block = compiler.compile_test_assignment_block_tree(&result, cond, then_block, else_block);
 
     assert!(matches!(
         block.as_slice(),
@@ -7511,7 +7514,7 @@ fn lowers_pnull_undefined_to_opt_non_inline_operand_to_primitive_option_from_nul
 fn lowers_module_pfield_with_ocaml_identifier_conversion() {
     let mut compiler = LambdaCompiler::new();
     let module_value = Ident::create_local("Js_promise2");
-    let expr = compiler.compile_field_access(
+    let expr = compiler.compile_field_access_tree(
         3,
         &FieldDbgInfo::Module {
             name: "catch".to_string(),
@@ -7543,7 +7546,7 @@ fn lowers_module_pfield_with_ocaml_identifier_conversion() {
 fn lowers_record_pfield_to_positioned_static_access_like_ocaml() {
     let mut compiler = LambdaCompiler::new();
     let record = Ident::create_local("record");
-    let expr = compiler.compile_field_access(
+    let expr = compiler.compile_field_access_tree(
         2,
         &FieldDbgInfo::Record {
             name: "field".to_string(),
@@ -7573,7 +7576,8 @@ fn lowers_record_pfield_to_positioned_static_access_like_ocaml() {
 fn lowers_extension_pfield_to_named_payload_property_like_ocaml() {
     let mut compiler = LambdaCompiler::new();
     let exn = Ident::create_local("exn");
-    let expr = compiler.compile_field_access(1, &FieldDbgInfo::Extension, &Expression::var(exn));
+    let expr =
+        compiler.compile_field_access_tree(1, &FieldDbgInfo::Extension, &Expression::var(exn));
 
     match &expr.desc {
         ExpressionDesc::StaticIndex(target, field, Some(index)) => {
@@ -7599,7 +7603,7 @@ fn lowers_extension_pfield_to_named_payload_property_like_ocaml() {
 fn lowers_module_pfield_from_pure_caml_block_directly_like_ocaml() {
     let mut compiler = LambdaCompiler::new();
     let eq = Ident::create_local("Eq");
-    let expr = compiler.compile_field_access(
+    let expr = compiler.compile_field_access_tree(
         0,
         &FieldDbgInfo::Module {
             name: "Eq".to_string(),
@@ -7625,7 +7629,7 @@ fn lowers_module_pfield_from_pure_caml_block_directly_like_ocaml() {
 fn lowers_record_pfield_from_pure_caml_block_directly_like_ocaml() {
     let mut compiler = LambdaCompiler::new();
     let value = Ident::create_local("value");
-    let expr = compiler.compile_field_access(
+    let expr = compiler.compile_field_access_tree(
         0,
         &FieldDbgInfo::Record {
             name: "d".to_string(),
@@ -7658,7 +7662,7 @@ fn lowers_cons_pfield_from_pure_caml_block_directly_like_ocaml() {
     let mut compiler = LambdaCompiler::new();
     let head = Ident::create_local("head");
     let tail = Ident::create_local("tail");
-    let head_expr = compiler.compile_field_access(
+    let head_expr = compiler.compile_field_access_tree(
         0,
         &FieldDbgInfo::Cons,
         &Expression::new(ExpressionDesc::CamlBlock(
@@ -7679,7 +7683,7 @@ fn lowers_cons_pfield_from_pure_caml_block_directly_like_ocaml() {
             ))),
         )),
     );
-    let tail_expr = compiler.compile_field_access(
+    let tail_expr = compiler.compile_field_access_tree(
         1,
         &FieldDbgInfo::Cons,
         &Expression::new(ExpressionDesc::CamlBlock(
@@ -7721,7 +7725,7 @@ fn lowers_cons_pfield_from_pure_caml_block_directly_like_ocaml() {
 fn lowers_extension_pfield_from_pure_caml_block_directly_like_ocaml() {
     let mut compiler = LambdaCompiler::new();
     let payload = Ident::create_local("payload");
-    let expr = compiler.compile_field_access(
+    let expr = compiler.compile_field_access_tree(
         1,
         &FieldDbgInfo::Extension,
         &Expression::new(ExpressionDesc::CamlBlock(
@@ -7749,9 +7753,12 @@ fn lowers_polyvar_pfield_to_named_static_access_like_ocaml() {
     let mut compiler = LambdaCompiler::new();
     let variant = Ident::create_local("variant");
     let tag =
-        compiler.compile_field_access(0, &FieldDbgInfo::PolyVarTag, &Expression::var(variant));
-    let value =
-        compiler.compile_field_access(1, &FieldDbgInfo::PolyVarContent, &Expression::var(variant));
+        compiler.compile_field_access_tree(0, &FieldDbgInfo::PolyVarTag, &Expression::var(variant));
+    let value = compiler.compile_field_access_tree(
+        1,
+        &FieldDbgInfo::PolyVarContent,
+        &Expression::var(variant),
+    );
 
     match &tag.desc {
         ExpressionDesc::StaticIndex(target, field, Some(index)) => {
@@ -7798,8 +7805,8 @@ fn lowers_polyvar_pfield_from_pure_caml_block_directly_like_ocaml() {
         MutableFlag::Immutable,
         Box::new(TagInfo::PolyVar("Tag".to_string())),
     ));
-    let tag = compiler.compile_field_access(0, &FieldDbgInfo::PolyVarTag, &block);
-    let value = compiler.compile_field_access(1, &FieldDbgInfo::PolyVarContent, &block);
+    let tag = compiler.compile_field_access_tree(0, &FieldDbgInfo::PolyVarTag, &block);
+    let value = compiler.compile_field_access_tree(1, &FieldDbgInfo::PolyVarContent, &block);
 
     assert_eq!(print_expression(&tag), "\"Tag\"");
     assert!(matches!(
@@ -7815,7 +7822,7 @@ fn lowers_polyvar_pfield_from_pure_caml_block_directly_like_ocaml() {
 #[test]
 fn lowers_qualified_ml_module_default_field_without_preconverting_the_member_name() {
     let mut compiler = LambdaCompiler::new();
-    let expr = compiler.compile_field_access(
+    let expr = compiler.compile_field_access_tree(
         0,
         &FieldDbgInfo::Module {
             name: "default".to_string(),
@@ -7847,7 +7854,7 @@ fn lowers_qualified_ml_module_default_field_without_preconverting_the_member_nam
 #[test]
 fn lowers_qualified_ml_module_reserved_fields_through_vident_printing() {
     let mut compiler = LambdaCompiler::new();
-    let expr = compiler.compile_field_access(
+    let expr = compiler.compile_field_access_tree(
         3,
         &FieldDbgInfo::Module {
             name: "catch".to_string(),
@@ -7880,7 +7887,7 @@ fn lowers_qualified_ml_module_reserved_fields_through_vident_printing() {
 fn lowers_qualified_ml_module_closed_undefined_constant_from_cmj() {
     let resolver = resolver_with_checked_in_cmj();
     let mut compiler = LambdaCompiler::with_module_path_resolver(Some(resolver));
-    let expr = compiler.compile_field_access(
+    let expr = compiler.compile_field_access_tree(
         0,
         &FieldDbgInfo::Module {
             name: "empty".to_string(),

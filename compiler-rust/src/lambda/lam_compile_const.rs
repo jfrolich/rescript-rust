@@ -3,15 +3,17 @@
 //! Port of `lam_compile_const.ml`.
 //! Extracted from `lam_compile.rs` for organization.
 
-use super::js_exp_make_tree::{
+use super::js_exp_make::{
     js_expr_no_side_effects, poly_var_tag_access, poly_var_value_access, pure_indexed_block_item,
     pure_record_field_item,
 };
 use super::lam_compile::{LambdaCompiler, pointer_info_comment_text};
 use crate::cmi::persistent_env::CmjExportConstant;
+use crate::js_ir::arena::{Expr, ExprKind, JsArena};
+use crate::js_ir::build::exp as E;
 use crate::js_ir::op::{Kind, MutableFlag, Number};
 use crate::js_ir::printer::convert_ident_name;
-use crate::js_ir::{BinOp, Expression, ExpressionDesc, ModuleId};
+use crate::js_ir::{BinOp, ModuleId};
 use crate::lambda::lam_compat::FieldDbgInfo;
 use crate::lambda::lam_constant::{Constant, ConstructorRuntimeTag, PointerInfo};
 
@@ -24,46 +26,46 @@ impl LambdaCompiler {
         }
     }
 
-    pub(crate) fn nested_some_none(depth: usize, none: Expression) -> Expression {
-        if depth == 0 {
-            none
-        } else {
-            Self::nested_some_none(
-                depth - 1,
-                Expression::new(ExpressionDesc::OptionalBlock(Box::new(none), false)),
-            )
+    pub(crate) fn nested_some_none(depth: usize, none: Expr, j: &mut JsArena) -> Expr {
+        let mut none = none;
+        for _ in 0..depth {
+            none = E::new(ExprKind::OptionalBlock(none, false), j);
         }
+        none
     }
 
-    pub(crate) fn compile_some_constant(inner: &Constant) -> Expression {
+    pub(crate) fn compile_some_constant(inner: &Constant, j: &mut JsArena) -> Expr {
         match Self::some_none_depth(inner) {
-            Some(depth) => Self::nested_some_none(
-                depth,
-                Expression::new(ExpressionDesc::OptionalBlock(
-                    Box::new(Expression::undefined(false)),
-                    false,
-                )),
-            ),
-            None => Expression::new(ExpressionDesc::OptionalBlock(
-                Box::new(Self::compile_constant(inner)),
-                true,
-            )),
+            Some(depth) => {
+                let undefined = E::undefined(false, j);
+                let none = E::new(ExprKind::OptionalBlock(undefined, false), j);
+                Self::nested_some_none(depth, none, j)
+            }
+            None => {
+                let value = Self::compile_constant(inner, j);
+                E::new(ExprKind::OptionalBlock(value, true), j)
+            }
         }
     }
 
-    fn compile_runtime_int(value: i64) -> Expression {
+    fn compile_runtime_int(value: i64, j: &mut JsArena) -> Expr {
         match i32::try_from(value) {
-            Ok(value) => Expression::number(Number::int(value)),
-            Err(_) => Expression::number(Number::float(value.to_string())),
+            Ok(value) => E::number(Number::int(value), j),
+            Err(_) => E::number(Number::float(value.to_string()), j),
         }
     }
 
-    pub(crate) fn compile_constant(cst: &Constant) -> Expression {
+    fn commented_number(n: Number, comment: &str, j: &mut JsArena) -> Expr {
+        let n = j.number_id(n);
+        E::with_comment(ExprKind::Number(n), comment, j)
+    }
+
+    pub(crate) fn compile_constant(cst: &Constant, j: &mut JsArena) -> Expr {
         match cst {
-            Constant::JsNull => Expression::null(),
-            Constant::JsUndefined { is_unit } => Expression::undefined(*is_unit),
-            Constant::JsTrue => Expression::bool(true),
-            Constant::JsFalse => Expression::bool(false),
+            Constant::JsNull => E::null(j),
+            Constant::JsUndefined { is_unit } => E::undefined(*is_unit, j),
+            Constant::JsTrue => E::bool(true, j),
+            Constant::JsFalse => E::bool(false, j),
             Constant::Int {
                 i,
                 comment: Some(info),
@@ -72,79 +74,68 @@ impl LambdaCompiler {
                     unreachable!()
                 };
                 match &tag.runtime_tag {
-                    Some(ConstructorRuntimeTag::Int(value)) => Self::compile_runtime_int(*value),
+                    Some(ConstructorRuntimeTag::Int(value)) => Self::compile_runtime_int(*value, j),
                     // OCaml `Js_exp_make.tag_type`: `String s -> str s`.
-                    Some(ConstructorRuntimeTag::String(value)) => {
-                        Expression::new(ExpressionDesc::Str(value.clone()))
-                    }
+                    Some(ConstructorRuntimeTag::String(value)) => E::string(value, j),
                     Some(ConstructorRuntimeTag::Float(value)) => {
-                        Expression::number(Number::float(value.clone()))
+                        E::number(Number::float(value.clone()), j)
                     }
                     Some(ConstructorRuntimeTag::BigInt(value)) => {
-                        Expression::number(Number::bigint(true, value.clone()))
+                        E::number(Number::bigint(true, value.clone()), j)
                     }
-                    Some(ConstructorRuntimeTag::Bool(value)) => Expression::bool(*value),
-                    Some(ConstructorRuntimeTag::Null) => Expression::null(),
-                    Some(ConstructorRuntimeTag::Undefined) => Expression::undefined(false),
-                    None if tag.name != "[]" => Expression::string(tag.name.clone()),
-                    None => Expression::with_comment(
-                        ExpressionDesc::Number(Number::int(*i)),
-                        tag.name.clone(),
-                    ),
+                    Some(ConstructorRuntimeTag::Bool(value)) => E::bool(*value, j),
+                    Some(ConstructorRuntimeTag::Null) => E::null(j),
+                    Some(ConstructorRuntimeTag::Undefined) => E::undefined(false, j),
+                    None if tag.name != "[]" => E::string(&tag.name, j),
+                    None => Self::commented_number(Number::int(*i), &tag.name, j),
                 }
             }
             Constant::Int { i, comment } => {
                 match pointer_info_comment_text(comment.as_ref().map(|v| &**v)) {
-                    Some(comment) => {
-                        Expression::with_comment(ExpressionDesc::Number(Number::int(*i)), comment)
-                    }
-                    None => Expression::number(Number::int(*i)),
+                    Some(comment) => Self::commented_number(Number::int(*i), &comment, j),
+                    None => E::number(Number::int(*i), j),
                 }
             }
             Constant::Constructor(tag) => match &tag.literal {
                 Some(crate::types::VariantLiteralTag::Int(value)) => {
-                    Expression::number(Number::int(*value as i32))
+                    E::number(Number::int(*value as i32), j)
                 }
                 // lam_compile_const.ml `E.tag_type t`: `String s -> str s`.
-                Some(crate::types::VariantLiteralTag::String(value)) => {
-                    Expression::new(ExpressionDesc::Str(value.clone()))
-                }
+                Some(crate::types::VariantLiteralTag::String(value)) => E::string(value, j),
                 Some(crate::types::VariantLiteralTag::Float(value)) => {
-                    Expression::number(Number::float(value.clone()))
+                    E::number(Number::float(value.clone()), j)
                 }
                 // js_exp_make.ml `literal_tag`: `Bigint_utils.parse_bigint`.
                 Some(crate::types::VariantLiteralTag::BigInt(value)) => {
                     let (positive, digits) = crate::types::typecore::parse_bigint_literal(value);
-                    Expression::number(Number::bigint(positive, digits))
+                    E::number(Number::bigint(positive, digits), j)
                 }
-                Some(crate::types::VariantLiteralTag::Bool(value)) => Expression::bool(*value),
-                Some(crate::types::VariantLiteralTag::Null) => Expression::null(),
-                Some(crate::types::VariantLiteralTag::Undefined) => Expression::undefined(false),
-                None if tag.name == "[]" => Expression::with_comment(
-                    ExpressionDesc::Number(Number::int(0)),
-                    tag.name.clone(),
-                ),
-                None => Expression::string(tag.name.clone()),
+                Some(crate::types::VariantLiteralTag::Bool(value)) => E::bool(*value, j),
+                Some(crate::types::VariantLiteralTag::Null) => E::null(j),
+                Some(crate::types::VariantLiteralTag::Undefined) => E::undefined(false, j),
+                None if tag.name == "[]" => Self::commented_number(Number::int(0), &tag.name, j),
+                None => E::string(&tag.name, j),
             },
             Constant::NativeInt { i, comment } => {
                 match pointer_info_comment_text(comment.as_ref().map(|v| &**v)) {
-                    Some(comment) => Expression::with_comment(
-                        ExpressionDesc::Number(Number::float(i.to_string())),
-                        comment,
-                    ),
-                    None => Expression::number(Number::float(i.to_string())),
+                    Some(comment) => {
+                        Self::commented_number(Number::float(i.to_string()), &comment, j)
+                    }
+                    None => E::number(Number::float(i.to_string()), j),
                 }
             }
-            Constant::Char(c) => Expression::number(Number::Int { i: *c, c: Some(*c) }),
-            Constant::String(s) => Expression::string(s.clone()),
-            Constant::ImmString(s) => Expression::new(ExpressionDesc::Str(s.clone())),
-            Constant::Float(f) => Expression::number(Number::float(f.clone())),
+            Constant::Char(c) => E::number(Number::Int { i: *c, c: Some(*c) }, j),
+            Constant::String(s) | Constant::ImmString(s) => E::string(s, j),
+            Constant::Float(f) => E::number(Number::float(f.clone()), j),
             Constant::BigInt { negative, value } => {
-                Expression::number(Number::bigint(!negative, value.clone()))
+                E::number(Number::bigint(!negative, value.clone()), j)
             }
-            Constant::Pointer(name) => Expression::string(name.clone()),
+            Constant::Pointer(name) => E::string(name, j),
             Constant::Block { tag_info, elements } => {
-                let elems = elements.iter().map(Self::compile_constant).collect();
+                let elems: Vec<Expr> = elements
+                    .iter()
+                    .map(|element| Self::compile_constant(element, j))
+                    .collect();
                 // OCaml's `Lam_compile_const.translate` (lam_compile_const.ml:67-69)
                 // calls `Js_of_lam_block.make_block NA tag_info ...` — `NA`, not
                 // `Immutable`. Downstream JS-pass rules that match
@@ -155,22 +146,18 @@ impl LambdaCompiler {
                 // `let CustomizeTags = Pmakeblock(...)` (which IS `Immutable`) gets
                 // its inner `Caml_block(NA)` constants hoisted to
                 // `let CustomizeTags_d = ...`. Mirror the OCaml convention here.
-                Expression::new(ExpressionDesc::CamlBlock(
-                    elems,
-                    MutableFlag::NA,
-                    tag_info.clone(),
-                ))
+                E::caml_block(&elems, MutableFlag::NA, (**tag_info).clone(), j)
             }
-            Constant::Some(inner) => Self::compile_some_constant(inner),
-            Constant::ModuleAlias => Expression::undefined(false),
+            Constant::Some(inner) => Self::compile_some_constant(inner, j),
+            Constant::ModuleAlias => E::undefined(false, j),
         }
     }
 
-    pub(crate) fn cmj_export_constant_expr(constant: CmjExportConstant) -> Expression {
+    pub(crate) fn cmj_export_constant_expr(constant: CmjExportConstant, j: &mut JsArena) -> Expr {
         match constant {
-            CmjExportConstant::Bool(value) => Expression::bool(value),
-            CmjExportConstant::Null => Expression::null(),
-            CmjExportConstant::Undefined { is_unit } => Expression::undefined(is_unit),
+            CmjExportConstant::Bool(value) => E::bool(value, j),
+            CmjExportConstant::Null => E::null(j),
+            CmjExportConstant::Undefined { is_unit } => E::undefined(is_unit, j),
         }
     }
 
@@ -178,7 +165,7 @@ impl LambdaCompiler {
         &mut self,
         module: &ModuleId,
         field_name: &str,
-    ) -> Option<Expression> {
+    ) -> Option<Expr> {
         if !matches!(module.kind, Kind::Ml) {
             return None;
         }
@@ -194,106 +181,80 @@ impl LambdaCompiler {
             },
         )?;
         let constant = constants.get(field_name).copied()?;
-        Some(Self::cmj_export_constant_expr(constant))
+        Some(Self::cmj_export_constant_expr(constant, &mut self.j))
     }
 
     pub(crate) fn compile_field_access(
         &mut self,
         idx: i32,
         info: &FieldDbgInfo,
-        target: &Expression,
-    ) -> Expression {
+        target: Expr,
+    ) -> Expr {
+        let indexed = |j: &mut JsArena, field: &str, pos: Option<i32>| {
+            pure_indexed_block_item(j, target, idx)
+                .unwrap_or_else(|| E::static_index(target, field, pos, j))
+        };
         match info {
-            FieldDbgInfo::Module { name } => match &target.desc {
-                ExpressionDesc::Var(crate::js_ir::VIdent::Qualified(module, None)) => {
-                    if let Some(constant) = self.resolve_cmj_module_field_constant(module, name) {
+            FieldDbgInfo::Module { name } => match self.j.ek(target) {
+                ExprKind::Qualified(q) if self.j.qual(q).1.is_none() => {
+                    let module = self.j.qual(q).0.clone();
+                    if let Some(constant) = self.resolve_cmj_module_field_constant(&module, name) {
                         return constant;
                     }
-                    Expression::qualified(module.clone(), Some(name.clone()))
+                    E::qualified(module, Some(name.clone()), &mut self.j)
                 }
-                _ => pure_indexed_block_item(target, idx).unwrap_or_else(|| {
-                    Expression::new(ExpressionDesc::StaticIndex(
-                        Box::new(target.clone()),
-                        convert_ident_name(name),
-                        Some(idx),
-                    ))
-                }),
+                _ => indexed(&mut self.j, &convert_ident_name(name), Some(idx)),
             },
             FieldDbgInfo::Record { name }
             | FieldDbgInfo::RecordInline { name }
-            | FieldDbgInfo::RecordExtension { name } => pure_record_field_item(target, name, idx)
-                .unwrap_or_else(|| {
+            | FieldDbgInfo::RecordExtension { name } => {
+                pure_record_field_item(&self.j, target, name, idx).unwrap_or_else(|| {
                     // OCaml `record_access` keeps the field position in
                     // `Static_index` so `js_pass_flatten_and_mark_dead` can
                     // substitute projections from materialized blocks
                     // (compiler/core/js_exp_make.ml:399-409).
-                    Expression::new(ExpressionDesc::StaticIndex(
-                        Box::new(target.clone()),
-                        name.clone(),
-                        Some(idx),
-                    ))
-                }),
-            FieldDbgInfo::Extension => pure_indexed_block_item(target, idx).unwrap_or_else(|| {
-                Expression::new(ExpressionDesc::StaticIndex(
-                    Box::new(target.clone()),
-                    format!("_{}", idx),
-                    Some(idx),
-                ))
-            }),
-            FieldDbgInfo::Cons => pure_indexed_block_item(target, idx).unwrap_or_else(|| {
-                // OCaml `cons_access` delegates to `record_access`, preserving
-                // the position metadata (compiler/core/js_exp_make.ml:417-423).
-                Expression::new(ExpressionDesc::StaticIndex(
-                    Box::new(target.clone()),
-                    match idx {
-                        0 => "hd".to_string(),
-                        1 => "tl".to_string(),
-                        _ => format!("_{}", idx),
-                    },
-                    Some(idx),
-                ))
-            }),
-            FieldDbgInfo::PolyVarTag => poly_var_tag_access(target),
-            FieldDbgInfo::PolyVarContent => poly_var_value_access(target),
-            FieldDbgInfo::VariantTag => pure_indexed_block_item(target, idx).unwrap_or_else(|| {
-                Expression::new(ExpressionDesc::StaticIndex(
-                    Box::new(target.clone()),
-                    "TAG".to_string(),
-                    None,
-                ))
-            }),
-            FieldDbgInfo::Variant => pure_indexed_block_item(target, idx).unwrap_or_else(|| {
-                // OCaml `variant_access` delegates to `record_access`, preserving
-                // the position metadata (compiler/core/js_exp_make.ml:414-415).
-                Expression::new(ExpressionDesc::StaticIndex(
-                    Box::new(target.clone()),
-                    format!("_{}", idx),
-                    Some(idx),
-                ))
-            }),
-            _ => pure_indexed_block_item(target, idx).unwrap_or_else(|| {
-                Expression::new(ExpressionDesc::ArrayIndex(
-                    Box::new(target.clone()),
-                    Box::new(Expression::number(Number::int(idx))),
-                ))
+                    E::static_index(target, name, Some(idx), &mut self.j)
+                })
+            }
+            FieldDbgInfo::Extension => indexed(&mut self.j, &format!("_{}", idx), Some(idx)),
+            // OCaml `cons_access` delegates to `record_access`, preserving
+            // the position metadata (compiler/core/js_exp_make.ml:417-423).
+            FieldDbgInfo::Cons => {
+                let field = match idx {
+                    0 => "hd".to_string(),
+                    1 => "tl".to_string(),
+                    _ => format!("_{}", idx),
+                };
+                indexed(&mut self.j, &field, Some(idx))
+            }
+            FieldDbgInfo::PolyVarTag => poly_var_tag_access(target, &mut self.j),
+            FieldDbgInfo::PolyVarContent => poly_var_value_access(target, &mut self.j),
+            FieldDbgInfo::VariantTag => indexed(&mut self.j, "TAG", None),
+            // OCaml `variant_access` delegates to `record_access`, preserving
+            // the position metadata (compiler/core/js_exp_make.ml:414-415).
+            FieldDbgInfo::Variant => indexed(&mut self.j, &format!("_{}", idx), Some(idx)),
+            _ => pure_indexed_block_item(&self.j, target, idx).unwrap_or_else(|| {
+                let index = E::int(idx, &mut self.j);
+                E::new(ExprKind::ArrayIndex(target, index), &mut self.j)
             }),
         }
     }
 
     pub(crate) fn compile_set_field(
-        &self,
+        &mut self,
         idx: i32,
         info: &crate::lambda::lam_compat::SetFieldDbgInfo,
-        target: &Expression,
-        value: &Expression,
-    ) -> Expression {
-        if js_expr_no_side_effects(target)
+        target: Expr,
+        value: Expr,
+    ) -> Expr {
+        let j = &mut self.j;
+        if js_expr_no_side_effects(j, target)
             && matches!(
-                target.desc,
-                ExpressionDesc::Array(_, _) | ExpressionDesc::CamlBlock(_, _, _)
+                j.ek(target),
+                ExprKind::Array(_, _) | ExprKind::CamlBlock(_, _, _)
             )
         {
-            return value.clone();
+            return value;
         }
 
         let field = match info {
@@ -302,13 +263,9 @@ impl LambdaCompiler {
             | crate::lambda::lam_compat::SetFieldDbgInfo::RecordExtensionSet(name) => {
                 // OCaml record assignment keeps `Some(pos)` on the indexed
                 // property (compiler/core/js_exp_make.ml:504-520).
-                Expression::new(ExpressionDesc::StaticIndex(
-                    Box::new(target.clone()),
-                    name.clone(),
-                    Some(idx),
-                ))
+                E::static_index(target, name, Some(idx), j)
             }
         };
-        Expression::bin(BinOp::Eq, field, value.clone())
+        E::bin(BinOp::Eq, field, value, j)
     }
 }

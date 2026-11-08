@@ -233,6 +233,16 @@ pub mod exp {
         j.expr(kind)
     }
 
+    /// An expression list (arena last, so items may be built inline).
+    pub fn list(items: &[Expr], j: &mut JsArena) -> ExprList {
+        j.expr_list(items)
+    }
+
+    /// An interned string (arena last, like the other builders).
+    pub fn str_id(s: &str, j: &mut JsArena) -> StrId {
+        j.str(s)
+    }
+
     pub fn with_comment(kind: ExprKind, comment: &str, j: &mut JsArena) -> Expr {
         j.expr_commented(kind, comment)
     }
@@ -1189,6 +1199,11 @@ pub mod stmt {
     /// A statement with no folding.
     pub fn new(kind: StmtKind, j: &mut JsArena) -> Stmt {
         normalize(kind, None, j)
+    }
+
+    /// A statement list (arena last, so items may be built inline).
+    pub fn list(items: &[Stmt], j: &mut JsArena) -> StmtList {
+        j.stmt_list(items)
     }
 
     /// A statement with a comment.

@@ -936,6 +936,16 @@ impl JsArena {
 /// [`StmtList`] when a node is built from them.
 pub type Block = Vec<Stmt>;
 
+impl StmtList {
+    /// The shared empty block, valid in every arena.
+    pub const EMPTY: StmtList = StmtList(NonZeroU32::MIN);
+}
+
+impl ExprList {
+    /// The shared empty expression list, valid in every arena.
+    pub const EMPTY: ExprList = ExprList(NonZeroU32::MIN);
+}
+
 /// A JS program: its arena plus the top-level statements (`J.program`).
 #[derive(Debug, Clone)]
 pub struct JsProgram {

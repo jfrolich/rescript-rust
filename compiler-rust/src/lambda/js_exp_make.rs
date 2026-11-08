@@ -5,9 +5,7 @@
 //! `js_ir::build`).
 
 use crate::js_ir::CallInfo;
-use crate::js_ir::arena::{
-    Block, Clause, Expr, ExprKind, FunInfo, JsArena, StmtKind, StringClauseInfo,
-};
+use crate::js_ir::arena::{Block, Clause, Expr, ExprKind, FunInfo, JsArena, StringClauseInfo};
 use crate::js_ir::build::{exp as E, expression_has_no_side_effects, int_of, stmt as S};
 use crate::js_ir::op::{BinOp, Kind, Number};
 use crate::lambda::lam_compat::Comparison;
@@ -887,9 +885,4 @@ pub(crate) fn interpolated_template(
         let values = j.expr_list(&merged_values);
         j.expr(ExprKind::InterpolatedTemplate(segments, values))
     }
-}
-
-/// Whether `stmt` is a `Variable` declaration (for statement filters).
-pub(crate) fn is_variable(a: &JsArena, stmt: crate::js_ir::arena::Stmt) -> bool {
-    matches!(a.sk(stmt), StmtKind::Variable(_))
 }

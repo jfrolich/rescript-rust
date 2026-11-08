@@ -24,20 +24,17 @@
 
 pub mod arena;
 pub mod js_exp_make;
-pub mod js_exp_make_tree;
 pub mod js_pass_external_shadow;
 pub mod js_pass_flatten_and_mark_dead;
 pub mod js_pass_record_rest;
 pub mod js_pass_tailcall_inline;
 pub mod js_shake;
 pub mod js_stmt_make;
-pub mod js_stmt_make_tree;
 pub mod lam_analysis;
 pub mod lam_arity;
 pub mod lam_beta_reduce;
 pub mod lam_closure;
 pub mod lam_coercion;
-pub mod lam_coercion_tree;
 pub mod lam_compat;
 pub mod lam_compile;
 pub mod lam_compile_const;
