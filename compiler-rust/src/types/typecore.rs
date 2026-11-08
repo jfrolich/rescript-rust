@@ -10505,7 +10505,7 @@ fn finish_non_gadt_type_cases(
         let lev = ctx.current_stamp();
         ctx.init_def(lev + 1000);
         unused_check_level = lev;
-        unused_expected_ty = crate::types::ctype::subst_identity_copy(ctx, ty_arg);
+        unused_expected_ty = crate::types::ctype::subst_for_saving_copy(ctx, ty_arg);
         let partial = if partial_flag {
             parmatch_check_partial(
                 tctx,
@@ -11683,7 +11683,7 @@ fn type_match(
     let mut unused_expected_ty = ty_arg;
     let partial = if has_generalized_value_patterns {
         unused_check_level = gadt_lev;
-        unused_expected_ty = crate::types::ctype::subst_identity_copy(ctx, ty_arg);
+        unused_expected_ty = crate::types::ctype::subst_for_saving_copy(ctx, ty_arg);
         let partial = parmatch_check_partial(
             tctx,
             val_case_env,
@@ -11715,7 +11715,7 @@ fn type_match(
         let lev = ctx.current_stamp();
         ctx.init_def(lev + 1000);
         unused_check_level = lev;
-        unused_expected_ty = crate::types::ctype::subst_identity_copy(ctx, ty_arg);
+        unused_expected_ty = crate::types::ctype::subst_for_saving_copy(ctx, ty_arg);
         let partial = parmatch_check_partial(
             tctx,
             val_case_env,
@@ -13481,7 +13481,7 @@ fn type_function_nary(
             Partial::Total
         } else {
             let ty_arg_check = if do_init {
-                crate::types::ctype::subst_identity_copy(ctx, ty_arg_c)
+                crate::types::ctype::subst_for_saving_copy(ctx, ty_arg_c)
             } else {
                 ty_arg_c
             };

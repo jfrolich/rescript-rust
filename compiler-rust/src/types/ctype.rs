@@ -12641,7 +12641,7 @@ pub fn copy_type(ctx: &TypeContext, ty: TypeExprRef) -> TypeExprRef {
 /// Used in type_newtype to ensure replace_newtype_path doesn't corrupt
 /// shared pattern types.
 pub fn subst_identity_copy(ctx: &TypeContext, ty: TypeExprRef) -> TypeExprRef {
-    subst_identity_copy_with_partial(ctx, ty, false)
+    subst_identity_copy_with_mode(ctx, ty, SubstCopyMode::IDENTITY)
 }
 
 pub fn subst_identity_copy_many(ctx: &TypeContext, types: &[TypeExprRef]) -> Vec<TypeExprRef> {
@@ -12653,7 +12653,15 @@ pub fn subst_identity_copy_many(ctx: &TypeContext, types: &[TypeExprRef]) -> Vec
     ctx.with_copy_session(|| {
         types
             .iter()
-            .map(|ty| subst_identity_copy_rec(ctx, *ty, false, &mut seen, &mut row_more_markers))
+            .map(|ty| {
+                subst_identity_copy_rec(
+                    ctx,
+                    *ty,
+                    SubstCopyMode::IDENTITY,
+                    &mut seen,
+                    &mut row_more_markers,
+                )
+            })
             .collect()
     })
 }
@@ -12663,19 +12671,59 @@ pub fn subst_identity_copy_with_partial(
     ty: TypeExprRef,
     reopen_closed_variant_rows: bool,
 ) -> TypeExprRef {
+    subst_identity_copy_with_mode(
+        ctx,
+        ty,
+        SubstCopyMode {
+            reopen_closed_variant_rows,
+            for_saving: false,
+        },
+    )
+}
+
+/// OCaml `Subst.type_expr (Subst.for_saving Subst.identity) ty`, which
+/// `type_cases` and `type_function` use to "copy variables too"
+/// (typecore.ml:4877-4880, typecore.ml:4171-4174): unlike
+/// [`subst_identity_copy`], type variables and row variables get fresh
+/// generic copies (subst.ml:135-143, 196-206).
+pub fn subst_for_saving_copy(ctx: &TypeContext, ty: TypeExprRef) -> TypeExprRef {
+    subst_identity_copy_with_mode(
+        ctx,
+        ty,
+        SubstCopyMode {
+            reopen_closed_variant_rows: false,
+            for_saving: true,
+        },
+    )
+}
+
+/// How [`subst_identity_copy_rec`] copies: `for_saving` is `Subst.for_saving`;
+/// `reopen_closed_variant_rows` is the `instance ~partial:false` row reopening.
+#[derive(Clone, Copy)]
+struct SubstCopyMode {
+    reopen_closed_variant_rows: bool,
+    for_saving: bool,
+}
+
+impl SubstCopyMode {
+    const IDENTITY: Self = Self {
+        reopen_closed_variant_rows: false,
+        for_saving: false,
+    };
+}
+
+fn subst_identity_copy_with_mode(
+    ctx: &TypeContext,
+    ty: TypeExprRef,
+    mode: SubstCopyMode,
+) -> TypeExprRef {
     let mut seen = HashMap::new();
     // OCaml Subst.typexp uses a temporary `row_more.desc <- Tsubst(Ttuple [...])`
     // marker window to preserve recursive row sharing while copying.
     // Keep the same lifetime semantics in a scoped side table.
     let mut row_more_markers = HashMap::new();
     ctx.with_copy_session(|| {
-        subst_identity_copy_rec(
-            ctx,
-            ty,
-            reopen_closed_variant_rows,
-            &mut seen,
-            &mut row_more_markers,
-        )
+        subst_identity_copy_rec(ctx, ty, mode, &mut seen, &mut row_more_markers)
     })
 }
 
@@ -12688,7 +12736,7 @@ struct SubstRowMoreMarker {
 fn subst_identity_copy_rec(
     ctx: &TypeContext,
     ty: TypeExprRef,
-    reopen_closed_variant_rows: bool,
+    mode: SubstCopyMode,
     seen: &mut HashMap<TypeExprRef, TypeExprRef>,
     row_more_markers: &mut HashMap<TypeExprRef, SubstRowMoreMarker>,
 ) -> TypeExprRef {
@@ -12708,6 +12756,21 @@ fn subst_identity_copy_rec(
     match &*desc {
         // OCaml Subst.typexp returns identity for Tvar/Tunivar
         // (when not for_saving and id >= 0)
+        TypeDesc::Tvar(..) | TypeDesc::Tunivar(..) if mode.for_saving => {
+            // subst.ml:135-142: `newpersty (norm desc)`, then `Tsubst`; the
+            // copy keeps the descriptor.
+            let copied_desc = match &*desc {
+                TypeDesc::Tvar(name, block) => TypeDesc::Tvar(name.clone(), block.copied_from(ty)),
+                TypeDesc::Tunivar(name, block) => {
+                    TypeDesc::Tunivar(name.clone(), block.copied_from(ty))
+                }
+                _ => unreachable!(),
+            };
+            let copied = ctx.new_generic_type(copied_desc);
+            drop(desc);
+            seen.insert(ty, copied);
+            copied
+        }
         TypeDesc::Tvar(..) | TypeDesc::Tunivar(..) | TypeDesc::Tnil => {
             drop(desc);
             ty
@@ -12726,13 +12789,7 @@ fn subst_identity_copy_rec(
                 TypeDesc::Tlink(target) | TypeDesc::Tsubst(target) => {
                     let target = *target;
                     drop(desc);
-                    return subst_identity_copy_rec(
-                        ctx,
-                        target,
-                        reopen_closed_variant_rows,
-                        seen,
-                        row_more_markers,
-                    );
+                    return subst_identity_copy_rec(ctx, target, mode, seen, row_more_markers);
                 }
                 TypeDesc::Tarrow { args, ret } => {
                     let args = args.clone();
@@ -12741,23 +12798,12 @@ fn subst_identity_copy_rec(
                     let args = args
                         .into_iter()
                         .map(|mut arg| {
-                            arg.typ = subst_identity_copy_rec(
-                                ctx,
-                                arg.typ,
-                                reopen_closed_variant_rows,
-                                seen,
-                                row_more_markers,
-                            );
+                            arg.typ =
+                                subst_identity_copy_rec(ctx, arg.typ, mode, seen, row_more_markers);
                             arg
                         })
                         .collect();
-                    let ret = subst_identity_copy_rec(
-                        ctx,
-                        ret,
-                        reopen_closed_variant_rows,
-                        seen,
-                        row_more_markers,
-                    );
+                    let ret = subst_identity_copy_rec(ctx, ret, mode, seen, row_more_markers);
                     TypeDesc::Tarrow { args, ret }
                 }
                 TypeDesc::Ttuple(types) => {
@@ -12765,15 +12811,7 @@ fn subst_identity_copy_rec(
                     drop(desc);
                     let types_copy: Vec<_> = types
                         .iter()
-                        .map(|t| {
-                            subst_identity_copy_rec(
-                                ctx,
-                                *t,
-                                reopen_closed_variant_rows,
-                                seen,
-                                row_more_markers,
-                            )
-                        })
+                        .map(|t| subst_identity_copy_rec(ctx, *t, mode, seen, row_more_markers))
                         .collect();
                     TypeDesc::Ttuple(types_copy.into())
                 }
@@ -12794,15 +12832,7 @@ fn subst_identity_copy_rec(
                     drop(desc);
                     let args_copy: Vec<_> = args
                         .iter()
-                        .map(|t| {
-                            subst_identity_copy_rec(
-                                ctx,
-                                *t,
-                                reopen_closed_variant_rows,
-                                seen,
-                                row_more_markers,
-                            )
-                        })
+                        .map(|t| subst_identity_copy_rec(ctx, *t, mode, seen, row_more_markers))
                         .collect();
                     TypeDesc::Tconstr {
                         path,
@@ -12815,13 +12845,7 @@ fn subst_identity_copy_rec(
                     let fields = *fields;
                     drop(desc);
                     TypeDesc::Tobject {
-                        fields: subst_identity_copy_rec(
-                            ctx,
-                            fields,
-                            reopen_closed_variant_rows,
-                            seen,
-                            row_more_markers,
-                        ),
+                        fields: subst_identity_copy_rec(ctx, fields, mode, seen, row_more_markers),
                     }
                 }
                 TypeDesc::Tfield {
@@ -12844,20 +12868,9 @@ fn subst_identity_copy_rec(
                             seen.get(&t).copied()
                         })
                     };
-                    let rest_copy = subst_identity_copy_rec(
-                        ctx,
-                        rest,
-                        reopen_closed_variant_rows,
-                        seen,
-                        row_more_markers,
-                    );
-                    let typ_copy = subst_identity_copy_rec(
-                        ctx,
-                        typ,
-                        reopen_closed_variant_rows,
-                        seen,
-                        row_more_markers,
-                    );
+                    let rest_copy =
+                        subst_identity_copy_rec(ctx, rest, mode, seen, row_more_markers);
+                    let typ_copy = subst_identity_copy_rec(ctx, typ, mode, seen, row_more_markers);
                     TypeDesc::Tfield {
                         name,
                         mutability,
@@ -12869,24 +12882,11 @@ fn subst_identity_copy_rec(
                     let body = *body;
                     let vars = vars.clone();
                     drop(desc);
-                    let body_copy = subst_identity_copy_rec(
-                        ctx,
-                        body,
-                        reopen_closed_variant_rows,
-                        seen,
-                        row_more_markers,
-                    );
+                    let body_copy =
+                        subst_identity_copy_rec(ctx, body, mode, seen, row_more_markers);
                     let vars_copy: Vec<_> = vars
                         .iter()
-                        .map(|t| {
-                            subst_identity_copy_rec(
-                                ctx,
-                                *t,
-                                reopen_closed_variant_rows,
-                                seen,
-                                row_more_markers,
-                            )
-                        })
+                        .map(|t| subst_identity_copy_rec(ctx, *t, mode, seen, row_more_markers))
                         .collect();
                     TypeDesc::Tpoly {
                         body: body_copy,
@@ -12910,20 +12910,27 @@ fn subst_identity_copy_rec(
                         let (dup, mut more_copy) = {
                             let more_desc = ctx.get_desc(more).into_desc();
                             let more_is_constr = matches!(&more_desc, TypeDesc::Tconstr { .. });
-                            let dup = ctx.get_level(more) == GENERIC_LEVEL
+                            let dup = mode.for_saving
+                                || ctx.get_level(more) == GENERIC_LEVEL
                                 || super::btype::static_row(ctx, &row)
                                 || more_is_constr;
                             let more_copy = match more_desc {
                                 TypeDesc::Tsubst(target) => target,
                                 TypeDesc::Tconstr { .. } | TypeDesc::Tnil => {
-                                    subst_identity_copy_rec(
-                                        ctx,
-                                        more,
-                                        reopen_closed_variant_rows,
-                                        seen,
-                                        row_more_markers,
-                                    )
+                                    subst_identity_copy_rec(ctx, more, mode, seen, row_more_markers)
                                 }
+                                // subst.ml:203-206: `newpersty (norm more.desc)`
+                                // when saving.
+                                TypeDesc::Tvar(name, block) if mode.for_saving => ctx
+                                    .new_generic_type(TypeDesc::Tvar(
+                                        name,
+                                        block.copied_from(more),
+                                    )),
+                                TypeDesc::Tunivar(name, block) if mode.for_saving => ctx
+                                    .new_generic_type(TypeDesc::Tunivar(
+                                        name,
+                                        block.copied_from(more),
+                                    )),
                                 TypeDesc::Tunivar(..) => more,
                                 TypeDesc::Tvar(name, block) => {
                                     if dup {
@@ -12939,7 +12946,7 @@ fn subst_identity_copy_rec(
                                 TypeDesc::Tlink(target) => subst_identity_copy_rec(
                                     ctx,
                                     target,
-                                    reopen_closed_variant_rows,
+                                    mode,
                                     seen,
                                     row_more_markers,
                                 ),
@@ -12947,7 +12954,7 @@ fn subst_identity_copy_rec(
                             };
                             (dup, more_copy)
                         };
-                        if reopen_closed_variant_rows {
+                        if mode.reopen_closed_variant_rows {
                             let has_reither = row.row_fields.iter().any(|(_, field)| {
                                 matches!(
                                     super::btype::row_field_repr(ctx, field),
@@ -13003,7 +13010,7 @@ fn subst_identity_copy_rec(
                                             subst_identity_copy_rec(
                                                 ctx,
                                                 ty,
-                                                reopen_closed_variant_rows,
+                                                mode,
                                                 seen,
                                                 row_more_markers,
                                             ),
@@ -13025,7 +13032,7 @@ fn subst_identity_copy_rec(
                                                 subst_identity_copy_rec(
                                                     ctx,
                                                     *t,
-                                                    reopen_closed_variant_rows,
+                                                    mode,
                                                     seen,
                                                     row_more_markers,
                                                 )
@@ -13053,7 +13060,7 @@ fn subst_identity_copy_rec(
                                         subst_identity_copy_rec(
                                             ctx,
                                             *t,
-                                            reopen_closed_variant_rows,
+                                            mode,
                                             seen,
                                             row_more_markers,
                                         )
@@ -13078,15 +13085,7 @@ fn subst_identity_copy_rec(
                     drop(desc);
                     let args_copy: Vec<_> = args
                         .iter()
-                        .map(|t| {
-                            subst_identity_copy_rec(
-                                ctx,
-                                *t,
-                                reopen_closed_variant_rows,
-                                seen,
-                                row_more_markers,
-                            )
-                        })
+                        .map(|t| subst_identity_copy_rec(ctx, *t, mode, seen, row_more_markers))
                         .collect();
                     TypeDesc::Tpackage {
                         path,
