@@ -267,17 +267,6 @@ pub struct UnifyState {
     /// temporarily switches environments.
     env: Option<Env>,
 
-    /// Dotted type paths whose OCaml `Env.find_type` lookup would force
-    /// persistent module components while lowering levels.
-    pending_type_lookup_paths: Vec<Path>,
-
-    /// Type constructor paths whose level check proceeds to alias expansion
-    /// after the `Env.find_type` lookup.
-    pending_type_expansion_paths: Vec<Path>,
-
-    /// Whether the current caller wants to collect those lookup side effects.
-    capture_type_lookup_paths: bool,
-
     /// Current recursive call depth in `unify`.
     recursion_depth: usize,
 
@@ -338,9 +327,6 @@ pub(crate) struct UnifyStateSnapshot {
     generate_equations: bool,
     assume_injective: bool,
     env: Option<Env>,
-    pending_type_lookup_paths: Vec<Path>,
-    pending_type_expansion_paths: Vec<Path>,
-    capture_type_lookup_paths: bool,
     recursion_depth: usize,
     newtype_level: Option<i32>,
 }
@@ -354,9 +340,6 @@ impl UnifyState {
             generate_equations: false,
             assume_injective: false,
             env: None,
-            pending_type_lookup_paths: Vec::new(),
-            pending_type_expansion_paths: Vec::new(),
-            capture_type_lookup_paths: false,
             recursion_depth: 0,
             newtype_level: None,
             univar_pairs: Vec::new(),
@@ -372,9 +355,6 @@ impl UnifyState {
             generate_equations: true,
             assume_injective: false,
             env: None,
-            pending_type_lookup_paths: Vec::new(),
-            pending_type_expansion_paths: Vec::new(),
-            capture_type_lookup_paths: false,
             recursion_depth: 0,
             newtype_level: None,
             univar_pairs: Vec::new(),
@@ -413,9 +393,6 @@ impl UnifyState {
             generate_equations: self.generate_equations,
             assume_injective: self.assume_injective,
             env: self.env.as_ref().map(Env::clone_preserve_id),
-            pending_type_lookup_paths: self.pending_type_lookup_paths.clone(),
-            pending_type_expansion_paths: self.pending_type_expansion_paths.clone(),
-            capture_type_lookup_paths: self.capture_type_lookup_paths,
             recursion_depth: self.recursion_depth,
             newtype_level: self.newtype_level,
         }
@@ -428,55 +405,13 @@ impl UnifyState {
         self.generate_equations = snapshot.generate_equations;
         self.assume_injective = snapshot.assume_injective;
         self.env = snapshot.env;
-        self.pending_type_lookup_paths = snapshot.pending_type_lookup_paths;
-        self.pending_type_expansion_paths = snapshot.pending_type_expansion_paths;
-        self.capture_type_lookup_paths = snapshot.capture_type_lookup_paths;
         self.recursion_depth = snapshot.recursion_depth;
         self.newtype_level = snapshot.newtype_level;
     }
 
-    /// Temporarily move out the environment snapshot.
-    ///
-    /// Some typecore force helpers need `&mut TypeCheckContext` while reading
-    /// the unify environment. Moving the owned snapshot out avoids cloning a
-    /// large environment solely to satisfy the borrow checker.
+    /// Drop the environment snapshot.
     pub(crate) fn take_env(&mut self) -> Option<Env> {
         self.env.take()
-    }
-
-    /// Restore an environment snapshot previously removed with `take_env`.
-    pub(crate) fn restore_env(&mut self, env: Env) {
-        self.env = Some(env);
-    }
-
-    /// Start collecting type lookup paths reached through OCaml-equivalent
-    /// `ctype.ml` level lowering.
-    pub fn begin_type_lookup_capture(&mut self) -> bool {
-        let previous = self.capture_type_lookup_paths;
-        self.capture_type_lookup_paths = true;
-        previous
-    }
-
-    /// Restore the previous capture state and return paths collected while it
-    /// was active.
-    pub fn finish_type_lookup_capture(&mut self, previous: bool) -> (Vec<Path>, Vec<Path>) {
-        self.capture_type_lookup_paths = previous;
-        (
-            std::mem::take(&mut self.pending_type_lookup_paths),
-            std::mem::take(&mut self.pending_type_expansion_paths),
-        )
-    }
-
-    fn should_capture_type_lookup_paths(&self) -> bool {
-        self.capture_type_lookup_paths
-    }
-
-    fn extend_type_lookup_paths(&mut self, paths: Vec<Path>) {
-        self.pending_type_lookup_paths.extend(paths);
-    }
-
-    fn extend_type_expansion_paths(&mut self, paths: Vec<Path>) {
-        self.pending_type_expansion_paths.extend(paths);
     }
 
     /// Check if two types have already been unified.
@@ -585,22 +520,9 @@ pub(crate) fn lookup_type_decl_for_path_pub(
     lookup_type_decl_for_path(ctx, env, path).map(super::decl::TypeDeclarationRef::into_owned)
 }
 
-fn get_level_with_lookup_capture(
-    ctx: &TypeContext,
-    env: &Env,
-    path: &Path,
-    pending_type_lookup_paths: &mut Option<&mut Vec<Path>>,
-) -> i32 {
-    // OCaml compiler/ml/ctype.ml:666-673 `get_level env p` calls
-    // `Env.find_type p env` before falling back to `Path.binding_time p`.
-    // For dotted paths, compiler/ml/env.ml:800-813 builds parent component
-    // tables as a lookup side effect; `lower_args` depends on that happening
-    // before local binders are created.
-    if matches!(path.view(), PathView::Pdot(_, _, _)) {
-        if let Some(paths) = pending_type_lookup_paths.as_deref_mut() {
-            paths.push(path.clone());
-        }
-    }
+/// OCaml `get_level env p` (ctype.ml:666-673): the newtype level of `p`'s
+/// declaration, or `Path.binding_time p`.
+fn get_level_in_env(ctx: &TypeContext, env: &Env, path: &Path) -> i32 {
     // A declaration reached through a persistent unit comes out of
     // `Subst.type_declaration`, which clears `type_newtype_level`
     // (compiler/ml/subst.ml:292), so the lookup would fall back to the
@@ -2369,7 +2291,7 @@ pub fn update_level(ctx: &TypeContext, level: i32, ty: TypeExprRef) {
 pub fn update_level_expand(ctx: &TypeContext, env: &Env, level: i32, ty: TypeExprRef) {
     // Callers of this form ignore an escaping constructor, like the memoized
     // expansion in OCaml `expand_abbrev` (ctype.ml:1153-1160).
-    let _ = update_level_checked(ctx, env, level, ty, &mut None, &mut None);
+    let _ = update_level_checked(ctx, env, level, ty);
 }
 
 /// The tail of OCaml `unify1_var` (ctype.ml:2086-2095): link the variable,
@@ -2388,7 +2310,7 @@ fn unify1_var_link(
     };
     let var_desc = ctx.get_desc(var).into_desc();
     link_type(ctx, var, ty);
-    if let Err(err) = update_level_checked(ctx, env, level, ty, &mut None, &mut None) {
+    if let Err(err) = update_level_checked(ctx, env, level, ty) {
         ctx.set_desc(var, var_desc);
         return Err(err);
     }
@@ -2404,38 +2326,18 @@ pub(crate) fn update_level_checked(
     env: &Env,
     level: i32,
     ty: TypeExprRef,
-    pending_type_lookup_paths: &mut Option<&mut Vec<Path>>,
-    pending_type_expansion_paths: &mut Option<&mut Vec<Path>>,
 ) -> Result<(), TypeError> {
     let ty = ctx.repr(ty);
     if ctx.get_level(ty) <= level {
         return Ok(());
     }
     let snapshot = ctx.snapshot_type_state();
-    if update_level_expand_with_lookup_capture(
-        ctx,
-        env,
-        level,
-        false,
-        ty,
-        pending_type_lookup_paths,
-        pending_type_expansion_paths,
-    )
-    .is_ok()
-    {
+    if update_level_pass(ctx, env, level, false, ty).is_ok() {
         return Ok(());
     }
     ctx.restore_type_state(snapshot);
-    update_level_expand_with_lookup_capture(
-        ctx,
-        env,
-        level,
-        true,
-        ty,
-        pending_type_lookup_paths,
-        pending_type_expansion_paths,
-    )
-    .map_err(|escaping| TypeError::Unify(vec![(escaping, new_var_at_level(ctx, level))]))
+    update_level_pass(ctx, env, level, true, ty)
+        .map_err(|escaping| TypeError::Unify(vec![(escaping, new_var_at_level(ctx, level))]))
 }
 
 /// OCaml `newvar2 level`.
@@ -2447,14 +2349,12 @@ fn new_var_at_level(ctx: &TypeContext, level: i32) -> TypeExprRef {
 
 /// OCaml `update_level env level expand` (ctype.ml:561-613). Returns the type
 /// whose constructor would escape its scope.
-fn update_level_expand_with_lookup_capture(
+fn update_level_pass(
     ctx: &TypeContext,
     env: &Env,
     level: i32,
     expand: bool,
     ty: TypeExprRef,
-    pending_type_lookup_paths: &mut Option<&mut Vec<Path>>,
-    pending_type_expansion_paths: &mut Option<&mut Vec<Path>>,
 ) -> Result<(), TypeExprRef> {
     let ty = ctx.repr(ty);
     let current = ctx.get_level(ty);
@@ -2465,53 +2365,30 @@ fn update_level_expand_with_lookup_capture(
             TypeDesc::Tconstr { path, args, .. } => {
                 let has_args = !args.is_empty();
                 // OCaml compiler/ml/ctype.ml:695 calls `get_level env p`
-                // here. Keep the same lookup side effects even when the
-                // numeric result falls back to `Path.binding_time`. A path
-                // rooted at a persistent unit answers with its binding time
-                // without a lookup (see `get_level_with_lookup_capture`), so
-                // it needs no copy unless it is recorded or expanded.
-                let persistent_level = (path_root_is_persistent(path)
-                    && (pending_type_lookup_paths.is_none()
-                        || !matches!(path.view(), PathView::Pdot(..))))
-                .then(|| path.binding_time());
-                let path_level = match persistent_level {
-                    Some(path_level) => path_level,
-                    None => {
-                        let path = path.clone();
-                        get_level_with_lookup_capture(ctx, env, &path, pending_type_lookup_paths)
-                    }
+                // here. A path rooted at a persistent unit answers with its
+                // binding time (see `get_level_in_env`), without a copy.
+                let path_level = if path_root_is_persistent(path) {
+                    path.binding_time()
+                } else {
+                    let path = path.clone();
+                    get_level_in_env(ctx, env, &path)
                 };
                 // OCaml compiler/ml/ctype.ml:742-768 only requires
                 // `level < get_level env p` after the outer `ty.level > level`
                 // check. Generic-level constructor nodes are still eligible
                 // for abbreviation expansion during `moregeneral`.
                 let should_try_expand = level < path_level;
-                let expansion_path = (should_try_expand && pending_type_expansion_paths.is_some())
-                    .then(|| path.clone());
                 drop(desc);
                 // OCaml compiler/ml/ctype.ml:568-578: try to replace the
                 // constructor by its expansion; a constructor that cannot be
                 // expanded would escape its scope.
                 if should_try_expand {
-                    if let (Some(paths), Some(path)) =
-                        (pending_type_expansion_paths.as_deref_mut(), expansion_path)
-                    {
-                        paths.push(path);
-                    }
                     if let Some(expanded) = try_expand_head(ctx, env, ty) {
                         let expanded = ctx.repr(expanded);
                         if expanded != ty && !deep_occur(ctx, ty, expanded) {
                             link_type(ctx, ty, expanded);
                             // Recursively update the expansion
-                            return update_level_expand_with_lookup_capture(
-                                ctx,
-                                env,
-                                level,
-                                expand,
-                                expanded,
-                                pending_type_lookup_paths,
-                                pending_type_expansion_paths,
-                            );
+                            return update_level_pass(ctx, env, level, expand, expanded);
                         }
                     }
                 }
@@ -2527,28 +2404,12 @@ fn update_level_expand_with_lookup_capture(
                         let expanded = ctx.repr(expanded);
                         if expanded != ty && !deep_occur(ctx, ty, expanded) {
                             link_type(ctx, ty, expanded);
-                            return update_level_expand_with_lookup_capture(
-                                ctx,
-                                env,
-                                level,
-                                expand,
-                                expanded,
-                                pending_type_lookup_paths,
-                                pending_type_expansion_paths,
-                            );
+                            return update_level_pass(ctx, env, level, expand, expanded);
                         }
                     }
                 }
                 ctx.set_level(ty, level);
-                return update_level_children(
-                    ctx,
-                    env,
-                    level,
-                    expand,
-                    ty,
-                    pending_type_lookup_paths,
-                    pending_type_expansion_paths,
-                );
+                return update_level_children(ctx, env, level, expand, ty);
             }
             TypeDesc::Tvariant(row) => {
                 let name_path = row_repr_ref(ctx, &ctx.row_desc(row))
@@ -2562,8 +2423,7 @@ fn update_level_expand_with_lookup_capture(
                 // (compiler/ml/ctype.ml:666-673), so persistent alias
                 // signatures force at the same point as OCaml.
                 if let Some(path) = name_path
-                    && level
-                        < get_level_with_lookup_capture(ctx, env, &path, pending_type_lookup_paths)
+                    && level < get_level_in_env(ctx, env, &path)
                 {
                     let mut row = match &*ctx.borrow_desc(ty) {
                         TypeDesc::Tvariant(row) => row_repr(ctx, &ctx.row_desc(row)),
@@ -2573,28 +2433,12 @@ fn update_level_expand_with_lookup_capture(
                     ctx.set_desc(ty, TypeDesc::Tvariant(ctx.new_row_desc(row)));
                 }
                 ctx.set_level(ty, level);
-                return update_level_children(
-                    ctx,
-                    env,
-                    level,
-                    expand,
-                    ty,
-                    pending_type_lookup_paths,
-                    pending_type_expansion_paths,
-                );
+                return update_level_children(ctx, env, level, expand, ty);
             }
             _ => {
                 drop(desc);
                 ctx.set_level(ty, level);
-                return update_level_children(
-                    ctx,
-                    env,
-                    level,
-                    expand,
-                    ty,
-                    pending_type_lookup_paths,
-                    pending_type_expansion_paths,
-                );
+                return update_level_children(ctx, env, level, expand, ty);
             }
         }
     }
@@ -2608,21 +2452,11 @@ fn update_level_children(
     level: i32,
     expand: bool,
     ty: TypeExprRef,
-    pending_type_lookup_paths: &mut Option<&mut Vec<Path>>,
-    pending_type_expansion_paths: &mut Option<&mut Vec<Path>>,
 ) -> Result<(), TypeExprRef> {
     let mut children: smallvec::SmallVec<[TypeExprRef; 8]> = smallvec::SmallVec::new();
     iter_type_expr(ctx, ty, |child| children.push(child));
     for child in children {
-        update_level_expand_with_lookup_capture(
-            ctx,
-            env,
-            level,
-            expand,
-            child,
-            pending_type_lookup_paths,
-            pending_type_expansion_paths,
-        )?;
+        update_level_pass(ctx, env, level, expand, child)?;
     }
     Ok(())
 }
@@ -7237,23 +7071,12 @@ pub fn unify_var(
                 return Err(TypeError::Unify(vec![(t1, t2)]));
             }
             let level = ctx.get_level(t1);
-            let capture_type_lookup_paths = state.should_capture_type_lookup_paths();
-            let mut pending_type_lookup_paths = Vec::new();
-            let mut pending_type_expansion_paths = Vec::new();
             let lowered = if let Some(env) = state.env() {
-                if capture_type_lookup_paths {
-                    let mut capture = Some(&mut pending_type_lookup_paths);
-                    let mut expansion_capture = Some(&mut pending_type_expansion_paths);
-                    update_level_checked(ctx, env, level, t2, &mut capture, &mut expansion_capture)
-                } else {
-                    update_level_checked(ctx, env, level, t2, &mut None, &mut None)
-                }
+                update_level_checked(ctx, env, level, t2)
             } else {
                 update_level(ctx, level, t2);
                 Ok(())
             };
-            state.extend_type_lookup_paths(pending_type_lookup_paths);
-            state.extend_type_expansion_paths(pending_type_expansion_paths);
             // OCaml ctype.ml:2617-2625: `update_level` raising aborts before
             // `link_type`, and the trace starts with the variable pair.
             if let Err(TypeError::Unify(trace)) = lowered {
@@ -7527,23 +7350,9 @@ fn unify_types(
         let lv1 = ctx.get_level(t1);
         let lv2 = ctx.get_level(t2);
         let lv = std::cmp::min(lv1, lv2);
-        let capture_type_lookup_paths = state.should_capture_type_lookup_paths();
-        let mut pending_type_lookup_paths = Vec::new();
-        let mut pending_type_expansion_paths = Vec::new();
         // OCaml ctype.ml:2154-2155 `update_level !env lv t2; update_level !env lv t1`.
-        let lowered = if capture_type_lookup_paths {
-            let mut capture = Some(&mut pending_type_lookup_paths);
-            let mut expansion_capture = Some(&mut pending_type_expansion_paths);
-            update_level_checked(ctx, env, lv, t2, &mut capture, &mut expansion_capture).and_then(
-                |()| update_level_checked(ctx, env, lv, t1, &mut capture, &mut expansion_capture),
-            )
-        } else {
-            update_level_checked(ctx, env, lv, t2, &mut None, &mut None)
-                .and_then(|()| update_level_checked(ctx, env, lv, t1, &mut None, &mut None))
-        };
-        state.extend_type_lookup_paths(pending_type_lookup_paths);
-        state.extend_type_expansion_paths(pending_type_expansion_paths);
-        lowered?;
+        update_level_checked(ctx, env, lv, t2)?;
+        update_level_checked(ctx, env, lv, t1)?;
     }
 
     // Re-repr after update_level_expand may have linked types.
@@ -11212,15 +11021,13 @@ fn compute_variance_rec(
 /// OCaml's lower_args: walk an arrow type, expanding each component with
 /// expand_head. This triggers type alias expansion for function argument/return
 /// types, matching OCaml's behavior during Pexp_apply processing.
-pub fn lower_args(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> (Vec<Path>, Vec<Path>) {
+pub fn lower_args(ctx: &TypeContext, env: &Env, ty: TypeExprRef) {
     let mut seen = Vec::new();
     let mut current = ty;
-    let mut pending_type_lookup_paths = Vec::new();
-    let mut pending_type_expansion_paths = Vec::new();
     loop {
         let expanded = expand_head(ctx, env, current);
         if seen.contains(&expanded) {
-            return (pending_type_lookup_paths, pending_type_expansion_paths);
+            return;
         }
         let arrow = {
             let desc = ctx.get_desc(expanded);
@@ -11237,26 +11044,17 @@ pub fn lower_args(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> (Vec<Path>, 
             }
         };
         let Some((arg_types, ret_ty)) = arrow else {
-            return (pending_type_lookup_paths, pending_type_expansion_paths);
+            return;
         };
 
         // OCaml compiler/ml/typecore.ml:2341 calls
-        // `unify_var env (newvar ()) arg.typ`; keep the Rust structure on the
-        // same ctype.ml:2820-2837 path instead of inlining a second copy here.
-        // Its ctype.ml:666-673 `get_level` path reaches Env.find_type, so
-        // return those dotted lookup points for typecore to force through the
-        // persistent component environment.
+        // `unify_var env (newvar ()) arg.typ` (ctype.ml:2820-2837).
         for arg_ty in arg_types {
             let mut state = UnifyState::new();
             state.set_env(env);
-            let previous_capture = state.begin_type_lookup_capture();
             if unify_var(ctx, &mut state, ctx.new_var(None), arg_ty).is_err() {
                 unreachable!("lower_args failed unify_var")
             }
-            let (lookup_paths, expansion_paths) =
-                state.finish_type_lookup_capture(previous_capture);
-            pending_type_lookup_paths.extend(lookup_paths);
-            pending_type_expansion_paths.extend(expansion_paths);
         }
 
         seen.push(expanded);
