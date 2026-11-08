@@ -2987,8 +2987,11 @@ impl<'a> RawLambdaConverter<'a> {
             let logical_field_count = compact.then_some(all_labels.len());
 
             let by_position = crate::types::typedtree::record_fields_by_position(fields, all_labels);
-            let mut elems = Vec::with_capacity(by_position.len());
-            let mut fields_info = Vec::with_capacity(by_position.len());
+            // The block keeps these vectors: a compact block holds at most the
+            // written fields, so do not reserve a slot per label.
+            let slots = if compact { fields.len() } else { by_position.len() };
+            let mut elems = Vec::with_capacity(slots);
+            let mut fields_info = Vec::with_capacity(slots);
             for (lbl, field) in by_position {
                 let (lbl, value) = match (field, &init_var) {
                     (Some(field), _) if compact && record_field_is_static_optional_none(field) => {
