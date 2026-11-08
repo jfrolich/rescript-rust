@@ -207,19 +207,40 @@ impl Drop for TypeMutationSnapshot<'_> {
     }
 }
 
-/// Which mutations the trail logs, from the live snapshots: every change
-/// while a full snapshot lives, path compressions while any snapshot lives.
-#[derive(Default)]
-struct TrailLogging {
-    full: Cell<bool>,
-    compress: Cell<bool>,
+/// Which mutations the trail logs, derived from the live snapshots.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum TrailMode {
+    /// No snapshot lives.
+    #[default]
+    Off,
+    /// Only `undo_compress` snapshots live: log path compressions.
+    CompressOnly,
+    /// A full snapshot lives: log every change, path compressions included.
+    Full,
 }
+
+#[derive(Default)]
+struct TrailLogging(Cell<TrailMode>);
 
 impl TrailLogging {
     fn update(&self, journal: &TypeMutationJournal) {
-        self.full
-            .set(journal.active.iter().any(|snapshot| snapshot.full));
-        self.compress.set(!journal.active.is_empty());
+        self.0.set(if journal.active.iter().any(|snapshot| snapshot.full) {
+            TrailMode::Full
+        } else if journal.active.is_empty() {
+            TrailMode::Off
+        } else {
+            TrailMode::CompressOnly
+        });
+    }
+
+    /// Every change is logged.
+    fn full(&self) -> bool {
+        self.0.get() == TrailMode::Full
+    }
+
+    /// Path compressions are logged.
+    fn compress(&self) -> bool {
+        self.0.get() != TrailMode::Off
     }
 }
 
@@ -2517,7 +2538,7 @@ impl TypeContext {
         ty: TypeExprRef,
         kind: crate::perf_counters::TypeMutationKind,
     ) {
-        if !self.mutation_logging.full.get() || self.store_build_owns(ty) {
+        if !self.mutation_logging.full() || self.store_build_owns(ty) {
             return;
         }
         let mut journal = self.mutation_journal.borrow_mut();
@@ -2535,7 +2556,7 @@ impl TypeContext {
         mutation: impl FnOnce() -> TypeMutation,
         kind: crate::perf_counters::TypeMutationKind,
     ) {
-        if !self.mutation_logging.full.get() {
+        if !self.mutation_logging.full() {
             return;
         }
         self.mutation_journal.borrow_mut().entries.push(mutation());
@@ -2546,7 +2567,7 @@ impl TypeContext {
 
     #[inline]
     fn record_row_field_mutation(&self, mutation: impl FnOnce() -> TypeMutation, row: RowFieldRef) {
-        if !self.mutation_logging.full.get() || self.store_build_owns_row_field(row) {
+        if !self.mutation_logging.full() || self.store_build_owns_row_field(row) {
             return;
         }
         let mut journal = self.mutation_journal.borrow_mut();
@@ -3550,7 +3571,7 @@ impl TypeContext {
             self.poison_store_build();
         }
         // Only a full snapshot restores semantic changes.
-        if self.mutation_logging.full.get() {
+        if self.mutation_logging.full() {
             let old = self.get_mutability(r);
             self.mutation_journal
                 .borrow_mut()
@@ -4702,7 +4723,7 @@ impl TypeContext {
                 let direct =
                     matches!(*self.borrow_desc(node), TypeDesc::Tlink(target) if target == current);
                 if !direct {
-                    if self.mutation_logging.compress.get() && !self.store_build_owns(node) {
+                    if self.mutation_logging.compress() && !self.store_build_owns(node) {
                         let old = self.get_desc(node).0;
                         self.mutation_journal
                             .borrow_mut()
@@ -5412,7 +5433,7 @@ mod tests {
         );
         assert_eq!(ctx.current_def_level_state(), initial_levels);
         assert!(ctx.memoized_abbrev_refs.borrow().is_empty());
-        assert!(!ctx.mutation_logging.full.get() && !ctx.mutation_logging.compress.get());
+        assert!(!ctx.mutation_logging.full() && !ctx.mutation_logging.compress());
     }
 
     #[test]
@@ -5428,7 +5449,7 @@ mod tests {
         ctx.restore_type_state(inner);
 
         assert!(matches!(&*ctx.get_desc(ty), TypeDesc::Tvar(Some(name)) if name == "original"));
-        assert!(!ctx.mutation_logging.full.get() && !ctx.mutation_logging.compress.get());
+        assert!(!ctx.mutation_logging.full() && !ctx.mutation_logging.compress());
     }
 
     #[test]

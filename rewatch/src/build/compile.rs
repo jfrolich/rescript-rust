@@ -3,6 +3,7 @@
 mod dependency_cycle;
 
 use super::build_types::*;
+use super::incremental::IncrementalPlan;
 use super::logs;
 use super::packages;
 use super::qos;
@@ -622,6 +623,19 @@ fn append_compile_warnings(
     }
 }
 
+/// How far a [`compile`] call got across its rounds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CompileProgress {
+    /// No module has failed and the scheduler has not stalled.
+    Ok,
+    /// A module failed. Its dependents never become ready, so an unfinished
+    /// universe is expected and is not reported as a cycle.
+    HadErrors,
+    /// Nothing was in flight while modules were still waiting and no module
+    /// had failed: the remaining modules form a dependency cycle.
+    Stalled,
+}
+
 #[instrument(name = "build.compile", skip_all)]
 pub fn compile(
     build_state: &mut BuildCommandState,
@@ -650,7 +664,7 @@ pub fn compile(
     let incremental_plan = build_state.incremental_plan.take();
     let has_support_work = incremental_plan
         .as_ref()
-        .is_some_and(|plan| plan.support_everything);
+        .is_some_and(|plan| *plan == IncrementalPlan::SupportEverything);
     if dirty_modules.is_empty() && !has_support_work {
         set_length(0);
         let mut warnings = String::new();
@@ -709,7 +723,7 @@ pub fn compile(
     // transitively depends on it.
     // A cut-off build decides the dependents round by round instead.
     let mut compile_universe = dirty_modules.clone();
-    let mut frontier = if incremental_plan.as_ref().is_some_and(|plan| plan.cutoff) {
+    let mut frontier = if incremental_plan == Some(IncrementalPlan::Cutoff) {
         Vec::new()
     } else {
         dirty_modules.iter().cloned().collect::<Vec<_>>()
@@ -743,7 +757,7 @@ pub fn compile(
     // A cut-off build compiles in rounds: the dependents of a module whose
     // interface digest changed are compiled in the next round
     // (see `incremental::next_round`).
-    let cutoff = incremental_plan.as_ref().is_some_and(|plan| plan.cutoff);
+    let cutoff = incremental_plan == Some(IncrementalPlan::Cutoff);
 
     let js_writer = JsWriter::spawn();
     // Bound the jobs handed to rayon so the priority heap still orders work —
@@ -760,8 +774,7 @@ pub fn compile(
     let critical_slots = qos::critical_slots();
 
     let mut results_buffer: Vec<CompletionMsg> = Vec::with_capacity(compile_universe.len());
-    let mut has_errors = false;
-    let mut stalled = false;
+    let mut progress = CompileProgress::Ok;
     let mut completed_count = 0usize;
     let mut total_universe_count = 0usize;
     let mut all_registry_only: AHashSet<String> = AHashSet::new();
@@ -912,21 +925,28 @@ pub fn compile(
                                 in_flight,
                             );
                         }
-                        scope.spawn(move |_| {
-                            let msg = finish_in_process_js(
-                                build_state_ref,
-                                build_command_state_ref,
-                                pre_js_msg,
-                                parent_span,
-                                registry_snapshot,
-                                &tx,
-                                &write_tx,
-                            );
-                            if show_progress {
-                                inc_ref();
-                            }
-                            let _ = tx.send(WorkerMsg::Completed(msg));
-                        });
+                        let job_tx = tx.clone();
+                        let panicked_module = module_name.clone();
+                        spawn_job(
+                            scope,
+                            tx,
+                            move || {
+                                let msg = finish_in_process_js(
+                                    build_state_ref,
+                                    build_command_state_ref,
+                                    pre_js_msg,
+                                    parent_span,
+                                    registry_snapshot,
+                                    &job_tx,
+                                    &write_tx,
+                                );
+                                if show_progress {
+                                    inc_ref();
+                                }
+                                WorkerMsg::Completed(msg)
+                            },
+                            move |message| panicked_completion(panicked_module, &message),
+                        );
                         trace!("scheduled in-process JS finish for {}", module_name);
                         continue;
                     }
@@ -971,30 +991,34 @@ pub fn compile(
                         compile_universe: compile_universe.clone(),
                         registry_only: registry_only.clone(),
                     };
-                    scope.spawn(move |_| {
-                        let msg = compile_one(
-                            build_state_ref,
-                            build_command_state_ref,
-                            &registry_snapshot,
-                            &module_asts,
-                            &module_name,
-                            is_dirty,
-                            parent_span,
-                            in_process_hooks,
-                            placement,
-                        );
-                        if show_progress && matches!(msg, WorkerMsg::Completed(_)) {
-                            inc_ref();
-                        }
-                        // Receiver lives for the full scope, so send cannot fail
-                        // unless the dispatcher has already hung up on purpose.
-                        let _ = tx.send(msg);
-                    });
+                    let panicked_module = module_name.clone();
+                    spawn_job(
+                        scope,
+                        tx,
+                        move || {
+                            let msg = compile_one(
+                                build_state_ref,
+                                build_command_state_ref,
+                                &registry_snapshot,
+                                &module_asts,
+                                &module_name,
+                                is_dirty,
+                                parent_span,
+                                in_process_hooks,
+                                placement,
+                            );
+                            if show_progress && matches!(msg, WorkerMsg::Completed(_)) {
+                                inc_ref();
+                            }
+                            msg
+                        },
+                        move |message| panicked_completion(panicked_module, &message),
+                    );
                 }
 
                 if in_flight == 0 {
-                    if completed.len() < compile_universe_count && !has_errors {
-                        stalled = true;
+                    if completed.len() < compile_universe_count && progress == CompileProgress::Ok {
+                        progress = CompileProgress::Stalled;
                     }
                     break;
                 }
@@ -1126,7 +1150,7 @@ pub fn compile(
                             let module_failed = msg.result.is_err()
                                 || msg.interface_result.as_ref().is_some_and(|r| r.is_err());
                             if module_failed {
-                                has_errors = true;
+                                progress = CompileProgress::HadErrors;
                             }
 
                             let finished_name = msg.module_name.clone();
@@ -1224,7 +1248,7 @@ pub fn compile(
         }
         all_registry_only.extend(registry_only.iter().cloned());
         all_dirty.extend(dirty_set);
-        if !cutoff || stalled {
+        if !cutoff || progress == CompileProgress::Stalled {
             break compile_universe;
         }
         let written: AHashSet<String> = compiled_this_build
@@ -1452,7 +1476,7 @@ pub fn compile(
                 module.compile_dirty = false;
                 if is_compiled && !registry_only.contains(&module_name) {
                     build_state.written_modules.insert(module_name.clone());
-                    if let Some(started) = build_state.build_started_at {
+                    if let Some(started) = build_state.build_run.started_at() {
                         build_state.js_confirmed_at.insert(module_name.clone(), started);
                     }
                 }
@@ -1489,7 +1513,7 @@ pub fn compile(
         }
     }
 
-    if stalled {
+    if progress == CompileProgress::Stalled {
         let cycle = dependency_cycle::find(
             &compile_universe
                 .iter()
@@ -2648,6 +2672,37 @@ pub(crate) fn join_runtime_precompile(handle: std::thread::ScopedJoinHandle<'_, 
     })
 }
 
+/// Run a scheduler job on `scope` and send its message on `tx`, also when
+/// the job panics. The schedulers count jobs in flight and wait on
+/// `rx.recv()` while holding a sender themselves, so a job that unwound
+/// without sending would leave the build waiting forever with every thread
+/// idle. `on_panic` turns the panic message into the job's failure message.
+fn spawn_job<'scope, M: Send + 'scope>(
+    scope: &rayon::Scope<'scope>,
+    tx: mpsc::Sender<M>,
+    job: impl FnOnce() -> M + Send + 'scope,
+    on_panic: impl FnOnce(String) -> M + Send + 'scope,
+) {
+    scope.spawn(move |_| {
+        let msg = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job))
+            .unwrap_or_else(|panic| on_panic(panic_message(panic.as_ref(), "unknown panic")));
+        // The receiver lives for the whole scope.
+        let _ = tx.send(msg);
+    });
+}
+
+/// The failure message of a project module whose worker job panicked.
+fn panicked_completion(module_name: String, message: &str) -> WorkerMsg {
+    WorkerMsg::Completed(CompletionMsg {
+        result: Err(anyhow!("Compilation panicked for {module_name}: {message}")),
+        module_name,
+        interface_result: None,
+        is_clean: false,
+        is_compiled: true,
+        registry_updates: Vec::new(),
+    })
+}
+
 /// The message of a caught panic payload, or `unknown` when it carries none.
 fn panic_message(panic: &(dyn std::any::Any + Send), unknown: &str) -> String {
     if let Some(s) = panic.downcast_ref::<String>() {
@@ -2788,7 +2843,7 @@ struct RuntimeInterfaceSource {
 }
 
 #[derive(Debug)]
-struct RuntimeModuleSource {
+pub(crate) struct RuntimeModuleSource {
     module_name: String,
     res_path: PathBuf,
     res_arena: ParseArena,
@@ -2895,7 +2950,8 @@ impl RuntimeStore {
 }
 
 /// The alias rewrites each runtime module published, by module.
-type RuntimeAliasRewrites = Mutex<AHashMap<String, Vec<(String, rescript_compiler::types::path::Path)>>>;
+pub(crate) type RuntimeAliasRewrites =
+    Mutex<AHashMap<String, Vec<(String, rescript_compiler::types::path::Path)>>>;
 
 /// Register the runtime interfaces `store` holds for these sources, without
 /// decoding their signatures (see `ModuleRegistry::register_stored_lazily`).
@@ -2928,24 +2984,32 @@ fn store_runtime_interfaces(
     runtime_modules: &[RuntimeModuleSource],
     published_aliases: RuntimeAliasRewrites,
 ) {
-    let published_aliases = published_aliases.into_inner().unwrap();
-    let interfaces: Option<Vec<(String, Vec<u8>)>> = {
-        let registry = registry.lock().unwrap();
-        runtime_modules
-            .iter()
-            .map(|module| {
-                let aliases = published_aliases
-                    .get(&module.module_name)
-                    .map(Vec::as_slice)
-                    .unwrap_or(&[]);
-                let data = registry.encode_stored_module(&module.module_name, aliases)?;
-                Some((module.module_name.clone(), data))
-            })
-            .collect()
-    };
-    if let Some(interfaces) = interfaces {
+    if let Some(interfaces) = encode_runtime_interfaces(registry, runtime_modules, published_aliases) {
         super::state_db::write_runtime_interfaces(&store.db, key, &interfaces);
     }
+}
+
+/// The runtime modules just compiled into `registry`, encoded as stored
+/// modules (see `ModuleRegistry::register_stored_lazily`), by module; `None`
+/// when one of them is missing from the registry.
+pub(crate) fn encode_runtime_interfaces(
+    registry: &Mutex<ModuleRegistry>,
+    runtime_modules: &[RuntimeModuleSource],
+    published_aliases: RuntimeAliasRewrites,
+) -> Option<Vec<(String, Vec<u8>)>> {
+    let published_aliases = published_aliases.into_inner().unwrap();
+    let registry = registry.lock().unwrap();
+    runtime_modules
+        .iter()
+        .map(|module| {
+            let aliases = published_aliases
+                .get(&module.module_name)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            let data = registry.encode_stored_module(&module.module_name, aliases)?;
+            Some((module.module_name.clone(), data))
+        })
+        .collect()
 }
 
 pub(crate) fn pre_compile_runtime_modules(
@@ -2981,6 +3045,12 @@ pub(crate) fn pre_compile_runtime_modules(
 
     // The interfaces the last build compiled stand in for compiling the
     // runtime again while its sources and the compiler are the same.
+    // The runtime compiled into this executable, when these are its sources.
+    if super::embedded_runtime::register(registry, runtime_root, &runtime_paths) {
+        debug!("Registered {} embedded runtime interfaces", runtime_paths.len());
+        return Ok(());
+    }
+
     let store_key = store.map(|store| (store, store.key(runtime_root, &runtime_paths)));
     if let Some((store, key)) = &store_key
         && load_runtime_interfaces(registry, store, key, &runtime_paths)
@@ -2989,30 +3059,13 @@ pub(crate) fn pre_compile_runtime_modules(
         return Ok(());
     }
 
-    let runtime_compile_threads = super::pools::compile_threads().max(2);
-    // Runtime module compilation runs inside Rayon workers, so the outer
-    // precompile thread stack is not enough for very large runtime IR cleanup.
-    let runtime_compile_pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(runtime_compile_threads)
-        .thread_name(|idx| format!("rewatch-runtime-in-process-{idx}"))
-        .stack_size(256 * 1024 * 1024)
-        .build()
-        .context("failed to create runtime in-process compiler pool")?;
-    let mut runtime_modules = runtime_compile_pool.install(|| collect_runtime_sources(runtime_paths))?;
-    populate_runtime_deps(&mut runtime_modules);
-
-    seed_runtime_registry(registry, &runtime_modules);
-    let published_aliases = RuntimeAliasRewrites::default();
-    runtime_compile_pool.install(|| {
-        compile_runtime_modules_parallel(
-            registry,
-            runtime_root,
-            &runtime_path,
-            &runtime_config,
-            &runtime_modules,
-            &published_aliases,
-        )
-    })?;
+    let (runtime_modules, published_aliases) = compile_runtime_sources(
+        registry,
+        runtime_root,
+        &runtime_path,
+        &runtime_config,
+        runtime_paths,
+    )?;
     if let Some((store, key)) = &store_key {
         store_runtime_interfaces(registry, store, key, &runtime_modules, published_aliases);
     }
@@ -3058,6 +3111,43 @@ pub(crate) fn pre_compile_runtime_modules(
         runtime_modules.len()
     );
     Ok(())
+}
+
+/// Compile the runtime sources `runtime_paths` (module name, `.res` path),
+/// which are in `runtime_path`, into `registry`. Returns the compiled modules
+/// and the alias rewrites each published.
+pub(crate) fn compile_runtime_sources(
+    registry: &Mutex<ModuleRegistry>,
+    runtime_root: &Path,
+    runtime_path: &Path,
+    runtime_config: &config::Config,
+    runtime_paths: Vec<(String, PathBuf)>,
+) -> Result<(Vec<RuntimeModuleSource>, RuntimeAliasRewrites)> {
+    let runtime_compile_threads = super::pools::compile_threads().max(2);
+    // Runtime module compilation runs inside Rayon workers, so the outer
+    // precompile thread stack is not enough for very large runtime IR cleanup.
+    let runtime_compile_pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(runtime_compile_threads)
+        .thread_name(|idx| format!("rewatch-runtime-in-process-{idx}"))
+        .stack_size(256 * 1024 * 1024)
+        .build()
+        .context("failed to create runtime in-process compiler pool")?;
+    let mut runtime_modules = runtime_compile_pool.install(|| collect_runtime_sources(runtime_paths))?;
+    populate_runtime_deps(&mut runtime_modules);
+
+    seed_runtime_registry(registry, &runtime_modules);
+    let published_aliases = RuntimeAliasRewrites::default();
+    runtime_compile_pool.install(|| {
+        compile_runtime_modules_parallel(
+            registry,
+            runtime_root,
+            runtime_path,
+            runtime_config,
+            &runtime_modules,
+            &published_aliases,
+        )
+    })?;
+    Ok((runtime_modules, published_aliases))
 }
 
 fn seed_runtime_registry(registry: &Mutex<ModuleRegistry>, runtime_modules: &[RuntimeModuleSource]) {
@@ -3119,18 +3209,29 @@ fn compile_runtime_modules_parallel(
                 let registry_snapshot = worker_registry_template.clone();
                 let tx = tx.clone();
                 in_flight += 1;
-                scope.spawn(move |_| {
-                    let result = compile_runtime_module_from_source(
-                        registry,
-                        runtime_root,
-                        runtime_path,
-                        runtime_config,
-                        module,
-                        registry_snapshot,
-                        published_aliases,
-                    );
-                    let _ = tx.send(RuntimeCompletionMsg { idx, result });
-                });
+                spawn_job(
+                    scope,
+                    tx,
+                    move || RuntimeCompletionMsg {
+                        idx,
+                        result: compile_runtime_module_from_source(
+                            registry,
+                            runtime_root,
+                            runtime_path,
+                            runtime_config,
+                            module,
+                            registry_snapshot,
+                            published_aliases,
+                        ),
+                    },
+                    move |message| RuntimeCompletionMsg {
+                        idx,
+                        result: Err(anyhow!(
+                            "Compiling runtime module {} panicked: {message}",
+                            module.module_name
+                        )),
+                    },
+                );
             }
 
             if in_flight == 0 {
@@ -4459,6 +4560,56 @@ mod tests {
     use std::sync::RwLock;
     use std::time::SystemTime;
     use tempfile::TempDir;
+
+    /// A job that panics still reports, so a scheduler that waits for every
+    /// job in flight while holding a sender itself does not hang.
+    #[test]
+    fn spawn_job_reports_a_panic_instead_of_hanging() {
+        let (done_tx, done_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let (tx, rx) = mpsc::channel::<Result<u32, String>>();
+            let mut results = Vec::new();
+            rayon::in_place_scope(|scope| {
+                let mut in_flight = 0;
+                for i in 0..3u32 {
+                    in_flight += 1;
+                    spawn_job(
+                        scope,
+                        tx.clone(),
+                        move || {
+                            if i == 1 {
+                                panic!("job {i} failed");
+                            }
+                            Ok(i)
+                        },
+                        Err,
+                    );
+                }
+                while in_flight > 0 {
+                    let Ok(msg) = rx.recv() else { break };
+                    in_flight -= 1;
+                    results.push(msg);
+                }
+            });
+            done_tx.send(results).expect("test receiver is alive");
+        });
+        let mut results = done_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("the scheduler loop hung on a panicked job");
+        results.sort();
+        assert_eq!(results, vec![Ok(0), Ok(2), Err("job 1 failed".to_string())]);
+    }
+
+    #[test]
+    fn panicked_completion_fails_the_module_with_the_message() {
+        let WorkerMsg::Completed(msg) = panicked_completion("App".to_string(), "boom") else {
+            panic!("expected a completion");
+        };
+        assert_eq!(msg.module_name, "App");
+        assert!(msg.is_compiled && !msg.is_clean);
+        let err = msg.result.expect_err("a panicked module fails");
+        assert_eq!(err.to_string(), "Compilation panicked for App: boom");
+    }
 
     fn test_project_context(root: &Path) -> ProjectContext {
         let config = config::tests::create_config(config::tests::CreateConfigArgs {

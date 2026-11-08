@@ -829,27 +829,19 @@ fn compute_active_features(
     let mut result: AHashMap<String, AHashSet<String>> = AHashMap::new();
 
     for (package_name, package) in packages {
-        let mut any_all_request = false;
-        let mut saw_consumer_entry = false;
-        let mut requested: AHashSet<String> = AHashSet::new();
-
-        if package.is_root {
+        let request = if package.is_root {
             match cli_features {
-                None => any_all_request = true,
-                Some(list) => requested.extend(list.iter().cloned()),
+                None => FeatureRequest::All,
+                Some(list) => FeatureRequest::Only(list.iter().cloned().collect()),
             }
         } else {
+            let mut request = FeatureRequest::NoConsumer;
             for consumer in packages.values() {
                 // `dependencies` always contribute.
                 if let Some(deps) = consumer.config.dependencies.as_ref() {
                     for dep in deps {
-                        if dep.name() != package_name {
-                            continue;
-                        }
-                        saw_consumer_entry = true;
-                        match dep.features() {
-                            None => any_all_request = true,
-                            Some(list) => requested.extend(list.iter().cloned()),
+                        if dep.name() == package_name {
+                            request.add(dep.features());
                         }
                     }
                 }
@@ -860,37 +852,54 @@ fn compute_active_features(
                     && let Some(dev_deps) = consumer.config.dev_dependencies.as_ref()
                 {
                     for dep in dev_deps {
-                        if dep.name() != package_name {
-                            continue;
-                        }
-                        saw_consumer_entry = true;
-                        match dep.features() {
-                            None => any_all_request = true,
-                            Some(list) => requested.extend(list.iter().cloned()),
+                        if dep.name() == package_name {
+                            request.add(dep.features());
                         }
                     }
                 }
             }
+            request
+        };
 
-            // Defensive: if no consumer edge was found at all, keep all features. An empty
-            // `requested` set by itself is a *valid* request (`"features": []` means
-            // "untagged only"), so only fall back when we truly observed no entries.
-            if !saw_consumer_entry {
-                any_all_request = true;
+        let closure = match request {
+            // Defensive: if no consumer edge was found at all, keep all
+            // features. An empty `Only` set is a *valid* request
+            // (`"features": []` means "untagged only").
+            FeatureRequest::NoConsumer | FeatureRequest::All => package.config.collect_declared_features(),
+            FeatureRequest::Only(requested) => {
+                config::resolve_active_features(&requested, package.config.features.as_ref())
+                    .map_err(|e| anyhow!("Invalid features for package '{}': {}", package_name, e))?
             }
-        }
-
-        let closure = if any_all_request {
-            package.config.collect_declared_features()
-        } else {
-            config::resolve_active_features(&requested, package.config.features.as_ref())
-                .map_err(|e| anyhow!("Invalid features for package '{}': {}", package_name, e))?
         };
 
         result.insert(package_name.clone(), closure);
     }
 
     Ok(result)
+}
+
+/// The features a package's consumers request, merged over every consumer
+/// entry.
+enum FeatureRequest {
+    /// No consumer entry names the package.
+    NoConsumer,
+    /// Only these features (and what they imply).
+    Only(AHashSet<String>),
+    /// Every declared feature: some entry did not list features.
+    All,
+}
+
+impl FeatureRequest {
+    fn add(&mut self, features: Option<&Vec<String>>) {
+        match (&mut *self, features) {
+            (FeatureRequest::All, _) => {}
+            (_, None) => *self = FeatureRequest::All,
+            (FeatureRequest::Only(requested), Some(list)) => requested.extend(list.iter().cloned()),
+            (FeatureRequest::NoConsumer, Some(list)) => {
+                *self = FeatureRequest::Only(list.iter().cloned().collect())
+            }
+        }
+    }
 }
 
 /// Make turns a folder, that should contain a config, into a tree of Packages.

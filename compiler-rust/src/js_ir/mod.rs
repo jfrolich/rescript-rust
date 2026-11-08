@@ -13,6 +13,9 @@
 //! - Statements - Instructions that have effects
 //! - Programs - Complete compilation units
 
+pub mod arena;
+pub mod arena_tree;
+pub mod build;
 pub mod op;
 pub mod printer;
 pub mod program_printer;
@@ -32,7 +35,6 @@ use crate::cmi::persistent_env::{
     CmjPackageSpec, PersistentEnv,
 };
 use crate::ident::Ident;
-use crate::lambda::Lambda;
 use crate::lambda::SwitchCaseTag;
 use crate::lambda::lam_tag_info::TagInfo;
 pub use op::{BinOp, IdentInfo, Kind, LengthObject, MutableFlag, Number, Property, PropertyName};
@@ -719,18 +721,22 @@ fn normalize_absolute_path(path: &FsPath) -> PathBuf {
     normalize_lexical_path(base)
 }
 
+/// Whether `bytes` is an absolute Unix path with no empty, `.` or `..`
+/// component and no trailing separator, so lexical normalization keeps it.
+#[cfg(unix)]
+fn is_normal_absolute_unix_path(bytes: &[u8]) -> bool {
+    bytes.len() > 1
+        && bytes[0] == b'/'
+        && bytes[1..]
+            .split(|&byte| byte == b'/')
+            .all(|part| !part.is_empty() && part != b"." && part != b"..")
+}
+
 fn normalize_lexical_path(path: PathBuf) -> PathBuf {
-    // An absolute Unix path without `.`/`..` components, doubled or trailing
-    // separators is already normal; skip rebuilding it component by component.
     #[cfg(unix)]
     {
         use std::os::unix::ffi::OsStrExt;
-        let bytes = path.as_os_str().as_bytes();
-        if bytes.first() == Some(&b'/')
-            && bytes.len() > 1
-            && !bytes.ends_with(b"/")
-            && !bytes.windows(2).any(|pair| pair == b"//" || pair == b"/.")
-        {
+        if is_normal_absolute_unix_path(path.as_os_str().as_bytes()) {
             return path;
         }
     }
@@ -773,6 +779,47 @@ fn normalize_lexical_path(path: PathBuf) -> PathBuf {
 }
 
 fn relative_path_between(base_dir: &FsPath, target: &FsPath) -> Option<PathBuf> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::{OsStrExt, OsStringExt};
+        let base = base_dir.as_os_str().as_bytes();
+        let target = target.as_os_str().as_bytes();
+        if is_normal_absolute_unix_path(base) && is_normal_absolute_unix_path(target) {
+            // Both paths are already normal, so their components are the
+            // `/`-separated parts; this is the general case below without
+            // copying and re-parsing either path.
+            let base_parts = base[1..].split(|&byte| byte == b'/');
+            let mut target_parts = target[1..].split(|&byte| byte == b'/').peekable();
+            let mut ups = 0usize;
+            let mut diverged = false;
+            for part in base_parts {
+                if !diverged && target_parts.peek() == Some(&part) {
+                    target_parts.next();
+                } else {
+                    diverged = true;
+                    ups += 1;
+                }
+            }
+            let mut relative = Vec::with_capacity(ups * 3 + target.len());
+            for _ in 0..ups {
+                if !relative.is_empty() {
+                    relative.push(b'/');
+                }
+                relative.extend_from_slice(b"..");
+            }
+            for part in target_parts {
+                if !relative.is_empty() {
+                    relative.push(b'/');
+                }
+                relative.extend_from_slice(part);
+            }
+            return Some(PathBuf::from(std::ffi::OsString::from_vec(relative)));
+        }
+    }
+    relative_path_between_general(base_dir, target)
+}
+
+fn relative_path_between_general(base_dir: &FsPath, target: &FsPath) -> Option<PathBuf> {
     let base = normalize_lexical_path(base_dir.to_path_buf());
     let target = normalize_lexical_path(target.to_path_buf());
 
@@ -3020,236 +3067,39 @@ pub struct DepsProgram {
     pub side_effect: Option<String>,
 }
 
-pub(crate) fn dispose_deps_program_nonrecursive(program: DepsProgram) {
-    let DepsProgram {
-        program,
-        modules: _,
-        side_effect: _,
-    } = program;
-    dispose_program_nonrecursive(program);
-}
-
-pub(crate) fn dispose_program_nonrecursive(program: Program) {
-    let Program {
-        block,
-        exports: _,
-        export_set: _,
-        name_reservations: _,
-    } = program;
-    dispose_block_nonrecursive(block);
-}
-
-enum DisposeItem {
-    Block(Block),
-    Statement(Statement),
-    Expression(Expression),
-}
-
-fn dispose_block_nonrecursive(block: Block) {
-    let mut stack = vec![DisposeItem::Block(block)];
-    while let Some(item) = stack.pop() {
-        match item {
-            DisposeItem::Block(block) => {
-                for statement in block {
-                    stack.push(DisposeItem::Statement(statement));
-                }
-            }
-            DisposeItem::Statement(statement) => {
-                dispose_statement_nonrecursive(statement, &mut stack)
-            }
-            DisposeItem::Expression(expression) => {
-                dispose_expression_nonrecursive(expression, &mut stack)
-            }
-        }
-    }
-}
-
-fn push_expression_vec(expressions: Vec<Expression>, stack: &mut Vec<DisposeItem>) {
-    for expression in expressions {
-        stack.push(DisposeItem::Expression(expression));
-    }
-}
-
-fn push_optional_expression(expression: Option<Expression>, stack: &mut Vec<DisposeItem>) {
-    if let Some(expression) = expression {
-        stack.push(DisposeItem::Expression(expression));
-    }
-}
-
-fn push_optional_expression_vec(
-    expressions: Option<Vec<Expression>>,
-    stack: &mut Vec<DisposeItem>,
-) {
-    if let Some(expressions) = expressions {
-        push_expression_vec(expressions, stack);
-    }
-}
-
-fn dispose_case_clause_nonrecursive(clause: CaseClause, stack: &mut Vec<DisposeItem>) {
-    let CaseClause {
-        source_loc: _,
-        body,
-        should_break: _,
-        comment: _,
-    } = clause;
-    stack.push(DisposeItem::Block(body));
-}
-
-fn dispose_statement_nonrecursive(statement: Statement, stack: &mut Vec<DisposeItem>) {
-    let Statement {
-        source_loc: _,
-        desc,
-        comment: _,
-    } = statement;
-    match desc {
-        StatementDesc::Block(block) => stack.push(DisposeItem::Block(block)),
-        StatementDesc::Variable(decl) => {
-            let VariableDeclaration {
-                ident: _,
-                value,
-                property: _,
-                ident_info: _,
-            } = decl;
-            push_optional_expression(value, stack);
-        }
-        StatementDesc::Exp(expr) | StatementDesc::Return(expr) | StatementDesc::Throw(expr) => {
-            stack.push(DisposeItem::Expression(expr));
-        }
-        StatementDesc::If(cond, then_block, else_block) => {
-            stack.push(DisposeItem::Expression(cond));
-            stack.push(DisposeItem::Block(then_block));
-            stack.push(DisposeItem::Block(else_block));
-        }
-        StatementDesc::While(_, cond, body) => {
-            stack.push(DisposeItem::Expression(cond));
-            stack.push(DisposeItem::Block(body));
-        }
-        StatementDesc::ForRange(_, start, finish, _, _, body) => {
-            push_optional_expression(start.map(|expr| *expr), stack);
-            stack.push(DisposeItem::Expression(*finish));
-            stack.push(DisposeItem::Block(body));
-        }
-        StatementDesc::ForOf(_, _, iterable, body)
-        | StatementDesc::ForAwaitOf(_, _, iterable, body) => {
-            stack.push(DisposeItem::Expression(*iterable));
-            stack.push(DisposeItem::Block(body));
-        }
-        StatementDesc::IntSwitch(expr, clauses, default) => {
-            stack.push(DisposeItem::Expression(expr));
-            for (_, clause) in clauses {
-                dispose_case_clause_nonrecursive(clause, stack);
-            }
-            if let Some(default) = default {
-                stack.push(DisposeItem::Block(default));
-            }
-        }
-        StatementDesc::StringSwitch(expr, clauses, default) => {
-            stack.push(DisposeItem::Expression(expr));
-            for clause in clauses {
-                dispose_case_clause_nonrecursive(clause.clause, stack);
-            }
-            if let Some(default) = default {
-                stack.push(DisposeItem::Block(default));
-            }
-        }
-        StatementDesc::Try(body, catch, finally) => {
-            stack.push(DisposeItem::Block(body));
-            if let Some((_, catch_body)) = catch {
-                stack.push(DisposeItem::Block(catch_body));
-            }
-            if let Some(finally) = finally {
-                stack.push(DisposeItem::Block(finally));
-            }
-        }
-        StatementDesc::Continue(_) | StatementDesc::Break(_) | StatementDesc::Debugger => {}
-    }
-}
-
-fn dispose_expression_nonrecursive(expression: Expression, stack: &mut Vec<DisposeItem>) {
-    let Expression {
-        source_loc: _,
-        desc,
-        comment: _,
-    } = expression;
-    match desc {
-        ExpressionDesc::Length(expr, _)
-        | ExpressionDesc::IsNullOrUndefined(expr)
-        | ExpressionDesc::Typeof(expr)
-        | ExpressionDesc::JsNot(expr)
-        | ExpressionDesc::JsBnot(expr)
-        | ExpressionDesc::StaticIndex(expr, _, _)
-        | ExpressionDesc::OptionalBlock(expr, _)
-        | ExpressionDesc::CamlBlockTag(expr, _)
-        | ExpressionDesc::Await(expr)
-        | ExpressionDesc::Spread(expr)
-        | ExpressionDesc::RecordRest(_, expr) => {
-            stack.push(DisposeItem::Expression(*expr));
-        }
-        ExpressionDesc::StringAppend(left, right)
-        | ExpressionDesc::In(left, right)
-        | ExpressionDesc::Seq(left, right)
-        | ExpressionDesc::Bin(_, left, right)
-        | ExpressionDesc::FlatCall(left, right)
-        | ExpressionDesc::StringIndex(left, right)
-        | ExpressionDesc::ArrayIndex(left, right) => {
-            stack.push(DisposeItem::Expression(*left));
-            stack.push(DisposeItem::Expression(*right));
-        }
-        ExpressionDesc::Cond(cond, then_expr, else_expr) => {
-            stack.push(DisposeItem::Expression(*cond));
-            stack.push(DisposeItem::Expression(*then_expr));
-            stack.push(DisposeItem::Expression(*else_expr));
-        }
-        ExpressionDesc::Call(func, args, _) => {
-            stack.push(DisposeItem::Expression(*func));
-            push_expression_vec(args, stack);
-        }
-        ExpressionDesc::TaggedTemplate(tag, _quasi, expressions) => {
-            stack.push(DisposeItem::Expression(*tag));
-            push_expression_vec(expressions, stack);
-        }
-        ExpressionDesc::InterpolatedTemplate { values, .. } => push_expression_vec(values, stack),
-        ExpressionDesc::Fun {
-            is_method: _,
-            params: _,
-            body,
-            env: _,
-            return_unit: _,
-            async_: _,
-            directive: _,
-        } => {
-            stack.push(DisposeItem::Block(body));
-        }
-        ExpressionDesc::Array(expressions, _) => push_expression_vec(expressions, stack),
-        ExpressionDesc::CamlBlock(expressions, _, _) => {
-            push_expression_vec(expressions, stack);
-        }
-        ExpressionDesc::Object(proto, properties) => {
-            if let Some(proto) = proto {
-                stack.push(DisposeItem::Expression(*proto));
-            }
-            for (_, expression) in properties {
-                stack.push(DisposeItem::Expression(expression));
-            }
-        }
-        ExpressionDesc::New(func, args) => {
-            stack.push(DisposeItem::Expression(*func));
-            push_optional_expression_vec(args, stack);
-        }
-        ExpressionDesc::Var(_)
-        | ExpressionDesc::Bool(_)
-        | ExpressionDesc::Str(_)
-        | ExpressionDesc::TemplateLiteral(_)
-        | ExpressionDesc::JsonLiteral(_)
-        | ExpressionDesc::RawJsCode(_)
-        | ExpressionDesc::Number(_)
-        | ExpressionDesc::Undefined { .. }
-        | ExpressionDesc::Null => {}
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn relative_path_fast_path_matches_general_case() {
+        use super::{relative_path_between, relative_path_between_general};
+        use std::path::Path;
+        let paths = [
+            "/a",
+            "/a/b",
+            "/a/b/c",
+            "/a/bc",
+            "/a/.hidden/c",
+            "/a/.hidden/d/e.js",
+            "/x/y",
+            "/a/b/c/d",
+        ];
+        for base in paths {
+            for target in paths {
+                assert_eq!(
+                    relative_path_between(Path::new(base), Path::new(target)),
+                    relative_path_between_general(Path::new(base), Path::new(target)),
+                    "{base} -> {target}"
+                );
+            }
+        }
+        assert!(!super::is_normal_absolute_unix_path(b"/a/./b"));
+        assert!(!super::is_normal_absolute_unix_path(b"/a/../b"));
+        assert!(!super::is_normal_absolute_unix_path(b"/a//b"));
+        assert!(!super::is_normal_absolute_unix_path(b"/a/"));
+        assert!(super::is_normal_absolute_unix_path(b"/a/.b/..c"));
+    }
+
     use super::*;
     use tempfile::tempdir;
 

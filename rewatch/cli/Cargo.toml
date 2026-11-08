@@ -1,0 +1,24 @@
+[package]
+name = "rescript-cli"
+version = "13.0.0-alpha.7"
+edition = "2024"
+rust-version = "1.91"
+publish = false
+description = "The `rescript` executable, with the runtime compiled in (see build.rs)."
+
+[[bin]]
+name = "rescript"
+path = "src/main.rs"
+
+[dependencies]
+rescript = { path = ".." }
+rescript-compiler = { path = "../../compiler-rust" }
+anyhow = "1.0.93"
+console = "0.15.5"
+env_logger = "0.10"
+log = { version = "0.4.17" }
+mimalloc = { version = "0.1", default-features = false }
+rayon = "1.6.1"
+
+[build-dependencies]
+rescript = { path = ".." }

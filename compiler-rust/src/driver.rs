@@ -24,8 +24,9 @@ use crate::cmi::portable_types::PortablePersStruct;
 use crate::context::IdGenerator;
 use crate::diagnostics::WarningConfig;
 use crate::ident::Ident;
+use crate::js_ir::arena::JsDepsProgram as DepsProgram;
 use crate::js_ir::{
-    DepsProgram, Kind, ModuleFormat, ModuleId, ModulePathResolutionError, ModulePathResolver,
+    Kind, ModuleFormat, ModuleId, ModulePathResolutionError, ModulePathResolver,
     print_deps_program_with_directives_and_options, print_deps_program_with_source_map,
 };
 use crate::lambda::lam_compile::LambdaCompiler;
@@ -10130,6 +10131,7 @@ fn compile_source_to_js_with_options_inner(
             has_resi,
         )
     });
+    let raw_arena = crate::raw_lambda::RawArena::for_typed_exprs(tctx.typed.expr_count());
     let mut raw_converter =
         crate::raw_lambda::convert::RawLambdaConverter::with_start_stamp_and_unit_name(
             parser.arena(),
@@ -10138,6 +10140,7 @@ fn compile_source_to_js_with_options_inner(
             &env,
             lambda_start_stamp,
             unit_name,
+            &raw_arena,
         );
     raw_converter.set_preserve_expanded_sparse_records(
         options.dump_lambda || options.dump_lambda_sexp || options.dump_lambda_sexp_locs,
@@ -10181,12 +10184,20 @@ fn compile_source_to_js_with_options_inner(
     if let Some(trace) = discriminator_trace.as_deref_mut() {
         trace.type_context_stamp = type_ctx.current_stamp();
         trace.raw_converter_stamp = raw_lambda_current_stamp;
-        trace.raw_max_stamp = crate::raw_lambda::lower::max_ident_stamp_for_test(&raw_lambda);
-        trace.raw_lambda = format!("{raw_lambda:#?}");
+        trace.raw_max_stamp =
+            crate::raw_lambda::lower::max_ident_stamp_for_test(&raw_arena.get(), raw_lambda);
+        trace.raw_lambda =
+            crate::raw_lambda::print::RawLambdaPrinter::new(&raw_arena.get(), raw_lambda)
+                .to_string();
     }
 
+    if SKIP_CLI_CLEANUP.load(Ordering::Relaxed) {
+        std::mem::forget(raw_converter);
+    } else {
+        drop(raw_converter);
+    }
     let (mut lowered_arena, lowered_root, export_idents) =
-        crate::raw_lambda::lower::lower_to_translmod_lambda(raw_lambda);
+        crate::raw_lambda::lower::lower_to_translmod_lambda(raw_arena.into_inner(), raw_lambda);
     // js_implementation.ml:165 prints `-drawlambda` on Translmod's result.
     if options.dump_lambda {
         use std::io::Write;
@@ -10344,7 +10355,6 @@ fn compile_source_to_js_with_options_inner(
     if SKIP_CLI_CLEANUP.load(Ordering::Relaxed) {
         std::mem::forget(compiler);
         std::mem::forget(program);
-        std::mem::forget(raw_converter);
         std::mem::forget(implementation_coercion);
         std::mem::forget(typed_structure);
         std::mem::forget(final_env);
@@ -13534,7 +13544,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
 
     let unit_name = options.current_unit_name().unwrap_or_default();
     let (
-        raw_lambda,
+        (raw_arena, raw_lambda),
         raw_warnings,
         raw_diagnostic,
         raw_possible_required_modules,
@@ -13562,6 +13572,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
                 has_interface,
             ),
         };
+        let raw_arena = crate::raw_lambda::RawArena::for_typed_exprs(tctx.typed.expr_count());
         let mut raw_converter =
             crate::raw_lambda::convert::RawLambdaConverter::with_start_stamp_and_unit_name(
                 arena,
@@ -13570,6 +13581,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
                 &env,
                 lambda_start_stamp,
                 unit_name,
+                &raw_arena,
             );
         raw_converter.set_preserve_expanded_sparse_records(
             options.capture_intermediates || options.dumps.iter().any(|kind| kind.is_lambda()),
@@ -13597,8 +13609,9 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         let hoisted_functions = raw_converter.take_hoisted_functions();
         let hoisted_exports = raw_converter.take_hoisted_exports();
         let lam_locs = raw_converter.take_lam_locs();
+        drop(raw_converter);
         Ok((
-            raw_lambda,
+            (raw_arena.into_inner(), raw_lambda),
             raw_warnings,
             raw_diagnostic,
             possible_required_modules,
@@ -13704,7 +13717,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     // Capture raw lambda sexp for the playground (only if requested).
     let raw_lambda_sexp = if options.capture_intermediates {
         let mut buf = Vec::new();
-        crate::raw_lambda::print::print_raw_lambda(&raw_lambda, &mut buf);
+        crate::raw_lambda::print::print_raw_lambda(&raw_arena, raw_lambda, &mut buf);
         String::from_utf8_lossy(&buf).into_owned()
     } else {
         String::new()
@@ -13713,7 +13726,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     let (mut lowered_arena, lowered_root, export_idents) =
         crate::timing::measure(crate::timing::Phase::Lambda, || {
             let _phase = info_span!("compiler.lower_lambda").entered();
-            crate::raw_lambda::lower::lower_to_translmod_lambda(raw_lambda)
+            crate::raw_lambda::lower::lower_to_translmod_lambda(raw_arena, raw_lambda)
         });
     // js_implementation.ml:165 prints `-drawlambda` on Translmod's result.
     if options.dumps.contains(&DumpKind::RawLambda) {
@@ -13920,7 +13933,7 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
         })?;
     }
     let mut rendered_programs = if options.skip_js_render {
-        crate::js_ir::dispose_deps_program_nonrecursive(program);
+        drop(program);
         Vec::new()
     } else {
         let mut rendered_programs = vec![(
@@ -13988,15 +14001,15 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
                     code: std::mem::take(&mut primary_js),
                     source_map: primary_source_map,
                 });
-                crate::js_ir::dispose_deps_program_nonrecursive(primary_program);
+                drop(primary_program);
                 String::new()
             } else {
-                crate::js_ir::dispose_deps_program_nonrecursive(primary_program);
+                drop(primary_program);
                 primary_js
             };
             for (path, program, module_path_resolver, lam_locs) in rendered_programs {
                 let Some(path) = path else {
-                    crate::js_ir::dispose_deps_program_nonrecursive(program);
+                    drop(program);
                     continue;
                 };
                 let (code, source_map) = render_js_program(
@@ -14009,7 +14022,7 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
                     Some(&path),
                     lam_locs,
                 );
-                crate::js_ir::dispose_deps_program_nonrecursive(program);
+                drop(program);
                 js_outputs.push(JsOutput {
                     path,
                     code,
