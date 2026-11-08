@@ -18345,13 +18345,12 @@ fn type_structure_item<'a>(
                                 variance_row,
                             )?;
                         }
-                        let path = Path::pident(*type_id);
-                        let Ok(updated_decl_ref) = new_env.lookup_type(&path) else {
+                        let Some(updated_decl) =
+                            new_env.update_type_variance(*type_id, variance_row.clone())
+                        else {
                             continue;
                         };
-                        let mut updated_decl = updated_decl_ref.clone();
-                        updated_decl.type_variance = variance_row.clone();
-                        new_env.replace_type_properties(*type_id, updated_decl.clone());
+                        let updated_decl = updated_decl.as_ref().clone();
 
                         if let Some(typed_decl) = typed_tree_decls.get_mut(idx) {
                             typed_decl.typ_type.type_variance = variance_row.clone();
@@ -18429,13 +18428,12 @@ fn type_structure_item<'a>(
                                 variance_row,
                             )?;
                         }
-                        let path = Path::pident(*type_id);
-                        let Ok(updated_decl_ref) = new_env.lookup_type(&path) else {
+                        let Some(updated_decl) =
+                            new_env.update_type_variance(*type_id, variance_row.clone())
+                        else {
                             continue;
                         };
-                        let mut updated_decl = updated_decl_ref.clone();
-                        updated_decl.type_variance = variance_row.clone();
-                        new_env.replace_type_properties(*type_id, updated_decl.clone());
+                        let updated_decl = updated_decl.as_ref().clone();
 
                         if let Some(typed_decl) = typed_tree_decls.get_mut(idx) {
                             typed_decl.typ_type.type_variance = variance_row.clone();
@@ -21413,8 +21411,11 @@ let f = (v: t) => v.a
         assert_eq!(ctx.label_family(family).unwrap().len(), 2);
 
         // A variance update keeps the labels of the same declaration.
-        env.replace_type_properties(id, decl);
+        let updated = env
+            .update_type_variance(id, decl.type_variance.clone())
+            .expect("t is bound");
         assert_eq!(env.type_label_family(&id), Some(family));
+        assert!(matches!(updated.type_kind, crate::types::TypeKind::TypeRecord(..)));
 
         // A new binding without labels (an abstract placeholder) has none.
         let placeholder = abstract_decl(&env);
@@ -21464,5 +21465,4 @@ let f = r => r.x
         );
         assert!(result.is_err(), "an inline record label is not bound by name");
     }
-
 }

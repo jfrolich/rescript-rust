@@ -1618,13 +1618,21 @@ impl Env {
         }
     }
 
-    /// Replace the declaration bound to `id` by one that differs only in
-    /// properties its labels do not describe (variance), keeping the labels
-    /// and their array.
-    pub fn replace_type_properties(&mut self, id: Ident, decl: impl Into<Arc<TypeDeclaration>>) {
+    /// Rebind the type `id` with its declaration's `type_variance` replaced
+    /// by `variance`, keeping its labels and their array (labels do not
+    /// describe variance). Returns the new declaration, or `None` when `id`
+    /// is not bound.
+    pub fn update_type_variance(
+        &mut self,
+        id: Ident,
+        variance: Vec<super::variance::Variance>,
+    ) -> Option<Arc<TypeDeclaration>> {
+        let mut decl = self.find_type_arc_by_ident(&id)?.as_ref().clone();
+        decl.type_variance = variance;
+        let decl = Arc::new(decl);
         self.bump_scope();
-        let decl = decl.into();
-        self.data_mut().types.add(id, decl);
+        self.data_mut().types.add(id, decl.clone());
+        Some(decl)
     }
 
     /// Find a type by name.
