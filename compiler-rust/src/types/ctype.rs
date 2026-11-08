@@ -14357,7 +14357,7 @@ mod tests {
     }
 
     #[test]
-    fn ownership_probe_does_not_publish_and_live_result_allows_recursive_lookup() {
+    fn ownership_live_result_allows_recursive_lookup() {
         let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
         let env = Env::empty();
         let parent = Path::pident(Ident::create_persistent("ProbeOwnership"));
@@ -14371,14 +14371,10 @@ mod tests {
             )]),
         );
         let mut pers = None;
-        let probe = super::super::typecore::lookup_type_in_resolved_path_for_probe(
+        let probe = super::super::typecore::lookup_type_in_resolved_path(
             &parent, "t", &env, &mut pers, &ctx,
         )
         .expect("probe");
-        assert!(
-            ctx.find_resolved_module_type(env.scope_id(), &parent, "t")
-                .is_none()
-        );
         let path = Path::pdot(parent.clone(), "t");
         let first = lookup_type_decl_for_path(&ctx, &env, &path).expect("real lookup");
         assert!(

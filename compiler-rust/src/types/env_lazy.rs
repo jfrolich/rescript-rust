@@ -1767,7 +1767,6 @@ fn build_local_module_components(
         | super::decl::ModuleType::MtyIdent(alias_path) = &md.md_type
         && let PathView::Pident(alias_id) = alias_path.view()
         && alias_id.is_persistent()
-        && cache_mode.forces_alias_sig()
     {
         let ps = {
             let pers = pers_env.as_mut()?;
@@ -1810,8 +1809,7 @@ fn build_local_module_components(
     // `find_module` (env.ml:876-881), which forces the unit's `comp_modules`
     // thunk for it, `Subst.modtype` freshening its bound identifiers
     // (env.ml:475-477).
-    if cache_mode.forces_alias_sig()
-        && !matches!(md.md_type, super::decl::ModuleType::MtyAlias(..))
+    if !matches!(md.md_type, super::decl::ModuleType::MtyAlias(..))
         && let Some(source) = source_prefix
         && let PathView::Pdot(parent, name, _) = source.view()
         && !source.same(access_path)
@@ -1833,34 +1831,25 @@ fn build_local_module_components(
         // the module type whose signature is used below.
         match alias_path.view() {
             PathView::Pdot(parent, name, _) => {
-                if cache_mode.forces_alias_sig() {
-                    // OCaml compiler/ml/env.ml:1517 calls `scrape_alias` for
-                    // real component-table construction, and scrape_alias
-                    // reaches env.ml:865-882 `find_module`, which forces
-                    // env.ml:1568's module-declaration thunk. Rust-only probe
-                    // callers skip this branch because they are existence
-                    // checks with no corresponding OCaml lookup step.
-                    let _ = crate::types::typecore::lookup_module_in_resolved_path(
-                        parent,
-                        name.as_str(),
-                        env,
-                        pers_env,
-                        ctx,
-                    );
-                }
+                // OCaml compiler/ml/env.ml:1517 calls `scrape_alias` for
+                // component-table construction, and scrape_alias reaches
+                // env.ml:865-882 `find_module`, which forces env.ml:1568's
+                // module-declaration thunk.
+                let _ = crate::types::typecore::lookup_module_in_resolved_path(
+                    parent,
+                    name.as_str(),
+                    env,
+                    pers_env,
+                    ctx,
+                );
             }
             PathView::Pident(id) if id.is_persistent() => {
                 // OCaml compiler/ml/env.ml:1516-1518 scrapes aliases while
-                // building real component tables, which can force
-                // env.ml:719-721 `ps_sig` through env.ml:865-875. Rust-only
-                // existence probes suppress that force because no OCaml lookup
-                // reaches this alias at that point.
-                if cache_mode.forces_alias_sig()
-                    && let Some(pers) = pers_env.as_mut()
-                {
+                // building component tables, which can force env.ml:719-721
+                // `ps_sig` through env.ml:865-875.
+                if let Some(pers) = pers_env.as_mut() {
                     let _ = pers.force_lazy_signature_rename(id.name(), ctx);
                 } else if access_path_is_direct_opened_component(env, access_path)
-                    && cache_mode.forces_alias_sig()
                     && env.find_module(id.name()).is_err()
                 {
                     // OCaml compiler/ml/env.ml:1440-1446 reaches
@@ -1892,8 +1881,7 @@ fn build_local_module_components(
                 super::decl::ModuleType::MtyAlias(_, alias_path)
                     if alias_path
                         .as_pident()
-                        .is_some_and(|alias_id| alias_id.is_persistent())
-                        && cache_mode.forces_alias_sig() =>
+                        .is_some_and(|alias_id| alias_id.is_persistent()) =>
                 {
                     let alias_id = alias_path.as_pident().expect("guarded Pident");
                     // OCaml compiler/ml/env.ml:1517 calls `scrape_alias` before
@@ -2193,25 +2181,22 @@ impl StoredModuleComponents {
             let (components, piece) =
                 ctx.build_in_store(|| self.build_components(pers_env, ctx, cache_mode));
             let components = Arc::new(components?);
-            if cache_mode.publishes() {
-                match piece {
-                    Some(piece) => {
-                        if self.cached.set(components.clone()).is_ok() {
-                            let _ = self.cached_piece.set(piece);
-                        }
+            match piece {
+                Some(piece) => {
+                    if self.cached.set(components.clone()).is_ok() {
+                        let _ = self.cached_piece.set(piece);
                     }
-                    // Built from this compilation's private state (such as
-                    // a renamed persistent signature): keep it for this
-                    // compilation only.
-                    None => ctx.set_local_stored_components(self.local_id, components.clone()),
                 }
+                // Built from this compilation's private state (such as a
+                // renamed persistent signature): keep it for this compilation
+                // only.
+                None => ctx.set_local_stored_components(self.local_id, components.clone()),
             }
             return Some(f(components.as_ref()));
         }
 
         let components = Arc::new(self.build_components(pers_env, ctx, cache_mode)?);
-        if cache_mode.publishes()
-            && self.cached.set(components.clone()).is_err()
+        if self.cached.set(components.clone()).is_err()
             && let Some(cached) = self.cached.get().cloned()
         {
             return Some(f(cached.as_ref()));
@@ -2242,7 +2227,7 @@ impl StoredModuleComponents {
             cache_mode,
         )?;
         if ctx.compiler_counters_enabled() {
-            crate::perf_counters::record_stored_component_build(cache_mode, cache_mode.publishes());
+            crate::perf_counters::record_stored_component_build(cache_mode);
         }
         Some(components)
     }

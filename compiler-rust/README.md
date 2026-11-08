@@ -646,11 +646,6 @@ Current Rust-specific risk:
   port of `Env.components_of_module_maker`. Any performance or parity work here
   should cite the exact OCaml reference path and avoid adding a Rust-only
   compatibility layer.
-- `ComponentLookupCacheMode::{FindModule, ProbeModuleDescr}` in
-  `src/types/typecore.rs` is intended to model OCaml's `Env.find_module` versus
-  `Env.find_module_descr` force boundary. It should be audited at every call
-  site because the reference boundary lives in `env.ml`, not in an arbitrary
-  output or cache mode.
 - `TypeContext` keeps side caches for qualified component views, flattened alias
   component paths, forced normalized paths, and forced type-path comparisons.
   The qualified-component cache matches OCaml lazy sharing intent; the alias and

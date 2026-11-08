@@ -18569,12 +18569,7 @@ fn type_pack(
             std::sync::Arc::new(vec![]),
         ));
     // OCaml compiler/ml/typemod.ml:1710-1719 calls `wrap_constraint` for
-    // every packed module. Do not reuse a previous package coercion here:
-    // Includemod expansion allocates/freshens hidden identifiers, and strict
-    // typedtree parity depends on doing that work at the same program points.
-    // Component-table probes now carry `ComponentLookupApi::ProbeModuleDescr`
-    // explicitly, so package wrapping can call inclusion directly without
-    // changing global lazy-forcing state.
+    // every packed module.
     // typemod.ml `wrap_constraint`: an inclusion failure is `Not_included`
     // at the packed module expression.
     let mut inclusion_warnings = Vec::new();
@@ -22620,27 +22615,14 @@ impl Env {
                         return result;
                     }
                     if let Some(pers) = pers_env.as_mut() {
-                        let sig = if cache_mode.forces_alias_sig() {
-                            // OCaml compiler/ml/env.ml:1435-1446
-                            // `scrape_alias` resolves Mty_alias through
-                            // `find_module`; for persistent Pidents,
-                            // env.ml:872-875 returns an Mty_signature after
-                            // forcing ps_sig, which is initialized as
-                            // `Subst.signature Subst.identity sign` at env.ml:677.
-                            // Probe mode mirrors env.ml:781-813 type-component
-                            // lookup and reads the component descriptor instead.
-                            let renamed_sig = pers.get_renamed_sig_shared(mod_name, ctx)?;
-                            copy_lookup_signature_for_subst(renamed_sig.as_ref(), ctx)
-                        } else {
-                            // OCaml compiler/ml/env.ml:800-813 qualified type
-                            // lookup reads component tables without forcing
-                            // env.ml:719-721 `ps_sig` unless the lookup path
-                            // really reaches that lazy. Probe mode keeps the
-                            // same descriptor-only boundary for callers that
-                            // need component facts without `find_module`
-                            // forcing from env.ml:865-882.
-                            pers.read_raw_sig_shared(mod_name, ctx)?.as_ref().clone()
-                        };
+                        // OCaml compiler/ml/env.ml:1435-1446 `scrape_alias`
+                        // resolves Mty_alias through `find_module`; for
+                        // persistent Pidents, env.ml:872-875 returns an
+                        // Mty_signature after forcing ps_sig, which is
+                        // initialized as `Subst.signature Subst.identity sign`
+                        // at env.ml:677.
+                        let renamed_sig = pers.get_renamed_sig_shared(mod_name, ctx)?;
+                        let sig = copy_lookup_signature_for_subst(renamed_sig.as_ref(), ctx);
                         let result = Some((sig, Some(mod_name.to_string())));
                         visiting.remove(path);
                         return result;
@@ -23406,8 +23388,8 @@ fn type_contains_unresolved_local_path(
             // thunk. This unresolved-path probe uses the explicit no-publish
             // cache mode so it does not make alias children such as
             // `Functions.Types` earlier than OCaml would.
-            let local_path_is_unresolved = has_local_head
-                && lookup_type_decl_for_path_for_probe(path, env, pers_env, ctx).is_none();
+            let local_path_is_unresolved =
+                has_local_head && lookup_type_decl_for_path(path, env, pers_env, ctx).is_none();
             if local_path_is_unresolved {
                 return true;
             }
@@ -25387,7 +25369,7 @@ fn qualify_module_local_type_paths_with_alias_lookup_in_place<'a>(
         // qualification probes only check whether a rewritten path exists; they
         // must not force env.ml:1568 module-declaration thunks or populate the
         // normal Rust lookup caches before the later real lookup reaches them.
-        lookup_type_decl_for_path_for_probe(type_path, env, pers_env, ctx)
+        lookup_type_decl_for_path(type_path, env, pers_env, ctx)
     }
 
     let repr = ctx.repr(ty);
@@ -25524,7 +25506,7 @@ fn qualify_module_local_type_paths_with_alias_lookup_in_place<'a>(
                             env,
                             pers_env,
                             ctx,
-                            ComponentLookupApi::ProbeModuleDescr,
+                            ComponentLookupApi::FindType,
                             |components| {
                                 components
                                     .lookup_type(id.name())
@@ -26479,9 +26461,7 @@ fn with_resolved_child_module_components<R>(
     let result = (f
         .take()
         .expect("qualified child module components callback reused"))(&components);
-    if let Some(module_key) = module_key
-        && cache_mode.publishes()
-    {
+    if let Some(module_key) = module_key {
         ctx.register_qualified_module_components(module_key, components);
     }
     Some(result)
@@ -26957,9 +26937,7 @@ fn build_module_components_from_parent_path(
             // persistent branch (env.ml:872-875) forces `ps_sig`, freshening
             // the unit's bound identifiers. The view below shares the
             // unrenamed signature, so take the rename's stamps here.
-            if cache_mode.forces_alias_sig() {
-                ctx.trigger_module_sig_rename(&alias_target);
-            }
+            ctx.trigger_module_sig_rename(&alias_target);
             let source_prefix = Path::pident(Ident::create_persistent(&alias_target));
             let access_path =
                 Path::pdot_pos(parent_access_path, module_name.as_str(), runtime_pos as i32);
@@ -27204,27 +27182,6 @@ pub(crate) enum ComponentLookupApi {
     /// OCaml `Env.open_signature`, `env.ml:1874-1877`: open the selected
     /// descriptor's component table into another environment.
     OpenSignature,
-    /// Rust-only no-publish existence probe for checks that do not correspond
-    /// to an OCaml lookup step. It may inspect the descriptor shape but must not
-    /// publish a component-table cache entry or force alias signatures on behalf
-    /// of a later real lookup.
-    ProbeModuleDescr,
-}
-
-impl ComponentLookupApi {
-    pub(crate) fn publishes(self) -> bool {
-        !matches!(self, ComponentLookupApi::ProbeModuleDescr)
-    }
-
-    pub(crate) fn forces_alias_sig(self) -> bool {
-        // OCaml compiler/ml/env.ml:1516-1518 runs `scrape_alias` whenever
-        // `get_components` builds a component table. That scrape reaches
-        // env.ml:1435-1446 and may call env.ml:865-882 `find_module` for an
-        // alias target even when the outer API is `find_type` or
-        // `find_module_descr`. Only Rust-only no-publish probes suppress that
-        // side effect, because there is no corresponding OCaml lookup step.
-        !matches!(self, ComponentLookupApi::ProbeModuleDescr)
-    }
 }
 
 pub(crate) fn with_resolved_module_components_for_path_with_cache_mode<R>(
@@ -27262,8 +27219,7 @@ pub(crate) fn with_resolved_module_components_for_path_with_cache_mode<R>(
     let shared_key = module_key
         .as_ref()
         .filter(|key| {
-            cache_mode.publishes()
-                && ctx.persistent_env_is_in_process()
+            ctx.persistent_env_is_in_process()
                 && key.is_worker_shareable()
                 && shared_components_enabled()
                 // The worker's shared view was built by a compilation that
@@ -27333,13 +27289,7 @@ pub(crate) fn with_resolved_module_components_for_path_with_cache_mode<R>(
     let result = (f
         .take()
         .expect("qualified module components callback reused"))(&components);
-    // OCaml compiler/ml/env.ml:781-813 exposes separate descriptor/type lookup
-    // paths from env.ml:865-882 module-declaration lookup. Probe callers such as
-    // typedecl.ml:767-779 constraint checks can read component descriptors, but
-    // must not publish that probe view as the normal lazy component result.
-    if let Some(module_key) = module_key
-        && cache_mode.publishes()
-    {
+    if let Some(module_key) = module_key {
         if crate::types::context::store_debug_enabled() && shared_key.is_some() {
             eprintln!(
                 "[store-build] {} published={}",
@@ -27497,23 +27447,6 @@ pub(crate) fn lookup_type_in_resolved_path(
     )
 }
 
-pub(crate) fn lookup_type_in_resolved_path_for_probe(
-    parent_module_path: &Path,
-    type_name: &str,
-    env: &Env,
-    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &crate::types::context::TypeContext,
-) -> Option<(Path, Ident, Arc<crate::types::decl::TypeDeclaration>)> {
-    lookup_type_in_resolved_path_with_cache_mode(
-        parent_module_path,
-        type_name,
-        env,
-        pers_env,
-        ctx,
-        ComponentLookupApi::ProbeModuleDescr,
-    )
-}
-
 fn lookup_type_in_resolved_path_with_cache_mode(
     parent_module_path: &Path,
     type_name: &str,
@@ -27566,16 +27499,14 @@ fn lookup_type_in_resolved_path_with_cache_mode(
             // not use the raw CMI reader here: OCaml's `ps_comps` is built from
             // the acknowledged persistent structure, not from an uncomponentized
             // CMI declaration.
-            if cache_mode.publishes() {
-                ctx.register_resolved_module_type(
-                    env.scope_id(),
-                    parent_module_path,
-                    type_name,
-                    found.0.clone(),
-                    found.1,
-                    found.2.clone(),
-                );
-            }
+            ctx.register_resolved_module_type(
+                env.scope_id(),
+                parent_module_path,
+                type_name,
+                found.0.clone(),
+                found.1,
+                found.2.clone(),
+            );
             return Some(found);
         }
     }
@@ -27600,20 +27531,14 @@ fn lookup_type_in_resolved_path_with_cache_mode(
         |components| {
             components.lookup_type(type_name).map(|(id, decl)| {
                 let result = (parent_module_path.clone(), *id, decl.clone());
-                // OCaml compiler/ml/env.ml:800-813 qualified type lookup reaches
-                // component tables through env.ml:781-793 `find_module_descr`, while
-                // typedecl.ml:767-779 probe-style constraint checks can inspect the
-                // descriptor without publishing Rust's selected lookup cache.
-                if cache_mode.publishes() {
-                    ctx.register_resolved_module_type(
-                        env.scope_id(),
-                        parent_module_path,
-                        type_name,
-                        result.0.clone(),
-                        result.1,
-                        result.2.clone(),
-                    );
-                }
+                ctx.register_resolved_module_type(
+                    env.scope_id(),
+                    parent_module_path,
+                    type_name,
+                    result.0.clone(),
+                    result.1,
+                    result.2.clone(),
+                );
                 result
             })
         },
@@ -28475,21 +28400,6 @@ fn lookup_type_decl_for_path<'a>(
         pers_env,
         ctx,
         ComponentLookupApi::FindType,
-    )
-}
-
-fn lookup_type_decl_for_path_for_probe<'a>(
-    type_path: &Path,
-    env: &Env,
-    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &'a crate::types::context::TypeContext,
-) -> Option<Arc<crate::types::decl::TypeDeclaration>> {
-    lookup_type_decl_for_path_with_cache_mode(
-        type_path,
-        env,
-        pers_env,
-        ctx,
-        ComponentLookupApi::ProbeModuleDescr,
     )
 }
 
