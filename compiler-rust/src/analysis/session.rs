@@ -63,6 +63,7 @@ impl Loaded {
         Ctx {
             arena: self.source.parsed.arena(),
             types: &self.source.typed.type_ctx,
+            ta: &self.source.typed.typed_arena,
         }
     }
 }
@@ -154,12 +155,15 @@ fn load_source(source: TypedSource, module_name: &str, id: ModuleId) -> Loaded {
     let ctx = Ctx {
         arena: source.parsed.arena(),
         types: &source.typed.type_ctx,
+        ta: &source.typed.typed_arena,
     };
     let annots = match &source.typed.typed {
-        ToolingTyped::Implementation(structure) => {
-            Some(Annots::Implementation(&structure.str_items))
-        }
-        ToolingTyped::Interface(signature) => Some(Annots::Interface(&signature.sig_items)),
+        ToolingTyped::Implementation(structure) => Some(Annots::Implementation(
+            ctx.ta.structure_items(structure.str_items),
+        )),
+        ToolingTyped::Interface(signature) => Some(Annots::Interface(
+            ctx.ta.signature_items(signature.sig_items),
+        )),
         ToolingTyped::Failed(_) => None,
     };
     let (file, extra) = match annots {

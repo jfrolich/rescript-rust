@@ -47,6 +47,8 @@ pub fn translate_type_declaration_from_types(
         _ => crate::gentype::translate_type_declarations::DeclarationKind::NoDeclaration,
     };
     crate::gentype::translate_type_declarations::traslate_declaration_kind_from_decl_attributes(
+        // Declarations read from types carry no typed annotations.
+        &crate::types::typedtree::TypedArena::new(),
         ctx,
         arena,
         config,

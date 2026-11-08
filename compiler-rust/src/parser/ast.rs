@@ -287,6 +287,9 @@ fn deserialize_attributes<'de, D: serde::Deserializer<'de>>(
 }
 
 impl Attributes {
+    /// The empty attributes list.
+    pub const EMPTY: Attributes = Attributes(None);
+
     /// Create an empty attributes list (no heap allocation).
     #[inline(always)]
     pub fn new() -> Self {

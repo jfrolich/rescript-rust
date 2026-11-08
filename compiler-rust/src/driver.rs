@@ -10032,13 +10032,20 @@ fn compile_source_to_js_with_options_inner(
     // Print typed tree if requested
     if options.dump_typed_sexp {
         let mut stderr = std::io::stderr();
-        let _ = print_typed_structure(parser.arena(), &type_ctx, &typed_structure, &mut stderr);
+        let _ = print_typed_structure(
+            parser.arena(),
+            &type_ctx,
+            &tctx.typed,
+            &typed_structure,
+            &mut stderr,
+        );
     }
     if options.dump_typed_sexp_locs {
         let mut stderr = std::io::stderr();
         let _ = print_typed_structure_with_locs(
             parser.arena(),
             &type_ctx,
+            &tctx.typed,
             &typed_structure,
             &mut stderr,
         );
@@ -10079,6 +10086,7 @@ fn compile_source_to_js_with_options_inner(
             options,
             crate::gentype::main::TypedArtifactAnnots::Implementation(&typed_structure),
             parser.arena(),
+            &tctx.typed,
             &type_ctx,
             source_file_for_interface,
             &module_name,
@@ -10114,6 +10122,7 @@ fn compile_source_to_js_with_options_inner(
     let mut raw_converter =
         crate::raw_lambda::convert::RawLambdaConverter::with_start_stamp_and_unit_name(
             parser.arena(),
+            &tctx.typed,
             &type_ctx,
             &env,
             lambda_start_stamp,
@@ -11008,6 +11017,7 @@ pub fn typecheck_interface_source(
     // js_implementation.ml:62: `ignore (Includemod.signatures initial_env sg
     // sg)`, which marks the declarations of the interface used.
     let sig_type = crate::types::typemod::decl_signature_from_typed_signature(
+        &tctx.typed,
         &typed_signature,
         parser.arena(),
         &type_ctx,
@@ -11025,13 +11035,20 @@ pub fn typecheck_interface_source(
     // Print typed tree if requested
     if options.dump_typed_sexp {
         let mut stderr = std::io::stderr();
-        let _ = print_typed_signature(parser.arena(), &type_ctx, &typed_signature, &mut stderr);
+        let _ = print_typed_signature(
+            parser.arena(),
+            &type_ctx,
+            &tctx.typed,
+            &typed_signature,
+            &mut stderr,
+        );
     }
     if options.dump_typed_sexp_locs {
         let mut stderr = std::io::stderr();
         let _ = print_typed_signature_with_locs(
             parser.arena(),
             &type_ctx,
+            &tctx.typed,
             &typed_signature,
             &mut stderr,
         );
@@ -11419,19 +11436,20 @@ fn apply_moregen_constraints(
 
     // Walk top-level implementation structure items and match with interface.
     // Also recurse into modules to find inner non-generic Tvars.
-    moregen_link_structure(type_ctx, typed_structure, &iface_val_types);
+    moregen_link_structure(type_ctx, &tctx.typed, typed_structure, &iface_val_types);
 }
 
 fn moregen_link_structure(
     type_ctx: &TypeContext,
+    ta: &crate::types::typedtree::TypedArena,
     structure: &crate::types::typedtree::Structure,
     iface_val_types: &ahash::AHashMap<String, crate::types::type_expr::TypeExprRef>,
 ) {
-    for item in &structure.str_items {
+    for item in ta.structure_items(structure.str_items) {
         match &item.str_desc {
             crate::types::typedtree::StructureItemDesc::Tstr_value(_, bindings) => {
-                for binding in bindings {
-                    let Some(name) = extract_pat_name(&binding.vb_pat) else {
+                for binding in ta.value_bindings(*bindings) {
+                    let Some(name) = extract_pat_name(ta.pattern(binding.vb_pat)) else {
                         continue;
                     };
                     let Some(&iface_ty) = iface_val_types.get(&name) else {
@@ -11440,12 +11458,13 @@ fn moregen_link_structure(
                     let iface_inst = crate::types::ctype::instance(type_ctx, iface_ty);
                     moregen_link(
                         type_ctx,
-                        binding.vb_pat.pat_type,
+                        ta.pattern(binding.vb_pat).pat_type,
                         iface_inst,
                         &mut ahash::AHashSet::new(),
                     );
+                    let vb_expr = ta.expr(binding.vb_expr);
                     if let crate::types::typedtree::ExpressionDesc::Texp_ident(_, _, desc) =
-                        &binding.vb_expr.exp_desc
+                        &vb_expr.exp_desc
                     {
                         // OCaml Ctype.moregeneral instantiates generic variables on
                         // copies before comparison (compiler/ml/ctype.ml:3124-3139).
@@ -11460,13 +11479,13 @@ fn moregen_link_structure(
                         );
                         moregen_link(
                             type_ctx,
-                            binding.vb_pat.pat_type,
+                            ta.pattern(binding.vb_pat).pat_type,
                             desc.val_type,
                             &mut ahash::AHashSet::new(),
                         );
                         moregen_link(
                             type_ctx,
-                            binding.vb_expr.exp_type,
+                            vb_expr.exp_type,
                             desc.val_type,
                             &mut ahash::AHashSet::new(),
                         );
@@ -11474,7 +11493,7 @@ fn moregen_link_structure(
                 }
             }
             crate::types::typedtree::StructureItemDesc::Tstr_module(mb) => {
-                moregen_link_mod_expr(type_ctx, &mb.mb_expr, iface_val_types);
+                moregen_link_mod_expr(type_ctx, ta, ta.module_expr(mb.mb_expr), iface_val_types);
             }
             _ => {}
         }
@@ -11483,15 +11502,16 @@ fn moregen_link_structure(
 
 fn moregen_link_mod_expr(
     type_ctx: &TypeContext,
+    ta: &crate::types::typedtree::TypedArena,
     mod_expr: &crate::types::typedtree::ModuleExpr,
     iface_val_types: &ahash::AHashMap<String, crate::types::type_expr::TypeExprRef>,
 ) {
     match &mod_expr.mod_desc {
         crate::types::typedtree::ModuleExprDesc::Tmod_structure(s) => {
-            moregen_link_structure(type_ctx, s, iface_val_types);
+            moregen_link_structure(type_ctx, ta, s, iface_val_types);
         }
         crate::types::typedtree::ModuleExprDesc::Tmod_constraint(inner, _, _, _) => {
-            moregen_link_mod_expr(type_ctx, inner, iface_val_types);
+            moregen_link_mod_expr(type_ctx, ta, ta.module_expr(*inner), iface_val_types);
         }
         _ => {}
     }
@@ -12503,6 +12523,7 @@ fn process_gentype_typed_artifact_if_enabled<'a>(
     options: &CompilerOptions,
     annots: crate::gentype::main::TypedArtifactAnnots<'a>,
     arena: &'a ParseArena,
+    ta: &'a crate::types::typedtree::TypedArena,
     type_ctx: &'a TypeContext,
     filename: &str,
     module_name: &str,
@@ -12521,6 +12542,7 @@ fn process_gentype_typed_artifact_if_enabled<'a>(
             crate::gentype::main::TypedArtifact {
                 annots,
                 arena,
+                ta,
                 ctx: type_ctx,
                 source_file: Some(filename),
                 compiler_module_name: module_name.to_string(),
@@ -12999,6 +13021,8 @@ fn in_process_type_check_context<'a>(
 pub struct ToolingTypedModule {
     pub type_ctx: TypeContext,
     pub typed: ToolingTyped,
+    /// Node storage of `typed`.
+    pub typed_arena: crate::types::typedtree::TypedArena,
 }
 
 /// What type-checking a module for editor tooling produced.
@@ -13024,7 +13048,7 @@ pub fn typecheck_structure_for_tooling(
     let frontend_warning_specs =
         ppx::collect_leading_builtin_warning_attribute_specs(structure, arena);
     let type_ctx = fresh_type_context();
-    let typed = {
+    let (typed, typed_arena) = {
         let (mut tctx, env) = in_process_type_check_context(
             &type_ctx,
             arena,
@@ -13034,7 +13058,7 @@ pub fn typecheck_structure_for_tooling(
             &file_config,
             &frontend_warning_specs,
         );
-        match type_structure(&mut tctx, &env, arena, structure) {
+        let typed = match type_structure(&mut tctx, &env, arena, structure) {
             Ok((typed_structure, _final_env)) => ToolingTyped::Implementation(typed_structure),
             Err(e) => {
                 let source = read_in_process_source(filename);
@@ -13048,9 +13072,14 @@ pub fn typecheck_structure_for_tooling(
                 };
                 ToolingTyped::Failed(format!("{report:#}"))
             }
-        }
+        };
+        (typed, tctx.take_typed_arena())
     };
-    ToolingTypedModule { type_ctx, typed }
+    ToolingTypedModule {
+        type_ctx,
+        typed,
+        typed_arena,
+    }
 }
 
 /// Type-check an interface for editor tooling, as the in-process build does
@@ -13067,7 +13096,7 @@ pub fn typecheck_signature_for_tooling(
     let frontend_warning_specs =
         ppx::collect_leading_builtin_warning_signature_attribute_specs(signature, arena);
     let type_ctx = fresh_type_context();
-    let typed = {
+    let (typed, typed_arena) = {
         let (mut tctx, env) = in_process_type_check_context(
             &type_ctx,
             arena,
@@ -13077,7 +13106,7 @@ pub fn typecheck_signature_for_tooling(
             &file_config,
             &frontend_warning_specs,
         );
-        match transl_signature(&mut tctx, &env, arena, signature) {
+        let typed = match transl_signature(&mut tctx, &env, arena, signature) {
             Ok(typed_signature) => ToolingTyped::Interface(typed_signature),
             Err(e) => {
                 let source = read_in_process_source(filename);
@@ -13091,9 +13120,14 @@ pub fn typecheck_signature_for_tooling(
                 };
                 ToolingTyped::Failed(format!("{report:#}"))
             }
-        }
+        };
+        (typed, tctx.take_typed_arena())
     };
-    ToolingTypedModule { type_ctx, typed }
+    ToolingTypedModule {
+        type_ctx,
+        typed,
+        typed_arena,
+    }
 }
 
 pub fn compile_preprocessed_structure_in_process_until_js(
@@ -13206,7 +13240,13 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         .as_deref()
         == Some(module_name)
     {
-        let _ = print_typed_structure(arena, &type_ctx, &typed_structure, &mut std::io::stderr());
+        let _ = print_typed_structure(
+            arena,
+            &type_ctx,
+            &tctx.typed,
+            &typed_structure,
+            &mut std::io::stderr(),
+        );
     }
 
     let mut inferred_implementation_coercion = None;
@@ -13318,6 +13358,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
                 crate::types::sexp_typedtree::print_typed_structure(
                     arena,
                     &type_ctx,
+                    &tctx.typed,
                     &typed_structure,
                     &mut buf,
                 )
@@ -13325,6 +13366,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
                 crate::types::sexp_typedtree::print_typed_structure_with_locs(
                     arena,
                     &type_ctx,
+                    &tctx.typed,
                     &typed_structure,
                     &mut buf,
                 )
@@ -13336,6 +13378,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     let unit_reads = if options.collect_unit_reads {
         crate::types::unit_reads::structure_reads(
             &type_ctx,
+            &tctx.typed,
             &typed_structure,
             &options.open_modules,
         )
@@ -13450,6 +13493,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         let _ = crate::types::sexp_typedtree::print_typed_structure_with_locs(
             arena,
             &type_ctx,
+            &tctx.typed,
             &typed_structure,
             &mut buf,
         );
@@ -13468,6 +13512,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
             options,
             crate::gentype::main::TypedArtifactAnnots::Implementation(&typed_structure),
             arena,
+            &tctx.typed,
             &type_ctx,
             filename,
             module_name,
@@ -13510,6 +13555,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         let mut raw_converter =
             crate::raw_lambda::convert::RawLambdaConverter::with_start_stamp_and_unit_name(
                 arena,
+                &tctx.typed,
                 &type_ctx,
                 &env,
                 lambda_start_stamp,
@@ -14058,6 +14104,7 @@ pub fn typecheck_preprocessed_signature_in_process(
     let unit_reads = if options.collect_unit_reads {
         crate::types::unit_reads::signature_reads(
             &type_ctx,
+            &tctx.typed,
             &typed_signature,
             &options.open_modules,
         )
@@ -14067,6 +14114,7 @@ pub fn typecheck_preprocessed_signature_in_process(
     // js_implementation.ml:62: `ignore (Includemod.signatures initial_env sg
     // sg)`, which marks the declarations of the interface used.
     let sig_type = crate::types::typemod::decl_signature_from_typed_signature(
+        &tctx.typed,
         &typed_signature,
         arena,
         &type_ctx,
@@ -14094,9 +14142,15 @@ pub fn typecheck_preprocessed_signature_in_process(
         if options.dumps.contains(&kind) {
             let mut buf = Vec::new();
             let _ = if kind == DumpKind::TypedTree {
-                print_typed_signature(arena, &type_ctx, &typed_signature, &mut buf)
+                print_typed_signature(arena, &type_ctx, &tctx.typed, &typed_signature, &mut buf)
             } else {
-                print_typed_signature_with_locs(arena, &type_ctx, &typed_signature, &mut buf)
+                print_typed_signature_with_locs(
+                    arena,
+                    &type_ctx,
+                    &tctx.typed,
+                    &typed_signature,
+                    &mut buf,
+                )
             };
             dumps.push((kind, latin1_dump(buf)));
         }
@@ -14104,6 +14158,7 @@ pub fn typecheck_preprocessed_signature_in_process(
     let gentype_ignore_interface = options.gentype_config.is_some()
         && crate::gentype::annotation::signature_check_annotation(
             arena,
+            &tctx.typed,
             &|_loc, attributes| {
                 crate::gentype::annotation::get_attribute_payload(
                     arena,
@@ -14119,6 +14174,7 @@ pub fn typecheck_preprocessed_signature_in_process(
             options,
             crate::gentype::main::TypedArtifactAnnots::Interface(&typed_signature),
             arena,
+            &tctx.typed,
             &type_ctx,
             filename,
             module_name,
@@ -14126,6 +14182,7 @@ pub fn typecheck_preprocessed_signature_in_process(
         )?;
     }
     let decl_signature = crate::types::typemod::decl_signature_from_typed_signature(
+        &tctx.typed,
         &typed_signature,
         arena,
         &type_ctx,
