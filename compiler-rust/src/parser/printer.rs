@@ -2244,7 +2244,10 @@ fn print_exp_fun_parameter(
                 {
                     let (ref var_pat_idx, ref typ) = **ppat_inner;
                     let var_pattern = arena.get_pat(*var_pat_idx);
-                    let attrs = print_attributes(state, &pat.ppat_attributes, cmt_tbl, arena);
+                    // res_printer.ml:5646-5656 builds the parts in a list
+                    // literal, which OCaml evaluates right to left: the type,
+                    // then the label's comments, then the attributes.
+                    let typ = print_typ_expr(state, arena.get_core_type(*typ), cmt_tbl, arena);
                     let label = print_comments(
                         Doc::concat(vec![
                             Doc::text("~"),
@@ -2254,7 +2257,7 @@ fn print_exp_fun_parameter(
                         var_pattern.ppat_loc,
                         arena,
                     );
-                    let typ = print_typ_expr(state, arena.get_core_type(*typ), cmt_tbl, arena);
+                    let attrs = print_attributes(state, &pat.ppat_attributes, cmt_tbl, arena);
                     print_comments(
                         Doc::concat(vec![attrs, label, Doc::text(": "), typ]),
                         cmt_tbl,
@@ -2269,12 +2272,17 @@ fn print_exp_fun_parameter(
                         ppat_attributes: Attributes::new(),
                         ..(*pat).clone()
                     };
+                    // The parts are a list literal, which OCaml evaluates
+                    // right to left: the pattern takes its comments before
+                    // the attributes do.
+                    let pattern_doc = print_pattern(state, &bare, cmt_tbl, arena);
+                    let attrs_doc = print_attributes(state, &pat.ppat_attributes, cmt_tbl, arena);
                     Doc::concat(vec![
-                        print_attributes(state, &pat.ppat_attributes, cmt_tbl, arena),
+                        attrs_doc,
                         Doc::text("~"),
                         print_ident_like(arena.get_string(lbl.txt), false, false),
                         Doc::text(" as "),
-                        print_pattern(state, &bare, cmt_tbl, arena),
+                        pattern_doc,
                     ])
                 }
             };
@@ -5435,10 +5443,8 @@ fn print_list_pattern(
     );
     let should_hug = matches!(patterns.as_slice(), [single] if parsetree_viewer::is_huggable_pattern(single))
         && tail_is_nil;
-    let mut docs: Vec<Doc> = Vec::with_capacity(patterns.len());
-    for p in &patterns {
-        docs.push(print_pattern(state, p, cmt_tbl, arena));
-    }
+    // res_printer.ml:2845-2866 builds the children in a list literal, which
+    // OCaml evaluates right to left: the tail before the other patterns.
     let tail_doc = if tail_is_nil {
         Doc::nil()
     } else {
@@ -5453,6 +5459,10 @@ fn print_list_pattern(
             print_pattern(state, tail, cmt_tbl, arena),
         ])
     };
+    let mut docs: Vec<Doc> = Vec::with_capacity(patterns.len());
+    for p in &patterns {
+        docs.push(print_pattern(state, p, cmt_tbl, arena));
+    }
     let children = Doc::concat(vec![
         if should_hug {
             Doc::nil()
@@ -10686,6 +10696,80 @@ fn add_braces(doc: Doc, force_break: bool) -> Doc {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The parameter `@attr(x) ~a as y` with the payload `x` at the same
+    /// location as `y`, as a PPX can generate, and a comment after that
+    /// location. res_printer.ml:5658-5667 builds `~b as c` in a list literal,
+    /// which OCaml evaluates right to left: the pattern takes the comment
+    /// before the attribute's payload can.
+    #[test]
+    fn labelled_alias_pattern_takes_shared_location_comments_first() {
+        let mut parser = crate::parser::Parser::new("A.res", "let f = (@attr(x) ~a as y) => y\n");
+        let structure = crate::parser::module::parse_structure(&mut parser);
+        assert!(!parser.has_errors());
+        let mut arena = parser.into_arena();
+        let StructureItemDesc::Pstr_value(inner) = &structure[0].pstr_desc else {
+            panic!("expected a let");
+        };
+        let fun_idx = arena.vb_list(inner.1)[0].pvb_expr;
+        let (pat_loc, payload_idx) = {
+            let (_, params, _) = parsetree_viewer::fun_expr(&arena, arena.get_expr(fun_idx));
+            let [parsetree_viewer::FunParam::Parameter { pat, .. }] = params.as_slice() else {
+                panic!("expected one parameter");
+            };
+            let Payload::PStr(items) = &pat.ppat_attributes[0].1 else {
+                panic!("expected a payload");
+            };
+            let StructureItemDesc::Pstr_eval(eval) = &items[0].pstr_desc else {
+                panic!("expected an expression payload");
+            };
+            (pat.ppat_loc, eval.0)
+        };
+        arena.get_expr_mut(payload_idx).pexp_loc = pat_loc;
+        let mut cmt_tbl = CommentTable::new();
+        let comment =
+            Comment::make_multi_line(arena.to_location(pat_loc), " c ".into(), false, false);
+        cmt_tbl.attach_trailing(pat_loc, vec![comment], &arena);
+        let (_, params, _) = parsetree_viewer::fun_expr(&arena, arena.get_expr(fun_idx));
+        let doc = print_exp_fun_parameter(&PrinterState::init(), &params[0], &mut cmt_tbl, &arena);
+        assert_eq!(doc.to_string(80), "@attr(x) ~a as y /* c */");
+    }
+
+    /// `list{a, ...rest}` with `a` at the same location as `rest`, as a PPX
+    /// can generate, and a comment before that location. res_printer.ml:
+    /// 2845-2866 builds the children in a list literal, which OCaml evaluates
+    /// right to left: the tail takes the comment before the other patterns.
+    #[test]
+    fn list_pattern_tail_takes_shared_location_comments_first() {
+        let mut parser = crate::parser::Parser::new("A.res", "let f = (list{a, ...rest}) => a\n");
+        let structure = crate::parser::module::parse_structure(&mut parser);
+        assert!(!parser.has_errors());
+        let mut arena = parser.into_arena();
+        let StructureItemDesc::Pstr_value(inner) = &structure[0].pstr_desc else {
+            panic!("expected a let");
+        };
+        let fun_idx = arena.vb_list(inner.1)[0].pvb_expr;
+        let (list_pat, head_idx, rest_loc) = {
+            let (_, params, _) = parsetree_viewer::fun_expr(&arena, arena.get_expr(fun_idx));
+            let [parsetree_viewer::FunParam::Parameter { pat, .. }] = params.as_slice() else {
+                panic!("expected one parameter");
+            };
+            let PatternDesc::Ppat_construct(_, args) = &pat.ppat_desc else {
+                panic!("expected a list pattern");
+            };
+            let [head, rest] = arena.pat_list(args.txt) else {
+                panic!("expected a head and a tail");
+            };
+            ((*pat).clone(), *head, arena.get_pat(*rest).ppat_loc)
+        };
+        arena.get_pat_mut(head_idx).ppat_loc = rest_loc;
+        let mut cmt_tbl = CommentTable::new();
+        let comment =
+            Comment::make_multi_line(arena.to_location(rest_loc), " c ".into(), false, false);
+        cmt_tbl.attach_leading(rest_loc, vec![comment], &arena);
+        let doc = print_list_pattern(&PrinterState::init(), &list_pat, &mut cmt_tbl, &arena);
+        assert_eq!(doc.to_string(80), "list{a, /* c */ ...rest}");
+    }
 
     #[test]
     fn multiline_comment_star_lines_use_ocaml_string_trim() {
