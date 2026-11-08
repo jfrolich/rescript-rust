@@ -97,7 +97,9 @@ impl IncludeModError {
             | IncludeModError::ModuleTypesMismatch { error, .. }
             | IncludeModError::InModule { error, .. }
             | IncludeModError::InFunctorBody { error, .. }
-            | IncludeModError::AtModtype { error, .. } => error.invalid_string_escape(),
+            | IncludeModError::InFunctorArg { error, .. }
+            | IncludeModError::AtModtype { error, .. }
+            | IncludeModError::Reversed { error } => error.invalid_string_escape(),
             IncludeModError::SignatureMismatch(errors) => errors
                 .iter()
                 .find_map(IncludeModError::invalid_string_escape),
@@ -106,29 +108,35 @@ impl IncludeModError {
     }
 }
 
-/// Errors that can occur during module inclusion checking.
+/// `Includemod.Error`'s list of `(pos list, Env.t, symptom)` (includemod.ml),
+/// as a tree: each node that carries an error below it stands for the
+/// position or the entry OCaml conses onto that error's list.
 #[derive(Debug, Clone)]
 pub enum IncludeModError {
     /// A `@deprecated` payload with an invalid escape: its reader's
     /// `Location.Error` (ast_payload.ml:39-51), which escapes inclusion
     /// checking.
     InvalidStringEscape { loc: crate::types::DeclLoc },
-    /// Missing signature field in implementation.
+    /// `Dont_match` (includemod.ml): the module types do not match, which
+    /// the enclosing `modtypes` reports as their `Module_types` entry.
+    DontMatch,
+    /// `Missing_field (id, loc, kind, item)`: an expected item the
+    /// implementation lacks.
     MissingField {
         id: Ident,
         loc: crate::types::DeclLoc,
         kind: &'static str,
+        item: SignatureItem,
     },
-    /// Value type mismatch.
+    /// `Value_descriptions (id, vd1, vd2)`.
     ValueTypeMismatch {
         name: Ident,
         actual: ValueDescription,
         expected: ValueDescription,
+        /// `find_arity_mismatch env vd1.val_type vd2.val_type`.
         arity_mismatch: Option<(usize, usize)>,
     },
-    /// Type declaration mismatch.
-    TypeMismatch { name: Ident, reason: String },
-    /// Type declaration mismatch with enough context to print OCaml's report.
+    /// `Type_declarations (id, decl1, decl2, errs)`.
     TypeDeclarationMismatch {
         name: Ident,
         actual: TypeDeclaration,
@@ -136,62 +144,58 @@ pub enum IncludeModError {
         /// `Includecore.type_declarations`'s differences, never empty.
         errs: Vec<TypeMismatch>,
     },
-    /// Extension constructor mismatch.
+    /// `Extension_constructors (id, ext1, ext2)`.
     ExtensionConstructorMismatch {
         name: Ident,
         actual: ExtensionConstructor,
         expected: ExtensionConstructor,
     },
-    /// Module type mismatch.
-    ModuleTypeMismatch { name: Ident, reason: String },
-    /// Module type declaration mismatch.
+    /// `Modtype_infos (id, info1, info2)` before the errors of the
+    /// equivalence check (includemod.ml `modtype_infos`); `expected` is
+    /// `Subst.modtype_declaration subst info2`.
     ModuleTypeDeclarationMismatch {
         name: Ident,
         actual: ModtypeDeclaration,
         expected: ModtypeDeclaration,
-        /// The signature's declaration before `Subst.modtype_declaration
-        /// subst` (includemod.ml:415-419), and `subst`.
-        expected_source: Box<(ModtypeDeclaration, InclusionSubst)>,
         error: Box<IncludeModError>,
     },
-    /// Equivalent module type declarations require a structure-field permutation.
+    /// `Modtype_permutation`.
     ModtypePermutation,
-    /// Nested module types do not include one another.
+    /// `Module_types (mty1, Subst.modtype subst mty2)` before the errors of
+    /// the comparison (includemod.ml `modtypes`); a `DontMatch` error
+    /// stands for none.
     ModuleTypesMismatch {
         actual: Box<ModuleType>,
         expected: Box<ModuleType>,
-        /// The `subst` of `Subst.modtype subst mty2` (includemod.ml:186-196).
-        subst: Box<InclusionSubst>,
         error: Box<IncludeModError>,
     },
-    /// A module alias normalized to a path whose compiled interface is missing.
+    /// `Unbound_module_path path`.
     UnboundModulePath { path: Path },
-    /// Nested include error reported in a module context.
+    /// The errors under `Module id`.
     InModule {
         name: Ident,
         error: Box<IncludeModError>,
     },
-    /// Nested include error reported in a functor result context.
+    /// The errors under `Body param`, a functor's result.
     InFunctorBody {
         param: Ident,
-        actual: Box<ModuleType>,
-        expected: Box<ModuleType>,
-        /// `Subst.add_module param2 (Pident param1) subst` (includemod.ml:257-262).
-        subst: Box<InclusionSubst>,
         error: Box<IncludeModError>,
     },
-    /// Nested include error reported in a module type position.
+    /// The errors under `Arg param`, a functor's parameter, where inclusion
+    /// goes the other way.
+    InFunctorArg {
+        param: Ident,
+        error: Box<IncludeModError>,
+    },
+    /// The errors under `Modtype id`.
     AtModtype {
         name: Ident,
         error: Box<IncludeModError>,
     },
-    /// Functor parameter mismatch.
-    FunctorParamMismatch(String),
-    /// Functor result mismatch.
-    FunctorResultMismatch(String),
-    /// Not a functor.
-    NotAFunctor,
-    /// Signature mismatch with details.
+    /// The errors under `Reverse`: the second half of an equivalence check
+    /// of module types, compared the other way round.
+    Reversed { error: Box<IncludeModError> },
+    /// Several errors at the same position, in order.
     SignatureMismatch(Vec<IncludeModError>),
 }
 
@@ -204,51 +208,108 @@ fn pp_text(ppf: &mut Ppf<'_>, s: &str) {
     ppf.string_as(s.len(), s);
 }
 
-/// `Typemod.report_error (Not_included errs)` (typemod.ml:1862-1863):
-/// `@[<v>Signature mismatch:@ %a@]` around `Includemod.report_error`.
+/// What an inclusion report is printed under.
+pub(crate) enum ReportHeading<'a> {
+    /// `Typemod.report_error (Not_included errs)`:
+    /// `@[<v>Signature mismatch:@,@,%a@]`.
+    SignatureMismatch,
+    /// `Includemod.compunit`'s errors, whose list starts with
+    /// `([], Env.empty, Interface_mismatch (impl_name, intf_name))`.
+    Interface {
+        impl_name: &'a str,
+        intf_name: &'a str,
+    },
+    /// `Typemod.report_error (With_mismatch (lid, explanation))`.
+    WithMismatch { lid: &'a str },
+    /// `Typemod.report_error (With_makes_applicative_functor_ill_typed (lid,
+    /// path, explanation))`.
+    WithMakesApplicativeFunctorIllTyped { lid: &'a str, path: &'a str },
+}
+
+/// `Typemod.report_error (Not_included errs)` (typemod.ml).
 pub fn format_error(type_ctx: &TypeContext, filename: &str, error: &IncludeModError) -> String {
-    render_include_report(type_ctx, filename, error, true)
+    format_report(type_ctx, filename, error, ReportHeading::SignatureMismatch)
 }
 
-/// `Includemod.report_error` alone (includemod.ml:662-673), as the `with`
-/// constraint and interface reports print it under their own heading.
-pub(crate) fn format_error_without_signature_header(
+/// An inclusion report under `heading`, printed at column 2, the column of
+/// a report's message in its vertical box, ending in a newline.
+pub(crate) fn format_report(
     type_ctx: &TypeContext,
     filename: &str,
     error: &IncludeModError,
+    heading: ReportHeading<'_>,
 ) -> String {
-    render_include_report(type_ctx, filename, error, false)
-}
-
-/// Print an inclusion report at column 2, the column of a report's message
-/// in its vertical box, with each line ending in a newline.
-fn render_include_report(
-    type_ctx: &TypeContext,
-    filename: &str,
-    error: &IncludeModError,
-    signature_header: bool,
-) -> String {
+    use crate::parser::formatter::BoxKind;
+    let mut entries = Vec::new();
+    if let ReportHeading::Interface {
+        impl_name,
+        intf_name,
+    } = heading
+    {
+        entries.push(ReportEntry {
+            cxt: Vec::new(),
+            symptom: ReportSymptom::Interface {
+                impl_name,
+                intf_name,
+            },
+        });
+    }
+    flatten_error(error, &mut Vec::new(), &mut entries);
     let mut buf = Vec::new();
     {
         let mut ppf = crate::parser::formatter::Formatter::new(&mut buf);
         ppf.string_as(2, "");
-        if signature_header {
-            ppf.open_vbox(0);
-            pp_text(&mut ppf, "Signature mismatch:");
-            ppf.space();
-        }
-        // `report_error`'s `@[<v>%a%a@]` (includemod.ml:673).
-        ppf.open_vbox(0);
-        let mut report = IncludeReport {
-            ppf,
-            started: false,
-            elided: false,
-        };
-        format_include_error(type_ctx, filename, error, &mut Vec::new(), &mut report);
-        let mut ppf = report.ppf;
-        ppf.close_box();
-        if signature_header {
-            ppf.close_box();
+        let ppf = &mut ppf;
+        match heading {
+            ReportHeading::Interface { .. } => report_error(ppf, type_ctx, filename, &entries),
+            ReportHeading::SignatureMismatch => {
+                ppf.open_vbox(0);
+                pp_text(ppf, "Signature mismatch:");
+                ppf.cut();
+                ppf.cut();
+                report_error(ppf, type_ctx, filename, &entries);
+                ppf.close_box();
+            }
+            // `@[<v>@[In this `with' constraint, the new definition of %a@
+            // does not match its original definition@ in the constrained
+            // signature:@]@,@,%a@]`
+            ReportHeading::WithMismatch { lid } => {
+                ppf.open_vbox(0);
+                ppf.open_box(BoxKind::Box, 0);
+                pp_text(
+                    ppf,
+                    &format!("In this `with' constraint, the new definition of {lid}"),
+                );
+                ppf.space();
+                pp_text(ppf, "does not match its original definition");
+                ppf.space();
+                pp_text(ppf, "in the constrained signature:");
+                ppf.close_box();
+                ppf.cut();
+                ppf.cut();
+                report_error(ppf, type_ctx, filename, &entries);
+                ppf.close_box();
+            }
+            // `@[<v>@[This `with' constraint on %a makes the applicative
+            // functor @ type %s ill-typed in the constrained signature:@]@,@,%a@]`
+            ReportHeading::WithMakesApplicativeFunctorIllTyped { lid, path } => {
+                ppf.open_vbox(0);
+                ppf.open_box(BoxKind::Box, 0);
+                pp_text(
+                    ppf,
+                    &format!("This `with' constraint on {lid} makes the applicative functor "),
+                );
+                ppf.space();
+                pp_text(
+                    ppf,
+                    &format!("type {path} ill-typed in the constrained signature:"),
+                );
+                ppf.close_box();
+                ppf.cut();
+                ppf.cut();
+                report_error(ppf, type_ctx, filename, &entries);
+                ppf.close_box();
+            }
         }
         ppf.flush();
     }
@@ -261,83 +322,202 @@ fn render_include_report(
     out
 }
 
-/// The vertical box of `Includemod.report_error` (includemod.ml:662-673),
-/// whose entries are each followed by `@ ` but the last: `started` records
-/// whether an entry was printed, so the break goes before every later one.
-/// `elided` is `pe` negated: whether `...` stands for a big entry already.
-struct IncludeReport<'b> {
-    ppf: Ppf<'b>,
-    started: bool,
-    elided: bool,
+/// One position of `Includemod.pos` (includemod.ml).
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum IncludePos {
+    Module(Ident),
+    Modtype(Ident),
+    Arg(Ident),
+    Body(Ident),
+    Reverse,
 }
 
-impl IncludeReport<'_> {
-    /// The `@ ` between two entries of the report.
-    fn begin_entry(&mut self) {
-        if self.started {
-            self.ppf.space();
+/// The symptom of an entry of the error list.
+enum ReportSymptom<'e> {
+    /// `Interface_mismatch (impl_name, intf_name)`.
+    Interface {
+        impl_name: &'e str,
+        intf_name: &'e str,
+    },
+    /// `Module_types (mty1, mty2)`.
+    ModuleTypes {
+        actual: &'e ModuleType,
+        expected: &'e ModuleType,
+    },
+    /// `Modtype_infos (id, info1, info2)`.
+    ModtypeInfos {
+        name: &'e Ident,
+        actual: &'e ModtypeDeclaration,
+        expected: &'e ModtypeDeclaration,
+    },
+    /// Any other symptom, the error that is it.
+    Leaf(&'e IncludeModError),
+}
+
+/// An entry `(cxt, env, symptom)` of `Includemod.Error`'s list; `cxt` is
+/// listed from the outermost position, `List.rev` of OCaml's.
+struct ReportEntry<'e> {
+    cxt: Vec<IncludePos>,
+    symptom: ReportSymptom<'e>,
+}
+
+/// The list OCaml builds for `error`, in order, each entry under the
+/// positions above it.
+fn flatten_error<'e>(
+    error: &'e IncludeModError,
+    cxt: &mut Vec<IncludePos>,
+    out: &mut Vec<ReportEntry<'e>>,
+) {
+    let mut under = |pos, error: &'e IncludeModError, out: &mut Vec<ReportEntry<'e>>| {
+        cxt.push(pos);
+        flatten_error(error, cxt, out);
+        cxt.pop();
+    };
+    match error {
+        IncludeModError::SignatureMismatch(errors) => {
+            for error in errors {
+                flatten_error(error, cxt, out);
+            }
         }
-        self.started = true;
+        IncludeModError::InModule { name, error } => under(IncludePos::Module(*name), error, out),
+        IncludeModError::AtModtype { name, error } => under(IncludePos::Modtype(*name), error, out),
+        IncludeModError::InFunctorBody { param, error } => {
+            under(IncludePos::Body(*param), error, out)
+        }
+        IncludeModError::InFunctorArg { param, error } => {
+            under(IncludePos::Arg(*param), error, out)
+        }
+        IncludeModError::Reversed { error } => under(IncludePos::Reverse, error, out),
+        IncludeModError::ModuleTypesMismatch {
+            actual,
+            expected,
+            error,
+        } => {
+            out.push(ReportEntry {
+                cxt: cxt.clone(),
+                symptom: ReportSymptom::ModuleTypes { actual, expected },
+            });
+            if !matches!(**error, IncludeModError::DontMatch) {
+                flatten_error(error, cxt, out);
+            }
+        }
+        IncludeModError::ModuleTypeDeclarationMismatch {
+            name,
+            actual,
+            expected,
+            error,
+        } => {
+            out.push(ReportEntry {
+                cxt: cxt.clone(),
+                symptom: ReportSymptom::ModtypeInfos {
+                    name,
+                    actual,
+                    expected,
+                },
+            });
+            flatten_error(error, cxt, out);
+        }
+        // `modtypes` turns every `Dont_match` into its `Module_types` entry.
+        IncludeModError::DontMatch => {
+            debug_assert!(false, "Dont_match escaped its modtypes");
+        }
+        _ => out.push(ReportEntry {
+            cxt: cxt.clone(),
+            symptom: ReportSymptom::Leaf(error),
+        }),
     }
 }
 
-/// OCaml `Includemod.show_loc` (includemod.ml:489-490):
-/// `@\n@[<2>%a:@ %s@]`, with `Location.print_loc` (location.ml:77-95)
-/// writing the file name and range in zero-width colour tags.
-fn pp_show_loc(ppf: &mut Ppf<'_>, location: &str, message: &str) {
-    ppf.newline();
-    ppf.open_box(crate::parser::formatter::BoxKind::Box, 2);
-    ppf.string_as(location.len(), &code_frame::colorize_location(location));
-    pp_text(ppf, ":");
-    ppf.space();
-    pp_text(ppf, message);
+/// Whether a symptom shows the declarations that differ. A permutation of
+/// fields doesn't, so the comparison of the module types around it stays
+/// (includemod.ml `report_error`).
+fn shows_declarations(symptom: &ReportSymptom<'_>) -> bool {
+    match symptom {
+        ReportSymptom::ModuleTypes { .. } | ReportSymptom::ModtypeInfos { .. } => true,
+        ReportSymptom::Interface { .. } => false,
+        ReportSymptom::Leaf(error) => matches!(
+            error,
+            IncludeModError::MissingField { .. }
+                | IncludeModError::ValueTypeMismatch { .. }
+                | IncludeModError::TypeDeclarationMismatch { .. }
+                | IncludeModError::ExtensionConstructorMismatch { .. }
+        ),
+    }
+}
+
+/// `Includemod.report_error` (includemod.ml): the error is a path of
+/// symptoms from the whole module down to the items that differ. A module or
+/// module type comparison is left out when a later symptom shows the
+/// declarations that differ; each entry follows a blank line and, when its
+/// position differs from the one before, a line naming where it is.
+fn report_error(
+    ppf: &mut Ppf<'_>,
+    type_ctx: &TypeContext,
+    filename: &str,
+    entries: &[ReportEntry<'_>],
+) {
+    ppf.open_vbox(0);
+    let mut previous: Option<&[IncludePos]> = None;
+    for (index, entry) in entries.iter().enumerate() {
+        if matches!(
+            entry.symptom,
+            ReportSymptom::ModuleTypes { .. } | ReportSymptom::ModtypeInfos { .. }
+        ) && entries[index + 1..]
+            .iter()
+            .any(|later| shows_declarations(&later.symptom))
+        {
+            continue;
+        }
+        if previous.is_some() {
+            ppf.cut();
+            ppf.cut();
+        }
+        let show_context = previous != Some(entry.cxt.as_slice());
+        include_err(ppf, type_ctx, filename, show_context, entry);
+        previous = Some(&entry.cxt);
+    }
     ppf.close_box();
 }
 
-/// `show_loc` of a declaration location, resolved to its file.
-fn pp_show_decl_loc(
+/// `include_err ~show_context` (includemod.ml): `@[<v>%a%a@]` of the
+/// position and the symptom. Inclusion is reversed in each functor parameter
+/// on the way, and in the second half of an equivalence check of module
+/// types.
+fn include_err(
     ppf: &mut Ppf<'_>,
     type_ctx: &TypeContext,
     filename: &str,
-    loc: crate::types::DeclLoc,
-    message: &str,
+    show_context: bool,
+    entry: &ReportEntry<'_>,
 ) {
-    let loc = type_ctx.resolve_loc(loc);
-    let location = code_frame::format_location(
-        &location_filename(type_ctx, filename, &loc),
-        &loc.loc_start,
-        &loc.loc_end,
-    );
-    pp_show_loc(ppf, &location, message);
+    let swapped = entry
+        .cxt
+        .iter()
+        .filter(|pos| matches!(pos, IncludePos::Arg(_) | IncludePos::Reverse))
+        .count()
+        % 2
+        == 1;
+    ppf.open_vbox(0);
+    if show_context {
+        let cxt: Vec<IncludePos> = entry
+            .cxt
+            .iter()
+            .copied()
+            .filter(|pos| *pos != IncludePos::Reverse)
+            .collect();
+        pp_include_context(ppf, &cxt);
+    }
+    include_symptom(ppf, type_ctx, filename, swapped, &entry.symptom);
+    ppf.close_box();
 }
 
-/// `show_locs` (includemod.ml:492-494): the expected declaration first.
-fn pp_show_locs(
-    ppf: &mut Ppf<'_>,
-    type_ctx: &TypeContext,
-    filename: &str,
-    actual: crate::types::DeclLoc,
-    expected: crate::types::DeclLoc,
-) {
-    pp_show_decl_loc(ppf, type_ctx, filename, expected, "Expected declaration");
-    pp_show_decl_loc(ppf, type_ctx, filename, actual, "Actual declaration");
-}
-
-/// One step of `Includemod.error` contexts (includemod.ml:28-32).
-#[derive(Clone)]
-enum IncludeContext {
-    Module(Ident),
-    Modtype(Ident),
-    Body(Ident),
-}
-
-/// `Includemod.context` (includemod.ml:587-608) for a context listed from
-/// the outermost step.
-fn pp_context(ppf: &mut Ppf<'_>, cxt: &[IncludeContext]) {
+/// `Includemod.context` (includemod.ml) for a context listed from the
+/// outermost step.
+fn pp_context(ppf: &mut Ppf<'_>, cxt: &[IncludePos]) {
     use crate::parser::formatter::BoxKind;
     match cxt {
         // `@[<2>module %a%a@]`
-        [IncludeContext::Module(id), rem @ ..] => {
+        [IncludePos::Module(id), rem @ ..] => {
             ppf.open_box(BoxKind::Box, 2);
             pp_text(ppf, "module ");
             pp_text(ppf, id.name());
@@ -345,7 +525,7 @@ fn pp_context(ppf: &mut Ppf<'_>, cxt: &[IncludeContext]) {
             ppf.close_box();
         }
         // `@[<2>module type %a =@ %a@]`
-        [IncludeContext::Modtype(id), rem @ ..] => {
+        [IncludePos::Modtype(id), rem @ ..] => {
             ppf.open_box(BoxKind::Box, 2);
             pp_text(ppf, "module type ");
             pp_text(ppf, id.name());
@@ -355,21 +535,31 @@ fn pp_context(ppf: &mut Ppf<'_>, cxt: &[IncludeContext]) {
             ppf.close_box();
         }
         // `(%s) =>@ %a`
-        [IncludeContext::Body(x), rem @ ..] => {
+        [IncludePos::Body(x), rem @ ..] => {
             pp_text(ppf, "(");
             pp_text(ppf, context_argname(x));
             pp_text(ppf, ") =>");
             ppf.space();
             pp_context_mty(ppf, rem);
         }
+        // `(%a:@ %a) => ...`
+        [IncludePos::Arg(x), rem @ ..] => {
+            pp_text(ppf, "(");
+            pp_text(ppf, x.name());
+            pp_text(ppf, ":");
+            ppf.space();
+            pp_context_mty(ppf, rem);
+            pp_text(ppf, ") => ...");
+        }
+        [IncludePos::Reverse, rem @ ..] => pp_context(ppf, rem),
         [] => pp_text(ppf, "<here>"),
     }
 }
 
 /// `context_mty`: `@[<2>{@ %a@;<1 -2>}@]` around a module step.
-fn pp_context_mty(ppf: &mut Ppf<'_>, cxt: &[IncludeContext]) {
+fn pp_context_mty(ppf: &mut Ppf<'_>, cxt: &[IncludePos]) {
     match cxt {
-        [IncludeContext::Module(_) | IncludeContext::Modtype(_), ..] => {
+        [IncludePos::Module(_) | IncludePos::Modtype(_), ..] => {
             ppf.open_box(crate::parser::formatter::BoxKind::Box, 2);
             pp_text(ppf, "{");
             ppf.space();
@@ -384,7 +574,7 @@ fn pp_context_mty(ppf: &mut Ppf<'_>, cxt: &[IncludeContext]) {
 
 /// `args`: `:@ %a`, the module step's type, a functor's parameters
 /// included.
-fn pp_context_args(ppf: &mut Ppf<'_>, cxt: &[IncludeContext]) {
+fn pp_context_args(ppf: &mut Ppf<'_>, cxt: &[IncludePos]) {
     pp_text(ppf, ":");
     ppf.space();
     pp_context_mty(ppf, cxt);
@@ -395,316 +585,222 @@ fn context_argname(id: &Ident) -> &str {
     if id.name() == "*" { "" } else { id.name() }
 }
 
-/// The context part of `include_err` (includemod.ml:616-625): nothing at the
-/// top, `In module A.B:@ ` inside plain submodules, otherwise
-/// `@[<hv 2>At position@ %a@]@ `.
-fn pp_include_context(ppf: &mut Ppf<'_>, cxt: &[IncludeContext]) {
+/// `path_of_modules` (includemod.ml): the path of the modules a context goes
+/// through, outermost first, printed by `Printtyp.path`, when it goes through
+/// modules only.
+fn path_of_modules(cxt: &[IncludePos]) -> Option<String> {
+    if cxt.is_empty() {
+        return None;
+    }
+    let mut names = Vec::with_capacity(cxt.len());
+    for pos in cxt {
+        match pos {
+            IncludePos::Module(id) => names.push(id.name()),
+            IncludePos::Modtype(_)
+            | IncludePos::Arg(_)
+            | IncludePos::Body(_)
+            | IncludePos::Reverse => return None,
+        }
+    }
+    Some(names.join("."))
+}
+
+/// The `context` of `report_error` (includemod.ml): where in the module an
+/// error is, as a line before it. A module type or a functor's result at the
+/// end of a module path is named in words; any other position is shown as a
+/// module type with `<here>`.
+fn pp_include_context(ppf: &mut Ppf<'_>, cxt: &[IncludePos]) {
     if cxt.is_empty() {
         return;
     }
-    if cxt
-        .iter()
-        .all(|step| matches!(step, IncludeContext::Module(_)))
-    {
-        // `Printtyp.path` of `path_of_context`: the module names joined by
-        // dots.
-        let names: Vec<&str> = cxt
-            .iter()
-            .map(|step| match step {
-                IncludeContext::Module(id) => id.name(),
-                _ => unreachable!(),
-            })
-            .collect();
-        pp_text(ppf, "In module ");
-        pp_text(ppf, &names.join("."));
-        pp_text(ppf, ":");
-        ppf.space();
-    } else {
-        ppf.open_hvbox(2);
-        pp_text(ppf, "At position");
-        ppf.space();
-        pp_context(ppf, cxt);
-        ppf.close_box();
-        ppf.space();
-    }
-}
-
-/// `include_err'` in `report_error` (includemod.ml:666-671): an entry that
-/// is not the last one prints only when its symptom is not big; the first big
-/// one prints `...` in place of its context and symptom, later ones nothing.
-/// Returns whether the entry was elided.
-fn elide_big_entry(is_big: impl FnOnce() -> bool, report: &mut IncludeReport<'_>) -> bool {
-    if !is_big() {
-        return false;
-    }
-    if !report.elided {
-        report.begin_entry();
-        pp_text(&mut report.ppf, "...");
-        report.elided = true;
-    }
-    true
-}
-
-/// Whether the `Module_types` entry above `error` is the last of OCaml's
-/// error list: a bare `ModuleTypeMismatch` stands for `Dont_match`, which
-/// contributes only that entry (includemod.ml:186-189).
-fn module_types_entry_is_last(error: &IncludeModError) -> bool {
-    matches!(error, IncludeModError::ModuleTypeMismatch { .. })
-}
-
-/// `@[<hv 2>%s@ %a@;<1 -2>%s@ %a@]`, the two-sided layout of the
-/// `Value_descriptions`, `Extension_constructors`, `Module_types` and
-/// `Modtype_infos` symptoms (includemod.ml:548-578), each side a doc of the
-/// outcome printer.
-fn pp_two_sided(ppf: &mut Ppf<'_>, heading: &str, actual: &str, between: &str, expected: &str) {
-    ppf.open_hvbox(2);
-    pp_text(ppf, heading);
-    ppf.space();
-    crate::types::printtyp::pp_doc(ppf, actual);
-    ppf.break_(1, -2);
-    pp_text(ppf, between);
-    ppf.space();
-    crate::types::printtyp::pp_doc(ppf, expected);
-    ppf.close_box();
-}
-
-/// `include_err` (includemod.ml:627-629) of a `Module_types` entry:
-/// `@[<v>%a%a@]` of its context and symptom (includemod.ml:566-569).
-fn pp_module_types_entry(
-    report: &mut IncludeReport<'_>,
-    type_ctx: &TypeContext,
-    cxt: &[IncludeContext],
-    actual: &ModuleType,
-    expected: &ModuleType,
-) {
-    report.begin_entry();
-    let ppf = &mut report.ppf;
-    ppf.open_vbox(0);
-    pp_include_context(ppf, cxt);
-    pp_two_sided(
-        ppf,
-        "Modules do not match:",
-        &format_module_type(type_ctx, actual),
-        "is not included in",
-        &format_module_type(type_ctx, expected),
-    );
-    ppf.close_box();
-}
-
-/// The lines of a message rendered before printing, each after a break of
-/// the vertical box it is printed in.
-fn pp_lines_after_breaks(ppf: &mut Ppf<'_>, message: &str) {
-    for line in message.lines() {
-        ppf.space();
-        pp_text(ppf, line);
-    }
-}
-
-/// The lines of a message rendered before printing, separated by breaks of
-/// the vertical box it is printed in.
-fn pp_lines(ppf: &mut Ppf<'_>, message: &str) {
-    for (index, line) in message.lines().enumerate() {
-        if index > 0 {
+    let line = match path_of_modules(cxt) {
+        Some(path) => Some(format!("In module {path}:")),
+        None => match cxt.split_last() {
+            Some((IncludePos::Modtype(id), [])) => Some(format!("In module type {}:", id.name())),
+            Some((IncludePos::Modtype(id), modules)) => {
+                path_of_modules(modules).map(|path| format!("In module type {path}.{}:", id.name()))
+            }
+            Some((IncludePos::Body(_), modules)) => {
+                path_of_modules(modules).map(|path| format!("In the result of functor {path}:"))
+            }
+            Some((IncludePos::Arg(x), modules)) => path_of_modules(modules)
+                .map(|path| format!("In the parameter {} of functor {path}:", x.name())),
+            _ => None,
+        },
+    };
+    match line {
+        Some(line) => pp_text(ppf, &line),
+        // `@[<hv 2>At position@ %a@]`
+        None => {
+            ppf.open_hvbox(2);
+            pp_text(ppf, "At position");
             ppf.space();
+            pp_context(ppf, cxt);
+            ppf.close_box();
         }
-        pp_text(ppf, line);
     }
+    ppf.cut();
+    ppf.cut();
 }
 
-/// `report_error` (includemod.ml:662-673) over Rust's nested error tree: each
-/// entry of OCaml's flat error list is printed with its own context.
-fn format_include_error(
+/// `show_declaration label loc pp ppf x` (includemod.ml):
+/// `@[<v 2>%s (%a):@,%a@]`, a declaration under a label naming its side and
+/// its location, `Location.print_loc` writing the file name and range in
+/// zero-width colour tags.
+fn pp_show_declaration(
+    ppf: &mut Ppf<'_>,
     type_ctx: &TypeContext,
     filename: &str,
-    error: &IncludeModError,
-    cxt: &mut Vec<IncludeContext>,
-    report: &mut IncludeReport<'_>,
+    label: &str,
+    loc: crate::types::DeclLoc,
+    declaration: &str,
 ) {
-    match error {
-        IncludeModError::SignatureMismatch(errors) => {
-            for error in errors {
-                format_include_error(type_ctx, filename, error, cxt, report);
-            }
-            return;
-        }
-        IncludeModError::InModule { name, error } => {
-            cxt.push(IncludeContext::Module(*name));
-            format_include_error(type_ctx, filename, error, cxt, report);
-            cxt.pop();
-            return;
-        }
-        IncludeModError::AtModtype { name, error } => {
-            cxt.push(IncludeContext::Modtype(*name));
-            format_include_error(type_ctx, filename, error, cxt, report);
-            cxt.pop();
-            return;
-        }
-        IncludeModError::InFunctorBody {
-            param,
-            actual,
-            expected,
-            subst,
-            error,
+    let loc = type_ctx.resolve_loc(loc);
+    let location = code_frame::format_location(
+        &location_filename(type_ctx, filename, &loc),
+        &loc.loc_start,
+        &loc.loc_end,
+    );
+    ppf.open_vbox(2);
+    pp_text(ppf, label);
+    pp_text(ppf, " (");
+    ppf.string_as(location.len(), &code_frame::colorize_location(&location));
+    pp_text(ppf, "):");
+    ppf.cut();
+    crate::types::printtyp::pp_doc(ppf, declaration);
+    ppf.close_box();
+}
+
+/// `show_declarations ~swapped pp ppf (x1, loc1, x2, loc2)` (includemod.ml):
+/// `x1` is included in `x2`; in a functor's parameter, where inclusion goes
+/// the other way, `swapped` is true and `x2` is the actual declaration.
+#[allow(clippy::too_many_arguments)]
+fn pp_show_declarations(
+    ppf: &mut Ppf<'_>,
+    type_ctx: &TypeContext,
+    filename: &str,
+    swapped: bool,
+    x1: &str,
+    loc1: crate::types::DeclLoc,
+    x2: &str,
+    loc2: crate::types::DeclLoc,
+) {
+    let ((actual, actual_loc), (expected, expected_loc)) = if swapped {
+        ((x2, loc2), (x1, loc1))
+    } else {
+        ((x1, loc1), (x2, loc2))
+    };
+    pp_show_declaration(
+        ppf,
+        type_ctx,
+        filename,
+        "Actual declaration",
+        actual_loc,
+        actual,
+    );
+    ppf.cut();
+    ppf.cut();
+    pp_show_declaration(
+        ppf,
+        type_ctx,
+        filename,
+        "Expected declaration",
+        expected_loc,
+        expected,
+    );
+}
+
+/// `include_symptom ~swapped env ppf symptom` (includemod.ml).
+fn include_symptom(
+    ppf: &mut Ppf<'_>,
+    type_ctx: &TypeContext,
+    filename: &str,
+    swapped: bool,
+    symptom: &ReportSymptom<'_>,
+) {
+    use crate::parser::formatter::BoxKind;
+    let error = match symptom {
+        // `@[The implementation %s@ does not match the interface %s:@]`
+        ReportSymptom::Interface {
+            impl_name,
+            intf_name,
         } => {
-            // `modtypes` on the functor results (includemod.ml:388-396) runs
-            // in `Body param :: cxt`.
-            cxt.push(IncludeContext::Body(*param));
-            let is_last = module_types_entry_is_last(error);
-            if is_last
-                || !elide_big_entry(
-                    || {
-                        crate::types::includemod_error_size::module_types_is_big(
-                            type_ctx, actual, expected, subst,
-                        )
-                    },
-                    report,
-                )
-            {
-                pp_module_types_entry(report, type_ctx, cxt, actual, expected);
-            }
-            if !is_last {
-                format_include_error(type_ctx, filename, error, cxt, report);
-            }
-            cxt.pop();
-            return;
-        }
-        IncludeModError::ModuleTypesMismatch {
-            actual,
-            expected,
-            subst,
-            error,
-        } => {
-            let is_last = module_types_entry_is_last(error);
-            if is_last
-                || !elide_big_entry(
-                    || {
-                        crate::types::includemod_error_size::module_types_is_big(
-                            type_ctx, actual, expected, subst,
-                        )
-                    },
-                    report,
-                )
-            {
-                pp_module_types_entry(report, type_ctx, cxt, actual, expected);
-            }
-            if !is_last {
-                format_include_error(type_ctx, filename, error, cxt, report);
-            }
-            return;
-        }
-        // `Modtype_infos` always has the reasons of `check_modtype_equiv`
-        // after it (includemod.ml:419).
-        IncludeModError::ModuleTypeDeclarationMismatch {
-            name,
-            actual,
-            expected,
-            expected_source,
-            error,
-        } => {
-            if !elide_big_entry(
-                || {
-                    crate::types::includemod_error_size::modtype_infos_is_big(
-                        type_ctx,
-                        name,
-                        actual,
-                        &expected_source.0,
-                        &expected_source.1,
-                    )
-                },
-                report,
-            ) {
-                // `include_err` (includemod.ml:627-629) of `Modtype_infos`
-                // (includemod.ml:570-574).
-                report.begin_entry();
-                let ppf = &mut report.ppf;
-                ppf.open_vbox(0);
-                pp_include_context(ppf, cxt);
-                pp_two_sided(
-                    ppf,
-                    "Module type declarations do not match:",
-                    &format_modtype_declaration(type_ctx, name, actual),
-                    "does not match",
-                    &format_modtype_declaration(type_ctx, name, expected),
-                );
-                ppf.close_box();
-            }
-            format_include_error(type_ctx, filename, error, cxt, report);
-            return;
-        }
-        _ => {}
-    }
-    // `include_err` (includemod.ml:627-629): `@[<v>%a%a@]` of the context and
-    // the symptom.
-    report.begin_entry();
-    let ppf = &mut report.ppf;
-    ppf.open_vbox(0);
-    pp_include_context(ppf, cxt);
-    match error {
-        IncludeModError::SignatureMismatch(_)
-        | IncludeModError::InModule { .. }
-        | IncludeModError::AtModtype { .. }
-        | IncludeModError::InFunctorBody { .. }
-        | IncludeModError::ModuleTypesMismatch { .. }
-        | IncludeModError::ModuleTypeDeclarationMismatch { .. } => unreachable!(),
-        // Taken out by `escaped` before an inclusion error is reported.
-        IncludeModError::InvalidStringEscape { .. } => {
-            unreachable!("an invalid escape escapes inclusion checking")
-        }
-        IncludeModError::UnboundModulePath { path } => {
-            pp_text(ppf, "Unbound module ");
-            pp_text(ppf, &path.name());
-        }
-        IncludeModError::TypeDeclarationMismatch {
-            name,
-            actual,
-            expected,
-            errs,
-        } => {
-            // includemod.ml:555-561:
-            // `@[<v>@[<hv>%s:@;<1 2>%a@ %s@;<1 2>%a@]%a%a@]`.
-            let actual_text = format_type_declaration(type_ctx, name, actual);
-            let expected_text = format_type_declaration(type_ctx, name, expected);
-            ppf.open_vbox(0);
-            ppf.open_hvbox(0);
-            pp_text(ppf, "Type declarations do not match:");
-            ppf.break_(1, 2);
-            crate::types::printtyp::pp_doc(ppf, &actual_text);
+            ppf.open_box(BoxKind::Box, 0);
+            pp_text(ppf, &format!("The implementation {impl_name}"));
             ppf.space();
-            pp_text(ppf, "is not included in");
-            ppf.break_(1, 2);
-            crate::types::printtyp::pp_doc(ppf, &expected_text);
+            pp_text(ppf, &format!("does not match the interface {intf_name}:"));
             ppf.close_box();
-            pp_show_locs(ppf, type_ctx, filename, actual.type_loc, expected.type_loc);
-            crate::types::includecore::report_type_mismatch(
-                ppf,
-                "the first",
-                "the second",
-                "declaration",
-                errs,
-            );
-            ppf.close_box();
+            return;
         }
-        IncludeModError::ExtensionConstructorMismatch {
+        // `@[<v 2>Actual module type:@,%a@]@,@,@[<v 2>Expected module
+        // type:@,%a@]`
+        ReportSymptom::ModuleTypes { actual, expected } => {
+            let (actual, expected) = if swapped {
+                (expected, actual)
+            } else {
+                (actual, expected)
+            };
+            ppf.open_vbox(2);
+            pp_text(ppf, "Actual module type:");
+            ppf.cut();
+            crate::types::printtyp::pp_doc(ppf, &format_module_type(type_ctx, actual));
+            ppf.close_box();
+            ppf.cut();
+            ppf.cut();
+            ppf.open_vbox(2);
+            pp_text(ppf, "Expected module type:");
+            ppf.cut();
+            crate::types::printtyp::pp_doc(ppf, &format_module_type(type_ctx, expected));
+            ppf.close_box();
+            return;
+        }
+        ReportSymptom::ModtypeInfos {
             name,
             actual,
             expected,
         } => {
-            pp_two_sided(
+            pp_show_declarations(
                 ppf,
-                "Extension declarations do not match:",
-                &format_extension_constructor(type_ctx, name, actual),
-                "is not included in",
-                &format_extension_constructor(type_ctx, name, expected),
+                type_ctx,
+                filename,
+                swapped,
+                &format_modtype_declaration(type_ctx, name, actual),
+                actual.mtd_loc,
+                &format_modtype_declaration(type_ctx, name, expected),
+                expected.mtd_loc,
             );
-            pp_show_locs(ppf, type_ctx, filename, actual.ext_loc, expected.ext_loc);
+            return;
         }
-        IncludeModError::MissingField { id, loc, kind } => {
-            pp_text(ppf, "The ");
-            pp_text(ppf, kind);
-            pp_text(ppf, " `");
-            pp_text(ppf, id.name());
-            pp_text(ppf, "` is required but not provided");
-            pp_show_decl_loc(ppf, type_ctx, filename, *loc, "Expected declaration");
+        ReportSymptom::Leaf(error) => error,
+    };
+    match error {
+        IncludeModError::MissingField {
+            id,
+            loc,
+            kind,
+            item,
+        } => {
+            // Reversed, the item is one the actual declaration has and the
+            // expected one lacks.
+            let (sentence, label) = if swapped {
+                (
+                    "is only present in the actual declaration.",
+                    "Actual declaration",
+                )
+            } else {
+                ("is required but not provided.", "Expected declaration")
+            };
+            pp_text(ppf, &format!("The {kind} `{}` {sentence}", id.name()));
+            ppf.cut();
+            ppf.cut();
+            pp_show_declaration(
+                ppf,
+                type_ctx,
+                filename,
+                label,
+                *loc,
+                &format_signature(type_ctx, std::slice::from_ref(item)),
+            );
         }
         IncludeModError::ValueTypeMismatch {
             name,
@@ -712,16 +808,21 @@ fn format_include_error(
             expected,
             arity_mismatch,
         } => {
-            pp_two_sided(
+            pp_show_declarations(
                 ppf,
-                "Values do not match:",
+                type_ctx,
+                filename,
+                swapped,
                 &format_value_description(type_ctx, name, actual),
-                "is not included in",
+                actual.val_loc,
                 &format_value_description(type_ctx, name, expected),
+                expected.val_loc,
             );
-            // `show_arity_mismatch` (includemod.ml:530-542): `@\n@[The
-            // implementation contains a function taking %s where the
-            // interface expects one taking %s.@]`.
+            // `show_arity_mismatch env ppf d1 d2`, or `d2 d1` when swapped:
+            // `@,@,@[The implementation contains a function taking %s where
+            // the interface expects one taking %s.@]`.
+            let arity_mismatch =
+                arity_mismatch.map(|(n1, n2)| if swapped { (n2, n1) } else { (n1, n2) });
             if let Some((actual_arity, expected_arity)) = arity_mismatch {
                 let arguments = |arity: usize| {
                     if arity == 1 {
@@ -730,42 +831,91 @@ fn format_include_error(
                         format!("{arity} arguments")
                     }
                 };
-                ppf.newline();
-                ppf.open_box(crate::parser::formatter::BoxKind::Box, 0);
+                ppf.cut();
+                ppf.cut();
+                ppf.open_box(BoxKind::Box, 0);
                 pp_text(
                     ppf,
                     &format!(
                         "The implementation contains a function taking {} where the interface expects one taking {}.",
-                        arguments(*actual_arity),
-                        arguments(*expected_arity)
+                        arguments(actual_arity),
+                        arguments(expected_arity)
                     ),
                 );
                 ppf.close_box();
             }
-            pp_show_locs(ppf, type_ctx, filename, actual.val_loc, expected.val_loc);
         }
-        IncludeModError::TypeMismatch { name, reason } => {
-            pp_text(ppf, "Type declarations do not match: ");
-            pp_text(ppf, name.name());
-            pp_lines_after_breaks(ppf, reason);
+        IncludeModError::TypeDeclarationMismatch {
+            name,
+            actual,
+            expected,
+            errs,
+        } => {
+            pp_show_declarations(
+                ppf,
+                type_ctx,
+                filename,
+                swapped,
+                &format_type_declaration(type_ctx, name, actual),
+                actual.type_loc,
+                &format_type_declaration(type_ctx, name, expected),
+                expected.type_loc,
+            );
+            if errs.iter().any(|err| *err != TypeMismatch::Manifest) {
+                let (first, second) = if swapped {
+                    ("the expected", "the actual")
+                } else {
+                    ("the actual", "the expected")
+                };
+                ppf.cut();
+                crate::types::includecore::report_type_mismatch(
+                    ppf,
+                    first,
+                    second,
+                    "declaration",
+                    errs,
+                );
+            }
         }
-        IncludeModError::ModuleTypeMismatch { name, reason } => {
-            pp_text(ppf, "Modules do not match: ");
-            pp_text(ppf, name.name());
-            pp_lines_after_breaks(ppf, reason);
+        IncludeModError::ExtensionConstructorMismatch {
+            name,
+            actual,
+            expected,
+        } => {
+            pp_show_declarations(
+                ppf,
+                type_ctx,
+                filename,
+                swapped,
+                &format_extension_constructor(type_ctx, name, actual),
+                actual.ext_loc,
+                &format_extension_constructor(type_ctx, name, expected),
+                expected.ext_loc,
+            );
         }
         IncludeModError::ModtypePermutation => {
             pp_text(ppf, "Illegal permutation of structure fields");
         }
-        IncludeModError::FunctorParamMismatch(reason)
-        | IncludeModError::FunctorResultMismatch(reason) => {
-            pp_lines(ppf, reason);
+        IncludeModError::UnboundModulePath { path } => {
+            pp_text(ppf, "Unbound module ");
+            pp_text(ppf, &path.name());
         }
-        IncludeModError::NotAFunctor => {
-            pp_text(ppf, "Not a functor.");
+        // Taken out by `escaped` before an inclusion error is reported.
+        IncludeModError::InvalidStringEscape { .. } => {
+            unreachable!("an invalid escape escapes inclusion checking")
+        }
+        IncludeModError::DontMatch
+        | IncludeModError::SignatureMismatch(_)
+        | IncludeModError::InModule { .. }
+        | IncludeModError::AtModtype { .. }
+        | IncludeModError::InFunctorBody { .. }
+        | IncludeModError::InFunctorArg { .. }
+        | IncludeModError::Reversed { .. }
+        | IncludeModError::ModuleTypesMismatch { .. }
+        | IncludeModError::ModuleTypeDeclarationMismatch { .. } => {
+            unreachable!("not a symptom of its own")
         }
     }
-    ppf.close_box();
 }
 
 pub(crate) fn location_filename(type_ctx: &TypeContext, fallback: &str, loc: &Location) -> String {
@@ -813,6 +963,12 @@ fn format_modtype_declaration(
     let tree =
         crate::types::printtyp::Printtyp::new(type_ctx).tree_of_modtype_declaration(id, decl);
     crate::types::printtyp::print_out_sig_item(&tree)
+}
+
+/// `Printtyp.signature`: the outcome tree of a signature, printed.
+fn format_signature(type_ctx: &TypeContext, sig: &[SignatureItem]) -> String {
+    let tree = crate::types::printtyp::Printtyp::new(type_ctx).tree_of_signature(sig);
+    crate::types::printtyp::print_out_signature_doc(&tree).to_string(80)
 }
 
 fn format_value_description(type_ctx: &TypeContext, id: &Ident, desc: &ValueDescription) -> String {
@@ -869,21 +1025,6 @@ impl InclusionSubst {
     fn new_entry(&mut self) -> SubstEntry {
         self.entries += 1;
         SubstEntry(self.entries)
-    }
-
-    /// `Path_map.find path s.types`: the target and the call that added it.
-    pub(crate) fn type_target(&self, path: &Path) -> Option<(Path, SubstEntry)> {
-        self.type_paths.get_target(path)
-    }
-
-    /// `Path_map.find path s.modules`.
-    pub(crate) fn module_target(&self, path: &Path) -> Option<(Path, SubstEntry)> {
-        self.module_paths.get_target(path)
-    }
-
-    /// `Tbl.find id s.modtypes`: the path of the target `Mty_ident`.
-    pub(crate) fn modtype_target(&self, path: &Path) -> Option<(Path, SubstEntry)> {
-        self.modtype_paths.get_target(path)
     }
 }
 
@@ -1041,41 +1182,22 @@ pub fn modtypes_with_warnings(
     warnings: &mut Vec<Warning>,
 ) -> IncludeModResult<ModuleCoercion> {
     let subst = InclusionSubst::default();
-    modtypes_inner(type_ctx, env, &subst, mty_impl, mty_sig, None, warnings).map_err(|error| {
-        if module_type_error_is_alias_unbound_module(mty_impl, mty_sig, &error) {
-            error
-        } else {
-            IncludeModError::ModuleTypesMismatch {
-                actual: Box::new(mty_impl.clone()),
-                expected: Box::new(mty_sig.clone()),
-                subst: Box::new(subst.clone()),
-                error: Box::new(error),
-            }
-        }
-    })
-}
-
-fn module_type_error_is_alias_unbound_module(
-    mty_impl: &ModuleType,
-    mty_sig: &ModuleType,
-    error: &IncludeModError,
-) -> bool {
-    matches!(error, IncludeModError::UnboundModulePath { .. })
-        && (matches!(mty_impl, ModuleType::MtyAlias(..))
-            || matches!(mty_sig, ModuleType::MtyAlias(..)))
+    modtypes_inner(type_ctx, env, &subst, mty_impl, mty_sig, None, warnings)
+        .map_err(|error| wrap_modtypes_error(type_ctx, &subst, mty_impl, mty_sig, error))
 }
 
 /// The error half of OCaml `modtypes` (includemod.ml:187-198): `Dont_match`
-/// (a bare `ModuleTypeMismatch` here) becomes a `Module_types` entry; other
+/// becomes a `Module_types (mty1, Subst.modtype subst mty2)` entry; other
 /// errors from `try_modtypes` get one too unless either side is an alias, in
 /// which case the inner comparison already reported it.
 fn wrap_modtypes_error(
+    type_ctx: &TypeContext,
     subst: &InclusionSubst,
     mty_impl: &ModuleType,
     mty_sig: &ModuleType,
     error: IncludeModError,
 ) -> IncludeModError {
-    if !matches!(error, IncludeModError::ModuleTypeMismatch { .. })
+    if !matches!(error, IncludeModError::DontMatch)
         && (matches!(mty_impl, ModuleType::MtyAlias(..))
             || matches!(mty_sig, ModuleType::MtyAlias(..)))
     {
@@ -1083,8 +1205,7 @@ fn wrap_modtypes_error(
     }
     IncludeModError::ModuleTypesMismatch {
         actual: Box::new(mty_impl.clone()),
-        expected: Box::new(mty_sig.clone()),
-        subst: Box::new(subst.clone()),
+        expected: Box::new(substitute_module_type_paths(type_ctx, mty_sig, subst)),
         error: Box::new(error),
     }
 }
@@ -1252,10 +1373,7 @@ fn modtypes_inner(
                 let lax_impl_path = normalized_alias_path(type_ctx, env, impl_path);
                 let lax_sig_path = normalized_alias_path(type_ctx, env, &subst_sig_path);
                 if !lax_impl_path.same(&lax_sig_path) {
-                    return Err(IncludeModError::ModuleTypeMismatch {
-                        name: Ident::create_local("module"),
-                        reason: "module aliases do not match".to_string(),
-                    });
+                    return Err(IncludeModError::DontMatch);
                 }
             }
             match (pres_impl, pres_sig) {
@@ -1291,7 +1409,9 @@ fn modtypes_inner(
                         sig_access_path,
                         warnings,
                     )
-                    .map_err(|error| wrap_modtypes_error(subst, &expanded, mty_sig, error))
+                    .map_err(|error| {
+                        wrap_modtypes_error(type_ctx, subst, &expanded, mty_sig, error)
+                    })
                 }) {
                 coercion?
             } else {
@@ -1315,7 +1435,7 @@ fn modtypes_inner(
                     sig_access_path,
                     warnings,
                 )
-                .map_err(|error| wrap_modtypes_error(subst, &expanded, mty_sig, error))?
+                .map_err(|error| wrap_modtypes_error(type_ctx, subst, &expanded, mty_sig, error))?
             };
             match pres_impl {
                 crate::types::decl::AliasPresence::MtaPresent => Ok(coercion),
@@ -1353,40 +1473,80 @@ fn modtypes_inner(
                 result: result_sig,
             },
         ) => {
-            let empty_subst = InclusionSubst::default();
-            let expected_param_type = param_type_sig.as_deref().map(|pt_sig| {
-                // OCaml compiler/ml/includemod.ml:257-262 computes
-                // `arg2' = Subst.modtype subst arg2` before both the
-                // contravariant argument check and `Env.add_module`.
-                substitute_module_type_paths(type_ctx, pt_sig, subst)
-            });
-
-            // Check parameter (contravariant)
-            let param_coercion = match (param_type_impl, expected_param_type.as_ref()) {
-                (Some(pt_impl), Some(pt_sig)) => {
-                    // Note: parameters are contravariant, so we swap impl/sig
-                    modtypes_inner(type_ctx, env, &empty_subst, pt_sig, pt_impl, None, warnings)?
+            match (param_type_impl.as_deref(), param_type_sig.as_deref()) {
+                // `Mty_functor (param1, None, res1), Mty_functor (_param2,
+                // None, res2)`: the results under `Body param1 :: cxt`.
+                (None, None) => {
+                    let result_coercion = modtypes_inner(
+                        type_ctx,
+                        env,
+                        subst,
+                        result_impl,
+                        result_sig,
+                        sig_access_path,
+                        warnings,
+                    )
+                    .map_err(|error| IncludeModError::InFunctorBody {
+                        param: *param_impl,
+                        error: Box::new(wrap_modtypes_error(
+                            type_ctx,
+                            subst,
+                            result_impl,
+                            result_sig,
+                            error,
+                        )),
+                    })?;
+                    return Ok(match result_coercion {
+                        ModuleCoercion::Tcoerce_none => ModuleCoercion::Tcoerce_none,
+                        cc => ModuleCoercion::Tcoerce_functor(
+                            Box::new(ModuleCoercion::Tcoerce_none),
+                            Box::new(cc),
+                        ),
+                    });
                 }
-                (None, None) => ModuleCoercion::Tcoerce_none,
-                _ => {
-                    return Err(IncludeModError::FunctorParamMismatch(
-                        "parameter presence mismatch".to_string(),
-                    ));
-                }
+                (Some(_), Some(_)) => {}
+                // `_, _ -> raise Dont_match`.
+                _ => return Err(IncludeModError::DontMatch),
+            }
+            let (Some(pt_impl), Some(pt_sig)) = (param_type_impl, param_type_sig) else {
+                unreachable!()
             };
+            // OCaml compiler/ml/includemod.ml:257-262 computes
+            // `arg2' = Subst.modtype subst arg2` before both the
+            // contravariant argument check and `Env.add_module`.
+            let expected_param_type = substitute_module_type_paths(type_ctx, pt_sig, subst);
 
-            // OCaml compiler/ml/includemod.ml:257-262 checks the functor
-            // result under `Subst.add_module param2 (Pident param1) subst`
-            // and an environment extended with the implementation parameter.
+            // `modtypes ~loc env (Arg param1 :: cxt) Subst.identity arg2'
+            // arg1`: parameters are contravariant.
+            let empty_subst = InclusionSubst::default();
+            let param_coercion = modtypes_inner(
+                type_ctx,
+                env,
+                &empty_subst,
+                &expected_param_type,
+                pt_impl,
+                None,
+                warnings,
+            )
+            .map_err(|error| IncludeModError::InFunctorArg {
+                param: *param_impl,
+                error: Box::new(wrap_modtypes_error(
+                    type_ctx,
+                    &empty_subst,
+                    &expected_param_type,
+                    pt_impl,
+                    error,
+                )),
+            })?;
+
+            // `modtypes ~loc (Env.add_module param1 arg2' env) (Body param1
+            // :: cxt) (Subst.add_module param2 (Pident param1) subst) res1
+            // res2`.
             let mut result_env = env.clone();
-            let param_binding_type = expected_param_type
-                .clone()
-                .or_else(|| param_type_impl.as_deref().cloned())
-                .unwrap_or_else(|| ModuleType::MtySignature(std::sync::Arc::new(vec![])));
             result_env.add_module(
                 *param_impl,
                 ModuleDeclaration {
-                    md_type: param_binding_type,
+                    md_type: expected_param_type,
                     md_attributes: vec![],
                     md_loc: crate::types::DeclLoc::none(),
                     md_path: None,
@@ -1410,10 +1570,13 @@ fn modtypes_inner(
             )
             .map_err(|error| IncludeModError::InFunctorBody {
                 param: *param_impl,
-                actual: result_impl.clone(),
-                expected: result_sig.clone(),
-                subst: Box::new(result_subst.clone()),
-                error: Box::new(error),
+                error: Box::new(wrap_modtypes_error(
+                    type_ctx,
+                    &result_subst,
+                    result_impl,
+                    result_sig,
+                    error,
+                )),
             })?;
 
             // If both parameter and result coercions are identity, return identity
@@ -1466,10 +1629,7 @@ fn modtypes_inner(
             } else {
                 // includemod.ml `try_modtypes`: an identifier that cannot be
                 // expanded does not match a signature (`Dont_match`).
-                Err(IncludeModError::ModuleTypeMismatch {
-                    name: Ident::create_local("module"),
-                    reason: "incompatible module types".to_string(),
-                })
+                Err(IncludeModError::DontMatch)
             }
         }
 
@@ -1527,16 +1687,10 @@ fn modtypes_inner(
                         warnings,
                     )
                 } else {
-                    Err(IncludeModError::ModuleTypeMismatch {
-                        name: Ident::create_local("module"),
-                        reason: "incompatible module types".to_string(),
-                    })
+                    Err(IncludeModError::DontMatch)
                 }
             } else {
-                Err(IncludeModError::ModuleTypeMismatch {
-                    name: Ident::create_local("module"),
-                    reason: "incompatible module types".to_string(),
-                })
+                Err(IncludeModError::DontMatch)
             }
         }
 
@@ -1581,18 +1735,12 @@ fn modtypes_inner(
                     warnings,
                 )
             } else {
-                Err(IncludeModError::ModuleTypeMismatch {
-                    name: Ident::create_local("module"),
-                    reason: "incompatible module types".to_string(),
-                })
+                Err(IncludeModError::DontMatch)
             }
         }
 
         // Fallback: incompatible module types
-        _ => Err(IncludeModError::ModuleTypeMismatch {
-            name: Ident::create_local("module"),
-            reason: "incompatible module types".to_string(),
-        }),
+        _ => Err(IncludeModError::DontMatch),
     }
 }
 
@@ -1812,11 +1960,13 @@ fn missing_signature_item_error(
     id: &Ident,
     loc: crate::types::DeclLoc,
     field_desc: &FieldDesc,
+    item: &SignatureItem,
 ) -> IncludeModError {
     IncludeModError::MissingField {
         id: *id,
         loc,
         kind: field_desc_kind(field_desc),
+        item: item.clone(),
     }
 }
 
@@ -1842,12 +1992,16 @@ fn pair_signature_items<'a>(
             register_paired_signature_substitution(pair, sig_access_path, subst);
             paired.push(pair);
         } else if report_missing {
-            errors.push(missing_signature_item_error(sig_id, sig_loc, &field_desc));
+            errors.push(missing_signature_item_error(
+                sig_id,
+                sig_loc,
+                &field_desc,
+                sig_item,
+            ));
         }
     }
-    // includemod.ml:358-365 conses each missing field onto `unpaired` and
-    // raises the list as built, i.e. in reverse signature order.
-    errors.reverse();
+    // includemod.ml `pair_components` raises the missing fields in the
+    // order of the expected signature.
 
     (len_impl, paired, errors)
 }
@@ -1965,6 +2119,7 @@ fn check_paired_signature_items(
                     IncludeModError::InModule {
                         name: *impl_id,
                         error: Box::new(wrap_modtypes_error(
+                            type_ctx,
                             subst,
                             &impl_mty,
                             &sig_mod_decl.md_type,
@@ -1986,7 +2141,6 @@ fn check_paired_signature_items(
                     *impl_id,
                     impl_modtype_decl,
                     &expected_modtype_decl,
-                    (sig_modtype_decl, subst),
                     warnings,
                 )?;
             }
@@ -3315,8 +3469,8 @@ fn compare_runtime_annotations(
                 None
             } else {
                 Some(TypeMismatch::RuntimeAnnotation(
-                    crate::types::variant_layout::describe_declared_block_type(declared1.as_ref()),
-                    crate::types::variant_layout::describe_declared_block_type(declared2),
+                    crate::types::variant_layout::describe_declared_values(declared1.as_ref()),
+                    crate::types::variant_layout::describe_declared_values(declared2),
                 ))
             }
         }
@@ -4535,15 +4689,15 @@ fn constructor_arguments_equal_for_inclusion(
     }
 }
 
-/// Check if module type declaration `impl_decl` is compatible with `sig_decl`.
-#[allow(clippy::too_many_arguments)]
+/// `modtype_infos ~loc env cxt subst id info1 info2` (includemod.ml), with
+/// `sig_decl` already `Subst.modtype_declaration subst info2`: the module
+/// types must be equivalent, checked under `Modtype id`.
 fn modtype_declarations(
     type_ctx: &TypeContext,
     env: &Env,
     id: Ident,
     impl_decl: &ModtypeDeclaration,
     sig_decl: &ModtypeDeclaration,
-    (sig_source, subst): (&ModtypeDeclaration, &InclusionSubst),
     warnings: &mut Vec<Warning>,
 ) -> IncludeModResult<()> {
     if let Some(warning) = deprecated_inclusion_warning(
@@ -4557,59 +4711,51 @@ fn modtype_declarations(
         warnings.push(warning);
     }
 
-    if impl_decl == sig_decl {
-        return Ok(());
-    }
-    match (&impl_decl.mtd_type, &sig_decl.mtd_type) {
-        // Both abstract - compatible
-        (None, None) => Ok(()),
-
-        // Signature is abstract - implementation can be anything
-        (Some(_), None) => Ok(()),
-
-        // Signature has type but implementation is abstract - error
-        (None, Some(_)) => Err(IncludeModError::ModuleTypeMismatch {
-            name: id,
-            reason: "implementation is abstract but signature requires concrete type".to_string(),
-        }),
-
-        // Both have types - check compatibility (bidirectional)
+    let equivalence = match (&impl_decl.mtd_type, &sig_decl.mtd_type) {
+        (_, None) => Ok(()),
         (Some(impl_mty), Some(sig_mty)) => {
-            if impl_mty == sig_mty {
-                return Ok(());
-            }
-
-            let mismatch = |error| IncludeModError::ModuleTypeDeclarationMismatch {
-                name: id,
-                actual: impl_decl.clone(),
-                expected: sig_decl.clone(),
-                expected_source: Box::new((sig_source.clone(), subst.clone())),
-                error: Box::new(with_modtype_context(id, error)),
-            };
-
-            // Module types must be equivalent (both directions), and OCaml
-            // rejects equivalent declarations when either direction needs a
-            // structure-field permutation.
-            let impl_to_sig = modtypes_with_warnings(type_ctx, env, impl_mty, sig_mty, warnings)
-                .map_err(&mismatch)?;
-            let sig_to_impl = modtypes_with_warnings(type_ctx, env, sig_mty, impl_mty, warnings)
-                .map_err(&mismatch)?;
-            if !matches!(impl_to_sig, ModuleCoercion::Tcoerce_none)
-                || !matches!(sig_to_impl, ModuleCoercion::Tcoerce_none)
-            {
-                return Err(mismatch(IncludeModError::ModtypePermutation));
-            }
-            Ok(())
+            check_modtype_equiv(type_ctx, env, impl_mty, sig_mty, warnings)
         }
-    }
+        // `check_modtype_equiv ~loc env cxt' (Mty_ident (Pident id)) mty2`.
+        (None, Some(sig_mty)) => check_modtype_equiv(
+            type_ctx,
+            env,
+            &ModuleType::MtyIdent(Path::pident(id)),
+            sig_mty,
+            warnings,
+        ),
+    };
+    equivalence.map_err(|error| IncludeModError::ModuleTypeDeclarationMismatch {
+        name: id,
+        actual: impl_decl.clone(),
+        expected: sig_decl.clone(),
+        error: Box::new(IncludeModError::AtModtype {
+            name: id,
+            error: Box::new(error),
+        }),
+    })
 }
 
-/// `check_modtype_equiv` runs in `Modtype id :: cxt` (includemod.ml:
-/// 473-476); every error below it shares that context.
-fn with_modtype_context(name: Ident, error: IncludeModError) -> IncludeModError {
-    IncludeModError::AtModtype {
-        name,
-        error: Box::new(error),
+/// `check_modtype_equiv ~loc env cxt mty1 mty2` (includemod.ml): each module
+/// type includes the other, without coercion. The reference's build
+/// evaluates the pair of `modtypes` left to right: an error of the forward
+/// check is the one reported, and the reverse check runs under `Reverse`.
+fn check_modtype_equiv(
+    type_ctx: &TypeContext,
+    env: &Env,
+    mty1: &ModuleType,
+    mty2: &ModuleType,
+    warnings: &mut Vec<Warning>,
+) -> IncludeModResult<()> {
+    let c1 = modtypes_with_warnings(type_ctx, env, mty1, mty2, warnings)?;
+    let c2 = modtypes_with_warnings(type_ctx, env, mty2, mty1, warnings).map_err(|error| {
+        IncludeModError::Reversed {
+            error: Box::new(error),
+        }
+    })?;
+    match (c1, c2) {
+        (ModuleCoercion::Tcoerce_none, ModuleCoercion::Tcoerce_none) => Ok(()),
+        _ => Err(IncludeModError::ModtypePermutation),
     }
 }
 

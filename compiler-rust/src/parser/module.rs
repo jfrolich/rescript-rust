@@ -3974,7 +3974,8 @@ fn parse_rec_module_declarations(
 
 /// Parse a module type declaration.
 /// `in_structure` indicates whether this is in a structure (.res) or signature (.resi).
-/// In structure context, OCaml passes ~loc, in signature context it doesn't (uses Location.none).
+/// Both span from the name to the end (res_core.ml `parse_module_type_impl`
+/// and `parse_module_type_declaration`).
 fn parse_module_type_declaration(
     p: &mut Parser<'_>,
     outer_attrs: Attributes,
@@ -4012,13 +4013,10 @@ fn parse_module_type_declaration(
         None
     };
 
-    // In structure context (parse_module_type_impl), OCaml passes ~loc:(mk_loc name_start p.prev_end_pos)
-    // In signature context (parse_module_type_declaration), OCaml doesn't pass ~loc, uses Location.none
-    let loc = if in_structure {
-        p.mk_loc_idx_to_prev_end(name_start_idx)
-    } else {
-        Location::none()
-    };
+    // `~loc:(mk_loc name_start p.prev_end_pos)` in a structure and
+    // `~loc:(mk_loc name_start (Parser.position p))`, the consumed position,
+    // in a signature.
+    let loc = p.mk_loc_idx_to_prev_end(name_start_idx);
 
     ModuleTypeDeclaration {
         pmtd_name: name,

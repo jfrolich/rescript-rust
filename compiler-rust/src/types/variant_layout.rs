@@ -128,9 +128,9 @@ fn runtime_annotation_to_string(annotation: &RuntimeAnnotation) -> String {
     }
 }
 
-/// ast_untagged_variants.ml `describe_declared_block_type`: what a
-/// declaration's annotations state, for error messages.
-pub(crate) fn describe_declared_block_type(block_type: Option<&BlockType>) -> String {
+/// ast_untagged_variants.ml `describe_declared_values`: what a
+/// declaration's annotations state about its values, for error messages.
+pub(crate) fn describe_declared_values(block_type: Option<&BlockType>) -> String {
     match block_type {
         Some(BlockType::Instance(Instance::Class {
             name, ancestors, ..
@@ -146,8 +146,8 @@ pub(crate) fn describe_declared_block_type(block_type: Option<&BlockType>) -> St
             )
         }
         Some(BlockType::Instance(Instance::Array(_))) => "arrays".to_string(),
-        Some(block_type) => format!("values whose typeof is \"{}\"", typeof_name(block_type)),
-        None => "no runtime class or typeof".to_string(),
+        Some(block_type) => format!("typeof \"{}\"", typeof_name(block_type)),
+        None => "no stated class or typeof".to_string(),
     }
 }
 

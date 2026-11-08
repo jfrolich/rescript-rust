@@ -43,7 +43,6 @@ pub(crate) mod env_lazy;
 pub mod external_ffi_types;
 pub mod includecore;
 pub mod includemod;
-pub(crate) mod includemod_error_size;
 pub(crate) mod parmatch;
 pub mod path;
 pub(crate) mod path_provenance;

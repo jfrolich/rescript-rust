@@ -729,40 +729,6 @@ fn strip_saved_signature_locations(sig: &mut [crate::types::decl::SignatureItem]
     crate::types::decl::walk_signature_locations(sig, &mut Strip);
 }
 
-/// `Subst.extension_constructor` for saving drops `ext_loc` whatever
-/// `keep_locs` says (subst.ml:314-322).
-fn strip_saved_extension_locations(sig: &mut [crate::types::decl::SignatureItem]) {
-    use crate::types::decl::{ModuleType, SignatureItem};
-    fn module_type(mty: &mut ModuleType) {
-        match mty {
-            ModuleType::MtySignature(sig) => {
-                strip_saved_extension_locations(&mut std::sync::Arc::make_mut(sig)[..])
-            }
-            ModuleType::MtyFunctor {
-                param_type, result, ..
-            } => {
-                if let Some(param) = param_type {
-                    module_type(param);
-                }
-                module_type(result);
-            }
-            ModuleType::MtyIdent(_) | ModuleType::MtyAlias(..) => {}
-        }
-    }
-    for item in sig {
-        match item {
-            SignatureItem::SigTypext(_, ext, _) => ext.ext_loc = crate::types::DeclLoc::none(),
-            SignatureItem::SigModule(_, md, _) => module_type(&mut md.md_type),
-            SignatureItem::SigModtype(_, mtd) => {
-                if let Some(mty) = &mut mtd.mtd_type {
-                    module_type(mty);
-                }
-            }
-            _ => {}
-        }
-    }
-}
-
 /// `bsc -format` (rescript_compiler_main.ml:168-182 via
 /// res_multi_printer.ml:1-30): parse `.res`/`.resi` source in printer mode and
 /// print it back with its comments. Sources are Latin-1 byte strings like the
@@ -5093,13 +5059,12 @@ fn format_with_mismatch_report(
     lid: &Longident,
     error: &crate::types::includemod::IncludeModError,
 ) -> String {
-    let mut message = String::new();
-    message.push_str("  In this `with' constraint, the new definition of ");
-    message.push_str(&format_longident_for_report(arena, lid));
-    message.push('\n');
-    message.push_str("  does not match its original definition in the constrained signature:\n");
-    message.push_str(
-        &crate::types::includemod::format_error_without_signature_header(type_ctx, filename, error),
+    let lid = format_longident_for_report(arena, lid);
+    let message = crate::types::includemod::format_report(
+        type_ctx,
+        filename,
+        error,
+        crate::types::includemod::ReportHeading::WithMismatch { lid: &lid },
     );
     format_compiler_error_report_raw_message(arena, source, filename, loc, &message)
 }
@@ -5114,17 +5079,16 @@ fn format_with_makes_applicative_functor_ill_typed_report(
     path: &crate::types::Path,
     error: &crate::types::includemod::IncludeModError,
 ) -> String {
-    let mut message = String::new();
-    let lid_text = format_longident_for_report(arena, lid);
-    message.push_str("  This `with' constraint on ");
-    message.push_str(&lid_text);
-    message.push_str(" makes the applicative functor \n");
-    message.push_str("  type ");
-    message.push_str(&path.name());
-    message.push_str(" ill-typed in the constrained signature:\n");
-    let include_error =
-        crate::types::includemod::format_error_without_signature_header(type_ctx, filename, error);
-    message.push_str(&include_error);
+    let lid = format_longident_for_report(arena, lid);
+    let message = crate::types::includemod::format_report(
+        type_ctx,
+        filename,
+        error,
+        crate::types::includemod::ReportHeading::WithMakesApplicativeFunctorIllTyped {
+            lid: &lid,
+            path: &path.name(),
+        },
+    );
     format_compiler_error_report_raw_message(arena, source, filename, loc, &message)
 }
 
@@ -8130,15 +8094,14 @@ fn format_compunit_mismatch_report(
     let file_loc = Location::in_file(StrIdx::default());
     let loc =
         &direct_compunit_error_location(error).map_or(file_loc, |loc| type_ctx.resolve_loc(loc));
-    let mut message = String::new();
-    message.push_str("  The implementation ");
-    message.push_str(impl_name);
-    message.push('\n');
-    message.push_str("  does not match the interface ");
-    message.push_str(intf_name);
-    message.push_str(":\n");
-    message.push_str(
-        &crate::types::includemod::format_error_without_signature_header(type_ctx, filename, error),
+    let message = crate::types::includemod::format_report(
+        type_ctx,
+        filename,
+        error,
+        crate::types::includemod::ReportHeading::Interface {
+            impl_name,
+            intf_name,
+        },
     );
     // The report is located where the error is (location.ml prints
     // `loc.loc_start.pos_fname`), e.g. at a value only the interface declares.
@@ -11169,7 +11132,6 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         if !options.keep_locs {
             strip_saved_signature_locations(&mut signature_for_save);
         }
-        strip_saved_extension_locations(&mut signature_for_save);
         // OCaml compiler/ml/env.ml:1949-1952 saves a fresh
         // `Subst.signature (Subst.for_saving Subst.identity) sg` copy before
         // installing the persistent structure. Keep Rust's GenType raw-signature
@@ -12010,14 +11972,12 @@ pub fn typecheck_preprocessed_signature_in_process(
         if !options.keep_locs {
             strip_saved_signature_locations(&mut raw);
         }
-        strip_saved_extension_locations(&mut raw);
         std::sync::Arc::new(raw)
     };
     let mut saved_signature = published_signature.clone();
     if !options.keep_locs {
         strip_saved_signature_locations(&mut saved_signature);
     }
-    strip_saved_extension_locations(&mut saved_signature);
     let crcs = Vec::new();
     // js_implementation.ml:59: `Builtin_attributes.deprecated_of_sig ast`.
     let deprecated =

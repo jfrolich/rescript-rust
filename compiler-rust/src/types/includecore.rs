@@ -35,7 +35,7 @@ pub enum TypeMismatch {
     TagName,
     VariantRepresentation(Ident),
     /// What each declaration states about its values at run time
-    /// (`Ast_untagged_variants.describe_declared_block_type`).
+    /// (`Ast_untagged_variants.describe_declared_values`).
     RuntimeAnnotation(String, String),
     NotUndefined,
 }
@@ -43,6 +43,27 @@ pub enum TypeMismatch {
 /// `Format.pp_print_string`: a string as wide as its bytes.
 fn text<W: std::io::Write>(ppf: &mut Formatter<W>, s: &str) {
     ppf.string_as(s.len(), s);
+}
+
+/// A side of a comparison as a label: "the actual" and "declaration" make
+/// "Actual declaration" (includecore.ml `label`).
+fn label(side: &str, decl: &str) -> String {
+    let side = side.strip_prefix("the ").unwrap_or(side);
+    let mut label = format!("{side} {decl}");
+    // `String.capitalize_ascii`
+    if let Some(first) = label.get_mut(0..1) {
+        first.make_ascii_uppercase();
+    }
+    label
+}
+
+/// `String.capitalize_ascii`
+fn capitalize(s: &str) -> String {
+    let mut s = s.to_string();
+    if let Some(first) = s.get_mut(0..1) {
+        first.make_ascii_uppercase();
+    }
+    s
 }
 
 /// `report_type_mismatch0 first second decl ppf err` (includecore.ml).
@@ -105,19 +126,21 @@ fn report_type_mismatch0<W: std::io::Write>(
             ),
         ),
         TypeMismatch::RecordRepresentation => text(ppf, "Their internal representations differ"),
-        // `"Their internal representations differ:@ %s %s %s"`
+        // `"@[<v 2>Their internal representations differ:@,%s %s %s@]"`
         TypeMismatch::UnboxedRepresentation(b) => {
+            ppf.open_vbox(2);
             text(ppf, "Their internal representations differ:");
-            ppf.space();
+            ppf.cut();
             text(
                 ppf,
                 &format!(
                     "{} {decl} uses unboxed representation",
-                    if *b { second } else { first }
+                    capitalize(if *b { second } else { first })
                 ),
             );
+            ppf.close_box();
         }
-        TypeMismatch::Immediate => text(ppf, &format!("{first} is not an immediate type")),
+        TypeMismatch::Immediate => text(ppf, &format!("{first} {decl} is not an immediate type")),
         TypeMismatch::TagName => text(ppf, "Their @tag annotations differ"),
         TypeMismatch::VariantRepresentation(s) => text(
             ppf,
@@ -126,29 +149,34 @@ fn report_type_mismatch0<W: std::io::Write>(
                 s.name()
             ),
         ),
-        // `"Their runtime representations differ:@ %s %s is @notUndefined,@
-        // but %s %s can hold undefined"`
+        // `"@[<v 2>Their runtime representations differ:@,%s: can hold
+        // undefined@,%s: @notUndefined@]"`
         TypeMismatch::NotUndefined => {
+            ppf.open_vbox(2);
             text(ppf, "Their runtime representations differ:");
-            ppf.space();
-            text(ppf, &format!("{second} {decl} is @notUndefined,"));
-            ppf.space();
-            text(ppf, &format!("but {first} {decl} can hold undefined"));
+            ppf.cut();
+            text(ppf, &format!("{}: can hold undefined", label(first, decl)));
+            ppf.cut();
+            text(ppf, &format!("{}: @notUndefined", label(second, decl)));
+            ppf.close_box();
         }
-        // `"Their runtime representations differ:@ %s %s states %s,@ %s %s
-        // states %s"`
+        // `"@[<v 2>Their runtime representations differ:@,%s: %s@,%s: %s@]"`
         TypeMismatch::RuntimeAnnotation(declared1, declared2) => {
+            ppf.open_vbox(2);
             text(ppf, "Their runtime representations differ:");
-            ppf.space();
-            text(ppf, &format!("{first} {decl} states {declared1},"));
-            ppf.space();
-            text(ppf, &format!("{second} {decl} states {declared2}"));
+            ppf.cut();
+            text(ppf, &format!("{}: {declared1}", label(first, decl)));
+            ppf.cut();
+            text(ppf, &format!("{}: {declared2}", label(second, decl)));
+            ppf.close_box();
         }
     }
 }
 
 /// `report_type_mismatch first second decl ppf errs` (includecore.ml): each
-/// error after a break, followed by a period; `Manifest` prints nothing.
+/// error after a break, followed by a period but for the differences in
+/// runtime representation, whose lines are labels; `Manifest` prints
+/// nothing.
 pub(crate) fn report_type_mismatch<W: std::io::Write>(
     ppf: &mut Formatter<W>,
     first: &str,
@@ -162,6 +190,11 @@ pub(crate) fn report_type_mismatch<W: std::io::Write>(
         }
         ppf.space();
         report_type_mismatch0(ppf, first, second, decl, err);
-        text(ppf, ".");
+        if !matches!(
+            err,
+            TypeMismatch::RuntimeAnnotation(..) | TypeMismatch::NotUndefined
+        ) {
+            text(ppf, ".");
+        }
     }
 }
