@@ -3814,15 +3814,26 @@ fn type_mod_error_to_anyhow_styled(
             2,
         )
         .into(),
-        TypeModError::DefinitionMismatch { loc, ty, detail } => UserDiagnostic::new(
+        TypeModError::DefinitionMismatch { loc, ty, errs } => UserDiagnostic::new(
             format_definition_mismatch_report(
-                type_ctx,
+                type_ctx, arena, source, filename, *loc, *ty, errs,
+            ),
+            2,
+        )
+        .into(),
+        // typedecl.ml `Unavailable_type_constructor p`: `"The definition of
+        // type %a@ is unavailable"`.
+        TypeModError::UnavailableTypeConstructor { loc, path } => UserDiagnostic::new(
+            format_compiler_error_report_formatted(
                 arena,
                 source,
                 filename,
                 *loc,
-                *ty,
-                detail.as_deref(),
+                &type_clash::render_error_message(|ppf| {
+                    ppf.str(&format!("The definition of type {}", path.name()));
+                    ppf.space();
+                    ppf.str("is unavailable");
+                }),
             ),
             2,
         )
@@ -5665,10 +5676,10 @@ fn format_definition_mismatch_report(
     filename: &str,
     loc: LocIdx,
     ty: TypeExprRef,
-    detail: Option<&str>,
+    errs: &[crate::types::includecore::TypeMismatch],
 ) -> String {
     let message = type_clash::render_error_message(|ppf| {
-        type_clash::print_definition_mismatch(ppf, type_ctx, ty, detail)
+        type_clash::print_definition_mismatch(ppf, type_ctx, ty, errs)
     });
     format_compiler_error_report_formatted(arena, source, filename, loc, &message)
 }

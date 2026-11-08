@@ -2215,13 +2215,13 @@ pub(super) fn print_object_field_not_mutable(
 }
 
 /// `Typedecl.report_error`'s `Definition_mismatch (ty, errs)`
-/// (typedecl.ml:2153-2159); `detail` is the rendered
-/// `Includecore.report_type_mismatch` sentence, if any.
+/// (typedecl.ml): `@[<v>@[<hov>%s@ %s@;<1 2>%a@]%a@]`, the reasons by
+/// `Includecore.report_type_mismatch "the original" "this" "definition"`.
 pub(super) fn print_definition_mismatch(
     ppf: &mut Ppf<'_>,
     ctx: &TypeContext,
     ty: TypeExprRef,
-    detail: Option<&str>,
+    errs: &[crate::types::includecore::TypeMismatch],
 ) {
     let mut printer = Printtyp::new(ctx);
     ppf.open_box(BoxKind::V, 0);
@@ -2232,15 +2232,13 @@ pub(super) fn print_definition_mismatch(
     ppf.break_(1, 2);
     typecore_type_expr(ppf, &mut printer, ty);
     ppf.close_box();
-    if let Some(detail) = detail.filter(|detail| !detail.is_empty()) {
-        // `report_type_mismatch` prints each error as "@ %a.".
-        // Breaks inside an error ("Their internal representations differ:@ ...")
-        // are hints of the enclosing vertical box.
-        for line in detail.split('\n') {
-            ppf.space();
-            ppf.str(line);
-        }
-    }
+    crate::types::includecore::report_type_mismatch(
+        ppf,
+        "the original",
+        "this",
+        "definition",
+        errs,
+    );
     ppf.close_box();
 }
 

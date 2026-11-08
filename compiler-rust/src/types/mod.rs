@@ -41,6 +41,7 @@ pub mod dict_pattern;
 pub mod env;
 pub(crate) mod env_lazy;
 pub mod external_ffi_types;
+pub mod includecore;
 pub mod includemod;
 pub(crate) mod includemod_error_size;
 pub(crate) mod parmatch;

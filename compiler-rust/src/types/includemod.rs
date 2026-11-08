@@ -22,6 +22,7 @@ use crate::types::decl::{
     SignatureItem, TypeDeclaration, TypeInlinedType, TypeKind, ValueDescription, ValueKind,
 };
 use crate::types::env::Env;
+use crate::types::includecore::TypeMismatch;
 use crate::types::type_expr::{RowDesc, RowField, TypeDesc};
 use crate::types::typedtree::ModuleCoercion;
 use crate::types::{TypeContext, TypeExprRef};
@@ -132,7 +133,8 @@ pub enum IncludeModError {
         name: Ident,
         actual: TypeDeclaration,
         expected: TypeDeclaration,
-        detail: TypeDeclarationMismatchDetail,
+        /// `Includecore.type_declarations`'s differences, never empty.
+        errs: Vec<TypeMismatch>,
     },
     /// Extension constructor mismatch.
     ExtensionConstructorMismatch {
@@ -191,41 +193,6 @@ pub enum IncludeModError {
     NotAFunctor,
     /// Signature mismatch with details.
     SignatureMismatch(Vec<IncludeModError>),
-}
-
-/// Structured counterpart of `Includecore.type_mismatch`.
-///
-/// Most inclusion checks still produce a pre-rendered detail while they are
-/// ported, but semantic mismatches must remain distinguishable from their
-/// diagnostic text. In particular, `TagName` originates from the canonical
-/// variant layout rather than from a formatted declaration.
-#[derive(Debug, Clone)]
-pub enum TypeDeclarationMismatchDetail {
-    TagName,
-    Variance,
-    Rendered(String),
-}
-
-impl TypeDeclarationMismatchDetail {
-    fn message(&self) -> &str {
-        match self {
-            Self::TagName => "Their @tag annotations differ.",
-            Self::Variance => "Their variances do not agree.",
-            Self::Rendered(message) => message,
-        }
-    }
-}
-
-impl From<String> for TypeDeclarationMismatchDetail {
-    fn from(value: String) -> Self {
-        Self::Rendered(value)
-    }
-}
-
-impl From<&str> for TypeDeclarationMismatchDetail {
-    fn from(value: &str) -> Self {
-        Self::Rendered(value.to_string())
-    }
 }
 
 /// The formatter an inclusion report prints into.
@@ -691,7 +658,7 @@ fn format_include_error(
             name,
             actual,
             expected,
-            detail,
+            errs,
         } => {
             // includemod.ml:555-561:
             // `@[<v>@[<hv>%s:@;<1 2>%a@ %s@;<1 2>%a@]%a%a@]`.
@@ -708,9 +675,13 @@ fn format_include_error(
             crate::types::printtyp::pp_doc(ppf, &expected_text);
             ppf.close_box();
             pp_show_locs(ppf, type_ctx, filename, actual.type_loc, expected.type_loc);
-            // `Includecore.report_type_mismatch` (includecore.ml:244-249):
-            // `@ %a.` for each mismatch, in the vertical box.
-            pp_lines_after_breaks(ppf, detail.message());
+            crate::types::includecore::report_type_mismatch(
+                ppf,
+                "the first",
+                "the second",
+                "declaration",
+                errs,
+            );
             ppf.close_box();
         }
         IncludeModError::ExtensionConstructorMismatch {
@@ -2930,6 +2901,9 @@ fn substitute_value_type_paths(
 }
 
 /// Check if type declaration `impl_decl` is a subtype of `sig_decl`.
+/// `Includemod.type_declarations` (includemod.ml): mark the implementation's
+/// type used, then compare it with the expected declaration (already
+/// substituted by the caller).
 pub(crate) fn type_declarations(
     type_ctx: &TypeContext,
     env: &Env,
@@ -2945,34 +2919,41 @@ pub(crate) fn type_declarations(
         id.name(),
         type_ctx.resolve_loc(impl_decl.type_loc),
     );
-    // includecore.ml:384-398 marks the implementation's constructors when both
-    // declarations are variants.
-    if let (
-        crate::types::TypeKind::TypeVariant(impl_cstrs, _),
-        crate::types::TypeKind::TypeVariant(_, _),
-    ) = (&impl_decl.type_kind, &sig_decl.type_kind)
-        && !env.is_implicit_coercion()
-    {
-        let usage = if impl_decl.type_private == crate::types::PrivateFlag::Private
-            || sig_decl.type_private == crate::types::PrivateFlag::Public
-        {
-            crate::types::usage::ConstructorUsage::Positive
-        } else {
-            crate::types::usage::ConstructorUsage::Privatize
-        };
-        let mut usage_tables = type_ctx.usage();
-        for cstr in impl_cstrs {
-            usage_tables.mark_constructor_used(
-                usage,
-                id.name(),
-                type_ctx.resolve_loc(impl_decl.type_loc),
-                cstr.cd_id.name(),
-            );
-        }
+    let errs = includecore_type_declarations(
+        type_ctx,
+        env,
+        id.name(),
+        impl_decl,
+        id,
+        sig_decl,
+        false,
+        warnings,
+    )?;
+    if errs.is_empty() {
+        Ok(())
+    } else {
+        Err(type_decl_mismatch(id, impl_decl, sig_decl, errs))
     }
+}
+
+/// `Includecore.type_declarations ?equality ~loc env name decl1 id decl2`
+/// (includecore.ml): the differences that keep `decl1` from being included
+/// in `decl2`, the first failing check's only. `Err` is a payload reader's
+/// error, which escapes the check.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn includecore_type_declarations(
+    type_ctx: &TypeContext,
+    env: &Env,
+    name: &str,
+    impl_decl: &TypeDeclaration,
+    id: Ident,
+    sig_decl: &TypeDeclaration,
+    equality: bool,
+    warnings: &mut Vec<Warning>,
+) -> IncludeModResult<Vec<TypeMismatch>> {
     if let Some(warning) = deprecated_inclusion_warning(
         type_ctx,
-        id.name(),
+        name,
         &impl_decl.type_attributes,
         &sig_decl.type_attributes,
         impl_decl.type_loc,
@@ -2981,23 +2962,12 @@ pub(crate) fn type_declarations(
         warnings.push(warning);
     }
 
-    // Check arity (number of type parameters)
-    if impl_decl.type_params.len() != sig_decl.type_params.len() {
-        return Err(type_decl_mismatch(
-            id,
-            impl_decl,
-            sig_decl,
-            "They have different arities.",
-        ));
+    if impl_decl.type_arity != sig_decl.type_arity {
+        return Ok(vec![TypeMismatch::Arity]);
     }
 
     if !private_flags(impl_decl, sig_decl) {
-        return Err(type_decl_mismatch(
-            id,
-            impl_decl,
-            sig_decl,
-            "A private type would be revealed.",
-        ));
+        return Ok(vec![TypeMismatch::Privacy]);
     }
 
     let param_map = build_type_param_map(type_ctx, &impl_decl.type_params, &sig_decl.type_params);
@@ -3009,12 +2979,7 @@ pub(crate) fn type_declarations(
                 &impl_decl.type_params,
                 &sig_decl.type_params,
             ) {
-                return Err(type_decl_mismatch(
-                    id,
-                    impl_decl,
-                    sig_decl,
-                    "Their constraints differ.",
-                ));
+                return Ok(vec![TypeMismatch::Constraint]);
             }
         }
         (Some(impl_manifest), Some(sig_manifest)) => {
@@ -3028,50 +2993,31 @@ pub(crate) fn type_declarations(
                 sig_decl.type_private,
                 &param_map,
             ) {
-                return Err(type_decl_mismatch(id, impl_decl, sig_decl, String::new()));
+                return Ok(vec![TypeMismatch::Manifest]);
             }
         }
         (None, Some(sig_manifest)) => {
-            let manifests_match = type_param_lists_equal_for_inclusion(
+            if !type_param_lists_equal_for_inclusion(
                 type_ctx,
                 env,
                 &impl_decl.type_params,
                 &sig_decl.type_params,
-            ) && impl_decl.type_path.as_ref().is_some_and(|path| {
-                let self_ty =
-                    type_ctx.new_generic_constr(path.clone(), sig_decl.type_params.clone());
-                type_exprs_equal_for_inclusion(
-                    type_ctx,
-                    Some(env),
-                    &param_map,
-                    self_ty,
-                    sig_manifest,
-                )
-            });
-            if !manifests_match {
-                return Err(type_decl_mismatch(
-                    id,
-                    impl_decl,
-                    sig_decl,
-                    if type_param_lists_equal_for_inclusion(
-                        type_ctx,
-                        env,
-                        &impl_decl.type_params,
-                        &sig_decl.type_params,
-                    ) {
-                        String::new()
-                    } else {
-                        "Their constraints differ.".to_string()
-                    },
-                ));
+            ) {
+                return Ok(vec![TypeMismatch::Constraint]);
+            }
+            // `let ty1 = Btype.newgenty (Tconstr (Pident id, decl2.type_params,
+            // ref Mnil))` and `Ctype.equal env false [ty1] [ty2]`.
+            let ty1 = type_ctx.new_generic_constr(Path::pident(id), sig_decl.type_params.clone());
+            if !crate::types::ctype::equal(type_ctx, env, false, &[ty1], &[sig_manifest]) {
+                return Ok(vec![TypeMismatch::Manifest]);
             }
         }
     }
 
     // includecore.ml: `compare_runtime_annotations env id decl1 decl2` once
     // the manifests agree.
-    if let Some(detail) = compare_runtime_annotations(type_ctx, env, id, impl_decl, sig_decl) {
-        return Err(type_decl_mismatch(id, impl_decl, sig_decl, detail));
+    if let Some(err) = compare_runtime_annotations(type_ctx, env, id, impl_decl, sig_decl) {
+        return Ok(vec![err]);
     }
 
     let canonical_unboxed = |decl: &TypeDeclaration| {
@@ -3083,64 +3029,52 @@ pub(crate) fn type_declarations(
     if !matches!(sig_decl.type_kind, TypeKind::TypeAbstract)
         && canonical_unboxed(impl_decl) != canonical_unboxed(sig_decl)
     {
-        let unboxed_decl = if canonical_unboxed(sig_decl) {
-            "the second"
-        } else {
-            "the first"
-        };
-        return Err(type_decl_mismatch(
-            id,
-            impl_decl,
-            sig_decl,
-            format!(
-                "Their internal representations differ:\n{unboxed_decl} declaration uses unboxed representation."
-            ),
-        ));
+        return Ok(vec![TypeMismatch::UnboxedRepresentation(
+            canonical_unboxed(sig_decl),
+        )]);
     }
 
     if type_decl_tag_name(type_ctx, impl_decl) != type_decl_tag_name(type_ctx, sig_decl) {
-        return Err(type_decl_mismatch(
-            id,
-            impl_decl,
-            sig_decl,
-            TypeDeclarationMismatchDetail::TagName,
-        ));
+        return Ok(vec![TypeMismatch::TagName]);
     }
 
-    // Check that the type kinds are compatible
-    match (&impl_decl.type_kind, &sig_decl.type_kind) {
-        // Abstract in signature allows any implementation
-        (_, TypeKind::TypeAbstract) => {}
-
-        (
-            TypeKind::TypeRecord(impl_labels, impl_rep),
-            TypeKind::TypeRecord(sig_labels, sig_rep),
-        ) => {
-            if let Some(detail) = compare_record_declarations(
-                type_ctx,
-                env,
-                &impl_decl.type_params,
-                &sig_decl.type_params,
-                impl_labels,
-                sig_labels,
-            ) {
-                return Err(type_decl_mismatch(id, impl_decl, sig_decl, detail));
-            }
-            if impl_rep != sig_rep {
-                return Err(type_decl_mismatch(
-                    id,
-                    impl_decl,
-                    sig_decl,
-                    "Their internal representations differ.",
-                ));
-            }
-        }
-
+    let err = match (&impl_decl.type_kind, &sig_decl.type_kind) {
+        (_, TypeKind::TypeAbstract) => Vec::new(),
         (
             TypeKind::TypeVariant(impl_constructors, _),
             TypeKind::TypeVariant(sig_constructors, _),
         ) => {
-            if let Some(detail) = compare_variant_declarations(
+            // includecore.ml: `mark cstrs1 usage name decl1; if equality then
+            // mark cstrs2 Env.Positive (Ident.name id) decl2`.
+            if !env.is_implicit_coercion() {
+                let usage = if impl_decl.type_private == crate::types::PrivateFlag::Private
+                    || sig_decl.type_private == crate::types::PrivateFlag::Public
+                {
+                    crate::types::usage::ConstructorUsage::Positive
+                } else {
+                    crate::types::usage::ConstructorUsage::Privatize
+                };
+                let mut usage_tables = type_ctx.usage();
+                for cstr in impl_constructors {
+                    usage_tables.mark_constructor_used(
+                        usage,
+                        name,
+                        type_ctx.resolve_loc(impl_decl.type_loc),
+                        cstr.cd_id.name(),
+                    );
+                }
+                if equality {
+                    for cstr in sig_constructors {
+                        usage_tables.mark_constructor_used(
+                            crate::types::usage::ConstructorUsage::Positive,
+                            id.name(),
+                            type_ctx.resolve_loc(sig_decl.type_loc),
+                            cstr.cd_id.name(),
+                        );
+                    }
+                }
+            }
+            compare_variant_declarations(
                 type_ctx,
                 env,
                 &impl_decl.type_params,
@@ -3158,89 +3092,83 @@ pub(crate) fn type_declarations(
                         .expect("variant declaration layout"),
                 ),
                 warnings,
-            )? {
-                return Err(type_decl_mismatch(id, impl_decl, sig_decl, detail));
+            )?
+        }
+        (
+            TypeKind::TypeRecord(impl_labels, impl_rep),
+            TypeKind::TypeRecord(sig_labels, sig_rep),
+        ) => {
+            let err = compare_record_declarations(
+                type_ctx,
+                env,
+                &impl_decl.type_params,
+                &sig_decl.type_params,
+                impl_labels,
+                sig_labels,
+            );
+            if !err.is_empty() || impl_rep == sig_rep {
+                err
+            } else {
+                vec![TypeMismatch::RecordRepresentation]
             }
         }
-
-        (TypeKind::TypeOpen, TypeKind::TypeOpen) => {}
-
-        _ => {
-            return Err(type_decl_mismatch(
-                id,
-                impl_decl,
-                sig_decl,
-                "Their kinds differ.",
-            ));
-        }
+        (TypeKind::TypeOpen, TypeKind::TypeOpen) => Vec::new(),
+        _ => vec![TypeMismatch::Kind],
+    };
+    if !err.is_empty() {
+        return Ok(err);
     }
 
-    if matches!(sig_decl.type_kind, TypeKind::TypeAbstract)
-        && sig_decl.type_manifest.is_none()
-        && !impl_decl.type_immediate
-        && sig_decl.type_immediate
-    {
-        return Err(type_decl_mismatch(
-            id,
-            impl_decl,
-            sig_decl,
-            "the first is not an immediate type.",
-        ));
-    }
-
-    // Match OCaml's Includecore.type_declarations variance check.
-    let sig_is_abstract =
+    let abstr =
         matches!(sig_decl.type_kind, TypeKind::TypeAbstract) && sig_decl.type_manifest.is_none();
-    let need_variance = sig_is_abstract
+    // If attempt to assign a non-immediate type (e.g. string) to a type that
+    // must be immediate, then we error.
+    if abstr && !impl_decl.type_immediate && sig_decl.type_immediate {
+        return Ok(vec![TypeMismatch::Immediate]);
+    }
+
+    let need_variance = abstr
         || matches!(impl_decl.type_private, crate::types::PrivateFlag::Private)
         || matches!(impl_decl.type_kind, TypeKind::TypeOpen);
-    if need_variance && impl_decl.type_variance.len() == sig_decl.type_variance.len() {
-        let abstract_or_private =
-            sig_is_abstract || matches!(sig_decl.type_private, crate::types::PrivateFlag::Private);
-        let open_sig =
-            matches!(sig_decl.type_kind, TypeKind::TypeOpen) && sig_decl.type_manifest.is_none();
-
-        for (sig_param, (impl_var, sig_var)) in sig_decl.type_params.iter().zip(
+    if !need_variance {
+        return Ok(Vec::new());
+    }
+    let abstr = abstr || matches!(sig_decl.type_private, crate::types::PrivateFlag::Private);
+    let opn = matches!(sig_decl.type_kind, TypeKind::TypeOpen) && sig_decl.type_manifest.is_none();
+    let variance_ok = sig_decl
+        .type_params
+        .iter()
+        .zip(
             impl_decl
                 .type_variance
                 .iter()
                 .zip(sig_decl.type_variance.iter()),
-        ) {
-            let implies = |lhs: bool, rhs: bool| !lhs || rhs;
+        )
+        .all(|(sig_param, (impl_var, sig_var))| {
+            let imp = |lhs: bool, rhs: bool| !lhs || rhs;
             let constrained = !crate::types::btype::is_tvar(type_ctx, *sig_param);
-
-            let (impl_co, impl_cn) = impl_var.get_upper();
-            let (sig_co, sig_cn) = sig_var.get_upper();
-            let upper_ok = if abstract_or_private {
-                implies(impl_co, sig_co) && implies(impl_cn, sig_cn)
-            } else if open_sig || constrained {
-                impl_co == sig_co && impl_cn == sig_cn
+            let (co1, cn1) = impl_var.get_upper();
+            let (co2, cn2) = sig_var.get_upper();
+            let upper_ok = if abstr {
+                imp(co1, co2) && imp(cn1, cn2)
+            } else if opn || constrained {
+                co1 == co2 && cn1 == cn2
             } else {
                 true
             };
-
-            let (impl_p, impl_n, impl_i, impl_j) = impl_var.get_lower();
-            let (sig_p, sig_n, sig_i, sig_j) = sig_var.get_lower();
-            let lower_ok = implies(
-                abstract_or_private,
-                implies(sig_p, impl_p)
-                    && implies(sig_n, impl_n)
-                    && implies(sig_i, impl_i)
-                    && implies(sig_j, impl_j),
-            );
-
-            if !(upper_ok && lower_ok) {
-                return Err(type_decl_mismatch(
-                    id,
-                    impl_decl,
-                    sig_decl,
-                    TypeDeclarationMismatchDetail::Variance,
-                ));
-            }
-        }
-    }
-
-    Ok(())
+            let (p1, n1, i1, j1) = impl_var.get_lower();
+            let (p2, n2, i2, j2) = sig_var.get_lower();
+            upper_ok
+                && imp(
+                    abstr,
+                    imp(p2, p1) && imp(n2, n1) && imp(i2, i1) && imp(j2, j1),
+                )
+        });
+    Ok(if variance_ok {
+        Vec::new()
+    } else {
+        vec![TypeMismatch::Variance]
+    })
 }
 
 fn compare_record_declarations(
@@ -3250,7 +3178,7 @@ fn compare_record_declarations(
     sig_params: &[TypeExprRef],
     impl_labels: &[LabelDeclaration],
     sig_labels: &[LabelDeclaration],
-) -> Option<String> {
+) -> Vec<TypeMismatch> {
     let param_map = build_type_param_map(type_ctx, impl_params, sig_params);
     compare_record_declarations_with_param_map(
         type_ctx,
@@ -3271,7 +3199,7 @@ fn compare_record_declarations_with_param_map(
     sig_params: &[TypeExprRef],
     impl_labels: &[LabelDeclaration],
     sig_labels: &[LabelDeclaration],
-) -> Option<String> {
+) -> Vec<TypeMismatch> {
     // OCaml compiler/ml/includecore.ml:396 starts record comparison at 1,
     // so diagnostics report declaration field positions as 1-based.
     let mut index = 0usize;
@@ -3281,49 +3209,35 @@ fn compare_record_declarations_with_param_map(
         let impl_label = &impl_labels[index];
         let sig_label = &sig_labels[index];
         if impl_label.ld_id.name() != sig_label.ld_id.name() {
-            return Some(format!(
-                "Fields number {} have different names, {} and {}.",
+            return vec![TypeMismatch::FieldNames(
                 index + 1,
-                impl_label.ld_id.name(),
-                sig_label.ld_id.name()
-            ));
+                impl_label.ld_id.name().to_string(),
+                sig_label.ld_id.name().to_string(),
+            )];
         }
         if impl_label.ld_mutable != sig_label.ld_mutable {
-            return Some(format!(
-                "The mutability of field {} is different.",
-                impl_label.ld_id.name()
-            ));
+            return vec![TypeMismatch::FieldMutable(impl_label.ld_id)];
         }
         if impl_label.ld_optional != sig_label.ld_optional {
-            return Some(format!(
-                "The optional attribute of field {} is different.",
-                impl_label.ld_id.name()
-            ));
+            return vec![TypeMismatch::FieldOptional(impl_label.ld_id)];
         }
         let impl_runtime_name = impl_label.declaration_name();
         let sig_runtime_name = sig_label.declaration_name();
         if impl_runtime_name != sig_runtime_name {
-            return Some(format!(
-                "Fields number {} have different names, {} and {}.",
+            return vec![TypeMismatch::FieldNames(
                 index + 1,
-                impl_runtime_name,
-                sig_runtime_name
-            ));
+                impl_runtime_name.to_string(),
+                sig_runtime_name.to_string(),
+            )];
         }
         index += 1;
     }
 
     if let Some(label) = sig_labels.get(index) {
-        return Some(format!(
-            "The field {} is only present in the second declaration.",
-            label.ld_id.name()
-        ));
+        return vec![TypeMismatch::FieldMissing(true, label.ld_id)];
     }
     if let Some(label) = impl_labels.get(index) {
-        return Some(format!(
-            "The field {} is only present in the first declaration.",
-            label.ld_id.name()
-        ));
+        return vec![TypeMismatch::FieldMissing(false, label.ld_id)];
     }
 
     // OCaml compiler/ml/includecore.ml:271-313 first compares every record
@@ -3337,7 +3251,7 @@ fn compare_record_declarations_with_param_map(
     sig_types.extend(sig_labels.iter().rev().map(|label| label.ld_type));
     sig_types.extend_from_slice(sig_params);
     if type_expr_lists_equal_for_inclusion(type_ctx, env, param_map, &impl_types, &sig_types) {
-        return None;
+        return Vec::new();
     }
 
     // The reference retries field-by-field only after the batched fast path
@@ -3348,14 +3262,11 @@ fn compare_record_declarations_with_param_map(
         prior_impl.insert(0, impl_label.ld_type);
         prior_sig.insert(0, sig_label.ld_type);
         if !type_expr_lists_equal_for_inclusion(type_ctx, env, param_map, &prior_impl, &prior_sig) {
-            return Some(format!(
-                "The types for field {} are not equal.",
-                impl_label.ld_id.name()
-            ));
+            return vec![TypeMismatch::FieldType(impl_label.ld_id)];
         }
     }
 
-    None
+    Vec::new()
 }
 
 /// includecore.ml `compare_runtime_annotations`: what the second
@@ -3371,7 +3282,7 @@ fn compare_runtime_annotations(
     id: Ident,
     impl_decl: &TypeDeclaration,
     sig_decl: &TypeDeclaration,
-) -> Option<String> {
+) -> Option<TypeMismatch> {
     // The second declaration's shape was resolved in its own environment, so
     // it is what users of the second declaration see.
     let first_type = |env: &mut Env| {
@@ -3389,10 +3300,9 @@ fn compare_runtime_annotations(
                 crate::raw_lambda::typeopt::Undefinedness::CannotBeUndefined
                 | crate::raw_lambda::typeopt::Undefinedness::Unseen => None,
                 crate::raw_lambda::typeopt::Undefinedness::StandsForAnother
-                | crate::raw_lambda::typeopt::Undefinedness::CanBeUndefined => Some(
-                    "Their runtime representations differ:\nthe second declaration is @notUndefined,\nbut the first declaration can hold undefined."
-                        .to_string(),
-                ),
+                | crate::raw_lambda::typeopt::Undefinedness::CanBeUndefined => {
+                    Some(TypeMismatch::NotUndefined)
+                }
             }
         }
         crate::types::ValueShape::RecognizedAs(shape2) => {
@@ -3404,8 +3314,7 @@ fn compare_runtime_annotations(
             if declared1.as_ref() == declared2 {
                 None
             } else {
-                Some(format!(
-                    "Their runtime representations differ:\nthe first declaration states {},\nthe second declaration states {}.",
+                Some(TypeMismatch::RuntimeAnnotation(
                     crate::types::variant_layout::describe_declared_block_type(declared1.as_ref()),
                     crate::types::variant_layout::describe_declared_block_type(declared2),
                 ))
@@ -3418,13 +3327,13 @@ fn type_decl_mismatch(
     name: Ident,
     actual: &TypeDeclaration,
     expected: &TypeDeclaration,
-    detail: impl Into<TypeDeclarationMismatchDetail>,
+    errs: Vec<TypeMismatch>,
 ) -> IncludeModError {
     IncludeModError::TypeDeclarationMismatch {
         name,
         actual: actual.clone(),
         expected: expected.clone(),
-        detail: detail.into(),
+        errs,
     }
 }
 
@@ -3817,7 +3726,7 @@ fn compare_variant_declarations(
     impl_layout: crate::types::VariantLayout,
     sig_layout: crate::types::VariantLayout,
     warnings: &mut Vec<Warning>,
-) -> IncludeModResult<Option<String>> {
+) -> IncludeModResult<Vec<TypeMismatch>> {
     let param_map = build_type_param_map(type_ctx, impl_params, sig_params);
     // OCaml compiler/ml/includecore.ml:392 starts variant comparison at 1,
     // so diagnostics report constructor positions as 1-based.
@@ -3828,12 +3737,11 @@ fn compare_variant_declarations(
         let impl_constructor = &impl_constructors[index];
         let sig_constructor = &sig_constructors[index];
         if impl_constructor.cd_id.name() != sig_constructor.cd_id.name() {
-            return Ok(Some(format!(
-                "Constructors number {} have different names, {} and {}.",
+            return Ok(vec![TypeMismatch::ConstructorNames(
                 index + 1,
-                impl_constructor.cd_id.name(),
-                sig_constructor.cd_id.name()
-            )));
+                impl_constructor.cd_id.name().to_string(),
+                sig_constructor.cd_id.name().to_string(),
+            )]);
         }
         if let Some(warning) = deprecated_inclusion_warning(
             type_ctx,
@@ -3856,10 +3764,7 @@ fn compare_variant_declarations(
                         impl_res,
                         sig_res,
                     ) {
-                        return Ok(Some(format!(
-                            "The types for constructor {} are not equal.",
-                            impl_constructor.cd_id.name()
-                        )));
+                        return Ok(vec![TypeMismatch::ConstructorType(impl_constructor.cd_id)]);
                     }
                     (
                         build_type_param_map(type_ctx, &[impl_res], &[sig_res]),
@@ -3868,10 +3773,7 @@ fn compare_variant_declarations(
                     )
                 }
                 (Some(_), None) | (None, Some(_)) => {
-                    return Ok(Some(format!(
-                        "The types for constructor {} are not equal.",
-                        impl_constructor.cd_id.name()
-                    )));
+                    return Ok(vec![TypeMismatch::ConstructorType(impl_constructor.cd_id)]);
                 }
                 (None, None) => (param_map.clone(), impl_params.to_vec(), sig_params.to_vec()),
             };
@@ -3881,7 +3783,7 @@ fn compare_variant_declarations(
                 ConstructorArguments::CstrRecord(impl_labels),
                 ConstructorArguments::CstrRecord(sig_labels),
             ) => {
-                if let Some(detail) = compare_record_declarations_with_param_map(
+                let err = compare_record_declarations_with_param_map(
                     type_ctx,
                     env,
                     &arg_param_map,
@@ -3889,18 +3791,16 @@ fn compare_variant_declarations(
                     &arg_sig_params,
                     impl_labels,
                     sig_labels,
-                ) {
-                    return Ok(Some(detail));
+                );
+                if !err.is_empty() {
+                    return Ok(err);
                 }
             }
             (
                 ConstructorArguments::CstrTuple(impl_args),
                 ConstructorArguments::CstrTuple(sig_args),
             ) if impl_args.len() != sig_args.len() => {
-                return Ok(Some(format!(
-                    "The arities for constructor {} differ.",
-                    impl_constructor.cd_id.name()
-                )));
+                return Ok(vec![TypeMismatch::ConstructorArity(impl_constructor.cd_id)]);
             }
             (
                 ConstructorArguments::CstrTuple(impl_args),
@@ -3914,18 +3814,12 @@ fn compare_variant_declarations(
                         *impl_arg,
                         *sig_arg,
                     ) {
-                        return Ok(Some(format!(
-                            "The types for constructor {} are not equal.",
-                            impl_constructor.cd_id.name()
-                        )));
+                        return Ok(vec![TypeMismatch::ConstructorType(impl_constructor.cd_id)]);
                     }
                 }
             }
             _ => {
-                return Ok(Some(format!(
-                    "The types for constructor {} are not equal.",
-                    impl_constructor.cd_id.name()
-                )));
+                return Ok(vec![TypeMismatch::ConstructorType(impl_constructor.cd_id)]);
             }
         }
 
@@ -3940,10 +3834,9 @@ fn compare_variant_declarations(
             };
             impl_tag != sig_tag
         } {
-            return Ok(Some(format!(
-                "The internal representations for case {} are not equal.",
-                impl_constructor.cd_id.name()
-            )));
+            return Ok(vec![TypeMismatch::VariantRepresentation(
+                impl_constructor.cd_id,
+            )]);
         }
         // includecore.ml `compare_variants`: a tagged case with a payload
         // carries its tag in the object; an untagged one is its payload,
@@ -3962,29 +3855,28 @@ fn compare_variant_declarations(
             )
             && impl_block.tag.literal != sig_block.tag.literal
         {
-            return Ok(Some(format!(
-                "The internal representations for case {} are not equal.",
-                impl_constructor.cd_id.name()
-            )));
+            return Ok(vec![TypeMismatch::VariantRepresentation(
+                impl_constructor.cd_id,
+            )]);
         }
 
         index += 1;
     }
 
     if let Some(constructor) = sig_constructors.get(index) {
-        return Ok(Some(format!(
-            "The constructor {} is only present in the second declaration.",
-            constructor.cd_id.name()
-        )));
+        return Ok(vec![TypeMismatch::ConstructorMissing(
+            true,
+            constructor.cd_id,
+        )]);
     }
     if let Some(constructor) = impl_constructors.get(index) {
-        return Ok(Some(format!(
-            "The constructor {} is only present in the first declaration.",
-            constructor.cd_id.name()
-        )));
+        return Ok(vec![TypeMismatch::ConstructorMissing(
+            false,
+            constructor.cd_id,
+        )]);
     }
 
-    Ok(None)
+    Ok(Vec::new())
 }
 
 fn constructor_is_nullary(constructor: &ConstructorDeclaration) -> bool {
@@ -4015,18 +3907,6 @@ fn type_exprs_equal_for_inclusion(
 ) -> bool {
     let mut seen = HashSet::new();
     type_exprs_equal_for_inclusion_inner(type_ctx, env, param_map, impl_ty, sig_ty, &mut seen)
-}
-
-pub(crate) fn type_exprs_equal_for_type_declaration(
-    type_ctx: &TypeContext,
-    env: &Env,
-    expected_params: &[TypeExprRef],
-    actual_params: &[TypeExprRef],
-    expected_ty: TypeExprRef,
-    actual_ty: TypeExprRef,
-) -> bool {
-    let param_map = build_type_param_map(type_ctx, expected_params, actual_params);
-    type_exprs_equal_for_inclusion(type_ctx, Some(env), &param_map, expected_ty, actual_ty)
 }
 
 fn type_exprs_equal_for_inclusion_inner(
@@ -4649,7 +4529,7 @@ fn constructor_arguments_equal_for_inclusion(
             ConstructorArguments::CstrRecord(impl_labels),
             ConstructorArguments::CstrRecord(sig_labels),
         ) => {
-            compare_record_declarations(type_ctx, env, &[], &[], impl_labels, sig_labels).is_none()
+            compare_record_declarations(type_ctx, env, &[], &[], impl_labels, sig_labels).is_empty()
         }
         _ => false,
     }

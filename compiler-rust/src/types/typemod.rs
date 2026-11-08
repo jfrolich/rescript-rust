@@ -3501,8 +3501,12 @@ pub enum TypeModError {
     DefinitionMismatch {
         loc: LocIdx,
         ty: TypeExprRef,
-        detail: Option<String>,
+        /// `Includecore.type_declarations`'s differences, possibly none.
+        errs: Vec<crate::types::includecore::TypeMismatch>,
     },
+    /// The type a manifest names has no declaration in the environment
+    /// (typedecl.ml `Unavailable_type_constructor`).
+    UnavailableTypeConstructor { loc: LocIdx, path: Path },
     /// A private fixed row type has an invalid manifest.
     BadFixedType { loc: LocIdx, reason: String },
     /// A type parameter variance annotation is not satisfied by the declaration.
@@ -4493,244 +4497,6 @@ fn type_kind_needs_coherence_check(kind: &crate::types::decl::TypeKind) -> bool 
     )
 }
 
-fn compare_definition_record_labels(
-    ctx: &crate::types::context::TypeContext,
-    env: &Env,
-    expected_params: &[TypeExprRef],
-    actual_params: &[TypeExprRef],
-    expected: &[crate::types::decl::LabelDeclaration],
-    actual: &[crate::types::decl::LabelDeclaration],
-) -> Option<String> {
-    let len = expected.len().min(actual.len());
-    for idx in 0..len {
-        let expected_label = &expected[idx];
-        let actual_label = &actual[idx];
-        if expected_label.ld_id.name() != actual_label.ld_id.name() {
-            return Some(format!(
-                "Fields number {} have different names, {} and {}.",
-                idx + 1,
-                expected_label.ld_id.name(),
-                actual_label.ld_id.name()
-            ));
-        }
-        // includecore.ml:288-299: mutability, optionality, then the `@as`
-        // runtime names (Record_attributes_check.check_bs_attributes_inclusion).
-        if expected_label.ld_mutable != actual_label.ld_mutable {
-            return Some(format!(
-                "The mutability of field {} is different.",
-                expected_label.ld_id.name()
-            ));
-        }
-        if expected_label.ld_optional != actual_label.ld_optional {
-            return Some(format!(
-                "The optional attribute of field {} is different.",
-                expected_label.ld_id.name()
-            ));
-        }
-        let expected_runtime_name = expected_label.declaration_name();
-        let actual_runtime_name = actual_label.declaration_name();
-        if expected_runtime_name != actual_runtime_name {
-            return Some(format!(
-                "Fields number {} have different names, {} and {}.",
-                idx + 1,
-                expected_runtime_name,
-                actual_runtime_name
-            ));
-        }
-        if !crate::types::includemod::type_exprs_equal_for_type_declaration(
-            ctx,
-            env,
-            expected_params,
-            actual_params,
-            expected_label.ld_type,
-            actual_label.ld_type,
-        ) {
-            return Some(format!(
-                "The types for field {} are not equal.",
-                expected_label.ld_id.name()
-            ));
-        }
-    }
-
-    if let Some(label) = expected.get(len) {
-        return Some(format!(
-            "The field {} is only present in the original definition.",
-            label.ld_id.name()
-        ));
-    }
-    if let Some(label) = actual.get(len) {
-        return Some(format!(
-            "The field {} is only present in this definition.",
-            label.ld_id.name()
-        ));
-    }
-
-    None
-}
-
-fn compare_definition_constructors(
-    ctx: &crate::types::context::TypeContext,
-    env: &Env,
-    expected_params: &[TypeExprRef],
-    actual_params: &[TypeExprRef],
-    expected: &[crate::types::decl::ConstructorDeclaration],
-    actual: &[crate::types::decl::ConstructorDeclaration],
-    expected_layout: &crate::types::VariantLayout,
-    actual_layout: &crate::types::VariantLayout,
-) -> Option<String> {
-    let len = expected.len().min(actual.len());
-    for idx in 0..len {
-        let expected_constructor = &expected[idx];
-        let actual_constructor = &actual[idx];
-        if expected_constructor.cd_id.name() != actual_constructor.cd_id.name() {
-            return Some(format!(
-                "Constructors number {} have different names, {} and {}.",
-                idx + 1,
-                expected_constructor.cd_id.name(),
-                actual_constructor.cd_id.name()
-            ));
-        }
-        match (&expected_constructor.cd_args, &actual_constructor.cd_args) {
-            (
-                crate::types::decl::ConstructorArguments::CstrRecord(expected_labels),
-                crate::types::decl::ConstructorArguments::CstrRecord(actual_labels),
-            ) => {
-                if let Some(detail) = compare_definition_record_labels(
-                    ctx,
-                    env,
-                    expected_params,
-                    actual_params,
-                    expected_labels,
-                    actual_labels,
-                ) {
-                    return Some(detail);
-                }
-            }
-            (
-                crate::types::decl::ConstructorArguments::CstrTuple(expected_args),
-                crate::types::decl::ConstructorArguments::CstrTuple(actual_args),
-            ) if expected_args.len() != actual_args.len() => {
-                return Some(format!(
-                    "The arities for constructor {} differ.",
-                    expected_constructor.cd_id.name()
-                ));
-            }
-            (
-                crate::types::decl::ConstructorArguments::CstrTuple(expected_args),
-                crate::types::decl::ConstructorArguments::CstrTuple(actual_args),
-            ) => {
-                for (expected_arg, actual_arg) in expected_args.iter().zip(actual_args.iter()) {
-                    if !crate::types::includemod::type_exprs_equal_for_type_declaration(
-                        ctx,
-                        env,
-                        expected_params,
-                        actual_params,
-                        *expected_arg,
-                        *actual_arg,
-                    ) {
-                        return Some(format!(
-                            "The types for constructor {} are not equal.",
-                            expected_constructor.cd_id.name()
-                        ));
-                    }
-                }
-            }
-            _ => {
-                return Some(format!(
-                    "The types for constructor {} are not equal.",
-                    expected_constructor.cd_id.name()
-                ));
-            }
-        }
-        if matches!(
-            expected_constructor.cd_args,
-            crate::types::decl::ConstructorArguments::CstrTuple(ref args) if args.is_empty()
-        ) {
-            let expected_tag = match &expected_layout.constructors[idx] {
-                crate::types::VariantConstructorCase::Constant(tag) => &tag.literal,
-                crate::types::VariantConstructorCase::Block(_) => unreachable!(),
-            };
-            let actual_tag = match &actual_layout.constructors[idx] {
-                crate::types::VariantConstructorCase::Constant(tag) => &tag.literal,
-                crate::types::VariantConstructorCase::Block(_) => unreachable!(),
-            };
-            if expected_tag != actual_tag {
-                return Some(format!(
-                    "The internal representations for case {} are not equal.",
-                    expected_constructor.cd_id.name()
-                ));
-            }
-        } else if let (
-            crate::types::VariantConstructorCase::Block(crate::types::VariantBlock::Tagged(
-                expected_block,
-            )),
-            crate::types::VariantConstructorCase::Block(crate::types::VariantBlock::Tagged(
-                actual_block,
-            )),
-        ) = (&expected_layout.constructors[idx], &actual_layout.constructors[idx])
-            && expected_block.tag.literal != actual_block.tag.literal
-        {
-            // includecore.ml `compare_variants`: a tagged case with a payload
-            // carries its tag in the object; an untagged one is its payload,
-            // whatever its `@as`.
-            return Some(format!(
-                "The internal representations for case {} are not equal.",
-                expected_constructor.cd_id.name()
-            ));
-        }
-    }
-
-    if let Some(constructor) = expected.get(len) {
-        return Some(format!(
-            "The constructor {} is only present in the original definition.",
-            constructor.cd_id.name()
-        ));
-    }
-    if let Some(constructor) = actual.get(len) {
-        return Some(format!(
-            "The constructor {} is only present in this definition.",
-            constructor.cd_id.name()
-        ));
-    }
-
-    None
-}
-
-fn definition_mismatch_detail(
-    ctx: &crate::types::context::TypeContext,
-    env: &Env,
-    expected: &crate::types::decl::TypeDeclaration,
-    actual: &crate::types::decl::TypeDeclaration,
-) -> Option<String> {
-    match (&expected.type_kind, &actual.type_kind) {
-        (
-            crate::types::decl::TypeKind::TypeRecord(expected_labels, _),
-            crate::types::decl::TypeKind::TypeRecord(actual_labels, _),
-        ) => compare_definition_record_labels(
-            ctx,
-            env,
-            &expected.type_params,
-            &actual.type_params,
-            expected_labels,
-            actual_labels,
-        ),
-        (
-            crate::types::decl::TypeKind::TypeVariant(expected_constructors, expected_layout),
-            crate::types::decl::TypeKind::TypeVariant(actual_constructors, actual_layout),
-        ) => compare_definition_constructors(
-            ctx,
-            env,
-            &expected.type_params,
-            &actual.type_params,
-            expected_constructors,
-            actual_constructors,
-            &ctx.variant_layout(*expected_layout),
-            &ctx.variant_layout(*actual_layout),
-        ),
-        _ => None,
-    }
-}
-
 fn type_expr_lists_equal_without_renaming(
     ctx: &crate::types::context::TypeContext,
     env: &Env,
@@ -4743,168 +4509,17 @@ fn type_expr_lists_equal_without_renaming(
         })
 }
 
-fn coherence_private_flags(
-    expected: &crate::types::decl::TypeDeclaration,
-    actual: &crate::types::decl::TypeDeclaration,
-) -> bool {
-    match (expected.type_private, actual.type_private) {
-        (crate::types::PrivateFlag::Private, crate::types::PrivateFlag::Public) => {
-            matches!(actual.type_kind, crate::types::decl::TypeKind::TypeAbstract)
-                && (actual.type_manifest.is_none()
-                    || !matches!(
-                        expected.type_kind,
-                        crate::types::decl::TypeKind::TypeAbstract
-                    ))
-        }
-        _ => true,
-    }
-}
-
-fn type_decl_variant_configuration(
-    ctx: &crate::types::context::TypeContext,
-    decl: &crate::types::decl::TypeDeclaration,
-) -> crate::types::VariantConfiguration {
-    let mut configuration = decl
-        .variant_layout_ref()
-        .map(|layout_ref| ctx.variant_layout(layout_ref).configuration())
-        .unwrap_or(crate::types::VariantConfiguration {
-            unboxed: false,
-            tag_name: None,
-        });
-    configuration.unboxed |= decl.type_representation == crate::types::TypeRepresentation::Unboxed;
-    configuration
-}
-
-fn coherence_variance_detail(
-    ctx: &crate::types::context::TypeContext,
-    expected: &crate::types::decl::TypeDeclaration,
-    actual: &crate::types::decl::TypeDeclaration,
-) -> Option<String> {
-    let actual_is_abstract = matches!(actual.type_kind, crate::types::decl::TypeKind::TypeAbstract)
-        && actual.type_manifest.is_none();
-    let need_variance = actual_is_abstract
-        || matches!(expected.type_private, crate::types::PrivateFlag::Private)
-        || matches!(expected.type_kind, crate::types::decl::TypeKind::TypeOpen);
-
-    if !need_variance || expected.type_variance.len() != actual.type_variance.len() {
-        return None;
-    }
-
-    let actual_is_private = matches!(actual.type_private, crate::types::PrivateFlag::Private);
-    let open_actual = matches!(actual.type_kind, crate::types::decl::TypeKind::TypeOpen)
-        && actual.type_manifest.is_none();
-
-    for (actual_param, (expected_var, actual_var)) in actual.type_params.iter().zip(
-        expected
-            .type_variance
-            .iter()
-            .zip(actual.type_variance.iter()),
-    ) {
-        let implies = |lhs: bool, rhs: bool| !lhs || rhs;
-        let constrained = !crate::types::btype::is_tvar(ctx, *actual_param);
-
-        let (expected_co, expected_cn) = expected_var.get_upper();
-        let (actual_co, actual_cn) = actual_var.get_upper();
-        let upper_ok = if actual_is_abstract || actual_is_private {
-            implies(expected_co, actual_co) && implies(expected_cn, actual_cn)
-        } else if open_actual || constrained {
-            expected_co == actual_co && expected_cn == actual_cn
-        } else {
-            true
-        };
-
-        let (expected_p, expected_n, expected_i, expected_j) = expected_var.get_lower();
-        let (actual_p, actual_n, actual_i, actual_j) = actual_var.get_lower();
-        let lower_ok = implies(
-            actual_is_abstract || actual_is_private,
-            implies(actual_p, expected_p)
-                && implies(actual_n, expected_n)
-                && implies(actual_i, expected_i)
-                && implies(actual_j, expected_j),
-        );
-
-        if !(upper_ok && lower_ok) {
-            return Some("Their variances do not agree.".to_string());
-        }
-    }
-
-    None
-}
-
-fn coherence_definition_mismatch_detail(
-    ctx: &crate::types::context::TypeContext,
-    env: &Env,
-    expected: &crate::types::decl::TypeDeclaration,
-    actual: &crate::types::decl::TypeDeclaration,
-) -> Option<String> {
-    if expected.type_params.len() != actual.type_params.len() {
-        return Some("They have different arities.".to_string());
-    }
-
-    if !coherence_private_flags(expected, actual) {
-        return Some("A private type would be revealed.".to_string());
-    }
-
-    let expected_configuration = type_decl_variant_configuration(ctx, expected);
-    let actual_configuration = type_decl_variant_configuration(ctx, actual);
-    if !matches!(actual.type_kind, crate::types::decl::TypeKind::TypeAbstract)
-        && expected_configuration.unboxed != actual_configuration.unboxed
-    {
-        // typedecl.ml:2158 reports with `report_type_mismatch "the original" "this" "definition"`.
-        let unboxed_decl = if actual_configuration.unboxed {
-            "this"
-        } else {
-            "the original"
-        };
-        return Some(format!(
-            "Their internal representations differ:\n{unboxed_decl} definition uses unboxed representation."
-        ));
-    }
-
-    if expected_configuration.tag_name != actual_configuration.tag_name {
-        return Some("Their @tag annotations differ.".to_string());
-    }
-
-    match (&expected.type_kind, &actual.type_kind) {
-        (_, crate::types::decl::TypeKind::TypeAbstract) => {}
-        (
-            crate::types::decl::TypeKind::TypeRecord(_, expected_rep),
-            crate::types::decl::TypeKind::TypeRecord(_, actual_rep),
-        ) => {
-            if let Some(detail) = definition_mismatch_detail(ctx, env, expected, actual) {
-                return Some(detail);
-            }
-            if expected_rep != actual_rep {
-                return Some("Their internal representations differ.".to_string());
-            }
-        }
-        (
-            crate::types::decl::TypeKind::TypeVariant(_, _),
-            crate::types::decl::TypeKind::TypeVariant(_, _),
-        ) => {
-            if let Some(detail) = definition_mismatch_detail(ctx, env, expected, actual) {
-                return Some(detail);
-            }
-        }
-        (crate::types::decl::TypeKind::TypeOpen, crate::types::decl::TypeKind::TypeOpen) => {}
-        _ => return Some("Their kinds differ.".to_string()),
-    }
-
-    let actual_is_abstract = matches!(actual.type_kind, crate::types::decl::TypeKind::TypeAbstract)
-        && actual.type_manifest.is_none();
-    if actual_is_abstract && !expected.type_immediate && actual.type_immediate {
-        return Some("the first is not an immediate type.".to_string());
-    }
-
-    coherence_variance_detail(ctx, expected, actual)
-}
-
+/// `Typedecl.check_coherence env loc id decl` (typedecl.ml): a variant,
+/// record or open type with a manifest must be the declaration the manifest
+/// names, compared by `Includecore.type_declarations ~equality:true`. The
+/// comparison's `@deprecated` warnings go to `warnings`.
 fn check_type_declaration_coherence(
     ctx: &crate::types::context::TypeContext,
     env: &Env,
     loc: LocIdx,
     id: &Ident,
     decl: &crate::types::decl::TypeDeclaration,
+    warnings: &mut Vec<Warning>,
 ) -> TypeModResult<()> {
     if !type_kind_needs_coherence_check(&decl.type_kind) {
         return Ok(());
@@ -4922,90 +4537,59 @@ fn check_type_declaration_coherence(
             return Err(TypeModError::DefinitionMismatch {
                 loc,
                 ty: manifest,
-                detail: None,
+                errs: Vec::new(),
             });
         }
     };
     drop(manifest_desc);
 
-    if manifest_args.len() != decl.type_params.len() {
-        return Err(TypeModError::DefinitionMismatch {
-            loc,
-            ty: manifest,
-            detail: Some("They have different arities.".to_string()),
-        });
-    }
-
-    if !type_expr_lists_equal_without_renaming(ctx, env, &manifest_args, &decl.type_params) {
-        return Err(TypeModError::DefinitionMismatch {
-            loc,
-            ty: manifest,
-            detail: Some("Their constraints differ.".to_string()),
-        });
-    }
-
+    // `Env.find_type path env`, whose `Not_found` is
+    // `Unavailable_type_constructor path`.
     let Some(expected_decl) =
         crate::types::ctype::lookup_type_decl_for_path(ctx, env, &manifest_path)
     else {
-        return Ok(());
+        return Err(TypeModError::UnavailableTypeConstructor {
+            loc,
+            path: manifest_path,
+        });
     };
 
-    // OCaml compiler/ml/typedecl.ml:863-884 first checks that manifest
-    // arguments are exactly the current declaration parameters, then compares
-    // the resolved manifest declaration against the explicit representation
-    // after `Subst.add_type id path` has rewritten recursive self references.
-    let self_path = Path::pident(*id);
-    let substituted_decl = crate::types::includemod::substitute_type_declaration_self_path(
-        ctx,
-        decl,
-        &self_path,
-        &manifest_path,
-    );
-    // `Includecore.type_declarations ~equality:true` (includecore.ml:384-398)
-    // marks the manifest's constructors with the privacy-derived usage and,
-    // for the equation, the re-exported constructors as built.
-    if let (
-        crate::types::decl::TypeKind::TypeVariant(expected_cstrs, _),
-        crate::types::decl::TypeKind::TypeVariant(cstrs, _),
-    ) = (&expected_decl.type_kind, &substituted_decl.type_kind)
-        && !env.is_implicit_coercion()
-    {
-        let usage = if expected_decl.type_private == crate::types::PrivateFlag::Private
-            || substituted_decl.type_private == crate::types::PrivateFlag::Public
-        {
-            crate::types::usage::ConstructorUsage::Positive
-        } else {
-            crate::types::usage::ConstructorUsage::Privatize
-        };
-        let mut usage_tables = ctx.usage();
-        for cstr in expected_cstrs {
-            usage_tables.mark_constructor_used(
-                usage,
-                manifest_path.last(),
-                ctx.resolve_loc(expected_decl.type_loc),
-                cstr.cd_id.name(),
-            );
-        }
-        for cstr in cstrs {
-            usage_tables.mark_constructor_used(
-                crate::types::usage::ConstructorUsage::Positive,
-                id.name(),
-                ctx.resolve_loc(substituted_decl.type_loc),
-                cstr.cd_id.name(),
-            );
-        }
-    }
-    if let Some(detail) =
-        coherence_definition_mismatch_detail(ctx, env, &expected_decl, &substituted_decl)
-    {
-        return Err(TypeModError::DefinitionMismatch {
+    let errs = if manifest_args.len() != decl.type_params.len() {
+        vec![crate::types::includecore::TypeMismatch::Arity]
+    } else if !type_expr_lists_equal_without_renaming(ctx, env, &manifest_args, &decl.type_params) {
+        vec![crate::types::includecore::TypeMismatch::Constraint]
+    } else {
+        // `Includecore.type_declarations ~loc ~equality:true env (Path.last
+        // path) decl' id (Subst.type_declaration (Subst.add_type id path
+        // Subst.identity) decl)`.
+        let substituted_decl = crate::types::includemod::substitute_type_declaration_self_path(
+            ctx,
+            decl,
+            &Path::pident(*id),
+            &manifest_path,
+        );
+        let result = crate::types::includemod::includecore_type_declarations(
+            ctx,
+            env,
+            manifest_path.last(),
+            &expected_decl,
+            *id,
+            &substituted_decl,
+            true,
+            warnings,
+        );
+        crate::types::includemod::escaped(ctx, result)?
+            .expect("a type declaration comparison raises only payload errors")
+    };
+    if errs.is_empty() {
+        Ok(())
+    } else {
+        Err(TypeModError::DefinitionMismatch {
             loc,
             ty: manifest,
-            detail: Some(detail),
-        });
+            errs,
+        })
     }
-
-    Ok(())
 }
 
 fn object_field_rest(ctx: &crate::types::context::TypeContext, fields: TypeExprRef) -> TypeExprRef {
@@ -9644,7 +9228,11 @@ fn check_type_decl(
             error,
         }
     })?;
-    check_type_declaration_coherence(ctx, &env, loc, &id, newdecl)
+    let mut coherence_warnings = Vec::new();
+    let coherence =
+        check_type_declaration_coherence(ctx, &env, loc, &id, newdecl, &mut coherence_warnings);
+    report_inclusion_warnings(tctx, loc, coherence_warnings);
+    coherence
 }
 
 /// `merge_constraint` (typemod.ml:288-473): merges one `with` constraint into
@@ -18853,13 +18441,17 @@ fn type_structure_item<'a>(
                         continue;
                     }
                     let idx = type_entry_parser_indices[entry_idx];
-                    check_type_declaration_coherence(
+                    let mut coherence_warnings = Vec::new();
+                    let coherence = check_type_declaration_coherence(
                         ctx,
                         &new_env,
                         decls[idx].ptype_loc,
                         &declared_type_ids[idx],
                         internal_decl,
-                    )?;
+                        &mut coherence_warnings,
+                    );
+                    report_inclusion_warnings(tctx, decls[idx].ptype_loc, coherence_warnings);
+                    coherence?;
                 }
             } else {
                 let required_variances: Vec<Vec<(bool, bool, bool)>> = decls
@@ -18915,13 +18507,17 @@ fn type_structure_item<'a>(
                 }
 
                 for (idx, internal_decl) in internal_decls_for_generalize.iter().enumerate() {
-                    check_type_declaration_coherence(
+                    let mut coherence_warnings = Vec::new();
+                    let coherence = check_type_declaration_coherence(
                         ctx,
                         &new_env,
                         decls[idx].ptype_loc,
                         &declared_type_ids[idx],
                         internal_decl,
-                    )?;
+                        &mut coherence_warnings,
+                    );
+                    report_inclusion_warnings(tctx, decls[idx].ptype_loc, coherence_warnings);
+                    coherence?;
                 }
             }
 
@@ -21115,13 +20711,17 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
                 continue;
             }
             let idx = type_entry_parser_indices[entry_idx];
-            check_type_declaration_coherence(
+            let mut coherence_warnings = Vec::new();
+            let coherence = check_type_declaration_coherence(
                 ctx,
                 &variance_env,
                 decls[idx].ptype_loc,
                 &declared_type_ids[idx],
                 internal_decl,
-            )?;
+                &mut coherence_warnings,
+            );
+            report_inclusion_warnings(tctx, decls[idx].ptype_loc, coherence_warnings);
+            coherence?;
         }
     } else {
         let required_variances: Vec<Vec<(bool, bool, bool)>> = decls
@@ -21160,13 +20760,17 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
         }
 
         for (idx, internal_decl) in internal_decls_for_generalize.iter().enumerate() {
-            check_type_declaration_coherence(
+            let mut coherence_warnings = Vec::new();
+            let coherence = check_type_declaration_coherence(
                 ctx,
                 &variance_env,
                 decls[idx].ptype_loc,
                 &declared_type_ids[idx],
                 internal_decl,
-            )?;
+                &mut coherence_warnings,
+            );
+            report_inclusion_warnings(tctx, decls[idx].ptype_loc, coherence_warnings);
+            coherence?;
         }
     }
 
