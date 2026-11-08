@@ -3689,6 +3689,34 @@ pub(crate) fn is_js_keyword_or_global(s: &str) -> bool {
         )
 }
 
+/// Prints an arena expression at precedence level 0.
+#[cfg(test)]
+pub fn print_expr(a: &JsArena, expr: Expr) -> String {
+    print_expr_with_options(a, expr, 0, false, false)
+}
+
+#[cfg(test)]
+pub(crate) fn print_expr_with_options(
+    a: &JsArena,
+    expr: Expr,
+    level: u8,
+    debug: bool,
+    jsx_preserve: bool,
+) -> String {
+    let mut printer =
+        JsPrinter::with_module_path_resolver_and_options(a, None, debug, jsx_preserve);
+    printer.print_expression(expr, level);
+    printer.into_output()
+}
+
+/// Prints arena statements as a top-level statement sequence.
+#[cfg(test)]
+pub fn print_stmts(a: &JsArena, block: &[Stmt]) -> String {
+    let mut printer = JsPrinter::new(a);
+    printer.print_statements(block, true);
+    printer.into_output()
+}
+
 /// Print a tree expression to a string.
 pub fn print_expression(expr: &super::Expression) -> String {
     print_expression_with_options(expr, 0, false, false)
