@@ -17,6 +17,8 @@ use super::ast::*;
 use super::longident::Longident;
 use crate::parse_arena::{CoreTypeIdx, ExprIdx, LidentIdx, Located, ParseArena, StrIdx};
 
+mod mapper;
+
 /// Component description type - mirrors OCaml's componentDescription
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum ComponentDescription {
@@ -40,9 +42,15 @@ pub struct JsxConfig {
     pub file_name: String,
     /// First fatal PPX diagnostic found while transforming.
     pub fatal_error: Option<JsxPreprocessorError>,
-    /// Per expression index: 0 unknown, 1 its subtree is left unchanged by
-    /// `transform_expression`, 2 it may change.
+    /// Per expression index: 0 unknown, 1 the mapper leaves its subtree
+    /// unchanged, 2 it may change (see `mapper::subtree_may_change`).
     unchanged_memo: Vec<u8>,
+    /// Warnings in the order the mapper raises them (`Location.prerr_warning`
+    /// prints each one when it is raised).
+    warnings: Vec<JsxPreprocessorWarning>,
+    /// How many warnings were raised before `fatal_error`: OCaml raises the
+    /// error and stops, so the mapper's later warnings are never printed.
+    warnings_before_error: usize,
     /// OCaml `empty_loc = Location.in_file file_name` (jsx_v4.ml:1021-1022):
     /// the location of the nodes `map_binding` generates for a component.
     pub empty_loc: Location,
@@ -59,6 +67,19 @@ struct JsxConfigScope {
 }
 
 impl JsxConfig {
+    /// The warnings and the result of a run of the mapper: the warnings raised
+    /// before the first fatal error, then that error or `result`.
+    fn finish<T>(&mut self, result: T) -> (JsxPreprocessorResult<T>, Vec<JsxPreprocessorWarning>) {
+        let mut warnings = std::mem::take(&mut self.warnings);
+        match self.fatal_error.take() {
+            Some(error) => {
+                warnings.truncate(self.warnings_before_error);
+                (Err(error), warnings)
+            }
+            None => (Ok(result), warnings),
+        }
+    }
+
     /// jsx_ppx.ml:106-107, 122-123: save the scope and reset `has_component`
     /// on entering a structure or signature.
     fn enter_scope(&mut self) -> JsxConfigScope {
@@ -89,6 +110,8 @@ impl Default for JsxConfig {
             file_name: String::new(),
             fatal_error: None,
             unchanged_memo: Vec::new(),
+            warnings: Vec::new(),
+            warnings_before_error: 0,
             empty_loc: Location::none(),
         }
     }
@@ -258,16 +281,9 @@ pub fn transform_structure_collecting_warnings(
         ..Default::default()
     };
 
-    let mut warnings = vec![];
-    let mut result = vec![];
-    for item in structure {
-        let items = transform_structure_item_multi(item, &mut config, arena, &mut warnings);
-        if let Some(error) = config.fatal_error.take() {
-            return (Err(error), warnings);
-        }
-        result.extend(items);
-    }
-    (Ok(result), warnings)
+    // `mapper.structure mapper code` (jsx_ppx.ml:149-160).
+    let result = mapper::structure(structure, &mut config, arena);
+    config.finish(result)
 }
 
 /// Transform a signature, applying JSX PPX transformations.
@@ -313,72 +329,29 @@ pub fn transform_signature_with_warnings_result(
         ..Default::default()
     };
 
-    let mut result = vec![];
-    let mut warnings = vec![];
-    for item in signature {
-        let items = transform_signature_item_multi(item, &mut config, arena, &mut warnings);
-        if let Some(error) = config.fatal_error.take() {
-            return Err(error);
-        }
-        result.extend(items);
-    }
-    Ok((result, warnings))
+    // `mapper.signature mapper code` (jsx_ppx.ml:162-173).
+    let result = mapper::signature(signature, &mut config, arena);
+    let (result, warnings) = config.finish(result);
+    result.map(|signature| (signature, warnings))
 }
 
 // ============================================================================
 // Structure Item Transformation
 // ============================================================================
 
-/// Transform a structure item, potentially returning multiple items
-/// (e.g., props type + transformed function)
-fn transform_structure_item_multi(
+/// `Jsx_v4.transform_structure_item` (jsx_v4.ml:948-1052): the component
+/// transform of an item the mapper has already mapped, at version 4. Only
+/// externals and value bindings change.
+fn transform_structure_item4(
     item: StructureItem,
     config: &mut JsxConfig,
     arena: &mut ParseArena,
-    warnings: &mut Vec<JsxPreprocessorWarning>,
 ) -> Vec<StructureItem> {
-    // Check for @@jsxConfig attribute
-    if let StructureItemDesc::Pstr_attribute(attr) = &item.pstr_desc {
-        if arena.get_string(attr.0.txt) == "jsxConfig" {
-            update_config_from_attribute(arena, attr, config);
-        }
-        return vec![item];
-    }
-
-    // jsx_ppx.ml:76-89, 124-131: with another version the mapper is
-    // `default_mapper`, which still visits every nested structure, where an
-    // `@@jsxConfig` can turn the transform on.
-    if config.version != 4 {
-        let pstr_desc = match item.pstr_desc {
-            StructureItemDesc::Pstr_value((rec_flag, bindings)) => {
-                let bindings: Vec<_> = arena
-                    .vb_list(bindings)
-                    .to_vec()
-                    .into_iter()
-                    .map(|binding| transform_value_binding(binding, config, arena))
-                    .collect();
-                StructureItemDesc::Pstr_value((rec_flag, arena.push_vb_list(&bindings)))
-            }
-            desc => transform_structure_item_desc(desc, config, arena, warnings),
-        };
-        return vec![StructureItem {
-            pstr_desc,
-            pstr_loc: item.pstr_loc,
-        }];
-    }
-
     // Handle Pstr_value with potential @react.component
     if let StructureItemDesc::Pstr_value(val_inner) = item.pstr_desc {
         let (rec_flag, bindings) = val_inner;
         let bindings = arena.vb_list(bindings).to_vec();
-        return transform_value_bindings(
-            rec_flag,
-            bindings,
-            &item.pstr_loc,
-            config,
-            arena,
-            warnings,
-        );
+        return transform_value_bindings(rec_flag, bindings, &item.pstr_loc, config, arena);
     }
 
     // Handle Pstr_primitive (external) with potential @react.component
@@ -387,7 +360,7 @@ fn transform_structure_item_multi(
             arena,
             vd.pval_jsx_component.as_deref(),
             &vd.pval_attributes,
-            warnings,
+            &mut config.warnings,
         );
         let (pval_jsx_component, pval_attributes) = match &taken {
             Some((component, attrs)) => (Some(component), attrs),
@@ -418,56 +391,24 @@ fn transform_structure_item_multi(
         }
     }
 
-    // Handle module definitions (for nested module tracking)
-    if let StructureItemDesc::Pstr_module(mb) = item.pstr_desc {
-        let transformed = transform_module_binding_with_tracking(*mb, config, arena, warnings);
-        return vec![StructureItem {
-            pstr_desc: StructureItemDesc::Pstr_module(Box::new(transformed)),
-            pstr_loc: item.pstr_loc,
-        }];
-    }
-
-    // Default: just transform expressions within
-    vec![StructureItem {
-        pstr_desc: transform_structure_item_desc(item.pstr_desc, config, arena, warnings),
-        pstr_loc: item.pstr_loc,
-    }]
+    vec![item]
 }
 
-fn transform_module_binding_with_tracking(
-    mb: ModuleBinding,
-    config: &mut JsxConfig,
-    arena: &mut ParseArena,
-    warnings: &mut Vec<JsxPreprocessorWarning>,
-) -> ModuleBinding {
-    // Track nested module name
-    let module_name = arena.get_string(mb.pmb_name.txt).to_string();
-    // jsx_v4.ml:1374-1382 only tracks the name; `has_component` is saved and
-    // reset by the structure/signature mapper (jsx_ppx.ml:101-123).
-    config.nested_modules.push(module_name);
-
-    let transformed = transform_module_binding(mb, config, arena, warnings);
-
-    // Pop the module name
-    config.nested_modules.pop();
-
-    transformed
-}
-
-/// Transform value bindings, handling @react.component
+/// The value-binding case of `Jsx_v4.transform_structure_item`
+/// (jsx_v4.ml:1015-1052): `List.fold_right process_binding`, so `map_binding`
+/// runs on the last binding first; the results keep the source order.
 fn transform_value_bindings(
     rec_flag: RecFlag,
     bindings: Vec<ValueBinding>,
     loc: &Location,
     config: &mut JsxConfig,
     arena: &mut ParseArena,
-    warnings: &mut Vec<JsxPreprocessorWarning>,
 ) -> Vec<StructureItem> {
     let mut props_types = vec![];
     let mut transformed_bindings = vec![];
     let mut new_bindings = vec![];
 
-    for mut binding in bindings {
+    for mut binding in bindings.into_iter().rev() {
         // jsx_v4.ml map_binding: take a `@react.componentWithProps` payload,
         // reject leftover annotations, then dispatch on the binding's
         // component node.
@@ -475,7 +416,7 @@ fn transform_value_bindings(
             arena,
             binding.pvb_jsx_component.as_deref(),
             &binding.pvb_attributes,
-            warnings,
+            &mut config.warnings,
         ) {
             binding.pvb_jsx_component = Some(Box::new(component));
             binding.pvb_attributes = attrs;
@@ -491,7 +432,7 @@ fn transform_value_bindings(
         if let Some(JsxComponentKind::Labelled(_)) = kind {
             // Transform @react.component binding
             let (props_type, transformed, new_binding) =
-                transform_react_component_binding(binding, rec_flag, loc, config, arena, warnings);
+                transform_react_component_binding(binding, rec_flag, loc, config, arena);
 
             if let Some(pt) = props_type {
                 props_types.push(pt);
@@ -511,10 +452,13 @@ fn transform_value_bindings(
             }
         } else {
             // Just transform expressions within
-            transformed_bindings.push(transform_value_binding(binding, config, arena));
+            transformed_bindings.push(binding);
         }
     }
 
+    props_types.reverse();
+    transformed_bindings.reverse();
+    new_bindings.reverse();
     let mut result = props_types;
     result.push(StructureItem {
         pstr_desc: StructureItemDesc::Pstr_value((
@@ -618,7 +562,6 @@ fn transform_react_component_binding(
     pstr_loc: &Location,
     config: &mut JsxConfig,
     arena: &mut ParseArena,
-    warnings: &mut Vec<JsxPreprocessorWarning>,
 ) -> (Option<StructureItem>, ValueBinding, Option<ValueBinding>) {
     check_multiple_components(config, *pstr_loc);
 
@@ -668,7 +611,7 @@ fn transform_react_component_binding(
         constrained_newtypes.append(&mut newtypes);
         newtypes = constrained_newtypes;
     }
-    warnings.extend(jsx_warnings);
+    config.warnings.extend(jsx_warnings);
     if let Some((loc, message)) = named_args_error {
         set_fatal_error(config, loc, message);
     }
@@ -1171,7 +1114,8 @@ fn transform_react_component_with_props_binding(
             // For recursive: modify original binding to be internal, add new binding
             let internal_fn_name_idx = arena.push_string(internal_fn_name);
             let original_expr = arena.get_expr(binding.pvb_expr).clone();
-            let transformed_original = transform_expression(original_expr, config, arena);
+            // The binding was mapped before the component transform.
+            let transformed_original = original_expr;
             let modified_binding = ValueBinding {
                 pvb_jsx_component: None,
                 pvb_pat: arena.push_pat(Pattern {
@@ -1190,8 +1134,8 @@ fn transform_react_component_with_props_binding(
         }
         RecFlag::Nonrecursive => {
             // For non-recursive: wrap the function body with React.element constraint
-            let transformed_expr =
-                transform_expression(arena.get_expr(binding.pvb_expr).clone(), config, arena);
+            // The binding was mapped before the component transform.
+            let transformed_expr = arena.get_expr(binding.pvb_expr).clone();
             let constrained_expr =
                 wrap_function_body_with_constraint(arena, transformed_expr, config);
             // OCaml line 905-909: clear pexp_attributes (they were moved to wrapper_expr)
@@ -1698,7 +1642,8 @@ fn build_props_pattern_and_body(
         });
     }
 
-    let transformed_body = transform_expression(body, config, arena);
+    // The binding was mapped before the component transform.
+    let transformed_body = body;
 
     // Constrain return type to React.element
     let constrained_body = constrain_jsx_return(arena, transformed_body, config);
@@ -1871,36 +1816,20 @@ fn add_default_value_matches(
 // Signature Item Transformation
 // ============================================================================
 
-fn transform_signature_item_multi(
+/// `Jsx_v4.transform_signature_item` (jsx_v4.ml:1054-1109): the component
+/// transform of a signature item the mapper has already mapped, at version 4.
+fn transform_signature_item4(
     item: SignatureItem,
     config: &mut JsxConfig,
     arena: &mut ParseArena,
-    warnings: &mut Vec<JsxPreprocessorWarning>,
 ) -> Vec<SignatureItem> {
-    // Check for @@jsxConfig attribute
-    if let SignatureItemDesc::Psig_attribute(attr) = &item.psig_desc {
-        if arena.get_string(attr.0.txt) == "jsxConfig" {
-            update_config_from_attribute(arena, attr, config);
-        }
-        return vec![item];
-    }
-
-    // jsx_ppx.ml:108-115: with another version the item is only mapped by
-    // `default_mapper`, which visits its nested signatures.
-    if config.version != 4 {
-        return vec![SignatureItem {
-            psig_desc: transform_signature_item_desc(item.psig_desc, config, arena, warnings),
-            psig_loc: item.psig_loc,
-        }];
-    }
-
     // Handle Psig_value with potential @react.component
     if let SignatureItemDesc::Psig_value(vd) = &item.psig_desc {
         let taken = take_component_with_props_payload(
             arena,
             vd.pval_jsx_component.as_deref(),
             &vd.pval_attributes,
-            warnings,
+            &mut config.warnings,
         );
         let (pval_jsx_component, pval_attributes) = match &taken {
             Some((component, attrs)) => (Some(component), attrs),
@@ -1916,10 +1845,7 @@ fn transform_signature_item_multi(
         }
     }
 
-    vec![SignatureItem {
-        psig_desc: transform_signature_item_desc(item.psig_desc, config, arena, warnings),
-        psig_loc: item.psig_loc,
-    }]
+    vec![item]
 }
 
 fn transform_react_component_sig(
@@ -2449,6 +2375,7 @@ fn set_fatal_error_with_style(
     message_style: JsxPreprocessorMessageStyle,
 ) {
     if config.fatal_error.is_none() {
+        config.warnings_before_error = config.warnings.len();
         config.fatal_error = Some(JsxPreprocessorError {
             loc,
             message: message.to_string(),
@@ -3730,888 +3657,13 @@ fn update_config_from_attribute(arena: &ParseArena, attr: &Attribute, config: &m
 // Structure/Signature Item Desc Transformation (for non-component items)
 // ============================================================================
 
-fn transform_structure_item_desc(
-    desc: StructureItemDesc,
-    config: &mut JsxConfig,
-    arena: &mut ParseArena,
-    warnings: &mut Vec<JsxPreprocessorWarning>,
-) -> StructureItemDesc {
-    match desc {
-        StructureItemDesc::Pstr_value(inner) => StructureItemDesc::Pstr_value(inner),
-        StructureItemDesc::Pstr_eval(inner) => {
-            let (expr_idx, attrs) = *inner;
-            let expr = arena.get_expr(expr_idx).clone();
-            let transformed = transform_expression(expr, config, arena);
-            StructureItemDesc::Pstr_eval(Box::new((arena.push_expr(transformed), attrs)))
-        }
-        StructureItemDesc::Pstr_module(mb) => StructureItemDesc::Pstr_module(Box::new(
-            transform_module_binding(*mb, config, arena, warnings),
-        )),
-        StructureItemDesc::Pstr_recmodule(mbs) => {
-            let mut result = vec![];
-            for mb in *mbs {
-                result.push(transform_module_binding(mb, config, arena, warnings));
-            }
-            StructureItemDesc::Pstr_recmodule(Box::new(result))
-        }
-        StructureItemDesc::Pstr_modtype(mt) => StructureItemDesc::Pstr_modtype(Box::new(
-            transform_module_type_declaration(*mt, config, arena, warnings),
-        )),
-        StructureItemDesc::Pstr_include(incl) => {
-            let mod_expr = arena.get_mod_expr(incl.pincl_mod).clone();
-            let transformed = transform_module_expr(mod_expr, config, arena, warnings);
-            StructureItemDesc::Pstr_include(Box::new(IncludeDeclaration {
-                pincl_mod: arena.push_mod_expr(transformed),
-                pincl_loc: incl.pincl_loc,
-                pincl_attributes: incl.pincl_attributes,
-            }))
-        }
-        StructureItemDesc::Pstr_extension(inner) => {
-            let ((name, payload), attrs) = *inner;
-            let payload = transform_payload(payload, config, arena, warnings);
-            StructureItemDesc::Pstr_extension(Box::new(((name, payload), attrs)))
-        }
-        other => other,
-    }
-}
-
-fn transform_module_type_declaration(
-    mt: ModuleTypeDeclaration,
-    config: &mut JsxConfig,
-    arena: &mut ParseArena,
-    warnings: &mut Vec<JsxPreprocessorWarning>,
-) -> ModuleTypeDeclaration {
-    ModuleTypeDeclaration {
-        pmtd_name: mt.pmtd_name,
-        pmtd_type: mt
-            .pmtd_type
-            .map(|mty| transform_module_type_idx(mty, config, arena, warnings)),
-        pmtd_attributes: mt.pmtd_attributes,
-        pmtd_loc: mt.pmtd_loc,
-    }
-}
-
-fn transform_module_type_idx(
-    mty: crate::parse_arena::ModTypeIdx,
-    config: &mut JsxConfig,
-    arena: &mut ParseArena,
-    warnings: &mut Vec<JsxPreprocessorWarning>,
-) -> crate::parse_arena::ModTypeIdx {
-    let mty_val = arena.get_mod_type(mty).clone();
-    let transformed = transform_module_type(mty_val, config, arena, warnings);
-    arena.push_mod_type(transformed)
-}
-
-/// `default_mapper.module_type` with the JSX `signature` override
-/// (compiler/syntax/src/jsx_ppx.ml:101-120): every nested module type and
-/// module expression is visited.
-fn transform_module_type(
-    mty: ModuleType,
-    config: &mut JsxConfig,
-    arena: &mut ParseArena,
-    warnings: &mut Vec<JsxPreprocessorWarning>,
-) -> ModuleType {
-    ModuleType {
-        pmty_desc: match mty.pmty_desc {
-            ModuleTypeDesc::Pmty_signature(sig_items) => {
-                let scope = config.enter_scope();
-                let mut result = vec![];
-                for item in *sig_items {
-                    let items = transform_signature_item_multi(item, config, arena, warnings);
-                    result.extend(items);
-                }
-                config.exit_scope(scope);
-                ModuleTypeDesc::Pmty_signature(Box::new(result))
-            }
-            ModuleTypeDesc::Pmty_functor(inner) => {
-                let (name, arg, body) = *inner;
-                // OCaml evaluates constructor arguments right to left.
-                let body = transform_module_type_idx(body, config, arena, warnings);
-                let arg = arg.map(|arg| transform_module_type_idx(arg, config, arena, warnings));
-                ModuleTypeDesc::Pmty_functor(Box::new((name, arg, body)))
-            }
-            ModuleTypeDesc::Pmty_with(inner) => {
-                let (body, constraints) = *inner;
-                let body = transform_module_type_idx(body, config, arena, warnings);
-                ModuleTypeDesc::Pmty_with(Box::new((body, constraints)))
-            }
-            ModuleTypeDesc::Pmty_typeof(mexpr) => {
-                let mexpr_val = arena.get_mod_expr(mexpr).clone();
-                let transformed = transform_module_expr(mexpr_val, config, arena, warnings);
-                ModuleTypeDesc::Pmty_typeof(arena.push_mod_expr(transformed))
-            }
-            other => other,
-        },
-        pmty_loc: mty.pmty_loc,
-        pmty_attributes: mty.pmty_attributes,
-    }
-}
-
-fn transform_signature_item_desc(
-    desc: SignatureItemDesc,
-    config: &mut JsxConfig,
-    arena: &mut ParseArena,
-    warnings: &mut Vec<JsxPreprocessorWarning>,
-) -> SignatureItemDesc {
-    match desc {
-        SignatureItemDesc::Psig_module(md) => {
-            // Transform module declaration - recurse into the module type
-            let pmd_type = transform_module_type_idx(md.pmd_type, config, arena, warnings);
-            SignatureItemDesc::Psig_module(Box::new(ModuleDeclaration {
-                pmd_name: md.pmd_name,
-                pmd_type,
-                pmd_attributes: md.pmd_attributes,
-                pmd_loc: md.pmd_loc,
-            }))
-        }
-        SignatureItemDesc::Psig_recmodule(mds) => {
-            // Transform recursive module declarations
-            SignatureItemDesc::Psig_recmodule(Box::new(
-                mds.into_iter()
-                    .map(|md| ModuleDeclaration {
-                        pmd_name: md.pmd_name,
-                        pmd_type: transform_module_type_idx(md.pmd_type, config, arena, warnings),
-                        pmd_attributes: md.pmd_attributes,
-                        pmd_loc: md.pmd_loc,
-                    })
-                    .collect(),
-            ))
-        }
-        SignatureItemDesc::Psig_modtype(mtd) => {
-            // Transform module type declaration
-            SignatureItemDesc::Psig_modtype(Box::new(transform_module_type_declaration(
-                *mtd, config, arena, warnings,
-            )))
-        }
-        SignatureItemDesc::Psig_include(incl) => {
-            let incl = *incl;
-            SignatureItemDesc::Psig_include(Box::new(IncludeDescription {
-                pincl_mod: transform_module_type_idx(incl.pincl_mod, config, arena, warnings),
-                ..incl
-            }))
-        }
-        SignatureItemDesc::Psig_extension(inner) => {
-            let ((name, payload), attrs) = *inner;
-            let payload = transform_payload(payload, config, arena, warnings);
-            SignatureItemDesc::Psig_extension(Box::new(((name, payload), attrs)))
-        }
-        other => other,
-    }
-}
-
-/// `default_mapper.payload` (compiler/ml/ast_mapper.ml): a structure or
-/// signature payload goes back through the JSX `structure`/`signature`
-/// mappers (compiler/syntax/src/jsx_ppx.ml:97-128), a pattern guard through
-/// `expr`.
-fn transform_payload(
-    payload: Payload,
-    config: &mut JsxConfig,
-    arena: &mut ParseArena,
-    warnings: &mut Vec<JsxPreprocessorWarning>,
-) -> Payload {
-    match payload {
-        Payload::PStr(items) => Payload::PStr(Box::new(transform_structure_with_config(
-            *items, config, arena, warnings,
-        ))),
-        Payload::PSig(items) => {
-            let scope = config.enter_scope();
-            let mut result = vec![];
-            for item in *items {
-                result.extend(transform_signature_item_multi(
-                    item, config, arena, warnings,
-                ));
-            }
-            config.exit_scope(scope);
-            Payload::PSig(Box::new(result))
-        }
-        Payload::PPat(inner) => {
-            let (pat, guard) = *inner;
-            let guard = guard.map(|guard| {
-                let guard_expr = arena.get_expr(guard).clone();
-                let transformed = transform_expression(guard_expr, config, arena);
-                arena.push_expr(transformed)
-            });
-            Payload::PPat(Box::new((pat, guard)))
-        }
-        other => other,
-    }
-}
-
-fn transform_module_binding(
-    mb: ModuleBinding,
-    config: &mut JsxConfig,
-    arena: &mut ParseArena,
-    warnings: &mut Vec<JsxPreprocessorWarning>,
-) -> ModuleBinding {
-    let pmb_expr = {
-        let mexpr_val = arena.get_mod_expr(mb.pmb_expr).clone();
-        let transformed = transform_module_expr(mexpr_val, config, arena, warnings);
-        arena.push_mod_expr(transformed)
-    };
-    ModuleBinding {
-        pmb_name: mb.pmb_name,
-        pmb_expr,
-        pmb_attributes: mb.pmb_attributes,
-        pmb_loc: mb.pmb_loc,
-    }
-}
-
-/// Transform a structure with an existing config (preserves file_name and nested_modules)
-fn transform_structure_with_config(
-    structure: Structure,
-    config: &mut JsxConfig,
-    arena: &mut ParseArena,
-    warnings: &mut Vec<JsxPreprocessorWarning>,
-) -> Structure {
-    let scope = config.enter_scope();
-    let mut result = vec![];
-    for item in structure {
-        let items = transform_structure_item_multi(item, config, arena, warnings);
-        result.extend(items);
-    }
-    config.exit_scope(scope);
-    result
-}
-
-fn transform_module_expr(
-    mexpr: ModuleExpr,
-    config: &mut JsxConfig,
-    arena: &mut ParseArena,
-    warnings: &mut Vec<JsxPreprocessorWarning>,
-) -> ModuleExpr {
-    ModuleExpr {
-        pmod_desc: match mexpr.pmod_desc {
-            ModuleExprDesc::Pmod_structure(items) => {
-                // Transform structure with current config (preserving file_name and nested_modules)
-                ModuleExprDesc::Pmod_structure(Box::new(transform_structure_with_config(
-                    *items, config, arena, warnings,
-                )))
-            }
-            ModuleExprDesc::Pmod_functor(inner) => {
-                let (arg, arg_ty, body) = *inner;
-                let body_expr = arena.get_mod_expr(body).clone();
-                let transformed_body = transform_module_expr(body_expr, config, arena, warnings);
-                let arg_ty =
-                    arg_ty.map(|arg_ty| transform_module_type_idx(arg_ty, config, arena, warnings));
-                ModuleExprDesc::Pmod_functor(Box::new((
-                    arg,
-                    arg_ty,
-                    arena.push_mod_expr(transformed_body),
-                )))
-            }
-            ModuleExprDesc::Pmod_apply(m1, m2) => {
-                let m1_expr = arena.get_mod_expr(m1).clone();
-                let m2_expr = arena.get_mod_expr(m2).clone();
-                let m1_transformed = transform_module_expr(m1_expr, config, arena, warnings);
-                let m2_transformed = transform_module_expr(m2_expr, config, arena, warnings);
-                ModuleExprDesc::Pmod_apply(
-                    arena.push_mod_expr(m1_transformed),
-                    arena.push_mod_expr(m2_transformed),
-                )
-            }
-            ModuleExprDesc::Pmod_constraint(m, mt) => {
-                // OCaml evaluates constructor arguments right to left, so the
-                // module type is mapped before the module expression.
-                let mt = transform_module_type_idx(mt, config, arena, warnings);
-                let m_expr = arena.get_mod_expr(m).clone();
-                let m_transformed = transform_module_expr(m_expr, config, arena, warnings);
-                ModuleExprDesc::Pmod_constraint(arena.push_mod_expr(m_transformed), mt)
-            }
-            ModuleExprDesc::Pmod_unpack(expr) => {
-                let expr_val = arena.get_expr(expr).clone();
-                let transformed = transform_expression(expr_val, config, arena);
-                ModuleExprDesc::Pmod_unpack(arena.push_expr(transformed))
-            }
-            other => other,
-        },
-        pmod_loc: mexpr.pmod_loc,
-        pmod_attributes: mexpr.pmod_attributes,
-    }
-}
-
-fn transform_value_binding(
-    binding: ValueBinding,
-    config: &mut JsxConfig,
-    arena: &mut ParseArena,
-) -> ValueBinding {
-    let pvb_expr = transform_expression(arena.get_expr(binding.pvb_expr).clone(), config, arena);
-    ValueBinding {
-        pvb_jsx_component: binding.pvb_jsx_component,
-        pvb_pat: binding.pvb_pat,
-        pvb_expr: arena.push_expr(pvb_expr),
-        pvb_attributes: binding.pvb_attributes,
-        pvb_loc: binding.pvb_loc,
-    }
-}
-
 // ============================================================================
 // Expression Transformation
 // ============================================================================
 
-fn transform_expression(
-    expr: Expression,
-    config: &mut JsxConfig,
-    arena: &mut ParseArena,
-) -> Expression {
-    // Every arm below only rebuilds its node around transformed children,
-    // except JSX elements and module expressions. A subtree without either
-    // comes back unchanged, so return it without rebuilding.
-    if !expression_may_change(&expr, arena, &mut config.unchanged_memo) {
-        return expr;
-    }
-    let new_desc = match expr.pexp_desc {
-        ExpressionDesc::Pexp_jsx_element(jsx) if config.version == 4 => {
-            transform_jsx_element(*jsx, config, &expr.pexp_loc, &expr.pexp_attributes, arena)
-        }
-        // jsx_ppx.ml:76-79: with another version `default_mapper.expr` only
-        // maps the element's props and children (ast_mapper.ml:446-471).
-        ExpressionDesc::Pexp_jsx_element(jsx) => ExpressionDesc::Pexp_jsx_element(Box::new(
-            map_jsx_element_children(*jsx, config, arena),
-        )),
-        ExpressionDesc::Pexp_let(inner) => {
-            let (rec_flag, bindings, body) = inner;
-            let transformed_bindings: Vec<_> = arena
-                .vb_list(bindings)
-                .to_vec()
-                .into_iter()
-                .map(|binding| transform_value_binding(binding, config, arena))
-                .collect();
-            let transformed_bindings = arena.push_vb_list(&transformed_bindings);
-            let body_expr = arena.get_expr(body).clone();
-            let transformed_body = transform_expression(body_expr, config, arena);
-            ExpressionDesc::Pexp_let((
-                rec_flag,
-                transformed_bindings,
-                arena.push_expr(transformed_body),
-            ))
-        }
-        ExpressionDesc::Pexp_fun(inner) => {
-            let PexpFun {
-                arg_label,
-                default,
-                lhs,
-                rhs,
-                is_async,
-                arity,
-            } = *inner;
-            let rhs_expr = arena.get_expr(rhs).clone();
-            let transformed_rhs = transform_expression(rhs_expr, config, arena);
-            let transformed_default = default.map(|d| {
-                let d_expr = arena.get_expr(d).clone();
-                let rw = transform_expression(d_expr, config, arena);
-                arena.push_expr(rw)
-            });
-            ExpressionDesc::Pexp_fun(Box::new(PexpFun {
-                arg_label,
-                default: transformed_default,
-                lhs,
-                rhs: arena.push_expr(transformed_rhs),
-                is_async,
-                arity,
-            }))
-        }
-        ExpressionDesc::Pexp_apply(inner) => {
-            let PexpApply {
-                funct,
-                args,
-                partial,
-                transformed_jsx,
-            } = inner;
-            let funct_expr = arena.get_expr(funct).clone();
-            let transformed_funct = transform_expression(funct_expr, config, arena);
-            let funct = arena.push_expr(transformed_funct);
-            let args: Vec<_> = arena
-                .apply_args(args)
-                .to_vec()
-                .into_iter()
-                .map(|(lbl, e)| {
-                    let e_expr = arena.get_expr(e).clone();
-                    let transformed = transform_expression(e_expr, config, arena);
-                    (lbl, arena.push_expr(transformed))
-                })
-                .collect();
-            ExpressionDesc::Pexp_apply(PexpApply {
-                funct,
-                args: arena.push_apply_args(&args),
-                partial,
-                transformed_jsx,
-            })
-        }
-        ExpressionDesc::Pexp_match(inner) => {
-            let (scrutinee, cases) = inner;
-            let scrutinee_expr = arena.get_expr(scrutinee).clone();
-            let transformed_scrutinee = transform_expression(scrutinee_expr, config, arena);
-            let transformed_cases = arena
-                .case_list(cases)
-                .to_vec()
-                .into_iter()
-                .map(|case| transform_case(case, config, arena))
-                .collect::<Vec<_>>();
-            ExpressionDesc::Pexp_match((
-                arena.push_expr(transformed_scrutinee),
-                arena.push_case_list(&transformed_cases),
-            ))
-        }
-        ExpressionDesc::Pexp_try(inner) => {
-            let (body, cases, finally) = inner;
-            let body_expr = arena.get_expr(body).clone();
-            let transformed_body = transform_expression(body_expr, config, arena);
-            let transformed_cases = arena
-                .case_list(cases)
-                .to_vec()
-                .into_iter()
-                .map(|case| transform_case(case, config, arena))
-                .collect::<Vec<_>>();
-            let transformed_finally = finally.map(|finally| {
-                let finally_expr = arena.get_expr(finally).clone();
-                let transformed = transform_expression(finally_expr, config, arena);
-                arena.push_expr(transformed)
-            });
-            ExpressionDesc::Pexp_try((
-                arena.push_expr(transformed_body),
-                arena.push_case_list(&transformed_cases),
-                transformed_finally,
-            ))
-        }
-        ExpressionDesc::Pexp_tuple(exprs) => ExpressionDesc::Pexp_tuple({
-            let items = arena
-                .expr_list(exprs)
-                .to_vec()
-                .into_iter()
-                .map(|e| {
-                    let e_expr = arena.get_expr(e).clone();
-                    let transformed = transform_expression(e_expr, config, arena);
-                    arena.push_expr(transformed)
-                })
-                .collect::<Vec<_>>();
-            arena.push_expr_list(&items)
-        }),
-        ExpressionDesc::Pexp_construct(lid, mut args) => {
-            // The rewritten node gets its own list; the original keeps its own.
-            let mut new_items = arena.expr_list(args.txt).to_vec();
-            for e in new_items.iter_mut() {
-                let e_expr = arena.get_expr(*e).clone();
-                let rw = transform_expression(e_expr, config, arena);
-                *e = arena.push_expr(rw);
-            }
-            args.txt = arena.push_expr_list(&new_items);
-            ExpressionDesc::Pexp_construct(lid, args)
-        }
-        ExpressionDesc::Pexp_variant(inner) => {
-            let (label, mut args) = *inner;
-            // The rewritten node gets its own list; the original keeps its own.
-            let mut new_items = arena.expr_list(args.txt).to_vec();
-            for e in new_items.iter_mut() {
-                let e_expr = arena.get_expr(*e).clone();
-                let transformed = transform_expression(e_expr, config, arena);
-                *e = arena.push_expr(transformed);
-            }
-            args.txt = arena.push_expr_list(&new_items);
-            ExpressionDesc::Pexp_variant(Box::new((label, args)))
-        }
-        ExpressionDesc::Pexp_record(inner) => {
-            let (fields, base) = inner;
-            let transformed_base = base.map(|e| {
-                let e_expr = arena.get_expr(e).clone();
-                let rw = transform_expression(e_expr, config, arena);
-                arena.push_expr(rw)
-            });
-            let fields: Vec<_> = arena
-                .expr_field_list(fields)
-                .to_vec()
-                .into_iter()
-                .map(|f| ExpressionRecordField {
-                    lid: f.lid,
-                    expr: {
-                        let expr = arena.get_expr(f.expr).clone();
-                        let transformed = transform_expression(expr, config, arena);
-                        arena.push_expr(transformed)
-                    },
-                    opt: f.opt,
-                })
-                .collect();
-            ExpressionDesc::Pexp_record((arena.push_expr_field_list(&fields), transformed_base))
-        }
-        ExpressionDesc::Pexp_field(obj, field) => {
-            let obj_expr = arena.get_expr(obj).clone();
-            let transformed_obj = transform_expression(obj_expr, config, arena);
-            ExpressionDesc::Pexp_field(arena.push_expr(transformed_obj), field)
-        }
-        ExpressionDesc::Pexp_setfield(inner) => {
-            let (obj, field, value) = *inner;
-            let obj_expr = arena.get_expr(obj).clone();
-            let value_expr = arena.get_expr(value).clone();
-            let transformed_obj = transform_expression(obj_expr, config, arena);
-            let transformed_value = transform_expression(value_expr, config, arena);
-            ExpressionDesc::Pexp_setfield(Box::new((
-                arena.push_expr(transformed_obj),
-                field,
-                arena.push_expr(transformed_value),
-            )))
-        }
-        ExpressionDesc::Pexp_object_get(inner) => {
-            let (obj, name) = *inner;
-            let obj_expr = arena.get_expr(obj).clone();
-            let transformed_obj = transform_expression(obj_expr, config, arena);
-            ExpressionDesc::Pexp_object_get(Box::new((arena.push_expr(transformed_obj), name)))
-        }
-        ExpressionDesc::Pexp_object_set(inner) => {
-            let (obj, name, value) = *inner;
-            let value_expr = arena.get_expr(value).clone();
-            let transformed_value = transform_expression(value_expr, config, arena);
-            let value = arena.push_expr(transformed_value);
-            let obj_expr = arena.get_expr(obj).clone();
-            let transformed_obj = transform_expression(obj_expr, config, arena);
-            ExpressionDesc::Pexp_object_set(Box::new((
-                arena.push_expr(transformed_obj),
-                name,
-                value,
-            )))
-        }
-        ExpressionDesc::Pexp_object_literal(fields) => {
-            ExpressionDesc::Pexp_object_literal(Box::new(
-                fields
-                    .into_iter()
-                    .map(|(name, e)| {
-                        let e_expr = arena.get_expr(e).clone();
-                        let transformed = transform_expression(e_expr, config, arena);
-                        (name, arena.push_expr(transformed))
-                    })
-                    .collect(),
-            ))
-        }
-        ExpressionDesc::Pexp_spread(kind, elements) => {
-            let elements = arena.spread_element_list(elements).to_vec();
-            let elements: Vec<SpreadElement> = elements
-                .into_iter()
-                .map(|element| {
-                    let mut transform = |e: ExprIdx| {
-                        let e_expr = arena.get_expr(e).clone();
-                        let transformed = transform_expression(e_expr, config, arena);
-                        arena.push_expr(transformed)
-                    };
-                    match element {
-                        SpreadElement::Pspread_item(e) => SpreadElement::Pspread_item(transform(e)),
-                        SpreadElement::Pspread(e) => SpreadElement::Pspread(transform(e)),
-                    }
-                })
-                .collect();
-            ExpressionDesc::Pexp_spread(kind, arena.push_spread_element_list(&elements))
-        }
-        ExpressionDesc::Pexp_dict(entries) => ExpressionDesc::Pexp_dict(Box::new(
-            entries
-                .into_iter()
-                .map(|entry| {
-                    let mut transform = |e: ExprIdx| {
-                        let e_expr = arena.get_expr(e).clone();
-                        let transformed = transform_expression(e_expr, config, arena);
-                        arena.push_expr(transformed)
-                    };
-                    match entry {
-                        DictEntry::Pdict_entry(key, e) => DictEntry::Pdict_entry(key, transform(e)),
-                        DictEntry::Pdict_spread(e) => DictEntry::Pdict_spread(transform(e)),
-                    }
-                })
-                .collect(),
-        )),
-        ExpressionDesc::Pexp_array(elems) => ExpressionDesc::Pexp_array({
-            let items = arena
-                .expr_list(elems)
-                .to_vec()
-                .into_iter()
-                .map(|e| {
-                    let e_expr = arena.get_expr(e).clone();
-                    let transformed = transform_expression(e_expr, config, arena);
-                    arena.push_expr(transformed)
-                })
-                .collect::<Vec<_>>();
-            arena.push_expr_list(&items)
-        }),
-        ExpressionDesc::Pexp_ifthenelse(inner) => {
-            let (cond, then_expr, else_expr) = *inner;
-            let cond_expr = arena.get_expr(cond).clone();
-            let then_expr_val = arena.get_expr(then_expr).clone();
-            let transformed_cond = transform_expression(cond_expr, config, arena);
-            let transformed_then = transform_expression(then_expr_val, config, arena);
-            let transformed_else = else_expr.map(|e| {
-                let else_expr_val = arena.get_expr(e).clone();
-                let transformed = transform_expression(else_expr_val, config, arena);
-                arena.push_expr(transformed)
-            });
-            ExpressionDesc::Pexp_ifthenelse(Box::new((
-                arena.push_expr(transformed_cond),
-                arena.push_expr(transformed_then),
-                transformed_else,
-            )))
-        }
-        ExpressionDesc::Pexp_ternary(inner) => {
-            let (cond, consequent, alternate) = *inner;
-            let cond = arena.get_expr(cond).clone();
-            let consequent = arena.get_expr(consequent).clone();
-            let alternate = arena.get_expr(alternate).clone();
-            let cond = transform_expression(cond, config, arena);
-            let consequent = transform_expression(consequent, config, arena);
-            let alternate = transform_expression(alternate, config, arena);
-            ExpressionDesc::Pexp_ternary(Box::new((
-                arena.push_expr(cond),
-                arena.push_expr(consequent),
-                arena.push_expr(alternate),
-            )))
-        }
-        ExpressionDesc::Pexp_braces(braces) => {
-            let inner = arena.get_expr(braces.expr).clone();
-            let inner = transform_expression(inner, config, arena);
-            ExpressionDesc::Pexp_braces(crate::parser::ast::PexpBraces {
-                expr: arena.push_expr(inner),
-                braces_loc: braces.braces_loc,
-            })
-        }
-        ExpressionDesc::Pexp_sequence(e1, e2) => {
-            let e1_expr = arena.get_expr(e1).clone();
-            let e2_expr = arena.get_expr(e2).clone();
-            let t1 = transform_expression(e1_expr, config, arena);
-            let t2 = transform_expression(e2_expr, config, arena);
-            ExpressionDesc::Pexp_sequence(arena.push_expr(t1), arena.push_expr(t2))
-        }
-        ExpressionDesc::Pexp_while(cond, body) => {
-            let cond_expr = arena.get_expr(cond).clone();
-            let body_expr = arena.get_expr(body).clone();
-            let tc = transform_expression(cond_expr, config, arena);
-            let tb = transform_expression(body_expr, config, arena);
-            ExpressionDesc::Pexp_while(arena.push_expr(tc), arena.push_expr(tb))
-        }
-        ExpressionDesc::Pexp_for(inner) => {
-            let (pat, start, end_, dir, body) = *inner;
-            let start_expr = arena.get_expr(start).clone();
-            let end_expr = arena.get_expr(end_).clone();
-            let body_expr = arena.get_expr(body).clone();
-            let transformed_start = transform_expression(start_expr, config, arena);
-            let transformed_end = transform_expression(end_expr, config, arena);
-            let transformed_body = transform_expression(body_expr, config, arena);
-            ExpressionDesc::Pexp_for(Box::new((
-                pat,
-                arena.push_expr(transformed_start),
-                arena.push_expr(transformed_end),
-                dir,
-                arena.push_expr(transformed_body),
-            )))
-        }
-        ExpressionDesc::Pexp_for_of(inner) => {
-            let (pat, iterable, body) = *inner;
-            let iterable_expr = arena.get_expr(iterable).clone();
-            let body_expr = arena.get_expr(body).clone();
-            let transformed_iterable = transform_expression(iterable_expr, config, arena);
-            let transformed_body = transform_expression(body_expr, config, arena);
-            ExpressionDesc::Pexp_for_of(Box::new((
-                pat,
-                arena.push_expr(transformed_iterable),
-                arena.push_expr(transformed_body),
-            )))
-        }
-        ExpressionDesc::Pexp_for_await_of(inner) => {
-            let (pat, iterable, body) = *inner;
-            let iterable_expr = arena.get_expr(iterable).clone();
-            let body_expr = arena.get_expr(body).clone();
-            let transformed_iterable = transform_expression(iterable_expr, config, arena);
-            let transformed_body = transform_expression(body_expr, config, arena);
-            ExpressionDesc::Pexp_for_await_of(Box::new((
-                pat,
-                arena.push_expr(transformed_iterable),
-                arena.push_expr(transformed_body),
-            )))
-        }
-        ExpressionDesc::Pexp_constraint(inner) => {
-            let (inner_expr_idx, typ) = *inner;
-            let inner_expr = arena.get_expr(inner_expr_idx).clone();
-            let transformed = transform_expression(inner_expr, config, arena);
-            ExpressionDesc::Pexp_constraint(Box::new((arena.push_expr(transformed), typ)))
-        }
-        ExpressionDesc::Pexp_coerce(inner) => {
-            let (inner_expr_idx, from_typ, to_typ) = *inner;
-            let inner_expr = arena.get_expr(inner_expr_idx).clone();
-            let transformed = transform_expression(inner_expr, config, arena);
-            ExpressionDesc::Pexp_coerce(Box::new((arena.push_expr(transformed), from_typ, to_typ)))
-        }
-        ExpressionDesc::Pexp_extension(inner) => {
-            let (name, payload) = *inner;
-            let mut ignored_warnings = vec![];
-            let payload = transform_payload(payload, config, arena, &mut ignored_warnings);
-            ExpressionDesc::Pexp_extension(Box::new((name, payload)))
-        }
-        ExpressionDesc::Pexp_letmodule(inner) => {
-            let (name, module_idx, body_idx) = *inner;
-            let mut ignored_warnings = vec![];
-            let module_expr = arena.get_mod_expr(module_idx).clone();
-            let transformed_module =
-                transform_module_expr(module_expr, config, arena, &mut ignored_warnings);
-            let body_expr = arena.get_expr(body_idx).clone();
-            let transformed_body = transform_expression(body_expr, config, arena);
-            ExpressionDesc::Pexp_letmodule(Box::new((
-                name,
-                arena.push_mod_expr(transformed_module),
-                arena.push_expr(transformed_body),
-            )))
-        }
-        ExpressionDesc::Pexp_letexception(inner) => {
-            let (extension, body_idx) = *inner;
-            let body_expr = arena.get_expr(body_idx).clone();
-            let transformed_body = transform_expression(body_expr, config, arena);
-            ExpressionDesc::Pexp_letexception(Box::new((
-                extension,
-                arena.push_expr(transformed_body),
-            )))
-        }
-        ExpressionDesc::Pexp_assert(e) => {
-            let e_expr = arena.get_expr(e).clone();
-            let transformed = transform_expression(e_expr, config, arena);
-            ExpressionDesc::Pexp_assert(arena.push_expr(transformed))
-        }
-        ExpressionDesc::Pexp_newtype(inner) => {
-            let (name, body_idx) = *inner;
-            let body_expr = arena.get_expr(body_idx).clone();
-            let transformed_body = transform_expression(body_expr, config, arena);
-            ExpressionDesc::Pexp_newtype(Box::new((name, arena.push_expr(transformed_body))))
-        }
-        ExpressionDesc::Pexp_pack(mexpr) => {
-            let mut ignored_warnings = vec![];
-            let mexpr_val = arena.get_mod_expr(mexpr).clone();
-            let transformed =
-                transform_module_expr(mexpr_val, config, arena, &mut ignored_warnings);
-            ExpressionDesc::Pexp_pack(arena.push_mod_expr(transformed))
-        }
-        ExpressionDesc::Pexp_open(inner) => {
-            let (override_flag, lid, inner_expr_idx) = *inner;
-            let inner_expr = arena.get_expr(inner_expr_idx).clone();
-            let transformed = transform_expression(inner_expr, config, arena);
-            ExpressionDesc::Pexp_open(Box::new((override_flag, lid, arena.push_expr(transformed))))
-        }
-        ExpressionDesc::Pexp_await(e) => {
-            let e_expr = arena.get_expr(e).clone();
-            let transformed = transform_expression(e_expr, config, arena);
-            ExpressionDesc::Pexp_await(arena.push_expr(transformed))
-        }
-        // Ast_mapper: `Pexp_template` maps its values; `Pexp_tagged_template`
-        // maps the tag, then the values.
-        ExpressionDesc::Pexp_template(mut template) => {
-            template.values = template
-                .values
-                .into_iter()
-                .map(|e| {
-                    let e_expr = arena.get_expr(e).clone();
-                    let transformed = transform_expression(e_expr, config, arena);
-                    arena.push_expr(transformed)
-                })
-                .collect();
-            ExpressionDesc::Pexp_template(template)
-        }
-        ExpressionDesc::Pexp_tagged_template(mut template) => {
-            let tag_expr = arena.get_expr(template.tag).clone();
-            let tag = transform_expression(tag_expr, config, arena);
-            template.tag = arena.push_expr(tag);
-            template.values = template
-                .values
-                .into_iter()
-                .map(|e| {
-                    let e_expr = arena.get_expr(e).clone();
-                    let transformed = transform_expression(e_expr, config, arena);
-                    arena.push_expr(transformed)
-                })
-                .collect();
-            ExpressionDesc::Pexp_tagged_template(template)
-        }
-        other => other,
-    };
-
-    Expression {
-        pexp_desc: new_desc,
-        pexp_loc: expr.pexp_loc,
-        pexp_attributes: expr.pexp_attributes,
-    }
-}
-
-fn transform_case(case: Case, config: &mut JsxConfig, arena: &mut ParseArena) -> Case {
-    let transformed_guard = case.pc_guard.map(|e| {
-        let e_expr = arena.get_expr(e).clone();
-        let transformed = transform_expression(e_expr, config, arena);
-        arena.push_expr(transformed)
-    });
-    let transformed_rhs = {
-        let rhs_expr = arena.get_expr(case.pc_rhs).clone();
-        let transformed = transform_expression(rhs_expr, config, arena);
-        arena.push_expr(transformed)
-    };
-    Case {
-        pc_bar: case.pc_bar,
-        pc_lhs: case.pc_lhs,
-        pc_guard: transformed_guard,
-        pc_rhs: transformed_rhs,
-    }
-}
-
 // ============================================================================
 // JSX Element Transformation
 // ============================================================================
-
-/// `default_mapper.expr` on a JSX element (ast_mapper.ml:446-471): the
-/// constructor arguments are evaluated right to left, so the children are
-/// mapped before the props.
-fn map_jsx_element_children(
-    jsx: JsxElement,
-    config: &mut JsxConfig,
-    arena: &mut ParseArena,
-) -> JsxElement {
-    fn map_expr(idx: ExprIdx, config: &mut JsxConfig, arena: &mut ParseArena) -> ExprIdx {
-        let expr = arena.get_expr(idx).clone();
-        let transformed = transform_expression(expr, config, arena);
-        arena.push_expr(transformed)
-    }
-    let map_children = |children: Vec<ExprIdx>, config: &mut JsxConfig, arena: &mut ParseArena| {
-        children
-            .into_iter()
-            .map(|child| map_expr(child, config, arena))
-            .collect::<Vec<_>>()
-    };
-    let map_props = |props: Vec<JsxProp>, config: &mut JsxConfig, arena: &mut ParseArena| {
-        props
-            .into_iter()
-            .map(|prop| match prop {
-                JsxProp::Value {
-                    name,
-                    optional,
-                    value,
-                } => JsxProp::Value {
-                    name,
-                    optional,
-                    value: map_expr(value, config, arena),
-                },
-                JsxProp::Spreading { loc, expr } => JsxProp::Spreading {
-                    loc,
-                    expr: map_expr(expr, config, arena),
-                },
-                punning @ JsxProp::Punning { .. } => punning,
-            })
-            .collect::<Vec<_>>()
-    };
-    match jsx {
-        JsxElement::Fragment(fragment) => JsxElement::Fragment(JsxFragment {
-            children: map_children(fragment.children, config, arena),
-            ..fragment
-        }),
-        JsxElement::Unary(unary) => JsxElement::Unary(JsxUnaryElement {
-            props: map_props(unary.props, config, arena),
-            ..unary
-        }),
-        JsxElement::Container(container) => {
-            let children = map_children(container.children, config, arena);
-            let props = map_props(container.props, config, arena);
-            JsxElement::Container(JsxContainerElement {
-                props,
-                children,
-                ..container
-            })
-        }
-    }
-}
 
 fn transform_jsx_element(
     jsx: JsxElement,
@@ -4748,7 +3800,7 @@ fn append_children_prop(
     if children.len() == 1 {
         let child = children.into_iter().next().unwrap();
         let child_expr = arena.get_expr(child).clone();
-        let transformed_child = transform_expression(child_expr, config, arena);
+        let transformed_child = mapper::expr(child_expr, config, arena);
 
         // For lowercase components, wrap in ReactDOM.someElement
         let expr = match component_description {
@@ -4837,7 +3889,7 @@ fn append_children_prop(
                     .into_iter()
                     .map(|c| {
                         let c_expr = arena.get_expr(c).clone();
-                        let transformed = transform_expression(c_expr, config, arena);
+                        let transformed = mapper::expr(c_expr, config, arena);
                         arena.push_expr(transformed)
                     })
                     .collect::<Vec<_>>();
@@ -4924,7 +3976,7 @@ fn mk_record_from_props(
     let (regular_props, spread_base) = {
         let mut props_iter = props.into_iter().peekable();
         let spread_base = if let Some(JsxProp::Spreading { expr, .. }) = props_iter.peek() {
-            let spread = transform_expression(arena.get_expr(*expr).clone(), config, arena);
+            let spread = mapper::expr(arena.get_expr(*expr).clone(), config, arena);
             props_iter.next(); // consume the spread
             Some(arena.push_expr(spread))
         } else {
@@ -4974,7 +4026,7 @@ fn mk_record_from_props(
                         },
                         expr: {
                             let value = arena.get_expr(*value).clone();
-                            let transformed = transform_expression(value, config, arena);
+                            let transformed = mapper::expr(value, config, arena);
                             arena.push_expr(transformed)
                         },
                         opt: *optional,
@@ -5223,137 +4275,6 @@ fn transform_jsx_container(
     }
 }
 
-/// Whether `transform_expression` may rewrite `expr` or its subtree: it
-/// contains a JSX element, a module expression (whose structure items get the
-/// component transform), or a construct this check does not inspect.
-fn expression_may_change(expr: &Expression, arena: &ParseArena, memo: &mut Vec<u8>) -> bool {
-    let child = |idx: ExprIdx, memo: &mut Vec<u8>| subtree_may_change(idx, arena, memo);
-    match &expr.pexp_desc {
-        ExpressionDesc::Pexp_ident(_)
-        | ExpressionDesc::Pexp_constant(_)
-        | ExpressionDesc::Pexp_break
-        | ExpressionDesc::Pexp_continue => false,
-        ExpressionDesc::Pexp_let(inner) => {
-            arena
-                .vb_list(inner.1)
-                .iter()
-                .any(|binding| child(binding.pvb_expr, memo))
-                || child(inner.2, memo)
-        }
-        ExpressionDesc::Pexp_fun(inner) => {
-            inner.default.is_some_and(|default| child(default, memo)) || child(inner.rhs, memo)
-        }
-        ExpressionDesc::Pexp_apply(inner) => {
-            child(inner.funct, memo)
-                || arena
-                    .apply_args(inner.args)
-                    .iter()
-                    .any(|(_, arg)| child(*arg, memo))
-        }
-        ExpressionDesc::Pexp_match((scrutinee, cases))
-        | ExpressionDesc::Pexp_try((scrutinee, cases, None)) => {
-            child(*scrutinee, memo)
-                || arena.case_list(*cases).iter().any(|case| {
-                    case.pc_guard.is_some_and(|guard| child(guard, memo))
-                        || child(case.pc_rhs, memo)
-                })
-        }
-        ExpressionDesc::Pexp_try((body, cases, Some(finally))) => {
-            child(*body, memo)
-                || arena.case_list(*cases).iter().any(|case| {
-                    case.pc_guard.is_some_and(|guard| child(guard, memo))
-                        || child(case.pc_rhs, memo)
-                })
-                || child(*finally, memo)
-        }
-        ExpressionDesc::Pexp_template(template) => {
-            template.values.iter().any(|item| child(*item, memo))
-        }
-        ExpressionDesc::Pexp_tagged_template(template) => {
-            child(template.tag, memo) || template.values.iter().any(|item| child(*item, memo))
-        }
-        ExpressionDesc::Pexp_tuple(items) | ExpressionDesc::Pexp_array(items) => arena
-            .expr_list(*items)
-            .to_vec()
-            .iter()
-            .any(|item| child(*item, memo)),
-        ExpressionDesc::Pexp_dict(entries) => entries.iter().any(|entry| match entry {
-            DictEntry::Pdict_entry(_, e) | DictEntry::Pdict_spread(e) => child(*e, memo),
-        }),
-        ExpressionDesc::Pexp_spread(_, elements) => arena
-            .spread_element_list(*elements)
-            .to_vec()
-            .iter()
-            .any(|element| child(element.expr(), memo)),
-        ExpressionDesc::Pexp_construct(_, args) => arena
-            .expr_list(args.txt)
-            .iter()
-            .any(|arg| child(*arg, memo)),
-        ExpressionDesc::Pexp_variant(inner) => arena
-            .expr_list(inner.1.txt)
-            .iter()
-            .any(|arg| child(*arg, memo)),
-        ExpressionDesc::Pexp_record(inner) => {
-            arena
-                .expr_field_list(inner.0)
-                .iter()
-                .any(|field| child(field.expr, memo))
-                || inner.1.is_some_and(|spread| child(spread, memo))
-        }
-        ExpressionDesc::Pexp_field(target, _) => child(*target, memo),
-        ExpressionDesc::Pexp_setfield(inner) => child(inner.0, memo) || child(inner.2, memo),
-        ExpressionDesc::Pexp_object_get(inner) => child(inner.0, memo),
-        ExpressionDesc::Pexp_object_set(inner) => child(inner.0, memo) || child(inner.2, memo),
-        ExpressionDesc::Pexp_object_literal(fields) => fields.iter().any(|(_, e)| child(*e, memo)),
-        ExpressionDesc::Pexp_ifthenelse(inner) => {
-            child(inner.0, memo)
-                || child(inner.1, memo)
-                || inner.2.is_some_and(|else_| child(else_, memo))
-        }
-        ExpressionDesc::Pexp_ternary(inner) => {
-            child(inner.0, memo) || child(inner.1, memo) || child(inner.2, memo)
-        }
-        ExpressionDesc::Pexp_braces(braces) => child(braces.expr, memo),
-        ExpressionDesc::Pexp_regexp(_) => false,
-        ExpressionDesc::Pexp_sequence(first, second)
-        | ExpressionDesc::Pexp_while(first, second) => child(*first, memo) || child(*second, memo),
-        ExpressionDesc::Pexp_for(inner) => {
-            child(inner.1, memo) || child(inner.2, memo) || child(inner.4, memo)
-        }
-        ExpressionDesc::Pexp_for_of(inner) | ExpressionDesc::Pexp_for_await_of(inner) => {
-            child(inner.1, memo) || child(inner.2, memo)
-        }
-        ExpressionDesc::Pexp_constraint(inner) => child(inner.0, memo),
-        ExpressionDesc::Pexp_coerce(inner) => child(inner.0, memo),
-        ExpressionDesc::Pexp_letexception(inner) => child(inner.1, memo),
-        ExpressionDesc::Pexp_assert(inner) | ExpressionDesc::Pexp_await(inner) => {
-            child(*inner, memo)
-        }
-        ExpressionDesc::Pexp_newtype(inner) => child(inner.1, memo),
-        ExpressionDesc::Pexp_open(inner) => child(inner.2, memo),
-        ExpressionDesc::Pexp_jsx_element(_)
-        | ExpressionDesc::Pexp_letmodule(_)
-        | ExpressionDesc::Pexp_pack(_)
-        | ExpressionDesc::Pexp_extension(_)
-        | ExpressionDesc::Pexp_raw(_) => true,
-    }
-}
-
-fn subtree_may_change(idx: ExprIdx, arena: &ParseArena, memo: &mut Vec<u8>) -> bool {
-    let slot = idx.0 as usize;
-    if let Some(&known) = memo.get(slot)
-        && known != 0
-    {
-        return known == 2;
-    }
-    let may_change = expression_may_change(arena.get_expr(idx), arena, memo);
-    if slot >= memo.len() {
-        memo.resize(slot + 1, 0);
-    }
-    memo[slot] = if may_change { 2 } else { 1 };
-    may_change
-}
-
 #[cfg(test)]
 mod tests {
     use super::{JsxConfig, module_access_name, transform_structure_result};
@@ -5429,7 +4350,9 @@ mod tests {
                     "let f = () => {\n  module M = {\n    @@jsxConfig({version: 5})\n  }\n  <div> {module N = {@@jsxConfig({version: 6})}\n  1} </div>\n}\n",
                     version
                 ),
-                unsupported(3, 26)
+                // `letmodule ~loc ~attrs s (module_expr me) (expr e)` maps the
+                // body, which holds `N`, before the module `M`.
+                unsupported(5, 43)
             );
         }
         // Children are mapped before props, as OCaml evaluates the arguments of
@@ -5468,6 +4391,121 @@ mod tests {
             nested_module.matches("(Lident \"ReactDOM\")").count(),
             1,
             "{nested_module}"
+        );
+    }
+
+    /// The mapper follows OCaml's evaluation order (ast_mapper.ml:317-471):
+    /// the first `@@jsxConfig` error is the one OCaml raises first.
+    #[test]
+    fn jsx_mapper_raises_errors_in_ocaml_evaluation_order() {
+        let first_error_line = |source: &str| {
+            let mut parser = Parser::new("test.res".to_string(), source);
+            let structure = module::parse_structure(&mut parser);
+            assert!(!parser.has_errors(), "{source}");
+            let arena = parser.arena_mut();
+            let error = transform_structure_result(structure, 4, "react", arena)
+                .expect_err("two invalid versions");
+            arena.loc_start(error.loc).line
+        };
+        let bad = |n: i32| format!("{{module M{n} = {{@@jsxConfig({{version: {n}}})}}\n 1}}");
+        // (source, line of the first error), from OCaml bsc -bs-jsx 4.
+        let cases = [
+            // let: the body, then the bindings
+            (
+                format!("let f = () => {{\n  let a = {}\n  {}\n}}\n", bad(5), bad(6)),
+                4,
+            ),
+            // apply: the arguments, then the function
+            (format!("let x = {}({})\n", bad(5), bad(6)), 2),
+            // switch: the cases, then the scrutinee
+            (
+                format!("let x = switch {} {{\n| _ => {}\n}}\n", bad(5), bad(6)),
+                3,
+            ),
+            // try: the cases, then the body
+            (
+                format!("let x = try {} catch {{\n| _ => {}\n}}\n", bad(5), bad(6)),
+                3,
+            ),
+            // an expression's attributes come first
+            (format!("let x = @foo({}) {}\n", bad(5), bad(6)), 1),
+            // a value binding: the pattern, the expression, then the attributes
+            (format!("@foo({})\nlet x = {}\n", bad(5), bad(6)), 3),
+            // parameter defaults are mapped, after the body
+            (
+                format!("let f = (~a={}, ~b={}) => {}\n", bad(5), bad(6), bad(7)),
+                3,
+            ),
+        ];
+        for (source, line) in cases {
+            assert_eq!(first_error_line(&source), line, "{source}");
+        }
+        // Module application maps the argument first.
+        let modapply = "module R = F({@@jsxConfig({version: 5})})({@@jsxConfig({version: 6})})\n";
+        let mut parser = Parser::new("test.res".to_string(), modapply);
+        let structure = module::parse_structure(&mut parser);
+        let arena = parser.arena_mut();
+        let error = transform_structure_result(structure, 4, "react", arena).unwrap_err();
+        let start = arena.loc_start(error.loc);
+        assert_eq!(start.cnum - start.bol, 65);
+    }
+
+    /// Warnings from structures nested in expressions are reported, and none
+    /// raised after the first error (OCaml stops at the raise).
+    #[test]
+    fn jsx_mapper_reports_nested_warnings_until_the_first_error() {
+        let warnings = |source: &str| {
+            let mut parser = Parser::new("test.res".to_string(), source);
+            let structure = module::parse_structure(&mut parser);
+            assert!(!parser.has_errors(), "{source}");
+            let arena = parser.arena_mut();
+            let (result, warnings) =
+                super::transform_structure_collecting_warnings(structure, 4, "react", arena);
+            (result.is_ok(), warnings.len())
+        };
+        let component =
+            "module W = {\n  @react.componentWithProps(x)\n  let make = props => <div />\n}";
+        let bad = "{module M = {@@jsxConfig({version: 5})}\n 1}";
+        assert_eq!(
+            warnings(&format!("let f = () => {{\n{component}\n1\n}}\n")),
+            (true, 1)
+        );
+        assert_eq!(
+            warnings(&format!("let x = %foo(\n{component}\n)\n")),
+            (true, 1)
+        );
+        // The body (the warning) is mapped before the binding (the error).
+        assert_eq!(
+            warnings(&format!(
+                "let f = () => {{\nlet y = {bad}\n{component}\n1\n}}\n"
+            )),
+            (false, 1)
+        );
+        // The error comes first, so the warning is never raised.
+        assert_eq!(
+            warnings(&format!(
+                "let f = () => {{\n{component}\nlet y = {bad}\n1\n}}\n"
+            )),
+            (false, 0)
+        );
+    }
+
+    /// JSX in parameter defaults is transformed (`p_default` is mapped).
+    #[test]
+    fn jsx_mapper_transforms_parameter_defaults() {
+        let source = "let f = (~a=<div />, ~b=<span />, ()) => a\n";
+        let mut parser = Parser::new("test.res".to_string(), source);
+        let structure = module::parse_structure(&mut parser);
+        let arena = parser.arena_mut();
+        let structure = transform_structure_result(structure, 4, "react", arena).unwrap();
+        let mut out = Vec::new();
+        sexp_locs::print_structure(&structure, arena, &mut out);
+        let out = String::from_utf8(out).unwrap();
+        assert!(!out.contains("Pexp_jsx_unary_element"), "{out}");
+        assert_eq!(
+            out.matches("(Ldot (Lident \"ReactDOM\") \"jsx\")").count(),
+            2,
+            "{out}"
         );
     }
 
