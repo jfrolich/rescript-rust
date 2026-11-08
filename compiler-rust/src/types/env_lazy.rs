@@ -584,33 +584,24 @@ fn build_labels_for_name(
     labels
 }
 
+/// Progress of the lazy scan that builds child component thunks.
 #[derive(Debug, Clone)]
-struct ChildComponentScanState {
+enum ChildComponentScanState {
+    /// Items before `next_index` have been scanned.
+    Pending(ChildScanCursor),
+    /// Every item has been scanned; a missing child does not exist.
+    Complete,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ChildScanCursor {
+    /// Types, modules and module types scanned so far, created on first use.
     working_env: Option<super::env::Env>,
     next_index: usize,
     runtime_pos: usize,
-    complete: bool,
 }
 
-impl ChildComponentScanState {
-    fn new() -> Self {
-        Self {
-            working_env: None,
-            next_index: 0,
-            runtime_pos: 0,
-            complete: false,
-        }
-    }
-
-    fn complete() -> Self {
-        Self {
-            working_env: None,
-            next_index: 0,
-            runtime_pos: 0,
-            complete: true,
-        }
-    }
-
+impl ChildScanCursor {
     fn working_env_mut(&mut self) -> &mut super::env::Env {
         self.working_env.get_or_insert_with(super::env::Env::empty)
     }
@@ -715,7 +706,10 @@ fn scan_child_component_from_signature(
     state: &mut ChildComponentScanState,
     child_name: &str,
 ) -> (Option<(usize, Arc<StoredModuleComponents>)>, usize) {
-    let start_index = state.next_index;
+    let ChildComponentScanState::Pending(cursor) = state else {
+        return (None, 0);
+    };
+    let start_index = cursor.next_index;
     let mut found = None;
 
     // OCaml compiler/ml/env.ml:1530-1578 computes component paths once,
@@ -724,27 +718,27 @@ fn scan_child_component_from_signature(
     // env.ml:1573-1578. Persistent signatures need the same split so
     // qualified value lookup can descend through child components without
     // forcing `Subst.modtype` on the module declaration thunk.
-    while state.next_index < signature.len() {
-        let item = &signature[state.next_index];
-        state.next_index += 1;
+    while cursor.next_index < signature.len() {
+        let item = &signature[cursor.next_index];
+        cursor.next_index += 1;
         match item {
             SignatureItem::SigValue(_, desc) => {
                 if !matches!(desc.val_kind, ValueKind::ValPrim(_)) {
-                    state.runtime_pos += 1;
+                    cursor.runtime_pos += 1;
                 }
             }
             SignatureItem::SigType(id, decl, _) => {
-                state.working_env_mut().add_type(*id, decl.clone());
+                cursor.working_env_mut().add_type(*id, decl.clone());
             }
             SignatureItem::SigTypext(_, _, _) | SignatureItem::SigClass => {
-                state.runtime_pos += 1;
+                cursor.runtime_pos += 1;
             }
             SignatureItem::SigModule(id, md, _) => {
-                let runtime_pos = state.runtime_pos;
+                let runtime_pos = cursor.runtime_pos;
                 let child_access_path =
                     qualified_submodule_access_path(access_path, id.name(), runtime_pos, md);
                 let stored = {
-                    let working_env = state.working_env_mut();
+                    let working_env = cursor.working_env_mut();
                     working_env.add_module_with_component_context(
                         *id,
                         md.clone(),
@@ -767,27 +761,27 @@ fn scan_child_component_from_signature(
                 child_components.insert(id.name().to_string(), stored.clone());
                 if id.name() == child_name {
                     found = stored;
-                    state.runtime_pos += 1;
+                    cursor.runtime_pos += 1;
                     break;
                 }
-                state.runtime_pos += 1;
+                cursor.runtime_pos += 1;
             }
             SignatureItem::SigModtype(id, mtd) => {
-                state.working_env_mut().add_modtype(*id, mtd.clone());
+                cursor.working_env_mut().add_modtype(*id, mtd.clone());
             }
             SignatureItem::SigClassType => {}
         }
     }
 
-    if state.next_index >= signature.len() {
-        state.complete = true;
-        state.working_env = None;
+    let scanned_items = cursor.next_index - start_index;
+    if cursor.next_index >= signature.len() {
+        *state = ChildComponentScanState::Complete;
         child_components
             .entry(child_name.to_string())
             .or_insert(None);
     }
 
-    (found, state.next_index - start_index)
+    (found, scanned_items)
 }
 
 impl QualifiedModuleComponents {
@@ -981,9 +975,9 @@ impl QualifiedModuleComponents {
                 qualified_modtypes: RefCell::new(HashMap::new()),
                 child_components: RefCell::new(child_components),
                 child_component_scan: RefCell::new(if child_component_scan_complete {
-                    ChildComponentScanState::complete()
+                    ChildComponentScanState::Complete
                 } else {
-                    ChildComponentScanState::new()
+                    ChildComponentScanState::Pending(ChildScanCursor::default())
                 }),
                 value_subst_maps: RefCell::new(None),
                 in_store: std::cell::Cell::new(super::thread_store::store_build_active()),
@@ -1348,7 +1342,7 @@ impl QualifiedModuleComponents {
         }
 
         let mut scan = self.tables.child_component_scan.borrow_mut();
-        if scan.complete {
+        if matches!(*scan, ChildComponentScanState::Complete) {
             self.tables
                 .child_components
                 .borrow_mut()
