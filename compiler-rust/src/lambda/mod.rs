@@ -22,7 +22,7 @@
 //! - [`print`] - Pretty printing for debugging
 //! - [`compile_context`] - Compilation context for Lambda to JS IR
 
-pub mod indexed;
+pub mod arena;
 pub mod js_exp_make;
 pub mod js_pass_external_shadow;
 pub mod js_pass_flatten_and_mark_dead;
@@ -31,10 +31,8 @@ pub mod js_pass_tailcall_inline;
 pub mod js_shake;
 pub mod js_stmt_make;
 pub mod lam_analysis;
-pub(crate) mod lam_analysis_indexed;
 pub mod lam_arity;
 pub mod lam_beta_reduce;
-pub(crate) mod lam_beta_reduce_indexed;
 pub mod lam_closure;
 pub mod lam_coercion;
 pub mod lam_compat;
@@ -42,38 +40,25 @@ pub mod lam_compile;
 pub mod lam_compile_const;
 pub mod lam_compile_context;
 pub mod lam_compile_external;
-pub(crate) mod lam_compile_input;
 pub mod lam_compile_main;
-pub(crate) mod lam_compile_main_indexed;
 pub mod lam_compile_primitive;
 pub mod lam_compile_variant;
-pub mod lam_loc;
 pub mod lam_constant;
-pub mod lam_eta_conversion;
-pub mod lam_exit_code;
-pub mod lam_free_variables;
+pub mod lam_hash_ident;
 pub mod lam_hit;
-pub(crate) mod lam_indexed_helpers;
+pub mod lam_loc;
 pub mod lam_pass_alpha_conversion;
-pub(crate) mod lam_pass_alpha_conversion_indexed;
 pub mod lam_pass_collapse_var_aliases;
 pub mod lam_pass_collect;
-pub mod lam_pass_collect_indexed;
-pub mod lam_pass_count;
-pub(crate) mod lam_pass_count_indexed;
 pub mod lam_pass_deep_flatten;
-pub(crate) mod lam_pass_deep_flatten_indexed;
-pub(crate) mod lam_pass_eliminate_ref_indexed;
 pub mod lam_pass_exits;
-pub mod lam_pass_exits_indexed;
 pub mod lam_pass_guard_raises;
 pub mod lam_pass_lets_dce;
-pub(crate) mod lam_pass_lets_dce_indexed;
 pub mod lam_pass_remove_alias;
-pub(crate) mod lam_pass_remove_alias_indexed;
 pub mod lam_pass_sroa;
 pub mod lam_primitive;
 pub mod lam_print;
+pub mod lam_stats;
 pub mod lam_subst;
 pub mod lam_tag_info;
 pub mod lam_util;
@@ -84,9 +69,9 @@ pub mod sexp_lambda;
 use crate::ident::Ident;
 pub use lam_compat::{Comparison, FieldDbgInfo, LetKind, SetFieldDbgInfo};
 pub use lam_constant::Constant;
+pub use lam_loc::{CmjExportLambdas, LamLoc, LamLocTable};
 pub use lam_primitive::Primitive;
 pub use lam_tag_info::TagInfo;
-pub use lam_loc::{CmjExportLambdas, LamLoc, LamLocTable};
 
 /// Source binding selected by `@res.hoistedFunction` for a flat JS export.
 /// Mirrors `Lambda.hoisted_function` in `compiler/ml/lambda.ml`.
@@ -220,7 +205,8 @@ fn runtime_value_kind(c: &Constant) -> ValueKind {
         },
         Constant::Block { tag_info, .. } => match &**tag_info {
             TagInfo::Tuple => ValueKind::IsArray,
-            TagInfo::Record { fields, .. } => {
+            TagInfo::Record(record) => {
+                let fields = &record.fields;
                 if !fields.is_empty()
                     && fields
                         .iter()
@@ -306,19 +292,49 @@ enum UntaggedAction {
     Undecided,
 }
 
+/// The case `untagged_action` picks, by position in the switch's keys.
+pub(crate) enum UntaggedChoice {
+    Const(usize),
+    Block(usize),
+    /// Decided, but no case of the switch matches.
+    NoCase,
+    Undecided,
+}
+
 /// lambda.ml `switch`'s `untagged_action`.
 fn untagged_action(
     facts: &crate::types::VariantMatchingFacts,
     cst: &Constant,
     switch: &LambdaSwitch,
 ) -> UntaggedAction {
+    let const_keys: Vec<SwitchKey> = switch.sw_consts.iter().map(|(k, _)| k.clone()).collect();
+    let block_keys: Vec<SwitchKey> = switch.sw_blocks.iter().map(|(k, _)| k.clone()).collect();
+    match untagged_action_index(facts, cst, &const_keys, &block_keys) {
+        UntaggedChoice::Const(i) => UntaggedAction::Case(Some(switch.sw_consts[i].1.clone())),
+        UntaggedChoice::Block(i) => UntaggedAction::Case(Some(switch.sw_blocks[i].1.clone())),
+        UntaggedChoice::NoCase => UntaggedAction::Case(None),
+        UntaggedChoice::Undecided => UntaggedAction::Undecided,
+    }
+}
+
+/// lambda.ml `switch`'s `untagged_action`, over the switch keys.
+pub(crate) fn untagged_action_index(
+    facts: &crate::types::VariantMatchingFacts,
+    cst: &Constant,
+    const_keys: &[SwitchKey],
+    block_keys: &[SwitchKey],
+) -> UntaggedChoice {
     let literal_of_tag = |tag: &crate::types::VariantTag| match &tag.literal {
         Some(literal) => literal.clone(),
         None => crate::types::VariantLiteralTag::String(tag.name.clone()),
     };
+    let found = |i: Option<usize>, f: fn(usize) -> UntaggedChoice| match i {
+        Some(i) => f(i),
+        None => UntaggedChoice::NoCase,
+    };
     let kind = runtime_value_kind(cst);
     match &kind {
-        ValueKind::UnknownValue => UntaggedAction::Undecided,
+        ValueKind::UnknownValue => UntaggedChoice::Undecided,
         ValueKind::IsLiteral(literal)
             if facts
                 .literal_tags
@@ -326,17 +342,14 @@ fn untagged_action(
                 .any(|tag| literal_denotes_same(literal, tag)) =>
         {
             // The literal side wins, exactly as it does at runtime.
-            UntaggedAction::Case(
-                switch
-                    .sw_consts
-                    .iter()
-                    .find(|(key, _)| match key {
-                        SwitchKey::Constructor(crate::types::VariantConstructorCase::Constant(
-                            tag,
-                        )) => literal_denotes_same(literal, &literal_of_tag(tag)),
-                        _ => false,
-                    })
-                    .map(|(_, action)| action.clone()),
+            found(
+                const_keys.iter().position(|key| match key {
+                    SwitchKey::Constructor(crate::types::VariantConstructorCase::Constant(tag)) => {
+                        literal_denotes_same(literal, &literal_of_tag(tag))
+                    }
+                    _ => false,
+                }),
+                UntaggedChoice::Const,
             )
         }
         _ => {
@@ -345,22 +358,17 @@ fn untagged_action(
                 value_has_block_type(&facts.block_types, &kind, block_type)
             };
             if facts.block_types.iter().any(matches_block) {
-                UntaggedAction::Case(
-                    switch
-                        .sw_blocks
-                        .iter()
-                        .find(|(key, _)| match key {
-                            SwitchKey::Constructor(
-                                crate::types::VariantConstructorCase::Block(
-                                    crate::types::VariantBlock::Untagged { block_type, .. },
-                                ),
-                            ) => matches_block(block_type),
-                            _ => false,
-                        })
-                        .map(|(_, action)| action.clone()),
+                found(
+                    block_keys.iter().position(|key| match key {
+                        SwitchKey::Constructor(crate::types::VariantConstructorCase::Block(
+                            crate::types::VariantBlock::Untagged { block_type, .. },
+                        )) => matches_block(block_type),
+                        _ => false,
+                    }),
+                    UntaggedChoice::Block,
                 )
             } else {
-                UntaggedAction::Undecided
+                UntaggedChoice::Undecided
             }
         }
     }
@@ -434,34 +442,6 @@ pub struct Apply {
     pub ap_info: ApInfo,
     /// Was this transformed from JSX?
     pub ap_transformed_jsx: bool,
-}
-
-/// Transform the lambda in `boxed` and store the result in the same
-/// allocation, so passes that rebuild the tree do not free and reallocate
-/// every child box.
-#[inline]
-pub(crate) fn map_box(mut boxed: Box<Lambda>, f: impl FnOnce(Lambda) -> Lambda) -> Box<Lambda> {
-    let inner = std::mem::replace(&mut *boxed, Lambda::Lbreak);
-    *boxed = f(inner);
-    boxed
-}
-
-/// Rebuild an `Lprim` with mapped arguments, reusing its boxed payload.
-/// Applies the same constant folding as [`Lambda::prim`].
-pub(crate) fn map_prim_args(mut info: Box<PrimInfo>, f: impl FnMut(Lambda) -> Lambda) -> Lambda {
-    let args = std::mem::take(&mut info.args);
-    info.args = args.into_iter().map(f).collect();
-    Lambda::prim_boxed(info)
-}
-
-/// Rebuild an `Lfunction` with a mapped body, reusing its boxed payload.
-pub(crate) fn map_function_body(
-    mut func: Box<LFunction>,
-    f: impl FnOnce(Lambda) -> Lambda,
-) -> Lambda {
-    let body = std::mem::replace(&mut *func.body, Lambda::Lbreak);
-    *func.body = f(body);
-    Lambda::Lfunction(func)
 }
 
 /// Lambda IR expression
@@ -818,10 +798,10 @@ impl Lambda {
                 }),
             Lambda::Lconst(Constant::Block { tag_info, elements }) => {
                 let runtime = match &*tag_info {
-                    TagInfo::Constructor { runtime, .. } => {
-                        Some(crate::types::VariantBlock::Tagged((**runtime).clone()))
+                    TagInfo::Constructor(c) => {
+                        Some(crate::types::VariantBlock::Tagged((*c.runtime).clone()))
                     }
-                    TagInfo::RecordInlined { runtime, .. } => Some((**runtime).clone()),
+                    TagInfo::RecordInlined(r) => Some((*r.runtime).clone()),
                     _ => None,
                 };
                 switch
@@ -1806,7 +1786,10 @@ mod tests {
         );
         // The constructor keeps the shape; the final pass moves the code.
         assert!(matches!(if_expr, Lambda::LifThenElse(..)));
-        let if_expr = crate::lambda::lam_pass_guard_raises::guard_raises(if_expr);
+        let mut a = crate::lambda::arena::LamArena::new();
+        let root = a.import(&if_expr);
+        let root = crate::lambda::lam_pass_guard_raises::guard_raises(&mut a, root);
+        let if_expr = a.export(root);
 
         match if_expr {
             Lambda::Lsequence(first, second) => {
@@ -1846,11 +1829,7 @@ mod tests {
         );
 
         let if_expr = Lambda::if_(
-            Lambda::prim(
-                Primitive::Pisint,
-                vec![Lambda::var(value)],
-                LamLoc::NONE,
-            ),
+            Lambda::prim(Primitive::Pisint, vec![Lambda::var(value)], LamLoc::NONE),
             inner_if.clone(),
             Lambda::false_(),
         );
@@ -1879,7 +1858,11 @@ mod node_size_tests {
     #[test]
     fn lambda_node_sizes_stay_compact() {
         use std::mem::size_of;
-        assert_eq!(size_of::<super::Primitive>(), 88);
+        // Constructor/record block tags and JS call specs are boxed
+        // (`ConstructorTag`, `RecordTag`, `RecordInlinedTag`, `JsCall`).
+        assert_eq!(size_of::<super::TagInfo>(), 32);
+        assert_eq!(size_of::<super::Primitive>(), 40);
+        assert_eq!(size_of::<super::arena::PrimPayload>(), 48);
         assert_eq!(size_of::<super::Constant>(), 56);
         assert_eq!(size_of::<super::Lambda>(), 56);
     }

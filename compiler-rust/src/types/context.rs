@@ -233,19 +233,6 @@ pub type CachedRecordLabel = (
     Vec<super::decl::Attribute>,
 );
 
-/// The type-declaration maps fed lazily from `type_decl_log`.
-#[derive(Clone, Copy)]
-enum TypeDeclMap {
-    Name,
-    Stamp,
-    Path,
-    Exact,
-}
-
-impl TypeDeclMap {
-    const COUNT: usize = 4;
-}
-
 #[derive(Default)]
 struct TypeMutationJournal {
     entries: Vec<TypeMutation>,
@@ -611,56 +598,6 @@ pub struct TypeContext {
     /// innermost last.
     copy_sessions: RefCell<Vec<CopySession>>,
 
-    /// Global type declaration store, indexed by type name.
-    /// Populated when loading CMI module signatures so that type alias
-    /// expansion can find declarations for types not directly in the env.
-    type_decl_store:
-        RefCell<crate::fast_hash::AHashMap<smol_str::SmolStr, Arc<super::decl::TypeDeclaration>>>,
-
-    /// Global type declaration store, indexed by ident stamp.
-    /// Used for looking up CMI-loaded type declarations by their stamp
-    /// when the type name is too generic (e.g., "t").
-    type_decl_by_stamp: RefCell<crate::fast_hash::AHashMap<i32, Arc<super::decl::TypeDeclaration>>>,
-
-    /// Global type declaration store, indexed by full qualified path string.
-    /// Used for looking up types via Pdot paths (e.g., "Js.Promise.t").
-    type_decl_by_path:
-        RefCell<crate::fast_hash::AHashMap<smol_str::SmolStr, Arc<super::decl::TypeDeclaration>>>,
-    /// Qualified declarations keyed by Path identity, preserving local stamps.
-    /// Only single `Exact` registrations, with their log position; batches
-    /// are kept whole in `exact_path_batches` and probed through their shared
-    /// index, so a unit never copies every dependency type into this map.
-    type_decl_by_exact_path:
-        RefCell<crate::fast_hash::AHashMap<Path, (usize, Arc<super::decl::TypeDeclaration>)>>,
-    exact_path_batches: RefCell<Vec<(usize, Arc<super::thread_store::SigTypeBatch>)>>,
-    /// Exact-path answers, valid while the log length equals the first field.
-    exact_path_memo: RefCell<(
-        usize,
-        crate::fast_hash::AHashMap<Path, Option<Arc<super::decl::TypeDeclaration>>>,
-    )>,
-    /// Registrations for the four maps above, in registration order. Each map
-    /// replays the log up to the present only when it is read: modules
-    /// register every type of every loaded dependency but read these maps
-    /// rarely, and most registrations come as one shared batch per signature.
-    type_decl_log: RefCell<Vec<TypeDeclRegistration>>,
-    /// Log position each map has been replayed to, indexed by `TypeDeclMap`.
-    type_decl_log_replayed: [Cell<usize>; TypeDeclMap::COUNT],
-    type_item_by_path:
-        RefCell<crate::fast_hash::AHashMap<String, (Ident, super::decl::TypeDeclaration)>>,
-    missing_type_item_by_path: RefCell<crate::fast_hash::AHashSet<String>>,
-
-    /// Cache for type declarations resolved through module signatures (Pdot paths).
-    /// Separate from type_decl_by_path to avoid conflicts with expand_head_once
-    /// entries which have unqualified paths. This approximates OCaml's
-    /// components_of_module_maker lazy caching.
-    resolved_pdot_type_cache: RefCell<
-        hashbrown::HashMap<
-            SamePathKey,
-            Arc<super::decl::TypeDeclaration>,
-            crate::fast_hash::FastState,
-        >,
-    >,
-
     /// Cache for resolved module signatures. Keyed by module path name.
     /// OCaml `compiler/ml/env.ml:1513-1514,1516-1588` stores forced module
     /// components behind lazy cells; cache hits share the already-substituted
@@ -934,8 +871,6 @@ pub(crate) enum StoreEffect {
     /// signature (reserving its binder stamps) in this compilation.
     TriggerRename(smol_str::SmolStr),
     /// Registrations in this compilation's declaration and alias tables.
-    RegisterTypeDecl(smol_str::SmolStr, Arc<super::decl::TypeDeclaration>),
-    RegisterTypeDeclByStamp(i32, Arc<super::decl::TypeDeclaration>),
     RegisterAliasSource(Path, Path),
     RegisterQualifiedModuleDecl(
         Path,
@@ -959,17 +894,6 @@ pub(crate) fn store_debug_enabled() -> bool {
 }
 
 static NEXT_STORE_PIECE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-
-/// One registration for the global type-declaration maps.
-#[derive(Debug)]
-enum TypeDeclRegistration {
-    /// Every type of a store-owned signature, for all four maps.
-    Batch(Arc<super::thread_store::SigTypeBatch>),
-    Name(smol_str::SmolStr, Arc<super::decl::TypeDeclaration>),
-    Stamp(i32, Arc<super::decl::TypeDeclaration>),
-    Path(smol_str::SmolStr, Arc<super::decl::TypeDeclaration>),
-    Exact(Path, Arc<super::decl::TypeDeclaration>),
-}
 
 /// A map key that compares paths with `Path::same` (ignoring `Pdot`
 /// positions and comparing identifiers by stamp, or by name when persistent).
@@ -1018,21 +942,6 @@ fn hash_same_path<H: std::hash::Hasher>(path: &Path, state: &mut H) {
 impl std::hash::Hash for SamePathKey {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         hash_same_path(&self.0, state);
-    }
-}
-
-/// Borrowed form of [`SamePathKey`], so lookups do not clone the path.
-struct SamePathRef<'a>(&'a Path);
-
-impl std::hash::Hash for SamePathRef<'_> {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        hash_same_path(self.0, state);
-    }
-}
-
-impl hashbrown::Equivalent<SamePathKey> for SamePathRef<'_> {
-    fn equivalent(&self, key: &SamePathKey) -> bool {
-        self.0.same(&key.0)
     }
 }
 
@@ -1181,17 +1090,6 @@ impl TypeContext {
             mutabilities: RefCell::new(Vec::new()),
             mutability_overlay: RefCell::new(crate::fast_hash::AHashMap::new()),
             copy_sessions: RefCell::new(Vec::new()),
-            type_decl_store: RefCell::new(crate::fast_hash::AHashMap::new()),
-            type_decl_by_stamp: RefCell::new(crate::fast_hash::AHashMap::new()),
-            type_decl_by_path: RefCell::new(crate::fast_hash::AHashMap::new()),
-            type_decl_by_exact_path: RefCell::new(crate::fast_hash::AHashMap::new()),
-            exact_path_batches: RefCell::new(Vec::new()),
-            exact_path_memo: RefCell::new((0, crate::fast_hash::AHashMap::new())),
-            type_decl_log: RefCell::new(Vec::new()),
-            type_decl_log_replayed: Default::default(),
-            type_item_by_path: RefCell::new(crate::fast_hash::AHashMap::new()),
-            missing_type_item_by_path: RefCell::new(crate::fast_hash::AHashSet::new()),
-            resolved_pdot_type_cache: RefCell::new(hashbrown::HashMap::default()),
             resolved_module_sig_cache: RefCell::new(crate::fast_hash::AHashMap::new()),
             qualified_module_components_cache: RefCell::new(crate::fast_hash::AHashMap::new()),
             component_alias_sources: RefCell::new(crate::fast_hash::AHashMap::new()),
@@ -1462,162 +1360,6 @@ impl TypeContext {
         self.next_cmi_longident_idx.set(next);
     }
 
-    /// Register a type declaration for type alias expansion.
-    /// Called when loading module signatures from CMI files.
-    pub fn register_type_decl(
-        &self,
-        name: &str,
-        decl: impl Into<Arc<super::decl::TypeDeclaration>>,
-    ) {
-        self.register_shared_type_decl(name, decl.into());
-    }
-
-    pub(crate) fn register_shared_type_decl(
-        &self,
-        name: &str,
-        decl: Arc<super::decl::TypeDeclaration>,
-    ) {
-        if self.in_store_build() {
-            self.record_store_effect(StoreEffect::RegisterTypeDecl(name.into(), decl.clone()));
-        }
-        self.type_decl_log
-            .borrow_mut()
-            .push(TypeDeclRegistration::Name(
-                smol_str::SmolStr::new(name),
-                decl,
-            ));
-    }
-
-    /// Install the type registrations of a store-owned signature, in order.
-    /// Equivalent to calling the four `register_shared_type_decl*` methods for
-    /// each entry.
-    pub(crate) fn register_sig_type_registrations(
-        &self,
-        registrations: &Arc<super::thread_store::SigTypeBatch>,
-    ) {
-        self.poison_store_build_for("register_sig_type_registrations");
-        self.type_decl_log
-            .borrow_mut()
-            .push(TypeDeclRegistration::Batch(registrations.clone()));
-    }
-
-    /// Bring `map` up to date with the registration log.
-    fn replay_type_decl_log(&self, map: TypeDeclMap) {
-        let log = self.type_decl_log.borrow();
-        let start = self.type_decl_log_replayed[map as usize].get();
-        if start == log.len() {
-            return;
-        }
-        let pending = &log[start..];
-        // Upper bound on inserts, so the map grows once instead of rehashing
-        // repeatedly while a batch is replayed.
-        let additional: usize = pending
-            .iter()
-            .map(|entry| match entry {
-                TypeDeclRegistration::Batch(registrations) => registrations.len(),
-                _ => 1,
-            })
-            .sum();
-        match map {
-            TypeDeclMap::Name => {
-                let mut by_name = self.type_decl_store.borrow_mut();
-                by_name.reserve(additional);
-                for entry in pending {
-                    match entry {
-                        TypeDeclRegistration::Batch(registrations) => {
-                            for registration in registrations.iter() {
-                                by_name
-                                    .insert(registration.name.clone(), registration.decl.clone());
-                            }
-                        }
-                        TypeDeclRegistration::Name(name, decl) => {
-                            by_name.insert(name.clone(), decl.clone());
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            TypeDeclMap::Stamp => {
-                let mut by_stamp = self.type_decl_by_stamp.borrow_mut();
-                by_stamp.reserve(additional);
-                for entry in pending {
-                    match entry {
-                        TypeDeclRegistration::Batch(registrations) => {
-                            for registration in registrations.iter() {
-                                if registration.stamp != 0 {
-                                    by_stamp.insert(registration.stamp, registration.decl.clone());
-                                }
-                            }
-                        }
-                        TypeDeclRegistration::Stamp(stamp, decl) => {
-                            by_stamp.insert(*stamp, decl.clone());
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            TypeDeclMap::Path => {
-                let mut by_path = self.type_decl_by_path.borrow_mut();
-                by_path.reserve(additional);
-                for entry in pending {
-                    match entry {
-                        TypeDeclRegistration::Batch(registrations) => {
-                            for registration in registrations.iter() {
-                                by_path.insert(
-                                    registration.qualified_name.clone(),
-                                    registration.decl.clone(),
-                                );
-                            }
-                        }
-                        TypeDeclRegistration::Path(path, decl) => {
-                            by_path.insert(path.clone(), decl.clone());
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            TypeDeclMap::Exact => {
-                let mut by_exact_path = self.type_decl_by_exact_path.borrow_mut();
-                let mut batches = self.exact_path_batches.borrow_mut();
-                for (offset, entry) in pending.iter().enumerate() {
-                    let position = start + offset;
-                    match entry {
-                        TypeDeclRegistration::Batch(registrations) => {
-                            batches.push((position, registrations.clone()));
-                        }
-                        TypeDeclRegistration::Exact(path, decl) => {
-                            by_exact_path.insert(path.clone(), (position, decl.clone()));
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        }
-        self.type_decl_log_replayed[map as usize].set(log.len());
-    }
-
-    /// Register a type declaration by ident stamp for alias expansion.
-    pub fn register_type_decl_by_stamp(
-        &self,
-        stamp: i32,
-        decl: impl Into<Arc<super::decl::TypeDeclaration>>,
-    ) {
-        self.register_shared_type_decl_by_stamp(stamp, decl.into());
-    }
-
-    pub(crate) fn register_shared_type_decl_by_stamp(
-        &self,
-        stamp: i32,
-        decl: Arc<super::decl::TypeDeclaration>,
-    ) {
-        if self.in_store_build() {
-            self.record_store_effect(StoreEffect::RegisterTypeDeclByStamp(stamp, decl.clone()));
-        }
-        self.type_decl_log
-            .borrow_mut()
-            .push(TypeDeclRegistration::Stamp(stamp, decl));
-    }
-
     /// Match OCaml `Ctype.get_new_abstract_name`.
     pub(crate) fn next_reified_abstract_name(&self, prefix: &str) -> String {
         self.poison_store_build_for("next_reified_abstract_name");
@@ -1629,163 +1371,6 @@ impl TypeContext {
         } else {
             format!("{prefix}{index}")
         }
-    }
-
-    /// Look up a type declaration by name from the global store.
-    pub fn find_type_decl(
-        &self,
-        name: &str,
-    ) -> Option<std::cell::Ref<'_, super::decl::TypeDeclaration>> {
-        self.replay_type_decl_log(TypeDeclMap::Name);
-        std::cell::Ref::filter_map(self.type_decl_store.borrow(), |s| {
-            s.get(name).map(AsRef::as_ref)
-        })
-        .ok()
-    }
-
-    /// Like `find_type_decl`, but returns the shared declaration handle.
-    pub(crate) fn find_type_decl_arc(
-        &self,
-        name: &str,
-    ) -> Option<Arc<super::decl::TypeDeclaration>> {
-        self.replay_type_decl_log(TypeDeclMap::Name);
-        self.type_decl_store.borrow().get(name).cloned()
-    }
-
-    /// Look up a type declaration by stamp from the global store.
-    pub(crate) fn find_type_decl_arc_by_stamp(
-        &self,
-        stamp: i32,
-    ) -> Option<Arc<super::decl::TypeDeclaration>> {
-        self.replay_type_decl_log(TypeDeclMap::Stamp);
-        self.type_decl_by_stamp.borrow().get(&stamp).cloned()
-    }
-
-    pub fn find_type_decl_by_stamp(
-        &self,
-        stamp: i32,
-    ) -> Option<std::cell::Ref<'_, super::decl::TypeDeclaration>> {
-        self.replay_type_decl_log(TypeDeclMap::Stamp);
-        std::cell::Ref::filter_map(self.type_decl_by_stamp.borrow(), |s| {
-            s.get(&stamp).map(AsRef::as_ref)
-        })
-        .ok()
-    }
-
-    /// Register a type declaration by full qualified path string for alias expansion.
-    pub fn register_type_decl_by_path(
-        &self,
-        path: &str,
-        decl: impl Into<Arc<super::decl::TypeDeclaration>>,
-    ) {
-        self.register_shared_type_decl_by_path(path, decl.into());
-    }
-
-    pub(crate) fn register_shared_type_decl_by_path(
-        &self,
-        path: &str,
-        decl: Arc<super::decl::TypeDeclaration>,
-    ) {
-        self.poison_store_build_for("register_shared_type_decl_by_path");
-        self.type_decl_log
-            .borrow_mut()
-            .push(TypeDeclRegistration::Path(
-                smol_str::SmolStr::new(path),
-                decl,
-            ));
-    }
-
-    /// Register a qualified declaration by exact Path identity.
-    pub fn register_type_decl_by_exact_path(
-        &self,
-        path: Path,
-        decl: impl Into<Arc<super::decl::TypeDeclaration>>,
-    ) {
-        self.register_shared_type_decl_by_exact_path(path, decl.into());
-    }
-
-    pub(crate) fn register_shared_type_decl_by_exact_path(
-        &self,
-        path: Path,
-        decl: Arc<super::decl::TypeDeclaration>,
-    ) {
-        self.poison_store_build_for("register_shared_type_decl_by_exact_path");
-        self.type_decl_log
-            .borrow_mut()
-            .push(TypeDeclRegistration::Exact(path, decl));
-    }
-
-    pub(crate) fn register_type_item_by_path(
-        &self,
-        path: &str,
-        id: Ident,
-        decl: super::decl::TypeDeclaration,
-    ) {
-        self.poison_store_build_for("register_type_item_by_path");
-        self.type_item_by_path
-            .borrow_mut()
-            .insert(path.to_string(), (id, decl));
-    }
-
-    pub(crate) fn find_type_item_by_path(
-        &self,
-        path: &str,
-    ) -> Option<(Ident, super::decl::TypeDeclaration)> {
-        self.type_item_by_path.borrow().get(path).cloned()
-    }
-
-    pub(crate) fn register_missing_type_item_by_path(&self, path: &str) {
-        self.poison_store_build_for("register_missing_type_item_by_path");
-        self.missing_type_item_by_path
-            .borrow_mut()
-            .insert(path.to_string());
-    }
-
-    pub(crate) fn is_missing_type_item_by_path(&self, path: &str) -> bool {
-        self.missing_type_item_by_path.borrow().contains(path)
-    }
-
-    /// Cache a type declaration resolved through module signatures (Pdot paths).
-    /// Keyed by `Path::same` identity; only paths without a functor
-    /// application are cached.
-    pub(crate) fn register_resolved_pdot_type(
-        &self,
-        path: &Path,
-        decl: Arc<super::decl::TypeDeclaration>,
-    ) {
-        self.resolved_pdot_type_cache
-            .borrow_mut()
-            .insert(SamePathKey(path.clone()), decl);
-    }
-
-    /// Look up a cached resolved Pdot type declaration.
-    pub(crate) fn find_resolved_pdot_type(
-        &self,
-        path: &Path,
-    ) -> Option<Arc<super::decl::TypeDeclaration>> {
-        self.resolved_pdot_type_cache
-            .borrow()
-            .get(&SamePathRef(path))
-            .cloned()
-    }
-
-    /// Look up a cached resolved declaration by printed name: only paths
-    /// rooted at a persistent (stamp-0) identifier are reachable this way.
-    pub(crate) fn find_resolved_pdot_type_by_name(
-        &self,
-        path: &Path,
-    ) -> Option<Arc<super::decl::TypeDeclaration>> {
-        fn persistent_dotted(path: &Path) -> bool {
-            match path {
-                Path::Pident(id) => id.is_persistent() || id.stamp() == 0,
-                Path::Pdot(parent, _, _) => persistent_dotted(parent),
-                Path::Papply(_, _) => false,
-            }
-        }
-        if !matches!(path, Path::Pdot(..)) || !persistent_dotted(path) {
-            return None;
-        }
-        self.find_resolved_pdot_type(path)
     }
 
     /// Cache a resolved module signature.
@@ -2420,64 +2005,6 @@ impl TypeContext {
             .borrow()
             .as_ref()
             .is_some_and(crate::cmi::persistent_env::PersistentEnv::is_in_process_mode)
-    }
-
-    /// Look up a type declaration by full qualified path string.
-    /// Like `find_type_decl_by_path`, but returns the shared declaration handle.
-    pub(crate) fn find_type_decl_arc_by_path(
-        &self,
-        path: &str,
-    ) -> Option<Arc<super::decl::TypeDeclaration>> {
-        self.replay_type_decl_log(TypeDeclMap::Path);
-        self.type_decl_by_path.borrow().get(path).cloned()
-    }
-
-    pub fn find_type_decl_by_path(
-        &self,
-        path: &str,
-    ) -> Option<std::cell::Ref<'_, super::decl::TypeDeclaration>> {
-        self.replay_type_decl_log(TypeDeclMap::Path);
-        std::cell::Ref::filter_map(self.type_decl_by_path.borrow(), |s| {
-            s.get(path).map(AsRef::as_ref)
-        })
-        .ok()
-    }
-
-    /// Look up a qualified declaration by exact Path identity.
-    /// The declaration registered last under exactly `path`.
-    pub fn find_type_decl_by_exact_path(
-        &self,
-        path: &Path,
-    ) -> Option<Arc<super::decl::TypeDeclaration>> {
-        self.replay_type_decl_log(TypeDeclMap::Exact);
-        let log_len = self.type_decl_log.borrow().len();
-        {
-            let mut memo = self.exact_path_memo.borrow_mut();
-            if memo.0 != log_len {
-                memo.0 = log_len;
-                memo.1.clear();
-            } else if let Some(found) = memo.1.get(path) {
-                return found.clone();
-            }
-        }
-        let singles = self.type_decl_by_exact_path.borrow();
-        let single = singles.get(path);
-        let mut found = None;
-        for (position, batch) in self.exact_path_batches.borrow().iter().rev() {
-            if single.is_some_and(|(single_position, _)| position < single_position) {
-                break;
-            }
-            if let Some(decl) = batch.find_exact(path) {
-                found = Some(decl.clone());
-                break;
-            }
-        }
-        let found = found.or_else(|| single.map(|(_, decl)| decl.clone()));
-        self.exact_path_memo
-            .borrow_mut()
-            .1
-            .insert(path.clone(), found.clone());
-        found
     }
 
     // ========================================================================
@@ -4608,12 +4135,6 @@ impl TypeContext {
                     }
                 }
                 StoreEffect::TriggerRename(name) => self.trigger_module_sig_rename(name),
-                StoreEffect::RegisterTypeDecl(name, decl) => {
-                    self.register_shared_type_decl(name, decl.clone())
-                }
-                StoreEffect::RegisterTypeDeclByStamp(stamp, decl) => {
-                    self.register_shared_type_decl_by_stamp(*stamp, decl.clone())
-                }
                 StoreEffect::RegisterAliasSource(component, source) => {
                     self.register_component_alias_source(component.clone(), source.clone())
                 }
@@ -4981,29 +4502,6 @@ mod tests {
             Some(true)
         );
         assert_eq!(ctx.find_forced_type_path_compare(7, &ty, &ty), None);
-
-        // `SamePathKey` ignores `Pdot` positions; so must its borrowed probe.
-        let decl = std::sync::Arc::new(super::super::decl::TypeDeclaration {
-            type_params: vec![],
-            type_arity: 0,
-            type_kind: super::super::TypeKind::TypeAbstract,
-            type_private: PrivateFlag::Public,
-            type_manifest: None,
-            type_variance: vec![],
-            type_newtype_level: None,
-            type_loc: crate::types::DeclLoc::none(),
-            type_attributes: vec![],
-            type_immediate: false,
-            type_representation: super::super::TypeRepresentation::Boxed,
-            type_inlined_types: vec![],
-            type_path: None,
-        });
-        ctx.register_resolved_pdot_type(&ty, decl.clone());
-        let repositioned = Path::pdot_pos(module, "t", 9);
-        assert!(
-            ctx.find_resolved_pdot_type(&repositioned)
-                .is_some_and(|found| std::sync::Arc::ptr_eq(&found, &decl))
-        );
     }
 
     #[test]
