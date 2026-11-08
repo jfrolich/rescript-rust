@@ -5,6 +5,7 @@
 //! and the operations on them used by the pattern matching compiler.
 
 use crate::fast_hash::AHashMap as HashMap;
+use crate::types::path::PathView;
 use std::borrow::{Borrow, Cow};
 use std::collections::BTreeSet;
 use std::collections::VecDeque;
@@ -15,19 +16,19 @@ use std::sync::{Arc, OnceLock};
 use crate::ident::{Ident, IdentFlags};
 use crate::lambda::LamLoc;
 use crate::lambda::LetKind;
+use crate::lambda::arena::{LamArena, Node, View};
 use crate::lambda::lam_constant::PointerInfo;
 use crate::lambda::lam_primitive::Mutable;
 use crate::lambda::{Comparison, FieldDbgInfo, Primitive, TagInfo};
 use crate::location::Location;
-use crate::parse_arena::{LocIdx, ParseArena};
-use crate::parser::ast::Attributes;
+use crate::parse_arena::LocIdx;
 use crate::raw_lambda::loc::LocArena;
 use crate::raw_lambda::switch::Shared;
 use crate::raw_lambda::typeopt::{
     constructor_has_optional_shape, has_untagged, type_cannot_contain_undefined,
     type_cannot_contain_undefined_no_env,
 };
-use crate::raw_lambda::{RawApply, RawLambda, RawLambdaSwitch, RawPrimInfo};
+use crate::raw_lambda::{RawArena, RawLambda, RawLambdaSwitch};
 use crate::types::asttypes::MutableFlag;
 use crate::types::btype;
 use crate::types::context::TypeContext;
@@ -44,11 +45,9 @@ use std::cell::RefCell;
 ///
 /// OCaml `compiler/ml/matching.ml:29-34,659-1090` keeps actions as immutable
 /// lambda values in lists, so copying case matrices shares those actions by
-/// pointer. Rust's derived `RawLambda::clone` recursively copied whole branch
-/// bodies here, which made large matches quadratic in raw-lambda size. Keep
-/// the same functional model as OCaml by sharing the action while the matrix is
-/// being transformed, and materialize the raw lambda only when final code needs
-/// ownership.
+/// pointer. Raw Lambda terms are arena handles, so an action is shared the
+/// same way; the action itself is shared so its `make_key` result is
+/// computed once.
 #[derive(Clone)]
 struct MatchAction(Arc<MatchActionData>);
 
@@ -90,29 +89,19 @@ impl From<RawLambda> for CaseAction {
 /// (`compiler/ml/matching.ml:381-386`). OCaml makes a fresh variable per
 /// comparison so no real action can mention it; a negative stamp is never
 /// allocated, which gives the same guarantee and lets keys be cached.
-fn fallthrough_stand_in() -> RawLambda {
-    RawLambda::Lvar(Ident::new(
+fn fallthrough_stand_in(b: &RawArena) -> RawLambda {
+    b.var(Ident::new(
         "fallthrough",
         -1,
         crate::ident::IdentFlags::NONE,
     ))
 }
 
-/// A shared term as a child of a new node. Constants are copied so the
-/// folding constructors see them.
-fn shared_term(term: &Arc<RawLambda>) -> RawLambda {
-    match term.as_ref() {
-        RawLambda::Lconst(_) => term.as_ref().clone(),
-        _ => RawLambda::Lshared(term.clone()),
-    }
-}
-
 enum MatchActionKind {
-    /// A case's guard and body. Shared so a compiled matching can place them
-    /// without copying (see `RawLambda::Lshared`).
+    /// A case's guard and body.
     Case {
-        guard: Option<Arc<RawLambda>>,
-        body: Arc<RawLambda>,
+        guard: Option<RawLambda>,
+        body: RawLambda,
     },
     Bind {
         kind: LetKind,
@@ -129,8 +118,8 @@ impl MatchAction {
 
     fn from_case(action: CaseAction) -> Self {
         Self::from_kind(MatchActionKind::Case {
-            guard: action.guard.map(Arc::new),
-            body: Arc::new(action.body),
+            guard: action.guard,
+            body: action.body,
         })
     }
 
@@ -141,14 +130,14 @@ impl MatchAction {
         }))
     }
 
-    fn bind(self, kind: LetKind, id: Ident, arg: RawLambda) -> Self {
+    fn bind(self, b: &RawArena, kind: LetKind, id: Ident, arg: RawLambda) -> Self {
         // OCaml `compiler/ml/matching.ml:556-566` calls
         // `Lambda.bind Alias id arg action`, and `compiler/ml/lambda.ml:560-565`
-        // shares the immutable action below the new `Llet`. Store the wrapper
-        // as a node so Rust does not deep-clone a shared action while
-        // normalizing match matrices.
-        match &arg {
-            RawLambda::Lvar(v) if v.same(&id) => self,
+        // shares the immutable action below the new `Llet`. The `Llet` is
+        // built when the action is placed (`body_with`), since a guarded
+        // action's fallthrough is only known then.
+        match b.as_var(arg) {
+            Some(v) if v.same(&id) => self,
             _ => Self::from_kind(MatchActionKind::Bind {
                 kind,
                 id,
@@ -160,41 +149,43 @@ impl MatchAction {
 
     /// `Matching.action_body_with ~fail` (`compiler/ml/matching.ml:370-376`):
     /// the guard falls through to `fail`, under the action's bindings.
-    fn body_with(&self, fail: RawLambda) -> RawLambda {
+    fn body_with(&self, b: &RawArena, fail: RawLambda) -> RawLambda {
         match &self.0.kind {
-            MatchActionKind::Case { guard: None, body } => RawLambda::Lshared(body.clone()),
+            MatchActionKind::Case { guard: None, body } => *body,
             MatchActionKind::Case {
                 guard: Some(guard),
                 body,
-            } => RawLambda::if_(shared_term(guard), shared_term(body), fail),
+            } => b.if_(*guard, *body, fail),
             MatchActionKind::Bind {
                 kind,
                 id,
                 arg,
                 action,
-            } => RawLambda::Llet(
-                *kind,
-                *id,
-                Box::new(arg.clone()),
-                Box::new(action.body_with(fail)),
-            ),
+            } => {
+                let body = action.body_with(b, fail);
+                b.let_(*kind, *id, *arg, body)
+            }
         }
     }
 
     /// An unguarded action's term (`action_body_with ~fail:lambda_unit`).
-    fn to_raw(&self) -> RawLambda {
-        self.body_with(lambda_unit())
+    fn to_raw(&self, b: &RawArena) -> RawLambda {
+        if let MatchActionKind::Case { guard: None, body } = &self.0.kind {
+            return *body;
+        }
+        let unit = lambda_unit(b);
+        self.body_with(b, unit)
     }
 
-    fn normalized_key(&self) -> Option<&str> {
+    fn normalized_key(&self, b: &RawArena) -> Option<&str> {
         // OCaml `compiler/ml/lambda.ml:432-466` computes `Lambda.make_key`, and
         // `compiler/ml/matching.ml:489-500,708-846` compares those pure keys while
         // shuffling the same immutable actions through match matrices. Cache the
         // key beside the shared action so Rust preserves the same result without
-        // materializing delayed `Llet` wrappers as full raw-lambda clones.
+        // materializing delayed `Llet` wrappers.
         self.0
             .normalized_key
-            .get_or_init(|| make_key_string_action(self))
+            .get_or_init(|| make_key_string_action(b, self))
             .as_deref()
     }
 
@@ -206,20 +197,20 @@ impl MatchAction {
     }
 
     /// `Matching.action_free_variables` (`compiler/ml/matching.ml:388-397`).
-    fn free_variables(&self) -> IdentSet {
+    fn free_variables(&self, a: &LamArena) -> IdentSet {
         match &self.0.kind {
             MatchActionKind::Case { guard, body } => {
-                let mut fv = raw_lambda_free_variables(body);
+                let mut fv = raw_lambda_free_variables(a, *body);
                 if let Some(guard) = guard {
-                    fv.extend(raw_lambda_free_variables(guard));
+                    fv.extend(raw_lambda_free_variables(a, *guard));
                 }
                 fv
             }
             MatchActionKind::Bind {
                 id, arg, action, ..
             } => {
-                let mut fv = raw_lambda_free_variables(arg);
-                fv.extend(action.free_variables());
+                let mut fv = raw_lambda_free_variables(a, *arg);
+                fv.extend(action.free_variables(a));
                 fv.remove(id);
                 fv
             }
@@ -1001,7 +992,7 @@ fn untagged_payload_type_cannot_be_undefined(
                 || path.same(&crate::types::predef::path_bigint())
                 || path.same(&crate::types::predef::path_bool())
                 || path.same(&crate::types::predef::path_array())
-                || matches!(path, crate::types::path::Path::Pident(id) if id.name() == "dict")
+                || matches!(path.view(), crate::types::path::PathView::Pident(id) if id.name() == "dict")
                 || matches!(path.name().as_str(), "Js.Dict.t" | "Js_dict.t")
         }
         crate::types::type_expr::TypeDesc::Tarrow { .. }
@@ -2045,219 +2036,196 @@ fn charge_logical_record_fields(
 /// Returns None if the lambda is too complex (functions, letrec, loops, etc.)
 ///
 /// Equivalent to OCaml's `Lambda.make_key`.
-fn make_key(e: &RawLambda) -> Option<RawLambda> {
-    let mut count = 0i32;
+fn make_key(b: &RawArena, e: RawLambda) -> Option<RawLambda> {
     type KeyEnv = Vec<(Ident, RawLambda)>;
     fn tr_rec(
+        b: &RawArena,
         env: &mut KeyEnv,
-        e: &RawLambda,
+        e: RawLambda,
         count: &mut i32,
         next_id: &mut i32,
     ) -> Option<RawLambda> {
-        let e = e.peel();
         *count += 1;
         if *count > MAX_RAW {
             return None; // Too big
         }
-        match e {
-            RawLambda::Lshared(_) => unreachable!("peeled"),
-            RawLambda::Lvar(id) => {
-                if let Some((_, replacement)) = env.iter().rev().find(|(key, _)| key.same(id)) {
-                    Some(replacement.clone())
-                } else {
-                    Some(e.clone())
+        match b.node(e) {
+            Node::Var(id) => {
+                let id = b.get().ident(id);
+                match env.iter().rev().find(|(key, _)| key.same(&id)) {
+                    Some((_, replacement)) => Some(*replacement),
+                    None => Some(e),
                 }
             }
-            RawLambda::Lconst(_) => Some(e.clone()),
-            RawLambda::LglobalModule(_) => Some(e.clone()),
-            RawLambda::Lapply(ap) => {
-                let func = tr_rec(env, &ap.ap_func, count, next_id)?;
-                let args = tr_recs(env, &ap.ap_args, count, next_id)?;
-                Some(RawLambda::Lapply(Box::new(RawApply {
-                    ap_func: Box::new(func),
-                    ap_args: args,
-                    ap_info: crate::lambda::ApInfo {
+            Node::Const(_) | Node::GlobalModule(_) => Some(e),
+            Node::Apply { func, args, info } => {
+                let func = tr_rec(b, env, func, count, next_id)?;
+                let args = tr_recs(b, env, &b.list(args), count, next_id)?;
+                let payload = b.get().apply_payload(info).clone();
+                Some(b.apply(
+                    func,
+                    &args,
+                    crate::lambda::ApInfo {
                         loc: LamLoc::NONE,
-                        ..ap.ap_info.clone()
+                        ..payload.info
                     },
-                    ap_transformed_jsx: ap.ap_transformed_jsx,
-                })))
+                    payload.transformed_jsx,
+                ))
             }
-            RawLambda::Llet(LetKind::Alias, x, ex, body) => {
-                // Ignore aliases -> substitute
-                let ex = tr_rec(env, ex, count, next_id)?;
-                env.push((*x, ex));
-                let result = tr_rec(env, body, count, next_id);
-                env.pop();
-                result
-            }
-            RawLambda::Llet(kind, x, ex, body)
-                if matches!(
-                    (kind, body.as_ref()),
-                    (LetKind::Strict | LetKind::StrictOpt, RawLambda::Lvar(v)) if v.same(x)
-                ) =>
-            {
-                // Llet (Strict|StrictOpt, x, ex, Lvar v) when v same x -> tr_rec ex
-                tr_rec(env, ex, count, next_id)
-            }
-            RawLambda::Llet(kind, x, ex, body) => {
+            Node::Let {
+                kind,
+                id,
+                value,
+                body,
+            } => {
+                let x = b.get().ident(id);
+                if kind == LetKind::Alias {
+                    // Ignore aliases -> substitute
+                    let ex = tr_rec(b, env, value, count, next_id)?;
+                    env.push((x, ex));
+                    let result = tr_rec(b, env, body, count, next_id);
+                    env.pop();
+                    return result;
+                }
+                if matches!(kind, LetKind::Strict | LetKind::StrictOpt)
+                    && matches!(b.as_var(body), Some(v) if v.same(&x))
+                {
+                    // Llet (Strict|StrictOpt, x, ex, Lvar v) when v same x -> tr_rec ex
+                    return tr_rec(b, env, value, count, next_id);
+                }
                 // Because of side effects, keep other lets with normalized names
-                let ex_norm = tr_rec(env, ex, count, next_id)?;
+                let ex_norm = tr_rec(b, env, value, count, next_id)?;
                 let y = Ident::new(x.name(), *next_id, IdentFlags::NONE);
                 *next_id += 1;
-                env.push((*x, RawLambda::Lvar(y)));
-                let body_norm = tr_rec(env, body, count, next_id)?;
+                let y_var = b.var(y);
+                env.push((x, y_var));
+                let body_norm = tr_rec(b, env, body, count, next_id);
                 env.pop();
-                Some(RawLambda::Llet(
-                    *kind,
-                    y,
-                    Box::new(ex_norm),
-                    Box::new(body_norm),
-                ))
+                Some(b.let_(kind, y, ex_norm, body_norm?))
             }
-            RawLambda::Lprim(info) => {
-                charge_logical_record_fields(count, &info.primitive, info.args.len())?;
-                let args = tr_recs(env, &info.args, count, next_id)?;
-                Some(RawLambda::Lprim(Box::new(RawPrimInfo {
-                    primitive: info.primitive.clone(),
-                    args,
-                    loc: LamLoc::NONE,
-                })))
+            Node::Prim { args, info } => {
+                let primitive = b.get().prim_payload(info).primitive.clone();
+                let args = b.list(args);
+                charge_logical_record_fields(count, &primitive, args.len())?;
+                let args = tr_recs(b, env, &args, count, next_id)?;
+                Some(b.prim(primitive, &args, LamLoc::NONE))
             }
-            RawLambda::Lswitch(scrut, sw) => {
-                let scrut_norm = tr_rec(env, scrut, count, next_id)?;
-                let sw_norm = tr_sw(env, sw, count, next_id)?;
-                Some(RawLambda::Lswitch(Box::new(scrut_norm), Box::new(sw_norm)))
-            }
-            RawLambda::LstringSwitch(scrut, cases, default) => {
-                let scrut_norm = tr_rec(env, scrut, count, next_id)?;
-                let mut norm_cases = Vec::new();
-                for (s, act) in cases {
-                    norm_cases.push((s.clone(), tr_rec(env, act, count, next_id)?));
+            Node::Switch { scrut, .. } => {
+                let (_, sw) = b.switch_parts(e).expect("switch node");
+                let scrut_norm = tr_rec(b, env, scrut, count, next_id)?;
+                let mut consts = Vec::with_capacity(sw.sw_consts.len());
+                for (tag, act) in sw.sw_consts {
+                    consts.push((tag, tr_rec(b, env, act, count, next_id)?));
                 }
-                let norm_default = tr_opt(env, default.as_deref(), count, next_id)?;
-                Some(RawLambda::LstringSwitch(
-                    Box::new(scrut_norm),
-                    norm_cases,
-                    norm_default.map(Box::new),
+                let mut blocks = Vec::with_capacity(sw.sw_blocks.len());
+                for (tag, act) in sw.sw_blocks {
+                    blocks.push((tag, tr_rec(b, env, act, count, next_id)?));
+                }
+                let fail = match sw.sw_failaction {
+                    None => None,
+                    Some(fail) => Some(tr_rec(b, env, fail, count, next_id)?),
+                };
+                Some(b.switch(
+                    scrut_norm,
+                    RawLambdaSwitch {
+                        sw_consts_full: sw.sw_consts_full,
+                        sw_consts: consts,
+                        sw_blocks_full: sw.sw_blocks_full,
+                        sw_blocks: blocks,
+                        sw_failaction: fail,
+                        sw_dispatch: sw.sw_dispatch,
+                    },
                 ))
             }
-            RawLambda::LstaticRaise(i, es) => {
-                let args = tr_recs(env, es, count, next_id)?;
-                Some(RawLambda::LstaticRaise(*i, args))
+            Node::StringSwitch { .. } => {
+                let (scrut, cases, default) = b.string_switch_parts(e).expect("string switch");
+                let scrut_norm = tr_rec(b, env, scrut, count, next_id)?;
+                let mut norm_cases = Vec::with_capacity(cases.len());
+                for (s, act) in cases {
+                    norm_cases.push((s, tr_rec(b, env, act, count, next_id)?));
+                }
+                let default = match default {
+                    None => None,
+                    Some(default) => Some(tr_rec(b, env, default, count, next_id)?),
+                };
+                Some(b.string_switch(scrut_norm, &norm_cases, default))
             }
-            RawLambda::LstaticCatch(e1, xs, e2) => {
-                let e1_norm = tr_rec(env, e1, count, next_id)?;
-                let e2_norm = tr_rec(env, e2, count, next_id)?;
-                Some(RawLambda::LstaticCatch(
-                    Box::new(e1_norm),
-                    xs.clone(),
-                    Box::new(e2_norm),
-                ))
+            Node::StaticRaise { label, args } => {
+                let args = tr_recs(b, env, &b.list(args), count, next_id)?;
+                Some(b.static_raise(label, &args))
             }
-            RawLambda::LtryWith(e1, x, e2) => {
-                let e1_norm = tr_rec(env, e1, count, next_id)?;
-                let e2_norm = tr_rec(env, e2, count, next_id)?;
-                Some(RawLambda::LtryWith(
-                    Box::new(e1_norm),
-                    *x,
-                    Box::new(e2_norm),
-                ))
+            Node::StaticCatch {
+                body,
+                handler,
+                info,
+            } => {
+                let body = tr_rec(b, env, body, count, next_id)?;
+                let handler = tr_rec(b, env, handler, count, next_id)?;
+                Some(b.push(Node::StaticCatch {
+                    body,
+                    handler,
+                    info,
+                }))
             }
-            RawLambda::LifThenElse(cond, ifso, ifnot) => {
-                let cond_norm = tr_rec(env, cond, count, next_id)?;
-                let ifso_norm = tr_rec(env, ifso, count, next_id)?;
-                let ifnot_norm = tr_rec(env, ifnot, count, next_id)?;
-                Some(RawLambda::LifThenElse(
-                    Box::new(cond_norm),
-                    Box::new(ifso_norm),
-                    Box::new(ifnot_norm),
-                ))
+            Node::TryWith { body, id, handler } => {
+                let body = tr_rec(b, env, body, count, next_id)?;
+                let handler = tr_rec(b, env, handler, count, next_id)?;
+                Some(b.push(Node::TryWith { body, id, handler }))
             }
-            RawLambda::Lsequence(e1, e2) => {
-                let e1_norm = tr_rec(env, e1, count, next_id)?;
-                let e2_norm = tr_rec(env, e2, count, next_id)?;
-                Some(RawLambda::Lsequence(Box::new(e1_norm), Box::new(e2_norm)))
+            Node::If { cond, then_, else_ } => {
+                let cond = tr_rec(b, env, cond, count, next_id)?;
+                let then_ = tr_rec(b, env, then_, count, next_id)?;
+                let else_ = tr_rec(b, env, else_, count, next_id)?;
+                Some(b.if_raw(cond, then_, else_))
             }
-            RawLambda::Lassign(x, e) => {
-                let e_norm = tr_rec(env, e, count, next_id)?;
-                Some(RawLambda::Lassign(*x, Box::new(e_norm)))
+            Node::Sequence(e1, e2) => {
+                let e1 = tr_rec(b, env, e1, count, next_id)?;
+                let e2 = tr_rec(b, env, e2, count, next_id)?;
+                Some(b.seq(e1, e2))
+            }
+            Node::Assign { id, value } => {
+                let value = tr_rec(b, env, value, count, next_id)?;
+                Some(b.push(Node::Assign { id, value }))
             }
             // OCaml `Lambda.make_key` after #8348:
             // `Lbreak -> Lbreak | Lcontinue -> Lcontinue`.
-            RawLambda::Lbreak => Some(RawLambda::Lbreak),
-            RawLambda::Lcontinue => Some(RawLambda::Lcontinue),
+            Node::Break | Node::Continue => Some(e),
             // Functions, letrec, loops are not simple
-            RawLambda::Lletrec(..)
-            | RawLambda::Lfunction(..)
-            | RawLambda::Lfor(..)
-            | RawLambda::Lfor_of(..)
-            | RawLambda::Lfor_await_of(..)
-            | RawLambda::Lwhile(..) => None,
+            Node::LetRec { .. }
+            | Node::Function { .. }
+            | Node::For { .. }
+            | Node::ForOf { .. }
+            | Node::ForAwaitOf { .. }
+            | Node::While(..) => None,
         }
     }
 
     fn tr_recs(
+        b: &RawArena,
         env: &mut KeyEnv,
         es: &[RawLambda],
         count: &mut i32,
         next_id: &mut i32,
     ) -> Option<Vec<RawLambda>> {
-        es.iter().map(|e| tr_rec(env, e, count, next_id)).collect()
+        es.iter()
+            .map(|e| tr_rec(b, env, *e, count, next_id))
+            .collect()
     }
 
-    fn tr_sw(
-        env: &mut KeyEnv,
-        sw: &RawLambdaSwitch,
-        count: &mut i32,
-        next_id: &mut i32,
-    ) -> Option<RawLambdaSwitch> {
-        let mut consts = Vec::new();
-        for (tag, act) in &sw.sw_consts {
-            consts.push((tag.clone(), tr_rec(env, act, count, next_id)?));
-        }
-        let mut blocks = Vec::new();
-        for (tag, act) in &sw.sw_blocks {
-            blocks.push((tag.clone(), tr_rec(env, act, count, next_id)?));
-        }
-        let fail = tr_opt(env, sw.sw_failaction.as_deref(), count, next_id)?;
-        Some(RawLambdaSwitch {
-            sw_consts_full: sw.sw_consts_full,
-            sw_consts: consts,
-            sw_blocks_full: sw.sw_blocks_full,
-            sw_blocks: blocks,
-            sw_failaction: fail.map(Box::new),
-            sw_dispatch: sw.sw_dispatch.clone(),
-        })
-    }
-
-    fn tr_opt(
-        env: &mut KeyEnv,
-        e: Option<&RawLambda>,
-        count: &mut i32,
-        next_id: &mut i32,
-    ) -> Option<Option<RawLambda>> {
-        match e {
-            None => Some(None),
-            Some(e) => Some(Some(tr_rec(env, e, count, next_id)?)),
-        }
-    }
-
-    let mut next_id = 0i32;
     // OCaml's `Lambda.make_key` extends a tiny identifier environment with
     // `Ident.add` while capped by `max_raw = 32`
     // (`compiler/ml/lambda.ml:432-466`). Use a stack of bindings here instead
     // of cloning a hash table for every normalized `let`.
-    tr_rec(&mut Vec::new(), e, &mut count, &mut next_id)
+    tr_rec(b, &mut Vec::new(), e, &mut 0, &mut 0)
 }
 
 /// Convert a RawLambda to a string key for comparison purposes.
 /// Returns None if the lambda cannot be normalized.
-fn make_key_string(e: &RawLambda) -> Option<String> {
-    let mut writer = MakeKeyWriter::new();
-    let mut out = String::with_capacity(128);
-    writer.write_raw(e, &mut out)?;
-    Some(out)
+fn make_key_string(b: &RawArena, e: RawLambda) -> Option<String> {
+    let mut writer = MakeKeyWriter::new(b);
+    let mut out = KeyOut::new(128);
+    writer.write_raw(&b.get(), e, &mut out)?;
+    Some(out.buf)
 }
 
 /// Convert a delayed match action to the same structural key as
@@ -2268,166 +2236,262 @@ fn make_key_string(e: &RawLambda) -> Option<String> {
 /// action lets as `MatchActionKind::Bind` to preserve that sharing; this
 /// traverses those wrappers as if they were `Llet` nodes while keeping the
 /// `max_raw = 32` cutoff from `lambda.ml:434,438-440`.
-fn make_key_string_action(action: &MatchAction) -> Option<String> {
-    let mut writer = MakeKeyWriter::new();
-    let mut out = String::with_capacity(128);
+fn make_key_string_action(b: &RawArena, action: &MatchAction) -> Option<String> {
+    let mut writer = MakeKeyWriter::new(b);
+    let mut out = KeyOut::new(128);
     writer.write_action(action, &mut out)?;
-    Some(out)
+    Some(out.buf)
+}
+
+/// Whether `e`'s `Lambda.make_key` exists and equals `key`. Writes the key
+/// against `key` and stops at the first byte that differs, so unequal
+/// actions are rejected without normalizing them in full.
+fn make_key_equals(b: &RawArena, e: RawLambda, key: &str) -> bool {
+    let mut writer = MakeKeyWriter::new(b);
+    let mut out = KeyOut::expecting(key);
+    writer.write_raw(&b.get(), e, &mut out).is_some() && out.matches_all()
+}
+
+/// Sink for [`MakeKeyWriter`]: builds the key, or compares it with an
+/// expected key as it is written.
+struct KeyOut<'e> {
+    buf: String,
+    expect: Option<&'e str>,
+    pos: usize,
+    diverged: bool,
+}
+
+impl<'e> KeyOut<'e> {
+    fn new(capacity: usize) -> Self {
+        KeyOut {
+            buf: String::with_capacity(capacity),
+            expect: None,
+            pos: 0,
+            diverged: false,
+        }
+    }
+
+    fn expecting(key: &'e str) -> Self {
+        KeyOut {
+            buf: String::new(),
+            expect: Some(key),
+            pos: 0,
+            diverged: false,
+        }
+    }
+
+    fn push_str(&mut self, s: &str) {
+        match self.expect {
+            None => self.buf.push_str(s),
+            Some(key) => {
+                if !self.diverged
+                    && key.as_bytes().get(self.pos..self.pos + s.len()) == Some(s.as_bytes())
+                {
+                    self.pos += s.len();
+                } else {
+                    self.diverged = true;
+                }
+            }
+        }
+    }
+
+    fn push(&mut self, c: char) {
+        self.push_str(c.encode_utf8(&mut [0; 4]));
+    }
+
+    fn matches_all(&self) -> bool {
+        !self.diverged && self.expect.is_some_and(|key| key.len() == self.pos)
+    }
+}
+
+impl std::fmt::Write for KeyOut<'_> {
+    fn write_str(&mut self, s: &str) -> std::fmt::Result {
+        self.push_str(s);
+        if self.diverged {
+            Err(std::fmt::Error)
+        } else {
+            Ok(())
+        }
+    }
 }
 
 enum KeyBody<'a> {
-    Raw(&'a RawLambda),
+    Raw(RawLambda),
     Action(&'a MatchAction),
 }
 
-struct MakeKeyWriter {
+/// Writes `Lambda.make_key`. Reads hold the arena only inside
+/// [`MakeKeyWriter::write_raw_after_count`], which never reaches an action;
+/// a guarded action's key term is built in [`MakeKeyWriter::write_action`].
+struct MakeKeyWriter<'b> {
+    b: &'b RawArena,
     count: i32,
     next_id: i32,
     env: Vec<(Ident, String)>,
 }
 
-impl MakeKeyWriter {
-    fn new() -> Self {
+impl<'b> MakeKeyWriter<'b> {
+    fn new(b: &'b RawArena) -> Self {
         Self {
+            b,
             count: 0,
             next_id: 0,
             env: Vec::new(),
         }
     }
 
-    fn write_raw(&mut self, e: &RawLambda, out: &mut String) -> Option<()> {
+    fn write_raw(&mut self, a: &LamArena, e: RawLambda, out: &mut KeyOut<'_>) -> Option<()> {
         self.count += 1;
-        if self.count > MAX_RAW {
+        if self.count > MAX_RAW || out.diverged {
             return None;
         }
-        self.write_raw_after_count(e, out)
+        self.write_raw_after_count(a, e, out)
     }
 
-    fn write_action(&mut self, action: &MatchAction, out: &mut String) -> Option<()> {
+    fn write_action(&mut self, action: &MatchAction, out: &mut KeyOut<'_>) -> Option<()> {
         self.count += 1;
         if self.count > MAX_RAW {
             return None;
         }
         match &action.0.kind {
-            MatchActionKind::Case { guard: None, body } => self.write_raw_after_count(body, out),
+            MatchActionKind::Case { guard: None, body } => {
+                self.write_raw_after_count(&self.b.get(), *body, out)
+            }
             // `Matching.action_key_term` (`compiler/ml/matching.ml:381-386`).
             MatchActionKind::Case { guard: Some(_), .. } => {
-                let term = action.body_with(fallthrough_stand_in());
-                self.write_raw_after_count(&term, out)
+                let fallthrough = fallthrough_stand_in(self.b);
+                let term = action.body_with(self.b, fallthrough);
+                self.write_raw_after_count(&self.b.get(), term, out)
             }
             MatchActionKind::Bind {
                 kind,
                 id,
                 arg,
                 action,
-            } => self.write_let(*kind, id, arg, KeyBody::Action(action), out),
+            } => self.write_let(None, *kind, id, *arg, KeyBody::Action(action), out),
         }
     }
 
-    fn write_body(&mut self, body: KeyBody<'_>, out: &mut String) -> Option<()> {
+    fn write_body(
+        &mut self,
+        a: Option<&LamArena>,
+        body: KeyBody<'_>,
+        out: &mut KeyOut<'_>,
+    ) -> Option<()> {
         match body {
-            KeyBody::Raw(raw) => self.write_raw(raw, out),
+            KeyBody::Raw(raw) => match a {
+                Some(a) => self.write_raw(a, raw, out),
+                None => self.write_raw(&self.b.get(), raw, out),
+            },
             KeyBody::Action(action) => self.write_action(action, out),
         }
     }
 
-    fn write_raw_after_count(&mut self, e: &RawLambda, out: &mut String) -> Option<()> {
-        match e {
-            // A shared action counts as the node it wraps.
-            RawLambda::Lshared(inner) => self.write_raw_after_count(inner, out),
-            RawLambda::Lvar(id) => {
-                if let Some((_, replacement)) = self.env.iter().rev().find(|(key, _)| key.same(id))
+    fn write_raw_after_count(
+        &mut self,
+        a: &LamArena,
+        e: RawLambda,
+        out: &mut KeyOut<'_>,
+    ) -> Option<()> {
+        match a.view(e) {
+            View::Var(id) => {
+                if let Some((_, replacement)) = self.env.iter().rev().find(|(key, _)| key.same(&id))
                 {
                     out.push_str(replacement);
                 } else {
                     out.push_str("Lvar(");
-                    write_ident_key(out, id);
+                    write_ident_key(out, &id);
                     out.push(')');
                 }
                 Some(())
             }
-            RawLambda::Lconst(c) => {
+            View::Const(c) => {
                 write!(out, "Lconst({c:?})").ok()?;
                 Some(())
             }
-            RawLambda::LglobalModule(id) => {
+            View::GlobalModule(id) => {
                 out.push_str("LglobalModule(");
-                write_ident_key(out, id);
+                write_ident_key(out, &id);
                 out.push(')');
                 Some(())
             }
-            RawLambda::Lapply(ap) => {
+            View::Apply {
+                func,
+                args,
+                info,
+                transformed_jsx,
+            } => {
                 out.push_str("Lapply(");
-                self.write_raw(&ap.ap_func, out)?;
+                self.write_raw(a, func, out)?;
                 out.push_str(",[");
-                self.write_raw_list(&ap.ap_args, out)?;
+                self.write_raw_list(a, args, out)?;
                 write!(
                     out,
                     "],{:?},{:?},{})",
-                    ap.ap_info.inlined, ap.ap_info.status, ap.ap_transformed_jsx
+                    info.inlined, info.status, transformed_jsx
                 )
                 .ok()?;
                 Some(())
             }
-            RawLambda::Llet(kind, x, ex, body) => {
-                self.write_let(*kind, x, ex, KeyBody::Raw(body), out)
+            View::Let(kind, x, ex, body) => {
+                self.write_let(Some(a), kind, &x, ex, KeyBody::Raw(body), out)
             }
-            RawLambda::Lprim(info) => {
-                charge_logical_record_fields(&mut self.count, &info.primitive, info.args.len())?;
-                write!(out, "Lprim({:?},[", info.primitive).ok()?;
-                self.write_raw_list(&info.args, out)?;
+            View::Prim(primitive, args, _) => {
+                charge_logical_record_fields(&mut self.count, primitive, args.len())?;
+                write!(out, "Lprim({primitive:?},[").ok()?;
+                self.write_raw_list(a, args, out)?;
                 out.push_str("])");
                 Some(())
             }
-            RawLambda::Lswitch(scrut, sw) => {
+            View::Switch(scrut, sw) => {
                 out.push_str("Lswitch(");
-                self.write_raw(scrut, out)?;
-                write!(out, ",fullc={},consts=[", sw.sw_consts_full).ok()?;
-                for (idx, (tag, act)) in sw.sw_consts.iter().enumerate() {
+                self.write_raw(a, scrut, out)?;
+                write!(out, ",fullc={},consts=[", sw.payload.consts_full).ok()?;
+                for (idx, (tag, act)) in sw.consts().enumerate() {
                     if idx > 0 {
                         out.push(',');
                     }
                     write!(out, "{tag}:").ok()?;
-                    self.write_raw(act, out)?;
+                    self.write_raw(a, act, out)?;
                 }
-                write!(out, "],fullb={},blocks=[", sw.sw_blocks_full).ok()?;
-                for (idx, (tag, act)) in sw.sw_blocks.iter().enumerate() {
+                write!(out, "],fullb={},blocks=[", sw.payload.blocks_full).ok()?;
+                for (idx, (tag, act)) in sw.blocks().enumerate() {
                     if idx > 0 {
                         out.push(',');
                     }
                     write!(out, "{tag}:").ok()?;
-                    self.write_raw(act, out)?;
+                    self.write_raw(a, act, out)?;
                 }
                 out.push_str("],fail=");
-                self.write_raw_opt(sw.sw_failaction.as_deref(), out)?;
-                write!(out, ",names={:?})", sw.sw_dispatch).ok()?;
+                self.write_raw_opt(a, sw.actions.fail, out)?;
+                write!(out, ",names={:?})", sw.payload.dispatch).ok()?;
                 Some(())
             }
-            RawLambda::LstringSwitch(scrut, cases, default) => {
+            View::StringSwitch(scrut, sw) => {
                 out.push_str("LstringSwitch(");
-                self.write_raw(scrut, out)?;
+                self.write_raw(a, scrut, out)?;
                 out.push_str(",[");
-                for (idx, (label, act)) in cases.iter().enumerate() {
+                for (idx, (label, act)) in sw.cases().enumerate() {
                     if idx > 0 {
                         out.push(',');
                     }
                     write!(out, "{label:?}:").ok()?;
-                    self.write_raw(act, out)?;
+                    self.write_raw(a, act, out)?;
                 }
                 out.push_str("],");
-                self.write_raw_opt(default.as_deref(), out)?;
+                self.write_raw_opt(a, sw.default, out)?;
                 out.push(')');
                 Some(())
             }
-            RawLambda::LstaticRaise(i, args) => {
+            View::StaticRaise(i, args) => {
                 write!(out, "LstaticRaise({i},[").ok()?;
-                self.write_raw_list(args, out)?;
+                self.write_raw_list(a, args, out)?;
                 out.push_str("])");
                 Some(())
             }
-            RawLambda::LstaticCatch(e1, (i, vars), e2) => {
+            View::StaticCatch(e1, i, vars, e2) => {
                 write!(out, "LstaticCatch(").ok()?;
-                self.write_raw(e1, out)?;
+                self.write_raw(a, e1, out)?;
                 write!(out, ",({i},[").ok()?;
                 for (idx, var) in vars.iter().enumerate() {
                     if idx > 0 {
@@ -2436,81 +2500,94 @@ impl MakeKeyWriter {
                     write_ident_key(out, var);
                 }
                 out.push_str("]),");
-                self.write_raw(e2, out)?;
+                self.write_raw(a, e2, out)?;
                 out.push(')');
                 Some(())
             }
-            RawLambda::LtryWith(e1, x, e2) => {
+            View::TryWith(e1, x, e2) => {
                 out.push_str("LtryWith(");
-                self.write_raw(e1, out)?;
+                self.write_raw(a, e1, out)?;
                 out.push(',');
-                write_ident_key(out, x);
+                write_ident_key(out, &x);
                 out.push(',');
-                self.write_raw(e2, out)?;
+                self.write_raw(a, e2, out)?;
                 out.push(')');
                 Some(())
             }
-            RawLambda::LifThenElse(cond, ifso, ifnot) => {
+            View::If(cond, ifso, ifnot) => {
                 out.push_str("LifThenElse(");
-                self.write_raw(cond, out)?;
+                self.write_raw(a, cond, out)?;
                 out.push(',');
-                self.write_raw(ifso, out)?;
+                self.write_raw(a, ifso, out)?;
                 out.push(',');
-                self.write_raw(ifnot, out)?;
+                self.write_raw(a, ifnot, out)?;
                 out.push(')');
                 Some(())
             }
-            RawLambda::Lsequence(e1, e2) => {
+            View::Sequence(e1, e2) => {
                 out.push_str("Lsequence(");
-                self.write_raw(e1, out)?;
+                self.write_raw(a, e1, out)?;
                 out.push(',');
-                self.write_raw(e2, out)?;
+                self.write_raw(a, e2, out)?;
                 out.push(')');
                 Some(())
             }
-            RawLambda::Lassign(x, e) => {
+            View::Assign(x, e) => {
                 out.push_str("Lassign(");
-                write_ident_key(out, x);
+                write_ident_key(out, &x);
                 out.push(',');
-                self.write_raw(e, out)?;
+                self.write_raw(a, e, out)?;
                 out.push(')');
                 Some(())
             }
-            RawLambda::Lbreak => {
+            View::Break => {
                 out.push_str("Lbreak");
                 Some(())
             }
-            RawLambda::Lcontinue => {
+            View::Continue => {
                 out.push_str("Lcontinue");
                 Some(())
             }
-            RawLambda::Lletrec(..)
-            | RawLambda::Lfunction(..)
-            | RawLambda::Lfor(..)
-            | RawLambda::Lfor_of(..)
-            | RawLambda::Lfor_await_of(..)
-            | RawLambda::Lwhile(..) => None,
+            View::LetRec(..)
+            | View::Function { .. }
+            | View::For(..)
+            | View::ForOf(..)
+            | View::ForAwaitOf(..)
+            | View::While(..) => None,
         }
     }
 
+    /// `a` is the held arena when the let is a raw node, `None` when it is
+    /// an action's binding (whose body may need building).
     fn write_let(
         &mut self,
+        a: Option<&LamArena>,
         kind: LetKind,
         x: &Ident,
-        ex: &RawLambda,
+        ex: RawLambda,
         body: KeyBody<'_>,
-        out: &mut String,
+        out: &mut KeyOut<'_>,
     ) -> Option<()> {
         if kind == LetKind::Alias {
-            let ex_key = self.raw_to_string(ex)?;
+            let ex_key = match a {
+                Some(a) => self.raw_to_string(a, ex)?,
+                None => self.raw_to_string(&self.b.get(), ex)?,
+            };
             self.env.push((*x, ex_key));
-            let result = self.write_body(body, out);
+            let result = self.write_body(a, body, out);
             self.env.pop();
             return result;
         }
 
-        if matches!(kind, LetKind::Strict | LetKind::StrictOpt) && same_var_body(&body, x) {
-            return self.write_raw(ex, out);
+        let same_var = match a {
+            Some(a) => same_var_body(a, &body, x),
+            None => same_var_body(&self.b.get(), &body, x),
+        };
+        if matches!(kind, LetKind::Strict | LetKind::StrictOpt) && same_var {
+            return match a {
+                Some(a) => self.write_raw(a, ex, out),
+                None => self.write_raw(&self.b.get(), ex, out),
+            };
         }
 
         out.push_str("Llet(");
@@ -2519,42 +2596,55 @@ impl MakeKeyWriter {
         self.next_id += 1;
         write_synthetic_ident_key(out, x.name(), synthetic_stamp);
         out.push(',');
-        self.write_raw(ex, out)?;
+        match a {
+            Some(a) => self.write_raw(a, ex, out)?,
+            None => self.write_raw(&self.b.get(), ex, out)?,
+        }
         out.push(',');
-        let mut replacement = String::with_capacity(x.name().len() + 16);
+        let mut replacement = KeyOut::new(x.name().len() + 16);
         replacement.push_str("Lvar(");
         write_synthetic_ident_key(&mut replacement, x.name(), synthetic_stamp);
         replacement.push(')');
-        self.env.push((*x, replacement));
-        let result = self.write_body(body, out);
+        self.env.push((*x, replacement.buf));
+        let result = self.write_body(a, body, out);
         self.env.pop();
         result?;
         out.push(')');
         Some(())
     }
 
-    fn raw_to_string(&mut self, e: &RawLambda) -> Option<String> {
-        let mut out = String::with_capacity(64);
-        self.write_raw(e, &mut out)?;
-        Some(out)
+    fn raw_to_string(&mut self, a: &LamArena, e: RawLambda) -> Option<String> {
+        let mut out = KeyOut::new(64);
+        self.write_raw(a, e, &mut out)?;
+        Some(out.buf)
     }
 
-    fn write_raw_list(&mut self, items: &[RawLambda], out: &mut String) -> Option<()> {
+    fn write_raw_list(
+        &mut self,
+        a: &LamArena,
+        items: &[RawLambda],
+        out: &mut KeyOut<'_>,
+    ) -> Option<()> {
         for (idx, item) in items.iter().enumerate() {
             if idx > 0 {
                 out.push(',');
             }
-            self.write_raw(item, out)?;
+            self.write_raw(a, *item, out)?;
         }
         Some(())
     }
 
-    fn write_raw_opt(&mut self, item: Option<&RawLambda>, out: &mut String) -> Option<()> {
+    fn write_raw_opt(
+        &mut self,
+        a: &LamArena,
+        item: Option<RawLambda>,
+        out: &mut KeyOut<'_>,
+    ) -> Option<()> {
         match item {
             None => out.push_str("None"),
             Some(item) => {
                 out.push_str("Some(");
-                self.write_raw(item, out)?;
+                self.write_raw(a, item, out)?;
                 out.push(')');
             }
         }
@@ -2562,17 +2652,17 @@ impl MakeKeyWriter {
     }
 }
 
-fn same_var_body(body: &KeyBody<'_>, id: &Ident) -> bool {
+fn same_var_body(a: &LamArena, body: &KeyBody<'_>, id: &Ident) -> bool {
     match body {
-        KeyBody::Raw(raw) if matches!(raw.peel(), RawLambda::Lvar(v) if v.same(id)) => true,
-        KeyBody::Action(action) => {
-            matches!(&action.0.kind, MatchActionKind::Case { guard: None, body } if matches!(&**body, RawLambda::Lvar(v) if v.same(id)))
-        }
-        _ => false,
+        KeyBody::Raw(raw) => matches!(a.as_var(*raw), Some(v) if v.same(id)),
+        KeyBody::Action(action) => matches!(
+            &action.0.kind,
+            MatchActionKind::Case { guard: None, body } if matches!(a.as_var(*body), Some(v) if v.same(id))
+        ),
     }
 }
 
-fn write_ident_key(out: &mut String, id: &Ident) {
+fn write_ident_key(out: &mut KeyOut<'_>, id: &Ident) {
     match id.stamp() {
         0 => {
             out.push_str(id.name());
@@ -2586,12 +2676,12 @@ fn write_ident_key(out: &mut String, id: &Ident) {
     }
 }
 
-fn write_synthetic_ident_key(out: &mut String, name: &str, stamp: i32) {
+fn write_synthetic_ident_key(out: &mut KeyOut<'_>, name: &str, stamp: i32) {
     write_synthetic_ident_key_with_global(out, name, stamp, false);
 }
 
 fn write_synthetic_ident_key_with_global(
-    out: &mut String,
+    out: &mut KeyOut<'_>,
     name: &str,
     stamp: i32,
     is_global: bool,
@@ -2604,8 +2694,8 @@ fn write_synthetic_ident_key_with_global(
         out.push('#');
     } else {
         out.push_str(name);
-        write!(out, "/{stamp}").expect("writing to String cannot fail");
-        if is_global {
+        // Fails only when a comparing sink has already diverged.
+        if write!(out, "/{stamp}").is_ok() && is_global {
             out.push('g');
         }
     }
@@ -2621,7 +2711,8 @@ fn write_synthetic_ident_key_with_global(
 ///
 /// Uses string keys (from `make_key` normalization) for comparison,
 /// since RawLambda doesn't implement PartialEq/Ord.
-pub struct StoreExp {
+pub struct StoreExp<'b> {
+    b: &'b RawArena,
     /// Map from normalized key string -> action index.
     ///
     /// OCaml uses `AMap` for lookup in `Switch.Store.store`
@@ -2634,11 +2725,12 @@ pub struct StoreExp {
     acts: Vec<(bool, RawLambda)>,
 }
 
-impl StoreExp {
+impl<'b> StoreExp<'b> {
     /// Create a new empty store.
     /// Equivalent to OCaml's `mk_store`.
-    pub fn mk_store() -> Self {
+    pub fn mk_store(b: &'b RawArena) -> Self {
         StoreExp {
+            b,
             map: HashMap::new(),
             acts: Vec::new(),
         }
@@ -2652,7 +2744,7 @@ impl StoreExp {
 
     /// Internal: store an action, deduplicating if possible.
     fn store(&mut self, must_share: bool, act: RawLambda) -> usize {
-        match make_key_string(&act) {
+        match make_key_string(self.b, act) {
             Some(key) => {
                 if let Some(&i) = self.map.get(&key) {
                     self.acts[i].0 = true;
@@ -2701,36 +2793,14 @@ impl StoreExp {
     }
 }
 
-fn materialize_resolved_action(
-    resolved_acts: &mut [Option<RawLambda>],
-    use_counts: &[usize],
-    idx: usize,
-) -> RawLambda {
-    // OCaml's switch store shares immutable action pointers
-    // (`compiler/ml/switch.ml:55-76`, used from
-    // `compiler/ml/matching.ml:1609-1659,1761-1833`). Once Rust has decided
-    // which actions are truly shared, single-use actions can be moved into the
-    // output switch instead of recursively cloning their raw-lambda bodies.
-    if use_counts[idx] == 1 {
-        resolved_acts[idx]
-            .take()
-            .expect("single-use resolved action should still be available")
-    } else {
-        resolved_acts[idx]
-            .as_ref()
-            .expect("shared resolved action should still be available")
-            .clone()
-    }
-}
-
 // ============================================================================
 // make_exit — Lstaticraise(i, [])
 // ============================================================================
 
 /// Create a static raise with no arguments.
 /// Equivalent to OCaml's `make_exit`.
-pub fn make_exit(i: i32) -> RawLambda {
-    RawLambda::LstaticRaise(i, Vec::new())
+pub fn make_exit(b: &RawArena, i: i32) -> RawLambda {
+    b.static_raise(i, &[])
 }
 
 // ============================================================================
@@ -2743,15 +2813,18 @@ pub fn make_exit(i: i32) -> RawLambda {
 ///
 /// Equivalent to OCaml's `make_catch`.
 pub fn make_catch(
+    b: &RawArena,
     d: RawLambda,
     next_raise_count: &mut i32,
     k: impl FnOnce(RawLambda) -> RawLambda,
 ) -> RawLambda {
-    match d.peel() {
-        RawLambda::LstaticRaise(_, args) if args.is_empty() => k(d),
+    match b.node(d) {
+        Node::StaticRaise { args, .. } if args == LamArena::EMPTY => k(d),
         _ => {
             let e = bump_raise_count(next_raise_count);
-            RawLambda::LstaticCatch(Box::new(k(make_exit(e))), (e, Vec::new()), Box::new(d))
+            let exit = make_exit(b, e);
+            let body = k(exit);
+            b.static_catch(body, e, &[], d)
         }
     }
 }
@@ -2764,10 +2837,10 @@ pub fn make_catch(
 /// Returns the exit number if so.
 ///
 /// Equivalent to OCaml's `as_simple_exit`.
-pub fn as_simple_exit(lam: &RawLambda) -> Option<i32> {
-    match lam.peel() {
-        RawLambda::LstaticRaise(i, args) if args.is_empty() => Some(*i),
-        RawLambda::Llet(LetKind::Alias, _, _, e) => as_simple_exit(e),
+pub fn as_simple_exit(a: &LamArena, lam: RawLambda) -> Option<i32> {
+    match a.view(lam) {
+        View::StaticRaise(i, []) => Some(i),
+        View::Let(LetKind::Alias, _, _, e) => as_simple_exit(a, e),
         _ => None,
     }
 }
@@ -2776,108 +2849,53 @@ pub fn as_simple_exit(lam: &RawLambda) -> Option<i32> {
 // make_catch_delayed — Delayed catch with next_raise_count
 // ============================================================================
 
-/// Create a delayed catch: returns (exit_number, wrapper_fn).
-/// If the handler is already a simple exit, the wrapper is the identity.
-/// Otherwise, allocates a new exit number and returns a wrapper that
-/// wraps the body in `Lstaticcatch(body, (i,[]), handler)` (or just returns
-/// `handler` if body is `Lstaticraise(i, _)`).
+/// Create a delayed catch: returns the exit number and the handler to wrap
+/// with, if any (see [`apply_catch_delayed`]). If the handler is already a
+/// simple exit, there is nothing to wrap.
 ///
 /// Equivalent to OCaml's `make_catch_delayed`.
 pub fn make_catch_delayed(
+    b: &RawArena,
     handler: RawLambda,
     next_raise_count: &mut i32,
-) -> (i32, Box<dyn FnOnce(RawLambda) -> RawLambda>) {
-    match as_simple_exit(&handler) {
-        Some(i) => (i, Box::new(|act| act)),
-        None => {
-            let i = bump_raise_count(next_raise_count);
-            (
-                i,
-                Box::new(move |body: RawLambda| match body.peel() {
-                    RawLambda::LstaticRaise(j, _) if *j == i => handler,
-                    _ => {
-                        RawLambda::LstaticCatch(Box::new(body), (i, Vec::new()), Box::new(handler))
-                    }
-                }),
-            )
-        }
+) -> (i32, Option<RawLambda>) {
+    let simple = as_simple_exit(&b.get(), handler);
+    match simple {
+        Some(i) => (i, None),
+        None => (bump_raise_count(next_raise_count), Some(handler)),
+    }
+}
+
+/// The wrapper `make_catch_delayed` returns: the identity without a handler,
+/// else `Lstaticcatch(body, (i,[]), handler)`, or just `handler` when `body`
+/// is `Lstaticraise(i, _)`.
+fn apply_catch_delayed(
+    b: &RawArena,
+    i: i32,
+    handler: Option<RawLambda>,
+    body: RawLambda,
+) -> RawLambda {
+    let Some(handler) = handler else {
+        return body;
+    };
+    match b.node(body) {
+        Node::StaticRaise { label, .. } if label == i => handler,
+        _ => b.static_catch(body, i, &[], handler),
     }
 }
 
 // ============================================================================
-// raw_static_raise — Borrow the raw action only for the static-raise test
+// raw_static_raise — The raw action's static-raise shape
 // ============================================================================
 
-enum StaticRaiseArgs<'a> {
-    Borrowed(&'a [RawLambda]),
-    Owned(Vec<RawLambda>),
-}
-
-impl StaticRaiseArgs<'_> {
-    fn iter(&self) -> std::slice::Iter<'_, RawLambda> {
-        match self {
-            StaticRaiseArgs::Borrowed(args) => args.iter(),
-            StaticRaiseArgs::Owned(args) => args.iter(),
-        }
+/// `raw_action r` (`compiler/ml/matching.ml:479-482`) when it is a static
+/// raise: `make_key r`, or `r` itself when `make_key` fails.
+fn raw_static_raise(b: &RawArena, l: RawLambda) -> Option<(i32, Vec<RawLambda>)> {
+    let raw = make_key(b, l).unwrap_or(l);
+    match b.node(raw) {
+        Node::StaticRaise { label, args } => Some((label, b.list(args))),
+        _ => None,
     }
-}
-
-/// Return the raw action's static-raise shape without cloning the fallback.
-fn raw_static_raise(l: &RawLambda) -> Option<(i32, StaticRaiseArgs<'_>)> {
-    match make_key(l) {
-        Some(RawLambda::LstaticRaise(i, args)) => Some((i, StaticRaiseArgs::Owned(args))),
-        Some(_) => None,
-        None => match l.peel() {
-            // OCaml `compiler/ml/matching.ml:479-482` returns the original
-            // lambda when `make_key` fails. Borrow that original static raise
-            // instead of cloning the whole raw lambda tree.
-            RawLambda::LstaticRaise(i, args) => Some((*i, StaticRaiseArgs::Borrowed(args))),
-            _ => None,
-        },
-    }
-}
-
-// ============================================================================
-// tr_raw — Transform raw action with catch (raises on failure)
-// ============================================================================
-
-/// Normalize a lambda action. Returns None if normalization fails
-/// (equivalent to OCaml's `tr_raw` which raises Exit on failure).
-fn tr_raw(act: &RawLambda) -> Option<RawLambda> {
-    make_key(act)
-}
-
-/// Convert a normalized RawLambda to a structural key for comparison.
-///
-/// OCaml `same_actions` compares `Lambda.make_key` results structurally
-/// (`compiler/ml/matching.ml:489-500`). Do not use the raw lambda pretty-printer
-/// here: `Printlambda` intentionally renders some constants ambiguously in
-/// `-drawlambda` output, so it is not a safe equality key.
-fn lambda_to_string(lam: &RawLambda) -> String {
-    format!("{lam:?}")
-}
-
-/// Whether `lambda_to_string(lam) == expected`, comparing while formatting
-/// so a mismatch stops at its first differing piece without building the
-/// string.
-fn lambda_debug_equals(lam: &RawLambda, expected: &str) -> bool {
-    struct Compare<'a> {
-        rest: &'a str,
-    }
-    impl std::fmt::Write for Compare<'_> {
-        fn write_str(&mut self, piece: &str) -> std::fmt::Result {
-            match self.rest.strip_prefix(piece) {
-                Some(rest) => {
-                    self.rest = rest;
-                    Ok(())
-                }
-                None => Err(std::fmt::Error),
-            }
-        }
-    }
-    let mut compare = Compare { rest: expected };
-    std::fmt::Write::write_fmt(&mut compare, format_args!("{lam:?}")).is_ok()
-        && compare.rest.is_empty()
 }
 
 // ============================================================================
@@ -2889,18 +2907,18 @@ fn lambda_debug_equals(lam: &RawLambda, expected: &str) -> bool {
 /// `None` otherwise.
 ///
 /// Equivalent to OCaml's `same_actions`.
-pub fn same_actions<'p>(cases: &[Clause<'p>]) -> Option<RawLambda> {
+pub fn same_actions<'p>(b: &RawArena, cases: &[Clause<'p>]) -> Option<RawLambda> {
     match cases {
         [] => None,
-        [(_, act)] => Some(act.to_raw()),
+        [(_, act)] => Some(act.to_raw(b)),
         [(_, act0), rem @ ..] => {
-            let raw_act0_str = act0.normalized_key()?;
+            let raw_act0_str = act0.normalized_key(b)?;
             for (_, act) in rem {
-                if act.normalized_key()? != raw_act0_str {
+                if act.normalized_key(b)? != raw_act0_str {
                     return None;
                 }
             }
-            Some(act0.to_raw())
+            Some(act0.to_raw(b))
         }
     }
 }
@@ -2913,7 +2931,12 @@ pub fn same_actions<'p>(cases: &[Clause<'p>]) -> Option<RawLambda> {
 /// Returns true if both can be normalized and their normalized forms are equal.
 ///
 /// Equivalent to OCaml's `up_ok_action`.
-fn up_ok_action(ctx_ref: Option<&TypeContext>, act1: &MatchAction, act2: &MatchAction) -> bool {
+fn up_ok_action(
+    b: &RawArena,
+    ctx_ref: Option<&TypeContext>,
+    act1: &MatchAction,
+    act2: &MatchAction,
+) -> bool {
     // `let fail = Lambda.var (Ident.create "fallthrough")`
     // (compiler/ml/matching.ml:522-525): every comparison takes a fresh
     // identifier, shared by both keys. The cached keys use a stand-in that is
@@ -2921,7 +2944,7 @@ fn up_ok_action(ctx_ref: Option<&TypeContext>, act1: &MatchAction, act2: &MatchA
     if let Some(ctx) = ctx_ref {
         let _fail = ctx.create_ident("fallthrough");
     }
-    match (act1.normalized_key(), act2.normalized_key()) {
+    match (act1.normalized_key(b), act2.normalized_key(b)) {
         (Some(raw1), Some(raw2)) => raw1 == raw2,
         _ => false,
     }
@@ -2937,23 +2960,25 @@ fn up_ok_action(ctx_ref: Option<&TypeContext>, act1: &MatchAction, act2: &MatchA
 ///
 /// Equivalent to OCaml's `up_ok`.
 fn up_ok<'p>(
+    b: &RawArena,
     pa: &PatArena<'p>,
     ctx_ref: Option<&TypeContext>,
     ps: &[&'p Pattern],
     act_p: &MatchAction,
     l: &[Clause<'p>],
 ) -> bool {
-    up_ok_iter(pa, ctx_ref, ps, act_p, l.iter())
+    up_ok_iter(b, pa, ctx_ref, ps, act_p, l.iter())
 }
 
 fn up_ok_iter<'p: 'a, 'a>(
+    b: &RawArena,
     pa: &PatArena<'p>,
     ctx_ref: Option<&TypeContext>,
     ps: &[&'p Pattern],
     act_p: &MatchAction,
     mut clauses: impl Iterator<Item = &'a Clause<'p>>,
 ) -> bool {
-    clauses.all(|(qs, act_q)| up_ok_action(ctx_ref, act_p, act_q) || !may_compats(pa, ps, qs))
+    clauses.all(|(qs, act_q)| up_ok_action(b, ctx_ref, act_p, act_q) || !may_compats(pa, ps, qs))
 }
 
 // ============================================================================
@@ -3026,10 +3051,10 @@ fn simplify_or<'p>(
 
 /// Bind a variable to an argument in an action.
 /// Equivalent to OCaml's `Lambda.bind Alias id arg action`.
-fn bind(kind: LetKind, id: &Ident, arg: &RawLambda, action: RawLambda) -> RawLambda {
-    match arg.peel() {
-        RawLambda::Lvar(v) if v.same(id) => action,
-        _ => RawLambda::Llet(kind, *id, Box::new(arg.clone()), Box::new(action)),
+fn bind(b: &RawArena, kind: LetKind, id: &Ident, arg: &RawLambda, action: RawLambda) -> RawLambda {
+    match b.as_var(*arg) {
+        Some(v) if v.same(id) => action,
+        _ => b.let_(kind, *id, *arg, action),
     }
 }
 
@@ -3058,6 +3083,7 @@ pub fn simplify_cases<'p>(
         arg: &RawLambda,
         cls: Vec<Clause<'p>>,
     ) -> Vec<Clause<'p>> {
+        let b = arena.b;
         let mut pending: VecDeque<Clause<'p>> = cls.into();
         let mut result = Vec::with_capacity(pending.len());
         while let Some((pats, action)) = pending.pop_front() {
@@ -3068,7 +3094,7 @@ pub fn simplify_cases<'p>(
 
             match &pat.pat_desc {
                 PatternDesc::Tpat_var(id, _) => {
-                    let new_action = action.bind(LetKind::Alias, *id, arg.clone());
+                    let new_action = action.bind(b, LetKind::Alias, *id, arg.clone());
                     let mut row = vec![omega()];
                     row.extend(patl.iter().cloned());
                     result.push((row, new_action));
@@ -3077,7 +3103,7 @@ pub fn simplify_cases<'p>(
                     result.push((pats, action));
                 }
                 PatternDesc::Tpat_alias(p, id, _) => {
-                    let new_action = action.bind(LetKind::Alias, *id, arg.clone());
+                    let new_action = action.bind(b, LetKind::Alias, *id, arg.clone());
                     let mut new_pats = vec![pa.pat(*p)];
                     new_pats.extend(patl.iter().cloned());
                     // OCaml `compiler/ml/matching.ml:565-566` immediately
@@ -3089,12 +3115,12 @@ pub fn simplify_cases<'p>(
                 PatternDesc::Tpat_record(lbls, _, rest) if lbls.is_empty() => {
                     let action = match rest {
                         Some(rest) => action.bind(
+                            b,
                             LetKind::Strict,
                             rest.rest_ident,
-                            RawLambda::prim(
+                            b.prim(
                                 Primitive::PrecordRest(rest.excluded_runtime_labels.clone()),
-                                vec![arg.clone()],
-                                // matching.ml:585/596 `bind_record_rest pat.pat_loc`.
+                                &[arg.clone()], // matching.ml:585/596 `bind_record_rest pat.pat_loc`.
                                 arena.lam_loc(pat.pat_loc),
                             ),
                         ),
@@ -3107,12 +3133,12 @@ pub fn simplify_cases<'p>(
                 PatternDesc::Tpat_record(lbls, closed, rest) => {
                     let action = match rest {
                         Some(rest) => action.bind(
+                            b,
                             LetKind::Strict,
                             rest.rest_ident,
-                            RawLambda::prim(
+                            b.prim(
                                 Primitive::PrecordRest(rest.excluded_runtime_labels.clone()),
-                                vec![arg.clone()],
-                                // matching.ml:585/596 `bind_record_rest pat.pat_loc`.
+                                &[arg.clone()], // matching.ml:585/596 `bind_record_rest pat.pat_loc`.
                                 arena.lam_loc(pat.pat_loc),
                             ),
                         ),
@@ -3526,22 +3552,23 @@ where
 
 /// Compute the free variables of a pattern matching's actions.
 /// Equivalent to OCaml's `pm_free_variables`.
-pub fn pm_free_variables<'p>(pm: &PatternMatching<'p>) -> IdentSet {
+pub fn pm_free_variables<'p>(b: &RawArena, pm: &PatternMatching<'p>) -> IdentSet {
+    let a = b.get();
     // OCaml uses IdentSet.union (free_variables act) r folded right over cases.
     pm.cases
         .iter()
         .rev()
         .fold(BTreeSet::new(), |mut r, (_, act)| {
-            let fv = act.free_variables();
+            let fv = act.free_variables(&a);
             r.extend(fv);
             r
         })
 }
 
 /// Free variables of a RawLambda expression (`Lambda.free_variables`).
-fn raw_lambda_free_variables(lam: &RawLambda) -> IdentSet {
+fn raw_lambda_free_variables(a: &LamArena, lam: RawLambda) -> IdentSet {
     let mut fv = IdentSet::new();
-    crate::raw_lambda::collect_free_variables(lam, &mut fv);
+    crate::raw_lambda::collect_free_variables(a, lam, &mut fv);
     fv
 }
 
@@ -3884,6 +3911,7 @@ fn do_split_or<'p>(
     def: &DefaultEnv<'p>,
     next_raise: &mut i32,
 ) -> (PmHalfCompiledInfo<'p>, Vec<(i32, PmHalfCompiled<'p>)>) {
+    let b = arena.b;
     // OCaml `compiler/ml/matching.ml:817-828` is tail-recursive. Rust does not
     // guarantee tail-call elimination, and large generated matches build very
     // deep `do_split_or` stacks. Keep the exact branch order but run it as an
@@ -3901,13 +3929,13 @@ fn do_split_or<'p>(
         let push_to_before_or_ors = {
             let (p, ps) = cl.0.split_first().expect("split_or: empty pattern row");
             let act = &cl.1;
-            if up_ok_iter(pa, ctx_ref, cl.0.as_slice(), act, no.iter()) {
+            if up_ok_iter(b, pa, ctx_ref, cl.0.as_slice(), act, no.iter()) {
                 if is_or(p) {
                     let (new_ors, new_no) = insert_or_append(pa, p, ps, act, ors, no);
                     ors = new_ors;
                     no = new_no;
                     continue;
-                } else if up_ok_iter(pa, ctx_ref, cl.0.as_slice(), act, ors.iter()) {
+                } else if up_ok_iter(b, pa, ctx_ref, cl.0.as_slice(), act, ors.iter()) {
                     // OCaml `do_split` moves the current row into `before` with
                     // `(cl :: before)` (compiler/ml/matching.ml:820-826).
                     Some(true)
@@ -4278,6 +4306,7 @@ fn split_ex<'p>(
     k: Vec<(i32, PmHalfCompiled<'p>)>,
     next_raise: &mut i32,
 ) -> (PmHalfCompiledInfo<'p>, Vec<(i32, PmHalfCompiled<'p>)>) {
+    let b = arena.b;
     match rest.split_first() {
         None => {
             let yes = rev_vec(yes);
@@ -4351,7 +4380,7 @@ fn split_ex<'p>(
             }
         }
         Some((cl, rem)) => match cl.0.first() {
-            Some(p) if group(p) && up_ok(pa, ctx_ref, &cl.0, &cl.1, &no) => {
+            Some(p) if group(p) && up_ok(b, pa, ctx_ref, &cl.0, &cl.1, &no) => {
                 let mut new_yes = yes;
                 new_yes.insert(0, cl.clone());
                 split_ex(
@@ -4383,6 +4412,7 @@ fn split_noex<'p>(
     k: Vec<(i32, PmHalfCompiled<'p>)>,
     next_raise: &mut i32,
 ) -> (PmHalfCompiledInfo<'p>, Vec<(i32, PmHalfCompiled<'p>)>) {
+    let b = arena.b;
     match rest.split_first() {
         None => {
             let yes = rev_vec(yes);
@@ -4451,7 +4481,7 @@ fn split_noex<'p>(
                 // Fall through to normal case
                 let cl = &rest[0];
                 match cl.0.first() {
-                    Some(p) if !group(p) && up_ok(pa, ctx_ref, &cl.0, &cl.1, &no) => {
+                    Some(p) if !group(p) && up_ok(b, pa, ctx_ref, &cl.0, &cl.1, &no) => {
                         let mut new_yes = yes;
                         new_yes.insert(0, cl.clone());
                         split_noex(
@@ -4489,7 +4519,7 @@ fn split_noex<'p>(
             }
         }
         Some((cl, rem)) => match cl.0.first() {
-            Some(p) if !group(p) && up_ok(pa, ctx_ref, &cl.0, &cl.1, &no) => {
+            Some(p) if !group(p) && up_ok(b, pa, ctx_ref, &cl.0, &cl.1, &no) => {
                 let mut new_yes = yes;
                 new_yes.insert(0, cl.clone());
                 split_noex(
@@ -4520,12 +4550,13 @@ fn precompile_var<'p>(
     k: Vec<(i32, PmHalfCompiled<'p>)>,
     next_raise: &mut i32,
 ) -> (PmHalfCompiledInfo<'p>, Vec<(i32, PmHalfCompiled<'p>)>) {
+    let b = arena.b;
     match args.as_slice() {
         [] => panic!("precompile_var: empty args"),
         [_, arg_rest @ ..] if !arg_rest.is_empty() => {
             // Check if second arg is Lvar
-            match &arg_rest[0].0 {
-                RawLambda::Lvar(v) => {
+            match b.as_var(arg_rest[0].0) {
+                Some(v) => {
                     if cls.len() == 1 {
                         // as split as it can
                         dont_precompile_var(pa, args, cls, def, k)
@@ -4549,7 +4580,7 @@ fn precompile_var<'p>(
                             ctx_ref,
                             pa,
                             arena,
-                            &Some(*v),
+                            &Some(v),
                             var_cls,
                             &arg_tail,
                             var_def,
@@ -4618,12 +4649,13 @@ fn precompile_or<'p>(
     k: Vec<(i32, PmHalfCompiled<'p>)>,
     next_raise: &mut i32,
 ) -> (PmHalfCompiledInfo<'p>, Vec<(i32, PmHalfCompiled<'p>)>) {
+    let b = arena.b;
     if ors.is_empty() {
         return split_constr(ctx_ref, pa, arena, &cls, args, def, k, next_raise);
     }
 
     // do_cases processes the or-pattern list
-    let (end_body, handlers) = do_cases_or(ctx_ref, pa, argo, &ors, args, &def, next_raise);
+    let (end_body, handlers) = do_cases_or(b, ctx_ref, pa, argo, &ors, args, &def, next_raise);
 
     let matrix = as_matrix(pa, &[cls.as_slice(), ors.as_slice()].concat());
     let body = PatternMatching {
@@ -4648,6 +4680,7 @@ fn precompile_or<'p>(
 /// Process or-pattern cases for precompile_or.
 /// Equivalent to the inner `do_cases` in OCaml's `precompile_or`.
 fn do_cases_or<'p>(
+    b: &RawArena,
     ctx_ref: Option<&TypeContext>,
     pa: &'p PatArena<'p>,
     argo: &Option<Ident>,
@@ -4659,11 +4692,12 @@ fn do_cases_or<'p>(
     Vec<Clause<'p>>,
     Vec<(Matrix<'p>, i32, Vec<Ident>, PatternMatching<'p>)>,
 ) {
-    let (body, handlers) = do_cases_or_deque(ctx_ref, pa, argo, ors, args, def, next_raise);
+    let (body, handlers) = do_cases_or_deque(b, ctx_ref, pa, argo, ors, args, def, next_raise);
     (body.into_iter().collect(), handlers)
 }
 
 fn do_cases_or_deque<'p>(
+    b: &RawArena,
     ctx_ref: Option<&TypeContext>,
     pa: &'p PatArena<'p>,
     argo: &Option<Ident>,
@@ -4705,7 +4739,7 @@ fn do_cases_or_deque<'p>(
 
                     let vars: Vec<Ident> = {
                         let orp_vars = extract_vars(pa, BTreeSet::new(), orp);
-                        let pm_fv = pm_free_variables(&orpm);
+                        let pm_fv = pm_free_variables(b, &orpm);
                         orp_vars.intersection(&pm_fv).cloned().collect()
                     };
 
@@ -4713,14 +4747,12 @@ fn do_cases_or_deque<'p>(
                     let new_patl = omegas(patl.len());
 
                     let mk_new_action = |vs: &[Ident]| -> RawLambda {
-                        RawLambda::LstaticRaise(
-                            or_num,
-                            vs.iter().map(|v| RawLambda::Lvar(*v)).collect(),
-                        )
+                        let vars: Vec<RawLambda> = vs.iter().map(|v| b.var(*v)).collect();
+                        b.static_raise(or_num, &vars)
                     };
 
                     let (body, handlers) =
-                        do_cases_or_deque(ctx_ref, pa, argo, &rem, args, def, next_raise);
+                        do_cases_or_deque(b, ctx_ref, pa, argo, &rem, args, def, next_raise);
 
                     let exploded = explode_or_pat(
                         ctx_ref,
@@ -4750,7 +4782,7 @@ fn do_cases_or_deque<'p>(
                     // `push_front` for the same list shape without shifting a
                     // Rust Vec on every row.
                     let (mut new_ord, new_to_catch) =
-                        do_cases_or_deque(ctx_ref, pa, argo, rem, args, def, next_raise);
+                        do_cases_or_deque(b, ctx_ref, pa, argo, rem, args, def, next_raise);
                     new_ord.push_front(cl.clone());
                     (new_ord, new_to_catch)
                 }
@@ -5003,6 +5035,7 @@ fn divide_constant<'p>(
 /// Make field access arguments for a constructor.
 /// Equivalent to OCaml's `make_field_args`.
 fn make_field_args(
+    b: &RawArena,
     fld_info: FieldDbgInfo,
     loc: LamLoc,
     binding_kind: LetKind,
@@ -5014,11 +5047,11 @@ fn make_field_args(
     let mut result = Vec::new();
     for pos in first_pos..=last_pos {
         result.push((
-            RawLambda::Lprim(Box::new(RawPrimInfo {
-                primitive: Primitive::Pfield(pos, fld_info.clone()),
-                args: vec![arg.clone()],
+            b.prim(
+                Primitive::Pfield(pos, fld_info.clone()),
+                &[arg.clone()],
                 loc,
-            })),
+            ),
             binding_kind,
         ));
     }
@@ -5196,6 +5229,7 @@ fn make_constr_matching<'p>(
     ctx: &[Ctx<'p>],
     args: &MatchArgs,
 ) -> MatchCell<'p> {
+    let b = arena.b;
     match args.split_first() {
         None => crate::misc::fatal_error("Matching.make_constr_matching"),
         Some(((arg, _mut), _)) => {
@@ -5244,12 +5278,7 @@ fn make_constr_matching<'p>(
                             _ => Primitive::PvalFromOption,
                         };
                         let mut result = vec![(
-                            RawLambda::Lprim(Box::new(RawPrimInfo {
-                                primitive: from_option,
-                                args: vec![arg.clone()],
-                                // matching.ml:1307 `p.pat_loc`.
-                                loc: arena.lam_loc(p.pat_loc),
-                            })),
+                            b.prim(from_option, &[arg.clone()], arena.lam_loc(p.pat_loc)),
                             LetKind::Alias,
                         )];
                         result.extend(argl.iter().cloned());
@@ -5262,6 +5291,7 @@ fn make_constr_matching<'p>(
                             FieldDbgInfo::Variant
                         };
                         make_field_args(
+                            b,
                             fld_info,
                             // matching.ml:1309-1313 `make_field_args p.pat_loc`.
                             arena.lam_loc(p.pat_loc),
@@ -5273,6 +5303,7 @@ fn make_constr_matching<'p>(
                         )
                     }
                     crate::types::ConstructorKind::Extension(_) => make_field_args(
+                        b,
                         FieldDbgInfo::Extension,
                         arena.lam_loc(p.pat_loc),
                         LetKind::Alias,
@@ -5410,6 +5441,7 @@ fn make_variant_matching_nonconst<'p>(
     ctx: &[Ctx<'p>],
     args: &MatchArgs,
 ) -> MatchCell<'p> {
+    let b = arena.b;
     match args.split_first() {
         None => crate::misc::fatal_error("Matching.make_variant_matching_nonconst"),
         Some(((arg, _mut), _)) => {
@@ -5422,12 +5454,11 @@ fn make_variant_matching_nonconst<'p>(
             );
             let ctx = filter_ctx(None, pa, p, ctx);
             let mut new_args = vec![(
-                RawLambda::Lprim(Box::new(RawPrimInfo {
-                    primitive: Primitive::Pfield(1, FieldDbgInfo::PolyVarContent),
-                    args: vec![arg.clone()],
-                    // matching.ml:1366-1368 `p.pat_loc`.
-                    loc: arena.lam_loc(p.pat_loc),
-                })),
+                b.prim(
+                    Primitive::Pfield(1, FieldDbgInfo::PolyVarContent),
+                    &[arg.clone()],
+                    arena.lam_loc(p.pat_loc),
+                ),
                 LetKind::Alias,
             )];
             new_args.extend(argl.iter().cloned());
@@ -5647,6 +5678,7 @@ fn matcher_tuple<'p>(
 /// Make a tuple matching.
 /// Equivalent to OCaml's `make_tuple_matching`.
 fn make_tuple_matching<'p>(
+    b: &RawArena,
     pa: &PatArena<'p>,
     loc: LamLoc,
     arity: usize,
@@ -5660,11 +5692,11 @@ fn make_tuple_matching<'p>(
             let mut new_args = Vec::new();
             for pos in 0..arity {
                 new_args.push((
-                    RawLambda::Lprim(Box::new(RawPrimInfo {
-                        primitive: Primitive::Pfield(pos as i32, FieldDbgInfo::Tuple),
-                        args: vec![arg.clone()],
+                    b.prim(
+                        Primitive::Pfield(pos as i32, FieldDbgInfo::Tuple),
+                        &[arg.clone()],
                         loc,
-                    })),
+                    ),
                     LetKind::Alias,
                 ));
             }
@@ -5688,9 +5720,10 @@ fn divide_tuple<'p>(
     ctx: &[Ctx<'p>],
     pm: &PatternMatching<'p>,
 ) -> MatchCell<'p> {
+    let b = arena.b;
     divide_line(
         |c| filter_ctx(None, pa, p, c),
-        |def, args| make_tuple_matching(pa, arena.lam_loc(p.pat_loc), arity, def, args),
+        |def, args| make_tuple_matching(b, pa, arena.lam_loc(p.pat_loc), arity, def, args),
         |pat, rem| get_args_tuple(pa, arity, pat, rem),
         p,
         ctx,
@@ -5788,6 +5821,7 @@ fn matcher_record<'p>(
 /// Make a record matching.
 /// Equivalent to OCaml's `make_record_matching`.
 fn make_record_matching<'p>(
+    b: &RawArena,
     pa: &PatArena<'p>,
     loc: LamLoc,
     all_labels: &[LabelDescription],
@@ -5804,31 +5838,22 @@ fn make_record_matching<'p>(
                     RecordRepresentation::RecordFloatUnused => {
                         panic!("Record_float_unused")
                     }
-                    RecordRepresentation::RecordRegular => {
-                        RawLambda::Lprim(Box::new(RawPrimInfo {
-                            primitive: Primitive::Pfield(lbl.lbl_pos, fld_record(lbl)),
-                            args: vec![arg.clone()],
-                            loc,
-                        }))
-                    }
-                    RecordRepresentation::RecordInlined { .. } => {
-                        RawLambda::Lprim(Box::new(RawPrimInfo {
-                            primitive: Primitive::Pfield(lbl.lbl_pos, fld_record_inline(lbl)),
-                            args: vec![arg.clone()],
-                            loc,
-                        }))
-                    }
+                    RecordRepresentation::RecordRegular => b.prim(
+                        Primitive::Pfield(lbl.lbl_pos, fld_record(lbl)),
+                        &[arg.clone()],
+                        loc,
+                    ),
+                    RecordRepresentation::RecordInlined { .. } => b.prim(
+                        Primitive::Pfield(lbl.lbl_pos, fld_record_inline(lbl)),
+                        &[arg.clone()],
+                        loc,
+                    ),
                     RecordRepresentation::RecordUnboxed(_) => arg.clone(),
-                    RecordRepresentation::RecordExtension => {
-                        RawLambda::Lprim(Box::new(RawPrimInfo {
-                            primitive: Primitive::Pfield(
-                                lbl.lbl_pos + 1,
-                                fld_record_extension(lbl),
-                            ),
-                            args: vec![arg.clone()],
-                            loc,
-                        }))
-                    }
+                    RecordRepresentation::RecordExtension => b.prim(
+                        Primitive::Pfield(lbl.lbl_pos + 1, fld_record_extension(lbl)),
+                        &[arg.clone()],
+                        loc,
+                    ),
                 };
                 let str_kind = match lbl.lbl_mut {
                     MutableFlag::Immutable => LetKind::Alias,
@@ -5859,10 +5884,11 @@ fn divide_record<'p>(
     ctx: &[Ctx<'p>],
     pm: &PatternMatching<'p>,
 ) -> MatchCell<'p> {
+    let b = arena.b;
     let num_fields = all_labels.len();
     divide_line(
         |c| filter_ctx(Some(ctx_ref), pa, p, c),
-        |def, args| make_record_matching(pa, arena.lam_loc(p.pat_loc), all_labels, def, args),
+        |def, args| make_record_matching(b, pa, arena.lam_loc(p.pat_loc), all_labels, def, args),
         |pat, rem| get_args_record(pa, num_fields, pat, rem),
         p,
         ctx,
@@ -5923,6 +5949,7 @@ fn make_array_matching<'p>(
     ctx: &[Ctx<'p>],
     args: &MatchArgs,
 ) -> MatchCell<'p> {
+    let b = arena.b;
     match args.split_first() {
         None => crate::misc::fatal_error("Matching.make_array_matching"),
         Some(((arg, _mut), _)) => {
@@ -5931,18 +5958,17 @@ fn make_array_matching<'p>(
             let mut new_args = Vec::new();
             for pos in 0..len {
                 new_args.push((
-                    RawLambda::Lprim(Box::new(RawPrimInfo {
-                        primitive: Primitive::Parrayrefu,
-                        args: vec![
+                    b.prim(
+                        Primitive::Parrayrefu,
+                        &[
                             arg.clone(),
-                            RawLambda::Lconst(crate::lambda::Constant::Int {
+                            b.const_(crate::lambda::Constant::Int {
                                 i: pos as i32,
                                 comment: None,
                             }),
                         ],
-                        // matching.ml:1552 `p.pat_loc`.
-                        loc: arena.lam_loc(p.pat_loc),
-                    })),
+                        arena.lam_loc(p.pat_loc),
+                    ),
                     LetKind::StrictOpt,
                 ));
             }
@@ -5990,6 +6016,7 @@ fn divide_array<'p>(
 ///
 /// Equivalent to OCaml's `share_actions_tree`.
 fn share_actions_tree(
+    b: &RawArena,
     sw: Vec<(Constant, RawLambda)>,
     d: Option<RawLambda>,
     next_raise_count: &mut i32,
@@ -5998,7 +6025,7 @@ fn share_actions_tree(
     Vec<(Constant, RawLambda)>,
     Option<RawLambda>,
 ) {
-    let mut store = StoreExp::mk_store();
+    let mut store = StoreExp::mk_store(b);
 
     // Default action is always shared
     let d_idx = d.map(|d| store.act_store_shared(d));
@@ -6012,52 +6039,29 @@ fn share_actions_tree(
     // Retrieve all actions, including potential default
     let acts = store.act_get_shared();
 
-    // Process shared actions — OCaml's handle_shared
-    let mut handlers: Vec<(i32, Box<dyn FnOnce(RawLambda) -> RawLambda>)> = Vec::new();
+    // Process shared actions — OCaml's handle_shared. Only the actual catch
+    // handlers are kept: when the action is already a simple exit there is
+    // no handler to reapply.
+    let mut handler_pairs: Vec<(i32, RawLambda)> = Vec::new();
     let resolved_acts: Vec<RawLambda> = acts
         .into_iter()
         .map(|act| match act {
             Shared::Single(a) => a,
             Shared::Shared(a) => {
-                let (i, h) = make_catch_delayed(a, next_raise_count);
-                handlers.push((i, h));
-                make_exit(i)
+                let (i, h) = make_catch_delayed(b, a, next_raise_count);
+                if let Some(h) = h {
+                    handler_pairs.push((i, h));
+                }
+                make_exit(b, i)
             }
         })
         .collect();
-
-    let mut use_counts = vec![0usize; resolved_acts.len()];
-    if let Some(idx) = d_idx {
-        use_counts[idx] += 1;
-    }
-    for (_, idx) in &sw_indices {
-        use_counts[*idx] += 1;
-    }
-    let mut resolved_acts = resolved_acts.into_iter().map(Some).collect::<Vec<_>>();
 
     // Reconstruct default and switch list
-    let d = d_idx.map(|idx| materialize_resolved_action(&mut resolved_acts, &use_counts, idx));
+    let d = d_idx.map(|idx| resolved_acts[idx]);
     let sw: Vec<(Constant, RawLambda)> = sw_indices
         .into_iter()
-        .map(|(cst, j)| {
-            (
-                cst,
-                materialize_resolved_action(&mut resolved_acts, &use_counts, j),
-            )
-        })
-        .collect();
-
-    // Extract only the actual catch handlers. When the wrapper is identity
-    // (the shared action is already a simple exit), there is no handler to reapply.
-    let handler_pairs: Vec<(i32, RawLambda)> = handlers
-        .into_iter()
-        .filter_map(|(i, h)| {
-            let handler = h(make_exit(i));
-            match handler.peel() {
-                RawLambda::LstaticRaise(j, args) if *j == i && args.is_empty() => None,
-                _ => Some((i, handler)),
-            }
-        })
+        .map(|(cst, j)| (cst, resolved_acts[j]))
         .collect();
 
     (handler_pairs, sw, d)
@@ -6066,23 +6070,23 @@ fn share_actions_tree(
 /// Apply handler wrappers to a result lambda.
 /// The handlers are applied in forward order (first handler = innermost).
 /// Equivalent to OCaml's `!hs result`.
-fn apply_handlers(mut result: RawLambda, handlers: Vec<(i32, RawLambda)>) -> RawLambda {
+fn apply_handlers(
+    b: &RawArena,
+    mut result: RawLambda,
+    handlers: Vec<(i32, RawLambda)>,
+) -> RawLambda {
     // OCaml composes: hs := fun act -> h(ohs(act))
     // First handler added is innermost, last is outermost.
     // Each wrapper h wraps the body in LstaticCatch(body, (i,[]), handler_body).
     // So iterating forward: first handler wraps result first (innermost),
     // then each subsequent handler wraps around (outermost).
     for (exit_id, handler) in handlers.into_iter() {
-        match result.peel() {
-            RawLambda::LstaticRaise(j, args) if *j == exit_id && args.is_empty() => {
+        match b.node(result) {
+            Node::StaticRaise { label, args } if label == exit_id && args == LamArena::EMPTY => {
                 result = handler;
             }
             _ => {
-                result = RawLambda::LstaticCatch(
-                    Box::new(result),
-                    (exit_id, Vec::new()),
-                    Box::new(handler),
-                );
+                result = b.static_catch(result, exit_id, &[], handler);
             }
         }
     }
@@ -6124,6 +6128,7 @@ fn sort_lambda_list(mut l: Vec<(Constant, RawLambda)>) -> Vec<(Constant, RawLamb
 // ============================================================================
 
 fn do_tests_fail_owned(
+    b: &RawArena,
     loc: LamLoc,
     fail: RawLambda,
     tst: Primitive,
@@ -6136,19 +6141,20 @@ fn do_tests_fail_owned(
     // build the same right-associated test chain while moving those actions
     // into place instead of recursively cloning them.
     cases.into_iter().rev().fold(fail, |acc, (c, act)| {
-        RawLambda::LifThenElse(
-            Box::new(RawLambda::Lprim(Box::new(RawPrimInfo {
-                primitive: tst.clone(),
-                args: vec![arg.clone(), typed_const_to_lambda_const(&c)],
+        b.if_raw(
+            b.prim(
+                tst.clone(),
+                &[arg.clone(), typed_const_to_lambda_const(b, &c)],
                 loc,
-            }))),
-            Box::new(acc),
-            Box::new(act),
+            ),
+            acc,
+            act,
         )
     })
 }
 
 fn do_tests_nofail_owned(
+    b: &RawArena,
     loc: LamLoc,
     tst: Primitive,
     arg: RawLambda,
@@ -6161,21 +6167,21 @@ fn do_tests_nofail_owned(
     // Same branch shape as `do_tests_nofail`: for [c1->a1; c2->a2],
     // emit `if c1 then a2 else a1`. See compiler/ml/matching.ml:1761-1833.
     cases.into_iter().rev().fold(last_action, |acc, (c, act)| {
-        RawLambda::LifThenElse(
-            Box::new(RawLambda::Lprim(Box::new(RawPrimInfo {
-                primitive: tst.clone(),
-                args: vec![arg.clone(), typed_const_to_lambda_const(&c)],
+        b.if_raw(
+            b.prim(
+                tst.clone(),
+                &[arg.clone(), typed_const_to_lambda_const(b, &c)],
                 loc,
-            }))),
-            Box::new(acc),
-            Box::new(act),
+            ),
+            acc,
+            act,
         )
     })
 }
 
 /// Convert a typedtree constant to a lambda constant wrapped in Lconst.
 /// Equivalent to OCaml's `Lconst(Const_base c)`.
-fn typed_const_to_lambda_const(c: &Constant) -> RawLambda {
+fn typed_const_to_lambda_const(b: &RawArena, c: &Constant) -> RawLambda {
     let lc = match c {
         Constant::Int(i) => crate::lambda::Constant::int(*i as i32),
         Constant::Char(c) => crate::lambda::Constant::Char(*c),
@@ -6186,13 +6192,14 @@ fn typed_const_to_lambda_const(c: &Constant) -> RawLambda {
             value: v.clone(),
         },
     };
-    RawLambda::Lconst(lc)
+    b.const_(lc)
 }
 
 /// Build a test sequence for constant matching.
 /// Uses dichotomic splitting when there are enough cases and a less-than test is available.
 /// Equivalent to OCaml's `make_test_sequence`.
 fn make_test_sequence(
+    b: &RawArena,
     loc: LamLoc,
     fail: Option<RawLambda>,
     tst: Primitive,
@@ -6203,9 +6210,10 @@ fn make_test_sequence(
 ) -> RawLambda {
     let const_lambda_list = sort_lambda_list(const_lambda_list);
     let (handlers, const_lambda_list, fail) =
-        share_actions_tree(const_lambda_list, fail, next_raise_count);
+        share_actions_tree(b, const_lambda_list, fail, next_raise_count);
 
     fn make_test_seq_inner_owned(
+        b: &RawArena,
         loc: &LamLoc,
         fail: Option<RawLambda>,
         tst: &Primitive,
@@ -6217,36 +6225,35 @@ fn make_test_sequence(
             let mid = const_lambda_list.len() / 2;
             let list2 = const_lambda_list.split_off(mid);
             let pivot_const = &list2[0].0;
-            RawLambda::LifThenElse(
-                Box::new(RawLambda::Lprim(Box::new(RawPrimInfo {
-                    primitive: lt_tst.clone(),
-                    args: vec![arg.clone(), typed_const_to_lambda_const(pivot_const)],
-                    loc: *loc,
-                }))),
-                Box::new(make_test_seq_inner_owned(
+            b.if_raw(
+                b.prim(
+                    lt_tst.clone(),
+                    &[arg.clone(), typed_const_to_lambda_const(b, pivot_const)],
+                    *loc,
+                ),
+                make_test_seq_inner_owned(
+                    b,
                     loc,
                     fail.clone(),
                     tst,
                     lt_tst,
                     arg,
                     const_lambda_list,
-                )),
-                Box::new(make_test_seq_inner_owned(
-                    loc, fail, tst, lt_tst, arg, list2,
-                )),
+                ),
+                make_test_seq_inner_owned(b, loc, fail, tst, lt_tst, arg, list2),
             )
         } else {
             match fail {
-                None => do_tests_nofail_owned(*loc, tst.clone(), arg.clone(), const_lambda_list),
+                None => do_tests_nofail_owned(b, *loc, tst.clone(), arg.clone(), const_lambda_list),
                 Some(fail) => {
-                    do_tests_fail_owned(*loc, fail, tst.clone(), arg.clone(), const_lambda_list)
+                    do_tests_fail_owned(b, *loc, fail, tst.clone(), arg.clone(), const_lambda_list)
                 }
             }
         }
     }
 
-    let result = make_test_seq_inner_owned(&loc, fail, &tst, &lt_tst, &arg, const_lambda_list);
-    apply_handlers(result, handlers)
+    let result = make_test_seq_inner_owned(b, &loc, fail, &tst, &lt_tst, &arg, const_lambda_list);
+    apply_handlers(b, result, handlers)
 }
 
 // ============================================================================
@@ -6256,10 +6263,11 @@ fn make_test_sequence(
 /// Deduplicate switch actions by wrapping shared actions in catch/exit.
 /// Equivalent to OCaml's `share_actions_sw`.
 pub fn share_actions_sw(
+    b: &RawArena,
     sw: RawLambdaSwitch,
     next_raise_count: &mut i32,
 ) -> (Vec<(i32, RawLambda)>, RawLambdaSwitch) {
-    let mut store = StoreExp::mk_store();
+    let mut store = StoreExp::mk_store(b);
 
     // Store fail action as shared
     let RawLambdaSwitch {
@@ -6271,7 +6279,7 @@ pub fn share_actions_sw(
         sw_dispatch,
     } = sw;
 
-    let fail_idx = sw_failaction.map(|fail| store.act_store_shared(*fail));
+    let fail_idx = sw_failaction.map(|fail| store.act_store_shared(fail));
 
     // Store const and block actions
     let consts: Vec<(crate::lambda::SwitchKey, usize)> = sw_consts
@@ -6286,76 +6294,35 @@ pub fn share_actions_sw(
     // Get shared actions
     let acts = store.act_get_shared();
 
-    // Process shared actions (handle_shared pattern)
+    // Process shared actions (handle_shared pattern). An action that is
+    // already a simple exit targets an existing handler; no new wrapper.
     let mut handlers: Vec<(i32, RawLambda)> = Vec::new();
     let resolved_acts: Vec<RawLambda> = acts
         .into_iter()
         .map(|act| match act {
             Shared::Single(a) => a,
             Shared::Shared(a) => {
-                let (i, h) = make_catch_delayed(a, next_raise_count);
-                // Extract handler body from the wrapper function
-                let dummy = RawLambda::Lconst(crate::lambda::Constant::int(0));
-                let wrapped = h(dummy);
-                match wrapped {
-                    RawLambda::LstaticCatch(_, (exit_id, _), handler) => {
-                        handlers.push((exit_id, *handler));
-                        make_exit(exit_id)
-                    }
-                    _ => {
-                        // h was identity — the action is already a simple exit.
-                        // Use the original action directly; the exit already
-                        // targets an existing handler, no new wrapper needed.
-                        make_exit(i)
-                    }
+                let (i, h) = make_catch_delayed(b, a, next_raise_count);
+                if let Some(h) = h {
+                    handlers.push((i, h));
                 }
+                make_exit(b, i)
             }
         })
         .collect();
-
-    let mut use_counts = vec![0usize; resolved_acts.len()];
-    if let Some(idx) = fail_idx {
-        use_counts[idx] += 1;
-    }
-    for (_, idx) in &consts {
-        use_counts[*idx] += 1;
-    }
-    for (_, idx) in &blocks {
-        use_counts[*idx] += 1;
-    }
-    let mut resolved_acts = resolved_acts.into_iter().map(Some).collect::<Vec<_>>();
-
-    // Reconstruct fail
-    let fail = fail_idx.map(|idx| {
-        Box::new(materialize_resolved_action(
-            &mut resolved_acts,
-            &use_counts,
-            idx,
-        ))
-    });
 
     let new_sw = RawLambdaSwitch {
         sw_consts_full,
         sw_consts: consts
             .into_iter()
-            .map(|(i, j)| {
-                (
-                    i,
-                    materialize_resolved_action(&mut resolved_acts, &use_counts, j),
-                )
-            })
+            .map(|(i, j)| (i, resolved_acts[j]))
             .collect(),
         sw_blocks_full,
         sw_blocks: blocks
             .into_iter()
-            .map(|(i, j)| {
-                (
-                    i,
-                    materialize_resolved_action(&mut resolved_acts, &use_counts, j),
-                )
-            })
+            .map(|(i, j)| (i, resolved_acts[j]))
             .collect(),
-        sw_failaction: fail,
+        sw_failaction: fail_idx.map(|idx| resolved_acts[idx]),
         sw_dispatch,
     };
 
@@ -6366,14 +6333,14 @@ pub fn share_actions_sw(
 /// When a static exit appears >= 3 times in the cases and there's no failaction,
 /// extract it as the failaction to reduce switch size.
 /// Equivalent to OCaml's `reintroduce_fail`.
-pub fn reintroduce_fail(sw: RawLambdaSwitch) -> RawLambdaSwitch {
+pub fn reintroduce_fail(b: &RawArena, sw: RawLambdaSwitch) -> RawLambdaSwitch {
     if sw.sw_failaction.is_some() {
         return sw;
     }
 
     let mut counts: HashMap<i32, i32> = HashMap::new();
     let seen = |counts: &mut HashMap<i32, i32>, lam: &RawLambda| {
-        if let Some(i) = as_simple_exit(lam) {
+        if let Some(i) = as_simple_exit(&b.get(), *lam) {
             let old = counts.get(&i).copied().unwrap_or(0);
             counts.insert(i, old + 1);
         }
@@ -6397,9 +6364,9 @@ pub fn reintroduce_fail(sw: RawLambdaSwitch) -> RawLambdaSwitch {
 
     if max >= 3 {
         let default = i_max;
-        fn remove<K>(ls: Vec<(K, RawLambda)>, default: i32) -> Vec<(K, RawLambda)> {
+        fn remove<K>(b: &RawArena, ls: Vec<(K, RawLambda)>, default: i32) -> Vec<(K, RawLambda)> {
             ls.into_iter()
-                .filter(|(_, lam)| match as_simple_exit(lam) {
+                .filter(|(_, lam)| match as_simple_exit(&b.get(), *lam) {
                     Some(j) => j != default,
                     None => true,
                 })
@@ -6407,14 +6374,14 @@ pub fn reintroduce_fail(sw: RawLambdaSwitch) -> RawLambdaSwitch {
         }
         let nconsts = sw.sw_consts.len();
         let nblocks = sw.sw_blocks.len();
-        let sw_consts = remove(sw.sw_consts, default);
-        let sw_blocks = remove(sw.sw_blocks, default);
+        let sw_consts = remove(b, sw.sw_consts, default);
+        let sw_blocks = remove(b, sw.sw_blocks, default);
         RawLambdaSwitch {
             sw_consts_full: sw.sw_consts_full && sw_consts.len() == nconsts,
             sw_consts,
             sw_blocks_full: sw.sw_blocks_full && sw_blocks.len() == nblocks,
             sw_blocks,
-            sw_failaction: Some(Box::new(make_exit(default))),
+            sw_failaction: Some(make_exit(b, default)),
             sw_dispatch: sw.sw_dispatch,
         }
     } else {
@@ -6456,12 +6423,13 @@ type IntCases = std::vec::IntoIter<(i32, RawLambda)>;
 /// The actions are moved into the store; the recursion mirrors OCaml's
 /// list recursion with `rest` as an owning iterator.
 fn as_interval_canfail(
+    b: &RawArena,
     fail: RawLambda,
     low: i32,
     high: i32,
     l: Vec<(i32, RawLambda)>,
-) -> (Vec<(i32, i32, usize)>, StoreExp) {
-    let mut store = StoreExp::mk_store();
+) -> (Vec<(i32, i32, usize)>, StoreExp<'_>) {
+    let mut store = StoreExp::mk_store(b);
 
     let fail_idx = store.act_store(fail);
     assert_eq!(fail_idx, 0); // fail has action index 0
@@ -6472,7 +6440,7 @@ fn as_interval_canfail(
         cur_act: usize,
         rest: &mut IntCases,
         high: i32,
-        store: &mut StoreExp,
+        store: &mut StoreExp<'_>,
     ) -> Vec<(i32, i32, usize)> {
         let Some((i, act_i)) = rest.next() else {
             return if cur_high == high {
@@ -6514,7 +6482,7 @@ fn as_interval_canfail(
         cur_high: i32,
         rest: &mut IntCases,
         high: i32,
-        store: &mut StoreExp,
+        store: &mut StoreExp<'_>,
     ) -> Vec<(i32, i32, usize)> {
         let Some((i, act_i)) = rest.next() else {
             return vec![(cur_low, cur_high, 0)];
@@ -6551,15 +6519,18 @@ fn as_interval_canfail(
 
 /// Convert a sorted int-lambda list (no fail action) into intervals.
 /// Equivalent to OCaml's `as_interval_nofail`.
-fn as_interval_nofail(l: Vec<(i32, RawLambda)>) -> (Vec<(i32, i32, usize)>, StoreExp) {
-    let mut store = StoreExp::mk_store();
+fn as_interval_nofail(
+    b: &RawArena,
+    l: Vec<(i32, RawLambda)>,
+) -> (Vec<(i32, i32, usize)>, StoreExp<'_>) {
+    let mut store = StoreExp::mk_store(b);
 
     fn i_rec(
         cur_low: i32,
         cur_high: i32,
         cur_act: usize,
         rest: &mut IntCases,
-        store: &mut StoreExp,
+        store: &mut StoreExp<'_>,
     ) -> Vec<(i32, i32, usize)> {
         let Some((i, act)) = rest.next() else {
             return vec![(cur_low, cur_high, cur_act)];
@@ -6600,16 +6571,17 @@ fn sort_int_lambda_list(mut l: Vec<(i32, RawLambda)>) -> Vec<(i32, RawLambda)> {
 /// Convert an int-lambda list into intervals for the switch compiler.
 /// Equivalent to OCaml's `as_interval`.
 fn as_interval(
+    b: &RawArena,
     fail: Option<RawLambda>,
     low: i32,
     high: i32,
     l: Vec<(i32, RawLambda)>,
-) -> ((i32, i32), (Vec<(i32, i32, usize)>, StoreExp)) {
+) -> ((i32, i32), (Vec<(i32, i32, usize)>, StoreExp<'_>)) {
     let l = sort_int_lambda_list(l);
     let edges = get_edges(low, high, &l);
     let result = match fail {
-        None => as_interval_nofail(l),
-        Some(act) => as_interval_canfail(act, low, high, l),
+        None => as_interval_nofail(b, l),
+        Some(act) => as_interval_canfail(b, act, low, high, l),
     };
     (edges, result)
 }
@@ -6617,6 +6589,7 @@ fn as_interval(
 /// Compile an integer switch using the switch module.
 /// Equivalent to OCaml's `call_switcher`.
 pub fn call_switcher(
+    b: &RawArena,
     fail: Option<RawLambda>,
     arg: RawLambda,
     low: i32,
@@ -6624,13 +6597,13 @@ pub fn call_switcher(
     int_lambda_list: Vec<(i32, RawLambda)>,
     next_raise_count: &mut i32,
 ) -> RawLambda {
-    let (edges, (cases, store)) = as_interval(fail, low, high, int_lambda_list);
+    let (edges, (cases, store)) = as_interval(b, fail, low, high, int_lambda_list);
 
     // Pass the existing action array through without re-storing it. The cases
     // above already contain indices into this exact array.
     let acts = store.act_get_shared();
 
-    crate::raw_lambda::switch::zyva_with_shared_actions(edges, arg, &cases, acts, &mut || {
+    crate::raw_lambda::switch::zyva_with_shared_actions(b, edges, arg, &cases, acts, &mut || {
         bump_raise_count(next_raise_count)
     })
 }
@@ -6748,8 +6721,8 @@ fn get_variant_constructors_from_env(
         let TypeDesc::Tconstr { path, .. } = &*desc else {
             return Vec::new();
         };
-        let exact_lookup = |decl: &crate::types::decl::TypeDeclaration| match path {
-            crate::types::Path::Pident(_) => true,
+        let exact_lookup = |decl: &crate::types::decl::TypeDeclaration| match path.view() {
+            crate::types::path::PathView::Pident(_) => true,
             _ => decl
                 .type_path
                 .as_ref()
@@ -6824,6 +6797,7 @@ fn get_variant_constructors_from_env(
 /// Returns (optional fail lambda, jumps).
 /// Equivalent to OCaml's `mk_failaction_neg`.
 fn mk_failaction_neg<'p>(
+    b: &RawArena,
     partial: &Partial,
     ctx: &[Ctx<'p>],
     def: &DefaultEnv<'p>,
@@ -6831,7 +6805,7 @@ fn mk_failaction_neg<'p>(
     match partial {
         Partial::Partial => match def.first() {
             Some((_, idef)) => (
-                Some(RawLambda::LstaticRaise(*idef, Vec::new())),
+                Some(b.static_raise(*idef, &[])),
                 jumps_singleton(*idef, ctx.to_vec()),
             ),
             None => {
@@ -6847,6 +6821,7 @@ fn mk_failaction_neg<'p>(
 /// Returns (optional fail lambda, additional cases, jumps).
 /// Equivalent to OCaml's `mk_failaction_pos`.
 fn mk_failaction_pos<'p>(
+    b: &RawArena,
     ctx_ref: &TypeContext,
     pa: &'p PatArena<'p>,
     partial: &Partial,
@@ -6865,11 +6840,11 @@ fn mk_failaction_pos<'p>(
             .map(|pat| (*pat, ctx_lub(pa, pat, ctx)))
             .collect();
 
-        let (fail, jmps) = scan_def(pa, ctx, Vec::new(), to_test, defs);
+        let (fail, jmps) = scan_def(b, pa, ctx, Vec::new(), to_test, defs);
         (None, fail, jmps)
     } else {
         // Too many non-matched constructors -> reduced information
-        let (fail, jumps) = mk_failaction_neg(partial, ctx, defs);
+        let (fail, jumps) = mk_failaction_neg(b, partial, ctx, defs);
         (fail, Vec::new(), jumps)
     }
 }
@@ -6878,6 +6853,7 @@ fn mk_failaction_pos<'p>(
 /// Returns (key-action list, jumps).
 /// Equivalent to OCaml's inner `scan_def` in `mk_failaction_pos`.
 fn scan_def<'p>(
+    b: &RawArena,
     pa: &'p PatArena<'p>,
     ctx: &[Ctx<'p>],
     env: Vec<(Vec<&'p Pattern>, i32)>,
@@ -6892,7 +6868,7 @@ fn scan_def<'p>(
         let mut klist: Vec<(std::sync::Arc<ConstructorDescription>, RawLambda)> = Vec::new();
         let mut jumps = jumps_empty();
         for (pats, i) in &env {
-            let action = RawLambda::LstaticRaise(*i, Vec::new());
+            let action = b.static_raise(*i, &[]);
             let mut new_klist: Vec<(std::sync::Arc<ConstructorDescription>, RawLambda)> = pats
                 .iter()
                 .map(|pat| (get_key_constr(pat), action.clone()))
@@ -6909,18 +6885,18 @@ fn scan_def<'p>(
         (klist, jumps)
     } else {
         match defs.split_first() {
-            None => scan_def(pa, ctx, env, Vec::new(), &[]),
+            None => scan_def(b, pa, ctx, env, Vec::new(), &[]),
             Some(((pss, idef), rem)) => {
                 let (now, later): (Vec<_>, Vec<_>) = to_test
                     .into_iter()
                     .partition(|(_, p_ctx)| ctx_match(pa, p_ctx, pss));
                 if now.is_empty() {
-                    scan_def(pa, ctx, env, later, rem)
+                    scan_def(b, pa, ctx, env, later, rem)
                 } else {
                     let pats: Vec<&'p Pattern> = now.into_iter().map(|(p, _)| p).collect();
                     let mut new_env = vec![(pats, *idef)];
                     new_env.extend(env);
-                    scan_def(pa, ctx, new_env, later, rem)
+                    scan_def(b, pa, ctx, new_env, later, rem)
                 }
             }
         }
@@ -6929,20 +6905,16 @@ fn scan_def<'p>(
 
 /// Overloaded version of `same_actions` for tagged lists (ConstructorTag, lambda).
 /// Checks if all actions in a case list are the same.
-fn all_actions_same_tagged<K>(cases: &[(K, RawLambda)]) -> bool {
+fn all_actions_same_tagged<K>(b: &RawArena, cases: &[(K, RawLambda)]) -> bool {
     match cases {
         [] => false,
         [_] => true,
         [(_, act0), rem @ ..] => {
-            let Some(raw_act0) = tr_raw(act0) else {
+            let Some(raw_act0) = make_key_string(b, *act0) else {
                 return false;
             };
-            let raw_act0_str = lambda_to_string(&raw_act0);
             for (_, act) in rem {
-                let Some(raw_act) = tr_raw(act) else {
-                    return false;
-                };
-                if !lambda_debug_equals(&raw_act, &raw_act0_str) {
+                if !make_key_equals(b, *act, &raw_act0) {
                     return false;
                 }
             }
@@ -6954,15 +6926,16 @@ fn all_actions_same_tagged<K>(cases: &[(K, RawLambda)]) -> bool {
 /// Share actions for tree-based string matching.
 /// Like share_actions_tree but for (String, RawLambda) pairs.
 fn share_actions_tree_string(
+    b: &RawArena,
     sw: Vec<(String, RawLambda)>,
     d: Option<RawLambda>,
     next_raise_count: &mut i32,
 ) -> (
-    Box<dyn FnOnce(RawLambda) -> RawLambda>,
+    Vec<(i32, Option<RawLambda>)>,
     Vec<(String, RawLambda)>,
     Option<RawLambda>,
 ) {
-    let mut store = StoreExp::mk_store();
+    let mut store = StoreExp::mk_store(b);
 
     let d_idx = d.map(|d| store.act_store_shared(d));
 
@@ -6974,37 +6947,34 @@ fn share_actions_tree_string(
     let acts = store.act_get_shared();
 
     // Process shared actions — handle_shared
-    let mut handlers: Vec<(i32, Box<dyn FnOnce(RawLambda) -> RawLambda>)> = Vec::new();
+    let mut handlers: Vec<(i32, Option<RawLambda>)> = Vec::new();
     let resolved_acts: Vec<RawLambda> = acts
         .into_iter()
         .map(|act| match act {
             Shared::Single(a) => a,
             Shared::Shared(a) => {
-                let (i, h) = make_catch_delayed(a, next_raise_count);
+                let (i, h) = make_catch_delayed(b, a, next_raise_count);
                 handlers.push((i, h));
-                make_exit(i)
+                make_exit(b, i)
             }
         })
         .collect();
 
-    let d = d_idx.map(|idx| resolved_acts[idx].clone());
+    let d = d_idx.map(|idx| resolved_acts[idx]);
     let sw: Vec<(String, RawLambda)> = sw_indices
         .into_iter()
-        .map(|(s, j)| (s, resolved_acts[j].clone()))
+        .map(|(s, j)| (s, resolved_acts[j]))
         .collect();
 
-    // Build composed wrapper function
-    let hs: Box<dyn FnOnce(RawLambda) -> RawLambda> = handlers.into_iter().fold(
-        Box::new(|x: RawLambda| x) as Box<dyn FnOnce(RawLambda) -> RawLambda>,
-        |ohs, (_, h)| Box::new(move |act: RawLambda| h(ohs(act))),
-    );
-
-    (hs, sw, d)
+    // The composed wrapper `hs` (first handler innermost); see
+    // `apply_catch_delayed`.
+    (handlers, sw, d)
 }
 
 /// Combine constant matching results.
 /// Equivalent to OCaml's `combine_constant`.
 fn combine_constant<'p>(
+    b: &RawArena,
     pa: &PatArena<'p>,
     loc: LamLoc,
     arg: RawLambda,
@@ -7016,7 +6986,7 @@ fn combine_constant<'p>(
     next_raise_count: &mut i32,
 ) -> (RawLambda, Jumps<'p>) {
     let (const_lambda_list, total, _pats) = c_div;
-    let (fail, local_jumps) = mk_failaction_neg(partial, ctx, def);
+    let (fail, local_jumps) = mk_failaction_neg(b, partial, ctx, def);
     let lambda1 = match cst {
         Constant::Int(_) => {
             let int_lambda_list: Vec<(i32, RawLambda)> = const_lambda_list
@@ -7027,6 +6997,7 @@ fn combine_constant<'p>(
                 })
                 .collect();
             call_switcher(
+                b,
                 fail,
                 arg,
                 i32::MIN,
@@ -7043,7 +7014,7 @@ fn combine_constant<'p>(
                     _ => panic!("combine_constant: expected Const_char"),
                 })
                 .collect();
-            call_switcher(fail, arg, 0, i32::MAX, int_lambda_list, next_raise_count)
+            call_switcher(b, fail, arg, 0, i32::MAX, int_lambda_list, next_raise_count)
         }
         Constant::String(_) => {
             let const_lambda_list = sort_lambda_list(const_lambda_list);
@@ -7054,14 +7025,13 @@ fn combine_constant<'p>(
                     _ => panic!("combine_constant: expected Const_string"),
                 })
                 .collect();
-            let (hs, sw, fail) = share_actions_tree_string(sw, fail, next_raise_count);
-            hs(RawLambda::LstringSwitch(
-                Box::new(arg),
-                sw,
-                fail.map(Box::new),
-            ))
+            let (hs, sw, fail) = share_actions_tree_string(b, sw, fail, next_raise_count);
+            let switch = b.string_switch(arg, &sw, fail);
+            hs.into_iter()
+                .fold(switch, |act, (i, h)| apply_catch_delayed(b, i, h, act))
         }
         Constant::Float(_) => make_test_sequence(
+            b,
             loc,
             fail,
             Primitive::Pfloatcomp(Comparison::Neq),
@@ -7071,6 +7041,7 @@ fn combine_constant<'p>(
             next_raise_count,
         ),
         Constant::BigInt(_, _) => make_test_sequence(
+            b,
             loc,
             fail,
             Primitive::Pbigintcomp(Comparison::Neq),
@@ -7148,33 +7119,33 @@ fn get_extension_cases(
 
 /// Translate a path to a RawLambda access expression.
 /// Equivalent to OCaml's `transl_normal_path`.
-fn transl_normal_path(path: &crate::types::path::Path) -> RawLambda {
-    use crate::types::path::Path;
-    match path {
-        Path::Pident(id) => {
+fn transl_normal_path(b: &RawArena, path: &crate::types::path::Path) -> RawLambda {
+    match path.view() {
+        PathView::Pident(id) => {
             if id.is_global() {
-                RawLambda::global_module(*id)
+                b.global_module(*id)
             } else {
-                RawLambda::Lvar(*id)
+                b.var(*id)
             }
         }
-        Path::Pdot(p, s, pos) => RawLambda::Lprim(Box::new(RawPrimInfo {
-            primitive: Primitive::Pfield(
+        PathView::Pdot(p, s, pos) => b.prim(
+            Primitive::Pfield(
                 *pos,
                 FieldDbgInfo::Module {
                     name: s.to_string(),
                 },
             ),
-            args: vec![transl_normal_path(p)],
-            loc: LamLoc::NONE,
-        })),
-        Path::Papply(_, _) => panic!("transl_normal_path: Papply"),
+            &[transl_normal_path(b, p)],
+            LamLoc::NONE,
+        ),
+        PathView::Papply(_, _) => panic!("transl_normal_path: Papply"),
     }
 }
 
 /// Translate an extension path to a RawLambda.
 /// Equivalent to OCaml's `transl_extension_path`.
 fn transl_extension_path(
+    b: &RawArena,
     ctx_ref: &TypeContext,
     env: EnvRef,
     path: &crate::types::path::Path,
@@ -7186,10 +7157,10 @@ fn transl_extension_path(
         // If normalization didn't resolve (still Pdot chain), try via type context's
         // resolved module sig cache for persistent module aliases
         let normalized = normalize_path_via_ctx(ctx_ref, &normalized);
-        transl_normal_path(&normalized)
+        transl_normal_path(b, &normalized)
     } else {
         let normalized = normalize_path_via_ctx(ctx_ref, path);
-        transl_normal_path(&normalized)
+        transl_normal_path(b, &normalized)
     }
 }
 
@@ -7201,14 +7172,14 @@ fn normalize_path_via_ctx(
 ) -> crate::types::path::Path {
     use crate::types::path::Path;
 
-    match path {
-        Path::Pdot(prefix, name, pos) => {
+    match path.view() {
+        PathView::Pdot(prefix, name, pos) => {
             // First normalize the prefix recursively
             let norm_prefix = normalize_module_path_via_ctx(ctx_ref, prefix);
-            if norm_prefix == **prefix {
+            if norm_prefix == *prefix {
                 path.clone()
             } else {
-                Path::Pdot(std::sync::Arc::new(norm_prefix), *name, *pos)
+                Path::pdot_pos(norm_prefix, *name, *pos)
             }
         }
         _ => path.clone(),
@@ -7224,21 +7195,21 @@ fn normalize_module_path_via_ctx(
     use crate::types::path::Path;
 
     // First normalize prefix recursively for Pdot
-    let path = match path {
-        Path::Pdot(prefix, name, pos) => {
+    let path = match path.view() {
+        PathView::Pdot(prefix, name, pos) => {
             let norm_prefix = normalize_module_path_via_ctx(ctx_ref, prefix);
-            if norm_prefix == **prefix {
+            if norm_prefix == *prefix {
                 path.clone()
             } else {
-                Path::Pdot(std::sync::Arc::new(norm_prefix), *name, *pos)
+                Path::pdot_pos(norm_prefix, *name, *pos)
             }
         }
         _ => path.clone(),
     };
 
     // Check if this path resolves to a module alias via sig caches
-    match &path {
-        Path::Pdot(prefix, name, _) => {
+    match path.view() {
+        PathView::Pdot(prefix, name, _) => {
             // Strategy 1: check the qualified module components cache.
             // This covers persistent module aliases like Js.Exn → Stdlib_Exn
             // that were resolved during type checking via with_resolved_module_components_for_path.
@@ -7287,6 +7258,7 @@ fn normalize_module_path_via_ctx(
 /// Combine constructor matching results.
 /// Equivalent to OCaml's `combine_constructor`.
 fn combine_constructor<'p>(
+    b: &RawArena,
     ctx_ref: &TypeContext,
     pa: &'p PatArena<'p>,
     loc: LamLoc,
@@ -7307,7 +7279,7 @@ fn combine_constructor<'p>(
 
     if matches!(cstr.cstr_kind, crate::types::ConstructorKind::Extension(_)) {
         // Special cases for extensions
-        let (fail, local_jumps) = mk_failaction_neg(partial, ctx, def);
+        let (fail, local_jumps) = mk_failaction_neg(b, partial, ctx, def);
         let lambda1 = {
             let extension_cases = get_extension_cases(tag_lambda_list);
             // OCaml compiler/ml/matching.ml:2118-2139 uses the first extension
@@ -7332,18 +7304,14 @@ fn combine_constructor<'p>(
                     .into_iter()
                     .rev()
                     .fold(default, |rem, (path, act)| {
-                        let ext = transl_extension_path(ctx_ref, ex_pat.pat_env, &path);
-                        RawLambda::LifThenElse(
-                            Box::new(RawLambda::Lprim(Box::new(RawPrimInfo {
-                                primitive: Primitive::PextensionSlotEq,
-                                args: vec![RawLambda::Lvar(tag), ext],
-                                loc,
-                            }))),
-                            Box::new(act),
-                            Box::new(rem),
+                        let ext = transl_extension_path(b, ctx_ref, ex_pat.pat_env, &path);
+                        b.if_raw(
+                            b.prim(Primitive::PextensionSlotEq, &[b.var(tag), ext], loc),
+                            act,
+                            rem,
                         )
                     });
-                RawLambda::Llet(LetKind::Alias, tag, Box::new(arg), Box::new(tests))
+                b.let_(LetKind::Alias, tag, arg, tests)
             }
         };
         (lambda1, jumps_union(pa, local_jumps, total1))
@@ -7365,7 +7333,7 @@ fn combine_constructor<'p>(
         let (fail_opt, fails, local_jumps) = if sig_complete {
             (None, Vec::new(), jumps_empty())
         } else {
-            mk_failaction_pos(ctx_ref, pa, partial, &pats, ctx, def)
+            mk_failaction_pos(b, ctx_ref, pa, partial, &pats, ctx, def)
         };
 
         // OCaml shares the immutable list cells/actions here:
@@ -7377,7 +7345,7 @@ fn combine_constructor<'p>(
         // at compiler/ml/matching.ml:2155-2156.
         let mut actions = fails;
         actions.extend(tag_lambda_list);
-        let actions_all_same = fail_opt.is_none() && all_actions_same_tagged(&actions);
+        let actions_all_same = fail_opt.is_none() && all_actions_same_tagged(b, &actions);
 
         let lambda1 = if actions_all_same {
             let (_, act) = actions
@@ -7401,19 +7369,15 @@ fn combine_constructor<'p>(
                 let (_, act1) = consts.pop().expect("one constant constructor case");
                 let (_, act2) = nonconsts.pop().expect("one block constructor case");
                 let test_arg = if is_option {
-                    RawLambda::Lprim(Box::new(RawPrimInfo {
-                        primitive: Primitive::PisNotNone,
-                        args: vec![arg],
-                        loc,
-                    }))
+                    b.prim(Primitive::PisNotNone, &[arg], loc)
                 } else {
-                    RawLambda::Lprim(Box::new(RawPrimInfo {
-                        primitive: Primitive::Pjscomp(Comparison::Neq),
-                        args: vec![arg, RawLambda::Lconst(crate::lambda::Constant::int(0))],
+                    b.prim(
+                        Primitive::Pjscomp(Comparison::Neq),
+                        &[arg, b.const_(crate::lambda::Constant::int(0))],
                         loc,
-                    }))
+                    )
                 };
-                RawLambda::LifThenElse(Box::new(test_arg), Box::new(act2), Box::new(act1))
+                b.if_raw(test_arg, act2, act1)
             } else if num_consts == 2
                 && num_nonconsts == 0
                 && consts.len() == 2
@@ -7426,11 +7390,7 @@ fn combine_constructor<'p>(
                         .find_map(|(cstr, action)| (cstr.cstr_name == name).then(|| action.clone()))
                         .expect("boolean constructor action")
                 };
-                RawLambda::LifThenElse(
-                    Box::new(arg),
-                    Box::new(find_action("true")),
-                    Box::new(find_action("false")),
-                )
+                b.if_raw(arg, find_action("true"), find_action("false"))
             } else {
                 // Emit a switch. OCaml computes `act0` at
                 // compiler/ml/matching.ml:2179-2189, but the only arm
@@ -7461,13 +7421,13 @@ fn combine_constructor<'p>(
                     sw_consts: switch_cases(consts),
                     sw_blocks_full: nonconsts.len() >= num_nonconsts,
                     sw_blocks: switch_cases(nonconsts),
-                    sw_failaction: fail_opt.map(Box::new),
+                    sw_failaction: fail_opt,
                     sw_dispatch: crate::lambda::SwitchDispatch::Variant(matching_facts),
                 };
-                let (handlers, sw) = share_actions_sw(sw, next_raise_count);
-                let sw = reintroduce_fail(sw);
-                let result = RawLambda::Lswitch(Box::new(arg), Box::new(sw));
-                apply_handlers(result, handlers)
+                let (handlers, sw) = share_actions_sw(b, sw, next_raise_count);
+                let sw = reintroduce_fail(b, sw);
+                let result = b.switch(arg, sw);
+                apply_handlers(b, result, handlers)
             }
         };
         (lambda1, jumps_union(pa, local_jumps, total1))
@@ -7480,6 +7440,7 @@ fn combine_constructor<'p>(
 /// Groups entries that have the same lambda action together, producing a list
 /// of `(hash_names, action)` pairs in order of first occurrence.
 fn convert_polyvar_list(
+    b: &RawArena,
     xs: Vec<(i32, (String, RawLambda))>,
 ) -> Vec<(Vec<(i32, String)>, RawLambda)> {
     // Group by normalized action equality, matching OCaml's make_key-based
@@ -7488,7 +7449,7 @@ fn convert_polyvar_list(
     let mut group_of_key: HashMap<String, usize> = HashMap::new();
 
     for (hash, (name, act)) in xs {
-        match make_key_string(&act) {
+        match make_key_string(b, act) {
             Some(key) => match group_of_key.get(&key) {
                 Some(&idx) => groups[idx].0.push((hash, name)),
                 None => {
@@ -7509,47 +7470,48 @@ fn convert_polyvar_list(
 
 /// Create a disjunction of equality tests for polyvar hash values.
 /// Equivalent to OCaml's `Polyvar_pattern_match.or_list`.
-fn raw_polyvariant_hash_const(hash: i32, name: &str) -> RawLambda {
-    RawLambda::Lconst(crate::lambda::lam_constant::Constant::Int {
+fn raw_polyvariant_hash_const(b: &RawArena, hash: i32, name: &str) -> RawLambda {
+    b.const_(crate::lambda::lam_constant::Constant::Int {
         i: hash,
         comment: Some(Box::new(PointerInfo::PolyVariant(name.to_string()))),
     })
 }
 
-fn or_list_polyvar(arg: &RawLambda, hash_names: &[(i32, String)]) -> RawLambda {
+fn or_list_polyvar(b: &RawArena, arg: &RawLambda, hash_names: &[(i32, String)]) -> RawLambda {
     let (first_hash, first_name) = &hash_names[0];
-    let init = RawLambda::Lprim(Box::new(RawPrimInfo {
-        primitive: Primitive::Pintcomp(Comparison::Eq),
-        args: vec![
+    let init = b.prim(
+        Primitive::Pintcomp(Comparison::Eq),
+        &[
             arg.clone(),
-            raw_polyvariant_hash_const(*first_hash, first_name),
+            raw_polyvariant_hash_const(b, *first_hash, first_name),
         ],
-        loc: LamLoc::NONE,
-    }));
+        LamLoc::NONE,
+    );
     hash_names[1..].iter().fold(init, |acc, (hash, name)| {
-        RawLambda::Lprim(Box::new(RawPrimInfo {
-            primitive: Primitive::Psequor,
-            args: vec![
+        b.prim(
+            Primitive::Psequor,
+            &[
                 acc,
-                RawLambda::Lprim(Box::new(RawPrimInfo {
-                    primitive: Primitive::Pintcomp(Comparison::Eq),
-                    args: vec![arg.clone(), raw_polyvariant_hash_const(*hash, name)],
-                    loc: LamLoc::NONE,
-                })),
+                b.prim(
+                    Primitive::Pintcomp(Comparison::Eq),
+                    &[arg.clone(), raw_polyvariant_hash_const(b, *hash, name)],
+                    LamLoc::NONE,
+                ),
             ],
-            loc: LamLoc::NONE,
-        }))
+            LamLoc::NONE,
+        )
     })
 }
 
 /// Build an if-chain from converted polyvar list.
 /// Used by both make_test_sequence_variant_constant and call_switcher_variant_constant.
 fn polyvar_if_chain(
+    b: &RawArena,
     fail: Option<RawLambda>,
     arg: &RawLambda,
     int_lambda_list: Vec<(i32, (String, RawLambda))>,
 ) -> RawLambda {
-    let mut converted = convert_polyvar_list(int_lambda_list).into_iter();
+    let mut converted = convert_polyvar_list(b, int_lambda_list).into_iter();
     // Without a fail action the first action is the default and the rest are
     // if-then-else; with one, fail is the default and every entry is tested.
     let default = match fail {
@@ -7562,34 +7524,37 @@ fn polyvar_if_chain(
         }
     };
     converted.rev().fold(default, |acc, (hash_names, act)| {
-        let predicate = or_list_polyvar(arg, &hash_names);
-        RawLambda::LifThenElse(Box::new(predicate), Box::new(act), Box::new(acc))
+        let predicate = or_list_polyvar(b, arg, &hash_names);
+        b.if_raw(predicate, act, acc)
     })
 }
 
 /// Make a test sequence for variant constant matching.
 /// Equivalent to OCaml's `Polyvar_pattern_match.make_test_sequence_variant_constant`.
 fn make_test_sequence_variant_constant(
+    b: &RawArena,
     fail: Option<RawLambda>,
     arg: RawLambda,
     int_lambda_list: Vec<(i32, (String, RawLambda))>,
 ) -> RawLambda {
-    polyvar_if_chain(fail, &arg, int_lambda_list)
+    polyvar_if_chain(b, fail, &arg, int_lambda_list)
 }
 
 /// Call switcher for variant constant matching.
 /// Equivalent to OCaml's `Polyvar_pattern_match.call_switcher_variant_constant`.
 fn call_switcher_variant_constant(
+    b: &RawArena,
     fail: Option<RawLambda>,
     arg: RawLambda,
     int_lambda_list: Vec<(i32, (String, RawLambda))>,
 ) -> RawLambda {
-    polyvar_if_chain(fail, &arg, int_lambda_list)
+    polyvar_if_chain(b, fail, &arg, int_lambda_list)
 }
 
 /// Call switcher for variant non-constant (block) matching.
 /// Equivalent to OCaml's `Polyvar_pattern_match.call_switcher_variant_constr`.
 fn call_switcher_variant_constr(
+    b: &RawArena,
     ctx_ref: &TypeContext,
     loc: LamLoc,
     fail: Option<RawLambda>,
@@ -7597,25 +7562,18 @@ fn call_switcher_variant_constr(
     int_lambda_list: Vec<(i32, (String, RawLambda))>,
 ) -> RawLambda {
     let v = ctx_ref.create_ident("variant");
-    RawLambda::Llet(
+    b.let_(
         LetKind::Alias,
         v,
-        Box::new(RawLambda::Lprim(Box::new(RawPrimInfo {
-            primitive: Primitive::Pfield(0, FieldDbgInfo::PolyVarTag),
-            args: vec![arg],
-            loc,
-        }))),
-        Box::new(call_switcher_variant_constant(
-            fail,
-            RawLambda::Lvar(v),
-            int_lambda_list,
-        )),
+        b.prim(Primitive::Pfield(0, FieldDbgInfo::PolyVarTag), &[arg], loc),
+        call_switcher_variant_constant(b, fail, b.var(v), int_lambda_list),
     )
 }
 
 /// Combine variant matching results.
 /// Equivalent to OCaml's `combine_variant`.
 fn combine_variant<'p>(
+    b: &RawArena,
     pa: &PatArena<'p>,
     ctx_ref: &TypeContext,
     loc: LamLoc,
@@ -7650,14 +7608,10 @@ fn combine_variant<'p>(
     }
 
     let test_int_or_block = |arg: RawLambda, if_int: RawLambda, if_block: RawLambda| -> RawLambda {
-        RawLambda::LifThenElse(
-            Box::new(RawLambda::Lprim(Box::new(RawPrimInfo {
-                primitive: Primitive::PisPolyVarBlock,
-                args: vec![arg],
-                loc,
-            }))),
-            Box::new(if_block),
-            Box::new(if_int),
+        b.if_raw(
+            b.prim(Primitive::PisPolyVarBlock, &[arg], loc),
+            if_block,
+            if_int,
         )
     };
 
@@ -7666,10 +7620,10 @@ fn combine_variant<'p>(
     let (fail, local_jumps) = if sig_complete || matches!(partial, Partial::Total) {
         (None, jumps_empty())
     } else {
-        mk_failaction_neg(partial, ctx, def)
+        mk_failaction_neg(b, partial, ctx, def)
     };
 
-    let actions_all_same = fail.is_none() && all_actions_same_tagged(&tag_lambda_list);
+    let actions_all_same = fail.is_none() && all_actions_same_tagged(b, &tag_lambda_list);
     let lambda1 = if actions_all_same {
         // OCaml compiler/ml/matching.ml:2155-2156 returns the original
         // action when all switch branches share the same lambda.
@@ -7686,19 +7640,19 @@ fn combine_variant<'p>(
             test_int_or_block(arg, act1, act2)
         } else if nonconsts.is_empty() {
             // One can compare integers and pointers
-            make_test_sequence_variant_constant(fail, arg, consts)
+            make_test_sequence_variant_constant(b, fail, arg, consts)
         } else if consts.is_empty() {
             let lam =
-                call_switcher_variant_constr(ctx_ref, loc, fail.clone(), arg.clone(), nonconsts);
+                call_switcher_variant_constr(b, ctx_ref, loc, fail.clone(), arg.clone(), nonconsts);
             // One must not dereference integers
             match fail {
                 None => lam,
                 Some(fail) => test_int_or_block(arg, fail, lam),
             }
         } else {
-            let lam_const = call_switcher_variant_constant(fail.clone(), arg.clone(), consts);
+            let lam_const = call_switcher_variant_constant(b, fail.clone(), arg.clone(), consts);
             let lam_nonconst =
-                call_switcher_variant_constr(ctx_ref, loc, fail, arg.clone(), nonconsts);
+                call_switcher_variant_constr(b, ctx_ref, loc, fail, arg.clone(), nonconsts);
             test_int_or_block(arg, lam_const, lam_nonconst)
         }
     };
@@ -7708,6 +7662,7 @@ fn combine_variant<'p>(
 /// Combine array matching results.
 /// Equivalent to OCaml's `combine_array`.
 fn combine_array<'p>(
+    b: &RawArena,
     pa: &PatArena<'p>,
     ctx_ref: &TypeContext,
     loc: LamLoc,
@@ -7719,7 +7674,7 @@ fn combine_array<'p>(
     next_raise_count: &mut i32,
 ) -> (RawLambda, Jumps<'p>) {
     let (len_lambda_list, total1, _pats) = c_div;
-    let (fail, local_jumps) = mk_failaction_neg(partial, ctx, def);
+    let (fail, local_jumps) = mk_failaction_neg(b, partial, ctx, def);
     let lambda1 = {
         let newvar = ctx_ref.create_ident("len");
         let int_lambda_list: Vec<(i32, RawLambda)> = len_lambda_list
@@ -7727,21 +7682,19 @@ fn combine_array<'p>(
             .map(|(len, act)| (len as i32, act))
             .collect();
         let switch_result = call_switcher(
+            b,
             fail,
-            RawLambda::Lvar(newvar),
+            b.var(newvar),
             0,
             i32::MAX,
             int_lambda_list,
             next_raise_count,
         );
         bind(
+            b,
             LetKind::Alias,
             &newvar,
-            &RawLambda::Lprim(Box::new(RawPrimInfo {
-                primitive: Primitive::Parraylength,
-                args: vec![arg],
-                loc,
-            })),
+            &b.prim(Primitive::Parraylength, &[arg], loc),
             switch_result,
         )
     };
@@ -7796,6 +7749,7 @@ fn compile_list<'p, K: Clone>(
 /// Compile or-pattern handlers.
 /// Equivalent to OCaml's `compile_orhandlers`.
 fn compile_orhandlers<'p>(
+    b: &RawArena,
     pa: &'p PatArena<'p>,
     compile_fun: &mut dyn FnMut(
         &[Ctx<'p>],
@@ -7807,6 +7761,7 @@ fn compile_orhandlers<'p>(
     to_catch: &[(Matrix<'p>, i32, Vec<Ident>, PatternMatching<'p>)],
 ) -> (RawLambda, Jumps<'p>) {
     fn do_rec<'p>(
+        b: &RawArena,
         pa: &'p PatArena<'p>,
         compile_fun: &mut dyn FnMut(
             &[Ctx<'p>],
@@ -7823,16 +7778,17 @@ fn compile_orhandlers<'p>(
                 let ctx_i = select_columns(pa, mat, ctx);
                 match compile_fun(&ctx_i, pm) {
                     Ok((handler_i, total_i)) => {
-                        match raw_static_raise(&r) {
+                        match raw_static_raise(b, r) {
                             Some((j, args)) if j == *i => {
                                 let body = vars
                                     .iter()
                                     .zip(args.iter())
                                     .rev()
                                     .fold(handler_i, |body, (var, arg)| {
-                                        bind(LetKind::Alias, var, arg, body)
+                                        bind(b, LetKind::Alias, var, arg, body)
                                     });
                                 do_rec(
+                                    b,
                                     pa,
                                     compile_fun,
                                     body,
@@ -7846,16 +7802,13 @@ fn compile_orhandlers<'p>(
                                 // skips a handler when `raw_action r` is a
                                 // different static raise.
                                 drop(args);
-                                do_rec(pa, compile_fun, r, total_r, ctx, rem)
+                                do_rec(b, pa, compile_fun, r, total_r, ctx, rem)
                             }
                             None => do_rec(
+                                b,
                                 pa,
                                 compile_fun,
-                                RawLambda::LstaticCatch(
-                                    Box::new(r),
-                                    (*i, vars.clone()),
-                                    Box::new(handler_i),
-                                ),
+                                b.static_catch(r, *i, &vars.clone(), handler_i),
                                 jumps_union(
                                     pa,
                                     jumps_remove(*i, total_r),
@@ -7867,13 +7820,10 @@ fn compile_orhandlers<'p>(
                         }
                     }
                     Err(Unused) => do_rec(
+                        b,
                         pa,
                         compile_fun,
-                        RawLambda::LstaticCatch(
-                            Box::new(r),
-                            (*i, vars.clone()),
-                            Box::new(lambda_unit()),
-                        ),
+                        b.static_catch(r, *i, &vars.clone(), lambda_unit(b)),
                         total_r,
                         ctx,
                         rem,
@@ -7883,7 +7833,7 @@ fn compile_orhandlers<'p>(
         }
     }
 
-    do_rec(pa, compile_fun, lambda1, total1, ctx, to_catch)
+    do_rec(b, pa, compile_fun, lambda1, total1, ctx, to_catch)
 }
 
 /// Check if v approximately appears in lam.
@@ -7891,117 +7841,108 @@ fn compile_orhandlers<'p>(
 /// matching.ml `approx_present`: anything but a constant, a static raise,
 /// a primitive, an alias let or a variable (including `Lglobal_module`)
 /// counts as present.
-fn approx_present(v: &Ident, lam: &RawLambda) -> bool {
-    match lam.peel() {
-        RawLambda::Lconst(_) => false,
-        RawLambda::LstaticRaise(_, args) => args.iter().any(|a| approx_present(v, a)),
-        RawLambda::Lprim(info) => info.args.iter().any(|a| approx_present(v, a)),
-        RawLambda::Llet(LetKind::Alias, _, l1, l2) => {
-            approx_present(v, l1) || approx_present(v, l2)
+fn approx_present(a: &LamArena, v: &Ident, lam: RawLambda) -> bool {
+    match a.view(lam) {
+        View::Const(_) => false,
+        View::StaticRaise(_, args) | View::Prim(_, args, _) => {
+            args.iter().any(|arg| approx_present(a, v, *arg))
         }
-        RawLambda::Lvar(vv) => v.same(vv),
+        View::Let(LetKind::Alias, _, l1, l2) => {
+            approx_present(a, v, l1) || approx_present(a, v, l2)
+        }
+        View::Var(vv) => v.same(&vv),
         _ => true,
     }
 }
 
 /// Lower a binding into the appropriate branch.
 /// Equivalent to OCaml's `lower_bind`.
-fn lower_bind(v: &Ident, arg: &RawLambda, lam: RawLambda) -> RawLambda {
+fn lower_bind(b: &RawArena, v: &Ident, arg: &RawLambda, lam: RawLambda) -> RawLambda {
     // OCaml `compiler/ml/matching.ml:2413-2435` rebuilds only the branch that
-    // needs the alias binding. Pattern-match the Rust value by ownership so
-    // unchanged subtrees move through instead of recursively cloning the
-    // already-built raw lambda. A shared action is only copied when one of
-    // the rewriting shapes below applies; otherwise it is wrapped unchanged.
-    let lam = match lam {
-        RawLambda::Lshared(inner)
-            if matches!(
-                &*inner,
-                RawLambda::LifThenElse(..)
-                    | RawLambda::Lswitch(..)
-                    | RawLambda::Llet(LetKind::Alias, ..)
-                    | RawLambda::Lvar(_)
-                    | RawLambda::Lshared(_)
-            ) =>
-        {
-            RawLambda::Lshared(inner).unshare()
-        }
-        other => other,
-    };
-    match lam {
-        RawLambda::LifThenElse(cond, ifso, ifnot) => {
-            let pcond = approx_present(v, &cond);
-            let pso = approx_present(v, &ifso);
-            let pnot = approx_present(v, &ifnot);
+    // needs the alias binding.
+    let present = |l: RawLambda| approx_present(&b.get(), v, l);
+    match b.node(lam) {
+        Node::If { cond, then_, else_ } => {
+            let pcond = present(cond);
+            let pso = present(then_);
+            let pnot = present(else_);
             match (pcond, pso, pnot) {
-                (false, false, false) => RawLambda::LifThenElse(cond, ifso, ifnot),
+                (false, false, false) => lam,
                 (false, true, false) => {
-                    RawLambda::LifThenElse(cond, Box::new(lower_bind(v, arg, *ifso)), ifnot)
+                    let then_ = lower_bind(b, v, arg, then_);
+                    b.if_raw(cond, then_, else_)
                 }
                 (false, false, true) => {
-                    RawLambda::LifThenElse(cond, ifso, Box::new(lower_bind(v, arg, *ifnot)))
+                    let else_ = lower_bind(b, v, arg, else_);
+                    b.if_raw(cond, then_, else_)
                 }
-                _ => bind(
-                    LetKind::Alias,
-                    v,
-                    arg,
-                    RawLambda::LifThenElse(cond, ifso, ifnot),
-                ),
+                _ => bind(b, LetKind::Alias, v, arg, lam),
             }
         }
-        RawLambda::Lswitch(ls, mut sw) => {
-            if sw.sw_consts.len() == 1 && sw.sw_blocks.is_empty() && !approx_present(v, &ls) {
+        Node::Switch { scrut: ls, .. } => {
+            let (_, mut sw) = b.switch_parts(lam).expect("switch node");
+            if sw.sw_consts.len() == 1 && sw.sw_blocks.is_empty() && !present(ls) {
                 let (i, act) = sw.sw_consts.pop().expect("single const switch branch");
-                sw.sw_consts.push((i, lower_bind(v, arg, act)));
-                RawLambda::Lswitch(ls, sw)
-            } else if sw.sw_consts.is_empty() && sw.sw_blocks.len() == 1 && !approx_present(v, &ls)
-            {
+                sw.sw_consts.push((i, lower_bind(b, v, arg, act)));
+                b.switch(ls, sw)
+            } else if sw.sw_consts.is_empty() && sw.sw_blocks.len() == 1 && !present(ls) {
                 let (i, act) = sw.sw_blocks.pop().expect("single block switch branch");
-                sw.sw_blocks.push((i, lower_bind(v, arg, act)));
-                RawLambda::Lswitch(ls, sw)
+                sw.sw_blocks.push((i, lower_bind(b, v, arg, act)));
+                b.switch(ls, sw)
             } else {
-                bind(LetKind::Alias, v, arg, RawLambda::Lswitch(ls, sw))
+                bind(b, LetKind::Alias, v, arg, lam)
             }
         }
-        RawLambda::Llet(LetKind::Alias, vv, lv, l) => {
-            if approx_present(v, &lv) {
-                bind(
-                    LetKind::Alias,
-                    v,
-                    arg,
-                    RawLambda::Llet(LetKind::Alias, vv, lv, l),
-                )
+        Node::Let {
+            kind: LetKind::Alias,
+            id,
+            value: lv,
+            body: l,
+        } => {
+            if present(lv) {
+                bind(b, LetKind::Alias, v, arg, lam)
             } else {
-                RawLambda::Llet(LetKind::Alias, vv, lv, Box::new(lower_bind(v, arg, *l)))
+                let l = lower_bind(b, v, arg, l);
+                b.push(Node::Let {
+                    kind: LetKind::Alias,
+                    id,
+                    value: lv,
+                    body: l,
+                })
             }
         }
         // matching.ml:2407-2410: eliminate `let v = arg in v`; lower_bind is
         // only used for alias bindings, so `arg` is pure.
-        RawLambda::Lvar(u) if u.same(v) => arg.clone(),
-        other => bind(LetKind::Alias, v, arg, other),
+        Node::Var(_) if matches!(b.as_var(lam), Some(u) if u.same(v)) => *arg,
+        _ => bind(b, LetKind::Alias, v, arg, lam),
     }
 }
 
 /// Bind with check — try to lower alias bindings.
 /// Equivalent to OCaml's `bind_check`.
-fn bind_check(str_kind: LetKind, v: &Ident, arg: &RawLambda, lam: RawLambda) -> RawLambda {
-    match (&str_kind, arg.peel()) {
-        (_, RawLambda::Lvar(_)) => bind(str_kind, v, arg, lam),
-        (LetKind::Alias, _) => lower_bind(v, arg, lam),
-        _ => bind(str_kind, v, arg, lam),
+fn bind_check(
+    b: &RawArena,
+    str_kind: LetKind,
+    v: &Ident,
+    arg: &RawLambda,
+    lam: RawLambda,
+) -> RawLambda {
+    match (&str_kind, b.as_var(*arg)) {
+        (_, Some(_)) => bind(b, str_kind, v, arg, lam),
+        (LetKind::Alias, _) => lower_bind(b, v, arg, lam),
+        _ => bind(b, str_kind, v, arg, lam),
     }
 }
 
 /// Compile the default/exit case.
 /// Equivalent to OCaml's `comp_exit`.
 fn comp_exit<'p>(
+    b: &RawArena,
     ctx: &[Ctx<'p>],
     m: &PatternMatching<'p>,
 ) -> Result<(RawLambda, Jumps<'p>), Unused> {
     match m.default.first() {
-        Some((_, i)) => Ok((
-            RawLambda::LstaticRaise(*i, Vec::new()),
-            jumps_singleton(*i, ctx.to_vec()),
-        )),
+        Some((_, i)) => Ok((b.static_raise(*i, &[]), jumps_singleton(*i, ctx.to_vec()))),
         None => crate::misc::fatal_error("Matching.comp_exit"),
     }
 }
@@ -8009,6 +7950,7 @@ fn comp_exit<'p>(
 /// Compile a match with multiple handlers (for split results).
 /// Equivalent to OCaml's `comp_match_handlers`.
 fn comp_match_handlers<'p>(
+    b: &RawArena,
     pa: &PatArena<'p>,
     comp_fun: &mut dyn FnMut(
         &Partial,
@@ -8030,16 +7972,19 @@ fn comp_match_handlers<'p>(
     // structurally by sharing the tail list. Borrow the Rust slice for the
     // same control flow instead of cloning precompiled match trees.
     match comp_fun(&Partial::Partial, ctx, arg, first_match) {
-        Ok((first_lam, total)) => c_rec(pa, comp_fun, partial, arg, first_lam, total, next_matchs),
+        Ok((first_lam, total)) => {
+            c_rec(b, pa, comp_fun, partial, arg, first_lam, total, next_matchs)
+        }
         Err(Unused) => match next_matchs.split_first() {
             None => Err(Unused),
-            Some(((_, x), xs)) => comp_match_handlers(pa, comp_fun, partial, ctx, arg, x, xs),
+            Some(((_, x), xs)) => comp_match_handlers(b, pa, comp_fun, partial, ctx, arg, x, xs),
         },
     }
 }
 
 /// Inner recursive function for comp_match_handlers.
 fn c_rec<'p>(
+    b: &RawArena,
     pa: &PatArena<'p>,
     comp_fun: &mut dyn FnMut(
         &Partial,
@@ -8061,7 +8006,7 @@ fn c_rec<'p>(
             let has_ctx_i =
                 jumps_position(*i, &total_body).is_some_and(|p| !total_body[p].1.is_empty());
             if !has_ctx_i {
-                c_rec(pa, comp_fun, partial, arg, body, total_body, rem)
+                c_rec(b, pa, comp_fun, partial, arg, body, total_body, rem)
             } else {
                 let (ctx_i, total_rem) = jumps_extract(*i, total_body);
                 let this_partial = if rem.is_empty() {
@@ -8071,24 +8016,22 @@ fn c_rec<'p>(
                 };
                 match comp_fun(&this_partial, &ctx_i, arg, pm) {
                     Ok((li, total_i)) => c_rec(
+                        b,
                         pa,
                         comp_fun,
                         partial,
                         arg,
-                        RawLambda::LstaticCatch(Box::new(body), (*i, Vec::new()), Box::new(li)),
+                        b.static_catch(body, *i, &[], li),
                         jumps_union(pa, total_i, total_rem),
                         rem,
                     ),
                     Err(Unused) => c_rec(
+                        b,
                         pa,
                         comp_fun,
                         partial,
                         arg,
-                        RawLambda::LstaticCatch(
-                            Box::new(body),
-                            (*i, Vec::new()),
-                            Box::new(lambda_unit()),
-                        ),
+                        b.static_catch(body, *i, &[], lambda_unit(b)),
                         total_rem,
                         rem,
                     ),
@@ -8137,24 +8080,25 @@ fn id_of_pattern(pa: &PatArena<'_>, ctx_ref: &TypeContext, pat: &Pattern) -> Opt
 /// Convert arg to a variable (bind if not already a variable).
 /// Equivalent to OCaml's `arg_to_var`.
 fn arg_to_var<'p>(
+    b: &RawArena,
     pa: &PatArena<'p>,
     ctx_ref: &TypeContext,
     arg: &RawLambda,
     cls: &[Clause<'p>],
 ) -> (Ident, RawLambda) {
-    match arg {
-        RawLambda::Lvar(v) => (*v, arg.clone()),
-        _ => {
+    match b.as_var(*arg) {
+        Some(v) => (v, *arg),
+        None => {
             let v = name_pattern(pa, ctx_ref, "match", cls);
-            (v, RawLambda::Lvar(v))
+            (v, b.var(v))
         }
     }
 }
 
 /// Lambda unit value.
 /// Equivalent to OCaml's `Lambda.lambda_unit`.
-fn lambda_unit() -> RawLambda {
-    RawLambda::Lconst(crate::lambda::Constant::JsUndefined { is_unit: true })
+fn lambda_unit(b: &RawArena) -> RawLambda {
+    b.unit()
 }
 
 /// The main compilation function.
@@ -8176,8 +8120,9 @@ fn compile_match<'p>(
     m: &PatternMatching<'p>,
     next_raise_count: &mut i32,
 ) -> Result<(RawLambda, Jumps<'p>), Unused> {
+    let b = arena.b;
     match (m.cases.as_slice(), m.args.as_slice()) {
-        ([], []) => comp_exit(ctx, m),
+        ([], []) => comp_exit(b, ctx, m),
         ([(pats, action), rem @ ..], _) if pats.is_empty() => {
             if action.is_guarded() {
                 let remaining = PatternMatching {
@@ -8195,13 +8140,13 @@ fn compile_match<'p>(
                     &remaining,
                     next_raise_count,
                 )?;
-                Ok((action.body_with(lambda), total))
+                Ok((action.body_with(b, lambda), total))
             } else {
-                Ok((action.to_raw(), jumps_empty()))
+                Ok((action.to_raw(b), jumps_empty()))
             }
         }
         (_, [(arg, str_kind), argl @ ..]) => {
-            let (v, newarg) = arg_to_var(pa, ctx_ref, arg, &m.cases);
+            let (v, newarg) = arg_to_var(b, pa, ctx_ref, arg, &m.cases);
             let new_args = {
                 let mut a = vec![(newarg.clone(), LetKind::Alias)];
                 a.extend(argl.iter().cloned());
@@ -8229,16 +8174,24 @@ fn compile_match<'p>(
                 do_compile_matching(ctx_ref, pa, arena, partial, ctx, arg, pmh, next_raise_count)
             };
 
-            let (lam, total) =
-                comp_match_handlers(pa, &mut comp_fn, partial, ctx, &newarg, &first_match, &rem)?;
-            Ok((bind_check(*str_kind, &v, arg, lam), total))
+            let (lam, total) = comp_match_handlers(
+                b,
+                pa,
+                &mut comp_fn,
+                partial,
+                ctx,
+                &newarg,
+                &first_match,
+                &rem,
+            )?;
+            Ok((bind_check(b, *str_kind, &v, arg, lam), total))
         }
         (cases, []) if !cases.is_empty() => {
             // Cases exist but no args — shouldn't happen normally.
             // Return the first non-guarded action if available.
             for (_, act) in cases {
                 if !act.is_guarded() {
-                    return Ok((act.to_raw(), jumps_empty()));
+                    return Ok((act.to_raw(b), jumps_empty()));
                 }
             }
             Err(Unused)
@@ -8259,6 +8212,7 @@ fn do_compile_matching<'p>(
     pmh: &PmHalfCompiled<'p>,
     next_raise_count: &mut i32,
 ) -> Result<(RawLambda, Jumps<'p>), Unused> {
+    let b = arena.b;
     match pmh {
         PmHalfCompiled::Pm(pm) => {
             let pat = what_is_cases(&pm.cases);
@@ -8318,6 +8272,7 @@ fn do_compile_matching<'p>(
                         &|ctx, pm| divide_constant(pa, ctx, pm),
                         &|ctx, def, c_div, nrc| {
                             combine_constant(
+                                b,
                                 pa,
                                 loc,
                                 arg_clone.clone(),
@@ -8347,6 +8302,7 @@ fn do_compile_matching<'p>(
                         &|ctx, pm| divide_constructor(ctx_ref, pa, arena, ctx, pm),
                         &|ctx, def, c_div, nrc| {
                             combine_constructor(
+                                b,
                                 ctx_ref,
                                 pa,
                                 loc,
@@ -8376,6 +8332,7 @@ fn do_compile_matching<'p>(
                         &|ctx, pm| divide_array(pa, arena, ctx, pm),
                         &|ctx, def, c_div, nrc| {
                             combine_array(
+                                b,
                                 pa,
                                 ctx_ref,
                                 loc,
@@ -8406,6 +8363,7 @@ fn do_compile_matching<'p>(
                         &move |ctx, pm| divide_variant(ctx_ref, pa, arena, &row_desc, ctx, pm),
                         &|ctx, def, c_div, _nrc| {
                             combine_variant(
+                                b,
                                 pa,
                                 ctx_ref,
                                 loc,
@@ -8455,6 +8413,7 @@ fn do_compile_matching<'p>(
                 compile_match(ctx_ref, pa, arena, None, partial, ctx, pm, next_raise_count)
             };
             Ok(compile_orhandlers(
+                b,
                 pa,
                 &mut compile_fn,
                 lam,
@@ -8514,6 +8473,7 @@ fn compile_test_wrapper<'p, K: Clone>(
     pm: &PatternMatching<'p>,
     next_raise_count: &mut i32,
 ) -> Result<(RawLambda, Jumps<'p>), Unused> {
+    let b = arena.b;
     let raise_counter = std::cell::Cell::new(*next_raise_count);
 
     // Step 1: divide
@@ -8534,7 +8494,7 @@ fn compile_test_wrapper<'p, K: Clone>(
 
     // Step 3: combine
     let result = match &c_div {
-        (list, _, _) if list.is_empty() => match mk_failaction_neg(partial, ctx, &pm.default) {
+        (list, _, _) if list.is_empty() => match mk_failaction_neg(b, partial, ctx, &pm.default) {
             (None, _) => Err(Unused),
             (Some(l), total) => Ok((l, total)),
         },
@@ -8743,7 +8703,7 @@ fn resolve_labels_from_type(
 
     // Handle inline records: path is Pdot(parent_type, constructor_name, _)
     // Look up the parent type declaration and find the constructor's inline record
-    if let crate::types::Path::Pdot(ref parent_path, ref cstr_name, _) = path {
+    if let crate::types::path::PathView::Pdot(parent_path, cstr_name, _) = path.view() {
         // Try to find the parent type declaration
         if let Ok(parent_decl) = env.lookup_type(parent_path) {
             if let crate::types::TypeKind::TypeVariant(ref constrs, layout) = parent_decl.type_kind
@@ -8818,7 +8778,7 @@ fn extract_row_from_type_with_env(
         let expanded = crate::types::ctype::expand_head(ctx_ref, env.as_ref(), ty);
         let desc = ctx_ref.get_desc(expanded);
         if let TypeDesc::Tvariant(row) = &*desc {
-            return btype::row_repr(ctx_ref, row);
+            return btype::row_repr(ctx_ref, &ctx_ref.row_desc(row));
         }
     }
 
@@ -8830,7 +8790,7 @@ fn extract_row_from_type(ctx_ref: &TypeContext, ty: TypeExprRef) -> RowDesc {
     use crate::types::type_expr::TypeDesc;
 
     if let TypeDesc::Tvariant(row) = &*ctx_ref.get_desc(ctx_ref.repr(ty)) {
-        return btype::row_repr(ctx_ref, row);
+        return btype::row_repr(ctx_ref, &ctx_ref.row_desc(*row));
     }
 
     // Fallback: empty row
@@ -8948,6 +8908,7 @@ fn start_ctx<'p>(n: usize) -> Vec<Ctx<'p>> {
 /// Check total: add a catch handler if jumps are not empty.
 /// Equivalent to OCaml's `check_total`.
 fn check_total<'p>(
+    b: &RawArena,
     total: &Jumps<'p>,
     lambda: RawLambda,
     i: i32,
@@ -8956,28 +8917,12 @@ fn check_total<'p>(
     if jumps_is_empty(total) {
         lambda
     } else {
-        RawLambda::LstaticCatch(Box::new(lambda), (i, Vec::new()), Box::new(handler_fun()))
+        b.static_catch(lambda, i, &[], handler_fun())
     }
 }
 
 /// Compile a matching with error handler.
 /// Equivalent to OCaml's `compile_matching`.
-/// Replace the shared actions (`RawLambda::Lshared`) in a compiled matching
-/// by the actions themselves, moving each action that is placed once.
-///
-/// The matching compiler places an action by reference instead of copying
-/// its lambda (OCaml shares the immutable action, `compiler/ml/matching.ml`
-/// `Lambda.bind` / `Switch.Store`). Once the matching structures are dropped,
-/// an action used once is uniquely owned by its occurrence and moves out. An
-/// action's own lambda never contains shared actions, so the walk stops there.
-pub(crate) fn resolve_shared_actions(lam: &mut RawLambda) {
-    if let RawLambda::Lshared(_) = lam {
-        *lam = std::mem::replace(lam, RawLambda::Lbreak).unshare();
-        return;
-    }
-    lam.for_each_child_mut(&mut resolve_shared_actions);
-}
-
 pub fn compile_matching(
     ctx_ref: &TypeContext,
     ta: &TypedArena,
@@ -8990,7 +8935,7 @@ pub fn compile_matching(
 ) -> RawLambda {
     let store = PatStore::default();
     let pa = PatArena::new(ta, &store);
-    let mut lambda = compile_matching_unresolved(
+    compile_matching_unresolved(
         ctx_ref,
         &pa,
         arena,
@@ -8999,9 +8944,7 @@ pub fn compile_matching(
         pat_act_list,
         partial,
         next_raise_count,
-    );
-    resolve_shared_actions(&mut lambda);
-    lambda
+    )
 }
 
 fn compile_matching_unresolved<'p>(
@@ -9014,6 +8957,7 @@ fn compile_matching_unresolved<'p>(
     partial: Partial,
     next_raise_count: &mut i32,
 ) -> RawLambda {
+    let b = arena.b;
     let partial = check_partial_single(pa, &pat_act_list, partial);
     match partial {
         Partial::Partial => {
@@ -9036,7 +8980,7 @@ fn compile_matching_unresolved<'p>(
                 &pm,
                 next_raise_count,
             ) {
-                Ok((lambda, total)) => check_total(&total, lambda, raise_num, handler_fun),
+                Ok((lambda, total)) => check_total(b, &total, lambda, raise_num, handler_fun),
                 Err(Unused) => panic!("compile_matching: Unused"),
             }
         }
@@ -9066,7 +9010,7 @@ fn compile_matching_unresolved<'p>(
                 Err(Unused) => {
                     // Shouldn't happen for Total matches, but handle gracefully
                     // by returning a unit value as placeholder.
-                    lambda_unit()
+                    lambda_unit(b)
                 }
             }
         }
@@ -9076,6 +9020,7 @@ fn compile_matching_unresolved<'p>(
 /// Build a match failure exception raise.
 /// Equivalent to OCaml's `partial_function`.
 pub fn partial_function(arena: &LocArena<'_>, loc: Location) -> RawLambda {
+    let b = arena.b;
     // OCaml matching.ml:2688-2691 embeds the source position in the payload.
     arena.require_locations();
     let line = loc.loc_start.line;
@@ -9094,8 +9039,8 @@ pub fn partial_function(arena: &LocArena<'_>, loc: Location) -> RawLambda {
 
     let node_loc = arena.locs.intern(loc);
     let match_failure_ident = crate::types::predef::ident_match_failure();
-    let exn = RawLambda::global_module(match_failure_ident);
-    let payload = RawLambda::Lconst(crate::lambda::Constant::Block {
+    let exn = b.global_module(match_failure_ident);
+    let payload = b.const_(crate::lambda::Constant::Block {
         tag_info: Box::new(TagInfo::Tuple),
         elements: vec![
             crate::lambda::Constant::string(fname),
@@ -9104,15 +9049,15 @@ pub fn partial_function(arena: &LocArena<'_>, loc: Location) -> RawLambda {
         ],
     });
 
-    RawLambda::Lprim(Box::new(RawPrimInfo {
-        primitive: Primitive::Praise,
-        args: vec![RawLambda::Lprim(Box::new(RawPrimInfo {
-            primitive: Primitive::Pmakeblock(TagInfo::Extension, Mutable::Immutable),
-            args: vec![exn, payload],
-            loc: node_loc,
-        }))],
-        loc: node_loc,
-    }))
+    b.prim(
+        Primitive::Praise,
+        &[b.prim(
+            Primitive::Pmakeblock(TagInfo::Extension, Mutable::Immutable),
+            &[exn, payload],
+            node_loc,
+        )],
+        node_loc,
+    )
 }
 
 /// Compile a match for a function body.
@@ -9150,18 +9095,13 @@ pub fn for_trywith(
     pat_act_list: Vec<(&Pattern, CaseAction)>,
     next_raise_count: &mut i32,
 ) -> RawLambda {
+    let b = arena.b;
     let param_clone = param.clone();
     compile_matching(
         ctx_ref,
         ta,
         arena,
-        || {
-            RawLambda::Lprim(Box::new(RawPrimInfo {
-                primitive: Primitive::Praise,
-                args: vec![param_clone],
-                loc: LamLoc::NONE,
-            }))
-        },
+        || b.prim(Primitive::Praise, &[param_clone], LamLoc::NONE),
         param,
         pat_act_list,
         Partial::Partial,
@@ -9206,14 +9146,15 @@ pub fn for_let(
     body: RawLambda,
     next_raise_count: &mut i32,
 ) -> RawLambda {
+    let b = arena.b;
     match &pat.pat_desc {
         PatternDesc::Tpat_any => {
             // Eliminates a useless variable
-            RawLambda::Lsequence(Box::new(param), Box::new(body))
+            b.seq(param, body)
         }
         PatternDesc::Tpat_var(id, _) => {
             // Fast path
-            RawLambda::Llet(LetKind::Strict, *id, Box::new(param), Box::new(body))
+            b.let_(LetKind::Strict, *id, param, body)
         }
         _ => simple_for_let(ctx_ref, ta, arena, loc, param, pat, body, next_raise_count),
     }
@@ -9233,7 +9174,7 @@ pub fn for_tupled_function(
 ) -> RawLambda {
     let store = PatStore::default();
     let pa = PatArena::new(ta, &store);
-    let mut lambda = for_tupled_function_unresolved(
+    let lambda = for_tupled_function_unresolved(
         ctx_ref,
         &pa,
         arena,
@@ -9243,7 +9184,6 @@ pub fn for_tupled_function(
         partial,
         next_raise_count,
     );
-    resolve_shared_actions(&mut lambda);
     lambda
 }
 
@@ -9257,6 +9197,7 @@ fn for_tupled_function_unresolved<'p>(
     partial: Partial,
     next_raise_count: &mut i32,
 ) -> RawLambda {
+    let b = arena.b;
     let pats_act_list: Vec<Clause<'p>> = pats_act_list
         .into_iter()
         .map(|(pats, act)| (pats, MatchAction::from_case(act)))
@@ -9269,7 +9210,7 @@ fn for_tupled_function_unresolved<'p>(
         args: MatchArgs::new(
             paraml
                 .iter()
-                .map(|id| (RawLambda::Lvar(*id), LetKind::Strict))
+                .map(|id| (b.var(*id), LetKind::Strict))
                 .collect(),
         ),
         default: vec![(omegas_row, raise_num)],
@@ -9286,7 +9227,7 @@ fn for_tupled_function_unresolved<'p>(
     ) {
         Ok((lambda, total)) => {
             let loc_clone = loc;
-            check_total(&total, lambda, raise_num, || {
+            check_total(b, &total, lambda, raise_num, || {
                 partial_function(arena, loc_clone)
             })
         }
@@ -9444,6 +9385,7 @@ fn compile_flattened<'p>(
     pmh: &PmHalfCompiled<'p>,
     next_raise_count: &mut i32,
 ) -> Result<(RawLambda, Jumps<'p>), Unused> {
+    let b = arena.b;
     match pmh {
         PmHalfCompiled::Pm(pm) => {
             compile_match(ctx_ref, pa, arena, None, partial, ctx, pm, next_raise_count)
@@ -9465,6 +9407,7 @@ fn compile_flattened<'p>(
                 compile_match(ctx_ref, pa, arena, None, partial, ctx, pm, next_raise_count)
             };
             Ok(compile_orhandlers(
+                b,
                 pa,
                 &mut compile_fn,
                 lam,
@@ -9489,6 +9432,7 @@ pub fn do_for_multiple_match<'p>(
     partial: Partial,
     next_raise_count: &mut i32,
 ) -> RawLambda {
+    let b = arena.b;
     let partial = check_partial_single(pa, &pat_act_list, partial);
     // OCaml `compiler/ml/matching.ml:3846-3852` builds the matrix from the
     // incoming action list directly. Rust owns `pat_act_list` here, so move
@@ -9498,11 +9442,11 @@ pub fn do_for_multiple_match<'p>(
         .into_iter()
         .map(|(pat, act)| (vec![pat], MatchAction::from_case(act)))
         .collect();
-    let tuple_arg = RawLambda::Lprim(Box::new(RawPrimInfo {
-        primitive: Primitive::Pmakeblock(TagInfo::Tuple, Mutable::Immutable),
-        args: paraml.clone(),
-        loc: arena.locs.intern(loc),
-    }));
+    let tuple_arg = b.prim(
+        Primitive::Pmakeblock(TagInfo::Tuple, Mutable::Immutable),
+        &paraml.clone(),
+        arena.locs.intern(loc),
+    );
     let (raise_num, pm1) = match &partial {
         Partial::Partial => {
             let raise_num = bump_raise_count(next_raise_count);
@@ -9537,11 +9481,7 @@ pub fn do_for_multiple_match<'p>(
             .iter()
             .map(|_| ctx_ref.create_ident("match"))
             .collect();
-        let args = MatchArgs::new(
-            idl.iter()
-                .map(|id| (RawLambda::Lvar(*id), LetKind::Alias))
-                .collect(),
-        );
+        let args = MatchArgs::new(idl.iter().map(|id| (b.var(*id), LetKind::Alias)).collect());
 
         let flat_next = flatten_precompiled(pa, size, &args, next)?;
         let flat_nexts: Vec<(i32, PmHalfCompiled<'_>)> = nexts
@@ -9560,8 +9500,9 @@ pub fn do_for_multiple_match<'p>(
             compile_flattened(ctx_ref, pa, arena, partial, ctx, arg, pmh, next_raise_count)
         };
 
-        let dummy_arg = RawLambda::Lconst(crate::lambda::Constant::int(0));
+        let dummy_arg = b.const_(crate::lambda::Constant::int(0));
         let (lam, total) = comp_match_handlers(
+            b,
             pa,
             &mut compile_fn,
             &partial,
@@ -9576,7 +9517,7 @@ pub fn do_for_multiple_match<'p>(
             match &partial {
                 Partial::Partial => {
                     let loc_clone = loc;
-                    check_total(&total, lam, raise_num, || {
+                    check_total(b, &total, lam, raise_num, || {
                         partial_function(arena, loc_clone)
                     })
                 }
@@ -9585,7 +9526,7 @@ pub fn do_for_multiple_match<'p>(
                     lam
                 }
             },
-            |body, (id, param)| bind(LetKind::Strict, id, param, body),
+            |body, (id, param)| bind(b, LetKind::Strict, id, param, body),
         );
         Ok(result)
     })();
@@ -9607,7 +9548,7 @@ pub fn do_for_multiple_match<'p>(
                 Ok((lambda, total)) => match &partial {
                     Partial::Partial => {
                         let loc_clone = loc;
-                        check_total(&total, lambda, raise_num, || {
+                        check_total(b, &total, lambda, raise_num, || {
                             partial_function(arena, loc_clone)
                         })
                     }
@@ -9624,19 +9565,23 @@ pub fn do_for_multiple_match<'p>(
 
 /// Extract a variable from a param, binding if needed.
 /// Equivalent to OCaml's `param_to_var`.
-fn param_to_var(ctx_ref: &TypeContext, param: &RawLambda) -> (Ident, Option<RawLambda>) {
-    match param {
-        RawLambda::Lvar(v) => (*v, None),
-        _ => (ctx_ref.create_ident("match"), Some(param.clone())),
+fn param_to_var(
+    b: &RawArena,
+    ctx_ref: &TypeContext,
+    param: &RawLambda,
+) -> (Ident, Option<RawLambda>) {
+    match b.as_var(*param) {
+        Some(v) => (v, None),
+        None => (ctx_ref.create_ident("match"), Some(*param)),
     }
 }
 
 /// Optionally bind a variable.
 /// Equivalent to OCaml's `bind_opt`.
-fn bind_opt(v_eo: (Ident, Option<RawLambda>), k: RawLambda) -> RawLambda {
+fn bind_opt(b: &RawArena, v_eo: (Ident, Option<RawLambda>), k: RawLambda) -> RawLambda {
     match v_eo {
         (_, None) => k,
-        (v, Some(e)) => bind(LetKind::Strict, &v, &e, k),
+        (v, Some(e)) => bind(b, LetKind::Strict, &v, &e, k),
     }
 }
 
@@ -9652,14 +9597,15 @@ pub fn for_multiple_match(
     partial: Partial,
     next_raise_count: &mut i32,
 ) -> RawLambda {
+    let b = arena.b;
     let v_paraml: Vec<(Ident, Option<RawLambda>)> = paraml
         .iter()
-        .map(|param| param_to_var(ctx_ref, param))
+        .map(|param| param_to_var(b, ctx_ref, param))
         .collect();
-    let new_paraml: Vec<RawLambda> = v_paraml.iter().map(|(v, _)| RawLambda::Lvar(*v)).collect();
+    let new_paraml: Vec<RawLambda> = v_paraml.iter().map(|(v, _)| b.var(*v)).collect();
     let store = PatStore::default();
     let pa = PatArena::new(ta, &store);
-    let mut inner = do_for_multiple_match(
+    let inner = do_for_multiple_match(
         ctx_ref,
         &pa,
         arena,
@@ -9669,11 +9615,10 @@ pub fn for_multiple_match(
         partial,
         next_raise_count,
     );
-    resolve_shared_actions(&mut inner);
     v_paraml
         .into_iter()
         .rev()
-        .fold(inner, |body, v_eo| bind_opt(v_eo, body))
+        .fold(inner, |body, v_eo| bind_opt(b, v_eo, body))
 }
 
 #[cfg(test)]
@@ -9720,44 +9665,6 @@ mod tests {
 
         assert_eq!(keys(&jumps_remove(1, a.clone())), vec![(9, 1), (5, 2)]);
         assert_eq!(keys(&jumps_remove(3, a.clone())), keys(&a));
-    }
-
-    #[test]
-    fn resolve_shared_actions_replaces_every_shared_action() {
-        use super::*;
-        fn has_shared(lam: &mut RawLambda) -> bool {
-            if matches!(lam, RawLambda::Lshared(_)) {
-                return true;
-            }
-            let mut found = false;
-            lam.for_each_child_mut(&mut |child| found |= has_shared(child));
-            found
-        }
-        let once = Arc::new(RawLambda::Lvar(Ident::create_local("once")));
-        let twice = Arc::new(RawLambda::Lconst(crate::lambda::Constant::int(2)));
-        let mut lam = RawLambda::LifThenElse(
-            Box::new(RawLambda::Lvar(Ident::create_local("cond"))),
-            Box::new(RawLambda::Lshared(once)),
-            Box::new(RawLambda::Lsequence(
-                Box::new(RawLambda::Lshared(twice.clone())),
-                Box::new(RawLambda::Lshared(twice)),
-            )),
-        );
-        resolve_shared_actions(&mut lam);
-        assert!(!has_shared(&mut lam));
-        let RawLambda::LifThenElse(_, ifso, ifnot) = &lam else {
-            panic!("shape changed");
-        };
-        assert!(matches!(ifso.as_ref(), RawLambda::Lvar(id) if id.name() == "once"));
-        let RawLambda::Lsequence(first, second) = ifnot.as_ref() else {
-            panic!("shape changed");
-        };
-        for action in [first, second] {
-            assert!(matches!(
-                action.as_ref(),
-                RawLambda::Lconst(crate::lambda::Constant::Int { i: 2, .. })
-            ));
-        }
     }
 
     use super::*;
@@ -9808,9 +9715,42 @@ mod tests {
     }
 
     #[test]
+    fn make_key_equals_compares_while_writing() {
+        let b = RawArena::new();
+        let x = Ident::create_local("x");
+        let y = Ident::create_local("y");
+        let one = || {
+            b.const_(crate::lambda::lam_constant::Constant::Int {
+                i: 1,
+                comment: None,
+            })
+        };
+        // A strict let whose body is not its variable is keyed with a
+        // synthetic stamp, which a diverged comparison must not fail on.
+        let key_term = |id: Ident, v: RawLambda| {
+            b.let_(
+                LetKind::Strict,
+                id,
+                v,
+                b.prim(Primitive::Paddint, &[b.var(id), b.var(y)], LamLoc::NONE),
+            )
+        };
+        let first = key_term(x, one());
+        let key = make_key_string(&b, first).expect("small term has a key");
+        // A let of another identifier with the same name keys the same.
+        let same_name = Ident::create_local("x");
+        assert!(make_key_equals(&b, key_term(same_name, one()), &key));
+        assert!(!make_key_equals(&b, key_term(x, b.var(y)), &key));
+        assert!(!make_key_equals(&b, one(), &key));
+        assert!(!make_key_equals(&b, b.var(y), &key));
+    }
+
+    #[test]
     fn or_list_polyvar_keeps_named_hash_metadata() {
-        let arg = RawLambda::var(Ident::create_local("match"));
+        let b = RawArena::new();
+        let arg = b.var(Ident::create_local("match"));
         let raw = or_list_polyvar(
+            &b,
             &arg,
             &[
                 (btype::hash_variant("A"), "A".to_string()),
@@ -9818,21 +9758,21 @@ mod tests {
             ],
         );
 
-        let RawLambda::Lprim(first_or) = raw else {
-            panic!("expected sequor chain");
+        let a = b.get();
+        let View::Prim(_, [first_eq, second_eq], _) = a.view(raw) else {
+            panic!("expected sequor chain over two equality tests");
         };
-        let [RawLambda::Lprim(first_eq), RawLambda::Lprim(second_eq)] = first_or.args.as_slice()
-        else {
-            panic!("expected two equality tests");
-        };
-
-        assert!(
-            matches!(first_eq.args.as_slice(), [RawLambda::Lvar(_), RawLambda::Lconst(crate::lambda::lam_constant::Constant::Int { i, comment: Some(comment) })]
-            if *i == btype::hash_variant("A") && matches!(&**comment, PointerInfo::PolyVariant(name) if name == "A"))
-        );
-        assert!(
-            matches!(second_eq.args.as_slice(), [RawLambda::Lvar(_), RawLambda::Lconst(crate::lambda::lam_constant::Constant::Int { i, comment: Some(comment) })]
-            if *i == btype::hash_variant("B") && matches!(&**comment, PointerInfo::PolyVariant(name) if name == "B"))
-        );
+        for (test, name) in [(*first_eq, "A"), (*second_eq, "B")] {
+            let View::Prim(_, [var, hash], _) = a.view(test) else {
+                panic!("expected an equality test");
+            };
+            assert!(a.as_var(*var).is_some());
+            assert!(matches!(
+                a.as_const(*hash),
+                Some(crate::lambda::lam_constant::Constant::Int { i, comment: Some(comment) })
+                    if *i == btype::hash_variant(name)
+                        && matches!(&**comment, PointerInfo::PolyVariant(n) if n == name)
+            ));
+        }
     }
 }

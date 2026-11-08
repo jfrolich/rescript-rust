@@ -64,7 +64,7 @@ pub struct PortableTypeEntry {
 /// TypeDesc with indices into `PortableTypeGraph.entries` instead of arena refs.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum PortableTypeDesc {
-    Tvar(Option<String>),
+    Tvar(Option<crate::name::Name>),
     Tarrow {
         args: Vec<(ArgLabel, usize)>,
         ret: usize,
@@ -78,7 +78,7 @@ pub enum PortableTypeDesc {
         fields: usize,
     },
     Tfield {
-        name: String,
+        name: crate::name::Name,
         /// Index into `PortableTypeGraph.mutabilities`.
         mutability: usize,
         typ: usize,
@@ -88,7 +88,7 @@ pub enum PortableTypeDesc {
     Tlink(usize),
     Tsubst(usize),
     Tvariant(PortableRowDesc),
-    Tunivar(Option<String>),
+    Tunivar(Option<crate::name::Name>),
     Tpoly {
         body: usize,
         vars: Vec<usize>,
@@ -310,8 +310,8 @@ pub fn compute_type_graph_fingerprint(entries: &HashGraph<'_>, sig: &Signature) 
 /// Hash a Path using only names, not stamps. This makes the fingerprint stable
 /// across recompilations where dependency stamps may shift.
 fn hash_path_by_name(hasher: &mut impl Hasher, path: &Path) {
-    use crate::types::path::Path as P;
-    match path {
+    use crate::types::path::PathView as P;
+    match path.view() {
         P::Pident(ident) => {
             0u8.hash(hasher);
             ident.name().hash(hasher);
@@ -962,18 +962,18 @@ impl<'a, 'f> TypeGraphSerializer<'a, 'f> {
         match desc {
             TypeDesc::Tvar(name) => PortableTypeDesc::Tvar(name.clone()),
             TypeDesc::Tarrow { args, ret } => PortableTypeDesc::Tarrow {
-                args: args
+                args: self.ctx.type_args(args)
                     .iter()
-                    .map(|arg| (self.portable_label(arg.label()), self.serialize_type(arg.typ)))
+                    .map(|arg| (self.portable_label(&arg.label().to_arg_label()), self.serialize_type(arg.typ)))
                     .collect(),
                 ret: self.serialize_type(*ret),
             },
             TypeDesc::Ttuple(types) => {
-                PortableTypeDesc::Ttuple(types.iter().map(|t| self.serialize_type(*t)).collect())
+                PortableTypeDesc::Ttuple(self.ctx.type_list(types).iter().map(|t| self.serialize_type(*t)).collect())
             }
             TypeDesc::Tconstr { path, args, .. } => PortableTypeDesc::Tconstr {
                 path: path.clone(),
-                args: args.iter().map(|t| self.serialize_type(*t)).collect(),
+                args: self.ctx.type_list(args).iter().map(|t| self.serialize_type(*t)).collect(),
             },
             TypeDesc::Tobject { fields } => PortableTypeDesc::Tobject {
                 fields: self.serialize_type(*fields),
@@ -993,20 +993,22 @@ impl<'a, 'f> TypeGraphSerializer<'a, 'f> {
             TypeDesc::Tlink(r) => PortableTypeDesc::Tlink(self.serialize_type(*r)),
             TypeDesc::Tsubst(r) => PortableTypeDesc::Tsubst(self.serialize_type(*r)),
             TypeDesc::Tvariant(row_desc) => {
-                PortableTypeDesc::Tvariant(self.serialize_row_desc(row_desc))
+                PortableTypeDesc::Tvariant(self.serialize_row_desc(&self.ctx.row_desc(row_desc)))
             }
             TypeDesc::Tunivar(name) => PortableTypeDesc::Tunivar(name.clone()),
             TypeDesc::Tpoly { body, vars } => PortableTypeDesc::Tpoly {
                 body: self.serialize_type(*body),
-                vars: vars.iter().map(|t| self.serialize_type(*t)).collect(),
+                vars: self.ctx.type_list(vars).iter().map(|t| self.serialize_type(*t)).collect(),
             },
             TypeDesc::Tpackage { path, lids, args } => PortableTypeDesc::Tpackage {
                 path: path.clone(),
-                lids: lids
+                lids: self
+                    .ctx
+                    .package_lids(lids)
                     .iter()
                     .map(|lid| self.serialize_longident(lid))
                     .collect(),
-                args: args.iter().map(|t| self.serialize_type(*t)).collect(),
+                args: self.ctx.type_list(args).iter().map(|t| self.serialize_type(*t)).collect(),
             },
         }
     }
@@ -1227,6 +1229,20 @@ impl<'a, 'f> TypeGraphSerializer<'a, 'f> {
 pub(crate) trait TypeNodeSink {
     fn abbrev_nil(&self) -> AbbrevMemoRef;
     fn longident_name(&self, name: &str) -> crate::intern::StrIdx;
+    fn new_type_list(&self, items: &[TypeExprRef]) -> crate::types::type_expr::TypeRefList;
+    fn new_type_args(&self, args: &[TypeArg]) -> crate::types::type_expr::TypeArgList;
+    fn new_row_desc(&self, row: RowDesc) -> crate::types::type_expr::RowDescRef;
+    fn new_package_lids(
+        &self,
+        lids: Vec<crate::parser::longident::Longident>,
+    ) -> crate::types::type_expr::PackageLidsRef;
+    fn new_type_list_from_iter(
+        &self,
+        items: impl Iterator<Item = TypeExprRef>,
+    ) -> crate::types::type_expr::TypeRefList {
+        let items: crate::types::type_expr::TypeRefs = items.collect();
+        self.new_type_list(&items)
+    }
     /// A cell for an internalized graph. Store and shared graphs outlive any
     /// one compilation, so they get persistent cells.
     fn new_mutability(&self, flag: crate::types::asttypes::MutableFlag) -> MutabilityRef {
@@ -1258,6 +1274,25 @@ impl TypeNodeSink for TypeContext {
     fn longident_name(&self, name: &str) -> crate::intern::StrIdx {
         self.intern_cmi_longident_name(name)
     }
+
+    fn new_type_list(&self, items: &[TypeExprRef]) -> crate::types::type_expr::TypeRefList {
+        TypeContext::new_type_list(self, items)
+    }
+
+    fn new_type_args(&self, args: &[TypeArg]) -> crate::types::type_expr::TypeArgList {
+        TypeContext::new_type_args(self, args)
+    }
+
+    fn new_row_desc(&self, row: RowDesc) -> crate::types::type_expr::RowDescRef {
+        TypeContext::new_row_desc(self, row)
+    }
+
+    fn new_package_lids(
+        &self,
+        lids: Vec<crate::parser::longident::Longident>,
+    ) -> crate::types::type_expr::PackageLidsRef {
+        TypeContext::new_package_lids(self, lids)
+    }
 }
 
 impl TypeNodeSink for ThreadTypeStore {
@@ -1267,6 +1302,25 @@ impl TypeNodeSink for ThreadTypeStore {
 
     fn longident_name(&self, name: &str) -> crate::intern::StrIdx {
         self.intern_longident_name(name)
+    }
+
+    fn new_type_list(&self, items: &[TypeExprRef]) -> crate::types::type_expr::TypeRefList {
+        self.alloc_type_list(items)
+    }
+
+    fn new_type_args(&self, args: &[TypeArg]) -> crate::types::type_expr::TypeArgList {
+        self.alloc_type_args(args)
+    }
+
+    fn new_row_desc(&self, row: RowDesc) -> crate::types::type_expr::RowDescRef {
+        self.alloc_row_desc(row)
+    }
+
+    fn new_package_lids(
+        &self,
+        lids: Vec<crate::parser::longident::Longident>,
+    ) -> crate::types::type_expr::PackageLidsRef {
+        self.alloc_package_lids(lids)
     }
 }
 
@@ -1410,6 +1464,18 @@ fn internalize_signature_into_store(
 struct SharedSink<'a> {
     pool: &'a crate::types::shared_store::SharedTypePool,
     current: std::cell::Cell<u32>,
+    /// The graph's base index and sizes, which place each payload section.
+    base: u32,
+    sizes: crate::types::shared_store::SharedGraphSizes,
+    /// Payloads allocated so far.
+    payloads: std::cell::RefCell<crate::types::shared_store::SharedGraphPayloads>,
+}
+
+impl SharedSink<'_> {
+    /// Tagged shared index of entry `len` of the section at `start`.
+    fn section_index(&self, start: usize, len: usize) -> u32 {
+        (self.base + (start + len) as u32) | crate::types::type_expr::SHARED_REF_BITS
+    }
 }
 
 impl TypeNodeSink for SharedSink<'_> {
@@ -1420,6 +1486,62 @@ impl TypeNodeSink for SharedSink<'_> {
     fn longident_name(&self, name: &str) -> crate::intern::StrIdx {
         self.pool.intern_longident_name(name)
     }
+
+    fn new_type_list(&self, items: &[TypeExprRef]) -> crate::types::type_expr::TypeRefList {
+        let mut payloads = self.payloads.borrow_mut();
+        let start = self.section_index(self.sizes.lists_start(), payloads.lists.len());
+        payloads.lists.extend_from_slice(items);
+        crate::types::type_expr::TypeRefList::from_parts(start, items.len())
+    }
+
+    fn new_type_args(&self, args: &[TypeArg]) -> crate::types::type_expr::TypeArgList {
+        let mut payloads = self.payloads.borrow_mut();
+        let start = self.section_index(self.sizes.args_start(), payloads.args.len());
+        payloads.args.extend_from_slice(args);
+        crate::types::type_expr::TypeArgList::from_parts(start, args.len())
+    }
+
+    fn new_row_desc(&self, row: RowDesc) -> crate::types::type_expr::RowDescRef {
+        let mut payloads = self.payloads.borrow_mut();
+        let index = self.section_index(self.sizes.rows_start(), payloads.rows.len());
+        payloads.rows.push(row);
+        crate::types::type_expr::RowDescRef::from_raw(index)
+    }
+
+    fn new_package_lids(
+        &self,
+        lids: Vec<crate::parser::longident::Longident>,
+    ) -> crate::types::type_expr::PackageLidsRef {
+        let mut payloads = self.payloads.borrow_mut();
+        let index = self.section_index(self.sizes.lids_start(), payloads.lids.len());
+        payloads.lids.push(lids);
+        crate::types::type_expr::PackageLidsRef::from_raw(index)
+    }
+}
+
+/// Sizes of the shared graph `internalize_desc` builds for `graph`: one
+/// payload per type list element, arrow parameter, row and package.
+fn shared_graph_sizes(graph: &PortableTypeGraph) -> crate::types::shared_store::SharedGraphSizes {
+    let mut sizes = crate::types::shared_store::SharedGraphSizes {
+        nodes: graph.entries.len(),
+        layouts: graph.variant_layouts.len(),
+        ..Default::default()
+    };
+    for entry in &graph.entries {
+        match &entry.desc {
+            PortableTypeDesc::Ttuple(items) => sizes.list_items += items.len(),
+            PortableTypeDesc::Tconstr { args, .. } => sizes.list_items += args.len(),
+            PortableTypeDesc::Tpackage { args, .. } => {
+                sizes.list_items += args.len();
+                sizes.lids += 1;
+            }
+            PortableTypeDesc::Tpoly { vars, .. } => sizes.list_items += vars.len(),
+            PortableTypeDesc::Tarrow { args, .. } => sizes.arg_items += args.len(),
+            PortableTypeDesc::Tvariant(_) => sizes.rows += 1,
+            _ => {}
+        }
+    }
+    sizes
 }
 
 /// Internalize a graph into the process-wide shared pool. The graph is built
@@ -1434,13 +1556,17 @@ fn internalize_signature_into_shared(
 ) -> Option<Signature> {
     let mut remap = Vec::new();
     let map = |file| files.map(file);
-    let base = pool.publish(graph.entries.len(), graph.variant_layouts.len(), |base| {
+    let sizes = shared_graph_sizes(graph);
+    let base = pool.publish(sizes, |base| {
         remap = (0..graph.entries.len())
             .map(|i| crate::types::shared_store::shared_ref(base, i))
             .collect();
         let sink = SharedSink {
             pool,
             current: std::cell::Cell::new(base),
+            base,
+            sizes,
+            payloads: Default::default(),
         };
         let locs = shared_decl_locs(base, &map);
         let mremap = internalize_mutabilities(graph, &sink);
@@ -1458,11 +1584,12 @@ fn internalize_signature_into_shared(
                 (desc, level)
             })
             .collect();
-        (
+        crate::types::shared_store::SharedGraphParts {
             nodes,
-            graph.variant_layouts.clone(),
-            files.locations(locations).collect(),
-        )
+            payloads: sink.payloads.into_inner(),
+            layouts: graph.variant_layouts.clone(),
+            locations: files.locations(locations).collect(),
+        }
     })?;
     let layout_remap: Vec<_> = (0..graph.variant_layouts.len())
         .map(|i| crate::types::VariantLayoutRef::from_shared_index(base + i as u32))
@@ -1622,18 +1749,21 @@ fn internalize_desc<S: TypeNodeSink>(
     match desc {
         PortableTypeDesc::Tvar(name) => TypeDesc::Tvar(name.clone()),
         PortableTypeDesc::Tarrow { args, ret } => TypeDesc::Tarrow {
-            args: args
-                .iter()
-                .map(|(lbl, typ)| TypeArg::new(import_label(lbl, locs), remap[*typ]))
-                .collect(),
+            args: {
+                let args: crate::types::type_expr::TypeArgs = args
+                    .iter()
+                    .map(|(lbl, typ)| TypeArg::new(import_label(lbl, locs), remap[*typ]))
+                    .collect();
+                ctx.new_type_args(&args)
+            },
             ret: remap[*ret],
         },
         PortableTypeDesc::Ttuple(types) => {
-            TypeDesc::Ttuple(types.iter().map(|&i| remap[i]).collect())
+            TypeDesc::Ttuple(ctx.new_type_list_from_iter(types.iter().map(|&i| remap[i])))
         }
         PortableTypeDesc::Tconstr { path, args } => TypeDesc::Tconstr {
             path: path.clone(),
-            args: args.iter().map(|&i| remap[i]).collect(),
+            args: ctx.new_type_list_from_iter(args.iter().map(|&i| remap[i])),
             abbrev: ctx.abbrev_nil(),
         },
         PortableTypeDesc::Tobject { fields } => TypeDesc::Tobject {
@@ -1654,21 +1784,21 @@ fn internalize_desc<S: TypeNodeSink>(
         PortableTypeDesc::Tlink(i) => TypeDesc::Tlink(remap[*i]),
         PortableTypeDesc::Tsubst(i) => TypeDesc::Tsubst(remap[*i]),
         PortableTypeDesc::Tvariant(prd) => {
-            TypeDesc::Tvariant(Box::new(internalize_row_desc(prd, remap, ctx)))
+            TypeDesc::Tvariant(ctx.new_row_desc(internalize_row_desc(prd, remap, ctx)))
         }
         PortableTypeDesc::Tunivar(name) => TypeDesc::Tunivar(name.clone()),
         PortableTypeDesc::Tpoly { body, vars } => TypeDesc::Tpoly {
             body: remap[*body],
-            vars: vars.iter().map(|&i| remap[i]).collect(),
+            vars: ctx.new_type_list_from_iter(vars.iter().map(|&i| remap[i])),
         },
         PortableTypeDesc::Tpackage { path, lids, args } => TypeDesc::Tpackage {
             path: path.clone(),
-            lids: Box::new(
+            lids: ctx.new_package_lids(
                 lids.iter()
                     .map(|lid| internalize_longident(lid, ctx))
                     .collect(),
             ),
-            args: args.iter().map(|&i| remap[i]).collect(),
+            args: ctx.new_type_list_from_iter(args.iter().map(|&i| remap[i])),
         },
     }
 }
@@ -1913,12 +2043,11 @@ mod type_arg_tests {
             ArgLabel::optional("opt", ctx.intern_loc(loc)),
         ];
         let arrow = ctx.new_type(TypeDesc::Tarrow {
-            args: vec![
+            args: ctx.new_type_args(&[
                 TypeArg::unlabeled(shared),
                 TypeArg::new(labels[1].clone(), shared),
                 TypeArg::new(labels[2].clone(), distinct),
-            ]
-            .into(),
+            ]),
             ret: shared,
         });
         let mut file_names = PortableFileNames::default();
@@ -1946,12 +2075,13 @@ mod type_arg_tests {
         let TypeDesc::Tarrow { args, ret } = restored else {
             panic!("not arrow")
         };
+        let args = ctx.type_args(args);
         assert_eq!(args[0].typ, ret);
         assert_eq!(args[1].typ, ret);
         assert_ne!(args[2].typ, ret);
-        assert!(matches!(args[0].label(), ArgLabel::Nolabel));
+        assert!(args[0].label().is_nolabel());
         for (arg, expected) in args.iter().zip(&labels).skip(1) {
-            assert!(arg.label().same_label(expected));
+            assert!(arg.label().same_label(crate::types::type_expr::TypeArgLabel::new(expected)));
             assert_eq!(ctx.resolve_loc(arg.label().loc()), loc);
         }
     }

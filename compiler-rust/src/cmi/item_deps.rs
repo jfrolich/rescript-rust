@@ -12,6 +12,7 @@
 //! (`*`). The dependent then has to be recompiled only when the digest of an
 //! item it read changed.
 
+use crate::types::path::PathView;
 use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
@@ -78,7 +79,7 @@ pub fn read_of_path(path: &Path, kind: Kind, own_unit: Option<&str>, out: &mut V
     if own_unit.is_none() && !has_persistent_head(path) {
         return;
     }
-    if let Path::Papply(f, x) = path {
+    if let PathView::Papply(f, x) = path.view() {
         read_of_path(f, Kind::Module, own_unit, out);
         read_of_path(x, Kind::Module, own_unit, out);
         return;
@@ -86,7 +87,7 @@ pub fn read_of_path(path: &Path, kind: Kind, own_unit: Option<&str>, out: &mut V
     let Ok((root, segs)) = path.flatten() else {
         // A dotted path under a functor application.
         for head in path.heads() {
-            read_of_path(&Path::Pident(*head), Kind::Module, own_unit, out);
+            read_of_path(&Path::pident(*head), Kind::Module, own_unit, out);
         }
         return;
     };
@@ -109,10 +110,10 @@ pub fn read_of_path(path: &Path, kind: Kind, own_unit: Option<&str>, out: &mut V
 }
 
 fn has_persistent_head(path: &Path) -> bool {
-    match path {
-        Path::Pident(id) => id.is_persistent(),
-        Path::Pdot(parent, _, _) => has_persistent_head(parent),
-        Path::Papply(f, x) => has_persistent_head(f) || has_persistent_head(x),
+    match path.view() {
+        PathView::Pident(id) => id.is_persistent(),
+        PathView::Pdot(parent, _, _) => has_persistent_head(parent),
+        PathView::Papply(f, x) => has_persistent_head(f) || has_persistent_head(x),
     }
 }
 

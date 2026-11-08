@@ -7,10 +7,14 @@
 use ahash::AHashSet as HashSet;
 
 use crate::ident::Ident;
-use crate::js_ir::op::{IdentInfo, Kind, UsedStats};
-use crate::js_ir::{
-    Block, DepsProgram, Expression, ExpressionDesc, Program, Statement, StatementDesc, VIdent,
-    VariableDeclaration,
+use crate::js_ir::arena::{
+    Block, Expr, ExprKind, JsArena, JsDepsProgram as DepsProgram, JsProgram as Program, Stmt,
+    StmtKind, StmtList,
+};
+use crate::js_ir::build::exp as E;
+use crate::js_ir::op::{Kind, UsedStats};
+use crate::js_ir::walk::{
+    Mapper, any_child, each_child, map_expression_children, map_statement_children,
 };
 use crate::lambda::lam_compat::LetKind;
 
@@ -18,236 +22,227 @@ use super::js_exp_make::js_expr_no_side_effects;
 use super::lam_coercion::same_reusable_export_value;
 
 pub(crate) fn apply_js_shake_pass(mut deps: DepsProgram) -> DepsProgram {
-    deps.program = shake_program(deps.program);
+    shake_program(&mut deps.program);
     deps
 }
 
+fn local_var(a: &JsArena, e: Expr) -> Option<Ident> {
+    match a.ek(e) {
+        ExprKind::Var(id) => Some(a.ident(id)),
+        _ => None,
+    }
+}
+
+fn is_literal(a: &JsArena, e: Expr) -> bool {
+    matches!(
+        a.ek(e),
+        ExprKind::Number(_)
+            | ExprKind::Str(_)
+            | ExprKind::Bool(_)
+            | ExprKind::Undefined { .. }
+            | ExprKind::Null
+    )
+}
+
 pub(crate) fn move_same_name_export_alias_to_export_tail(
+    j: &mut JsArena,
     block: &mut Block,
     export: &Ident,
-    value: &Expression,
-) -> Option<(Expression, LetKind)> {
-    let ExpressionDesc::Var(VIdent::Id(target)) = &value.desc else {
-        return None;
-    };
+    value: Expr,
+) -> Option<(Expr, LetKind)> {
+    let target = local_var(j, value)?;
+    let target = &target;
     if target.name() != export.name() {
         return None;
     }
 
     // OCaml coerces exports over flattened lambda groups before JS lowering
     // (`compiler/core/lam_coercion.ml:179-199`,
-    // `compiler/core/lam_compile_main.ml:220-254`). Keep the Rust-only JS IR
-    // scans borrowed until we know we must rewrite, so the read-only path has
-    // the same semantics without cloning the full block.
-    let (index, replacement, property) = {
-        let flattened_refs = flatten_toplevel_block_refs(block);
-        let (index, initializer, property) =
-            same_name_export_alias_binding_ref(&flattened_refs, target)?;
-        let initializer_kind = same_name_export_initializer_kind_ref(&flattened_refs, initializer);
-        // OCaml only substitutes Strict/Alias/StrictOpt simple bindings in
-        // `compiler/core/lam_pass_lets_dce.ml:21-23` and
-        // `compiler/core/lam_pass_lets_dce.ml:44-72`, then JS dead-code
-        // marking gathers use info in one pass
-        // (`compiler/core/js_pass_flatten_and_mark_dead.ml:32-91`). If this
-        // binding is already outside the tail-movable shapes, the later
-        // reference scans cannot make it movable; this is the same
-        // `blocked_by_kind` / `blocked_by_variable` rejection below, just
-        // before walking large function bodies.
-        if matches!(property, LetKind::Variable)
-            || matches!(initializer_kind, TailMoveInitializerKind::Other)
-        {
-            return None;
-        }
-        let remaining = &flattened_refs[index + 1..];
-        let later_initializer_mentions_target =
-            later_toplevel_initializer_mentions_ident_ref(remaining, target);
-        let prefer_materialized_root =
-            tail_move_materialized_root_ident_ref(&flattened_refs, initializer).is_some_and(
-                |root| {
-                    !root.same(target)
-                        && (later_initializer_mentions_target
-                            || remaining
-                                .iter()
-                                .any(|stmt| statement_mentions_ident_anywhere(stmt, &root)))
-                },
-            );
-        let replacement = resolve_tail_move_replacement_expression_ref(
-            &flattened_refs,
-            initializer,
-            target,
-            prefer_materialized_root,
-        );
-        let binding_is_direct_literal = matches!(
-            &initializer.desc,
-            ExpressionDesc::Number(_)
-                | ExpressionDesc::Str(_)
-                | ExpressionDesc::Bool(_)
-                | ExpressionDesc::Undefined { .. }
-                | ExpressionDesc::Null
-        );
-        let binding_is_local_alias =
-            matches!(&initializer.desc, ExpressionDesc::Var(VIdent::Id(_)));
-        let has_later_function_binding = has_later_toplevel_function_binding_ref(remaining);
-        let later_function_mentions_target =
-            later_toplevel_function_mentions_ident_ref(remaining, target);
-        // A Literal+Alias binding existing in the block means
-        // `compiler/core/lam_pass_lets_dce.ml:121-133` entered the Strict arm
-        // and `compiler/core/lam_util.ml:118-124` downgraded to Alias without
-        // substituting the value. That is the exact shape OCaml keeps in source
-        // order via `compiler/core/lam_coercion.ml:99-121`, so we must not
-        // relocate the binding. The Alias-arm substitution path in OCaml always
-        // removes the binding, in which case this function never finds a
-        // declaration to move.
-        let blocked_by_literal_binding =
-            matches!(initializer_kind, TailMoveInitializerKind::Literal)
-                && !matches!(property, LetKind::Alias);
-        let blocked_by_literal_alias_preserved_in_block =
-            matches!(initializer_kind, TailMoveInitializerKind::Literal)
-                && matches!(property, LetKind::Alias);
-        let blocked_by_direct_literal_reuse =
-            matches!(initializer_kind, TailMoveInitializerKind::Literal)
-                && binding_is_direct_literal
-                && later_initializer_mentions_target;
-        let blocked_by_literal_alias_without_materialized_root =
-            matches!(initializer_kind, TailMoveInitializerKind::Literal)
-                && binding_is_local_alias
-                && !prefer_materialized_root;
-        let blocked_by_later_function_capture = later_function_mentions_target;
-        let blocked_by_qualified_binding_before_later_function = has_later_function_binding
-            && matches!(initializer_kind, TailMoveInitializerKind::Qualified);
-        let blocked_by_variable = matches!(property, LetKind::Variable);
-        let blocked_by_kind = matches!(initializer_kind, TailMoveInitializerKind::Other);
-        let blocked_by_effects = !js_expr_no_side_effects(&replacement);
-        let blocked_by_self_mention = expression_mentions_ident_anywhere(&replacement, target);
-        let blocked_by_prior_use = flattened_refs[..index]
-            .iter()
-            .any(|stmt| statement_mentions_ident_anywhere(stmt, target));
-        let has_remaining_use = remaining
-            .iter()
-            .any(|stmt| statement_mentions_ident_anywhere(stmt, target));
-        let blocked_by_unsafe_inline =
-            matches!(initializer_kind, TailMoveInitializerKind::Qualified)
-                && !qualified_tail_move_uses_are_safe_to_inline_ref(
-                    remaining,
-                    target,
-                    &replacement,
-                );
-        let blocked_by_later_initializer = later_initializer_mentions_target
-            && !matches!(initializer_kind, TailMoveInitializerKind::Literal);
-        let blocked_by_later_effect = !later_toplevel_effect_allows_tail_move_ref(
-            remaining,
-            target,
-            initializer_kind,
-            &replacement,
-            replacement_resolves_to_recursive_function_ref(&flattened_refs, &replacement),
-        ) && !(target.same(export)
-            && !has_remaining_use
-            && ml_module_field_tail_move_replacement(&replacement));
-        if blocked_by_variable
-            || blocked_by_literal_binding
-            || blocked_by_literal_alias_preserved_in_block
-            || blocked_by_direct_literal_reuse
-            || blocked_by_literal_alias_without_materialized_root
-            || blocked_by_later_function_capture
-            || blocked_by_qualified_binding_before_later_function
-            || blocked_by_kind
-            || blocked_by_effects
-            || blocked_by_self_mention
-            || blocked_by_prior_use
-            || blocked_by_unsafe_inline
-            || blocked_by_later_initializer
-            || blocked_by_later_effect
-        {
-            return None;
-        }
+    // `compiler/core/lam_compile_main.ml:220-254`).
+    let flattened = flatten_toplevel_block(j, block);
+    let (index, initializer, property) = same_name_export_alias_binding(j, &flattened, target)?;
+    let initializer_kind = same_name_export_initializer_kind(j, &flattened, initializer);
+    // OCaml only substitutes Strict/Alias/StrictOpt simple bindings in
+    // `compiler/core/lam_pass_lets_dce.ml:21-23` and
+    // `compiler/core/lam_pass_lets_dce.ml:44-72`, then JS dead-code
+    // marking gathers use info in one pass
+    // (`compiler/core/js_pass_flatten_and_mark_dead.ml:32-91`). If this
+    // binding is already outside the tail-movable shapes, the later
+    // reference scans cannot make it movable; this is the same
+    // `blocked_by_kind` / `blocked_by_variable` rejection below, just
+    // before walking large function bodies.
+    if matches!(property, LetKind::Variable)
+        || matches!(initializer_kind, TailMoveInitializerKind::Other)
+    {
+        return None;
+    }
+    let remaining = &flattened[index + 1..];
+    let later_initializer_mentions_target =
+        later_toplevel_initializer_mentions_ident(j, remaining, target);
+    let prefer_materialized_root = tail_move_materialized_root_ident(j, &flattened, initializer)
+        .is_some_and(|root| {
+            !root.same(target)
+                && (later_initializer_mentions_target
+                    || remaining
+                        .iter()
+                        .any(|stmt| statement_mentions_ident_anywhere(j, *stmt, &root)))
+        });
+    let replacement = resolve_tail_move_replacement_expression(
+        j,
+        &flattened,
+        initializer,
+        target,
+        prefer_materialized_root,
+    );
+    let a: &JsArena = j;
+    let binding_is_direct_literal = is_literal(a, initializer);
+    let binding_is_local_alias = matches!(a.ek(initializer), ExprKind::Var(_));
+    let has_later_function_binding = has_later_toplevel_function_binding(a, remaining);
+    let later_function_mentions_target =
+        later_toplevel_function_mentions_ident(a, remaining, target);
+    // A Literal+Alias binding existing in the block means
+    // `compiler/core/lam_pass_lets_dce.ml:121-133` entered the Strict arm
+    // and `compiler/core/lam_util.ml:118-124` downgraded to Alias without
+    // substituting the value. That is the exact shape OCaml keeps in source
+    // order via `compiler/core/lam_coercion.ml:99-121`, so we must not
+    // relocate the binding. The Alias-arm substitution path in OCaml always
+    // removes the binding, in which case this function never finds a
+    // declaration to move.
+    let literal = matches!(initializer_kind, TailMoveInitializerKind::Literal);
+    let qualified = matches!(initializer_kind, TailMoveInitializerKind::Qualified);
+    let blocked_by_literal_binding = literal && !matches!(property, LetKind::Alias);
+    let blocked_by_literal_alias_preserved_in_block = literal && matches!(property, LetKind::Alias);
+    let blocked_by_direct_literal_reuse =
+        literal && binding_is_direct_literal && later_initializer_mentions_target;
+    let blocked_by_literal_alias_without_materialized_root =
+        literal && binding_is_local_alias && !prefer_materialized_root;
+    let blocked_by_later_function_capture = later_function_mentions_target;
+    let blocked_by_qualified_binding_before_later_function =
+        has_later_function_binding && qualified;
+    let blocked_by_effects = !js_expr_no_side_effects(a, replacement);
+    let blocked_by_self_mention = expression_mentions_ident_anywhere(a, replacement, target);
+    let blocked_by_prior_use = flattened[..index]
+        .iter()
+        .any(|stmt| statement_mentions_ident_anywhere(a, *stmt, target));
+    let has_remaining_use = remaining
+        .iter()
+        .any(|stmt| statement_mentions_ident_anywhere(a, *stmt, target));
+    let blocked_by_unsafe_inline = qualified
+        && !qualified_tail_move_uses_are_safe_to_inline(a, remaining, target, replacement);
+    let blocked_by_later_initializer = later_initializer_mentions_target && !literal;
+    let blocked_by_later_effect = !later_toplevel_effect_allows_tail_move(
+        a,
+        remaining,
+        target,
+        initializer_kind,
+        replacement,
+        replacement_resolves_to_recursive_function(a, &flattened, replacement),
+    ) && !(target.same(export)
+        && !has_remaining_use
+        && ml_module_field_tail_move_replacement(a, replacement));
+    if blocked_by_literal_binding
+        || blocked_by_literal_alias_preserved_in_block
+        || blocked_by_direct_literal_reuse
+        || blocked_by_literal_alias_without_materialized_root
+        || blocked_by_later_function_capture
+        || blocked_by_qualified_binding_before_later_function
+        || blocked_by_effects
+        || blocked_by_self_mention
+        || blocked_by_prior_use
+        || blocked_by_unsafe_inline
+        || blocked_by_later_initializer
+        || blocked_by_later_effect
+    {
+        return None;
+    }
 
-        (index, replacement, property)
+    *block = substitute_after(j, flattened, index, target, replacement);
+    Some((replacement, property))
+}
+
+/// Drops `flattened[index]` and replaces `target` with `replacement` in the
+/// statements after it.
+fn substitute_after(
+    j: &mut JsArena,
+    mut flattened: Vec<Stmt>,
+    index: usize,
+    target: &Ident,
+    replacement: Expr,
+) -> Block {
+    let mut sub = SubstituteExportAlias {
+        target: *target,
+        replacement,
     };
-
-    let mut flattened = flatten_toplevel_block_owned(std::mem::take(block));
     for stmt in &mut flattened[index + 1..] {
-        substitute_export_alias_use_in_statement(stmt, target, &replacement);
+        *stmt = sub.statement(j, *stmt);
     }
     flattened.remove(index);
-    *block = flattened;
-    Some((replacement, property))
+    flattened
 }
 
 pub(crate) fn move_reused_same_name_export_binding_to_export_tail(
+    j: &mut JsArena,
     block: &mut Block,
     export: &Ident,
-    value: &Expression,
-) -> Option<(Expression, LetKind)> {
+    value: Expr,
+) -> Option<(Expr, LetKind)> {
     // Same OCaml contract as `move_same_name_export_alias_to_export_tail`:
-    // export identity decisions come from `compiler/core/lam_coercion.ml:82-121`;
-    // this Rust JS-IR pass only preserves the final output shape and takes
-    // ownership of the block after the borrowed checks choose a mutation.
-    let (index, reused, replacement, property) = {
-        let flattened_refs = flatten_toplevel_block_refs(block);
-        let (index, reused, _initializer, property) =
-            direct_reused_same_name_export_alias_binding_ref(&flattened_refs, export, value)?;
-        let replacement =
-            resolve_tail_move_replacement_expression_ref(&flattened_refs, value, reused, false);
-        let initializer_kind = same_name_export_initializer_kind_ref(&flattened_refs, &replacement);
-        let remaining = &flattened_refs[index + 1..];
-        let blocked_by_literal_binding =
-            matches!(initializer_kind, TailMoveInitializerKind::Literal)
-                && (!matches!(property, LetKind::Alias)
-                    || !has_later_toplevel_function_binding_ref(remaining));
-        let blocked_by_later_effect = !later_toplevel_effect_allows_tail_move_ref(
-            remaining,
-            reused,
-            initializer_kind,
-            &replacement,
-            replacement_resolves_to_recursive_function_ref(&flattened_refs, &replacement),
-        );
-        if matches!(property, LetKind::Variable)
-            || blocked_by_literal_binding
-            || matches!(initializer_kind, TailMoveInitializerKind::Other)
-            || !js_expr_no_side_effects(&replacement)
-            || flattened_refs[..index]
-                .iter()
-                .any(|stmt| statement_mentions_ident_anywhere(stmt, reused))
-            || (matches!(initializer_kind, TailMoveInitializerKind::Qualified)
-                && !qualified_tail_move_uses_are_safe_to_inline_ref(
-                    remaining,
-                    reused,
-                    &replacement,
-                ))
-            || later_toplevel_initializer_mentions_ident_ref(remaining, reused)
-            || blocked_by_later_effect
-        {
-            return None;
-        }
-
-        (index, *reused, replacement, property)
-    };
-
-    let mut flattened = flatten_toplevel_block_owned(std::mem::take(block));
-    for stmt in &mut flattened[index + 1..] {
-        substitute_export_alias_use_in_statement(stmt, &reused, &replacement);
+    // export identity decisions come from `compiler/core/lam_coercion.ml:82-121`.
+    let flattened = flatten_toplevel_block(j, block);
+    let (index, reused, _initializer, property) =
+        direct_reused_same_name_export_alias_binding(j, &flattened, export, value)?;
+    let replacement =
+        resolve_tail_move_replacement_expression(j, &flattened, value, &reused, false);
+    let a: &JsArena = j;
+    let initializer_kind = same_name_export_initializer_kind(a, &flattened, replacement);
+    let remaining = &flattened[index + 1..];
+    let blocked_by_literal_binding = matches!(initializer_kind, TailMoveInitializerKind::Literal)
+        && (!matches!(property, LetKind::Alias)
+            || !has_later_toplevel_function_binding(a, remaining));
+    let blocked_by_later_effect = !later_toplevel_effect_allows_tail_move(
+        a,
+        remaining,
+        &reused,
+        initializer_kind,
+        replacement,
+        replacement_resolves_to_recursive_function(a, &flattened, replacement),
+    );
+    if matches!(property, LetKind::Variable)
+        || blocked_by_literal_binding
+        || matches!(initializer_kind, TailMoveInitializerKind::Other)
+        || !js_expr_no_side_effects(a, replacement)
+        || flattened[..index]
+            .iter()
+            .any(|stmt| statement_mentions_ident_anywhere(a, *stmt, &reused))
+        || (matches!(initializer_kind, TailMoveInitializerKind::Qualified)
+            && !qualified_tail_move_uses_are_safe_to_inline(a, remaining, &reused, replacement))
+        || later_toplevel_initializer_mentions_ident(a, remaining, &reused)
+        || blocked_by_later_effect
+    {
+        return None;
     }
-    flattened.remove(index);
-    *block = flattened;
+
+    *block = substitute_after(j, flattened, index, &reused, replacement);
     Some((replacement, property))
 }
 
-fn same_name_export_alias_binding_ref<'a>(
-    block: &'a [&'a Statement],
+fn same_name_export_alias_binding(
+    a: &JsArena,
+    block: &[Stmt],
     target: &Ident,
-) -> Option<(usize, &'a Expression, LetKind)> {
-    block
-        .iter()
-        .enumerate()
-        .find_map(|(index, stmt)| match &stmt.desc {
-            StatementDesc::Variable(VariableDeclaration {
-                ident,
-                value: Some(initializer),
-                property,
-                ..
-            }) if ident.same(target) => Some((index, initializer, *property)),
+) -> Option<(usize, Expr, LetKind)> {
+    block.iter().enumerate().find_map(|(index, stmt)| {
+        let StmtKind::Variable(v) = a.sk(*stmt) else {
+            return None;
+        };
+        let decl = a.var(v);
+        match decl.value {
+            Some(initializer) if decl.ident.same(target) => {
+                Some((index, initializer, decl.property))
+            }
             _ => None,
-        })
+        }
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -258,207 +253,108 @@ pub(crate) enum TailMoveInitializerKind {
     Other,
 }
 
-fn same_name_export_initializer_kind_ref(
-    block: &[&Statement],
-    initializer: &Expression,
+fn same_name_export_initializer_kind(
+    a: &JsArena,
+    block: &[Stmt],
+    initializer: Expr,
 ) -> TailMoveInitializerKind {
-    match &initializer.desc {
-        ExpressionDesc::Number(_)
-        | ExpressionDesc::Str(_)
-        | ExpressionDesc::Bool(_)
-        | ExpressionDesc::Undefined { .. }
-        | ExpressionDesc::Null => TailMoveInitializerKind::Literal,
-        ExpressionDesc::Var(VIdent::Qualified(_, _)) => TailMoveInitializerKind::Qualified,
-        ExpressionDesc::Var(VIdent::Id(target)) => {
-            resolve_tail_move_initializer_kind_ref(block, target)
-                .unwrap_or(TailMoveInitializerKind::Other)
-        }
+    match a.ek(initializer) {
+        _ if is_literal(a, initializer) => TailMoveInitializerKind::Literal,
+        ExprKind::Qualified(_) => TailMoveInitializerKind::Qualified,
+        ExprKind::Var(target) => resolve_tail_move_initializer_kind(a, block, &a.ident(target))
+            .unwrap_or(TailMoveInitializerKind::Other),
         _ => TailMoveInitializerKind::Other,
     }
 }
 
+/// The declaration of `ident` among `block`'s statements.
+fn find_declaration<'a>(
+    a: &'a JsArena,
+    block: &[Stmt],
+    ident: &Ident,
+) -> Option<&'a crate::js_ir::arena::VarDecl> {
+    block.iter().find_map(|stmt| match a.sk(*stmt) {
+        StmtKind::Variable(v) if a.var(v).ident.same(ident) => Some(a.var(v)),
+        _ => None,
+    })
+}
+
 pub(crate) fn resolve_tail_move_replacement_expression(
-    block: &Block,
-    initializer: &Expression,
+    j: &mut JsArena,
+    block: &[Stmt],
+    initializer: Expr,
     rebound: &Ident,
     prefer_materialized_root: bool,
-) -> Expression {
-    let ExpressionDesc::Var(VIdent::Id(start)) = &initializer.desc else {
-        return initializer.clone();
+) -> Expr {
+    let Some(mut current) = local_var(j, initializer) else {
+        return initializer;
     };
-
-    let mut current = *start;
     let mut seen = HashSet::new();
 
     loop {
         if !seen.insert(current) {
-            return initializer.clone();
+            return initializer;
         }
 
-        let stmt = match block.iter().find(|stmt| {
-            matches!(
-                &stmt.desc,
-                StatementDesc::Variable(VariableDeclaration { ident, .. }) if ident.same(&current)
-            )
-        }) {
-            Some(stmt) => stmt,
-            None => return Expression::var(current),
+        let Some(decl) = find_declaration(j, block, &current) else {
+            return E::var(current, j);
         };
-
-        let StatementDesc::Variable(VariableDeclaration {
-            value: Some(value),
-            property,
-            ..
-        }) = &stmt.desc
-        else {
-            return Expression::var(current);
+        let Some(value) = decl.value else {
+            return E::var(current, j);
         };
 
         // OCaml's `compiler/core/lam_pass_lets_dce.ml:21-23` only substitutes
         // Strict / Alias / StrictOpt. Stop at a Variable-kind binding
         // (post-eliminate_ref ref); folding through it is unsound because later
         // code may mutate it.
-        if matches!(property, LetKind::Variable) {
-            return Expression::var(current);
+        if matches!(decl.property, LetKind::Variable) {
+            return E::var(current, j);
         }
 
-        match &value.desc {
-            ExpressionDesc::Fun { .. } => return Expression::var(current),
-            ExpressionDesc::Var(VIdent::Qualified(module, field)) => {
-                return if prefer_materialized_root && !current.same(rebound) {
-                    Expression::var(current)
-                } else if current.same(rebound) {
-                    Expression::qualified(module.clone(), field.clone())
+        match j.ek(value) {
+            ExprKind::Qualified(_) => {
+                return if current.same(rebound) {
+                    // A fresh node with the same module and member.
+                    let kind = j.ek(value);
+                    j.expr(kind)
                 } else {
-                    Expression::var(current)
+                    E::var(current, j)
                 };
             }
-            ExpressionDesc::Var(VIdent::Id(next)) if next.name() == current.name() => {
-                current = *next;
+            ExprKind::Var(next) if j.ident(next).name() == current.name() => {
+                current = j.ident(next);
             }
-            ExpressionDesc::Number(_)
-            | ExpressionDesc::Str(_)
-            | ExpressionDesc::Bool(_)
-            | ExpressionDesc::Undefined { .. }
-            | ExpressionDesc::Null => {
+            _ if is_literal(j, value) => {
                 return if prefer_materialized_root && !current.same(rebound) {
-                    Expression::var(current)
+                    E::var(current, j)
                 } else {
-                    value.clone()
+                    value
                 };
             }
-            _ => return Expression::var(current),
+            _ => return E::var(current, j),
         }
     }
 }
 
-fn resolve_tail_move_replacement_expression_ref(
-    block: &[&Statement],
-    initializer: &Expression,
-    rebound: &Ident,
-    prefer_materialized_root: bool,
-) -> Expression {
-    // Borrowed twin of `resolve_tail_move_replacement_expression`, preserving
-    // the substitution boundary from `compiler/core/lam_pass_lets_dce.ml:21-23`
-    // while avoiding JS statement clones on read-only export checks.
-    let ExpressionDesc::Var(VIdent::Id(start)) = &initializer.desc else {
-        return initializer.clone();
-    };
-
-    let mut current = *start;
-    let mut seen = HashSet::new();
-
-    loop {
-        if !seen.insert(current) {
-            return initializer.clone();
-        }
-
-        let stmt = match block.iter().find(|stmt| {
-            matches!(
-                &stmt.desc,
-                StatementDesc::Variable(VariableDeclaration { ident, .. }) if ident.same(&current)
-            )
-        }) {
-            Some(stmt) => stmt,
-            None => return Expression::var(current),
-        };
-
-        let StatementDesc::Variable(VariableDeclaration {
-            value: Some(value),
-            property,
-            ..
-        }) = &stmt.desc
-        else {
-            return Expression::var(current);
-        };
-
-        if matches!(property, LetKind::Variable) {
-            return Expression::var(current);
-        }
-
-        match &value.desc {
-            ExpressionDesc::Fun { .. } => return Expression::var(current),
-            ExpressionDesc::Var(VIdent::Qualified(module, field)) => {
-                return if prefer_materialized_root && !current.same(rebound) {
-                    Expression::var(current)
-                } else if current.same(rebound) {
-                    Expression::qualified(module.clone(), field.clone())
-                } else {
-                    Expression::var(current)
-                };
-            }
-            ExpressionDesc::Var(VIdent::Id(next)) if next.name() == current.name() => {
-                current = *next;
-            }
-            ExpressionDesc::Number(_)
-            | ExpressionDesc::Str(_)
-            | ExpressionDesc::Bool(_)
-            | ExpressionDesc::Undefined { .. }
-            | ExpressionDesc::Null => {
-                return if prefer_materialized_root && !current.same(rebound) {
-                    Expression::var(current)
-                } else {
-                    value.clone()
-                };
-            }
-            _ => return Expression::var(current),
-        }
-    }
-}
-
-fn tail_move_materialized_root_ident_ref(
-    block: &[&Statement],
-    initializer: &Expression,
+fn tail_move_materialized_root_ident(
+    a: &JsArena,
+    block: &[Stmt],
+    initializer: Expr,
 ) -> Option<Ident> {
-    let ExpressionDesc::Var(VIdent::Id(start)) = &initializer.desc else {
-        return None;
-    };
-
-    let mut current = *start;
+    let mut current = local_var(a, initializer)?;
     let mut seen = HashSet::new();
 
     loop {
         if !seen.insert(current) {
             return None;
         }
-
-        let stmt = block.iter().find(|stmt| {
-            matches!(
-                &stmt.desc,
-                StatementDesc::Variable(VariableDeclaration { ident, .. }) if ident.same(&current)
-            )
-        })?;
-
-        let StatementDesc::Variable(VariableDeclaration {
-            value: Some(value), ..
-        }) = &stmt.desc
-        else {
+        let decl = find_declaration(a, block, &current)?;
+        let Some(value) = decl.value else {
             return Some(current);
         };
-
-        match &value.desc {
-            ExpressionDesc::Var(VIdent::Id(next)) if next.name() == current.name() => {
-                current = *next;
+        match a.ek(value) {
+            ExprKind::Var(next) if a.ident(next).name() == current.name() => {
+                current = a.ident(next);
             }
             _ => return Some(current),
         }
@@ -466,7 +362,8 @@ fn tail_move_materialized_root_ident_ref(
 }
 
 pub(crate) fn resolve_tail_move_initializer_kind(
-    block: &Block,
+    a: &JsArena,
+    block: &[Stmt],
     start: &Ident,
 ) -> Option<TailMoveInitializerKind> {
     let mut current = *start;
@@ -476,74 +373,12 @@ pub(crate) fn resolve_tail_move_initializer_kind(
         if !seen.insert(current) {
             return None;
         }
-
-        let stmt = block.iter().find(|stmt| {
-            matches!(
-                &stmt.desc,
-                StatementDesc::Variable(VariableDeclaration { ident, .. }) if ident.same(&current)
-            )
-        })?;
-
-        let StatementDesc::Variable(VariableDeclaration {
-            value: Some(value), ..
-        }) = &stmt.desc
-        else {
-            return None;
-        };
-
-        match &value.desc {
-            ExpressionDesc::Fun { .. } => return Some(TailMoveInitializerKind::Function),
-            ExpressionDesc::Var(VIdent::Qualified(_, _)) => {
-                return Some(TailMoveInitializerKind::Qualified);
-            }
-            ExpressionDesc::Number(_)
-            | ExpressionDesc::Str(_)
-            | ExpressionDesc::Bool(_)
-            | ExpressionDesc::Undefined { .. }
-            | ExpressionDesc::Null => return Some(TailMoveInitializerKind::Literal),
-            ExpressionDesc::Var(VIdent::Id(next)) => current = *next,
-            _ => return None,
-        }
-    }
-}
-
-fn resolve_tail_move_initializer_kind_ref(
-    block: &[&Statement],
-    start: &Ident,
-) -> Option<TailMoveInitializerKind> {
-    let mut current = *start;
-    let mut seen = HashSet::new();
-
-    loop {
-        if !seen.insert(current) {
-            return None;
-        }
-
-        let stmt = block.iter().find(|stmt| {
-            matches!(
-                &stmt.desc,
-                StatementDesc::Variable(VariableDeclaration { ident, .. }) if ident.same(&current)
-            )
-        })?;
-
-        let StatementDesc::Variable(VariableDeclaration {
-            value: Some(value), ..
-        }) = &stmt.desc
-        else {
-            return None;
-        };
-
-        match &value.desc {
-            ExpressionDesc::Fun { .. } => return Some(TailMoveInitializerKind::Function),
-            ExpressionDesc::Var(VIdent::Qualified(_, _)) => {
-                return Some(TailMoveInitializerKind::Qualified);
-            }
-            ExpressionDesc::Number(_)
-            | ExpressionDesc::Str(_)
-            | ExpressionDesc::Bool(_)
-            | ExpressionDesc::Undefined { .. }
-            | ExpressionDesc::Null => return Some(TailMoveInitializerKind::Literal),
-            ExpressionDesc::Var(VIdent::Id(next)) => current = *next,
+        let value = find_declaration(a, block, &current)?.value?;
+        match a.ek(value) {
+            ExprKind::Fun(_) => return Some(TailMoveInitializerKind::Function),
+            ExprKind::Qualified(_) => return Some(TailMoveInitializerKind::Qualified),
+            _ if is_literal(a, value) => return Some(TailMoveInitializerKind::Literal),
+            ExprKind::Var(next) => current = a.ident(next),
             _ => return None,
         }
     }
@@ -556,53 +391,59 @@ enum TailMoveUseContext {
     NewTarget,
 }
 
-fn tail_move_uses_are_safe_to_inline(block: &[Statement], target: &Ident) -> bool {
+fn tail_move_uses_are_safe_to_inline(a: &JsArena, block: &[Stmt], target: &Ident) -> bool {
     block
         .iter()
-        .all(|stmt| statement_uses_ident_only_in_tail_move_safe_positions(stmt, target))
+        .all(|stmt| statement_uses_ident_only_in_tail_move_safe_positions(a, *stmt, target))
 }
 
-fn tail_move_uses_are_safe_to_inline_ref(block: &[&Statement], target: &Ident) -> bool {
-    block
-        .iter()
-        .all(|stmt| statement_uses_ident_only_in_tail_move_safe_positions(stmt, target))
+fn tail_move_list_safe(a: &JsArena, block: StmtList, target: &Ident) -> bool {
+    tail_move_uses_are_safe_to_inline(a, a.stmts(block), target)
 }
 
-fn qualified_tail_move_uses_are_safe_to_inline_ref(
-    block: &[&Statement],
+fn qualified_tail_move_uses_are_safe_to_inline(
+    a: &JsArena,
+    block: &[Stmt],
     target: &Ident,
-    replacement: &Expression,
+    replacement: Expr,
 ) -> bool {
-    same_name_ml_module_field_tail_move_replacement(replacement, target.name())
-        || tail_move_uses_are_safe_to_inline_ref(block, target)
+    same_name_ml_module_field_tail_move_replacement(a, replacement, target.name())
+        || tail_move_uses_are_safe_to_inline(a, block, target)
 }
 
 fn same_name_ml_module_field_tail_move_replacement(
-    replacement: &Expression,
+    a: &JsArena,
+    replacement: Expr,
     target_name: &str,
 ) -> bool {
-    matches!(
-        &replacement.desc,
-        ExpressionDesc::Var(VIdent::Qualified(module, Some(field)))
-            if field == target_name && module.kind.eq(&Kind::Ml)
-    )
+    match a.ek(replacement) {
+        ExprKind::Qualified(q) => {
+            let (module, field) = a.qual(q);
+            field == Some(target_name) && module.kind.eq(&Kind::Ml)
+        }
+        _ => false,
+    }
 }
 
-fn ml_module_field_tail_move_replacement(replacement: &Expression) -> bool {
-    matches!(
-        &replacement.desc,
-        ExpressionDesc::Var(VIdent::Qualified(module, _)) if module.kind.eq(&Kind::Ml)
-    )
+fn ml_module_field_tail_move_replacement(a: &JsArena, replacement: Expr) -> bool {
+    match a.ek(replacement) {
+        ExprKind::Qualified(q) => a.qual(q).0.kind.eq(&Kind::Ml),
+        _ => false,
+    }
 }
 
-fn later_toplevel_effect_allows_tail_move_ref(
-    block: &[&Statement],
+fn later_toplevel_effect_allows_tail_move(
+    a: &JsArena,
+    block: &[Stmt],
     target: &Ident,
     initializer_kind: TailMoveInitializerKind,
-    replacement: &Expression,
+    replacement: Expr,
     replacement_is_recursive_function: bool,
 ) -> bool {
-    if !later_toplevel_effect_statement_ref(block) {
+    if !block
+        .iter()
+        .any(|stmt| statement_has_toplevel_effect(a, *stmt))
+    {
         return true;
     }
     if matches!(initializer_kind, TailMoveInitializerKind::Literal) {
@@ -610,945 +451,384 @@ fn later_toplevel_effect_allows_tail_move_ref(
     }
     let has_remaining_use = block
         .iter()
-        .any(|stmt| statement_mentions_ident_anywhere(stmt, target));
+        .any(|stmt| statement_mentions_ident_anywhere(a, *stmt, target));
     if !has_remaining_use {
         return matches!(initializer_kind, TailMoveInitializerKind::Function)
             && replacement_is_recursive_function;
     }
 
     match initializer_kind {
-        TailMoveInitializerKind::Function => tail_move_uses_are_safe_to_inline_ref(block, target),
+        TailMoveInitializerKind::Function => tail_move_uses_are_safe_to_inline(a, block, target),
         TailMoveInitializerKind::Qualified => {
-            qualified_tail_move_uses_are_safe_to_inline_ref(block, target, replacement)
+            qualified_tail_move_uses_are_safe_to_inline(a, block, target, replacement)
         }
         TailMoveInitializerKind::Literal | TailMoveInitializerKind::Other => false,
     }
 }
 
-fn replacement_resolves_to_recursive_function_ref(
-    block: &[&Statement],
-    replacement: &Expression,
+fn replacement_resolves_to_recursive_function(
+    a: &JsArena,
+    block: &[Stmt],
+    replacement: Expr,
 ) -> bool {
-    let ExpressionDesc::Var(VIdent::Id(binding)) = &replacement.desc else {
+    let Some(binding) = local_var(a, replacement) else {
         return false;
     };
-    block.iter().any(|stmt| match &stmt.desc {
-        StatementDesc::Variable(VariableDeclaration {
-            ident,
-            value:
-                Some(Expression {
-                    desc: ExpressionDesc::Fun { body, .. },
-                    ..
-                }),
-            ..
-        }) if ident.same(binding) => body
+    block.iter().any(|stmt| {
+        let StmtKind::Variable(v) = a.sk(*stmt) else {
+            return false;
+        };
+        let decl = a.var(v);
+        if !decl.ident.same(&binding) {
+            return false;
+        }
+        let Some(value) = decl.value else {
+            return false;
+        };
+        let ExprKind::Fun(f) = a.ek(value) else {
+            return false;
+        };
+        a.stmts(a.fun(f).body)
             .iter()
-            .any(|stmt| statement_mentions_ident_anywhere(stmt, binding)),
-        _ => false,
+            .any(|stmt| statement_mentions_ident_anywhere(a, *stmt, &binding))
     })
 }
 
-fn statement_uses_ident_only_in_tail_move_safe_positions(stmt: &Statement, target: &Ident) -> bool {
-    match &stmt.desc {
-        StatementDesc::Block(block) => tail_move_uses_are_safe_to_inline(block, target),
-        StatementDesc::Variable(VariableDeclaration { ident, value, .. }) => {
-            !ident.same(target)
-                && value.as_ref().is_none_or(|value| {
-                    expression_uses_ident_only_in_tail_move_safe_positions(
-                        value,
-                        target,
-                        TailMoveUseContext::Other,
-                    )
+fn statement_uses_ident_only_in_tail_move_safe_positions(
+    a: &JsArena,
+    stmt: Stmt,
+    target: &Ident,
+) -> bool {
+    let other = |e: Expr| {
+        expression_uses_ident_only_in_tail_move_safe_positions(
+            a,
+            e,
+            target,
+            TailMoveUseContext::Other,
+        )
+    };
+    let list = |b: StmtList| tail_move_list_safe(a, b, target);
+    match a.sk(stmt) {
+        StmtKind::Block(block) => list(block),
+        StmtKind::Variable(v) => {
+            let decl = a.var(v);
+            !decl.ident.same(target) && decl.value.is_none_or(other)
+        }
+        StmtKind::Exp(e) | StmtKind::Return(e) | StmtKind::Throw(e) => other(e),
+        StmtKind::If(cond, then_block, else_block) => {
+            other(cond) && list(then_block) && list(else_block)
+        }
+        StmtKind::While(_, cond, body) => other(cond) && list(body),
+        StmtKind::ForRange(info) => {
+            let info = a.for_range(info);
+            !a.ident(info.ident).same(target)
+                && info.init.is_none_or(other)
+                && other(info.end)
+                && list(info.body)
+        }
+        StmtKind::ForOf(info) | StmtKind::ForAwaitOf(info) => {
+            let info = a.for_of(info);
+            !a.ident(info.ident).same(target) && other(info.iterable) && list(info.body)
+        }
+        StmtKind::IntSwitch(test, info) => {
+            let info = a.int_switch(info);
+            other(test)
+                && info.clauses.iter().all(|(_, clause)| list(clause.body))
+                && info.default.is_none_or(list)
+        }
+        StmtKind::StringSwitch(test, info) => {
+            let info = a.string_switch(info);
+            other(test)
+                && info.clauses.iter().all(|clause| list(clause.clause.body))
+                && info.default.is_none_or(list)
+        }
+        StmtKind::Try(info) => {
+            let info = a.try_info(info);
+            list(info.body)
+                && info.catch.is_none_or(|(catch_ident, block)| {
+                    !a.ident(catch_ident).same(target) && list(block)
                 })
+                && info.finally.is_none_or(list)
         }
-        StatementDesc::Exp(expr) | StatementDesc::Return(expr) | StatementDesc::Throw(expr) => {
-            expression_uses_ident_only_in_tail_move_safe_positions(
-                expr,
-                target,
-                TailMoveUseContext::Other,
-            )
-        }
-        StatementDesc::If(cond, then_block, else_block) => {
-            expression_uses_ident_only_in_tail_move_safe_positions(
-                cond,
-                target,
-                TailMoveUseContext::Other,
-            ) && tail_move_uses_are_safe_to_inline(then_block, target)
-                && tail_move_uses_are_safe_to_inline(else_block, target)
-        }
-        StatementDesc::While(_, cond, body) => {
-            expression_uses_ident_only_in_tail_move_safe_positions(
-                cond,
-                target,
-                TailMoveUseContext::Other,
-            ) && tail_move_uses_are_safe_to_inline(body, target)
-        }
-        StatementDesc::ForRange(_, start, finish, loop_ident, _, body) => {
-            !loop_ident.same(target)
-                && start.as_ref().is_none_or(|expr| {
-                    expression_uses_ident_only_in_tail_move_safe_positions(
-                        expr,
-                        target,
-                        TailMoveUseContext::Other,
-                    )
-                })
-                && expression_uses_ident_only_in_tail_move_safe_positions(
-                    finish,
-                    target,
-                    TailMoveUseContext::Other,
-                )
-                && tail_move_uses_are_safe_to_inline(body, target)
-        }
-        StatementDesc::ForOf(_, loop_ident, iterable, body)
-        | StatementDesc::ForAwaitOf(_, loop_ident, iterable, body) => {
-            !loop_ident.same(target)
-                && expression_uses_ident_only_in_tail_move_safe_positions(
-                    iterable,
-                    target,
-                    TailMoveUseContext::Other,
-                )
-                && tail_move_uses_are_safe_to_inline(body, target)
-        }
-        StatementDesc::IntSwitch(test, clauses, default) => {
-            expression_uses_ident_only_in_tail_move_safe_positions(
-                test,
-                target,
-                TailMoveUseContext::Other,
-            ) && clauses
-                .iter()
-                .all(|(_, clause)| tail_move_uses_are_safe_to_inline(&clause.body, target))
-                && default
-                    .as_ref()
-                    .is_none_or(|block| tail_move_uses_are_safe_to_inline(block, target))
-        }
-        StatementDesc::StringSwitch(test, clauses, default) => {
-            expression_uses_ident_only_in_tail_move_safe_positions(
-                test,
-                target,
-                TailMoveUseContext::Other,
-            ) && clauses
-                .iter()
-                .all(|clause| tail_move_uses_are_safe_to_inline(&clause.clause.body, target))
-                && default
-                    .as_ref()
-                    .is_none_or(|block| tail_move_uses_are_safe_to_inline(block, target))
-        }
-        StatementDesc::Try(body, catch, finally) => {
-            tail_move_uses_are_safe_to_inline(body, target)
-                && catch.as_ref().is_none_or(|(catch_ident, block)| {
-                    !catch_ident.same(target) && tail_move_uses_are_safe_to_inline(block, target)
-                })
-                && finally
-                    .as_ref()
-                    .is_none_or(|block| tail_move_uses_are_safe_to_inline(block, target))
-        }
-        StatementDesc::Debugger | StatementDesc::Break(_) | StatementDesc::Continue(_) => true,
+        StmtKind::Debugger | StmtKind::Break(_) | StmtKind::Continue(_) => true,
     }
 }
 
 fn expression_uses_ident_only_in_tail_move_safe_positions(
-    expr: &Expression,
+    a: &JsArena,
+    expr: Expr,
     target: &Ident,
     context: TailMoveUseContext,
 ) -> bool {
-    match &expr.desc {
-        ExpressionDesc::Var(VIdent::Id(ident)) => {
-            !ident.same(target)
-                || matches!(
-                    context,
-                    TailMoveUseContext::CallCallee | TailMoveUseContext::NewTarget
-                )
+    use TailMoveUseContext::*;
+    let check = |e: Expr, context| {
+        expression_uses_ident_only_in_tail_move_safe_positions(a, e, target, context)
+    };
+    let all = |list: crate::js_ir::arena::ExprList| a.exprs(list).iter().all(|e| check(*e, Other));
+    match a.ek(expr) {
+        ExprKind::Var(ident) => {
+            !a.ident(ident).same(target) || matches!(context, CallCallee | NewTarget)
         }
-        ExpressionDesc::Var(VIdent::Qualified(_, _))
-        | ExpressionDesc::Bool(_)
-        | ExpressionDesc::Str(_)
-        | ExpressionDesc::TemplateLiteral(_)
-        | ExpressionDesc::JsonLiteral(_)
-        | ExpressionDesc::Number(_)
-        | ExpressionDesc::Undefined { .. }
-        | ExpressionDesc::Null
-        | ExpressionDesc::RawJsCode(_) => true,
-        ExpressionDesc::Length(inner, _)
-        | ExpressionDesc::IsNullOrUndefined(inner)
-        | ExpressionDesc::Typeof(inner)
-        | ExpressionDesc::JsNot(inner)
-        | ExpressionDesc::JsBnot(inner)
-        | ExpressionDesc::Spread(inner)
-        | ExpressionDesc::RecordRest(_, inner)
-        | ExpressionDesc::Await(inner)
-        | ExpressionDesc::OptionalBlock(inner, _)
-        | ExpressionDesc::StaticIndex(inner, _, _)
-        | ExpressionDesc::CamlBlockTag(inner, _) => {
-            expression_uses_ident_only_in_tail_move_safe_positions(
-                inner,
-                target,
-                TailMoveUseContext::Other,
-            )
+        ExprKind::FlatCall(left, right) => check(left, CallCallee) && check(right, Other),
+        ExprKind::Call(func, args, _) | ExprKind::TaggedTemplate(func, _, args) => {
+            check(func, CallCallee) && all(args)
         }
-        ExpressionDesc::StringAppend(left, right)
-        | ExpressionDesc::In(left, right)
-        | ExpressionDesc::Seq(left, right)
-        | ExpressionDesc::Bin(_, left, right)
-        | ExpressionDesc::StringIndex(left, right)
-        | ExpressionDesc::ArrayIndex(left, right) => {
-            expression_uses_ident_only_in_tail_move_safe_positions(
-                left,
-                target,
-                TailMoveUseContext::Other,
-            ) && expression_uses_ident_only_in_tail_move_safe_positions(
-                right,
-                target,
-                TailMoveUseContext::Other,
-            )
-        }
-        ExpressionDesc::FlatCall(left, right) => {
-            expression_uses_ident_only_in_tail_move_safe_positions(
-                left,
-                target,
-                TailMoveUseContext::CallCallee,
-            ) && expression_uses_ident_only_in_tail_move_safe_positions(
-                right,
-                target,
-                TailMoveUseContext::Other,
-            )
-        }
-        ExpressionDesc::Cond(test, consequent, alternate) => {
-            expression_uses_ident_only_in_tail_move_safe_positions(
-                test,
-                target,
-                TailMoveUseContext::Other,
-            ) && expression_uses_ident_only_in_tail_move_safe_positions(
-                consequent,
-                target,
-                TailMoveUseContext::Other,
-            ) && expression_uses_ident_only_in_tail_move_safe_positions(
-                alternate,
-                target,
-                TailMoveUseContext::Other,
-            )
-        }
-        ExpressionDesc::Call(func, args, _) => {
-            expression_uses_ident_only_in_tail_move_safe_positions(
-                func,
-                target,
-                TailMoveUseContext::CallCallee,
-            ) && args.iter().all(|arg| {
-                expression_uses_ident_only_in_tail_move_safe_positions(
-                    arg,
-                    target,
-                    TailMoveUseContext::Other,
-                )
-            })
-        }
-        ExpressionDesc::TaggedTemplate(tag, _, values) => {
-            expression_uses_ident_only_in_tail_move_safe_positions(
-                tag,
-                target,
-                TailMoveUseContext::CallCallee,
-            ) && values.iter().all(|expr| {
-                expression_uses_ident_only_in_tail_move_safe_positions(
-                    expr,
-                    target,
-                    TailMoveUseContext::Other,
-                )
-            })
-        }
-        ExpressionDesc::InterpolatedTemplate { values, .. } => values.iter().all(|expr| {
-            expression_uses_ident_only_in_tail_move_safe_positions(
-                expr,
-                target,
-                TailMoveUseContext::Other,
-            )
-        }),
-        ExpressionDesc::New(func, args) => {
-            expression_uses_ident_only_in_tail_move_safe_positions(
-                func,
-                target,
-                TailMoveUseContext::NewTarget,
-            ) && args.as_ref().is_none_or(|args| {
-                args.iter().all(|arg| {
-                    expression_uses_ident_only_in_tail_move_safe_positions(
-                        arg,
-                        target,
-                        TailMoveUseContext::Other,
-                    )
-                })
-            })
-        }
-        ExpressionDesc::Fun { body, .. } => tail_move_uses_are_safe_to_inline(body, target),
-        ExpressionDesc::Array(items, _) => items.iter().all(|item| {
-            expression_uses_ident_only_in_tail_move_safe_positions(
-                item,
-                target,
-                TailMoveUseContext::Other,
-            )
-        }),
-        ExpressionDesc::CamlBlock(items, _, _) => items.iter().all(|item| {
-            expression_uses_ident_only_in_tail_move_safe_positions(
-                item,
-                target,
-                TailMoveUseContext::Other,
-            )
-        }),
-        ExpressionDesc::Object(dup, props) => {
-            dup.as_ref().is_none_or(|expr| {
-                expression_uses_ident_only_in_tail_move_safe_positions(
-                    expr,
-                    target,
-                    TailMoveUseContext::Other,
-                )
-            }) && props.iter().all(|(_, value)| {
-                expression_uses_ident_only_in_tail_move_safe_positions(
-                    value,
-                    target,
-                    TailMoveUseContext::Other,
-                )
-            })
-        }
+        ExprKind::New(func, args) => check(func, NewTarget) && args.is_none_or(all),
+        ExprKind::Fun(f) => tail_move_list_safe(a, a.fun(f).body, target),
+        _ => !any_child(a, expr, |child| !check(child, Other)),
     }
 }
 
-fn direct_reused_same_name_export_alias_binding_ref<'a>(
-    block: &'a [&'a Statement],
+fn direct_reused_same_name_export_alias_binding(
+    a: &JsArena,
+    block: &[Stmt],
     export: &Ident,
-    value: &Expression,
-) -> Option<(usize, &'a Ident, &'a Expression, LetKind)> {
-    block
-        .iter()
-        .enumerate()
-        .find_map(|(index, stmt)| match &stmt.desc {
-            StatementDesc::Variable(VariableDeclaration {
-                ident,
-                value: Some(initializer),
-                property,
-                ..
-            }) if ident.name() == export.name()
-                && same_reusable_export_value(initializer, value) =>
-            {
-                Some((index, ident, initializer, *property))
-            }
-            _ => None,
-        })
+    value: Expr,
+) -> Option<(usize, Ident, Expr, LetKind)> {
+    block.iter().enumerate().find_map(|(index, stmt)| {
+        let StmtKind::Variable(v) = a.sk(*stmt) else {
+            return None;
+        };
+        let decl = a.var(v);
+        let initializer = decl.value?;
+        (decl.ident.name() == export.name() && same_reusable_export_value(a, initializer, value))
+            .then_some((index, decl.ident, initializer, decl.property))
+    })
 }
 
 pub(crate) fn keeps_declared_same_name_reusable_export_binding(
-    block: &Block,
+    a: &JsArena,
+    block: &[Stmt],
     export: &Ident,
-    value: &Expression,
+    value: Expr,
 ) -> bool {
-    let flattened_refs = flatten_toplevel_block_refs(block);
-    direct_reused_same_name_export_alias_binding_ref(&flattened_refs, export, value).is_some_and(
+    let flattened = flatten_toplevel_block(a, block);
+    direct_reused_same_name_export_alias_binding(a, &flattened, export, value).is_some_and(
         |(_, ident, _, property)| ident.same(export) && !matches!(property, LetKind::Variable),
     )
 }
 
-fn has_later_toplevel_function_binding_ref(block: &[&Statement]) -> bool {
+/// The initializer of a top-level `let x = function ...`.
+fn function_binding(a: &JsArena, stmt: Stmt) -> bool {
+    match a.sk(stmt) {
+        StmtKind::Variable(v) => a
+            .var(v)
+            .value
+            .is_some_and(|value| matches!(a.ek(value), ExprKind::Fun(_))),
+        _ => false,
+    }
+}
+
+fn has_later_toplevel_function_binding(a: &JsArena, block: &[Stmt]) -> bool {
+    block.iter().any(|stmt| function_binding(a, *stmt))
+}
+
+fn later_toplevel_function_mentions_ident(a: &JsArena, block: &[Stmt], target: &Ident) -> bool {
     block.iter().any(|stmt| {
-        matches!(
-            &stmt.desc,
-            StatementDesc::Variable(VariableDeclaration {
-                value: Some(Expression {
-                    desc: ExpressionDesc::Fun { .. },
-                    ..
-                }),
-                ..
-            })
-        )
+        function_binding(a, *stmt) && statement_mentions_ident_anywhere(a, *stmt, target)
     })
 }
 
-fn later_toplevel_function_mentions_ident_ref(block: &[&Statement], target: &Ident) -> bool {
-    block.iter().any(|stmt| match &stmt.desc {
-        StatementDesc::Variable(VariableDeclaration {
-            value:
-                Some(Expression {
-                    desc: ExpressionDesc::Fun { .. },
-                    ..
-                }),
-            ..
-        }) => statement_mentions_ident_anywhere(stmt, target),
+fn later_toplevel_initializer_mentions_ident(a: &JsArena, block: &[Stmt], target: &Ident) -> bool {
+    block.iter().any(|stmt| match a.sk(*stmt) {
+        StmtKind::Variable(v) => a.var(v).value.is_some_and(|value| {
+            expression_mentions_ident_outside_nested_functions(a, value, target)
+        }),
         _ => false,
     })
 }
 
-fn later_toplevel_initializer_mentions_ident_ref(block: &[&Statement], target: &Ident) -> bool {
-    block.iter().any(|stmt| match &stmt.desc {
-        StatementDesc::Variable(VariableDeclaration {
-            value: Some(value), ..
-        }) => expression_mentions_ident_outside_nested_functions(value, target),
-        _ => false,
-    })
-}
-
-fn later_toplevel_effect_statement_ref(block: &[&Statement]) -> bool {
-    block.iter().any(|stmt| statement_has_toplevel_effect(stmt))
-}
-
-fn statement_has_toplevel_effect(stmt: &Statement) -> bool {
-    match &stmt.desc {
-        StatementDesc::Variable(VariableDeclaration { value, .. }) => value
-            .as_ref()
-            .is_some_and(|expr| !js_expr_no_side_effects(expr)),
-        _ => !js_statement_no_side_effects(stmt),
+fn statement_has_toplevel_effect(a: &JsArena, stmt: Stmt) -> bool {
+    match a.sk(stmt) {
+        StmtKind::Variable(v) => a
+            .var(v)
+            .value
+            .is_some_and(|expr| !js_expr_no_side_effects(a, expr)),
+        _ => !js_statement_no_side_effects(a, stmt),
     }
 }
 
-fn expression_mentions_ident_outside_nested_functions(expr: &Expression, target: &Ident) -> bool {
-    match &expr.desc {
-        ExpressionDesc::Var(VIdent::Id(ident)) => ident.same(target),
-        ExpressionDesc::Var(VIdent::Qualified(_, _))
-        | ExpressionDesc::Bool(_)
-        | ExpressionDesc::Str(_)
-        | ExpressionDesc::TemplateLiteral(_)
-        | ExpressionDesc::JsonLiteral(_)
-        | ExpressionDesc::Number(_)
-        | ExpressionDesc::Undefined { .. }
-        | ExpressionDesc::Null
-        | ExpressionDesc::RawJsCode(_) => false,
-        ExpressionDesc::Length(inner, _)
-        | ExpressionDesc::IsNullOrUndefined(inner)
-        | ExpressionDesc::Typeof(inner)
-        | ExpressionDesc::JsNot(inner)
-        | ExpressionDesc::JsBnot(inner)
-        | ExpressionDesc::Spread(inner)
-        | ExpressionDesc::RecordRest(_, inner)
-        | ExpressionDesc::Await(inner)
-        | ExpressionDesc::OptionalBlock(inner, _)
-        | ExpressionDesc::StaticIndex(inner, _, _)
-        | ExpressionDesc::CamlBlockTag(inner, _)
-        | ExpressionDesc::New(inner, None) => {
-            expression_mentions_ident_outside_nested_functions(inner, target)
-        }
-        ExpressionDesc::In(left, right)
-        | ExpressionDesc::StringAppend(left, right)
-        | ExpressionDesc::Seq(left, right)
-        | ExpressionDesc::Bin(_, left, right)
-        | ExpressionDesc::FlatCall(left, right)
-        | ExpressionDesc::StringIndex(left, right)
-        | ExpressionDesc::ArrayIndex(left, right) => {
-            expression_mentions_ident_outside_nested_functions(left, target)
-                || expression_mentions_ident_outside_nested_functions(right, target)
-        }
-        ExpressionDesc::Cond(test, consequent, alternate) => {
-            expression_mentions_ident_outside_nested_functions(test, target)
-                || expression_mentions_ident_outside_nested_functions(consequent, target)
-                || expression_mentions_ident_outside_nested_functions(alternate, target)
-        }
-        ExpressionDesc::Call(func, args, _) => {
-            expression_mentions_ident_outside_nested_functions(func, target)
-                || args
-                    .iter()
-                    .any(|arg| expression_mentions_ident_outside_nested_functions(arg, target))
-        }
-        ExpressionDesc::TaggedTemplate(tag, _, values) => {
-            expression_mentions_ident_outside_nested_functions(tag, target)
-                || values
-                    .iter()
-                    .any(|expr| expression_mentions_ident_outside_nested_functions(expr, target))
-        }
-        ExpressionDesc::InterpolatedTemplate { values, .. } => values
-            .iter()
-            .any(|expr| expression_mentions_ident_outside_nested_functions(expr, target)),
-        ExpressionDesc::New(func, Some(args)) => {
-            expression_mentions_ident_outside_nested_functions(func, target)
-                || args
-                    .iter()
-                    .any(|arg| expression_mentions_ident_outside_nested_functions(arg, target))
-        }
-        ExpressionDesc::Fun { .. } => false,
-        ExpressionDesc::Array(items, _) => items
-            .iter()
-            .any(|item| expression_mentions_ident_outside_nested_functions(item, target)),
-        ExpressionDesc::CamlBlock(items, _, _) => items
-            .iter()
-            .any(|item| expression_mentions_ident_outside_nested_functions(item, target)),
-        ExpressionDesc::Object(dup, props) => {
-            dup.as_deref()
-                .is_some_and(|dup| expression_mentions_ident_outside_nested_functions(dup, target))
-                || props.iter().any(|(_, value)| {
-                    expression_mentions_ident_outside_nested_functions(value, target)
-                })
-        }
-    }
-}
-
-fn substitute_export_alias_use_in_statement(
-    stmt: &mut Statement,
+fn expression_mentions_ident_outside_nested_functions(
+    a: &JsArena,
+    expr: Expr,
     target: &Ident,
-    replacement: &Expression,
-) {
-    match &mut stmt.desc {
-        StatementDesc::Block(block) => {
-            for stmt in block {
-                substitute_export_alias_use_in_statement(stmt, target, replacement);
+) -> bool {
+    match a.ek(expr) {
+        ExprKind::Var(ident) => a.ident(ident).same(target),
+        ExprKind::Fun(_) => false,
+        _ => any_child(a, expr, |child| {
+            expression_mentions_ident_outside_nested_functions(a, child, target)
+        }),
+    }
+}
+
+/// Replaces uses of `target` with `replacement`, respecting shadowing by
+/// loop, catch and function parameters.
+struct SubstituteExportAlias {
+    target: Ident,
+    replacement: Expr,
+}
+
+impl Mapper for SubstituteExportAlias {
+    fn statement(&mut self, j: &mut JsArena, s: Stmt) -> Stmt {
+        match j.sk(s) {
+            StmtKind::ForRange(info) if j.ident(j.for_range(info).ident).same(&self.target) => s,
+            StmtKind::ForOf(info) | StmtKind::ForAwaitOf(info)
+                if j.ident(j.for_of(info).ident).same(&self.target) =>
+            {
+                s
             }
-        }
-        StatementDesc::Variable(decl) => {
-            if let Some(value) = &mut decl.value {
-                substitute_export_alias_use_in_expression(value, target, replacement);
-            }
-        }
-        StatementDesc::Exp(expr) | StatementDesc::Return(expr) | StatementDesc::Throw(expr) => {
-            substitute_export_alias_use_in_expression(expr, target, replacement);
-        }
-        StatementDesc::If(cond, then_block, else_block) => {
-            substitute_export_alias_use_in_expression(cond, target, replacement);
-            for stmt in then_block {
-                substitute_export_alias_use_in_statement(stmt, target, replacement);
-            }
-            for stmt in else_block {
-                substitute_export_alias_use_in_statement(stmt, target, replacement);
-            }
-        }
-        StatementDesc::While(_, cond, body) => {
-            substitute_export_alias_use_in_expression(cond, target, replacement);
-            for stmt in body {
-                substitute_export_alias_use_in_statement(stmt, target, replacement);
-            }
-        }
-        StatementDesc::ForRange(_, start, finish, ident, _, body) => {
-            if !ident.same(target) {
-                if let Some(start) = start {
-                    substitute_export_alias_use_in_expression(start, target, replacement);
-                }
-                substitute_export_alias_use_in_expression(finish, target, replacement);
-                for stmt in body {
-                    substitute_export_alias_use_in_statement(stmt, target, replacement);
-                }
-            }
-        }
-        StatementDesc::ForOf(_, ident, iterable, body)
-        | StatementDesc::ForAwaitOf(_, ident, iterable, body) => {
-            if !ident.same(target) {
-                substitute_export_alias_use_in_expression(iterable, target, replacement);
-                for stmt in body {
-                    substitute_export_alias_use_in_statement(stmt, target, replacement);
-                }
-            }
-        }
-        StatementDesc::IntSwitch(test, clauses, default) => {
-            substitute_export_alias_use_in_expression(test, target, replacement);
-            for (_, clause) in clauses {
-                for stmt in &mut clause.body {
-                    substitute_export_alias_use_in_statement(stmt, target, replacement);
-                }
-            }
-            if let Some(default) = default {
-                for stmt in default {
-                    substitute_export_alias_use_in_statement(stmt, target, replacement);
-                }
-            }
-        }
-        StatementDesc::StringSwitch(test, clauses, default) => {
-            substitute_export_alias_use_in_expression(test, target, replacement);
-            for clause in clauses {
-                for stmt in &mut clause.clause.body {
-                    substitute_export_alias_use_in_statement(stmt, target, replacement);
-                }
-            }
-            if let Some(default) = default {
-                for stmt in default {
-                    substitute_export_alias_use_in_statement(stmt, target, replacement);
-                }
-            }
-        }
-        StatementDesc::Try(body, catch, finally) => {
-            for stmt in body {
-                substitute_export_alias_use_in_statement(stmt, target, replacement);
-            }
-            if let Some((catch_ident, block)) = catch {
-                if !catch_ident.same(target) {
-                    for stmt in block {
-                        substitute_export_alias_use_in_statement(stmt, target, replacement);
+            StmtKind::Try(id) => {
+                let info = j.try_info(id);
+                let body = self.block(j, info.body);
+                let catch = info.catch.map(|(ident, block)| {
+                    if j.ident(ident).same(&self.target) {
+                        (ident, block)
+                    } else {
+                        (ident, self.block(j, block))
                     }
+                });
+                let finally = info.finally.map(|b| self.block(j, b));
+                let new = crate::js_ir::arena::TryInfo {
+                    body,
+                    catch,
+                    finally,
+                };
+                if new == info {
+                    return s;
                 }
+                let id = j.try_id(new);
+                j.rekind_stmt(s, StmtKind::Try(id))
             }
-            if let Some(block) = finally {
-                for stmt in block {
-                    substitute_export_alias_use_in_statement(stmt, target, replacement);
-                }
-            }
+            _ => map_statement_children(self, j, s),
         }
-        StatementDesc::Debugger | StatementDesc::Break(_) | StatementDesc::Continue(_) => {}
     }
-}
 
-fn substitute_export_alias_use_in_expression(
-    expr: &mut Expression,
-    target: &Ident,
-    replacement: &Expression,
-) {
-    match &mut expr.desc {
-        ExpressionDesc::Var(VIdent::Id(ident)) if ident.same(target) => {
-            *expr = replacement.clone();
-        }
-        ExpressionDesc::Var(VIdent::Id(_))
-        | ExpressionDesc::Var(VIdent::Qualified(_, _))
-        | ExpressionDesc::Bool(_)
-        | ExpressionDesc::Str(_)
-        | ExpressionDesc::TemplateLiteral(_)
-        | ExpressionDesc::JsonLiteral(_)
-        | ExpressionDesc::Number(_)
-        | ExpressionDesc::Undefined { .. }
-        | ExpressionDesc::Null
-        | ExpressionDesc::RawJsCode(_) => {}
-        ExpressionDesc::Length(inner, _)
-        | ExpressionDesc::IsNullOrUndefined(inner)
-        | ExpressionDesc::Typeof(inner)
-        | ExpressionDesc::JsNot(inner)
-        | ExpressionDesc::JsBnot(inner)
-        | ExpressionDesc::Spread(inner)
-        | ExpressionDesc::RecordRest(_, inner)
-        | ExpressionDesc::Await(inner)
-        | ExpressionDesc::OptionalBlock(inner, _)
-        | ExpressionDesc::StaticIndex(inner, _, _)
-        | ExpressionDesc::CamlBlockTag(inner, _)
-        | ExpressionDesc::New(inner, None) => {
-            substitute_export_alias_use_in_expression(inner, target, replacement);
-        }
-        ExpressionDesc::In(left, right)
-        | ExpressionDesc::StringAppend(left, right)
-        | ExpressionDesc::Seq(left, right)
-        | ExpressionDesc::Bin(_, left, right)
-        | ExpressionDesc::FlatCall(left, right)
-        | ExpressionDesc::StringIndex(left, right)
-        | ExpressionDesc::ArrayIndex(left, right) => {
-            substitute_export_alias_use_in_expression(left, target, replacement);
-            substitute_export_alias_use_in_expression(right, target, replacement);
-        }
-        ExpressionDesc::Cond(test, consequent, alternate) => {
-            substitute_export_alias_use_in_expression(test, target, replacement);
-            substitute_export_alias_use_in_expression(consequent, target, replacement);
-            substitute_export_alias_use_in_expression(alternate, target, replacement);
-        }
-        ExpressionDesc::Call(func, args, _) => {
-            substitute_export_alias_use_in_expression(func, target, replacement);
-            for arg in args {
-                substitute_export_alias_use_in_expression(arg, target, replacement);
+    fn expression(&mut self, j: &mut JsArena, e: Expr) -> Expr {
+        match j.ek(e) {
+            ExprKind::Var(ident) if j.ident(ident).same(&self.target) => self.replacement,
+            ExprKind::Fun(f)
+                if j.ident_slice(j.fun(f).params)
+                    .iter()
+                    .any(|param| param.same(&self.target)) =>
+            {
+                e
             }
-        }
-        ExpressionDesc::TaggedTemplate(tag, _, values) => {
-            substitute_export_alias_use_in_expression(tag, target, replacement);
-            for value in values {
-                substitute_export_alias_use_in_expression(value, target, replacement);
-            }
-        }
-        ExpressionDesc::InterpolatedTemplate { values, .. } => {
-            for value in values {
-                substitute_export_alias_use_in_expression(value, target, replacement);
-            }
-        }
-        ExpressionDesc::New(func, Some(args)) => {
-            substitute_export_alias_use_in_expression(func, target, replacement);
-            for arg in args {
-                substitute_export_alias_use_in_expression(arg, target, replacement);
-            }
-        }
-        ExpressionDesc::Fun { params, body, .. } => {
-            if !params.iter().any(|param| param.same(target)) {
-                for stmt in body {
-                    substitute_export_alias_use_in_statement(stmt, target, replacement);
-                }
-            }
-        }
-        ExpressionDesc::Array(items, _) => {
-            for item in items {
-                substitute_export_alias_use_in_expression(item, target, replacement);
-            }
-        }
-        ExpressionDesc::CamlBlock(items, _, _) => {
-            for item in items {
-                substitute_export_alias_use_in_expression(item, target, replacement);
-            }
-        }
-        ExpressionDesc::Object(dup, props) => {
-            if let Some(dup) = dup {
-                substitute_export_alias_use_in_expression(dup, target, replacement);
-            }
-            for (_, value) in props {
-                substitute_export_alias_use_in_expression(value, target, replacement);
-            }
+            _ => map_expression_children(self, j, e),
         }
     }
 }
 
-pub(crate) fn statement_mentions_ident_anywhere(stmt: &Statement, target: &Ident) -> bool {
-    match &stmt.desc {
-        StatementDesc::Block(block) => block
-            .iter()
-            .any(|stmt| statement_mentions_ident_anywhere(stmt, target)),
-        StatementDesc::Variable(VariableDeclaration { value, .. }) => value
-            .as_ref()
-            .is_some_and(|value| expression_mentions_ident_anywhere(value, target)),
-        StatementDesc::Exp(expr) | StatementDesc::Return(expr) | StatementDesc::Throw(expr) => {
-            expression_mentions_ident_anywhere(expr, target)
+fn list_mentions(a: &JsArena, block: StmtList, target: &Ident) -> bool {
+    a.stmts(block)
+        .iter()
+        .any(|stmt| statement_mentions_ident_anywhere(a, *stmt, target))
+}
+
+pub(crate) fn statement_mentions_ident_anywhere(a: &JsArena, stmt: Stmt, target: &Ident) -> bool {
+    let expr = |e: Expr| expression_mentions_ident_anywhere(a, e, target);
+    let list = |b: StmtList| list_mentions(a, b, target);
+    match a.sk(stmt) {
+        StmtKind::Block(block) => list(block),
+        StmtKind::Variable(v) => a.var(v).value.is_some_and(expr),
+        StmtKind::Exp(e) | StmtKind::Return(e) | StmtKind::Throw(e) => expr(e),
+        StmtKind::If(cond, then_block, else_block) => {
+            expr(cond) || list(then_block) || list(else_block)
         }
-        StatementDesc::If(cond, then_block, else_block) => {
-            expression_mentions_ident_anywhere(cond, target)
-                || then_block
-                    .iter()
-                    .any(|stmt| statement_mentions_ident_anywhere(stmt, target))
-                || else_block
-                    .iter()
-                    .any(|stmt| statement_mentions_ident_anywhere(stmt, target))
+        StmtKind::While(_, cond, body) => expr(cond) || list(body),
+        StmtKind::ForRange(info) => {
+            let info = a.for_range(info);
+            !a.ident(info.ident).same(target)
+                && (info.init.is_some_and(expr) || expr(info.end) || list(info.body))
         }
-        StatementDesc::While(_, cond, body) => {
-            expression_mentions_ident_anywhere(cond, target)
-                || body
-                    .iter()
-                    .any(|stmt| statement_mentions_ident_anywhere(stmt, target))
+        StmtKind::ForOf(info) | StmtKind::ForAwaitOf(info) => {
+            let info = a.for_of(info);
+            !a.ident(info.ident).same(target) && (expr(info.iterable) || list(info.body))
         }
-        StatementDesc::ForRange(_, start, finish, ident, _, body) => {
-            !ident.same(target)
-                && (start
-                    .as_ref()
-                    .is_some_and(|start| expression_mentions_ident_anywhere(start, target))
-                    || expression_mentions_ident_anywhere(finish, target)
-                    || body
-                        .iter()
-                        .any(|stmt| statement_mentions_ident_anywhere(stmt, target)))
+        StmtKind::IntSwitch(test, info) => {
+            let info = a.int_switch(info);
+            expr(test)
+                || info.clauses.iter().any(|(_, clause)| list(clause.body))
+                || info.default.is_some_and(list)
         }
-        StatementDesc::ForOf(_, ident, iterable, body)
-        | StatementDesc::ForAwaitOf(_, ident, iterable, body) => {
-            !ident.same(target)
-                && (expression_mentions_ident_anywhere(iterable, target)
-                    || body
-                        .iter()
-                        .any(|stmt| statement_mentions_ident_anywhere(stmt, target)))
+        StmtKind::StringSwitch(test, info) => {
+            let info = a.string_switch(info);
+            expr(test)
+                || info.clauses.iter().any(|clause| list(clause.clause.body))
+                || info.default.is_some_and(list)
         }
-        StatementDesc::IntSwitch(test, clauses, default) => {
-            expression_mentions_ident_anywhere(test, target)
-                || clauses.iter().any(|(_, clause)| {
-                    clause
-                        .body
-                        .iter()
-                        .any(|stmt| statement_mentions_ident_anywhere(stmt, target))
-                })
-                || default.as_ref().is_some_and(|block| {
-                    block
-                        .iter()
-                        .any(|stmt| statement_mentions_ident_anywhere(stmt, target))
-                })
+        StmtKind::Try(info) => {
+            let info = a.try_info(info);
+            list(info.body)
+                || info
+                    .catch
+                    .is_some_and(|(ident, block)| !a.ident(ident).same(target) && list(block))
+                || info.finally.is_some_and(list)
         }
-        StatementDesc::StringSwitch(test, clauses, default) => {
-            expression_mentions_ident_anywhere(test, target)
-                || clauses.iter().any(|clause| {
-                    clause
-                        .clause
-                        .body
-                        .iter()
-                        .any(|stmt| statement_mentions_ident_anywhere(stmt, target))
-                })
-                || default.as_ref().is_some_and(|block| {
-                    block
-                        .iter()
-                        .any(|stmt| statement_mentions_ident_anywhere(stmt, target))
-                })
-        }
-        StatementDesc::Try(body, catch, finally) => {
-            body.iter()
-                .any(|stmt| statement_mentions_ident_anywhere(stmt, target))
-                || catch.as_ref().is_some_and(|(ident, block)| {
-                    !ident.same(target)
-                        && block
-                            .iter()
-                            .any(|stmt| statement_mentions_ident_anywhere(stmt, target))
-                })
-                || finally.as_ref().is_some_and(|block| {
-                    block
-                        .iter()
-                        .any(|stmt| statement_mentions_ident_anywhere(stmt, target))
-                })
-        }
-        StatementDesc::Debugger | StatementDesc::Break(_) | StatementDesc::Continue(_) => false,
+        StmtKind::Debugger | StmtKind::Break(_) | StmtKind::Continue(_) => false,
     }
 }
 
-fn expression_mentions_ident_anywhere(expr: &Expression, target: &Ident) -> bool {
-    match &expr.desc {
-        ExpressionDesc::Var(VIdent::Id(ident)) => ident.same(target),
-        ExpressionDesc::Var(VIdent::Qualified(_, _))
-        | ExpressionDesc::Bool(_)
-        | ExpressionDesc::Str(_)
-        | ExpressionDesc::TemplateLiteral(_)
-        | ExpressionDesc::JsonLiteral(_)
-        | ExpressionDesc::Number(_)
-        | ExpressionDesc::Undefined { .. }
-        | ExpressionDesc::Null
-        | ExpressionDesc::RawJsCode(_) => false,
-        ExpressionDesc::Length(inner, _)
-        | ExpressionDesc::IsNullOrUndefined(inner)
-        | ExpressionDesc::Typeof(inner)
-        | ExpressionDesc::JsNot(inner)
-        | ExpressionDesc::JsBnot(inner)
-        | ExpressionDesc::Spread(inner)
-        | ExpressionDesc::RecordRest(_, inner)
-        | ExpressionDesc::Await(inner)
-        | ExpressionDesc::OptionalBlock(inner, _)
-        | ExpressionDesc::StaticIndex(inner, _, _)
-        | ExpressionDesc::CamlBlockTag(inner, _)
-        | ExpressionDesc::New(inner, None) => expression_mentions_ident_anywhere(inner, target),
-        ExpressionDesc::In(left, right)
-        | ExpressionDesc::StringAppend(left, right)
-        | ExpressionDesc::Seq(left, right)
-        | ExpressionDesc::Bin(_, left, right)
-        | ExpressionDesc::FlatCall(left, right)
-        | ExpressionDesc::StringIndex(left, right)
-        | ExpressionDesc::ArrayIndex(left, right) => {
-            expression_mentions_ident_anywhere(left, target)
-                || expression_mentions_ident_anywhere(right, target)
+fn expression_mentions_ident_anywhere(a: &JsArena, expr: Expr, target: &Ident) -> bool {
+    match a.ek(expr) {
+        ExprKind::Var(ident) => a.ident(ident).same(target),
+        ExprKind::Fun(f) => {
+            let info = a.fun(f);
+            !a.ident_slice(info.params)
+                .iter()
+                .any(|param| param.same(target))
+                && list_mentions(a, info.body, target)
         }
-        ExpressionDesc::Cond(test, consequent, alternate) => {
-            expression_mentions_ident_anywhere(test, target)
-                || expression_mentions_ident_anywhere(consequent, target)
-                || expression_mentions_ident_anywhere(alternate, target)
-        }
-        ExpressionDesc::Call(func, args, _) => {
-            expression_mentions_ident_anywhere(func, target)
-                || args
-                    .iter()
-                    .any(|arg| expression_mentions_ident_anywhere(arg, target))
-        }
-        ExpressionDesc::TaggedTemplate(tag, _, values) => {
-            expression_mentions_ident_anywhere(tag, target)
-                || values
-                    .iter()
-                    .any(|expr| expression_mentions_ident_anywhere(expr, target))
-        }
-        ExpressionDesc::InterpolatedTemplate { values, .. } => values
-            .iter()
-            .any(|expr| expression_mentions_ident_anywhere(expr, target)),
-        ExpressionDesc::New(func, Some(args)) => {
-            expression_mentions_ident_anywhere(func, target)
-                || args
-                    .iter()
-                    .any(|arg| expression_mentions_ident_anywhere(arg, target))
-        }
-        ExpressionDesc::Fun { params, body, .. } => {
-            !params.iter().any(|param| param.same(target))
-                && body
-                    .iter()
-                    .any(|stmt| statement_mentions_ident_anywhere(stmt, target))
-        }
-        ExpressionDesc::Array(items, _) => items
-            .iter()
-            .any(|item| expression_mentions_ident_anywhere(item, target)),
-        ExpressionDesc::CamlBlock(items, _, _) => items
-            .iter()
-            .any(|item| expression_mentions_ident_anywhere(item, target)),
-        ExpressionDesc::Object(dup, props) => {
-            dup.as_deref()
-                .is_some_and(|dup| expression_mentions_ident_anywhere(dup, target))
-                || props
-                    .iter()
-                    .any(|(_, value)| expression_mentions_ident_anywhere(value, target))
-        }
+        _ => any_child(a, expr, |child| {
+            expression_mentions_ident_anywhere(a, child, target)
+        }),
     }
 }
 
-fn shake_program(mut program: Program) -> Program {
+fn shake_program(program: &mut Program) {
     // OCaml flattens the JS block once, computes the required identifiers over
     // that same list, then folds it to keep live/effectful statements
-    // (`compiler/core/js_shake.ml:62-104`). This pass owns the Rust `Program`,
-    // so moving statements into that flattened list is functionally equivalent
-    // to OCaml's shared-list traversal and avoids cloning the full JS tree.
-    program.block = shake_block_owned(std::mem::take(&mut program.block), &program.export_set);
-    program
+    // (`compiler/core/js_shake.ml:62-104`).
+    let a = &program.arena;
+    let block = flatten_toplevel_block(a, &program.block);
+    let required = fixed_point_required_idents(a, &block, &program.export_set);
+
+    program.block = block
+        .into_iter()
+        .filter(|stmt| match a.sk(*stmt) {
+            StmtKind::Variable(v) => {
+                let decl = a.var(v);
+                required.contains(&decl.ident)
+                    || decl
+                        .value
+                        .is_some_and(|expr| !js_expr_no_side_effects(a, expr))
+            }
+            _ => !js_statement_no_side_effects(a, *stmt),
+        })
+        .collect();
 }
 
-fn shake_block_owned(block: Block, export_set: &HashSet<Ident>) -> Block {
-    let block = flatten_toplevel_block_owned(block);
-    let required = fixed_point_required_idents(&block, export_set);
+/// `Js_analyzer.rev_toplevel_flatten` (`compiler/core/js_shake.ml:64`):
+/// splices nested blocks and drops dead declarations.
+pub(crate) fn flatten_toplevel_block(a: &JsArena, block: &[Stmt]) -> Vec<Stmt> {
+    let mut flattened = Vec::with_capacity(block.len());
+    flatten_toplevel_block_into(a, block, &mut flattened);
+    flattened
+}
 
-    block
-        .into_iter()
-        .filter(|stmt| match &stmt.desc {
-            StatementDesc::Variable(VariableDeclaration { ident, value, .. }) => {
-                if required.contains(ident) {
-                    true
-                } else {
-                    value
-                        .as_ref()
-                        .is_some_and(|expr| !js_expr_no_side_effects(expr))
+fn flatten_toplevel_block_into(a: &JsArena, block: &[Stmt], flattened: &mut Vec<Stmt>) {
+    for stmt in block {
+        match a.sk(*stmt) {
+            StmtKind::Variable(v) => {
+                let decl = a.var(v);
+                match decl.ident_info.used_stats {
+                    UsedStats::DeadPure => {}
+                    UsedStats::DeadNonPure if decl.value.is_none() => {}
+                    _ => flattened.push(*stmt),
                 }
             }
-            _ => !js_statement_no_side_effects(stmt),
-        })
-        .collect()
-}
-
-pub(crate) fn flatten_toplevel_block_owned(block: Block) -> Block {
-    // Owned flattened traversal: same filtering as OCaml's
-    // `Js_analyzer.rev_toplevel_flatten` use in `compiler/core/js_shake.ml:64`,
-    // but it moves `Statement`s instead of cloning them because `shake_program`
-    // consumes the post-pass `Program`.
-    let mut flattened = Vec::with_capacity(block.len());
-    flatten_toplevel_block_owned_into(block, &mut flattened);
-    flattened
-}
-
-pub(crate) fn flatten_toplevel_block_refs(block: &Block) -> Vec<&Statement> {
-    // Borrowed flattened traversal. OCaml flattens once and
-    // then folds the same list (`compiler/core/js_shake.ml:63-104`); callers
-    // that only inspect exports should not pay for cloning a JS block.
-    let mut flattened = Vec::with_capacity(block.len());
-    flatten_toplevel_block_refs_into(block, &mut flattened);
-    flattened
-}
-
-fn flatten_toplevel_block_owned_into(block: Block, flattened: &mut Block) {
-    for stmt in block {
-        let Statement {
-            source_loc,
-            desc,
-            comment,
-        } = stmt;
-        match desc {
-            StatementDesc::Variable(VariableDeclaration {
-                ident_info:
-                    IdentInfo {
-                        used_stats: UsedStats::DeadPure,
-                    },
-                ..
-            })
-            | StatementDesc::Variable(VariableDeclaration {
-                ident_info:
-                    IdentInfo {
-                        used_stats: UsedStats::DeadNonPure,
-                    },
-                value: None,
-                ..
-            }) => {}
-            StatementDesc::Block(inner) => flatten_toplevel_block_owned_into(inner, flattened),
-            desc => flattened.push(Statement {
-                source_loc,
-                desc,
-                comment,
-            }),
-        }
-    }
-}
-
-fn flatten_toplevel_block_refs_into<'a>(block: &'a Block, flattened: &mut Vec<&'a Statement>) {
-    for stmt in block {
-        match &stmt.desc {
-            StatementDesc::Variable(VariableDeclaration {
-                ident_info:
-                    IdentInfo {
-                        used_stats: UsedStats::DeadPure,
-                    },
-                ..
-            })
-            | StatementDesc::Variable(VariableDeclaration {
-                ident_info:
-                    IdentInfo {
-                        used_stats: UsedStats::DeadNonPure,
-                    },
-                value: None,
-                ..
-            }) => {}
-            StatementDesc::Block(inner) => flatten_toplevel_block_refs_into(inner, flattened),
-            _ => flattened.push(stmt),
+            StmtKind::Block(inner) => flatten_toplevel_block_into(a, a.stmts(inner), flattened),
+            _ => flattened.push(*stmt),
         }
     }
 }
@@ -1566,23 +846,29 @@ enum RequiredIdentsEntry {
     Effect(Option<HashSet<Ident>>),
 }
 
-fn fixed_point_required_idents(block: &Block, export_set: &HashSet<Ident>) -> HashSet<Ident> {
+fn fixed_point_required_idents(
+    a: &JsArena,
+    block: &[Stmt],
+    export_set: &HashSet<Ident>,
+) -> HashSet<Ident> {
     let entries: Vec<RequiredIdentsEntry> = block
         .iter()
-        .map(|stmt| match &stmt.desc {
-            StatementDesc::Variable(VariableDeclaration { ident, value, .. }) => {
+        .map(|stmt| match a.sk(*stmt) {
+            StmtKind::Variable(v) => {
+                let decl = a.var(v);
                 RequiredIdentsEntry::Variable {
-                    ident: *ident,
-                    value: value.as_ref().map(|value| {
+                    ident: decl.ident,
+                    value: decl.value.map(|value| {
                         (
-                            !js_expr_no_side_effects(value),
-                            free_variables_of_expression(value),
+                            !js_expr_no_side_effects(a, value),
+                            free_variables_of_expression(a, value),
                         )
                     }),
                 }
             }
             _ => RequiredIdentsEntry::Effect(
-                (!js_statement_no_side_effects(stmt)).then(|| free_variables_of_statement(stmt)),
+                (!js_statement_no_side_effects(a, *stmt))
+                    .then(|| free_variables_of_statement(a, *stmt)),
             ),
         })
         .collect();
@@ -1651,14 +937,6 @@ impl JsIdentStats {
         }
     }
 
-    fn add_defined_ident(&mut self, ident: &Ident) {
-        self.defined_idents.insert(*ident);
-    }
-
-    fn extend_free_idents(&mut self, other: HashSet<Ident>) {
-        self.used_idents.extend(other);
-    }
-
     fn free_variables(mut self) -> HashSet<Ident> {
         self.used_idents
             .retain(|ident| !self.defined_idents.contains(ident));
@@ -1666,246 +944,184 @@ impl JsIdentStats {
     }
 }
 
-fn free_variables_of_statement(stmt: &Statement) -> HashSet<Ident> {
+fn free_variables_of_statement(a: &JsArena, stmt: Stmt) -> HashSet<Ident> {
     let mut stats = JsIdentStats::default();
-    collect_statement_idents(stmt, &mut stats);
+    collect_statement_idents(a, stmt, &mut stats);
     stats.free_variables()
 }
 
-fn free_variables_of_expression(expr: &Expression) -> HashSet<Ident> {
+fn free_variables_of_expression(a: &JsArena, expr: Expr) -> HashSet<Ident> {
     let mut stats = JsIdentStats::default();
-    collect_expression_idents(expr, &mut stats);
+    collect_expression_idents(a, expr, &mut stats);
     stats.free_variables()
 }
 
 fn free_variables_of_block_with_defined(
-    block: &Block,
+    a: &JsArena,
+    block: StmtList,
     defined: impl IntoIterator<Item = Ident>,
 ) -> HashSet<Ident> {
     let mut stats = JsIdentStats::with_defined(defined);
-    collect_block_idents(block, &mut stats);
+    collect_block_idents(a, block, &mut stats);
     stats.free_variables()
 }
 
-fn collect_block_idents(block: &Block, stats: &mut JsIdentStats) {
-    for stmt in block {
-        collect_statement_idents(stmt, stats);
+fn collect_block_idents(a: &JsArena, block: StmtList, stats: &mut JsIdentStats) {
+    for stmt in a.stmts(block) {
+        collect_statement_idents(a, *stmt, stats);
     }
 }
 
-fn collect_statement_idents(stmt: &Statement, stats: &mut JsIdentStats) {
-    match &stmt.desc {
-        StatementDesc::Block(block) => collect_block_idents(block, stats),
-        StatementDesc::Variable(VariableDeclaration { ident, value, .. }) => {
-            stats.add_defined_ident(ident);
-            if let Some(value) = value {
-                collect_expression_idents(value, stats);
+fn collect_statement_idents(a: &JsArena, stmt: Stmt, stats: &mut JsIdentStats) {
+    match a.sk(stmt) {
+        StmtKind::Block(block) => collect_block_idents(a, block, stats),
+        StmtKind::Variable(v) => {
+            let decl = a.var(v);
+            stats.defined_idents.insert(decl.ident);
+            if let Some(value) = decl.value {
+                collect_expression_idents(a, value, stats);
             }
         }
-        StatementDesc::Exp(expr) | StatementDesc::Return(expr) | StatementDesc::Throw(expr) => {
-            collect_expression_idents(expr, stats);
+        StmtKind::Exp(e) | StmtKind::Return(e) | StmtKind::Throw(e) => {
+            collect_expression_idents(a, e, stats)
         }
-        StatementDesc::If(cond, then_block, else_block) => {
-            collect_expression_idents(cond, stats);
-            collect_block_idents(then_block, stats);
-            collect_block_idents(else_block, stats);
+        StmtKind::If(cond, then_block, else_block) => {
+            collect_expression_idents(a, cond, stats);
+            collect_block_idents(a, then_block, stats);
+            collect_block_idents(a, else_block, stats);
         }
-        StatementDesc::While(_, cond, body) => {
-            collect_expression_idents(cond, stats);
-            collect_block_idents(body, stats);
+        StmtKind::While(_, cond, body) => {
+            collect_expression_idents(a, cond, stats);
+            collect_block_idents(a, body, stats);
         }
-        StatementDesc::ForRange(_, start, finish, loop_ident, _, body) => {
-            if let Some(start) = start {
-                collect_expression_idents(start, stats);
+        StmtKind::ForRange(info) => {
+            let info = a.for_range(info);
+            if let Some(init) = info.init {
+                collect_expression_idents(a, init, stats);
             }
-            collect_expression_idents(finish, stats);
-            stats.extend_free_idents(free_variables_of_block_with_defined(
-                body,
-                std::iter::once(*loop_ident),
-            ));
-        }
-        StatementDesc::ForOf(_, loop_ident, iterable, body)
-        | StatementDesc::ForAwaitOf(_, loop_ident, iterable, body) => {
-            collect_expression_idents(iterable, stats);
-            stats.extend_free_idents(free_variables_of_block_with_defined(
-                body,
-                std::iter::once(*loop_ident),
-            ));
-        }
-        StatementDesc::IntSwitch(test, clauses, default) => {
-            collect_expression_idents(test, stats);
-            for (_, clause) in clauses {
-                collect_block_idents(&clause.body, stats);
-            }
-            if let Some(default) = default {
-                collect_block_idents(default, stats);
-            }
-        }
-        StatementDesc::StringSwitch(test, clauses, default) => {
-            collect_expression_idents(test, stats);
-            for clause in clauses {
-                collect_block_idents(&clause.clause.body, stats);
-            }
-            if let Some(default) = default {
-                collect_block_idents(default, stats);
-            }
-        }
-        StatementDesc::Try(body, catch, finally) => {
-            collect_block_idents(body, stats);
-            if let Some((catch_ident, catch_block)) = catch {
-                stats.extend_free_idents(free_variables_of_block_with_defined(
-                    catch_block,
-                    std::iter::once(*catch_ident),
+            collect_expression_idents(a, info.end, stats);
+            stats
+                .used_idents
+                .extend(free_variables_of_block_with_defined(
+                    a,
+                    info.body,
+                    std::iter::once(a.ident(info.ident)),
                 ));
+        }
+        StmtKind::ForOf(info) | StmtKind::ForAwaitOf(info) => {
+            let info = a.for_of(info);
+            collect_expression_idents(a, info.iterable, stats);
+            stats
+                .used_idents
+                .extend(free_variables_of_block_with_defined(
+                    a,
+                    info.body,
+                    std::iter::once(a.ident(info.ident)),
+                ));
+        }
+        StmtKind::IntSwitch(test, info) => {
+            collect_expression_idents(a, test, stats);
+            let info = a.int_switch(info);
+            for (_, clause) in &info.clauses {
+                collect_block_idents(a, clause.body, stats);
             }
-            if let Some(finally) = finally {
-                collect_block_idents(finally, stats);
+            if let Some(default) = info.default {
+                collect_block_idents(a, default, stats);
             }
         }
-        StatementDesc::Debugger | StatementDesc::Break(_) | StatementDesc::Continue(_) => {}
+        StmtKind::StringSwitch(test, info) => {
+            collect_expression_idents(a, test, stats);
+            let info = a.string_switch(info);
+            for clause in &info.clauses {
+                collect_block_idents(a, clause.clause.body, stats);
+            }
+            if let Some(default) = info.default {
+                collect_block_idents(a, default, stats);
+            }
+        }
+        StmtKind::Try(info) => {
+            let info = a.try_info(info);
+            collect_block_idents(a, info.body, stats);
+            if let Some((catch_ident, catch_block)) = info.catch {
+                stats
+                    .used_idents
+                    .extend(free_variables_of_block_with_defined(
+                        a,
+                        catch_block,
+                        std::iter::once(a.ident(catch_ident)),
+                    ));
+            }
+            if let Some(finally) = info.finally {
+                collect_block_idents(a, finally, stats);
+            }
+        }
+        StmtKind::Debugger | StmtKind::Break(_) | StmtKind::Continue(_) => {}
     }
 }
 
-fn collect_expression_idents(expr: &Expression, stats: &mut JsIdentStats) {
-    match &expr.desc {
-        ExpressionDesc::Var(crate::js_ir::VIdent::Id(ident)) => stats.add_used_ident(ident),
-        ExpressionDesc::Var(crate::js_ir::VIdent::Qualified(_, _))
-        | ExpressionDesc::Undefined { .. }
-        | ExpressionDesc::Null
-        | ExpressionDesc::Bool(_)
-        | ExpressionDesc::Str(_)
-        | ExpressionDesc::TemplateLiteral(_)
-        | ExpressionDesc::JsonLiteral(_)
-        | ExpressionDesc::RawJsCode(_)
-        | ExpressionDesc::Number(_) => {}
-        ExpressionDesc::Length(inner, _)
-        | ExpressionDesc::IsNullOrUndefined(inner)
-        | ExpressionDesc::Typeof(inner)
-        | ExpressionDesc::JsNot(inner)
-        | ExpressionDesc::JsBnot(inner)
-        | ExpressionDesc::CamlBlockTag(inner, _)
-        | ExpressionDesc::OptionalBlock(inner, _)
-        | ExpressionDesc::Await(inner)
-        | ExpressionDesc::Spread(inner)
-        | ExpressionDesc::RecordRest(_, inner) => collect_expression_idents(inner, stats),
-        ExpressionDesc::StringAppend(left, right)
-        | ExpressionDesc::In(left, right)
-        | ExpressionDesc::Seq(left, right)
-        | ExpressionDesc::Bin(_, left, right)
-        | ExpressionDesc::FlatCall(left, right)
-        | ExpressionDesc::StringIndex(left, right)
-        | ExpressionDesc::ArrayIndex(left, right) => {
-            collect_expression_idents(left, stats);
-            collect_expression_idents(right, stats);
+fn collect_expression_idents(a: &JsArena, expr: Expr, stats: &mut JsIdentStats) {
+    match a.ek(expr) {
+        ExprKind::Var(ident) => stats.add_used_ident(&a.ident(ident)),
+        ExprKind::Fun(f) => {
+            let info = a.fun(f);
+            stats
+                .used_idents
+                .extend(free_variables_of_block_with_defined(
+                    a,
+                    info.body,
+                    a.ident_slice(info.params).iter().copied(),
+                ));
         }
-        ExpressionDesc::Cond(test, consequent, alternate) => {
-            collect_expression_idents(test, stats);
-            collect_expression_idents(consequent, stats);
-            collect_expression_idents(alternate, stats);
-        }
-        ExpressionDesc::Call(func, args, _) => {
-            collect_expression_idents(func, stats);
-            for arg in args {
-                collect_expression_idents(arg, stats);
-            }
-        }
-        ExpressionDesc::TaggedTemplate(tag, _, values) => {
-            collect_expression_idents(tag, stats);
-            for value in values {
-                collect_expression_idents(value, stats);
-            }
-        }
-        ExpressionDesc::InterpolatedTemplate { values, .. } => {
-            for value in values {
-                collect_expression_idents(value, stats);
-            }
-        }
-        ExpressionDesc::StaticIndex(target, _, _) => collect_expression_idents(target, stats),
-        ExpressionDesc::New(target, args) => {
-            collect_expression_idents(target, stats);
-            if let Some(args) = args {
-                for arg in args {
-                    collect_expression_idents(arg, stats);
-                }
-            }
-        }
-        ExpressionDesc::Fun { params, body, .. } => {
-            stats.extend_free_idents(free_variables_of_block_with_defined(
-                body,
-                params.iter().cloned(),
-            ));
-        }
-        ExpressionDesc::Array(items, _) => {
-            for item in items {
-                collect_expression_idents(item, stats);
-            }
-        }
-        ExpressionDesc::CamlBlock(items, _, _) => {
-            for item in items {
-                collect_expression_idents(item, stats);
-            }
-        }
-        ExpressionDesc::Object(dup, props) => {
-            if let Some(dup) = dup {
-                collect_expression_idents(dup, stats);
-            }
-            for (_, value) in props {
-                collect_expression_idents(value, stats);
-            }
-        }
+        _ => each_child(a, expr, |child| collect_expression_idents(a, child, stats)),
     }
 }
 
-fn js_block_no_side_effects(block: &Block) -> bool {
-    block.iter().all(js_statement_no_side_effects)
+fn js_block_no_side_effects(a: &JsArena, block: StmtList) -> bool {
+    a.stmts(block)
+        .iter()
+        .all(|stmt| js_statement_no_side_effects(a, *stmt))
 }
 
-fn js_statement_no_side_effects(stmt: &Statement) -> bool {
-    match &stmt.desc {
-        StatementDesc::Throw(_)
-        | StatementDesc::Debugger
-        | StatementDesc::Break(_)
-        | StatementDesc::Variable(_)
-        | StatementDesc::Continue(_) => false,
-        StatementDesc::Exp(expr) | StatementDesc::Return(expr) => js_expr_no_side_effects(expr),
-        StatementDesc::Block(block) => js_block_no_side_effects(block),
-        StatementDesc::If(cond, then_block, else_block) => {
-            js_expr_no_side_effects(cond)
-                && js_block_no_side_effects(then_block)
-                && js_block_no_side_effects(else_block)
+fn js_statement_no_side_effects(a: &JsArena, stmt: Stmt) -> bool {
+    let expr = |e: Expr| js_expr_no_side_effects(a, e);
+    let list = |b: StmtList| js_block_no_side_effects(a, b);
+    match a.sk(stmt) {
+        StmtKind::Throw(_)
+        | StmtKind::Debugger
+        | StmtKind::Break(_)
+        | StmtKind::Variable(_)
+        | StmtKind::Continue(_) => false,
+        StmtKind::Exp(e) | StmtKind::Return(e) => expr(e),
+        StmtKind::Block(block) => list(block),
+        StmtKind::If(cond, then_block, else_block) => {
+            expr(cond) && list(then_block) && list(else_block)
         }
-        StatementDesc::While(_, cond, body) => {
-            js_expr_no_side_effects(cond) && js_block_no_side_effects(body)
-        }
-        StatementDesc::ForRange(_, start, finish, _, _, body) => {
-            start.as_deref().is_none_or(js_expr_no_side_effects)
-                && js_expr_no_side_effects(finish)
-                && js_block_no_side_effects(body)
+        StmtKind::While(_, cond, body) => expr(cond) && list(body),
+        StmtKind::ForRange(info) => {
+            let info = a.for_range(info);
+            info.init.is_none_or(expr) && expr(info.end) && list(info.body)
         }
         // OCaml `js_analyzer.ml` `no_side_effect_obj`: `ForOf` / `ForAwaitOf`
         // raise Not_found, i.e. always considered side-effecting (the iterator
         // protocol can run arbitrary user code).
-        StatementDesc::ForOf(_, _, _, _) | StatementDesc::ForAwaitOf(_, _, _, _) => false,
-        StatementDesc::IntSwitch(test, clauses, default) => {
-            js_expr_no_side_effects(test)
-                && clauses
-                    .iter()
-                    .all(|(_, clause)| js_block_no_side_effects(&clause.body))
-                && default.as_ref().is_none_or(js_block_no_side_effects)
+        StmtKind::ForOf(_) | StmtKind::ForAwaitOf(_) => false,
+        StmtKind::IntSwitch(test, info) => {
+            let info = a.int_switch(info);
+            expr(test)
+                && info.clauses.iter().all(|(_, clause)| list(clause.body))
+                && info.default.is_none_or(list)
         }
-        StatementDesc::StringSwitch(test, clauses, default) => {
-            js_expr_no_side_effects(test)
-                && clauses
-                    .iter()
-                    .all(|clause| js_block_no_side_effects(&clause.clause.body))
-                && default.as_ref().is_none_or(js_block_no_side_effects)
+        StmtKind::StringSwitch(test, info) => {
+            let info = a.string_switch(info);
+            expr(test)
+                && info.clauses.iter().all(|clause| list(clause.clause.body))
+                && info.default.is_none_or(list)
         }
-        StatementDesc::Try(body, catch, finally) => {
-            js_block_no_side_effects(body)
-                && catch
-                    .as_ref()
-                    .is_none_or(|(_, block)| js_block_no_side_effects(block))
-                && finally.as_ref().is_none_or(js_block_no_side_effects)
+        StmtKind::Try(info) => {
+            let info = a.try_info(info);
+            list(info.body)
+                && info.catch.is_none_or(|(_, block)| list(block))
+                && info.finally.is_none_or(list)
         }
     }
 }

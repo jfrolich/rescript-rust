@@ -2,6 +2,7 @@
 
 use crate::gentype::gen_type_common::{Dep, dep_to_string};
 use crate::types::Path;
+use crate::types::path::PathView;
 
 pub fn handle_namespace(name: &str, dep: &Dep) -> Dep {
     match dep {
@@ -21,8 +22,8 @@ pub fn from_path1(
     let stripped_path = crate::gentype::type_env::strip_current_module_prefix(path, type_env);
     let path = stripped_path.as_ref().unwrap_or(path);
 
-    match path {
-        Path::Pident(id) => {
+    match path.view() {
+        PathView::Pident(id) => {
             let name = id.name();
             match crate::gentype::type_env::lookup(name, type_env) {
                 None => (type_env.clone(), Dep::External(name.to_string())),
@@ -44,10 +45,10 @@ pub fn from_path1(
                 }
             }
         }
-        Path::Pdot(p, s, _pos) if matches!(p.as_ref(), Path::Pident(id) if crate::gentype::gen_type_common::scoped_package::is_generated_module(id, config)) =>
+        PathView::Pdot(p, s, _pos) if matches!(p.view(), PathView::Pident(id) if crate::gentype::gen_type_common::scoped_package::is_generated_module(id, config)) =>
         {
-            let generated_module = match p.as_ref() {
-                Path::Pident(id) => id,
+            let generated_module = match p.view() {
+                PathView::Pident(id) => id,
                 _ => unreachable!(),
             };
             (
@@ -60,14 +61,14 @@ pub fn from_path1(
                 ),
             )
         }
-        Path::Pdot(p, s, _pos) => {
+        PathView::Pdot(p, s, _pos) => {
             let (type_env_from_p, dep) = from_path1(config, type_env, p);
             match crate::gentype::type_env::expand_alias_to_external_module(s, &type_env_from_p) {
                 Some(dep) => (type_env_from_p, dep),
                 None => (type_env_from_p, Dep::Dot(Box::new(dep), s.to_string())),
             }
         }
-        Path::Papply(_, _) => (
+        PathView::Papply(_, _) => (
             type_env.clone(),
             Dep::Internal(crate::gentype::resolved_name::from_string(
                 "__Papply_unsupported_genType__",

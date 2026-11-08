@@ -4,17 +4,15 @@
 //! import declarations, export blocks, purity metadata, and the module wrapper.
 //! This corresponds to OCaml's `js_dump_program.ml`.
 
+use super::arena::{
+    ExprKind, JsArena, JsDepsProgram as DepsProgram, JsProgram as Program, Stmt, StmtKind,
+};
 use super::op::Kind;
 use super::printer::{JsPrinter, js_export_name};
 use super::source_map::{SourceMapBuilder, SourceMapMode, inline_comment, linked_comment};
-use super::{
-    Block, DepsProgram, Expression, ExpressionDesc, ModuleFormat, ModulePathResolver, Program,
-    Statement, StatementDesc,
-};
+use super::{ModuleFormat, ModulePathResolver};
 use crate::binary_ast::ppx::{JsStmtClassification, classify_js_stmt};
 use crate::ident::Ident;
-use crate::intern::StrIdx;
-use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -67,7 +65,8 @@ impl JsPrinter<'_> {
             self.write("'use strict';");
             self.newline();
         }
-        let (file_comments, block_start) = split_leading_file_comments(&program.program.block);
+        let (file_comments, block_start) =
+            split_leading_file_comments(&program.program.arena, &program.program.block);
         if file_comments.is_empty() {
             self.at_least_two_lines();
         } else {
@@ -236,19 +235,15 @@ fn deps_program_is_empty(program: &DepsProgram) -> bool {
         && program.program.name_reservations.is_empty()
 }
 
-fn split_leading_file_comments(block: &Block) -> (Vec<&str>, usize) {
+fn split_leading_file_comments<'a>(a: &'a JsArena, block: &[Stmt]) -> (Vec<&'a str>, usize) {
     let mut index = 0;
     let mut comments = Vec::new();
 
-    while let Some(Statement {
-        desc:
-            StatementDesc::Exp(Expression {
-                desc: ExpressionDesc::RawJsCode(info),
-                ..
-            }),
-        ..
-    }) = block.get(index)
+    while let Some(stmt) = block.get(index)
+        && let StmtKind::Exp(expr) = a.sk(*stmt)
+        && let ExprKind::RawJsCode(info) = a.ek(expr)
     {
+        let info = a.raw(info);
         if !info.is_stmt
             || !matches!(
                 classify_js_stmt(&info.code),
@@ -265,14 +260,15 @@ fn split_leading_file_comments(block: &Block) -> (Vec<&str>, usize) {
 }
 
 /// Print a program to a string
-pub fn print_program(program: &Program) -> String {
-    let mut printer = JsPrinter::with_capacity(estimated_block_output_capacity(
-        program.block.len(),
-        program.exports.len(),
-        0,
-        0,
-        true,
-    ));
+pub fn print_program(program: &impl AsDepsProgram) -> String {
+    program.with_deps_program(|program| print_arena_program(&program.program))
+}
+
+fn print_arena_program(program: &Program) -> String {
+    let mut printer = JsPrinter::with_capacity(
+        &program.arena,
+        estimated_block_output_capacity(program.block.len(), program.exports.len(), 0, 0, true),
+    );
     printer.print_program(program);
     printer.into_output()
 }
@@ -311,14 +307,14 @@ fn estimated_deps_program_output_capacity(
 
 /// Print a module-level program to a string.
 pub fn print_deps_program(
-    program: &DepsProgram,
+    program: &impl AsDepsProgram,
     module_path_resolver: Option<&ModulePathResolver>,
 ) -> String {
     print_deps_program_with_directives(program, module_path_resolver, &[], false, false)
 }
 
 pub fn print_deps_program_with_directives(
-    program: &DepsProgram,
+    program: &impl AsDepsProgram,
     module_path_resolver: Option<&ModulePathResolver>,
     directives: &[String],
     debug: bool,
@@ -335,28 +331,64 @@ pub fn print_deps_program_with_directives(
 }
 
 pub fn print_deps_program_with_directives_and_options(
-    program: &DepsProgram,
+    program: &impl AsDepsProgram,
     module_path_resolver: Option<&ModulePathResolver>,
     directives: &[String],
     debug: bool,
     jsx_preserve: bool,
     emit_header: bool,
 ) -> String {
-    let capacity = estimated_deps_program_output_capacity(program, directives, emit_header);
-    let mut printer = JsPrinter::with_module_path_resolver_options_and_capacity(
-        module_path_resolver,
-        debug,
-        jsx_preserve,
-        capacity,
-    );
-    printer.print_deps_program_with_directives_and_options(program, directives, emit_header);
-    printer.into_output()
+    program.with_deps_program(|program| {
+        let capacity = estimated_deps_program_output_capacity(program, directives, emit_header);
+        let mut printer = JsPrinter::with_module_path_resolver_options_and_capacity(
+            &program.program.arena,
+            module_path_resolver,
+            debug,
+            jsx_preserve,
+            capacity,
+        );
+        printer.print_deps_program_with_directives_and_options(program, directives, emit_header);
+        printer.into_output()
+    })
 }
 
 /// Print one concrete output target and collect mappings from JS IR source
 /// locations. This is the Rust counterpart of
 /// `Lam_compile_main.dump_deps_program_with_source_map`.
 pub fn print_deps_program_with_source_map(
+    program: &impl AsDepsProgram,
+    module_path_resolver: Option<&ModulePathResolver>,
+    directives: &[String],
+    debug: bool,
+    jsx_preserve: bool,
+    emit_header: bool,
+    target_file: &Path,
+    source_file: &Path,
+    mode: SourceMapMode,
+    sources_content: bool,
+    source_root: &str,
+    lam_locs: Arc<crate::lambda::LamLocTable>,
+) -> (String, Option<String>) {
+    program.with_deps_program(|program| {
+        print_arena_deps_program_with_source_map(
+            program,
+            module_path_resolver,
+            directives,
+            debug,
+            jsx_preserve,
+            emit_header,
+            target_file,
+            source_file,
+            mode,
+            sources_content,
+            source_root,
+            lam_locs,
+        )
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn print_arena_deps_program_with_source_map(
     program: &DepsProgram,
     module_path_resolver: Option<&ModulePathResolver>,
     directives: &[String],
@@ -372,6 +404,7 @@ pub fn print_deps_program_with_source_map(
 ) -> (String, Option<String>) {
     let capacity = estimated_deps_program_output_capacity(program, directives, emit_header);
     let mut printer = JsPrinter::with_module_path_resolver_options_and_capacity(
+        &program.program.arena,
         module_path_resolver,
         debug,
         jsx_preserve,
@@ -409,11 +442,40 @@ pub fn print_deps_program_with_source_map(
     }
 }
 
+/// A program the printer can read: an arena program, or (while the
+/// pipeline still produces boxed trees) a tree program copied into an arena.
+pub trait AsDepsProgram {
+    fn with_deps_program<R>(&self, f: impl FnOnce(&DepsProgram) -> R) -> R;
+}
+
+impl AsDepsProgram for DepsProgram {
+    fn with_deps_program<R>(&self, f: impl FnOnce(&DepsProgram) -> R) -> R {
+        f(self)
+    }
+}
+
+impl AsDepsProgram for super::DepsProgram {
+    fn with_deps_program<R>(&self, f: impl FnOnce(&DepsProgram) -> R) -> R {
+        f(&DepsProgram::from_tree(self))
+    }
+}
+
+impl AsDepsProgram for super::Program {
+    fn with_deps_program<R>(&self, f: impl FnOnce(&DepsProgram) -> R) -> R {
+        f(&DepsProgram {
+            program: Program::from_tree(self),
+            modules: Vec::new(),
+            side_effect: None,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::js_ir::op::{ImportAttributes, Kind, Number};
     use crate::js_ir::printer::JsPrinter;
+    use crate::js_ir::{DepsProgram, Expression, Program, Statement};
     use crate::js_ir::{
         ExpressionDesc, JsRawInfo, ModuleId, ModulePathResolver, VariableDeclaration,
     };
@@ -634,7 +696,8 @@ mod tests {
             None,
             false,
         );
-        let mut printer = JsPrinter::with_module_path_resolver(Some(&resolver));
+        let a = crate::js_ir::arena::JsArena::new();
+        let mut printer = JsPrinter::with_module_path_resolver(&a, Some(&resolver));
         let printed = printer.print_module_imports(&[ModuleId {
             id: import_id,
             kind: Kind::External {

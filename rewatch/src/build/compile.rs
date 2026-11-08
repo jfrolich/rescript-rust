@@ -21,7 +21,6 @@ use rescript_compiler::cmi::persistent_env::{
 use rescript_compiler::cmi::portable_types::PortablePersStruct;
 use rescript_compiler::parse_arena::ParseArena;
 use rescript_compiler::parser::ast::{Signature, Structure};
-use rescript_compiler::types::path::Path as TypePath;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::path::Path;
@@ -2767,7 +2766,7 @@ struct RuntimeInterfaceSource {
 }
 
 #[derive(Debug)]
-struct RuntimeModuleSource {
+pub(crate) struct RuntimeModuleSource {
     module_name: String,
     res_path: PathBuf,
     res_arena: ParseArena,
@@ -2903,19 +2902,26 @@ fn store_runtime_interfaces(
     key: &str,
     runtime_modules: &[RuntimeModuleSource],
 ) {
-    let interfaces: Option<Vec<(String, Vec<u8>)>> = {
-        let registry = registry.lock().unwrap();
-        runtime_modules
-            .iter()
-            .map(|module| {
-                let data = registry.encode_stored_module(&module.module_name)?;
-                Some((module.module_name.clone(), data))
-            })
-            .collect()
-    };
-    if let Some(interfaces) = interfaces {
+    if let Some(interfaces) = encode_runtime_interfaces(registry, runtime_modules) {
         super::state_db::write_runtime_interfaces(&store.db, key, &interfaces);
     }
+}
+
+/// The runtime modules just compiled into `registry`, encoded as stored
+/// modules (see `ModuleRegistry::register_stored_lazily`), by module; `None`
+/// when one of them is missing from the registry.
+pub(crate) fn encode_runtime_interfaces(
+    registry: &Mutex<ModuleRegistry>,
+    runtime_modules: &[RuntimeModuleSource],
+) -> Option<Vec<(String, Vec<u8>)>> {
+    let registry = registry.lock().unwrap();
+    runtime_modules
+        .iter()
+        .map(|module| {
+            let data = registry.encode_stored_module(&module.module_name)?;
+            Some((module.module_name.clone(), data))
+        })
+        .collect()
 }
 
 pub(crate) fn pre_compile_runtime_modules(
@@ -2951,6 +2957,12 @@ pub(crate) fn pre_compile_runtime_modules(
 
     // The interfaces the last build compiled stand in for compiling the
     // runtime again while its sources and the compiler are the same.
+    // The runtime compiled into this executable, when these are its sources.
+    if super::embedded_runtime::register(registry, runtime_root, &runtime_paths) {
+        debug!("Registered {} embedded runtime interfaces", runtime_paths.len());
+        return Ok(());
+    }
+
     let store_key = store.map(|store| (store, store.key(runtime_root, &runtime_paths)));
     if let Some((store, key)) = &store_key
         && load_runtime_interfaces(registry, store, key, &runtime_paths)
@@ -2959,28 +2971,13 @@ pub(crate) fn pre_compile_runtime_modules(
         return Ok(());
     }
 
-    let runtime_compile_threads = super::pools::compile_threads().max(2);
-    // Runtime module compilation runs inside Rayon workers, so the outer
-    // precompile thread stack is not enough for very large runtime IR cleanup.
-    let runtime_compile_pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(runtime_compile_threads)
-        .thread_name(|idx| format!("rewatch-runtime-in-process-{idx}"))
-        .stack_size(256 * 1024 * 1024)
-        .build()
-        .context("failed to create runtime in-process compiler pool")?;
-    let mut runtime_modules = runtime_compile_pool.install(|| collect_runtime_sources(runtime_paths))?;
-    populate_runtime_deps(&mut runtime_modules);
-
-    seed_runtime_registry(registry, &runtime_modules);
-    runtime_compile_pool.install(|| {
-        compile_runtime_modules_parallel(
-            registry,
-            runtime_root,
-            &runtime_path,
-            &runtime_config,
-            &runtime_modules,
-        )
-    })?;
+    let runtime_modules = compile_runtime_sources(
+        registry,
+        runtime_root,
+        &runtime_path,
+        &runtime_config,
+        runtime_paths,
+    )?;
     if let Some((store, key)) = &store_key {
         store_runtime_interfaces(registry, store, key, &runtime_modules);
     }
@@ -3026,6 +3023,41 @@ pub(crate) fn pre_compile_runtime_modules(
         runtime_modules.len()
     );
     Ok(())
+}
+
+/// Compile the runtime sources `runtime_paths` (module name, `.res` path),
+/// which are in `runtime_path`, into `registry`. Returns the compiled modules
+/// and the alias rewrites each published.
+pub(crate) fn compile_runtime_sources(
+    registry: &Mutex<ModuleRegistry>,
+    runtime_root: &Path,
+    runtime_path: &Path,
+    runtime_config: &config::Config,
+    runtime_paths: Vec<(String, PathBuf)>,
+) -> Result<Vec<RuntimeModuleSource>> {
+    let runtime_compile_threads = super::pools::compile_threads().max(2);
+    // Runtime module compilation runs inside Rayon workers, so the outer
+    // precompile thread stack is not enough for very large runtime IR cleanup.
+    let runtime_compile_pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(runtime_compile_threads)
+        .thread_name(|idx| format!("rewatch-runtime-in-process-{idx}"))
+        .stack_size(256 * 1024 * 1024)
+        .build()
+        .context("failed to create runtime in-process compiler pool")?;
+    let mut runtime_modules = runtime_compile_pool.install(|| collect_runtime_sources(runtime_paths))?;
+    populate_runtime_deps(&mut runtime_modules);
+
+    seed_runtime_registry(registry, &runtime_modules);
+    runtime_compile_pool.install(|| {
+        compile_runtime_modules_parallel(
+            registry,
+            runtime_root,
+            runtime_path,
+            runtime_config,
+            &runtime_modules,
+        )
+    })?;
+    Ok(runtime_modules)
 }
 
 fn seed_runtime_registry(registry: &Mutex<ModuleRegistry>, runtime_modules: &[RuntimeModuleSource]) {

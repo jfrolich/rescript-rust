@@ -4,13 +4,14 @@ use std::fmt;
 use std::io::Write;
 
 use crate::ident::Ident;
+use crate::lambda::arena::{LamArena, StrSwitchView, SwitchView, View};
 use crate::lambda::lam_compat::LetKind;
 use crate::lambda::lam_constant::{Constant, PointerInfo};
 use crate::lambda::lam_primitive::Mutable;
 use crate::lambda::lam_print::raw_primitive_to_string;
 use crate::lambda::{FieldDbgInfo, FunctionAttribute, InlineAttribute, Primitive, TagInfo};
 use crate::parser::formatter::{BoxKind, Formatter};
-use crate::raw_lambda::{RawApply, RawLFunction, RawLambda, RawLambdaSwitch, RawPrimInfo};
+use crate::raw_lambda::RawLambda;
 
 /// Print a string in OCaml style: escape non-ASCII bytes as \NNN (decimal).
 /// Strings are stored as Latin-1 (each char codepoint = original byte value),
@@ -37,20 +38,21 @@ fn print_ocaml_string<W: Write>(f: &mut Formatter<W>, s: &str) {
 
 /// Pretty-printer for raw lambda.
 pub struct RawLambdaPrinter<'a> {
-    raw: &'a RawLambda,
+    arena: &'a LamArena,
+    raw: RawLambda,
 }
 
 impl<'a> RawLambdaPrinter<'a> {
     /// Create a new raw-lambda printer.
-    pub fn new(raw: &'a RawLambda) -> Self {
-        Self { raw }
+    pub fn new(arena: &'a LamArena, raw: RawLambda) -> Self {
+        Self { arena, raw }
     }
 }
 
 impl fmt::Display for RawLambdaPrinter<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut out = Vec::new();
-        print_raw_lambda(self.raw, &mut out);
+        print_raw_lambda(self.arena, self.raw, &mut out);
         match String::from_utf8(out) {
             Ok(s) => f.write_str(&s),
             Err(err) => f.write_str(&String::from_utf8_lossy(&err.into_bytes())),
@@ -58,9 +60,9 @@ impl fmt::Display for RawLambdaPrinter<'_> {
     }
 }
 
-pub fn print_raw_lambda(raw: &RawLambda, out: &mut impl Write) {
+pub fn print_raw_lambda(a: &LamArena, raw: RawLambda, out: &mut impl Write) {
     let mut f = Formatter::new(out);
-    lam(&mut f, raw, None);
+    lam(a, &mut f, raw, None);
     f.flush();
 }
 
@@ -253,55 +255,66 @@ fn print_primitive<W: Write>(f: &mut Formatter<W>, prim: &Primitive) {
     }
 }
 
-fn print_apply<W: Write>(f: &mut Formatter<W>, apply: &RawApply, reraise_exn: Option<&Ident>) {
+fn print_apply<W: Write>(
+    a: &LamArena,
+    f: &mut Formatter<W>,
+    func: RawLambda,
+    args: &[RawLambda],
+    inlined: InlineAttribute,
+    reraise_exn: Option<&Ident>,
+) {
     f.open_box(BoxKind::Box, 2);
     f.string("(apply");
     f.space();
-    lam(f, &apply.ap_func, reraise_exn);
-    for arg in &apply.ap_args {
+    lam(a, f, func, reraise_exn);
+    for arg in args {
         f.space();
-        lam(f, arg, reraise_exn);
+        lam(a, f, *arg, reraise_exn);
     }
-    print_apply_inline_attribute(f, apply.ap_info.inlined);
+    print_apply_inline_attribute(f, inlined);
     f.string(")");
     f.close_box();
 }
 
 fn print_function<W: Write>(
+    a: &LamArena,
     f: &mut Formatter<W>,
-    func: &RawLFunction,
+    params: &[Ident],
+    attr: &FunctionAttribute,
+    body: RawLambda,
     reraise_exn: Option<&Ident>,
 ) {
     f.open_box(BoxKind::Box, 2);
     f.string("(function");
-    for param in &func.params {
+    for param in params {
         f.space();
-        print_ident(f, param);
+        print_ident(f, &param);
     }
     f.space();
-    print_function_attribute(f, &func.attr);
-    lam(f, &func.body, reraise_exn);
+    print_function_attribute(f, attr);
+    lam(a, f, body, reraise_exn);
     f.string(")");
     f.close_box();
 }
 
-fn print_let_bindings<'a, W: Write>(
+fn print_let_bindings<W: Write>(
+    a: &LamArena,
     f: &mut Formatter<W>,
-    lam0: &'a RawLambda,
+    lam0: RawLambda,
     reraise_exn: Option<&Ident>,
-) -> &'a RawLambda {
+) -> RawLambda {
     let mut current = lam0;
     let mut first = true;
-    while let RawLambda::Llet(kind, id, arg, body) = current {
+    while let View::Let(kind, id, arg, body) = a.view(current) {
         if !first {
             f.space();
         }
         f.open_box(BoxKind::Box, 2);
-        print_ident(f, id);
+        print_ident(f, &id);
         f.string(" =");
-        f.string(let_kind_suffix(*kind));
+        f.string(let_kind_suffix(kind));
         f.space();
-        lam(f, arg, reraise_exn);
+        lam(a, f, arg, reraise_exn);
         f.close_box();
         current = body;
         first = false;
@@ -310,12 +323,13 @@ fn print_let_bindings<'a, W: Write>(
 }
 
 fn print_switch_cases_with_exn<W: Write>(
+    a: &LamArena,
     f: &mut Formatter<W>,
-    sw: &RawLambdaSwitch,
+    sw: &SwitchView<'_>,
     reraise_exn: Option<&Ident>,
 ) {
     let mut first = true;
-    for (n, l) in &sw.sw_consts {
+    for (n, l) in sw.consts() {
         if !first {
             f.space();
         }
@@ -330,11 +344,11 @@ fn print_switch_cases_with_exn<W: Write>(
             )) => unreachable!("block key in constant cases"),
         }
         f.space();
-        lam(f, l, reraise_exn);
+        lam(a, f, l, reraise_exn);
         f.close_box();
         first = false;
     }
-    for (n, l) in &sw.sw_blocks {
+    for (n, l) in sw.blocks() {
         if !first {
             f.space();
         }
@@ -349,30 +363,30 @@ fn print_switch_cases_with_exn<W: Write>(
             ) => unreachable!("constant key in block cases"),
         }
         f.space();
-        lam(f, l, reraise_exn);
+        lam(a, f, l, reraise_exn);
         f.close_box();
         first = false;
     }
-    if let Some(fail) = &sw.sw_failaction {
+    if let Some(fail) = sw.actions.fail {
         if !first {
             f.space();
         }
         f.open_box(BoxKind::HV, 1);
         f.string("default:");
         f.space();
-        lam(f, fail, reraise_exn);
+        lam(a, f, fail, reraise_exn);
         f.close_box();
     }
 }
 
 fn print_string_switch_cases_with_exn<W: Write>(
+    a: &LamArena,
     f: &mut Formatter<W>,
-    cases: &[(String, RawLambda)],
-    default: &Option<Box<RawLambda>>,
+    sw: &StrSwitchView<'_>,
     reraise_exn: Option<&Ident>,
 ) {
     let mut first = true;
-    for (s, l) in cases {
+    for (s, l) in sw.cases() {
         if !first {
             f.space();
         }
@@ -381,101 +395,105 @@ fn print_string_switch_cases_with_exn<W: Write>(
         print_ocaml_string(f, s);
         f.string(":");
         f.space();
-        lam(f, l, reraise_exn);
+        lam(a, f, l, reraise_exn);
         f.close_box();
         first = false;
     }
-    if let Some(default) = default {
+    if let Some(default) = sw.default {
         if !first {
             f.space();
         }
         f.open_box(BoxKind::HV, 1);
         f.string("default:");
         f.space();
-        lam(f, default, reraise_exn);
+        lam(a, f, default, reraise_exn);
         f.close_box();
     }
 }
 
-fn sequence<W: Write>(f: &mut Formatter<W>, lam0: &RawLambda, reraise_exn: Option<&Ident>) {
-    match lam0 {
-        RawLambda::Lsequence(first, second) => {
-            sequence(f, first, reraise_exn);
+fn sequence<W: Write>(
+    a: &LamArena,
+    f: &mut Formatter<W>,
+    lam0: RawLambda,
+    reraise_exn: Option<&Ident>,
+) {
+    match a.view(lam0) {
+        View::Sequence(first, second) => {
+            sequence(a, f, first, reraise_exn);
             f.space();
-            sequence(f, second, reraise_exn);
+            sequence(a, f, second, reraise_exn);
         }
-        _ => lam(f, lam0, reraise_exn),
+        _ => lam(a, f, lam0, reraise_exn),
     }
 }
 
-fn lam<W: Write>(f: &mut Formatter<W>, lam0: &RawLambda, reraise_exn: Option<&Ident>) {
-    match lam0 {
-        RawLambda::Lshared(inner) => lam(f, inner, reraise_exn),
-        RawLambda::Lvar(id) => print_ident(f, id),
-        RawLambda::LglobalModule(id) => {
+fn lam<W: Write>(a: &LamArena, f: &mut Formatter<W>, lam0: RawLambda, reraise_exn: Option<&Ident>) {
+    match a.view(lam0) {
+        View::Var(id) => print_ident(f, &id),
+        View::GlobalModule(id) => {
             f.open_box(BoxKind::Box, 2);
             f.string("(");
             f.string("global ");
-            print_ident(f, id);
+            print_ident(f, &id);
             f.string(")");
             f.close_box();
         }
-        RawLambda::Lconst(cst) => print_struct_const(f, cst),
-        RawLambda::Lapply(apply) => print_apply(f, apply, reraise_exn),
-        RawLambda::Lfunction(func) => print_function(f, func, reraise_exn),
-        RawLambda::Llet(_, _, _, _) => {
+        View::Const(cst) => print_struct_const(f, cst),
+        View::Apply {
+            func, args, info, ..
+        } => print_apply(a, f, func, args, info.inlined, reraise_exn),
+        View::Function { params, body, func } => {
+            print_function(a, f, params, &func.attr, body, reraise_exn)
+        }
+        View::Let(..) => {
             f.open_box(BoxKind::Box, 2);
             f.string("(let");
             f.space();
             f.open_box(BoxKind::HV, 1);
             f.string("(");
-            let body = print_let_bindings(f, lam0, reraise_exn);
+            let body = print_let_bindings(a, f, lam0, reraise_exn);
             f.string(")");
             f.close_box();
             f.space();
-            lam(f, body, reraise_exn);
+            lam(a, f, body, reraise_exn);
             f.string(")");
             f.close_box();
         }
-        RawLambda::Lletrec(bindings, body) => {
+        View::LetRec(ids, values, body) => {
             f.open_box(BoxKind::Box, 2);
             f.string("(letrec");
             f.space();
             f.string("(");
             f.open_box(BoxKind::HV, 1);
             let mut first = true;
-            for (id, expr) in bindings {
+            for (id, expr) in ids.iter().zip(values) {
                 if !first {
                     f.space();
                 }
                 f.open_box(BoxKind::Box, 2);
                 print_ident(f, id);
                 f.space();
-                lam(f, expr, reraise_exn);
+                lam(a, f, *expr, reraise_exn);
                 f.close_box();
                 first = false;
             }
             f.close_box();
             f.string(")");
             f.space();
-            lam(f, body, reraise_exn);
+            lam(a, f, body, reraise_exn);
             f.string(")");
             f.close_box();
         }
-        RawLambda::Lprim(__prim0) => {
-            let RawPrimInfo {
-                primitive,
-                args,
-                loc: _,
-            } = __prim0.as_ref();
-
+        View::Prim(primitive, args, _) => {
             if matches!(primitive, Primitive::Praise) {
-                if let ([RawLambda::Lvar(id)], Some(exn_id)) = (args.as_slice(), reraise_exn) {
+                if let ([arg], Some(exn_id)) = (args, reraise_exn)
+                    && let Some(id) = a.as_var(*arg)
+                {
                     if id.same(exn_id) {
                         f.open_box(BoxKind::Box, 2);
                         f.string("(reraise");
                         f.space();
-                        print_ident(f, id);
+                        print_ident(f, &id);
                         f.string(")");
                         f.close_box();
                         return;
@@ -487,14 +505,14 @@ fn lam<W: Write>(f: &mut Formatter<W>, lam0: &RawLambda, reraise_exn: Option<&Id
             print_primitive(f, primitive);
             for arg in args {
                 f.space();
-                lam(f, arg, reraise_exn);
+                lam(a, f, *arg, reraise_exn);
             }
             f.string(")");
             f.close_box();
         }
-        RawLambda::Lswitch(arg, sw) => {
+        View::Switch(arg, sw) => {
             f.open_box(BoxKind::Box, 1);
-            if sw.sw_failaction.is_some() {
+            if sw.actions.fail.is_some() {
                 f.string("(switch");
             } else {
                 f.string("(switch*");
@@ -502,40 +520,40 @@ fn lam<W: Write>(f: &mut Formatter<W>, lam0: &RawLambda, reraise_exn: Option<&Id
             // OCaml lam_print.ml keeps the operator and scrutinee on the
             // same line; only the break before the cases is conditional.
             f.string(" ");
-            lam(f, arg, reraise_exn);
+            lam(a, f, arg, reraise_exn);
             f.space();
             f.open_vbox(0);
-            print_switch_cases_with_exn(f, sw, reraise_exn);
+            print_switch_cases_with_exn(a, f, &sw, reraise_exn);
             f.close_box();
             f.string(")");
             f.close_box();
         }
-        RawLambda::LstringSwitch(arg, cases, default) => {
+        View::StringSwitch(arg, sw) => {
             f.open_box(BoxKind::Box, 1);
             f.string("(stringswitch ");
-            lam(f, arg, reraise_exn);
+            lam(a, f, arg, reraise_exn);
             f.space();
             f.open_vbox(0);
-            print_string_switch_cases_with_exn(f, cases, default, reraise_exn);
+            print_string_switch_cases_with_exn(a, f, &sw, reraise_exn);
             f.close_box();
             f.string(")");
             f.close_box();
         }
-        RawLambda::LstaticRaise(i, ls) => {
+        View::StaticRaise(i, ls) => {
             f.open_box(BoxKind::Box, 2);
             f.print(format_args!("(exit {i}"));
             for l in ls {
                 f.space();
-                lam(f, l, reraise_exn);
+                lam(a, f, *l, reraise_exn);
             }
             f.string(")");
             f.close_box();
         }
-        RawLambda::LstaticCatch(body, (i, vars), handler) => {
+        View::StaticCatch(body, i, vars, handler) => {
             f.open_box(BoxKind::Box, 2);
             f.string("(catch");
             f.space();
-            lam(f, body, reraise_exn);
+            lam(a, f, body, reraise_exn);
             f.break_(1, -1);
             f.print(format_args!("with ({i}"));
             for var in vars {
@@ -544,109 +562,109 @@ fn lam<W: Write>(f: &mut Formatter<W>, lam0: &RawLambda, reraise_exn: Option<&Id
             }
             f.string(")");
             f.space();
-            lam(f, handler, reraise_exn);
+            lam(a, f, handler, reraise_exn);
             f.string(")");
             f.close_box();
         }
-        RawLambda::LtryWith(body, param, handler) => {
+        View::TryWith(body, param, handler) => {
             f.open_box(BoxKind::Box, 2);
             f.string("(try");
             f.space();
-            lam(f, body, None);
+            lam(a, f, body, None);
             f.break_(1, -1);
             f.string("with ");
-            print_ident(f, param);
+            print_ident(f, &param);
             f.space();
-            lam(f, handler, Some(param));
+            lam(a, f, handler, Some(&param));
             f.string(")");
             f.close_box();
         }
-        RawLambda::LifThenElse(cond, ifso, ifnot) => {
+        View::If(cond, ifso, ifnot) => {
             f.open_box(BoxKind::Box, 2);
             f.string("(if");
             f.space();
-            lam(f, cond, reraise_exn);
+            lam(a, f, cond, reraise_exn);
             f.space();
-            lam(f, ifso, reraise_exn);
+            lam(a, f, ifso, reraise_exn);
             f.space();
-            lam(f, ifnot, reraise_exn);
+            lam(a, f, ifnot, reraise_exn);
             f.string(")");
             f.close_box();
         }
-        RawLambda::Lsequence(first, second) => {
+        View::Sequence(first, second) => {
             f.open_box(BoxKind::Box, 2);
             f.string("(seq");
             f.space();
             // OCaml's printlambda uses `lam` for the first element (preserving
             // nested seq structure) and `sequence` for the second (flattening).
-            lam(f, first, reraise_exn);
+            lam(a, f, first, reraise_exn);
             f.space();
-            sequence(f, second, reraise_exn);
+            sequence(a, f, second, reraise_exn);
             f.string(")");
             f.close_box();
         }
-        RawLambda::Lwhile(cond, body) => {
+        View::While(cond, body) => {
             f.open_box(BoxKind::Box, 2);
             f.string("(while");
             f.space();
-            lam(f, cond, reraise_exn);
+            lam(a, f, cond, reraise_exn);
             f.space();
-            lam(f, body, reraise_exn);
+            lam(a, f, body, reraise_exn);
             f.string(")");
             f.close_box();
         }
-        RawLambda::Lfor(param, lo, hi, dir, body) => {
+        View::For(param, lo, hi, dir, body) => {
             f.open_box(BoxKind::Box, 2);
             f.string("(for ");
-            print_ident(f, param);
+            print_ident(f, &param);
             f.space();
-            lam(f, lo, reraise_exn);
+            lam(a, f, lo, reraise_exn);
             f.space();
             f.string(match dir {
                 crate::lambda::DirectionFlag::Upto => "to",
                 crate::lambda::DirectionFlag::Downto => "downto",
             });
             f.space();
-            lam(f, hi, reraise_exn);
+            lam(a, f, hi, reraise_exn);
             f.space();
-            lam(f, body, reraise_exn);
+            lam(a, f, body, reraise_exn);
             f.string(")");
             f.close_box();
         }
-        RawLambda::Lfor_of(param, iterable, body) => {
+        View::ForOf(param, iterable, body) => {
             f.open_box(BoxKind::Box, 2);
             f.string("(for_of ");
-            print_ident(f, param);
+            print_ident(f, &param);
             f.space();
-            lam(f, iterable, reraise_exn);
+            lam(a, f, iterable, reraise_exn);
             f.space();
-            lam(f, body, reraise_exn);
+            lam(a, f, body, reraise_exn);
             f.string(")");
             f.close_box();
         }
-        RawLambda::Lfor_await_of(param, iterable, body) => {
+        View::ForAwaitOf(param, iterable, body) => {
             f.open_box(BoxKind::Box, 2);
             f.string("(for_await_of ");
-            print_ident(f, param);
+            print_ident(f, &param);
             f.space();
-            lam(f, iterable, reraise_exn);
+            lam(a, f, iterable, reraise_exn);
             f.space();
-            lam(f, body, reraise_exn);
+            lam(a, f, body, reraise_exn);
             f.string(")");
             f.close_box();
         }
-        RawLambda::Lassign(id, expr) => {
+        View::Assign(id, expr) => {
             f.open_box(BoxKind::Box, 2);
             f.string("(assign");
             f.space();
-            print_ident(f, id);
+            print_ident(f, &id);
             f.space();
-            lam(f, expr, reraise_exn);
+            lam(a, f, expr, reraise_exn);
             f.string(")");
             f.close_box();
         }
-        RawLambda::Lbreak => f.string("break"),
-        RawLambda::Lcontinue => f.string("continue"),
+        View::Break => f.string("break"),
+        View::Continue => f.string("continue"),
     }
 }
 
@@ -657,14 +675,15 @@ mod tests {
     #[test]
     fn polyvariant_pointer_decodes_internal_utf8_without_changing_ascii() {
         let unicode = crate::source_text::latin1_bytes_to_string("`🚀".as_bytes().to_vec());
-        let unicode = RawLambda::const_(Constant::Pointer(unicode));
+        let b = crate::raw_lambda::RawArena::new();
+        let unicode = b.const_(Constant::Pointer(unicode));
         let mut unicode_out = Vec::new();
-        print_raw_lambda(&unicode, &mut unicode_out);
+        print_raw_lambda(&b.get(), unicode, &mut unicode_out);
         assert_eq!(unicode_out, "`🚀".as_bytes());
 
-        let ascii = RawLambda::const_(Constant::Pointer("`Ready".to_string()));
+        let ascii = b.const_(Constant::Pointer("`Ready".to_string()));
         let mut ascii_out = Vec::new();
-        print_raw_lambda(&ascii, &mut ascii_out);
+        print_raw_lambda(&b.get(), ascii, &mut ascii_out);
         assert_eq!(ascii_out, b"`Ready");
     }
 }
