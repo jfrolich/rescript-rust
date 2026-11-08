@@ -205,7 +205,6 @@ fn fixed_row_type_id_for_decl(
 
 fn translate_type_declaration_params<'a>(
     tctx: &mut TypeCheckContext<'a>,
-    env: &Env,
     arena: &'a ParseArena,
     params: &[(crate::parse_arena::CoreTypeIdx, ParserVariance)],
 ) -> TypeModResult<(Vec<(TypedCoreType, TypesVariance)>, Vec<TypeExprRef>)> {
@@ -213,50 +212,51 @@ fn translate_type_declaration_params<'a>(
     let mut typed_params = Vec::with_capacity(params.len());
     let mut internal_params = Vec::with_capacity(params.len());
 
+    // `make_params` (typedecl.ml:165-170) of `Typetexp.transl_type_param`
+    // (typetexp.ml:233-270), each in `warning_scope styp.ptyp_attributes`.
     for (core_type_idx, parser_var) in params {
         let core_type = arena.get_core_type(*core_type_idx);
-        let (typed_core_type, type_ref) = match &core_type.ptyp_desc {
-            crate::parser::ast::CoreTypeDesc::Ptyp_any => {
-                let type_ref = ctx.new_var(Some("_".to_string()));
-                (
-                    TypedCoreType {
-                        ctyp_desc: TypedCoreTypeDesc::Ttyp_var(None),
-                        ctyp_type: type_ref,
-                        ctyp_env: EnvRef(0),
-                        ctyp_loc: core_type.ptyp_loc,
-                        ctyp_attributes: core_type.ptyp_attributes.clone(),
-                    },
-                    type_ref,
-                )
-            }
-            crate::parser::ast::CoreTypeDesc::Ptyp_var(name) => {
-                let name = arena.get_string(*name);
-                check_type_variable_name(core_type.ptyp_loc, name)?;
-                if tctx.type_variables.contains_key(name) {
-                    return Err(TypeModError::RepeatedParameter {
-                        loc: core_type.ptyp_loc,
-                    });
+        let (typed_core_type, type_ref) =
+            with_warning_scope(tctx, arena, &core_type.ptyp_attributes, true, |tctx| {
+                let typed_param = |desc, type_ref| TypedCoreType {
+                    ctyp_desc: desc,
+                    ctyp_type: type_ref,
+                    ctyp_env: EnvRef(0),
+                    ctyp_loc: core_type.ptyp_loc,
+                    ctyp_attributes: core_type.ptyp_attributes.clone(),
+                };
+                match &core_type.ptyp_desc {
+                    // `Ttyp_any` with `new_global_var ~name:"_"`.
+                    crate::parser::ast::CoreTypeDesc::Ptyp_any => {
+                        let type_ref = ctx.new_global_var(Some("_".to_string()));
+                        Ok((
+                            typed_param(TypedCoreTypeDesc::Ttyp_var(None), type_ref),
+                            type_ref,
+                        ))
+                    }
+                    crate::parser::ast::CoreTypeDesc::Ptyp_var(name) => {
+                        let name = arena.get_string(*name);
+                        check_type_variable_name(core_type.ptyp_loc, name)?;
+                        if tctx.type_variables.contains_key(name) {
+                            return Err(TypeModError::RepeatedParameter {
+                                loc: core_type.ptyp_loc,
+                            });
+                        }
+                        let type_ref = ctx.new_global_var(Some(name.to_string()));
+                        tctx.type_variables.insert(name.to_string(), type_ref);
+                        Ok((
+                            typed_param(
+                                TypedCoreTypeDesc::Ttyp_var(Some(name.to_string())),
+                                type_ref,
+                            ),
+                            type_ref,
+                        ))
+                    }
+                    _ => unreachable!("Typetexp.transl_type_param: a parameter is a variable"),
                 }
-                let type_ref = ctx.new_var(Some(name.to_string()));
-                (
-                    TypedCoreType {
-                        ctyp_desc: TypedCoreTypeDesc::Ttyp_var(Some(name.to_string())),
-                        ctyp_type: type_ref,
-                        ctyp_env: EnvRef(0),
-                        ctyp_loc: core_type.ptyp_loc,
-                        ctyp_attributes: core_type.ptyp_attributes.clone(),
-                    },
-                    type_ref,
-                )
-            }
-            _ => transl_type(tctx, env, core_type)?,
-        };
+            })?;
 
         internal_params.push(type_ref);
-        if let crate::parser::ast::CoreTypeDesc::Ptyp_var(name) = &core_type.ptyp_desc {
-            tctx.type_variables
-                .insert(arena.get_string(*name).to_string(), type_ref);
-        }
         typed_params.push((typed_core_type, parser_variance_to_types(*parser_var)));
     }
 
@@ -298,7 +298,7 @@ fn translate_fixed_row_type_declaration<'a>(
     type_path: Option<Path>,
 ) -> TypeModResult<TypedTypeDeclaration> {
     let saved_type_variables = std::mem::take(&mut tctx.type_variables);
-    let result = translate_type_declaration_params(tctx, env, arena, &decl.ptype_params);
+    let result = translate_type_declaration_params(tctx, arena, &decl.ptype_params);
     tctx.type_variables = saved_type_variables;
     let (typ_params, internal_type_params) = result?;
 
@@ -9394,8 +9394,7 @@ fn transl_with_constraint<'a>(
     );
     tctx.reset_type_variables();
     ctx.begin_def();
-    let (tparams, params) =
-        translate_type_declaration_params(tctx, env, arena, &sdecl.ptype_params)?;
+    let (tparams, params) = translate_type_declaration_params(tctx, arena, &sdecl.ptype_params)?;
     let orig_decl = crate::types::ctype::instance_declaration(ctx, orig_decl);
     let arity_ok = params.len() == orig_decl.type_arity as usize;
     if arity_ok {
@@ -16692,7 +16691,7 @@ fn transl_type_extension<'a>(
     // typedecl.ml:1793 `make_params env styext.ptyext_params`
     // (Typetexp.transl_type_param: a repeated variable is an error).
     let (typed_params, typed_param_type_refs) =
-        translate_type_declaration_params(tctx, env, arena, &ext.ptyext_params)?;
+        translate_type_declaration_params(tctx, arena, &ext.ptyext_params)?;
     let allowed_type_params: HashSet<TypeExprRef> = typed_param_type_refs
         .iter()
         .map(|ty_ref| ctx.repr(*ty_ref))

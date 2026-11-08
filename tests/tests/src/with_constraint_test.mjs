@@ -2,6 +2,8 @@
 
 import * as Mocha from "mocha";
 import * as Test_utils from "./test_utils.mjs";
+import * as Primitive_object from "@rescript/runtime/lib/es6/Primitive_object.mjs";
+import * as Primitive_exceptions from "@rescript/runtime/lib/es6/Primitive_exceptions.mjs";
 
 let one = {hd: 1, tl: /* [] */0};
 
@@ -34,6 +36,23 @@ let v$1 = [
 
 let Pairs = {
   v: v$1
+};
+
+let Wild = {
+  one: 1
+};
+
+let one$1 = "one";
+
+let WildSubst = {
+  one: one$1
+};
+
+let WildExt = /* @__PURE__ */Primitive_exceptions.create("With_constraint_test.WildExt");
+
+let wildExt = {
+  RE_EXN_ID: WildExt,
+  _1: 1
 };
 
 let A = {};
@@ -93,23 +112,29 @@ let Seven = {
 
 Mocha.describe("With_constraint_test", () => {
   Mocha.test("with type", () => {
-    Test_utils.eq("File \"with_constraint_test.res\", line 143, characters 7-14", {hd: 1, tl: /* [] */0}, one);
-    Test_utils.eq("File \"with_constraint_test.res\", line 144, characters 7-14", "Square", "Square");
-    Test_utils.eq("File \"with_constraint_test.res\", line 145, characters 7-14", "A", "A");
-    Test_utils.eq("File \"with_constraint_test.res\", line 146, characters 7-14", [1], v);
-    Test_utils.eq("File \"with_constraint_test.res\", line 147, characters 7-14", [
+    Test_utils.eq("File \"with_constraint_test.res\", line 157, characters 7-14", {hd: 1, tl: /* [] */0}, one);
+    Test_utils.eq("File \"with_constraint_test.res\", line 158, characters 7-14", "Square", "Square");
+    Test_utils.eq("File \"with_constraint_test.res\", line 159, characters 7-14", "A", "A");
+    Test_utils.eq("File \"with_constraint_test.res\", line 160, characters 7-14", [1], v);
+    Test_utils.eq("File \"with_constraint_test.res\", line 161, characters 7-14", [
       1,
       2
     ], v$1);
-    Test_utils.eq("File \"with_constraint_test.res\", line 148, characters 7-14", 2, 2);
-    Test_utils.eq("File \"with_constraint_test.res\", line 149, characters 7-14", "s", w);
+    Test_utils.eq("File \"with_constraint_test.res\", line 162, characters 7-14", 1, 1);
+    Test_utils.eq("File \"with_constraint_test.res\", line 163, characters 7-14", "one", one$1);
+    Test_utils.eq("File \"with_constraint_test.res\", line 164, characters 7-14", true, Primitive_object.equal(wildExt, {
+      RE_EXN_ID: WildExt,
+      _1: 1
+    }));
+    Test_utils.eq("File \"with_constraint_test.res\", line 165, characters 7-14", 2, 2);
+    Test_utils.eq("File \"with_constraint_test.res\", line 166, characters 7-14", "s", w);
   });
   Mocha.test("with module", () => {
-    Test_utils.eq("File \"with_constraint_test.res\", line 152, characters 7-14", 6, removedSum);
-    Test_utils.eq("File \"with_constraint_test.res\", line 153, characters 7-14", ["s"], w$1);
-    Test_utils.eq("File \"with_constraint_test.res\", line 154, characters 7-14", [1], v$2);
+    Test_utils.eq("File \"with_constraint_test.res\", line 169, characters 7-14", 6, removedSum);
+    Test_utils.eq("File \"with_constraint_test.res\", line 170, characters 7-14", ["s"], w$1);
+    Test_utils.eq("File \"with_constraint_test.res\", line 171, characters 7-14", [1], v$2);
   });
-  Mocha.test("package type", () => Test_utils.eq("File \"with_constraint_test.res\", line 157, characters 7-14", 7, 7));
+  Mocha.test("package type", () => Test_utils.eq("File \"with_constraint_test.res\", line 174, characters 7-14", 7, 7));
 });
 
 let listOne = one;
@@ -123,6 +148,10 @@ let tag = "A";
 let arr = v;
 
 let pairs = v$1;
+
+let wildOne = 1;
+
+let wildSubstOne = one$1;
 
 let nestedEq = 2;
 
@@ -144,6 +173,12 @@ export {
   arr,
   Pairs,
   pairs,
+  Wild,
+  WildSubst,
+  WildExt,
+  wildOne,
+  wildSubstOne,
+  wildExt,
   NestedEq,
   NestedSubst,
   nestedEq,

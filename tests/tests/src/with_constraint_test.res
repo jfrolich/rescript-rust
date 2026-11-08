@@ -57,6 +57,20 @@ module Pairs: Indexed with type t<'a> := ('a, int) = {
 }
 let pairs: (int, int) = Pairs.v
 
+// Wildcard parameters in `with type`, `with type :=` and a type extension.
+module Wild: Container with type t<_> = int = {
+  type t<_> = int
+  let one = 1
+}
+module WildSubst: Container with type t<_> := string = {
+  let one = "one"
+}
+type wildExt<_> = ..
+type wildExt<_> += WildExt(int)
+let wildOne: int = Wild.one
+let wildSubstOne: string = WildSubst.one
+let wildExt: wildExt<string> = WildExt(1)
+
 // A nested type constraint and a nested destructive type substitution.
 module type Nested = {
   module A: {
@@ -145,6 +159,9 @@ describe(__MODULE__, () => {
     eq(__LOC__, #A, tag)
     eq(__LOC__, [1], arr)
     eq(__LOC__, (1, 2), pairs)
+    eq(__LOC__, 1, wildOne)
+    eq(__LOC__, "one", wildSubstOne)
+    eq(__LOC__, true, wildExt == WildExt(1))
     eq(__LOC__, 2, nestedEq)
     eq(__LOC__, "s", nestedSubst)
   })
