@@ -3,6 +3,7 @@ pub mod clean;
 pub mod compile;
 pub mod compiler_info;
 pub mod deps;
+pub mod embedded_runtime;
 pub mod incremental;
 pub mod logs;
 pub mod namespaces;
