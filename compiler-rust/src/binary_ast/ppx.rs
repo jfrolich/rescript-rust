@@ -11387,6 +11387,62 @@ mod tests {
     /// bs_builtin_ppx.ml:250-276, 363-372 and 556-571: the builtin mapper
     /// raises the `let?` errors where it meets the binding, whether LetUnwrap
     /// is enabled deciding which one.
+    /// `Ast_helper` constructors take `?loc ?attrs` first, so OCaml evaluates
+    /// a node's children before its attributes (ast_helper.ml:423-448,
+    /// 469-566, 633-642): the child's error is the first one raised.
+    #[test]
+    fn builtin_mapper_maps_children_before_declaration_attributes() {
+        let first_error_line = |source: &str| {
+            let (mut arena, structure) = parse_structure(source);
+            let error = rewrite_structure(&structure, &mut arena, false)
+                .expect_err("both payloads are invalid");
+            let loc = error.loc().expect("the error has a location");
+            arena.loc_start(loc).line
+        };
+        let cases = [
+            // module binding
+            (
+                "@foo(let a = %raw(1))\nmodule M = {\n  let b = %raw(2)\n}\n",
+                3,
+            ),
+            // include
+            (
+                "@foo(let a = %raw(1))\ninclude {\n  let b = %raw(2)\n}\n",
+                3,
+            ),
+            // module type declaration
+            (
+                "@foo(let a = %raw(1))\nmodule type S = module type of {\n  let b = %raw(2)\n}\n",
+                3,
+            ),
+            // label declaration: the type before the attributes
+            (
+                "type t = {\n  @foo(let a = %raw(1)) x: @bar(let b = %raw(2)) int,\n}\n",
+                2,
+            ),
+            // type extension: the constructors before the attributes
+            (
+                "type t = ..\n@foo(let a = %raw(1))\ntype t += @bar(let b = %raw(2)) B\n",
+                3,
+            ),
+        ];
+        for (source, line) in cases {
+            assert_eq!(first_error_line(source), line, "{source}");
+        }
+        let column = |source: &str| {
+            let (mut arena, structure) = parse_structure(source);
+            let error = rewrite_structure(&structure, &mut arena, false).unwrap_err();
+            let start = arena.loc_start(error.loc().unwrap());
+            start.cnum - start.bol
+        };
+        // label declaration: `x: @bar(...)` is reported (OCaml prints 2:41,
+        // a one-based column), not `@foo(...)`.
+        assert_eq!(
+            column("type t = {\n  @foo(let a = %raw(1)) x: @bar(let b = %raw(2)) int,\n}\n"),
+            40
+        );
+    }
+
     #[test]
     fn let_unwrap_errors_come_from_the_builtin_mapper() {
         let rewrite_error = |source: &str, let_unwrap: bool| {

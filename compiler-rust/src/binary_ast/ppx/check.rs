@@ -7,7 +7,10 @@
 //! order: a node's attributes are mapped first, then the arguments of the
 //! rebuilt constructor, function application or record right to left, while
 //! `List.map`/`Ext_list.map` visit lists left to right and `Ext_list.fold_right`
-//! right to left.
+//! right to left. Labelled arguments are evaluated in the order of the
+//! function's parameters, whatever their order at the call: `Mb.mk name expr
+//! ~attrs ~loc` (`Mb.mk ?loc ?attrs name expr`, ast_helper.ml:433) maps the
+//! module expression before the attributes.
 //!
 //! The warnings the mapper prints (`Location.prerr_warning`) are collected in
 //! the same walk, so only those emitted before the first error are reported.
@@ -184,15 +187,17 @@ impl<'a> Checker<'a> {
             }
             StructureItemDesc::Pstr_modtype(mtd) => self.module_type_declaration(mtd),
             StructureItemDesc::Pstr_open(od) => self.attributes(&od.popen_attributes),
+            // `Incl.mk ?loc ?attrs mexpr` (ast_helper.ml:448).
             StructureItemDesc::Pstr_include(incl) => {
-                self.attributes(&incl.pincl_attributes)?;
-                self.module_expr(incl.pincl_mod)
+                self.module_expr(incl.pincl_mod)?;
+                self.attributes(&incl.pincl_attributes)
             }
             StructureItemDesc::Pstr_attribute(attr) => self.attribute(attr),
+            // `Str.extension ?loc ?attrs a` (ast_helper.ml:323).
             StructureItemDesc::Pstr_extension(inner) => {
                 let (extension, attrs) = &**inner;
-                self.attributes(attrs)?;
-                self.extension(extension)
+                self.extension(extension)?;
+                self.attributes(attrs)
             }
             StructureItemDesc::Pstr_raw(raw) => self.attributes(&raw.attrs),
         }
@@ -228,28 +233,31 @@ impl<'a> Checker<'a> {
             }
             SignatureItemDesc::Psig_typext(te) => self.type_extension(te),
             SignatureItemDesc::Psig_exception(ec) => self.extension_constructor(ec),
+            // `Md.mk ?loc ?attrs name typ` (ast_helper.ml:423).
             SignatureItemDesc::Psig_module(md) => {
-                self.attributes(&md.pmd_attributes)?;
-                self.module_type(md.pmd_type)
+                self.module_type(md.pmd_type)?;
+                self.attributes(&md.pmd_attributes)
             }
             SignatureItemDesc::Psig_recmodule(mds) => {
                 for md in mds.iter() {
-                    self.attributes(&md.pmd_attributes)?;
                     self.module_type(md.pmd_type)?;
+                    self.attributes(&md.pmd_attributes)?;
                 }
                 Ok(())
             }
             SignatureItemDesc::Psig_modtype(mtd) => self.module_type_declaration(mtd),
             SignatureItemDesc::Psig_open(od) => self.attributes(&od.popen_attributes),
+            // `Incl.mk ?loc ?attrs mexpr` (ast_helper.ml:448).
             SignatureItemDesc::Psig_include(incl) => {
-                self.attributes(&incl.pincl_attributes)?;
-                self.module_type(incl.pincl_mod)
+                self.module_type(incl.pincl_mod)?;
+                self.attributes(&incl.pincl_attributes)
             }
             SignatureItemDesc::Psig_attribute(attr) => self.attribute(attr),
+            // `Sig.extension ?loc ?attrs a` (ast_helper.ml:305).
             SignatureItemDesc::Psig_extension(inner) => {
                 let (extension, attrs) = &**inner;
-                self.attributes(attrs)?;
-                self.extension(extension)
+                self.extension(extension)?;
+                self.attributes(attrs)
             }
         }
     }
@@ -368,16 +376,12 @@ impl<'a> Checker<'a> {
     // Type declarations
     // ------------------------------------------------------------------
 
-    /// `T.map_type_declaration` (ast_mapper.ml:98-117): attributes, manifest,
-    /// kind, constraints, parameters. `strip_deriving` drops the `@deriving`
-    /// attributes `process_derive_type` removed.
+    /// `T.map_type_declaration` (ast_mapper.ml:142-164): `Type.mk ?loc ?attrs
+    /// ?params ?cstrs ?kind ?priv ?manifest ?origin name` (ast_helper.ml:469)
+    /// evaluates the manifest, kind, constraints, parameters, then the
+    /// attributes. `strip_deriving` drops the `@deriving` attributes
+    /// `process_derive_type` removed.
     fn type_declaration(&mut self, tdcl: &TypeDeclaration, strip_deriving: bool) -> PpxResult<()> {
-        for attr in tdcl.ptype_attributes.iter() {
-            if strip_deriving && self.arena.get_string(attr.0.txt) == "deriving" {
-                continue;
-            }
-            self.attribute(attr)?;
-        }
         if let Some(manifest) = tdcl.ptype_manifest {
             self.typ(manifest)?;
         }
@@ -401,17 +405,25 @@ impl<'a> Checker<'a> {
         for (param, _variance) in &tdcl.ptype_params {
             self.typ(*param)?;
         }
+        for attr in tdcl.ptype_attributes.iter() {
+            if strip_deriving && self.arena.get_string(attr.0.txt) == "deriving" {
+                continue;
+            }
+            self.attribute(attr)?;
+        }
         Ok(())
     }
 
-    /// `default_mapper.constructor_declaration` (ast_mapper.ml:534-540):
-    /// attributes, result type, arguments.
+    /// `default_mapper.constructor_declaration` (ast_mapper.ml:614-620):
+    /// `Type.constructor ?loc ?attrs ?args ?res ?runtime_tag name`
+    /// (ast_helper.ml:500) evaluates the result type, the arguments, then the
+    /// attributes.
     fn constructor_declaration(&mut self, constructor: &ConstructorDeclaration) -> PpxResult<()> {
-        self.attributes(&constructor.pcd_attributes)?;
         if let Some(res) = constructor.pcd_res {
             self.typ(res)?;
         }
-        self.constructor_arguments(&constructor.pcd_args)
+        self.constructor_arguments(&constructor.pcd_args)?;
+        self.attributes(&constructor.pcd_attributes)
     }
 
     fn constructor_arguments(&mut self, args: &ConstructorArguments) -> PpxResult<()> {
@@ -431,60 +443,70 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// `default_mapper.label_declaration` (ast_mapper.ml:541-547):
-    /// attributes, then the type.
+    /// `default_mapper.label_declaration` (ast_mapper.ml:621-629):
+    /// `Type.field ?loc ?attrs ?mut ?optional ?runtime_name name typ`
+    /// (ast_helper.ml:566) evaluates the type, then the attributes.
     fn label_declaration(&mut self, label: &LabelDeclaration) -> PpxResult<()> {
-        self.attributes(&label.pld_attributes)?;
-        self.typ(label.pld_type)
+        self.typ(label.pld_type)?;
+        self.attributes(&label.pld_attributes)
     }
 
-    /// `T.map_type_extension` (ast_mapper.ml:132-145).
+    /// `T.map_type_extension` (ast_mapper.ml:178-195): `Te.mk ?attrs ?params
+    /// ?priv path constructors` (ast_helper.ml:633) evaluates the
+    /// constructors, the parameters, then the attributes.
     fn type_extension(&mut self, te: &TypeExtension) -> PpxResult<()> {
-        self.attributes(&te.ptyext_attributes)?;
-        for (param, _variance) in &te.ptyext_params {
-            self.typ(*param)?;
-        }
         for constructor in &te.ptyext_constructors {
             self.extension_constructor(constructor)?;
         }
-        Ok(())
+        for (param, _variance) in &te.ptyext_params {
+            self.typ(*param)?;
+        }
+        self.attributes(&te.ptyext_attributes)
     }
 
-    /// `T.map_extension_constructor` (ast_mapper.ml:147-157).
+    /// `T.map_extension_constructor` (ast_mapper.ml:193-203): `Te.constructor
+    /// ?loc ?attrs name kind` (ast_helper.ml:642) evaluates the kind (the
+    /// result type, then the arguments of `Pext_decl`), then the attributes.
     fn extension_constructor(&mut self, ec: &ExtensionConstructor) -> PpxResult<()> {
-        self.attributes(&ec.pext_attributes)?;
         match &ec.pext_kind {
             ExtensionConstructorKind::Pext_decl(args, res) => {
                 if let Some(res) = res {
                     self.typ(*res)?;
                 }
-                self.constructor_arguments(args)
+                self.constructor_arguments(args)?;
             }
-            ExtensionConstructorKind::Pext_rebind(_) => Ok(()),
+            ExtensionConstructorKind::Pext_rebind(_) => {}
         }
+        self.attributes(&ec.pext_attributes)
     }
 
-    /// `default_mapper.value_description` (ast_mapper.ml:486-491).
+    /// `default_mapper.value_description` (ast_mapper.ml:550-557): `Val.mk
+    /// ?loc ?attrs ?prim name typ` (ast_helper.ml:407) evaluates the type, then
+    /// the attributes.
     fn value_description(&mut self, vd: &ValueDescription) -> PpxResult<()> {
-        self.attributes(&vd.pval_attributes)?;
-        self.typ(vd.pval_type)
+        self.typ(vd.pval_type)?;
+        self.attributes(&vd.pval_attributes)
     }
 
     // ------------------------------------------------------------------
     // Modules
     // ------------------------------------------------------------------
 
+    /// `default_mapper.module_binding`: `Mb.mk ?loc ?attrs name expr`
+    /// (ast_helper.ml:433) evaluates the module expression, then the
+    /// attributes.
     fn module_binding(&mut self, mb: &ModuleBinding) -> PpxResult<()> {
-        self.attributes(&mb.pmb_attributes)?;
-        self.module_expr(mb.pmb_expr)
+        self.module_expr(mb.pmb_expr)?;
+        self.attributes(&mb.pmb_attributes)
     }
 
+    /// `default_mapper.module_type_declaration`: `Mtd.mk ?loc ?attrs ?typ name`
+    /// (ast_helper.ml:428) evaluates the module type, then the attributes.
     fn module_type_declaration(&mut self, mtd: &ModuleTypeDeclaration) -> PpxResult<()> {
-        self.attributes(&mtd.pmtd_attributes)?;
         if let Some(typ) = mtd.pmtd_type {
             self.module_type(typ)?;
         }
-        Ok(())
+        self.attributes(&mtd.pmtd_attributes)
     }
 
     /// `M.map` (ast_mapper.ml:218-234).
