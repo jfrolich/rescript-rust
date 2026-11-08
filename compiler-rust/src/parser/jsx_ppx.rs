@@ -152,6 +152,9 @@ const COMPONENT_WITH_PROPS_FORWARD_REF_MSG: &str = "Components using React.forwa
 const COMPONENT_KEY_PROP_MSG: &str = "Key cannot be accessed inside of a component. Don't worry - you can always key a component from its parent!";
 const COMPONENT_DUPLICATE_PROP_MSG_PREFIX: &str = "The prop `";
 const COMPONENT_DUPLICATE_PROP_MSG_SUFFIX: &str = "` is defined several times in this component.";
+/// jsx_ppx.ml:69-70.
+const UNSUPPORTED_JSX_VERSION_MSG: &str =
+    "Unsupported JSX version. Only `version: 4` is supported.";
 const COMPONENT_PROPS_NEED_LABELLED_MSG: &str = "React: props need to be labelled arguments.\nIf you are working with refs be sure to wrap with React.forwardRef.\nIf your component doesn't have any props use () or _ instead of a name.";
 const COMPONENT_CALL_NEEDS_FUNCTION_MSG: &str = "JSX component calls can only be on function definitions or component wrappers (forwardRef, memo).";
 const STRING_INT_ATTR_UNSUPPORTED_MSG: &str = "@string and @int attributes not supported. See https://github.com/rescript-lang/rescript-compiler/issues/5724";
@@ -3586,82 +3589,88 @@ fn make_props_abstract_type_sig(
 // Config Update
 // ============================================================================
 
+/// `Jsx_ppx.update_config` (compiler/syntax/src/jsx_ppx.ml:53-74) on the
+/// payload of a `@@jsxConfig` attribute.
 fn update_config_from_attribute(arena: &ParseArena, attr: &Attribute, config: &mut JsxConfig) {
-    // Parse @@jsxConfig({version: 4, module_: "React"})
-    // Matches OCaml's update_config behavior
-    if let Payload::PStr(items) = &attr.1 {
-        for item in items.iter() {
-            if let StructureItemDesc::Pstr_eval(eval_inner) = &item.pstr_desc {
-                let (ref expr, _) = **eval_inner;
-                // jsx_ppx.ml `get_payload_fields`: `Ast_payload.unwrap_payload_expression`.
-                let expr = if items.len() == 1 {
-                    crate::ast_payload::unwrap_braces(arena, arena.get_expr(*expr))
-                } else {
-                    arena.get_expr(*expr)
-                };
-                if let ExpressionDesc::Pexp_record(rec_inner) = &expr.pexp_desc {
-                    let (ref fields, _) = *rec_inner;
-                    let mut module_raw: Option<String> = None;
-                    let mut version_raw: Option<i32> = None;
+    // jsx_ppx.ml:6-15 `get_payload_fields`: the record of the first item of
+    // `Ast_payload.unwrap_payload_expression payload`, without a spread.
+    let Payload::PStr(items) = &attr.1 else {
+        return;
+    };
+    let Some(first) = items.first() else {
+        return;
+    };
+    let StructureItemDesc::Pstr_eval(eval_inner) = &first.pstr_desc else {
+        return;
+    };
+    let expr = if items.len() == 1 {
+        crate::ast_payload::unwrap_braces(arena, arena.get_expr(eval_inner.0))
+    } else {
+        arena.get_expr(eval_inner.0)
+    };
+    let ExpressionDesc::Pexp_record((fields, None)) = &expr.pexp_desc else {
+        return;
+    };
+    let fields = arena.expr_field_list(*fields);
+    // The fields named exactly `key` (`{txt = Lident k} when k = key`).
+    let fields_named = |key: &'static str| {
+        fields.iter().filter(move |field| {
+            matches!(
+                arena.get_longident(field.lid.txt),
+                Longident::Lident(name) if arena.get_string(*name) == key
+            )
+        })
+    };
 
-                    for field in arena.expr_field_list(*fields) {
-                        let last_idx = arena.get_longident(field.lid.txt).last_idx();
-                        let last_str = arena.get_string(last_idx);
-                        match last_str {
-                            "version" => {
-                                if let ExpressionDesc::Pexp_constant(c) =
-                                    &crate::ast_payload::unwrap_braces(
-                                        arena,
-                                        arena.get_expr(field.expr),
-                                    )
-                                    .pexp_desc
-                                {
-                                    if let Constant::Integer(s, _) = &*c {
-                                        if let Ok(v) = arena.get_string(*s).parse::<i32>() {
-                                            version_raw = Some(v);
-                                        }
-                                    }
-                                }
-                            }
-                            "module_" => {
-                                match crate::ast_payload::semantic_string_of_expression(
-                                    arena,
-                                    arena.get_expr(field.expr),
-                                ) {
-                                    Ok(value) => {
-                                        if let Some(value) = value {
-                                            module_raw = Some(value);
-                                        }
-                                    }
-                                    Err(error) => {
-                                        set_fatal_error(config, error.loc, error.message);
-                                    }
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-
-                    // OCaml behavior: if module is not "react" (case-insensitive), it's "generic"
-                    // and version is always set to 4. Otherwise use explicit version.
-                    let is_generic = match &module_raw {
-                        Some(m) if m.to_lowercase() == "react" => false,
-                        Some(_) => true,
-                        None => false,
-                    };
-
-                    match (is_generic, version_raw) {
-                        (true, _) => config.version = 4,
-                        (false, Some(v)) => config.version = v,
-                        (false, None) => {}
-                    }
-
-                    if let Some(m) = module_raw {
-                        config.module_name = m;
-                    }
+    // jsx_ppx.ml:19-36, 51 `get_string ~key:"module_"`: the first field whose
+    // value has a semantic string; reading each value may raise.
+    let mut module_raw: Option<String> = None;
+    for field in fields_named("module_") {
+        match crate::ast_payload::semantic_string_of_expression(arena, arena.get_expr(field.expr)) {
+            Ok(value) => {
+                if module_raw.is_none() {
+                    module_raw = value;
                 }
             }
+            Err(error) => {
+                set_fatal_error(config, error.loc, error.message);
+                return;
+            }
         }
+    }
+    let is_generic = match &module_raw {
+        Some(m) => m.to_lowercase() != "react",
+        None => false,
+    };
+
+    // jsx_ppx.ml:61-71: only JSX v4 exists, so any other `version` is an
+    // error at the version value. `get_version_expr` is the first `version`
+    // field; `get_int` the first one holding an unsuffixed integer literal
+    // that `int_of_string` accepts.
+    if let Some(version_field) = fields_named("version").next() {
+        let version = fields_named("version").find_map(|field| {
+            match &crate::ast_payload::unwrap_braces(arena, arena.get_expr(field.expr)).pexp_desc {
+                ExpressionDesc::Pexp_constant(c) => match c {
+                    Constant::Integer(value, None) => Some(arena.get_string(*value)),
+                    _ => None,
+                },
+                _ => None,
+            }
+        });
+        match version.and_then(crate::types::decl::parse_ocaml_int_literal) {
+            Some(4) => config.version = 4,
+            _ => {
+                let loc = arena.get_expr(version_field.expr).pexp_loc;
+                set_fatal_error(config, loc, UNSUPPORTED_JSX_VERSION_MSG);
+                return;
+            }
+        }
+    }
+    if is_generic {
+        config.version = 4;
+    }
+    if let Some(m) = module_raw {
+        config.module_name = m;
     }
 }
 
@@ -5241,6 +5250,43 @@ fn subtree_may_change(idx: ExprIdx, arena: &ParseArena, memo: &mut Vec<u8>) -> b
 mod tests {
     use super::{JsxConfig, module_access_name, transform_structure_result};
     use crate::parser::{ExpressionDesc, Longident, Parser, StructureItemDesc, module, sexp_locs};
+
+    /// jsx_ppx.ml:61-71: a `version` other than 4 is an error at the
+    /// version value, also for a generic `module_`.
+    #[test]
+    fn jsx_config_rejects_versions_other_than_4() {
+        let error_at = |source: &str| {
+            let mut parser = Parser::new("test.res".to_string(), source);
+            let structure = module::parse_structure(&mut parser);
+            assert!(!parser.has_errors(), "{source}");
+            let arena = parser.arena_mut();
+            transform_structure_result(structure, 4, "react", arena)
+                .err()
+                .map(|error| {
+                    let start = arena.loc_start(error.loc);
+                    (error.message, start.line, start.cnum - start.bol)
+                })
+        };
+        let unsupported =
+            |line, column| Some((super::UNSUPPORTED_JSX_VERSION_MSG.to_string(), line, column));
+        assert_eq!(
+            error_at("@@jsxConfig({version: 3})\nlet x = <div />\n"),
+            unsupported(1, 22)
+        );
+        assert_eq!(
+            error_at("@@jsxConfig({version: \"4\"})\n"),
+            unsupported(1, 22)
+        );
+        assert_eq!(
+            error_at("@@jsxConfig({module_: \"Preact\", version: 3})\n"),
+            unsupported(1, 41)
+        );
+        assert_eq!(
+            error_at("@@jsxConfig({version: 0x4})\nlet x = <div />\n"),
+            None
+        );
+        assert_eq!(error_at("@@jsxConfig({module_: \"Preact\"})\n"), None);
+    }
 
     #[test]
     fn parses_dotted_custom_jsx_module_paths() {
