@@ -21217,6 +21217,88 @@ let s: option<string> = cell.value
         assert!(result.is_err(), "a mutable `{{}}` must not generalize");
     }
 
+    /// Type `program` after a record declaration `decl` and a polymorphic,
+    /// non-expansive `base: <ty>` (`assert(false)` is non-expansive,
+    /// typecore.ml `Texp_assert`), then use `binding` at two instances.
+    /// The parameter is invariant (`'a => 'a`) so the relaxed value
+    /// restriction cannot generalize an expansive `binding`.
+    fn uses_at_two_types(decl: &str, ty: &str, binding: &str) -> Result<(), TypeModError> {
+        typecheck_result(&format!(
+            "{decl}\nlet base: {ty}<'a> = assert(false)\nlet x = {binding}\nlet ints: {ty}<int> = x\nlet strings: {ty}<string> = x\n"
+        ))
+    }
+
+    #[test]
+    fn spread_generalizes_only_when_every_field_is_immutable() {
+        // The literal allocates every field of the record: written, copied
+        // from the spread, or left out (typecore.ml:2088-2108). Each
+        // immutable twin must generalize, so the mutable failure is the
+        // value restriction and not some other error.
+        let immutable = "type cell<'a> = {tag: int, value: option<'a => 'a>}";
+        let mutable = "type cell<'a> = {tag: int, mutable value: option<'a => 'a>}";
+        for binding in [
+            // `value` copied from the spread
+            "{...base, tag: 1}",
+            // `value` written over the spread
+            "{...base, value: None}",
+            // every field written over the spread
+            "{...base, tag: 1, value: None}",
+        ] {
+            uses_at_two_types(immutable, "cell", binding)
+                .unwrap_or_else(|e| panic!("`{binding}` of an immutable record: {e:?}"));
+            assert!(
+                uses_at_two_types(mutable, "cell", binding).is_err(),
+                "`{binding}` of a record with a mutable field must not generalize"
+            );
+        }
+    }
+
+    #[test]
+    fn spread_of_an_expansive_base_does_not_generalize() {
+        // `is_nonexpansive_opt extended_expression` (typecore.ml:2090).
+        let decl = "type cell<'a> = {tag: int, value: option<'a => 'a>}\nlet make = (): cell<'a> => assert(false)";
+        uses_at_two_types(decl, "cell", "{...base, tag: 1}").expect("a non-expansive spread generalizes");
+        assert!(
+            uses_at_two_types(decl, "cell", "{...make(), tag: 1}").is_err(),
+            "an expansive spread must not generalize"
+        );
+    }
+
+    #[test]
+    fn literal_leaving_out_a_mutable_field_does_not_generalize() {
+        // The omitted optional `value` is allocated too (typecore.ml:2106-2108).
+        uses_at_two_types("type cell<'a> = {tag: int, value?: 'a => 'a}", "cell", "{tag: 1}")
+            .expect("an immutable literal generalizes");
+        assert!(
+            uses_at_two_types("type cell<'a> = {tag: int, mutable value?: 'a => 'a}", "cell", "{tag: 1}")
+                .is_err(),
+            "an omitted mutable field must not generalize"
+        );
+    }
+
+    #[test]
+    fn inline_record_with_a_mutable_field_does_not_generalize() {
+        // An inline record literal is a `Texp_record` whose `lbl_all` holds
+        // the constructor's fields (typecore.ml:2106-2108).
+        let immutable = "type t<'a> = A({tag: int, value: option<'a => 'a>})";
+        let mutable = "type t<'a> = A({tag: int, mutable value: option<'a => 'a>})";
+        let binding = "A({tag: 1, value: None})";
+        uses_at_two_types(immutable, "t", binding).expect("an immutable inline record generalizes");
+        assert!(
+            uses_at_two_types(mutable, "t", binding).is_err(),
+            "a mutable inline record must not generalize"
+        );
+    }
+
+    #[test]
+    fn spread_of_an_unboxed_record_generalizes() {
+        uses_at_two_types(
+            "@unboxed type box<'a> = {value: option<'a => 'a>}",
+            "box",
+            "{...base, value: None}",
+        )
+        .expect("an immutable unboxed spread generalizes");
+    }
 
     /// The label of the field access a function `name` returns.
     fn body_field_label<'s>(typed: &'s Structure, name: &str) -> &'s LabelDescription {

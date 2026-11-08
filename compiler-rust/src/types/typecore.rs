@@ -18938,41 +18938,46 @@ fn is_nonexpansive_expression(tctx: &mut TypeCheckContext<'_>, exp: &Expression)
             extended_expression,
             ..
         } => {
-            // typecore.ml:2088-2105
-            fields.iter().all(|(label, _, expr)| {
-                label.lbl_mut == crate::types::MutableFlag::Immutable
-                    && is_nonexpansive_expression(tctx, expr)
-            }) && match extended_expression.as_deref() {
-                Some(expr) => is_nonexpansive_expression(tctx, expr),
-                // The optional fields the literal leaves out are allocated too.
-                None if fields.is_empty() => {
-                    // `{}` has no field to find the record's labels through:
-                    // `extract_concrete_record exp.exp_env exp.exp_type`,
-                    // `Not_found -> false` (typecore.ml:2098-2105).
-                    let ctx = tctx.type_ctx;
-                    let Some(env) = ctx.get_typed_env(exp.exp_env) else {
-                        return false;
-                    };
-                    match extract_concrete_record_type_info(
-                        exp.exp_type,
-                        &env,
-                        &mut tctx.persistent_env,
-                        ctx,
-                    ) {
-                        Some((_, _, decl)) => match &decl.type_kind {
-                            crate::types::TypeKind::TypeRecord(labels, _) => labels
-                                .iter()
-                                .all(|ld| ld.ld_mutable == crate::types::MutableFlag::Immutable),
-                            _ => false,
-                        },
-                        None => false,
-                    }
+            // typecore.ml:2088-2108
+            if !(fields
+                .iter()
+                .all(|(_, _, expr)| is_nonexpansive_expression(tctx, expr))
+                && extended_expression
+                    .as_deref()
+                    .is_none_or(|expr| is_nonexpansive_expression(tctx, expr)))
+            {
+                return false;
+            }
+            // The literal allocates every field of the record: written,
+            // copied from the spread, or left out.
+            if fields.is_empty() {
+                // `{}` has no field to find the record's labels through:
+                // `extract_concrete_record exp.exp_env exp.exp_type`,
+                // `Not_found -> false` (typecore.ml:2097-2105).
+                let ctx = tctx.type_ctx;
+                let Some(env) = ctx.get_typed_env(exp.exp_env) else {
+                    return false;
+                };
+                match extract_concrete_record_type_info(
+                    exp.exp_type,
+                    &env,
+                    &mut tctx.persistent_env,
+                    ctx,
+                ) {
+                    Some((_, _, decl)) => match &decl.type_kind {
+                        crate::types::TypeKind::TypeRecord(labels, _) => labels
+                            .iter()
+                            .all(|ld| ld.ld_mutable == crate::types::MutableFlag::Immutable),
+                        _ => false,
+                    },
+                    None => false,
                 }
+            } else {
                 // `Array.for_all ... lbl.lbl_all` of the first written label.
-                None => crate::types::typedtree::record_all_labels(tctx.type_ctx, fields)
+                crate::types::typedtree::record_all_labels(tctx.type_ctx, fields)
                     .expect("a non-empty record literal has the lbl_all of its labels")
                     .iter()
-                    .all(|label| label.lbl_mut == crate::types::MutableFlag::Immutable),
+                    .all(|label| label.lbl_mut == crate::types::MutableFlag::Immutable)
             }
         }
         ExpressionDesc::Texp_field(expr, _, _) => is_nonexpansive_expression(tctx, expr),
