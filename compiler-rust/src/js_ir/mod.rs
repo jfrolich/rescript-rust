@@ -18,6 +18,8 @@ pub mod arena_tree;
 pub mod build;
 #[cfg(test)]
 pub mod dump;
+#[cfg(test)]
+pub(crate) mod test_util;
 pub mod op;
 pub mod printer;
 pub mod program_printer;

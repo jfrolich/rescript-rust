@@ -3766,44 +3766,9 @@ mod tests {
     use crate::js_ir::arena::*;
     use crate::js_ir::build::{exp as JE, stmt as JS};
     use crate::js_ir::op::{IdentInfo, LengthObject, MutableFlag, PropertyName, UsedStats};
+    use crate::js_ir::test_util::{test_fun, test_props};
     use crate::js_ir::{CallInfo, JsRawInfo, ModuleId};
     use crate::lambda::TagInfo;
-
-    /// A function expression node, built raw (no smart-constructor folding).
-    fn test_fun(
-        is_method: bool,
-        params: &[Ident],
-        body: &[Stmt],
-        return_unit: bool,
-        async_: bool,
-        directive: Option<&str>,
-        j: &mut JsArena,
-    ) -> Expr {
-        let params = j.ident_list(params);
-        let body = JS::list(body, j);
-        let directive = directive.map(|d| j.str(d));
-        let f = j.fun_id(FunInfo {
-            is_method,
-            params,
-            body,
-            return_unit,
-            async_,
-            directive,
-        });
-        j.expr(ExprKind::Fun(f))
-    }
-
-    /// Object-literal properties for `ExprKind::Object`.
-    fn test_props(props: Vec<(PropertyName, Expr)>, j: &mut JsArena) -> PropList {
-        let props: Vec<(PropName, Expr)> = props
-            .into_iter()
-            .map(|(name, value)| match name {
-                PropertyName::Lit(s) => (PropName::Lit(j.str(&s)), value),
-                PropertyName::Symbol => (PropName::Symbol, value),
-            })
-            .collect();
-        j.prop_list(&props)
-    }
 
     /// Prints `body` as a function body.
     fn print_function_body_of(j: &JsArena, body: &[Stmt], return_unit: bool) -> String {
