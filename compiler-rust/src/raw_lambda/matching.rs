@@ -4,6 +4,7 @@
 //! It defines the core data structures (matrix, context, jumps, pattern_matching)
 //! and the operations on them used by the pattern matching compiler.
 
+use super::key_encode::{KeyEncode, KeyOut};
 use crate::fast_hash::AHashMap as HashMap;
 use crate::types::path::PathView;
 use std::borrow::{Borrow, Cow};
@@ -2252,69 +2253,6 @@ fn make_key_equals(b: &RawArena, e: RawLambda, key: &str) -> bool {
     writer.write_raw(&b.get(), e, &mut out).is_some() && out.matches_all()
 }
 
-/// Sink for [`MakeKeyWriter`]: builds the key, or compares it with an
-/// expected key as it is written.
-struct KeyOut<'e> {
-    buf: String,
-    expect: Option<&'e str>,
-    pos: usize,
-    diverged: bool,
-}
-
-impl<'e> KeyOut<'e> {
-    fn new(capacity: usize) -> Self {
-        KeyOut {
-            buf: String::with_capacity(capacity),
-            expect: None,
-            pos: 0,
-            diverged: false,
-        }
-    }
-
-    fn expecting(key: &'e str) -> Self {
-        KeyOut {
-            buf: String::new(),
-            expect: Some(key),
-            pos: 0,
-            diverged: false,
-        }
-    }
-
-    fn push_str(&mut self, s: &str) {
-        match self.expect {
-            None => self.buf.push_str(s),
-            Some(key) => {
-                if !self.diverged
-                    && key.as_bytes().get(self.pos..self.pos + s.len()) == Some(s.as_bytes())
-                {
-                    self.pos += s.len();
-                } else {
-                    self.diverged = true;
-                }
-            }
-        }
-    }
-
-    fn push(&mut self, c: char) {
-        self.push_str(c.encode_utf8(&mut [0; 4]));
-    }
-
-    fn matches_all(&self) -> bool {
-        !self.diverged && self.expect.is_some_and(|key| key.len() == self.pos)
-    }
-}
-
-impl std::fmt::Write for KeyOut<'_> {
-    fn write_str(&mut self, s: &str) -> std::fmt::Result {
-        self.push_str(s);
-        if self.diverged {
-            Err(std::fmt::Error)
-        } else {
-            Ok(())
-        }
-    }
-}
-
 enum KeyBody<'a> {
     Raw(RawLambda),
     Action(&'a MatchAction),
@@ -2406,7 +2344,9 @@ impl<'b> MakeKeyWriter<'b> {
                 Some(())
             }
             View::Const(c) => {
-                write!(out, "Lconst({c:?})").ok()?;
+                out.push_str("Lconst(");
+                c.encode(out);
+                out.push(')');
                 Some(())
             }
             View::GlobalModule(id) => {
@@ -2425,12 +2365,11 @@ impl<'b> MakeKeyWriter<'b> {
                 self.write_raw(a, func, out)?;
                 out.push_str(",[");
                 self.write_raw_list(a, args, out)?;
-                write!(
-                    out,
-                    "],{:?},{:?},{})",
-                    info.inlined, info.status, transformed_jsx
-                )
-                .ok()?;
+                out.push_str("],");
+                info.inlined.encode(out);
+                info.status.encode(out);
+                transformed_jsx.encode(out);
+                out.push(')');
                 Some(())
             }
             View::Let(kind, x, ex, body) => {
@@ -2438,7 +2377,9 @@ impl<'b> MakeKeyWriter<'b> {
             }
             View::Prim(primitive, args, _) => {
                 charge_logical_record_fields(&mut self.count, primitive, args.len())?;
-                write!(out, "Lprim({primitive:?},[").ok()?;
+                out.push_str("Lprim(");
+                primitive.encode(out);
+                out.push_str(",[");
                 self.write_raw_list(a, args, out)?;
                 out.push_str("])");
                 Some(())
@@ -2464,7 +2405,9 @@ impl<'b> MakeKeyWriter<'b> {
                 }
                 out.push_str("],fail=");
                 self.write_raw_opt(a, sw.actions.fail, out)?;
-                write!(out, ",names={:?})", sw.payload.dispatch).ok()?;
+                out.push_str(",names=");
+                sw.payload.dispatch.encode(out);
+                out.push(')');
                 Some(())
             }
             View::StringSwitch(scrut, sw) => {
@@ -2475,7 +2418,8 @@ impl<'b> MakeKeyWriter<'b> {
                     if idx > 0 {
                         out.push(',');
                     }
-                    write!(out, "{label:?}:").ok()?;
+                    label.encode(out);
+                    out.push(':');
                     self.write_raw(a, act, out)?;
                 }
                 out.push_str("],");
@@ -2591,7 +2535,8 @@ impl<'b> MakeKeyWriter<'b> {
         }
 
         out.push_str("Llet(");
-        write!(out, "{kind:?},").ok()?;
+        kind.encode(out);
+        out.push(',');
         let synthetic_stamp = self.next_id;
         self.next_id += 1;
         write_synthetic_ident_key(out, x.name(), synthetic_stamp);

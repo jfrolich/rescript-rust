@@ -10,6 +10,7 @@
 //! generation consume.
 
 pub mod convert;
+mod key_encode;
 pub(crate) mod lambda_scc;
 pub mod loc;
 pub mod lower;
