@@ -678,7 +678,6 @@ fn compile_in_process(
                     Default::default(),
                     false,
                 ),
-                interface.new_alias_rewrites.into_iter().collect(),
             );
         }
     }

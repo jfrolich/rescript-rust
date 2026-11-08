@@ -182,13 +182,8 @@ impl UnitDigests {
 
     /// The module's interface encoded for storage, as its extras (`None` for
     /// none) and core.
-    pub fn encode_parts(
-        &self,
-        module_name: &str,
-        alias_rewrites: &[(String, rescript_compiler::types::path::Path)],
-    ) -> Option<(Option<Vec<u8>>, Vec<u8>)> {
-        self.registry
-            .encode_stored_module_parts(module_name, alias_rewrites)
+    pub fn encode_parts(&self, module_name: &str) -> Option<(Option<Vec<u8>>, Vec<u8>)> {
+        self.registry.encode_stored_module_parts(module_name)
     }
 
     /// The module's interface digest and item digests, `None` when it is not
@@ -304,7 +299,6 @@ pub fn current_record(
         .as_ref()
         .and_then(|previous| previous.packages.get(package_name))
         .map(|record| &record.state.stored_interfaces);
-    let alias_rewrites = &*compiles.module_alias_rewrites;
     record.interface_updates = build_state
         .compiled_modules
         .par_iter()
@@ -314,8 +308,7 @@ pub fn current_record(
                 .is_some_and(|module| module.package_name == package_name && !module.compile_dirty)
         })
         .filter_map(|module_name| {
-            let aliases = alias_rewrites.get(module_name).map(Vec::as_slice).unwrap_or(&[]);
-            let (extras, core) = digests.encode_parts(module_name, aliases)?;
+            let (extras, core) = digests.encode_parts(module_name)?;
             let mut hasher = blake3::Hasher::new();
             hasher.update(&core);
             if let Some(extras) = &extras {
@@ -817,15 +810,14 @@ pub fn load_stored(build_state: &BuildCommandState, modules: &AHashSet<String>) 
         })
         .collect();
     let mut loaded = AHashSet::new();
-    let mut alias_rewrites = build_state.module_alias_rewrites.lock().unwrap();
     let mut registry = build_state.module_registry.lock().unwrap();
     for (module_name, extras, fetch) in extras {
         let core = rescript_compiler::cmi::persistent_env::PendingCore::Fetch(fetch);
-        let Some(aliases) = registry.register_stored_parts(&module_name, extras.as_deref(), core) else {
+        if registry
+            .register_stored_parts(&module_name, extras.as_deref(), core)
+            .is_none()
+        {
             continue;
-        };
-        if !aliases.is_empty() {
-            alias_rewrites.insert(module_name.clone(), aliases);
         }
         loaded.insert(module_name);
     }
@@ -1540,8 +1532,6 @@ pub struct CompileRecords<'a> {
     loaded_units: MutexGuard<'a, AHashMap<String, AHashSet<String>>>,
     unit_reads: MutexGuard<'a, AHashMap<String, PendingReads>>,
     verified_imports: MutexGuard<'a, AHashMap<String, AHashMap<String, u64>>>,
-    module_alias_rewrites:
-        MutexGuard<'a, AHashMap<String, Vec<(String, rescript_compiler::types::path::Path)>>>,
     in_memory_deps: MutexGuard<'a, AHashMap<String, Dependencies>>,
 }
 
@@ -1551,7 +1541,6 @@ impl<'a> CompileRecords<'a> {
             loaded_units: build_state.loaded_units.lock().unwrap(),
             unit_reads: build_state.unit_reads.lock().unwrap(),
             verified_imports: build_state.verified_imports.lock().unwrap(),
-            module_alias_rewrites: build_state.module_alias_rewrites.lock().unwrap(),
             in_memory_deps: build_state.in_memory_deps.lock().unwrap(),
         }
     }

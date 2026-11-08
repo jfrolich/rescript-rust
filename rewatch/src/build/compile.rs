@@ -289,7 +289,6 @@ struct PendingRegistryUpdate {
     module_name: String,
     pers_struct: Option<Arc<PortablePersStruct>>,
     module_info: InMemoryModuleInfo,
-    alias_rewrites: AHashMap<String, TypePath>,
 }
 
 struct InProcessModuleResult {
@@ -313,29 +312,12 @@ fn apply_pending_registry_updates(
         return;
     }
 
-    {
-        let mut alias_rewrites = build_command_state.module_alias_rewrites.lock().unwrap();
-        for update in &updates {
-            if !update.alias_rewrites.is_empty() {
-                alias_rewrites
-                    .entry(update.module_name.clone())
-                    .or_default()
-                    .extend(update.alias_rewrites.iter().map(|(k, v)| (k.clone(), v.clone())));
-            }
-        }
-    }
     let mut registry = build_command_state.module_registry.lock().unwrap();
     for update in updates {
         if let Some(pers_struct) = update.pers_struct {
-            registry.register_module_arc(
-                &update.module_name,
-                pers_struct,
-                update.module_info,
-                update.alias_rewrites,
-            );
+            registry.register_module_arc(&update.module_name, pers_struct, update.module_info);
         } else {
             registry.insert_module_info(update.module_name, update.module_info);
-            registry.extend_alias_rewrites(update.alias_rewrites);
         }
     }
 }
@@ -2377,7 +2359,6 @@ fn js_metadata_registry_updates_for_package(
     has_interface: bool,
     interface_registry_update: Option<PendingRegistryUpdate>,
     pers_struct: Option<PortablePersStruct>,
-    new_alias_rewrites: AHashMap<String, TypePath>,
 ) -> Vec<PendingRegistryUpdate> {
     let module_info = in_memory_module_info_for_package(
         package,
@@ -2400,7 +2381,6 @@ fn js_metadata_registry_updates_for_package(
                 module_name: module_name.to_string(),
                 pers_struct: None,
                 module_info,
-                alias_rewrites: AHashMap::new(),
             }]
         }
     } else if let Some(ps) = pers_struct {
@@ -2408,7 +2388,6 @@ fn js_metadata_registry_updates_for_package(
             module_name: module_name.to_string(),
             pers_struct: Some(Arc::new(ps)),
             module_info,
-            alias_rewrites: new_alias_rewrites,
         }]
     } else {
         Vec::new()
@@ -2894,9 +2873,6 @@ impl RuntimeStore {
     }
 }
 
-/// The alias rewrites each runtime module published, by module.
-type RuntimeAliasRewrites = Mutex<AHashMap<String, Vec<(String, rescript_compiler::types::path::Path)>>>;
-
 /// Register the runtime interfaces `store` holds for these sources, without
 /// decoding their signatures (see `ModuleRegistry::register_stored_lazily`).
 /// Returns whether all of them were registered.
@@ -2926,19 +2902,13 @@ fn store_runtime_interfaces(
     store: &RuntimeStore,
     key: &str,
     runtime_modules: &[RuntimeModuleSource],
-    published_aliases: RuntimeAliasRewrites,
 ) {
-    let published_aliases = published_aliases.into_inner().unwrap();
     let interfaces: Option<Vec<(String, Vec<u8>)>> = {
         let registry = registry.lock().unwrap();
         runtime_modules
             .iter()
             .map(|module| {
-                let aliases = published_aliases
-                    .get(&module.module_name)
-                    .map(Vec::as_slice)
-                    .unwrap_or(&[]);
-                let data = registry.encode_stored_module(&module.module_name, aliases)?;
+                let data = registry.encode_stored_module(&module.module_name)?;
                 Some((module.module_name.clone(), data))
             })
             .collect()
@@ -3002,7 +2972,6 @@ pub(crate) fn pre_compile_runtime_modules(
     populate_runtime_deps(&mut runtime_modules);
 
     seed_runtime_registry(registry, &runtime_modules);
-    let published_aliases = RuntimeAliasRewrites::default();
     runtime_compile_pool.install(|| {
         compile_runtime_modules_parallel(
             registry,
@@ -3010,11 +2979,10 @@ pub(crate) fn pre_compile_runtime_modules(
             &runtime_path,
             &runtime_config,
             &runtime_modules,
-            &published_aliases,
         )
     })?;
     if let Some((store, key)) = &store_key {
-        store_runtime_interfaces(registry, store, key, &runtime_modules, published_aliases);
+        store_runtime_interfaces(registry, store, key, &runtime_modules);
     }
 
     if let (Some(start), Some(before)) = (runtime_timing_start, runtime_timing_before) {
@@ -3087,7 +3055,6 @@ fn compile_runtime_modules_parallel(
     runtime_path: &Path,
     runtime_config: &config::Config,
     runtime_modules: &[RuntimeModuleSource],
-    published_aliases: &RuntimeAliasRewrites,
 ) -> Result<()> {
     let (mut pending_deps, dependents) = runtime_dependency_graph(runtime_modules);
     let priorities = runtime_critical_path_priorities(runtime_modules, &dependents);
@@ -3127,7 +3094,6 @@ fn compile_runtime_modules_parallel(
                         runtime_config,
                         module,
                         registry_snapshot,
-                        published_aliases,
                     );
                     let _ = tx.send(RuntimeCompletionMsg { idx, result });
                 });
@@ -3175,7 +3141,6 @@ fn compile_runtime_modules_parallel(
             runtime_config,
             runtime_modules,
             &completed,
-            published_aliases,
         )?;
     }
 
@@ -3189,7 +3154,6 @@ fn compile_runtime_cycle_remainder_serial(
     runtime_config: &config::Config,
     runtime_modules: &[RuntimeModuleSource],
     completed: &[bool],
-    published_aliases: &RuntimeAliasRewrites,
 ) -> Result<()> {
     debug!("runtime dependency graph has a cycle; compiling remaining modules serially");
     let worker_registry_template = registry.lock().unwrap().for_worker_snapshot();
@@ -3205,7 +3169,6 @@ fn compile_runtime_cycle_remainder_serial(
             runtime_config,
             &runtime_modules[idx],
             registry_snapshot,
-            published_aliases,
         )?;
     }
     Ok(())
@@ -3218,7 +3181,6 @@ fn compile_runtime_module_from_source(
     runtime_config: &config::Config,
     module: &RuntimeModuleSource,
     registry_snapshot: ModuleRegistry,
-    published_aliases: &RuntimeAliasRewrites,
 ) -> Result<()> {
     let options = runtime_compiler_options(
         runtime_root,
@@ -3231,7 +3193,6 @@ fn compile_runtime_module_from_source(
     let mut local_registry = registry_snapshot;
     let has_runtime_interface = module.resi.is_some();
     let mut interface_pers_struct = None;
-    let mut interface_alias_rewrites = AHashMap::new();
 
     if let Some(interface) = &module.resi {
         let intf_result = rescript_compiler::driver::typecheck_preprocessed_signature_in_process(
@@ -3249,14 +3210,12 @@ fn compile_runtime_module_from_source(
             )
         })?;
 
-        interface_alias_rewrites = intf_result.new_alias_rewrites;
         if let Some(pers_struct) = intf_result.pers_struct {
             let pers_struct = Arc::new(pers_struct);
             local_registry.register_module_arc(
                 &module.module_name,
                 pers_struct.clone(),
                 InMemoryModuleInfo::new(module.res_path.clone(), true, AHashMap::new(), true),
-                interface_alias_rewrites.clone(),
             );
             interface_pers_struct = Some(pers_struct);
         }
@@ -3288,43 +3247,18 @@ fn compile_runtime_module_from_source(
     .with_cmj_export_lambdas(compile_result.cmj_export_lambdas)
     .with_cmj_hoisted_exports(compile_result.hoisted_exports);
 
-    let published: &AHashMap<String, rescript_compiler::types::path::Path> = if has_runtime_interface {
-        &interface_alias_rewrites
-    } else {
-        &compile_result.new_alias_rewrites
-    };
-    if !published.is_empty() {
-        let mut aliases: Vec<_> = published.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-        aliases.sort_by(|a, b| a.0.cmp(&b.0));
-        published_aliases
-            .lock()
-            .unwrap()
-            .insert(module.module_name.clone(), aliases);
-    }
     let mut shared_registry = registry.lock().unwrap();
     if has_runtime_interface {
         // OCaml compiler/ml/typemod.ml:1742-1758 checks the implementation
         // against the already-saved interface `.cmi`; typemod.ml:1779-1787
-        // only saves an inferred `.cmi` in the no-interface branch. Keep
-        // implementation-local module aliases out of the published registry.
+        // only saves an inferred `.cmi` in the no-interface branch.
         if let Some(pers_struct) = interface_pers_struct {
-            shared_registry.register_module_arc(
-                &module.module_name,
-                pers_struct,
-                module_info,
-                interface_alias_rewrites,
-            );
+            shared_registry.register_module_arc(&module.module_name, pers_struct, module_info);
         } else {
             shared_registry.insert_module_info(module.module_name.clone(), module_info);
-            shared_registry.extend_alias_rewrites(interface_alias_rewrites);
         }
     } else if let Some(pers_struct) = compile_result.pers_struct {
-        shared_registry.register_module(
-            &module.module_name,
-            pers_struct,
-            module_info,
-            compile_result.new_alias_rewrites,
-        );
+        shared_registry.register_module(&module.module_name, pers_struct, module_info);
     }
 
     Ok(())
@@ -3886,28 +3820,20 @@ fn compile_module_in_process_to_js_boundary(
             .as_ref()
             .map(|ps| ps.fingerprint)
             .unwrap_or(0);
-        let intf_alias_rewrites = intf_result.new_alias_rewrites;
         if let Some(ps) = intf_result.pers_struct {
             let ps = Arc::new(ps);
             let module_info = provisional_module_info.clone();
-            local_registry.register_module_arc(
-                module_name,
-                ps.clone(),
-                module_info.clone(),
-                intf_alias_rewrites.clone(),
-            );
+            local_registry.register_module_arc(module_name, ps.clone(), module_info.clone());
             interface_registry_update = Some(PendingRegistryUpdate {
                 module_name: module_name.to_string(),
                 pers_struct: Some(ps),
                 module_info,
-                alias_rewrites: intf_alias_rewrites,
             });
         } else {
             interface_registry_update = Some(PendingRegistryUpdate {
                 module_name: module_name.to_string(),
                 pers_struct: None,
                 module_info: provisional_module_info.clone(),
-                alias_rewrites: intf_alias_rewrites,
             });
         }
 
@@ -3950,14 +3876,12 @@ fn compile_module_in_process_to_js_boundary(
                     module_name: signature_module_name.clone(),
                     pers_struct: Some(Arc::new(pers_struct)),
                     module_info,
-                    alias_rewrites: ready.new_alias_rewrites,
                 }]
             } else {
                 vec![PendingRegistryUpdate {
                     module_name: signature_module_name.clone(),
                     pers_struct: None,
                     module_info,
-                    alias_rewrites: ready.new_alias_rewrites,
                 }]
             };
             hooks
@@ -4239,7 +4163,6 @@ fn finish_in_process_js_inner(
             module_name: module_name.clone(),
             pers_struct: None,
             module_info,
-            alias_rewrites: AHashMap::new(),
         }];
         metadata_registry_updates = Some(send_js_metadata_ready(
             metadata_tx,
@@ -4283,7 +4206,6 @@ fn finish_in_process_js_inner(
             has_interface,
             metadata_interface_registry_update,
             compile_result.pers_struct,
-            compile_result.new_alias_rewrites,
         );
         send_js_metadata_ready(metadata_tx, module_name.clone(), registry_updates)
     });

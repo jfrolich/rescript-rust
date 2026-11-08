@@ -553,7 +553,9 @@ pub struct ModuleRegistry {
     disk_modules: SharedRegistryMap<bool>,
     /// Module metadata (source paths, purity, runtime status).
     module_info: SharedRegistryMap<InMemoryModuleInfo>,
-    /// Alias prefix rewrites (flattened_name -> qualified_path).
+    /// Alias prefix rewrites (flattened_name -> qualified_path) of the
+    /// registered namespace modules. A compiled or stored module's aliases are
+    /// not shared: a compilation collects them when it loads the module.
     alias_rewrites: SharedRegistryMap<Path>,
     /// Source file paths for ALL modules, including those not yet compiled.
     /// Used for on-demand source-based type checking when a module is needed
@@ -721,11 +723,7 @@ impl ModuleRegistry {
 
     /// The module's published interface encoded for storage (see
     /// [`super::stored_module`]), `None` when it is not registered.
-    pub fn encode_stored_module(
-        &self,
-        name: &str,
-        alias_rewrites: &[(String, Path)],
-    ) -> Option<Vec<u8>> {
+    pub fn encode_stored_module(&self, name: &str) -> Option<Vec<u8>> {
         let (pers, info) = self.registered(name);
         let info = info?;
         let gentype_declarations = crate::gentype::main::type_declarations_of_module(name);
@@ -733,7 +731,6 @@ impl ModuleRegistry {
             &super::stored_module::StoredModuleRef {
                 pers_struct: pers.as_deref(),
                 info: &info,
-                alias_rewrites,
                 gentype_declarations: &gentype_declarations,
             },
         ))
@@ -741,11 +738,7 @@ impl ModuleRegistry {
 
     /// [`Self::encode_stored_module`] as its extras, `None` when it has none,
     /// and core (see [`super::stored_module::encode_parts`]).
-    pub fn encode_stored_module_parts(
-        &self,
-        name: &str,
-        alias_rewrites: &[(String, Path)],
-    ) -> Option<(Option<Vec<u8>>, Vec<u8>)> {
+    pub fn encode_stored_module_parts(&self, name: &str) -> Option<(Option<Vec<u8>>, Vec<u8>)> {
         let (pers, info) = self.registered(name);
         let info = info?;
         let gentype_declarations = crate::gentype::main::type_declarations_of_module(name);
@@ -753,24 +746,18 @@ impl ModuleRegistry {
             &super::stored_module::StoredModuleRef {
                 pers_struct: pers.as_deref(),
                 info: &info,
-                alias_rewrites,
                 gentype_declarations: &gentype_declarations,
             },
         ))
     }
 
     /// Register a stored module's interface (see
-    /// [`super::stored_module::encode`]), as compiling it would. Its alias
-    /// rewrites and GenType declarations are registered now; its signature
-    /// and JS metadata are decoded by the first lookup of the module, so a
-    /// build that registers many stored modules pays only for those its
-    /// compiles read. Returns the module's alias rewrites, or `None`,
-    /// registering nothing, when the data does not decode.
-    pub fn register_stored_lazily(
-        &mut self,
-        name: &str,
-        data: &[u8],
-    ) -> Option<Vec<(String, Path)>> {
+    /// [`super::stored_module::encode`]), as compiling it would. Its GenType
+    /// declarations are registered now; its signature and JS metadata are
+    /// decoded by the first lookup of the module, so a build that registers
+    /// many stored modules pays only for those its compiles read. Returns
+    /// `None`, registering nothing, when the data does not decode.
+    pub fn register_stored_lazily(&mut self, name: &str, data: &[u8]) -> Option<()> {
         let (extras, core) = super::stored_module::split(data)?;
         self.register_stored_parts(name, Some(extras), PendingCore::Bytes(core.to_vec()))
     }
@@ -784,7 +771,7 @@ impl ModuleRegistry {
         name: &str,
         extras: Option<&[u8]>,
         core: PendingCore,
-    ) -> Option<Vec<(String, Path)>> {
+    ) -> Option<()> {
         assert!(
             !self.write_to_local,
             "stored modules are registered in the shared registry"
@@ -794,13 +781,12 @@ impl ModuleRegistry {
             None => super::stored_module::StoredExtras::default(),
         };
         let lazy = self.lazy_stored_modules();
-        self.extend_alias_rewrites(extras.alias_rewrite_map());
         crate::gentype::main::restore_type_declarations(name, extras.gentype_declarations);
         lazy.pending
             .lock()
             .unwrap()
             .insert(name.to_string(), Arc::new(Mutex::new(Some(core))));
-        Some(extras.alias_rewrites)
+        Some(())
     }
 
     /// Decode `name`'s stored module now if it is registered with
@@ -973,9 +959,8 @@ impl ModuleRegistry {
         name: &str,
         portable: PortablePersStruct,
         info: InMemoryModuleInfo,
-        new_alias_rewrites: HashMap<String, Path>,
     ) {
-        self.register_module_arc(name, Arc::new(portable), info, new_alias_rewrites);
+        self.register_module_arc(name, Arc::new(portable), info);
     }
 
     /// Store a compiled module's finalized PersStruct and metadata from an
@@ -985,11 +970,9 @@ impl ModuleRegistry {
         name: &str,
         portable: Arc<PortablePersStruct>,
         info: InMemoryModuleInfo,
-        new_alias_rewrites: HashMap<String, Path>,
     ) {
         self.insert_cached_module(name.to_string(), portable);
         self.insert_module_info(name.to_string(), info);
-        self.extend_alias_rewrites(new_alias_rewrites);
     }
 
     fn insert_cached_module(&mut self, name: String, portable: Arc<PortablePersStruct>) {
@@ -1438,21 +1421,25 @@ impl PersistentEnv {
     }
 
     /// Extract the diff produced by this compilation: the newly-registered
-    /// PersStruct (serialized to portable form) and any new alias rewrites.
-    /// Must be called while the TypeContext is still alive so the type graph
-    /// can be serialized. Used to update the shared ModuleRegistry after
-    /// compilation.
+    /// PersStruct, serialized to portable form. Must be called while the
+    /// TypeContext is still alive so the type graph can be serialized. Used
+    /// to update the shared ModuleRegistry after compilation.
+    ///
+    /// The alias rewrites the compilation collected stay with it: a
+    /// compilation that reads this module collects them from its signature
+    /// when it loads it (`find_pers_struct`), as OCaml scrapes the aliases of
+    /// the units a compilation reads (`compiler/ml/env.ml:1513-1538`), so what
+    /// a compilation sees does not depend on which other modules compiled
+    /// before it.
     pub fn extract_module_update(
         &self,
         module_name: &str,
         ctx: &TypeContext,
         arena: Option<&crate::parse_arena::ParseArena>,
-    ) -> (Option<PortablePersStruct>, HashMap<String, Path>) {
-        let portable = self
-            .cache_lookup(module_name)
+    ) -> Option<PortablePersStruct> {
+        self.cache_lookup(module_name)
             .and_then(|opt| opt)
-            .map(|ps| portable_types::serialize_pers_struct(ps.as_ref(), ctx, arena));
-        (portable, self.view.alias_prefix_rewrites.local_clone())
+            .map(|ps| portable_types::serialize_pers_struct(ps.as_ref(), ctx, arena))
     }
 
     /// Extract all currently-cached modules as portable structs, plus the full
@@ -7543,28 +7530,15 @@ mod resolution_view_tests {
             "Stored",
             portable,
             InMemoryModuleInfo::new(PathBuf::from("Stored.res"), true, HashMap::new(), true),
-            HashMap::new(),
         );
-        let alias = (
-            "Stored__Flat".to_string(),
-            Path::pident(Ident::create_persistent("Stored")),
-        );
-        let data = compiled
-            .encode_stored_module("Stored", std::slice::from_ref(&alias))
-            .unwrap();
+        let data = compiled.encode_stored_module("Stored").unwrap();
 
         let mut registry = ModuleRegistry::new();
         assert!(registry.register_stored_lazily("Bad", &data[..3]).is_none());
-        let aliases = registry.register_stored_lazily("Stored", &data).unwrap();
-        assert_eq!(aliases.len(), 1);
+        assert!(registry.register_stored_lazily("Stored", &data).is_some());
         assert!(registry.is_pending_stored("Stored"));
         assert!(!registry.is_empty());
-        // Alias rewrites are registered up front.
         let env = PersistentEnv::from_registry(&registry);
-        assert!(
-            env.qualified_alias_path_for_flattened_head("Stored__Flat")
-                .is_some()
-        );
         assert!(registry.is_pending_stored("Stored"));
         // A lookup through any snapshot decodes the module into the shared maps.
         let snapshot = registry.for_worker_snapshot();
@@ -7580,7 +7554,6 @@ mod resolution_view_tests {
             "Other",
             PortablePersStruct::clone(&snapshot.registered("Stored").0.unwrap()),
             InMemoryModuleInfo::new(PathBuf::from("Other.res"), false, HashMap::new(), false),
-            HashMap::new(),
         );
         assert!(!registry.is_pending_stored("Other"));
         assert!(!registry.module_info_is_runtime("Other"));

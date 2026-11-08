@@ -316,7 +316,6 @@ pub struct BuildCommandState {
     // module -> unit -> the unit's interface digest now.
     pub verified_imports: Mutex<AHashMap<String, AHashMap<String, u64>>>,
     // The alias rewrites each module registered, for its stored interface.
-    pub module_alias_rewrites: Mutex<AHashMap<String, Vec<(String, rescript_compiler::types::path::Path)>>>,
     // The modules this build compiled (written or not).
     pub compiled_modules: AHashSet<String>,
     // The build stopped at a parse error, before planning: it compiled
@@ -463,7 +462,6 @@ impl BuildCommandState {
             loaded_units: Mutex::new(AHashMap::new()),
             unit_reads: Mutex::new(AHashMap::new()),
             verified_imports: Mutex::new(AHashMap::new()),
-            module_alias_rewrites: Mutex::new(AHashMap::new()),
             compiled_modules: AHashSet::new(),
             stopped_at_parse: false,
             invalidated_modules: AHashSet::new(),
@@ -624,7 +622,6 @@ impl BuildCommandState {
         is_pure: bool,
         cmj_export_constants: AHashMap<String, CmjExportConstant>,
         is_runtime: bool,
-        new_alias_rewrites: ahash::AHashMap<String, rescript_compiler::types::path::Path>,
     ) {
         self.update_module_registry_arc(
             module_name,
@@ -633,7 +630,6 @@ impl BuildCommandState {
             is_pure,
             cmj_export_constants,
             is_runtime,
-            new_alias_rewrites,
         );
     }
 
@@ -646,7 +642,6 @@ impl BuildCommandState {
         is_pure: bool,
         cmj_export_constants: AHashMap<String, CmjExportConstant>,
         is_runtime: bool,
-        new_alias_rewrites: ahash::AHashMap<String, rescript_compiler::types::path::Path>,
     ) {
         let info = rescript_compiler::cmi::persistent_env::InMemoryModuleInfo::new(
             source_path,
@@ -654,12 +649,10 @@ impl BuildCommandState {
             cmj_export_constants,
             is_runtime,
         );
-        self.module_registry.lock().unwrap().register_module_arc(
-            module_name,
-            pers_struct,
-            info,
-            new_alias_rewrites,
-        );
+        self.module_registry
+            .lock()
+            .unwrap()
+            .register_module_arc(module_name, pers_struct, info);
     }
 
     /// Register a namespace in the module registry.

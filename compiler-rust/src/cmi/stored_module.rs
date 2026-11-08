@@ -1,38 +1,32 @@
 //! A module's published interface as an incremental build stores it: its
 //! portable signature, the JS metadata other modules' code generation reads,
-//! the alias rewrites it registered, and the GenType type declarations of its
-//! typed artifacts (GenType translates imported types with them). Loading one stands in for compiling
+//! and the GenType type declarations of its typed artifacts (GenType
+//! translates imported types with them). Loading one stands in for compiling
 //! an unchanged dependency.
 //!
 //! The encoding has two parts, so a build can register a stored module
 //! without decoding all of it (see `ModuleRegistry::register_stored_lazily`):
 //!
-//! - the extras: the alias rewrites and GenType declarations, which other
-//!   modules' compiles look up by flattened name or typed-artifact path and
-//!   so must be registered up front;
+//! - the extras: the GenType declarations, which other modules' compiles
+//!   look up by typed-artifact path and so must be registered up front;
 //! - the core: the signature and JS metadata, which a compile only reads
 //!   through the module's name, decoded the first time it is looked up.
 //!
 //! An encoded module is the extras' length (4 bytes, little endian), the
 //! extras, then the core.
 
-use ahash::AHashMap as HashMap;
-
 use super::persistent_env::InMemoryModuleInfo;
 use super::portable_types::PortablePersStruct;
-use crate::types::path::Path;
 
 /// Borrowed form, for encoding straight from the registry.
 pub struct StoredModuleRef<'a> {
     pub pers_struct: Option<&'a PortablePersStruct>,
     pub info: &'a InMemoryModuleInfo,
-    pub alias_rewrites: &'a [(String, Path)],
     pub gentype_declarations: &'a [(String, GentypeDeclarations)],
 }
 
 #[derive(serde::Serialize)]
 struct ExtrasRef<'a> {
-    alias_rewrites: &'a [(String, Path)],
     gentype_declarations: &'a [(String, GentypeDeclarations)],
 }
 
@@ -48,17 +42,8 @@ pub type GentypeDeclarations = crate::gentype::main::EncodedTypeDeclarations;
 /// The part of a stored module registered up front.
 #[derive(serde::Deserialize, Default)]
 pub struct StoredExtras {
-    /// The alias rewrites the module registered (flattened name to path).
-    pub alias_rewrites: Vec<(String, Path)>,
     /// The GenType declarations of the module's typed artifacts.
     pub gentype_declarations: Vec<(String, GentypeDeclarations)>,
-}
-
-impl StoredExtras {
-    /// [`Self::alias_rewrites`] as a map.
-    pub fn alias_rewrite_map(&self) -> HashMap<String, Path> {
-        self.alias_rewrites.iter().cloned().collect()
-    }
 }
 
 /// The part of a stored module decoded when the module is first looked up.
@@ -83,7 +68,6 @@ pub fn encode(module: &StoredModuleRef<'_>) -> Vec<u8> {
 
 fn encode_extras(module: &StoredModuleRef<'_>) -> Vec<u8> {
     crate::binser::to_vec(&ExtrasRef {
-        alias_rewrites: module.alias_rewrites,
         gentype_declarations: module.gentype_declarations,
     })
     .expect("encoding to memory cannot fail")
@@ -100,8 +84,7 @@ fn encode_core(module: &StoredModuleRef<'_>) -> Vec<u8> {
 /// A module's extras, `None` when it has none, and core, encoded
 /// separately so a build can store the core where it reads it only on demand.
 pub fn encode_parts(module: &StoredModuleRef<'_>) -> (Option<Vec<u8>>, Vec<u8>) {
-    let extras = (!module.alias_rewrites.is_empty() || !module.gentype_declarations.is_empty())
-        .then(|| encode_extras(module));
+    let extras = (!module.gentype_declarations.is_empty()).then(|| encode_extras(module));
     (extras, encode_core(module))
 }
 
