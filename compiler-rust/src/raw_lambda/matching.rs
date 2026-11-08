@@ -2223,9 +2223,9 @@ fn make_key(b: &RawArena, e: RawLambda) -> Option<RawLambda> {
 /// Returns None if the lambda cannot be normalized.
 fn make_key_string(b: &RawArena, e: RawLambda) -> Option<String> {
     let mut writer = MakeKeyWriter::new(b);
-    let mut out = String::with_capacity(128);
+    let mut out = KeyOut::new(128);
     writer.write_raw(&b.get(), e, &mut out)?;
-    Some(out)
+    Some(out.buf)
 }
 
 /// Convert a delayed match action to the same structural key as
@@ -2238,9 +2238,81 @@ fn make_key_string(b: &RawArena, e: RawLambda) -> Option<String> {
 /// `max_raw = 32` cutoff from `lambda.ml:434,438-440`.
 fn make_key_string_action(b: &RawArena, action: &MatchAction) -> Option<String> {
     let mut writer = MakeKeyWriter::new(b);
-    let mut out = String::with_capacity(128);
+    let mut out = KeyOut::new(128);
     writer.write_action(action, &mut out)?;
-    Some(out)
+    Some(out.buf)
+}
+
+/// Whether `e`'s `Lambda.make_key` exists and equals `key`. Writes the key
+/// against `key` and stops at the first byte that differs, so unequal
+/// actions are rejected without normalizing them in full.
+fn make_key_equals(b: &RawArena, e: RawLambda, key: &str) -> bool {
+    let mut writer = MakeKeyWriter::new(b);
+    let mut out = KeyOut::expecting(key);
+    writer.write_raw(&b.get(), e, &mut out).is_some() && out.matches_all()
+}
+
+/// Sink for [`MakeKeyWriter`]: builds the key, or compares it with an
+/// expected key as it is written.
+struct KeyOut<'e> {
+    buf: String,
+    expect: Option<&'e str>,
+    pos: usize,
+    diverged: bool,
+}
+
+impl<'e> KeyOut<'e> {
+    fn new(capacity: usize) -> Self {
+        KeyOut {
+            buf: String::with_capacity(capacity),
+            expect: None,
+            pos: 0,
+            diverged: false,
+        }
+    }
+
+    fn expecting(key: &'e str) -> Self {
+        KeyOut {
+            buf: String::new(),
+            expect: Some(key),
+            pos: 0,
+            diverged: false,
+        }
+    }
+
+    fn push_str(&mut self, s: &str) {
+        match self.expect {
+            None => self.buf.push_str(s),
+            Some(key) => {
+                if !self.diverged
+                    && key.as_bytes().get(self.pos..self.pos + s.len()) == Some(s.as_bytes())
+                {
+                    self.pos += s.len();
+                } else {
+                    self.diverged = true;
+                }
+            }
+        }
+    }
+
+    fn push(&mut self, c: char) {
+        self.push_str(c.encode_utf8(&mut [0; 4]));
+    }
+
+    fn matches_all(&self) -> bool {
+        !self.diverged && self.expect.is_some_and(|key| key.len() == self.pos)
+    }
+}
+
+impl std::fmt::Write for KeyOut<'_> {
+    fn write_str(&mut self, s: &str) -> std::fmt::Result {
+        self.push_str(s);
+        if self.diverged {
+            Err(std::fmt::Error)
+        } else {
+            Ok(())
+        }
+    }
 }
 
 enum KeyBody<'a> {
@@ -2268,15 +2340,15 @@ impl<'b> MakeKeyWriter<'b> {
         }
     }
 
-    fn write_raw(&mut self, a: &LamArena, e: RawLambda, out: &mut String) -> Option<()> {
+    fn write_raw(&mut self, a: &LamArena, e: RawLambda, out: &mut KeyOut<'_>) -> Option<()> {
         self.count += 1;
-        if self.count > MAX_RAW {
+        if self.count > MAX_RAW || out.diverged {
             return None;
         }
         self.write_raw_after_count(a, e, out)
     }
 
-    fn write_action(&mut self, action: &MatchAction, out: &mut String) -> Option<()> {
+    fn write_action(&mut self, action: &MatchAction, out: &mut KeyOut<'_>) -> Option<()> {
         self.count += 1;
         if self.count > MAX_RAW {
             return None;
@@ -2304,7 +2376,7 @@ impl<'b> MakeKeyWriter<'b> {
         &mut self,
         a: Option<&LamArena>,
         body: KeyBody<'_>,
-        out: &mut String,
+        out: &mut KeyOut<'_>,
     ) -> Option<()> {
         match body {
             KeyBody::Raw(raw) => match a {
@@ -2319,7 +2391,7 @@ impl<'b> MakeKeyWriter<'b> {
         &mut self,
         a: &LamArena,
         e: RawLambda,
-        out: &mut String,
+        out: &mut KeyOut<'_>,
     ) -> Option<()> {
         match a.view(e) {
             View::Var(id) => {
@@ -2494,7 +2566,7 @@ impl<'b> MakeKeyWriter<'b> {
         x: &Ident,
         ex: RawLambda,
         body: KeyBody<'_>,
-        out: &mut String,
+        out: &mut KeyOut<'_>,
     ) -> Option<()> {
         if kind == LetKind::Alias {
             let ex_key = match a {
@@ -2529,11 +2601,11 @@ impl<'b> MakeKeyWriter<'b> {
             None => self.write_raw(&self.b.get(), ex, out)?,
         }
         out.push(',');
-        let mut replacement = String::with_capacity(x.name().len() + 16);
+        let mut replacement = KeyOut::new(x.name().len() + 16);
         replacement.push_str("Lvar(");
         write_synthetic_ident_key(&mut replacement, x.name(), synthetic_stamp);
         replacement.push(')');
-        self.env.push((*x, replacement));
+        self.env.push((*x, replacement.buf));
         let result = self.write_body(a, body, out);
         self.env.pop();
         result?;
@@ -2542,16 +2614,16 @@ impl<'b> MakeKeyWriter<'b> {
     }
 
     fn raw_to_string(&mut self, a: &LamArena, e: RawLambda) -> Option<String> {
-        let mut out = String::with_capacity(64);
+        let mut out = KeyOut::new(64);
         self.write_raw(a, e, &mut out)?;
-        Some(out)
+        Some(out.buf)
     }
 
     fn write_raw_list(
         &mut self,
         a: &LamArena,
         items: &[RawLambda],
-        out: &mut String,
+        out: &mut KeyOut<'_>,
     ) -> Option<()> {
         for (idx, item) in items.iter().enumerate() {
             if idx > 0 {
@@ -2566,7 +2638,7 @@ impl<'b> MakeKeyWriter<'b> {
         &mut self,
         a: &LamArena,
         item: Option<RawLambda>,
-        out: &mut String,
+        out: &mut KeyOut<'_>,
     ) -> Option<()> {
         match item {
             None => out.push_str("None"),
@@ -2590,7 +2662,7 @@ fn same_var_body(a: &LamArena, body: &KeyBody<'_>, id: &Ident) -> bool {
     }
 }
 
-fn write_ident_key(out: &mut String, id: &Ident) {
+fn write_ident_key(out: &mut KeyOut<'_>, id: &Ident) {
     match id.stamp() {
         0 => {
             out.push_str(id.name());
@@ -2604,12 +2676,12 @@ fn write_ident_key(out: &mut String, id: &Ident) {
     }
 }
 
-fn write_synthetic_ident_key(out: &mut String, name: &str, stamp: i32) {
+fn write_synthetic_ident_key(out: &mut KeyOut<'_>, name: &str, stamp: i32) {
     write_synthetic_ident_key_with_global(out, name, stamp, false);
 }
 
 fn write_synthetic_ident_key_with_global(
-    out: &mut String,
+    out: &mut KeyOut<'_>,
     name: &str,
     stamp: i32,
     is_global: bool,
@@ -2622,8 +2694,8 @@ fn write_synthetic_ident_key_with_global(
         out.push('#');
     } else {
         out.push_str(name);
-        write!(out, "/{stamp}").expect("writing to String cannot fail");
-        if is_global {
+        // Fails only when a comparing sink has already diverged.
+        if write!(out, "/{stamp}").is_ok() && is_global {
             out.push('g');
         }
     }
@@ -6842,9 +6914,8 @@ fn all_actions_same_tagged<K>(b: &RawArena, cases: &[(K, RawLambda)]) -> bool {
                 return false;
             };
             for (_, act) in rem {
-                match make_key_string(b, *act) {
-                    Some(raw_act) if raw_act == raw_act0 => {}
-                    _ => return false,
+                if !make_key_equals(b, *act, &raw_act0) {
+                    return false;
                 }
             }
             true
@@ -9641,6 +9712,37 @@ mod tests {
                 .iter()
                 .all(|case| matches!(case, crate::types::VariantConstructorCase::Block(_)))
         );
+    }
+
+    #[test]
+    fn make_key_equals_compares_while_writing() {
+        let b = RawArena::new();
+        let x = Ident::create_local("x");
+        let y = Ident::create_local("y");
+        let one = || {
+            b.const_(crate::lambda::lam_constant::Constant::Int {
+                i: 1,
+                comment: None,
+            })
+        };
+        // A strict let whose body is not its variable is keyed with a
+        // synthetic stamp, which a diverged comparison must not fail on.
+        let key_term = |id: Ident, v: RawLambda| {
+            b.let_(
+                LetKind::Strict,
+                id,
+                v,
+                b.prim(Primitive::Paddint, &[b.var(id), b.var(y)], LamLoc::NONE),
+            )
+        };
+        let first = key_term(x, one());
+        let key = make_key_string(&b, first).expect("small term has a key");
+        // A let of another identifier with the same name keys the same.
+        let same_name = Ident::create_local("x");
+        assert!(make_key_equals(&b, key_term(same_name, one()), &key));
+        assert!(!make_key_equals(&b, key_term(x, b.var(y)), &key));
+        assert!(!make_key_equals(&b, one(), &key));
+        assert!(!make_key_equals(&b, b.var(y), &key));
     }
 
     #[test]
