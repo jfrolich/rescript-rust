@@ -94,6 +94,13 @@ impl Name {
         Some(name)
     }
 
+    /// Hash of the text, computed once with fixed seeds: the same in every
+    /// run, unlike the address.
+    #[inline]
+    pub(crate) fn content_hash(self) -> u64 {
+        self.0.hash
+    }
+
     /// The interned string.
     #[inline]
     pub fn as_str(self) -> &'static str {

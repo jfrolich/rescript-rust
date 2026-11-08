@@ -7,6 +7,7 @@ use crate::parse_arena::{LocIdx, ParseArena};
 use crate::parser::formatter::{BoxKind, Formatter};
 use crate::types::asttypes::ArgLabel;
 use crate::types::path::Path;
+use crate::types::path::PathView;
 use crate::types::predef;
 use crate::types::printtyp::{Printtyp, TAG_ERROR, TAG_INFO, TAG_RESET, TracePair, expand_trace};
 use crate::types::type_expr::{TypeDesc, TypeExprRef};
@@ -80,8 +81,9 @@ fn collect_missing_arguments(
 ) -> Option<Vec<(ArgLabel, TypeExprRef)>> {
     let (params, ret) = match &*ctx.borrow_desc(type1) {
         TypeDesc::Tarrow { args, ret } => (
-            args.iter()
-                .map(|a| (a.label().clone(), a.typ))
+            ctx.type_args(args)
+                .iter()
+                .map(|a| (a.label().to_arg_label(), a.typ))
                 .collect::<Vec<_>>(),
             *ret,
         ),
@@ -380,8 +382,8 @@ fn head_path(ctx: &TypeContext, ty: TypeExprRef) -> Option<Path> {
 }
 
 fn is_jsx_path(path: &Path, name: &str) -> bool {
-    matches!(path, Path::Pdot(parent, s, _)
-        if s == name && matches!(parent.as_ref(), Path::Pident(id) if id.name() == "Jsx"))
+    matches!(path.view(), PathView::Pdot(parent, s, _)
+        if s == name && matches!(parent.view(), crate::types::path::PathView::Pident(id) if id.name() == "Jsx"))
 }
 
 fn expands_to_jsx(ctx: &TypeContext, env: &Env, ty: TypeExprRef, name: &str) -> bool {
@@ -945,7 +947,7 @@ fn print_extra_type_clash_help_by_types(
             ppf.cut();
         } else if type_params.len() == 1
             && p.same(&predef::path_array())
-            && expands_to_jsx(ctx, env, type_params[0], "element")
+            && expands_to_jsx(ctx, env, ctx.type_list_at(type_params, 0), "element")
         {
             let extra = format!(
                 " (for example by using a pipe: ->{}.",
@@ -1070,6 +1072,7 @@ fn print_extra_type_clash_help_by_types(
     if is(&p1, predef::path_string())
         && let TypeDesc::Tvariant(row) = &d2
     {
+        let row = &ctx.row_desc(row);
         let text = extract_text_at_loc(arena, source, loc);
         if let Some(string_value) = extract_string_constant(ctx, &text) {
             let variant_constructors: Vec<String> =
@@ -1228,16 +1231,17 @@ fn show_extra_help(ctx: &TypeContext, ppf: &mut Ppf<'_>, tr: &[TracePair]) {
     let (an, en) = match (&*ctx.borrow_desc(a), &*ctx.borrow_desc(e)) {
         (
             TypeDesc::Tconstr {
-                path: Path::Pident(ai),
-                args: aa,
-                ..
+                path: ap, args: aa, ..
             },
             TypeDesc::Tconstr {
-                path: Path::Pident(ei),
-                args: ea,
-                ..
+                path: ep, args: ea, ..
             },
-        ) if aa.is_empty() && ea.is_empty() => (ai.name().to_string(), ei.name().to_string()),
+        ) if aa.is_empty() && ea.is_empty() => match (ap.view(), ep.view()) {
+            (PathView::Pident(ai), PathView::Pident(ei)) => {
+                (ai.name().to_string(), ei.name().to_string())
+            }
+            _ => return,
+        },
         _ => return,
     };
     let converter = match (an.as_str(), en.as_str()) {

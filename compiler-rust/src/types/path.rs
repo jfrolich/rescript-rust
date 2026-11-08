@@ -22,52 +22,244 @@
 //! ```
 
 use crate::ident::Ident;
-use serde::{Deserialize, Serialize};
+use crate::name::Name;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::cell::Cell;
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{LazyLock, Mutex};
 
-/// A module path in the type system.
+/// A module path in the type system (OCaml `Path.t`).
 ///
 /// Paths are used to refer to types, modules, and values throughout
 /// the type checker. Unlike `Longident`, they use `Ident` with stamps
 /// for unique identification.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Path {
+///
+/// Intentional Rust performance representation of `compiler/ml/path.ml:18-21`:
+/// paths are hash-consed process-wide (like [`Name`]), so a `Path` is one
+/// `Copy` pointer to an immutable, never-freed node. Structurally identical
+/// paths are the same node, and every node points at the representative of
+/// its `Path.same` class (`compiler/ml/path.ml:23-29`: identifiers compared
+/// with `Ident.same`, `Pdot` positions ignored), so `same` is one pointer
+/// comparison and hashing reads a precomputed word. The set of distinct
+/// paths in a build is small (a few hundred thousand on large projects).
+/// Match on [`Path::view`] to inspect the constructor.
+#[derive(Clone, Copy)]
+pub struct Path(&'static PathNode);
+
+/// The constructor of a [`Path`], for pattern matching.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PathView {
     /// A simple identifier: `String`, `int`
     Pident(Ident),
     /// A dotted access: `Array.t` is `Pdot(Pident(Array), "t", -1)`
     /// The integer is a position hint (usually -1 for no hint).
-    Pdot(Arc<Path>, crate::name::Name, i32),
+    Pdot(Path, Name, i32),
     /// Functor application: `F(X)` is `Papply(F, X)`
-    Papply(Arc<Path>, Arc<Path>),
+    Papply(Path, Path),
 }
 
-/// Consistent with the derived equality (`Ident` compares with `same`: by
-/// stamp when stamped, else by name). Identifiers hash by stamp or by the
-/// interned name's precomputed hash, so hashing a path never reads name text.
-impl std::hash::Hash for Path {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        match self {
-            Path::Pident(id) => {
-                if id.stamp() != 0 {
-                    state.write_u8(0);
-                    state.write_i32(id.stamp());
-                } else {
-                    state.write_u8(1);
-                    std::hash::Hash::hash(&id.name_atom(), state);
-                }
-            }
-            Path::Pdot(parent, name, _) => {
-                state.write_u8(2);
-                std::hash::Hash::hash(name, state);
-                std::hash::Hash::hash(&**parent, state);
-            }
-            Path::Papply(functor, argument) => {
-                state.write_u8(3);
-                std::hash::Hash::hash(&**functor, state);
-                std::hash::Hash::hash(&**argument, state);
+struct PathNode {
+    view: PathView,
+    /// Representative of this node's `Path.same` class; `None` when the node
+    /// is the representative.
+    same: Option<&'static PathNode>,
+    /// Hash of the exact structure (identifier flags and positions included).
+    node_hash: u64,
+    /// Hash of the `Path.same` class: equal for `same` paths.
+    same_hash: u64,
+}
+
+impl PathNode {
+    #[inline]
+    fn class(&'static self) -> &'static PathNode {
+        self.same.unwrap_or(self)
+    }
+}
+
+#[inline]
+fn mix(a: u64, b: u64) -> u64 {
+    // wyhash-style folded multiply: fixed constants, so hashes (and every
+    // table keyed by them) are the same from run to run.
+    let full = u128::from(a ^ 0xa076_1d64_78bd_642f) * u128::from(b ^ 0xe703_7ed1_a0b4_28db);
+    (full as u64) ^ ((full >> 64) as u64)
+}
+
+fn node_hash(view: &PathView) -> u64 {
+    match *view {
+        PathView::Pident(id) => mix(
+            mix(1, id.name_atom().content_hash()),
+            (u64::from(id.stamp() as u32) << 8) | u64::from(id.flags().bits()),
+        ),
+        PathView::Pdot(parent, name, pos) => mix(
+            mix(2, parent.0.node_hash),
+            mix(name.content_hash(), u64::from(pos as u32)),
+        ),
+        PathView::Papply(functor, arg) => mix(mix(3, functor.0.node_hash), arg.0.node_hash),
+    }
+}
+
+fn same_hash(view: &PathView) -> u64 {
+    match *view {
+        PathView::Pident(id) => {
+            if id.stamp() != 0 {
+                mix(4, u64::from(id.stamp() as u32))
+            } else {
+                mix(5, id.name_atom().content_hash())
             }
         }
+        PathView::Pdot(parent, name, _) => mix(mix(6, parent.0.same_hash), name.content_hash()),
+        PathView::Papply(functor, arg) => mix(mix(7, functor.0.same_hash), arg.0.same_hash),
+    }
+}
+
+/// Exact structural identity of two views whose children are interned.
+#[inline]
+fn view_identical(a: &PathView, b: &PathView) -> bool {
+    match (a, b) {
+        (PathView::Pident(x), PathView::Pident(y)) => {
+            x.name_atom() == y.name_atom() && x.stamp() == y.stamp() && x.flags() == y.flags()
+        }
+        (PathView::Pdot(p, s, i), PathView::Pdot(q, t, j)) => {
+            std::ptr::eq(p.0, q.0) && s == t && i == j
+        }
+        (PathView::Papply(f, x), PathView::Papply(g, y)) => {
+            std::ptr::eq(f.0, g.0) && std::ptr::eq(x.0, y.0)
+        }
+        _ => false,
+    }
+}
+
+/// Whether `view` belongs to the `Path.same` class of representative `rep`.
+#[inline]
+fn view_same_class(view: &PathView, rep: &PathView) -> bool {
+    match (view, rep) {
+        (PathView::Pident(x), PathView::Pident(y)) => x.same(y),
+        (PathView::Pdot(p, s, _), PathView::Pdot(q, t, _)) => s == t && p.same(q),
+        (PathView::Papply(f, x), PathView::Papply(g, y)) => f.same(g) && x.same(y),
+        _ => false,
+    }
+}
+
+const SHARDS: usize = 64;
+const LOCAL_CACHE: usize = 1 << 13;
+
+type Table = hashbrown::HashTable<&'static PathNode>;
+
+struct Interner {
+    nodes: Box<[Mutex<Table>]>,
+    classes: Box<[Mutex<Table>]>,
+}
+
+static INTERNER: LazyLock<Interner> = LazyLock::new(|| Interner {
+    nodes: (0..SHARDS).map(|_| Mutex::new(Table::new())).collect(),
+    classes: (0..SHARDS).map(|_| Mutex::new(Table::new())).collect(),
+});
+
+thread_local! {
+    /// Direct-mapped cache of recently interned nodes, so repeated
+    /// constructions skip the shared table and its lock. Bounded, unlike the
+    /// table: a slot miss only costs a locked lookup.
+    static LOCAL: Box<[Cell<Option<&'static PathNode>>]> =
+        (0..LOCAL_CACHE).map(|_| Cell::new(None)).collect();
+}
+
+#[inline]
+fn shard(hash: u64) -> usize {
+    // The table uses the low bits; pick the shard from the high ones.
+    (hash >> 58) as usize % SHARDS
+}
+
+fn intern(view: PathView) -> Path {
+    let hash = node_hash(&view);
+    let slot = (hash as usize) & (LOCAL_CACHE - 1);
+    if let Ok(Some(node)) = LOCAL.try_with(|local| local[slot].get())
+        && node.node_hash == hash
+        && view_identical(&node.view, &view)
+    {
+        return Path(node);
+    }
+    let node = intern_shared(view, hash);
+    // Unavailable only while the thread is being torn down.
+    let _ = LOCAL.try_with(|local| local[slot].set(Some(node)));
+    Path(node)
+}
+
+#[inline(never)]
+fn intern_shared(view: PathView, hash: u64) -> &'static PathNode {
+    let interner = &*INTERNER;
+    let mut nodes = interner.nodes[shard(hash)]
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(node) = nodes.find(hash, |node| {
+        node.node_hash == hash && view_identical(&node.view, &view)
+    }) {
+        return node;
+    }
+    let class_hash = same_hash(&view);
+    // Lock order: node shard, then class shard.
+    let mut classes = interner.classes[shard(class_hash)]
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let rep = classes
+        .find(class_hash, |rep| {
+            rep.same_hash == class_hash && view_same_class(&view, &rep.view)
+        })
+        .copied();
+    let node: &'static PathNode = Box::leak(Box::new(PathNode {
+        view,
+        same: rep,
+        node_hash: hash,
+        same_hash: class_hash,
+    }));
+    if rep.is_none() {
+        classes.insert_unique(class_hash, node, |rep| rep.same_hash);
+    }
+    nodes.insert_unique(hash, node, |node| node.node_hash);
+    node
+}
+
+impl From<PathView> for Path {
+    #[inline]
+    fn from(view: PathView) -> Self {
+        intern(view)
+    }
+}
+
+/// `==` is OCaml's structural equality on paths: identifiers compare with
+/// `Ident.same` and `Pdot` positions must match.
+impl PartialEq for Path {
+    #[inline]
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::eq(self.0, other.0) || (self.same(other) && self.positions_equal(other))
+    }
+}
+
+impl Eq for Path {}
+
+/// Consistent with `==` and with [`Path::same`]: the hash of the `same`
+/// class, which ignores positions and never reads name text.
+impl std::hash::Hash for Path {
+    #[inline]
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        state.write_u64(self.0.same_hash);
+    }
+}
+
+impl fmt::Debug for Path {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&self.0.view, f)
+    }
+}
+
+impl Serialize for Path {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.0.view.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for Path {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        PathView::deserialize(deserializer).map(intern)
     }
 }
 
@@ -78,57 +270,88 @@ impl Path {
     /// Create a path from a simple identifier.
     #[inline]
     pub fn pident(id: Ident) -> Self {
-        Path::Pident(id)
+        intern(PathView::Pident(id))
     }
 
     /// Create a dotted path.
     #[inline]
-    pub fn pdot(prefix: Path, name: impl Into<crate::name::Name>) -> Self {
-        Path::Pdot(Arc::new(prefix), name.into(), NOPOS)
-    }
-
-    /// Get the parent module path (strip the last component).
-    /// For `Pdot(parent, name, _)`, returns `Some(parent)`.
-    /// For `Pident(_)` and `Papply(..)`, returns `None`.
-    pub fn parent(&self) -> Option<Path> {
-        match self {
-            Path::Pdot(parent, _, _) => Some((**parent).clone()),
-            _ => None,
-        }
+    pub fn pdot(prefix: Path, name: impl Into<Name>) -> Self {
+        intern(PathView::Pdot(prefix, name.into(), NOPOS))
     }
 
     /// Create a dotted path with position.
     #[inline]
-    pub fn pdot_pos(prefix: Path, name: impl Into<crate::name::Name>, pos: i32) -> Self {
-        Path::Pdot(Arc::new(prefix), name.into(), pos)
+    pub fn pdot_pos(prefix: Path, name: impl Into<Name>, pos: i32) -> Self {
+        intern(PathView::Pdot(prefix, name.into(), pos))
     }
 
     /// Create a functor application path.
     #[inline]
     pub fn papply(functor: Path, arg: Path) -> Self {
-        Path::Papply(Arc::new(functor), Arc::new(arg))
+        intern(PathView::Papply(functor, arg))
     }
 
-    /// Check if two paths refer to the same entity.
-    ///
-    /// This compares paths structurally, using `Ident::same` for identifiers.
+    /// The constructor of this path.
+    #[inline]
+    pub fn view(self) -> &'static PathView {
+        &self.0.view
+    }
+
+    /// The identifier of a `Pident` path.
+    #[inline]
+    pub fn as_pident(self) -> Option<&'static Ident> {
+        match self.view() {
+            PathView::Pident(id) => Some(id),
+            _ => None,
+        }
+    }
+
+    /// Get the parent module path (strip the last component).
+    /// For `Pdot(parent, name, _)`, returns `Some(parent)`.
+    /// For `Pident(_)` and `Papply(..)`, returns `None`.
+    #[inline]
+    pub fn parent(&self) -> Option<Path> {
+        match self.view() {
+            PathView::Pdot(parent, _, _) => Some(*parent),
+            _ => None,
+        }
+    }
+
+    /// Check if two paths refer to the same entity (`Path.same`,
+    /// `compiler/ml/path.ml:23-29`): structural, with `Ident.same` on
+    /// identifiers and `Pdot` positions ignored.
+    #[inline]
     pub fn same(&self, other: &Path) -> bool {
-        match (self, other) {
-            (Path::Pident(id1), Path::Pident(id2)) => id1.same(id2),
-            (Path::Pdot(p1, s1, _), Path::Pdot(p2, s2, _)) => {
-                s1 == s2 && (Arc::ptr_eq(p1, p2) || p1.same(p2))
+        std::ptr::eq(self.0.class(), other.0.class())
+    }
+
+    /// Hash consistent with [`Path::same`] (and with `Hash`).
+    #[inline]
+    pub fn same_hash(&self) -> u64 {
+        self.0.same_hash
+    }
+
+    /// For two `same` paths: whether their `Pdot` positions also agree.
+    fn positions_equal(&self, other: &Path) -> bool {
+        if std::ptr::eq(self.0, other.0) {
+            return true;
+        }
+        match (self.view(), other.view()) {
+            (PathView::Pident(_), PathView::Pident(_)) => true,
+            (PathView::Pdot(p, _, i), PathView::Pdot(q, _, j)) => i == j && p.positions_equal(q),
+            (PathView::Papply(f, x), PathView::Papply(g, y)) => {
+                f.positions_equal(g) && x.positions_equal(y)
             }
-            (Path::Papply(f1, a1), Path::Papply(f2, a2)) => f1.same(f2) && a1.same(a2),
             _ => false,
         }
     }
 
     /// Check if an identifier is free (appears) in this path.
     pub fn is_free(&self, id: &Ident) -> bool {
-        match self {
-            Path::Pident(id2) => id.same(id2),
-            Path::Pdot(p, _, _) => p.is_free(id),
-            Path::Papply(p1, p2) => p1.is_free(id) || p2.is_free(id),
+        match self.view() {
+            PathView::Pident(id2) => id.same(id2),
+            PathView::Pdot(p, _, _) => p.is_free(id),
+            PathView::Papply(p1, p2) => p1.is_free(id) || p2.is_free(id),
         }
     }
 
@@ -137,10 +360,10 @@ impl Path {
     /// For a functor application this is the later of the two binding
     /// times (OCaml `Path.binding_time`).
     pub fn binding_time(&self) -> i32 {
-        match self {
-            Path::Pident(id) => id.binding_time(),
-            Path::Pdot(p, _, _) => p.binding_time(),
-            Path::Papply(p1, p2) => p1.binding_time().max(p2.binding_time()),
+        match self.view() {
+            PathView::Pident(id) => id.binding_time(),
+            PathView::Pdot(p, _, _) => p.binding_time(),
+            PathView::Papply(p1, p2) => p1.binding_time().max(p2.binding_time()),
         }
     }
 
@@ -151,22 +374,22 @@ impl Path {
 
     /// Whether `name()` equals `target`, without building the name.
     pub fn name_eq(&self, target: &str) -> bool {
-        match self {
-            Path::Pident(id) => id.name() == target,
-            Path::Pdot(parent, s, _) => target
+        match self.view() {
+            PathView::Pident(id) => id.name() == target,
+            PathView::Pdot(parent, s, _) => target
                 .strip_suffix(s.as_str())
                 .and_then(|prefix| prefix.strip_suffix('.'))
                 .is_some_and(|prefix| parent.name_eq(prefix)),
-            Path::Papply(_, _) => self.name() == target,
+            PathView::Papply(_, _) => self.name() == target,
         }
     }
 
     /// Get the last component name of the path (e.g., "ref" for both "ref" and "Pervasives.ref").
-    pub fn head_name(&self) -> &str {
-        match self {
-            Path::Pident(id) => id.name(),
-            Path::Pdot(_, s, _) => s.as_str(),
-            Path::Papply(_, arg) => arg.head_name(),
+    pub fn head_name(&self) -> &'static str {
+        match self.view() {
+            PathView::Pident(id) => id.name(),
+            PathView::Pdot(_, s, _) => s.as_str(),
+            PathView::Papply(_, arg) => arg.head_name(),
         }
     }
 
@@ -179,9 +402,9 @@ impl Path {
 
     /// Append the (parenthesized) name to `out` without intermediate strings.
     pub fn write_name_with_paren(&self, out: &mut String, paren: impl Fn(&str) -> bool + Copy) {
-        match self {
-            Path::Pident(id) => out.push_str(id.name()),
-            Path::Pdot(p, s, _) => {
+        match self.view() {
+            PathView::Pident(id) => out.push_str(id.name()),
+            PathView::Pdot(p, s, _) => {
                 p.write_name_with_paren(out, paren);
                 if paren(s) {
                     out.push_str(".( ");
@@ -192,7 +415,7 @@ impl Path {
                     out.push_str(s);
                 }
             }
-            Path::Papply(p1, p2) => {
+            PathView::Papply(p1, p2) => {
                 p1.write_name_with_paren(out, paren);
                 out.push('(');
                 p2.write_name_with_paren(out, paren);
@@ -202,10 +425,10 @@ impl Path {
     }
 
     fn name_len_hint(&self) -> usize {
-        match self {
-            Path::Pident(id) => id.name().len(),
-            Path::Pdot(p, s, _) => p.name_len_hint() + 1 + s.len(),
-            Path::Papply(p1, p2) => p1.name_len_hint() + p2.name_len_hint() + 2,
+        match self.view() {
+            PathView::Pident(id) => id.name().len(),
+            PathView::Pdot(p, s, _) => p.name_len_hint() + 1 + s.len(),
+            PathView::Papply(p1, p2) => p1.name_len_hint() + p2.name_len_hint() + 2,
         }
     }
 
@@ -214,71 +437,71 @@ impl Path {
     /// # Panics
     ///
     /// Panics if the path is a `Papply`.
-    pub fn head(&self) -> &Ident {
+    pub fn head(&self) -> &'static Ident {
         self.head_opt().expect("Path::head called on Papply")
     }
 
     /// Return the identifier at the root of a non-application path.
-    pub fn head_opt(&self) -> Option<&Ident> {
-        match self {
-            Path::Pident(id) => Some(id),
-            Path::Pdot(parent, _, _) => parent.head_opt(),
-            Path::Papply(_, _) => None,
+    pub fn head_opt(&self) -> Option<&'static Ident> {
+        match self.view() {
+            PathView::Pident(id) => Some(id),
+            PathView::Pdot(parent, _, _) => parent.head_opt(),
+            PathView::Papply(_, _) => None,
         }
     }
 
     /// Get the last component of this path.
-    pub fn last(&self) -> &str {
-        match self {
-            Path::Pident(id) => id.name(),
-            Path::Pdot(_, s, _) => s,
-            Path::Papply(_, p) => p.last(),
+    pub fn last(&self) -> &'static str {
+        match self.view() {
+            PathView::Pident(id) => id.name(),
+            PathView::Pdot(_, s, _) => s.as_str(),
+            PathView::Papply(_, p) => p.last(),
+        }
+    }
+
+    /// Whether `flatten` would fail, i.e. the non-`Pdot` root is a functor
+    /// application. Allocation-free.
+    pub fn has_apply_prefix(&self) -> bool {
+        match self.view() {
+            PathView::Pident(_) => false,
+            PathView::Pdot(parent, _, _) => parent.has_apply_prefix(),
+            PathView::Papply(_, _) => true,
         }
     }
 
     /// Flatten this path to an identifier and list of component names.
     ///
     /// Returns `Err(())` if the path contains a `Papply`.
-    /// Whether `flatten` would fail, i.e. the non-`Pdot` root is a functor
-    /// application. Allocation-free.
-    pub fn has_apply_prefix(&self) -> bool {
-        match self {
-            Path::Pident(_) => false,
-            Path::Pdot(parent, _, _) => parent.has_apply_prefix(),
-            Path::Papply(_, _) => true,
-        }
-    }
-
-    pub fn flatten(&self) -> Result<(&Ident, Vec<&str>), ()> {
-        fn go<'a>(path: &'a Path, acc: &mut Vec<&'a str>) -> Result<&'a Ident, ()> {
-            match path {
-                Path::Pident(id) => Ok(id),
-                Path::Pdot(p, s, _) => {
-                    let id = go(p, acc)?;
-                    acc.push(s);
+    pub fn flatten(&self) -> Result<(&'static Ident, Vec<&'static str>), ()> {
+        fn go(path: Path, acc: &mut Vec<&'static str>) -> Result<&'static Ident, ()> {
+            match path.view() {
+                PathView::Pident(id) => Ok(id),
+                PathView::Pdot(p, s, _) => {
+                    let id = go(*p, acc)?;
+                    acc.push(s.as_str());
                     Ok(id)
                 }
-                Path::Papply(_, _) => Err(()),
+                PathView::Papply(_, _) => Err(()),
             }
         }
 
         let mut components = Vec::new();
-        let id = go(self, &mut components)?;
+        let id = go(*self, &mut components)?;
         Ok((id, components))
     }
 
     /// Get all head identifiers in the path (including through `Papply`).
-    pub fn heads(&self) -> Vec<&Ident> {
+    pub fn heads(&self) -> Vec<&'static Ident> {
         let mut result = Vec::new();
         self.collect_heads(&mut result);
         result
     }
 
-    fn collect_heads<'a>(&'a self, acc: &mut Vec<&'a Ident>) {
-        match self {
-            Path::Pident(id) => acc.push(id),
-            Path::Pdot(p, _, _) => p.collect_heads(acc),
-            Path::Papply(p1, p2) => {
+    fn collect_heads(&self, acc: &mut Vec<&'static Ident>) {
+        match self.view() {
+            PathView::Pident(id) => acc.push(id),
+            PathView::Pdot(p, _, _) => p.collect_heads(acc),
+            PathView::Papply(p1, p2) => {
                 p1.collect_heads(acc);
                 p2.collect_heads(acc);
             }
@@ -287,33 +510,30 @@ impl Path {
 
     /// Check if the last component starts with an uppercase letter.
     pub fn is_uident(&self) -> bool {
-        let last = self.last();
-        !last.is_empty()
-            && last
-                .chars()
-                .next()
-                .map(|c| c.is_ascii_uppercase())
-                .unwrap_or(false)
+        is_uident_str(self.last())
     }
 }
 
 impl Ord for Path {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        match (self, other) {
-            (Path::Pident(id1), Path::Pident(id2)) => id1.cmp(id2),
-            (Path::Pdot(p1, s1, _), Path::Pdot(p2, s2, _)) => match p1.cmp(p2) {
+        if std::ptr::eq(self.0, other.0) {
+            return std::cmp::Ordering::Equal;
+        }
+        match (self.view(), other.view()) {
+            (PathView::Pident(id1), PathView::Pident(id2)) => id1.cmp(id2),
+            (PathView::Pdot(p1, s1, _), PathView::Pdot(p2, s2, _)) => match p1.cmp(p2) {
                 std::cmp::Ordering::Equal => s1.cmp(s2),
                 other => other,
             },
-            (Path::Papply(f1, a1), Path::Papply(f2, a2)) => match f1.cmp(f2) {
+            (PathView::Papply(f1, a1), PathView::Papply(f2, a2)) => match f1.cmp(f2) {
                 std::cmp::Ordering::Equal => a1.cmp(a2),
                 other => other,
             },
             // Ordering: Pident < Pdot < Papply
-            (Path::Pident(_), _) => std::cmp::Ordering::Less,
-            (_, Path::Pident(_)) => std::cmp::Ordering::Greater,
-            (Path::Pdot(_, _, _), Path::Papply(_, _)) => std::cmp::Ordering::Less,
-            (Path::Papply(_, _), Path::Pdot(_, _, _)) => std::cmp::Ordering::Greater,
+            (PathView::Pident(_), _) => std::cmp::Ordering::Less,
+            (_, PathView::Pident(_)) => std::cmp::Ordering::Greater,
+            (PathView::Pdot(_, _, _), PathView::Papply(_, _)) => std::cmp::Ordering::Less,
+            (PathView::Papply(_, _), PathView::Pdot(_, _, _)) => std::cmp::Ordering::Greater,
         }
     }
 }
@@ -327,17 +547,17 @@ impl PartialOrd for Path {
 impl fmt::Display for Path {
     /// Same text as `name()`, written without an intermediate `String`.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Path::Pident(id) => f.write_str(id.name()),
-            Path::Pdot(p, s, _) => {
-                fmt::Display::fmt(&**p, f)?;
+        match self.view() {
+            PathView::Pident(id) => f.write_str(id.name()),
+            PathView::Pdot(p, s, _) => {
+                fmt::Display::fmt(p, f)?;
                 f.write_str(".")?;
                 f.write_str(s)
             }
-            Path::Papply(p1, p2) => {
-                fmt::Display::fmt(&**p1, f)?;
+            PathView::Papply(p1, p2) => {
+                fmt::Display::fmt(p1, f)?;
                 f.write_str("(")?;
-                fmt::Display::fmt(&**p2, f)?;
+                fmt::Display::fmt(p2, f)?;
                 f.write_str(")")
             }
         }
@@ -360,26 +580,26 @@ pub enum Typath {
 impl Path {
     /// Categorize this path for constructor handling.
     pub fn constructor_typath(&self) -> Typath {
-        match self {
-            Path::Pident(id) if is_uident_str(id.name()) => Typath::LocalExt(*id),
-            Path::Pdot(ty_path, s, _) if is_uident_str(s) => {
+        match self.view() {
+            PathView::Pident(id) if is_uident_str(id.name()) => Typath::LocalExt(*id),
+            PathView::Pdot(ty_path, s, _) if is_uident_str(s) => {
                 if is_uident_str(ty_path.last()) {
-                    Typath::Ext((**ty_path).clone(), s.to_string())
+                    Typath::Ext(*ty_path, s.to_string())
                 } else {
-                    Typath::Cstr((**ty_path).clone(), s.to_string())
+                    Typath::Cstr(*ty_path, s.to_string())
                 }
             }
-            p => Typath::Regular(p.clone()),
+            _ => Typath::Regular(*self),
         }
     }
 
     /// Check if this path refers to a constructor type.
     pub fn is_constructor_typath(&self) -> bool {
         // Same cases as `constructor_typath`, without building the result.
-        match self {
-            Path::Pident(id) => is_uident_str(id.name()),
-            Path::Pdot(_, s, _) => is_uident_str(s),
-            Path::Papply(..) => false,
+        match self.view() {
+            PathView::Pident(id) => is_uident_str(id.name()),
+            PathView::Pdot(_, s, _) => is_uident_str(s),
+            PathView::Papply(..) => false,
         }
     }
 }
