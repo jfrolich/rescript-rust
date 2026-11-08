@@ -3935,31 +3935,19 @@ fn transl_type_inner(
                 }
             };
 
-            let package_lids: Vec<_> = sorted_constraints
+            // typetexp.ml:572-576: translate the module type
+            // `create_package_mty true` builds, whose `with type` constraints
+            // go through `merge_constraint`.
+            let package_fields: Vec<_> = sorted_constraints
                 .iter()
-                .map(|(field_lid, _, _)| field_lid.clone())
+                .map(|(_, field_lid, _)| **field_lid)
                 .collect();
-            if crate::types::typemod::package_modtype_signature_expected(
-                env,
-                &pack_path,
-                &package_lids,
-                &mut tctx.persistent_env,
-                ctx,
-            ) {
-                return Err(TypeCoreError::SignatureExpected { loc });
-            }
-            // OCaml compiler/ml/typetexp.ml:547-562 calls
-            // `create_package_mty true`, translates that fake module type,
-            // then translates the visible package fields. The fake nested
-            // `with type` module type is not printed by our sexp serializer,
-            // but its `transl_modtype` freshening side effects are visible in
-            // later typedtree identifier stamps.
-            crate::types::typemod::force_package_modtype_translation_for_core_type(
+            crate::types::typemod::transl_fake_package_modtype(
                 tctx,
                 env,
                 tctx.arena,
                 &pack_path,
-                &package_lids,
+                &package_fields,
                 loc,
             )
             .map_err(|err| match err {
