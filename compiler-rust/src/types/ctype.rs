@@ -12103,8 +12103,9 @@ pub fn instance_constructor(
 }
 
 /// Instantiate a constructor description in a pattern context, processing GADT
-/// existential type variables. For each existential, creates an abstract type
-/// `$ConstructorName_'varname` and links the copied existential to it.
+/// existential type variables. For each existential `'a`, creates an abstract
+/// type `$a` (numbered when the name is taken) and links the copied
+/// existential to it.
 /// Matches OCaml's Ctype.instance_constructor ~in_pattern:(env, newtype_lev).
 pub fn instance_constructor_in_pattern(
     ctx: &TypeContext,
@@ -12121,9 +12122,10 @@ pub fn instance_constructor_in_pattern(
         let name = {
             let desc = ctx.get_desc(existential_repr);
             match &*desc {
-                super::type_expr::TypeDesc::Tvar(Some(name), ..) => {
-                    format!("${}_'{}", cstr.cstr_name, name)
-                }
+                // `$a` for the variable `'a`, numbered when the name is
+                // taken, so that distinct existentials print differently
+                // (ctype.ml:953-958).
+                super::type_expr::TypeDesc::Tvar(Some(name), ..) => format!("${name}"),
                 _ => format!("${}", cstr.cstr_name),
             }
         };
@@ -12149,8 +12151,9 @@ pub fn instance_constructor_in_pattern(
         // OCaml compiler/ml/ctype.ml:1111-1123 creates existential abstract
         // type names with `Ident.create`, so they consume the same stamp
         // stream as typedtree binders.
-        let path =
-            super::path::Path::pident(ctx.create_ident(&ctx.next_reified_abstract_name(&name)));
+        let id = ctx.create_ident(&ctx.next_reified_abstract_name(&name));
+        ctx.record_existential_constructor(id.binding_time(), &cstr.cstr_name);
+        let path = super::path::Path::pident(id);
         env.add_local_constraint(path.clone(), decl);
 
         // Create Tconstr pointing to the abstract type

@@ -492,6 +492,10 @@ pub struct TypeContext {
     /// Counters for OCaml `Ctype.get_new_abstract_name` when reifying local
     /// GADT constraint variables.
     reified_var_counters: RefCell<crate::fast_hash::AHashMap<String, usize>>,
+    /// OCaml `Ctype.existential_constructors_key` (ctype.ml:936-944): the
+    /// constructor binding each existential type `instance_constructor`
+    /// created in this compilation, by the stamp of its identifier.
+    existential_constructors: RefCell<crate::fast_hash::AHashMap<i32, crate::name::Name>>,
     /// Previous env ID for check_abbrev_env (OCaml ctype.ml:1272)
     previous_env_id: Cell<u64>,
 
@@ -1144,6 +1148,7 @@ impl TypeContext {
             rigid_variants: Cell::new(false),
             simple_abbrevs: Cell::new(AbbrevMemoRef(1)),
             reified_var_counters: RefCell::new(crate::fast_hash::AHashMap::new()),
+            existential_constructors: RefCell::new(crate::fast_hash::AHashMap::new()),
             previous_env_id: Cell::new(0),
             current_abbreviations: Cell::new(AbbrevMemoRef::nil()),
             types: TypeArena::new(),
@@ -1624,6 +1629,30 @@ impl TypeContext {
         self.type_decl_log
             .borrow_mut()
             .push(TypeDeclRegistration::Stamp(stamp, decl));
+    }
+
+    /// OCaml `Ctype.reset_reified_var_counter` (ctype.ml:906).
+    pub(crate) fn reset_reified_var_counter(&self) {
+        self.reified_var_counters.borrow_mut().clear();
+    }
+
+    /// The `Hashtbl.replace` into `existential_constructors_key` in OCaml
+    /// `Ctype.instance_constructor` (ctype.ml:960-962).
+    pub(crate) fn record_existential_constructor(&self, stamp: i32, constructor: &str) {
+        self.existential_constructors
+            .borrow_mut()
+            .insert(stamp, crate::name::Name::from(constructor));
+    }
+
+    /// OCaml `Ctype.existential_constructor id` (ctype.ml:941-944).
+    pub(crate) fn existential_constructor(
+        &self,
+        id: &crate::ident::Ident,
+    ) -> Option<crate::name::Name> {
+        self.existential_constructors
+            .borrow()
+            .get(&id.binding_time())
+            .copied()
     }
 
     /// Match OCaml `Ctype.get_new_abstract_name`.

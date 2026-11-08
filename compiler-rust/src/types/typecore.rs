@@ -1488,10 +1488,12 @@ impl<'a> TypeCheckContext<'a> {
         self.persistent_env = Some(env);
     }
 
-    /// Match OCaml Typetexp.reset_type_variables:
-    /// clear the table and reset Ctype.global_level for fresh globals.
+    /// Match OCaml Typetexp.reset_type_variables (typetexp.ml:213-216):
+    /// reset Ctype.global_level for fresh globals and the reified variable
+    /// counter, then clear the table.
     pub fn reset_type_variables(&mut self) {
         self.type_ctx.reset_global_level();
+        self.type_ctx.reset_reified_var_counter();
         self.type_variables.clear();
     }
 

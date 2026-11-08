@@ -3134,7 +3134,25 @@ impl<'a> Printtyp<'a> {
         }
     }
 
+    /// `escape_explanation ppf p` (printtyp.ml:1303-1318).
     fn escape_scope<W: std::io::Write>(&mut self, ppf: &mut Formatter<W>, p: &Path) {
+        if let Path::Pident(id) = p
+            && let Some(constructor) = self.ctx.existential_constructor(id)
+        {
+            let constructor = constructor.as_str();
+            ppf.cut();
+            ppf.open_box(BoxKind::Box, 0);
+            ppf.str(id.name());
+            ppf.str(" is an existential type bound by the constructor ");
+            ppf.str(constructor);
+            ppf.str(".");
+            ppf.space();
+            ppf.str("It is only known in the scope of the pattern that matches ");
+            ppf.str(constructor);
+            ppf.str(".");
+            ppf.close_box();
+            return;
+        }
         ppf.cut();
         ppf.open_box(BoxKind::Box, 0);
         ppf.str("The type constructor");
