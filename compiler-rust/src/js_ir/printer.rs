@@ -3680,6 +3680,7 @@ pub(crate) fn is_js_keyword_or_global(s: &str) -> bool {
                 | "String"
                 | "Symbol"
                 | "SyntaxError"
+                | "Temporal"
                 | "TypedArray"
                 | "TypeError"
                 | "Uint16Array"
