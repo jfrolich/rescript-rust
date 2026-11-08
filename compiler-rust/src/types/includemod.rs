@@ -5228,16 +5228,16 @@ mod tests {
         assert_eq!(signature_modules(&sig).len(), 0);
     }
 
-    /// The context part of `include_err` (includemod.ml:616-625), printed
-    /// at column 2 as in a report.
-    fn include_context_text(cxt: &[IncludeContext]) -> String {
+    /// The position line of `report_error` (includemod.ml `context`),
+    /// printed at column 2 as in a report, before a symptom.
+    fn include_context_text(cxt: &[IncludePos]) -> String {
         let mut buf = Vec::new();
         {
             let mut ppf = crate::parser::formatter::Formatter::new(&mut buf);
             ppf.string_as(2, "");
             ppf.open_vbox(0);
             pp_include_context(&mut ppf, cxt);
-            pp_text(&mut ppf, "Modules do not match");
+            pp_text(&mut ppf, "Illegal permutation of structure fields");
             ppf.close_box();
             ppf.flush();
         }
@@ -5245,28 +5245,53 @@ mod tests {
     }
 
     #[test]
-    fn include_context_writes_functor_positions_in_rescript_syntax() {
-        // The upstream example of b7fed40f06: the body of functor `F`
-        // declared in module `M`'s signature.
+    fn include_context_names_module_paths_in_words() {
+        // The positions of upstream acdf563eef: a module path, a module
+        // type, a functor's result or parameter at the end of one, and any
+        // other position as a module type with `<here>`.
         let f = Ident::create_local("F");
         let x = Ident::create_local("X");
-        assert_eq!(
-            include_context_text(&[IncludeContext::Module(f), IncludeContext::Body(x)]),
-            "At position module F: (X) => <here>\n  Modules do not match"
-        );
         let y = Ident::create_local("Y");
-        assert_eq!(
-            include_context_text(&[IncludeContext::Body(x), IncludeContext::Module(y)]),
-            "At position (X) => { module Y: <here> }\n  Modules do not match"
-        );
         let t = Ident::create_local("T");
+        let symptom = "\n  \n  Illegal permutation of structure fields";
+        let line = |cxt: &[IncludePos]| {
+            include_context_text(cxt)
+                .strip_suffix(symptom)
+                .expect("a blank line before the symptom")
+                .to_string()
+        };
         assert_eq!(
-            include_context_text(&[IncludeContext::Modtype(t), IncludeContext::Module(y)]),
-            "At position module type T = { module Y: <here> }\n  Modules do not match"
+            line(&[IncludePos::Module(f), IncludePos::Module(y)]),
+            "In module F.Y:"
+        );
+        assert_eq!(line(&[IncludePos::Modtype(t)]), "In module type T:");
+        assert_eq!(
+            line(&[IncludePos::Module(f), IncludePos::Modtype(t)]),
+            "In module type F.T:"
         );
         assert_eq!(
-            include_context_text(&[IncludeContext::Module(f), IncludeContext::Module(y)]),
-            "In module F.Y:\n  Modules do not match"
+            line(&[IncludePos::Module(f), IncludePos::Body(x)]),
+            "In the result of functor F:"
+        );
+        assert_eq!(
+            line(&[IncludePos::Module(f), IncludePos::Arg(x)]),
+            "In the parameter X of functor F:"
+        );
+        assert_eq!(
+            line(&[IncludePos::Body(x), IncludePos::Module(y)]),
+            "At position (X) => { module Y: <here> }"
+        );
+        assert_eq!(
+            line(&[IncludePos::Modtype(t), IncludePos::Module(y)]),
+            "At position module type T = { module Y: <here> }"
+        );
+        assert_eq!(
+            line(&[
+                IncludePos::Module(f),
+                IncludePos::Body(x),
+                IncludePos::Module(y)
+            ]),
+            "At position module F: (X) => { module Y: <here> }"
         );
     }
 }
