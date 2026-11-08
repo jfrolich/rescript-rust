@@ -219,10 +219,7 @@ fn run(args: Vec<String>) {
                 parser.arena_mut(),
             ) {
                 Ok(result) => result,
-                Err(err) => {
-                    eprintln!("{err}");
-                    process::exit(1);
-                }
+                Err(err) => exit_with_uncaught_error(&err),
             };
             print_jsx_preprocessor_warnings(&source, &filename, &jsx_warnings, &mut io::stderr());
             signature
@@ -270,10 +267,7 @@ fn run(args: Vec<String>) {
                     );
                     let rewritten = match rewritten {
                         Ok(rewritten) => rewritten,
-                        Err(e) => {
-                            eprintln!("PPX rewrite failed: {e}");
-                            process::exit(1);
-                        }
+                        Err(e) => exit_with_uncaught_error(&format!("PPX rewrite failed: {e}")),
                     };
                     sexp_locs::print_signature(&rewritten, parser.arena(), &mut io::stdout());
                 }
@@ -370,10 +364,7 @@ fn run(args: Vec<String>) {
                 parser.arena_mut(),
             ) {
                 Ok(result) => result,
-                Err(err) => {
-                    eprintln!("{err}");
-                    process::exit(1);
-                }
+                Err(err) => exit_with_uncaught_error(&err),
             };
             print_jsx_preprocessor_warnings(&source, &filename, &jsx_warnings, &mut io::stderr());
             structure
@@ -424,10 +415,7 @@ fn run(args: Vec<String>) {
                     );
                     let rewritten = match rewritten {
                         Ok(rewritten) => rewritten,
-                        Err(e) => {
-                            eprintln!("PPX rewrite failed: {e}");
-                            process::exit(1);
-                        }
+                        Err(e) => exit_with_uncaught_error(&format!("PPX rewrite failed: {e}")),
                     };
                     sexp_locs::print_structure(&rewritten, parser.arena(), &mut io::stdout());
                 }
@@ -501,6 +489,15 @@ fn print_diagnostics(parser: &Parser<'_>, source: &str, filename: &str, out: &mu
         );
         let _ = out.write_all(error_msg.as_bytes());
     }
+}
+
+/// `res_cli` catches no exception from `Jsx_ppx` or `Bs_builtin_ppx.mapper`
+/// (res_cli.ml:126-132, 158-165), so their errors end the process as an
+/// uncaught exception, which the OCaml runtime reports on stderr with exit
+/// status 2.
+fn exit_with_uncaught_error(message: &dyn std::fmt::Display) -> ! {
+    eprintln!("{message}");
+    process::exit(2)
 }
 
 fn print_parser_warnings(parser: &Parser<'_>, source: &str, filename: &str, out: &mut impl Write) {
