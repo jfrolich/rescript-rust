@@ -372,6 +372,19 @@ impl LambdaCompiler {
             .to_tree()
     }
 
+    /// Export coercion over a block in `self.j`.
+    pub(crate) fn coerce_toplevel_exports_lam(
+        &mut self,
+        block: &mut Vec<Stmt>,
+        extracted: ExtractedExports,
+    ) -> Vec<Ident> {
+        let mut j = std::mem::take(&mut self.j);
+        let (exports, _) =
+            self.coerce_toplevel_exports_with_name_reservations(&mut j, block, extracted);
+        self.j = j;
+        exports
+    }
+
     /// Export coercion over a tree block.
     pub(crate) fn coerce_toplevel_exports(
         &mut self,
