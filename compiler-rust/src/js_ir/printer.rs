@@ -3737,18 +3737,18 @@ fn print_expression_with_options(
 }
 
 #[cfg(test)]
-fn print_expression_with_level(expr: &super::Expression, level: u8) -> String {
-    print_expression_with_options(expr, level, false, false)
+fn print_expression_with_level(a: &JsArena, expr: Expr, level: u8) -> String {
+    print_expr_with_options(a, expr, level, false, false)
 }
 
 #[cfg(test)]
-fn print_expression_with_debug(expr: &super::Expression, debug: bool) -> String {
-    print_expression_with_options(expr, 0, debug, false)
+fn print_expression_with_debug(a: &JsArena, expr: Expr, debug: bool) -> String {
+    print_expr_with_options(a, expr, 0, debug, false)
 }
 
 #[cfg(test)]
-fn print_expression_with_jsx_preserve(expr: &super::Expression, jsx_preserve: bool) -> String {
-    print_expression_with_options(expr, 0, false, jsx_preserve)
+fn print_expression_with_jsx_preserve(a: &JsArena, expr: Expr, jsx_preserve: bool) -> String {
+    print_expr_with_options(a, expr, 0, false, jsx_preserve)
 }
 
 /// Print a tree block to a string.
@@ -3763,60 +3763,117 @@ pub fn print_block(block: &super::Block) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::js_ir::arena::*;
+    use crate::js_ir::build::{exp as JE, stmt as JS};
     use crate::js_ir::op::{IdentInfo, LengthObject, MutableFlag, PropertyName, UsedStats};
-    use crate::js_ir::{
-        Block, CallInfo, CaseClause, Expression, ExpressionDesc, JsRawInfo, ModuleId, Statement,
-        StatementDesc, StringClause, VIdent, VariableDeclaration,
-    };
+    use crate::js_ir::{CallInfo, JsRawInfo, ModuleId};
     use crate::lambda::TagInfo;
 
-    /// Prints a tree block as a function body.
-    fn print_function_body_tree(body: &Block, return_unit: bool) -> String {
-        let mut a = JsArena::new();
-        let body = crate::js_ir::arena_tree::import_block_vec(&mut a, body);
-        let mut printer = JsPrinter::new(&a);
-        printer.print_function_body(&body, return_unit);
+    /// A function expression node, built raw (no smart-constructor folding).
+    fn test_fun(
+        is_method: bool,
+        params: &[Ident],
+        body: &[Stmt],
+        return_unit: bool,
+        async_: bool,
+        directive: Option<&str>,
+        j: &mut JsArena,
+    ) -> Expr {
+        let params = j.ident_list(params);
+        let body = JS::list(body, j);
+        let directive = directive.map(|d| j.str(d));
+        let f = j.fun_id(FunInfo {
+            is_method,
+            params,
+            body,
+            return_unit,
+            async_,
+            directive,
+        });
+        j.expr(ExprKind::Fun(f))
+    }
+
+    /// Object-literal properties for `ExprKind::Object`.
+    fn test_props(props: Vec<(PropertyName, Expr)>, j: &mut JsArena) -> PropList {
+        let props: Vec<(PropName, Expr)> = props
+            .into_iter()
+            .map(|(name, value)| match name {
+                PropertyName::Lit(s) => (PropName::Lit(j.str(&s)), value),
+                PropertyName::Symbol => (PropName::Symbol, value),
+            })
+            .collect();
+        j.prop_list(&props)
+    }
+
+    /// Prints `body` as a function body.
+    fn print_function_body_of(j: &JsArena, body: &[Stmt], return_unit: bool) -> String {
+        let mut printer = JsPrinter::new(j);
+        printer.print_function_body(body, return_unit);
         printer.into_output()
     }
 
     #[test]
     fn function_body_preserves_nested_guards_and_inner_returns() {
+        let mut j = JsArena::new();
         // js_dump.ml:1752-1766 only elides the outermost unit-return tail.
-        let outer = Expression::var(Ident::create_local("outer"));
-        let inner = Expression::var(Ident::create_local("inner"));
-        let body = vec![Statement::new(StatementDesc::If(
-            outer,
-            vec![Statement::new(StatementDesc::If(
-                inner,
-                vec![Statement::exp(Expression::call(
-                    Expression::var(Ident::create_local("act")),
-                    vec![],
-                    CallInfo::default(),
-                ))],
-                vec![Statement::return_(Expression::undefined(true))],
-            ))],
-            vec![Statement::return_(Expression::undefined(true))],
-        ))];
+        let outer = JE::var(Ident::create_local("outer"), &mut j);
+        let inner = JE::var(Ident::create_local("inner"), &mut j);
+        let body = vec![JS::new(
+            StmtKind::If(
+                outer,
+                JS::list(
+                    &[JS::new(
+                        StmtKind::If(
+                            inner,
+                            JS::list(
+                                &[JS::exp(
+                                    JE::call(
+                                        JE::var(Ident::create_local("act"), &mut j),
+                                        &[],
+                                        CallInfo::default(),
+                                        &mut j,
+                                    ),
+                                    &mut j,
+                                )],
+                                &mut j,
+                            ),
+                            JS::list(&[JS::return_(JE::undefined(true, &mut j), &mut j)], &mut j),
+                        ),
+                        &mut j,
+                    )],
+                    &mut j,
+                ),
+                JS::list(&[JS::return_(JE::undefined(true, &mut j), &mut j)], &mut j),
+            ),
+            &mut j,
+        )];
         assert_eq!(
-            print_function_body_tree(&body, true),
+            print_function_body_of(&j, &body, true),
             "if (outer) {\n  if (inner) {\n    act();\n  } else {\n    return;\n  }\n}"
         );
     }
 
     #[test]
     fn function_body_trailing_return_does_not_rewrite_preceding_if() {
+        let mut j = JsArena::new();
         // The two-element clause prints s as a statement, not function_body [s].
-        let cond = Expression::var(Ident::create_local("cond"));
+        let cond = JE::var(Ident::create_local("cond"), &mut j);
         let body = vec![
-            Statement::new(StatementDesc::If(
-                cond,
-                vec![Statement::return_(Expression::number(Number::int(1)))],
-                vec![Statement::return_(Expression::undefined(true))],
-            )),
-            Statement::return_(Expression::undefined(true)),
+            JS::new(
+                StmtKind::If(
+                    cond,
+                    JS::list(
+                        &[JS::return_(JE::number(Number::int(1), &mut j), &mut j)],
+                        &mut j,
+                    ),
+                    JS::list(&[JS::return_(JE::undefined(true, &mut j), &mut j)], &mut j),
+                ),
+                &mut j,
+            ),
+            JS::return_(JE::undefined(true, &mut j), &mut j),
         ];
         assert_eq!(
-            print_function_body_tree(&body, true),
+            print_function_body_of(&j, &body, true),
             "if (cond) {\n  return 1;\n} else {\n  return;\n}"
         );
     }
@@ -3835,93 +3892,104 @@ mod tests {
 
     #[test]
     fn test_print_bool() {
-        let expr = Expression::bool(true);
-        assert_eq!(print_expression(&expr), "true");
+        let mut j = JsArena::new();
+        let expr = JE::bool(true, &mut j);
+        assert_eq!(print_expr(&j, expr), "true");
 
-        let expr = Expression::bool(false);
-        assert_eq!(print_expression(&expr), "false");
+        let expr = JE::bool(false, &mut j);
+        assert_eq!(print_expr(&j, expr), "false");
     }
 
     #[test]
     fn test_print_null_undefined() {
-        let expr = Expression::null();
-        assert_eq!(print_expression(&expr), "null");
+        let mut j = JsArena::new();
+        let expr = JE::null(&mut j);
+        assert_eq!(print_expr(&j, expr), "null");
 
-        let expr = Expression::undefined(true);
-        assert_eq!(print_expression(&expr), "undefined");
+        let expr = JE::undefined(true, &mut j);
+        assert_eq!(print_expr(&j, expr), "undefined");
     }
 
     #[test]
     fn test_print_number() {
-        let expr = Expression::number(Number::int(42));
-        assert_eq!(print_expression(&expr), "42");
+        let mut j = JsArena::new();
+        let expr = JE::number(Number::int(42), &mut j);
+        assert_eq!(print_expr(&j, expr), "42");
 
-        let expr = Expression::number(Number::float("3.14"));
-        assert_eq!(print_expression(&expr), "3.14");
+        let expr = JE::number(Number::float("3.14"), &mut j);
+        assert_eq!(print_expr(&j, expr), "3.14");
 
-        let expr = Expression::number(Number::float("1."));
-        assert_eq!(print_expression(&expr), "1");
+        let expr = JE::number(Number::float("1."), &mut j);
+        assert_eq!(print_expr(&j, expr), "1");
 
-        let expr = Expression::number(Number::float("0012."));
-        assert_eq!(print_expression(&expr), "12");
+        let expr = JE::number(Number::float("0012."), &mut j);
+        assert_eq!(print_expr(&j, expr), "12");
 
-        let expr = Expression::number(Number::float("-0."));
-        assert_eq!(print_expression(&expr), "-0");
+        let expr = JE::number(Number::float("-0."), &mut j);
+        assert_eq!(print_expr(&j, expr), "-0");
 
-        let expr = Expression::number(Number::float("0x10"));
-        assert_eq!(print_expression(&expr), "16");
+        let expr = JE::number(Number::float("0x10"), &mut j);
+        assert_eq!(print_expr(&j, expr), "16");
 
-        let expr = Expression::number(Number::char('A'));
-        assert_eq!(print_expression(&expr), "/* 'A' */65");
+        let expr = JE::number(Number::char('A'), &mut j);
+        assert_eq!(print_expr(&j, expr), "/* 'A' */65");
 
-        let expr = Expression::number(Number::char('文'));
-        assert_eq!(print_expression(&expr), "/* '文' */25991");
+        let expr = JE::number(Number::char('文'), &mut j);
+        assert_eq!(print_expr(&j, expr), "/* '文' */25991");
     }
 
     #[test]
     fn test_exponentiation_parenthesizes_compound_right_operand() {
-        let expr = Expression::bin(
+        let mut j = JsArena::new();
+        let expr = JE::bin(
             BinOp::Pow,
-            Expression::var(Ident::create_local("base")),
-            Expression::bin(
+            JE::var(Ident::create_local("base"), &mut j),
+            JE::bin(
                 BinOp::Div,
-                Expression::var(Ident::create_local("numerator")),
-                Expression::var(Ident::create_local("denominator")),
+                JE::var(Ident::create_local("numerator"), &mut j),
+                JE::var(Ident::create_local("denominator"), &mut j),
+                &mut j,
             ),
+            &mut j,
         );
-        assert_eq!(print_expression(&expr), "base ** (numerator / denominator)");
+        assert_eq!(print_expr(&j, expr), "base ** (numerator / denominator)");
     }
 
     #[test]
     #[ignore = "stale internal shape expectation; covered by strict lambda/JS parity gates"]
     fn test_for_range_finish_binding_suffix_persists_across_sibling_loops_like_ocaml() {
-        let first = Statement::for_range(
+        let mut j = JsArena::new();
+        let first = JS::for_range(
             None,
-            Some(Expression::number(Number::int(0))),
-            Expression::call(
-                Expression::var(Ident::create_local("finishExpr")),
-                vec![Expression::number(Number::int(1))],
+            Some(JE::number(Number::int(0), &mut j)),
+            JE::call(
+                JE::var(Ident::create_local("finishExpr"), &mut j),
+                &[JE::number(Number::int(1), &mut j)],
                 CallInfo::default(),
+                &mut j,
             ),
             Ident::create_local("i"),
             ForDirection::Up,
-            vec![],
+            &[],
+            &mut j,
         );
 
-        let second = Statement::for_range(
+        let second = JS::for_range(
             None,
-            Some(Expression::number(Number::int(0))),
-            Expression::call(
-                Expression::var(Ident::create_local("finishExpr")),
-                vec![Expression::number(Number::int(2))],
+            Some(JE::number(Number::int(0), &mut j)),
+            JE::call(
+                JE::var(Ident::create_local("finishExpr"), &mut j),
+                &[JE::number(Number::int(2), &mut j)],
                 CallInfo::default(),
+                &mut j,
             ),
             Ident::create_local("i"),
             ForDirection::Up,
-            vec![],
+            &[],
+            &mut j,
         );
 
-        let rendered = print_block(&vec![first, second]);
+        let rendered = print_stmts(&j, &vec![first, second]);
 
         assert!(rendered.contains("for (let i = 0, i_finish = finishExpr(1); i < i_finish; ++i)"));
         assert!(
@@ -3933,227 +4001,293 @@ mod tests {
 
     #[test]
     fn test_print_string() {
-        let expr = Expression::string("hello");
-        assert_eq!(print_expression(&expr), "\"hello\"");
+        let mut j = JsArena::new();
+        let expr = JE::string("hello", &mut j);
+        assert_eq!(print_expr(&j, expr), "\"hello\"");
 
-        let expr = Expression::string("hello\nworld");
-        assert_eq!(print_expression(&expr), "\"hello\\nworld\"");
+        let expr = JE::string("hello\nworld", &mut j);
+        assert_eq!(print_expr(&j, expr), "\"hello\\nworld\"");
     }
 
     #[test]
     fn test_print_string_decodes_internal_utf8_bytes_before_escaping() {
-        let expr = Expression::string(latin1_encoded_utf8("\u{4f60}\u{597d}"));
-        assert_eq!(print_expression(&expr), "\"\u{4f60}\u{597d}\"");
+        let mut j = JsArena::new();
+        let expr = JE::string(&latin1_encoded_utf8("\u{4f60}\u{597d}"), &mut j);
+        assert_eq!(print_expr(&j, expr), "\"\u{4f60}\u{597d}\"");
     }
 
     #[test]
     fn test_print_json_literal_decodes_internal_utf8_bytes() {
+        let mut j = JsArena::new();
         let regex = format!(
             "/Bucklescript{}/",
             "\u{662f}\u{4e00}\u{4e2a}\u{7a0b}\u{5e8f}\u{8bed}\u{8a00}"
         );
-        let expr = Expression::new(ExpressionDesc::JsonLiteral(latin1_encoded_utf8(&regex)));
-        assert_eq!(print_expression(&expr), regex);
+        let expr = JE::new(
+            ExprKind::JsonLiteral(JE::str_id(&latin1_encoded_utf8(&regex), &mut j)),
+            &mut j,
+        );
+        assert_eq!(print_expr(&j, expr), regex);
     }
 
     #[test]
     fn test_print_tagged_template_decodes_internal_utf8_bytes() {
-        let expr = Expression::new(ExpressionDesc::TaggedTemplate(
-            Box::new(Expression::var(Ident::create_local("tag"))),
-            vec![latin1_encoded_utf8(
-                "\u{4f60}\u{597d}\u{ff0c}\n\u{4e16}\u{754c}",
-            )],
-            vec![],
-        ));
+        let mut j = JsArena::new();
+        let expr = JE::new(
+            ExprKind::TaggedTemplate(
+                JE::var(Ident::create_local("tag"), &mut j),
+                j.tagged_id(vec![latin1_encoded_utf8(
+                    "\u{4f60}\u{597d}\u{ff0c}\n\u{4e16}\u{754c}",
+                )]),
+                j.empty_exprs(),
+            ),
+            &mut j,
+        );
 
         assert_eq!(
-            print_expression(&expr),
+            print_expr(&j, expr),
             format!("tag`\u{4f60}\u{597d}\u{ff0c}\n\u{4e16}\u{754c}`")
         );
     }
 
     #[test]
     fn test_print_array() {
-        let expr = Expression::array(
-            vec![
-                Expression::number(Number::int(1)),
-                Expression::number(Number::int(2)),
-                Expression::number(Number::int(3)),
+        let mut j = JsArena::new();
+        let expr = JE::array(
+            &[
+                JE::number(Number::int(1), &mut j),
+                JE::number(Number::int(2), &mut j),
+                JE::number(Number::int(3), &mut j),
             ],
             MutableFlag::Immutable,
+            &mut j,
         );
-        assert_eq!(print_expression(&expr), "[\n  1,\n  2,\n  3\n]");
+        assert_eq!(print_expr(&j, expr), "[\n  1,\n  2,\n  3\n]");
     }
 
     #[test]
     fn test_print_singleton_array_preserves_nested_object_indentation_like_ocaml() {
-        let expr = Expression::array(
-            vec![Expression::new(ExpressionDesc::Object(
-                None,
-                vec![(PropertyName::lit("foo"), Expression::number(Number::int(1)))],
-            ))],
+        let mut j = JsArena::new();
+        let expr = JE::array(
+            &[JE::new(
+                ExprKind::Object(
+                    None,
+                    test_props(
+                        vec![(PropertyName::lit("foo"), JE::number(Number::int(1), &mut j))],
+                        &mut j,
+                    ),
+                ),
+                &mut j,
+            )],
             MutableFlag::Immutable,
+            &mut j,
         );
 
-        assert_eq!(print_expression(&expr), "[{\n    foo: 1\n  }]");
+        assert_eq!(print_expr(&j, expr), "[{\n    foo: 1\n  }]");
     }
 
     #[test]
     fn test_print_binary() {
-        let left = Expression::number(Number::int(1));
-        let right = Expression::number(Number::int(2));
-        let expr = Expression::bin(BinOp::Plus, left, right);
-        assert_eq!(print_expression(&expr), "1 + 2");
+        let mut j = JsArena::new();
+        let left = JE::number(Number::int(1), &mut j);
+        let right = JE::number(Number::int(2), &mut j);
+        let expr = JE::bin(BinOp::Plus, left, right, &mut j);
+        assert_eq!(print_expr(&j, expr), "1 + 2");
     }
 
     #[test]
     fn test_print_shift_binary_is_parenthesized_like_ocaml() {
-        let expr = Expression::bin(
+        let mut j = JsArena::new();
+        let expr = JE::bin(
             BinOp::Lsl,
-            Expression::var(Ident::create_local("x")),
-            Expression::number(Number::int(1)),
+            JE::var(Ident::create_local("x"), &mut j),
+            JE::number(Number::int(1), &mut j),
+            &mut j,
         );
-        assert_eq!(print_expression(&expr), "(x << 1)");
+        assert_eq!(print_expr(&j, expr), "(x << 1)");
     }
 
     #[test]
     fn test_print_chained_logical_and_without_right_nested_parens_like_ocaml() {
-        let expr = Expression::bin(
+        let mut j = JsArena::new();
+        let expr = JE::bin(
             BinOp::And,
-            Expression::var(Ident::create_local("a")),
-            Expression::bin(
+            JE::var(Ident::create_local("a"), &mut j),
+            JE::bin(
                 BinOp::And,
-                Expression::var(Ident::create_local("b")),
-                Expression::var(Ident::create_local("c")),
+                JE::var(Ident::create_local("b"), &mut j),
+                JE::var(Ident::create_local("c"), &mut j),
+                &mut j,
             ),
+            &mut j,
         );
-        assert_eq!(print_expression(&expr), "a && b && c");
+        assert_eq!(print_expr(&j, expr), "a && b && c");
     }
 
     #[test]
     fn test_print_chained_logical_or_without_right_nested_parens_like_ocaml() {
-        let expr = Expression::bin(
+        let mut j = JsArena::new();
+        let expr = JE::bin(
             BinOp::Or,
-            Expression::var(Ident::create_local("a")),
-            Expression::bin(
+            JE::var(Ident::create_local("a"), &mut j),
+            JE::bin(
                 BinOp::Or,
-                Expression::var(Ident::create_local("b")),
-                Expression::var(Ident::create_local("c")),
+                JE::var(Ident::create_local("b"), &mut j),
+                JE::var(Ident::create_local("c"), &mut j),
+                &mut j,
             ),
+            &mut j,
         );
-        assert_eq!(print_expression(&expr), "a || b || c");
+        assert_eq!(print_expr(&j, expr), "a || b || c");
     }
 
     #[test]
     fn test_print_nullish_or_as_loose_null_check_like_ocaml() {
-        let value = Expression::var(Ident::create_local("x"));
-        let expr = Expression::bin(
+        let mut j = JsArena::new();
+        let value = JE::var(Ident::create_local("x"), &mut j);
+        let expr = JE::bin(
             BinOp::Or,
-            Expression::bin(BinOp::EqEqEq, value.clone(), Expression::null()),
-            Expression::bin(BinOp::EqEqEq, value.clone(), Expression::undefined(false)),
+            JE::bin(BinOp::EqEqEq, value.clone(), JE::null(&mut j), &mut j),
+            JE::bin(
+                BinOp::EqEqEq,
+                value.clone(),
+                JE::undefined(false, &mut j),
+                &mut j,
+            ),
+            &mut j,
         );
 
-        assert_eq!(print_expression(&expr), "x == null");
+        assert_eq!(print_expr(&j, expr), "x == null");
     }
 
     #[test]
     fn test_print_nullish_or_as_loose_null_check_in_reverse_order_like_ocaml() {
-        let value = Expression::var(Ident::create_local("x"));
-        let expr = Expression::bin(
+        let mut j = JsArena::new();
+        let value = JE::var(Ident::create_local("x"), &mut j);
+        let expr = JE::bin(
             BinOp::Or,
-            Expression::bin(BinOp::EqEqEq, value.clone(), Expression::undefined(false)),
-            Expression::bin(BinOp::EqEqEq, value.clone(), Expression::null()),
+            JE::bin(
+                BinOp::EqEqEq,
+                value.clone(),
+                JE::undefined(false, &mut j),
+                &mut j,
+            ),
+            JE::bin(BinOp::EqEqEq, value.clone(), JE::null(&mut j), &mut j),
+            &mut j,
         );
 
-        assert_eq!(print_expression(&expr), "x == null");
+        assert_eq!(print_expr(&j, expr), "x == null");
     }
 
     #[test]
     fn test_print_chained_bitwise_or_without_right_nested_parens_like_ocaml() {
-        let expr = Expression::bin(
+        let mut j = JsArena::new();
+        let expr = JE::bin(
             BinOp::Bor,
-            Expression::var(Ident::create_local("a")),
-            Expression::bin(
+            JE::var(Ident::create_local("a"), &mut j),
+            JE::bin(
                 BinOp::Bor,
-                Expression::var(Ident::create_local("b")),
-                Expression::var(Ident::create_local("c")),
+                JE::var(Ident::create_local("b"), &mut j),
+                JE::var(Ident::create_local("c"), &mut j),
+                &mut j,
             ),
+            &mut j,
         );
-        assert_eq!(print_expression(&expr), "a | b | c");
+        assert_eq!(print_expr(&j, expr), "a | b | c");
     }
 
     #[test]
     fn test_print_zero_minus_expr_as_unary_minus() {
-        let expr = Expression::bin(
+        let mut j = JsArena::new();
+        let expr = JE::bin(
             BinOp::Bor,
-            Expression::bin(
+            JE::bin(
                 BinOp::Minus,
-                Expression::number(Number::int(0)),
-                Expression::var(Ident::create_local("x")),
+                JE::number(Number::int(0), &mut j),
+                JE::var(Ident::create_local("x"), &mut j),
+                &mut j,
             ),
-            Expression::number(Number::int(0)),
+            JE::number(Number::int(0), &mut j),
+            &mut j,
         );
-        assert_eq!(print_expression(&expr), "-x | 0");
+        assert_eq!(print_expr(&j, expr), "-x | 0");
     }
 
     #[test]
     fn test_print_zero_float_minus_expr_as_spaced_unary_minus() {
-        let expr = Expression::bin(
+        let mut j = JsArena::new();
+        let expr = JE::bin(
             BinOp::Minus,
-            Expression::number(Number::float("0.")),
-            Expression::var(Ident::create_local("x")),
+            JE::number(Number::float("0."), &mut j),
+            JE::var(Ident::create_local("x"), &mut j),
+            &mut j,
         );
-        assert_eq!(print_expression(&expr), "- x");
+        assert_eq!(print_expr(&j, expr), "- x");
     }
 
     #[test]
     fn test_print_typeof_function_parenthesizes_arrow_expression() {
+        let mut j = JsArena::new();
         let value = Ident::create_local("value");
-        let expr = Expression::new(ExpressionDesc::Typeof(Box::new(Expression::new(
-            ExpressionDesc::Fun {
-                is_method: false,
-                params: vec![value],
-                body: vec![Statement::return_(Expression::var(value))],
-                env: Default::default(),
-                return_unit: false,
-                async_: false,
-                directive: None,
-            },
-        ))));
-        assert_eq!(print_expression(&expr), "typeof (value => value)");
+        let expr = JE::new(
+            ExprKind::Typeof(test_fun(
+                false,
+                &[value],
+                &[JS::return_(JE::var(value, &mut j), &mut j)],
+                false,
+                false,
+                None,
+                &mut j,
+            )),
+            &mut j,
+        );
+        assert_eq!(print_expr(&j, expr), "typeof (value => value)");
     }
 
     #[test]
     fn test_print_typeof_simple_raw_js_omits_extra_parens() {
-        let expr = Expression::new(ExpressionDesc::Typeof(Box::new(Expression::new(
-            ExpressionDesc::RawJsCode(JsRawInfo {
-                code: "__DEV__".to_string(),
-                is_stmt: false,
-            }),
-        ))));
-        assert_eq!(print_expression(&expr), "typeof __DEV__");
+        let mut j = JsArena::new();
+        let expr = JE::new(
+            ExprKind::Typeof(JE::new(
+                ExprKind::RawJsCode(j.raw_id(JsRawInfo {
+                    code: "__DEV__".to_string(),
+                    is_stmt: false,
+                })),
+                &mut j,
+            )),
+            &mut j,
+        );
+        assert_eq!(print_expr(&j, expr), "typeof __DEV__");
     }
 
     #[test]
     fn test_print_raw_js_regex_literal_omits_extra_parens() {
-        let expr = Expression::new(ExpressionDesc::RawJsCode(JsRawInfo {
-            code: "/foo/g".to_string(),
-            is_stmt: false,
-        }));
-        assert_eq!(print_expression(&expr), "/foo/g");
+        let mut j = JsArena::new();
+        let expr = JE::new(
+            ExprKind::RawJsCode(j.raw_id(JsRawInfo {
+                code: "/foo/g".to_string(),
+                is_stmt: false,
+            })),
+            &mut j,
+        );
+        assert_eq!(print_expr(&j, expr), "/foo/g");
     }
 
     #[test]
     fn test_print_raw_js_decodes_internal_utf8_bytes() {
-        let expr = Expression::new(ExpressionDesc::RawJsCode(JsRawInfo {
-            code: latin1_encoded_utf8(&format!(
-                "/Bucklescript{}/",
-                "\u{662f}\u{4e00}\u{4e2a}\u{7a0b}\u{5e8f}\u{8bed}\u{8a00}"
-            )),
-            is_stmt: false,
-        }));
+        let mut j = JsArena::new();
+        let expr = JE::new(
+            ExprKind::RawJsCode(j.raw_id(JsRawInfo {
+                code: latin1_encoded_utf8(&format!(
+                    "/Bucklescript{}/",
+                    "\u{662f}\u{4e00}\u{4e2a}\u{7a0b}\u{5e8f}\u{8bed}\u{8a00}"
+                )),
+                is_stmt: false,
+            })),
+            &mut j,
+        );
         assert_eq!(
-            print_expression(&expr),
+            print_expr(&j, expr),
             format!(
                 "/Bucklescript{}/",
                 "\u{662f}\u{4e00}\u{4e2a}\u{7a0b}\u{5e8f}\u{8bed}\u{8a00}"
@@ -4163,52 +4297,72 @@ mod tests {
 
     #[test]
     fn test_print_raw_js_function_expression_adds_parens() {
-        let expr = Expression::new(ExpressionDesc::RawJsCode(JsRawInfo {
-            code: "(a) => typeof a".to_string(),
-            is_stmt: false,
-        }));
-        assert_eq!(print_expression(&expr), "((a) => typeof a)");
+        let mut j = JsArena::new();
+        let expr = JE::new(
+            ExprKind::RawJsCode(j.raw_id(JsRawInfo {
+                code: "(a) => typeof a".to_string(),
+                is_stmt: false,
+            })),
+            &mut j,
+        );
+        assert_eq!(print_expr(&j, expr), "((a) => typeof a)");
     }
 
     #[test]
     fn test_print_statement_calling_raw_js_function_expression_adds_statement_parens() {
-        let expr = Expression::call(
-            Expression::new(ExpressionDesc::RawJsCode(JsRawInfo {
-                code: "(_)=> console.log('should works')".to_string(),
-                is_stmt: false,
-            })),
-            vec![],
+        let mut j = JsArena::new();
+        let expr = JE::call(
+            JE::new(
+                ExprKind::RawJsCode(j.raw_id(JsRawInfo {
+                    code: "(_)=> console.log('should works')".to_string(),
+                    is_stmt: false,
+                })),
+                &mut j,
+            ),
+            &[],
             CallInfo::default(),
+            &mut j,
         );
-        let block = vec![Statement::exp(expr)];
+        let block = vec![JS::exp(expr, &mut j)];
         assert_eq!(
-            print_block(&block),
+            print_stmts(&j, &block),
             "(((_)=> console.log('should works'))());"
         );
     }
 
     #[test]
     fn test_print_parenthesized_object_statement_uses_ocaml_group_indent() {
-        let stmt = Statement::exp(Expression::new(ExpressionDesc::Object(
-            None,
-            vec![
-                (
-                    PropertyName::lit("high"),
-                    Expression::call(
-                        Expression::var(Ident::create_local("add")),
+        let mut j = JsArena::new();
+        let stmt = JS::exp(
+            JE::new(
+                ExprKind::Object(
+                    None,
+                    test_props(
                         vec![
-                            Expression::number(Number::int(1)),
-                            Expression::number(Number::int(2)),
+                            (
+                                PropertyName::lit("high"),
+                                JE::call(
+                                    JE::var(Ident::create_local("add"), &mut j),
+                                    &[
+                                        JE::number(Number::int(1), &mut j),
+                                        JE::number(Number::int(2), &mut j),
+                                    ],
+                                    CallInfo::default(),
+                                    &mut j,
+                                ),
+                            ),
+                            (PropertyName::lit("low"), JE::number(Number::int(3), &mut j)),
                         ],
-                        CallInfo::default(),
+                        &mut j,
                     ),
                 ),
-                (PropertyName::lit("low"), Expression::number(Number::int(3))),
-            ],
-        )));
+                &mut j,
+            ),
+            &mut j,
+        );
 
         assert_eq!(
-            print_block(&vec![stmt]),
+            print_stmts(&j, &vec![stmt]),
             "({\n    high: add(1, 2),\n    low: 3\n  });"
         );
     }
@@ -4216,371 +4370,490 @@ mod tests {
     #[test]
     #[ignore = "stale internal shape expectation; covered by strict lambda/JS parity gates"]
     fn test_print_block_preserves_raw_js_comment_literal_statements_like_ocaml() {
+        let mut j = JsArena::new();
         let block = vec![
-            Statement::exp(Expression::new(ExpressionDesc::RawJsCode(JsRawInfo {
-                code: "//eslint-disable\n0".to_string(),
-                is_stmt: false,
-            }))),
-            Statement::return_(Expression::var(Ident::create_local("x"))),
+            JS::exp(
+                JE::new(
+                    ExprKind::RawJsCode(j.raw_id(JsRawInfo {
+                        code: "//eslint-disable\n0".to_string(),
+                        is_stmt: false,
+                    })),
+                    &mut j,
+                ),
+                &mut j,
+            ),
+            JS::return_(JE::var(Ident::create_local("x"), &mut j), &mut j),
         ];
 
-        assert_eq!(print_block(&block), "//eslint-disable\nreturn x;");
+        assert_eq!(print_stmts(&j, &block), "//eslint-disable\nreturn x;");
     }
 
     #[test]
     #[ignore = "stale internal shape expectation; covered by strict lambda/JS parity gates"]
     fn test_print_block_preserves_comment_only_raw_js_statements_without_semicolon_like_ocaml() {
+        let mut j = JsArena::new();
         let block = vec![
-            Statement::exp(Expression::new(ExpressionDesc::RawJsCode(JsRawInfo {
-                code: "/* comment */".to_string(),
-                is_stmt: true,
-            }))),
-            Statement::return_(Expression::number(Number::int(1))),
+            JS::exp(
+                JE::new(
+                    ExprKind::RawJsCode(j.raw_id(JsRawInfo {
+                        code: "/* comment */".to_string(),
+                        is_stmt: true,
+                    })),
+                    &mut j,
+                ),
+                &mut j,
+            ),
+            JS::return_(JE::number(Number::int(1), &mut j), &mut j),
         ];
 
-        assert_eq!(print_block(&block), "/* comment */\nreturn 1;");
+        assert_eq!(print_stmts(&j, &block), "/* comment */\nreturn 1;");
     }
 
     #[test]
     #[ignore = "stale internal shape expectation; covered by strict lambda/JS parity gates"]
     fn test_print_conditional() {
-        let cond = Expression::bool(true);
-        let then_ = Expression::number(Number::int(1));
-        let else_ = Expression::number(Number::int(2));
-        let expr = Expression::cond(cond, then_, else_);
-        assert_eq!(print_expression(&expr), "true ? 1 : 2");
+        let mut j = JsArena::new();
+        let cond = JE::bool(true, &mut j);
+        let then_ = JE::number(Number::int(1), &mut j);
+        let else_ = JE::number(Number::int(2), &mut j);
+        let expr = JE::cond(cond, then_, else_, &mut j);
+        assert_eq!(print_expr(&j, expr), "true ? 1 : 2");
     }
 
     #[test]
     fn test_print_parenthesized_conditional_uses_vertical_group() {
-        let cond = Expression::var(Ident::create_local("x"));
-        let then_ = Expression::number(Number::int(1));
-        let else_ = Expression::number(Number::int(2));
-        let expr = Expression::cond(cond, then_, else_);
-        assert_eq!(print_expression_with_level(&expr, 3), "(\n  x ? 1 : 2\n)");
+        let mut j = JsArena::new();
+        let cond = JE::var(Ident::create_local("x"), &mut j);
+        let then_ = JE::number(Number::int(1), &mut j);
+        let else_ = JE::number(Number::int(2), &mut j);
+        let expr = JE::cond(cond, then_, else_, &mut j);
+        assert_eq!(
+            print_expression_with_level(&j, expr, 3),
+            "(\n  x ? 1 : 2\n)"
+        );
     }
 
     #[test]
     fn test_print_nested_conditional_else_branch_matches_ocaml_grouping() {
-        let outer = Expression::cond(
-            Expression::var(Ident::create_local("x")),
-            Expression::number(Number::int(0)),
-            Expression::cond(
-                Expression::var(Ident::create_local("y")),
-                Expression::number(Number::int(1)),
-                Expression::number(Number::int(2)),
+        let mut j = JsArena::new();
+        let outer = JE::cond(
+            JE::var(Ident::create_local("x"), &mut j),
+            JE::number(Number::int(0), &mut j),
+            JE::cond(
+                JE::var(Ident::create_local("y"), &mut j),
+                JE::number(Number::int(1), &mut j),
+                JE::number(Number::int(2), &mut j),
+                &mut j,
             ),
+            &mut j,
         );
-        assert_eq!(print_expression(&outer), "x ? 0 : (\n    y ? 1 : 2\n  )");
+        assert_eq!(print_expr(&j, outer), "x ? 0 : (\n    y ? 1 : 2\n  )");
     }
 
     #[test]
     fn test_print_call() {
+        let mut j = JsArena::new();
         let id = Ident::create_local("foo");
-        let func = Expression::var(id);
-        let args = vec![Expression::number(Number::int(42))];
-        let expr = Expression::call(func, args, CallInfo::default());
-        assert!(print_expression(&expr).contains("(42)"));
+        let func = JE::var(id, &mut j);
+        let args = vec![JE::number(Number::int(42), &mut j)];
+        let expr = JE::call(func, &args, CallInfo::default(), &mut j);
+        assert!(print_expr(&j, expr).contains("(42)"));
     }
 
     #[test]
     fn test_print_call_omits_single_unit_undefined_argument() {
-        let func = Expression::var(Ident::create_local("foo"));
-        let expr = Expression::call(func, vec![Expression::undefined(true)], CallInfo::default());
-        assert_eq!(print_expression(&expr), "foo()");
+        let mut j = JsArena::new();
+        let func = JE::var(Ident::create_local("foo"), &mut j);
+        let expr = JE::call(
+            func,
+            &[JE::undefined(true, &mut j)],
+            CallInfo::default(),
+            &mut j,
+        );
+        assert_eq!(print_expr(&j, expr), "foo()");
     }
 
     #[test]
     fn test_print_call_keeps_plain_undefined_argument() {
-        let func = Expression::var(Ident::create_local("foo"));
-        let expr = Expression::call(
+        let mut j = JsArena::new();
+        let func = JE::var(Ident::create_local("foo"), &mut j);
+        let expr = JE::call(
             func,
-            vec![Expression::undefined(false)],
+            &[JE::undefined(false, &mut j)],
             CallInfo::default(),
+            &mut j,
         );
-        assert_eq!(print_expression(&expr), "foo(undefined)");
+        assert_eq!(print_expr(&j, expr), "foo(undefined)");
     }
 
     #[test]
     fn test_print_if_condition_call_object_argument_uses_snapshot_indent_like_ocaml() {
-        let cond = Expression::bin(
+        let mut j = JsArena::new();
+        let cond = JE::bin(
             BinOp::NotEqEq,
-            Expression::call(
-                Expression::new(ExpressionDesc::StaticIndex(
-                    Box::new(Expression::var(Ident::create_local("Primitive_object"))),
-                    "equal".to_string(),
-                    None,
-                )),
-                vec![
-                    Expression::var(Ident::create_local("e")),
-                    Expression::new(ExpressionDesc::Object(
-                        None,
-                        vec![(
-                            PropertyName::lit("RE_EXN_ID"),
-                            Expression::var(Ident::create_local("Not_found")),
-                        )],
-                    )),
+            JE::call(
+                JE::new(
+                    ExprKind::StaticIndex(
+                        JE::var(Ident::create_local("Primitive_object"), &mut j),
+                        JE::str_id("equal", &mut j),
+                        crate::js_ir::arena::FieldPos::new(None),
+                    ),
+                    &mut j,
+                ),
+                &[
+                    JE::var(Ident::create_local("e"), &mut j),
+                    JE::new(
+                        ExprKind::Object(
+                            None,
+                            test_props(
+                                vec![(
+                                    PropertyName::lit("RE_EXN_ID"),
+                                    JE::var(Ident::create_local("Not_found"), &mut j),
+                                )],
+                                &mut j,
+                            ),
+                        ),
+                        &mut j,
+                    ),
                 ],
                 CallInfo::default(),
+                &mut j,
             ),
-            Expression::bool(false),
+            JE::bool(false, &mut j),
+            &mut j,
         );
-        let stmt = Statement::new(StatementDesc::If(
-            cond,
-            vec![Statement::return_(Expression::number(Number::int(1)))],
-            vec![],
-        ));
+        let stmt = JS::new(
+            StmtKind::If(
+                cond,
+                JS::list(
+                    &[JS::return_(JE::number(Number::int(1), &mut j), &mut j)],
+                    &mut j,
+                ),
+                j.empty_block(),
+            ),
+            &mut j,
+        );
 
         assert_eq!(
-            print_block(&vec![stmt]),
+            print_stmts(&j, &vec![stmt]),
             "if (Primitive_object.equal(e, {\n    RE_EXN_ID: Not_found\n  }) !== false) {\n  return 1;\n}"
         );
     }
 
     #[test]
     fn test_print_transformed_jsx_component_call_uses_jsx_syntax() {
-        let expr = Expression::call(
-            Expression::qualified(jsx_runtime_module(), Some("jsx".to_string())),
-            vec![
-                Expression::new(ExpressionDesc::StaticIndex(
-                    Box::new(Expression::var(Ident::create_persistent("Foo"))),
-                    "make".to_string(),
-                    None,
-                )),
-                Expression::new(ExpressionDesc::Object(None, vec![])),
+        let mut j = JsArena::new();
+        let expr = JE::call(
+            JE::qualified(jsx_runtime_module(), Some("jsx".to_string()), &mut j),
+            &[
+                JE::new(
+                    ExprKind::StaticIndex(
+                        JE::var(Ident::create_persistent("Foo"), &mut j),
+                        JE::str_id("make", &mut j),
+                        crate::js_ir::arena::FieldPos::new(None),
+                    ),
+                    &mut j,
+                ),
+                JE::new(ExprKind::Object(None, test_props(vec![], &mut j)), &mut j),
             ],
             CallInfo {
                 call_transformed_jsx: true,
                 ..CallInfo::default()
             },
+            &mut j,
         );
 
         assert_eq!(
-            print_expression_with_jsx_preserve(&expr, true),
+            print_expression_with_jsx_preserve(&j, expr, true),
             "<Foo.make />"
         );
     }
 
     #[test]
     fn test_print_transformed_jsx_requires_jsx_preserve_flag_like_ocaml() {
-        let expr = Expression::call(
-            Expression::qualified(jsx_runtime_module(), Some("jsx".to_string())),
-            vec![
-                Expression::new(ExpressionDesc::StaticIndex(
-                    Box::new(Expression::var(Ident::create_persistent("Foo"))),
-                    "make".to_string(),
-                    None,
-                )),
-                Expression::new(ExpressionDesc::Object(None, vec![])),
+        let mut j = JsArena::new();
+        let expr = JE::call(
+            JE::qualified(jsx_runtime_module(), Some("jsx".to_string()), &mut j),
+            &[
+                JE::new(
+                    ExprKind::StaticIndex(
+                        JE::var(Ident::create_persistent("Foo"), &mut j),
+                        JE::str_id("make", &mut j),
+                        crate::js_ir::arena::FieldPos::new(None),
+                    ),
+                    &mut j,
+                ),
+                JE::new(ExprKind::Object(None, test_props(vec![], &mut j)), &mut j),
             ],
             CallInfo {
                 call_transformed_jsx: true,
                 ..CallInfo::default()
             },
+            &mut j,
         );
 
-        assert_eq!(print_expression(&expr), "JsxRuntime.jsx(Foo.make, {})");
+        assert_eq!(print_expr(&j, expr), "JsxRuntime.jsx(Foo.make, {})");
     }
 
     #[test]
     fn test_print_transformed_jsx_children_keep_nested_jsx_unwrapped() {
-        let strong = Expression::call(
-            Expression::qualified(jsx_runtime_module(), Some("jsx".to_string())),
-            vec![
-                Expression::string("strong"),
-                Expression::new(ExpressionDesc::Object(None, vec![])),
+        let mut j = JsArena::new();
+        let strong = JE::call(
+            JE::qualified(jsx_runtime_module(), Some("jsx".to_string()), &mut j),
+            &[
+                JE::string("strong", &mut j),
+                JE::new(ExprKind::Object(None, test_props(vec![], &mut j)), &mut j),
             ],
             CallInfo {
                 call_transformed_jsx: true,
                 ..CallInfo::default()
             },
+            &mut j,
         );
-        let expr = Expression::call(
-            Expression::qualified(jsx_runtime_module(), Some("jsxs".to_string())),
-            vec![
-                Expression::string("div"),
-                Expression::new(ExpressionDesc::Object(
-                    None,
-                    vec![(
-                        PropertyName::lit("children"),
-                        Expression::array(
-                            vec![strong, Expression::string("Hello, world!")],
-                            MutableFlag::Immutable,
+        let expr = JE::call(
+            JE::qualified(jsx_runtime_module(), Some("jsxs".to_string()), &mut j),
+            &[
+                JE::string("div", &mut j),
+                JE::new(
+                    ExprKind::Object(
+                        None,
+                        test_props(
+                            vec![(
+                                PropertyName::lit("children"),
+                                JE::array(
+                                    &[strong, JE::string("Hello, world!", &mut j)],
+                                    MutableFlag::Immutable,
+                                    &mut j,
+                                ),
+                            )],
+                            &mut j,
                         ),
-                    )],
-                )),
+                    ),
+                    &mut j,
+                ),
             ],
             CallInfo {
                 call_transformed_jsx: true,
                 ..CallInfo::default()
             },
+            &mut j,
         );
 
         assert_eq!(
-            print_expression_with_jsx_preserve(&expr, true),
+            print_expression_with_jsx_preserve(&j, expr, true),
             "<div>\n  <strong />\n  {\"Hello, world!\"}\n</div>"
         );
     }
 
     #[test]
     fn test_print_transformed_jsx_record_block_props_like_ocaml() {
-        let strong = Expression::call(
-            Expression::qualified(jsx_runtime_module(), Some("jsx".to_string())),
-            vec![
-                Expression::string("strong"),
-                Expression::new(ExpressionDesc::CamlBlock(
-                    vec![],
-                    MutableFlag::Immutable,
-                    Box::new(TagInfo::record(
-                        vec![],
-                        crate::parser::ast::MutableFlag::Immutable,
-                    )),
-                )),
+        let mut j = JsArena::new();
+        let strong = JE::call(
+            JE::qualified(jsx_runtime_module(), Some("jsx".to_string()), &mut j),
+            &[
+                JE::string("strong", &mut j),
+                JE::new(
+                    ExprKind::CamlBlock(
+                        j.empty_exprs(),
+                        MutableFlag::Immutable,
+                        j.tag_id(TagInfo::record(
+                            vec![],
+                            crate::parser::ast::MutableFlag::Immutable,
+                        )),
+                    ),
+                    &mut j,
+                ),
             ],
             CallInfo {
                 call_transformed_jsx: true,
                 ..CallInfo::default()
             },
+            &mut j,
         );
-        let expr = Expression::call(
-            Expression::qualified(jsx_runtime_module(), Some("jsxs".to_string())),
-            vec![
-                Expression::string("div"),
-                Expression::new(ExpressionDesc::CamlBlock(
-                    vec![
-                        Expression::undefined(false),
-                        Expression::array(
-                            vec![strong, Expression::string("Hello, world!")],
-                            MutableFlag::Immutable,
+        let expr = JE::call(
+            JE::qualified(jsx_runtime_module(), Some("jsxs".to_string()), &mut j),
+            &[
+                JE::string("div", &mut j),
+                JE::new(
+                    ExprKind::CamlBlock(
+                        JE::list(
+                            &[
+                                JE::undefined(false, &mut j),
+                                JE::array(
+                                    &[strong, JE::string("Hello, world!", &mut j)],
+                                    MutableFlag::Immutable,
+                                    &mut j,
+                                ),
+                            ],
+                            &mut j,
                         ),
-                    ],
-                    MutableFlag::Immutable,
-                    Box::new(TagInfo::record(
-                        vec![
-                            ("className".to_string(), true),
-                            ("children".to_string(), false),
-                        ],
-                        crate::parser::ast::MutableFlag::Immutable,
-                    )),
-                )),
+                        MutableFlag::Immutable,
+                        j.tag_id(TagInfo::record(
+                            vec![
+                                ("className".to_string(), true),
+                                ("children".to_string(), false),
+                            ],
+                            crate::parser::ast::MutableFlag::Immutable,
+                        )),
+                    ),
+                    &mut j,
+                ),
             ],
             CallInfo {
                 call_transformed_jsx: true,
                 ..CallInfo::default()
             },
+            &mut j,
         );
 
         assert_eq!(
-            print_expression_with_jsx_preserve(&expr, true),
+            print_expression_with_jsx_preserve(&j, expr, true),
             "<div>\n  <strong />\n  {\"Hello, world!\"}\n</div>"
         );
     }
 
     #[test]
     fn test_print_transformed_jsx_spread_and_key_props_like_ocaml() {
+        let mut j = JsArena::new();
         let spread = Ident::create_persistent("newrecord");
-        let expr = Expression::call(
-            Expression::qualified(jsx_runtime_module(), Some("jsx".to_string())),
-            vec![
-                Expression::string("input"),
-                Expression::new(ExpressionDesc::Seq(
-                    Box::new(Expression::bin(
-                        BinOp::Eq,
-                        Expression::new(ExpressionDesc::StaticIndex(
-                            Box::new(Expression::var(spread)),
-                            "type".to_string(),
-                            None,
-                        )),
-                        Expression::string("text"),
-                    )),
-                    Box::new(Expression::var(spread)),
-                )),
-                Expression::string("barry-key"),
+        let expr = JE::call(
+            JE::qualified(jsx_runtime_module(), Some("jsx".to_string()), &mut j),
+            &[
+                JE::string("input", &mut j),
+                JE::new(
+                    ExprKind::Seq(
+                        JE::bin(
+                            BinOp::Eq,
+                            JE::new(
+                                ExprKind::StaticIndex(
+                                    JE::var(spread, &mut j),
+                                    JE::str_id("type", &mut j),
+                                    crate::js_ir::arena::FieldPos::new(None),
+                                ),
+                                &mut j,
+                            ),
+                            JE::string("text", &mut j),
+                            &mut j,
+                        ),
+                        JE::var(spread, &mut j),
+                    ),
+                    &mut j,
+                ),
+                JE::string("barry-key", &mut j),
             ],
             CallInfo {
                 call_transformed_jsx: true,
                 ..CallInfo::default()
             },
+            &mut j,
         );
 
         assert_eq!(
-            print_expression_with_jsx_preserve(&expr, true),
+            print_expression_with_jsx_preserve(&j, expr, true),
             "<input\n  key={\"barry-key\"} \n  {...newrecord} \n  type={\"text\"}\n/>"
         );
     }
 
     #[test]
     fn test_print_new_member_constructor_omits_extra_parens_like_ocaml() {
-        let expr = Expression::new(ExpressionDesc::New(
-            Box::new(Expression::new(ExpressionDesc::StaticIndex(
-                Box::new(Expression::qualified(
-                    ModuleId {
-                        id: Ident::create_local("React"),
-                        kind: Kind::External {
-                            name: "react".to_string(),
-                            default: false,
-                            import_attributes: None,
-                        },
-                        dynamic_import: false,
-                    },
-                    None,
-                )),
-                "Component".to_string(),
-                None,
-            ))),
-            Some(vec![]),
-        ));
+        let mut j = JsArena::new();
+        let expr = JE::new(
+            ExprKind::New(
+                JE::new(
+                    ExprKind::StaticIndex(
+                        JE::qualified(
+                            ModuleId {
+                                id: Ident::create_local("React"),
+                                kind: Kind::External {
+                                    name: "react".to_string(),
+                                    default: false,
+                                    import_attributes: None,
+                                },
+                                dynamic_import: false,
+                            },
+                            None,
+                            &mut j,
+                        ),
+                        JE::str_id("Component", &mut j),
+                        crate::js_ir::arena::FieldPos::new(None),
+                    ),
+                    &mut j,
+                ),
+                Some(JE::list(&[], &mut j)),
+            ),
+            &mut j,
+        );
 
-        assert_eq!(print_expression(&expr), "new React.Component()");
+        assert_eq!(print_expr(&j, expr), "new React.Component()");
     }
 
     #[test]
     fn test_print_new_global_member_constructor_keeps_parens_like_snapshot() {
-        let expr = Expression::new(ExpressionDesc::New(
-            Box::new(Expression::new(ExpressionDesc::StaticIndex(
-                Box::new(Expression::var(Ident::create_local("global"))),
-                "Buffer".to_string(),
-                None,
-            ))),
-            Some(vec![Expression::number(Number::int(20))]),
-        ));
+        let mut j = JsArena::new();
+        let expr = JE::new(
+            ExprKind::New(
+                JE::new(
+                    ExprKind::StaticIndex(
+                        JE::var(Ident::create_local("global"), &mut j),
+                        JE::str_id("Buffer", &mut j),
+                        crate::js_ir::arena::FieldPos::new(None),
+                    ),
+                    &mut j,
+                ),
+                Some(JE::list(&[JE::number(Number::int(20), &mut j)], &mut j)),
+            ),
+            &mut j,
+        );
 
-        assert_eq!(print_expression(&expr), "new (global.Buffer)(20)");
+        assert_eq!(print_expr(&j, expr), "new (global.Buffer)(20)");
     }
 
     #[test]
     fn test_print_optional_block_omits_unit_undefined_argument() {
-        let expr = Expression::new(ExpressionDesc::OptionalBlock(
-            Box::new(Expression::undefined(true)),
-            false,
-        ));
-        assert_eq!(print_expression(&expr), "Primitive_option.some()");
+        let mut j = JsArena::new();
+        let expr = JE::new(
+            ExprKind::OptionalBlock(JE::undefined(true, &mut j), false),
+            &mut j,
+        );
+        assert_eq!(print_expr(&j, expr), "Primitive_option.some()");
     }
 
     #[test]
     fn test_print_optional_block_keeps_plain_undefined_argument() {
-        let expr = Expression::new(ExpressionDesc::OptionalBlock(
-            Box::new(Expression::undefined(false)),
-            false,
-        ));
-        assert_eq!(print_expression(&expr), "Primitive_option.some(undefined)");
+        let mut j = JsArena::new();
+        let expr = JE::new(
+            ExprKind::OptionalBlock(JE::undefined(false, &mut j), false),
+            &mut j,
+        );
+        assert_eq!(print_expr(&j, expr), "Primitive_option.some(undefined)");
     }
 
     #[test]
     fn test_print_return() {
-        let stmt = Statement::return_(Expression::number(Number::int(42)));
+        let mut j = JsArena::new();
+        let stmt = JS::return_(JE::number(Number::int(42), &mut j), &mut j);
         let block = vec![stmt];
-        assert_eq!(print_block(&block), "return 42;");
+        assert_eq!(print_stmts(&j, &block), "return 42;");
     }
 
     #[test]
     fn test_print_if() {
-        let stmt = Statement::new(StatementDesc::If(
-            Expression::bool(true),
-            vec![Statement::return_(Expression::number(Number::int(1)))],
-            vec![Statement::return_(Expression::number(Number::int(2)))],
-        ));
-        let result = print_block(&vec![stmt]);
+        let mut j = JsArena::new();
+        let stmt = JS::new(
+            StmtKind::If(
+                JE::bool(true, &mut j),
+                JS::list(
+                    &[JS::return_(JE::number(Number::int(1), &mut j), &mut j)],
+                    &mut j,
+                ),
+                JS::list(
+                    &[JS::return_(JE::number(Number::int(2), &mut j), &mut j)],
+                    &mut j,
+                ),
+            ),
+            &mut j,
+        );
+        let result = print_stmts(&j, &vec![stmt]);
         assert!(result.contains("if (true)"));
         assert!(result.contains("return 1;"));
         assert!(result.contains("else"));
@@ -4589,110 +4862,179 @@ mod tests {
 
     #[test]
     fn test_print_if_omits_else_for_single_empty_block_like_ocaml() {
-        let stmt = Statement::new(StatementDesc::If(
-            Expression::bool(true),
-            vec![Statement::return_(Expression::number(Number::int(1)))],
-            vec![Statement::new(StatementDesc::Block(vec![]))],
-        ));
+        let mut j = JsArena::new();
+        let stmt = JS::new(
+            StmtKind::If(
+                JE::bool(true, &mut j),
+                JS::list(
+                    &[JS::return_(JE::number(Number::int(1), &mut j), &mut j)],
+                    &mut j,
+                ),
+                JS::list(&[JS::new(StmtKind::Block(j.empty_block()), &mut j)], &mut j),
+            ),
+            &mut j,
+        );
 
-        assert_eq!(print_block(&vec![stmt]), "if (true) {\n  return 1;\n}");
+        assert_eq!(print_stmts(&j, &vec![stmt]), "if (true) {\n  return 1;\n}");
     }
 
     #[test]
     fn test_print_if_omits_else_for_single_var_expression_like_ocaml() {
-        let stmt = Statement::new(StatementDesc::If(
-            Expression::bool(true),
-            vec![Statement::return_(Expression::number(Number::int(1)))],
-            vec![Statement::exp(Expression::var(Ident::create_local(
-                "ignored",
-            )))],
-        ));
+        let mut j = JsArena::new();
+        let stmt = JS::new(
+            StmtKind::If(
+                JE::bool(true, &mut j),
+                JS::list(
+                    &[JS::return_(JE::number(Number::int(1), &mut j), &mut j)],
+                    &mut j,
+                ),
+                JS::list(
+                    &[JS::exp(
+                        JE::var(Ident::create_local("ignored"), &mut j),
+                        &mut j,
+                    )],
+                    &mut j,
+                ),
+            ),
+            &mut j,
+        );
 
-        assert_eq!(print_block(&vec![stmt]), "if (true) {\n  return 1;\n}");
+        assert_eq!(print_stmts(&j, &vec![stmt]), "if (true) {\n  return 1;\n}");
     }
 
     #[test]
     fn test_print_if_unwraps_single_block_else_if_like_ocaml() {
-        let nested = Statement::new(StatementDesc::If(
-            Expression::bool(false),
-            vec![Statement::return_(Expression::number(Number::int(2)))],
-            vec![],
-        ));
-        let stmt = Statement::new(StatementDesc::If(
-            Expression::bool(true),
-            vec![Statement::return_(Expression::number(Number::int(1)))],
-            vec![Statement::new(StatementDesc::Block(vec![nested]))],
-        ));
+        let mut j = JsArena::new();
+        let nested = JS::new(
+            StmtKind::If(
+                JE::bool(false, &mut j),
+                JS::list(
+                    &[JS::return_(JE::number(Number::int(2), &mut j), &mut j)],
+                    &mut j,
+                ),
+                j.empty_block(),
+            ),
+            &mut j,
+        );
+        let stmt = JS::new(
+            StmtKind::If(
+                JE::bool(true, &mut j),
+                JS::list(
+                    &[JS::return_(JE::number(Number::int(1), &mut j), &mut j)],
+                    &mut j,
+                ),
+                JS::list(
+                    &[JS::new(
+                        StmtKind::Block(JS::list(&[nested], &mut j)),
+                        &mut j,
+                    )],
+                    &mut j,
+                ),
+            ),
+            &mut j,
+        );
 
         assert_eq!(
-            print_block(&vec![stmt]),
+            print_stmts(&j, &vec![stmt]),
             "if (true) {\n  return 1;\n} else if (false) {\n  return 2;\n}"
         );
     }
 
     #[test]
     fn test_print_function_body_keeps_guard_return_fallthrough_tail_like_ocaml() {
+        let mut j = JsArena::new();
         let state = Ident::create_local("state");
         let block = vec![
-            Statement::new(StatementDesc::If(
-                Expression::bin(
-                    BinOp::NotEqEq,
-                    Expression::new(ExpressionDesc::Typeof(Box::new(Expression::var(state)))),
-                    Expression::string("object".to_string()),
+            JS::new(
+                StmtKind::If(
+                    JE::bin(
+                        BinOp::NotEqEq,
+                        JE::new(ExprKind::Typeof(JE::var(state, &mut j)), &mut j),
+                        JE::string("object", &mut j),
+                        &mut j,
+                    ),
+                    JS::list(
+                        &[JS::return_(JE::number(Number::int(0), &mut j), &mut j)],
+                        &mut j,
+                    ),
+                    j.empty_block(),
                 ),
-                vec![Statement::return_(Expression::number(Number::int(0)))],
-                vec![],
-            )),
-            Statement::return_(Expression::bin(
-                BinOp::Bor,
-                Expression::bin(
-                    BinOp::Plus,
-                    Expression::number(Number::int(0)),
-                    Expression::new(ExpressionDesc::StaticIndex(
-                        Box::new(Expression::var(state)),
-                        "_0".to_string(),
-                        None,
-                    )),
+                &mut j,
+            ),
+            JS::return_(
+                JE::bin(
+                    BinOp::Bor,
+                    JE::bin(
+                        BinOp::Plus,
+                        JE::number(Number::int(0), &mut j),
+                        JE::new(
+                            ExprKind::StaticIndex(
+                                JE::var(state, &mut j),
+                                JE::str_id("_0", &mut j),
+                                crate::js_ir::arena::FieldPos::new(None),
+                            ),
+                            &mut j,
+                        ),
+                        &mut j,
+                    ),
+                    JE::number(Number::int(0), &mut j),
+                    &mut j,
                 ),
-                Expression::number(Number::int(0)),
-            )),
+                &mut j,
+            ),
         ];
 
         assert_eq!(
-            print_function_body_tree(&block, false),
+            print_function_body_of(&j, &block, false),
             "if (typeof state !== \"object\") {\n  return 0;\n}\nreturn 0 + state._0 | 0;"
         );
     }
 
     #[test]
     fn test_print_function_body_keeps_bound_success_tail_on_strict_undefined_guard() {
+        let mut j = JsArena::new();
         let match_id = Ident::create_local("match");
         let tmp = Ident::create_local("tmp");
         let block = vec![
-            Statement::new(StatementDesc::If(
-                Expression::bin(
-                    BinOp::EqEqEq,
-                    Expression::var(match_id),
-                    Expression::undefined(false),
+            JS::new(
+                StmtKind::If(
+                    JE::bin(
+                        BinOp::EqEqEq,
+                        JE::var(match_id, &mut j),
+                        JE::undefined(false, &mut j),
+                        &mut j,
+                    ),
+                    JS::list(&[JS::return_(JE::string("no", &mut j), &mut j)], &mut j),
+                    j.empty_block(),
                 ),
-                vec![Statement::return_(Expression::string("no"))],
-                vec![],
-            )),
-            Statement::variable(VariableDeclaration {
-                ident: tmp,
-                value: Some(Expression::var(match_id)),
-                property: crate::lambda::LetKind::Strict,
-                ident_info: IdentInfo::default(),
-            }),
-            Statement::new(StatementDesc::If(
-                Expression::bin(BinOp::EqEqEq, Expression::var(tmp), Expression::null()),
-                vec![Statement::return_(Expression::string("yes"))],
-                vec![],
-            )),
-            Statement::return_(Expression::string("no")),
+                &mut j,
+            ),
+            JS::variable(
+                VarDecl {
+                    ident: tmp,
+                    value: Some(JE::var(match_id, &mut j)),
+                    property: crate::lambda::LetKind::Strict,
+                    ident_info: IdentInfo::default(),
+                },
+                &mut j,
+            ),
+            JS::new(
+                StmtKind::If(
+                    JE::bin(
+                        BinOp::EqEqEq,
+                        JE::var(tmp, &mut j),
+                        JE::null(&mut j),
+                        &mut j,
+                    ),
+                    JS::list(&[JS::return_(JE::string("yes", &mut j), &mut j)], &mut j),
+                    j.empty_block(),
+                ),
+                &mut j,
+            ),
+            JS::return_(JE::string("no", &mut j), &mut j),
         ];
 
-        let rendered = print_function_body_tree(&block, false);
+        let rendered = print_function_body_of(&j, &block, false);
 
         assert!(rendered.starts_with("if (match === undefined) {"));
         assert!(rendered.contains("let tmp = match;"));
@@ -4700,67 +5042,103 @@ mod tests {
 
     #[test]
     fn test_print_while() {
-        let stmt = Statement::while_(Expression::bool(true), vec![Statement::break_()]);
-        let result = print_block(&vec![stmt]);
+        let mut j = JsArena::new();
+        let stmt = JS::while_(
+            None,
+            JE::bool(true, &mut j),
+            &[JS::break_(None, &mut j)],
+            &mut j,
+        );
+        let result = print_stmts(&j, &vec![stmt]);
         assert!(result.contains("while (true)"));
         assert!(result.contains("break;"));
     }
 
     #[test]
     fn test_print_empty_while_body_keeps_blank_line_like_ocaml() {
-        let rendered = print_block(&vec![Statement::while_(Expression::bool(true), vec![])]);
+        let mut j = JsArena::new();
+        let rendered = {
+            let v = vec![JS::while_(None, JE::bool(true, &mut j), &[], &mut j)];
+            print_stmts(&j, &v)
+        };
 
         assert_eq!(rendered, "while (true) {\n  \n};");
     }
 
     #[test]
     fn test_print_if_keeps_blank_lines_for_hidden_branch_statements_like_ocaml() {
-        let hidden = Statement::new(StatementDesc::Block(vec![Statement::exp(Expression::var(
-            Ident::create_local("ignored"),
-        ))]));
-        let stmt = Statement::new(StatementDesc::If(
-            Expression::bool(true),
-            vec![
-                Statement::exp(Expression::call(
-                    Expression::var(Ident::create_local("log")),
-                    vec![],
-                    CallInfo::default(),
-                )),
-                hidden.clone(),
-            ],
-            vec![hidden],
-        ));
+        let mut j = JsArena::new();
+        let hidden = JS::new(
+            StmtKind::Block(JS::list(
+                &[JS::exp(
+                    JE::var(Ident::create_local("ignored"), &mut j),
+                    &mut j,
+                )],
+                &mut j,
+            )),
+            &mut j,
+        );
+        let stmt = JS::new(
+            StmtKind::If(
+                JE::bool(true, &mut j),
+                JS::list(
+                    &[
+                        JS::exp(
+                            JE::call(
+                                JE::var(Ident::create_local("log"), &mut j),
+                                &[],
+                                CallInfo::default(),
+                                &mut j,
+                            ),
+                            &mut j,
+                        ),
+                        hidden.clone(),
+                    ],
+                    &mut j,
+                ),
+                JS::list(&[hidden], &mut j),
+            ),
+            &mut j,
+        );
 
         assert_eq!(
-            print_block(&vec![stmt]),
+            print_stmts(&j, &vec![stmt]),
             "if (true) {\n  log();\n  \n} else {\n  \n}"
         );
     }
 
     #[test]
     fn test_print_while_multiline_condition_keeps_hanging_indent_like_ocaml() {
-        let cond = Expression::call(
-            Expression::new(ExpressionDesc::Fun {
-                is_method: false,
-                params: vec![],
-                body: vec![
-                    Statement::variable(VariableDeclaration {
-                        ident: Ident::create_local("b"),
-                        value: Some(Expression::number(Number::int(9))),
-                        property: crate::lambda::lam_compat::LetKind::Strict,
-                        ident_info: Default::default(),
-                    }),
-                    Statement::return_(Expression::bool(true)),
+        let mut j = JsArena::new();
+        let cond = JE::call(
+            test_fun(
+                false,
+                &[],
+                &[
+                    JS::variable(
+                        VarDecl {
+                            ident: Ident::create_local("b"),
+                            value: Some(JE::number(Number::int(9), &mut j)),
+                            property: crate::lambda::lam_compat::LetKind::Strict,
+                            ident_info: Default::default(),
+                        },
+                        &mut j,
+                    ),
+                    JS::return_(JE::bool(true, &mut j), &mut j),
                 ],
-                env: Default::default(),
-                return_unit: false,
-                async_: false,
-                directive: None,
-            }),
-            vec![],
+                false,
+                false,
+                None,
+                &mut j,
+            ),
+            &[],
             CallInfo::default(),
+            &mut j,
         );
-        let rendered = print_block(&vec![Statement::while_(cond, vec![Statement::break_()])]);
+        let rendered = {
+            let v = vec![JS::while_(None, cond, &[JS::break_(None, &mut j)], &mut j)];
+            print_stmts(&j, &v)
+        };
 
         assert_eq!(
             rendered,
@@ -4771,22 +5149,24 @@ mod tests {
     #[test]
     #[ignore = "stale internal shape expectation; covered by strict lambda/JS parity gates"]
     fn test_print_for_range_complex_finish_uses_finish_binding() {
+        let mut j = JsArena::new();
         let i = Ident::create_local("i");
         let xs = Ident::create_local("xs");
-        let finish = Expression::new(ExpressionDesc::Length(
-            Box::new(Expression::var(xs)),
-            LengthObject::Array,
-        ));
-        let stmt = Statement::for_range(
+        let finish = JE::new(
+            ExprKind::Length(JE::var(xs, &mut j), LengthObject::Array),
+            &mut j,
+        );
+        let stmt = JS::for_range(
             None,
-            Some(Expression::number(Number::int(0))),
+            Some(JE::number(Number::int(0), &mut j)),
             finish,
             i,
             ForDirection::Up,
-            vec![],
+            &[],
+            &mut j,
         );
         assert_eq!(
-            print_block(&vec![stmt]),
+            print_stmts(&j, &vec![stmt]),
             "for (let i = 0, i_finish = xs.length; i < i_finish; ++i) {}"
         );
     }
@@ -4794,15 +5174,16 @@ mod tests {
     #[test]
     #[ignore = "stale internal shape expectation; covered by strict lambda/JS parity gates"]
     fn test_print_for_range_without_init_binds_complex_finish_once() {
+        let mut j = JsArena::new();
         let i = Ident::create_local("i");
         let xs = Ident::create_local("xs");
-        let finish = Expression::new(ExpressionDesc::Length(
-            Box::new(Expression::var(xs)),
-            LengthObject::Array,
-        ));
-        let stmt = Statement::for_range(None, None, finish, i, ForDirection::Upto, vec![]);
+        let finish = JE::new(
+            ExprKind::Length(JE::var(xs, &mut j), LengthObject::Array),
+            &mut j,
+        );
+        let stmt = JS::for_range(None, None, finish, i, ForDirection::Upto, &[], &mut j);
         assert_eq!(
-            print_block(&vec![stmt]),
+            print_stmts(&j, &vec![stmt]),
             "for (let i_finish = xs.length; i <= i_finish; ++i) {}"
         );
     }
@@ -4810,61 +5191,76 @@ mod tests {
     #[test]
     #[ignore = "stale internal shape expectation; covered by strict lambda/JS parity gates"]
     fn test_print_for_range_parenthesizes_sequence_init_in_header() {
+        let mut j = JsArena::new();
         let i = Ident::create_local("i");
         let xs = Ident::create_local("xs");
         let side_effect = Ident::create_local("sideEffect");
-        let init = Expression::new(ExpressionDesc::Seq(
-            Box::new(Expression::call(
-                Expression::var(side_effect),
-                vec![],
-                CallInfo::default(),
-            )),
-            Box::new(Expression::number(Number::int(0))),
-        ));
-        let finish = Expression::new(ExpressionDesc::Length(
-            Box::new(Expression::var(xs)),
-            LengthObject::Array,
-        ));
-        let stmt = Statement::for_range(None, Some(init), finish, i, ForDirection::Upto, vec![]);
+        let init = JE::new(
+            ExprKind::Seq(
+                JE::call(
+                    JE::var(side_effect, &mut j),
+                    &[],
+                    CallInfo::default(),
+                    &mut j,
+                ),
+                JE::number(Number::int(0), &mut j),
+            ),
+            &mut j,
+        );
+        let finish = JE::new(
+            ExprKind::Length(JE::var(xs, &mut j), LengthObject::Array),
+            &mut j,
+        );
+        let stmt = JS::for_range(None, Some(init), finish, i, ForDirection::Upto, &[], &mut j);
         assert_eq!(
-            print_block(&vec![stmt]),
+            print_stmts(&j, &vec![stmt]),
             "for (let i = (sideEffect(), 0), i_finish = xs.length; i <= i_finish; ++i) {}"
         );
     }
 
     #[test]
     fn test_print_block_preserves_top_level_function_order() {
+        let mut j = JsArena::new();
         let before = Ident::create_local("before");
         let url = Ident::create_local("url");
         let after = Ident::create_local("after");
-        let stmt_before = Statement::variable(VariableDeclaration {
-            ident: before,
-            value: Some(Expression::number(Number::int(1))),
-            property: crate::lambda::lam_compat::LetKind::Strict,
-            ident_info: Default::default(),
-        });
-        let stmt_fun = Statement::variable(VariableDeclaration {
-            ident: url,
-            value: Some(Expression::new(ExpressionDesc::Fun {
-                is_method: false,
-                params: vec![Ident::create_local("prim")],
-                body: vec![Statement::return_(Expression::var(url))],
-                env: Default::default(),
-                return_unit: false,
-                async_: false,
-                directive: None,
-            })),
-            property: crate::lambda::lam_compat::LetKind::Strict,
-            ident_info: Default::default(),
-        });
-        let stmt_after = Statement::variable(VariableDeclaration {
-            ident: after,
-            value: Some(Expression::number(Number::int(2))),
-            property: crate::lambda::lam_compat::LetKind::Strict,
-            ident_info: Default::default(),
-        });
+        let stmt_before = JS::variable(
+            VarDecl {
+                ident: before,
+                value: Some(JE::number(Number::int(1), &mut j)),
+                property: crate::lambda::lam_compat::LetKind::Strict,
+                ident_info: Default::default(),
+            },
+            &mut j,
+        );
+        let stmt_fun = JS::variable(
+            VarDecl {
+                ident: url,
+                value: Some(test_fun(
+                    false,
+                    &[Ident::create_local("prim")],
+                    &[JS::return_(JE::var(url, &mut j), &mut j)],
+                    false,
+                    false,
+                    None,
+                    &mut j,
+                )),
+                property: crate::lambda::lam_compat::LetKind::Strict,
+                ident_info: Default::default(),
+            },
+            &mut j,
+        );
+        let stmt_after = JS::variable(
+            VarDecl {
+                ident: after,
+                value: Some(JE::number(Number::int(2), &mut j)),
+                property: crate::lambda::lam_compat::LetKind::Strict,
+                ident_info: Default::default(),
+            },
+            &mut j,
+        );
 
-        let rendered = print_block(&vec![stmt_before, stmt_fun, stmt_after]);
+        let rendered = print_stmts(&j, &vec![stmt_before, stmt_fun, stmt_after]);
         let before_idx = rendered.find("let before").unwrap();
         let fun_idx = rendered.find("function url").unwrap();
         let after_idx = rendered.find("let after").unwrap();
@@ -4875,31 +5271,41 @@ mod tests {
     #[test]
     #[ignore = "stale internal shape expectation; covered by strict lambda/JS parity gates"]
     fn test_print_function_binding_reserves_own_name_inside_body_like_ocaml() {
+        let mut j = JsArena::new();
         let function_ident = Ident::create_local("callback");
         let param = Ident::create_local("time");
         let inner = Ident::create_local("callback");
-        let rendered = print_block(&vec![Statement::variable(VariableDeclaration {
-            ident: function_ident,
-            value: Some(Expression::new(ExpressionDesc::Fun {
-                is_method: false,
-                params: vec![param],
-                body: vec![
-                    Statement::variable(VariableDeclaration {
-                        ident: inner,
-                        value: Some(Expression::number(Number::int(1))),
-                        property: crate::lambda::lam_compat::LetKind::Strict,
-                        ident_info: Default::default(),
-                    }),
-                    Statement::return_(Expression::var(inner)),
-                ],
-                env: Default::default(),
-                return_unit: false,
-                async_: false,
-                directive: None,
-            })),
-            property: crate::lambda::lam_compat::LetKind::Strict,
-            ident_info: Default::default(),
-        })]);
+        let rendered = {
+            let v = vec![JS::variable(
+                VarDecl {
+                    ident: function_ident,
+                    value: Some(test_fun(
+                        false,
+                        &[param],
+                        &[
+                            JS::variable(
+                                VarDecl {
+                                    ident: inner,
+                                    value: Some(JE::number(Number::int(1), &mut j)),
+                                    property: crate::lambda::lam_compat::LetKind::Strict,
+                                    ident_info: Default::default(),
+                                },
+                                &mut j,
+                            ),
+                            JS::return_(JE::var(inner, &mut j), &mut j),
+                        ],
+                        false,
+                        false,
+                        None,
+                        &mut j,
+                    )),
+                    property: crate::lambda::lam_compat::LetKind::Strict,
+                    ident_info: Default::default(),
+                },
+                &mut j,
+            )];
+            print_stmts(&j, &v)
+        };
 
         assert!(rendered.contains("let callback = time => {"));
         assert!(rendered.contains("let callback$1 = 1;"));
@@ -4908,31 +5314,41 @@ mod tests {
 
     #[test]
     fn test_print_function_scope_allows_shadowing_uncaptured_outer_name() {
+        let mut j = JsArena::new();
         let outer = Ident::create_local("x");
         let foo = Ident::create_local("foo");
         let param = Ident::create_local("x");
-        let rendered = print_block(&vec![
-            Statement::variable(VariableDeclaration {
-                ident: outer,
-                value: Some(Expression::number(Number::int(1))),
-                property: crate::lambda::lam_compat::LetKind::Strict,
-                ident_info: Default::default(),
-            }),
-            Statement::variable(VariableDeclaration {
-                ident: foo,
-                value: Some(Expression::new(ExpressionDesc::Fun {
-                    is_method: false,
-                    params: vec![param],
-                    body: vec![Statement::return_(Expression::var(param))],
-                    env: Default::default(),
-                    return_unit: false,
-                    async_: false,
-                    directive: None,
-                })),
-                property: crate::lambda::lam_compat::LetKind::Strict,
-                ident_info: Default::default(),
-            }),
-        ]);
+        let rendered = {
+            let v = vec![
+                JS::variable(
+                    VarDecl {
+                        ident: outer,
+                        value: Some(JE::number(Number::int(1), &mut j)),
+                        property: crate::lambda::lam_compat::LetKind::Strict,
+                        ident_info: Default::default(),
+                    },
+                    &mut j,
+                ),
+                JS::variable(
+                    VarDecl {
+                        ident: foo,
+                        value: Some(test_fun(
+                            false,
+                            &[param],
+                            &[JS::return_(JE::var(param, &mut j), &mut j)],
+                            false,
+                            false,
+                            None,
+                            &mut j,
+                        )),
+                        property: crate::lambda::lam_compat::LetKind::Strict,
+                        ident_info: Default::default(),
+                    },
+                    &mut j,
+                ),
+            ];
+            print_stmts(&j, &v)
+        };
 
         assert!(rendered.contains("let x = 1;"));
         assert!(rendered.contains("function foo(x) {"));
@@ -4942,35 +5358,49 @@ mod tests {
 
     #[test]
     fn test_print_function_scope_preserves_captured_outer_name() {
+        let mut j = JsArena::new();
         let outer = Ident::create_local("value");
         let foo = Ident::create_local("foo");
         let param = Ident::create_local("arg");
-        let rendered = print_block(&vec![
-            Statement::variable(VariableDeclaration {
-                ident: outer,
-                value: Some(Expression::number(Number::int(1))),
-                property: crate::lambda::lam_compat::LetKind::Strict,
-                ident_info: Default::default(),
-            }),
-            Statement::variable(VariableDeclaration {
-                ident: foo,
-                value: Some(Expression::new(ExpressionDesc::Fun {
-                    is_method: false,
-                    params: vec![param],
-                    body: vec![Statement::return_(Expression::bin(
-                        BinOp::Plus,
-                        Expression::var(outer),
-                        Expression::var(param),
-                    ))],
-                    env: Default::default(),
-                    return_unit: false,
-                    async_: false,
-                    directive: None,
-                })),
-                property: crate::lambda::lam_compat::LetKind::Strict,
-                ident_info: Default::default(),
-            }),
-        ]);
+        let rendered = {
+            let v = vec![
+                JS::variable(
+                    VarDecl {
+                        ident: outer,
+                        value: Some(JE::number(Number::int(1), &mut j)),
+                        property: crate::lambda::lam_compat::LetKind::Strict,
+                        ident_info: Default::default(),
+                    },
+                    &mut j,
+                ),
+                JS::variable(
+                    VarDecl {
+                        ident: foo,
+                        value: Some(test_fun(
+                            false,
+                            &[param],
+                            &[JS::return_(
+                                JE::bin(
+                                    BinOp::Plus,
+                                    JE::var(outer, &mut j),
+                                    JE::var(param, &mut j),
+                                    &mut j,
+                                ),
+                                &mut j,
+                            )],
+                            false,
+                            false,
+                            None,
+                            &mut j,
+                        )),
+                        property: crate::lambda::lam_compat::LetKind::Strict,
+                        ident_info: Default::default(),
+                    },
+                    &mut j,
+                ),
+            ];
+            print_stmts(&j, &v)
+        };
 
         assert!(rendered.contains("function foo(arg) {"));
         assert!(rendered.contains("return value + arg;"));
@@ -4978,44 +5408,63 @@ mod tests {
 
     #[test]
     fn test_print_function_scope_reserves_captured_tagged_template_tag() {
+        let mut j = JsArena::new();
         let outer = Ident::create_local("tag");
         let foo = Ident::create_local("foo");
         let param = Ident::create_local("arg");
         let inner = Ident::create_local("tag");
-        let rendered = print_block(&vec![
-            Statement::variable(VariableDeclaration {
-                ident: outer,
-                value: Some(Expression::number(Number::int(1))),
-                property: crate::lambda::lam_compat::LetKind::Strict,
-                ident_info: Default::default(),
-            }),
-            Statement::variable(VariableDeclaration {
-                ident: foo,
-                value: Some(Expression::new(ExpressionDesc::Fun {
-                    is_method: false,
-                    params: vec![param],
-                    body: vec![
-                        Statement::variable(VariableDeclaration {
-                            ident: inner,
-                            value: Some(Expression::var(param)),
-                            property: crate::lambda::lam_compat::LetKind::Strict,
-                            ident_info: Default::default(),
-                        }),
-                        Statement::return_(Expression::new(ExpressionDesc::TaggedTemplate(
-                            Box::new(Expression::var(outer)),
-                            vec!["a".to_string(), "b".to_string()],
-                            vec![Expression::var(inner)],
-                        ))),
-                    ],
-                    env: Default::default(),
-                    return_unit: false,
-                    async_: false,
-                    directive: None,
-                })),
-                property: crate::lambda::lam_compat::LetKind::Strict,
-                ident_info: Default::default(),
-            }),
-        ]);
+        let rendered = {
+            let v = vec![
+                JS::variable(
+                    VarDecl {
+                        ident: outer,
+                        value: Some(JE::number(Number::int(1), &mut j)),
+                        property: crate::lambda::lam_compat::LetKind::Strict,
+                        ident_info: Default::default(),
+                    },
+                    &mut j,
+                ),
+                JS::variable(
+                    VarDecl {
+                        ident: foo,
+                        value: Some(test_fun(
+                            false,
+                            &[param],
+                            &[
+                                JS::variable(
+                                    VarDecl {
+                                        ident: inner,
+                                        value: Some(JE::var(param, &mut j)),
+                                        property: crate::lambda::lam_compat::LetKind::Strict,
+                                        ident_info: Default::default(),
+                                    },
+                                    &mut j,
+                                ),
+                                JS::return_(
+                                    JE::new(
+                                        ExprKind::TaggedTemplate(
+                                            JE::var(outer, &mut j),
+                                            j.tagged_id(vec!["a".to_string(), "b".to_string()]),
+                                            JE::list(&[JE::var(inner, &mut j)], &mut j),
+                                        ),
+                                        &mut j,
+                                    ),
+                                    &mut j,
+                                ),
+                            ],
+                            false,
+                            false,
+                            None,
+                            &mut j,
+                        )),
+                        property: crate::lambda::lam_compat::LetKind::Strict,
+                        ident_info: Default::default(),
+                    },
+                    &mut j,
+                ),
+            ];
+            print_stmts(&j, &v)
+        };
 
         // The captured outer `tag` is reserved in `foo`'s scope, so the
         // body-local `tag` must not shadow it.
@@ -5025,52 +5474,72 @@ mod tests {
 
     #[test]
     fn test_print_function_scope_copies_captured_base_suffix_map_like_ocaml() {
+        let mut j = JsArena::new();
         let outer_start = Ident::create_local("match");
         let outer_end = Ident::create_local("match");
         let callback = Ident::create_local("callback");
         let param = Ident::create_local("preset");
         let inner_match = Ident::create_local("match");
 
-        let rendered = print_block(&vec![
-            Statement::variable(VariableDeclaration {
-                ident: outer_start,
-                value: Some(Expression::number(Number::int(1))),
-                property: crate::lambda::lam_compat::LetKind::Strict,
-                ident_info: Default::default(),
-            }),
-            Statement::variable(VariableDeclaration {
-                ident: outer_end,
-                value: Some(Expression::number(Number::int(2))),
-                property: crate::lambda::lam_compat::LetKind::Strict,
-                ident_info: Default::default(),
-            }),
-            Statement::variable(VariableDeclaration {
-                ident: callback,
-                value: Some(Expression::new(ExpressionDesc::Fun {
-                    is_method: false,
-                    params: vec![param],
-                    body: vec![
-                        Statement::variable(VariableDeclaration {
-                            ident: inner_match,
-                            value: Some(Expression::number(Number::int(3))),
-                            property: crate::lambda::lam_compat::LetKind::Strict,
-                            ident_info: Default::default(),
-                        }),
-                        Statement::return_(Expression::bin(
-                            BinOp::Plus,
-                            Expression::var(outer_start),
-                            Expression::var(inner_match),
+        let rendered = {
+            let v = vec![
+                JS::variable(
+                    VarDecl {
+                        ident: outer_start,
+                        value: Some(JE::number(Number::int(1), &mut j)),
+                        property: crate::lambda::lam_compat::LetKind::Strict,
+                        ident_info: Default::default(),
+                    },
+                    &mut j,
+                ),
+                JS::variable(
+                    VarDecl {
+                        ident: outer_end,
+                        value: Some(JE::number(Number::int(2), &mut j)),
+                        property: crate::lambda::lam_compat::LetKind::Strict,
+                        ident_info: Default::default(),
+                    },
+                    &mut j,
+                ),
+                JS::variable(
+                    VarDecl {
+                        ident: callback,
+                        value: Some(test_fun(
+                            false,
+                            &[param],
+                            &[
+                                JS::variable(
+                                    VarDecl {
+                                        ident: inner_match,
+                                        value: Some(JE::number(Number::int(3), &mut j)),
+                                        property: crate::lambda::lam_compat::LetKind::Strict,
+                                        ident_info: Default::default(),
+                                    },
+                                    &mut j,
+                                ),
+                                JS::return_(
+                                    JE::bin(
+                                        BinOp::Plus,
+                                        JE::var(outer_start, &mut j),
+                                        JE::var(inner_match, &mut j),
+                                        &mut j,
+                                    ),
+                                    &mut j,
+                                ),
+                            ],
+                            false,
+                            false,
+                            None,
+                            &mut j,
                         )),
-                    ],
-                    env: Default::default(),
-                    return_unit: false,
-                    async_: false,
-                    directive: None,
-                })),
-                property: crate::lambda::lam_compat::LetKind::Strict,
-                ident_info: Default::default(),
-            }),
-        ]);
+                        property: crate::lambda::lam_compat::LetKind::Strict,
+                        ident_info: Default::default(),
+                    },
+                    &mut j,
+                ),
+            ];
+            print_stmts(&j, &v)
+        };
 
         assert!(rendered.contains("let match = 1;"));
         assert!(rendered.contains("let match$1 = 2;"));
@@ -5080,36 +5549,48 @@ mod tests {
 
     #[test]
     fn test_print_unit_function_elides_tail_return_statement() {
+        let mut j = JsArena::new();
         let foo = Ident::create_local("remove");
         let param = Ident::create_local("id");
-        let rendered = print_block(&vec![Statement::variable(VariableDeclaration {
-            ident: foo,
-            value: Some(Expression::new(ExpressionDesc::Fun {
-                is_method: false,
-                params: vec![param],
-                body: vec![Statement::return_(Expression::call(
-                    Expression::qualified(
-                        ModuleId {
-                            id: Ident::create_local("Belt_MutableMapInt"),
-                            kind: Kind::Ml,
-                            dynamic_import: false,
-                        },
-                        Some("remove".to_string()),
-                    ),
-                    vec![
-                        Expression::var(Ident::create_local("mockMap")),
-                        Expression::var(param),
-                    ],
-                    CallInfo::default(),
-                ))],
-                env: Default::default(),
-                return_unit: true,
-                async_: false,
-                directive: None,
-            })),
-            property: crate::lambda::lam_compat::LetKind::Strict,
-            ident_info: Default::default(),
-        })]);
+        let rendered = {
+            let v = vec![JS::variable(
+                VarDecl {
+                    ident: foo,
+                    value: Some(test_fun(
+                        false,
+                        &[param],
+                        &[JS::return_(
+                            JE::call(
+                                JE::qualified(
+                                    ModuleId {
+                                        id: Ident::create_local("Belt_MutableMapInt"),
+                                        kind: Kind::Ml,
+                                        dynamic_import: false,
+                                    },
+                                    Some("remove".to_string()),
+                                    &mut j,
+                                ),
+                                &[
+                                    JE::var(Ident::create_local("mockMap"), &mut j),
+                                    JE::var(param, &mut j),
+                                ],
+                                CallInfo::default(),
+                                &mut j,
+                            ),
+                            &mut j,
+                        )],
+                        true,
+                        false,
+                        None,
+                        &mut j,
+                    )),
+                    property: crate::lambda::lam_compat::LetKind::Strict,
+                    ident_info: Default::default(),
+                },
+                &mut j,
+            )];
+            print_stmts(&j, &v)
+        };
 
         assert!(rendered.contains("function remove(id) {"));
         assert!(rendered.contains("Belt_MutableMapInt.remove(mockMap, id);"));
@@ -5118,65 +5599,85 @@ mod tests {
 
     #[test]
     fn test_print_unit_arrow_function_elides_tail_return_statement() {
-        let rendered = print_expression(&Expression::new(ExpressionDesc::Fun {
-            is_method: false,
-            params: vec![],
-            body: vec![Statement::return_(Expression::call(
-                Expression::qualified(
-                    ModuleId {
-                        id: Ident::create_local("Test_utils"),
-                        kind: Kind::Ml,
-                        dynamic_import: false,
-                    },
-                    Some("eq".to_string()),
-                ),
-                vec![
-                    Expression::string("loc"),
-                    Expression::number(Number::int(1)),
-                    Expression::number(Number::int(1)),
-                ],
-                CallInfo::default(),
-            ))],
-            env: Default::default(),
-            return_unit: true,
-            async_: false,
-            directive: None,
-        }));
+        let mut j = JsArena::new();
+        let rendered = {
+            let v = test_fun(
+                false,
+                &[],
+                &[JS::return_(
+                    JE::call(
+                        JE::qualified(
+                            ModuleId {
+                                id: Ident::create_local("Test_utils"),
+                                kind: Kind::Ml,
+                                dynamic_import: false,
+                            },
+                            Some("eq".to_string()),
+                            &mut j,
+                        ),
+                        &[
+                            JE::string("loc", &mut j),
+                            JE::number(Number::int(1), &mut j),
+                            JE::number(Number::int(1), &mut j),
+                        ],
+                        CallInfo::default(),
+                        &mut j,
+                    ),
+                    &mut j,
+                )],
+                true,
+                false,
+                None,
+                &mut j,
+            );
+            print_expr(&j, v)
+        };
 
         assert_eq!(rendered, "() => Test_utils.eq(\"loc\", 1, 1)");
     }
 
     #[test]
     fn test_print_arrow_function_with_undefined_body_uses_compact_empty_block() {
-        let rendered = print_expression(&Expression::new(ExpressionDesc::Fun {
-            is_method: false,
-            params: vec![],
-            body: vec![Statement::return_(Expression::undefined(false))],
-            env: Default::default(),
-            return_unit: false,
-            async_: false,
-            directive: None,
-        }));
+        let mut j = JsArena::new();
+        let rendered = {
+            let v = test_fun(
+                false,
+                &[],
+                &[JS::return_(JE::undefined(false, &mut j), &mut j)],
+                false,
+                false,
+                None,
+                &mut j,
+            );
+            print_expr(&j, v)
+        };
 
         assert_eq!(rendered, "() => {}");
     }
 
     #[test]
     fn test_print_named_function_with_undefined_body_keeps_blank_line_like_ocaml() {
-        let rendered = print_block(&vec![Statement::variable(VariableDeclaration {
-            ident: Ident::create_local("n"),
-            value: Some(Expression::new(ExpressionDesc::Fun {
-                is_method: false,
-                params: vec![Ident::create_local("prim")],
-                body: vec![Statement::return_(Expression::undefined(false))],
-                env: Default::default(),
-                return_unit: false,
-                async_: false,
-                directive: None,
-            })),
-            property: crate::lambda::lam_compat::LetKind::Strict,
-            ident_info: Default::default(),
-        })]);
+        let mut j = JsArena::new();
+        let rendered = {
+            let v = vec![JS::variable(
+                VarDecl {
+                    ident: Ident::create_local("n"),
+                    value: Some(test_fun(
+                        false,
+                        &[Ident::create_local("prim")],
+                        &[JS::return_(JE::undefined(false, &mut j), &mut j)],
+                        false,
+                        false,
+                        None,
+                        &mut j,
+                    )),
+                    property: crate::lambda::lam_compat::LetKind::Strict,
+                    ident_info: Default::default(),
+                },
+                &mut j,
+            )];
+            print_stmts(&j, &v)
+        };
 
         assert_eq!(rendered, "function n(prim) {\n  \n}");
     }
@@ -5184,98 +5685,148 @@ mod tests {
     #[test]
     #[ignore = "stale internal shape expectation; covered by strict lambda/JS parity gates"]
     fn test_print_arrow_function_parenthesizes_object_literal_body() {
-        let rendered = print_expression(&Expression::new(ExpressionDesc::Fun {
-            is_method: false,
-            params: vec![],
-            body: vec![Statement::return_(Expression::new(ExpressionDesc::Object(
-                None,
-                vec![(
-                    PropertyName::lit("default"),
-                    Expression::number(Number::int(1)),
+        let mut j = JsArena::new();
+        let rendered = {
+            let v = test_fun(
+                false,
+                &[],
+                &[JS::return_(
+                    JE::new(
+                        ExprKind::Object(
+                            None,
+                            test_props(
+                                vec![(
+                                    PropertyName::lit("default"),
+                                    JE::number(Number::int(1), &mut j),
+                                )],
+                                &mut j,
+                            ),
+                        ),
+                        &mut j,
+                    ),
+                    &mut j,
                 )],
-            )))],
-            env: Default::default(),
-            return_unit: false,
-            async_: false,
-            directive: None,
-        }));
+                false,
+                false,
+                None,
+                &mut j,
+            );
+            print_expr(&j, v)
+        };
 
         assert_eq!(rendered, "() => ({\n  \"default\": 1\n})");
     }
 
     #[test]
     fn test_print_arrow_function_parenthesizes_constructor_block_body() {
-        let rendered = print_expression(&Expression::new(ExpressionDesc::Fun {
-            is_method: false,
-            params: vec![],
-            body: vec![Statement::return_(Expression::new(
-                ExpressionDesc::CamlBlock(
-                    vec![Expression::number(Number::int(1))],
-                    MutableFlag::Immutable,
-                    Box::new(TagInfo::constructor("Some", 1)),
-                ),
-            ))],
-            env: Default::default(),
-            return_unit: false,
-            async_: false,
-            directive: None,
-        }));
+        let mut j = JsArena::new();
+        let rendered = {
+            let v = test_fun(
+                false,
+                &[],
+                &[JS::return_(
+                    JE::new(
+                        ExprKind::CamlBlock(
+                            JE::list(&[JE::number(Number::int(1), &mut j)], &mut j),
+                            MutableFlag::Immutable,
+                            j.tag_id(TagInfo::constructor("Some", 1)),
+                        ),
+                        &mut j,
+                    ),
+                    &mut j,
+                )],
+                false,
+                false,
+                None,
+                &mut j,
+            );
+            print_expr(&j, v)
+        };
 
         assert_eq!(rendered, "() => ({\n  TAG: \"Some\",\n  _0: 1\n})");
     }
 
     #[test]
     fn test_print_arrow_function_preserves_parenthesized_shift_body() {
+        let mut j = JsArena::new();
         let value = Ident::create_local("value");
-        let rendered = print_expression(&Expression::new(ExpressionDesc::Fun {
-            is_method: false,
-            params: vec![value],
-            body: vec![Statement::return_(Expression::bin(
-                BinOp::Lsl,
-                Expression::var(value),
-                Expression::number(Number::int(1)),
-            ))],
-            env: Default::default(),
-            return_unit: false,
-            async_: false,
-            directive: None,
-        }));
+        let rendered = {
+            let v = test_fun(
+                false,
+                &[value],
+                &[JS::return_(
+                    JE::bin(
+                        BinOp::Lsl,
+                        JE::var(value, &mut j),
+                        JE::number(Number::int(1), &mut j),
+                        &mut j,
+                    ),
+                    &mut j,
+                )],
+                false,
+                false,
+                None,
+                &mut j,
+            );
+            print_expr(&j, v)
+        };
 
         assert_eq!(rendered, "value => (value << 1)");
     }
 
     #[test]
     fn test_print_unit_function_tail_if_drops_else_return_undefined() {
+        let mut j = JsArena::new();
         let foo = Ident::create_local("foo");
-        let rendered = print_block(&vec![Statement::variable(VariableDeclaration {
-            ident: foo,
-            value: Some(Expression::new(ExpressionDesc::Fun {
-                is_method: false,
-                params: vec![],
-                body: vec![Statement::new(StatementDesc::If(
-                    Expression::var(Ident::create_local("cond")),
-                    vec![Statement::exp(Expression::call(
-                        Expression::qualified(
-                            ModuleId {
-                                id: Ident::create_local("console"),
-                                kind: Kind::Ml,
-                                dynamic_import: false,
-                            },
-                            Some("log".to_string()),
-                        ),
-                        vec![Expression::string("hit")],
-                        CallInfo::default(),
-                    ))],
-                    vec![Statement::return_(Expression::undefined(true))],
-                ))],
-                env: Default::default(),
-                return_unit: true,
-                async_: false,
-                directive: None,
-            })),
-            property: crate::lambda::lam_compat::LetKind::Strict,
-            ident_info: Default::default(),
-        })]);
+        let rendered = {
+            let v = vec![JS::variable(
+                VarDecl {
+                    ident: foo,
+                    value: Some(test_fun(
+                        false,
+                        &[],
+                        &[JS::new(
+                            StmtKind::If(
+                                JE::var(Ident::create_local("cond"), &mut j),
+                                JS::list(
+                                    &[JS::exp(
+                                        JE::call(
+                                            JE::qualified(
+                                                ModuleId {
+                                                    id: Ident::create_local("console"),
+                                                    kind: Kind::Ml,
+                                                    dynamic_import: false,
+                                                },
+                                                Some("log".to_string()),
+                                                &mut j,
+                                            ),
+                                            &[JE::string("hit", &mut j)],
+                                            CallInfo::default(),
+                                            &mut j,
+                                        ),
+                                        &mut j,
+                                    )],
+                                    &mut j,
+                                ),
+                                JS::list(
+                                    &[JS::return_(JE::undefined(true, &mut j), &mut j)],
+                                    &mut j,
+                                ),
+                            ),
+                            &mut j,
+                        )],
+                        true,
+                        false,
+                        None,
+                        &mut j,
+                    )),
+                    property: crate::lambda::lam_compat::LetKind::Strict,
+                    ident_info: Default::default(),
+                },
+                &mut j,
+            )];
+            print_stmts(&j, &v)
+        };
 
         assert!(rendered.contains("if (cond) {"));
         assert!(rendered.contains("console.log(\"hit\");"));
@@ -5285,39 +5836,64 @@ mod tests {
 
     #[test]
     fn test_print_unit_function_body_keeps_single_negative_guard_like_ocaml() {
+        let mut j = JsArena::new();
         let handle = Ident::create_local("handle");
         let q = Ident::create_local("q");
         let do_action = Ident::create_local("doAction");
-        let q_length = Expression::new(ExpressionDesc::StaticIndex(
-            Box::new(Expression::var(q)),
-            "length".to_string(),
-            None,
-        ));
-        let rendered = print_block(&vec![Statement::variable(VariableDeclaration {
-            ident: handle,
-            value: Some(Expression::new(ExpressionDesc::Fun {
-                is_method: false,
-                params: vec![q],
-                body: vec![
-                    Statement::new(StatementDesc::If(
-                        Expression::bin(BinOp::Le, q_length, Expression::number(Number::int(0))),
-                        vec![Statement::return_(Expression::undefined(true))],
-                        vec![],
+        let q_length = JE::new(
+            ExprKind::StaticIndex(
+                JE::var(q, &mut j),
+                JE::str_id("length", &mut j),
+                crate::js_ir::arena::FieldPos::new(None),
+            ),
+            &mut j,
+        );
+        let rendered = {
+            let v = vec![JS::variable(
+                VarDecl {
+                    ident: handle,
+                    value: Some(test_fun(
+                        false,
+                        &[q],
+                        &[
+                            JS::new(
+                                StmtKind::If(
+                                    JE::bin(
+                                        BinOp::Le,
+                                        q_length,
+                                        JE::number(Number::int(0), &mut j),
+                                        &mut j,
+                                    ),
+                                    JS::list(
+                                        &[JS::return_(JE::undefined(true, &mut j), &mut j)],
+                                        &mut j,
+                                    ),
+                                    j.empty_block(),
+                                ),
+                                &mut j,
+                            ),
+                            JS::exp(
+                                JE::call(
+                                    JE::var(do_action, &mut j),
+                                    &[],
+                                    CallInfo::default(),
+                                    &mut j,
+                                ),
+                                &mut j,
+                            ),
+                        ],
+                        true,
+                        false,
+                        None,
+                        &mut j,
                     )),
-                    Statement::exp(Expression::call(
-                        Expression::var(do_action),
-                        vec![],
-                        CallInfo::default(),
-                    )),
-                ],
-                env: Default::default(),
-                return_unit: true,
-                async_: false,
-                directive: None,
-            })),
-            property: crate::lambda::lam_compat::LetKind::Strict,
-            ident_info: Default::default(),
-        })]);
+                    property: crate::lambda::lam_compat::LetKind::Strict,
+                    ident_info: Default::default(),
+                },
+                &mut j,
+            )];
+            print_stmts(&j, &v)
+        };
 
         assert!(rendered.contains("if (q.length <= 0) {"));
         assert!(rendered.contains("doAction();"));
@@ -5326,41 +5902,56 @@ mod tests {
 
     #[test]
     fn test_print_unit_function_body_keeps_single_negative_guard_before_loop_like_ocaml() {
+        let mut j = JsArena::new();
         let handle = Ident::create_local("handle");
         let len = Ident::create_local("len");
         let k = Ident::create_local("k");
-        let rendered = print_block(&vec![Statement::variable(VariableDeclaration {
-            ident: handle,
-            value: Some(Expression::new(ExpressionDesc::Fun {
-                is_method: false,
-                params: vec![len],
-                body: vec![
-                    Statement::new(StatementDesc::If(
-                        Expression::bin(
-                            BinOp::EqEqEq,
-                            Expression::var(len),
-                            Expression::number(Number::int(0)),
-                        ),
-                        vec![Statement::return_(Expression::undefined(true))],
-                        vec![],
-                    )),
-                    Statement::for_range(
+        let rendered = {
+            let v = vec![JS::variable(
+                VarDecl {
+                    ident: handle,
+                    value: Some(test_fun(
+                        false,
+                        &[len],
+                        &[
+                            JS::new(
+                                StmtKind::If(
+                                    JE::bin(
+                                        BinOp::EqEqEq,
+                                        JE::var(len, &mut j),
+                                        JE::number(Number::int(0), &mut j),
+                                        &mut j,
+                                    ),
+                                    JS::list(
+                                        &[JS::return_(JE::undefined(true, &mut j), &mut j)],
+                                        &mut j,
+                                    ),
+                                    j.empty_block(),
+                                ),
+                                &mut j,
+                            ),
+                            JS::for_range(
+                                None,
+                                Some(JE::number(Number::int(0), &mut j)),
+                                JE::number(Number::int(1), &mut j),
+                                k,
+                                ForDirection::Up,
+                                &[],
+                                &mut j,
+                            ),
+                        ],
+                        true,
+                        false,
                         None,
-                        Some(Expression::number(Number::int(0))),
-                        Expression::number(Number::int(1)),
-                        k,
-                        ForDirection::Up,
-                        vec![],
-                    ),
-                ],
-                env: Default::default(),
-                return_unit: true,
-                async_: false,
-                directive: None,
-            })),
-            property: crate::lambda::lam_compat::LetKind::Strict,
-            ident_info: Default::default(),
-        })]);
+                        &mut j,
+                    )),
+                    property: crate::lambda::lam_compat::LetKind::Strict,
+                    ident_info: Default::default(),
+                },
+                &mut j,
+            )];
+            print_stmts(&j, &v)
+        };
 
         assert!(rendered.contains("if (len === 0) {"), "{rendered}");
         assert!(
@@ -5372,49 +5963,68 @@ mod tests {
 
     #[test]
     fn test_print_unit_function_body_keeps_single_negative_guard_before_call_like_ocaml() {
+        let mut j = JsArena::new();
         let handle = Ident::create_local("handle");
         let obj = Ident::create_local("obj");
         let size = Ident::create_local("size");
         let log = Ident::create_local("log");
-        let rendered = print_block(&vec![Statement::variable(VariableDeclaration {
-            ident: handle,
-            value: Some(Expression::new(ExpressionDesc::Fun {
-                is_method: false,
-                params: vec![obj],
-                body: vec![
-                    Statement::new(StatementDesc::If(
-                        Expression::bin(
-                            BinOp::EqEqEq,
-                            Expression::new(ExpressionDesc::Typeof(Box::new(Expression::var(obj)))),
-                            Expression::string("function"),
-                        ),
-                        vec![Statement::return_(Expression::undefined(true))],
-                        vec![],
+        let rendered = {
+            let v = vec![JS::variable(
+                VarDecl {
+                    ident: handle,
+                    value: Some(test_fun(
+                        false,
+                        &[obj],
+                        &[
+                            JS::new(
+                                StmtKind::If(
+                                    JE::bin(
+                                        BinOp::EqEqEq,
+                                        JE::new(ExprKind::Typeof(JE::var(obj, &mut j)), &mut j),
+                                        JE::string("function", &mut j),
+                                        &mut j,
+                                    ),
+                                    JS::list(
+                                        &[JS::return_(JE::undefined(true, &mut j), &mut j)],
+                                        &mut j,
+                                    ),
+                                    j.empty_block(),
+                                ),
+                                &mut j,
+                            ),
+                            JS::variable(
+                                VarDecl {
+                                    ident: size,
+                                    value: Some(JE::new(
+                                        ExprKind::StaticIndex(
+                                            JE::var(obj, &mut j),
+                                            JE::str_id("length", &mut j),
+                                            crate::js_ir::arena::FieldPos::new(None),
+                                        ),
+                                        &mut j,
+                                    )),
+                                    property: crate::lambda::lam_compat::LetKind::Strict,
+                                    ident_info: Default::default(),
+                                },
+                                &mut j,
+                            ),
+                            JS::exp(
+                                JE::call(JE::var(log, &mut j), &[], CallInfo::default(), &mut j),
+                                &mut j,
+                            ),
+                        ],
+                        true,
+                        false,
+                        None,
+                        &mut j,
                     )),
-                    Statement::variable(VariableDeclaration {
-                        ident: size,
-                        value: Some(Expression::new(ExpressionDesc::StaticIndex(
-                            Box::new(Expression::var(obj)),
-                            "length".to_string(),
-                            None,
-                        ))),
-                        property: crate::lambda::lam_compat::LetKind::Strict,
-                        ident_info: Default::default(),
-                    }),
-                    Statement::exp(Expression::call(
-                        Expression::var(log),
-                        vec![],
-                        CallInfo::default(),
-                    )),
-                ],
-                env: Default::default(),
-                return_unit: true,
-                async_: false,
-                directive: None,
-            })),
-            property: crate::lambda::lam_compat::LetKind::Strict,
-            ident_info: Default::default(),
-        })]);
+                    property: crate::lambda::lam_compat::LetKind::Strict,
+                    ident_info: Default::default(),
+                },
+                &mut j,
+            )];
+            print_stmts(&j, &v)
+        };
 
         assert!(
             rendered.contains("if (typeof obj === \"function\") {"),
@@ -5430,12 +6040,19 @@ mod tests {
 
     #[test]
     fn test_print_variable_declaration_omits_undefined_initializer() {
-        let rendered = print_block(&vec![Statement::variable(VariableDeclaration {
-            ident: Ident::create_local("VS"),
-            value: Some(Expression::undefined(false)),
-            property: crate::lambda::lam_compat::LetKind::Strict,
-            ident_info: Default::default(),
-        })]);
+        let mut j = JsArena::new();
+        let rendered = {
+            let v = vec![JS::variable(
+                VarDecl {
+                    ident: Ident::create_local("VS"),
+                    value: Some(JE::undefined(false, &mut j)),
+                    property: crate::lambda::lam_compat::LetKind::Strict,
+                    ident_info: Default::default(),
+                },
+                &mut j,
+            )];
+            print_stmts(&j, &v)
+        };
 
         assert_eq!(rendered, "let VS;");
     }
@@ -5443,46 +6060,65 @@ mod tests {
     #[test]
     #[ignore = "stale internal shape expectation; covered by strict lambda/JS parity gates"]
     fn test_print_dead_pure_variable_declaration_is_omitted_like_ocaml() {
+        let mut j = JsArena::new();
         let mut dead_info = IdentInfo::default();
         dead_info.used_stats = UsedStats::DeadPure;
 
-        let rendered = print_block(&vec![
-            Statement::variable(VariableDeclaration {
-                ident: Ident::create_local("dead"),
-                value: Some(Expression::array(
-                    vec![Expression::number(Number::int(1))],
-                    MutableFlag::Immutable,
-                )),
-                property: crate::lambda::lam_compat::LetKind::Strict,
-                ident_info: dead_info,
-            }),
-            Statement::variable(VariableDeclaration {
-                ident: Ident::create_local("alive"),
-                value: Some(Expression::number(Number::int(2))),
-                property: crate::lambda::lam_compat::LetKind::Strict,
-                ident_info: Default::default(),
-            }),
-        ]);
+        let rendered = {
+            let v = vec![
+                JS::variable(
+                    VarDecl {
+                        ident: Ident::create_local("dead"),
+                        value: Some(JE::array(
+                            &[JE::number(Number::int(1), &mut j)],
+                            MutableFlag::Immutable,
+                            &mut j,
+                        )),
+                        property: crate::lambda::lam_compat::LetKind::Strict,
+                        ident_info: dead_info,
+                    },
+                    &mut j,
+                ),
+                JS::variable(
+                    VarDecl {
+                        ident: Ident::create_local("alive"),
+                        value: Some(JE::number(Number::int(2), &mut j)),
+                        property: crate::lambda::lam_compat::LetKind::Strict,
+                        ident_info: Default::default(),
+                    },
+                    &mut j,
+                ),
+            ];
+            print_stmts(&j, &v)
+        };
 
         assert_eq!(rendered, "let alive = 2;");
     }
 
     #[test]
     fn test_print_dead_non_pure_variable_declaration_as_expression_like_ocaml() {
+        let mut j = JsArena::new();
         let mut dead_info = IdentInfo::default();
         dead_info.used_stats = UsedStats::DeadNonPure;
         let effect = Ident::create_local("effect");
 
-        let rendered = print_block(&vec![Statement::variable(VariableDeclaration {
-            ident: Ident::create_local("dead"),
-            value: Some(Expression::call(
-                Expression::var(effect),
-                vec![],
-                CallInfo::default(),
-            )),
-            property: crate::lambda::lam_compat::LetKind::Strict,
-            ident_info: dead_info,
-        })]);
+        let rendered = {
+            let v = vec![JS::variable(
+                VarDecl {
+                    ident: Ident::create_local("dead"),
+                    value: Some(JE::call(
+                        JE::var(effect, &mut j),
+                        &[],
+                        CallInfo::default(),
+                        &mut j,
+                    )),
+                    property: crate::lambda::lam_compat::LetKind::Strict,
+                    ident_info: dead_info,
+                },
+                &mut j,
+            )];
+            print_stmts(&j, &v)
+        };
 
         assert_eq!(rendered, "effect();");
     }
@@ -5490,66 +6126,100 @@ mod tests {
     #[test]
     #[ignore = "stale internal shape expectation; covered by strict lambda/JS parity gates"]
     fn test_print_dead_pure_top_level_function_binding_is_omitted_like_ocaml() {
+        let mut j = JsArena::new();
         let mut dead_info = IdentInfo::default();
         dead_info.used_stats = UsedStats::DeadPure;
 
-        let rendered = print_block(&vec![
-            Statement::variable(VariableDeclaration {
-                ident: Ident::create_local("deadFn"),
-                value: Some(Expression::new(ExpressionDesc::Fun {
-                    is_method: false,
-                    params: vec![],
-                    body: vec![Statement::return_(Expression::number(Number::int(1)))],
-                    env: Default::default(),
-                    return_unit: false,
-                    async_: false,
-                    directive: None,
-                })),
-                property: crate::lambda::lam_compat::LetKind::Strict,
-                ident_info: dead_info,
-            }),
-            Statement::variable(VariableDeclaration {
-                ident: Ident::create_local("alive"),
-                value: Some(Expression::number(Number::int(2))),
-                property: crate::lambda::lam_compat::LetKind::Strict,
-                ident_info: Default::default(),
-            }),
-        ]);
+        let rendered = {
+            let v = vec![
+                JS::variable(
+                    VarDecl {
+                        ident: Ident::create_local("deadFn"),
+                        value: Some(test_fun(
+                            false,
+                            &[],
+                            &[JS::return_(JE::number(Number::int(1), &mut j), &mut j)],
+                            false,
+                            false,
+                            None,
+                            &mut j,
+                        )),
+                        property: crate::lambda::lam_compat::LetKind::Strict,
+                        ident_info: dead_info,
+                    },
+                    &mut j,
+                ),
+                JS::variable(
+                    VarDecl {
+                        ident: Ident::create_local("alive"),
+                        value: Some(JE::number(Number::int(2), &mut j)),
+                        property: crate::lambda::lam_compat::LetKind::Strict,
+                        ident_info: Default::default(),
+                    },
+                    &mut j,
+                ),
+            ];
+            print_stmts(&j, &v)
+        };
 
         assert_eq!(rendered, "let alive = 2;");
     }
 
     #[test]
     fn test_print_property_access_uses_dot_for_default_keyword() {
-        let rendered = print_expression(&Expression::new(ExpressionDesc::StaticIndex(
-            Box::new(Expression::var(Ident::create_local("Es6_export"))),
-            "default".to_string(),
-            None,
-        )));
+        let mut j = JsArena::new();
+        let rendered = {
+            let v = JE::new(
+                ExprKind::StaticIndex(
+                    JE::var(Ident::create_local("Es6_export"), &mut j),
+                    JE::str_id("default", &mut j),
+                    crate::js_ir::arena::FieldPos::new(None),
+                ),
+                &mut j,
+            );
+            print_expr(&j, v)
+        };
 
         assert_eq!(rendered, "Es6_export.default");
     }
 
     #[test]
     fn test_print_property_access_unwraps_uppercase_exotic_keys() {
-        let rendered = print_expression(&Expression::new(ExpressionDesc::StaticIndex(
-            Box::new(Expression::var(Ident::create_local("x"))),
-            "\\\"MyWeirdProp\"".to_string(),
-            None,
-        )));
+        let mut j = JsArena::new();
+        let rendered = {
+            let v = JE::new(
+                ExprKind::StaticIndex(
+                    JE::var(Ident::create_local("x"), &mut j),
+                    JE::str_id("\\\"MyWeirdProp\"", &mut j),
+                    crate::js_ir::arena::FieldPos::new(None),
+                ),
+                &mut j,
+            );
+            print_expr(&j, v)
+        };
 
         assert_eq!(rendered, "x.MyWeirdProp");
     }
 
     #[test]
     fn test_print_object_literal_unwraps_uppercase_exotic_keys() {
-        let rendered = print_expression(&Expression::new(ExpressionDesc::Object(
-            None,
-            vec![(
-                PropertyName::Lit("\\\"MyWeirdProp\"".to_string()),
-                Expression::number(Number::int(1)),
-            )],
-        )));
+        let mut j = JsArena::new();
+        let rendered = {
+            let v = JE::new(
+                ExprKind::Object(
+                    None,
+                    test_props(
+                        vec![(
+                            PropertyName::Lit("\\\"MyWeirdProp\"".to_string()),
+                            JE::number(Number::int(1), &mut j),
+                        )],
+                        &mut j,
+                    ),
+                ),
+                &mut j,
+            );
+            print_expr(&j, v)
+        };
 
         assert_eq!(rendered, "{\n  MyWeirdProp: 1\n}");
     }
@@ -5557,22 +6227,35 @@ mod tests {
     #[test]
     #[ignore = "stale internal shape expectation; covered by strict lambda/JS parity gates"]
     fn test_print_parenthesized_object_literal_preserves_group_indentation_like_ocaml() {
-        let rendered = print_expression(&Expression::new(ExpressionDesc::ArrayIndex(
-            Box::new(Expression::new(ExpressionDesc::Object(
-                None,
-                vec![
-                    (
-                        PropertyName::lit("foo"),
-                        Expression::number(Number::int(43)),
+        let mut j = JsArena::new();
+        let rendered = {
+            let v = JE::new(
+                ExprKind::ArrayIndex(
+                    JE::new(
+                        ExprKind::Object(
+                            None,
+                            test_props(
+                                vec![
+                                    (
+                                        PropertyName::lit("foo"),
+                                        JE::number(Number::int(43), &mut j),
+                                    ),
+                                    (
+                                        PropertyName::lit("bar"),
+                                        JE::number(Number::int(86), &mut j),
+                                    ),
+                                ],
+                                &mut j,
+                            ),
+                        ),
+                        &mut j,
                     ),
-                    (
-                        PropertyName::lit("bar"),
-                        Expression::number(Number::int(86)),
-                    ),
-                ],
-            ))),
-            Box::new(Expression::string("foo")),
-        )));
+                    JE::string("foo", &mut j),
+                ),
+                &mut j,
+            );
+            print_expr(&j, v)
+        };
 
         assert_eq!(rendered, "({\n  foo: 43,\n  bar: 86\n})[\"foo\"]");
     }
@@ -5580,159 +6263,247 @@ mod tests {
     #[test]
     fn test_print_parenthesized_object_literal_before_dot_access_preserves_group_indentation_like_ocaml()
      {
-        let expr = Expression::new(ExpressionDesc::StaticIndex(
-            Box::new(Expression::new(ExpressionDesc::Object(
-                None,
-                vec![(PropertyName::lit("_5"), Expression::number(Number::int(3)))],
-            ))),
-            "TAG".to_string(),
-            None,
-        ));
+        let mut j = JsArena::new();
+        let expr = JE::new(
+            ExprKind::StaticIndex(
+                JE::new(
+                    ExprKind::Object(
+                        None,
+                        test_props(
+                            vec![(PropertyName::lit("_5"), JE::number(Number::int(3), &mut j))],
+                            &mut j,
+                        ),
+                    ),
+                    &mut j,
+                ),
+                JE::str_id("TAG", &mut j),
+                crate::js_ir::arena::FieldPos::new(None),
+            ),
+            &mut j,
+        );
 
-        assert_eq!(print_expression(&expr), "({\n  _5: 3\n}).TAG");
+        assert_eq!(print_expr(&j, expr), "({\n  _5: 3\n}).TAG");
     }
 
     #[test]
     fn test_print_object_literal_call_argument_before_index_keeps_group_indent_like_ocaml() {
-        let expr = Expression::new(ExpressionDesc::ArrayIndex(
-            Box::new(Expression::call(
-                Expression::new(ExpressionDesc::StaticIndex(
-                    Box::new(Expression::var(Ident::create_local("Object"))),
-                    "create".to_string(),
-                    None,
-                )),
-                vec![Expression::new(ExpressionDesc::Object(
-                    None,
-                    vec![(PropertyName::lit("a"), Expression::number(Number::int(1)))],
-                ))],
-                CallInfo::default(),
-            )),
-            Box::new(Expression::string("a")),
-        ));
+        let mut j = JsArena::new();
+        let expr = JE::new(
+            ExprKind::ArrayIndex(
+                JE::call(
+                    JE::new(
+                        ExprKind::StaticIndex(
+                            JE::var(Ident::create_local("Object"), &mut j),
+                            JE::str_id("create", &mut j),
+                            crate::js_ir::arena::FieldPos::new(None),
+                        ),
+                        &mut j,
+                    ),
+                    &[JE::new(
+                        ExprKind::Object(
+                            None,
+                            test_props(
+                                vec![(PropertyName::lit("a"), JE::number(Number::int(1), &mut j))],
+                                &mut j,
+                            ),
+                        ),
+                        &mut j,
+                    )],
+                    CallInfo::default(),
+                    &mut j,
+                ),
+                JE::string("a", &mut j),
+            ),
+            &mut j,
+        );
 
         assert_eq!(
-            print_expression(&expr),
+            print_expr(&j, expr),
             "$$Object.create({\n    a: 1\n  })[\"a\"]"
         );
     }
 
     #[test]
     fn test_print_parenthesized_object_literal_index_as_call_argument_keeps_group_indent() {
-        let arg = Expression::new(ExpressionDesc::ArrayIndex(
-            Box::new(Expression::new(ExpressionDesc::Object(
-                None,
-                vec![
-                    (
-                        PropertyName::lit("foo"),
-                        Expression::number(Number::int(43)),
+        let mut j = JsArena::new();
+        let arg = JE::new(
+            ExprKind::ArrayIndex(
+                JE::new(
+                    ExprKind::Object(
+                        None,
+                        test_props(
+                            vec![
+                                (
+                                    PropertyName::lit("foo"),
+                                    JE::number(Number::int(43), &mut j),
+                                ),
+                                (
+                                    PropertyName::lit("bar"),
+                                    JE::number(Number::int(86), &mut j),
+                                ),
+                            ],
+                            &mut j,
+                        ),
                     ),
-                    (
-                        PropertyName::lit("bar"),
-                        Expression::number(Number::int(86)),
-                    ),
-                ],
-            ))),
-            Box::new(Expression::string("foo")),
-        ));
-        let call = Expression::call(
-            Expression::var(Ident::create_local("f")),
-            vec![arg],
+                    &mut j,
+                ),
+                JE::string("foo", &mut j),
+            ),
+            &mut j,
+        );
+        let call = JE::call(
+            JE::var(Ident::create_local("f"), &mut j),
+            &[arg],
             CallInfo::default(),
+            &mut j,
         );
 
         assert_eq!(
-            print_expression(&call),
+            print_expr(&j, call),
             "f(({\n    foo: 43,\n    bar: 86\n  })[\"foo\"])"
         );
     }
 
     #[test]
     fn test_print_parenthesized_object_literal_dot_access_as_call_argument_preserves_base_indent() {
-        let arg = Expression::new(ExpressionDesc::StaticIndex(
-            Box::new(Expression::new(ExpressionDesc::Object(
-                None,
-                vec![(PropertyName::lit("_5"), Expression::number(Number::int(3)))],
-            ))),
-            "TAG".to_string(),
-            None,
-        ));
-        let call = Expression::call(
-            Expression::var(Ident::create_local("f")),
-            vec![arg],
+        let mut j = JsArena::new();
+        let arg = JE::new(
+            ExprKind::StaticIndex(
+                JE::new(
+                    ExprKind::Object(
+                        None,
+                        test_props(
+                            vec![(PropertyName::lit("_5"), JE::number(Number::int(3), &mut j))],
+                            &mut j,
+                        ),
+                    ),
+                    &mut j,
+                ),
+                JE::str_id("TAG", &mut j),
+                crate::js_ir::arena::FieldPos::new(None),
+            ),
+            &mut j,
+        );
+        let call = JE::call(
+            JE::var(Ident::create_local("f"), &mut j),
+            &[arg],
             CallInfo::default(),
+            &mut j,
         );
 
-        assert_eq!(print_expression(&call), "f(({\n  _5: 3\n}).TAG)");
+        assert_eq!(print_expr(&j, call), "f(({\n  _5: 3\n}).TAG)");
     }
 
     #[test]
     fn test_print_caml_block_tag_call_argument_uses_group_indent_like_ocaml() {
-        let call = Expression::call(
-            Expression::new(ExpressionDesc::StaticIndex(
-                Box::new(Expression::var(Ident::create_local("console"))),
-                "log".to_string(),
-                None,
-            )),
-            vec![Expression::new(ExpressionDesc::CamlBlockTag(
-                Box::new(Expression::new(ExpressionDesc::Object(
-                    None,
-                    vec![(PropertyName::lit("_5"), Expression::number(Number::int(3)))],
-                ))),
-                "TAG".to_string(),
-            ))],
+        let mut j = JsArena::new();
+        let call = JE::call(
+            JE::new(
+                ExprKind::StaticIndex(
+                    JE::var(Ident::create_local("console"), &mut j),
+                    JE::str_id("log", &mut j),
+                    crate::js_ir::arena::FieldPos::new(None),
+                ),
+                &mut j,
+            ),
+            &[JE::new(
+                ExprKind::CamlBlockTag(
+                    JE::new(
+                        ExprKind::Object(
+                            None,
+                            test_props(
+                                vec![(PropertyName::lit("_5"), JE::number(Number::int(3), &mut j))],
+                                &mut j,
+                            ),
+                        ),
+                        &mut j,
+                    ),
+                    JE::str_id("TAG", &mut j),
+                ),
+                &mut j,
+            )],
             CallInfo::default(),
+            &mut j,
         );
 
-        assert_eq!(
-            print_expression(&call),
-            "console.log(({\n    _5: 3\n  }).TAG)"
-        );
+        assert_eq!(print_expr(&j, call), "console.log(({\n    _5: 3\n  }).TAG)");
     }
 
     #[test]
     fn test_print_nested_member_target_call_with_multiline_array_arg_avoids_double_indent() {
-        let promise_all = Expression::call(
-            Expression::new(ExpressionDesc::StaticIndex(
-                Box::new(Expression::var(Ident::create_local("Promise"))),
-                "all".to_string(),
-                None,
-            )),
-            vec![Expression::array(
-                vec![
-                    Expression::var(Ident::create_local("p1")),
-                    Expression::var(Ident::create_local("p2")),
-                    Expression::var(Ident::create_local("p3")),
+        let mut j = JsArena::new();
+        let promise_all = JE::call(
+            JE::new(
+                ExprKind::StaticIndex(
+                    JE::var(Ident::create_local("Promise"), &mut j),
+                    JE::str_id("all", &mut j),
+                    crate::js_ir::arena::FieldPos::new(None),
+                ),
+                &mut j,
+            ),
+            &[JE::array(
+                &[
+                    JE::var(Ident::create_local("p1"), &mut j),
+                    JE::var(Ident::create_local("p2"), &mut j),
+                    JE::var(Ident::create_local("p3"), &mut j),
                 ],
                 MutableFlag::Immutable,
+                &mut j,
             )],
             CallInfo::default(),
+            &mut j,
         );
-        let stmt = Statement::new(StatementDesc::If(
-            Expression::bool(true),
-            vec![Statement::return_(Expression::new(
-                ExpressionDesc::StaticIndex(Box::new(promise_all), "then".to_string(), None),
-            ))],
-            vec![],
-        ));
+        let stmt = JS::new(
+            StmtKind::If(
+                JE::bool(true, &mut j),
+                JS::list(
+                    &[JS::return_(
+                        JE::new(
+                            ExprKind::StaticIndex(
+                                promise_all,
+                                JE::str_id("then", &mut j),
+                                crate::js_ir::arena::FieldPos::new(None),
+                            ),
+                            &mut j,
+                        ),
+                        &mut j,
+                    )],
+                    &mut j,
+                ),
+                j.empty_block(),
+            ),
+            &mut j,
+        );
 
         assert_eq!(
-            print_block(&vec![stmt]),
+            print_stmts(&j, &vec![stmt]),
             "if (true) {\n  return $$Promise.all([\n    p1,\n    p2,\n    p3\n  ]).then;\n}"
         );
     }
 
     #[test]
     fn test_print_new_call_with_multiline_array_argument_keeps_array_layout() {
-        let rendered = print_expression(&Expression::new(ExpressionDesc::New(
-            Box::new(Expression::var(Ident::create_local("BigInt64Array"))),
-            Some(vec![Expression::array(
-                vec![
-                    Expression::var(Ident::create_local("num1")),
-                    Expression::var(Ident::create_local("num2")),
-                ],
-                MutableFlag::Immutable,
-            )]),
-        )));
+        let mut j = JsArena::new();
+        let rendered = {
+            let v = JE::new(
+                ExprKind::New(
+                    JE::var(Ident::create_local("BigInt64Array"), &mut j),
+                    Some(JE::list(
+                        &[JE::array(
+                            &[
+                                JE::var(Ident::create_local("num1"), &mut j),
+                                JE::var(Ident::create_local("num2"), &mut j),
+                            ],
+                            MutableFlag::Immutable,
+                            &mut j,
+                        )],
+                        &mut j,
+                    )),
+                ),
+                &mut j,
+            );
+            print_expr(&j, v)
+        };
 
         assert!(rendered.starts_with("new $$BigInt64Array(["));
         assert!(rendered.contains("[\n  num1,\n  num2\n])"));
@@ -5740,207 +6511,270 @@ mod tests {
 
     #[test]
     fn test_print_new_index_call_argument_keeps_multiline_array_group_indent_like_ocaml() {
-        let arg = Expression::new(ExpressionDesc::ArrayIndex(
-            Box::new(Expression::new(ExpressionDesc::New(
-                Box::new(Expression::var(Ident::create_local("BigInt64Array"))),
-                Some(vec![Expression::array(
-                    vec![
-                        Expression::var(Ident::create_local("num1")),
-                        Expression::var(Ident::create_local("num2")),
-                    ],
-                    MutableFlag::Immutable,
-                )]),
-            ))),
-            Box::new(Expression::number(Number::int(1))),
-        ));
-        let call = Expression::call(
-            Expression::var(Ident::create_local("f")),
-            vec![arg],
+        let mut j = JsArena::new();
+        let arg = JE::new(
+            ExprKind::ArrayIndex(
+                JE::new(
+                    ExprKind::New(
+                        JE::var(Ident::create_local("BigInt64Array"), &mut j),
+                        Some(JE::list(
+                            &[JE::array(
+                                &[
+                                    JE::var(Ident::create_local("num1"), &mut j),
+                                    JE::var(Ident::create_local("num2"), &mut j),
+                                ],
+                                MutableFlag::Immutable,
+                                &mut j,
+                            )],
+                            &mut j,
+                        )),
+                    ),
+                    &mut j,
+                ),
+                JE::number(Number::int(1), &mut j),
+            ),
+            &mut j,
+        );
+        let call = JE::call(
+            JE::var(Ident::create_local("f"), &mut j),
+            &[arg],
             CallInfo::default(),
+            &mut j,
         );
 
         assert_eq!(
-            print_expression(&call),
+            print_expr(&j, call),
             "f(new $$BigInt64Array([\n    num1,\n    num2\n  ])[1])"
         );
     }
 
     #[test]
     fn test_print_indexed_multiline_array_call_argument_uses_group_indent_like_ocaml() {
-        let arg = Expression::new(ExpressionDesc::ArrayIndex(
-            Box::new(Expression::array(
-                vec![
-                    Expression::number(Number::int(0)),
-                    Expression::number(Number::int(1)),
-                    Expression::number(Number::int(2)),
-                ],
-                MutableFlag::Immutable,
-            )),
-            Box::new(Expression::number(Number::int(10))),
-        ));
-        let call = Expression::call(
-            Expression::var(Ident::create_local("f")),
-            vec![arg],
+        let mut j = JsArena::new();
+        let arg = JE::new(
+            ExprKind::ArrayIndex(
+                JE::array(
+                    &[
+                        JE::number(Number::int(0), &mut j),
+                        JE::number(Number::int(1), &mut j),
+                        JE::number(Number::int(2), &mut j),
+                    ],
+                    MutableFlag::Immutable,
+                    &mut j,
+                ),
+                JE::number(Number::int(10), &mut j),
+            ),
+            &mut j,
+        );
+        let call = JE::call(
+            JE::var(Ident::create_local("f"), &mut j),
+            &[arg],
             CallInfo::default(),
+            &mut j,
         );
 
-        assert_eq!(
-            print_expression(&call),
-            "f([\n    0,\n    1,\n    2\n  ][10])"
-        );
+        assert_eq!(print_expr(&j, call), "f([\n    0,\n    1,\n    2\n  ][10])");
     }
 
     #[test]
     fn test_print_length_of_member_target_call_with_multiline_array_arg_preserves_base_indent() {
-        let arg = Expression::length(
-            Expression::call(
-                Expression::var(Ident::create_local("g")),
-                vec![Expression::array(
-                    vec![
-                        Expression::number(Number::int(1)),
-                        Expression::number(Number::int(2)),
-                        Expression::number(Number::int(3)),
+        let mut j = JsArena::new();
+        let arg = JE::length(
+            JE::call(
+                JE::var(Ident::create_local("g"), &mut j),
+                &[JE::array(
+                    &[
+                        JE::number(Number::int(1), &mut j),
+                        JE::number(Number::int(2), &mut j),
+                        JE::number(Number::int(3), &mut j),
                     ],
                     MutableFlag::Immutable,
+                    &mut j,
                 )],
                 CallInfo::default(),
+                &mut j,
             ),
             LengthObject::Array,
+            &mut j,
         );
-        let call = Expression::call(
-            Expression::var(Ident::create_local("f")),
-            vec![arg],
+        let call = JE::call(
+            JE::var(Ident::create_local("f"), &mut j),
+            &[arg],
             CallInfo::default(),
+            &mut j,
         );
 
-        assert_eq!(
-            print_expression(&call),
-            "f(g([\n  1,\n  2,\n  3\n]).length)"
-        );
+        assert_eq!(print_expr(&j, call), "f(g([\n  1,\n  2,\n  3\n]).length)");
     }
 
     #[test]
     fn test_print_static_member_target_new_with_multiline_array_arg_preserves_base_indent() {
-        let map_entries = Expression::array(
-            vec![
-                Expression::array(
-                    vec![
-                        Expression::number(Number::int(1)),
-                        Expression::number(Number::int(3)),
+        let mut j = JsArena::new();
+        let map_entries = JE::array(
+            &[
+                JE::array(
+                    &[
+                        JE::number(Number::int(1), &mut j),
+                        JE::number(Number::int(3), &mut j),
                     ],
                     MutableFlag::Immutable,
+                    &mut j,
                 ),
-                Expression::array(
-                    vec![
-                        Expression::number(Number::int(2)),
-                        Expression::number(Number::int(4)),
+                JE::array(
+                    &[
+                        JE::number(Number::int(2), &mut j),
+                        JE::number(Number::int(4), &mut j),
                     ],
                     MutableFlag::Immutable,
+                    &mut j,
                 ),
             ],
             MutableFlag::Immutable,
+            &mut j,
         );
-        let values_call = Expression::call(
-            Expression::new(ExpressionDesc::StaticIndex(
-                Box::new(Expression::new(ExpressionDesc::New(
-                    Box::new(Expression::var(Ident::create_local("Map"))),
-                    Some(vec![map_entries]),
-                ))),
-                "values".to_string(),
-                None,
-            )),
-            vec![],
+        let values_call = JE::call(
+            JE::new(
+                ExprKind::StaticIndex(
+                    JE::new(
+                        ExprKind::New(
+                            JE::var(Ident::create_local("Map"), &mut j),
+                            Some(JE::list(&[map_entries], &mut j)),
+                        ),
+                        &mut j,
+                    ),
+                    JE::str_id("values", &mut j),
+                    crate::js_ir::arena::FieldPos::new(None),
+                ),
+                &mut j,
+            ),
+            &[],
             CallInfo::default(),
+            &mut j,
         );
-        let call = Expression::call(
-            Expression::var(Ident::create_local("f")),
-            vec![values_call],
+        let call = JE::call(
+            JE::var(Ident::create_local("f"), &mut j),
+            &[values_call],
             CallInfo::default(),
+            &mut j,
         );
 
         assert_eq!(
-            print_expression(&call),
+            print_expr(&j, call),
             "f(new $$Map([\n  [\n    1,\n    3\n  ],\n  [\n    2,\n    4\n  ]\n]).values())"
         );
     }
 
     #[test]
     fn test_print_qualified_runtime_member_mangles_reserved_name() {
-        let rendered = print_expression(&Expression::qualified(
-            ModuleId {
-                id: Ident::create_persistent("Js_promise2"),
-                kind: Kind::Runtime,
-                dynamic_import: false,
-            },
-            Some("catch".to_string()),
-        ));
+        let mut j = JsArena::new();
+        let rendered = {
+            let v = JE::qualified(
+                ModuleId {
+                    id: Ident::create_persistent("Js_promise2"),
+                    kind: Kind::Runtime,
+                    dynamic_import: false,
+                },
+                Some("catch".to_string()),
+                &mut j,
+            );
+            print_expr(&j, v)
+        };
 
         assert_eq!(rendered, "Js_promise2.$$catch");
     }
 
     #[test]
     fn test_print_qualified_external_member_preserves_js_property_access() {
-        let rendered = print_expression(&Expression::qualified(
-            ModuleId {
-                id: Ident::create_persistent("URL"),
-                kind: Kind::External {
-                    name: "url".to_string(),
-                    default: false,
-                    import_attributes: None,
+        let mut j = JsArena::new();
+        let rendered = {
+            let v = JE::qualified(
+                ModuleId {
+                    id: Ident::create_persistent("URL"),
+                    kind: Kind::External {
+                        name: "url".to_string(),
+                        default: false,
+                        import_attributes: None,
+                    },
+                    dynamic_import: false,
                 },
-                dynamic_import: false,
-            },
-            Some("catch".to_string()),
-        ));
+                Some("catch".to_string()),
+                &mut j,
+            );
+            print_expr(&j, v)
+        };
 
         assert_eq!(rendered, "URL.catch");
     }
 
     #[test]
     fn test_print_object_literal_allows_keyword_property_names_without_quotes() {
-        let rendered = print_expression(&Expression::new(ExpressionDesc::Object(
-            None,
-            vec![
-                (
-                    PropertyName::lit("catch"),
-                    Expression::number(Number::int(1)),
+        let mut j = JsArena::new();
+        let rendered = {
+            let v = JE::new(
+                ExprKind::Object(
+                    None,
+                    test_props(
+                        vec![
+                            (
+                                PropertyName::lit("catch"),
+                                JE::number(Number::int(1), &mut j),
+                            ),
+                            (
+                                PropertyName::lit("default"),
+                                JE::number(Number::int(2), &mut j),
+                            ),
+                        ],
+                        &mut j,
+                    ),
                 ),
-                (
-                    PropertyName::lit("default"),
-                    Expression::number(Number::int(2)),
-                ),
-            ],
-        )));
+                &mut j,
+            );
+            print_expr(&j, v)
+        };
 
         assert_eq!(rendered, "{\n  catch: 1,\n  default: 2\n}");
     }
 
     #[test]
     fn test_print_spread_only_object_literal_inline_like_ocaml() {
-        let rendered = print_expression(&Expression::new(ExpressionDesc::Object(
-            Some(Box::new(Expression::var(Ident::create_local("source")))),
-            vec![],
-        )));
+        let mut j = JsArena::new();
+        let rendered = {
+            let v = JE::new(
+                ExprKind::Object(
+                    Some(JE::var(Ident::create_local("source"), &mut j)),
+                    test_props(vec![], &mut j),
+                ),
+                &mut j,
+            );
+            print_expr(&j, v)
+        };
 
         assert_eq!(rendered, "{...source}");
     }
 
     #[test]
     fn test_print_function_declaration_preserves_raw_directive() {
-        let rendered = print_block(&vec![Statement::variable(VariableDeclaration {
-            ident: Ident::create_local("testFnWithDirective"),
-            value: Some(Expression::new(ExpressionDesc::Fun {
-                is_method: false,
-                params: vec![Ident::create_local("name")],
-                body: vec![Statement::return_(Expression::string("Hello"))],
-                env: Default::default(),
-                return_unit: false,
-                async_: false,
-                directive: Some(Box::new("'use memo'".to_string())),
-            })),
-            property: crate::lambda::lam_compat::LetKind::Strict,
-            ident_info: Default::default(),
-        })]);
+        let mut j = JsArena::new();
+        let rendered = {
+            let v = vec![JS::variable(
+                VarDecl {
+                    ident: Ident::create_local("testFnWithDirective"),
+                    value: Some(test_fun(
+                        false,
+                        &[Ident::create_local("name")],
+                        &[JS::return_(JE::string("Hello", &mut j), &mut j)],
+                        false,
+                        false,
+                        Some(&Box::new("'use memo'".to_string())),
+                        &mut j,
+                    )),
+                    property: crate::lambda::lam_compat::LetKind::Strict,
+                    ident_info: Default::default(),
+                },
+                &mut j,
+            )];
+            print_stmts(&j, &v)
+        };
 
         assert!(rendered.contains(
             "function testFnWithDirective(name) {\n  'use memo';\n  return \"Hello\";\n}"
@@ -5949,15 +6783,19 @@ mod tests {
 
     #[test]
     fn test_print_function_expression_preserves_raw_directive() {
-        let rendered = print_expression(&Expression::new(ExpressionDesc::Fun {
-            is_method: false,
-            params: vec![Ident::create_local("name")],
-            body: vec![Statement::return_(Expression::string("Hello"))],
-            env: Default::default(),
-            return_unit: false,
-            async_: false,
-            directive: Some(Box::new("'use cache'".to_string())),
-        }));
+        let mut j = JsArena::new();
+        let rendered = {
+            let v = test_fun(
+                false,
+                &[Ident::create_local("name")],
+                &[JS::return_(JE::string("Hello", &mut j), &mut j)],
+                false,
+                false,
+                Some(&Box::new("'use cache'".to_string())),
+                &mut j,
+            );
+            print_expr(&j, v)
+        };
 
         assert_eq!(
             rendered,
@@ -5967,18 +6805,22 @@ mod tests {
 
     #[test]
     fn test_print_method_function_expression_omits_the_this_parameter() {
+        let mut j = JsArena::new();
         let this_param = Ident::create_local("me");
         let amount = Ident::create_local("amount");
 
-        let rendered = print_expression(&Expression::new(ExpressionDesc::Fun {
-            is_method: true,
-            params: vec![this_param, amount],
-            body: vec![Statement::return_(Expression::var(this_param))],
-            env: Default::default(),
-            return_unit: false,
-            async_: false,
-            directive: None,
-        }));
+        let rendered = {
+            let v = test_fun(
+                true,
+                &[this_param, amount],
+                &[JS::return_(JE::var(this_param, &mut j), &mut j)],
+                false,
+                false,
+                None,
+                &mut j,
+            );
+            print_expr(&j, v)
+        };
 
         assert_eq!(
             rendered,
@@ -5988,23 +6830,30 @@ mod tests {
 
     #[test]
     fn test_print_top_level_method_function_as_named_declaration() {
+        let mut j = JsArena::new();
         let this_param = Ident::create_local("self");
         let value = Ident::create_local("value");
 
-        let rendered = print_block(&vec![Statement::variable(VariableDeclaration {
-            ident: Ident::create_local("methodWithThis"),
-            value: Some(Expression::new(ExpressionDesc::Fun {
-                is_method: true,
-                params: vec![this_param, value],
-                body: vec![Statement::return_(Expression::var(this_param))],
-                env: Default::default(),
-                return_unit: false,
-                async_: false,
-                directive: None,
-            })),
-            property: crate::lambda::lam_compat::LetKind::Strict,
-            ident_info: Default::default(),
-        })]);
+        let rendered = {
+            let v = vec![JS::variable(
+                VarDecl {
+                    ident: Ident::create_local("methodWithThis"),
+                    value: Some(test_fun(
+                        true,
+                        &[this_param, value],
+                        &[JS::return_(JE::var(this_param, &mut j), &mut j)],
+                        false,
+                        false,
+                        None,
+                        &mut j,
+                    )),
+                    property: crate::lambda::lam_compat::LetKind::Strict,
+                    ident_info: Default::default(),
+                },
+                &mut j,
+            )];
+            print_stmts(&j, &v)
+        };
 
         assert_eq!(
             rendered,
@@ -6014,163 +6863,222 @@ mod tests {
 
     #[test]
     fn test_print_cons_constructor_as_hd_tl_object() {
-        let expr = Expression::new(ExpressionDesc::CamlBlock(
-            vec![
-                Expression::number(Number::int(1)),
-                Expression::number(Number::int(0)),
-            ],
-            MutableFlag::Immutable,
-            Box::new(TagInfo::constructor("::", 1)),
-        ));
+        let mut j = JsArena::new();
+        let expr = JE::new(
+            ExprKind::CamlBlock(
+                JE::list(
+                    &[
+                        JE::number(Number::int(1), &mut j),
+                        JE::number(Number::int(0), &mut j),
+                    ],
+                    &mut j,
+                ),
+                MutableFlag::Immutable,
+                j.tag_id(TagInfo::constructor("::", 1)),
+            ),
+            &mut j,
+        );
 
-        assert_eq!(print_expression(&expr), "{\n  hd: 1,\n  tl: 0\n}");
+        assert_eq!(print_expr(&j, expr), "{\n  hd: 1,\n  tl: 0\n}");
     }
 
     #[test]
     fn test_print_non_cons_constructor_keeps_tag_object_shape() {
-        let expr = Expression::new(ExpressionDesc::CamlBlock(
-            vec![Expression::number(Number::int(1))],
-            MutableFlag::Immutable,
-            Box::new(TagInfo::constructor("Some", 1)),
-        ));
+        let mut j = JsArena::new();
+        let expr = JE::new(
+            ExprKind::CamlBlock(
+                JE::list(&[JE::number(Number::int(1), &mut j)], &mut j),
+                MutableFlag::Immutable,
+                j.tag_id(TagInfo::constructor("Some", 1)),
+            ),
+            &mut j,
+        );
 
-        assert_eq!(print_expression(&expr), "{\n  TAG: \"Some\",\n  _0: 1\n}");
+        assert_eq!(print_expr(&j, expr), "{\n  TAG: \"Some\",\n  _0: 1\n}");
     }
 
     #[test]
     fn test_print_non_cons_constructor_adds_debug_name_symbol_in_debug_mode() {
-        let expr = Expression::new(ExpressionDesc::CamlBlock(
-            vec![
-                Expression::number(Number::int(1)),
-                Expression::number(Number::int(2)),
-            ],
-            MutableFlag::Immutable,
-            Box::new(TagInfo::constructor("A", 2)),
-        ));
+        let mut j = JsArena::new();
+        let expr = JE::new(
+            ExprKind::CamlBlock(
+                JE::list(
+                    &[
+                        JE::number(Number::int(1), &mut j),
+                        JE::number(Number::int(2), &mut j),
+                    ],
+                    &mut j,
+                ),
+                MutableFlag::Immutable,
+                j.tag_id(TagInfo::constructor("A", 2)),
+            ),
+            &mut j,
+        );
 
         assert_eq!(
-            print_expression_with_debug(&expr, true),
+            print_expression_with_debug(&j, expr, true),
             "{\n  TAG: \"A\",\n  _0: 1,\n  _1: 2,\n  [Symbol.for(\"name\")]: \"A\"\n}"
         );
         assert_eq!(
-            print_expression_with_debug(&expr, false),
+            print_expression_with_debug(&j, expr, false),
             "{\n  TAG: \"A\",\n  _0: 1,\n  _1: 2\n}"
         );
     }
 
     #[test]
     fn test_print_record_omits_optional_undefined_fields() {
-        let expr = Expression::new(ExpressionDesc::CamlBlock(
-            vec![
-                Expression::number(Number::int(10)),
-                Expression::undefined(false),
-            ],
-            MutableFlag::Immutable,
-            Box::new(TagInfo::record(
-                vec![("x".to_string(), false), ("i".to_string(), true)],
-                crate::parser::ast::MutableFlag::Immutable,
-            )),
-        ));
+        let mut j = JsArena::new();
+        let expr = JE::new(
+            ExprKind::CamlBlock(
+                JE::list(
+                    &[
+                        JE::number(Number::int(10), &mut j),
+                        JE::undefined(false, &mut j),
+                    ],
+                    &mut j,
+                ),
+                MutableFlag::Immutable,
+                j.tag_id(TagInfo::record(
+                    vec![("x".to_string(), false), ("i".to_string(), true)],
+                    crate::parser::ast::MutableFlag::Immutable,
+                )),
+            ),
+            &mut j,
+        );
 
-        assert_eq!(print_expression(&expr), "{\n  x: 10\n}");
+        assert_eq!(print_expr(&j, expr), "{\n  x: 10\n}");
     }
 
     #[test]
     fn test_print_inline_record_variant_keeps_tag_field() {
-        let expr = Expression::new(ExpressionDesc::CamlBlock(
-            vec![Expression::string("hello")],
-            MutableFlag::Immutable,
-            Box::new(TagInfo::RecordInlined(Box::new(
-                crate::lambda::lam_tag_info::RecordInlinedTag {
-                    name: "One".to_string(),
-                    num_nonconst: 1,
-                    runtime: Box::new(crate::types::VariantBlock::Tagged(
-                        crate::types::TaggedBlock {
-                            tag: crate::types::VariantTag {
-                                name: "One".to_string(),
-                                literal: None,
+        let mut j = JsArena::new();
+        let expr = JE::new(
+            ExprKind::CamlBlock(
+                JE::list(&[JE::string("hello", &mut j)], &mut j),
+                MutableFlag::Immutable,
+                j.tag_id(TagInfo::RecordInlined(Box::new(
+                    crate::lambda::lam_tag_info::RecordInlinedTag {
+                        name: "One".to_string(),
+                        num_nonconst: 1,
+                        runtime: Box::new(crate::types::VariantBlock::Tagged(
+                            crate::types::TaggedBlock {
+                                tag: crate::types::VariantTag {
+                                    name: "One".to_string(),
+                                    literal: None,
+                                },
+                                tag_name: None,
                             },
-                            tag_name: None,
-                        },
-                    )),
-                    fields: vec![("name".to_string(), false)],
-                    logical_field_count: None,
-                    mutable_flag: crate::parser::ast::MutableFlag::Immutable,
-                },
-            ))),
-        ));
+                        )),
+                        fields: vec![("name".to_string(), false)],
+                        logical_field_count: None,
+                        mutable_flag: crate::parser::ast::MutableFlag::Immutable,
+                    },
+                ))),
+            ),
+            &mut j,
+        );
 
         assert_eq!(
-            print_expression(&expr),
+            print_expr(&j, expr),
             "{\n  TAG: \"One\",\n  name: \"hello\"\n}"
         );
     }
 
     #[test]
     fn test_print_numeric_named_record_as_array() {
-        let expr = Expression::new(ExpressionDesc::CamlBlock(
-            vec![
-                Expression::number(Number::int(1)),
-                Expression::number(Number::int(2)),
-            ],
-            MutableFlag::Immutable,
-            Box::new(TagInfo::record(
-                vec![("0".to_string(), false), ("1".to_string(), false)],
-                crate::parser::ast::MutableFlag::Immutable,
-            )),
-        ));
+        let mut j = JsArena::new();
+        let expr = JE::new(
+            ExprKind::CamlBlock(
+                JE::list(
+                    &[
+                        JE::number(Number::int(1), &mut j),
+                        JE::number(Number::int(2), &mut j),
+                    ],
+                    &mut j,
+                ),
+                MutableFlag::Immutable,
+                j.tag_id(TagInfo::record(
+                    vec![("0".to_string(), false), ("1".to_string(), false)],
+                    crate::parser::ast::MutableFlag::Immutable,
+                )),
+            ),
+            &mut j,
+        );
 
-        assert_eq!(print_expression(&expr), "[\n  1,\n  2\n]");
+        assert_eq!(print_expr(&j, expr), "[\n  1,\n  2\n]");
     }
 
     #[test]
     fn test_print_module_block_uses_object_layout() {
-        let expr = Expression::new(ExpressionDesc::CamlBlock(
-            vec![Expression::number(Number::int(1))],
-            MutableFlag::Immutable,
-            Box::new(TagInfo::Module(vec!["value".to_string()])),
-        ));
+        let mut j = JsArena::new();
+        let expr = JE::new(
+            ExprKind::CamlBlock(
+                JE::list(&[JE::number(Number::int(1), &mut j)], &mut j),
+                MutableFlag::Immutable,
+                j.tag_id(TagInfo::Module(vec!["value".to_string()])),
+            ),
+            &mut j,
+        );
 
-        assert_eq!(print_expression(&expr), "{\n  value: 1\n}");
+        assert_eq!(print_expr(&j, expr), "{\n  value: 1\n}");
     }
 
     #[test]
     fn test_print_exception_extension_block_as_object() {
-        let expr = Expression::new(ExpressionDesc::CamlBlock(
-            vec![Expression::string("Not_found")],
-            MutableFlag::Immutable,
-            Box::new(TagInfo::Extension),
-        ));
+        let mut j = JsArena::new();
+        let expr = JE::new(
+            ExprKind::CamlBlock(
+                JE::list(&[JE::string("Not_found", &mut j)], &mut j),
+                MutableFlag::Immutable,
+                j.tag_id(TagInfo::Extension),
+            ),
+            &mut j,
+        );
 
-        assert_eq!(print_expression(&expr), "{\n  RE_EXN_ID: \"Not_found\"\n}");
+        assert_eq!(print_expr(&j, expr), "{\n  RE_EXN_ID: \"Not_found\"\n}");
     }
 
     #[test]
     fn test_print_record_extension_exception_uses_named_fields() {
-        let expr = Expression::new(ExpressionDesc::CamlBlock(
-            vec![
-                Expression::var(Ident::create_local("A")),
-                Expression::number(Number::int(3)),
-            ],
-            MutableFlag::Immutable,
-            Box::new(TagInfo::RecordExt {
-                fields: vec!["value".to_string()],
-                mutable_flag: crate::parser::ast::MutableFlag::Immutable,
-            }),
-        ));
+        let mut j = JsArena::new();
+        let expr = JE::new(
+            ExprKind::CamlBlock(
+                JE::list(
+                    &[
+                        JE::var(Ident::create_local("A"), &mut j),
+                        JE::number(Number::int(3), &mut j),
+                    ],
+                    &mut j,
+                ),
+                MutableFlag::Immutable,
+                j.tag_id(TagInfo::RecordExt {
+                    fields: vec!["value".to_string()],
+                    mutable_flag: crate::parser::ast::MutableFlag::Immutable,
+                }),
+            ),
+            &mut j,
+        );
 
-        assert_eq!(print_expression(&expr), "{\n  RE_EXN_ID: A,\n  value: 3\n}");
+        assert_eq!(print_expr(&j, expr), "{\n  RE_EXN_ID: A,\n  value: 3\n}");
     }
 
     #[test]
     fn test_print_throw_exception_block_includes_error_stack() {
-        let rendered = print_block(&vec![Statement::throw(Expression::new(
-            ExpressionDesc::CamlBlock(
-                vec![Expression::string("Not_found")],
-                MutableFlag::Immutable,
-                Box::new(TagInfo::Extension),
-            ),
-        ))]);
+        let mut j = JsArena::new();
+        let rendered = {
+            let v = vec![JS::throw(
+                JE::new(
+                    ExprKind::CamlBlock(
+                        JE::list(&[JE::string("Not_found", &mut j)], &mut j),
+                        MutableFlag::Immutable,
+                        j.tag_id(TagInfo::Extension),
+                    ),
+                    &mut j,
+                ),
+                &mut j,
+            )];
+            print_stmts(&j, &v)
+        };
 
         assert_eq!(
             rendered,
@@ -6180,30 +7088,41 @@ mod tests {
 
     #[test]
     fn test_print_int_switch_cases_keep_space_before_colon() {
-        let rendered = print_block(&vec![Statement::new(StatementDesc::IntSwitch(
-            Expression::var(Ident::create_local("tag")),
-            vec![
-                (
-                    0,
-                    CaseClause {
-                        source_loc: None,
-                        body: vec![Statement::return_(Expression::number(Number::int(1)))],
-                        should_break: false,
-                        comment: None,
-                    },
-                ),
-                (
-                    1,
-                    CaseClause {
-                        source_loc: None,
-                        body: vec![],
-                        should_break: false,
-                        comment: None,
-                    },
-                ),
-            ],
-            Some(vec![Statement::return_(Expression::number(Number::int(2)))]),
-        ))]);
+        let mut j = JsArena::new();
+        let rendered = {
+            let v = vec![JS::int_switch(
+                JE::var(Ident::create_local("tag"), &mut j),
+                vec![
+                    (
+                        0,
+                        Clause {
+                            source_loc: None,
+                            body: JS::list(
+                                &[JS::return_(JE::number(Number::int(1), &mut j), &mut j)],
+                                &mut j,
+                            ),
+                            should_break: false,
+                            comment: None,
+                        },
+                    ),
+                    (
+                        1,
+                        Clause {
+                            source_loc: None,
+                            body: JS::list(&[], &mut j),
+                            should_break: false,
+                            comment: None,
+                        },
+                    ),
+                ],
+                Some(JS::list(
+                    &[JS::return_(JE::number(Number::int(2), &mut j), &mut j)],
+                    &mut j,
+                )),
+                &mut j,
+            )];
+            print_stmts(&j, &v)
+        };
 
         assert_eq!(
             rendered,
@@ -6213,30 +7132,35 @@ mod tests {
 
     #[test]
     fn test_print_int_switch_cases_emit_break_for_empty_body_clauses() {
-        let rendered = print_block(&vec![Statement::new(StatementDesc::IntSwitch(
-            Expression::var(Ident::create_local("tag")),
-            vec![
-                (
-                    0,
-                    CaseClause {
-                        source_loc: None,
-                        body: vec![],
-                        should_break: false,
-                        comment: None,
-                    },
-                ),
-                (
-                    1,
-                    CaseClause {
-                        source_loc: None,
-                        body: vec![],
-                        should_break: true,
-                        comment: None,
-                    },
-                ),
-            ],
-            None,
-        ))]);
+        let mut j = JsArena::new();
+        let rendered = {
+            let v = vec![JS::int_switch(
+                JE::var(Ident::create_local("tag"), &mut j),
+                vec![
+                    (
+                        0,
+                        Clause {
+                            source_loc: None,
+                            body: JS::list(&[], &mut j),
+                            should_break: false,
+                            comment: None,
+                        },
+                    ),
+                    (
+                        1,
+                        Clause {
+                            source_loc: None,
+                            body: JS::list(&[], &mut j),
+                            should_break: true,
+                            comment: None,
+                        },
+                    ),
+                ],
+                None,
+                &mut j,
+            )];
+            print_stmts(&j, &v)
+        };
 
         assert_eq!(
             rendered,
@@ -6246,30 +7170,41 @@ mod tests {
 
     #[test]
     fn test_print_string_switch_cases_keep_space_before_colon() {
-        let rendered = print_block(&vec![Statement::new(StatementDesc::StringSwitch(
-            Expression::var(Ident::create_local("tag")),
-            vec![
-                StringClause {
-                    tag_type: SwitchCaseTag::String("One".to_string()),
-                    clause: CaseClause {
-                        source_loc: None,
-                        body: vec![Statement::return_(Expression::number(Number::int(1)))],
-                        should_break: false,
-                        comment: None,
+        let mut j = JsArena::new();
+        let rendered = {
+            let v = vec![JS::string_switch(
+                JE::var(Ident::create_local("tag"), &mut j),
+                vec![
+                    StringClauseInfo {
+                        tag_type: SwitchCaseTag::String("One".to_string()),
+                        clause: Clause {
+                            source_loc: None,
+                            body: JS::list(
+                                &[JS::return_(JE::number(Number::int(1), &mut j), &mut j)],
+                                &mut j,
+                            ),
+                            should_break: false,
+                            comment: None,
+                        },
                     },
-                },
-                StringClause {
-                    tag_type: SwitchCaseTag::String("Two".to_string()),
-                    clause: CaseClause {
-                        source_loc: None,
-                        body: vec![],
-                        should_break: false,
-                        comment: None,
+                    StringClauseInfo {
+                        tag_type: SwitchCaseTag::String("Two".to_string()),
+                        clause: Clause {
+                            source_loc: None,
+                            body: JS::list(&[], &mut j),
+                            should_break: false,
+                            comment: None,
+                        },
                     },
-                },
-            ],
-            Some(vec![Statement::return_(Expression::number(Number::int(2)))]),
-        ))]);
+                ],
+                Some(JS::list(
+                    &[JS::return_(JE::number(Number::int(2), &mut j), &mut j)],
+                    &mut j,
+                )),
+                &mut j,
+            )];
+            print_stmts(&j, &v)
+        };
 
         assert_eq!(
             rendered,
@@ -6279,30 +7214,35 @@ mod tests {
 
     #[test]
     fn test_print_string_switch_cases_emit_break_for_empty_body_clauses() {
-        let rendered = print_block(&vec![Statement::new(StatementDesc::StringSwitch(
-            Expression::var(Ident::create_local("tag")),
-            vec![
-                StringClause {
-                    tag_type: SwitchCaseTag::String("One".to_string()),
-                    clause: CaseClause {
-                        source_loc: None,
-                        body: vec![],
-                        should_break: false,
-                        comment: None,
+        let mut j = JsArena::new();
+        let rendered = {
+            let v = vec![JS::string_switch(
+                JE::var(Ident::create_local("tag"), &mut j),
+                vec![
+                    StringClauseInfo {
+                        tag_type: SwitchCaseTag::String("One".to_string()),
+                        clause: Clause {
+                            source_loc: None,
+                            body: JS::list(&[], &mut j),
+                            should_break: false,
+                            comment: None,
+                        },
                     },
-                },
-                StringClause {
-                    tag_type: SwitchCaseTag::String("Two".to_string()),
-                    clause: CaseClause {
-                        source_loc: None,
-                        body: vec![],
-                        should_break: true,
-                        comment: None,
+                    StringClauseInfo {
+                        tag_type: SwitchCaseTag::String("Two".to_string()),
+                        clause: Clause {
+                            source_loc: None,
+                            body: JS::list(&[], &mut j),
+                            should_break: true,
+                            comment: None,
+                        },
                     },
-                },
-            ],
-            None,
-        ))]);
+                ],
+                None,
+                &mut j,
+            )];
+            print_stmts(&j, &v)
+        };
 
         assert_eq!(
             rendered,
@@ -6312,30 +7252,43 @@ mod tests {
 
     #[test]
     fn test_print_string_switch_cases_keep_break_on_its_own_line_after_body() {
-        let rendered = print_block(&vec![Statement::new(StatementDesc::StringSwitch(
-            Expression::var(Ident::create_local("tag")),
-            vec![StringClause {
-                tag_type: SwitchCaseTag::String("One".to_string()),
-                clause: CaseClause {
-                    source_loc: None,
-                    body: vec![Statement::exp(Expression::call(
-                        Expression::qualified(
-                            ModuleId {
-                                id: Ident::create_local("console"),
-                                kind: Kind::Ml,
-                                dynamic_import: false,
-                            },
-                            Some("log".to_string()),
+        let mut j = JsArena::new();
+        let rendered = {
+            let v = vec![JS::string_switch(
+                JE::var(Ident::create_local("tag"), &mut j),
+                vec![StringClauseInfo {
+                    tag_type: SwitchCaseTag::String("One".to_string()),
+                    clause: Clause {
+                        source_loc: None,
+                        body: JS::list(
+                            &[JS::exp(
+                                JE::call(
+                                    JE::qualified(
+                                        ModuleId {
+                                            id: Ident::create_local("console"),
+                                            kind: Kind::Ml,
+                                            dynamic_import: false,
+                                        },
+                                        Some("log".to_string()),
+                                        &mut j,
+                                    ),
+                                    &[JE::string("hello", &mut j)],
+                                    CallInfo::default(),
+                                    &mut j,
+                                ),
+                                &mut j,
+                            )],
+                            &mut j,
                         ),
-                        vec![Expression::string("hello")],
-                        CallInfo::default(),
-                    ))],
-                    should_break: true,
-                    comment: None,
-                },
-            }],
-            None,
-        ))]);
+                        should_break: true,
+                        comment: None,
+                    },
+                }],
+                None,
+                &mut j,
+            )];
+            print_stmts(&j, &v)
+        };
 
         assert_eq!(
             rendered,
@@ -6345,30 +7298,44 @@ mod tests {
 
     #[test]
     fn test_print_string_switch_cases_escape_string_tags() {
-        let rendered = print_block(&vec![Statement::new(StatementDesc::StringSwitch(
-            Expression::var(Ident::create_local("tag")),
-            vec![
-                StringClause {
-                    tag_type: SwitchCaseTag::String("\\\"".to_string()),
-                    clause: CaseClause {
-                        source_loc: None,
-                        body: vec![Statement::return_(Expression::number(Number::int(1)))],
-                        should_break: false,
-                        comment: None,
+        let mut j = JsArena::new();
+        let rendered = {
+            let v = vec![JS::string_switch(
+                JE::var(Ident::create_local("tag"), &mut j),
+                vec![
+                    StringClauseInfo {
+                        tag_type: SwitchCaseTag::String("\\\"".to_string()),
+                        clause: Clause {
+                            source_loc: None,
+                            body: JS::list(
+                                &[JS::return_(JE::number(Number::int(1), &mut j), &mut j)],
+                                &mut j,
+                            ),
+                            should_break: false,
+                            comment: None,
+                        },
                     },
-                },
-                StringClause {
-                    tag_type: SwitchCaseTag::String("\\\\".to_string()),
-                    clause: CaseClause {
-                        source_loc: None,
-                        body: vec![Statement::return_(Expression::number(Number::int(2)))],
-                        should_break: false,
-                        comment: None,
+                    StringClauseInfo {
+                        tag_type: SwitchCaseTag::String("\\\\".to_string()),
+                        clause: Clause {
+                            source_loc: None,
+                            body: JS::list(
+                                &[JS::return_(JE::number(Number::int(2), &mut j), &mut j)],
+                                &mut j,
+                            ),
+                            should_break: false,
+                            comment: None,
+                        },
                     },
-                },
-            ],
-            Some(vec![Statement::return_(Expression::number(Number::int(3)))]),
-        ))]);
+                ],
+                Some(JS::list(
+                    &[JS::return_(JE::number(Number::int(3), &mut j), &mut j)],
+                    &mut j,
+                )),
+                &mut j,
+            )];
+            print_stmts(&j, &v)
+        };
 
         assert_eq!(
             rendered,
