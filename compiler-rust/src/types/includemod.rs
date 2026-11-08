@@ -2225,7 +2225,7 @@ fn value_descriptions(
         }
         (ValueKind::ValPrim(prim), _) => Ok(ModuleCoercion::Tcoerce_primitive(
             crate::types::typedtree::PrimitiveCoercion {
-                pc_desc: prim.clone(),
+                pc_desc: (**prim).clone(),
                 pc_type: sig_desc.val_type,
                 pc_loc: impl_desc.val_loc,
                 pc_id: id,
@@ -4620,7 +4620,7 @@ mod tests {
             val_type,
             val_kind: ValueKind::ValReg,
             val_loc: crate::types::DeclLoc::none(),
-            val_attributes: vec![],
+            val_attributes: Default::default(),
             val_path: None,
         }
     }
@@ -4652,7 +4652,7 @@ mod tests {
                 val_type: val_ty,
                 val_kind: ValueKind::ValReg,
                 val_loc: crate::types::DeclLoc::none(),
-                val_attributes: vec![],
+                val_attributes: Default::default(),
                 val_path: None,
             },
         )];
@@ -4674,7 +4674,7 @@ mod tests {
                 val_type: val_ty,
                 val_kind: ValueKind::ValReg,
                 val_loc: crate::types::DeclLoc::none(),
-                val_attributes: vec![],
+                val_attributes: Default::default(),
                 val_path: None,
             },
         )];
@@ -4684,7 +4684,7 @@ mod tests {
                 val_type: val_ty,
                 val_kind: ValueKind::ValReg,
                 val_loc: crate::types::DeclLoc::none(),
-                val_attributes: vec![],
+                val_attributes: Default::default(),
                 val_path: None,
             },
         )];
@@ -4876,7 +4876,7 @@ mod tests {
                     val_type: val_ty_placeholder,
                     val_kind: ValueKind::ValReg,
                     val_loc: crate::types::DeclLoc::none(),
-                    val_attributes: vec![],
+                    val_attributes: Default::default(),
                     val_path: None,
                 },
             ),

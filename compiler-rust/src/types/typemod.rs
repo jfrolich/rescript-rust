@@ -7592,7 +7592,7 @@ fn extract_sig_values_from_pattern(
                 val_type: ty,
                 val_kind: crate::types::decl::ValueKind::ValReg,
                 val_loc: crate::types::DeclLoc::none(),
-                val_attributes: vec![],
+                val_attributes: Default::default(),
                 val_path: None,
             },
         ));
@@ -11978,18 +11978,18 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                                 val_kind: match &vd.pval_prim {
                                     None => crate::types::decl::ValueKind::ValReg,
                                     Some(prim) => crate::types::decl::ValueKind::ValPrim(
-                                        primitive_description_from_value_decl(
+                                        std::sync::Arc::new(primitive_description_from_value_decl(
                                             arena,
                                             ctx,
                                             &sig_env,
                                             prim,
                                             vd.pval_type,
                                             val_type,
-                                        ),
+                                        )),
                                     ),
                                 },
                                 val_loc: tctx.intern_loc(arena.to_location(sig_item.psig_loc)),
-                                val_attributes: vec![],
+                                val_attributes: Default::default(),
                                 val_path: None,
                             },
                         ));
@@ -13196,7 +13196,7 @@ pub(crate) fn decl_signature_from_typed_signature(
                         // typedecl.ml:1883-1889: `Types.val_loc` is the
                         // signature item loc (typemod.ml:755-757).
                         val_loc: ctx.intern_loc(arena.to_location(item.sig_loc)),
-                        val_attributes: parser_attrs_to_decl_attrs(arena, ctx, &vd.val_attributes),
+                        val_attributes: parser_attrs_to_decl_attrs(arena, ctx, &vd.val_attributes).into(),
                         val_path: None,
                     },
                 ));
@@ -14156,7 +14156,7 @@ fn extract_module_type_from_mod_expr_inner(
                             // typedecl.ml:1878-1915: the kind as typed.
                             val_kind: vd.val_kind.clone(),
                             val_loc: crate::types::DeclLoc::none(),
-                            val_attributes: vec![],
+                            val_attributes: Default::default(),
                             val_path: None,
                         };
                         sig_items.push(SigItem::SigValue(id, value_desc.clone()));
@@ -16271,14 +16271,14 @@ pub fn transl_signature<'a>(
                 let val_kind = match &vd.pval_prim {
                     None => crate::types::decl::ValueKind::ValReg,
                     Some(prim) => crate::types::decl::ValueKind::ValPrim(
-                        primitive_description_from_value_decl(
+                        std::sync::Arc::new(primitive_description_from_value_decl(
                             arena,
                             ctx,
                             &sig_env,
                             prim,
                             vd.pval_type,
                             val_ty,
-                        ),
+                        )),
                     ),
                 };
                 // OCaml typedecl.ml:1875-1914 translates the type scheme before
@@ -16890,9 +16890,9 @@ fn type_structure_item<'a>(
                 parser_attrs_to_decl_attrs(arena, tctx.type_ctx, &vd.pval_attributes);
             let val_desc_for_env = crate::types::ValueDescription {
                 val_type: val_ty,
-                val_kind: crate::types::ValueKind::ValPrim(prim_desc),
+                val_kind: crate::types::ValueKind::ValPrim(std::sync::Arc::new(prim_desc)),
                 val_loc: tctx.intern_loc(arena.to_location(loc)),
-                val_attributes,
+                val_attributes: val_attributes.into(),
                 val_path: None,
             };
             let sig_item =

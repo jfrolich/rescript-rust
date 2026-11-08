@@ -24,8 +24,9 @@ pub struct ValueDescription {
     pub val_kind: ValueKind,
     /// Source location
     pub val_loc: DeclLoc,
-    /// Attributes
-    pub val_attributes: Vec<Attribute>,
+    /// Attributes. Shared by copies, like the list OCaml's
+    /// `Subst.value_description` keeps (compiler/ml/subst.ml:294).
+    pub val_attributes: SharedSlice<Attribute>,
     /// Full path to the value (for module items, None for local bindings)
     pub val_path: Option<Path>,
 }
@@ -35,8 +36,9 @@ pub struct ValueDescription {
 pub enum ValueKind {
     /// Regular value
     ValReg,
-    /// Primitive value
-    ValPrim(PrimitiveDescription),
+    /// Primitive value. Copies of a value description share it, as OCaml's
+    /// `Subst.value_description` keeps `val_kind` (compiler/ml/subst.ml:292).
+    ValPrim(std::sync::Arc<PrimitiveDescription>),
 }
 
 /// `Primitive.prim_kind`.
@@ -627,6 +629,73 @@ pub enum ExtStatus {
 // Attributes
 // ============================================================================
 
+/// An immutable list that copies share, like the physically shared lists of
+/// OCaml declaration copies. The empty list allocates nothing. Serializes as
+/// a plain sequence, so encodings and digests match a `Vec`.
+#[derive(Clone, PartialEq, Eq)]
+pub struct SharedSlice<T>(Option<std::sync::Arc<[T]>>);
+
+impl<T> Default for SharedSlice<T> {
+    fn default() -> Self {
+        Self(None)
+    }
+}
+
+impl<T> std::ops::Deref for SharedSlice<T> {
+    type Target = [T];
+    fn deref(&self) -> &[T] {
+        self.0.as_deref().unwrap_or(&[])
+    }
+}
+
+impl<T: Clone> SharedSlice<T> {
+    /// The items for in-place edits, copied first if another copy shares them.
+    pub fn make_mut(&mut self) -> &mut [T] {
+        match &mut self.0 {
+            Some(items) => std::sync::Arc::make_mut(items),
+            None => &mut [],
+        }
+    }
+}
+
+impl<T> From<Vec<T>> for SharedSlice<T> {
+    fn from(items: Vec<T>) -> Self {
+        Self((!items.is_empty()).then(|| items.into()))
+    }
+}
+
+impl<T> FromIterator<T> for SharedSlice<T> {
+    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
+        iter.into_iter().collect::<Vec<T>>().into()
+    }
+}
+
+impl<'a, T> IntoIterator for &'a SharedSlice<T> {
+    type Item = &'a T;
+    type IntoIter = std::slice::Iter<'a, T>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl<T: std::fmt::Debug> std::fmt::Debug for SharedSlice<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        (**self).fmt(f)
+    }
+}
+
+impl<T: Serialize> Serialize for SharedSlice<T> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_seq(self.iter())
+    }
+}
+
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for SharedSlice<T> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Vec::<T>::deserialize(deserializer).map(Self::from)
+    }
+}
+
 /// An attribute.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Attribute {
@@ -740,7 +809,7 @@ pub fn walk_signature_locations(sig: &mut [SignatureItem], v: &mut dyn Signature
         match item {
             SignatureItem::SigValue(_, vd) => {
                 v.location(&mut vd.val_loc);
-                attrs(&mut vd.val_attributes, v);
+                attrs(vd.val_attributes.make_mut(), v);
             }
             SignatureItem::SigType(_, td, _) => {
                 let td = std::sync::Arc::make_mut(td);

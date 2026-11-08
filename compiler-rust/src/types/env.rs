@@ -2778,7 +2778,7 @@ mod tests {
             val_type: TypeExprRef(0),
             val_kind: super::super::decl::ValueKind::ValReg,
             val_loc: crate::types::DeclLoc::none(),
-            val_attributes: vec![],
+            val_attributes: Default::default(),
             val_path: None,
         };
         env.add_value(id, desc);
@@ -2822,14 +2822,14 @@ mod tests {
             val_type: TypeExprRef(1),
             val_kind: super::super::decl::ValueKind::ValReg,
             val_loc: crate::types::DeclLoc::none(),
-            val_attributes: vec![],
+            val_attributes: Default::default(),
             val_path: None,
         };
         let desc2 = ValueDescription {
             val_type: TypeExprRef(2),
             val_kind: super::super::decl::ValueKind::ValReg,
             val_loc: crate::types::DeclLoc::none(),
-            val_attributes: vec![],
+            val_attributes: Default::default(),
             val_path: None,
         };
 
@@ -2849,7 +2849,7 @@ mod tests {
             val_type: TypeExprRef(0),
             val_kind: super::super::decl::ValueKind::ValReg,
             val_loc: crate::types::DeclLoc::none(),
-            val_attributes: vec![],
+            val_attributes: Default::default(),
             val_path: None,
         };
 
@@ -2869,7 +2869,7 @@ mod tests {
             val_type: TypeExprRef(0),
             val_kind: super::super::decl::ValueKind::ValReg,
             val_loc: crate::types::DeclLoc::none(),
-            val_attributes: vec![],
+            val_attributes: Default::default(),
             val_path: None,
         };
         env.add_value(id, desc);
