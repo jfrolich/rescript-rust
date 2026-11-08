@@ -10131,7 +10131,7 @@ fn compile_source_to_js_with_options_inner(
             has_resi,
         )
     });
-    let raw_arena = crate::raw_lambda::RawArena::new();
+    let raw_arena = crate::raw_lambda::RawArena::for_typed_exprs(tctx.typed.expr_count());
     let mut raw_converter =
         crate::raw_lambda::convert::RawLambdaConverter::with_start_stamp_and_unit_name(
             parser.arena(),
@@ -13564,7 +13564,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
                 has_interface,
             ),
         };
-        let raw_arena = crate::raw_lambda::RawArena::new();
+        let raw_arena = crate::raw_lambda::RawArena::for_typed_exprs(tctx.typed.expr_count());
         let mut raw_converter =
             crate::raw_lambda::convert::RawLambdaConverter::with_start_stamp_and_unit_name(
                 arena,

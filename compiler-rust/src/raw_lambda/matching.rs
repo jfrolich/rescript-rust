@@ -4,6 +4,7 @@
 //! It defines the core data structures (matrix, context, jumps, pattern_matching)
 //! and the operations on them used by the pattern matching compiler.
 
+use super::key_encode::{KeyEncode, KeyOut};
 use crate::fast_hash::AHashMap as HashMap;
 use crate::types::path::PathView;
 use std::borrow::{Borrow, Cow};
@@ -780,10 +781,10 @@ fn record_lubs<'p>(
             }
             (Some((lid1, lbl1, p1, o1)), Some((lid2, lbl2, p2, o2))) => {
                 if lbl1.lbl_pos < lbl2.lbl_pos {
-                    out.push((*lid1, lbl1.clone(), p1.clone(), *o1));
+                    out.push((*lid1, lbl1.clone(), *p1, *o1));
                     i += 1;
                 } else if lbl2.lbl_pos < lbl1.lbl_pos {
-                    out.push((*lid2, lbl2.clone(), p2.clone(), *o2));
+                    out.push((*lid2, lbl2.clone(), *p2, *o2));
                     j += 1;
                 } else {
                     if o1 != o2 {
@@ -2252,69 +2253,6 @@ fn make_key_equals(b: &RawArena, e: RawLambda, key: &str) -> bool {
     writer.write_raw(&b.get(), e, &mut out).is_some() && out.matches_all()
 }
 
-/// Sink for [`MakeKeyWriter`]: builds the key, or compares it with an
-/// expected key as it is written.
-struct KeyOut<'e> {
-    buf: String,
-    expect: Option<&'e str>,
-    pos: usize,
-    diverged: bool,
-}
-
-impl<'e> KeyOut<'e> {
-    fn new(capacity: usize) -> Self {
-        KeyOut {
-            buf: String::with_capacity(capacity),
-            expect: None,
-            pos: 0,
-            diverged: false,
-        }
-    }
-
-    fn expecting(key: &'e str) -> Self {
-        KeyOut {
-            buf: String::new(),
-            expect: Some(key),
-            pos: 0,
-            diverged: false,
-        }
-    }
-
-    fn push_str(&mut self, s: &str) {
-        match self.expect {
-            None => self.buf.push_str(s),
-            Some(key) => {
-                if !self.diverged
-                    && key.as_bytes().get(self.pos..self.pos + s.len()) == Some(s.as_bytes())
-                {
-                    self.pos += s.len();
-                } else {
-                    self.diverged = true;
-                }
-            }
-        }
-    }
-
-    fn push(&mut self, c: char) {
-        self.push_str(c.encode_utf8(&mut [0; 4]));
-    }
-
-    fn matches_all(&self) -> bool {
-        !self.diverged && self.expect.is_some_and(|key| key.len() == self.pos)
-    }
-}
-
-impl std::fmt::Write for KeyOut<'_> {
-    fn write_str(&mut self, s: &str) -> std::fmt::Result {
-        self.push_str(s);
-        if self.diverged {
-            Err(std::fmt::Error)
-        } else {
-            Ok(())
-        }
-    }
-}
-
 enum KeyBody<'a> {
     Raw(RawLambda),
     Action(&'a MatchAction),
@@ -2406,7 +2344,9 @@ impl<'b> MakeKeyWriter<'b> {
                 Some(())
             }
             View::Const(c) => {
-                write!(out, "Lconst({c:?})").ok()?;
+                out.push_str("Lconst(");
+                c.encode(out);
+                out.push(')');
                 Some(())
             }
             View::GlobalModule(id) => {
@@ -2425,12 +2365,11 @@ impl<'b> MakeKeyWriter<'b> {
                 self.write_raw(a, func, out)?;
                 out.push_str(",[");
                 self.write_raw_list(a, args, out)?;
-                write!(
-                    out,
-                    "],{:?},{:?},{})",
-                    info.inlined, info.status, transformed_jsx
-                )
-                .ok()?;
+                out.push_str("],");
+                info.inlined.encode(out);
+                info.status.encode(out);
+                transformed_jsx.encode(out);
+                out.push(')');
                 Some(())
             }
             View::Let(kind, x, ex, body) => {
@@ -2438,7 +2377,9 @@ impl<'b> MakeKeyWriter<'b> {
             }
             View::Prim(primitive, args, _) => {
                 charge_logical_record_fields(&mut self.count, primitive, args.len())?;
-                write!(out, "Lprim({primitive:?},[").ok()?;
+                out.push_str("Lprim(");
+                primitive.encode(out);
+                out.push_str(",[");
                 self.write_raw_list(a, args, out)?;
                 out.push_str("])");
                 Some(())
@@ -2464,7 +2405,9 @@ impl<'b> MakeKeyWriter<'b> {
                 }
                 out.push_str("],fail=");
                 self.write_raw_opt(a, sw.actions.fail, out)?;
-                write!(out, ",names={:?})", sw.payload.dispatch).ok()?;
+                out.push_str(",names=");
+                sw.payload.dispatch.encode(out);
+                out.push(')');
                 Some(())
             }
             View::StringSwitch(scrut, sw) => {
@@ -2475,7 +2418,8 @@ impl<'b> MakeKeyWriter<'b> {
                     if idx > 0 {
                         out.push(',');
                     }
-                    write!(out, "{label:?}:").ok()?;
+                    label.encode(out);
+                    out.push(':');
                     self.write_raw(a, act, out)?;
                 }
                 out.push_str("],");
@@ -2591,7 +2535,8 @@ impl<'b> MakeKeyWriter<'b> {
         }
 
         out.push_str("Llet(");
-        write!(out, "{kind:?},").ok()?;
+        kind.encode(out);
+        out.push(',');
         let synthetic_stamp = self.next_id;
         self.next_id += 1;
         write_synthetic_ident_key(out, x.name(), synthetic_stamp);
@@ -3094,7 +3039,7 @@ pub fn simplify_cases<'p>(
 
             match &pat.pat_desc {
                 PatternDesc::Tpat_var(id, _) => {
-                    let new_action = action.bind(b, LetKind::Alias, *id, arg.clone());
+                    let new_action = action.bind(b, LetKind::Alias, *id, *arg);
                     let mut row = vec![omega()];
                     row.extend(patl.iter().cloned());
                     result.push((row, new_action));
@@ -3103,7 +3048,7 @@ pub fn simplify_cases<'p>(
                     result.push((pats, action));
                 }
                 PatternDesc::Tpat_alias(p, id, _) => {
-                    let new_action = action.bind(b, LetKind::Alias, *id, arg.clone());
+                    let new_action = action.bind(b, LetKind::Alias, *id, *arg);
                     let mut new_pats = vec![pa.pat(*p)];
                     new_pats.extend(patl.iter().cloned());
                     // OCaml `compiler/ml/matching.ml:565-566` immediately
@@ -3120,7 +3065,7 @@ pub fn simplify_cases<'p>(
                             rest.rest_ident,
                             b.prim(
                                 Primitive::PrecordRest(rest.excluded_runtime_labels.clone()),
-                                &[arg.clone()], // matching.ml:585/596 `bind_record_rest pat.pat_loc`.
+                                &[*arg], // matching.ml:585/596 `bind_record_rest pat.pat_loc`.
                                 arena.lam_loc(pat.pat_loc),
                             ),
                         ),
@@ -3138,7 +3083,7 @@ pub fn simplify_cases<'p>(
                             rest.rest_ident,
                             b.prim(
                                 Primitive::PrecordRest(rest.excluded_runtime_labels.clone()),
-                                &[arg.clone()], // matching.ml:585/596 `bind_record_rest pat.pat_loc`.
+                                &[*arg], // matching.ml:585/596 `bind_record_rest pat.pat_loc`.
                                 arena.lam_loc(pat.pat_loc),
                             ),
                         ),
@@ -3856,7 +3801,7 @@ fn rebuild_nexts<'p>(
             e,
             PmHalfCompiled::PmVar(PmVarCompiled {
                 inside: Box::new(pm),
-                var_arg: arg.clone(),
+                var_arg: *arg,
             }),
         )
     }));
@@ -4574,7 +4519,7 @@ fn precompile_var<'p>(
                             &|_p: &'p Pattern, rem: &[&'p Pattern]| Ok(rem.to_vec()),
                             &def,
                         );
-                        let av = arg_rest[0].0.clone();
+                        let av = arg_rest[0].0;
                         let arg_tail = args.tail(1);
                         let (first_info, nexts) = split_or(
                             ctx_ref,
@@ -4595,7 +4540,7 @@ fn precompile_var<'p>(
                             let rfirst = PmHalfCompiledInfo {
                                 me: PmHalfCompiled::PmVar(PmVarCompiled {
                                     inside: Box::new(first_info.me),
-                                    var_arg: av.clone(),
+                                    var_arg: av,
                                 }),
                                 matrix: add_omega_column(&first_info.matrix),
                                 top_default: rebuild_default(pa, &nexts, def),
@@ -5047,11 +4992,7 @@ fn make_field_args(
     let mut result = Vec::new();
     for pos in first_pos..=last_pos {
         result.push((
-            b.prim(
-                Primitive::Pfield(pos, fld_info.clone()),
-                &[arg.clone()],
-                loc,
-            ),
+            b.prim(Primitive::Pfield(pos, fld_info.clone()), &[*arg], loc),
             binding_kind,
         ));
     }
@@ -5238,7 +5179,7 @@ fn make_constr_matching<'p>(
             let untagged = has_untagged(&cstr.cstr_attributes);
             let newargs = if cstr.cstr_inlined.is_some() || (untagged && !cstr.cstr_args.is_empty())
             {
-                let mut result = vec![(arg.clone(), LetKind::Alias)];
+                let mut result = vec![(*arg, LetKind::Alias)];
                 result.extend(argl.iter().cloned());
                 result
             } else {
@@ -5278,7 +5219,7 @@ fn make_constr_matching<'p>(
                             _ => Primitive::PvalFromOption,
                         };
                         let mut result = vec![(
-                            b.prim(from_option, &[arg.clone()], arena.lam_loc(p.pat_loc)),
+                            b.prim(from_option, &[*arg], arena.lam_loc(p.pat_loc)),
                             LetKind::Alias,
                         )];
                         result.extend(argl.iter().cloned());
@@ -5456,7 +5397,7 @@ fn make_variant_matching_nonconst<'p>(
             let mut new_args = vec![(
                 b.prim(
                     Primitive::Pfield(1, FieldDbgInfo::PolyVarContent),
-                    &[arg.clone()],
+                    &[*arg],
                     arena.lam_loc(p.pat_loc),
                 ),
                 LetKind::Alias,
@@ -5694,7 +5635,7 @@ fn make_tuple_matching<'p>(
                 new_args.push((
                     b.prim(
                         Primitive::Pfield(pos as i32, FieldDbgInfo::Tuple),
-                        &[arg.clone()],
+                        &[*arg],
                         loc,
                     ),
                     LetKind::Alias,
@@ -5840,18 +5781,18 @@ fn make_record_matching<'p>(
                     }
                     RecordRepresentation::RecordRegular => b.prim(
                         Primitive::Pfield(lbl.lbl_pos, fld_record(lbl)),
-                        &[arg.clone()],
+                        &[*arg],
                         loc,
                     ),
                     RecordRepresentation::RecordInlined { .. } => b.prim(
                         Primitive::Pfield(lbl.lbl_pos, fld_record_inline(lbl)),
-                        &[arg.clone()],
+                        &[*arg],
                         loc,
                     ),
-                    RecordRepresentation::RecordUnboxed(_) => arg.clone(),
+                    RecordRepresentation::RecordUnboxed(_) => *arg,
                     RecordRepresentation::RecordExtension => b.prim(
                         Primitive::Pfield(lbl.lbl_pos + 1, fld_record_extension(lbl)),
-                        &[arg.clone()],
+                        &[*arg],
                         loc,
                     ),
                 };
@@ -5961,7 +5902,7 @@ fn make_array_matching<'p>(
                     b.prim(
                         Primitive::Parrayrefu,
                         &[
-                            arg.clone(),
+                            *arg,
                             b.const_(crate::lambda::Constant::Int {
                                 i: pos as i32,
                                 comment: None,
@@ -6142,11 +6083,7 @@ fn do_tests_fail_owned(
     // into place instead of recursively cloning them.
     cases.into_iter().rev().fold(fail, |acc, (c, act)| {
         b.if_raw(
-            b.prim(
-                tst.clone(),
-                &[arg.clone(), typed_const_to_lambda_const(b, &c)],
-                loc,
-            ),
+            b.prim(tst.clone(), &[arg, typed_const_to_lambda_const(b, &c)], loc),
             acc,
             act,
         )
@@ -6168,11 +6105,7 @@ fn do_tests_nofail_owned(
     // emit `if c1 then a2 else a1`. See compiler/ml/matching.ml:1761-1833.
     cases.into_iter().rev().fold(last_action, |acc, (c, act)| {
         b.if_raw(
-            b.prim(
-                tst.clone(),
-                &[arg.clone(), typed_const_to_lambda_const(b, &c)],
-                loc,
-            ),
+            b.prim(tst.clone(), &[arg, typed_const_to_lambda_const(b, &c)], loc),
             acc,
             act,
         )
@@ -6228,25 +6161,17 @@ fn make_test_sequence(
             b.if_raw(
                 b.prim(
                     lt_tst.clone(),
-                    &[arg.clone(), typed_const_to_lambda_const(b, pivot_const)],
+                    &[*arg, typed_const_to_lambda_const(b, pivot_const)],
                     *loc,
                 ),
-                make_test_seq_inner_owned(
-                    b,
-                    loc,
-                    fail.clone(),
-                    tst,
-                    lt_tst,
-                    arg,
-                    const_lambda_list,
-                ),
+                make_test_seq_inner_owned(b, loc, fail, tst, lt_tst, arg, const_lambda_list),
                 make_test_seq_inner_owned(b, loc, fail, tst, lt_tst, arg, list2),
             )
         } else {
             match fail {
-                None => do_tests_nofail_owned(b, *loc, tst.clone(), arg.clone(), const_lambda_list),
+                None => do_tests_nofail_owned(b, *loc, tst.clone(), *arg, const_lambda_list),
                 Some(fail) => {
-                    do_tests_fail_owned(b, *loc, fail, tst.clone(), arg.clone(), const_lambda_list)
+                    do_tests_fail_owned(b, *loc, fail, tst.clone(), *arg, const_lambda_list)
                 }
             }
         }
@@ -6871,7 +6796,7 @@ fn scan_def<'p>(
             let action = b.static_raise(*i, &[]);
             let mut new_klist: Vec<(std::sync::Arc<ConstructorDescription>, RawLambda)> = pats
                 .iter()
-                .map(|pat| (get_key_constr(pat), action.clone()))
+                .map(|pat| (get_key_constr(pat), action))
                 .collect();
             new_klist.extend(klist);
             klist = new_klist;
@@ -7111,7 +7036,7 @@ fn get_extension_cases(
     tag_lambda_list
         .into_iter()
         .map(|(cstr, act)| match &cstr.cstr_kind {
-            crate::types::ConstructorKind::Extension(path) => (path.clone(), act),
+            crate::types::ConstructorKind::Extension(path) => (*path, act),
             crate::types::ConstructorKind::Ordinary(_) => unreachable!("ordinary extension case"),
         })
         .collect()
@@ -7177,12 +7102,12 @@ fn normalize_path_via_ctx(
             // First normalize the prefix recursively
             let norm_prefix = normalize_module_path_via_ctx(ctx_ref, prefix);
             if norm_prefix == *prefix {
-                path.clone()
+                *path
             } else {
                 Path::pdot_pos(norm_prefix, *name, *pos)
             }
         }
-        _ => path.clone(),
+        _ => *path,
     }
 }
 
@@ -7199,12 +7124,12 @@ fn normalize_module_path_via_ctx(
         PathView::Pdot(prefix, name, pos) => {
             let norm_prefix = normalize_module_path_via_ctx(ctx_ref, prefix);
             if norm_prefix == *prefix {
-                path.clone()
+                *path
             } else {
                 Path::pdot_pos(norm_prefix, *name, *pos)
             }
         }
-        _ => path.clone(),
+        _ => *path,
     };
 
     // Check if this path resolves to a module alias via sig caches
@@ -7237,7 +7162,7 @@ fn normalize_module_path_via_ctx(
                         sig.iter().find_map(|item| match item {
                             SignatureItem::SigModule(id, md, _) if id.name() == name => {
                                 match &md.md_type {
-                                    ModuleType::MtyAlias(_, alias_path) => Some(alias_path.clone()),
+                                    ModuleType::MtyAlias(_, alias_path) => Some(*alias_path),
                                     _ => None,
                                 }
                             }
@@ -7387,7 +7312,7 @@ fn combine_constructor<'p>(
                 let find_action = |name: &str| {
                     consts
                         .iter()
-                        .find_map(|(cstr, action)| (cstr.cstr_name == name).then(|| action.clone()))
+                        .find_map(|(cstr, action)| (cstr.cstr_name == name).then(|| *action))
                         .expect("boolean constructor action")
                 };
                 b.if_raw(arg, find_action("true"), find_action("false"))
@@ -7481,10 +7406,7 @@ fn or_list_polyvar(b: &RawArena, arg: &RawLambda, hash_names: &[(i32, String)]) 
     let (first_hash, first_name) = &hash_names[0];
     let init = b.prim(
         Primitive::Pintcomp(Comparison::Eq),
-        &[
-            arg.clone(),
-            raw_polyvariant_hash_const(b, *first_hash, first_name),
-        ],
+        &[*arg, raw_polyvariant_hash_const(b, *first_hash, first_name)],
         LamLoc::NONE,
     );
     hash_names[1..].iter().fold(init, |acc, (hash, name)| {
@@ -7494,7 +7416,7 @@ fn or_list_polyvar(b: &RawArena, arg: &RawLambda, hash_names: &[(i32, String)]) 
                 acc,
                 b.prim(
                     Primitive::Pintcomp(Comparison::Eq),
-                    &[arg.clone(), raw_polyvariant_hash_const(b, *hash, name)],
+                    &[*arg, raw_polyvariant_hash_const(b, *hash, name)],
                     LamLoc::NONE,
                 ),
             ],
@@ -7642,17 +7564,15 @@ fn combine_variant<'p>(
             // One can compare integers and pointers
             make_test_sequence_variant_constant(b, fail, arg, consts)
         } else if consts.is_empty() {
-            let lam =
-                call_switcher_variant_constr(b, ctx_ref, loc, fail.clone(), arg.clone(), nonconsts);
+            let lam = call_switcher_variant_constr(b, ctx_ref, loc, fail, arg, nonconsts);
             // One must not dereference integers
             match fail {
                 None => lam,
                 Some(fail) => test_int_or_block(arg, fail, lam),
             }
         } else {
-            let lam_const = call_switcher_variant_constant(b, fail.clone(), arg.clone(), consts);
-            let lam_nonconst =
-                call_switcher_variant_constr(b, ctx_ref, loc, fail, arg.clone(), nonconsts);
+            let lam_const = call_switcher_variant_constant(b, fail, arg, consts);
+            let lam_nonconst = call_switcher_variant_constr(b, ctx_ref, loc, fail, arg, nonconsts);
             test_int_or_block(arg, lam_const, lam_nonconst)
         }
     };
@@ -8148,7 +8068,7 @@ fn compile_match<'p>(
         (_, [(arg, str_kind), argl @ ..]) => {
             let (v, newarg) = arg_to_var(b, pa, ctx_ref, arg, &m.cases);
             let new_args = {
-                let mut a = vec![(newarg.clone(), LetKind::Alias)];
+                let mut a = vec![(newarg, LetKind::Alias)];
                 a.extend(argl.iter().cloned());
                 a
             };
@@ -8262,7 +8182,7 @@ fn do_compile_matching<'p>(
                 }
                 PatternDesc::Tpat_constant(cst) => {
                     let loc = arena.lam_loc(pat.pat_loc);
-                    let arg_clone = arg.clone();
+                    let arg_clone = *arg;
                     let cst_clone = cst.clone();
                     compile_test_wrapper(
                         ctx_ref,
@@ -8272,16 +8192,7 @@ fn do_compile_matching<'p>(
                         &|ctx, pm| divide_constant(pa, ctx, pm),
                         &|ctx, def, c_div, nrc| {
                             combine_constant(
-                                b,
-                                pa,
-                                loc,
-                                arg_clone.clone(),
-                                &cst_clone,
-                                partial,
-                                ctx,
-                                def,
-                                c_div,
-                                nrc,
+                                b, pa, loc, arg_clone, &cst_clone, partial, ctx, def, c_div, nrc,
                             )
                         },
                         ctx,
@@ -8291,7 +8202,7 @@ fn do_compile_matching<'p>(
                 }
                 PatternDesc::Tpat_construct(_, cstr, _) => {
                     let loc = arena.lam_loc(pat.pat_loc);
-                    let arg_clone = arg.clone();
+                    let arg_clone = *arg;
                     let ex_pat: &'p Pattern = pat;
                     let cstr_clone = cstr.clone();
                     compile_test_wrapper(
@@ -8306,7 +8217,7 @@ fn do_compile_matching<'p>(
                                 ctx_ref,
                                 pa,
                                 loc,
-                                arg_clone.clone(),
+                                arg_clone,
                                 ex_pat,
                                 &cstr_clone,
                                 partial,
@@ -8323,7 +8234,7 @@ fn do_compile_matching<'p>(
                 }
                 PatternDesc::Tpat_array(_) => {
                     let loc = arena.lam_loc(pat.pat_loc);
-                    let arg_clone = arg.clone();
+                    let arg_clone = *arg;
                     compile_test_wrapper(
                         ctx_ref,
                         pa,
@@ -8332,16 +8243,7 @@ fn do_compile_matching<'p>(
                         &|ctx, pm| divide_array(pa, arena, ctx, pm),
                         &|ctx, def, c_div, nrc| {
                             combine_array(
-                                b,
-                                pa,
-                                ctx_ref,
-                                loc,
-                                arg_clone.clone(),
-                                partial,
-                                ctx,
-                                def,
-                                c_div,
-                                nrc,
+                                b, pa, ctx_ref, loc, arg_clone, partial, ctx, def, c_div, nrc,
                             )
                         },
                         ctx,
@@ -8351,7 +8253,7 @@ fn do_compile_matching<'p>(
                 }
                 PatternDesc::Tpat_variant(_, _, _row_ref) => {
                     let loc = arena.lam_loc(pat.pat_loc);
-                    let arg_clone = arg.clone();
+                    let arg_clone = *arg;
                     let row_desc =
                         extract_row_from_type_with_env(ctx_ref, pat.pat_type, pat.pat_env);
                     let row_desc2 = row_desc.clone();
@@ -8363,15 +8265,7 @@ fn do_compile_matching<'p>(
                         &move |ctx, pm| divide_variant(ctx_ref, pa, arena, &row_desc, ctx, pm),
                         &|ctx, def, c_div, _nrc| {
                             combine_variant(
-                                b,
-                                pa,
-                                ctx_ref,
-                                loc,
-                                &row_desc2,
-                                arg_clone.clone(),
-                                partial,
-                                ctx,
-                                def,
+                                b, pa, ctx_ref, loc, &row_desc2, arg_clone, partial, ctx, def,
                                 c_div,
                             )
                         },
@@ -8632,7 +8526,7 @@ fn resolve_labels_from_type(
     let ty = ctx_ref.repr(record_ty);
     let desc = ctx_ref.get_desc(ty);
     let (path, _args) = match &*desc {
-        TypeDesc::Tconstr { path, args, .. } => (path.clone(), args.clone()),
+        TypeDesc::Tconstr { path, args, .. } => (*path, *args),
         _ => return None,
     };
     drop(desc);
@@ -9096,7 +8990,7 @@ pub fn for_trywith(
     next_raise_count: &mut i32,
 ) -> RawLambda {
     let b = arena.b;
-    let param_clone = param.clone();
+    let param_clone = param;
     compile_matching(
         ctx_ref,
         ta,
