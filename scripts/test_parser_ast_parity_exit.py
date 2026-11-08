@@ -3,8 +3,9 @@
 Runs the real script on one file with fake parsers, compilers and value
 comparison for each side. The fakes print the same output for both sides
 unless told to fail, time out, reject, differ or skip writing their output
-in one stage, so every case isolates one stage of one side. The spice and
-parser warning stages run on one fixture each in a temporary directory.
+in one stage, so every case isolates one stage of one side. The spice,
+parser warning and parse error stages run on one fixture each in a temporary
+directory.
 """
 
 import hashlib
@@ -45,6 +46,19 @@ if want_side in (side, "both") and want_stage == stage:
         # Both reject, the OCaml side with status 2 and Rust with 1.
         print("fake rejection", file=sys.stderr)
         sys.exit(2 if side == "ocaml" else 1)
+    if mode in ("reject-msg", "reject1-msg"):
+        # Both reject with the same status and different stderr.
+        print("fake rejection by " + side, file=sys.stderr)
+        sys.exit(2 if mode == "reject-msg" else 1)
+    if mode == "reject-stdout":
+        # Both reject with the same status and stderr, and different stdout.
+        print("partial output of " + side)
+        print("fake rejection", file=sys.stderr)
+        sys.exit(2)
+    if mode == "stream":
+        # The output goes to stderr instead of stdout.
+        sys.stderr.write(text)
+        sys.exit(0)
     if mode == "timeout":
         time.sleep(30)
     if mode == "differ":
@@ -121,6 +135,9 @@ class AstParityStageFailureTests(unittest.TestCase):
         cls.warning_file = root / "warnings" / "Warning.res"
         cls.warning_file.write_text("let x = 1\n")
         (root / "warnings" / "expected" / "Warning.res.txt").write_text("(parser-warning)\n")
+        (root / "errors").mkdir()
+        cls.parse_error_file = root / "errors" / "Broken.res"
+        cls.parse_error_file.write_text("let = \n")
         cls.input = root / "Input.res"
         cls.input.write_text("let x = 1\n")
         cls.root = root
@@ -135,6 +152,7 @@ class AstParityStageFailureTests(unittest.TestCase):
                    OCAML_BSC=str(root / "ocaml"), RUST_BSC=str(root / "rust"),
                    SPICE_PPX=str(root / "spice_ppx"), SPICE_TEST_DIR=str(root / "spice"),
                    PARSER_WARNING_DIR=str(root / "warnings"),
+                   PARSE_ERROR_DIRS=str(root / "errors"),
                    INSPECT_SCRIPT=str(root / "fake_inspect.py"),
                    FAKE_FAIL=fake_fail, FAKE_INSPECT=fake_inspect,
                    TELLA_DIR=str(root / "no-corpus"))
@@ -146,7 +164,8 @@ class AstParityStageFailureTests(unittest.TestCase):
 
     def stage_file(self, stage):
         return {"spice-ppx": self.spice_file,
-                "parser-warning": self.warning_file}.get(stage, self.input)
+                "parser-warning": self.warning_file,
+                "ml": self.parse_error_file}.get(stage, self.input)
 
     def assert_one_stage_failure(self, out, line):
         self.assertIn("Stage failures:           1", out)
@@ -163,6 +182,8 @@ class AstParityStageFailureTests(unittest.TestCase):
     def test_failed_command_is_a_counted_failure(self):
         cases = [(side, stage) for side in ("ocaml", "rust")
                  for stage in ("sexp-locs", "spice-ppx", "parser-warning")]
+        # The parse error stage compares any exit status, so only a killed or
+        # timed out command is a failure (see the timeout test).
         # Where the OCaml reference may reject a file, a failing Rust command
         # after an OCaml success is a failure.
         cases += [("rust", "sexp-locs-ppx"), ("rust", "bsc-ast")]
@@ -181,6 +202,14 @@ class AstParityStageFailureTests(unittest.TestCase):
                 self.assert_one_stage_failure(
                     out, f"{self.stage_file(stage)} / {stage} / ocaml / timed out after 5s (exit 124)")
 
+    def test_parse_error_timeout_is_a_counted_failure(self):
+        code, out = self.run_script("rust:ml:timeout")
+        self.assertEqual(code, 2, out)
+        self.assertIn("Stage failures:           2", out)
+        for mode in ("plain", "recover"):
+            self.assertIn(
+                f"{self.parse_error_file} / parse-error-{mode} / rust / timed out after 5s (exit 124)", out)
+
     def test_missing_ast_file_is_a_counted_failure(self):
         for stage in ("bsc-ast", "spice-ppx"):
             with self.subTest(stage=stage):
@@ -197,14 +226,50 @@ class AstParityStageFailureTests(unittest.TestCase):
         self.assertIn(f"{self.spice_file} / spice-ppx-compare / inspect_binary_ast.py / exit 1:", out)
 
     def test_rejection_by_both_sides_is_listed(self):
-        for stage in ("sexp-locs-ppx", "bsc-ast"):
+        # bsc reproduces OCaml's diagnostics, so its stderr is compared; the
+        # text of res_parser's uncaught exception is not.
+        for stage, streams in (("sexp-locs-ppx", "stdout identical, stderr not compared (uncaught exception)"),
+                               ("bsc-ast", "stdout identical, stderr identical")):
             with self.subTest(stage=stage):
                 code, out = self.run_script(f"both:{stage}:reject")
                 self.assertEqual(code, 0, out)
                 self.assertIn("Stage failures:           0", out)
                 self.assertIn("Rejected by both the OCaml reference and Rust (1):", out)
                 self.assertIn(
-                    f"{self.input} / {stage} / ocaml exit 2: fake rejection / rust exit 2: fake rejection", out)
+                    f"{self.input} / {stage} / ocaml exit 2: fake rejection / rust exit 2: fake rejection / {streams}",
+                    out)
+
+    def test_rejection_with_other_compared_streams_is_a_difference(self):
+        cases = [("bsc-ast", "reject-msg", "bsc-ast value differences: 1"),
+                 ("bsc-ast", "reject-stdout", "bsc-ast value differences: 1"),
+                 ("sexp-locs-ppx", "reject-stdout", "sexp-locs-ppx differences: 1"),
+                 # Status 1 is res_cli's own report, so its stderr is compared.
+                 ("sexp-locs-ppx", "reject1-msg", "sexp-locs-ppx differences: 1")]
+        for stage, mode, summary in cases:
+            with self.subTest(stage=stage, mode=mode):
+                code, out = self.run_script(f"both:{stage}:{mode}")
+                self.assertEqual(code, 1, out)
+                self.assertIn(summary, out)
+                self.assertIn("Stage failures:           0", out)
+                self.assertNotIn("Rejected by both", out)
+
+    def test_uncaught_exception_text_is_not_compared(self):
+        code, out = self.run_script("both:sexp-locs-ppx:reject-msg")
+        self.assertEqual(code, 0, out)
+        self.assertIn(
+            f"{self.input} / sexp-locs-ppx / ocaml exit 2: fake rejection by ocaml / "
+            "rust exit 2: fake rejection by rust / stdout identical, stderr not compared (uncaught exception)",
+            out)
+
+    def test_parse_error_streams_are_compared_separately(self):
+        code, out = self.run_script()
+        self.assertIn("parse error checks:       2", out)
+        self.assertIn("parse error passes:       2", out)
+        code, out = self.run_script("rust:ml:stream")
+        self.assertEqual(code, 1, out)
+        self.assertIn("parse error differences:  2", out)
+        self.assertIn(f"{self.parse_error_file} (parse-error-plain: stdout differs,stderr differs)", out)
+        self.assertIn("FAILED: Parse error streams have 2 difference(s)", out)
 
     def test_reference_rejection_accepted_by_rust_is_a_difference(self):
         for stage, summary in (("sexp-locs-ppx", "sexp-locs-ppx differences: 1"),
