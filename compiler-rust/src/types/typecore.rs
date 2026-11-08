@@ -1240,9 +1240,6 @@ pub struct TypeCheckContext<'a> {
     pub type_variables: HashMap<String, TypeExprRef>,
     /// Whether the current type translation rejects free type variables.
     fixed_type_variables: bool,
-    /// Whether delayed type translation may read a local module declaration
-    /// signature before forcing that module's component table.
-    defer_delayed_type_component_lookup: bool,
     /// Persistent environment for loading external modules from .cmi files.
     pub persistent_env: Option<crate::cmi::persistent_env::PersistentEnv>,
     /// Active recursive value bindings currently in scope.
@@ -1394,7 +1391,6 @@ impl<'a> TypeCheckContext<'a> {
             univars: Vec::new(),
             type_variables: HashMap::new(),
             fixed_type_variables: false,
-            defer_delayed_type_component_lookup: false,
             active_recursive_value_ids: Vec::new(),
             persistent_env: None,
             experimental_let_unwrap: false,
@@ -2338,7 +2334,7 @@ pub fn transl_type(
 ) -> TypeCoreResult<(crate::types::typedtree::TypedCoreType, TypeExprRef)> {
     // `Typetexp.transl_simple_type` always runs `globalize_used_variables`
     // (typetexp.ml:659-696): new variables become global-level variables.
-    transl_type_with_options(tctx, env, styp, true, false, false)
+    transl_type_with_options(tctx, env, styp, true, false)
 }
 
 pub(crate) fn transl_type_fixed(
@@ -2346,7 +2342,7 @@ pub(crate) fn transl_type_fixed(
     env: &Env,
     styp: &crate::parser::ast::CoreType,
 ) -> TypeCoreResult<(crate::types::typedtree::TypedCoreType, TypeExprRef)> {
-    transl_type_with_options(tctx, env, styp, true, true, false)
+    transl_type_with_options(tctx, env, styp, true, true)
 }
 
 /// Run the deferred unifications of `Typetexp.globalize_used_variables`'s
@@ -2383,7 +2379,7 @@ pub fn transl_type_delayed(
     TypeExprRef,
     Vec<GlobalizeForce>,
 )> {
-    transl_type_globalized(tctx, env, styp, globalize, false, true)
+    transl_type_globalized(tctx, env, styp, globalize, false)
 }
 
 /// `Typetexp.transl_simple_type` (typetexp.ml:690-696): translate, then run
@@ -2394,16 +2390,9 @@ fn transl_type_with_options(
     styp: &crate::parser::ast::CoreType,
     globalize: bool,
     fixed_type_variables: bool,
-    defer_component_lookup: bool,
 ) -> TypeCoreResult<(crate::types::typedtree::TypedCoreType, TypeExprRef)> {
-    let (typed, ty, forces) = transl_type_globalized(
-        tctx,
-        env,
-        styp,
-        globalize,
-        fixed_type_variables,
-        defer_component_lookup,
-    )?;
+    let (typed, ty, forces) =
+        transl_type_globalized(tctx, env, styp, globalize, fixed_type_variables)?;
     run_globalize_forces(tctx, forces)?;
     Ok((typed, ty))
 }
@@ -2414,7 +2403,6 @@ fn transl_type_globalized(
     styp: &crate::parser::ast::CoreType,
     globalize: bool,
     fixed_type_variables: bool,
-    defer_component_lookup: bool,
 ) -> TypeCoreResult<(
     crate::types::typedtree::TypedCoreType,
     TypeExprRef,
@@ -2425,12 +2413,9 @@ fn transl_type_globalized(
     tctx.used_variable_locs.clear();
     tctx.univars.clear();
     let old_fixed_type_variables = tctx.fixed_type_variables;
-    let old_defer_component_lookup = tctx.defer_delayed_type_component_lookup;
     tctx.fixed_type_variables = fixed_type_variables;
-    tctx.defer_delayed_type_component_lookup = defer_component_lookup;
     let translated = transl_type_inner(tctx, env, styp);
     tctx.fixed_type_variables = old_fixed_type_variables;
-    tctx.defer_delayed_type_component_lookup = old_defer_component_lookup;
     let translated = translated?;
 
     // Match OCaml typetexp `globalize_used_variables`: link variables seen in
@@ -2540,70 +2525,6 @@ fn path_from_longident_persistent(lid: &Longident, arena: &ParseArena) -> Path {
     }
 }
 
-fn lookup_type_decl_in_unforced_module_decl(
-    md: &crate::types::decl::ModuleDeclaration,
-    type_name: &str,
-) -> Option<(Ident, Arc<crate::types::decl::TypeDeclaration>)> {
-    let crate::types::decl::ModuleType::MtySignature(sig) = &md.md_type else {
-        return None;
-    };
-    sig.iter().find_map(|item| match item {
-        crate::types::decl::SignatureItem::SigType(id, decl, _) if id.name() == type_name => {
-            Some((*id, decl.clone()))
-        }
-        _ => None,
-    })
-}
-
-fn select_record_type_in_unforced_module_decl(
-    ctx: &crate::types::context::TypeContext,
-    module_path: &Path,
-    md: &crate::types::decl::ModuleDeclaration,
-    label_name: &str,
-    field_names: &[&str],
-    closed_record: bool,
-) -> Option<TypeExprRef> {
-    let crate::types::decl::ModuleType::MtySignature(sig) = &md.md_type else {
-        return None;
-    };
-
-    let mut matching: Vec<(Path, TypeExprRef)> = Vec::new();
-    for item in sig.iter() {
-        let crate::types::decl::SignatureItem::SigType(type_id, decl, _) = item else {
-            continue;
-        };
-        let crate::types::TypeKind::TypeRecord(record_labels, _) = &decl.type_kind else {
-            continue;
-        };
-        if !record_labels
-            .iter()
-            .any(|label| label.ld_id.name() == label_name)
-        {
-            continue;
-        }
-        if !record_labels_match_ids(record_labels, field_names, closed_record) {
-            continue;
-        }
-        let type_path = Path::pdot(module_path.clone(), type_id.name());
-        if matching
-            .iter()
-            .any(|(existing_path, _)| existing_path.same(&type_path))
-        {
-            continue;
-        }
-        matching.push((
-            type_path.clone(),
-            ctx.new_generic_constr(type_path, decl.type_params.clone()),
-        ));
-    }
-
-    if matching.len() == 1 {
-        Some(matching[0].1)
-    } else {
-        None
-    }
-}
-
 pub(crate) fn resolve_type_constructor_path(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
@@ -2650,27 +2571,6 @@ pub(crate) fn resolve_type_constructor_path(
             // through Env.lookup_type; its Ldot case in
             // compiler/ml/env.ml:1091-1099 resolves the parent module
             // descriptor and reads the type table from that component view.
-            if tctx.defer_delayed_type_component_lookup
-                && let Longident::Lident(prefix_idx) = prefix.as_ref()
-            {
-                let module_name = tctx.arena.get_string(*prefix_idx);
-                if let Ok((module_path, md)) = env.find_module_with_path(module_name)
-                    && let Some((_id, decl)) =
-                        lookup_type_decl_in_unforced_module_decl(md, type_name)
-                {
-                    // OCaml compiler/ml/typecore.ml:1650-1664 stores the
-                    // force from Typetexp.transl_simple_type_delayed, and
-                    // compiler/ml/typecore.ml:4270-4288 runs it only after
-                    // pattern binders are entered. During that delayed
-                    // translation window, read the already-computed module
-                    // signature without forcing env.ml:781-813's component
-                    // table; the queued pattern force runs that lookup later.
-                    return (
-                        Path::pdot(module_path, type_name.to_string()),
-                        Some((*decl).clone()),
-                    );
-                }
-            }
             if let Some(Some((mod_path, decl))) = with_resolved_module_components_for_lid(
                 prefix,
                 tctx.arena,
@@ -14190,30 +14090,6 @@ fn select_record_type_from_qualified_label_scope(
         return None;
     };
     let label_name = arena.get_string(*label_idx);
-
-    if let Longident::Lident(module_idx) = module_lid.as_ref() {
-        let module_name = arena.get_string(*module_idx);
-        if let Ok((module_path, md)) = env.find_module_with_path(module_name) {
-            if matches!(module_path.view(), crate::types::path::PathView::Pident(id) if !id.is_persistent() && id.stamp() != 0)
-                && let Some(record_ty) = select_record_type_in_unforced_module_decl(
-                    ctx,
-                    &module_path,
-                    md,
-                    label_name,
-                    field_names,
-                    closed_record,
-                )
-            {
-                // OCaml compiler/ml/typecore.ml:1075-1104 reduces the label
-                // scope before compiler/ml/typecore.ml:3535-3575
-                // `type_label_exp` instances and unifies field types. For local
-                // module-qualified record literals, inspect the stored module
-                // declaration signature here so the applicative component table
-                // is forced by that later field-typing path.
-                return Some(record_ty);
-            }
-        }
-    }
 
     // OCaml compiler/ml/typecore.ml:1098-1125 first calls
     // `Typetexp.find_all_labels`, then typecore.ml:1071-1095
