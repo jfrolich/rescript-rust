@@ -191,7 +191,10 @@ fn run(args: Vec<String>) {
         // Print diagnostics if any
         let has_parse_errors = parser.has_errors();
         if has_parse_errors {
-            print_diagnostics(&parser, &source, &filename, &mut io::stdout());
+            // res_cli.ml:105-110, 139-144: `Res_diagnostics.print_report`
+            // writes to the stderr formatter, then the CLI exits 1 or, with
+            // -recover, prints the recovered tree on stdout.
+            print_diagnostics(&parser, &source, &filename, &mut io::stderr());
             if !args.recover {
                 process::exit(1);
             }
@@ -336,7 +339,10 @@ fn run(args: Vec<String>) {
         // Print diagnostics if any
         let has_parse_errors = parser.has_errors();
         if has_parse_errors {
-            print_diagnostics(&parser, &source, &filename, &mut io::stdout());
+            // res_cli.ml:105-110, 139-144: `Res_diagnostics.print_report`
+            // writes to the stderr formatter, then the CLI exits 1 or, with
+            // -recover, prints the recovered tree on stdout.
+            print_diagnostics(&parser, &source, &filename, &mut io::stderr());
             if !args.recover {
                 process::exit(1);
             }
