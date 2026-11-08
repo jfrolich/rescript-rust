@@ -3,18 +3,17 @@
 //! This module provides functionality to convert the JavaScript IR
 //! into formatted JavaScript source code.
 
-use super::op::{BinOp, Kind, Number, PropertyName, UsedStats};
-use crate::lambda::LamLoc;
-use super::{
-    Block, CallArity, CallInfo, CallKind, CaseClause, Expression, ExpressionDesc, ForDirection,
-    JsRawInfo, ModulePathResolver, Statement, StatementDesc, StringClause, VIdent,
-    VariableDeclaration,
+use super::arena::{
+    Clause, Expr, ExprKind, JsArena, PropName, QualId, Stmt, StmtKind, StringClauseInfo, VarDecl,
 };
+use super::op::{BinOp, Kind, Number, UsedStats};
+use super::{CallArity, CallKind, ForDirection, JsRawInfo, ModulePathResolver};
 use crate::binary_ast::ppx::{
     JsExpClassification, JsStmtClassification, classify_js_exp, classify_js_stmt,
 };
 use crate::ident::Ident;
 use crate::js_ir::source_map::SourceMapBuilder;
+use crate::lambda::LamLoc;
 use crate::lambda::SwitchCaseTag;
 use ahash::{AHashMap as HashMap, AHashSet as HashSet};
 use std::borrow::Cow;
@@ -28,14 +27,14 @@ struct NameScope {
 enum JsxChildren<'a> {
     None,
     EmptyFragment,
-    Slice(&'a [Expression]),
-    Single(&'a Expression),
+    Slice(&'a [Expr]),
+    Single(Expr),
 }
 
 struct FunctionPrintContext<'a> {
     is_method: bool,
     params: &'a [Ident],
-    body: &'a Block,
+    body: &'a [Stmt],
     return_unit: bool,
     async_: bool,
     directive: Option<&'a str>,
@@ -45,8 +44,17 @@ struct FunctionPrintContext<'a> {
     reserved_idents: Option<&'a [Ident]>,
 }
 
+/// A variable reference (`J.vident`): a local identifier or a module member.
+#[derive(Clone, Copy)]
+enum VIdentRef {
+    Id(Ident),
+    Qualified(QualId),
+}
+
 /// JavaScript printer state
 pub struct JsPrinter<'r> {
+    /// The arena holding the nodes being printed.
+    pub(super) a: &'r JsArena,
     /// Output buffer
     output: String,
     /// Current indentation level
@@ -74,16 +82,11 @@ pub struct JsPrinter<'r> {
     free_vars: FreeVarScratch,
 }
 
-impl Default for JsPrinter<'_> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl<'r> JsPrinter<'r> {
     /// Create a new printer
-    pub fn new() -> Self {
+    pub fn new(a: &'r JsArena) -> Self {
         Self {
+            a,
             output: String::new(),
             indent: 0,
             last_new_line: false,
@@ -101,32 +104,37 @@ impl<'r> JsPrinter<'r> {
     }
 
     /// Create a new printer with a preallocated output buffer.
-    pub fn with_capacity(capacity: usize) -> Self {
-        let mut printer = Self::new();
+    pub fn with_capacity(a: &'r JsArena, capacity: usize) -> Self {
+        let mut printer = Self::new(a);
         printer.output = String::with_capacity(capacity);
         printer
     }
 
     /// Create a new printer with module import resolution context.
-    pub fn with_module_path_resolver(module_path_resolver: Option<&'r ModulePathResolver>) -> Self {
-        Self::with_module_path_resolver_and_options(module_path_resolver, false, false)
+    pub fn with_module_path_resolver(
+        a: &'r JsArena,
+        module_path_resolver: Option<&'r ModulePathResolver>,
+    ) -> Self {
+        Self::with_module_path_resolver_and_options(a, module_path_resolver, false, false)
     }
 
     /// Create a new printer with module import resolution context and debug mode.
     pub fn with_module_path_resolver_and_debug(
+        a: &'r JsArena,
         module_path_resolver: Option<&'r ModulePathResolver>,
         debug: bool,
     ) -> Self {
-        Self::with_module_path_resolver_and_options(module_path_resolver, debug, false)
+        Self::with_module_path_resolver_and_options(a, module_path_resolver, debug, false)
     }
 
     /// Create a new printer with module import resolution context and dumper options.
     pub fn with_module_path_resolver_and_options(
+        a: &'r JsArena,
         module_path_resolver: Option<&'r ModulePathResolver>,
         debug: bool,
         jsx_preserve: bool,
     ) -> Self {
-        let mut printer = Self::with_capacity(0);
+        let mut printer = Self::with_capacity(a, 0);
         printer.module_path_resolver = module_path_resolver;
         printer.debug = debug;
         printer.jsx_preserve = jsx_preserve;
@@ -134,12 +142,13 @@ impl<'r> JsPrinter<'r> {
     }
 
     pub(crate) fn with_module_path_resolver_options_and_capacity(
+        a: &'r JsArena,
         module_path_resolver: Option<&'r ModulePathResolver>,
         debug: bool,
         jsx_preserve: bool,
         capacity: usize,
     ) -> Self {
-        let mut printer = Self::with_capacity(capacity);
+        let mut printer = Self::with_capacity(a, capacity);
         printer.module_path_resolver = module_path_resolver;
         printer.debug = debug;
         printer.jsx_preserve = jsx_preserve;
@@ -163,9 +172,9 @@ impl<'r> JsPrinter<'r> {
         self.source_map.take()
     }
 
-    fn mark_source_loc(&mut self, source_loc: Option<&LamLoc>) {
+    fn mark_source_loc(&mut self, source_loc: Option<LamLoc>) {
         if let (Some(builder), Some(source_loc)) = (&mut self.source_map, source_loc) {
-            builder.add_mapping(self.generated_line, self.generated_column, source_loc);
+            builder.add_mapping(self.generated_line, self.generated_column, &source_loc);
         }
     }
 
@@ -199,8 +208,9 @@ impl<'r> JsPrinter<'r> {
         self.last_new_line = false;
     }
 
-    fn expression_string_in_current_scope(&self, expr: &Expression, level: u8) -> String {
+    fn expression_string_in_current_scope(&self, expr: Expr, level: u8) -> String {
         let mut printer = Self {
+            a: self.a,
             output: String::new(),
             indent: 0,
             last_new_line: false,
@@ -220,21 +230,18 @@ impl<'r> JsPrinter<'r> {
         printer.output
     }
 
-    fn nullish_or_target<'a>(
-        &self,
-        left: &'a Expression,
-        right: &'a Expression,
-    ) -> Option<&'a Expression> {
-        fn strict_nullish_target(expr: &Expression) -> Option<(&Expression, bool)> {
-            let ExpressionDesc::Bin(BinOp::EqEqEq, tested, literal) = &expr.desc else {
+    fn nullish_or_target(&self, left: Expr, right: Expr) -> Option<Expr> {
+        let a = self.a;
+        let strict_nullish_target = |expr: Expr| -> Option<(Expr, bool)> {
+            let ExprKind::Bin(BinOp::EqEqEq, tested, literal) = a.ek(expr) else {
                 return None;
             };
-            match literal.as_ref().desc {
-                ExpressionDesc::Null => Some((tested.as_ref(), true)),
-                ExpressionDesc::Undefined { .. } => Some((tested.as_ref(), false)),
+            match a.ek(literal) {
+                ExprKind::Null => Some((tested, true)),
+                ExprKind::Undefined { .. } => Some((tested, false)),
                 _ => None,
             }
-        }
+        };
 
         let (left_target, left_is_null) = strict_nullish_target(left)?;
         let (right_target, right_is_null) = strict_nullish_target(right)?;
@@ -429,7 +436,7 @@ impl<'r> JsPrinter<'r> {
     }
 
     /// Print statements
-    pub fn print_statements(&mut self, stmts: &[Statement], top_level: bool) {
+    pub fn print_statements(&mut self, stmts: &[Stmt], top_level: bool) {
         for (index, stmt) in stmts.iter().enumerate() {
             if index > 0 {
                 if top_level {
@@ -438,22 +445,23 @@ impl<'r> JsPrinter<'r> {
                     self.newline();
                 }
             }
-            if self.statement_prints_anything(stmt, top_level) {
-                self.print_statement(stmt, top_level);
+            if self.statement_prints_anything(*stmt, top_level) {
+                self.print_statement(*stmt, top_level);
             }
         }
     }
 
     /// Print a statement
-    pub fn print_statement(&mut self, stmt: &Statement, top_level: bool) {
+    pub fn print_statement(&mut self, stmt: Stmt, top_level: bool) {
         // OCaml js_dump.ml marks after the optional comment and immediately
         // before printing the statement description.
         self.print_statement_comment_and_mark(stmt);
-        self.print_statement_desc(&stmt.desc, top_level);
+        self.print_statement_desc(self.a.sk(stmt), top_level);
     }
 
-    fn print_statement_comment_and_mark(&mut self, stmt: &Statement) {
-        if let Some(ref comment) = stmt.comment {
+    fn print_statement_comment_and_mark(&mut self, stmt: Stmt) {
+        let a = self.a;
+        if let Some(comment) = a.stmt_comment(stmt) {
             self.write("/* ");
             self.write(comment);
             self.write(" */");
@@ -461,46 +469,61 @@ impl<'r> JsPrinter<'r> {
         }
 
         // js_dump.ml:1321-1324.
-        self.mark_source_loc(stmt.source_loc.as_ref());
+        self.mark_source_loc(a.stmt_loc(stmt));
     }
 
-    fn statement_prints_anything(&self, stmt: &Statement, top_level: bool) -> bool {
-        stmt.comment.is_some() || self.statement_desc_prints_anything(&stmt.desc, top_level)
+    fn statement_prints_anything(&self, stmt: Stmt, top_level: bool) -> bool {
+        self.a.stmt_comment(stmt).is_some()
+            || self.statement_desc_prints_anything(self.a.sk(stmt), top_level)
     }
 
-    fn statement_desc_prints_anything(&self, desc: &StatementDesc, _top_level: bool) -> bool {
+    fn statement_desc_prints_anything(&self, desc: StmtKind, _top_level: bool) -> bool {
+        let a = self.a;
         match desc {
-            StatementDesc::Block(stmts) => stmts
+            StmtKind::Block(stmts) => a
+                .stmts(stmts)
                 .iter()
-                .any(|stmt| self.statement_prints_anything(stmt, false)),
-            StatementDesc::Variable(decl) => match decl.ident_info.used_stats {
-                UsedStats::DeadPure => false,
-                UsedStats::DeadNonPure => decl
-                    .value
-                    .as_ref()
-                    .is_some_and(|value| !matches!(value.desc, ExpressionDesc::Var(_))),
-                _ => true,
-            },
-            StatementDesc::Exp(expr) => expression_statement_prints_anything(expr),
+                .any(|stmt| self.statement_prints_anything(*stmt, false)),
+            StmtKind::Variable(decl) => {
+                let decl = a.var(decl);
+                match decl.ident_info.used_stats {
+                    UsedStats::DeadPure => false,
+                    UsedStats::DeadNonPure => decl.value.is_some_and(|value| {
+                        !matches!(a.ek(value), ExprKind::Var(_) | ExprKind::Qualified(_))
+                    }),
+                    _ => true,
+                }
+            }
+            StmtKind::Exp(expr) => expression_statement_prints_anything(a, expr),
             _ => true,
         }
     }
 
+    fn write_label(&mut self, label: Option<super::arena::StrId>) {
+        if let Some(label) = label {
+            self.write(self.a.text(label));
+            self.write(": ");
+        }
+    }
+
     /// Print a statement description
-    fn print_statement_desc(&mut self, desc: &StatementDesc, top_level: bool) {
+    fn print_statement_desc(&mut self, desc: StmtKind, top_level: bool) {
+        let a = self.a;
         match desc {
-            StatementDesc::Block(stmts) => {
+            StmtKind::Block(stmts) => {
+                let stmts = a.stmts(stmts);
                 if stmts.is_empty() {
                     return;
                 }
                 self.print_statements(stmts, false);
             }
 
-            StatementDesc::Variable(decl) => {
+            StmtKind::Variable(decl) => {
+                let decl = a.var(decl);
                 match decl.ident_info.used_stats {
                     UsedStats::DeadPure => return,
                     UsedStats::DeadNonPure => {
-                        if let Some(value) = &decl.value {
+                        if let Some(value) = decl.value {
                             self.print_expression_statement(value);
                         }
                         return;
@@ -508,67 +531,52 @@ impl<'r> JsPrinter<'r> {
                     _ => {}
                 }
 
-                if top_level {
-                    if let Some(Expression {
-                        desc:
-                            ExpressionDesc::Fun {
-                                is_method,
-                                params,
-                                body,
-                                return_unit,
-                                async_,
-                                directive,
-                                ..
-                            },
-                        source_loc,
-                        ..
-                    }) = &decl.value
-                    {
-                        // js_dump.ml:1278-1280: `mark_source_loc f e.source_loc`
-                        // before `pp_function`.
-                        self.mark_source_loc(source_loc.as_ref());
-                        self.print_function_declaration(
-                            &decl.ident,
-                            *is_method,
-                            params,
-                            body,
-                            *return_unit,
-                            *async_,
-                            directive.as_deref().map(|x| x.as_str()),
-                        );
-                        return;
-                    }
+                if top_level
+                    && let Some(value) = decl.value
+                    && let ExprKind::Fun(f) = a.ek(value)
+                {
+                    let info = a.fun(f);
+                    // js_dump.ml:1278-1280: `mark_source_loc f e.source_loc`
+                    // before `pp_function`.
+                    self.mark_source_loc(a.expr_loc(value));
+                    self.print_function_declaration(
+                        &decl.ident,
+                        info.is_method,
+                        a.ident_slice(info.params),
+                        a.stmts(info.body),
+                        info.return_unit,
+                        info.async_,
+                        info.directive.map(|d| a.text(d)),
+                    );
+                    return;
                 }
 
                 self.print_variable_declaration(decl);
             }
 
-            StatementDesc::Exp(expr) => {
+            StmtKind::Exp(expr) => {
                 self.print_expression_statement(expr);
             }
 
-            StatementDesc::If(cond, then_block, else_block) => {
-                self.print_if_statement(cond, then_block, else_block);
+            StmtKind::If(cond, then_block, else_block) => {
+                self.print_if_statement(cond, a.stmts(then_block), a.stmts(else_block));
             }
 
-            StatementDesc::While(label, cond, body) => {
-                if let Some(label) = label {
-                    self.write(label);
-                    self.write(": ");
-                }
+            StmtKind::While(label, cond, body) => {
+                self.write_label(label);
                 self.write("while ");
                 self.write_char('(');
                 self.with_indent(1, |this| this.print_expression(cond, 0));
                 self.write(") ");
-                self.print_brace_block(body);
+                self.print_brace_block(a.stmts(body));
                 self.semi();
             }
 
-            StatementDesc::ForRange(label, init, end, id, direction, body) => {
-                if let Some(label) = label {
-                    self.write(label);
-                    self.write(": ");
-                }
+            StmtKind::ForRange(info) => {
+                let info = a.for_range(info);
+                self.write_label(info.label);
+                let id = a.ident(info.ident);
+                let end = info.end;
                 // OCaml's js_dump.ml:1415 threads its Ext_pp_scope cxt through
                 // the for-body without calling sub_scope — sub_scope only runs
                 // on function entry (js_dump.ml:369). Keeping the body in the
@@ -576,15 +584,15 @@ impl<'r> JsPrinter<'r> {
                 // next_suffix counters so stamp-distinct shadowing vars get
                 // their `$N` rename (matches Ext_pp_scope.add_ident's
                 // cardinal-based counter).
-                let id_name = self.ident_name(id);
-                let finish_binding = for_range_finish_needs_binding(end).then(|| {
+                let id_name = self.ident_name(&id);
+                let finish_binding = for_range_finish_needs_binding(a, end).then(|| {
                     self.fresh_scoped_name(format!("{}_finish", convert_ident_name(id.name())))
                 });
 
                 self.write("for ");
                 self.write_char('(');
 
-                match (init, finish_binding.as_deref()) {
+                match (info.init, finish_binding.as_deref()) {
                     (Some(init_expr), Some(finish_name)) => {
                         self.write("let ");
                         self.write(&id_name);
@@ -614,7 +622,7 @@ impl<'r> JsPrinter<'r> {
                 self.space();
 
                 self.write(&id_name);
-                match direction {
+                match info.direction {
                     ForDirection::Upto => self.write(" <= "),
                     ForDirection::Downto => self.write(" >= "),
                     ForDirection::Up => self.write(" < "),
@@ -627,7 +635,7 @@ impl<'r> JsPrinter<'r> {
                 self.semi();
                 self.space();
 
-                match direction {
+                match info.direction {
                     ForDirection::Upto | ForDirection::Up => {
                         self.write("++");
                         self.write(&id_name);
@@ -639,70 +647,51 @@ impl<'r> JsPrinter<'r> {
                 }
 
                 self.write(") ");
-                self.print_brace_block(body);
+                self.print_brace_block(a.stmts(info.body));
             }
 
-            StatementDesc::ForOf(label, id, iterable, body) => {
-                if let Some(label) = label {
-                    self.write(label);
-                    self.write(": ");
-                }
-                self.write("for ");
+            StmtKind::ForOf(info) | StmtKind::ForAwaitOf(info) => {
+                let is_await = matches!(desc, StmtKind::ForAwaitOf(_));
+                let info = a.for_of(info);
+                self.write_label(info.label);
+                self.write(if is_await { "for await " } else { "for " });
                 self.write_char('(');
                 // OCaml uses `P.paren_group f 1` (js_dump.ml:1516) which adds
                 // one indent level inside the parens so a multi-line iterable
                 // (e.g. an inline array) continues at `base + 2` rather than
                 // `base + 1`.
-                let id_name = self.ident_name(id);
+                let id_name = self.ident_name(&a.ident(info.ident));
                 self.with_indent(1, |this| {
                     this.write("let ");
                     this.write(&id_name);
                     this.write(" of ");
-                    this.print_expression(iterable, 0);
+                    this.print_expression(info.iterable, 0);
                 });
                 self.write(") ");
-                self.print_brace_block(body);
+                self.print_brace_block(a.stmts(info.body));
             }
 
-            StatementDesc::ForAwaitOf(label, id, iterable, body) => {
-                if let Some(label) = label {
-                    self.write(label);
-                    self.write(": ");
-                }
-                self.write("for await ");
-                self.write_char('(');
-                let id_name = self.ident_name(id);
-                self.with_indent(1, |this| {
-                    this.write("let ");
-                    this.write(&id_name);
-                    this.write(" of ");
-                    this.print_expression(iterable, 0);
-                });
-                self.write(") ");
-                self.print_brace_block(body);
-            }
-
-            StatementDesc::Continue(label) => {
+            StmtKind::Continue(label) => {
                 self.write("continue");
                 if let Some(label) = label {
                     self.write(" ");
-                    self.write(label);
+                    self.write(a.text(label));
                 }
                 self.semi();
             }
 
-            StatementDesc::Break(label) => {
+            StmtKind::Break(label) => {
                 self.write("break");
                 if let Some(label) = label {
                     self.write(" ");
-                    self.write(label);
+                    self.write(a.text(label));
                 }
                 self.semi();
             }
 
-            StatementDesc::Return(expr) => {
+            StmtKind::Return(expr) => {
                 // Check for undefined return
-                if matches!(expr.desc, ExpressionDesc::Undefined { .. }) {
+                if matches!(a.ek(expr), ExprKind::Undefined { .. }) {
                     self.write("return");
                     self.semi();
                     return;
@@ -711,28 +700,29 @@ impl<'r> JsPrinter<'r> {
                 self.write("return ");
                 // js_dump.ml:1576-1584: a returned function goes straight to
                 // `pp_function`, without `expression`'s source-location mark.
-                let mark = !matches!(expr.desc, ExpressionDesc::Fun { .. });
+                let mark = !matches!(a.ek(expr), ExprKind::Fun(_));
                 self.print_expression_with_mark(expr, 0, mark);
                 self.semi();
             }
 
-            StatementDesc::IntSwitch(expr, cases, default) => {
+            StmtKind::IntSwitch(expr, info) => {
+                let info = a.int_switch(info);
                 self.write("switch ");
                 self.write_char('(');
                 self.print_expression(expr, 0);
                 self.write(") {");
                 self.indent();
 
-                for (value, clause) in cases {
+                for (value, clause) in &info.clauses {
                     self.print_int_case(*value, clause);
                 }
 
-                if let Some(default_block) = default {
+                if let Some(default_block) = info.default {
                     self.newline();
                     self.write("default:");
                     self.indent();
                     self.newline();
-                    self.print_statements(default_block, false);
+                    self.print_statements(a.stmts(default_block), false);
                     self.dedent();
                 }
 
@@ -741,23 +731,24 @@ impl<'r> JsPrinter<'r> {
                 self.write_char('}');
             }
 
-            StatementDesc::StringSwitch(expr, cases, default) => {
+            StmtKind::StringSwitch(expr, info) => {
+                let info = a.string_switch(info);
                 self.write("switch ");
                 self.write_char('(');
                 self.print_expression(expr, 0);
                 self.write(") {");
                 self.indent();
 
-                for clause in cases {
+                for clause in &info.clauses {
                     self.print_string_case(clause);
                 }
 
-                if let Some(default_block) = default {
+                if let Some(default_block) = info.default {
                     self.newline();
                     self.write("default:");
                     self.indent();
                     self.newline();
-                    self.print_statements(default_block, false);
+                    self.print_statements(a.stmts(default_block), false);
                     self.dedent();
                 }
 
@@ -766,7 +757,7 @@ impl<'r> JsPrinter<'r> {
                 self.write_char('}');
             }
 
-            StatementDesc::Throw(expr) => {
+            StmtKind::Throw(expr) => {
                 self.write("throw ");
                 if !self.try_print_exception_block(expr, 0, true) {
                     self.print_expression(expr, 0);
@@ -774,25 +765,26 @@ impl<'r> JsPrinter<'r> {
                 self.semi();
             }
 
-            StatementDesc::Try(body, catch, finally) => {
+            StmtKind::Try(info) => {
+                let info = a.try_info(info);
                 self.write("try ");
-                self.print_brace_block(body);
+                self.print_brace_block(a.stmts(info.body));
 
-                if let Some((exn_id, catch_block)) = catch {
-                    let exn_name = self.ident_name(exn_id);
+                if let Some((exn_id, catch_block)) = info.catch {
+                    let exn_name = self.ident_name(&a.ident(exn_id));
                     self.write(" catch (");
                     self.write(&exn_name);
                     self.write(") ");
-                    self.print_brace_block(catch_block);
+                    self.print_brace_block(a.stmts(catch_block));
                 }
 
-                if let Some(finally_block) = finally {
+                if let Some(finally_block) = info.finally {
                     self.write(" finally ");
-                    self.print_brace_block(finally_block);
+                    self.print_brace_block(a.stmts(finally_block));
                 }
             }
 
-            StatementDesc::Debugger => {
+            StmtKind::Debugger => {
                 // js_dump.ml:204-208 `debugger_nl`.
                 self.newline();
                 self.write("debugger");
@@ -802,10 +794,15 @@ impl<'r> JsPrinter<'r> {
         }
     }
 
-    fn print_expression_statement(&mut self, expr: &Expression) {
+    fn print_expression_statement(&mut self, expr: Expr) {
+        self.print_expression_statement_with_mark(expr, true);
+    }
+
+    fn print_expression_statement_with_mark(&mut self, expr: Expr, mark: bool) {
+        let a = self.a;
         // OCaml's js_dump suppresses dead pure bindings entirely and prints dead
         // impure bindings as plain expression statements.
-        match classify_raw_js_expression_statement(expr) {
+        match classify_raw_js_expression_statement(a, expr) {
             RawJsExpressionStatement::Omit => return,
             RawJsExpressionStatement::Comment(comment) => {
                 self.write(&comment);
@@ -814,7 +811,7 @@ impl<'r> JsPrinter<'r> {
             RawJsExpressionStatement::Normal => {}
         }
 
-        if matches!(expr.desc, ExpressionDesc::Var(_)) {
+        if matches!(a.ek(expr), ExprKind::Var(_) | ExprKind::Qualified(_)) {
             return;
         }
         let needs_paren = self.expr_needs_paren(expr);
@@ -824,17 +821,38 @@ impl<'r> JsPrinter<'r> {
             // one extra indentation level while the surrounding parens print.
             self.with_indent(1, |this| {
                 this.write_char('(');
-                this.print_expression(expr, 0);
+                this.print_expression_with_mark(expr, 0, mark);
                 this.write_char(')');
             });
         } else {
-            self.print_expression(expr, 0);
+            self.print_expression_with_mark(expr, 0, mark);
         }
         self.semi();
     }
 
+    /// Prints the statement `Statement::exp(expr)` would build
+    /// (`Js_stmt_make.exp`), without building it.
+    fn print_exp_statement_of(&mut self, expr: Expr) {
+        let a = self.a;
+        match a.ek(expr) {
+            ExprKind::Seq(left, right) => {
+                if expression_stmt_is_trivial(a, left) {
+                    return self.print_exp_statement_of(right);
+                }
+                if expression_stmt_is_trivial(a, right) {
+                    return self.print_exp_statement_of(left);
+                }
+                // `Exp (Seq ..)` keeps the comment and drops the location.
+                self.print_expression_statement_with_mark(expr, false);
+            }
+            // An empty block.
+            ExprKind::Number(_) | ExprKind::Undefined { .. } => {}
+            _ => self.print_expression_statement(expr),
+        }
+    }
+
     /// Print a brace-enclosed block
-    fn print_brace_block(&mut self, stmts: &Block) {
+    fn print_brace_block(&mut self, stmts: &[Stmt]) {
         self.write_char('{');
         self.indent();
         self.newline();
@@ -845,12 +863,12 @@ impl<'r> JsPrinter<'r> {
     }
 
     /// Print a variable declaration
-    fn print_variable_declaration(&mut self, decl: &VariableDeclaration) {
-        if let Some(Expression {
-            desc: ExpressionDesc::RecordRest(fields, source),
-            ..
-        }) = &decl.value
+    fn print_variable_declaration(&mut self, decl: &VarDecl) {
+        let a = self.a;
+        if let Some(value) = decl.value
+            && let ExprKind::RecordRest(fields, source) = a.ek(value)
         {
+            let fields = a.rest(fields);
             self.write("let {");
             for (index, field) in fields.iter().enumerate() {
                 if index > 0 {
@@ -877,21 +895,18 @@ impl<'r> JsPrinter<'r> {
             return;
         }
 
+        let fun = decl.value.and_then(|value| match a.ek(value) {
+            ExprKind::Fun(f) => Some((value, a.fun(f))),
+            _ => None,
+        });
+
         // Eta-reduce `let f = function(x, y) { return g(x, y); }` to `let f = g;`
         // at print time, matching OCaml's pp_function
         // (compiler/core/js_dump.ml:299-344) for the `Name_non_top` fn_state.
-        if let Some(Expression {
-            desc:
-                ExpressionDesc::Fun {
-                    is_method,
-                    params,
-                    body,
-                    ..
-                },
-            ..
-        }) = &decl.value
-        {
-            if let Some(target) = eta_reduce_function_body(*is_method, params, body) {
+        if let Some((_, info)) = fun {
+            let params = a.ident_slice(info.params);
+            let body = a.stmts(info.body);
+            if let Some(target) = eta_reduce_function_body(a, info.is_method, params, body) {
                 self.write("let ");
                 let var_name = self.ident_name(&decl.ident);
                 self.write(&var_name);
@@ -904,15 +919,15 @@ impl<'r> JsPrinter<'r> {
             }
         }
 
-        let reserved_idents = if let Some(Expression {
-            desc: ExpressionDesc::Fun { params, body, .. },
-            ..
-        }) = &decl.value
-        {
+        let reserved_idents = if let Some((_, info)) = fun {
             // OCaml reserves the unbounded function environment plus the
             // Name_non_top binding before printing it; see
             // compiler/core/js_dump.ml:337-345 and 411-414.
-            let reserved = self.function_reserved_idents(params, body, Some(&decl.ident));
+            let reserved = self.function_reserved_idents(
+                a.ident_slice(info.params),
+                a.stmts(info.body),
+                Some(&decl.ident),
+            );
             self.reserve_idents_in_current_scope(&reserved);
             Some(reserved)
         } else {
@@ -923,20 +938,11 @@ impl<'r> JsPrinter<'r> {
         self.write("let ");
         self.write(&var_name);
 
-        if let Some(value) = &decl.value {
-            if !is_undefined_literal(value) {
+        if let Some(value) = decl.value {
+            if !is_undefined_literal(a, value) {
                 self.write(" = ");
-                if let ExpressionDesc::Fun {
-                    is_method,
-                    params,
-                    body,
-                    return_unit,
-                    async_,
-                    directive,
-                    ..
-                } = &value.desc
-                {
-                    self.mark_source_loc(value.source_loc.as_ref());
+                if let Some((_, info)) = fun {
+                    self.mark_source_loc(a.expr_loc(value));
                     // OCaml reference: compiler/core/js_dump.ml:337-360 builds
                     // `set_env` including `Name_non_top id`, then
                     // compiler/core/js_dump.ml:411-414 prints the function in
@@ -945,12 +951,12 @@ impl<'r> JsPrinter<'r> {
                     // the body, so body-local bindings with the same source name
                     // get `$N` suffixes.
                     self.print_function_expression(FunctionPrintContext {
-                        is_method: *is_method,
-                        params,
-                        body,
-                        return_unit: *return_unit,
-                        async_: *async_,
-                        directive: directive.as_deref().map(|x| x.as_str()),
+                        is_method: info.is_method,
+                        params: a.ident_slice(info.params),
+                        body: a.stmts(info.body),
+                        return_unit: info.return_unit,
+                        async_: info.async_,
+                        directive: info.directive.map(|d| a.text(d)),
                         function_ident: Some(&decl.ident),
                         reserved_idents: reserved_idents.as_deref(),
                     });
@@ -966,7 +972,7 @@ impl<'r> JsPrinter<'r> {
     fn with_function_ident_scope<T>(
         &mut self,
         params: &[Ident],
-        body: &Block,
+        body: &[Stmt],
         function_ident: Option<&Ident>,
         f: impl FnOnce(&mut Self) -> T,
     ) -> T {
@@ -1010,12 +1016,12 @@ impl<'r> JsPrinter<'r> {
     fn function_reserved_idents(
         &mut self,
         params: &[Ident],
-        body: &Block,
+        body: &[Stmt],
         function_ident: Option<&Ident>,
     ) -> Vec<Ident> {
-        let mut reserved_idents = self
-            .free_vars
-            .free_variables_sorted(body, params.iter().copied());
+        let mut reserved_idents =
+            self.free_vars
+                .free_variables_sorted(self.a, body, params.iter().copied());
         if let Some(function_ident) = function_ident {
             reserved_idents.push(*function_ident);
             reserved_idents.sort();
@@ -1025,6 +1031,7 @@ impl<'r> JsPrinter<'r> {
     }
 
     fn print_function_expression(&mut self, context: FunctionPrintContext<'_>) {
+        let a = self.a;
         let FunctionPrintContext {
             is_method,
             params,
@@ -1039,7 +1046,8 @@ impl<'r> JsPrinter<'r> {
         let reserved_idents = match reserved_idents {
             Some(reserved_idents) => reserved_idents,
             None => {
-                computed_reserved_idents = self.function_reserved_idents(params, body, function_ident);
+                computed_reserved_idents =
+                    self.function_reserved_idents(params, body, function_ident);
                 &computed_reserved_idents
             }
         };
@@ -1051,7 +1059,7 @@ impl<'r> JsPrinter<'r> {
         // OCaml's `Is_return | No_name _` arm of pp_function that emits
         // `optimize len ~p cxt f v` -> `vident` for the clean
         // `arity = Full, call_info = Call_ml | Call_builtin_runtime` case.
-        if let Some(target) = eta_reduce_function_body(is_method, params, body) {
+        if let Some(target) = eta_reduce_function_body(a, is_method, params, body) {
             self.with_reserved_ident_scope(reserved_idents, |this| {
                 this.print_vident(target);
             });
@@ -1095,14 +1103,8 @@ impl<'r> JsPrinter<'r> {
             // Body
             if use_arrow
                 && directive.is_none()
-                && body.as_slice().len() == 1
-                && matches!(
-                    body[0].desc,
-                    StatementDesc::Return(Expression {
-                        desc: ExpressionDesc::Undefined { .. },
-                        ..
-                    })
-                )
+                && body.len() == 1
+                && return_is_undefined(a, body[0])
             {
                 this.write(" {}");
                 return;
@@ -1110,7 +1112,7 @@ impl<'r> JsPrinter<'r> {
 
             if use_arrow
                 && directive.is_none()
-                && let Some(expr) = single_arrow_function_expr(body)
+                && let Some(expr) = single_arrow_function_expr(a, body)
             {
                 this.write(" ");
                 let needs_paren = this.arrow_expr_needs_paren(expr);
@@ -1142,12 +1144,13 @@ impl<'r> JsPrinter<'r> {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn print_function_declaration(
         &mut self,
         ident: &Ident,
         is_method: bool,
         params: &[Ident],
-        body: &Block,
+        body: &[Stmt],
         return_unit: bool,
         async_: bool,
         directive: Option<&str>,
@@ -1157,7 +1160,7 @@ impl<'r> JsPrinter<'r> {
         // a single `return Call(Var v, ls, _)` whose argument list matches the
         // parameter list positionally and v does not appear in the params (to
         // avoid turning `function x { return x(x); }` into `let x = x;`).
-        if let Some(target) = eta_reduce_function_body(is_method, params, body) {
+        if let Some(target) = eta_reduce_function_body(self.a, is_method, params, body) {
             self.write("let ");
             let fn_name = self.ident_name(ident);
             self.write(&fn_name);
@@ -1198,7 +1201,7 @@ impl<'r> JsPrinter<'r> {
         &mut self,
         is_method: bool,
         params: &[Ident],
-        body: &Block,
+        body: &[Stmt],
     ) -> (Option<String>, Vec<String>) {
         if !is_method {
             let rendered_params = params.iter().map(|param| self.ident_name(param)).collect();
@@ -1208,7 +1211,9 @@ impl<'r> JsPrinter<'r> {
         let (this_param, args) = params
             .split_first()
             .expect("method functions must carry an explicit `this` parameter");
-        let free = self.free_vars.free_variables_sorted(body, std::iter::empty());
+        let free = self
+            .free_vars
+            .free_variables_sorted(self.a, body, std::iter::empty());
         let this_binding = free
             .contains(this_param)
             .then(|| self.ident_name(this_param));
@@ -1218,12 +1223,12 @@ impl<'r> JsPrinter<'r> {
 
     fn print_function_body_block(
         &mut self,
-        body: &Block,
+        body: &[Stmt],
         return_unit: bool,
         directive: Option<&str>,
         this_binding: Option<&String>,
     ) {
-        let body_prints_any = function_body_prints_any(body);
+        let body_prints_any = function_body_prints_any(self.a, body);
         self.write(" {");
         if this_binding.is_none() && directive.is_none() && !body_prints_any {
             self.indent();
@@ -1270,22 +1275,16 @@ impl<'r> JsPrinter<'r> {
         }
     }
 
-    /// Print an integer case
-    fn print_int_case(&mut self, value: i32, clause: &CaseClause) {
-        self.newline();
-        self.write("case ");
-        self.mark_source_loc(clause.source_loc.as_ref());
-        self.write(&value.to_string());
-        self.write(" :");
-
-        if !clause.body.is_empty() || clause.should_break {
+    fn print_case_body(&mut self, clause: &Clause) {
+        let body = self.a.stmts(clause.body);
+        if !body.is_empty() || clause.should_break {
             self.indent();
             self.newline();
-            if !clause.body.is_empty() {
-                self.print_statements(&clause.body, false);
+            if !body.is_empty() {
+                self.print_statements(body, false);
             }
             if clause.should_break {
-                if !clause.body.is_empty() {
+                if !body.is_empty() {
                     self.newline();
                 }
                 self.write("break");
@@ -1293,6 +1292,16 @@ impl<'r> JsPrinter<'r> {
             }
             self.dedent();
         }
+    }
+
+    /// Print an integer case
+    fn print_int_case(&mut self, value: i32, clause: &Clause) {
+        self.newline();
+        self.write("case ");
+        self.mark_source_loc(clause.source_loc);
+        self.write(&value.to_string());
+        self.write(" :");
+        self.print_case_body(clause);
     }
 
     fn print_switch_case_tag(&mut self, tag: &SwitchCaseTag) {
@@ -1318,50 +1327,33 @@ impl<'r> JsPrinter<'r> {
     }
 
     /// Print a literal switch case.
-    fn print_string_case(&mut self, clause: &StringClause) {
+    fn print_string_case(&mut self, clause: &StringClauseInfo) {
         self.newline();
         self.write("case ");
-        self.mark_source_loc(clause.clause.source_loc.as_ref());
+        self.mark_source_loc(clause.clause.source_loc);
         self.print_switch_case_tag(&clause.tag_type);
         self.write(" :");
-
-        if !clause.clause.body.is_empty() || clause.clause.should_break {
-            self.indent();
-            self.newline();
-            if !clause.clause.body.is_empty() {
-                self.print_statements(&clause.clause.body, false);
-            }
-            if clause.clause.should_break {
-                if !clause.clause.body.is_empty() {
-                    self.newline();
-                }
-                self.write("break");
-                self.semi();
-            }
-            self.dedent();
-        }
+        self.print_case_body(&clause.clause);
     }
 
     /// Check if an expression needs parentheses when used as a statement
-    fn expr_needs_paren(&self, expr: &Expression) -> bool {
-        match &expr.desc {
-            ExpressionDesc::Call(func, _, _) => matches!(func.desc, ExpressionDesc::RawJsCode(_)),
-            ExpressionDesc::RawJsCode(info) => !info.is_stmt,
-            ExpressionDesc::Fun { .. }
-            | ExpressionDesc::Object(_, _)
-            | ExpressionDesc::JsonLiteral(_) => true,
+    fn expr_needs_paren(&self, expr: Expr) -> bool {
+        let a = self.a;
+        match a.ek(expr) {
+            ExprKind::Call(func, _, _) => matches!(a.ek(func), ExprKind::RawJsCode(_)),
+            ExprKind::RawJsCode(info) => !a.raw(info).is_stmt,
+            ExprKind::Fun(_) | ExprKind::Object(_, _) | ExprKind::JsonLiteral(_) => true,
             _ => false,
         }
     }
 
-    fn arrow_expr_needs_paren(&self, expr: &Expression) -> bool {
-        match &expr.desc {
-            ExpressionDesc::Fun { .. }
-            | ExpressionDesc::Object(_, _)
-            | ExpressionDesc::JsonLiteral(_) => true,
-            ExpressionDesc::RawJsCode(info) => !info.is_stmt,
-            ExpressionDesc::CamlBlock(_, _, tag_info) => matches!(
-                &**tag_info,
+    fn arrow_expr_needs_paren(&self, expr: Expr) -> bool {
+        let a = self.a;
+        match a.ek(expr) {
+            ExprKind::Fun(_) | ExprKind::Object(_, _) | ExprKind::JsonLiteral(_) => true,
+            ExprKind::RawJsCode(info) => !a.raw(info).is_stmt,
+            ExprKind::CamlBlock(_, _, tag_info) => matches!(
+                a.tag(tag_info),
                 crate::lambda::TagInfo::Record(_)
                     | crate::lambda::TagInfo::Module(_)
                     | crate::lambda::TagInfo::PolyVar(_)
@@ -1370,88 +1362,83 @@ impl<'r> JsPrinter<'r> {
                     | crate::lambda::TagInfo::RecordInlined(_)
                     | crate::lambda::TagInfo::Constructor(_)
             ),
-            ExpressionDesc::OptionalBlock(inner, true) => self.arrow_expr_needs_paren(inner),
+            ExprKind::OptionalBlock(inner, true) => self.arrow_expr_needs_paren(inner),
             _ => false,
         }
     }
 
-    fn transformed_jsx_call_name<'a>(
-        &self,
-        func: &'a Expression,
-        info: &CallInfo,
-    ) -> Option<&'a str> {
-        if !info.call_transformed_jsx {
+    fn transformed_jsx_call_name(&self, func: Expr, info: super::arena::CallId) -> Option<&'r str> {
+        let a = self.a;
+        if !a.call_info(info).call_transformed_jsx {
             return None;
         }
 
-        let name = match &func.desc {
-            ExpressionDesc::Var(VIdent::Id(id)) => Some(id.name()),
-            ExpressionDesc::Var(VIdent::Qualified(_, Some(name))) => Some(name.as_str()),
+        let name = match a.ek(func) {
+            ExprKind::Var(id) => Some(a.ident(id).name()),
+            ExprKind::Qualified(q) => a.qual(q).1,
             _ => None,
         }?;
 
         matches!(name, "jsx" | "jsxs").then_some(name)
     }
 
-    fn is_jsx_fragment_tag(&self, tag: &Expression) -> bool {
-        matches!(
-            &tag.desc,
-            ExpressionDesc::Var(VIdent::Qualified(module, Some(name)))
-                if name == "Fragment"
+    fn is_jsx_fragment_tag(&self, tag: Expr) -> bool {
+        let a = self.a;
+        match a.ek(tag) {
+            ExprKind::Qualified(q) => {
+                let (module, member) = a.qual(q);
+                member == Some("Fragment")
                     && matches!(
                         &module.kind,
                         Kind::External { name, .. } if name == "react/jsx-runtime"
                     )
-        )
+            }
+            _ => false,
+        }
     }
 
-    fn collect_jsx_fields_from_object<'a>(
+    fn collect_jsx_fields_from_object(
         &self,
-        props: &'a [(PropertyName, Expression)],
-    ) -> Option<Vec<(&'a str, &'a Expression)>> {
+        props: &'r [(PropName, Expr)],
+    ) -> Option<Vec<(&'r str, Expr)>> {
+        let a = self.a;
         let mut fields = Vec::with_capacity(props.len());
         for (name, value) in props {
-            let PropertyName::Lit(name) = name else {
+            let PropName::Lit(name) = name else {
                 return None;
             };
-            fields.push((name.as_str(), value));
+            fields.push((a.text(*name), *value));
         }
         Some(fields)
     }
 
-    fn collect_jsx_fields_from_record_block<'a>(
+    fn collect_jsx_fields_from_record_block(
         &self,
-        elements: &'a [Expression],
-        fields: &'a [(String, bool)],
-    ) -> Option<Vec<(&'a str, &'a Expression)>> {
+        elements: &'r [Expr],
+        fields: &'r [(String, bool)],
+    ) -> Option<Vec<(&'r str, Expr)>> {
         if elements.len() != fields.len() {
             return None;
         }
 
         let mut collected = Vec::with_capacity(fields.len());
         for ((name, optional), value) in fields.iter().zip(elements.iter()) {
-            if *optional && is_undefined_literal(value) {
+            if *optional && is_undefined_literal(self.a, *value) {
                 continue;
             }
-            collected.push((name.as_str(), value));
+            collected.push((name.as_str(), *value));
         }
         Some(collected)
     }
 
-    fn collect_jsx_spread_assignments<'a>(
-        &self,
-        props: &'a Expression,
-    ) -> Option<(Vec<(&'a str, &'a Expression)>, &'a Expression)> {
-        fn visit<'a>(
-            expr: &'a Expression,
-            acc: &mut Vec<(&'a str, &'a Expression)>,
-        ) -> Option<&'a Expression> {
-            match &expr.desc {
-                ExpressionDesc::Seq(first, rest) => match &first.desc {
-                    ExpressionDesc::Bin(BinOp::Eq, target, value) => match &target.as_ref().desc {
-                        ExpressionDesc::StaticIndex(_, name, _) => {
-                            acc.push((name.as_str(), value.as_ref()));
-                            visit(rest, acc)
+    fn collect_jsx_spread_assignments(&self, props: Expr) -> Option<(Vec<(&'r str, Expr)>, Expr)> {
+        fn visit<'r>(a: &'r JsArena, expr: Expr, acc: &mut Vec<(&'r str, Expr)>) -> Option<Expr> {
+            match a.ek(expr) {
+                ExprKind::Seq(first, rest) => match a.ek(first) {
+                    ExprKind::Bin(BinOp::Eq, target, value) => match a.ek(target) {
+                        ExprKind::StaticIndex(_, name, _) => {
+                            acc.push((a.text(name), value));
+                            visit(a, rest, acc)
                         }
                         _ => None,
                     },
@@ -1462,62 +1449,60 @@ impl<'r> JsPrinter<'r> {
         }
 
         let mut fields = Vec::new();
-        let spread = visit(props, &mut fields)?;
+        let spread = visit(self.a, props, &mut fields)?;
         Some((fields, spread))
     }
 
-    fn collect_transformed_jsx_props<'a>(
+    #[allow(clippy::type_complexity)]
+    fn collect_transformed_jsx_props(
         &self,
-        props: &'a Expression,
-    ) -> Option<(Vec<(&'a str, &'a Expression)>, Option<&'a Expression>)> {
-        match &props.desc {
-            ExpressionDesc::Object(dup, props) => Some((
-                self.collect_jsx_fields_from_object(props)?,
-                dup.as_ref().map(|dup| dup.as_ref()),
+        props: Expr,
+    ) -> Option<(Vec<(&'r str, Expr)>, Option<Expr>)> {
+        let a = self.a;
+        match a.ek(props) {
+            ExprKind::Object(dup, prop_list) => Some((
+                self.collect_jsx_fields_from_object(a.props(prop_list))?,
+                dup,
             )),
-            ExpressionDesc::CamlBlock(elements, _, tag)
-                if matches!(**tag, crate::lambda::TagInfo::Record(_)) =>
-            {
-                let crate::lambda::TagInfo::Record(record) = &**tag else {
-                    unreachable!()
-                };
-                let fields = &record.fields;
-                Some((
-                    self.collect_jsx_fields_from_record_block(elements, fields)?,
+            ExprKind::CamlBlock(elements, _, tag) => match a.tag(tag) {
+                crate::lambda::TagInfo::Record(record) => Some((
+                    self.collect_jsx_fields_from_record_block(a.exprs(elements), &record.fields)?,
                     None,
-                ))
-            }
-            ExpressionDesc::Seq(_, _) => {
+                )),
+                _ => None,
+            },
+            ExprKind::Seq(_, _) => {
                 let (fields, spread_props) = self.collect_jsx_spread_assignments(props)?;
                 Some((fields, Some(spread_props)))
             }
-            ExpressionDesc::Var(_) => Some((Vec::new(), Some(props))),
+            ExprKind::Var(_) | ExprKind::Qualified(_) => Some((Vec::new(), Some(props))),
             _ => None,
         }
     }
 
-    fn jsx_children<'a>(
+    fn jsx_children(
         &self,
         fn_name: &str,
-        fields: &[(&'a str, &'a Expression)],
+        fields: &[(&'r str, Expr)],
         is_fragment: bool,
-    ) -> JsxChildren<'a> {
+    ) -> JsxChildren<'r> {
+        let a = self.a;
         for (name, expr) in fields {
             if *name != "children" {
                 continue;
             }
 
             return if fn_name == "jsxs" {
-                match &expr.desc {
-                    ExpressionDesc::Array(children, _) => JsxChildren::Slice(children),
-                    ExpressionDesc::OptionalBlock(inner, _) => match &inner.as_ref().desc {
-                        ExpressionDesc::Array(children, _) => JsxChildren::Slice(children),
-                        _ => JsxChildren::Single(expr),
+                match a.ek(*expr) {
+                    ExprKind::Array(children, _) => JsxChildren::Slice(a.exprs(children)),
+                    ExprKind::OptionalBlock(inner, _) => match a.ek(inner) {
+                        ExprKind::Array(children, _) => JsxChildren::Slice(a.exprs(children)),
+                        _ => JsxChildren::Single(*expr),
                     },
-                    _ => JsxChildren::Single(expr),
+                    _ => JsxChildren::Single(*expr),
                 }
             } else {
-                JsxChildren::Single(expr)
+                JsxChildren::Single(*expr)
             };
         }
 
@@ -1528,27 +1513,27 @@ impl<'r> JsPrinter<'r> {
         }
     }
 
-    fn print_transformed_jsx_tag(&mut self, tag: &Expression, level: u8, is_fragment: bool) {
-        match &tag.desc {
-            ExpressionDesc::Str(txt) => self.write(txt),
+    fn print_transformed_jsx_tag(&mut self, tag: Expr, level: u8, is_fragment: bool) {
+        match self.a.ek(tag) {
+            ExprKind::Str(txt) => self.write(self.a.text(txt)),
             _ if is_fragment => {}
             _ => self.print_expression(tag, level),
         }
     }
 
-    fn print_transformed_jsx_key_prop(&mut self, key: &Expression) {
+    fn print_transformed_jsx_key_prop(&mut self, key: Expr) {
         self.write("key={");
         self.print_expression(key, 0);
         self.write("} ");
     }
 
-    fn print_transformed_jsx_spread_prop(&mut self, spread: &Expression) {
+    fn print_transformed_jsx_spread_prop(&mut self, spread: Expr) {
         self.write("{...");
         self.print_expression(spread, 0);
         self.write("} ");
     }
 
-    fn print_transformed_jsx_named_prop(&mut self, name: &str, value: &Expression) {
+    fn print_transformed_jsx_named_prop(&mut self, name: &str, value: Expr) {
         self.write(unwrap_uppercase_exotic(name));
         self.write("={");
         self.print_expression(value, 0);
@@ -1557,17 +1542,11 @@ impl<'r> JsPrinter<'r> {
 
     /// js_dump.ml `print_one_child`: a child prints at the level of the
     /// enclosing JSX expression (`print_indented_list f level ...`).
-    fn print_transformed_jsx_child(&mut self, child: &Expression, level: u8) {
+    fn print_transformed_jsx_child(&mut self, child: Expr, level: u8) {
+        let a = self.a;
         let child_is_jsx = matches!(
-            &child.desc,
-            ExpressionDesc::Call(
-                _,
-                _,
-                CallInfo {
-                    call_transformed_jsx: true,
-                    ..
-                }
-            )
+            a.ek(child),
+            ExprKind::Call(_, _, info) if a.call_info(info).call_transformed_jsx
         );
         if !child_is_jsx {
             self.write("{");
@@ -1582,10 +1561,10 @@ impl<'r> JsPrinter<'r> {
         &mut self,
         level: u8,
         fn_name: &str,
-        tag: &Expression,
-        fields: &[(&str, &Expression)],
-        spread_props: Option<&Expression>,
-        key: Option<&Expression>,
+        tag: Expr,
+        fields: &[(&str, Expr)],
+        spread_props: Option<Expr>,
+        key: Option<Expr>,
     ) {
         let is_fragment = self.is_jsx_fragment_tag(tag);
         let children = self.jsx_children(fn_name, fields, is_fragment);
@@ -1629,7 +1608,7 @@ impl<'r> JsPrinter<'r> {
             }
             let mut printed_named_props = 0;
             for (name, value) in fields.iter().filter(|(name, _)| *name != "children") {
-                self.print_transformed_jsx_named_prop(name, value);
+                self.print_transformed_jsx_named_prop(name, *value);
                 printed_named_props += 1;
                 if printed_named_props < named_prop_count {
                     self.newline();
@@ -1660,7 +1639,7 @@ impl<'r> JsPrinter<'r> {
                 self.indent();
                 for child in children {
                     self.newline();
-                    self.print_transformed_jsx_child(child, level);
+                    self.print_transformed_jsx_child(*child, level);
                 }
                 self.dedent();
                 self.newline();
@@ -1691,9 +1670,9 @@ impl<'r> JsPrinter<'r> {
 
     fn try_print_transformed_jsx_call(
         &mut self,
-        func: &Expression,
-        args: &[Expression],
-        info: &CallInfo,
+        func: Expr,
+        args: &[Expr],
+        info: super::arena::CallId,
         level: u8,
     ) -> bool {
         if !self.jsx_preserve {
@@ -1705,8 +1684,8 @@ impl<'r> JsPrinter<'r> {
         };
 
         let (tag, props, key) = match args {
-            [tag, props] => (tag, props, None),
-            [tag, props, key] => (tag, props, Some(key)),
+            [tag, props] => (*tag, *props, None),
+            [tag, props, key] => (*tag, *props, Some(*key)),
             _ => return false,
         };
         let Some((fields, spread_props)) = self.collect_transformed_jsx_props(props) else {
@@ -1718,103 +1697,116 @@ impl<'r> JsPrinter<'r> {
     }
 
     /// Print an expression
-    pub fn print_expression(&mut self, expr: &Expression, level: u8) {
+    pub fn print_expression(&mut self, expr: Expr, level: u8) {
         self.print_expression_with_mark(expr, level, true);
     }
 
-    fn print_expression_with_mark(&mut self, expr: &Expression, level: u8, mark: bool) {
+    fn print_expression_with_mark(&mut self, expr: Expr, level: u8, mark: bool) {
+        let a = self.a;
+        let cold = a.expr_cold(expr);
         // Print comment if present
-        if let Some(ref comment) = expr.comment {
+        if let Some(comment) = cold.comment {
             self.write("/* ");
-            self.write(comment);
+            self.write(a.text(comment));
             self.write(" */");
         }
 
         if mark {
-            self.mark_source_loc(expr.source_loc.as_ref());
+            self.mark_source_loc(cold.source_loc);
         }
-        self.print_expression_desc(&expr.desc, level);
+        self.print_expression_desc(a.ek(expr), level);
+    }
+
+    fn paren_if(&mut self, needs_paren: bool, action: impl FnOnce(&mut Self)) {
+        if needs_paren {
+            self.write_char('(');
+        }
+        action(self);
+        if needs_paren {
+            self.write_char(')');
+        }
     }
 
     /// Print an expression description
-    fn print_expression_desc(&mut self, desc: &ExpressionDesc, level: u8) {
+    fn print_expression_desc(&mut self, desc: ExprKind, level: u8) {
+        let a = self.a;
         match desc {
-            ExpressionDesc::Null => {
+            ExprKind::Null => {
                 self.write("null");
             }
 
-            ExpressionDesc::Undefined { .. } => {
+            ExprKind::Undefined { .. } => {
                 self.write("undefined");
             }
 
-            ExpressionDesc::Var(vident) => {
-                self.print_vident(vident);
+            ExprKind::Var(id) => {
+                self.print_vident(VIdentRef::Id(a.ident(id)));
             }
 
-            ExpressionDesc::Bool(b) => {
-                self.write(if *b { "true" } else { "false" });
+            ExprKind::Qualified(q) => {
+                self.print_vident(VIdentRef::Qualified(q));
             }
 
-            ExpressionDesc::Number(n) => {
-                self.print_number(n, level);
+            ExprKind::Bool(b) => {
+                self.write(if b { "true" } else { "false" });
             }
 
-            ExpressionDesc::Str(txt) => {
-                self.print_string(txt);
+            ExprKind::Number(n) => {
+                self.print_number(a.number(n), level);
             }
 
-            ExpressionDesc::TemplateLiteral(segment) => {
+            ExprKind::Str(txt) => {
+                self.print_string(a.text(txt));
+            }
+
+            ExprKind::TemplateLiteral(segment) => {
                 self.write_char('`');
-                self.write_decoded_internal_string(segment.source());
+                self.write_decoded_internal_string(a.template(segment).source());
                 self.write_char('`');
             }
 
-            ExpressionDesc::JsonLiteral(source) => {
-                self.write_decoded_internal_string(source);
+            ExprKind::JsonLiteral(source) => {
+                self.write_decoded_internal_string(a.text(source));
             }
 
-            ExpressionDesc::InterpolatedTemplate { segments, values } => {
+            ExprKind::InterpolatedTemplate(segments, values) => {
+                let values = a.exprs(values);
                 self.write_char('`');
-                for (i, segment) in segments.iter().enumerate() {
+                for (i, segment) in a.segments(segments).iter().enumerate() {
                     self.write_decoded_internal_string(segment.source());
                     if let Some(value) = values.get(i) {
                         self.write("${");
-                        self.print_expression(value, 0);
+                        self.print_expression(*value, 0);
                         self.write_char('}');
                     }
                 }
                 self.write_char('`');
             }
 
-            ExpressionDesc::Array(elements, _) => {
-                self.print_array_literal(elements);
+            ExprKind::Array(elements, _) => {
+                self.print_array_literal(a.exprs(elements));
             }
 
-            ExpressionDesc::Object(dup, props) => self.print_object_literal(
+            ExprKind::Object(dup, props) => self.print_object_literal(
                 level,
-                dup.as_deref(),
-                props.iter(),
+                dup,
+                a.props(props).iter(),
                 |this, (name, value)| {
-                    this.print_property_name(name);
+                    this.print_property_name(*name);
                     this.write(": ");
-                    this.print_expression(value, 1);
+                    this.print_expression(*value, 1);
                 },
             ),
 
-            ExpressionDesc::Seq(e1, e2) => {
-                let needs_paren = level > 0;
-                if needs_paren {
-                    self.write_char('(');
-                }
-                self.print_expression(e1, 0);
-                self.write(", ");
-                self.print_expression(e2, 0);
-                if needs_paren {
-                    self.write_char(')');
-                }
+            ExprKind::Seq(e1, e2) => {
+                self.paren_if(level > 0, |this| {
+                    this.print_expression(e1, 0);
+                    this.write(", ");
+                    this.print_expression(e2, 0);
+                });
             }
 
-            ExpressionDesc::Cond(cond, then_, else_) => {
+            ExprKind::Cond(cond, then_, else_) => {
                 let print_cond = |this: &mut Self| {
                     this.print_expression(cond, 3);
                     this.write(" ? ");
@@ -1829,96 +1821,69 @@ impl<'r> JsPrinter<'r> {
                 }
             }
 
-            ExpressionDesc::Bin(op, left, right) => {
-                if *op == BinOp::Minus {
-                    match (&left.desc, &right.desc) {
-                        (ExpressionDesc::Number(Number::Int { i: 0, .. }), _) => {
-                            let needs_paren = level > 13;
-                            if needs_paren {
-                                self.write_char('(');
-                            }
-                            self.write_char('-');
-                            self.print_expression(right, 13);
-                            if needs_paren {
-                                self.write_char(')');
-                            }
+            ExprKind::Bin(op, left, right) => {
+                if op == BinOp::Minus
+                    && let ExprKind::Number(n) = a.ek(left)
+                {
+                    match a.number(n) {
+                        Number::Int { i: 0, .. } => {
+                            self.paren_if(level > 13, |this| {
+                                this.write_char('-');
+                                this.print_expression(right, 13);
+                            });
                             return;
                         }
-                        (ExpressionDesc::Number(Number::Float(float)), _) if float.f == "0." => {
-                            let needs_paren = level > 13;
-                            if needs_paren {
-                                self.write_char('(');
-                            }
-                            self.write("- ");
-                            self.print_expression(right, 13);
-                            if needs_paren {
-                                self.write_char(')');
-                            }
+                        Number::Float(float) if float.f == "0." => {
+                            self.paren_if(level > 13, |this| {
+                                this.write("- ");
+                                this.print_expression(right, 13);
+                            });
                             return;
                         }
                         _ => {}
                     }
                 }
 
-                if *op == BinOp::Or {
-                    if let Some(target) = self.nullish_or_target(left, right) {
-                        let needs_paren = level > 0;
-                        if needs_paren {
-                            self.write_char('(');
-                        }
-                        self.print_expression(target, 1);
-                        self.write(" == null");
-                        if needs_paren {
-                            self.write_char(')');
-                        }
-                        return;
-                    }
+                if op == BinOp::Or
+                    && let Some(target) = self.nullish_or_target(left, right)
+                {
+                    self.paren_if(level > 0, |this| {
+                        this.print_expression(target, 1);
+                        this.write(" == null");
+                    });
+                    return;
                 }
 
-                let (out, lft, rght) = op_precedence(*op);
+                let (out, lft, rght) = op_precedence(op);
                 // OCaml keeps shift operators parenthesized even in low-precedence
                 // contexts to preserve the backend's conservative JS byte shape.
                 let needs_paren = level > out || matches!(op, BinOp::Lsl | BinOp::Lsr | BinOp::Asr);
-                if needs_paren {
-                    self.write_char('(');
-                }
-                self.print_expression(left, lft);
-                self.space();
-                self.write(op.to_js_string());
-                self.space();
-                self.print_expression(right, rght);
-                if needs_paren {
-                    self.write_char(')');
-                }
+                self.paren_if(needs_paren, |this| {
+                    this.print_expression(left, lft);
+                    this.space();
+                    this.write(op.to_js_string());
+                    this.space();
+                    this.print_expression(right, rght);
+                });
             }
 
-            ExpressionDesc::JsNot(e) => {
-                let needs_paren = level > 13;
-                if needs_paren {
-                    self.write_char('(');
-                }
-                self.write_char('!');
-                self.print_expression(e, 13);
-                if needs_paren {
-                    self.write_char(')');
-                }
+            ExprKind::JsNot(e) => {
+                self.paren_if(level > 13, |this| {
+                    this.write_char('!');
+                    this.print_expression(e, 13);
+                });
             }
 
-            ExpressionDesc::JsBnot(e) => {
-                let needs_paren = level > 13;
-                if needs_paren {
-                    self.write_char('(');
-                }
-                self.write_char('~');
-                self.print_expression(e, 13);
-                if needs_paren {
-                    self.write_char(')');
-                }
+            ExprKind::JsBnot(e) => {
+                self.paren_if(level > 13, |this| {
+                    this.write_char('~');
+                    this.print_expression(e, 13);
+                });
             }
 
-            ExpressionDesc::Typeof(e) => {
+            ExprKind::Typeof(e) => {
                 self.write("typeof ");
-                if matches!(e.desc, ExpressionDesc::Fun { .. }) {
+                if matches!(a.ek(e), ExprKind::Fun(_)) {
                     self.write_char('(');
                     self.print_expression(e, 13);
                     self.write_char(')');
@@ -1927,20 +1892,16 @@ impl<'r> JsPrinter<'r> {
                 }
             }
 
-            ExpressionDesc::In(prop, obj) => {
-                let needs_paren = level > 12;
-                if needs_paren {
-                    self.write_char('(');
-                }
-                self.print_expression(prop, 0);
-                self.write(" in ");
-                self.print_expression(obj, 0);
-                if needs_paren {
-                    self.write_char(')');
-                }
+            ExprKind::In(prop, obj) => {
+                self.paren_if(level > 12, |this| {
+                    this.print_expression(prop, 0);
+                    this.write(" in ");
+                    this.print_expression(obj, 0);
+                });
             }
 
-            ExpressionDesc::Call(func, args, info) => {
+            ExprKind::Call(func, args, info) => {
+                let args = a.exprs(args);
                 if self.try_print_transformed_jsx_call(func, args, info, level) {
                     return;
                 }
@@ -1951,7 +1912,7 @@ impl<'r> JsPrinter<'r> {
                 }
 
                 // Wrap function expressions in parens
-                if matches!(func.desc, ExpressionDesc::Fun { .. }) {
+                if matches!(a.ek(func), ExprKind::Fun(_)) {
                     self.write_char('(');
                     self.print_expression(func, 15);
                     self.write_char(')');
@@ -1960,31 +1921,23 @@ impl<'r> JsPrinter<'r> {
                 }
 
                 self.write_char('(');
-                let printed_args = match args.as_slice() {
+                let printed_args = match args {
                     // OCaml's js_dump.ml omits the synthetic unit argument so `f(())`
                     // prints as `f()`, while plain `undefined` stays explicit.
-                    [
-                        Expression {
-                            desc: ExpressionDesc::Undefined { is_unit: true },
-                            ..
-                        },
-                    ] => &[][..],
-                    _ => args.as_slice(),
+                    [single] if matches!(a.ek(*single), ExprKind::Undefined { is_unit: true }) => {
+                        &[][..]
+                    }
+                    _ => args,
                 };
                 // js_dump.ml:653-671: a lone function argument goes straight
                 // to `pp_function`, without `expression`'s source-location mark.
-                let mark_args = !matches!(
-                    printed_args,
-                    [Expression {
-                        desc: ExpressionDesc::Fun { .. },
-                        ..
-                    }]
-                );
+                let mark_args =
+                    !matches!(printed_args, [single] if matches!(a.ek(*single), ExprKind::Fun(_)));
                 for (i, arg) in printed_args.iter().enumerate() {
                     if i > 0 {
                         self.write(", ");
                     }
-                    self.print_call_argument_with_mark(arg, level, mark_args);
+                    self.print_call_argument_with_mark(*arg, level, mark_args);
                 }
                 self.write_char(')');
 
@@ -1993,27 +1946,26 @@ impl<'r> JsPrinter<'r> {
                 }
             }
 
-            ExpressionDesc::FlatCall(func, args) => {
+            ExprKind::FlatCall(func, args) => {
                 self.print_expression(func, 15);
                 self.write(".apply(null, ");
                 self.print_expression(args, 1);
                 self.write_char(')');
             }
 
-            ExpressionDesc::New(ctor, args) => {
+            ExprKind::New(ctor, args) => {
                 let needs_paren = level > 15;
                 if needs_paren {
                     self.write_char('(');
                 }
                 self.write("new ");
-                let ctor_level = match &ctor.desc {
-                    ExpressionDesc::StaticIndex(target, _, _)
+                let ctor_level = match a.ek(ctor) {
+                    ExprKind::StaticIndex(target, _, _)
                         if matches!(
-                            target.as_ref(),
-                            Expression {
-                                desc: ExpressionDesc::Var(VIdent::Qualified(module, None)),
-                                ..
-                            } if matches!(module.kind, Kind::External { .. })
+                            a.ek(target),
+                            ExprKind::Qualified(q)
+                                if a.qual(q).1.is_none()
+                                    && matches!(a.qual(q).0.kind, Kind::External { .. })
                         ) =>
                     {
                         15
@@ -2023,11 +1975,11 @@ impl<'r> JsPrinter<'r> {
                 self.print_expression(ctor, ctor_level);
                 self.write_char('(');
                 if let Some(args) = args {
-                    for (i, arg) in args.iter().enumerate() {
+                    for (i, arg) in a.exprs(args).iter().enumerate() {
                         if i > 0 {
                             self.write(", ");
                         }
-                        self.print_call_argument(arg, level);
+                        self.print_call_argument(*arg, level);
                     }
                 }
                 self.write_char(')');
@@ -2036,413 +1988,365 @@ impl<'r> JsPrinter<'r> {
                 }
             }
 
-            ExpressionDesc::ArrayIndex(arr, idx) => {
+            ExprKind::ArrayIndex(arr, idx) => {
                 // OCaml's `Array_index` printer (js_dump.ml:991-995) wraps the
                 // inner expression in `P.group f 1` unconditionally — every
                 // multi-line shape inside the target gets +1 indent. The
                 // printer's `print_member_target_expression(_, true)` mirrors
                 // that by raising the indent before delegating to the inner
                 // expression.
-                let needs_paren = level > 15;
-                if needs_paren {
-                    self.write_char('(');
-                }
-                self.print_member_target_expression(arr, true);
-                // `P.group f 1` around the whole access plus
-                // `P.bracket_group f 1` around the index (js_dump.ml:1039-1043).
-                self.write_char('[');
-                // The index sits inside both the outer `P.group f 1` and
-                // `P.bracket_group f 1` (js_dump.ml `Array_index`).
-                self.with_indent(2, |p| p.print_expression(idx, 0));
-                self.write_char(']');
-                if needs_paren {
-                    self.write_char(')');
-                }
+                self.paren_if(level > 15, |this| {
+                    this.print_member_target_expression(arr, true);
+                    // `P.group f 1` around the whole access plus
+                    // `P.bracket_group f 1` around the index (js_dump.ml:1039-1043).
+                    this.write_char('[');
+                    // The index sits inside both the outer `P.group f 1` and
+                    // `P.bracket_group f 1` (js_dump.ml `Array_index`).
+                    this.with_indent(2, |p| p.print_expression(idx, 0));
+                    this.write_char(']');
+                });
             }
 
-            ExpressionDesc::StringIndex(str_expr, idx) => {
+            ExprKind::StringIndex(str_expr, idx) => {
                 self.print_expression(str_expr, 15);
                 self.write(".codePointAt(");
                 self.print_expression(idx, 0);
                 self.write_char(')');
             }
 
-            ExpressionDesc::StaticIndex(obj, field, _) => {
-                let needs_paren = level > 15;
-                if needs_paren {
-                    self.write_char('(');
-                }
-                self.print_dot_member_target_expression(obj);
-                self.print_property_access(field);
-                if needs_paren {
-                    self.write_char(')');
-                }
+            ExprKind::StaticIndex(obj, field, _) => {
+                self.paren_if(level > 15, |this| {
+                    this.print_dot_member_target_expression(obj);
+                    this.print_property_access(a.text(field));
+                });
             }
 
-            ExpressionDesc::Length(e, obj_type) => {
-                let needs_paren = level > 15;
-                if needs_paren {
-                    self.write_char('(');
-                }
-                self.print_dot_member_target_expression(e);
-                self.write(".length");
-                if needs_paren {
-                    self.write_char(')');
-                }
-                let _ = obj_type; // Used for type-specific optimizations
+            ExprKind::Length(e, _) => {
+                self.paren_if(level > 15, |this| {
+                    this.print_dot_member_target_expression(e);
+                    this.write(".length");
+                });
             }
 
-            ExpressionDesc::IsNullOrUndefined(e) => {
-                let needs_paren = level > 0;
-                if needs_paren {
-                    self.write_char('(');
-                }
-                self.print_expression(e, 1);
-                self.write(" == null");
-                if needs_paren {
-                    self.write_char(')');
-                }
+            ExprKind::IsNullOrUndefined(e) => {
+                self.paren_if(level > 0, |this| {
+                    this.print_expression(e, 1);
+                    this.write(" == null");
+                });
             }
 
-            ExpressionDesc::StringAppend(e1, e2) => {
+            ExprKind::StringAppend(e1, e2) => {
                 let (out, lft, rght) = op_precedence(BinOp::Plus);
-                let needs_paren = level > out;
-                if needs_paren {
-                    self.write_char('(');
-                }
-                self.print_expression(e1, lft);
-                self.write(" + ");
-                self.print_expression(e2, rght);
-                if needs_paren {
-                    self.write_char(')');
-                }
+                self.paren_if(level > out, |this| {
+                    this.print_expression(e1, lft);
+                    this.write(" + ");
+                    this.print_expression(e2, rght);
+                });
             }
 
-            ExpressionDesc::Fun {
-                is_method,
-                params,
-                body,
-                return_unit,
-                async_,
-                directive,
-                ..
-            } => {
+            ExprKind::Fun(f) => {
+                let info = a.fun(f);
                 self.print_function_expression(FunctionPrintContext {
-                    is_method: *is_method,
-                    params,
-                    body,
-                    return_unit: *return_unit,
-                    async_: *async_,
-                    directive: directive.as_deref().map(|x| x.as_str()),
+                    is_method: info.is_method,
+                    params: a.ident_slice(info.params),
+                    body: a.stmts(info.body),
+                    return_unit: info.return_unit,
+                    async_: info.async_,
+                    directive: info.directive.map(|d| a.text(d)),
                     function_ident: None,
                     reserved_idents: None,
                 });
             }
 
-            ExpressionDesc::RawJsCode(info) => {
-                self.print_raw_js(info);
+            ExprKind::RawJsCode(info) => {
+                self.print_raw_js(a.raw(info));
             }
 
-            ExpressionDesc::Await(e) => {
-                let needs_paren = level > 13;
-                if needs_paren {
-                    self.write_char('(');
-                }
-                self.write("await ");
-                self.print_expression(e, 13);
-                if needs_paren {
-                    self.write_char(')');
-                }
+            ExprKind::Await(e) => {
+                self.paren_if(level > 13, |this| {
+                    this.write("await ");
+                    this.print_expression(e, 13);
+                });
             }
 
-            ExpressionDesc::RecordRest(fields, source) => {
-                let needs_paren = level > 15;
-                if needs_paren {
-                    self.write_char('(');
-                }
-                self.write("(({");
-                for (index, field) in fields.iter().enumerate() {
-                    if index > 0 {
-                        self.write(", ");
+            ExprKind::RecordRest(fields, source) => {
+                let fields = a.rest(fields);
+                self.paren_if(level > 15, |this| {
+                    this.write("(({");
+                    for (index, field) in fields.iter().enumerate() {
+                        if index > 0 {
+                            this.write(", ");
+                        }
+                        this.print_literal_property_name(&field.label);
+                        this.write(": __unused");
+                        this.write(&index.to_string());
                     }
-                    self.print_literal_property_name(&field.label);
-                    self.write(": __unused");
-                    self.write(&index.to_string());
-                }
-                if !fields.is_empty() {
-                    self.write(", ");
-                }
-                self.write("...__rest}) => __rest)(");
-                self.print_expression(source, 0);
-                self.write_char(')');
-                if needs_paren {
-                    self.write_char(')');
-                }
+                    if !fields.is_empty() {
+                        this.write(", ");
+                    }
+                    this.write("...__rest}) => __rest)(");
+                    this.print_expression(source, 0);
+                    this.write_char(')');
+                });
             }
 
-            ExpressionDesc::Spread(e) => {
-                let needs_paren = level > 13;
-                if needs_paren {
-                    self.write_char('(');
-                }
-                self.write("...");
-                self.print_expression(e, 13);
-                if needs_paren {
-                    self.write_char(')');
-                }
+            ExprKind::Spread(e) => {
+                self.paren_if(level > 13, |this| {
+                    this.write("...");
+                    this.print_expression(e, 13);
+                });
             }
 
-            ExpressionDesc::TaggedTemplate(tag, strings, values) => {
+            ExprKind::TaggedTemplate(tag, strings, values) => {
+                let values = a.exprs(values);
                 self.print_expression(tag, level);
                 self.write_char('`');
-                for (i, source) in strings.iter().enumerate() {
+                for (i, source) in a.tagged(strings).iter().enumerate() {
                     self.write_decoded_internal_string(source);
                     if i < values.len() {
                         self.write("${");
-                        self.print_expression(&values[i], 0);
+                        self.print_expression(values[i], 0);
                         self.write_char('}');
                     }
                 }
                 self.write_char('`');
             }
 
-            ExpressionDesc::OptionalBlock(e, identity) => {
-                if *identity {
+            ExprKind::OptionalBlock(e, identity) => {
+                if identity {
                     self.print_expression(e, level);
                 } else {
                     // Match OCaml's js_dump.ml by omitting the synthetic unit
                     // argument so `Some(())` prints as `Primitive_option.some()`.
                     self.write("Primitive_option.some(");
-                    if !matches!(e.desc, ExpressionDesc::Undefined { is_unit: true }) {
+                    if !matches!(a.ek(e), ExprKind::Undefined { is_unit: true }) {
                         self.print_expression(e, 1);
                     }
                     self.write_char(')');
                 }
             }
 
-            ExpressionDesc::CamlBlock(elements, _mutable, tag_info) => {
-                use crate::lambda::TagInfo;
-
-                if matches!(&**tag_info, TagInfo::Extension | TagInfo::RecordExt { .. }) {
-                    self.print_exception_block_literal(level, elements, tag_info, false);
-                    return;
-                }
-
-                // Check if this is a record with field names
-                match &**tag_info {
-                    TagInfo::Record(record) if record.fields.len() == elements.len() => {
-                        let fields = &record.fields;
-                        if record_uses_array_syntax(fields) {
-                            self.print_array_literal(elements);
-                        } else {
-                            self.print_object_literal(
-                                level,
-                                None,
-                                elements.iter().zip(fields.iter()).filter_map(
-                                    |(elem, (field_name, optional))| {
-                                        if *optional && is_undefined_literal(elem) {
-                                            None
-                                        } else {
-                                            Some((field_name.as_str(), elem))
-                                        }
-                                    },
-                                ),
-                                |this, (field_name, elem)| {
-                                    this.print_literal_property_name(field_name);
-                                    this.write(": ");
-                                    this.print_expression(elem, 1);
-                                },
-                            );
-                        }
-                    }
-                    TagInfo::RecordInlined(inlined) if inlined.fields.len() == elements.len() => {
-                        let (name, fields, runtime) =
-                            (&inlined.name, &inlined.fields, &inlined.runtime);
-                        // js_dump.ml Blk_record_inlined: only a tagged block
-                        // emits its tag field.
-                        let tag_field = match &**runtime {
-                            crate::types::VariantBlock::Untagged { .. } => None,
-                            crate::types::VariantBlock::Tagged(tagged) => Some((
-                                tagged.tag_name.as_deref().unwrap_or("TAG"),
-                                variant_tag_to_switch(&tagged.tag)
-                                    .unwrap_or_else(|| SwitchCaseTag::String(name.clone())),
-                            )),
-                        };
-                        self.print_object_literal(
-                            level,
-                            None,
-                            (if tag_field.is_none() {
-                                Vec::new()
-                            } else {
-                                vec![(None, None)]
-                            })
-                            .into_iter()
-                            .chain(
-                                elements.iter().zip(fields.iter()).filter_map(
-                                    |(elem, (field_name, optional))| {
-                                        if *optional && is_undefined_literal(elem) {
-                                            None
-                                        } else {
-                                            Some((Some(field_name.as_str()), Some(elem)))
-                                        }
-                                    },
-                                ),
-                            ),
-                            |this, prop| match prop {
-                                (None, None) => {
-                                    let (tag_name, tag_value) =
-                                        tag_field.as_ref().expect("tag property of a tagged block");
-                                    this.print_literal_property_name(tag_name);
-                                    this.write(": ");
-                                    this.print_switch_case_tag(tag_value);
-                                }
-                                (Some(field_name), Some(elem)) => {
-                                    this.print_literal_property_name(field_name);
-                                    this.write(": ");
-                                    this.print_expression(elem, 1);
-                                }
-                                _ => unreachable!("inline record literal properties stay aligned"),
-                            },
-                        );
-                    }
-                    TagInfo::Module(fields) if fields.len() == elements.len() => {
-                        self.print_object_literal(
-                            level,
-                            None,
-                            elements.iter().zip(fields.iter()),
-                            |this, (elem, field_name)| {
-                                let field_name = convert_ident_name(field_name);
-                                this.print_literal_property_name(&field_name);
-                                this.write(": ");
-                                this.print_expression(elem, 1);
-                            },
-                        );
-                    }
-                    TagInfo::Constructor(constructor) => {
-                        let (name, runtime) = (&constructor.name, &constructor.runtime);
-                        if name == "::" {
-                            self.print_object_literal(
-                                level,
-                                None,
-                                elements.iter().enumerate(),
-                                |this, (i, elem)| {
-                                    match i {
-                                        0 => this.write("hd"),
-                                        1 => this.write("tl"),
-                                        _ => {
-                                            this.write("_");
-                                            this.write(&i.to_string());
-                                        }
-                                    }
-                                    this.write(": ");
-                                    this.print_expression(elem, 1);
-                                },
-                            );
-                        } else {
-                            {
-                                let tag_name = runtime.tag_name.as_deref().unwrap_or("TAG");
-                                let tag_value = variant_tag_to_switch(&runtime.tag)
-                                    .unwrap_or_else(|| SwitchCaseTag::String(name.clone()));
-                                let include_tag = true;
-                                let include_debug_name = self.debug && name.as_str() != "::";
-                                self.print_object_literal(
-                                    level,
-                                    None,
-                                    (if include_tag {
-                                        vec![(None, None)]
-                                    } else {
-                                        Vec::new()
-                                    })
-                                    .into_iter()
-                                    .chain(
-                                        elements
-                                            .iter()
-                                            .enumerate()
-                                            .map(|(i, elem)| (Some(i), Some(elem))),
-                                    )
-                                    .chain(include_debug_name.then_some((Some(usize::MAX), None))),
-                                    |this, prop| match prop {
-                                        (None, None) => {
-                                            this.print_literal_property_name(tag_name);
-                                            this.write(": ");
-                                            this.print_switch_case_tag(&tag_value);
-                                        }
-                                        (Some(i), Some(elem)) => {
-                                            this.write("_");
-                                            this.write(&i.to_string());
-                                            this.write(": ");
-                                            this.print_expression(elem, 1);
-                                        }
-                                        (Some(i), None) if i == usize::MAX => {
-                                            this.print_property_name(&PropertyName::Symbol);
-                                            this.write(": ");
-                                            this.print_string(name);
-                                        }
-                                        _ => unreachable!(
-                                            "constructor literal properties stay aligned"
-                                        ),
-                                    },
-                                );
-                            }
-                        }
-                    }
-                    TagInfo::PolyVar(_) => {
-                        // OCaml's `js_dump.ml:901-912` for `Caml_block(el, _, _,
-                        // Blk_poly_var _)` emits `{NAME: el[0]; VAL: el[1]}` —
-                        // the NAME slot is whatever expression sits at
-                        // elements[0] (a `Const_int n` for numeric polyvar
-                        // names like `#1`, a `Const_string "Foo"` otherwise).
-                        // Printing the `name` string verbatim as done
-                        // previously emitted `NAME: "1"` for `#1` instead of
-                        // `NAME: 1`.
-                        self.print_object_literal(
-                            level,
-                            None,
-                            std::iter::once((false, elements.first())).chain(
-                                elements.get(1).into_iter().map(|value| (true, Some(value))),
-                            ),
-                            |this, (is_value, value)| {
-                                let value = value.expect("polyvar block element must exist");
-                                if is_value {
-                                    this.write("VAL: ");
-                                } else {
-                                    this.write("NAME: ");
-                                }
-                                this.print_expression(value, 1);
-                            },
-                        );
-                    }
-                    _ => {
-                        self.print_array_literal(elements);
-                    }
-                }
+            ExprKind::CamlBlock(elements, _mutable, tag_info) => {
+                self.print_caml_block(level, a.exprs(elements), a.tag(tag_info));
             }
 
-            ExpressionDesc::CamlBlockTag(e, tag) => {
+            ExprKind::CamlBlockTag(e, tag) => {
                 self.with_indent(1, |this| this.print_expression(e, 15));
                 self.write_char('.');
-                self.write(tag);
+                self.write(a.text(tag));
             }
         }
     }
 
-    fn try_print_exception_block(
+    fn print_caml_block(
         &mut self,
-        expr: &Expression,
         level: u8,
-        include_stack: bool,
-    ) -> bool {
-        match &expr.desc {
-            ExpressionDesc::CamlBlock(elements, _, tag_info)
+        elements: &'r [Expr],
+        tag_info: &'r crate::lambda::TagInfo,
+    ) {
+        use crate::lambda::TagInfo;
+        let a = self.a;
+
+        if matches!(tag_info, TagInfo::Extension | TagInfo::RecordExt { .. }) {
+            self.print_exception_block_literal(level, elements, tag_info, false);
+            return;
+        }
+
+        // Check if this is a record with field names
+        match tag_info {
+            TagInfo::Record(record) if record.fields.len() == elements.len() => {
+                let fields = &record.fields;
+                if record_uses_array_syntax(fields) {
+                    self.print_array_literal(elements);
+                } else {
+                    self.print_object_literal(
+                        level,
+                        None,
+                        elements.iter().zip(fields.iter()).filter_map(
+                            |(elem, (field_name, optional))| {
+                                if *optional && is_undefined_literal(a, *elem) {
+                                    None
+                                } else {
+                                    Some((field_name.as_str(), *elem))
+                                }
+                            },
+                        ),
+                        |this, (field_name, elem)| {
+                            this.print_literal_property_name(field_name);
+                            this.write(": ");
+                            this.print_expression(elem, 1);
+                        },
+                    );
+                }
+            }
+            TagInfo::RecordInlined(inlined) if inlined.fields.len() == elements.len() => {
+                let (name, fields, runtime) = (&inlined.name, &inlined.fields, &inlined.runtime);
+                // js_dump.ml Blk_record_inlined: only a tagged block
+                // emits its tag field.
+                let tag_field = match &**runtime {
+                    crate::types::VariantBlock::Untagged { .. } => None,
+                    crate::types::VariantBlock::Tagged(tagged) => Some((
+                        tagged.tag_name.as_deref().unwrap_or("TAG"),
+                        variant_tag_to_switch(&tagged.tag)
+                            .unwrap_or_else(|| SwitchCaseTag::String(name.clone())),
+                    )),
+                };
+                self.print_object_literal(
+                    level,
+                    None,
+                    (if tag_field.is_none() {
+                        Vec::new()
+                    } else {
+                        vec![(None, None)]
+                    })
+                    .into_iter()
+                    .chain(elements.iter().zip(fields.iter()).filter_map(
+                        |(elem, (field_name, optional))| {
+                            if *optional && is_undefined_literal(a, *elem) {
+                                None
+                            } else {
+                                Some((Some(field_name.as_str()), Some(*elem)))
+                            }
+                        },
+                    )),
+                    |this, prop| match prop {
+                        (None, None) => {
+                            let (tag_name, tag_value) =
+                                tag_field.as_ref().expect("tag property of a tagged block");
+                            this.print_literal_property_name(tag_name);
+                            this.write(": ");
+                            this.print_switch_case_tag(tag_value);
+                        }
+                        (Some(field_name), Some(elem)) => {
+                            this.print_literal_property_name(field_name);
+                            this.write(": ");
+                            this.print_expression(elem, 1);
+                        }
+                        _ => unreachable!("inline record literal properties stay aligned"),
+                    },
+                );
+            }
+            TagInfo::Module(fields) if fields.len() == elements.len() => {
+                self.print_object_literal(
+                    level,
+                    None,
+                    elements.iter().zip(fields.iter()),
+                    |this, (elem, field_name)| {
+                        let field_name = convert_ident_name(field_name);
+                        this.print_literal_property_name(&field_name);
+                        this.write(": ");
+                        this.print_expression(*elem, 1);
+                    },
+                );
+            }
+            TagInfo::Constructor(constructor) => {
+                let (name, runtime) = (&constructor.name, &constructor.runtime);
+                if name == "::" {
+                    self.print_object_literal(
+                        level,
+                        None,
+                        elements.iter().enumerate(),
+                        |this, (i, elem)| {
+                            match i {
+                                0 => this.write("hd"),
+                                1 => this.write("tl"),
+                                _ => {
+                                    this.write("_");
+                                    this.write(&i.to_string());
+                                }
+                            }
+                            this.write(": ");
+                            this.print_expression(*elem, 1);
+                        },
+                    );
+                } else {
+                    let tag_name = runtime.tag_name.as_deref().unwrap_or("TAG");
+                    let tag_value = variant_tag_to_switch(&runtime.tag)
+                        .unwrap_or_else(|| SwitchCaseTag::String(name.clone()));
+                    let include_debug_name = self.debug && name.as_str() != "::";
+                    self.print_object_literal(
+                        level,
+                        None,
+                        std::iter::once((None, None))
+                            .chain(
+                                elements
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(i, elem)| (Some(i), Some(*elem))),
+                            )
+                            .chain(include_debug_name.then_some((Some(usize::MAX), None))),
+                        |this, prop| match prop {
+                            (None, None) => {
+                                this.print_literal_property_name(tag_name);
+                                this.write(": ");
+                                this.print_switch_case_tag(&tag_value);
+                            }
+                            (Some(i), Some(elem)) => {
+                                this.write("_");
+                                this.write(&i.to_string());
+                                this.write(": ");
+                                this.print_expression(elem, 1);
+                            }
+                            (Some(i), None) if i == usize::MAX => {
+                                this.print_property_name(PropName::Symbol);
+                                this.write(": ");
+                                this.print_string(name);
+                            }
+                            _ => unreachable!("constructor literal properties stay aligned"),
+                        },
+                    );
+                }
+            }
+            TagInfo::PolyVar(_) => {
+                // OCaml's `js_dump.ml:901-912` for `Caml_block(el, _, _,
+                // Blk_poly_var _)` emits `{NAME: el[0]; VAL: el[1]}` —
+                // the NAME slot is whatever expression sits at
+                // elements[0] (a `Const_int n` for numeric polyvar
+                // names like `#1`, a `Const_string "Foo"` otherwise).
+                self.print_object_literal(
+                    level,
+                    None,
+                    std::iter::once((false, elements.first().copied())).chain(
+                        elements
+                            .get(1)
+                            .into_iter()
+                            .map(|value| (true, Some(*value))),
+                    ),
+                    |this, (is_value, value)| {
+                        let value = value.expect("polyvar block element must exist");
+                        if is_value {
+                            this.write("VAL: ");
+                        } else {
+                            this.write("NAME: ");
+                        }
+                        this.print_expression(value, 1);
+                    },
+                );
+            }
+            _ => {
+                self.print_array_literal(elements);
+            }
+        }
+    }
+
+    fn try_print_exception_block(&mut self, expr: Expr, level: u8, include_stack: bool) -> bool {
+        let a = self.a;
+        match a.ek(expr) {
+            ExprKind::CamlBlock(elements, _, tag_info)
                 if matches!(
-                    &**tag_info,
+                    a.tag(tag_info),
                     crate::lambda::TagInfo::Extension | crate::lambda::TagInfo::RecordExt { .. }
                 ) =>
             {
                 // js_dump.ml:470-472: `expression` marks the block's location
                 // before printing it.
-                self.mark_source_loc(expr.source_loc.as_ref());
-                self.print_exception_block_literal(level, elements, tag_info, include_stack);
+                self.mark_source_loc(a.expr_loc(expr));
+                self.print_exception_block_literal(
+                    level,
+                    a.exprs(elements),
+                    a.tag(tag_info),
+                    include_stack,
+                );
                 true
             }
             _ => false,
@@ -2452,11 +2356,11 @@ impl<'r> JsPrinter<'r> {
     fn print_exception_block_literal(
         &mut self,
         level: u8,
-        elements: &[Expression],
+        elements: &[Expr],
         tag_info: &crate::lambda::TagInfo,
         include_stack: bool,
     ) {
-        let mut props: Vec<(String, Option<&Expression>)> =
+        let mut props: Vec<(String, Option<Expr>)> =
             Vec::with_capacity(elements.len() + usize::from(include_stack));
         for (index, element) in elements.iter().enumerate() {
             let name = match tag_info {
@@ -2479,7 +2383,7 @@ impl<'r> JsPrinter<'r> {
                 }
                 _ => unreachable!("exception block printer only handles exception tag kinds"),
             };
-            props.push((name, Some(element)));
+            props.push((name, Some(*element)));
         }
         if include_stack {
             props.push(("Error".to_string(), None));
@@ -2490,7 +2394,7 @@ impl<'r> JsPrinter<'r> {
             this.print_literal_property_name(name);
             this.write(": ");
             if let Some(value) = value {
-                this.print_expression(value, 1);
+                this.print_expression(*value, 1);
             } else {
                 this.write("new Error()");
             }
@@ -2498,33 +2402,36 @@ impl<'r> JsPrinter<'r> {
     }
 
     /// Print a variable identifier
-    fn print_vident(&mut self, vident: &VIdent) {
+    fn print_vident(&mut self, vident: VIdentRef) {
         match vident {
-            VIdent::Id(id) => {
-                let name = self.ident_name(id);
+            VIdentRef::Id(id) => {
+                let name = self.ident_name(&id);
                 self.write(&name);
             }
-            VIdent::Qualified(module, None) => {
-                let mod_name = self.module_ident_name(&module.id);
-                self.write(&mod_name);
-            }
-            VIdent::Qualified(module, Some(_))
-                if matches!(&module.kind, Kind::External { default: true, .. }) =>
-            {
-                let mod_name = self.module_ident_name(&module.id);
-                self.write(&mod_name);
-            }
-            VIdent::Qualified(module, Some(member)) => {
-                let mod_name = self.module_ident_name(&module.id);
-                self.write(&mod_name);
-                match &module.kind {
-                    Kind::Ml | Kind::Runtime => {
-                        let printed_member = js_export_name(member);
-                        self.write_char('.');
-                        self.write(&printed_member);
+            VIdentRef::Qualified(q) => {
+                let (module, member) = self.a.qual(q);
+                match member {
+                    None => {
+                        let mod_name = self.module_ident_name(&module.id);
+                        self.write(&mod_name);
                     }
-                    Kind::External { .. } => {
-                        self.print_property_access(member);
+                    Some(_) if matches!(&module.kind, Kind::External { default: true, .. }) => {
+                        let mod_name = self.module_ident_name(&module.id);
+                        self.write(&mod_name);
+                    }
+                    Some(member) => {
+                        let mod_name = self.module_ident_name(&module.id);
+                        self.write(&mod_name);
+                        match &module.kind {
+                            Kind::Ml | Kind::Runtime => {
+                                let printed_member = js_export_name(member);
+                                self.write_char('.');
+                                self.write(&printed_member);
+                            }
+                            Kind::External { .. } => {
+                                self.print_property_access(member);
+                            }
+                        }
                     }
                 }
             }
@@ -2534,7 +2441,7 @@ impl<'r> JsPrinter<'r> {
     fn print_object_literal<T, I, F>(
         &mut self,
         level: u8,
-        dup: Option<&Expression>,
+        dup: Option<Expr>,
         props: I,
         mut print_prop: F,
     ) where
@@ -2583,7 +2490,7 @@ impl<'r> JsPrinter<'r> {
         }
     }
 
-    fn print_member_target_expression(&mut self, expr: &Expression, extra_group_indent: bool) {
+    fn print_member_target_expression(&mut self, expr: Expr, extra_group_indent: bool) {
         if extra_group_indent {
             self.indent();
         }
@@ -2593,19 +2500,19 @@ impl<'r> JsPrinter<'r> {
         }
     }
 
-    fn print_dot_member_target_expression(&mut self, expr: &Expression) {
+    fn print_dot_member_target_expression(&mut self, expr: Expr) {
         self.suppress_member_target_call_arg_group_indent += 1;
         self.print_expression(expr, 15);
         self.suppress_member_target_call_arg_group_indent -= 1;
     }
 
-    fn print_call_argument(&mut self, expr: &Expression, call_level: u8) {
+    fn print_call_argument(&mut self, expr: Expr, call_level: u8) {
         self.print_call_argument_with_mark(expr, call_level, true);
     }
 
-    fn print_call_argument_with_mark(&mut self, expr: &Expression, call_level: u8, mark: bool) {
+    fn print_call_argument_with_mark(&mut self, expr: Expr, call_level: u8, mark: bool) {
         let extra_group_indent =
-            call_argument_needs_extra_group_indent(expr, call_level, self.indent)
+            call_argument_needs_extra_group_indent(self.a, expr, call_level, self.indent)
                 && self.suppress_member_target_call_arg_group_indent == 0
                 && !self.output.is_empty()
                 && !self.last_new_line;
@@ -2618,16 +2525,16 @@ impl<'r> JsPrinter<'r> {
         }
     }
 
-    fn print_array_literal(&mut self, elements: &[Expression]) {
+    fn print_array_literal(&mut self, elements: &[Expr]) {
         self.write_char('[');
         match elements {
             [] => {}
-            [single] => self.with_indent(1, |this| this.print_expression(single, 1)),
+            [single] => self.with_indent(1, |this| this.print_expression(*single, 1)),
             _ => {
                 self.indent();
                 for (index, elem) in elements.iter().enumerate() {
                     self.newline();
-                    self.print_expression(elem, 1);
+                    self.print_expression(*elem, 1);
                     if index + 1 < elements.len() {
                         self.write_char(',');
                     }
@@ -2649,10 +2556,10 @@ impl<'r> JsPrinter<'r> {
     }
 
     /// Print a property name
-    fn print_property_name(&mut self, name: &PropertyName) {
+    fn print_property_name(&mut self, name: PropName) {
         match name {
-            PropertyName::Lit(s) => self.print_literal_property_name(s),
-            PropertyName::Symbol => {
+            PropName::Lit(s) => self.print_literal_property_name(self.a.text(s)),
+            PropName::Symbol => {
                 self.write("[Symbol.for(\"name\")]");
             }
         }
@@ -2773,19 +2680,19 @@ impl<'r> JsPrinter<'r> {
     /// Port of compiler/core/js_dump.ml:1743-1771. Only the final
     /// statement is eligible for unit-return elision; do not optimize guards
     /// here after the JS passes have established their control-flow shape.
-    fn print_function_body(&mut self, mut stmts: &[Statement], return_unit: bool) {
+    fn print_function_body(&mut self, mut stmts: &[Stmt], return_unit: bool) {
         while let Some((stmt, rest)) = stmts.split_first() {
             match rest {
                 [] => {
-                    self.print_function_tail_statement(stmt, return_unit);
+                    self.print_function_tail_statement(*stmt, return_unit);
                     return;
                 }
-                [tail] if return_is_undefined(tail) => {
-                    self.print_statement(stmt, false);
+                [tail] if return_is_undefined(self.a, *tail) => {
+                    self.print_statement(*stmt, false);
                     return;
                 }
                 _ => {
-                    self.print_statement(stmt, false);
+                    self.print_statement(*stmt, false);
                     self.newline();
                     stmts = rest;
                 }
@@ -2793,16 +2700,16 @@ impl<'r> JsPrinter<'r> {
         }
     }
 
-    fn print_if_statement(&mut self, cond: &Expression, then_block: &Block, else_block: &Block) {
+    fn print_if_statement(&mut self, cond: Expr, then_block: &[Stmt], else_block: &[Stmt]) {
         self.write("if ");
         self.write_char('(');
         self.with_indent(1, |this| this.print_expression(cond, 0));
         self.write(") ");
         self.print_brace_block(then_block);
 
-        if !else_block_is_omitted_like_ocaml(else_block) {
+        if !else_block_is_omitted_like_ocaml(self.a, else_block) {
             self.write(" else ");
-            if let Some(nested_if) = single_else_if_stmt_like_ocaml(else_block) {
+            if let Some(nested_if) = single_else_if_stmt_like_ocaml(self.a, else_block) {
                 self.print_statement(nested_if, false);
                 return;
             }
@@ -2810,20 +2717,20 @@ impl<'r> JsPrinter<'r> {
         }
     }
 
-    fn print_function_tail_statement(&mut self, stmt: &Statement, return_unit: bool) {
-        match &stmt.desc {
-            StatementDesc::If(cond, then_, else_) if else_is_single_return_undefined(else_) => {
+    fn print_function_tail_statement(&mut self, stmt: Stmt, return_unit: bool) {
+        let a = self.a;
+        match a.sk(stmt) {
+            StmtKind::If(cond, then_, else_)
+                if else_is_single_return_undefined(a, a.stmts(else_)) =>
+            {
                 // `print_statement` of `If (cond, then_, [])` with the same
                 // comment and location, without copying the branches.
                 self.print_statement_comment_and_mark(stmt);
-                self.print_if_statement(cond, then_, &Vec::new());
+                self.print_if_statement(cond, a.stmts(then_), &[]);
             }
-            StatementDesc::Return(Expression {
-                desc: ExpressionDesc::Undefined { .. },
-                ..
-            }) => {}
-            StatementDesc::Return(expr) if return_unit => {
-                self.print_statement(&Statement::exp(expr.clone()), false);
+            StmtKind::Return(expr) if matches!(a.ek(expr), ExprKind::Undefined { .. }) => {}
+            StmtKind::Return(expr) if return_unit => {
+                self.print_exp_statement_of(expr);
             }
             _ => self.print_statement(stmt, false),
         }
@@ -2834,34 +2741,38 @@ impl<'r> JsPrinter<'r> {
 /// (compiler/core/js_dump.ml:299-344). Returns the callee to print when the
 /// function body is `[ Return (Call (Var v, args, _)) ]`, every argument is the
 /// matching parameter, and call info permits the rewrite.
-fn eta_reduce_function_body<'a>(
+fn eta_reduce_function_body(
+    a: &JsArena,
     is_method: bool,
     params: &[Ident],
-    body: &'a Block,
-) -> Option<&'a VIdent> {
+    body: &[Stmt],
+) -> Option<VIdentRef> {
     if is_method {
         return None;
     }
-    let [stmt] = body.as_slice() else {
+    let [stmt] = body else {
         return None;
     };
-    let StatementDesc::Return(ret_expr) = &stmt.desc else {
+    let StmtKind::Return(ret_expr) = a.sk(*stmt) else {
         return None;
     };
-    let ExpressionDesc::Call(callee, args, info) = &ret_expr.desc else {
+    let ExprKind::Call(callee, args, info) = a.ek(ret_expr) else {
         return None;
     };
-    let ExpressionDesc::Var(v) = &callee.desc else {
-        return None;
+    let v = match a.ek(callee) {
+        ExprKind::Var(id) => VIdentRef::Id(a.ident(id)),
+        ExprKind::Qualified(q) => VIdentRef::Qualified(q),
+        _ => return None,
     };
+    let args = a.exprs(args);
     if args.len() != params.len() {
         return None;
     }
     for (arg, param) in args.iter().zip(params.iter()) {
-        let ExpressionDesc::Var(VIdent::Id(arg_id)) = &arg.desc else {
+        let ExprKind::Var(arg_id) = a.ek(*arg) else {
             return None;
         };
-        if !arg_id.same(param) {
+        if !a.ident(arg_id).same(param) {
             return None;
         }
     }
@@ -2869,19 +2780,17 @@ fn eta_reduce_function_body<'a>(
     // `call_info = Call_ml | Call_builtin_runtime`. Rust does not emit the
     // Curry wrapper used for `arity = NA` (js_dump.ml:331-343), so keep the
     // reduction to the exact `Full` case.
+    let info = a.call_info(info);
     if !matches!(info.kind, CallKind::MlCall | CallKind::BuiltinRuntime)
         || !matches!(info.arity, CallArity::Full)
     {
         return None;
     }
 
-    match v {
-        VIdent::Id(callee_id) => {
-            if params.iter().any(|p| p.same(callee_id)) {
-                return None;
-            }
-        }
-        VIdent::Qualified(_, _) => {}
+    if let VIdentRef::Id(callee_id) = &v
+        && params.iter().any(|p| p.same(callee_id))
+    {
+        return None;
     }
     Some(v)
 }
@@ -2926,13 +2835,15 @@ enum RawJsExpressionStatement {
     Normal,
 }
 
-fn classify_raw_js_expression_statement(expr: &Expression) -> RawJsExpressionStatement {
-    match &expr.desc {
-        ExpressionDesc::Var(_)
-        | ExpressionDesc::Str(_)
-        | ExpressionDesc::TemplateLiteral(_)
-        | ExpressionDesc::JsonLiteral(_) => RawJsExpressionStatement::Omit,
-        ExpressionDesc::RawJsCode(info) if info.is_stmt => {
+fn classify_raw_js_expression_statement(a: &JsArena, expr: Expr) -> RawJsExpressionStatement {
+    match a.ek(expr) {
+        ExprKind::Var(_)
+        | ExprKind::Qualified(_)
+        | ExprKind::Str(_)
+        | ExprKind::TemplateLiteral(_)
+        | ExprKind::JsonLiteral(_) => RawJsExpressionStatement::Omit,
+        ExprKind::RawJsCode(info) if a.raw(info).is_stmt => {
+            let info = a.raw(info);
             if matches!(
                 classify_js_stmt(&info.code),
                 JsStmtClassification::JsStmtComment
@@ -2942,7 +2853,7 @@ fn classify_raw_js_expression_statement(expr: &Expression) -> RawJsExpressionSta
                 RawJsExpressionStatement::Normal
             }
         }
-        ExpressionDesc::RawJsCode(info) => match classify_js_exp(&info.code) {
+        ExprKind::RawJsCode(info) => match classify_js_exp(&a.raw(info).code) {
             JsExpClassification::JsLiteral {
                 comment: Some(comment),
             } => RawJsExpressionStatement::Comment(comment),
@@ -2955,15 +2866,20 @@ fn classify_raw_js_expression_statement(expr: &Expression) -> RawJsExpressionSta
     }
 }
 
-fn expression_statement_prints_anything(expr: &Expression) -> bool {
+fn expression_statement_prints_anything(a: &JsArena, expr: Expr) -> bool {
     !matches!(
-        classify_raw_js_expression_statement(expr),
+        classify_raw_js_expression_statement(a, expr),
         RawJsExpressionStatement::Omit
     )
 }
 
+fn expression_stmt_is_trivial(a: &JsArena, expr: Expr) -> bool {
+    matches!(a.ek(expr), ExprKind::Number(_) | ExprKind::Undefined { .. })
+}
+
 fn call_argument_needs_extra_group_indent(
-    expr: &Expression,
+    a: &JsArena,
+    expr: Expr,
     call_level: u8,
     current_indent: usize,
 ) -> bool {
@@ -2975,11 +2891,11 @@ fn call_argument_needs_extra_group_indent(
         return false;
     }
 
-    match &expr.desc {
-        ExpressionDesc::Object(_, _) => true,
-        ExpressionDesc::Array(elements, _) => elements.len() > 1,
-        ExpressionDesc::OptionalBlock(inner, true) => {
-            call_argument_needs_extra_group_indent(inner, call_level, current_indent)
+    match a.ek(expr) {
+        ExprKind::Object(_, _) => true,
+        ExprKind::Array(elements, _) => a.exprs(elements).len() > 1,
+        ExprKind::OptionalBlock(inner, true) => {
+            call_argument_needs_extra_group_indent(a, inner, call_level, current_indent)
         }
         _ => false,
     }
@@ -3003,108 +2919,63 @@ fn variant_tag_to_switch(tag: &crate::types::VariantTag) -> Option<SwitchCaseTag
     }
 }
 
-fn is_undefined_literal(expr: &Expression) -> bool {
-    matches!(expr.desc, ExpressionDesc::Undefined { .. })
+fn is_undefined_literal(a: &JsArena, expr: Expr) -> bool {
+    matches!(a.ek(expr), ExprKind::Undefined { .. })
 }
 
-fn else_is_single_return_undefined(block: &Block) -> bool {
-    matches!(block.as_slice(), [stmt] if return_is_undefined(stmt))
+fn else_is_single_return_undefined(a: &JsArena, block: &[Stmt]) -> bool {
+    matches!(block, [stmt] if return_is_undefined(a, *stmt))
 }
 
-fn else_block_is_omitted_like_ocaml(block: &Block) -> bool {
-    matches!(block.as_slice(), [])
-        || matches!(
-            block.as_slice(),
-            [Statement {
-                desc: StatementDesc::Block(inner),
-                ..
-            }] if inner.is_empty()
-        )
-        || matches!(
-            block.as_slice(),
-            [Statement {
-                desc: StatementDesc::Exp(Expression {
-                    desc: ExpressionDesc::Var(_),
-                    ..
-                }),
-                ..
-            }]
-        )
+fn else_block_is_omitted_like_ocaml(a: &JsArena, block: &[Stmt]) -> bool {
+    match block {
+        [] => true,
+        [stmt] => match a.sk(*stmt) {
+            StmtKind::Block(inner) => a.stmts(inner).is_empty(),
+            StmtKind::Exp(e) => matches!(a.ek(e), ExprKind::Var(_) | ExprKind::Qualified(_)),
+            _ => false,
+        },
+        _ => false,
+    }
 }
 
-fn single_else_if_stmt_like_ocaml(block: &Block) -> Option<&Statement> {
-    match block.as_slice() {
-        [
-            stmt @ Statement {
-                desc: StatementDesc::If(_, _, _),
-                ..
+fn single_else_if_stmt_like_ocaml(a: &JsArena, block: &[Stmt]) -> Option<Stmt> {
+    match block {
+        [stmt] => match a.sk(*stmt) {
+            StmtKind::If(_, _, _) => Some(*stmt),
+            StmtKind::Block(inner) => match a.stmts(inner) {
+                [stmt] if matches!(a.sk(*stmt), StmtKind::If(_, _, _)) => Some(*stmt),
+                _ => None,
             },
-        ] => Some(stmt),
-        [
-            Statement {
-                desc: StatementDesc::Block(inner),
-                ..
-            },
-        ] => match inner.as_slice() {
-            [
-                stmt @ Statement {
-                    desc: StatementDesc::If(_, _, _),
-                    ..
-                },
-            ] => Some(stmt),
             _ => None,
         },
         _ => None,
     }
 }
 
-fn return_is_undefined(stmt: &Statement) -> bool {
-    matches!(
-        stmt,
-        Statement {
-            desc: StatementDesc::Return(Expression {
-                desc: ExpressionDesc::Undefined { .. },
-                ..
-            }),
-            ..
-        }
-    )
+fn return_is_undefined(a: &JsArena, stmt: Stmt) -> bool {
+    matches!(a.sk(stmt), StmtKind::Return(e) if matches!(a.ek(e), ExprKind::Undefined { .. }))
 }
 
-fn function_tail_statement_prints(stmt: &Statement) -> bool {
-    !matches!(
-        stmt.desc,
-        StatementDesc::Return(Expression {
-            desc: ExpressionDesc::Undefined { .. },
-            ..
-        })
-    )
-}
-
-fn function_body_prints_any(stmts: &Block) -> bool {
+fn function_body_prints_any(a: &JsArena, stmts: &[Stmt]) -> bool {
     stmts.iter().enumerate().any(|(index, stmt)| {
         if index + 1 == stmts.len() {
-            function_tail_statement_prints(stmt)
+            !return_is_undefined(a, *stmt)
         } else {
             true
         }
     })
 }
 
-fn single_arrow_function_expr(body: &Block) -> Option<&Expression> {
-    match body.as_slice() {
-        [
-            Statement {
-                desc: StatementDesc::Return(expr),
-                ..
-            },
-        ] if !matches!(expr.desc, ExpressionDesc::Undefined { .. }) => Some(expr),
-        [
-            Statement {
-                desc: StatementDesc::Exp(expr),
-                ..
-            },
-        ] => Some(expr),
+fn single_arrow_function_expr(a: &JsArena, body: &[Stmt]) -> Option<Expr> {
+    match body {
+        [stmt] => match a.sk(*stmt) {
+            StmtKind::Return(expr) if !matches!(a.ek(expr), ExprKind::Undefined { .. }) => {
+                Some(expr)
+            }
+            StmtKind::Exp(expr) => Some(expr),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -3369,13 +3240,14 @@ impl FreeVarScratch {
     /// `out`'s used identifiers.
     fn collect_nested(
         &mut self,
-        block: &Block,
+        a: &JsArena,
+        block: &[Stmt],
         defined: impl IntoIterator<Item = Ident>,
         out: &mut JsIdentStats,
     ) {
         let mut inner = self.pool.pop().unwrap_or_default();
         inner.defined_idents.extend(defined);
-        collect_block_idents(block, &mut inner, self);
+        collect_block_idents(a, block, &mut inner, self);
         out.used_idents.extend(
             inner
                 .used_idents
@@ -3389,11 +3261,12 @@ impl FreeVarScratch {
     /// The free variables of `block` with `defined` bound around it, sorted.
     fn free_variables_sorted(
         &mut self,
-        block: &Block,
+        a: &JsArena,
+        block: &[Stmt],
         defined: impl IntoIterator<Item = Ident>,
     ) -> Vec<Ident> {
         let mut stats = self.pool.pop().unwrap_or_default();
-        self.collect_nested(block, defined, &mut stats);
+        self.collect_nested(a, block, defined, &mut stats);
         let mut free: Vec<Ident> = stats.used_idents.drain().collect();
         self.pool.push(stats);
         free.sort();
@@ -3401,175 +3274,211 @@ impl FreeVarScratch {
     }
 }
 
-fn collect_block_idents(block: &Block, stats: &mut JsIdentStats, memo: &mut FreeVarScratch) {
+fn collect_block_idents(
+    a: &JsArena,
+    block: &[Stmt],
+    stats: &mut JsIdentStats,
+    memo: &mut FreeVarScratch,
+) {
     for stmt in block {
-        collect_statement_idents(stmt, stats, memo);
+        collect_statement_idents(a, *stmt, stats, memo);
     }
 }
 
-fn collect_statement_idents(stmt: &Statement, stats: &mut JsIdentStats, memo: &mut FreeVarScratch) {
-    match &stmt.desc {
-        StatementDesc::Block(block) => collect_block_idents(block, stats, memo),
-        StatementDesc::Variable(VariableDeclaration { ident, value, .. }) => {
-            stats.add_defined_ident(ident);
-            if let Some(value) = value {
-                if let ExpressionDesc::RecordRest(fields, _) = &value.desc {
-                    for field in fields {
+fn collect_statement_idents(
+    a: &JsArena,
+    stmt: Stmt,
+    stats: &mut JsIdentStats,
+    memo: &mut FreeVarScratch,
+) {
+    match a.sk(stmt) {
+        StmtKind::Block(block) => collect_block_idents(a, a.stmts(block), stats, memo),
+        StmtKind::Variable(decl) => {
+            let decl = a.var(decl);
+            stats.add_defined_ident(&decl.ident);
+            if let Some(value) = decl.value {
+                if let ExprKind::RecordRest(fields, _) = a.ek(value) {
+                    for field in a.rest(fields) {
                         if let Some(field_ident) = &field.ident {
                             stats.add_defined_ident(field_ident);
                         }
                     }
                 }
-                collect_expression_idents(value, stats, memo);
+                collect_expression_idents(a, value, stats, memo);
             }
         }
-        StatementDesc::Exp(expr) | StatementDesc::Return(expr) | StatementDesc::Throw(expr) => {
-            collect_expression_idents(expr, stats, memo);
+        StmtKind::Exp(expr) | StmtKind::Return(expr) | StmtKind::Throw(expr) => {
+            collect_expression_idents(a, expr, stats, memo);
         }
-        StatementDesc::If(cond, then_block, else_block) => {
-            collect_expression_idents(cond, stats, memo);
-            collect_block_idents(then_block, stats, memo);
-            collect_block_idents(else_block, stats, memo);
+        StmtKind::If(cond, then_block, else_block) => {
+            collect_expression_idents(a, cond, stats, memo);
+            collect_block_idents(a, a.stmts(then_block), stats, memo);
+            collect_block_idents(a, a.stmts(else_block), stats, memo);
         }
-        StatementDesc::While(_, cond, body) => {
-            collect_expression_idents(cond, stats, memo);
-            collect_block_idents(body, stats, memo);
+        StmtKind::While(_, cond, body) => {
+            collect_expression_idents(a, cond, stats, memo);
+            collect_block_idents(a, a.stmts(body), stats, memo);
         }
-        StatementDesc::ForRange(_, start, finish, loop_ident, _, body) => {
-            if let Some(start) = start {
-                collect_expression_idents(start, stats, memo);
+        StmtKind::ForRange(info) => {
+            let info = a.for_range(info);
+            if let Some(start) = info.init {
+                collect_expression_idents(a, start, stats, memo);
             }
-            collect_expression_idents(finish, stats, memo);
-            memo.collect_nested(body, std::iter::once(*loop_ident), stats);
+            collect_expression_idents(a, info.end, stats, memo);
+            memo.collect_nested(
+                a,
+                a.stmts(info.body),
+                std::iter::once(a.ident(info.ident)),
+                stats,
+            );
         }
-        StatementDesc::ForOf(_, loop_ident, iterable, body)
-        | StatementDesc::ForAwaitOf(_, loop_ident, iterable, body) => {
-            collect_expression_idents(iterable, stats, memo);
-            memo.collect_nested(body, std::iter::once(*loop_ident), stats);
+        StmtKind::ForOf(info) | StmtKind::ForAwaitOf(info) => {
+            let info = a.for_of(info);
+            collect_expression_idents(a, info.iterable, stats, memo);
+            memo.collect_nested(
+                a,
+                a.stmts(info.body),
+                std::iter::once(a.ident(info.ident)),
+                stats,
+            );
         }
-        StatementDesc::IntSwitch(test, clauses, default) => {
-            collect_expression_idents(test, stats, memo);
-            for (_, clause) in clauses {
-                collect_block_idents(&clause.body, stats, memo);
+        StmtKind::IntSwitch(test, info) => {
+            collect_expression_idents(a, test, stats, memo);
+            let info = a.int_switch(info);
+            for (_, clause) in &info.clauses {
+                collect_block_idents(a, a.stmts(clause.body), stats, memo);
             }
-            if let Some(default) = default {
-                collect_block_idents(default, stats, memo);
-            }
-        }
-        StatementDesc::StringSwitch(test, clauses, default) => {
-            collect_expression_idents(test, stats, memo);
-            for clause in clauses {
-                collect_block_idents(&clause.clause.body, stats, memo);
-            }
-            if let Some(default) = default {
-                collect_block_idents(default, stats, memo);
-            }
-        }
-        StatementDesc::Try(body, catch, finally) => {
-            collect_block_idents(body, stats, memo);
-            if let Some((catch_ident, catch_block)) = catch {
-                memo.collect_nested(catch_block, std::iter::once(*catch_ident), stats);
-            }
-            if let Some(finally) = finally {
-                collect_block_idents(finally, stats, memo);
+            if let Some(default) = info.default {
+                collect_block_idents(a, a.stmts(default), stats, memo);
             }
         }
-        StatementDesc::Debugger | StatementDesc::Break(_) | StatementDesc::Continue(_) => {}
+        StmtKind::StringSwitch(test, info) => {
+            collect_expression_idents(a, test, stats, memo);
+            let info = a.string_switch(info);
+            for clause in &info.clauses {
+                collect_block_idents(a, a.stmts(clause.clause.body), stats, memo);
+            }
+            if let Some(default) = info.default {
+                collect_block_idents(a, a.stmts(default), stats, memo);
+            }
+        }
+        StmtKind::Try(info) => {
+            let info = a.try_info(info);
+            collect_block_idents(a, a.stmts(info.body), stats, memo);
+            if let Some((catch_ident, catch_block)) = info.catch {
+                memo.collect_nested(
+                    a,
+                    a.stmts(catch_block),
+                    std::iter::once(a.ident(catch_ident)),
+                    stats,
+                );
+            }
+            if let Some(finally) = info.finally {
+                collect_block_idents(a, a.stmts(finally), stats, memo);
+            }
+        }
+        StmtKind::Debugger | StmtKind::Break(_) | StmtKind::Continue(_) => {}
     }
 }
 
-fn collect_expression_idents(expr: &Expression, stats: &mut JsIdentStats, memo: &mut FreeVarScratch) {
-    match &expr.desc {
-        ExpressionDesc::Var(VIdent::Id(ident)) => stats.add_used_ident(ident),
-        ExpressionDesc::Var(VIdent::Qualified(module, _)) => stats.add_used_ident(&module.id),
-        ExpressionDesc::Undefined { .. }
-        | ExpressionDesc::Null
-        | ExpressionDesc::Bool(_)
-        | ExpressionDesc::Str(_)
-        | ExpressionDesc::TemplateLiteral(_)
-        | ExpressionDesc::JsonLiteral(_)
-        | ExpressionDesc::RawJsCode(_)
-        | ExpressionDesc::Number(_) => {}
-        ExpressionDesc::Length(inner, _)
-        | ExpressionDesc::IsNullOrUndefined(inner)
-        | ExpressionDesc::Typeof(inner)
-        | ExpressionDesc::JsNot(inner)
-        | ExpressionDesc::JsBnot(inner)
-        | ExpressionDesc::CamlBlockTag(inner, _)
-        | ExpressionDesc::OptionalBlock(inner, _)
-        | ExpressionDesc::Await(inner)
-        | ExpressionDesc::Spread(inner)
-        | ExpressionDesc::RecordRest(_, inner) => collect_expression_idents(inner, stats, memo),
-        ExpressionDesc::StringAppend(left, right)
-        | ExpressionDesc::In(left, right)
-        | ExpressionDesc::Seq(left, right)
-        | ExpressionDesc::Bin(_, left, right)
-        | ExpressionDesc::FlatCall(left, right)
-        | ExpressionDesc::StringIndex(left, right)
-        | ExpressionDesc::ArrayIndex(left, right) => {
-            collect_expression_idents(left, stats, memo);
-            collect_expression_idents(right, stats, memo);
+fn collect_expression_idents(
+    a: &JsArena,
+    expr: Expr,
+    stats: &mut JsIdentStats,
+    memo: &mut FreeVarScratch,
+) {
+    match a.ek(expr) {
+        ExprKind::Var(ident) => stats.add_used_ident(&a.ident(ident)),
+        ExprKind::Qualified(q) => stats.add_used_ident(&a.qual(q).0.id),
+        ExprKind::Undefined { .. }
+        | ExprKind::Null
+        | ExprKind::Bool(_)
+        | ExprKind::Str(_)
+        | ExprKind::TemplateLiteral(_)
+        | ExprKind::JsonLiteral(_)
+        | ExprKind::RawJsCode(_)
+        | ExprKind::Number(_) => {}
+        ExprKind::Length(inner, _)
+        | ExprKind::IsNullOrUndefined(inner)
+        | ExprKind::Typeof(inner)
+        | ExprKind::JsNot(inner)
+        | ExprKind::JsBnot(inner)
+        | ExprKind::CamlBlockTag(inner, _)
+        | ExprKind::OptionalBlock(inner, _)
+        | ExprKind::Await(inner)
+        | ExprKind::Spread(inner)
+        | ExprKind::RecordRest(_, inner) => collect_expression_idents(a, inner, stats, memo),
+        ExprKind::StringAppend(left, right)
+        | ExprKind::In(left, right)
+        | ExprKind::Seq(left, right)
+        | ExprKind::Bin(_, left, right)
+        | ExprKind::FlatCall(left, right)
+        | ExprKind::StringIndex(left, right)
+        | ExprKind::ArrayIndex(left, right) => {
+            collect_expression_idents(a, left, stats, memo);
+            collect_expression_idents(a, right, stats, memo);
         }
-        ExpressionDesc::Cond(test, consequent, alternate) => {
-            collect_expression_idents(test, stats, memo);
-            collect_expression_idents(consequent, stats, memo);
-            collect_expression_idents(alternate, stats, memo);
+        ExprKind::Cond(test, consequent, alternate) => {
+            collect_expression_idents(a, test, stats, memo);
+            collect_expression_idents(a, consequent, stats, memo);
+            collect_expression_idents(a, alternate, stats, memo);
         }
-        ExpressionDesc::Call(func, args, _) => {
-            collect_expression_idents(func, stats, memo);
-            for arg in args {
-                collect_expression_idents(arg, stats, memo);
+        ExprKind::Call(func, args, _) => {
+            collect_expression_idents(a, func, stats, memo);
+            for arg in a.exprs(args) {
+                collect_expression_idents(a, *arg, stats, memo);
             }
         }
-        ExpressionDesc::TaggedTemplate(tag, _, values) => {
+        ExprKind::TaggedTemplate(tag, _, values) => {
             // js_record_iter.ml:104-106 visits the tag before the values.
-            collect_expression_idents(tag, stats, memo);
-            for value in values {
-                collect_expression_idents(value, stats, memo);
+            collect_expression_idents(a, tag, stats, memo);
+            for value in a.exprs(values) {
+                collect_expression_idents(a, *value, stats, memo);
             }
         }
-        ExpressionDesc::InterpolatedTemplate { values, .. } => {
-            for value in values {
-                collect_expression_idents(value, stats, memo);
+        ExprKind::InterpolatedTemplate(_, values) => {
+            for value in a.exprs(values) {
+                collect_expression_idents(a, *value, stats, memo);
             }
         }
-        ExpressionDesc::StaticIndex(target, _, _) => collect_expression_idents(target, stats, memo),
-        ExpressionDesc::New(target, args) => {
-            collect_expression_idents(target, stats, memo);
+        ExprKind::StaticIndex(target, _, _) => collect_expression_idents(a, target, stats, memo),
+        ExprKind::New(target, args) => {
+            collect_expression_idents(a, target, stats, memo);
             if let Some(args) = args {
-                for arg in args {
-                    collect_expression_idents(arg, stats, memo);
+                for arg in a.exprs(args) {
+                    collect_expression_idents(a, *arg, stats, memo);
                 }
             }
         }
-        ExpressionDesc::Fun { params, body, .. } => {
-            memo.collect_nested(body, params.iter().copied(), stats);
+        ExprKind::Fun(f) => {
+            let info = a.fun(f);
+            memo.collect_nested(
+                a,
+                a.stmts(info.body),
+                a.ident_slice(info.params).iter().copied(),
+                stats,
+            );
         }
-        ExpressionDesc::Array(items, _) => {
-            for item in items {
-                collect_expression_idents(item, stats, memo);
+        ExprKind::Array(items, _) | ExprKind::CamlBlock(items, _, _) => {
+            for item in a.exprs(items) {
+                collect_expression_idents(a, *item, stats, memo);
             }
         }
-        ExpressionDesc::CamlBlock(items, _, _) => {
-            for item in items {
-                collect_expression_idents(item, stats, memo);
-            }
-        }
-        ExpressionDesc::Object(dup, props) => {
+        ExprKind::Object(dup, props) => {
             if let Some(dup) = dup {
-                collect_expression_idents(dup, stats, memo);
+                collect_expression_idents(a, dup, stats, memo);
             }
-            for (_, value) in props {
-                collect_expression_idents(value, stats, memo);
+            for (_, value) in a.props(props) {
+                collect_expression_idents(a, *value, stats, memo);
             }
         }
     }
 }
 
-fn for_range_finish_needs_binding(expr: &Expression) -> bool {
+fn for_range_finish_needs_binding(a: &JsArena, expr: Expr) -> bool {
     !matches!(
-        expr.desc,
-        ExpressionDesc::Number(_) | ExpressionDesc::Var(_)
+        a.ek(expr),
+        ExprKind::Number(_) | ExprKind::Var(_) | ExprKind::Qualified(_)
     )
 }
 
@@ -3763,38 +3672,46 @@ pub(crate) fn is_js_keyword_or_global(s: &str) -> bool {
         )
 }
 
-/// Print an expression to a string
-pub fn print_expression(expr: &Expression) -> String {
-    let mut printer = JsPrinter::new();
-    printer.print_expression(expr, 0);
-    printer.into_output()
+/// Print a tree expression to a string.
+pub fn print_expression(expr: &super::Expression) -> String {
+    print_expression_with_options(expr, 0, false, false)
 }
 
-#[cfg(test)]
-fn print_expression_with_level(expr: &Expression, level: u8) -> String {
-    let mut printer = JsPrinter::new();
+fn print_expression_with_options(
+    expr: &super::Expression,
+    level: u8,
+    debug: bool,
+    jsx_preserve: bool,
+) -> String {
+    let mut a = JsArena::new();
+    let expr = super::arena_tree::import_expr(&mut a, expr);
+    let mut printer =
+        JsPrinter::with_module_path_resolver_and_options(&a, None, debug, jsx_preserve);
     printer.print_expression(expr, level);
     printer.into_output()
 }
 
 #[cfg(test)]
-fn print_expression_with_debug(expr: &Expression, debug: bool) -> String {
-    let mut printer = JsPrinter::with_module_path_resolver_and_debug(None, debug);
-    printer.print_expression(expr, 0);
-    printer.into_output()
+fn print_expression_with_level(expr: &super::Expression, level: u8) -> String {
+    print_expression_with_options(expr, level, false, false)
 }
 
 #[cfg(test)]
-fn print_expression_with_jsx_preserve(expr: &Expression, jsx_preserve: bool) -> String {
-    let mut printer = JsPrinter::with_module_path_resolver_and_options(None, false, jsx_preserve);
-    printer.print_expression(expr, 0);
-    printer.into_output()
+fn print_expression_with_debug(expr: &super::Expression, debug: bool) -> String {
+    print_expression_with_options(expr, 0, debug, false)
 }
 
-/// Print a block to a string
-pub fn print_block(block: &Block) -> String {
-    let mut printer = JsPrinter::new();
-    printer.print_statements(block, true);
+#[cfg(test)]
+fn print_expression_with_jsx_preserve(expr: &super::Expression, jsx_preserve: bool) -> String {
+    print_expression_with_options(expr, 0, false, jsx_preserve)
+}
+
+/// Print a tree block to a string.
+pub fn print_block(block: &super::Block) -> String {
+    let mut a = JsArena::new();
+    let block = super::arena_tree::import_block_vec(&mut a, block);
+    let mut printer = JsPrinter::new(&a);
+    printer.print_statements(&block, true);
     printer.into_output()
 }
 
@@ -3802,8 +3719,20 @@ pub fn print_block(block: &Block) -> String {
 mod tests {
     use super::*;
     use crate::js_ir::op::{IdentInfo, LengthObject, MutableFlag, PropertyName, UsedStats};
-    use crate::js_ir::{CallInfo, Expression, ModuleId, Statement};
+    use crate::js_ir::{
+        Block, CallInfo, CaseClause, Expression, ExpressionDesc, JsRawInfo, ModuleId, Statement,
+        StatementDesc, StringClause, VIdent, VariableDeclaration,
+    };
     use crate::lambda::TagInfo;
+
+    /// Prints a tree block as a function body.
+    fn print_function_body_tree(body: &Block, return_unit: bool) -> String {
+        let mut a = JsArena::new();
+        let body = crate::js_ir::arena_tree::import_block_vec(&mut a, body);
+        let mut printer = JsPrinter::new(&a);
+        printer.print_function_body(&body, return_unit);
+        printer.into_output()
+    }
 
     #[test]
     fn function_body_preserves_nested_guards_and_inner_returns() {
@@ -3823,10 +3752,8 @@ mod tests {
             ))],
             vec![Statement::return_(Expression::undefined(true))],
         ))];
-        let mut printer = JsPrinter::new();
-        printer.print_function_body(&body, true);
         assert_eq!(
-            printer.into_output(),
+            print_function_body_tree(&body, true),
             "if (outer) {\n  if (inner) {\n    act();\n  } else {\n    return;\n  }\n}"
         );
     }
@@ -3843,10 +3770,8 @@ mod tests {
             )),
             Statement::return_(Expression::undefined(true)),
         ];
-        let mut printer = JsPrinter::new();
-        printer.print_function_body(&body, true);
         assert_eq!(
-            printer.into_output(),
+            print_function_body_tree(&body, true),
             "if (cond) {\n  return 1;\n} else {\n  return;\n}"
         );
     }
@@ -4688,11 +4613,8 @@ mod tests {
             )),
         ];
 
-        let mut printer = JsPrinter::new();
-        printer.print_function_body(&block, false);
-
         assert_eq!(
-            printer.into_output(),
+            print_function_body_tree(&block, false),
             "if (typeof state !== \"object\") {\n  return 0;\n}\nreturn 0 + state._0 | 0;"
         );
     }
@@ -4725,9 +4647,7 @@ mod tests {
             Statement::return_(Expression::string("no")),
         ];
 
-        let mut printer = JsPrinter::new();
-        printer.print_function_body(&block, false);
-        let rendered = printer.into_output();
+        let rendered = print_function_body_tree(&block, false);
 
         assert!(rendered.starts_with("if (match === undefined) {"));
         assert!(rendered.contains("let tmp = match;"));

@@ -13,6 +13,8 @@
 //! - Statements - Instructions that have effects
 //! - Programs - Complete compilation units
 
+pub mod arena;
+pub mod arena_tree;
 pub mod op;
 pub mod printer;
 pub mod program_printer;
