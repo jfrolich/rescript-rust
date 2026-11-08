@@ -44,6 +44,10 @@ pub(crate) enum OutVariant {
     Ovar_typ(Box<OutType>),
 }
 
+/// A row of `Otyp_record`: name, runtime name given with `@as`, mutable,
+/// optional, type.
+pub(crate) type OutRecordField = (String, Option<String>, bool, bool, OutType);
+
 /// `Outcometree.out_type`.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum OutType {
@@ -55,8 +59,9 @@ pub(crate) enum OutType {
     Otyp_manifest(Box<OutType>, Box<OutType>),
     /// Fields are (name, mutable, type).
     Otyp_object(Vec<(String, bool, OutType)>, Option<bool>),
-    /// `(name, mutable, optional, type)` rows.
-    Otyp_record(Vec<(String, bool, bool, OutType)>),
+    /// Rows of name, runtime name given with `@as`, mutable, optional and
+    /// type (outcometree.ml:40-41).
+    Otyp_record(Vec<OutRecordField>),
     Otyp_stuff(String),
     Otyp_tuple(Vec<OutType>),
     Otyp_var(bool, String),
@@ -820,10 +825,7 @@ impl<'a> Printtyp<'a> {
     }
 
     /// `tree_of_label` (compiler/ml/printtyp.ml).
-    fn tree_of_label(
-        &mut self,
-        l: &crate::types::decl::LabelDeclaration,
-    ) -> (String, bool, bool, OutType) {
+    fn tree_of_label(&mut self, l: &crate::types::decl::LabelDeclaration) -> OutRecordField {
         let opt = l.ld_optional;
         let typ = match &*self.ctx.borrow_desc(l.ld_type) {
             TypeDesc::Tconstr { path, args, .. }
@@ -835,6 +837,7 @@ impl<'a> Printtyp<'a> {
         };
         (
             l.ld_id.name().to_string(),
+            l.ld_runtime_name.clone(),
             matches!(l.ld_mutable, crate::types::asttypes::MutableFlag::Mutable),
             opt,
             self.tree_of_typexp(false, typ),
@@ -1803,8 +1806,17 @@ fn print_object_fields(fields: &[(String, bool, OutType)], rest: &Option<bool>) 
     ]))
 }
 
-fn print_record_decl_row_doc((name, mutable, opt, arg): &(String, bool, bool, OutType)) -> Doc {
+/// `print_record_decl_row_doc` (res_outcome_printer.ml:395-409).
+fn print_record_decl_row_doc((name, runtime_name, mutable, opt, arg): &OutRecordField) -> Doc {
     Doc::group(Doc::concat(vec![
+        match runtime_name {
+            // `"@as(\"" ^ String.escaped runtime_name ^ "\") "`
+            Some(runtime_name) => Doc::text(format!(
+                "@as({}) ",
+                crate::types::external_ffi_types::debug::quote(runtime_name)
+            )),
+            None => Doc::nil(),
+        },
         if *mutable {
             Doc::text("mutable ")
         } else {
@@ -1817,7 +1829,7 @@ fn print_record_decl_row_doc((name, mutable, opt, arg): &(String, bool, bool, Ou
     ]))
 }
 
-fn print_record_declaration_doc(inline: bool, rows: &[(String, bool, bool, OutType)]) -> Doc {
+fn print_record_declaration_doc(inline: bool, rows: &[OutRecordField]) -> Doc {
     let content = Doc::concat(vec![
         Doc::lbrace(),
         Doc::indent(Doc::concat(vec![
@@ -3963,6 +3975,36 @@ mod tests {
         assert_eq!(
             modules_do_not_match("{\n  let unrelated: string\n}", "HasFoo"),
             "Modules do not match:\n    {\n      let unrelated: string\n    }\n  is not included in\n    HasFoo"
+        );
+    }
+
+    #[test]
+    fn record_rows_print_their_runtime_name_as_an_as_attribute() {
+        use super::{OutType, print_out_type};
+        // The upstream example of 52ae045512, and `String.escaped`.
+        let row = |name: &str, runtime_name: Option<&str>, mutable| {
+            (
+                name.to_string(),
+                runtime_name.map(str::to_string),
+                mutable,
+                false,
+                OutType::Otyp_stuff("int".to_string()),
+            )
+        };
+        assert_eq!(
+            print_out_type(&OutType::Otyp_record(vec![row(
+                "field",
+                Some("wire"),
+                false
+            )])),
+            "{@as(\"wire\") field: int}"
+        );
+        assert_eq!(
+            print_out_type(&OutType::Otyp_record(vec![
+                row("a", Some("x\"y\\"), true),
+                row("b", None, false),
+            ])),
+            "{@as(\"x\\\"y\\\\\") mutable a: int, b: int}"
         );
     }
 
