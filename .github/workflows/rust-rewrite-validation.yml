@@ -24,6 +24,7 @@ jobs:
         run: |
           python3 scripts/test_js_output_fixture_reporting.py
           python3 scripts/test_typedtree_parity_exit.py
+          python3 scripts/test_parser_ast0_parity_exit.py
 
       # This is the toolchain used by the release parity measurements. The
       # crate's minimum supported version is not the validation toolchain.
