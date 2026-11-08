@@ -1164,9 +1164,8 @@ impl<'a> RawLambdaConverter<'a> {
             .unwrap_or_else(|| self.fresh_ident(default))
     }
 
-    /// Look up all label declarations for a record type.
-    /// OCaml's make_record_matching uses lbl_all to iterate over ALL fields.
-    /// Since Rust's lbl_all is a placeholder, we resolve via the type context cache.
+    /// The labels of `lbl.lbl_all`: OCaml's make_record_matching iterates
+    /// over every field of the record.
     fn resolve_all_record_labels(
         &self,
         lbl: &LabelDescription,
@@ -1179,101 +1178,27 @@ impl<'a> RawLambdaConverter<'a> {
             Vec<crate::types::decl::Attribute>,
         )>,
     > {
-        // The labels stored by `Dict_pattern`.
-        if let Some(labels) = self.type_ctx.label_all(lbl.lbl_all) {
-            return Some(
-                labels
-                    .into_iter()
-                    .map(|label| {
-                        (
-                            label.lbl_runtime_name,
-                            label.lbl_pos,
-                            label.lbl_mut,
-                            label.lbl_repres,
-                            label.lbl_attributes,
-                        )
-                    })
-                    .collect(),
-            );
-        }
-        let ty = self.type_ctx.repr(lbl.lbl_res);
-        let desc = self.type_ctx.get_desc(ty);
-        match &*desc {
-            TypeDesc::Tconstr { path, .. } => {
-                // Try the record labels cache (populated during type checking),
-                // keyed by the exact type path (including stamps)
-                if let Some(labels) = self.type_ctx.get_record_labels(path) {
-                    return Some(labels);
-                }
-                // Try env lookup
-                if let Ok(decl) = self.env.lookup_type(path) {
-                    if let crate::types::TypeKind::TypeRecord(ref labels, ref repr) = decl.type_kind
-                    {
-                        return Some(
-                            labels
-                                .iter()
-                                .enumerate()
-                                .map(|(pos, ld)| {
-                                    let name = ld.declaration_name();
-                                    (
-                                        name,
-                                        pos as i32,
-                                        ld.ld_mutable,
-                                        repr.clone(),
-                                        ld.ld_attributes.clone(),
-                                    )
-                                })
-                                .collect(),
-                        );
-                    }
-                }
-                // Try type_ctx stores
-                if let Some(decl) = self.type_ctx.find_type_decl_by_path(&path.name()) {
-                    if let crate::types::TypeKind::TypeRecord(ref labels, ref repr) = decl.type_kind
-                    {
-                        return Some(
-                            labels
-                                .iter()
-                                .enumerate()
-                                .map(|(pos, ld)| {
-                                    let name = ld.declaration_name();
-                                    (
-                                        name,
-                                        pos as i32,
-                                        ld.ld_mutable,
-                                        repr.clone(),
-                                        ld.ld_attributes.clone(),
-                                    )
-                                })
-                                .collect(),
-                        );
-                    }
-                }
-                if let Some(decl) = self.type_ctx.find_type_decl(path.last()) {
-                    if let crate::types::TypeKind::TypeRecord(ref labels, ref repr) = decl.type_kind
-                    {
-                        return Some(
-                            labels
-                                .iter()
-                                .enumerate()
-                                .map(|(pos, ld)| {
-                                    let name = ld.declaration_name();
-                                    (
-                                        name,
-                                        pos as i32,
-                                        ld.ld_mutable,
-                                        repr.clone(),
-                                        ld.ld_attributes.clone(),
-                                    )
-                                })
-                                .collect(),
-                        );
-                    }
-                }
-                None
-            }
-            _ => None,
-        }
+        // `lbl.lbl_all`: every pattern label carries its record's array.
+        let labels = self.type_ctx.label_all(lbl.lbl_all).unwrap_or_else(|| {
+            panic!(
+                "record pattern label `{}` carries no lbl_all array ({:?})",
+                lbl.lbl_name, lbl.lbl_all
+            )
+        });
+        Some(
+            labels
+                .into_iter()
+                .map(|label| {
+                    (
+                        label.lbl_runtime_name,
+                        label.lbl_pos,
+                        label.lbl_mut,
+                        label.lbl_repres,
+                        label.lbl_attributes,
+                    )
+                })
+                .collect(),
+        )
     }
 
     fn global_path(&self) -> Option<crate::types::Path> {

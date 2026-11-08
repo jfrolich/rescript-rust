@@ -5336,63 +5336,24 @@ fn build_as_type(
             {
                 Ok(pat.pat_type)
             } else {
-                // OCaml build_as_type for records creates a fresh record type variable,
-                // then refines it through each label's instantiated arg/res types.
+                // OCaml build_as_type (typecore.ml:626-652): a fresh record
+                // type refined through each label of `lbl.lbl_all` of the
+                // first label, `Array.iter do_label lbl.lbl_all`.
                 let ty = ctx.new_var(None);
-                let record_res = first_label.map(|lbl| lbl.lbl_res).unwrap_or(pat.pat_type);
                 let present_fields_by_pos: HashMap<i32, &Pattern> = fields
                     .iter()
                     .map(|(_lid, label_desc, field_pat, _optional)| (label_desc.lbl_pos, field_pat))
                     .collect();
-
-                let all_labels =
-                    get_record_labels(ctx, env, &mut tctx.persistent_env, pat.pat_type).or_else(
-                        || {
-                            first_label.and_then(|lbl| {
-                                get_record_labels(ctx, env, &mut tctx.persistent_env, lbl.lbl_res)
-                            })
-                        },
-                    );
-
-                if let Some(label_decls) = all_labels {
-                    for (idx, label_decl) in label_decls.iter().enumerate() {
-                        let label_name = label_decl.ld_id.name().to_string();
-                        let resolved_label = crate::types::LabelDescription {
-                            lbl_name: label_decl.ld_id.name().to_string(),
-                            lbl_runtime_name: label_decl.declaration_name(),
-                            // Keep OCaml's build_as_type constraint: each label
-                            // result type must point to the concrete record type.
-                            lbl_res: record_res,
-                            lbl_arg: crate::types::instance(ctx, label_decl.ld_type),
-                            lbl_mut: label_decl.ld_mutable,
-                            lbl_optional: label_decl.ld_optional,
-                            lbl_pos: idx as i32,
-                            lbl_all: crate::types::LabelArrayRef(0),
-                            lbl_repres: crate::types::RecordRepresentation::RecordRegular,
-                            lbl_private: crate::types::PrivateFlag::Public,
-                            lbl_loc: label_decl.ld_loc,
-                            lbl_attributes: label_decl.ld_attributes.clone(),
-                        };
-                        let env_label = disambiguate_label(
-                            &label_name,
-                            record_res,
-                            env,
-                            &mut tctx.persistent_env,
-                            ctx,
-                            false,
-                        )
-                        .unwrap_or(resolved_label);
-                        let field_pat = present_fields_by_pos
-                            .get(&env_label.lbl_pos)
-                            .copied()
-                            .or_else(|| present_fields_by_pos.get(&(idx as i32)).copied());
-                        refine_record_as_type_label(tctx, env, pat, ty, &env_label, field_pat)?;
-                    }
-                } else {
-                    for (_lid, label_desc, _field_pat, _optional) in fields.iter() {
-                        let field_pat = present_fields_by_pos.get(&label_desc.lbl_pos).copied();
-                        refine_record_as_type_label(tctx, env, pat, ty, label_desc, field_pat)?;
-                    }
+                let first_label = first_label.expect("a record pattern with fields");
+                let family = ctx.label_family(first_label.lbl_all).unwrap_or_else(|| {
+                    panic!(
+                        "record pattern label `{}` carries no lbl_all array ({:?})",
+                        first_label.lbl_name, first_label.lbl_all
+                    )
+                });
+                for label in family.iter() {
+                    let field_pat = present_fields_by_pos.get(&label.lbl_pos).copied();
+                    refine_record_as_type_label(tctx, env, pat, ty, label, field_pat)?;
                 }
                 Ok(ty)
             }
@@ -6598,10 +6559,6 @@ fn type_pattern_record(
             }
         }
         typed_fields.push((field.lid, Arc::new(label_desc), typed_pat, field.opt));
-    }
-
-    if let Some((_, label_desc, _, _)) = typed_fields.first() {
-        let _ = get_record_labels(ctx, env, &mut tctx.persistent_env, label_desc.lbl_res);
     }
 
     // Invariant: records are sorted in the typed tree (by label position)
@@ -15886,29 +15843,10 @@ fn get_record_labels(
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ty: TypeExprRef,
 ) -> Option<Vec<crate::types::decl::LabelDeclaration>> {
-    if let Some((path, _actual_args, type_decl)) =
+    if let Some((_path, _actual_args, type_decl)) =
         extract_concrete_record_type_info(ty, env, pers_env, ctx)
     {
-        if let crate::types::TypeKind::TypeRecord(ref labels, ref repr) = type_decl.type_kind {
-            // Cache record labels for raw lambda all-field binding.
-            // The full Path (including Ident stamps) is the cache key, so
-            // different record types with the same name never collide.
-            let cache_key = path.clone();
-            let cache_entries: Vec<_> = labels
-                .iter()
-                .enumerate()
-                .map(|(pos, ld)| {
-                    let name = ld.declaration_name();
-                    (
-                        name,
-                        pos as i32,
-                        ld.ld_mutable,
-                        repr.clone(),
-                        ld.ld_attributes.clone(),
-                    )
-                })
-                .collect();
-            ctx.register_record_labels(&cache_key, cache_entries);
+        if let crate::types::TypeKind::TypeRecord(ref labels, _) = type_decl.type_kind {
             return Some(labels.to_vec());
         }
     }

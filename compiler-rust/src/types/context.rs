@@ -222,16 +222,6 @@ enum TypeMutation {
     SavedLevels(Vec<(i32, i32)>),
 }
 
-/// A record label as cached for pattern/record lowering: name, position,
-/// mutability, record representation and attributes.
-pub type CachedRecordLabel = (
-    String,
-    i32,
-    super::asttypes::MutableFlag,
-    super::decl::RecordRepresentation,
-    Vec<super::decl::Attribute>,
-);
-
 /// The type-declaration maps fed lazily from `type_decl_log`.
 #[derive(Clone, Copy)]
 enum TypeDeclMap {
@@ -834,11 +824,6 @@ pub struct TypeContext {
     /// can use the original's dedup key.
     arity_aliases: RefCell<crate::fast_hash::AHashMap<TypeExprRef, TypeExprRef>>,
 
-    /// Record type labels cache.
-    /// Maps type path (with stamp for uniqueness) → Vec<(field_name, position, mutable, repr, attributes)>.
-    /// Populated during type checking when record patterns are processed.
-    /// Used by raw lambda conversion to bind ALL record fields (matching OCaml's make_record_matching).
-    record_labels_cache: RefCell<crate::fast_hash::AHashMap<Path, Vec<CachedRecordLabel>>>,
 
     /// Reconstructed record label descriptions keyed by type path.
     /// OCaml installs one shared `lbl_all` array for a record declaration and
@@ -1204,7 +1189,6 @@ impl TypeContext {
             predef_option_type: Cell::new(None),
             predef_option_layout: Cell::new(None),
             arity_aliases: RefCell::new(crate::fast_hash::AHashMap::new()),
-            record_labels_cache: RefCell::new(crate::fast_hash::AHashMap::new()),
             record_label_descriptions_cache: RefCell::new(crate::fast_hash::AHashMap::new()),
             record_label_description_summaries_cache: RefCell::new(
                 crate::fast_hash::AHashMap::new(),
@@ -3287,20 +3271,6 @@ impl TypeContext {
     /// Get the arity alias for a TypeExprRef, if any.
     pub fn get_arity_alias(&self, te: TypeExprRef) -> Option<TypeExprRef> {
         self.arity_aliases.borrow().get(&te).copied()
-    }
-
-    /// Cache record label info for a type path.
-    /// Called during type checking when record patterns are processed.
-    pub fn register_record_labels(&self, type_path: &Path, labels: Vec<CachedRecordLabel>) {
-        self.poison_store_build_for("register_record_labels");
-        self.record_labels_cache
-            .borrow_mut()
-            .insert(type_path.clone(), labels);
-    }
-
-    /// Look up cached record labels for a type path.
-    pub fn get_record_labels(&self, type_path: &Path) -> Option<Vec<CachedRecordLabel>> {
-        self.record_labels_cache.borrow().get(type_path).cloned()
     }
 
     /// Register the reconstructed label descriptions of a record path as its

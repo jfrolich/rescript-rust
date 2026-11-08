@@ -868,43 +868,36 @@ fn set_args_erase_mutable<'p>(
     do_set_args(pa, true, q, r)
 }
 
-/// The complete label array of a record pattern (`lbl_all`), when it can be
-/// resolved; see `all_record_args`.
+/// The complete label array of a record pattern: `lbl_all` of its first
+/// label (compiler/ml/matching.ml:218-224, 540-563); see `all_record_args`.
 fn record_all_labels(
     ctx_ref: Option<&TypeContext>,
-    pat_type: TypeExprRef,
-    pat_env: EnvRef,
     lbls: &[RecordPatternField],
 ) -> Option<Vec<LabelDescription>> {
     let first_lbl = &lbls[0].1;
+    ctx_ref.map(|ctx| pattern_label_family(ctx, first_lbl))
+}
 
-    // OCaml expands through the typed label's own `lbl_all` array, not by
-    // guessing another record declaration with compatible positions. See
-    // compiler/ml/matching.ml:218-224 and 540-563.
-
-    ctx_ref.and_then(|ctx| {
-        ctx.label_all(first_lbl.lbl_all).or_else(|| {
-            resolve_labels_from_type(ctx, first_lbl.lbl_res, pat_env)
-                .filter(|labels| record_labels_cover_pattern_fields(labels, lbls))
-                .or_else(|| {
-                    resolve_labels_from_type(ctx, pat_type, pat_env)
-                        .filter(|labels| record_labels_cover_pattern_fields(labels, lbls))
-                })
-        })
+/// `lbl.lbl_all`: every pattern label carries the array its record's labels
+/// were described with.
+fn pattern_label_family(ctx: &TypeContext, lbl: &LabelDescription) -> Vec<LabelDescription> {
+    ctx.label_all(lbl.lbl_all).unwrap_or_else(|| {
+        panic!(
+            "record pattern label `{}` carries no lbl_all array ({:?})",
+            lbl.lbl_name, lbl.lbl_all
+        )
     })
 }
 
 fn all_record_args(
     ctx_ref: Option<&TypeContext>,
-    pat_type: TypeExprRef,
-    pat_env: EnvRef,
     lbls: &[RecordPatternField],
 ) -> Vec<RecordPatternField> {
     if lbls.is_empty() {
         return Vec::new();
     }
     let first_opt = lbls[0].3;
-    match record_all_labels(ctx_ref, pat_type, pat_env, lbls) {
+    match record_all_labels(ctx_ref, lbls) {
         Some(all_labels) => {
             // Build a full array with omega for missing fields
             let dummy_loc = crate::parse_arena::Located {
@@ -941,14 +934,12 @@ fn all_record_args(
 /// a record head expands to.
 fn all_record_arg_pats<'p>(
     ctx_ref: Option<&TypeContext>,
-    pat_type: TypeExprRef,
-    pat_env: EnvRef,
     lbls: &'p [RecordPatternField],
 ) -> Vec<&'p Pattern> {
     if lbls.is_empty() {
         return Vec::new();
     }
-    match record_all_labels(ctx_ref, pat_type, pat_env, lbls) {
+    match record_all_labels(ctx_ref, lbls) {
         Some(all_labels) => {
             let mut result: Vec<&'p Pattern> = vec![omega(); all_labels.len()];
             for (_, lbl, pat, _) in lbls {
@@ -1442,7 +1433,7 @@ where
         PatternDesc::Tpat_record(fields, _, _) if !fields.is_empty() => Box::new(
             move |q: &'p Pattern, rem: &[&'p Pattern]| match &q.pat_desc {
                 PatternDesc::Tpat_record(fields2, _, _) if !fields2.is_empty() => {
-                    let expanded = all_record_arg_pats(ctx_ref, q.pat_type, q.pat_env, fields2);
+                    let expanded = all_record_arg_pats(ctx_ref, fields2);
                     Ok((p, prepend_row(expanded, rem)))
                 }
                 PatternDesc::Tpat_any => {
@@ -2775,7 +2766,7 @@ fn simplify_or<'p>(ctx_ref: Option<&TypeContext>, pa: &'p PatArena, p: &'p Patte
                 }
             }
             PatternDesc::Tpat_record(lbls, closed, rest) => {
-                let all_lbls = all_record_args(ctx_ref, p.pat_type, p.pat_env, lbls);
+                let all_lbls = all_record_args(ctx_ref, lbls);
                 Ok(Cow::Owned(with_desc(
                     p,
                     PatternDesc::Tpat_record(all_lbls, *closed, rest.clone()),
@@ -2888,7 +2879,7 @@ pub fn simplify_cases<'p>(
                         ),
                         None => action,
                     };
-                    let all_lbls = all_record_args(ctx_ref, pat.pat_type, pat.pat_env, lbls);
+                    let all_lbls = all_record_args(ctx_ref, lbls);
                     let full_pat: &'p Pattern = pa.alloc(with_desc(
                         pat,
                         PatternDesc::Tpat_record(all_lbls, *closed, None),
@@ -8435,7 +8426,7 @@ fn do_compile_matching<'p>(
                     )
                 }
                 PatternDesc::Tpat_record(fields, _, _) if !fields.is_empty() => {
-                    let all_labels = resolve_all_record_labels(ctx_ref, pat, fields);
+                    let all_labels = resolve_all_record_labels(ctx_ref, fields);
                     let norm_pat = normalize_pat(pa, pat);
                     compile_no_test(
                         ctx_ref,
@@ -8709,12 +8700,10 @@ fn get_all_labels_from_record_fields(
     labels
 }
 
-/// Resolve ALL record labels from the record type, not just those mentioned in the pattern.
-/// This is the equivalent of OCaml's `lbl.lbl_all` which points to all labels of the record type.
-/// We look up the type declaration via the TypeContext to get all labels.
+/// `lbl.lbl_all` of a record pattern's first label (compiler/ml/matching.ml:
+/// 2564-2568 passes it to `divide_record`).
 fn resolve_all_record_labels(
     ctx_ref: &TypeContext,
-    pat: &Pattern,
     fields: &[(
         crate::types::typedtree::Loc<crate::parse_arena::LidentIdx>,
         std::sync::Arc<LabelDescription>,
@@ -8722,256 +8711,10 @@ fn resolve_all_record_labels(
         bool,
     )],
 ) -> Vec<LabelDescription> {
-    if fields.is_empty() {
-        return Vec::new();
+    match fields.first() {
+        Some((_, first_lbl, _, _)) => pattern_label_family(ctx_ref, first_lbl),
+        None => Vec::new(),
     }
-
-    let first_lbl = &fields[0].1;
-    if let Some(all_labels) = ctx_ref.label_all(first_lbl.lbl_all) {
-        return all_labels;
-    }
-
-    // OCaml passes `lbl.lbl_all` from the typed pattern directly to
-    // `divide_record` (compiler/ml/matching.ml:2564-2568). Rust reconstructs
-    // that array, so reject loose lookups that do not include the labels from
-    // the already-typed pattern.
-    if let Some(all_labels) = resolve_labels_from_type(ctx_ref, first_lbl.lbl_res, pat.pat_env)
-        .filter(|labels| record_labels_cover_pattern_fields(labels, fields))
-    {
-        return all_labels;
-    }
-
-    // Try via pat_type
-    if let Some(all_labels) = resolve_labels_from_type(ctx_ref, pat.pat_type, pat.pat_env)
-        .filter(|labels| record_labels_cover_pattern_fields(labels, fields))
-    {
-        return all_labels;
-    }
-
-    // Fallback: return only mentioned fields (old behavior)
-    get_all_labels_from_record_fields(fields)
-}
-
-fn record_labels_cover_pattern_fields(
-    all_labels: &[LabelDescription],
-    fields: &[(
-        crate::types::typedtree::Loc<crate::parse_arena::LidentIdx>,
-        std::sync::Arc<LabelDescription>,
-        Pattern,
-        bool,
-    )],
-) -> bool {
-    fields.iter().all(|(_, field_label, _, _)| {
-        all_labels.iter().any(|label| {
-            // OCaml carries the physical `lbl_all` array from typecore into
-            // matching.ml:1417-1476, so source names and `@as` runtime names
-            // are two views of the same label. Rust reconstructs that array
-            // from caches that may store Lambda.find_name-style runtime names
-            // (compiler/ml/lambda.ml:147-154); accept either spelling while
-            // still requiring the declaration position to match.
-            label.lbl_pos == field_label.lbl_pos
-                && (label.lbl_name == field_label.lbl_name
-                    || label_runtime_name_matching(label)
-                        == label_runtime_name_matching(field_label))
-        })
-    })
-}
-
-fn label_descriptions_from_cached_entries(
-    cached: Vec<(
-        String,
-        i32,
-        MutableFlag,
-        RecordRepresentation,
-        Vec<crate::types::decl::Attribute>,
-    )>,
-) -> Vec<LabelDescription> {
-    cached
-        .into_iter()
-        .map(|(name, pos, mutflag, repr, attrs)| LabelDescription {
-            lbl_name: name.clone(),
-            // typecore.ml `Label` name choice: `lbl_runtime_name = name`.
-            lbl_runtime_name: name,
-            lbl_res: TypeExprRef(0),
-            lbl_arg: TypeExprRef(0),
-            lbl_mut: mutflag,
-            lbl_optional: true,
-            lbl_pos: pos,
-            lbl_all: crate::types::decl::LabelArrayRef(0),
-            lbl_repres: repr,
-            lbl_private: crate::types::asttypes::PrivateFlag::Public,
-            lbl_loc: crate::types::DeclLoc::none(),
-            lbl_attributes: attrs,
-        })
-        .collect()
-}
-
-/// Look up all LabelDescription entries for a record type.
-fn resolve_labels_from_type(
-    ctx_ref: &TypeContext,
-    record_ty: TypeExprRef,
-    env_ref: EnvRef,
-) -> Option<Vec<LabelDescription>> {
-    use crate::types::type_expr::TypeDesc;
-
-    let ty = ctx_ref.repr(record_ty);
-    let desc = ctx_ref.get_desc(ty);
-    let (path, _args) = match &*desc {
-        TypeDesc::Tconstr { path, args, .. } => (path.clone(), args.clone()),
-        _ => return None,
-    };
-    drop(desc);
-
-    if let Some(labels) = ctx_ref.get_record_label_descriptions(&path) {
-        return Some(labels.as_ref().clone());
-    }
-
-    // Match OCaml `lbl.lbl_all` use in compiler/ml/matching.ml:1417-1476.
-    // Typecore registers this lightweight cache while reconstructing record
-    // labels for raw lambda conversion, keyed by the exact type path
-    // (including stamps). Prefer it before any declaration-name fallback.
-    if let Some(labels) = ctx_ref.get_record_labels(&path) {
-        return Some(label_descriptions_from_cached_entries(labels));
-    }
-
-    // Try env lookup first
-    let env = ctx_ref.get_typed_env(env_ref)?;
-    if let Ok(decl) = env.lookup_type(&path) {
-        if let crate::types::TypeKind::TypeRecord(ref labels, ref repr) = decl.type_kind {
-            return Some(build_label_descriptions(labels, repr, decl.type_private));
-        }
-    }
-
-    if let crate::types::Path::Pident(ref id) = path {
-        if id.stamp() != 0 {
-            if let Some(decl) = ctx_ref.find_type_decl_by_stamp(id.stamp()) {
-                if let crate::types::TypeKind::TypeRecord(ref labels, ref repr) = decl.type_kind {
-                    return Some(build_label_descriptions(labels, repr, decl.type_private));
-                }
-            }
-        }
-    }
-
-    // Try exact type_ctx stores. OCaml's `lbl_all` is already exact
-    // (compiler/ml/typecore.ml:2802); avoid falling back from `A.B.t` to any
-    // same-last-name `t`, which can attach another record's debug labels.
-    if let Some(decl) = ctx_ref.find_type_decl_by_path(&path.name()) {
-        if let crate::types::TypeKind::TypeRecord(ref labels, ref repr) = decl.type_kind {
-            return Some(build_label_descriptions(labels, repr, decl.type_private));
-        }
-    }
-    if matches!(path, crate::types::Path::Pident(_))
-        && let Some(decl) = ctx_ref.find_type_decl(path.last())
-    {
-        if let crate::types::TypeKind::TypeRecord(ref labels, ref repr) = decl.type_kind {
-            return Some(build_label_descriptions(labels, repr, decl.type_private));
-        }
-    }
-
-    // Extension/exception inline records use the constructor path itself
-    // (for example `A0`) rather than a parent-type `Pdot`, so reconstruct
-    // their full label set from the constructor's synthetic inline record.
-    for cstr in env.find_all_constructors(path.last()).iter().rev() {
-        let matches_inline_record_path = match &cstr.cstr_kind {
-            crate::types::ConstructorKind::Extension(ext_path) => ext_path.same(&path),
-            crate::types::ConstructorKind::Ordinary(_) => false,
-        };
-        if !matches_inline_record_path {
-            continue;
-        }
-        if let Some(inlined) = &cstr.cstr_inlined {
-            if let crate::types::TypeKind::TypeRecord(ref labels, ref repr) = inlined.type_kind {
-                return Some(build_label_descriptions(labels, repr, inlined.type_private));
-            }
-        }
-    }
-
-    // Handle inline records: path is Pdot(parent_type, constructor_name, _)
-    // Look up the parent type declaration and find the constructor's inline record
-    if let crate::types::Path::Pdot(ref parent_path, ref cstr_name, _) = path {
-        // Try to find the parent type declaration
-        let parent_decl = env
-            .lookup_type(parent_path)
-            .ok()
-            .cloned()
-            .or_else(|| {
-                ctx_ref
-                    .find_type_decl_by_path(&parent_path.name())
-                    .map(|d| d.clone())
-            })
-            .or_else(|| {
-                ctx_ref
-                    .find_type_decl(parent_path.last())
-                    .map(|d| d.clone())
-            })
-            .or_else(|| {
-                if let crate::types::Path::Pident(ref id) = **parent_path {
-                    if id.stamp() != 0 {
-                        ctx_ref
-                            .find_type_decl_by_stamp(id.stamp())
-                            .map(|d| d.clone())
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            });
-        if let Some(parent_decl) = parent_decl {
-            if let crate::types::TypeKind::TypeVariant(ref constrs, layout) = parent_decl.type_kind
-            {
-                for (position, cd) in constrs.iter().enumerate() {
-                    if cd.cd_id.name() == cstr_name.as_str() {
-                        if let crate::types::ConstructorArguments::CstrRecord(ref labels) =
-                            cd.cd_args
-                        {
-                            let repr = RecordRepresentation::RecordInlined {
-                                name: cstr_name.to_string(),
-                                representation: crate::types::ConstructorReference {
-                                    variant: layout,
-                                    position,
-                                },
-                            };
-                            return Some(build_label_descriptions(
-                                labels,
-                                &repr,
-                                parent_decl.type_private,
-                            ));
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    None
-}
-
-fn build_label_descriptions(
-    labels: &[crate::types::decl::LabelDeclaration],
-    repr: &RecordRepresentation,
-    private: crate::types::asttypes::PrivateFlag,
-) -> Vec<LabelDescription> {
-    labels
-        .iter()
-        .enumerate()
-        .map(|(pos, ld)| {
-            LabelDescription {
-                lbl_name: ld.ld_id.name().to_string(),
-                lbl_runtime_name: ld.declaration_name(),
-                lbl_res: TypeExprRef(0), // Not used by matching
-                lbl_arg: ld.ld_type,
-                lbl_mut: ld.ld_mutable,
-                lbl_optional: ld.ld_optional,
-                lbl_pos: pos as i32,
-                lbl_all: crate::types::decl::LabelArrayRef(0),
-                lbl_repres: repr.clone(),
-                lbl_private: private,
-                lbl_loc: ld.ld_loc,
-                lbl_attributes: ld.ld_attributes.clone(),
-            }
-        })
-        .collect()
 }
 
 /// Extract a RowDesc from a type expression (for variant matching).
