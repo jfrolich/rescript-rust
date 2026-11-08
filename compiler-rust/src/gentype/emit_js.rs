@@ -1120,15 +1120,6 @@ pub fn emit_translation_as_string(
         true => crate::gentype::emit_type::emit_import_react(emitters),
         false => emitters,
     };
-    let env = match config.emit_import_curry {
-        true => require_module(
-            true,
-            env,
-            crate::gentype::import_path::bs_curry_path(config),
-            &crate::gentype::module_name::CURRY.to_string(),
-        ),
-        false => env,
-    };
     let emitters = crate::gentype::export_module::emit_all_module_items(
         config,
         emitters,

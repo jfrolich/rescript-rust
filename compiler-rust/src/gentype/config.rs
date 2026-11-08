@@ -31,7 +31,6 @@ pub struct T {
     /// Map from package name to its install path, used to locate [.cmt]/[.cmti]
     /// files of cross-package references.
     pub dep_paths: HashMap<String, String>,
-    pub emit_import_curry: bool,
     pub emit_import_react: bool,
     pub emit_type_prop_done: bool,
     pub everything: bool,
@@ -40,7 +39,6 @@ pub struct T {
     pub module_: Module,
     pub module_resolution: ModuleResolution,
     pub namespace: Option<String>,
-    pub platform_lib: String,
     pub project_root: String,
     pub shims_map: ModuleNameMap,
     pub sources: Vec<String>,
@@ -52,7 +50,6 @@ pub fn default() -> T {
         bsb_project_root: String::new(),
         bs_dependencies: vec![],
         dep_paths: HashMap::new(),
-        emit_import_curry: false,
         emit_import_react: false,
         emit_type_prop_done: false,
         everything: false,
@@ -61,26 +58,11 @@ pub fn default() -> T {
         module_: Module::ESModule,
         module_resolution: ModuleResolution::Node,
         namespace: None,
-        platform_lib: String::new(),
         project_root: String::new(),
         shims_map: BTreeMap::new(),
         sources: vec![],
         suffix: ".bs.js".to_string(),
     }
-}
-
-pub fn bs_platform_lib(config: &T) -> String {
-    match config.module_ {
-        Module::ESModule => format!("{}/lib/es6", config.platform_lib),
-        Module::CommonJS => format!("{}/lib/js", config.platform_lib),
-    }
-}
-
-pub fn get_bs_curry_path(config: &T) -> String {
-    Path::new(&bs_platform_lib(config))
-        .join("curry.js")
-        .to_string_lossy()
-        .to_string()
 }
 
 // ----- CLI-flag backing state -----------------------------------------
@@ -174,7 +156,6 @@ pub fn build_config_from_flags(namespace: Option<String>, flags: FlagState) -> T
         bsb_project_root,
         bs_dependencies: flags.bs_dependencies_flag,
         dep_paths,
-        emit_import_curry: false,
         emit_import_react: false,
         emit_type_prop_done: false,
         everything: false,
@@ -183,7 +164,6 @@ pub fn build_config_from_flags(namespace: Option<String>, flags: FlagState) -> T
         module_,
         module_resolution,
         namespace,
-        platform_lib: "rescript".to_string(),
         project_root,
         shims_map,
         sources: flags.source_dirs_flag,

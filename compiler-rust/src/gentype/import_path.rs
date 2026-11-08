@@ -4,13 +4,6 @@ use std::path::Path;
 
 pub type T = (String, String);
 
-pub fn bs_curry_path(config: &crate::gentype::config::T) -> T {
-    (
-        String::new(),
-        crate::gentype::config::get_bs_curry_path(config),
-    )
-}
-
 pub fn from_module(
     dir: &str,
     import_extension: &str,

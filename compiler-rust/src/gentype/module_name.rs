@@ -4,7 +4,6 @@ use std::cmp::Ordering;
 
 pub type T = String;
 
-pub const CURRY: &str = "Curry";
 pub const RESCRIPT_PERVASIVES: &str = "RescriptPervasives";
 
 pub fn sanitize_id(s: &str) -> String {

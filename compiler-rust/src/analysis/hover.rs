@@ -224,17 +224,13 @@ impl Hover<'_, '_> {
             .filter_map(|path| {
                 let (env, declared) =
                     references::dig_constructor(self.session, &env_to_search, &path)?;
-                if shared::is_uncurried_internal(&path) {
-                    None
-                } else {
-                    Some(ExtractedType {
-                        name: declared.name.txt.clone(),
-                        loc: declared.extent_loc,
-                        decl: declared.item.decl.clone(),
-                        env,
-                        path,
-                    })
-                }
+                Some(ExtractedType {
+                    name: declared.name.txt.clone(),
+                    loc: declared.extent_loc,
+                    decl: declared.item.decl.clone(),
+                    env,
+                    path,
+                })
             })
             .collect()
     }
