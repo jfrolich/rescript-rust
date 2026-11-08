@@ -623,6 +623,19 @@ fn append_compile_warnings(
     }
 }
 
+/// How far a [`compile`] call got across its rounds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CompileProgress {
+    /// No module has failed and the scheduler has not stalled.
+    Ok,
+    /// A module failed. Its dependents never become ready, so an unfinished
+    /// universe is expected and is not reported as a cycle.
+    HadErrors,
+    /// Nothing was in flight while modules were still waiting and no module
+    /// had failed: the remaining modules form a dependency cycle.
+    Stalled,
+}
+
 #[instrument(name = "build.compile", skip_all)]
 pub fn compile(
     build_state: &mut BuildCommandState,
@@ -761,8 +774,7 @@ pub fn compile(
     let critical_slots = qos::critical_slots();
 
     let mut results_buffer: Vec<CompletionMsg> = Vec::with_capacity(compile_universe.len());
-    let mut has_errors = false;
-    let mut stalled = false;
+    let mut progress = CompileProgress::Ok;
     let mut completed_count = 0usize;
     let mut total_universe_count = 0usize;
     let mut all_registry_only: AHashSet<String> = AHashSet::new();
@@ -994,8 +1006,8 @@ pub fn compile(
                 }
 
                 if in_flight == 0 {
-                    if completed.len() < compile_universe_count && !has_errors {
-                        stalled = true;
+                    if completed.len() < compile_universe_count && progress == CompileProgress::Ok {
+                        progress = CompileProgress::Stalled;
                     }
                     break;
                 }
@@ -1127,7 +1139,7 @@ pub fn compile(
                             let module_failed = msg.result.is_err()
                                 || msg.interface_result.as_ref().is_some_and(|r| r.is_err());
                             if module_failed {
-                                has_errors = true;
+                                progress = CompileProgress::HadErrors;
                             }
 
                             let finished_name = msg.module_name.clone();
@@ -1225,7 +1237,7 @@ pub fn compile(
         }
         all_registry_only.extend(registry_only.iter().cloned());
         all_dirty.extend(dirty_set);
-        if !cutoff || stalled {
+        if !cutoff || progress == CompileProgress::Stalled {
             break compile_universe;
         }
         let written: AHashSet<String> = compiled_this_build
@@ -1490,7 +1502,7 @@ pub fn compile(
         }
     }
 
-    if stalled {
+    if progress == CompileProgress::Stalled {
         let cycle = dependency_cycle::find(
             &compile_universe
                 .iter()
