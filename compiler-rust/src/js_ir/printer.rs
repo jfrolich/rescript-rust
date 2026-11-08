@@ -4,7 +4,8 @@
 //! into formatted JavaScript source code.
 
 use super::arena::{
-    Clause, Expr, ExprKind, JsArena, PropName, QualId, Stmt, StmtKind, StringClauseInfo, VarDecl,
+    Clause, Expr, ExprKind, FunId, JsArena, PropName, QualId, Stmt, StmtKind, StringClauseInfo,
+    VarDecl,
 };
 use super::op::{BinOp, Kind, Number, UsedStats};
 use super::{CallArity, CallKind, ForDirection, JsRawInfo, ModulePathResolver};
@@ -3222,17 +3223,20 @@ impl JsIdentStats {
     }
 }
 
-/// Reusable sets for computing the free variables of function bodies.
+/// Free variables of function bodies, computed once per function.
 ///
 /// OCaml computes each function's free variables once per program in
 /// `Js_pass_scope` and stores them in its `Js_fun_env`
 /// (compiler/core/js_pass_scope.ml, compiler/core/js_fun_env.ml), which
 /// `pp_function` reads (compiler/core/js_dump.ml:337-345). The printer
-/// recomputes them per function from the body; these pooled sets keep that
-/// from allocating a pair of hash sets per nested scope.
+/// computes them on demand instead, keeping each nested function's result in
+/// `fun_free` keyed by its `FunId`, so printing nested closures does not
+/// re-walk inner bodies once per enclosing function. The pooled sets keep the
+/// walk from allocating a pair of hash sets per nested scope.
 #[derive(Default)]
 struct FreeVarScratch {
     pool: Vec<JsIdentStats>,
+    fun_free: HashMap<FunId, Box<[Ident]>>,
 }
 
 impl FreeVarScratch {
@@ -3256,6 +3260,27 @@ impl FreeVarScratch {
         );
         inner.defined_idents.clear();
         self.pool.push(inner);
+    }
+
+    /// Adds the free variables of function `f` to `out`'s used identifiers,
+    /// computing and remembering them on first use.
+    fn collect_fun(&mut self, a: &JsArena, f: FunId, out: &mut JsIdentStats) {
+        if let Some(free) = self.fun_free.get(&f) {
+            out.used_idents.extend(free.iter().copied());
+            return;
+        }
+        let info = a.fun(f);
+        let mut stats = self.pool.pop().unwrap_or_default();
+        self.collect_nested(
+            a,
+            a.stmts(info.body),
+            a.ident_slice(info.params).iter().copied(),
+            &mut stats,
+        );
+        let free: Box<[Ident]> = stats.used_idents.drain().collect();
+        self.pool.push(stats);
+        out.used_idents.extend(free.iter().copied());
+        self.fun_free.insert(f, free);
     }
 
     /// The free variables of `block` with `defined` bound around it, sorted.
@@ -3450,15 +3475,7 @@ fn collect_expression_idents(
                 }
             }
         }
-        ExprKind::Fun(f) => {
-            let info = a.fun(f);
-            memo.collect_nested(
-                a,
-                a.stmts(info.body),
-                a.ident_slice(info.params).iter().copied(),
-                stats,
-            );
-        }
+        ExprKind::Fun(f) => memo.collect_fun(a, f, stats),
         ExprKind::Array(items, _) | ExprKind::CamlBlock(items, _, _) => {
             for item in a.exprs(items) {
                 collect_expression_idents(a, *item, stats, memo);
