@@ -2262,19 +2262,21 @@ fn print_exp_fun_parameter(
                         arena,
                     )
                 }
-                // ~d as x or ~d=pat
-                (ArgLabel::Labelled(lbl), _) => Doc::concat(vec![
-                    Doc::text("~"),
-                    print_ident_like(arena.get_string(lbl.txt), false, false),
-                    Doc::text(" as "),
-                    print_pattern(state, pat, cmt_tbl, arena),
-                ]),
-                (ArgLabel::Optional(lbl), _) => Doc::concat(vec![
-                    Doc::text("~"),
-                    print_ident_like(arena.get_string(lbl.txt), false, false),
-                    Doc::text(" as "),
-                    print_pattern(state, pat, cmt_tbl, arena),
-                ]),
+                // ~b as c: the parser puts attributes before `~b` on `c`
+                // (res_printer.ml:5658-5667).
+                (ArgLabel::Labelled(lbl) | ArgLabel::Optional(lbl), _) => {
+                    let bare = Pattern {
+                        ppat_attributes: Attributes::new(),
+                        ..(*pat).clone()
+                    };
+                    Doc::concat(vec![
+                        print_attributes(state, &pat.ppat_attributes, cmt_tbl, arena),
+                        Doc::text("~"),
+                        print_ident_like(arena.get_string(lbl.txt), false, false),
+                        Doc::text(" as "),
+                        print_pattern(state, &bare, cmt_tbl, arena),
+                    ])
+                }
             };
 
             // Only add =? for optional arguments without a default value
