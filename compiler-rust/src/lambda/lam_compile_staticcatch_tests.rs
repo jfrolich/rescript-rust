@@ -1,7 +1,7 @@
 use super::*;
 use crate::expect_dump;
 use crate::js_ir::dump;
-use crate::js_ir::printer::{print_expr, print_stmts};
+use crate::js_ir::printer::print_stmts;
 use crate::lambda::LamLoc;
 
 #[test]

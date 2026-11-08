@@ -3,33 +3,38 @@
 //! Tests assert on the shape of compiled JS IR by comparing a dump against
 //! an expected string ([`expect_dump!`](crate::expect_dump)), instead of
 //! pattern-matching nested nodes. The dump shows every node kind and payload
-//! that changes meaning; identifiers print by name.
+//! that changes meaning. Identifiers print by name; within one dump, a second
+//! distinct identifier with an already-seen name prints as `name#1` (then
+//! `name#2`, ...), so identity relations show without depending on stamps.
 
 use std::fmt::Write;
+
+use ahash::AHashMap;
 
 use super::arena::{Clause, Expr, ExprKind, JsArena, PropName, Stmt, StmtKind, StmtList};
 use super::op::{Number, UsedStats};
 use super::{CallArity, CallKind};
+use crate::ident::Ident;
 use crate::lambda::SwitchCaseTag;
 
 /// Dump of one expression.
 pub fn expr(a: &JsArena, e: Expr) -> String {
     let mut out = String::new();
-    Dumper { a, out: &mut out }.expr(e);
+    Dumper::new(a, &mut out).expr(e);
     out
 }
 
 /// Dump of one statement.
 pub fn stmt(a: &JsArena, s: Stmt) -> String {
     let mut out = String::new();
-    Dumper { a, out: &mut out }.stmt(s);
+    Dumper::new(a, &mut out).stmt(s);
     out
 }
 
 /// Dump of a statement sequence, statements separated by `; `.
 pub fn block(a: &JsArena, block: &[Stmt]) -> String {
     let mut out = String::new();
-    Dumper { a, out: &mut out }.stmts(block);
+    Dumper::new(a, &mut out).stmts(block);
     out
 }
 
@@ -61,6 +66,37 @@ macro_rules! expect_dump {
 struct Dumper<'a, 'o> {
     a: &'a JsArena,
     out: &'o mut String,
+    /// The distinct identifiers seen so far for each name, in order.
+    seen: AHashMap<&'static str, Vec<Ident>>,
+}
+
+impl<'a, 'o> Dumper<'a, 'o> {
+    fn new(a: &'a JsArena, out: &'o mut String) -> Self {
+        Dumper {
+            a,
+            out,
+            seen: AHashMap::new(),
+        }
+    }
+
+    /// The printed form of `id`: its name, plus `#k` for the k-th distinct
+    /// identifier with that name (k > 0).
+    fn ident(&mut self, id: Ident) -> String {
+        let name = id.name();
+        let seen = self.seen.entry(name).or_default();
+        let k = match seen.iter().position(|other| other.same(&id)) {
+            Some(k) => k,
+            None => {
+                seen.push(id);
+                seen.len() - 1
+            }
+        };
+        if k == 0 {
+            name.to_string()
+        } else {
+            format!("{name}#{k}")
+        }
+    }
 }
 
 impl Dumper<'_, '_> {
@@ -176,7 +212,10 @@ impl Dumper<'_, '_> {
                 }
                 self.w(")");
             }
-            ExprKind::Var(id) => self.w(a.ident(id).name()),
+            ExprKind::Var(id) => {
+                let name = self.ident(a.ident(id));
+                self.w(&name);
+            }
             ExprKind::Qualified(q) => {
                 let (module, member) = a.qual(q);
                 let _ = write!(self.out, "{}", module.id.name());
@@ -206,10 +245,10 @@ impl Dumper<'_, '_> {
                     let _ = write!(self.out, "[{}]", flags.join(","));
                 }
                 self.w("(");
-                let names: Vec<&str> = a
+                let names: Vec<String> = a
                     .ident_slice(info.params)
                     .iter()
-                    .map(|p| p.name())
+                    .map(|p| self.ident(*p))
                     .collect();
                 self.w(&names.join(", "));
                 self.w(")");
@@ -293,8 +332,8 @@ impl Dumper<'_, '_> {
                 let fields: Vec<String> = a
                     .rest(fields)
                     .iter()
-                    .map(|f| match &f.ident {
-                        Some(id) => format!("{}: {}", f.label, id.name()),
+                    .map(|f| match f.ident {
+                        Some(id) => format!("{}: {}", f.label, self.ident(id)),
                         None => format!("...{}", f.label),
                     })
                     .collect();
@@ -362,7 +401,8 @@ impl Dumper<'_, '_> {
                 if decl.ident_info.used_stats != UsedStats::default() {
                     let _ = write!(self.out, ",{:?}", decl.ident_info.used_stats);
                 }
-                let _ = write!(self.out, "] {}", decl.ident.name());
+                let name = self.ident(decl.ident);
+                let _ = write!(self.out, "] {name}");
                 if let Some(value) = decl.value {
                     self.w(" = ");
                     self.expr(value);
@@ -403,7 +443,8 @@ impl Dumper<'_, '_> {
                 let info = a.for_range(info);
                 self.w("For");
                 self.label(info.label);
-                let _ = write!(self.out, "({} = ", a.ident(info.ident).name());
+                let name = self.ident(a.ident(info.ident));
+                let _ = write!(self.out, "({name} = ");
                 match info.init {
                     Some(init) => self.expr(init),
                     None => self.w("_"),
@@ -418,7 +459,8 @@ impl Dumper<'_, '_> {
                 let info = a.for_of(info);
                 self.w(if await_ { "ForAwaitOf" } else { "ForOf" });
                 self.label(info.label);
-                let _ = write!(self.out, "({} of ", a.ident(info.ident).name());
+                let name = self.ident(a.ident(info.ident));
+                let _ = write!(self.out, "({name} of ");
                 self.expr(info.iterable);
                 self.w(") ");
                 self.braced(info.body);
@@ -475,7 +517,8 @@ impl Dumper<'_, '_> {
                 self.w("Try");
                 self.braced(info.body);
                 if let Some((id, body)) = info.catch {
-                    let _ = write!(self.out, " catch({})", a.ident(id).name());
+                    let name = self.ident(a.ident(id));
+                    let _ = write!(self.out, " catch({name})");
                     self.braced(body);
                 }
                 if let Some(finally) = info.finally {

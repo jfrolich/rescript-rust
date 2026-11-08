@@ -1,11 +1,8 @@
 use super::*;
 use crate::expect_dump;
 use crate::js_ir::dump;
-use crate::js_ir::printer::{print_expr, print_stmts};
 use crate::js_ir::test_util::test_fun;
-use crate::lambda::lam_coercion::{
-    ExtractedExports, extract_toplevel_exports, resolve_export_aliases,
-};
+use crate::lambda::lam_coercion::{ExtractedExports, resolve_export_aliases};
 
 #[test]
 fn coerce_toplevel_exports_reuses_existing_undefined_binding() {
@@ -89,8 +86,13 @@ fn coerce_toplevel_exports_keeps_undefined_rebound_after_later_effects() {
 
     expect_dump!(
         dump::block(&compiler.j, &block),
-        "let[Strict] MyURL = undefined; Exp(Call[Na](callback; )); let[Strict] MyURL = undefined"
+        "let[Strict] MyURL = undefined; Exp(Call[Na](callback; )); let[Strict] MyURL#1 = undefined"
     );
+    let [rebound] = exports.as_slice() else {
+        panic!("expected one export, got {exports:?}");
+    };
+    assert!(!rebound.same(&alias));
+    assert_eq!(rebound.name(), alias.name());
 }
 
 #[test]
@@ -178,7 +180,7 @@ fn coerce_and_resolve_keep_declared_same_name_function_export_aliases_with_multi
     assert_eq!(exports, vec![exported]);
     expect_dump!(
         dump::block(&compiler.j, &block),
-        "let[Alias] broken = doSomethingAsync; let[Strict] broken = Fun[async](param){Return(undefined)}; let[Alias] broken = broken"
+        "let[Alias] broken = doSomethingAsync; let[Strict] broken#1 = Fun[async](param){Return(undefined)}; let[Alias] broken#2 = broken#1"
     );
 }
 

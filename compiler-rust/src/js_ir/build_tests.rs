@@ -4,11 +4,11 @@
 use super::{exp as JE, stmt as JS};
 use crate::expect_dump;
 use crate::ident::Ident;
+use crate::js_ir::CallInfo;
 use crate::js_ir::arena::*;
 use crate::js_ir::dump;
 use crate::js_ir::op::*;
 use crate::js_ir::printer::print_stmts;
-use crate::js_ir::CallInfo;
 use crate::lambda::SwitchCaseTag;
 #[test]
 fn test_expression_creation() {

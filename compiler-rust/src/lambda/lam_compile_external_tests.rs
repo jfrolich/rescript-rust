@@ -11,7 +11,6 @@ use crate::lambda::js_pass_flatten_and_mark_dead::{
 };
 use crate::lambda::js_pass_tailcall_inline::apply_js_tailcall_inline_pass;
 use crate::lambda::js_shake::apply_js_shake_pass;
-use crate::lambda::lam_coercion::{extract_toplevel_exports, resolve_export_aliases};
 
 #[test]
 fn lowers_js_var_without_args_to_a_value() {
@@ -654,7 +653,7 @@ fn lowers_js_object_create_with_nonduplicable_optional_field_after_object_temp_l
 
     expect_dump!(
         dump::block(&compiler.j, &compiled.prelude),
-        "let[Variable] tmp = {}; let[Strict] tmp = Raw(\"computeOption()\"); If(NotEqEq(tmp, undefined)) {Exp(Eq(tmp.alt, Call[BuiltinRuntime,full](Primitive_option.valFromOption<Runtime>; tmp)))} else {}"
+        "let[Variable] tmp = {}; let[Strict] tmp#1 = Raw(\"computeOption()\"); If(NotEqEq(tmp#1, undefined)) {Exp(Eq(tmp.alt, Call[BuiltinRuntime,full](Primitive_option.valFromOption<Runtime>; tmp#1)))} else {}"
     );
 }
 
@@ -1311,4 +1310,6 @@ fn lowers_nullable_predicates_to_js_null_checks() {
         dump::expr(&compiler.j, nullable_compiled.expr),
         "IsNullOrUndefined(value)"
     );
+    assert!(nullable_compiled.prelude.is_empty());
+    assert!(undefined_compiled.prelude.is_empty());
 }
