@@ -1660,6 +1660,11 @@ mod tests {
             line_and_column(*parser.arena().loc_start(structure[0].pstr_loc)),
             (1, 0)
         );
+        // Sources are read as Latin-1, one char per byte, so the first line
+        // starts at byte 3, after the mark, as `line_offset = offset` does
+        // in res_scanner.ml.
+        let start = *parser.arena().loc_start(structure[0].pstr_loc);
+        assert_eq!((start.bol, start.cnum), (3, 3));
         for (source, expected) in [
             ("let x = 1\rlet y = 2".to_string(), (2, 0)),
             ("let x = 1 // c\rlet y = 2".to_string(), (2, 0)),
