@@ -288,8 +288,13 @@ fn reprint_expr_at_loc(
         ))),
         pstr_loc: LocIdx::none(),
     };
-    let printed =
-        crate::parser::printer::print_implementation(&[wrapped], comments, 80, &mut sub_arena);
+    let printed = crate::parser::printer::print_implementation(
+        &[wrapped],
+        comments,
+        80,
+        "\n",
+        &mut sub_arena,
+    );
     Some(printed.trim().to_string())
 }
 
@@ -307,6 +312,7 @@ fn parse_and_reprint(ctx: &TypeContext, text: &str) -> Option<String> {
         &structure,
         comments,
         80,
+        "\n",
         &mut sub_arena,
     ))
 }

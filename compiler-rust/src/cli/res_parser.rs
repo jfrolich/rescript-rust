@@ -170,10 +170,9 @@ fn run(args: Vec<String>) {
         return;
     }
 
-    // res_cli.ml:86-88: read sources with LF line endings, so a CRLF file
-    // prints like an LF one, also inside comments, template literals and raw
-    // JS.
-    let source = crate::parser::line_endings::to_lf(&source).into_owned();
+    // res_cli.ml:79-82: the res target keeps the line endings of a CRLF
+    // file, like bsc -format; the source is parsed as it is.
+    let newline = crate::parser::line_endings::newline(&source);
 
     // Determine if we're parsing an interface
     let is_interface = args.interface || filename.ends_with(".resi") || filename.ends_with(".mli");
@@ -242,6 +241,7 @@ fn run(args: Vec<String>) {
             "res" => print_signature_res(
                 &signature,
                 parser.comments().to_vec(),
+                newline,
                 parser.arena_mut(),
                 &mut io::stdout(),
             ),
@@ -378,6 +378,7 @@ fn run(args: Vec<String>) {
                 let output = printer::print_structure_with_comments(
                     &structure,
                     parser.comments().to_vec(),
+                    newline,
                     parser.arena_mut(),
                 );
                 if !output.is_empty() {
@@ -604,11 +605,12 @@ fn print_tokens(source: &str, filename: &str, out: &mut impl Write) {
 fn print_signature_res(
     signature: &[SignatureItem],
     comments: Vec<Comment>,
+    newline: &str,
     arena: &mut ParseArena,
     out: &mut impl Write,
 ) {
     // Use printer to print signature
-    let output = printer::print_signature_with_comments(signature, comments, arena);
+    let output = printer::print_signature_with_comments(signature, comments, newline, arena);
     if !output.is_empty() {
         // Convert Latin-1 chars back to bytes to preserve original file encoding
         let _ = out.write_all(&latin1_bytes(&output));

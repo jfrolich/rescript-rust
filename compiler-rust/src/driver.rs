@@ -781,13 +781,11 @@ pub fn format_source_with(
     filename: &str,
     ignore_parse_errors: bool,
 ) -> (String, Option<Vec<u8>>) {
-    // res_multi_printer.ml:24-31 `Res_line_endings.preserve`: print the
-    // source with LF line endings and give the result CRLF ones when the
-    // source's first line break is CRLF.
+    // res_multi_printer.ml:2-3,28-32: parse the source as it is and print
+    // the line breaks the printer writes with the source's newline.
     let raw_source = crate::source_text::latin1_bytes_to_string(source.to_vec());
-    let crlf = crate::parser::line_endings::uses_crlf(&raw_source);
-    let source = crate::parser::line_endings::to_lf(&raw_source);
-    let source: &str = &source;
+    let newline = crate::parser::line_endings::newline(&raw_source);
+    let source: &str = &raw_source;
     let is_interface = filename.ends_with(".resi");
     let mut parser = Parser::new(filename, source);
     let (report, output) = if is_interface {
@@ -800,6 +798,7 @@ pub fn format_source_with(
         let output = crate::parser::printer::print_signature_with_comments(
             &signature,
             comments,
+            newline,
             parser.arena_mut(),
         );
         (report, output)
@@ -813,14 +812,10 @@ pub fn format_source_with(
         let output = crate::parser::printer::print_structure_with_comments(
             &structure,
             comments,
+            newline,
             parser.arena_mut(),
         );
         (report, output)
-    };
-    let output = if crlf {
-        crate::parser::line_endings::to_crlf(&output)
-    } else {
-        output
     };
     (report, Some(output.chars().map(|c| c as u8).collect()))
 }
@@ -12046,19 +12041,37 @@ pub fn typecheck_preprocessed_signature_in_process(
 
 #[cfg(test)]
 mod tests {
-    /// tests/syntax_tests/res_test.ml:27-56: formatting keeps a file's line
+    /// tests/syntax_tests/res_test.ml:27-75: formatting keeps a file's line
     /// endings, also inside comments, template literals and raw JS, and
-    /// formatting the result again changes nothing.
+    /// formatting the result again changes nothing. The line breaks inside
+    /// literals are part of the program and keep their bytes, whatever the
+    /// file's line endings, and so do the ones inside comments.
     #[test]
     fn format_keeps_line_endings() {
-        let lf = "/* a\n multi-line comment */\nlet s = `line 1\nline 2`\nlet r = %raw(`\n  function () {\n    return 1\n  }\n`)\n";
-        let crlf = crate::parser::line_endings::to_crlf(lf);
-        for source in [lf, crlf.as_str()] {
-            let formatted = super::format_source(source.as_bytes(), "A.res").unwrap();
-            assert_eq!(String::from_utf8_lossy(&formatted), source);
-            let again = super::format_source(&formatted, "A.res").unwrap();
-            assert_eq!(again, formatted);
+        let to_crlf = |text: &str| text.split('\n').collect::<Vec<_>>().join("\r\n");
+        let format = |source: &str| {
+            String::from_utf8(super::format_source(source.as_bytes(), "A.res").unwrap()).unwrap()
+        };
+        let lf = "/* a\n multi-line comment */\n/* a comment\n * with stars\n */\nlet s = `line 1\nline 2`\nlet r = %raw(`\n  function () {\n    return 1\n  }\n`)\n";
+        let crlf = to_crlf(lf);
+        for source in [
+            lf,
+            crlf.as_str(),
+            "let x = 1\r\nlet s = \"a\nb\"\r\n",
+            "let x = 1\nlet s = \"a\r\nb\"\n",
+            "let x = 1\r\nlet t = `a\nb`\r\nlet c = '\n'\r\nlet p = #\"a\nb\"\r\n",
+            "let x = 1\nlet t = `a\r\nb`\nlet c = '\r'\nlet p = #\"a\r\nb\"\n",
+            "let x = 1\n/* a\r\r\nb\nc */\nlet y = 2\n",
+            "let x = 1\r\n/* a\nb\r\nc */\r\nlet y = 2\r\n",
+        ] {
+            let formatted = format(source);
+            assert_eq!(formatted, source);
+            assert_eq!(format(&formatted), formatted);
         }
+        // The printer writes the line breaks of a comment it reindents.
+        let formatted = format("let x = 1\n/* a\r\r\n b */\nlet y = 2\n");
+        assert_eq!(formatted, "let x = 1\n/* a\n b */\nlet y = 2\n");
+        assert_eq!(format(&to_crlf(&formatted)), to_crlf(&formatted));
         let unformatted = super::format_source(b"let  x  =  1\r\n", "A.res").unwrap();
         assert_eq!(unformatted, b"let x = 1\r\n");
     }

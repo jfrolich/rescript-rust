@@ -429,17 +429,44 @@ impl Doc {
         width >= 0
     }
 
-    /// Render the document to a string with the given maximum line width
+    /// Render the document to a string with the given maximum line width,
+    /// its line breaks written as LF (`Res_doc.to_string ~width`).
     pub fn to_string(&self, width: i32) -> String {
-        // First propagate forced breaks
+        self.to_string_with_newline(width, "\n")
+    }
+
+    /// `Res_doc.to_string ~newline ~width` (res_doc.ml:206-280): the line
+    /// breaks the printer writes are `newline`; a literal line is part of a
+    /// literal's contents and stays LF.
+    pub fn to_string_with_newline(&self, width: i32, newline: &str) -> String {
         self.propagate_forced_breaks();
 
         let mut buffer = String::with_capacity(1024);
         let mut pos = 0i32;
+        // `line_suffices`, oldest first: OCaml conses each new suffix and
+        // reverses the list when it flushes them.
         let mut line_suffices: Vec<(i32, Mode, &Doc)> = Vec::new();
         let mut stack: Vec<(i32, Mode, &Doc)> = vec![(0, Mode::Flat, self)];
 
-        while let Some((indent, mode, doc)) = stack.pop() {
+        // `Mini_buffer.flush_newline`: trim the spaces before the line break.
+        fn flush_newline(buffer: &mut String, newline: &str) {
+            let trimmed_len = buffer.trim_end_matches(' ').len();
+            buffer.truncate(trimmed_len);
+            buffer.push_str(newline);
+        }
+
+        loop {
+            let Some((indent, mode, doc)) = stack.pop() else {
+                // `| [] -> process ~pos:0 [] (List.rev suffices)`
+                if line_suffices.is_empty() {
+                    break;
+                }
+                for suffix in line_suffices.drain(..).rev() {
+                    stack.push(suffix);
+                }
+                pos = 0;
+                continue;
+            };
             match doc {
                 Doc::Nil | Doc::BreakParent => {}
                 Doc::Text(txt) => {
@@ -450,7 +477,6 @@ impl Doc {
                     line_suffices.push((indent, mode, doc));
                 }
                 Doc::Concat(docs) => {
-                    // Push in reverse order
                     for doc in docs.iter().rev() {
                         stack.push((indent, mode, doc));
                     }
@@ -471,38 +497,31 @@ impl Doc {
                 Doc::LineBreak(style) => {
                     if mode == Mode::Break {
                         if !line_suffices.is_empty() {
-                            // Process line suffices first, then come back to this line break
+                            // `process ~pos:ind [] (List.concat [List.rev
+                            // line_suffices; cmd :: rest])`
                             stack.push((indent, mode, doc));
                             for suffix in line_suffices.drain(..).rev() {
                                 stack.push(suffix);
                             }
+                            pos = indent;
                         } else if *style == LineStyle::Literal {
                             buffer.push('\n');
                             pos = 0;
                         } else {
-                            // Trim trailing spaces only (not all whitespace - preserve newlines!)
-                            // This mimics OCaml's flush_newline which only trims ' ' characters
-                            let trimmed_len = buffer.trim_end_matches(' ').len();
-                            buffer.truncate(trimmed_len);
-                            buffer.push('\n');
+                            flush_newline(&mut buffer, newline);
                             for _ in 0..indent {
                                 buffer.push(' ');
                             }
                             pos = indent;
                         }
                     } else {
-                        // Flat mode
                         match style {
                             LineStyle::Classic => {
                                 buffer.push(' ');
                                 pos += 1;
                             }
                             LineStyle::Hard => {
-                                // Trim trailing spaces only (not all whitespace - preserve newlines!)
-                                // This mimics OCaml's flush_newline which only trims ' ' characters
-                                let trimmed_len = buffer.trim_end_matches(' ').len();
-                                buffer.truncate(trimmed_len);
-                                buffer.push('\n');
+                                flush_newline(&mut buffer, newline);
                                 pos = 0;
                             }
                             LineStyle::Literal => {
@@ -514,8 +533,6 @@ impl Doc {
                     }
                 }
                 Doc::Group { should_break, doc } => {
-                    // Include remaining stack in fits check (like OCaml)
-                    // Pass stack as slice reference to avoid cloning
                     if should_break.get()
                         || !Self::fits(width - pos, (indent, Mode::Flat, doc), &stack)
                     {
@@ -525,99 +542,20 @@ impl Doc {
                     }
                 }
                 Doc::CustomLayout(docs) => {
-                    // Find the first layout that fits, or use the last one
-                    // Include remaining stack in fits check (like OCaml)
-                    // Pass stack as slice reference to avoid cloning
-                    let mut chosen = docs.last();
-                    for doc in docs.iter() {
-                        if Self::fits(width - pos, (indent, Mode::Flat, doc), &stack) {
-                            chosen = Some(doc);
-                            break;
-                        }
-                    }
+                    // `find_group_that_fits`: the last layout when none
+                    // before it fits, `Nil` when there is none.
+                    let chosen = match docs.split_last() {
+                        None => None,
+                        Some((last, init)) => Some(
+                            init.iter()
+                                .find(|doc| {
+                                    Self::fits(width - pos, (indent, Mode::Flat, doc), &stack)
+                                })
+                                .unwrap_or(last),
+                        ),
+                    };
                     if let Some(doc) = chosen {
                         stack.push((indent, Mode::Flat, doc));
-                    }
-                }
-            }
-        }
-
-        // Process any remaining line suffices
-        for (indent, mode, doc) in line_suffices.into_iter().rev() {
-            stack.push((indent, mode, doc));
-        }
-        while let Some((indent, mode, doc)) = stack.pop() {
-            match doc {
-                Doc::Nil | Doc::BreakParent | Doc::LineSuffix(_) => {}
-                Doc::Text(txt) => {
-                    buffer.push_str(txt);
-                    pos += text_width(txt);
-                }
-                Doc::Concat(docs) => {
-                    for doc in docs.iter().rev() {
-                        stack.push((indent, mode, doc));
-                    }
-                }
-                Doc::Indent(doc) => {
-                    stack.push((indent + 2, mode, doc));
-                }
-                Doc::LineBreak(style) => {
-                    if mode == Mode::Break {
-                        if *style == LineStyle::Literal {
-                            buffer.push('\n');
-                            pos = 0;
-                        } else {
-                            let trimmed_len = buffer.trim_end_matches(' ').len();
-                            buffer.truncate(trimmed_len);
-                            buffer.push('\n');
-                            if indent > 0 {
-                                buffer.push_str(&" ".repeat(indent as usize));
-                            }
-                            pos = indent;
-                        }
-                    } else {
-                        // Flat mode
-                        match style {
-                            LineStyle::Classic => {
-                                buffer.push(' ');
-                                pos += 1;
-                            }
-                            LineStyle::Hard => {
-                                let trimmed_len = buffer.trim_end_matches(' ').len();
-                                buffer.truncate(trimmed_len);
-                                buffer.push('\n');
-                                pos = 0;
-                            }
-                            LineStyle::Literal => {
-                                buffer.push('\n');
-                                pos = 0;
-                            }
-                            LineStyle::Soft => {}
-                        }
-                    }
-                }
-                Doc::Group {
-                    doc: contents,
-                    should_break,
-                } => {
-                    let mode = if should_break.get() {
-                        Mode::Break
-                    } else {
-                        Mode::Flat
-                    };
-                    stack.push((indent, mode, contents));
-                }
-                Doc::IfBreaks { yes, no, .. } => {
-                    if mode == Mode::Break {
-                        stack.push((indent, mode, yes));
-                    } else {
-                        stack.push((indent, mode, no));
-                    }
-                }
-                Doc::CustomLayout(docs) => {
-                    // Use the first option
-                    if let Some(first) = docs.first() {
-                        stack.push((indent, mode, first));
                     }
                 }
             }

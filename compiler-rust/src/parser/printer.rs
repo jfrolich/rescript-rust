@@ -295,7 +295,9 @@ fn print_multiline_comment_content(txt: &str) -> Doc {
             Doc::concat(vec![Doc::text("/* "), Doc::text(trimmed), Doc::text(" */")])
         }
         _ => {
-            let first_line = Comment::trim_spaces(lines[0]);
+            // res_printer.ml:184-191: the printer writes the line break, so
+            // drop the CRs of a CRLF one.
+            let first_line = Comment::trim_spaces(lines[0].trim_end_matches('\r'));
             let rest = &lines[1..];
 
             // Helper function similar to OCaml's indent_stars
@@ -9743,54 +9745,64 @@ fn print_include_declaration(
 /// Default print width.
 pub const DEFAULT_PRINT_WIDTH: i32 = 100;
 
-/// Print a structure with comments to a string.
+/// Print a structure with comments to a string
+/// (`Res_printer.print_implementation ~width ~newline`).
 pub fn print_implementation(
     structure: &[StructureItem],
     comments: Vec<Comment>,
     width: i32,
+    newline: &str,
     arena: &mut ParseArena,
 ) -> String {
     let mut cmt_tbl = CommentTable::new();
     walk_structure(structure, &mut cmt_tbl, comments, arena);
     let state = PrinterState::init();
     let doc = print_structure(&state, structure, &mut cmt_tbl, arena);
-    // res_printer.ml:6443-6456: `Doc.to_string ~width doc ^ "\n"`, also
-    // for an empty file.
-    format!("{}\n", doc.to_string(width))
+    // res_printer.ml:6459-6461: `Doc.to_string ~newline ~width doc ^
+    // newline`, also for an empty file.
+    let mut output = doc.to_string_with_newline(width, newline);
+    output.push_str(newline);
+    output
 }
 
 /// Print a structure with comments using default width.
 pub fn print_structure_with_comments(
     structure: &[StructureItem],
     comments: Vec<Comment>,
+    newline: &str,
     arena: &mut ParseArena,
 ) -> String {
-    print_implementation(structure, comments, DEFAULT_PRINT_WIDTH, arena)
+    print_implementation(structure, comments, DEFAULT_PRINT_WIDTH, newline, arena)
 }
 
-/// Print a signature/interface to a string.
+/// Print a signature/interface to a string
+/// (`Res_printer.print_interface ~width ~newline`).
 pub fn print_interface(
     signature: &[SignatureItem],
     comments: Vec<Comment>,
     width: i32,
+    newline: &str,
     arena: &mut ParseArena,
 ) -> String {
     let mut cmt_tbl = CommentTable::new();
     walk_signature(signature, &mut cmt_tbl, comments, arena);
     let state = PrinterState::init();
     let doc = print_signature(&state, signature, &mut cmt_tbl, arena);
-    // res_printer.ml:6443-6456: `Doc.to_string ~width doc ^ "\n"`, also
-    // for an empty file.
-    format!("{}\n", doc.to_string(width))
+    // res_printer.ml:6463-6465: `Doc.to_string ~newline ~width doc ^
+    // newline`, also for an empty file.
+    let mut output = doc.to_string_with_newline(width, newline);
+    output.push_str(newline);
+    output
 }
 
 /// Print a signature with comments using default width.
 pub fn print_signature_with_comments(
     signature: &[SignatureItem],
     comments: Vec<Comment>,
+    newline: &str,
     arena: &mut ParseArena,
 ) -> String {
-    print_interface(signature, comments, DEFAULT_PRINT_WIDTH, arena)
+    print_interface(signature, comments, DEFAULT_PRINT_WIDTH, newline, arena)
 }
 
 // ============================================================================
