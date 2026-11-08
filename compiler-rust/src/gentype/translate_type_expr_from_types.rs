@@ -92,6 +92,21 @@ pub fn translate_obj_type(
     }
 }
 
+/// The Temporal types declared by TypeScript's `ESNext.Temporal` library.
+fn is_temporal_value_type(name: &str) -> bool {
+    matches!(
+        name,
+        "Duration"
+            | "Instant"
+            | "PlainDate"
+            | "PlainDateTime"
+            | "PlainMonthDay"
+            | "PlainTime"
+            | "PlainYearMonth"
+            | "ZonedDateTime"
+    )
+}
+
 pub fn translate_constr(
     config: &crate::gentype::config::T,
     params_translation: &[Translation],
@@ -145,6 +160,26 @@ pub fn translate_constr(
         ) => tr(ident(name)),
         (["Stdlib", "Symbol", "t"], []) => tr(ident("symbol")),
         (["Stdlib", "Intl", intl_module, "t"], []) => tr(ident(&format!("Intl.{intl_module}"))),
+        (["Stdlib", "Temporal", temporal_module, "t"], [])
+            if is_temporal_value_type(temporal_module) =>
+        {
+            tr(ident(&format!("Temporal.{temporal_module}")))
+        }
+        // Conversions between Temporal types return the shared types of
+        // `Stdlib_Temporal_Common`, like `Stdlib_Temporal_Common.plainDate`.
+        (
+            ["Stdlib", "Temporal", "Common", temporal_type]
+            | ["Stdlib", "Temporal_Common", temporal_type],
+            [],
+        ) if is_temporal_value_type(
+            &crate::lambda::lam_compile_external::capitalize_ascii_first(temporal_type),
+        ) =>
+        {
+            tr(ident(&format!(
+                "Temporal.{}",
+                crate::lambda::lam_compile_external::capitalize_ascii_first(temporal_type)
+            )))
+        }
         (["Stdlib", "JsError", "t"], []) => tr(ident("Error")),
         (["Stdlib", "Iterable", "t"] | ["iterable"], [param]) => {
             with_type(param, builtin(vec![param.type_.clone()], "Iterable"))
