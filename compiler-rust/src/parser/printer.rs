@@ -480,8 +480,9 @@ fn print_leading_comments_with(node: Doc, comments: Vec<Comment>, full_loc: &Ful
         acc.push(separator);
     }
 
-    acc.push(node);
-    Doc::group(Doc::concat(acc))
+    // res_printer.ml:340-341: the comments are marked so that an item
+    // separator does not measure them.
+    Doc::group(Doc::concat(vec![Doc::comment(Doc::concat(acc)), node]))
 }
 
 /// Print trailing comments for a node (takes comments directly).
@@ -596,11 +597,14 @@ fn print_leading_comments(
 // List Printing
 // ============================================================================
 
-/// Print a list of nodes with proper comment handling and line breaks.
+/// Print a list of nodes with proper comment handling and line breaks
+/// (`print_list`, res_printer.ml:399-441).
 ///
 /// This function handles:
 /// - Printing each node with its comments
 /// - Adding appropriate separators (single or double hard lines)
+/// - With `space_multiline`, a blank line next to nodes printed on several
+///   lines (`Doc.item_separator`)
 /// - Creating a breakable group with optional forced breaks
 pub fn print_list<'a, T, F, G>(
     get_loc: F,
@@ -609,6 +613,7 @@ pub fn print_list<'a, T, F, G>(
     cmt_tbl: &mut CommentTable,
     arena: &ParseArena,
     force_break: bool,
+    space_multiline: bool,
 ) -> Doc
 where
     F: Fn(&'a T) -> LocIdx,
@@ -621,6 +626,9 @@ where
     let mut docs = Vec::with_capacity(nodes.len() * 2);
     let mut first_loc = None;
     let mut previous_loc = None;
+    // The previous node's document, which an item separator shares with the
+    // list as OCaml shares the head of `acc`.
+    let mut previous_doc: Option<std::rc::Rc<Doc>> = None;
 
     for node in nodes {
         let loc = get_loc(node);
@@ -635,17 +643,27 @@ where
             continue;
         }
 
+        let doc = print_comments(raw_doc, cmt_tbl, loc, arena);
+        let (doc, shared_doc) = if space_multiline {
+            let shared_doc = std::rc::Rc::new(doc);
+            (Doc::Shared(shared_doc.clone()), Some(shared_doc))
+        } else {
+            (doc, None)
+        };
         if let Some(previous_loc) = previous_loc {
             let previous_end = arena.loc_end(previous_loc);
             let separator = if start_pos.line - previous_end.line > 1 {
                 Doc::concat(vec![Doc::hard_line(), Doc::hard_line()])
+            } else if let (Some(prev), Some(next)) = (&previous_doc, &shared_doc) {
+                Doc::item_separator(prev.clone(), next.clone())
             } else {
                 Doc::hard_line()
             };
             docs.push(separator);
         }
 
-        docs.push(print_comments(raw_doc, cmt_tbl, loc, arena));
+        docs.push(doc);
+        previous_doc = shared_doc;
         first_loc.get_or_insert(loc);
         previous_loc = Some(loc);
     }
@@ -8356,6 +8374,7 @@ pub fn print_structure(
         cmt_tbl,
         arena,
         false,
+        true,
     )
 }
 
@@ -8380,6 +8399,7 @@ pub fn print_signature(
         cmt_tbl,
         arena,
         false,
+        true,
     )
 }
 

@@ -12047,7 +12047,7 @@ pub fn typecheck_preprocessed_signature_in_process(
 
 #[cfg(test)]
 mod tests {
-    /// tests/syntax_tests/res_test.ml:27-75: formatting keeps a file's line
+    /// tests/syntax_tests/res_test.ml:27-84: formatting keeps a file's line
     /// endings, also inside comments, template literals and raw JS, and
     /// formatting the result again changes nothing. The line breaks inside
     /// literals are part of the program and keep their bytes, whatever the
@@ -12058,15 +12058,15 @@ mod tests {
         let format = |source: &str| {
             String::from_utf8(super::format_source(source.as_bytes(), "A.res").unwrap()).unwrap()
         };
-        let lf = "/* a\n multi-line comment */\n/* a comment\n * with stars\n */\nlet s = `line 1\nline 2`\nlet r = %raw(`\n  function () {\n    return 1\n  }\n`)\n";
+        let lf = "/* a\n multi-line comment */\n/* a comment\n * with stars\n */\nlet s = `line 1\nline 2`\n\nlet r = %raw(`\n  function () {\n    return 1\n  }\n`)\n";
         let crlf = to_crlf(lf);
         for source in [
             lf,
             crlf.as_str(),
-            "let x = 1\r\nlet s = \"a\nb\"\r\n",
-            "let x = 1\nlet s = \"a\r\nb\"\n",
-            "let x = 1\r\nlet t = `a\nb`\r\nlet c = '\n'\r\nlet p = #\"a\nb\"\r\n",
-            "let x = 1\nlet t = `a\r\nb`\nlet c = '\r'\nlet p = #\"a\r\nb\"\n",
+            "let x = 1\r\n\r\nlet s = \"a\nb\"\r\n",
+            "let x = 1\n\nlet s = \"a\r\nb\"\n",
+            "let x = 1\r\n\r\nlet t = `a\nb`\r\n\r\nlet c = '\n'\r\n\r\nlet p = #\"a\nb\"\r\n",
+            "let x = 1\n\nlet t = `a\r\nb`\n\nlet c = '\r'\n\nlet p = #\"a\r\nb\"\n",
             "let x = 1\n/* a\r\r\nb\nc */\nlet y = 2\n",
             "let x = 1\r\n/* a\nb\r\nc */\r\nlet y = 2\r\n",
         ] {
