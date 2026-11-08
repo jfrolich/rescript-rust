@@ -39,8 +39,9 @@ pub fn block(a: &JsArena, block: &[Stmt]) -> String {
 }
 
 /// Compares `actual` with `expected`. On mismatch it prints an
-/// `EXPECT_DUMP` line with the actual dump (so a script can update the
-/// expectation) and panics, unless `EXPECT_DUMP_FILL` is set.
+/// `EXPECT_DUMP` line with the actual dump and panics, unless
+/// `EXPECT_DUMP_FILL` is set. `scripts/update_expect_dumps.py [FILTER]` runs
+/// the tests that way and rewrites the stale expectations in place.
 #[track_caller]
 pub fn check(actual: &str, expected: &str, file: &str, line: u32, column: u32) {
     if actual != expected {
