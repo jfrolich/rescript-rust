@@ -254,6 +254,53 @@ fn extract_text_at_loc(arena: &ParseArena, source: &str, loc: LocIdx) -> String 
         .to_string()
 }
 
+/// `!Parser.parse_source text`, as rescript_compiler_driver.ml:24-35 sets
+/// it: the structure and comments of `text`, or nothing when `text` does
+/// not parse cleanly. Hints rewrite source text extracted at a location, and
+/// text that does not parse (e.g. a location that leaves out the parentheses
+/// around an operand) must not be turned into a suggestion. The parser's
+/// warnings are reported either way.
+fn parse_source(
+    ctx: &TypeContext,
+    text: &str,
+) -> (
+    Vec<crate::parser::ast::StructureItem>,
+    Vec<crate::parser::comment::Comment>,
+    ParseArena,
+) {
+    let mut parser = crate::parser::Parser::new("<none>", text);
+    let structure = crate::parser::module::parse_structure(&mut parser);
+    ctx.push_reparse_warnings(parser.warnings());
+    if parser.has_errors() {
+        return (Vec::new(), Vec::new(), parser.into_arena());
+    }
+    let comments = parser.take_comments();
+    (structure, comments, parser.into_arena())
+}
+
+/// `Parser.parse_expr_at_loc`: the expression the source at `loc` parses to,
+/// with its comments and arena, when it is a single expression.
+fn parse_expr_at_loc(
+    ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    loc: LocIdx,
+) -> Option<(
+    crate::parse_arena::ExprIdx,
+    Vec<crate::parser::comment::Comment>,
+    ParseArena,
+)> {
+    let text = extract_text_at_loc(arena, source, loc);
+    let (structure, comments, sub_arena) = parse_source(ctx, &text);
+    let [item] = structure.as_slice() else {
+        return None;
+    };
+    let crate::parser::ast::StructureItemDesc::Pstr_eval(eval) = &item.pstr_desc else {
+        return None;
+    };
+    Some((eval.0, comments, sub_arena))
+}
+
 /// `!Parser.parse_source` then `!Parser.reprint_source`, applied to the
 /// expression at `loc` after `mapper` (`Parser.reprint_expr_at_loc`).
 fn reprint_expr_at_loc(
@@ -266,19 +313,8 @@ fn reprint_expr_at_loc(
         crate::parser::ast::Expression,
     ) -> Option<crate::parser::ast::Expression>,
 ) -> Option<String> {
-    let text = extract_text_at_loc(arena, source, loc);
-    let mut parser = crate::parser::Parser::new("<none>", &text);
-    let structure = crate::parser::module::parse_structure(&mut parser);
-    ctx.push_reparse_warnings(parser.warnings());
-    let comments = parser.take_comments();
-    let mut sub_arena = parser.into_arena();
-    let [item] = structure.as_slice() else {
-        return None;
-    };
-    let crate::parser::ast::StructureItemDesc::Pstr_eval(eval) = &item.pstr_desc else {
-        return None;
-    };
-    let exp = sub_arena.get_expr(eval.0).clone();
+    let (exp_idx, comments, mut sub_arena) = parse_expr_at_loc(ctx, arena, source, loc)?;
+    let exp = sub_arena.get_expr(exp_idx).clone();
     let exp = mapper(&mut sub_arena, exp)?;
     let exp_idx = sub_arena.push_expr(exp);
     let wrapped = crate::parser::ast::StructureItem {
@@ -300,14 +336,10 @@ fn reprint_expr_at_loc(
 
 /// `!Parser.parse_source text` followed by `!Parser.reprint_source`.
 fn parse_and_reprint(ctx: &TypeContext, text: &str) -> Option<String> {
-    let mut parser = crate::parser::Parser::new("<none>", text);
-    let structure = crate::parser::module::parse_structure(&mut parser);
-    ctx.push_reparse_warnings(parser.warnings());
+    let (structure, comments, mut sub_arena) = parse_source(ctx, text);
     if structure.is_empty() {
         return None;
     }
-    let comments = parser.take_comments();
-    let mut sub_arena = parser.into_arena();
     Some(crate::parser::printer::print_implementation(
         &structure,
         comments,
@@ -319,10 +351,7 @@ fn parse_and_reprint(ctx: &TypeContext, text: &str) -> Option<String> {
 
 /// Whether `text` parses to a single constant expression.
 fn text_is_constant(ctx: &TypeContext, text: &str) -> bool {
-    let mut parser = crate::parser::Parser::new("<none>", text);
-    let structure = crate::parser::module::parse_structure(&mut parser);
-    ctx.push_reparse_warnings(parser.warnings());
-    let arena = parser.into_arena();
+    let (structure, _, arena) = parse_source(ctx, text);
     match structure.as_slice() {
         [item] => match &item.pstr_desc {
             crate::parser::ast::StructureItemDesc::Pstr_eval(eval) => matches!(
@@ -337,10 +366,7 @@ fn text_is_constant(ctx: &TypeContext, text: &str) -> bool {
 
 /// `extract_string_constant`.
 fn extract_string_constant(ctx: &TypeContext, text: &str) -> Option<String> {
-    let mut parser = crate::parser::Parser::new("<none>", text);
-    let structure = crate::parser::module::parse_structure(&mut parser);
-    ctx.push_reparse_warnings(parser.warnings());
-    let arena = parser.into_arena();
+    let (structure, _, arena) = parse_source(ctx, text);
     let [item] = structure.as_slice() else {
         return None;
     };
@@ -1183,21 +1209,27 @@ fn print_extra_type_clash_help_by_types(
         }
         None => false,
     };
-    // error_message_utils.ml:775-779: the coercion targets the whole
-    // expected type, not the innermost mismatch.
-    let target_type = match top_level_types {
-        Some((_, t2_top)) => t2_top,
-        None => b2,
+    // error_message_utils.ml:775-780: the coercion targets the whole
+    // expected type, named as the message shows it, not its expansion.
+    let target_type = match trace {
+        [_, (t2_top, _), ..] => *t2_top,
+        _ => b2,
     };
     let target_type_string = {
         printer.reset_and_mark_loops(target_type);
         printer.type_expr(target_type)
     };
     let target_expr_text = extract_text_at_loc(arena, source, loc);
-    let suggested_rewrite = parse_and_reprint(
-        ctx,
-        &format!("({target_expr_text} :> {target_type_string})"),
-    );
+    // error_message_utils.ml:783-796: the location of an expression leaves
+    // out the parentheses around its first or last operand, so the text alone
+    // may not be an expression, even when the wrapped text happens to parse.
+    let suggested_rewrite = match parse_expr_at_loc(ctx, arena, source, loc) {
+        None => None,
+        Some(_) => parse_and_reprint(
+            ctx,
+            &format!("({target_expr_text} :> {target_type_string})"),
+        ),
+    };
     let is_constant = text_is_constant(ctx, &target_expr_text);
     if can_show_coercion_message && !is_constant {
         ppf.cut();
