@@ -124,3 +124,6 @@ tests/tests/src/**/*.js
 
 # rewatch build lock guards
 .build.lock.guard
+
+# Amp orb portal registrations
+.amp/portals/*
