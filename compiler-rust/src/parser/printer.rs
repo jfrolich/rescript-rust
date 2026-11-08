@@ -7747,7 +7747,7 @@ fn print_value_binding(
         Doc::text("and ")
     };
 
-    // res_printer.ml:2359-2392: `pvb_constraint = Some {pvc_newtypes; pvc_type}`
+    // res_printer.ml:2484-2545: `pvb_constraint = Some {pvc_newtypes; pvc_type}`
     // prints `let p: type a b. t = e`.
     if let Some(constraint) = arena.value_constraint(vb.pvb_pat) {
         let newtypes = Doc::join(
@@ -7778,23 +7778,44 @@ fn print_value_binding(
             cmt_tbl,
             arena,
         );
-        return Doc::group(Doc::concat(vec![
+        // Keep `let f: type a. t = body` on one line up to the body's first
+        // line break when it fits; otherwise break after `:` and `=`. The
+        // attributes stay outside, so that `fits` measures from the `let`.
+        return Doc::concat(vec![
             attrs_doc,
-            header,
-            pat_doc,
-            Doc::text(":"),
-            Doc::indent(Doc::concat(vec![
-                Doc::line(),
-                Doc::text("type "),
-                newtypes,
-                Doc::dot(),
-                Doc::space(),
-                typ_doc,
-                Doc::text(" ="),
-                Doc::line(),
-                expr_doc,
-            ])),
-        ]));
+            Doc::custom_layout(vec![
+                // Not a group: a group would be marked broken by the body's
+                // line breaks, and `fits` would then accept a header that
+                // overflows.
+                Doc::concat(vec![
+                    header.clone(),
+                    pat_doc.clone(),
+                    Doc::text(": type "),
+                    newtypes.clone(),
+                    Doc::dot(),
+                    Doc::space(),
+                    typ_doc.clone(),
+                    Doc::text(" = "),
+                    expr_doc.clone(),
+                ]),
+                Doc::group(Doc::concat(vec![
+                    header,
+                    pat_doc,
+                    Doc::text(":"),
+                    Doc::indent(Doc::concat(vec![
+                        Doc::line(),
+                        Doc::text("type "),
+                        newtypes,
+                        Doc::dot(),
+                        Doc::space(),
+                        typ_doc,
+                        Doc::text(" ="),
+                        Doc::line(),
+                        expr_doc,
+                    ])),
+                ])),
+            ]),
+        ]);
     }
 
     // res_printer.ml:2393-2450: `Ppat_constraint (p, Ptyp_poly)` over a
