@@ -1,0 +1,20 @@
+
+  [1;31mWe've found a bug for you![0m
+  [36m/.../fixtures/inclusion_layout_deep_functor_parameter.res[0m:[2m3:5-5:1[0m
+
+  1 [2m│[0m module M: {
+  2 [2m│[0m   module F: (X: (Y: (Z: {let a: int}) => {}) => {}) => {}
+  [1;31m3[0m [2m│[0m } = [1;31m{[0m
+  [1;31m4[0m [2m│[0m [1;31m  module F = (X: (Y: (Z: {let a: string}) => {}) => {}) => {}[0m
+  [1;31m5[0m [2m│[0m [1;31m}[0m
+  6 [2m│[0m 
+
+  Signature mismatch:
+  
+  At position module F: (X: (Y: (Z: <here>) => ...) => ...) => ...
+  
+  Actual declaration ([36m/.../fixtures/inclusion_layout_deep_functor_parameter.res[0m:[2m4:27-39[0m):
+    let a: string
+  
+  Expected declaration ([36m/.../fixtures/inclusion_layout_deep_functor_parameter.res[0m:[2m2:26-35[0m):
+    let a: int

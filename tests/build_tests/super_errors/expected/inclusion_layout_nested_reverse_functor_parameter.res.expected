@@ -1,0 +1,23 @@
+
+  [1;31mWe've found a bug for you![0m
+  [36m/.../fixtures/inclusion_layout_nested_reverse_functor_parameter.res[0m:[2m9:5-17:1[0m
+
+   7 [2m│[0m     },
+   8 [2m│[0m   ) => {}
+   [1;31m9[0m [2m│[0m } = [1;31m{[0m
+  [1;31m10[0m [2m│[0m [1;31m  module F = ([0m
+   [2m.[0m [2m│[0m [2m...[0m
+  [1;31m16[0m [2m│[0m [1;31m  ) => {}[0m
+  [1;31m17[0m [2m│[0m [1;31m}[0m
+  18 [2m│[0m 
+
+  Signature mismatch:
+  
+  At position
+    module F: (X:
+      { module type T = { module G: (Y: <here>) => ... } }) => ...
+  
+  The value `b` is required but not provided.
+  
+  Expected declaration ([36m/.../fixtures/inclusion_layout_nested_reverse_functor_parameter.res[0m:[2m5:36-45[0m):
+    let b: int
