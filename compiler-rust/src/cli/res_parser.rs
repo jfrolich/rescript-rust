@@ -215,17 +215,16 @@ fn run(args: Vec<String>) {
                 signature
             };
             // Apply JSX PPX transformation and emit JSX preprocessor warnings.
-            let (signature, jsx_warnings) = match jsx_ppx::transform_signature_with_warnings_result(
+            // The warnings raised before an error are printed before it
+            // escapes (`Location.prerr_warning`).
+            let (result, jsx_warnings) = jsx_ppx::transform_signature_collecting_warnings(
                 signature,
                 args.jsx_version,
                 &args.jsx_module,
                 parser.arena_mut(),
-            ) {
-                Ok(result) => result,
-                Err(err) => exit_with_uncaught_error(&err),
-            };
+            );
             print_jsx_preprocessor_warnings(&source, &filename, &jsx_warnings, &mut io::stderr());
-            signature
+            result.unwrap_or_else(|err| exit_with_uncaught_error(&err))
         };
 
         // Print in requested format
@@ -363,17 +362,16 @@ fn run(args: Vec<String>) {
                 structure
             };
             // Apply JSX PPX transformation and emit JSX preprocessor warnings.
-            let (structure, jsx_warnings) = match jsx_ppx::transform_structure_with_warnings_result(
+            // The warnings raised before an error are printed before it
+            // escapes (`Location.prerr_warning`).
+            let (result, jsx_warnings) = jsx_ppx::transform_structure_collecting_warnings(
                 structure,
                 args.jsx_version,
                 &args.jsx_module,
                 parser.arena_mut(),
-            ) {
-                Ok(result) => result,
-                Err(err) => exit_with_uncaught_error(&err),
-            };
+            );
             print_jsx_preprocessor_warnings(&source, &filename, &jsx_warnings, &mut io::stderr());
-            structure
+            result.unwrap_or_else(|err| exit_with_uncaught_error(&err))
         };
 
         // Print in requested format

@@ -1405,8 +1405,8 @@ pub(crate) fn jsx_preserve_for_structure(
     options.jsx_preserve || structure_has_config_string(structure, "-bs-jsx-preserve", arena)
 }
 
-/// `builtin_ppx_warnings` receives the warnings the builtin mapper prints,
-/// including those emitted before a mapper error.
+/// `builtin_ppx_warnings` receives the warnings the JSX and builtin mappers
+/// print, including those emitted before a mapper error.
 fn preprocess_signature_for_typecheck_with_source(
     signature: Signature,
     options: &CompilerOptions,
@@ -1417,13 +1417,15 @@ fn preprocess_signature_for_typecheck_with_source(
     builtin_ppx_warnings: &mut Vec<ppx::PpxWarning>,
 ) -> Result<Signature> {
     let signature = if let Some(jsx_version) = options.jsx_version {
-        jsx_ppx::transform_signature_result(
+        // The JSX warnings come first, those raised before an error included.
+        let (signature, jsx_warnings) = jsx_ppx::transform_signature_collecting_warnings(
             signature,
             jsx_version,
             jsx_module_name(options, None),
             arena,
-        )
-        .map_err(|e| jsx_ppx_error_to_anyhow(e, arena, source, filename))?
+        );
+        builtin_ppx_warnings.extend(jsx_preprocessor_warnings_to_ppx(arena, jsx_warnings));
+        signature.map_err(|e| jsx_ppx_error_to_anyhow(e, arena, source, filename))?
     } else {
         signature
     };

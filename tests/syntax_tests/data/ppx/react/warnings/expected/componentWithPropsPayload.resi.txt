@@ -1,0 +1,15 @@
+
+  Warning number 3
+  syntax_tests/data/ppx/react/warnings/componentWithPropsPayload.resi:2:1-25
+
+  1 │ type props = {a: int}
+  2 │ @react.componentWithProps(x)
+  3 │ let make: props => int
+  4 │ 
+
+  deprecated: @react.componentWithProps takes no payload. The payload has no effect; remove it.
+
+type props = {a: int}
+
+@react.componentWithProps(x)
+let make: props => int

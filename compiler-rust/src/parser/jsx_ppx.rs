@@ -218,30 +218,13 @@ pub fn transform_structure_result(
     initial_module: &str,
     arena: &mut ParseArena,
 ) -> JsxPreprocessorResult<Structure> {
-    let (structure, _) = transform_structure_with_warnings_result(
-        structure,
-        initial_version,
-        initial_module,
-        arena,
-    )?;
-    Ok(structure)
+    transform_structure_collecting_warnings(structure, initial_version, initial_module, arena).0
 }
 
-/// Transform a structure and collect JSX preprocessor warnings.
-pub fn transform_structure_with_warnings_result(
-    structure: Structure,
-    initial_version: i32,
-    initial_module: &str,
-    arena: &mut ParseArena,
-) -> JsxPreprocessorResult<(Structure, Vec<JsxPreprocessorWarning>)> {
-    let (result, warnings) =
-        transform_structure_collecting_warnings(structure, initial_version, initial_module, arena);
-    result.map(|structure| (structure, warnings))
-}
-
-/// Like [`transform_structure_with_warnings_result`], but also returns the
-/// warnings reported before a fatal error: OCaml prints each warning as it is
-/// raised (`Location.prerr_warning`), before the error escapes.
+/// Transform a structure and collect the JSX preprocessor warnings, including
+/// those raised before an error: OCaml prints each warning as it is raised
+/// (`Location.prerr_warning`), before the error escapes, so a caller prints
+/// them whatever the result.
 pub fn transform_structure_collecting_warnings(
     structure: Structure,
     initial_version: i32,
@@ -283,22 +266,21 @@ pub fn transform_signature_result(
     initial_module: &str,
     arena: &mut ParseArena,
 ) -> JsxPreprocessorResult<Signature> {
-    let (signature, _) = transform_signature_with_warnings_result(
-        signature,
-        initial_version,
-        initial_module,
-        arena,
-    )?;
-    Ok(signature)
+    transform_signature_collecting_warnings(signature, initial_version, initial_module, arena).0
 }
 
-/// Transform a signature and collect JSX preprocessor warnings.
-pub fn transform_signature_with_warnings_result(
+/// Transform a signature and collect the JSX preprocessor warnings, including
+/// those raised before an error (see
+/// [`transform_structure_collecting_warnings`]).
+pub fn transform_signature_collecting_warnings(
     signature: Signature,
     initial_version: i32,
     initial_module: &str,
     arena: &mut ParseArena,
-) -> JsxPreprocessorResult<(Signature, Vec<JsxPreprocessorWarning>)> {
+) -> (
+    JsxPreprocessorResult<Signature>,
+    Vec<JsxPreprocessorWarning>,
+) {
     // Extract file name from first item's location
     let file_name = signature
         .first()
@@ -321,8 +303,7 @@ pub fn transform_signature_with_warnings_result(
 
     // `mapper.signature mapper code` (jsx_ppx.ml:162-173).
     let result = mapper::signature(signature, &mut config, arena);
-    let (result, warnings) = config.finish(result);
-    result.map(|signature| (signature, warnings))
+    config.finish(result)
 }
 
 // ============================================================================
@@ -4468,6 +4449,28 @@ mod tests {
         let (pushed, ok, warnings) = run(&format!("{large}{warning}{bad}"));
         assert!(pushed > 1000, "{pushed}");
         assert_eq!((ok, warnings), (false, 1));
+    }
+
+    /// A signature keeps the warnings raised before its error, and none after.
+    #[test]
+    fn jsx_signature_reports_warnings_until_the_first_error() {
+        let warning = "@react.componentWithProps(x)\nlet make: props => int\n";
+        let bad = "@@jsxConfig({version: 5})\n";
+        let run = |source: &str| {
+            let mut parser = Parser::new("test.resi".to_string(), source);
+            let signature = module::parse_signature(&mut parser);
+            assert!(!parser.has_errors(), "{source}");
+            let (result, warnings) = super::transform_signature_collecting_warnings(
+                signature,
+                4,
+                "react",
+                parser.arena_mut(),
+            );
+            (result.is_ok(), warnings.len())
+        };
+        assert_eq!(run(&format!("{warning}{bad}")), (false, 1));
+        assert_eq!(run(&format!("{bad}{warning}")), (false, 0));
+        assert_eq!(run(warning), (true, 1));
     }
 
     /// JSX in parameter defaults is transformed (`p_default` is mapped).
