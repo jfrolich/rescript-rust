@@ -626,9 +626,11 @@ where
     let mut docs = Vec::with_capacity(nodes.len() * 2);
     let mut first_loc = None;
     let mut previous_loc = None;
-    // The previous node's document, which an item separator shares with the
-    // list as OCaml shares the head of `acc`.
-    let mut previous_doc: Option<std::rc::Rc<Doc>> = None;
+    // With `space_multiline`, `docs` is the pool of the `Doc::ItemList` the
+    // list prints as, and `previous_doc` the position of the previous node's
+    // document in it, which an item separator names where OCaml shares the
+    // head of `acc`.
+    let mut previous_doc: Option<u32> = None;
 
     for node in nodes {
         let loc = get_loc(node);
@@ -644,26 +646,23 @@ where
         }
 
         let doc = print_comments(raw_doc, cmt_tbl, loc, arena);
-        let (doc, shared_doc) = if space_multiline {
-            let shared_doc = std::rc::Rc::new(doc);
-            (Doc::Shared(shared_doc.clone()), Some(shared_doc))
-        } else {
-            (doc, None)
-        };
         if let Some(previous_loc) = previous_loc {
             let previous_end = arena.loc_end(previous_loc);
             let separator = if start_pos.line - previous_end.line > 1 {
                 Doc::concat(vec![Doc::hard_line(), Doc::hard_line()])
-            } else if let (Some(prev), Some(next)) = (&previous_doc, &shared_doc) {
-                Doc::item_separator(prev.clone(), next.clone())
+            } else if let Some(prev) = previous_doc.filter(|_| space_multiline) {
+                // `Doc.item_separator ~prev:prev_doc ~next:doc`: `doc` goes
+                // right after the separator.
+                let next = docs.len() as u32 + 1;
+                Doc::ItemSeparator { prev, next }
             } else {
                 Doc::hard_line()
             };
             docs.push(separator);
         }
 
+        previous_doc = Some(docs.len() as u32);
         docs.push(doc);
-        previous_doc = shared_doc;
         first_loc.get_or_insert(loc);
         previous_loc = Some(loc);
     }
@@ -674,7 +673,12 @@ where
     let should_break =
         force_break || arena.loc_start(first_loc).line != arena.loc_end(last_loc).line;
 
-    Doc::breakable_group(Doc::concat(docs), should_break)
+    let docs = if space_multiline {
+        Doc::ItemList(docs)
+    } else {
+        Doc::concat(docs)
+    };
+    Doc::breakable_group(docs, should_break)
 }
 
 /// Print a list of nodes with index, with proper comment handling.

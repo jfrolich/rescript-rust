@@ -65,16 +65,28 @@ pub enum Doc {
     CustomLayout(Vec<Doc>),
     /// Force the parent group to break
     BreakParent,
-    /// `Res_doc.ItemSeparator {prev; next}`: a hard line, and a blank line
-    /// when `prev` or `next`, the documents printed on each side of it, span
-    /// several lines. It measures them but does not print them.
-    ItemSeparator { prev: Rc<Doc>, next: Rc<Doc> },
-    /// `Res_doc.Comment`: prints like its argument, which an item separator
-    /// does not measure.
-    Comment(Box<Doc>),
-    /// A document that an item separator measures as well: OCaml shares the
-    /// document physically between the list and the separators next to it.
-    Shared(Rc<Doc>),
+    /// The concatenation `print_list ~space_multiline:true` builds
+    /// (res_printer.ml:399-441): its children print in order like
+    /// `Concat`'s, and are the pool its `ItemSeparator` children index into.
+    /// OCaml's separators share the item documents physically; here an item
+    /// is stored once and a separator names it by its position.
+    ItemList(Vec<Doc>),
+    /// `Res_doc.ItemSeparator {prev; next}`, a child of an `ItemList`: a hard
+    /// line, and a blank line when `prev` or `next`, the list's children at
+    /// those positions printed on each side of it, span several lines. It
+    /// measures them but does not print them.
+    ItemSeparator { prev: u32, next: u32 },
+    /// `Res_doc.Comment`, over the documents of a concatenation: prints like
+    /// them, and an item separator does not measure them.
+    Comment(Vec<Doc>),
+}
+
+/// A command of the `to_string` stack: a document, or an `ItemSeparator`
+/// resolved against the `ItemList` that holds it.
+#[derive(Clone, Copy)]
+enum Cmd<'d> {
+    Doc(&'d Doc),
+    Separator { prev: &'d Doc, next: &'d Doc },
 }
 
 impl Doc {
@@ -161,14 +173,13 @@ impl Doc {
         Doc::BreakParent
     }
 
-    /// `Res_doc.item_separator ~prev ~next`.
-    pub fn item_separator(prev: Rc<Doc>, next: Rc<Doc>) -> Doc {
-        Doc::ItemSeparator { prev, next }
-    }
-
     /// `Res_doc.comment`.
     pub fn comment(doc: Doc) -> Doc {
-        Doc::Comment(Box::new(doc))
+        match doc {
+            Doc::Concat(docs) => Doc::Comment(docs),
+            Doc::Nil => Doc::Comment(Vec::new()),
+            doc => Doc::Comment(vec![doc]),
+        }
     }
 
     /// `Res_doc.is_nil`.
@@ -290,8 +301,7 @@ impl Doc {
             | Doc::LineBreak(LineStyle::Literal)
             | Doc::ItemSeparator { .. } => true,
             Doc::LineBreak(LineStyle::Classic) | Doc::LineBreak(LineStyle::Soft) => false,
-            Doc::Indent(child) | Doc::Comment(child) => child.propagate_forced_breaks(),
-            Doc::Shared(child) => child.propagate_forced_breaks(),
+            Doc::Indent(child) => child.propagate_forced_breaks(),
             Doc::IfBreaks { yes, no, broken } => {
                 let no_forces = no.propagate_forced_breaks();
                 if no_forces {
@@ -308,7 +318,7 @@ impl Doc {
                 should_break.set(should);
                 should
             }
-            Doc::Concat(children) => {
+            Doc::Concat(children) | Doc::ItemList(children) | Doc::Comment(children) => {
                 let mut forces = false;
                 for child in children {
                     if child.propagate_forced_breaks() {
@@ -335,10 +345,11 @@ impl Doc {
             Doc::BreakParent | Doc::ItemSeparator { .. } => true,
             Doc::Group { should_break, .. } if should_break.get() => true,
             Doc::Group { doc, .. } => doc.will_break(),
-            Doc::Indent(doc) | Doc::Comment(doc) => doc.will_break(),
-            Doc::Shared(doc) => doc.will_break(),
+            Doc::Indent(doc) => doc.will_break(),
             Doc::CustomLayout(docs) if !docs.is_empty() => docs[0].will_break(),
-            Doc::Concat(docs) => docs.iter().any(|d| d.will_break()),
+            Doc::Concat(docs) | Doc::ItemList(docs) | Doc::Comment(docs) => {
+                docs.iter().any(|d| d.will_break())
+            }
             Doc::IfBreaks { yes, no, .. } => yes.will_break() || no.will_break(),
             _ => false,
         }
@@ -358,9 +369,8 @@ impl Doc {
                 Doc::LineSuffix(_) => true,
                 Doc::LineBreak(_) | Doc::ItemSeparator { .. } => pending && !broken,
                 Doc::Nil | Doc::Text(_) | Doc::BreakParent => pending,
-                Doc::Indent(doc) | Doc::Comment(doc) => walk(doc, broken, pending),
-                Doc::Shared(doc) => walk(doc, broken, pending),
-                Doc::Concat(docs) => docs
+                Doc::Indent(doc) => walk(doc, broken, pending),
+                Doc::Concat(docs) | Doc::ItemList(docs) | Doc::Comment(docs) => docs
                     .iter()
                     .fold(pending, |pending, doc| walk(doc, broken, pending)),
                 Doc::Group { should_break, doc } => {
@@ -387,7 +397,9 @@ impl Doc {
     /// `first` is processed, then the entries of `rest` from the top of the
     /// render stack downwards, stopping as soon as the result is known. `rest`
     /// is walked lazily so a check never copies the whole render stack.
-    fn fits(width: i32, first: (i32, Mode, &Doc), rest: &[(i32, Mode, &Doc)]) -> bool {
+    fn fits(width: i32, first: (i32, Mode, &Doc), rest: &[(i32, Mode, Cmd<'_>)]) -> bool {
+        // A separator of the render stack is measured as `ItemSeparator`.
+        let separator = Doc::ItemSeparator { prev: 0, next: 0 };
         let mut width = width;
         let mut stack: Vec<(i32, Mode, &Doc)> = vec![first];
         let mut rest = rest.iter().rev();
@@ -396,7 +408,8 @@ impl Doc {
             let (indent, mode, doc) = match stack.pop() {
                 Some(item) => item,
                 None => match rest.next() {
-                    Some(item) => *item,
+                    Some((indent, mode, Cmd::Doc(doc))) => (*indent, *mode, *doc),
+                    Some((indent, mode, Cmd::Separator { .. })) => (*indent, *mode, &separator),
                     None => break,
                 },
             };
@@ -411,12 +424,6 @@ impl Doc {
                 }
                 (_, Doc::Indent(doc)) => {
                     stack.push((indent + 2, mode, doc));
-                }
-                (_, Doc::Comment(doc)) => {
-                    stack.push((indent, mode, doc));
-                }
-                (_, Doc::Shared(doc)) => {
-                    stack.push((indent, mode, doc));
                 }
                 (Mode::Flat, Doc::LineBreak(LineStyle::Hard))
                 | (Mode::Flat, Doc::LineBreak(LineStyle::Literal)) => {
@@ -447,7 +454,7 @@ impl Doc {
                 (Mode::Flat, Doc::IfBreaks { no, .. }) => {
                     stack.push((indent, mode, no));
                 }
-                (_, Doc::Concat(docs)) => {
+                (_, Doc::Concat(docs) | Doc::ItemList(docs) | Doc::Comment(docs)) => {
                     // Push in reverse order so first doc is processed first
                     for doc in docs.iter().rev() {
                         stack.push((indent, mode, doc));
@@ -470,7 +477,7 @@ impl Doc {
         width: i32,
         pos: i32,
         indent: i32,
-        rest: &[(i32, Mode, &'d Doc)],
+        rest: &[(i32, Mode, Cmd<'_>)],
         docs: &'d [Doc],
     ) -> Option<&'d Doc> {
         let (last, init) = docs.split_last()?;
@@ -487,8 +494,12 @@ impl Doc {
     /// Comments and line suffixes do not count.
     fn spans_lines(width: i32, indent: i32, mode: Mode, doc: &Doc) -> bool {
         let mut pos = indent;
-        let mut stack: Vec<(i32, Mode, &Doc)> = vec![(indent, mode, doc)];
-        while let Some((indent, mode, doc)) = stack.pop() {
+        let mut stack: Vec<(i32, Mode, Cmd<'_>)> = vec![(indent, mode, Cmd::Doc(doc))];
+        while let Some((indent, mode, cmd)) = stack.pop() {
+            let doc = match cmd {
+                Cmd::Doc(doc) => doc,
+                Cmd::Separator { .. } => return true,
+            };
             match doc {
                 Doc::Nil | Doc::BreakParent | Doc::LineSuffix(_) | Doc::Comment(_) => {}
                 Doc::Text(txt) => {
@@ -497,20 +508,19 @@ impl Doc {
                     }
                     pos += text_width(txt);
                 }
-                Doc::Concat(docs) => {
+                Doc::Concat(docs) | Doc::ItemList(docs) => {
                     for doc in docs.iter().rev() {
-                        stack.push((indent, mode, doc));
+                        stack.push((indent, mode, Cmd::Doc(doc)));
                     }
                 }
-                Doc::Indent(doc) => stack.push((indent + 2, mode, doc)),
-                Doc::Shared(doc) => stack.push((indent, mode, doc)),
+                Doc::Indent(doc) => stack.push((indent + 2, mode, Cmd::Doc(doc))),
                 Doc::IfBreaks { yes, no, broken } => {
                     let doc = if broken.get() || mode == Mode::Break {
                         yes
                     } else {
                         no
                     };
-                    stack.push((indent, mode, doc));
+                    stack.push((indent, mode, Cmd::Doc(doc)));
                 }
                 Doc::LineBreak(LineStyle::Hard | LineStyle::Literal)
                 | Doc::ItemSeparator { .. } => {
@@ -531,15 +541,15 @@ impl Doc {
                     if should_break.get()
                         || !Self::fits(width - pos, (indent, Mode::Flat, doc), &stack)
                     {
-                        stack.push((indent, Mode::Break, doc));
+                        stack.push((indent, Mode::Break, Cmd::Doc(doc)));
                     } else {
-                        stack.push((indent, Mode::Flat, doc));
+                        stack.push((indent, Mode::Flat, Cmd::Doc(doc)));
                     }
                 }
                 Doc::CustomLayout(docs) => {
                     if let Some(doc) = Self::select_custom_layout(width, pos, indent, &stack, docs)
                     {
-                        stack.push((indent, Mode::Flat, doc));
+                        stack.push((indent, Mode::Flat, Cmd::Doc(doc)));
                     }
                 }
             }
@@ -582,7 +592,7 @@ impl Doc {
         // `line_suffices`, oldest first: OCaml conses each new suffix and
         // reverses the list when it flushes them.
         let mut line_suffices: Vec<(i32, Mode, &Doc)> = Vec::new();
-        let mut stack: Vec<(i32, Mode, &Doc)> = vec![(0, Mode::Flat, self)];
+        let mut stack: Vec<(i32, Mode, Cmd<'_>)> = vec![(0, Mode::Flat, Cmd::Doc(self))];
 
         // `Mini_buffer.flush_newline`: trim the spaces before the line break.
         fn flush_newline(buffer: &mut String, newline: &str) {
@@ -592,16 +602,58 @@ impl Doc {
         }
 
         loop {
-            let Some((indent, mode, doc)) = stack.pop() else {
+            let Some((indent, mode, cmd)) = stack.pop() else {
                 // `| [] -> process ~pos:0 [] (List.rev suffices)`
                 if line_suffices.is_empty() {
                     break;
                 }
-                for suffix in line_suffices.drain(..).rev() {
-                    stack.push(suffix);
+                for (indent, mode, doc) in line_suffices.drain(..).rev() {
+                    stack.push((indent, mode, Cmd::Doc(doc)));
                 }
                 pos = 0;
                 continue;
+            };
+            let doc = match cmd {
+                Cmd::Doc(doc) => doc,
+                Cmd::Separator { prev, next } => {
+                    // res_doc.ml:330-351.
+                    if Self::spans_lines(width, indent, mode, prev)
+                        || Self::spans_lines(width, indent, mode, next)
+                    {
+                        // Own-line trailing comments of `prev` go below the
+                        // blank line, where they print once they are leading
+                        // comments of `next`. The stack grows towards its
+                        // top, so the commands go on in reverse: the two
+                        // separators, the first comment without its hard
+                        // lines, the other comments as they are, a
+                        // separator, then what follows.
+                        let mut same_line = Vec::with_capacity(line_suffices.len());
+                        let mut below: Vec<(&[Doc], (i32, Mode, &Doc))> = Vec::new();
+                        for suffix in line_suffices.drain(..) {
+                            match suffix.2.own_line_suffix() {
+                                None => same_line.push(suffix),
+                                Some(comment) => below.push((comment, suffix)),
+                            }
+                        }
+                        line_suffices = same_line;
+                        if let Some(((first, (first_indent, first_mode, _)), others)) =
+                            below.split_first()
+                        {
+                            stack.push((indent, mode, Cmd::Doc(&hard_line)));
+                            for (_, (indent, mode, doc)) in others.iter().rev() {
+                                stack.push((*indent, *mode, Cmd::Doc(doc)));
+                            }
+                            for doc in first.iter().rev() {
+                                stack.push((*first_indent, *first_mode, Cmd::Doc(doc)));
+                            }
+                        }
+                        stack.push((indent, mode, Cmd::Doc(&hard_line)));
+                        stack.push((indent, mode, Cmd::Doc(&hard_line)));
+                    } else {
+                        stack.push((indent, mode, Cmd::Doc(&hard_line)));
+                    }
+                    continue;
+                }
             };
             match doc {
                 Doc::Nil | Doc::BreakParent => {}
@@ -612,28 +664,38 @@ impl Doc {
                 Doc::LineSuffix(doc) => {
                     line_suffices.push((indent, mode, doc));
                 }
-                Doc::Concat(docs) => {
+                Doc::Concat(docs) | Doc::Comment(docs) => {
                     for doc in docs.iter().rev() {
-                        stack.push((indent, mode, doc));
+                        stack.push((indent, mode, Cmd::Doc(doc)));
                     }
                 }
+                Doc::ItemList(docs) => {
+                    // Each separator measures the children it names.
+                    for doc in docs.iter().rev() {
+                        let cmd = match doc {
+                            Doc::ItemSeparator { prev, next } => Cmd::Separator {
+                                prev: &docs[*prev as usize],
+                                next: &docs[*next as usize],
+                            },
+                            doc => Cmd::Doc(doc),
+                        };
+                        stack.push((indent, mode, cmd));
+                    }
+                }
+                Doc::ItemSeparator { .. } => {
+                    unreachable!("an item separator is only rendered by its item list")
+                }
                 Doc::Indent(doc) => {
-                    stack.push((indent + 2, mode, doc));
-                }
-                Doc::Comment(doc) => {
-                    stack.push((indent, mode, doc));
-                }
-                Doc::Shared(doc) => {
-                    stack.push((indent, mode, doc));
+                    stack.push((indent + 2, mode, Cmd::Doc(doc)));
                 }
                 Doc::IfBreaks { yes, broken, .. } if broken.get() => {
-                    stack.push((indent, mode, yes));
+                    stack.push((indent, mode, Cmd::Doc(yes)));
                 }
                 Doc::IfBreaks { yes, no, .. } => {
                     if mode == Mode::Break {
-                        stack.push((indent, mode, yes));
+                        stack.push((indent, mode, Cmd::Doc(yes)));
                     } else {
-                        stack.push((indent, mode, no));
+                        stack.push((indent, mode, Cmd::Doc(no)));
                     }
                 }
                 Doc::LineBreak(style) => {
@@ -641,9 +703,9 @@ impl Doc {
                         if !line_suffices.is_empty() {
                             // `process ~pos:ind [] (List.concat [List.rev
                             // line_suffices; cmd :: rest])`
-                            stack.push((indent, mode, doc));
-                            for suffix in line_suffices.drain(..).rev() {
-                                stack.push(suffix);
+                            stack.push((indent, mode, Cmd::Doc(doc)));
+                            for (indent, mode, doc) in line_suffices.drain(..).rev() {
+                                stack.push((indent, mode, Cmd::Doc(doc)));
                             }
                             pos = indent;
                         } else if *style == LineStyle::Literal {
@@ -678,52 +740,15 @@ impl Doc {
                     if should_break.get()
                         || !Self::fits(width - pos, (indent, Mode::Flat, doc), &stack)
                     {
-                        stack.push((indent, Mode::Break, doc));
+                        stack.push((indent, Mode::Break, Cmd::Doc(doc)));
                     } else {
-                        stack.push((indent, Mode::Flat, doc));
+                        stack.push((indent, Mode::Flat, Cmd::Doc(doc)));
                     }
                 }
                 Doc::CustomLayout(docs) => {
                     if let Some(doc) = Self::select_custom_layout(width, pos, indent, &stack, docs)
                     {
-                        stack.push((indent, Mode::Flat, doc));
-                    }
-                }
-                Doc::ItemSeparator { prev, next } => {
-                    if Self::spans_lines(width, indent, mode, prev)
-                        || Self::spans_lines(width, indent, mode, next)
-                    {
-                        // Own-line trailing comments of `prev` go below the
-                        // blank line, where they print once they are leading
-                        // comments of `next` (res_doc.ml:330-351). The stack
-                        // grows towards its top, so the commands go on in
-                        // reverse: the two separators, the first comment
-                        // without its hard lines, the other comments as they
-                        // are, a separator, then what follows.
-                        let mut same_line = Vec::with_capacity(line_suffices.len());
-                        let mut below: Vec<(&[Doc], (i32, Mode, &Doc))> = Vec::new();
-                        for suffix in line_suffices.drain(..) {
-                            match suffix.2.own_line_suffix() {
-                                None => same_line.push(suffix),
-                                Some(comment) => below.push((comment, suffix)),
-                            }
-                        }
-                        line_suffices = same_line;
-                        if let Some(((first, (first_indent, first_mode, _)), others)) =
-                            below.split_first()
-                        {
-                            stack.push((indent, mode, &hard_line));
-                            for (_, suffix) in others.iter().rev() {
-                                stack.push(*suffix);
-                            }
-                            for doc in first.iter().rev() {
-                                stack.push((*first_indent, *first_mode, doc));
-                            }
-                        }
-                        stack.push((indent, mode, &hard_line));
-                        stack.push((indent, mode, &hard_line));
-                    } else {
-                        stack.push((indent, mode, &hard_line));
+                        stack.push((indent, Mode::Flat, Cmd::Doc(doc)));
                     }
                 }
             }
@@ -881,14 +906,9 @@ mod tests {
         Doc::breakable_group(doc, true).to_string(width)
     }
 
+    /// `concat [prev; item_separator ~prev ~next; next]`.
     fn items(prev: Doc, next: Doc) -> Doc {
-        let prev = Rc::new(prev);
-        let next = Rc::new(next);
-        Doc::concat(vec![
-            Doc::Shared(prev.clone()),
-            Doc::item_separator(prev, next.clone()),
-            Doc::Shared(next),
-        ])
+        Doc::ItemList(vec![prev, Doc::ItemSeparator { prev: 0, next: 2 }, next])
     }
 
     fn item_a() -> Doc {
@@ -1066,14 +1086,25 @@ mod tests {
     }
 
     #[test]
+    fn doc_stays_small() {
+        // An item separator names the list's children by position, so the
+        // spacing nodes do not grow `Doc` past its other variants.
+        assert_eq!(std::mem::size_of::<Doc>(), 32);
+    }
+
+    #[test]
     fn item_separator_predicates() {
-        let separator = Doc::item_separator(Rc::new(item_a()), Rc::new(item_b()));
+        let separator = Doc::ItemSeparator { prev: 0, next: 0 };
         assert!(separator.will_break());
         assert!(!separator.is_nil());
+        assert!(items(item_a(), item_b()).will_break());
         // A separator breaks its group, which flushes a pending line suffix.
         assert!(
-            !Doc::group(Doc::concat(vec![Doc::line_suffix(item_a()), separator]))
-                .has_pending_line_suffix()
+            !Doc::group(Doc::concat(vec![
+                Doc::line_suffix(item_a()),
+                items(item_a(), item_b())
+            ]))
+            .has_pending_line_suffix()
         );
         assert_eq!(print_items(80, Doc::custom_layout(vec![])), "");
     }
