@@ -41,6 +41,10 @@ if want_side in (side, "both") and want_stage == stage:
     if mode == "reject":
         print("fake rejection", file=sys.stderr)
         sys.exit(2)
+    if mode == "reject-split":
+        # Both reject, the OCaml side with status 2 and Rust with 1.
+        print("fake rejection", file=sys.stderr)
+        sys.exit(2 if side == "ocaml" else 1)
     if mode == "timeout":
         time.sleep(30)
     if mode == "differ":
@@ -210,6 +214,16 @@ class AstParityStageFailureTests(unittest.TestCase):
                 self.assertEqual(code, 1, out)
                 self.assertIn(summary, out)
                 self.assertIn("Stage failures:           0", out)
+
+    def test_rejection_with_another_status_is_a_difference(self):
+        for stage, summary in (("sexp-locs-ppx", "sexp-locs-ppx differences: 1"),
+                               ("bsc-ast", "bsc-ast value differences: 1")):
+            with self.subTest(stage=stage):
+                code, out = self.run_script(f"both:{stage}:reject-split")
+                self.assertEqual(code, 1, out)
+                self.assertIn(summary, out)
+                self.assertIn("Stage failures:           0", out)
+                self.assertNotIn("Rejected by both", out)
 
     def test_difference_stays_a_difference(self):
         for stage, summary in (("sexp-locs", "sexp-locs differences:    1"),

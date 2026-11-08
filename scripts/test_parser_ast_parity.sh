@@ -31,8 +31,9 @@
 # no baseline, and the script exits 2, so a failed command can never shrink a
 # difference list unnoticed. At sexp-locs-ppx and bsc-ast the OCaml reference
 # rejects some files (an error raised by the builtin PPX or the compiler);
-# when Rust rejects them too, both reasons are listed as "both reject", and
-# when Rust accepts such a file it is a difference. Exit 1 means every
+# when Rust rejects them too with the same exit status, both reasons are
+# listed as "both reject", and when Rust accepts such a file or exits with
+# another status it is a difference. Exit 1 means every
 # comparison ran and some differ (or regressed); exit 0 means full parity.
 # OCAML_PARSER, RUST_PARSER, OCAML_BSC, RUST_BSC, SPICE_TEST_DIR,
 # PARSER_WARNING_DIR and INSPECT_SCRIPT may name other tools or fixtures.
@@ -459,8 +460,9 @@ run_stage() {
 # Classify a stage whose OCaml reference may reject the file. $1 is the
 # stage, $2/$3 the OCaml and Rust exit statuses, $4/$5 their stderr files.
 # Prints "compare" when both succeeded, "reject" when both rejected the file
-# with an ordinary error (listed as a reference rejection), "differ" when
-# the OCaml reference rejected a file Rust accepted, and "failed" when a
+# with the same exit status (listed as a reference rejection), "differ" when
+# the OCaml reference rejected a file Rust accepted or both rejected it with
+# different exit statuses, and "failed" when a
 # command timed out, was killed, or Rust failed where OCaml succeeded (the
 # failure is recorded).
 classify_reference_stage() {
@@ -483,7 +485,7 @@ classify_reference_stage() {
     elif [[ $ocaml_status -eq 0 ]]; then
         record_stage_failure "$file" "$stage" rust "$(command_failure_reason "$rust_status" "$rust_err") (the OCaml reference succeeded)"
         echo failed
-    elif [[ $rust_status -eq 0 ]]; then
+    elif [[ $rust_status -eq 0 || $rust_status -ne $ocaml_status ]]; then
         echo differ
     else
         printf '%s\t%s\tocaml %s\trust %s\n' "$file" "$stage" \
@@ -607,8 +609,9 @@ test_single_file() {
                     sexp_locs_ppx_checked=1
                     sexp_locs_ppx_diff=1
                     {
-                        echo "The OCaml reference rejected the file and the Rust parser accepted it."
+                        echo "The OCaml reference rejected the file and the Rust parser accepted it or exited differently."
                         echo "OCaml: $(command_failure_reason "$ocaml_status" "$file_temp/ocaml.sexp-locs-ppx.err")"
+                        echo "Rust:  $(command_failure_reason "$rust_status" "$file_temp/rust.sexp-locs-ppx.err")"
                     } > "$TEMP_DIR/sexp_locs_ppx_diffs/$safe_name.diff"
                     ;;
             esac
@@ -658,7 +661,7 @@ test_single_file() {
                     sexp_locs_ppx_spice_checked=1
                     sexp_locs_ppx_spice_diff=1
                     {
-                        echo "The OCaml reference rejected the file and Rust bsc accepted it."
+                        echo "The OCaml reference rejected the file and Rust bsc accepted it or exited differently."
                         echo ""
                         echo "--- OCaml stderr ---"
                         cat "$ocaml_spice_sexp" 2>/dev/null || true
@@ -711,8 +714,9 @@ test_single_file() {
                     bsc_ast_checked=1
                     bsc_ast_diff=1
                     {
-                        echo "The OCaml reference rejected the file and Rust bsc accepted it."
+                        echo "The OCaml reference rejected the file and Rust bsc accepted it or exited differently."
                         echo "OCaml: $(command_failure_reason "$ocaml_status" "$file_temp/ocaml.bsc.err")"
+                        echo "Rust:  $(command_failure_reason "$rust_status" "$file_temp/rust.bsc.err")"
                     } > "$TEMP_DIR/bsc_ast_parity_diffs/$safe_name.diff"
                     ;;
             esac
