@@ -93,15 +93,16 @@ pub struct PreviousInProcessBuild {
 
 /// The incremental part of a fresh in-process build's plan, consumed by
 /// [`super::compile::compile`].
-#[derive(Debug, Default)]
-pub struct IncrementalPlan {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IncrementalPlan {
+    /// One-shot builds compile the dependents of a recompiled module only
+    /// when its interface digest changed, in rounds (see [`next_round`]),
+    /// instead of compiling every transitive dependent.
+    Cutoff,
     /// Watch mode keeps every module in memory for later rebuilds and editor
-    /// tooling, so every up-to-date module is a support module.
-    pub support_everything: bool,
-    /// Compile the dependents of a recompiled module only when its interface
-    /// digest changed, in rounds (see [`next_round`]), instead of compiling
-    /// every transitive dependent.
-    pub cutoff: bool,
+    /// tooling, so every up-to-date module is a support module and every
+    /// transitive dependent of a stale module is compiled.
+    SupportEverything,
 }
 
 /// A unit's interface digest (its whole-unit item digest) with its item
@@ -281,14 +282,19 @@ pub fn current_record(
             .meta
             .insert(META_MODULE_SET.to_string(), module_set_digest(build_state));
     }
-    if let Some(started) = build_state.build_started_at {
+    if let Some(started) = build_state.build_run.started_at() {
         record.meta.insert(
             state_db::META_BUILD_STARTED_AT.to_string(),
             state_db::nanos_from_time(started).to_string(),
         );
         record.meta.insert(
             state_db::META_BUILD_OK.to_string(),
-            if build_state.last_build_ok { "1" } else { "0" }.to_string(),
+            if build_state.build_run.succeeded() {
+                "1"
+            } else {
+                "0"
+            }
+            .to_string(),
         );
     }
     // The interfaces of the modules this build compiled, where they differ
@@ -705,7 +711,7 @@ fn modules_to_compile(build_state: &BuildCommandState, stale: &AHashSet<String>)
         .as_ref()
         .expect("planned before choosing what to parse");
     let mut universe = stale.clone();
-    let mut frontier: Vec<String> = if plan.cutoff {
+    let mut frontier: Vec<String> = if *plan == IncrementalPlan::Cutoff {
         Vec::new()
     } else {
         stale.iter().cloned().collect()
@@ -721,7 +727,7 @@ fn modules_to_compile(build_state: &BuildCommandState, stale: &AHashSet<String>)
     }
     let support = support_modules(build_state, &universe, plan);
     // Support modules with a stored interface are loaded, not parsed.
-    let loadable = if plan.cutoff {
+    let loadable = if *plan == IncrementalPlan::Cutoff {
         stored_loadable(build_state, stale, &support)
     } else {
         AHashSet::new()
@@ -860,7 +866,7 @@ pub fn decode_recorded_imports(
 /// plan is known, the unchanged modules it compiles. Every other module is
 /// never parsed. Returns the parse warnings to report.
 pub fn parse_and_plan(build_state: &mut BuildCommandState, inc: impl Fn() + Sync) -> anyhow::Result<String> {
-    let mut warnings = super::parse::generate_asts(build_state, &inc)?;
+    let mut warnings = super::parse::generate_asts(build_state, &inc, super::parse::ParseWarningLog::Append)?;
     let deleted_modules = build_state.deleted_modules.clone();
     super::deps::get_deps(build_state, &deleted_modules);
     plan(build_state);
@@ -890,7 +896,11 @@ pub fn parse_and_plan(build_state: &mut BuildCommandState, inc: impl Fn() + Sync
             }
         }
     }
-    warnings.push_str(&super::parse::generate_asts(build_state, &inc)?);
+    warnings.push_str(&super::parse::generate_asts(
+        build_state,
+        &inc,
+        super::parse::ParseWarningLog::Append,
+    )?);
     // Parsing marks what it parsed for compilation; the plan decides.
     for (module_name, module) in build_state.build_state.modules.iter_mut() {
         module.compile_dirty = stale.contains(module_name);
@@ -935,10 +945,7 @@ pub fn parse_for_round(
             }
         }
     }
-    build_state.parse_warnings_replayed = true;
-    let result = super::parse::generate_asts(build_state, || ());
-    build_state.parse_warnings_replayed = false;
-    result.map(drop)
+    super::parse::generate_asts(build_state, || (), super::parse::ParseWarningLog::AlreadyWritten).map(drop)
 }
 
 /// The saved parse warnings of source files this build did not parse:
@@ -1055,8 +1062,14 @@ fn recorded_as_is(module_name: &str, module: &Module, record: Option<&PackageRec
 }
 
 /// Facts about one source module, gathered from the file system.
-pub struct ModuleTimes {
-    recorded: bool,
+pub enum ModuleTimes {
+    /// The previous build did not record the module as it is now: it is
+    /// stale whatever its files say, and so is everything that depends on it.
+    Unrecorded,
+    Recorded(RecordedTimes),
+}
+
+pub struct RecordedTimes {
     newest_input: Option<SystemTime>,
     /// When the JavaScript was last known to be up to date: the oldest output
     /// file's modification time, or the recorded build start if later. `None`
@@ -1094,25 +1107,16 @@ fn compute_module_times(build_state: &BuildCommandState) -> AHashMap<String, Mod
             let package = build_state.get_package(&module.package_name).expect("package");
             let record = previous.and_then(|previous| previous.packages.get(&module.package_name));
             if !recorded_as_is(module_name, module, record) {
-                // Stale whatever its files say, and so is everything that
-                // depends on it.
-                let times = ModuleTimes {
-                    recorded: false,
-                    newest_input: None,
-                    output: None,
-                    js_confirmed_at: None,
-                };
-                return (module_name.clone(), times);
+                return (module_name.clone(), ModuleTimes::Unrecorded);
             }
             let js_confirmed_at = record.and_then(|record| record.js_confirmed_at(module_name));
             let output = oldest_output(module, package, root_config)
                 .map(|oldest| js_confirmed_at.map_or(oldest, |confirmed| oldest.max(confirmed)));
-            let times = ModuleTimes {
-                recorded: true,
+            let times = ModuleTimes::Recorded(RecordedTimes {
                 newest_input: newest_own_input(module, config_times[&module.package_name]),
                 output,
                 js_confirmed_at,
-            };
+            });
             (module_name.clone(), times)
         })
         .collect::<Vec<_>>()
@@ -1140,7 +1144,11 @@ pub fn everything_up_to_date(build_state: &mut BuildCommandState) -> bool {
         else {
             return false;
         };
-        times.recorded && times.output.is_some() && times.newest_input.is_some_and(|newest| newest < started)
+        matches!(
+            times,
+            ModuleTimes::Recorded(RecordedTimes { newest_input: Some(newest), output: Some(_), .. })
+                if *newest < started
+        )
     });
     if up_to_date {
         restore_warnings(build_state, &|_| true);
@@ -1159,10 +1167,15 @@ fn carry_js_confirmed_at(
     up_to_date: &dyn Fn(&str) -> bool,
 ) {
     for (module_name, times) in times {
-        if let Some(confirmed) = times.js_confirmed_at
+        if let ModuleTimes::Recorded(RecordedTimes {
+            js_confirmed_at: Some(confirmed),
+            ..
+        }) = times
             && up_to_date(module_name)
         {
-            build_state.js_confirmed_at.insert(module_name.clone(), confirmed);
+            build_state
+                .js_confirmed_at
+                .insert(module_name.clone(), *confirmed);
         }
     }
 }
@@ -1189,7 +1202,8 @@ pub fn plan(build_state: &mut BuildCommandState) {
             return None;
         }
         let mut newest = match times.get(module_name) {
-            Some(times) => times.newest_input,
+            Some(ModuleTimes::Recorded(times)) => times.newest_input,
+            Some(ModuleTimes::Unrecorded) => None,
             // A namespace map has no sources of its own.
             None => Some(UNIX_EPOCH),
         };
@@ -1231,8 +1245,11 @@ pub fn plan(build_state: &mut BuildCommandState) {
         };
         let mut import_candidates: Vec<(String, Vec<(String, u64)>)> = Vec::new();
         for (module_name, own) in &times {
-            let own_stale = !own.recorded
-                || !matches!((own.newest_input, own.output), (Some(newest), Some(output)) if newest <= output);
+            let own_stale = !matches!(
+                own,
+                ModuleTimes::Recorded(RecordedTimes { newest_input: Some(newest), output: Some(output), .. })
+                    if newest <= output
+            );
             let row = recorded_row(build_state, module_name);
             let unknown_imports =
                 row.is_none_or(|row| row.interface_digest.is_none() || row.imports.is_none());
@@ -1240,7 +1257,7 @@ pub fn plan(build_state: &mut BuildCommandState) {
                 module
                     .deps
                     .iter()
-                    .any(|dep| times.get(dep).is_some_and(|times| !times.recorded))
+                    .any(|dep| matches!(times.get(dep), Some(ModuleTimes::Unrecorded)))
             });
             let import_removed = check_imports
                 && row.and_then(|row| row.imports.as_ref()).is_some_and(|imports| {
@@ -1310,8 +1327,11 @@ pub fn plan(build_state: &mut BuildCommandState) {
         for module_name in names {
             let own = &times[module_name];
             let newest = newest_closure(module_name, build_state, &times, &mut memo, &mut visiting);
-            let up_to_date = own.recorded
-                && matches!((newest, own.output), (Some(newest), Some(output)) if newest <= output);
+            let up_to_date = matches!(
+                (own, newest),
+                (ModuleTimes::Recorded(RecordedTimes { output: Some(output), .. }), Some(newest))
+                    if newest <= *output
+            );
             if !up_to_date {
                 stale.insert(module_name.clone());
             }
@@ -1328,9 +1348,10 @@ pub fn plan(build_state: &mut BuildCommandState) {
     }
     restore_warnings(build_state, &|module_name| !stale.contains(module_name));
     carry_js_confirmed_at(build_state, &times, &|module_name| !stale.contains(module_name));
-    build_state.incremental_plan = Some(IncrementalPlan {
-        support_everything: !cutoff,
-        cutoff,
+    build_state.incremental_plan = Some(if cutoff {
+        IncrementalPlan::Cutoff
+    } else {
+        IncrementalPlan::SupportEverything
     });
 }
 
@@ -1475,7 +1496,7 @@ pub fn support_modules(
     universe: &AHashSet<String>,
     plan: &IncrementalPlan,
 ) -> AHashSet<String> {
-    if plan.support_everything {
+    if *plan == IncrementalPlan::SupportEverything {
         return build_state
             .modules
             .keys()

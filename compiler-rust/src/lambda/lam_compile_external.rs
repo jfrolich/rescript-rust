@@ -283,37 +283,29 @@ impl LambdaCompiler {
         a: &LamArena,
         lam: Lam,
     ) -> Option<Expr> {
-        let mut module_target_var: Option<Ident> = None;
-        let mut module_target_global: Option<Ident> = None;
+        /// The one module every field access in the chain reads from.
+        enum ModuleTarget {
+            Var(Ident),
+            Global(Ident),
+        }
+        let mut module_target: Option<ModuleTarget> = None;
         let mut alias_chain = Vec::new();
         let mut cursor = lam;
 
         let mut note_target = |target: Lam| -> Option<()> {
-            match a.view(target) {
-                View::Var(id) => {
-                    if module_target_global.is_some()
-                        || module_target_var
-                            .as_ref()
-                            .is_some_and(|current| !current.same(&id))
-                    {
-                        return None;
-                    }
-                    module_target_var.get_or_insert(id);
-                    Some(())
-                }
-                View::GlobalModule(id) => {
-                    if module_target_var.is_some()
-                        || module_target_global
-                            .as_ref()
-                            .is_some_and(|current_id| !current_id.same(&id))
-                    {
-                        return None;
-                    }
-                    module_target_global.get_or_insert(id);
-                    Some(())
-                }
-                _ => None,
+            let next = match a.view(target) {
+                View::Var(id) => ModuleTarget::Var(id),
+                View::GlobalModule(id) => ModuleTarget::Global(id),
+                _ => return None,
+            };
+            match (&module_target, &next) {
+                (None, _) => module_target = Some(next),
+                (Some(ModuleTarget::Var(current)), ModuleTarget::Var(id))
+                | (Some(ModuleTarget::Global(current)), ModuleTarget::Global(id))
+                    if current.same(id) => {}
+                _ => return None,
             }
+            Some(())
         };
 
         loop {
@@ -381,21 +373,18 @@ impl LambdaCompiler {
                         }
                     }
 
-                    return if let Some(id) = module_target_var {
-                        Some(JE::var(id, &mut self.j))
-                    } else {
-                        module_target_global.map(|id| {
-                            JE::qualified(
-                                ModuleId {
-                                    id,
-                                    kind: Kind::Ml,
-                                    dynamic_import: false,
-                                },
-                                None,
-                                &mut self.j,
-                            )
-                        })
-                    };
+                    return module_target.map(|target| match target {
+                        ModuleTarget::Var(id) => JE::var(id, &mut self.j),
+                        ModuleTarget::Global(id) => JE::qualified(
+                            ModuleId {
+                                id,
+                                kind: Kind::Ml,
+                                dynamic_import: false,
+                            },
+                            None,
+                            &mut self.j,
+                        ),
+                    });
                 }
                 _ => return None,
             }

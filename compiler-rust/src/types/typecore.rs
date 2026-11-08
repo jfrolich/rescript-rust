@@ -1240,9 +1240,6 @@ pub struct TypeCheckContext<'a> {
     pub type_variables: HashMap<String, TypeExprRef>,
     /// Whether the current type translation rejects free type variables.
     fixed_type_variables: bool,
-    /// Whether delayed type translation may read a local module declaration
-    /// signature before forcing that module's component table.
-    defer_delayed_type_component_lookup: bool,
     /// Persistent environment for loading external modules from .cmi files.
     pub persistent_env: Option<crate::cmi::persistent_env::PersistentEnv>,
     /// Active recursive value bindings currently in scope.
@@ -1251,15 +1248,13 @@ pub struct TypeCheckContext<'a> {
     pub active_recursive_value_ids: Vec<Ident>,
     /// Mirrors OCaml's Experimental_features.LetUnwrap during type checking.
     pub experimental_let_unwrap: bool,
-    /// `~deprecated_context:FunctionCall` of typecore.ml:2496: set while
-    /// typing the function of an application and consumed by `Pexp_ident`.
+    /// OCaml's `?deprecated_context:FunctionCall` argument (typecore.ml:2594,
+    /// 2632): set right before typing the function of an application or the
+    /// tag of a tagged template, and taken by the next expression typed.
+    /// Braces pass it on to their inner expression (typecore.ml:2450-2452).
     pub(crate) deprecated_function_call: bool,
     /// Mirrors OCaml's Clflags.transparent_modules from `-no-alias-deps`.
     pub transparent_modules: bool,
-    /// When inside Pexp_constraint, the GENERIC constraint type. Used by
-    /// type_match_cases_batch_non_gadt to create fresh instances per case
-    /// body, matching OCaml's behavior where ty_res is generic.
-    pub generic_constraint_body_ty: Option<TypeExprRef>,
     /// Cached semantic module types from Tmod_apply, keyed by parsed module
     /// expression location.  Ensures that a second lookup for the same functor
     /// application reuses the types with correct path substitutions.
@@ -1398,13 +1393,11 @@ impl<'a> TypeCheckContext<'a> {
             univars: Vec::new(),
             type_variables: HashMap::new(),
             fixed_type_variables: false,
-            defer_delayed_type_component_lookup: false,
             active_recursive_value_ids: Vec::new(),
             persistent_env: None,
             experimental_let_unwrap: false,
             deprecated_function_call: false,
             transparent_modules: false,
-            generic_constraint_body_ty: None,
             module_expr_semantic_types: HashMap::new(),
             applicative_functor_body_depth: 0,
         }
@@ -2343,7 +2336,7 @@ pub fn transl_type(
 ) -> TypeCoreResult<(crate::types::typedtree::TypedCoreType, TypeExprRef)> {
     // `Typetexp.transl_simple_type` always runs `globalize_used_variables`
     // (typetexp.ml:659-696): new variables become global-level variables.
-    transl_type_with_options(tctx, env, styp, true, false, false)
+    transl_type_with_options(tctx, env, styp, true, false)
 }
 
 pub(crate) fn transl_type_fixed(
@@ -2351,7 +2344,7 @@ pub(crate) fn transl_type_fixed(
     env: &Env,
     styp: &crate::parser::ast::CoreType,
 ) -> TypeCoreResult<(crate::types::typedtree::TypedCoreType, TypeExprRef)> {
-    transl_type_with_options(tctx, env, styp, true, true, false)
+    transl_type_with_options(tctx, env, styp, true, true)
 }
 
 /// Run the deferred unifications of `Typetexp.globalize_used_variables`'s
@@ -2388,7 +2381,7 @@ pub fn transl_type_delayed(
     TypeExprRef,
     Vec<GlobalizeForce>,
 )> {
-    transl_type_globalized(tctx, env, styp, globalize, false, true)
+    transl_type_globalized(tctx, env, styp, globalize, false)
 }
 
 /// `Typetexp.transl_simple_type` (typetexp.ml:690-696): translate, then run
@@ -2399,16 +2392,9 @@ fn transl_type_with_options(
     styp: &crate::parser::ast::CoreType,
     globalize: bool,
     fixed_type_variables: bool,
-    defer_component_lookup: bool,
 ) -> TypeCoreResult<(crate::types::typedtree::TypedCoreType, TypeExprRef)> {
-    let (typed, ty, forces) = transl_type_globalized(
-        tctx,
-        env,
-        styp,
-        globalize,
-        fixed_type_variables,
-        defer_component_lookup,
-    )?;
+    let (typed, ty, forces) =
+        transl_type_globalized(tctx, env, styp, globalize, fixed_type_variables)?;
     run_globalize_forces(tctx, forces)?;
     Ok((typed, ty))
 }
@@ -2419,7 +2405,6 @@ fn transl_type_globalized(
     styp: &crate::parser::ast::CoreType,
     globalize: bool,
     fixed_type_variables: bool,
-    defer_component_lookup: bool,
 ) -> TypeCoreResult<(
     crate::types::typedtree::TypedCoreType,
     TypeExprRef,
@@ -2430,12 +2415,9 @@ fn transl_type_globalized(
     tctx.used_variable_locs.clear();
     tctx.univars.clear();
     let old_fixed_type_variables = tctx.fixed_type_variables;
-    let old_defer_component_lookup = tctx.defer_delayed_type_component_lookup;
     tctx.fixed_type_variables = fixed_type_variables;
-    tctx.defer_delayed_type_component_lookup = defer_component_lookup;
     let translated = transl_type_inner(tctx, env, styp);
     tctx.fixed_type_variables = old_fixed_type_variables;
-    tctx.defer_delayed_type_component_lookup = old_defer_component_lookup;
     let translated = translated?;
 
     // Match OCaml typetexp `globalize_used_variables`: link variables seen in
@@ -2545,70 +2527,6 @@ fn path_from_longident_persistent(lid: &Longident, arena: &ParseArena) -> Path {
     }
 }
 
-fn lookup_type_decl_in_unforced_module_decl(
-    md: &crate::types::decl::ModuleDeclaration,
-    type_name: &str,
-) -> Option<(Ident, Arc<crate::types::decl::TypeDeclaration>)> {
-    let crate::types::decl::ModuleType::MtySignature(sig) = &md.md_type else {
-        return None;
-    };
-    sig.iter().find_map(|item| match item {
-        crate::types::decl::SignatureItem::SigType(id, decl, _) if id.name() == type_name => {
-            Some((*id, decl.clone()))
-        }
-        _ => None,
-    })
-}
-
-fn select_record_type_in_unforced_module_decl(
-    ctx: &crate::types::context::TypeContext,
-    module_path: &Path,
-    md: &crate::types::decl::ModuleDeclaration,
-    label_name: &str,
-    field_names: &[&str],
-    closed_record: bool,
-) -> Option<TypeExprRef> {
-    let crate::types::decl::ModuleType::MtySignature(sig) = &md.md_type else {
-        return None;
-    };
-
-    let mut matching: Vec<(Path, TypeExprRef)> = Vec::new();
-    for item in sig.iter() {
-        let crate::types::decl::SignatureItem::SigType(type_id, decl, _) = item else {
-            continue;
-        };
-        let crate::types::TypeKind::TypeRecord(record_labels, _) = &decl.type_kind else {
-            continue;
-        };
-        if !record_labels
-            .iter()
-            .any(|label| label.ld_id.name() == label_name)
-        {
-            continue;
-        }
-        if !record_labels_match_ids(record_labels, field_names, closed_record) {
-            continue;
-        }
-        let type_path = Path::pdot(module_path.clone(), type_id.name());
-        if matching
-            .iter()
-            .any(|(existing_path, _)| existing_path.same(&type_path))
-        {
-            continue;
-        }
-        matching.push((
-            type_path.clone(),
-            ctx.new_generic_constr(type_path, decl.type_params.clone()),
-        ));
-    }
-
-    if matching.len() == 1 {
-        Some(matching[0].1)
-    } else {
-        None
-    }
-}
-
 pub(crate) fn resolve_type_constructor_path(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
@@ -2655,27 +2573,6 @@ pub(crate) fn resolve_type_constructor_path(
             // through Env.lookup_type; its Ldot case in
             // compiler/ml/env.ml:1091-1099 resolves the parent module
             // descriptor and reads the type table from that component view.
-            if tctx.defer_delayed_type_component_lookup
-                && let Longident::Lident(prefix_idx) = prefix.as_ref()
-            {
-                let module_name = tctx.arena.get_string(*prefix_idx);
-                if let Ok((module_path, md)) = env.find_module_with_path(module_name)
-                    && let Some((_id, decl)) =
-                        lookup_type_decl_in_unforced_module_decl(md, type_name)
-                {
-                    // OCaml compiler/ml/typecore.ml:1650-1664 stores the
-                    // force from Typetexp.transl_simple_type_delayed, and
-                    // compiler/ml/typecore.ml:4270-4288 runs it only after
-                    // pattern binders are entered. During that delayed
-                    // translation window, read the already-computed module
-                    // signature without forcing env.ml:781-813's component
-                    // table; the queued pattern force runs that lookup later.
-                    return (
-                        Path::pdot(module_path, type_name.to_string()),
-                        Some((*decl).clone()),
-                    );
-                }
-            }
             if let Some(Some((mod_path, decl))) = with_resolved_module_components_for_lid(
                 prefix,
                 tctx.arena,
@@ -7798,6 +7695,8 @@ fn type_expect_with_recarg_unscoped<'a>(
     let loc = expr.pexp_loc;
     let ctx = tctx.type_ctx;
     let exp_env_ref = ctx.store_typed_env(env);
+    // Applies to this expression only; see `deprecated_function_call`.
+    let deprecated_function_call = std::mem::take(&mut tctx.deprecated_function_call);
     let context = match &expr.pexp_desc {
         // Special errors for braced identifiers passed to records.
         ED::Pexp_braces(braces)
@@ -7820,6 +7719,7 @@ fn type_expect_with_recarg_unscoped<'a>(
             // typecore.ml: type the inner expression, then prepend the
             // braces node's attributes.
             let inner = tctx.arena.get_expr(braces.expr);
+            tctx.deprecated_function_call = deprecated_function_call;
             let exp = type_expect_with_recarg(tctx, env, inner, expected_ty, context, recarg)?;
             let mut attrs = expr.pexp_attributes.clone();
             attrs.extend(tctx.typed.exp_attributes(&exp).iter().cloned());
@@ -7868,7 +7768,7 @@ fn type_expect_with_recarg_unscoped<'a>(
             let used_name = tctx.arena.get_string(longident.last_idx());
             tctx.mark_value_used(env, used_name, tctx.resolve_loc(desc.val_loc));
             // typetexp.ml:117-123 via typecore.ml:2381-2388.
-            let deprecated_context = if std::mem::take(&mut tctx.deprecated_function_call) {
+            let deprecated_context = if deprecated_function_call {
                 crate::types::context::DeprecatedContext::FunctionCall
             } else {
                 crate::types::context::DeprecatedContext::Reference
@@ -8318,10 +8218,8 @@ fn type_expect_with_recarg_unscoped<'a>(
             ctx.begin_def();
             let stag = tctx.arena.get_expr(template.tag);
             let tag_var = ctx.new_var(None);
-            tctx.deprecated_function_call = matches!(&stag.pexp_desc, ED::Pexp_ident(_));
-            let tag = type_expect(tctx, env, stag, tag_var, None);
-            tctx.deprecated_function_call = false;
-            let tag = tag?;
+            tctx.deprecated_function_call = true;
+            let tag = type_expect(tctx, env, stag, tag_var, None)?;
             let param_ty = ctx.new_var(None);
             let output_ty = ctx.new_var(None);
             let tag_ty = ctx.new_constr(
@@ -8820,259 +8718,6 @@ fn type_expect_with_recarg_unscoped<'a>(
 }
 
 /// Unify expression types, raising ExprTypeClash on error.
-fn force_env_find_type_side_effects_for_path(
-    tctx: &mut TypeCheckContext<'_>,
-    env: &Env,
-    path: &Path,
-) -> Option<Arc<crate::types::decl::TypeDeclaration>> {
-    if let PathView::Pdot(parent, type_name, _) = path.view() {
-        // OCaml compiler/ml/ctype.ml:666-673 `get_level` calls
-        // `Env.find_type`; for `Pdot`, compiler/ml/env.ml:800-813 reaches
-        // `find_module_descr` before reading `comp_types`, which forces
-        // env.ml:1513-1552 component tables even when the type declaration is
-        // otherwise already present in the environment. Keep that lazy force
-        // point separate from abbreviation expansion.
-        let _ = lookup_type_in_resolved_path(
-            parent,
-            type_name.as_str(),
-            env,
-            &mut tctx.persistent_env,
-            tctx.type_ctx,
-        );
-    }
-    lookup_type_decl_for_path(path, env, &mut tctx.persistent_env, tctx.type_ctx)
-}
-
-fn path_depth_without_apply(path: &Path) -> usize {
-    match path.view() {
-        PathView::Pident(_) => 1,
-        PathView::Pdot(parent, _, _) => path_depth_without_apply(parent) + 1,
-        PathView::Papply(_, _) => 0,
-    }
-}
-
-fn lower_args_manifest_needs_component_force(
-    ctx: &TypeContext,
-    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    lookup_path: &Path,
-    manifest: TypeExprRef,
-) -> bool {
-    let manifest = ctx.repr(manifest);
-    let desc = ctx.borrow_desc(manifest);
-    match &*desc {
-        TypeDesc::Tconstr { path, args, .. } => {
-            let path = path.clone();
-            let has_args = !args.is_empty();
-            drop(desc);
-
-            let root = path_non_apply_root_ident(&path);
-            let pers_flat_hit = root.is_some_and(|head| {
-                pers_env
-                    .as_ref()
-                    .and_then(|pers| pers.qualified_alias_path_for_flattened_head(head.name()))
-                    .is_some()
-            });
-            let ctx_flat_hit = root.is_some_and(|head| {
-                let source = Path::pident(head.clone());
-                !ctx.component_paths_for_alias_source(&source).is_empty()
-            });
-            let parent_depth = path
-                .parent()
-                .map(|parent| path_depth_without_apply(&parent));
-            // OCaml compiler/ml/typecore.ml:2335-2342 lowers each application
-            // argument through ctype.ml:2820-2837 `unify_var`. Its
-            // ctype.ml:666-673 `get_level` calls env.ml:800-813 `find_type`,
-            // whose env.ml:1513-1552 component-table construction applies
-            // `Subst.type_declaration` to type manifests regardless of arity.
-            // Keep this tied to captured Ctype lookup/expansion paths and
-            // registered alias-component facts. Scanning raw signature contents
-            // here would add a Rust-only force heuristic; OCaml reaches child
-            // module thunks through env.ml:1567-1578 component storage.
-            !path.same(lookup_path)
-                && has_args
-                && (pers_flat_hit || ctx_flat_hit)
-                && parent_depth.is_some_and(|depth| depth >= 2)
-        }
-        _ => false,
-    }
-}
-
-fn force_unify_type_lookup_paths(tctx: &mut TypeCheckContext<'_>, paths: Vec<Path>) {
-    if paths.is_empty() {
-        return;
-    }
-
-    let Some(env) = tctx.unify_state.take_env() else {
-        return;
-    };
-
-    for path in paths {
-        // OCaml compiler/ml/typecore.ml:345-349 calls `Ctype.unify`,
-        // whose ctype.ml:666-673/688-749 `get_level` path reaches
-        // `Env.find_type`; for dotted paths env.ml:800-813 forces parent
-        // module components. Rust ctype records those exact lookup points
-        // because persistent component forcing lives in typecore.
-        let _ = force_env_find_type_side_effects_for_path(tctx, &env, &path);
-    }
-    tctx.unify_state.restore_env(env);
-}
-
-fn force_lower_args_type_lookup_paths(
-    tctx: &mut TypeCheckContext<'_>,
-    lookup_paths: Vec<Path>,
-    expansion_paths: Vec<Path>,
-) {
-    fn visit_manifest(
-        tctx: &mut TypeCheckContext<'_>,
-        env: &Env,
-        ty: TypeExprRef,
-        seen: &mut TypeExprRefSet,
-    ) {
-        let ctx = tctx.type_ctx;
-        let ty = ctx.repr(ty);
-        if !seen.insert(ty) {
-            return;
-        }
-
-        let desc = ctx.borrow_desc(ty);
-        match &*desc {
-            TypeDesc::Tconstr { path, args, .. } => {
-                let path = path.clone();
-                let args = args.clone();
-                drop(desc);
-                if let Some(decl) =
-                    lookup_type_decl_for_path(&path, env, &mut tctx.persistent_env, ctx)
-                    && let Some(manifest) = decl.type_manifest
-                {
-                    visit_manifest(tctx, env, manifest, seen);
-                }
-                for arg in ctx.type_list(args) {
-                    visit_manifest(tctx, env, arg, seen);
-                }
-            }
-            TypeDesc::Tarrow { args, ret } => {
-                let args = args.clone();
-                let ret = *ret;
-                drop(desc);
-                for arg in ctx.type_args(args) {
-                    visit_manifest(tctx, env, arg.typ, seen);
-                }
-                visit_manifest(tctx, env, ret, seen);
-            }
-            TypeDesc::Ttuple(items) => {
-                let items = items.clone();
-                drop(desc);
-                for item in ctx.type_list(items) {
-                    visit_manifest(tctx, env, item, seen);
-                }
-            }
-            TypeDesc::Tobject { fields } => {
-                let fields = *fields;
-                drop(desc);
-                visit_manifest(tctx, env, fields, seen);
-            }
-            TypeDesc::Tfield { typ, rest, .. } => {
-                let typ = *typ;
-                let rest = *rest;
-                drop(desc);
-                visit_manifest(tctx, env, typ, seen);
-                visit_manifest(tctx, env, rest, seen);
-            }
-            TypeDesc::Tlink(inner) | TypeDesc::Tsubst(inner) => {
-                let inner = *inner;
-                drop(desc);
-                visit_manifest(tctx, env, inner, seen);
-            }
-            TypeDesc::Tvariant(row) => {
-                let row = &ctx.row_desc(row);
-                let row = row.clone();
-                drop(desc);
-                if let Some((_, args)) = &row.row_name {
-                    for arg in args {
-                        visit_manifest(tctx, env, *arg, seen);
-                    }
-                }
-                visit_manifest(tctx, env, row.row_more, seen);
-                for (_, field) in row.row_fields.iter() {
-                    match field {
-                        RowField::Rpresent(Some(arg)) => visit_manifest(tctx, env, *arg, seen),
-                        RowField::Reither { types, .. } => {
-                            for arg in types {
-                                visit_manifest(tctx, env, *arg, seen);
-                            }
-                        }
-                        RowField::Rpresent(None) | RowField::Rabsent => {}
-                    }
-                }
-            }
-            TypeDesc::Tpoly { body, vars } => {
-                let body = *body;
-                let vars = vars.clone();
-                drop(desc);
-                visit_manifest(tctx, env, body, seen);
-                for var in ctx.type_list(vars) {
-                    visit_manifest(tctx, env, var, seen);
-                }
-            }
-            TypeDesc::Tpackage { args, .. } => {
-                let args = args.clone();
-                drop(desc);
-                for arg in ctx.type_list(args) {
-                    visit_manifest(tctx, env, arg, seen);
-                }
-            }
-            TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {}
-        }
-    }
-
-    if lookup_paths.is_empty() && expansion_paths.is_empty() {
-        return;
-    }
-
-    let Some(env) = tctx.unify_state.take_env() else {
-        return;
-    };
-
-    let mut seen = TypeExprRefSet::new();
-    for path in lookup_paths {
-        // OCaml compiler/ml/typecore.ml:2335-2342 `lower_args` calls
-        // ctype.ml:2820-2837 `unify_var`; its ctype.ml:666-673
-        // `get_level` path reaches Env.find_type before local binders that
-        // follow the application are stamped.
-        let decl = force_env_find_type_side_effects_for_path(tctx, &env, &path);
-        if let Some(decl) = decl
-            && let Some(manifest) = decl.type_manifest
-            && lower_args_manifest_needs_component_force(
-                tctx.type_ctx,
-                &mut tctx.persistent_env,
-                &path,
-                manifest,
-            )
-        {
-            // OCaml compiler/ml/env.ml:1513-1552 builds component types from
-            // `decl' = Subst.type_declaration sub decl`. For nested component
-            // aliases, that copied manifest is where later Env.find_type calls
-            // are forced. Rust keeps signatures shared, so force the same
-            // manifest component path before stamping the next local binder.
-            visit_manifest(tctx, &env, manifest, &mut seen);
-        }
-    }
-    for path in expansion_paths {
-        // Only ctype.ml:688-749 paths that pass the `level < path_level`
-        // expansion branch should walk manifests; plain `get_level` lookups
-        // above are not enough. When that expansion branch runs,
-        // ctype.ml:1367-1372 `expand_head` can force manifest aliases in the
-        // same phase.
-        if let Some(decl) =
-            lookup_type_decl_for_path(&path, &env, &mut tctx.persistent_env, tctx.type_ctx)
-            && let Some(manifest) = decl.type_manifest
-        {
-            visit_manifest(tctx, &env, manifest, &mut seen);
-        }
-    }
-    tctx.unify_state.restore_env(env);
-}
-
 fn unify_expression_types(
     tctx: &mut TypeCheckContext<'_>,
     loc: LocIdx,
@@ -9082,12 +8727,7 @@ fn unify_expression_types(
 ) -> TypeCoreResult<()> {
     use crate::types::unify;
 
-    let previous_capture = tctx.unify_state.begin_type_lookup_capture();
     let result = unify(tctx.type_ctx, &mut tctx.unify_state, ty1, ty2);
-    let (pending_type_lookup_paths, _) = tctx
-        .unify_state
-        .finish_type_lookup_capture(previous_capture);
-    force_unify_type_lookup_paths(tctx, pending_type_lookup_paths);
 
     match result {
         Ok(()) => Ok(()),
@@ -9905,13 +9545,8 @@ fn type_application(
     //   begin_def (); ... type_application/translate_unified_ops ...; end_def ();
     ctx.begin_def();
     let funct_ty = ctx.new_var(None);
-    tctx.deprecated_function_call = matches!(
-        &funct.pexp_desc,
-        crate::parser::ast::ExpressionDesc::Pexp_ident(_)
-    );
-    let typed_funct = type_expect(tctx, env, funct, funct_ty, None);
-    tctx.deprecated_function_call = false;
-    let typed_funct = typed_funct?;
+    tctx.deprecated_function_call = true;
+    let typed_funct = type_expect(tctx, env, funct, funct_ty, None)?;
     let typed_funct_value_path = match &typed_funct.exp_desc {
         ExpressionDesc::Texp_ident(path, _, _) => Some(path.clone()),
         _ => None,
@@ -9939,17 +9574,8 @@ fn type_application(
     let lowered_ty = crate::types::instance(ctx, typed_funct.exp_type);
     ctx.end_def();
     // OCaml compiler/ml/typecore.ml:2579-2582 instances the function type and
-    // immediately runs `lower_args`; typecore.ml:2335-2342 then calls
-    // `unify_var`, whose ctype.ml:666-673 `get_level` reaches Env.find_type.
-    // Rust ctype returns those lookup points so typecore can force persistent
-    // components in the same phase.
-    let (pending_type_lookup_paths, pending_type_expansion_paths) =
-        crate::types::ctype::lower_args(ctx, env, lowered_ty);
-    force_lower_args_type_lookup_paths(
-        tctx,
-        pending_type_lookup_paths,
-        pending_type_expansion_paths,
-    );
+    // immediately runs `lower_args` (typecore.ml:2335-2342).
+    crate::types::ctype::lower_args(ctx, env, lowered_ty);
 
     ctx.begin_def();
 
@@ -14463,30 +14089,6 @@ fn select_record_type_from_qualified_label_scope(
     };
     let label_name = arena.get_string(*label_idx);
 
-    if let Longident::Lident(module_idx) = module_lid.as_ref() {
-        let module_name = arena.get_string(*module_idx);
-        if let Ok((module_path, md)) = env.find_module_with_path(module_name) {
-            if matches!(module_path.view(), crate::types::path::PathView::Pident(id) if !id.is_persistent() && id.stamp() != 0)
-                && let Some(record_ty) = select_record_type_in_unforced_module_decl(
-                    ctx,
-                    &module_path,
-                    md,
-                    label_name,
-                    field_names,
-                    closed_record,
-                )
-            {
-                // OCaml compiler/ml/typecore.ml:1075-1104 reduces the label
-                // scope before compiler/ml/typecore.ml:3535-3575
-                // `type_label_exp` instances and unifies field types. For local
-                // module-qualified record literals, inspect the stored module
-                // declaration signature here so the applicative component table
-                // is forced by that later field-typing path.
-                return Some(record_ty);
-            }
-        }
-    }
-
     // OCaml compiler/ml/typecore.ml:1098-1125 first calls
     // `Typetexp.find_all_labels`, then typecore.ml:1071-1095
     // `disambiguate_label_by_ids` reduces that label scope by the full record
@@ -14579,17 +14181,8 @@ fn type_record(
     use crate::types::typedtree::RecordLabelDefinition;
 
     let ctx = tctx.type_ctx;
-    // Most callers should protect generic expected types from record typing
-    // side effects, but constraint bodies must type against the shared generic
-    // node so unification side effects match OCaml.
-    let expected_ty = if tctx
-        .generic_constraint_body_ty
-        .is_some_and(|constraint_ty| ctx.repr(constraint_ty) == ctx.repr(expected_ty))
-    {
-        expected_ty
-    } else {
-        instance_if_generic(ctx, expected_ty)
-    };
+    // Protect a generic expected type from record typing side effects.
+    let expected_ty = instance_if_generic(ctx, expected_ty);
     let placeholder_lid = tctx.arena.placeholder_located(loc);
 
     // Type check base expression if present.
@@ -16799,12 +16392,8 @@ fn type_constraint(
     // Pass the GENERIC constraint type to type_expect (matches OCaml).
     // Rue handlers create per-expression instances via rue_unify.
     // Non-rue handlers (tuple, array, construct) use instance_if_generic
-    // to avoid corrupting the generic type. Set generic_constraint_body_ty
-    // so match cases can create fresh instances per case body.
-    let prev_generic_constraint = tctx.generic_constraint_body_ty;
-    tctx.generic_constraint_body_ty = Some(ctype_ty);
+    // to avoid corrupting the generic type.
     let typed_inner = type_expect(tctx, env, inner_expr, ctype_ty, None)?;
-    tctx.generic_constraint_body_ty = prev_generic_constraint;
     unify_expression_types(tctx, loc, typed_inner.exp_type, arg_unify_ty, None)?;
 
     rue_unify(tctx, loc, result_ty, expected_ty, context)?;
@@ -18978,12 +18567,7 @@ fn type_pack(
             std::sync::Arc::new(vec![]),
         ));
     // OCaml compiler/ml/typemod.ml:1710-1719 calls `wrap_constraint` for
-    // every packed module. Do not reuse a previous package coercion here:
-    // Includemod expansion allocates/freshens hidden identifiers, and strict
-    // typedtree parity depends on doing that work at the same program points.
-    // Component-table probes now carry `ComponentLookupApi::ProbeModuleDescr`
-    // explicitly, so package wrapping can call inclusion directly without
-    // changing global lazy-forcing state.
+    // every packed module.
     // typemod.ml `wrap_constraint`: an inclusion failure is `Not_included`
     // at the packed module expression.
     let mut inclusion_warnings = Vec::new();
@@ -23029,27 +22613,14 @@ impl Env {
                         return result;
                     }
                     if let Some(pers) = pers_env.as_mut() {
-                        let sig = if cache_mode.forces_alias_sig() {
-                            // OCaml compiler/ml/env.ml:1435-1446
-                            // `scrape_alias` resolves Mty_alias through
-                            // `find_module`; for persistent Pidents,
-                            // env.ml:872-875 returns an Mty_signature after
-                            // forcing ps_sig, which is initialized as
-                            // `Subst.signature Subst.identity sign` at env.ml:677.
-                            // Probe mode mirrors env.ml:781-813 type-component
-                            // lookup and reads the component descriptor instead.
-                            let renamed_sig = pers.get_renamed_sig_shared(mod_name, ctx)?;
-                            copy_lookup_signature_for_subst(renamed_sig.as_ref(), ctx)
-                        } else {
-                            // OCaml compiler/ml/env.ml:800-813 qualified type
-                            // lookup reads component tables without forcing
-                            // env.ml:719-721 `ps_sig` unless the lookup path
-                            // really reaches that lazy. Probe mode keeps the
-                            // same descriptor-only boundary for callers that
-                            // need component facts without `find_module`
-                            // forcing from env.ml:865-882.
-                            pers.read_raw_sig_shared(mod_name, ctx)?.as_ref().clone()
-                        };
+                        // OCaml compiler/ml/env.ml:1435-1446 `scrape_alias`
+                        // resolves Mty_alias through `find_module`; for
+                        // persistent Pidents, env.ml:872-875 returns an
+                        // Mty_signature after forcing ps_sig, which is
+                        // initialized as `Subst.signature Subst.identity sign`
+                        // at env.ml:677.
+                        let renamed_sig = pers.get_renamed_sig_shared(mod_name, ctx)?;
+                        let sig = copy_lookup_signature_for_subst(renamed_sig.as_ref(), ctx);
                         let result = Some((sig, Some(mod_name.to_string())));
                         visiting.remove(path);
                         return result;
@@ -23815,8 +23386,8 @@ fn type_contains_unresolved_local_path(
             // thunk. This unresolved-path probe uses the explicit no-publish
             // cache mode so it does not make alias children such as
             // `Functions.Types` earlier than OCaml would.
-            let local_path_is_unresolved = has_local_head
-                && lookup_type_decl_for_path_for_probe(path, env, pers_env, ctx).is_none();
+            let local_path_is_unresolved =
+                has_local_head && lookup_type_decl_for_path(path, env, pers_env, ctx).is_none();
             if local_path_is_unresolved {
                 return true;
             }
@@ -25796,7 +25367,7 @@ fn qualify_module_local_type_paths_with_alias_lookup_in_place<'a>(
         // qualification probes only check whether a rewritten path exists; they
         // must not force env.ml:1568 module-declaration thunks or populate the
         // normal Rust lookup caches before the later real lookup reaches them.
-        lookup_type_decl_for_path_for_probe(type_path, env, pers_env, ctx)
+        lookup_type_decl_for_path(type_path, env, pers_env, ctx)
     }
 
     let repr = ctx.repr(ty);
@@ -25933,7 +25504,7 @@ fn qualify_module_local_type_paths_with_alias_lookup_in_place<'a>(
                             env,
                             pers_env,
                             ctx,
-                            ComponentLookupApi::ProbeModuleDescr,
+                            ComponentLookupApi::FindType,
                             |components| {
                                 components
                                     .lookup_type(id.name())
@@ -26888,9 +26459,7 @@ fn with_resolved_child_module_components<R>(
     let result = (f
         .take()
         .expect("qualified child module components callback reused"))(&components);
-    if let Some(module_key) = module_key
-        && cache_mode.publishes()
-    {
+    if let Some(module_key) = module_key {
         ctx.register_qualified_module_components(module_key, components);
     }
     Some(result)
@@ -27366,9 +26935,7 @@ fn build_module_components_from_parent_path(
             // persistent branch (env.ml:872-875) forces `ps_sig`, freshening
             // the unit's bound identifiers. The view below shares the
             // unrenamed signature, so take the rename's stamps here.
-            if cache_mode.forces_alias_sig() {
-                ctx.trigger_module_sig_rename(&alias_target);
-            }
+            ctx.trigger_module_sig_rename(&alias_target);
             let source_prefix = Path::pident(Ident::create_persistent(&alias_target));
             let access_path =
                 Path::pdot_pos(parent_access_path, module_name.as_str(), runtime_pos as i32);
@@ -27613,27 +27180,6 @@ pub(crate) enum ComponentLookupApi {
     /// OCaml `Env.open_signature`, `env.ml:1874-1877`: open the selected
     /// descriptor's component table into another environment.
     OpenSignature,
-    /// Rust-only no-publish existence probe for checks that do not correspond
-    /// to an OCaml lookup step. It may inspect the descriptor shape but must not
-    /// publish a component-table cache entry or force alias signatures on behalf
-    /// of a later real lookup.
-    ProbeModuleDescr,
-}
-
-impl ComponentLookupApi {
-    pub(crate) fn publishes(self) -> bool {
-        !matches!(self, ComponentLookupApi::ProbeModuleDescr)
-    }
-
-    pub(crate) fn forces_alias_sig(self) -> bool {
-        // OCaml compiler/ml/env.ml:1516-1518 runs `scrape_alias` whenever
-        // `get_components` builds a component table. That scrape reaches
-        // env.ml:1435-1446 and may call env.ml:865-882 `find_module` for an
-        // alias target even when the outer API is `find_type` or
-        // `find_module_descr`. Only Rust-only no-publish probes suppress that
-        // side effect, because there is no corresponding OCaml lookup step.
-        !matches!(self, ComponentLookupApi::ProbeModuleDescr)
-    }
 }
 
 pub(crate) fn with_resolved_module_components_for_path_with_cache_mode<R>(
@@ -27671,8 +27217,7 @@ pub(crate) fn with_resolved_module_components_for_path_with_cache_mode<R>(
     let shared_key = module_key
         .as_ref()
         .filter(|key| {
-            cache_mode.publishes()
-                && ctx.persistent_env_is_in_process()
+            ctx.persistent_env_is_in_process()
                 && key.is_worker_shareable()
                 && shared_components_enabled()
                 // The worker's shared view was built by a compilation that
@@ -27742,13 +27287,7 @@ pub(crate) fn with_resolved_module_components_for_path_with_cache_mode<R>(
     let result = (f
         .take()
         .expect("qualified module components callback reused"))(&components);
-    // OCaml compiler/ml/env.ml:781-813 exposes separate descriptor/type lookup
-    // paths from env.ml:865-882 module-declaration lookup. Probe callers such as
-    // typedecl.ml:767-779 constraint checks can read component descriptors, but
-    // must not publish that probe view as the normal lazy component result.
-    if let Some(module_key) = module_key
-        && cache_mode.publishes()
-    {
+    if let Some(module_key) = module_key {
         if crate::types::context::store_debug_enabled() && shared_key.is_some() {
             eprintln!(
                 "[store-build] {} published={}",
@@ -27906,23 +27445,6 @@ pub(crate) fn lookup_type_in_resolved_path(
     )
 }
 
-pub(crate) fn lookup_type_in_resolved_path_for_probe(
-    parent_module_path: &Path,
-    type_name: &str,
-    env: &Env,
-    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &crate::types::context::TypeContext,
-) -> Option<(Path, Ident, Arc<crate::types::decl::TypeDeclaration>)> {
-    lookup_type_in_resolved_path_with_cache_mode(
-        parent_module_path,
-        type_name,
-        env,
-        pers_env,
-        ctx,
-        ComponentLookupApi::ProbeModuleDescr,
-    )
-}
-
 fn lookup_type_in_resolved_path_with_cache_mode(
     parent_module_path: &Path,
     type_name: &str,
@@ -27975,16 +27497,14 @@ fn lookup_type_in_resolved_path_with_cache_mode(
             // not use the raw CMI reader here: OCaml's `ps_comps` is built from
             // the acknowledged persistent structure, not from an uncomponentized
             // CMI declaration.
-            if cache_mode.publishes() {
-                ctx.register_resolved_module_type(
-                    env.scope_id(),
-                    parent_module_path,
-                    type_name,
-                    found.0.clone(),
-                    found.1,
-                    found.2.clone(),
-                );
-            }
+            ctx.register_resolved_module_type(
+                env.scope_id(),
+                parent_module_path,
+                type_name,
+                found.0.clone(),
+                found.1,
+                found.2.clone(),
+            );
             return Some(found);
         }
     }
@@ -28009,20 +27529,14 @@ fn lookup_type_in_resolved_path_with_cache_mode(
         |components| {
             components.lookup_type(type_name).map(|(id, decl)| {
                 let result = (parent_module_path.clone(), *id, decl.clone());
-                // OCaml compiler/ml/env.ml:800-813 qualified type lookup reaches
-                // component tables through env.ml:781-793 `find_module_descr`, while
-                // typedecl.ml:767-779 probe-style constraint checks can inspect the
-                // descriptor without publishing Rust's selected lookup cache.
-                if cache_mode.publishes() {
-                    ctx.register_resolved_module_type(
-                        env.scope_id(),
-                        parent_module_path,
-                        type_name,
-                        result.0.clone(),
-                        result.1,
-                        result.2.clone(),
-                    );
-                }
+                ctx.register_resolved_module_type(
+                    env.scope_id(),
+                    parent_module_path,
+                    type_name,
+                    result.0.clone(),
+                    result.1,
+                    result.2.clone(),
+                );
                 result
             })
         },
@@ -28884,21 +28398,6 @@ fn lookup_type_decl_for_path<'a>(
         pers_env,
         ctx,
         ComponentLookupApi::FindType,
-    )
-}
-
-fn lookup_type_decl_for_path_for_probe<'a>(
-    type_path: &Path,
-    env: &Env,
-    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &'a crate::types::context::TypeContext,
-) -> Option<Arc<crate::types::decl::TypeDeclaration>> {
-    lookup_type_decl_for_path_with_cache_mode(
-        type_path,
-        env,
-        pers_env,
-        ctx,
-        ComponentLookupApi::ProbeModuleDescr,
     )
 }
 

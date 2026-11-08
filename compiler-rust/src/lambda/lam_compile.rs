@@ -3742,7 +3742,15 @@ impl LambdaCompiler {
             a.params(info).to_vec()
         };
         let mut tail_loop = TailLoopState::new(tail_targets.to_vec(), params.clone());
-        let body = self.compile_tail_loop_return_block(a, body, &mut tail_loop);
+        // OCaml compiler/core/lam_compile.ml:398-407 compiles the body with
+        // `jmp_table = empty_handler_map; switch_depth = 0; loop_stack = []`,
+        // like any other function body: the enclosing function's handlers
+        // and loops do not reach into it.
+        let body = self.with_function_scope(|this| {
+            this.with_return_unit_context(return_unit, |that| {
+                that.compile_tail_loop_return_block(a, body, &mut tail_loop)
+            })
+        });
 
         if !tail_loop.triggered {
             return self.compile_expr(a, func).expr;

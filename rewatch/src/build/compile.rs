@@ -3,6 +3,7 @@
 mod dependency_cycle;
 
 use super::build_types::*;
+use super::incremental::IncrementalPlan;
 use super::logs;
 use super::packages;
 use super::qos;
@@ -603,6 +604,19 @@ fn append_compile_warnings(
     }
 }
 
+/// How far a [`compile`] call got across its rounds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CompileProgress {
+    /// No module has failed and the scheduler has not stalled.
+    Ok,
+    /// A module failed. Its dependents never become ready, so an unfinished
+    /// universe is expected and is not reported as a cycle.
+    HadErrors,
+    /// Nothing was in flight while modules were still waiting and no module
+    /// had failed: the remaining modules form a dependency cycle.
+    Stalled,
+}
+
 #[instrument(name = "build.compile", skip_all)]
 pub fn compile(
     build_state: &mut BuildCommandState,
@@ -631,7 +645,7 @@ pub fn compile(
     let incremental_plan = build_state.incremental_plan.take();
     let has_support_work = incremental_plan
         .as_ref()
-        .is_some_and(|plan| plan.support_everything);
+        .is_some_and(|plan| *plan == IncrementalPlan::SupportEverything);
     if dirty_modules.is_empty() && !has_support_work {
         set_length(0);
         let mut warnings = String::new();
@@ -690,7 +704,7 @@ pub fn compile(
     // transitively depends on it.
     // A cut-off build decides the dependents round by round instead.
     let mut compile_universe = dirty_modules.clone();
-    let mut frontier = if incremental_plan.as_ref().is_some_and(|plan| plan.cutoff) {
+    let mut frontier = if incremental_plan == Some(IncrementalPlan::Cutoff) {
         Vec::new()
     } else {
         dirty_modules.iter().cloned().collect::<Vec<_>>()
@@ -724,7 +738,7 @@ pub fn compile(
     // A cut-off build compiles in rounds: the dependents of a module whose
     // interface digest changed are compiled in the next round
     // (see `incremental::next_round`).
-    let cutoff = incremental_plan.as_ref().is_some_and(|plan| plan.cutoff);
+    let cutoff = incremental_plan == Some(IncrementalPlan::Cutoff);
 
     let js_writer = JsWriter::spawn();
     // Bound the jobs handed to rayon so the priority heap still orders work —
@@ -741,8 +755,7 @@ pub fn compile(
     let critical_slots = qos::critical_slots();
 
     let mut results_buffer: Vec<CompletionMsg> = Vec::with_capacity(compile_universe.len());
-    let mut has_errors = false;
-    let mut stalled = false;
+    let mut progress = CompileProgress::Ok;
     let mut completed_count = 0usize;
     let mut total_universe_count = 0usize;
     let mut all_registry_only: AHashSet<String> = AHashSet::new();
@@ -974,8 +987,8 @@ pub fn compile(
                 }
 
                 if in_flight == 0 {
-                    if completed.len() < compile_universe_count && !has_errors {
-                        stalled = true;
+                    if completed.len() < compile_universe_count && progress == CompileProgress::Ok {
+                        progress = CompileProgress::Stalled;
                     }
                     break;
                 }
@@ -1107,7 +1120,7 @@ pub fn compile(
                             let module_failed = msg.result.is_err()
                                 || msg.interface_result.as_ref().is_some_and(|r| r.is_err());
                             if module_failed {
-                                has_errors = true;
+                                progress = CompileProgress::HadErrors;
                             }
 
                             let finished_name = msg.module_name.clone();
@@ -1205,7 +1218,7 @@ pub fn compile(
         }
         all_registry_only.extend(registry_only.iter().cloned());
         all_dirty.extend(dirty_set);
-        if !cutoff || stalled {
+        if !cutoff || progress == CompileProgress::Stalled {
             break compile_universe;
         }
         let written: AHashSet<String> = compiled_this_build
@@ -1433,7 +1446,7 @@ pub fn compile(
                 module.compile_dirty = false;
                 if is_compiled && !registry_only.contains(&module_name) {
                     build_state.written_modules.insert(module_name.clone());
-                    if let Some(started) = build_state.build_started_at {
+                    if let Some(started) = build_state.build_run.started_at() {
                         build_state.js_confirmed_at.insert(module_name.clone(), started);
                     }
                 }
@@ -1470,7 +1483,7 @@ pub fn compile(
         }
     }
 
-    if stalled {
+    if progress == CompileProgress::Stalled {
         let cycle = dependency_cycle::find(
             &compile_universe
                 .iter()

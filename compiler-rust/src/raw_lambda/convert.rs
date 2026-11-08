@@ -453,7 +453,11 @@ pub struct RawLambdaConverter<'a> {
     diagnostic: Option<RawLambdaDiagnostic>,
     warnings: Vec<TypeCoreWarning>,
     warning_config: WarningConfig,
-    suppress_inlined_attribute_check: usize,
+    /// Address of the applied function or functor whose `[@inlined]`
+    /// attribute its application consumed. OCaml strips the attribute from
+    /// that one node (translattribute.ml:100-129), so only it skips the
+    /// misplaced-attribute check; its subexpressions are still checked.
+    inlined_consumed_by: Option<usize>,
     preserve_expanded_sparse_records: bool,
     hoisted_functions: Vec<crate::lambda::HoistedFunction>,
     hoisted_exports: Vec<crate::lambda::HoistedExport>,
@@ -488,7 +492,7 @@ impl<'a> RawLambdaConverter<'a> {
             diagnostic: None,
             warnings: Vec::new(),
             warning_config: WarningConfig::new(),
-            suppress_inlined_attribute_check: 0,
+            inlined_consumed_by: None,
             preserve_expanded_sparse_records: false,
             hoisted_functions: Vec::new(),
             hoisted_exports: Vec::new(),
@@ -522,7 +526,7 @@ impl<'a> RawLambdaConverter<'a> {
             diagnostic: None,
             warnings: Vec::new(),
             warning_config: WarningConfig::new(),
-            suppress_inlined_attribute_check: 0,
+            inlined_consumed_by: None,
             preserve_expanded_sparse_records: false,
             hoisted_functions: Vec::new(),
             hoisted_exports: Vec::new(),
@@ -557,7 +561,7 @@ impl<'a> RawLambdaConverter<'a> {
             diagnostic: None,
             warnings: Vec::new(),
             warning_config: WarningConfig::new(),
-            suppress_inlined_attribute_check: 0,
+            inlined_consumed_by: None,
             preserve_expanded_sparse_records: false,
             hoisted_functions: Vec::new(),
             hoisted_exports: Vec::new(),
@@ -1215,11 +1219,18 @@ impl<'a> RawLambdaConverter<'a> {
         self.parse_inline_attribute(idx.map(|idx| &attrs.as_slice()[idx]))
     }
 
-    fn with_inlined_attribute_check_suppressed<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
-        self.suppress_inlined_attribute_check += 1;
+    /// Convert the applied `node` with its `[@inlined]` attribute consumed.
+    fn with_inlined_consumed_by<N, T>(&mut self, node: &N, f: impl FnOnce(&mut Self) -> T) -> T {
+        let previous = self
+            .inlined_consumed_by
+            .replace(std::ptr::from_ref(node).addr());
         let result = f(self);
-        self.suppress_inlined_attribute_check -= 1;
+        self.inlined_consumed_by = previous;
         result
+    }
+
+    fn inlined_consumed<N>(&self, node: &N) -> bool {
+        self.inlined_consumed_by == Some(std::ptr::from_ref(node).addr())
     }
 
     /// Mirrors `Translattribute.check_attribute` for expression attributes.
@@ -1238,7 +1249,7 @@ impl<'a> RawLambdaConverter<'a> {
                     }
                 }
                 "inlined" => {
-                    if self.suppress_inlined_attribute_check > 0 {
+                    if self.inlined_consumed(expr) {
                         continue;
                     }
                     self.report_warning(
@@ -1269,7 +1280,7 @@ impl<'a> RawLambdaConverter<'a> {
                     }
                 }
                 "inlined" => {
-                    if self.suppress_inlined_attribute_check > 0 {
+                    if self.inlined_consumed(module_expr) {
                         continue;
                     }
                     self.report_warning(
@@ -4570,9 +4581,10 @@ impl<'a> RawLambdaConverter<'a> {
                 let loc = module_expr.mod_loc;
                 let inlined =
                     self.get_inlined_attribute_from(&self.ta.module_expr(*funct).mod_attributes);
-                let funct_lam = self.with_inlined_attribute_check_suppressed(|this| {
+                let funct_expr = self.ta.module_expr(*funct);
+                let funct_lam = self.with_inlined_consumed_by(funct_expr, |this| {
                     this.convert_module_expr_raw_with_coercion(
-                        self.ta.module_expr(*funct),
+                        funct_expr,
                         &None,
                         &ModuleCoercion::Tcoerce_none,
                     )
@@ -7009,8 +7021,7 @@ impl<'a> RawLambdaConverter<'a> {
         }
 
         let inlined = self.get_inlined_attribute_from(self.ta.exp_attributes(funct));
-        let funct_lam =
-            self.with_inlined_attribute_check_suppressed(|this| this.convert_expr_raw(funct));
+        let funct_lam = self.with_inlined_consumed_by(funct, |this| this.convert_expr_raw(funct));
         let uncurried_partial_application = if partial {
             self.env_for_expr(funct).and_then(|env| {
                 self.get_function_arity_from_type(env.as_ref(), funct.exp_type)

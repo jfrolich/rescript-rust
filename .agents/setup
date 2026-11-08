@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+# Prepares an Amp orb to build and test this repository: the OCaml reference
+# compiler (opam + dune), the Rust compiler and rewatch (rustup), and the
+# JavaScript tooling (yarn). Must stay idempotent; see
+# https://ampcode.com/docs/orbs.
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+
+step() {
+  printf '\n==> %s (%s)\n' "$1" "$(date +%T)"
+}
+
+# Keep in sync with .devcontainer/Dockerfile and the CI matrix.
+OPAM_VERSION=2.5.0
+OCAML_VERSION=5.5.1
+OPAM_SWITCH=rescript
+# rewatch pins its toolchain in rewatch/rust-toolchain.toml; compiler-rust
+# builds with the same one.
+RUST_TOOLCHAIN="$(awk -F '"' '/^channel/ { print $2; exit }' rewatch/rust-toolchain.toml)"
+
+step "System packages"
+missing=()
+for pkg in bubblewrap build-essential m4 pkg-config unzip patch bzip2 rsync; do
+  dpkg -s "$pkg" >/dev/null 2>&1 || missing+=("$pkg")
+done
+if ((${#missing[@]})); then
+  sudo apt-get update -qq
+  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${missing[@]}"
+fi
+
+step "opam $OPAM_VERSION"
+if ! command -v opam >/dev/null 2>&1 || [[ "$(opam --version)" != "$OPAM_VERSION" ]]; then
+  tmp="$(mktemp)"
+  curl -fsSL "https://github.com/ocaml/opam/releases/download/$OPAM_VERSION/opam-$OPAM_VERSION-x86_64-linux" -o "$tmp"
+  sudo install -m 755 "$tmp" /usr/local/bin/opam
+  rm -f "$tmp"
+fi
+if [[ ! -d "$HOME/.opam" ]]; then
+  opam init --bare -y --disable-sandboxing --no-setup
+fi
+
+step "OCaml $OCAML_VERSION switch '$OPAM_SWITCH'"
+if ! opam switch list --short | grep -qx "$OPAM_SWITCH"; then
+  opam switch create "$OPAM_SWITCH" "$OCAML_VERSION" -y
+fi
+opam switch set "$OPAM_SWITCH"
+eval "$(opam env --switch="$OPAM_SWITCH" --set-switch)"
+
+step "OCaml dependencies"
+# js_of_ocaml/wasm_of_ocaml are only needed for the playground build; skip
+# them to keep a cold setup short. ounit2 and ocamlformat are the test-only
+# dependencies `make test` and `make checkformat` need.
+opam install . --deps-only -y
+opam install -y ounit2.2.2.7 ocamlformat.0.29.0
+
+step "Rust $RUST_TOOLCHAIN"
+if [[ ! -x "$HOME/.cargo/bin/rustup" ]]; then
+  curl -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path --profile minimal \
+    --default-toolchain "$RUST_TOOLCHAIN" -c clippy -c rustfmt
+fi
+# shellcheck disable=SC1091
+source "$HOME/.cargo/env"
+rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal -c clippy -c rustfmt
+rustup default "$RUST_TOOLCHAIN"
+
+step "Login shell environment"
+profile_marker="# rescript: cargo and opam environment"
+if ! grep -Fqx "$profile_marker" "$HOME/.bash_profile" 2>/dev/null; then
+  cat >>"$HOME/.bash_profile" <<EOF
+
+$profile_marker
+[ -f "\$HOME/.cargo/env" ] && . "\$HOME/.cargo/env"
+command -v opam >/dev/null 2>&1 && eval "\$(opam env --switch=$OPAM_SWITCH --set-switch 2>/dev/null)"
+EOF
+fi
+
+step "JavaScript dependencies"
+sudo corepack enable
+COREPACK_ENABLE_DOWNLOAD_PROMPT=0 yarn install --immutable
+
+step "Done"

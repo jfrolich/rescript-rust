@@ -449,9 +449,9 @@ pub fn incremental_build_without_lock(
         rescript_compiler::perf_counters::reset();
     }
     logs::initialize(&build_state.packages);
-    build_state.build_started_at = Some(std::time::SystemTime::now());
-    build_state.last_build_ok = false;
-    build_state.stopped_at_parse = false;
+    build_state.build_run = BuildRun::Running {
+        started_at: std::time::SystemTime::now(),
+    };
     build_state.invalidated_modules.clear();
 
     // A fresh in-process build has nothing compiled in memory, so every
@@ -499,7 +499,7 @@ pub fn incremental_build_without_lock(
             log_config_warnings(build_state);
         }
         write_compiler_info(build_state);
-        build_state.last_build_ok = true;
+        build_state.build_run.succeed();
         print_compiler_reports(phase_timing_enabled, compiler_counters_enabled);
         return Ok(
             if has_parse_warnings
@@ -559,7 +559,7 @@ pub fn incremental_build_without_lock(
             let result_asts = if incremental {
                 incremental::parse_and_plan(build_state, || pb.inc(1))
             } else {
-                parse::generate_asts(build_state, || pb.inc(1))
+                parse::generate_asts(build_state, || pb.inc(1), parse::ParseWarningLog::Append)
             };
             phase_mark("parse-asts-done");
             let precompile_result = handle.and_then(compile::join_runtime_precompile);
@@ -580,7 +580,7 @@ pub fn incremental_build_without_lock(
         }
         result_asts
     } else {
-        parse::generate_asts(build_state, || pb.inc(1))
+        parse::generate_asts(build_state, || pb.inc(1), parse::ParseWarningLog::Append)
     };
     let timing_ast_elapsed = timing_ast.elapsed();
 
@@ -591,7 +591,7 @@ pub fn incremental_build_without_lock(
         }
         Err(err) => {
             let _error_span = info_span!("build.parse_error").entered();
-            build_state.stopped_at_parse = true;
+            build_state.build_run.stop_at_parse();
             logs::finalize(&build_state.packages);
 
             if !plain_output && show_progress {
@@ -675,13 +675,18 @@ pub fn incremental_build_without_lock(
         .unwrap(),
     );
 
-    let (compile_errors, compile_warnings, num_compiled_modules) = compile::compile(
+    let compile_result = compile::compile(
         build_state,
         show_progress,
         || pb.inc(1),
         |size| pb.set_length(size),
-    )
-    .map_err(|e| {
+    );
+    // Workers request the retry while compiling. Consume the request even when
+    // `compile` fails afterwards, so it cannot start a retry in a later build.
+    let retry_with_locations = build_state
+        .diagnostic_retry
+        .swap(false, std::sync::atomic::Ordering::Relaxed);
+    let (compile_errors, compile_warnings, num_compiled_modules) = compile_result.map_err(|e| {
         let _error_span = info_span!("build.compile_error").entered();
         print_compiler_reports(phase_timing_enabled, compiler_counters_enabled);
 
@@ -691,10 +696,7 @@ pub fn incremental_build_without_lock(
         }
     })?;
 
-    if build_state
-        .diagnostic_retry
-        .swap(false, std::sync::atomic::Ordering::Relaxed)
-    {
+    if retry_with_locations {
         pb.finish_and_clear();
         // No first-pass diagnostic escapes. Discard the speculative registry
         // and recompile its dependencies too: inclusion/type errors can quote
@@ -711,7 +713,6 @@ pub fn incremental_build_without_lock(
         build_state.previous_in_process = None;
         build_state.loaded_modules.clear();
         build_state.compiled_modules.clear();
-        build_state.parse_warnings_replayed = false;
         mark_modules_dirty(build_state);
         let result = incremental_build_without_lock(
             build_state,
@@ -801,7 +802,7 @@ pub fn incremental_build_without_lock(
         phase_mark("compiler-info-end");
 
         print_compiler_reports(phase_timing_enabled, compiler_counters_enabled);
-        build_state.last_build_ok = true;
+        build_state.build_run.succeed();
         Ok(outcome)
     }
 }

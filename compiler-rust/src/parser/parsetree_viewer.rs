@@ -811,7 +811,6 @@ pub fn fun_expr<'a>(
 
     // Now collect_params: only handle Pexp_fun, stop at anything else
     let mut n_fun = 0;
-    let mut found_first_pexp_fun = false;
 
     loop {
         match &current.pexp_desc {
@@ -823,9 +822,7 @@ pub fn fun_expr<'a>(
                     if n_fun > 0 {
                         break;
                     }
-                    if !found_first_pexp_fun {
-                        is_async = is_async || inner.is_async;
-                    }
+                    is_async = is_async || inner.is_async;
                     push_nary_newtypes(arena, inner, &mut params);
                     for source in source_params {
                         params.push(FunParam::Parameter {
@@ -847,10 +844,10 @@ pub fn fun_expr<'a>(
                     is_async: expr_is_async,
                 } = &**inner;
                 // Check is_async on the FIRST Pexp_fun we encounter
-                // (it may be nested inside Pexp_newtype)
-                if !found_first_pexp_fun {
+                // (it may be nested inside Pexp_newtype). The first one always
+                // collects a parameter, so `n_fun == 0` identifies it.
+                if n_fun == 0 {
                     is_async = is_async || *expr_is_async;
-                    found_first_pexp_fun = true;
                 }
 
                 // OCaml's condition: arity = None || n_fun = 0
