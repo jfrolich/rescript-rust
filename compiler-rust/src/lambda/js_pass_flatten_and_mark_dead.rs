@@ -802,7 +802,8 @@ fn substituted_caml_block_item(
     };
     if let Some(field) = field {
         match &**tag_info {
-            TagInfo::Record { fields, .. } | TagInfo::RecordInlined { fields, .. } => {
+            TagInfo::Record(_) | TagInfo::RecordInlined(_) => {
+                let fields = tag_info.record_fields().expect("record block");
                 let item = items
                     .iter()
                     .zip(fields.iter())
@@ -826,7 +827,7 @@ fn should_materialize_block_binding_items(
     // splitting complex payload fields
     // (`compiler/core/js_pass_flatten_and_mark_dead.ml:174-221`).
     let item_count = match tag_info {
-        TagInfo::Record { .. } | TagInfo::RecordInlined { .. } => tag_info.logical_field_count(),
+        TagInfo::Record(_) | TagInfo::RecordInlined(_) => tag_info.logical_field_count(),
         _ => items.len(),
     };
     if item_count < 2 {
@@ -882,7 +883,7 @@ fn is_simple_substituted_index_value(expr: &Expression) -> bool {
         | ExpressionDesc::TemplateLiteral(_)
         | ExpressionDesc::Undefined { .. } => true,
         ExpressionDesc::CamlBlock(items, MutableFlag::Immutable, tag)
-            if matches!(**tag, TagInfo::Constructor { .. }) =>
+            if matches!(**tag, TagInfo::Constructor(_)) =>
         {
             items.iter().all(is_simple_substituted_index_value)
         }
@@ -896,7 +897,8 @@ fn block_substitution_name(ident: &Ident, tag_info: &TagInfo, index: usize) -> S
             .get(index)
             .cloned()
             .unwrap_or_else(|| index.to_string()),
-        TagInfo::Record { fields, .. } => fields
+        TagInfo::Record(record) => record
+            .fields
             .get(index)
             .map(|(field, _)| field.clone())
             .unwrap_or_else(|| index.to_string()),

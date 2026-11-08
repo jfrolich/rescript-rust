@@ -1,30 +1,28 @@
-//! Direct port of `compiler/core/lam_pass_remove_alias.ml`.
-//!
-//! Field folding, optional-block unwrapping, cross-module function inlining
-//! and boolean-constant folding using the `ident_tbl` populated by
-//! `Lam_pass_collect.collect_info`.
-//!
-//! Every line below must trace to a specific line in OCaml. No invented
-//! logic.
+//! `Lam_pass_remove_alias.simplify_alias` over the Lambda arena: field
+//! folding, optional unwrapping, boolean folding and function inlining from
+//! the metadata `Lam_pass_collect` recorded.
 
 use crate::ident::Ident;
 use crate::lambda::LamLoc;
+use crate::lambda::arena::{Lam, LamArena, Node};
 use crate::lambda::lam_analysis::{lfunction_can_be_inlined, ok_to_inline_fun_when_app};
+use crate::lambda::lam_beta_reduce::{propagate_beta_reduce, propagate_beta_reduce_with_map};
 use crate::lambda::lam_closure::is_closed_with_map;
 use crate::lambda::lam_compat::{Comparison, FieldDbgInfo};
-use crate::lambda::lam_compile_context::{BoxedNullable, IdKind, IdentTable, LamStats, RecFlag};
+use crate::lambda::lam_compile_context::{BoxedNullable, RecFlag};
 use crate::lambda::lam_constant::Constant;
 use crate::lambda::lam_hit::hit_variable;
 use crate::lambda::lam_primitive::Primitive;
+use crate::lambda::lam_stats::{IdKind, IdentTable, LamStats};
 use crate::lambda::lam_tag_info::TagInfo;
 use crate::lambda::lam_util::field_flatten_get;
-use crate::lambda::{Apply, Lambda, PrimInfo};
+use crate::lambda::{ApInfo, Lambda};
 
 /// Rust counterpart to `Lam_compile_env.query_external_id_info` used by
 /// `Lam_pass_remove_alias.simplify_alias` (lam_pass_remove_alias.ml:143-159).
 pub type ExternalInlineResolver<'a> = dyn FnMut(&Ident, &str) -> Option<Lambda> + 'a;
 
-/// Direct port of `Lam_pass_remove_alias.outcome` (lam_pass_remove_alias.ml:25).
+/// `Lam_pass_remove_alias.outcome` (lam_pass_remove_alias.ml:25).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Outcome {
     EvalFalse,
@@ -32,33 +30,33 @@ enum Outcome {
     EvalUnknown,
 }
 
-/// Direct port of `Lam_pass_remove_alias.id_is_for_sure_true_in_boolean`
-/// (lam_pass_remove_alias.ml:27-42).
-fn id_is_for_sure_true_in_boolean(tbl: &IdentTable, id: &crate::ident::Ident) -> Outcome {
+/// `id_is_for_sure_true_in_boolean` (lam_pass_remove_alias.ml:27-42).
+fn id_is_for_sure_true_in_boolean(a: &LamArena, tbl: &IdentTable, id: &Ident) -> Outcome {
+    let falsy = |c: &Constant| {
+        matches!(
+            c,
+            Constant::JsFalse | Constant::JsNull | Constant::JsUndefined { .. }
+        )
+    };
     match tbl.get(id) {
-        Some(IdKind::NormalOptional(Lambda::Lconst(
-            Constant::JsFalse | Constant::JsNull | Constant::JsUndefined { .. },
-        ))) => Outcome::EvalFalse,
-        Some(IdKind::Constant(Constant::JsTrue)) => Outcome::EvalTrue,
-        Some(IdKind::Constant(Constant::Int { i, .. })) => {
-            if *i == 0 {
-                Outcome::EvalFalse
-            } else {
-                Outcome::EvalTrue
+        Some(IdKind::NormalOptional(l)) if a.as_const(*l).is_some_and(falsy) => Outcome::EvalFalse,
+        Some(IdKind::Constant(c)) => match a.constant(*c) {
+            Constant::JsTrue => Outcome::EvalTrue,
+            Constant::Int { i, .. } => {
+                if *i == 0 {
+                    Outcome::EvalFalse
+                } else {
+                    Outcome::EvalTrue
+                }
             }
-        }
-        Some(IdKind::Constant(
-            Constant::JsFalse | Constant::JsNull | Constant::JsUndefined { .. },
-        )) => Outcome::EvalFalse,
+            c if falsy(c) => Outcome::EvalFalse,
+            _ => Outcome::EvalUnknown,
+        },
         _ => Outcome::EvalUnknown,
     }
 }
 
-/// Direct port of `Lam_pass_remove_alias.is_const_some` (lam_pass_remove_alias.ml:44-48).
-///
-/// Recognises constants whose runtime shape is `Some(_)` — either the
-/// dedicated `Constant::Some` carrier or a record block tagged
-/// [`TagInfo::Some`] / [`TagInfo::SomeNotNested`].
+/// `is_const_some` (lam_pass_remove_alias.ml:44-48).
 fn is_const_some(cst: &Constant) -> bool {
     match cst {
         Constant::Some(_) => true,
@@ -69,81 +67,47 @@ fn is_const_some(cst: &Constant) -> bool {
     }
 }
 
-/// Port of `Lam.not_` (lam.ml:584-588). Folds `Pintcomp Cneq -> Pintcomp Ceq`
-/// to keep the outcome shape clean; otherwise wraps the argument in `Pnot`.
-fn lam_not(loc: LamLoc, x: Lambda) -> Lambda {
-    match x {
-        Lambda::Lprim(__prim9)
-            if matches!(
-                __prim9.as_ref(),
-                PrimInfo {
-                    primitive: Primitive::Pintcomp(Comparison::Neq),
-                    args: _,
-                    loc: _l,
-                }
-            ) =>
-        {
-            let PrimInfo {
-                primitive: Primitive::Pintcomp(Comparison::Neq),
-                args,
-                loc: l,
-            } = *__prim9
-            else {
-                unreachable!()
-            };
-            Lambda::Lprim(Box::new(PrimInfo {
-                primitive: Primitive::Pintcomp(Comparison::Eq),
-                args,
-                loc: l,
-            }))
-        }
-        x => Lambda::prim(Primitive::Pnot, vec![x], loc),
+/// `Lam.not_` (lam.ml:584-588).
+fn lam_not(a: &mut LamArena, loc: LamLoc, x: Lam) -> Lam {
+    if let Node::Prim { args, info } = a.node(x)
+        && matches!(
+            a.prim_payload(info).primitive,
+            Primitive::Pintcomp(Comparison::Neq)
+        )
+    {
+        let l = a.prim_payload(info).loc;
+        let info = a.add_prim(Primitive::Pintcomp(Comparison::Eq), l);
+        return a.prim_raw_with(info, args);
+    }
+    a.prim(Primitive::Pnot, &[x], loc)
+}
+
+/// The module and field of `Pfield(_, Fld_module name) [Lglobal_module id]`.
+fn module_field_apply_target(a: &LamArena, lam: Lam) -> Option<(Ident, &str)> {
+    let (Primitive::Pfield(_, FieldDbgInfo::Module { name }), [m], _) = a.as_prim(lam)? else {
+        return None;
+    };
+    match a.node(*m) {
+        Node::GlobalModule(id) => Some((a.ident(id), name.as_str())),
+        _ => None,
     }
 }
 
-fn module_field_apply_target(lam: &Lambda) -> Option<(&Ident, &str)> {
-    let Lambda::Lprim(__prim201) = lam else {
-        return None;
-    };
-    let PrimInfo {
-        primitive: Primitive::Pfield(_, FieldDbgInfo::Module { name }),
-        args,
-        ..
-    } = __prim201.as_ref()
-    else {
-        return None;
-    };
-    let [Lambda::LglobalModule(id)] = args.as_slice() else {
-        return None;
-    };
-    Some((id, name.as_str()))
-}
-
-fn external_inline_args_are_allowed(args: &[Lambda], ident_tbl: &IdentTable) -> bool {
-    args.iter().all(|arg| match arg {
-        Lambda::Lvar(param) => !matches!(ident_tbl.get(param), Some(IdKind::Parameter)),
-        _ => true,
+fn external_inline_args_are_allowed(a: &LamArena, args: &[Lam], ident_tbl: &IdentTable) -> bool {
+    args.iter().all(|arg| match a.as_var(*arg) {
+        Some(param) => !matches!(ident_tbl.get(&param), Some(IdKind::Parameter)),
+        None => true,
     })
 }
 
-/// Direct port of `Lam_pass_remove_alias.simplify_alias`
-/// (lam_pass_remove_alias.ml:50-290).
-///
-/// The `meta` parameter is mutable so that the beta-reduction helpers called
-/// from inside the pass can register `ImmutableBlock` / `Normal_optional`
-/// entries for their fresh let-bound parameters (lam_beta_reduce.ml:66-73).
-/// Without this, blocks introduced by beta-reduced functor arguments remain
-/// opaque to subsequent `field_flatten_get` lookups.
-///
-/// `jsx_preserve` ports OCaml's `Js_config.jsx_preserve` global: the
-/// 7432-tagged Pjs_call arm only fires when it is true
-/// (lam_pass_remove_alias.ml:54-62).
-pub fn simplify_alias_with_jsx_and_external_inline_owned(
+/// `Lam_pass_remove_alias.simplify_alias` (lam_pass_remove_alias.ml:50-290).
+pub fn simplify_alias(
+    a: &mut LamArena,
     meta: &mut LamStats,
-    lam: Lambda,
+    lam: Lam,
     jsx_preserve: bool,
     external_inline: &mut ExternalInlineResolver<'_>,
-) -> Lambda {
+) -> Lam {
     let export_idents = std::mem::take(&mut meta.export_idents);
     let id_gen = meta.id_gen.clone();
     let result = Simplifier {
@@ -153,397 +117,272 @@ pub fn simplify_alias_with_jsx_and_external_inline_owned(
         jsx_preserve,
         external_inline,
     }
-    .simpl_owned(lam);
+    .simpl(a, lam);
     meta.export_idents = export_idents;
     result
 }
 
-struct Simplifier<'a> {
-    ident_tbl: &'a mut crate::lambda::lam_compile_context::IdentTable,
-    export_idents: &'a ahash::AHashSet<crate::ident::Ident>,
-    /// Shared stamp counter used for `Ident.rename` during beta reduction.
-    /// Mirrors OCaml's global `Ident.rename` counter so fresh stamps never
-    /// collide across independent beta reductions of the same function.
+struct Simplifier<'a, 'r> {
+    ident_tbl: &'a mut IdentTable,
+    export_idents: &'a ahash::AHashSet<Ident>,
     id_gen: &'a crate::context::IdGenerator,
     jsx_preserve: bool,
-    external_inline: &'a mut ExternalInlineResolver<'a>,
+    external_inline: &'a mut ExternalInlineResolver<'r>,
 }
 
-use crate::lambda::lambda_traverse::Mapped;
-
-impl<'a> Simplifier<'a> {
-    /// Owned port of `Lam_pass_remove_alias.simplify_alias`
-    /// (compiler/core/lam_pass_remove_alias.ml:50-290). Each branch mirrors
-    /// the borrowed `simpl` walker below but consumes unchanged Rust nodes.
-    fn simpl_owned(&mut self, lam: Lambda) -> Lambda {
-        self.simpl_sharing(lam).0
-    }
-
-    fn simpl_list(&mut self, items: Vec<Lambda>) -> (Vec<Lambda>, bool) {
-        let mut changed = false;
-        let items = items
-            .into_iter()
-            .map(|item| {
-                let (item, c) = self.simpl_sharing(item);
-                changed |= c;
-                item
-            })
-            .collect();
-        (items, changed)
+impl Simplifier<'_, '_> {
+    fn simpl_children(&mut self, a: &mut LamArena, lam: Lam) -> Lam {
+        a.shallow_map(lam, &mut |a, x| self.simpl(a, x))
     }
 
     /// `Lam_pass_remove_alias.simplify_alias.simpl`
-    /// (compiler/core/lam_pass_remove_alias.ml:49-247). OCaml hands back the
-    /// physically same term when nothing was rewritten; the flag in the
-    /// returned pair says whether the term is a new one, so callers rebuild
-    /// through the folding smart constructors only when OCaml would.
-    fn simpl_sharing(&mut self, lam: Lambda) -> Mapped {
-        match lam {
-            // 7432: prevent optimization in JSX preserve mode.
-            Lambda::Lprim(prim)
-                if self.jsx_preserve
-                    && matches!(
-                        &prim.primitive,
-                        Primitive::PjsCall { prim_name, .. }
-                            if prim_name == "jsx" || prim_name == "jsxs"
-                    )
-                    && matches!(
-                        prim.args.first(),
-                        Some(Lambda::Lprim(first)) if matches!(first.primitive, Primitive::Pfield(_, _))
-                    ) =>
-            {
-                let PrimInfo {
-                    primitive,
-                    mut args,
-                    loc,
-                } = *prim;
-                let rest = args.split_off(1);
-                let (rest, changed) = self.simpl_list(rest);
-                args.extend(rest);
-                if changed {
-                    (Lambda::prim(primitive, args, loc), true)
-                } else {
-                    (
-                        Lambda::Lprim(Box::new(PrimInfo {
-                            primitive,
-                            args,
-                            loc,
-                        })),
-                        false,
-                    )
-                }
-            }
-            Lambda::Lprim(prim)
-                if matches!(prim.primitive, Primitive::Pfield(_, _)) && prim.args.len() == 1 =>
-            {
-                let PrimInfo {
-                    primitive,
-                    mut args,
-                    loc,
-                } = *prim;
-                let Primitive::Pfield(i, info) = primitive.clone() else {
-                    unreachable!()
-                };
-                let (arg, arg_changed) =
-                    self.simpl_sharing(args.pop().expect("checked one Pfield arg"));
-                let rebuild = |arg: Lambda| {
-                    if arg_changed {
-                        (Lambda::prim(primitive, vec![arg], loc), true)
-                    } else {
-                        (
-                            Lambda::Lprim(Box::new(PrimInfo {
-                                primitive,
-                                args: vec![arg],
-                                loc,
-                            })),
-                            false,
-                        )
-                    }
-                };
-                match arg {
-                    Lambda::Lvar(v) => {
-                        let mut fallback_used = false;
-                        let fallback_v = v;
-                        let result = field_flatten_get(
-                            || {
-                                fallback_used = true;
-                                rebuild(Lambda::Lvar(fallback_v)).0
-                            },
-                            &v,
-                            i,
-                            &info,
-                            self.ident_tbl,
-                        );
-                        let changed = !fallback_used || arg_changed;
-                        (result, changed)
-                    }
-                    other => rebuild(other),
-                }
-            }
-            Lambda::Lprim(prim)
-                if matches!(
-                    prim.primitive,
-                    Primitive::PvalFromOption | Primitive::PvalFromOptionNotNest
-                ) && matches!(prim.args.as_slice(), [Lambda::Lvar(_)]) =>
-            {
-                let Lambda::Lvar(v) = &prim.args[0] else {
-                    unreachable!()
-                };
-                match self.ident_tbl.get(v).cloned() {
-                    Some(IdKind::OptionalBlock(l, _)) => (l, true),
-                    _ if matches!(prim.primitive, Primitive::PvalFromOptionNotNest) => {
-                        let PrimInfo { mut args, .. } = *prim;
-                        (args.pop().expect("checked one optional arg"), true)
-                    }
-                    _ => (Lambda::Lprim(prim), false),
-                }
-            }
-            Lambda::LifThenElse(cond, then_, else_)
-                if matches!(
-                    cond.as_ref(),
-                    Lambda::Lprim(prim)
-                        if matches!(prim.primitive, Primitive::PisNotNone)
-                            && matches!(prim.args.as_slice(), [Lambda::Lvar(_)])
-                ) =>
-            {
-                let id = match cond.as_ref() {
-                    Lambda::Lprim(prim) => match &prim.args[0] {
-                        Lambda::Lvar(id) => *id,
-                        _ => unreachable!(),
-                    },
-                    _ => unreachable!(),
-                };
-                let optional_test = |primitive: Primitive, l: Lambda| {
-                    lam_not(
-                        LamLoc::NONE,
-                        Lambda::prim(primitive, vec![l], LamLoc::NONE),
-                    )
-                };
-                match self.ident_tbl.get(&id).cloned() {
-                    Some(IdKind::Constant(c)) if is_const_some(&c) => {
-                        (self.simpl_owned(*then_), true)
-                    }
-                    Some(
-                        IdKind::ImmutableBlock(_)
-                        | IdKind::MutableBlock(_)
-                        | IdKind::NormalOptional(_),
-                    ) => (self.simpl_owned(*then_), true),
-                    Some(IdKind::OptionalBlock(l, nullable)) => {
-                        let primitive = match nullable {
-                            BoxedNullable::Null => Primitive::PisNull,
-                            BoxedNullable::Undefined => Primitive::PisUndefined,
-                            BoxedNullable::NullUndefined => Primitive::PisNullUndefined,
-                        };
-                        let then_ = self.simpl_owned(*then_);
-                        let else_ = self.simpl_owned(*else_);
-                        (Lambda::if_(optional_test(primitive, l), then_, else_), true)
-                    }
-                    _ => crate::lambda::lambda_traverse::shallow_map_sharing(
-                        Lambda::LifThenElse(cond, then_, else_),
-                        &mut |inner| self.simpl_sharing(inner),
-                    ),
-                }
-            }
-            Lambda::LifThenElse(cond, then_, else_) if matches!(cond.as_ref(), Lambda::Lvar(_)) => {
-                let Lambda::Lvar(id) = cond.as_ref() else {
-                    unreachable!()
-                };
-                match id_is_for_sure_true_in_boolean(self.ident_tbl, id) {
-                    Outcome::EvalTrue => (self.simpl_owned(*then_), true),
-                    Outcome::EvalFalse => (self.simpl_owned(*else_), true),
-                    Outcome::EvalUnknown => crate::lambda::lambda_traverse::shallow_map_sharing(
-                        Lambda::LifThenElse(cond, then_, else_),
-                        &mut |inner| self.simpl_sharing(inner),
-                    ),
-                }
-            }
-            Lambda::Lapply(apply)
-                if module_field_apply_target(apply.ap_func.as_ref()).is_some() =>
-            {
-                let Apply {
-                    ap_func,
-                    ap_args,
-                    ap_info,
-                    ap_transformed_jsx,
-                } = *apply;
-                let (module_id, field_name) = module_field_apply_target(ap_func.as_ref())
-                    .expect("checked module field target");
-                if let Some(Lambda::Lfunction(func)) = (self.external_inline)(module_id, field_name)
-                    && func.params.len() == ap_args.len()
-                    && external_inline_args_are_allowed(&ap_args, self.ident_tbl)
-                    && lfunction_can_be_inlined(&func)
+    /// (lam_pass_remove_alias.ml:49-247). Returns `lam` itself when nothing
+    /// was rewritten, as OCaml's physical sharing does.
+    fn simpl(&mut self, a: &mut LamArena, lam: Lam) -> Lam {
+        match a.node(lam) {
+            Node::Prim { args, info } => self.simpl_prim(a, lam, args, info),
+            Node::If { cond, then_, else_ } => {
+                // `if Pis_not_none v then ...`
+                if let Some((Primitive::PisNotNone, [v], _)) = a.as_prim(cond)
+                    && let Some(id) = a.as_var(*v)
                 {
-                    let reduced =
-                        crate::lambda::lam_beta_reduce::propagate_beta_reduce_with_meta_and_id_gen(
-                            self.ident_tbl,
-                            self.id_gen,
-                            &func.params,
-                            &func.body,
-                            &ap_args,
-                        );
-                    return (self.simpl_owned(reduced), true);
+                    match self.ident_tbl.get(&id) {
+                        Some(IdKind::Constant(c)) if is_const_some(a.constant(*c)) => {
+                            return self.simpl(a, then_);
+                        }
+                        Some(
+                            IdKind::ImmutableBlock(_)
+                            | IdKind::MutableBlock(_)
+                            | IdKind::NormalOptional(_),
+                        ) => return self.simpl(a, then_),
+                        Some(IdKind::OptionalBlock(l, nullable)) => {
+                            let (l, nullable) = (*l, *nullable);
+                            let primitive = match nullable {
+                                BoxedNullable::Null => Primitive::PisNull,
+                                BoxedNullable::Undefined => Primitive::PisUndefined,
+                                BoxedNullable::NullUndefined => Primitive::PisNullUndefined,
+                            };
+                            let then_ = self.simpl(a, then_);
+                            let else_ = self.simpl(a, else_);
+                            let test = a.prim(primitive, &[l], LamLoc::NONE);
+                            let test = lam_not(a, LamLoc::NONE, test);
+                            return a.if_(test, then_, else_);
+                        }
+                        _ => return self.simpl_children(a, lam),
+                    }
                 }
-                // `Lambda.apply fn args' ap_info ?ap_transformed_jsx:None`.
-                let _ = ap_transformed_jsx;
-                let (func, c1) = self.simpl_sharing(*ap_func);
-                let (args, c2) = self.simpl_list(ap_args);
-                if c1 || c2 {
-                    (Lambda::apply(func, args, ap_info, false), true)
-                } else {
-                    (
-                        Lambda::Lapply(Box::new(Apply {
-                            ap_func: Box::new(func),
-                            ap_args: args,
-                            ap_info,
-                            ap_transformed_jsx,
-                        })),
-                        false,
-                    )
+                if let Some(id) = a.as_var(cond) {
+                    return match id_is_for_sure_true_in_boolean(a, self.ident_tbl, &id) {
+                        Outcome::EvalTrue => self.simpl(a, then_),
+                        Outcome::EvalFalse => self.simpl(a, else_),
+                        Outcome::EvalUnknown => self.simpl_children(a, lam),
+                    };
+                }
+                self.simpl_children(a, lam)
+            }
+            Node::Apply { func, args, info } => self.simpl_apply(a, lam, func, args, info),
+            Node::StringSwitch {
+                scrut,
+                actions,
+                info,
+            } => {
+                if let Some(s) = a.as_var(scrut)
+                    && let Some(IdKind::Constant(c)) = self.ident_tbl.get(&s)
+                {
+                    // Switch on the constant the scrutinee is bound to.
+                    let c = *c;
+                    let (actions, _) = a.map_list(actions, &mut |a, x| self.simpl(a, x));
+                    let scrut = a.push(Node::Const(c));
+                    return a.string_switch_with(scrut, actions, info);
+                }
+                self.simpl_children(a, lam)
+            }
+            _ => self.simpl_children(a, lam),
+        }
+    }
+
+    fn simpl_prim(
+        &mut self,
+        a: &mut LamArena,
+        lam: Lam,
+        args: crate::lambda::arena::LamList,
+        info: crate::lambda::arena::PrimId,
+    ) -> Lam {
+        let primitive = &a.prim_payload(info).primitive;
+        // 7432: no optimization of the component of a JSX call in preserve
+        // mode.
+        if self.jsx_preserve
+            && matches!(primitive, Primitive::PjsCall(call)
+                if call.prim_name == "jsx" || call.prim_name == "jsxs")
+            && a.list(args)
+                .first()
+                .is_some_and(|f| matches!(a.as_prim(*f), Some((Primitive::Pfield(_, _), _, _))))
+        {
+            let all = a.list_vec(args);
+            let mut changed = false;
+            let mut out = smallvec::SmallVec::<[Lam; 8]>::with_capacity(all.len());
+            out.push(all[0]);
+            for &x in &all[1..] {
+                let y = self.simpl(a, x);
+                changed |= y != x;
+                out.push(y);
+            }
+            if !changed {
+                return lam;
+            }
+            let args = a.add_list(&out);
+            return a.prim_with(info, args);
+        }
+        match primitive {
+            Primitive::Pfield(i, field_info) if a.list_len(args) == 1 => {
+                let (i, field_info) = (*i, field_info.clone());
+                let arg = a.list(args)[0];
+                let new_arg = self.simpl(a, arg);
+                let rebuild = |a: &mut LamArena| {
+                    if new_arg == arg {
+                        lam
+                    } else {
+                        let args = a.add_list(&[new_arg]);
+                        a.prim_with(info, args)
+                    }
+                };
+                match a.as_var(new_arg) {
+                    Some(v) => field_flatten_get(a, rebuild, &v, i, &field_info, self.ident_tbl),
+                    None => rebuild(a),
                 }
             }
-            Lambda::Lapply(apply) if matches!(apply.ap_func.as_ref(), Lambda::Lvar(_)) => {
-                let Apply {
-                    ap_func,
-                    ap_args,
-                    ap_info,
-                    ap_transformed_jsx,
-                } = *apply;
-                let Lambda::Lvar(v) = *ap_func else {
-                    unreachable!()
-                };
-                let (ap_args, args_changed) = self.simpl_list(ap_args);
-                let normal = |this: &mut Self, ap_args: Vec<Lambda>| {
-                    let (func, func_changed) = this.simpl_sharing(Lambda::Lvar(v));
-                    if func_changed || args_changed {
-                        (
-                            Lambda::apply(func, ap_args, ap_info.clone(), ap_transformed_jsx),
-                            true,
-                        )
+            Primitive::PvalFromOption | Primitive::PvalFromOptionNotNest if matches!(a.list(args), [x] if matches!(a.node(*x), Node::Var(_))) =>
+            {
+                let not_nest = matches!(primitive, Primitive::PvalFromOptionNotNest);
+                let x = a.list(args)[0];
+                let v = a.as_var(x).expect("checked variable");
+                match self.ident_tbl.get(&v) {
+                    Some(IdKind::OptionalBlock(l, _)) => *l,
+                    _ if not_nest => x,
+                    _ => lam,
+                }
+            }
+            _ => self.simpl_children(a, lam),
+        }
+    }
+
+    fn beta(&mut self, a: &mut LamArena, params: &[Ident], body: Lam, args: &[Lam]) -> Lam {
+        propagate_beta_reduce(a, self.ident_tbl, self.id_gen, params, body, args)
+    }
+
+    fn simpl_apply(
+        &mut self,
+        a: &mut LamArena,
+        lam: Lam,
+        func: Lam,
+        args: crate::lambda::arena::LamList,
+        info: crate::lambda::arena::ApplyId,
+    ) -> Lam {
+        // Cross-module inlining (lam_pass_remove_alias.ml:131-162).
+        if let Some((module_id, field_name)) = module_field_apply_target(a, func) {
+            let field_name = field_name.to_string();
+            let arg_list = a.list_vec(args);
+            if let Some(Lambda::Lfunction(f)) = (self.external_inline)(&module_id, &field_name)
+                && f.params.len() == arg_list.len()
+                && external_inline_args_are_allowed(a, &arg_list, self.ident_tbl)
+                && crate::lambda::lam_analysis::attr_can_be_inlined(&f.attr)
+            {
+                let body = a.import(&f.body);
+                let reduced = self.beta(a, &f.params, body, &arg_list);
+                return self.simpl(a, reduced);
+            }
+            // `Lambda.apply fn args' ap_info ?ap_transformed_jsx:None`.
+            let nf = self.simpl(a, func);
+            let (nargs, changed) = a.map_list(args, &mut |a, x| self.simpl(a, x));
+            if nf == func && !changed {
+                return lam;
+            }
+            let ap_info: ApInfo = a.apply_payload(info).info.clone();
+            let nargs = a.list_vec(nargs);
+            return a.apply(nf, &nargs, ap_info, false);
+        }
+        match a.node(func) {
+            Node::Var(v) => {
+                let v = a.ident(v);
+                let (nargs, args_changed) = a.map_list(args, &mut |a, x| self.simpl(a, x));
+                let normal = |this: &mut Self, a: &mut LamArena| {
+                    let nf = this.simpl(a, func);
+                    if nf == func && !args_changed {
+                        lam
                     } else {
-                        (
-                            Lambda::Lapply(Box::new(Apply {
-                                ap_func: Box::new(func),
-                                ap_args,
-                                ap_info: ap_info.clone(),
-                                ap_transformed_jsx,
-                            })),
-                            false,
-                        )
+                        a.apply_with(nf, nargs, info)
                     }
                 };
                 let func_info = match self.ident_tbl.get(&v) {
                     Some(IdKind::FunctionId {
-                        lambda: Some((Lambda::Lfunction(func), rec_flag)),
+                        lambda: Some((f, rec_flag)),
                         ..
-                    }) if lfunction_can_be_inlined(func) => Some((func.clone(), *rec_flag)),
+                    }) => match a.node(*f) {
+                        Node::Function { body, info: fi } if lfunction_can_be_inlined(a, fi) => {
+                            Some((fi, body, *rec_flag))
+                        }
+                        _ => None,
+                    },
                     _ => None,
                 };
-                let Some((func, rec_flag)) = func_info else {
-                    return normal(self, ap_args);
+                let Some((fi, body, rec_flag)) = func_info else {
+                    return normal(self, a);
                 };
-                if ap_args.len() != func.params.len() {
-                    return normal(self, ap_args);
+                let arg_list = a.list_vec(nargs);
+                let params: smallvec::SmallVec<[Ident; 8]> = a.params(fi).iter().copied().collect();
+                if arg_list.len() != params.len() {
+                    return normal(self, a);
                 }
-                if func.attr.is_a_functor {
-                    let reduced =
-                        crate::lambda::lam_beta_reduce::propagate_beta_reduce_with_meta_and_id_gen(
-                            self.ident_tbl,
-                            self.id_gen,
-                            &func.params,
-                            &func.body,
-                            &ap_args,
-                        );
-                    return (self.simpl_owned(reduced), true);
+                if a.func_payload(fi).attr.is_a_functor {
+                    let reduced = self.beta(a, &params, body, &arg_list);
+                    return self.simpl(a, reduced);
                 }
-                if !ok_to_inline_fun_when_app(&func, &ap_args) {
-                    return normal(self, ap_args);
+                if !ok_to_inline_fun_when_app(a, fi, body, &arg_list) {
+                    return normal(self, a);
                 }
                 let (param_ok, param_map) =
-                    is_closed_with_map(self.export_idents, &func.params, &func.body);
-                let is_export_id = self.export_idents.contains(&v);
-                if is_export_id && !param_ok {
-                    return normal(self, ap_args);
+                    is_closed_with_map(a, self.export_idents, &params, body);
+                if self.export_idents.contains(&v) && !param_ok {
+                    return normal(self, a);
                 }
                 match rec_flag {
-                    RecFlag::Rec => (
-                        crate::lambda::lam_beta_reduce::propagate_beta_reduce_with_map_and_meta_and_id_gen(
-                            self.ident_tbl,
-                            self.id_gen,
-                            &param_map,
-                            &func.params,
-                            &func.body,
-                            &ap_args,
-                        ),
-                        true,
+                    RecFlag::Rec => propagate_beta_reduce_with_map(
+                        a,
+                        self.ident_tbl,
+                        self.id_gen,
+                        &param_map,
+                        &params,
+                        body,
+                        &arg_list,
                     ),
-                    RecFlag::SelfRec => normal(self, ap_args),
+                    RecFlag::SelfRec => normal(self, a),
                     RecFlag::NonRec => {
-                        if ap_args.iter().any(|arg| hit_variable(&v, arg)) {
-                            normal(self, ap_args)
+                        if arg_list.iter().any(|x| hit_variable(a, &v, *x)) {
+                            normal(self, a)
                         } else {
-                            let reduced =
-                                crate::lambda::lam_beta_reduce::propagate_beta_reduce_with_map_and_meta_and_id_gen(
-                                    self.ident_tbl,
-                                    self.id_gen,
-                                    &param_map,
-                                    &func.params,
-                                    &func.body,
-                                    &ap_args,
-                                );
-                            (self.simpl_owned(reduced), true)
+                            let reduced = propagate_beta_reduce_with_map(
+                                a,
+                                self.ident_tbl,
+                                self.id_gen,
+                                &param_map,
+                                &params,
+                                body,
+                                &arg_list,
+                            );
+                            self.simpl(a, reduced)
                         }
                     }
                 }
             }
-            Lambda::Lapply(apply)
-                if matches!(
-                    apply.ap_func.as_ref(),
-                    Lambda::Lfunction(func)
-                        if func.params.len() == apply.ap_args.len() && lfunction_can_be_inlined(func)
-                ) =>
+            Node::Function { body, info: fi }
+                if a.params(fi).len() == a.list_len(args) && lfunction_can_be_inlined(a, fi) =>
             {
-                let Apply {
-                    ap_func, ap_args, ..
-                } = *apply;
-                let Lambda::Lfunction(func) = *ap_func else {
-                    unreachable!()
-                };
-                let reduced =
-                    crate::lambda::lam_beta_reduce::propagate_beta_reduce_with_meta_and_id_gen(
-                        self.ident_tbl,
-                        self.id_gen,
-                        &func.params,
-                        &func.body,
-                        &ap_args,
-                    );
-                (self.simpl_owned(reduced), true)
+                let params: smallvec::SmallVec<[Ident; 8]> = a.params(fi).iter().copied().collect();
+                let arg_list = a.list_vec(args);
+                let reduced = self.beta(a, &params, body, &arg_list);
+                self.simpl(a, reduced)
             }
-            Lambda::LstringSwitch(scrut, cases, default)
-                if matches!(
-                    scrut.as_ref(),
-                    Lambda::Lvar(s) if matches!(self.ident_tbl.get(s), Some(IdKind::Constant(_)))
-                ) =>
-            {
-                let Lambda::Lvar(s) = scrut.as_ref() else {
-                    unreachable!()
-                };
-                let Some(IdKind::Constant(c)) = self.ident_tbl.get(s).cloned() else {
-                    unreachable!()
-                };
-                // Switch on the constant the scrutinee is bound to.
-                let cases = cases
-                    .into_iter()
-                    .map(|(k, v)| (k, self.simpl_owned(v)))
-                    .collect();
-                let default = default.map(|d| self.simpl_owned(*d));
-                (
-                    Lambda::string_switch(Lambda::const_(c), cases, default.map(Box::new)),
-                    true,
-                )
-            }
-            lam => crate::lambda::lambda_traverse::shallow_map_sharing(lam, &mut |inner| {
-                self.simpl_sharing(inner)
-            }),
+            _ => self.simpl_children(a, lam),
         }
     }
 }
