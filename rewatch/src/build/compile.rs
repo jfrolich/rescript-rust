@@ -925,21 +925,28 @@ pub fn compile(
                                 in_flight,
                             );
                         }
-                        scope.spawn(move |_| {
-                            let msg = finish_in_process_js(
-                                build_state_ref,
-                                build_command_state_ref,
-                                pre_js_msg,
-                                parent_span,
-                                registry_snapshot,
-                                &tx,
-                                &write_tx,
-                            );
-                            if show_progress {
-                                inc_ref();
-                            }
-                            let _ = tx.send(WorkerMsg::Completed(msg));
-                        });
+                        let job_tx = tx.clone();
+                        let panicked_module = module_name.clone();
+                        spawn_job(
+                            scope,
+                            tx,
+                            move || {
+                                let msg = finish_in_process_js(
+                                    build_state_ref,
+                                    build_command_state_ref,
+                                    pre_js_msg,
+                                    parent_span,
+                                    registry_snapshot,
+                                    &job_tx,
+                                    &write_tx,
+                                );
+                                if show_progress {
+                                    inc_ref();
+                                }
+                                WorkerMsg::Completed(msg)
+                            },
+                            move |message| panicked_completion(panicked_module, &message),
+                        );
                         trace!("scheduled in-process JS finish for {}", module_name);
                         continue;
                     }
@@ -984,25 +991,29 @@ pub fn compile(
                         compile_universe: compile_universe.clone(),
                         registry_only: registry_only.clone(),
                     };
-                    scope.spawn(move |_| {
-                        let msg = compile_one(
-                            build_state_ref,
-                            build_command_state_ref,
-                            &registry_snapshot,
-                            &module_asts,
-                            &module_name,
-                            is_dirty,
-                            parent_span,
-                            in_process_hooks,
-                            placement,
-                        );
-                        if show_progress && matches!(msg, WorkerMsg::Completed(_)) {
-                            inc_ref();
-                        }
-                        // Receiver lives for the full scope, so send cannot fail
-                        // unless the dispatcher has already hung up on purpose.
-                        let _ = tx.send(msg);
-                    });
+                    let panicked_module = module_name.clone();
+                    spawn_job(
+                        scope,
+                        tx,
+                        move || {
+                            let msg = compile_one(
+                                build_state_ref,
+                                build_command_state_ref,
+                                &registry_snapshot,
+                                &module_asts,
+                                &module_name,
+                                is_dirty,
+                                parent_span,
+                                in_process_hooks,
+                                placement,
+                            );
+                            if show_progress && matches!(msg, WorkerMsg::Completed(_)) {
+                                inc_ref();
+                            }
+                            msg
+                        },
+                        move |message| panicked_completion(panicked_module, &message),
+                    );
                 }
 
                 if in_flight == 0 {
@@ -2661,6 +2672,37 @@ pub(crate) fn join_runtime_precompile(handle: std::thread::ScopedJoinHandle<'_, 
     })
 }
 
+/// Run a scheduler job on `scope` and send its message on `tx`, also when
+/// the job panics. The schedulers count jobs in flight and wait on
+/// `rx.recv()` while holding a sender themselves, so a job that unwound
+/// without sending would leave the build waiting forever with every thread
+/// idle. `on_panic` turns the panic message into the job's failure message.
+fn spawn_job<'scope, M: Send + 'scope>(
+    scope: &rayon::Scope<'scope>,
+    tx: mpsc::Sender<M>,
+    job: impl FnOnce() -> M + Send + 'scope,
+    on_panic: impl FnOnce(String) -> M + Send + 'scope,
+) {
+    scope.spawn(move |_| {
+        let msg = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job))
+            .unwrap_or_else(|panic| on_panic(panic_message(panic.as_ref(), "unknown panic")));
+        // The receiver lives for the whole scope.
+        let _ = tx.send(msg);
+    });
+}
+
+/// The failure message of a project module whose worker job panicked.
+fn panicked_completion(module_name: String, message: &str) -> WorkerMsg {
+    WorkerMsg::Completed(CompletionMsg {
+        result: Err(anyhow!("Compilation panicked for {module_name}: {message}")),
+        module_name,
+        interface_result: None,
+        is_clean: false,
+        is_compiled: true,
+        registry_updates: Vec::new(),
+    })
+}
+
 /// The message of a caught panic payload, or `unknown` when it carries none.
 fn panic_message(panic: &(dyn std::any::Any + Send), unknown: &str) -> String {
     if let Some(s) = panic.downcast_ref::<String>() {
@@ -3167,18 +3209,29 @@ fn compile_runtime_modules_parallel(
                 let registry_snapshot = worker_registry_template.clone();
                 let tx = tx.clone();
                 in_flight += 1;
-                scope.spawn(move |_| {
-                    let result = compile_runtime_module_from_source(
-                        registry,
-                        runtime_root,
-                        runtime_path,
-                        runtime_config,
-                        module,
-                        registry_snapshot,
-                        published_aliases,
-                    );
-                    let _ = tx.send(RuntimeCompletionMsg { idx, result });
-                });
+                spawn_job(
+                    scope,
+                    tx,
+                    move || RuntimeCompletionMsg {
+                        idx,
+                        result: compile_runtime_module_from_source(
+                            registry,
+                            runtime_root,
+                            runtime_path,
+                            runtime_config,
+                            module,
+                            registry_snapshot,
+                            published_aliases,
+                        ),
+                    },
+                    move |message| RuntimeCompletionMsg {
+                        idx,
+                        result: Err(anyhow!(
+                            "Compiling runtime module {} panicked: {message}",
+                            module.module_name
+                        )),
+                    },
+                );
             }
 
             if in_flight == 0 {
@@ -4507,6 +4560,56 @@ mod tests {
     use std::sync::RwLock;
     use std::time::SystemTime;
     use tempfile::TempDir;
+
+    /// A job that panics still reports, so a scheduler that waits for every
+    /// job in flight while holding a sender itself does not hang.
+    #[test]
+    fn spawn_job_reports_a_panic_instead_of_hanging() {
+        let (done_tx, done_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let (tx, rx) = mpsc::channel::<Result<u32, String>>();
+            let mut results = Vec::new();
+            rayon::in_place_scope(|scope| {
+                let mut in_flight = 0;
+                for i in 0..3u32 {
+                    in_flight += 1;
+                    spawn_job(
+                        scope,
+                        tx.clone(),
+                        move || {
+                            if i == 1 {
+                                panic!("job {i} failed");
+                            }
+                            Ok(i)
+                        },
+                        Err,
+                    );
+                }
+                while in_flight > 0 {
+                    let Ok(msg) = rx.recv() else { break };
+                    in_flight -= 1;
+                    results.push(msg);
+                }
+            });
+            done_tx.send(results).expect("test receiver is alive");
+        });
+        let mut results = done_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("the scheduler loop hung on a panicked job");
+        results.sort();
+        assert_eq!(results, vec![Ok(0), Ok(2), Err("job 1 failed".to_string())]);
+    }
+
+    #[test]
+    fn panicked_completion_fails_the_module_with_the_message() {
+        let WorkerMsg::Completed(msg) = panicked_completion("App".to_string(), "boom") else {
+            panic!("expected a completion");
+        };
+        assert_eq!(msg.module_name, "App");
+        assert!(msg.is_compiled && !msg.is_clean);
+        let err = msg.result.expect_err("a panicked module fails");
+        assert_eq!(err.to_string(), "Compilation panicked for App: boom");
+    }
 
     fn test_project_context(root: &Path) -> ProjectContext {
         let config = config::tests::create_config(config::tests::CreateConfigArgs {
