@@ -2290,11 +2290,11 @@ fn alias_type_mismatch_trace(
     }
 }
 
-fn is_incomplete_type_constructor_path(ctx: &TypeContext, env: &Env, path: &Path) -> bool {
+fn is_incomplete_type_constructor_path(env: &Env, path: &Path) -> bool {
     let Path::Pident(id) = path else {
         return false;
     };
-    if id.stamp() == 0 || id.is_persistent() || ctx.find_type_decl_by_stamp(id.stamp()).is_some() {
+    if id.stamp() == 0 || id.is_persistent() {
         return false;
     }
     let Ok(env_decl) = env.find_type_by_ident(id) else {
@@ -3415,7 +3415,7 @@ fn transl_type_inner(
                                 && (matches!(
                                     &*ctx.borrow_desc(ctx.repr(expanded)),
                                     TypeDesc::Tvar(_)
-                                ) || is_incomplete_type_constructor_path(ctx, env, &path))
+                                ) || is_incomplete_type_constructor_path(env, &path))
                             {
                                 return Err(TypeCoreError::UnboundTypeConstructorIncomplete {
                                     loc: inherit_ct.ptyp_loc,
@@ -3648,7 +3648,7 @@ fn transl_type_inner(
                                 && (matches!(
                                     &*ctx.borrow_desc(ctx.repr(expanded)),
                                     TypeDesc::Tvar(_)
-                                ) || is_incomplete_type_constructor_path(ctx, env, &path))
+                                ) || is_incomplete_type_constructor_path(env, &path))
                             {
                                 return Err(TypeCoreError::UnboundTypeConstructorIncomplete {
                                     loc: inherit_ct.ptyp_loc,
@@ -18125,46 +18125,6 @@ fn type_letmodule(
     expected_ty: TypeExprRef,
     attributes: &[crate::parser::ast::Attribute],
 ) -> TypeCoreResult<Expression> {
-    fn register_module_type_type_decls_by_stamp(
-        ctx: &TypeContext,
-        mty: &crate::types::decl::ModuleType,
-    ) {
-        use crate::types::decl::ModuleType as DeclMty;
-        use crate::types::decl::SignatureItem;
-
-        match mty {
-            DeclMty::MtySignature(sig_items) => {
-                for item in sig_items.iter() {
-                    match item {
-                        SignatureItem::SigType(id, decl, _) => {
-                            if id.stamp() != 0 {
-                                ctx.register_type_decl_by_stamp(id.stamp(), decl.clone());
-                            }
-                        }
-                        SignatureItem::SigModule(_, md, _) => {
-                            register_module_type_type_decls_by_stamp(ctx, &md.md_type);
-                        }
-                        SignatureItem::SigModtype(_, mtd) => {
-                            if let Some(inner) = &mtd.mtd_type {
-                                register_module_type_type_decls_by_stamp(ctx, inner);
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            DeclMty::MtyFunctor {
-                param_type, result, ..
-            } => {
-                if let Some(param_mty) = param_type.as_deref() {
-                    register_module_type_type_decls_by_stamp(ctx, param_mty);
-                }
-                register_module_type_type_decls_by_stamp(ctx, result);
-            }
-            DeclMty::MtyAlias(_, _) | DeclMty::MtyIdent(_) => {}
-        }
-    }
-
     let arena = tctx.arena;
     let ctx = tctx.type_ctx;
     let mod_name_str = arena.get_string(name.txt).to_string();
@@ -18234,7 +18194,6 @@ fn type_letmodule(
         // Add the module to the environment so the body can access M.value
         let mod_id = ctx.create_ident(&mod_name_str);
         let mut body_env = env.clone();
-        register_module_type_type_decls_by_stamp(ctx, &mod_sig);
         let md_decl = crate::types::decl::ModuleDeclaration {
             md_type: mod_sig,
             md_attributes: vec![],
@@ -23074,11 +23033,7 @@ fn resolve_type_item_identity(
             if id.stamp() == 0 {
                 return None;
             }
-            let arity = if let Ok(decl) = env.lookup_type(path) {
-                decl.type_params.len()
-            } else {
-                ctx.find_type_decl_by_stamp(id.stamp())?.type_params.len()
-            };
+            let arity = env.lookup_type(path).ok()?.type_params.len();
             Some((id.stamp(), arity))
         }
         Path::Pdot(parent, type_name, _) => {
@@ -28389,7 +28344,7 @@ fn raw_alias_target_for_module_path<'a>(
 }
 
 /// Look up a type declaration for a given path.
-/// Tries env first, then the global type stores.
+/// Tries env first, then module components.
 fn lookup_type_decl_for_path<'a>(
     type_path: &Path,
     env: &Env,
@@ -28469,34 +28424,7 @@ fn lookup_type_decl_for_path_with_cache_mode<'a>(
         }
     }
 
-    // Try stamp-based lookup only for regular type identifiers. Constructor-like
-    // paths such as local exception inline-record paths (`C`) share the `Path`
-    // representation but are not type bindings, and imported CMI type stamps can
-    // collide with local constructor stamps.
-    if let Path::Pident(id) = type_path {
-        if id.stamp() != 0 {
-            if let Some(decl) = env.find_type_arc_by_ident(id) {
-                return Some(decl.clone());
-            }
-        }
-
-        // Try stamp-based lookup only for regular type identifiers.
-        // Constructor-like paths such as local exception inline-record paths
-        // (`C`) share the `Path` representation but are not type bindings, and
-        // imported CMI type stamps can collide with local constructor stamps.
-        if id.stamp() != 0
-            && matches!(
-                type_path.constructor_typath(),
-                crate::types::path::Typath::Regular(_)
-            )
-        {
-            if let Some(decl) = ctx.find_type_decl_arc_by_stamp(id.stamp()) {
-                return Some(decl);
-            }
-        }
-    }
-
-    // Only use env.lookup_type directly for simple identifiers after exact/stamp
+    // Only use env.lookup_type directly for simple identifiers after the exact
     // lookup. For qualified paths, env.lookup_type currently resolves by leaf
     // name and can return an unrelated declaration with the same type name.
     if let Path::Pident(id) = type_path {
@@ -28509,20 +28437,6 @@ fn lookup_type_decl_for_path_with_cache_mode<'a>(
     if let Path::Pdot(parent, type_name, _) = type_path {
         let mut deferred_self_manifest_decl: Option<Arc<crate::types::decl::TypeDeclaration>> =
             None;
-        // Cache by `Path::same` identity for paths without a functor
-        // application (the old printed-name key excluded those too).
-        let cache_key = (!type_path.has_apply_prefix()).then_some(type_path);
-
-        // Check resolved-sig cache first to avoid re-creating fresh type copies.
-        // This approximates OCaml's components_of_module_maker lazy caching.
-        // Uses a separate cache from type_decl_by_path to avoid conflicts with
-        // expand_head_once entries which have unqualified paths.
-        if let Some(cache_key) = cache_key {
-            if let Some(decl) = ctx.find_resolved_pdot_type(cache_key) {
-                return Some(decl);
-            }
-        }
-
         // Inline-record constructor paths are type paths whose parent is also a type path:
         // `<type_path>.<Constructor>`. Rebuild the synthetic record declaration from
         // the parent variant declaration so label disambiguation can recover field types.
@@ -28651,11 +28565,6 @@ fn lookup_type_decl_for_path_with_cache_mode<'a>(
                                         | crate::types::decl::ModuleType::MtyIdent(..)
                                 )
                             {
-                                if cache_mode.publishes()
-                                    && let Some(cache_key) = cache_key
-                                {
-                                    ctx.register_resolved_pdot_type(cache_key, decl.clone());
-                                }
                                 return Some(decl);
                             }
                         }
@@ -28676,11 +28585,6 @@ fn lookup_type_decl_for_path_with_cache_mode<'a>(
                         .as_ref()
                         .is_some_and(|stored_path| !stored_path.same(type_path))
                     {
-                        if cache_mode.publishes()
-                            && let Some(cache_key) = cache_key
-                        {
-                            ctx.register_resolved_pdot_type(cache_key, decl.clone());
-                        }
                         return Some(decl);
                     }
 
@@ -28694,11 +28598,6 @@ fn lookup_type_decl_for_path_with_cache_mode<'a>(
                 // Cache the resolved decl so subsequent lookups for the same
                 // Pdot path reuse the same type nodes (matching OCaml's
                 // components_of_module_maker lazy caching).
-                if cache_mode.publishes()
-                    && let Some(cache_key) = cache_key
-                {
-                    ctx.register_resolved_pdot_type(cache_key, decl.clone());
-                }
                 Some(decl)
             },
         ) {
@@ -28725,27 +28624,19 @@ fn lookup_type_decl_for_path_with_cache_mode<'a>(
                     cache_mode,
                 )
             {
-                if cache_mode.publishes()
-                    && let Some(cache_key) = cache_key
-                {
-                    ctx.register_resolved_pdot_type(cache_key, decl.clone());
-                }
                 return Some(decl);
             }
         }
 
         // Try resolving the module alias: Pdot(Pident(Nullable/9), "t")
         // -> look up "Nullable" module in env -> if it's MtyAlias(Stdlib_Nullable)
-        // -> look up "Stdlib_Nullable.t" in the path store or try CMI resolution
+        // -> resolve "Stdlib_Nullable.t" through its module components
         if let Path::Pident(parent_id) = parent.as_ref() {
             if let Some(md) = lookup_pident_module_for_path(env, parent.as_ref(), parent_id) {
                 use crate::types::decl::ModuleType;
                 match &md.md_type {
                     ModuleType::MtyAlias(_, alias_path) | ModuleType::MtyIdent(alias_path) => {
                         let resolved_path = Path::pdot(alias_path.clone(), type_name.as_str());
-                        if let Some(decl) = ctx.find_type_decl_by_path(&resolved_path.name()) {
-                            return Some(Arc::new(decl.clone()));
-                        }
                         if let Some(decl) =
                             crate::types::ctype::resolve_type_through_modules(ctx, &resolved_path)
                         {
@@ -28763,18 +28654,9 @@ fn lookup_type_decl_for_path_with_cache_mode<'a>(
                                 ctx,
                                 cache_mode,
                                 |components| {
-                                    components.lookup_type(type_name.as_str()).map(|(_, decl)| {
-                                        let decl = decl.clone();
-                                        if cache_mode.publishes()
-                                            && let Some(cache_key) = cache_key
-                                        {
-                                            ctx.register_resolved_pdot_type(
-                                                cache_key,
-                                                decl.clone(),
-                                            );
-                                        }
-                                        decl
-                                    })
+                                    components
+                                        .lookup_type(type_name.as_str())
+                                        .map(|(_, decl)| decl.clone())
                                 },
                             )
                         {
@@ -28792,16 +28674,6 @@ fn lookup_type_decl_for_path_with_cache_mode<'a>(
             return Some(decl);
         }
 
-        // Fall back to direct path lookup only after module-signature resolution.
-        // OCaml's Env.components_of_module applies Subst.type_declaration before
-        // exposing Sig_type entries; preferring substituted signatures first avoids
-        // returning stale unqualified recursive paths (e.g. JSON.t self refs as Pident "t").
-        if cache_key.is_some() {
-            if let Some(decl) = ctx.find_type_decl_by_path(&type_path.name()) {
-                return Some(Arc::new(decl.clone()));
-            }
-        }
-
         // Try resolving through modules (loading CMI files on demand)
         if let Some(decl) = crate::types::ctype::resolve_type_through_modules(ctx, type_path) {
             return Some(Arc::new(decl));
@@ -28809,15 +28681,6 @@ fn lookup_type_decl_for_path_with_cache_mode<'a>(
 
         if let Some(decl) = deferred_self_manifest_decl {
             return Some(decl);
-        }
-    }
-
-    // Only fall back to name-based lookup for simple identifiers.
-    // For qualified paths (Pdot), a head-name fallback is unsound and can
-    // resolve to an unrelated type that happens to share the same leaf name.
-    if let Path::Pident(id) = type_path {
-        if let Some(decl) = ctx.find_type_decl(id.name()) {
-            return Some(Arc::new(decl.clone()));
         }
     }
 
