@@ -3530,6 +3530,13 @@ fn print_subtype_context<W: std::io::Write>(
                 );
             }
         }
+        C::CoercionIntoPrivateType { typename } => {
+            ppf.space();
+            info(ppf, &typename.name());
+            ppf.str(
+                " is private: its values can only be built in the module that defines it, so another type cannot be coerced to it.",
+            );
+        }
     }
 }
 

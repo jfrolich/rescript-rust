@@ -123,6 +123,10 @@ pub enum SubtypeContext {
         right_record_name: Path,
         issues: Vec<RecordFieldSubtypeViolation>,
     },
+
+    /// The target is a private record or variant, whose values only its own
+    /// module can build.
+    CoercionIntoPrivateType { typename: Path },
 }
 
 /// User-facing type kind for subtype diagnostics.
@@ -5730,6 +5734,33 @@ fn can_try_coerce_variant_to_primitive_opt(
     }
 }
 
+/// OCaml `coerces_into_private_type env t1 t2` (ctype.ml:3504-3516):
+/// whether `t2` is a private record or variant that `t1`, another type,
+/// would be coerced into.
+fn coerces_into_private_type(
+    ctx: &TypeContext,
+    env: &Env,
+    t1: TypeExprRef,
+    t2: TypeExprRef,
+) -> bool {
+    match extract_concrete_typedecl(ctx, env, t2) {
+        Some((p2, _, decl))
+            if decl.type_private == PrivateFlag::Private
+                && matches!(
+                    decl.type_kind,
+                    crate::types::TypeKind::TypeRecord(..)
+                        | crate::types::TypeKind::TypeVariant(..)
+                ) =>
+        {
+            match extract_concrete_typedecl(ctx, env, t1) {
+                Some((p1, _, _)) => !p1.same(&p2),
+                None => true,
+            }
+        }
+        Some(_) | None => false,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn subtype_rec(
     ctx: &TypeContext,
@@ -5898,6 +5929,21 @@ fn subtype_rec(
                     Ok(())
                 }
             }
+        }
+        (_, TypeDesc::Tconstr { .. }) if coerces_into_private_type(ctx, env, t1, t2) => {
+            // Only the module defining a private record or variant builds its
+            // values; a coercion from another type would build one anywhere
+            // (ctype.ml:3582-3595).
+            let (typename, _, _) =
+                extract_concrete_typedecl(ctx, env, t2).expect("checked by the guard");
+            push_subtype_cstr(
+                cstrs,
+                trace,
+                t1,
+                t2,
+                Some(SubtypeContext::CoercionIntoPrivateType { typename }),
+            );
+            Ok(())
         }
         (
             TypeDesc::Tconstr {
