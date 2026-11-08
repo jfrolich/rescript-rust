@@ -1205,9 +1205,10 @@ impl<'a> Printtyp<'a> {
                 Some(crate::types::VariantLiteralTag::Undefined) => {
                     Some("@as(undefined)".to_string())
                 }
+                // `Printf.sprintf "@as(\"%s\")" (String_literal.encode_js_string s)`
                 Some(crate::types::VariantLiteralTag::String(s)) => Some(format!(
                     "@as(\"{}\")",
-                    crate::string_literal::ocaml_escaped(&s)
+                    crate::string_literal::encode_js_string(&s)
                 )),
                 Some(crate::types::VariantLiteralTag::Int(i)) => Some(format!("@as({i})")),
                 Some(crate::types::VariantLiteralTag::Float(f)) => Some(format!("@as({f})")),
@@ -1833,15 +1834,15 @@ fn print_object_fields(fields: &[(String, bool, OutType)], rest: &Option<bool>) 
     ]))
 }
 
-/// `print_record_decl_row_doc` (res_outcome_printer.ml:395-409).
+/// `print_record_decl_row_doc` (res_outcome_printer.ml:395-414).
 fn print_record_decl_row_doc((name, runtime_name, mutable, opt, arg): &OutRecordField) -> Doc {
     Doc::group(Doc::concat(vec![
         match runtime_name {
-            // `"@as(\"" ^ String.escaped runtime_name ^ "\") "`
-            Some(runtime_name) => Doc::text(format!(
-                "@as({}) ",
-                crate::types::external_ffi_types::debug::quote(runtime_name)
-            )),
+            Some(runtime_name) => Doc::concat(vec![
+                Doc::text("@as("),
+                print_string_literal_doc(runtime_name),
+                Doc::text(") "),
+            ]),
             None => Doc::nil(),
         },
         if *mutable {
@@ -1977,9 +1978,14 @@ fn print_type_params_doc(params: Vec<Doc>, trailing_comma: bool) -> Doc {
 // Print a digested FFI declaration as the surface attributes the user wrote;
 // the stored form is the declaration itself (res_outcome_printer.ml:481-613).
 
+/// `print_string_literal_doc` (res_outcome_printer.ml:44-45): the string as
+/// a ReScript string literal, `String_literal.encode_js_string` keeping valid
+/// UTF-8 and escaping only what the literal needs.
 fn print_string_literal_doc(s: &str) -> Doc {
-    // `"\"" ^ String.escaped s ^ "\""`
-    Doc::text(crate::types::external_ffi_types::debug::quote(s))
+    Doc::text(format!(
+        "\"{}\"",
+        crate::string_literal::encode_js_string(s)
+    ))
 }
 
 fn print_inline_const_doc(c: &crate::types::external_ffi_types::InlineConst) -> Doc {
@@ -4032,7 +4038,7 @@ mod tests {
     #[test]
     fn record_rows_print_their_runtime_name_as_an_as_attribute() {
         use super::{OutType, print_out_type};
-        // The upstream example of 52ae045512, and `String.escaped`.
+        // The upstream example of 52ae045512, and escaped quotes and backslashes.
         let row = |name: &str, runtime_name: Option<&str>, mutable| {
             (
                 name.to_string(),
@@ -4056,6 +4062,34 @@ mod tests {
                 row("b", None, false),
             ])),
             "{@as(\"x\\\"y\\\\\") mutable a: int, b: int}"
+        );
+    }
+
+    #[test]
+    fn record_rows_print_their_runtime_name_as_a_rescript_string_literal() {
+        use super::{OutType, print_out_type};
+        // `String_literal.encode_js_string` (upstream 0800cb42b8): the bytes
+        // of valid UTF-8 stay as they are (the compiler holds one char per
+        // byte), control bytes take JavaScript escapes, and backticks and
+        // dollars need none in a double-quoted literal.
+        let row = |runtime_name: &str| {
+            (
+                "name".to_string(),
+                Some(runtime_name.to_string()),
+                false,
+                false,
+                OutType::Otyp_stuff("int".to_string()),
+            )
+        };
+        let print =
+            |runtime_name: &str| print_out_type(&OutType::Otyp_record(vec![row(runtime_name)]));
+        assert_eq!(
+            print("pr\u{c3}\u{a9}nom"),
+            "{@as(\"pr\u{c3}\u{a9}nom\") name: int}"
+        );
+        assert_eq!(
+            print("\u{1}\t\u{b}\u{c}\u{7f}`$"),
+            "{@as(\"\\x01\\t\\v\\f\\x7F`$\") name: int}"
         );
     }
 
