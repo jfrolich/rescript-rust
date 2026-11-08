@@ -6460,11 +6460,11 @@ pub(crate) fn flat_make_paths(
             }
         }
 
-        fn env(&mut self) -> Env {
+        fn env(&mut self, ctx: &crate::types::context::TypeContext) -> Env {
             while self.envs.len() < self.depth() {
                 let mut env = self.envs.last().unwrap_or(self.base).clone();
                 for item in self.level(self.envs.len()) {
-                    crate::types::includemod::add_sig_item_to_env(item, &mut env);
+                    crate::types::includemod::add_sig_item_to_env(ctx, item, &mut env);
                 }
                 self.envs.push(env);
             }
@@ -6505,7 +6505,7 @@ pub(crate) fn flat_make_paths(
                         Mty::MtySignature(sg) => Some(sg.clone()),
                         Mty::MtyIdent(_) => {
                             let md_type = md.md_type.clone();
-                            let env = scope.env();
+                            let env = scope.env(ctx);
                             match mtype_scrape(ctx, &env, pers_env, &md_type) {
                                 Mty::MtySignature(sg) => Some(sg),
                                 _ => None,
@@ -6949,7 +6949,7 @@ fn compute_type_variance_fixpoint(
         {
             let mut decl = template.clone();
             decl.type_variance = variance.clone();
-            iter_env.add_type(*type_id, decl);
+            iter_env.store_type(ctx, *type_id, decl);
         }
 
         let computed: Vec<Vec<TypesVariance>> = paths
@@ -7889,7 +7889,7 @@ fn add_signature_items_to_env(
                 check_value_name_for_env(ctx, id, desc)?;
                 env.add_value(*id, desc.clone());
             }
-            SignatureItem::SigType(id, decl, _) => env.add_type(*id, decl.clone()),
+            SignatureItem::SigType(id, decl, _) => env.store_type(ctx, *id, decl.clone()),
             SignatureItem::SigModule(id, md, _) => env.add_module(*id, md.clone()),
             SignatureItem::SigModtype(id, mtd) => env.add_modtype(*id, mtd.clone()),
             SignatureItem::SigTypext(_, _, _)
@@ -8799,11 +8799,11 @@ fn mtype_remove_aliases(
                         *rs,
                     );
                     // `Env.add_module id mty env`.
-                    crate::types::includemod::add_sig_item_to_env(&item, &mut env);
+                    crate::types::includemod::add_sig_item_to_env(tctx.type_ctx, &item, &mut env);
                     out.push(item);
                 }
                 SignatureItem::SigModtype(..) => {
-                    crate::types::includemod::add_sig_item_to_env(item, &mut env);
+                    crate::types::includemod::add_sig_item_to_env(tctx.type_ctx, item, &mut env);
                     out.push(item.clone());
                 }
                 _ => out.push(item.clone()),
@@ -9192,9 +9192,9 @@ fn check_type_decl(
     // `Env.add_type ~check:true` (env.ml:1561-1566).
     let mut env = env.clone();
     tctx.check_type_usage(id.name(), ctx.resolve_loc(newdecl.type_loc), loc);
-    env.add_type(id, newdecl.clone());
+    env.store_type(ctx, id, newdecl.clone());
     if let Some(row_id) = row_id {
-        env.add_type(row_id, newdecl.clone());
+        env.store_type(ctx, row_id, newdecl.clone());
     }
     // `add_rec_types` (typemod.ml:273-276).
     if rs != crate::types::decl::RecStatus::TrecNot {
@@ -9208,7 +9208,7 @@ fn check_type_decl(
                 break;
             };
             tctx.check_type_usage(rec_id.name(), ctx.resolve_loc(rec_decl.type_loc), loc);
-            env.add_type(*rec_id, rec_decl.clone());
+            env.store_type(ctx, *rec_id, rec_decl.clone());
         }
     }
     let mut inclusion_warnings = Vec::new();
@@ -9337,7 +9337,7 @@ fn merge_constraint<'a>(
                     let mut row_env = m.initial_env.clone();
                     let mut decl_row_with_path = decl_row.clone();
                     decl_row_with_path.type_path = Some(Path::pident(id_row));
-                    row_env.add_type(id_row, decl_row_with_path);
+                    row_env.store_type(tctx.type_ctx, id_row, decl_row_with_path);
                     let tdecl = transl_with_constraint(
                         tctx,
                         &row_env,
@@ -9514,7 +9514,7 @@ fn merge_constraint<'a>(
                 }
                 _ => {}
             }
-            crate::types::includemod::add_sig_item_to_env(item, &mut env);
+            crate::types::includemod::add_sig_item_to_env(tctx.type_ctx, item, &mut env);
         }
         Err(TypeModError::WithNoComponent {
             loc,
@@ -9968,7 +9968,7 @@ fn check_usage_of_path_of_substituted_item(
 
     let mut iter_env = env.clone_preserve_id();
     for item in signature {
-        crate::types::includemod::add_sig_item_to_env(item, &mut iter_env);
+        crate::types::includemod::add_sig_item_to_env(tctx.type_ctx, item, &mut iter_env);
     }
 
     for item in signature {
@@ -11882,7 +11882,7 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                                 &sig_env,
                                 &type_decl,
                             )?;
-                            sig_env.add_type(type_id, type_decl.clone());
+                            sig_env.store_type(tctx.type_ctx, type_id, type_decl.clone());
                             items.push(SigItem::SigType(
                                 type_id,
                                 std::sync::Arc::new(type_decl),
@@ -12381,7 +12381,7 @@ fn approx_modtype_rec<'a>(
                         tctx.type_ctx,
                     ) {
                         for item in &sig {
-                            crate::types::includemod::add_sig_item_to_env(item, &mut sig_env);
+                            crate::types::includemod::add_sig_item_to_env(tctx.type_ctx, item, &mut sig_env);
                         }
                         items.extend(sig);
                     }
@@ -13653,7 +13653,7 @@ fn extract_module_type_from_mod_expr_inner(
                                 rec_status,
                             ));
                             if let Some(env_mut) = local_env.as_mut() {
-                                env_mut.add_type(decl.typ_id, decl.typ_type.clone());
+                                env_mut.store_type(type_ctx.expect("module type extraction runs with a type context"), decl.typ_id, decl.typ_type.clone());
                             }
                         }
                     }
@@ -13692,7 +13692,7 @@ fn extract_module_type_from_mod_expr_inner(
                         if !incl.incl_type.is_empty() {
                             for sig_item in incl.incl_type.clone() {
                                 if let Some(env_mut) = local_env.as_mut() {
-                                    add_sig_item_to_env(&sig_item, env_mut);
+                                    add_sig_item_to_env(type_ctx.expect("module type extraction runs with a type context"), &sig_item, env_mut);
                                 }
                                 sig_items.push(sig_item);
                             }
@@ -13736,7 +13736,7 @@ fn extract_module_type_from_mod_expr_inner(
                                 if let Some(inner_sig) = inner_sig_opt {
                                     for sig_item in inner_sig {
                                         if let Some(env_mut) = local_env.as_mut() {
-                                            add_sig_item_to_env(&sig_item, env_mut);
+                                            add_sig_item_to_env(type_ctx.expect("module type extraction runs with a type context"), &sig_item, env_mut);
                                         }
                                         sig_items.push(sig_item);
                                     }
@@ -13773,7 +13773,7 @@ fn extract_module_type_from_mod_expr_inner(
                                     if let Some(inner_sig) = found_sig {
                                         for sig_item in inner_sig {
                                             if let Some(env_mut) = local_env.as_mut() {
-                                                add_sig_item_to_env(&sig_item, env_mut);
+                                                add_sig_item_to_env(type_ctx.expect("module type extraction runs with a type context"), &sig_item, env_mut);
                                             }
                                             sig_items.push(sig_item);
                                         }
@@ -13789,7 +13789,7 @@ fn extract_module_type_from_mod_expr_inner(
                                         ) {
                                             for sig_item in inner_sig {
                                                 if let Some(env_mut) = local_env.as_mut() {
-                                                    add_sig_item_to_env(&sig_item, env_mut);
+                                                    add_sig_item_to_env(type_ctx.expect("module type extraction runs with a type context"), &sig_item, env_mut);
                                                 }
                                                 sig_items.push(sig_item);
                                             }
@@ -15708,7 +15708,7 @@ pub fn transl_signature<'a>(
                 // all signature types, including abstract ones, enter the
                 // threaded environment for subsequent signature items.
                 for td in &typed_decls {
-                    sig_env.add_type(td.typ_id, td.typ_type.clone());
+                    sig_env.store_type(tctx.type_ctx, td.typ_id, td.typ_type.clone());
                 }
                 // typedecl.ml:1535-1538 adds them with `Env.add_type
                 // ~check:true`, which registers the unused-type checks in
@@ -16063,7 +16063,7 @@ fn closed_modtype(
         crate::types::decl::ModuleType::MtySignature(sig) => {
             let mut sig_env = env.clone_preserve_id();
             for item in sig.iter() {
-                crate::types::includemod::add_sig_item_to_env(item, &mut sig_env);
+                crate::types::includemod::add_sig_item_to_env(ctx, item, &mut sig_env);
             }
             sig.iter()
                 .all(|item| closed_signature_item(ctx, &sig_env, item))
@@ -18351,7 +18351,7 @@ fn type_structure_item<'a>(
                         };
                         let mut updated_decl = updated_decl_ref.clone();
                         updated_decl.type_variance = variance_row.clone();
-                        new_env.add_type(*type_id, updated_decl.clone());
+                        new_env.replace_type_properties(*type_id, updated_decl.clone());
 
                         if let Some(typed_decl) = typed_tree_decls.get_mut(idx) {
                             typed_decl.typ_type.type_variance = variance_row.clone();
@@ -18435,7 +18435,7 @@ fn type_structure_item<'a>(
                         };
                         let mut updated_decl = updated_decl_ref.clone();
                         updated_decl.type_variance = variance_row.clone();
-                        new_env.add_type(*type_id, updated_decl.clone());
+                        new_env.replace_type_properties(*type_id, updated_decl.clone());
 
                         if let Some(typed_decl) = typed_tree_decls.get_mut(idx) {
                             typed_decl.typ_type.type_variance = variance_row.clone();
@@ -20478,7 +20478,7 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
             &declared_type_ids
         };
         for (type_id, decl) in entry_ids.iter().zip(internal_decls_for_generalize.iter()) {
-            newenv.add_type(*type_id, decl.clone());
+            newenv.store_type(tctx.type_ctx, *type_id, decl.clone());
         }
         for (decl, type_id) in decls.iter().zip(declared_type_ids.iter()) {
             let Ok(stub) = temp_env.find_type_by_ident(type_id) else {
@@ -20525,14 +20525,14 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
             .iter()
             .zip(internal_decls_for_generalize.iter())
         {
-            variance_env.add_type(*type_id, decl.clone());
+            variance_env.store_type(tctx.type_ctx, *type_id, decl.clone());
         }
     } else {
         for (type_id, decl) in declared_type_ids
             .iter()
             .zip(internal_decls_for_generalize.iter())
         {
-            variance_env.add_type(*type_id, decl.clone());
+            variance_env.store_type(tctx.type_ctx, *type_id, decl.clone());
         }
     }
 
@@ -21345,6 +21345,124 @@ let g = (w: M.t) => w.a
                 assert_eq!(opened.lbl_all, by_type.lbl_all);
             },
         );
+    }
+
+
+    #[test]
+    fn opening_a_module_with_an_empty_record_installs_its_other_labels() {
+        // `type any = {}` describes no labels (datarepr.ml:261-288), so an
+        // open installs none for it.
+        with_typed(
+            r#"
+module M = {
+  type any = {}
+  type t = {a: int}
+}
+open M
+let f = (v: t) => v.a
+"#,
+            |typed, ctx| {
+                assert_eq!(family_names(ctx, body_field_label(typed, "f")), ["a"]);
+            },
+        );
+    }
+
+
+    /// The abstract `int` declaration of the initial environment.
+    fn abstract_decl(env: &Env) -> crate::types::decl::TypeDeclaration {
+        env.find_type("int").expect("predef int").clone()
+    }
+
+    fn record_decl(
+        ctx: &TypeContext,
+        env: &Env,
+        names: &[&str],
+    ) -> crate::types::decl::TypeDeclaration {
+        let labels = names
+            .iter()
+            .map(|name| crate::types::decl::LabelDeclaration {
+                ld_id: ctx.create_ident(name),
+                ld_runtime_name: None,
+                ld_mutable: crate::types::MutableFlag::Immutable,
+                ld_optional: false,
+                ld_type: ctx.new_constr(Path::Pident(crate::types::predef::ident_int()), vec![]),
+                ld_loc: crate::types::DeclLoc::none(),
+                ld_attributes: vec![],
+            })
+            .collect();
+        crate::types::decl::TypeDeclaration {
+            type_kind: crate::types::TypeKind::TypeRecord(
+                labels,
+                crate::types::RecordRepresentation::RecordRegular,
+            ),
+            ..abstract_decl(env)
+        }
+    }
+
+    #[test]
+    fn store_type_ties_labels_and_a_new_binding_drops_them() {
+        // `store_type` (env.ml:1561-1569) installs the labels with the type;
+        // binding the ident again describes the new declaration's labels.
+        let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
+        let mut env = initial_env(&ctx);
+        let id = ctx.create_ident("t");
+        let decl = record_decl(&ctx, &env, &["a", "b"]);
+        env.store_type(&ctx, id, decl.clone());
+        let family = env.type_label_family(&id).expect("store_type ties the labels");
+        assert_eq!(env.find_label("a").unwrap().lbl_all, family);
+        assert_eq!(ctx.label_family(family).unwrap().len(), 2);
+
+        // A variance update keeps the labels of the same declaration.
+        env.replace_type_properties(id, decl);
+        assert_eq!(env.type_label_family(&id), Some(family));
+
+        // A new binding without labels (an abstract placeholder) has none.
+        let placeholder = abstract_decl(&env);
+        env.add_type(id, placeholder);
+        assert_eq!(env.type_label_family(&id), None);
+
+        // Storing a record again describes a new array.
+        let decl = record_decl(&ctx, &env, &["c"]);
+        env.store_type(&ctx, id, decl);
+        let again = env.type_label_family(&id).unwrap();
+        assert_ne!(again, family);
+        assert_eq!(env.find_label("c").unwrap().lbl_all, again);
+    }
+
+    #[test]
+    fn variance_updated_record_keeps_one_array() {
+        // Rust re-adds a declaration with its computed variance after the
+        // final environment; the labels installed with it stay the array of
+        // both lookup by name and `find_type_descrs`.
+        with_typed(
+            r#"
+type box<'a> = {v: 'a, n: int}
+type other = {v: string}
+let f = (b: box<int>) => b.v
+let lit = ({v: 1, n: 2}: box<int>)
+"#,
+            |typed, ctx| {
+                let by_type = body_field_label(typed, "f");
+                assert_eq!(family_names(ctx, by_type), ["v", "n"]);
+                assert_eq!(by_type.lbl_all, literal_labels(typed, "lit")[0].lbl_all);
+            },
+        );
+    }
+
+    #[test]
+    fn opening_a_module_does_not_install_inline_record_labels() {
+        // `comp_labels` holds `labels_of_type`, empty for a variant
+        // (datarepr.ml:292-298): `x` is unbound by name after `open M`.
+        let result = typecheck_result(
+            r#"
+module M = {
+  type v = A({x: int})
+}
+open M
+let f = r => r.x
+"#,
+        );
+        assert!(result.is_err(), "an inline record label is not bound by name");
     }
 
 }

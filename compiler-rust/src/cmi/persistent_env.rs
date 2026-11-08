@@ -8161,27 +8161,10 @@ fn add_signature_to_env_with_options_inner(
                                 cstr_inlined,
                             };
 
-                            if let Some(ref inlined_decl) = cstr_desc.cstr_inlined {
-                                if let crate::types::TypeKind::TypeRecord(ref labels, _) =
-                                    inlined_decl.type_kind
-                                {
-                                    let inline_path =
-                                        Path::pdot(type_path.clone(), cstr_desc.cstr_name.clone());
-                                    let ty_res = ctx
-                                        .new_constr(inline_path, inlined_decl.type_params.clone());
-                                    // `Datarepr.label_descrs` (compiler/ml/datarepr.ml:261-288).
-                                    for (ld, label_desc) in labels.iter().zip(crate::types::env_lazy::label_descrs(
-                                        ty_res, &inlined_decl, decl.type_private, ctx, |_| {},
-                                    )) {
-                                        if as_opened {
-                                            opened_labels.push((ld.ld_id, label_desc));
-                                        } else {
-                                            env.add_label(ld.ld_id, label_desc);
-                                        }
-                                    }
-                                }
-                            }
-
+                            // `comp_labels` holds `labels_of_type`, which describes
+                            // no labels for a variant (datarepr.ml:292-298): an
+                            // inline record's labels are reached through its
+                            // constructor (`cstr_inlined`), never by name.
                             if as_opened {
                                 opened_constructors.push((cd.cd_id, cstr_desc));
                             } else {
@@ -8195,16 +8178,20 @@ fn add_signature_to_env_with_options_inner(
                         // array stored with the type in `comp_types`.
                         // An open installs the component table's own labels
                         // (env.ml:1874-1877 opens `find_module_descr root`).
-                        let components = precomputed_components
-                            .expect("an open installs a module's component table");
-                        let family = components
-                            .type_label_family(id.name(), ctx)
-                            .expect("a record type of a component has its label family");
-                        let descs = ctx
-                            .label_family(family)
-                            .expect("a component label family is registered")
-                            .as_ref()
-                            .clone();
+                        // A record without fields describes no labels.
+                        let descs = if labels.is_empty() {
+                            Vec::new()
+                        } else {
+                            let components = precomputed_components
+                                .expect("an open installs a module's component table");
+                            let family = components
+                                .type_label_family(id.name(), ctx)
+                                .expect("a record type of a component has its label family");
+                            ctx.label_family(family)
+                                .expect("a component label family is registered")
+                                .as_ref()
+                                .clone()
+                        };
                         for (ld, label_desc) in labels.iter().zip(descs) {
                             if as_opened {
                                 opened_labels.push((ld.ld_id, label_desc));

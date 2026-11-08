@@ -4735,7 +4735,7 @@ impl<'a> RawLambdaConverter<'a> {
                     }
                 }
                 DeclSigItem::SigType(id, tdecl, _) => {
-                    env.add_type(*id, tdecl.clone());
+                    env.store_type(self.type_ctx, *id, tdecl.clone());
                 }
                 DeclSigItem::SigTypext(_, _, _) => {
                     return None; // type extensions can't be initialized

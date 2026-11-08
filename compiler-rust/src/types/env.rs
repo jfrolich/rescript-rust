@@ -1576,7 +1576,52 @@ impl Env {
     // ========================================================================
 
     /// Add a type binding.
+    /// Add a type binding without describing its labels: OCaml
+    /// `store_type_infos` (env.ml:1605-1612), what `components_of_module_maker`
+    /// uses (env.ml:1488), or an abstract placeholder. A previous binding of
+    /// `id` loses its labels' array. Use [`Env::store_type`] for `Env.add_type`.
     pub fn add_type(&mut self, id: Ident, decl: impl Into<Arc<TypeDeclaration>>) {
+        self.bump_scope();
+        let decl = decl.into();
+        let data = self.data_mut();
+        data.types.add(id, decl);
+        data.type_label_families.remove(&id);
+    }
+
+    /// OCaml `Env.add_type` = `store_type` (env.ml:1561-1569, 1701): the
+    /// binding plus the labels `Datarepr.labels_of_type (Pident id) decl`
+    /// describes for a record, added with `List.fold_right`. Constructors
+    /// are added by the callers that need them.
+    pub fn store_type(
+        &mut self,
+        ctx: &TypeContext,
+        id: Ident,
+        decl: impl Into<Arc<TypeDeclaration>>,
+    ) {
+        let decl = decl.into();
+        self.add_type(id, decl.clone());
+        if let TypeKind::TypeRecord(labels, _) = &decl.type_kind
+            && !labels.is_empty()
+        {
+            let res_ty = ctx.new_generic_constr(Path::Pident(id), decl.type_params.clone());
+            let descs = crate::types::env_lazy::label_descrs(
+                res_ty,
+                &decl,
+                decl.type_private,
+                ctx,
+                |_| {},
+            );
+            self.add_type_label_family(id, descs[0].lbl_all);
+            for (ld, desc) in labels.iter().zip(descs).rev() {
+                self.add_label(ld.ld_id, desc);
+            }
+        }
+    }
+
+    /// Replace the declaration bound to `id` by one that differs only in
+    /// properties its labels do not describe (variance), keeping the labels
+    /// and their array.
+    pub fn replace_type_properties(&mut self, id: Ident, decl: impl Into<Arc<TypeDeclaration>>) {
         self.bump_scope();
         let decl = decl.into();
         self.data_mut().types.add(id, decl);
@@ -2410,6 +2455,7 @@ fn build_initial_env(ctx: &TypeContext) -> Env {
                                  decl: TypeDeclaration,
                                  ctx: &TypeContext| {
         let type_path = Path::pident(id);
+        let mut record_family = None;
 
         // Extract constructors/labels from predef declarations so they are
         // available for disambiguation just like OCaml's initial environment.
@@ -2472,13 +2518,16 @@ fn build_initial_env(ctx: &TypeContext) -> Env {
                 for (ld, label_desc) in labels.iter().zip(crate::types::env_lazy::label_descrs(
                     res_ty, &decl, decl.type_private, ctx, |_| {},
                 )) {
-                    env.add_type_label_family(id, label_desc.lbl_all);
+                    record_family = Some(label_desc.lbl_all);
                     env.add_label(ld.ld_id, label_desc);
                 }
             }
             _ => {}
         }
         env.add_type(id, decl);
+        if let Some(family) = record_family {
+            env.add_type_label_family(id, family);
+        }
     };
 
     use super::predef;

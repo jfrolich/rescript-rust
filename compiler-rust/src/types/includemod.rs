@@ -2257,7 +2257,7 @@ fn signatures_with_subst(
         .collect::<Vec<_>>();
 
     for sig_item in sig_impl {
-        add_sig_item_to_env(sig_item, &mut include_env);
+        add_sig_item_to_env(type_ctx, sig_item, &mut include_env);
     }
 
     let (len_impl, paired, errors) =
@@ -2493,10 +2493,11 @@ fn primitive_coercible(
         }
 }
 
-pub(crate) fn add_sig_item_to_env(item: &SignatureItem, env: &mut Env) {
+/// `Env.add_item` (env.ml:1757-1768): a type goes through `store_type`.
+pub(crate) fn add_sig_item_to_env(ctx: &TypeContext, item: &SignatureItem, env: &mut Env) {
     match item {
         SignatureItem::SigValue(id, desc) => env.add_value(*id, desc.clone()),
-        SignatureItem::SigType(id, decl, _) => env.add_type(*id, decl.clone()),
+        SignatureItem::SigType(id, decl, _) => env.store_type(ctx, *id, decl.clone()),
         SignatureItem::SigModule(id, md, _) => env.add_module(*id, md.clone()),
         SignatureItem::SigModtype(id, mtd) => env.add_modtype(*id, mtd.clone()),
         SignatureItem::SigTypext(_, _, _)
@@ -3703,7 +3704,7 @@ fn compare_runtime_annotations(
     let first_type = |env: &mut Env| {
         // `Env.add_type ~check:false id decl1 env` and
         // `Btype.newgenty (Tconstr (Pident id, decl1.type_params, ref Mnil))`.
-        env.add_type(id, impl_decl.clone());
+        env.store_type(type_ctx, id, impl_decl.clone());
         type_ctx.new_generic_constr(Path::pident(id), impl_decl.type_params.clone())
     };
     match &sig_decl.type_shape {

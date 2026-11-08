@@ -499,7 +499,7 @@ pub(crate) fn resolve_shapes(
         for ((id, decl), shape) in ids.iter().zip(decls).zip(shapes) {
             let mut decl = decl.clone();
             decl.type_shape = shape.clone();
-            env.add_type(*id, decl);
+            env.store_type(ctx, *id, decl);
         }
         env
     };
