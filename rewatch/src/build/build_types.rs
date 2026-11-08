@@ -270,6 +270,54 @@ pub struct GentypeCompileContext {
     pub resolver: Arc<rescript_compiler::gentype::module_resolver::Resolver>,
 }
 
+/// Where the latest build of a [`BuildCommandState`] got.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuildRun {
+    /// No build has run in this process.
+    NotStarted,
+    /// Started and not finished successfully: still running, or failed after
+    /// parsing.
+    Running { started_at: std::time::SystemTime },
+    /// Stopped at a parse error, before planning: it compiled nothing and
+    /// leaves the previous build record in place.
+    StoppedAtParse { started_at: std::time::SystemTime },
+    /// Finished without errors.
+    Succeeded { started_at: std::time::SystemTime },
+}
+
+impl BuildRun {
+    pub fn started_at(self) -> Option<std::time::SystemTime> {
+        match self {
+            BuildRun::NotStarted => None,
+            BuildRun::Running { started_at }
+            | BuildRun::StoppedAtParse { started_at }
+            | BuildRun::Succeeded { started_at } => Some(started_at),
+        }
+    }
+
+    pub fn succeeded(self) -> bool {
+        matches!(self, BuildRun::Succeeded { .. })
+    }
+
+    pub fn stopped_at_parse(self) -> bool {
+        matches!(self, BuildRun::StoppedAtParse { .. })
+    }
+
+    /// The running build stopped at a parse error.
+    pub fn stop_at_parse(&mut self) {
+        if let BuildRun::Running { started_at } = *self {
+            *self = BuildRun::StoppedAtParse { started_at };
+        }
+    }
+
+    /// The running build finished without errors.
+    pub fn succeed(&mut self) {
+        if let BuildRun::Running { started_at } = *self {
+            *self = BuildRun::Succeeded { started_at };
+        }
+    }
+}
+
 /// Extended build state that includes command-line specific overrides.
 /// Wraps `BuildState` and adds command-specific data like warning overrides.
 /// Used by commands that need to respect CLI flags (e.g., `build`, `watch`).
@@ -319,9 +367,6 @@ pub struct BuildCommandState {
     pub module_alias_rewrites: Mutex<AHashMap<String, Vec<(String, rescript_compiler::types::path::Path)>>>,
     // The modules this build compiled (written or not).
     pub compiled_modules: AHashSet<String>,
-    // The build stopped at a parse error, before planning: it compiled
-    // nothing and leaves the previous build record in place.
-    pub stopped_at_parse: bool,
     // Modules compiled after a dependency failed: their results were dropped,
     // but their JavaScript may have been written from the failed module's
     // incomplete metadata. The build record forgets what they imported, so
@@ -351,10 +396,8 @@ pub struct BuildCommandState {
     pub in_memory_only: bool,
     // The incremental plan of a fresh in-process build, consumed by `compile`.
     pub incremental_plan: Option<super::incremental::IncrementalPlan>,
-    // When the latest build started, and whether it finished without errors;
-    // recorded in the in-process manifest.
-    pub build_started_at: Option<std::time::SystemTime>,
-    pub last_build_ok: bool,
+    // The latest build of this process; recorded in the in-process manifest.
+    pub build_run: BuildRun,
     // The parse warnings of the latest parse of each source file, saved so a
     // build that parses nothing can report them again.
     pub parse_warnings: ParseWarnings,
@@ -462,7 +505,6 @@ impl BuildCommandState {
             verified_imports: Mutex::new(AHashMap::new()),
             module_alias_rewrites: Mutex::new(AHashMap::new()),
             compiled_modules: AHashSet::new(),
-            stopped_at_parse: false,
             invalidated_modules: AHashSet::new(),
             loaded_modules: AHashSet::new(),
             written_modules: AHashSet::new(),
@@ -472,8 +514,7 @@ impl BuildCommandState {
             previous_in_process: None,
             in_memory_only: false,
             incremental_plan: None,
-            build_started_at: None,
-            last_build_ok: false,
+            build_run: BuildRun::NotStarted,
             parse_warnings: Mutex::new(AHashMap::new()),
             js_confirmed_at: AHashMap::new(),
             source_mtimes: AHashMap::new(),

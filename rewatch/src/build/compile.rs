@@ -1465,7 +1465,7 @@ pub fn compile(
                 module.compile_dirty = false;
                 if is_compiled && !registry_only.contains(&module_name) {
                     build_state.written_modules.insert(module_name.clone());
-                    if let Some(started) = build_state.build_started_at {
+                    if let Some(started) = build_state.build_run.started_at() {
                         build_state.js_confirmed_at.insert(module_name.clone(), started);
                     }
                 }

@@ -449,9 +449,9 @@ pub fn incremental_build_without_lock(
         rescript_compiler::perf_counters::reset();
     }
     logs::initialize(&build_state.packages);
-    build_state.build_started_at = Some(std::time::SystemTime::now());
-    build_state.last_build_ok = false;
-    build_state.stopped_at_parse = false;
+    build_state.build_run = BuildRun::Running {
+        started_at: std::time::SystemTime::now(),
+    };
     build_state.invalidated_modules.clear();
 
     // A fresh in-process build has nothing compiled in memory, so every
@@ -499,7 +499,7 @@ pub fn incremental_build_without_lock(
             log_config_warnings(build_state);
         }
         write_compiler_info(build_state);
-        build_state.last_build_ok = true;
+        build_state.build_run.succeed();
         print_compiler_reports(phase_timing_enabled, compiler_counters_enabled);
         return Ok(
             if has_parse_warnings
@@ -591,7 +591,7 @@ pub fn incremental_build_without_lock(
         }
         Err(err) => {
             let _error_span = info_span!("build.parse_error").entered();
-            build_state.stopped_at_parse = true;
+            build_state.build_run.stop_at_parse();
             logs::finalize(&build_state.packages);
 
             if !plain_output && show_progress {
@@ -801,7 +801,7 @@ pub fn incremental_build_without_lock(
         phase_mark("compiler-info-end");
 
         print_compiler_reports(phase_timing_enabled, compiler_counters_enabled);
-        build_state.last_build_ok = true;
+        build_state.build_run.succeed();
         Ok(outcome)
     }
 }

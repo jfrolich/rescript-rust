@@ -82,7 +82,7 @@ fn in_process_source_paths(build_state: &BuildCommandState) -> AHashMap<String, 
 /// [`build::state_db`]): the sources it compiled, when each module's
 /// JavaScript was confirmed up to date, and the warnings to report again.
 pub fn write_in_process_record(build_state: &BuildCommandState) {
-    if build_state.stopped_at_parse {
+    if build_state.build_run.stopped_at_parse() {
         return;
     }
     let digests = build::incremental::UnitDigests::of_compiled(build_state);

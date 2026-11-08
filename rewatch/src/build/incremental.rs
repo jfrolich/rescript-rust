@@ -287,14 +287,19 @@ pub fn current_record(
             .meta
             .insert(META_MODULE_SET.to_string(), module_set_digest(build_state));
     }
-    if let Some(started) = build_state.build_started_at {
+    if let Some(started) = build_state.build_run.started_at() {
         record.meta.insert(
             state_db::META_BUILD_STARTED_AT.to_string(),
             state_db::nanos_from_time(started).to_string(),
         );
         record.meta.insert(
             state_db::META_BUILD_OK.to_string(),
-            if build_state.last_build_ok { "1" } else { "0" }.to_string(),
+            if build_state.build_run.succeeded() {
+                "1"
+            } else {
+                "0"
+            }
+            .to_string(),
         );
     }
     // The interfaces of the modules this build compiled, where they differ
