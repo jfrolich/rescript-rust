@@ -1409,9 +1409,20 @@ pub(crate) enum LetCheck {
     Local,
     /// `Typecore.type_binding`: `Unused_value_declaration` for both.
     Toplevel,
-    /// The fake let of an optional-argument default: `check = check_strict`
-    /// (typecore.ml:4530-4546).
+    /// `type_let ~optional_default:true`, the let binding an optional
+    /// parameter's default that `type_function` synthesizes: `check =
+    /// check_strict`, and its match gets function-style diagnostics
+    /// (typecore.ml:4930-4952, 5061-5068).
     FakeOptional,
+}
+
+/// `type_expect ?match_context` (typecore.ml:2571-2576): set where the type
+/// checker itself rewrites source into a match, it says what that match
+/// stands for in the source and decides the wording of its diagnostics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MatchContext {
+    /// `` `Function ``: function-style diagnostics instead of a switch's.
+    Function,
 }
 
 impl<'a> TypeCheckContext<'a> {
@@ -7754,13 +7765,36 @@ fn type_expect_with_recarg<'a>(
     context: Option<TypeClashContext>,
     recarg: RecArg,
 ) -> TypeCoreResult<Expression> {
+    type_expect_full(tctx, env, expr, expected_ty, context, recarg, None)
+}
+
+/// `type_expect ~context ?recarg ?match_context` (typecore.ml:2552-2569).
+fn type_expect_full<'a>(
+    tctx: &mut TypeCheckContext<'a>,
+    env: &Env,
+    expr: &ParsedExpression,
+    expected_ty: TypeExprRef,
+    context: Option<TypeClashContext>,
+    recarg: RecArg,
+    match_context: Option<MatchContext>,
+) -> TypeCoreResult<Expression> {
     let arena = tctx.arena;
     let mut typed = crate::types::typemod::with_warning_scope(
         tctx,
         arena,
         &expr.pexp_attributes,
         true,
-        |tctx| type_expect_with_recarg_unscoped(tctx, env, expr, expected_ty, context, recarg),
+        |tctx| {
+            type_expect_with_recarg_unscoped(
+                tctx,
+                env,
+                expr,
+                expected_ty,
+                context,
+                recarg,
+                match_context,
+            )
+        },
     )?;
     // OCaml records `exp_env = env` on every typed expression
     // (typecore.ml type_expect_); later phases such as
@@ -7780,6 +7814,7 @@ fn type_expect_with_recarg_unscoped<'a>(
     expected_ty: TypeExprRef,
     context: Option<TypeClashContext>,
     recarg: RecArg,
+    match_context: Option<MatchContext>,
 ) -> TypeCoreResult<Expression> {
     use crate::parser::ast::ExpressionDesc as ED;
 
@@ -7998,60 +8033,69 @@ fn type_expect_with_recarg_unscoped<'a>(
 
         ED::Pexp_let(inner) => {
             let (ref rec_flag, ref bindings, ref body_idx) = *inner;
-            // typecore.ml:2636-2650: a non-recursive let of one binding
-            // without attributes whose pattern contains a GADT constructor is
-            // typed as a one-case match marked `#let_gadt_pattern`, without
-            // the caller's context.
+            // typecore.ml:2648-2673: a non-recursive let of one binding
+            // without a type constraint whose pattern contains a GADT
+            // constructor is typed as a one-case match, without the caller's
+            // context and with function-style diagnostics. The binding's
+            // attributes go on the case pattern, in front of its own.
             let arena = tctx.arena;
             if *rec_flag == RecFlag::Nonrecursive
                 && let [binding] = arena.vb_list(*bindings)
-                && binding.pvb_attributes.is_empty()
+                && arena.value_constraint(binding.pvb_pat).is_none()
                 && pattern_contains_generalized_constructor(
                     tctx,
                     env,
                     arena.get_pat(binding.pvb_pat),
                 )
             {
+                // `pvb_attributes @ spat.ppat_attributes` is the pattern's own
+                // list when the binding has none.
+                let case_pat = if binding.pvb_attributes.is_empty() {
+                    binding.pvb_pat
+                } else {
+                    let spat = arena.get_pat(binding.pvb_pat);
+                    let mut attributes = Vec::with_capacity(
+                        binding.pvb_attributes.len() + spat.ppat_attributes.len(),
+                    );
+                    attributes.extend(binding.pvb_attributes.iter().cloned());
+                    attributes.extend(spat.ppat_attributes.iter().cloned());
+                    arena.push_typecheck_pattern(ParsedPattern {
+                        ppat_desc: spat.ppat_desc.clone(),
+                        ppat_loc: spat.ppat_loc,
+                        ppat_attributes: Attributes::from_vec(attributes),
+                    })
+                };
                 let cases = arena.push_shared_case_list(&[crate::parser::ast::Case {
                     pc_bar: None,
-                    pc_lhs: binding.pvb_pat,
+                    pc_lhs: case_pat,
                     pc_guard: None,
                     pc_rhs: *body_idx,
                 }]);
-                let marker = arena
-                    .find_string_idx("#let_gadt_pattern")
-                    .unwrap_or_else(|| arena.push_typecheck_string("#let_gadt_pattern".to_owned()));
-                let mut attributes = Vec::with_capacity(expr.pexp_attributes.len() + 1);
-                attributes.push((
-                    Located {
-                        txt: marker,
-                        loc: arena.none_loc(),
-                    },
-                    crate::parser::ast::Payload::PStr(Box::default()),
-                ));
-                attributes.extend(expr.pexp_attributes.iter().cloned());
                 let match_expr = ParsedExpression {
                     pexp_desc: ED::Pexp_match((binding.pvb_expr, cases)),
                     pexp_loc: expr.pexp_loc,
-                    pexp_attributes: Attributes::from_vec(attributes),
+                    pexp_attributes: expr.pexp_attributes.clone(),
                 };
-                return type_expect(tctx, env, &match_expr, expected_ty, None);
+                return type_expect_full(
+                    tctx,
+                    env,
+                    &match_expr,
+                    expected_ty,
+                    None,
+                    RecArg::Rejected,
+                    Some(MatchContext::Function),
+                );
             }
             // Let expression
             // OCaml does NOT reset typetexp.type_variables for local Pexp_let.
             // reset_type_variables happens at top-level expression/binding entry.
-            let let_check = if is_fake_optional_arg_let(tctx.arena, tctx.arena.vb_list(*bindings)) {
-                LetCheck::FakeOptional
-            } else {
-                LetCheck::Local
-            };
             let (typed_bindings, new_env, unpacks) = type_let_bindings(
                 tctx,
                 env,
                 *rec_flag,
                 tctx.arena.vb_list(*bindings),
                 true,
-                let_check,
+                LetCheck::Local,
             )?;
 
             // Type check body in extended environment
@@ -8509,6 +8553,7 @@ fn type_expect_with_recarg_unscoped<'a>(
                 tctx.arena.case_list(*cases),
                 expected_ty,
                 &expr.pexp_attributes,
+                match_context,
             )
         }
 
@@ -11307,13 +11352,25 @@ fn type_match_cases_batch_non_gadt<'a>(
                 env.clone()
             };
             let mut unpacks: Vec<PatternVariable> = Vec::new();
-            for pv in &state.pattern_variables {
-                add_pattern_variable_value(tctx, &mut case_env, pv);
-                if pv.is_module {
-                    // Match OCaml order in wrap_unpacks (`x :: module_variables`).
-                    unpacks.insert(0, pv.clone());
-                }
-            }
+            // typecore.ml:1964-1972: the unused-variable checks are set up in
+            // the pattern's warning scope.
+            let pattern_attributes = &tctx.arena.get_pat(case.pc_lhs).ppat_attributes;
+            crate::types::typemod::with_warning_scope(
+                tctx,
+                tctx.arena,
+                pattern_attributes,
+                false,
+                |tctx| {
+                    for pv in &state.pattern_variables {
+                        add_pattern_variable_value(tctx, &mut case_env, pv);
+                        if pv.is_module {
+                            // Match OCaml order in wrap_unpacks (`x :: module_variables`).
+                            unpacks.insert(0, pv.clone());
+                        }
+                    }
+                    Ok::<(), TypeCoreError>(())
+                },
+            )?;
 
             // OCaml typecore.ml:4407: `pattern_force := force @ !pattern_force`.
             pattern_forces.extend(state.take_globalize_forces());
@@ -11492,23 +11549,24 @@ fn type_match(
     cases: &[crate::parser::ast::Case],
     expected_ty: TypeExprRef,
     attributes: &[crate::parser::ast::Attribute],
+    match_context: Option<MatchContext>,
 ) -> TypeCoreResult<Expression> {
     let ctx = tctx.type_ctx;
-    let has_attribute = |name| {
-        attributes
-            .iter()
-            .any(|attr| tctx.arena.get_string(attr.0.txt) == name)
-    };
-    let body_context = if has_attribute("let.unwrap") {
-        Some(TypeClashContext::LetUnwrapReturn)
-    } else if has_attribute("#optional_arg_default") || has_attribute("#let_gadt_pattern") {
-        // typecore.ml:2835-2844: the match synthesized for an optional
-        // argument's default is part of a function definition, and the one
-        // typed for a let destructuring a GADT constructor has the rest of the
-        // block as its body, so their branches use function-style diagnostics.
-        None
-    } else {
-        Some(TypeClashContext::SwitchExpression)
+    // typecore.ml:2855-2864: a match the type checker synthesized says what it
+    // stands for; otherwise only the parsed `let?` is marked, by
+    // `let.unwrap`.
+    let body_context = match match_context {
+        Some(MatchContext::Function) => None,
+        None => {
+            if attributes
+                .iter()
+                .any(|attr| tctx.arena.get_string(attr.0.txt) == "let.unwrap")
+            {
+                Some(TypeClashContext::LetUnwrapReturn)
+            } else {
+                Some(TypeClashContext::SwitchExpression)
+            }
+        }
     };
 
     // Match OCaml typecore.ml Pexp_match:
@@ -12585,16 +12643,26 @@ fn type_case_pattern_impl<'a>(
         }
     }
 
-    // Extend environment with pattern bindings
+    // Extend environment with pattern bindings, in the pattern's warning
+    // scope (typecore.ml:1964-1972).
     let mut unpacks: Vec<PatternVariable> = Vec::new();
-    for pv in &state.pattern_variables {
-        add_pattern_variable_value(tctx, &mut case_env, pv);
-        if pv.is_module {
-            // OCaml records unpack vars in reverse insertion order
-            // (`module_variables := x :: module_variables`).
-            unpacks.insert(0, pv.clone());
-        }
-    }
+    crate::types::typemod::with_warning_scope(
+        tctx,
+        tctx.arena,
+        &tctx.arena.get_pat(case.pc_lhs).ppat_attributes,
+        false,
+        |tctx| {
+            for pv in &state.pattern_variables {
+                add_pattern_variable_value(tctx, &mut case_env, pv);
+                if pv.is_module {
+                    // OCaml records unpack vars in reverse insertion order
+                    // (`module_variables := x :: module_variables`).
+                    unpacks.insert(0, pv.clone());
+                }
+            }
+            Ok::<(), TypeCoreError>(())
+        },
+    )?;
 
     let pattern_forces = state.take_globalize_forces();
     Ok(PendingSequentialMatchCase {
@@ -12820,7 +12888,6 @@ fn desugar_nary_function_defaults(
                 pexp_loc: loc,
                 pexp_attributes: Attributes::new(),
             });
-            let optional_default_attr = arena.intern_string("#optional_arg_default");
             let match_expr = arena.push_expr(ParsedExpression {
                 pexp_desc: ED::Pexp_match((
                     scrutinee,
@@ -12840,11 +12907,7 @@ fn desugar_nary_function_defaults(
                     ]),
                 )),
                 pexp_loc: sloc,
-                pexp_attributes: vec![(
-                    Located::mknoloc(optional_default_attr),
-                    crate::parser::ast::Payload::PStr(Box::default()),
-                )]
-                .into(),
+                pexp_attributes: Attributes::new(),
             });
             let rewritten = crate::parser::ast::FunParam {
                 p_attrs: param.p_attrs.clone(),
@@ -12884,10 +12947,6 @@ pub fn prepare_typecheck_arena(arena: &mut ParseArena) {
     // first-class-module discovery. Its spelling is known up front, so intern it
     // while the arena is still exclusively borrowed.
     arena.intern_string("#modulepat");
-    // The marker of a let destructuring a GADT constructor
-    // (typecore.ml:2647-2648), attached once the environment shows the
-    // pattern contains one.
-    arena.intern_string("#let_gadt_pattern");
 
     let functions = arena.nary_functions();
     for (fun, loc) in functions {
@@ -13346,31 +13405,36 @@ fn type_function_nary(
             // `unpacks_acc @ unpacks` (typecore.ml:4119), where a parameter's
             // `unpacks` are its `module_variables`, latest first.
             let mut param_unpacks = Vec::new();
-            for variable in &state.pattern_variables {
-                add_pattern_variable_value(tctx, &mut next_env, variable);
-                if variable.is_module {
-                    param_unpacks.insert(0, variable.clone());
-                }
-            }
+            // typecore.ml:1964-1972: in the pattern's warning scope.
+            crate::types::typemod::with_warning_scope(
+                tctx,
+                tctx.arena,
+                &parsed_pattern.ppat_attributes,
+                false,
+                |tctx| {
+                    for variable in &state.pattern_variables {
+                        add_pattern_variable_value(tctx, &mut next_env, variable);
+                        if variable.is_module {
+                            param_unpacks.insert(0, variable.clone());
+                        }
+                    }
+                    Ok::<(), TypeCoreError>(())
+                },
+            )?;
             unpacks.extend(param_unpacks);
             body_env = next_env;
         }
         let mut opt_param = None;
         if let Some(default_binding) = default_binding {
             let let_env = body_env.clone_preserve_id();
-            let let_check =
-                if is_fake_optional_arg_let(tctx.arena, std::slice::from_ref(default_binding)) {
-                    LetCheck::FakeOptional
-                } else {
-                    LetCheck::Local
-                };
+            // typecore.ml:4078-4080: `type_let ~optional_default:true`.
             let (typed_bindings, next_env, let_unpacks) = type_let_bindings(
                 tctx,
                 &body_env,
                 RecFlag::Nonrecursive,
                 std::slice::from_ref(default_binding),
                 true,
-                let_check,
+                LetCheck::FakeOptional,
             )?;
             body_env = next_env;
             unpacks.extend(let_unpacks);
@@ -17313,11 +17377,15 @@ fn type_open(
     ))
 }
 
+/// `type_expression` of `type_let` (typecore.ml:5061-5081): an unconstrained
+/// binding of the let `type_function` synthesizes for an optional parameter's
+/// default is typed with the `` `Function `` match context.
 fn type_value_binding_expression(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
     binding: &crate::parser::ast::ValueBinding,
     expected_ty: TypeExprRef,
+    let_check: LetCheck,
 ) -> TypeCoreResult<Expression> {
     if let Some(expression) = tctx
         .arena
@@ -17328,7 +17396,16 @@ fn type_value_binding_expression(
         type_expect(tctx, env, &expression, expected_ty, None)
     } else {
         let expression = tctx.arena.get_expr(binding.pvb_expr).clone();
-        type_expect(tctx, env, &expression, expected_ty, None)
+        let match_context = (let_check == LetCheck::FakeOptional).then_some(MatchContext::Function);
+        type_expect_full(
+            tctx,
+            env,
+            &expression,
+            expected_ty,
+            None,
+            RecArg::Rejected,
+            match_context,
+        )
     }
 }
 
@@ -20852,21 +20929,6 @@ fn should_warn_unused_name(name: &str) -> bool {
     !name.is_empty() && !name.starts_with('_') && !name.starts_with('#')
 }
 
-fn is_fake_optional_arg_let(
-    arena: &ParseArena,
-    bindings: &[crate::parser::ast::ValueBinding],
-) -> bool {
-    // typecore.ml:4580-4589: the synthetic let-declaration introduced for an
-    // optional parameter's default carries `#optional_arg_default`.
-    let [binding] = bindings else {
-        return false;
-    };
-    let expr = arena.get_expr(binding.pvb_expr);
-    expr.pexp_attributes
-        .iter()
-        .any(|(name, _)| arena.get_string(name.txt) == "#optional_arg_default")
-}
-
 fn report_let_partial_match_warnings<'a>(
     tctx: &mut TypeCheckContext<'a>,
     env: &Env,
@@ -21218,8 +21280,13 @@ fn type_let_bindings(
                         ctx.begin_def();
                         let (inst_vars, inst_ty) =
                             crate::types::ctype::instance_poly(ctx, true, true, &vars, body);
-                        let exp =
-                            type_value_binding_expression(tctx, &typing_env, binding, inst_ty)?;
+                        let exp = type_value_binding_expression(
+                            tctx,
+                            &typing_env,
+                            binding,
+                            inst_ty,
+                            let_check,
+                        )?;
                         ctx.end_def();
                         // OCaml: check_univars env true "definition" exp pat.pat_type vars
                         check_univars_or_less_general(
@@ -21241,7 +21308,7 @@ fn type_let_bindings(
                     _ => {
                         drop(pat_desc);
                         // OCaml: type_expect ~context exp_env sexp pat.pat_type
-                        type_value_binding_expression(tctx, &typing_env, binding, pat_ty)
+                        type_value_binding_expression(tctx, &typing_env, binding, pat_ty, let_check)
                     }
                 },
             )?;
