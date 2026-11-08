@@ -48,6 +48,37 @@ pub struct JsxConfig {
     pub empty_loc: Location,
 }
 
+/// The part of [`JsxConfig`] that `@@jsxConfig` and component definitions
+/// change inside one structure or signature, and that the mapper restores when
+/// the structure or signature ends (jsx_ppx.ml:93-104 `save_config` /
+/// `restore_config`).
+struct JsxConfigScope {
+    version: i32,
+    module_name: String,
+    has_component: bool,
+}
+
+impl JsxConfig {
+    /// jsx_ppx.ml:106-107, 122-123: save the scope and reset `has_component`
+    /// on entering a structure or signature.
+    fn enter_scope(&mut self) -> JsxConfigScope {
+        let scope = JsxConfigScope {
+            version: self.version,
+            module_name: self.module_name.clone(),
+            has_component: self.has_component,
+        };
+        self.has_component = false;
+        scope
+    }
+
+    /// jsx_ppx.ml:117, 133: restore the scope saved on entry.
+    fn exit_scope(&mut self, scope: JsxConfigScope) {
+        self.version = scope.version;
+        self.module_name = scope.module_name;
+        self.has_component = scope.has_component;
+    }
+}
+
 impl Default for JsxConfig {
     fn default() -> Self {
         JsxConfig {
@@ -314,9 +345,26 @@ fn transform_structure_item_multi(
         return vec![item];
     }
 
-    // Only transform if version is 4
+    // jsx_ppx.ml:76-89, 124-131: with another version the mapper is
+    // `default_mapper`, which still visits every nested structure, where an
+    // `@@jsxConfig` can turn the transform on.
     if config.version != 4 {
-        return vec![item];
+        let pstr_desc = match item.pstr_desc {
+            StructureItemDesc::Pstr_value((rec_flag, bindings)) => {
+                let bindings: Vec<_> = arena
+                    .vb_list(bindings)
+                    .to_vec()
+                    .into_iter()
+                    .map(|binding| transform_value_binding(binding, config, arena))
+                    .collect();
+                StructureItemDesc::Pstr_value((rec_flag, arena.push_vb_list(&bindings)))
+            }
+            desc => transform_structure_item_desc(desc, config, arena, warnings),
+        };
+        return vec![StructureItem {
+            pstr_desc,
+            pstr_loc: item.pstr_loc,
+        }];
     }
 
     // Handle Pstr_value with potential @react.component
@@ -1837,9 +1885,13 @@ fn transform_signature_item_multi(
         return vec![item];
     }
 
-    // Only transform if version is 4
+    // jsx_ppx.ml:108-115: with another version the item is only mapped by
+    // `default_mapper`, which visits its nested signatures.
     if config.version != 4 {
-        return vec![item];
+        return vec![SignatureItem {
+            psig_desc: transform_signature_item_desc(item.psig_desc, config, arena, warnings),
+            psig_loc: item.psig_loc,
+        }];
     }
 
     // Handle Psig_value with potential @react.component
@@ -3762,17 +3814,13 @@ fn transform_module_type(
     ModuleType {
         pmty_desc: match mty.pmty_desc {
             ModuleTypeDesc::Pmty_signature(sig_items) => {
-                // Save and reset has_component (OCaml: config.has_component <- false)
-                let old_has_component = config.has_component;
-                config.has_component = false;
-                // Transform signature items
+                let scope = config.enter_scope();
                 let mut result = vec![];
                 for item in *sig_items {
                     let items = transform_signature_item_multi(item, config, arena, warnings);
                     result.extend(items);
                 }
-                // Restore has_component
-                config.has_component = old_has_component;
+                config.exit_scope(scope);
                 ModuleTypeDesc::Pmty_signature(Box::new(result))
             }
             ModuleTypeDesc::Pmty_functor(inner) => {
@@ -3866,15 +3914,14 @@ fn transform_payload(
             *items, config, arena, warnings,
         ))),
         Payload::PSig(items) => {
-            let old_has_component = config.has_component;
-            config.has_component = false;
+            let scope = config.enter_scope();
             let mut result = vec![];
             for item in *items {
                 result.extend(transform_signature_item_multi(
                     item, config, arena, warnings,
                 ));
             }
-            config.has_component = old_has_component;
+            config.exit_scope(scope);
             Payload::PSig(Box::new(result))
         }
         Payload::PPat(inner) => {
@@ -3916,18 +3963,13 @@ fn transform_structure_with_config(
     arena: &mut ParseArena,
     warnings: &mut Vec<JsxPreprocessorWarning>,
 ) -> Structure {
-    // Save and reset has_component (OCaml: config.has_component <- false)
-    let old_has_component = config.has_component;
-    config.has_component = false;
-
+    let scope = config.enter_scope();
     let mut result = vec![];
     for item in structure {
         let items = transform_structure_item_multi(item, config, arena, warnings);
         result.extend(items);
     }
-
-    // Restore has_component
-    config.has_component = old_has_component;
+    config.exit_scope(scope);
     result
 }
 
@@ -4018,9 +4060,14 @@ fn transform_expression(
         return expr;
     }
     let new_desc = match expr.pexp_desc {
-        ExpressionDesc::Pexp_jsx_element(jsx) => {
+        ExpressionDesc::Pexp_jsx_element(jsx) if config.version == 4 => {
             transform_jsx_element(*jsx, config, &expr.pexp_loc, &expr.pexp_attributes, arena)
         }
+        // jsx_ppx.ml:76-79: with another version `default_mapper.expr` only
+        // maps the element's props and children (ast_mapper.ml:446-471).
+        ExpressionDesc::Pexp_jsx_element(jsx) => ExpressionDesc::Pexp_jsx_element(Box::new(
+            map_jsx_element_children(*jsx, config, arena),
+        )),
         ExpressionDesc::Pexp_let(inner) => {
             let (rec_flag, bindings, body) = inner;
             let transformed_bindings: Vec<_> = arena
@@ -4504,6 +4551,67 @@ fn transform_case(case: Case, config: &mut JsxConfig, arena: &mut ParseArena) ->
 // ============================================================================
 // JSX Element Transformation
 // ============================================================================
+
+/// `default_mapper.expr` on a JSX element (ast_mapper.ml:446-471): the
+/// constructor arguments are evaluated right to left, so the children are
+/// mapped before the props.
+fn map_jsx_element_children(
+    jsx: JsxElement,
+    config: &mut JsxConfig,
+    arena: &mut ParseArena,
+) -> JsxElement {
+    fn map_expr(idx: ExprIdx, config: &mut JsxConfig, arena: &mut ParseArena) -> ExprIdx {
+        let expr = arena.get_expr(idx).clone();
+        let transformed = transform_expression(expr, config, arena);
+        arena.push_expr(transformed)
+    }
+    let map_children = |children: Vec<ExprIdx>, config: &mut JsxConfig, arena: &mut ParseArena| {
+        children
+            .into_iter()
+            .map(|child| map_expr(child, config, arena))
+            .collect::<Vec<_>>()
+    };
+    let map_props = |props: Vec<JsxProp>, config: &mut JsxConfig, arena: &mut ParseArena| {
+        props
+            .into_iter()
+            .map(|prop| match prop {
+                JsxProp::Value {
+                    name,
+                    optional,
+                    value,
+                } => JsxProp::Value {
+                    name,
+                    optional,
+                    value: map_expr(value, config, arena),
+                },
+                JsxProp::Spreading { loc, expr } => JsxProp::Spreading {
+                    loc,
+                    expr: map_expr(expr, config, arena),
+                },
+                punning @ JsxProp::Punning { .. } => punning,
+            })
+            .collect::<Vec<_>>()
+    };
+    match jsx {
+        JsxElement::Fragment(fragment) => JsxElement::Fragment(JsxFragment {
+            children: map_children(fragment.children, config, arena),
+            ..fragment
+        }),
+        JsxElement::Unary(unary) => JsxElement::Unary(JsxUnaryElement {
+            props: map_props(unary.props, config, arena),
+            ..unary
+        }),
+        JsxElement::Container(container) => {
+            let children = map_children(container.children, config, arena);
+            let props = map_props(container.props, config, arena);
+            JsxElement::Container(JsxContainerElement {
+                props,
+                children,
+                ..container
+            })
+        }
+    }
+}
 
 fn transform_jsx_element(
     jsx: JsxElement,
@@ -5286,6 +5394,81 @@ mod tests {
             None
         );
         assert_eq!(error_at("@@jsxConfig({module_: \"Preact\"})\n"), None);
+    }
+
+    /// jsx_ppx.ml:93-133: with the transform off the mapper still visits
+    /// nested structures, where `@@jsxConfig` applies until the structure ends.
+    #[test]
+    fn jsx_config_applies_in_nested_structures_at_any_version() {
+        let transform = |source: &str, version: i32| {
+            let mut parser = Parser::new("test.res".to_string(), source);
+            let structure = module::parse_structure(&mut parser);
+            assert!(!parser.has_errors(), "{source}");
+            let arena = parser.arena_mut();
+            match transform_structure_result(structure, version, "react", arena) {
+                Ok(structure) => {
+                    let mut out = Vec::new();
+                    sexp_locs::print_structure(&structure, arena, &mut out);
+                    Ok(String::from_utf8(out).unwrap())
+                }
+                Err(error) => {
+                    let start = arena.loc_start(error.loc);
+                    Err((error.message, start.line, start.cnum - start.bol))
+                }
+            }
+        };
+        let unsupported =
+            |line, column| Err((super::UNSUPPORTED_JSX_VERSION_MSG.to_string(), line, column));
+        for version in [-1, 4] {
+            assert_eq!(
+                transform("module M = {\n  @@jsxConfig({version: 5})\n}\n", version),
+                unsupported(2, 24)
+            );
+            assert_eq!(
+                transform(
+                    "let f = () => {\n  module M = {\n    @@jsxConfig({version: 5})\n  }\n  <div> {module N = {@@jsxConfig({version: 6})}\n  1} </div>\n}\n",
+                    version
+                ),
+                unsupported(3, 26)
+            );
+        }
+        // Children are mapped before props, as OCaml evaluates the arguments of
+        // `Exp.jsx_container_element` right to left.
+        assert_eq!(
+            transform(
+                "let x = <div a={module A = {@@jsxConfig({version: 7})}\n 1}> {module B = {@@jsxConfig({version: 8})}\n 1} </div>\n",
+                -1
+            ),
+            unsupported(2, 40)
+        );
+        // A nested `@@jsxConfig({version: 4})` turns the transform on for that
+        // structure only.
+        let nested_on = transform(
+            "module M = {\n  @@jsxConfig({version: 4})\n  let a = <div />\n}\nlet b = <div />\n",
+            -1,
+        )
+        .unwrap();
+        assert_eq!(
+            nested_on.matches("Pexp_jsx_unary_element").count(),
+            1,
+            "{nested_on}"
+        );
+        // A nested `module_` ends with its structure.
+        let nested_module = transform(
+            "module M = {\n  @@jsxConfig({module_: \"Preact\"})\n  let a = <div />\n}\nlet b = <div />\n",
+            4,
+        )
+        .unwrap();
+        assert_eq!(
+            nested_module.matches("(Lident \"Preact\")").count(),
+            1,
+            "{nested_module}"
+        );
+        assert_eq!(
+            nested_module.matches("(Lident \"ReactDOM\")").count(),
+            1,
+            "{nested_module}"
+        );
     }
 
     #[test]
