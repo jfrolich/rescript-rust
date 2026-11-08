@@ -358,14 +358,19 @@ fn print_multiline_comment_content(txt: &str) -> Doc {
     }
 }
 
-/// Print a leading comment, with optional reference to next comment for spacing.
-fn print_leading_comment(comment: &Comment, next_comment: Option<&Comment>) -> Doc {
-    let single_line = comment.is_single_line();
-    let content = if single_line {
+/// `print_comment_content`: a comment's text as the printer writes it.
+fn print_comment_content(comment: &Comment) -> Doc {
+    if comment.is_single_line() {
         Doc::text(format!("//{}", comment.txt()))
     } else {
         print_multiline_comment_content(comment.txt())
-    };
+    }
+}
+
+/// Print a leading comment, with optional reference to next comment for spacing.
+fn print_leading_comment(comment: &Comment, next_comment: Option<&Comment>) -> Doc {
+    let single_line = comment.is_single_line();
+    let content = print_comment_content(comment);
 
     let separator = {
         let mut parts = Vec::new();
@@ -785,12 +790,14 @@ pub fn print_comments_inside_file(cmt_tbl: &mut CommentTable) -> Doc {
             let len = comments.len();
 
             for (i, comment) in comments.iter().enumerate() {
-                let next_comment = if i + 1 < len {
-                    Some(&comments[i + 1])
+                if i + 1 < len {
+                    acc.push(print_leading_comment(comment, Some(&comments[i + 1])));
                 } else {
-                    None
-                };
-                acc.push(print_leading_comment(comment, next_comment));
+                    // res_printer.ml:306-308: nothing follows the last
+                    // comment: the line break after a line comment would add
+                    // an empty line to the final newline of the file.
+                    acc.push(print_comment_content(comment));
+                }
             }
 
             Doc::group(Doc::concat(acc))
@@ -1816,14 +1823,11 @@ fn print_list_expression(
 ) -> Doc {
     let (expressions, spread) = parsetree_viewer::collect_list_expressions(arena, e);
     let spread_doc = match spread {
-        Some(expr) => Doc::concat(vec![Doc::text(","), Doc::line(), Doc::dotdotdot(), {
-            let doc = print_expression_with_comments(state, expr, cmt_tbl, arena);
-            match parens::expr_allowing_coercion(arena, expr) {
-                ParenKind::Parenthesized => add_parens(doc),
-                ParenKind::Braced(loc) => print_braces(doc, expr, loc, arena),
-                ParenKind::Nothing => doc,
-            }
-        }]),
+        Some(expr) => Doc::concat(vec![
+            Doc::text(","),
+            Doc::line(),
+            print_spread_with_comments(state, expr, cmt_tbl, arena),
+        ]),
         None => Doc::nil(),
     };
     Doc::group(Doc::concat(vec![
@@ -2107,7 +2111,7 @@ fn print_expr_fun_parameters(
 
     // General case: multiple parameters or complex single parameter
     let fits_on_one_line = matches!(in_callback, InCallback::FitsOnOneLine);
-    let should_hug = parameters_should_hug(parameters);
+    let should_hug = parameters_should_hug(parameters, arena);
 
     let lparen = if is_async {
         add_async(Doc::lparen())
@@ -2145,8 +2149,13 @@ fn print_expr_fun_parameters(
     ]))
 }
 
-/// Check if parameters should be hugged (printed without line breaks).
-fn parameters_should_hug(parameters: &[parsetree_viewer::FunParam<'_>]) -> bool {
+/// Check if parameters should be hugged (printed without line breaks)
+/// (`Parsetree_viewer.parameters_should_hug`). A doc comment can be printed
+/// on its own line, which a hugged parameter cannot start.
+fn parameters_should_hug(
+    parameters: &[parsetree_viewer::FunParam<'_>],
+    arena: &ParseArena,
+) -> bool {
     use parsetree_viewer::FunParam;
     match parameters {
         [
@@ -2156,7 +2165,13 @@ fn parameters_should_hug(parameters: &[parsetree_viewer::FunParam<'_>]) -> bool 
                 default_expr: None,
                 pat,
             },
-        ] if attrs.is_empty() => parsetree_viewer::is_huggable_pattern(pat),
+        ] if attrs.is_empty() => {
+            parsetree_viewer::is_huggable_pattern(pat)
+                && !pat
+                    .ppat_attributes
+                    .iter()
+                    .any(|attr| parsetree_viewer::is_doc_comment_attribute(arena, attr))
+        }
         _ => false,
     }
 }
@@ -3189,6 +3204,31 @@ fn print_dict_expr(
     ])
 }
 
+/// res_printer.ml `print_spread_with_comments`: `...expr` in an array, list
+/// or dict. The leading comments of `expr` go before the dots, which are part
+/// of the spread and not of `expr`.
+fn print_spread_with_comments(
+    state: &PrinterState,
+    expr: &Expression,
+    cmt_tbl: &mut CommentTable,
+    arena: &ParseArena,
+) -> Doc {
+    let leading_comments_doc = print_leading_comments(Doc::nil(), cmt_tbl, expr.pexp_loc, arena);
+    let doc = print_expression(state, expr, cmt_tbl, arena);
+    let doc = match parens::expr_allowing_coercion(arena, expr) {
+        ParenKind::Parenthesized => add_parens(doc),
+        ParenKind::Braced(braces) => print_braces(doc, expr, braces, arena),
+        ParenKind::Nothing => doc,
+    };
+    let full_loc = arena.to_location(expr.pexp_loc);
+    let trailing_comments = cmt_tbl.remove_trailing_comments_by_loc(expr.pexp_loc, arena);
+    Doc::concat(vec![
+        leading_comments_doc,
+        Doc::dotdotdot(),
+        print_trailing_comments_with(doc, trailing_comments, &full_loc),
+    ])
+}
+
 fn print_spread_dict_expr(
     state: &PrinterState,
     entries: &[DictEntry],
@@ -3204,20 +3244,9 @@ fn print_spread_dict_expr(
             crate::binary_ast::ast_dict::Part::Rows(rows) => {
                 part_docs.push(print_dict_rows(state, rows, cmt_tbl, arena))
             }
-            crate::binary_ast::ast_dict::Part::Spread(spread) => {
-                let spread = arena.get_expr(*spread);
-                let leading = print_leading_comments(Doc::nil(), cmt_tbl, spread.pexp_loc, arena);
-                let spread_doc = print_expression(state, spread, cmt_tbl, arena);
-                let spread_doc = match parens::expr_allowing_coercion(arena, spread) {
-                    ParenKind::Parenthesized => add_parens(spread_doc),
-                    ParenKind::Braced(braces) => print_braces(spread_doc, spread, braces, arena),
-                    ParenKind::Nothing => spread_doc,
-                };
-                let full_loc = arena.to_location(spread.pexp_loc);
-                let trailing = cmt_tbl.remove_trailing_comments_by_loc(spread.pexp_loc, arena);
-                let spread_doc = print_trailing_comments_with(spread_doc, trailing, &full_loc);
-                part_docs.push(Doc::concat(vec![leading, Doc::dotdotdot(), spread_doc]));
-            }
+            crate::binary_ast::ast_dict::Part::Spread(spread) => part_docs.push(
+                print_spread_with_comments(state, arena.get_expr(*spread), cmt_tbl, arena),
+            ),
         }
     }
 
@@ -3306,18 +3335,7 @@ fn print_spread_expr(
                 print_comments(doc, cmt_tbl, expr.pexp_loc, arena)
             }
             SpreadElement::Pspread(idx) => {
-                // The leading comments go before the dots, so they're taken
-                // before the expression is printed.
-                let expr = arena.get_expr(idx);
-                let full_loc = arena.to_location(expr.pexp_loc);
-                let leading_comments = cmt_tbl.remove_leading_comments_by_loc(expr.pexp_loc, arena);
-                let leading_comments_doc =
-                    print_leading_comments_with(Doc::nil(), leading_comments, &full_loc);
-                let doc = expr_doc(cmt_tbl, expr);
-                let trailing_comments =
-                    cmt_tbl.remove_trailing_comments_by_loc(expr.pexp_loc, arena);
-                let doc = print_trailing_comments_with(doc, trailing_comments, &full_loc);
-                Doc::concat(vec![leading_comments_doc, Doc::dotdotdot(), doc])
+                print_spread_with_comments(state, arena.get_expr(idx), cmt_tbl, arena)
             }
         })
         .collect();
@@ -5422,12 +5440,16 @@ fn print_list_pattern(
     let tail_doc = if tail_is_nil {
         Doc::nil()
     } else {
-        let doc = Doc::concat(vec![
+        // Taken before `print_pattern` prints the other comments, so they go
+        // before the dots.
+        let leading = print_leading_comments(Doc::nil(), cmt_tbl, tail.ppat_loc, arena);
+        Doc::concat(vec![
+            Doc::text(","),
+            Doc::line(),
+            leading,
             Doc::text("..."),
             print_pattern(state, tail, cmt_tbl, arena),
-        ]);
-        let tail_doc = print_comments(doc, cmt_tbl, tail.ppat_loc, arena);
-        Doc::concat(vec![Doc::text(","), Doc::line(), tail_doc])
+        ])
     };
     let children = Doc::concat(vec![
         if should_hug {
@@ -6831,13 +6853,11 @@ fn print_mod_expr_attributes(
     cmt_tbl: &mut CommentTable,
     arena: &ParseArena,
 ) -> Doc {
-    let attrs: Vec<&Attribute> = mod_expr.pmod_attributes.iter().collect();
-    if attrs.is_empty() {
+    if mod_expr.pmod_attributes.is_empty() {
         return Doc::nil();
     }
-    let (doc_comments, others): (Vec<&Attribute>, Vec<&Attribute>) = attrs
-        .into_iter()
-        .partition(|attr| parsetree_viewer::is_doc_comment_attribute(arena, attr));
+    let (doc_comments, others) =
+        parsetree_viewer::partition_doc_comment_attributes(arena, &mod_expr.pmod_attributes);
     Doc::concat(
         doc_comments
             .into_iter()
@@ -7969,15 +7989,12 @@ fn print_attributes_with_loc(
     arena: &ParseArena,
     inline: bool,
 ) -> Doc {
-    let filtered: Vec<&Attribute> = attrs.iter().collect();
-    if filtered.is_empty() {
+    if attrs.is_empty() {
         return Doc::nil();
     }
 
-    // res_printer.ml:5999-6031
-    let (comment_attrs, attrs): (Vec<&Attribute>, Vec<&Attribute>) = filtered
-        .into_iter()
-        .partition(|attr| parsetree_viewer::is_doc_comment_attribute(arena, attr));
+    // res_printer.ml:5941-5979
+    let (comment_attrs, attrs) = parsetree_viewer::partition_doc_comment_attributes(arena, attrs);
     let line_break = match loc {
         None => Doc::line(),
         Some(loc) => match attrs.last() {
@@ -8004,7 +8021,14 @@ fn print_attributes_with_loc(
         Doc::nil()
     } else {
         Doc::concat(vec![
-            Doc::group(join_attributes_with_sep(state, &attrs, cmt_tbl, arena)),
+            // A doc comment here follows an attribute and stays on its line.
+            Doc::group(Doc::join(
+                Doc::line(),
+                attrs
+                    .iter()
+                    .map(|attr| print_attribute(state, attr, false, cmt_tbl, arena))
+                    .collect(),
+            )),
             if inline { Doc::space() } else { line_break },
         ])
     };

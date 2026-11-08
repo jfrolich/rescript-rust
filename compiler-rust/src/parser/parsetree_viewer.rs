@@ -1144,18 +1144,19 @@ pub fn is_doc_comment_attribute(arena: &ParseArena, attr: &Attribute) -> bool {
 
 pub fn partition_doc_comment_attributes<'a>(
     arena: &ParseArena,
-    attrs: &'a Attributes,
+    attrs: &'a [Attribute],
 ) -> (Vec<&'a Attribute>, Vec<&'a Attribute>) {
-    let mut doc_comments = Vec::new();
-    let mut others = Vec::new();
-    for attr in attrs {
-        if is_doc_comment_attribute(arena, attr) {
-            doc_comments.push(attr);
-        } else {
-            others.push(attr);
-        }
-    }
-    (doc_comments, others)
+    // Only the doc comments before every other attribute: one after an
+    // attribute stays in its place, so that printing keeps the order of the
+    // attributes.
+    let split = attrs
+        .iter()
+        .position(|attr| !is_doc_comment_attribute(arena, attr))
+        .unwrap_or(attrs.len());
+    (
+        attrs[..split].iter().collect(),
+        attrs[split..].iter().collect(),
+    )
 }
 
 // ============================================================================
