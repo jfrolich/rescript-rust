@@ -2260,36 +2260,13 @@ fn parse_type_equation_and_representation(
             (manifest, kind, private, Attributes::new())
         }
         Token::Private => parse_private_eq_or_repr(p),
-        Token::Bar | Token::DotDot | Token::DocComment { .. } => {
+        Token::Bar | Token::DotDot => {
             let (private, kind, attrs) =
                 parse_type_representation(p, inline_ctx, Some(current_type_name_path));
             (None, kind, private, attrs)
         }
-        Token::At => {
-            // Look past the attributes (and doc comments): a representation-like
-            // token means a representation, anything else a manifest.
-            let is_representation_after_attrs = p.lookahead(|state| {
-                parse_attributes(state);
-                super::core::skip_doc_comments(state);
-                match state.token {
-                    Token::Lbrace => {
-                        state.next();
-                        parse_attributes(state);
-                        super::core::skip_doc_comments(state);
-                        !matches!(
-                            state.token,
-                            Token::String(_) | Token::Dot | Token::DotDot | Token::DotDotDot
-                        )
-                    }
-                    Token::Bar | Token::DotDot | Token::DocComment { .. } => true,
-                    Token::Uident(_) => {
-                        state.next();
-                        state.token != Token::Dot
-                    }
-                    _ => false,
-                }
-            });
-            if is_representation_after_attrs {
+        Token::At | Token::DocComment { .. } => {
+            if is_representation_after_attrs(p) {
                 let (private, kind, attrs) =
                     parse_type_representation(p, inline_ctx, Some(current_type_name_path));
                 (None, kind, private, attrs)
@@ -2299,6 +2276,51 @@ fn parse_type_equation_and_representation(
         }
         _ => parse_manifest_and_representation(p, inline_ctx, current_type_name_path),
     }
+}
+
+/// OCaml `is_representation_after_attrs` (res_core.ml:6027-6074).
+/// Attributes and doc comments after `=` (or `= private`) can start a
+/// representation (variant/record/open variant) or a manifest. Look ahead past
+/// them: if a representation-like token follows, it is a representation;
+/// otherwise a manifest type expression.
+fn is_representation_after_attrs(p: &mut Parser<'_>) -> bool {
+    let starts_with_doc_comment = matches!(p.token, Token::DocComment { .. });
+    p.lookahead(|state| {
+        parse_attributes(state);
+        // Optionally skip a run of doc comments before deciding.
+        super::core::skip_doc_comments(state);
+        match state.token {
+            Token::Lbrace => {
+                // Disambiguate a record declaration from an object type: a
+                // string, `.` or `..` inside the braces is an object type, a
+                // manifest.
+                state.next();
+                parse_attributes(state);
+                super::core::skip_doc_comments(state);
+                match state.token {
+                    Token::String(_) | Token::Dot | Token::DotDot => false,
+                    // A spread (`{...base, y: int}`) after a leading doc
+                    // comment has always been parsed as a record declaration,
+                    // and after a leading attribute as an object type.
+                    Token::DotDotDot => starts_with_doc_comment,
+                    _ => true,
+                }
+            }
+            // A variant constructor list, or an extensible variant `..`.
+            Token::Bar | Token::DotDot => true,
+            // A variant spread (`...base | C`) after a leading doc comment has
+            // always been parsed as a constructor list.
+            Token::DotDotDot => starts_with_doc_comment,
+            // A constructor, or a module-qualified manifest `M.t`.
+            Token::Uident(_) => {
+                state.next();
+                state.token != Token::Dot
+            }
+            // A doc comment before a constructor list.
+            Token::DocComment { .. } => true,
+            _ => false,
+        }
+    })
 }
 
 /// The manifest fallback of `parse_type_equation_and_representation`: a type
@@ -2395,9 +2417,12 @@ fn parse_type_equation_or_constr_decl(p: &mut Parser<'_>) -> TypeEquationAttrs {
     }
 }
 
-/// OCaml `parse_private_eq_or_repr` (res_core.ml:5856-5872).
+/// OCaml `parse_private_eq_or_repr` (res_core.ml:5788-5812).
 fn parse_private_eq_or_repr(p: &mut Parser<'_>) -> TypeEquationAttrs {
     p.expect(Token::Private);
+    // The guard of the `At | DocComment` arm, which only those tokens reach.
+    let representation_after_attrs =
+        matches!(p.token, Token::At | Token::DocComment { .. }) && is_representation_after_attrs(p);
     match p.token {
         Token::Lbrace => {
             let (manifest, kind, _) = parse_record_or_object_decl(p, None, None);
@@ -2410,6 +2435,19 @@ fn parse_private_eq_or_repr(p: &mut Parser<'_>) -> TypeEquationAttrs {
         Token::Bar | Token::DotDot => {
             let (_, kind, attrs) = parse_type_representation(p, None, None);
             (None, kind, PrivateFlag::Private, attrs)
+        }
+        Token::At | Token::DocComment { .. } if representation_after_attrs => {
+            let (_, kind, attrs) = parse_type_representation(p, None, None);
+            (None, kind, PrivateFlag::Private, attrs)
+        }
+        Token::DocComment { .. } => {
+            let typ = typ::parse_typ_expr(p);
+            (
+                Some(p.arena_mut().push_core_type(typ)),
+                TypeKind::Ptype_abstract,
+                PrivateFlag::Private,
+                Attributes::new(),
+            )
         }
         ref t if grammar::is_typ_expr_start(t) => {
             let typ = typ::parse_typ_expr(p);
