@@ -2,6 +2,7 @@
 
 use super::shared_types::*;
 use crate::types::Path;
+use crate::types::path::PathView;
 
 /// The modules a command can reach: OCaml's `state` plus `package`. Files
 /// load lazily and stay put once loaded, so `&File`s stay valid across
@@ -32,10 +33,10 @@ pub enum Found {
 
 /// `join_paths`.
 fn join_paths(module_path: &Path, mut path: ModulePathList) -> (i32, String, ModulePathList) {
-    match module_path {
-        Path::Pident(ident) => (ident.stamp(), ident.name().to_string(), path),
-        Path::Papply(fn_path, _) => join_paths(fn_path, path),
-        Path::Pdot(inner, name, _) => {
+    match module_path.view() {
+        PathView::Pident(ident) => (ident.stamp(), ident.name().to_string(), path),
+        PathView::Papply(fn_path, _) => join_paths(fn_path, path),
+        PathView::Pdot(inner, name, _) => {
             path.insert(0, name.to_string());
             join_paths(inner, path)
         }
@@ -44,13 +45,13 @@ fn join_paths(module_path: &Path, mut path: ModulePathList) -> (i32, String, Mod
 
 /// `make_path`. `file` is `env.file`.
 fn make_path(file: &File, env: &QueryEnv, module_path: &Path) -> Resolution {
-    match module_path {
-        Path::Pident(ident) if ident.stamp() == 0 => {
+    match module_path.view() {
+        PathView::Pident(ident) if ident.stamp() == 0 => {
             Resolution::GlobalMod(ident.name().to_string())
         }
-        Path::Pident(ident) => Resolution::Stamp(ident.stamp()),
-        Path::Papply(fn_path, _) => make_path(file, env, fn_path),
-        Path::Pdot(inner, name, _) => match join_paths(inner, vec![name.to_string()]) {
+        PathView::Pident(ident) => Resolution::Stamp(ident.stamp()),
+        PathView::Papply(fn_path, _) => make_path(file, env, fn_path),
+        PathView::Pdot(inner, name, _) => match join_paths(inner, vec![name.to_string()]) {
             (0, module_name, path) => Resolution::Global(module_name, path),
             (stamp, _, path) => {
                 let res = file

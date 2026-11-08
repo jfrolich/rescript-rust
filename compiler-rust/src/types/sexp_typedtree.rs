@@ -10,6 +10,7 @@ use crate::types::asttypes::ArgLabel as TypeArgLabel;
 use crate::types::btype;
 use crate::types::context::TypeContext;
 use crate::types::path::Path;
+use crate::types::path::PathView;
 use crate::types::tast_arena::{TExprIdx, TypedArena};
 use crate::types::type_expr::{RowDesc, RowField, TypeDesc, TypeExprRef};
 use crate::types::typedtree::{
@@ -147,12 +148,12 @@ fn location_idx(arena: &ParseArena, cx: Cx<'_>, loc: LocIdx) -> Sexp {
 // ============================================================================
 
 fn sexp_path(p: &Path) -> Sexp {
-    match p {
-        Path::Pident(id) => Sexp::list(vec![Sexp::atom("Pident"), sexp_ident(id)]),
-        Path::Pdot(parent, s, _) => {
+    match p.view() {
+        PathView::Pident(id) => Sexp::list(vec![Sexp::atom("Pident"), sexp_ident(id)]),
+        PathView::Pdot(parent, s, _) => {
             Sexp::list(vec![Sexp::atom("Pdot"), sexp_path(parent), string(s)])
         }
-        Path::Papply(p1, p2) => {
+        PathView::Papply(p1, p2) => {
             Sexp::list(vec![Sexp::atom("Papply"), sexp_path(p1), sexp_path(p2)])
         }
     }
@@ -446,9 +447,9 @@ fn sexp_type_expr_body_inline(
             // compiler/ml/sexp_typedtree.ml emits each argument as
             // [arg_label; typ], followed by the return type.
             let mut items = vec![Sexp::atom("Tarrow")];
-            for arg in args {
+            for arg in ctx.type_args(args).iter() {
                 items.push(Sexp::list(vec![
-                    sexp_type_arg_label(arg.label()),
+                    sexp_type_arg_label(&arg.label().to_arg_label()),
                     sexp_type_expr_inline(arena, ctx, state, arg.typ),
                 ]));
             }
@@ -457,14 +458,14 @@ fn sexp_type_expr_body_inline(
         }
         TypeDesc::Ttuple(types) => {
             let mut items = vec![Sexp::atom("Ttuple")];
-            for t in types.iter() {
+            for t in ctx.type_list(types).iter() {
                 items.push(sexp_type_expr_inline(arena, ctx, state, *t));
             }
             Sexp::list(items)
         }
         TypeDesc::Tconstr { path, args, .. } => {
             let mut arg_sexps = Vec::new();
-            for t in args.iter() {
+            for t in ctx.type_list(args).iter() {
                 arg_sexps.push(sexp_type_expr_inline(arena, ctx, state, *t));
             }
             Sexp::list(vec![
@@ -503,25 +504,26 @@ fn sexp_type_expr_body_inline(
             let s = sexp_type_expr_inline(arena, ctx, state, *ty);
             Sexp::list(vec![Sexp::atom("Tsubst"), s])
         }
-        TypeDesc::Tvariant(row) => sexp_row_desc(arena, ctx, state, row),
+        TypeDesc::Tvariant(row) => sexp_row_desc(arena, ctx, state, &ctx.row_desc(row)),
         TypeDesc::Tpoly { body, vars } => {
             let body_sexp = sexp_type_expr_inline(arena, ctx, state, *body);
             let mut var_sexps = Vec::new();
-            for t in vars.iter() {
+            for t in ctx.type_list(vars).iter() {
                 var_sexps.push(sexp_type_expr_inline(arena, ctx, state, *t));
             }
             Sexp::list(vec![Sexp::atom("Tpoly"), body_sexp, Sexp::list(var_sexps)])
         }
         TypeDesc::Tpackage { path, lids, args } => {
             let mut arg_sexps = Vec::new();
-            for t in args.iter() {
+            for t in ctx.type_list(args).iter() {
                 arg_sexps.push(sexp_type_expr_inline(arena, ctx, state, *t));
             }
             Sexp::list(vec![
                 Sexp::atom("Tpackage"),
                 sexp_path(path),
                 Sexp::list(
-                    lids.iter()
+                    ctx.package_lids(lids)
+                        .iter()
                         .map(|li| sexp_longident(arena, ctx, li))
                         .collect(),
                 ),

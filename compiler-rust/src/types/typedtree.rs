@@ -1161,8 +1161,8 @@ mod node_size_tests {
     #[test]
     fn typed_items_stay_compact() {
         use std::mem::size_of;
-        assert_eq!(size_of::<super::StructureItem>(), 96);
-        assert_eq!(size_of::<super::TypedSignatureItem>(), 96);
+        assert_eq!(size_of::<super::StructureItem>(), 80);
+        assert_eq!(size_of::<super::TypedSignatureItem>(), 80);
         assert_eq!(size_of::<super::TypedCoreType>(), 80);
     }
 
