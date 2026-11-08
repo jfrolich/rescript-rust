@@ -21043,3 +21043,183 @@ module M3: {
         ));
     }
 }
+
+/// `lbl_all` is the array `Datarepr.label_descrs` built for the record
+/// (compiler/ml/datarepr.ml:261-288), whether a label is reached through the
+/// environment, a module path or a literal.
+#[cfg(test)]
+mod label_family_tests {
+    use super::*;
+    use crate::context::IdGenerator;
+    use crate::parser::{Parser, module};
+    use crate::types::{TypeCheckContext, TypeContext, initial_env};
+    use crate::types::LabelDescription;
+    use crate::types::typedtree::{ExpressionDesc, PatternDesc, ValueBinding};
+
+    fn with_typed(source: &str, check: impl FnOnce(&Structure, &TypeContext)) {
+        crate::ident::Ident::set_current_time(999);
+        let id_gen = IdGenerator::with_start_stamp(999);
+        let _ = id_gen.next_stamp();
+        let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
+        let mut parser = Parser::new("test.res", source);
+        let structure = module::parse_structure(&mut parser);
+        assert!(!parser.has_errors(), "parse failed");
+        let arena = parser.arena();
+        let mut tctx = TypeCheckContext::new(&type_ctx, arena);
+        let env = initial_env(&type_ctx);
+        let (typed, _) = type_structure(&mut tctx, &env, arena, &structure).expect("typecheck");
+        check(&typed, &type_ctx);
+    }
+
+    fn binding<'s>(typed: &'s Structure, name: &str) -> &'s ValueBinding {
+        typed
+            .str_items
+            .iter()
+            .find_map(|item| match &item.str_desc {
+                StructureItemDesc::Tstr_value(_, vbs) => vbs.iter().find(|vb| {
+                    matches!(&vb.vb_pat.pat_desc, PatternDesc::Tpat_var(id, _) if id.name() == name)
+                }),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no binding `{name}`"))
+    }
+
+    fn field_label<'s>(typed: &'s Structure, name: &str) -> &'s LabelDescription {
+        match &binding(typed, name).vb_expr.exp_desc {
+            ExpressionDesc::Texp_field(_, _, label) => label,
+            other => panic!("`{name}` is not a field access: {other:?}"),
+        }
+    }
+
+    fn literal_labels<'s>(typed: &'s Structure, name: &str) -> Vec<&'s LabelDescription> {
+        match &binding(typed, name).vb_expr.exp_desc {
+            ExpressionDesc::Texp_record { fields, .. } => {
+                fields.iter().map(|(label, _, _)| label).collect()
+            }
+            other => panic!("`{name}` is not a record literal: {other:?}"),
+        }
+    }
+
+    fn family_names(ctx: &TypeContext, label: &LabelDescription) -> Vec<String> {
+        let family = ctx
+            .label_family(label.lbl_all)
+            .unwrap_or_else(|| panic!("label `{}` carries no lbl_all", label.lbl_name));
+        family.iter().map(|l| l.lbl_name.clone()).collect()
+    }
+
+    #[test]
+    fn env_label_lookup_before_any_literal_has_its_family() {
+        with_typed(
+            r#"
+type t = {a: int, b: string}
+external mk_x: unit => t = "mk"
+let x = mk_x()
+let b = x.b
+"#,
+            |typed, ctx| {
+                let label = field_label(typed, "b");
+                assert_ne!(label.lbl_all, crate::types::decl::LabelArrayRef::NONE);
+                assert_eq!(family_names(ctx, label), ["a", "b"]);
+                assert_eq!(label.lbl_pos, 1);
+            },
+        );
+    }
+
+    #[test]
+    fn two_records_with_no_literal_have_distinct_families() {
+        with_typed(
+            r#"
+type t = {a: int}
+type u = {a: int, c: int}
+external mk_x: unit => t = "mk"
+let x = mk_x()
+external mk_y: unit => u = "mk"
+let y = mk_y()
+let fx = x.a
+let fy = y.a
+"#,
+            |typed, ctx| {
+                let lx = field_label(typed, "fx");
+                let ly = field_label(typed, "fy");
+                assert_ne!(lx.lbl_all, ly.lbl_all);
+                assert_eq!(family_names(ctx, lx), ["a"]);
+                assert_eq!(family_names(ctx, ly), ["a", "c"]);
+            },
+        );
+    }
+
+    #[test]
+    fn module_alias_open_and_shadowing_keep_the_reached_family() {
+        with_typed(
+            r#"
+module M = {
+  type t = {x: int, y: int}
+}
+module N = M
+external mk_v: unit => N.t = "mk"
+let v = mk_v()
+let fy = v.N.y
+open M
+let fx = v.x
+type t = {x: string}
+external mk_w: unit => t = "mk"
+let w = mk_w()
+let fw = w.x
+"#,
+            |typed, ctx| {
+                assert_eq!(family_names(ctx, field_label(typed, "fy")), ["x", "y"]);
+                assert_eq!(family_names(ctx, field_label(typed, "fx")), ["x", "y"]);
+                let shadowing = field_label(typed, "fw");
+                assert_eq!(family_names(ctx, shadowing), ["x"]);
+                assert_eq!(shadowing.lbl_pos, 0);
+            },
+        );
+    }
+
+    #[test]
+    fn generic_record_literals_share_one_family_per_literal() {
+        with_typed(
+            r#"
+type p<'a> = {v: 'a, w: int}
+let a = {v: 1, w: 2}
+let b = {w: 3, v: "s"}
+"#,
+            |typed, ctx| {
+                for name in ["a", "b"] {
+                    let labels = literal_labels(typed, name);
+                    assert_eq!(labels.len(), 2);
+                    // Written fields are ordered by position and all point at
+                    // the array of the first one (typecore.ml:3058-3170).
+                    assert_eq!(labels[0].lbl_name, "v");
+                    assert_eq!(labels[1].lbl_name, "w");
+                    assert_eq!(labels[0].lbl_all, labels[1].lbl_all);
+                    assert_eq!(family_names(ctx, labels[0]), ["v", "w"]);
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn record_pattern_labels_carry_their_family() {
+        with_typed(
+            r#"
+type t = {a: int, b: int, c: int}
+external mk_x: unit => t = "mk"
+let x = mk_x()
+let f = switch x {
+| {b} => b
+}
+"#,
+            |typed, ctx| {
+                let ExpressionDesc::Texp_match(_, cases, _, _) = &binding(typed, "f").vb_expr.exp_desc
+                else {
+                    panic!("`f` is not a switch");
+                };
+                let PatternDesc::Tpat_record(fields, _, _) = &cases[0].c_lhs.pat_desc else {
+                    panic!("case is not a record pattern");
+                };
+                assert_eq!(family_names(ctx, &fields[0].1), ["a", "b", "c"]);
+            },
+        );
+    }
+}
