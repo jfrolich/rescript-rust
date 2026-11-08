@@ -675,13 +675,18 @@ pub fn incremental_build_without_lock(
         .unwrap(),
     );
 
-    let (compile_errors, compile_warnings, num_compiled_modules) = compile::compile(
+    let compile_result = compile::compile(
         build_state,
         show_progress,
         || pb.inc(1),
         |size| pb.set_length(size),
-    )
-    .map_err(|e| {
+    );
+    // Workers request the retry while compiling. Consume the request even when
+    // `compile` fails afterwards, so it cannot start a retry in a later build.
+    let retry_with_locations = build_state
+        .diagnostic_retry
+        .swap(false, std::sync::atomic::Ordering::Relaxed);
+    let (compile_errors, compile_warnings, num_compiled_modules) = compile_result.map_err(|e| {
         let _error_span = info_span!("build.compile_error").entered();
         print_compiler_reports(phase_timing_enabled, compiler_counters_enabled);
 
@@ -691,10 +696,7 @@ pub fn incremental_build_without_lock(
         }
     })?;
 
-    if build_state
-        .diagnostic_retry
-        .swap(false, std::sync::atomic::Ordering::Relaxed)
-    {
+    if retry_with_locations {
         pb.finish_and_clear();
         // No first-pass diagnostic escapes. Discard the speculative registry
         // and recompile its dependencies too: inclusion/type errors can quote
