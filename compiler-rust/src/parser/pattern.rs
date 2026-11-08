@@ -516,7 +516,7 @@ fn parse_module_pattern(p: &mut Parser<'_>, attrs: Attributes) -> Pattern {
     }
 }
 
-/// OCaml `parse_list_pattern ~start_pos ~attrs` (res_core.ml:1659-1681).
+/// OCaml `parse_list_pattern ~start_pos ~attrs` (res_core.ml:1647-1675).
 fn parse_list_pattern(p: &mut Parser<'_>, start_pos_idx: PosIdx, attrs: Attributes) -> Pattern {
     let mut list_patterns = super::core::parse_comma_delimited_reversed_list(
         p,
@@ -526,6 +526,13 @@ fn parse_list_pattern(p: &mut Parser<'_>, start_pos_idx: PosIdx, attrs: Attribut
     );
     p.expect(Token::Rbrace);
     let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+    // `list{...p}` is `p` itself and keeps the location of `p`, so the
+    // comments around the spread stay outside it (res_core.ml:1662-1666).
+    if matches!(list_patterns.as_slice(), [(true, _)]) {
+        let (_, mut pattern) = list_patterns.remove(0);
+        pattern.ppat_attributes = attrs;
+        return pattern;
+    }
     let spread = if matches!(list_patterns.first(), Some((true, _))) {
         Some(list_patterns.remove(0).1)
     } else {
