@@ -9522,7 +9522,8 @@ fn transl_with_constraint<'a>(
     {
         let ty = ctx.repr(ty);
         let level = ctx.get_level(ty);
-        let ty2 = ctx.alloc_type_at_level(ctx.get_desc(ty).into_desc(), level);
+        // `newty2 ty.level ty.desc` shares `ty`'s descriptor.
+        let ty2 = ctx.alloc_type_at_level(ctx.get_desc(ty).into_desc().shared_from(ty), level);
         if crate::types::ctype::deep_occur(ctx, ty, ty2) {
             let td = TypeDesc::Tconstr {
                 path: Path::pident(id),

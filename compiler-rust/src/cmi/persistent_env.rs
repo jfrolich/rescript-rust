@@ -6025,7 +6025,8 @@ fn substitute_type_expr_path(
                 &args,
             )
             .expect("Ctype.apply of a substituted type function");
-            let applied_desc = ctx.get_desc(applied).into_desc();
+            // `ty'.desc <- (apply ...).desc` shares the result's descriptor.
+            let applied_desc = ctx.get_desc(applied).into_desc().shared_from(applied);
             ctx.set_desc(ty_ref, applied_desc);
             continue;
         }
