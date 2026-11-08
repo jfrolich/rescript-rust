@@ -66,9 +66,13 @@ fn capitalize(s: &str) -> String {
     s
 }
 
-/// `report_type_mismatch0 first second decl ppf err` (includecore.ml).
+/// `report_type_mismatch0 ?lead_in first second decl ppf err`
+/// (includecore.ml). `lead_in` introduces the two lines of a difference in
+/// runtime representation; without it they stand under a lead-in printed
+/// before.
 fn report_type_mismatch0<W: std::io::Write>(
     ppf: &mut Formatter<W>,
+    lead_in: bool,
     first: &str,
     second: &str,
     decl: &str,
@@ -152,49 +156,75 @@ fn report_type_mismatch0<W: std::io::Write>(
         // `"@[<v 2>Their runtime representations differ:@,%s: can hold
         // undefined@,%s: @notUndefined@]"`
         TypeMismatch::NotUndefined => {
-            ppf.open_vbox(2);
-            text(ppf, "Their runtime representations differ:");
-            ppf.cut();
+            if lead_in {
+                ppf.open_vbox(2);
+                text(ppf, "Their runtime representations differ:");
+                ppf.cut();
+            }
             text(ppf, &format!("{}: can hold undefined", label(first, decl)));
             ppf.cut();
             text(ppf, &format!("{}: @notUndefined", label(second, decl)));
-            ppf.close_box();
+            if lead_in {
+                ppf.close_box();
+            }
         }
         // `"@[<v 2>Their runtime representations differ:@,%s: %s@,%s: %s@]"`
         TypeMismatch::RuntimeAnnotation(declared1, declared2) => {
-            ppf.open_vbox(2);
-            text(ppf, "Their runtime representations differ:");
-            ppf.cut();
+            if lead_in {
+                ppf.open_vbox(2);
+                text(ppf, "Their runtime representations differ:");
+                ppf.cut();
+            }
             text(ppf, &format!("{}: {declared1}", label(first, decl)));
             ppf.cut();
             text(ppf, &format!("{}: {declared2}", label(second, decl)));
-            ppf.close_box();
+            if lead_in {
+                ppf.close_box();
+            }
         }
     }
 }
 
-/// `report_type_mismatch first second decl ppf errs` (includecore.ml): each
-/// error after a break, followed by a period but for the differences in
-/// runtime representation, whose lines are labels; `Manifest` prints
-/// nothing.
+/// `report_type_mismatch ?read_the_same first second decl ppf errs`
+/// (includecore.ml): each reason on a line after a break, followed by a
+/// period but for the differences in runtime representation, whose lines
+/// are labels; `Manifest` prints nothing. `read_the_same` puts them under a
+/// note that the declarations print the same, which then replaces the
+/// lead-in of a difference in runtime representation.
 pub(crate) fn report_type_mismatch<W: std::io::Write>(
     ppf: &mut Formatter<W>,
+    read_the_same: bool,
     first: &str,
     second: &str,
     decl: &str,
     errs: &[TypeMismatch],
 ) {
-    for err in errs {
-        if *err == TypeMismatch::Manifest {
-            continue;
-        }
+    if read_the_same {
+        // `"@ @[<v 2>The declarations read the same, but a type they mention
+        // differs:%a@]"`
         ppf.space();
-        report_type_mismatch0(ppf, first, second, decl, err);
-        if !matches!(
-            err,
-            TypeMismatch::RuntimeAnnotation(..) | TypeMismatch::NotUndefined
-        ) {
-            text(ppf, ".");
+        ppf.open_vbox(2);
+        text(
+            ppf,
+            "The declarations read the same, but a type they mention differs:",
+        );
+    }
+    for err in errs {
+        match err {
+            TypeMismatch::Manifest => {}
+            // Its lines are labels, not sentences.
+            TypeMismatch::RuntimeAnnotation(..) | TypeMismatch::NotUndefined => {
+                ppf.space();
+                report_type_mismatch0(ppf, !read_the_same, first, second, decl, err);
+            }
+            _ => {
+                ppf.space();
+                report_type_mismatch0(ppf, true, first, second, decl, err);
+                text(ppf, ".");
+            }
         }
+    }
+    if read_the_same {
+        ppf.close_box();
     }
 }

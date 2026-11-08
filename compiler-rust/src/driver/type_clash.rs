@@ -2234,6 +2234,7 @@ pub(super) fn print_definition_mismatch(
     ppf.close_box();
     crate::types::includecore::report_type_mismatch(
         ppf,
+        false,
         "the original",
         "this",
         "definition",

@@ -289,6 +289,19 @@ fn declared_runtime_annotation(
     )
 }
 
+/// The runtime annotation a declaration states, as it is written, for
+/// printing it (printtyp.ml `tree_of_type_decl`); a malformed one was
+/// reported when the declaration was typed and is left out.
+pub(crate) fn stated_runtime_annotation(
+    ctx: &TypeContext,
+    decl: &TypeDeclaration,
+) -> Option<String> {
+    match declared_runtime_annotation(ctx, decl) {
+        Ok(Some(annotation)) => Some(runtime_annotation_to_string(&annotation)),
+        Ok(None) | Err(_) => None,
+    }
+}
+
 fn annotation_error(err: impl Into<AnnotationError>) -> TypeModError {
     match err.into() {
         AnnotationError::Untagged(loc, error) => {

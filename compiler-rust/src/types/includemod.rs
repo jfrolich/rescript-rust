@@ -851,14 +851,16 @@ fn include_symptom(
             expected,
             errs,
         } => {
+            let printed1 = format_type_declaration(type_ctx, name, actual);
+            let printed2 = format_type_declaration(type_ctx, name, expected);
             pp_show_declarations(
                 ppf,
                 type_ctx,
                 filename,
                 swapped,
-                &format_type_declaration(type_ctx, name, actual),
+                &printed1,
                 actual.type_loc,
-                &format_type_declaration(type_ctx, name, expected),
+                &printed2,
                 expected.type_loc,
             );
             if errs.iter().any(|err| *err != TypeMismatch::Manifest) {
@@ -867,9 +869,15 @@ fn include_symptom(
                 } else {
                     ("the actual", "the expected")
                 };
+                // Declarations can print the same and still differ, when a
+                // type they mention differs between the two sides, e.g. a
+                // class the interface leaves abstract. The reasons then say
+                // that first.
+                let read_the_same = printed1 == printed2;
                 ppf.cut();
                 crate::types::includecore::report_type_mismatch(
                     ppf,
+                    read_the_same,
                     first,
                     second,
                     "declaration",

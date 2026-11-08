@@ -98,8 +98,10 @@ pub(crate) struct OutTypeDecl {
     pub params: Vec<(String, (bool, bool))>,
     pub typ: OutType,
     pub private: bool,
-    pub immediate: bool,
-    pub unboxed: bool,
+    /// `otype_attributes`: the annotations that change what the declaration
+    /// means at run time, as they are written, e.g. `@unboxed` or
+    /// `@tag("kind")`.
+    pub attributes: Vec<String>,
     pub cstrs: Vec<(OutType, OutType)>,
 }
 
@@ -1134,18 +1136,43 @@ impl<'a> Printtyp<'a> {
                 boxed_unboxed,
             ),
         };
-        let immediate = decl
+        // What the declaration itself states, not what it inherits from an
+        // abbreviated type; a malformed annotation was reported when the
+        // declaration was typed, and is left out.
+        let mut attributes = Vec::new();
+        // `Builtin_attributes.immediate`
+        if decl
             .type_attributes
             .iter()
-            .any(|attr| attr.attr_name.txt == "immediate");
+            .any(|attr| attr.attr_name.txt == "immediate")
+        {
+            attributes.push("@immediate".to_string());
+        }
+        if unboxed {
+            attributes.push("@unboxed".to_string());
+        }
+        // `Ast_untagged_variants.process_tag_name`
+        if let Ok(Some(name)) =
+            crate::types::typemod::process_variant_tag_name(self.ctx, &decl.type_attributes)
+        {
+            attributes.push(format!(
+                "@tag(\"{}\")",
+                crate::string_literal::encode_js_string(&name)
+            ));
+        }
+        // `Ast_untagged_variants.process_runtime_annotation ?loc:None`
+        if let Some(annotation) =
+            crate::types::variant_layout::stated_runtime_annotation(self.ctx, decl)
+        {
+            attributes.push(annotation);
+        }
         self.inlined_types = saved_inlined;
         OutTypeDecl {
             name: id.name().to_string(),
             params: args,
             typ,
             private,
-            immediate,
-            unboxed,
+            attributes,
             cstrs: constraints,
         }
     }
@@ -2195,11 +2222,10 @@ pub(crate) fn print_out_sig_item_doc_with(item: &OutSigItem, print_name_as_is: b
             print_out_module_type_doc(mty),
         ])),
         OutSigItem::Osig_type(decl, rec_status) => {
-            let attrs = match (decl.immediate, decl.unboxed) {
-                (false, false) => Doc::nil(),
-                (true, false) => Doc::concat(vec![Doc::text("@immediate"), Doc::line()]),
-                (false, true) => Doc::concat(vec![Doc::text("@unboxed"), Doc::line()]),
-                (true, true) => Doc::concat(vec![Doc::text("@immediate @unboxed"), Doc::line()]),
+            let attrs = if decl.attributes.is_empty() {
+                Doc::nil()
+            } else {
+                Doc::concat(vec![Doc::text(decl.attributes.join(" ")), Doc::line()])
             };
             let kw = Doc::text(match rec_status {
                 OutRecStatus::Orec_not => "type ",

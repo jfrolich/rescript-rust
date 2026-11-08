@@ -5647,7 +5647,9 @@ pub(crate) fn process_constructor_tag(
     }
 }
 
-fn process_variant_tag_name(
+/// `Ast_untagged_variants.process_tag_name`: the name a `@tag` annotation
+/// gives the tag field.
+pub(crate) fn process_variant_tag_name(
     ctx: &crate::types::context::TypeContext,
     attrs: &[crate::types::decl::Attribute],
 ) -> TypeModResult<Option<String>> {
