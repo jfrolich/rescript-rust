@@ -12697,6 +12697,20 @@ pub fn subst_for_saving_copy(ctx: &TypeContext, ty: TypeExprRef) -> TypeExprRef 
     )
 }
 
+/// OCaml `Subst.norm` (subst.ml:121-126) on the descriptor of variable
+/// `node`: `Tvar None` and `Tunivar None` become the static constants every
+/// such copy shares; a named variable's copy keeps `node`'s own descriptor.
+fn subst_norm(desc: &TypeDesc, node: TypeExprRef) -> TypeDesc {
+    use super::type_expr::VarDescBlock;
+    match desc {
+        TypeDesc::Tvar(None, _) => TypeDesc::Tvar(None, VarDescBlock::Static),
+        TypeDesc::Tunivar(None, _) => TypeDesc::Tunivar(None, VarDescBlock::Static),
+        TypeDesc::Tvar(name, block) => TypeDesc::Tvar(name.clone(), block.copied_from(node)),
+        TypeDesc::Tunivar(name, block) => TypeDesc::Tunivar(name.clone(), block.copied_from(node)),
+        _ => unreachable!("Subst.norm on a non-variable"),
+    }
+}
+
 /// How [`subst_identity_copy_rec`] copies: `for_saving` is `Subst.for_saving`;
 /// `reopen_closed_variant_rows` is the `instance ~partial:false` row reopening.
 #[derive(Clone, Copy)]
@@ -12757,16 +12771,8 @@ fn subst_identity_copy_rec(
         // OCaml Subst.typexp returns identity for Tvar/Tunivar
         // (when not for_saving and id >= 0)
         TypeDesc::Tvar(..) | TypeDesc::Tunivar(..) if mode.for_saving => {
-            // subst.ml:135-142: `newpersty (norm desc)`, then `Tsubst`; the
-            // copy keeps the descriptor.
-            let copied_desc = match &*desc {
-                TypeDesc::Tvar(name, block) => TypeDesc::Tvar(name.clone(), block.copied_from(ty)),
-                TypeDesc::Tunivar(name, block) => {
-                    TypeDesc::Tunivar(name.clone(), block.copied_from(ty))
-                }
-                _ => unreachable!(),
-            };
-            let copied = ctx.new_generic_type(copied_desc);
+            // subst.ml:135-142: `newpersty (norm desc)`, then `Tsubst`.
+            let copied = ctx.new_generic_type(subst_norm(&desc, ty));
             drop(desc);
             seen.insert(ty, copied);
             copied
@@ -12921,16 +12927,11 @@ fn subst_identity_copy_rec(
                                 }
                                 // subst.ml:203-206: `newpersty (norm more.desc)`
                                 // when saving.
-                                TypeDesc::Tvar(name, block) if mode.for_saving => ctx
-                                    .new_generic_type(TypeDesc::Tvar(
-                                        name,
-                                        block.copied_from(more),
-                                    )),
-                                TypeDesc::Tunivar(name, block) if mode.for_saving => ctx
-                                    .new_generic_type(TypeDesc::Tunivar(
-                                        name,
-                                        block.copied_from(more),
-                                    )),
+                                ref more_desc @ (TypeDesc::Tvar(..) | TypeDesc::Tunivar(..))
+                                    if mode.for_saving =>
+                                {
+                                    ctx.new_generic_type(subst_norm(more_desc, more))
+                                }
                                 TypeDesc::Tunivar(..) => more,
                                 TypeDesc::Tvar(name, block) => {
                                     if dup {
