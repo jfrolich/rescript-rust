@@ -3717,25 +3717,6 @@ pub fn print_stmts(a: &JsArena, block: &[Stmt]) -> String {
     printer.into_output()
 }
 
-/// Print a tree expression to a string.
-pub fn print_expression(expr: &super::Expression) -> String {
-    print_expression_with_options(expr, 0, false, false)
-}
-
-fn print_expression_with_options(
-    expr: &super::Expression,
-    level: u8,
-    debug: bool,
-    jsx_preserve: bool,
-) -> String {
-    let mut a = JsArena::new();
-    let expr = super::arena_tree::import_expr(&mut a, expr);
-    let mut printer =
-        JsPrinter::with_module_path_resolver_and_options(&a, None, debug, jsx_preserve);
-    printer.print_expression(expr, level);
-    printer.into_output()
-}
-
 #[cfg(test)]
 fn print_expression_with_level(a: &JsArena, expr: Expr, level: u8) -> String {
     print_expr_with_options(a, expr, level, false, false)
@@ -3749,15 +3730,6 @@ fn print_expression_with_debug(a: &JsArena, expr: Expr, debug: bool) -> String {
 #[cfg(test)]
 fn print_expression_with_jsx_preserve(a: &JsArena, expr: Expr, jsx_preserve: bool) -> String {
     print_expr_with_options(a, expr, 0, false, jsx_preserve)
-}
-
-/// Print a tree block to a string.
-pub fn print_block(block: &super::Block) -> String {
-    let mut a = JsArena::new();
-    let block = super::arena_tree::import_block_vec(&mut a, block);
-    let mut printer = JsPrinter::new(&a);
-    printer.print_statements(&block, true);
-    printer.into_output()
 }
 
 #[cfg(test)]

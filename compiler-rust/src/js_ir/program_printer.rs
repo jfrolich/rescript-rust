@@ -260,11 +260,7 @@ fn split_leading_file_comments<'a>(a: &'a JsArena, block: &[Stmt]) -> (Vec<&'a s
 }
 
 /// Print a program to a string
-pub fn print_program(program: &impl AsDepsProgram) -> String {
-    program.with_deps_program(|program| print_arena_program(&program.program))
-}
-
-fn print_arena_program(program: &Program) -> String {
+pub fn print_program(program: &Program) -> String {
     let mut printer = JsPrinter::with_capacity(
         &program.arena,
         estimated_block_output_capacity(program.block.len(), program.exports.len(), 0, 0, true),
@@ -307,14 +303,14 @@ fn estimated_deps_program_output_capacity(
 
 /// Print a module-level program to a string.
 pub fn print_deps_program(
-    program: &impl AsDepsProgram,
+    program: &DepsProgram,
     module_path_resolver: Option<&ModulePathResolver>,
 ) -> String {
     print_deps_program_with_directives(program, module_path_resolver, &[], false, false)
 }
 
 pub fn print_deps_program_with_directives(
-    program: &impl AsDepsProgram,
+    program: &DepsProgram,
     module_path_resolver: Option<&ModulePathResolver>,
     directives: &[String],
     debug: bool,
@@ -331,32 +327,30 @@ pub fn print_deps_program_with_directives(
 }
 
 pub fn print_deps_program_with_directives_and_options(
-    program: &impl AsDepsProgram,
+    program: &DepsProgram,
     module_path_resolver: Option<&ModulePathResolver>,
     directives: &[String],
     debug: bool,
     jsx_preserve: bool,
     emit_header: bool,
 ) -> String {
-    program.with_deps_program(|program| {
-        let capacity = estimated_deps_program_output_capacity(program, directives, emit_header);
-        let mut printer = JsPrinter::with_module_path_resolver_options_and_capacity(
-            &program.program.arena,
-            module_path_resolver,
-            debug,
-            jsx_preserve,
-            capacity,
-        );
-        printer.print_deps_program_with_directives_and_options(program, directives, emit_header);
-        printer.into_output()
-    })
+    let capacity = estimated_deps_program_output_capacity(program, directives, emit_header);
+    let mut printer = JsPrinter::with_module_path_resolver_options_and_capacity(
+        &program.program.arena,
+        module_path_resolver,
+        debug,
+        jsx_preserve,
+        capacity,
+    );
+    printer.print_deps_program_with_directives_and_options(program, directives, emit_header);
+    printer.into_output()
 }
 
 /// Print one concrete output target and collect mappings from JS IR source
 /// locations. This is the Rust counterpart of
 /// `Lam_compile_main.dump_deps_program_with_source_map`.
 pub fn print_deps_program_with_source_map(
-    program: &impl AsDepsProgram,
+    program: &DepsProgram,
     module_path_resolver: Option<&ModulePathResolver>,
     directives: &[String],
     debug: bool,
@@ -369,22 +363,20 @@ pub fn print_deps_program_with_source_map(
     source_root: &str,
     lam_locs: Arc<crate::lambda::LamLocTable>,
 ) -> (String, Option<String>) {
-    program.with_deps_program(|program| {
-        print_arena_deps_program_with_source_map(
-            program,
-            module_path_resolver,
-            directives,
-            debug,
-            jsx_preserve,
-            emit_header,
-            target_file,
-            source_file,
-            mode,
-            sources_content,
-            source_root,
-            lam_locs,
-        )
-    })
+    print_arena_deps_program_with_source_map(
+        program,
+        module_path_resolver,
+        directives,
+        debug,
+        jsx_preserve,
+        emit_header,
+        target_file,
+        source_file,
+        mode,
+        sources_content,
+        source_root,
+        lam_locs,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -439,34 +431,6 @@ fn print_arena_deps_program_with_source_map(
             (output, None)
         }
         SourceMapMode::None => (output, None),
-    }
-}
-
-/// A program the printer can read: an arena program, or (while the
-/// pipeline still produces boxed trees) a tree program copied into an arena.
-pub trait AsDepsProgram {
-    fn with_deps_program<R>(&self, f: impl FnOnce(&DepsProgram) -> R) -> R;
-}
-
-impl AsDepsProgram for DepsProgram {
-    fn with_deps_program<R>(&self, f: impl FnOnce(&DepsProgram) -> R) -> R {
-        f(self)
-    }
-}
-
-impl AsDepsProgram for super::DepsProgram {
-    fn with_deps_program<R>(&self, f: impl FnOnce(&DepsProgram) -> R) -> R {
-        f(&DepsProgram::from_tree(self))
-    }
-}
-
-impl AsDepsProgram for super::Program {
-    fn with_deps_program<R>(&self, f: impl FnOnce(&DepsProgram) -> R) -> R {
-        f(&DepsProgram {
-            program: Program::from_tree(self),
-            modules: Vec::new(),
-            side_effect: None,
-        })
     }
 }
 
