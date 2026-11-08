@@ -12624,10 +12624,6 @@ fn type_case_pattern_impl<'a>(
             return Err(err);
         }
     };
-    iter_typed_pattern(&typed_pat, &mut |pat| {
-        crate::types::generalize(tctx.type_ctx, pat.pat_type);
-    });
-
     // `type_pattern` returns the pattern's `env ref` (typecore.ml:1960-1969):
     // the case environment with the existentials, reified abstract types and
     // GADT equations the pattern introduced. Rust's pattern unification
@@ -12643,8 +12639,9 @@ fn type_case_pattern_impl<'a>(
         }
     }
 
-    // Extend environment with pattern bindings, in the pattern's warning
-    // scope (typecore.ml:1964-1972).
+    // `type_pattern` extends that environment with the pattern bindings, in
+    // the pattern's warning scope, before the caller unifies or generalizes
+    // the pattern (typecore.ml:1960-1975, 4831-4863).
     let mut unpacks: Vec<PatternVariable> = Vec::new();
     crate::types::typemod::with_warning_scope(
         tctx,
@@ -12663,6 +12660,9 @@ fn type_case_pattern_impl<'a>(
             Ok::<(), TypeCoreError>(())
         },
     )?;
+    iter_typed_pattern(&typed_pat, &mut |pat| {
+        crate::types::generalize(tctx.type_ctx, pat.pat_type);
+    });
 
     let pattern_forces = state.take_globalize_forces();
     Ok(PendingSequentialMatchCase {
@@ -13349,6 +13349,42 @@ fn type_function_nary(
                 return Err(err);
             }
         };
+        // `type_pattern` adds the pattern variables to that environment, in
+        // the pattern's warning scope, before `type_params` unifies, forces
+        // or generalizes the pattern (typecore.ml:1960-1975, 4050-4063):
+        // `ext_env` already binds them.
+        let registered: TypeCoreResult<()> = if state.pattern_variables.is_empty() {
+            Ok(())
+        } else {
+            let mut next_env = body_env.clone();
+            // `unpacks_acc @ unpacks` (typecore.ml:4119), where a parameter's
+            // `unpacks` are its `module_variables`, latest first.
+            let mut param_unpacks = Vec::new();
+            let registered = crate::types::typemod::with_warning_scope(
+                tctx,
+                tctx.arena,
+                &parsed_pattern.ppat_attributes,
+                false,
+                |tctx| {
+                    for variable in &state.pattern_variables {
+                        add_pattern_variable_value(tctx, &mut next_env, variable);
+                        if variable.is_module {
+                            param_unpacks.insert(0, variable.clone());
+                        }
+                    }
+                    Ok::<(), TypeCoreError>(())
+                },
+            );
+            unpacks.extend(param_unpacks);
+            body_env = next_env;
+            registered
+        };
+        if let Err(err) = registered {
+            if propagate {
+                ctx.end_def();
+            }
+            return Err(err);
+        }
         let result: TypeCoreResult<()> = (|| {
             // `unify_pat ext_env pat ty_arg'` (typecore.ml:4038-4039).
             tctx.set_unify_env(&body_env);
@@ -13399,30 +13435,6 @@ fn type_function_nary(
             iter_typed_pattern(&typed, &mut |pat| {
                 crate::types::generalize(ctx, pat.pat_type)
             });
-        }
-        if !state.pattern_variables.is_empty() {
-            let mut next_env = body_env.clone();
-            // `unpacks_acc @ unpacks` (typecore.ml:4119), where a parameter's
-            // `unpacks` are its `module_variables`, latest first.
-            let mut param_unpacks = Vec::new();
-            // typecore.ml:1964-1972: in the pattern's warning scope.
-            crate::types::typemod::with_warning_scope(
-                tctx,
-                tctx.arena,
-                &parsed_pattern.ppat_attributes,
-                false,
-                |tctx| {
-                    for variable in &state.pattern_variables {
-                        add_pattern_variable_value(tctx, &mut next_env, variable);
-                        if variable.is_module {
-                            param_unpacks.insert(0, variable.clone());
-                        }
-                    }
-                    Ok::<(), TypeCoreError>(())
-                },
-            )?;
-            unpacks.extend(param_unpacks);
-            body_env = next_env;
         }
         let mut opt_param = None;
         if let Some(default_binding) = default_binding {
