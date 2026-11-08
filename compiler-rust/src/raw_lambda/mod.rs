@@ -76,6 +76,13 @@ impl RawArena {
         Self::with_capacity(1024)
     }
 
+    /// An arena sized for translating a module of `exprs` typed-tree
+    /// expressions and lowering the result into the same arena. On Tella
+    /// the lowered arena holds a median 2.5 nodes per expression.
+    pub fn for_typed_exprs(exprs: usize) -> Self {
+        Self::with_capacity(exprs * 5 / 2 + 16)
+    }
+
     pub fn with_capacity(nodes: usize) -> Self {
         Self {
             a: RefCell::new(LamArena::with_capacity(nodes)),
