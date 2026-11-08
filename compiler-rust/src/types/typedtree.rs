@@ -366,35 +366,17 @@ pub enum ExpressionDesc {
     Texp_variant(String, Option<Box<Expression>>),
 
     /// Record: `{l1: E1, ..., ln: En}` or `{...E0, l1: E1, ...}`.
-    /// Fields are (lid, label_desc, definition, optional).
+    ///
+    /// OCaml `Texp_record` (compiler/ml/typedtree.mli:220-238): `fields`
+    /// holds only the fields the literal writes, ordered by `lbl_pos`. A field
+    /// it leaves out is taken from `extended_expression` when there is one,
+    /// and is otherwise an optional field set to `None`.
     Texp_record {
         fields: Vec<RecordField>,
-        /// OCaml `representation` (compiler/ml/typedtree.ml `Texp_record`).
-        /// When `fields` is non-empty OCaml takes it from the first label's
-        /// `lbl_repres` (compiler/ml/typecore.ml:2767-2771), so Rust derives it
-        /// from `fields[0]`. Only the empty-field case (typecore.ml:2772-2788)
-        /// carries it separately; sparse storage keeps the common node small.
+        /// OCaml `representation`. With written fields it is their labels'
+        /// `lbl_repres` (compiler/ml/typecore.ml:3058-3059, 3165-3168), read
+        /// from `fields[0]`; only `{}` (typecore.ml:3060-3080) carries it.
         empty_representation: Option<Box<crate::types::RecordRepresentation>>,
-        extended_expression: Option<Box<Expression>>,
-    },
-
-    /// Intentional Rust performance representation for large regular records
-    /// with many omitted optional fields.
-    ///
-    /// OCaml compiler/ml/typecore.ml:2833-2842 stores one entry per label from
-    /// the shared `lbl_all` array. Keep the same external typedtree shape by
-    /// expanding in serializers, but avoid copying hundreds of label
-    /// descriptions into every sparse JSX record internally. The shared
-    /// `all_labels` table is part of that optimization; consumers are expected
-    /// to expand it at typedtree/lambda/raw-lambda boundaries.
-    ///
-    /// Do not remove this during parity cleanup unless the replacement keeps
-    /// the same external typedtree/lambda/JS behavior and comparable
-    /// large-record performance.
-    Texp_record_sparse {
-        fields: Vec<RecordField>,
-        all_labels: std::sync::Arc<Vec<LabelDescription>>,
-        omitted_loc: LocIdx,
         extended_expression: Option<Box<Expression>>,
     },
 
@@ -504,29 +486,51 @@ pub enum ExpressionDesc {
 
 // DirectionFlag and Arity are re-exported from parser::ast
 
-/// Record label definition in a record expression.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub enum RecordLabelDefinition {
-    /// Label is kept from extended expression.
-    Kept(TypeExprRef),
-    /// Label is overridden with new expression.
-    Overridden(Loc<LidentIdx>, Expression),
-    /// Intentional Rust performance representation for an omitted optional label
-    /// synthesized as `None`.
-    ///
-    /// OCaml compiler/ml/typecore.ml:2833-2842 materializes this as
-    /// `Overridden ({loc; txt = Lident lbl.lbl_name}, option_none lbl.lbl_arg loc)`.
-    /// Keep the same typedtree boundary semantics without allocating a full
-    /// `Texp_construct None` expression for every sparse JSX record field.
-    OmittedOptionalNone(Loc<LidentIdx>, TypeExprRef),
+/// A field a record literal writes: OCaml's
+/// `Types.label_description * Longident.t loc * expression`.
+pub type RecordField = (LabelDescription, Loc<LidentIdx>, Expression);
+
+/// `all_labels` (compiler/ml/translcore.ml:1020-1028): every label of the
+/// record a `Texp_record` builds, the `lbl_all` of its written labels; `None`
+/// for `{}`. Record typing registers that array in the `TypeContext` and
+/// points every written label at it, so it always resolves.
+pub fn record_all_labels(
+    ctx: &crate::types::context::TypeContext,
+    fields: &[RecordField],
+) -> Option<Arc<Vec<LabelDescription>>> {
+    let (first, _, _) = fields.first()?;
+    Some(
+        ctx.label_family(first.lbl_all)
+            .expect("a written record label points to its registered lbl_all"),
+    )
 }
 
-pub type RecordField = (
-    Loc<LidentIdx>,
-    LabelDescription,
-    RecordLabelDefinition,
-    bool,
-);
+/// The `representation` of a `Texp_record`.
+pub fn record_representation<'a>(
+    fields: &'a [RecordField],
+    empty_representation: Option<&'a crate::types::RecordRepresentation>,
+) -> Option<&'a crate::types::RecordRepresentation> {
+    fields
+        .first()
+        .map(|(lbl, _, _)| &lbl.lbl_repres)
+        .or(empty_representation)
+}
+
+/// `fields_by_position` (compiler/ml/translcore.ml:1030-1035): each label of
+/// the record with the expression the literal writes for it, if any, in
+/// position order.
+pub fn record_fields_by_position<'a>(
+    fields: &'a [RecordField],
+    labels: &'a [LabelDescription],
+) -> Vec<(&'a LabelDescription, Option<&'a RecordField>)> {
+    let mut written: Vec<Option<&RecordField>> = vec![None; labels.len()];
+    for field in fields {
+        // `written.(lbl.lbl_pos) <- Some exp`: a written label is a label of
+        // the record.
+        written[field.0.lbl_pos as usize] = Some(field);
+    }
+    labels.iter().zip(written).collect()
+}
 
 /// An argument in a function application.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

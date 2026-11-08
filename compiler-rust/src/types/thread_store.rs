@@ -177,6 +177,9 @@ pub(crate) struct ThreadTypeStore {
     /// Label descriptions of large regular records of dependency types,
     /// built as store builds (see `typecore::build_record_label_descriptions_info`).
     record_labels: RefCell<HashMap<Path, SharedRecordLabels>>,
+    /// The `lbl_all` arrays built during store builds (`LabelArrayRef::store`).
+    /// The element is shared with `record_labels`.
+    label_families: RefCell<Vec<Arc<Vec<crate::types::decl::LabelDescription>>>>,
     /// The predefined environment built as a store build, with its replay
     /// record (see `env::initial_env`).
     initial_env: RefCell<
@@ -230,6 +233,7 @@ impl ThreadTypeStore {
             signature_indexes: RefCell::new(HashMap::new()),
             shared_components: RefCell::new(HashMap::new()),
             record_labels: RefCell::new(HashMap::new()),
+            label_families: RefCell::new(Vec::new()),
             initial_env: RefCell::new(None),
             generation,
             shared: super::shared_store::pool_for(generation),
@@ -471,6 +475,28 @@ impl ThreadTypeStore {
             .borrow_mut()
             .entry(key)
             .or_insert((components, piece));
+    }
+
+    /// Store a label array built during a store build; its index for
+    /// `LabelArrayRef::store`.
+    pub(crate) fn push_label_family(
+        &self,
+        labels: Arc<Vec<crate::types::decl::LabelDescription>>,
+    ) -> usize {
+        let mut families = self.label_families.borrow_mut();
+        families.push(labels);
+        families.len() - 1
+    }
+
+    pub(crate) fn label_family(
+        &self,
+        idx: usize,
+    ) -> Option<Arc<Vec<crate::types::decl::LabelDescription>>> {
+        self.label_families.borrow().get(idx).cloned()
+    }
+
+    pub(crate) fn label_family_count(&self) -> usize {
+        self.label_families.borrow().len()
     }
 
     pub(crate) fn cached_record_labels(&self, record_path: &Path) -> Option<SharedRecordLabels> {

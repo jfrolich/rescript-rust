@@ -1,7 +1,7 @@
 //! Sexp printer for Typedtree - used for parity testing between OCaml and Rust compilers
 
 use crate::ident::Ident;
-use crate::parse_arena::{LidentIdx, LocIdx, ParseArena};
+use crate::parse_arena::{LocIdx, ParseArena};
 use crate::parser::ast::{
     Attribute, ClosedFlag, DirectionFlag, MutableFlag, OverrideFlag, Payload, PrivateFlag, RecFlag,
 };
@@ -13,8 +13,8 @@ use crate::types::path::Path;
 use crate::types::type_expr::{RowDesc, RowField, TypeDesc, TypeExprRef};
 use crate::types::typedtree::{
     Case, Constant, DictEntry, Expression, ExpressionDesc, ExtensionConstructor,
-    ExtensionConstructorKind, Loc, ModuleBinding, ModuleExpr, ModuleExprDesc, ModuleTypeConstraint,
-    OpenDeclaration, Partial, Pattern, PatternDesc, RecordField, RecordLabelDefinition, Structure,
+    ExtensionConstructorKind, ModuleBinding, ModuleExpr, ModuleExprDesc, ModuleTypeConstraint,
+    OpenDeclaration, Partial, Pattern, PatternDesc, RecordField, Structure,
     StructureItem, StructureItemDesc, TypeExtension, TypedConstructorArguments,
     TypedConstructorDeclaration, TypedCoreType, TypedCoreTypeDesc, TypedLabelDeclaration,
     TypedTypeDeclaration, TypedTypeKind, ValueBinding,
@@ -175,10 +175,6 @@ fn sexp_longident_idx(
     idx: crate::parse_arena::LidentIdx,
 ) -> Sexp {
     sexp_longident(arena, ctx, arena.get_longident(idx))
-}
-
-fn sexp_lident_name(name: &str) -> Sexp {
-    Sexp::list(vec![Sexp::atom("Lident"), string(name)])
 }
 
 // ============================================================================
@@ -759,43 +755,6 @@ fn sexp_expression(arena: &ParseArena, ctx: &TypeContext, with_locs: bool, e: &E
     Sexp::list(items)
 }
 
-fn sexp_omitted_optional_none_expression(
-    arena: &ParseArena,
-    ctx: &TypeContext,
-    with_locs: bool,
-    li: &Loc<LidentIdx>,
-    option_ty: TypeExprRef,
-) -> Sexp {
-    sexp_omitted_optional_none_expression_at_loc(arena, ctx, with_locs, li.loc, option_ty)
-}
-
-fn sexp_omitted_optional_none_expression_at_loc(
-    arena: &ParseArena,
-    ctx: &TypeContext,
-    with_locs: bool,
-    loc: LocIdx,
-    option_ty: TypeExprRef,
-) -> Sexp {
-    let loc_sexp = if with_locs {
-        vec![location_idx(arena, with_locs, loc)]
-    } else {
-        vec![]
-    };
-    let desc = Sexp::list(vec![
-        Sexp::atom("Texp_construct"),
-        sexp_longident_idx(arena, ctx, arena.none_lid()),
-        Sexp::list(Vec::new()),
-    ]);
-    let ty = sexp_type_expr(arena, ctx, option_ty);
-
-    let mut items = vec![Sexp::atom("expression")];
-    items.extend(loc_sexp);
-    items.push(desc);
-    items.push(Sexp::list(vec![Sexp::atom("type"), ty]));
-    items.push(Sexp::list(vec![Sexp::atom("attributes")]));
-    Sexp::list(items)
-}
-
 fn sexp_exp_extra(
     arena: &ParseArena,
     ctx: &TypeContext,
@@ -861,45 +820,18 @@ fn sexp_exp_extra(
     }
 }
 
-fn sexp_record_definition(
-    arena: &ParseArena,
-    ctx: &TypeContext,
-    with_locs: bool,
-    def: &RecordLabelDefinition,
-) -> Sexp {
-    match def {
-        RecordLabelDefinition::Kept(ty) => {
-            Sexp::list(vec![Sexp::atom("Kept"), sexp_type_expr(arena, ctx, *ty)])
-        }
-        RecordLabelDefinition::Overridden(li, e) => Sexp::list(vec![
-            Sexp::atom("Overridden"),
-            sexp_longident_idx(arena, ctx, li.txt),
-            sexp_expression(arena, ctx, with_locs, e),
-        ]),
-        // Intentional Rust performance representation: `OmittedOptionalNone`
-        // is the sparse internal form of the `option_none` expression that
-        // OCaml compiler/ml/typecore.ml:2833-2842 materializes. Sexp output
-        // must expand it here, not remove the sparse storage optimization.
-        RecordLabelDefinition::OmittedOptionalNone(li, option_ty) => Sexp::list(vec![
-            Sexp::atom("Overridden"),
-            sexp_longident_idx(arena, ctx, li.txt),
-            sexp_omitted_optional_none_expression(arena, ctx, with_locs, li, *option_ty),
-        ]),
-    }
-}
-
+/// A written record field: `(name lid expression)`, as
+/// compiler/ml/sexp_typedtree.ml prints `(ld, li, e)`.
 fn sexp_record_field(
     arena: &ParseArena,
     ctx: &TypeContext,
     with_locs: bool,
-    field_name: &str,
-    def: &RecordLabelDefinition,
-    opt_flag: bool,
+    (ld, li, e): &RecordField,
 ) -> Sexp {
     Sexp::list(vec![
-        string(field_name),
-        sexp_record_definition(arena, ctx, with_locs, def),
-        Sexp::atom(if opt_flag { "optional" } else { "required" }),
+        string(&ld.lbl_name),
+        sexp_longident_idx(arena, ctx, li.txt),
+        sexp_expression(arena, ctx, with_locs, e),
     ])
 }
 
@@ -1055,87 +987,10 @@ fn sexp_expression_desc(
             extended_expression,
             ..
         } => {
-            let mut field_items = Vec::new();
-            for (_li, ld, def, opt_flag) in fields.iter() {
-                field_items.push(sexp_record_field(
-                    arena,
-                    ctx,
-                    with_locs,
-                    &ld.lbl_name,
-                    def,
-                    *opt_flag,
-                ));
-            }
-            let ext_sexp = match extended_expression {
-                None => Sexp::atom("None"),
-                Some(e) => Sexp::list(vec![
-                    Sexp::atom("Some"),
-                    sexp_expression(arena, ctx, with_locs, e),
-                ]),
-            };
-            Sexp::list(vec![
-                Sexp::atom("Texp_record"),
-                Sexp::list(field_items),
-                ext_sexp,
-            ])
-        }
-        ExpressionDesc::Texp_record_sparse {
-            fields,
-            all_labels,
-            omitted_loc,
-            extended_expression,
-        } => {
-            // Intentional Rust performance representation: this is the
-            // typedtree boundary that expands sparse records back to OCaml's
-            // full record-field shape for parity output.
-            let mut explicit_by_pos: HashMap<usize, &RecordField> =
-                HashMap::with_capacity(fields.len());
-            for field in fields.iter() {
-                let pos = field.1.lbl_pos;
-                if pos >= 0 {
-                    explicit_by_pos.insert(pos as usize, field);
-                }
-            }
-
-            // OCaml compiler/ml/typecore.ml:2833-2842 builds definitions from
-            // the complete label array before translcore.ml:1145-1191 walks
-            // every slot. Serialize the carried shared array rather than
-            // rediscovering labels through potentially alias-expanded types.
-            let mut field_items = Vec::with_capacity(all_labels.len());
-            for (idx, label) in all_labels.iter().enumerate() {
-                let pos = if label.lbl_pos >= 0 {
-                    label.lbl_pos as usize
-                } else {
-                    idx
-                };
-                if let Some((_li, ld, def, opt_flag)) = explicit_by_pos.get(&pos) {
-                    field_items.push(sexp_record_field(
-                        arena,
-                        ctx,
-                        with_locs,
-                        &ld.lbl_name,
-                        def,
-                        *opt_flag,
-                    ));
-                } else if label.lbl_optional {
-                    let def = Sexp::list(vec![
-                        Sexp::atom("Overridden"),
-                        sexp_lident_name(&label.lbl_name),
-                        sexp_omitted_optional_none_expression_at_loc(
-                            arena,
-                            ctx,
-                            with_locs,
-                            *omitted_loc,
-                            label.lbl_arg,
-                        ),
-                    ]);
-                    field_items.push(Sexp::list(vec![
-                        string(&label.lbl_name),
-                        def,
-                        Sexp::atom("required"),
-                    ]));
-                }
-            }
+            let field_items = fields
+                .iter()
+                .map(|field| sexp_record_field(arena, ctx, with_locs, field))
+                .collect();
             let ext_sexp = match extended_expression {
                 None => Sexp::atom("None"),
                 Some(e) => Sexp::list(vec![

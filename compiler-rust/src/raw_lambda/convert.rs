@@ -6,7 +6,6 @@
 mod jsx;
 
 use crate::fast_hash::{AHashMap as HashMap, AHashSet as HashSet};
-use std::borrow::Cow;
 use std::path::Path as StdPath;
 
 use crate::context::IdGenerator;
@@ -26,7 +25,7 @@ use crate::lambda::{
     SetFieldDbgInfo,
 };
 use crate::location::Location;
-use crate::parse_arena::{LidentIdx, LocIdx, Located, ParseArena};
+use crate::parse_arena::{LidentIdx, LocIdx, ParseArena};
 use crate::parser::ast::MutableFlag as ParserMutableFlag;
 use crate::raw_lambda::matching as full_matching;
 use crate::raw_lambda::typeopt::{
@@ -44,7 +43,7 @@ use crate::types::typecore::TypeCoreWarning;
 use crate::types::typedtree::{
     ApplyArg, Case, Constant as TConstant, Expression, ExpressionDesc, FunctionParam,
     ModuleCoercion, ModuleExpr, ModuleExprDesc, Partial, Pattern, PatternDesc, RecordField,
-    RecordLabelDefinition, Structure, StructureItem, StructureItemDesc, ValueBinding,
+    Structure, StructureItem, StructureItemDesc, ValueBinding,
 };
 
 // Keep these aligned with compiler/ml/predef.ml's allocation order. The
@@ -466,38 +465,27 @@ fn raw_record_setfield_access(lbl: &LabelDescription) -> Option<(i32, SetFieldDb
     Some((pos, info))
 }
 
-fn raw_record_mutable_flag(
-    fields: &[(
-        Located<LidentIdx>,
-        LabelDescription,
-        RecordLabelDefinition,
-        bool,
-    )],
-) -> ParserMutableFlag {
-    fields
+/// `mut` of `transl_record` (compiler/ml/translcore.ml:1811-1813): mutable
+/// when any label of the record is.
+fn raw_record_mutable_flag(labels: &[LabelDescription]) -> ParserMutableFlag {
+    if labels
         .iter()
-        .find(|(_, lbl, _, _)| lbl.lbl_mut == TypeMutableFlag::Mutable)
-        .map(|_| ParserMutableFlag::Mutable)
-        .unwrap_or(ParserMutableFlag::Immutable)
+        .any(|lbl| lbl.lbl_mut == TypeMutableFlag::Mutable)
+    {
+        ParserMutableFlag::Mutable
+    } else {
+        ParserMutableFlag::Immutable
+    }
 }
 
-fn record_field_is_static_optional_none(
-    lbl: &LabelDescription,
-    def: &RecordLabelDefinition,
-) -> bool {
-    if !lbl.lbl_optional {
-        return false;
-    }
-
-    match def {
-        RecordLabelDefinition::OmittedOptionalNone(_, _) => true,
-        RecordLabelDefinition::Overridden(_, expr) => matches!(
+/// A written optional field whose value is statically `None`.
+fn record_field_is_static_optional_none((lbl, _, expr): &RecordField) -> bool {
+    lbl.lbl_optional
+        && matches!(
             &expr.exp_desc,
             ExpressionDesc::Texp_construct(_, cstr, args)
                 if args.is_empty() && cstr.cstr_name == "None" && constructor_has_optional_shape(cstr)
-        ),
-        RecordLabelDefinition::Kept(_) => false,
-    }
+        )
 }
 
 fn inlined_record_representation(
@@ -2951,27 +2939,7 @@ impl<'a> RawLambdaConverter<'a> {
                         fields,
                         extended_expression.as_deref(),
                         inlined_record_representation(cstr),
-                        None,
                     ),
-                    ExpressionDesc::Texp_record_sparse {
-                        fields,
-                        all_labels,
-                        omitted_loc,
-                        ..
-                    } => {
-                        // Debug/captured lambda keeps OCaml's full `lbl_all`
-                        // stream; normal JS lowering can compact static
-                        // omitted optional None before raw-lambda conversion.
-                        let (record_fields, logical_field_count) =
-                            self.sparse_record_fields_for_lambda(all_labels, fields, *omitted_loc);
-                        self.convert_record_raw(
-                            SrcLoc::from(arg.exp_loc),
-                            &record_fields,
-                            None,
-                            inlined_record_representation(cstr),
-                            logical_field_count,
-                        )
-                    }
                     _ => self.convert_expr_raw(arg),
                 },
                 [] => RawLambda::const_(raw_constructor_constant(self.type_ctx, cstr, 0)),
@@ -3044,76 +3012,82 @@ impl<'a> RawLambdaConverter<'a> {
         }
     }
 
+    /// `transl_record` (compiler/ml/translcore.ml:1770-1923). `fields` are
+    /// the written fields in position order; the record's labels are their
+    /// `lbl_all` (`all_labels fields`, none for `{}`).
     fn convert_record_raw(
         &mut self,
         loc: SrcLoc,
-        fields: &[(
-            Located<LidentIdx>,
-            LabelDescription,
-            RecordLabelDefinition,
-            bool,
-        )],
+        fields: &[RecordField],
         base: Option<&Expression>,
         empty_repres: Option<RecordRepresentation>,
-        logical_field_count: Option<usize>,
     ) -> RawLambda {
-        let first_lbl = fields.first().map(|(_, first_lbl, _, _)| first_lbl);
+        let all_labels =
+            crate::types::typedtree::record_all_labels(self.type_ctx, fields).unwrap_or_default();
+        let all_labels = all_labels.as_slice();
+        let first_lbl = fields.first().map(|(first_lbl, _, _)| first_lbl);
         let repres = first_lbl
             .map(|lbl| lbl.lbl_repres.clone())
             .or(empty_repres)
             .unwrap_or(RecordRepresentation::RecordRegular);
-        let mutable_flag = raw_record_mutable_flag(fields);
+        let mutable_flag = raw_record_mutable_flag(all_labels);
         let base_lam = base.map(|expr| self.convert_expr_raw(expr));
-        let has_optional = fields.iter().any(|(_, lbl, _, _)| lbl.lbl_optional);
-        // OCaml uses field-by-field construction when:
-        // - no base expression, OR
-        // - all fields are overridden (no Kept), OR
-        // - size < 20 AND no optional fields (OCaml's transl_record line 1130)
+
+        // `record_copies_fields` (translcore.ml:1037-1050): with no `init`, or
+        // a small record with no optional field, copy the fields one by one.
         let build_direct = base.is_none()
-            || fields.iter().all(|(_, _, def, _)| {
-                matches!(
-                    def,
-                    RecordLabelDefinition::Overridden(_, _)
-                        | RecordLabelDefinition::OmittedOptionalNone(_, _)
-                )
-            })
-            || (fields.len() < 20 && !has_optional);
+            || (all_labels.len() < 20 && !all_labels.iter().any(|lbl| lbl.lbl_optional));
 
         if build_direct {
             // OCaml allocates init_id before inspecting opt_init_expr, even
-            // for a record literal with no base (translcore.ml:1087-1114).
+            // for a record literal with no base (translcore.ml:1787-1789).
             // The binder is emitted only when a base exists, but its allocation
             // still orders later Translcore/Translmod identifiers.
             let init_id = self.fresh_ident("init");
             let init_var = base_lam.as_ref().map(|_| RawLambda::var(init_id));
 
-            let mut elems = Vec::with_capacity(fields.len());
-            let mut fields_info = Vec::with_capacity(fields.len());
-            for (lid, lbl, def, _) in fields {
-                // OCaml compiler/ml/translcore.ml:1139-1191 maps every record
-                // field in `fields`, including omitted optional fields that
-                // typecore.ml:2833-2842 materialized as `option_none`. Keep the
-                // full Lambda block shape here; JS output can still erase
-                // optional `undefined` fields during JS lowering.
-                let value = match def {
-                    RecordLabelDefinition::Overridden(_, expr) => self.convert_expr_raw(expr),
-                    RecordLabelDefinition::OmittedOptionalNone(_, _) => raw_optional_none(),
-                    RecordLabelDefinition::Kept(_) => {
-                        let Some(base_var) = &init_var else {
-                            elems.push(RawLambda::unit());
-                            fields_info.push((label_runtime_name(lbl), lbl.lbl_optional));
-                            continue;
-                        };
-                        if matches!(lbl.lbl_repres, RecordRepresentation::RecordUnboxed(_)) {
+            // Intentional Rust performance representation: JS lowering leaves
+            // out an optional field of a regular record that is statically
+            // `None`, so for a large literal without a spread (JSX DOM props)
+            // the block holds only the written fields that are not `None`,
+            // with `logical_field_count` keeping the record's arity. Debug and
+            // captured Lambda keep OCaml's block over every label.
+            let compact = !self.preserve_expanded_sparse_records
+                && init_var.is_none()
+                && all_labels.len() >= 20
+                && repres == RecordRepresentation::RecordRegular
+                && all_labels
+                    .iter()
+                    .all(|lbl| lbl.lbl_repres == RecordRepresentation::RecordRegular);
+            let logical_field_count = compact.then_some(all_labels.len());
+
+            let by_position = crate::types::typedtree::record_fields_by_position(fields, all_labels);
+            let mut elems = Vec::with_capacity(by_position.len());
+            let mut fields_info = Vec::with_capacity(by_position.len());
+            for (lbl, field) in by_position {
+                let (lbl, value) = match (field, &init_var) {
+                    (Some(field), _) if compact && record_field_is_static_optional_none(field) => {
+                        continue;
+                    }
+                    (Some((written_lbl, _, expr)), _) => {
+                        (written_lbl, self.convert_expr_raw(expr))
+                    }
+                    (None, None) if compact => continue,
+                    // An optional field the literal leaves out.
+                    (None, None) => (lbl, raw_optional_none()),
+                    (None, Some(base_var)) => {
+                        let value = if matches!(lbl.lbl_repres, RecordRepresentation::RecordUnboxed(_))
+                        {
                             base_var.clone()
                         } else {
                             let (pos, info) = raw_record_field_access(lbl);
                             RawLambda::prim(
                                 Primitive::Pfield(pos, info),
                                 vec![base_var.clone()],
-                                self.lam_loc(lid.loc),
+                                self.lam_loc(loc),
                             )
-                        }
+                        };
+                        (lbl, value)
                     }
                 };
                 elems.push(value);
@@ -3184,7 +3158,8 @@ impl<'a> RawLambdaConverter<'a> {
                     }
                 }
                 RecordRepresentation::RecordExtension => {
-                    let Some(first_lbl) = first_lbl else {
+                    // translcore.ml:1870-1876 reads the path of `lbl_all.(0)`.
+                    let Some(first_lbl) = first_lbl.or(all_labels.first()) else {
                         return RawLambda::unit();
                     };
                     let path = match self.type_desc(first_lbl.lbl_res) {
@@ -3197,10 +3172,7 @@ impl<'a> RawLambdaConverter<'a> {
                     RawLambda::prim(
                         Primitive::Pmakeblock(
                             TagInfo::RecordExt {
-                                fields: fields
-                                    .iter()
-                                    .map(|(_, lbl, _, _)| label_runtime_name(lbl))
-                                    .collect(),
+                                fields: all_labels.iter().map(label_runtime_name).collect(),
                                 mutable_flag,
                             },
                             if matches!(mutable_flag, ParserMutableFlag::Mutable) {
@@ -3225,19 +3197,13 @@ impl<'a> RawLambdaConverter<'a> {
             return RawLambda::unit();
         };
 
+        // Take a shallow copy of the init record, then set the written
+        // fields of the copy (translcore.ml:1886-1923). OCaml folds left over
+        // the fields, each Lsequence(upd, cont) wrapping the continuation, so
+        // the LAST field ends up outermost in the sequence chain.
         let copy_id = self.fresh_ident("newrecord");
         let mut body = RawLambda::var(copy_id);
-        // OCaml uses Array.fold_left which processes fields left-to-right.
-        // Each Lsequence(upd, cont) wraps the update around the continuation,
-        // so the LAST field ends up outermost in the sequence chain.
-        for (_, lbl, def, _) in fields.iter() {
-            let expr = match def {
-                RecordLabelDefinition::Overridden(_, expr) => expr,
-                RecordLabelDefinition::Kept(_)
-                | RecordLabelDefinition::OmittedOptionalNone(_, _) => {
-                    continue;
-                }
-            };
+        for (lbl, _, expr) in fields.iter() {
             let Some((pos, info)) = raw_record_setfield_access(lbl) else {
                 continue;
             };
@@ -3255,143 +3221,6 @@ impl<'a> RawLambdaConverter<'a> {
             RawLambda::prim(Primitive::Pduprecord, vec![init_expr], self.lam_loc(loc)),
             body,
         )
-    }
-
-    fn expand_sparse_record_fields(
-        &self,
-        all_labels: &std::sync::Arc<Vec<LabelDescription>>,
-        fields: &[RecordField],
-        omitted_loc: LocIdx,
-    ) -> Vec<RecordField> {
-        // OCaml compiler/ml/typecore.ml:2833-2842 stores one definition per
-        // `lbl_all` entry, then compiler/ml/translcore.ml:1139-1191 lowers
-        // that whole array into the Lambda block. Rust's sparse typedtree node
-        // is an internal storage optimization, so expand it before Lambda.
-        let placeholder_lid = fields
-            .first()
-            .map(|(lid, _, _, _)| *lid)
-            .unwrap_or_else(|| self.arena.placeholder_located(omitted_loc));
-        let mut explicit_by_pos: HashMap<usize, &RecordField> =
-            HashMap::with_capacity(fields.len());
-        for field in fields.iter() {
-            let pos = field.1.lbl_pos;
-            if pos >= 0 {
-                explicit_by_pos.insert(pos as usize, field);
-            }
-        }
-
-        let mut expanded = Vec::with_capacity(all_labels.len());
-        for (idx, label) in all_labels.iter().enumerate() {
-            let pos = if label.lbl_pos >= 0 {
-                label.lbl_pos as usize
-            } else {
-                idx
-            };
-            if let Some(field) = explicit_by_pos.get(&pos) {
-                expanded.push((*field).clone());
-            } else if label.lbl_optional {
-                // Intentional Rust performance representation: reconstruct
-                // the omitted optional `None` node that OCaml
-                // compiler/ml/typecore.ml:2833-2842 stores eagerly in the
-                // typedtree field list.
-                let label_lid = Located {
-                    txt: placeholder_lid.txt,
-                    loc: omitted_loc,
-                };
-                expanded.push((
-                    label_lid,
-                    label.clone(),
-                    RecordLabelDefinition::OmittedOptionalNone(label_lid, label.lbl_arg),
-                    false,
-                ));
-            } else {
-                // Sparse records are only created after typecore has verified
-                // all mandatory labels are present. If a malformed node reaches
-                // lambda lowering, keep a unit placeholder rather than changing
-                // field order; this mirrors the fallback value OCaml would have
-                // placed in the full record array before translcore.ml:1145-1162
-                // mapped every slot.
-                let label_lid = Located {
-                    txt: placeholder_lid.txt,
-                    loc: omitted_loc,
-                };
-                expanded.push((
-                    label_lid,
-                    label.clone(),
-                    RecordLabelDefinition::Kept(label.lbl_arg),
-                    false,
-                ));
-            }
-        }
-        expanded
-    }
-
-    fn compact_sparse_record_fields_for_output<'b>(
-        &self,
-        all_labels: &std::sync::Arc<Vec<LabelDescription>>,
-        fields: &'b [RecordField],
-    ) -> Cow<'b, [RecordField]> {
-        // If every selected label has a materialized slot, sorting by `lbl_pos`
-        // preserves OCaml `lbl_all` field order without walking omitted fields.
-        if fields.iter().all(|field| field.1.lbl_pos >= 0) {
-            let already_ordered = fields
-                .windows(2)
-                .all(|pair| pair[0].1.lbl_pos <= pair[1].1.lbl_pos);
-            let has_static_optional_none = fields
-                .iter()
-                .any(|field| record_field_is_static_optional_none(&field.1, &field.2));
-            if already_ordered && !has_static_optional_none {
-                return Cow::Borrowed(fields);
-            }
-            let mut compact = fields
-                .iter()
-                .filter(|field| !record_field_is_static_optional_none(&field.1, &field.2))
-                .cloned()
-                .collect::<Vec<_>>();
-            if !already_ordered {
-                compact.sort_by_key(|field| field.1.lbl_pos);
-            }
-            return Cow::Owned(compact);
-        }
-
-        let mut compact = Vec::with_capacity(fields.len());
-        for (idx, label) in all_labels.iter().enumerate() {
-            let label_pos = if label.lbl_pos >= 0 {
-                label.lbl_pos as usize
-            } else {
-                idx
-            };
-            let Some(field) = fields.iter().find(|field| {
-                usize::try_from(field.1.lbl_pos).ok() == Some(label_pos)
-                    || field.1.lbl_name == label.lbl_name
-            }) else {
-                continue;
-            };
-            if record_field_is_static_optional_none(&field.1, &field.2) {
-                continue;
-            }
-            compact.push((*field).clone());
-        }
-        Cow::Owned(compact)
-    }
-
-    fn sparse_record_fields_for_lambda<'b>(
-        &self,
-        all_labels: &std::sync::Arc<Vec<LabelDescription>>,
-        fields: &'b [RecordField],
-        omitted_loc: LocIdx,
-    ) -> (Cow<'b, [RecordField]>, Option<usize>) {
-        if self.preserve_expanded_sparse_records {
-            (
-                Cow::Owned(self.expand_sparse_record_fields(all_labels, fields, omitted_loc)),
-                None,
-            )
-        } else {
-            (
-                self.compact_sparse_record_fields_for_output(all_labels, fields),
-                Some(all_labels.len()),
-            )
-        }
     }
 
     fn include_bound_idents(sig: &[SignatureItem]) -> Vec<(Ident, usize)> {
@@ -5758,24 +5587,7 @@ impl<'a> RawLambdaConverter<'a> {
                 fields,
                 extended_expression.as_deref(),
                 None,
-                None,
             ),
-            ExpressionDesc::Texp_record_sparse {
-                fields,
-                all_labels,
-                omitted_loc,
-                ..
-            } => {
-                let (record_fields, logical_field_count) =
-                    self.sparse_record_fields_for_lambda(all_labels, fields, *omitted_loc);
-                self.convert_record_raw(
-                    SrcLoc::from(expr.exp_loc),
-                    &record_fields,
-                    None,
-                    None,
-                    logical_field_count,
-                )
-            }
             ExpressionDesc::Texp_field(record, _, lbl) => {
                 if matches!(lbl.lbl_repres, RecordRepresentation::RecordUnboxed(_)) {
                     self.convert_expr_raw(record)
@@ -7450,6 +7262,7 @@ mod tests {
     }
 
     use super::*;
+    use crate::parse_arena::Located;
     use crate::types::typedtree::EnvRef;
 
     use crate::context::IdGenerator;
@@ -7513,8 +7326,8 @@ mod tests {
         let arg = Expression::new(
             ExpressionDesc::Texp_record {
                 fields: vec![],
-                extended_expression: None,
                 empty_representation: None,
+                extended_expression: None,
             },
             LocIdx::none(),
             crate::types::TypeExprRef(0),

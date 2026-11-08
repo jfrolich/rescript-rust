@@ -270,10 +270,8 @@ fn walk_record_fields<I: TastIterator + ?Sized>(
     fields: &[RecordField],
     extended: &Option<Box<Expression>>,
 ) {
-    for (_, _, def, _) in fields {
-        if let RecordLabelDefinition::Overridden(_, e) = def {
-            sub.expr(e);
-        }
+    for (_, _, e) in fields {
+        sub.expr(e);
     }
     if let Some(e) = extended {
         sub.expr(e);
@@ -343,11 +341,6 @@ pub fn walk_expr<I: TastIterator + ?Sized>(sub: &mut I, e: &Expression) {
             }
         }
         ExpressionDesc::Texp_record {
-            fields,
-            extended_expression,
-            ..
-        }
-        | ExpressionDesc::Texp_record_sparse {
             fields,
             extended_expression,
             ..

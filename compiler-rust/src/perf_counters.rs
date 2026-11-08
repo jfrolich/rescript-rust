@@ -63,12 +63,6 @@ static QUALIFIED_RECORD_LABEL_MISSES: AtomicU64 = AtomicU64::new(0);
 static QUALIFIED_RECORD_LABEL_REGISTERED: AtomicU64 = AtomicU64::new(0);
 static QUALIFIED_RECORD_LABEL_UNCACHED_OTHER: AtomicU64 = AtomicU64::new(0);
 
-static SPARSE_RECORD_LARGE: AtomicU64 = AtomicU64::new(0);
-static SPARSE_RECORD_USED: AtomicU64 = AtomicU64::new(0);
-static SPARSE_RECORD_SKIPPED: AtomicU64 = AtomicU64::new(0);
-static SPARSE_RECORD_TOTAL_LABELS: AtomicU64 = AtomicU64::new(0);
-static SPARSE_RECORD_TOTAL_FIELDS: AtomicU64 = AtomicU64::new(0);
-static MODULE_SPARSE_RECORDS: OnceLock<Mutex<HashMap<String, SparseRecordSite>>> = OnceLock::new();
 
 static TYPE_ITEM_RESOLVE_CACHE_HITS: AtomicU64 = AtomicU64::new(0);
 static TYPE_ITEM_RESOLVE_MISSING_CACHE_HITS: AtomicU64 = AtomicU64::new(0);
@@ -209,15 +203,6 @@ fn print_top_signature_sites<K: Clone>(
     for (key, site) in entries.into_iter().take(20) {
         print(&key, &site);
     }
-}
-
-#[derive(Clone, Copy, Default)]
-struct SparseRecordSite {
-    large: u64,
-    used: u64,
-    skipped: u64,
-    labels: u64,
-    fields: u64,
 }
 
 /// Thread-local module attribution guard for compiler counters.
@@ -379,11 +364,6 @@ pub fn reset() {
         &QUALIFIED_RECORD_LABEL_MISSES,
         &QUALIFIED_RECORD_LABEL_REGISTERED,
         &QUALIFIED_RECORD_LABEL_UNCACHED_OTHER,
-        &SPARSE_RECORD_LARGE,
-        &SPARSE_RECORD_USED,
-        &SPARSE_RECORD_SKIPPED,
-        &SPARSE_RECORD_TOTAL_LABELS,
-        &SPARSE_RECORD_TOTAL_FIELDS,
         &TYPE_ITEM_RESOLVE_CACHE_HITS,
         &TYPE_ITEM_RESOLVE_MISSING_CACHE_HITS,
         &TYPE_ITEM_RESOLVE_SCANS,
@@ -434,9 +414,6 @@ pub fn reset() {
         modules.lock().unwrap().clear();
     }
     if let Some(modules) = MODULE_SIGNATURE_FRESHENS.get() {
-        modules.lock().unwrap().clear();
-    }
-    if let Some(modules) = MODULE_SPARSE_RECORDS.get() {
         modules.lock().unwrap().clear();
     }
 }
@@ -552,38 +529,6 @@ pub(crate) fn record_qualified_record_label_registered() {
 #[inline]
 pub(crate) fn record_qualified_record_label_uncached_other() {
     QUALIFIED_RECORD_LABEL_UNCACHED_OTHER.fetch_add(1, Ordering::Relaxed);
-}
-
-/// Record a large record literal that can use the sparse internal representation.
-///
-/// Caller must check [`enabled`] before calling this hot-path helper.
-pub(crate) fn record_sparse_record(used: bool, label_count: usize, field_count: usize) {
-    SPARSE_RECORD_LARGE.fetch_add(1, Ordering::Relaxed);
-    SPARSE_RECORD_TOTAL_LABELS.fetch_add(label_count as u64, Ordering::Relaxed);
-    SPARSE_RECORD_TOTAL_FIELDS.fetch_add(field_count as u64, Ordering::Relaxed);
-    if used {
-        SPARSE_RECORD_USED.fetch_add(1, Ordering::Relaxed);
-    } else {
-        SPARSE_RECORD_SKIPPED.fetch_add(1, Ordering::Relaxed);
-    }
-
-    CURRENT_MODULE.with(|current| {
-        let current = current.borrow();
-        let Some(module) = current.as_ref() else {
-            return;
-        };
-        let modules = MODULE_SPARSE_RECORDS.get_or_init(|| Mutex::new(HashMap::new()));
-        let mut modules = modules.lock().unwrap();
-        let entry = modules.entry(module.clone()).or_default();
-        entry.large += 1;
-        if used {
-            entry.used += 1;
-        } else {
-            entry.skipped += 1;
-        }
-        entry.labels += label_count as u64;
-        entry.fields += field_count as u64;
-    });
 }
 
 /// Record a cached type-item path lookup.
@@ -770,15 +715,6 @@ pub fn print_report() {
         QUALIFIED_RECORD_LABEL_UNCACHED_OTHER.load(Ordering::Relaxed),
     );
     eprintln!(
-        "[compiler-counter] sparse_records large={} used={} skipped={} labels={} fields={}",
-        SPARSE_RECORD_LARGE.load(Ordering::Relaxed),
-        SPARSE_RECORD_USED.load(Ordering::Relaxed),
-        SPARSE_RECORD_SKIPPED.load(Ordering::Relaxed),
-        SPARSE_RECORD_TOTAL_LABELS.load(Ordering::Relaxed),
-        SPARSE_RECORD_TOTAL_FIELDS.load(Ordering::Relaxed),
-    );
-    print_module_sparse_records();
-    eprintln!(
         "[compiler-counter] type_item_resolve positive_cache_hits={} missing_cache_hits={} scans={} scanned_items={} type_items={} found={}",
         TYPE_ITEM_RESOLVE_CACHE_HITS.load(Ordering::Relaxed),
         TYPE_ITEM_RESOLVE_MISSING_CACHE_HITS.load(Ordering::Relaxed),
@@ -824,31 +760,6 @@ pub fn print_report() {
         REGISTRY_LOCAL_ALIASES_TOTAL.load(Ordering::Relaxed),
         REGISTRY_LOCAL_FALLBACKS_TOTAL.load(Ordering::Relaxed),
     );
-}
-
-fn print_module_sparse_records() {
-    let Some(modules) = MODULE_SPARSE_RECORDS.get() else {
-        return;
-    };
-
-    let mut modules = modules
-        .lock()
-        .unwrap()
-        .iter()
-        .map(|(module, site)| (module.clone(), *site))
-        .collect::<Vec<_>>();
-    modules.sort_by(|a, b| {
-        b.1.labels
-            .cmp(&a.1.labels)
-            .then_with(|| b.1.large.cmp(&a.1.large))
-    });
-
-    for (module, site) in modules.into_iter().take(20) {
-        eprintln!(
-            "[compiler-counter] module_sparse_records module={} large={} used={} skipped={} labels={} fields={}",
-            module, site.large, site.used, site.skipped, site.labels, site.fields,
-        );
-    }
 }
 
 fn print_module_signature_copies() {

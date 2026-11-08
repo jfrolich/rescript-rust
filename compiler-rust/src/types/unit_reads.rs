@@ -130,9 +130,8 @@ impl TastIterator for Collector<'_> {
             ExpressionDesc::Texp_field(_, _, ld) | ExpressionDesc::Texp_setfield(_, _, ld, _) => {
                 self.label(ld)
             }
-            ExpressionDesc::Texp_record { fields, .. }
-            | ExpressionDesc::Texp_record_sparse { fields, .. } => {
-                for (_, ld, _, _) in fields {
+            ExpressionDesc::Texp_record { fields, .. } => {
+                for (ld, _, _) in fields {
                     self.label(ld);
                 }
             }

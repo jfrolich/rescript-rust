@@ -682,16 +682,13 @@ impl TastIterator for ExtraIterator<'_, '_> {
             {
                 self.add_for_lident(Some((expression.exp_type, Tip::Value)), path, lid)
             }
-            tt::ExpressionDesc::Texp_record { fields, .. }
-            | tt::ExpressionDesc::Texp_record_sparse { fields, .. } => {
+            tt::ExpressionDesc::Texp_record { fields, .. } => {
+                // process_extra.ml:434-438: every written field.
                 let items: Vec<RecordItem> = fields
                     .iter()
-                    .filter_map(|(_, _, def, _)| match def {
-                        tt::RecordLabelDefinition::Overridden(lid, _) => Some(RecordItem {
-                            lid: lid.txt,
-                            loc: lid.loc,
-                        }),
-                        _ => None,
+                    .map(|(_, lid, _)| RecordItem {
+                        lid: lid.txt,
+                        loc: lid.loc,
                     })
                     .collect();
                 self.add_for_record(expression.exp_type, &items);

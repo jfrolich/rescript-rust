@@ -4,9 +4,7 @@
 //! `jsxs`, `jsxKeyed`, `jsxsKeyed`, `jsxFragment`) are fixed by the PPX, unlike
 //! the JS names of the externals.
 
-use std::borrow::Cow;
-
-use super::{RawLambdaConverter, label_runtime_name, raw_optional_none};
+use super::{RawLambdaConverter, label_runtime_name};
 use crate::lambda::lam_primitive::JsxElement;
 use crate::lambda::{FieldDbgInfo, LamLoc, Primitive};
 use crate::raw_lambda::{LetKind, RawLambda};
@@ -17,7 +15,7 @@ use crate::types::external_ffi_types::{
 };
 use crate::types::path::Path;
 use crate::types::typedtree::{
-    ApplyArg, Expression, ExpressionDesc, RecordField, RecordLabelDefinition,
+    ApplyArg, Expression, ExpressionDesc, RecordField, record_fields_by_position,
 };
 
 /// `jsx_props`: the props as the PPX passes them.
@@ -25,8 +23,10 @@ pub(super) enum JsxProps<'e> {
     /// The PPX passes the spread itself when there are no other props.
     Spread(&'e Expression),
     Record {
-        /// In `lbl_all` order.
-        fields: Cow<'e, [RecordField]>,
+        /// The written fields, in `lbl_pos` order.
+        fields: &'e [RecordField],
+        /// `all_labels fields`: every label of the record.
+        all_labels: std::sync::Arc<Vec<LabelDescription>>,
         init: Option<&'e Expression>,
         /// `transl_record`'s choice: copy the fields of `init` one by one,
         /// or take a shallow copy of it.
@@ -111,21 +111,17 @@ fn jsx_children<'e>(
 }
 
 /// `Lambda.record_fields_are_array`: the runtime names are "0", "1", ...
-fn record_fields_are_array(fields: &[RecordField]) -> bool {
-    !fields.is_empty()
-        && fields
+fn record_fields_are_array(labels: &[LabelDescription]) -> bool {
+    !labels.is_empty()
+        && labels
             .iter()
             .enumerate()
-            .all(|(i, (_, lbl, _, _))| lbl.lbl_runtime_name == i.to_string())
+            .all(|(i, lbl)| lbl.lbl_runtime_name == i.to_string())
 }
 
-fn is_omitted(lbl: &LabelDescription, definition: &RecordLabelDefinition) -> bool {
-    lbl.lbl_optional
-        && match definition {
-            RecordLabelDefinition::OmittedOptionalNone(..) => true,
-            RecordLabelDefinition::Overridden(_, e) => is_construct(e, "None"),
-            RecordLabelDefinition::Kept(_) => false,
-        }
+/// `is_omitted` of `jsx_props_of`: an optional prop written as `None`.
+fn is_omitted(lbl: &LabelDescription, e: &Expression) -> bool {
+    lbl.lbl_optional && is_construct(e, "None")
 }
 
 fn is_plain_param(param: &Param) -> bool {
@@ -135,56 +131,33 @@ fn is_plain_param(param: &Param) -> bool {
 impl<'a> RawLambdaConverter<'a> {
     /// `jsx_props_of`.
     fn jsx_props_of<'e>(&self, multi: bool, props: &'e Expression) -> Option<JsxProps<'e>> {
-        // `explicit` holds the fields with a definition in the source: all
-        // of them, or the explicit ones of a sparse record, whose omitted
-        // optional fields are statically `None`.
-        let (fields, explicit, init): (Cow<'e, [RecordField]>, &'e [RecordField], _) =
-            match &props.exp_desc {
-                ExpressionDesc::Texp_record {
-                    fields,
-                    empty_representation,
-                    extended_expression,
-                } if fields
-                    .first()
-                    .map(|(_, lbl, _, _)| &lbl.lbl_repres)
-                    .or(empty_representation.as_deref())
-                    .is_none_or(|repres| *repres == RecordRepresentation::RecordRegular) =>
-                {
-                    (
-                        Cow::Borrowed(fields.as_slice()),
-                        fields.as_slice(),
-                        extended_expression.as_deref(),
-                    )
-                }
-                ExpressionDesc::Texp_record_sparse {
-                    fields,
-                    all_labels,
-                    omitted_loc,
-                    extended_expression,
-                } => (
-                    Cow::Owned(self.expand_sparse_record_fields(all_labels, fields, *omitted_loc)),
-                    fields.as_slice(),
-                    extended_expression.as_deref(),
-                ),
-                _ => return Some(JsxProps::Spread(props)),
-            };
-        let children = explicit
-            .iter()
-            .find_map(|(_, lbl, definition, _)| match definition {
-                RecordLabelDefinition::Overridden(_, child)
-                    if lbl.lbl_name == "children" && !is_omitted(lbl, definition) =>
-                {
-                    Some((lbl, child))
-                }
-                _ => None,
-            });
+        let ExpressionDesc::Texp_record {
+            fields,
+            empty_representation,
+            extended_expression,
+        } = &props.exp_desc
+        else {
+            return Some(JsxProps::Spread(props));
+        };
+        let representation =
+            crate::types::typedtree::record_representation(fields, empty_representation.as_deref());
+        if !representation.is_none_or(|repres| *repres == RecordRepresentation::RecordRegular) {
+            return Some(JsxProps::Spread(props));
+        }
+        let all_labels =
+            crate::types::typedtree::record_all_labels(self.type_ctx, fields).unwrap_or_default();
+        let init = extended_expression.as_deref();
+        let children = fields.iter().find_map(|(lbl, _, child)| {
+            (lbl.lbl_name == "children" && !is_omitted(lbl, child)).then_some((lbl, child))
+        });
+        // `record_copies_fields` (translcore.ml:1037-1050).
         let copy_fields = match init {
             None => true,
-            Some(_) => fields.len() < 20 && !fields.iter().any(|(_, lbl, _, _)| lbl.lbl_optional),
+            Some(_) => all_labels.len() < 20 && !all_labels.iter().any(|lbl| lbl.lbl_optional),
         };
         let children = match children {
             // A record with the runtime names "0", "1", ... is an array.
-            _ if record_fields_are_array(&fields) => return None,
+            _ if record_fields_are_array(&all_labels) => return None,
             None => None,
             // Children printed as JSX children must be the `children` prop.
             Some((lbl, _)) if lbl.lbl_runtime_name != "children" => return None,
@@ -192,6 +165,7 @@ impl<'a> RawLambdaConverter<'a> {
         };
         Some(JsxProps::Record {
             fields,
+            all_labels,
             init,
             copy_fields,
             children,
@@ -309,6 +283,7 @@ impl<'a> RawLambdaConverter<'a> {
             JsxProps::Spread(props) => (None, Some(self.convert_expr_raw(props)), Vec::new(), None),
             JsxProps::Record {
                 fields,
+                all_labels,
                 init,
                 copy_fields,
                 children,
@@ -317,32 +292,49 @@ impl<'a> RawLambdaConverter<'a> {
                 // out, unless it overrides a prop of the spread.
                 let has_spread = init.is_some() && !copy_fields;
                 let mut props = Vec::with_capacity(fields.len());
-                for (i, (_, lbl, definition, _)) in fields.iter().enumerate() {
-                    let value = match definition {
-                        RecordLabelDefinition::Overridden(..)
-                            if lbl.lbl_name == "children" && children.is_some() =>
-                        {
-                            continue;
-                        }
-                        RecordLabelDefinition::Overridden(_, value) => self.convert_expr_raw(value),
-                        RecordLabelDefinition::OmittedOptionalNone(..) => raw_optional_none(),
-                        RecordLabelDefinition::Kept(_) if copy_fields => RawLambda::prim(
-                            Primitive::Pfield(
-                                i as i32,
-                                FieldDbgInfo::Record {
-                                    name: label_runtime_name(lbl),
-                                },
-                            ),
-                            vec![RawLambda::var(init_id)],
-                            loc,
-                        ),
-                        RecordLabelDefinition::Kept(_) => continue,
-                    };
+                let mut field = |lbl: &LabelDescription, value: RawLambda| {
                     props.push((
                         label_runtime_name(lbl),
                         lbl.lbl_optional && !has_spread,
                         value,
                     ));
+                };
+                let skip = |lbl: &LabelDescription| lbl.lbl_name == "children" && children.is_some();
+                match init {
+                    // The props the literal leaves out are copied from `init`.
+                    Some(_) if copy_fields => {
+                        for (lbl, written) in record_fields_by_position(fields, &all_labels) {
+                            match written {
+                                Some((lbl, _, value)) => {
+                                    if !skip(lbl) {
+                                        let value = self.convert_expr_raw(value);
+                                        field(lbl, value);
+                                    }
+                                }
+                                None => field(
+                                    lbl,
+                                    RawLambda::prim(
+                                        Primitive::Pfield(
+                                            lbl.lbl_pos,
+                                            FieldDbgInfo::Record {
+                                                name: label_runtime_name(lbl),
+                                            },
+                                        ),
+                                        vec![RawLambda::var(init_id)],
+                                        loc,
+                                    ),
+                                ),
+                            }
+                        }
+                    }
+                    _ => {
+                        for (lbl, _, value) in fields {
+                            if !skip(lbl) {
+                                let value = self.convert_expr_raw(value);
+                                field(lbl, value);
+                            }
+                        }
+                    }
                 }
                 let children = children.map(|children| {
                     children

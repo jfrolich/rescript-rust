@@ -29,7 +29,6 @@ use super::typedtree::EnvRef;
 use crate::context::IdGenerator;
 use crate::ident::Ident;
 use crate::intern::StrIdx;
-use crate::parse_arena::LidentIdx;
 use std::cell::{Cell, RefCell};
 use std::ops::Deref;
 use std::ptr::NonNull;
@@ -875,14 +874,14 @@ pub struct TypeContext {
 
     /// Reconstructed record label descriptions keyed by type path.
     /// OCaml installs one shared `lbl_all` array for a record declaration and
-    /// reuses it from record typing (`compiler/ml/typecore.ml:2802,2833-2842`).
-    /// Rust reconstructs fallback label descriptions from declarations, so cache
-    /// that reconstructed array per TypeContext and share it across record
-    /// literals instead of rebuilding or cloning large records such as
-    /// `JsxDOM.domProps` for every JSX literal.
-    record_label_descriptions_cache: RefCell<
-        crate::fast_hash::AHashMap<super::path::Path, Arc<Vec<super::decl::LabelDescription>>>,
-    >,
+    /// reuses it from record typing (`compiler/ml/typecore.ml:3058-3059,
+    /// 3137`). Rust reconstructs the label descriptions from declarations, so
+    /// it registers that array once per record path in `label_families` and
+    /// keeps the path's `lbl_all` handle here, shared across record literals
+    /// instead of rebuilding or cloning large records such as `JsxDOM.domProps`
+    /// for every JSX literal.
+    record_label_descriptions_cache:
+        RefCell<crate::fast_hash::AHashMap<super::path::Path, super::decl::LabelArrayRef>>,
     record_label_description_summaries_cache:
         RefCell<crate::fast_hash::AHashMap<super::path::Path, Arc<RecordLabelDescriptionSummary>>>,
 
@@ -895,16 +894,15 @@ pub struct TypeContext {
         crate::fast_hash::AHashMap<QualifiedRecordLabelCacheKey, super::decl::LabelDescription>,
     >,
 
-    /// The `lbl_all` arrays of labels built outside a type declaration
-    /// (`Dict_pattern.labels_of_keys`): `LabelArrayRef(n)` for `n >= 1` is
-    /// entry `n - 1`. Labels of declared records keep `LabelArrayRef(0)` and
-    /// resolve their array through the declaration.
-    label_arrays: RefCell<Vec<Vec<super::decl::LabelDescription>>>,
-
-    /// Lident indices synthesized while filling omitted optional record fields.
-    /// This avoids repeated reverse scans through the parse arena for large JSX
-    /// DOM prop records while preserving the same index that the scan found.
-    synthesized_record_lidents: RefCell<crate::fast_hash::AHashMap<String, LidentIdx>>,
+    /// The `lbl_all` arrays of this compilation: `LabelArrayRef(n)` for
+    /// `n >= 1` is entry `n - 1`. They are the record families registered per
+    /// record path (`record_label_descriptions_cache`; the array a record
+    /// literal's written labels point to) and the labels built outside a type
+    /// declaration (`Dict_pattern.labels_of_keys`). A label installed in the
+    /// environment from a declaration keeps `LabelArrayRef(0)` until a record
+    /// literal records its family. Families built in the worker store are
+    /// shared with it, hence the `Arc` element.
+    label_families: RefCell<Vec<Arc<Vec<super::decl::LabelDescription>>>>,
 
     /// Stored typedtree environment snapshots, keyed by EnvRef.
     typed_envs: RefCell<Vec<Arc<Env>>>,
@@ -1252,8 +1250,7 @@ impl TypeContext {
                 crate::fast_hash::AHashMap::new(),
             ),
             qualified_record_label_cache: RefCell::new(crate::fast_hash::AHashMap::new()),
-            label_arrays: RefCell::new(Vec::new()),
-            synthesized_record_lidents: RefCell::new(crate::fast_hash::AHashMap::new()),
+            label_families: RefCell::new(Vec::new()),
             typed_envs: RefCell::new(Vec::new()),
             typed_envs_by_id: RefCell::new(crate::fast_hash::AHashMap::new()),
             last_typed_env: Cell::new((u64::MAX, EnvRef(0))),
@@ -3347,7 +3344,8 @@ impl TypeContext {
         self.record_labels_cache.borrow().get(type_path).cloned()
     }
 
-    /// Cache reconstructed record label descriptions for a type path.
+    /// Register the reconstructed label descriptions of a record path as its
+    /// family: a new `lbl_all` array of this compilation.
     pub fn register_record_label_descriptions(
         &self,
         type_path: &Path,
@@ -3355,12 +3353,7 @@ impl TypeContext {
     ) {
         self.poison_store_build_for("register_record_label_descriptions");
         let summary = Arc::new(RecordLabelDescriptionSummary::from_labels(&labels));
-        self.record_label_descriptions_cache
-            .borrow_mut()
-            .insert(type_path.clone(), labels);
-        self.record_label_description_summaries_cache
-            .borrow_mut()
-            .insert(type_path.clone(), summary);
+        self.register_record_label_descriptions_with_summary(type_path, labels, summary);
     }
 
     /// Register label descriptions and their already-built summary.
@@ -3370,12 +3363,24 @@ impl TypeContext {
         labels: Arc<Vec<super::decl::LabelDescription>>,
         summary: Arc<RecordLabelDescriptionSummary>,
     ) {
+        let lbl_all = self.push_label_family(labels);
         self.record_label_descriptions_cache
             .borrow_mut()
-            .insert(type_path.clone(), labels);
+            .insert(type_path.clone(), lbl_all);
         self.record_label_description_summaries_cache
             .borrow_mut()
             .insert(type_path.clone(), summary);
+    }
+
+    /// The `lbl_all` array registered for a record path.
+    pub(crate) fn get_record_label_family(
+        &self,
+        type_path: &Path,
+    ) -> Option<super::decl::LabelArrayRef> {
+        self.record_label_descriptions_cache
+            .borrow()
+            .get(type_path)
+            .copied()
     }
 
     /// Look up reconstructed record label descriptions for a type path.
@@ -3383,10 +3388,7 @@ impl TypeContext {
         &self,
         type_path: &Path,
     ) -> Option<Arc<Vec<super::decl::LabelDescription>>> {
-        self.record_label_descriptions_cache
-            .borrow()
-            .get(type_path)
-            .cloned()
+        self.label_family(self.get_record_label_family(type_path)?)
     }
 
     pub(crate) fn get_record_label_description_summary(
@@ -3429,43 +3431,61 @@ impl TypeContext {
         );
     }
 
-    /// Return a cached synthesized record-field lident by label name.
-    pub fn get_synthesized_record_lident(&self, label_name: &str) -> Option<LidentIdx> {
-        self.synthesized_record_lidents
-            .borrow()
-            .get(label_name)
-            .copied()
+    /// The handle the next array pushed by `push_label_family` gets: in the
+    /// worker store's pool during a store build (what it builds is shared
+    /// with later compilations), otherwise in this compilation's pool.
+    fn next_label_family(&self) -> super::decl::LabelArrayRef {
+        if self.in_store_build() {
+            super::decl::LabelArrayRef::store(self.store.label_family_count())
+        } else {
+            super::decl::LabelArrayRef::local(self.label_families.borrow().len())
+        }
     }
 
-    /// Cache the lident chosen for a synthesized record field.
-    pub fn cache_synthesized_record_lident(&self, label_name: String, lid: LidentIdx) {
-        self.poison_store_build_for("cache_synthesized_record_lident");
-        self.synthesized_record_lidents
-            .borrow_mut()
-            .entry(label_name)
-            .or_insert(lid);
+    fn push_label_family(
+        &self,
+        labels: Arc<Vec<super::decl::LabelDescription>>,
+    ) -> super::decl::LabelArrayRef {
+        if self.in_store_build() {
+            super::decl::LabelArrayRef::store(self.store.push_label_family(labels))
+        } else {
+            let mut families = self.label_families.borrow_mut();
+            families.push(labels);
+            super::decl::LabelArrayRef::local(families.len() - 1)
+        }
     }
 
     /// Store the labels built by `build`, which receives the `lbl_all`
-    /// reference they share (OCaml ties that knot by mutating `lbl_all`).
+    /// reference they share (OCaml ties that knot by mutating `lbl_all`,
+    /// compiler/ml/datarepr.ml:261-288).
     pub fn alloc_label_array(
         &self,
         build: impl FnOnce(super::decl::LabelArrayRef) -> Vec<super::decl::LabelDescription>,
     ) -> Vec<super::decl::LabelDescription> {
-        self.poison_store_build_for("alloc_label_array");
-        let lbl_all = super::decl::LabelArrayRef(self.label_arrays.borrow().len() as u32 + 1);
+        let lbl_all = self.next_label_family();
         let labels = build(lbl_all);
-        self.label_arrays.borrow_mut().push(labels.clone());
+        let pushed = self.push_label_family(Arc::new(labels.clone()));
+        debug_assert_eq!(pushed, lbl_all);
         labels
     }
 
-    /// The labels of `lbl_all` when it was stored by `alloc_label_array`.
+    /// The array a label's `lbl_all` names; `None` for `LabelArrayRef::NONE`.
+    pub fn label_family(
+        &self,
+        lbl_all: super::decl::LabelArrayRef,
+    ) -> Option<Arc<Vec<super::decl::LabelDescription>>> {
+        match lbl_all.index()? {
+            Ok(store_idx) => self.store.label_family(store_idx),
+            Err(local_idx) => self.label_families.borrow().get(local_idx).cloned(),
+        }
+    }
+
+    /// The labels of `lbl_all`, when this compilation registered it.
     pub fn label_all(
         &self,
         lbl_all: super::decl::LabelArrayRef,
     ) -> Option<Vec<super::decl::LabelDescription>> {
-        let index = (lbl_all.0 as usize).checked_sub(1)?;
-        self.label_arrays.borrow().get(index).cloned()
+        self.label_family(lbl_all).map(|labels| labels.to_vec())
     }
 
     // ========================================================================

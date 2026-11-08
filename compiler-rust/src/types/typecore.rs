@@ -4004,14 +4004,17 @@ fn existing_or_new_lident_idx(arena: &ParseArena, name: &str) -> LidentIdx {
     find_existing_lident_idx(arena, name).unwrap_or_else(|| arena.push_typecheck_lident(name))
 }
 
-/// `Lident lbl_name` for a synthesized optional record field, shared across
-/// the compilation through the TypeContext cache.
-fn synthesized_record_lident_idx(ctx: &TypeContext, arena: &ParseArena, name: &str) -> LidentIdx {
-    ctx.get_synthesized_record_lident(name).unwrap_or_else(|| {
-        let lid = existing_or_new_lident_idx(arena, name);
-        ctx.cache_synthesized_record_lident(name.to_string(), lid);
-        lid
-    })
+/// `written_labels` (compiler/ml/typecore.ml:387-391): which labels of a
+/// record with `label_count` labels a literal writes, indexed by `lbl_pos`.
+fn record_written_labels(
+    label_count: usize,
+    written_fields: &[crate::types::typedtree::RecordField],
+) -> Vec<bool> {
+    let mut written = vec![false; label_count];
+    for (label, _, _) in written_fields {
+        written[label.lbl_pos as usize] = true;
+    }
+    written
 }
 
 fn find_existing_lident_idx(arena: &ParseArena, name: &str) -> Option<LidentIdx> {
@@ -10924,18 +10927,9 @@ fn collect_expression_ident_heads(exp: &Expression, ids: &mut Vec<Ident>) {
             fields,
             extended_expression,
             ..
-        }
-        | ExpressionDesc::Texp_record_sparse {
-            fields,
-            extended_expression,
-            ..
         } => {
-            for (_, _, definition, _) in fields {
-                if let crate::types::typedtree::RecordLabelDefinition::Overridden(_, expr) =
-                    definition
-                {
-                    collect_expression_ident_heads(expr, ids);
-                }
+            for (_, _, expr) in fields {
+                collect_expression_ident_heads(expr, ids);
             }
             if let Some(expr) = extended_expression {
                 collect_expression_ident_heads(expr, ids);
@@ -14431,6 +14425,8 @@ fn record_labels_satisfy_closed(
 
 #[derive(Clone)]
 struct RecordLabelDescriptionsInfo {
+    /// The registered `lbl_all` array of `labels`.
+    family: crate::types::LabelArrayRef,
     labels: Arc<Vec<crate::types::LabelDescription>>,
     summary: Arc<crate::types::context::RecordLabelDescriptionSummary>,
 }
@@ -14951,8 +14947,6 @@ fn type_record(
     attributes: &[crate::parser::ast::Attribute],
     recarg: RecArg,
 ) -> TypeCoreResult<Expression> {
-    use crate::types::typedtree::RecordLabelDefinition;
-
     let ctx = tctx.type_ctx;
     // typecore.ml Pexp_record: record syntax on a dict points to `dict{...}`,
     // checked against the expected type and, with a spread, its type.
@@ -14969,7 +14963,6 @@ fn type_record(
     } else {
         instance_if_generic(ctx, expected_ty)
     };
-    let placeholder_lid = tctx.arena.placeholder_located(loc);
 
     // Type check base expression if present.
     // Match OCaml: type the base with type_exp (no expected type constraint),
@@ -15102,30 +15095,12 @@ fn type_record(
     let jsx_component_error_info = record_opath_ty
         .and_then(|record_ty| jsx_prop_error_info_for_record_ty(tctx, env, record_ty));
 
-    // OCaml builds record definitions by label position over the full label set.
-    // Keep explicit overrides keyed by lbl_pos so we can reconstruct full fields.
-    type ExplicitOverrideEntry = (
-        Located<LidentIdx>,
-        crate::types::LabelDescription,
-        RecordLabelDefinition,
-        bool,
-    );
-
-    fn build_explicit_overrides_by_name(
-        explicit_entries: &[Option<ExplicitOverrideEntry>],
-    ) -> HashMap<String, usize> {
-        let mut by_name = HashMap::with_capacity(explicit_entries.len());
-        for (idx, entry) in explicit_entries.iter().enumerate() {
-            if let Some((_lid, label_desc, _def, _opt)) = entry {
-                by_name.insert(label_desc.lbl_name.clone(), idx);
-            }
-        }
-        by_name
-    }
-
-    let mut explicit_entries: Vec<Option<ExplicitOverrideEntry>> = Vec::with_capacity(fields.len());
-    let mut explicit_overrides: HashMap<i32, usize> = HashMap::with_capacity(fields.len());
-    let mut explicit_overrides_in_order = Vec::with_capacity(fields.len());
+    // OCaml `type_label_a_list` (typecore.ml:3613-3640) types the written
+    // fields sorted by `lbl_pos` (`explicit_fields` below) and returns them in
+    // that order: they become the `Texp_record` fields (`record_fields`,
+    // typecore.ml:393-402).
+    let mut explicit_entries: Vec<crate::types::typedtree::RecordField> =
+        Vec::with_capacity(fields.len());
     let mut first_disambiguated_label: Option<crate::types::LabelDescription> = None;
     let mut ambiguous_label_warnings: Vec<(String, Vec<String>, Option<Path>)> = Vec::new();
     let report_ambiguous_label_warnings = tctx.warning_config.is_active(&Warning::AmbiguousName {
@@ -15613,470 +15588,91 @@ fn type_record(
         let mut final_expr = final_expr;
         final_expr.exp_type = crate::types::ctype::instance(ctx, final_expr.exp_type);
 
-        let entry = (
-            field.lid,
-            label_desc.clone(),
-            RecordLabelDefinition::Overridden(field.lid, final_expr),
-            false, // OCaml Texp_record always uses false for this flag
-        );
-        let entry_idx = explicit_entries.len();
-        explicit_entries.push(Some(entry));
-        explicit_overrides.insert(label_desc.lbl_pos, entry_idx);
-        explicit_overrides_in_order.push(entry_idx);
+        explicit_entries.push((label_desc, field.lid, final_expr));
     }
 
-    let has_dotdotdot_field = fields.iter().any(|field| {
-        let lid = arena.get_longident(field.lid.txt);
-        arena.get_string(lid.last_idx()) == "..."
-    });
-
-    let mut all_label_descriptions_info = if has_dotdotdot_field {
-        None
-    } else {
-        // OCaml compiler/ml/typecore.ml:2802-2842 and typecore.ml:2953-2978
-        // build record definitions from the first typed label's `lbl_all`
-        // array. Prefer that selected label family before rediscovering labels
-        // from the record expression type, because the selected family carries
-        // source-visible module aliases such as `Layout.Types`.
-        first_disambiguated_label
-            .as_ref()
-            .and_then(|lbl| {
-                build_record_label_descriptions_info(
-                    lbl.lbl_res,
-                    env,
-                    &mut tctx.persistent_env,
-                    ctx,
-                )
-            })
+    // The `lbl_all` array of the written labels, which OCaml reads from the
+    // first one (typecore.ml:3058-3059, 3137-3138). Rust installs declared
+    // labels without it, so resolve the first label's record family here,
+    // register it, and point every written label at it (below). Typing has
+    // unified each label's result with `ty_record`, so the fallbacks resolve
+    // the same record through the types the labels were unified with.
+    let record_family = first_disambiguated_label.as_ref().and_then(|lbl| {
+        build_record_label_descriptions_info(lbl.lbl_res, env, &mut tctx.persistent_env, ctx)
             .or_else(|| {
                 build_record_label_descriptions_info(record_ty, env, &mut tctx.persistent_env, ctx)
             })
             .or_else(|| {
-                build_record_label_descriptions_info(
-                    disambiguation_ty,
-                    env,
-                    &mut tctx.persistent_env,
-                    ctx,
-                )
+                typed_base.as_ref().and_then(|base_expr| {
+                    build_record_label_descriptions_info(
+                        base_expr.exp_type,
+                        env,
+                        &mut tctx.persistent_env,
+                        ctx,
+                    )
+                })
             })
-    };
-    if all_label_descriptions_info.is_none() {
-        if let Some(base_expr) = typed_base.as_ref() {
-            all_label_descriptions_info = build_record_label_descriptions_info(
-                base_expr.exp_type,
-                env,
-                &mut tctx.persistent_env,
-                ctx,
-            );
+    });
+    if !explicit_entries.is_empty() {
+        // OCaml always has `lbl_all`: a written label is a label of a
+        // declared record.
+        let family = record_family
+            .as_ref()
+            .expect("the labels a record literal writes belong to a declared record");
+        for (label, _, _) in explicit_entries.iter_mut() {
+            label.lbl_all = family.family;
         }
     }
-    if all_label_descriptions_info.is_none() {
-        if let Some(lbl) = first_disambiguated_label.as_ref() {
-            all_label_descriptions_info = build_record_label_descriptions_info(
-                lbl.lbl_res,
-                env,
-                &mut tctx.persistent_env,
-                ctx,
-            );
-        }
-    }
-    if all_label_descriptions_info
-        .as_ref()
-        .is_some_and(|info| info.summary.has_dotdotdot)
-    {
-        all_label_descriptions_info = None;
-    }
-    let all_label_descriptions_summary = all_label_descriptions_info
-        .as_ref()
-        .map(|info| info.summary.clone());
-    let mut all_label_descriptions = all_label_descriptions_info
-        .as_ref()
-        .map(|info| info.labels.clone());
-
-    // Resolve the full label set for this record type (OCaml builds
-    // definitions over lbl_all). Prefer the shared LabelDescription array above:
-    // OCaml compiler/ml/typecore.ml:2802,2840-2842,2960-2978 reads `lbl_all`
-    // directly, while cloning the Rust declaration labels repeats a full record
-    // declaration copy for every JSX props literal.
-    let mut all_labels = if has_dotdotdot_field || all_label_descriptions.is_some() {
-        None
-    } else {
-        get_record_labels(ctx, env, &mut tctx.persistent_env, record_ty)
-            .or_else(|| get_record_labels(ctx, env, &mut tctx.persistent_env, disambiguation_ty))
-    };
-    if all_label_descriptions.is_none() && all_labels.is_none() {
-        if let Some(base_expr) = typed_base.as_ref() {
-            all_labels = get_record_labels(ctx, env, &mut tctx.persistent_env, base_expr.exp_type);
-        }
-    }
-    if all_label_descriptions.is_none() && all_labels.is_none() {
-        if let Some(ref lbl) = first_disambiguated_label {
-            all_labels = get_record_labels(ctx, env, &mut tctx.persistent_env, lbl.lbl_res);
-        }
-    }
-    if all_labels
-        .as_ref()
-        .is_some_and(|labels| labels.iter().any(|ld| ld.ld_id.name() == "..."))
-    {
-        all_labels = None;
-    }
-    let mut typed_fields = Vec::with_capacity(fields.len());
 
     // OCaml: unify_exp_types ty_record (instance env ty_expected)
     let expected_inst_for_record = crate::types::instance(ctx, expected_ty);
     unify_expression_types(tctx, loc, record_ty, expected_inst_for_record, None)?;
     // OCaml `check_duplicates` (compiler/ml/typecore.ml:2232-2245) runs after
     // every field is typed and the record type is unified with the expected
-    // type (typecore.ml:2765-2766, 2876-2877), over the lbl_pos-sorted list.
+    // type (typecore.ml:3054-3055, 3134-3135), over the lbl_pos-sorted list.
     for pair in explicit_entries.windows(2) {
-        if let [Some((_, lbl1, _, _)), Some((lid2, lbl2, _, _))] = pair {
-            if lbl1.lbl_pos == lbl2.lbl_pos {
-                return Err(TypeCoreError::LabelMultiplyDefined {
-                    loc: lid2.loc,
-                    label: lbl1.lbl_name.clone(),
-                    jsx_component_info: jsx_component_error_info.clone(),
-                });
-            }
+        let [(lbl1, _, _), (lbl2, lid2, _)] = pair else {
+            continue;
+        };
+        if lbl1.lbl_pos == lbl2.lbl_pos {
+            return Err(TypeCoreError::LabelMultiplyDefined {
+                loc: lid2.loc,
+                label: lbl1.lbl_name.clone(),
+                jsx_component_info: jsx_component_error_info.clone(),
+            });
         }
     }
-    // OCaml special-case (typecore.ml, Pexp_record with no base):
-    // for `{}` in a known record context, keep `Texp_record` fields empty when
-    // all fields are optional; only error when required fields are missing.
-    // Do not synthesize explicit `None` overrides for the all-optional case.
-    if typed_base.is_none() && fields.is_empty() {
-        if let Some(labels) = all_label_descriptions.as_ref() {
-            let labels_missing: Vec<String> = if all_label_descriptions_summary
-                .as_ref()
-                .is_some_and(|summary| summary.mandatory_count == 0)
-            {
-                Vec::new()
-            } else {
-                labels
-                    .iter()
-                    .filter(|ld| !ld.lbl_optional)
-                    .map(|ld| ld.lbl_name.clone())
-                    .collect()
-            };
-            if !labels_missing.is_empty() {
-                return Err(TypeCoreError::LabelsMissing {
-                    loc,
-                    labels: labels_missing,
-                    jsx_component_info: jsx_component_error_info.clone(),
-                });
-            }
-            all_label_descriptions = Some(Arc::new(Vec::new()));
-        } else {
-            match all_labels.as_ref() {
-                Some(labels) => {
-                    let labels_missing: Vec<String> = labels
+
+    if typed_base.is_none() {
+        let labels_missing: Vec<String> = match record_family.as_ref() {
+            // `written_labels` and `labels_missing` (typecore.ml:387-391,
+            // 3081-3097): the mandatory labels the literal does not write, in
+            // `lbl_all` order.
+            Some(family) if !explicit_entries.is_empty() => {
+                if family.summary.mandatory_count == 0 {
+                    Vec::new()
+                } else {
+                    let written = record_written_labels(family.labels.len(), &explicit_entries);
+                    family
+                        .labels
                         .iter()
-                        .filter(|ld| !ld.ld_optional)
-                        .map(|ld| ld.ld_id.name().to_string())
-                        .collect();
-                    if !labels_missing.is_empty() {
-                        return Err(TypeCoreError::LabelsMissing {
-                            loc,
-                            labels: labels_missing,
-                            jsx_component_info: jsx_component_error_info.clone(),
-                        });
-                    }
-                    all_labels = Some(Vec::new());
-                }
-                None => {
-                    return Err(TypeCoreError::EmptyRecordLiteral { loc });
+                        .filter(|label| !written[label.lbl_pos as usize] && !label.lbl_optional)
+                        .map(|label| label.lbl_name.clone())
+                        .collect()
                 }
             }
-        }
-    }
-
-    // Intentional Rust performance representation: OCaml compiler/ml/typecore.ml:2833-2842
-    // stores every omitted optional field as an `option_none` entry. Keep that
-    // external typedtree contract at serialization/lambda boundaries, but store
-    // large closed regular records sparsely inside Rust so JSX prop bags don't
-    // copy hundreds of label descriptions.
-    let sparse_all_label_descriptions = if typed_base.is_none() && !fields.is_empty() {
-        all_label_descriptions.as_ref().and_then(|labels| {
-            let all_regular = all_label_descriptions_summary.as_ref().map_or_else(
-                || {
-                    labels.iter().all(|label| {
-                        matches!(
-                            label.lbl_repres,
-                            crate::types::RecordRepresentation::RecordRegular
-                        )
-                    })
-                },
-                |summary| summary.all_regular,
-            );
-            (labels.len() >= 20 && all_regular).then(|| labels.clone())
-        })
-    } else {
-        None
-    };
-    let use_sparse_large_record = sparse_all_label_descriptions.is_some();
-    if ctx.compiler_counters_enabled() && typed_base.is_none() && !fields.is_empty() {
-        let label_count = all_label_descriptions
-            .as_ref()
-            .map(|labels| labels.len())
-            .or_else(|| all_labels.as_ref().map(|labels| labels.len()))
-            .unwrap_or(0);
-        if label_count >= 20 {
-            crate::perf_counters::record_sparse_record(
-                use_sparse_large_record,
-                label_count,
-                fields.len(),
-            );
-        }
-    }
-
-    if let Some(all_label_descriptions) = all_label_descriptions.clone() {
-        if use_sparse_large_record {
-            let labels_missing = if all_label_descriptions_summary
-                .as_ref()
-                .is_some_and(|summary| summary.mandatory_count == 0)
-            {
-                Vec::new()
-            } else {
-                let explicit_overrides_by_name =
-                    build_explicit_overrides_by_name(&explicit_entries);
-                let mut labels_missing = Vec::new();
-                for raw_label_desc in all_label_descriptions
+            // OCaml typecore.ml:3060-3080: `{}` of the expected concrete
+            // record misses its mandatory fields; with none it is
+            // `Empty_record_literal`.
+            _ => match expected_record_info.as_ref().map(|(_, _, decl)| &decl.type_kind) {
+                Some(crate::types::TypeKind::TypeRecord(labels, _)) => labels
                     .iter()
-                    .filter(|label| !label.lbl_optional)
-                {
-                    let key_pos = raw_label_desc.lbl_pos;
-                    if explicit_overrides.contains_key(&key_pos)
-                        || explicit_overrides_by_name.contains_key(&raw_label_desc.lbl_name)
-                    {
-                        continue;
-                    }
-                    labels_missing.push(raw_label_desc.lbl_name.clone());
-                }
-                labels_missing
-            };
-
-            if !labels_missing.is_empty() {
-                return Err(TypeCoreError::LabelsMissing {
-                    loc,
-                    labels: labels_missing,
-                    jsx_component_info: jsx_component_error_info.clone(),
-                });
-            }
-
-            // OCaml compiler/ml/typecore.ml:2833-2842 materializes omitted
-            // optionals while walking `lbl_all`. For large sparse regular
-            // records, keep only explicit fields here and let the canonical
-            // typedtree serializer reconstruct omitted `None` entries from the
-            // shared label array.
-            typed_fields.extend(
-                explicit_overrides_in_order
-                    .into_iter()
-                    .filter_map(|idx| explicit_entries[idx].take()),
-            );
-        } else {
-            let mut explicit_overrides_by_name =
-                build_explicit_overrides_by_name(&explicit_entries);
-            if all_label_descriptions.len() > typed_fields.capacity() {
-                typed_fields.reserve(
-                    all_label_descriptions
-                        .len()
-                        .saturating_sub(typed_fields.len()),
-                );
-            }
-            let mut labels_missing = Vec::new();
-
-            for raw_label_desc in all_label_descriptions.iter() {
-                let label_name = raw_label_desc.lbl_name.clone();
-                let key_pos = raw_label_desc.lbl_pos;
-
-                if let Some(explicit_idx) = explicit_overrides.remove(&key_pos) {
-                    explicit_overrides_by_name.remove(&label_name);
-                    if let Some(explicit) = explicit_entries[explicit_idx].take() {
-                        typed_fields.push(explicit);
-                    }
-                    continue;
-                }
-                if let Some(explicit_idx) = explicit_overrides_by_name.remove(&label_name) {
-                    if let Some(explicit) = explicit_entries[explicit_idx].take() {
-                        typed_fields.push(explicit);
-                    }
-                    continue;
-                }
-
-                if typed_base.is_some() {
-                    let (_poly_vars, ty_arg, ty_res) =
-                        crate::types::ctype::instance_label(ctx, false, raw_label_desc);
-                    let _ = crate::types::unify(ctx, &mut tctx.unify_state, ty_res, record_ty);
-                    let label_desc = crate::types::LabelDescription {
-                        lbl_res: record_ty,
-                        lbl_arg: ty_arg,
-                        ..raw_label_desc.clone()
-                    };
-                    typed_fields.push((
-                        placeholder_lid,
-                        label_desc.clone(),
-                        RecordLabelDefinition::Kept(label_desc.lbl_arg),
-                        false,
-                    ));
-                    continue;
-                }
-
-                if raw_label_desc.lbl_optional {
-                    let option_ty = raw_label_desc.lbl_arg;
-                    let label_lid_idx = synthesized_record_lident_idx(ctx, tctx.arena, &label_name);
-                    let label_lid = Located {
-                        txt: label_lid_idx,
-                        loc,
-                    };
-                    let label_desc = crate::types::LabelDescription {
-                        lbl_res: record_ty,
-                        ..raw_label_desc.clone()
-                    };
-                    typed_fields.push((
-                        label_lid,
-                        label_desc,
-                        RecordLabelDefinition::OmittedOptionalNone(label_lid, option_ty),
-                        false,
-                    ));
-                } else {
-                    labels_missing.push(label_name);
-                }
-            }
-
-            if !labels_missing.is_empty() {
-                return Err(TypeCoreError::LabelsMissing {
-                    loc,
-                    labels: labels_missing,
-                    jsx_component_info: jsx_component_error_info.clone(),
-                });
-            }
-
-            typed_fields.extend(
-                explicit_overrides_by_name
-                    .into_values()
-                    .filter_map(|idx| explicit_entries[idx].take()),
-            );
-        }
-    } else if let Some(ref all_labels) = all_labels {
-        let mut explicit_overrides_by_name = build_explicit_overrides_by_name(&explicit_entries);
-        if all_labels.len() > typed_fields.capacity() {
-            typed_fields.reserve(all_labels.len().saturating_sub(typed_fields.len()));
-        }
-        let mut labels_missing = Vec::new();
-
-        for (lbl_idx, label_decl) in all_labels.iter().enumerate() {
-            let label_name = label_decl.ld_id.name().to_string();
-
-            let key_pos = lbl_idx as i32;
-            // Check if this label has an explicit override BEFORE doing instance_label.
-            // OCaml only calls instance_label for explicit fields (in type_label_exp),
-            // not for missing optional fields (which use lbl.lbl_arg directly).
-            if let Some(explicit_idx) = explicit_overrides.remove(&key_pos) {
-                explicit_overrides_by_name.remove(&label_name);
-                if let Some(explicit) = explicit_entries[explicit_idx].take() {
-                    typed_fields.push(explicit);
-                }
-                continue;
-            }
-            if let Some(explicit_idx) = explicit_overrides_by_name.remove(&label_name) {
-                if let Some(explicit) = explicit_entries[explicit_idx].take() {
-                    typed_fields.push(explicit);
-                }
-                continue;
-            }
-
-            // OCaml uses the record family's label descriptions directly for
-            // omitted fields rather than re-disambiguating each label name.
-            let raw_label_desc = all_label_descriptions
-                .as_ref()
-                .and_then(|labels| labels.get(lbl_idx).cloned())
-                .filter(|label| label.lbl_name == label_name);
-
-            // For kept fields (base expression), we still need instance_label
-            // for type resolution. For optional None fields, use lbl_arg directly.
-            if typed_base.is_some() {
-                let label_desc = if let Some(raw_label_desc) = raw_label_desc.as_ref() {
-                    let (_poly_vars, ty_arg, ty_res) =
-                        crate::types::ctype::instance_label(ctx, false, raw_label_desc);
-                    let _ = crate::types::unify(ctx, &mut tctx.unify_state, ty_res, record_ty);
-                    crate::types::LabelDescription {
-                        lbl_res: record_ty,
-                        lbl_arg: ty_arg,
-                        ..raw_label_desc.clone()
-                    }
-                } else {
-                    crate::types::LabelDescription {
-                        lbl_name: label_name.clone(),
-                        lbl_runtime_name: label_decl.declaration_name(),
-                        lbl_res: record_ty,
-                        lbl_arg: crate::types::instance(ctx, label_decl.ld_type),
-                        lbl_mut: label_decl.ld_mutable,
-                        lbl_optional: label_decl.ld_optional,
-                        lbl_pos: lbl_idx as i32,
-                        lbl_all: crate::types::LabelArrayRef(0),
-                        lbl_repres: crate::types::RecordRepresentation::RecordRegular,
-                        lbl_private: crate::types::PrivateFlag::Public,
-                        lbl_loc: label_decl.ld_loc,
-                        lbl_attributes: label_decl.ld_attributes.clone(),
-                    }
-                };
-                typed_fields.push((
-                    placeholder_lid,
-                    label_desc.clone(),
-                    RecordLabelDefinition::Kept(label_desc.lbl_arg),
-                    false,
-                ));
-                continue;
-            }
-
-            // For missing optional fields: use lbl_arg directly (no instance_label),
-            // matching OCaml's option_none(lbl.lbl_arg, loc) pattern
-            let is_optional = raw_label_desc
-                .as_ref()
-                .map_or(label_decl.ld_optional, |l| l.lbl_optional);
-            if is_optional {
-                // Get the option type from the raw label, not from instance_label
-                let option_ty = raw_label_desc
-                    .as_ref()
-                    .map_or_else(|| label_decl.ld_type, |l| l.lbl_arg);
-                // Build label desc using the raw label's lbl_arg (not instanced)
-                let label_desc = if let Some(raw_label_desc) = raw_label_desc {
-                    crate::types::LabelDescription {
-                        lbl_res: record_ty,
-                        ..raw_label_desc
-                    }
-                } else {
-                    crate::types::LabelDescription {
-                        lbl_name: label_name.clone(),
-                        lbl_runtime_name: label_decl.declaration_name(),
-                        lbl_res: record_ty,
-                        lbl_arg: option_ty,
-                        lbl_mut: label_decl.ld_mutable,
-                        lbl_optional: true,
-                        lbl_pos: lbl_idx as i32,
-                        lbl_all: crate::types::LabelArrayRef(0),
-                        lbl_repres: crate::types::RecordRepresentation::RecordRegular,
-                        lbl_private: crate::types::PrivateFlag::Public,
-                        lbl_loc: label_decl.ld_loc,
-                        lbl_attributes: label_decl.ld_attributes.clone(),
-                    }
-                };
-                // OCaml uses {loc; txt = Lident lbl.lbl_name} for synthesized optional fields
-                let label_lid_idx = synthesized_record_lident_idx(ctx, tctx.arena, &label_name);
-                let label_lid = Located {
-                    txt: label_lid_idx,
-                    loc,
-                };
-                typed_fields.push((
-                    label_lid,
-                    label_desc,
-                    RecordLabelDefinition::OmittedOptionalNone(label_lid, option_ty),
-                    false,
-                ));
-            } else {
-                labels_missing.push(label_name);
-            }
-        }
-
+                    .filter(|ld| !ld.ld_optional)
+                    .map(|ld| ld.ld_id.name().to_string())
+                    .collect(),
+                _ => return Err(TypeCoreError::EmptyRecordLiteral { loc }),
+            },
+        };
         if !labels_missing.is_empty() {
             return Err(TypeCoreError::LabelsMissing {
                 loc,
@@ -16084,18 +15680,6 @@ fn type_record(
                 jsx_component_info: jsx_component_error_info.clone(),
             });
         }
-
-        // Preserve explicitly-typed fields even if we couldn't align their position.
-        typed_fields.extend(
-            explicit_overrides_by_name
-                .into_values()
-                .filter_map(|idx| explicit_entries[idx].take()),
-        );
-    } else {
-        typed_fields = explicit_overrides_in_order
-            .into_iter()
-            .filter_map(|idx| explicit_entries[idx].take())
-            .collect();
     }
 
     // Match OCaml's unify_kept (typecore.ml:2755-2770):
@@ -16134,88 +15718,39 @@ fn type_record(
         }
         typed_base_expr.exp_type = ty_exp;
 
-        // Collect the set of overridden label positions
-        let overridden_positions: HashSet<i32> = typed_fields
-            .iter()
-            .filter_map(|(_, lbl, defn, _)| {
-                if matches!(defn, RecordLabelDefinition::Overridden(..)) {
-                    Some(lbl.lbl_pos)
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        // Match OCaml unify_kept: iterate one generic label family for the
-        // concrete record path so each `instance_label false` call gets its own
-        // fresh copy window while still staying in the right record family.
-        let all_labels_for_unify = all_label_descriptions.clone().or_else(|| {
-            build_record_label_descriptions(record_ty, env, &mut tctx.persistent_env, ctx).or_else(
-                || build_record_label_descriptions(ty_exp, env, &mut tctx.persistent_env, ctx),
-            )
-        });
-
+        // `unify_kept` over `lbl.lbl_all` of the first written label
+        // (typecore.ml:3137-3151); a spread literal writes at least one field.
+        let family = record_family
+            .as_ref()
+            .expect("a record spread writes a label of a declared record");
         let base_loc = typed_base_expr.exp_loc;
-        if let Some(labels) = all_labels_for_unify {
-            for (idx, env_label) in labels.iter().enumerate() {
-                // Instance 1: connect to base expression. OCaml `unify_kept`
-                // (typecore.ml:2886-2898) raises from each unification.
-                // (typecore.ml: `unify_exp_types ~context:None exp.exp_loc env ty_exp ty_res1`).
-                let (_poly1, ty_arg1, ty_res1) =
+        // `written_labels lbl.lbl_all lbl_exp_list` (typecore.ml:3138).
+        let written = record_written_labels(family.labels.len(), &explicit_entries);
+        for env_label in family.labels.iter() {
+            // Instance 1: connect to the base expression; OCaml `unify_kept`
+            // raises from each unification.
+            let (_poly1, ty_arg1, ty_res1) =
+                crate::types::ctype::instance_label(ctx, false, env_label);
+            unify_expression_types(tctx, base_loc, ty_exp, ty_res1, None)?;
+
+            // Do not connect result types for written labels.
+            if !written[env_label.lbl_pos as usize] {
+                // Instance 2: connect to the expected type, bridging the two
+                // instances through their argument types.
+                let (_poly2, ty_arg2, ty_res2) =
                     crate::types::ctype::instance_label(ctx, false, env_label);
-                unify_expression_types(tctx, base_loc, ty_exp, ty_res1, None)?;
-
-                let is_overridden = overridden_positions.contains(&(idx as i32))
-                    || overridden_positions.contains(&env_label.lbl_pos);
-
-                if !is_overridden {
-                    // Instance 2: connect to expected type
-                    let (_poly2, ty_arg2, ty_res2) =
-                        crate::types::ctype::instance_label(ctx, false, env_label);
-                    // Bridge the two instances through their arg types
-                    unify_expression_types(tctx, loc, ty_arg1, ty_arg2, None)?;
-                    // Connect instance 2 to expected type
-                    let expected_inst = crate::types::instance(ctx, expected_ty);
-                    unify_expression_types(tctx, loc, expected_inst, ty_res2, None)?;
-                }
-            }
-        } else {
-            // Fallback: find any label for single-instance unification
-            let label_for_unify = typed_fields.iter().find_map(|(_, lbl, _, _)| {
-                disambiguate_label(
-                    &lbl.lbl_name,
-                    record_ty,
-                    env,
-                    &mut tctx.persistent_env,
-                    ctx,
-                    false,
-                    true,
-                )
-            });
-            if let Some(env_label) = label_for_unify {
-                let (_poly_vars, _ty_arg, ty_res) =
-                    crate::types::ctype::instance_label(ctx, false, &env_label);
-                unify_expression_types(tctx, base_loc, ty_exp, ty_res, None)?;
-            } else {
-                // Final fallback: direct unification
-                unify_expression_types(
-                    tctx,
-                    loc,
-                    ty_exp,
-                    record_ty,
-                    Some(TypeClashContext::RecordSpread),
-                )?;
+                unify_expression_types(tctx, loc, ty_arg1, ty_arg2, None)?;
+                let expected_inst = crate::types::instance(ctx, expected_ty);
+                unify_expression_types(tctx, loc, expected_inst, ty_res2, None)?;
             }
         }
     }
 
     if typed_base.is_some() {
-        // typecore.ml:2902-2906 reads `Array.length lbl.lbl_all` of the first
+        // typecore.ml:3154-3165    if typed_base.is_some() {
+        // typecore.ml:3154-3165 reads `Array.length lbl.lbl_all` of the first
         // label.
-        let num_fields = all_label_descriptions
-            .as_ref()
-            .map(|labels| labels.len())
-            .or_else(|| all_labels.as_ref().map(|labels| labels.len()));
+        let num_fields = record_family.as_ref().map(|family| family.labels.len());
         if num_fields.is_some_and(|num_fields| fields.len() == num_fields) {
             tctx.report_warning(loc, Warning::UselessRecordWith);
             typed_base = None;
@@ -16252,40 +15787,26 @@ fn type_record(
     // the same typedtree sharing and force order.
     let record_exp_ty = crate::types::instance(ctx, expected_ty);
 
-    let exp_desc = if let Some(all_labels) = sparse_all_label_descriptions.clone() {
-        ExpressionDesc::Texp_record_sparse {
-            fields: typed_fields,
-            // OCaml translcore.ml:1107-1191 lowers over the complete
-            // `lbl_all` array that typecore.ml:2833-2842 installed while
-            // typing the record. Carry the shared array with the sparse node
-            // so lambda lowering does not have to rediscover it through an
-            // alias-expanded record type path.
-            all_labels,
-            omitted_loc: loc,
-            extended_expression: typed_base.map(Box::new),
-        }
-    } else {
-        // OCaml compiler/ml/typecore.ml:2767-2788: a non-empty field array
-        // takes `representation` from its first label (kept implicit in
-        // `fields[0]`); an empty one uses the expected concrete record's
-        // representation (`repr_opt` from `extract_concrete_record`), else
-        // `Record_regular`.
-        let empty_representation = typed_fields.is_empty().then(|| {
-            Box::new(
-                expected_record_info
-                    .as_ref()
-                    .and_then(|(_, _, decl)| match &decl.type_kind {
-                        crate::types::TypeKind::TypeRecord(_, repr) => Some(repr.clone()),
-                        _ => None,
-                    })
-                    .unwrap_or(crate::types::RecordRepresentation::RecordRegular),
-            )
-        });
-        ExpressionDesc::Texp_record {
-            fields: typed_fields,
-            empty_representation,
-            extended_expression: typed_base.map(Box::new),
-        }
+    // `record_fields lbl_exp_list` (typecore.ml:393-402): only the written
+    // fields, already in `lbl_pos` order.
+    // OCaml typecore.ml:3058-3063: `{}` takes the expected concrete record's
+    // representation (`repr_opt` from `extract_concrete_record`); written
+    // fields carry theirs in their labels.
+    let empty_representation = explicit_entries.is_empty().then(|| {
+        Box::new(
+            expected_record_info
+                .as_ref()
+                .and_then(|(_, _, decl)| match &decl.type_kind {
+                    crate::types::TypeKind::TypeRecord(_, repr) => Some(repr.clone()),
+                    _ => None,
+                })
+                .unwrap_or(crate::types::RecordRepresentation::RecordRegular),
+        )
+    });
+    let exp_desc = ExpressionDesc::Texp_record {
+        fields: explicit_entries,
+        empty_representation,
+        extended_expression: typed_base.map(Box::new),
     };
 
     Ok(Expression::new(
@@ -19571,27 +19092,21 @@ fn is_nonexpansive_expression(tctx: &TypeCheckContext<'_>, exp: &Expression) -> 
             fields,
             extended_expression,
             ..
-        }
-        | ExpressionDesc::Texp_record_sparse {
-            fields,
-            extended_expression,
-            ..
         } => {
-            fields
-                .iter()
-                .all(|(_, label, definition, _)| match definition {
-                    crate::types::typedtree::RecordLabelDefinition::Overridden(_, expr) => {
-                        label.lbl_mut == crate::types::MutableFlag::Immutable
-                            && is_nonexpansive_expression(tctx, expr)
-                    }
-                    crate::types::typedtree::RecordLabelDefinition::Kept(_)
-                    | crate::types::typedtree::RecordLabelDefinition::OmittedOptionalNone(_, _) => {
-                        true
-                    }
-                })
-                && extended_expression
-                    .as_deref()
-                    .is_none_or(|expr| is_nonexpansive_expression(tctx, expr))
+            // typecore.ml:2088-2105
+            fields.iter().all(|(label, _, expr)| {
+                label.lbl_mut == crate::types::MutableFlag::Immutable
+                    && is_nonexpansive_expression(tctx, expr)
+            }) && match extended_expression.as_deref() {
+                Some(expr) => is_nonexpansive_expression(tctx, expr),
+                // The optional fields the literal leaves out are allocated too.
+                None => crate::types::typedtree::record_all_labels(tctx.type_ctx, fields)
+                    .is_none_or(|labels| {
+                        labels
+                            .iter()
+                            .all(|label| label.lbl_mut == crate::types::MutableFlag::Immutable)
+                    }),
+            }
         }
         ExpressionDesc::Texp_field(expr, _, _) => is_nonexpansive_expression(tctx, expr),
         ExpressionDesc::Texp_array(_) => false,
@@ -20116,19 +19631,11 @@ pub(crate) fn typed_expression_uses_ident(expr: &Expression, target: &Ident) -> 
             fields,
             extended_expression,
             ..
-        }
-        | ExpressionDesc::Texp_record_sparse {
-            fields,
-            extended_expression,
-            ..
         } => {
-            fields.iter().any(|(_, _, definition, _)| {
-                matches!(
-                    definition,
-                    crate::types::typedtree::RecordLabelDefinition::Overridden(_, expr)
-                        if typed_expression_uses_ident(expr, target)
-                )
-            }) || extended_expression
+            fields
+                .iter()
+                .any(|(_, _, expr)| typed_expression_uses_ident(expr, target))
+                || extended_expression
                 .as_deref()
                 .is_some_and(|expr| typed_expression_uses_ident(expr, target))
         }
@@ -20459,7 +19966,6 @@ fn rec_expression_class(expr: &Expression) -> RecExpressionClass {
         | ExpressionDesc::Texp_construct(_, _, _)
         | ExpressionDesc::Texp_variant(_, _)
         | ExpressionDesc::Texp_record { .. }
-        | ExpressionDesc::Texp_record_sparse { .. }
         | ExpressionDesc::Texp_object_literal(_)
         | ExpressionDesc::Texp_setfield(_, _, _, _)
         | ExpressionDesc::Texp_while(_, _)
@@ -20793,39 +20299,26 @@ fn rec_expression(ctx: &TypeContext, env: &RecEnv, expr: &Expression) -> RecUse 
         }
         ExpressionDesc::Texp_record {
             fields,
+            empty_representation,
             extended_expression,
-            ..
-        }
-        | ExpressionDesc::Texp_record_sparse {
-            fields,
-            extended_expression,
-            ..
         } => {
+            // rec_check.ml:291-300: each written field's use, joined.
             let fields_use = fields
                 .iter()
-                .fold(RecUse::default(), |use_, (_, _, def, _)| {
-                    let field_use = match def {
-                        crate::types::typedtree::RecordLabelDefinition::Overridden(_, expr) => {
-                            rec_expression(ctx, env, expr)
-                        }
-                        crate::types::typedtree::RecordLabelDefinition::Kept(_)
-                        | crate::types::typedtree::RecordLabelDefinition::OmittedOptionalNone(
-                            _,
-                            _,
-                        ) => RecUse::default(),
-                    };
-                    rec_use_join(use_, field_use)
+                .fold(RecUse::default(), |use_, (_, _, expr)| {
+                    rec_use_join(use_, rec_expression(ctx, env, expr))
                 });
             let record_use = rec_use_join(
                 fields_use,
                 rec_option_expression(ctx, env, extended_expression.as_deref()),
             );
-            let unboxed = fields.first().is_some_and(|(_, label, _, _)| {
-                matches!(
-                    label.lbl_repres,
-                    crate::types::decl::RecordRepresentation::RecordUnboxed(_)
-                )
-            });
+            let unboxed = matches!(
+                crate::types::typedtree::record_representation(
+                    fields,
+                    empty_representation.as_deref()
+                ),
+                Some(crate::types::decl::RecordRepresentation::RecordUnboxed(_))
+            );
             if unboxed {
                 record_use
             } else {
@@ -20883,16 +20376,16 @@ fn rec_expression(ctx: &TypeContext, env: &RecEnv, expr: &Expression) -> RecUse 
     }
 }
 
-fn rec_binding_rhs_is_exempt(expr: &Expression) -> bool {
+fn rec_binding_rhs_is_exempt(ctx: &TypeContext, expr: &Expression) -> bool {
     match &expr.exp_desc {
         ExpressionDesc::Texp_function { .. } => true,
-        ExpressionDesc::Texp_record { fields, .. }
-        | ExpressionDesc::Texp_record_sparse { fields, .. } => {
+        // rec_check.ml:497-502: a record of a single field, a function.
+        ExpressionDesc::Texp_record { fields, .. } => {
             matches!(
                 fields.as_slice(),
-                [(_, _, crate::types::typedtree::RecordLabelDefinition::Overridden(_, expr), _)]
-                    if matches!(expr.exp_desc, ExpressionDesc::Texp_function { .. })
-            )
+                [(_, _, expr)] if matches!(expr.exp_desc, ExpressionDesc::Texp_function { .. })
+            ) && crate::types::typedtree::record_all_labels(ctx, fields)
+                .is_some_and(|labels| labels.len() == 1)
         }
         _ => false,
     }
@@ -20930,7 +20423,7 @@ fn check_recursive_bindings(ctx: &TypeContext, bindings: &[ValueBinding]) -> Typ
         .flat_map(|binding| rec_pattern_variables(&binding.vb_pat))
         .collect::<Vec<_>>();
     for binding in bindings {
-        if !rec_binding_rhs_is_exempt(&binding.vb_expr) {
+        if !rec_binding_rhs_is_exempt(ctx, &binding.vb_expr) {
             check_recursive_expression(ctx, &ids, &binding.vb_expr)?;
         }
     }
@@ -25240,6 +24733,7 @@ fn build_record_label_descriptions_info(
                 Arc::new(crate::types::context::RecordLabelDescriptionSummary::from_labels(&cached))
             });
         return Some(RecordLabelDescriptionsInfo {
+            family: ctx.get_record_label_family(&record_path)?,
             labels: cached,
             summary,
         });
@@ -25259,7 +24753,11 @@ fn build_record_label_descriptions_info(
                 labels.clone(),
                 summary.clone(),
             );
-            return Some(RecordLabelDescriptionsInfo { labels, summary });
+            return Some(RecordLabelDescriptionsInfo {
+                        family: ctx.get_record_label_family(&record_path)?,
+                        labels,
+                        summary,
+                    });
         }
         let (descriptions, piece) = ctx.build_in_store(|| {
             let shared_res = ctx.new_generic_constr(record_path.clone(), decl.type_params.clone());
@@ -25302,6 +24800,7 @@ fn build_record_label_descriptions_info(
             summary.clone(),
         );
         return Some(RecordLabelDescriptionsInfo {
+            family: ctx.get_record_label_family(&record_path)?,
             labels: descriptions,
             summary,
         });
@@ -25321,7 +24820,11 @@ fn build_record_label_descriptions_info(
                 labels.clone(),
                 summary.clone(),
             );
-            return Some(RecordLabelDescriptionsInfo { labels, summary });
+            return Some(RecordLabelDescriptionsInfo {
+                        family: ctx.get_record_label_family(&record_path)?,
+                        labels,
+                        summary,
+                    });
         }
         let (descriptions, piece) = ctx.build_in_store(|| {
             let shared_res = ctx.new_generic_constr(record_path.clone(), decl.type_params.clone());
@@ -25364,6 +24867,7 @@ fn build_record_label_descriptions_info(
             summary.clone(),
         );
         return Some(RecordLabelDescriptionsInfo {
+            family: ctx.get_record_label_family(&record_path)?,
             labels: descriptions,
             summary,
         });
@@ -25409,6 +24913,7 @@ fn build_record_label_descriptions_info(
     ctx.register_record_label_descriptions(&record_path, descriptions.clone());
     let summary = ctx.get_record_label_description_summary(&record_path)?;
     Some(RecordLabelDescriptionsInfo {
+        family: ctx.get_record_label_family(&record_path)?,
         labels: descriptions,
         summary,
     })
@@ -25431,9 +24936,14 @@ fn cached_record_label_descriptions_info_for_constr(
             let desc = ctx.borrow_desc(current);
             match &*desc {
                 TypeDesc::Tconstr { path, .. } => {
-                    let labels = ctx.get_record_label_descriptions(path)?;
+                    let family = ctx.get_record_label_family(path)?;
+                    let labels = ctx.label_family(family)?;
                     let summary = ctx.get_record_label_description_summary(path)?;
-                    return Some(RecordLabelDescriptionsInfo { labels, summary });
+                    return Some(RecordLabelDescriptionsInfo {
+                        family,
+                        labels,
+                        summary,
+                    });
                 }
                 TypeDesc::Tlink(target) | TypeDesc::Tsubst(target) => Some(*target),
                 _ => return None,
