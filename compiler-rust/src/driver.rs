@@ -2731,18 +2731,23 @@ fn type_mod_error_to_anyhow_styled(
             .into()
         }
         TypeModError::CoreError(TypeCoreError::NotAPackedModule { loc, ty }) => {
+            // typecore.ml:5438-5440.
+            let ty = format_type_expr(type_ctx, *ty);
             UserDiagnostic::new(
-                format_compiler_error_report_with_unindented_break(
-                    arena,
-                    source,
-                    filename,
-                    *loc,
-                    "This expression is packed module, but the expected type is",
-                    &format_type_expr(type_ctx, *ty),
-                ),
-                2,
-            )
-            .into()
+            format_compiler_error_report_formatted(
+                arena,
+                source,
+                filename,
+                *loc,
+                &type_clash::render_error_message(|ppf| {
+                    ppf.str("This expression is packed module, but the expected type is");
+                    ppf.space();
+                    crate::types::printtyp::pp_doc(ppf, &ty);
+                }),
+            ),
+            2,
+        )
+        .into()
         }
         TypeModError::CoreError(TypeCoreError::InlinedRecordExpected { loc }) => {
             UserDiagnostic::new(
@@ -2765,18 +2770,23 @@ fn type_mod_error_to_anyhow_styled(
             .into()
         }
         TypeModError::NotAPackedModule { loc, ty } => {
+            // typemod.ml:1932-1934.
+            let ty = format_type_expr(type_ctx, *ty);
             UserDiagnostic::new(
-                format_compiler_error_report_with_unindented_break(
-                    arena,
-                    source,
-                    filename,
-                    *loc,
-                    "This expression is not a packed module. It has type",
-                    &format_type_expr(type_ctx, *ty),
-                ),
-                2,
-            )
-            .into()
+            format_compiler_error_report_formatted(
+                arena,
+                source,
+                filename,
+                *loc,
+                &type_clash::render_error_message(|ppf| {
+                    ppf.str("This expression is not a packed module. It has type");
+                    ppf.space();
+                    crate::types::printtyp::pp_doc(ppf, &ty);
+                }),
+            ),
+            2,
+        )
+        .into()
         }
         TypeModError::CannotApply { loc, mty, origin } => UserDiagnostic::new(
             format_cannot_apply_module_report(type_ctx, arena, source, filename, *loc, mty, origin.as_ref()),
@@ -2859,36 +2869,47 @@ fn type_mod_error_to_anyhow_styled(
             2,
         )
         .into(),
-        TypeModError::IncompletePackedModule { loc, ty } => UserDiagnostic::new(
-            format_compiler_error_report_with_unindented_break(
+        TypeModError::IncompletePackedModule { loc, ty } => {
+            // typemod.ml:1935-1938.
+            let ty = format_package_type_expr_for_error(type_ctx, arena, *ty);
+            UserDiagnostic::new(
+            format_compiler_error_report_formatted(
                 arena,
                 source,
                 filename,
                 *loc,
-                "The type of this first-class module still contains type variables:",
-                &format_package_type_expr_for_error(type_ctx, arena, *ty),
+                &type_clash::render_error_message(|ppf| {
+                    ppf.str("The type of this first-class module still contains type variables:");
+                    ppf.space();
+                    crate::types::printtyp::pp_doc(ppf, &ty);
+                }),
             ),
             2,
         )
-        .into(),
-        TypeModError::ScopingPack { loc, lid, ty } => UserDiagnostic::new(
-            format_compiler_error_report_with_unindented_break(
+        .into()
+        }
+        TypeModError::ScopingPack { loc, lid, ty } => {
+            // typemod.ml:1939-1941.
+            let lid = format_longident_for_report(arena, lid);
+            let ty = format_type_expr(type_ctx, *ty);
+            UserDiagnostic::new(
+            format_compiler_error_report_formatted(
                 arena,
                 source,
                 filename,
                 *loc,
-                &format!(
-                    "The type {} in this module cannot be exported.",
-                    format_longident_for_report(arena, lid)
-                ),
-                &format!(
-                    "Its type contains local dependencies:\n{}",
-                    format_type_expr(type_ctx, *ty)
-                ),
+                &type_clash::render_error_message(|ppf| {
+                    ppf.str(&format!("The type {lid} in this module cannot be exported."));
+                    ppf.space();
+                    ppf.str("Its type contains local dependencies:");
+                    ppf.space();
+                    crate::types::printtyp::pp_doc(ppf, &ty);
+                }),
             ),
             2,
         )
-        .into(),
+        .into()
+        }
         TypeModError::StructureExpected { loc, mty } => UserDiagnostic::new(
             format_structure_expected_report(type_ctx, arena, source, filename, *loc, mty),
             2,
@@ -3562,20 +3583,22 @@ fn type_mod_error_to_anyhow_styled(
             .into()
         }
         TypeModError::CoreError(TypeCoreError::PrivateType { loc, ty }) => {
+            // typecore.ml:5425-5426.
+            let ty = format_type_expr(type_ctx, *ty);
             UserDiagnostic::new(
-                format_compiler_error_report(
-                    arena,
-                    source,
-                    filename,
-                    *loc,
-                    &format!(
-                        "Cannot create values of the private type {}",
-                        format_type_expr(type_ctx, *ty)
-                    ),
-                ),
-                2,
-            )
-            .into()
+            format_compiler_error_report_formatted(
+                arena,
+                source,
+                filename,
+                *loc,
+                &type_clash::render_error_message(|ppf| {
+                    ppf.str("Cannot create values of the private type ");
+                    crate::types::printtyp::pp_doc(ppf, &ty);
+                }),
+            ),
+            2,
+        )
+        .into()
         }
         TypeModError::CoreError(TypeCoreError::LabelNotMutable { loc, lid }) => {
             UserDiagnostic::new(
@@ -3662,17 +3685,28 @@ fn type_mod_error_to_anyhow_styled(
             )
             .into()
         }
-        TypeModError::CoreError(TypeCoreError::NotAnObjectType { loc, ty }) => UserDiagnostic::new(
-            format_compiler_error_report(
+        TypeModError::CoreError(TypeCoreError::NotAnObjectType { loc, ty }) => {
+            // typetexp.ml:1014-1016: `@[The type %a@ is not an object type@]`.
+            let ty = format_type_expr(type_ctx, *ty);
+            UserDiagnostic::new(
+            format_compiler_error_report_formatted(
                 arena,
                 source,
                 filename,
                 *loc,
-                &format!("The type {} is not an object type", format_type_expr(type_ctx, *ty)),
+                &type_clash::render_error_message(|ppf| {
+                    ppf.open_box(crate::parser::formatter::BoxKind::Box, 0);
+                    ppf.str("The type ");
+                    crate::types::printtyp::pp_doc(ppf, &ty);
+                    ppf.space();
+                    ppf.str("is not an object type");
+                    ppf.close_box();
+                }),
             ),
             2,
         )
-        .into(),
+        .into()
+        }
         TypeModError::CoreError(TypeCoreError::OpenedObject { loc, path }) => {
             let report = match path {
                 Some(path) => format_compiler_error_report_with_unindented_break(
@@ -3752,16 +3786,29 @@ fn type_mod_error_to_anyhow_styled(
             actual,
             expected,
         } => UserDiagnostic::new(
-            format_compiler_error_report(
+            format_compiler_error_report_formatted(
                 arena,
                 source,
                 filename,
                 *loc,
-                &format!(
-                    "Constraints are not satisfied in this type.\nType {} should be an instance of {}",
-                    format_type_expr(type_ctx, *actual),
-                    format_type_expr(type_ctx, *expected)
-                ),
+                &format_two_type_message(type_ctx, *actual, *expected, |ppf, actual, expected| {
+                    // typedecl.ml:2216-2221:
+                    // `@[%s@ @[<hv>Type@ %a@ should be an instance of@ %a@]@]`.
+                    use crate::parser::formatter::BoxKind;
+                    ppf.open_box(BoxKind::Box, 0);
+                    ppf.str("Constraints are not satisfied in this type.");
+                    ppf.space();
+                    ppf.open_box(BoxKind::HV, 0);
+                    ppf.str("Type");
+                    ppf.space();
+                    crate::types::printtyp::pp_doc(ppf, actual);
+                    ppf.space();
+                    ppf.str("should be an instance of");
+                    ppf.space();
+                    crate::types::printtyp::pp_doc(ppf, expected);
+                    ppf.close_box();
+                    ppf.close_box();
+                }),
             ),
             2,
         )
@@ -4012,15 +4059,23 @@ fn type_mod_error_to_anyhow_styled(
         )
         .into(),
         TypeModError::CycleInDef { loc, name, ty } => UserDiagnostic::new(
-            format_compiler_error_report(
+            format_compiler_error_report_formatted(
                 arena,
                 source,
                 filename,
                 *loc,
-                &format!(
-                    "The definition of {name} contains a cycle:\n{}",
-                    format_type_expr(type_ctx, *ty)
-                ),
+                &{
+                    // typedecl.ml:2205-2208:
+                    // `@[<v>The definition of %s contains a cycle:@ %a@]`.
+                    let ty = format_type_expr(type_ctx, *ty);
+                    type_clash::render_error_message(|ppf| {
+                        ppf.open_vbox(0);
+                        ppf.str(&format!("The definition of {name} contains a cycle:"));
+                        ppf.space();
+                        crate::types::printtyp::pp_doc(ppf, &ty);
+                        ppf.close_box();
+                    })
+                },
             ),
             2,
         )
@@ -4031,17 +4086,24 @@ fn type_mod_error_to_anyhow_styled(
             actual,
             expected,
         } => UserDiagnostic::new(
-            format_compiler_error_report(
+            format_compiler_error_report_formatted(
                 arena,
                 source,
                 filename,
                 *loc,
-                &format!(
-                    "In the definition of {}, type {} should be {}",
-                    path.name(),
-                    format_type_expr(type_ctx, *actual),
-                    format_type_expr(type_ctx, *expected)
-                ),
+                &format_two_type_message(type_ctx, *actual, *expected, |ppf, actual, expected| {
+                    // typedecl.ml:2222-2226:
+                    // `@[<hv>In the definition of %s, type@ %a@ should be@ %a@]`.
+                    ppf.open_hvbox(0);
+                    ppf.str(&format!("In the definition of {}, type", path.name()));
+                    ppf.space();
+                    crate::types::printtyp::pp_doc(ppf, actual);
+                    ppf.space();
+                    ppf.str("should be");
+                    ppf.space();
+                    crate::types::printtyp::pp_doc(ppf, expected);
+                    ppf.close_box();
+                }),
             ),
             2,
         )
@@ -4981,6 +5043,24 @@ fn format_structure_expected_report(
         ppf.close_box();
     });
     format_compiler_error_report_formatted(arena, source, filename, loc, &message)
+}
+
+/// A message printing two types in one naming session, as
+/// `Printtyp.reset_and_mark_loops ty; Printtyp.mark_loops ty'` does before
+/// the report prints both (typedecl.ml:2217-2218, 2223-2224).
+fn format_two_type_message(
+    type_ctx: &TypeContext,
+    first: TypeExprRef,
+    second: TypeExprRef,
+    f: impl FnOnce(&mut crate::parser::formatter::Formatter<&mut Vec<u8>>, &str, &str),
+) -> String {
+    let mut printer = TypeExprPrinter::new(type_ctx);
+    printer.reset();
+    printer.mark_loops(first);
+    printer.mark_loops(second);
+    let first = printer.print(first);
+    let second = printer.print(second);
+    type_clash::render_error_message(|ppf| f(ppf, &first, &second))
 }
 
 fn format_typemod_module_type(
