@@ -704,17 +704,20 @@ impl<'a> SigReadContext<'a> {
             OcamlValue::Block(tag, fields) => match tag {
                 0 => {
                     // Tvar(string option)
-                    let name = fields[0].as_option().map(|s| s.as_string().to_string());
+                    let name = fields[0]
+                        .as_option()
+                        .map(|s| crate::name::Name::new(s.as_string()));
                     TypeDesc::Tvar(name)
                 }
                 1 => {
                     // Caml1999I024 stores the complete parameter list directly;
                     // keep that allocation shape rather than rebuilding unary nodes.
-                    let args = fields[0]
+                    let args: crate::types::type_expr::TypeArgs = fields[0]
                         .as_list()
                         .iter()
                         .map(|arg| self.read_arg(arg))
                         .collect();
+                    let args = self.ctx.new_type_args(&args);
                     let ret = self.read_type_expr(&fields[1]);
                     TypeDesc::Tarrow { args, ret }
                 }
@@ -725,7 +728,7 @@ impl<'a> SigReadContext<'a> {
                         .iter()
                         .map(|te| self.read_type_expr(te))
                         .collect();
-                    TypeDesc::Ttuple(types.into())
+                    TypeDesc::Ttuple(self.ctx.new_type_list(&types))
                 }
                 3 => {
                     // Tconstr(Path.t, type_expr list, abbrev_memo ref)
@@ -739,7 +742,7 @@ impl<'a> SigReadContext<'a> {
 
                     TypeDesc::Tconstr {
                         path,
-                        args: args.into(),
+                        args: self.ctx.new_type_list(&args),
                         abbrev,
                     }
                 }
@@ -751,7 +754,7 @@ impl<'a> SigReadContext<'a> {
                 }
                 5 => {
                     // Tfield {name; mutability: field_mutability ref; typ; rest}
-                    let name = fields[0].as_string().to_string();
+                    let name = crate::name::Name::new(fields[0].as_string());
                     let mutability = self.read_mutability_ref(&fields[1]);
                     let typ = self.read_type_expr(&fields[2]);
                     let rest = self.read_type_expr(&fields[3]);
@@ -775,11 +778,13 @@ impl<'a> SigReadContext<'a> {
                 8 => {
                     // Tvariant(row_desc)
                     let row = self.read_row_desc(&fields[0]);
-                    TypeDesc::Tvariant(Box::new(row))
+                    TypeDesc::Tvariant(self.ctx.new_row_desc(row))
                 }
                 9 => {
                     // Tunivar(string option)
-                    let name = fields[0].as_option().map(|s| s.as_string().to_string());
+                    let name = fields[0]
+                        .as_option()
+                        .map(|s| crate::name::Name::new(s.as_string()));
                     TypeDesc::Tunivar(name)
                 }
                 10 => {
@@ -792,7 +797,7 @@ impl<'a> SigReadContext<'a> {
                         .collect();
                     TypeDesc::Tpoly {
                         body,
-                        vars: vars.into(),
+                        vars: self.ctx.new_type_list(&vars),
                     }
                 }
                 11 => {
@@ -810,8 +815,8 @@ impl<'a> SigReadContext<'a> {
                         .collect();
                     TypeDesc::Tpackage {
                         path,
-                        lids: Box::new(lids),
-                        args: args.into(),
+                        lids: self.ctx.new_package_lids(lids),
+                        args: self.ctx.new_type_list(&args),
                     }
                 }
                 _ => {
@@ -994,20 +999,20 @@ fn read_path(value: &OcamlValue) -> Path {
     match value {
         OcamlValue::Block(0, fields) => {
             let id = read_ident(&fields[0]);
-            Path::Pident(id)
+            Path::pident(id)
         }
         OcamlValue::Block(1, fields) => {
             let prefix = read_path(&fields[0]);
             let name = fields[1].as_string().to_string();
             let pos = fields[2].as_int() as i32;
-            Path::Pdot(std::sync::Arc::new(prefix), name.into(), pos)
+            Path::pdot_pos(prefix, name, pos)
         }
         OcamlValue::Block(2, fields) => {
             let f = read_path(&fields[0]);
             let a = read_path(&fields[1]);
-            Path::Papply(std::sync::Arc::new(f), std::sync::Arc::new(a))
+            Path::papply(f, a)
         }
-        _ => Path::Pident(Ident::create_persistent("?")), // fallback
+        _ => Path::pident(Ident::create_persistent("?")), // fallback
     }
 }
 

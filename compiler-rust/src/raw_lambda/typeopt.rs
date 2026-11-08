@@ -4,6 +4,7 @@
 //! consults when deciding raw-lambda shapes such as `Blk_some_not_nested`.
 
 use crate::fast_hash::AHashSet as HashSet;
+use crate::types::path::PathView;
 
 use crate::types::context::TypeContext;
 use crate::types::decl::{
@@ -330,7 +331,7 @@ pub(crate) fn is_base_type(ctx: &TypeContext, env: &Env, ty: TypeExprRef, name: 
 }
 
 fn type_is_builtin_path_but_option(path: &Path) -> BuiltinPathTest {
-    let Path::Pident(id) = path else {
+    let PathView::Pident(id) = path.view() else {
         return BuiltinPathTest::NotApplicable;
     };
     // OCaml checks by stamp range (predef stamps are in a known range).
@@ -388,7 +389,9 @@ fn type_is_builtin_object_uncached(ctx: &TypeContext, env: &Env, ty: TypeExprRef
     match &*ctx.get_desc(ty) {
         TypeDesc::Tobject { .. } => true,
         TypeDesc::Tconstr { path, args, .. } => {
-            if matches!(path, Path::Pident(id) if id.name() == "dict") && args.len() == 1 {
+            if matches!(path.view(), crate::types::path::PathView::Pident(id) if id.name() == "dict")
+                && args.len() == 1
+            {
                 true
             } else {
                 path.name_eq(JS_DICT_T) || path.name_eq(JS_DICT_T_LEGACY)
@@ -475,7 +478,7 @@ mod tests {
             },
         );
 
-        let alias_ty = ctx.new_constr(Path::Pident(alias_id), vec![]);
+        let alias_ty = ctx.new_constr(Path::pident(alias_id), vec![]);
 
         assert!(is_base_type(&ctx, &env, alias_ty, "string"));
     }

@@ -1,5 +1,6 @@
 // Port of compiler/gentype/TypeEnv.ml:1-204 and TypeEnv.mli:1-23.
 
+use crate::types::path::PathView;
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -79,15 +80,15 @@ pub fn is_current_module_name(type_env: &T, name: &str) -> bool {
 }
 
 pub fn strip_current_module_prefix(path: &Path, type_env: &T) -> Option<Path> {
-    match path {
-        Path::Pdot(prefix, segment, _) if matches!(prefix.as_ref(), Path::Pident(id) if is_current_module_name(type_env, id.name())) => {
-            Some(Path::Pident(crate::ident::Ident::create_local(
+    match path.view() {
+        PathView::Pdot(prefix, segment, _) if matches!(prefix.view(), PathView::Pident(id) if is_current_module_name(type_env, id.name())) => {
+            Some(Path::pident(crate::ident::Ident::create_local(
                 segment.as_str(),
             )))
         }
-        Path::Pdot(prefix, segment, pos) => strip_current_module_prefix(prefix, type_env)
+        PathView::Pdot(prefix, segment, pos) => strip_current_module_prefix(prefix, type_env)
             .map(|stripped_prefix| Path::pdot_pos(stripped_prefix, *segment, *pos)),
-        Path::Pident(_) | Path::Papply(_, _) => None,
+        PathView::Pident(_) | PathView::Papply(_, _) => None,
     }
 }
 
@@ -240,8 +241,8 @@ pub fn apply_type_equations(
     type_env: &T,
 ) -> Option<Type> {
     // Mirrors compiler/gentype/TypeEnv.ml:106-119.
-    match path {
-        Path::Pident(id) => match type_env.borrow().type_equations.get(id.name()) {
+    match path.view() {
+        PathView::Pident(id) => match type_env.borrow().type_equations.get(id.name()) {
             Some(type_) => {
                 if crate::gentype::debug::type_resolution.load(std::sync::atomic::Ordering::Relaxed)
                 {
@@ -325,14 +326,14 @@ fn lookup_module_type(
 
 pub fn path_to_list(path: &Path) -> Vec<String> {
     // Mirrors compiler/gentype/TypeEnv.ml:154-158.
-    match path {
-        Path::Pident(id) => vec![id.name().to_string()],
-        Path::Pdot(p, s, _) => {
+    match path.view() {
+        PathView::Pident(id) => vec![id.name().to_string()],
+        PathView::Pdot(p, s, _) => {
             let mut out = vec![s.to_string()];
             out.extend(path_to_list(p));
             out
         }
-        Path::Papply(_, _) => vec![],
+        PathView::Papply(_, _) => vec![],
     }
 }
 

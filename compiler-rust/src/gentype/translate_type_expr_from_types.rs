@@ -7,6 +7,7 @@ use crate::gentype::gen_type_common::{
 use crate::types::asttypes::ArgLabel;
 use crate::types::context::TypeContext;
 use crate::types::path::Path;
+use crate::types::path::PathView;
 use crate::types::type_expr::{RowDesc, RowField, TypeDesc, TypeExprRef};
 
 #[derive(Debug, Clone)]
@@ -32,9 +33,10 @@ pub fn remove_option(
     // Mirrors compiler/gentype/TranslateTypeExprFromTypes.ml:5-12.
     match (type_expr_desc(ctx, type_expr), label) {
         (TypeDesc::Tconstr { path, args, .. }, ArgLabel::Optional(lbl))
-            if matches!(&path, Path::Pident(id) if id.name() == "option") && args.len() == 1 =>
+            if matches!(path.view(), PathView::Pident(id) if id.name() == "option")
+                && args.len() == 1 =>
         {
-            Some((lbl.txt.clone(), args[0]))
+            Some((lbl.txt.clone(), ctx.type_list_at(args, 0)))
         }
         (TypeDesc::Tlink(t), _) => remove_option(ctx, label, &t),
         _ => None,
@@ -43,18 +45,18 @@ pub fn remove_option(
 
 pub fn path_to_list(path: &Path) -> Vec<String> {
     // Mirrors compiler/gentype/TranslateTypeExprFromTypes.ml:14-22.
-    match path {
-        Path::Pident(id) if id.name().starts_with("Stdlib_") => {
+    match path.view() {
+        PathView::Pident(id) if id.name().starts_with("Stdlib_") => {
             let name = id.name();
             vec![name[7..].to_string(), "Stdlib".to_string()]
         }
-        Path::Pident(id) => vec![id.name().to_string()],
-        Path::Pdot(p, s, _) => {
+        PathView::Pident(id) => vec![id.name().to_string()],
+        PathView::Pdot(p, s, _) => {
             let mut out = vec![s.to_string()];
             out.extend(path_to_list(p));
             out
         }
-        Path::Papply(_, _) => vec![],
+        PathView::Papply(_, _) => vec![],
     }
 }
 
@@ -333,7 +335,7 @@ pub fn translate_arrow_type(
     let mut arg_deps = Vec::new();
     let mut labeled_convertable_types = Vec::with_capacity(args.len());
     for arg in args {
-        let (label, typ) = match arg.label() {
+        let (label, typ) = match &arg.label().to_arg_label() {
             ArgLabel::Nolabel => (Label::Nolabel, arg.typ),
             label => match remove_option(ctx, label, &arg.typ) {
                 Some((lbl, typ)) => (Label::OptLabel(lbl), typ),
@@ -384,15 +386,23 @@ pub fn translateTypeExprFromTypes_(
         },
         TypeDesc::Tvar(Some(s)) => Translation {
             dependencies: vec![],
-            type_: Type::TypeVar(s),
+            type_: Type::TypeVar(s.to_string()),
         },
         TypeDesc::Tconstr { path, args, .. }
-            if path.name() == "Js.t" && args.len() == 1 && is_js_t_preserved(ctx, &args[0]) =>
+            if path.name() == "Js.t"
+                && args.len() == 1
+                && is_js_t_preserved(ctx, &ctx.type_list_at(args, 0)) =>
         {
             translate_obj_type(ClosedFlag::Closed, vec![])
         }
         TypeDesc::Tconstr { path, args, .. } if path.name() == "Js.t" && args.len() == 1 => {
-            translateTypeExprFromTypes_(ctx, config, type_vars_gen, type_env, &args[0])
+            translateTypeExprFromTypes_(
+                ctx,
+                config,
+                type_vars_gen,
+                type_env,
+                &ctx.type_list_at(args, 0),
+            )
         }
         TypeDesc::Tobject { fields, .. } => {
             let (closed_flag, fields_translations) =
@@ -405,19 +415,34 @@ pub fn translateTypeExprFromTypes_(
             // single argument is Tlink. Rust still needs that exact branch; for
             // now the argument translation follows Tlink through the same
             // TypeContext-backed descriptor reads.
-            let params_translation =
-                translateTypeExprsFromTypes_(ctx, config, type_vars_gen, type_env, &args);
+            let params_translation = translateTypeExprsFromTypes_(
+                ctx,
+                config,
+                type_vars_gen,
+                type_env,
+                &ctx.type_list(args),
+            );
             translate_constr(config, &params_translation, &path, type_env)
         }
         TypeDesc::Tpoly { body, vars } if vars.is_empty() => {
             translateTypeExprFromTypes_(ctx, config, type_vars_gen, type_env, &body)
         }
-        TypeDesc::Tarrow { args, ret } => {
-            translate_arrow_type(ctx, config, type_vars_gen, type_env, &args, &ret)
-        }
+        TypeDesc::Tarrow { args, ret } => translate_arrow_type(
+            ctx,
+            config,
+            type_vars_gen,
+            type_env,
+            &ctx.type_args(args),
+            &ret,
+        ),
         TypeDesc::Ttuple(list_exp) => {
-            let inner_types_translation =
-                translateTypeExprsFromTypes_(ctx, config, type_vars_gen, type_env, &list_exp);
+            let inner_types_translation = translateTypeExprsFromTypes_(
+                ctx,
+                config,
+                type_vars_gen,
+                type_env,
+                &ctx.type_list(list_exp),
+            );
             Translation {
                 dependencies: inner_types_translation
                     .iter()
@@ -432,9 +457,13 @@ pub fn translateTypeExprFromTypes_(
             }
         }
         TypeDesc::Tlink(t) => translateTypeExprFromTypes_(ctx, config, type_vars_gen, type_env, &t),
-        TypeDesc::Tvariant(row_desc) => {
-            translate_variant(ctx, config, type_vars_gen, type_env, &row_desc)
-        }
+        TypeDesc::Tvariant(row_desc) => translate_variant(
+            ctx,
+            config,
+            type_vars_gen,
+            type_env,
+            &ctx.row_desc(row_desc),
+        ),
         TypeDesc::Tpackage {
             path,
             lids,
@@ -444,11 +473,20 @@ pub fn translateTypeExprFromTypes_(
             // `Tpackage(path, ids, types)` translates package constraints by
             // pairing the stored Longident list with the stored type list before
             // calling `TypeEnv.add_type_equations`.
-            let ids = lids
+            let ids = ctx
+                .package_lids(lids)
                 .iter()
                 .map(|lid| longident_to_strings(ctx, lid))
                 .collect::<Vec<_>>();
-            translate_package(ctx, config, type_vars_gen, type_env, &path, &ids, &types)
+            translate_package(
+                ctx,
+                config,
+                type_vars_gen,
+                type_env,
+                &path,
+                &ids,
+                &ctx.type_list(types),
+            )
         }
         TypeDesc::Tfield { .. }
         | TypeDesc::Tnil
@@ -714,7 +752,7 @@ fn get_field_types(
                 };
                 let translation =
                     translateTypeExprFromTypes_(ctx, config, type_vars_gen, type_env, &typ);
-                fields.push((name, mutable_, translation));
+                fields.push((name.to_string(), mutable_, translation));
                 closed_flag
             }
             TypeDesc::Tlink(te) => go(ctx, config, type_vars_gen, type_env, &te, fields),
