@@ -1146,6 +1146,20 @@ pub fn ctx_rshift<'p>(ctx: &[Ctx<'p>]) -> Vec<Ctx<'p>> {
     ctx.iter().map(rshift).collect()
 }
 
+/// Forget what the contexts know about the first column
+/// (`ctx_erase_first_col`, matching.ml:106-113).
+fn ctx_erase_first_col<'p>(ctx: Vec<Ctx<'p>>) -> Vec<Ctx<'p>> {
+    ctx.into_iter()
+        .map(|Ctx { left, mut right }| {
+            match right.first_mut() {
+                Some(first) => *first = omega(),
+                None => panic!("Matching.ctx_erase_first_col"),
+            }
+            Ctx { left, right }
+        })
+        .collect()
+}
+
 /// Split off the first n elements from a pattern list.
 /// Returns (first_n, rest).
 fn nchars<'p>(n: usize, ps: &[&'p Pattern]) -> (Vec<&'p Pattern>, Vec<&'p Pattern>) {
@@ -8354,6 +8368,14 @@ fn compile_match<'p>(
 
             let (lam, total) =
                 comp_match_handlers(&mut comp_fn, partial, ctx, &newarg, &first_match, &rem)?;
+            // matching.ml:2800-2808: a mutable field or array element is read
+            // once into `v` here. The code that the exits jump to reads it
+            // again and may see another value, as a guard may have changed
+            // it, so what the tests on `v` found doesn't hold there.
+            let total = match str_kind {
+                LetKind::StrictOpt => jumps_map(ctx_erase_first_col, total),
+                LetKind::Strict | LetKind::Alias | LetKind::Variable => total,
+            };
             Ok((bind_check(*str_kind, &v, arg, lam), total))
         }
         (cases, []) if !cases.is_empty() => {
@@ -9090,15 +9112,17 @@ fn is_mutable(p: &Pattern) -> bool {
 }
 
 /// Downgrade Total to Partial when needed.
-/// Equivalent to OCaml's `check_partial` (single pattern version).
+/// Equivalent to OCaml's `check_partial` (single pattern version,
+/// matching.ml:2937-2956): when the matching reads some mutable field and has
+/// a guard, which may change the field so that the cases after it, reading
+/// it again, match none.
 fn check_partial_single(pat_act_list: &[(&Pattern, CaseAction)], partial: Partial) -> Partial {
     match partial {
         Partial::Partial => Partial::Partial,
         Partial::Total => {
             if pat_act_list.is_empty()
-                || pat_act_list
-                    .iter()
-                    .any(|(pat, act)| is_mutable(pat) && act.guard.is_some())
+                || (pat_act_list.iter().any(|(_, act)| act.guard.is_some())
+                    && pat_act_list.iter().any(|(pat, _)| is_mutable(pat)))
             {
                 Partial::Partial
             } else {
@@ -9115,9 +9139,10 @@ fn check_partial_list<'p>(pat_act_list: &[Clause<'p>], partial: Partial) -> Part
         Partial::Partial => Partial::Partial,
         Partial::Total => {
             if pat_act_list.is_empty()
-                || pat_act_list
-                    .iter()
-                    .any(|(pats, lam)| pats.iter().any(|p| is_mutable(p)) && lam.is_guarded())
+                || (pat_act_list.iter().any(|(_, lam)| lam.is_guarded())
+                    && pat_act_list
+                        .iter()
+                        .any(|(pats, _)| pats.iter().any(|p| is_mutable(p))))
             {
                 Partial::Partial
             } else {
