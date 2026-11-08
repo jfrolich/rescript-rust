@@ -2,24 +2,17 @@
 
 Please read and follow the instructions in [AGENTS.md](./AGENTS.md).
 
-## ⚠️ CRITICAL: Reference the OCaml Implementation
+## ⚠️ CRITICAL: Behaviour Matches OCaml, Implementation Is Free
 
-This repository is a 1:1 Rust port of the OCaml compiler implementation.
+The Rust compiler must generate byte-for-byte identical JavaScript and keep the
+type system consistent with the OCaml compiler: the same programs are accepted
+and rejected, with the same types and diagnostics. How Rust gets there may
+differ from OCaml. See "The Correctness Contract" in [AGENTS.md](./AGENTS.md).
 
-For every compiler source change that changes Rust behavior, allocation order,
-sharing, traversal order, or typechecker semantics, include a concrete reference
-to the matching OCaml reference implementation.
-
-Required format:
-- Prefer a nearby code comment with `compiler/ml/<file>.ml:<line>` or a short
-  line range, explaining which OCaml behavior the Rust code is matching.
-- If a code comment would be noisy, include the same concrete reference in the
-  commit message.
-- If there is no direct OCaml counterpart, state that explicitly and explain why
-  the Rust-only change is necessary.
-
-Do not make parity or performance changes from intuition alone. Read the OCaml
-source first, cite the relevant spot, and make the Rust code match that behavior.
+Read the OCaml source under `compiler/` to understand a behaviour before
+changing it. When Rust code exists only to reproduce a non-obvious OCaml
+behaviour, cite the OCaml location (`compiler/ml/<file>.ml:<line>`) in a comment
+or in the commit message.
 
 ## ⚠️ CRITICAL: COMMIT YOUR CHANGES
 
