@@ -52,6 +52,8 @@ fn bsc_registry(
 }
 
 fn main() {
+    // The runtime the build script compiled (see `cli/build.rs`).
+    build::embedded_runtime::install(include_bytes!(concat!(env!("OUT_DIR"), "/runtime.bin")));
     // Hidden test commands: run the linked compiler one file at a time, as
     // the parity scripts compare it against the OCaml reference compiler.
     let mut args = std::env::args().skip(1);

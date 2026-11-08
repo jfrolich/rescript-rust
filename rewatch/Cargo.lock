@@ -1856,6 +1856,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "rescript-cli"
+version = "13.0.0-alpha.7"
+dependencies = [
+ "anyhow",
+ "console",
+ "env_logger 0.10.2",
+ "log",
+ "mimalloc",
+ "rayon",
+ "rescript",
+ "rescript-compiler",
+]
+
+[[package]]
 name = "rescript-compiler"
 version = "0.1.0"
 dependencies = [

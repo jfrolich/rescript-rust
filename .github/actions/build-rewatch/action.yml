@@ -26,7 +26,7 @@ runs:
       uses: actions/cache@v6
       with:
         path: rewatch/target
-        key: rewatch-build-v4-${{ inputs.cache-target }}-${{ hashFiles('rewatch/src/**', 'rewatch/Cargo.toml', 'rewatch/Cargo.lock') }}
+        key: rewatch-build-v5-${{ inputs.cache-target }}-${{ hashFiles('rewatch/src/**', 'rewatch/cli/**', 'rewatch/Cargo.toml', 'rewatch/Cargo.lock', 'compiler-rust/src/**', 'compiler-rust/Cargo.toml', 'packages/@rescript/runtime/*.res', 'packages/@rescript/runtime/*.resi', 'packages/@rescript/runtime/rescript.json') }}
 
     - name: Determine Rust toolchain version
       id: rust-version
