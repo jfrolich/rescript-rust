@@ -69,6 +69,8 @@ module Cli_arg_processor = struct
       is_interface
       || (len > 0 && (String.get [@doesNotRaise]) filename (len - 1) = 'i')
     in
+    let source = lazy (Ext_io.load_file filename) in
+    let load_source () = Lazy.force source in
     let print_engine =
       match target with
       | "binary" -> Res_driver_binary.print_engine
@@ -80,7 +82,10 @@ module Cli_arg_processor = struct
       | "sexp0-locs" -> Res_ast_debugger.sexp0_locs_print_engine
       | "comments" -> Res_ast_debugger.comments_print_engine
       | "tokens" -> Res_token_debugger.token_print_engine
-      | "res" -> Res_driver.print_engine
+      | "res" ->
+        (* Keep the line endings of a CRLF file, like bsc -format *)
+        Res_driver.print_engine
+          ~newline:(Res_line_endings.newline (load_source ()))
       | "doc" -> Res_ast_debugger.doc_print_engine
       | target ->
         print_endline
@@ -89,9 +94,6 @@ module Cli_arg_processor = struct
         exit 1
     in
 
-    (* Read sources with LF line endings, so a CRLF file prints like an LF one,
-       also inside comments, template literals and raw JS. *)
-    let load_source () = Res_line_endings.to_lf (Ext_io.load_file filename) in
     (* Color the Format tags (e.g. @{<error>...@}) of printed diagnostics *)
     Misc.Color.setup None;
 
