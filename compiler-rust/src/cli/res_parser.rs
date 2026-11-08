@@ -253,7 +253,20 @@ fn run(args: Vec<String>) {
                 if has_parse_errors {
                     sexp_locs::print_signature(&signature, parser.arena(), &mut io::stdout());
                 } else {
-                    let rewritten = match ppx::rewrite_signature(&signature, parser.arena_mut()) {
+                    // res_cli.ml:129-132 runs `Bs_builtin_ppx.mapper`: its
+                    // warnings go to stderr as it maps, before any error.
+                    let (rewritten, warnings) =
+                        ppx::rewrite_signature_with_warnings(&signature, parser.arena_mut());
+                    eprint!(
+                        "{}",
+                        crate::driver::format_ppx_warnings(
+                            parser.arena(),
+                            &source,
+                            &filename,
+                            &warnings
+                        )
+                    );
+                    let rewritten = match rewritten {
                         Ok(rewritten) => rewritten,
                         Err(e) => {
                             eprintln!("PPX rewrite failed: {e}");
@@ -394,10 +407,20 @@ fn run(args: Vec<String>) {
                 if has_parse_errors {
                     sexp_locs::print_structure(&structure, parser.arena(), &mut io::stdout());
                 } else {
-                    let rewritten = match ppx::rewrite_structure_for_parser_debug(
-                        &structure,
-                        parser.arena_mut(),
-                    ) {
+                    // res_cli.ml:161-165 runs `Bs_builtin_ppx.mapper`, as on
+                    // the interface path above.
+                    let (rewritten, warnings) =
+                        ppx::rewrite_structure_with_warnings(&structure, parser.arena_mut());
+                    eprint!(
+                        "{}",
+                        crate::driver::format_ppx_warnings(
+                            parser.arena(),
+                            &source,
+                            &filename,
+                            &warnings
+                        )
+                    );
+                    let rewritten = match rewritten {
                         Ok(rewritten) => rewritten,
                         Err(e) => {
                             eprintln!("PPX rewrite failed: {e}");

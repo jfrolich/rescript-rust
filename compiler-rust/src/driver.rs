@@ -1656,6 +1656,28 @@ fn emit_ppx_warnings_with_config(
     has_error
 }
 
+/// The builtin mapper's warnings under the default warning settings, as
+/// `Location.prerr_warning` prints them in a tool that sets no `-w` flags,
+/// such as `res_parser` (compiler/ext/warnings.ml:266-267 applies
+/// `Bsc_warnings.defaults_w` when the module loads).
+pub fn format_ppx_warnings(
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    warnings: &[ppx::PpxWarning],
+) -> String {
+    let mut out = String::new();
+    format_ppx_warnings_with_config(
+        arena,
+        source,
+        filename,
+        &WarningConfig::new(),
+        warnings,
+        &mut out,
+    );
+    out
+}
+
 /// Append the active warnings' reports to `out`; returns whether one is an error.
 fn format_ppx_warnings_with_config(
     arena: &ParseArena,

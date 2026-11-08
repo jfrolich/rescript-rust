@@ -9847,7 +9847,7 @@ pub fn rewrite_structure_with_warnings(
     arena: &mut ParseArena,
 ) -> (PpxResult<Vec<StructureItem>>, Vec<PpxWarning>) {
     let mut warnings = Vec::new();
-    let result = rewrite_structure_impl(structure, arena, true, true, Some(&mut warnings));
+    let result = rewrite_structure_impl(structure, arena, true, Some(&mut warnings));
     let result = with_deferred_ppx_error(result, arena);
     (result, warnings)
 }
@@ -9859,16 +9859,6 @@ fn with_deferred_ppx_error<T>(result: PpxResult<T>, arena: &mut ParseArena) -> P
         Some(error) => Err(error),
         None => result,
     }
-}
-
-/// Apply the built-in mapper for parser-debug output. OCaml's `res_parser`
-/// exposes the mapped tree without running the compiler-only invariant pass.
-pub fn rewrite_structure_for_parser_debug(
-    structure: &[StructureItem],
-    arena: &mut ParseArena,
-) -> PpxResult<Vec<StructureItem>> {
-    let result = rewrite_structure_impl(structure, arena, true, false, None);
-    with_deferred_ppx_error(result, arena)
 }
 
 /// The order in which OCaml `Bs_builtin_ppx.structure_mapper`
@@ -9917,7 +9907,6 @@ fn rewrite_structure_impl(
     structure: &[StructureItem],
     arena: &mut ParseArena,
     apply_spice: bool,
-    validate_invariants: bool,
     mut warnings: Option<&mut Vec<PpxWarning>>,
 ) -> PpxResult<Vec<StructureItem>> {
     // Context for tracking already-created module type names (per-structure scope)
@@ -9984,14 +9973,12 @@ fn rewrite_structure_impl(
                 let Unit::Item(index) = units[unit_index] else {
                     unreachable!("item event for a %%private run")
                 };
-                if validate_invariants {
-                    let mut checker = check::Checker::new(arena);
-                    let result = checker.structure_mapper_item(&structure[index]);
-                    if let Some(warnings) = warnings.as_deref_mut() {
-                        warnings.append(&mut checker.warnings);
-                    }
-                    result?;
+                let mut checker = check::Checker::new(arena);
+                let result = checker.structure_mapper_item(&structure[index]);
+                if let Some(warnings) = warnings.as_deref_mut() {
+                    warnings.append(&mut checker.warnings);
                 }
+                result?;
                 slots[unit_index] = rewrite_structure_unit(
                     &structure[index],
                     arena,
@@ -10004,15 +9991,13 @@ fn rewrite_structure_impl(
                 let Unit::Private(start, end) = units[unit_index] else {
                     unreachable!("%%private event for an item")
                 };
-                if validate_invariants {
-                    for item in &structure[start..end] {
-                        let mut checker = check::Checker::new(arena);
-                        let result = checker.structure_mapper_item(item);
-                        if let Some(warnings) = warnings.as_deref_mut() {
-                            warnings.append(&mut checker.warnings);
-                        }
-                        result?;
+                for item in &structure[start..end] {
+                    let mut checker = check::Checker::new(arena);
+                    let result = checker.structure_mapper_item(item);
+                    if let Some(warnings) = warnings.as_deref_mut() {
+                        warnings.append(&mut checker.warnings);
                     }
+                    result?;
                 }
                 let mut mapped = Vec::new();
                 for item in &structure[start..end] {
@@ -10969,8 +10954,8 @@ fn rewrite_module_expr(
     let mod_expr = &stripped;
     let new_desc = match &mod_expr.pmod_desc {
         current::ModuleExprDesc::Pmod_structure(items) => {
-            let rewritten_items = rewrite_structure_impl(items, arena, false, true, None)
-                .unwrap_or_else(|error| {
+            let rewritten_items =
+                rewrite_structure_impl(items, arena, false, None).unwrap_or_else(|error| {
                     arena.defer_ppx_error(error);
                     items
                         .iter()
