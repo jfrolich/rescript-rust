@@ -869,7 +869,7 @@ pub fn decode_recorded_imports(
 /// plan is known, the unchanged modules it compiles. Every other module is
 /// never parsed. Returns the parse warnings to report.
 pub fn parse_and_plan(build_state: &mut BuildCommandState, inc: impl Fn() + Sync) -> anyhow::Result<String> {
-    let mut warnings = super::parse::generate_asts(build_state, &inc)?;
+    let mut warnings = super::parse::generate_asts(build_state, &inc, super::parse::ParseWarningLog::Append)?;
     let deleted_modules = build_state.deleted_modules.clone();
     super::deps::get_deps(build_state, &deleted_modules);
     plan(build_state);
@@ -899,7 +899,11 @@ pub fn parse_and_plan(build_state: &mut BuildCommandState, inc: impl Fn() + Sync
             }
         }
     }
-    warnings.push_str(&super::parse::generate_asts(build_state, &inc)?);
+    warnings.push_str(&super::parse::generate_asts(
+        build_state,
+        &inc,
+        super::parse::ParseWarningLog::Append,
+    )?);
     // Parsing marks what it parsed for compilation; the plan decides.
     for (module_name, module) in build_state.build_state.modules.iter_mut() {
         module.compile_dirty = stale.contains(module_name);
@@ -944,10 +948,7 @@ pub fn parse_for_round(
             }
         }
     }
-    build_state.parse_warnings_replayed = true;
-    let result = super::parse::generate_asts(build_state, || ());
-    build_state.parse_warnings_replayed = false;
-    result.map(drop)
+    super::parse::generate_asts(build_state, || (), super::parse::ParseWarningLog::AlreadyWritten).map(drop)
 }
 
 /// The saved parse warnings of source files this build did not parse:

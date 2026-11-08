@@ -202,7 +202,7 @@ fn parsed_state(path: &Path, prod: bool) -> Result<BuildCommandState> {
     );
     packages::parse_packages(&mut build_state)?;
     mark_modules_dirty(&mut build_state);
-    let parse_errors = parse::generate_asts(&mut build_state, || ())?;
+    let parse_errors = parse::generate_asts(&mut build_state, || (), parse::ParseWarningLog::Append)?;
     if build_state.stopped_at_parse {
         return Err(anyhow!("parse errors:\n{parse_errors}"));
     }

@@ -559,7 +559,7 @@ pub fn incremental_build_without_lock(
             let result_asts = if incremental {
                 incremental::parse_and_plan(build_state, || pb.inc(1))
             } else {
-                parse::generate_asts(build_state, || pb.inc(1))
+                parse::generate_asts(build_state, || pb.inc(1), parse::ParseWarningLog::Append)
             };
             phase_mark("parse-asts-done");
             let precompile_result = handle.and_then(compile::join_runtime_precompile);
@@ -580,7 +580,7 @@ pub fn incremental_build_without_lock(
         }
         result_asts
     } else {
-        parse::generate_asts(build_state, || pb.inc(1))
+        parse::generate_asts(build_state, || pb.inc(1), parse::ParseWarningLog::Append)
     };
     let timing_ast_elapsed = timing_ast.elapsed();
 
@@ -712,7 +712,6 @@ pub fn incremental_build_without_lock(
         build_state.previous_in_process = None;
         build_state.loaded_modules.clear();
         build_state.compiled_modules.clear();
-        build_state.parse_warnings_replayed = false;
         mark_modules_dirty(build_state);
         let result = incremental_build_without_lock(
             build_state,

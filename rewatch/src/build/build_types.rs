@@ -330,9 +330,6 @@ pub struct BuildCommandState {
     // The modules whose stored interface this build loaded instead of
     // compiling them.
     pub loaded_modules: AHashSet<String>,
-    // Set while parsing modules whose saved parse warnings were already
-    // reported this build: the parse then only records them.
-    pub parse_warnings_replayed: bool,
     // The modules whose JavaScript this process wrote.
     pub written_modules: AHashSet<String>,
     // GenType config and resolver inputs are immutable within one compile wave.
@@ -468,7 +465,6 @@ impl BuildCommandState {
             stopped_at_parse: false,
             invalidated_modules: AHashSet::new(),
             loaded_modules: AHashSet::new(),
-            parse_warnings_replayed: false,
             written_modules: AHashSet::new(),
             gentype_contexts: Mutex::new(AHashMap::new()),
             package_compiler_options: Mutex::new(AHashMap::new()),

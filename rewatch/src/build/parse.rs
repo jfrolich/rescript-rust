@@ -23,9 +23,19 @@ struct GeneratedAst {
     deps: Option<Dependencies>,
 }
 
+/// Whether parsing appends a source's warnings to its package log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParseWarningLog {
+    Append,
+    /// The sources' saved warnings were already reported this build: parsing
+    /// only records them.
+    AlreadyWritten,
+}
+
 pub fn generate_asts(
     build_state: &mut BuildCommandState,
     inc: impl Fn() + std::marker::Sync,
+    warning_log: ParseWarningLog,
 ) -> anyhow::Result<String> {
     let mut has_failure = false;
     let mut stderr = "".to_string();
@@ -169,7 +179,7 @@ pub fn generate_asts(
                     stored_asts: &build_state.stored_asts,
                     in_memory_deps: &build_state.in_memory_deps,
                     parse_warnings: &build_state.parse_warnings,
-                    warnings_replayed: build_state.parse_warnings_replayed,
+                    warning_log,
                 };
                 let (parse_state, parse_dirty) = sinks.apply(
                     package,
@@ -658,7 +668,7 @@ struct ParseSinks<'a> {
     stored_asts: &'a std::sync::Mutex<ahash::AHashMap<String, super::build_types::StoredAst>>,
     in_memory_deps: &'a std::sync::Mutex<ahash::AHashMap<String, Dependencies>>,
     parse_warnings: &'a ParseWarnings,
-    warnings_replayed: bool,
+    warning_log: ParseWarningLog,
 }
 
 impl ParseSinks<'_> {
@@ -690,7 +700,7 @@ impl ParseSinks<'_> {
             // propagating the warning with every compile. So we mark it as
             // dirty for the next round
             Some(warnings) if package.is_local_dep => {
-                if !self.warnings_replayed {
+                if self.warning_log == ParseWarningLog::Append {
                     logs::append(package, &warnings);
                 }
                 stderr.push_str(&warnings);
@@ -702,7 +712,7 @@ impl ParseSinks<'_> {
                 // (e.g. legacy `(. ...)` uncurried syntax) so
                 // downstream users can report breakage upstream.
                 if let Some(kept) = retain_critical_external_warnings(&warnings) {
-                    if !self.warnings_replayed {
+                    if self.warning_log == ParseWarningLog::Append {
                         logs::append(package, &kept);
                     }
                     stderr.push_str(&kept);
