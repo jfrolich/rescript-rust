@@ -21222,4 +21222,47 @@ let f = switch x {
             },
         );
     }
+
+    fn typecheck_result(source: &str) -> Result<(), TypeModError> {
+        crate::ident::Ident::set_current_time(999);
+        let id_gen = IdGenerator::with_start_stamp(999);
+        let _ = id_gen.next_stamp();
+        let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
+        let mut parser = Parser::new("test.res", source);
+        let structure = module::parse_structure(&mut parser);
+        assert!(!parser.has_errors(), "parse failed");
+        let arena = parser.arena();
+        let mut tctx = TypeCheckContext::new(&type_ctx, arena);
+        let env = initial_env(&type_ctx);
+        type_structure(&mut tctx, &env, arena, &structure).map(|_| ())
+    }
+
+    #[test]
+    fn empty_literal_of_an_immutable_record_generalizes() {
+        // `{}` with no mutable field is non-expansive (typecore.ml:2098-2105).
+        typecheck_result(
+            r#"
+type options<'a> = {value?: 'a}
+let defaults: options<_> = {}
+let ints: options<int> = defaults
+let strings: options<string> = defaults
+"#,
+        )
+        .expect("an immutable `{}` generalizes");
+    }
+
+    #[test]
+    fn empty_literal_of_a_record_with_a_mutable_field_does_not_generalize() {
+        // A mutable field makes `{}` expansive (typecore.ml:2098-2105).
+        let result = typecheck_result(
+            r#"
+type cell<'a> = {tag?: int, mutable value?: 'a}
+let cell: cell<_> = {}
+cell.value = Some(1)
+let s: option<string> = cell.value
+"#,
+        );
+        assert!(result.is_err(), "a mutable `{{}}` must not generalize");
+    }
+
 }

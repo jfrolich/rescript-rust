@@ -18911,7 +18911,7 @@ fn has_internal_expansive_attribute(
         .any(|attr| arena.get_string(attr.0.txt) == "internal.expansive")
 }
 
-fn is_nonexpansive_expression(tctx: &TypeCheckContext<'_>, exp: &Expression) -> bool {
+fn is_nonexpansive_expression(tctx: &mut TypeCheckContext<'_>, exp: &Expression) -> bool {
     if has_internal_expansive_attribute(tctx.arena, &exp.exp_attributes) {
         return true;
     }
@@ -18958,6 +18958,29 @@ fn is_nonexpansive_expression(tctx: &TypeCheckContext<'_>, exp: &Expression) -> 
             }) && match extended_expression.as_deref() {
                 Some(expr) => is_nonexpansive_expression(tctx, expr),
                 // The optional fields the literal leaves out are allocated too.
+                None if fields.is_empty() => {
+                    // `{}` has no field to find the record's labels through:
+                    // `extract_concrete_record exp.exp_env exp.exp_type`,
+                    // `Not_found -> false` (typecore.ml:2098-2105).
+                    let ctx = tctx.type_ctx;
+                    let Some(env) = ctx.get_typed_env(exp.exp_env) else {
+                        return false;
+                    };
+                    match extract_concrete_record_type_info(
+                        exp.exp_type,
+                        &env,
+                        &mut tctx.persistent_env,
+                        ctx,
+                    ) {
+                        Some((_, _, decl)) => match &decl.type_kind {
+                            crate::types::TypeKind::TypeRecord(labels, _) => labels
+                                .iter()
+                                .all(|ld| ld.ld_mutable == crate::types::MutableFlag::Immutable),
+                            _ => false,
+                        },
+                        None => false,
+                    }
+                }
                 None => crate::types::typedtree::record_all_labels(tctx.type_ctx, fields)
                     .is_none_or(|labels| {
                         labels
@@ -19046,7 +19069,7 @@ fn is_nonexpansive_expression(tctx: &TypeCheckContext<'_>, exp: &Expression) -> 
 }
 
 fn is_nonexpansive_module_expr(
-    tctx: &TypeCheckContext<'_>,
+    tctx: &mut TypeCheckContext<'_>,
     module_expr: &crate::types::typedtree::ModuleExpr,
 ) -> bool {
     match &module_expr.mod_desc {
@@ -19097,7 +19120,7 @@ fn is_nonexpansive_module_expr(
 }
 
 fn check_univars_or_less_general(
-    tctx: &TypeCheckContext<'_>,
+    tctx: &mut TypeCheckContext<'_>,
     env: &Env,
     expans: bool,
     kind: &str,
