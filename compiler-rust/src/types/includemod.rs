@@ -3333,102 +3333,385 @@ pub(crate) fn includecore_type_declarations(
     })
 }
 
+/// `'a aligned` (includecore.ml): the entries of two declarations of a
+/// record or a variant, lined up by name.
+enum Aligned<'a, T> {
+    /// An entry in both, with its position in each.
+    Both(&'a T, usize, &'a T, usize),
+    Renamed(&'a T, &'a T),
+    OnlyFirst(&'a T),
+    OnlySecond(&'a T),
+}
+
+/// The entries both declarations name, in the order of the second, when
+/// the first has them in another order.
+type AlignedOrder = Option<Vec<String>>;
+
+/// `align name l1 l2` (includecore.ml): declarations that agree on their
+/// names, as most do, need no tables.
+fn align<'a, T>(
+    name: fn(&T) -> &str,
+    l1: &'a [T],
+    l2: &'a [T],
+) -> (Vec<Aligned<'a, T>>, AlignedOrder) {
+    if l1.len() == l2.len() && l1.iter().zip(l2).all(|(x1, x2)| name(x1) == name(x2)) {
+        let aligned = l1
+            .iter()
+            .zip(l2)
+            .enumerate()
+            .map(|(i, (x1, x2))| Aligned::Both(x1, i, x2, i))
+            .collect();
+        return (aligned, None);
+    }
+    align_by_name(name, l1, l2)
+}
+
+/// `align_by_name name l1 l2` (includecore.ml): the entries of the second
+/// declaration in its order, then those only the first has, and the common
+/// names in the second's order when the first has them in another. The
+/// entries the other declaration lacks fall into gaps, each after an entry
+/// both have, or at the start; a gap that holds as many in each declaration
+/// holds renamings, paired in order.
+fn align_by_name<'a, T>(
+    name: fn(&T) -> &str,
+    l1: &'a [T],
+    l2: &'a [T],
+) -> (Vec<Aligned<'a, T>>, AlignedOrder) {
+    let positions = |l: &'a [T]| -> HashMap<&'a str, usize> {
+        l.iter().enumerate().map(|(i, x)| (name(x), i)).collect()
+    };
+    let pos1 = positions(l1);
+    let pos2 = positions(l2);
+    let gaps = |l: &'a [T], other: &HashMap<&'a str, usize>| {
+        let mut table: HashMap<Option<&'a str>, Vec<&'a T>> = HashMap::default();
+        let mut gap = None;
+        for x in l {
+            if other.contains_key(name(x)) {
+                gap = Some(name(x));
+            } else {
+                table.entry(gap).or_default().push(x);
+            }
+        }
+        table
+    };
+    let gaps1 = gaps(l1, &pos2);
+    let mut renamings: HashMap<&'a str, &'a T> = HashMap::default();
+    let mut renamed: HashSet<&'a str> = HashSet::default();
+    for (gap, xs2) in gaps(l2, &pos1) {
+        if let Some(xs1) = gaps1.get(&gap)
+            && xs1.len() == xs2.len()
+        {
+            for (x1, x2) in xs1.iter().zip(&xs2) {
+                renamings.insert(name(x2), x1);
+                renamed.insert(name(x1));
+            }
+        }
+    }
+    let mut aligned: Vec<Aligned<'a, T>> = l2
+        .iter()
+        .enumerate()
+        .map(|(i, x2)| match pos1.get(name(x2)) {
+            Some(&i1) => Aligned::Both(&l1[i1], i1, x2, i),
+            None => match renamings.get(name(x2)) {
+                Some(&x1) => Aligned::Renamed(x1, x2),
+                None => Aligned::OnlySecond(x2),
+            },
+        })
+        .collect();
+    aligned.extend(
+        l1.iter()
+            .filter(|x1| !pos2.contains_key(name(x1)) && !renamed.contains(name(x1)))
+            .map(Aligned::OnlyFirst),
+    );
+    let common = |l: &'a [T], other: &HashMap<&'a str, usize>| -> Vec<&'a str> {
+        l.iter()
+            .map(name)
+            .filter(|n| other.contains_key(n))
+            .collect()
+    };
+    let order2 = common(l2, &pos1);
+    let order = if common(l1, &pos2) == order2 {
+        None
+    } else {
+        Some(order2.into_iter().map(str::to_string).collect())
+    };
+    (aligned, order)
+}
+
+/// `compare_records env params1 params2 labels1 labels2` (includecore.ml):
+/// every difference of the fields, lined up by name.
 fn compare_record_declarations(
     type_ctx: &TypeContext,
     env: &Env,
-    impl_params: &[TypeExprRef],
-    sig_params: &[TypeExprRef],
-    impl_labels: &[LabelDeclaration],
-    sig_labels: &[LabelDeclaration],
+    params1: &[TypeExprRef],
+    params2: &[TypeExprRef],
+    labels1: &[LabelDeclaration],
+    labels2: &[LabelDeclaration],
 ) -> Vec<TypeMismatch> {
-    let param_map = build_type_param_map(type_ctx, impl_params, sig_params);
-    compare_record_declarations_with_param_map(
-        type_ctx,
-        env,
-        &param_map,
-        impl_params,
-        sig_params,
-        impl_labels,
-        sig_labels,
-    )
+    fn name(ld: &LabelDeclaration) -> &str {
+        ld.ld_id.name()
+    }
+    let (aligned, order) = align(name, labels1, labels2);
+    let pairs: Vec<(&LabelDeclaration, &LabelDeclaration)> = aligned
+        .iter()
+        .filter_map(|entry| match entry {
+            Aligned::Both(ld1, _, ld2, _) => Some((*ld1, *ld2)),
+            Aligned::Renamed(..) | Aligned::OnlyFirst(_) | Aligned::OnlySecond(_) => None,
+        })
+        .collect();
+    // The fields whose types differ. All the types are compared at once
+    // first; when that fails, each field with the fields before it that
+    // agree, as they are added to the parameters, cf. PR#7378.
+    let type_mismatches: Vec<Ident> = {
+        let mut all1 = params1.to_vec();
+        all1.extend(pairs.iter().map(|(ld1, _)| ld1.ld_type));
+        let mut all2 = params2.to_vec();
+        all2.extend(pairs.iter().map(|(_, ld2)| ld2.ld_type));
+        if crate::types::ctype::equal(type_ctx, env, true, &all1, &all2) {
+            Vec::new()
+        } else {
+            let mut prior1 = params1.to_vec();
+            let mut prior2 = params2.to_vec();
+            let mut mismatches = Vec::new();
+            for (ld1, ld2) in &pairs {
+                let mut next1 = Vec::with_capacity(prior1.len() + 1);
+                next1.push(ld1.ld_type);
+                next1.extend_from_slice(&prior1);
+                let mut next2 = Vec::with_capacity(prior2.len() + 1);
+                next2.push(ld2.ld_type);
+                next2.extend_from_slice(&prior2);
+                if crate::types::ctype::equal(type_ctx, env, true, &next1, &next2) {
+                    prior1 = next1;
+                    prior2 = next2;
+                } else {
+                    mismatches.push(ld1.ld_id);
+                }
+            }
+            mismatches
+        }
+    };
+    let compare_fields = |ld1: &LabelDeclaration, ld2: &LabelDeclaration| {
+        let mut errs = Vec::new();
+        if ld1.ld_mutable != ld2.ld_mutable {
+            errs.push(TypeMismatch::FieldMutable(ld1.ld_id));
+        }
+        if ld1.ld_optional != ld2.ld_optional {
+            errs.push(TypeMismatch::FieldOptional(ld1.ld_id));
+        }
+        let name1 = ld1.declaration_name();
+        let name2 = ld2.declaration_name();
+        if name1 != name2 {
+            errs.push(TypeMismatch::FieldRuntimeName(
+                ld1.ld_id,
+                name1.to_string(),
+                name2.to_string(),
+            ));
+        }
+        // The type of an optional field is an option, which `FieldOptional`
+        // already reports.
+        if ld1.ld_optional == ld2.ld_optional
+            && type_mismatches.iter().any(|id| id.same(&ld1.ld_id))
+        {
+            errs.push(TypeMismatch::FieldType(ld1.ld_id));
+        }
+        errs
+    };
+    let mut errs = Vec::new();
+    for entry in &aligned {
+        match entry {
+            Aligned::Both(ld1, _, ld2, _) => errs.extend(compare_fields(ld1, ld2)),
+            Aligned::Renamed(ld1, ld2) => errs.push(TypeMismatch::FieldRenamed(
+                name(ld1).to_string(),
+                name(ld2).to_string(),
+            )),
+            Aligned::OnlyFirst(ld1) => errs.push(TypeMismatch::FieldMissing(false, ld1.ld_id)),
+            Aligned::OnlySecond(ld2) => errs.push(TypeMismatch::FieldMissing(true, ld2.ld_id)),
+        }
+    }
+    if let Some(names) = order {
+        errs.push(TypeMismatch::FieldOrder(names));
+    }
+    errs
 }
 
-fn compare_record_declarations_with_param_map(
+/// `compare_constructor_arguments env cstr params1 params2 arg1 arg2`
+/// (includecore.ml).
+fn compare_constructor_arguments(
     type_ctx: &TypeContext,
     env: &Env,
-    param_map: &HashMap<TypeExprRef, TypeExprRef>,
-    impl_params: &[TypeExprRef],
-    sig_params: &[TypeExprRef],
-    impl_labels: &[LabelDeclaration],
-    sig_labels: &[LabelDeclaration],
+    cstr: Ident,
+    params1: &[TypeExprRef],
+    params2: &[TypeExprRef],
+    arg1: &ConstructorArguments,
+    arg2: &ConstructorArguments,
 ) -> Vec<TypeMismatch> {
-    // OCaml compiler/ml/includecore.ml:396 starts record comparison at 1,
-    // so diagnostics report declaration field positions as 1-based.
-    let mut index = 0usize;
-    let len = impl_labels.len().min(sig_labels.len());
-
-    while index < len {
-        let impl_label = &impl_labels[index];
-        let sig_label = &sig_labels[index];
-        if impl_label.ld_id.name() != sig_label.ld_id.name() {
-            return vec![TypeMismatch::FieldNames(
-                index + 1,
-                impl_label.ld_id.name().to_string(),
-                sig_label.ld_id.name().to_string(),
-            )];
+    match (arg1, arg2) {
+        (ConstructorArguments::CstrTuple(arg1), ConstructorArguments::CstrTuple(arg2)) => {
+            if arg1.len() != arg2.len() {
+                return vec![TypeMismatch::ConstructorArity(cstr)];
+            }
+            // Ctype.equal must be called on all arguments at once, cf.
+            // PR#7378.
+            let mut all1 = params1.to_vec();
+            all1.extend_from_slice(arg1);
+            let mut all2 = params2.to_vec();
+            all2.extend_from_slice(arg2);
+            if crate::types::ctype::equal(type_ctx, env, true, &all1, &all2) {
+                Vec::new()
+            } else {
+                vec![TypeMismatch::ConstructorType(cstr)]
+            }
         }
-        if impl_label.ld_mutable != sig_label.ld_mutable {
-            return vec![TypeMismatch::FieldMutable(impl_label.ld_id)];
+        (ConstructorArguments::CstrRecord(l1), ConstructorArguments::CstrRecord(l2)) => {
+            let errs = compare_record_declarations(type_ctx, env, params1, params2, l1, l2);
+            if errs.is_empty() {
+                errs
+            } else {
+                vec![TypeMismatch::ConstructorRecord(cstr, errs)]
+            }
         }
-        if impl_label.ld_optional != sig_label.ld_optional {
-            return vec![TypeMismatch::FieldOptional(impl_label.ld_id)];
-        }
-        let impl_runtime_name = impl_label.declaration_name();
-        let sig_runtime_name = sig_label.declaration_name();
-        if impl_runtime_name != sig_runtime_name {
-            return vec![TypeMismatch::FieldNames(
-                index + 1,
-                impl_runtime_name.to_string(),
-                sig_runtime_name.to_string(),
-            )];
-        }
-        index += 1;
+        _ => vec![TypeMismatch::ConstructorType(cstr)],
     }
+}
 
-    if let Some(label) = sig_labels.get(index) {
-        return vec![TypeMismatch::FieldMissing(true, label.ld_id)];
+/// `compare_variants ~loc env params1 params2 ~layout1 ~layout2 cstrs1
+/// cstrs2` (includecore.ml): every difference of the constructors, lined up
+/// by name, each compared at its own position in each layout.
+#[allow(clippy::too_many_arguments)]
+fn compare_variant_declarations(
+    type_ctx: &TypeContext,
+    env: &Env,
+    params1: &[TypeExprRef],
+    params2: &[TypeExprRef],
+    cstrs1: &[ConstructorDeclaration],
+    cstrs2: &[ConstructorDeclaration],
+    layout1: crate::types::VariantLayout,
+    layout2: crate::types::VariantLayout,
+    warnings: &mut Vec<Warning>,
+) -> IncludeModResult<Vec<TypeMismatch>> {
+    fn name(cd: &ConstructorDeclaration) -> &str {
+        cd.cd_id.name()
     }
-    if let Some(label) = impl_labels.get(index) {
-        return vec![TypeMismatch::FieldMissing(false, label.ld_id)];
-    }
-
-    // OCaml compiler/ml/includecore.ml:271-313 first compares every record
-    // parameter and field in one Ctype.equal call. Fields are consed while
-    // traversing, so the final comparison visits them in reverse declaration
-    // order before the type parameters.
-    let mut impl_types = Vec::with_capacity(impl_labels.len() + impl_params.len());
-    let mut sig_types = Vec::with_capacity(sig_labels.len() + sig_params.len());
-    impl_types.extend(impl_labels.iter().rev().map(|label| label.ld_type));
-    impl_types.extend_from_slice(impl_params);
-    sig_types.extend(sig_labels.iter().rev().map(|label| label.ld_type));
-    sig_types.extend_from_slice(sig_params);
-    if type_expr_lists_equal_for_inclusion(type_ctx, env, param_map, &impl_types, &sig_types) {
-        return Vec::new();
-    }
-
-    // The reference retries field-by-field only after the batched fast path
-    // fails, so diagnostics can identify the first incompatible declaration.
-    let mut prior_impl = impl_params.to_vec();
-    let mut prior_sig = sig_params.to_vec();
-    for (impl_label, sig_label) in impl_labels.iter().zip(sig_labels) {
-        prior_impl.insert(0, impl_label.ld_type);
-        prior_sig.insert(0, sig_label.ld_type);
-        if !type_expr_lists_equal_for_inclusion(type_ctx, env, param_map, &prior_impl, &prior_sig) {
-            return vec![TypeMismatch::FieldType(impl_label.ld_id)];
+    let (aligned, order) = align(name, cstrs1, cstrs2);
+    let mut errs = Vec::new();
+    for entry in aligned {
+        match entry {
+            Aligned::Both(cd1, i1, cd2, i2) => errs.extend(compare_constructors(
+                type_ctx, env, params1, params2, &layout1, &layout2, cd1, i1, cd2, i2, warnings,
+            )?),
+            Aligned::Renamed(cd1, cd2) => errs.push(TypeMismatch::ConstructorRenamed(
+                name(cd1).to_string(),
+                name(cd2).to_string(),
+            )),
+            Aligned::OnlyFirst(cd1) => {
+                errs.push(TypeMismatch::ConstructorMissing(false, cd1.cd_id))
+            }
+            Aligned::OnlySecond(cd2) => {
+                errs.push(TypeMismatch::ConstructorMissing(true, cd2.cd_id))
+            }
         }
     }
+    if let Some(names) = order {
+        errs.push(TypeMismatch::ConstructorOrder(names));
+    }
+    Ok(errs)
+}
 
-    Vec::new()
+/// `compare_constructors ~loc env params1 params2 ~layout1 ~layout2 cd1 i1
+/// cd2 i2` (includecore.ml): `i1` and `i2` are the positions of the
+/// constructors in their layouts.
+#[allow(clippy::too_many_arguments)]
+fn compare_constructors(
+    type_ctx: &TypeContext,
+    env: &Env,
+    params1: &[TypeExprRef],
+    params2: &[TypeExprRef],
+    layout1: &crate::types::VariantLayout,
+    layout2: &crate::types::VariantLayout,
+    cd1: &ConstructorDeclaration,
+    i1: usize,
+    cd2: &ConstructorDeclaration,
+    i2: usize,
+    warnings: &mut Vec<Warning>,
+) -> IncludeModResult<Vec<TypeMismatch>> {
+    if let Some(warning) = deprecated_inclusion_warning(
+        type_ctx,
+        cd1.cd_id.name(),
+        &cd1.cd_attributes,
+        &cd2.cd_attributes,
+        cd1.cd_loc,
+        cd2.cd_loc,
+    )? {
+        warnings.push(warning);
+    }
+    let r = match (cd1.cd_res, cd2.cd_res) {
+        (Some(r1), Some(r2)) => {
+            if crate::types::ctype::equal(type_ctx, env, true, &[r1], &[r2]) {
+                compare_constructor_arguments(
+                    type_ctx,
+                    env,
+                    cd1.cd_id,
+                    &[r1],
+                    &[r2],
+                    &cd1.cd_args,
+                    &cd2.cd_args,
+                )
+            } else {
+                vec![TypeMismatch::ConstructorType(cd1.cd_id)]
+            }
+        }
+        (Some(_), None) | (None, Some(_)) => vec![TypeMismatch::ConstructorType(cd1.cd_id)],
+        (None, None) => compare_constructor_arguments(
+            type_ctx,
+            env,
+            cd1.cd_id,
+            params1,
+            params2,
+            &cd1.cd_args,
+            &cd2.cd_args,
+        ),
+    };
+    if !r.is_empty() {
+        return Ok(r);
+    }
+    if constructor_is_nullary(cd1) {
+        return Ok(
+            if layout1.constructor_tag(i1) != layout2.constructor_tag(i2) {
+                vec![TypeMismatch::VariantRepresentation(cd1.cd_id)]
+            } else {
+                Vec::new()
+            },
+        );
+    }
+    // A tagged case with a payload carries its tag in the object; an
+    // untagged one is its payload, whatever its `@as`, and is compared by
+    // its payload kind.
+    use crate::types::{VariantBlock, VariantBlockType, VariantConstructorCase};
+    Ok(
+        match (&layout1.constructors[i1], &layout2.constructors[i2]) {
+            (
+                VariantConstructorCase::Block(VariantBlock::Tagged(block1)),
+                VariantConstructorCase::Block(VariantBlock::Tagged(block2)),
+            ) if block1.tag.literal != block2.tag.literal => {
+                vec![TypeMismatch::VariantRepresentation(cd1.cd_id)]
+            }
+            // An unknown payload in the second declaration is the only payload
+            // case and has no check, so any first one agrees.
+            (
+                VariantConstructorCase::Block(VariantBlock::Untagged {
+                    block_type: block_type1,
+                    ..
+                }),
+                VariantConstructorCase::Block(VariantBlock::Untagged {
+                    block_type: block_type2,
+                    ..
+                }),
+            ) if block_type1 != block_type2 && *block_type2 != VariantBlockType::Unknown => {
+                vec![TypeMismatch::VariantRepresentation(cd1.cd_id)]
+            }
+            _ => Vec::new(),
+        },
+    )
 }
 
 /// includecore.ml `compare_runtime_annotations`: what the second
@@ -3876,169 +4159,6 @@ fn type_manifest_for_inclusion(
     }
 
     false
-}
-
-fn compare_variant_declarations(
-    type_ctx: &TypeContext,
-    env: &Env,
-    impl_params: &[TypeExprRef],
-    sig_params: &[TypeExprRef],
-    impl_constructors: &[ConstructorDeclaration],
-    sig_constructors: &[ConstructorDeclaration],
-    impl_layout: crate::types::VariantLayout,
-    sig_layout: crate::types::VariantLayout,
-    warnings: &mut Vec<Warning>,
-) -> IncludeModResult<Vec<TypeMismatch>> {
-    let param_map = build_type_param_map(type_ctx, impl_params, sig_params);
-    // OCaml compiler/ml/includecore.ml:392 starts variant comparison at 1,
-    // so diagnostics report constructor positions as 1-based.
-    let mut index = 0usize;
-    let len = impl_constructors.len().min(sig_constructors.len());
-
-    while index < len {
-        let impl_constructor = &impl_constructors[index];
-        let sig_constructor = &sig_constructors[index];
-        if impl_constructor.cd_id.name() != sig_constructor.cd_id.name() {
-            return Ok(vec![TypeMismatch::ConstructorNames(
-                index + 1,
-                impl_constructor.cd_id.name().to_string(),
-                sig_constructor.cd_id.name().to_string(),
-            )]);
-        }
-        if let Some(warning) = deprecated_inclusion_warning(
-            type_ctx,
-            impl_constructor.cd_id.name(),
-            &impl_constructor.cd_attributes,
-            &sig_constructor.cd_attributes,
-            impl_constructor.cd_loc,
-            sig_constructor.cd_loc,
-        )? {
-            warnings.push(warning);
-        }
-
-        let (arg_param_map, arg_impl_params, arg_sig_params) =
-            match (impl_constructor.cd_res, sig_constructor.cd_res) {
-                (Some(impl_res), Some(sig_res)) => {
-                    if !type_exprs_equal_for_inclusion(
-                        type_ctx,
-                        Some(env),
-                        &param_map,
-                        impl_res,
-                        sig_res,
-                    ) {
-                        return Ok(vec![TypeMismatch::ConstructorType(impl_constructor.cd_id)]);
-                    }
-                    (
-                        build_type_param_map(type_ctx, &[impl_res], &[sig_res]),
-                        vec![impl_res],
-                        vec![sig_res],
-                    )
-                }
-                (Some(_), None) | (None, Some(_)) => {
-                    return Ok(vec![TypeMismatch::ConstructorType(impl_constructor.cd_id)]);
-                }
-                (None, None) => (param_map.clone(), impl_params.to_vec(), sig_params.to_vec()),
-            };
-
-        match (&impl_constructor.cd_args, &sig_constructor.cd_args) {
-            (
-                ConstructorArguments::CstrRecord(impl_labels),
-                ConstructorArguments::CstrRecord(sig_labels),
-            ) => {
-                let err = compare_record_declarations_with_param_map(
-                    type_ctx,
-                    env,
-                    &arg_param_map,
-                    &arg_impl_params,
-                    &arg_sig_params,
-                    impl_labels,
-                    sig_labels,
-                );
-                if !err.is_empty() {
-                    return Ok(err);
-                }
-            }
-            (
-                ConstructorArguments::CstrTuple(impl_args),
-                ConstructorArguments::CstrTuple(sig_args),
-            ) if impl_args.len() != sig_args.len() => {
-                return Ok(vec![TypeMismatch::ConstructorArity(impl_constructor.cd_id)]);
-            }
-            (
-                ConstructorArguments::CstrTuple(impl_args),
-                ConstructorArguments::CstrTuple(sig_args),
-            ) => {
-                for (impl_arg, sig_arg) in impl_args.iter().zip(sig_args.iter()) {
-                    if !type_exprs_equal_for_inclusion(
-                        type_ctx,
-                        Some(env),
-                        &arg_param_map,
-                        *impl_arg,
-                        *sig_arg,
-                    ) {
-                        return Ok(vec![TypeMismatch::ConstructorType(impl_constructor.cd_id)]);
-                    }
-                }
-            }
-            _ => {
-                return Ok(vec![TypeMismatch::ConstructorType(impl_constructor.cd_id)]);
-            }
-        }
-
-        if constructor_is_nullary(impl_constructor) && {
-            let impl_tag = match &impl_layout.constructors[index] {
-                crate::types::VariantConstructorCase::Constant(tag) => &tag.literal,
-                crate::types::VariantConstructorCase::Block(_) => unreachable!(),
-            };
-            let sig_tag = match &sig_layout.constructors[index] {
-                crate::types::VariantConstructorCase::Constant(tag) => &tag.literal,
-                crate::types::VariantConstructorCase::Block(_) => unreachable!(),
-            };
-            impl_tag != sig_tag
-        } {
-            return Ok(vec![TypeMismatch::VariantRepresentation(
-                impl_constructor.cd_id,
-            )]);
-        }
-        // includecore.ml `compare_variants`: a tagged case with a payload
-        // carries its tag in the object; an untagged one is its payload,
-        // whatever its `@as`.
-        if !constructor_is_nullary(impl_constructor)
-            && let (
-                crate::types::VariantConstructorCase::Block(crate::types::VariantBlock::Tagged(
-                    impl_block,
-                )),
-                crate::types::VariantConstructorCase::Block(crate::types::VariantBlock::Tagged(
-                    sig_block,
-                )),
-            ) = (
-                &impl_layout.constructors[index],
-                &sig_layout.constructors[index],
-            )
-            && impl_block.tag.literal != sig_block.tag.literal
-        {
-            return Ok(vec![TypeMismatch::VariantRepresentation(
-                impl_constructor.cd_id,
-            )]);
-        }
-
-        index += 1;
-    }
-
-    if let Some(constructor) = sig_constructors.get(index) {
-        return Ok(vec![TypeMismatch::ConstructorMissing(
-            true,
-            constructor.cd_id,
-        )]);
-    }
-    if let Some(constructor) = impl_constructors.get(index) {
-        return Ok(vec![TypeMismatch::ConstructorMissing(
-            false,
-            constructor.cd_id,
-        )]);
-    }
-
-    Ok(Vec::new())
 }
 
 fn constructor_is_nullary(constructor: &ConstructorDeclaration) -> bool {
@@ -4619,20 +4739,21 @@ fn extension_constructors(
         return Err(mismatch());
     }
 
-    // OCaml compiler/ml/includecore.ml:470-473 creates an anonymous
-    // constructor identifier before comparing extension arguments. The
-    // comparison uses it for record-constructor diagnostics; preserve the
-    // allocation even when Rust's diagnostic representation does not need the
-    // identifier so subsequent binding stamps follow the same typing order.
-    let _constructor_id = type_ctx.create_ident("");
-
-    if !constructor_arguments_equal_for_inclusion(
+    // `compare_constructor_arguments env (Ident.create "")
+    // ext1.ext_type_params ext2.ext_type_params ext1.ext_args ext2.ext_args
+    // = []` (includecore.ml `extension_constructors`).
+    let constructor_id = type_ctx.create_ident("");
+    if !compare_constructor_arguments(
         type_ctx,
         env,
-        &param_map,
+        constructor_id,
+        &impl_ext.ext_type_params,
+        &sig_ext.ext_type_params,
         &impl_ext.ext_args,
         &sig_ext.ext_args,
-    ) {
+    )
+    .is_empty()
+    {
         return Err(mismatch());
     }
 
@@ -4661,41 +4782,6 @@ fn extension_constructors(
     Ok(())
 }
 
-fn constructor_arguments_equal_for_inclusion(
-    type_ctx: &TypeContext,
-    env: &Env,
-    param_map: &HashMap<TypeExprRef, TypeExprRef>,
-    impl_args: &ConstructorArguments,
-    sig_args: &ConstructorArguments,
-) -> bool {
-    match (impl_args, sig_args) {
-        (
-            ConstructorArguments::CstrTuple(impl_items),
-            ConstructorArguments::CstrTuple(sig_items),
-        ) => {
-            impl_items.len() == sig_items.len()
-                && impl_items
-                    .iter()
-                    .zip(sig_items.iter())
-                    .all(|(impl_item, sig_item)| {
-                        type_exprs_equal_for_inclusion(
-                            type_ctx,
-                            Some(env),
-                            param_map,
-                            *impl_item,
-                            *sig_item,
-                        )
-                    })
-        }
-        (
-            ConstructorArguments::CstrRecord(impl_labels),
-            ConstructorArguments::CstrRecord(sig_labels),
-        ) => {
-            compare_record_declarations(type_ctx, env, &[], &[], impl_labels, sig_labels).is_empty()
-        }
-        _ => false,
-    }
-}
 
 /// `modtype_infos ~loc env cxt subst id info1 info2` (includemod.ml), with
 /// `sig_decl` already `Subst.modtype_declaration subst info2`: the module

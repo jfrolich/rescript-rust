@@ -22,12 +22,21 @@ pub enum TypeMismatch {
     FieldType(Ident),
     FieldMutable(Ident),
     FieldOptional(Ident),
-    FieldNames(usize, String, String),
+    /// A field of the first declaration, named the second way in the
+    /// second.
+    FieldRenamed(String, String),
+    /// A field and its runtime names in the two declarations.
+    FieldRuntimeName(Ident, String, String),
     FieldMissing(bool, Ident),
+    /// The names in both declarations, in the second one's order.
+    FieldOrder(Vec<String>),
     ConstructorType(Ident),
     ConstructorArity(Ident),
-    ConstructorNames(usize, String, String),
+    ConstructorRenamed(String, String),
     ConstructorMissing(bool, Ident),
+    ConstructorOrder(Vec<String>),
+    /// The differences of a constructor's inline records.
+    ConstructorRecord(Ident, Vec<TypeMismatch>),
     RecordRepresentation,
     /// `true` means the second declaration is unboxed.
     UnboxedRepresentation(bool),
@@ -38,6 +47,12 @@ pub enum TypeMismatch {
     /// (`Ast_untagged_variants.describe_declared_values`).
     RuntimeAnnotation(String, String),
     NotUndefined,
+}
+
+/// `%S`: the string in double quotes, `String.escaped`, its characters
+/// below 256 read as bytes as the outcome printer reads runtime names.
+fn ocaml_quoted(s: &str) -> String {
+    crate::types::external_ffi_types::debug::quote(s)
 }
 
 /// `Format.pp_print_string`: a string as wide as its bytes.
@@ -97,10 +112,26 @@ fn report_type_mismatch0<W: std::io::Write>(
             ppf,
             &format!("The optional attribute of field {} is different", s.name()),
         ),
-        TypeMismatch::FieldNames(n, name1, name2) => text(
+        TypeMismatch::FieldRenamed(name1, name2) => text(
             ppf,
-            &format!("Fields number {n} have different names, {name1} and {name2}"),
+            &format!("The field {name1} is named {name2} in {second} {decl}"),
         ),
+        // `"The field %s has the runtime name %S in %s %s,@ but %S in %s %s"`
+        TypeMismatch::FieldRuntimeName(s, name1, name2) => {
+            text(
+                ppf,
+                &format!(
+                    "The field {} has the runtime name {} in {first} {decl},",
+                    s.name(),
+                    ocaml_quoted(name1)
+                ),
+            );
+            ppf.space();
+            text(
+                ppf,
+                &format!("but {} in {second} {decl}", ocaml_quoted(name2)),
+            );
+        }
         TypeMismatch::FieldMissing(b, s) => text(
             ppf,
             &format!(
@@ -109,6 +140,15 @@ fn report_type_mismatch0<W: std::io::Write>(
                 if *b { second } else { first }
             ),
         ),
+        // `"The fields are in another order in %s %s:@ %s"`
+        TypeMismatch::FieldOrder(names) => {
+            text(
+                ppf,
+                &format!("The fields are in another order in {second} {decl}:"),
+            );
+            ppf.space();
+            text(ppf, &names.join(", "));
+        }
         TypeMismatch::ConstructorType(s) => text(
             ppf,
             &format!("The types for constructor {} are not equal", s.name()),
@@ -117,9 +157,9 @@ fn report_type_mismatch0<W: std::io::Write>(
             ppf,
             &format!("The arities for constructor {} differ", s.name()),
         ),
-        TypeMismatch::ConstructorNames(n, name1, name2) => text(
+        TypeMismatch::ConstructorRenamed(name1, name2) => text(
             ppf,
-            &format!("Constructors number {n} have different names, {name1} and {name2}"),
+            &format!("The constructor {name1} is named {name2} in {second} {decl}"),
         ),
         TypeMismatch::ConstructorMissing(b, s) => text(
             ppf,
@@ -129,6 +169,25 @@ fn report_type_mismatch0<W: std::io::Write>(
                 if *b { second } else { first }
             ),
         ),
+        // `"The constructors are in another order in %s %s:@ %s"`
+        TypeMismatch::ConstructorOrder(names) => {
+            text(
+                ppf,
+                &format!("The constructors are in another order in {second} {decl}:"),
+            );
+            ppf.space();
+            text(ppf, &names.join(", "));
+        }
+        // `"@[<v 2>The records of constructor %s differ:%a@]"`
+        TypeMismatch::ConstructorRecord(s, errs) => {
+            ppf.open_vbox(2);
+            text(
+                ppf,
+                &format!("The records of constructor {} differ:", s.name()),
+            );
+            report_type_mismatch(ppf, false, first, second, decl, errs);
+            ppf.close_box();
+        }
         TypeMismatch::RecordRepresentation => text(ppf, "Their internal representations differ"),
         // `"@[<v 2>Their internal representations differ:@,%s %s %s@]"`
         TypeMismatch::UnboxedRepresentation(b) => {
@@ -212,10 +271,14 @@ pub(crate) fn report_type_mismatch<W: std::io::Write>(
     for err in errs {
         match err {
             TypeMismatch::Manifest => {}
-            // Its lines are labels, not sentences.
+            // Its lines are labels, or its errors sentences of their own.
             TypeMismatch::RuntimeAnnotation(..) | TypeMismatch::NotUndefined => {
                 ppf.space();
                 report_type_mismatch0(ppf, !read_the_same, first, second, decl, err);
+            }
+            TypeMismatch::ConstructorRecord(..) => {
+                ppf.space();
+                report_type_mismatch0(ppf, true, first, second, decl, err);
             }
             _ => {
                 ppf.space();
