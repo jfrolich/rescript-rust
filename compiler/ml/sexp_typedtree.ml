@@ -475,16 +475,9 @@ and expression_desc ~with_locs desc =
     let arg_sexp = opt (expression ~with_locs) arg in
     Sexp.list [Sexp.atom "Texp_variant"; string label; arg_sexp]
   | Texp_record { fields; representation = _; extended_expression } ->
-    let fields_sexp = Sexp.list (Array.to_list (Array.map (fun (ld, def, opt_flag) ->
-      let def_sexp = match def with
-        | Kept ty ->
-          let ty_sexp = type_expr ty in
-          Sexp.list [Sexp.atom "Kept"; ty_sexp]
-        | Overridden (li, e) ->
-          let e_sexp = expression ~with_locs e in
-          Sexp.list [Sexp.atom "Overridden"; longident_loc li; e_sexp]
-      in
-      Sexp.list [string ld.Types.lbl_name; def_sexp; Sexp.atom (if opt_flag then "optional" else "required")]
+    let fields_sexp = Sexp.list (Array.to_list (Array.map (fun (ld, li, e) ->
+      let e_sexp = expression ~with_locs e in
+      Sexp.list [string ld.Types.lbl_name; longident_loc li; e_sexp]
     ) fields)) in
     let ext_sexp = opt (expression ~with_locs) extended_expression in
     Sexp.list [
