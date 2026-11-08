@@ -70,8 +70,6 @@ static SPARSE_RECORD_TOTAL_LABELS: AtomicU64 = AtomicU64::new(0);
 static SPARSE_RECORD_TOTAL_FIELDS: AtomicU64 = AtomicU64::new(0);
 static MODULE_SPARSE_RECORDS: OnceLock<Mutex<HashMap<String, SparseRecordSite>>> = OnceLock::new();
 
-static TYPE_ITEM_RESOLVE_CACHE_HITS: AtomicU64 = AtomicU64::new(0);
-static TYPE_ITEM_RESOLVE_MISSING_CACHE_HITS: AtomicU64 = AtomicU64::new(0);
 static TYPE_ITEM_RESOLVE_SCANS: AtomicU64 = AtomicU64::new(0);
 static TYPE_ITEM_RESOLVE_SCANNED_ITEMS: AtomicU64 = AtomicU64::new(0);
 static TYPE_ITEM_RESOLVE_TYPE_ITEMS: AtomicU64 = AtomicU64::new(0);
@@ -384,8 +382,6 @@ pub fn reset() {
         &SPARSE_RECORD_SKIPPED,
         &SPARSE_RECORD_TOTAL_LABELS,
         &SPARSE_RECORD_TOTAL_FIELDS,
-        &TYPE_ITEM_RESOLVE_CACHE_HITS,
-        &TYPE_ITEM_RESOLVE_MISSING_CACHE_HITS,
         &TYPE_ITEM_RESOLVE_SCANS,
         &TYPE_ITEM_RESOLVE_SCANNED_ITEMS,
         &TYPE_ITEM_RESOLVE_TYPE_ITEMS,
@@ -586,22 +582,6 @@ pub(crate) fn record_sparse_record(used: bool, label_count: usize, field_count: 
     });
 }
 
-/// Record a cached type-item path lookup.
-///
-/// Caller must check [`enabled`] before calling this hot-path helper.
-#[inline]
-pub(crate) fn record_type_item_resolve_cache_hit() {
-    TYPE_ITEM_RESOLVE_CACHE_HITS.fetch_add(1, Ordering::Relaxed);
-}
-
-/// Record a cached missing type-item path lookup.
-///
-/// Caller must check [`enabled`] before calling this hot-path helper.
-#[inline]
-pub(crate) fn record_type_item_resolve_missing_cache_hit() {
-    TYPE_ITEM_RESOLVE_MISSING_CACHE_HITS.fetch_add(1, Ordering::Relaxed);
-}
-
 /// Record a type-item signature scan.
 ///
 /// Caller must check [`enabled`] before calling this hot-path helper.
@@ -779,9 +759,7 @@ pub fn print_report() {
     );
     print_module_sparse_records();
     eprintln!(
-        "[compiler-counter] type_item_resolve positive_cache_hits={} missing_cache_hits={} scans={} scanned_items={} type_items={} found={}",
-        TYPE_ITEM_RESOLVE_CACHE_HITS.load(Ordering::Relaxed),
-        TYPE_ITEM_RESOLVE_MISSING_CACHE_HITS.load(Ordering::Relaxed),
+        "[compiler-counter] type_item_resolve scans={} scanned_items={} type_items={} found={}",
         TYPE_ITEM_RESOLVE_SCANS.load(Ordering::Relaxed),
         TYPE_ITEM_RESOLVE_SCANNED_ITEMS.load(Ordering::Relaxed),
         TYPE_ITEM_RESOLVE_TYPE_ITEMS.load(Ordering::Relaxed),

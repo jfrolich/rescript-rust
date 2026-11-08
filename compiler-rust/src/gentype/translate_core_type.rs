@@ -11,19 +11,21 @@ use crate::types::asttypes::ArgLabel;
 use crate::types::context::TypeContext;
 use crate::types::path::PathView;
 use crate::types::typedtree::{
-    ObjectField, ObjectFieldDesc, RowFieldDesc, RowFieldType, TypedCoreType, TypedCoreTypeDesc,
+    ObjectField, ObjectFieldDesc, RowFieldDesc, RowFieldType, TCoreTypeIdx, TypedArena,
+    TypedCoreType, TypedCoreTypeDesc,
 };
 
 pub fn remove_option(
+    ta: &TypedArena,
     label: &ArgLabel,
     core_type: &TypedCoreType,
-) -> Option<(String, TypedCoreType)> {
+) -> Option<(String, TCoreTypeIdx)> {
     // Mirrors compiler/gentype/TranslateCoreType.ml:4-15.
     match (&core_type.ctyp_desc, label) {
         (TypedCoreTypeDesc::Ttyp_constr(path, _, args), ArgLabel::Optional(lbl))
             if path.as_pident().is_some_and(|id| id.name() == "option") && args.len() == 1 =>
         {
-            Some((lbl.txt.clone(), args[0].clone()))
+            Some((lbl.txt.clone(), ta.core_type_list(*args)[0]))
         }
         (TypedCoreTypeDesc::Ttyp_constr(path, _, args), ArgLabel::Optional(lbl))
             if matches!(path.view(), PathView::Pdot(name_space, id, _)
@@ -31,7 +33,7 @@ pub fn remove_option(
                     && id == "option")
                 && args.len() == 1 =>
         {
-            Some((lbl.txt.clone(), args[0].clone()))
+            Some((lbl.txt.clone(), ta.core_type_list(*args)[0]))
         }
         _ => None,
     }
@@ -40,11 +42,11 @@ pub fn remove_option(
 #[derive(Debug, Clone)]
 pub struct ProcessVariant {
     pub no_payloads: Vec<(String, crate::parser::ast::Attributes)>,
-    pub payloads: Vec<(String, crate::parser::ast::Attributes, TypedCoreType)>,
-    pub inherits: Vec<TypedCoreType>,
+    pub payloads: Vec<(String, crate::parser::ast::Attributes, TCoreTypeIdx)>,
+    pub inherits: Vec<TCoreTypeIdx>,
 }
 
-pub fn process_variant(row_fields: &[RowFieldType]) -> ProcessVariant {
+pub fn process_variant(ta: &TypedArena, row_fields: &[RowFieldType]) -> ProcessVariant {
     // Mirrors compiler/gentype/TranslateCoreType.ml:17-50.
     let mut no_payloads = Vec::new();
     let mut payloads = Vec::new();
@@ -59,11 +61,11 @@ pub fn process_variant(row_fields: &[RowFieldType]) -> ProcessVariant {
                 payloads.push((
                     label.txt.clone(),
                     row_field.rf_attributes.clone(),
-                    payload[0].clone(),
+                    ta.core_type_list(*payload)[0],
                 ));
             }
             RowFieldDesc::Rtag(_, _, _) => {}
-            RowFieldDesc::Rinherit(t) => inherits.push(t.clone()),
+            RowFieldDesc::Rinherit(t) => inherits.push(*t),
         }
     }
 
@@ -75,6 +77,7 @@ pub fn process_variant(row_fields: &[RowFieldType]) -> ProcessVariant {
 }
 
 pub fn translate_arrow_type(
+    ta: &TypedArena,
     ctx: &TypeContext,
     arena: &ParseArena,
     config: &crate::gentype::config::T,
@@ -90,29 +93,30 @@ pub fn translate_arrow_type(
     let mut labeled_convertable_types = Vec::with_capacity(args.len());
     for arg in args {
         let (label, typ) = match &arg.lbl {
-            ArgLabel::Nolabel => (Label::Nolabel, &*arg.typ),
+            ArgLabel::Nolabel => (Label::Nolabel, ta.core_type(arg.typ)),
             label => {
                 let as_label =
                     crate::gentype::annotation::get_gentype_as_renaming(arena, &arg.attrs)
                         .unwrap_or_default();
-                match remove_option(label, &arg.typ) {
+                match remove_option(ta, label, ta.core_type(arg.typ)) {
                     None => {
                         let label = if as_label.is_empty() {
                             label_name(label)
                         } else {
                             as_label
                         };
-                        (Label::Label(label), &*arg.typ)
+                        (Label::Label(label), ta.core_type(arg.typ))
                     }
                     Some((lbl, typ)) => {
                         let translation = translateCoreType_(
+                            ta,
                             ctx,
                             arena,
                             config,
                             type_vars_gen,
                             false,
                             type_env,
-                            &typ,
+                            ta.core_type(typ),
                         );
                         all_deps.extend(translation.dependencies);
                         labeled_convertable_types.push((Label::OptLabel(lbl), translation.type_));
@@ -122,11 +126,12 @@ pub fn translate_arrow_type(
             }
         };
         let translation =
-            translateCoreType_(ctx, arena, config, type_vars_gen, false, type_env, typ);
+            translateCoreType_(ta, ctx, arena, config, type_vars_gen, false, type_env, typ);
         all_deps.extend(translation.dependencies);
         labeled_convertable_types.push((label, translation.type_));
     }
-    let translation = translateCoreType_(ctx, arena, config, type_vars_gen, false, type_env, ret);
+    let translation =
+        translateCoreType_(ta, ctx, arena, config, type_vars_gen, false, type_env, ret);
     if !no_function_return_dependencies {
         all_deps.extend(translation.dependencies);
     }
@@ -143,6 +148,7 @@ pub fn translate_arrow_type(
 
 #[allow(non_snake_case)]
 pub fn translateCoreType_(
+    ta: &TypedArena,
     ctx: &TypeContext,
     arena: &ParseArena,
     config: &crate::gentype::config::T,
@@ -153,14 +159,29 @@ pub fn translateCoreType_(
 ) -> crate::gentype::translate_type_expr_from_types::Translation {
     // Mirrors compiler/gentype/TranslateCoreType.ml:122-280.
     match &core_type.ctyp_desc {
-        TypedCoreTypeDesc::Ttyp_alias(ct, _) => {
-            translateCoreType_(ctx, arena, config, type_vars_gen, false, type_env, ct)
-        }
+        TypedCoreTypeDesc::Ttyp_alias(ct, _) => translateCoreType_(
+            ta,
+            ctx,
+            arena,
+            config,
+            type_vars_gen,
+            false,
+            type_env,
+            ta.core_type(*ct),
+        ),
         TypedCoreTypeDesc::Ttyp_object(t_obj, closed_flag) => {
             let fields_translations = t_obj
                 .iter()
                 .map(|object_field| {
-                    get_field_type(ctx, arena, config, type_vars_gen, type_env, object_field)
+                    get_field_type(
+                        ta,
+                        ctx,
+                        arena,
+                        config,
+                        type_vars_gen,
+                        type_env,
+                        object_field,
+                    )
                 })
                 .collect::<Vec<_>>();
             crate::gentype::translate_type_expr_from_types::translate_obj_type(
@@ -172,8 +193,15 @@ pub fn translateCoreType_(
             )
         }
         TypedCoreTypeDesc::Ttyp_constr(path, _, type_params) => {
-            let params_translation =
-                translateCoreTypes_(ctx, arena, config, type_vars_gen, type_env, type_params);
+            let params_translation = translateCoreTypes_(
+                ta,
+                ctx,
+                arena,
+                config,
+                type_vars_gen,
+                type_env,
+                ta.core_type_list(*type_params),
+            );
             crate::gentype::translate_type_expr_from_types::translate_constr(
                 config,
                 &params_translation,
@@ -182,15 +210,17 @@ pub fn translateCoreType_(
             )
         }
         TypedCoreTypeDesc::Ttyp_poly(_, t) => translateCoreType_(
+            ta,
             ctx,
             arena,
             config,
             type_vars_gen,
             no_function_return_dependencies,
             type_env,
-            t,
+            ta.core_type(*t),
         ),
         TypedCoreTypeDesc::Ttyp_arrow(args, ret) => translate_arrow_type(
+            ta,
             ctx,
             arena,
             config,
@@ -198,11 +228,18 @@ pub fn translateCoreType_(
             no_function_return_dependencies,
             type_env,
             args,
-            ret,
+            ta.core_type(*ret),
         ),
         TypedCoreTypeDesc::Ttyp_tuple(list_exp) => {
-            let inner_types_translation =
-                translateCoreTypes_(ctx, arena, config, type_vars_gen, type_env, list_exp);
+            let inner_types_translation = translateCoreTypes_(
+                ta,
+                ctx,
+                arena,
+                config,
+                type_vars_gen,
+                type_env,
+                ta.core_type_list(*list_exp),
+            );
             crate::gentype::translate_type_expr_from_types::Translation {
                 dependencies: inner_types_translation
                     .iter()
@@ -229,6 +266,7 @@ pub fn translateCoreType_(
             }
         }
         TypedCoreTypeDesc::Ttyp_variant(row_fields, _, _) => translate_variant(
+            ta,
             ctx,
             arena,
             config,
@@ -238,38 +276,41 @@ pub fn translateCoreType_(
             row_fields,
         ),
         TypedCoreTypeDesc::Ttyp_package(package) => {
-            translate_package(ctx, arena, config, type_vars_gen, type_env, package)
+            translate_package(ta, ctx, arena, config, type_vars_gen, type_env, package)
         }
     }
 }
 
 #[allow(non_snake_case)]
 pub fn translateCoreTypes_(
+    ta: &TypedArena,
     ctx: &TypeContext,
     arena: &ParseArena,
     config: &crate::gentype::config::T,
     type_vars_gen: &crate::gentype::gen_ident::TypeVarsGen,
     type_env: &crate::gentype::type_env::T,
-    type_exprs: &[TypedCoreType],
+    type_exprs: &[TCoreTypeIdx],
 ) -> Vec<crate::gentype::translate_type_expr_from_types::Translation> {
     // Mirrors compiler/gentype/TranslateCoreType.ml:282-284.
     type_exprs
         .iter()
-        .map(|core_type| {
+        .map(|&core_type| {
             translateCoreType_(
+                ta,
                 ctx,
                 arena,
                 config,
                 type_vars_gen,
                 false,
                 type_env,
-                core_type,
+                ta.core_type(core_type),
             )
         })
         .collect()
 }
 
 pub fn translate_core_type(
+    ta: &TypedArena,
     ctx: &TypeContext,
     arena: &ParseArena,
     config: &crate::gentype::config::T,
@@ -279,6 +320,7 @@ pub fn translate_core_type(
     // Mirrors compiler/gentype/TranslateCoreType.ml:286-295.
     let type_vars_gen = crate::gentype::gen_ident::create_type_vars_gen();
     let translation = translateCoreType_(
+        ta,
         ctx,
         arena,
         config,
@@ -296,6 +338,7 @@ pub fn translate_core_type(
 }
 
 fn get_field_type(
+    ta: &TypedArena,
     ctx: &TypeContext,
     arena: &ParseArena,
     config: &crate::gentype::config::T,
@@ -320,18 +363,37 @@ fn get_field_type(
             (
                 name.txt.clone(),
                 mutable_,
-                translateCoreType_(ctx, arena, config, type_vars_gen, false, type_env, t),
+                translateCoreType_(
+                    ta,
+                    ctx,
+                    arena,
+                    config,
+                    type_vars_gen,
+                    false,
+                    type_env,
+                    ta.core_type(*t),
+                ),
             )
         }
         ObjectFieldDesc::OTinherit(t) => (
             "Inherit".to_string(),
             crate::gentype::gen_type_common::Mutable::Immutable,
-            translateCoreType_(ctx, arena, config, type_vars_gen, false, type_env, t),
+            translateCoreType_(
+                ta,
+                ctx,
+                arena,
+                config,
+                type_vars_gen,
+                false,
+                type_env,
+                ta.core_type(*t),
+            ),
         ),
     }
 }
 
 fn translate_variant(
+    ta: &TypedArena,
     ctx: &TypeContext,
     arena: &ParseArena,
     config: &crate::gentype::config::T,
@@ -344,7 +406,7 @@ fn translate_variant(
         no_payloads,
         payloads,
         inherits,
-    } = process_variant(row_fields);
+    } = process_variant(ta, row_fields);
     let as_string = crate::gentype::annotation::has_attribute(
         arena,
         crate::gentype::annotation::tag_is_string,
@@ -393,7 +455,16 @@ fn translate_variant(
             (
                 label.clone(),
                 attributes.clone(),
-                translateCoreType_(ctx, arena, config, type_vars_gen, false, type_env, payload),
+                translateCoreType_(
+                    ta,
+                    ctx,
+                    arena,
+                    config,
+                    type_vars_gen,
+                    false,
+                    type_env,
+                    ta.core_type(*payload),
+                ),
             )
         })
         .collect::<Vec<_>>();
@@ -411,7 +482,7 @@ fn translate_variant(
         })
         .collect::<Vec<_>>();
     let inherits_translations =
-        translateCoreTypes_(ctx, arena, config, type_vars_gen, type_env, &inherits);
+        translateCoreTypes_(ta, ctx, arena, config, type_vars_gen, type_env, &inherits);
     let inherits = inherits_translations
         .iter()
         .map(|translation| translation.type_.clone())
@@ -432,6 +503,7 @@ fn translate_variant(
 }
 
 fn translate_package(
+    ta: &TypedArena,
     ctx: &TypeContext,
     arena: &ParseArena,
     config: &crate::gentype::config::T,
@@ -447,7 +519,16 @@ fn translate_package(
                 .map(|(x, t)| {
                     (
                         longident_to_strings(arena, arena.get_longident(x.txt)),
-                        translateCoreType_(ctx, arena, config, type_vars_gen, false, &type_env, t),
+                        translateCoreType_(
+                            ta,
+                            ctx,
+                            arena,
+                            config,
+                            type_vars_gen,
+                            false,
+                            &type_env,
+                            ta.core_type(*t),
+                        ),
                     )
                 })
                 .collect::<Vec<_>>();

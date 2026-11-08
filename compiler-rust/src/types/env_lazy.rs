@@ -2040,10 +2040,7 @@ fn build_local_module_components(
                     runtime_pos += 1;
                 }
             }
-            (
-                SignatureItem::SigType(id, decl, _),
-                SignatureItem::SigType(qualified_id, qualified_decl, _),
-            ) => {
+            (SignatureItem::SigType(id, decl, _), SignatureItem::SigType(_, qualified_decl, _)) => {
                 if let Some(working_env) = working_env.as_mut() {
                     let env_decl = if use_qualified_items_for_env {
                         qualified_decl.clone()
@@ -2051,10 +2048,6 @@ fn build_local_module_components(
                         decl.clone()
                     };
                     working_env.add_type(*id, env_decl);
-                }
-                ctx.register_type_decl(qualified_id.name(), qualified_decl.clone());
-                if qualified_id.stamp() != 0 {
-                    ctx.register_type_decl_by_stamp(qualified_id.stamp(), qualified_decl.clone());
                 }
             }
             (SignatureItem::SigTypext(_, _, _), SignatureItem::SigTypext(_, _, _))
@@ -2088,7 +2081,6 @@ fn build_local_module_components(
                         Some((access_path.clone(), qualified_sig_for_children.clone())),
                     );
                 }
-                crate::cmi::persistent_env::register_types_by_stamp_recursive(&qmd.md_type, ctx);
                 if let Some(working_env) = working_env.as_ref()
                     && let Some(stored) =
                         working_env.local_module_components_arc(&Path::pident(*id))

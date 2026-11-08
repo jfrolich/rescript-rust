@@ -2396,8 +2396,9 @@ Current Rust performance-oriented differences:
   main `Expression` enum. Function defaults, case guards, constructor payloads,
   variant payloads, record spreads, else branches, and coercion source types are
   keyed by stable `ExprIdx` instead of inflating every expression node.
-- `SparseExtras` stores the common "no typedtree extras" case as `None` instead
-  of an inline empty vector on every typed pattern/expression.
+- Typed expressions and patterns keep their extras and attributes in a
+  `TypedArena` side table behind an optional 4-byte handle, so the common case
+  of neither costs no allocation and no inline empty vectors.
 - `Texp_record_sparse` is an internal representation for large closed regular
   records with many omitted optional fields, especially JSX prop bags. OCaml
   materializes one field entry per label from `lbl_all`; Rust stores explicit

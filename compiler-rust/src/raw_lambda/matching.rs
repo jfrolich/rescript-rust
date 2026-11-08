@@ -14,15 +14,15 @@ use std::ops::Deref;
 use std::sync::{Arc, OnceLock};
 
 use crate::ident::{Ident, IdentFlags};
+use crate::lambda::LamLoc;
 use crate::lambda::LetKind;
 use crate::lambda::lam_constant::PointerInfo;
 use crate::lambda::lam_primitive::Mutable;
 use crate::lambda::{Comparison, FieldDbgInfo, Primitive, TagInfo};
-use crate::lambda::LamLoc;
 use crate::location::Location;
-use crate::raw_lambda::loc::LocArena;
 use crate::parse_arena::{LocIdx, ParseArena};
 use crate::parser::ast::Attributes;
+use crate::raw_lambda::loc::LocArena;
 use crate::raw_lambda::switch::Shared;
 use crate::raw_lambda::typeopt::{
     constructor_has_optional_shape, has_untagged, type_cannot_contain_undefined,
@@ -36,7 +36,10 @@ use crate::types::decl::{ConstructorDescription, LabelDescription, RecordReprese
 use crate::types::type_expr::TypeExprRef;
 use crate::types::type_expr::{RowDesc, RowField};
 use crate::types::typedtree::Partial;
-use crate::types::typedtree::{Constant, EnvRef, Pattern, PatternDesc};
+use crate::types::typedtree::{
+    Constant, EnvRef, Pattern, PatternDesc, TPatIdx, TPatList, TypedArena,
+};
+use std::cell::RefCell;
 
 /// Shared action carried by the pattern-matching compiler.
 ///
@@ -277,11 +280,142 @@ impl Deref for MatchArgs {
 // Omega (wildcard) helpers — ported from parmatch.ml
 // ============================================================================
 
-/// Arena for patterns synthesized while compiling a match. Matrices,
-/// contexts and default environments hold `&'p Pattern` rows that borrow
-/// typed-tree patterns or patterns from this arena, the way OCaml's
-/// immutable pattern lists share their elements (`compiler/ml/matching.ml`).
-pub(crate) type PatArena = typed_arena::Arena<Pattern>;
+/// Backing storage of a [`PatArena`] overlay.
+#[derive(Default)]
+pub struct PatStore {
+    pats: typed_arena::Arena<Pattern>,
+    lists: typed_arena::Arena<TPatIdx>,
+}
+
+/// The patterns a match is compiled from: the typed tree's, plus an overlay
+/// of patterns synthesized while compiling it. Matrices, contexts and
+/// default environments hold `&'p Pattern` rows that borrow either, the way
+/// OCaml's immutable pattern lists share their elements
+/// (`compiler/ml/matching.ml`). Sub-patterns are handles; overlay handles
+/// carry a flag bit, so every lookup goes through this type.
+pub struct PatArena<'p> {
+    ta: &'p TypedArena,
+    store: &'p PatStore,
+    overlay: RefCell<Vec<&'p Pattern>>,
+    overlay_lists: RefCell<Vec<&'p [TPatIdx]>>,
+    /// Overlay handle of each overlay pattern (and the shared wildcard), by
+    /// address, for [`PatArena::handle`].
+    overlay_by_addr: RefCell<ahash::AHashMap<usize, TPatIdx>>,
+}
+
+impl<'p> PatArena<'p> {
+    pub(crate) fn new(ta: &'p TypedArena, store: &'p PatStore) -> Self {
+        let pa = PatArena {
+            ta,
+            store,
+            overlay: RefCell::new(Vec::new()),
+            overlay_lists: RefCell::new(Vec::new()),
+            overlay_by_addr: RefCell::new(ahash::AHashMap::new()),
+        };
+        let omega_idx = pa.push(omega_owned());
+        pa.overlay_by_addr
+            .borrow_mut()
+            .insert(omega() as *const Pattern as usize, omega_idx);
+        pa
+    }
+
+    fn store_overlay(&self, p: Pattern) -> (TPatIdx, &'p Pattern) {
+        let r: &'p Pattern = self.store.pats.alloc(p);
+        let mut overlay = self.overlay.borrow_mut();
+        let idx = TPatIdx::overlay(overlay.len());
+        overlay.push(r);
+        self.overlay_by_addr
+            .borrow_mut()
+            .insert(r as *const Pattern as usize, idx);
+        (idx, r)
+    }
+
+    /// Store a synthesized pattern.
+    pub(crate) fn alloc(&self, p: Pattern) -> &'p Pattern {
+        self.store_overlay(p).1
+    }
+
+    /// Store a synthesized pattern, for use as a sub-pattern.
+    pub(crate) fn push(&self, p: Pattern) -> TPatIdx {
+        self.store_overlay(p).0
+    }
+
+    /// A pattern by handle.
+    pub(crate) fn pat(&self, idx: TPatIdx) -> &'p Pattern {
+        match idx.overlay_index() {
+            Some(i) => self.overlay.borrow()[i],
+            None => self.ta.pattern(idx),
+        }
+    }
+
+    /// The handles of a pattern list.
+    pub(crate) fn list(&self, list: TPatList) -> &'p [TPatIdx] {
+        match crate::types::tast_arena::overlay_pattern_list_index(list) {
+            Some(i) => self.overlay_lists.borrow()[i],
+            None => self.ta.pattern_list(list),
+        }
+    }
+
+    /// The patterns of a list.
+    pub(crate) fn pats(&self, list: TPatList) -> impl ExactSizeIterator<Item = &'p Pattern> + '_ {
+        self.list(list).iter().map(move |&idx| self.pat(idx))
+    }
+
+    /// Store a list of handles.
+    pub(crate) fn push_list(&self, items: impl IntoIterator<Item = TPatIdx>) -> TPatList {
+        let items: &'p [TPatIdx] = self.store.lists.alloc_extend(items);
+        if items.is_empty() {
+            return TPatList::EMPTY;
+        }
+        let mut lists = self.overlay_lists.borrow_mut();
+        let list = crate::types::tast_arena::overlay_pattern_list(lists.len(), items.len());
+        lists.push(items);
+        list
+    }
+
+    /// The handle of a pattern reference, for use as a sub-pattern: its own
+    /// handle when it is stored here or in the typed tree, otherwise a
+    /// stored copy.
+    pub(crate) fn handle(&self, p: &Pattern) -> TPatIdx {
+        if let Some(idx) = self.ta.pattern_handle(p) {
+            return idx;
+        }
+        if let Some(&idx) = self
+            .overlay_by_addr
+            .borrow()
+            .get(&(p as *const Pattern as usize))
+        {
+            return idx;
+        }
+        self.push(p.clone())
+    }
+
+    /// The shared wildcard, as a sub-pattern.
+    pub(crate) fn omega_idx(&self) -> TPatIdx {
+        self.handle(omega())
+    }
+
+    /// `n` wildcards, as the sub-patterns of a new pattern (OCaml
+    /// `omega_list`).
+    pub(crate) fn omegas(&self, n: usize) -> TPatList {
+        let omega = self.omega_idx();
+        self.push_list(std::iter::repeat_n(omega, n))
+    }
+
+    /// Row patterns as the sub-patterns of a new pattern.
+    pub(crate) fn refs_list(&self, ps: &[&Pattern]) -> TPatList {
+        let handles: Vec<TPatIdx> = ps.iter().map(|p| self.handle(p)).collect();
+        self.push_list(handles)
+    }
+
+    /// The handle of a pattern that is either a reference or newly built.
+    pub(crate) fn intern(&self, p: Cow<'_, Pattern>) -> TPatIdx {
+        match p {
+            Cow::Borrowed(p) => self.handle(p),
+            Cow::Owned(p) => self.push(p),
+        }
+    }
+}
 
 /// OCaml `omega = make_pat Tpat_any Ctype.none Env.empty`: one shared value.
 static OMEGA: std::sync::LazyLock<Pattern> = std::sync::LazyLock::new(|| {
@@ -290,7 +424,6 @@ static OMEGA: std::sync::LazyLock<Pattern> = std::sync::LazyLock::new(|| {
         LocIdx::none(),
         TypeExprRef(0),
         EnvRef(0),
-        Attributes::new(),
     )
 });
 
@@ -311,17 +444,6 @@ fn omegas(n: usize) -> Vec<&'static Pattern> {
     (0..n).map(|_| omega()).collect()
 }
 
-/// Owned wildcards with the same length as `l` (sub-patterns of a new
-/// pattern).
-fn omega_list<T>(l: &[T]) -> Vec<Pattern> {
-    l.iter().map(|_| omega_owned()).collect()
-}
-
-/// Copy borrowed rows into owned sub-patterns of a new pattern.
-fn owned_pats(ps: &[&Pattern]) -> Vec<Pattern> {
-    ps.iter().map(|p| (*p).clone()).collect()
-}
-
 fn bump_raise_count(next_raise_count: &mut i32) -> i32 {
     *next_raise_count += 1;
     *next_raise_count
@@ -333,7 +455,7 @@ fn bump_raise_count(next_raise_count: &mut i32) -> i32 {
 
 /// Make a pattern with given desc, type, and env.
 fn make_pat(desc: PatternDesc, ty: TypeExprRef, env: EnvRef) -> Pattern {
-    Pattern::new(desc, LocIdx::none(), ty, env, Attributes::new())
+    Pattern::new(desc, LocIdx::none(), ty, env)
 }
 
 /// Compare two typed constants.
@@ -393,15 +515,17 @@ fn same_constructor(c1: &ConstructorDescription, c2: &ConstructorDescription) ->
 type RecordPatternField = (
     crate::parse_arena::Located<crate::parse_arena::LidentIdx>,
     std::sync::Arc<crate::types::LabelDescription>,
-    Pattern,
+    TPatIdx,
     bool,
 );
 
 fn records_args_for_le_pats<'p>(
-    l1: &'p [RecordPatternField],
-    l2: &'p [RecordPatternField],
+    pa: &PatArena<'p>,
+    l1: &[RecordPatternField],
+    l2: &[RecordPatternField],
     omega: &'p Pattern,
 ) -> (Vec<&'p Pattern>, Vec<&'p Pattern>) {
+    let pat = |idx: &TPatIdx| pa.pat(*idx);
     let mut ps = Vec::new();
     let mut qs = Vec::new();
     let mut i = 0;
@@ -413,28 +537,28 @@ fn records_args_for_le_pats<'p>(
         match (l1.get(i), l2.get(j)) {
             (Some((_, lbl1, p1, _)), Some((_, lbl2, p2, _))) => {
                 if lbl1.lbl_pos < lbl2.lbl_pos {
-                    ps.push(p1);
+                    ps.push(pat(p1));
                     qs.push(omega);
                     i += 1;
                 } else if lbl1.lbl_pos > lbl2.lbl_pos {
                     ps.push(omega);
-                    qs.push(p2);
+                    qs.push(pat(p2));
                     j += 1;
                 } else {
-                    ps.push(p1);
-                    qs.push(p2);
+                    ps.push(pat(p1));
+                    qs.push(pat(p2));
                     i += 1;
                     j += 1;
                 }
             }
             (Some((_, _, p1, _)), None) => {
-                ps.push(p1);
+                ps.push(pat(p1));
                 qs.push(omega);
                 i += 1;
             }
             (None, Some((_, _, p2, _))) => {
                 ps.push(omega);
-                qs.push(p2);
+                qs.push(pat(p2));
                 j += 1;
             }
             (None, None) => break,
@@ -447,40 +571,44 @@ fn records_args_for_le_pats<'p>(
 /// Check if one pattern is less specific than another (le_pat p q means
 /// everything matched by q is also matched by p).
 /// Equivalent to OCaml's `le_pat`.
-fn le_pat(p: &Pattern, q: &Pattern) -> bool {
+fn le_pat<'p>(pa: &PatArena<'p>, p: &Pattern, q: &Pattern) -> bool {
     match (&p.pat_desc, &q.pat_desc) {
         (PatternDesc::Tpat_var(..) | PatternDesc::Tpat_any, _) => true,
-        (PatternDesc::Tpat_alias(p, _, _), _) => le_pat(p, q),
-        (_, PatternDesc::Tpat_alias(q, _, _)) => le_pat(p, q),
+        (PatternDesc::Tpat_alias(p, _, _), _) => le_pat(pa, pa.pat(*p), q),
+        (_, PatternDesc::Tpat_alias(q, _, _)) => le_pat(pa, p, pa.pat(*q)),
         // OCaml reaches or-pattern implication through the `satisfiable`
         // fallback in `Parmatch.le_pat` (compiler/ml/parmatch.ml:1772-1791).
         (PatternDesc::Tpat_or(_, _, _), PatternDesc::Tpat_or(q1, q2, _)) => {
-            le_pat(p, q1) && le_pat(p, q2)
+            le_pat(pa, p, pa.pat(*q1)) && le_pat(pa, p, pa.pat(*q2))
         }
-        (PatternDesc::Tpat_or(p1, p2, _), _) => le_pat(p1, q) || le_pat(p2, q),
-        (_, PatternDesc::Tpat_or(q1, q2, _)) => le_pat(p, q1) && le_pat(p, q2),
+        (PatternDesc::Tpat_or(p1, p2, _), _) => {
+            le_pat(pa, pa.pat(*p1), q) || le_pat(pa, pa.pat(*p2), q)
+        }
+        (_, PatternDesc::Tpat_or(q1, q2, _)) => {
+            le_pat(pa, p, pa.pat(*q1)) && le_pat(pa, p, pa.pat(*q2))
+        }
         (PatternDesc::Tpat_constant(c1), PatternDesc::Tpat_constant(c2)) => {
             const_compare(c1, c2) == std::cmp::Ordering::Equal
         }
         (PatternDesc::Tpat_construct(_, c1, ps), PatternDesc::Tpat_construct(_, c2, qs)) => {
-            same_constructor(c1, c2) && le_pats(ps, qs)
+            same_constructor(c1, c2) && le_pat_lists(pa, *ps, *qs)
         }
         (
             PatternDesc::Tpat_variant(l1, Some(p1), _),
             PatternDesc::Tpat_variant(l2, Some(p2), _),
-        ) => l1 == l2 && le_pat(p1, p2),
+        ) => l1 == l2 && le_pat(pa, pa.pat(*p1), pa.pat(*p2)),
         (PatternDesc::Tpat_variant(l1, None, _), PatternDesc::Tpat_variant(l2, None, _)) => {
             l1 == l2
         }
         (PatternDesc::Tpat_variant(..), PatternDesc::Tpat_variant(..)) => false,
-        (PatternDesc::Tpat_tuple(ps), PatternDesc::Tpat_tuple(qs)) => le_pats(ps, qs),
+        (PatternDesc::Tpat_tuple(ps), PatternDesc::Tpat_tuple(qs)) => le_pat_lists(pa, *ps, *qs),
         (PatternDesc::Tpat_record(l1, _, _), PatternDesc::Tpat_record(l2, _, _)) => {
             let omega = omega();
-            let (ps, qs) = records_args_for_le_pats(l1, l2, omega);
-            ps.iter().zip(&qs).all(|(p, q)| le_pat(p, q))
+            let (ps, qs) = records_args_for_le_pats(pa, l1, l2, omega);
+            ps.iter().zip(&qs).all(|(p, q)| le_pat(pa, p, q))
         }
         (PatternDesc::Tpat_array(ps), PatternDesc::Tpat_array(qs)) => {
-            ps.len() == qs.len() && le_pats(ps, qs)
+            ps.len() == qs.len() && le_pat_lists(pa, *ps, *qs)
         }
         // OCaml falls back to `not (satisfiable [[p]] [q])` here
         // (compiler/ml/parmatch.ml:1772-1791). Keep the remaining fallback
@@ -489,11 +617,16 @@ fn le_pat(p: &Pattern, q: &Pattern) -> bool {
     }
 }
 
+/// [`le_pats`] over the sub-pattern lists of two patterns.
+fn le_pat_lists(pa: &PatArena<'_>, ps: TPatList, qs: TPatList) -> bool {
+    pa.pats(ps).zip(pa.pats(qs)).all(|(p, q)| le_pat(pa, p, q))
+}
+
 /// Check if patterns ps are pairwise le_pat to qs.
-fn le_pats<A: Borrow<Pattern>, B: Borrow<Pattern>>(ps: &[A], qs: &[B]) -> bool {
+fn le_pats<A: Borrow<Pattern>, B: Borrow<Pattern>>(pa: &PatArena<'_>, ps: &[A], qs: &[B]) -> bool {
     ps.iter()
         .zip(qs)
-        .all(|(p, q)| le_pat(p.borrow(), q.borrow()))
+        .all(|(p, q)| le_pat(pa, p.borrow(), q.borrow()))
 }
 
 /// Get minimal elements under a partial order `le`.
@@ -523,12 +656,12 @@ struct Empty;
 /// Least upper bound of two patterns (the most specific pattern that
 /// matches everything matched by either p or q).
 /// Returns Err(Empty) when p and q are incompatible.
-fn lub<'p>(pa: &'p PatArena, p: &'p Pattern, q: &'p Pattern) -> Result<&'p Pattern, Empty> {
-    Ok(alloc_cow(pa, lub_cow(p, q)?))
+fn lub<'p>(pa: &'p PatArena<'p>, p: &'p Pattern, q: &'p Pattern) -> Result<&'p Pattern, Empty> {
+    Ok(alloc_cow(pa, lub_cow(pa, p, q)?))
 }
 
 /// Store a pattern that is either one of the inputs or newly built.
-fn alloc_cow<'p>(pa: &'p PatArena, p: Cow<'p, Pattern>) -> &'p Pattern {
+fn alloc_cow<'p>(pa: &'p PatArena<'p>, p: Cow<'p, Pattern>) -> &'p Pattern {
     match p {
         Cow::Borrowed(p) => p,
         Cow::Owned(p) => pa.alloc(p),
@@ -537,23 +670,27 @@ fn alloc_cow<'p>(pa: &'p PatArena, p: Cow<'p, Pattern>) -> &'p Pattern {
 
 /// `lub` returning one of its inputs when the result is that input (OCaml
 /// returns `p` or `q` physically), and a new pattern otherwise.
-fn lub_cow<'x>(p: &'x Pattern, q: &'x Pattern) -> Result<Cow<'x, Pattern>, Empty> {
+fn lub_cow<'p>(
+    pa: &PatArena<'p>,
+    p: &'p Pattern,
+    q: &'p Pattern,
+) -> Result<Cow<'p, Pattern>, Empty> {
     match (&p.pat_desc, &q.pat_desc) {
-        (PatternDesc::Tpat_alias(p, _, _), _) => lub_cow(p, q),
-        (_, PatternDesc::Tpat_alias(q, _, _)) => lub_cow(p, q),
+        (PatternDesc::Tpat_alias(p, _, _), _) => lub_cow(pa, pa.pat(*p), q),
+        (_, PatternDesc::Tpat_alias(q, _, _)) => lub_cow(pa, p, pa.pat(*q)),
         (PatternDesc::Tpat_any | PatternDesc::Tpat_var(..), _) => Ok(Cow::Borrowed(q)),
         (_, PatternDesc::Tpat_any | PatternDesc::Tpat_var(..)) => Ok(Cow::Borrowed(p)),
-        (PatternDesc::Tpat_or(p1, p2, _), _) => orlub(p1, p2, q),
-        (_, PatternDesc::Tpat_or(q1, q2, _)) => orlub(q1, q2, p),
+        (PatternDesc::Tpat_or(p1, p2, _), _) => orlub(pa, pa.pat(*p1), pa.pat(*p2), q),
+        (_, PatternDesc::Tpat_or(q1, q2, _)) => orlub(pa, pa.pat(*q1), pa.pat(*q2), p),
         (PatternDesc::Tpat_constant(c1), PatternDesc::Tpat_constant(c2))
             if const_compare(c1, c2) == std::cmp::Ordering::Equal =>
         {
             Ok(Cow::Borrowed(p))
         }
         (PatternDesc::Tpat_tuple(ps), PatternDesc::Tpat_tuple(qs)) => {
-            let rs = lubs_owned(ps, qs)?;
+            let rs = lubs_owned(pa, pa.list(*ps), pa.list(*qs))?;
             Ok(Cow::Owned(make_pat(
-                PatternDesc::Tpat_tuple(rs),
+                PatternDesc::Tpat_tuple(pa.push_list(rs)),
                 p.pat_type,
                 p.pat_env,
             )))
@@ -561,9 +698,9 @@ fn lub_cow<'x>(p: &'x Pattern, q: &'x Pattern) -> Result<Cow<'x, Pattern>, Empty
         (PatternDesc::Tpat_construct(lid, c1, ps1), PatternDesc::Tpat_construct(_, c2, ps2))
             if same_constructor(c1, c2) =>
         {
-            let rs = lubs_owned(ps1, ps2)?;
+            let rs = lubs_owned(pa, pa.list(*ps1), pa.list(*ps2))?;
             Ok(Cow::Owned(make_pat(
-                PatternDesc::Tpat_construct(*lid, c1.clone(), rs),
+                PatternDesc::Tpat_construct(*lid, c1.clone(), pa.push_list(rs)),
                 p.pat_type,
                 p.pat_env,
             )))
@@ -572,9 +709,9 @@ fn lub_cow<'x>(p: &'x Pattern, q: &'x Pattern) -> Result<Cow<'x, Pattern>, Empty
             PatternDesc::Tpat_variant(l1, Some(p1), row),
             PatternDesc::Tpat_variant(l2, Some(p2), _),
         ) if l1 == l2 => {
-            let r = lub_cow(p1, p2)?.into_owned();
+            let r = pa.intern(lub_cow(pa, pa.pat(*p1), pa.pat(*p2))?);
             Ok(Cow::Owned(make_pat(
-                PatternDesc::Tpat_variant(l1.clone(), Some(Box::new(r)), *row),
+                PatternDesc::Tpat_variant(l1.clone(), Some(r), *row),
                 p.pat_type,
                 p.pat_env,
             )))
@@ -585,7 +722,7 @@ fn lub_cow<'x>(p: &'x Pattern, q: &'x Pattern) -> Result<Cow<'x, Pattern>, Empty
             Ok(Cow::Borrowed(p))
         }
         (PatternDesc::Tpat_record(l1, closed, _), PatternDesc::Tpat_record(l2, _, _)) => {
-            let rs = record_lubs(l1, l2)?;
+            let rs = record_lubs(pa, l1, l2)?;
             Ok(Cow::Owned(make_pat(
                 PatternDesc::Tpat_record(rs, *closed, None),
                 p.pat_type,
@@ -593,9 +730,9 @@ fn lub_cow<'x>(p: &'x Pattern, q: &'x Pattern) -> Result<Cow<'x, Pattern>, Empty
             )))
         }
         (PatternDesc::Tpat_array(ps), PatternDesc::Tpat_array(qs)) if ps.len() == qs.len() => {
-            let rs = lubs_owned(ps, qs)?;
+            let rs = lubs_owned(pa, pa.list(*ps), pa.list(*qs))?;
             Ok(Cow::Owned(make_pat(
-                PatternDesc::Tpat_array(rs),
+                PatternDesc::Tpat_array(pa.push_list(rs)),
                 p.pat_type,
                 p.pat_env,
             )))
@@ -609,28 +746,33 @@ fn with_desc(q: &Pattern, pat_desc: PatternDesc) -> Pattern {
     Pattern {
         pat_desc,
         pat_loc: q.pat_loc,
-        pat_extra: q.pat_extra.clone(),
+        pat_cold: q.pat_cold,
         pat_type: q.pat_type,
         pat_env: q.pat_env,
-        pat_attributes: q.pat_attributes.clone(),
     }
 }
 
-fn orlub<'x>(p1: &'x Pattern, p2: &'x Pattern, q: &'x Pattern) -> Result<Cow<'x, Pattern>, Empty> {
-    match lub_cow(p1, q) {
-        Ok(r1) => match lub_cow(p2, q) {
+fn orlub<'p>(
+    pa: &PatArena<'p>,
+    p1: &'p Pattern,
+    p2: &'p Pattern,
+    q: &'p Pattern,
+) -> Result<Cow<'p, Pattern>, Empty> {
+    match lub_cow(pa, p1, q) {
+        Ok(r1) => match lub_cow(pa, p2, q) {
             Ok(r2) => Ok(Cow::Owned(with_desc(
                 q,
-                PatternDesc::Tpat_or(Box::new(r1.into_owned()), Box::new(r2.into_owned()), None),
+                PatternDesc::Tpat_or(pa.intern(r1), pa.intern(r2), None),
             ))),
             Err(Empty) => Ok(r1),
         },
-        Err(Empty) => lub_cow(p2, q),
+        Err(Empty) => lub_cow(pa, p2, q),
     }
 }
 
 /// Record field lub.
-fn record_lubs(
+fn record_lubs<'p>(
+    pa: &PatArena<'p>,
     l1: &[RecordPatternField],
     l2: &[RecordPatternField],
 ) -> Result<Vec<RecordPatternField>, Empty> {
@@ -657,7 +799,7 @@ fn record_lubs(
                     if o1 != o2 {
                         return Err(Empty);
                     }
-                    let p = lub_cow(p1, p2)?.into_owned();
+                    let p = pa.intern(lub_cow(pa, pa.pat(*p1), pa.pat(*p2))?);
                     out.push((*lid1, lbl1.clone(), p, *o1));
                     i += 1;
                     j += 1;
@@ -668,16 +810,16 @@ fn record_lubs(
 }
 
 /// `lubs` over sub-patterns of new patterns.
-fn lubs_owned(ps: &[Pattern], qs: &[Pattern]) -> Result<Vec<Pattern>, Empty> {
+fn lubs_owned(pa: &PatArena<'_>, ps: &[TPatIdx], qs: &[TPatIdx]) -> Result<Vec<TPatIdx>, Empty> {
     ps.iter()
         .zip(qs)
-        .map(|(p, q)| lub_cow(p, q).map(Cow::into_owned))
+        .map(|(p, q)| lub_cow(pa, pa.pat(*p), pa.pat(*q)).map(|r| pa.intern(r)))
         .collect()
 }
 
 /// `lubs` over borrowed rows.
 fn lubs<'p>(
-    pa: &'p PatArena,
+    pa: &'p PatArena<'p>,
     ps: &[&'p Pattern],
     qs: &[&'p Pattern],
 ) -> Result<Vec<&'p Pattern>, Empty> {
@@ -686,40 +828,36 @@ fn lubs<'p>(
 
 /// Normalize a pattern: replace all sub-pattern arguments with omega.
 /// Equivalent to OCaml's `normalize_pat`.
-fn normalize_pat<'p>(pa: &'p PatArena, q: &'p Pattern) -> &'p Pattern {
+fn normalize_pat<'p>(pa: &'p PatArena<'p>, q: &'p Pattern) -> &'p Pattern {
     match &q.pat_desc {
         PatternDesc::Tpat_any | PatternDesc::Tpat_constant(_) => q,
-        PatternDesc::Tpat_alias(p, _, _) => normalize_pat(pa, p),
-        _ => pa.alloc(normalize_pat_owned(q)),
+        PatternDesc::Tpat_alias(p, _, _) => normalize_pat(pa, pa.pat(*p)),
+        _ => pa.alloc(normalize_pat_owned(pa, q)),
     }
 }
 
-fn normalize_pat_owned(q: &Pattern) -> Pattern {
+fn normalize_pat_owned(pa: &PatArena<'_>, q: &Pattern) -> Pattern {
     match &q.pat_desc {
         PatternDesc::Tpat_any | PatternDesc::Tpat_constant(_) => q.clone(),
         PatternDesc::Tpat_var(..) => make_pat(PatternDesc::Tpat_any, q.pat_type, q.pat_env),
-        PatternDesc::Tpat_alias(p, _, _) => normalize_pat_owned(p),
+        PatternDesc::Tpat_alias(p, _, _) => normalize_pat_owned(pa, pa.pat(*p)),
         PatternDesc::Tpat_tuple(args) => make_pat(
-            PatternDesc::Tpat_tuple(omega_list(args)),
+            PatternDesc::Tpat_tuple(pa.omegas(args.len())),
             q.pat_type,
             q.pat_env,
         ),
         PatternDesc::Tpat_construct(lid, c, args) => make_pat(
-            PatternDesc::Tpat_construct(*lid, c.clone(), omega_list(args)),
+            PatternDesc::Tpat_construct(*lid, c.clone(), pa.omegas(args.len())),
             q.pat_type,
             q.pat_env,
         ),
         PatternDesc::Tpat_variant(l, arg, row) => make_pat(
-            PatternDesc::Tpat_variant(
-                l.clone(),
-                arg.as_ref().map(|_| Box::new(omega_owned())),
-                *row,
-            ),
+            PatternDesc::Tpat_variant(l.clone(), arg.map(|_| pa.omega_idx()), *row),
             q.pat_type,
             q.pat_env,
         ),
         PatternDesc::Tpat_array(args) => make_pat(
-            PatternDesc::Tpat_array(omega_list(args)),
+            PatternDesc::Tpat_array(pa.omegas(args.len())),
             q.pat_type,
             q.pat_env,
         ),
@@ -727,7 +865,7 @@ fn normalize_pat_owned(q: &Pattern) -> Pattern {
             PatternDesc::Tpat_record(
                 largs
                     .iter()
-                    .map(|(lid, lbl, _, opt)| (*lid, lbl.clone(), omega_owned(), *opt))
+                    .map(|(lid, lbl, _, opt)| (*lid, lbl.clone(), pa.omega_idx(), *opt))
                     .collect(),
                 *closed,
                 None,
@@ -748,7 +886,7 @@ fn read_args<'r, 'p>(n: usize, r: &'r [&'p Pattern]) -> (&'r [&'p Pattern], &'r 
 /// Set the arguments of a normalized pattern, optionally erasing mutable fields.
 /// Equivalent to OCaml's `do_set_args`.
 fn do_set_args<'p>(
-    pa: &'p PatArena,
+    pa: &'p PatArena<'p>,
     erase_mutable: bool,
     q: &'p Pattern,
     r: &[&'p Pattern],
@@ -758,7 +896,7 @@ fn do_set_args<'p>(
             let (args, rest) = read_args(pats.len(), r);
             (
                 make_pat(
-                    PatternDesc::Tpat_tuple(owned_pats(args)),
+                    PatternDesc::Tpat_tuple(pa.refs_list(args)),
                     q.pat_type,
                     q.pat_env,
                 ),
@@ -772,9 +910,9 @@ fn do_set_args<'p>(
                 .zip(args.iter())
                 .map(|((lid, lbl, _, opt), arg)| {
                     if erase_mutable && matches!(lbl.lbl_mut, MutableFlag::Mutable) {
-                        (*lid, lbl.clone(), omega_owned(), *opt)
+                        (*lid, lbl.clone(), pa.omega_idx(), *opt)
                     } else {
-                        (*lid, lbl.clone(), (*arg).clone(), *opt)
+                        (*lid, lbl.clone(), pa.handle(arg), *opt)
                     }
                 })
                 .collect();
@@ -791,7 +929,7 @@ fn do_set_args<'p>(
             let (args, rest) = read_args(pats.len(), r);
             (
                 make_pat(
-                    PatternDesc::Tpat_construct(*lid, c.clone(), owned_pats(args)),
+                    PatternDesc::Tpat_construct(*lid, c.clone(), pa.refs_list(args)),
                     q.pat_type,
                     q.pat_env,
                 ),
@@ -800,7 +938,7 @@ fn do_set_args<'p>(
         }
         PatternDesc::Tpat_variant(l, opt_omega, row) => {
             let (arg, rest) = match (opt_omega, r) {
-                (Some(_), [a, rest @ ..]) => (Some(Box::new((*a).clone())), rest),
+                (Some(_), [a, rest @ ..]) => (Some(pa.handle(a)), rest),
                 (None, _) => (None, r),
                 _ => panic!("Parmatch.set_args: variant"),
             };
@@ -817,7 +955,7 @@ fn do_set_args<'p>(
             let (args, rest) = read_args(pats.len(), r);
             (
                 make_pat(
-                    PatternDesc::Tpat_array(owned_pats(args)),
+                    PatternDesc::Tpat_array(pa.refs_list(args)),
                     q.pat_type,
                     q.pat_env,
                 ),
@@ -840,7 +978,7 @@ fn do_set_args<'p>(
 
 /// `set_args_erase_mutable q r` — like set_args but replaces mutable fields with omega.
 fn set_args_erase_mutable<'p>(
-    pa: &'p PatArena,
+    pa: &'p PatArena<'p>,
     q: &'p Pattern,
     r: &[&'p Pattern],
 ) -> Vec<&'p Pattern> {
@@ -898,6 +1036,7 @@ fn can_strip_optional_construct_wrapper(
 /// missing ones with omega. Since Rust's `lbl_all` is a placeholder, we
 /// resolve via the TypeContext when available.
 fn strip_optional_record_pattern_wrapper<'p>(
+    pa: &PatArena<'p>,
     ctx_ref: Option<&TypeContext>,
     lbl: &LabelDescription,
     pat: &'p Pattern,
@@ -910,17 +1049,17 @@ fn strip_optional_record_pattern_wrapper<'p>(
         PatternDesc::Tpat_construct(_, cstr, args)
             if cstr.cstr_name == "Some" && args.len() == 1 =>
         {
-            match &args[0].pat_desc {
-                PatternDesc::Tpat_constant(_) => &args[0],
+            match &pa.pat(pa.list(*args)[0]).pat_desc {
+                PatternDesc::Tpat_constant(_) => pa.pat(pa.list(*args)[0]),
                 PatternDesc::Tpat_construct(_, inner_cstr, _) => match ctx_ref {
                     Some(ctx_ref)
                         if can_strip_optional_construct_wrapper(
                             ctx_ref,
-                            args[0].pat_env,
+                            pa.pat(pa.list(*args)[0]).pat_env,
                             inner_cstr,
                         ) =>
                     {
-                        &args[0]
+                        pa.pat(pa.list(*args)[0])
                     }
                     _ => pat,
                 },
@@ -990,6 +1129,7 @@ fn record_all_labels(
 }
 
 fn all_record_args(
+    pa: &PatArena<'_>,
     ctx_ref: Option<&TypeContext>,
     pat_type: TypeExprRef,
     pat_env: EnvRef,
@@ -1012,7 +1152,7 @@ fn all_record_args(
                     (
                         dummy_loc,
                         std::sync::Arc::new(lbl.clone()),
-                        omega_owned(),
+                        pa.omega_idx(),
                         first_opt,
                     )
                 })
@@ -1020,8 +1160,10 @@ fn all_record_args(
             // Fill in the actual patterns from the provided fields
             for (id, lbl, pat, opt) in lbls {
                 if (lbl.lbl_pos as usize) < result.len() {
-                    let rewritten_pat = strip_optional_record_pattern_wrapper(ctx_ref, lbl, pat);
-                    result[lbl.lbl_pos as usize] = (*id, lbl.clone(), rewritten_pat.clone(), *opt);
+                    let rewritten_pat =
+                        strip_optional_record_pattern_wrapper(pa, ctx_ref, lbl, pa.pat(*pat));
+                    result[lbl.lbl_pos as usize] =
+                        (*id, lbl.clone(), pa.handle(rewritten_pat), *opt);
                 }
             }
             result
@@ -1036,10 +1178,11 @@ fn all_record_args(
 /// The field patterns `all_record_args` would produce, borrowed: the columns
 /// a record head expands to.
 fn all_record_arg_pats<'p>(
+    pa: &PatArena<'p>,
     ctx_ref: Option<&TypeContext>,
     pat_type: TypeExprRef,
     pat_env: EnvRef,
-    lbls: &'p [RecordPatternField],
+    lbls: &[RecordPatternField],
 ) -> Vec<&'p Pattern> {
     if lbls.is_empty() {
         return Vec::new();
@@ -1050,12 +1193,12 @@ fn all_record_arg_pats<'p>(
             for (_, lbl, pat, _) in lbls {
                 if (lbl.lbl_pos as usize) < result.len() {
                     result[lbl.lbl_pos as usize] =
-                        strip_optional_record_pattern_wrapper(ctx_ref, lbl, pat);
+                        strip_optional_record_pattern_wrapper(pa, ctx_ref, lbl, pa.pat(*pat));
                 }
             }
             result
         }
-        None => lbls.iter().map(|(_, _, p, _)| p).collect(),
+        None => lbls.iter().map(|(_, _, p, _)| pa.pat(*p)).collect(),
     }
 }
 
@@ -1069,16 +1212,20 @@ fn may_equal_constr(
 
 /// Compatibility predicate: may_compat p q returns false when p and q
 /// never admit a common instance.
-fn may_compat(p: &Pattern, q: &Pattern) -> bool {
+fn may_compat(pa: &PatArena<'_>, p: &Pattern, q: &Pattern) -> bool {
     match (&p.pat_desc, &q.pat_desc) {
         (PatternDesc::Tpat_any | PatternDesc::Tpat_var(..), _)
         | (_, PatternDesc::Tpat_any | PatternDesc::Tpat_var(..)) => true,
-        (PatternDesc::Tpat_alias(p, _, _), _) => may_compat(p, q),
-        (_, PatternDesc::Tpat_alias(q, _, _)) => may_compat(p, q),
-        (PatternDesc::Tpat_or(p1, p2, _), _) => may_compat(p1, q) || may_compat(p2, q),
-        (_, PatternDesc::Tpat_or(q1, q2, _)) => may_compat(p, q1) || may_compat(p, q2),
+        (PatternDesc::Tpat_alias(p, _, _), _) => may_compat(pa, pa.pat(*p), q),
+        (_, PatternDesc::Tpat_alias(q, _, _)) => may_compat(pa, p, pa.pat(*q)),
+        (PatternDesc::Tpat_or(p1, p2, _), _) => {
+            may_compat(pa, pa.pat(*p1), q) || may_compat(pa, pa.pat(*p2), q)
+        }
+        (_, PatternDesc::Tpat_or(q1, q2, _)) => {
+            may_compat(pa, p, pa.pat(*q1)) || may_compat(pa, p, pa.pat(*q2))
+        }
         (PatternDesc::Tpat_construct(_, c1, ps1), PatternDesc::Tpat_construct(_, c2, ps2)) => {
-            may_equal_constr(c1, c2) && may_compats(ps1, ps2)
+            may_equal_constr(c1, c2) && may_compat_lists(pa, *ps1, *ps2)
         }
         (PatternDesc::Tpat_constant(c1), PatternDesc::Tpat_constant(c2)) => {
             const_compare(c1, c2) == std::cmp::Ordering::Equal
@@ -1086,48 +1233,62 @@ fn may_compat(p: &Pattern, q: &Pattern) -> bool {
         (PatternDesc::Tpat_variant(l1, op1, _), PatternDesc::Tpat_variant(l2, op2, _)) => {
             l1 == l2
                 && match (op1, op2) {
-                    (Some(p1), Some(p2)) => may_compat(p1, p2),
+                    (Some(p1), Some(p2)) => may_compat(pa, pa.pat(*p1), pa.pat(*p2)),
                     (None, None) => true,
                     _ => false,
                 }
         }
-        (PatternDesc::Tpat_tuple(ps), PatternDesc::Tpat_tuple(qs)) => may_compats(ps, qs),
+        (PatternDesc::Tpat_tuple(ps), PatternDesc::Tpat_tuple(qs)) => {
+            may_compat_lists(pa, *ps, *qs)
+        }
         (PatternDesc::Tpat_array(ps), PatternDesc::Tpat_array(qs)) => {
-            ps.len() == qs.len() && may_compats(ps, qs)
+            ps.len() == qs.len() && may_compat_lists(pa, *ps, *qs)
         }
         (PatternDesc::Tpat_record(l1, _, _), PatternDesc::Tpat_record(l2, _, _)) => {
             // Check compatible fields only
-            may_compats_record(l1, l2)
+            may_compats_record(pa, l1, l2)
         }
         // OCaml's Parmatch.Compat.compat rejects cross-shape pairs here.
         _ => false,
     }
 }
 
-fn may_compats<A: Borrow<Pattern>, B: Borrow<Pattern>>(ps: &[A], qs: &[B]) -> bool {
+/// [`may_compats`] over the sub-pattern lists of two patterns.
+fn may_compat_lists(pa: &PatArena<'_>, ps: TPatList, qs: TPatList) -> bool {
+    pa.pats(ps)
+        .zip(pa.pats(qs))
+        .all(|(p, q)| may_compat(pa, p, q))
+}
+
+fn may_compats<A: Borrow<Pattern>, B: Borrow<Pattern>>(
+    pa: &PatArena<'_>,
+    ps: &[A],
+    qs: &[B],
+) -> bool {
     ps.iter()
         .zip(qs.iter())
-        .all(|(p, q)| may_compat(p.borrow(), q.borrow()))
+        .all(|(p, q)| may_compat(pa, p.borrow(), q.borrow()))
 }
 
 fn may_compats_record(
+    pa: &PatArena<'_>,
     l1: &[(
         crate::parse_arena::Located<crate::parse_arena::LidentIdx>,
         std::sync::Arc<crate::types::LabelDescription>,
-        Pattern,
+        TPatIdx,
         bool,
     )],
     l2: &[(
         crate::parse_arena::Located<crate::parse_arena::LidentIdx>,
         std::sync::Arc<crate::types::LabelDescription>,
-        Pattern,
+        TPatIdx,
         bool,
     )],
 ) -> bool {
     // For each field present in both, check compatibility
     for (_, lbl1, p1, _) in l1 {
         for (_, lbl2, p2, _) in l2 {
-            if lbl1.lbl_pos == lbl2.lbl_pos && !may_compat(p1, p2) {
+            if lbl1.lbl_pos == lbl2.lbl_pos && !may_compat(pa, pa.pat(*p1), pa.pat(*p2)) {
                 return false;
             }
         }
@@ -1166,8 +1327,8 @@ pub struct Ctx<'p> {
 }
 
 /// Check if context c1 is less-or-equal to c2.
-pub fn le_ctx(c1: &Ctx<'_>, c2: &Ctx<'_>) -> bool {
-    le_pats(&c1.left, &c2.left) && le_pats(&c1.right, &c2.right)
+pub fn le_ctx<'p>(pa: &PatArena<'p>, c1: &Ctx<'_>, c2: &Ctx<'_>) -> bool {
+    le_pats(pa, &c1.left, &c2.left) && le_pats(pa, &c1.right, &c2.right)
 }
 
 /// Shift the first element of `right` to the front of `left`.
@@ -1206,13 +1367,13 @@ fn small_enough(n: usize, slice: &[Ctx<'_>]) -> bool {
 }
 
 /// Shift left for a list of contexts, with pruning when too large.
-pub fn ctx_lshift<'p>(ctx: &[Ctx<'p>]) -> Vec<Ctx<'p>> {
+pub fn ctx_lshift<'p>(pa: &PatArena<'p>, ctx: &[Ctx<'p>]) -> Vec<Ctx<'p>> {
     if small_enough(31, ctx) {
         ctx.iter().map(lshift).collect()
     } else {
         // Context pruning
         let forgotten: Vec<Ctx<'_>> = ctx.iter().map(lforget).collect();
-        get_mins(le_ctx, forgotten)
+        get_mins(|c1, c2| le_ctx(pa, c1, c2), forgotten)
     }
 }
 
@@ -1268,7 +1429,7 @@ pub fn ctx_rshift_num<'p>(n: usize, ctx: &[Ctx<'p>]) -> Vec<Ctx<'p>> {
 /// Recombination of contexts: take the first element from left,
 /// and set its arguments from right, erasing mutable fields.
 /// e.g. `(_,_)::p1::p2::rem -> (p1,p2)::rem`
-pub fn combine<'p>(pa: &'p PatArena, ctx: &Ctx<'p>) -> Ctx<'p> {
+pub fn combine<'p>(pa: &'p PatArena<'p>, ctx: &Ctx<'p>) -> Ctx<'p> {
     match ctx.left.split_first() {
         Some((p, ps)) => {
             let result = set_args_erase_mutable(pa, p, &ctx.right);
@@ -1284,7 +1445,7 @@ pub fn combine<'p>(pa: &'p PatArena, ctx: &Ctx<'p>) -> Ctx<'p> {
 }
 
 /// Combine all contexts.
-pub fn ctx_combine<'p>(pa: &'p PatArena, ctx: &[Ctx<'p>]) -> Vec<Ctx<'p>> {
+pub fn ctx_combine<'p>(pa: &'p PatArena<'p>, ctx: &[Ctx<'p>]) -> Vec<Ctx<'p>> {
     ctx.iter().map(|c| combine(pa, c)).collect()
 }
 
@@ -1321,25 +1482,29 @@ enum MatchError {
 /// row's results come before the remaining rows' results, so filtering one
 /// row at a time gives the same matrix.
 pub fn filter_matrix<'p>(
+    pa: &PatArena<'p>,
     matcher: &dyn Fn(&'p Pattern, &[&'p Pattern]) -> Result<Vec<&'p Pattern>, MatchError>,
     pss: &Matrix<'p>,
 ) -> Matrix<'p> {
     fn filter_row<'p>(
+        pa: &PatArena<'p>,
         matcher: &dyn Fn(&'p Pattern, &[&'p Pattern]) -> Result<Vec<&'p Pattern>, MatchError>,
         p: &'p Pattern,
         ps: &[&'p Pattern],
         out: &mut Matrix<'p>,
     ) {
         match &p.pat_desc {
-            PatternDesc::Tpat_alias(p_inner, _, _) => filter_row(matcher, p_inner, ps, out),
-            PatternDesc::Tpat_var(..) => filter_row(matcher, omega(), ps, out),
+            PatternDesc::Tpat_alias(p_inner, _, _) => {
+                filter_row(pa, matcher, pa.pat(*p_inner), ps, out)
+            }
+            PatternDesc::Tpat_var(..) => filter_row(pa, matcher, omega(), ps, out),
             _ => match matcher(p, ps) {
                 Ok(filtered_row) => out.push(filtered_row),
                 Err(MatchError::NoMatch) => {}
                 Err(MatchError::OrPat) => match &p.pat_desc {
                     PatternDesc::Tpat_or(p1, p2, _) => {
-                        filter_row(matcher, p1, ps, out);
-                        filter_row(matcher, p2, ps, out);
+                        filter_row(pa, matcher, pa.pat(*p1), ps, out);
+                        filter_row(pa, matcher, pa.pat(*p2), ps, out);
                     }
                     _ => panic!("filter_matrix: OrPat on non-or pattern"),
                 },
@@ -1349,7 +1514,7 @@ pub fn filter_matrix<'p>(
     let mut out = Vec::new();
     for row in pss {
         match row.split_first() {
-            Some((p, ps)) => filter_row(matcher, p, ps, &mut out),
+            Some((p, ps)) => filter_row(pa, matcher, p, ps, &mut out),
             // Empty rows shouldn't appear here — fatal error in OCaml.
             None => crate::misc::fatal_error("Matching.filter_matrix"),
         }
@@ -1367,10 +1532,12 @@ pub type DefaultEnv<'p> = Vec<(Matrix<'p>, i32)>;
 /// Build default environment by filtering each matrix with the given matcher.
 /// Equivalent to OCaml's `make_default`.
 pub fn make_default<'p>(
+    pa: &PatArena<'p>,
     matcher: &dyn Fn(&'p Pattern, &[&'p Pattern]) -> Result<Vec<&'p Pattern>, MatchError>,
     env: &DefaultEnv<'p>,
 ) -> DefaultEnv<'p> {
     fn make_rec<'p>(
+        pa: &PatArena<'p>,
         matcher: &dyn Fn(&'p Pattern, &[&'p Pattern]) -> Result<Vec<&'p Pattern>, MatchError>,
         env: &[(Matrix<'p>, i32)],
     ) -> DefaultEnv<'p> {
@@ -1381,8 +1548,8 @@ pub fn make_default<'p>(
                 if pss.len() == 1 && pss[0].is_empty() {
                     return vec![(vec![Vec::new()], *i)];
                 }
-                let rest = make_rec(matcher, rem);
-                let filtered = filter_matrix(matcher, pss);
+                let rest = make_rec(pa, matcher, rem);
+                let filtered = filter_matrix(pa, matcher, pss);
                 if filtered.is_empty() {
                     rest
                 } else if !filtered.is_empty() && filtered.iter().any(|row| row.is_empty()) {
@@ -1397,7 +1564,7 @@ pub fn make_default<'p>(
             }
         }
     }
-    make_rec(matcher, env)
+    make_rec(pa, matcher, env)
 }
 
 // ============================================================================
@@ -1428,7 +1595,7 @@ fn prepend_row<'p>(
 /// Equivalent to OCaml's `ctx_matcher`.
 pub fn ctx_matcher<'p, 'a>(
     ctx_ref: Option<&'a TypeContext>,
-    pa: &'p PatArena,
+    pa: &'p PatArena<'p>,
     p: &'p Pattern,
 ) -> CtxMatcher<'p, 'a>
 where
@@ -1439,9 +1606,9 @@ where
         PatternDesc::Tpat_construct(_, cstr, pats) => Box::new(
             move |q: &'p Pattern, rem: &[&'p Pattern]| match &q.pat_desc {
                 PatternDesc::Tpat_construct(_, cstr2, args) if may_equal_constr(cstr, cstr2) => {
-                    Ok((p, prepend_row(args, rem)))
+                    Ok((p, prepend_row(pa.pats(*args), rem)))
                 }
-                PatternDesc::Tpat_any => Ok((p, prepend_row(pats, rem))),
+                PatternDesc::Tpat_any => Ok((p, prepend_row(pa.pats(*pats), rem))),
                 _ => Err(MatchError::NoMatch),
             },
         ),
@@ -1461,9 +1628,9 @@ where
         PatternDesc::Tpat_variant(lab, Some(omega_pat), _) => Box::new(
             move |q: &'p Pattern, rem: &[&'p Pattern]| match &q.pat_desc {
                 PatternDesc::Tpat_variant(lab2, Some(arg), _) if lab == lab2 => {
-                    Ok((p, prepend_row([&**arg], rem)))
+                    Ok((p, prepend_row([pa.pat(*arg)], rem)))
                 }
-                PatternDesc::Tpat_any => Ok((p, prepend_row([&**omega_pat], rem))),
+                PatternDesc::Tpat_any => Ok((p, prepend_row([pa.pat(*omega_pat)], rem))),
                 _ => Err(MatchError::NoMatch),
             },
         ),
@@ -1479,9 +1646,9 @@ where
             Box::new(
                 move |q: &'p Pattern, rem: &[&'p Pattern]| match &q.pat_desc {
                     PatternDesc::Tpat_array(args) if args.len() == len => {
-                        Ok((p, prepend_row(args, rem)))
+                        Ok((p, prepend_row(pa.pats(*args), rem)))
                     }
-                    PatternDesc::Tpat_any => Ok((p, prepend_row(pats, rem))),
+                    PatternDesc::Tpat_any => Ok((p, prepend_row(pa.pats(*pats), rem))),
                     _ => Err(MatchError::NoMatch),
                 },
             )
@@ -1491,9 +1658,9 @@ where
             Box::new(
                 move |q: &'p Pattern, rem: &[&'p Pattern]| match &q.pat_desc {
                     PatternDesc::Tpat_tuple(args) if args.len() == len => {
-                        Ok((p, prepend_row(args, rem)))
+                        Ok((p, prepend_row(pa.pats(*args), rem)))
                     }
-                    PatternDesc::Tpat_any => Ok((p, prepend_row(pats, rem))),
+                    PatternDesc::Tpat_any => Ok((p, prepend_row(pa.pats(*pats), rem))),
                     _ => Err(MatchError::NoMatch),
                 },
             )
@@ -1501,12 +1668,13 @@ where
         PatternDesc::Tpat_record(fields, _, _) if !fields.is_empty() => Box::new(
             move |q: &'p Pattern, rem: &[&'p Pattern]| match &q.pat_desc {
                 PatternDesc::Tpat_record(fields2, _, _) if !fields2.is_empty() => {
-                    let expanded = all_record_arg_pats(ctx_ref, q.pat_type, q.pat_env, fields2);
+                    let expanded = all_record_arg_pats(pa, ctx_ref, q.pat_type, q.pat_env, fields2);
                     Ok((p, prepend_row(expanded, rem)))
                 }
-                PatternDesc::Tpat_any => {
-                    Ok((p, prepend_row(fields.iter().map(|(_, _, f, _)| f), rem)))
-                }
+                PatternDesc::Tpat_any => Ok((
+                    p,
+                    prepend_row(fields.iter().map(|(_, _, f, _)| pa.pat(*f)), rem),
+                )),
                 _ => Err(MatchError::NoMatch),
             },
         ),
@@ -1523,13 +1691,14 @@ where
 /// results precede the remaining contexts' results.
 pub fn filter_ctx<'p>(
     ctx_ref: Option<&TypeContext>,
-    pa: &'p PatArena,
+    pa: &'p PatArena<'p>,
     q: &'p Pattern,
     ctx: &[Ctx<'p>],
 ) -> Vec<Ctx<'p>> {
     let matcher = ctx_matcher(ctx_ref, pa, q);
 
     fn filter_one<'p>(
+        pa: &PatArena<'p>,
         matcher: &dyn Fn(
             &'p Pattern,
             &[&'p Pattern],
@@ -1541,11 +1710,13 @@ pub fn filter_ctx<'p>(
     ) {
         match &p.pat_desc {
             PatternDesc::Tpat_or(p1, p2, _) => {
-                filter_one(matcher, left, p1, ps, out);
-                filter_one(matcher, left, p2, ps, out);
+                filter_one(pa, matcher, left, pa.pat(*p1), ps, out);
+                filter_one(pa, matcher, left, pa.pat(*p2), ps, out);
             }
-            PatternDesc::Tpat_alias(p_inner, _, _) => filter_one(matcher, left, p_inner, ps, out),
-            PatternDesc::Tpat_var(..) => filter_one(matcher, left, omega(), ps, out),
+            PatternDesc::Tpat_alias(p_inner, _, _) => {
+                filter_one(pa, matcher, left, pa.pat(*p_inner), ps, out)
+            }
+            PatternDesc::Tpat_var(..) => filter_one(pa, matcher, left, omega(), ps, out),
             _ => {
                 if let Ok((to_left, right)) = matcher(p, ps) {
                     let mut new_left = Vec::with_capacity(left.len() + 1);
@@ -1563,7 +1734,7 @@ pub fn filter_ctx<'p>(
     let mut out = Vec::new();
     for l in ctx {
         match l.right.split_first() {
-            Some((p, ps)) => filter_one(&*matcher, &l.left, p, ps, &mut out),
+            Some((p, ps)) => filter_one(pa, &*matcher, &l.left, p, ps, &mut out),
             None => crate::misc::fatal_error("Matching.filter_ctx"),
         }
     }
@@ -1576,7 +1747,7 @@ pub fn filter_ctx<'p>(
 
 /// Select columns from pattern rows and combine with context.
 /// Equivalent to OCaml's `select_columns`.
-pub fn select_columns<'p>(pa: &'p PatArena, pss: &Matrix<'p>, ctx: &[Ctx<'p>]) -> Vec<Ctx<'p>> {
+pub fn select_columns<'p>(pa: &'p PatArena<'p>, pss: &Matrix<'p>, ctx: &[Ctx<'p>]) -> Vec<Ctx<'p>> {
     let n = ncols(pss);
     let mut result = Vec::new();
     for ps in pss.iter() {
@@ -1597,7 +1768,7 @@ pub fn select_columns<'p>(pa: &'p PatArena, pss: &Matrix<'p>, ctx: &[Ctx<'p>]) -
 
 /// Least upper bound of a pattern with contexts.
 /// Equivalent to OCaml's `ctx_lub`.
-pub fn ctx_lub<'p>(pa: &'p PatArena, p: &'p Pattern, ctx: &[Ctx<'p>]) -> Vec<Ctx<'p>> {
+pub fn ctx_lub<'p>(pa: &'p PatArena<'p>, p: &'p Pattern, ctx: &[Ctx<'p>]) -> Vec<Ctx<'p>> {
     let mut result = Vec::new();
     for c in ctx.iter() {
         match c.right.split_first() {
@@ -1620,9 +1791,9 @@ pub fn ctx_lub<'p>(pa: &'p PatArena, p: &'p Pattern, ctx: &[Ctx<'p>]) -> Vec<Ctx
 
 /// Check if any context's right side may be compatible with any row in pss.
 /// Equivalent to OCaml's `ctx_match`.
-pub fn ctx_match(ctx: &[Ctx<'_>], pss: &Matrix<'_>) -> bool {
+pub fn ctx_match(pa: &PatArena<'_>, ctx: &[Ctx<'_>], pss: &Matrix<'_>) -> bool {
     ctx.iter()
-        .any(|c| pss.iter().any(|ps| may_compats(&c.right, ps)))
+        .any(|c| pss.iter().any(|ps| may_compats(pa, &c.right, ps)))
 }
 
 // ============================================================================
@@ -1681,7 +1852,12 @@ pub fn jumps_singleton<'p>(i: i32, ctx: Vec<Ctx<'p>>) -> Jumps<'p> {
 /// Add contexts for exit number i to the jump table.
 /// Maintains descending sort order and merges with get_mins when
 /// the exit number already exists.
-pub fn jumps_add<'p>(i: i32, pss: Vec<Ctx<'p>>, mut jumps: Jumps<'p>) -> Jumps<'p> {
+pub fn jumps_add<'p>(
+    pa: &PatArena<'p>,
+    i: i32,
+    pss: Vec<Ctx<'p>>,
+    mut jumps: Jumps<'p>,
+) -> Jumps<'p> {
     if pss.is_empty() {
         return jumps;
     }
@@ -1693,7 +1869,7 @@ pub fn jumps_add<'p>(i: i32, pss: Vec<Ctx<'p>>, mut jumps: Jumps<'p>) -> Jumps<'
             let qss = std::mem::take(&mut jumps[p].1);
             let mut combined = pss;
             combined.extend(qss);
-            jumps[p].1 = get_mins(le_ctx, combined);
+            jumps[p].1 = get_mins(|c1, c2| le_ctx(pa, c1, c2), combined);
         }
     }
     jumps
@@ -1701,7 +1877,7 @@ pub fn jumps_add<'p>(i: i32, pss: Vec<Ctx<'p>>, mut jumps: Jumps<'p>) -> Jumps<'
 
 /// Union of two jump tables.
 /// Maintains descending sort order and merges contexts with get_mins.
-pub fn jumps_union<'p>(env1: Jumps<'p>, env2: Jumps<'p>) -> Jumps<'p> {
+pub fn jumps_union<'p>(pa: &PatArena<'p>, env1: Jumps<'p>, env2: Jumps<'p>) -> Jumps<'p> {
     let mut result = Vec::with_capacity(env1.len() + env2.len());
     let mut env1 = env1.into_iter().peekable();
     let mut env2 = env2.into_iter().peekable();
@@ -1721,7 +1897,7 @@ pub fn jumps_union<'p>(env1: Jumps<'p>, env2: Jumps<'p>) -> Jumps<'p> {
             let (_, mut combined) = env1.next().expect("peeked");
             let (_, pss2) = env2.next().expect("peeked");
             combined.extend(pss2);
-            result.push((i1, get_mins(le_ctx, combined)));
+            result.push((i1, get_mins(|c1, c2| le_ctx(pa, c1, c2), combined)));
         } else if i1 > i2 {
             result.extend(env1.next());
         } else {
@@ -1732,7 +1908,7 @@ pub fn jumps_union<'p>(env1: Jumps<'p>, env2: Jumps<'p>) -> Jumps<'p> {
 }
 
 /// Merge adjacent pairs of jump tables (used by jumps_unions).
-fn merge<'p>(envs: Vec<Jumps<'p>>) -> Vec<Jumps<'p>> {
+fn merge<'p>(pa: &PatArena<'p>, envs: Vec<Jumps<'p>>) -> Vec<Jumps<'p>> {
     if envs.len() < 2 {
         return envs;
     }
@@ -1740,7 +1916,7 @@ fn merge<'p>(envs: Vec<Jumps<'p>>) -> Vec<Jumps<'p>> {
     let mut iter = envs.into_iter();
     loop {
         match (iter.next(), iter.next()) {
-            (Some(e1), Some(e2)) => result.push(jumps_union(e1, e2)),
+            (Some(e1), Some(e2)) => result.push(jumps_union(pa, e1, e2)),
             (Some(e1), None) => {
                 result.push(e1);
                 break;
@@ -1752,11 +1928,11 @@ fn merge<'p>(envs: Vec<Jumps<'p>>) -> Vec<Jumps<'p>> {
 }
 
 /// Union of a list of jump tables (using balanced merge).
-pub fn jumps_unions<'p>(envs: Vec<Jumps<'p>>) -> Jumps<'p> {
+pub fn jumps_unions<'p>(pa: &PatArena<'p>, envs: Vec<Jumps<'p>>) -> Jumps<'p> {
     match envs.len() {
         0 => Vec::new(),
         1 => envs.into_iter().next().unwrap(),
-        _ => jumps_unions(merge(envs)),
+        _ => jumps_unions(pa, merge(pa, envs)),
     }
 }
 
@@ -2761,22 +2937,24 @@ fn up_ok_action(ctx_ref: Option<&TypeContext>, act1: &MatchAction, act2: &MatchA
 /// are incompatible.
 ///
 /// Equivalent to OCaml's `up_ok`.
-fn up_ok(
+fn up_ok<'p>(
+    pa: &PatArena<'p>,
     ctx_ref: Option<&TypeContext>,
-    ps: &[&Pattern],
+    ps: &[&'p Pattern],
     act_p: &MatchAction,
-    l: &[Clause<'_>],
+    l: &[Clause<'p>],
 ) -> bool {
-    up_ok_iter(ctx_ref, ps, act_p, l.iter())
+    up_ok_iter(pa, ctx_ref, ps, act_p, l.iter())
 }
 
 fn up_ok_iter<'p: 'a, 'a>(
+    pa: &PatArena<'p>,
     ctx_ref: Option<&TypeContext>,
     ps: &[&'p Pattern],
     act_p: &MatchAction,
     mut clauses: impl Iterator<Item = &'a Clause<'p>>,
 ) -> bool {
-    clauses.all(|(qs, act_q)| up_ok_action(ctx_ref, act_p, act_q) || !may_compats(ps, qs))
+    clauses.all(|(qs, act_q)| up_ok_action(ctx_ref, act_p, act_q) || !may_compats(pa, ps, qs))
 }
 
 // ============================================================================
@@ -2789,9 +2967,14 @@ fn up_ok_iter<'p: 'a, 'a>(
 /// - Aliases are preserved around or-patterns
 ///
 /// Equivalent to OCaml's `simplify_or`.
-fn simplify_or<'p>(ctx_ref: Option<&TypeContext>, pa: &'p PatArena, p: &'p Pattern) -> &'p Pattern {
+fn simplify_or<'p>(
+    ctx_ref: Option<&TypeContext>,
+    pa: &'p PatArena<'p>,
+    p: &'p Pattern,
+) -> &'p Pattern {
     /// `Err` is OCaml's `Var` exception: the pattern matches anything.
     fn simpl_rec<'x>(
+        pa: &PatArena<'x>,
         ctx_ref: Option<&TypeContext>,
         p: &'x Pattern,
     ) -> Result<Cow<'x, Pattern>, Cow<'x, Pattern>> {
@@ -2801,33 +2984,29 @@ fn simplify_or<'p>(ctx_ref: Option<&TypeContext>, pa: &'p PatArena, p: &'p Patte
                 let alias = |q: Cow<'x, Pattern>| {
                     Cow::Owned(with_desc(
                         p,
-                        PatternDesc::Tpat_alias(Box::new(q.into_owned()), *id, s.clone()),
+                        PatternDesc::Tpat_alias(pa.push(q.into_owned()), *id, s.clone()),
                     ))
                 };
-                match simpl_rec(ctx_ref, q) {
+                match simpl_rec(pa, ctx_ref, pa.pat(*q)) {
                     Ok(q) => Ok(alias(q)),
                     Err(q) => Err(alias(q)),
                 }
             }
             PatternDesc::Tpat_or(p1, p2, o) => {
-                let q1 = simpl_rec(ctx_ref, p1)?; // propagates Var if p1 is variable
+                let q1 = simpl_rec(pa, ctx_ref, pa.pat(*p1))?; // propagates Var if p1 is variable
                 let or = |q2: Cow<'x, Pattern>| {
                     Cow::Owned(with_desc(
                         p,
-                        PatternDesc::Tpat_or(
-                            Box::new(q1.clone().into_owned()),
-                            Box::new(q2.into_owned()),
-                            o.clone(),
-                        ),
+                        PatternDesc::Tpat_or(pa.intern(q1.clone()), pa.intern(q2), o.clone()),
                     ))
                 };
-                match simpl_rec(ctx_ref, p2) {
+                match simpl_rec(pa, ctx_ref, pa.pat(*p2)) {
                     Ok(q2) => Ok(or(q2)),
                     Err(q2) => Err(or(q2)),
                 }
             }
             PatternDesc::Tpat_record(lbls, closed, rest) => {
-                let all_lbls = all_record_args(ctx_ref, p.pat_type, p.pat_env, lbls);
+                let all_lbls = all_record_args(pa, ctx_ref, p.pat_type, p.pat_env, lbls);
                 Ok(Cow::Owned(with_desc(
                     p,
                     PatternDesc::Tpat_record(all_lbls, *closed, rest.clone()),
@@ -2837,7 +3016,7 @@ fn simplify_or<'p>(ctx_ref: Option<&TypeContext>, pa: &'p PatArena, p: &'p Patte
         }
     }
 
-    match simpl_rec(ctx_ref, p) {
+    match simpl_rec(pa, ctx_ref, p) {
         Ok(p) | Err(p) => alloc_cow(pa, p),
     }
 }
@@ -2864,7 +3043,7 @@ fn bind(kind: LetKind, id: &Ident, arg: &RawLambda, action: RawLambda) -> RawLam
 /// Equivalent to OCaml's `simplify_cases`.
 pub fn simplify_cases<'p>(
     ctx_ref: Option<&TypeContext>,
-    pa: &'p PatArena,
+    pa: &'p PatArena<'p>,
     arena: &LocArena<'_>,
     args: &[(RawLambda, LetKind)],
     cls: Vec<Clause<'p>>,
@@ -2875,7 +3054,7 @@ pub fn simplify_cases<'p>(
 
     fn simplify<'p>(
         ctx_ref: Option<&TypeContext>,
-        pa: &'p PatArena,
+        pa: &'p PatArena<'p>,
         arena: &LocArena<'_>,
         arg: &RawLambda,
         cls: Vec<Clause<'p>>,
@@ -2900,7 +3079,7 @@ pub fn simplify_cases<'p>(
                 }
                 PatternDesc::Tpat_alias(p, id, _) => {
                     let new_action = action.bind(LetKind::Alias, *id, arg.clone());
-                    let mut new_pats = vec![&**p];
+                    let mut new_pats = vec![pa.pat(*p)];
                     new_pats.extend(patl.iter().cloned());
                     // OCaml `compiler/ml/matching.ml:565-566` immediately
                     // reprocesses the peeled alias row by recursing on
@@ -2940,7 +3119,7 @@ pub fn simplify_cases<'p>(
                         ),
                         None => action,
                     };
-                    let all_lbls = all_record_args(ctx_ref, pat.pat_type, pat.pat_env, lbls);
+                    let all_lbls = all_record_args(pa, ctx_ref, pat.pat_type, pat.pat_env, lbls);
                     let full_pat: &'p Pattern = pa.alloc(with_desc(
                         pat,
                         PatternDesc::Tpat_record(all_lbls, *closed, None),
@@ -3010,10 +3189,10 @@ pub fn what_is_cases<'p>(cases: &[Clause<'p>]) -> &'p Pattern {
 
 /// Convert cases to a pattern matrix (taking the minimal rows under le_pats).
 /// Equivalent to OCaml's `as_matrix`.
-pub fn as_matrix<'p>(cases: &[Clause<'p>]) -> Matrix<'p> {
+pub fn as_matrix<'p>(pa: &PatArena<'p>, cases: &[Clause<'p>]) -> Matrix<'p> {
     let rows: Vec<&Vec<&'p Pattern>> = cases.iter().map(|(ps, _)| ps).collect();
     get_mins(
-        |a: &&Vec<&'p Pattern>, b: &&Vec<&'p Pattern>| le_pats(a, b),
+        |a: &&Vec<&'p Pattern>, b: &&Vec<&'p Pattern>| le_pats(pa, a, b),
         rows,
     )
     .into_iter()
@@ -3042,12 +3221,12 @@ pub fn cons_default<'p>(
 /// with p, and drop the first column.
 ///
 /// Equivalent to OCaml's `default_compat`.
-pub fn default_compat<'p>(p: &Pattern, def: &DefaultEnv<'p>) -> DefaultEnv<'p> {
+pub fn default_compat<'p>(pa: &PatArena<'p>, p: &Pattern, def: &DefaultEnv<'p>) -> DefaultEnv<'p> {
     def.iter().rev().fold(Vec::new(), |r, (pss, i)| {
         let qss: Vec<Vec<&'p Pattern>> = pss
             .iter()
             .filter_map(|qs| match qs.split_first() {
-                Some((q, rem)) if may_compat(p, q) => Some(rem.to_vec()),
+                Some((q, rem)) if may_compat(pa, p, q) => Some(rem.to_vec()),
                 _ => None,
             })
             .collect();
@@ -3071,7 +3250,7 @@ type IdentSet = BTreeSet<Ident>;
 
 /// Recursively extract all variables bound in a pattern.
 /// Equivalent to OCaml's `extract_vars`.
-pub fn extract_vars(r: IdentSet, p: &Pattern) -> IdentSet {
+pub fn extract_vars(pa: &PatArena<'_>, r: IdentSet, p: &Pattern) -> IdentSet {
     match &p.pat_desc {
         PatternDesc::Tpat_var(id, _) => {
             let mut r = r;
@@ -3081,20 +3260,24 @@ pub fn extract_vars(r: IdentSet, p: &Pattern) -> IdentSet {
         PatternDesc::Tpat_alias(p, id, _) => {
             let mut r = r;
             r.insert(*id);
-            extract_vars(r, p)
+            extract_vars(pa, r, pa.pat(*p))
         }
-        PatternDesc::Tpat_tuple(pats) => pats.iter().fold(r, extract_vars),
+        PatternDesc::Tpat_tuple(pats) => pa.pats(*pats).fold(r, |r, p| extract_vars(pa, r, p)),
         PatternDesc::Tpat_record(lpats, _, rest) => {
             let mut r = r;
             if let Some(rest) = rest {
                 r.insert(rest.rest_ident);
             }
-            lpats.iter().fold(r, |r, (_, _, p, _)| extract_vars(r, p))
+            lpats
+                .iter()
+                .fold(r, |r, (_, _, p, _)| extract_vars(pa, r, pa.pat(*p)))
         }
-        PatternDesc::Tpat_construct(_, _, pats) => pats.iter().fold(r, extract_vars),
-        PatternDesc::Tpat_array(pats) => pats.iter().fold(r, extract_vars),
-        PatternDesc::Tpat_variant(_, Some(p), _) => extract_vars(r, p),
-        PatternDesc::Tpat_or(p, _, _) => extract_vars(r, p),
+        PatternDesc::Tpat_construct(_, _, pats) => {
+            pa.pats(*pats).fold(r, |r, p| extract_vars(pa, r, p))
+        }
+        PatternDesc::Tpat_array(pats) => pa.pats(*pats).fold(r, |r, p| extract_vars(pa, r, p)),
+        PatternDesc::Tpat_variant(_, Some(p), _) => extract_vars(pa, r, pa.pat(*p)),
+        PatternDesc::Tpat_or(p, _, _) => extract_vars(pa, r, pa.pat(*p)),
         PatternDesc::Tpat_constant(_)
         | PatternDesc::Tpat_any
         | PatternDesc::Tpat_variant(_, None, _) => r,
@@ -3105,17 +3288,20 @@ pub fn extract_vars(r: IdentSet, p: &Pattern) -> IdentSet {
 /// Mirrors OCaml's `extract_vars` branches (compiler/ml/matching.ml:613-624)
 /// but avoids allocating an IdentSet for the hot no-variable test in
 /// `insert_or_append` (compiler/ml/matching.ml:738-740).
-fn pattern_binds_vars(p: &Pattern) -> bool {
+fn pattern_binds_vars(pa: &PatArena<'_>, p: &Pattern) -> bool {
     match &p.pat_desc {
         PatternDesc::Tpat_var(_, _) | PatternDesc::Tpat_alias(_, _, _) => true,
         PatternDesc::Tpat_tuple(pats)
         | PatternDesc::Tpat_construct(_, _, pats)
-        | PatternDesc::Tpat_array(pats) => pats.iter().any(pattern_binds_vars),
+        | PatternDesc::Tpat_array(pats) => pa.pats(*pats).any(|p| pattern_binds_vars(pa, p)),
         PatternDesc::Tpat_record(lpats, _, rest) => {
-            rest.is_some() || lpats.iter().any(|(_, _, pat, _)| pattern_binds_vars(pat))
+            rest.is_some()
+                || lpats
+                    .iter()
+                    .any(|(_, _, pat, _)| pattern_binds_vars(pa, pa.pat(*pat)))
         }
         PatternDesc::Tpat_variant(_, Some(p), _) | PatternDesc::Tpat_or(p, _, _) => {
-            pattern_binds_vars(p)
+            pattern_binds_vars(pa, pa.pat(*p))
         }
         PatternDesc::Tpat_constant(_)
         | PatternDesc::Tpat_any
@@ -3166,9 +3352,17 @@ fn alpha_pat_id<'a>(env: &'a [(Ident, Ident)], id: &Ident) -> Option<&'a Ident> 
         .find_map(|(from, to)| if from.same(id) { Some(to) } else { None })
 }
 
+fn alpha_pat_list(pa: &PatArena<'_>, env: &[(Ident, Ident)], items: TPatList) -> TPatList {
+    let renamed: Vec<TPatIdx> = pa
+        .pats(items)
+        .map(|item| pa.push(alpha_pat(pa, env, item)))
+        .collect();
+    pa.push_list(renamed)
+}
+
 /// Apply an alpha-renaming environment to a pattern.
 /// Equivalent to OCaml's `Typedtree.alpha_pat`.
-fn alpha_pat(env: &[(Ident, Ident)], pat: &Pattern) -> Pattern {
+fn alpha_pat(pa: &PatArena<'_>, env: &[(Ident, Ident)], pat: &Pattern) -> Pattern {
     match &pat.pat_desc {
         PatternDesc::Tpat_var(id, name) => {
             let pat_desc = alpha_pat_id(env, id)
@@ -3177,11 +3371,11 @@ fn alpha_pat(env: &[(Ident, Ident)], pat: &Pattern) -> Pattern {
             with_desc(pat, pat_desc)
         }
         PatternDesc::Tpat_alias(inner, id, name) => {
-            let new_inner = alpha_pat(env, inner);
+            let new_inner = alpha_pat(pa, env, pa.pat(*inner));
             if let Some(new_id) = alpha_pat_id(env, id) {
                 with_desc(
                     pat,
-                    PatternDesc::Tpat_alias(Box::new(new_inner), *new_id, name.clone()),
+                    PatternDesc::Tpat_alias(pa.push(new_inner), *new_id, name.clone()),
                 )
             } else {
                 new_inner
@@ -3189,21 +3383,17 @@ fn alpha_pat(env: &[(Ident, Ident)], pat: &Pattern) -> Pattern {
         }
         PatternDesc::Tpat_tuple(items) => with_desc(
             pat,
-            PatternDesc::Tpat_tuple(items.iter().map(|item| alpha_pat(env, item)).collect()),
+            PatternDesc::Tpat_tuple(alpha_pat_list(pa, env, *items)),
         ),
         PatternDesc::Tpat_construct(lid, cstr, args) => with_desc(
             pat,
-            PatternDesc::Tpat_construct(
-                *lid,
-                cstr.clone(),
-                args.iter().map(|arg| alpha_pat(env, arg)).collect(),
-            ),
+            PatternDesc::Tpat_construct(*lid, cstr.clone(), alpha_pat_list(pa, env, *args)),
         ),
         PatternDesc::Tpat_variant(label, arg, row) => with_desc(
             pat,
             PatternDesc::Tpat_variant(
                 label.clone(),
-                arg.as_ref().map(|arg| Box::new(alpha_pat(env, arg))),
+                arg.map(|arg| pa.push(alpha_pat(pa, env, pa.pat(arg)))),
                 *row,
             ),
         ),
@@ -3213,7 +3403,12 @@ fn alpha_pat(env: &[(Ident, Ident)], pat: &Pattern) -> Pattern {
                 fields
                     .iter()
                     .map(|(lid, lbl, field_pat, opt)| {
-                        (*lid, lbl.clone(), alpha_pat(env, field_pat), *opt)
+                        (
+                            *lid,
+                            lbl.clone(),
+                            pa.push(alpha_pat(pa, env, pa.pat(*field_pat))),
+                            *opt,
+                        )
                     })
                     .collect(),
                 *closed,
@@ -3228,13 +3423,13 @@ fn alpha_pat(env: &[(Ident, Ident)], pat: &Pattern) -> Pattern {
         ),
         PatternDesc::Tpat_array(items) => with_desc(
             pat,
-            PatternDesc::Tpat_array(items.iter().map(|item| alpha_pat(env, item)).collect()),
+            PatternDesc::Tpat_array(alpha_pat_list(pa, env, *items)),
         ),
         PatternDesc::Tpat_or(left, right, row) => with_desc(
             pat,
             PatternDesc::Tpat_or(
-                Box::new(alpha_pat(env, left)),
-                Box::new(alpha_pat(env, right)),
+                pa.push(alpha_pat(pa, env, pa.pat(*left))),
+                pa.push(alpha_pat(pa, env, pa.pat(*right))),
                 row.clone(),
             ),
         ),
@@ -3255,7 +3450,7 @@ fn alpha_pat(env: &[(Ident, Ident)], pat: &Pattern) -> Pattern {
 /// Equivalent to OCaml's `explode_or_pat`.
 pub fn explode_or_pat<'p, F>(
     ctx_ref: Option<&TypeContext>,
-    pa: &'p PatArena,
+    pa: &'p PatArena<'p>,
     arg: &Option<Ident>,
     patl: &[&'p Pattern],
     mk_action: &F,
@@ -3269,8 +3464,28 @@ where
 {
     match &pat.pat_desc {
         PatternDesc::Tpat_or(p1, p2, _) => {
-            let rem = explode_or_pat(ctx_ref, pa, arg, patl, mk_action, rem, vars, aliases, p2)?;
-            explode_or_pat(ctx_ref, pa, arg, patl, mk_action, rem, vars, aliases, p1)
+            let rem = explode_or_pat(
+                ctx_ref,
+                pa,
+                arg,
+                patl,
+                mk_action,
+                rem,
+                vars,
+                aliases,
+                pa.pat(*p2),
+            )?;
+            explode_or_pat(
+                ctx_ref,
+                pa,
+                arg,
+                patl,
+                mk_action,
+                rem,
+                vars,
+                aliases,
+                pa.pat(*p1),
+            )
         }
         PatternDesc::Tpat_alias(p, id, _) => {
             let mut new_aliases = vec![*id];
@@ -3284,7 +3499,7 @@ where
                 rem,
                 vars,
                 &new_aliases,
-                p,
+                pa.pat(*p),
             )
         }
         PatternDesc::Tpat_var(x, _) => {
@@ -3301,7 +3516,7 @@ where
         _ => {
             let env = mk_alpha_env(ctx_ref, arg, aliases, vars)?;
             let new_ids: Vec<Ident> = env.iter().map(|(_, id)| *id).collect();
-            let mut row: Vec<&'p Pattern> = vec![pa.alloc(alpha_pat(&env, pat))];
+            let mut row: Vec<&'p Pattern> = vec![pa.alloc(alpha_pat(pa, &env, pat))];
             row.extend_from_slice(patl);
             let mut result = vec![(row, MatchAction::new(mk_action(&new_ids)))];
             result.extend(rem);
@@ -3427,37 +3642,42 @@ fn is_or(p: &Pattern) -> bool {
 
 /// Condition (a) for appending to the Or matrix: p and q are incompatible.
 /// Equivalent to OCaml's `conda`.
-fn conda(p: &Pattern, q: &Pattern) -> bool {
-    !may_compat(p, q)
+fn conda(pa: &PatArena<'_>, p: &Pattern, q: &Pattern) -> bool {
+    !may_compat(pa, p, q)
 }
 
 /// Condition (b) for appending: action is not guarded and qs <= ps.
 /// Equivalent to OCaml's `condb`.
-fn condb(act: &MatchAction, ps: &[&Pattern], qs: &[&Pattern]) -> bool {
-    !act.is_guarded() && le_pats(qs, ps)
+fn condb<'p>(pa: &PatArena<'p>, act: &MatchAction, ps: &[&Pattern], qs: &[&Pattern]) -> bool {
+    !act.is_guarded() && le_pats(pa, qs, ps)
 }
 
 fn or_ok_iter<'p: 'a, 'a>(
+    pa: &PatArena<'p>,
     p: &'p Pattern,
     ps: &[&'p Pattern],
     mut clauses: impl Iterator<Item = &'a Clause<'p>>,
 ) -> bool {
     clauses.all(|(row, act)| match row.split_first() {
-        Some((q, qs)) if is_or(q) => conda(p, q) || condb(act, ps, qs),
+        Some((q, qs)) if is_or(q) => conda(pa, p, q) || condb(pa, act, ps, qs),
         _ => true,
     })
 }
 
 /// Check if two patterns are equivalent (each le the other).
 /// Equivalent to OCaml's `equiv_pat`.
-fn equiv_pat(p: &Pattern, q: &Pattern) -> bool {
-    le_pat(p, q) && le_pat(q, p)
+fn equiv_pat(pa: &PatArena<'_>, p: &Pattern, q: &Pattern) -> bool {
+    le_pat(pa, p, q) && le_pat(pa, q, p)
 }
 
 /// Get equivalent or-patterns from the front of the list.
 /// Returns (equivalent_clauses, remaining_clauses).
 /// Equivalent to OCaml's `get_equiv`.
-fn get_equiv<'p>(p: &'p Pattern, l: &[Clause<'p>]) -> (Vec<Clause<'p>>, Vec<Clause<'p>>) {
+fn get_equiv<'p>(
+    pa: &PatArena<'p>,
+    p: &'p Pattern,
+    l: &[Clause<'p>],
+) -> (Vec<Clause<'p>>, Vec<Clause<'p>>) {
     // OCaml compiler/ml/matching.ml:727-732 recurses through the equivalent
     // prefix and conses each row while returning, preserving source order.
     // Count the prefix first so Rust clones each row once without repeated
@@ -3465,7 +3685,7 @@ fn get_equiv<'p>(p: &'p Pattern, l: &[Clause<'p>]) -> (Vec<Clause<'p>>, Vec<Clau
     let prefix_len = l
         .iter()
         .take_while(|cl| match cl.0.first() {
-            Some(q) => equiv_pat(p, q),
+            Some(q) => equiv_pat(pa, p, q),
             None => false,
         })
         .count();
@@ -3481,6 +3701,7 @@ fn get_equiv<'p>(p: &'p Pattern, l: &[Clause<'p>]) -> (Vec<Clause<'p>>, Vec<Clau
 /// Returns (updated_ors, updated_no).
 /// Equivalent to OCaml's `insert_or_append`.
 fn insert_or_append<'p>(
+    pa: &PatArena<'p>,
     p: &'p Pattern,
     ps: &[&'p Pattern],
     act: &MatchAction,
@@ -3505,8 +3726,11 @@ fn insert_or_append<'p>(
         };
         let act_q = &cl.1;
 
-        if is_or(q_head) && may_compat(p, q_head) {
-            if !pattern_binds_vars(p) && !pattern_binds_vars(q_head) && equiv_pat(p, q_head) {
+        if is_or(q_head) && may_compat(pa, p, q_head) {
+            if !pattern_binds_vars(pa, p)
+                && !pattern_binds_vars(pa, q_head)
+                && equiv_pat(pa, p, q_head)
+            {
                 // OCaml compiler/ml/matching.ml:743-756 checks the tail after
                 // the equivalent-prefix group. Keep that as deque iteration so
                 // we do not force VecDeque::make_contiguous on a push_front-built
@@ -3515,17 +3739,17 @@ fn insert_or_append<'p>(
                     .iter()
                     .skip(index + 1)
                     .take_while(|cl| match cl.0.first() {
-                        Some(q) => equiv_pat(q_head, q),
+                        Some(q) => equiv_pat(pa, q_head, q),
                         None => false,
                     })
                     .count();
                 let not_e_start = index + 1 + equivalent_tail_len;
-                if or_ok_iter(p, ps, ors.iter().skip(not_e_start))
+                if or_ok_iter(pa, p, ps, ors.iter().skip(not_e_start))
                     && ors
                         .iter()
                         .take(index)
                         .all(|seen_cl| match seen_cl.0.first() {
-                            Some(q) => !may_compat(p, q),
+                            Some(q) => !may_compat(pa, p, q),
                             None => panic!("insert_or_append: empty seen row"),
                         })
                 {
@@ -3544,7 +3768,7 @@ fn insert_or_append<'p>(
                 return (ors, no);
             }
 
-            if !condb(act_q, ps, qs) {
+            if !condb(pa, act_q, ps, qs) {
                 no.push_front(clause_from_head(p, ps, act));
                 return (ors, no);
             }
@@ -3566,22 +3790,26 @@ fn insert_or_append<'p>(
 
 /// Reconstruct a matrix from a half-compiled pattern matching.
 /// Equivalent to OCaml's `rebuild_matrix`.
-fn rebuild_matrix<'p>(pmh: &PmHalfCompiled<'p>) -> Matrix<'p> {
+fn rebuild_matrix<'p>(pa: &PatArena<'p>, pmh: &PmHalfCompiled<'p>) -> Matrix<'p> {
     match pmh {
-        PmHalfCompiled::Pm(pm) => as_matrix(&pm.cases),
+        PmHalfCompiled::Pm(pm) => as_matrix(pa, &pm.cases),
         PmHalfCompiled::PmOr(por) => por.or_matrix.clone(),
-        PmHalfCompiled::PmVar(x) => add_omega_column(&rebuild_matrix(&x.inside)),
+        PmHalfCompiled::PmVar(x) => add_omega_column(&rebuild_matrix(pa, &x.inside)),
     }
 }
 
 /// Reconstruct default information from half-compiled pm list.
 /// Equivalent to OCaml's `rebuild_default`.
-fn rebuild_default<'p>(nexts: &[(i32, PmHalfCompiled<'p>)], def: DefaultEnv<'p>) -> DefaultEnv<'p> {
+fn rebuild_default<'p>(
+    pa: &PatArena<'p>,
+    nexts: &[(i32, PmHalfCompiled<'p>)],
+    def: DefaultEnv<'p>,
+) -> DefaultEnv<'p> {
     match nexts.split_first() {
         None => def,
         Some(((e, pmh), rem)) => {
-            let mut result = vec![(add_omega_column(&rebuild_matrix(pmh)), *e)];
-            result.extend(rebuild_default(rem, def));
+            let mut result = vec![(add_omega_column(&rebuild_matrix(pa, pmh)), *e)];
+            result.extend(rebuild_default(pa, rem, def));
             result
         }
     }
@@ -3618,7 +3846,7 @@ fn rebuild_nexts<'p>(
 /// Equivalent to OCaml's `split_or`.
 fn split_or<'p>(
     ctx_ref: Option<&TypeContext>,
-    pa: &'p PatArena,
+    pa: &'p PatArena<'p>,
     arena: &LocArena<'_>,
     argo: &Option<Ident>,
     cls: Vec<Clause<'p>>,
@@ -3646,7 +3874,7 @@ fn split_or<'p>(
 /// Inner do_split for split_or.
 fn do_split_or<'p>(
     ctx_ref: Option<&TypeContext>,
-    pa: &'p PatArena,
+    pa: &'p PatArena<'p>,
     arena: &LocArena<'_>,
     argo: &Option<Ident>,
     mut before: VecDeque<Clause<'p>>,
@@ -3674,17 +3902,17 @@ fn do_split_or<'p>(
         let push_to_before_or_ors = {
             let (p, ps) = cl.0.split_first().expect("split_or: empty pattern row");
             let act = &cl.1;
-            if up_ok_iter(ctx_ref, cl.0.as_slice(), act, no.iter()) {
+            if up_ok_iter(pa, ctx_ref, cl.0.as_slice(), act, no.iter()) {
                 if is_or(p) {
-                    let (new_ors, new_no) = insert_or_append(p, ps, act, ors, no);
+                    let (new_ors, new_no) = insert_or_append(pa, p, ps, act, ors, no);
                     ors = new_ors;
                     no = new_no;
                     continue;
-                } else if up_ok_iter(ctx_ref, cl.0.as_slice(), act, ors.iter()) {
+                } else if up_ok_iter(pa, ctx_ref, cl.0.as_slice(), act, ors.iter()) {
                     // OCaml `do_split` moves the current row into `before` with
                     // `(cl :: before)` (compiler/ml/matching.ml:820-826).
                     Some(true)
-                } else if or_ok_iter(p, ps, ors.iter()) {
+                } else if or_ok_iter(pa, p, ps, ors.iter()) {
                     Some(false)
                 } else {
                     None
@@ -3705,7 +3933,7 @@ fn do_split_or<'p>(
 /// cons_next helper for split_or.
 fn cons_next_or<'p>(
     ctx_ref: Option<&TypeContext>,
-    pa: &'p PatArena,
+    pa: &'p PatArena<'p>,
     arena: &LocArena<'_>,
     argo: &Option<Ident>,
     yes: Vec<Clause<'p>>,
@@ -3761,7 +3989,7 @@ fn cons_next_or<'p>(
 /// Equivalent to OCaml's `split_naive`.
 fn split_naive<'p>(
     ctx_ref: Option<&TypeContext>,
-    pa: &'p PatArena,
+    pa: &'p PatArena<'p>,
     arena: &LocArena<'_>,
     cls: &[Clause<'p>],
     args: &MatchArgs,
@@ -3803,7 +4031,7 @@ fn split_naive<'p>(
 /// Split on extension constructors (naive).
 fn split_exc<'p>(
     ctx_ref: Option<&TypeContext>,
-    pa: &'p PatArena,
+    pa: &'p PatArena<'p>,
     arena: &LocArena<'_>,
     cstr0: &crate::types::ConstructorDescription,
     yes: Vec<Clause<'p>>,
@@ -3823,7 +4051,7 @@ fn split_exc<'p>(
                         args: args.clone(),
                         default: def.clone(),
                     }),
-                    matrix: as_matrix(&yes),
+                    matrix: as_matrix(pa, &yes),
                     top_default: def,
                 },
                 k,
@@ -3868,7 +4096,7 @@ fn split_exc<'p>(
                                 args: args.clone(),
                                 default: new_def.clone(),
                             }),
-                            matrix: as_matrix(&yes),
+                            matrix: as_matrix(pa, &yes),
                             top_default: new_def,
                         },
                         new_nexts,
@@ -3904,7 +4132,7 @@ fn split_exc<'p>(
                             args: args.clone(),
                             default: new_def.clone(),
                         }),
-                        matrix: as_matrix(&yes),
+                        matrix: as_matrix(pa, &yes),
                         top_default: new_def,
                     },
                     new_nexts,
@@ -3918,7 +4146,7 @@ fn split_exc<'p>(
 /// Split on non-extension constructors (naive).
 fn split_noexc<'p>(
     ctx_ref: Option<&TypeContext>,
-    pa: &'p PatArena,
+    pa: &'p PatArena<'p>,
     arena: &LocArena<'_>,
     yes: Vec<Clause<'p>>,
     rest: &[Clause<'p>],
@@ -3982,7 +4210,7 @@ fn split_noexc<'p>(
 /// Equivalent to OCaml's `split_constr`.
 fn split_constr<'p>(
     ctx_ref: Option<&TypeContext>,
-    pa: &'p PatArena,
+    pa: &'p PatArena<'p>,
     arena: &LocArena<'_>,
     cls: &[Clause<'p>],
     args: &MatchArgs,
@@ -4040,7 +4268,7 @@ fn split_constr<'p>(
 /// split_ex: raise constructor rows up.
 fn split_ex<'p>(
     ctx_ref: Option<&TypeContext>,
-    pa: &'p PatArena,
+    pa: &'p PatArena<'p>,
     arena: &LocArena<'_>,
     group: fn(&'p Pattern) -> bool,
     yes: Vec<Clause<'p>>,
@@ -4063,7 +4291,7 @@ fn split_ex<'p>(
                             args: args.clone(),
                             default: def.clone(),
                         }),
-                        matrix: as_matrix(&yes),
+                        matrix: as_matrix(pa, &yes),
                         top_default: def,
                     },
                     k,
@@ -4114,7 +4342,7 @@ fn split_ex<'p>(
                                     args: args.clone(),
                                     default: new_def.clone(),
                                 }),
-                                matrix: as_matrix(&yes),
+                                matrix: as_matrix(pa, &yes),
                                 top_default: new_def,
                             },
                             new_nexts,
@@ -4124,7 +4352,7 @@ fn split_ex<'p>(
             }
         }
         Some((cl, rem)) => match cl.0.first() {
-            Some(p) if group(p) && up_ok(ctx_ref, &cl.0, &cl.1, &no) => {
+            Some(p) if group(p) && up_ok(pa, ctx_ref, &cl.0, &cl.1, &no) => {
                 let mut new_yes = yes;
                 new_yes.insert(0, cl.clone());
                 split_ex(
@@ -4145,7 +4373,7 @@ fn split_ex<'p>(
 /// split_noex: raise non-constructor rows up.
 fn split_noex<'p>(
     ctx_ref: Option<&TypeContext>,
-    pa: &'p PatArena,
+    pa: &'p PatArena<'p>,
     arena: &LocArena<'_>,
     group: fn(&'p Pattern) -> bool,
     yes: Vec<Clause<'p>>,
@@ -4224,7 +4452,7 @@ fn split_noex<'p>(
                 // Fall through to normal case
                 let cl = &rest[0];
                 match cl.0.first() {
-                    Some(p) if !group(p) && up_ok(ctx_ref, &cl.0, &cl.1, &no) => {
+                    Some(p) if !group(p) && up_ok(pa, ctx_ref, &cl.0, &cl.1, &no) => {
                         let mut new_yes = yes;
                         new_yes.insert(0, cl.clone());
                         split_noex(
@@ -4262,7 +4490,7 @@ fn split_noex<'p>(
             }
         }
         Some((cl, rem)) => match cl.0.first() {
-            Some(p) if !group(p) && up_ok(ctx_ref, &cl.0, &cl.1, &no) => {
+            Some(p) if !group(p) && up_ok(pa, ctx_ref, &cl.0, &cl.1, &no) => {
                 let mut new_yes = yes;
                 new_yes.insert(0, cl.clone());
                 split_noex(
@@ -4285,7 +4513,7 @@ fn split_noex<'p>(
 /// Equivalent to OCaml's `precompile_var`.
 fn precompile_var<'p>(
     ctx_ref: Option<&TypeContext>,
-    pa: &'p PatArena,
+    pa: &'p PatArena<'p>,
     arena: &LocArena<'_>,
     args: &MatchArgs,
     cls: Vec<Clause<'p>>,
@@ -4301,7 +4529,7 @@ fn precompile_var<'p>(
                 RawLambda::Lvar(v) => {
                     if cls.len() == 1 {
                         // as split as it can
-                        dont_precompile_var(args, cls, def, k)
+                        dont_precompile_var(pa, args, cls, def, k)
                     } else {
                         // Precompile: strip first pattern from each case
                         let var_cls: Vec<Clause<'p>> = cls
@@ -4312,6 +4540,7 @@ fn precompile_var<'p>(
                             })
                             .collect();
                         let var_def = make_default(
+                            pa,
                             &|_p: &'p Pattern, rem: &[&'p Pattern]| Ok(rem.to_vec()),
                             &def,
                         );
@@ -4331,7 +4560,7 @@ fn precompile_var<'p>(
                         // Compute top information
                         if nexts.is_empty() {
                             // If you need
-                            dont_precompile_var(args, cls, def, k)
+                            dont_precompile_var(pa, args, cls, def, k)
                         } else {
                             let rfirst = PmHalfCompiledInfo {
                                 me: PmHalfCompiled::PmVar(PmVarCompiled {
@@ -4339,23 +4568,24 @@ fn precompile_var<'p>(
                                     var_arg: av.clone(),
                                 }),
                                 matrix: add_omega_column(&first_info.matrix),
-                                top_default: rebuild_default(&nexts, def),
+                                top_default: rebuild_default(pa, &nexts, def),
                             };
                             let rnexts = rebuild_nexts(&av, nexts, k);
                             (rfirst, rnexts)
                         }
                     }
                 }
-                _ => dont_precompile_var(args, cls, def, k),
+                _ => dont_precompile_var(pa, args, cls, def, k),
             }
         }
-        _ => dont_precompile_var(args, cls, def, k),
+        _ => dont_precompile_var(pa, args, cls, def, k),
     }
 }
 
 /// Don't precompile: just wrap the cases in a PatternMatching.
 /// Equivalent to OCaml's `dont_precompile_var`.
 fn dont_precompile_var<'p>(
+    pa: &PatArena<'p>,
     args: &MatchArgs,
     cls: Vec<Clause<'p>>,
     def: DefaultEnv<'p>,
@@ -4368,7 +4598,7 @@ fn dont_precompile_var<'p>(
                 args: args.clone(),
                 default: def.clone(),
             }),
-            matrix: as_matrix(&cls),
+            matrix: as_matrix(pa, &cls),
             top_default: def,
         },
         k,
@@ -4379,7 +4609,7 @@ fn dont_precompile_var<'p>(
 /// Equivalent to OCaml's `precompile_or`.
 fn precompile_or<'p>(
     ctx_ref: Option<&TypeContext>,
-    pa: &'p PatArena,
+    pa: &'p PatArena<'p>,
     arena: &LocArena<'_>,
     argo: &Option<Ident>,
     cls: Vec<Clause<'p>>,
@@ -4396,7 +4626,7 @@ fn precompile_or<'p>(
     // do_cases processes the or-pattern list
     let (end_body, handlers) = do_cases_or(ctx_ref, pa, argo, &ors, args, &def, next_raise);
 
-    let matrix = as_matrix(&[cls.as_slice(), ors.as_slice()].concat());
+    let matrix = as_matrix(pa, &[cls.as_slice(), ors.as_slice()].concat());
     let body = PatternMatching {
         cases: [cls, end_body].concat(),
         args: args.clone(),
@@ -4420,7 +4650,7 @@ fn precompile_or<'p>(
 /// Equivalent to the inner `do_cases` in OCaml's `precompile_or`.
 fn do_cases_or<'p>(
     ctx_ref: Option<&TypeContext>,
-    pa: &'p PatArena,
+    pa: &'p PatArena<'p>,
     argo: &Option<Ident>,
     ors: &[Clause<'p>],
     args: &MatchArgs,
@@ -4436,7 +4666,7 @@ fn do_cases_or<'p>(
 
 fn do_cases_or_deque<'p>(
     ctx_ref: Option<&TypeContext>,
-    pa: &'p PatArena,
+    pa: &'p PatArena<'p>,
     argo: &Option<Ident>,
     ors: &[Clause<'p>],
     args: &MatchArgs,
@@ -4454,7 +4684,7 @@ fn do_cases_or_deque<'p>(
                     let patl = &cl.0[1..];
                     let action = &cl.1;
 
-                    let (others, rem) = get_equiv(orp, rem);
+                    let (others, rem) = get_equiv(pa, orp, rem);
 
                     let orpm_cases = {
                         let mut cases = vec![(patl.to_vec(), action.clone())];
@@ -4471,11 +4701,11 @@ fn do_cases_or_deque<'p>(
                     let orpm = PatternMatching {
                         cases: orpm_cases,
                         args: orpm_args,
-                        default: default_compat(orp, def),
+                        default: default_compat(pa, orp, def),
                     };
 
                     let vars: Vec<Ident> = {
-                        let orp_vars = extract_vars(BTreeSet::new(), orp);
+                        let orp_vars = extract_vars(pa, BTreeSet::new(), orp);
                         let pm_fv = pm_free_variables(&orpm);
                         orp_vars.intersection(&pm_fv).cloned().collect()
                     };
@@ -4534,7 +4764,7 @@ fn do_cases_or_deque<'p>(
 /// Equivalent to OCaml's `split_precompile`.
 pub fn split_precompile<'p>(
     ctx_ref: Option<&TypeContext>,
-    pa: &'p PatArena,
+    pa: &'p PatArena<'p>,
     arena: &LocArena<'_>,
     argo: &Option<Ident>,
     pm: &PatternMatching<'p>,
@@ -4688,14 +4918,15 @@ fn divide_line<'p>(
 /// Matcher for constant patterns.
 /// Equivalent to OCaml's `matcher_const`.
 fn matcher_const<'p>(
+    pa: &PatArena<'p>,
     cst: &Constant,
     p: &'p Pattern,
     rem: &[&'p Pattern],
 ) -> Result<Vec<&'p Pattern>, MatchError> {
     match &p.pat_desc {
-        PatternDesc::Tpat_or(p1, p2, _) => match matcher_const(cst, p1, rem) {
+        PatternDesc::Tpat_or(p1, p2, _) => match matcher_const(pa, cst, pa.pat(*p1), rem) {
             Ok(r) => Ok(r),
-            Err(MatchError::NoMatch) => matcher_const(cst, p2, rem),
+            Err(MatchError::NoMatch) => matcher_const(pa, cst, pa.pat(*p2), rem),
             Err(e) => Err(e),
         },
         PatternDesc::Tpat_constant(c1) if const_compare(c1, cst) == std::cmp::Ordering::Equal => {
@@ -4726,7 +4957,7 @@ fn get_args_constant<'p>(_p: &'p Pattern, rem: &[&'p Pattern]) -> Vec<&'p Patter
 /// Make a constant matching cell.
 /// Equivalent to OCaml's `make_constant_matching`.
 fn make_constant_matching<'p>(
-    pa: &'p PatArena,
+    pa: &'p PatArena<'p>,
     p: &'p Pattern,
     def: &DefaultEnv<'p>,
     ctx: &[Ctx<'p>],
@@ -4736,7 +4967,7 @@ fn make_constant_matching<'p>(
         None => crate::misc::fatal_error("Matching.make_constant_matching"),
         Some(_) => {
             let key = get_key_constant("make", p);
-            let def = make_default(&|p2, rem| matcher_const(&key, p2, rem), def);
+            let def = make_default(pa, &|p2, rem| matcher_const(pa, &key, p2, rem), def);
             let ctx = filter_ctx(None, pa, p, ctx);
             MatchCell {
                 pm: PatternMatching {
@@ -4754,7 +4985,7 @@ fn make_constant_matching<'p>(
 /// Divide a pattern matching by constant values.
 /// Equivalent to OCaml's `divide_constant`.
 fn divide_constant<'p>(
-    pa: &'p PatArena,
+    pa: &'p PatArena<'p>,
     ctx: &[Ctx<'p>],
     m: &PatternMatching<'p>,
 ) -> Vec<(Constant, MatchCell<'p>)> {
@@ -4807,9 +5038,9 @@ fn get_key_constr(p: &Pattern) -> std::sync::Arc<ConstructorDescription> {
 
 /// Get the arguments from a constructor pattern.
 /// Equivalent to OCaml's `get_args_constr`.
-fn get_args_constr<'p>(p: &'p Pattern, rem: &[&'p Pattern]) -> Vec<&'p Pattern> {
+fn get_args_constr<'p>(pa: &PatArena<'p>, p: &'p Pattern, rem: &[&'p Pattern]) -> Vec<&'p Pattern> {
     match &p.pat_desc {
-        PatternDesc::Tpat_construct(_, _, args) => prepend_row(args, rem),
+        PatternDesc::Tpat_construct(_, _, args) => prepend_row(pa.pats(*args), rem),
         _ => panic!("get_args_constr: not a construct pattern"),
     }
 }
@@ -4822,30 +5053,33 @@ fn get_args_constr<'p>(p: &'p Pattern, rem: &[&'p Pattern]) -> Vec<&'p Pattern> 
 /// types degrades to arity checking, due to potential rebinding.
 /// This comparison is performed by Types.may_equal_constr.
 fn matcher_constr<'p>(
-    pa: &'p PatArena,
+    pa: &'p PatArena<'p>,
     cstr: &ConstructorDescription,
     p: &'p Pattern,
     rem: &[&'p Pattern],
 ) -> Result<Vec<&'p Pattern>, MatchError> {
     match cstr.cstr_arity {
-        0 => matcher_constr_arity0(cstr, p, rem),
+        0 => matcher_constr_arity0(pa, cstr, p, rem),
         1 => matcher_constr_arity1(pa, cstr, p, rem),
-        _ => matcher_constr_arityN(cstr, p, rem),
+        _ => matcher_constr_arityN(pa, cstr, p, rem),
     }
 }
 
 /// Matcher for 0-arity constructor.
 fn matcher_constr_arity0<'p>(
+    pa: &PatArena<'p>,
     cstr: &ConstructorDescription,
     q: &'p Pattern,
     rem: &[&'p Pattern],
 ) -> Result<Vec<&'p Pattern>, MatchError> {
     match &q.pat_desc {
-        PatternDesc::Tpat_or(p1, p2, _) => match matcher_constr_arity0(cstr, p1, rem) {
-            Ok(r) => Ok(r),
-            Err(MatchError::NoMatch) => matcher_constr_arity0(cstr, p2, rem),
-            Err(e) => Err(e),
-        },
+        PatternDesc::Tpat_or(p1, p2, _) => {
+            match matcher_constr_arity0(pa, cstr, pa.pat(*p1), rem) {
+                Ok(r) => Ok(r),
+                Err(MatchError::NoMatch) => matcher_constr_arity0(pa, cstr, pa.pat(*p2), rem),
+                Err(e) => Err(e),
+            }
+        }
         PatternDesc::Tpat_construct(_, cstr2, args)
             if args.is_empty() && may_equal_constr(cstr, cstr2) =>
         {
@@ -4858,15 +5092,15 @@ fn matcher_constr_arity0<'p>(
 
 /// Matcher for 1-arity constructor.
 fn matcher_constr_arity1<'p>(
-    pa: &'p PatArena,
+    pa: &'p PatArena<'p>,
     cstr: &ConstructorDescription,
     q: &'p Pattern,
     rem: &[&'p Pattern],
 ) -> Result<Vec<&'p Pattern>, MatchError> {
     match &q.pat_desc {
         PatternDesc::Tpat_or(p1, p2, _) => {
-            let r1 = matcher_constr_arity1(pa, cstr, p1, rem).ok();
-            let r2 = matcher_constr_arity1(pa, cstr, p2, rem).ok();
+            let r1 = matcher_constr_arity1(pa, cstr, pa.pat(*p1), rem).ok();
+            let r2 = matcher_constr_arity1(pa, cstr, pa.pat(*p2), rem).ok();
             match (r1, r2) {
                 (None, None) => Err(MatchError::NoMatch),
                 (Some(r1), None) => Ok(r1),
@@ -4874,16 +5108,11 @@ fn matcher_constr_arity1<'p>(
                 (Some(r1), Some(r2)) => match (r1.first(), r2.first()) {
                     (Some(a1), Some(a2)) => {
                         let or_pat = Pattern {
-                            pat_desc: PatternDesc::Tpat_or(
-                                Box::new((*a1).clone()),
-                                Box::new((*a2).clone()),
-                                None,
-                            ),
+                            pat_desc: PatternDesc::Tpat_or(pa.handle(a1), pa.handle(a2), None),
                             pat_loc: LocIdx::none(),
-                            pat_extra: Default::default(),
+                            pat_cold: None,
                             pat_type: a1.pat_type,
                             pat_env: a1.pat_env,
-                            pat_attributes: Attributes::new(),
                         };
                         let mut result = vec![&*pa.alloc(or_pat)];
                         result.extend(rem.iter().cloned());
@@ -4896,7 +5125,7 @@ fn matcher_constr_arity1<'p>(
         PatternDesc::Tpat_construct(_, cstr2, args)
             if args.len() == 1 && may_equal_constr(cstr, cstr2) =>
         {
-            let mut result = vec![&args[0]];
+            let mut result = vec![pa.pat(pa.list(*args)[0])];
             result.extend(rem.iter().cloned());
             Ok(result)
         }
@@ -4911,6 +5140,7 @@ fn matcher_constr_arity1<'p>(
 
 /// Matcher for N-arity constructor (N >= 2).
 fn matcher_constr_arityN<'p>(
+    pa: &PatArena<'p>,
     cstr: &ConstructorDescription,
     q: &'p Pattern,
     rem: &[&'p Pattern],
@@ -4918,7 +5148,7 @@ fn matcher_constr_arityN<'p>(
     match &q.pat_desc {
         PatternDesc::Tpat_or(_, _, _) => Err(MatchError::OrPat),
         PatternDesc::Tpat_construct(_, cstr2, args) if may_equal_constr(cstr, cstr2) => {
-            let result = prepend_row(args, rem);
+            let result = prepend_row(pa.pats(*args), rem);
             Ok(result)
         }
         PatternDesc::Tpat_any => {
@@ -4960,7 +5190,7 @@ fn fld_record_extension(lbl: &LabelDescription) -> FieldDbgInfo {
 /// Equivalent to OCaml's `make_constr_matching`.
 fn make_constr_matching<'p>(
     ctx_ref: &TypeContext,
-    pa: &'p PatArena,
+    pa: &'p PatArena<'p>,
     arena: &LocArena<'_>,
     p: &'p Pattern,
     def: &DefaultEnv<'p>,
@@ -4989,7 +5219,7 @@ fn make_constr_matching<'p>(
                             PatternDesc::Tpat_construct(_, _, args_inner)
                                 if args_inner.len() == 1 =>
                             {
-                                let pat = &args_inner[0];
+                                let pat = pa.pat(pa.list(*args_inner)[0]);
                                 // First try env-based check
                                 let env_opt = ctx_ref.get_typed_env(pat.pat_env);
                                 let can_skip = env_opt
@@ -5059,7 +5289,11 @@ fn make_constr_matching<'p>(
                 pm: PatternMatching {
                     cases: Vec::new(),
                     args: MatchArgs::new(newargs),
-                    default: make_default(&|p2, rem| matcher_constr(pa, &cstr_clone, p2, rem), def),
+                    default: make_default(
+                        pa,
+                        &|p2, rem| matcher_constr(pa, &cstr_clone, p2, rem),
+                        def,
+                    ),
                 },
                 ctx: filter_ctx(Some(ctx_ref), pa, p, ctx),
                 pat: normalize_pat(pa, p),
@@ -5072,7 +5306,7 @@ fn make_constr_matching<'p>(
 /// Equivalent to OCaml's `divide_constructor`.
 fn divide_constructor<'p>(
     ctx_ref: &TypeContext,
-    pa: &'p PatArena,
+    pa: &'p PatArena<'p>,
     arena: &LocArena<'_>,
     ctx: &[Ctx<'p>],
     pm: &PatternMatching<'p>,
@@ -5081,7 +5315,7 @@ fn divide_constructor<'p>(
         |p, def, ctx_inner, args| make_constr_matching(ctx_ref, pa, arena, p, def, ctx_inner, args),
         |left, right| same_constructor(left, right),
         get_key_constr,
-        get_args_constr,
+        |p, rem| get_args_constr(pa, p, rem),
         ctx,
         pm,
     )
@@ -5092,14 +5326,15 @@ fn divide_constructor<'p>(
 /// Matcher for constant variant patterns.
 /// Equivalent to OCaml's `matcher_variant_const`.
 fn matcher_variant_const<'p>(
+    pa: &PatArena<'p>,
     lab: &str,
     p: &'p Pattern,
     rem: &[&'p Pattern],
 ) -> Result<Vec<&'p Pattern>, MatchError> {
     match &p.pat_desc {
-        PatternDesc::Tpat_or(p1, p2, _) => match matcher_variant_const(lab, p1, rem) {
+        PatternDesc::Tpat_or(p1, p2, _) => match matcher_variant_const(pa, lab, pa.pat(*p1), rem) {
             Ok(r) => Ok(r),
-            Err(MatchError::NoMatch) => matcher_variant_const(lab, p2, rem),
+            Err(MatchError::NoMatch) => matcher_variant_const(pa, lab, pa.pat(*p2), rem),
             Err(e) => Err(e),
         },
         PatternDesc::Tpat_variant(lab1, _, _) if lab1 == lab => Ok(rem.to_vec()),
@@ -5111,7 +5346,7 @@ fn matcher_variant_const<'p>(
 /// Make a variant matching cell for constant variants.
 /// Equivalent to OCaml's `make_variant_matching_constant`.
 fn make_variant_matching_constant<'p>(
-    pa: &'p PatArena,
+    pa: &'p PatArena<'p>,
     p: &'p Pattern,
     lab: &str,
     def: &DefaultEnv<'p>,
@@ -5122,7 +5357,11 @@ fn make_variant_matching_constant<'p>(
         None => crate::misc::fatal_error("Matching.make_variant_matching_constant"),
         Some(_) => {
             let lab_owned = lab.to_string();
-            let def = make_default(&|p2, rem| matcher_variant_const(&lab_owned, p2, rem), def);
+            let def = make_default(
+                pa,
+                &|p2, rem| matcher_variant_const(pa, &lab_owned, p2, rem),
+                def,
+            );
             let ctx = filter_ctx(None, pa, p, ctx);
             MatchCell {
                 pm: PatternMatching {
@@ -5140,6 +5379,7 @@ fn make_variant_matching_constant<'p>(
 /// Matcher for non-constant variant patterns.
 /// Equivalent to OCaml's `matcher_variant_nonconst`.
 fn matcher_variant_nonconst<'p>(
+    pa: &PatArena<'p>,
     lab: &str,
     p: &'p Pattern,
     rem: &[&'p Pattern],
@@ -5147,7 +5387,7 @@ fn matcher_variant_nonconst<'p>(
     match &p.pat_desc {
         PatternDesc::Tpat_or(_, _, _) => Err(MatchError::OrPat),
         PatternDesc::Tpat_variant(lab1, Some(arg), _) if lab1 == lab => {
-            let mut result = vec![&**arg];
+            let mut result = vec![pa.pat(*arg)];
             result.extend(rem.iter().cloned());
             Ok(result)
         }
@@ -5163,7 +5403,7 @@ fn matcher_variant_nonconst<'p>(
 /// Make a variant matching cell for non-constant variants.
 /// Equivalent to OCaml's `make_variant_matching_nonconst`.
 fn make_variant_matching_nonconst<'p>(
-    pa: &'p PatArena,
+    pa: &'p PatArena<'p>,
     arena: &LocArena<'_>,
     p: &'p Pattern,
     lab: &str,
@@ -5177,7 +5417,8 @@ fn make_variant_matching_nonconst<'p>(
             let argl = args.tail(1);
             let lab_owned = lab.to_string();
             let def = make_default(
-                &|p2, rem| matcher_variant_nonconst(&lab_owned, p2, rem),
+                pa,
+                &|p2, rem| matcher_variant_nonconst(pa, &lab_owned, p2, rem),
                 def,
             );
             let ctx = filter_ctx(None, pa, p, ctx);
@@ -5208,7 +5449,7 @@ fn make_variant_matching_nonconst<'p>(
 /// Equivalent to OCaml's `divide_variant`.
 fn divide_variant<'p>(
     ctx_ref: &TypeContext,
-    pa: &'p PatArena,
+    pa: &'p PatArena<'p>,
     arena: &LocArena<'_>,
     row: &RowDesc,
     ctx: &[Ctx<'p>],
@@ -5218,7 +5459,7 @@ fn divide_variant<'p>(
 
     fn divide_rec<'p>(
         ctx_ref: &TypeContext,
-        pa: &'p PatArena,
+        pa: &'p PatArena<'p>,
         arena: &LocArena<'_>,
         row: &RowDesc,
         cases: &[Clause<'p>],
@@ -5271,7 +5512,7 @@ fn divide_variant<'p>(
                                     }
                                     Some(pat_inner) => {
                                         let key = (lab.clone(), false);
-                                        let mut new_patl = vec![&**pat_inner];
+                                        let mut new_patl = vec![pa.pat(*pat_inner)];
                                         new_patl.extend(rest_patl.iter().cloned());
                                         add(
                                             |a| {
@@ -5328,23 +5569,31 @@ fn matcher_get_args_var<'p>(
 
 /// Make a variable matching.
 /// Equivalent to OCaml's `make_var_matching`.
-fn make_var_matching<'p>(def: &DefaultEnv<'p>, args: &MatchArgs) -> PatternMatching<'p> {
+fn make_var_matching<'p>(
+    pa: &PatArena<'p>,
+    def: &DefaultEnv<'p>,
+    args: &MatchArgs,
+) -> PatternMatching<'p> {
     match args.split_first() {
         None => crate::misc::fatal_error("Matching.make_var_matching"),
         Some(_) => PatternMatching {
             cases: Vec::new(),
             args: args.tail(1),
-            default: make_default(&matcher_get_args_var, def),
+            default: make_default(pa, &matcher_get_args_var, def),
         },
     }
 }
 
 /// Divide a pattern matching by variable.
 /// Equivalent to OCaml's `divide_var`.
-fn divide_var<'p>(ctx: &[Ctx<'p>], pm: &PatternMatching<'p>) -> MatchCell<'p> {
+fn divide_var<'p>(
+    pa: &'p PatArena<'p>,
+    ctx: &[Ctx<'p>],
+    pm: &PatternMatching<'p>,
+) -> MatchCell<'p> {
     divide_line(
-        ctx_lshift,
-        make_var_matching,
+        |c| ctx_lshift(pa, c),
+        |def, args| make_var_matching(pa, def, args),
         get_args_var,
         omega(),
         ctx,
@@ -5356,14 +5605,19 @@ fn divide_var<'p>(ctx: &[Ctx<'p>], pm: &PatternMatching<'p>) -> MatchCell<'p> {
 
 /// Get the arguments from a tuple pattern.
 /// Equivalent to OCaml's `get_args_tuple`.
-fn get_args_tuple<'p>(arity: usize, p: &'p Pattern, rem: &[&'p Pattern]) -> Vec<&'p Pattern> {
+fn get_args_tuple<'p>(
+    pa: &PatArena<'p>,
+    arity: usize,
+    p: &'p Pattern,
+    rem: &[&'p Pattern],
+) -> Vec<&'p Pattern> {
     match &p.pat_desc {
         PatternDesc::Tpat_any => {
             let mut result = omegas(arity);
             result.extend(rem.iter().cloned());
             result
         }
-        PatternDesc::Tpat_tuple(args) => prepend_row(args, rem),
+        PatternDesc::Tpat_tuple(args) => prepend_row(pa.pats(*args), rem),
         _ => panic!("get_args_tuple: not a tuple or any pattern"),
     }
 }
@@ -5371,6 +5625,7 @@ fn get_args_tuple<'p>(arity: usize, p: &'p Pattern, rem: &[&'p Pattern]) -> Vec<
 /// Matcher for tuple patterns.
 /// Equivalent to OCaml's `matcher_tuple`.
 fn matcher_tuple<'p>(
+    pa: &PatArena<'p>,
     arity: usize,
     p: &'p Pattern,
     rem: &[&'p Pattern],
@@ -5383,7 +5638,7 @@ fn matcher_tuple<'p>(
             Ok(result)
         }
         PatternDesc::Tpat_tuple(args) if args.len() == arity => {
-            let result = prepend_row(args, rem);
+            let result = prepend_row(pa.pats(*args), rem);
             Ok(result)
         }
         _ => Err(MatchError::NoMatch),
@@ -5393,6 +5648,7 @@ fn matcher_tuple<'p>(
 /// Make a tuple matching.
 /// Equivalent to OCaml's `make_tuple_matching`.
 fn make_tuple_matching<'p>(
+    pa: &PatArena<'p>,
     loc: LamLoc,
     arity: usize,
     def: &DefaultEnv<'p>,
@@ -5417,7 +5673,7 @@ fn make_tuple_matching<'p>(
             PatternMatching {
                 cases: Vec::new(),
                 args: MatchArgs::new(new_args),
-                default: make_default(&|p2, rem| matcher_tuple(arity, p2, rem), def),
+                default: make_default(pa, &|p2, rem| matcher_tuple(pa, arity, p2, rem), def),
             }
         }
     }
@@ -5426,7 +5682,7 @@ fn make_tuple_matching<'p>(
 /// Divide a pattern matching by tuple.
 /// Equivalent to OCaml's `divide_tuple`.
 fn divide_tuple<'p>(
-    pa: &'p PatArena,
+    pa: &'p PatArena<'p>,
     arena: &LocArena<'_>,
     arity: usize,
     p: &'p Pattern,
@@ -5435,8 +5691,8 @@ fn divide_tuple<'p>(
 ) -> MatchCell<'p> {
     divide_line(
         |c| filter_ctx(None, pa, p, c),
-        |def, args| make_tuple_matching(arena.lam_loc(p.pat_loc), arity, def, args),
-        |pat, rem| get_args_tuple(arity, pat, rem),
+        |def, args| make_tuple_matching(pa, arena.lam_loc(p.pat_loc), arity, def, args),
+        |pat, rem| get_args_tuple(pa, arity, pat, rem),
         p,
         ctx,
         pm,
@@ -5448,11 +5704,12 @@ fn divide_tuple<'p>(
 /// Build a record matching line from a Tpat_record pattern's fields.
 /// This version takes the typed record fields directly.
 fn record_matching_line_from_fields<'p>(
+    pa: &PatArena<'p>,
     num_fields: usize,
     fields: &'p [(
         crate::types::typedtree::Loc<crate::parse_arena::LidentIdx>,
         std::sync::Arc<LabelDescription>,
-        Pattern,
+        TPatIdx,
         bool,
     )],
 ) -> Vec<&'p Pattern> {
@@ -5465,22 +5722,27 @@ fn record_matching_line_from_fields<'p>(
     let size = std::cmp::max(num_fields, max_pos);
     let mut patv: Vec<&'p Pattern> = vec![omega(); size];
     for (_, lbl, pat, _) in fields {
-        patv[lbl.lbl_pos as usize] = pat;
+        patv[lbl.lbl_pos as usize] = pa.pat(*pat);
     }
     patv
 }
 
 /// Get the arguments from a record pattern.
 /// Equivalent to OCaml's `get_args_record`.
-fn get_args_record<'p>(num_fields: usize, p: &'p Pattern, rem: &[&'p Pattern]) -> Vec<&'p Pattern> {
+fn get_args_record<'p>(
+    pa: &PatArena<'p>,
+    num_fields: usize,
+    p: &'p Pattern,
+    rem: &[&'p Pattern],
+) -> Vec<&'p Pattern> {
     match &p.pat_desc {
         PatternDesc::Tpat_any => {
-            let mut result = record_matching_line_from_fields(num_fields, &[]);
+            let mut result = record_matching_line_from_fields(pa, num_fields, &[]);
             result.extend(rem.iter().cloned());
             result
         }
         PatternDesc::Tpat_record(lbl_pat_list, _, _) => {
-            let mut result = record_matching_line_from_fields(num_fields, lbl_pat_list);
+            let mut result = record_matching_line_from_fields(pa, num_fields, lbl_pat_list);
             result.extend(rem.iter().cloned());
             result
         }
@@ -5491,6 +5753,7 @@ fn get_args_record<'p>(num_fields: usize, p: &'p Pattern, rem: &[&'p Pattern]) -
 /// Matcher for record patterns.
 /// Equivalent to OCaml's `matcher_record`.
 fn matcher_record<'p>(
+    pa: &PatArena<'p>,
     num_fields: usize,
     p: &'p Pattern,
     rem: &[&'p Pattern],
@@ -5498,7 +5761,7 @@ fn matcher_record<'p>(
     match &p.pat_desc {
         PatternDesc::Tpat_or(_, _, _) => Err(MatchError::OrPat),
         PatternDesc::Tpat_any | PatternDesc::Tpat_var(..) => {
-            let mut result = record_matching_line_from_fields(num_fields, &[]);
+            let mut result = record_matching_line_from_fields(pa, num_fields, &[]);
             result.extend(rem.iter().cloned());
             Ok(result)
         }
@@ -5512,7 +5775,7 @@ fn matcher_record<'p>(
             // the all_labels array passed to divide_record instead.
             // For the matcher, we trust the caller's num_fields is correct.
             if !lbl_pat_list.is_empty() {
-                let mut result = record_matching_line_from_fields(num_fields, lbl_pat_list);
+                let mut result = record_matching_line_from_fields(pa, num_fields, lbl_pat_list);
                 result.extend(rem.iter().cloned());
                 Ok(result)
             } else {
@@ -5526,6 +5789,7 @@ fn matcher_record<'p>(
 /// Make a record matching.
 /// Equivalent to OCaml's `make_record_matching`.
 fn make_record_matching<'p>(
+    pa: &PatArena<'p>,
     loc: LamLoc,
     all_labels: &[LabelDescription],
     def: &DefaultEnv<'p>,
@@ -5575,7 +5839,7 @@ fn make_record_matching<'p>(
             }
             new_args.extend(argl.iter().cloned());
             let nfields = all_labels.len();
-            let def = make_default(&|p2, rem| matcher_record(nfields, p2, rem), def);
+            let def = make_default(pa, &|p2, rem| matcher_record(pa, nfields, p2, rem), def);
             PatternMatching {
                 cases: Vec::new(),
                 args: MatchArgs::new(new_args),
@@ -5589,7 +5853,7 @@ fn make_record_matching<'p>(
 /// Equivalent to OCaml's `divide_record`.
 fn divide_record<'p>(
     ctx_ref: &TypeContext,
-    pa: &'p PatArena,
+    pa: &'p PatArena<'p>,
     arena: &LocArena<'_>,
     all_labels: &[LabelDescription],
     p: &'p Pattern,
@@ -5599,8 +5863,8 @@ fn divide_record<'p>(
     let num_fields = all_labels.len();
     divide_line(
         |c| filter_ctx(Some(ctx_ref), pa, p, c),
-        |def, args| make_record_matching(arena.lam_loc(p.pat_loc), all_labels, def, args),
-        |pat, rem| get_args_record(num_fields, pat, rem),
+        |def, args| make_record_matching(pa, arena.lam_loc(p.pat_loc), all_labels, def, args),
+        |pat, rem| get_args_record(pa, num_fields, pat, rem),
         p,
         ctx,
         pm,
@@ -5620,9 +5884,9 @@ fn get_key_array(p: &Pattern) -> usize {
 
 /// Get the arguments from an array pattern.
 /// Equivalent to OCaml's `get_args_array`.
-fn get_args_array<'p>(p: &'p Pattern, rem: &[&'p Pattern]) -> Vec<&'p Pattern> {
+fn get_args_array<'p>(pa: &PatArena<'p>, p: &'p Pattern, rem: &[&'p Pattern]) -> Vec<&'p Pattern> {
     match &p.pat_desc {
-        PatternDesc::Tpat_array(patl) => prepend_row(patl, rem),
+        PatternDesc::Tpat_array(patl) => prepend_row(pa.pats(*patl), rem),
         _ => panic!("get_args_array: not an array pattern"),
     }
 }
@@ -5630,6 +5894,7 @@ fn get_args_array<'p>(p: &'p Pattern, rem: &[&'p Pattern]) -> Vec<&'p Pattern> {
 /// Matcher for array patterns.
 /// Equivalent to OCaml's `matcher_array`.
 fn matcher_array<'p>(
+    pa: &PatArena<'p>,
     len: usize,
     p: &'p Pattern,
     rem: &[&'p Pattern],
@@ -5637,7 +5902,7 @@ fn matcher_array<'p>(
     match &p.pat_desc {
         PatternDesc::Tpat_or(_, _, _) => Err(MatchError::OrPat),
         PatternDesc::Tpat_array(args) if args.len() == len => {
-            let result = prepend_row(args, rem);
+            let result = prepend_row(pa.pats(*args), rem);
             Ok(result)
         }
         PatternDesc::Tpat_any => {
@@ -5652,7 +5917,7 @@ fn matcher_array<'p>(
 /// Make an array matching cell.
 /// Equivalent to OCaml's `make_array_matching`.
 fn make_array_matching<'p>(
-    pa: &'p PatArena,
+    pa: &'p PatArena<'p>,
     arena: &LocArena<'_>,
     p: &'p Pattern,
     def: &DefaultEnv<'p>,
@@ -5683,7 +5948,7 @@ fn make_array_matching<'p>(
                 ));
             }
             new_args.extend(argl.iter().cloned());
-            let def = make_default(&|p2, rem| matcher_array(len, p2, rem), def);
+            let def = make_default(pa, &|p2, rem| matcher_array(pa, len, p2, rem), def);
             let ctx = filter_ctx(None, pa, p, ctx);
             MatchCell {
                 pm: PatternMatching {
@@ -5701,7 +5966,7 @@ fn make_array_matching<'p>(
 /// Divide a pattern matching by array length.
 /// Equivalent to OCaml's `divide_array`.
 fn divide_array<'p>(
-    pa: &'p PatArena,
+    pa: &'p PatArena<'p>,
     arena: &LocArena<'_>,
     ctx: &[Ctx<'p>],
     pm: &PatternMatching<'p>,
@@ -5710,7 +5975,7 @@ fn divide_array<'p>(
         |p, d, c, a| make_array_matching(pa, arena, p, d, c, a),
         |a, b| a == b,
         get_key_array,
-        get_args_array,
+        |p, rem| get_args_array(pa, p, rem),
         ctx,
         pm,
     )
@@ -6377,26 +6642,17 @@ pub fn call_switcher(
 
 /// Construct a pattern by or-ing together a list of patterns.
 /// Equivalent to OCaml's `list_as_pat`.
-fn list_as_pat<'p>(pa: &'p PatArena, pats: &[&'p Pattern]) -> &'p Pattern {
+fn list_as_pat<'p>(pa: &'p PatArena<'p>, pats: &[&'p Pattern]) -> &'p Pattern {
     match pats {
         [] => crate::misc::fatal_error("Matching.list_as_pat"),
         [pat] => pat,
-        _ => pa.alloc(list_as_pat_owned(pats)),
-    }
-}
-
-fn list_as_pat_owned(pats: &[&Pattern]) -> Pattern {
-    match pats {
-        [] => crate::misc::fatal_error("Matching.list_as_pat"),
-        [pat] => (*pat).clone(),
-        [pat, rest @ ..] => with_desc(
-            pat,
-            PatternDesc::Tpat_or(
-                Box::new((*pat).clone()),
-                Box::new(list_as_pat_owned(rest)),
-                None,
-            ),
-        ),
+        [pat, rest @ ..] => {
+            let rest = list_as_pat(pa, rest);
+            pa.alloc(with_desc(
+                pat,
+                PatternDesc::Tpat_or(pa.handle(pat), pa.handle(rest), None),
+            ))
+        }
     }
 }
 
@@ -6408,7 +6664,7 @@ fn list_as_pat_owned(pats: &[&Pattern]) -> Pattern {
 /// We use a simplified approach: extract constructor info from the first pattern.
 fn complete_pats_constrs<'p>(
     ctx_ref: &TypeContext,
-    pa: &'p PatArena,
+    pa: &'p PatArena<'p>,
     pats: &[&'p Pattern],
 ) -> Vec<&'p Pattern> {
     match pats.first() {
@@ -6443,7 +6699,7 @@ fn complete_pats_constrs<'p>(
             others.sort_by_key(|cnstr| cnstr.cstr_arity != 0);
             others
                 .iter()
-                .map(|cnstr| &*pa.alloc(pat_of_constr(p, cnstr)))
+                .map(|cnstr| &*pa.alloc(pat_of_constr(pa, p, cnstr)))
                 .collect()
         }
     }
@@ -6451,7 +6707,7 @@ fn complete_pats_constrs<'p>(
 
 /// Create a pattern from a constructor description, using the example pattern for type info.
 /// Equivalent to OCaml's `pat_of_constr`.
-fn pat_of_constr(ex_pat: &Pattern, cstr: &ConstructorDescription) -> Pattern {
+fn pat_of_constr(pa: &PatArena<'_>, ex_pat: &Pattern, cstr: &ConstructorDescription) -> Pattern {
     with_desc(
         ex_pat,
         PatternDesc::Tpat_construct(
@@ -6460,7 +6716,7 @@ fn pat_of_constr(ex_pat: &Pattern, cstr: &ConstructorDescription) -> Pattern {
                 loc: LocIdx::none(),
             },
             std::sync::Arc::new(cstr.clone()),
-            (0..cstr.cstr_arity).map(|_| omega_owned()).collect(),
+            pa.omegas(cstr.cstr_arity as usize),
         ),
     )
 }
@@ -6593,7 +6849,7 @@ fn mk_failaction_neg<'p>(
 /// Equivalent to OCaml's `mk_failaction_pos`.
 fn mk_failaction_pos<'p>(
     ctx_ref: &TypeContext,
-    pa: &'p PatArena,
+    pa: &'p PatArena<'p>,
     partial: &Partial,
     seen: &[&'p Pattern],
     ctx: &[Ctx<'p>],
@@ -6623,7 +6879,7 @@ fn mk_failaction_pos<'p>(
 /// Returns (key-action list, jumps).
 /// Equivalent to OCaml's inner `scan_def` in `mk_failaction_pos`.
 fn scan_def<'p>(
-    pa: &'p PatArena,
+    pa: &'p PatArena<'p>,
     ctx: &[Ctx<'p>],
     env: Vec<(Vec<&'p Pattern>, i32)>,
     to_test: Vec<(&'p Pattern, Vec<Ctx<'p>>)>,
@@ -6648,7 +6904,7 @@ fn scan_def<'p>(
         for (pats, i) in env.iter().rev() {
             if !ctx.is_empty() {
                 let jump_ctx = ctx_lub(pa, list_as_pat(pa, pats), ctx);
-                jumps = jumps_add(*i, jump_ctx, jumps);
+                jumps = jumps_add(pa, *i, jump_ctx, jumps);
             }
         }
         (klist, jumps)
@@ -6658,7 +6914,7 @@ fn scan_def<'p>(
             Some(((pss, idef), rem)) => {
                 let (now, later): (Vec<_>, Vec<_>) = to_test
                     .into_iter()
-                    .partition(|(_, p_ctx)| ctx_match(p_ctx, pss));
+                    .partition(|(_, p_ctx)| ctx_match(pa, p_ctx, pss));
                 if now.is_empty() {
                     scan_def(pa, ctx, env, later, rem)
                 } else {
@@ -6750,6 +7006,7 @@ fn share_actions_tree_string(
 /// Combine constant matching results.
 /// Equivalent to OCaml's `combine_constant`.
 fn combine_constant<'p>(
+    pa: &PatArena<'p>,
     loc: LamLoc,
     arg: RawLambda,
     cst: &Constant,
@@ -6824,7 +7081,7 @@ fn combine_constant<'p>(
             next_raise_count,
         ),
     };
-    (lambda1, jumps_union(local_jumps, total))
+    (lambda1, jumps_union(pa, local_jumps, total))
 }
 
 /// Split case list into constant and non-constant constructor cases.
@@ -7031,7 +7288,7 @@ fn normalize_module_path_via_ctx(
 /// Equivalent to OCaml's `combine_constructor`.
 fn combine_constructor<'p>(
     ctx_ref: &TypeContext,
-    pa: &'p PatArena,
+    pa: &'p PatArena<'p>,
     loc: LamLoc,
     arg: RawLambda,
     ex_pat: &'p Pattern,
@@ -7089,7 +7346,7 @@ fn combine_constructor<'p>(
                 RawLambda::Llet(LetKind::Alias, tag, Box::new(arg), Box::new(tests))
             }
         };
-        (lambda1, jumps_union(local_jumps, total1))
+        (lambda1, jumps_union(pa, local_jumps, total1))
     } else {
         // Regular concrete type
         let reference = match cstr.cstr_kind {
@@ -7213,7 +7470,7 @@ fn combine_constructor<'p>(
                 apply_handlers(result, handlers)
             }
         };
-        (lambda1, jumps_union(local_jumps, total1))
+        (lambda1, jumps_union(pa, local_jumps, total1))
     }
 }
 
@@ -7359,6 +7616,7 @@ fn call_switcher_variant_constr(
 /// Combine variant matching results.
 /// Equivalent to OCaml's `combine_variant`.
 fn combine_variant<'p>(
+    pa: &PatArena<'p>,
     ctx_ref: &TypeContext,
     loc: LamLoc,
     row: &RowDesc,
@@ -7444,12 +7702,13 @@ fn combine_variant<'p>(
             test_int_or_block(arg, lam_const, lam_nonconst)
         }
     };
-    (lambda1, jumps_union(local_jumps, total1))
+    (lambda1, jumps_union(pa, local_jumps, total1))
 }
 
 /// Combine array matching results.
 /// Equivalent to OCaml's `combine_array`.
 fn combine_array<'p>(
+    pa: &PatArena<'p>,
     ctx_ref: &TypeContext,
     loc: LamLoc,
     arg: RawLambda,
@@ -7486,7 +7745,7 @@ fn combine_array<'p>(
             switch_result,
         )
     };
-    (lambda1, jumps_union(local_jumps, total1))
+    (lambda1, jumps_union(pa, local_jumps, total1))
 }
 
 // ============================================================================
@@ -7502,7 +7761,7 @@ struct Unused;
 /// Returns (key-action list, total jumps, pattern list).
 /// Equivalent to OCaml's `compile_list`.
 fn compile_list<'p, K: Clone>(
-    pa: &'p PatArena,
+    pa: &'p PatArena<'p>,
     compile_fun: &mut dyn FnMut(
         &[Ctx<'p>],
         &PatternMatching<'p>,
@@ -7531,13 +7790,13 @@ fn compile_list<'p, K: Clone>(
     }
 
     totals.reverse();
-    Ok((compiled, jumps_unions(totals), new_pats))
+    Ok((compiled, jumps_unions(pa, totals), new_pats))
 }
 
 /// Compile or-pattern handlers.
 /// Equivalent to OCaml's `compile_orhandlers`.
 fn compile_orhandlers<'p>(
-    pa: &'p PatArena,
+    pa: &'p PatArena<'p>,
     compile_fun: &mut dyn FnMut(
         &[Ctx<'p>],
         &PatternMatching<'p>,
@@ -7548,7 +7807,7 @@ fn compile_orhandlers<'p>(
     to_catch: &[(Matrix<'p>, i32, Vec<Ident>, PatternMatching<'p>)],
 ) -> (RawLambda, Jumps<'p>) {
     fn do_rec<'p>(
-        pa: &'p PatArena,
+        pa: &'p PatArena<'p>,
         compile_fun: &mut dyn FnMut(
             &[Ctx<'p>],
             &PatternMatching<'p>,
@@ -7598,6 +7857,7 @@ fn compile_orhandlers<'p>(
                                     Box::new(handler_i),
                                 ),
                                 jumps_union(
+                                    pa,
                                     jumps_remove(*i, total_r),
                                     jumps_map(|c| ctx_rshift_num(ncols(mat), &c), total_i),
                                 ),
@@ -7749,6 +8009,7 @@ fn comp_exit<'p>(
 /// Compile a match with multiple handlers (for split results).
 /// Equivalent to OCaml's `comp_match_handlers`.
 fn comp_match_handlers<'p>(
+    pa: &PatArena<'p>,
     comp_fun: &mut dyn FnMut(
         &Partial,
         &[Ctx<'p>],
@@ -7769,16 +8030,17 @@ fn comp_match_handlers<'p>(
     // structurally by sharing the tail list. Borrow the Rust slice for the
     // same control flow instead of cloning precompiled match trees.
     match comp_fun(&Partial::Partial, ctx, arg, first_match) {
-        Ok((first_lam, total)) => c_rec(comp_fun, partial, arg, first_lam, total, next_matchs),
+        Ok((first_lam, total)) => c_rec(pa, comp_fun, partial, arg, first_lam, total, next_matchs),
         Err(Unused) => match next_matchs.split_first() {
             None => Err(Unused),
-            Some(((_, x), xs)) => comp_match_handlers(comp_fun, partial, ctx, arg, x, xs),
+            Some(((_, x), xs)) => comp_match_handlers(pa, comp_fun, partial, ctx, arg, x, xs),
         },
     }
 }
 
 /// Inner recursive function for comp_match_handlers.
 fn c_rec<'p>(
+    pa: &PatArena<'p>,
     comp_fun: &mut dyn FnMut(
         &Partial,
         &[Ctx<'p>],
@@ -7799,7 +8061,7 @@ fn c_rec<'p>(
             let has_ctx_i =
                 jumps_position(*i, &total_body).is_some_and(|p| !total_body[p].1.is_empty());
             if !has_ctx_i {
-                c_rec(comp_fun, partial, arg, body, total_body, rem)
+                c_rec(pa, comp_fun, partial, arg, body, total_body, rem)
             } else {
                 let (ctx_i, total_rem) = jumps_extract(*i, total_body);
                 let this_partial = if rem.is_empty() {
@@ -7809,14 +8071,16 @@ fn c_rec<'p>(
                 };
                 match comp_fun(&this_partial, &ctx_i, arg, pm) {
                     Ok((li, total_i)) => c_rec(
+                        pa,
                         comp_fun,
                         partial,
                         arg,
                         RawLambda::LstaticCatch(Box::new(body), (*i, Vec::new()), Box::new(li)),
-                        jumps_union(total_i, total_rem),
+                        jumps_union(pa, total_i, total_rem),
                         rem,
                     ),
                     Err(Unused) => c_rec(
+                        pa,
                         comp_fun,
                         partial,
                         arg,
@@ -7836,10 +8100,15 @@ fn c_rec<'p>(
 
 /// Find a reasonable name for the match variable from the first pattern.
 /// Equivalent to OCaml's `name_pattern`.
-fn name_pattern<'p>(ctx_ref: &TypeContext, default: &str, cases: &[Clause<'p>]) -> Ident {
+fn name_pattern<'p>(
+    pa: &PatArena<'p>,
+    ctx_ref: &TypeContext,
+    default: &str,
+    cases: &[Clause<'p>],
+) -> Ident {
     for (pats, _) in cases {
         if let Some(pat) = pats.first() {
-            if let Some(id) = id_of_pattern(ctx_ref, pat) {
+            if let Some(id) = id_of_pattern(pa, ctx_ref, pat) {
                 return id;
             }
         }
@@ -7849,16 +8118,18 @@ fn name_pattern<'p>(ctx_ref: &TypeContext, default: &str, cases: &[Clause<'p>]) 
 
 /// Extract an identifier from a pattern (for naming purposes).
 /// Equivalent to OCaml's `Typecore.id_of_pattern`.
-fn id_of_pattern(ctx_ref: &TypeContext, pat: &Pattern) -> Option<Ident> {
+fn id_of_pattern(pa: &PatArena<'_>, ctx_ref: &TypeContext, pat: &Pattern) -> Option<Ident> {
     match &pat.pat_desc {
         PatternDesc::Tpat_var(id, _) => Some(*id),
         PatternDesc::Tpat_alias(_, id, _) => Some(*id),
-        PatternDesc::Tpat_construct(_, _, args) if args.len() == 1 => match &args[0].pat_desc {
-            PatternDesc::Tpat_var(id, _) | PatternDesc::Tpat_alias(_, id, _) => {
-                Some(ctx_ref.rename_ident(id))
+        PatternDesc::Tpat_construct(_, _, args) if args.len() == 1 => {
+            match &pa.pat(pa.list(*args)[0]).pat_desc {
+                PatternDesc::Tpat_var(id, _) | PatternDesc::Tpat_alias(_, id, _) => {
+                    Some(ctx_ref.rename_ident(id))
+                }
+                _ => None,
             }
-            _ => None,
-        },
+        }
         _ => None,
     }
 }
@@ -7866,6 +8137,7 @@ fn id_of_pattern(ctx_ref: &TypeContext, pat: &Pattern) -> Option<Ident> {
 /// Convert arg to a variable (bind if not already a variable).
 /// Equivalent to OCaml's `arg_to_var`.
 fn arg_to_var<'p>(
+    pa: &PatArena<'p>,
     ctx_ref: &TypeContext,
     arg: &RawLambda,
     cls: &[Clause<'p>],
@@ -7873,7 +8145,7 @@ fn arg_to_var<'p>(
     match arg {
         RawLambda::Lvar(v) => (*v, arg.clone()),
         _ => {
-            let v = name_pattern(ctx_ref, "match", cls);
+            let v = name_pattern(pa, ctx_ref, "match", cls);
             (v, RawLambda::Lvar(v))
         }
     }
@@ -7896,7 +8168,7 @@ fn lambda_unit() -> RawLambda {
 /// Equivalent to OCaml's `compile_match`.
 fn compile_match<'p>(
     ctx_ref: &TypeContext,
-    pa: &'p PatArena,
+    pa: &'p PatArena<'p>,
     arena: &LocArena<'_>,
     _repr: Option<()>,
     partial: &Partial,
@@ -7929,7 +8201,7 @@ fn compile_match<'p>(
             }
         }
         (_, [(arg, str_kind), argl @ ..]) => {
-            let (v, newarg) = arg_to_var(ctx_ref, arg, &m.cases);
+            let (v, newarg) = arg_to_var(pa, ctx_ref, arg, &m.cases);
             let new_args = {
                 let mut a = vec![(newarg.clone(), LetKind::Alias)];
                 a.extend(argl.iter().cloned());
@@ -7958,7 +8230,7 @@ fn compile_match<'p>(
             };
 
             let (lam, total) =
-                comp_match_handlers(&mut comp_fn, partial, ctx, &newarg, &first_match, &rem)?;
+                comp_match_handlers(pa, &mut comp_fn, partial, ctx, &newarg, &first_match, &rem)?;
             Ok((bind_check(*str_kind, &v, arg, lam), total))
         }
         (cases, []) if !cases.is_empty() => {
@@ -7979,7 +8251,7 @@ fn compile_match<'p>(
 /// Equivalent to OCaml's `do_compile_matching`.
 fn do_compile_matching<'p>(
     ctx_ref: &TypeContext,
-    pa: &'p PatArena,
+    pa: &'p PatArena<'p>,
     arena: &LocArena<'_>,
     partial: &Partial,
     ctx: &[Ctx<'p>],
@@ -7995,7 +8267,7 @@ fn do_compile_matching<'p>(
                     ctx_ref,
                     pa,
                     arena,
-                    &|ctx, pm| divide_var(ctx, pm),
+                    &|ctx, pm| divide_var(pa, ctx, pm),
                     &|ctx| ctx_rshift(ctx),
                     partial,
                     ctx,
@@ -8046,6 +8318,7 @@ fn do_compile_matching<'p>(
                         &|ctx, pm| divide_constant(pa, ctx, pm),
                         &|ctx, def, c_div, nrc| {
                             combine_constant(
+                                pa,
                                 loc,
                                 arg_clone.clone(),
                                 &cst_clone,
@@ -8103,6 +8376,7 @@ fn do_compile_matching<'p>(
                         &|ctx, pm| divide_array(pa, arena, ctx, pm),
                         &|ctx, def, c_div, nrc| {
                             combine_array(
+                                pa,
                                 ctx_ref,
                                 loc,
                                 arg_clone.clone(),
@@ -8132,6 +8406,7 @@ fn do_compile_matching<'p>(
                         &move |ctx, pm| divide_variant(ctx_ref, pa, arena, &row_desc, ctx, pm),
                         &|ctx, def, c_div, _nrc| {
                             combine_variant(
+                                pa,
                                 ctx_ref,
                                 loc,
                                 &row_desc2,
@@ -8156,7 +8431,7 @@ fn do_compile_matching<'p>(
                 pa,
                 arena,
                 partial,
-                &ctx_lshift(ctx),
+                &ctx_lshift(pa, ctx),
                 var_arg,
                 inside,
                 next_raise_count,
@@ -8195,7 +8470,7 @@ fn do_compile_matching<'p>(
 /// Equivalent to OCaml's `compile_no_test`.
 fn compile_no_test<'p>(
     ctx_ref: &TypeContext,
-    pa: &'p PatArena,
+    pa: &'p PatArena<'p>,
     arena: &LocArena<'_>,
     divide_fn: &dyn Fn(&[Ctx<'p>], &PatternMatching<'p>) -> MatchCell<'p>,
     up_ctx: &dyn Fn(&[Ctx<'p>]) -> Vec<Ctx<'p>>,
@@ -8225,7 +8500,7 @@ fn compile_no_test<'p>(
 /// being captured by both compile_fn and combine_fn closures.
 fn compile_test_wrapper<'p, K: Clone>(
     ctx_ref: &TypeContext,
-    pa: &'p PatArena,
+    pa: &'p PatArena<'p>,
     arena: &LocArena<'_>,
     partial: &Partial,
     divide_fn: &dyn Fn(&[Ctx<'p>], &PatternMatching<'p>) -> Vec<(K, MatchCell<'p>)>,
@@ -8280,7 +8555,7 @@ fn get_all_labels_from_record_fields(
     fields: &[(
         crate::types::typedtree::Loc<crate::parse_arena::LidentIdx>,
         std::sync::Arc<LabelDescription>,
-        Pattern,
+        TPatIdx,
         bool,
     )],
 ) -> Vec<LabelDescription> {
@@ -8301,7 +8576,7 @@ fn resolve_all_record_labels(
     fields: &[(
         crate::types::typedtree::Loc<crate::parse_arena::LidentIdx>,
         std::sync::Arc<LabelDescription>,
-        Pattern,
+        TPatIdx,
         bool,
     )],
 ) -> Vec<LabelDescription> {
@@ -8337,7 +8612,7 @@ fn record_labels_cover_pattern_fields(
     fields: &[(
         crate::types::typedtree::Loc<crate::parse_arena::LidentIdx>,
         std::sync::Arc<LabelDescription>,
-        Pattern,
+        TPatIdx,
         bool,
     )],
 ) -> bool {
@@ -8448,32 +8723,6 @@ fn resolve_labels_from_type(
         }
     }
 
-    if let crate::types::path::PathView::Pident(id) = path.view() {
-        if id.stamp() != 0 {
-            if let Some(decl) = ctx_ref.find_type_decl_by_stamp(id.stamp()) {
-                if let crate::types::TypeKind::TypeRecord(ref labels, ref repr) = decl.type_kind {
-                    return Some(build_label_descriptions(labels, repr, decl.type_private));
-                }
-            }
-        }
-    }
-
-    // Try exact type_ctx stores. OCaml's `lbl_all` is already exact
-    // (compiler/ml/typecore.ml:2802); avoid falling back from `A.B.t` to any
-    // same-last-name `t`, which can attach another record's debug labels.
-    if let Some(decl) = ctx_ref.find_type_decl_by_path(&path.name()) {
-        if let crate::types::TypeKind::TypeRecord(ref labels, ref repr) = decl.type_kind {
-            return Some(build_label_descriptions(labels, repr, decl.type_private));
-        }
-    }
-    if matches!(path.view(), crate::types::path::PathView::Pident(_))
-        && let Some(decl) = ctx_ref.find_type_decl(path.last())
-    {
-        if let crate::types::TypeKind::TypeRecord(ref labels, ref repr) = decl.type_kind {
-            return Some(build_label_descriptions(labels, repr, decl.type_private));
-        }
-    }
-
     // Extension/exception inline records use the constructor path itself
     // (for example `A0`) rather than a parent-type `Pdot`, so reconstruct
     // their full label set from the constructor's synthetic inline record.
@@ -8496,34 +8745,7 @@ fn resolve_labels_from_type(
     // Look up the parent type declaration and find the constructor's inline record
     if let crate::types::path::PathView::Pdot(parent_path, cstr_name, _) = path.view() {
         // Try to find the parent type declaration
-        let parent_decl = env
-            .lookup_type(parent_path)
-            .ok()
-            .cloned()
-            .or_else(|| {
-                ctx_ref
-                    .find_type_decl_by_path(&parent_path.name())
-                    .map(|d| d.clone())
-            })
-            .or_else(|| {
-                ctx_ref
-                    .find_type_decl(parent_path.last())
-                    .map(|d| d.clone())
-            })
-            .or_else(|| {
-                if let crate::types::path::PathView::Pident(id) = parent_path.view() {
-                    if id.stamp() != 0 {
-                        ctx_ref
-                            .find_type_decl_by_stamp(id.stamp())
-                            .map(|d| d.clone())
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            });
-        if let Some(parent_decl) = parent_decl {
+        if let Ok(parent_decl) = env.lookup_type(parent_path) {
             if let crate::types::TypeKind::TypeVariant(ref constrs, layout) = parent_decl.type_kind
             {
                 for (position, cd) in constrs.iter().enumerate() {
@@ -8600,7 +8822,6 @@ fn extract_row_from_type_with_env(
         }
     }
 
-    // Fall back to stamp/path-based lookup
     extract_row_from_type(ctx_ref, ty)
 }
 
@@ -8608,54 +8829,8 @@ fn extract_row_from_type(ctx_ref: &TypeContext, ty: TypeExprRef) -> RowDesc {
     use crate::types::btype;
     use crate::types::type_expr::TypeDesc;
 
-    // Expand through links, Tconstr, and row_more to find the variant row
-    let mut current = ctx_ref.repr(ty);
-    for _ in 0..20 {
-        enum Action {
-            ReturnRow(RowDesc),
-            ExpandConstr(i32, String),
-            Follow(TypeExprRef),
-            Stop,
-        }
-        let action = {
-            let desc = ctx_ref.get_desc(current);
-            match &*desc {
-                TypeDesc::Tvariant(row) => Action::ReturnRow(btype::row_repr(ctx_ref, &ctx_ref.row_desc(row))),
-                TypeDesc::Tconstr { path, .. } => {
-                    let stamp = match path.view() {
-                        crate::types::path::PathView::Pident(id) => id.stamp(),
-                        _ => -1,
-                    };
-                    Action::ExpandConstr(stamp, path.name())
-                }
-                TypeDesc::Tlink(next) => Action::Follow(*next),
-                _ => Action::Stop,
-            }
-        };
-        match action {
-            Action::ReturnRow(row) => return row,
-            Action::ExpandConstr(stamp, path_name) => {
-                if stamp >= 0 {
-                    if let Some(decl) = ctx_ref.find_type_decl_by_stamp(stamp) {
-                        if let Some(manifest) = decl.type_manifest {
-                            current = ctx_ref.repr(manifest);
-                            continue;
-                        }
-                    }
-                }
-                if let Some(decl) = ctx_ref.find_type_decl_by_path(&path_name) {
-                    if let Some(manifest) = decl.type_manifest {
-                        current = ctx_ref.repr(manifest);
-                        continue;
-                    }
-                }
-                break;
-            }
-            Action::Follow(next) => {
-                current = ctx_ref.repr(next);
-            }
-            Action::Stop => break,
-        }
+    if let TypeDesc::Tvariant(row) = &*ctx_ref.get_desc(ctx_ref.repr(ty)) {
+        return btype::row_repr(ctx_ref, &ctx_ref.row_desc(*row));
     }
 
     // Fallback: empty row
@@ -8674,21 +8849,23 @@ fn extract_row_from_type(ctx_ref: &TypeContext, ty: TypeExprRef) -> RowDesc {
 
 /// Find if a predicate holds for any sub-pattern description.
 /// Equivalent to OCaml's `find_in_pat`.
-fn find_in_pat(pred: &dyn Fn(&PatternDesc) -> bool, p: &Pattern) -> bool {
+fn find_in_pat(pa: &PatArena<'_>, pred: &dyn Fn(&PatternDesc) -> bool, p: &Pattern) -> bool {
     if pred(&p.pat_desc) {
         return true;
     }
     match &p.pat_desc {
         PatternDesc::Tpat_alias(p, _, _) | PatternDesc::Tpat_variant(_, Some(p), _) => {
-            find_in_pat(pred, p)
+            find_in_pat(pa, pred, pa.pat(*p))
         }
         PatternDesc::Tpat_tuple(ps)
         | PatternDesc::Tpat_construct(_, _, ps)
-        | PatternDesc::Tpat_array(ps) => ps.iter().any(|p| find_in_pat(pred, p)),
-        PatternDesc::Tpat_record(lpats, _, _) => {
-            lpats.iter().any(|(_, _, p, _)| find_in_pat(pred, p))
+        | PatternDesc::Tpat_array(ps) => pa.pats(*ps).any(|p| find_in_pat(pa, pred, p)),
+        PatternDesc::Tpat_record(lpats, _, _) => lpats
+            .iter()
+            .any(|(_, _, p, _)| find_in_pat(pa, pred, pa.pat(*p))),
+        PatternDesc::Tpat_or(p, q, _) => {
+            find_in_pat(pa, pred, pa.pat(*p)) || find_in_pat(pa, pred, pa.pat(*q))
         }
-        PatternDesc::Tpat_or(p, q, _) => find_in_pat(pred, p) || find_in_pat(pred, q),
         PatternDesc::Tpat_constant(_)
         | PatternDesc::Tpat_var(_, _)
         | PatternDesc::Tpat_any
@@ -8709,20 +8886,24 @@ fn have_mutable_field(p: &PatternDesc) -> bool {
 
 /// Check if a pattern accesses mutable fields anywhere.
 /// Equivalent to OCaml's `is_mutable`.
-fn is_mutable(p: &Pattern) -> bool {
-    find_in_pat(&have_mutable_field, p)
+fn is_mutable(pa: &PatArena<'_>, p: &Pattern) -> bool {
+    find_in_pat(pa, &have_mutable_field, p)
 }
 
 /// Downgrade Total to Partial when needed.
 /// Equivalent to OCaml's `check_partial` (single pattern version).
-fn check_partial_single(pat_act_list: &[(&Pattern, CaseAction)], partial: Partial) -> Partial {
+fn check_partial_single(
+    pa: &PatArena<'_>,
+    pat_act_list: &[(&Pattern, CaseAction)],
+    partial: Partial,
+) -> Partial {
     match partial {
         Partial::Partial => Partial::Partial,
         Partial::Total => {
             if pat_act_list.is_empty()
                 || pat_act_list
                     .iter()
-                    .any(|(pat, act)| is_mutable(pat) && act.guard.is_some())
+                    .any(|(pat, act)| is_mutable(pa, pat) && act.guard.is_some())
             {
                 Partial::Partial
             } else {
@@ -8734,14 +8915,18 @@ fn check_partial_single(pat_act_list: &[(&Pattern, CaseAction)], partial: Partia
 
 /// Downgrade Total to Partial when needed (list of patterns version).
 /// Equivalent to OCaml's `check_partial_list`.
-fn check_partial_list<'p>(pat_act_list: &[Clause<'p>], partial: Partial) -> Partial {
+fn check_partial_list<'p>(
+    pa: &PatArena<'p>,
+    pat_act_list: &[Clause<'p>],
+    partial: Partial,
+) -> Partial {
     match partial {
         Partial::Partial => Partial::Partial,
         Partial::Total => {
             if pat_act_list.is_empty()
                 || pat_act_list
                     .iter()
-                    .any(|(pats, lam)| pats.iter().any(|p| is_mutable(p)) && lam.is_guarded())
+                    .any(|(pats, lam)| pats.iter().any(|p| is_mutable(pa, p)) && lam.is_guarded())
             {
                 Partial::Partial
             } else {
@@ -8795,6 +8980,7 @@ pub(crate) fn resolve_shared_actions(lam: &mut RawLambda) {
 
 pub fn compile_matching(
     ctx_ref: &TypeContext,
+    ta: &TypedArena,
     arena: &LocArena<'_>,
     handler_fun: impl FnOnce() -> RawLambda,
     arg: RawLambda,
@@ -8802,7 +8988,8 @@ pub fn compile_matching(
     partial: Partial,
     next_raise_count: &mut i32,
 ) -> RawLambda {
-    let pa = PatArena::new();
+    let store = PatStore::default();
+    let pa = PatArena::new(ta, &store);
     let mut lambda = compile_matching_unresolved(
         ctx_ref,
         &pa,
@@ -8819,7 +9006,7 @@ pub fn compile_matching(
 
 fn compile_matching_unresolved<'p>(
     ctx_ref: &TypeContext,
-    pa: &'p PatArena,
+    pa: &'p PatArena<'p>,
     arena: &LocArena<'_>,
     handler_fun: impl FnOnce() -> RawLambda,
     arg: RawLambda,
@@ -8827,7 +9014,7 @@ fn compile_matching_unresolved<'p>(
     partial: Partial,
     next_raise_count: &mut i32,
 ) -> RawLambda {
-    let partial = check_partial_single(&pat_act_list, partial);
+    let partial = check_partial_single(pa, &pat_act_list, partial);
     match partial {
         Partial::Partial => {
             let raise_num = bump_raise_count(next_raise_count);
@@ -8932,6 +9119,7 @@ pub fn partial_function(arena: &LocArena<'_>, loc: Location) -> RawLambda {
 /// Equivalent to OCaml's `for_function`.
 pub fn for_function(
     ctx_ref: &TypeContext,
+    ta: &TypedArena,
     arena: &LocArena<'_>,
     loc: Location,
     param: RawLambda,
@@ -8942,6 +9130,7 @@ pub fn for_function(
     let loc_clone = loc;
     compile_matching(
         ctx_ref,
+        ta,
         arena,
         || partial_function(arena, loc_clone),
         param,
@@ -8955,6 +9144,7 @@ pub fn for_function(
 /// Equivalent to OCaml's `for_trywith`.
 pub fn for_trywith(
     ctx_ref: &TypeContext,
+    ta: &TypedArena,
     arena: &LocArena<'_>,
     param: RawLambda,
     pat_act_list: Vec<(&Pattern, CaseAction)>,
@@ -8963,6 +9153,7 @@ pub fn for_trywith(
     let param_clone = param.clone();
     compile_matching(
         ctx_ref,
+        ta,
         arena,
         || {
             RawLambda::Lprim(Box::new(RawPrimInfo {
@@ -8982,6 +9173,7 @@ pub fn for_trywith(
 /// Equivalent to OCaml's `simple_for_let`.
 pub fn simple_for_let(
     ctx_ref: &TypeContext,
+    ta: &TypedArena,
     arena: &LocArena<'_>,
     loc: Location,
     param: RawLambda,
@@ -8992,6 +9184,7 @@ pub fn simple_for_let(
     let loc_clone = loc;
     compile_matching(
         ctx_ref,
+        ta,
         arena,
         || partial_function(arena, loc_clone),
         param,
@@ -9005,6 +9198,7 @@ pub fn simple_for_let(
 /// Equivalent to OCaml's `for_let`.
 pub fn for_let(
     ctx_ref: &TypeContext,
+    ta: &TypedArena,
     arena: &LocArena<'_>,
     loc: Location,
     param: RawLambda,
@@ -9021,7 +9215,7 @@ pub fn for_let(
             // Fast path
             RawLambda::Llet(LetKind::Strict, *id, Box::new(param), Box::new(body))
         }
-        _ => simple_for_let(ctx_ref, arena, loc, param, pat, body, next_raise_count),
+        _ => simple_for_let(ctx_ref, ta, arena, loc, param, pat, body, next_raise_count),
     }
 }
 
@@ -9029,6 +9223,7 @@ pub fn for_let(
 /// Equivalent to OCaml's `for_tupled_function`.
 pub fn for_tupled_function(
     ctx_ref: &TypeContext,
+    ta: &TypedArena,
     arena: &LocArena<'_>,
     loc: Location,
     paraml: &[Ident],
@@ -9036,7 +9231,8 @@ pub fn for_tupled_function(
     partial: Partial,
     next_raise_count: &mut i32,
 ) -> RawLambda {
-    let pa = PatArena::new();
+    let store = PatStore::default();
+    let pa = PatArena::new(ta, &store);
     let mut lambda = for_tupled_function_unresolved(
         ctx_ref,
         &pa,
@@ -9053,7 +9249,7 @@ pub fn for_tupled_function(
 
 fn for_tupled_function_unresolved<'p>(
     ctx_ref: &TypeContext,
-    pa: &'p PatArena,
+    pa: &'p PatArena<'p>,
     arena: &LocArena<'_>,
     loc: Location,
     paraml: &[Ident],
@@ -9065,7 +9261,7 @@ fn for_tupled_function_unresolved<'p>(
         .into_iter()
         .map(|(pats, act)| (pats, MatchAction::from_case(act)))
         .collect();
-    let partial = check_partial_list(&pats_act_list, partial);
+    let partial = check_partial_list(pa, &pats_act_list, partial);
     let raise_num = bump_raise_count(next_raise_count);
     let omegas_row: Vec<Vec<&'p Pattern>> = vec![omegas(paraml.len())];
     let pm = PatternMatching {
@@ -9103,9 +9299,13 @@ struct CannotFlattenExn;
 
 /// Flatten a pattern into its tuple components.
 /// Equivalent to OCaml's `flatten_pattern`.
-fn flatten_pattern(size: usize, p: &Pattern) -> Result<Vec<&Pattern>, CannotFlattenExn> {
+fn flatten_pattern<'p>(
+    pa: &PatArena<'p>,
+    size: usize,
+    p: &'p Pattern,
+) -> Result<Vec<&'p Pattern>, CannotFlattenExn> {
     match &p.pat_desc {
-        PatternDesc::Tpat_tuple(args) => Ok(args.iter().collect()),
+        PatternDesc::Tpat_tuple(args) => Ok(pa.pats(*args).collect()),
         PatternDesc::Tpat_any => Ok(omegas(size)),
         _ => Err(CannotFlattenExn),
     }
@@ -9114,6 +9314,7 @@ fn flatten_pattern(size: usize, p: &Pattern) -> Result<Vec<&Pattern>, CannotFlat
 /// Flatten a pattern line (possibly through or-patterns and aliases).
 /// Equivalent to OCaml's `flatten_pat_line`.
 fn flatten_pat_line<'p>(
+    pa: &PatArena<'p>,
     size: usize,
     p: &'p Pattern,
     k: Vec<Vec<&'p Pattern>>,
@@ -9125,15 +9326,15 @@ fn flatten_pat_line<'p>(
             Ok(result)
         }
         PatternDesc::Tpat_tuple(args) => {
-            let mut result = vec![args.iter().collect()];
+            let mut result = vec![pa.pats(*args).collect()];
             result.extend(k);
             Ok(result)
         }
         PatternDesc::Tpat_or(p1, p2, _) => {
-            let k = flatten_pat_line(size, p2, k)?;
-            flatten_pat_line(size, p1, k)
+            let k = flatten_pat_line(pa, size, pa.pat(*p2), k)?;
+            flatten_pat_line(pa, size, pa.pat(*p1), k)
         }
-        PatternDesc::Tpat_alias(p, _, _) => flatten_pat_line(size, p, k),
+        PatternDesc::Tpat_alias(p, _, _) => flatten_pat_line(pa, size, pa.pat(*p), k),
         _ => Err(CannotFlattenExn),
     }
 }
@@ -9141,13 +9342,14 @@ fn flatten_pat_line<'p>(
 /// Flatten all cases.
 /// Equivalent to OCaml's `flatten_cases`.
 fn flatten_cases<'p>(
+    pa: &PatArena<'p>,
     size: usize,
     cases: &[Clause<'p>],
 ) -> Result<Vec<Clause<'p>>, CannotFlattenExn> {
     cases
         .iter()
         .map(|(ps, action)| match ps.as_slice() {
-            [p] => Ok((flatten_pattern(size, p)?, action.clone())),
+            [p] => Ok((flatten_pattern(pa, size, p)?, action.clone())),
             _ => Err(CannotFlattenExn),
         })
         .collect()
@@ -9155,60 +9357,70 @@ fn flatten_cases<'p>(
 
 /// Flatten a matrix.
 /// Equivalent to OCaml's `flatten_matrix`.
-fn flatten_matrix<'p>(size: usize, pss: &Matrix<'p>) -> Result<Matrix<'p>, CannotFlattenExn> {
+fn flatten_matrix<'p>(
+    pa: &PatArena<'p>,
+    size: usize,
+    pss: &Matrix<'p>,
+) -> Result<Matrix<'p>, CannotFlattenExn> {
     pss.iter()
         .rev()
         .try_fold(Vec::new(), |r, ps| match ps.as_slice() {
-            [p] => flatten_pat_line(size, p, r),
+            [p] => flatten_pat_line(pa, size, p, r),
             _ => Err(CannotFlattenExn),
         })
 }
 
 /// Flatten default environment.
 /// Equivalent to OCaml's `flatten_def`.
-fn flatten_def<'p>(size: usize, def: &DefaultEnv<'p>) -> Result<DefaultEnv<'p>, CannotFlattenExn> {
+fn flatten_def<'p>(
+    pa: &PatArena<'p>,
+    size: usize,
+    def: &DefaultEnv<'p>,
+) -> Result<DefaultEnv<'p>, CannotFlattenExn> {
     def.iter()
-        .map(|(pss, i)| Ok((flatten_matrix(size, pss)?, *i)))
+        .map(|(pss, i)| Ok((flatten_matrix(pa, size, pss)?, *i)))
         .collect()
 }
 
 /// Flatten a pattern matching.
 /// Equivalent to OCaml's `flatten_pm`.
 fn flatten_pm<'p>(
+    pa: &PatArena<'p>,
     size: usize,
     args: MatchArgs,
     pm: &PatternMatching<'p>,
 ) -> Result<PatternMatching<'p>, CannotFlattenExn> {
     Ok(PatternMatching {
         args,
-        cases: flatten_cases(size, &pm.cases)?,
-        default: flatten_def(size, &pm.default)?,
+        cases: flatten_cases(pa, size, &pm.cases)?,
+        default: flatten_def(pa, size, &pm.default)?,
     })
 }
 
 /// Flatten a precompiled pattern matching.
 /// Equivalent to OCaml's `flatten_precompiled`.
 fn flatten_precompiled<'p>(
+    pa: &PatArena<'p>,
     size: usize,
     args: &MatchArgs,
     pmh: PmHalfCompiled<'p>,
 ) -> Result<PmHalfCompiled<'p>, CannotFlattenExn> {
     match pmh {
-        PmHalfCompiled::Pm(pm) => Ok(PmHalfCompiled::Pm(flatten_pm(size, args.clone(), &pm)?)),
+        PmHalfCompiled::Pm(pm) => Ok(PmHalfCompiled::Pm(flatten_pm(pa, size, args.clone(), &pm)?)),
         PmHalfCompiled::PmOr(PmOrCompiled {
             body,
             handlers,
             or_matrix,
         }) => {
-            let flat_body = flatten_pm(size, args.clone(), &body)?;
+            let flat_body = flatten_pm(pa, size, args.clone(), &body)?;
             let flat_handlers: Vec<_> = handlers
                 .into_iter()
                 .map(|(mat, i, vars, pm)| {
-                    let flat_mat = flatten_matrix(size, &mat)?;
+                    let flat_mat = flatten_matrix(pa, size, &mat)?;
                     Ok((flat_mat, i, vars, pm))
                 })
                 .collect::<Result<_, CannotFlattenExn>>()?;
-            let flat_or_matrix = flatten_matrix(size, &or_matrix)?;
+            let flat_or_matrix = flatten_matrix(pa, size, &or_matrix)?;
             Ok(PmHalfCompiled::PmOr(PmOrCompiled {
                 body: flat_body,
                 handlers: flat_handlers,
@@ -9224,7 +9436,7 @@ fn flatten_precompiled<'p>(
 /// Equivalent to OCaml's `compile_flattened`.
 fn compile_flattened<'p>(
     ctx_ref: &TypeContext,
-    pa: &'p PatArena,
+    pa: &'p PatArena<'p>,
     arena: &LocArena<'_>,
     partial: &Partial,
     ctx: &[Ctx<'p>],
@@ -9269,7 +9481,7 @@ fn compile_flattened<'p>(
 /// Equivalent to OCaml's `do_for_multiple_match`.
 pub fn do_for_multiple_match<'p>(
     ctx_ref: &TypeContext,
-    pa: &'p PatArena,
+    pa: &'p PatArena<'p>,
     arena: &LocArena<'_>,
     loc: Location,
     paraml: Vec<RawLambda>,
@@ -9277,7 +9489,7 @@ pub fn do_for_multiple_match<'p>(
     partial: Partial,
     next_raise_count: &mut i32,
 ) -> RawLambda {
-    let partial = check_partial_single(&pat_act_list, partial);
+    let partial = check_partial_single(pa, &pat_act_list, partial);
     // OCaml `compiler/ml/matching.ml:3846-3852` builds the matrix from the
     // incoming action list directly. Rust owns `pat_act_list` here, so move
     // actions into the shared `MatchAction` wrapper instead of recursively
@@ -9331,11 +9543,11 @@ pub fn do_for_multiple_match<'p>(
                 .collect(),
         );
 
-        let flat_next = flatten_precompiled(size, &args, next)?;
+        let flat_next = flatten_precompiled(pa, size, &args, next)?;
         let flat_nexts: Vec<(i32, PmHalfCompiled<'_>)> = nexts
             .into_iter()
             .map(|(e, pm)| {
-                let flat = flatten_precompiled(size, &args, pm)?;
+                let flat = flatten_precompiled(pa, size, &args, pm)?;
                 Ok((e, flat))
             })
             .collect::<Result<_, CannotFlattenExn>>()?;
@@ -9350,6 +9562,7 @@ pub fn do_for_multiple_match<'p>(
 
         let dummy_arg = RawLambda::Lconst(crate::lambda::Constant::int(0));
         let (lam, total) = comp_match_handlers(
+            pa,
             &mut compile_fn,
             &partial,
             &start_ctx(size),
@@ -9431,6 +9644,7 @@ fn bind_opt(v_eo: (Ident, Option<RawLambda>), k: RawLambda) -> RawLambda {
 /// Equivalent to OCaml's `for_multiple_match`.
 pub fn for_multiple_match(
     ctx_ref: &TypeContext,
+    ta: &TypedArena,
     arena: &LocArena<'_>,
     loc: Location,
     paraml: Vec<RawLambda>,
@@ -9443,7 +9657,8 @@ pub fn for_multiple_match(
         .map(|param| param_to_var(ctx_ref, param))
         .collect();
     let new_paraml: Vec<RawLambda> = v_paraml.iter().map(|(v, _)| RawLambda::Lvar(*v)).collect();
-    let pa = PatArena::new();
+    let store = PatStore::default();
+    let pa = PatArena::new(ta, &store);
     let mut inner = do_for_multiple_match(
         ctx_ref,
         &pa,
@@ -9479,19 +9694,22 @@ mod tests {
     #[test]
     fn jumps_tables_stay_sorted_descending_and_merge_equal_exits() {
         use super::*;
+        let ta = TypedArena::new();
+        let store = PatStore::default();
+        let pa = &PatArena::new(&ta, &store);
         let a: Jumps<'_> = vec![(9, empty_ctxs(1)), (5, empty_ctxs(2)), (1, empty_ctxs(1))];
         let b: Jumps<'_> = vec![(7, empty_ctxs(1)), (5, empty_ctxs(1)), (0, empty_ctxs(3))];
         // Equal empty contexts are mutually `le_ctx`, so get_mins keeps one.
-        let u = jumps_union(a.clone(), b);
+        let u = jumps_union(pa, a.clone(), b);
         assert_eq!(keys(&u), vec![(9, 1), (7, 1), (5, 1), (1, 1), (0, 3)]);
 
-        let added = jumps_add(6, empty_ctxs(2), a.clone());
+        let added = jumps_add(pa, 6, empty_ctxs(2), a.clone());
         assert_eq!(keys(&added), vec![(9, 1), (6, 2), (5, 2), (1, 1)]);
-        let added = jumps_add(5, empty_ctxs(1), a.clone());
+        let added = jumps_add(pa, 5, empty_ctxs(1), a.clone());
         assert_eq!(keys(&added), vec![(9, 1), (5, 1), (1, 1)]);
-        let added = jumps_add(-3, empty_ctxs(1), a.clone());
+        let added = jumps_add(pa, -3, empty_ctxs(1), a.clone());
         assert_eq!(keys(&added), vec![(9, 1), (5, 2), (1, 1), (-3, 1)]);
-        assert_eq!(keys(&jumps_add(4, Vec::new(), a.clone())), keys(&a));
+        assert_eq!(keys(&jumps_add(pa, 4, Vec::new(), a.clone())), keys(&a));
 
         let (ctx, rest) = jumps_extract(5, a.clone());
         assert_eq!(ctx.len(), 2);

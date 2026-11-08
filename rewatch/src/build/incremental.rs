@@ -36,15 +36,17 @@
 //! for the modules that are not recompiled, as the build does for any module
 //! it does not recompile.
 
-use super::build_types::{BuildCommandState, Module, SourceType};
+use super::build_types::{BuildCommandState, Module, PendingReads, SourceType};
 use super::packages::Package;
 use super::state_db::{self, ItemDigests, ModuleRow, PackageState, SourceDeps, UnitReads};
 use crate::config::{Config, SourceMapCommand};
 use ahash::{AHashMap, AHashSet};
 use rayon::prelude::*;
+use rescript_compiler::binary_ast::Dependencies;
 use rescript_compiler::cmi::item_deps;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::MutexGuard;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// What one package's database recorded about the previous build.
@@ -114,7 +116,11 @@ fn whole_and_items(items: ItemDigests) -> UnitDigest {
 /// a set of lookups.
 pub struct UnitDigests {
     registry: rescript_compiler::cmi::persistent_env::ModuleRegistry,
-    cache: std::sync::Mutex<AHashMap<String, Option<UnitDigest>>>,
+    /// One cell per module of the build, so parallel lookups (recording
+    /// reads every module's imports) take no lock.
+    cache: AHashMap<String, std::sync::OnceLock<Option<UnitDigest>>>,
+    /// The other units looked up (not modules of the build).
+    other: std::sync::Mutex<AHashMap<String, Option<UnitDigest>>>,
     /// The recorded interface digests of the modules this build loaded from
     /// their stored interface instead of compiling: what was recorded with
     /// that interface, so they need not be decoded and hashed again.
@@ -136,7 +142,12 @@ impl UnitDigests {
             .collect();
         Self {
             registry: build_state.snapshot_module_registry(),
-            cache: std::sync::Mutex::new(AHashMap::new()),
+            cache: build_state
+                .modules
+                .keys()
+                .map(|module_name| (module_name.clone(), std::sync::OnceLock::new()))
+                .collect(),
+            other: std::sync::Mutex::new(AHashMap::new()),
             recorded,
         }
     }
@@ -145,15 +156,9 @@ impl UnitDigests {
     /// compiled computed up front, in parallel.
     pub fn of_compiled(build_state: &BuildCommandState) -> Self {
         let digests = Self::new(build_state);
-        let computed: Vec<(String, Option<UnitDigest>)> = build_state
-            .compiled_modules
-            .par_iter()
-            .map(|module_name| {
-                let computed = digests.registry.item_digests(module_name).map(whole_and_items);
-                (module_name.clone(), computed)
-            })
-            .collect();
-        digests.cache.lock().unwrap().extend(computed);
+        build_state.compiled_modules.par_iter().for_each(|module_name| {
+            digests.get(module_name);
+        });
         digests
     }
 
@@ -189,11 +194,15 @@ impl UnitDigests {
     /// The module's interface digest and item digests, `None` when it is not
     /// registered.
     pub fn get(&self, module_name: &str) -> Option<UnitDigest> {
-        if let Some(known) = self.cache.lock().unwrap().get(module_name) {
+        let compute = || self.registry.item_digests(module_name).map(whole_and_items);
+        if let Some(cell) = self.cache.get(module_name) {
+            return cell.get_or_init(compute).clone();
+        }
+        if let Some(known) = self.other.lock().unwrap().get(module_name) {
             return known.clone();
         }
-        let computed = self.registry.item_digests(module_name).map(whole_and_items);
-        self.cache
+        let computed = compute();
+        self.other
             .lock()
             .unwrap()
             .insert(module_name.to_string(), computed.clone());
@@ -245,6 +254,7 @@ pub fn expected_outputs(build_state: &BuildCommandState, package_name: &str) -> 
 /// The build record to save for `package` after this build.
 pub fn current_record(
     build_state: &BuildCommandState,
+    compiles: &CompileRecords,
     package_name: &str,
     digests: &UnitDigests,
 ) -> PackageState {
@@ -253,7 +263,8 @@ pub fn current_record(
         .previous_in_process
         .as_ref()
         .and_then(|previous| previous.packages.get(package_name));
-    let changed = previous.and_then(|previous| changed_modules(build_state, package_name, previous));
+    let changed =
+        previous.and_then(|previous| changed_modules(build_state, compiles, package_name, previous));
     record.partial = changed.is_some();
     let outputs = match previous
         .filter(|previous| record.partial && outputs_as_recorded(build_state, package_name, previous))
@@ -293,17 +304,7 @@ pub fn current_record(
         .as_ref()
         .and_then(|previous| previous.packages.get(package_name))
         .map(|record| &record.state.stored_interfaces);
-    // Copied out: the lock must not be held across the parallel encoding
-    // (packages record in parallel, and a worker may steal another
-    // package's record that takes the same lock).
-    let alias_rewrites: AHashMap<&String, Vec<(String, rescript_compiler::types::path::Path)>> = {
-        let all = build_state.module_alias_rewrites.lock().unwrap();
-        build_state
-            .compiled_modules
-            .iter()
-            .filter_map(|module_name| Some((module_name, all.get(module_name)?.clone())))
-            .collect()
-    };
+    let alias_rewrites = &*compiles.module_alias_rewrites;
     record.interface_updates = build_state
         .compiled_modules
         .par_iter()
@@ -340,7 +341,10 @@ pub fn current_record(
         .par_iter()
         .filter(|(_, module)| module.package_name == package_name)
         .filter_map(|(module_name, _)| {
-            Some((module_name, written_interface(build_state, module_name, digests)?))
+            Some((
+                module_name,
+                written_interface(build_state, compiles, module_name, digests)?,
+            ))
         })
         .collect::<Vec<_>>()
         .into_iter()
@@ -383,7 +387,7 @@ pub fn current_record(
             None => recorded_row(build_state, module_name)
                 .filter(|_| !build_state.written_modules.contains(module_name))
                 .map_or((None, None), |row| {
-                    let verified = build_state.verified_imports.lock().unwrap();
+                    let verified = &compiles.verified_imports;
                     let imports = row
                         .imports
                         .as_ref()
@@ -431,7 +435,7 @@ pub fn current_record(
         }
         record.modules.insert(module_name.clone(), row);
     }
-    let in_memory_deps = build_state.in_memory_deps.lock().unwrap();
+    let in_memory_deps = &compiles.in_memory_deps;
     // A partial record sets the rows of the sources this build parsed; the
     // others are as recorded.
     let parsed: Option<AHashSet<String>> = record.partial.then(|| {
@@ -486,7 +490,6 @@ pub fn current_record(
             }
         }
     }
-    drop(in_memory_deps);
     record.parse_warnings = build_state
         .parse_warnings
         .lock()
@@ -529,6 +532,7 @@ fn outputs_as_recorded(
 /// once, or changed sources).
 fn changed_modules<'a>(
     build_state: &'a BuildCommandState,
+    compiles: &CompileRecords,
     package_name: &str,
     previous: &PackageRecord,
 ) -> Option<AHashSet<&'a String>> {
@@ -552,7 +556,7 @@ fn changed_modules<'a>(
     if source_count != previous.state.sources.len() {
         return None;
     }
-    let verified = build_state.verified_imports.lock().unwrap();
+    let verified = &compiles.verified_imports;
     for set in [
         &build_state.written_modules,
         &build_state.compiled_modules,
@@ -1528,6 +1532,31 @@ fn dependency_closure(
     support
 }
 
+/// What this build's compiles left in the build state for its record, locked
+/// once while the build is recorded: the compiles are done by then, and
+/// taking these locks for each module serialized the parallel recording.
+/// Nothing that runs while this is held may take one of these locks.
+pub struct CompileRecords<'a> {
+    loaded_units: MutexGuard<'a, AHashMap<String, AHashSet<String>>>,
+    unit_reads: MutexGuard<'a, AHashMap<String, PendingReads>>,
+    verified_imports: MutexGuard<'a, AHashMap<String, AHashMap<String, u64>>>,
+    module_alias_rewrites:
+        MutexGuard<'a, AHashMap<String, Vec<(String, rescript_compiler::types::path::Path)>>>,
+    in_memory_deps: MutexGuard<'a, AHashMap<String, Dependencies>>,
+}
+
+impl<'a> CompileRecords<'a> {
+    pub fn lock(build_state: &'a BuildCommandState) -> Self {
+        Self {
+            loaded_units: build_state.loaded_units.lock().unwrap(),
+            unit_reads: build_state.unit_reads.lock().unwrap(),
+            verified_imports: build_state.verified_imports.lock().unwrap(),
+            module_alias_rewrites: build_state.module_alias_rewrites.lock().unwrap(),
+            in_memory_deps: build_state.in_memory_deps.lock().unwrap(),
+        }
+    }
+}
+
 /// What a module written by this build read and published, for its record.
 struct WrittenRecord {
     digest: u64,
@@ -1538,6 +1567,7 @@ struct WrittenRecord {
 
 fn written_interface(
     build_state: &BuildCommandState,
+    compiles: &CompileRecords,
     module_name: &str,
     digests: &UnitDigests,
 ) -> Option<WrittenRecord> {
@@ -1547,9 +1577,8 @@ fn written_interface(
     let own = digests.get(module_name)?;
     // What inlinable bodies refer to is added now, with dependencies' JS
     // metadata final (they may publish it after this module compiled).
-    let mut read_keys: BTreeMap<String, std::collections::BTreeSet<String>> = {
-        let pending = build_state.unit_reads.lock().unwrap();
-        match pending.get(module_name) {
+    let mut read_keys: BTreeMap<String, std::collections::BTreeSet<String>> =
+        match compiles.unit_reads.get(module_name) {
             Some(pending) => {
                 let mut keys = pending.resolved.clone();
                 for (unit, unit_keys) in digests.lambda_reads(&pending.resolved) {
@@ -1563,10 +1592,9 @@ fn written_interface(
                 keys
             }
             None => BTreeMap::new(),
-        }
-    };
+        };
     // A unit the compile loaded without a recorded read is read whole.
-    for unit in build_state.loaded_units.lock().unwrap().get(module_name)? {
+    for unit in compiles.loaded_units.get(module_name)? {
         read_keys.entry(unit.clone()).or_insert_with(|| {
             [item_deps::WHOLE.to_string(), item_deps::MODULE_LEVEL.to_string()]
                 .into_iter()

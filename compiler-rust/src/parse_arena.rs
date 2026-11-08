@@ -3301,6 +3301,21 @@ impl<T> ArenaList<T> {
     pub fn is_empty(self) -> bool {
         self.len == 0
     }
+
+    /// A list of `len` items starting at `start` in a pool owned by another
+    /// arena (the typed tree's [`crate::types::tast_arena::TypedArena`]).
+    pub(crate) fn from_range(start: u32, len: u32) -> Self {
+        Self {
+            start,
+            len,
+            _items: std::marker::PhantomData,
+        }
+    }
+
+    /// First slot of the list in its pool.
+    pub(crate) fn start(self) -> u32 {
+        self.start
+    }
 }
 
 impl<T> Clone for ArenaList<T> {

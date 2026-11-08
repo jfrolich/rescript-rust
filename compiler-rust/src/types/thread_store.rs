@@ -16,7 +16,7 @@
 //! Design: `projects/in-process-performance/THREAD_TYPE_STORE.md`.
 
 use super::context::TypeNodes;
-use super::decl::{Signature, TypeDeclaration};
+use super::decl::Signature;
 use super::path::Path;
 use super::type_expr::{AbbrevMemo, AbbrevMemoRef, RowField, RowFieldRef, TypeDesc, TypeExprRef};
 use super::variant_runtime::{Layout, LayoutRef};
@@ -74,50 +74,6 @@ struct PersEntry {
     ps: Arc<PersStruct>,
 }
 
-/// One type declaration of a store-owned signature, with the keys a unit's
-/// `TypeContext` registers it under.
-#[derive(Debug)]
-pub(crate) struct SigTypeRegistration {
-    pub(crate) name: smol_str::SmolStr,
-    pub(crate) stamp: i32,
-    pub(crate) qualified_name: smol_str::SmolStr,
-    pub(crate) qualified_path: Path,
-    pub(crate) decl: Arc<TypeDeclaration>,
-}
-
-/// The type registrations of one store-owned signature, shared by every unit
-/// that loads it, with an exact-path index built on first use.
-#[derive(Debug)]
-pub(crate) struct SigTypeBatch {
-    entries: Box<[SigTypeRegistration]>,
-    exact_index: std::sync::OnceLock<crate::fast_hash::AHashMap<Path, u32>>,
-}
-
-impl SigTypeBatch {
-    /// The declaration the batch registers last under `path`, as replaying
-    /// its entries into a map keyed by `qualified_path` would leave it.
-    pub(crate) fn find_exact(&self, path: &Path) -> Option<&Arc<TypeDeclaration>> {
-        let index = self.exact_index.get_or_init(|| {
-            let mut index = crate::fast_hash::AHashMap::with_capacity(self.entries.len());
-            for (position, entry) in self.entries.iter().enumerate() {
-                index.insert(entry.qualified_path.clone(), position as u32);
-            }
-            index
-        });
-        index
-            .get(path)
-            .map(|&position| &self.entries[position as usize].decl)
-    }
-}
-
-impl std::ops::Deref for SigTypeBatch {
-    type Target = [SigTypeRegistration];
-
-    fn deref(&self) -> &Self::Target {
-        &self.entries
-    }
-}
-
 /// Store-built label descriptions of one record type, their summary, and the
 /// replay record of building them.
 pub(crate) type SharedRecordLabels = (
@@ -144,13 +100,6 @@ pub(crate) struct ThreadTypeStore {
     /// Signatures retained by `pers`; their items keep one address for the
     /// life of the store.
     shared_signatures: RefCell<HashSet<usize>>,
-    /// One `Arc` per declaration of a store-owned signature, keyed by the
-    /// declaration's address, so per-unit registries share an allocation
-    /// instead of cloning every dependency declaration for every compilation.
-    type_decl_arcs: RefCell<HashMap<usize, Arc<TypeDeclaration>>>,
-    /// Per-unit type registrations of a store-owned signature under one module
-    /// path, keyed by the signature's item address and that path.
-    sig_type_registrations: RefCell<HashMap<(usize, Path), Arc<SigTypeBatch>>>,
     /// Component-table name indexes of store-owned signatures, keyed by the
     /// signature's address (kept alive by `pers`).
     signature_indexes: RefCell<HashMap<usize, Arc<crate::types::env_lazy::SignatureIndex>>>,
@@ -201,8 +150,6 @@ impl ThreadTypeStore {
             next_type_id: Cell::new(STORE_TYPE_ID_BASE),
             pers: RefCell::new(HashMap::new()),
             shared_signatures: RefCell::new(HashSet::new()),
-            type_decl_arcs: RefCell::new(HashMap::new()),
-            sig_type_registrations: RefCell::new(HashMap::new()),
             signature_indexes: RefCell::new(HashMap::new()),
             shared_components: RefCell::new(HashMap::new()),
             record_labels: RefCell::new(HashMap::new()),
@@ -281,40 +228,6 @@ impl ThreadTypeStore {
         self.shared_signatures
             .borrow()
             .contains(&(Arc::as_ptr(sig) as usize))
-    }
-
-    /// Shared handle for a declaration that lives inside a store-owned
-    /// signature (`owns_signature` must hold for its root). Equal in content to
-    /// `Arc::new(decl.clone())`; allocated once per store.
-    pub(crate) fn shared_type_decl(&self, decl: &TypeDeclaration) -> Arc<TypeDeclaration> {
-        let key = decl as *const TypeDeclaration as usize;
-        if let Some(shared) = self.type_decl_arcs.borrow().get(&key) {
-            return shared.clone();
-        }
-        let shared = Arc::new(decl.clone());
-        self.type_decl_arcs.borrow_mut().insert(key, shared.clone());
-        shared
-    }
-
-    /// Registrations for `sig` under `module_path`, built once per store.
-    pub(crate) fn sig_type_registrations(
-        &self,
-        sig: &Signature,
-        module_path: &Path,
-        build: impl FnOnce() -> Vec<SigTypeRegistration>,
-    ) -> Arc<SigTypeBatch> {
-        let key = (sig.as_ptr() as usize, module_path.clone());
-        if let Some(found) = self.sig_type_registrations.borrow().get(&key) {
-            return found.clone();
-        }
-        let built = Arc::new(SigTypeBatch {
-            entries: build().into_boxed_slice(),
-            exact_index: std::sync::OnceLock::new(),
-        });
-        self.sig_type_registrations
-            .borrow_mut()
-            .insert(key, built.clone());
-        built
     }
 
     /// Name index of a store-owned signature (`owns_signature` must hold),

@@ -48,6 +48,7 @@ pub mod printtyp;
 pub mod record_runtime;
 pub mod sexp_typedtree;
 pub mod shared_store;
+pub mod tast_arena;
 pub mod tast_iterator;
 pub mod thread_store;
 pub mod type_expr;
@@ -62,7 +63,6 @@ pub mod variant_runtime;
 // Re-exports for convenience
 pub use asttypes::{ArgLabel, Label, Located, MutableFlag, PrivateFlag};
 pub use context::TypeContext;
-pub use decl_loc::{DeclLoc, DeclLocTable, DeclLocs};
 pub use decl::{
     AliasPresence, Attribute, AttributePayload, ConstructorArguments, ConstructorDeclaration,
     ConstructorDescription, ConstructorKind, ExtStatus, ExtensionConstructor, LabelArrayRef,
@@ -71,6 +71,7 @@ pub use decl::{
     TypeDeclaration, TypeInlinedType, TypeKind, TypeRepresentation, ValueDescription, ValueKind,
     may_equal_constructor, same_constructor,
 };
+pub use decl_loc::{DeclLoc, DeclLocTable, DeclLocs};
 pub use path::{NOPOS, Path, PathView, Typath};
 pub(crate) use type_expr::TypeExprRefMap;
 pub use type_expr::{

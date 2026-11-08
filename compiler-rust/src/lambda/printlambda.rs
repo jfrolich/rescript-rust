@@ -153,11 +153,13 @@ fn print_taginfo<W: Write>(f: &mut Formatter<W>, tag_info: &TagInfo) {
         TagInfo::Extension => f.string("ext"),
         TagInfo::RecordExt { fields, .. } => f.print(format_args!("[{}]", fields.join(";"))),
         TagInfo::Tuple => f.string("tuple"),
-        TagInfo::Constructor {
-            name, num_nonconst, ..
-        } => f.print(format_args!("{name}/{num_nonconst}")),
+        TagInfo::Constructor(c) => {
+            let (name, num_nonconst) = (&c.name, c.num_nonconst);
+            f.print(format_args!("{name}/{num_nonconst}"))
+        }
         TagInfo::PolyVar(_) => f.string("polyvar"),
-        TagInfo::Record { fields, .. } | TagInfo::RecordInlined { fields, .. } => {
+        TagInfo::Record(_) | TagInfo::RecordInlined(_) => {
+            let fields = tag_info.record_fields().expect("record block");
             let names: Vec<&str> = fields.iter().map(|(name, _)| name.as_str()).collect();
             f.print(format_args!("[{}]", names.join(";")));
         }
@@ -206,7 +208,7 @@ fn primitive<W: Write>(f: &mut Formatter<W>, prim: &Primitive) {
         Primitive::PrecordRest(excluded) => {
             f.print(format_args!("record_rest({})", excluded.join(", ")))
         }
-        Primitive::PjsCall { prim_name, .. } => f.print(format_args!("js_call[{prim_name}]")),
+        Primitive::PjsCall(call) => f.print(format_args!("js_call[{}]", call.prim_name)),
         Primitive::PjsObjectCreate(_) => s(f, "js_obj_create"),
         Primitive::PjsObjectGet(name) => f.print(format_args!("js_object_get[{name}]")),
         Primitive::PjsObjectSet(name) => f.print(format_args!("js_object_set[{name}]")),

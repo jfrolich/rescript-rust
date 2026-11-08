@@ -46,6 +46,7 @@ impl SeenTypes {
 
 struct Collector<'a> {
     ctx: &'a TypeContext,
+    ta: &'a TypedArena,
     seen: SeenTypes,
     out: Vec<UnitRead>,
 }
@@ -118,9 +119,13 @@ impl Collector<'_> {
     }
 }
 
-impl TastIterator for Collector<'_> {
+impl<'a> TastIterator<'a> for Collector<'a> {
+    fn arena(&self) -> &'a TypedArena {
+        self.ta
+    }
+
     fn expr(&mut self, e: &Expression) {
-        for (extra, _, _) in e.exp_extra.iter() {
+        for (extra, _, _) in self.ta.exp_extra(e).iter() {
             if let ExpExtra::Texp_open(_, path, _, _) = extra {
                 self.path(path, Kind::Module);
             }
@@ -133,7 +138,7 @@ impl TastIterator for Collector<'_> {
             }
             ExpressionDesc::Texp_record { fields, .. }
             | ExpressionDesc::Texp_record_sparse { fields, .. } => {
-                for (_, ld, _, _) in fields {
+                for (_, ld, _, _) in self.ta.record_fields(*fields) {
                     self.label(ld);
                 }
             }
@@ -145,7 +150,7 @@ impl TastIterator for Collector<'_> {
     }
 
     fn pat(&mut self, p: &Pattern) {
-        for (extra, _, _) in p.pat_extra.iter() {
+        for (extra, _, _) in self.ta.pat_extra(p).iter() {
             if let PatExtra::Tpat_type(path, _) = extra {
                 self.path(path, Kind::Type);
             }
@@ -239,11 +244,13 @@ fn opened(opens: &[String]) -> impl Iterator<Item = UnitRead> + '_ {
 /// command line (read as whole modules).
 pub fn structure_reads(
     ctx: &TypeContext,
+    ta: &TypedArena,
     structure: &Structure,
     opens: &[String],
 ) -> Vec<UnitRead> {
     let mut collector = Collector {
         ctx,
+        ta,
         seen: SeenTypes::default(),
         out: opened(opens).collect(),
     };
@@ -254,11 +261,13 @@ pub fn structure_reads(
 /// The reads of an interface.
 pub fn signature_reads(
     ctx: &TypeContext,
+    ta: &TypedArena,
     signature: &TypedSignature,
     opens: &[String],
 ) -> Vec<UnitRead> {
     let mut collector = Collector {
         ctx,
+        ta,
         seen: SeenTypes::default(),
         out: opened(opens).collect(),
     };

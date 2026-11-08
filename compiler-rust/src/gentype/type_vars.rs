@@ -45,7 +45,7 @@ pub fn extract_from_type_expr_refs(ctx: &TypeContext, type_params: &[TypeExprRef
     so_far
 }
 
-pub fn extract_from_core_type(type_params: &[TypedCoreType]) -> Vec<String> {
+pub fn extract_from_core_type(type_params: &[&TypedCoreType]) -> Vec<String> {
     let mut so_far = Vec::new();
 
     for type_expr in type_params {
