@@ -307,30 +307,11 @@ impl QualifiedModuleComponentsCacheKey {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-struct QualifiedRecordLabelCacheKey {
-    path: SamePathKey,
-    env_id: u64,
-    lbl_pos: i32,
-}
-
-impl QualifiedRecordLabelCacheKey {
-    fn new(path: Path, env_id: u64, lbl_pos: i32) -> Self {
-        Self {
-            path: SamePathKey(path),
-            env_id,
-            lbl_pos,
-        }
-    }
-}
-
 #[derive(Clone, Debug)]
 pub(crate) struct RecordLabelDescriptionSummary {
     label_positions: Arc<crate::fast_hash::AHashMap<String, usize>>,
     pub(crate) mandatory_count: usize,
     pub(crate) has_optional: bool,
-    pub(crate) has_dotdotdot: bool,
-    pub(crate) all_regular: bool,
 }
 
 impl RecordLabelDescriptionSummary {
@@ -338,8 +319,6 @@ impl RecordLabelDescriptionSummary {
         let mut label_positions = crate::fast_hash::AHashMap::with_capacity(labels.len());
         let mut mandatory_count = 0;
         let mut has_optional = false;
-        let mut has_dotdotdot = false;
-        let mut all_regular = true;
 
         for (idx, label) in labels.iter().enumerate() {
             label_positions.insert(label.lbl_name.clone(), idx);
@@ -348,23 +327,12 @@ impl RecordLabelDescriptionSummary {
             } else {
                 mandatory_count += 1;
             }
-            if label.lbl_name == "..." {
-                has_dotdotdot = true;
-            }
-            if !matches!(
-                label.lbl_repres,
-                super::decl::RecordRepresentation::RecordRegular
-            ) {
-                all_regular = false;
-            }
         }
 
         Self {
             label_positions: Arc::new(label_positions),
             mandatory_count,
             has_optional,
-            has_dotdotdot,
-            all_regular,
         }
     }
 
@@ -885,14 +853,6 @@ pub struct TypeContext {
     record_label_description_summaries_cache:
         RefCell<crate::fast_hash::AHashMap<super::path::Path, Arc<RecordLabelDescriptionSummary>>>,
 
-    /// Qualified persistent record labels keyed by environment and label slot.
-    /// OCaml caches module components with already-substituted `lbl_all`
-    /// descriptors (compiler/ml/env.ml:1513-1514,1542-1548); this avoids
-    /// repeatedly copying the same persistent JSX prop label skeleton before
-    /// each `instance_label` call.
-    qualified_record_label_cache: RefCell<
-        crate::fast_hash::AHashMap<QualifiedRecordLabelCacheKey, super::decl::LabelDescription>,
-    >,
 
     /// The `lbl_all` arrays of this compilation: `LabelArrayRef(n)` for
     /// `n >= 1` is entry `n - 1`. They are the record families registered per
@@ -1249,7 +1209,6 @@ impl TypeContext {
             record_label_description_summaries_cache: RefCell::new(
                 crate::fast_hash::AHashMap::new(),
             ),
-            qualified_record_label_cache: RefCell::new(crate::fast_hash::AHashMap::new()),
             label_families: RefCell::new(Vec::new()),
             typed_envs: RefCell::new(Vec::new()),
             typed_envs_by_id: RefCell::new(crate::fast_hash::AHashMap::new()),
@@ -3404,36 +3363,6 @@ impl TypeContext {
             .borrow()
             .get(type_path)
             .cloned()
-    }
-
-    pub(crate) fn get_qualified_record_label(
-        &self,
-        env_id: u64,
-        type_path: &Path,
-        lbl_pos: i32,
-    ) -> Option<super::decl::LabelDescription> {
-        self.qualified_record_label_cache
-            .borrow()
-            .get(&QualifiedRecordLabelCacheKey::new(
-                type_path.clone(),
-                env_id,
-                lbl_pos,
-            ))
-            .cloned()
-    }
-
-    pub(crate) fn cache_qualified_record_label(
-        &self,
-        env_id: u64,
-        type_path: &Path,
-        lbl_pos: i32,
-        label: super::decl::LabelDescription,
-    ) {
-        self.poison_store_build_for("cache_qualified_record_label");
-        self.qualified_record_label_cache.borrow_mut().insert(
-            QualifiedRecordLabelCacheKey::new(type_path.clone(), env_id, lbl_pos),
-            label,
-        );
     }
 
     /// The handle the next array pushed by `push_label_family` gets: in the

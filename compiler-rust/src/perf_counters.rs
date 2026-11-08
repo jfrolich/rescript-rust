@@ -58,10 +58,6 @@ static STORED_COMPONENT_BUILD_PROBE_MODULE_DESCR: AtomicU64 = AtomicU64::new(0);
 static STORED_COMPONENT_PUBLISHED: AtomicU64 = AtomicU64::new(0);
 static STORED_COMPONENT_TRANSIENT: AtomicU64 = AtomicU64::new(0);
 
-static QUALIFIED_RECORD_LABEL_HITS: AtomicU64 = AtomicU64::new(0);
-static QUALIFIED_RECORD_LABEL_MISSES: AtomicU64 = AtomicU64::new(0);
-static QUALIFIED_RECORD_LABEL_REGISTERED: AtomicU64 = AtomicU64::new(0);
-static QUALIFIED_RECORD_LABEL_UNCACHED_OTHER: AtomicU64 = AtomicU64::new(0);
 
 
 static TYPE_ITEM_RESOLVE_CACHE_HITS: AtomicU64 = AtomicU64::new(0);
@@ -360,10 +356,6 @@ pub fn reset() {
         &STORED_COMPONENT_BUILD_PROBE_MODULE_DESCR,
         &STORED_COMPONENT_PUBLISHED,
         &STORED_COMPONENT_TRANSIENT,
-        &QUALIFIED_RECORD_LABEL_HITS,
-        &QUALIFIED_RECORD_LABEL_MISSES,
-        &QUALIFIED_RECORD_LABEL_REGISTERED,
-        &QUALIFIED_RECORD_LABEL_UNCACHED_OTHER,
         &TYPE_ITEM_RESOLVE_CACHE_HITS,
         &TYPE_ITEM_RESOLVE_MISSING_CACHE_HITS,
         &TYPE_ITEM_RESOLVE_SCANS,
@@ -497,38 +489,6 @@ pub(crate) fn record_stored_component_build(mode: ComponentLookupApi, published:
     } else {
         STORED_COMPONENT_TRANSIENT.fetch_add(1, Ordering::Relaxed);
     }
-}
-
-/// Record a qualified record-label cache hit.
-///
-/// Caller must check [`enabled`] before calling this hot-path helper.
-#[inline]
-pub(crate) fn record_qualified_record_label_hit() {
-    QUALIFIED_RECORD_LABEL_HITS.fetch_add(1, Ordering::Relaxed);
-}
-
-/// Record a qualified record-label cache miss.
-///
-/// Caller must check [`enabled`] before calling this hot-path helper.
-#[inline]
-pub(crate) fn record_qualified_record_label_miss() {
-    QUALIFIED_RECORD_LABEL_MISSES.fetch_add(1, Ordering::Relaxed);
-}
-
-/// Record a newly cached qualified record label.
-///
-/// Caller must check [`enabled`] before calling this hot-path helper.
-#[inline]
-pub(crate) fn record_qualified_record_label_registered() {
-    QUALIFIED_RECORD_LABEL_REGISTERED.fetch_add(1, Ordering::Relaxed);
-}
-
-/// Record a record label that is not eligible for the qualified-label cache.
-///
-/// Caller must check [`enabled`] before calling this hot-path helper.
-#[inline]
-pub(crate) fn record_qualified_record_label_uncached_other() {
-    QUALIFIED_RECORD_LABEL_UNCACHED_OTHER.fetch_add(1, Ordering::Relaxed);
 }
 
 /// Record a cached type-item path lookup.
@@ -706,13 +666,6 @@ pub fn print_report() {
         STORED_COMPONENT_BUILD_PROBE_MODULE_DESCR.load(Ordering::Relaxed),
         STORED_COMPONENT_PUBLISHED.load(Ordering::Relaxed),
         STORED_COMPONENT_TRANSIENT.load(Ordering::Relaxed),
-    );
-    eprintln!(
-        "[compiler-counter] qualified_record_labels hits={} misses={} registered={} uncached_other={}",
-        QUALIFIED_RECORD_LABEL_HITS.load(Ordering::Relaxed),
-        QUALIFIED_RECORD_LABEL_MISSES.load(Ordering::Relaxed),
-        QUALIFIED_RECORD_LABEL_REGISTERED.load(Ordering::Relaxed),
-        QUALIFIED_RECORD_LABEL_UNCACHED_OTHER.load(Ordering::Relaxed),
     );
     eprintln!(
         "[compiler-counter] type_item_resolve positive_cache_hits={} missing_cache_hits={} scans={} scanned_items={} type_items={} found={}",

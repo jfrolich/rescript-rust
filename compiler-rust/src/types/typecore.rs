@@ -5380,7 +5380,6 @@ fn build_as_type(
                             &mut tctx.persistent_env,
                             ctx,
                             false,
-                            true,
                         )
                         .unwrap_or(resolved_label);
                         let field_pat = present_fields_by_pos
@@ -6378,12 +6377,6 @@ fn type_pattern_record(
                     env,
                     &mut tctx.persistent_env,
                     ctx,
-                    false,
-                    // OCaml compiler/ml/typecore.ml:942-967 `lookup_from_type`
-                    // reads label descriptors without forcing nested field paths;
-                    // compiler/ml/typecore.ml:1623-1644 `type_label_pat`
-                    // allocates the subpattern binders first. Rust drains those
-                    // deferred field-path forces after pattern typing.
                     false,
                 )
             });
@@ -14461,20 +14454,6 @@ impl RecordLabelDescriptionsInfo {
     }
 }
 
-fn qualified_record_label_from_info(
-    info: Option<&RecordLabelDescriptionsInfo>,
-    field_name: &str,
-    env: &Env,
-    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &TypeContext,
-) -> Option<crate::types::LabelDescription> {
-    info.and_then(|info| info.label_by_name(field_name))
-        .map(|mut label| {
-            qualify_label_description_paths(&mut label, env, pers_env, ctx);
-            label
-        })
-}
-
 fn record_label_from_info(
     info: Option<&RecordLabelDescriptionsInfo>,
     field_name: &str,
@@ -15194,7 +15173,6 @@ fn type_record(
                     &mut tctx.persistent_env,
                     ctx,
                     false,
-                    true,
                 )
             })
         } else {
@@ -15237,13 +15215,8 @@ fn type_record(
                 if matches!(resolved_lid, Longident::Ldot(..)) {
                     return None;
                 }
-                let label = qualified_record_label_from_info(
-                    disambiguation_label_descriptions.as_ref(),
-                    field_name,
-                    env,
-                    &mut tctx.persistent_env,
-                    ctx,
-                )?;
+                let label =
+                    record_label_from_info(disambiguation_label_descriptions.as_ref(), field_name)?;
                 use_in_scope_label_of_type(ctx, env, field_name, &label);
                 Some(label)
             })
@@ -15258,7 +15231,6 @@ fn type_record(
                     &mut tctx.persistent_env,
                     ctx,
                     false,
-                    true,
                 )
             });
         if report_ambiguous_label_warnings
@@ -15357,7 +15329,6 @@ fn type_record(
                                     env,
                                     &mut tctx.persistent_env,
                                     ctx,
-                                    true,
                                 )
                             }
                         });
@@ -15382,20 +15353,6 @@ fn type_record(
                                 &mut tctx.persistent_env,
                                 ctx,
                             )
-                        })
-                        .map(|mut label| {
-                            // OCaml compiler/ml/typecore.ml:3677-3717 receives the
-                            // already-substituted label chosen by
-                            // typecore.ml:942-967 `lookup_from_type`; qualify the
-                            // expected-type label before `instance_label` so field
-                            // argument paths mirror the reference component table.
-                            qualify_label_description_paths(
-                                &mut label,
-                                env,
-                                &mut tctx.persistent_env,
-                                ctx,
-                            );
-                            label
                         })
                         .unwrap_or(env_label);
 
@@ -16171,7 +16128,7 @@ fn type_field(
     }
 
     // Disambiguate label: use the record expression's type to find the right label
-    let (env_label, needs_label_qualification) = if let Some(label) = lookup_label_by_lid(
+    let env_label = if let Some(label) = lookup_label_by_lid(
         &resolved_lid,
         Some(field_lid.loc),
         tctx.arena,
@@ -16181,7 +16138,7 @@ fn type_field(
         label_expected_record_ty,
         None,
     ) {
-        (Some(label), false)
+        Some(label)
     } else if matches!(resolved_lid, Longident::Ldot(..)) {
         // OCaml `find_all_labels` on a qualified label only reads that module's
         // labels, and `Name_choice.lookup_from_type` (typecore.ml:852-891) only
@@ -16203,17 +16160,13 @@ fn type_field(
             ),
         });
     } else {
-        (
-            disambiguate_label(
-                &field_name,
-                label_expected_record_ty.unwrap_or_else(|| tctx.type_ctx.new_var(None)),
-                env,
-                &mut tctx.persistent_env,
-                tctx.type_ctx,
-                true,
-                true,
-            ),
-            label_expected_record_ty.is_none(),
+        disambiguate_label(
+            &field_name,
+            label_expected_record_ty.unwrap_or_else(|| tctx.type_ctx.new_var(None)),
+            env,
+            &mut tctx.persistent_env,
+            tctx.type_ctx,
+            true,
         )
     };
     if label_expected_record_ty.is_none()
@@ -16221,10 +16174,6 @@ fn type_field(
         && let Some(label) = env_label.as_ref()
     {
         warn_ambiguous_label_access(tctx, env, field_lid.loc, &field_name, label);
-    }
-    let mut env_label = env_label;
-    if needs_label_qualification && let Some(label) = env_label.as_mut() {
-        qualify_label_description_paths(label, env, &mut tctx.persistent_env, tctx.type_ctx);
     }
 
     let (label_desc, field_ty, ty_res) = if let Some(env_label) = env_label {
@@ -16386,7 +16335,6 @@ fn type_setfield(
             &mut tctx.persistent_env,
             ctx,
             true,
-            true,
         )
     });
     if matches!(resolved_lid, Longident::Lident(_))
@@ -16399,10 +16347,6 @@ fn type_setfield(
     // type (`Env.lookup_all_labels`, env.ml:1230-1238).
     if let Some(label) = env_label.as_ref() {
         mark_type_path_of(tctx.type_ctx, env, label.lbl_res);
-    }
-    let mut env_label = env_label;
-    if let Some(label) = env_label.as_mut() {
-        qualify_label_description_paths(label, env, &mut tctx.persistent_env, ctx);
     }
     // OCaml typecore.ml:2948: `let ty_record = if opath = None then newvar ()
     // else record.exp_type`, where `opath` is the receiver's concrete record
@@ -21385,14 +21329,6 @@ where
     placeholder
 }
 
-fn copy_lookup_type_expr(
-    ctx: &TypeContext,
-    ty: TypeExprRef,
-    cache: &mut TypeExprRefMap<TypeExprRef>,
-) -> TypeExprRef {
-    copy_lookup_type_expr_with_paths(ctx, ty, cache, &clone_copy_lookup_path)
-}
-
 fn copy_lookup_constructor_args_with_paths<TP>(
     args: &crate::types::decl::ConstructorArguments,
     ctx: &TypeContext,
@@ -23604,370 +23540,6 @@ fn type_contains_unresolved_local_path(
     }
 }
 
-fn qualify_label_description_paths(
-    label: &mut crate::types::LabelDescription,
-    env: &Env,
-    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &crate::types::context::TypeContext,
-) {
-    fn qualified_record_label_cache_key(
-        label: &crate::types::LabelDescription,
-        env: &Env,
-        ctx: &crate::types::context::TypeContext,
-    ) -> QualifiedRecordLabelCacheKeyResult {
-        if label.lbl_pos < 0
-            || !matches!(
-                label.lbl_repres,
-                crate::types::RecordRepresentation::RecordRegular
-            )
-        {
-            return QualifiedRecordLabelCacheKeyResult::Other;
-        }
-
-        let desc = ctx.get_desc(ctx.repr(label.lbl_res));
-        let TypeDesc::Tconstr { path, .. } = &*desc else {
-            return QualifiedRecordLabelCacheKeyResult::Other;
-        };
-        if path_non_apply_root_ident(path).is_some() {
-            QualifiedRecordLabelCacheKeyResult::Key(env.scope_id(), path.clone(), label.lbl_pos)
-        } else {
-            QualifiedRecordLabelCacheKeyResult::Other
-        }
-    }
-
-    enum QualifiedRecordLabelCacheKeyResult {
-        Key(u64, Path, i32),
-        Other,
-    }
-
-    fn rewrite_direct_root_type_family_in_place(
-        ctx: &crate::types::context::TypeContext,
-        ty: TypeExprRef,
-        old_root_path: &Path,
-        new_root_path: &Path,
-        visited: &mut TypeExprRefSet,
-    ) {
-        use crate::types::type_expr::RowField;
-
-        let repr = ctx.repr(ty);
-        if !visited.insert(repr) {
-            return;
-        }
-
-        let desc = ctx.get_desc(repr).into_desc();
-        match desc {
-            TypeDesc::Tconstr {
-                path, args, abbrev, ..
-            } => {
-                for arg in &args {
-                    rewrite_direct_root_type_family_in_place(
-                        ctx,
-                        *arg,
-                        old_root_path,
-                        new_root_path,
-                        visited,
-                    );
-                }
-                let rewritten = path.parent().and_then(|parent| {
-                    // OCaml compiler/ml/subst.ml:87-95 rewrites paths through
-                    // explicit substitution entries; it does not match a
-                    // sibling path only because its printed name is the same.
-                    parent
-                        .same(old_root_path)
-                        .then(|| Path::pdot(new_root_path.clone(), path.last()))
-                });
-                if let Some(rewritten) = rewritten {
-                    ctx.set_desc(
-                        repr,
-                        TypeDesc::Tconstr {
-                            path: rewritten,
-                            args,
-                            abbrev,
-                            path_block: ctx.fresh_path_block(),
-                        },
-                    );
-                }
-            }
-            TypeDesc::Tarrow { args, ret } => {
-                for arg in args {
-                    rewrite_direct_root_type_family_in_place(
-                        ctx,
-                        arg.typ,
-                        old_root_path,
-                        new_root_path,
-                        visited,
-                    );
-                }
-                rewrite_direct_root_type_family_in_place(
-                    ctx,
-                    ret,
-                    old_root_path,
-                    new_root_path,
-                    visited,
-                );
-            }
-            TypeDesc::Ttuple(types) => {
-                for item in &types {
-                    rewrite_direct_root_type_family_in_place(
-                        ctx,
-                        *item,
-                        old_root_path,
-                        new_root_path,
-                        visited,
-                    );
-                }
-            }
-            TypeDesc::Tlink(target) | TypeDesc::Tsubst(target) => {
-                rewrite_direct_root_type_family_in_place(
-                    ctx,
-                    target,
-                    old_root_path,
-                    new_root_path,
-                    visited,
-                );
-            }
-            TypeDesc::Tobject { fields } => {
-                rewrite_direct_root_type_family_in_place(
-                    ctx,
-                    fields,
-                    old_root_path,
-                    new_root_path,
-                    visited,
-                );
-            }
-            TypeDesc::Tfield { typ, rest, .. } => {
-                rewrite_direct_root_type_family_in_place(
-                    ctx,
-                    typ,
-                    old_root_path,
-                    new_root_path,
-                    visited,
-                );
-                rewrite_direct_root_type_family_in_place(
-                    ctx,
-                    rest,
-                    old_root_path,
-                    new_root_path,
-                    visited,
-                );
-            }
-            TypeDesc::Tvariant(row) => {
-                for (_label, field) in &row.row_fields {
-                    match field {
-                        RowField::Rpresent(Some(ty)) => {
-                            rewrite_direct_root_type_family_in_place(
-                                ctx,
-                                *ty,
-                                old_root_path,
-                                new_root_path,
-                                visited,
-                            );
-                        }
-                        RowField::Reither { types, .. } => {
-                            for ty in types {
-                                rewrite_direct_root_type_family_in_place(
-                                    ctx,
-                                    *ty,
-                                    old_root_path,
-                                    new_root_path,
-                                    visited,
-                                );
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                rewrite_direct_root_type_family_in_place(
-                    ctx,
-                    row.row_more,
-                    old_root_path,
-                    new_root_path,
-                    visited,
-                );
-                if let Some((_, args)) = &row.row_name {
-                    for item in args {
-                        rewrite_direct_root_type_family_in_place(
-                            ctx,
-                            *item,
-                            old_root_path,
-                            new_root_path,
-                            visited,
-                        );
-                    }
-                }
-            }
-            TypeDesc::Tpoly { body, vars } => {
-                rewrite_direct_root_type_family_in_place(
-                    ctx,
-                    body,
-                    old_root_path,
-                    new_root_path,
-                    visited,
-                );
-                for var in &vars {
-                    rewrite_direct_root_type_family_in_place(
-                        ctx,
-                        *var,
-                        old_root_path,
-                        new_root_path,
-                        visited,
-                    );
-                }
-            }
-            TypeDesc::Tpackage { args, .. } => {
-                for item in &args {
-                    rewrite_direct_root_type_family_in_place(
-                        ctx,
-                        *item,
-                        old_root_path,
-                        new_root_path,
-                        visited,
-                    );
-                }
-            }
-            TypeDesc::Tvar(..) | TypeDesc::Tunivar(..) | TypeDesc::Tnil => {}
-        }
-    }
-
-    let counters_enabled = ctx.compiler_counters_enabled();
-    let cache_key = match qualified_record_label_cache_key(label, env, ctx) {
-        QualifiedRecordLabelCacheKeyResult::Key(env_id, path, lbl_pos) => {
-            Some((env_id, path, lbl_pos))
-        }
-        QualifiedRecordLabelCacheKeyResult::Other => {
-            if counters_enabled {
-                crate::perf_counters::record_qualified_record_label_uncached_other();
-            }
-            None
-        }
-    };
-    if let Some((env_id, path, lbl_pos)) = cache_key.as_ref()
-        && let Some(cached) = ctx.get_qualified_record_label(*env_id, path, *lbl_pos)
-    {
-        if counters_enabled {
-            crate::perf_counters::record_qualified_record_label_hit();
-        }
-        // Qualification rewrites only the label's types; the label keeps its
-        // own `lbl_all`.
-        label.lbl_res = cached.lbl_res;
-        label.lbl_arg = cached.lbl_arg;
-        return;
-    }
-    if counters_enabled && cache_key.is_some() {
-        crate::perf_counters::record_qualified_record_label_miss();
-    }
-
-    let mut copy_cache = TypeExprRefMap::new();
-    label.lbl_res = copy_lookup_type_expr(ctx, label.lbl_res, &mut copy_cache);
-    label.lbl_arg = copy_lookup_type_expr(ctx, label.lbl_arg, &mut copy_cache);
-
-    let res_path = {
-        let res_repr = ctx.repr(label.lbl_res);
-        let res_desc = ctx.get_desc(res_repr);
-        let TypeDesc::Tconstr { path, .. } = &*res_desc else {
-            return;
-        };
-        path.clone()
-    };
-    let mut module_access_paths = Vec::new();
-    match &res_path {
-        Path::Pdot(_, _, _) => {
-            let mut probe_visited = TypeExprRefSet::new();
-            let has_unresolved_local_path = type_contains_unresolved_local_path(
-                ctx,
-                env,
-                pers_env,
-                label.lbl_arg,
-                &mut probe_visited,
-            );
-            // OCaml compiler/ml/env.ml:1095-1105 and 1138-1143 resolve
-            // qualified labels through `lookup_module_descr`/`comp_labels`;
-            // env.ml:1259-1272 only marks the result type afterward. That
-            // path does not force env.ml:865-882 `find_module`, so these
-            // label-qualification alias probes must not force component
-            // module declarations and freshen child signature binders.
-            if let Some(parent) = res_path.parent() {
-                let parent_has_alias_target =
-                    raw_alias_target_for_module_path(&parent, env, pers_env, ctx).is_some();
-                if has_unresolved_local_path || parent_has_alias_target {
-                    module_access_paths.push(parent.clone());
-                }
-
-                // OCaml compiler/ml/env.ml:1435-1446 strengthens scraped
-                // aliases at the alias target, then compiler/ml/env.ml:1530
-                // and compiler/ml/subst.ml:87-95 apply only the substitution
-                // for the current component table. Do not re-run that
-                // substitution for alias-bearing ancestors: explicit target
-                // paths inside a child declaration, such as
-                // `Mistakes__Types.storyID` in `Types.Request.t`, are not
-                // rewritten to the selected root by the reference compiler.
-            }
-            let root = path_root_module(&res_path);
-            let root_has_alias_target =
-                raw_alias_target_for_module_path(&root, env, pers_env, ctx).is_some();
-            let is_top_level_alias_type = res_path
-                .parent()
-                .as_ref()
-                .is_some_and(|parent| parent.same(&root));
-            if (has_unresolved_local_path || (root_has_alias_target && is_top_level_alias_type))
-                && !module_access_paths.iter().any(|p| p.same(&root))
-            {
-                module_access_paths.push(root.clone());
-            }
-        }
-        Path::Pident(_) => {}
-        Path::Papply(_, _) => return,
-    }
-
-    // An inline record's type (`M.t.C`) has no manifest, so
-    // `extract_concrete_typedecl` stops there (compiler/ml/ctype.ml:1249-1265)
-    // and `lookup_from_type` takes the alias component's own labels
-    // (typecore.ml:852-870); only a regular record reaches the alias target
-    // through its strengthened manifest (mtype.ml:56-60).
-    let is_inline_record_label = matches!(
-        label.lbl_repres,
-        crate::types::RecordRepresentation::RecordInlined { .. }
-    );
-    if let Path::Pdot(_, _, _) = &res_path
-        && !is_inline_record_label
-    {
-        let root = path_root_module(&res_path);
-        if !root.same(&res_path) {
-            if let Some(alias_target) = raw_alias_target_for_module_path(&root, env, pers_env, ctx)
-            {
-                if path_non_apply_root_is_persistent(&alias_target) && !alias_target.same(&root) {
-                    let mut visited = TypeExprRefSet::new();
-                    rewrite_direct_root_type_family_in_place(
-                        ctx,
-                        label.lbl_arg,
-                        &root,
-                        &alias_target,
-                        &mut visited,
-                    );
-                }
-            }
-        }
-    }
-
-    for module_access_path in module_access_paths {
-        let mut visited = HashSet::new();
-        qualify_module_local_type_paths_from_module_descr_in_place(
-            ctx,
-            env,
-            pers_env,
-            label.lbl_arg,
-            &module_access_path,
-            &mut visited,
-        );
-    }
-
-    if let Some((env_id, path, lbl_pos)) = cache_key {
-        ctx.cache_qualified_record_label(env_id, &path, lbl_pos, label.clone());
-        if counters_enabled {
-            crate::perf_counters::record_qualified_record_label_registered();
-        }
-    }
-}
 
 struct DisambiguatedConstructor {
     path: Path,
@@ -24458,9 +24030,7 @@ fn lookup_label_by_lid(
                         pers_env,
                         ctx,
                     ) {
-                        let mut selected = candidate.clone();
-                        qualify_label_description_paths(&mut selected, env, pers_env, ctx);
-                        return Some(selected);
+                        return Some(candidate.clone());
                     }
                 }
             }
@@ -24508,7 +24078,7 @@ fn lookup_label_by_lid(
         }
     }
 
-    let mut selected = candidates.first().cloned()?;
+    let selected = candidates.first().cloned()?;
     if expected_record_ty.is_none() {
         // OCaml compiler/ml/typecore.ml:990-1006 `Label.disambiguate` takes
         // the first remaining label, calls its use callback, then runs
@@ -24527,7 +24097,6 @@ fn lookup_label_by_lid(
             ctx,
         );
     }
-    qualify_label_description_paths(&mut selected, env, pers_env, ctx);
     Some(selected)
 }
 
@@ -24752,11 +24321,7 @@ fn build_record_label_descriptions_info(
     // array.
     let shared_res = ctx.new_generic_constr(record_path.clone(), decl.type_params.clone());
     let descriptions =
-        crate::types::env_lazy::label_descrs(shared_res, &decl, decl.type_private, ctx, |descs| {
-            for label in descs {
-                qualify_label_description_paths(label, env, pers_env, ctx);
-            }
-        });
+        crate::types::env_lazy::label_descrs(shared_res, &decl, decl.type_private, ctx, |_| {});
     ctx.register_record_label_descriptions(&record_path, Arc::new(descriptions));
     info_of(ctx.get_record_label_family(&record_path)?)
 }
@@ -24831,7 +24396,6 @@ fn lookup_label_by_expected_type(
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &crate::types::context::TypeContext,
-    qualify_field_paths: bool,
 ) -> Option<crate::types::LabelDescription> {
     let visible_path =
         extract_type_path_from_expected_with_persistent_env(record_ty, env, pers_env, ctx)?;
@@ -24856,9 +24420,6 @@ fn lookup_label_by_expected_type(
             if !label_path.same(&visible_path) {
                 selected.lbl_res =
                     ctx.new_generic_constr(visible_path.clone(), label_args.to_vec());
-            }
-            if qualify_field_paths {
-                qualify_label_description_paths(&mut selected, env, pers_env, ctx);
             }
             return Some(selected);
         }
@@ -24887,14 +24448,7 @@ fn lookup_label_by_expected_type(
         ctx,
         |_| {},
     );
-    let mut selected = family[pos].clone();
-    if qualify_field_paths {
-        // OCaml compiler/ml/typecore.ml:3677-3717 record expression
-        // fields receive already-substituted labels before
-        // `instance_label`, so expression typing keeps the immediate
-        // component qualification.
-        qualify_label_description_paths(&mut selected, env, pers_env, ctx);
-    }
+    let selected = family[pos].clone();
     Some(selected)
 }
 
@@ -25005,7 +24559,6 @@ fn disambiguate_label(
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &crate::types::context::TypeContext,
     force_ambiguous_side_effects: bool,
-    qualify_lookup_from_type_label: bool,
 ) -> Option<crate::types::LabelDescription> {
     // Extract type path from the record expression's type
     let opath = extract_type_path_from_expected_with_persistent_env(record_ty, env, pers_env, ctx);
@@ -25021,7 +24574,6 @@ fn disambiguate_label(
             env,
             pers_env,
             ctx,
-            qualify_lookup_from_type_label,
         );
     }
 
@@ -25062,7 +24614,6 @@ fn disambiguate_label(
                 env,
                 pers_env,
                 ctx,
-                qualify_lookup_from_type_label,
             );
         }
     }
@@ -25075,7 +24626,6 @@ fn disambiguate_label(
             env,
             pers_env,
             ctx,
-            qualify_lookup_from_type_label,
         );
     }
 
@@ -25129,12 +24679,6 @@ fn disambiguate_label(
         {
             use_label_candidate(ctx, env, lookup_name, desc, mark);
         }
-    }
-
-    if opath.is_some()
-        && let Some(label) = selected.as_mut()
-    {
-        qualify_label_description_paths(label, env, pers_env, ctx);
     }
 
     selected
