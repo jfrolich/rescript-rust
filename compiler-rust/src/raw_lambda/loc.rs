@@ -79,17 +79,24 @@ impl LamLocBuilder {
     }
 }
 
-/// The parse arena plus the conversion's location builder, threaded through
+/// The parse arena, the conversion's location builder and its raw Lambda
+/// arena, threaded through
 /// `Matching` where OCaml reads `pat.pat_loc` and attaches it to nodes.
 #[derive(Clone, Copy)]
 pub struct LocArena<'a> {
     pub arena: &'a ParseArena,
     pub locs: &'a LamLocBuilder,
+    /// The raw Lambda arena the conversion builds into.
+    pub b: &'a crate::raw_lambda::RawArena,
 }
 
 impl<'a> LocArena<'a> {
-    pub fn new(arena: &'a ParseArena, locs: &'a LamLocBuilder) -> Self {
-        Self { arena, locs }
+    pub fn new(
+        arena: &'a ParseArena,
+        locs: &'a LamLocBuilder,
+        b: &'a crate::raw_lambda::RawArena,
+    ) -> Self {
+        Self { arena, locs, b }
     }
 
     /// Node handle for an arena location.

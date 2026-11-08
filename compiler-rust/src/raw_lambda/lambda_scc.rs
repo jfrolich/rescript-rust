@@ -3,56 +3,27 @@
 //! are not recursive.
 
 use crate::fast_hash::AHashMap;
-use crate::lambda::LamLoc;
 use crate::ident::Ident;
+use crate::lambda::LamLoc;
 use crate::lambda::LetKind;
-use crate::raw_lambda::RawLambda;
+use crate::lambda::arena::{LamArena, View};
+use crate::raw_lambda::{RawArena, RawLambda};
 
 type Bindings = Vec<(Ident, RawLambda)>;
 
 /// OCaml `Lambda_scc.exists_var`: walk `l`, stopping as soon as `p` returns
 /// true for a variable or assigned identifier.
-fn exists_var(p: &mut impl FnMut(&Ident) -> bool, l: &RawLambda) -> bool {
-    match l {
-        RawLambda::Lshared(inner) => exists_var(p, inner),
-        RawLambda::Lvar(id) => p(id),
-        RawLambda::Lassign(id, e) => p(id) || exists_var(p, e),
-        RawLambda::LstaticCatch(e1, _, e2)
-        | RawLambda::LtryWith(e1, _, e2)
-        | RawLambda::Lsequence(e1, e2)
-        | RawLambda::Lwhile(e1, e2)
-        | RawLambda::Lfor_of(_, e1, e2)
-        | RawLambda::Lfor_await_of(_, e1, e2) => exists_var(p, e1) || exists_var(p, e2),
-        RawLambda::Lfunction(f) => exists_var(p, &f.body),
-        RawLambda::Llet(_, _, arg, body) => exists_var(p, arg) || exists_var(p, body),
-        RawLambda::Lletrec(decl, body) => {
-            exists_var(p, body) || decl.iter().any(|(_, lam)| exists_var(p, lam))
-        }
-        RawLambda::Lfor(_, e1, e2, _, e3) | RawLambda::LifThenElse(e1, e2, e3) => {
-            exists_var(p, e1) || exists_var(p, e2) || exists_var(p, e3)
-        }
-        RawLambda::Lconst(_) | RawLambda::Lbreak | RawLambda::Lcontinue => false,
-        RawLambda::Lapply(ap) => {
-            exists_var(p, &ap.ap_func) || ap.ap_args.iter().any(|arg| exists_var(p, arg))
-        }
-        RawLambda::Lprim(info) => info.args.iter().any(|arg| exists_var(p, arg)),
-        RawLambda::LstaticRaise(_, args) => args.iter().any(|arg| exists_var(p, arg)),
-        RawLambda::Lswitch(arg, sw) => {
-            exists_var(p, arg)
-                || sw.sw_consts.iter().any(|(_, lam)| exists_var(p, lam))
-                || sw.sw_blocks.iter().any(|(_, lam)| exists_var(p, lam))
-                || sw
-                    .sw_failaction
-                    .as_deref()
-                    .is_some_and(|lam| exists_var(p, lam))
-        }
-        RawLambda::LstringSwitch(arg, cases, default) => {
-            exists_var(p, arg)
-                || cases.iter().any(|(_, lam)| exists_var(p, lam))
-                || default.as_deref().is_some_and(|lam| exists_var(p, lam))
-        }
-        RawLambda::LglobalModule(_) => false,
+fn exists_var(a: &LamArena, p: &mut impl FnMut(&Ident) -> bool, l: RawLambda) -> bool {
+    match a.view(l) {
+        View::Var(id) => return p(&id),
+        View::Assign(id, _) if p(&id) => return true,
+        _ => {}
     }
+    let mut found = false;
+    a.iter_children(l, |child| {
+        found = found || exists_var(a, p, child);
+    });
+    found
 }
 
 /// OCaml `Lambda_scc.preprocess_deps` (compiler/ml/lambda_scc.ml, upstream
@@ -60,7 +31,7 @@ fn exists_var(p: &mut impl FnMut(&Ident) -> bool, l: &RawLambda) -> bool {
 /// side refers to, in binding order. One `seen` array is shared by all bodies
 /// (`seen[j] == i` once body `i` has referred to binding `j`), so finding the
 /// edges costs the size of the bodies rather than the group size per body.
-fn preprocess_deps(groups: &Bindings) -> Vec<Vec<usize>> {
+fn preprocess_deps(a: &LamArena, groups: &Bindings) -> Vec<Vec<usize>> {
     let len = groups.len();
     // `Hash_ident.replace index id i`: a repeated member keeps its last index.
     let mut index = AHashMap::with_capacity(len);
@@ -75,6 +46,7 @@ fn preprocess_deps(groups: &Bindings) -> Vec<Vec<usize>> {
             let mut found = Vec::new();
             // stop walking `lam` once it has referred to every binding
             exists_var(
+                a,
                 &mut |id: &Ident| match index.get(id) {
                     Some(&j) if seen[j] != i => {
                         seen[j] = i;
@@ -83,7 +55,7 @@ fn preprocess_deps(groups: &Bindings) -> Vec<Vec<usize>> {
                     }
                     _ => false,
                 },
-                lam,
+                *lam,
             );
             found.sort_unstable();
             found
@@ -149,19 +121,19 @@ fn graph(e: &[Vec<usize>]) -> Vec<Vec<usize>> {
 
 /// OCaml `Lambda_scc.bind_rec`: split a syntactic `let rec` group into the
 /// actual recursive clusters and demote bindings that are not recursive.
-pub(crate) fn bind_rec(groups: Bindings, body: RawLambda) -> RawLambda {
+pub(crate) fn bind_rec(b: &RawArena, groups: Bindings, body: RawLambda) -> RawLambda {
     if let [(id, bind)] = groups.as_slice() {
-        return if exists_var(&mut |v: &Ident| id.same(v), bind) {
-            RawLambda::letrec(groups, body)
+        let recursive = exists_var(&b.get(), &mut |v: &Ident| id.same(v), *bind);
+        return if recursive {
+            b.letrec(&groups, body)
         } else {
-            let (id, bind) = groups.into_iter().next().expect("one binding");
-            RawLambda::let_(LetKind::Strict, id, bind, body)
+            b.let_(LetKind::Strict, *id, *bind, body)
         };
     }
-    let node_vec = preprocess_deps(&groups);
+    let node_vec = preprocess_deps(&b.get(), &groups);
     let clusters = graph(&node_vec);
     if clusters.len() <= 1 {
-        return RawLambda::letrec(groups, body);
+        return b.letrec(&groups, body);
     }
     let mut slots: Vec<Option<(Ident, RawLambda)>> = groups.into_iter().map(Some).collect();
     clusters.into_iter().rev().fold(body, |acc, cluster| {
@@ -173,9 +145,9 @@ pub(crate) fn bind_rec(groups: Bindings, body: RawLambda) -> RawLambda {
             && node_vec[*base_key].binary_search(base_key).is_err()
         {
             let (id, lam) = bindings.pop().expect("one binding");
-            RawLambda::let_(LetKind::Strict, id, lam, acc)
+            b.let_(LetKind::Strict, id, lam, acc)
         } else {
-            RawLambda::letrec(bindings, acc)
+            b.letrec(&bindings, acc)
         }
     })
 }
@@ -185,10 +157,10 @@ mod tests {
     use super::*;
     use crate::lambda::FunctionAttribute;
 
-    fn function(param: &str, body: RawLambda) -> RawLambda {
-        RawLambda::function_(
+    fn function(b: &RawArena, param: &str, body: RawLambda) -> RawLambda {
+        b.function_(
             1,
-            vec![Ident::create_local(param)],
+            &[Ident::create_local(param)],
             body,
             FunctionAttribute::default(),
             LamLoc::NONE,
@@ -199,28 +171,28 @@ mod tests {
     fn splits_a_group_into_its_recursive_clusters() {
         let find_end = Ident::create_local("find_end");
         let find_beg = Ident::create_local("find_beg");
+        let b = RawArena::new();
+        let (e, g) = (b.var(find_end), b.var(find_beg));
+        let seq = b.seq(e, g);
+        let find_end_fn = function(&b, "n", seq);
+        let g = b.var(find_beg);
+        let find_beg_fn = function(&b, "p", g);
+        let e = b.var(find_end);
         let lam = bind_rec(
-            vec![
-                (
-                    find_end,
-                    function(
-                        "n",
-                        RawLambda::seq(RawLambda::var(find_end), RawLambda::var(find_beg)),
-                    ),
-                ),
-                (find_beg, function("p", RawLambda::var(find_beg))),
-            ],
-            RawLambda::var(find_end),
+            &b,
+            vec![(find_end, find_end_fn), (find_beg, find_beg_fn)],
+            e,
         );
-        let RawLambda::Lletrec(outer, inner) = lam else {
+        let a = b.get();
+        let View::LetRec(outer, _, inner) = a.view(lam) else {
             panic!("expected letrec")
         };
-        assert!(matches!(outer.as_slice(), [(id, _)] if id.same(&find_beg)));
-        let RawLambda::Lletrec(inner_bindings, body) = *inner else {
+        assert!(matches!(outer, [id] if id.same(&find_beg)));
+        let View::LetRec(inner_bindings, _, body) = a.view(inner) else {
             panic!("expected nested letrec")
         };
-        assert!(matches!(inner_bindings.as_slice(), [(id, _)] if id.same(&find_end)));
-        assert!(matches!(*body, RawLambda::Lvar(ref id) if id.same(&find_end)));
+        assert!(matches!(inner_bindings, [id] if id.same(&find_end)));
+        assert!(matches!(a.view(body), View::Var(id) if id.same(&find_end)));
     }
 
     #[derive(Debug, PartialEq)]
@@ -238,29 +210,33 @@ mod tests {
             .map(|(name, _)| (*name, Ident::create_local(*name)))
             .collect();
         let id_of = |name: &str| group.iter().find(|(n, _)| *n == name).unwrap().1;
+        let b = RawArena::new();
         let bindings = bodies
             .iter()
             .map(|(name, refs)| {
-                let body = refs.iter().fold(RawLambda::unit(), |acc, r| {
-                    RawLambda::seq(acc, RawLambda::var(id_of(r)))
+                let body = refs.iter().fold(b.unit(), |acc, r| {
+                    let var = b.var(id_of(r));
+                    b.seq(acc, var)
                 });
                 (id_of(name), body)
             })
             .collect();
-        let mut lam = bind_rec(bindings, RawLambda::unit());
+        let unit = b.unit();
+        let mut lam = bind_rec(&b, bindings, unit);
+        let a = b.get();
         let mut shape = Vec::new();
         loop {
-            match lam {
-                RawLambda::Llet(_, id, _, rest) => {
+            match a.view(lam) {
+                View::Let(_, id, _, rest) => {
                     shape.push(Shape::Let(id.name().to_string()));
-                    lam = *rest;
+                    lam = rest;
                 }
-                RawLambda::Lletrec(bindings, rest) => {
+                View::LetRec(ids, _, rest) => {
                     let mut names: Vec<String> =
-                        bindings.iter().map(|(id, _)| id.name().to_string()).collect();
+                        ids.iter().map(|id| id.name().to_string()).collect();
                     names.sort();
                     shape.push(Shape::Rec(names));
-                    lam = *rest;
+                    lam = rest;
                 }
                 _ => return shape,
             }
@@ -314,10 +290,14 @@ mod tests {
     #[test]
     fn demotes_a_non_recursive_binding() {
         let f = Ident::create_local("f");
-        let lam = bind_rec(
-            vec![(f, function("x", RawLambda::unit()))],
-            RawLambda::var(f),
-        );
-        assert!(matches!(lam, RawLambda::Llet(LetKind::Strict, _, _, _)));
+        let b = RawArena::new();
+        let unit = b.unit();
+        let func = function(&b, "x", unit);
+        let var = b.var(f);
+        let lam = bind_rec(&b, vec![(f, func)], var);
+        assert!(matches!(
+            b.get().view(lam),
+            View::Let(LetKind::Strict, _, _, _)
+        ));
     }
 }

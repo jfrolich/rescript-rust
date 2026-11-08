@@ -13,8 +13,9 @@
 
 use crate::fast_hash::AHashMap;
 use crate::lambda::LamLoc;
+use crate::lambda::arena::{LamArena, Node, View};
 use crate::lambda::{Comparison, Constant, LetKind, Primitive};
-use crate::raw_lambda::{RawLambda, RawLambdaSwitch, RawPrimInfo};
+use crate::raw_lambda::{RawArena, RawLambda, RawLambdaSwitch};
 
 // ── Action store (port of Switch.Store) ────────────────────────────────
 
@@ -25,61 +26,12 @@ pub enum Shared<A> {
     Single(A),
 }
 
-/// OCaml `compiler/ml/switch.ml:511-560` stores actions as closures and
-/// invokes each leaf action without copying the lambda tree. Rust stores owned
-/// `RawLambda` values, so keep single-use actions movable and clone only the
-/// action slots that the generated case tree can reach more than once.
-enum SwitchAction {
-    Shared(RawLambda),
-    Single(Option<RawLambda>),
+fn make_const(b: &RawArena, i: i32) -> RawLambda {
+    b.const_(Constant::int(i))
 }
 
-impl SwitchAction {
-    fn take(&mut self) -> RawLambda {
-        match self {
-            SwitchAction::Shared(action) => action.clone(),
-            SwitchAction::Single(action) => action
-                .take()
-                .expect("single-use switch action was consumed more than once"),
-        }
-    }
-}
-
-fn action_use_counts(action_count: usize, cases: &[(i32, i32, usize)]) -> Vec<usize> {
-    let mut counts = vec![0usize; action_count];
-    for &(_, _, action) in cases {
-        counts[action] += 1;
-    }
-    counts
-}
-
-fn actions_for_cases(actions: Vec<RawLambda>, cases: &[(i32, i32, usize)]) -> Vec<SwitchAction> {
-    let counts = action_use_counts(actions.len(), cases);
-    actions
-        .into_iter()
-        .enumerate()
-        .map(|(idx, action)| {
-            if counts[idx] == 1 {
-                SwitchAction::Single(Some(action))
-            } else {
-                SwitchAction::Shared(action)
-            }
-        })
-        .collect()
-}
-
-// ── SArg implementation ───────────────────────────────────────────────
-
-fn make_const(i: i32) -> RawLambda {
-    RawLambda::Lconst(Constant::int(i))
-}
-
-fn make_prim(prim: Primitive, args: Vec<RawLambda>) -> RawLambda {
-    RawLambda::Lprim(Box::new(RawPrimInfo {
-        primitive: prim,
-        args,
-        loc: LamLoc::NONE,
-    }))
+fn make_prim(b: &RawArena, prim: Primitive, args: &[RawLambda]) -> RawLambda {
+    b.prim(prim, args, LamLoc::NONE)
 }
 
 /// OCaml `Switch.covers_range` (switch.ml:104-111): `cases` is exactly the
@@ -98,23 +50,18 @@ fn covers_range(cases: &[(crate::lambda::SwitchKey, RawLambda)], start: i32, fin
 /// OCaml `Switch.out_of_range` (switch.ml:113-118): `arg` is outside
 /// `lo .. hi`. A two-value range reads better as a pair of equality tests
 /// than as a pair of comparisons.
-pub(crate) fn out_of_range(arg: &RawLambda, lo: i32, hi: i32) -> RawLambda {
+pub(crate) fn out_of_range(b: &RawArena, arg: RawLambda, lo: i32, hi: i32) -> RawLambda {
     let test = |cmp: Comparison, k: i32| {
-        make_prim(Primitive::Pintcomp(cmp), vec![arg.clone(), make_const(k)])
+        let k = make_const(b, k);
+        make_prim(b, Primitive::Pintcomp(cmp), &[arg, k])
     };
     if hi == lo + 1 {
-        make_prim(
-            Primitive::Pnot,
-            vec![make_prim(
-                Primitive::Psequor,
-                vec![test(Comparison::Eq, lo), test(Comparison::Eq, hi)],
-            )],
-        )
+        let (l, h) = (test(Comparison::Eq, lo), test(Comparison::Eq, hi));
+        let or = make_prim(b, Primitive::Psequor, &[l, h]);
+        make_prim(b, Primitive::Pnot, &[or])
     } else {
-        make_prim(
-            Primitive::Psequor,
-            vec![test(Comparison::Gt, hi), test(Comparison::Lt, lo)],
-        )
+        let (h, l) = (test(Comparison::Gt, hi), test(Comparison::Lt, lo));
+        make_prim(b, Primitive::Psequor, &[h, l])
     }
 }
 
@@ -123,102 +70,104 @@ pub(crate) fn out_of_range(arg: &RawLambda, lo: i32, hi: i32) -> RawLambda {
 /// when the table already covers the whole guarded range the guard is
 /// dropped and its action becomes the failaction.
 fn emit_if_out(
+    b: &RawArena,
     offset: i32,
     range: i32,
-    arg: &RawLambda,
+    arg: RawLambda,
     ifso: RawLambda,
     ifno: RawLambda,
 ) -> RawLambda {
     let lo = -offset;
     let hi = range - offset;
-    if let (RawLambda::Lvar(x), RawLambda::Lswitch(sarg, sw)) = (arg, &ifno)
-        && let RawLambda::Lvar(y) = sarg.as_ref()
+    if let Some(x) = b.as_var(arg)
+        && let Some((sarg, mut sw)) = b.switch_parts(ifno)
+        && let Some(y) = b.as_var(sarg)
         && sw.sw_blocks.is_empty()
         && sw.sw_blocks_full
         && sw.sw_failaction.is_none()
-        && x.same(y)
+        && x.same(&y)
         && covers_range(&sw.sw_consts, lo, hi)
     {
-        let RawLambda::Lswitch(sarg, mut sw) = ifno else {
-            unreachable!()
-        };
-        sw.sw_failaction = Some(Box::new(ifso));
+        sw.sw_failaction = Some(ifso);
         sw.sw_consts_full = false;
-        return RawLambda::Lswitch(sarg, sw);
+        return b.switch(sarg, sw);
     }
-    make_if(out_of_range(arg, lo, hi), ifso, ifno)
+    let cond = out_of_range(b, arg, lo, hi);
+    make_if(b, cond, ifso, ifno)
 }
 
 /// OCaml `Switch.emit_if_in` (switch.ml:140-142).
 fn emit_if_in(
+    b: &RawArena,
     offset: i32,
     range: i32,
-    arg: &RawLambda,
+    arg: RawLambda,
     ifso: RawLambda,
     ifno: RawLambda,
 ) -> RawLambda {
     let lo = -offset;
     let hi = range - offset;
-    make_if(
-        make_prim(Primitive::Pnot, vec![out_of_range(arg, lo, hi)]),
-        ifso,
-        ifno,
-    )
+    let out = out_of_range(b, arg, lo, hi);
+    let cond = make_prim(b, Primitive::Pnot, &[out]);
+    make_if(b, cond, ifso, ifno)
 }
 
-fn make_if(cond: RawLambda, ifso: RawLambda, ifnot: RawLambda) -> RawLambda {
-    RawLambda::LifThenElse(Box::new(cond), Box::new(ifso), Box::new(ifnot))
+fn make_if(b: &RawArena, cond: RawLambda, ifso: RawLambda, ifnot: RawLambda) -> RawLambda {
+    b.if_raw(cond, ifso, ifnot)
 }
 
 /// Build an Lswitch from a mapping table.
-fn build_lswitch(arg: RawLambda, tbl: &[usize], acts: Vec<RawLambda>, offset: i32) -> RawLambda {
-    let cases_for_counts: Vec<(i32, i32, usize)> = tbl
-        .iter()
-        .enumerate()
-        .map(|(i, &act_idx)| (offset + i as i32, offset + i as i32, act_idx))
-        .collect();
-    let mut acts = actions_for_cases(acts, &cases_for_counts);
-    let mut cases: Vec<(i32, RawLambda)> = Vec::with_capacity(tbl.len());
-    for (i, &act_idx) in tbl.iter().enumerate().rev() {
-        cases.push((offset + i as i32, acts[act_idx].take()));
-    }
-    cases.reverse();
-    RawLambda::Lswitch(
-        Box::new(arg),
-        Box::new(RawLambdaSwitch {
+fn build_lswitch(
+    b: &RawArena,
+    arg: RawLambda,
+    tbl: &[usize],
+    acts: &[RawLambda],
+    offset: i32,
+) -> RawLambda {
+    b.switch(
+        arg,
+        RawLambdaSwitch {
             sw_consts_full: true,
-            sw_consts: cases
-                .into_iter()
-                .map(|(key, action)| (crate::lambda::SwitchKey::Int(key), action))
+            sw_consts: tbl
+                .iter()
+                .enumerate()
+                .map(|(i, &act_idx)| {
+                    (
+                        crate::lambda::SwitchKey::Int(offset + i as i32),
+                        acts[act_idx],
+                    )
+                })
                 .collect(),
             sw_blocks_full: true,
             sw_blocks: Vec::new(),
             sw_failaction: None,
             sw_dispatch: crate::lambda::SwitchDispatch::Direct,
-        }),
+        },
     )
 }
 
-fn make_exit(i: i32) -> RawLambda {
-    RawLambda::LstaticRaise(i, Vec::new())
+fn make_exit(b: &RawArena, i: i32) -> RawLambda {
+    b.static_raise(i, &[])
 }
 
 /// Check if a lambda is a simple static raise.
-fn as_simple_exit(lam: &RawLambda) -> Option<i32> {
-    match lam.peel() {
-        RawLambda::LstaticRaise(i, args) if args.is_empty() => Some(*i),
-        RawLambda::Llet(LetKind::Alias, _, _, body) => as_simple_exit(body),
+fn as_simple_exit(a: &LamArena, lam: RawLambda) -> Option<i32> {
+    match a.view(lam) {
+        View::StaticRaise(i, []) => Some(i),
+        View::Let(LetKind::Alias, _, _, body) => as_simple_exit(a, body),
         _ => None,
     }
 }
 
 /// OCaml's `make_catch_delayed`.
 fn make_catch_delayed(
+    b: &RawArena,
     handler: RawLambda,
     next_raise: &mut dyn FnMut() -> i32,
 ) -> (i32, Option<RawLambda>) {
     // Returns (exit_id, Some(handler)) if wrapping needed, (exit_id, None) if already an exit
-    if let Some(i) = as_simple_exit(&handler) {
+    let simple = as_simple_exit(&b.get(), handler);
+    if let Some(i) = simple {
         (i, None)
     } else {
         let i = next_raise();
@@ -410,14 +359,16 @@ fn same_act(cases: &[(i32, i32, usize)]) -> bool {
 const INTER_LIMIT: i32 = 1 << 16;
 
 /// The main switch compiler. Handles memoization and test optimization.
-struct SwitchCompiler {
+struct SwitchCompiler<'b> {
+    b: &'b RawArena,
     memo: AHashMap<Vec<Kind>, (TRet, (CTests, CTests))>,
     ok_inter: bool,
 }
 
-impl SwitchCompiler {
-    fn new(ok_inter: bool) -> Self {
+impl<'b> SwitchCompiler<'b> {
+    fn new(b: &'b RawArena, ok_inter: bool) -> Self {
         SwitchCompiler {
+            b,
             memo: AHashMap::default(),
             ok_inter,
         }
@@ -641,19 +592,19 @@ impl SwitchCompiler {
     fn c_test(
         &mut self,
         off: i32,
-        arg: &RawLambda,
+        arg: RawLambda,
         cases: &[(i32, i32, usize)],
-        actions: &mut [SwitchAction],
+        actions: &[RawLambda],
     ) -> RawLambda {
         let lcases = cases.len();
         assert!(lcases > 0);
         if lcases == 1 {
-            return actions[cases[0].2].take();
+            return actions[cases[0].2];
         }
 
         let (w, _cost) = self.opt_count(cases);
         match w {
-            TRet::No => actions[cases[0].2].take(),
+            TRet::No => actions[cases[0].2],
             TRet::Inter(i, j) => {
                 let (low, high, inside, outside) = coupe_inter(i as usize, j as usize, cases);
                 let (_, (cinside, _)) = self.opt_count(inside);
@@ -662,22 +613,22 @@ impl SwitchCompiler {
                     if less_tests(coutside, cinside) {
                         let ifso = self.c_test(off, arg, inside, actions);
                         let ifnot = self.c_test(off, arg, &outside, actions);
-                        make_if_eq(arg, low + off, ifso, ifnot)
+                        make_if_eq(self.b, arg, low + off, ifso, ifnot)
                     } else {
                         let ifso = self.c_test(off, arg, &outside, actions);
                         let ifnot = self.c_test(off, arg, inside, actions);
-                        make_if_ne(arg, low + off, ifso, ifnot)
+                        make_if_ne(self.b, arg, low + off, ifso, ifnot)
                     }
                 } else if less_tests(coutside, cinside) {
                     // OCaml `make_if_in ctx (low + ctx.off) (high - low)`
                     // (switch.ml:535-536, 566-569).
                     let ifso = self.c_test(off, arg, inside, actions);
                     let ifno = self.c_test(off, arg, &outside, actions);
-                    emit_if_in(-(low + off), high - low, arg, ifso, ifno)
+                    emit_if_in(self.b, -(low + off), high - low, arg, ifso, ifno)
                 } else {
                     let ifso = self.c_test(off, arg, &outside, actions);
                     let ifno = self.c_test(off, arg, inside, actions);
-                    emit_if_out(-(low + off), high - low, arg, ifso, ifno)
+                    emit_if_out(self.b, -(low + off), high - low, arg, ifso, ifno)
                 }
             }
             TRet::Sep(i) => {
@@ -688,15 +639,15 @@ impl SwitchCompiler {
                 if i == 1 && lim + off == 1 && cases[0].0 + off == 0 {
                     let ifso = self.c_test(off, arg, right, actions);
                     let ifnot = self.c_test(off, arg, left, actions);
-                    make_if_ne(arg, 0, ifso, ifnot)
+                    make_if_ne(self.b, arg, 0, ifso, ifnot)
                 } else if less_tests(cright, cleft) {
                     let ifso = self.c_test(off, arg, left, actions);
                     let ifnot = self.c_test(off, arg, right, actions);
-                    make_if_lt(arg, lim + off, ifso, ifnot)
+                    make_if_lt(self.b, arg, lim + off, ifso, ifnot)
                 } else {
                     let ifso = self.c_test(off, arg, right, actions);
                     let ifnot = self.c_test(off, arg, left, actions);
-                    make_if_ge(arg, lim + off, ifso, ifnot)
+                    make_if_ge(self.b, arg, lim + off, ifso, ifnot)
                 }
             }
         }
@@ -706,39 +657,62 @@ impl SwitchCompiler {
 // ── Comparison helpers ────────────────────────────────────────────────
 
 fn make_if_test(
+    b: &RawArena,
     prim: Primitive,
-    arg: &RawLambda,
+    arg: RawLambda,
     i: i32,
     ifso: RawLambda,
     ifnot: RawLambda,
 ) -> RawLambda {
-    make_if(
-        make_prim(prim, vec![arg.clone(), make_const(i)]),
-        ifso,
-        ifnot,
-    )
+    let i = make_const(b, i);
+    let cond = make_prim(b, prim, &[arg, i]);
+    make_if(b, cond, ifso, ifnot)
 }
 
-fn make_if_lt(arg: &RawLambda, i: i32, ifso: RawLambda, ifnot: RawLambda) -> RawLambda {
+fn make_if_lt(
+    b: &RawArena,
+    arg: RawLambda,
+    i: i32,
+    ifso: RawLambda,
+    ifnot: RawLambda,
+) -> RawLambda {
     match i {
-        1 => make_if_test(Primitive::Pintcomp(Comparison::Le), arg, 0, ifso, ifnot),
-        _ => make_if_test(Primitive::Pintcomp(Comparison::Lt), arg, i, ifso, ifnot),
+        1 => make_if_test(b, Primitive::Pintcomp(Comparison::Le), arg, 0, ifso, ifnot),
+        _ => make_if_test(b, Primitive::Pintcomp(Comparison::Lt), arg, i, ifso, ifnot),
     }
 }
 
-fn make_if_ge(arg: &RawLambda, i: i32, ifso: RawLambda, ifnot: RawLambda) -> RawLambda {
+fn make_if_ge(
+    b: &RawArena,
+    arg: RawLambda,
+    i: i32,
+    ifso: RawLambda,
+    ifnot: RawLambda,
+) -> RawLambda {
     match i {
-        1 => make_if_test(Primitive::Pintcomp(Comparison::Gt), arg, 0, ifso, ifnot),
-        _ => make_if_test(Primitive::Pintcomp(Comparison::Ge), arg, i, ifso, ifnot),
+        1 => make_if_test(b, Primitive::Pintcomp(Comparison::Gt), arg, 0, ifso, ifnot),
+        _ => make_if_test(b, Primitive::Pintcomp(Comparison::Ge), arg, i, ifso, ifnot),
     }
 }
 
-fn make_if_eq(arg: &RawLambda, i: i32, ifso: RawLambda, ifnot: RawLambda) -> RawLambda {
-    make_if_test(Primitive::Pintcomp(Comparison::Eq), arg, i, ifso, ifnot)
+fn make_if_eq(
+    b: &RawArena,
+    arg: RawLambda,
+    i: i32,
+    ifso: RawLambda,
+    ifnot: RawLambda,
+) -> RawLambda {
+    make_if_test(b, Primitive::Pintcomp(Comparison::Eq), arg, i, ifso, ifnot)
 }
 
-fn make_if_ne(arg: &RawLambda, i: i32, ifso: RawLambda, ifnot: RawLambda) -> RawLambda {
-    make_if_test(Primitive::Pintcomp(Comparison::Neq), arg, i, ifso, ifnot)
+fn make_if_ne(
+    b: &RawArena,
+    arg: RawLambda,
+    i: i32,
+    ifso: RawLambda,
+    ifnot: RawLambda,
+) -> RawLambda {
+    make_if_test(b, Primitive::Pintcomp(Comparison::Neq), arg, i, ifso, ifnot)
 }
 
 // ── Cluster building (port of make_clusters/make_switch) ──────────────
@@ -750,11 +724,12 @@ fn make_if_ne(arg: &RawLambda, i: i32, ifso: RawLambda, ifnot: RawLambda) -> Raw
 /// `ctx`; `ctx.off` stays 0 and `ctx.arg` is the original scrutinee for the
 /// whole `do_zyva` run, so dense cluster switches are built on `arg` directly.
 fn build_clustered_test(
-    compiler: &mut SwitchCompiler,
+    compiler: &mut SwitchCompiler<'_>,
     cases: &[(i32, i32, usize)],
     actions: &[RawLambda],
-    arg: &RawLambda,
+    arg: RawLambda,
 ) -> RawLambda {
+    let b = compiler.b;
     let (n_clusters, k) = compiler.comp_clusters(cases);
 
     let mut cluster_cases = vec![(0i32, 0i32, 0usize); n_clusters];
@@ -772,9 +747,7 @@ fn build_clustered_test(
         let act_index = if i == j {
             let act = cases[i].2;
             *single_act_map.entry(act).or_insert_with(|| {
-                let mut action = actions[act].clone();
-                unit_switch_arg_fixup(&mut action, arg);
-                cluster_actions.push(action);
+                cluster_actions.push(unit_switch_arg_fixup(b, actions[act], arg));
                 cluster_actions.len() - 1
             })
         } else {
@@ -792,11 +765,9 @@ fn build_clustered_test(
                 };
                 tbl[(lo - l) as usize..=(hi - l) as usize].fill(idx);
             }
-            let switch_acts: Vec<RawLambda> = switch_act_ids
-                .iter()
-                .map(|&act| actions[act].clone())
-                .collect();
-            cluster_actions.push(build_lswitch(arg.clone(), &tbl, switch_acts, l));
+            let switch_acts: Vec<RawLambda> =
+                switch_act_ids.iter().map(|&act| actions[act]).collect();
+            cluster_actions.push(build_lswitch(b, arg, &tbl, &switch_acts, l));
             cluster_actions.len() - 1
         };
         cluster_cases[ir] = (l, h, act_index);
@@ -807,8 +778,7 @@ fn build_clustered_test(
         ir -= 1;
     }
 
-    let mut cluster_actions = actions_for_cases(cluster_actions, &cluster_cases);
-    compiler.c_test(0, arg, &cluster_cases, &mut cluster_actions)
+    compiler.c_test(0, arg, &cluster_cases, &cluster_actions)
 }
 
 /// Replace the scrutinee of a single-case cluster action that is itself an
@@ -818,23 +788,28 @@ fn build_clustered_test(
 /// cluster switches and has no OCaml counterpart (`switch.ml` invokes single
 /// actions unchanged). It is kept so output stays byte-identical; it only
 /// fires for an action whose own scrutinee is literally `()`.
-fn unit_switch_arg_fixup(lam: &mut RawLambda, real_arg: &RawLambda) {
-    if matches!(lam, RawLambda::Lshared(_))
-        && matches!(lam.peel(), RawLambda::Lswitch(switch_arg, _) if switch_arg.is_unit())
+fn unit_switch_arg_fixup(b: &RawArena, lam: RawLambda, real_arg: RawLambda) -> RawLambda {
+    if let Node::Switch {
+        scrut,
+        actions,
+        info,
+    } = b.node(lam)
+        && b.is_unit(scrut)
     {
-        *lam = std::mem::replace(lam, RawLambda::Lbreak).unshare();
+        return b.push(Node::Switch {
+            scrut: real_arg,
+            actions,
+            info,
+        });
     }
-    if let RawLambda::Lswitch(switch_arg, _) = lam
-        && switch_arg.is_unit()
-    {
-        **switch_arg = real_arg.clone();
-    }
+    lam
 }
 
 // ── Shared action handling ────────────────────────────────────────────
 
 /// Process shared actions, wrapping in catch/exit.
 fn abstract_shared(
+    b: &RawArena,
     shared_actions: Vec<Shared<RawLambda>>,
     next_raise: &mut dyn FnMut() -> i32,
 ) -> (Vec<(i32, RawLambda)>, Vec<RawLambda>) {
@@ -845,11 +820,11 @@ fn abstract_shared(
         match act {
             Shared::Single(a) => actions.push(a),
             Shared::Shared(a) => {
-                let (exit_id, handler) = make_catch_delayed(a, next_raise);
+                let (exit_id, handler) = make_catch_delayed(b, a, next_raise);
                 if let Some(h) = handler {
                     handlers.push((exit_id, h));
                 }
-                actions.push(make_exit(exit_id));
+                actions.push(make_exit(b, exit_id));
             }
         }
     }
@@ -857,18 +832,21 @@ fn abstract_shared(
 }
 
 /// Wrap result with catch handlers.
-fn wrap_handlers(mut result: RawLambda, handlers: Vec<(i32, RawLambda)>) -> RawLambda {
+fn wrap_handlers(
+    b: &RawArena,
+    mut result: RawLambda,
+    handlers: Vec<(i32, RawLambda)>,
+) -> RawLambda {
     // OCaml composes handlers as h(oh(x)), so first handler is outermost.
     // We reverse to get the first handler as outermost.
     for (exit_id, handler) in handlers.into_iter().rev() {
-        if let RawLambda::LstaticRaise(j, _) = result.peel() {
-            if *j == exit_id {
-                result = handler;
-                continue;
-            }
+        if let Node::StaticRaise { label, .. } = b.node(result)
+            && label == exit_id
+        {
+            result = handler;
+            continue;
         }
-        result =
-            RawLambda::LstaticCatch(Box::new(result), (exit_id, Vec::new()), Box::new(handler));
+        result = b.static_catch(result, exit_id, &[], handler);
     }
     result
 }
@@ -880,6 +858,7 @@ fn wrap_handlers(mut result: RawLambda, handlers: Vec<(i32, RawLambda)>) -> RawL
 /// This preserves the exact indices embedded in `cases`, matching OCaml's
 /// `Switcher.zyva` call where the `StoreExp` action array is passed directly.
 pub fn zyva_with_shared_actions(
+    b: &RawArena,
     edges: (i32, i32),
     arg: RawLambda,
     cases: &[(i32, i32, usize)],
@@ -888,12 +867,12 @@ pub fn zyva_with_shared_actions(
 ) -> RawLambda {
     assert!(!cases.is_empty());
 
-    let (handlers, actions) = abstract_shared(shared_actions, next_raise);
+    let (handlers, actions) = abstract_shared(b, shared_actions, next_raise);
 
     let (low, high) = edges;
     let ok_inter = low.abs() <= INTER_LIMIT && high.abs() <= INTER_LIMIT;
-    let mut compiler = SwitchCompiler::new(ok_inter);
+    let mut compiler = SwitchCompiler::new(b, ok_inter);
 
-    let result = build_clustered_test(&mut compiler, cases, &actions, &arg);
-    wrap_handlers(result, handlers)
+    let result = build_clustered_test(&mut compiler, cases, &actions, arg);
+    wrap_handlers(b, result, handlers)
 }
