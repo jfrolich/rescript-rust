@@ -719,13 +719,6 @@ pub enum TypeCoreError {
     /// Invalid record-rest pattern.
     RecordRest { loc: LocIdx, error: RecordRestError },
 
-    /// Too many arguments.
-    TooManyArguments {
-        loc: LocIdx,
-        in_function: bool,
-        ty: TypeExprRef,
-    },
-
     /// Abstract wrong label.
     AbstractWrongLabel {
         loc: Location,
@@ -769,12 +762,6 @@ pub enum TypeCoreError {
 
     /// A module typing error surfaced while typing an expression form.
     ModuleError(Box<crate::types::typemod::TypeModError>),
-
-    /// Recursive local constraint.
-    RecursiveLocalConstraint {
-        loc: LocIdx,
-        trace: Vec<(TypeExprRef, TypeExprRef)>,
-    },
 
     /// Unexpected existential.
     UnexpectedExistential { loc: LocIdx },
@@ -5191,10 +5178,6 @@ fn unify_pattern_types(
                 .env()
                 .map(|env| tctx.type_ctx.store_typed_env(env)),
         }),
-        Err(TypeError::RecursiveAbbrev) => Err(TypeCoreError::RecursiveLocalConstraint {
-            loc: _loc,
-            trace: vec![(ty1, ty2)],
-        }),
         Err(_) => Err(TypeCoreError::PatternTypeClash {
             loc: Some(_loc),
             trace: vec![(ty1, ty2)],
@@ -5250,10 +5233,6 @@ fn unify_pattern_types_gadt(
                 .unify_state
                 .env()
                 .map(|env| tctx.type_ctx.store_typed_env(env)),
-        }),
-        Err(TypeError::RecursiveAbbrev) => Err(TypeCoreError::RecursiveLocalConstraint {
-            loc: _loc,
-            trace: vec![(ty1, ty2)],
         }),
         Err(_) => Err(TypeCoreError::PatternTypeClash {
             loc: Some(_loc),

@@ -3048,15 +3048,6 @@ fn type_mod_error_to_anyhow_styled(
                 format_compiler_error_report_formatted(arena, source, filename, *loc, &message);
             UserDiagnostic::new(report, 2).into()
         }
-        TypeModError::CoreError(TypeCoreError::RecursiveLocalConstraint { loc, trace }) => {
-            UserDiagnostic::new(
-                format_recursive_local_constraint_report(
-                    type_ctx, arena, source, filename, *loc, trace,
-                ),
-                2,
-            )
-            .into()
-        }
         TypeModError::CoreError(TypeCoreError::PolymorphicLabel { loc, lid }) => {
             UserDiagnostic::new(
                 format_polymorphic_label_report(arena, source, filename, *loc, lid),
@@ -3197,23 +3188,6 @@ fn type_mod_error_to_anyhow_styled(
             )
             .into()
         }
-        TypeModError::CoreError(TypeCoreError::TooManyArguments {
-            loc,
-            in_function,
-            ty,
-        }) => UserDiagnostic::new(
-            format_too_many_arguments_report(
-                type_ctx,
-                arena,
-                source,
-                filename,
-                *loc,
-                *in_function,
-                *ty,
-            ),
-            2,
-        )
-        .into(),
         TypeModError::CoreError(TypeCoreError::AbstractWrongLabel { loc, label, ty }) => {
             UserDiagnostic::new(
                 format_abstract_wrong_label_report(
@@ -6886,46 +6860,6 @@ fn format_expr_type_clash_report(
     }
 }
 
-fn format_recursive_local_constraint_report(
-    type_ctx: &TypeContext,
-    arena: &ParseArena,
-    source: &str,
-    filename: &str,
-    loc: LocIdx,
-    trace: &[(TypeExprRef, TypeExprRef)],
-) -> String {
-    let Some((actual, expected)) = trace.first().copied() else {
-        return format_compiler_error_report(arena, source, filename, loc, "Type error.");
-    };
-
-    let mut message = String::new();
-    let mut printer = type_clash_printer(type_ctx, trace);
-    message.push_str("Recursive local constraint when unifying ");
-    append_type_clash_type_with_printer(
-        type_ctx,
-        trace,
-        true,
-        ERROR,
-        actual,
-        &mut message,
-        &mut printer,
-    );
-    message.push('\n');
-    message.push_str("with ");
-    append_type_clash_type_with_printer(
-        type_ctx,
-        trace,
-        false,
-        INFO,
-        expected,
-        &mut message,
-        &mut printer,
-    );
-    append_incompatible_type_parts(type_ctx, trace, &mut message);
-
-    format_compiler_error_report(arena, source, filename, loc, &message)
-}
-
 fn format_orpat_vars_report(
     arena: &ParseArena,
     source: &str,
@@ -10053,29 +9987,6 @@ fn format_tagged_template_non_tag_report(
         type_clash::print_tagged_template_non_tag(ppf, type_ctx, typ)
     });
     format_compiler_error_report_formatted(arena, source, filename, loc, &message)
-}
-
-fn format_too_many_arguments_report(
-    type_ctx: &TypeContext,
-    arena: &ParseArena,
-    source: &str,
-    filename: &str,
-    loc: LocIdx,
-    in_function: bool,
-    ty: TypeExprRef,
-) -> String {
-    let message = if in_function {
-        format!(
-            "This function expects too many arguments,\nit should have type {}",
-            format_type_expr(type_ctx, ty)
-        )
-    } else {
-        format!(
-            "This expression should not be a function,\nthe expected type is {}",
-            format_type_expr(type_ctx, ty)
-        )
-    };
-    format_compiler_error_report(arena, source, filename, loc, &message)
 }
 
 fn format_abstract_wrong_label_report(

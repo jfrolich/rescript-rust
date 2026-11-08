@@ -63,9 +63,6 @@ pub enum TypeError {
     /// Recursive type detected (occurs check failed).
     RecursiveType(TypeExprRef),
 
-    /// Recursive abbreviation detected.
-    RecursiveAbbrev,
-
     /// Cannot expand a type abbreviation.
     CannotExpand,
 
