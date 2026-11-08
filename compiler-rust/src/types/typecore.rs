@@ -7988,6 +7988,45 @@ fn type_expect_with_recarg_unscoped<'a>(
 
         ED::Pexp_let(inner) => {
             let (ref rec_flag, ref bindings, ref body_idx) = *inner;
+            // typecore.ml:2636-2650: a non-recursive let of one binding
+            // without attributes whose pattern contains a GADT constructor is
+            // typed as a one-case match marked `#let_gadt_pattern`, without
+            // the caller's context.
+            let arena = tctx.arena;
+            if *rec_flag == RecFlag::Nonrecursive
+                && let [binding] = arena.vb_list(*bindings)
+                && binding.pvb_attributes.is_empty()
+                && pattern_contains_generalized_constructor(
+                    tctx,
+                    env,
+                    arena.get_pat(binding.pvb_pat),
+                )
+            {
+                let cases = arena.push_shared_case_list(&[crate::parser::ast::Case {
+                    pc_bar: None,
+                    pc_lhs: binding.pvb_pat,
+                    pc_guard: None,
+                    pc_rhs: *body_idx,
+                }]);
+                let marker = arena
+                    .find_string_idx("#let_gadt_pattern")
+                    .unwrap_or_else(|| arena.push_typecheck_string("#let_gadt_pattern".to_owned()));
+                let mut attributes = Vec::with_capacity(expr.pexp_attributes.len() + 1);
+                attributes.push((
+                    Located {
+                        txt: marker,
+                        loc: arena.none_loc(),
+                    },
+                    crate::parser::ast::Payload::PStr(Box::default()),
+                ));
+                attributes.extend(expr.pexp_attributes.iter().cloned());
+                let match_expr = ParsedExpression {
+                    pexp_desc: ED::Pexp_match((binding.pvb_expr, cases)),
+                    pexp_loc: expr.pexp_loc,
+                    pexp_attributes: Attributes::from_vec(attributes),
+                };
+                return type_expect(tctx, env, &match_expr, expected_ty, None);
+            }
             // Let expression
             // OCaml does NOT reset typetexp.type_variables for local Pexp_let.
             // reset_type_variables happens at top-level expression/binding entry.
@@ -11452,9 +11491,11 @@ fn type_match(
     };
     let body_context = if has_attribute("let.unwrap") {
         Some(TypeClashContext::LetUnwrapReturn)
-    } else if has_attribute("#optional_arg_default") {
-        // compiler/ml/typecore.ml:2626-2634: this synthesized match is part of
-        // function typing, so its branches use function-style diagnostics.
+    } else if has_attribute("#optional_arg_default") || has_attribute("#let_gadt_pattern") {
+        // typecore.ml:2835-2844: the match synthesized for an optional
+        // argument's default is part of a function definition, and the one
+        // typed for a let destructuring a GADT constructor has the rest of the
+        // block as its body, so their branches use function-style diagnostics.
         None
     } else {
         Some(TypeClashContext::SwitchExpression)
@@ -12838,6 +12879,10 @@ pub fn prepare_typecheck_arena(arena: &mut ParseArena) {
     // first-class-module discovery. Its spelling is known up front, so intern it
     // while the arena is still exclusively borrowed.
     arena.intern_string("#modulepat");
+    // The marker of a let destructuring a GADT constructor
+    // (typecore.ml:2647-2648), attached once the environment shows the
+    // pattern contains one.
+    arena.intern_string("#let_gadt_pattern");
 
     let functions = arena.nary_functions();
     for (fun, loc) in functions {
