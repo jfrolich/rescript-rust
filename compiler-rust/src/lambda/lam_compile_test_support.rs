@@ -184,6 +184,124 @@ impl LambdaCompiler {
             self.compile_named_string_switch_return(&mut a, test, &cases, default, complete);
         self.tree_block(&block)
     }
+
+    // Arena-output forms: Lambda tree in, JS arena handles (in `self.j`) out.
+
+    pub(crate) fn compile_expr_lam(&mut self, lam: &Lambda) -> Compiled {
+        let mut a = LamArena::new();
+        let lam = a.import(lam);
+        self.compile_expr(&mut a, lam)
+    }
+
+    pub(crate) fn compile_return_block_lam(&mut self, lam: &Lambda) -> Vec<Stmt> {
+        let mut a = LamArena::new();
+        let lam = a.import(lam);
+        self.compile_return_block(&mut a, lam)
+    }
+
+    pub(crate) fn compile_effect_block_lam(&mut self, lam: &Lambda) -> Vec<Stmt> {
+        let mut a = LamArena::new();
+        let lam = a.import(lam);
+        self.compile_effect_block(&mut a, lam)
+    }
+
+    pub(crate) fn compile_assign_to_target_block_lam(
+        &mut self,
+        result: &Ident,
+        lam: &Lambda,
+    ) -> Vec<Stmt> {
+        let mut a = LamArena::new();
+        let lam = a.import(lam);
+        self.compile_assign_to_target_block(&mut a, result, lam)
+    }
+
+    pub(crate) fn compile_string_switch_return_block_lam(
+        &mut self,
+        scrut: &Lambda,
+        cases: &[(String, Lambda)],
+        default: Option<&Lambda>,
+    ) -> Vec<Stmt> {
+        let mut a = LamArena::new();
+        let lam = a.import(&Lambda::LstringSwitch(
+            Box::new(scrut.clone()),
+            cases.to_vec(),
+            default.map(|d| Box::new(d.clone())),
+        ));
+        let Node::StringSwitch {
+            scrut,
+            actions,
+            info,
+        } = a.node(lam)
+        else {
+            unreachable!("an imported string switch is a string switch node")
+        };
+        self.compile_string_switch_return_block(&mut a, scrut, StrSw { actions, info })
+    }
+
+    pub(crate) fn compile_untagged_variant_switch_return_statements_lam(
+        &mut self,
+        scrut: Expr,
+        switch: &LambdaSwitch,
+    ) -> Vec<Stmt> {
+        let mut a = LamArena::new();
+        let switch = Self::decoded_tree_switch(&mut a, switch);
+        self.compile_untagged_variant_switch_return_statements(&mut a, scrut, &switch)
+    }
+
+    pub(crate) fn compile_untagged_variant_switch_assignment_statements_lam(
+        &mut self,
+        result: &Ident,
+        scrut: Expr,
+        switch: &LambdaSwitch,
+    ) -> Vec<Stmt> {
+        let mut a = LamArena::new();
+        let switch = Self::decoded_tree_switch(&mut a, switch);
+        self.compile_untagged_variant_switch_assignment_statements(&mut a, result, scrut, &switch)
+    }
+
+    pub(crate) fn compile_untagged_variant_switch_effect_statements_lam(
+        &mut self,
+        scrut: Expr,
+        switch: &LambdaSwitch,
+    ) -> Vec<Stmt> {
+        let mut a = LamArena::new();
+        let switch = Self::decoded_tree_switch(&mut a, switch);
+        self.compile_untagged_variant_switch_effect_statements(&mut a, scrut, &switch)
+    }
+
+    pub(crate) fn compile_let_binding_lam(
+        &mut self,
+        kind: LetKind,
+        id: &Ident,
+        value: &Lambda,
+    ) -> Vec<Stmt> {
+        let mut a = LamArena::new();
+        let value = a.import(value);
+        self.compile_let_binding(&mut a, kind, id, value)
+    }
+
+    pub(crate) fn compile_named_variant_switch_return_statements_lam(
+        &mut self,
+        scrut: Expr,
+        switch: &LambdaSwitch,
+    ) -> Vec<Stmt> {
+        let mut a = LamArena::new();
+        let switch = Self::decoded_tree_switch(&mut a, switch);
+        self.compile_named_variant_switch_return_statements(&mut a, scrut, &switch)
+    }
+
+    pub(crate) fn compile_named_string_switch_return_lam(
+        &mut self,
+        test: Expr,
+        cases: &[(SwitchCaseTag, &Lambda)],
+        default: Option<&Lambda>,
+        complete: bool,
+    ) -> Vec<Stmt> {
+        let mut a = LamArena::new();
+        let cases = import_cases(&mut a, cases);
+        let default = default.map(|d| a.import(d));
+        self.compile_named_string_switch_return(&mut a, test, &cases, default, complete)
+    }
 }
 
 pub(crate) fn module_side_effect_reason_tree(lam: &Lambda) -> Option<String> {
