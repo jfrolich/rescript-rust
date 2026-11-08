@@ -57,8 +57,8 @@ pub struct PortableTypeGraph {
     pub identities: PortableIdentities,
 }
 
-/// The physical sharing of a saved interface's types, for
-/// `Includemod.is_big` (includemod_error_size.rs) only.
+/// The physical sharing of a saved interface's types, read only by the
+/// removed `Includemod.is_big`.
 ///
 /// OCaml saves `Subst.signature` with `for_saving` (subst.ml:132-232) and
 /// the importer unmarshals it, so the importer's blocks are shared exactly as

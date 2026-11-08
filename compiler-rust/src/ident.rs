@@ -134,9 +134,8 @@ pub struct Ident {
 /// or any identifier of the compilation, even with the same stamp and name.
 /// Rust identifiers are values, so a decoded one carries the number of its
 /// marshal block, or of its block in the saved interface a stored graph was
-/// imported from (0 for every other identifier). It only feeds
-/// `Includemod.is_big` (includemod_error_size.rs), which counts each block
-/// once. Three bytes, in the padding after `flags`.
+/// imported from (0 for every other identifier). Its only reader went with
+/// `Includemod.is_big`, which counted each block once. Three bytes, in the padding after `flags`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct IdentOrigin([u8; 3]);
 

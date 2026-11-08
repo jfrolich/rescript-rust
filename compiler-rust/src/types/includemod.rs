@@ -1007,32 +1007,17 @@ fn format_extension_constructor(
 }
 
 /// The substitution `subst` of OCaml's `Includemod.modtypes`.
-///
-/// Each `Subst.add_type`/`add_module`/`add_modtype` call allocates its target
-/// (`Pident id1`, `Mty_ident (Pident id1)`) once, and every path it replaces
-/// shares that block. [`SubstEntry`] numbers those calls so the size of an
-/// error (`Includemod.is_big`) can count each target once.
 #[derive(Clone, Default, Debug)]
 pub struct InclusionSubst {
     type_paths: PathSubstMap,
     module_paths: PathSubstMap,
     modtype_paths: PathSubstMap,
-    entries: u32,
 }
 
-/// One `Subst.add_*` call of an [`InclusionSubst`].
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub struct SubstEntry(u32);
 
 impl InclusionSubst {
     fn is_empty(&self) -> bool {
         self.type_paths.is_empty() && self.module_paths.is_empty() && self.modtype_paths.is_empty()
-    }
-
-    /// A new `Subst.add_*` call, whose target the keys inserted with it share.
-    fn new_entry(&mut self) -> SubstEntry {
-        self.entries += 1;
-        SubstEntry(self.entries)
     }
 }
 
@@ -1046,14 +1031,14 @@ impl InclusionSubst {
 /// whether any key has one so the common case needs no full-map scan.
 #[derive(Clone, Default, Debug)]
 struct PathSubstMap {
-    map: HashMap<Path, (Path, SubstEntry)>,
+    map: HashMap<Path, Path>,
     any_pos_key: bool,
 }
 
 impl PathSubstMap {
-    fn insert(&mut self, key: Path, value: Path, entry: SubstEntry) {
+    fn insert(&mut self, key: Path, value: Path) {
         self.any_pos_key |= path_has_pos_hint(&key);
-        self.map.insert(key, (value, entry));
+        self.map.insert(key, value);
     }
 
     fn is_empty(&self) -> bool {
@@ -1061,10 +1046,6 @@ impl PathSubstMap {
     }
 
     fn get(&self, path: &Path) -> Option<Path> {
-        self.get_target(path).map(|(value, _)| value)
-    }
-
-    fn get_target(&self, path: &Path) -> Option<(Path, SubstEntry)> {
         if let Some(value) = self.map.get(path) {
             return Some(value.clone());
         }
@@ -1561,12 +1542,9 @@ fn modtypes_inner(
                 },
             );
             let mut result_subst = subst.clone();
-            let entry = result_subst.new_entry();
-            result_subst.module_paths.insert(
-                Path::pident(*param_sig),
-                Path::pident(*param_impl),
-                entry,
-            );
+            result_subst
+                .module_paths
+                .insert(Path::pident(*param_sig), Path::pident(*param_impl));
             let result_coercion = modtypes_inner(
                 type_ctx,
                 &result_env,
@@ -1900,19 +1878,17 @@ fn register_paired_signature_substitution(
             // compiler/ml/subst.ml:87-95 then rewrites exact type paths before
             // recursively rewriting module prefixes.
             let impl_path = Path::pident(*impl_id);
-            let entry = subst.new_entry();
             subst
                 .type_paths
-                .insert(Path::pident(*sig_id), impl_path.clone(), entry);
+                .insert(Path::pident(*sig_id), impl_path.clone());
             if let Some(access_path) = sig_access_path {
                 subst.type_paths.insert(
                     Path::pdot(access_path.clone(), sig_id.name()),
                     impl_path.clone(),
-                    entry,
                 );
             }
             if let Some(sig_path) = &sig_decl.type_path {
-                subst.type_paths.insert(sig_path.clone(), impl_path, entry);
+                subst.type_paths.insert(sig_path.clone(), impl_path);
             }
         }
         (
@@ -1923,21 +1899,17 @@ fn register_paired_signature_substitution(
             // module-type substitutions; compiler/ml/subst.ml:69-75 applies
             // them to exact paths before dotted-prefix recursion.
             let impl_path = Path::pident(*impl_id);
-            let entry = subst.new_entry();
             subst
                 .module_paths
-                .insert(Path::pident(*sig_id), impl_path.clone(), entry);
+                .insert(Path::pident(*sig_id), impl_path.clone());
             if let Some(access_path) = sig_access_path {
                 subst.module_paths.insert(
                     Path::pdot(access_path.clone(), sig_id.name()),
                     impl_path.clone(),
-                    entry,
                 );
             }
             if let Some(sig_path) = &sig_decl.md_path {
-                subst
-                    .module_paths
-                    .insert(sig_path.clone(), impl_path, entry);
+                subst.module_paths.insert(sig_path.clone(), impl_path);
             }
         }
         (SignatureItem::SigModtype(impl_id, _), SignatureItem::SigModtype(sig_id, _)) => {
@@ -1945,10 +1917,9 @@ fn register_paired_signature_substitution(
             // `Subst.add_modtype id2 (Mty_ident (Pident id1))`. Dotted module
             // type paths are handled by Subst.modtype_path through their module
             // prefix (compiler/ml/subst.ml:77-86), not by a dotted modtype map.
-            let entry = subst.new_entry();
             subst
                 .modtype_paths
-                .insert(Path::pident(*sig_id), Path::pident(*impl_id), entry);
+                .insert(Path::pident(*sig_id), Path::pident(*impl_id));
         }
         _ => {}
     }
@@ -2747,8 +2718,7 @@ pub(crate) fn substitute_type_declaration_self_path(
     to: &Path,
 ) -> TypeDeclaration {
     let mut subst = InclusionSubst::default();
-    let entry = subst.new_entry();
-    subst.type_paths.insert(from.clone(), to.clone(), entry);
+    subst.type_paths.insert(from.clone(), to.clone());
     substitute_type_declaration_paths(type_ctx, decl, &subst)
 }
 

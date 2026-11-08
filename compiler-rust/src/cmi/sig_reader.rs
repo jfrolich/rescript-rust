@@ -45,8 +45,8 @@ pub struct SigReadContext<'a> {
     mutability_cache: AHashMap<usize, MutabilityRef>,
     /// The physical sharing of the marshalled graph, by block address. The
     /// `cmi_sign` value being read keeps every block alive while this
-    /// context exists, so an address names one block. They feed only
-    /// `Includemod.is_big` (includemod_error_size.rs).
+    /// context exists, so an address names one block. Their only reader
+    /// went with `Includemod.is_big`.
     ///
     /// Retained `Ident.t` blocks, each with its own [`IdentOrigin`].
     ident_origins: AHashMap<usize, (OcamlValue, IdentOrigin)>,

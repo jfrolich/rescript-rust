@@ -348,9 +348,9 @@ impl IntoIterator for TypeArgList {
 /// own; a copy of a type node (`Btype.copy_type_desc`, `Ctype.copy`,
 /// `Subst.type_path` on a `Pident`) keeps the block of the node it copies;
 /// `Predef.path_*` are global blocks. Rust paths are values, so the identity
-/// is carried here. It never takes part in type equality: it only feeds
-/// `Includemod.is_big`, which counts each distinct block once
-/// (includemod_error_size.rs).
+/// is carried here. It never takes part in type equality. Its only reader,
+/// the size elision of inclusion errors (`Includemod.is_big`), went with
+/// upstream acdf563eef; it is kept until that dead provenance is removed.
 ///
 /// A tagged [`PathBlockOwner`], so no node handle (local, store or shared)
 /// can be mistaken for a sentinel or a token.
@@ -406,8 +406,8 @@ impl PathBlock {
 /// `Ctype.copy` on forget (ctype.ml:771, 849) and row unification
 /// (ctype.ml:2427). A copy that keeps the descriptor (`Tunivar _ as ty`,
 /// `Tvar _` with `keep_names`, `newty2 ty.level ty.desc`) shares the
-/// source node's block. Like [`PathBlock`], this only feeds
-/// `Includemod.is_big` and never takes part in type equality.
+/// source node's block. Like [`PathBlock`], it never takes part in type
+/// equality, and its only reader went with `Includemod.is_big`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum VarDescBlock {
     /// A descriptor allocated for this node.

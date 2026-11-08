@@ -67,8 +67,8 @@ impl std::hash::Hash for Instance {
 }
 
 /// The physical identity of the OCaml heap blocks of an `InstanceType
-/// (Class {name; ancestors})` value, which `Includemod.is_big` counts once
-/// each (includemod_error_size.rs). Kinds are values in Rust, so the identity
+/// (Class {name; ancestors})` value, which the removed `Includemod.is_big`
+/// counted once each. Kinds are values in Rust, so the identity
 /// is carried here and copied with the kind: a layout's untagged payload
 /// kind is the block of the payload type's shape (variant_layout.ml
 /// `payload_kind`), and `Variant_layout.declaration_shape` keeps the
@@ -227,7 +227,7 @@ impl std::hash::Hash for RecognizedShape {
 }
 
 /// The physical identity of the `Recognized_as` block of a shape, which
-/// `Includemod.is_big` counts once (includemod_error_size.rs). Shapes are
+/// the removed `Includemod.is_big` counted once. Shapes are
 /// values in Rust, so the identity is carried here: a restated
 /// `@notUndefined` keeps the abbreviated type's shape
 /// (variant_layout.ml `declaration_shape`), and `Subst` and copied
