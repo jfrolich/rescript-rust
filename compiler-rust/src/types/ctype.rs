@@ -220,6 +220,9 @@ pub enum RecordFieldSubtypeViolation {
     },
     /// A field present in the target record is missing from the source record.
     FieldMissing { label: String },
+    /// A field immutable in the source record is mutable in the target
+    /// record (record_coercion.ml:13, 44-49).
+    MutableMismatch { label: String },
 }
 
 /// Result type for type operations.
@@ -6595,8 +6598,29 @@ fn check_record_fields(
             });
         }
 
-        field_types1.push(field1.ld_type);
-        field_types2.push(field2.ld_type);
+        // record_coercion.ml:44-49: writing through the target would change
+        // a field that the source treats as immutable.
+        if field1.ld_mutable == MutableFlag::Immutable && field2.ld_mutable == MutableFlag::Mutable
+        {
+            issues.push(RecordFieldSubtypeViolation::MutableMismatch {
+                label: field1.ld_id.name().to_string(),
+            });
+        }
+
+        // record_coercion.ml:50-53: a field mutable in both records is read
+        // and written through both types, so it is a subtype both ways:
+        // `ld1 :: ld2 :: acc1` and `ld2 :: ld1 :: acc2`. The lists are built
+        // forward here and reversed by the callers, so each pair is pushed
+        // in reverse.
+        if field1.ld_mutable == MutableFlag::Mutable && field2.ld_mutable == MutableFlag::Mutable {
+            field_types1.push(field2.ld_type);
+            field_types1.push(field1.ld_type);
+            field_types2.push(field1.ld_type);
+            field_types2.push(field2.ld_type);
+        } else {
+            field_types1.push(field1.ld_type);
+            field_types2.push(field2.ld_type);
+        }
     }
 
     // Issues are accumulated by prepending (OCaml list cons order).
@@ -14296,6 +14320,74 @@ mod tests {
     use crate::types::decl::{
         ModuleDeclaration, ModuleType, RecStatus, SignatureItem, TypeDeclaration, TypeKind,
     };
+
+    /// `check_record_fields` (record_coercion.ml:15-58) on records whose
+    /// fields have the given mutability, each field typed by a fresh
+    /// variable: the violations and the paired types, in the order the
+    /// callers pass them to `subtype_list`.
+    fn check_mutability(
+        ctx: &TypeContext,
+        fields: &[(&str, MutableFlag, MutableFlag)],
+    ) -> (
+        Vec<RecordFieldSubtypeViolation>,
+        Vec<(TypeExprRef, TypeExprRef)>,
+        Vec<(TypeExprRef, TypeExprRef)>,
+    ) {
+        let label = |name: &str, mutable: MutableFlag, ty: TypeExprRef| LabelDeclaration {
+            ld_id: ctx.create_ident(name),
+            ld_runtime_name: None,
+            ld_mutable: mutable,
+            ld_optional: false,
+            ld_type: ty,
+            ld_loc: crate::types::DeclLoc::none(),
+            ld_attributes: vec![],
+        };
+        let mut fields1 = Vec::new();
+        let mut fields2 = Vec::new();
+        let mut types = Vec::new();
+        for (name, mutable1, mutable2) in fields {
+            let (ty1, ty2) = (ctx.new_var(None), ctx.new_var(None));
+            fields1.push(label(name, *mutable1, ty1));
+            fields2.push(label(name, *mutable2, ty2));
+            types.push((ty1, ty2));
+        }
+        let (violations, mut tl1, mut tl2) = check_record_fields(&fields1, &fields2);
+        tl1.reverse();
+        tl2.reverse();
+        let pairs = tl1.into_iter().zip(tl2).collect();
+        (violations, pairs, types)
+    }
+
+    #[test]
+    fn record_coercion_rejects_making_a_field_writable() {
+        use MutableFlag::{Immutable, Mutable};
+        let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
+        let (violations, pairs, types) = check_mutability(&ctx, &[("x", Immutable, Mutable)]);
+        assert!(matches!(
+            violations.as_slice(),
+            [RecordFieldSubtypeViolation::MutableMismatch { label }] if label == "x"
+        ));
+        assert_eq!(pairs, vec![types[0]]);
+        // A read-only view of a mutable field is sound.
+        let (violations, pairs, types) = check_mutability(&ctx, &[("x", Mutable, Immutable)]);
+        assert!(violations.is_empty());
+        assert_eq!(pairs, vec![types[0]]);
+    }
+
+    #[test]
+    fn record_coercion_relates_a_field_mutable_in_both_records_both_ways() {
+        use MutableFlag::{Immutable, Mutable};
+        let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
+        let (violations, pairs, types) = check_mutability(
+            &ctx,
+            &[("a", Mutable, Mutable), ("b", Immutable, Immutable)],
+        );
+        assert!(violations.is_empty());
+        let ((a1, a2), (b1, b2)) = (types[0], types[1]);
+        // OCaml's cons lists after the fold over `a` then `b`:
+        // `b1 :: a1 :: a2` and `b2 :: a2 :: a1`.
+        assert_eq!(pairs, vec![(b1, b2), (a1, a2), (a2, a1)]);
+    }
 
     #[test]
     fn repeated_normalization_allocates_fresh_dots_from_cached_resolution() {

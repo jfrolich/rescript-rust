@@ -3715,7 +3715,7 @@ fn print_variant_configuration_issue<W: std::io::Write>(
     }
 }
 
-/// `print_record_field_subtype_violation` (printtyp.ml:1700-1738).
+/// `print_record_field_subtype_violation` (printtyp.ml:1666-1716).
 fn print_record_field_subtype_violation<W: std::io::Write>(
     ppf: &mut Formatter<W>,
     issue: &crate::types::ctype::RecordFieldSubtypeViolation,
@@ -3792,6 +3792,15 @@ fn print_record_field_subtype_violation<W: std::io::Write>(
             info(ppf, &right_record_name.name());
             ppf.str(", but present in record ");
             info(ppf, &left_record_name.name());
+        }
+        V::MutableMismatch { label } => {
+            ppf.str("The field ");
+            info(ppf, label);
+            ppf.str(" is mutable in record ");
+            info(ppf, &right_record_name.name());
+            ppf.str(", but not in record ");
+            info(ppf, &left_record_name.name());
+            ppf.str(". A coercion can't make a field writable.");
         }
     }
 }
