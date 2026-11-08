@@ -1065,8 +1065,14 @@ fn recorded_as_is(module_name: &str, module: &Module, record: Option<&PackageRec
 }
 
 /// Facts about one source module, gathered from the file system.
-pub struct ModuleTimes {
-    recorded: bool,
+pub enum ModuleTimes {
+    /// The previous build did not record the module as it is now: it is
+    /// stale whatever its files say, and so is everything that depends on it.
+    Unrecorded,
+    Recorded(RecordedTimes),
+}
+
+pub struct RecordedTimes {
     newest_input: Option<SystemTime>,
     /// When the JavaScript was last known to be up to date: the oldest output
     /// file's modification time, or the recorded build start if later. `None`
@@ -1104,25 +1110,16 @@ fn compute_module_times(build_state: &BuildCommandState) -> AHashMap<String, Mod
             let package = build_state.get_package(&module.package_name).expect("package");
             let record = previous.and_then(|previous| previous.packages.get(&module.package_name));
             if !recorded_as_is(module_name, module, record) {
-                // Stale whatever its files say, and so is everything that
-                // depends on it.
-                let times = ModuleTimes {
-                    recorded: false,
-                    newest_input: None,
-                    output: None,
-                    js_confirmed_at: None,
-                };
-                return (module_name.clone(), times);
+                return (module_name.clone(), ModuleTimes::Unrecorded);
             }
             let js_confirmed_at = record.and_then(|record| record.js_confirmed_at(module_name));
             let output = oldest_output(module, package, root_config)
                 .map(|oldest| js_confirmed_at.map_or(oldest, |confirmed| oldest.max(confirmed)));
-            let times = ModuleTimes {
-                recorded: true,
+            let times = ModuleTimes::Recorded(RecordedTimes {
                 newest_input: newest_own_input(module, config_times[&module.package_name]),
                 output,
                 js_confirmed_at,
-            };
+            });
             (module_name.clone(), times)
         })
         .collect::<Vec<_>>()
@@ -1150,7 +1147,11 @@ pub fn everything_up_to_date(build_state: &mut BuildCommandState) -> bool {
         else {
             return false;
         };
-        times.recorded && times.output.is_some() && times.newest_input.is_some_and(|newest| newest < started)
+        matches!(
+            times,
+            ModuleTimes::Recorded(RecordedTimes { newest_input: Some(newest), output: Some(_), .. })
+                if *newest < started
+        )
     });
     if up_to_date {
         restore_warnings(build_state, &|_| true);
@@ -1169,10 +1170,15 @@ fn carry_js_confirmed_at(
     up_to_date: &dyn Fn(&str) -> bool,
 ) {
     for (module_name, times) in times {
-        if let Some(confirmed) = times.js_confirmed_at
+        if let ModuleTimes::Recorded(RecordedTimes {
+            js_confirmed_at: Some(confirmed),
+            ..
+        }) = times
             && up_to_date(module_name)
         {
-            build_state.js_confirmed_at.insert(module_name.clone(), confirmed);
+            build_state
+                .js_confirmed_at
+                .insert(module_name.clone(), *confirmed);
         }
     }
 }
@@ -1199,7 +1205,8 @@ pub fn plan(build_state: &mut BuildCommandState) {
             return None;
         }
         let mut newest = match times.get(module_name) {
-            Some(times) => times.newest_input,
+            Some(ModuleTimes::Recorded(times)) => times.newest_input,
+            Some(ModuleTimes::Unrecorded) => None,
             // A namespace map has no sources of its own.
             None => Some(UNIX_EPOCH),
         };
@@ -1241,8 +1248,11 @@ pub fn plan(build_state: &mut BuildCommandState) {
         };
         let mut import_candidates: Vec<(String, Vec<(String, u64)>)> = Vec::new();
         for (module_name, own) in &times {
-            let own_stale = !own.recorded
-                || !matches!((own.newest_input, own.output), (Some(newest), Some(output)) if newest <= output);
+            let own_stale = !matches!(
+                own,
+                ModuleTimes::Recorded(RecordedTimes { newest_input: Some(newest), output: Some(output), .. })
+                    if newest <= output
+            );
             let row = recorded_row(build_state, module_name);
             let unknown_imports =
                 row.is_none_or(|row| row.interface_digest.is_none() || row.imports.is_none());
@@ -1250,7 +1260,7 @@ pub fn plan(build_state: &mut BuildCommandState) {
                 module
                     .deps
                     .iter()
-                    .any(|dep| times.get(dep).is_some_and(|times| !times.recorded))
+                    .any(|dep| matches!(times.get(dep), Some(ModuleTimes::Unrecorded)))
             });
             let import_removed = check_imports
                 && row.and_then(|row| row.imports.as_ref()).is_some_and(|imports| {
@@ -1320,8 +1330,11 @@ pub fn plan(build_state: &mut BuildCommandState) {
         for module_name in names {
             let own = &times[module_name];
             let newest = newest_closure(module_name, build_state, &times, &mut memo, &mut visiting);
-            let up_to_date = own.recorded
-                && matches!((newest, own.output), (Some(newest), Some(output)) if newest <= output);
+            let up_to_date = matches!(
+                (own, newest),
+                (ModuleTimes::Recorded(RecordedTimes { output: Some(output), .. }), Some(newest))
+                    if newest <= *output
+            );
             if !up_to_date {
                 stale.insert(module_name.clone());
             }
