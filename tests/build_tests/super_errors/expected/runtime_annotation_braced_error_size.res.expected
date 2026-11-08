@@ -12,21 +12,11 @@
   12 [2m│[0m 
 
   Signature mismatch:
-  ...
-  At position module type T = <here>
-  Modules do not match:
-    {
-      type foo
-      let x: string
-    }
-  is not included in
-    {
-      type foo
-      let x: int
-    }
-  At position module type T = <here>
-  Values do not match: let x: string is not included in let x: int
-  [36m/.../fixtures/runtime_annotation_braced_error_size.res[0m:[2m4:5-14[0m:
-    Expected declaration
-  [36m/.../fixtures/runtime_annotation_braced_error_size.res[0m:[2m9:5-17[0m:
-    Actual declaration
+  
+  In module type T:
+  
+  Actual declaration ([36m/.../fixtures/runtime_annotation_braced_error_size.res[0m:[2m9:5-17[0m):
+    let x: string
+  
+  Expected declaration ([36m/.../fixtures/runtime_annotation_braced_error_size.res[0m:[2m4:5-14[0m):
+    let x: int

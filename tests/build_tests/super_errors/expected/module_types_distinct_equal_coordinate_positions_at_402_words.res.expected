@@ -11,18 +11,9 @@
   8 [2m│[0m 
 
   Signature mismatch:
-  Modules do not match:
-    {
-      type t = A | B
-      let v: int
-    }
-  is not included in
-    {
-      type t = A | B
-      let v: option<string>
-    }
-  Values do not match: let v: int is not included in let v: option<string>
-  [36m/.../fixtures/module_types_distinct_equal_coordinate_positions_at_402_words.res[0m:[2m3:3-23[0m:
-    Expected declaration
-  [36m/.../fixtures/module_types_distinct_equal_coordinate_positions_at_402_words.res[0m:[2m6:7[0m:
-    Actual declaration
+  
+  Actual declaration ([36m/.../fixtures/module_types_distinct_equal_coordinate_positions_at_402_words.res[0m:[2m6:7[0m):
+    let v: int
+  
+  Expected declaration ([36m/.../fixtures/module_types_distinct_equal_coordinate_positions_at_402_words.res[0m:[2m3:3-23[0m):
+    let v: option<string>

@@ -6,12 +6,11 @@ We've found a bug for you!
 
   The implementation /.../fixtures/Iface_field_arity_mismatch/Foo.res
   does not match the interface /.../fixtures/Iface_field_arity_mismatch/Foo.resi:
-  Type declarations do not match:
+  
+  Actual declaration (/.../fixtures/Iface_field_arity_mismatch/Foo.res:1:1-19):
     type t = A(int) | B
-  is not included in
+  
+  Expected declaration (/.../fixtures/Iface_field_arity_mismatch/Foo.resi:1:1-24):
     type t = A(int, int) | B
-  /.../fixtures/Iface_field_arity_mismatch/Foo.resi:1:1-24:
-    Expected declaration
-  /.../fixtures/Iface_field_arity_mismatch/Foo.res:1:1-19:
-    Actual declaration
+  
   The arities for constructor A differ.

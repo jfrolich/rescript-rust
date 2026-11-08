@@ -15,24 +15,9 @@
   10 [2m│[0m 
 
   Signature mismatch:
-  Modules do not match:
-    {
-      type aVeryLongTypeNameThatHasTheSameShapeAsAShortOne = {
-        aVeryLongFieldNameThatGoesOnAndOnAndOn0: int,
-        aVeryLongFieldNameThatGoesOnAndOnAndOn1: int,
-      }
-      let v: int
-    }
-  is not included in
-    {
-      type aVeryLongTypeNameThatHasTheSameShapeAsAShortOne = {
-        aVeryLongFieldNameThatGoesOnAndOnAndOn0: int,
-        aVeryLongFieldNameThatGoesOnAndOnAndOn1: int,
-      }
-      let v: string
-    }
-  Values do not match: let v: int is not included in let v: string
-  [36m/.../fixtures/module_types_long_names_not_elided.res[0m:[2m5:3-15[0m:
-    Expected declaration
-  [36m/.../fixtures/module_types_long_names_not_elided.res[0m:[2m8:7[0m:
-    Actual declaration
+  
+  Actual declaration ([36m/.../fixtures/module_types_long_names_not_elided.res[0m:[2m8:7[0m):
+    let v: int
+  
+  Expected declaration ([36m/.../fixtures/module_types_long_names_not_elided.res[0m:[2m5:3-15[0m):
+    let v: string

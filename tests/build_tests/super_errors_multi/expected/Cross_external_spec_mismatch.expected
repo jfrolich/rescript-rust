@@ -6,11 +6,9 @@ We've found a bug for you!
 
   The implementation /.../fixtures/Cross_external_spec_mismatch/Specmismatch.res
   does not match the interface /.../fixtures/Cross_external_spec_mismatch/Specmismatch.resi:
-  Values do not match:
+  
+  Actual declaration (/.../fixtures/Cross_external_spec_mismatch/Specmismatch.res:1:1-46):
     @val @module("m") external f: int => int = "f"
-  is not included in
+  
+  Expected declaration (/.../fixtures/Cross_external_spec_mismatch/Specmismatch.resi:1:1-33):
     @val external f: int => int = "f"
-  /.../fixtures/Cross_external_spec_mismatch/Specmismatch.resi:1:1-33:
-    Expected declaration
-  /.../fixtures/Cross_external_spec_mismatch/Specmismatch.res:1:1-46:
-    Actual declaration

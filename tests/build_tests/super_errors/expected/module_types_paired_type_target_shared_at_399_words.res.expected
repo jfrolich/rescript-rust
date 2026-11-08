@@ -12,23 +12,11 @@
   17 [2m│[0m 
 
   Signature mismatch:
-  ...
+  
   In module N:
-  Modules do not match:
-    {
-      let a0: (t, t)
-      let a1: (t, t, t)
-      let v: int
-    }
-  is not included in
-    {
-      let a0: (t, t)
-      let a1: (t, t, t)
-      let v: string
-    }
-  In module N:
-  Values do not match: let v: int is not included in let v: string
-  [36m/.../fixtures/module_types_paired_type_target_shared_at_399_words.res[0m:[2m7:5-17[0m:
-    Expected declaration
-  [36m/.../fixtures/module_types_paired_type_target_shared_at_399_words.res[0m:[2m14:9[0m:
-    Actual declaration
+  
+  Actual declaration ([36m/.../fixtures/module_types_paired_type_target_shared_at_399_words.res[0m:[2m14:9[0m):
+    let v: int
+  
+  Expected declaration ([36m/.../fixtures/module_types_paired_type_target_shared_at_399_words.res[0m:[2m7:5-17[0m):
+    let v: string

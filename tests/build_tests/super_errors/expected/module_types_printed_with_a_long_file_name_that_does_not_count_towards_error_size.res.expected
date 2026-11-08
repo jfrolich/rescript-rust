@@ -11,18 +11,9 @@
   9 [2m│[0m 
 
   Signature mismatch:
-  Modules do not match:
-    {
-      type t = {f0: int, f1: int}
-      let v: int
-    }
-  is not included in
-    {
-      type t = {f0: int, f1: int}
-      let v: string
-    }
-  Values do not match: let v: int is not included in let v: string
-  [36m/.../fixtures/module_types_printed_with_a_long_file_name_that_does_not_count_towards_error_size.res[0m:[2m4:3-15[0m:
-    Expected declaration
-  [36m/.../fixtures/module_types_printed_with_a_long_file_name_that_does_not_count_towards_error_size.res[0m:[2m7:7[0m:
-    Actual declaration
+  
+  Actual declaration ([36m/.../fixtures/module_types_printed_with_a_long_file_name_that_does_not_count_towards_error_size.res[0m:[2m7:7[0m):
+    let v: int
+  
+  Expected declaration ([36m/.../fixtures/module_types_printed_with_a_long_file_name_that_does_not_count_towards_error_size.res[0m:[2m4:3-15[0m):
+    let v: string

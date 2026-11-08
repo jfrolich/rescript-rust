@@ -11,28 +11,11 @@ We've found a bug for you!
   18 │ 
 
   Signature mismatch:
-  ...
-  At position module type T = <here>
-  Modules do not match:
-    {
-      module N1: Dep.Sub.S
-      module N2: Dep.Sub.S
-      module type N3 = Dep.Sub.S
-      let x: string
-    }
-  is not included in
-    {
-      module N1: Dep.Sub.S
-      module N2: Dep.Sub.S
-      module type N3 = Dep.Sub.S
-      let x: (~a: int) => int
-    }
-  At position module type T = <here>
-  Values do not match:
+  
+  In module type T:
+  
+  Actual declaration (/.../fixtures/Cross_opened_module_type_error_size/Use.res:15:5-17):
     let x: string
-  is not included in
+  
+  Expected declaration (/.../fixtures/Cross_opened_module_type_error_size/Use.res:7:5-27):
     let x: (~a: int) => int
-  /.../fixtures/Cross_opened_module_type_error_size/Use.res:7:5-27:
-    Expected declaration
-  /.../fixtures/Cross_opened_module_type_error_size/Use.res:15:5-17:
-    Actual declaration

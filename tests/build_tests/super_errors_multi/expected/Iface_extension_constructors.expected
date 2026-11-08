@@ -3,11 +3,9 @@ We've found a bug for you!
 
   The implementation /.../fixtures/Iface_extension_constructors/Foo.res
   does not match the interface /.../fixtures/Iface_extension_constructors/Foo.resi:
-  Extension declarations do not match:
+  
+  Actual declaration (/.../fixtures/Iface_extension_constructors/Foo.res:4:3-16):
     type t += Boom(string)
-  is not included in
+  
+  Expected declaration (/.../fixtures/Iface_extension_constructors/Foo.resi:4:3-13):
     type t += Boom(int)
-  /.../fixtures/Iface_extension_constructors/Foo.res:
-    Expected declaration
-  /.../fixtures/Iface_extension_constructors/Foo.res:4:3-16:
-    Actual declaration

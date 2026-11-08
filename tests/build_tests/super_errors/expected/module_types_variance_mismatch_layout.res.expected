@@ -10,20 +10,11 @@
   7 [2m│[0m 
 
   Signature mismatch:
-  Modules do not match:
-    {
-      type t<'a> = 'a => unit
-    }
-  is not included in
-    {
-      type t<+'a>
-    }
-  Type declarations do not match:
+  
+  Actual declaration ([36m/.../fixtures/module_types_variance_mismatch_layout.res[0m:[2m5:3-25[0m):
     type t<'a> = 'a => unit
-  is not included in
+  
+  Expected declaration ([36m/.../fixtures/module_types_variance_mismatch_layout.res[0m:[2m3:3-13[0m):
     type t<+'a>
-  [36m/.../fixtures/module_types_variance_mismatch_layout.res[0m:[2m3:3-13[0m:
-    Expected declaration
-  [36m/.../fixtures/module_types_variance_mismatch_layout.res[0m:[2m5:3-25[0m:
-    Actual declaration
+  
   Their variances do not agree.
