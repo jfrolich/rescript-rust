@@ -424,20 +424,17 @@ fn compare_longident(arena: &ParseArena, left: &Longident, right: &Longident) ->
     }
 }
 
+/// OCaml `Datarepr.constructor_args`' `type_params` of an inline record
+/// (datarepr.ml:73-75).
 pub(crate) fn inline_record_type_params(
     ctx: &TypeContext,
-    parent_type_params: &[TypeExprRef],
     labels: &[crate::types::LabelDeclaration],
 ) -> Vec<TypeExprRef> {
-    parent_type_params
-        .iter()
-        .copied()
-        .filter(|param| {
-            labels
-                .iter()
-                .any(|label| crate::types::ctype::deep_occur(ctx, *param, label.ld_type))
-        })
-        .collect()
+    // datarepr.ml:73-75: `free_vars ~param:true` of the fields' types, not
+    // the parent declaration's parameters: a GADT constructor's fields
+    // mention its own variables, existentials included.
+    let field_types: Vec<TypeExprRef> = labels.iter().map(|label| label.ld_type).collect();
+    crate::types::env::free_vars_param(ctx, &field_types)
 }
 
 // ============================================================================
@@ -16489,7 +16486,7 @@ fn inline_record_decl_from_variant_type(
             let crate::types::ConstructorArguments::CstrRecord(ref labels) = cd.cd_args else {
                 return None;
             };
-            let inline_params = inline_record_type_params(ctx, &type_decl.type_params, labels);
+            let inline_params = inline_record_type_params(ctx, labels);
             let inline_repr =
                 if type_decl.type_representation == crate::types::TypeRepresentation::Unboxed {
                     // compiler/ml/datarepr.ml:163-164: unboxed inline records use `Record_unboxed true`.
@@ -26419,35 +26416,32 @@ fn lookup_constructor_by_expected_type(
                                 copied
                             })
                             .collect();
-                        // Use ORIGINAL labels for param detection (deep_occur
-                        // needs physical identity between params and label types).
-                        // Then deep-copy the detected params using the same cache
-                        // so they match the copied labels.
-                        let inline_params =
-                            inline_record_type_params(ctx, &concrete_type_decl.type_params, labels)
-                                .into_iter()
-                                .map(|param| {
-                                    let copied = crate::types::ctype::copy_type_deep(
+                        // The parameters are the original labels' free variables
+                        // (datarepr.ml:73-75), deep-copied with the labels' cache
+                        // so that they match the copied labels.
+                        let inline_params = inline_record_type_params(ctx, labels)
+                            .into_iter()
+                            .map(|param| {
+                                let copied = crate::types::ctype::copy_type_deep(
+                                    ctx,
+                                    param,
+                                    &mut inst_cache,
+                                );
+                                if let Some(module_path) = constructor_module_access_path.as_ref()
+                                {
+                                    let mut visited = HashSet::new();
+                                    qualify_module_local_type_paths_in_place(
                                         ctx,
-                                        param,
-                                        &mut inst_cache,
+                                        env,
+                                        pers_env,
+                                        copied,
+                                        module_path,
+                                        &mut visited,
                                     );
-                                    if let Some(module_path) =
-                                        constructor_module_access_path.as_ref()
-                                    {
-                                        let mut visited = HashSet::new();
-                                        qualify_module_local_type_paths_in_place(
-                                            ctx,
-                                            env,
-                                            pers_env,
-                                            copied,
-                                            module_path,
-                                            &mut visited,
-                                        );
-                                    }
-                                    copied
-                                })
-                                .collect::<Vec<_>>();
+                                }
+                                copied
+                            })
+                            .collect::<Vec<_>>();
                         let inline_path =
                             Path::pdot(concrete_type_path.clone(), cstr_name.to_string());
                         let inline_constr =
@@ -29299,8 +29293,7 @@ fn lookup_type_decl_for_path_with_cache_mode<'a>(
                     if cd.cd_id.name() == type_name.as_str() {
                         if let crate::types::ConstructorArguments::CstrRecord(labels) = &cd.cd_args
                         {
-                            let inline_params =
-                                inline_record_type_params(ctx, &parent_decl.type_params, labels);
+                            let inline_params = inline_record_type_params(ctx, labels);
                             return Some(Arc::new(crate::types::TypeDeclaration {
                                 type_params: inline_params.clone(),
                                 type_arity: inline_params.len() as i32,

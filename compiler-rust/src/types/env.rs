@@ -74,6 +74,70 @@ fn free_vars_rec(
     }
 }
 
+/// OCaml `Datarepr.free_vars ~param:true (newgenty (Ttuple tys))`
+/// (datarepr.ml:24-44) as `Type_set.elements`: the free type variables of
+/// `tys`, where a non-static polymorphic variant whose row variable is free
+/// counts as one parameter itself, ordered by node (allocation order,
+/// OCaml's `type_expr.id`).
+pub(crate) fn free_vars_param(ctx: &TypeContext, tys: &[TypeExprRef]) -> Vec<TypeExprRef> {
+    fn walk(
+        ctx: &TypeContext,
+        ty: TypeExprRef,
+        result: &mut Vec<TypeExprRef>,
+        visited: &mut HashSet<TypeExprRef>,
+    ) {
+        let ty = ctx.repr(ty);
+        if !visited.insert(ty) {
+            return;
+        }
+        let desc = ctx.get_desc(ty).into_desc();
+        match desc {
+            TypeDesc::Tvar(..) => result.push(ty),
+            TypeDesc::Tvariant(row) => {
+                let row = super::btype::row_repr(ctx, &row);
+                // `iter_row loop row`: the fields, and the name's arguments.
+                for (_, field) in row.row_fields.iter() {
+                    match super::btype::row_field_repr(ctx, field) {
+                        super::type_expr::RowField::Rpresent(Some(arg)) => {
+                            walk(ctx, arg, result, visited)
+                        }
+                        super::type_expr::RowField::Reither { types, .. } => {
+                            for arg in types.iter() {
+                                walk(ctx, *arg, result, visited);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                if let Some((_, args)) = &row.row_name {
+                    for arg in args.iter() {
+                        walk(ctx, *arg, result, visited);
+                    }
+                }
+                if !super::btype::static_row(ctx, &row) {
+                    let more = ctx.repr(row.row_more);
+                    if matches!(&*ctx.get_desc(more), TypeDesc::Tvar(..)) {
+                        result.push(ty);
+                    } else {
+                        walk(ctx, more, result, visited);
+                    }
+                }
+            }
+            _ => super::btype::iter_type_expr(ctx, ty, |child| {
+                walk(ctx, child, result, visited);
+            }),
+        }
+    }
+    let mut result = Vec::new();
+    let mut visited = HashSet::new();
+    for &ty in tys {
+        walk(ctx, ty, &mut result, &mut visited);
+    }
+    result.sort_by_key(|ty| ty.0);
+    result.dedup();
+    result
+}
+
 /// Compute existential type variables for a GADT constructor.
 /// Existentials are type variables that appear in the args but not in the result type.
 /// Matches OCaml's Datarepr.constructor_existentials.

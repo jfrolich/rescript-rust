@@ -537,7 +537,6 @@ fn rebind_constructor_arguments(
 fn rebound_constructor_args(
     ctx: &crate::types::context::TypeContext,
     path: &Path,
-    parent_type_params: &[TypeExprRef],
     ext_args: &crate::types::ConstructorArguments,
 ) -> (
     Option<Vec<TypeExprRef>>,
@@ -546,7 +545,7 @@ fn rebound_constructor_args(
     let crate::types::ConstructorArguments::CstrRecord(labels) = ext_args else {
         return (None, None);
     };
-    let type_params = inline_record_type_params(ctx, parent_type_params, labels);
+    let type_params = inline_record_type_params(ctx, labels);
     let inline_ty = ctx.new_generic_constr(path.clone(), type_params.clone());
     let decl = crate::types::TypeDeclaration {
         type_arity: type_params.len() as i32,
@@ -1370,18 +1369,13 @@ fn collect_functor_arg_module_aliases(
 
 fn inline_record_type_params(
     ctx: &crate::types::context::TypeContext,
-    parent_type_params: &[TypeExprRef],
     labels: &[crate::types::LabelDeclaration],
 ) -> Vec<TypeExprRef> {
-    parent_type_params
-        .iter()
-        .copied()
-        .filter(|param| {
-            labels
-                .iter()
-                .any(|label| crate::types::ctype::deep_occur(ctx, *param, label.ld_type))
-        })
-        .collect()
+    // datarepr.ml:73-75: `free_vars ~param:true` of the fields' types, not
+    // the parent declaration's parameters: a GADT constructor's fields
+    // mention its own variables, existentials included.
+    let field_types: Vec<TypeExprRef> = labels.iter().map(|label| label.ld_type).collect();
+    crate::types::env::free_vars_param(ctx, &field_types)
 }
 
 /// The most recently interned arena location equal to `target`.
@@ -17616,12 +17610,8 @@ fn transl_type_extension<'a>(
                 let ext_args = rebind_constructor_arguments(tctx, &rebind_desc, &inst_args);
                 // `Datarepr.extension_descr` -> `constructor_args`
                 // (compiler/ml/datarepr.ml:64-92).
-                let (cstr_args, cstr_inlined) = rebound_constructor_args(
-                    ctx,
-                    &Path::pident(id),
-                    &typed_param_type_refs,
-                    &ext_args,
-                );
+                let (cstr_args, cstr_inlined) =
+                    rebound_constructor_args(ctx, &Path::pident(id), &ext_args);
                 (
                     crate::types::typedtree::ExtensionConstructorKind::Text_rebind(
                         rebind_path,
@@ -18416,11 +18406,8 @@ fn type_structure_item<'a>(
                                             // Mirror OCaml datarepr.constructor_args for inline records:
                                             // cstr_args = [Tconstr(type_path.Constructor, params)],
                                             // cstr_inlined = Some synthetic record declaration.
-                                            let inline_params = inline_record_type_params(
-                                                ctx,
-                                                &internal_type_params,
-                                                inline_lbls,
-                                            );
+                                            let inline_params =
+                                                inline_record_type_params(ctx, inline_lbls);
                                             let position = internal_cstrs.len() - 1;
                                             let inline_decl = crate::types::TypeDeclaration {
                                                 type_params: inline_params.clone(),
@@ -18772,8 +18759,7 @@ fn type_structure_item<'a>(
                                 if let crate::types::ConstructorArguments::CstrRecord(ref lbls) =
                                     internal_cd_args
                                 {
-                                    let inline_params =
-                                        inline_record_type_params(ctx, &internal_type_params, lbls);
+                                    let inline_params = inline_record_type_params(ctx, lbls);
                                     // Build path: Pdot(Pident(type_name), cstr_name)
                                     let inline_path =
                                         Path::pdot(type_path.clone(), cstr_name_str.to_string());
@@ -19888,7 +19874,7 @@ fn type_structure_item<'a>(
                     // (compiler/ml/datarepr.ml:64-92): an inline record
                     // becomes a record type at the new constructor's path.
                     let (cstr_args, cstr_inlined) =
-                        rebound_constructor_args(ctx, &Path::pident(id), &[], &ext_args);
+                        rebound_constructor_args(ctx, &Path::pident(id), &ext_args);
                     (
                         crate::types::typedtree::ExtensionConstructorKind::Text_rebind(
                             rebind_path,

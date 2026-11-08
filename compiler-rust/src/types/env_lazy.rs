@@ -320,8 +320,7 @@ fn build_type_constructors(
                 (args.clone(), args.len() as i32, None)
             }
             super::decl::ConstructorArguments::CstrRecord(labels) => {
-                let inline_params =
-                    super::typecore::inline_record_type_params(ctx, &decl.type_params, labels);
+                let inline_params = super::typecore::inline_record_type_params(ctx, labels);
                 let inline_path = Path::pdot(type_path.clone(), cd.cd_id.name());
                 let inline_constr = ctx.new_generic_constr(inline_path, inline_params.clone());
                 let inline_decl = TypeDeclaration {
@@ -499,11 +498,7 @@ fn build_constructors_for_name(
                         (args.clone(), args.len() as i32, None)
                     }
                     super::decl::ConstructorArguments::CstrRecord(labels) => {
-                        let inline_params = super::typecore::inline_record_type_params(
-                            ctx,
-                            &ext.ext_type_params,
-                            labels,
-                        );
+                        let inline_params = super::typecore::inline_record_type_params(ctx, labels);
                         let inline_path = ext_path.clone();
                         let inline_constr =
                             ctx.new_generic_constr(inline_path.clone(), inline_params.clone());

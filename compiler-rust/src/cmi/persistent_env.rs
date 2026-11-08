@@ -7816,21 +7816,6 @@ fn add_signature_to_env_with_options_inner(
         substitute_type_paths_in_sig(sig_items, module_path, ctx);
     }
 
-    fn inline_record_type_params(
-        ctx: &TypeContext,
-        parent_type_params: &[TypeExprRef],
-        labels: &[crate::types::LabelDeclaration],
-    ) -> Vec<TypeExprRef> {
-        parent_type_params
-            .iter()
-            .copied()
-            .filter(|param| {
-                labels
-                    .iter()
-                    .any(|label| crate::types::ctype::deep_occur(ctx, *param, label.ld_type))
-            })
-            .collect()
-    }
 
     // OCaml's components_of_module_maker uses a selective position counter:
     // only value-bearing items (non-primitive values, modules, extension constructors)
@@ -7924,7 +7909,9 @@ fn add_signature_to_env_with_options_inner(
                             let inline_record = match &cd.cd_args {
                                 crate::types::decl::ConstructorArguments::CstrRecord(labels) => {
                                     let inline_params =
-                                        inline_record_type_params(ctx, &decl.type_params, labels);
+                                        crate::types::typecore::inline_record_type_params(
+                                            ctx, labels,
+                                        );
                                     let inline_path =
                                         Path::pdot(type_path.clone(), cd.cd_id.name());
                                     let inline_decl = crate::types::TypeDeclaration {
