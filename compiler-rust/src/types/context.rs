@@ -530,6 +530,9 @@ pub struct TypeContext {
     store_build_effects: RefCell<Vec<StoreEffect>>,
     /// Shared pieces whose effects this compilation has already applied.
     touched_store_pieces: RefCell<crate::fast_hash::AHashSet<u64>>,
+    /// The local stamp each store binder this compilation built or replayed
+    /// stands for (see [`StoreStampOrigins`]).
+    store_stamp_origins: RefCell<StoreStampOrigins>,
     /// Component tables of store-resident modules whose build read state
     /// private to this compilation, so they could not be published to the
     /// worker store. Keyed by `StoredModuleComponents` id; reused for the rest
@@ -855,8 +858,9 @@ pub struct TypeContext {
 /// forced pieces) evolves exactly as if it had built the data itself.
 #[derive(Debug, Clone)]
 pub(crate) enum StoreEffect {
-    /// Local identifier stamps consumed.
-    Stamps(i32),
+    /// Binders created: their store stamps, in creation order. Each consumed
+    /// one local identifier stamp.
+    Stamps(Vec<i32>),
     /// A shared piece forced while building this one.
     Piece(Arc<StorePiece>),
     /// A component view registered in this compilation's component cache.
@@ -886,6 +890,29 @@ pub(crate) enum StoreEffect {
 pub(crate) struct StorePiece {
     id: u64,
     effects: Vec<StoreEffect>,
+}
+
+/// Which local stamp each store binder of a compilation stands for.
+///
+/// A binder built into the worker store gets a stamp of the process-wide
+/// store range (`thread_store::next_store_stamp`), so it is never
+/// `Ident::same` as an identifier of another compilation sharing it, while
+/// the compilation's own stamp stream advances as if it had renamed the
+/// identifier itself, and so does the stream of every compilation that later
+/// uses the piece. In OCaml each compilation builds that data itself
+/// (`compiler/ml/env.ml:1513-1588`, `compiler/ml/subst.ml:310-345`), so the
+/// binder has the stamp the compilation's stream skipped. Which store stamp a
+/// binder got depends on the order in which worker threads built shared data;
+/// a signature a compilation publishes (which can mention store binders, e.g.
+/// a functor application's result) saves the local stamps instead
+/// (`TypeContext::saved_store_stamps`), as OCaml's `.cmi` would.
+#[derive(Default)]
+struct StoreStampOrigins {
+    /// `(store stamp, local stamp)` of binders this compilation built.
+    built: Vec<(i32, i32)>,
+    /// Runs of binders this compilation replayed: the piece, the index of
+    /// its `StoreEffect::Stamps` effect, and the local stamp of the first.
+    replayed: Vec<(Arc<StorePiece>, usize, i32)>,
 }
 
 pub(crate) fn store_debug_enabled() -> bool {
@@ -1066,6 +1093,7 @@ impl TypeContext {
             store_build_poisoned: Cell::new(false),
             store_build_effects: RefCell::new(Vec::new()),
             touched_store_pieces: RefCell::new(crate::fast_hash::AHashSet::new()),
+            store_stamp_origins: RefCell::new(StoreStampOrigins::default()),
             local_stored_components: RefCell::new(crate::fast_hash::AHashMap::new()),
             mutation_journal: RefCell::new(TypeMutationJournal::default()),
             mutation_logging: TrailLogging::default(),
@@ -3766,13 +3794,17 @@ impl TypeContext {
     /// the binder gets a store stamp so it can never be `Ident::same` as an
     /// identifier of another compilation.
     fn store_binder(&self, id: &Ident) -> Ident {
-        self.id_gen.next_stamp();
+        let local = self.id_gen.next_stamp();
+        let stamp = super::thread_store::next_store_stamp();
         let mut effects = self.store_build_effects.borrow_mut();
         match effects.last_mut() {
-            Some(StoreEffect::Stamps(count)) => *count += 1,
-            _ => effects.push(StoreEffect::Stamps(1)),
+            Some(StoreEffect::Stamps(stamps)) => stamps.push(stamp),
+            _ => effects.push(StoreEffect::Stamps(vec![stamp])),
         }
-        let stamp = super::thread_store::next_store_stamp();
+        self.store_stamp_origins
+            .borrow_mut()
+            .built
+            .push((stamp, local));
         let mut fresh = id.with_stamp(stamp);
         if id.is_persistent() {
             fresh = Ident::new(id.name(), stamp, crate::ident::IdentFlags::NONE);
@@ -4095,14 +4127,20 @@ impl TypeContext {
         self.suspend_store_build(|| self.replay_store_piece(piece));
     }
 
-    fn replay_store_piece(&self, piece: &StorePiece) {
+    fn replay_store_piece(&self, piece: &Arc<StorePiece>) {
         if !self.touched_store_pieces.borrow_mut().insert(piece.id) {
             return;
         }
-        for effect in &piece.effects {
+        for (index, effect) in piece.effects.iter().enumerate() {
             match effect {
-                StoreEffect::Stamps(count) => {
-                    self.id_gen.advance_stamp_by(*count);
+                StoreEffect::Stamps(stamps) => {
+                    let count = stamps.len() as i32;
+                    let last = self.id_gen.advance_stamp_by(count);
+                    self.store_stamp_origins.borrow_mut().replayed.push((
+                        piece.clone(),
+                        index,
+                        last - count + 1,
+                    ));
                 }
                 StoreEffect::Piece(inner) => self.replay_store_piece(inner),
                 StoreEffect::RegisterComponents(key, components) => {
@@ -4124,6 +4162,25 @@ impl TypeContext {
                 }
             }
         }
+    }
+
+    /// The local stamp of each store binder this compilation built or
+    /// replayed, by store stamp (see [`StoreStampOrigins`]).
+    pub(crate) fn saved_store_stamps(&self) -> crate::fast_hash::AHashMap<i32, i32> {
+        let origins = self.store_stamp_origins.borrow();
+        let mut stamps: crate::fast_hash::AHashMap<i32, i32> =
+            origins.built.iter().copied().collect();
+        for (piece, index, first) in &origins.replayed {
+            if let StoreEffect::Stamps(store) = &piece.effects[*index] {
+                stamps.extend(
+                    store
+                        .iter()
+                        .zip(*first..)
+                        .map(|(store, local)| (*store, local)),
+                );
+            }
+        }
+        stamps
     }
 
     /// Record an effect of the current store build on this compilation.

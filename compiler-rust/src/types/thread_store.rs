@@ -57,7 +57,7 @@ pub fn build_generation() -> u64 {
 /// First binder stamp handed out to identifiers created while building shared
 /// store data. Compilation-local stamps restart per unit and stay far below
 /// this range, so a shared binder can never be `Ident::same` as a local one.
-const STORE_STAMP_BASE: i32 = 1 << 29;
+const STORE_STAMP_BASE: i32 = crate::ident::STORE_STAMP_BASE;
 
 /// Binder stamps of shared store data, unique across all workers of the
 /// process (shared data never leaves its worker, but a unit's published

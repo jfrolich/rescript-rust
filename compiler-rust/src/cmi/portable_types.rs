@@ -202,14 +202,35 @@ impl PortablePersStruct {
         raw: Option<PortableRawSignature>,
         fingerprint: u64,
     ) -> Self {
+        Self::encode(
+            ps_name,
+            ps_filename,
+            ps_deprecated,
+            ps_crcs,
+            &sig,
+            raw.as_ref(),
+            fingerprint,
+        )
+    }
+
+    /// [`Self::new`] from borrowed signatures.
+    fn encode(
+        ps_name: String,
+        ps_filename: String,
+        ps_deprecated: Option<String>,
+        ps_crcs: Vec<(String, Option<[u8; 16]>)>,
+        sig: &PortableSignature,
+        raw: Option<&PortableRawSignature>,
+        fingerprint: u64,
+    ) -> Self {
         PortablePersStruct {
             ps_name,
             ps_filename,
             ps_deprecated,
             ps_crcs,
             shareable: graph_is_shareable(&sig.type_graph),
-            sig: crate::binser::Encoded::encode(&sig),
-            raw: raw.as_ref().map(crate::binser::Encoded::encode),
+            sig: crate::binser::Encoded::encode(sig),
+            raw: raw.map(crate::binser::Encoded::encode),
             fingerprint,
         }
     }
@@ -720,26 +741,46 @@ pub fn serialize_pers_struct(
         .find_raw_module_sig(&ps.ps_name)
         .map(|raw_sig| serialize_signature(&raw_sig, ctx, arena, &mut file_names));
     let fingerprint = compute_type_graph_fingerprint(&HashGraph::of(&type_graph), &sig);
-    PortablePersStruct::new(
-        ps.ps_name.clone(),
-        ps.ps_filename.clone(),
-        ps.ps_deprecated.clone(),
-        ps.ps_crcs.clone(),
-        PortableSignature {
-            ps_sig: sig,
-            cmi_longident_names: file_names.names,
-            type_graph,
-            locations,
+    let sig = PortableSignature {
+        ps_sig: sig,
+        cmi_longident_names: file_names.names,
+        type_graph,
+        locations,
+    };
+    let raw = raw.map(
+        |(raw_ps_sig, raw_type_graph, raw_locations)| PortableRawSignature {
+            raw_ps_sig,
+            raw_type_graph,
+            raw_locations,
         },
-        raw.map(
-            |(raw_ps_sig, raw_type_graph, raw_locations)| PortableRawSignature {
-                raw_ps_sig,
-                raw_type_graph,
-                raw_locations,
-            },
-        ),
-        fingerprint,
-    )
+    );
+    let encode = || {
+        PortablePersStruct::encode(
+            ps.ps_name.clone(),
+            ps.ps_filename.clone(),
+            ps.ps_deprecated.clone(),
+            ps.ps_crcs.clone(),
+            &sig,
+            raw.as_ref(),
+            fingerprint,
+        )
+    };
+    // Store binders the signature mentions are saved with the local stamps
+    // they stand for (see `TypeContext::saved_store_stamps`); most
+    // signatures mention none, so the table is only built for those that do.
+    let (portable, has_store_stamps) =
+        crate::ident::saving_store_stamps(Default::default(), encode);
+    if !has_store_stamps {
+        return portable;
+    }
+    let (portable, unmapped) = crate::ident::saving_store_stamps(ctx.saved_store_stamps(), encode);
+    if unmapped {
+        log::debug!(
+            "the signature of {} keeps a store stamp this compilation did not build or replay",
+            ps.ps_name
+        );
+    }
+    portable
 }
 
 /// Serialize `sig` with its location table, adding the file names of its
