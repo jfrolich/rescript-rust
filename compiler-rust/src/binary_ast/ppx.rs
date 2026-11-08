@@ -9006,9 +9006,8 @@ fn deriving_process_derive_type<'t>(
 }
 
 /// `Ast_tdcls.handle_tdcls_in_stru`/`handle_tdcls_in_sigi`
-/// (ast_tdcls.ml:38-108) after the declarations are mapped:
-/// `Ast_derive_abstract.is_abstract`, then either the abstract expansion or,
-/// action by action, `Ast_payload.table_dispatch` and the deriver's
+/// (ast_tdcls.ml:38-108) after the declarations are mapped: action by action,
+/// `Ast_derive.dispatch` (ast_derive.ml:48-64) and the deriver's
 /// `structure_gen` (structures only) and `signature_gen`.
 fn run_derivers(
     tdcls: &[TypeDeclaration],
@@ -9022,35 +9021,35 @@ fn run_derivers(
     }
     let actions = deriving_config_actions(payload, arena)?;
     for action in &actions {
+        // `Ast_derive.dispatch`: the derivers `@deriving(...)` supports, by
+        // name.
         match action.name.as_str() {
-            // `Ast_derive_projector` (ast_derive_projector.ml:17-137).
             "accessors" => {
+                // `Ast_derive_projector.check_config`
+                // (ast_derive_projector.ml:3-8).
                 if let Some(config) = action.config {
                     return Err(PpxError::at_loc(
                         arena.get_expr(config).pexp_loc,
-                        "such configuration is not supported",
+                        "@deriving(accessors) takes no configuration.",
                     ));
                 }
+                // `Ast_derive_projector.structure_gen` and `signature_gen`
+                // (ast_derive_projector.ml:20-146).
                 if in_structure {
                     accessors_gen(tdcls, warnings)?;
                 }
                 accessors_gen(tdcls, warnings)?;
             }
-            // `Ast_derive.dispatch` (compiler/frontend/ast_derive.ml): the
-            // derivers that used to be built in get a dedicated error.
-            name if removed_deriver_hint(name).is_some() => {
-                return Err(PpxError::at_loc(
-                    action.name_loc,
-                    format!(
-                        "@deriving({name}) has been removed. {}",
-                        removed_deriver_hint(name).unwrap_or_default()
-                    ),
-                ));
-            }
+            // The derivers that used to be built in get a dedicated error.
             name => {
                 return Err(PpxError::at_loc(
                     action.name_loc,
-                    format!("{name} is not supported"),
+                    match removed_deriver_hint(name) {
+                        Some(hint) => format!("@deriving({name}) has been removed. {hint}"),
+                        None => format!(
+                            "@deriving({name}) is not supported. The only deriver is @deriving(accessors)."
+                        ),
+                    },
                 ));
             }
         }
@@ -11493,6 +11492,73 @@ mod tests {
             rewrite_error(nested_top_level, true),
             Some((LET_UNWRAP_TOPLEVEL_ERROR.to_string(), 2, 7))
         );
+    }
+
+    /// `Ast_derive.dispatch` (ast_derive.ml:48-64) resolves a deriver by
+    /// name: accessors rejects any configuration at the configuration's
+    /// location, a removed deriver points to its replacement and any other
+    /// name is unsupported at the name's location, in structures and
+    /// signatures alike.
+    #[test]
+    fn deriving_dispatch_errors_name_the_deriver() {
+        let located = |arena: &ParseArena, error: PpxError| {
+            let loc = error.loc().expect("the error has a location");
+            let start = arena.loc_start(loc);
+            let end = arena.loc_end(loc);
+            (
+                error.message_text().to_string(),
+                start.line,
+                start.cnum - start.bol,
+                end.cnum - end.bol,
+            )
+        };
+        let structure_error = |source: &str| {
+            let (mut arena, structure) = parse_structure(source);
+            let error = rewrite_structure(&structure, &mut arena, false)
+                .err()
+                .expect("the deriver is rejected");
+            located(&arena, error)
+        };
+        let signature_error = |source: &str| {
+            let mut parser = Parser::new("test.resi", source);
+            let signature = module::parse_signature(&mut parser);
+            assert!(
+                !parser.has_errors(),
+                "parser errors: {:?}",
+                parser.diagnostics()
+            );
+            let mut arena = parser.into_arena();
+            let error = rewrite_signature(&signature, &mut arena, false)
+                .err()
+                .expect("the deriver is rejected");
+            located(&arena, error)
+        };
+        let unknown = "@deriving(lenses)\ntype t = {name: string}\n";
+        let unknown_error = (
+            "@deriving(lenses) is not supported. The only deriver is @deriving(accessors)."
+                .to_string(),
+            1,
+            10,
+            16,
+        );
+        assert_eq!(structure_error(unknown), unknown_error);
+        assert_eq!(signature_error(unknown), unknown_error);
+        let config = "@deriving({accessors: true})\ntype t = {name: string}\n";
+        let config_error = (
+            "@deriving(accessors) takes no configuration.".to_string(),
+            1,
+            22,
+            26,
+        );
+        assert_eq!(structure_error(config), config_error);
+        assert_eq!(signature_error(config), config_error);
+        let (message, line, start, end) =
+            structure_error("@deriving(abstract)\ntype t = {name: string}\n");
+        assert!(
+            message.starts_with("@deriving(abstract) has been removed. Use a record type instead."),
+            "{message}"
+        );
+        assert_eq!((line, start, end), (1, 10, 18));
     }
 
     #[test]
