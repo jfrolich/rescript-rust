@@ -16731,19 +16731,6 @@ fn type_open(
         tctx.type_ctx,
     ) {
         path
-    } else if let Some((resolved_path, sig_items)) = env.resolve_module_lid(
-        open_lid,
-        tctx.arena,
-        &mut tctx.persistent_env,
-        tctx.type_ctx,
-    ) {
-        crate::cmi::persistent_env::open_signature_components_into_env(
-            sig_items.as_ref(),
-            &resolved_path,
-            &mut open_env,
-            tctx.type_ctx,
-        );
-        resolved_path
     } else {
         let open_lid = open_lid.clone();
         match crate::types::typemod::open_failure_path(tctx, env, tctx.arena, &open_lid, lid.loc) {
@@ -18981,12 +18968,11 @@ fn is_nonexpansive_expression(tctx: &mut TypeCheckContext<'_>, exp: &Expression)
                         None => false,
                     }
                 }
+                // `Array.for_all ... lbl.lbl_all` of the first written label.
                 None => crate::types::typedtree::record_all_labels(tctx.type_ctx, fields)
-                    .is_none_or(|labels| {
-                        labels
-                            .iter()
-                            .all(|label| label.lbl_mut == crate::types::MutableFlag::Immutable)
-                    }),
+                    .expect("a non-empty record literal has the lbl_all of its labels")
+                    .iter()
+                    .all(|label| label.lbl_mut == crate::types::MutableFlag::Immutable),
             }
         }
         ExpressionDesc::Texp_field(expr, _, _) => is_nonexpansive_expression(tctx, expr),
@@ -24206,6 +24192,64 @@ fn extract_concrete_record_type_info(
     }
 }
 
+/// `snd (Env.find_type_descrs path env)` for the record declaration `decl`
+/// found at `path` (compiler/ml/env.ml:782-828), as a label array.
+///
+/// A regular path names the labels installed with the type: `store_type`
+/// for a local type (env.ml:1561-1569), the component table for a type of a
+/// module (env.ml:1470-1485). Both are the arrays label lookup by name
+/// returns. An inline-record constructor path describes the record afresh
+/// (`type_of_cstr`, env.ml:782-784). A local constraint has no labels
+/// (env.ml:790-791).
+fn find_type_label_family(
+    path: &Path,
+    decl: &crate::types::TypeDeclaration,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &crate::types::context::TypeContext,
+) -> Option<crate::types::LabelArrayRef> {
+    use crate::types::path::Typath;
+    // A record without labels describes no array.
+    if !matches!(&decl.type_kind, crate::types::TypeKind::TypeRecord(labels, _) if !labels.is_empty())
+    {
+        return None;
+    }
+    match path.constructor_typath() {
+        Typath::Regular(_) => {
+            if env.find_local_constraint(path).is_some() {
+                return None;
+            }
+            let family = match path {
+                Path::Pident(id) => env.type_label_family(id),
+                Path::Pdot(parent, type_name, _) => {
+                    with_resolved_module_components_for_path_with_cache_mode(
+                        parent,
+                        env,
+                        pers_env,
+                        ctx,
+                        ComponentLookupApi::FindType,
+                        |components| components.type_label_family(type_name, ctx),
+                    )
+                    .flatten()
+                }
+                Path::Papply(..) => None,
+            };
+            Some(family.unwrap_or_else(|| {
+                panic!(
+                    "record type `{}` was found without the labels installed with it",
+                    path.name()
+                )
+            }))
+        }
+        Typath::Cstr(..) | Typath::Ext(..) | Typath::LocalExt(_) => {
+            let res_ty = ctx.new_generic_constr(path.clone(), decl.type_params.clone());
+            crate::types::env_lazy::label_descrs(res_ty, decl, decl.type_private, ctx, |_| {})
+                .first()
+                .map(|label| label.lbl_all)
+        }
+    }
+}
+
 fn build_record_label_descriptions(
     record_ty: TypeExprRef,
     env: &Env,
@@ -24221,134 +24265,17 @@ fn build_record_label_descriptions_info(
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &crate::types::context::TypeContext,
 ) -> Option<RecordLabelDescriptionsInfo> {
-    // OCaml reads the `lbl_all` array `Datarepr.label_descrs` installed for
-    // the record (compiler/ml/datarepr.ml:261-288, typecore.ml:3058-3059).
-    // Rust describes the record path's declaration once per compilation and
-    // keeps that tied array per path.
-    if let Some(cached) = cached_record_label_descriptions_info_for_constr(record_ty, ctx) {
-        return Some(cached);
-    }
-
+    // OCaml reads the labels of the record `extract_concrete_typedecl` finds
+    // through `Env.find_type_descrs` (compiler/ml/typecore.ml:976-977,
+    // env.ml:828): the array installed with the declaration.
     let (record_path, _actual_args, decl) =
         extract_concrete_record_type_info(record_ty, env, pers_env, ctx)?;
-    let (labels, repr) = match &decl.type_kind {
-        crate::types::TypeKind::TypeRecord(labels, repr) => (labels, repr),
-        _ => return None,
-    };
-    let info_of = |family: crate::types::LabelArrayRef| {
-        Some(RecordLabelDescriptionsInfo {
-            family,
-            labels: ctx.label_family(family)?,
-            summary: ctx.get_record_label_description_summary(&record_path)?,
-        })
-    };
-    if let Some(family) = ctx.get_record_label_family(&record_path) {
-        return info_of(family);
-    }
-
-    // Large regular records of dependency types (JSX DOM props and the like)
-    // are described identically by every module, and their labels are not
-    // qualified here (see below), so describe them once per worker store.
-    let large_regular =
-        labels.len() >= 20 && matches!(repr, crate::types::RecordRepresentation::RecordRegular);
-    if large_regular && crate::types::ctype::path_root_is_persistent(&record_path) {
-        let store = ctx.thread_store();
-        if let Some((labels, summary, piece)) = store.cached_record_labels(&record_path) {
-            ctx.touch_store_piece(&piece);
-            ctx.register_record_label_descriptions_with_summary(&record_path, labels, summary);
-            return info_of(ctx.get_record_label_family(&record_path)?);
-        }
-        let (descriptions, piece) = ctx.build_in_store(|| {
-            let shared_res = ctx.new_generic_constr(record_path.clone(), decl.type_params.clone());
-            crate::types::env_lazy::label_descrs(shared_res, &decl, decl.type_private, ctx, |_| {})
-        });
-        let descriptions = Arc::new(descriptions);
-        let summary = Arc::new(
-            crate::types::context::RecordLabelDescriptionSummary::from_labels(&descriptions),
-        );
-        if let Some(piece) = piece {
-            store.publish_record_labels(
-                record_path.clone(),
-                (descriptions.clone(), summary.clone(), piece),
-            );
-        }
-        ctx.register_record_label_descriptions_with_summary(&record_path, descriptions, summary);
-        return info_of(ctx.get_record_label_family(&record_path)?);
-    }
-
-    // OCaml compiler/ml/env.ml:1542-1549 installs labels from
-    // `Subst.type_declaration sub decl`; compiler/ml/subst.ml:173-177 rewrites
-    // every field argument path before `Datarepr.label_descrs` ties the
-    // array.
-    let shared_res = ctx.new_generic_constr(record_path.clone(), decl.type_params.clone());
-    let descriptions =
-        crate::types::env_lazy::label_descrs(shared_res, &decl, decl.type_private, ctx, |_| {});
-    ctx.register_record_label_descriptions(&record_path, Arc::new(descriptions));
-    info_of(ctx.get_record_label_family(&record_path)?)
-}
-
-fn cached_record_label_descriptions_info_for_constr(
-    record_ty: TypeExprRef,
-    ctx: &crate::types::context::TypeContext,
-) -> Option<RecordLabelDescriptionsInfo> {
-    let mut current = ctx.repr(record_ty);
-    for _ in 0..32 {
-        let next = {
-            let desc = ctx.borrow_desc(current);
-            match &*desc {
-                TypeDesc::Tconstr { path, .. } => {
-                    let family = ctx.get_record_label_family(path)?;
-                    let labels = ctx.label_family(family)?;
-                    let summary = ctx.get_record_label_description_summary(path)?;
-                    return Some(RecordLabelDescriptionsInfo {
-                        family,
-                        labels,
-                        summary,
-                    });
-                }
-                TypeDesc::Tlink(target) | TypeDesc::Tsubst(target) => Some(*target),
-                _ => return None,
-            }
-        };
-        current = ctx.repr(next?);
-    }
-    None
-}
-
-fn specialize_label_for_record_ty(
-    label: &crate::types::LabelDescription,
-    record_ty: TypeExprRef,
-    env: &Env,
-    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &crate::types::context::TypeContext,
-) -> crate::types::LabelDescription {
-    let Some((record_path, actual_args, decl)) =
-        extract_concrete_record_type_info(record_ty, env, pers_env, ctx)
-    else {
-        return label.clone();
-    };
-
-    let label_res = ctx.repr(label.lbl_res);
-    let label_desc = ctx.get_desc(label_res);
-    let matches_record = matches!(
-        &*label_desc,
-        TypeDesc::Tconstr { path, .. }
-            if path.same(&record_path)
-                || compare_type_paths_for_disambiguation(path, &record_path, env, pers_env, ctx)
-    );
-    drop(label_desc);
-    if !matches_record {
-        return label.clone();
-    }
-
-    let specialized_arg =
-        crate::types::ctype::subst_type_params(ctx, &decl.type_params, &actual_args, label.lbl_arg);
-
-    crate::types::LabelDescription {
-        lbl_res: ctx.new_constr(record_path, actual_args),
-        lbl_arg: specialized_arg,
-        ..label.clone()
-    }
+    let family = find_type_label_family(&record_path, &decl, env, pers_env, ctx)?;
+    Some(RecordLabelDescriptionsInfo {
+        family,
+        labels: ctx.label_family(family)?,
+        summary: ctx.label_family_summary(family)?,
+    })
 }
 
 fn lookup_label_by_expected_type(
@@ -24364,10 +24291,10 @@ fn lookup_label_by_expected_type(
     let env_labels = env.find_all_labels(label_name);
     for env_label in env_labels.iter() {
         let label_res = ctx.repr(env_label.lbl_res);
-        let (label_path, label_args) = {
+        let label_path = {
             let label_desc = ctx.get_desc(label_res);
             match &*label_desc {
-                TypeDesc::Tconstr { path, args, .. } => (path.clone(), args.clone()),
+                TypeDesc::Tconstr { path, .. } => path.clone(),
                 _ => continue,
             }
         };
@@ -24375,14 +24302,10 @@ fn lookup_label_by_expected_type(
         if label_path.same(&visible_path)
             || compare_type_paths_for_disambiguation(&label_path, &visible_path, env, pers_env, ctx)
         {
-            // `disambiguate_by_type` then `use ()`.
+            // `disambiguate_by_type` returns the label as found, then `use ()`
+            // (compiler/ml/typecore.ml:1002-1007, 1031-1034).
             mark_type_path(ctx, env, &label_path);
-            let mut selected = (*env_label).clone();
-            if !label_path.same(&visible_path) {
-                selected.lbl_res =
-                    ctx.new_generic_constr(visible_path.clone(), label_args.to_vec());
-            }
-            return Some(selected);
+            return Some((*env_label).clone());
         }
     }
 
@@ -24399,18 +24322,10 @@ fn lookup_label_by_expected_type(
         return None;
     };
     let pos = labels.iter().position(|ld| ld.ld_id.name() == label_name)?;
-    // `Env.find_type_descrs` of the record path describes the declaration
-    // afresh (compiler/ml/env.ml:784, datarepr.ml:261-299).
-    let res_ty = ctx.new_generic_constr(visible_path, type_decl.type_params.clone());
-    let family = crate::types::env_lazy::label_descrs(
-        res_ty,
-        &type_decl,
-        type_decl.type_private,
-        ctx,
-        |_| {},
-    );
-    let selected = family[pos].clone();
-    Some(selected)
+    // `lookup_from_type`: the labels of `Env.find_type_descrs tpath`
+    // (compiler/ml/typecore.ml:976-981), the array installed with the type.
+    let family = find_type_label_family(&concrete_path, &type_decl, env, pers_env, ctx)?;
+    Some(ctx.label_family(family)?[pos].clone())
 }
 
 fn force_type_paths_for_lookup_from_type(
@@ -28968,24 +28883,6 @@ fn pm_variant_constructors(
     }
 }
 
-/// `lbl.lbl_all` for labels whose result type is `record_ty`.
-fn pm_record_labels(
-    ctx: &TypeContext,
-    env: &Env,
-    pers: &mut PersistentEnvSlot,
-    record_ty: TypeExprRef,
-) -> Vec<crate::types::LabelDescription> {
-    let ty = ctx.repr(record_ty);
-    let path = match &*ctx.get_desc(ty) {
-        TypeDesc::Tconstr { path, .. } => path.clone(),
-        _ => return Vec::new(),
-    };
-    match lookup_type_decl_for_path(&path, env, pers, ctx) {
-        Some(decl) => crate::types::env_lazy::labels_of_type_path(&path, &decl, ctx),
-        None => Vec::new(),
-    }
-}
-
 /// The environment part of `pats_of_type` (parmatch.ml:942-966).
 fn pm_type_shape(
     ctx: &TypeContext,
@@ -29012,8 +28909,12 @@ fn pm_type_shape(
                 &path, &decl, ctx,
             ))
         }
+        // `snd (Env.find_type_descrs path env)` (parmatch.ml:1012-1013).
         crate::types::TypeKind::TypeRecord(..) => TypeShape::Record(
-            crate::types::env_lazy::labels_of_type_path(&path, &decl, ctx),
+            find_type_label_family(&path, &decl, env, pers, ctx)
+                .and_then(|family| ctx.label_family(family))
+                .map(|labels| labels.as_ref().clone())
+                .unwrap_or_default(),
         ),
         _ => TypeShape::Other,
     }
@@ -29066,19 +28967,6 @@ impl crate::types::parmatch::Oracle for TypecoreParmatchOracle<'_, '_> {
             self.env,
             &mut self.tctx.persistent_env,
             ty,
-        )
-    }
-
-    fn record_labels(
-        &mut self,
-        _env: EnvRef,
-        record_ty: TypeExprRef,
-    ) -> Vec<crate::types::LabelDescription> {
-        pm_record_labels(
-            self.tctx.type_ctx,
-            self.env,
-            &mut self.tctx.persistent_env,
-            record_ty,
         )
     }
 
@@ -29206,14 +29094,6 @@ impl crate::types::parmatch::Oracle for TranslParmatchOracle<'_> {
         ty: TypeExprRef,
     ) -> Vec<crate::types::ConstructorDescription> {
         pm_variant_constructors(self.ctx, self.env, self.persistent_env, ty)
-    }
-
-    fn record_labels(
-        &mut self,
-        _env: EnvRef,
-        record_ty: TypeExprRef,
-    ) -> Vec<crate::types::LabelDescription> {
-        pm_record_labels(self.ctx, self.env, self.persistent_env, record_ty)
     }
 
     fn type_shape(

@@ -120,14 +120,6 @@ impl std::ops::Deref for SigTypeBatch {
     }
 }
 
-/// Store-built label descriptions of one record type, their summary, and the
-/// replay record of building them.
-pub(crate) type SharedRecordLabels = (
-    Arc<Vec<crate::types::decl::LabelDescription>>,
-    Arc<crate::types::context::RecordLabelDescriptionSummary>,
-    Arc<crate::types::context::StorePiece>,
-);
-
 /// Shared dependency state for one worker thread.
 pub(crate) struct ThreadTypeStore {
     types: TypeArena,
@@ -174,11 +166,7 @@ pub(crate) struct ThreadTypeStore {
             ),
         >,
     >,
-    /// Label descriptions of large regular records of dependency types,
-    /// built as store builds (see `typecore::build_record_label_descriptions_info`).
-    record_labels: RefCell<HashMap<Path, SharedRecordLabels>>,
     /// The `lbl_all` arrays built during store builds (`LabelArrayRef::store`).
-    /// The element is shared with `record_labels`.
     label_families: RefCell<Vec<Arc<Vec<crate::types::decl::LabelDescription>>>>,
     /// The predefined environment built as a store build, with its replay
     /// record (see `env::initial_env`).
@@ -232,7 +220,6 @@ impl ThreadTypeStore {
             sig_type_registrations: RefCell::new(HashMap::new()),
             signature_indexes: RefCell::new(HashMap::new()),
             shared_components: RefCell::new(HashMap::new()),
-            record_labels: RefCell::new(HashMap::new()),
             label_families: RefCell::new(Vec::new()),
             initial_env: RefCell::new(None),
             generation,
@@ -497,17 +484,6 @@ impl ThreadTypeStore {
 
     pub(crate) fn label_family_count(&self) -> usize {
         self.label_families.borrow().len()
-    }
-
-    pub(crate) fn cached_record_labels(&self, record_path: &Path) -> Option<SharedRecordLabels> {
-        self.record_labels.borrow().get(record_path).cloned()
-    }
-
-    pub(crate) fn publish_record_labels(&self, record_path: Path, labels: SharedRecordLabels) {
-        self.record_labels
-            .borrow_mut()
-            .entry(record_path)
-            .or_insert(labels);
     }
 
     pub(crate) fn cached_initial_env(

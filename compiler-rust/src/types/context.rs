@@ -825,28 +825,19 @@ pub struct TypeContext {
     arity_aliases: RefCell<crate::fast_hash::AHashMap<TypeExprRef, TypeExprRef>>,
 
 
-    /// Reconstructed record label descriptions keyed by type path.
-    /// OCaml installs one shared `lbl_all` array for a record declaration and
-    /// reuses it from record typing (`compiler/ml/typecore.ml:3058-3059,
-    /// 3137`). Rust reconstructs the label descriptions from declarations, so
-    /// it registers that array once per record path in `label_families` and
-    /// keeps the path's `lbl_all` handle here, shared across record literals
-    /// instead of rebuilding or cloning large records such as `JsxDOM.domProps`
-    /// for every JSX literal.
-    record_label_descriptions_cache:
-        RefCell<crate::fast_hash::AHashMap<super::path::Path, super::decl::LabelArrayRef>>,
-    record_label_description_summaries_cache:
-        RefCell<crate::fast_hash::AHashMap<super::path::Path, Arc<RecordLabelDescriptionSummary>>>,
+    /// `RecordLabelDescriptionSummary` of each label array, a memo derived
+    /// from the array: name positions and optional/mandatory counts used by
+    /// record disambiguation.
+    label_family_summaries: RefCell<
+        crate::fast_hash::AHashMap<super::decl::LabelArrayRef, Arc<RecordLabelDescriptionSummary>>,
+    >,
 
 
     /// The `lbl_all` arrays of this compilation: `LabelArrayRef(n)` for
-    /// `n >= 1` is entry `n - 1`. They are the record families registered per
-    /// record path (`record_label_descriptions_cache`; the array a record
-    /// literal's written labels point to) and the labels built outside a type
-    /// declaration (`Dict_pattern.labels_of_keys`). A label installed in the
-    /// environment from a declaration keeps `LabelArrayRef(0)` until a record
-    /// literal records its family. Families built in the worker store are
-    /// shared with it, hence the `Arc` element.
+    /// `n >= 1` is entry `n - 1`. `Datarepr.label_descrs` allocates one per
+    /// described record declaration, and `Dict_pattern.labels_of_keys` one per
+    /// dict pattern. Families built in the worker store live in its pool and
+    /// are shared with later compilations, hence the `Arc` element.
     label_families: RefCell<Vec<Arc<Vec<super::decl::LabelDescription>>>>,
 
     /// Stored typedtree environment snapshots, keyed by EnvRef.
@@ -1189,10 +1180,7 @@ impl TypeContext {
             predef_option_type: Cell::new(None),
             predef_option_layout: Cell::new(None),
             arity_aliases: RefCell::new(crate::fast_hash::AHashMap::new()),
-            record_label_descriptions_cache: RefCell::new(crate::fast_hash::AHashMap::new()),
-            record_label_description_summaries_cache: RefCell::new(
-                crate::fast_hash::AHashMap::new(),
-            ),
+            label_family_summaries: RefCell::new(crate::fast_hash::AHashMap::new()),
             label_families: RefCell::new(Vec::new()),
             typed_envs: RefCell::new(Vec::new()),
             typed_envs_by_id: RefCell::new(crate::fast_hash::AHashMap::new()),
@@ -3273,66 +3261,20 @@ impl TypeContext {
         self.arity_aliases.borrow().get(&te).copied()
     }
 
-    /// Register the reconstructed label descriptions of a record path as its
-    /// family: a new `lbl_all` array of this compilation.
-    pub fn register_record_label_descriptions(
+    /// The summary of the label array `lbl_all`, computed once per array.
+    pub(crate) fn label_family_summary(
         &self,
-        type_path: &Path,
-        labels: Arc<Vec<super::decl::LabelDescription>>,
-    ) {
-        self.poison_store_build_for("register_record_label_descriptions");
-        let summary = Arc::new(RecordLabelDescriptionSummary::from_labels(&labels));
-        self.register_record_label_descriptions_with_summary(type_path, labels, summary);
-    }
-
-    /// Register label descriptions and their already-built summary.
-    pub(crate) fn register_record_label_descriptions_with_summary(
-        &self,
-        type_path: &Path,
-        labels: Arc<Vec<super::decl::LabelDescription>>,
-        summary: Arc<RecordLabelDescriptionSummary>,
-    ) {
-        // The labels are tied to their array (`label_descrs`).
-        let lbl_all = labels
-            .first()
-            .map(|label| label.lbl_all)
-            .filter(|lbl_all| *lbl_all != super::decl::LabelArrayRef::NONE)
-            .unwrap_or_else(|| self.push_label_family(labels));
-        self.record_label_descriptions_cache
-            .borrow_mut()
-            .insert(type_path.clone(), lbl_all);
-        self.record_label_description_summaries_cache
-            .borrow_mut()
-            .insert(type_path.clone(), summary);
-    }
-
-    /// The `lbl_all` array registered for a record path.
-    pub(crate) fn get_record_label_family(
-        &self,
-        type_path: &Path,
-    ) -> Option<super::decl::LabelArrayRef> {
-        self.record_label_descriptions_cache
-            .borrow()
-            .get(type_path)
-            .copied()
-    }
-
-    /// Look up reconstructed record label descriptions for a type path.
-    pub fn get_record_label_descriptions(
-        &self,
-        type_path: &Path,
-    ) -> Option<Arc<Vec<super::decl::LabelDescription>>> {
-        self.label_family(self.get_record_label_family(type_path)?)
-    }
-
-    pub(crate) fn get_record_label_description_summary(
-        &self,
-        type_path: &Path,
+        lbl_all: super::decl::LabelArrayRef,
     ) -> Option<Arc<RecordLabelDescriptionSummary>> {
-        self.record_label_description_summaries_cache
-            .borrow()
-            .get(type_path)
-            .cloned()
+        if let Some(summary) = self.label_family_summaries.borrow().get(&lbl_all) {
+            return Some(summary.clone());
+        }
+        let labels = self.label_family(lbl_all)?;
+        let summary = Arc::new(RecordLabelDescriptionSummary::from_labels(&labels));
+        self.label_family_summaries
+            .borrow_mut()
+            .insert(lbl_all, summary.clone());
+        Some(summary)
     }
 
     /// The handle the next array pushed by `push_label_family` gets: in the

@@ -11989,30 +11989,14 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                         .is_none()
                         {
                             let lookup_env = sig_env.clone_preserve_id();
-                            if crate::types::typecore::open_module_lid_components_into_env(
+                            let _ = crate::types::typecore::open_module_lid_components_into_env(
                                 open_lid,
                                 arena,
                                 &lookup_env,
                                 &mut sig_env,
                                 &mut tctx.persistent_env,
                                 tctx.type_ctx,
-                            )
-                            .is_none()
-                                && let Some((resolved_path, sig_items)) = lookup_env
-                                    .resolve_module_lid(
-                                        open_lid,
-                                        arena,
-                                        &mut tctx.persistent_env,
-                                        tctx.type_ctx,
-                                    )
-                            {
-                                crate::cmi::persistent_env::open_signature_components_into_env(
-                                    sig_items.as_ref(),
-                                    &resolved_path,
-                                    &mut sig_env,
-                                    tctx.type_ctx,
-                                );
-                            }
+                            );
                         }
                     }
                     crate::parser::ast::SignatureItemDesc::Psig_include(incl) => {
@@ -12378,29 +12362,14 @@ fn approx_modtype_rec<'a>(
                         Some(od.popen_lid.loc),
                     );
                     let lookup_env = sig_env.clone_preserve_id();
-                    if crate::types::typecore::open_module_lid_components_into_env(
+                    let _ = crate::types::typecore::open_module_lid_components_into_env(
                         open_lid,
                         arena,
                         &lookup_env,
                         &mut sig_env,
                         &mut tctx.persistent_env,
                         tctx.type_ctx,
-                    )
-                    .is_none()
-                        && let Some((resolved_path, sig_items)) = lookup_env.resolve_module_lid(
-                            open_lid,
-                            arena,
-                            &mut tctx.persistent_env,
-                            tctx.type_ctx,
-                        )
-                    {
-                        crate::cmi::persistent_env::open_signature_components_into_env(
-                            sig_items.as_ref(),
-                            &resolved_path,
-                            &mut sig_env,
-                            tctx.type_ctx,
-                        );
-                    }
+                    );
                 }
                 PSigDesc::Psig_include(incl) => {
                     let mty =
@@ -15939,19 +15908,6 @@ pub fn transl_signature<'a>(
                     )
                 } {
                     path
-                } else if let Some((resolved_path, sig_items)) = sig_env.resolve_module_lid(
-                    open_lid,
-                    arena,
-                    &mut tctx.persistent_env,
-                    tctx.type_ctx,
-                ) {
-                    crate::cmi::persistent_env::open_signature_components_into_env(
-                        sig_items.as_ref(),
-                        &resolved_path,
-                        &mut sig_env,
-                        tctx.type_ctx,
-                    );
-                    resolved_path
                 } else {
                     sig_env.set_pending_open_slot(None);
                     open_failure_path(tctx, &sig_env, arena, &longident, od.popen_lid.loc)?
@@ -18224,6 +18180,9 @@ fn type_structure_item<'a>(
             // `List.fold_right` too.
             for (type_id, decl, constructors, labels) in final_env_entries.into_iter().rev() {
                 new_env.add_type(type_id, decl);
+                if let Some((_, first)) = labels.first() {
+                    new_env.add_type_label_family(type_id, first.lbl_all);
+                }
                 for (cstr_id, cstr_desc) in constructors.into_iter().rev() {
                     new_env.add_constructor(cstr_id, cstr_desc);
                 }
@@ -19290,16 +19249,6 @@ fn type_structure_item<'a>(
                 )
             } {
                 path
-            } else if let Some((resolved_path, sig_items)) =
-                env.resolve_module_lid(open_lid, arena, &mut tctx.persistent_env, tctx.type_ctx)
-            {
-                crate::cmi::persistent_env::open_signature_components_into_env(
-                    sig_items.as_ref(),
-                    &resolved_path,
-                    &mut new_env,
-                    tctx.type_ctx,
-                );
-                resolved_path
             } else {
                 // OCaml compiler/ml/typemod.ml:88-95 first calls
                 // `Env.open_signature`; only when that fails does it call
@@ -19586,6 +19535,9 @@ fn type_structure_item<'a>(
                                         }
                                     },
                                 );
+                                if let Some(first) = descs.first() {
+                                    new_env.add_type_label_family(*id, first.lbl_all);
+                                }
                                 for (ld, lbl_desc) in labels.iter().zip(descs) {
                                     new_env.add_label(ld.ld_id, lbl_desc);
                                 }
@@ -21064,6 +21016,7 @@ mod label_family_tests {
         let mut parser = Parser::new("test.res", source);
         let structure = module::parse_structure(&mut parser);
         assert!(!parser.has_errors(), "parse failed");
+        crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
         let arena = parser.arena();
         let mut tctx = TypeCheckContext::new(&type_ctx, arena);
         let env = initial_env(&type_ctx);
@@ -21231,6 +21184,7 @@ let f = switch x {
         let mut parser = Parser::new("test.res", source);
         let structure = module::parse_structure(&mut parser);
         assert!(!parser.has_errors(), "parse failed");
+        crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
         let arena = parser.arena();
         let mut tctx = TypeCheckContext::new(&type_ctx, arena);
         let env = initial_env(&type_ctx);
@@ -21263,6 +21217,134 @@ let s: option<string> = cell.value
 "#,
         );
         assert!(result.is_err(), "a mutable `{{}}` must not generalize");
+    }
+
+
+    /// The label of the field access a function `name` returns.
+    fn body_field_label<'s>(typed: &'s Structure, name: &str) -> &'s LabelDescription {
+        let mut expr = &binding(typed, name).vb_expr;
+        while let ExpressionDesc::Texp_function { body, .. } = &expr.exp_desc {
+            expr = body;
+        }
+        match &expr.exp_desc {
+            ExpressionDesc::Texp_field(_, _, label) => label,
+            other => panic!("`{name}` does not return a field access: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn type_directed_lookup_of_a_local_record_reads_its_installed_array() {
+        // `u` shadows the label `a` by name; `v.a` finds `t`'s label through
+        // the type, and the literal reads `find_type_descrs` of `t`
+        // (env.ml:828 -> store_type, env.ml:1561-1569): one array.
+        with_typed(
+            r#"
+type t = {a: int, b: int}
+type u = {a: string}
+let f = (v: t) => v.a
+let lit = ({a: 1, b: 2}: t)
+"#,
+            |typed, ctx| {
+                let by_type = body_field_label(typed, "f");
+                let literal = literal_labels(typed, "lit");
+                assert_eq!(family_names(ctx, by_type), ["a", "b"]);
+                assert_eq!(by_type.lbl_all, literal[0].lbl_all);
+            },
+        );
+    }
+
+    #[test]
+    fn type_directed_and_qualified_lookup_share_the_component_array() {
+        // `v.a` with no `a` in scope goes through `lookup_from_type`
+        // (typecore.ml:976-981) to the component table of `M`; `w.M.a` looks
+        // the label up by name in the same table (env.ml:1470-1485).
+        with_typed(
+            r#"
+module M = {
+  type t = {a: int, b: int}
+}
+let f = (v: M.t) => v.a
+let g = (w: M.t) => w.M.a
+let h = (x: M.t) => x.b
+"#,
+            |typed, ctx| {
+                let by_type = body_field_label(typed, "f");
+                let by_name = body_field_label(typed, "g");
+                let again = body_field_label(typed, "h");
+                assert_eq!(family_names(ctx, by_type), ["a", "b"]);
+                assert_eq!(by_type.lbl_all, by_name.lbl_all);
+                // A second type-directed lookup reuses the table's array.
+                assert_eq!(by_type.lbl_all, again.lbl_all);
+            },
+        );
+    }
+
+    #[test]
+    fn generic_record_through_an_alias_instantiates_per_use() {
+        with_typed(
+            r#"
+module M = {
+  type p<'a> = {v: 'a, n: int}
+}
+module N = M
+let i = (x: N.p<int>) => x.v
+let s = (y: N.p<string>) => y.v
+"#,
+            |typed, ctx| {
+                let li = body_field_label(typed, "i");
+                let ls = body_field_label(typed, "s");
+                assert_eq!(family_names(ctx, li), ["v", "n"]);
+                assert_eq!(li.lbl_all, ls.lbl_all);
+                let i_ty = ctx.repr(binding(typed, "i").vb_expr.exp_type);
+                let s_ty = ctx.repr(binding(typed, "s").vb_expr.exp_type);
+                assert_ne!(i_ty, s_ty);
+            },
+        );
+    }
+
+    #[test]
+    fn inline_record_labels_get_a_new_array_per_lookup() {
+        // `type_of_cstr` describes an inline record on every lookup
+        // (env.ml:782-784).
+        with_typed(
+            r#"
+type v = A({x: int, y: int})
+let f = (A(r)) => r.x
+let g = (A(r)) => r.y
+"#,
+            |typed, ctx| {
+                let lf = body_field_label(typed, "f");
+                let lg = body_field_label(typed, "g");
+                assert_eq!(family_names(ctx, lf), ["x", "y"]);
+                assert_eq!(family_names(ctx, lg), ["x", "y"]);
+                assert_ne!(lf.lbl_all, lg.lbl_all);
+            },
+        );
+    }
+
+
+    #[test]
+    fn opened_labels_share_the_component_array_with_type_directed_lookup() {
+        // `open M` installs the component table's labels (env.ml:1874-1877);
+        // after `u` shadows `a`, `w.a` finds `M.t`'s label through
+        // `find_type_descrs` of the same table (env.ml:828, 1470-1485).
+        with_typed(
+            r#"
+module M = {
+  type t = {a: int, b: int}
+}
+open M
+let f = (v: t) => v.a
+type u = {a: string}
+let g = (w: M.t) => w.a
+"#,
+            |typed, ctx| {
+                let opened = body_field_label(typed, "f");
+                let by_type = body_field_label(typed, "g");
+                assert_eq!(family_names(ctx, opened), ["a", "b"]);
+                assert_eq!(opened.lbl_all, by_type.lbl_all);
+            },
+        );
     }
 
 }

@@ -40,8 +40,6 @@ pub(crate) trait Oracle {
     /// constructors of the variant type, in declaration order.
     fn variant_constructors(&mut self, env: EnvRef, ty: TypeExprRef)
     -> Vec<ConstructorDescription>;
-    /// `lbl.lbl_all` for a label of the record type `record_ty`, in position order.
-    fn record_labels(&mut self, env: EnvRef, record_ty: TypeExprRef) -> Vec<LabelDescription>;
     /// The part of `pats_of_type` that needs `Env.find_type`
     /// (parmatch.ml:943-965).
     fn type_shape(&mut self, env: EnvRef, ty: TypeExprRef, always: bool) -> TypeShape;
@@ -383,17 +381,13 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
         }
     }
 
-    /// `lbl.lbl_all`: the stored array of a label built by `Dict_pattern`,
-    /// otherwise the labels of its record type's declaration.
-    fn lbl_all(
-        &mut self,
-        env: EnvRef,
-        (lbl_all, lbl_res): (LabelArrayRef, TypeExprRef),
-    ) -> Vec<LabelDescription> {
-        match self.oracle.ctx().label_all(lbl_all) {
-            Some(labels) => labels,
-            None => self.oracle.record_labels(env, lbl_res),
-        }
+    /// `lbl.lbl_all`: every label carries the array its record's labels were
+    /// described with (or `Dict_pattern` built).
+    fn lbl_all(&mut self, lbl_all: LabelArrayRef) -> Vec<LabelDescription> {
+        self.oracle
+            .ctx()
+            .label_all(lbl_all)
+            .unwrap_or_else(|| panic!("a pattern label carries no lbl_all array ({lbl_all:?})"))
     }
 
     /// `int_range p`: the values matched by an int or char constant or
@@ -504,9 +498,7 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                 _ => false,
             },
             Check::RecordLabelCounts(lbl1, lbl2) => {
-                let env1 = self.node(hp1).env;
-                let env2 = self.node(hp2).env;
-                self.lbl_all(env1, lbl1).len() == self.lbl_all(env2, lbl2).len()
+                self.lbl_all(lbl1.0).len() == self.lbl_all(lbl2.0).len()
             }
         }
     }
@@ -850,14 +842,13 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
     /// `all_record_args lbls` (parmatch.ml:538-573).
     fn all_record_args(
         &mut self,
-        env: crate::types::typedtree::EnvRef,
         lbls: &[Field<'a>],
     ) -> Vec<Field<'a>> {
         let Some(first) = lbls.first() else {
             return Vec::new();
         };
         let opt = first.opt;
-        let lbl_all = self.lbl_all(env, (first.lbl.lbl_all, first.lbl.lbl_res));
+        let lbl_all = self.lbl_all(first.lbl.lbl_all);
         let mut table: Vec<Field<'a>> = lbl_all
             .into_iter()
             .map(|lbl| Field {
@@ -3159,8 +3150,7 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
             has_rest,
         } = self.desc(p).clone()
         {
-            let env = self.node(p).env;
-            let fields = self.all_record_args(env, &fields);
+            let fields = self.all_record_args(&fields);
             let q = self.with_desc(
                 p,
                 Desc::Record {

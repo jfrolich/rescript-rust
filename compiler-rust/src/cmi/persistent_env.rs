@@ -7898,25 +7898,6 @@ fn collect_alias_rewrites<S: AliasRewriteSink>(
     }
 }
 
-/// local bindings. This matches OCaml's behavior where opened modules have
-/// lower lookup priority than local bindings (e.g., Predef types like `int`
-/// are not shadowed when Pervasives.cmi is opened).
-///
-/// Add an already-built module component signature with opened-binding priority.
-pub fn open_signature_components_into_env(
-    sig_items: &[SignatureItem],
-    module_path: &Path,
-    env: &mut Env,
-    ctx: &TypeContext,
-) {
-    // OCaml compiler/ml/env.ml:1874-1877 implements `open_signature` by
-    // forcing `find_module_descr root` and passing the already-built component
-    // table to `add_components`. The component table was built by
-    // env.ml:1513-1588, including the env.ml:1530 `prefix_idents` substitution,
-    // so an `open` must not apply a second signature-wide substitution here.
-    add_signature_to_env_with_options(sig_items, module_path, env, ctx, true, false, true, None);
-}
-
 pub(crate) fn open_module_components_into_env(
     components: &crate::types::env_lazy::QualifiedModuleComponents,
     root: Path,
@@ -7931,60 +7912,21 @@ pub(crate) fn open_module_components_into_env(
     open_components_into_env(components, root, env, ctx);
 }
 
-fn add_signature_to_env_with_options(
-    sig_items: &[SignatureItem],
-    module_path: &Path,
-    env: &mut Env,
-    ctx: &TypeContext,
-    as_opened: bool,
-    apply_path_subst: bool,
-    register_loaded_types: bool,
-    precomputed_components: Option<&crate::types::env_lazy::QualifiedModuleComponents>,
-) {
-    if as_opened {
-        let layers = build_opened_layers(
-            sig_items,
-            module_path,
-            ctx,
-            apply_path_subst,
-            register_loaded_types,
-            precomputed_components,
-        );
-        env.add_prebuilt_open_layers(module_path.clone(), &layers);
-        return;
-    }
-    add_signature_to_env_with_options_inner(
-        sig_items,
-        module_path,
-        env,
-        ctx,
-        false,
-        apply_path_subst,
-        register_loaded_types,
-        precomputed_components,
-        None,
-    );
-}
-
-/// The layer tables that opening `sig_items` under `module_path` adds.
+/// The layer tables that opening the component table `components` adds.
 fn build_opened_layers(
-    sig_items: &[SignatureItem],
-    module_path: &Path,
+    components: &crate::types::env_lazy::QualifiedModuleComponents,
     ctx: &TypeContext,
-    apply_path_subst: bool,
-    register_loaded_types: bool,
-    precomputed_components: Option<&crate::types::env_lazy::QualifiedModuleComponents>,
 ) -> crate::types::env::OpenedLayers {
     let mut out = None;
     add_signature_to_env_with_options_inner(
-        sig_items,
-        module_path,
+        components.signature(),
+        components.access_path(),
         &mut Env::empty(),
         ctx,
         true,
-        apply_path_subst,
-        register_loaded_types,
-        precomputed_components,
+        false,
+        true,
+        Some(components),
         Some(&mut out),
     );
     out.expect("opened layers built")
@@ -7999,14 +7941,7 @@ fn open_components_into_env(
     ctx: &TypeContext,
 ) {
     let layers = components.opened_layers(ctx, || {
-        build_opened_layers(
-            components.signature(),
-            components.access_path(),
-            ctx,
-            false,
-            true,
-            Some(components),
-        )
+        build_opened_layers(components, ctx)
     });
     env.add_prebuilt_open_layers(root, &layers);
 }
@@ -8255,13 +8190,22 @@ fn add_signature_to_env_with_options_inner(
                         }
                     }
                     TypeKind::TypeRecord(labels, _) => {
-                        let type_path = Path::pdot(module_path.clone(), id.name());
-                        let res_ty = ctx.new_generic_constr(type_path, decl.type_params.clone());
-
-                        // `Datarepr.label_descrs` (compiler/ml/datarepr.ml:261-288).
-                        for (ld, label_desc) in labels.iter().zip(crate::types::env_lazy::label_descrs(
-                            res_ty, &decl, decl.type_private, ctx, |_| {},
-                        )) {
+                        // `add_components` opens the component table's
+                        // `comp_labels` (compiler/ml/env.ml:1841-1860): the
+                        // array stored with the type in `comp_types`.
+                        // An open installs the component table's own labels
+                        // (env.ml:1874-1877 opens `find_module_descr root`).
+                        let components = precomputed_components
+                            .expect("an open installs a module's component table");
+                        let family = components
+                            .type_label_family(id.name(), ctx)
+                            .expect("a record type of a component has its label family");
+                        let descs = ctx
+                            .label_family(family)
+                            .expect("a component label family is registered")
+                            .as_ref()
+                            .clone();
+                        for (ld, label_desc) in labels.iter().zip(descs) {
                             if as_opened {
                                 opened_labels.push((ld.ld_id, label_desc));
                             } else {

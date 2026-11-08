@@ -1183,6 +1183,11 @@ struct EnvData {
     /// Local constraints (for GADTs).
     local_constraints: PersistentHashMap<Path, Arc<TypeDeclaration>>,
 
+    /// The label array `store_type` described with each local record type
+    /// (compiler/ml/env.ml:1561-1569 stores `(decl, (constructors, labels))`
+    /// in `env.types`): what `find_type_descrs (Pident id)` returns.
+    type_label_families: PersistentHashMap<Ident, super::decl::LabelArrayRef>,
+
     /// Environment flags.
     flags: EnvFlags,
 
@@ -1272,6 +1277,7 @@ impl Env {
                 scope_caches: std::rc::Rc::default(),
                 implicit_open_roots: PersistentHashSet::default(),
                 local_constraints: PersistentHashMap::default(),
+                type_label_families: PersistentHashMap::default(),
                 flags: EnvFlags::default(),
                 pending_open_slot: None,
             }),
@@ -1805,6 +1811,18 @@ impl Env {
         self.bump_id();
         let desc = Arc::new(desc);
         self.data_mut().labels.add(id, desc);
+    }
+
+    /// Record that the labels installed for the record type `id` share the
+    /// array `lbl_all` (the labels half of `store_type`, env.ml:1561-1569).
+    pub fn add_type_label_family(&mut self, id: Ident, lbl_all: super::decl::LabelArrayRef) {
+        self.data_mut().type_label_families.insert(id, lbl_all);
+    }
+
+    /// `snd (find_type_descrs (Pident id))` of a record type: the array its
+    /// labels were installed with.
+    pub fn type_label_family(&self, id: &Ident) -> Option<super::decl::LabelArrayRef> {
+        self.data.type_label_families.get(id).copied()
     }
 
     /// Find a label by name.
@@ -2454,6 +2472,7 @@ fn build_initial_env(ctx: &TypeContext) -> Env {
                 for (ld, label_desc) in labels.iter().zip(crate::types::env_lazy::label_descrs(
                     res_ty, &decl, decl.type_private, ctx, |_| {},
                 )) {
+                    env.add_type_label_family(id, label_desc.lbl_all);
                     env.add_label(ld.ld_id, label_desc);
                 }
             }

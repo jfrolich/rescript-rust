@@ -462,7 +462,7 @@ pub struct LabelDescription {
 /// valid for every compilation leasing that store; otherwise entry `n - 1` of
 /// the compilation's own pool. `NONE` is `dummy_label`'s empty `lbl_all`
 /// (datarepr.ml:245-258) and never names an array.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct LabelArrayRef(pub u32);
 
 impl LabelArrayRef {
