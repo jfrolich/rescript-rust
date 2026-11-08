@@ -1256,10 +1256,6 @@ pub struct TypeCheckContext<'a> {
     pub(crate) deprecated_function_call: bool,
     /// Mirrors OCaml's Clflags.transparent_modules from `-no-alias-deps`.
     pub transparent_modules: bool,
-    /// When inside Pexp_constraint, the GENERIC constraint type. Used by
-    /// type_match_cases_batch_non_gadt to create fresh instances per case
-    /// body, matching OCaml's behavior where ty_res is generic.
-    pub generic_constraint_body_ty: Option<TypeExprRef>,
     /// Cached semantic module types from Tmod_apply, keyed by parsed module
     /// expression location.  Ensures that a second lookup for the same functor
     /// application reuses the types with correct path substitutions.
@@ -1404,7 +1400,6 @@ impl<'a> TypeCheckContext<'a> {
             experimental_let_unwrap: false,
             deprecated_function_call: false,
             transparent_modules: false,
-            generic_constraint_body_ty: None,
             module_expr_semantic_types: HashMap::new(),
             applicative_functor_body_depth: 0,
         }
@@ -14579,17 +14574,8 @@ fn type_record(
     use crate::types::typedtree::RecordLabelDefinition;
 
     let ctx = tctx.type_ctx;
-    // Most callers should protect generic expected types from record typing
-    // side effects, but constraint bodies must type against the shared generic
-    // node so unification side effects match OCaml.
-    let expected_ty = if tctx
-        .generic_constraint_body_ty
-        .is_some_and(|constraint_ty| ctx.repr(constraint_ty) == ctx.repr(expected_ty))
-    {
-        expected_ty
-    } else {
-        instance_if_generic(ctx, expected_ty)
-    };
+    // Protect a generic expected type from record typing side effects.
+    let expected_ty = instance_if_generic(ctx, expected_ty);
     let placeholder_lid = tctx.arena.placeholder_located(loc);
 
     // Type check base expression if present.
@@ -16799,12 +16785,8 @@ fn type_constraint(
     // Pass the GENERIC constraint type to type_expect (matches OCaml).
     // Rue handlers create per-expression instances via rue_unify.
     // Non-rue handlers (tuple, array, construct) use instance_if_generic
-    // to avoid corrupting the generic type. Set generic_constraint_body_ty
-    // so match cases can create fresh instances per case body.
-    let prev_generic_constraint = tctx.generic_constraint_body_ty;
-    tctx.generic_constraint_body_ty = Some(ctype_ty);
+    // to avoid corrupting the generic type.
     let typed_inner = type_expect(tctx, env, inner_expr, ctype_ty, None)?;
-    tctx.generic_constraint_body_ty = prev_generic_constraint;
     unify_expression_types(tctx, loc, typed_inner.exp_type, arg_unify_ty, None)?;
 
     rue_unify(tctx, loc, result_ty, expected_ty, context)?;
