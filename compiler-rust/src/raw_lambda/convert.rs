@@ -6915,8 +6915,12 @@ impl<'a> RawLambdaConverter<'a> {
             lambda_body = match &pat.pat_desc {
                 PatternDesc::Tpat_any => lambda_body,
                 PatternDesc::Tpat_var(bound, _) if bound.same(id) => lambda_body,
+                // `Matching.for_function loc` with the function's own
+                // `e.exp_loc` for every parameter (translcore.ml:1175,
+                // 1627-1641): a refutable parameter's `Match_failure` names
+                // where the function starts, not the parameter.
                 _ => self.for_function_with_synced_stamps(
-                    pat.pat_loc,
+                    loc,
                     RawLambda::var(*id),
                     vec![(pat, lambda_body.into())],
                     param.fp_partial,
