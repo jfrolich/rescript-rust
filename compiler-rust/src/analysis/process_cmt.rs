@@ -206,7 +206,7 @@ impl Processor<'_> {
                     decl::TypeKind::TypeAbstract => match decl.type_manifest {
                         Some(manifest) => match &*self.ctx.types.get_desc(manifest) {
                             TypeDesc::Tconstr { path, args, .. } => TypeKind::Abstract(Some((
-                                path.clone(),
+                                *path,
                                 self.ctx.types.type_list(args).iter().copied().collect(),
                             ))),
                             TypeDesc::Ttuple(items) => TypeKind::Tuple(
@@ -332,7 +332,7 @@ impl Processor<'_> {
     ) -> Module {
         match module_type {
             decl::ModuleType::MtyIdent(path) | decl::ModuleType::MtyAlias(_, path) => {
-                Module::Ident(path.clone())
+                Module::Ident(*path)
             }
             decl::ModuleType::MtySignature(signature) => {
                 Module::Structure(Arc::new(self.for_type_signature(name, env, signature)))
@@ -356,7 +356,7 @@ impl Processor<'_> {
                 Some(manifest) => match &self.ctx.ta.core_type(*manifest).ctyp_desc {
                     tt::TypedCoreTypeDesc::Ttyp_constr(path, _, args) => {
                         TypeKind::Abstract(Some((
-                            path.clone(),
+                            *path,
                             self.ctx.ta.core_types(*args).map(|t| t.ctyp_type).collect(),
                         )))
                     }
@@ -574,7 +574,7 @@ impl Processor<'_> {
                     tt::ModuleTypeDesc::Tmty_ident(path, _)
                     | tt::ModuleTypeDesc::Tmty_alias(path, _) => ProcessEnv {
                         module_path: ModulePath::IncludedModule(
-                            path.clone(),
+                            *path,
                             Box::new(env.module_path.clone()),
                         ),
                     },
@@ -645,7 +645,7 @@ impl Processor<'_> {
                     });
                 let unpacked_path = unpack_loc.and_then(|_| {
                     match &*self.ctx.types.get_desc(dig(self.ctx.types, pat.pat_type)) {
-                        TypeDesc::Tpackage { path, .. } => Some(path.clone()),
+                        TypeDesc::Tpackage { path, .. } => Some(*path),
                         _ => None,
                     }
                 });
@@ -868,7 +868,7 @@ impl Processor<'_> {
         module_name: &str,
     ) -> Module {
         match mod_desc {
-            tt::ModuleExprDesc::Tmod_ident(path, _) => Module::Ident(path.clone()),
+            tt::ModuleExprDesc::Tmod_ident(path, _) => Module::Ident(*path),
             tt::ModuleExprDesc::Tmod_structure(structure) => {
                 let env = env.add_module(module_name);
                 Module::Structure(Arc::new(self.for_structure(
@@ -1027,7 +1027,7 @@ fn get_module_path(
     mod_desc: &tt::ModuleExprDesc,
 ) -> Option<crate::types::Path> {
     match mod_desc {
-        tt::ModuleExprDesc::Tmod_ident(path, _) => Some(path.clone()),
+        tt::ModuleExprDesc::Tmod_ident(path, _) => Some(*path),
         tt::ModuleExprDesc::Tmod_apply(functor, _, _) => {
             get_module_path(ta, &ta.module_expr(*functor).mod_desc)
         }

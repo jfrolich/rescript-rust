@@ -284,7 +284,7 @@ pub(crate) fn scrape_ty(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> TypeEx
     let ty = crate::types::ctype::subst_identity_copy(ctx, ty);
     let ty = crate::types::ctype::expand_head_opt(ctx, env, ty);
     let path = match &*ctx.borrow_desc(ty) {
-        TypeDesc::Tconstr { path, .. } => Some(path.clone()),
+        TypeDesc::Tconstr { path, .. } => Some(*path),
         _ => None,
     };
     match path {

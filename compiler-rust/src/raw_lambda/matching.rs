@@ -7141,7 +7141,7 @@ fn get_extension_cases(
     tag_lambda_list
         .into_iter()
         .map(|(cstr, act)| match &cstr.cstr_kind {
-            crate::types::ConstructorKind::Extension(path) => (path.clone(), act),
+            crate::types::ConstructorKind::Extension(path) => (*path, act),
             crate::types::ConstructorKind::Ordinary(_) => unreachable!("ordinary extension case"),
         })
         .collect()
@@ -7206,12 +7206,12 @@ fn normalize_path_via_ctx(
             // First normalize the prefix recursively
             let norm_prefix = normalize_module_path_via_ctx(ctx_ref, prefix);
             if norm_prefix == *prefix {
-                path.clone()
+                *path
             } else {
                 Path::pdot_pos(norm_prefix, *name, *pos)
             }
         }
-        _ => path.clone(),
+        _ => *path,
     }
 }
 
@@ -7228,12 +7228,12 @@ fn normalize_module_path_via_ctx(
         PathView::Pdot(prefix, name, pos) => {
             let norm_prefix = normalize_module_path_via_ctx(ctx_ref, prefix);
             if norm_prefix == *prefix {
-                path.clone()
+                *path
             } else {
                 Path::pdot_pos(norm_prefix, *name, *pos)
             }
         }
-        _ => path.clone(),
+        _ => *path,
     };
 
     // Check if this path resolves to a module alias via sig caches
@@ -7266,7 +7266,7 @@ fn normalize_module_path_via_ctx(
                         sig.iter().find_map(|item| match item {
                             SignatureItem::SigModule(id, md, _) if id.name() == name => {
                                 match &md.md_type {
-                                    ModuleType::MtyAlias(_, alias_path) => Some(alias_path.clone()),
+                                    ModuleType::MtyAlias(_, alias_path) => Some(*alias_path),
                                     _ => None,
                                 }
                             }
@@ -8672,7 +8672,7 @@ fn resolve_labels_from_type(
     let ty = ctx_ref.repr(record_ty);
     let desc = ctx_ref.get_desc(ty);
     let (path, _args) = match &*desc {
-        TypeDesc::Tconstr { path, args, .. } => (path.clone(), args.clone()),
+        TypeDesc::Tconstr { path, args, .. } => (*path, *args),
         _ => return None,
     };
     drop(desc);

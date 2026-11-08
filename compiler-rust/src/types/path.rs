@@ -620,8 +620,8 @@ mod tests {
     #[test]
     fn test_name_eq_matches_name() {
         let a = Path::pident(Ident::create_persistent("A"));
-        let ab = Path::pdot(a.clone(), "B");
-        let abc = Path::pdot(ab.clone(), "c");
+        let ab = Path::pdot(a, "B");
+        let abc = Path::pdot(ab, "c");
         for path in [&a, &ab, &abc] {
             assert!(path.name_eq(&path.name()));
         }
@@ -629,7 +629,7 @@ mod tests {
         assert!(!abc.name_eq("AB.c"));
         assert!(!abc.name_eq("B.c"));
         assert!(!ab.name_eq("A.B.c"));
-        let applied = Path::papply(a.clone(), ab.clone());
+        let applied = Path::papply(a, ab);
         assert!(applied.name_eq(&applied.name()));
     }
 

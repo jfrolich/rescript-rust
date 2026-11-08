@@ -1757,7 +1757,7 @@ impl PersistentEnv {
                 .view
                 .alias_prefix_rewrites
                 .get(&portable_key)
-                .unwrap_or_else(|| module_path.clone());
+                .unwrap_or_else(|| module_path);
             collect_alias_rewrites(
                 &ps.ps_sig,
                 &effective_module_path,
@@ -1830,7 +1830,7 @@ impl PersistentEnv {
                 .view
                 .alias_prefix_rewrites
                 .get(cache_key)
-                .unwrap_or_else(|| module_path.clone());
+                .unwrap_or_else(|| module_path);
             collect_alias_rewrites(
                 &ps.ps_sig,
                 &effective_module_path,
@@ -1874,7 +1874,7 @@ impl PersistentEnv {
             .view
             .alias_prefix_rewrites
             .get(name)
-            .unwrap_or_else(|| module_path.clone());
+            .unwrap_or_else(|| module_path);
         collect_alias_rewrites(
             &signature,
             &effective_module_path,
@@ -2681,7 +2681,7 @@ impl PersistentEnv {
         };
         let module_path = Path::pident(Ident::create_persistent(name));
         let components_key = crate::types::context::QualifiedModuleComponentsCacheKey::new(
-            module_path.clone(),
+            module_path,
             None,
         );
         // OCaml compiler/ml/env.ml:669-678 stores persistent module components
@@ -2721,10 +2721,10 @@ impl PersistentEnv {
                 // component modtype force with that alias path.
                 let build = || {
                     crate::types::env_lazy::QualifiedModuleComponents::new_with_child_components_arc_and_value_source_prefix(
-                        module_path.clone(),
+                        module_path,
                         ps.ps_sig.clone(),
                         crate::fast_hash::AHashMap::new(),
-                        alias_source.clone(),
+                        alias_source,
                         ctx,
                     )
                 };
@@ -3848,7 +3848,7 @@ fn build_subst_maps(sig_items: &[SignatureItem], module_path: &Path) -> SubstMap
     for item in sig_items {
         match item {
             SignatureItem::SigType(id, _, _) | SignatureItem::SigModtype(id, _) => {
-                let qualified_path = Path::pdot(module_path.clone(), id.name());
+                let qualified_path = Path::pdot(*module_path, id.name());
                 if id.stamp() != 0 {
                     // OCaml Subst uses identifier identity for non-persistent ids.
                     maps.type_stamp_map.insert(id.stamp(), qualified_path);
@@ -3859,7 +3859,7 @@ fn build_subst_maps(sig_items: &[SignatureItem], module_path: &Path) -> SubstMap
                 }
             }
             SignatureItem::SigModule(id, _, _) => {
-                let qualified_path = Path::pdot(module_path.clone(), id.name());
+                let qualified_path = Path::pdot(*module_path, id.name());
                 if id.stamp() != 0 {
                     // OCaml Subst uses identifier identity for non-persistent ids.
                     insert_module_stamp_subst(&mut maps.module_stamp_map, id, qualified_path);
@@ -4192,7 +4192,7 @@ pub(crate) fn freshened_signature_bound_idents_from_kind(
     let maps_empty = local_maps.is_empty();
     let rewrite_type_path = |path: &Path| {
         if maps_empty {
-            path.clone()
+            *path
         } else {
             substitute_type_path(
                 path,
@@ -4206,7 +4206,7 @@ pub(crate) fn freshened_signature_bound_idents_from_kind(
     };
     let rewrite_module_path = |path: &Path| {
         if maps_empty {
-            path.clone()
+            *path
         } else {
             substitute_module_path(
                 path,
@@ -4252,10 +4252,10 @@ pub(crate) fn substitute_functor_result_module_path(
     let mut copied = crate::types::typecore::copy_lookup_module_type_for_subst(module_type, ctx);
     let mut maps = SubstMaps::default();
     if old_param.stamp() != 0 {
-        insert_module_stamp_subst(&mut maps.module_stamp_map, old_param, arg_path.clone());
+        insert_module_stamp_subst(&mut maps.module_stamp_map, old_param, *arg_path);
     } else {
         maps.module_name_map
-            .insert(old_param.name().to_string(), arg_path.clone());
+            .insert(old_param.name().to_string(), *arg_path);
     }
     freshen_module_type_bound_idents_with_maps(&mut copied, &maps, ctx);
     copied
@@ -4274,10 +4274,10 @@ pub(crate) fn substitute_module_type_with_module_path_subst(
     let mut maps = SubstMaps::default();
     for (id, path) in module_paths {
         if id.stamp() != 0 {
-            insert_module_stamp_subst(&mut maps.module_stamp_map, id, path.clone());
+            insert_module_stamp_subst(&mut maps.module_stamp_map, id, *path);
         } else {
             maps.module_name_map
-                .insert(id.name().to_string(), path.clone());
+                .insert(id.name().to_string(), *path);
         }
     }
     freshen_module_type_bound_idents_with_maps(&mut copied, &maps, ctx);
@@ -4770,7 +4770,7 @@ fn restore_child_self_manifests_from_parent_scope(
         ctx.set_desc(
             manifest,
             TypeDesc::Tconstr {
-                path: Path::pdot(parent_module_path.clone(), child_id.name()),
+                path: Path::pdot(*parent_module_path, child_id.name()),
                 args,
                 abbrev,
             },
@@ -4835,7 +4835,7 @@ pub fn substitute_type_paths_in_sig(
             SignatureItem::SigType(id, _, _) | SignatureItem::SigModtype(id, _) => {
                 direct_type_name_map
                     .entry(id.name().to_string())
-                    .or_insert_with(|| Path::pdot(module_path.clone(), id.name()));
+                    .or_insert_with(|| Path::pdot(*module_path, id.name()));
             }
             _ => {}
         }
@@ -5135,7 +5135,7 @@ fn substitute_type_expr_path(
                     protected_module_head,
                 );
                 if new_path != *path {
-                    let mut new_desc = (*desc).clone();
+                    let mut new_desc = (*desc);
                     if let TypeDesc::Tconstr { ref mut path, .. } = new_desc {
                         *path = new_path;
                     }
@@ -5226,7 +5226,7 @@ fn substitute_type_expr_path(
                     protected_module_head,
                 );
                 if new_path != *path {
-                    let mut new_desc = (*desc).clone();
+                    let mut new_desc = (*desc);
                     if let TypeDesc::Tpackage { ref mut path, .. } = new_desc {
                         *path = new_path;
                     }
@@ -5254,7 +5254,7 @@ pub fn alias_reroot_prefixes(module_path: &Path, ctx: &TypeContext) -> Vec<(Path
     component_alias_sources(module_path, ctx)
         .into_iter()
         .filter(|source| !source.same(module_path))
-        .map(|source| (source, module_path.clone()))
+        .map(|source| (source, *module_path))
         .collect()
 }
 
@@ -5298,7 +5298,7 @@ fn component_alias_sources(module_path: &Path, ctx: &TypeContext) -> Vec<Path> {
 /// Rewrite `path` through the first matching `(old, new)` prefix pair.
 pub fn reroot_path(path: &Path, prefixes: &[(Path, Path)]) -> Path {
     rewrite_path_by_path_prefixes(path, &PathPrefixes::new(prefixes))
-        .unwrap_or_else(|| path.clone())
+        .unwrap_or_else(|| *path)
 }
 
 /// Whether any type constructor or package path reachable from `ty` starts
@@ -5399,7 +5399,7 @@ pub fn build_value_subst_maps(sig_items: &[SignatureItem], module_path: &Path) -
             SignatureItem::SigType(id, _, _) | SignatureItem::SigModtype(id, _) => {
                 direct_type_name_map
                     .entry(id.name().to_string())
-                    .or_insert_with(|| Path::pdot(module_path.clone(), id.name()));
+                    .or_insert_with(|| Path::pdot(*module_path, id.name()));
             }
             _ => {}
         }
@@ -5464,8 +5464,8 @@ pub fn substitute_type_paths_in_value_with_maps(
             else {
                 continue;
             };
-            let old_path = Path::pdot(alias_source.clone(), id.name());
-            let new_path = Path::pdot(module_path.clone(), id.name());
+            let old_path = Path::pdot(alias_source, id.name());
+            let new_path = Path::pdot(*module_path, id.name());
             if old_path.same(&new_path) {
                 continue;
             }
@@ -5510,7 +5510,7 @@ fn direct_manifest_substitution_would_self_alias(
         module_name_map,
         protected_module_head,
     );
-    substituted.same(&Path::pdot(module_path.clone(), id.name()))
+    substituted.same(&Path::pdot(*module_path, id.name()))
 }
 
 fn substitute_type_path(
@@ -5530,12 +5530,12 @@ fn substitute_type_path(
                 type_stamp_map
                     .get(&ident.stamp())
                     .cloned()
-                    .unwrap_or_else(|| path.clone())
+                    .unwrap_or_else(|| *path)
             } else {
                 type_name_map
                     .get(ident.name())
                     .cloned()
-                    .unwrap_or_else(|| path.clone())
+                    .unwrap_or_else(|| *path)
             }
         }
         PathView::Pdot(prefix, name, pos) => {
@@ -5580,13 +5580,13 @@ fn substitute_module_path(
                 // fall back to declaration names or flattened path spelling.
                 module_stamp_map
                     .get(&ident.stamp())
-                    .and_then(|(_, path)| (!protected).then(|| path.clone()))
-                    .unwrap_or_else(|| path.clone())
+                    .and_then(|(_, path)| (!protected).then(|| *path))
+                    .unwrap_or_else(|| *path)
             } else {
                 module_name_map
                     .get(ident.name())
                     .cloned()
-                    .unwrap_or_else(|| path.clone())
+                    .unwrap_or_else(|| *path)
             }
         }
         PathView::Pdot(prefix, name, pos) => {
@@ -5636,7 +5636,7 @@ fn rewrite_type_expr_prefix(
         TypeDesc::Tconstr { path, args, .. } => {
             let rewritten = rewrite_path_prefix(path, old_name, new_prefix);
             if let Some(new_path) = rewritten {
-                let mut new_desc = (*desc).clone();
+                let mut new_desc = (*desc);
                 if let TypeDesc::Tconstr { ref mut path, .. } = new_desc {
                     *path = new_path;
                 }
@@ -5710,7 +5710,7 @@ fn rewrite_type_expr_prefix(
         }
         TypeDesc::Tpackage { path, args, .. } => {
             if let Some(new_path) = rewrite_path_prefix(path, old_name, new_prefix) {
-                let mut new_desc = (*desc).clone();
+                let mut new_desc = (*desc);
                 if let TypeDesc::Tpackage { ref mut path, .. } = new_desc {
                     *path = new_path;
                 }
@@ -5729,12 +5729,12 @@ fn rewrite_type_expr_prefix(
 fn rewrite_path_prefix(path: &Path, old_name: &str, new_prefix: &Path) -> Option<Path> {
     match path.view() {
         // Pident("Belt_Array") → new_prefix (e.g., Pdot(Pident("Belt"), "Array"))
-        PathView::Pident(id) if id.name() == old_name => Some(new_prefix.clone()),
+        PathView::Pident(id) if id.name() == old_name => Some(*new_prefix),
         // Pdot(Pident("Belt_Array"), "t", pos) → Pdot(new_prefix, "t", pos)
         PathView::Pdot(inner, name, pos) => {
             if let PathView::Pident(id) = inner.view() {
                 if id.name() == old_name {
-                    return Some(Path::pdot_pos(new_prefix.clone(), *name, *pos));
+                    return Some(Path::pdot_pos(*new_prefix, *name, *pos));
                 }
             }
             // Recursively check deeper paths
@@ -6131,12 +6131,12 @@ fn rewrite_module_prefix_in_sig_with_visited(
 ///   Pdot(Pdot(Pdot(Pident("Js"),"Json"),"Kind"),"t") → Pdot(Pdot(Pident("J"),"Kind"),"t")
 fn rewrite_path_by_path_prefix(path: &Path, old_prefix: &Path, new_prefix: &Path) -> Option<Path> {
     if path.same(old_prefix) {
-        return Some(new_prefix.clone());
+        return Some(*new_prefix);
     }
     match path.view() {
         PathView::Pdot(inner, name, pos) => {
             if inner.same(old_prefix) {
-                return Some(Path::pdot_pos(new_prefix.clone(), *name, *pos));
+                return Some(Path::pdot_pos(*new_prefix, *name, *pos));
             }
             rewrite_path_by_path_prefix(inner, old_prefix, new_prefix)
                 .map(|new_inner| Path::pdot_pos(new_inner, *name, *pos))
@@ -6159,7 +6159,7 @@ impl<'a> PathPrefixes<'a> {
             let mut index = ahash::AHashMap::with_capacity(pairs.len());
             for (position, (old_prefix, _)) in pairs.iter().enumerate() {
                 index
-                    .entry(crate::types::context::SamePathKey::new(old_prefix.clone()))
+                    .entry(crate::types::context::SamePathKey::new(*old_prefix))
                     .or_insert(position);
             }
             index
@@ -6184,7 +6184,7 @@ fn rewrite_path_by_path_prefixes(path: &Path, prefixes: &PathPrefixes<'_>) -> Op
     let mut ancestor = path;
     loop {
         if let Some(&position) =
-            index.get(&crate::types::context::SamePathKey::new(ancestor.clone()))
+            index.get(&crate::types::context::SamePathKey::new(*ancestor))
         {
             first = Some(first.map_or(position, |found| found.min(position)));
         }
@@ -6339,7 +6339,7 @@ fn rewrite_type_expr_by_path_prefix_in(
     match &*desc {
         TypeDesc::Tconstr { path, args, .. } => {
             if let Some(new_path) = rewrite_path_by_path_prefix(path, old_prefix, new_prefix) {
-                let mut new_desc = (*desc).clone();
+                let mut new_desc = (*desc);
                 if let TypeDesc::Tconstr { ref mut path, .. } = new_desc {
                     *path = new_path;
                 }
@@ -6417,7 +6417,7 @@ fn rewrite_type_expr_by_path_prefix_in(
         }
         TypeDesc::Tpackage { path, args, .. } => {
             if let Some(new_path) = rewrite_path_by_path_prefix(path, old_prefix, new_prefix) {
-                let mut new_desc = (*desc).clone();
+                let mut new_desc = (*desc);
                 if let TypeDesc::Tpackage { ref mut path, .. } = new_desc {
                     *path = new_path;
                 }
@@ -6456,7 +6456,7 @@ fn rewrite_type_expr_by_path_prefixes(
     match &*desc {
         TypeDesc::Tconstr { path, args, .. } => {
             if let Some(new_path) = rewrite_path_by_path_prefixes(path, prefixes) {
-                let mut new_desc = (*desc).clone();
+                let mut new_desc = (*desc);
                 if let TypeDesc::Tconstr { ref mut path, .. } = new_desc {
                     *path = new_path;
                 }
@@ -6527,7 +6527,7 @@ fn rewrite_type_expr_by_path_prefixes(
         }
         TypeDesc::Tpackage { path, args, .. } => {
             if let Some(new_path) = rewrite_path_by_path_prefixes(path, prefixes) {
-                let mut new_desc = (*desc).clone();
+                let mut new_desc = (*desc);
                 if let TypeDesc::Tpackage { ref mut path, .. } = new_desc {
                     *path = new_path;
                 }
@@ -6751,7 +6751,7 @@ pub fn substitute_submodule_paths(
 
     for item in sig_items {
         if let SignatureItem::SigModule(id, md, _) = item {
-            let sub_path = Path::pdot(module_path.clone(), id.name());
+            let sub_path = Path::pdot(*module_path, id.name());
             if let ModuleType::MtySignature(sub_sig) = &md.md_type {
                 substitute_type_paths_in_sig_with_maps(sub_sig, &parent_maps, ctx);
                 restore_child_self_manifests_from_parent_scope(
@@ -6816,13 +6816,13 @@ fn collect_alias_rewrites<S: AliasRewriteSink>(
                 if let PathView::Pident(alias_id) = alias_path.view()
                     && !rewrites.has_alias_rewrite(alias_id.name())
                 {
-                    let qualified = Path::pdot(module_path.clone(), id.name_atom());
+                    let qualified = Path::pdot(*module_path, id.name_atom());
                     rewrites.insert_alias_rewrite_if_absent(alias_id.name().to_string(), qualified);
                 }
             }
             // Also recurse into MtySignature submodules to find nested aliases
             if let ModuleType::MtySignature(sub_sig) = &md.md_type {
-                let sub_path = Path::pdot(module_path.clone(), id.name_atom());
+                let sub_path = Path::pdot(*module_path, id.name_atom());
                 collect_alias_rewrites(sub_sig, &sub_path, rewrites);
             }
         }
@@ -6878,7 +6878,7 @@ fn add_signature_to_env_with_options(
             apply_path_subst,
             precomputed_components,
         );
-        env.add_prebuilt_open_layers(module_path.clone(), &layers);
+        env.add_prebuilt_open_layers(*module_path, &layers);
         return;
     }
     add_signature_to_env_with_options_inner(
@@ -6931,7 +6931,7 @@ fn open_components_into_env(
             Some(components),
         )
     });
-    env.add_prebuilt_open_layers(components.access_path().clone(), &layers);
+    env.add_prebuilt_open_layers(*components.access_path(), &layers);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -6979,7 +6979,7 @@ fn add_signature_to_env_with_options_inner(
     if let Some(source) = precomputed_components.and_then(|c| c.rerooted_value_source())
         && !reroot_prefixes.iter().any(|(from, _)| from.same(source))
     {
-        reroot_prefixes.push((source.clone(), module_path.clone()));
+        reroot_prefixes.push((*source, *module_path));
     }
     let mut opened_values = Vec::new();
     let mut opened_types = Vec::new();
@@ -7005,7 +7005,7 @@ fn add_signature_to_env_with_options_inner(
         )
     };
     for item in sig_items.iter() {
-        let slot_path = |name: &str, p: i32| Path::pdot_pos(module_path.clone(), name, p);
+        let slot_path = |name: &str, p: i32| Path::pdot_pos(*module_path, name, p);
         match item {
             SignatureItem::SigValue(id, desc) => {
                 // Add value binding with qualified path
@@ -7028,7 +7028,7 @@ fn add_signature_to_env_with_options_inner(
             SignatureItem::SigType(id, decl, _rec_status) => {
                 // Add type binding with qualified path
                 let mut decl = (**decl).clone();
-                decl.type_path = Some(Path::pdot(module_path.clone(), id.name()));
+                decl.type_path = Some(Path::pdot(*module_path, id.name()));
                 let decl = Arc::new(decl);
                 if as_opened {
                     opened_types.push((*id, decl.clone()));
@@ -7039,14 +7039,14 @@ fn add_signature_to_env_with_options_inner(
                 // Also add constructors and labels from this type
                 match &decl.type_kind {
                     TypeKind::TypeVariant(constrs, layout) => {
-                        let type_path = Path::pdot(module_path.clone(), id.name());
+                        let type_path = Path::pdot(*module_path, id.name());
                         for (position, cd) in constrs.iter().enumerate() {
                             let inline_record = match &cd.cd_args {
                                 crate::types::decl::ConstructorArguments::CstrRecord(labels) => {
                                     let inline_params =
                                         inline_record_type_params(ctx, &decl.type_params, labels);
                                     let inline_path =
-                                        Path::pdot(type_path.clone(), cd.cd_id.name());
+                                        Path::pdot(type_path, cd.cd_id.name());
                                     let inline_decl = crate::types::TypeDeclaration {
                                         type_params: inline_params.clone(),
                                         type_arity: inline_params.len() as i32,
@@ -7111,7 +7111,7 @@ fn add_signature_to_env_with_options_inner(
                                 crate::types::ctype::subst_identity_copy(ctx, res_ty)
                             } else {
                                 // Default: the type constructor with its params
-                                ctx.new_generic_constr(type_path.clone(), decl.type_params.clone())
+                                ctx.new_generic_constr(type_path, decl.type_params.clone())
                             };
 
                             // datarepr.ml:62-75: the variables of the arguments
@@ -7149,7 +7149,7 @@ fn add_signature_to_env_with_options_inner(
                                     inlined_decl.type_kind
                                 {
                                     let inline_path =
-                                        Path::pdot(type_path.clone(), cstr_desc.cstr_name.clone());
+                                        Path::pdot(type_path, cstr_desc.cstr_name.clone());
                                     let ty_res = ctx
                                         .new_constr(inline_path, inlined_decl.type_params.clone());
                                     for (pos, ld) in labels.iter().enumerate() {
@@ -7189,7 +7189,7 @@ fn add_signature_to_env_with_options_inner(
                         }
                     }
                     TypeKind::TypeRecord(labels, repr) => {
-                        let type_path = Path::pdot(module_path.clone(), id.name());
+                        let type_path = Path::pdot(*module_path, id.name());
                         let res_ty = ctx.new_generic_constr(type_path, decl.type_params.clone());
 
                         for (pos, ld) in labels.iter().enumerate() {
@@ -7229,7 +7229,7 @@ fn add_signature_to_env_with_options_inner(
                 let module_pos = pos;
                 let access_path = slot_path(id.name(), module_pos);
                 pos += 1;
-                md.md_path = Some(access_path.clone());
+                md.md_path = Some(access_path);
                 // Rewrite module-type paths against the opened signature.
                 // Persistent identifiers in debug output carry `!` (e.g.
                 // `ArrayExt!`). Keep those top-level alias targets distinct so
@@ -7249,21 +7249,21 @@ fn add_signature_to_env_with_options_inner(
                                 }
                                 let clean = alias_id.name();
                                 if clean == module_name {
-                                    access_path.clone()
+                                    *access_path
                                 } else if clean == module_path.last() {
-                                    module_path.clone()
+                                    *module_path
                                 } else {
                                     path
                                 }
                             }
                             PathView::Pdot(prefix, name, pos) => Path::pdot_pos(
-                                go(prefix.clone(), module_path, module_name, access_path),
+                                go(*prefix, module_path, module_name, access_path),
                                 *name,
                                 *pos,
                             ),
                             PathView::Papply(functor, arg) => Path::papply(
-                                go(functor.clone(), module_path, module_name, access_path),
-                                go(arg.clone(), module_path, module_name, access_path),
+                                go(*functor, module_path, module_name, access_path),
+                                go(*arg, module_path, module_name, access_path),
                             ),
                         }
                     }
@@ -7295,7 +7295,7 @@ fn add_signature_to_env_with_options_inner(
                         // equivalent persistent-alias thunk.
                         let stored = Arc::new(crate::types::env_lazy::StoredModuleComponents::new(
                             Env::empty(),
-                            access_path.clone(),
+                            access_path,
                             md.clone(),
                         ));
                         opened_module_components.push((*id, stored, module_pos));
@@ -7395,7 +7395,7 @@ fn add_signature_to_env_with_options_inner(
         );
         match opened_out {
             Some(out) => *out = Some(layers),
-            None => env.add_prebuilt_open_layers(module_path.clone(), &layers),
+            None => env.add_prebuilt_open_layers(*module_path, &layers),
         }
     }
 }

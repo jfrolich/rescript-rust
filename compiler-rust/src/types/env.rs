@@ -585,7 +585,7 @@ impl<T: Clone> IdTbl<T> {
                     let path = opened
                         .root
                         .as_ref()
-                        .map(|root| Path::pdot_pos(root.clone(), key, *pos))
+                        .map(|root| Path::pdot_pos(*root, key, *pos))
                         .unwrap_or_else(|| Path::pident(*id));
                     (path, value)
                 })
@@ -1351,7 +1351,7 @@ impl Env {
                 .visible_local_entries()
                 .filter_map(|(id, decl)| match &decl.md_type {
                     ModuleType::MtyAlias(_, target) | ModuleType::MtyIdent(target) => {
-                        Some((*id, target.clone()))
+                        Some((*id, *target))
                     }
                     _ => None,
                 })
@@ -1843,17 +1843,17 @@ impl Env {
         let slot = self.data.pending_open_slot;
         let data = self.data_mut();
         data.values
-            .add_open_layer_table(root.clone(), layers.values.clone(), slot);
+            .add_open_layer_table(root, layers.values.clone(), slot);
         data.types
-            .add_open_layer_table(root.clone(), layers.types.clone(), slot);
+            .add_open_layer_table(root, layers.types.clone(), slot);
         data.constrs
             .add_open_layer_table(layers.constrs.clone(), slot);
         data.labels
             .add_open_layer_table(layers.labels.clone(), slot);
         data.modules
-            .add_open_layer_table(root.clone(), layers.modules.clone(), slot);
+            .add_open_layer_table(root, layers.modules.clone(), slot);
         data.module_components.add_open_layer_table(
-            root.clone(),
+            root,
             layers.module_components.clone(),
             slot,
         );
@@ -1894,7 +1894,7 @@ impl Env {
     fn first_dotted_component_path(path: &Path) -> Option<Path> {
         match path.view() {
             PathView::Pdot(parent, name, pos) => match parent.view() {
-                PathView::Pident(_) => Some(Path::pdot_pos(parent.clone(), *name, *pos)),
+                PathView::Pident(_) => Some(Path::pdot_pos(*parent, *name, *pos)),
                 _ => Self::first_dotted_component_path(parent),
             },
             PathView::Pident(_) | PathView::Papply(_, _) => None,
@@ -2021,7 +2021,7 @@ impl Env {
             if visiting.contains(path) {
                 return Err(EnvError::ModuleNotFound(path.name().into()));
             }
-            visiting.push(path.clone());
+            visiting.push(*path);
 
             match path.view() {
                 PathView::Pident(id) => {
@@ -2066,31 +2066,31 @@ impl Env {
             PathView::Pdot(prefix, name, pos) => {
                 let normalized_prefix = self.normalize_path(prefix);
                 if normalized_prefix == *prefix {
-                    path.clone()
+                    *path
                 } else {
                     Path::pdot_pos(normalized_prefix, *name, *pos)
                 }
             }
-            PathView::Pident(_) => path.clone(),
+            PathView::Pident(_) => *path,
             PathView::Papply(_, _) => panic!("normalize_path_prefix called on Papply"),
         }
     }
 
     fn normalize_path_inner(&self, path: &Path, depth: usize) -> Path {
         if depth > 20 {
-            return path.clone(); // Prevent infinite loops
+            return *path; // Prevent infinite loops
         }
         // First, recursively normalize the prefix for Pdot paths
         let path = match path.view() {
             PathView::Pdot(p, s, pos) => {
                 let p_norm = self.normalize_path_inner(p, depth + 1);
                 if p_norm == *p {
-                    path.clone()
+                    *path
                 } else {
                     Path::pdot_pos(p_norm, *s, *pos)
                 }
             }
-            _ => path.clone(),
+            _ => *path,
         };
 
         // Then check if the path itself is a module alias
@@ -2350,7 +2350,7 @@ fn build_initial_env(ctx: &TypeContext) -> Env {
                     let cstr_res = if let Some(res_ty) = cd.cd_res {
                         res_ty
                     } else {
-                        ctx.new_generic_constr(type_path.clone(), decl.type_params.clone())
+                        ctx.new_generic_constr(type_path, decl.type_params.clone())
                     };
 
                     let cstr_existentials = constructor_existentials(ctx, &cstr_args, cd.cd_res);
@@ -2379,7 +2379,7 @@ fn build_initial_env(ctx: &TypeContext) -> Env {
                 }
             }
             TypeKind::TypeRecord(labels, repr) => {
-                let res_ty = ctx.new_generic_constr(type_path.clone(), decl.type_params.clone());
+                let res_ty = ctx.new_generic_constr(type_path, decl.type_params.clone());
                 for (pos, ld) in labels.iter().enumerate() {
                     let label_desc = LabelDescription {
                         lbl_name: ld.ld_id.name().to_string(),
@@ -2655,7 +2655,7 @@ fn build_initial_env(ctx: &TypeContext) -> Env {
                     cstr_existentials: vec![],
                     cstr_arity: args.len() as i32,
                     cstr_args: args,
-                    cstr_kind: ConstructorKind::Extension(path.clone()),
+                    cstr_kind: ConstructorKind::Extension(path),
                     cstr_generalized: false,
                     cstr_private: PrivateFlag::Public,
                     cstr_loc: crate::types::DeclLoc::none(),

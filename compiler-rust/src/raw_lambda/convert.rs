@@ -1189,7 +1189,7 @@ impl<'a> RawLambdaConverter<'a> {
     ) -> Option<crate::types::Path> {
         rootpath
             .as_ref()
-            .map(|path| crate::types::Path::pdot(path.clone(), field.name().to_string()))
+            .map(|path| crate::types::Path::pdot(*path, field.name().to_string()))
     }
 
     fn loc_idx_for_location(&self, loc: &Location) -> LocIdx {
@@ -1534,7 +1534,7 @@ impl<'a> RawLambdaConverter<'a> {
         param: &Ident,
     ) -> Option<crate::types::Path> {
         rootpath.as_ref().map(|path| {
-            crate::types::Path::papply(path.clone(), crate::types::Path::pident(*param))
+            crate::types::Path::papply(*path, crate::types::Path::pident(*param))
         })
     }
 
@@ -1593,7 +1593,7 @@ impl<'a> RawLambdaConverter<'a> {
     }
 
     fn type_desc(&self, ty: TypeExprRef) -> TypeDesc {
-        (*self.type_ctx.get_desc(self.type_ctx.repr(ty))).clone()
+        (*self.type_ctx.get_desc(self.type_ctx.repr(ty)))
     }
 
     fn is_function_type_with_env(
@@ -3935,7 +3935,7 @@ impl<'a> RawLambdaConverter<'a> {
                 if force_root {
                     self.force_persistent_normalized_prefix(env, id);
                 }
-                path.clone()
+                *path
             }
         };
 
@@ -4057,7 +4057,7 @@ impl<'a> RawLambdaConverter<'a> {
             ),
             crate::types::path::PathView::Pident(id) => {
                 self.force_persistent_normalized_prefix(env, id);
-                path.clone()
+                *path
             }
         };
 
@@ -4153,8 +4153,8 @@ impl<'a> RawLambdaConverter<'a> {
                 *name,
                 *pos,
             ),
-            crate::types::path::PathView::Pident(_) => path.clone(),
-            crate::types::path::PathView::Papply(_, _) => path.clone(),
+            crate::types::path::PathView::Pident(_) => *path,
+            crate::types::path::PathView::Papply(_, _) => *path,
         }
     }
 
@@ -4355,7 +4355,7 @@ impl<'a> RawLambdaConverter<'a> {
             (coercion, ModuleCoercion::Tcoerce_alias(env, path, inner)) => {
                 ModuleCoercion::Tcoerce_alias(
                     *env,
-                    path.clone(),
+                    *path,
                     Box::new(Self::compose_coercions_raw(coercion, inner)),
                 )
             }
@@ -7736,7 +7736,7 @@ mod tests {
             cstr_existentials: Vec::new(),
             cstr_args: Vec::new(),
             cstr_arity: 0,
-            cstr_kind: crate::types::ConstructorKind::Extension(path.clone()),
+            cstr_kind: crate::types::ConstructorKind::Extension(path),
             cstr_generalized: false,
             cstr_private: crate::types::asttypes::PrivateFlag::Public,
             cstr_loc: crate::types::DeclLoc::none(),
@@ -8474,8 +8474,8 @@ mod tests {
         let icon_export_path =
             crate::types::Path::pdot(crate::types::Path::pident(icon), export.name().to_string());
         let subtitles_path =
-            crate::types::Path::pdot(icon_export_path.clone(), subtitles.name().to_string());
-        let main_path = crate::types::Path::pdot(subtitles_path.clone(), main.name().to_string());
+            crate::types::Path::pdot(icon_export_path, subtitles.name().to_string());
+        let main_path = crate::types::Path::pdot(subtitles_path, main.name().to_string());
 
         let main_decl = crate::types::decl::ModuleDeclaration {
             md_type: test_signature_module_type(vec![crate::types::SignatureItem::SigValue(
@@ -8514,7 +8514,7 @@ mod tests {
                                             crate::types::decl::ModuleDeclaration {
                                                 md_type: crate::types::decl::ModuleType::MtyAlias(
                                                     crate::types::decl::AliasPresence::MtaPresent,
-                                                    main_path.clone(),
+                                                    main_path,
                                                 ),
                                                 md_attributes: Vec::new(),
                                                 md_loc: crate::types::DeclLoc::none(),

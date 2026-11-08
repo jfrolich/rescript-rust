@@ -384,7 +384,7 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
         let expanded = self.oracle.expand_head(env, ty);
         let ctx = self.oracle.ctx();
         match &*ctx.get_desc(ctx.repr(expanded)) {
-            TypeDesc::Tconstr { path, .. } => Some(path.clone()),
+            TypeDesc::Tconstr { path, .. } => Some(*path),
             _ => None,
         }
     }
@@ -461,7 +461,7 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
         let desc = ctx.get_desc(ctx.repr(expanded));
         match &*desc {
             TypeDesc::Tvariant(row) => {
-                let row = row.clone();
+                let row = *row;
                 drop(desc);
                 matches!(
                     crate::types::btype::row_field(ctx, tag, &ctx.row_desc(row)),

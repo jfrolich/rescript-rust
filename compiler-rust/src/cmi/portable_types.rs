@@ -888,7 +888,7 @@ impl<'a, 'f> TypeGraphSerializer<'a, 'f> {
 
     fn serialize_desc(&mut self, desc: &TypeDesc) -> PortableTypeDesc {
         match desc {
-            TypeDesc::Tvar(name) => PortableTypeDesc::Tvar(name.clone()),
+            TypeDesc::Tvar(name) => PortableTypeDesc::Tvar(*name),
             TypeDesc::Tarrow { args, ret } => PortableTypeDesc::Tarrow {
                 args: self.ctx.type_args(args)
                     .iter()
@@ -900,7 +900,7 @@ impl<'a, 'f> TypeGraphSerializer<'a, 'f> {
                 PortableTypeDesc::Ttuple(self.ctx.type_list(types).iter().map(|t| self.serialize_type(*t)).collect())
             }
             TypeDesc::Tconstr { path, args, .. } => PortableTypeDesc::Tconstr {
-                path: path.clone(),
+                path: *path,
                 args: self.ctx.type_list(args).iter().map(|t| self.serialize_type(*t)).collect(),
             },
             TypeDesc::Tobject { fields } => PortableTypeDesc::Tobject {
@@ -912,7 +912,7 @@ impl<'a, 'f> TypeGraphSerializer<'a, 'f> {
                 typ,
                 rest,
             } => PortableTypeDesc::Tfield {
-                name: name.clone(),
+                name: *name,
                 mutability: self.serialize_mutability(*mutability),
                 typ: self.serialize_type(*typ),
                 rest: self.serialize_type(*rest),
@@ -923,13 +923,13 @@ impl<'a, 'f> TypeGraphSerializer<'a, 'f> {
             TypeDesc::Tvariant(row_desc) => {
                 PortableTypeDesc::Tvariant(self.serialize_row_desc(&self.ctx.row_desc(row_desc)))
             }
-            TypeDesc::Tunivar(name) => PortableTypeDesc::Tunivar(name.clone()),
+            TypeDesc::Tunivar(name) => PortableTypeDesc::Tunivar(*name),
             TypeDesc::Tpoly { body, vars } => PortableTypeDesc::Tpoly {
                 body: self.serialize_type(*body),
                 vars: self.ctx.type_list(vars).iter().map(|t| self.serialize_type(*t)).collect(),
             },
             TypeDesc::Tpackage { path, lids, args } => PortableTypeDesc::Tpackage {
-                path: path.clone(),
+                path: *path,
                 lids: self
                     .ctx
                     .package_lids(lids)
@@ -982,7 +982,7 @@ impl<'a, 'f> TypeGraphSerializer<'a, 'f> {
             row_fixed: rd.row_fixed,
             row_name: rd.row_name.as_ref().map(|(p, args)| {
                 (
-                    p.clone(),
+                    *p,
                     args.iter().map(|t| self.serialize_type(*t)).collect(),
                 )
             }),
@@ -1675,7 +1675,7 @@ fn internalize_desc<S: TypeNodeSink>(
     ctx: &S,
 ) -> TypeDesc {
     match desc {
-        PortableTypeDesc::Tvar(name) => TypeDesc::Tvar(name.clone()),
+        PortableTypeDesc::Tvar(name) => TypeDesc::Tvar(*name),
         PortableTypeDesc::Tarrow { args, ret } => TypeDesc::Tarrow {
             args: {
                 let args: crate::types::type_expr::TypeArgs = args
@@ -1690,7 +1690,7 @@ fn internalize_desc<S: TypeNodeSink>(
             TypeDesc::Ttuple(ctx.new_type_list_from_iter(types.iter().map(|&i| remap[i])))
         }
         PortableTypeDesc::Tconstr { path, args } => TypeDesc::Tconstr {
-            path: path.clone(),
+            path: *path,
             args: ctx.new_type_list_from_iter(args.iter().map(|&i| remap[i])),
             abbrev: ctx.abbrev_nil(),
         },
@@ -1703,7 +1703,7 @@ fn internalize_desc<S: TypeNodeSink>(
             typ,
             rest,
         } => TypeDesc::Tfield {
-            name: name.clone(),
+            name: *name,
             mutability: mremap[*mutability],
             typ: remap[*typ],
             rest: remap[*rest],
@@ -1714,13 +1714,13 @@ fn internalize_desc<S: TypeNodeSink>(
         PortableTypeDesc::Tvariant(prd) => {
             TypeDesc::Tvariant(ctx.new_row_desc(internalize_row_desc(prd, remap, ctx)))
         }
-        PortableTypeDesc::Tunivar(name) => TypeDesc::Tunivar(name.clone()),
+        PortableTypeDesc::Tunivar(name) => TypeDesc::Tunivar(*name),
         PortableTypeDesc::Tpoly { body, vars } => TypeDesc::Tpoly {
             body: remap[*body],
             vars: ctx.new_type_list_from_iter(vars.iter().map(|&i| remap[i])),
         },
         PortableTypeDesc::Tpackage { path, lids, args } => TypeDesc::Tpackage {
-            path: path.clone(),
+            path: *path,
             lids: ctx.new_package_lids(
                 lids.iter()
                     .map(|lid| internalize_longident(lid, ctx))
@@ -1767,7 +1767,7 @@ fn internalize_row_desc<S: TypeNodeSink>(
         row_name: prd
             .row_name
             .as_ref()
-            .map(|(p, args)| (p.clone(), args.iter().map(|&i| remap[i]).collect())),
+            .map(|(p, args)| (*p, args.iter().map(|&i| remap[i]).collect())),
     }
 }
 

@@ -1529,8 +1529,8 @@ impl TypeContext {
     pub(crate) fn register_component_alias_source(&self, component_path: Path, alias_source: Path) {
         if self.in_store_build() {
             self.record_store_effect(StoreEffect::RegisterAliasSource(
-                component_path.clone(),
-                alias_source.clone(),
+                component_path,
+                alias_source,
             ));
         }
         // OCaml compiler/ml/env.ml:1440-1446 scrapes aliases by resolving the
@@ -1551,16 +1551,16 @@ impl TypeContext {
             push_unique_path(
                 self.component_alias_sources
                     .borrow_mut()
-                    .entry(SamePathKey(component_path.clone()))
+                    .entry(SamePathKey(component_path))
                     .or_default(),
-                alias_source.clone(),
+                alias_source,
             );
             push_unique_path(
                 self.component_paths_by_alias_source
                     .borrow_mut()
                     .entry(SamePathKey(alias_source))
                     .or_default(),
-                component_path.clone(),
+                component_path,
             );
         }
     }
@@ -1602,7 +1602,7 @@ impl TypeContext {
         self.poison_store_build_for("read:component_paths_for_alias_source");
         self.component_paths_by_alias_source
             .borrow()
-            .get(&SamePathKey(alias_source.clone()))
+            .get(&SamePathKey(*alias_source))
             .cloned()
             .unwrap_or_default()
     }
@@ -1618,7 +1618,7 @@ impl TypeContext {
         // the path does first: the same for every compilation.
         self.component_alias_sources
             .borrow()
-            .get(&SamePathKey(component_path.clone()))
+            .get(&SamePathKey(*component_path))
             .cloned()
             .unwrap_or_default()
     }
@@ -1637,12 +1637,12 @@ impl TypeContext {
         module_name: &str,
     ) -> Option<Path> {
         self.poison_store_build_for("read:find_module_alias_in_components");
-        let key = QualifiedModuleComponentsCacheKey::new(parent_path.clone(), None);
+        let key = QualifiedModuleComponentsCacheKey::new(*parent_path, None);
         self.with_qualified_module_components(&key, |components| {
             let (_, _, md) = components.lookup_module(module_name)?;
             match &md.md_type {
-                super::decl::ModuleType::MtyAlias(_, target) => Some(target.clone()),
-                super::decl::ModuleType::MtyIdent(target) => Some(target.clone()),
+                super::decl::ModuleType::MtyAlias(_, target) => Some(*target),
+                super::decl::ModuleType::MtyIdent(target) => Some(*target),
                 _ => None,
             }
         })
@@ -1659,7 +1659,7 @@ impl TypeContext {
     ) {
         self.resolved_module_value_cache
             .borrow_mut()
-            .entry(module_path.clone())
+            .entry(*module_path)
             .or_default()
             .insert(value_name.to_string(), (path, desc));
     }
@@ -1689,7 +1689,7 @@ impl TypeContext {
     ) {
         self.resolved_module_type_cache
             .borrow_mut()
-            .entry((env_id, module_path.clone()))
+            .entry((env_id, *module_path))
             .or_default()
             .insert(type_name.to_string(), (access_path, id, decl));
     }
@@ -1760,7 +1760,7 @@ impl TypeContext {
                 scope_id,
                 mode,
                 arity,
-                path: path.clone(),
+                path: *path,
             },
             expansion,
         );
@@ -1789,7 +1789,7 @@ impl TypeContext {
     ) {
         self.resolved_type_item_cache
             .borrow_mut()
-            .insert((scope_id, path.clone(), strengthen_alias_types), (id, decl));
+            .insert((scope_id, *path, strengthen_alias_types), (id, decl));
     }
 
     pub(crate) fn find_resolved_module_type(
@@ -1814,7 +1814,7 @@ impl TypeContext {
     ) {
         self.resolved_child_module_path_cache
             .borrow_mut()
-            .entry(parent_path.clone())
+            .entry(*parent_path)
             .or_default()
             .insert(child_name.to_string(), child_path);
     }
@@ -1846,7 +1846,7 @@ impl TypeContext {
     ) {
         if self.in_store_build() {
             self.record_store_effect(StoreEffect::RegisterQualifiedModuleDecl(
-                parent_path.clone(),
+                *parent_path,
                 child_name.into(),
                 id,
                 md.clone(),
@@ -1860,7 +1860,7 @@ impl TypeContext {
         }
         self.qualified_module_decl_cache
             .borrow_mut()
-            .entry(parent_path.clone())
+            .entry(*parent_path)
             .or_default()
             .insert(child_name.to_string(), (id, md));
     }
@@ -1894,7 +1894,7 @@ impl TypeContext {
     ) {
         self.normalized_path_full_cache
             .borrow_mut()
-            .insert((env_id, original_path.clone()), normalized_path);
+            .insert((env_id, *original_path), normalized_path);
     }
 
     pub(crate) fn find_type_newtype_level(
@@ -1916,7 +1916,7 @@ impl TypeContext {
     ) {
         self.type_newtype_levels
             .borrow_mut()
-            .insert((scope_id, path.clone()), level);
+            .insert((scope_id, *path), level);
     }
 
     pub(crate) fn find_occur_variance_mask(
@@ -1938,7 +1938,7 @@ impl TypeContext {
     ) {
         self.occur_variance_masks
             .borrow_mut()
-            .insert((scope_id, path.clone()), mask);
+            .insert((scope_id, *path), mask);
     }
 
     pub(crate) fn register_normalized_path_forward(
@@ -1949,7 +1949,7 @@ impl TypeContext {
     ) {
         self.normalized_path_forward_cache
             .borrow_mut()
-            .insert((env_id, original_path.clone()), normalized_path);
+            .insert((env_id, *original_path), normalized_path);
     }
 
     pub(crate) fn find_normalized_path_forward(
@@ -1985,7 +1985,7 @@ impl TypeContext {
         self.poison_store_build_for("register_forced_normalized_path_full");
         self.forced_normalized_path_full_cache
             .borrow_mut()
-            .insert((env_id, original_path.clone()), normalized_path);
+            .insert((env_id, *original_path), normalized_path);
     }
 
     /// Look up a side-effectful normalize path result for this environment.
@@ -2011,8 +2011,8 @@ impl TypeContext {
     ) {
         self.poison_store_build_for("register_forced_type_path_compare");
         let mut cache = self.forced_type_path_compare_cache.borrow_mut();
-        cache.insert((env_id, left.clone(), right.clone()), same);
-        cache.insert((env_id, right.clone(), left.clone()), same);
+        cache.insert((env_id, *left, *right), same);
+        cache.insert((env_id, *right, *left), same);
     }
 
     /// Look up a side-effectful type-path comparison for this environment.
@@ -2868,7 +2868,7 @@ impl TypeContext {
             journal.entries[snapshot.cursor.min(journal.entries.len())..]
                 .iter()
                 .filter_map(|mutation| match mutation {
-                    TypeMutation::Compress(ty, old, target) => Some((*ty, old.clone(), *target)),
+                    TypeMutation::Compress(ty, old, target) => Some((*ty, *old, *target)),
                     _ => None,
                 })
                 .collect()
@@ -2998,7 +2998,7 @@ impl TypeContext {
         self.poison_store_build_for("register_record_labels");
         self.record_labels_cache
             .borrow_mut()
-            .insert(type_path.clone(), labels);
+            .insert(*type_path, labels);
     }
 
     /// Look up cached record labels for a type path.
@@ -3016,10 +3016,10 @@ impl TypeContext {
         let summary = Arc::new(RecordLabelDescriptionSummary::from_labels(&labels));
         self.record_label_descriptions_cache
             .borrow_mut()
-            .insert(type_path.clone(), labels);
+            .insert(*type_path, labels);
         self.record_label_description_summaries_cache
             .borrow_mut()
-            .insert(type_path.clone(), summary);
+            .insert(*type_path, summary);
     }
 
     /// Register label descriptions and their already-built summary.
@@ -3031,10 +3031,10 @@ impl TypeContext {
     ) {
         self.record_label_descriptions_cache
             .borrow_mut()
-            .insert(type_path.clone(), labels);
+            .insert(*type_path, labels);
         self.record_label_description_summaries_cache
             .borrow_mut()
-            .insert(type_path.clone(), summary);
+            .insert(*type_path, summary);
     }
 
     /// Look up reconstructed record label descriptions for a type path.
@@ -3067,7 +3067,7 @@ impl TypeContext {
         self.qualified_record_label_cache
             .borrow()
             .get(&QualifiedRecordLabelCacheKey::new(
-                type_path.clone(),
+                *type_path,
                 env_id,
                 lbl_pos,
             ))
@@ -3083,7 +3083,7 @@ impl TypeContext {
     ) {
         self.poison_store_build_for("cache_qualified_record_label");
         self.qualified_record_label_cache.borrow_mut().insert(
-            QualifiedRecordLabelCacheKey::new(type_path.clone(), env_id, lbl_pos),
+            QualifiedRecordLabelCacheKey::new(*type_path, env_id, lbl_pos),
             label,
         );
     }
@@ -4371,7 +4371,7 @@ impl TypeContext {
                 }
                 StoreEffect::TriggerRename(name) => self.trigger_module_sig_rename(name),
                 StoreEffect::RegisterAliasSource(component, source) => {
-                    self.register_component_alias_source(component.clone(), source.clone())
+                    self.register_component_alias_source(*component, *source)
                 }
                 StoreEffect::RegisterQualifiedModuleDecl(parent, name, id, md) => {
                     self.register_qualified_module_decl(parent, name, *id, md.clone())
@@ -4746,7 +4746,7 @@ mod tests {
     fn borrowed_path_keys_find_owned_cache_entries() {
         let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
         let module = Path::pdot(super::super::predef::path_int(), "M");
-        let ty = Path::pdot_pos(module.clone(), "t", 3);
+        let ty = Path::pdot_pos(module, "t", 3);
         ctx.register_type_newtype_level(7, &ty, Some(2));
         assert_eq!(ctx.find_type_newtype_level(7, &ty), Some(Some(2)));
         assert_eq!(ctx.find_type_newtype_level(8, &ty), None);
@@ -4956,7 +4956,7 @@ mod tests {
                 .is_empty()
         );
 
-        ctx.register_component_alias_source(selected_path.clone(), alias_source.clone());
+        ctx.register_component_alias_source(selected_path, alias_source);
 
         assert!(
             ctx.component_paths_for_alias_source(&alias_source_no_pos)
@@ -5054,7 +5054,7 @@ mod tests {
         let int_path = super::super::predef::path_int();
         let stored_int = ctx.store.alloc_type(
             TypeDesc::Tconstr {
-                path: int_path.clone(),
+                path: int_path,
                 args: TypeRefList::EMPTY,
                 abbrev: ctx.store.alloc_abbrev(AbbrevMemo::Mnil),
             },
@@ -5244,7 +5244,7 @@ mod tests {
         let abbrev = ctx.new_var(None);
         let expansion = ctx.new_var(None);
         let path = Path::pident(Ident::create_persistent("Allocated"));
-        ctx.memorize_abbrev_expansion(memo, PrivateFlag::Public, path.clone(), abbrev, expansion);
+        ctx.memorize_abbrev_expansion(memo, PrivateFlag::Public, path, abbrev, expansion);
 
         ctx.restore_type_state(snapshot);
 
@@ -5265,7 +5265,7 @@ mod tests {
         let first = ctx.new_var(None);
         let second = ctx.new_var(None);
         let path = Path::pident(Ident::create_persistent("Alias"));
-        ctx.memorize_abbrev_expansion(memo, PrivateFlag::Public, path.clone(), abbrev, first);
+        ctx.memorize_abbrev_expansion(memo, PrivateFlag::Public, path, abbrev, first);
         let snapshot = ctx.snapshot_type_state();
         ctx.memorize_abbrev_expansion(
             memo,
@@ -5335,7 +5335,7 @@ mod tests {
         ctx.memorize_abbrev_expansion(
             pre_memo,
             PrivateFlag::Public,
-            pre_path.clone(),
+            pre_path,
             pre_abbrev,
             pre_expansion,
         );
@@ -5355,7 +5355,7 @@ mod tests {
         ctx.memorize_abbrev_expansion(
             post_memo,
             PrivateFlag::Public,
-            post_path.clone(),
+            post_path,
             post_abbrev,
             post_expansion,
         );
@@ -5380,7 +5380,7 @@ mod tests {
         ctx.memorize_abbrev_expansion(
             post_memo,
             PrivateFlag::Public,
-            post_path.clone(),
+            post_path,
             post_abbrev,
             post_expansion,
         );
