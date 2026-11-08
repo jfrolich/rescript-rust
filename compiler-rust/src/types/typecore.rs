@@ -5900,17 +5900,27 @@ fn type_pattern_construct(
     // For GADT constructors with existentials, process them in pattern context.
     let (inst_arg_types, result_ty) = if !cstr_desc.cstr_existentials.is_empty() {
         if let Some(newtype_lev) = tctx.newtype_level {
-            let mut env_mut = env.clone();
-
-            // Note: env_mut has the new abstract types added, but since env is
-            // immutable here, the abstract types are only visible through the
-            // local_constraints (for GADT equation checking).
-            crate::types::instance_constructor_in_pattern(
-                ctx,
-                &mut env_mut,
-                newtype_lev,
-                &cstr_desc,
-            )
+            // `instance_constructor ~in_pattern:(env, get_newtype_level ())`
+            // (typecore.ml:1574-1577) adds the existentials to the pattern's
+            // `env ref`, the one `unify_pat_types_gadt` extends with GADT
+            // equations; in Rust that is the unify state's environment.
+            match tctx.unify_state.env_mut() {
+                Some(pattern_env) => crate::types::instance_constructor_in_pattern(
+                    ctx,
+                    pattern_env,
+                    newtype_lev,
+                    &cstr_desc,
+                ),
+                None => {
+                    let mut pattern_env = env.clone();
+                    crate::types::instance_constructor_in_pattern(
+                        ctx,
+                        &mut pattern_env,
+                        newtype_lev,
+                        &cstr_desc,
+                    )
+                }
+            }
         } else {
             crate::types::instance_constructor(ctx, &cstr_desc)
         }
@@ -12560,19 +12570,14 @@ fn type_case_pattern_impl<'a>(
         crate::types::generalize(tctx.type_ctx, pat.pat_type);
     });
 
-    // Propagate GADT equations from unify state env back to case env,
-    // then restore the original unify state env.
+    // `type_pattern` returns the pattern's `env ref` (typecore.ml:1960-1969):
+    // the case environment with the existentials, reified abstract types and
+    // GADT equations the pattern introduced. Rust's pattern unification
+    // extended the unify state's copy of the case environment; it becomes
+    // the case environment, then the original unify state env is restored.
     if needs_case_local_constraints {
         if let Some(unify_env) = tctx.unify_state.env() {
-            let constraints: Vec<_> = unify_env
-                .iter_local_constraints()
-                .map(|(p, d)| (p.clone(), d.clone()))
-                .collect();
-            for (path, decl) in constraints {
-                if case_env.find_local_constraint(&path).is_none() {
-                    case_env.add_local_constraint(path, decl);
-                }
-            }
+            case_env = unify_env.clone();
         }
         // Restore the original unify state env
         if let Some(old_env) = saved_unify_env {
@@ -13271,16 +13276,10 @@ fn type_function_nary(
             lev,
             0,
         );
+        // The pattern's `env ref` (typecore.ml:1960-1969), extended in the
+        // unify state's copy of the parameter environment.
         if has_gadts && let Some(unify_env) = tctx.unify_state.env() {
-            let constraints: Vec<_> = unify_env
-                .iter_local_constraints()
-                .map(|(path, decl)| (path.clone(), decl.clone()))
-                .collect();
-            for (path, decl) in constraints {
-                if body_env.find_local_constraint(&path).is_none() {
-                    body_env.add_local_constraint(path, decl);
-                }
-            }
+            body_env = unify_env.clone();
         }
         let mut typed = match typed {
             Ok(typed) => typed,
