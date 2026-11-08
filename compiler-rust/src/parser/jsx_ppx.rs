@@ -40,9 +40,9 @@ pub struct JsxConfig {
     pub file_name: String,
     /// First fatal PPX diagnostic found while transforming.
     pub fatal_error: Option<JsxPreprocessorError>,
-    /// Per expression index: 0 unknown, 1 its subtree is left unchanged by
-    /// `transform_expression`, 2 it may change.
-    unchanged_memo: Vec<u8>,
+    /// Per expression index: whether `transform_expression` may change its
+    /// subtree, or `None` when not computed yet.
+    unchanged_memo: Vec<Option<bool>>,
     /// OCaml `empty_loc = Location.in_file file_name` (jsx_v4.ml:1021-1022):
     /// the location of the nodes `map_binding` generates for a component.
     pub empty_loc: Location,
@@ -4997,8 +4997,12 @@ fn transform_jsx_container(
 /// Whether `transform_expression` may rewrite `expr` or its subtree: it
 /// contains a JSX element, a module expression (whose structure items get the
 /// component transform), or a construct this check does not inspect.
-fn expression_may_change(expr: &Expression, arena: &ParseArena, memo: &mut Vec<u8>) -> bool {
-    let child = |idx: ExprIdx, memo: &mut Vec<u8>| subtree_may_change(idx, arena, memo);
+fn expression_may_change(
+    expr: &Expression,
+    arena: &ParseArena,
+    memo: &mut Vec<Option<bool>>,
+) -> bool {
+    let child = |idx: ExprIdx, memo: &mut Vec<Option<bool>>| subtree_may_change(idx, arena, memo);
     match &expr.pexp_desc {
         ExpressionDesc::Pexp_ident(_)
         | ExpressionDesc::Pexp_constant(_)
@@ -5092,18 +5096,16 @@ fn expression_may_change(expr: &Expression, arena: &ParseArena, memo: &mut Vec<u
     }
 }
 
-fn subtree_may_change(idx: ExprIdx, arena: &ParseArena, memo: &mut Vec<u8>) -> bool {
+fn subtree_may_change(idx: ExprIdx, arena: &ParseArena, memo: &mut Vec<Option<bool>>) -> bool {
     let slot = idx.0 as usize;
-    if let Some(&known) = memo.get(slot)
-        && known != 0
-    {
-        return known == 2;
+    if let Some(&Some(may_change)) = memo.get(slot) {
+        return may_change;
     }
     let may_change = expression_may_change(arena.get_expr(idx), arena, memo);
     if slot >= memo.len() {
-        memo.resize(slot + 1, 0);
+        memo.resize(slot + 1, None);
     }
-    memo[slot] = if may_change { 2 } else { 1 };
+    memo[slot] = Some(may_change);
     may_change
 }
 
