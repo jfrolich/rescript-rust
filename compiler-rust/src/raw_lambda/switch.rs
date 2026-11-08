@@ -36,9 +36,9 @@ fn make_prim(b: &RawArena, prim: Primitive, args: &[RawLambda]) -> RawLambda {
 
 /// OCaml `Switch.covers_range` (switch.ml:104-111): `cases` is exactly the
 /// contiguous integer keys `start .. finish`, in order.
-fn covers_range(cases: &[(crate::lambda::SwitchKey, RawLambda)], start: i32, finish: i32) -> bool {
+fn covers_range(keys: &[crate::lambda::SwitchKey], start: i32, finish: i32) -> bool {
     let mut start = start;
-    for (key, _) in cases {
+    for key in keys {
         match key {
             crate::lambda::SwitchKey::Int(i) if start <= finish && *i == start => start += 1,
             _ => return false,
@@ -79,18 +79,35 @@ fn emit_if_out(
 ) -> RawLambda {
     let lo = -offset;
     let hi = range - offset;
-    if let Some(x) = b.as_var(arg)
-        && let Some((sarg, mut sw)) = b.switch_parts(ifno)
-        && let Some(y) = b.as_var(sarg)
-        && sw.sw_blocks.is_empty()
-        && sw.sw_blocks_full
-        && sw.sw_failaction.is_none()
-        && x.same(&y)
-        && covers_range(&sw.sw_consts, lo, hi)
-    {
-        sw.sw_failaction = Some(ifso);
-        sw.sw_consts_full = false;
-        return b.switch(sarg, sw);
+    let covered = b.with_mut(|a| {
+        let Node::Switch {
+            scrut,
+            actions,
+            info,
+        } = a.node(ifno)
+        else {
+            return None;
+        };
+        let p = a.switch_payload(info);
+        let same_var = matches!((a.as_var(arg), a.as_var(scrut)), (Some(x), Some(y)) if x.same(&y));
+        if !(same_var
+            && p.n_blocks() == 0
+            && p.blocks_full
+            && !p.has_fail
+            && covers_range(a.switch_const_keys(info), lo, hi))
+        {
+            return None;
+        }
+        let (blocks_full, dispatch) = (p.blocks_full, p.dispatch.clone());
+        let keys = a.switch_const_keys(info).to_vec();
+        let mut cases = a.list_small(actions);
+        cases.push(ifso);
+        let actions = a.add_list(&cases);
+        let info = a.add_switch(false, keys, blocks_full, [], true, dispatch);
+        Some(a.switch_raw(scrut, actions, info))
+    });
+    if let Some(switch) = covered {
+        return switch;
     }
     let cond = out_of_range(b, arg, lo, hi);
     make_if(b, cond, ifso, ifno)

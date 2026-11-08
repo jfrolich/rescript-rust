@@ -258,24 +258,15 @@ impl Lowering<'_> {
         let scrutinee = self.lower(scrut);
         let a = &mut *self.a;
 
-        if const_only_switch {
-            let consts: Vec<(crate::lambda::SwitchKey, Lam)> = a
-                .switch_const_keys(info)
-                .iter()
-                .cloned()
-                .zip(lowered.iter().copied())
-                .collect();
-            let dispatch = a.switch_payload(info).dispatch.clone();
-            if let Some(diff) = happens_to_be_diff(a, &consts, &dispatch) {
-                if diff == 0 {
-                    return scrutinee;
-                }
-                let diff = a.const_(Constant::Int {
-                    i: diff,
-                    comment: None,
-                });
-                return a.prim(Primitive::Paddint, &[scrutinee, diff], LamLoc::NONE);
+        if const_only_switch && let Some(diff) = happens_to_be_diff(a, info, &lowered) {
+            if diff == 0 {
+                return scrutinee;
             }
+            let diff = a.const_(Constant::Int {
+                i: diff,
+                comment: None,
+            });
+            return a.prim(Primitive::Paddint, &[scrutinee, diff], LamLoc::NONE);
         }
 
         let actions = a.add_list(&lowered);
@@ -760,33 +751,28 @@ fn int_constant_value(a: &LamArena, lam: Lam) -> Option<i32> {
     }
 }
 
-fn happens_to_be_diff(
-    a: &LamArena,
-    sw_consts: &[(crate::lambda::SwitchKey, Lam)],
-    sw_dispatch: &crate::lambda::SwitchDispatch,
-) -> Option<i32> {
-    if !matches!(sw_dispatch, crate::lambda::SwitchDispatch::Direct) {
+fn happens_to_be_diff(a: &LamArena, info: SwitchId, actions: &[Lam]) -> Option<i32> {
+    if !matches!(
+        a.switch_payload(info).dispatch,
+        crate::lambda::SwitchDispatch::Direct
+    ) {
         return None;
     }
-    let ((crate::lambda::SwitchKey::Int(first), first_lam), rest) = sw_consts.split_first()? else {
-        return None;
-    };
-    let (crate::lambda::SwitchKey::Int(second), second_lam) = rest.first()? else {
-        return None;
-    };
-    let diff = int_constant_value(a, *first_lam)?.checked_sub(*first)?;
-    if int_constant_value(a, *second_lam)?.checked_sub(*second)? != diff {
+    let keys = a.switch_const_keys(info);
+    if keys.len() < 2 {
         return None;
     }
-    for (key, lam) in rest.iter().skip(1) {
+    let mut diff = None;
+    for (key, lam) in keys.iter().zip(actions) {
         let crate::lambda::SwitchKey::Int(value) = key else {
             return None;
         };
-        if int_constant_value(a, *lam)?.checked_sub(*value)? != diff {
+        let d = int_constant_value(a, *lam)?.checked_sub(*value)?;
+        if *diff.get_or_insert(d) != d {
             return None;
         }
     }
-    Some(diff)
+    diff
 }
 
 /// A module block whose fields are, in order, all fields of one module:
