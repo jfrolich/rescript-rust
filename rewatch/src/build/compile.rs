@@ -3,6 +3,7 @@
 mod dependency_cycle;
 
 use super::build_types::*;
+use super::incremental::IncrementalPlan;
 use super::logs;
 use super::packages;
 use super::qos;
@@ -650,7 +651,7 @@ pub fn compile(
     let incremental_plan = build_state.incremental_plan.take();
     let has_support_work = incremental_plan
         .as_ref()
-        .is_some_and(|plan| plan.support_everything);
+        .is_some_and(|plan| *plan == IncrementalPlan::SupportEverything);
     if dirty_modules.is_empty() && !has_support_work {
         set_length(0);
         let mut warnings = String::new();
@@ -709,7 +710,7 @@ pub fn compile(
     // transitively depends on it.
     // A cut-off build decides the dependents round by round instead.
     let mut compile_universe = dirty_modules.clone();
-    let mut frontier = if incremental_plan.as_ref().is_some_and(|plan| plan.cutoff) {
+    let mut frontier = if incremental_plan == Some(IncrementalPlan::Cutoff) {
         Vec::new()
     } else {
         dirty_modules.iter().cloned().collect::<Vec<_>>()
@@ -743,7 +744,7 @@ pub fn compile(
     // A cut-off build compiles in rounds: the dependents of a module whose
     // interface digest changed are compiled in the next round
     // (see `incremental::next_round`).
-    let cutoff = incremental_plan.as_ref().is_some_and(|plan| plan.cutoff);
+    let cutoff = incremental_plan == Some(IncrementalPlan::Cutoff);
 
     let js_writer = JsWriter::spawn();
     // Bound the jobs handed to rayon so the priority heap still orders work —

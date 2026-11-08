@@ -93,15 +93,16 @@ pub struct PreviousInProcessBuild {
 
 /// The incremental part of a fresh in-process build's plan, consumed by
 /// [`super::compile::compile`].
-#[derive(Debug, Default)]
-pub struct IncrementalPlan {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IncrementalPlan {
+    /// One-shot builds compile the dependents of a recompiled module only
+    /// when its interface digest changed, in rounds (see [`next_round`]),
+    /// instead of compiling every transitive dependent.
+    Cutoff,
     /// Watch mode keeps every module in memory for later rebuilds and editor
-    /// tooling, so every up-to-date module is a support module.
-    pub support_everything: bool,
-    /// Compile the dependents of a recompiled module only when its interface
-    /// digest changed, in rounds (see [`next_round`]), instead of compiling
-    /// every transitive dependent.
-    pub cutoff: bool,
+    /// tooling, so every up-to-date module is a support module and every
+    /// transitive dependent of a stale module is compiled.
+    SupportEverything,
 }
 
 /// A unit's interface digest (its whole-unit item digest) with its item
@@ -712,7 +713,7 @@ fn modules_to_compile(build_state: &BuildCommandState, stale: &AHashSet<String>)
         .as_ref()
         .expect("planned before choosing what to parse");
     let mut universe = stale.clone();
-    let mut frontier: Vec<String> = if plan.cutoff {
+    let mut frontier: Vec<String> = if *plan == IncrementalPlan::Cutoff {
         Vec::new()
     } else {
         stale.iter().cloned().collect()
@@ -728,7 +729,7 @@ fn modules_to_compile(build_state: &BuildCommandState, stale: &AHashSet<String>)
     }
     let support = support_modules(build_state, &universe, plan);
     // Support modules with a stored interface are loaded, not parsed.
-    let loadable = if plan.cutoff {
+    let loadable = if *plan == IncrementalPlan::Cutoff {
         stored_loadable(build_state, stale, &support)
     } else {
         AHashSet::new()
@@ -1336,9 +1337,10 @@ pub fn plan(build_state: &mut BuildCommandState) {
     }
     restore_warnings(build_state, &|module_name| !stale.contains(module_name));
     carry_js_confirmed_at(build_state, &times, &|module_name| !stale.contains(module_name));
-    build_state.incremental_plan = Some(IncrementalPlan {
-        support_everything: !cutoff,
-        cutoff,
+    build_state.incremental_plan = Some(if cutoff {
+        IncrementalPlan::Cutoff
+    } else {
+        IncrementalPlan::SupportEverything
     });
 }
 
@@ -1483,7 +1485,7 @@ pub fn support_modules(
     universe: &AHashSet<String>,
     plan: &IncrementalPlan,
 ) -> AHashSet<String> {
-    if plan.support_everything {
+    if *plan == IncrementalPlan::SupportEverything {
         return build_state
             .modules
             .keys()
