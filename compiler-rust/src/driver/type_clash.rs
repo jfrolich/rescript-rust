@@ -1569,6 +1569,34 @@ pub(super) fn print_pattern_type_clash(
     );
 }
 
+/// `Typecore.report_error`'s `Label_mismatch (lid, trace)`
+/// (typecore.ml:5250-5256): `super_report_unification_error` under the
+/// error's env.
+pub(super) fn print_label_mismatch(
+    ppf: &mut Ppf<'_>,
+    ctx: &TypeContext,
+    env: &Env,
+    lid: &str,
+    raw_trace: &[(TypeExprRef, TypeExprRef)],
+) {
+    let tr = expand_trace(ctx, raw_trace);
+    let mut printer = printer_with_env(ctx, env);
+    printer.super_unification_error(
+        ppf,
+        true,
+        &tr,
+        &mut |ppf| {
+            // `The record field %a@ belongs to the type`
+            ppf.str("The record field ");
+            ppf.str(lid);
+            ppf.space();
+            ppf.str("belongs to the type");
+        },
+        &mut |ppf| ppf.str("but is mixed here with fields of type"),
+        None,
+    );
+}
+
 /// `Typecore.report_error`'s `Less_general (kind, trace)`
 /// (typecore.ml:5012-5016).
 pub(super) fn print_less_general(
@@ -1805,7 +1833,36 @@ pub(super) fn print_report_unification_error(
 ) {
     let tr = expand_trace(ctx, raw_trace);
     let mut printer = Printtyp::new(ctx);
-    printer.report_unification_error(ppf, true, &tr, txt1, txt2);
+    printer.report_unification_error(ppf, true, &tr, &mut |ppf| ppf.str(txt1), &mut |ppf| {
+        ppf.str(txt2)
+    });
+}
+
+/// `Typedecl.report_error`'s `Rebind_wrong_type (lid, env, trace)`
+/// (typedecl.ml:2273-2278): `Printtyp.report_unification_error` under the
+/// error's env.
+pub(super) fn print_rebind_wrong_type(
+    ppf: &mut Ppf<'_>,
+    ctx: &TypeContext,
+    env: &Env,
+    lid: &str,
+    raw_trace: &[(TypeExprRef, TypeExprRef)],
+) {
+    let tr = expand_trace(ctx, raw_trace);
+    let mut printer = printer_with_env(ctx, env);
+    printer.report_unification_error(
+        ppf,
+        true,
+        &tr,
+        &mut |ppf| {
+            // `The constructor %a@ has type`
+            ppf.str("The constructor ");
+            ppf.str(lid);
+            ppf.space();
+            ppf.str("has type");
+        },
+        &mut |ppf| ppf.str("but was expected to be of type"),
+    );
 }
 
 /// `Typecore.report_error`'s `Name_type_mismatch (kind, lid, tp, tpl)`

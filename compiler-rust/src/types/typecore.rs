@@ -467,6 +467,9 @@ pub enum TypeCoreError {
         loc: LocIdx,
         lid: Longident,
         trace: Vec<(TypeExprRef, TypeExprRef)>,
+        /// The environment of the failed unification (OCaml's `Error` env,
+        /// typecore.ml:4279-4281).
+        env: Option<EnvRef>,
     },
 
     /// Pattern type clash.
@@ -15188,6 +15191,7 @@ fn type_record(
                             loc: field.lid.loc,
                             lid: tctx.arena.get_longident(field.lid.txt).clone(),
                             trace,
+                            env: Some(tctx.type_ctx.store_typed_env(env)),
                         });
                     }
                     let ty_arg = crate::types::ctype::instance(ctx, ty_arg0);
@@ -16712,6 +16716,7 @@ fn type_setfield(
                                 TypeError::Unify(trace) => trace,
                                 _ => vec![(ty_res, expected_record_ty)],
                             },
+                            env: Some(tctx.type_ctx.store_typed_env(env)),
                         });
                 let field_ty = crate::types::ctype::instance(ctx, ty_arg0);
 

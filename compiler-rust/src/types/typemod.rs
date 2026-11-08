@@ -3639,10 +3639,10 @@ pub enum TypeModError {
         loc: LocIdx,
         /// Rebound constructor longident.
         lid: Longident,
-        /// Actual constructor result type.
-        actual: TypeExprRef,
-        /// Expected extension result type.
-        expected: TypeExprRef,
+        /// The failed unification's trace and env
+        /// (`Rebind_wrong_type (lid, env, trace)`, typedecl.ml:1713-1715).
+        trace: Vec<(TypeExprRef, TypeExprRef)>,
+        env: EnvRef,
     },
     /// A private constructor was rebound as public.
     RebindPrivate {
@@ -18350,7 +18350,9 @@ fn type_structure_item<'a>(
                     unify_state.set_env(&new_env);
                     if let Err(err) = crate::types::unify(ctx, &mut unify_state, constr, manifest) {
                         let trace = match err {
-                            crate::types::TypeError::Unify(trace) if !trace.is_empty() => trace,
+                            crate::types::ctype::TypeError::Unify(trace) if !trace.is_empty() => {
+                                trace
+                            }
                             _ => vec![(constr, manifest)],
                         };
                         return Err(TypeModError::TypeDeclTypeClash {
@@ -18888,14 +18890,21 @@ fn type_structure_item<'a>(
                         } else {
                             (ext_res_ty, None)
                         };
-                        if crate::types::ctype::unify(ctx, &mut tctx.unify_state, cstr_res, res)
-                            .is_err()
+                        if let Err(err) =
+                            crate::types::ctype::unify(ctx, &mut tctx.unify_state, cstr_res, res)
                         {
                             return Err(TypeModError::RebindWrongType {
                                 loc: lid.loc,
                                 lid: tctx.resolve_lid(lid.txt).clone(),
-                                actual: cstr_res,
-                                expected: res,
+                                trace: match err {
+                                    crate::types::ctype::TypeError::Unify(trace)
+                                        if !trace.is_empty() =>
+                                    {
+                                        trace
+                                    }
+                                    _ => vec![(cstr_res, res)],
+                                },
+                                env: tctx.type_ctx.store_typed_env(env),
                             });
                         }
                         if matches!(rebind_desc.cstr_private, crate::types::PrivateFlag::Private)
@@ -19266,14 +19275,21 @@ fn type_structure_item<'a>(
                             None,
                         )
                     };
-                    if crate::types::ctype::unify(ctx, &mut tctx.unify_state, cstr_res, res)
-                        .is_err()
+                    if let Err(err) =
+                        crate::types::ctype::unify(ctx, &mut tctx.unify_state, cstr_res, res)
                     {
                         return Err(TypeModError::RebindWrongType {
                             loc: lid.loc,
                             lid: tctx.resolve_lid(lid.txt).clone(),
-                            actual: cstr_res,
-                            expected: res,
+                            trace: match err {
+                                crate::types::ctype::TypeError::Unify(trace)
+                                    if !trace.is_empty() =>
+                                {
+                                    trace
+                                }
+                                _ => vec![(cstr_res, res)],
+                            },
+                            env: tctx.type_ctx.store_typed_env(env),
                         });
                     }
                     if matches!(rebind_desc.cstr_private, crate::types::PrivateFlag::Private) {
@@ -21097,7 +21113,7 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
             unify_state.set_env(&newenv);
             if let Err(err) = crate::types::unify(ctx, &mut unify_state, constr, manifest) {
                 let trace = match err {
-                    crate::types::TypeError::Unify(trace) if !trace.is_empty() => trace,
+                    crate::types::ctype::TypeError::Unify(trace) if !trace.is_empty() => trace,
                     _ => vec![(constr, manifest)],
                 };
                 return Err(TypeModError::TypeDeclTypeClash {

@@ -3827,8 +3827,8 @@ impl<'a> Printtyp<'a> {
         ppf: &mut Formatter<W>,
         unif: bool,
         tr: &[TracePair],
-        txt1: &str,
-        txt2: &str,
+        txt1: &mut dyn FnMut(&mut Formatter<W>),
+        txt2: &mut dyn FnMut(&mut Formatter<W>),
     ) {
         self.reset();
         self.trace_same_names(tr);
@@ -3850,11 +3850,11 @@ impl<'a> Printtyp<'a> {
             .collect();
         ppf.open_box(BoxKind::V, 0);
         ppf.open_box(BoxKind::Box, 0);
-        ppf.str(txt1);
+        txt1(ppf);
         ppf.break_(1, 2);
         self.type_expansion(ppf, t1, t1e);
         ppf.space();
-        ppf.str(txt2);
+        txt2(ppf);
         ppf.break_(1, 2);
         self.type_expansion(ppf, t2, t2e);
         ppf.close_box();
