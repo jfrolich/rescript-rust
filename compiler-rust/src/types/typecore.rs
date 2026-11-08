@@ -1272,6 +1272,10 @@ pub struct TypeCheckContext<'a> {
     conv_name_counter: u32,
     generated_pattern_constructors: Vec<(String, Arc<crate::types::ConstructorDescription>)>,
     generated_pattern_labels: Vec<(String, Arc<crate::types::LabelDescription>)>,
+    /// OCaml `type_pat`'s `constrs <> None` (typecore.ml:1330-1331): the
+    /// pattern being typed comes from parmatch, through `partial_pred` or an
+    /// exploded wildcard (typecore.ml:1361-1371).
+    pattern_constrs_given: bool,
     /// Current warning configuration.
     pub warning_config: WarningConfig,
     /// Current loop nesting depth for validating break/continue.
@@ -1455,6 +1459,7 @@ impl<'a> TypeCheckContext<'a> {
             conv_name_counter: 0,
             generated_pattern_constructors: Vec::new(),
             generated_pattern_labels: Vec::new(),
+            pattern_constrs_given: false,
             warning_config: WarningConfig::new(),
             loop_depth: 0,
             in_finally: false,
@@ -4570,6 +4575,10 @@ fn type_pattern_inner(
                     } else {
                         mode
                     };
+                    // `type_pat ~constrs:(Some constrs) ~labels:(Some labels)`
+                    // (typecore.ml:1371).
+                    let old_constrs_given =
+                        std::mem::replace(&mut tctx.pattern_constrs_given, true);
                     let result = type_pattern_inner(
                         tctx,
                         env,
@@ -4580,6 +4589,7 @@ fn type_pattern_inner(
                         state,
                         next_explode,
                     );
+                    tctx.pattern_constrs_given = old_constrs_given;
                     tctx.generated_pattern_constructors
                         .truncate(constructor_checkpoint);
                     tctx.generated_pattern_labels.truncate(label_checkpoint);
@@ -5834,6 +5844,11 @@ fn type_pattern_construct(
     // env.ml:1197-1206), then typecore.ml:1392: `Env.mark_constructor
     // Env.Pattern !env (Longident.last lid.txt) constr`.
     mark_type_path_of(tctx.type_ctx, env, cstr_desc.cstr_res);
+    // typecore.ml:1539-1540: a generalized constructor of a counter-example
+    // inside an or-pattern makes the or-pattern split.
+    if cstr_desc.cstr_generalized && tctx.pattern_constrs_given && mode == PatternMode::InsideOr {
+        return Err(TypeCoreError::NeedBacktrack);
+    }
     mark_constructor(
         tctx.type_ctx,
         env,
@@ -30444,6 +30459,8 @@ fn partial_pred(
 ) -> Option<Pattern> {
     let ctx = tctx.type_ctx;
     let old_constructors = std::mem::take(&mut tctx.generated_pattern_constructors);
+    // `type_pat ~constrs ~labels` (typecore.ml:1915): Conv's tables.
+    let old_constrs_given = std::mem::replace(&mut tctx.pattern_constrs_given, true);
     let old_labels = std::mem::take(&mut tctx.generated_pattern_labels);
     let parsed = conv_counter_example(tctx, u, loc);
     let type_snapshot = ctx.snapshot_type_state();
@@ -30486,6 +30503,7 @@ fn partial_pred(
     tctx.unify_state.put_back_unified_pairs(unified_pairs);
     tctx.diagnostics.truncate(diagnostic_len);
     tctx.generated_pattern_constructors = old_constructors;
+    tctx.pattern_constrs_given = old_constrs_given;
     tctx.generated_pattern_labels = old_labels;
     result.ok()
 }
