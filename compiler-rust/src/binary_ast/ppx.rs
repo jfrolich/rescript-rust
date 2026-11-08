@@ -9862,7 +9862,8 @@ pub fn rewrite_structure_with_warnings(
     let_unwrap: bool,
 ) -> (PpxResult<Vec<StructureItem>>, Vec<PpxWarning>) {
     let mut warnings = Vec::new();
-    let result = rewrite_structure_impl(structure, arena, true, let_unwrap, Some(&mut warnings));
+    arena.set_experimental_let_unwrap(let_unwrap);
+    let result = rewrite_structure_impl(structure, arena, true, Some(&mut warnings));
     let result = with_deferred_ppx_error(result, arena);
     (result, warnings)
 }
@@ -9922,7 +9923,6 @@ fn rewrite_structure_impl(
     structure: &[StructureItem],
     arena: &mut ParseArena,
     apply_spice: bool,
-    let_unwrap: bool,
     mut warnings: Option<&mut Vec<PpxWarning>>,
 ) -> PpxResult<Vec<StructureItem>> {
     // Context for tracking already-created module type names (per-structure scope)
@@ -9989,7 +9989,7 @@ fn rewrite_structure_impl(
                 let Unit::Item(index) = units[unit_index] else {
                     unreachable!("item event for a %%private run")
                 };
-                let mut checker = check::Checker::new(arena, let_unwrap);
+                let mut checker = check::Checker::new(arena);
                 let result = checker.structure_mapper_item(&structure[index]);
                 if let Some(warnings) = warnings.as_deref_mut() {
                     warnings.append(&mut checker.warnings);
@@ -10008,7 +10008,7 @@ fn rewrite_structure_impl(
                     unreachable!("%%private event for an item")
                 };
                 for item in &structure[start..end] {
-                    let mut checker = check::Checker::new(arena, let_unwrap);
+                    let mut checker = check::Checker::new(arena);
                     let result = checker.structure_mapper_item(item);
                     if let Some(warnings) = warnings.as_deref_mut() {
                         warnings.append(&mut checker.warnings);
@@ -10414,7 +10414,8 @@ pub fn rewrite_signature_with_warnings(
     arena: &mut ParseArena,
     let_unwrap: bool,
 ) -> (PpxResult<Vec<SignatureItem>>, Vec<PpxWarning>) {
-    let mut checker = check::Checker::new(arena, let_unwrap);
+    arena.set_experimental_let_unwrap(let_unwrap);
+    let mut checker = check::Checker::new(arena);
     let checked = checker.signature(signature);
     let warnings = std::mem::take(&mut checker.warnings);
     if let Err(error) = checked {
@@ -10972,11 +10973,8 @@ fn rewrite_module_expr(
     let mod_expr = &stripped;
     let new_desc = match &mod_expr.pmod_desc {
         current::ModuleExprDesc::Pmod_structure(items) => {
-            // The enclosing top-level item was checked with the file's
-            // LetUnwrap setting before its rewrite started, and that walk
-            // covers this structure: a disabled `let?` never gets here.
-            let rewritten_items = rewrite_structure_impl(items, arena, false, true, None)
-                .unwrap_or_else(|error| {
+            let rewritten_items =
+                rewrite_structure_impl(items, arena, false, None).unwrap_or_else(|error| {
                     arena.defer_ppx_error(error);
                     items
                         .iter()
@@ -11425,6 +11423,19 @@ mod tests {
         assert_eq!(
             rewrite_error(unsupported, true),
             Some((LET_UNWRAP_UNSUPPORTED_TYPE_ERROR.to_string(), 2, 7))
+        );
+
+        // A structure nested in a module is rewritten with the same setting.
+        let nested_module = "module M = {\n  let f = value => {\n    let? Some(x) = value\n    Some(x)\n  }\n}\n";
+        assert_eq!(
+            rewrite_error(nested_module, false),
+            Some((LET_UNWRAP_NOT_ENABLED_ERROR.to_string(), 3, 9))
+        );
+        assert_eq!(rewrite_error(nested_module, true), None);
+        let nested_top_level = "module M = {\n  let? Some(x) = None\n}\n";
+        assert_eq!(
+            rewrite_error(nested_top_level, true),
+            Some((LET_UNWRAP_TOPLEVEL_ERROR.to_string(), 2, 7))
         );
     }
 

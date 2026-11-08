@@ -29,7 +29,8 @@ pub(super) struct Checker<'a> {
 }
 
 impl<'a> Checker<'a> {
-    pub(super) fn new(arena: &'a mut ParseArena, let_unwrap: bool) -> Self {
+    pub(super) fn new(arena: &'a mut ParseArena) -> Self {
+        let let_unwrap = arena.experimental_let_unwrap();
         Self {
             arena,
             async_context: true,

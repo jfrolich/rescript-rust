@@ -567,6 +567,10 @@ pub struct ParseArena {
     /// Whether the builtin spice mapper stands in for a configured external
     /// spice PPX (see `driver::is_builtin_external_ppx`).
     builtin_spice_disabled: bool,
+    /// `Experimental_features.is_enabled LetUnwrap` for the builtin PPX run on
+    /// this arena, which decides the error a `let?` binding raises
+    /// (bs_builtin_ppx.ml:273, 366, 565). Set by the rewrite entry points.
+    experimental_let_unwrap: bool,
     /// OCaml `Used_attributes` (compiler/ml/used_attributes.ml): attribute name
     /// locations marked as consumed by the builtin PPX, consulted by the
     /// unused-attribute sweep (`Bs_ast_invariant.warn_unused_attribute`).
@@ -1029,6 +1033,7 @@ impl Default for ParseArena {
             value_constraint_varify_errors: HashMap::new(),
             ppx_deferred_error: None,
             builtin_spice_disabled: false,
+            experimental_let_unwrap: false,
             used_attributes: std::sync::Mutex::new(HashSet::new()),
             patterns: Arena::default(),
             synthetic_patterns: elsa::sync::FrozenVec::new(),
@@ -3015,6 +3020,15 @@ impl ParseArena {
 
     pub fn builtin_spice_enabled(&self) -> bool {
         !self.builtin_spice_disabled
+    }
+
+    /// Set the LetUnwrap experimental feature for the builtin PPX.
+    pub fn set_experimental_let_unwrap(&mut self, enabled: bool) {
+        self.experimental_let_unwrap = enabled;
+    }
+
+    pub fn experimental_let_unwrap(&self) -> bool {
+        self.experimental_let_unwrap
     }
 
     /// Record a nested builtin-ppx error unless an earlier one is pending.
