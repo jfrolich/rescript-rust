@@ -817,7 +817,13 @@ pub fn format_source_with(
         );
         (report, output)
     };
-    (report, Some(output.chars().map(|c| c as u8).collect()))
+    // res_multi_printer.ml:31-34: keep a byte order mark, which the scanner
+    // skips.
+    let bom = crate::parser::scanner::byte_order_mark(source);
+    (
+        report,
+        Some(bom.chars().chain(output.chars()).map(|c| c as u8).collect()),
+    )
 }
 
 fn parse_diagnostics_report(parser: &Parser<'_>, source: &str, filename: &str) -> String {
@@ -12068,6 +12074,29 @@ mod tests {
             assert_eq!(formatted, source);
             assert_eq!(format(&formatted), formatted);
         }
+        // Formatting keeps a byte order mark, and a lone CR ends a line.
+        let bom = "\u{EF}\u{BB}\u{BF}";
+        let format_latin1 = |source: &str| -> String {
+            let bytes: Vec<u8> = source.chars().map(|c| c as u8).collect();
+            super::format_source(&bytes, "A.res")
+                .unwrap()
+                .into_iter()
+                .map(char::from)
+                .collect()
+        };
+        for source in [
+            format!("{bom}let x = 1\n"),
+            format!("{bom}// c\r\nlet x = 1\r\n"),
+        ] {
+            let formatted = format_latin1(&source);
+            assert_eq!(formatted, source);
+            assert_eq!(format_latin1(&formatted), formatted);
+        }
+        assert_eq!(
+            format("let x = 1 // c\rlet y = 2\n"),
+            "let x = 1 // c\nlet y = 2\n"
+        );
+        assert_eq!(format("let x = 1\rlet y = 2\r"), "let x = 1\nlet y = 2\n");
         // The printer writes the line breaks of a comment it reindents.
         let formatted = format("let x = 1\n/* a\r\r\n b */\nlet y = 2\n");
         assert_eq!(formatted, "let x = 1\n/* a\n b */\nlet y = 2\n");

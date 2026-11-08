@@ -28,9 +28,15 @@ fn digits_count(n: i32) -> usize {
 fn seek_2_lines_before(src: &str, pos: &Position) -> (usize, i32) {
     let original_line = pos.line;
     let mut current_line = 1i32;
-    let mut current_char = 0usize;
-
     let bytes = src.as_bytes();
+    // code_frame.ml:16-17: like the scanner, start the first line after a
+    // UTF-8 byte order mark.
+    let mut current_char = if bytes.starts_with(b"\xEF\xBB\xBF") {
+        3
+    } else {
+        0
+    };
+
     while current_char < bytes.len() {
         if current_line + 2 >= original_line {
             return (current_char, current_line);
@@ -41,6 +47,25 @@ fn seek_2_lines_before(src: &str, pos: &Position) -> (usize, i32) {
         current_char += 1;
     }
     (current_char, current_line)
+}
+
+/// `lone_crs_to_lf` (code_frame.ml:19-30): like the scanner, end a line at a
+/// CR not followed by LF too. Each such CR becomes an LF, so the byte offsets
+/// of positions stay valid.
+fn lone_crs_to_lf(src: Cow<'_, str>) -> Cow<'_, str> {
+    if !src.contains('\r') {
+        return src;
+    }
+    let bytes = src.as_bytes();
+    let mut converted = String::with_capacity(src.len());
+    for (index, character) in src.char_indices() {
+        if character == '\r' && bytes.get(index + 1) != Some(&b'\n') {
+            converted.push('\n');
+        } else {
+            converted.push(character);
+        }
+    }
+    Cow::Owned(converted)
 }
 
 /// Seek forward to find the end position for showing 2 lines after the error.
@@ -305,7 +330,8 @@ pub fn print_warning(src: &str, start_pos: &Position, end_pos: &Position) -> Str
 }
 
 fn print_impl(src: &str, start_pos: &Position, end_pos: &Position, emphasis: Emphasis) -> String {
-    let display_src = source_for_display(src);
+    // code_frame.ml:139: `let src = lone_crs_to_lf src`.
+    let display_src = lone_crs_to_lf(source_for_display(src));
     let src = display_src.as_ref();
     let indent = 2;
     let highlight_line_start = start_pos.line;
