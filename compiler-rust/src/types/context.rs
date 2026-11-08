@@ -1327,25 +1327,6 @@ impl TypeContext {
         })
     }
 
-    /// Snapshot the synthetic CMI longident component names among `raws` so
-    /// portable signatures can move across TypeContexts without losing the
-    /// side table. Sorted by index.
-    pub fn snapshot_cmi_longident_names(
-        &self,
-        raws: impl IntoIterator<Item = u32>,
-    ) -> Vec<(u32, String)> {
-        // Store and shared-pool names resolve process-wide through
-        // `cmi_longident_component_name`; only this context's own names
-        // travel with the signature.
-        let table = self.cmi_longident_names.borrow();
-        let mut names: Vec<(u32, String)> = raws
-            .into_iter()
-            .filter_map(|raw| table.get(&raw).map(|name| (raw, name.clone())))
-            .collect();
-        names.sort_unstable_by_key(|(raw, _)| *raw);
-        names
-    }
-
     /// Import synthetic CMI longident names from a portable signature.
     pub fn import_cmi_longident_names(&self, names: &[(u32, String)]) {
         self.poison_store_build_for("import_cmi_longident_names");
