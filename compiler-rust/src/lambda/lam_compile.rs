@@ -693,6 +693,7 @@ impl LambdaCompiler {
                 let _phase = info_span!("compiler.lambda_simplify").entered();
                 let module_path_resolver = self.module_path_resolver.as_ref();
                 let cross_module_inline = self.cross_module_inline;
+                let jsx_preserve = self.jsx_preserve;
                 let mut cmj_lambda_cache: AHashMap<
                     String,
                     Option<Arc<crate::lambda::CmjExportLambdas>>,
@@ -727,6 +728,7 @@ impl LambdaCompiler {
                     lam,
                     &mut external_inline,
                     &mut external_arity,
+                    jsx_preserve,
                 )
             },
         );

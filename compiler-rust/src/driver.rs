@@ -7664,7 +7664,6 @@ fn compile_source_to_js_with_options_inner(
         options.dump_lambda || options.dump_lambda_sexp || options.dump_lambda_sexp_locs,
     );
     raw_converter.set_no_assert_false(options.no_assert_false);
-    raw_converter.set_jsx_preserve(jsx_preserve);
     raw_converter.set_noassert(options.noassert);
     raw_converter.set_warning_config(tctx.warning_config.clone());
     if let Some(persistent_env) = tctx.persistent_env.clone() {
@@ -11322,7 +11321,6 @@ pub fn compile_preprocessed_structure_in_process_until_js(
             options.capture_intermediates || options.dumps.iter().any(|kind| kind.is_lambda()),
         );
         raw_converter.set_no_assert_false(options.no_assert_false);
-        raw_converter.set_jsx_preserve(jsx_preserve);
         raw_converter.set_noassert(options.noassert);
         raw_converter.set_warning_config(tctx.warning_config.clone());
         if let Some(persistent_env) = tctx.persistent_env.clone() {

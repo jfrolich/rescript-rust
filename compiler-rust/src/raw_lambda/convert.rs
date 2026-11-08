@@ -602,8 +602,6 @@ pub struct RawLambdaConverter<'a> {
     warnings: Vec<TypeCoreWarning>,
     warning_config: WarningConfig,
     preserve_expanded_sparse_records: bool,
-    /// `!Clflags.jsx_preserve`: JSX calls become `Pjsx` elements.
-    jsx_preserve: bool,
     /// `Translmod.implementation.flat_make_paths`, set by the driver from the
     /// final signature.
     flat_make_paths: Vec<crate::lambda::FlatMakePath>,
@@ -634,7 +632,6 @@ impl<'a> RawLambdaConverter<'a> {
             warnings: Vec::new(),
             warning_config: WarningConfig::new(),
             preserve_expanded_sparse_records: false,
-            jsx_preserve: false,
             flat_make_paths: Vec::new(),
             lam_locs: crate::raw_lambda::loc::LamLocBuilder::new(arena),
         }
@@ -663,7 +660,6 @@ impl<'a> RawLambdaConverter<'a> {
             warnings: Vec::new(),
             warning_config: WarningConfig::new(),
             preserve_expanded_sparse_records: false,
-            jsx_preserve: false,
             flat_make_paths: Vec::new(),
             lam_locs: crate::raw_lambda::loc::LamLocBuilder::new(arena),
         }
@@ -693,7 +689,6 @@ impl<'a> RawLambdaConverter<'a> {
             warnings: Vec::new(),
             warning_config: WarningConfig::new(),
             preserve_expanded_sparse_records: false,
-            jsx_preserve: false,
             flat_make_paths: Vec::new(),
             lam_locs: crate::raw_lambda::loc::LamLocBuilder::new(arena),
         }
@@ -724,7 +719,6 @@ impl<'a> RawLambdaConverter<'a> {
             warnings: Vec::new(),
             warning_config: WarningConfig::new(),
             preserve_expanded_sparse_records: false,
-            jsx_preserve: false,
             flat_make_paths: Vec::new(),
             lam_locs: crate::raw_lambda::loc::LamLocBuilder::new(arena),
         }
@@ -759,10 +753,6 @@ impl<'a> RawLambdaConverter<'a> {
 
     pub fn set_preserve_expanded_sparse_records(&mut self, preserve: bool) {
         self.preserve_expanded_sparse_records = preserve;
-    }
-
-    pub fn set_jsx_preserve(&mut self, jsx_preserve: bool) {
-        self.jsx_preserve = jsx_preserve;
     }
 
     pub fn set_warning_config(&mut self, warning_config: WarningConfig) {
@@ -5651,10 +5641,7 @@ impl<'a> RawLambdaConverter<'a> {
                 partial,
                 transformed_jsx,
             } => {
-                if *transformed_jsx
-                    && self.jsx_preserve
-                    && let Some(call) = self.jsx_call(expr, funct, args)
-                {
+                if *transformed_jsx && let Some(call) = self.jsx_call(expr, funct, args) {
                     self.with_warning_scope(&funct.exp_attributes, |this| {
                         this.check_expr_attribute(funct)
                     });
@@ -7803,6 +7790,7 @@ mod tests {
                 &ahash::AHashSet::new(),
                 &mut inline,
                 &mut arity,
+                false,
             )
             .unwrap();
         assert_eq!(

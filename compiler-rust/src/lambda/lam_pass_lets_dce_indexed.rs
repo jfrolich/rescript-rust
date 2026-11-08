@@ -680,7 +680,7 @@ mod tests {
         context.simplify_exits(&generator);
         context.collect_info();
         let mut inline = |_: &Ident, _: &str| None;
-        context.simplify_alias(&generator, &mut inline);
+        context.simplify_alias(&generator, &mut inline, false);
         context.deep_flatten(&generator);
         let mut arity = |_: &Ident, _: &str| None;
         context.alpha_conversion_with_external_arity(&generator, &mut arity);

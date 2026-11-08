@@ -876,6 +876,7 @@ pub(crate) fn lower_and_optimize_for_pre_js_indexed(
     possible_required_modules: &AHashSet<ModuleId>,
     external_inline: &mut IndexedExternalInlineResolver<'_>,
     external_arity: &mut ExternalArityResolver<'_>,
+    jsx_preserve: bool,
 ) -> Result<IndexedPreJsBackend, IndexedPreJsError> {
     lower_and_optimize_for_pre_js_indexed_with_diagnostics(
         indexed_raw,
@@ -884,6 +885,7 @@ pub(crate) fn lower_and_optimize_for_pre_js_indexed(
         possible_required_modules,
         external_inline,
         external_arity,
+        jsx_preserve,
         None,
     )
 }
@@ -895,6 +897,7 @@ pub(crate) fn lower_and_optimize_for_pre_js_indexed_with_diagnostics(
     possible_required_modules: &AHashSet<ModuleId>,
     external_inline: &mut IndexedExternalInlineResolver<'_>,
     external_arity: &mut ExternalArityResolver<'_>,
+    jsx_preserve: bool,
     diagnostics: Option<&mut dyn IndexedDiagnosticsObserver>,
 ) -> Result<IndexedPreJsBackend, IndexedPreJsError> {
     let (raw, id_gen) = indexed_raw.into_parts();
@@ -907,6 +910,7 @@ pub(crate) fn lower_and_optimize_for_pre_js_indexed_with_diagnostics(
         id_gen,
         external_inline,
         external_arity,
+        jsx_preserve,
         diagnostics,
     )
 }
@@ -922,6 +926,7 @@ pub(crate) fn optimize_for_pre_js_indexed(
     id_gen: Arc<IdGenerator>,
     external_inline: &mut IndexedExternalInlineResolver<'_>,
     external_arity: &mut ExternalArityResolver<'_>,
+    jsx_preserve: bool,
 ) -> Result<IndexedPreJsBackend, IndexedPreJsError> {
     optimize_for_pre_js_indexed_with_diagnostics(
         lambda,
@@ -931,6 +936,7 @@ pub(crate) fn optimize_for_pre_js_indexed(
         id_gen,
         external_inline,
         external_arity,
+        jsx_preserve,
         None,
     )
 }
@@ -943,6 +949,7 @@ pub(crate) fn optimize_for_pre_js_indexed_with_diagnostics(
     id_gen: Arc<IdGenerator>,
     external_inline: &mut IndexedExternalInlineResolver<'_>,
     external_arity: &mut ExternalArityResolver<'_>,
+    jsx_preserve: bool,
     mut diagnostics: Option<&mut dyn IndexedDiagnosticsObserver>,
 ) -> Result<IndexedPreJsBackend, IndexedPreJsError> {
     fn dump(
@@ -969,12 +976,12 @@ pub(crate) fn optimize_for_pre_js_indexed_with_diagnostics(
     context.simplify_exits(&id_gen);
     dump(&mut diagnostics, "simplify_exits", &context);
     context.collect_info_with_external_arity(external_arity);
-    context.simplify_alias(&id_gen, external_inline);
+    context.simplify_alias(&id_gen, external_inline, jsx_preserve);
     dump(&mut diagnostics, "simplify_alias", &context);
     context.deep_flatten(&id_gen);
     dump(&mut diagnostics, "flatten2", &context);
     context.collect_info_with_external_arity(external_arity);
-    context.simplify_alias(&id_gen, external_inline);
+    context.simplify_alias(&id_gen, external_inline, jsx_preserve);
     context.deep_flatten(&id_gen);
     context.collect_info_with_external_arity(external_arity);
     dump(&mut diagnostics, "alpha_before", &context);
@@ -983,7 +990,7 @@ pub(crate) fn optimize_for_pre_js_indexed_with_diagnostics(
     context.simplify_exits(&id_gen);
     context.collect_info_with_external_arity(external_arity);
     dump(&mut diagnostics, "simplify_alias_before", &context);
-    context.simplify_alias(&id_gen, external_inline);
+    context.simplify_alias(&id_gen, external_inline, jsx_preserve);
     dump(&mut diagnostics, "alpha_conversion", &context);
     context.alpha_conversion_with_external_arity(&id_gen, external_arity);
     dump(&mut diagnostics, "before-simplify_lets", &context);
@@ -1057,6 +1064,7 @@ mod tests {
             generator,
             &mut inline,
             &mut arity,
+            false,
         )
     }
 
@@ -1341,6 +1349,7 @@ mod tests {
             Arc::new(IdGenerator::with_start_stamp(10)),
             &mut inline,
             &mut arity,
+            false,
         )
         .unwrap();
         assert_eq!(result.exports()[0].name(), "value");
@@ -1510,6 +1519,7 @@ mod tests {
             Arc::new(IdGenerator::with_start_stamp(5)),
             &mut inline,
             &mut arity,
+            false,
         )
         .unwrap();
         assert!(result.possible_required_modules().contains(&extra));
@@ -1741,6 +1751,7 @@ mod tests {
             Arc::new(IdGenerator::with_start_stamp(10)),
             &mut inline,
             &mut arity,
+            false,
             Some(&mut observer),
         )
         .unwrap();

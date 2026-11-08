@@ -320,6 +320,7 @@ pub fn simplify_for_js_backend(lam: &Lambda) -> Lambda {
         lam.clone(),
         &mut no_external_inline,
         &mut no_external_arity,
+        false,
     )
     .lambda
 }
@@ -334,6 +335,7 @@ pub fn simplify_for_js_backend_with_external_inline_and_meta_owned(
     lam: Lambda,
     external_inline: &mut ExternalInlineResolver<'_>,
     external_arity: &mut ExternalArityResolver<'_>,
+    jsx_preserve: bool,
 ) -> SimplifiedForJsBackend {
     // OCaml constructs `meta` once at lam_compile_main.ml:150-153 with
     // `~export_idents` and `~export_ident_sets` from the Lam_compile_main.compile
@@ -375,7 +377,8 @@ pub fn simplify_for_js_backend_with_external_inline_and_meta_owned(
     collect_info_with_external_arity(&mut meta, &lam, external_arity);
 
     // lam_compile_main.ml:167 — simplify_alias.
-    let lam = simplify_alias_with_external_inline_owned(&mut meta, lam, external_inline);
+    let lam =
+        simplify_alias_with_external_inline_owned(&mut meta, lam, external_inline, jsx_preserve);
 
     // lam_compile_main.ml:169 — deep_flatten.
     let lam = deep_flatten_owned_with_id_gen(lam, &meta.id_gen);
@@ -384,7 +387,8 @@ pub fn simplify_for_js_backend_with_external_inline_and_meta_owned(
     collect_info_with_external_arity(&mut meta, &lam, external_arity);
 
     // lam_compile_main.ml:174 — simplify_alias.
-    let lam = simplify_alias_with_external_inline_owned(&mut meta, lam, external_inline);
+    let lam =
+        simplify_alias_with_external_inline_owned(&mut meta, lam, external_inline, jsx_preserve);
 
     // lam_compile_main.ml:175 — deep_flatten.
     let lam = deep_flatten_owned_with_id_gen(lam, &meta.id_gen);
@@ -406,7 +410,8 @@ pub fn simplify_for_js_backend_with_external_inline_and_meta_owned(
     collect_info_with_external_arity(&mut meta, &lam, external_arity);
 
     // lam_compile_main.ml:188 — simplify_alias.
-    let lam = simplify_alias_with_external_inline_owned(&mut meta, lam, external_inline);
+    let lam =
+        simplify_alias_with_external_inline_owned(&mut meta, lam, external_inline, jsx_preserve);
 
     // OCaml runs alpha_conversion a second time here (lam_compile_main.ml:190).
     // Over a 3,355-module application it rewrote none of them, and dropping

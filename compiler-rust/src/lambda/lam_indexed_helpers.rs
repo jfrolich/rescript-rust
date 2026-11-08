@@ -29,7 +29,7 @@ pub(crate) fn append_refine_let(
     if let NodeSnapshot::Prim(primitive, args, loc) = store.snapshot(body)
         && let [only] = args.as_slice()
         && matches!(store.view(*only), NodeView::Var(id) if id.same(&param))
-        && !matches!(primitive, Primitive::Pmakeblock(_, _))
+        && !matches!(primitive, Primitive::Pmakeblock(_, _) | Primitive::Pjsx(_))
     {
         return append_rebuilt(store, NodeSnapshot::Prim(primitive, vec![arg], loc));
     }

@@ -14,9 +14,11 @@ use crate::lambda::lam_primitive::Primitive;
 use crate::lambda::lam_tag_info::TagInfo;
 use crate::lambda::{Apply, Lambda, lam_analysis};
 
-/// Equivalent of OCaml's `is_block_constructor` (lam_util.ml:69-72).
-fn is_block_constructor(primitive: &Primitive) -> bool {
-    matches!(primitive, Primitive::Pmakeblock(_, _))
+/// Equivalent of OCaml's `keeps_binding` (lam_util.ml:56-61). A JSX element
+/// whose only argument is its tag keeps the tag bound: a function bound by
+/// `let` gets the binding's name, which React shows.
+fn keeps_binding(primitive: &Primitive) -> bool {
+    matches!(primitive, Primitive::Pmakeblock(_, _) | Primitive::Pjsx(_))
 }
 
 /// Equivalent of OCaml's `is_safe_to_alias` recursive helper
@@ -87,10 +89,10 @@ fn refine_let_parts(
         (_, _, Lambda::Lvar(w)) if w == &param => arg,
 
         // (Prim) `let[k] x = e in prim p [x]` -> `prim p [e]`, when `p` is not
-        // a block constructor (lam_util.ml:105-111).
+        // a block constructor or a JSX element (lam_util.ml:103-113).
         (_, _, Lambda::Lprim(prim))
             if matches!(prim.args.as_slice(), [Lambda::Lvar(w)] if w == &param)
-                && !is_block_constructor(&prim.primitive) =>
+                && !keeps_binding(&prim.primitive) =>
         {
             Lambda::prim(prim.primitive.clone(), vec![arg], prim.loc)
         }

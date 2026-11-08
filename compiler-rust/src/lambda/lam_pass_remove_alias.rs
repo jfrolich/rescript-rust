@@ -145,6 +145,7 @@ pub fn simplify_alias_with_external_inline_owned(
     meta: &mut LamStats,
     lam: Lambda,
     external_inline: &mut ExternalInlineResolver<'_>,
+    jsx_preserve: bool,
 ) -> Lambda {
     let export_idents = std::mem::take(&mut meta.export_idents);
     let id_gen = meta.id_gen.clone();
@@ -154,6 +155,7 @@ pub fn simplify_alias_with_external_inline_owned(
         id_gen: &id_gen,
         external_inline,
         inline_depth: 0,
+        jsx_preserve,
     }
     .simpl_owned(lam);
     meta.export_idents = export_idents;
@@ -169,6 +171,8 @@ struct Simplifier<'a> {
     id_gen: &'a crate::context::IdGenerator,
     external_inline: &'a mut ExternalInlineResolver<'a>,
     inline_depth: usize,
+    /// `!((Clflags.current ()).jsx_preserve)`, read by the JSX tag case.
+    jsx_preserve: bool,
 }
 
 use crate::lambda::lambda_traverse::Mapped;
@@ -201,11 +205,12 @@ impl<'a> Simplifier<'a> {
     /// through the folding smart constructors only when OCaml would.
     fn simpl_sharing(&mut self, lam: Lambda) -> Mapped {
         match lam {
-            // Keep a JSX tag like `M.make` as it is: flattening it may give a
-            // variable with a lowercase name, which JSX reads as an intrinsic
-            // element (#7432).
+            // In JSX preserve mode, keep a JSX tag like `M.make` as it is:
+            // flattening it may give a variable with a lowercase name, which
+            // JSX reads as an intrinsic element (#7432).
             Lambda::Lprim(prim)
-                if matches!(prim.primitive, Primitive::Pjsx(_))
+                if self.jsx_preserve
+                    && matches!(prim.primitive, Primitive::Pjsx(_))
                     && matches!(
                         prim.args.first(),
                         Some(Lambda::Lprim(first)) if matches!(first.primitive, Primitive::Pfield(_, _))
