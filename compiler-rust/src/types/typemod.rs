@@ -18113,7 +18113,7 @@ fn type_structure_item<'a>(
                 // them.
                 let mut env_labels = Vec::new();
                 // Add record labels to environment
-                if let crate::types::TypeKind::TypeRecord(ref labels, ref repres) =
+                if let crate::types::TypeKind::TypeRecord(ref labels, _) =
                     internal_decl.type_kind
                 {
                     // Create the record type reference: Tconstr(type_path, type_params)
@@ -18121,25 +18121,10 @@ fn type_structure_item<'a>(
                         ctx.new_constr(type_path.clone(), internal_decl.type_params.clone());
                     env_desc_types_for_generalize.push(ty_res);
                     let mut label_descs = Vec::with_capacity(labels.len());
-                    for (pos, ld) in labels.iter().enumerate() {
-                        let lbl_desc = crate::types::LabelDescription {
-                            lbl_name: ld.ld_id.name().to_string(),
-                            lbl_runtime_name: ld.declaration_name(),
-                            lbl_res: ty_res,
-                            lbl_arg: crate::types::ctype::remap_label_type_to_params(
-                                ctx,
-                                ld.ld_type,
-                                &internal_decl.type_params,
-                            ),
-                            lbl_mut: ld.ld_mutable,
-                            lbl_optional: ld.ld_optional,
-                            lbl_pos: pos as i32,
-                            lbl_all: crate::types::LabelArrayRef(0),
-                            lbl_repres: repres.clone(),
-                            lbl_private: internal_decl.type_private,
-                            lbl_loc: ld.ld_loc,
-                            lbl_attributes: ld.ld_attributes.clone(),
-                        };
+                    // `Datarepr.label_descrs` (compiler/ml/datarepr.ml:261-288).
+                    for (ld, lbl_desc) in labels.iter().zip(crate::types::env_lazy::label_descrs(
+                        ty_res, &internal_decl, internal_decl.type_private, ctx, |_| {},
+                    )) {
                         label_descs.push((ld.ld_id, lbl_desc));
                     }
                     env_labels = label_descs;
@@ -19570,7 +19555,7 @@ fn type_structure_item<'a>(
                                     new_env.add_constructor(cd.cd_id, cstr_desc);
                                 }
                             }
-                            if let crate::types::TypeKind::TypeRecord(labels, repres) =
+                            if let crate::types::TypeKind::TypeRecord(labels, _) =
                                 &decl.type_kind
                             {
                                 // Include should expose record labels from included types
@@ -19586,30 +19571,22 @@ fn type_structure_item<'a>(
                                     tctx.type_ctx,
                                     ty_res,
                                 );
-                                for (pos, ld) in labels.iter().enumerate() {
-                                    let lbl_arg = crate::types::ctype::remap_label_type_to_params(
-                                        tctx.type_ctx,
-                                        ld.ld_type,
-                                        &decl.type_params,
-                                    );
-                                    crate::types::ctype::force_generalize_sig_type(
-                                        tctx.type_ctx,
-                                        lbl_arg,
-                                    );
-                                    let lbl_desc = crate::types::LabelDescription {
-                                        lbl_name: ld.ld_id.name().to_string(),
-                                        lbl_runtime_name: ld.declaration_name(),
-                                        lbl_res: ty_res,
-                                        lbl_arg,
-                                        lbl_mut: ld.ld_mutable,
-                                        lbl_optional: ld.ld_optional,
-                                        lbl_pos: pos as i32,
-                                        lbl_all: crate::types::LabelArrayRef(0),
-                                        lbl_repres: repres.clone(),
-                                        lbl_private: decl.type_private,
-                                        lbl_loc: ld.ld_loc,
-                                        lbl_attributes: ld.ld_attributes.clone(),
-                                    };
+                                // `Datarepr.label_descrs` (compiler/ml/datarepr.ml:261-288).
+                                let descs = crate::types::env_lazy::label_descrs(
+                                    ty_res,
+                                    decl,
+                                    decl.type_private,
+                                    tctx.type_ctx,
+                                    |descs| {
+                                        for desc in descs {
+                                            crate::types::ctype::force_generalize_sig_type(
+                                                tctx.type_ctx,
+                                                desc.lbl_arg,
+                                            );
+                                        }
+                                    },
+                                );
+                                for (ld, lbl_desc) in labels.iter().zip(descs) {
                                     new_env.add_label(ld.ld_id, lbl_desc);
                                 }
                             }

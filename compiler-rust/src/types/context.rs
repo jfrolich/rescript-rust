@@ -3363,7 +3363,12 @@ impl TypeContext {
         labels: Arc<Vec<super::decl::LabelDescription>>,
         summary: Arc<RecordLabelDescriptionSummary>,
     ) {
-        let lbl_all = self.push_label_family(labels);
+        // The labels are tied to their array (`label_descrs`).
+        let lbl_all = labels
+            .first()
+            .map(|label| label.lbl_all)
+            .filter(|lbl_all| *lbl_all != super::decl::LabelArrayRef::NONE)
+            .unwrap_or_else(|| self.push_label_family(labels));
         self.record_label_descriptions_cache
             .borrow_mut()
             .insert(type_path.clone(), lbl_all);

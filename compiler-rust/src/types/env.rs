@@ -2448,27 +2448,12 @@ fn build_initial_env(ctx: &TypeContext) -> Env {
                     env.add_constructor(cd.cd_id, cstr_desc);
                 }
             }
-            TypeKind::TypeRecord(labels, repr) => {
+            TypeKind::TypeRecord(labels, _) => {
                 let res_ty = ctx.new_generic_constr(type_path.clone(), decl.type_params.clone());
-                for (pos, ld) in labels.iter().enumerate() {
-                    let label_desc = LabelDescription {
-                        lbl_name: ld.ld_id.name().to_string(),
-                        lbl_runtime_name: ld.declaration_name(),
-                        lbl_res: res_ty,
-                        lbl_arg: crate::types::ctype::remap_label_type_to_params(
-                            ctx,
-                            ld.ld_type,
-                            &decl.type_params,
-                        ),
-                        lbl_mut: ld.ld_mutable,
-                        lbl_optional: ld.ld_optional,
-                        lbl_pos: pos as i32,
-                        lbl_all: crate::types::decl::LabelArrayRef(0),
-                        lbl_repres: repr.clone(),
-                        lbl_private: decl.type_private,
-                        lbl_loc: ld.ld_loc,
-                        lbl_attributes: ld.ld_attributes.clone(),
-                    };
+                // `Datarepr.label_descrs` (compiler/ml/datarepr.ml:261-288).
+                for (ld, label_desc) in labels.iter().zip(crate::types::env_lazy::label_descrs(
+                    res_ty, &decl, decl.type_private, ctx, |_| {},
+                )) {
                     env.add_label(ld.ld_id, label_desc);
                 }
             }

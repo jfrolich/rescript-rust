@@ -263,17 +263,21 @@ pub(crate) fn constructors_of_type_path(
     out
 }
 
-/// `snd (Env.find_type_descrs path env)` for a record declaration, in label
-/// position order (compiler/ml/datarepr.ml:174-188).
-pub(crate) fn labels_of_type_path(
-    type_path: &Path,
+/// `Datarepr.label_descrs` (compiler/ml/datarepr.ml:261-288): the labels of a
+/// record declaration with result type `res_ty`, in position order, sharing
+/// one `lbl_all` array. `adjust` applies what the caller applies to the
+/// declaration before describing it (the component substitution,
+/// compiler/ml/env.ml:1530-1548); the array is tied afterwards.
+pub(crate) fn label_descrs(
+    res_ty: super::type_expr::TypeExprRef,
     decl: &TypeDeclaration,
+    private: super::asttypes::PrivateFlag,
     ctx: &super::context::TypeContext,
+    adjust: impl FnOnce(&mut [LabelDescription]),
 ) -> Vec<LabelDescription> {
     let super::decl::TypeKind::TypeRecord(labels, repr) = &decl.type_kind else {
         return Vec::new();
     };
-    let res_ty = ctx.new_generic_constr(type_path.clone(), decl.type_params.clone());
     let mut descs: Vec<LabelDescription> = labels
         .iter()
         .enumerate()
@@ -285,17 +289,36 @@ pub(crate) fn labels_of_type_path(
             lbl_mut: ld.ld_mutable,
             lbl_optional: ld.ld_optional,
             lbl_pos: pos as i32,
-            lbl_all: super::decl::LabelArrayRef(0),
+            lbl_all: super::decl::LabelArrayRef::NONE,
             lbl_repres: repr.clone(),
-            lbl_private: decl.type_private,
+            lbl_private: private,
             lbl_loc: ld.ld_loc,
             lbl_attributes: ld.ld_attributes.clone(),
         })
         .collect();
-    if let Some(access_path) = type_path.parent() {
-        reroot_label_descriptions(&mut descs, &[], &access_path, ctx);
-    }
-    descs
+    adjust(&mut descs);
+    ctx.alloc_label_array(|lbl_all| {
+        for desc in &mut descs {
+            desc.lbl_all = lbl_all;
+        }
+        descs
+    })
+}
+
+/// `snd (Env.find_type_descrs path env)` for a record declaration, in label
+/// position order (compiler/ml/env.ml:784, 800-813): a fresh description,
+/// with its own `lbl_all`, on every call.
+pub(crate) fn labels_of_type_path(
+    type_path: &Path,
+    decl: &TypeDeclaration,
+    ctx: &super::context::TypeContext,
+) -> Vec<LabelDescription> {
+    let res_ty = ctx.new_generic_constr(type_path.clone(), decl.type_params.clone());
+    label_descrs(res_ty, decl, decl.type_private, ctx, |descs| {
+        if let Some(access_path) = type_path.parent() {
+            reroot_label_descriptions(descs, &[], &access_path, ctx);
+        }
+    })
 }
 
 fn build_type_constructors(
@@ -421,45 +444,6 @@ fn build_type_constructors(
     }
 }
 
-fn build_matching_type_labels(
-    out: &mut Vec<LabelDescription>,
-    access_path: &Path,
-    type_name: &str,
-    decl: &TypeDeclaration,
-    label_name: &str,
-    ctx: &super::context::TypeContext,
-) {
-    let super::decl::TypeKind::TypeRecord(labels, repr) = &decl.type_kind else {
-        return;
-    };
-
-    let mut res_ty = None;
-    for (pos, ld) in labels.iter().enumerate() {
-        if ld.ld_id.name() != label_name {
-            continue;
-        }
-        let res_ty = *res_ty.get_or_insert_with(|| {
-            let type_path = Path::pdot(access_path.clone(), type_name);
-            ctx.new_generic_constr(type_path, decl.type_params.clone())
-        });
-        let label_desc = LabelDescription {
-            lbl_name: ld.ld_id.name().to_string(),
-            lbl_runtime_name: ld.declaration_name(),
-            lbl_res: res_ty,
-            lbl_arg: super::ctype::remap_label_type_to_params(ctx, ld.ld_type, &decl.type_params),
-            lbl_mut: ld.ld_mutable,
-            lbl_optional: ld.ld_optional,
-            lbl_pos: pos as i32,
-            lbl_all: super::decl::LabelArrayRef(0),
-            lbl_repres: repr.clone(),
-            lbl_private: decl.type_private,
-            lbl_loc: ld.ld_loc,
-            lbl_attributes: ld.ld_attributes.clone(),
-        };
-        out.insert(0, label_desc);
-    }
-}
-
 fn build_constructors_for_name(
     access_path: &Path,
     signature: &[SignatureItem],
@@ -565,23 +549,6 @@ fn build_constructors_for_name(
     constructors
 }
 
-fn build_labels_for_name(
-    access_path: &Path,
-    signature: &[SignatureItem],
-    label_name: &str,
-    ctx: &super::context::TypeContext,
-) -> Vec<LabelDescription> {
-    let mut labels = Vec::new();
-
-    for item in signature {
-        if let SignatureItem::SigType(id, decl, _) = item {
-            build_matching_type_labels(&mut labels, access_path, id.name(), decl, label_name, ctx);
-        }
-    }
-
-    labels
-}
-
 #[derive(Debug, Clone)]
 struct ChildComponentScanState {
     working_env: Option<super::env::Env>,
@@ -620,6 +587,14 @@ struct StructureComponentTables {
     component_values: RefCell<HashMap<String, Option<(usize, Ident, ValueDescription)>>>,
     constructors: RefCell<HashMap<String, Arc<Vec<ConstructorDescription>>>>,
     labels: RefCell<HashMap<String, Arc<Vec<LabelDescription>>>>,
+    /// The labels of each record type of the component, by type name: what
+    /// `components_of_module_maker` stores in `comp_labels` for the type
+    /// (compiler/ml/env.ml:1542-1548), one `lbl_all` array per type, built on
+    /// the first lookup of one of its labels.
+    label_families: RefCell<HashMap<String, Vec<LabelDescription>>>,
+    /// The types whose families the last label lookup built, so a lookup
+    /// whose store build is discarded discards them too.
+    label_families_built: RefCell<Vec<String>>,
     modtypes: HashMap<String, (Ident, ModtypeDeclaration)>,
     // OCaml compiler/ml/env.ml:1568-1578 stores `comp_modules` and
     // `comp_modtypes` declarations in EnvLazy-backed component tables, and
@@ -1018,6 +993,8 @@ impl QualifiedModuleComponents {
                 component_values: RefCell::new(HashMap::new()),
                 constructors: RefCell::new(HashMap::new()),
                 labels: RefCell::new(HashMap::new()),
+                label_families: RefCell::new(HashMap::new()),
+                label_families_built: RefCell::new(Vec::new()),
                 modtypes: component_modtypes,
                 qualified_modules: RefCell::new(HashMap::new()),
                 qualified_modtypes: RefCell::new(HashMap::new()),
@@ -1135,6 +1112,10 @@ impl QualifiedModuleComponents {
             }
             ForcedKind::Labels => {
                 self.tables.labels.borrow_mut().remove(name);
+                let mut families = self.tables.label_families.borrow_mut();
+                for type_name in self.tables.label_families_built.borrow_mut().drain(..) {
+                    families.remove(&type_name);
+                }
             }
             ForcedKind::QualifiedModule => {
                 self.tables.qualified_modules.borrow_mut().remove(name);
@@ -1334,9 +1315,43 @@ impl QualifiedModuleComponents {
         // selected component path. For normal compilation, force just the label
         // bucket requested by typecore.ml:1107-1126-style qualified lookup; this
         // avoids constructing hundreds of unused JSX record labels per module view.
-        let mut built =
-            build_labels_for_name(self.access_path(), self.signature.as_ref(), name, ctx);
-        reroot_label_descriptions(&mut built, self.signature.as_ref(), self.access_path(), ctx);
+        self.tables.label_families_built.borrow_mut().clear();
+        let mut built = Vec::new();
+        for item in self.signature.iter() {
+            let SignatureItem::SigType(id, decl, _) = item else {
+                continue;
+            };
+            let super::decl::TypeKind::TypeRecord(labels, _) = &decl.type_kind else {
+                continue;
+            };
+            let Some(pos) = labels.iter().position(|ld| ld.ld_id.name() == name) else {
+                continue;
+            };
+            let type_name = id.name();
+            if !self.tables.label_families.borrow().contains_key(type_name) {
+                let type_path = Path::pdot(self.access_path().clone(), type_name);
+                let res_ty = ctx.new_generic_constr(type_path, decl.type_params.clone());
+                let family = label_descrs(res_ty, decl, decl.type_private, ctx, |descs| {
+                    reroot_label_descriptions(
+                        descs,
+                        self.signature.as_ref(),
+                        self.access_path(),
+                        ctx,
+                    )
+                });
+                self.tables
+                    .label_families
+                    .borrow_mut()
+                    .insert(type_name.to_string(), family);
+                self.tables
+                    .label_families_built
+                    .borrow_mut()
+                    .push(type_name.to_string());
+            }
+            // Later declarations shadow earlier ones (`comp_labels` is a
+            // `find_all` table, newest first).
+            built.insert(0, self.tables.label_families.borrow()[type_name][pos].clone());
+        }
         let built = Arc::new(built);
         if self.compiler_counters_enabled {
             crate::perf_counters::record_lazy_scan(

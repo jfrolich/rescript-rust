@@ -15591,38 +15591,17 @@ fn type_record(
         explicit_entries.push((label_desc, field.lid, final_expr));
     }
 
-    // The `lbl_all` array of the written labels, which OCaml reads from the
-    // first one (typecore.ml:3058-3059, 3137-3138). Rust installs declared
-    // labels without it, so resolve the first label's record family here,
-    // register it, and point every written label at it (below). Typing has
-    // unified each label's result with `ty_record`, so the fallbacks resolve
-    // the same record through the types the labels were unified with.
-    let record_family = first_disambiguated_label.as_ref().and_then(|lbl| {
-        build_record_label_descriptions_info(lbl.lbl_res, env, &mut tctx.persistent_env, ctx)
-            .or_else(|| {
-                build_record_label_descriptions_info(record_ty, env, &mut tctx.persistent_env, ctx)
-            })
-            .or_else(|| {
-                typed_base.as_ref().and_then(|base_expr| {
-                    build_record_label_descriptions_info(
-                        base_expr.exp_type,
-                        env,
-                        &mut tctx.persistent_env,
-                        ctx,
-                    )
-                })
-            })
+    // `lbl.lbl_all` of the first written label (typecore.ml:3058-3059,
+    // 3137-3138): the array `Datarepr.label_descrs` tied when the label was
+    // described.
+    let record_family = explicit_entries.first().map(|(label, _, _)| {
+        ctx.label_family(label.lbl_all).unwrap_or_else(|| {
+            panic!(
+                "written record label `{}` carries no lbl_all array ({:?})",
+                label.lbl_name, label.lbl_all
+            )
+        })
     });
-    if !explicit_entries.is_empty() {
-        // OCaml always has `lbl_all`: a written label is a label of a
-        // declared record.
-        let family = record_family
-            .as_ref()
-            .expect("the labels a record literal writes belong to a declared record");
-        for (label, _, _) in explicit_entries.iter_mut() {
-            label.lbl_all = family.family;
-        }
-    }
 
     // OCaml: unify_exp_types ty_record (instance env ty_expected)
     let expected_inst_for_record = crate::types::instance(ctx, expected_ty);
@@ -15648,13 +15627,10 @@ fn type_record(
             // `written_labels` and `labels_missing` (typecore.ml:387-391,
             // 3081-3097): the mandatory labels the literal does not write, in
             // `lbl_all` order.
-            Some(family) if !explicit_entries.is_empty() => {
-                if family.summary.mandatory_count == 0 {
-                    Vec::new()
-                } else {
-                    let written = record_written_labels(family.labels.len(), &explicit_entries);
+            Some(family) => {
+                let written = record_written_labels(family.len(), &explicit_entries);
+                {
                     family
-                        .labels
                         .iter()
                         .filter(|label| !written[label.lbl_pos as usize] && !label.lbl_optional)
                         .map(|label| label.lbl_name.clone())
@@ -15725,8 +15701,8 @@ fn type_record(
             .expect("a record spread writes a label of a declared record");
         let base_loc = typed_base_expr.exp_loc;
         // `written_labels lbl.lbl_all lbl_exp_list` (typecore.ml:3138).
-        let written = record_written_labels(family.labels.len(), &explicit_entries);
-        for env_label in family.labels.iter() {
+        let written = record_written_labels(family.len(), &explicit_entries);
+        for env_label in family.iter() {
             // Instance 1: connect to the base expression; OCaml `unify_kept`
             // raises from each unification.
             let (_poly1, ty_arg1, ty_res1) =
@@ -15750,7 +15726,7 @@ fn type_record(
         // typecore.ml:3154-3165    if typed_base.is_some() {
         // typecore.ml:3154-3165 reads `Array.length lbl.lbl_all` of the first
         // label.
-        let num_fields = record_family.as_ref().map(|family| family.labels.len());
+        let num_fields = record_family.as_ref().map(|family| family.len());
         if num_fields.is_some_and(|num_fields| fields.len() == num_fields) {
             tctx.report_warning(loc, Warning::UselessRecordWith);
             typed_base = None;
@@ -23871,7 +23847,10 @@ fn qualify_label_description_paths(
         if counters_enabled {
             crate::perf_counters::record_qualified_record_label_hit();
         }
-        *label = cached;
+        // Qualification rewrites only the label's types; the label keeps its
+        // own `lbl_all`.
+        label.lbl_res = cached.lbl_res;
+        label.lbl_arg = cached.lbl_arg;
         return;
     }
     if counters_enabled && cache_key.is_some() {
@@ -24712,10 +24691,10 @@ fn build_record_label_descriptions_info(
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &crate::types::context::TypeContext,
 ) -> Option<RecordLabelDescriptionsInfo> {
-    // OCaml reuses the installed `lbl_all` array during record typing
-    // (compiler/ml/typecore.ml:2802,2840-2842). Rust reconstructs that array
-    // lazily, so a constructor-path cache hit can return before cloning the
-    // full record declaration again.
+    // OCaml reads the `lbl_all` array `Datarepr.label_descrs` installed for
+    // the record (compiler/ml/datarepr.ml:261-288, typecore.ml:3058-3059).
+    // Rust describes the record path's declaration once per compilation and
+    // keeps that tied array per path.
     if let Some(cached) = cached_record_label_descriptions_info_for_constr(record_ty, ctx) {
         return Some(cached);
     }
@@ -24726,204 +24705,60 @@ fn build_record_label_descriptions_info(
         crate::types::TypeKind::TypeRecord(labels, repr) => (labels, repr),
         _ => return None,
     };
-    if let Some(cached) = ctx.get_record_label_descriptions(&record_path) {
-        let summary = ctx
-            .get_record_label_description_summary(&record_path)
-            .unwrap_or_else(|| {
-                Arc::new(crate::types::context::RecordLabelDescriptionSummary::from_labels(&cached))
-            });
-        return Some(RecordLabelDescriptionsInfo {
-            family: ctx.get_record_label_family(&record_path)?,
-            labels: cached,
-            summary,
-        });
-    }
-
-    // Large regular records of dependency types (JSX DOM props and the like)
-    // are reconstructed identically by every module, and their labels are
-    // not qualified here (see below), so build them once per worker store.
-    let large_regular =
-        labels.len() >= 20 && matches!(repr, crate::types::RecordRepresentation::RecordRegular);
-    if large_regular && crate::types::ctype::path_root_is_persistent(&record_path) {
-        let store = ctx.thread_store();
-        if let Some((labels, summary, piece)) = store.cached_record_labels(&record_path) {
-            ctx.touch_store_piece(&piece);
-            ctx.register_record_label_descriptions_with_summary(
-                &record_path,
-                labels.clone(),
-                summary.clone(),
-            );
-            return Some(RecordLabelDescriptionsInfo {
-                        family: ctx.get_record_label_family(&record_path)?,
-                        labels,
-                        summary,
-                    });
-        }
-        let (descriptions, piece) = ctx.build_in_store(|| {
-            let shared_res = ctx.new_generic_constr(record_path.clone(), decl.type_params.clone());
-            labels
-                .iter()
-                .enumerate()
-                .map(|(pos, ld)| crate::types::LabelDescription {
-                    lbl_name: ld.ld_id.name().to_string(),
-                    lbl_runtime_name: ld.declaration_name(),
-                    lbl_res: shared_res,
-                    lbl_arg: crate::types::ctype::remap_label_type_to_params(
-                        ctx,
-                        ld.ld_type,
-                        &decl.type_params,
-                    ),
-                    lbl_mut: ld.ld_mutable,
-                    lbl_optional: ld.ld_optional,
-                    lbl_pos: pos as i32,
-                    lbl_all: crate::types::LabelArrayRef(0),
-                    lbl_repres: repr.clone(),
-                    lbl_private: decl.type_private,
-                    lbl_loc: ld.ld_loc,
-                    lbl_attributes: ld.ld_attributes.clone(),
-                })
-                .collect::<Vec<_>>()
-        });
-        let descriptions = Arc::new(descriptions);
-        let summary = Arc::new(
-            crate::types::context::RecordLabelDescriptionSummary::from_labels(&descriptions),
-        );
-        if let Some(piece) = piece {
-            store.publish_record_labels(
-                record_path.clone(),
-                (descriptions.clone(), summary.clone(), piece),
-            );
-        }
-        ctx.register_record_label_descriptions_with_summary(
-            &record_path,
-            descriptions.clone(),
-            summary.clone(),
-        );
-        return Some(RecordLabelDescriptionsInfo {
-            family: ctx.get_record_label_family(&record_path)?,
-            labels: descriptions,
-            summary,
-        });
-    }
-
-    // Large regular records of dependency types (JSX DOM props and the like)
-    // are reconstructed identically by every module, and their labels are
-    // not qualified here (see below), so build them once per worker store.
-    let large_regular =
-        labels.len() >= 20 && matches!(repr, crate::types::RecordRepresentation::RecordRegular);
-    if large_regular && crate::types::ctype::path_root_is_persistent(&record_path) {
-        let store = ctx.thread_store();
-        if let Some((labels, summary, piece)) = store.cached_record_labels(&record_path) {
-            ctx.touch_store_piece(&piece);
-            ctx.register_record_label_descriptions_with_summary(
-                &record_path,
-                labels.clone(),
-                summary.clone(),
-            );
-            return Some(RecordLabelDescriptionsInfo {
-                        family: ctx.get_record_label_family(&record_path)?,
-                        labels,
-                        summary,
-                    });
-        }
-        let (descriptions, piece) = ctx.build_in_store(|| {
-            let shared_res = ctx.new_generic_constr(record_path.clone(), decl.type_params.clone());
-            labels
-                .iter()
-                .enumerate()
-                .map(|(pos, ld)| crate::types::LabelDescription {
-                    lbl_name: ld.ld_id.name().to_string(),
-                    lbl_runtime_name: ld.declaration_name(),
-                    lbl_res: shared_res,
-                    lbl_arg: crate::types::ctype::remap_label_type_to_params(
-                        ctx,
-                        ld.ld_type,
-                        &decl.type_params,
-                    ),
-                    lbl_mut: ld.ld_mutable,
-                    lbl_optional: ld.ld_optional,
-                    lbl_pos: pos as i32,
-                    lbl_all: crate::types::LabelArrayRef(0),
-                    lbl_repres: repr.clone(),
-                    lbl_private: decl.type_private,
-                    lbl_loc: ld.ld_loc,
-                    lbl_attributes: ld.ld_attributes.clone(),
-                })
-                .collect::<Vec<_>>()
-        });
-        let descriptions = Arc::new(descriptions);
-        let summary = Arc::new(
-            crate::types::context::RecordLabelDescriptionSummary::from_labels(&descriptions),
-        );
-        if let Some(piece) = piece {
-            store.publish_record_labels(
-                record_path.clone(),
-                (descriptions.clone(), summary.clone(), piece),
-            );
-        }
-        ctx.register_record_label_descriptions_with_summary(
-            &record_path,
-            descriptions.clone(),
-            summary.clone(),
-        );
-        return Some(RecordLabelDescriptionsInfo {
-            family: ctx.get_record_label_family(&record_path)?,
-            labels: descriptions,
-            summary,
-        });
-    }
-
-    let shared_res = ctx.new_generic_constr(record_path.clone(), decl.type_params.clone());
-    // OCaml assigns `lbl_all` when label descriptions are installed in the
-    // environment, then reuses that array in `type_record`
-    // (compiler/ml/typecore.ml:2802,2840-2842). This fallback reconstructs
-    // descriptions for paths that did not come through the label environment;
-    // do not register a fresh array for every record literal.
-    let mut descriptions = labels
-        .iter()
-        .enumerate()
-        .map(|(pos, ld)| crate::types::LabelDescription {
-            lbl_name: ld.ld_id.name().to_string(),
-            lbl_runtime_name: ld.declaration_name(),
-            lbl_res: shared_res,
-            lbl_arg: crate::types::ctype::remap_label_type_to_params(
-                ctx,
-                ld.ld_type,
-                &decl.type_params,
-            ),
-            lbl_mut: ld.ld_mutable,
-            lbl_optional: ld.ld_optional,
-            lbl_pos: pos as i32,
-            lbl_all: crate::types::LabelArrayRef(0),
-            lbl_repres: repr.clone(),
-            lbl_private: decl.type_private,
-            lbl_loc: ld.ld_loc,
-            lbl_attributes: ld.ld_attributes.clone(),
+    let info_of = |family: crate::types::LabelArrayRef| {
+        Some(RecordLabelDescriptionsInfo {
+            family,
+            labels: ctx.label_family(family)?,
+            summary: ctx.get_record_label_description_summary(&record_path)?,
         })
-        .collect::<Vec<_>>();
+    };
+    if let Some(family) = ctx.get_record_label_family(&record_path) {
+        return info_of(family);
+    }
+
+    // Large regular records of dependency types (JSX DOM props and the like)
+    // are described identically by every module, and their labels are not
+    // qualified here (see below), so describe them once per worker store.
+    let large_regular =
+        labels.len() >= 20 && matches!(repr, crate::types::RecordRepresentation::RecordRegular);
+    if large_regular && crate::types::ctype::path_root_is_persistent(&record_path) {
+        let store = ctx.thread_store();
+        if let Some((labels, summary, piece)) = store.cached_record_labels(&record_path) {
+            ctx.touch_store_piece(&piece);
+            ctx.register_record_label_descriptions_with_summary(&record_path, labels, summary);
+            return info_of(ctx.get_record_label_family(&record_path)?);
+        }
+        let (descriptions, piece) = ctx.build_in_store(|| {
+            let shared_res = ctx.new_generic_constr(record_path.clone(), decl.type_params.clone());
+            crate::types::env_lazy::label_descrs(shared_res, &decl, decl.type_private, ctx, |_| {})
+        });
+        let descriptions = Arc::new(descriptions);
+        let summary = Arc::new(
+            crate::types::context::RecordLabelDescriptionSummary::from_labels(&descriptions),
+        );
+        if let Some(piece) = piece {
+            store.publish_record_labels(
+                record_path.clone(),
+                (descriptions.clone(), summary.clone(), piece),
+            );
+        }
+        ctx.register_record_label_descriptions_with_summary(&record_path, descriptions, summary);
+        return info_of(ctx.get_record_label_family(&record_path)?);
+    }
+
     // OCaml compiler/ml/env.ml:1542-1549 installs labels from
     // `Subst.type_declaration sub decl`; compiler/ml/subst.ml:173-177 rewrites
-    // every field argument path while building the `lbl_all` array, which
-    // also types the omitted optional fields of a record literal
-    // (typecore.ml:2833-2842). The array is cached per record path.
-    for label in &mut descriptions {
-        qualify_label_description_paths(label, env, pers_env, ctx);
-    }
-    let descriptions = std::sync::Arc::new(descriptions);
-    ctx.register_record_label_descriptions(&record_path, descriptions.clone());
-    let summary = ctx.get_record_label_description_summary(&record_path)?;
-    Some(RecordLabelDescriptionsInfo {
-        family: ctx.get_record_label_family(&record_path)?,
-        labels: descriptions,
-        summary,
-    })
-}
-
-fn cached_record_label_descriptions_for_constr(
-    record_ty: TypeExprRef,
-    ctx: &crate::types::context::TypeContext,
-) -> Option<std::sync::Arc<Vec<crate::types::LabelDescription>>> {
-    cached_record_label_descriptions_info_for_constr(record_ty, ctx).map(|info| info.labels)
+    // every field argument path before `Datarepr.label_descrs` ties the
+    // array.
+    let shared_res = ctx.new_generic_constr(record_path.clone(), decl.type_params.clone());
+    let descriptions =
+        crate::types::env_lazy::label_descrs(shared_res, &decl, decl.type_private, ctx, |descs| {
+            for label in descs {
+                qualify_label_description_paths(label, env, pers_env, ctx);
+            }
+        });
+    ctx.register_record_label_descriptions(&record_path, Arc::new(descriptions));
+    info_of(ctx.get_record_label_family(&record_path)?)
 }
 
 fn cached_record_label_descriptions_info_for_constr(
@@ -25038,42 +24873,29 @@ fn lookup_label_by_expected_type(
         concrete_path.last(),
         ctx.resolve_loc(type_decl.type_loc),
     );
-    let (labels, repr) = match &type_decl.type_kind {
-        crate::types::TypeKind::TypeRecord(labels, repr) => (labels, repr),
-        _ => return None,
+    let crate::types::TypeKind::TypeRecord(labels, _) = &type_decl.type_kind else {
+        return None;
     };
+    let pos = labels.iter().position(|ld| ld.ld_id.name() == label_name)?;
+    // `Env.find_type_descrs` of the record path describes the declaration
+    // afresh (compiler/ml/env.ml:784, datarepr.ml:261-299).
     let res_ty = ctx.new_generic_constr(visible_path, type_decl.type_params.clone());
-    for (pos, ld) in labels.iter().enumerate() {
-        if ld.ld_id.name() == label_name {
-            let mut selected = crate::types::LabelDescription {
-                lbl_name: ld.ld_id.name().to_string(),
-                lbl_runtime_name: ld.declaration_name(),
-                lbl_res: res_ty,
-                lbl_arg: crate::types::ctype::remap_label_type_to_params(
-                    ctx,
-                    ld.ld_type,
-                    &type_decl.type_params,
-                ),
-                lbl_mut: ld.ld_mutable,
-                lbl_optional: ld.ld_optional,
-                lbl_pos: pos as i32,
-                lbl_all: crate::types::LabelArrayRef(0),
-                lbl_repres: repr.clone(),
-                lbl_private: type_decl.type_private,
-                lbl_loc: ld.ld_loc,
-                lbl_attributes: ld.ld_attributes.clone(),
-            };
-            if qualify_field_paths {
-                // OCaml compiler/ml/typecore.ml:3677-3717 record expression
-                // fields receive already-substituted labels before
-                // `instance_label`, so expression typing keeps the immediate
-                // component qualification.
-                qualify_label_description_paths(&mut selected, env, pers_env, ctx);
-            }
-            return Some(selected);
-        }
+    let family = crate::types::env_lazy::label_descrs(
+        res_ty,
+        &type_decl,
+        type_decl.type_private,
+        ctx,
+        |_| {},
+    );
+    let mut selected = family[pos].clone();
+    if qualify_field_paths {
+        // OCaml compiler/ml/typecore.ml:3677-3717 record expression
+        // fields receive already-substituted labels before
+        // `instance_label`, so expression typing keeps the immediate
+        // component qualification.
+        qualify_label_description_paths(&mut selected, env, pers_env, ctx);
     }
-    None
+    Some(selected)
 }
 
 fn force_type_paths_for_lookup_from_type(

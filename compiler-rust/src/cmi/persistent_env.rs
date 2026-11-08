@@ -8227,33 +8227,17 @@ fn add_signature_to_env_with_options_inner(
                             };
 
                             if let Some(ref inlined_decl) = cstr_desc.cstr_inlined {
-                                if let crate::types::TypeKind::TypeRecord(ref labels, ref repres) =
+                                if let crate::types::TypeKind::TypeRecord(ref labels, _) =
                                     inlined_decl.type_kind
                                 {
                                     let inline_path =
                                         Path::pdot(type_path.clone(), cstr_desc.cstr_name.clone());
                                     let ty_res = ctx
                                         .new_constr(inline_path, inlined_decl.type_params.clone());
-                                    for (pos, ld) in labels.iter().enumerate() {
-                                        let label_desc = LabelDescription {
-                                            lbl_name: ld.ld_id.name().to_string(),
-                                            lbl_runtime_name: ld.declaration_name(),
-                                            lbl_res: ty_res,
-                                            lbl_arg:
-                                                crate::types::ctype::remap_label_type_to_params(
-                                                    ctx,
-                                                    ld.ld_type,
-                                                    &inlined_decl.type_params,
-                                                ),
-                                            lbl_mut: ld.ld_mutable,
-                                            lbl_optional: ld.ld_optional,
-                                            lbl_pos: pos as i32,
-                                            lbl_all: crate::types::decl::LabelArrayRef(0),
-                                            lbl_repres: repres.clone(),
-                                            lbl_private: decl.type_private,
-                                            lbl_loc: ld.ld_loc,
-                                            lbl_attributes: ld.ld_attributes.clone(),
-                                        };
+                                    // `Datarepr.label_descrs` (compiler/ml/datarepr.ml:261-288).
+                                    for (ld, label_desc) in labels.iter().zip(crate::types::env_lazy::label_descrs(
+                                        ty_res, &inlined_decl, decl.type_private, ctx, |_| {},
+                                    )) {
                                         if as_opened {
                                             opened_labels.push((ld.ld_id, label_desc));
                                         } else {
@@ -8270,29 +8254,14 @@ fn add_signature_to_env_with_options_inner(
                             }
                         }
                     }
-                    TypeKind::TypeRecord(labels, repr) => {
+                    TypeKind::TypeRecord(labels, _) => {
                         let type_path = Path::pdot(module_path.clone(), id.name());
                         let res_ty = ctx.new_generic_constr(type_path, decl.type_params.clone());
 
-                        for (pos, ld) in labels.iter().enumerate() {
-                            let label_desc = LabelDescription {
-                                lbl_name: ld.ld_id.name().to_string(),
-                                lbl_runtime_name: ld.declaration_name(),
-                                lbl_res: res_ty,
-                                lbl_arg: crate::types::ctype::remap_label_type_to_params(
-                                    ctx,
-                                    ld.ld_type,
-                                    &decl.type_params,
-                                ),
-                                lbl_mut: ld.ld_mutable,
-                                lbl_optional: ld.ld_optional,
-                                lbl_pos: pos as i32,
-                                lbl_all: crate::types::decl::LabelArrayRef(0), // placeholder
-                                lbl_repres: repr.clone(),
-                                lbl_private: decl.type_private,
-                                lbl_loc: ld.ld_loc,
-                                lbl_attributes: ld.ld_attributes.clone(),
-                            };
+                        // `Datarepr.label_descrs` (compiler/ml/datarepr.ml:261-288).
+                        for (ld, label_desc) in labels.iter().zip(crate::types::env_lazy::label_descrs(
+                            res_ty, &decl, decl.type_private, ctx, |_| {},
+                        )) {
                             if as_opened {
                                 opened_labels.push((ld.ld_id, label_desc));
                             } else {
