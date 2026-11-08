@@ -13135,6 +13135,13 @@ fn type_function_nary(
     });
     unify_expression_types(tctx, loc, fun_ty, expected_ty, None)?;
 
+    // typecore.ml:3954-3974: with local constraints in scope, the parameter
+    // and result types are taken at a raised level and their structure
+    // generalized.
+    let separate = env.has_local_constraints();
+    if separate {
+        ctx.begin_def();
+    }
     let inst = crate::types::instance(ctx, fun_ty);
     let expanded = crate::types::ctype::expand_head_unif(ctx, env, inst);
     let (mut parameter_types, result_type) = {
@@ -13154,6 +13161,62 @@ fn type_function_nary(
             *typ = env.type_option(ctx, inner);
         }
     }
+    if separate {
+        ctx.end_def();
+        for &typ in &parameter_types {
+            crate::types::generalize_structure(ctx, ctx.current_level(), typ);
+        }
+        crate::types::generalize_structure(ctx, ctx.current_level(), result_type);
+    }
+
+    // typecore.ml:3978-4013: what `type_cases` does for one pattern without
+    // a guard, with GADT patterns correcting levels, duplicating the types
+    // of the identifiers the body uses, and raising the level for
+    // existentials before any parameter is typed.
+    let contains_polyvars = params.iter().any(|source| {
+        parsed_pattern_contains_polymorphic_variant(tctx.arena, tctx.arena.get_pat(source.p_pat))
+    });
+    let has_gadts = params.iter().any(|source| {
+        pattern_contains_generalized_constructor(tctx, env, tctx.arena.get_pat(source.p_pat))
+    });
+    let duplicated_env;
+    let (result_type, env) = if has_gadts {
+        let synth_cases = params
+            .iter()
+            .map(|source| crate::parser::ast::Case {
+                pc_bar: None,
+                pc_lhs: source.p_pat,
+                pc_guard: None,
+                pc_rhs: body,
+            })
+            .collect::<Vec<_>>();
+        let synth_case_refs = synth_cases.iter().collect::<Vec<_>>();
+        duplicated_env = duplicate_ident_types_for_gadt_cases(tctx, env, &synth_case_refs);
+        (
+            crate::types::ctype::subst_identity_copy(ctx, result_type),
+            &duplicated_env,
+        )
+    } else {
+        (result_type, env)
+    };
+    // `init_env` (typecore.ml:4003-4010).
+    fn init_env(ctx: &TypeContext, env: &Env) -> (i32, Env) {
+        ctx.begin_def();
+        ctx.set_current_time(ctx.current_level());
+        let lev = ctx.current_stamp();
+        ctx.init_def(lev + 1000);
+        let mut env = env.clone();
+        env.add_gadt_instance_level();
+        (lev, env)
+    }
+    let gadt_env;
+    let (lev, env) = if has_gadts {
+        let (lev, scoped) = init_env(ctx, env);
+        gadt_env = scoped;
+        (lev, &gadt_env)
+    } else {
+        (ctx.current_level(), env)
+    };
 
     let mut body_env = env.clone_preserve_id();
     let mut typed_patterns = Vec::with_capacity(params.len());
@@ -13168,46 +13231,120 @@ fn type_function_nary(
     for ((param, default_binding), typ) in
         params_bindings.iter().zip(parameter_types.iter().copied())
     {
+        // typecore.ml:4019-4049.
         let parsed_pattern = tctx.arena.get_pat(param.p_pat);
+        let erase_either = parsed_pattern_contains_polymorphic_variant(tctx.arena, parsed_pattern)
+            && type_contains_variant_either(ctx, typ);
+        let ty_arg_c = if has_gadts || erase_either {
+            crate::types::ctype::subst_identity_copy(ctx, typ)
+        } else {
+            typ
+        };
         let simple = is_simple_variable_pattern(tctx.arena, parsed_pattern);
-        let propagate = ctx.get_level(ctx.repr(typ)) == crate::types::GENERIC_LEVEL || !simple;
-        let mut state = PatternState::new();
-        state.reset(true);
+        let propagate = has_gadts
+            || ctx.get_level(ctx.repr(ty_arg_c)) == crate::types::GENERIC_LEVEL
+            || !simple;
         if propagate {
             ctx.begin_def();
         }
-        let typed = type_pattern(
+        let mut state = PatternState::new();
+        state.reset(true);
+        let ty_arg_i = if erase_either {
+            instance_for_erase_either_patterns(ctx, ty_arg_c)
+        } else {
+            crate::types::instance(ctx, ty_arg_c)
+        };
+        // `type_pattern ~lev env spat ty_arg_i` returns the pattern's
+        // environment with the GADT equations it introduced; Rust's GADT
+        // unification records them in the unify state's environment.
+        if has_gadts {
+            tctx.unify_state.set_env(&body_env);
+        }
+        let typed = type_pattern_with_existentials_at_level(
             tctx,
             &body_env,
             parsed_pattern,
-            crate::types::instance(ctx, typ),
+            ty_arg_i,
             PatternMode::Normal,
+            true,
             &mut state,
+            lev,
+            0,
         );
+        if has_gadts && let Some(unify_env) = tctx.unify_state.env() {
+            let constraints: Vec<_> = unify_env
+                .iter_local_constraints()
+                .map(|(path, decl)| (path.clone(), decl.clone()))
+                .collect();
+            for (path, decl) in constraints {
+                if body_env.find_local_constraint(&path).is_none() {
+                    body_env.add_local_constraint(path, decl);
+                }
+            }
+        }
+        let mut typed = match typed {
+            Ok(typed) => typed,
+            Err(err) => {
+                if propagate {
+                    ctx.end_def();
+                }
+                return Err(err);
+            }
+        };
+        let result: TypeCoreResult<()> = (|| {
+            // `unify_pat ext_env pat ty_arg'` (typecore.ml:4038-4039).
+            tctx.set_unify_env(&body_env);
+            unify_pattern_types(tctx, typed.pat_loc, typed.pat_type, ctx.new_var(None))?;
+            // typecore.ml:4040-4042.
+            if typed_pattern_has_variant(&typed) {
+                parmatch_pressure_variants(tctx, env, &[&typed]);
+                finalize_variant_in_pattern(tctx, env, &mut typed, false);
+            }
+            // typecore.ml:4043: `List.iter (fun f -> f ()) !pattern_force`.
+            run_globalize_forces(tctx, state.take_globalize_forces())?;
+            if propagate || erase_either {
+                tctx.set_unify_env(&body_env);
+                let parameter_instance = crate::types::instance(ctx, ty_arg_c);
+                unify_pattern_types(tctx, typed.pat_loc, typed.pat_type, parameter_instance)?;
+            }
+            Ok(())
+        })();
+        if let Err(err) = result {
+            if propagate {
+                ctx.end_def();
+            }
+            return Err(err);
+        }
         if propagate {
+            // typecore.ml:4046-4049.
+            tctx.set_unify_env(env);
+            let mut pattern_types = Vec::new();
+            iter_typed_pattern(&typed, &mut |pat| pattern_types.push(pat.pat_type));
+            for pattern_type in pattern_types {
+                let fresh = ctx.new_var(None);
+                if let Err(err) =
+                    crate::types::ctype::unify_var(ctx, &mut tctx.unify_state, pattern_type, fresh)
+                {
+                    ctx.end_def();
+                    let trace = match err {
+                        TypeError::Unify(trace) if !trace.is_empty() => trace,
+                        _ => vec![(pattern_type, fresh)],
+                    };
+                    return Err(TypeCoreError::PatternTypeClash {
+                        loc: Some(typed.pat_loc),
+                        trace,
+                        env: Some(ctx.store_typed_env(env)),
+                    });
+                }
+            }
             ctx.end_def();
-        }
-        let mut typed = typed?;
-        // typecore.ml:3662-3663 allocates a fresh pattern result and unifies
-        // the typed parameter with it before extending the environment.
-        unify_pattern_types(tctx, typed.pat_loc, typed.pat_type, ctx.new_var(None))?;
-        // typecore.ml:3711-3713.
-        if typed_pattern_has_variant(&typed) {
-            parmatch_pressure_variants(tctx, &body_env, &[&typed]);
-            finalize_variant_in_pattern(tctx, &body_env, &mut typed, false);
-        }
-        // typecore.ml:3714: `List.iter (fun f -> f ()) !pattern_force`.
-        run_globalize_forces(tctx, state.take_globalize_forces())?;
-        if propagate {
-            let parameter_instance = crate::types::instance(ctx, typ);
-            unify_pattern_types(tctx, typed.pat_loc, typed.pat_type, parameter_instance)?;
             iter_typed_pattern(&typed, &mut |pat| {
                 crate::types::generalize(ctx, pat.pat_type)
             });
         }
         if !state.pattern_variables.is_empty() {
             let mut next_env = body_env.clone();
-            // `unpacks_acc @ unpacks` (typecore.ml:3739), where a parameter's
+            // `unpacks_acc @ unpacks` (typecore.ml:4119), where a parameter's
             // `unpacks` are its `module_variables`, latest first.
             let mut param_unpacks = Vec::new();
             for variable in &state.pattern_variables {
@@ -13269,21 +13406,40 @@ fn type_function_nary(
             default_lets.push((typed_bindings, let_env));
             opt_param = Some(param_id);
         }
-        typed_patterns.push((typed, opt_param));
+        typed_patterns.push((typed, opt_param, ty_arg_c));
     }
 
+    // typecore.ml:4125-4135: the body, typed against a corrected copy of the
+    // result type when a parameter has a GADT pattern.
+    let body_result_type = if has_gadts {
+        crate::types::ctype::subst_identity_copy(ctx, result_type)
+    } else {
+        result_type
+    };
     let typed_body = type_expect_with_module_unpacks(
         tctx,
         &body_env,
         tctx.arena.get_expr(body),
-        result_type,
+        body_result_type,
         &unpacks,
         None,
     )?;
     let mut typed_body = Expression {
-        exp_type: crate::types::instance(ctx, result_type),
+        exp_type: crate::types::instance(ctx, body_result_type),
         ..typed_body
     };
+    if has_gadts {
+        // typecore.ml:4136-4138.
+        let shared_result = crate::types::instance(ctx, result_type);
+        tctx.set_unify_env(env);
+        unify_expression_types(
+            tctx,
+            typed_body.exp_loc,
+            typed_body.exp_type,
+            shared_result,
+            None,
+        )?;
+    }
     for (typed_bindings, _let_env) in default_lets.into_iter().rev() {
         let body_type = typed_body.exp_type;
         typed_body = Expression::new(
@@ -13305,32 +13461,27 @@ fn type_function_nary(
         }
     }
 
+    // typecore.ml:4160-4198.
     let needs_exhaust_check = params
         .iter()
         .any(|source| !is_simple_variable_pattern(tctx.arena, tctx.arena.get_pat(source.p_pat)));
-    let contains_polyvars = params.iter().any(|source| {
-        parsed_pattern_contains_polymorphic_variant(tctx.arena, tctx.arena.get_pat(source.p_pat))
-    });
-    let mut check_level = ctx.current_level();
-    if needs_exhaust_check {
-        ctx.begin_def();
-        ctx.set_current_time(ctx.current_level());
-        let level = ctx.current_stamp();
-        ctx.init_def(level + 1000);
-        check_level = level;
-    }
+    let do_init = has_gadts || needs_exhaust_check;
+    let check_env;
+    let (check_level, env) = if do_init && !has_gadts {
+        let (lev, scoped) = init_env(ctx, env);
+        check_env = scoped;
+        (lev, &check_env)
+    } else {
+        (lev, env)
+    };
     let mut typed_params = Vec::with_capacity(params.len());
-    for (((source, (typed, opt_param)), label), ty_arg_c) in params
-        .iter()
-        .zip(typed_patterns)
-        .zip(labels.iter())
-        .zip(parameter_types.iter().copied())
+    for ((source, (typed, opt_param, ty_arg_c)), label) in
+        params.iter().zip(typed_patterns).zip(labels.iter())
     {
         let partial = if is_simple_variable_pattern(tctx.arena, tctx.arena.get_pat(source.p_pat)) {
             Partial::Total
         } else {
-            // typecore.ml:3782-3798.
-            let ty_arg_check = if needs_exhaust_check {
+            let ty_arg_check = if do_init {
                 crate::types::ctype::subst_identity_copy(ctx, ty_arg_c)
             } else {
                 ty_arg_c
@@ -13352,7 +13503,7 @@ fn type_function_nary(
                 tctx,
                 env,
                 &typed,
-                needs_exhaust_check || contains_polyvars,
+                do_init || contains_polyvars,
                 check_level,
                 ty_arg_check,
             );
@@ -13372,9 +13523,11 @@ fn type_function_nary(
         });
     }
 
-    if needs_exhaust_check {
+    if do_init {
+        // Ensure that existential types do not escape (typecore.ml:4195-4198).
         ctx.end_def();
         let result_instance = crate::types::instance(ctx, result_type);
+        tctx.set_unify_env(env);
         unify_expression_types(tctx, loc, result_instance, ctx.new_var(None), None)?;
     }
 
