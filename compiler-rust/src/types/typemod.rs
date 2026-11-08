@@ -9415,6 +9415,538 @@ pub(crate) fn force_package_modtype_translation_for_core_type<'a>(
     Ok(())
 }
 
+/// `Mtype.get_arg_paths` (mtype.ml:273-279) with `get_prefixes`
+/// (mtype.ml:269-271): the arguments of the functor applications in `path`
+/// and their prefixes.
+fn mtype_get_arg_paths(path: &Path, out: &mut Vec<Path>) {
+    fn get_prefixes(path: &Path, out: &mut Vec<Path>) {
+        match path {
+            Path::Pident(_) => {}
+            Path::Pdot(prefix, _, _) | Path::Papply(prefix, _) => {
+                push_same_path(out, prefix);
+                get_prefixes(prefix, out);
+            }
+        }
+    }
+    match path {
+        Path::Pident(_) => {}
+        Path::Pdot(prefix, _, _) => mtype_get_arg_paths(prefix, out),
+        Path::Papply(functor, argument) => {
+            push_same_path(out, argument);
+            get_prefixes(argument, out);
+            mtype_get_arg_paths(functor, out);
+            mtype_get_arg_paths(argument, out);
+        }
+    }
+}
+
+/// Add `path` to a `Path_set` kept as a list.
+fn push_same_path(out: &mut Vec<Path>, path: &Path) {
+    if !out.iter().any(|known| known.same(path)) {
+        out.push(path.clone());
+    }
+}
+
+/// `Btype.type_iterators` with `it_path` and `it_signature_item` overridden
+/// as `Mtype.collect_arg_paths` does (mtype.ml:300-328). The marks of
+/// `it_type_expr` only stop the walk at visited nodes, and
+/// `unmark_iterators` removes them again; a visited set does both.
+struct CollectArgPaths<'c> {
+    ctx: &'c crate::types::context::TypeContext,
+    visited: HashSet<TypeExprRef>,
+    paths: Vec<Path>,
+    subst: Vec<(Path, Ident)>,
+    bindings: Vec<(Ident, Path)>,
+}
+
+impl CollectArgPaths<'_> {
+    fn it_path(&mut self, path: &Path) {
+        mtype_get_arg_paths(path, &mut self.paths);
+    }
+
+    fn it_type_expr(&mut self, ty: TypeExprRef) {
+        use crate::types::type_expr::TypeDesc;
+        let ty = self.ctx.repr(ty);
+        if !self.visited.insert(ty) {
+            return;
+        }
+        let mut children = Vec::new();
+        crate::types::iter_type_expr(self.ctx, ty, |child| children.push(child));
+        for child in children {
+            self.it_type_expr(child);
+        }
+        let path = match &*self.ctx.get_desc(ty) {
+            TypeDesc::Tconstr { path, .. } | TypeDesc::Tpackage { path, .. } => Some(path.clone()),
+            TypeDesc::Tvariant(row) => crate::types::btype::row_repr(self.ctx, row)
+                .row_name
+                .map(|(path, _)| path),
+            _ => None,
+        };
+        if let Some(path) = path {
+            self.it_path(&path);
+        }
+    }
+
+    fn it_type_declaration(&mut self, td: &crate::types::decl::TypeDeclaration) {
+        use crate::types::TypeKind;
+        for &param in &td.type_params {
+            self.it_type_expr(param);
+        }
+        if let Some(manifest) = td.type_manifest {
+            self.it_type_expr(manifest);
+        }
+        match &td.type_kind {
+            TypeKind::TypeAbstract | TypeKind::TypeOpen => {}
+            TypeKind::TypeVariant(constructors, _) => {
+                for cd in constructors.iter() {
+                    let mut args = Vec::new();
+                    crate::types::btype::iter_type_expr_cstr_args(&cd.cd_args, |ty| args.push(ty));
+                    for arg in args {
+                        self.it_type_expr(arg);
+                    }
+                    if let Some(res) = cd.cd_res {
+                        self.it_type_expr(res);
+                    }
+                }
+            }
+            TypeKind::TypeRecord(labels, _) => {
+                for label in labels.iter() {
+                    self.it_type_expr(label.ld_type);
+                }
+            }
+        }
+    }
+
+    fn it_signature_item(&mut self, item: &crate::types::decl::SignatureItem) {
+        use crate::types::decl::{ModuleType as DeclMty, SignatureItem};
+        match item {
+            SignatureItem::SigValue(_, vd) => self.it_type_expr(vd.val_type),
+            SignatureItem::SigType(_, td, _) => self.it_type_declaration(td),
+            SignatureItem::SigTypext(_, ext, _) => {
+                self.it_path(&ext.ext_type_path);
+                for &param in &ext.ext_type_params {
+                    self.it_type_expr(param);
+                }
+                let mut args = Vec::new();
+                crate::types::btype::iter_type_expr_cstr_args(&ext.ext_args, |ty| args.push(ty));
+                for arg in args {
+                    self.it_type_expr(arg);
+                }
+                if let Some(ret) = ext.ext_ret_type {
+                    self.it_type_expr(ret);
+                }
+            }
+            SignatureItem::SigModule(_, md, _) => self.it_module_type(&md.md_type),
+            SignatureItem::SigModtype(_, mtd) => {
+                if let Some(mty) = &mtd.mtd_type {
+                    self.it_module_type(mty);
+                }
+            }
+            SignatureItem::SigClass | SignatureItem::SigClassType => {}
+        }
+        match item {
+            SignatureItem::SigModule(id, md, _) => match &md.md_type {
+                DeclMty::MtyAlias(_, path) => self.bindings.push((*id, (**path).clone())),
+                DeclMty::MtySignature(sg) => {
+                    for inner in sg.iter() {
+                        if let SignatureItem::SigModule(inner_id, _, _) = inner {
+                            self.subst.push((
+                                Path::pdot_pos(Path::pident(*id), inner_id.name(), -1),
+                                *inner_id,
+                            ));
+                        }
+                    }
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+
+    fn it_module_type(&mut self, mty: &crate::types::decl::ModuleType) {
+        use crate::types::decl::ModuleType as DeclMty;
+        match mty {
+            DeclMty::MtyIdent(path) => self.it_path(path),
+            DeclMty::MtyAlias(_, path) => self.it_path(path),
+            DeclMty::MtySignature(sg) => {
+                for item in sg.iter() {
+                    self.it_signature_item(item);
+                }
+            }
+            DeclMty::MtyFunctor {
+                param_type, result, ..
+            } => {
+                if let Some(param_type) = param_type {
+                    self.it_module_type(param_type);
+                }
+                self.it_module_type(result);
+            }
+        }
+    }
+
+    /// `rollback_path subst p` (mtype.ml:281-288).
+    fn rollback_path(&self, path: &Path) -> Path {
+        if let Some((_, id)) = self.subst.iter().rev().find(|(key, _)| key.same(path)) {
+            return Path::pident(*id);
+        }
+        match path {
+            Path::Pident(_) | Path::Papply(..) => path.clone(),
+            Path::Pdot(prefix, name, pos) => {
+                let rolled = self.rollback_path(prefix);
+                if prefix.same(&rolled) {
+                    path.clone()
+                } else {
+                    self.rollback_path(&Path::pdot_pos(rolled, *name, *pos))
+                }
+            }
+        }
+    }
+
+    /// `collect_ids subst bindings p` (mtype.ml:290-298).
+    fn collect_ids(&self, path: &Path, out: &mut Vec<Ident>) {
+        if let Path::Pident(id) = self.rollback_path(path) {
+            if let Some((_, bound)) = self.bindings.iter().rev().find(|(bid, _)| bid.same(&id)) {
+                self.collect_ids(bound, out);
+            }
+            if !out.iter().any(|known| known.same(&id)) {
+                out.push(id);
+            }
+        }
+    }
+}
+
+/// `Mtype.collect_arg_paths mty` (mtype.ml:300-328): the module identifiers
+/// that functor applications in `mty` take as arguments, which
+/// `remove_aliases` must keep as aliases.
+fn mtype_collect_arg_paths(
+    ctx: &crate::types::context::TypeContext,
+    mty: &crate::types::decl::ModuleType,
+) -> Vec<Ident> {
+    let mut it = CollectArgPaths {
+        ctx,
+        visited: HashSet::default(),
+        paths: Vec::new(),
+        subst: Vec::new(),
+        bindings: Vec::new(),
+    };
+    it.it_module_type(mty);
+    let mut ids = Vec::new();
+    for path in &it.paths {
+        it.collect_ids(path, &mut ids);
+    }
+    ids
+}
+
+/// `Mtype.remove_aliases env mty` (mtype.ml:330-358).
+fn mtype_remove_aliases(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    mty: &crate::types::decl::ModuleType,
+) -> crate::types::decl::ModuleType {
+    use crate::types::decl::{ModuleType as DeclMty, SignatureItem};
+
+    fn remove_aliases(
+        tctx: &mut TypeCheckContext<'_>,
+        env: &Env,
+        excl: &[Ident],
+        mty: &DeclMty,
+    ) -> DeclMty {
+        match mty {
+            DeclMty::MtySignature(sg) => {
+                DeclMty::MtySignature(std::sync::Arc::new(remove_aliases_sig(tctx, env, excl, sg)))
+            }
+            DeclMty::MtyAlias(..) => {
+                // `Env.scrape_alias env mty`, then again until it stays.
+                match scrape_alias_module_type(mty, env, &mut tctx.persistent_env, tctx.type_ctx) {
+                    Some(scraped) if scraped != *mty => remove_aliases(tctx, env, excl, &scraped),
+                    _ => mty.clone(),
+                }
+            }
+            other => other.clone(),
+        }
+    }
+
+    fn remove_aliases_sig(
+        tctx: &mut TypeCheckContext<'_>,
+        env: &Env,
+        excl: &[Ident],
+        sg: &[SignatureItem],
+    ) -> crate::types::decl::Signature {
+        let mut env = env.clone();
+        let mut out = Vec::with_capacity(sg.len());
+        for item in sg {
+            match item {
+                SignatureItem::SigModule(id, md, rs) => {
+                    let md_type = match &md.md_type {
+                        DeclMty::MtyAlias(..) if excl.iter().any(|ex| ex.same(id)) => {
+                            md.md_type.clone()
+                        }
+                        mty => remove_aliases(tctx, &env, excl, mty),
+                    };
+                    let item = SignatureItem::SigModule(
+                        *id,
+                        crate::types::decl::ModuleDeclaration {
+                            md_type,
+                            ..md.clone()
+                        },
+                        *rs,
+                    );
+                    // `Env.add_module id mty env`.
+                    crate::types::includemod::add_sig_item_to_env(&item, &mut env);
+                    out.push(item);
+                }
+                SignatureItem::SigModtype(..) => {
+                    crate::types::includemod::add_sig_item_to_env(item, &mut env);
+                    out.push(item.clone());
+                }
+                _ => out.push(item.clone()),
+            }
+        }
+        out
+    }
+
+    let excl = mtype_collect_arg_paths(tctx.type_ctx, mty);
+    remove_aliases(tctx, env, &excl, mty)
+}
+
+/// `Typetexp.find_module env loc lid`: the module's path and declaration,
+/// whose module type is the declaration's own (env.ml:865-882).
+fn find_module_declaration_for_lid<'a>(
+    tctx: &mut TypeCheckContext<'a>,
+    env: &Env,
+    arena: &'a ParseArena,
+    loc: LocIdx,
+    lid: &Longident,
+) -> TypeModResult<(Path, crate::types::decl::ModuleDeclaration)> {
+    let unbound = |tctx: &mut TypeCheckContext<'a>| {
+        TypeModError::CoreError(crate::types::typecore::unbound_module_lookup_error(
+            tctx, env, loc, lid,
+        ))
+    };
+    let Some(path) =
+        lookup_module_path_by_lid(lid, arena, env, &mut tctx.persistent_env, tctx.type_ctx)
+    else {
+        return Err(unbound(tctx));
+    };
+    let decl = match &path {
+        Path::Pident(id) => match env.lookup_module(&path) {
+            Ok(md) => Some(md.clone()),
+            Err(_) => tctx
+                .persistent_env
+                .as_mut()
+                .and_then(|pers| pers.get_renamed_sig(id.name(), tctx.type_ctx))
+                .map(|sig| {
+                    empty_module_decl(crate::types::decl::ModuleType::MtySignature(
+                        std::sync::Arc::new(sig),
+                    ))
+                }),
+        },
+        Path::Pdot(parent, name, _) => crate::types::typecore::lookup_module_in_resolved_path(
+            parent,
+            name,
+            env,
+            &mut tctx.persistent_env,
+            tctx.type_ctx,
+        )
+        .map(|(_, _, md)| md),
+        Path::Papply(..) => None,
+    };
+    match decl {
+        Some(decl) => Ok((path, decl)),
+        None => Err(unbound(tctx)),
+    }
+}
+
+/// `Mtype.strengthen_decl ~aliasable:false env md p` (mtype.ml:93-97).
+fn strengthen_decl_non_aliasable(
+    ctx: &crate::types::context::TypeContext,
+    env: &Env,
+    md: crate::types::decl::ModuleDeclaration,
+    path: &Path,
+) -> crate::types::decl::ModuleDeclaration {
+    match &md.md_type {
+        crate::types::decl::ModuleType::MtyAlias(..) => md,
+        mty => crate::types::decl::ModuleDeclaration {
+            md_type: crate::types::ctype::strengthen_module_type_for_non_aliasable_path(
+                ctx, env, path, mty,
+            ),
+            ..md
+        },
+    }
+}
+
+/// `update_rec_next rs rem` (typemod.ml:139-146).
+fn update_rec_next(
+    rs: crate::types::decl::RecStatus,
+    rem: &mut [crate::types::decl::SignatureItem],
+) {
+    use crate::types::decl::{RecStatus, SignatureItem};
+    if rs == RecStatus::TrecNext {
+        return;
+    }
+    match rem.first_mut() {
+        Some(SignatureItem::SigType(_, _, next @ RecStatus::TrecNext))
+        | Some(SignatureItem::SigModule(_, _, next @ RecStatus::TrecNext)) => *next = rs,
+        _ => {}
+    }
+}
+
+/// The `Pwith_module` and `Pwith_modsubst` cases of OCaml
+/// `Typemod.merge_constraint initial_env loc sg constr` (typemod.ml:287-470):
+/// walk the signature along the constrained path, adding each item passed
+/// to the environment (`Env.add_item`), and replace the module it names by
+/// the strengthened replacement checked with `Includemod.modtypes`, or drop
+/// it for a destructive substitution, which `Subst.signature` then applies.
+#[allow(clippy::too_many_arguments)]
+fn merge_module_constraint<'a>(
+    tctx: &mut TypeCheckContext<'a>,
+    initial_env: &Env,
+    arena: &'a ParseArena,
+    mty: &crate::types::decl::ModuleType,
+    lid: &Longident,
+    rhs_lid: &Longident,
+    destructive: bool,
+    loc: LocIdx,
+) -> TypeModResult<crate::types::decl::ModuleType> {
+    use crate::types::decl::{ModuleType as DeclMty, SignatureItem};
+
+    #[allow(clippy::too_many_arguments)]
+    fn merge<'a>(
+        tctx: &mut TypeCheckContext<'a>,
+        initial_env: &Env,
+        arena: &'a ParseArena,
+        env: &Env,
+        sg: &[SignatureItem],
+        names: &[&str],
+        lid: &Longident,
+        rhs_lid: &Longident,
+        destructive: bool,
+        loc: LocIdx,
+        real_ids: &mut Vec<(Ident, Path)>,
+    ) -> TypeModResult<Vec<SignatureItem>> {
+        let mut env = env.clone();
+        for (index, item) in sg.iter().enumerate() {
+            if let SignatureItem::SigModule(id, md, rs) = item
+                && id.name() == names[0]
+            {
+                let mut out = sg[..index].to_vec();
+                let mut rem = sg[index + 1..].to_vec();
+                if names.len() == 1 {
+                    let (path, rhs_md) =
+                        find_module_declaration_for_lid(tctx, initial_env, arena, loc, rhs_lid)?;
+                    let rhs_md = if destructive {
+                        rhs_md
+                    } else {
+                        let md_type = mtype_remove_aliases(tctx, &env, &rhs_md.md_type);
+                        crate::types::decl::ModuleDeclaration { md_type, ..rhs_md }
+                    };
+                    let newmd = strengthen_decl_non_aliasable(tctx.type_ctx, &env, rhs_md, &path);
+                    let inclusion = crate::types::includemod::modtypes(
+                        tctx.type_ctx,
+                        &env,
+                        &newmd.md_type,
+                        &md.md_type,
+                    );
+                    crate::types::includemod::escaped(tctx.type_ctx, inclusion)
+                        .map_err(TypeModError::CoreError)?
+                        .map_err(|error| TypeModError::WithMismatch {
+                            loc,
+                            lid: lid.clone(),
+                            error,
+                        })?;
+                    if destructive {
+                        real_ids.push((*id, path));
+                        update_rec_next(*rs, &mut rem);
+                    } else {
+                        out.push(SignatureItem::SigModule(*id, newmd, *rs));
+                    }
+                } else {
+                    let Some(inner) = resolve_mod_type_to_sig(
+                        &md.md_type,
+                        Some(&env),
+                        &mut tctx.persistent_env,
+                        tctx.type_ctx,
+                    ) else {
+                        return Err(TypeModError::WithNoComponent {
+                            loc,
+                            lid: lid.clone(),
+                        });
+                    };
+                    let newsg = merge(
+                        tctx,
+                        initial_env,
+                        arena,
+                        &env,
+                        &inner,
+                        &names[1..],
+                        lid,
+                        rhs_lid,
+                        destructive,
+                        loc,
+                        real_ids,
+                    )?;
+                    out.push(SignatureItem::SigModule(
+                        *id,
+                        crate::types::decl::ModuleDeclaration {
+                            md_type: DeclMty::MtySignature(std::sync::Arc::new(newsg)),
+                            ..md.clone()
+                        },
+                        *rs,
+                    ));
+                }
+                out.extend(rem);
+                return Ok(out);
+            }
+            crate::types::includemod::add_sig_item_to_env(item, &mut env);
+        }
+        Err(TypeModError::WithNoComponent {
+            loc,
+            lid: lid.clone(),
+        })
+    }
+
+    let Some(sg) = resolve_mod_type_to_sig(
+        mty,
+        Some(initial_env),
+        &mut tctx.persistent_env,
+        tctx.type_ctx,
+    ) else {
+        return Err(TypeModError::WithNoComponent {
+            loc,
+            lid: lid.clone(),
+        });
+    };
+    let names = flatten_package_constraint_path(lid, arena, tctx.type_ctx);
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    let mut real_ids = Vec::new();
+    let sg = merge(
+        tctx,
+        initial_env,
+        arena,
+        initial_env,
+        &sg,
+        &names,
+        lid,
+        rhs_lid,
+        destructive,
+        loc,
+        &mut real_ids,
+    )?;
+    let mty = DeclMty::MtySignature(std::sync::Arc::new(sg));
+    if real_ids.is_empty() {
+        return Ok(mty);
+    }
+    // `Subst.signature` with `Subst.add_module_path path real_path` for the
+    // removed module (typemod.ml:461-467).
+    Ok(
+        crate::cmi::persistent_env::substitute_module_type_with_module_path_subst(
+            &mty,
+            &real_ids,
+            tctx.type_ctx,
+        ),
+    )
+}
+
 fn collect_pmty_with_type_constraints<'a>(
     tctx: &mut TypeCheckContext<'a>,
     env: &Env,
@@ -12636,14 +13168,6 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                 constraints,
                 mty.pmty_loc,
             )?;
-            let type_constraints = collect_pmty_with_type_constraints(
-                tctx,
-                env,
-                arena,
-                Some(&base_mty),
-                constraints,
-                mty.pmty_loc,
-            )?;
             check_destructive_substitution_alias_usage(
                 tctx,
                 env,
@@ -12652,18 +13176,90 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                 constraints,
                 mty.pmty_loc,
             )?;
-            let mut constrained_mty = if type_constraints.is_empty() {
-                base_mty
-            } else {
-                apply_with_type_constraints_to_module_type(
+            // typemod.ml:759-766 folds `merge_constraint` over the
+            // constraints in order, each on the signature the ones before it
+            // produced.
+            fn merge_type_constraints<'a>(
+                tctx: &mut TypeCheckContext<'a>,
+                env: &Env,
+                arena: &'a ParseArena,
+                mty: crate::types::decl::ModuleType,
+                constraints: &[crate::parser::ast::WithConstraint],
+                loc: LocIdx,
+            ) -> TypeModResult<crate::types::decl::ModuleType> {
+                if constraints.is_empty() {
+                    return Ok(mty);
+                }
+                let type_constraints = collect_pmty_with_type_constraints(
+                    tctx,
                     env,
-                    &base_mty,
+                    arena,
+                    Some(&mty),
+                    constraints,
+                    loc,
+                )?;
+                if type_constraints.is_empty() {
+                    return Ok(mty);
+                }
+                Ok(apply_with_type_constraints_to_module_type(
+                    env,
+                    &mty,
                     &type_constraints,
                     &mut tctx.persistent_env,
                     tctx.type_ctx,
                 )
-                .unwrap_or(base_mty)
-            };
+                .unwrap_or(mty))
+            }
+            let mut constrained_mty = base_mty;
+            for constraint in constraints {
+                constrained_mty = match constraint {
+                    crate::parser::ast::WithConstraint::Pwith_module(lid, rhs)
+                    | crate::parser::ast::WithConstraint::Pwith_modsubst(lid, rhs) => {
+                        let destructive = matches!(
+                            constraint,
+                            crate::parser::ast::WithConstraint::Pwith_modsubst(..)
+                        );
+                        let lid = tctx.resolve_lid(lid.txt).clone();
+                        let rhs_lid = tctx.resolve_lid(rhs.txt).clone();
+                        merge_module_constraint(
+                            tctx,
+                            env,
+                            arena,
+                            &constrained_mty,
+                            &lid,
+                            &rhs_lid,
+                            destructive,
+                            mty.pmty_loc,
+                        )?
+                    }
+                    crate::parser::ast::WithConstraint::Pwith_type(..) => merge_type_constraints(
+                        tctx,
+                        env,
+                        arena,
+                        constrained_mty,
+                        std::slice::from_ref(constraint),
+                        mty.pmty_loc,
+                    )?,
+                    crate::parser::ast::WithConstraint::Pwith_typesubst(..) => {
+                        let mut merged = merge_type_constraints(
+                            tctx,
+                            env,
+                            arena,
+                            constrained_mty,
+                            std::slice::from_ref(constraint),
+                            mty.pmty_loc,
+                        )?;
+                        // A destructive substitution ends in `Subst.signature`
+                        // (typemod.ml:438-460), which renames the signature's
+                        // bound identifiers as it substitutes.
+                        crate::cmi::persistent_env::freshen_module_type_bound_idents(
+                            &mut merged,
+                            tctx.type_ctx,
+                        );
+                        merged
+                    }
+                };
+            }
             // OCaml compiler/ml/typemod.ml:726-739 translates `Pmty_with` by
             // merging constraints, then returning `Mtype.freshen (Mty_signature
             // final_sg)`. compiler/ml/mtype.ml:28 implements `freshen` as
