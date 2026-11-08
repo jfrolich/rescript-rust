@@ -232,11 +232,9 @@ impl<'a> TastIterator<'a> for Collector<'a> {
 }
 
 fn opened(opens: &[String]) -> impl Iterator<Item = UnitRead> + '_ {
-    opens.iter().map(|unit| UnitRead {
-        unit: unit.clone(),
-        segs: Vec::new(),
-        kind: Kind::Module,
-    })
+    opens
+        .iter()
+        .map(|unit| UnitRead::whole(crate::name::Name::new(unit)))
 }
 
 /// The reads of an implementation; `opens` are the units opened by the

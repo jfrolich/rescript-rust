@@ -173,10 +173,7 @@ impl UnitDigests {
 
     /// What the inlinable bodies of the items in `resolved` refer to (see
     /// `ModuleRegistry::lambda_reads`), with every module's JS metadata final.
-    pub fn lambda_reads(
-        &self,
-        resolved: &BTreeMap<String, std::collections::BTreeSet<String>>,
-    ) -> BTreeMap<String, std::collections::BTreeSet<String>> {
+    pub fn lambda_reads(&self, resolved: &item_deps::ReadKeys) -> item_deps::ReadKeys {
         self.registry.lambda_reads(resolved)
     }
 
@@ -1577,44 +1574,45 @@ fn written_interface(
     let own = digests.get(module_name)?;
     // What inlinable bodies refer to is added now, with dependencies' JS
     // metadata final (they may publish it after this module compiled).
-    let mut read_keys: BTreeMap<String, std::collections::BTreeSet<String>> =
-        match compiles.unit_reads.get(module_name) {
-            Some(pending) => {
-                let mut keys = pending.resolved.clone();
-                for (unit, unit_keys) in digests.lambda_reads(&pending.resolved) {
-                    keys.entry(unit).or_default().extend(unit_keys);
-                }
-                for unit in &pending.module_level {
-                    keys.entry(unit.clone())
-                        .or_default()
-                        .insert(item_deps::MODULE_LEVEL.to_string());
-                }
-                keys
+    let mut read_keys: item_deps::ReadKeys = match compiles.unit_reads.get(module_name) {
+        Some(pending) => {
+            let mut keys = pending.resolved.clone();
+            for (unit, unit_keys) in digests.lambda_reads(&pending.resolved) {
+                keys.entry(unit).or_default().extend(unit_keys);
             }
-            None => BTreeMap::new(),
-        };
+            for unit in &pending.module_level {
+                keys.entry(*unit)
+                    .or_default()
+                    .insert(item_deps::ItemKey::ModuleLevel);
+            }
+            keys
+        }
+        None => item_deps::ReadKeys::default(),
+    };
     // A unit the compile loaded without a recorded read is read whole.
     for unit in compiles.loaded_units.get(module_name)? {
-        read_keys.entry(unit.clone()).or_insert_with(|| {
-            [item_deps::WHOLE.to_string(), item_deps::MODULE_LEVEL.to_string()]
-                .into_iter()
-                .collect()
-        });
+        read_keys
+            .entry(rescript_compiler::name::Name::new(unit))
+            .or_insert_with(|| {
+                [item_deps::ItemKey::Whole, item_deps::ItemKey::ModuleLevel]
+                    .into_iter()
+                    .collect()
+            });
     }
+    // Recorded in unit order, with the keys in their stored form.
+    let mut read_keys: Vec<_> = read_keys.into_iter().collect();
+    read_keys.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
     let mut imports = Vec::new();
     let mut reads = UnitReads::new();
-    for (unit, mut keys) in read_keys {
-        if unit == module_name || !build_state.modules.contains_key(&unit) {
+    for (unit, keys) in read_keys {
+        if unit.as_str() == module_name || !build_state.modules.contains_key(unit.as_str()) {
             continue;
         }
-        // The digest of every item covers the others.
-        if keys.contains(item_deps::WHOLE) {
-            keys = [item_deps::WHOLE.to_string()].into_iter().collect();
-        }
+        let keys = item_deps::stored_keys(&keys);
         let unit_digests = digests.get(&unit)?;
         let read_digest = item_deps::read_digest(&unit_digests.1, keys.iter());
-        imports.push((unit.clone(), unit_digests.0));
-        reads.insert(unit, (read_digest, keys.into_iter().collect()));
+        imports.push((unit.to_string(), unit_digests.0));
+        reads.insert(unit.to_string(), (read_digest, keys));
     }
     Some(WrittenRecord {
         digest: own.0,

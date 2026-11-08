@@ -533,7 +533,7 @@ impl BuildCommandState {
         let mut all_reads = self.unit_reads.lock().unwrap();
         let entry = all_reads.entry(module_name.to_string()).or_default();
         for (unit, keys) in reads.resolved {
-            if unit != module_name {
+            if unit.as_str() != module_name {
                 entry.resolved.entry(unit).or_default().extend(keys);
             }
         }
@@ -744,8 +744,8 @@ impl std::ops::DerefMut for BuildCommandState {
 /// (`ModuleRegistry::lambda_reads`).
 #[derive(Debug, Default)]
 pub struct PendingReads {
-    pub resolved: std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+    pub resolved: rescript_compiler::cmi::item_deps::ReadKeys,
     /// Units read only at module level (the modules the generated code may
     /// require).
-    pub module_level: Vec<String>,
+    pub module_level: Vec<rescript_compiler::name::Name>,
 }
