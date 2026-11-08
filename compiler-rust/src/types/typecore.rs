@@ -1248,8 +1248,10 @@ pub struct TypeCheckContext<'a> {
     pub active_recursive_value_ids: Vec<Ident>,
     /// Mirrors OCaml's Experimental_features.LetUnwrap during type checking.
     pub experimental_let_unwrap: bool,
-    /// `~deprecated_context:FunctionCall` of typecore.ml:2496: set while
-    /// typing the function of an application and consumed by `Pexp_ident`.
+    /// OCaml's `?deprecated_context:FunctionCall` argument (typecore.ml:2594,
+    /// 2632): set right before typing the function of an application or the
+    /// tag of a tagged template, and taken by the next expression typed.
+    /// Braces pass it on to their inner expression (typecore.ml:2450-2452).
     pub(crate) deprecated_function_call: bool,
     /// Mirrors OCaml's Clflags.transparent_modules from `-no-alias-deps`.
     pub transparent_modules: bool,
@@ -7693,6 +7695,8 @@ fn type_expect_with_recarg_unscoped<'a>(
     let loc = expr.pexp_loc;
     let ctx = tctx.type_ctx;
     let exp_env_ref = ctx.store_typed_env(env);
+    // Applies to this expression only; see `deprecated_function_call`.
+    let deprecated_function_call = std::mem::take(&mut tctx.deprecated_function_call);
     let context = match &expr.pexp_desc {
         // Special errors for braced identifiers passed to records.
         ED::Pexp_braces(braces)
@@ -7715,6 +7719,7 @@ fn type_expect_with_recarg_unscoped<'a>(
             // typecore.ml: type the inner expression, then prepend the
             // braces node's attributes.
             let inner = tctx.arena.get_expr(braces.expr);
+            tctx.deprecated_function_call = deprecated_function_call;
             let exp = type_expect_with_recarg(tctx, env, inner, expected_ty, context, recarg)?;
             let mut attrs = expr.pexp_attributes.clone();
             attrs.extend(tctx.typed.exp_attributes(&exp).iter().cloned());
@@ -7763,7 +7768,7 @@ fn type_expect_with_recarg_unscoped<'a>(
             let used_name = tctx.arena.get_string(longident.last_idx());
             tctx.mark_value_used(env, used_name, tctx.resolve_loc(desc.val_loc));
             // typetexp.ml:117-123 via typecore.ml:2381-2388.
-            let deprecated_context = if std::mem::take(&mut tctx.deprecated_function_call) {
+            let deprecated_context = if deprecated_function_call {
                 crate::types::context::DeprecatedContext::FunctionCall
             } else {
                 crate::types::context::DeprecatedContext::Reference
@@ -8213,10 +8218,8 @@ fn type_expect_with_recarg_unscoped<'a>(
             ctx.begin_def();
             let stag = tctx.arena.get_expr(template.tag);
             let tag_var = ctx.new_var(None);
-            tctx.deprecated_function_call = matches!(&stag.pexp_desc, ED::Pexp_ident(_));
-            let tag = type_expect(tctx, env, stag, tag_var, None);
-            tctx.deprecated_function_call = false;
-            let tag = tag?;
+            tctx.deprecated_function_call = true;
+            let tag = type_expect(tctx, env, stag, tag_var, None)?;
             let param_ty = ctx.new_var(None);
             let output_ty = ctx.new_var(None);
             let tag_ty = ctx.new_constr(
@@ -9542,13 +9545,8 @@ fn type_application(
     //   begin_def (); ... type_application/translate_unified_ops ...; end_def ();
     ctx.begin_def();
     let funct_ty = ctx.new_var(None);
-    tctx.deprecated_function_call = matches!(
-        &funct.pexp_desc,
-        crate::parser::ast::ExpressionDesc::Pexp_ident(_)
-    );
-    let typed_funct = type_expect(tctx, env, funct, funct_ty, None);
-    tctx.deprecated_function_call = false;
-    let typed_funct = typed_funct?;
+    tctx.deprecated_function_call = true;
+    let typed_funct = type_expect(tctx, env, funct, funct_ty, None)?;
     let typed_funct_value_path = match &typed_funct.exp_desc {
         ExpressionDesc::Texp_ident(path, _, _) => Some(path.clone()),
         _ => None,
