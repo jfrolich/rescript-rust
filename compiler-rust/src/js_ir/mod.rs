@@ -1859,11 +1859,8 @@ fn push_negation(expr: Expression) -> Option<Expression> {
     } = expr;
     match desc {
         ExpressionDesc::JsNot(inner) => Some(*inner),
-        ExpressionDesc::Bool(value) => Some(Expression {
-            source_loc: None,
-            desc: ExpressionDesc::Bool(!value),
-            comment,
-        }),
+        // `bool (not b)`: a fresh literal.
+        ExpressionDesc::Bool(value) => Some(Expression::bool(!value)),
         ExpressionDesc::Bin(BinOp::EqEqEq, left, right) => Some(Expression {
             source_loc,
             desc: ExpressionDesc::Bin(BinOp::NotEqEq, left, right),
@@ -2540,298 +2537,27 @@ fn js_or_expression(left: Expression, right: Expression) -> Expression {
         .unwrap_or_else(|| raw_bin_expression(BinOp::Or, left, right))
 }
 
+/// js_exp_make.ml `simplify_and`.
 fn simplify_and_if_no_side_effects(left: &Expression, right: &Expression) -> Option<Expression> {
     if expression_has_no_side_effects(left) && expression_has_no_side_effects(right) {
-        simplify_and_expression_with_depth(left, right, 0, true)
+        simplify_and_(0, left, right)
     } else {
         None
     }
 }
 
+/// js_exp_make.ml `simplify_or`.
 fn simplify_or_if_no_side_effects(left: &Expression, right: &Expression) -> Option<Expression> {
     if expression_has_no_side_effects(left) && expression_has_no_side_effects(right) {
-        simplify_or_expression_with_depth(left, right, 0, true)
+        simplify_or_(0, left, right)
     } else {
         None
     }
 }
 
-/// `pure` is true when both operands are already known to have no side
-/// effects. Sub-expressions of pure `&&`/`||` operands, their negations and
-/// conjunctions of them are pure as well, so recursive calls on those pass it
-/// on instead of walking the operands again (for long `||` chains that walk
-/// made each step linear and whole-chain construction quadratic).
-fn simplify_and_expression_with_depth(
-    left: &Expression,
-    right: &Expression,
-    depth: usize,
-    pure: bool,
-) -> Option<Expression> {
-    if depth > JS_SIMPLIFY_MAX_DEPTH {
-        return None;
-    }
-
-    match (&left.desc, &right.desc) {
-        (ExpressionDesc::Bool(false), _) | (_, ExpressionDesc::Bool(false)) => {
-            return Some(Expression::bool(false));
-        }
-        (ExpressionDesc::Bool(true), _) => return Some(right.clone()),
-        (_, ExpressionDesc::Bool(true)) => return Some(left.clone()),
-        _ => {}
-    }
-
-    if pure || (expression_has_no_side_effects(left) && expression_has_no_side_effects(right)) {
-        match (&left.desc, &right.desc) {
-            (ExpressionDesc::Bin(BinOp::And, left_a, left_b), _) => {
-                let simplified_left_a =
-                    simplify_and_expression_with_depth(left_a, right, depth + 1, true);
-                let simplified_left_b =
-                    simplify_and_expression_with_depth(left_b, right, depth + 1, true);
-                return match (simplified_left_a, simplified_left_b) {
-                    (None, None) => {
-                        simplify_and_expression_with_depth(left_a, left_b, depth + 1, true)
-                            .and_then(|expr| simplify_and_force(&expr, right, depth + 1))
-                    }
-                    (Some(left_a), None) => simplify_and_force(&left_a, left_b, depth + 1),
-                    (None, Some(left_b)) => simplify_and_force(left_a, &left_b, depth + 1),
-                    (Some(left_a), Some(left_b)) => simplify_and_force(&left_a, &left_b, depth + 1),
-                };
-            }
-            (_, ExpressionDesc::Bin(BinOp::And, right_a, right_b)) => {
-                let combined =
-                    raw_bin_expression(BinOp::And, left.clone(), right_a.as_ref().clone());
-                return simplify_and_expression_with_depth(&combined, right_b, depth + 1, true);
-            }
-            (ExpressionDesc::Bin(BinOp::Or, left_a, left_b), _) => {
-                let simplified_left_a =
-                    simplify_and_expression_with_depth(left_a, right, depth + 1, true);
-                let simplified_left_b =
-                    simplify_and_expression_with_depth(left_b, right, depth + 1, true);
-                return match (simplified_left_a, simplified_left_b) {
-                    (Some(expr), None) if matches!(expr.desc, ExpressionDesc::Bool(false)) => Some(
-                        raw_bin_expression(BinOp::And, left_b.as_ref().clone(), right.clone()),
-                    ),
-                    (None, Some(expr)) if matches!(expr.desc, ExpressionDesc::Bool(false)) => Some(
-                        raw_bin_expression(BinOp::And, left_a.as_ref().clone(), right.clone()),
-                    ),
-                    (None, _) | (_, None) => {
-                        simplify_or_expression_with_depth(left_a, left_b, depth + 1, true)
-                            .and_then(|expr| simplify_and_force(&expr, right, depth + 1))
-                    }
-                    (Some(left_a), Some(left_b)) => simplify_or_force(&left_a, &left_b, depth + 1),
-                };
-            }
-            _ => {}
-        }
-    }
-
-    if ocaml_eq_expression(left, right) {
-        return Some(left.clone());
-    }
-
-    if (pure || expression_has_no_side_effects(left))
-        && disjunction_contains_expression(left, right)
-    {
-        return Some(right.clone());
-    }
-    if (pure || expression_has_no_side_effects(right))
-        && disjunction_contains_expression(right, left)
-    {
-        return Some(left.clone());
-    }
-
-    if let Some(expr) = simplify_typeof_and_literal_and(left, right) {
-        return Some(expr);
-    }
-    if let Some(expr) = simplify_typeof_and_literal_and(right, left) {
-        return Some(expr);
-    }
-
-    if let Some(expr) = simplify_array_is_array_and_literal_and(left, right) {
-        return Some(expr);
-    }
-    if let Some(expr) = simplify_array_is_array_and_literal_and(right, left) {
-        return Some(expr);
-    }
-
-    if let Some(expr) = simplify_same_var_literal_and(left, right) {
-        return Some(expr);
-    }
-
-    None
-}
-
-/// See `simplify_and_expression_with_depth` for `pure`.
-fn simplify_or_expression_with_depth(
-    left: &Expression,
-    right: &Expression,
-    depth: usize,
-    pure: bool,
-) -> Option<Expression> {
-    if depth > JS_SIMPLIFY_MAX_DEPTH {
-        return None;
-    }
-
-    match (&left.desc, &right.desc) {
-        (ExpressionDesc::Bool(true), _) | (_, ExpressionDesc::Bool(true)) => {
-            return Some(Expression::bool(true));
-        }
-        (ExpressionDesc::Bool(false), _) => return Some(right.clone()),
-        (_, ExpressionDesc::Bool(false)) => return Some(left.clone()),
-        _ => {}
-    }
-
-    if (pure || expression_has_no_side_effects(left))
-        && conjunction_contains_expression(left, right)
-    {
-        return Some(right.clone());
-    }
-    if (pure || expression_has_no_side_effects(right))
-        && conjunction_contains_expression(right, left)
-    {
-        return Some(left.clone());
-    }
-
-    let left_not = push_negation(left.clone())?;
-    let right_not = push_negation(right.clone())?;
-    // Negation keeps operands pure.
-    let simplified = simplify_and_expression_with_depth(&left_not, &right_not, depth + 1, pure)?;
-    push_negation(simplified)
-}
-
-fn simplify_and_force(left: &Expression, right: &Expression, depth: usize) -> Option<Expression> {
-    simplify_and_expression_with_depth(left, right, depth, false)
-        .or_else(|| Some(raw_bin_expression(BinOp::And, left.clone(), right.clone())))
-}
-
-fn simplify_or_force(left: &Expression, right: &Expression, depth: usize) -> Option<Expression> {
-    simplify_or_expression_with_depth(left, right, depth, false)
-        .or_else(|| Some(raw_bin_expression(BinOp::Or, left.clone(), right.clone())))
-}
-
-fn simplify_typeof_and_literal_and(
-    typeof_expr: &Expression,
-    other: &Expression,
-) -> Option<Expression> {
-    let (vident, type_name) = typeof_var_type_test(typeof_expr)?;
-
-    match &other.desc {
-        ExpressionDesc::Var(other_vident)
-            if type_name == "boolean" && same_vident(vident, other_vident) =>
-        {
-            return Some(Expression::bin(
-                BinOp::EqEqEq,
-                Expression::new(ExpressionDesc::Var(other_vident.clone())),
-                Expression::bool(true),
-            ));
-        }
-        ExpressionDesc::JsNot(inner)
-            if type_name == "boolean"
-                && matches!(&inner.desc, ExpressionDesc::Var(other_vident) if same_vident(vident, other_vident)) =>
-        {
-            let ExpressionDesc::Var(other_vident) = &inner.desc else {
-                unreachable!();
-            };
-            return Some(Expression::bin(
-                BinOp::EqEqEq,
-                Expression::new(ExpressionDesc::Var(other_vident.clone())),
-                Expression::bool(false),
-            ));
-        }
-        _ => {}
-    }
-
-    let (op, other_vident, literal) = strict_var_literal_comparison(other)?;
-    if !same_vident(vident, other_vident) {
-        return None;
-    }
-
-    if op == BinOp::EqEqEq {
-        if literal_matches_type_name(literal, type_name) {
-            return Some(other.clone());
-        }
-        if matches!(type_name, "boolean" | "string" | "number")
-            && is_scalar_nullish_literal(literal)
-        {
-            return Some(Expression::bool(false));
-        }
-        return None;
-    }
-
-    if type_name == "boolean" {
-        if let ExpressionDesc::Bool(value) = literal.desc {
-            // A boolean other than `b` is `!b` (js_exp_make.ml `simplify_and_`).
-            return Some(raw_bin_expression(
-                BinOp::EqEqEq,
-                Expression::new(ExpressionDesc::Var(other_vident.clone())),
-                Expression::bool(!value),
-            ));
-        }
-    }
-
-    if matches!(type_name, "string" | "number") && literal_matches_type_name(literal, type_name) {
-        return None;
-    }
-
-    if type_name == "object" && matches!(literal.desc, ExpressionDesc::Null) {
-        return None;
-    }
-
-    if matches!(type_name, "boolean" | "string" | "number" | "object")
-        && is_scalar_nullish_literal(literal)
-    {
-        return Some(typeof_expr.clone());
-    }
-
-    None
-}
-
-fn simplify_array_is_array_and_literal_and(
-    array_test: &Expression,
-    other: &Expression,
-) -> Option<Expression> {
-    let vident = array_is_array_var(array_test)?;
-    let (op, other_vident, literal) = strict_var_literal_comparison(other)?;
-    if !same_vident(vident, other_vident) || !is_scalar_nullish_literal(literal) {
-        return None;
-    }
-
-    match op {
-        BinOp::EqEqEq => Some(Expression::bool(false)),
-        BinOp::NotEqEq => Some(array_test.clone()),
-        _ => None,
-    }
-}
-
-fn simplify_same_var_literal_and(left: &Expression, right: &Expression) -> Option<Expression> {
-    let (left_op, left_vident, left_literal) = strict_var_literal_comparison(left)?;
-    let (right_op, right_vident, right_literal) = strict_var_literal_comparison(right)?;
-    if !same_vident(left_vident, right_vident) {
-        return None;
-    }
-
-    if left_op == right_op {
-        if ocaml_eq_expression(left_literal, right_literal) {
-            return Some(left.clone());
-        }
-        if matches!(left_op, BinOp::EqEqEq) {
-            return Some(Expression::bool(false));
-        }
-        return None;
-    }
-
-    if ocaml_eq_expression(left_literal, right_literal) {
-        return Some(Expression::bool(false));
-    }
-
-    if matches!(left_op, BinOp::EqEqEq) {
-        return Some(left.clone());
-    }
-
-    Some(right.clone())
-}
-
-fn typeof_var_type_test(expr: &Expression) -> Option<(&VIdent, &str)> {
+/// `Bin (EqEqEq, {expression_desc = Typeof {expression_desc = Var ia}},
+/// {expression_desc = Str name})`: the variable and the type name.
+fn typeof_test(expr: &Expression) -> Option<(&VIdent, &str)> {
     let ExpressionDesc::Bin(BinOp::EqEqEq, left, right) = &expr.desc else {
         return None;
     };
@@ -2847,62 +2573,22 @@ fn typeof_var_type_test(expr: &Expression) -> Option<(&VIdent, &str)> {
     Some((vident, txt.as_str()))
 }
 
-fn strict_var_literal_comparison(expr: &Expression) -> Option<(BinOp, &VIdent, &Expression)> {
+/// `Bin (op, {expression_desc = Var ib}, {expression_desc = v})` for `op` one
+/// of `===` and `!==`.
+fn var_comparison(expr: &Expression) -> Option<(BinOp, &VIdent, &ExpressionDesc)> {
     let ExpressionDesc::Bin(op @ (BinOp::EqEqEq | BinOp::NotEqEq), left, right) = &expr.desc else {
         return None;
     };
     let ExpressionDesc::Var(vident) = &left.desc else {
         return None;
     };
-    if !is_scalar_nullish_literal(right) {
-        return None;
-    }
-    Some((*op, vident, right))
+    Some((*op, vident, &right.desc))
 }
 
-fn is_array_is_array_callee(expr: &Expression) -> bool {
+/// `Bool _ | Null | Undefined _ | Number _ | Str _`.
+fn is_literal_desc(desc: &ExpressionDesc) -> bool {
     matches!(
-        &expr.desc,
-        ExpressionDesc::StaticIndex(target, field, _)
-            if field == "isArray"
-                && matches!(
-                    target.as_ref(),
-                    Expression {
-                        desc: ExpressionDesc::Var(VIdent::Id(array_ident)),
-                        ..
-                    } if array_ident.name() == "Array"
-                )
-    )
-}
-
-fn array_is_array_var(expr: &Expression) -> Option<&VIdent> {
-    let ExpressionDesc::Call(func, args, _) = &expr.desc else {
-        return None;
-    };
-    if !is_array_is_array_callee(func) {
-        return None;
-    }
-    let [arg] = args.as_slice() else {
-        return None;
-    };
-    let ExpressionDesc::Var(vident) = &arg.desc else {
-        return None;
-    };
-    Some(vident)
-}
-
-fn literal_matches_type_name(literal: &Expression, type_name: &str) -> bool {
-    matches!(
-        (&literal.desc, type_name),
-        (ExpressionDesc::Bool(_), "boolean")
-            | (ExpressionDesc::Str(_), "string")
-            | (ExpressionDesc::Number(_), "number")
-    )
-}
-
-fn is_scalar_nullish_literal(expr: &Expression) -> bool {
-    matches!(
-        expr.desc,
+        desc,
         ExpressionDesc::Bool(_)
             | ExpressionDesc::Null
             | ExpressionDesc::Undefined { .. }
@@ -2911,32 +2597,344 @@ fn is_scalar_nullish_literal(expr: &Expression) -> bool {
     )
 }
 
-fn disjunction_contains_expression(disjunction: &Expression, needle: &Expression) -> bool {
-    if ocaml_eq_expression(disjunction, needle) {
-        return true;
-    }
+/// `Call (({expression_desc = Static_index _} as fn), [{expression_desc = Var ia}], _)
+/// when Js_analyzer.is_array_function fn`: the variable.
+fn array_is_array_test(expr: &Expression) -> Option<&VIdent> {
+    let ExpressionDesc::Call(func, args, _) = &expr.desc else {
+        return None;
+    };
+    let [arg] = args.as_slice() else {
+        return None;
+    };
+    let ExpressionDesc::Var(vident) = &arg.desc else {
+        return None;
+    };
+    is_array_is_array_callee(func).then_some(vident)
+}
 
-    match &disjunction.desc {
-        ExpressionDesc::Bin(BinOp::Or, left, right) => {
-            disjunction_contains_expression(left, needle)
-                || disjunction_contains_expression(right, needle)
-        }
-        _ => false,
+/// The two alternatives `(test, other)` and `(other, test)` of a symmetric
+/// or-pattern, which can't both match: the operand for which `is_test` holds,
+/// the other operand, and whether the test is the first operand.
+fn either_order<'e>(
+    e1: &'e Expression,
+    e2: &'e Expression,
+    is_test: impl Fn(&Expression) -> bool,
+) -> Option<(&'e Expression, &'e Expression, bool)> {
+    if is_test(e1) {
+        Some((e1, e2, true))
+    } else if is_test(e2) {
+        Some((e2, e1, false))
+    } else {
+        None
     }
 }
 
-fn conjunction_contains_expression(conjunction: &Expression, needle: &Expression) -> bool {
-    if ocaml_eq_expression(conjunction, needle) {
-        return true;
+fn is_typeof_test_of(expr: &Expression, names: &[&str]) -> bool {
+    typeof_test(expr).is_some_and(|(_, name)| names.contains(&name))
+}
+
+/// The variable `x` and the type name of `typeof x === name` when `other`
+/// tests the same variable as `test`.
+fn same_var_typeof<'e>(test: &'e Expression, other: &VIdent) -> Option<&'e str> {
+    let (ia, name) = typeof_test(test)?;
+    same_vident(ia, other).then_some(name)
+}
+
+/// js_exp_make.ml `simplify_and_`. The rules are tried in the order of the
+/// OCaml match; a rule that matches decides the result, also when it is
+/// `None`.
+fn simplify_and_(n: usize, e1: &Expression, e2: &Expression) -> Option<Expression> {
+    use ExpressionDesc as D;
+    if n > JS_SIMPLIFY_MAX_DEPTH {
+        return None;
+    }
+    match (&e1.desc, &e2.desc) {
+        (D::Bool(false), _) | (_, D::Bool(false)) => return Some(Expression::bool(false)),
+        (D::Bool(true), _) => return Some(e2.clone()),
+        (_, D::Bool(true)) => return Some(e1.clone()),
+        (D::Bin(BinOp::And, a, b), _) => {
+            let ao = simplify_and_(n + 1, a, e2);
+            let bo = simplify_and_(n + 1, b, e2);
+            return match (ao, bo) {
+                (None, None) => {
+                    simplify_and_(n + 1, a, b).and_then(|e| simplify_and_force(n + 1, &e, e2))
+                }
+                (Some(a_), None) => simplify_and_force(n + 1, &a_, b),
+                (None, Some(b_)) => simplify_and_force(n + 1, a, &b_),
+                (Some(a_), Some(b_)) => simplify_and_force(n + 1, &a_, &b_),
+            };
+        }
+        (_, D::Bin(BinOp::And, a, b)) => {
+            let e1_a = raw_bin_expression(BinOp::And, e1.clone(), a.as_ref().clone());
+            return simplify_and_(n + 1, &e1_a, b);
+        }
+        (D::Bin(BinOp::Or, a, b), _) => {
+            let ao = simplify_and_(n + 1, a, e2);
+            let bo = simplify_and_(n + 1, b, e2);
+            return match (ao, bo) {
+                (
+                    Some(Expression {
+                        desc: D::Bool(false),
+                        ..
+                    }),
+                    None,
+                ) => Some(raw_bin_expression(
+                    BinOp::And,
+                    b.as_ref().clone(),
+                    e2.clone(),
+                )),
+                (
+                    None,
+                    Some(Expression {
+                        desc: D::Bool(false),
+                        ..
+                    }),
+                ) => Some(raw_bin_expression(
+                    BinOp::And,
+                    a.as_ref().clone(),
+                    e2.clone(),
+                )),
+                (None, _) | (_, None) => {
+                    simplify_or_(n + 1, a, b).and_then(|e| simplify_and_force(n + 1, &e, e2))
+                }
+                (Some(a_), Some(b_)) => simplify_or_force(n + 1, &a_, &b_),
+            };
+        }
+        _ => {}
     }
 
-    match &conjunction.desc {
-        ExpressionDesc::Bin(BinOp::And, left, right) => {
-            conjunction_contains_expression(left, needle)
-                || conjunction_contains_expression(right, needle)
+    // `typeof x === "boolean" | "string" | "number"` with `x === <literal of
+    // that type>`: the comparison.
+    for (type_name, literal_of_type) in [
+        (
+            "boolean",
+            (|d: &D| matches!(d, D::Bool(_))) as fn(&D) -> bool,
+        ),
+        ("string", |d: &D| matches!(d, D::Str(_))),
+        ("number", |d: &D| matches!(d, D::Number(_))),
+    ] {
+        if let Some((test, cmp, _)) = either_order(e1, e2, |e| is_typeof_test_of(e, &[type_name]))
+            && let Some((BinOp::EqEqEq, ib, v)) = var_comparison(cmp)
+            && literal_of_type(v)
+        {
+            if same_var_typeof(test, ib).is_some() {
+                return Some(Expression::new(cmp.desc.clone()));
+            }
         }
-        _ => false,
     }
+
+    // `typeof x === "boolean" | "string" | "number"` with `x === <literal>`
+    // of another type: false.
+    if let Some((test, cmp, _)) = either_order(e1, e2, |e| {
+        is_typeof_test_of(e, &["boolean", "string", "number"])
+    }) && let Some((BinOp::EqEqEq, ib, v)) = var_comparison(cmp)
+        && is_literal_desc(v)
+        && same_var_typeof(test, ib).is_some()
+    {
+        return Some(Expression::bool(false));
+    }
+
+    // `Array.isArray(x)` with `x === <literal>`: false.
+    if let Some((test, cmp, _)) = either_order(e1, e2, |e| array_is_array_test(e).is_some())
+        && let Some((BinOp::EqEqEq, ib, v)) = var_comparison(cmp)
+        && is_literal_desc(v)
+        && array_is_array_test(test).is_some_and(|ia| same_vident(ia, ib))
+    {
+        return Some(Expression::bool(false));
+    }
+
+    // `typeof x === "boolean"` with `x`: `x === true`.
+    if let Some((test, other, _)) = either_order(e1, e2, |e| is_typeof_test_of(e, &["boolean"]))
+        && let D::Var(ib) = &other.desc
+        && same_var_typeof(test, ib).is_some()
+    {
+        return Some(raw_bin_expression(
+            BinOp::EqEqEq,
+            Expression::new(D::Var(ib.clone())),
+            Expression::bool(true),
+        ));
+    }
+
+    // `typeof x === "boolean"` with `!x`: `x === false`.
+    if let Some((test, other, _)) = either_order(e1, e2, |e| is_typeof_test_of(e, &["boolean"]))
+        && let D::JsNot(inner) = &other.desc
+        && let D::Var(ib) = &inner.desc
+        && same_var_typeof(test, ib).is_some()
+    {
+        return Some(raw_bin_expression(
+            BinOp::EqEqEq,
+            Expression::new(D::Var(ib.clone())),
+            Expression::bool(false),
+        ));
+    }
+
+    // `typeof x === "boolean"` with `x !== b`: a boolean other than `b` is
+    // `!b`.
+    if let Some((test, cmp, _)) = either_order(e1, e2, |e| is_typeof_test_of(e, &["boolean"]))
+        && let Some((BinOp::NotEqEq, ib, D::Bool(b))) = var_comparison(cmp)
+        && same_var_typeof(test, ib).is_some()
+    {
+        return Some(raw_bin_expression(
+            BinOp::EqEqEq,
+            Expression::new(D::Var(ib.clone())),
+            Expression::bool(!*b),
+        ));
+    }
+
+    // `typeof x === "string"` with `x !== "s"`, `typeof x === "number"` with
+    // `x !== n` and `typeof x === "object"` with `x !== null`: unchanged.
+    for (type_name, literal_of_type) in [
+        ("string", (|d: &D| matches!(d, D::Str(_))) as fn(&D) -> bool),
+        ("number", |d: &D| matches!(d, D::Number(_))),
+        ("object", |d: &D| matches!(d, D::Null)),
+    ] {
+        if let Some((test, cmp, _)) = either_order(e1, e2, |e| is_typeof_test_of(e, &[type_name]))
+            && let Some((BinOp::NotEqEq, ib, v)) = var_comparison(cmp)
+            && literal_of_type(v)
+            && same_var_typeof(test, ib).is_some()
+        {
+            return None;
+        }
+    }
+
+    // `typeof x === "boolean" | "string" | "number" | "object"` with
+    // `x !== <literal>`: the typeof test. With the typeof test second, only
+    // the literals `Bool _ | Null | Undefined _` take this rule.
+    let typeof_any = ["boolean", "string", "number", "object"];
+    if let Some((test, cmp, test_first)) =
+        either_order(e1, e2, |e| is_typeof_test_of(e, &typeof_any))
+        && let Some((BinOp::NotEqEq, ib, v)) = var_comparison(cmp)
+        && if test_first {
+            is_literal_desc(v)
+        } else {
+            matches!(v, D::Bool(_) | D::Null | D::Undefined { .. })
+        }
+        && same_var_typeof(test, ib).is_some()
+    {
+        return Some(Expression::new(test.desc.clone()));
+    }
+
+    // `Array.isArray(x)` with `x !== <literal>`: the `Array.isArray` test.
+    if let Some((test, cmp, _)) = either_order(e1, e2, |e| array_is_array_test(e).is_some())
+        && let Some((BinOp::NotEqEq, ib, v)) = var_comparison(cmp)
+        && is_literal_desc(v)
+        && array_is_array_test(test).is_some_and(|ia| same_vident(ia, ib))
+    {
+        return Some(Expression::new(test.desc.clone()));
+    }
+
+    if ocaml_eq_expression(e1, e2) {
+        return Some(e1.clone());
+    }
+
+    // `x === c1 && x === c2`, `x === c1 && x !== c2` and `x !== c1 && x === c2`
+    // decide by the JavaScript values of the literals.
+    if let (Some((op1, ia, v1)), Some((op2, ib, v2))) = (var_comparison(e1), var_comparison(e2))
+        && is_literal_desc(v1)
+        && is_literal_desc(v2)
+        && same_vident(ia, ib)
+    {
+        if op1 == BinOp::EqEqEq && op2 == BinOp::EqEqEq {
+            return match js_eq_literal(v1, v2) {
+                Some(true) => Some(e1.clone()),
+                Some(false) => Some(Expression::bool(false)),
+                None => None,
+            };
+        }
+        if op1 != op2 {
+            return match js_eq_literal(v1, v2) {
+                Some(true) => Some(Expression::bool(false)),
+                Some(false) => Some(if op1 == BinOp::EqEqEq {
+                    e1.clone()
+                } else {
+                    e2.clone()
+                }),
+                None => None,
+            };
+        }
+    }
+
+    None
+}
+
+/// js_exp_make.ml `simplify_and_force`.
+fn simplify_and_force(n: usize, e1: &Expression, e2: &Expression) -> Option<Expression> {
+    simplify_and_(n, e1, e2)
+        .or_else(|| Some(raw_bin_expression(BinOp::And, e1.clone(), e2.clone())))
+}
+
+/// js_exp_make.ml `simplify_or_`: `e1 || e2` is `!(!e1 && !e2)`.
+fn simplify_or_(n: usize, e1: &Expression, e2: &Expression) -> Option<Expression> {
+    use ExpressionDesc as D;
+    match (&e1.desc, &e2.desc) {
+        (D::Bool(true), _) | (_, D::Bool(true)) => Some(Expression::bool(true)),
+        (D::Bool(false), _) => Some(e2.clone()),
+        (_, D::Bool(false)) => Some(e1.clone()),
+        _ => match (push_negation(e1.clone()), push_negation(e2.clone())) {
+            (Some(e1_), Some(e2_)) => simplify_and_(n + 1, &e1_, &e2_).and_then(push_negation),
+            _ => None,
+        },
+    }
+}
+
+/// js_exp_make.ml `simplify_or_force`.
+fn simplify_or_force(n: usize, e1: &Expression, e2: &Expression) -> Option<Expression> {
+    simplify_or_(n, e1, e2).or_else(|| Some(raw_bin_expression(BinOp::Or, e1.clone(), e2.clone())))
+}
+
+/// js_analyzer.ml `number_value`: the value of a number literal as
+/// JavaScript sees it, so that `1` and `1.0` are the same number; `None` for
+/// a bigint, which is never `===` to a number.
+fn js_number_value(n: &Number) -> Option<f64> {
+    match n {
+        Number::Int { i, .. } => Some(f64::from(*i)),
+        Number::Float(op::FloatLit { f }) => crate::ocaml_float::float_of_string(f),
+        Number::BigInt(_) => None,
+    }
+}
+
+/// js_analyzer.ml `eq_literal`: whether two literals are the same value under
+/// JavaScript `===`; `None` when either is not a literal.
+pub(crate) fn js_eq_literal(x: &ExpressionDesc, y: &ExpressionDesc) -> Option<bool> {
+    use ExpressionDesc as D;
+    match (x, y) {
+        (D::Number(Number::BigInt(b0)), D::Number(Number::BigInt(b1))) => {
+            Some(b0.positive == b1.positive && b0.value == b1.value)
+        }
+        (D::Number(Number::BigInt(_)), D::Number(_))
+        | (D::Number(_), D::Number(Number::BigInt(_))) => Some(false),
+        (D::Number(n0), D::Number(n1)) => match (js_number_value(n0), js_number_value(n1)) {
+            // f64 `==` is IEEE equality like `===`: NaN differs from itself,
+            // and `0.` equals `-0.`.
+            (Some(f0), Some(f1)) => Some(f0 == f1),
+            _ => None,
+        },
+        (D::Bool(b0), D::Bool(b1)) => Some(b0 == b1),
+        (D::Str(s0), D::Str(s1)) => Some(s0 == s1),
+        (D::Null, D::Null) | (D::Undefined { .. }, D::Undefined { .. }) => Some(true),
+        _ if is_literal_desc(x) && is_literal_desc(y) => Some(false),
+        _ => None,
+    }
+}
+
+/// js_analyzer.ml `is_array_function`: `Array.isArray` on the JavaScript
+/// global `Array` (`Ext_ident.is_js`; Rust creates JS globals as persistent
+/// idents).
+fn is_array_is_array_callee(expr: &Expression) -> bool {
+    matches!(
+        &expr.desc,
+        ExpressionDesc::StaticIndex(target, field, None)
+            if field == "isArray"
+                && matches!(
+                    target.as_ref(),
+                    Expression {
+                        desc: ExpressionDesc::Var(VIdent::Id(array_ident)),
+                        ..
+                    } if array_ident.name() == "Array"
+                        && (array_ident.is_js()
+                            || (array_ident.is_global() && array_ident.stamp() == 0))
+                )
+    )
 }
 
 pub(crate) fn ocaml_eq_block(left: &Block, right: &Block) -> bool {
@@ -3390,6 +3388,13 @@ fn dispose_expression_nonrecursive(expression: Expression, stack: &mut Vec<Dispo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn conjunction_contains_expression(conjunction: &Expression, needle: &Expression) -> bool {
+        ocaml_eq_expression(conjunction, needle)
+            || matches!(&conjunction.desc, ExpressionDesc::Bin(BinOp::And, left, right)
+                if conjunction_contains_expression(left, needle)
+                    || conjunction_contains_expression(right, needle))
+    }
     use tempfile::tempdir;
 
     #[test]
@@ -5320,6 +5325,152 @@ mod tests {
     }
 
     #[test]
+    fn test_js_eq_literal_compares_javascript_values_like_ocaml() {
+        use ExpressionDesc as D;
+        let float = |f: &str| D::Number(Number::float(f));
+        let int = |i: i32| D::Number(Number::int(i));
+        let bigint = |positive: bool, v: &str| D::Number(Number::bigint(positive, v));
+        // js_analyzer.ml `eq_literal`.
+        assert_eq!(js_eq_literal(&int(1), &float("1.0")), Some(true));
+        assert_eq!(js_eq_literal(&float("2.5"), &float("2.5")), Some(true));
+        assert_eq!(js_eq_literal(&float("2.5"), &float("25e-1")), Some(true));
+        assert_eq!(js_eq_literal(&float("1_000."), &int(1000)), Some(true));
+        assert_eq!(js_eq_literal(&float("0x1p1"), &int(2)), Some(true));
+        assert_eq!(js_eq_literal(&float("0."), &float("-0.")), Some(true));
+        assert_eq!(js_eq_literal(&float("nan"), &float("nan")), Some(false));
+        assert_eq!(js_eq_literal(&float("2.5"), &float("3.5")), Some(false));
+        assert_eq!(js_eq_literal(&float("abc"), &int(1)), None);
+        assert_eq!(
+            js_eq_literal(&bigint(true, "1"), &bigint(true, "1")),
+            Some(true)
+        );
+        assert_eq!(
+            js_eq_literal(&bigint(true, "1"), &bigint(false, "1")),
+            Some(false)
+        );
+        assert_eq!(js_eq_literal(&bigint(true, "1"), &int(1)), Some(false));
+        assert_eq!(js_eq_literal(&float("1."), &bigint(true, "1")), Some(false));
+        assert_eq!(
+            js_eq_literal(&D::Str("a".into()), &D::Str("a".into())),
+            Some(true)
+        );
+        assert_eq!(js_eq_literal(&D::Str("1".into()), &int(1)), Some(false));
+        assert_eq!(js_eq_literal(&D::Bool(true), &D::Bool(false)), Some(false));
+        assert_eq!(
+            js_eq_literal(
+                &D::Undefined { is_unit: true },
+                &D::Undefined { is_unit: false }
+            ),
+            Some(true)
+        );
+        assert_eq!(
+            js_eq_literal(&D::Null, &D::Undefined { is_unit: false }),
+            Some(false)
+        );
+        assert_eq!(
+            js_eq_literal(&D::Var(VIdent::Id(Ident::create_local("x"))), &D::Null),
+            None
+        );
+    }
+
+    #[test]
+    fn test_js_and_decides_literal_conjunctions_by_value_like_ocaml() {
+        let x = Ident::create_local("x");
+        let cmp = |op: BinOp, n: Number| {
+            raw_bin_expression(op, Expression::var(x), Expression::number(n))
+        };
+        let and = |a: Expression, b: Expression| js_and_expression(a, b);
+        let is_float_cmp = |e: &Expression, op: BinOp| {
+            matches!(&e.desc, ExpressionDesc::Bin(o, _, r)
+                if *o == op && matches!(&r.desc, ExpressionDesc::Number(Number::Float(f)) if f.f == "2.5"))
+        };
+        let eq = cmp(BinOp::EqEqEq, Number::float("2.5"));
+        let ne = cmp(BinOp::NotEqEq, Number::float("2.5"));
+        assert!(is_float_cmp(&and(eq.clone(), eq.clone()), BinOp::EqEqEq));
+        assert!(matches!(
+            and(ne.clone(), eq.clone()).desc,
+            ExpressionDesc::Bool(false)
+        ));
+        assert!(matches!(
+            and(eq.clone(), ne.clone()).desc,
+            ExpressionDesc::Bool(false)
+        ));
+        // `1 === 1.0`: `x === 1 && x !== 1.0` is false.
+        assert!(matches!(
+            and(
+                cmp(BinOp::EqEqEq, Number::int(1)),
+                cmp(BinOp::NotEqEq, Number::float("1.0"))
+            )
+            .desc,
+            ExpressionDesc::Bool(false)
+        ));
+        // Different values: the `===` side.
+        assert!(is_float_cmp(
+            &and(cmp(BinOp::NotEqEq, Number::int(3)), eq.clone()),
+            BinOp::EqEqEq
+        ));
+        // A float literal `float_of_string` can't read is left alone.
+        assert!(matches!(
+            and(
+                cmp(BinOp::EqEqEq, Number::float("nope")),
+                cmp(BinOp::EqEqEq, Number::int(1))
+            )
+            .desc,
+            ExpressionDesc::Bin(BinOp::And, _, _)
+        ));
+    }
+
+    #[test]
+    fn test_js_and_keeps_both_boolean_complement_checks_like_ocaml() {
+        let x = Ident::create_local("x");
+        let cmp =
+            |op: BinOp, b: bool| raw_bin_expression(op, Expression::var(x), Expression::bool(b));
+        assert!(matches!(
+            js_and_expression(cmp(BinOp::NotEqEq, true), cmp(BinOp::NotEqEq, false)).desc,
+            ExpressionDesc::Bin(BinOp::And, _, _)
+        ));
+        assert!(matches!(
+            js_or_expression(cmp(BinOp::EqEqEq, true), cmp(BinOp::EqEqEq, false)).desc,
+            ExpressionDesc::Bin(BinOp::Or, _, _)
+        ));
+        // `x === true && x === false` is still false, and `x !== true &&
+        // x === false` the `===` side.
+        assert!(matches!(
+            js_and_expression(cmp(BinOp::EqEqEq, true), cmp(BinOp::EqEqEq, false)).desc,
+            ExpressionDesc::Bool(false)
+        ));
+        assert!(matches!(
+            js_and_expression(cmp(BinOp::NotEqEq, true), cmp(BinOp::EqEqEq, false)).desc,
+            ExpressionDesc::Bin(BinOp::EqEqEq, _, r) if matches!(r.desc, ExpressionDesc::Bool(false))
+        ));
+    }
+
+    #[test]
+    fn test_js_and_typeof_inequality_rule_is_asymmetric_like_ocaml() {
+        let x = Ident::create_local("x");
+        let typeof_boolean = raw_bin_expression(
+            BinOp::EqEqEq,
+            Expression::new(ExpressionDesc::Typeof(Box::new(Expression::var(x)))),
+            Expression::string("boolean"),
+        );
+        let ne_number = raw_bin_expression(
+            BinOp::NotEqEq,
+            Expression::var(x),
+            Expression::number(Number::int(5)),
+        );
+        // With the typeof test first, any literal takes the rule.
+        assert!(matches!(
+            js_and_expression(typeof_boolean.clone(), ne_number.clone()).desc,
+            ExpressionDesc::Bin(BinOp::EqEqEq, l, _) if matches!(l.desc, ExpressionDesc::Typeof(_))
+        ));
+        // With the typeof test second, only `Bool _ | Null | Undefined _` do.
+        assert!(matches!(
+            js_and_expression(ne_number, typeof_boolean).desc,
+            ExpressionDesc::Bin(BinOp::And, _, _)
+        ));
+    }
+
+    #[test]
     fn test_js_and_simplifies_or_literal_membership_against_same_literal_like_ocaml() {
         let key = Ident::create_local("key");
         let space = Expression::bin(
@@ -5355,7 +5506,10 @@ mod tests {
     }
 
     #[test]
-    fn test_js_or_absorbs_large_conjunction_membership_against_same_literal_like_ocaml() {
+    fn test_js_or_keeps_conjunction_containing_the_other_operand_like_ocaml() {
+        // js_exp_make.ml `simplify_or_` negates both sides, and
+        // `simplify_and_` has no rule for `x !== "space" && (... || x !==
+        // "space")`, so `or_` builds the disjunction unchanged.
         let key = Ident::create_local("key");
         let literal = |txt: &str| {
             Expression::bin(BinOp::EqEqEq, Expression::var(key), Expression::string(txt))
@@ -5376,21 +5530,10 @@ mod tests {
         );
 
         assert!(matches!(
-            simplified.desc,
-            ExpressionDesc::Bin(BinOp::EqEqEq, left, right)
-                if matches!(
-                    left.as_ref(),
-                    Expression {
-                        desc: ExpressionDesc::Var(VIdent::Id(id)),
-                        ..
-                    } if id.same(&key)
-                ) && matches!(
-                    right.as_ref(),
-                    Expression {
-                        desc: ExpressionDesc::Str(txt),
-                        ..
-                    } if txt == "space"
-                )
+            &simplified.desc,
+            ExpressionDesc::Bin(BinOp::Or, left, right)
+                if matches!(left.desc, ExpressionDesc::Bin(BinOp::EqEqEq, _, _))
+                    && matches!(right.desc, ExpressionDesc::Bin(BinOp::And, _, _))
         ));
     }
 
