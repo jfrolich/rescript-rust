@@ -745,3 +745,77 @@ pub fn get_extra(ctx: Ctx<'_>, file: &mut File, annots: Annots<'_>) -> Extra {
     }
     iterator.extra
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::context::IdGenerator;
+    use crate::parser::{Parser, module};
+    use crate::types::{TypeCheckContext, TypeContext, initial_env};
+
+    /// The field references `get_extra` records for `source`, as
+    /// `(field, one-based line)` in insertion order.
+    fn field_references(source: &str) -> Vec<(String, i32)> {
+        crate::ident::Ident::set_current_time(999);
+        let id_gen = IdGenerator::with_start_stamp(999);
+        let _ = id_gen.next_stamp();
+        let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
+        let mut parser = Parser::new("Test.res", source);
+        let structure = module::parse_structure(&mut parser);
+        assert!(!parser.has_errors(), "parse failed");
+        crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
+        let arena = parser.arena();
+        let mut tctx = TypeCheckContext::new(&type_ctx, arena);
+        let env = initial_env(&type_ctx);
+        let (typed, _) = crate::types::typemod::type_structure(&mut tctx, &env, arena, &structure)
+            .expect("typecheck");
+        let raised = crate::analysis::process_attributes::Raised::default();
+        let ctx = Ctx {
+            arena,
+            types: &type_ctx,
+            raised: &raised,
+        };
+        let annots = crate::analysis::process_cmt::Annots::Implementation(&typed.str_items);
+        let mut file = crate::analysis::process_cmt::file_for_annots(
+            ctx,
+            0,
+            "Test",
+            "Test.res".to_string(),
+            annots,
+        );
+        let extra = get_extra(ctx, &mut file, annots);
+        extra
+            .loc_items
+            .iter()
+            .filter_map(|item| match &item.loc_type {
+                LocType::Typed(name, _, LocKind::LocalReference(_, Tip::Field(_))) => {
+                    Some((name.clone(), item.loc.start.line))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn record_literals_reference_only_their_written_fields() {
+        // process_extra.ml:434-438: `Texp_record` adds a reference for each
+        // written field. An omitted optional field and a field taken from the
+        // spread are not written, so they get none.
+        let refs = field_references(
+            r#"type r = {a: int, b?: int, c?: string}
+let base: r = {a: 1}
+let x: r = {a: 2, b: 3}
+let y = {...base, c: "s"}
+"#,
+        );
+        assert_eq!(
+            refs,
+            [
+                ("a".to_string(), 2),
+                ("a".to_string(), 3),
+                ("b".to_string(), 3),
+                ("c".to_string(), 4),
+            ]
+        );
+    }
+}
