@@ -28,11 +28,10 @@ use crate::js_ir::{
 };
 use crate::lambda::lam_compile::LambdaCompiler;
 use crate::location::Location;
-use crate::parse_arena::{ExprIdx, LocIdx, ModExprIdx, ParseArena, StrIdx};
+use crate::parse_arena::{ExprIdx, LocIdx, ParseArena, StrIdx};
 use crate::parser::ast::{
-    ArgLabel as ParserArgLabel, Attribute, Attributes, Constant, Expression, ExpressionDesc,
-    ModuleExpr, ModuleExprDesc, PatternDesc, Payload, Signature, SignatureItemDesc, Structure,
-    StructureItemDesc,
+    ArgLabel as ParserArgLabel, Attributes, Constant, Expression, ExpressionDesc, ModuleExpr,
+    ModuleExprDesc, Payload, Signature, SignatureItemDesc, Structure, StructureItemDesc,
 };
 use crate::parser::{Longident, Parser, code_frame, jsx_ppx, module};
 use crate::types::printtyp::{TAG_ERROR as ERROR, TAG_INFO as INFO, TAG_RESET as RESET};
@@ -51,10 +50,6 @@ use crate::types::{
 // then eagerly creates Ident.create "+" consuming stamp 1000.
 // We match this by starting at 999 and consuming one stamp.
 const OCAML_NON_PREDEF_STAMP_START: i32 = 999;
-const LET_UNWRAP_FEATURE_NOT_ENABLED_MSG: &str = "Experimental feature not enabled: LetUnwrap. Enable it by setting \"LetUnwrap\" to true under \"experimental-features\" in rescript.json.";
-const LET_UNWRAP_TOPLEVEL_MSG: &str = "`let?` is not allowed for top-level bindings.";
-const LET_UNWRAP_UNSUPPORTED_TYPE_MSG: &str =
-    "`let?` is only supported in let bindings targeting the `result` or `option` type.";
 static SKIP_CLI_CLEANUP: AtomicBool = AtomicBool::new(false);
 static EXTERNAL_PPX_TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
 use crate::binary_ast::writer::{AST_IMPL_MAGIC_NUMBER, AST_INTF_MAGIC_NUMBER};
@@ -1415,6 +1410,7 @@ pub(crate) fn jsx_preserve_for_structure(
 fn preprocess_signature_for_typecheck_with_source(
     signature: Signature,
     options: &CompilerOptions,
+    let_unwrap: bool,
     arena: &mut crate::parse_arena::ParseArena,
     source: &str,
     filename: &str,
@@ -1436,7 +1432,8 @@ fn preprocess_signature_for_typecheck_with_source(
         Ok(signature)
     } else {
         arena.set_builtin_spice(options.builtin_spice());
-        let (rewritten, warnings) = ppx::rewrite_signature_with_warnings(&signature, arena);
+        let (rewritten, warnings) =
+            ppx::rewrite_signature_with_warnings(&signature, arena, let_unwrap);
         builtin_ppx_warnings.extend(warnings);
         rewritten.map_err(|e| ppx_error_to_anyhow(e, arena, source, filename))
     }
@@ -1733,520 +1730,6 @@ fn directive_payload_error_to_anyhow(
         2,
     )
     .into()
-}
-
-fn let_unwrap_feature_error_to_anyhow(
-    loc: LocIdx,
-    arena: &ParseArena,
-    source: &str,
-    filename: &str,
-) -> anyhow::Error {
-    UserDiagnostic::new(
-        format_compiler_error_report(
-            arena,
-            source,
-            filename,
-            loc,
-            LET_UNWRAP_FEATURE_NOT_ENABLED_MSG,
-        ),
-        2,
-    )
-    .into()
-}
-
-fn let_unwrap_position_error_to_anyhow(
-    loc: LocIdx,
-    arena: &ParseArena,
-    source: &str,
-    filename: &str,
-    message: &str,
-) -> anyhow::Error {
-    UserDiagnostic::new(
-        format_compiler_error_report(arena, source, filename, loc, message),
-        2,
-    )
-    .into()
-}
-
-fn attr_is_let_unwrap(attr: &Attribute, arena: &ParseArena) -> bool {
-    arena.get_string(attr.0.txt) == "let.unwrap"
-}
-
-fn attrs_have_let_unwrap(attrs: &crate::parser::ast::Attributes, arena: &ParseArena) -> bool {
-    attrs.iter().any(|attr| attr_is_let_unwrap(attr, arena))
-}
-
-fn reject_disabled_let_unwrap_in_structure(
-    enabled: bool,
-    structure: &Structure,
-    arena: &ParseArena,
-    source: &str,
-    filename: &str,
-) -> Result<()> {
-    if !enabled {
-        if let Some(loc) = disabled_let_unwrap_loc_in_structure(structure, arena) {
-            return Err(let_unwrap_feature_error_to_anyhow(
-                loc, arena, source, filename,
-            ));
-        }
-    }
-    Ok(())
-}
-
-#[derive(Clone, Copy)]
-enum LetUnwrapPositionError {
-    Toplevel(LocIdx),
-    UnsupportedType(LocIdx),
-}
-
-fn reject_enabled_invalid_let_unwrap_in_structure(
-    enabled: bool,
-    structure: &Structure,
-    arena: &ParseArena,
-    source: &str,
-    filename: &str,
-) -> Result<()> {
-    if !enabled {
-        return Ok(());
-    }
-    if let Some(error) = invalid_enabled_let_unwrap_in_structure(structure, arena) {
-        let (loc, message) = match error {
-            LetUnwrapPositionError::Toplevel(loc) => (loc, LET_UNWRAP_TOPLEVEL_MSG),
-            LetUnwrapPositionError::UnsupportedType(loc) => (loc, LET_UNWRAP_UNSUPPORTED_TYPE_MSG),
-        };
-        return Err(let_unwrap_position_error_to_anyhow(
-            loc, arena, source, filename, message,
-        ));
-    }
-    Ok(())
-}
-
-fn let_unwrap_binding_loc(
-    bindings: &[crate::parser::ast::ValueBinding],
-    arena: &ParseArena,
-) -> Option<LocIdx> {
-    bindings
-        .iter()
-        .find(|binding| attrs_have_let_unwrap(&binding.pvb_attributes, arena))
-        .map(|binding| arena.get_pat(binding.pvb_pat).ppat_loc)
-}
-
-fn is_supported_let_unwrap_pattern(pat: &crate::parser::ast::Pattern, arena: &ParseArena) -> bool {
-    let PatternDesc::Ppat_construct(ctor_lid, payload) = &pat.ppat_desc else {
-        return false;
-    };
-    let Longident::Lident(ctor_name_idx) = arena.get_longident(ctor_lid.txt) else {
-        return false;
-    };
-    matches!(
-        (arena.get_string(*ctor_name_idx), !payload.txt.is_empty()),
-        ("Ok", true) | ("Error", true) | ("Some", true) | ("None", false)
-    )
-}
-
-fn invalid_enabled_let_unwrap_in_bindings(
-    bindings: &[crate::parser::ast::ValueBinding],
-    arena: &ParseArena,
-) -> Option<LetUnwrapPositionError> {
-    for binding in bindings {
-        if let Some(error) = invalid_enabled_let_unwrap_in_expr(binding.pvb_expr, arena) {
-            return Some(error);
-        }
-    }
-    None
-}
-
-fn invalid_enabled_let_unwrap_in_structure(
-    structure: &Structure,
-    arena: &ParseArena,
-) -> Option<LetUnwrapPositionError> {
-    for item in structure {
-        match &item.pstr_desc {
-            StructureItemDesc::Pstr_eval(eval) => {
-                if let Some(error) = invalid_enabled_let_unwrap_in_expr(eval.0, arena) {
-                    return Some(error);
-                }
-            }
-            StructureItemDesc::Pstr_value(value) => {
-                if let Some(loc) = let_unwrap_binding_loc(arena.vb_list(value.1), arena) {
-                    return Some(LetUnwrapPositionError::Toplevel(loc));
-                }
-                if let Some(error) =
-                    invalid_enabled_let_unwrap_in_bindings(arena.vb_list(value.1), arena)
-                {
-                    return Some(error);
-                }
-            }
-            StructureItemDesc::Pstr_module(module_binding) => {
-                if let Some(error) =
-                    invalid_enabled_let_unwrap_in_mod_expr(module_binding.pmb_expr, arena)
-                {
-                    return Some(error);
-                }
-            }
-            StructureItemDesc::Pstr_recmodule(module_bindings) => {
-                for module_binding in module_bindings.iter() {
-                    if let Some(error) =
-                        invalid_enabled_let_unwrap_in_mod_expr(module_binding.pmb_expr, arena)
-                    {
-                        return Some(error);
-                    }
-                }
-            }
-            StructureItemDesc::Pstr_include(include_decl) => {
-                if let Some(error) =
-                    invalid_enabled_let_unwrap_in_mod_expr(include_decl.pincl_mod, arena)
-                {
-                    return Some(error);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-fn invalid_enabled_let_unwrap_in_mod_expr(
-    mod_expr: ModExprIdx,
-    arena: &ParseArena,
-) -> Option<LetUnwrapPositionError> {
-    let mod_expr = arena.get_mod_expr(mod_expr);
-    match &mod_expr.pmod_desc {
-        ModuleExprDesc::Pmod_structure(items) => {
-            invalid_enabled_let_unwrap_in_structure(items, arena)
-        }
-        ModuleExprDesc::Pmod_functor(functor) => {
-            invalid_enabled_let_unwrap_in_mod_expr(functor.2, arena)
-        }
-        ModuleExprDesc::Pmod_apply(lhs, rhs) => invalid_enabled_let_unwrap_in_mod_expr(*lhs, arena)
-            .or_else(|| invalid_enabled_let_unwrap_in_mod_expr(*rhs, arena)),
-        ModuleExprDesc::Pmod_constraint(inner, _) => {
-            invalid_enabled_let_unwrap_in_mod_expr(*inner, arena)
-        }
-        ModuleExprDesc::Pmod_unpack(expr) => invalid_enabled_let_unwrap_in_expr(*expr, arena),
-        _ => None,
-    }
-}
-
-fn invalid_enabled_let_unwrap_in_expr(
-    expr: ExprIdx,
-    arena: &ParseArena,
-) -> Option<LetUnwrapPositionError> {
-    let expr = arena.get_expr(expr);
-    match &expr.pexp_desc {
-        ExpressionDesc::Pexp_let(inner) => {
-            let (_rec_flag, bindings, body) = &*inner;
-            if let [binding] = arena.vb_list(*bindings)
-                && attrs_have_let_unwrap(&binding.pvb_attributes, arena)
-                && !is_supported_let_unwrap_pattern(arena.get_pat(binding.pvb_pat), arena)
-            {
-                return Some(LetUnwrapPositionError::UnsupportedType(
-                    arena.get_pat(binding.pvb_pat).ppat_loc,
-                ));
-            }
-            invalid_enabled_let_unwrap_in_bindings(arena.vb_list(*bindings), arena)
-                .or_else(|| invalid_enabled_let_unwrap_in_expr(*body, arena))
-        }
-        ExpressionDesc::Pexp_fun(fun) => fun
-            .default
-            .and_then(|expr| invalid_enabled_let_unwrap_in_expr(expr, arena))
-            .or_else(|| invalid_enabled_let_unwrap_in_expr(fun.rhs, arena)),
-        ExpressionDesc::Pexp_apply(apply) => invalid_enabled_let_unwrap_in_expr(apply.funct, arena)
-            .or_else(|| {
-                arena
-                    .apply_args(apply.args)
-                    .iter()
-                    .find_map(|(_, arg)| invalid_enabled_let_unwrap_in_expr(*arg, arena))
-            }),
-        ExpressionDesc::Pexp_match((scrutinee, cases)) => {
-            invalid_enabled_let_unwrap_in_expr(*scrutinee, arena).or_else(|| {
-                arena.case_list(*cases).iter().find_map(|case| {
-                    case.pc_guard
-                        .and_then(|guard| invalid_enabled_let_unwrap_in_expr(guard, arena))
-                        .or_else(|| invalid_enabled_let_unwrap_in_expr(case.pc_rhs, arena))
-                })
-            })
-        }
-        ExpressionDesc::Pexp_try((body, cases, finally)) => {
-            invalid_enabled_let_unwrap_in_expr(*body, arena)
-                .or_else(|| {
-                    arena.case_list(*cases).iter().find_map(|case| {
-                        case.pc_guard
-                            .and_then(|guard| invalid_enabled_let_unwrap_in_expr(guard, arena))
-                            .or_else(|| invalid_enabled_let_unwrap_in_expr(case.pc_rhs, arena))
-                    })
-                })
-                .or_else(|| {
-                    finally.and_then(|finally| invalid_enabled_let_unwrap_in_expr(finally, arena))
-                })
-        }
-        ExpressionDesc::Pexp_tuple(items) | ExpressionDesc::Pexp_array(items) => arena
-            .expr_list(*items)
-            .iter()
-            .find_map(|item| invalid_enabled_let_unwrap_in_expr(*item, arena)),
-        ExpressionDesc::Pexp_spread(_, elements) => arena
-            .spread_element_list(*elements)
-            .iter()
-            .find_map(|element| invalid_enabled_let_unwrap_in_expr(element.expr(), arena)),
-        ExpressionDesc::Pexp_construct(_, payload) => arena
-            .expr_list(payload.txt)
-            .iter()
-            .find_map(|expr| invalid_enabled_let_unwrap_in_expr(*expr, arena)),
-        ExpressionDesc::Pexp_variant(inner) => arena
-            .expr_list(inner.1.txt)
-            .iter()
-            .find_map(|expr| invalid_enabled_let_unwrap_in_expr(*expr, arena)),
-        ExpressionDesc::Pexp_record(record) => arena
-            .expr_field_list(record.0)
-            .iter()
-            .find_map(|field| invalid_enabled_let_unwrap_in_expr(field.expr, arena))
-            .or_else(|| {
-                record
-                    .1
-                    .and_then(|base| invalid_enabled_let_unwrap_in_expr(base, arena))
-            }),
-        ExpressionDesc::Pexp_field(owner, _)
-        | ExpressionDesc::Pexp_assert(owner)
-        | ExpressionDesc::Pexp_await(owner) => invalid_enabled_let_unwrap_in_expr(*owner, arena),
-        ExpressionDesc::Pexp_object_get(inner) => {
-            invalid_enabled_let_unwrap_in_expr(inner.0, arena)
-        }
-        ExpressionDesc::Pexp_setfield(inner) => invalid_enabled_let_unwrap_in_expr(inner.0, arena)
-            .or_else(|| invalid_enabled_let_unwrap_in_expr(inner.2, arena)),
-        ExpressionDesc::Pexp_ifthenelse(inner) => {
-            invalid_enabled_let_unwrap_in_expr(inner.0, arena)
-                .or_else(|| invalid_enabled_let_unwrap_in_expr(inner.1, arena))
-                .or_else(|| {
-                    inner
-                        .2
-                        .and_then(|else_expr| invalid_enabled_let_unwrap_in_expr(else_expr, arena))
-                })
-        }
-        ExpressionDesc::Pexp_braces(braces) => {
-            invalid_enabled_let_unwrap_in_expr(braces.expr, arena)
-        }
-        ExpressionDesc::Pexp_ternary(inner) => invalid_enabled_let_unwrap_in_expr(inner.0, arena)
-            .or_else(|| invalid_enabled_let_unwrap_in_expr(inner.1, arena))
-            .or_else(|| invalid_enabled_let_unwrap_in_expr(inner.2, arena)),
-        ExpressionDesc::Pexp_sequence(lhs, rhs) => invalid_enabled_let_unwrap_in_expr(*lhs, arena)
-            .or_else(|| invalid_enabled_let_unwrap_in_expr(*rhs, arena)),
-        ExpressionDesc::Pexp_while(cond, body) => invalid_enabled_let_unwrap_in_expr(*cond, arena)
-            .or_else(|| invalid_enabled_let_unwrap_in_expr(*body, arena)),
-        ExpressionDesc::Pexp_for(inner) => invalid_enabled_let_unwrap_in_expr(inner.1, arena)
-            .or_else(|| invalid_enabled_let_unwrap_in_expr(inner.2, arena))
-            .or_else(|| invalid_enabled_let_unwrap_in_expr(inner.4, arena)),
-        ExpressionDesc::Pexp_for_of(inner) | ExpressionDesc::Pexp_for_await_of(inner) => {
-            invalid_enabled_let_unwrap_in_expr(inner.1, arena)
-                .or_else(|| invalid_enabled_let_unwrap_in_expr(inner.2, arena))
-        }
-        ExpressionDesc::Pexp_constraint(inner) => {
-            invalid_enabled_let_unwrap_in_expr(inner.0, arena)
-        }
-        ExpressionDesc::Pexp_coerce(inner) => invalid_enabled_let_unwrap_in_expr(inner.0, arena),
-        ExpressionDesc::Pexp_letmodule(inner) => {
-            invalid_enabled_let_unwrap_in_mod_expr(inner.1, arena)
-                .or_else(|| invalid_enabled_let_unwrap_in_expr(inner.2, arena))
-        }
-        ExpressionDesc::Pexp_letexception(inner) => {
-            invalid_enabled_let_unwrap_in_expr(inner.1, arena)
-        }
-        ExpressionDesc::Pexp_newtype(inner) => invalid_enabled_let_unwrap_in_expr(inner.1, arena),
-        ExpressionDesc::Pexp_pack(mod_expr) => {
-            invalid_enabled_let_unwrap_in_mod_expr(*mod_expr, arena)
-        }
-        ExpressionDesc::Pexp_open(inner) => invalid_enabled_let_unwrap_in_expr(inner.2, arena),
-        _ => None,
-    }
-}
-
-fn disabled_let_unwrap_loc_in_bindings(
-    bindings: &[crate::parser::ast::ValueBinding],
-    arena: &ParseArena,
-) -> Option<LocIdx> {
-    for binding in bindings {
-        if attrs_have_let_unwrap(&binding.pvb_attributes, arena) {
-            return Some(arena.get_pat(binding.pvb_pat).ppat_loc);
-        }
-    }
-    for binding in bindings {
-        if let Some(loc) = disabled_let_unwrap_loc_in_expr(binding.pvb_expr, arena) {
-            return Some(loc);
-        }
-    }
-    None
-}
-
-fn disabled_let_unwrap_loc_in_structure(
-    structure: &Structure,
-    arena: &ParseArena,
-) -> Option<LocIdx> {
-    for item in structure {
-        match &item.pstr_desc {
-            StructureItemDesc::Pstr_eval(eval) => {
-                if let Some(loc) = disabled_let_unwrap_loc_in_expr(eval.0, arena) {
-                    return Some(loc);
-                }
-            }
-            StructureItemDesc::Pstr_value(value) => {
-                if let Some(loc) =
-                    disabled_let_unwrap_loc_in_bindings(arena.vb_list(value.1), arena)
-                {
-                    return Some(loc);
-                }
-            }
-            StructureItemDesc::Pstr_module(module_binding) => {
-                if let Some(loc) =
-                    disabled_let_unwrap_loc_in_mod_expr(module_binding.pmb_expr, arena)
-                {
-                    return Some(loc);
-                }
-            }
-            StructureItemDesc::Pstr_recmodule(module_bindings) => {
-                for module_binding in module_bindings.iter() {
-                    if let Some(loc) =
-                        disabled_let_unwrap_loc_in_mod_expr(module_binding.pmb_expr, arena)
-                    {
-                        return Some(loc);
-                    }
-                }
-            }
-            StructureItemDesc::Pstr_include(include_decl) => {
-                if let Some(loc) =
-                    disabled_let_unwrap_loc_in_mod_expr(include_decl.pincl_mod, arena)
-                {
-                    return Some(loc);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-fn disabled_let_unwrap_loc_in_mod_expr(mod_expr: ModExprIdx, arena: &ParseArena) -> Option<LocIdx> {
-    let mod_expr = arena.get_mod_expr(mod_expr);
-    match &mod_expr.pmod_desc {
-        ModuleExprDesc::Pmod_structure(items) => disabled_let_unwrap_loc_in_structure(items, arena),
-        ModuleExprDesc::Pmod_functor(functor) => {
-            disabled_let_unwrap_loc_in_mod_expr(functor.2, arena)
-        }
-        ModuleExprDesc::Pmod_apply(lhs, rhs) => disabled_let_unwrap_loc_in_mod_expr(*lhs, arena)
-            .or_else(|| disabled_let_unwrap_loc_in_mod_expr(*rhs, arena)),
-        ModuleExprDesc::Pmod_constraint(inner, _) => {
-            disabled_let_unwrap_loc_in_mod_expr(*inner, arena)
-        }
-        ModuleExprDesc::Pmod_unpack(expr) => disabled_let_unwrap_loc_in_expr(*expr, arena),
-        _ => None,
-    }
-}
-
-fn disabled_let_unwrap_loc_in_expr(expr: ExprIdx, arena: &ParseArena) -> Option<LocIdx> {
-    let expr = arena.get_expr(expr);
-    match &expr.pexp_desc {
-        ExpressionDesc::Pexp_let(inner) => {
-            disabled_let_unwrap_loc_in_bindings(arena.vb_list(inner.1), arena)
-                .or_else(|| disabled_let_unwrap_loc_in_expr(inner.2, arena))
-        }
-        ExpressionDesc::Pexp_fun(fun) => fun
-            .default
-            .and_then(|expr| disabled_let_unwrap_loc_in_expr(expr, arena))
-            .or_else(|| disabled_let_unwrap_loc_in_expr(fun.rhs, arena)),
-        ExpressionDesc::Pexp_apply(apply) => disabled_let_unwrap_loc_in_expr(apply.funct, arena)
-            .or_else(|| {
-                arena
-                    .apply_args(apply.args)
-                    .iter()
-                    .find_map(|(_, arg)| disabled_let_unwrap_loc_in_expr(*arg, arena))
-            }),
-        ExpressionDesc::Pexp_match((scrutinee, cases)) => {
-            disabled_let_unwrap_loc_in_expr(*scrutinee, arena).or_else(|| {
-                arena.case_list(*cases).iter().find_map(|case| {
-                    case.pc_guard
-                        .and_then(|guard| disabled_let_unwrap_loc_in_expr(guard, arena))
-                        .or_else(|| disabled_let_unwrap_loc_in_expr(case.pc_rhs, arena))
-                })
-            })
-        }
-        ExpressionDesc::Pexp_try((body, cases, finally)) => {
-            disabled_let_unwrap_loc_in_expr(*body, arena)
-                .or_else(|| {
-                    arena.case_list(*cases).iter().find_map(|case| {
-                        case.pc_guard
-                            .and_then(|guard| disabled_let_unwrap_loc_in_expr(guard, arena))
-                            .or_else(|| disabled_let_unwrap_loc_in_expr(case.pc_rhs, arena))
-                    })
-                })
-                .or_else(|| {
-                    finally.and_then(|finally| disabled_let_unwrap_loc_in_expr(finally, arena))
-                })
-        }
-        ExpressionDesc::Pexp_tuple(items) | ExpressionDesc::Pexp_array(items) => arena
-            .expr_list(*items)
-            .iter()
-            .find_map(|item| disabled_let_unwrap_loc_in_expr(*item, arena)),
-        ExpressionDesc::Pexp_spread(_, elements) => arena
-            .spread_element_list(*elements)
-            .iter()
-            .find_map(|element| disabled_let_unwrap_loc_in_expr(element.expr(), arena)),
-        ExpressionDesc::Pexp_construct(_, payload) => arena
-            .expr_list(payload.txt)
-            .iter()
-            .find_map(|expr| disabled_let_unwrap_loc_in_expr(*expr, arena)),
-        ExpressionDesc::Pexp_variant(inner) => arena
-            .expr_list(inner.1.txt)
-            .iter()
-            .find_map(|expr| disabled_let_unwrap_loc_in_expr(*expr, arena)),
-        ExpressionDesc::Pexp_record(record) => arena
-            .expr_field_list(record.0)
-            .iter()
-            .find_map(|field| disabled_let_unwrap_loc_in_expr(field.expr, arena))
-            .or_else(|| {
-                record
-                    .1
-                    .and_then(|base| disabled_let_unwrap_loc_in_expr(base, arena))
-            }),
-        ExpressionDesc::Pexp_field(owner, _)
-        | ExpressionDesc::Pexp_assert(owner)
-        | ExpressionDesc::Pexp_await(owner) => disabled_let_unwrap_loc_in_expr(*owner, arena),
-        ExpressionDesc::Pexp_object_get(inner) => disabled_let_unwrap_loc_in_expr(inner.0, arena),
-        ExpressionDesc::Pexp_setfield(inner) => disabled_let_unwrap_loc_in_expr(inner.0, arena)
-            .or_else(|| disabled_let_unwrap_loc_in_expr(inner.2, arena)),
-        ExpressionDesc::Pexp_ifthenelse(inner) => disabled_let_unwrap_loc_in_expr(inner.0, arena)
-            .or_else(|| disabled_let_unwrap_loc_in_expr(inner.1, arena))
-            .or_else(|| {
-                inner
-                    .2
-                    .and_then(|else_expr| disabled_let_unwrap_loc_in_expr(else_expr, arena))
-            }),
-        ExpressionDesc::Pexp_braces(braces) => disabled_let_unwrap_loc_in_expr(braces.expr, arena),
-        ExpressionDesc::Pexp_ternary(inner) => disabled_let_unwrap_loc_in_expr(inner.0, arena)
-            .or_else(|| disabled_let_unwrap_loc_in_expr(inner.1, arena))
-            .or_else(|| disabled_let_unwrap_loc_in_expr(inner.2, arena)),
-        ExpressionDesc::Pexp_sequence(lhs, rhs) => disabled_let_unwrap_loc_in_expr(*lhs, arena)
-            .or_else(|| disabled_let_unwrap_loc_in_expr(*rhs, arena)),
-        ExpressionDesc::Pexp_while(cond, body) => disabled_let_unwrap_loc_in_expr(*cond, arena)
-            .or_else(|| disabled_let_unwrap_loc_in_expr(*body, arena)),
-        ExpressionDesc::Pexp_for(inner) => disabled_let_unwrap_loc_in_expr(inner.1, arena)
-            .or_else(|| disabled_let_unwrap_loc_in_expr(inner.2, arena))
-            .or_else(|| disabled_let_unwrap_loc_in_expr(inner.4, arena)),
-        ExpressionDesc::Pexp_for_of(inner) | ExpressionDesc::Pexp_for_await_of(inner) => {
-            disabled_let_unwrap_loc_in_expr(inner.1, arena)
-                .or_else(|| disabled_let_unwrap_loc_in_expr(inner.2, arena))
-        }
-        ExpressionDesc::Pexp_constraint(inner) => disabled_let_unwrap_loc_in_expr(inner.0, arena),
-        ExpressionDesc::Pexp_coerce(inner) => disabled_let_unwrap_loc_in_expr(inner.0, arena),
-        ExpressionDesc::Pexp_letmodule(inner) => {
-            disabled_let_unwrap_loc_in_mod_expr(inner.1, arena)
-                .or_else(|| disabled_let_unwrap_loc_in_expr(inner.2, arena))
-        }
-        ExpressionDesc::Pexp_letexception(inner) => disabled_let_unwrap_loc_in_expr(inner.1, arena),
-        ExpressionDesc::Pexp_newtype(inner) => disabled_let_unwrap_loc_in_expr(inner.1, arena),
-        ExpressionDesc::Pexp_pack(mod_expr) => {
-            disabled_let_unwrap_loc_in_mod_expr(*mod_expr, arena)
-        }
-        ExpressionDesc::Pexp_open(inner) => disabled_let_unwrap_loc_in_expr(inner.2, arena),
-        _ => None,
-    }
 }
 
 /// Remove SGR style escapes (`ESC [ ... m`).
@@ -7210,22 +6693,6 @@ pub fn run_implementation_frontend(
     let debug = debug_for_structure(&structure, options, parser.arena());
     let jsx_preserve = jsx_preserve_for_structure(&structure, options, parser.arena());
     let experimental_let_unwrap = options.experimental_let_unwrap || file_config.let_unwrap;
-    if !options.no_builtin_ppx {
-        reject_disabled_let_unwrap_in_structure(
-            experimental_let_unwrap,
-            &structure,
-            parser.arena(),
-            source,
-            filename,
-        )?;
-        reject_enabled_invalid_let_unwrap_in_structure(
-            experimental_let_unwrap,
-            &structure,
-            parser.arena(),
-            source,
-            filename,
-        )?;
-    }
     // Source fallback path: only run JSX rewrite when the file enables `-bs-jsx`.
     let jsx_version = options.jsx_version.or(file_config.jsx_version);
     let structure = if let Some(jsx_version) = jsx_version {
@@ -7259,8 +6726,11 @@ pub fn run_implementation_frontend(
         // await, tagged templates, encode externals, and apply spice mapper rewrites.
         // spice is handled here, so avoid running a second top-level spice expansion pass.
         // The mapper's warnings precede its error.
-        let (rewritten, ppx_warnings) =
-            ppx::rewrite_structure_with_warnings(&structure, parser.arena_mut());
+        let (rewritten, ppx_warnings) = ppx::rewrite_structure_with_warnings(
+            &structure,
+            parser.arena_mut(),
+            experimental_let_unwrap,
+        );
         ppx_warnings_have_errors |= format_ppx_warnings_with_config(
             parser.arena(),
             source,
@@ -7383,6 +6853,7 @@ fn compile_source_to_js_with_options_inner(
     pers_env.set_load_path_shared(load_path.clone(), load_path_display);
     pers_env.set_open_modules(options.open_modules.clone());
     pers_env.set_jsx_version(options.jsx_version);
+    pers_env.set_experimental_let_unwrap(options.experimental_let_unwrap);
     pers_env.set_jsx_module(options.jsx_module.clone());
     let current_unit_name = options.current_unit_name();
     pers_env.set_compiling_module(current_unit_name.clone());
@@ -8449,6 +7920,7 @@ pub fn run_interface_frontend(
     let signature = preprocess_signature_for_typecheck_with_source(
         signature,
         options,
+        experimental_let_unwrap,
         parser.arena_mut(),
         source,
         filename,
@@ -8563,6 +8035,7 @@ pub fn typecheck_interface_source(
     pers_env.set_load_path_shared(load_path.clone(), load_path_display);
     pers_env.set_open_modules(options.open_modules.clone());
     pers_env.set_jsx_version(options.jsx_version);
+    pers_env.set_experimental_let_unwrap(options.experimental_let_unwrap);
     pers_env.set_jsx_module(options.jsx_module.clone());
     let current_unit_name = options.current_unit_name();
     pers_env.set_compiling_module(current_unit_name.clone());
@@ -10717,6 +10190,7 @@ fn in_process_type_check_context<'a>(
     pers_env.set_load_path_shared(load_path, load_path_display);
     pers_env.set_open_modules(options.open_modules.clone());
     pers_env.set_jsx_version(options.jsx_version);
+    pers_env.set_experimental_let_unwrap(options.experimental_let_unwrap);
     pers_env.set_jsx_module(options.jsx_module.clone());
     pers_env.set_nopervasives(options.nopervasives);
     pers_env.set_compiling_module(Some(module_name.to_string()));
@@ -11578,6 +11052,7 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
     persistent_env_for_js.set_load_path_shared(load_path, load_path_display);
     persistent_env_for_js.set_open_modules(options.open_modules.clone());
     persistent_env_for_js.set_jsx_version(options.jsx_version);
+    persistent_env_for_js.set_experimental_let_unwrap(options.experimental_let_unwrap);
     persistent_env_for_js.set_jsx_module(options.jsx_module.clone());
     persistent_env_for_js.set_nopervasives(options.nopervasives);
     persistent_env_for_js.set_compiling_module(options.module_name.clone());

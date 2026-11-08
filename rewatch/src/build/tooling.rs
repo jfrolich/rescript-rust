@@ -229,7 +229,8 @@ impl<'a> WatchProject<'a> {
         let source = compile::read_source_latin1(&path)?;
         let filename = path.to_string_lossy().into_owned();
         Ok(if interface {
-            let (arena, signature, _) = compile::parse_runtime_signature(&path, &source)?;
+            let (arena, signature, _) =
+                compile::parse_runtime_signature(&path, &source, options.experimental_let_unwrap)?;
             let typed = rescript_compiler::driver::typecheck_signature_for_tooling(
                 &arena,
                 &signature,
@@ -244,7 +245,8 @@ impl<'a> WatchProject<'a> {
                 path,
             }
         } else {
-            let (arena, structure, _) = compile::parse_runtime_structure(&path, &source)?;
+            let (arena, structure, _) =
+                compile::parse_runtime_structure(&path, &source, options.experimental_let_unwrap)?;
             let typed = rescript_compiler::driver::typecheck_structure_for_tooling(
                 &arena,
                 &structure,

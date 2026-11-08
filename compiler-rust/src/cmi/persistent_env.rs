@@ -1079,6 +1079,9 @@ pub struct PersistentEnv {
     /// Default JSX version from CLI flags, if any.
     jsx_version: Option<i32>,
     jsx_module: Option<String>,
+    /// `-enable-experimental LetUnwrap` of the current compilation, which a
+    /// source fallback compiles its dependency with.
+    experimental_let_unwrap: bool,
     /// Whether the current compilation uses `-nopervasives`.
     nopervasives: bool,
     /// Cache of renamed signatures (matching OCaml's lazy Subst.signature).
@@ -1200,6 +1203,7 @@ impl PersistentEnv {
             open_modules: Arc::new(Vec::new()),
             jsx_version: None,
             jsx_module: None,
+            experimental_let_unwrap: false,
             nopervasives: false,
             renamed_sig_cache: Arc::new(HashMap::new()),
             in_memory_modules: SharedRegistryMap::default(),
@@ -1237,6 +1241,7 @@ impl PersistentEnv {
             open_modules: Arc::new(Vec::new()),
             jsx_version: None,
             jsx_module: None,
+            experimental_let_unwrap: false,
             nopervasives: false,
             renamed_sig_cache: Arc::new(HashMap::new()),
             in_memory_modules: registry.module_info.clone(),
@@ -1550,6 +1555,10 @@ impl PersistentEnv {
 
     pub fn set_jsx_version(&mut self, jsx_version: Option<i32>) {
         self.jsx_version = jsx_version;
+    }
+
+    pub fn set_experimental_let_unwrap(&mut self, experimental_let_unwrap: bool) {
+        self.experimental_let_unwrap = experimental_let_unwrap;
     }
 
     pub fn set_nopervasives(&mut self, nopervasives: bool) {
@@ -2203,6 +2212,7 @@ impl PersistentEnv {
             open_modules: self.open_modules.clone(),
             jsx_version: self.jsx_version,
             jsx_module: self.jsx_module.clone(),
+            experimental_let_unwrap: self.experimental_let_unwrap,
             nopervasives: self.nopervasives,
             renamed_sig_cache: Arc::new(HashMap::new()),
             in_memory_modules: self.in_memory_modules.clone(),
@@ -2252,8 +2262,15 @@ impl PersistentEnv {
             if parser.has_errors() {
                 return None;
             }
-            let signature =
-                crate::binary_ast::ppx::rewrite_signature(&signature, parser.arena_mut()).ok()?;
+            let let_unwrap = self.experimental_let_unwrap
+                || crate::driver::extract_file_config_from_signature(&signature, parser.arena())
+                    .let_unwrap;
+            let signature = crate::binary_ast::ppx::rewrite_signature(
+                &signature,
+                parser.arena_mut(),
+                let_unwrap,
+            )
+            .ok()?;
             // The dependency's own compile raises on an invalid escape here
             // (typemod.ml:1825, js_implementation.ml:59): like a type error
             // below, it leaves nothing to load.
@@ -2299,6 +2316,7 @@ impl PersistentEnv {
             open_modules: self.open_modules.as_ref().clone(),
             jsx_version: self.jsx_version,
             jsx_module: self.jsx_module.clone(),
+            experimental_let_unwrap: self.experimental_let_unwrap,
             ..CompilerOptions::default()
         };
         let experimental_let_unwrap =
@@ -2315,8 +2333,12 @@ impl PersistentEnv {
         } else {
             structure
         };
-        let structure =
-            crate::binary_ast::ppx::rewrite_structure(&structure, parser.arena_mut()).ok()?;
+        let structure = crate::binary_ast::ppx::rewrite_structure(
+            &structure,
+            parser.arena_mut(),
+            experimental_let_unwrap,
+        )
+        .ok()?;
         // The dependency's own compile raises on an invalid escape here
             // (typemod.ml:1825, js_implementation.ml:59): like a type error
             // below, it leaves nothing to load.

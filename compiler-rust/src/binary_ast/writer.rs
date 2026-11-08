@@ -173,7 +173,9 @@ pub fn write_structure_ast_current_with_extra_deps_and_builtin_ppx(
     //    ran the frontend (`builtin_ppx == false`), it already applied both
     //    (js_implementation.ml:130).
     let rewritten_ast: Cow<'_, [StructureItem]> = if builtin_ppx {
-        let rewritten = ppx::rewrite_structure(ast, arena).map_err(ppx_rewrite_error)?;
+        // Only the tests ask for the builtin PPX here, without LetUnwrap;
+        // `bsc -bs-ast` runs it in the frontend.
+        let rewritten = ppx::rewrite_structure(ast, arena, false).map_err(ppx_rewrite_error)?;
         Cow::Owned(apply_no_export_config(arena, rewritten))
     } else {
         Cow::Borrowed(ast)
@@ -202,7 +204,8 @@ pub fn write_signature_ast_current_with_extra_deps_and_builtin_ppx(
 ) -> io::Result<()> {
     // 1. Optionally apply built-in PPX transformations (FFI encoding for externals, etc.)
     let rewritten_ast: Cow<'_, [SignatureItem]> = if builtin_ppx {
-        Cow::Owned(ppx::rewrite_signature(ast, arena).map_err(ppx_rewrite_error)?)
+        // As for structures: only the tests, without LetUnwrap.
+        Cow::Owned(ppx::rewrite_signature(ast, arena, false).map_err(ppx_rewrite_error)?)
     } else {
         Cow::Borrowed(ast)
     };

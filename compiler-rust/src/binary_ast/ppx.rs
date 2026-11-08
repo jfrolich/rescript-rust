@@ -193,6 +193,17 @@ fn has_obj_attr(attrs: &[Attribute], arena: &ParseArena) -> bool {
     })
 }
 
+/// `Bs_syntaxerr` `Experimental_feature_not_enabled LetUnwrap`
+/// (bs_syntaxerr.ml:89-93).
+const LET_UNWRAP_NOT_ENABLED_ERROR: &str = "Experimental feature not enabled: LetUnwrap. Enable it by setting \"LetUnwrap\" to true under \"experimental-features\" in rescript.json.";
+/// `Bs_syntaxerr` `LetUnwrap_not_supported_in_position `Toplevel`
+/// (bs_syntaxerr.ml:95-97).
+const LET_UNWRAP_TOPLEVEL_ERROR: &str = "`let?` is not allowed for top-level bindings.";
+/// `Bs_syntaxerr` `LetUnwrap_not_supported_in_position `Unsupported_type`
+/// (bs_syntaxerr.ml:98-100).
+const LET_UNWRAP_UNSUPPORTED_TYPE_ERROR: &str =
+    "`let?` is only supported in let bindings targeting the `result` or `option` type.";
+
 /// Check if attributes contain @let.unwrap.
 fn has_unwrap_attr(attrs: &[Attribute], arena: &ParseArena) -> bool {
     attrs
@@ -9833,11 +9844,14 @@ fn core_type_of_type_declaration_with_attrs(
 ///    with @res.await and hoists module type declarations before the Pstr_value
 ///
 /// OCaml: bs_builtin_ppx.ml lines 656-755 (structure_mapper)
+///
+/// `let_unwrap` is `Experimental_features.is_enabled LetUnwrap`.
 pub fn rewrite_structure(
     structure: &[StructureItem],
     arena: &mut ParseArena,
+    let_unwrap: bool,
 ) -> PpxResult<Vec<StructureItem>> {
-    rewrite_structure_with_warnings(structure, arena).0
+    rewrite_structure_with_warnings(structure, arena, let_unwrap).0
 }
 
 /// [`rewrite_structure`] together with the warnings the builtin mapper
@@ -9845,9 +9859,10 @@ pub fn rewrite_structure(
 pub fn rewrite_structure_with_warnings(
     structure: &[StructureItem],
     arena: &mut ParseArena,
+    let_unwrap: bool,
 ) -> (PpxResult<Vec<StructureItem>>, Vec<PpxWarning>) {
     let mut warnings = Vec::new();
-    let result = rewrite_structure_impl(structure, arena, true, Some(&mut warnings));
+    let result = rewrite_structure_impl(structure, arena, true, let_unwrap, Some(&mut warnings));
     let result = with_deferred_ppx_error(result, arena);
     (result, warnings)
 }
@@ -9907,6 +9922,7 @@ fn rewrite_structure_impl(
     structure: &[StructureItem],
     arena: &mut ParseArena,
     apply_spice: bool,
+    let_unwrap: bool,
     mut warnings: Option<&mut Vec<PpxWarning>>,
 ) -> PpxResult<Vec<StructureItem>> {
     // Context for tracking already-created module type names (per-structure scope)
@@ -9973,7 +9989,7 @@ fn rewrite_structure_impl(
                 let Unit::Item(index) = units[unit_index] else {
                     unreachable!("item event for a %%private run")
                 };
-                let mut checker = check::Checker::new(arena);
+                let mut checker = check::Checker::new(arena, let_unwrap);
                 let result = checker.structure_mapper_item(&structure[index]);
                 if let Some(warnings) = warnings.as_deref_mut() {
                     warnings.append(&mut checker.warnings);
@@ -9992,7 +10008,7 @@ fn rewrite_structure_impl(
                     unreachable!("%%private event for an item")
                 };
                 for item in &structure[start..end] {
-                    let mut checker = check::Checker::new(arena);
+                    let mut checker = check::Checker::new(arena, let_unwrap);
                     let result = checker.structure_mapper_item(item);
                     if let Some(warnings) = warnings.as_deref_mut() {
                         warnings.append(&mut checker.warnings);
@@ -10386,8 +10402,9 @@ fn expand_extensions_mod_expr(me_idx: ModExprIdx, arena: &mut ParseArena) -> Ppx
 pub fn rewrite_signature(
     signature: &[SignatureItem],
     arena: &mut ParseArena,
+    let_unwrap: bool,
 ) -> PpxResult<Vec<SignatureItem>> {
-    rewrite_signature_with_warnings(signature, arena).0
+    rewrite_signature_with_warnings(signature, arena, let_unwrap).0
 }
 
 /// [`rewrite_signature`] together with the warnings the builtin mapper
@@ -10395,8 +10412,9 @@ pub fn rewrite_signature(
 pub fn rewrite_signature_with_warnings(
     signature: &[SignatureItem],
     arena: &mut ParseArena,
+    let_unwrap: bool,
 ) -> (PpxResult<Vec<SignatureItem>>, Vec<PpxWarning>) {
-    let mut checker = check::Checker::new(arena);
+    let mut checker = check::Checker::new(arena, let_unwrap);
     let checked = checker.signature(signature);
     let warnings = std::mem::take(&mut checker.warnings);
     if let Err(error) = checked {
@@ -10954,8 +10972,11 @@ fn rewrite_module_expr(
     let mod_expr = &stripped;
     let new_desc = match &mod_expr.pmod_desc {
         current::ModuleExprDesc::Pmod_structure(items) => {
-            let rewritten_items =
-                rewrite_structure_impl(items, arena, false, None).unwrap_or_else(|error| {
+            // The enclosing top-level item was checked with the file's
+            // LetUnwrap setting before its rewrite started, and that walk
+            // covers this structure: a disabled `let?` never gets here.
+            let rewritten_items = rewrite_structure_impl(items, arena, false, true, None)
+                .unwrap_or_else(|error| {
                     arena.defer_ppx_error(error);
                     items
                         .iter()
@@ -11365,6 +11386,48 @@ mod tests {
         (ctor.txt, rhs.txt, continue_case.pc_rhs)
     }
 
+    /// bs_builtin_ppx.ml:250-276, 363-372 and 556-571: the builtin mapper
+    /// raises the `let?` errors where it meets the binding, whether LetUnwrap
+    /// is enabled deciding which one.
+    #[test]
+    fn let_unwrap_errors_come_from_the_builtin_mapper() {
+        let rewrite_error = |source: &str, let_unwrap: bool| {
+            let (mut arena, structure) = parse_structure(source);
+            match rewrite_structure(&structure, &mut arena, let_unwrap) {
+                Ok(_) => None,
+                Err(error) => {
+                    let loc = error.loc().expect("the error has a location");
+                    let start = arena.loc_start(loc);
+                    Some((error.message_text().to_string(), start.line, start.cnum - start.bol))
+                }
+            }
+        };
+        let nested = "let f = value => {\n  let? Ok(x) = value\n  Ok(x)\n}\n";
+        assert_eq!(
+            rewrite_error(nested, false),
+            Some((LET_UNWRAP_NOT_ENABLED_ERROR.to_string(), 2, 7))
+        );
+        assert_eq!(rewrite_error(nested, true), None);
+        let top_level = "let x = 1\nlet? Some(y) = None\n";
+        assert_eq!(
+            rewrite_error(top_level, false),
+            Some((LET_UNWRAP_NOT_ENABLED_ERROR.to_string(), 2, 5))
+        );
+        assert_eq!(
+            rewrite_error(top_level, true),
+            Some((LET_UNWRAP_TOPLEVEL_ERROR.to_string(), 2, 5))
+        );
+        let unsupported = "let f = value => {\n  let? (a, b) = value\n  a + b\n}\n";
+        assert_eq!(
+            rewrite_error(unsupported, false),
+            Some((LET_UNWRAP_NOT_ENABLED_ERROR.to_string(), 2, 7))
+        );
+        assert_eq!(
+            rewrite_error(unsupported, true),
+            Some((LET_UNWRAP_UNSUPPORTED_TYPE_ERROR.to_string(), 2, 7))
+        );
+    }
+
     #[test]
     fn let_unwrap_shares_static_constructors_but_not_fallback_binder_lidents() {
         let source = r#"
@@ -11375,7 +11438,8 @@ let f = value => {
 }
 "#;
         let (mut arena, structure) = parse_structure(source);
-        let rewritten = rewrite_structure(&structure, &mut arena).expect("rewrite should work");
+        let rewritten =
+            rewrite_structure(&structure, &mut arena, true).expect("rewrite should work");
         let StructureItemDesc::Pstr_value(value) = &rewritten[0].pstr_desc else {
             panic!("expected value binding");
         };
@@ -11506,7 +11570,8 @@ module Story = {
 type envelope = Story(Story.event)
 "#;
         let (mut arena, structure) = parse_structure(source);
-        let rewritten = rewrite_structure(&structure, &mut arena).expect("rewrite should work");
+        let rewritten =
+            rewrite_structure(&structure, &mut arena, true).expect("rewrite should work");
         let StructureItemDesc::Pstr_module(module) = &rewritten[0].pstr_desc else {
             panic!("expected nested module");
         };

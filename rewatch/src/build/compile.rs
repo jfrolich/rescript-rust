@@ -3025,7 +3025,9 @@ pub(crate) fn pre_compile_runtime_modules(
         .stack_size(256 * 1024 * 1024)
         .build()
         .context("failed to create runtime in-process compiler pool")?;
-    let mut runtime_modules = runtime_compile_pool.install(|| collect_runtime_sources(runtime_paths))?;
+    let let_unwrap = runtime_let_unwrap(&runtime_config);
+    let mut runtime_modules =
+        runtime_compile_pool.install(|| collect_runtime_sources(runtime_paths, let_unwrap))?;
     populate_runtime_deps(&mut runtime_modules);
 
     seed_runtime_registry(registry, &runtime_modules);
@@ -3389,16 +3391,19 @@ pub(crate) fn runtime_source_paths(runtime_path: &Path) -> Result<Vec<(String, P
 
 /// Read and parse the runtime sources (in parallel on the current Rayon
 /// pool), keeping the order of `paths`.
-fn collect_runtime_sources(paths: Vec<(String, PathBuf)>) -> Result<Vec<RuntimeModuleSource>> {
+fn collect_runtime_sources(
+    paths: Vec<(String, PathBuf)>,
+    let_unwrap: bool,
+) -> Result<Vec<RuntimeModuleSource>> {
     paths
         .into_par_iter()
         .map(|(module_name, path)| {
             let res_source = read_source_latin1(&path)?;
-            let (res_arena, structure, mut deps) = parse_runtime_structure(&path, &res_source)?;
+            let (res_arena, structure, mut deps) = parse_runtime_structure(&path, &res_source, let_unwrap)?;
             let resi_path = path.with_extension("resi");
             let resi = if resi_path.exists() {
                 let source = read_source_latin1(&resi_path)?;
-                let (arena, signature, intf_deps) = parse_runtime_signature(&resi_path, &source)?;
+                let (arena, signature, intf_deps) = parse_runtime_signature(&resi_path, &source, let_unwrap)?;
                 deps.extend(intf_deps);
                 Some(RuntimeInterfaceSource {
                     path: resi_path,
@@ -3461,9 +3466,12 @@ fn populate_runtime_deps(runtime_modules: &mut [RuntimeModuleSource]) {
     }
 }
 
+/// `let_unwrap` is the runtime package's LetUnwrap setting
+/// ([`runtime_let_unwrap`]); a `@@config` flag can also enable it.
 pub(crate) fn parse_runtime_signature(
     path: &Path,
     source: &str,
+    let_unwrap: bool,
 ) -> Result<(ParseArena, Signature, AHashSet<String>)> {
     rescript_compiler::timing::measure(rescript_compiler::timing::Phase::Parse, || {
         let filename = path.to_string_lossy();
@@ -3476,13 +3484,17 @@ pub(crate) fn parse_runtime_signature(
                 parser.diagnostics().len()
             ));
         }
-        let signature = rescript_compiler::binary_ast::ppx::rewrite_signature(&signature, parser.arena_mut())
-            .map_err(|err| {
-                anyhow!(
-                    "runtime interface PPX rewrite failed for {}: {err}",
-                    path.display()
-                )
-            })?;
+        let let_unwrap = let_unwrap
+            || rescript_compiler::driver::extract_file_config_from_signature(&signature, parser.arena())
+                .let_unwrap;
+        let signature =
+            rescript_compiler::binary_ast::ppx::rewrite_signature(&signature, parser.arena_mut(), let_unwrap)
+                .map_err(|err| {
+                    anyhow!(
+                        "runtime interface PPX rewrite failed for {}: {err}",
+                        path.display()
+                    )
+                })?;
         let deps = rescript_compiler::binary_ast::deps::extract_signature_deps(parser.arena(), &signature)
             .into_iter()
             .collect();
@@ -3492,9 +3504,12 @@ pub(crate) fn parse_runtime_signature(
     })
 }
 
+/// `let_unwrap` is the runtime package's LetUnwrap setting
+/// ([`runtime_let_unwrap`]); a `@@config` flag can also enable it.
 pub(crate) fn parse_runtime_structure(
     path: &Path,
     source: &str,
+    let_unwrap: bool,
 ) -> Result<(ParseArena, Structure, AHashSet<String>)> {
     rescript_compiler::timing::measure(rescript_compiler::timing::Phase::Parse, || {
         let filename = path.to_string_lossy();
@@ -3507,13 +3522,17 @@ pub(crate) fn parse_runtime_structure(
                 parser.diagnostics().len()
             ));
         }
-        let structure = rescript_compiler::binary_ast::ppx::rewrite_structure(&structure, parser.arena_mut())
-            .map_err(|err| {
-                anyhow!(
-                    "runtime implementation PPX rewrite failed for {}: {err}",
-                    path.display()
-                )
-            })?;
+        let let_unwrap = let_unwrap
+            || rescript_compiler::driver::extract_file_config_from_structure(&structure, parser.arena())
+                .let_unwrap;
+        let structure =
+            rescript_compiler::binary_ast::ppx::rewrite_structure(&structure, parser.arena_mut(), let_unwrap)
+                .map_err(|err| {
+                    anyhow!(
+                        "runtime implementation PPX rewrite failed for {}: {err}",
+                        path.display()
+                    )
+                })?;
         let structure =
             rescript_compiler::binary_ast::writer::apply_no_export_config(parser.arena_mut(), structure);
         let deps = rescript_compiler::binary_ast::deps::extract_structure_deps(parser.arena(), &structure)
@@ -3633,6 +3652,14 @@ fn runtime_compile_order(runtime_modules: &[RuntimeModuleSource]) -> Vec<usize> 
     order
 }
 
+/// Whether the runtime package enables LetUnwrap, through its compiler flags
+/// or its experimental features.
+pub(crate) fn runtime_let_unwrap(runtime_config: &config::Config) -> bool {
+    let bsc_flags = config::flatten_flags(&runtime_config.compiler_flags);
+    parse_in_process_compiler_flags(&bsc_flags).experimental_let_unwrap
+        || runtime_config.has_experimental_feature(config::ExperimentalFeature::LetUnwrap)
+}
+
 pub(crate) fn runtime_compiler_options(
     runtime_root: &Path,
     runtime_path: &Path,
@@ -3670,8 +3697,7 @@ pub(crate) fn runtime_compiler_options(
         js_output_targets,
         jsx_version: parsed_flags.jsx_version,
         jsx_module: parsed_flags.jsx_module.clone(),
-        experimental_let_unwrap: parsed_flags.experimental_let_unwrap
-            || runtime_config.has_experimental_feature(config::ExperimentalFeature::LetUnwrap),
+        experimental_let_unwrap: runtime_let_unwrap(runtime_config),
         jsx_preserve: parsed_flags.jsx_preserve,
         debug: parsed_flags.debug,
         no_version_header: parsed_flags.no_version_header,

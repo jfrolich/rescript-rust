@@ -21,16 +21,20 @@ pub(super) struct Checker<'a> {
     async_context: bool,
     /// `in_function_def`: whether the expression is the body of a function.
     in_function_def: bool,
+    /// `Experimental_features.is_enabled LetUnwrap`, which decides the error
+    /// a `let?` binding raises (bs_builtin_ppx.ml:273, 366, 565).
+    let_unwrap: bool,
     /// Warnings emitted so far, in mapping order.
     pub(super) warnings: Vec<PpxWarning>,
 }
 
 impl<'a> Checker<'a> {
-    pub(super) fn new(arena: &'a mut ParseArena) -> Self {
+    pub(super) fn new(arena: &'a mut ParseArena, let_unwrap: bool) -> Self {
         Self {
             arena,
             async_context: true,
             in_function_def: false,
+            let_unwrap,
             warnings: Vec::new(),
         }
     }
@@ -79,6 +83,22 @@ impl<'a> Checker<'a> {
 
     /// `Bs_builtin_ppx.structure_item_mapper` (bs_builtin_ppx.ml:513-637).
     fn structure_item(&mut self, item: &StructureItem) -> PpxResult<()> {
+        // bs_builtin_ppx.ml:556-571: a top-level `let?` binding is an error.
+        if let StructureItemDesc::Pstr_value(inner) = &item.pstr_desc
+            && let Some(vb) = self
+                .arena
+                .vb_list(inner.1)
+                .iter()
+                .find(|vb| has_unwrap_attr(&vb.pvb_attributes, self.arena))
+        {
+            let loc = self.arena.get_pat(vb.pvb_pat).ppat_loc;
+            let message = if self.let_unwrap {
+                LET_UNWRAP_TOPLEVEL_ERROR
+            } else {
+                LET_UNWRAP_NOT_ENABLED_ERROR
+            };
+            return Err(PpxError::at_loc(loc, message));
+        }
         match &item.pstr_desc {
             StructureItemDesc::Pstr_type(inner) => {
                 let (_rec_flag, tdcls) = &**inner;
@@ -892,6 +912,40 @@ impl<'a> Checker<'a> {
     ) -> PpxResult<()> {
         let (rec_flag, bindings, body) = inner;
         let bindings = &self.arena.vb_list(*bindings).to_vec();
+        if let [vb] = bindings.as_slice()
+            && has_unwrap_attr(&vb.pvb_attributes, self.arena)
+        {
+            let pat = self.arena.get_pat(vb.pvb_pat);
+            let loc = pat.ppat_loc;
+            // bs_builtin_ppx.ml:250-276: a supported `let?`, then the
+            // catch-all at 363-372.
+            let supported = *rec_flag == RecFlag::Nonrecursive
+                && self.arena.value_constraint(vb.pvb_pat).is_none()
+                && classify_let_unwrap_pattern(pat, self.arena).is_some();
+            if !self.let_unwrap {
+                return Err(PpxError::at_loc(loc, LET_UNWRAP_NOT_ENABLED_ERROR));
+            }
+            if !supported {
+                return Err(PpxError::at_loc(loc, LET_UNWRAP_UNSUPPORTED_TYPE_ERROR));
+            }
+            if !matches!(
+                &crate::ast_payload::unwrap_braces(self.arena, self.arena.get_expr(vb.pvb_expr))
+                    .pexp_desc,
+                ExpressionDesc::Pexp_pack(_)
+            ) {
+                // `default_expr_mapper` on `Pexp_match (pvb_expr, [early;
+                // cont])` with the binding's attributes appended: the
+                // attributes, the cases (the early-return case holds only
+                // generated nodes; the continuation is `pvb_pat => body`),
+                // then the scrutinee.
+                self.attributes(&expr.pexp_attributes)?;
+                self.attributes(&vb.pvb_attributes)?;
+                self.expr(*body)?;
+                self.pat(vb.pvb_pat)?;
+                return self.expr(vb.pvb_expr);
+            }
+            // A packed module falls back to `default_expr_mapper` below.
+        }
         if *rec_flag == RecFlag::Nonrecursive
             && let [vb] = bindings.as_slice()
             && self.arena.value_constraint(vb.pvb_pat).is_none()

@@ -255,8 +255,10 @@ fn run(args: Vec<String>) {
                 } else {
                     // res_cli.ml:129-132 runs `Bs_builtin_ppx.mapper`: its
                     // warnings go to stderr as it maps, before any error.
+                    // `res_parser` has no `-enable-experimental`, so LetUnwrap
+                    // is off.
                     let (rewritten, warnings) =
-                        ppx::rewrite_signature_with_warnings(&signature, parser.arena_mut());
+                        ppx::rewrite_signature_with_warnings(&signature, parser.arena_mut(), false);
                     eprint!(
                         "{}",
                         crate::driver::format_ppx_warnings(
@@ -410,7 +412,7 @@ fn run(args: Vec<String>) {
                     // res_cli.ml:161-165 runs `Bs_builtin_ppx.mapper`, as on
                     // the interface path above.
                     let (rewritten, warnings) =
-                        ppx::rewrite_structure_with_warnings(&structure, parser.arena_mut());
+                        ppx::rewrite_structure_with_warnings(&structure, parser.arena_mut(), false);
                     eprint!(
                         "{}",
                         crate::driver::format_ppx_warnings(
