@@ -52,7 +52,9 @@ use super::cmi_format;
 use super::portable_types::{self, PortablePersStruct};
 use super::sig_reader::SigReadContext;
 
-fn first_char_case_variant(name: &str) -> Option<String> {
+/// Short enough module names (most) stay inline, so a case-variant probe
+/// does not allocate.
+fn first_char_case_variant(name: &str) -> Option<smol_str::SmolStr> {
     let mut chars = name.chars();
     let first = chars.next()?;
     let rest = chars.as_str();
@@ -63,10 +65,10 @@ fn first_char_case_variant(name: &str) -> Option<String> {
     } else {
         return None;
     };
-    let mut variant = String::with_capacity(name.len());
+    let mut variant = smol_str::SmolStrBuilder::new();
     variant.push(swapped);
     variant.push_str(rest);
-    Some(variant)
+    Some(variant.finish())
 }
 
 fn resolve_first_char_case_key<'a, V>(map: &'a HashMap<String, V>, name: &str) -> Option<&'a str> {
@@ -74,7 +76,7 @@ fn resolve_first_char_case_key<'a, V>(map: &'a HashMap<String, V>, name: &str) -
         return Some(key.as_str());
     }
     let variant = first_char_case_variant(name)?;
-    map.get_key_value(&variant).map(|(key, _)| key.as_str())
+    map.get_key_value(variant.as_str()).map(|(key, _)| key.as_str())
 }
 
 #[derive(Debug)]
@@ -139,7 +141,7 @@ impl LazyStoredModules {
     /// variant, into the registry maps. Returns whether there was one.
     fn materialize_case(&self, name: &str) -> bool {
         self.materialize(name)
-            || first_char_case_variant(name).is_some_and(|variant| self.materialize(&variant))
+            || first_char_case_variant(name).is_some_and(|variant| self.materialize(variant.as_str()))
     }
 
     fn materialize(&self, name: &str) -> bool {
@@ -267,7 +269,7 @@ impl<V: Clone> SharedRegistryMap<V> {
             return Some((key.clone(), value.clone()));
         }
         let variant = first_char_case_variant(name)?;
-        map.get_key_value(&variant)
+        map.get_key_value(variant.as_str())
             .map(|(key, value)| (key.clone(), value.clone()))
     }
 
@@ -295,7 +297,7 @@ impl<V> SharedRegistryMap<V> {
             return Some(f(key, value));
         }
         let variant = first_char_case_variant(name)?;
-        map.get_key_value(&variant)
+        map.get_key_value(variant.as_str())
             .map(|(key, value)| f(key, value))
     }
 
@@ -1349,16 +1351,21 @@ impl PersistentEnv {
         self.cache_lookup_entry(name).map(|(_, value)| value)
     }
 
-    fn cache_lookup_entry(&self, name: &str) -> Option<(String, Option<Arc<PersStruct>>)> {
+    /// The cache key `name` resolves to (inline for most module names, so
+    /// no allocation) and its entry.
+    fn cache_lookup_entry(
+        &self,
+        name: &str,
+    ) -> Option<(smol_str::SmolStr, Option<Arc<PersStruct>>)> {
         if self.view.hidden_modules.contains(name) || self.outside_load_path(name) {
-            return Some((name.to_string(), None));
+            return Some((smol_str::SmolStr::new(name), None));
         }
         let cache = self.cache.lock().unwrap();
         let cache_key = resolve_first_char_case_key(&cache, name)?;
         cache
             .get(cache_key)
             .cloned()
-            .map(|value| (cache_key.to_string(), value))
+            .map(|value| (smol_str::SmolStr::new(cache_key), value))
     }
 
     /// The already-loaded persistent structure of `name`, without loading it.
@@ -1708,8 +1715,9 @@ impl PersistentEnv {
                     return false;
                 }
                 let ps = portable_types::internalize_pers_struct(portable, ctx);
-                self.cache_insert(portable_key.clone(), Some(ps.clone()));
-                (portable_key, ps)
+                let cache_key = smol_str::SmolStr::new(&portable_key);
+                self.cache_insert(portable_key, Some(ps.clone()));
+                (cache_key, ps)
             }
         };
         if should_register_lazy_raw_sig(&cache_key, &self.view.alias_prefix_rewrites)
@@ -1771,7 +1779,7 @@ impl PersistentEnv {
             if let Some(ps) = cached.as_ref() {
                 self.prepare_cached_pers_struct(&cache_key, ps, ctx);
             } else if self.in_process_mode
-                && !self.view.hidden_modules.contains(&cache_key)
+                && !self.view.hidden_modules.contains(cache_key.as_str())
                 && (self.portable_cache_entry(name).is_some()
                     || self.in_memory_info(name).is_some())
             {
@@ -3834,15 +3842,15 @@ fn decode_cmj_list<T>(
 /// in-process compilation stores signatures produced by independent compiler
 /// contexts whose local stamp counters can overlap.
 /// The `name_map` maps type names (for persistent idents with stamp 0) to their qualified paths.
-type ModuleStampSubstMap = HashMap<i32, (String, Path)>;
+type ModuleStampSubstMap = HashMap<i32, (Name, Path)>;
 
 fn insert_module_stamp_subst(map: &mut ModuleStampSubstMap, id: &Ident, path: Path) {
-    map.insert(id.stamp(), (id.name().to_string(), path));
+    map.insert(id.stamp(), (id.name_atom(), path));
 }
 
-fn nonpersistent_path_head(path: &Path) -> Option<(i32, String)> {
+fn nonpersistent_path_head(path: &Path) -> Option<(i32, Name)> {
     match path.view() {
-        PathView::Pident(id) => (id.stamp() != 0).then(|| (id.stamp(), id.name().to_string())),
+        PathView::Pident(id) => (id.stamp() != 0).then(|| (id.stamp(), id.name_atom())),
         PathView::Pdot(prefix, _, _) => nonpersistent_path_head(prefix),
         PathView::Papply(left, right) => {
             nonpersistent_path_head(left).or_else(|| nonpersistent_path_head(right))
@@ -3856,7 +3864,7 @@ struct SubstMaps {
     type_name_map: HashMap<String, Path>,
     module_stamp_map: ModuleStampSubstMap,
     module_name_map: HashMap<String, Path>,
-    protected_module_head: Option<(i32, String)>,
+    protected_module_head: Option<(i32, Name)>,
 }
 
 /// Fixed hasher keys: `AHashMap::default()` derives fresh random keys per
@@ -5159,7 +5167,7 @@ fn substitute_type_expr_path(
     type_name_map: &HashMap<String, Path>,
     module_stamp_map: &ModuleStampSubstMap,
     module_name_map: &HashMap<String, Path>,
-    protected_module_head: Option<&(i32, String)>,
+    protected_module_head: Option<&(i32, Name)>,
     ctx: &TypeContext,
     visited: &mut HashSet<usize>,
 ) {
@@ -5543,7 +5551,7 @@ fn direct_manifest_substitution_would_self_alias(
     type_name_map: &HashMap<String, Path>,
     module_stamp_map: &ModuleStampSubstMap,
     module_name_map: &HashMap<String, Path>,
-    protected_module_head: Option<&(i32, String)>,
+    protected_module_head: Option<&(i32, Name)>,
 ) -> bool {
     let manifest = ctx.repr(manifest);
     let desc = ctx.get_desc(manifest);
@@ -5571,7 +5579,7 @@ fn substitute_type_path(
     type_name_map: &HashMap<String, Path>,
     module_stamp_map: &ModuleStampSubstMap,
     module_name_map: &HashMap<String, Path>,
-    protected_module_head: Option<&(i32, String)>,
+    protected_module_head: Option<&(i32, Name)>,
 ) -> Path {
     match path.view() {
         PathView::Pident(ident) => {
@@ -5620,7 +5628,7 @@ fn substitute_module_path(
     path: &Path,
     module_stamp_map: &ModuleStampSubstMap,
     module_name_map: &HashMap<String, Path>,
-    protected_module_head: Option<&(i32, String)>,
+    protected_module_head: Option<&(i32, Name)>,
 ) -> Path {
     match path.view() {
         PathView::Pident(ident) => {
