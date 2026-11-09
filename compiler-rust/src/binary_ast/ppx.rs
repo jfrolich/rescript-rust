@@ -11409,6 +11409,50 @@ let e = () =>
         );
     }
 
+    /// bs_builtin_ppx.ml:165-171: a `Pexp_fun` holds all parameters of one
+    /// function, so a `Pexp_fun` in its body is another function, in an
+    /// async context exactly when it is async itself. `await` in a plain
+    /// function an async function returns is an error at the `await`, and so
+    /// is one in that function's default argument; the async function's own
+    /// parameters and body stay in its async context.
+    #[test]
+    fn builtin_mapper_gives_each_function_its_own_async_context() {
+        let check = |source: &str| -> Result<(), (i32, i32)> {
+            let (mut arena, structure) = parse_structure(source);
+            match rewrite_structure(&structure, &mut arena, false) {
+                Ok(_) => Ok(()),
+                Err(error) => {
+                    assert_eq!(error.message_text(), AWAIT_NOT_ASYNC_CONTEXT_ERROR, "{source}");
+                    let loc = error.loc().expect("the error has a location");
+                    let (start, end) = (arena.loc_start(loc), arena.loc_end(loc));
+                    assert_eq!(start.line, end.line, "{source}");
+                    Err((start.cnum - start.bol, end.cnum - end.bol))
+                }
+            }
+        };
+        let accepted = [
+            "let f = async (x, y) => await y + x\n",
+            "let f = async x => async y => await y + x\n",
+            "let f = async x => y => async z => await z + y + x\n",
+            "let f = async x => {\n  let y = await x\n  z => z + y\n}\n",
+            "let f = async (~x=await Promise.resolve(1)) => x\n",
+            "let f = async x => y => y + x\n",
+        ];
+        for source in accepted {
+            assert_eq!(check(source), Ok(()), "{source}");
+        }
+        let rejected = [
+            ("let f = async x => y => await y + x\n", (24, 31)),
+            ("let f = async x => (y => await y)\n", (25, 32)),
+            ("let f = x => async y => z => await z\n", (29, 36)),
+            ("let f = async x => (~y=await x) => y\n", (23, 30)),
+            ("let f = async x => y => z => await z\n", (29, 36)),
+        ];
+        for (source, columns) in rejected {
+            assert_eq!(check(source), Err(columns), "{source}");
+        }
+    }
+
     #[test]
     fn let_unwrap_errors_come_from_the_builtin_mapper() {
         let rewrite_error = |source: &str, let_unwrap: bool| {

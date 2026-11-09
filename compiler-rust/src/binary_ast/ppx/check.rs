@@ -22,8 +22,6 @@ pub(super) struct Checker<'a> {
     arena: &'a mut ParseArena,
     /// `async_context` (bs_builtin_ppx.ml:815): whether `await` is allowed.
     async_context: bool,
-    /// `in_function_def`: whether the expression is the body of a function.
-    in_function_def: bool,
     /// `Experimental_features.is_enabled LetUnwrap`, which decides the error
     /// a `let?` binding raises (bs_builtin_ppx.ml:273, 366, 565).
     let_unwrap: bool,
@@ -37,7 +35,6 @@ impl<'a> Checker<'a> {
         Self {
             arena,
             async_context: true,
-            in_function_def: false,
             let_unwrap,
             warnings: Vec::new(),
         }
@@ -755,8 +752,6 @@ impl<'a> Checker<'a> {
 
     /// The inner `expr_mapper` (bs_builtin_ppx.ml:108-392).
     fn expr_inner(&mut self, expr: &Expression) -> PpxResult<()> {
-        let old_in_function_def = self.in_function_def;
-        self.in_function_def = false;
         match &expr.pexp_desc {
             // `Pexp_regexp`: `Ast_payload.validate_raw_source ~kind:Raw_re`
             // on `/pattern/flags`, then the attributes are mapped.
@@ -822,7 +817,7 @@ impl<'a> Checker<'a> {
                 Constant::Integer(_, Some('l')) => Ok(()),
                 _ => self.attributes(&expr.pexp_attributes),
             },
-            ExpressionDesc::Pexp_fun(fun) => self.function(expr, fun, old_in_function_def),
+            ExpressionDesc::Pexp_fun(fun) => self.function(expr, fun),
             ExpressionDesc::Pexp_apply(apply) => self.apply(expr, apply),
             ExpressionDesc::Pexp_match(inner)
                 if self.is_bool_match(self.arena.case_list(inner.1)) =>
@@ -860,12 +855,7 @@ impl<'a> Checker<'a> {
     }
 
     /// `Pexp_fun` in `expr_mapper` (bs_builtin_ppx.ml:120-158).
-    fn function(
-        &mut self,
-        expr: &Expression,
-        fun: &PexpFun,
-        old_in_function_def: bool,
-    ) -> PpxResult<()> {
+    fn function(&mut self, expr: &Expression, fun: &PexpFun) -> PpxResult<()> {
         let params = self.arena.nary_fun_params(fun).into_owned();
         let newtypes = self.arena.nary_fun_newtypes(fun).to_vec();
         let body = self.arena.nary_fun_body(fun);
@@ -901,7 +891,10 @@ impl<'a> Checker<'a> {
             }
             return self.expr(body);
         }
-        self.async_context = (old_in_function_def && self.async_context) || fun.is_async;
+        // bs_builtin_ppx.ml:168-171: a `Pexp_fun` holds all parameters of
+        // one function, so a `Pexp_fun` in its body is another function and
+        // is in an async context exactly when it is async itself.
+        self.async_context = fun.is_async;
         self.attributes(&expr.pexp_attributes)?;
         for param in &params {
             // `{p with p_default = ...; p_pat = ...}` maps the pattern first.
@@ -910,11 +903,7 @@ impl<'a> Checker<'a> {
                 self.expr(default)?;
             }
         }
-        let saved_in_function_def = self.in_function_def;
-        self.in_function_def = true;
-        let result = self.expr(body);
-        self.in_function_def = saved_in_function_def;
-        result?;
+        self.expr(body)?;
         for (_name, attrs) in &newtypes {
             self.attributes(attrs)?;
         }
