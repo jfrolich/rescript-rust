@@ -960,6 +960,21 @@ pub struct JsProgram {
     pub name_reservations: Vec<Ident>,
 }
 
+#[cfg(test)]
+impl JsProgram {
+    /// A program over `block` and `exports`, owning `arena`.
+    pub fn new_in(block: Vec<Stmt>, exports: super::Exports, arena: JsArena) -> Self {
+        let export_set = exports.iter().copied().collect();
+        JsProgram {
+            arena,
+            block,
+            exports,
+            export_set,
+            name_reservations: Vec::new(),
+        }
+    }
+}
+
 /// A program with its dependencies (`J.deps_program`).
 #[derive(Debug, Clone)]
 pub struct JsDepsProgram {

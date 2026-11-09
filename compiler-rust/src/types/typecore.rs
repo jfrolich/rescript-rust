@@ -28385,7 +28385,7 @@ fn raw_alias_target_for_module_path<'a>(
 
 /// Look up a type declaration for a given path.
 /// Tries env first, then module components.
-fn lookup_type_decl_for_path<'a>(
+pub(crate) fn lookup_type_decl_for_path<'a>(
     type_path: &Path,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,

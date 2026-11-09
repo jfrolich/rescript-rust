@@ -523,13 +523,12 @@ pub(crate) fn lookup_type_decl_for_path_pub(
 /// OCaml `get_level env p` (ctype.ml:666-673): the newtype level of `p`'s
 /// declaration, or `Path.binding_time p`.
 fn get_level_in_env(ctx: &TypeContext, env: &Env, path: &Path) -> i32 {
-    // A declaration reached through a persistent unit comes out of
-    // `Subst.type_declaration`, which clears `type_newtype_level`
-    // (compiler/ml/subst.ml:292), so the lookup would fall back to the
-    // binding time anyway.
-    if path_root_is_persistent(path) {
-        return path.binding_time();
-    }
+    // The lookup also runs for a path rooted at a persistent unit, whose
+    // declaration never carries a newtype level (`Subst.type_declaration`
+    // clears it, compiler/ml/subst.ml:292): OCaml still calls `Env.find_type`
+    // there, and for a dotted path that builds the parent's component tables
+    // (compiler/ml/env.ml:781-813) at this point of level lowering.
+    //
     // `Env.find_type` answers from bindings fixed within one module scope, so
     // repeated level checks of the same path reuse the first lookup.
     let scope_id = env.scope_id();
@@ -541,23 +540,19 @@ fn get_level_in_env(ctx: &TypeContext, env: &Env, path: &Path) -> i32 {
             .find_type_by_ident(id)
             .ok()
             .and_then(|decl| decl.type_newtype_level.map(|(level, _)| level)),
-        PathView::Pdot(parent, type_name, _) => {
+        PathView::Pdot(_, _, _) => {
             // OCaml compiler/ml/ctype.ml:666-673 calls Env.find_type, whose
-            // dotted path lookup reaches compiler/ml/env.ml:800-813 through
-            // find_module_descr at env.ml:781-793. That path reads component
-            // tables; it does not perform the env.ml:865-887 find_module alias
-            // scrape used by normalize_path/module lookup. In Rust's
-            // in-process mode the active persistent table lives on TypeContext,
-            // so use it here with type-lookup component laziness preserved.
+            // dotted path lookup (compiler/ml/env.ml:800-813) runs
+            // `get_components (find_module_descr p env)` and reads
+            // `comp_types`. For a persistent parent that builds its
+            // `ps_comps` table (env.ml:781-788, env.ml:1454-1552) at this
+            // point of level lowering. It does not perform the env.ml:865-887
+            // find_module alias scrape used by normalize_path/module lookup.
+            // In Rust's in-process mode the active persistent table lives on
+            // TypeContext.
             let mut persistent_env = in_process_module_resolution_env(ctx);
-            crate::types::typecore::lookup_type_in_resolved_path(
-                parent,
-                type_name.as_str(),
-                env,
-                &mut persistent_env,
-                ctx,
-            )
-            .and_then(|(_, _, decl)| decl.type_newtype_level.map(|(level, _)| level))
+            crate::types::typecore::lookup_type_decl_for_path(path, env, &mut persistent_env, ctx)
+                .and_then(|decl| decl.type_newtype_level.map(|(level, _)| level))
         }
         PathView::Papply(_, _) => None,
     };
@@ -2365,20 +2360,15 @@ fn update_level_pass(
             TypeDesc::Tconstr { path, args, .. } => {
                 let has_args = !args.is_empty();
                 // OCaml compiler/ml/ctype.ml:695 calls `get_level env p`
-                // here. A path rooted at a persistent unit answers with its
-                // binding time (see `get_level_in_env`), without a copy.
-                let path_level = if path_root_is_persistent(path) {
-                    path.binding_time()
-                } else {
-                    let path = *path;
-                    get_level_in_env(ctx, env, &path)
-                };
+                // here, including its `Env.find_type` lookup.
+                let path = *path;
+                drop(desc);
+                let path_level = get_level_in_env(ctx, env, &path);
                 // OCaml compiler/ml/ctype.ml:742-768 only requires
                 // `level < get_level env p` after the outer `ty.level > level`
                 // check. Generic-level constructor nodes are still eligible
                 // for abbreviation expansion during `moregeneral`.
                 let should_try_expand = level < path_level;
-                drop(desc);
                 // OCaml compiler/ml/ctype.ml:568-578: try to replace the
                 // constructor by its expansion; a constructor that cannot be
                 // expanded would escape its scope.
