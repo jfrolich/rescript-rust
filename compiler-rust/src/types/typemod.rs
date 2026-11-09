@@ -2811,7 +2811,7 @@ pub(crate) fn find_type_decl_for_path(
         if let PathView::Pident(parent_id) = parent.view() {
             if let Ok(module_desc) = env
                 .lookup_module(parent)
-                .or_else(|_| env.find_module(parent_id.name()))
+                .or_else(|_| env.find_module(parent_id.name_atom()))
             {
                 use crate::types::decl::ModuleType;
                 use crate::types::decl::SignatureItem;

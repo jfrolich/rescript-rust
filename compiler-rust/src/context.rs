@@ -110,7 +110,7 @@ impl IdGenerator {
 
     /// Create a new local identifier.
     #[inline]
-    pub fn create(&self, name: &str) -> Ident {
+    pub fn create(&self, name: impl Into<crate::name::Name>) -> Ident {
         let stamp = self.next_stamp();
         Ident::new(name, stamp, IdentFlags::NONE)
     }

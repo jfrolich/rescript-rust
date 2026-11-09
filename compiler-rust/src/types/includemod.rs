@@ -1857,7 +1857,7 @@ fn check_paired_signature_items(
                 if !env.is_implicit_coercion() {
                     type_ctx
                         .usage()
-                        .mark_module_used(impl_id.name(), type_ctx.resolve_loc(impl_mod_decl.md_loc));
+                        .mark_module_used(impl_id.name_atom(), type_ctx.resolve_loc(impl_mod_decl.md_loc));
                 }
                 // Match compiler/ml/includemod.ml:396-413:
                 // `module_declarations` always strengthens the implementation
@@ -2155,7 +2155,7 @@ fn value_descriptions(
     if !env.is_implicit_coercion() {
         type_ctx
             .usage()
-            .mark_value_used(id.name(), type_ctx.resolve_loc(impl_desc.val_loc));
+            .mark_value_used(id.name_atom(), type_ctx.resolve_loc(impl_desc.val_loc));
     }
     if let Some(warning) = deprecated_inclusion_warning(
         type_ctx,
@@ -2797,7 +2797,7 @@ pub(crate) fn type_declarations(
     warnings: &mut Vec<Warning>,
 ) -> IncludeModResult<()> {
     // includemod.ml:66-67: `Env.mark_type_used env (Ident.name id) decl1`.
-    crate::types::typecore::mark_type_used(type_ctx, env, id.name(), type_ctx.resolve_loc(impl_decl.type_loc));
+    crate::types::typecore::mark_type_used(type_ctx, env, id.name_atom(), type_ctx.resolve_loc(impl_decl.type_loc));
     // includecore.ml:384-398 marks the implementation's constructors when both
     // declarations are variants.
     if let (
