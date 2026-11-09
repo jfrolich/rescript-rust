@@ -380,11 +380,19 @@ fn open_path_for_write(path: &Path) -> rusqlite::Result<Connection> {
         drop(conn);
         let _ = std::fs::remove_file(path);
         conn = Connection::open(path)?;
+        // Larger pages: rows hold encoded interfaces of several KB, and a
+        // build writes tens of MB, which 4 KB pages split into many more
+        // pages and writes. Takes effect only before the first table.
+        conn.pragma_update(None, "page_size", 16384)?;
         conn.execute_batch(SCHEMA)?;
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     }
     // A lost write only costs a rebuild, so don't wait for the disk.
     conn.pragma_update(None, "synchronous", "OFF")?;
+    // A record write is one transaction of up to tens of MB; with SQLite's
+    // default 2 MB page cache, dirty pages spill to the file mid-transaction
+    // and are written again on commit.
+    conn.pragma_update(None, "cache_size", -262_144)?;
     Ok(conn)
 }
 
