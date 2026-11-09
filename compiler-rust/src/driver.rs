@@ -9489,7 +9489,7 @@ fn format_package_type_expr_for_error(
     ty: TypeExprRef,
 ) -> String {
     let repr = type_ctx.repr(ty);
-    let desc = (*type_ctx.get_desc(repr)).clone();
+    let desc = (*type_ctx.get_desc(repr));
     let TypeDesc::Tpackage { path, lids, args } = desc else {
         return format_type_expr(type_ctx, ty);
     };
@@ -10402,7 +10402,7 @@ fn build_name_based_coercion(
                 {
                     ModuleCoercion::Tcoerce_alias(
                         EnvRef(0),
-                        impl_path.clone(),
+                        *impl_path,
                         Box::new(ModuleCoercion::Tcoerce_none),
                     )
                 } else {
@@ -10418,7 +10418,7 @@ fn build_name_based_coercion(
                 // coercion at the same boundary.
                 ModuleCoercion::Tcoerce_alias(
                     EnvRef(0),
-                    impl_path.clone(),
+                    *impl_path,
                     Box::new(ModuleCoercion::Tcoerce_none),
                 )
             }
@@ -11608,8 +11608,8 @@ fn moregen_link(
                 path: p2, args: a2, ..
             },
         ) if moregen_paths_compatible(p1, p2) && a1.len() == a2.len() => {
-            let a1 = a1.clone();
-            let a2 = a2.clone();
+            let a1 = *a1;
+            let a2 = *a2;
             drop(impl_desc);
             drop(iface_desc);
             for (a, b) in ctx.type_list(a1).iter().zip(ctx.type_list(a2).iter()) {
@@ -11619,7 +11619,7 @@ fn moregen_link(
         (TypeDesc::Tarrow { args: a1, ret: r1 }, TypeDesc::Tarrow { args: a2, ret: r2 })
             if a1.len() == a2.len() =>
         {
-            let (a1, a2, r1, r2) = (a1.clone(), a2.clone(), *r1, *r2);
+            let (a1, a2, r1, r2) = (*a1, *a2, *r1, *r2);
             drop(impl_desc);
             drop(iface_desc);
             for (a1, a2) in ctx.type_args(a1).iter().zip(ctx.type_args(a2).iter()) {
@@ -11628,8 +11628,8 @@ fn moregen_link(
             moregen_link(ctx, r1, r2, visited);
         }
         (TypeDesc::Ttuple(t1), TypeDesc::Ttuple(t2)) if t1.len() == t2.len() => {
-            let t1 = t1.clone();
-            let t2 = t2.clone();
+            let t1 = *t1;
+            let t2 = *t2;
             drop(impl_desc);
             drop(iface_desc);
             for (a, b) in ctx.type_list(t1).iter().zip(ctx.type_list(t2).iter()) {

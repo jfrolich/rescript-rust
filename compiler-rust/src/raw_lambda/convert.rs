@@ -7545,7 +7545,7 @@ mod tests {
             cstr_existentials: Vec::new(),
             cstr_args: Vec::new(),
             cstr_arity: 0,
-            cstr_kind: crate::types::ConstructorKind::Extension(path.clone()),
+            cstr_kind: crate::types::ConstructorKind::Extension(path),
             cstr_generalized: false,
             cstr_private: crate::types::asttypes::PrivateFlag::Public,
             cstr_loc: crate::types::DeclLoc::none(),
@@ -8319,8 +8319,8 @@ mod tests {
         let icon_export_path =
             crate::types::Path::pdot(crate::types::Path::pident(icon), export.name().to_string());
         let subtitles_path =
-            crate::types::Path::pdot(icon_export_path.clone(), subtitles.name().to_string());
-        let main_path = crate::types::Path::pdot(subtitles_path.clone(), main.name().to_string());
+            crate::types::Path::pdot(icon_export_path, subtitles.name().to_string());
+        let main_path = crate::types::Path::pdot(subtitles_path, main.name().to_string());
 
         let main_decl = crate::types::decl::ModuleDeclaration {
             md_type: test_signature_module_type(vec![crate::types::SignatureItem::SigValue(
@@ -8359,7 +8359,7 @@ mod tests {
                                             crate::types::decl::ModuleDeclaration {
                                                 md_type: crate::types::decl::ModuleType::MtyAlias(
                                                     crate::types::decl::AliasPresence::MtaPresent,
-                                                    main_path.clone(),
+                                                    main_path,
                                                 ),
                                                 md_attributes: Vec::new(),
                                                 md_loc: crate::types::DeclLoc::none(),

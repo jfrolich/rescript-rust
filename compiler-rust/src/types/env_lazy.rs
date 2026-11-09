@@ -226,7 +226,7 @@ fn build_matching_type_constructors(
     constructor_name: &str,
     ctx: &super::context::TypeContext,
 ) {
-    let type_path = Path::pdot(access_path.clone(), type_name);
+    let type_path = Path::pdot(*access_path, type_name);
     build_type_constructors(out, &type_path, decl, Some(constructor_name), ctx);
 }
 
@@ -274,7 +274,7 @@ pub(crate) fn labels_of_type_path(
     let super::decl::TypeKind::TypeRecord(labels, repr) = &decl.type_kind else {
         return Vec::new();
     };
-    let res_ty = ctx.new_generic_constr(type_path.clone(), decl.type_params.clone());
+    let res_ty = ctx.new_generic_constr(*type_path, decl.type_params.clone());
     let mut descs: Vec<LabelDescription> = labels
         .iter()
         .enumerate()
@@ -310,7 +310,7 @@ fn build_type_constructors(
         return;
     };
 
-    let type_path = type_path.clone();
+    let type_path = *type_path;
     for (position, cd) in cstrs.iter().enumerate() {
         if constructor_name.is_some_and(|name| cd.cd_id.name() != name) {
             continue;
@@ -323,7 +323,7 @@ fn build_type_constructors(
             super::decl::ConstructorArguments::CstrRecord(labels) => {
                 let inline_params =
                     super::typecore::inline_record_type_params(ctx, &decl.type_params, labels);
-                let inline_path = Path::pdot(type_path.clone(), cd.cd_id.name());
+                let inline_path = Path::pdot(type_path, cd.cd_id.name());
                 let inline_constr = ctx.new_generic_constr(inline_path, inline_params.clone());
                 let inline_decl = TypeDeclaration {
                     type_params: inline_params.clone(),
@@ -365,7 +365,7 @@ fn build_type_constructors(
                 super::type_expr::TypeDesc::Tconstr { path, args, .. } => {
                     let old_result_module_path = path.parent();
                     let new_result_module_path = type_path.parent();
-                    let args = args.clone();
+                    let args = *args;
                     drop(desc);
                     if let (Some(old_prefix), Some(new_prefix)) =
                         (old_result_module_path, new_result_module_path)
@@ -387,7 +387,7 @@ fn build_type_constructors(
                             }
                         }
                     }
-                    ctx.new_generic_constr(type_path.clone(), ctx.type_list(args).to_vec())
+                    ctx.new_generic_constr(type_path, ctx.type_list(args).to_vec())
                 }
                 _ => {
                     drop(desc);
@@ -395,7 +395,7 @@ fn build_type_constructors(
                 }
             }
         } else {
-            ctx.new_generic_constr(type_path.clone(), decl.type_params.clone())
+            ctx.new_generic_constr(type_path, decl.type_params.clone())
         };
         out.insert(
             0,
@@ -439,7 +439,7 @@ fn build_matching_type_labels(
             continue;
         }
         let res_ty = *res_ty.get_or_insert_with(|| {
-            let type_path = Path::pdot(access_path.clone(), type_name);
+            let type_path = Path::pdot(*access_path, type_name);
             ctx.new_generic_constr(type_path, decl.type_params.clone())
         });
         let label_desc = LabelDescription {
@@ -492,7 +492,7 @@ fn build_constructors_for_name(
                 if id.name() != constructor_name {
                     continue;
                 }
-                let ext_path = Path::pdot_pos(access_path.clone(), id.name(), ext_slot);
+                let ext_path = Path::pdot_pos(*access_path, id.name(), ext_slot);
                 let (cstr_args, cstr_arity, cstr_inlined) = match &ext.ext_args {
                     super::decl::ConstructorArguments::CstrTuple(args) => {
                         (args.clone(), args.len() as i32, None)
@@ -503,9 +503,9 @@ fn build_constructors_for_name(
                             &ext.ext_type_params,
                             labels,
                         );
-                        let inline_path = ext_path.clone();
+                        let inline_path = ext_path;
                         let inline_constr =
-                            ctx.new_generic_constr(inline_path.clone(), inline_params.clone());
+                            ctx.new_generic_constr(inline_path, inline_params.clone());
                         let inline_decl = TypeDeclaration {
                             type_params: inline_params.clone(),
                             type_arity: inline_params.len() as i32,
@@ -548,7 +548,7 @@ fn build_constructors_for_name(
                         ),
                         cstr_args,
                         cstr_arity,
-                        cstr_kind: ConstructorKind::Extension(ext_path.clone()),
+                        cstr_kind: ConstructorKind::Extension(ext_path),
                         cstr_generalized: ext.ext_ret_type.is_some(),
                         cstr_private: ext.ext_private,
                         cstr_loc: ext.ext_loc,
@@ -689,7 +689,7 @@ fn strengthen_view_types(
             }
             SignatureItem::SigModtype(id, mtd) if mtd.mtd_type.is_none() => {
                 mtd.mtd_type = Some(super::decl::ModuleType::MtyIdent(Path::pdot(
-                    source.clone(),
+                    *source,
                     id.name(),
                 )));
             }
@@ -744,7 +744,7 @@ fn scan_child_component_from_signature(
                         md.clone(),
                         md.clone(),
                         child_access_path,
-                        Some((access_path.clone(), signature.clone())),
+                        Some((*access_path, signature.clone())),
                     );
                     working_env
                         .local_module_components_arc(&Path::pident(*id))
@@ -753,7 +753,7 @@ fn scan_child_component_from_signature(
                 if let (Some(source), Some((_, stored))) = (source_prefix, &stored) {
                     let _ = stored
                         .source_prefix
-                        .set(Path::pdot(source.clone(), id.name()));
+                        .set(Path::pdot(*source, id.name()));
                 }
                 // OCaml `Tbl.add` shadows earlier entries with the same name
                 // (compiler/ml/env.ml:1577-1578), so keep the latest scanned
@@ -883,10 +883,10 @@ impl QualifiedModuleComponents {
                     }
                     let (old_prefix, new_prefix) = match item {
                         SignatureItem::SigModule(id, _, _) => (
-                            Path::pdot(source.clone(), id.name()),
-                            Path::pdot(access_path.clone(), id.name()),
+                            Path::pdot(*source, id.name()),
+                            Path::pdot(access_path, id.name()),
                         ),
-                        _ => (source.clone(), access_path.clone()),
+                        _ => (*source, access_path),
                     };
                     crate::cmi::persistent_env::rewrite_sig_by_path_prefix(
                         std::slice::from_ref(item),
@@ -927,14 +927,14 @@ impl QualifiedModuleComponents {
                     | super::decl::ModuleType::MtyIdent(alias_source) = &md.md_type
                 {
                     let component_path =
-                        Path::pdot_pos(access_path.clone(), id.name(), runtime_pos as i32);
+                        Path::pdot_pos(access_path, id.name(), runtime_pos as i32);
                     // OCaml compiler/ml/env.ml:1517 `scrape_alias` follows
                     // the module declaration's alias path through
                     // env.ml:865-882 `find_module`, then env.ml:1530-1578
                     // stores thunks under the selected component path.
                     // Preserve the actual source path from the declaration
                     // instead of recovering it from flattened spelling.
-                    ctx.register_component_alias_source(component_path, alias_source.clone());
+                    ctx.register_component_alias_source(component_path, *alias_source);
                 }
             } else {
                 let idx = *modtype_items.next().expect("peeked modtype item");
@@ -1603,13 +1603,13 @@ fn qualified_submodule_access_path(
         // stores child component thunks under that prefixed path. Do not let an
         // alias module's own `md_path` replace the selected component path.
         Path::pdot_pos(
-            parent_access_path.clone(),
+            *parent_access_path,
             module_name.to_string(),
             runtime_pos as i32,
         )
     } else {
         Path::pdot_pos(
-            parent_access_path.clone(),
+            *parent_access_path,
             module_name.to_string(),
             runtime_pos as i32,
         )
@@ -1713,7 +1713,7 @@ fn self_alias_raw_parent_module_item(
                     *id,
                     raw_md.clone(),
                     (*raw_parent_sig).clone(),
-                    raw_parent_path.clone(),
+                    raw_parent_path,
                 )),
                 _ => None,
             })
@@ -1792,7 +1792,7 @@ fn build_local_module_components(
             // instead of renaming and copying the unit's signature.
             return Some(
                 QualifiedModuleComponents::new_with_child_components_arc_and_value_source_prefix(
-                    access_path.clone(),
+                    *access_path,
                     ps.ps_sig.clone(),
                     HashMap::new(),
                     Some(source_prefix),
@@ -1958,7 +1958,7 @@ fn build_local_module_components(
             // module declaration, so apply that same parent-prefix-to-selected
             // substitution to the copied signature without consuming extra
             // component-thunk stamps.
-            let target_prefix = Path::pdot(parent_access_path.clone(), alias_name);
+            let target_prefix = Path::pdot(*parent_access_path, alias_name);
             crate::cmi::persistent_env::rewrite_sig_by_path_prefix(
                 &qualified_sig,
                 &target_prefix,
@@ -2060,7 +2060,7 @@ fn build_local_module_components(
                         env_decl,
                         component_decl,
                         child_access_path,
-                        Some((access_path.clone(), qualified_sig_for_children.clone())),
+                        Some((*access_path, qualified_sig_for_children.clone())),
                     );
                 }
                 if let Some(working_env) = working_env.as_ref()
@@ -2091,7 +2091,7 @@ fn build_local_module_components(
 
     Some(
         QualifiedModuleComponents::new_with_complete_child_components_arc(
-            access_path.clone(),
+            *access_path,
             qualified_sig,
             child_components,
             ctx,
@@ -2321,7 +2321,7 @@ impl StoredModuleComponents {
             self.functor_result_subst_cache
                 .get_or_init(|| RefCell::new(HashMap::new()))
                 .borrow_mut()
-                .insert(arg_path.clone(), (substituted.clone(), piece));
+                .insert(*arg_path, (substituted.clone(), piece));
         }
         Some(substituted)
     }

@@ -141,7 +141,7 @@ pub fn row_repr(ctx: &TypeContext, row: &RowDesc) -> RowDesc {
     loop {
         let more = ctx.repr(current.row_more);
         let inner = match &*ctx.borrow_desc(more) {
-            TypeDesc::Tvariant(inner_row) => Some(inner_row.clone()),
+            TypeDesc::Tvariant(inner_row) => Some(*inner_row),
             _ => None,
         };
         match inner {

@@ -13,7 +13,7 @@ pub use super::process_cmt::dig;
 /// `Shared.dig_constructor`.
 pub fn dig_constructor(types: &TypeContext, t: TypeExprRef) -> Option<Path> {
     match &*types.get_desc(dig(types, t)) {
-        TypeDesc::Tconstr { path, .. } => Some(path.clone()),
+        TypeDesc::Tconstr { path, .. } => Some(*path),
         _ => None,
     }
 }
@@ -45,7 +45,7 @@ pub fn decl_to_string(
 pub fn find_type_constructors_in(types: &TypeContext, tel: &[TypeExprRef], paths: &mut Vec<Path>) {
     fn add_path(paths: &mut Vec<Path>, path: &Path) {
         if !paths.iter().any(|p| p.same(path)) {
-            paths.push(path.clone());
+            paths.push(*path);
         }
     }
     fn walk(types: &TypeContext, te: TypeExprRef, paths: &mut Vec<Path>) {
