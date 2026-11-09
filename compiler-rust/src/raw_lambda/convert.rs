@@ -224,7 +224,7 @@ fn nonrecursive_alias_any_binding(ta: &TypedArena, binding: &ValueBinding) -> bo
 /// The label's runtime name, decided when its declaration was typed
 /// (OCaml `lbl.lbl_runtime_name`).
 fn label_runtime_name(lbl: &LabelDescription) -> String {
-    lbl.lbl_runtime_name.clone()
+    lbl.lbl_runtime_name.to_string()
 }
 
 fn constructor_runtime_tag(
@@ -973,7 +973,7 @@ impl<'a> RawLambdaConverter<'a> {
                                 .iter()
                                 .enumerate()
                                 .map(|(pos, ld)| {
-                                    let name = ld.declaration_name();
+                                    let name = ld.declaration_name().to_string();
                                     (
                                         name,
                                         pos as i32,

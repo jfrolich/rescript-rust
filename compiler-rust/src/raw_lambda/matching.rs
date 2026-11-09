@@ -1099,9 +1099,9 @@ fn record_all_labels(
                     cached
                         .into_iter()
                         .map(|(name, pos, mutflag, repr, attrs)| LabelDescription {
-                            lbl_name: name.clone(),
+                            lbl_name: crate::name::Name::new(&name),
                             // typecore.ml `Label` name choice: `lbl_runtime_name = name`.
-                            lbl_runtime_name: name,
+                            lbl_runtime_name: crate::name::Name::new(&name),
                             lbl_res: TypeExprRef(0),
                             lbl_arg: TypeExprRef(0),
                             lbl_mut: mutflag,
@@ -5135,7 +5135,7 @@ fn matcher_constr_arityN<'p>(
 
 /// The label's runtime name (OCaml `lbl.lbl_runtime_name`).
 fn label_runtime_name_matching(lbl: &LabelDescription) -> String {
-    lbl.lbl_runtime_name.clone()
+    lbl.lbl_runtime_name.to_string()
 }
 
 /// Create field debug info for a record label (equivalent to OCaml's Lambda.fld_record).
@@ -8498,9 +8498,9 @@ fn label_descriptions_from_cached_entries(
     cached
         .into_iter()
         .map(|(name, pos, mutflag, repr, attrs)| LabelDescription {
-            lbl_name: name.clone(),
+            lbl_name: crate::name::Name::new(&name),
             // typecore.ml `Label` name choice: `lbl_runtime_name = name`.
-            lbl_runtime_name: name,
+            lbl_runtime_name: crate::name::Name::new(&name),
             lbl_res: TypeExprRef(0),
             lbl_arg: TypeExprRef(0),
             lbl_mut: mutflag,
@@ -8538,9 +8538,9 @@ fn resolve_labels_from_type(
                 cached
                     .into_iter()
                     .map(|(name, pos, mutflag, repr, attrs)| LabelDescription {
-                        lbl_name: name.clone(),
+                        lbl_name: crate::name::Name::new(&name),
                         // typecore.ml `Label` name choice: `lbl_runtime_name = name`.
-                        lbl_runtime_name: name,
+                        lbl_runtime_name: crate::name::Name::new(&name),
                         lbl_res: TypeExprRef(0),
                         lbl_arg: TypeExprRef(0),
                         lbl_mut: mutflag,
@@ -8639,7 +8639,7 @@ fn build_label_descriptions(
         .enumerate()
         .map(|(pos, ld)| {
             LabelDescription {
-                lbl_name: ld.ld_id.name().to_string(),
+                lbl_name: ld.ld_id.name_atom(),
                 lbl_runtime_name: ld.declaration_name(),
                 lbl_res: TypeExprRef(0), // Not used by matching
                 lbl_arg: ld.ld_type,

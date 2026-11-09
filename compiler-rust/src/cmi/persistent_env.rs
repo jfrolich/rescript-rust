@@ -7168,7 +7168,7 @@ fn add_signature_to_env_with_options_inner(
                                         .new_constr(inline_path, inlined_decl.type_params.clone());
                                     for (pos, ld) in labels.iter().enumerate() {
                                         let label_desc = LabelDescription {
-                                            lbl_name: ld.ld_id.name().to_string(),
+                                            lbl_name: ld.ld_id.name_atom(),
                                             lbl_runtime_name: ld.declaration_name(),
                                             lbl_res: ty_res,
                                             lbl_arg:
@@ -7208,7 +7208,7 @@ fn add_signature_to_env_with_options_inner(
 
                         for (pos, ld) in labels.iter().enumerate() {
                             let label_desc = LabelDescription {
-                                lbl_name: ld.ld_id.name().to_string(),
+                                lbl_name: ld.ld_id.name_atom(),
                                 lbl_runtime_name: ld.declaration_name(),
                                 lbl_res: res_ty,
                                 lbl_arg: crate::types::ctype::remap_label_type_to_params(

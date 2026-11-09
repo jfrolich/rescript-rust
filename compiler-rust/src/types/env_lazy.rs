@@ -279,7 +279,7 @@ pub(crate) fn labels_of_type_path(
         .iter()
         .enumerate()
         .map(|(pos, ld)| LabelDescription {
-            lbl_name: ld.ld_id.name().to_string(),
+            lbl_name: ld.ld_id.name_atom(),
             lbl_runtime_name: ld.declaration_name(),
             lbl_res: res_ty,
             lbl_arg: super::ctype::remap_label_type_to_params(ctx, ld.ld_type, &decl.type_params),
@@ -443,7 +443,7 @@ fn build_matching_type_labels(
             ctx.new_generic_constr(type_path, decl.type_params.clone())
         });
         let label_desc = LabelDescription {
-            lbl_name: ld.ld_id.name().to_string(),
+            lbl_name: ld.ld_id.name_atom(),
             lbl_runtime_name: ld.declaration_name(),
             lbl_res: res_ty,
             lbl_arg: super::ctype::remap_label_type_to_params(ctx, ld.ld_type, &decl.type_params),
