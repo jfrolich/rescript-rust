@@ -17,10 +17,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
+use smallvec::SmallVec;
+
 use super::persistent_env::InMemoryModuleInfo;
 use super::portable_types::{
     PortablePersStruct, PortableRowField, PortableTypeDesc, PortableTypeEntry,
 };
+use crate::name::Name;
 use crate::types::decl::{
     ConstructorArguments, LabelDeclaration, ModuleType, Signature, SignatureItem, TypeInlinedType,
     TypeKind,
@@ -61,20 +64,87 @@ pub fn item_key(kind: Kind, name: &str) -> String {
     format!("{}:{name}", kind.tag())
 }
 
+/// What a compile read of a unit: every item, the module-level facts, or one
+/// top-level item. Stored as the strings [`WHOLE`], [`MODULE_LEVEL`] and
+/// [`item_key`] (see [`ItemKey::to_key_string`]); orders as those strings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ItemKey {
+    Whole,
+    ModuleLevel,
+    Item(Kind, Name),
+}
+
+impl ItemKey {
+    /// The key as stored.
+    pub fn to_key_string(self) -> String {
+        match self {
+            ItemKey::Whole => WHOLE.to_string(),
+            ItemKey::ModuleLevel => MODULE_LEVEL.to_string(),
+            ItemKey::Item(kind, name) => item_key(kind, &name),
+        }
+    }
+}
+
+impl Ord for ItemKey {
+    /// The order of the stored strings: `*` < `@` < `k:name`, items by
+    /// kind tag and then name (every item key has `:` second).
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        fn rank(key: &ItemKey) -> u8 {
+            match key {
+                ItemKey::Whole => 0,
+                ItemKey::ModuleLevel => 1,
+                ItemKey::Item(..) => 2,
+            }
+        }
+        match (self, other) {
+            (ItemKey::Item(ka, na), ItemKey::Item(kb, nb)) => {
+                (ka.tag(), na.as_str()).cmp(&(kb.tag(), nb.as_str()))
+            }
+            _ => rank(self).cmp(&rank(other)),
+        }
+    }
+}
+
+impl PartialOrd for ItemKey {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// The items read of each unit, by unit name (ordered as the names).
+pub type ResolvedReads = BTreeMap<Name, BTreeSet<ItemKey>>;
+
+/// The path segments of a read; most paths have few.
+pub type Segs = SmallVec<[Name; 3]>;
+
 /// A reference to something in a unit: `unit.segs`, where the last segment
 /// is of `kind`. Empty `segs` is the unit itself, as a whole module.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct UnitRead {
-    pub unit: String,
-    pub segs: Vec<String>,
+    pub unit: Name,
+    pub segs: Segs,
     pub kind: Kind,
+}
+
+/// The root of a dotted path and its segments, `None` under a functor
+/// application.
+fn flatten_names(path: Path, segs: &mut Segs) -> Option<&'static crate::ident::Ident> {
+    match path.view() {
+        PathView::Pident(id) => Some(id),
+        PathView::Pdot(parent, name, _) => {
+            let root = flatten_names(*parent, segs)?;
+            segs.push(*name);
+            Some(root)
+        }
+        PathView::Papply(_, _) => None,
+    }
 }
 
 /// The read a path denotes. Paths rooted at a persistent unit read that unit;
 /// with `own_unit`, paths rooted at a local identifier are read in it (used
 /// for the declarations of a unit's own signature). Functor applications
 /// read the functor and the argument as whole modules.
-pub fn read_of_path(path: &Path, kind: Kind, own_unit: Option<&str>, out: &mut Vec<UnitRead>) {
+pub fn read_of_path(path: &Path, kind: Kind, own_unit: Option<Name>, out: &mut Vec<UnitRead>) {
     // Without `own_unit` only paths with a persistent root read anything.
     if own_unit.is_none() && !has_persistent_head(path) {
         return;
@@ -84,28 +154,23 @@ pub fn read_of_path(path: &Path, kind: Kind, own_unit: Option<&str>, out: &mut V
         read_of_path(x, Kind::Module, own_unit, out);
         return;
     }
-    let Ok((root, segs)) = path.flatten() else {
+    let mut segs = Segs::new();
+    let Some(root) = flatten_names(*path, &mut segs) else {
         // A dotted path under a functor application.
         for head in path.heads() {
             read_of_path(&Path::pident(*head), Kind::Module, own_unit, out);
         }
         return;
     };
-    let segs: Vec<String> = segs.into_iter().map(str::to_string).collect();
     if root.is_persistent() {
         out.push(UnitRead {
-            unit: root.name().to_string(),
+            unit: root.name_atom(),
             segs,
             kind,
         });
     } else if let Some(unit) = own_unit {
-        let mut full = vec![root.name().to_string()];
-        full.extend(segs);
-        out.push(UnitRead {
-            unit: unit.to_string(),
-            segs: full,
-            kind,
-        });
+        segs.insert(0, root.name_atom());
+        out.push(UnitRead { unit, segs, kind });
     }
 }
 
@@ -118,19 +183,19 @@ fn has_persistent_head(path: &Path) -> bool {
 }
 
 /// The kind and name of a top-level item, `None` for class items.
-fn sig_item_kind_name(item: &SignatureItem) -> Option<(Kind, &'static str)> {
+fn sig_item_kind_name(item: &SignatureItem) -> Option<(Kind, Name)> {
     Some(match item {
-        SignatureItem::SigValue(id, _) => (Kind::Value, id.name()),
-        SignatureItem::SigType(id, _, _) => (Kind::Type, id.name()),
-        SignatureItem::SigTypext(id, _, _) => (Kind::Extension, id.name()),
-        SignatureItem::SigModule(id, _, _) => (Kind::Module, id.name()),
-        SignatureItem::SigModtype(id, _) => (Kind::Modtype, id.name()),
+        SignatureItem::SigValue(id, _) => (Kind::Value, id.name_atom()),
+        SignatureItem::SigType(id, _, _) => (Kind::Type, id.name_atom()),
+        SignatureItem::SigTypext(id, _, _) => (Kind::Extension, id.name_atom()),
+        SignatureItem::SigModule(id, _, _) => (Kind::Module, id.name_atom()),
+        SignatureItem::SigModtype(id, _) => (Kind::Modtype, id.name_atom()),
         SignatureItem::SigClass | SignatureItem::SigClassType => return None,
     })
 }
 
 fn sig_item_key(item: &SignatureItem) -> Option<String> {
-    sig_item_kind_name(item).map(|(kind, name)| item_key(kind, name))
+    sig_item_kind_name(item).map(|(kind, name)| item_key(kind, &name))
 }
 
 fn hash_one(value: &impl Hash) -> u64 {
@@ -209,11 +274,11 @@ pub fn item_digests(
 
 /// Collects the references of a unit's declarations.
 struct RefWalker<'a> {
-    unit: &'a str,
+    unit: Name,
     /// The unit's top-level item keys: a local identifier that names none of
     /// them is predefined (`int`, `option`) or bound inside the item being
     /// walked (a functor parameter, a sibling in a submodule).
-    own_keys: &'a ahash::AHashSet<(Kind, &'static str)>,
+    own_keys: &'a ahash::AHashSet<(Kind, Name)>,
     entries: &'a [PortableTypeEntry],
     /// `seen[idx] == epoch` when entry `idx` was walked for the current item.
     seen: Vec<u32>,
@@ -237,7 +302,7 @@ impl RefWalker<'_> {
                     } else {
                         read.kind
                     };
-                    own_keys.contains(&(first_kind, first.as_str()))
+                    own_keys.contains(&(first_kind, *first))
                 });
             if keep {
                 index += 1;
@@ -407,20 +472,20 @@ impl RefWalker<'_> {
 
 /// The references of the items of one unit's signature, computed once.
 pub struct UnitRefs {
-    /// Item key to the references of its declaration(s) and inlinable
-    /// lambda.
-    pub refs: ahash::AHashMap<String, Vec<UnitRead>>,
-    /// The module aliases among the items: key to alias targets.
-    pub aliases: ahash::AHashMap<String, Vec<UnitRead>>,
+    /// Item (kind and name) to the references of its declaration(s) and
+    /// inlinable lambda.
+    pub refs: ahash::AHashMap<(Kind, Name), Vec<UnitRead>>,
+    /// The module aliases among the items: item to alias targets.
+    pub aliases: ahash::AHashMap<(Kind, Name), Vec<UnitRead>>,
 }
 
 /// The references of every item of `ps`.
-pub fn unit_refs(unit: &str, ps: &PortablePersStruct, source: &dyn UnitSource) -> UnitRefs {
+pub fn unit_refs(unit: Name, ps: &PortablePersStruct, source: &dyn UnitSource) -> UnitRefs {
     let ps = ps.signature();
-    let own_keys: ahash::AHashSet<(Kind, &'static str)> =
+    let own_keys: ahash::AHashSet<(Kind, Name)> =
         ps.ps_sig.iter().filter_map(sig_item_kind_name).collect();
-    let mut refs: ahash::AHashMap<String, Vec<UnitRead>> = ahash::AHashMap::new();
-    let mut aliases: ahash::AHashMap<String, Vec<UnitRead>> = ahash::AHashMap::new();
+    let mut refs: ahash::AHashMap<(Kind, Name), Vec<UnitRead>> = ahash::AHashMap::new();
+    let mut aliases: ahash::AHashMap<(Kind, Name), Vec<UnitRead>> = ahash::AHashMap::new();
     // One `seen` buffer for all items; each item's walk uses a fresh epoch.
     let mut walker = RefWalker {
         unit,
@@ -431,7 +496,7 @@ pub fn unit_refs(unit: &str, ps: &PortablePersStruct, source: &dyn UnitSource) -
         out: Vec::new(),
     };
     for item in &ps.ps_sig {
-        let Some(key) = sig_item_key(item) else {
+        let Some(key) = sig_item_kind_name(item) else {
             continue;
         };
         walker.epoch += 1;
@@ -450,7 +515,7 @@ pub fn unit_refs(unit: &str, ps: &PortablePersStruct, source: &dyn UnitSource) -
                 for lambda_unit in source.lambda_units(unit, id.name()) {
                     out.push(UnitRead {
                         unit: lambda_unit,
-                        segs: Vec::new(),
+                        segs: Segs::new(),
                         kind: Kind::Module,
                     });
                 }
@@ -462,9 +527,9 @@ pub fn unit_refs(unit: &str, ps: &PortablePersStruct, source: &dyn UnitSource) -
         {
             let mut targets = Vec::new();
             read_of_path(target, Kind::Module, Some(unit), &mut targets);
-            aliases.entry(key.clone()).or_default().extend(targets);
+            aliases.entry(key).or_default().extend(targets);
         }
-        out.sort_by(|a, b| (&a.unit, &a.segs, a.kind).cmp(&(&b.unit, &b.segs, b.kind)));
+        out.sort_by(|a, b| (a.unit, &a.segs, a.kind).cmp(&(b.unit, &b.segs, b.kind)));
         out.dedup();
         refs.entry(key).or_default().extend(out);
     }
@@ -473,55 +538,49 @@ pub fn unit_refs(unit: &str, ps: &PortablePersStruct, source: &dyn UnitSource) -
 
 /// What resolving reads needs to know about the units.
 pub trait UnitSource {
-    /// The unit's published signature, `None` when it is not known.
-    fn portable(&self, unit: &str) -> Option<Arc<PortablePersStruct>>;
     /// The units an inlinable lambda exported under `name` refers to.
-    fn lambda_units(&self, unit: &str, name: &str) -> Vec<String>;
+    fn lambda_units(&self, unit: Name, name: &str) -> Vec<Name>;
     /// Units whose reads need no recording (the runtime, which does not
     /// change within a build).
-    fn ignored(&self, unit: &str) -> bool;
+    fn ignored(&self, unit: Name) -> bool;
     /// The item references of a unit ([`unit_refs`] of its signature),
     /// `None` when it is not known.
-    fn refs(&self, unit: &str) -> Option<Arc<UnitRefs>>;
+    fn refs(&self, unit: Name) -> Option<Arc<UnitRefs>>;
 }
 
-/// Resolve `initial` reads to the item keys read in each unit, closed over
-/// the declarations of the items read and over module aliases.
+/// Resolve `initial` reads to the items read in each unit, closed over the
+/// declarations of the items read and over module aliases.
 pub fn resolve_reads(
     initial: impl IntoIterator<Item = UnitRead>,
     source: &dyn UnitSource,
-) -> BTreeMap<String, BTreeSet<String>> {
-    let mut result: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+) -> ResolvedReads {
+    let mut result: ResolvedReads = BTreeMap::new();
     let mut work: Vec<UnitRead> = initial.into_iter().collect();
-    let mut done: ahash::AHashSet<UnitRead> = ahash::AHashSet::new();
+    let mut done: ahash::AHashSet<UnitRead> = ahash::AHashSet::with_capacity(work.len());
     // Per unit: `None` when ignored, else its references if known.
-    let mut units: ahash::AHashMap<String, Option<Option<Arc<UnitRefs>>>> = ahash::AHashMap::new();
+    let mut units: ahash::AHashMap<Name, Option<Option<Arc<UnitRefs>>>> = ahash::AHashMap::new();
     while let Some(read) = work.pop() {
         if done.contains(&read) {
             continue;
         }
-        let unit_refs = match units.get(&read.unit) {
-            Some(known) => known.clone(),
-            None => {
-                let known = (!source.ignored(&read.unit)).then(|| source.refs(&read.unit));
-                units.insert(read.unit.clone(), known.clone());
-                known
-            }
-        };
+        let unit_refs = units
+            .entry(read.unit)
+            .or_insert_with(|| (!source.ignored(read.unit)).then(|| source.refs(read.unit)))
+            .clone();
         // An ignored unit.
         let Some(unit_refs) = unit_refs else {
             done.insert(read);
             continue;
         };
-        let keys = result.entry(read.unit.clone()).or_default();
-        keys.insert(MODULE_LEVEL.to_string());
+        let keys = result.entry(read.unit).or_default();
+        keys.insert(ItemKey::ModuleLevel);
         let Some(refs) = unit_refs else {
-            keys.insert(WHOLE.to_string());
+            keys.insert(ItemKey::Whole);
             done.insert(read);
             continue;
         };
         if read.segs.is_empty() {
-            if keys.insert(WHOLE.to_string()) {
+            if keys.insert(ItemKey::Whole) {
                 for item_refs in refs.refs.values() {
                     work.extend(item_refs.iter().cloned());
                 }
@@ -533,8 +592,8 @@ pub fn resolve_reads(
             } else {
                 Kind::Module
             };
-            let key = item_key(kind, &read.segs[0]);
-            if keys.insert(key.clone())
+            let key = (kind, read.segs[0]);
+            if keys.insert(ItemKey::Item(kind, read.segs[0]))
                 && let Some(item_refs) = refs.refs.get(&key)
             {
                 work.extend(item_refs.iter().cloned());
@@ -544,7 +603,7 @@ pub fn resolve_reads(
             if let Some(targets) = refs.aliases.get(&key) {
                 for target in targets {
                     let mut target = target.clone();
-                    target.segs.extend(rest.iter().cloned());
+                    target.segs.extend(rest.iter().copied());
                     target.kind = read.kind;
                     work.push(target);
                 }
