@@ -22855,8 +22855,8 @@ fn extract_type_path_from_expected_with_persistent_env(
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &crate::types::context::TypeContext,
 ) -> Option<Path> {
-    let mut visited_types = HashSet::new();
-    let mut visited_paths = HashSet::new();
+    let mut visited_types = ChainVisited::default();
+    let mut visited_paths = ChainVisited::default();
     extract_type_path_from_expected_inner(
         expected_ty,
         env,
@@ -22867,13 +22867,36 @@ fn extract_type_path_from_expected_with_persistent_env(
     )
 }
 
+/// A visited set for walks along a short manifest chain (a few steps at
+/// most): membership by linear scan, no hashing and no heap allocation for
+/// the common case.
+struct ChainVisited<T>(smallvec::SmallVec<[T; 4]>);
+
+impl<T> Default for ChainVisited<T> {
+    fn default() -> Self {
+        ChainVisited(smallvec::SmallVec::new())
+    }
+}
+
+impl<T: PartialEq> ChainVisited<T> {
+    /// Add `item`; false when it was already present (like `HashSet::insert`).
+    #[inline]
+    fn insert(&mut self, item: T) -> bool {
+        if self.0.contains(&item) {
+            return false;
+        }
+        self.0.push(item);
+        true
+    }
+}
+
 fn extract_type_path_from_expected_inner(
     expected_ty: TypeExprRef,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &crate::types::context::TypeContext,
-    visited_types: &mut HashSet<usize>,
-    visited_paths: &mut HashSet<Path>,
+    visited_types: &mut ChainVisited<usize>,
+    visited_paths: &mut ChainVisited<Path>,
 ) -> Option<Path> {
     let ty = ctx.repr(expected_ty);
     if !visited_types.insert(ty.key()) {
@@ -24456,8 +24479,8 @@ fn extract_concrete_record_type_info(
     ctx: &crate::types::context::TypeContext,
 ) -> Option<(Path, Vec<TypeExprRef>, Arc<crate::types::TypeDeclaration>)> {
     let mut current = ctx.repr(record_ty);
-    let mut visited_types = HashSet::new();
-    let mut visited_paths = HashSet::new();
+    let mut visited_types = ChainVisited::default();
+    let mut visited_paths = ChainVisited::default();
 
     loop {
         current = ctx.repr(current);
