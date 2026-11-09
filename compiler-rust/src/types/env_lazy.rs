@@ -128,13 +128,13 @@ fn check_signature_store_resident(signature: &[SignatureItem], ctx: &super::cont
     }
     let mut stack = Vec::new();
     signature_roots(signature, &mut stack);
-    let mut seen = crate::fast_hash::AHashSet::new();
+    let mut seen = super::type_marks::visit_set();
     while let Some(ty) = stack.pop() {
         if !ty.is_store() {
             ctx.poison_store_build_for("unit-signature");
             return;
         }
-        if seen.insert(ty) {
+        if seen.visit(ty) {
             super::btype::iter_type_expr(ctx, ty, |child| stack.push(child));
         }
     }

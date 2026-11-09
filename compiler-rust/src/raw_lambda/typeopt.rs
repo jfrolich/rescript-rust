@@ -54,7 +54,7 @@ pub(crate) fn constructor_has_optional_shape(cstr: &ConstructorDescription) -> b
 
 pub(crate) fn type_cannot_contain_undefined(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> bool {
     ctx.typeopt_answer(env.id(), ty, TYPEOPT_CANNOT_CONTAIN_UNDEFINED, || {
-        let mut seen = HashSet::new();
+        let mut seen = crate::types::type_marks::visit_set();
         type_cannot_contain_undefined_rec(ctx, env, ty, &mut seen)
     })
 }
@@ -68,10 +68,10 @@ fn type_cannot_contain_undefined_rec(
     ctx: &TypeContext,
     env: &Env,
     ty: TypeExprRef,
-    seen: &mut HashSet<TypeExprRef>,
+    seen: &mut crate::types::type_marks::TypeVisitSet,
 ) -> bool {
     let ty = scrape_ty(ctx, env, ty);
-    if !seen.insert(ty) {
+    if !seen.visit(ty) {
         return false;
     }
 

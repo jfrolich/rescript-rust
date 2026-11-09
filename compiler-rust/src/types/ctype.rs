@@ -12219,7 +12219,7 @@ pub fn subst_identity_copy(ctx: &TypeContext, ty: TypeExprRef) -> TypeExprRef {
 }
 
 pub fn subst_identity_copy_many(ctx: &TypeContext, types: &[TypeExprRef]) -> Vec<TypeExprRef> {
-    let mut seen = HashMap::new();
+    let mut seen = super::type_marks::ref_table();
     // OCaml compiler/ml/subst.ml:273-301 calls `typexp` for every type slot
     // in a declaration before the single `cleanup_types` call, so temporary
     // Tsubst markers preserve sharing between params, kind fields, and manifest.
@@ -12237,7 +12237,7 @@ pub fn subst_identity_copy_with_partial(
     ty: TypeExprRef,
     reopen_closed_variant_rows: bool,
 ) -> TypeExprRef {
-    let mut seen = HashMap::new();
+    let mut seen = super::type_marks::ref_table();
     // OCaml Subst.typexp uses a temporary `row_more.desc <- Tsubst(Ttuple [...])`
     // marker window to preserve recursive row sharing while copying.
     // Keep the same lifetime semantics in a scoped side table.
@@ -12263,7 +12263,7 @@ fn subst_identity_copy_rec(
     ctx: &TypeContext,
     ty: TypeExprRef,
     reopen_closed_variant_rows: bool,
-    seen: &mut HashMap<TypeExprRef, TypeExprRef>,
+    seen: &mut super::type_marks::TypeNodeTable<TypeExprRef>,
     row_more_markers: &mut HashMap<TypeExprRef, SubstRowMoreMarker>,
 ) -> TypeExprRef {
     let ty = ctx.repr(ty);
@@ -12274,7 +12274,7 @@ fn subst_identity_copy_rec(
         return marker.tuple;
     }
 
-    if let Some(&cached) = seen.get(&ty) {
+    if let Some(cached) = seen.get(ty) {
         return cached;
     }
 
@@ -12403,7 +12403,7 @@ fn subst_identity_copy_rec(
                     let mutability = {
                         let seen = &*seen;
                         ctx.copy_field_mutability(mutability, rest, false, &|t| {
-                            seen.get(&t).copied()
+                            seen.get(t)
                         })
                     };
                     let rest_copy = subst_identity_copy_rec(
@@ -13256,7 +13256,7 @@ pub fn tuple_elements(ctx: &TypeContext, ty: TypeExprRef) -> Option<Vec<TypeExpr
 /// For Tobject: flattens fields (sorts alphabetically), rebuilds chain, mutates desc.
 /// Recursively visits all sub-types.
 pub fn normalize_type(ctx: &TypeContext, env: &Env, ty: TypeExprRef) {
-    let mut visited = HashSet::new();
+    let mut visited = super::type_marks::visit_set();
     normalize_type_rec(ctx, env, &mut visited, ty);
 }
 
@@ -13343,11 +13343,11 @@ pub fn normalize_all_types(ctx: &TypeContext) {
 fn normalize_type_rec(
     ctx: &TypeContext,
     env: &Env,
-    visited: &mut HashSet<TypeExprRef>,
+    visited: &mut super::type_marks::TypeVisitSet,
     ty: TypeExprRef,
 ) {
     let ty = ctx.repr(ty);
-    if !visited.insert(ty) {
+    if !visited.visit(ty) {
         return;
     }
 
