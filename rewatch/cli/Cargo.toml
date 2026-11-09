@@ -10,6 +10,11 @@ description = "The `rescript` executable, with the runtime compiled in (see buil
 name = "rescript"
 path = "src/main.rs"
 
+[features]
+# Count allocations and sample allocation sites (scripts/perf/README.md).
+# Off by default: normal builds use plain mimalloc with no overhead.
+alloc-stats = []
+
 [dependencies]
 rescript = { path = ".." }
 rescript-compiler = { path = "../../compiler-rust" }
