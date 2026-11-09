@@ -3077,11 +3077,18 @@ impl TypeContext {
 
     /// Cache record label info for a type path.
     /// Called during type checking when record patterns are processed.
-    pub fn register_record_labels(&self, type_path: &Path, labels: Vec<CachedRecordLabel>) {
+    /// Cache the record labels of `type_path`, built by `labels` the first
+    /// time.
+    pub fn register_record_labels_with(
+        &self,
+        type_path: &Path,
+        labels: impl FnOnce() -> Vec<CachedRecordLabel>,
+    ) {
         self.poison_store_build_for("register_record_labels");
         self.record_labels_cache
             .borrow_mut()
-            .insert(*type_path, labels);
+            .entry(*type_path)
+            .or_insert_with(labels);
     }
 
     /// Look up cached record labels for a type path.

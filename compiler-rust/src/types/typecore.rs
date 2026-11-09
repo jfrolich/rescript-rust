@@ -6413,7 +6413,7 @@ fn type_pattern_record(
 
     if !has_dict_pattern_attr {
         if let Some((_, label_desc, _, _)) = typed_fields.first() {
-            let _ = get_record_labels(ctx, env, &mut tctx.persistent_env, label_desc.lbl_res);
+            with_record_labels(ctx, env, &mut tctx.persistent_env, label_desc.lbl_res, |_| ());
         }
     }
 
@@ -15660,6 +15660,17 @@ fn get_record_labels(
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ty: TypeExprRef,
 ) -> Option<Vec<crate::types::decl::LabelDeclaration>> {
+    with_record_labels(ctx, env, pers_env, ty, <[_]>::to_vec)
+}
+
+/// `get_record_labels` that lends the labels to `f` instead of copying them.
+fn with_record_labels<R>(
+    ctx: &TypeContext,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ty: TypeExprRef,
+    f: impl FnOnce(&[crate::types::decl::LabelDeclaration]) -> R,
+) -> Option<R> {
     if let Some((path, _actual_args, type_decl)) =
         extract_concrete_record_type_info(ty, env, pers_env, ctx)
     {
@@ -15667,23 +15678,24 @@ fn get_record_labels(
             // Cache record labels for raw lambda all-field binding.
             // The full Path (including Ident stamps) is the cache key, so
             // different record types with the same name never collide.
-            let cache_key = path;
-            let cache_entries: Vec<_> = labels
-                .iter()
-                .enumerate()
-                .map(|(pos, ld)| {
-                    let name = ld.declaration_name().to_string();
-                    (
-                        name,
-                        pos as i32,
-                        ld.ld_mutable,
-                        repr.clone(),
-                        ld.ld_attributes.clone(),
-                    )
-                })
-                .collect();
-            ctx.register_record_labels(&cache_key, cache_entries);
-            return Some(labels.to_vec());
+            // A path names one declaration, so its entries never change.
+            ctx.register_record_labels_with(&path, || {
+                labels
+                    .iter()
+                    .enumerate()
+                    .map(|(pos, ld)| {
+                        let name = ld.declaration_name().to_string();
+                        (
+                            name,
+                            pos as i32,
+                            ld.ld_mutable,
+                            repr.clone(),
+                            ld.ld_attributes.clone(),
+                        )
+                    })
+                    .collect()
+            });
+            return Some(f(labels));
         }
     }
 
@@ -15723,7 +15735,7 @@ fn get_record_labels(
             if matches_inline_record_path(cstr) {
                 if let Some(ref inlined) = cstr.cstr_inlined {
                     if let crate::types::TypeKind::TypeRecord(ref labels, _) = inlined.type_kind {
-                        return Some(labels.to_vec());
+                        return Some(f(labels));
                     }
                 }
             }
