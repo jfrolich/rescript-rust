@@ -819,7 +819,7 @@ mod tests {
     fn prints_semantic_constructor_switch_keys() {
         let constant_key = crate::lambda::SwitchKey::Constructor(
             crate::types::VariantConstructorCase::Constant(crate::types::VariantTag {
-                name: "Null".to_string(),
+                name: crate::name::Name::new("Null"),
                 literal: None,
             }),
         );
@@ -827,7 +827,7 @@ mod tests {
             crate::lambda::SwitchKey::Constructor(crate::types::VariantConstructorCase::Block(
                 crate::types::VariantBlock::Tagged(crate::types::TaggedBlock {
                     tag: crate::types::VariantTag {
-                        name: "Boolean".to_string(),
+                        name: crate::name::Name::new("Boolean"),
                         literal: None,
                     },
                     tag_name: None,

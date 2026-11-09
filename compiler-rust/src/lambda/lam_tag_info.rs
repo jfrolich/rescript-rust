@@ -124,7 +124,7 @@ impl TagInfo {
         TagInfo::Constructor(Box::new(ConstructorTag {
             runtime: Box::new(crate::types::TaggedBlock {
                 tag: crate::types::VariantTag {
-                    name: name.clone(),
+                    name: crate::name::Name::new(&name),
                     literal: None,
                 },
                 tag_name: None,

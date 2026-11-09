@@ -3454,7 +3454,7 @@ fn decode_cmj_variant_tag(value: &OcamlValue) -> Option<crate::types::VariantTag
         return None;
     }
     Some(crate::types::VariantTag {
-        name: fields[0].as_string().to_string(),
+        name: crate::name::Name::new(fields[0].as_string()),
         literal: decode_cmj_variant_literal_tag_option(&fields[1])?,
     })
 }

@@ -1365,7 +1365,7 @@ mod tests {
                         crate::lambda::SwitchKey::Constructor(
                             crate::types::VariantConstructorCase::Constant(
                                 crate::types::VariantTag {
-                                    name: "A".to_string(),
+                                    name: crate::name::Name::new("A"),
                                     literal: None,
                                 },
                             ),
@@ -1441,7 +1441,7 @@ mod tests {
                             crate::lambda::SwitchKey::Constructor(
                                 crate::types::VariantConstructorCase::Constant(
                                     crate::types::VariantTag {
-                                        name: "A".to_string(),
+                                        name: crate::name::Name::new("A"),
                                         literal: None,
                                     },
                                 ),
@@ -1452,7 +1452,7 @@ mod tests {
                             crate::lambda::SwitchKey::Constructor(
                                 crate::types::VariantConstructorCase::Constant(
                                     crate::types::VariantTag {
-                                        name: "B".to_string(),
+                                        name: crate::name::Name::new("B"),
                                         literal: None,
                                     },
                                 ),

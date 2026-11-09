@@ -67,7 +67,7 @@ fn predef_exception_ident(name: &str, stamp: i32) -> Ident {
 
 fn recmodule_function_shape_constant() -> Constant {
     Constant::Constructor(crate::types::VariantTag {
-        name: "Function".to_string(),
+        name: crate::name::Name::new("Function"),
         literal: None,
     })
 }

@@ -15,7 +15,7 @@ fn named_variant_switch_expressions_split_const_and_block_dispatch() {
             sw_consts: vec![(
                 crate::lambda::SwitchKey::Constructor(
                     crate::types::VariantConstructorCase::Constant(crate::types::VariantTag {
-                        name: "A".to_string(),
+                        name: crate::name::Name::new("A"),
                         literal: None,
                     }),
                 ),
@@ -26,7 +26,7 @@ fn named_variant_switch_expressions_split_const_and_block_dispatch() {
                 crate::lambda::SwitchKey::Constructor(crate::types::VariantConstructorCase::Block(
                     crate::types::VariantBlock::Tagged(crate::types::TaggedBlock {
                         tag: crate::types::VariantTag {
-                            name: "B".to_string(),
+                            name: crate::name::Name::new("B"),
                             literal: None,
                         },
                         tag_name: None,
@@ -77,7 +77,7 @@ fn named_variant_constant_return_switch_skips_redundant_match_temp() {
                 (
                     crate::lambda::SwitchKey::Constructor(
                         crate::types::VariantConstructorCase::Constant(crate::types::VariantTag {
-                            name: "A".to_string(),
+                            name: crate::name::Name::new("A"),
                             literal: Some(crate::types::VariantLiteralTag::Int(0)),
                         }),
                     ),
@@ -86,7 +86,7 @@ fn named_variant_constant_return_switch_skips_redundant_match_temp() {
                 (
                     crate::lambda::SwitchKey::Constructor(
                         crate::types::VariantConstructorCase::Constant(crate::types::VariantTag {
-                            name: "B".to_string(),
+                            name: crate::name::Name::new("B"),
                             literal: Some(crate::types::VariantLiteralTag::Int(2)),
                         }),
                     ),
@@ -131,7 +131,7 @@ fn named_variant_return_switches_with_only_payload_cases_skip_object_split() {
                         crate::types::VariantConstructorCase::Block(
                             crate::types::VariantBlock::Tagged(crate::types::TaggedBlock {
                                 tag: crate::types::VariantTag {
-                                    name: "Ok".to_string(),
+                                    name: crate::name::Name::new("Ok"),
                                     literal: None,
                                 },
                                 tag_name: None,
@@ -145,7 +145,7 @@ fn named_variant_return_switches_with_only_payload_cases_skip_object_split() {
                         crate::types::VariantConstructorCase::Block(
                             crate::types::VariantBlock::Tagged(crate::types::TaggedBlock {
                                 tag: crate::types::VariantTag {
-                                    name: "Error".to_string(),
+                                    name: crate::name::Name::new("Error"),
                                     literal: None,
                                 },
                                 tag_name: None,
@@ -200,7 +200,7 @@ fn named_variant_mixed_const_and_identical_payload_return_cases_drop_redundant_t
             sw_consts: vec![(
                 crate::lambda::SwitchKey::Constructor(
                     crate::types::VariantConstructorCase::Constant(crate::types::VariantTag {
-                        name: "Empty".to_string(),
+                        name: crate::name::Name::new("Empty"),
                         literal: None,
                     }),
                 ),
@@ -213,7 +213,7 @@ fn named_variant_mixed_const_and_identical_payload_return_cases_drop_redundant_t
                         crate::types::VariantConstructorCase::Block(
                             crate::types::VariantBlock::Tagged(crate::types::TaggedBlock {
                                 tag: crate::types::VariantTag {
-                                    name: "Int1".to_string(),
+                                    name: crate::name::Name::new("Int1"),
                                     literal: None,
                                 },
                                 tag_name: None,
@@ -227,7 +227,7 @@ fn named_variant_mixed_const_and_identical_payload_return_cases_drop_redundant_t
                         crate::types::VariantConstructorCase::Block(
                             crate::types::VariantBlock::Tagged(crate::types::TaggedBlock {
                                 tag: crate::types::VariantTag {
-                                    name: "Int2".to_string(),
+                                    name: crate::name::Name::new("Int2"),
                                     literal: None,
                                 },
                                 tag_name: None,
@@ -273,7 +273,7 @@ fn named_variant_incomplete_payload_only_return_switches_keep_default_as_negated
                 crate::lambda::SwitchKey::Constructor(crate::types::VariantConstructorCase::Block(
                     crate::types::VariantBlock::Tagged(crate::types::TaggedBlock {
                         tag: crate::types::VariantTag {
-                            name: "C".to_string(),
+                            name: crate::name::Name::new("C"),
                             literal: None,
                         },
                         tag_name: None,
@@ -316,7 +316,7 @@ fn named_variant_incomplete_const_only_return_switches_keep_literal_guard() {
             sw_consts: vec![(
                 crate::lambda::SwitchKey::Constructor(
                     crate::types::VariantConstructorCase::Constant(crate::types::VariantTag {
-                        name: "A1".to_string(),
+                        name: crate::name::Name::new("A1"),
                         literal: None,
                     }),
                 ),
@@ -360,7 +360,7 @@ fn named_variant_return_switches_keep_default_only_const_side_inside_outer_else_
                 (
                     crate::lambda::SwitchKey::Constructor(
                         crate::types::VariantConstructorCase::Constant(crate::types::VariantTag {
-                            name: "A".to_string(),
+                            name: crate::name::Name::new("A"),
                             literal: None,
                         }),
                     ),
@@ -369,7 +369,7 @@ fn named_variant_return_switches_keep_default_only_const_side_inside_outer_else_
                 (
                     crate::lambda::SwitchKey::Constructor(
                         crate::types::VariantConstructorCase::Constant(crate::types::VariantTag {
-                            name: "B".to_string(),
+                            name: crate::name::Name::new("B"),
                             literal: None,
                         }),
                     ),
@@ -378,7 +378,7 @@ fn named_variant_return_switches_keep_default_only_const_side_inside_outer_else_
                 (
                     crate::lambda::SwitchKey::Constructor(
                         crate::types::VariantConstructorCase::Constant(crate::types::VariantTag {
-                            name: "C".to_string(),
+                            name: crate::name::Name::new("C"),
                             literal: None,
                         }),
                     ),
@@ -392,7 +392,7 @@ fn named_variant_return_switches_keep_default_only_const_side_inside_outer_else_
                         crate::types::VariantConstructorCase::Block(
                             crate::types::VariantBlock::Tagged(crate::types::TaggedBlock {
                                 tag: crate::types::VariantTag {
-                                    name: "WithPayloadA".to_string(),
+                                    name: crate::name::Name::new("WithPayloadA"),
                                     literal: None,
                                 },
                                 tag_name: None,
@@ -406,7 +406,7 @@ fn named_variant_return_switches_keep_default_only_const_side_inside_outer_else_
                         crate::types::VariantConstructorCase::Block(
                             crate::types::VariantBlock::Tagged(crate::types::TaggedBlock {
                                 tag: crate::types::VariantTag {
-                                    name: "WithPayloadB".to_string(),
+                                    name: crate::name::Name::new("WithPayloadB"),
                                     literal: None,
                                 },
                                 tag_name: None,
@@ -420,7 +420,7 @@ fn named_variant_return_switches_keep_default_only_const_side_inside_outer_else_
                         crate::types::VariantConstructorCase::Block(
                             crate::types::VariantBlock::Tagged(crate::types::TaggedBlock {
                                 tag: crate::types::VariantTag {
-                                    name: "WithPayloadC".to_string(),
+                                    name: crate::name::Name::new("WithPayloadC"),
                                     literal: None,
                                 },
                                 tag_name: None,
@@ -471,7 +471,7 @@ fn named_variant_return_switches_keep_shared_final_groups_inside_the_switch_with
                         crate::types::VariantConstructorCase::Block(
                             crate::types::VariantBlock::Tagged(crate::types::TaggedBlock {
                                 tag: crate::types::VariantTag {
-                                    name: "A".to_string(),
+                                    name: crate::name::Name::new("A"),
                                     literal: None,
                                 },
                                 tag_name: None,
@@ -485,7 +485,7 @@ fn named_variant_return_switches_keep_shared_final_groups_inside_the_switch_with
                         crate::types::VariantConstructorCase::Block(
                             crate::types::VariantBlock::Tagged(crate::types::TaggedBlock {
                                 tag: crate::types::VariantTag {
-                                    name: "B".to_string(),
+                                    name: crate::name::Name::new("B"),
                                     literal: None,
                                 },
                                 tag_name: None,
@@ -499,7 +499,7 @@ fn named_variant_return_switches_keep_shared_final_groups_inside_the_switch_with
                         crate::types::VariantConstructorCase::Block(
                             crate::types::VariantBlock::Tagged(crate::types::TaggedBlock {
                                 tag: crate::types::VariantTag {
-                                    name: "C".to_string(),
+                                    name: crate::name::Name::new("C"),
                                     literal: None,
                                 },
                                 tag_name: None,
@@ -544,7 +544,7 @@ fn builtin_untagged_block_switch_expressions_dispatch_on_object_runtime_shape() 
                 crate::lambda::SwitchKey::Constructor(crate::types::VariantConstructorCase::Block(
                     crate::types::VariantBlock::Untagged {
                         tag: crate::types::VariantTag {
-                            name: "Object".to_string(),
+                            name: crate::name::Name::new("Object"),
                             literal: None,
                         },
                         block_type: crate::types::VariantBlockType::Object,
@@ -593,7 +593,7 @@ fn object_and_array_untagged_return_switches_keep_object_inside_typeof_switch_li
                         crate::types::VariantConstructorCase::Block(
                             crate::types::VariantBlock::Untagged {
                                 tag: crate::types::VariantTag {
-                                    name: "String".to_string(),
+                                    name: crate::name::Name::new("String"),
                                     literal: None,
                                 },
                                 block_type: crate::types::VariantBlockType::String,
@@ -607,7 +607,7 @@ fn object_and_array_untagged_return_switches_keep_object_inside_typeof_switch_li
                         crate::types::VariantConstructorCase::Block(
                             crate::types::VariantBlock::Untagged {
                                 tag: crate::types::VariantTag {
-                                    name: "Number".to_string(),
+                                    name: crate::name::Name::new("Number"),
                                     literal: None,
                                 },
                                 block_type: crate::types::VariantBlockType::Int,
@@ -621,7 +621,7 @@ fn object_and_array_untagged_return_switches_keep_object_inside_typeof_switch_li
                         crate::types::VariantConstructorCase::Block(
                             crate::types::VariantBlock::Untagged {
                                 tag: crate::types::VariantTag {
-                                    name: "Object".to_string(),
+                                    name: crate::name::Name::new("Object"),
                                     literal: None,
                                 },
                                 block_type: crate::types::VariantBlockType::Object,
@@ -635,7 +635,7 @@ fn object_and_array_untagged_return_switches_keep_object_inside_typeof_switch_li
                         crate::types::VariantConstructorCase::Block(
                             crate::types::VariantBlock::Untagged {
                                 tag: crate::types::VariantTag {
-                                    name: "Array".to_string(),
+                                    name: crate::name::Name::new("Array"),
                                     literal: None,
                                 },
                                 block_type: crate::types::VariantBlockType::Instance(
@@ -690,7 +690,7 @@ fn mixed_array_object_function_untagged_return_switches_keep_typeof_tail_as_swit
                         crate::types::VariantConstructorCase::Block(
                             crate::types::VariantBlock::Untagged {
                                 tag: crate::types::VariantTag {
-                                    name: "Array".to_string(),
+                                    name: crate::name::Name::new("Array"),
                                     literal: None,
                                 },
                                 block_type: crate::types::VariantBlockType::Instance(
@@ -706,7 +706,7 @@ fn mixed_array_object_function_untagged_return_switches_keep_typeof_tail_as_swit
                         crate::types::VariantConstructorCase::Block(
                             crate::types::VariantBlock::Untagged {
                                 tag: crate::types::VariantTag {
-                                    name: "Object".to_string(),
+                                    name: crate::name::Name::new("Object"),
                                     literal: None,
                                 },
                                 block_type: crate::types::VariantBlockType::Object,
@@ -720,7 +720,7 @@ fn mixed_array_object_function_untagged_return_switches_keep_typeof_tail_as_swit
                         crate::types::VariantConstructorCase::Block(
                             crate::types::VariantBlock::Untagged {
                                 tag: crate::types::VariantTag {
-                                    name: "Function".to_string(),
+                                    name: crate::name::Name::new("Function"),
                                     literal: None,
                                 },
                                 block_type: crate::types::VariantBlockType::Function,
@@ -778,7 +778,7 @@ fn mixed_literal_and_block_untagged_return_dispatch_keeps_outer_else_block() {
                 (
                     crate::lambda::SwitchKey::Constructor(
                         crate::types::VariantConstructorCase::Constant(crate::types::VariantTag {
-                            name: "test".to_string(),
+                            name: crate::name::Name::new("test"),
                             literal: Some(crate::types::VariantLiteralTag::String(
                                 "test".to_string(),
                             )),
@@ -789,7 +789,7 @@ fn mixed_literal_and_block_untagged_return_dispatch_keeps_outer_else_block() {
                 (
                     crate::lambda::SwitchKey::Constructor(
                         crate::types::VariantConstructorCase::Constant(crate::types::VariantTag {
-                            name: "Twelve".to_string(),
+                            name: crate::name::Name::new("Twelve"),
                             literal: Some(crate::types::VariantLiteralTag::Int(12)),
                         }),
                     ),
@@ -803,7 +803,7 @@ fn mixed_literal_and_block_untagged_return_dispatch_keeps_outer_else_block() {
                         crate::types::VariantConstructorCase::Block(
                             crate::types::VariantBlock::Untagged {
                                 tag: crate::types::VariantTag {
-                                    name: "Array".to_string(),
+                                    name: crate::name::Name::new("Array"),
                                     literal: None,
                                 },
                                 block_type: crate::types::VariantBlockType::Instance(
@@ -819,7 +819,7 @@ fn mixed_literal_and_block_untagged_return_dispatch_keeps_outer_else_block() {
                         crate::types::VariantConstructorCase::Block(
                             crate::types::VariantBlock::Untagged {
                                 tag: crate::types::VariantTag {
-                                    name: "Object".to_string(),
+                                    name: crate::name::Name::new("Object"),
                                     literal: None,
                                 },
                                 block_type: crate::types::VariantBlockType::Object,
@@ -877,7 +877,7 @@ fn mixed_array_object_function_untagged_effect_switches_keep_typeof_tail_as_swit
                         crate::types::VariantConstructorCase::Block(
                             crate::types::VariantBlock::Untagged {
                                 tag: crate::types::VariantTag {
-                                    name: "Array".to_string(),
+                                    name: crate::name::Name::new("Array"),
                                     literal: None,
                                 },
                                 block_type: crate::types::VariantBlockType::Instance(
@@ -893,7 +893,7 @@ fn mixed_array_object_function_untagged_effect_switches_keep_typeof_tail_as_swit
                         crate::types::VariantConstructorCase::Block(
                             crate::types::VariantBlock::Untagged {
                                 tag: crate::types::VariantTag {
-                                    name: "Object".to_string(),
+                                    name: crate::name::Name::new("Object"),
                                     literal: None,
                                 },
                                 block_type: crate::types::VariantBlockType::Object,
@@ -907,7 +907,7 @@ fn mixed_array_object_function_untagged_effect_switches_keep_typeof_tail_as_swit
                         crate::types::VariantConstructorCase::Block(
                             crate::types::VariantBlock::Untagged {
                                 tag: crate::types::VariantTag {
-                                    name: "Function".to_string(),
+                                    name: crate::name::Name::new("Function"),
                                     literal: None,
                                 },
                                 block_type: crate::types::VariantBlockType::Function,
@@ -954,7 +954,7 @@ fn untagged_literal_dispatch_keeps_ocaml_case_order() {
                 (
                     crate::lambda::SwitchKey::Constructor(
                         crate::types::VariantConstructorCase::Constant(crate::types::VariantTag {
-                            name: "One".to_string(),
+                            name: crate::name::Name::new("One"),
                             literal: None,
                         }),
                     ),
@@ -963,7 +963,7 @@ fn untagged_literal_dispatch_keeps_ocaml_case_order() {
                 (
                     crate::lambda::SwitchKey::Constructor(
                         crate::types::VariantConstructorCase::Constant(crate::types::VariantTag {
-                            name: "Two".to_string(),
+                            name: crate::name::Name::new("Two"),
                             literal: None,
                         }),
                     ),
@@ -972,7 +972,7 @@ fn untagged_literal_dispatch_keeps_ocaml_case_order() {
                 (
                     crate::lambda::SwitchKey::Constructor(
                         crate::types::VariantConstructorCase::Constant(crate::types::VariantTag {
-                            name: "Three".to_string(),
+                            name: crate::name::Name::new("Three"),
                             literal: None,
                         }),
                     ),
@@ -984,7 +984,7 @@ fn untagged_literal_dispatch_keeps_ocaml_case_order() {
                 crate::lambda::SwitchKey::Constructor(crate::types::VariantConstructorCase::Block(
                     crate::types::VariantBlock::Untagged {
                         tag: crate::types::VariantTag {
-                            name: "FutureAddedValue".to_string(),
+                            name: crate::name::Name::new("FutureAddedValue"),
                             literal: None,
                         },
                         block_type: crate::types::VariantBlockType::String,
@@ -1040,7 +1040,7 @@ fn mixed_untagged_literal_dispatch_keeps_ocaml_block_overlap_order() {
                 (
                     crate::lambda::SwitchKey::Constructor(
                         crate::types::VariantConstructorCase::Constant(crate::types::VariantTag {
-                            name: "A".to_string(),
+                            name: crate::name::Name::new("A"),
                             literal: None,
                         }),
                     ),
@@ -1049,7 +1049,7 @@ fn mixed_untagged_literal_dispatch_keeps_ocaml_block_overlap_order() {
                 (
                     crate::lambda::SwitchKey::Constructor(
                         crate::types::VariantConstructorCase::Constant(crate::types::VariantTag {
-                            name: "B".to_string(),
+                            name: crate::name::Name::new("B"),
                             literal: None,
                         }),
                     ),
@@ -1058,7 +1058,7 @@ fn mixed_untagged_literal_dispatch_keeps_ocaml_block_overlap_order() {
                 (
                     crate::lambda::SwitchKey::Constructor(
                         crate::types::VariantConstructorCase::Constant(crate::types::VariantTag {
-                            name: "C".to_string(),
+                            name: crate::name::Name::new("C"),
                             literal: None,
                         }),
                     ),
@@ -1067,7 +1067,7 @@ fn mixed_untagged_literal_dispatch_keeps_ocaml_block_overlap_order() {
                 (
                     crate::lambda::SwitchKey::Constructor(
                         crate::types::VariantConstructorCase::Constant(crate::types::VariantTag {
-                            name: "D".to_string(),
+                            name: crate::name::Name::new("D"),
                             literal: None,
                         }),
                     ),
@@ -1081,7 +1081,7 @@ fn mixed_untagged_literal_dispatch_keeps_ocaml_block_overlap_order() {
                         crate::types::VariantConstructorCase::Block(
                             crate::types::VariantBlock::Untagged {
                                 tag: crate::types::VariantTag {
-                                    name: "String".to_string(),
+                                    name: crate::name::Name::new("String"),
                                     literal: None,
                                 },
                                 block_type: crate::types::VariantBlockType::String,
@@ -1095,7 +1095,7 @@ fn mixed_untagged_literal_dispatch_keeps_ocaml_block_overlap_order() {
                         crate::types::VariantConstructorCase::Block(
                             crate::types::VariantBlock::Untagged {
                                 tag: crate::types::VariantTag {
-                                    name: "Int".to_string(),
+                                    name: crate::name::Name::new("Int"),
                                     literal: None,
                                 },
                                 block_type: crate::types::VariantBlockType::Int,
@@ -1109,7 +1109,7 @@ fn mixed_untagged_literal_dispatch_keeps_ocaml_block_overlap_order() {
                         crate::types::VariantConstructorCase::Block(
                             crate::types::VariantBlock::Untagged {
                                 tag: crate::types::VariantTag {
-                                    name: "Object".to_string(),
+                                    name: crate::name::Name::new("Object"),
                                     literal: None,
                                 },
                                 block_type: crate::types::VariantBlockType::Object,
@@ -1185,7 +1185,7 @@ fn small_untagged_object_value_switches_keep_ocaml_runtime_guards() {
                 crate::lambda::SwitchKey::Constructor(crate::types::VariantConstructorCase::Block(
                     crate::types::VariantBlock::Untagged {
                         tag: crate::types::VariantTag {
-                            name: "Object".to_string(),
+                            name: crate::name::Name::new("Object"),
                             literal: None,
                         },
                         block_type: crate::types::VariantBlockType::Object,
@@ -1235,7 +1235,7 @@ fn complete_object_then_array_untagged_return_switches_preserve_case_order() {
                         crate::types::VariantConstructorCase::Block(
                             crate::types::VariantBlock::Untagged {
                                 tag: crate::types::VariantTag {
-                                    name: "Object".to_string(),
+                                    name: crate::name::Name::new("Object"),
                                     literal: None,
                                 },
                                 block_type: crate::types::VariantBlockType::Object,
@@ -1249,7 +1249,7 @@ fn complete_object_then_array_untagged_return_switches_preserve_case_order() {
                         crate::types::VariantConstructorCase::Block(
                             crate::types::VariantBlock::Untagged {
                                 tag: crate::types::VariantTag {
-                                    name: "Array".to_string(),
+                                    name: crate::name::Name::new("Array"),
                                     literal: None,
                                 },
                                 block_type: crate::types::VariantBlockType::Instance(
@@ -1408,7 +1408,7 @@ fn default_only_untagged_object_return_keeps_literal_default_branch_outside_obje
                 crate::lambda::SwitchKey::Constructor(crate::types::VariantConstructorCase::Block(
                     crate::types::VariantBlock::Untagged {
                         tag: crate::types::VariantTag {
-                            name: "Object".to_string(),
+                            name: crate::name::Name::new("Object"),
                             literal: None,
                         },
                         block_type: crate::types::VariantBlockType::Object,

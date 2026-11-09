@@ -199,7 +199,7 @@ fn runtime_value_kind(c: &Constant) -> ValueKind {
         Constant::Pointer(name) => ValueKind::IsLiteral(L::String(name.clone())),
         Constant::Constructor(tag) => match &tag.literal {
             None if tag.name == "[]" => ValueKind::IsLiteral(L::Int(0)),
-            None => ValueKind::IsLiteral(L::String(tag.name.clone())),
+            None => ValueKind::IsLiteral(L::String(tag.name.to_string())),
             Some(L::BigInt(_)) => ValueKind::UnknownValue,
             Some(literal) => ValueKind::IsLiteral(literal.clone()),
         },
@@ -326,7 +326,7 @@ pub(crate) fn untagged_action_index(
 ) -> UntaggedChoice {
     let literal_of_tag = |tag: &crate::types::VariantTag| match &tag.literal {
         Some(literal) => literal.clone(),
-        None => crate::types::VariantLiteralTag::String(tag.name.clone()),
+        None => crate::types::VariantLiteralTag::String(tag.name.to_string()),
     };
     let found = |i: Option<usize>, f: fn(usize) -> UntaggedChoice| match i {
         Some(i) => f(i),
@@ -1863,7 +1863,7 @@ mod node_size_tests {
         assert_eq!(size_of::<super::TagInfo>(), 32);
         assert_eq!(size_of::<super::Primitive>(), 40);
         assert_eq!(size_of::<super::arena::PrimPayload>(), 48);
-        assert_eq!(size_of::<super::Constant>(), 56);
+        assert_eq!(size_of::<super::Constant>(), 40);
         assert_eq!(size_of::<super::Lambda>(), 56);
     }
 }
