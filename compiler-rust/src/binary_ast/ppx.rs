@@ -4795,35 +4795,50 @@ fn handle_extension(
     let ext_loc = ext_name.loc;
 
     match name {
-        "todo" => handle_todo(payload, arena, ext_loc),
+        // A payload other than a string gives no message
+        // (ast_exp_extension.ml `handle_extension`).
+        "todo" => todo(
+            checked(payload_semantic_string(payload, arena)),
+            arena,
+            ext_loc,
+        ),
         "raw" => handle_raw(expr, payload, arena, arena.prim_raw_expr(), ext_loc),
         "ffi" => handle_ffi(expr, payload, arena, ext_loc),
         _ => expr.clone(),
     }
 }
 
-/// `%todo` (ast_exp_extension.ml:29-58): `JsError.throwWithMessage` applied
-/// to `"<file>:<line>:<start>-<end> - Todo[: message]"`, located at the
-/// extension name. The warning is emitted by the warning pre-pass.
-fn handle_todo(payload: &Payload, arena: &mut ParseArena, loc: LocIdx) -> Expression {
-    let todo_message = checked(payload_semantic_string(payload, arena));
-    let start = arena.loc_start(loc);
-    let end = arena.loc_end(loc);
+/// `Ast_exp_extension.todo` (ast_exp_extension.ml:26-50):
+/// `Stdlib_JsError.throwWithMessage` applied to
+/// `"<file>:<line>:<start>-<end> - Todo[: message]"`, located at `%todo`.
+/// The message names the file's base name and columns, like `__LOC__`. The
+/// warning is emitted by the warning pre-pass.
+fn todo(message: Option<String>, arena: &mut ParseArena, loc: LocIdx) -> Expression {
+    // The text embeds source coordinates: a location-free parse is redone
+    // with locations, as for `__LOC__`.
+    arena.require_locations();
+    let start = *arena.loc_start(loc);
+    let end = *arena.loc_end(loc);
+    // `Location.get_pos_info loc.loc_start`.
+    let start_col = start.cnum - start.bol;
+    let end_col = end.cnum - start.cnum + start_col;
     let mut text = format!(
         "{}:{}:{}-{}",
-        arena.get_string(start.file_name),
+        crate::misc::filename_basename(arena.get_string(start.file_name)),
         start.line,
-        start.cnum,
-        end.cnum
+        start_col,
+        end_col
     );
-    match &todo_message {
+    match &message {
         None => text.push_str(" - Todo"),
         Some(msg) => {
             text.push_str(" - Todo: ");
             text.push_str(msg);
         }
     }
-    let js_error = arena.push_lident("JsError");
+    // The compilation unit, not `JsError`: a user module of that name would
+    // shadow the `Stdlib` alias.
+    let js_error = arena.push_lident("Stdlib_JsError");
     let throw_lid = arena.push_ldot(js_error, "throwWithMessage");
     let funct = Expression {
         pexp_desc: ExpressionDesc::Pexp_ident(Located {
@@ -11202,6 +11217,101 @@ mod tests {
             parser.diagnostics()
         );
         (parser.into_arena(), structure)
+    }
+
+    /// The `%todo` calls of the `let x = () => %todo...` bindings of a
+    /// rewritten structure: the called function and the message text.
+    fn todo_calls(arena: &ParseArena, structure: &[StructureItem]) -> Vec<(String, String)> {
+        let print = |lid: &crate::parser::longident::Longident| -> String {
+            match lid {
+                crate::parser::longident::Longident::Ldot(prefix, name) => {
+                    let crate::parser::longident::Longident::Lident(prefix) = &**prefix else {
+                        panic!("expected Module.name");
+                    };
+                    format!("{}.{}", arena.get_string(*prefix), arena.get_string(*name))
+                }
+                _ => panic!("expected Module.name"),
+            }
+        };
+        structure
+            .iter()
+            .filter_map(|item| match &item.pstr_desc {
+                StructureItemDesc::Pstr_value((_, bindings)) => {
+                    Some(arena.vb_list(*bindings)[0].pvb_expr)
+                }
+                _ => None,
+            })
+            .filter_map(|expr| match &arena.get_expr(expr).pexp_desc {
+                ExpressionDesc::Pexp_fun(fun) => Some(fun.rhs),
+                _ => None,
+            })
+            .map(|body| {
+                let ExpressionDesc::Pexp_apply(apply) = &arena.get_expr(body).pexp_desc else {
+                    panic!("expected the %todo call");
+                };
+                let ExpressionDesc::Pexp_ident(funct) = &arena.get_expr(apply.funct).pexp_desc
+                else {
+                    panic!("expected a function name");
+                };
+                let (_, message) = arena.apply_args(apply.args)[0];
+                let ExpressionDesc::Pexp_constant(Constant::String(text)) =
+                    arena.get_expr(message).pexp_desc
+                else {
+                    panic!("expected the message");
+                };
+                (
+                    print(arena.get_longident(funct.txt)),
+                    text.semantic(arena).to_string(),
+                )
+            })
+            .collect()
+    }
+
+    /// ast_exp_extension.ml `todo`: `Stdlib_JsError.throwWithMessage`, not a
+    /// `JsError` a user module could shadow, with the message located like
+    /// `__LOC__` (the file's base name, the line and the columns of `%todo`).
+    /// A payload other than a string gives no message.
+    #[test]
+    fn todo_calls_stdlib_js_error_with_base_name_and_columns() {
+        let source = "let a = () => %todo
+let b = 1
+let c = () => %todo(\"later\")
+let d = () => %todo(`tmpl`)
+let e = () =>
+    %todo(1)
+";
+        let mut parser = Parser::new("/home/me/app/src/D.res", source);
+        let structure = module::parse_structure(&mut parser);
+        assert!(!parser.has_errors(), "{:?}", parser.diagnostics());
+        let mut arena = parser.into_arena();
+        let rewritten = rewrite_structure(&structure, &mut arena, false).expect("no error");
+        let call = |text: &str| {
+            (
+                "Stdlib_JsError.throwWithMessage".to_string(),
+                text.to_string(),
+            )
+        };
+        assert_eq!(
+            todo_calls(&arena, &rewritten),
+            [
+                call("D.res:1:14-19 - Todo"),
+                call("D.res:3:14-19 - Todo: later"),
+                call("D.res:4:14-19 - Todo: tmpl"),
+                call("D.res:6:4-9 - Todo"),
+            ]
+        );
+    }
+
+    /// The message embeds source coordinates, so a location-free parse asks
+    /// for a located one, as `__LOC__` does.
+    #[test]
+    fn todo_requires_source_locations() {
+        let mut parser = Parser::with_locations("D.res", "let a = () => %todo\n", false);
+        let structure = module::parse_structure(&mut parser);
+        let mut arena = parser.into_arena();
+        assert!(!arena.locations_required());
+        rewrite_structure(&structure, &mut arena, false).expect("no error");
+        assert!(arena.locations_required());
     }
 
     fn let_unwrap_case_lidents(
