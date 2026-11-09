@@ -6939,7 +6939,7 @@ fn printtyp_same_path(type_ctx: &TypeContext, t: TypeExprRef, t2: TypeExprRef) -
                     .type_list(a1)
                     .iter()
                     .zip(type_ctx.type_list(a2).iter())
-                    .all(|(x, y)| type_ctx.repr(*x) == type_ctx.repr(*y))
+                    .all(|(x, y)| type_ctx.repr(x) == type_ctx.repr(y))
         }
         _ => false,
     }
@@ -7400,7 +7400,7 @@ fn escaped_constructor_path_in_type(
             }
             for arg in type_ctx.type_list(args).iter() {
                 if let Some(path) =
-                    escaped_constructor_path_in_type(type_ctx, *arg, var_level, seen)
+                    escaped_constructor_path_in_type(type_ctx, arg, var_level, seen)
                 {
                     return Some(path);
                 }
@@ -7410,7 +7410,7 @@ fn escaped_constructor_path_in_type(
         TypeDesc::Tpackage { args, .. } | TypeDesc::Ttuple(args) => {
             for arg in type_ctx.type_list(args).iter() {
                 if let Some(path) =
-                    escaped_constructor_path_in_type(type_ctx, *arg, var_level, seen)
+                    escaped_constructor_path_in_type(type_ctx, arg, var_level, seen)
                 {
                     return Some(path);
                 }
@@ -9505,7 +9505,7 @@ fn format_package_type_expr_for_error(
             format!(
                 "type {} = {}",
                 format_longident_for_report(arena, lid),
-                format_type_expr(type_ctx, *arg)
+                format_type_expr(type_ctx, arg)
             )
         })
         .collect::<Vec<_>>();
@@ -11613,7 +11613,7 @@ fn moregen_link(
             drop(impl_desc);
             drop(iface_desc);
             for (a, b) in ctx.type_list(a1).iter().zip(ctx.type_list(a2).iter()) {
-                moregen_link(ctx, *a, *b, visited);
+                moregen_link(ctx, a, b, visited);
             }
         }
         (TypeDesc::Tarrow { args: a1, ret: r1 }, TypeDesc::Tarrow { args: a2, ret: r2 })
@@ -11633,7 +11633,7 @@ fn moregen_link(
             drop(impl_desc);
             drop(iface_desc);
             for (a, b) in ctx.type_list(t1).iter().zip(ctx.type_list(t2).iter()) {
-                moregen_link(ctx, *a, *b, visited);
+                moregen_link(ctx, a, b, visited);
             }
         }
         _ => {}
