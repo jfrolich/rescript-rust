@@ -400,8 +400,11 @@ fn open_path_for_write(path: &Path) -> rusqlite::Result<Connection> {
         // build writes tens of MB, which 4 KB pages split into many more
         // pages and writes. Takes effect only before the first table.
         conn.pragma_update(None, "page_size", 16384)?;
-        conn.execute_batch(SCHEMA)?;
-        conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        // One transaction: each statement on its own would create and
+        // delete the rollback journal, once per table.
+        conn.execute_batch(&format!(
+            "BEGIN;\n{SCHEMA}\nPRAGMA user_version = {SCHEMA_VERSION};\nCOMMIT;"
+        ))?;
     }
     // A lost write only costs a rebuild, so don't wait for the disk.
     conn.pragma_update(None, "synchronous", "OFF")?;

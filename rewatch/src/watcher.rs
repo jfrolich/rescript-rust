@@ -243,7 +243,9 @@ fn cleanup_before_watch_exit(
     if show_progress {
         println!("{message}");
     }
-    build::with_build_lock(path, || clean::cleanup_after_build(build_state));
+    build::with_build_lock(path, || {
+        clean::cleanup_after_build(build_state, build::CompilerInfoWrite::AfterBuild)
+    });
 }
 
 struct WatchArgs<'a> {
@@ -512,7 +514,7 @@ fn watch_loop(
                         // Reinitialization compares the sources and outputs on disk with the
                         // recorded build to remove what deleted sources and configuration
                         // changes left behind: record the builds this watcher made first.
-                        clean::write_in_process_record(&build_state);
+                        clean::write_in_process_record(&build_state, build::CompilerInfoWrite::AfterBuild);
                         let mut next_build_state = match build::initialize_build(
                             None,
                             filter,
@@ -550,6 +552,7 @@ fn watch_loop(
                             show_progress,
                             false,
                             plain_output,
+                            build::CompilerInfoWrite::AfterBuild,
                         );
                         clean::remove_obsolete_outputs_of_build(&build_state);
                         result.map_err(|e| anyhow::anyhow!("{e}"))
@@ -655,6 +658,7 @@ pub fn start(
                 show_progress,
                 false,
                 plain_output,
+                build::CompilerInfoWrite::AfterBuild,
             )
             .ok()
             .map(|result| (timing_total, result));

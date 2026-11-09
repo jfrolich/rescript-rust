@@ -81,18 +81,35 @@ fn in_process_source_paths(build_state: &BuildCommandState) -> AHashMap<String, 
 /// Record this in-process build in each package's database (see
 /// [`build::state_db`]): the sources it compiled, when each module's
 /// JavaScript was confirmed up to date, and the warnings to report again.
-pub fn write_in_process_record(build_state: &BuildCommandState) {
+pub fn write_in_process_record(
+    build_state: &BuildCommandState,
+    compiler_info_write: build::CompilerInfoWrite,
+) {
     if build_state.build_run.stopped_at_parse() {
         return;
     }
     let digests = build::incremental::UnitDigests::of_compiled(build_state);
     crate::build::phase_mark("record-digests");
     let compiles = build::incremental::CompileRecords::lock(build_state);
+    // A successful one-shot build records the compiler identity with it
+    // (see `build::CompilerInfoWrite`).
+    let source_map_args = build::compiler_info::source_map_args(build_state);
+    let with_compiler_info =
+        compiler_info_write == build::CompilerInfoWrite::WithRecord && build_state.build_run.succeeded();
     build_state
         .packages
         .par_iter()
         .for_each(|(package_name, package)| {
-            let record = build::incremental::current_record(build_state, &compiles, package_name, &digests);
+            let mut record =
+                build::incremental::current_record(build_state, &compiles, package_name, &digests);
+            if with_compiler_info
+                && let Some(entries) =
+                    build::compiler_info::recorded_entries(build_state, package, &source_map_args)
+            {
+                for (key, value) in entries {
+                    record.meta.insert(key.to_string(), value);
+                }
+            }
             let previous = build_state
                 .previous_in_process
                 .as_ref()
@@ -263,10 +280,10 @@ pub fn cleanup_previous_in_process_build(build_state: &mut BuildCommandState) ->
     (removed, total)
 }
 
-pub fn cleanup_after_build(build_state: &BuildCommandState) {
+pub fn cleanup_after_build(build_state: &BuildCommandState, compiler_info_write: build::CompilerInfoWrite) {
     // Recording a large build encodes and hashes every module it compiled.
     build::pools::with_pool_for(build_state.compiled_modules.len(), || {
-        write_in_process_record(build_state)
+        write_in_process_record(build_state, compiler_info_write)
     });
     crate::build::phase_mark("record-written");
 }
