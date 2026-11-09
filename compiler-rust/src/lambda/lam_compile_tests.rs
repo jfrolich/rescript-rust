@@ -373,7 +373,7 @@ pub(super) fn import_attributes_lowered_lambda() -> Lambda {
                 Primitive::Pfield(
                     0,
                     FieldDbgInfo::Module {
-                        name: "myJson".to_string(),
+                        name: crate::name::Name::new("myJson"),
                     },
                 ),
                 vec![Lambda::var(include_json)],
@@ -399,7 +399,7 @@ pub(super) fn import_attributes_lowered_lambda() -> Lambda {
                             Primitive::Pfield(
                                 0,
                                 FieldDbgInfo::Module {
-                                    name: "buttonCss".to_string(),
+                                    name: crate::name::Name::new("buttonCss"),
                                 },
                             ),
                             vec![Lambda::var(include_css)],
@@ -1102,7 +1102,7 @@ fn compile_expr_keeps_forwarded_module_call_params_like_ocaml() {
                 Primitive::Pfield(
                     23,
                     FieldDbgInfo::Module {
-                        name: "fromArray".to_string(),
+                        name: crate::name::Name::new("fromArray"),
                     },
                 ),
                 vec![Lambda::LglobalModule(belt_map)],
@@ -1155,7 +1155,7 @@ fn compile_expr_keeps_forwarded_nested_wrapper_params_like_ocaml() {
                     Primitive::Pfield(
                         9,
                         FieldDbgInfo::Module {
-                            name: "eq".to_string(),
+                            name: crate::name::Name::new("eq"),
                         },
                     ),
                     vec![Lambda::LglobalModule(belt_map)],
@@ -1632,7 +1632,7 @@ fn compile_deps_program_keeps_exported_call_result_before_rebound_constant_block
                 Primitive::Pfield(
                     0,
                     crate::lambda::lam_compat::FieldDbgInfo::Record {
-                        name: "x".to_string(),
+                        name: crate::name::Name::new("x"),
                     },
                 ),
                 vec![Lambda::var(param)],
@@ -4219,7 +4219,7 @@ fn function_return_blocks_collapse_identity_module_wrapper_to_parameter() {
                     Primitive::Pfield(
                         0,
                         FieldDbgInfo::Module {
-                            name: "x".to_string(),
+                            name: crate::name::Name::new("x"),
                         },
                     ),
                     vec![Lambda::var(module_param)],
@@ -4257,7 +4257,7 @@ fn function_return_blocks_collapse_inlined_identity_module_wrapper_to_parameter(
                     Primitive::Pfield(
                         0,
                         FieldDbgInfo::Module {
-                            name: "x".to_string(),
+                            name: crate::name::Name::new("x"),
                         },
                     ),
                     vec![Lambda::var(module_param)],
@@ -4292,7 +4292,7 @@ fn function_return_blocks_keep_non_identity_module_wrapper() {
                     Primitive::Pfield(
                         0,
                         FieldDbgInfo::Module {
-                            name: "x".to_string(),
+                            name: crate::name::Name::new("x"),
                         },
                     ),
                     vec![Lambda::var(left)],
@@ -4305,7 +4305,7 @@ fn function_return_blocks_keep_non_identity_module_wrapper() {
                         Primitive::Pfield(
                             1,
                             FieldDbgInfo::Module {
-                                name: "y".to_string(),
+                                name: crate::name::Name::new("y"),
                             },
                         ),
                         vec![Lambda::var(right)],
@@ -5076,7 +5076,7 @@ fn top_level_record_field_assignments_on_pure_fresh_literals_collapse_to_rhs_eff
     let mut compiler = LambdaCompiler::new();
     let lam = Lambda::seq(
         Lambda::prim(
-            Primitive::Psetfield(0, SetFieldDbgInfo::RecordSet("x".to_string())),
+            Primitive::Psetfield(0, SetFieldDbgInfo::RecordSet(crate::name::Name::new("x"))),
             vec![
                 Lambda::prim(
                     Primitive::Pmakeblock(
@@ -5490,7 +5490,7 @@ fn lowers_module_pfield_with_ocaml_identifier_conversion() {
     let expr = {
         let a0 = 3;
         let a1 = &FieldDbgInfo::Module {
-            name: "catch".to_string(),
+            name: crate::name::Name::new("catch"),
         };
         let a2 = &JE::var(module_value, &mut compiler.j);
         compiler.compile_field_access(a0, a1, *a2)
@@ -5507,7 +5507,7 @@ fn lowers_record_pfield_to_positioned_static_access_like_ocaml() {
     let expr = {
         let a0 = 2;
         let a1 = &FieldDbgInfo::Record {
-            name: "field".to_string(),
+            name: crate::name::Name::new("field"),
         };
         let a2 = &JE::var(record, &mut compiler.j);
         compiler.compile_field_access(a0, a1, *a2)
@@ -5539,7 +5539,7 @@ fn lowers_module_pfield_from_pure_caml_block_directly_like_ocaml() {
     let expr = {
         let a0 = 0;
         let a1 = &FieldDbgInfo::Module {
-            name: "Eq".to_string(),
+            name: crate::name::Name::new("Eq"),
         };
         let a2 = &JE::new(
             ExprKind::CamlBlock(
@@ -5563,7 +5563,7 @@ fn lowers_record_pfield_from_pure_caml_block_directly_like_ocaml() {
     let expr = {
         let a0 = 0;
         let a1 = &FieldDbgInfo::Record {
-            name: "d".to_string(),
+            name: crate::name::Name::new("d"),
         };
         let a2 = &JE::new(
             ExprKind::CamlBlock(
@@ -5742,7 +5742,7 @@ fn lowers_qualified_ml_module_default_field_without_preconverting_the_member_nam
     let expr = {
         let a0 = 0;
         let a1 = &FieldDbgInfo::Module {
-            name: "default".to_string(),
+            name: crate::name::Name::new("default"),
         };
         let a2 = &JE::qualified(
             ModuleId {
@@ -5766,7 +5766,7 @@ fn lowers_qualified_ml_module_reserved_fields_through_vident_printing() {
     let expr = {
         let a0 = 3;
         let a1 = &FieldDbgInfo::Module {
-            name: "catch".to_string(),
+            name: crate::name::Name::new("catch"),
         };
         let a2 = &JE::qualified(
             ModuleId {
@@ -5791,7 +5791,7 @@ fn lowers_qualified_ml_module_closed_undefined_constant_from_cmj() {
     let expr = {
         let a0 = 0;
         let a1 = &FieldDbgInfo::Module {
-            name: "empty".to_string(),
+            name: crate::name::Name::new("empty"),
         };
         let a2 = &JE::qualified(
             ModuleId {

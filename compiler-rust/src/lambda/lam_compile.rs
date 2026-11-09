@@ -1171,7 +1171,11 @@ impl LambdaCompiler {
         }
     }
 
-    fn module_field_apply_target(&self, a: &LamArena, lam: Lam) -> Option<(ModuleId, String)> {
+    fn module_field_apply_target(
+        &self,
+        a: &LamArena,
+        lam: Lam,
+    ) -> Option<(ModuleId, crate::name::Name)> {
         let (Primitive::Pfield(_, crate::lambda::FieldDbgInfo::Module { name }), [m], _) =
             a.as_prim(lam)?
         else {
@@ -1186,7 +1190,7 @@ impl LambdaCompiler {
                 kind: Kind::Ml,
                 dynamic_import: false,
             },
-            name.clone(),
+            *name,
         ))
     }
 
@@ -1200,7 +1204,7 @@ impl LambdaCompiler {
         let (module, field_name) = self.module_field_apply_target(a, func)?;
 
         if let Some(Lambda::Lfunction(f)) =
-            self.resolve_cmj_module_field_lambda(&module, &field_name)
+            self.resolve_cmj_module_field_lambda(&module, field_name.as_str())
             && f.params.len() == a.list_len(args)
             && lam_analysis::attr_can_be_inlined(&f.attr)
         {
@@ -1225,7 +1229,7 @@ impl LambdaCompiler {
             return Some(self.compile_expr(a, reduced));
         }
 
-        let known_arity = self.resolve_cmj_module_field_arity(&module, &field_name);
+        let known_arity = self.resolve_cmj_module_field_arity(&module, field_name.as_str());
         let mut prelude = Vec::new();
         let mut compiled_args = Vec::with_capacity(a.list_len(args));
         for arg in a.list_small(args) {
@@ -1235,7 +1239,7 @@ impl LambdaCompiler {
         }
 
         let apply = a.apply_payload(info);
-        let func = JE::qualified(module, Some(field_name), &mut self.j);
+        let func = JE::qualified(module, Some(field_name.to_string()), &mut self.j);
         let expr = match apply.info.status {
             // compiler/core/lam_compile.ml:303-309 keeps the explicit
             // App_infer_full/App_uncurry call info instead of consulting CMJ
@@ -2368,13 +2372,13 @@ impl LambdaCompiler {
             TagInfo::Record(record) => record
                 .fields
                 .get(index)
-                .map(|(name, _)| SetFieldDbgInfo::RecordSet(name.clone())),
+                .map(|(name, _)| SetFieldDbgInfo::RecordSet(crate::name::Name::new(name))),
             TagInfo::RecordInlined(inlined) => inlined
                 .fields
                 .get(index)
-                .map(|(name, _)| SetFieldDbgInfo::RecordInlineSet(name.clone())),
+                .map(|(name, _)| SetFieldDbgInfo::RecordInlineSet(crate::name::Name::new(name))),
             TagInfo::Constructor(constructor) => Some(SetFieldDbgInfo::RecordInlineSet(
-                if constructor.name == "::" {
+                crate::name::Name::new(&if constructor.name == "::" {
                     match index {
                         0 => "hd".to_string(),
                         1 => "tl".to_string(),
@@ -2382,7 +2386,7 @@ impl LambdaCompiler {
                     }
                 } else {
                     format!("_{}", index)
-                },
+                }),
             )),
             _ => None,
         }

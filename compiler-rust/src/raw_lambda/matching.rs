@@ -5148,8 +5148,8 @@ fn matcher_constr_arityN<'p>(
 }
 
 /// The label's runtime name (OCaml `lbl.lbl_runtime_name`).
-fn label_runtime_name_matching(lbl: &LabelDescription) -> String {
-    lbl.lbl_runtime_name.to_string()
+fn label_runtime_name_matching(lbl: &LabelDescription) -> crate::name::Name {
+    lbl.lbl_runtime_name
 }
 
 /// Create field debug info for a record label (equivalent to OCaml's Lambda.fld_record).
@@ -7070,9 +7070,7 @@ fn transl_normal_path(b: &RawArena, path: &crate::types::path::Path) -> RawLambd
         PathView::Pdot(p, s, pos) => b.prim(
             Primitive::Pfield(
                 *pos,
-                FieldDbgInfo::Module {
-                    name: s.to_string(),
-                },
+                FieldDbgInfo::Module { name: *s },
             ),
             &[transl_normal_path(b, p)],
             LamLoc::NONE,

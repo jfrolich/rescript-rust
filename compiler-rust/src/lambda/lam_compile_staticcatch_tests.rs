@@ -288,7 +288,7 @@ fn nested_wrapped_staticcatch_trywith_tail_loops_lower_like_gpr_1701() {
                                                                     Primitive::Pfield(
                                                                         0,
                                                                         crate::lambda::lam_compat::FieldDbgInfo::Record {
-                                                                            name: "RE_EXN_ID".to_string(),
+                                                                            name: crate::name::Name::new("RE_EXN_ID"),
                                                                         },
                                                                     ),
                                                                     vec![Lambda::var(exn)],

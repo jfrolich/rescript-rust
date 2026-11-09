@@ -181,9 +181,8 @@ impl Mapper for Substitute<'_> {
             }
             ExprKind::StaticIndex(target, field, pos) => {
                 let target = self.expression(j, target);
-                let name = j.text(field).to_string();
                 if let Some(rewritten) =
-                    direct_projection_from_pure_literal(j, target, Some(&name), pos.get())
+                    direct_projection_from_pure_literal(j, target, Some(j.text(field)), pos.get())
                 {
                     return rewritten;
                 }
