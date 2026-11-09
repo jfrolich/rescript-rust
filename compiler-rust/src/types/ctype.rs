@@ -3339,7 +3339,7 @@ fn lookup_component_module_sig_type(
                 env.lookup_module_ident_exact(id).ok()
             } else {
                 env.lookup_module(module_path)
-                    .or_else(|_| env.find_module(id.name()))
+                    .or_else(|_| env.find_module(id.name_atom()))
                     .ok()
             };
             module_decl.and_then(|md| match &md.md_type {

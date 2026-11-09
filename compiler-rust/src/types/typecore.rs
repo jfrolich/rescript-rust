@@ -1048,12 +1048,13 @@ impl PatternState {
         is_module: bool,
         arena: &ParseArena,
     ) -> TypeCoreResult<Ident> {
-        let name_str = arena.get_string(name.txt);
+        let interned = arena.name(name.txt);
+        let name_str = interned.as_str();
         // Check for duplicate binding
         if self
             .pattern_variables
             .iter()
-            .any(|pv| pv.id.name() == name_str)
+            .any(|pv| pv.id.name_atom() == interned)
         {
             return Err(TypeCoreError::MultiplyBoundVariable {
                 loc,
@@ -1061,7 +1062,7 @@ impl PatternState {
             });
         }
 
-        let id = type_ctx.create_ident(name_str);
+        let id = type_ctx.create_ident(interned);
         let full_loc = arena.to_location(loc);
         let full_name = crate::parse_arena::Located {
             txt: name_str.to_string(),
@@ -1865,7 +1866,7 @@ impl<'a> TypeCheckContext<'a> {
     }
 
     /// `Env.mark_value_used` (env.ml:1125-1128).
-    pub fn mark_value_used(&mut self, env: &Env, name: &str, val_loc: Location) {
+    pub fn mark_value_used(&mut self, env: &Env, name: impl crate::name::NameKey, val_loc: Location) {
         if !env.is_implicit_coercion() {
             self.type_ctx.usage().mark_value_used(name, val_loc);
         }
@@ -2022,8 +2023,8 @@ impl<'a> TypeCheckContext<'a> {
 
     /// Get the last component name of a Longident as a string.
     /// For `Lident("int")` returns `"int"`, for `Ldot(_, "bar")` returns `"bar"`.
-    pub fn longident_last_name(&self, lid: &Longident) -> String {
-        self.longident_last_name_str(lid).to_string()
+    pub fn longident_last_name(&self, lid: &Longident) -> crate::name::Name {
+        self.arena.name(lid.last_idx())
     }
 
     /// Borrow the last component name of a Longident from the parse arena.
@@ -5569,7 +5570,7 @@ fn type_pattern_construct(
                     tctx.report_warning(
                         lid.loc,
                         Warning::AmbiguousName {
-                            names: vec![lid_name.clone()],
+                            names: vec![lid_name.to_string()],
                             types: resolution.ambiguous_types.clone(),
                             is_label: false,
                         },
@@ -6021,19 +6022,16 @@ fn type_pattern_record(
         lid: Located<LidentIdx>,
         pat: crate::parse_arena::PatIdx,
         opt: bool,
-        field_name: String,
+        field_name: crate::name::Name,
         source_pos: i32,
         label: Option<crate::types::LabelDescription>,
     }
 
-    let field_name_strings: Vec<String> = fields
+    let arena = tctx.arena;
+    let field_names: smallvec::SmallVec<[&str; 8]> = fields
         .iter()
-        .map(|field| {
-            let lid = tctx.arena.get_longident(field.lid.txt);
-            tctx.arena.get_string(lid.last_idx()).to_string()
-        })
+        .map(|field| arena.get_string(arena.get_longident(field.lid.txt).last_idx()))
         .collect();
-    let field_names: Vec<&str> = field_name_strings.iter().map(String::as_str).collect();
     let report_ambiguous_label_warnings = tctx.warning_config.is_active(&Warning::AmbiguousName {
         names: Vec::new(),
         types: Vec::new(),
@@ -6210,7 +6208,7 @@ fn type_pattern_record(
                     ctx,
                 )
             {
-                ambiguous_label_warnings.push((field_name.clone(), types, selected_path));
+                ambiguous_label_warnings.push((field_name.to_string(), types, selected_path));
             }
         }
 
@@ -6245,7 +6243,7 @@ fn type_pattern_record(
             record_ty,
             expected_ty,
             &field.lid,
-            field.field_name.clone(),
+            field.field_name.to_string(),
         ));
     }
 
@@ -6306,14 +6304,14 @@ fn type_pattern_record(
                         record_ty,
                         expected_ty,
                         &field.lid,
-                        field.field_name,
+                        field.field_name.to_string(),
                     ));
                 }
                 let field_ty = ctx.new_var(None);
                 let label_desc = crate::types::LabelDescription {
-                    lbl_name: field.field_name.clone(),
+                    lbl_name: field.field_name.to_string(),
                     // typecore.ml `Label` name choice: `lbl_runtime_name = name`.
-                    lbl_runtime_name: field.field_name,
+                    lbl_runtime_name: field.field_name.to_string(),
                     lbl_res: record_ty,
                     lbl_arg: field_ty,
                     lbl_mut: crate::types::MutableFlag::Immutable,
@@ -7765,7 +7763,7 @@ fn type_expect_with_recarg_unscoped<'a>(
                 }
             };
             // `Env.lookup_value` marks the declaration used (env.ml:1169-1172).
-            let used_name = tctx.arena.get_string(longident.last_idx());
+            let used_name = tctx.arena.name(longident.last_idx());
             tctx.mark_value_used(env, used_name, tctx.resolve_loc(desc.val_loc));
             // typetexp.ml:117-123 via typecore.ml:2381-2388.
             let deprecated_context = if deprecated_function_call {
@@ -13296,7 +13294,7 @@ fn type_construct(
                         tctx.report_warning(
                             lid.loc,
                             Warning::AmbiguousName {
-                                names: vec![lid_name.clone()],
+                                names: vec![lid_name.to_string()],
                                 types: ambiguous_types,
                                 is_label: false,
                             },
@@ -13354,7 +13352,7 @@ fn type_construct(
                     tctx.report_warning(
                         lid.loc,
                         Warning::AmbiguousName {
-                            names: vec![lid_name.clone()],
+                            names: vec![lid_name.to_string()],
                             types: resolution.ambiguous_types.clone(),
                             is_label: false,
                         },
@@ -16280,7 +16278,7 @@ fn type_setfield(
             };
 
             let field_context = Some(TypeClashContext::SetRecordField {
-                field_name: field_context_name.clone(),
+                field_name: field_context_name.to_string(),
             });
             let typed_value = type_expect(tctx, env, new_value, field_ty, field_context)?;
             // OCaml compiler/ml/typecore.ml:3740-3743 uses `type_argument`, which
@@ -16326,7 +16324,7 @@ fn type_setfield(
         tctx.report_warning(
             field_lid.loc,
             Warning::BsPrivateRecordMutation {
-                field_name: field_context_name.clone(),
+                field_name: field_context_name.to_string(),
             },
         );
     }
@@ -17533,7 +17531,7 @@ fn resolve_alias_root_from_module_type(
 }
 
 fn resolve_letmodule_alias_root(env: &Env, module_id: &Ident) -> Option<Path> {
-    let md = env.find_module(module_id.name()).ok()?;
+    let md = env.find_module(module_id.name_atom()).ok()?;
     let mut visited = HashSet::new();
     resolve_alias_root_from_module_type(env, &md.md_type, &mut visited)
 }
@@ -18713,7 +18711,7 @@ fn type_expect_with_module_unpacks(
     // `Env.lookup_value` marks the pattern variable used (env.ml:1169-1172).
     if let Ok(desc) = env.find_value(unpack.id.name()) {
         let val_loc = desc.val_loc;
-        tctx.mark_value_used(env, unpack.id.name(), tctx.resolve_loc(val_loc));
+        tctx.mark_value_used(env, unpack.id.name_atom(), tctx.resolve_loc(val_loc));
     }
     // Note: OCaml applies prefix_idents/Subst.signature here via lazy
     // components_of_module_maker, rewriting Pident paths to Pdot(Reducer, ...).
@@ -22041,8 +22039,7 @@ impl Env {
     ) -> Option<(Path, Arc<ValueDescription>)> {
         match lid {
             Longident::Lident(idx) => {
-                let name = arena.get_string(*idx);
-                self.find_value_arc_with_path(name)
+                self.find_value_arc_with_path(arena.name(*idx))
                     .ok()
                     .map(|(access_path, desc)| (access_path, desc.clone()))
             }
@@ -23840,7 +23837,7 @@ enum ConstructorDisambiguationSource {
 pub(crate) fn mark_type_used(
     ctx: &crate::types::context::TypeContext,
     env: &Env,
-    name: &str,
+    name: impl crate::name::NameKey,
     type_loc: Location,
 ) {
     if !env.is_implicit_coercion() {
@@ -23872,7 +23869,7 @@ pub(crate) fn mark_constructor(
     };
     if let Some(loc) = loc {
         ctx.usage()
-            .mark_constructor_used(usage, path.last(), ctx.resolve_loc(loc), name);
+            .mark_constructor_used(usage, path.last_name(), ctx.resolve_loc(loc), name);
     }
 }
 
@@ -23881,7 +23878,7 @@ pub(crate) fn mark_type_path(ctx: &crate::types::context::TypeContext, env: &Env
     let type_loc =
         crate::types::ctype::lookup_type_decl_for_path(ctx, env, path).map(|decl| decl.type_loc);
     if let Some(type_loc) = type_loc {
-        mark_type_used(ctx, env, path.last(), ctx.resolve_loc(type_loc));
+        mark_type_used(ctx, env, path.last_name(), ctx.resolve_loc(type_loc));
     }
 }
 
@@ -26473,10 +26470,10 @@ pub(crate) fn mark_open_name_use(
     ctx: &crate::types::context::TypeContext,
     env: &Env,
     kind: crate::types::env::OpenLookupKind,
-    name: &str,
+    name: impl crate::name::NameKey,
 ) {
     if let Some(slot_use) = env.open_slot_use(kind, name) {
-        ctx.record_open_slot_use(slot_use.slot, kind.shadow_kind(), name, slot_use.shadowed);
+        ctx.record_open_slot_use(slot_use.slot, kind.shadow_kind(), name.text(), slot_use.shadowed);
     }
 }
 
@@ -26559,8 +26556,8 @@ fn mark_module_lid_used(
     let (name, path_name, md) = match lid {
         Longident::Lident(idx) => {
             let name = arena.get_string(*idx);
-            match env.find_module_with_path(name) {
-                Ok((path, md)) => (name, path.name(), md.clone()),
+            match env.find_module_with_path(arena.name(*idx)) {
+                Ok((path, md)) => (name, path.name(), std::borrow::Cow::Borrowed(md)),
                 // `find_pers_struct s` then `ps.ps_comps.deprecated`
                 // (env.ml:1043-1048).
                 Err(_) => {
@@ -26583,7 +26580,7 @@ fn mark_module_lid_used(
                 } => {
                     let path_name = format!("{parent_name}.{name}");
                     match submodule_declaration(env, &md_type, name, 0) {
-                        Some(md) => (name, path_name, md),
+                        Some(md) => (name, path_name, std::borrow::Cow::Owned(md)),
                         None => {
                             let (unit, mut components) =
                                 local_module_type_persistent_target(env, &md_type, 0)?;
@@ -26626,7 +26623,10 @@ fn mark_module_lid_used(
     }
     Some(ModuleLidTarget::Local {
         name: path_name,
-        md_type: md.md_type,
+        md_type: match md {
+            std::borrow::Cow::Borrowed(md) => md.md_type.clone(),
+            std::borrow::Cow::Owned(md) => md.md_type,
+        },
     })
 }
 
@@ -26719,7 +26719,7 @@ fn mark_open_lid_use_inner(
     kind: crate::types::env::OpenLookupKind,
 ) {
     match lid {
-        Longident::Lident(idx) => mark_open_name_use(ctx, env, kind, arena.get_string(*idx)),
+        Longident::Lident(idx) => mark_open_name_use(ctx, env, kind, arena.name(*idx)),
         Longident::Ldot(prefix, _) => {
             if let Longident::Lident(head) = prefix.as_ref()
                 && arena.get_string(*head) == "*predef*"
@@ -26749,7 +26749,7 @@ fn with_resolved_module_components_for_lid_inner<'a, R>(
 ) -> Option<R> {
     match lid {
         Longident::Lident(mod_idx) => {
-            let mod_name = arena.get_string(*mod_idx);
+            let mod_name = arena.name(*mod_idx);
             let module_path = if let Ok((module_path, _)) = env.find_module_with_path(mod_name) {
                 if let PathView::Pident(mod_id) = module_path.view() {
                     let pident_path = Path::pident(*mod_id);
@@ -27873,7 +27873,7 @@ fn lookup_pident_module_for_path<'a>(
         env.lookup_module_ident_exact(id).ok()
     } else {
         env.lookup_module(module_path)
-            .or_else(|_| env.find_module(id.name()))
+            .or_else(|_| env.find_module(id.name_atom()))
             .ok()
     }
 }

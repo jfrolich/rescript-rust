@@ -3994,7 +3994,7 @@ impl TypeContext {
     }
 
     /// Create a new identifier using the typing context's shared stamp source.
-    pub fn create_ident(&self, name: &str) -> Ident {
+    pub fn create_ident(&self, name: impl Into<crate::name::Name>) -> Ident {
         if self.in_store_build() {
             return self.store_binder(&Ident::create_persistent(name));
         }

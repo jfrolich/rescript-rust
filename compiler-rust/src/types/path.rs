@@ -451,6 +451,15 @@ impl Path {
     }
 
     /// Get the last component of this path.
+    pub fn last_name(&self) -> Name {
+        match self.view() {
+            PathView::Pident(id) => id.name_atom(),
+            PathView::Pdot(_, s, _) => *s,
+            PathView::Papply(_, p) => p.last_name(),
+        }
+    }
+
+    /// The last component name, as text.
     pub fn last(&self) -> &'static str {
         match self.view() {
             PathView::Pident(id) => id.name(),

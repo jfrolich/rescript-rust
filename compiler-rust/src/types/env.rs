@@ -492,9 +492,9 @@ impl<T: Clone> IdTbl<T> {
     /// The `using` call of OCaml `IdTbl.find_name ~mark:true` for `name`:
     /// the slot of the opened layer the name resolves to, and whether that
     /// layer hides an earlier binding (`find_name ~mark:false name next`).
-    pub fn open_slot_use(&self, name: &str) -> Option<OpenSlotUse> {
+    pub fn open_slot_use(&self, name: impl crate::name::NameKey) -> Option<OpenSlotUse> {
         // A name never interned is in no table.
-        self.open_slot_use_by_key(Name::lookup(name)?)
+        self.open_slot_use_by_key(name.name_key()?)
     }
 
     fn open_slot_use_by_key(&self, key: Name) -> Option<OpenSlotUse> {
@@ -537,8 +537,8 @@ impl<T: Clone> IdTbl<T> {
         })
     }
 
-    fn find_name_entry(&self, name: &str) -> Option<(&Ident, &T)> {
-        self.find_name_entry_key(Name::lookup(name)?)
+    fn find_name_entry(&self, name: impl crate::name::NameKey) -> Option<(&Ident, &T)> {
+        self.find_name_entry_key(name.name_key()?)
     }
 
     fn find_name_entry_key(&self, key: Name) -> Option<(&Ident, &T)> {
@@ -558,16 +558,16 @@ impl<T: Clone> IdTbl<T> {
         }
     }
 
-    pub fn find_by_name(&self, name: &str) -> Option<&T> {
+    pub fn find_by_name(&self, name: impl crate::name::NameKey) -> Option<&T> {
         self.find_name_entry(name).map(|(_, value)| value)
     }
 
-    pub fn find_by_name_with_id(&self, name: &str) -> Option<(&Ident, &T)> {
+    pub fn find_by_name_with_id(&self, name: impl crate::name::NameKey) -> Option<(&Ident, &T)> {
         self.find_name_entry(name)
     }
 
-    pub fn find_by_name_with_path(&self, name: &str) -> Option<(Path, &T)> {
-        self.find_by_key_with_path(Name::lookup(name)?)
+    pub fn find_by_name_with_path(&self, name: impl crate::name::NameKey) -> Option<(Path, &T)> {
+        self.find_by_key_with_path(name.name_key()?)
     }
 
     fn find_by_key_with_path(&self, key: Name) -> Option<(Path, &T)> {
@@ -643,9 +643,9 @@ impl<T: Clone> IdTbl<T> {
         None
     }
 
-    pub fn find_all(&self, name: &str) -> Vec<&T> {
+    pub fn find_all(&self, name: impl crate::name::NameKey) -> Vec<&T> {
         let mut items = Vec::new();
-        if let Some(key) = Name::lookup(name) {
+        if let Some(key) = name.name_key() {
             self.collect_all_key(key, &mut items);
         }
         items
@@ -663,7 +663,7 @@ impl<T: Clone> IdTbl<T> {
         }
     }
 
-    pub fn contains(&self, name: &str) -> bool {
+    pub fn contains(&self, name: impl crate::name::NameKey) -> bool {
         self.find_by_name(name).is_some()
     }
 
@@ -822,8 +822,8 @@ impl<T: Clone> TycompTbl<T> {
         };
     }
 
-    pub fn find_by_name(&self, name: &str) -> Option<&T> {
-        self.find_by_key(Name::lookup(name)?)
+    pub fn find_by_name(&self, name: impl crate::name::NameKey) -> Option<&T> {
+        self.find_by_key(name.name_key()?)
     }
 
     fn find_by_key(&self, key: Name) -> Option<&T> {
@@ -843,8 +843,11 @@ impl<T: Clone> TycompTbl<T> {
         }
     }
 
-    pub fn find_by_name_with_origin(&self, name: &str) -> Option<(&Ident, &T, bool)> {
-        self.find_by_key_with_origin(Name::lookup(name)?)
+    pub fn find_by_name_with_origin(
+        &self,
+        name: impl crate::name::NameKey,
+    ) -> Option<(&Ident, &T, bool)> {
+        self.find_by_key_with_origin(name.name_key()?)
     }
 
     fn find_by_key_with_origin(&self, key: Name) -> Option<(&Ident, &T, bool)> {
@@ -886,9 +889,9 @@ impl<T: Clone> TycompTbl<T> {
             .and_then(|opened| opened.next.find_by_ident(id))
     }
 
-    pub fn find_all(&self, name: &str) -> Vec<&T> {
+    pub fn find_all(&self, name: impl crate::name::NameKey) -> Vec<&T> {
         let mut items = Vec::new();
-        if let Some(key) = Name::lookup(name) {
+        if let Some(key) = name.name_key() {
             self.collect_all_key(key, &mut items);
         }
         items
@@ -908,9 +911,12 @@ impl<T: Clone> TycompTbl<T> {
 
     /// OCaml `TycompTbl.find_all`: each candidate with the `mk_callback`
     /// data of its opened layer, `(slot, first hidden candidate)`.
-    pub fn find_all_marking(&self, name: &str) -> Vec<(&T, Option<(u32, Option<&T>)>)> {
+    pub fn find_all_marking(
+        &self,
+        name: impl crate::name::NameKey,
+    ) -> Vec<(&T, Option<(u32, Option<&T>)>)> {
         let mut items: Vec<(&T, Option<(u32, Option<&T>)>)> = Vec::new();
-        let Some(key) = Name::lookup(name) else {
+        let Some(key) = name.name_key() else {
             return items;
         };
         // Each layer's own entries, then its opened components, then the
@@ -1214,7 +1220,12 @@ impl Env {
 
     /// OCaml `IdTbl.find_name ~mark:true` usage of an unqualified source
     /// name in the table `kind` selects.
-    pub(crate) fn open_slot_use(&self, kind: OpenLookupKind, name: &str) -> Option<OpenSlotUse> {
+    pub(crate) fn open_slot_use(
+        &self,
+        kind: OpenLookupKind,
+        name: impl crate::name::NameKey,
+    ) -> Option<OpenSlotUse> {
+        let name = name.name_key()?;
         match kind {
             OpenLookupKind::Value => self.data.values.open_slot_use(name),
             OpenLookupKind::Type => self.data.types.open_slot_use(name),
@@ -1418,44 +1429,44 @@ impl Env {
     }
 
     /// Find a value by name.
-    pub fn find_value(&self, name: &str) -> EnvResult<&ValueDescription> {
+    pub fn find_value(&self, name: impl crate::name::NameKey) -> EnvResult<&ValueDescription> {
         self.data
             .values
             .find_by_name(name)
             .map(|v| v.as_ref())
-            .ok_or_else(|| EnvError::ValueNotFound(name.into()))
+            .ok_or_else(|| EnvError::ValueNotFound(name.text().into()))
     }
 
     /// Find a value by name, returning both the identifier and description.
-    pub fn find_value_with_id(&self, name: &str) -> EnvResult<(&Ident, &ValueDescription)> {
+    pub fn find_value_with_id(&self, name: impl crate::name::NameKey) -> EnvResult<(&Ident, &ValueDescription)> {
         self.data
             .values
             .find_by_name_with_id(name)
             .map(|(id, v)| (id, v.as_ref()))
-            .ok_or_else(|| EnvError::ValueNotFound(name.into()))
+            .ok_or_else(|| EnvError::ValueNotFound(name.text().into()))
     }
 
     /// Find a value by name with the path selected by OCaml `IdTbl.find_name`.
     ///
     /// Local bindings resolve to `Pident(id)`, while opened bindings resolve to
     /// `Pdot(root, name, pos)` from the symbolic open layer.
-    pub fn find_value_with_path(&self, name: &str) -> EnvResult<(Path, &ValueDescription)> {
+    pub fn find_value_with_path(&self, name: impl crate::name::NameKey) -> EnvResult<(Path, &ValueDescription)> {
         self.data
             .values
             .find_by_name_with_path(name)
             .map(|(path, desc)| (path, desc.as_ref()))
-            .ok_or_else(|| EnvError::ValueNotFound(name.into()))
+            .ok_or_else(|| EnvError::ValueNotFound(name.text().into()))
     }
 
     /// Like `find_value_with_path`, sharing the stored description.
     pub fn find_value_arc_with_path(
         &self,
-        name: &str,
+        name: impl crate::name::NameKey,
     ) -> EnvResult<(Path, &Arc<ValueDescription>)> {
         self.data
             .values
             .find_by_name_with_path(name)
-            .ok_or_else(|| EnvError::ValueNotFound(name.into()))
+            .ok_or_else(|| EnvError::ValueNotFound(name.text().into()))
     }
 
     /// Iterate over visible value bindings.
@@ -1510,35 +1521,35 @@ impl Env {
     }
 
     /// Find a type by name.
-    pub fn find_type(&self, name: &str) -> EnvResult<&TypeDeclaration> {
+    pub fn find_type(&self, name: impl crate::name::NameKey) -> EnvResult<&TypeDeclaration> {
         self.data
             .types
             .find_by_name(name)
             .map(|t| t.as_ref())
-            .ok_or_else(|| EnvError::TypeNotFound(name.into()))
+            .ok_or_else(|| EnvError::TypeNotFound(name.text().into()))
     }
 
     /// Find a type by name, returning the identifier and declaration.
     /// The returned identifier has the canonical stamp from the environment
     /// (e.g., persistent ident for predef types).
-    pub fn find_type_with_id(&self, name: &str) -> EnvResult<(&Ident, &TypeDeclaration)> {
+    pub fn find_type_with_id(&self, name: impl crate::name::NameKey) -> EnvResult<(&Ident, &TypeDeclaration)> {
         self.data
             .types
             .find_by_name_with_id(name)
             .map(|(id, decl)| (id, decl.as_ref()))
-            .ok_or_else(|| EnvError::TypeNotFound(name.into()))
+            .ok_or_else(|| EnvError::TypeNotFound(name.text().into()))
     }
 
     /// Find a type by name with the path selected by OCaml `IdTbl.find_name`.
     ///
     /// Local bindings resolve to `Pident(id)`, while opened bindings resolve to
     /// `Pdot(root, name, pos)` from the symbolic open layer.
-    pub fn find_type_with_path(&self, name: &str) -> EnvResult<(Path, &TypeDeclaration)> {
+    pub fn find_type_with_path(&self, name: impl crate::name::NameKey) -> EnvResult<(Path, &TypeDeclaration)> {
         self.data
             .types
             .find_by_name_with_path(name)
             .map(|(path, decl)| (path, decl.as_ref()))
-            .ok_or_else(|| EnvError::TypeNotFound(name.into()))
+            .ok_or_else(|| EnvError::TypeNotFound(name.text().into()))
     }
 
     /// Iterate over visible type bindings.
@@ -1598,7 +1609,7 @@ impl Env {
         self.data
             .types
             .find_by_ident(id)
-            .or_else(|| self.data.types.find_by_name(id.name()))
+            .or_else(|| self.data.types.find_by_name(id.name_atom()))
     }
 
     /// Find a type by path.
@@ -1615,7 +1626,7 @@ impl Env {
                     // mirror OCaml `IdTbl.find_same` use
                     // `lookup_type_ident_exact` instead
                     // (compiler/ml/env.ml:800-813,862).
-                    self.data.types.find_by_name(id.name())
+                    self.data.types.find_by_name(id.name_atom())
                 })
                 .map(|t| t.as_ref())
                 .ok_or_else(|| EnvError::TypeNotFound(id.name().into())),
@@ -1693,28 +1704,28 @@ impl Env {
     }
 
     /// Find a constructor by name.
-    pub fn find_constructor(&self, name: &str) -> EnvResult<&ConstructorDescription> {
+    pub fn find_constructor(&self, name: impl crate::name::NameKey) -> EnvResult<&ConstructorDescription> {
         self.data
             .constrs
             .find_by_name(name)
             .map(|c| c.as_ref())
-            .ok_or_else(|| EnvError::ConstructorNotFound(name.into()))
+            .ok_or_else(|| EnvError::ConstructorNotFound(name.text().into()))
     }
 
     /// Find a constructor by name with its local/opened origin flag.
     pub fn find_constructor_with_origin(
         &self,
-        name: &str,
+        name: impl crate::name::NameKey,
     ) -> EnvResult<(&Ident, &ConstructorDescription, bool)> {
         self.data
             .constrs
             .find_by_name_with_origin(name)
             .map(|(id, c, is_local)| (id, c.as_ref(), is_local))
-            .ok_or_else(|| EnvError::ConstructorNotFound(name.into()))
+            .ok_or_else(|| EnvError::ConstructorNotFound(name.text().into()))
     }
 
     /// Find all constructors with a given name.
-    pub fn find_all_constructors(&self, name: &str) -> Vec<&ConstructorDescription> {
+    pub fn find_all_constructors(&self, name: impl crate::name::NameKey) -> Vec<&ConstructorDescription> {
         self.data
             .constrs
             .find_all(name)
@@ -1740,28 +1751,28 @@ impl Env {
     }
 
     /// Find a label by name.
-    pub fn find_label(&self, name: &str) -> EnvResult<&LabelDescription> {
+    pub fn find_label(&self, name: impl crate::name::NameKey) -> EnvResult<&LabelDescription> {
         self.data
             .labels
             .find_by_name(name)
             .map(|l| l.as_ref())
-            .ok_or_else(|| EnvError::LabelNotFound(name.into()))
+            .ok_or_else(|| EnvError::LabelNotFound(name.text().into()))
     }
 
     /// Find a label by name with its local/opened origin flag.
     pub fn find_label_with_origin(
         &self,
-        name: &str,
+        name: impl crate::name::NameKey,
     ) -> EnvResult<(&Ident, &LabelDescription, bool)> {
         self.data
             .labels
             .find_by_name_with_origin(name)
             .map(|(id, l, is_local)| (id, l.as_ref(), is_local))
-            .ok_or_else(|| EnvError::LabelNotFound(name.into()))
+            .ok_or_else(|| EnvError::LabelNotFound(name.text().into()))
     }
 
     /// Find all labels with a given name.
-    pub fn find_all_labels(&self, name: &str) -> Vec<&LabelDescription> {
+    pub fn find_all_labels(&self, name: impl crate::name::NameKey) -> Vec<&LabelDescription> {
         self.data
             .labels
             .find_all(name)
@@ -1862,33 +1873,33 @@ impl Env {
     }
 
     /// Find a module by name.
-    pub fn find_module(&self, name: &str) -> EnvResult<&ModuleDeclaration> {
+    pub fn find_module(&self, name: impl crate::name::NameKey) -> EnvResult<&ModuleDeclaration> {
         self.data
             .modules
             .find_by_name(name)
             .map(|m| m.as_ref())
-            .ok_or_else(|| EnvError::ModuleNotFound(name.into()))
+            .ok_or_else(|| EnvError::ModuleNotFound(name.text().into()))
     }
 
     /// Find a module by name, returning both the identifier and declaration.
-    pub fn find_module_with_id(&self, name: &str) -> EnvResult<(&Ident, &ModuleDeclaration)> {
+    pub fn find_module_with_id(&self, name: impl crate::name::NameKey) -> EnvResult<(&Ident, &ModuleDeclaration)> {
         self.data
             .modules
             .find_by_name_with_id(name)
             .map(|(id, m)| (id, m.as_ref()))
-            .ok_or_else(|| EnvError::ModuleNotFound(name.into()))
+            .ok_or_else(|| EnvError::ModuleNotFound(name.text().into()))
     }
 
     /// Find a module by name with the path selected by OCaml `IdTbl.find_name`.
     ///
     /// Local bindings resolve to `Pident(id)`, while opened bindings resolve to
     /// `Pdot(root, name, pos)` from the symbolic open layer.
-    pub fn find_module_with_path(&self, name: &str) -> EnvResult<(Path, &ModuleDeclaration)> {
+    pub fn find_module_with_path(&self, name: impl crate::name::NameKey) -> EnvResult<(Path, &ModuleDeclaration)> {
         self.data
             .modules
             .find_by_name_with_path(name)
             .map(|(path, decl)| (path, decl.as_ref()))
-            .ok_or_else(|| EnvError::ModuleNotFound(name.into()))
+            .ok_or_else(|| EnvError::ModuleNotFound(name.text().into()))
     }
 
     fn first_dotted_component_path(path: &Path) -> Option<Path> {
@@ -2030,7 +2041,7 @@ impl Env {
                         .find_by_ident(id)
                         .or_else(|| {
                             // Fallback: try name-based lookup for stamp mismatches
-                            env.data.modules.find_by_name(id.name())
+                            env.data.modules.find_by_name(id.name_atom())
                         })
                         .map(|m| m.as_ref())
                         .ok_or_else(|| EnvError::ModuleNotFound(id.name().into()))
@@ -2114,33 +2125,33 @@ impl Env {
     }
 
     /// Find a module type by name.
-    pub fn find_modtype(&self, name: &str) -> EnvResult<&ModtypeDeclaration> {
+    pub fn find_modtype(&self, name: impl crate::name::NameKey) -> EnvResult<&ModtypeDeclaration> {
         self.data
             .modtypes
             .find_by_name(name)
             .map(|m| m.as_ref())
-            .ok_or_else(|| EnvError::ModtypeNotFound(name.into()))
+            .ok_or_else(|| EnvError::ModtypeNotFound(name.text().into()))
     }
 
     /// Find a module type by name, returning both the identifier and declaration.
-    pub fn find_modtype_with_id(&self, name: &str) -> EnvResult<(&Ident, &ModtypeDeclaration)> {
+    pub fn find_modtype_with_id(&self, name: impl crate::name::NameKey) -> EnvResult<(&Ident, &ModtypeDeclaration)> {
         self.data
             .modtypes
             .find_by_name_with_id(name)
             .map(|(id, decl)| (id, decl.as_ref()))
-            .ok_or_else(|| EnvError::ModtypeNotFound(name.into()))
+            .ok_or_else(|| EnvError::ModtypeNotFound(name.text().into()))
     }
 
     /// Find a module type by name with the path selected by OCaml `IdTbl.find_name`.
     ///
     /// Local bindings resolve to `Pident(id)`, while opened bindings resolve to
     /// `Pdot(root, name, pos)` from the symbolic open layer.
-    pub fn find_modtype_with_path(&self, name: &str) -> EnvResult<(Path, &ModtypeDeclaration)> {
+    pub fn find_modtype_with_path(&self, name: impl crate::name::NameKey) -> EnvResult<(Path, &ModtypeDeclaration)> {
         self.data
             .modtypes
             .find_by_name_with_path(name)
             .map(|(path, decl)| (path, decl.as_ref()))
-            .ok_or_else(|| EnvError::ModtypeNotFound(name.into()))
+            .ok_or_else(|| EnvError::ModtypeNotFound(name.text().into()))
     }
 
     /// Iterate over visible module type bindings.
