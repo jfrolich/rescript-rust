@@ -694,18 +694,20 @@ pub fn from_decl_attributes(
     }
 }
 
-pub fn update_config_for_decl_module(
-    config: &crate::gentype::config::T,
+/// Borrows `config` unless the module's attributes change it, so modules
+/// without `@genType` do not copy the configuration.
+pub fn update_config_for_decl_module<'c>(
+    config: &'c crate::gentype::config::T,
     attributes: &[crate::types::decl::Attribute],
-) -> crate::gentype::config::T {
+) -> std::borrow::Cow<'c, crate::gentype::config::T> {
     // Mirrors compiler/gentype/Annotation.ml:292-295 for Types.signature
     // attributes.
     if has_decl_attribute(tag_is_gentype, attributes) {
         let mut config = config.clone();
         config.everything = true;
-        config
+        std::borrow::Cow::Owned(config)
     } else {
-        config.clone()
+        std::borrow::Cow::Borrowed(config)
     }
 }
 
