@@ -793,6 +793,13 @@ pub struct TypeContext {
     /// compiler/ml/env.ml:865-906); this gives Rust ctype the same lookup
     /// source without falling back to disk in in-process builds.
     persistent_env: RefCell<Option<crate::cmi::persistent_env::PersistentEnv>>,
+    /// Bumped whenever `persistent_env` is replaced.
+    persistent_env_generation: Cell<u64>,
+    /// Units whose `StoreEffect::PreparePers` this compilation has already
+    /// replayed against the `persistent_env` of the recorded generation.
+    /// Replaying it again against the same environment repeats the same
+    /// lookups and records nothing new (see `replay_store_piece`).
+    replayed_prepare_pers: RefCell<(u64, crate::fast_hash::AHashSet<smol_str::SmolStr>)>,
 
     /// Cache of renamed module signatures.
     /// Matches OCaml's lazy ps_sig = Subst.signature Subst.identity sign.
@@ -1182,6 +1189,8 @@ impl TypeContext {
             forced_type_path_compare_cache: RefCell::new(hashbrown::HashMap::default()),
             load_paths: RefCell::new(Arc::new(Vec::new())),
             persistent_env: RefCell::new(None),
+            persistent_env_generation: Cell::new(0),
+            replayed_prepare_pers: RefCell::new((0, crate::fast_hash::AHashSet::new())),
             renamed_module_sigs: RefCell::new(crate::fast_hash::AHashMap::new()),
             reserved_rename_stamps: Cell::new(None),
             raw_module_sigs: RefCell::new(crate::fast_hash::AHashMap::new()),
@@ -2066,6 +2075,8 @@ impl TypeContext {
 
     pub(crate) fn set_persistent_env(&self, env: crate::cmi::persistent_env::PersistentEnv) {
         *self.persistent_env.borrow_mut() = Some(env);
+        self.persistent_env_generation
+            .set(self.persistent_env_generation.get() + 1);
     }
 
     pub(crate) fn persistent_env_clone(&self) -> Option<crate::cmi::persistent_env::PersistentEnv> {
@@ -4386,6 +4397,23 @@ impl TypeContext {
                         .insert(key.clone(), components.clone());
                 }
                 StoreEffect::PreparePers(name) => {
+                    // The replay runs on a throwaway clone of `persistent_env`:
+                    // its only lasting effects are the imports it records and
+                    // the raw signatures and cache entries it registers, all
+                    // idempotent. A second replay of the same unit against the
+                    // same environment finds the first one's cache entry and
+                    // reaches the same answers, so it is skipped.
+                    {
+                        let generation = self.persistent_env_generation.get();
+                        let mut replayed = self.replayed_prepare_pers.borrow_mut();
+                        if replayed.0 != generation {
+                            replayed.0 = generation;
+                            replayed.1.clear();
+                        }
+                        if !replayed.1.insert(name.clone()) {
+                            continue;
+                        }
+                    }
                     if let Some(mut pers) = self.persistent_env_clone() {
                         let _ = pers.find_pers_struct(name, self);
                     }
