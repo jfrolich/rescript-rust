@@ -709,7 +709,6 @@ pub fn incremental_build_without_lock(
         build_state.loaded_units.lock().unwrap().clear();
         build_state.unit_reads.lock().unwrap().clear();
         build_state.verified_imports.lock().unwrap().clear();
-        build_state.module_alias_rewrites.lock().unwrap().clear();
         build_state.incremental_plan = None;
         build_state.previous_in_process = None;
         build_state.loaded_modules.clear();
