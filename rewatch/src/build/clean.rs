@@ -106,7 +106,19 @@ pub fn write_in_process_record(build_state: &BuildCommandState) {
             remove_obsolete_outputs(package, build_state.recorded_outputs.get(package_name), &current);
             build::state_db::write_record(package, previous, &record);
             build::state_db::remove_legacy_files(package);
+            drop_in_background(record);
         });
+}
+
+/// Drop `value` on a thread of its own. A large package's record takes tens
+/// of milliseconds to free, which would otherwise end every build.
+fn drop_in_background<T: Send + 'static>(value: T) {
+    if let Err(err) = std::thread::Builder::new()
+        .name("record-drop".to_string())
+        .spawn(move || drop(value))
+    {
+        log::debug!("could not spawn a thread to free the build record: {err}");
+    }
 }
 
 /// Remove the outputs the recorded build had that this one no longer
