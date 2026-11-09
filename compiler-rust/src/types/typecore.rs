@@ -4317,7 +4317,7 @@ fn type_pattern_with_existentials_at_level(
                 env,
                 &mut tctx.persistent_env,
                 field_ty,
-                &mut HashSet::new(),
+                &mut crate::types::type_marks::visit_set(),
             );
         }
     }
@@ -24944,12 +24944,12 @@ fn force_type_paths_for_lookup_from_type(
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ty: TypeExprRef,
-    seen: &mut HashSet<TypeExprRef>,
+    seen: &mut crate::types::type_marks::TypeVisitSet,
 ) {
     use crate::types::type_expr::RowField;
 
     let ty = ctx.repr(ty);
-    if !seen.insert(ty) {
+    if !seen.visit(ty) {
         return;
     }
 

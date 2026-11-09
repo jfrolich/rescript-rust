@@ -42,6 +42,7 @@ use crate::types::decl::{
 use crate::types::env::{Env, initial_env};
 use crate::types::path::Path;
 use crate::types::type_expr::{TypeDesc, TypeExprRef};
+use crate::types::type_marks::{TypeVisitSet, visit_set};
 use crate::types::typecore::TypeCheckContext;
 use crate::types::typedtree::{
     ModuleType as TypedModuleType, ModuleTypeDesc as TypedModuleTypeDesc,
@@ -4004,7 +4005,7 @@ fn freshen_module_type_bound_idents_with_maps(
     maps: &SubstMaps,
     ctx: &TypeContext,
 ) {
-    let mut visited = HashSet::new();
+    let mut visited = visit_set();
     freshen_module_type_bound_idents_rec(module_type, maps, ctx, &mut visited);
 }
 
@@ -4018,7 +4019,7 @@ fn freshen_module_type_bound_idents_rec(
     module_type: &mut ModuleType,
     maps: &SubstMaps,
     ctx: &TypeContext,
-    visited: &mut HashSet<usize>,
+    visited: &mut TypeVisitSet,
 ) {
     match module_type {
         ModuleType::MtyIdent(path) => {
@@ -4090,7 +4091,7 @@ fn freshen_signature_bound_idents_rec(
     sig_items: &mut [SignatureItem],
     maps: &SubstMaps,
     ctx: &TypeContext,
-    visited: &mut HashSet<usize>,
+    visited: &mut TypeVisitSet,
 ) {
     let mut local_maps = SubstMaps::default();
 
@@ -4221,7 +4222,7 @@ pub(crate) fn signature_freshen_stamp_count(sig_items: &[SignatureItem]) -> i32 
 }
 
 fn freshen_nested_signature_module_types(sig_items: &mut [SignatureItem], ctx: &TypeContext) {
-    let mut visited = HashSet::new();
+    let mut visited = visit_set();
     let no_maps = SubstMaps::default();
     for item in sig_items.iter_mut() {
         match item {
@@ -4541,7 +4542,7 @@ fn substitute_type_paths_in_sig_with_maps(
     maps: &SubstMaps,
     ctx: &TypeContext,
 ) {
-    let mut visited = HashSet::new();
+    let mut visited = visit_set();
     substitute_type_paths_in_sig_items(sig_items, maps, ctx, &mut visited, true);
 }
 
@@ -4552,7 +4553,7 @@ fn substitute_type_paths_in_sig_items(
     sig_items: &[SignatureItem],
     maps: &SubstMaps,
     ctx: &TypeContext,
-    visited: &mut HashSet<usize>,
+    visited: &mut TypeVisitSet,
     recurse: bool,
 ) {
     if maps.is_empty() {
@@ -4917,7 +4918,7 @@ pub fn substitute_type_paths_in_sig(
 
     // Now walk all type expressions referenced from the signature
     // and rewrite Tconstr paths that match our maps
-    let mut visited = HashSet::new();
+    let mut visited = visit_set();
 
     for item in sig_items {
         match item {
@@ -5116,7 +5117,7 @@ pub(crate) fn substitute_type_paths_in_sig_with_stamp_map(
     }
     let empty: HashMap<Name, Path> = HashMap::new();
     let empty_module_stamp: ModuleStampSubstMap = HashMap::new();
-    let mut visited = HashSet::new();
+    let mut visited = visit_set();
     for item in sig_items {
         match item {
             SignatureItem::SigValue(_id, desc) => {
@@ -5171,7 +5172,7 @@ fn substitute_type_expr_path(
     module_name_map: &HashMap<Name, Path>,
     protected_module_head: Option<&(i32, Name)>,
     ctx: &TypeContext,
-    visited: &mut HashSet<usize>,
+    visited: &mut TypeVisitSet,
 ) {
     // Use an explicit work stack instead of recursion to avoid stack overflow
     // on large type graphs (e.g., objects with hundreds of fields create deep
@@ -5179,7 +5180,7 @@ fn substitute_type_expr_path(
     let mut work_stack = vec![initial_ty_ref];
 
     while let Some(ty_ref) = work_stack.pop() {
-        if !visited.insert(ty_ref.key()) {
+        if !visited.visit(ty_ref) {
             continue; // Already visited (cycle detection)
         }
 
@@ -5374,9 +5375,9 @@ pub fn type_expr_mentions_path_prefixes(
         ty: TypeExprRef,
         prefixes: &PathPrefixes<'_>,
         ctx: &TypeContext,
-        visited: &mut HashSet<TypeExprRef>,
+        visited: &mut TypeVisitSet,
     ) -> bool {
-        if !visited.insert(ty) {
+        if !visited.visit(ty) {
             return false;
         }
         let desc = ctx.get_desc(ty);
@@ -5436,7 +5437,7 @@ pub fn type_expr_mentions_path_prefixes(
             TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => false,
         }
     }
-    walk(ty, &PathPrefixes::new(prefixes), ctx, &mut HashSet::new())
+    walk(ty, &PathPrefixes::new(prefixes), ctx, &mut visit_set())
 }
 
 /// Component substitution used by `substitute_type_paths_in_value_from_sig`.
@@ -5505,7 +5506,7 @@ pub fn substitute_type_paths_in_value_with_maps(
         return;
     }
 
-    let mut visited = HashSet::new();
+    let mut visited = visit_set();
     substitute_type_expr_path(
         desc.val_type,
         type_stamp_map,
@@ -5698,9 +5699,9 @@ fn rewrite_type_expr_prefix(
     old_name: &str,
     new_prefix: &Path,
     ctx: &TypeContext,
-    visited: &mut HashSet<usize>,
+    visited: &mut TypeVisitSet,
 ) {
-    if !visited.insert(ty_ref.key()) {
+    if !visited.visit(ty_ref) {
         return; // Already visited (cycle detection)
     }
 
@@ -5944,7 +5945,7 @@ pub fn rewrite_module_prefix_in_sig(
     new_prefix: &Path,
     ctx: &TypeContext,
 ) {
-    let mut visited = HashSet::new();
+    let mut visited = visit_set();
     rewrite_module_prefix_in_sig_with_visited(sig_items, old_name, new_prefix, ctx, &mut visited);
 }
 
@@ -5958,7 +5959,7 @@ pub fn rewrite_module_prefix_in_sig_shallow(
     new_prefix: &Path,
     ctx: &TypeContext,
 ) {
-    let mut visited = HashSet::new();
+    let mut visited = visit_set();
     for item in sig_items {
         match item {
             SignatureItem::SigValue(_id, desc) => {
@@ -6062,7 +6063,7 @@ fn rewrite_module_type_prefix_in_module_type(
     old_name: &str,
     new_prefix: &Path,
     ctx: &TypeContext,
-    visited: &mut HashSet<usize>,
+    visited: &mut TypeVisitSet,
 ) {
     match module_type {
         ModuleType::MtyIdent(_) | ModuleType::MtyAlias(_, _) => {}
@@ -6087,7 +6088,7 @@ fn rewrite_module_prefix_in_sig_with_visited(
     old_name: &str,
     new_prefix: &Path,
     ctx: &TypeContext,
-    visited: &mut HashSet<usize>,
+    visited: &mut TypeVisitSet,
 ) {
     for item in sig_items {
         match item {
@@ -6403,9 +6404,9 @@ fn rewrite_type_expr_by_path_prefix_in(
     old_prefix: &Path,
     new_prefix: &Path,
     ctx: &TypeContext,
-    visited: &mut HashSet<usize>,
+    visited: &mut TypeVisitSet,
 ) {
-    if !visited.insert(ty_ref.key()) {
+    if !visited.visit(ty_ref) {
         return;
     }
 
@@ -6512,7 +6513,7 @@ pub fn rewrite_type_expr_by_path_prefix(
     new_prefix: &Path,
     ctx: &TypeContext,
 ) {
-    let mut visited = HashSet::new();
+    let mut visited = visit_set();
     rewrite_type_expr_by_path_prefix_in(ty_ref, old_prefix, new_prefix, ctx, &mut visited);
 }
 
@@ -6520,9 +6521,9 @@ fn rewrite_type_expr_by_path_prefixes(
     ty_ref: TypeExprRef,
     prefixes: &PathPrefixes<'_>,
     ctx: &TypeContext,
-    visited: &mut HashSet<usize>,
+    visited: &mut TypeVisitSet,
 ) {
-    if !visited.insert(ty_ref.key()) {
+    if !visited.visit(ty_ref) {
         return;
     }
 
@@ -6624,7 +6625,7 @@ pub fn rewrite_sig_by_path_prefix(
     new_prefix: &Path,
     ctx: &TypeContext,
 ) {
-    let mut visited = HashSet::new();
+    let mut visited = visit_set();
 
     for item in sig_items {
         match item {
@@ -6737,7 +6738,7 @@ fn rewrite_sig_by_path_prefix_index(
     prefixes: &PathPrefixes<'_>,
     ctx: &TypeContext,
 ) {
-    let mut visited = HashSet::new();
+    let mut visited = visit_set();
 
     for item in sig_items {
         match item {
