@@ -22956,7 +22956,7 @@ fn extract_variant_type_path_from_expected_with_persistent_env(
         ctx: &crate::types::context::TypeContext,
     ) -> Option<Path> {
         let mut current = *path;
-        let mut visited = HashSet::new();
+        let mut visited = PathNameSet::default();
         loop {
             // Don't normalize module aliases at the top of the loop — this would
             // flatten qualified paths like Pdot(Pdot(Pident("Stdlib"), "JSON"), "t")
@@ -22964,7 +22964,7 @@ fn extract_variant_type_path_from_expected_with_persistent_env(
             // structure. lookup_type_decl_for_path handles module aliases internally
             // via resolve_module_signature_for_path. Module alias normalization is
             // only used as a fallback for self-manifest cycles (below).
-            if !visited.insert(current.name()) {
+            if !visited.insert(current) {
                 return None;
             }
             let Some(decl) = lookup_type_decl_for_path(&current, env, pers_env, ctx) else {
@@ -23012,6 +23012,26 @@ fn extract_variant_type_path_from_expected_with_persistent_env(
     None
 }
 
+/// Paths visited by a type-path expansion, compared by `Path.name` (the
+/// expansions stop at a name they have seen). Short, so a list.
+#[derive(Default)]
+struct PathNameSet(smallvec::SmallVec<[Path; 4]>);
+
+impl PathNameSet {
+    /// Adds `path`; `false` when a path with the same name is already in.
+    fn insert(&mut self, path: Path) -> bool {
+        if self.0.iter().any(|seen| seen.name_equals(&path)) {
+            return false;
+        }
+        self.0.push(path);
+        true
+    }
+
+    fn remove(&mut self, path: &Path) {
+        self.0.retain(|seen| !seen.name_equals(path));
+    }
+}
+
 /// OCaml `typecore.ml` compares constructor/label type paths with
 /// `compare_type_path`, which expands type manifests and normalizes aliases.
 /// Mirror that behavior for constructor disambiguation.
@@ -23021,15 +23041,14 @@ fn expand_type_path_for_compare(
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &crate::types::context::TypeContext,
     depth: usize,
-    visiting: &mut HashSet<String>,
+    visiting: &mut PathNameSet,
     force_env_normalize: bool,
 ) -> Path {
     if depth > 50 {
         return *path;
     }
 
-    let visit_key = path.name();
-    if !visiting.insert(visit_key.clone()) {
+    if !visiting.insert(*path) {
         return *path;
     }
 
@@ -23058,7 +23077,7 @@ fn expand_type_path_for_compare(
                                 visiting,
                                 force_env_normalize,
                             );
-                            visiting.remove(&visit_key);
+                            visiting.remove(path);
                             return expanded;
                         }
                     }
@@ -23076,7 +23095,7 @@ fn expand_type_path_for_compare(
                                 visiting,
                                 force_env_normalize,
                             );
-                            visiting.remove(&visit_key);
+                            visiting.remove(path);
                             return expanded;
                         }
                     }
@@ -23090,7 +23109,7 @@ fn expand_type_path_for_compare(
                     visiting,
                     force_env_normalize,
                 );
-                visiting.remove(&visit_key);
+                visiting.remove(path);
                 return expanded;
             }
         }
@@ -23117,11 +23136,11 @@ fn expand_type_path_for_compare(
             visiting,
             force_env_normalize,
         );
-        visiting.remove(&visit_key);
+        visiting.remove(path);
         return expanded;
     }
 
-    visiting.remove(&visit_key);
+    visiting.remove(path);
     *path
 }
 
@@ -23220,8 +23239,8 @@ fn compare_type_paths_for_disambiguation_impl(
     {
         return cached;
     }
-    let mut left_visiting = HashSet::new();
-    let mut right_visiting = HashSet::new();
+    let mut left_visiting = PathNameSet::default();
+    let mut right_visiting = PathNameSet::default();
     let left_expanded = expand_type_path_for_compare(
         left,
         env,
@@ -24174,7 +24193,7 @@ fn qualified_constructor_type_mismatch(
         return None;
     }
     let mut expand = |path: &Path| {
-        expand_type_path_for_compare(path, env, pers_env, ctx, 0, &mut HashSet::new(), true)
+        expand_type_path_for_compare(path, env, pers_env, ctx, 0, &mut PathNameSet::default(), true)
     };
     let tpath0 = match &*ctx.get_desc(ctx.repr(expected_ty)) {
         TypeDesc::Tconstr { path, .. } => *path,
