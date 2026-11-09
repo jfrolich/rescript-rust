@@ -27211,6 +27211,18 @@ pub(crate) fn with_resolved_module_components_for_path_with_cache_mode<R>(
         return Some(result);
     }
 
+    // Outside a store build, this compilation's own cache answers first; the
+    // shared-view checks below are only needed on a miss.
+    if !ctx.in_store_build()
+        && let Some(module_key) = module_key.as_ref()
+        && let Some(result) = ctx.with_qualified_module_components(module_key, |components| {
+            (f.take()
+                .expect("qualified module components callback reused"))(components)
+        })
+    {
+        return Some(result);
+    }
+
     // A persistent-rooted view is the same for every compilation (OCaml
     // builds `ps_comps` from `Env.empty`, compiler/ml/env.ml:669-678), so it
     // is built once per worker as a store build and shared.
@@ -27228,22 +27240,17 @@ pub(crate) fn with_resolved_module_components_for_path_with_cache_mode<R>(
                     .is_none_or(|pers| pers.unit_visible(module_path.head().name()))
         })
         .cloned();
-    if let Some(module_key) = module_key.as_ref() {
-        let unit_hit = if ctx.in_store_build() && shared_key.is_some() {
-            // A store build must not read this compilation's cache; the
-            // shared cache below answers for the same key.
-            None
-        } else {
-            ctx.with_qualified_module_components(module_key, |components| {
-                (f.take()
-                    .expect("qualified module components callback reused"))(
-                    components
-                )
-            })
-        };
-        if let Some(result) = unit_hit {
-            return Some(result);
-        }
+    if ctx.in_store_build()
+        && shared_key.is_none()
+        && let Some(module_key) = module_key.as_ref()
+        && let Some(result) = ctx.with_qualified_module_components(module_key, |components| {
+            (f.take()
+                .expect("qualified module components callback reused"))(components)
+        })
+    {
+        // A store build must not read this compilation's cache when the
+        // shared cache below answers for the same key.
+        return Some(result);
     }
     if let Some(shared_key) = shared_key.as_ref()
         && let Some((components, piece)) = ctx.thread_store().shared_components(shared_key)
