@@ -4134,9 +4134,8 @@ fn compile_module_in_process_to_js_boundary(
                 module_level: Vec::new(),
             };
             for module_id in &result.possible_required_modules {
-                let unit = module_id.id.name().to_string();
-                reads.module_level.push(unit.clone());
-                loaded_units.push(unit);
+                reads.module_level.push(module_id.id.name_atom());
+                loaded_units.push(module_id.id.name().to_string());
             }
             build_command_state.record_loaded_units(module_name, loaded_units, reads);
             result.warnings.insert_str(0, &interface_warnings);
