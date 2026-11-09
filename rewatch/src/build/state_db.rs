@@ -180,6 +180,21 @@ pub struct StoredInterface {
     pub core: Vec<u8>,
 }
 
+impl StoredInterface {
+    /// The interface encoded as `extras` (`None` for none) and `core`, with
+    /// its content hash.
+    pub fn new(extras: Option<Vec<u8>>, core: Vec<u8>) -> Self {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(&core);
+        if let Some(extras) = &extras {
+            hasher.update(extras);
+        }
+        let hash = hasher.finalize();
+        let hash = u64::from_le_bytes(hash.as_bytes()[..8].try_into().expect("8 bytes"));
+        Self { hash, extras, core }
+    }
+}
+
 /// What a module's compile read of each unit: the digest of the items read
 /// when it was compiled, and their keys.
 pub type UnitReads = BTreeMap<String, (u64, Vec<String>)>;

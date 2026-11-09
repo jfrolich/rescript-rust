@@ -706,6 +706,8 @@ pub fn incremental_build_without_lock(
             rescript_compiler::cmi::persistent_env::ModuleRegistry::new();
         build_state.stored_asts.lock().unwrap().clear();
         build_state.in_memory_interfaces.lock().unwrap().clear();
+        build_state.published_item_digests.lock().unwrap().clear();
+        build_state.prepared_interfaces.lock().unwrap().clear();
         build_state.loaded_units.lock().unwrap().clear();
         build_state.unit_reads.lock().unwrap().clear();
         build_state.verified_imports.lock().unwrap().clear();

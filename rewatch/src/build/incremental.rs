@@ -142,13 +142,25 @@ impl UnitDigests {
                 ))
             })
             .collect();
+        // The digests the scheduler computed of modules whose registration
+        // has not changed since are those of this snapshot.
+        let registry = build_state.snapshot_module_registry();
+        let published = build_state.published_item_digests.lock().unwrap();
+        let cache = build_state
+            .modules
+            .keys()
+            .map(|module_name| {
+                let cell = match published.get(module_name) {
+                    Some(items) => std::sync::OnceLock::from(Some((items[item_deps::WHOLE], items.clone()))),
+                    None => std::sync::OnceLock::new(),
+                };
+                (module_name.clone(), cell)
+            })
+            .collect();
+        drop(published);
         Self {
-            registry: build_state.snapshot_module_registry(),
-            cache: build_state
-                .modules
-                .keys()
-                .map(|module_name| (module_name.clone(), std::sync::OnceLock::new()))
-                .collect(),
+            registry,
+            cache,
             other: std::sync::Mutex::new(AHashMap::new()),
             recorded,
         }
@@ -312,22 +324,23 @@ pub fn current_record(
                 .is_some_and(|module| module.package_name == package_name && !module.compile_dirty)
         })
         .filter_map(|module_name| {
-            let (extras, core) = digests.encode_parts(module_name)?;
-            let mut hasher = blake3::Hasher::new();
-            hasher.update(&core);
-            if let Some(extras) = &extras {
-                hasher.update(extras);
-            }
-            let hash = hasher.finalize();
-            let content = u64::from_le_bytes(hash.as_bytes()[..8].try_into().expect("8 bytes"));
-            if stored.and_then(|stored| stored.get(module_name)) == Some(&content) {
+            // Encoded when the module completed, unless its registration
+            // changed since.
+            let prepared = build_state
+                .prepared_interfaces
+                .lock()
+                .unwrap()
+                .remove(module_name);
+            let interface = match prepared {
+                Some(interface) => interface,
+                None => {
+                    let (extras, core) = digests.encode_parts(module_name)?;
+                    state_db::StoredInterface::new(extras, core)
+                }
+            };
+            if stored.and_then(|stored| stored.get(module_name)) == Some(&interface.hash) {
                 return None;
             }
-            let interface = state_db::StoredInterface {
-                hash: content,
-                extras,
-                core,
-            };
             Some((module_name.clone(), interface))
         })
         .collect::<Vec<_>>()
@@ -815,6 +828,9 @@ pub fn load_stored(build_state: &BuildCommandState, modules: &AHashSet<String>) 
         .collect();
     let mut loaded = AHashSet::new();
     let mut registry = build_state.module_registry.lock().unwrap();
+    for (module_name, _, _) in &extras {
+        build_state.forget_item_digests(module_name);
+    }
     for (module_name, extras, fetch) in extras {
         let core = rescript_compiler::cmi::persistent_env::PendingCore::Fetch(fetch);
         if registry

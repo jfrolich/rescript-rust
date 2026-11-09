@@ -342,6 +342,15 @@ pub struct BuildCommandState {
     // In-memory published interfaces, keyed by module name. Only used in --in-process mode.
     // Maps module_name -> InMemoryModuleState.
     pub in_memory_interfaces: Mutex<AHashMap<String, InMemoryModuleState>>,
+    // The item digests `record_published_digest` computed of modules whose
+    // registration has not changed since, so recording the build need not
+    // decode and hash their signatures again. Every change to a module's
+    // registration drops its entry.
+    pub published_item_digests: Mutex<AHashMap<String, Arc<crate::build::state_db::ItemDigests>>>,
+    // The stored interfaces of the modules the last compile completed,
+    // encoded as they completed, for recording the build. Every change to a
+    // module's registration drops its entry.
+    pub prepared_interfaces: Mutex<AHashMap<String, crate::build::state_db::StoredInterface>>,
     // Monotonically increasing generation counter for in-memory interface invalidation.
     // Each compilation that produces a new interface bumps this counter.
     pub interface_generation: AtomicU64,
@@ -497,6 +506,8 @@ impl BuildCommandState {
             diagnostic_locations: false,
             diagnostic_retry: std::sync::atomic::AtomicBool::new(false),
             in_memory_interfaces: Mutex::new(AHashMap::new()),
+            published_item_digests: Mutex::new(AHashMap::new()),
+            prepared_interfaces: Mutex::new(AHashMap::new()),
             interface_generation: AtomicU64::new(0),
             module_registry: Mutex::new(ModuleRegistry::new()),
             in_memory_deps: Mutex::new(AHashMap::new()),
@@ -621,12 +632,16 @@ impl BuildCommandState {
     /// Returns whether it equals the digest recorded when the module was last
     /// compiled with the same signature.
     pub fn record_published_digest(&self, module_name: &str) -> bool {
-        let digest = self
-            .module_registry
-            .lock()
-            .unwrap()
-            .item_digests(module_name)
+        let items = self.module_registry.lock().unwrap().item_digests(module_name);
+        let digest = items
+            .as_ref()
             .and_then(|digests| digests.get(rescript_compiler::cmi::item_deps::WHOLE).copied());
+        if let Some(items) = items.filter(|_| digest.is_some()) {
+            self.published_item_digests
+                .lock()
+                .unwrap()
+                .insert(module_name.to_string(), Arc::new(items));
+        }
         let mut interfaces = self.in_memory_interfaces.lock().unwrap();
         let Some(state) = interfaces.get_mut(module_name) else {
             return false;
@@ -644,10 +659,21 @@ impl BuildCommandState {
         }
         let mut registry = self.module_registry.lock().unwrap();
         let mut interfaces = self.in_memory_interfaces.lock().unwrap();
+        let mut item_digests = self.published_item_digests.lock().unwrap();
+        let mut prepared = self.prepared_interfaces.lock().unwrap();
         for name in deleted_modules {
             registry.purge_module(name);
             interfaces.remove(name);
+            item_digests.remove(name);
+            prepared.remove(name);
         }
+    }
+
+    /// Drop the item digests recorded of `module_name`: its registration is
+    /// about to change.
+    pub fn forget_item_digests(&self, module_name: &str) {
+        self.published_item_digests.lock().unwrap().remove(module_name);
+        self.prepared_interfaces.lock().unwrap().remove(module_name);
     }
 
     /// Take a snapshot of the module registry for use during a compilation wave.
@@ -692,6 +718,7 @@ impl BuildCommandState {
             cmj_export_constants,
             is_runtime,
         );
+        self.forget_item_digests(module_name);
         self.module_registry
             .lock()
             .unwrap()

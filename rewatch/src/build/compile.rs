@@ -312,6 +312,14 @@ fn apply_pending_registry_updates(
         return;
     }
 
+    {
+        let mut item_digests = build_command_state.published_item_digests.lock().unwrap();
+        let mut interfaces = build_command_state.prepared_interfaces.lock().unwrap();
+        for update in &updates {
+            item_digests.remove(&update.module_name);
+            interfaces.remove(&update.module_name);
+        }
+    }
     let mut registry = build_command_state.module_registry.lock().unwrap();
     for update in updates {
         if let Some(pers_struct) = update.pers_struct {
@@ -661,6 +669,10 @@ pub fn compile(
     // Purge deleted/renamed modules from the in-memory registries so stale
     // entries don't remain resolvable in watch mode.
     build_state.purge_deleted_modules(&build_state.build_state.deleted_modules.clone());
+    // Registrations can change between builds (watch mode, retries); only
+    // digests computed by this build's scheduler are reused.
+    build_state.published_item_digests.lock().unwrap().clear();
+    build_state.prepared_interfaces.lock().unwrap().clear();
     build_state.clear_gentype_contexts();
     // Worker type stores hold dependency graphs published by this build
     // only; a new build starts every worker from an empty store.
@@ -741,6 +753,7 @@ pub fn compile(
     let cutoff = incremental_plan == Some(IncrementalPlan::Cutoff);
 
     let js_writer = JsWriter::spawn();
+    let digest_prep = DigestPrep::spawn(build_state.snapshot_module_registry());
     // Bound the jobs handed to rayon so the priority heap still orders work —
     // dumping everything into rayon's queue would defeat #2. Allow one queued
     // job per thread beyond the running ones: a worker that finishes then
@@ -1128,6 +1141,8 @@ pub fn compile(
                                 std::mem::take(&mut msg.registry_updates),
                             );
 
+                            // Its registration is final: compile is done with it.
+                            digest_prep.prepare(msg.module_name.clone());
                             let module_failed = msg.result.is_err()
                                 || msg.interface_result.as_ref().is_some_and(|r| r.is_err());
                             if module_failed {
@@ -1284,6 +1299,22 @@ pub fn compile(
         counters.print_report(capacity);
     }
     let js_write_failures = js_writer.finish();
+    // Every module's last registration is the one its last completion saw:
+    // only completing modules register (see `apply_pending_registry_updates`).
+    {
+        let mut item_digests = build_state.published_item_digests.lock().unwrap();
+        let mut interfaces = build_state.prepared_interfaces.lock().unwrap();
+        for prepared in digest_prep.finish() {
+            match prepared.item_digests {
+                Some(items) => item_digests.insert(prepared.module_name.clone(), items),
+                None => item_digests.remove(&prepared.module_name),
+            };
+            match prepared.interface {
+                Some(interface) => interfaces.insert(prepared.module_name, interface),
+                None => interfaces.remove(&prepared.module_name),
+            };
+        }
+    }
 
     trace!(
         "Compiled {} out of {} in the universe",
@@ -2480,6 +2511,62 @@ fn write_js_output(
         write_file_creating_parent_on_missing(&js_path, js_output)?;
     }
     Ok(())
+}
+
+/// Computes the item digests of compiled modules on a thread of its own, as
+/// they complete, for recording the build (see `incremental::UnitDigests`):
+/// otherwise recording a large build decodes and hashes every signature at
+/// the end, when nothing else runs.
+struct DigestPrep {
+    tx: mpsc::Sender<String>,
+    handle: std::thread::JoinHandle<Vec<PreparedRecord>>,
+}
+
+/// What [`DigestPrep`] computed of a completed module.
+struct PreparedRecord {
+    module_name: String,
+    item_digests: Option<Arc<super::state_db::ItemDigests>>,
+    interface: Option<super::state_db::StoredInterface>,
+}
+
+impl DigestPrep {
+    /// `registry` shares the build registry's maps, so it sees each module
+    /// as registered when [`DigestPrep::prepare`] is called.
+    fn spawn(registry: ModuleRegistry) -> Self {
+        let (tx, rx) = mpsc::channel::<String>();
+        let handle = std::thread::Builder::new()
+            .name("digest-prep".to_string())
+            .spawn(move || {
+                rx.into_iter()
+                    .map(|module_name| PreparedRecord {
+                        item_digests: registry
+                            .item_digests(&module_name)
+                            .filter(|items| items.contains_key(rescript_compiler::cmi::item_deps::WHOLE))
+                            .map(Arc::new),
+                        interface: registry
+                            .encode_stored_module_parts(&module_name)
+                            .map(|(extras, core)| super::state_db::StoredInterface::new(extras, core)),
+                        module_name,
+                    })
+                    .collect()
+            })
+            .expect("failed to spawn the digest thread");
+        DigestPrep { tx, handle }
+    }
+
+    /// Digest `module_name` as registered now.
+    fn prepare(&self, module_name: String) {
+        // The thread only stops when `finish` drops the sender.
+        self.tx.send(module_name).expect("digest thread stopped");
+    }
+
+    /// What was prepared, later completions of a module after earlier ones.
+    fn finish(self) -> Vec<PreparedRecord> {
+        drop(self.tx);
+        self.handle
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+    }
 }
 
 /// JS outputs of one module, queued for the writer thread.
