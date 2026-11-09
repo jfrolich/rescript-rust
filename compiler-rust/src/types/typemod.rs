@@ -1189,7 +1189,7 @@ fn primitive_description_from_value_decl(
             (arena.get_string(*name).to_string(), PrimKind::KindIntrinsic)
         }
         PrimitiveRepr::PrimFfi { name, spec } => {
-            (name.clone(), PrimKind::KindExternal(spec.clone()))
+            (name.clone(), PrimKind::KindExternal(std::sync::Arc::new((**spec).clone())))
         }
         PrimitiveRepr::PrimInlineConst(c) => (String::new(), PrimKind::KindInlineConst(c.clone())),
     };
