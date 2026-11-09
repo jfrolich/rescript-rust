@@ -2269,7 +2269,7 @@ impl<'r> JsPrinter<'r> {
                     None,
                     elements.iter().zip(fields.iter()),
                     |this, (elem, field_name)| {
-                        let field_name = convert_ident_name(field_name);
+                        let field_name = convert_ident_cow(field_name);
                         this.print_literal_property_name(&field_name);
                         this.write(": ");
                         this.print_expression(*elem, 1);
@@ -2455,7 +2455,7 @@ impl<'r> JsPrinter<'r> {
                         self.write_module_ident(&module.id);
                         match &module.kind {
                             Kind::Ml | Kind::Runtime => {
-                                let printed_member = js_export_name(member);
+                                let printed_member = js_export_name_cow(member);
                                 self.write_char('.');
                                 self.write(&printed_member);
                             }
@@ -3155,44 +3155,48 @@ fn unwrap_uppercase_exotic(name: &str) -> &str {
 /// `Js_dump_import_export.js_export_name`: the emitted export name of an ML
 /// binding, JS identifier conversion with the ES default export kept literal.
 pub(crate) fn js_export_name(name: &str) -> String {
+    js_export_name_cow(name).into_owned()
+}
+
+/// [`js_export_name`], borrowing `name` when it needs no conversion.
+pub(crate) fn js_export_name_cow(name: &str) -> Cow<'_, str> {
     if name == "default" {
-        name.to_string()
+        Cow::Borrowed(name)
     } else {
-        convert_ident_name(name)
+        convert_ident_cow(name)
     }
 }
 
 /// [`convert_ident_name`] for an interned name: the name itself when the
 /// conversion leaves it unchanged (almost always), without building a copy.
 pub(crate) fn convert_ident_atom(name: Name) -> Name {
-    let text = name.as_str();
-    let unwrapped = unwrap_uppercase_exotic(text);
-    if unwrapped.len() == text.len()
-        && !is_js_keyword_or_global(text)
-        && text
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '$'))
-    {
-        return name;
+    match convert_ident_cow(name.as_str()) {
+        Cow::Borrowed(converted) if converted.len() == name.len() => name,
+        converted => Name::new(&converted),
     }
-    Name::new(&convert_ident_name(text))
 }
 
 pub(crate) fn convert_ident_name(name: &str) -> String {
+    convert_ident_cow(name).into_owned()
+}
+
+/// [`convert_ident_name`], borrowing `name` (or the part inside an exotic
+/// `\"..."` wrapper) when it needs no mangling.
+pub(crate) fn convert_ident_cow(name: &str) -> Cow<'_, str> {
     let name = unwrap_uppercase_exotic(name);
     if is_js_keyword_or_global(name) {
-        format!("$${name}")
+        Cow::Owned(format!("$${name}"))
     } else {
         mangle_ident_name(name)
     }
 }
 
-fn mangle_ident_name(name: &str) -> String {
+fn mangle_ident_name(name: &str) -> Cow<'_, str> {
     if name
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '$'))
     {
-        return name.to_string();
+        return Cow::Borrowed(name);
     }
 
     let mut out = String::with_capacity(name.len());
@@ -3203,7 +3207,7 @@ fn mangle_ident_name(name: &str) -> String {
             out.push_str(mangle_ident_char(c, idx == 0));
         }
     }
-    out
+    Cow::Owned(out)
 }
 
 fn mangle_ident_char(c: char, op: bool) -> &'static str {

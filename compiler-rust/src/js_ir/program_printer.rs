@@ -8,7 +8,7 @@ use super::arena::{
     ExprKind, JsArena, JsDepsProgram as DepsProgram, JsProgram as Program, Stmt, StmtKind,
 };
 use super::op::Kind;
-use super::printer::{JsPrinter, js_export_name};
+use super::printer::{JsPrinter, js_export_name_cow};
 use super::source_map::{SourceMapBuilder, SourceMapMode, inline_comment, linked_comment};
 use super::{ModuleFormat, ModulePathResolver};
 use crate::binary_ast::ppx::{JsStmtClassification, classify_js_stmt};
@@ -192,8 +192,8 @@ impl JsPrinter<'_> {
             self.newline();
             let local_name = self.ident_name(export);
             self.write(&local_name);
-            let export_name = js_export_name(export.name());
-            if local_name != export_name {
+            let export_name = js_export_name_cow(export.name());
+            if local_name.as_str() != export_name {
                 self.write(" as ");
                 self.write(&export_name);
             }
@@ -210,7 +210,7 @@ impl JsPrinter<'_> {
                 self.newline();
             }
             let local_name = self.ident_name(export);
-            let export_name = js_export_name(export.name());
+            let export_name = js_export_name_cow(export.name());
             self.write("exports.");
             self.write(&export_name);
             self.write(" = ");
