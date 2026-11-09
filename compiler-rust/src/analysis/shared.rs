@@ -56,7 +56,7 @@ pub fn find_type_constructors_in(types: &TypeContext, tel: &[TypeExprRef], paths
             TypeDesc::Tconstr { path, args, .. } => {
                 add_path(paths, path);
                 for arg in types.type_list(args).iter() {
-                    walk(types, *arg, paths);
+                    walk(types, arg, paths);
                 }
             }
             TypeDesc::Tarrow { args, ret } => {
@@ -67,7 +67,7 @@ pub fn find_type_constructors_in(types: &TypeContext, tel: &[TypeExprRef], paths
             }
             TypeDesc::Ttuple(tel) => {
                 for t in types.type_list(tel).iter() {
-                    walk(types, *t, paths);
+                    walk(types, t, paths);
                 }
             }
             _ => {}

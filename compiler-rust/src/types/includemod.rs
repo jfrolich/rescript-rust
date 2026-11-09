@@ -2695,7 +2695,7 @@ fn rewrite_substituted_type_paths(
     match &*desc {
         TypeDesc::Tconstr { path, args, abbrev } => {
             for arg in type_ctx.type_list(args).iter() {
-                rewrite_substituted_type_paths(type_ctx, *arg, subst, seen);
+                rewrite_substituted_type_paths(type_ctx, arg, subst, seen);
             }
             let new_path = substitute_type_constructor_path(path, subst);
             if new_path != *path {
@@ -2717,7 +2717,7 @@ fn rewrite_substituted_type_paths(
         }
         TypeDesc::Ttuple(items) => {
             for item in type_ctx.type_list(items).iter() {
-                rewrite_substituted_type_paths(type_ctx, *item, subst, seen);
+                rewrite_substituted_type_paths(type_ctx, item, subst, seen);
             }
         }
         TypeDesc::Tobject { fields, .. } => {
@@ -2747,12 +2747,12 @@ fn rewrite_substituted_type_paths(
         TypeDesc::Tpoly { body, vars } => {
             rewrite_substituted_type_paths(type_ctx, *body, subst, seen);
             for var in type_ctx.type_list(vars).iter() {
-                rewrite_substituted_type_paths(type_ctx, *var, subst, seen);
+                rewrite_substituted_type_paths(type_ctx, var, subst, seen);
             }
         }
         TypeDesc::Tpackage { path, args, lids } => {
             for arg in type_ctx.type_list(args).iter() {
-                rewrite_substituted_type_paths(type_ctx, *arg, subst, seen);
+                rewrite_substituted_type_paths(type_ctx, arg, subst, seen);
             }
             let new_path = substitute_modtype_path(path, subst);
             if new_path != *path {
@@ -3873,7 +3873,7 @@ fn type_exprs_equal_for_inclusion_inner(
             .zip(type_ctx.type_list(sig_args).iter())
             .all(|(impl_arg, sig_arg)| {
                 type_exprs_equal_for_inclusion_inner(
-                    type_ctx, env, param_map, *impl_arg, *sig_arg, seen,
+                    type_ctx, env, param_map, impl_arg, sig_arg, seen,
                 )
             });
     }
@@ -3929,7 +3929,7 @@ fn type_exprs_equal_for_inclusion_inner(
                     .zip(type_ctx.type_list(sig_items).iter())
                     .all(|(impl_item, sig_item)| {
                         type_exprs_equal_for_inclusion_inner(
-                            type_ctx, env, param_map, *impl_item, *sig_item, seen,
+                            type_ctx, env, param_map, impl_item, sig_item, seen,
                         )
                     })
         }
@@ -3952,7 +3952,7 @@ fn type_exprs_equal_for_inclusion_inner(
                     .zip(type_ctx.type_list(sig_args).iter())
                     .all(|(impl_arg, sig_arg)| {
                         type_exprs_equal_for_inclusion_inner(
-                            type_ctx, env, param_map, *impl_arg, *sig_arg, seen,
+                            type_ctx, env, param_map, impl_arg, sig_arg, seen,
                         )
                     })
         }
@@ -4013,7 +4013,7 @@ fn type_exprs_equal_for_inclusion_inner(
                     .zip(type_ctx.type_list(sig_args).iter())
                     .all(|(impl_arg, sig_arg)| {
                         type_exprs_equal_for_inclusion_inner(
-                            type_ctx, env, param_map, *impl_arg, *sig_arg, seen,
+                            type_ctx, env, param_map, impl_arg, sig_arg, seen,
                         )
                     })
         }

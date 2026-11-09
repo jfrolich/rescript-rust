@@ -69,17 +69,17 @@ impl Collector<'_> {
             match &*desc {
                 TypeDesc::Tconstr { path, args, .. } => {
                     read_of_path(path, Kind::Type, None, &mut self.out);
-                    stack.extend(ctx.type_list(args).iter().copied());
+                    stack.extend(ctx.type_list(args).iter());
                 }
                 TypeDesc::Tpackage { path, args, .. } => {
                     read_of_path(path, Kind::Modtype, None, &mut self.out);
-                    stack.extend(ctx.type_list(args).iter().copied());
+                    stack.extend(ctx.type_list(args).iter());
                 }
                 TypeDesc::Tarrow { args, ret } => {
                     stack.extend(ctx.type_args(args).iter().map(|arg| arg.typ));
                     stack.push(*ret);
                 }
-                TypeDesc::Ttuple(types) => stack.extend(ctx.type_list(types).iter().copied()),
+                TypeDesc::Ttuple(types) => stack.extend(ctx.type_list(types).iter()),
                 TypeDesc::Tobject { fields } => stack.push(*fields),
                 TypeDesc::Tfield { typ, rest, .. } => {
                     stack.push(*typ);
@@ -88,7 +88,7 @@ impl Collector<'_> {
                 TypeDesc::Tlink(t) | TypeDesc::Tsubst(t) => stack.push(*t),
                 TypeDesc::Tpoly { body, vars } => {
                     stack.push(*body);
-                    stack.extend(ctx.type_list(vars).iter().copied());
+                    stack.extend(ctx.type_list(vars).iter());
                 }
                 TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {}
                 TypeDesc::Tvariant(row) => {
