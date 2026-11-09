@@ -321,6 +321,13 @@ impl Path {
     /// `compiler/ml/path.ml:23-29`): structural, with `Ident.same` on
     /// identifiers and `Pdot` positions ignored.
     #[inline]
+    /// The address of the interned node: equal exactly for identical paths
+    /// (identifier flags and positions included), unlike `==`.
+    #[inline]
+    pub fn node_addr(self) -> usize {
+        std::ptr::from_ref(self.0) as usize
+    }
+
     pub fn same(&self, other: &Path) -> bool {
         std::ptr::eq(self.0.class(), other.0.class())
     }

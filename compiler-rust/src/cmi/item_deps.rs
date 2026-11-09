@@ -13,7 +13,7 @@
 //! item it read changed.
 
 use crate::types::path::PathView;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
@@ -111,8 +111,10 @@ impl PartialOrd for ItemKey {
     }
 }
 
-/// The items read of each unit, by unit name (ordered as the names).
-pub type ResolvedReads = BTreeMap<Name, BTreeSet<ItemKey>>;
+/// The items read of each unit, by unit name. Unordered: sort units by
+/// name and keys by [`ItemKey`]'s order (the stored strings' order) where
+/// the order matters.
+pub type ResolvedReads = ahash::AHashMap<Name, ahash::AHashSet<ItemKey>>;
 
 /// The path segments of a read; most paths have few.
 pub type Segs = SmallVec<[Name; 3]>;
@@ -554,29 +556,34 @@ pub fn resolve_reads(
     initial: impl IntoIterator<Item = UnitRead>,
     source: &dyn UnitSource,
 ) -> ResolvedReads {
-    let mut result: ResolvedReads = BTreeMap::new();
+    /// What is known of a unit reached: its references (`None` when the
+    /// unit is ignored, `Some(None)` when its signature is not known) and
+    /// the keys read so far.
+    struct UnitState {
+        refs: Option<Option<Arc<UnitRefs>>>,
+        keys: ahash::AHashSet<ItemKey>,
+    }
     let mut work: Vec<UnitRead> = initial.into_iter().collect();
     let mut done: ahash::AHashSet<UnitRead> = ahash::AHashSet::with_capacity(work.len());
-    // Per unit: `None` when ignored, else its references if known.
-    let mut units: ahash::AHashMap<Name, Option<Option<Arc<UnitRefs>>>> = ahash::AHashMap::new();
+    let mut units: ahash::AHashMap<Name, UnitState> = ahash::AHashMap::new();
     while let Some(read) = work.pop() {
-        if done.contains(&read) {
+        if !done.insert(read.clone()) {
             continue;
         }
-        let unit_refs = units
-            .entry(read.unit)
-            .or_insert_with(|| (!source.ignored(read.unit)).then(|| source.refs(read.unit)))
-            .clone();
+        let UnitState { refs, keys } = units.entry(read.unit).or_insert_with(|| {
+            let refs = (!source.ignored(read.unit)).then(|| source.refs(read.unit));
+            let mut keys = ahash::AHashSet::new();
+            if refs.is_some() {
+                keys.insert(ItemKey::ModuleLevel);
+            }
+            UnitState { refs, keys }
+        });
         // An ignored unit.
-        let Some(unit_refs) = unit_refs else {
-            done.insert(read);
+        let Some(refs) = refs else {
             continue;
         };
-        let keys = result.entry(read.unit).or_default();
-        keys.insert(ItemKey::ModuleLevel);
-        let Some(refs) = unit_refs else {
+        let Some(refs) = refs else {
             keys.insert(ItemKey::Whole);
-            done.insert(read);
             continue;
         };
         if read.segs.is_empty() {
@@ -609,9 +616,11 @@ pub fn resolve_reads(
                 }
             }
         }
-        done.insert(read);
     }
-    result
+    units
+        .into_iter()
+        .filter_map(|(unit, state)| state.refs.is_some().then_some((unit, state.keys)))
+        .collect()
 }
 
 /// The digest of the items `keys` of a unit with the given item digests;

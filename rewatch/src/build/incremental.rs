@@ -1607,7 +1607,7 @@ fn written_interface(
             }
             keys
         }
-        None => BTreeMap::new(),
+        None => item_deps::ResolvedReads::default(),
     };
     // A unit the compile loaded without a recorded read is read whole.
     for unit in compiles.loaded_units.get(module_name)? {
@@ -1626,6 +1626,9 @@ fn written_interface(
         let keys: Vec<String> = if keys.contains(&ItemKey::Whole) {
             vec![item_deps::WHOLE.to_string()]
         } else {
+            // Stored in the keys' string order.
+            let mut keys: Vec<ItemKey> = keys.into_iter().collect();
+            keys.sort_unstable();
             keys.into_iter().map(ItemKey::to_key_string).collect()
         };
         let unit_digests = digests.get(unit)?;
@@ -1633,6 +1636,7 @@ fn written_interface(
         imports.push((unit.to_string(), unit_digests.0));
         reads.insert(unit.to_string(), (read_digest, keys));
     }
+    imports.sort_unstable_by(|a, b| a.0.cmp(&b.0));
     Some(WrittenRecord {
         digest: own.0,
         imports,

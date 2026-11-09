@@ -51,12 +51,17 @@ struct Collector<'a> {
     seen: SeenTypes,
     /// The walk stack of [`Collector::ty`], kept to reuse its buffer.
     stack: Vec<TypeExprRef>,
+    /// The paths already read, by interned node and kind: a path's reads
+    /// depend only on those, and many type nodes share a path.
+    paths: ahash::AHashSet<(usize, Kind)>,
     out: Vec<UnitRead>,
 }
 
 impl Collector<'_> {
     fn path(&mut self, path: &Path, kind: Kind) {
-        read_of_path(path, kind, None, &mut self.out);
+        if self.paths.insert((path.node_addr(), kind)) {
+            read_of_path(path, kind, None, &mut self.out);
+        }
     }
 
     fn ty(&mut self, root: TypeExprRef) {
@@ -72,11 +77,11 @@ impl Collector<'_> {
             let desc = ctx.borrow_desc(ty);
             match &*desc {
                 TypeDesc::Tconstr { path, args, .. } => {
-                    read_of_path(path, Kind::Type, None, &mut self.out);
+                    self.path(path, Kind::Type);
                     stack.extend(ctx.type_list(args).iter());
                 }
                 TypeDesc::Tpackage { path, args, .. } => {
-                    read_of_path(path, Kind::Modtype, None, &mut self.out);
+                    self.path(path, Kind::Modtype);
                     stack.extend(ctx.type_list(args).iter());
                 }
                 TypeDesc::Tarrow { args, ret } => {
@@ -98,7 +103,7 @@ impl Collector<'_> {
                 TypeDesc::Tvariant(row) => {
                     let row = &ctx.row_desc(row);
                     if let Some((path, _)) = &row.row_name {
-                        read_of_path(path, Kind::Type, None, &mut self.out);
+                        self.path(path, Kind::Type);
                     }
                     drop(desc);
                     super::btype::iter_type_expr(ctx, ty, |child| stack.push(child));
@@ -258,6 +263,7 @@ pub fn structure_reads(
         ta,
         seen: SeenTypes::default(),
         stack: Vec::new(),
+        paths: ahash::AHashSet::new(),
         out: opened(opens).collect(),
     };
     collector.structure(structure);
@@ -276,6 +282,7 @@ pub fn signature_reads(
         ta,
         seen: SeenTypes::default(),
         stack: Vec::new(),
+        paths: ahash::AHashSet::new(),
         out: opened(opens).collect(),
     };
     collector.signature(signature);

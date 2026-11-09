@@ -738,7 +738,7 @@ impl ModuleRegistry {
             });
         }
         if seeds.is_empty() {
-            return std::collections::BTreeMap::new();
+            return super::item_deps::ResolvedReads::default();
         }
         super::item_deps::resolve_reads(seeds, &source)
     }
