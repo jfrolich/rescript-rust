@@ -1522,18 +1522,13 @@ impl<'a> TypeCheckContext<'a> {
                 name,
                 deprecated,
             } => (loc, name, deprecated),
-            ModuleDeprecation::Persistent {
-                loc,
-                name,
-                unit,
-                components,
-            } => {
+            ModuleDeprecation::Persistent { loc, name, target } => {
                 let Some(deprecated) = self.persistent_env.as_ref().and_then(|pers_env| {
-                    persistent_module_deprecated(pers_env, &unit, &components)
+                    persistent_module_deprecated(pers_env, &target)
                 }) else {
                     return;
                 };
-                (loc, name, deprecated)
+                (loc, name.name(), deprecated)
             }
         };
         let txt = if deprecated.is_empty() {
@@ -7456,20 +7451,20 @@ fn deprecated_of_decl_attrs(attrs: &[crate::types::decl::Attribute]) -> Option<S
 /// built from (env.ml:1527-1533).
 fn persistent_module_deprecated(
     pers_env: &crate::cmi::persistent_env::PersistentEnv,
-    unit: &str,
-    components: &[String],
+    target: &Path,
 ) -> Option<String> {
-    let ps = pers_env.loaded_pers_struct(unit)?;
+    let (unit, components) = persistent_path_components(target)?;
+    let ps = pers_env.loaded_pers_struct(&unit)?;
     if components.is_empty() {
         return ps.ps_deprecated.clone();
     }
-    signature_submodule_deprecated(pers_env, &ps.ps_sig, components, 0)
+    signature_submodule_deprecated(pers_env, &ps.ps_sig, &components, 0)
 }
 
 fn signature_submodule_deprecated(
     pers_env: &crate::cmi::persistent_env::PersistentEnv,
     items: &[crate::types::decl::SignatureItem],
-    components: &[String],
+    components: &[crate::name::Name],
     depth: usize,
 ) -> Option<String> {
     use crate::types::decl::{ModuleType, SignatureItem};
@@ -7478,7 +7473,7 @@ fn signature_submodule_deprecated(
         return None;
     }
     let md = items.iter().rev().find_map(|item| match item {
-        SignatureItem::SigModule(id, md, _) if id.name() == first.as_str() => Some(md),
+        SignatureItem::SigModule(id, md, _) if id.name_atom() == *first => Some(md),
         _ => None,
     })?;
     if rest.is_empty() {
@@ -7490,7 +7485,7 @@ fn signature_submodule_deprecated(
         }
         ModuleType::MtyAlias(_, path) => {
             let (unit, mut target) = persistent_path_components(path)?;
-            target.extend(rest.iter().cloned());
+            target.extend(rest.iter().copied());
             let ps = pers_env.loaded_pers_struct(&unit)?;
             signature_submodule_deprecated(pers_env, &ps.ps_sig, &target, depth + 1)
         }
@@ -7500,17 +7495,20 @@ fn signature_submodule_deprecated(
 
 /// A module path rooted at a persistent unit, as the unit name and the
 /// submodule names below it.
-fn persistent_path_components(path: &Path) -> Option<(String, Vec<String>)> {
+fn persistent_path_components(path: &Path) -> Option<(crate::name::Name, PathComponents)> {
     match path.view() {
-        PathView::Pident(id) if id.is_persistent() => Some((id.name().to_string(), Vec::new())),
+        PathView::Pident(id) if id.is_persistent() => Some((id.name_atom(), PathComponents::new())),
         PathView::Pdot(parent, name, _) => {
             let (unit, mut components) = persistent_path_components(parent)?;
-            components.push(name.to_string());
+            components.push(*name);
             Some((unit, components))
         }
         _ => None,
     }
 }
+
+/// Submodule names below a persistent unit; module paths are short.
+type PathComponents = smallvec::SmallVec<[crate::name::Name; 4]>;
 
 fn deprecated_attr_payload(attrs: &[crate::types::decl::Attribute]) -> Option<(&str, bool)> {
     for attr in attrs {
@@ -26544,17 +26542,15 @@ pub(crate) fn mark_open_lid_use(
 
 /// Where the lookup of a module longident has arrived.
 enum ModuleLidTarget {
-    /// A module declaration of the lookup environment.
+    /// A module declaration of the lookup environment. `name` is the path
+    /// whose `Path.name` reports it.
     Local {
-        name: String,
+        name: Path,
         md_type: crate::types::decl::ModuleType,
     },
-    /// A module inside a persistent unit.
-    Persistent {
-        name: String,
-        unit: String,
-        components: Vec<String>,
-    },
+    /// A module inside a persistent unit: `target` is rooted at the unit's
+    /// persistent identifier (see [`persistent_path_components`]).
+    Persistent { name: Path, target: Path },
 }
 
 type ModuleDeprecationReport<'r> = Option<(
@@ -26579,16 +26575,14 @@ fn mark_module_lid_used(
         Longident::Lident(idx) => {
             let name = arena.get_string(*idx);
             match env.find_module_with_path(arena.name(*idx)) {
-                Ok((path, md)) => (name, path.name(), std::borrow::Cow::Borrowed(md)),
+                Ok((path, md)) => (name, path, std::borrow::Cow::Borrowed(md)),
                 // `find_pers_struct s` then `ps.ps_comps.deprecated`
                 // (env.ml:1043-1048).
                 Err(_) => {
-                    return Some(persistent_module_target(
-                        report,
-                        name.to_string(),
-                        name.to_string(),
-                        Vec::new(),
+                    let unit = Path::pident(crate::ident::Ident::create_persistent(
+                        arena.name(*idx),
                     ));
+                    return Some(persistent_module_target(report, unit, unit));
                 }
             }
         }
@@ -26600,30 +26594,27 @@ fn mark_module_lid_used(
                     name: parent_name,
                     md_type,
                 } => {
-                    let path_name = format!("{parent_name}.{name}");
+                    let path_name = Path::pdot(parent_name, arena.name(*idx));
                     match submodule_declaration(env, &md_type, name, 0) {
                         Some(md) => (name, path_name, std::borrow::Cow::Owned(md)),
                         None => {
-                            let (unit, mut components) =
-                                local_module_type_persistent_target(env, &md_type, 0)?;
-                            components.push(name.to_string());
+                            let target = local_module_type_persistent_target(env, &md_type, 0)?;
                             return Some(persistent_module_target(
-                                report, path_name, unit, components,
+                                report,
+                                path_name,
+                                Path::pdot(target, arena.name(*idx)),
                             ));
                         }
                     }
                 }
                 ModuleLidTarget::Persistent {
                     name: parent_name,
-                    unit,
-                    mut components,
+                    target,
                 } => {
-                    components.push(name.to_string());
                     return Some(persistent_module_target(
                         report,
-                        format!("{parent_name}.{name}"),
-                        unit,
-                        components,
+                        Path::pdot(parent_name, arena.name(*idx)),
+                        Path::pdot(target, arena.name(*idx)),
                     ));
                 }
             }
@@ -26639,7 +26630,7 @@ fn mark_module_lid_used(
     {
         deprecations.push(ModuleDeprecation::Resolved {
             loc: *loc,
-            name: path_name.clone(),
+            name: path_name.name(),
             deprecated,
         });
     }
@@ -26656,23 +26647,17 @@ fn mark_module_lid_used(
 /// lookup has loaded the unit.
 fn persistent_module_target(
     report: &mut ModuleDeprecationReport<'_>,
-    name: String,
-    unit: String,
-    components: Vec<String>,
+    name: Path,
+    target: Path,
 ) -> ModuleLidTarget {
     if let Some((loc, deprecations)) = report.as_mut() {
         deprecations.push(crate::types::context::ModuleDeprecation::Persistent {
             loc: *loc,
-            name: name.clone(),
-            unit: unit.clone(),
-            components: components.clone(),
+            name,
+            target,
         });
     }
-    ModuleLidTarget::Persistent {
-        name,
-        unit,
-        components,
-    }
+    ModuleLidTarget::Persistent { name, target }
 }
 
 /// The persistent module a local module type is an alias of, through local
@@ -26681,7 +26666,7 @@ fn local_module_type_persistent_target(
     env: &Env,
     mty: &crate::types::decl::ModuleType,
     depth: usize,
-) -> Option<(String, Vec<String>)> {
+) -> Option<Path> {
     use crate::types::decl::ModuleType;
     if depth > 32 {
         return None;
@@ -26692,7 +26677,7 @@ fn local_module_type_persistent_target(
             local_module_type_persistent_target(env, &mty, depth + 1)
         }
         ModuleType::MtyAlias(_, path) => match persistent_path_components(path) {
-            Some(target) => Some(target),
+            Some(_) => Some(*path),
             None => {
                 let mty = env.lookup_module(path).ok()?.md_type.clone();
                 local_module_type_persistent_target(env, &mty, depth + 1)
