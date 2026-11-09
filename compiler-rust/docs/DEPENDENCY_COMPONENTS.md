@@ -120,7 +120,70 @@ replay. Building views once per build needs:
   (all `read:renamed_module_sig`), store builds 18024 -> 17189, no guard
   misses, -0.1% retired instructions.
 
-## Remaining work: process-wide view core (step 1-3 above)
+## Remaining work: process-wide view core
+
+### Step 1 measurements (Tella clean build, trunk 10747a886a)
+
+Probe (not landed): `#[track_caller]` on `build_in_store*`, printing per
+build the type and row-field nodes it allocated, the sites of the pieces it
+nests and their effect kinds, and, for each view signature checked by
+`check_signature_store_resident`, whether its reachable nodes are in the
+shared pool, in the build's own range, or older worker-store nodes.
+
+* 297,562 top-level store builds allocate 1.37 M type nodes and no row
+  fields (4.6 nodes per build; 83% allocate none). By site: shared views
+  (`with_resolved_module_components_for_path_with_cache_mode`) 24,077
+  builds / 582 k nodes, stored child components
+  (`StoredModuleComponents::with_components`) 3,806 + 2,049 nested /
+  597 k nodes, entry forcing (`force_entry`, new entries) 56,497 / 376 k
+  nodes, `force_entry` hits 212,201 / 0 nodes, `opened_layers` 447 / 7 k.
+* View signatures reach only shared-pool nodes (2.66 M) and nodes of their
+  own build range (0.91 M over 19,221 views, about 47 per view); none reach
+  older worker-store nodes. Exporting a view's nodes is a bounded copy of its
+  own range: about 4,050 distinct views x 47 nodes, roughly 0.2 M node copies
+  per build (on the order of 10 ms CPU), against about 0.2 s of busy CPU for
+  rebuilding views. Export cost is not the obstacle.
+* Busy-CPU split (samply, 2 runs, 57.7 k samples): `build_in_store` 3.51%
+  inclusive. Its outermost caller is `force_entry` for 2.04%, top-level view
+  builds (`with_resolved_module_components_for_lid_inner`) 1.00%,
+  `resolve_type_constructor_path` 0.45%. Replay (`touch_store_piece`) 1.20%,
+  `internalize_pers_struct` 1.03% (already once per process). Most of the
+  repeated work is in the forcing tables, not in view construction.
+* 12,561 of 24,077 view pieces nest other pieces: 67 k `force_entry` pieces,
+  13 k stored-child-component pieces, 28 k other view pieces. 1,925 of the
+  nested `force_entry` pieces (plus 332 inside stored child components) are
+  `qualified_modules` forcings with `Stamps` and
+  `RegisterQualifiedModuleDecl` effects.
+
+### Consequence for the plan
+
+Step 2 below (shared core, forcing tables kept per worker) is not
+stamp-exact once step 4 publishes cores across workers. Replay dedups stamp
+effects by piece id. Today a forcing table lives on one worker, so a
+compilation that replays a view piece containing forcing piece `P` of table
+`T` later finds `P` in `T` and does not replay it again. If worker 2 adopts
+the view from worker 1, `P` belongs to worker 1's `T`. When the compilation
+later forces the same entry through worker 2's own `T`, it builds and
+replays a second piece with the same `Stamps(n)`, so its stamps drift from
+OCaml's. To keep stamps exact, a cross-worker view needs one of:
+
+* process-wide forcing tables (per-entry `OnceLock`, results exported to
+  `shared_store`). `StoredModuleComponents` holds an `Env` (`Rc`), so child
+  component entries need a `Send` seed. Nested forcing across tables on
+  different threads also needs a deadlock argument; OCaml's `Lazy` is
+  single-threaded.
+* or a replay effect that installs the forced entry (result plus piece) into
+  the adopting worker's table for that core, so a later force there finds
+  `P`. The result must then be readable on worker 2: exported nodes, and no
+  `Env` in child component entries.
+
+Either way, the work covers the forcing tables, which hold most of the cost
+(2.04% of 3.51%). Sharing only cores would save at most about 76% of the
+1.45% view-construction share before export and lookup costs, and less in
+practice, because forcing still runs once per worker. Not started; the
+expected gain stays at most about 2-2.5% for the full version.
+
+### Original slices (for reference)
 
 Expected gain: at most the per-worker repeat of `build_in_store` (about
 4.2 builds per view on 10 workers; `build_in_store` is 3.2% of busy CPU
