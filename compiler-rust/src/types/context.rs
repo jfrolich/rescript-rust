@@ -1003,6 +1003,16 @@ pub(crate) fn store_debug_enabled() -> bool {
 
 static NEXT_STORE_PIECE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
+thread_local! {
+    /// The piece of every store build with no effects and no guards (id 0;
+    /// built pieces count from 1). Pieces stay on their worker thread.
+    static EMPTY_STORE_PIECE: Arc<StorePiece> = Arc::new(StorePiece {
+        id: 0,
+        effects: Vec::new(),
+        guards: Vec::new(),
+    });
+}
+
 /// A map key that compares paths with `Path::same` (ignoring `Pdot`
 /// positions and comparing identifiers by stamp, or by name when persistent).
 #[derive(Clone, Debug)]
@@ -4431,6 +4441,13 @@ impl TypeContext {
                 .borrow_mut()
                 .extend(guards.iter().cloned());
         }
+        if effects.is_empty() && guards.is_empty() {
+            // Most builds have no effect on the compilation and read no
+            // guarded answer: touching, replaying or checking such a piece
+            // does nothing, so they all share one piece and the enclosing
+            // build need not record it.
+            return (result, Some(EMPTY_STORE_PIECE.with(Arc::clone)));
+        }
         let piece = Arc::new(StorePiece {
             id: NEXT_STORE_PIECE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             effects,
@@ -4448,6 +4465,9 @@ impl TypeContext {
     /// Note that this compilation is using shared store data built by `piece`:
     /// the first time, apply the effects that building it had.
     pub(crate) fn touch_store_piece(&self, piece: &Arc<StorePiece>) {
+        if piece.effects.is_empty() && piece.guards.is_empty() {
+            return;
+        }
         if self.in_store_build() {
             self.store_build_effects
                 .borrow_mut()
