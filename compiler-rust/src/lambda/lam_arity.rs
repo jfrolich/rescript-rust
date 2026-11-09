@@ -6,6 +6,25 @@
 
 use std::fmt;
 
+/// The arity at each application level. Nearly every function has one or
+/// two levels, so they stay inline and copying an arity does not allocate.
+pub type Arities = smallvec::SmallVec<[i32; 4]>;
+
+/// Serializes [`Arities`] as a plain sequence, like the `Vec<i32>` it
+/// replaced.
+mod arities_serde {
+    use super::Arities;
+
+    pub fn serialize<S: serde::Serializer>(a: &Arities, s: S) -> Result<S::Ok, S::Error> {
+        serde::Serialize::serialize(a.as_slice(), s)
+    }
+
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Arities, D::Error> {
+        let v: Vec<i32> = serde::Deserialize::deserialize(d)?;
+        Ok(Arities::from_vec(v))
+    }
+}
+
 /// Arity information for a function.
 ///
 /// This tracks the expected argument counts for a function and whether
@@ -23,7 +42,8 @@ pub enum Arity {
     /// additional arguments (like an exception).
     Info {
         /// List of arities at each application level
-        arities: Vec<i32>,
+        #[serde(with = "arities_serde")]
+        arities: Arities,
         /// Whether additional arguments can be accepted
         variadic: bool,
     },
@@ -34,8 +54,11 @@ pub enum Arity {
 
 impl Arity {
     /// Create a new arity with the given arities and variadic flag.
-    pub fn info(arities: Vec<i32>, variadic: bool) -> Self {
-        Arity::Info { arities, variadic }
+    pub fn info(arities: impl Into<Arities>, variadic: bool) -> Self {
+        Arity::Info {
+            arities: arities.into(),
+            variadic,
+        }
     }
 
     /// Create an unknown arity.
@@ -46,7 +69,7 @@ impl Arity {
     /// Arity for a non-function value.
     pub fn non_function() -> Self {
         Arity::Info {
-            arities: vec![],
+            arities: Arities::new(),
             variadic: false,
         }
     }
@@ -54,7 +77,7 @@ impl Arity {
     /// Arity for a raise/exception (can take any arguments).
     pub fn raise() -> Self {
         Arity::Info {
-            arities: vec![],
+            arities: Arities::new(),
             variadic: true,
         }
     }
@@ -65,11 +88,11 @@ impl Arity {
     pub fn merge(&self, n: i32) -> Self {
         match self {
             Arity::Na => Arity::Info {
-                arities: vec![n],
+                arities: smallvec::smallvec![n],
                 variadic: false,
             },
             Arity::Info { arities, variadic } => {
-                let mut new_arities = vec![n];
+                let mut new_arities: Arities = smallvec::smallvec![n];
                 new_arities.extend(arities.iter().copied());
                 Arity::Info {
                     arities: new_arities,
@@ -99,9 +122,9 @@ impl Arity {
     ///
     /// Returns an empty list for `Na`. Consumes the arity so the list is
     /// moved rather than cloned.
-    pub fn extract_arity(self) -> Vec<i32> {
+    pub fn extract_arity(self) -> Arities {
         match self {
-            Arity::Na => vec![],
+            Arity::Na => Arities::new(),
             Arity::Info { arities, .. } => arities,
         }
     }
@@ -128,7 +151,7 @@ impl Arity {
     /// Used when the same variable is assigned different functions
     /// in different branches.
     pub fn merge_arities(xs: &[i32], ys: &[i32], tail_x: bool, tail_y: bool) -> Self {
-        fn aux(acc: &mut Vec<i32>, xs: &[i32], ys: &[i32], tail_x: bool, tail_y: bool) -> bool {
+        fn aux(acc: &mut Arities, xs: &[i32], ys: &[i32], tail_x: bool, tail_y: bool) -> bool {
             match (xs, ys) {
                 ([], []) => tail_x && tail_y,
                 ([], rest) if tail_x => {
@@ -147,7 +170,7 @@ impl Arity {
             }
         }
 
-        let mut acc = Vec::new();
+        let mut acc = Arities::new();
         let variadic = aux(&mut acc, xs, ys, tail_x, tail_y);
         Arity::Info {
             arities: acc,
@@ -207,7 +230,7 @@ mod tests {
 
         let info = Arity::info(vec![2], false);
         let merged = info.merge(3);
-        assert_eq!(merged.extract_arity(), vec![3, 2]);
+        assert_eq!(merged.extract_arity().as_slice(), [3, 2]);
     }
 
     #[test]
@@ -226,8 +249,11 @@ mod tests {
 
     #[test]
     fn test_extract_arity() {
-        assert_eq!(Arity::na().extract_arity(), Vec::<i32>::new());
-        assert_eq!(Arity::info(vec![2, 3], false).extract_arity(), vec![2, 3]);
+        assert!(Arity::na().extract_arity().is_empty());
+        assert_eq!(
+            Arity::info(vec![2, 3], false).extract_arity().as_slice(),
+            [2, 3]
+        );
     }
 
     #[test]
@@ -236,7 +262,7 @@ mod tests {
         let result = Arity::merge_arities(&[2, 3], &[2, 3], false, false);
         match result {
             Arity::Info { arities, variadic } => {
-                assert_eq!(arities, vec![2, 3]);
+                assert_eq!(arities.as_slice(), [2, 3]);
                 assert!(!variadic);
             }
             _ => panic!("Expected Info"),
@@ -246,7 +272,7 @@ mod tests {
         let result = Arity::merge_arities(&[2, 3], &[2, 4], false, false);
         match result {
             Arity::Info { arities, variadic } => {
-                assert_eq!(arities, vec![2]);
+                assert_eq!(arities.as_slice(), [2]);
                 assert!(!variadic);
             }
             _ => panic!("Expected Info"),
@@ -256,7 +282,7 @@ mod tests {
         let result = Arity::merge_arities(&[2], &[2, 3], true, false);
         match result {
             Arity::Info { arities, variadic } => {
-                assert_eq!(arities, vec![2, 3]);
+                assert_eq!(arities.as_slice(), [2, 3]);
                 assert!(!variadic);
             }
             _ => panic!("Expected Info"),
@@ -266,7 +292,7 @@ mod tests {
         let result = Arity::merge_arities(&[2, 3], &[2, 3], true, true);
         match result {
             Arity::Info { arities, variadic } => {
-                assert_eq!(arities, vec![2, 3]);
+                assert_eq!(arities.as_slice(), [2, 3]);
                 assert!(variadic);
             }
             _ => panic!("Expected Info"),
