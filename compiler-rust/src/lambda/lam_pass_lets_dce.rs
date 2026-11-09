@@ -96,8 +96,17 @@ fn use_slot(occ: &OccurrenceTable, scope: usize, id: &Ident) -> Option<(usize, b
 
 fn add_one_use(occ: &mut OccurrenceTable, scope: usize, id: &Ident) {
     if let Some((index, captured)) = use_slot(occ, scope, id) {
-        occ.values[index].times += 1;
-        occ.values[index].captured |= captured;
+        if captured {
+            occ.absorb(
+                index,
+                UsedInfo {
+                    times: 1,
+                    captured: true,
+                },
+            );
+        } else {
+            occ.values[index].times += 1;
+        }
     }
 }
 
@@ -409,6 +418,20 @@ mod occurrence_scope_tests {
         assert!(occ.get(&id).captured);
         restore_var(&mut occ, &id, outer);
         assert!(occ.entries[&id].active.is_none());
+    }
+
+    #[test]
+    fn captured_count_saturates_at_maximum() {
+        let id = Ident::create_persistent("x");
+        let mut occ = OccurrenceTable::default();
+        bind_var(&mut occ, 0, &id);
+        occ.values[0].times = u32::MAX - 1;
+        add_one_use(&mut occ, 0, &id);
+        assert_eq!(occ.get(&id).times, u32::MAX);
+        assert!(!occ.get(&id).captured);
+        add_one_use(&mut occ, 1, &id);
+        assert_eq!(occ.get(&id).times, u32::MAX);
+        assert!(occ.get(&id).captured);
     }
 
     #[test]
