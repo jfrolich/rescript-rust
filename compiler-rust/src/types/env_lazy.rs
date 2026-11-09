@@ -40,7 +40,23 @@ pub(crate) struct SignatureIndex {
 
 impl SignatureIndex {
     pub(crate) fn build(signature: &Signature) -> Self {
-        let mut index = SignatureIndex::default();
+        // Size the tables up front: a signature is indexed once, and growing
+        // three maps item by item rehashed each of them several times.
+        let (mut values, mut types, mut modules) = (0, 0, 0);
+        for item in signature.iter() {
+            match item {
+                SignatureItem::SigValue(..) => values += 1,
+                SignatureItem::SigType(..) => types += 1,
+                SignatureItem::SigModule(..) => modules += 1,
+                _ => {}
+            }
+        }
+        let mut index = SignatureIndex {
+            values: HashMap::with_capacity(values),
+            types: HashMap::with_capacity(types),
+            modules: HashMap::with_capacity(modules),
+            ..SignatureIndex::default()
+        };
         let mut runtime_pos = 0usize;
         for (idx, item) in signature.iter().enumerate() {
             match item {
