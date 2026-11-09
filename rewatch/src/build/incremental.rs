@@ -1548,7 +1548,7 @@ fn dependency_closure(
 /// taking these locks for each module serialized the parallel recording.
 /// Nothing that runs while this is held may take one of these locks.
 pub struct CompileRecords<'a> {
-    loaded_units: MutexGuard<'a, AHashMap<String, AHashSet<String>>>,
+    loaded_units: MutexGuard<'a, AHashMap<String, AHashSet<Name>>>,
     unit_reads: MutexGuard<'a, AHashMap<String, PendingReads>>,
     verified_imports: MutexGuard<'a, AHashMap<String, AHashMap<String, u64>>>,
     in_memory_deps: MutexGuard<'a, AHashMap<String, Dependencies>>,
@@ -1601,7 +1601,7 @@ fn written_interface(
     // A unit the compile loaded without a recorded read is read whole.
     for unit in compiles.loaded_units.get(module_name)? {
         read_keys
-            .entry(Name::new(unit))
+            .entry(*unit)
             .or_insert_with(|| [ItemKey::Whole, ItemKey::ModuleLevel].into_iter().collect());
     }
     let mut imports = Vec::new();

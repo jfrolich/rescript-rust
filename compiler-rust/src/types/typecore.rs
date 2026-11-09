@@ -10740,7 +10740,7 @@ fn add_pattern_variable_value(
         val_type: pv.ty,
         val_kind: crate::types::ValueKind::ValReg,
         val_loc: tctx.intern_loc(pv.loc),
-        val_attributes: vec![],
+        val_attributes: Default::default(),
         val_path: None,
     };
     env.add_value(pv.id, desc);
@@ -12994,7 +12994,7 @@ fn type_for(
             // Match OCaml `type_for`: for-index value descriptions use the
             // enclosing `for` expression location.
             val_loc: tctx.intern_loc(val_loc),
-            val_attributes: vec![],
+            val_attributes: Default::default(),
             val_path: None,
         };
         body_env.add_value(pv.id, desc);
@@ -13160,7 +13160,7 @@ fn type_for_of(
             val_type: pv.ty,
             val_kind: crate::types::ValueKind::ValReg,
             val_loc: tctx.intern_loc(val_loc),
-            val_attributes: vec![],
+            val_attributes: Default::default(),
             val_path: None,
         };
         body_env.add_value(pv.id, desc);
@@ -18756,7 +18756,7 @@ fn type_expect_with_module_unpacks(
             val_type: unpack.ty,
             val_kind: crate::types::ValueKind::ValReg,
             val_loc: tctx.intern_loc(unpack.loc),
-            val_attributes: vec![],
+            val_attributes: Default::default(),
             val_path: None,
         });
 
@@ -20506,7 +20506,7 @@ fn type_let_bindings(
                         val_type: pv.ty,
                         val_kind: crate::types::ValueKind::ValReg,
                         val_loc: tctx.intern_loc(pv.loc),
-                        val_attributes: vec![],
+                        val_attributes: Default::default(),
                         val_path: None,
                     };
                     typing_env.add_value(pv.id, desc);
@@ -20813,7 +20813,7 @@ fn type_let_bindings(
                     val_type: pv.ty,
                     val_kind: crate::types::ValueKind::ValReg,
                     val_loc: tctx.intern_loc(pv.loc),
-                    val_attributes: vec![],
+                    val_attributes: Default::default(),
                     val_path: None,
                 };
                 new_env.add_value(pv.id, desc);

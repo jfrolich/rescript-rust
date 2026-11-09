@@ -10509,7 +10509,7 @@ fn build_name_based_coercion(
                             // Val_prim implementation + regular interface
                             // value is exported by a primitive coercion.
                             ModuleCoercion::Tcoerce_primitive(PrimitiveCoercion {
-                                pc_desc: prim.clone(),
+                                pc_desc: (**prim).clone(),
                                 pc_type: sig_desc.val_type,
                                 pc_loc: impl_desc.val_loc,
                                 pc_id: *impl_id,

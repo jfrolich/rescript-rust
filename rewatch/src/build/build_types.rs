@@ -354,8 +354,9 @@ pub struct BuildCommandState {
     pub in_memory_deps: Mutex<AHashMap<String, Dependencies>>,
     // The units each module's last compile in this process read the
     // interface of (type checking its interface and implementation, plus
-    // the modules its generated code may require).
-    pub loaded_units: Mutex<AHashMap<String, AHashSet<String>>>,
+    // the modules its generated code may require). Interned: every module
+    // keeps its set for the whole build.
+    pub loaded_units: Mutex<AHashMap<String, AHashSet<rescript_compiler::name::Name>>>,
     // What the last compile of a module read of other units (see
     // `rescript_compiler::cmi::item_deps`), resolved when the build is
     // recorded.
@@ -563,7 +564,12 @@ impl BuildCommandState {
     pub fn record_loaded_units(&self, module_name: &str, units: Vec<String>, reads: PendingReads) {
         let mut loaded = self.loaded_units.lock().unwrap();
         let entry = loaded.entry(module_name.to_string()).or_default();
-        entry.extend(units.into_iter().filter(|unit| unit != module_name));
+        entry.extend(
+            units
+                .iter()
+                .filter(|unit| *unit != module_name)
+                .map(|unit| rescript_compiler::name::Name::new(unit)),
+        );
         drop(loaded);
         let mut all_reads = self.unit_reads.lock().unwrap();
         let entry = all_reads.entry(module_name.to_string()).or_default();
