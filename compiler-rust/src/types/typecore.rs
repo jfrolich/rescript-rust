@@ -983,7 +983,7 @@ pub struct PatternState {
     /// Whether modules are allowed.
     allow_modules: bool,
     /// Module variables collected.
-    module_variables: Vec<(crate::parse_arena::Located<String>, Location)>,
+    module_variables: Vec<(crate::parse_arena::Located<crate::name::Name>, Location)>,
     /// Type paths whose component-table side effects must run after the whole
     /// pattern has allocated binders.
     deferred_type_path_forces: Vec<TypeExprRef>,
@@ -1015,7 +1015,7 @@ pub struct PatternVariable {
     /// Original parser location index for this binding.
     pub loc_idx: LocIdx,
     /// The name with location.
-    pub name: crate::parse_arena::Located<String>,
+    pub name: crate::parse_arena::Located<crate::name::Name>,
     /// The location.
     pub loc: Location,
     /// Whether this is an as-variable.
@@ -1065,7 +1065,7 @@ impl PatternState {
         let id = type_ctx.create_ident(interned);
         let full_loc = arena.to_location(loc);
         let full_name = crate::parse_arena::Located {
-            txt: name_str.to_string(),
+            txt: interned,
             loc: name.loc,
         };
         self.pattern_variables.push(PatternVariable {
@@ -18798,7 +18798,7 @@ fn type_expect_with_module_unpacks(
     .is_err()
     {
         return Err(TypeCoreError::ScopingLetModule(
-            unpack.name.txt.clone(),
+            unpack.name.txt.to_string(),
             typed_body.exp_type,
         ));
     }
@@ -18807,7 +18807,10 @@ fn type_expect_with_module_unpacks(
         let typed_node = Expression::new(
             crate::types::typedtree::ExpressionDesc::Texp_letmodule(
                 letmod_id,
-                unpack.name.clone(),
+                Located {
+                    txt: unpack.name.txt.to_string(),
+                    loc: unpack.name.loc,
+                },
                 tctx.typed.push_module_expr(unpack_module),
                 tctx.push_expr(typed_body),
             ),
