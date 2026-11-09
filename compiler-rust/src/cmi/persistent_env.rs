@@ -225,6 +225,23 @@ impl<V> SharedRegistryMap<V> {
     }
 }
 
+impl<V> SharedRegistryMap<V> {
+    /// `f` of the value for `key`, read in place under the map's read lock:
+    /// `f` must not look up this map again.
+    fn with_value<R>(&self, key: &str, f: impl FnOnce(&V) -> R) -> Option<R> {
+        {
+            let inner = self.inner.read().unwrap();
+            if let Some(value) = inner.get(key) {
+                return Some(f(value));
+            }
+        }
+        if !self.lazy.as_ref().is_some_and(|lazy| lazy.materialize(key)) {
+            return None;
+        }
+        self.inner.read().unwrap().get(key).map(f)
+    }
+}
+
 impl<V: Clone> SharedRegistryMap<V> {
     fn get_cloned(&self, key: &str) -> Option<V> {
         if let Some(value) = self.inner.read().unwrap().get(key).cloned() {
@@ -631,15 +648,21 @@ impl ModuleRegistry {
             .get(name)
             .cloned()
             .or_else(|| self.cached_modules.get_cloned(name));
-        (pers, self.registered_info(name))
-    }
-
-    /// The JS metadata of a registered module.
-    fn registered_info(&self, name: &str) -> Option<InMemoryModuleInfo> {
-        self.local_module_info
+        let info = self
+            .local_module_info
             .get(name)
             .cloned()
-            .or_else(|| self.module_info.get_cloned(name))
+            .or_else(|| self.module_info.get_cloned(name));
+        (pers, info)
+    }
+
+    /// `f` of the JS metadata of a registered module, read in place. `f`
+    /// must not look up module metadata again.
+    fn with_info<R>(&self, name: &str, f: impl FnOnce(&InMemoryModuleInfo) -> R) -> Option<R> {
+        match self.local_module_info.get(name) {
+            Some(info) => Some(f(info)),
+            None => self.module_info.with_value(name, f),
+        }
     }
 
     /// The per-item digests of a registered module
@@ -689,32 +712,30 @@ impl ModuleRegistry {
         };
         let mut seeds = Vec::new();
         for (unit, keys) in resolved {
-            let Some(info) = self.registered_info(unit) else {
-                continue;
-            };
-            if info.cmj_export_lambdas.is_empty() {
-                continue;
-            }
-            let mut names: Vec<&str> = Vec::new();
-            if keys.contains(&ItemKey::Whole) {
-                names.extend(info.cmj_export_lambdas.keys().map(String::as_str));
-            } else {
-                for key in keys {
-                    if let ItemKey::Item(Kind::Value | Kind::Module, name) = key {
-                        names.push(name.as_str());
+            self.with_info(unit, |info| {
+                let lambdas = &info.cmj_export_lambdas;
+                if lambdas.is_empty() {
+                    return;
+                }
+                let mut push = |name: &str| {
+                    for lambda_unit in lambda_units_of(lambdas, name) {
+                        seeds.push(UnitRead {
+                            unit: lambda_unit,
+                            segs: Segs::new(),
+                            kind: Kind::Module,
+                        });
+                    }
+                };
+                if keys.contains(&ItemKey::Whole) {
+                    lambdas.keys().for_each(|name| push(name));
+                } else {
+                    for key in keys {
+                        if let ItemKey::Item(Kind::Value | Kind::Module, name) = key {
+                            push(name.as_str());
+                        }
                     }
                 }
-            }
-            for name in names {
-                for lambda_unit in super::item_deps::UnitSource::lambda_units(&source, *unit, name)
-                {
-                    seeds.push(UnitRead {
-                        unit: lambda_unit,
-                        segs: Segs::new(),
-                        kind: Kind::Module,
-                    });
-                }
-            }
+            });
         }
         if seeds.is_empty() {
             return std::collections::BTreeMap::new();
@@ -871,14 +892,7 @@ impl ModuleRegistry {
     }
 
     pub fn module_info_is_runtime(&self, name: &str) -> bool {
-        self.local_module_info
-            .get(name)
-            .map(|info| info.is_runtime)
-            .or_else(|| {
-                self.module_info
-                    .get_cloned(name)
-                    .map(|info| info.is_runtime)
-            })
+        self.with_info(name, |info| info.is_runtime)
             .unwrap_or(false)
     }
 
@@ -7730,6 +7744,17 @@ mod resolution_view_tests {
     }
 }
 
+/// The units the inlinable lambda exported under `name` refers to.
+fn lambda_units_of(lambdas: &crate::lambda::CmjExportLambdas, name: &str) -> Vec<Name> {
+    let Some(lambda) = lambdas.get(name) else {
+        return Vec::new();
+    };
+    crate::lambda::lam_compile::collect_possible_required_modules_for_lambda(lambda)
+        .into_iter()
+        .map(|module| module.id.name_atom())
+        .collect()
+}
+
 /// The registered modules as a [`super::item_deps::UnitSource`].
 struct RegistryUnitSource<'a> {
     registry: &'a ModuleRegistry,
@@ -7742,16 +7767,11 @@ impl super::item_deps::UnitSource for RegistryUnitSource<'_> {
         if !self.lambdas {
             return Vec::new();
         }
-        let Some(info) = self.registry.registered_info(&unit) else {
-            return Vec::new();
-        };
-        let Some(lambda) = info.cmj_export_lambdas.get(name) else {
-            return Vec::new();
-        };
-        crate::lambda::lam_compile::collect_possible_required_modules_for_lambda(lambda)
-            .into_iter()
-            .map(|module| module.id.name_atom())
-            .collect()
+        self.registry
+            .with_info(&unit, |info| {
+                lambda_units_of(&info.cmj_export_lambdas, name)
+            })
+            .unwrap_or_default()
     }
     fn ignored(&self, unit: Name) -> bool {
         self.registry.module_info_is_runtime(&unit)
@@ -7765,8 +7785,8 @@ impl super::item_deps::UnitSource for RegistryUnitSource<'_> {
             .or_else(|| registry.cached_modules.get_cloned(&unit))?;
         let lambdas = if self.lambdas {
             registry
-                .registered_info(&unit)
-                .map_or(0, |info| Arc::as_ptr(&info.cmj_export_lambdas) as usize)
+                .with_info(&unit, |info| Arc::as_ptr(&info.cmj_export_lambdas) as usize)
+                .unwrap_or(0)
         } else {
             usize::MAX
         };
