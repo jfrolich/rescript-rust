@@ -304,7 +304,57 @@ impl std::hash::Hasher for PairKeyHasher {
 
 /// Unordered type pairs already entered by `unify`, packed as
 /// `(smaller id << 32) | larger id`.
-type UnifiedPairSet = std::collections::HashSet<u64, std::hash::BuildHasherDefault<PairKeyHasher>>;
+type PairTable = std::collections::HashSet<u64, std::hash::BuildHasherDefault<PairKeyHasher>>;
+
+/// Pair tables kept per thread for reuse, and the largest one worth keeping.
+const PAIR_POOL_LIMIT: usize = 16;
+const PAIR_POOL_MAX_CAPACITY: usize = 1 << 12;
+
+thread_local! {
+    static PAIR_TABLE_POOL: std::cell::RefCell<Vec<PairTable>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The unified-pair set of a [`UnifyState`]. Most states live for one
+/// `unify`/`moregen` call, so their tables come from a per-thread pool and go
+/// back to it, cleared, on drop instead of regrowing from empty every time.
+struct UnifiedPairSet(PairTable);
+
+impl Default for UnifiedPairSet {
+    fn default() -> Self {
+        UnifiedPairSet(
+            PAIR_TABLE_POOL
+                .try_with(|pool| pool.borrow_mut().pop())
+                .ok()
+                .flatten()
+                .unwrap_or_default(),
+        )
+    }
+}
+
+impl Clone for UnifiedPairSet {
+    fn clone(&self) -> Self {
+        UnifiedPairSet(self.0.clone())
+    }
+}
+
+impl Drop for UnifiedPairSet {
+    fn drop(&mut self) {
+        let mut table = std::mem::take(&mut self.0);
+        if table.capacity() == 0 || table.capacity() > PAIR_POOL_MAX_CAPACITY {
+            return;
+        }
+        table.clear();
+        PAIR_TABLE_POOL
+            .try_with(|pool| {
+                let mut pool = pool.borrow_mut();
+                if pool.len() < PAIR_POOL_LIMIT {
+                    pool.push(table);
+                }
+            })
+            .ok();
+    }
+}
 
 /// A unified-pair set moved out of a [`UnifyState`].
 pub(crate) struct UnifiedPairSetOwned(UnifiedPairSet);
@@ -416,12 +466,12 @@ impl UnifyState {
 
     /// Check if two types have already been unified.
     pub fn already_unified(&self, t1: TypeExprRef, t2: TypeExprRef) -> bool {
-        self.unified_pairs.contains(&unified_pair_key(t1, t2))
+        self.unified_pairs.0.contains(&unified_pair_key(t1, t2))
     }
 
     /// Mark two types as unified.
     pub fn mark_unified(&mut self, t1: TypeExprRef, t2: TypeExprRef) {
-        self.unified_pairs.insert(unified_pair_key(t1, t2));
+        self.unified_pairs.0.insert(unified_pair_key(t1, t2));
     }
 
     /// Move the unified-pair set out, leaving an empty one, for a
