@@ -198,6 +198,9 @@ pub(crate) struct Node<'a> {
 /// Pattern matrices (`pattern list list`).
 pub(crate) type Row = Vec<P>;
 
+/// Sub-pattern lists paired up for a comparison; small enough to stay inline.
+type PatArgs = smallvec::SmallVec<[P; 8]>;
+
 /// The arena and algorithms.
 pub(crate) struct Parmatch<'a, O: Oracle> {
     pub oracle: O,
@@ -480,8 +483,8 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
     }
 
     /// `records_args l1 l2`: fields are sorted by position.
-    fn records_args(&self, l1: &[Field<'a>], l2: &[Field<'a>]) -> (Vec<P>, Vec<P>) {
-        let (mut r1, mut r2) = (Vec::new(), Vec::new());
+    fn records_args(&self, l1: &[Field<'a>], l2: &[Field<'a>]) -> (PatArgs, PatArgs) {
+        let (mut r1, mut r2) = (PatArgs::new(), PatArgs::new());
         let (mut i, mut j) = (0, 0);
         while i < l1.len() || j < l2.len() {
             if i == l1.len() {
@@ -2159,7 +2162,7 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
         enum Step {
             Done(bool),
             Pat(P, P),
-            Pats(Vec<P>, Vec<P>),
+            Pats(PatArgs, PatArgs),
             NotSatisfiable,
         }
         let step = match (self.desc(p), self.desc(q)) {
@@ -2178,7 +2181,7 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                 },
             ) => {
                 if same_constructor(c1, c2) {
-                    Step::Pats(ps.clone(), qs.clone())
+                    Step::Pats(PatArgs::from_slice(ps), PatArgs::from_slice(qs))
                 } else {
                     Step::Done(false)
                 }
@@ -2210,14 +2213,16 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                 },
             ) => Step::Done(l1 == l2),
             (Desc::Variant { .. }, Desc::Variant { .. }) => Step::Done(false),
-            (Desc::Tuple(ps), Desc::Tuple(qs)) => Step::Pats(ps.clone(), qs.clone()),
+            (Desc::Tuple(ps), Desc::Tuple(qs)) => {
+                Step::Pats(PatArgs::from_slice(ps), PatArgs::from_slice(qs))
+            }
             (Desc::Record { fields: l1, .. }, Desc::Record { fields: l2, .. }) => {
                 let (ps, qs) = self.records_args(l1, l2);
                 Step::Pats(ps, qs)
             }
             (Desc::Array(ps), Desc::Array(qs)) => {
                 if ps.len() == qs.len() {
-                    Step::Pats(ps.clone(), qs.clone())
+                    Step::Pats(PatArgs::from_slice(ps), PatArgs::from_slice(qs))
                 } else {
                     Step::Done(false)
                 }
@@ -2242,17 +2247,18 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
         self.select_rec(once)
     }
 
+    /// `select_rec`: keeps the rows no later row dominates, in reverse order.
     fn select_rec(&mut self, ps: Vec<Row>) -> Vec<Row> {
-        let mut r: Vec<Row> = Vec::new();
+        let mut keep = vec![false; ps.len()];
         for i in 0..ps.len() {
-            let p = &ps[i];
-            let dominated = ps[i + 1..]
-                .iter()
-                .any(|p0| self.le_pats(&p0.clone(), &p.clone()));
-            if !dominated {
-                r.insert(0, p.clone());
-            }
+            keep[i] = !ps[i + 1..].iter().any(|p0| self.le_pats(p0, &ps[i]));
         }
+        let mut r: Vec<Row> = ps
+            .into_iter()
+            .zip(keep)
+            .filter_map(|(row, keep)| keep.then_some(row))
+            .collect();
+        r.reverse();
         r
     }
 }
