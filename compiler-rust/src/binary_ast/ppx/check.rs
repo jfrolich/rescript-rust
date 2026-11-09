@@ -802,6 +802,22 @@ impl<'a> Checker<'a> {
             }
             // bs_builtin_ppx.ml `Pexp_raw`: `handle_raw_node`.
             ExpressionDesc::Pexp_raw(raw) => check_raw_node(raw, self.arena, &mut self.warnings),
+            // bs_builtin_ppx.ml `Pexp_todo`: `Ast_exp_extension.todo` warns at
+            // the expression after reading the message, which raises on an
+            // invalid template escape.
+            ExpressionDesc::Pexp_todo(todo) => {
+                let message = match todo.message {
+                    Some(message) => {
+                        expr_semantic_string(self.arena.get_expr(message), self.arena)?
+                    }
+                    None => None,
+                };
+                self.warnings.push(PpxWarning {
+                    loc: expr.pexp_loc,
+                    warning: Warning::BsTodo { message },
+                });
+                Ok(())
+            }
             ExpressionDesc::Pexp_constant(constant) => match constant {
                 Constant::Integer(_, Some('l')) => Ok(()),
                 _ => self.attributes(&expr.pexp_attributes),
@@ -1215,7 +1231,8 @@ impl<'a> Checker<'a> {
             | ExpressionDesc::Pexp_fun(_)
             | ExpressionDesc::Pexp_apply(_)
             | ExpressionDesc::Pexp_extension(_)
-            | ExpressionDesc::Pexp_raw(_) => Ok(()),
+            | ExpressionDesc::Pexp_raw(_)
+            | ExpressionDesc::Pexp_todo(_) => Ok(()),
         }
     }
 

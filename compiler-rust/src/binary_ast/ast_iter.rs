@@ -590,6 +590,12 @@ pub fn walk_expr<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, idx: ExprId
         ExpressionDesc::Pexp_open(inner) => v.expr(arena, inner.2),
         ExpressionDesc::Pexp_extension(ext) => v.extension(arena, ext),
         ExpressionDesc::Pexp_raw(_) => {}
+        // ast_iterator.ml `Pexp_todo`: the message, if any.
+        ExpressionDesc::Pexp_todo(todo) => {
+            if let Some(message) = todo.message {
+                v.expr(arena, message);
+            }
+        }
         ExpressionDesc::Pexp_jsx_element(jsx) => match &**jsx {
             JsxElement::Fragment(fragment) => {
                 for child in &fragment.children {

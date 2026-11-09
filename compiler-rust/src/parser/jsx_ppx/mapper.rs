@@ -1246,6 +1246,14 @@ fn default_expr(e: Expression, c: &mut JsxConfig, a: &mut ParseArena) -> R<Expre
         ExpressionDesc::Pexp_jsx_element(jsx) => {
             ExpressionDesc::Pexp_jsx_element(Box::new(jsx_element(*jsx, c, a)?))
         }
+        // `todo ~loc ~attrs ~name_loc (Option.map (sub.expr sub) message)`.
+        ExpressionDesc::Pexp_todo(todo) => ExpressionDesc::Pexp_todo(PexpTodo {
+            name_loc: todo.name_loc,
+            message: todo
+                .message
+                .map(|message| expr_idx(message, c, a))
+                .transpose()?,
+        }),
         desc @ (ExpressionDesc::Pexp_ident(_)
         | ExpressionDesc::Pexp_constant(_)
         | ExpressionDesc::Pexp_break
@@ -1536,6 +1544,7 @@ pub(super) fn expression_may_change(e: &Expression, a: &ParseArena, memo: &mut V
         | ExpressionDesc::Pexp_continue
         | ExpressionDesc::Pexp_regexp(_)
         | ExpressionDesc::Pexp_raw(_) => false,
+        ExpressionDesc::Pexp_todo(todo) => todo.message.is_some_and(|message| child(message, memo)),
         ExpressionDesc::Pexp_let(inner) => {
             child(inner.2, memo)
                 || a.vb_list(inner.1)

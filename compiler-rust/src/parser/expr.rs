@@ -1509,7 +1509,19 @@ pub fn parse_atomic_expr(p: &mut Parser<'_>) -> Expression {
                     name_loc: name.loc,
                     source,
                 })),
-                _ => ExpressionDesc::Pexp_extension(Box::new((name, payload))),
+                // `%todo` with no payload, a string literal or a template
+                // without interpolations is a todo node.
+                _ => match if p.arena().get_string(name.txt) == crate::ast_todo::NAME {
+                    crate::ast_todo::of_payload(p.arena(), &payload)
+                } else {
+                    None
+                } {
+                    Some(message) => ExpressionDesc::Pexp_todo(PexpTodo {
+                        name_loc: name.loc,
+                        message,
+                    }),
+                    None => ExpressionDesc::Pexp_extension(Box::new((name, payload))),
+                },
             };
             Expression {
                 pexp_desc: pexp_desc,

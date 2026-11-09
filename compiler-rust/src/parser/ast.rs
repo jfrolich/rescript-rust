@@ -791,6 +791,15 @@ pub struct PexpRaw {
     pub source: RawSource,
 }
 
+/// OCaml `Pexp_todo {name_loc; message}`: `%todo` or `%todo("message")`.
+/// `name_loc` is the location of `%todo`; `message` is a string literal or a
+/// template without interpolations, as written.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct PexpTodo {
+    pub name_loc: LocIdx,
+    pub message: Option<ExprIdx>,
+}
+
 /// OCaml `Pstr_raw {name_loc; source; attrs}`. `name_loc` is the location of
 /// `%%raw`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -935,6 +944,8 @@ pub enum ExpressionDesc {
     Pexp_extension(Box<Extension>),
     /// `%raw("...")` and `%ffi("...")`: JavaScript source.
     Pexp_raw(Box<PexpRaw>),
+    /// `%todo` and `%todo("message")`: code that is not written yet.
+    Pexp_todo(PexpTodo),
     /// Await: `await E`.
     Pexp_await(ExprIdx),
     /// An ordinary backquoted template: `` `a ${b}` ``.

@@ -2565,8 +2565,22 @@ impl<'a> Mapper<'a> {
                     source,
                 }))
             }
+            // ast_mapper_from0.ml: the extension is mapped first; `%todo`
+            // with a payload `Ast_todo.of_payload` accepts is a todo node.
             pt0::ExpressionDesc::Extension(ext) => {
-                current::ExpressionDesc::Pexp_extension(Box::new(self.map_extension(ext)))
+                let (name, payload) = self.map_extension(ext);
+                let message = if self.arena.get_string(name.txt) == crate::ast_todo::NAME {
+                    crate::ast_todo::of_payload(self.arena, &payload)
+                } else {
+                    None
+                };
+                match message {
+                    Some(message) => current::ExpressionDesc::Pexp_todo(current::PexpTodo {
+                        name_loc: name.loc,
+                        message,
+                    }),
+                    None => current::ExpressionDesc::Pexp_extension(Box::new((name, payload))),
+                }
             }
             // OCaml-specific expressions that don't exist in ReScript
             pt0::ExpressionDesc::New(_) => {
@@ -4002,5 +4016,125 @@ let f = ``
         assert_eq!(decode(&mut arena, e), None);
         let e = spread_call(&mut arena, "Primitive_dict", true, vec![a.clone()]);
         assert_eq!(decode(&mut arena, e), None);
+    }
+
+    /// ounit_ast_mapper0_tests.ml `test_todo_roundtrips_through_ast0`: a
+    /// `%todo` without payload, with a string literal or with a template
+    /// without interpolations is a todo node; any other payload stays an
+    /// extension. On the v0 wire a todo node is the extension it is written
+    /// as, and it comes back as parsed, locations included.
+    #[test]
+    fn todo_roundtrips_through_ast0() {
+        let source = "let a = %todo
+let b = @attr %todo(\"message\")
+let c = %todo(`template`)
+let d = %todo(1)
+let e = %todo({\"braced\"})
+let f = %todo(@attr \"x\")
+let g = %todo(`a${b}`)
+let h = %todo->String.length";
+        let mut parser = crate::parser::Parser::new("Todo.res", source);
+        let structure = crate::parser::module::parse_structure(&mut parser);
+        assert!(
+            parser.diagnostics().is_empty(),
+            "expected valid ReScript source"
+        );
+        let mut arena = parser.into_arena();
+        let kinds: Vec<&str> = structure
+            .iter()
+            .map(|item| {
+                let current::StructureItemDesc::Pstr_value((_, bindings)) = &item.pstr_desc else {
+                    panic!("expected a let binding");
+                };
+                let expr = arena.get_expr(arena.vb_list(*bindings)[0].pvb_expr);
+                match &expr.pexp_desc {
+                    current::ExpressionDesc::Pexp_todo(todo) => match todo.message {
+                        None => "todo",
+                        Some(message) => match &arena.get_expr(message).pexp_desc {
+                            current::ExpressionDesc::Pexp_constant(current::Constant::String(
+                                _,
+                            )) => "todo string",
+                            current::ExpressionDesc::Pexp_template(_) => "todo template",
+                            _ => "todo other",
+                        },
+                    },
+                    current::ExpressionDesc::Pexp_extension(ext)
+                        if arena.get_string(ext.0.txt) == "todo" =>
+                    {
+                        "extension"
+                    }
+                    current::ExpressionDesc::Pexp_apply(_) => "apply",
+                    _ => "other",
+                }
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                "todo",
+                "todo string",
+                "todo template",
+                "extension",
+                "extension",
+                "extension",
+                "extension",
+                "apply"
+            ]
+        );
+        let before = sexp_locs(&structure, &arena);
+        let tree0 = super::super::mapper_to0::map_structure(&mut arena, &structure);
+        let pt0::StructureItemDesc::Value(_, bindings) = &tree0[0].pstr_desc else {
+            panic!("expected a let binding");
+        };
+        let pt0::ExpressionDesc::Extension((name, pt0::Payload::PStr(items))) =
+            &bindings[0].pvb_expr.pexp_desc
+        else {
+            panic!("expected a %todo extension on the ast0 wire");
+        };
+        assert_eq!(name.txt, "todo");
+        assert!(items.is_empty());
+        let back = map_structure(&mut arena, &tree0).expect("no mapper error");
+        assert_eq!(before, sexp_locs(&back, &arena));
+    }
+
+    /// A PPX that builds `%todo("x")` on the v0 wire produces a todo node.
+    #[test]
+    fn ppx_built_todo_through_ast0() {
+        let mut arena = ParseArena::new();
+        let message = expr0(
+            pt0::ExpressionDesc::Constant(pt0::Constant::String("x".to_string(), None)),
+            Location::none(),
+            vec![],
+        );
+        let todo = expr0(
+            pt0::ExpressionDesc::Extension((
+                OldLocated {
+                    txt: "todo".to_string(),
+                    loc: Location::none(),
+                },
+                pt0::Payload::PStr(vec![pt0::StructureItem {
+                    pstr_desc: pt0::StructureItemDesc::Eval(message, vec![]),
+                    pstr_loc: Location::none(),
+                }]),
+            )),
+            Location::none(),
+            vec![],
+        );
+        let item = pt0::StructureItem {
+            pstr_desc: pt0::StructureItemDesc::Eval(todo, vec![]),
+            pstr_loc: Location::none(),
+        };
+        let back = map_structure(&mut arena, &[item]).expect("no mapper error");
+        let current::StructureItemDesc::Pstr_eval(eval) = &back[0].pstr_desc else {
+            panic!("expected an evaluation back");
+        };
+        let current::ExpressionDesc::Pexp_todo(todo) = arena.get_expr(eval.0).pexp_desc else {
+            panic!("expected a todo node");
+        };
+        let message = arena.get_expr(todo.message.expect("a message"));
+        assert_eq!(
+            crate::ast_payload::semantic_string_of_expression(&arena, message).unwrap(),
+            Some("x".to_string())
+        );
     }
 }

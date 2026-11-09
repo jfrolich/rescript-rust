@@ -2392,8 +2392,11 @@ fn print_expression_inner<W: Write>(
                 f.string(")");
             }
         }
-        ExpressionDesc::Pexp_extension(_) | ExpressionDesc::Pexp_raw(_) => {
-            // pprintast.ml: `Pexp_raw` prints as `Ast_raw.to_extension`.
+        ExpressionDesc::Pexp_extension(_)
+        | ExpressionDesc::Pexp_raw(_)
+        | ExpressionDesc::Pexp_todo(_) => {
+            // pprintast.ml: `Pexp_raw` prints as `Ast_raw.to_extension`,
+            // `Pexp_todo` as `Ast_todo.to_extension`.
             let raw_extension;
             let ext = match &expr.pexp_desc {
                 ExpressionDesc::Pexp_extension(inner) => &**inner,
@@ -2404,6 +2407,11 @@ fn print_expression_inner<W: Write>(
                         raw.name_loc,
                         &raw.source,
                     );
+                    &raw_extension
+                }
+                ExpressionDesc::Pexp_todo(todo) => {
+                    raw_extension =
+                        crate::ast_todo::to_extension(arena, todo.name_loc, todo.message);
                     &raw_extension
                 }
                 _ => unreachable!(),

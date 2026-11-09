@@ -5278,6 +5278,13 @@ impl<'a> LocCloner<'a> {
                 self.loc(&mut raw.name_loc);
                 self.raw_source(&mut raw.source);
             }
+            // ast_mapper.ml `Pexp_todo`: `name_loc`, then the message.
+            ExpressionDesc::Pexp_todo(todo) => {
+                self.loc(&mut todo.name_loc);
+                if let Some(message) = &mut todo.message {
+                    self.expression_idx(message);
+                }
+            }
             ExpressionDesc::Pexp_await(expr) => self.expression_idx(expr),
             ExpressionDesc::Pexp_jsx_element(element) => self.jsx_element(element),
         }

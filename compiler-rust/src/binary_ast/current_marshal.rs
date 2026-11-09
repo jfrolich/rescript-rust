@@ -1511,13 +1511,14 @@ impl Marshal for ExpressionDesc {
         // Pexp_open = tag 31
         // Pexp_extension = tag 32
         // Pexp_raw = tag 33
-        // Pexp_await = tag 34
-        // Pexp_jsx_element = tag 35
-        // Pexp_for_of = tag 36
-        // Pexp_for_await_of = tag 37
-        // Pexp_regexp = tag 38
-        // Pexp_template = tag 39
-        // Pexp_tagged_template = tag 40
+        // Pexp_todo = tag 34
+        // Pexp_await = tag 35
+        // Pexp_jsx_element = tag 36
+        // Pexp_for_of = tag 37
+        // Pexp_for_await_of = tag 38
+        // Pexp_regexp = tag 39
+        // Pexp_template = tag 40
+        // Pexp_tagged_template = tag 41
         // Constant constructors (no payload):
         // Pexp_break = int 0
         // Pexp_continue = int 1
@@ -1536,7 +1537,7 @@ impl Marshal for ExpressionDesc {
                 inner.2.marshal(w);
             }
             ExpressionDesc::Pexp_regexp(regexp) => {
-                w.write_block_header(38, 2);
+                w.write_block_header(39, 2);
                 w.write_str(&regexp.pattern);
                 w.write_str(&regexp.flags);
             }
@@ -1790,35 +1791,41 @@ impl Marshal for ExpressionDesc {
                 raw.name_loc.marshal(w);
                 marshal_raw_source(&raw.source, w);
             }
+            ExpressionDesc::Pexp_todo(todo) => {
+                // Pexp_todo of {name_loc; message}
+                w.write_block_header(34, 2);
+                todo.name_loc.marshal(w);
+                todo.message.marshal(w);
+            }
             ExpressionDesc::Pexp_await(e) => {
-                w.write_block_header(34, 1);
+                w.write_block_header(35, 1);
                 e.marshal(w);
             }
             ExpressionDesc::Pexp_jsx_element(jsx) => {
-                w.write_block_header(35, 1);
+                w.write_block_header(36, 1);
                 jsx.marshal(w);
             }
             ExpressionDesc::Pexp_for_of(inner) => {
-                let (ref pat, ref iterable, ref body) = **inner;
-                w.write_block_header(36, 3);
-                pat.marshal(w);
-                iterable.marshal(w);
-                body.marshal(w);
-            }
-            ExpressionDesc::Pexp_for_await_of(inner) => {
                 let (ref pat, ref iterable, ref body) = **inner;
                 w.write_block_header(37, 3);
                 pat.marshal(w);
                 iterable.marshal(w);
                 body.marshal(w);
             }
+            ExpressionDesc::Pexp_for_await_of(inner) => {
+                let (ref pat, ref iterable, ref body) = **inner;
+                w.write_block_header(38, 3);
+                pat.marshal(w);
+                iterable.marshal(w);
+                body.marshal(w);
+            }
             ExpressionDesc::Pexp_template(template) => {
-                w.write_block_header(39, 2);
+                w.write_block_header(40, 2);
                 template.source_segments.marshal(w);
                 template.values.marshal(w);
             }
             ExpressionDesc::Pexp_tagged_template(template) => {
-                w.write_block_header(40, 3);
+                w.write_block_header(41, 3);
                 template.tag.marshal(w);
                 template.raw_sources.marshal(w);
                 template.values.marshal(w);

@@ -1844,6 +1844,13 @@ fn walk_expression(
             comments,
             arena,
         ),
+        // res_comments_table.ml `Pexp_todo`: walked as the extension.
+        ExpressionDesc::Pexp_todo(todo) => walk_extension(
+            &crate::ast_todo::to_extension(arena, todo.name_loc, todo.message),
+            t,
+            comments,
+            arena,
+        ),
         ExpressionDesc::Pexp_letexception(inner) => {
             let (ref ext, ref body_idx) = **inner;
             // Safety: arena is append-only, expression won't be invalidated

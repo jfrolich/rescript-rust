@@ -286,6 +286,10 @@ fn expression_has_string_literal(
             payload_has_string_literal(payload, value, arena)
         }
         ED::Pexp_raw(_) => false,
+        // The message of `%todo("...")`, which an extension payload held.
+        ED::Pexp_todo(todo) => todo.message.is_some_and(|message| {
+            expression_has_string_literal(arena.get_expr(message), value, arena)
+        }),
         ED::Pexp_ident(_) | ED::Pexp_break | ED::Pexp_continue | ED::Pexp_jsx_element(_) => false,
     }
 }

@@ -1479,6 +1479,14 @@ pub fn print_expression(
             cmt_tbl,
             arena,
         ),
+        // res_printer.ml `Pexp_todo`: printed as the extension.
+        ExpressionDesc::Pexp_todo(todo) => print_extension(
+            state,
+            &crate::ast_todo::to_extension(arena, todo.name_loc, todo.message),
+            false,
+            cmt_tbl,
+            arena,
+        ),
         ExpressionDesc::Pexp_regexp(regexp) => {
             Doc::text(format!("/{}/{}", regexp.pattern, regexp.flags))
         }

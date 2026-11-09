@@ -773,7 +773,8 @@ impl<'a> DependencyCollector<'a> {
                     self.bound_modules.shift_remove(name);
                 }
             }
-            ExpressionDesc::Pexp_raw(_) => {}
+            // depend.ml `Pexp_raw _ | Pexp_todo _ -> ()`.
+            ExpressionDesc::Pexp_raw(_) | ExpressionDesc::Pexp_todo(_) => {}
             ExpressionDesc::Pexp_extension(ext) => self.handle_extension(ext),
             ExpressionDesc::Pexp_await(expr) => {
                 // expr is ExprIdx

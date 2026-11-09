@@ -959,6 +959,17 @@ fn expression(expr: &Expression, arena: &ParseArena) -> Sexp {
             location(raw.name_loc, arena),
             raw_source(&raw.source, arena),
         ]),
+        ExpressionDesc::Pexp_todo(todo) => Sexp::list(vec![
+            Sexp::atom("Pexp_todo"),
+            location(todo.name_loc, arena),
+            match todo.message {
+                None => Sexp::atom("None"),
+                Some(message) => Sexp::list(vec![
+                    Sexp::atom("Some"),
+                    expression(arena.get_expr(message), arena),
+                ]),
+            },
+        ]),
         ExpressionDesc::Pexp_template(template) => Sexp::list(vec![
             Sexp::atom("Pexp_template"),
             Sexp::list(

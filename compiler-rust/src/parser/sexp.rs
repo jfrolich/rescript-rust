@@ -1113,6 +1113,17 @@ fn expression(arena: &ParseArena, expr: &Expression) -> Sexp {
             raw_kind(raw.kind),
             raw_source(arena, &raw.source),
         ]),
+        // res_ast_debugger.ml: `name_loc` is left out, as for `Pexp_raw`.
+        ExpressionDesc::Pexp_todo(todo) => Sexp::list(vec![
+            Sexp::atom("Pexp_todo"),
+            match todo.message {
+                None => Sexp::atom("None"),
+                Some(message) => Sexp::list(vec![
+                    Sexp::atom("Some"),
+                    expression(arena, arena.get_expr(message)),
+                ]),
+            },
+        ]),
         ExpressionDesc::Pexp_template(template) => Sexp::list(vec![
             Sexp::atom("Pexp_template"),
             Sexp::list(

@@ -2011,6 +2011,12 @@ impl<'a> Mapper<'a> {
                     &raw.source,
                 ))
             }
+            // ast_mapper_to0.ml `Pexp_todo`: the extension as parsed.
+            current::ExpressionDesc::Pexp_todo(todo) => {
+                let extension =
+                    crate::ast_todo::to_extension(self.arena, todo.name_loc, todo.message);
+                pt0::ExpressionDesc::Extension(self.map_extension(&extension))
+            }
             current::ExpressionDesc::Pexp_await(e_idx) => {
                 // The complete inner expression receives [@res.await] in
                 // map_expression_with_owner, matching OCaml's mapper.

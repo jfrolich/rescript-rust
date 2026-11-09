@@ -8865,6 +8865,12 @@ fn type_expect_with_recarg_unscoped<'a>(
             raw.name_loc,
             crate::ast_raw::extension_name(raw.kind),
         )),
+        // typecore.ml `Pexp_todo`: the built-in PPX lowers %todo before type
+        // checking.
+        ED::Pexp_todo(todo) => Err(uninterpreted_raw_error(
+            todo.name_loc,
+            crate::ast_todo::NAME,
+        )),
 
         ED::Pexp_extension(extension) => {
             // Extension: [%id]. typecore.ml `Pexp_extension ext ->
@@ -12126,6 +12132,7 @@ fn collect_lident_idents_in_expression(
         ED::Pexp_constant(_)
         | ED::Pexp_extension(_)
         | ED::Pexp_raw(_)
+        | ED::Pexp_todo(_)
         | ED::Pexp_break
         | ED::Pexp_continue => {}
         ED::Pexp_let(inner) => {

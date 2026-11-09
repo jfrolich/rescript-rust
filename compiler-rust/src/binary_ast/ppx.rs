@@ -4795,7 +4795,8 @@ fn handle_extension(
     let ext_loc = ext_name.loc;
 
     match name {
-        // A payload other than a string gives no message
+        // A payload the parser did not turn into `Pexp_todo`, or one from a
+        // v0 PPX. A payload other than a string gives no message
         // (ast_exp_extension.ml `handle_extension`).
         "todo" => todo(
             checked(payload_semantic_string(payload, arena)),
@@ -8443,6 +8444,15 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
         // bs_builtin_ppx.ml `Pexp_raw`.
         ExpressionDesc::Pexp_raw(raw) => {
             return handle_raw_node(raw, arena);
+        }
+        // bs_builtin_ppx.ml `Pexp_todo`: the message is read as
+        // `Ast_payload.semantic_string_of_expression`; the warning pre-pass
+        // raised on an invalid one.
+        ExpressionDesc::Pexp_todo(todo_node) => {
+            let message = todo_node
+                .message
+                .and_then(|message| checked(expr_semantic_string(arena.get_expr(message), arena)));
+            return todo(message, arena, todo_node.name_loc);
         }
 
         // JSX - recurse into children and props
