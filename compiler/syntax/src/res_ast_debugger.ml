@@ -835,6 +835,15 @@ module Sexp_ast = struct
           ([Sexp.atom "Pexp_raw"; raw_kind kind]
           @ (ignore name_loc; [])
           @ [raw_source source])
+      | Pexp_todo {name_loc; message} ->
+        ignore name_loc;
+        Sexp.list
+          [
+            Sexp.atom "Pexp_todo";
+            (match message with
+            | None -> Sexp.atom "None"
+            | Some expr -> Sexp.list [Sexp.atom "Some"; expression expr]);
+          ]
       | Pexp_regexp {pattern; flags} ->
         Sexp.list [Sexp.atom "Pexp_regexp"; string pattern; string flags]
       | Pexp_template {source_segments; values} ->
@@ -2026,6 +2035,15 @@ module SexpAstWithLocs = struct
           ([Sexp.atom "Pexp_raw"; raw_kind kind]
           @ [location name_loc]
           @ [raw_source source])
+      | Pexp_todo {name_loc; message} ->
+        Sexp.list
+          [
+            Sexp.atom "Pexp_todo";
+            location name_loc;
+            (match message with
+            | None -> Sexp.atom "None"
+            | Some expr -> Sexp.list [Sexp.atom "Some"; expression expr]);
+          ]
       | Pexp_template {source_segments; values} ->
         Sexp.list
           [
