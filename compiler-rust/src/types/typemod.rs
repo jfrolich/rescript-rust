@@ -7732,7 +7732,7 @@ pub fn lookup_module_path_by_lid(
                 if let Some(path) = &md.md_path {
                     return Some(*path);
                 }
-                return Some(Path::pident(*id));
+                return Some(Path::pident(id));
             }
             if let Some(pers) = pers_env.as_mut() {
                 if pers.find_pers_struct(mod_name, ctx).is_some() {
@@ -7803,7 +7803,7 @@ fn lookup_module_path_for_module_expr<'a>(
     {
         let mod_name = arena.get_string(*mod_idx);
         if let Ok((id, md)) = env.find_module_with_id(mod_name) {
-            return Ok(md.md_path.unwrap_or_else(|| Path::pident(*id)));
+            return Ok(md.md_path.unwrap_or_else(|| Path::pident(id)));
         }
 
         if tctx

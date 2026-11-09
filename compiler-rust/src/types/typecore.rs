@@ -9276,7 +9276,7 @@ fn lookup_value_for_arity_suggestion(
                 .rsplit_once('.')
                 .map_or(candidate, |(_, name)| name);
             env.find_value_with_id(value_name).ok().map(|(id, desc)| {
-                let path = desc.val_path.unwrap_or_else(|| Path::pident(*id));
+                let path = desc.val_path.unwrap_or_else(|| Path::pident(id));
                 (path, Arc::new(desc.clone()))
             })
         }

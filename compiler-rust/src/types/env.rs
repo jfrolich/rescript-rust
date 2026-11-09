@@ -424,42 +424,77 @@ fn ident_tbl_fold_name_order<'a>(names: impl Iterator<Item = (&'a str, i32)>) ->
     order
 }
 
-/// Same-name bindings in an Env table, oldest first. Most names are bound
-/// once, so a single binding is stored inline; a name bound again moves its
-/// bindings to a shared vector, so copying a persistent-map node on insert
-/// only bumps reference counts.
+/// Same-name bindings, oldest first. The single-binding case shares its name
+/// with the map key; only the stamp and flags need to live beside the value.
 #[derive(Debug, Clone)]
 enum IdBucket<T> {
-    One([(Ident, T); 1]),
+    One {
+        stamp: i32,
+        flags: IdentFlags,
+        value: T,
+    },
     Many(std::rc::Rc<Vec<(Ident, T)>>),
+}
+
+impl<T> IdBucket<T> {
+    fn one(id: Ident, value: T) -> Self {
+        Self::One {
+            stamp: id.stamp(),
+            flags: id.flags(),
+            value,
+        }
+    }
+
+    fn iter(&self, name: Name) -> impl DoubleEndedIterator<Item = (Ident, &T)> {
+        let (one, many): (Option<(Ident, &T)>, &[(Ident, T)]) = match self {
+            Self::One {
+                stamp,
+                flags,
+                value,
+            } => (Some((Ident::new(name, *stamp, *flags), value)), &[]),
+            Self::Many(entries) => (None, entries),
+        };
+        one.into_iter()
+            .chain(many.iter().map(|(id, value)| (*id, value)))
+    }
+
+    fn first(&self, name: Name) -> Option<(Ident, &T)> {
+        self.iter(name).next()
+    }
+
+    fn last(&self, name: Name) -> Option<(Ident, &T)> {
+        self.iter(name).next_back()
+    }
 }
 
 impl<T: Clone> IdBucket<T> {
     fn push(&mut self, id: Ident, value: T) {
         match self {
-            IdBucket::One([first]) => {
-                *self = IdBucket::Many(std::rc::Rc::new(vec![first.clone(), (id, value)]));
+            Self::One {
+                stamp,
+                flags,
+                value: first,
+            } => {
+                let first_id = Ident::new(id.name_atom(), *stamp, *flags);
+                *self = Self::Many(std::rc::Rc::new(vec![
+                    (first_id, first.clone()),
+                    (id, value),
+                ]));
             }
-            IdBucket::Many(entries) => std::rc::Rc::make_mut(entries).push((id, value)),
+            Self::Many(entries) => std::rc::Rc::make_mut(entries).push((id, value)),
         }
     }
 
-    fn last_mut(&mut self) -> Option<&mut (Ident, T)> {
+    fn last_mut(&mut self, name: Name) -> Option<(Ident, &mut T)> {
         match self {
-            IdBucket::One([entry]) => Some(entry),
-            IdBucket::Many(entries) => std::rc::Rc::make_mut(entries).last_mut(),
-        }
-    }
-}
-
-impl<T> std::ops::Deref for IdBucket<T> {
-    type Target = [(Ident, T)];
-
-    #[inline]
-    fn deref(&self) -> &[(Ident, T)] {
-        match self {
-            IdBucket::One(entry) => entry,
-            IdBucket::Many(entries) => entries,
+            Self::One {
+                stamp,
+                flags,
+                value,
+            } => Some((Ident::new(name, *stamp, *flags), value)),
+            Self::Many(entries) => std::rc::Rc::make_mut(entries)
+                .last_mut()
+                .map(|(id, value)| (*id, value)),
         }
     }
 }
@@ -492,7 +527,7 @@ impl<T: Clone> IdTbl<T> {
         {
             entries.push(id, value);
         } else {
-            self.current.insert(key, IdBucket::One([(id, value)]));
+            self.current.insert(key, IdBucket::one(id, value));
         }
     }
 
@@ -536,11 +571,7 @@ impl<T: Clone> IdTbl<T> {
     }
 
     fn open_slot_use_by_key(&self, key: Name) -> Option<OpenSlotUse> {
-        if self
-            .current
-            .get(&key)
-            .is_some_and(|entries| !entries.is_empty())
-        {
+        if self.current.contains_key(&key) {
             return None;
         }
         let opened = self.opened.as_ref()?;
@@ -562,7 +593,7 @@ impl<T: Clone> IdTbl<T> {
         let stamp = id.stamp();
         self.current.get(&id.name_atom()).and_then(|entries| {
             entries
-                .iter()
+                .iter(id.name_atom())
                 .rev()
                 .find(|(entry_id, _)| {
                     if stamp == 0 {
@@ -575,13 +606,13 @@ impl<T: Clone> IdTbl<T> {
         })
     }
 
-    fn find_name_entry(&self, name: impl crate::name::NameKey) -> Option<(&Ident, &T)> {
+    fn find_name_entry(&self, name: impl crate::name::NameKey) -> Option<(Ident, &T)> {
         self.find_name_entry_key(name.name_key()?)
     }
 
-    fn find_name_entry_key(&self, key: Name) -> Option<(&Ident, &T)> {
+    fn find_name_entry_key(&self, key: Name) -> Option<(Ident, &T)> {
         if !self.current.is_empty()
-            && let Some((id, value)) = self.current.get(&key).and_then(|entries| entries.last())
+            && let Some((id, value)) = self.current.get(&key).and_then(|entries| entries.last(key))
         {
             return Some((id, value));
         }
@@ -590,7 +621,7 @@ impl<T: Clone> IdTbl<T> {
             Some(opened) => opened
                 .components
                 .get(&key)
-                .map(|(id, value, _)| (id, value))
+                .map(|(id, value, _)| (*id, value))
                 .or_else(|| opened.next.find_name_entry_key(key)),
             None => None,
         }
@@ -600,7 +631,7 @@ impl<T: Clone> IdTbl<T> {
         self.find_name_entry(name).map(|(_, value)| value)
     }
 
-    pub fn find_by_name_with_id(&self, name: impl crate::name::NameKey) -> Option<(&Ident, &T)> {
+    pub fn find_by_name_with_id(&self, name: impl crate::name::NameKey) -> Option<(Ident, &T)> {
         self.find_name_entry(name)
     }
 
@@ -610,9 +641,9 @@ impl<T: Clone> IdTbl<T> {
 
     fn find_by_key_with_path(&self, key: Name) -> Option<(Path, &T)> {
         if !self.current.is_empty()
-            && let Some((id, value)) = self.current.get(&key).and_then(|entries| entries.last())
+            && let Some((id, value)) = self.current.get(&key).and_then(|entries| entries.last(key))
         {
-            return Some((Path::pident(*id), value));
+            return Some((Path::pident(id), value));
         }
 
         match &self.opened {
@@ -662,11 +693,11 @@ impl<T: Clone> IdTbl<T> {
     {
         if self.current.contains_key(&key)
             && let Some(entries) = self.current.get_mut(&key)
-            && let Some((id, value)) = entries.last_mut()
+            && let Some((id, value)) = entries.last_mut(key)
         {
             let updated = f(value);
             *value = updated.clone();
-            return Some((*id, updated));
+            return Some((id, updated));
         }
 
         if let Some(opened) = self.opened.as_mut() {
@@ -692,7 +723,7 @@ impl<T: Clone> IdTbl<T> {
 
     fn collect_all_key<'a>(&'a self, key: Name, items: &mut Vec<&'a T>) {
         if let Some(entries) = self.current.get(&key) {
-            items.extend(entries.iter().rev().map(|(_, value)| value));
+            items.extend(entries.iter(key).rev().map(|(_, value)| value));
         }
         if let Some(opened) = &self.opened {
             if let Some((_, value, _)) = opened.components.get(&key) {
@@ -706,18 +737,18 @@ impl<T: Clone> IdTbl<T> {
         self.find_by_name(name).is_some()
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (&Ident, &T)> {
+    pub fn iter(&self) -> impl Iterator<Item = (Ident, &T)> {
         let mut items = Vec::new();
         self.collect_iter(&mut items);
         items.into_iter()
     }
 
-    fn collect_iter<'a>(&'a self, items: &mut Vec<(&'a Ident, &'a T)>) {
-        for entries in self.current.values() {
-            items.extend(entries.iter().map(|(id, value)| (id, value)));
+    fn collect_iter<'a>(&'a self, items: &mut Vec<(Ident, &'a T)>) {
+        for (name, entries) in self.current.iter() {
+            items.extend(entries.iter(*name));
         }
         if let Some(opened) = &self.opened {
-            items.extend(opened.components.values().map(|(id, value, _)| (id, value)));
+            items.extend(opened.components.values().map(|(id, value, _)| (*id, value)));
             opened.next.collect_iter(items);
         }
     }
@@ -736,7 +767,7 @@ impl<T: Clone> IdTbl<T> {
             |(name, entries)| {
                 (
                     name.as_str(),
-                    entries.first().map_or(0, |(id, _)| id.stamp()),
+                    entries.first(*name).map_or(0, |(id, _)| id.stamp()),
                 )
             },
         )));
@@ -749,7 +780,7 @@ impl<T: Clone> IdTbl<T> {
         }
     }
 
-    pub fn visible_local_entries(&self) -> impl Iterator<Item = (&Ident, &T)> {
+    pub fn visible_local_entries(&self) -> impl Iterator<Item = (Ident, &T)> {
         let mut seen = HashSet::new();
         let mut shadowing_opens = Vec::new();
         let mut items = Vec::new();
@@ -765,14 +796,14 @@ impl<T: Clone> IdTbl<T> {
         &'a self,
         seen: &mut HashSet<Name>,
         shadowing_opens: &mut Vec<&'a OpenedMap<(Ident, T, i32)>>,
-        items: &mut Vec<(&'a Ident, &'a T)>,
+        items: &mut Vec<(Ident, &'a T)>,
     ) {
         for (name, entries) in self.current.iter() {
             if !shadowing_opens
                 .iter()
                 .any(|opened| opened.contains_key(name))
                 && seen.insert(*name)
-                && let Some((id, value)) = entries.last()
+                && let Some((id, value)) = entries.last(*name)
             {
                 items.push((id, value));
             }
@@ -832,7 +863,7 @@ impl<T: Clone> TycompTbl<T> {
         } else {
             let seq = self.current_first_add.len() as i32;
             self.current_first_add.insert(key, seq);
-            self.current.insert(key, IdBucket::One([(id, value)]));
+            self.current.insert(key, IdBucket::one(id, value));
         }
     }
 
@@ -867,7 +898,7 @@ impl<T: Clone> TycompTbl<T> {
 
     fn find_by_key(&self, key: Name) -> Option<&T> {
         if !self.current.is_empty()
-            && let Some((_, value)) = self.current.get(&key).and_then(|entries| entries.last())
+            && let Some((_, value)) = self.current.get(&key).and_then(|entries| entries.last(key))
         {
             return Some(value);
         }
@@ -885,12 +916,12 @@ impl<T: Clone> TycompTbl<T> {
     pub fn find_by_name_with_origin(
         &self,
         name: impl crate::name::NameKey,
-    ) -> Option<(&Ident, &T, bool)> {
+    ) -> Option<(Ident, &T, bool)> {
         self.find_by_key_with_origin(name.name_key()?)
     }
 
-    fn find_by_key_with_origin(&self, key: Name) -> Option<(&Ident, &T, bool)> {
-        if let Some((id, value)) = self.current.get(&key).and_then(|entries| entries.last()) {
+    fn find_by_key_with_origin(&self, key: Name) -> Option<(Ident, &T, bool)> {
+        if let Some((id, value)) = self.current.get(&key).and_then(|entries| entries.last(key)) {
             return Some((id, value, true));
         }
         match &self.opened {
@@ -898,7 +929,7 @@ impl<T: Clone> TycompTbl<T> {
                 .components
                 .get(&key)
                 .and_then(|entries| entries.first())
-                .map(|(id, value)| (id, value, false))
+                .map(|(id, value)| (*id, value, false))
                 .or_else(|| opened.next.find_by_key_with_origin(key)),
             None => None,
         }
@@ -909,7 +940,7 @@ impl<T: Clone> TycompTbl<T> {
         if !self.current.is_empty()
             && let Some(value) = self.current.get(&id.name_atom()).and_then(|entries| {
                 entries
-                    .iter()
+                    .iter(id.name_atom())
                     .rev()
                     .find(|(entry_id, _)| {
                         if stamp == 0 {
@@ -938,7 +969,7 @@ impl<T: Clone> TycompTbl<T> {
 
     fn collect_all_key<'a>(&'a self, key: Name, items: &mut Vec<&'a T>) {
         if let Some(entries) = self.current.get(&key) {
-            items.extend(entries.iter().rev().map(|(_, value)| value));
+            items.extend(entries.iter(key).rev().map(|(_, value)| value));
         }
         if let Some(opened) = &self.opened {
             if let Some(entries) = opened.components.get(&key) {
@@ -967,7 +998,7 @@ impl<T: Clone> TycompTbl<T> {
         let mut table = self;
         loop {
             if let Some(entries) = table.current.get(&key) {
-                items.extend(entries.iter().rev().map(|(_, value)| (value, None)));
+                items.extend(entries.iter(key).rev().map(|(_, value)| (value, None)));
             }
             let Some(opened) = &table.opened else {
                 break;
@@ -990,19 +1021,19 @@ impl<T: Clone> TycompTbl<T> {
         items
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (&Ident, &T)> {
+    pub fn iter(&self) -> impl Iterator<Item = (Ident, &T)> {
         let mut items = Vec::new();
         self.collect_iter(&mut items);
         items.into_iter()
     }
 
-    fn collect_iter<'a>(&'a self, items: &mut Vec<(&'a Ident, &'a T)>) {
-        for entries in self.current.values() {
-            items.extend(entries.iter().map(|(id, value)| (id, value)));
+    fn collect_iter<'a>(&'a self, items: &mut Vec<(Ident, &'a T)>) {
+        for (name, entries) in self.current.iter() {
+            items.extend(entries.iter(*name));
         }
         if let Some(opened) = &self.opened {
             for entries in opened.components.values() {
-                items.extend(entries.iter().map(|(id, value)| (id, value)));
+                items.extend(entries.iter().map(|(id, value)| (*id, value)));
             }
             opened.next.collect_iter(items);
         }
@@ -1401,7 +1432,7 @@ impl Env {
                 .visible_local_entries()
                 .filter_map(|(id, decl)| match &decl.md_type {
                     ModuleType::MtyAlias(_, target) | ModuleType::MtyIdent(target) => {
-                        Some((*id, *target))
+                        Some((id, *target))
                     }
                     _ => None,
                 })
@@ -1477,7 +1508,7 @@ impl Env {
     }
 
     /// Find a value by name, returning both the identifier and description.
-    pub fn find_value_with_id(&self, name: impl crate::name::NameKey) -> EnvResult<(&Ident, &ValueDescription)> {
+    pub fn find_value_with_id(&self, name: impl crate::name::NameKey) -> EnvResult<(Ident, &ValueDescription)> {
         self.data
             .values
             .find_by_name_with_id(name)
@@ -1509,7 +1540,7 @@ impl Env {
     }
 
     /// Iterate over visible value bindings.
-    pub fn iter_values(&self) -> impl Iterator<Item = (&Ident, &ValueDescription)> {
+    pub fn iter_values(&self) -> impl Iterator<Item = (Ident, &ValueDescription)> {
         self.data.values.iter().map(|(id, v)| (id, v.as_ref()))
     }
 
@@ -1571,7 +1602,7 @@ impl Env {
     /// Find a type by name, returning the identifier and declaration.
     /// The returned identifier has the canonical stamp from the environment
     /// (e.g., persistent ident for predef types).
-    pub fn find_type_with_id(&self, name: impl crate::name::NameKey) -> EnvResult<(&Ident, &TypeDeclaration)> {
+    pub fn find_type_with_id(&self, name: impl crate::name::NameKey) -> EnvResult<(Ident, &TypeDeclaration)> {
         self.data
             .types
             .find_by_name_with_id(name)
@@ -1603,7 +1634,7 @@ impl Env {
     }
 
     /// Iterate over visible type bindings.
-    pub fn iter_types(&self) -> impl Iterator<Item = (&Ident, &TypeDeclaration)> {
+    pub fn iter_types(&self) -> impl Iterator<Item = (Ident, &TypeDeclaration)> {
         self.data.types.iter().map(|(id, decl)| (id, decl.as_ref()))
     }
 
@@ -1766,7 +1797,7 @@ impl Env {
     pub fn find_constructor_with_origin(
         &self,
         name: impl crate::name::NameKey,
-    ) -> EnvResult<(&Ident, &ConstructorDescription, bool)> {
+    ) -> EnvResult<(Ident, &ConstructorDescription, bool)> {
         self.data
             .constrs
             .find_by_name_with_origin(name)
@@ -1785,7 +1816,7 @@ impl Env {
     }
 
     /// Iterate over visible constructor bindings.
-    pub fn iter_constructors(&self) -> impl Iterator<Item = (&Ident, &ConstructorDescription)> {
+    pub fn iter_constructors(&self) -> impl Iterator<Item = (Ident, &ConstructorDescription)> {
         self.data.constrs.iter().map(|(id, c)| (id, c.as_ref()))
     }
 
@@ -1813,7 +1844,7 @@ impl Env {
     pub fn find_label_with_origin(
         &self,
         name: impl crate::name::NameKey,
-    ) -> EnvResult<(&Ident, &LabelDescription, bool)> {
+    ) -> EnvResult<(Ident, &LabelDescription, bool)> {
         self.data
             .labels
             .find_by_name_with_origin(name)
@@ -1832,7 +1863,7 @@ impl Env {
     }
 
     /// Iterate over visible label bindings.
-    pub fn iter_labels(&self) -> impl Iterator<Item = (&Ident, &LabelDescription)> {
+    pub fn iter_labels(&self) -> impl Iterator<Item = (Ident, &LabelDescription)> {
         self.data.labels.iter().map(|(id, l)| (id, l.as_ref()))
     }
 
@@ -1932,7 +1963,7 @@ impl Env {
     }
 
     /// Find a module by name, returning both the identifier and declaration.
-    pub fn find_module_with_id(&self, name: impl crate::name::NameKey) -> EnvResult<(&Ident, &ModuleDeclaration)> {
+    pub fn find_module_with_id(&self, name: impl crate::name::NameKey) -> EnvResult<(Ident, &ModuleDeclaration)> {
         self.data
             .modules
             .find_by_name_with_id(name)
@@ -1994,7 +2025,7 @@ impl Env {
     }
 
     /// Iterate over visible module bindings.
-    pub fn iter_modules(&self) -> impl Iterator<Item = (&Ident, &ModuleDeclaration)> {
+    pub fn iter_modules(&self) -> impl Iterator<Item = (Ident, &ModuleDeclaration)> {
         self.data.modules.iter().map(|(id, m)| (id, m.as_ref()))
     }
 
@@ -2184,7 +2215,7 @@ impl Env {
     }
 
     /// Find a module type by name, returning both the identifier and declaration.
-    pub fn find_modtype_with_id(&self, name: impl crate::name::NameKey) -> EnvResult<(&Ident, &ModtypeDeclaration)> {
+    pub fn find_modtype_with_id(&self, name: impl crate::name::NameKey) -> EnvResult<(Ident, &ModtypeDeclaration)> {
         self.data
             .modtypes
             .find_by_name_with_id(name)
@@ -2205,7 +2236,7 @@ impl Env {
     }
 
     /// Iterate over visible module type bindings.
-    pub fn iter_modtypes(&self) -> impl Iterator<Item = (&Ident, &ModtypeDeclaration)> {
+    pub fn iter_modtypes(&self) -> impl Iterator<Item = (Ident, &ModtypeDeclaration)> {
         self.data
             .modtypes
             .iter()
@@ -2796,6 +2827,132 @@ fn build_initial_env(ctx: &TypeContext) -> Env {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn binding_table_layout() {
+        use std::mem::size_of;
+        assert_eq!(size_of::<Name>(), 8);
+        assert_eq!(size_of::<Ident>(), 16);
+        fn check<T>() {
+            assert_eq!(size_of::<IdBucket<Arc<T>>>(), 16);
+            assert_eq!(size_of::<(Name, IdBucket<Arc<T>>)>(), 24);
+        }
+        check::<ValueDescription>();
+        check::<TypeDeclaration>();
+        check::<ConstructorDescription>();
+        check::<LabelDescription>();
+        check::<ModuleDeclaration>();
+        check::<super::super::env_lazy::StoredModuleComponents>();
+        check::<ModtypeDeclaration>();
+    }
+
+    fn assert_ident(actual: Ident, expected: Ident) {
+        assert_eq!(actual.name_atom(), expected.name_atom());
+        assert_eq!(actual.stamp(), expected.stamp());
+        assert_eq!(actual.flags(), expected.flags());
+    }
+
+    #[test]
+    fn compact_bucket_preserves_ident_and_copy_on_write() {
+        let first = Ident::new("binding", 0, IdentFlags::GLOBAL.with_predef_exn());
+        let second = Ident::new("binding", 42, IdentFlags::JS_OBJECT);
+        let third = Ident::new("binding", 43, IdentFlags::JS);
+        let name = first.name_atom();
+        let mut bucket = IdBucket::one(first, 1);
+        assert_ident(bucket.first(name).unwrap().0, first);
+        assert_ident(bucket.last(name).unwrap().0, first);
+        let single = bucket.clone();
+        let (id, value) = bucket.last_mut(name).unwrap();
+        assert_ident(id, first);
+        *value = 2;
+        bucket.push(second, 3);
+        let multiple = bucket.clone();
+        bucket.push(third, 4);
+        *bucket.last_mut(name).unwrap().1 = 5;
+        assert_eq!(*single.last(name).unwrap().1, 1);
+        assert_ident(multiple.last(name).unwrap().0, second);
+        assert_eq!(*multiple.last(name).unwrap().1, 3);
+        let entries: Vec<_> = bucket.iter(name).collect();
+        assert_eq!(entries.len(), 3);
+        for ((actual, value), (expected, expected_value)) in
+            entries
+                .into_iter()
+                .zip([(first, 2), (second, 3), (third, 5)])
+        {
+            assert_ident(actual, expected);
+            assert_eq!(*value, expected_value);
+        }
+        assert_ident(bucket.iter(name).rev().last().unwrap().0, first);
+    }
+
+    #[test]
+    fn compact_id_table_preserves_shadowing_and_open_layers() {
+        let first = Ident::new("x", 0, IdentFlags::GLOBAL);
+        let second = Ident::new("x", 12, IdentFlags::JS);
+        let opened_id = Ident::new("x", 13, IdentFlags::JS_OBJECT);
+        let mut table = IdTbl::new();
+        table.add(first, 1);
+        let original = table.clone();
+        assert_ident(table.update_by_name("x", &mut |v| v + 1).unwrap().0, first);
+        table.add(second, 3);
+        assert_eq!(original.find_by_ident(&first), Some(&1));
+        assert_eq!(table.find_by_ident(&first), Some(&2));
+        assert_eq!(table.find_all("x"), vec![&3, &2]);
+        assert_ident(table.find_by_name_with_id("x").unwrap().0, second);
+        assert_ident(table.visible_local_entries().next().unwrap().0, second);
+        let ids: Vec<_> = table.iter().map(|(id, _)| id).collect();
+        assert_ident(ids[0], first);
+        assert_ident(ids[1], second);
+        table.add_open_layer(
+            Path::pident(Ident::create_persistent("M")),
+            vec![(opened_id, 4, 0)],
+            Some(7),
+        );
+        assert_ident(table.find_by_name_with_id("x").unwrap().0, opened_id);
+        assert_eq!(table.find_by_ident(&second), Some(&3));
+        assert_eq!(table.find_by_ident(&opened_id), None);
+        assert!(table.visible_local_entries().next().is_none());
+        let usage = table.open_slot_use("x").unwrap();
+        assert_eq!(usage.slot, 7);
+        assert!(usage.shadowed);
+        table.add(second, 5);
+        assert!(table.open_slot_use("x").is_none());
+        assert_eq!(table.find_all("x"), vec![&5, &4, &3, &2]);
+        assert_eq!(table.fold_name_order(), vec!["x", "x", "x"]);
+    }
+
+    #[test]
+    fn compact_tycomp_table_preserves_origin_and_order() {
+        let first = Ident::new("C", 21, IdentFlags::PREDEF_EXN);
+        let second = Ident::new("C", 22, IdentFlags::JS);
+        let opened_id = Ident::new("C", 23, IdentFlags::GLOBAL);
+        let mut table = TycompTbl::new();
+        table.add(first, 1);
+        let original = table.clone();
+        table.add(second, 2);
+        assert_eq!(original.find_by_ident(&second), None);
+        let (id, value, local) = table.find_by_name_with_origin("C").unwrap();
+        assert_ident(id, second);
+        assert_eq!(*value, 2);
+        assert!(local);
+        assert_eq!(table.find_all("C"), vec![&2, &1]);
+        let ids: Vec<_> = table.iter().map(|(id, _)| id).collect();
+        assert_ident(ids[0], first);
+        assert_ident(ids[1], second);
+        table.add_open_layer(vec![(opened_id, 3)], Some(8));
+        let (id, value, local) = table.find_by_name_with_origin("C").unwrap();
+        assert_ident(id, opened_id);
+        assert_eq!(*value, 3);
+        assert!(!local);
+        assert_eq!(
+            table.find_all_marking("C"),
+            vec![(&3, Some((8, Some(&2)))), (&2, None), (&1, None)]
+        );
+        assert_eq!(table.find_by_ident(&opened_id), None);
+        assert_eq!(table.find_by_ident(&first), Some(&1));
+        assert_eq!(table.fold_name_order(), vec!["C", "C"]);
+    }
 
     #[test]
     fn initial_env_is_built_once_per_worker_store() {
