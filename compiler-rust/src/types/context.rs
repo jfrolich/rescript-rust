@@ -1032,34 +1032,9 @@ impl PartialEq for SamePathKey {
 
 impl Eq for SamePathKey {}
 
-/// Hash consistent with `Path::same`: `Pdot` positions are ignored.
-fn hash_same_path<H: std::hash::Hasher>(path: &Path, state: &mut H) {
-    match path.view() {
-        PathView::Pident(id) => {
-            if id.stamp() != 0 {
-                state.write_u8(0);
-                state.write_i32(id.stamp());
-            } else {
-                state.write_u8(1);
-                std::hash::Hash::hash(&id.name_atom(), state);
-            }
-        }
-        PathView::Pdot(parent, name, _) => {
-            state.write_u8(2);
-            std::hash::Hash::hash(name, state);
-            hash_same_path(parent, state);
-        }
-        PathView::Papply(functor, argument) => {
-            state.write_u8(3);
-            hash_same_path(functor, state);
-            hash_same_path(argument, state);
-        }
-    }
-}
-
 impl std::hash::Hash for SamePathKey {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        hash_same_path(&self.0, state);
+        state.write_u64(self.0.same_hash());
     }
 }
 
@@ -4895,6 +4870,21 @@ impl TypeContext {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    #[test]
+    fn same_path_keys_ignore_positions_when_hashing() {
+        let root = Path::pident(Ident::create_persistent("SamePathKeyTest"));
+        let left = Path::pdot_pos(root, "Nested", 1);
+        let right = Path::pdot_pos(root, "Nested", 9);
+        let left = Path::papply(left, Path::pdot_pos(root, "Argument", 2));
+        let right = Path::papply(right, Path::pdot_pos(root, "Argument", 7));
+        assert_ne!(left, right);
+        assert!(left.same(&right));
+        let mut map = crate::fast_hash::AHashMap::default();
+        map.insert(SamePathKey(left), 42);
+        assert_eq!(map.get(&SamePathKey(right)), Some(&42));
+        assert_eq!(map.get(&SamePathKey(root)), None);
+    }
 
     #[test]
     fn type_nodes_address_every_node_across_chunks() {
