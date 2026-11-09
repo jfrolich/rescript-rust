@@ -444,6 +444,124 @@ mod tests {
         assert!(matches!(&values[0].desc, ExpressionDesc::Var(VIdent::Id(id)) if *id == held[0]));
     }
 
+    fn unit_assign(id: Ident) -> Lambda {
+        Lambda::assign(id, Lambda::unit())
+    }
+
+    fn function_body(body: Lambda) -> Lambda {
+        Lambda::function_(
+            0,
+            vec![],
+            body,
+            crate::lambda::FunctionAttribute::default(),
+            crate::lambda::LamLoc::NONE,
+        )
+    }
+
+    fn assignable_names(compiler: &LambdaCompiler) -> Vec<Ident> {
+        let mut ids: Vec<Ident> = compiler.assignable.iter().copied().collect();
+        ids.sort_by_key(|id| id.stamp());
+        ids
+    }
+
+    /// lambda_traverse.ml `assigned_variables`: every `Lassign` target,
+    /// including those inside function bodies, once each; two idents with
+    /// the same name but different stamps stay distinct.
+    #[test]
+    fn assigned_variables_collects_targets_by_identity() {
+        let compiler = LambdaCompiler::new();
+        let x = compiler.fresh_ident("x");
+        let x_other = compiler.fresh_ident("x");
+        let y = compiler.fresh_ident("y");
+        let lam = Lambda::seq(
+            unit_assign(x),
+            Lambda::seq(
+                function_body(Lambda::seq(unit_assign(y), unit_assign(x))),
+                Lambda::var(x_other),
+            ),
+        );
+        let assigned = crate::lambda::lambda_traverse::assigned_variables(&lam);
+        assert_eq!(assigned.len(), 2);
+        assert!(assigned.contains(&x) && assigned.contains(&y));
+        assert!(!assigned.contains(&x_other));
+    }
+
+    /// The variables an inlined body assigns change the hold decision while
+    /// that body compiles: a read of one is no longer `delay_safe`, so
+    /// `evaluate_now` binds it to a temporary. After `restore_assignable`
+    /// the read is safe to delay again.
+    #[test]
+    fn extended_assignable_changes_hold_decision_until_restored() {
+        let mut compiler = LambdaCompiler::new();
+        let r = compiler.fresh_ident("r");
+        assert!(delay_safe(&compiler.assignable, &var(r)));
+        let added = compiler.extend_assignable(&Lambda::seq(unit_assign(r), Lambda::var(r)));
+        assert_eq!(added, vec![r]);
+        assert!(!delay_safe(&compiler.assignable, &var(r)));
+        let (held, value) = compiler.evaluate_now(var(r));
+        let [statement] = held.as_slice() else {
+            panic!("expected one temporary: {held:?}");
+        };
+        let StatementDesc::Variable(decl) = &statement.desc else {
+            panic!("expected a temporary");
+        };
+        assert!(matches!(
+            decl.value.as_ref().map(|v| &v.desc),
+            Some(ExpressionDesc::Var(VIdent::Id(id))) if *id == r
+        ));
+        assert!(matches!(&value.desc, ExpressionDesc::Var(VIdent::Id(id)) if *id == decl.ident));
+        compiler.restore_assignable(added);
+        assert!(compiler.assignable.is_empty());
+        assert!(delay_safe(&compiler.assignable, &var(r)));
+    }
+
+    /// Nested inlined bodies: each extension adds only the ids not already
+    /// assignable, so restoring the inner body keeps the outer body's and
+    /// the module's ids, and restoring the outer body gives back exactly
+    /// the module's set.
+    #[test]
+    fn nested_assignable_extensions_restore_exactly() {
+        let mut compiler = LambdaCompiler::new();
+        let module_var = compiler.fresh_ident("m");
+        let a = compiler.fresh_ident("a");
+        let b = compiler.fresh_ident("b");
+        let a_same_name = compiler.fresh_ident("a");
+        compiler.assignable.insert(module_var);
+        let original = assignable_names(&compiler);
+
+        let outer =
+            compiler.extend_assignable(&Lambda::seq(unit_assign(module_var), unit_assign(a)));
+        assert_eq!(outer, vec![a]);
+        let after_outer = assignable_names(&compiler);
+
+        let inner_body = Lambda::seq(
+            unit_assign(a),
+            Lambda::seq(
+                unit_assign(module_var),
+                function_body(Lambda::seq(unit_assign(b), unit_assign(b))),
+            ),
+        );
+        let mut inner = compiler.extend_assignable(&inner_body);
+        assert_eq!(inner, vec![b]);
+        assert!(delay_safe(&compiler.assignable, &var(a_same_name)));
+
+        let inner_same_name = compiler.extend_assignable(&unit_assign(a_same_name));
+        assert_eq!(inner_same_name, vec![a_same_name]);
+        assert!(!delay_safe(&compiler.assignable, &var(a_same_name)));
+        compiler.restore_assignable(inner_same_name);
+        assert!(delay_safe(&compiler.assignable, &var(a_same_name)));
+
+        compiler.restore_assignable(std::mem::take(&mut inner));
+        assert_eq!(assignable_names(&compiler), after_outer);
+        assert!(!delay_safe(&compiler.assignable, &var(a)));
+        assert!(!delay_safe(&compiler.assignable, &var(module_var)));
+
+        compiler.restore_assignable(outer);
+        assert_eq!(assignable_names(&compiler), original);
+        assert!(delay_safe(&compiler.assignable, &var(a)));
+        assert!(!delay_safe(&compiler.assignable, &var(module_var)));
+    }
+
     /// `sequence_arguments` stays linear in the number of arguments.
     #[test]
     fn sequence_arguments_handles_long_argument_lists() {
