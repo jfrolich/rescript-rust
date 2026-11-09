@@ -1552,6 +1552,17 @@ impl Env {
             .ok_or_else(|| EnvError::TypeNotFound(name.text().into()))
     }
 
+    /// Like `find_type_with_path`, sharing the stored declaration.
+    pub fn find_type_arc_with_path(
+        &self,
+        name: impl crate::name::NameKey,
+    ) -> EnvResult<(Path, &Arc<TypeDeclaration>)> {
+        self.data
+            .types
+            .find_by_name_with_path(name)
+            .ok_or_else(|| EnvError::TypeNotFound(name.text().into()))
+    }
+
     /// Iterate over visible type bindings.
     pub fn iter_types(&self) -> impl Iterator<Item = (&Ident, &TypeDeclaration)> {
         self.data.types.iter().map(|(id, decl)| (id, decl.as_ref()))

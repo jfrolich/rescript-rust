@@ -2533,7 +2533,7 @@ pub(crate) fn resolve_type_constructor_path(
     env: &Env,
     lid: &Longident,
     loc: Option<LocIdx>,
-) -> (Path, Option<crate::types::decl::TypeDeclaration>) {
+) -> (Path, Option<Arc<crate::types::decl::TypeDeclaration>>) {
     // `Env.lookup_type` (env.ml:1062-1073) marks the source name.
     mark_open_lid_use(
         tctx.type_ctx,
@@ -2546,8 +2546,8 @@ pub(crate) fn resolve_type_constructor_path(
     match lid {
         Longident::Lident(name_idx) => {
             let name = tctx.arena.get_string(*name_idx);
-            match env.find_type_with_path(name) {
-                Ok((path, decl)) => (path, Some(decl.clone())),
+            match env.find_type_arc_with_path(tctx.arena.name(*name_idx)) {
+                Ok((path, decl)) => (path, Some(Arc::clone(decl))),
                 Err(_) => {
                     let path = crate::types::predef::find_predef_path(name)
                         .unwrap_or_else(|| Path::pident(Ident::create_persistent(name)));
@@ -2565,7 +2565,7 @@ pub(crate) fn resolve_type_constructor_path(
                 if tctx.arena.get_string(*prefix_idx) == "*predef*" {
                     let predef_path = crate::types::predef::find_predef_path(type_name)
                         .unwrap_or_else(|| Path::pident(Ident::create_persistent(type_name)));
-                    let predef_decl = env.lookup_type(&predef_path).ok().cloned();
+                    let predef_decl = env.lookup_type(&predef_path).ok().cloned().map(Arc::new);
                     return (predef_path, predef_decl);
                 }
             }
@@ -2587,7 +2587,7 @@ pub(crate) fn resolve_type_constructor_path(
                         &module_path,
                         type_name,
                     ) {
-                        return Some((cached_path, (*decl).clone()));
+                        return Some((cached_path, decl));
                     }
                     components.lookup_type(type_name).map(|(id, decl)| {
                         let decl = decl.clone();
@@ -2599,7 +2599,7 @@ pub(crate) fn resolve_type_constructor_path(
                             *id,
                             decl.clone(),
                         );
-                        (module_path, (*decl).clone())
+                        (module_path, decl)
                     })
                 },
             ) {
@@ -2623,7 +2623,7 @@ pub(crate) fn resolve_type_constructor_path(
                     // up the type table after resolving module components.
                     return (
                         Path::pdot(resolved_module_path, type_name.to_string()),
-                        Some((*decl).clone()),
+                        Some(decl),
                     );
                 }
             }
@@ -17685,7 +17685,7 @@ pub(crate) fn find_type_for_lid(
     env: &Env,
     loc: LocIdx,
     longident: &Longident,
-) -> TypeCoreResult<(Path, crate::types::decl::TypeDeclaration)> {
+) -> TypeCoreResult<(Path, Arc<crate::types::decl::TypeDeclaration>)> {
     let (path, type_decl) = resolve_type_constructor_path(tctx, env, longident, Some(loc));
     // `Env.lookup_type` marks the declaration used (env.ml:1174-1177).
     if let Some(decl) = type_decl.as_ref() {
