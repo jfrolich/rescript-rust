@@ -766,7 +766,9 @@ pub fn stored_loadable(
     let Some(previous) = build_state.previous_in_process.as_ref() else {
         return AHashSet::new();
     };
-    let downstream = downstream_of(build_state, round);
+    // Only walk the graph if a support module is otherwise loadable. Clean
+    // builds can have namespace maps as support, but those have no stored interface.
+    let mut downstream = None;
     support
         .iter()
         .filter(|module_name| {
@@ -775,12 +777,14 @@ pub fn stored_loadable(
             };
             !module.is_mlmap()
                 && !module.compile_dirty
-                && !downstream.contains(*module_name)
                 && !build_state.compiled_modules.contains(*module_name)
                 && previous
                     .packages
                     .get(&module.package_name)
                     .is_some_and(|record| record.state.stored_interfaces.contains_key(*module_name))
+                && !downstream
+                    .get_or_insert_with(|| downstream_of(build_state, round))
+                    .contains(*module_name)
         })
         .cloned()
         .collect()
@@ -1705,6 +1709,166 @@ fn affected_by_changed_imports(
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    fn loadable_test_state() -> BuildCommandState {
+        use super::super::build_types::{CompileState, CompilerInfo, Implementation, ParseState, SourceFile};
+        use crate::config::tests::{CreateConfigArgs, create_config};
+        use crate::project_context::ProjectContext;
+
+        let root = PathBuf::from("test-loadable");
+        let context = ProjectContext {
+            current_config: create_config(CreateConfigArgs {
+                name: "test".to_string(),
+                bs_deps: vec![],
+                build_dev_deps: vec![],
+                allowed_dependents: None,
+                path: root.clone(),
+            }),
+            monorepo_context: None,
+            node_modules_exist_cache: Default::default(),
+            packages_cache: Default::default(),
+        };
+        let compiler = CompilerInfo {
+            bsc_path: root.join("bsc"),
+            bsc_hash: blake3::hash(b"test"),
+            runtime_path: root.join("runtime"),
+        };
+        let mut state = BuildCommandState::new(
+            root,
+            context,
+            AHashMap::new(),
+            compiler,
+            None,
+            None,
+            SourceMapCommand::Build,
+        );
+        let mut record = PackageRecord::default();
+        for name in ["A", "B", "C", "Independent", "Dirty", "Compiled", "Unrecorded"] {
+            state.build_state.insert_module(
+                name,
+                Module {
+                    source_type: SourceType::SourceFile(SourceFile {
+                        implementation: Implementation {
+                            path: PathBuf::from(format!("{name}.res")),
+                            parse_state: ParseState::Success,
+                            compile_state: CompileState::Success,
+                            last_modified: UNIX_EPOCH,
+                            parse_dirty: false,
+                            compile_warnings: None,
+                        },
+                        interface: None,
+                    }),
+                    deps: AHashSet::new(),
+                    dependents: AHashSet::new(),
+                    package_name: "test".to_string(),
+                    compile_dirty: name == "Dirty",
+                    deps_dirty: false,
+                    is_type_dev: false,
+                },
+            );
+            if name != "Unrecorded" {
+                record
+                    .state
+                    .stored_interfaces
+                    .insert(name.to_string(), 0);
+            }
+        }
+        // A -> B -> C -> A: the downstream walk must terminate even when
+        // the dirty root is reachable again through a cycle.
+        for (dependency, dependent) in [("A", "B"), ("B", "C"), ("C", "A")] {
+            state
+                .build_state
+                .modules
+                .get_mut(dependency)
+                .unwrap()
+                .dependents
+                .insert(dependent.to_string());
+            state
+                .build_state
+                .modules
+                .get_mut(dependent)
+                .unwrap()
+                .deps
+                .insert(dependency.to_string());
+        }
+        state.compiled_modules.insert("Compiled".to_string());
+        state.previous_in_process = Some(PreviousInProcessBuild {
+            packages: [("test".to_string(), record)].into_iter().collect(),
+        });
+        state
+    }
+
+    #[test]
+    fn stored_loadable_empty_support_with_dirty_cycle() {
+        let mut state = loadable_test_state();
+        state.build_state.modules.get_mut("A").unwrap().compile_dirty = true;
+        let round = ["A".to_string()].into_iter().collect();
+        assert_eq!(
+            downstream_of(&state, &round),
+            ["A", "B", "C"].map(str::to_string).into_iter().collect()
+        );
+        assert!(stored_loadable(&state, &round, &AHashSet::new()).is_empty());
+        state.previous_in_process = None;
+        assert!(stored_loadable(&state, &round, &AHashSet::new()).is_empty());
+    }
+
+    #[test]
+    fn stored_loadable_nonempty_support_keeps_eligibility_checks() {
+        let mut state = loadable_test_state();
+        state.build_state.modules.get_mut("A").unwrap().compile_dirty = true;
+        let round = ["A".to_string()].into_iter().collect();
+        let support = [
+            "A",
+            "B",
+            "C",
+            "Independent",
+            "Dirty",
+            "Compiled",
+            "Unrecorded",
+            "Missing",
+        ]
+        .map(str::to_string)
+        .into_iter()
+        .collect();
+        assert_eq!(
+            stored_loadable(&state, &round, &support),
+            ["Independent".to_string()].into_iter().collect()
+        );
+        state.previous_in_process = None;
+        assert!(stored_loadable(&state, &round, &support).is_empty());
+    }
+
+    #[test]
+    fn stored_loadable_namespace_only_support_is_empty() {
+        use super::super::build_types::MlMap;
+
+        let mut state = loadable_test_state();
+        // Retain a recorded interface deliberately: namespace maps must be
+        // excluded by their source type, even if a record contains one.
+        state
+            .build_state
+            .modules
+            .get_mut("Independent")
+            .unwrap()
+            .source_type = SourceType::MlMap(MlMap { parse_dirty: false });
+        let round = ["A".to_string()].into_iter().collect();
+        let support = ["Independent".to_string()].into_iter().collect();
+        assert!(stored_loadable(&state, &round, &support).is_empty());
+    }
+
+    #[test]
+    fn all_dirty_compile_universe_needs_no_support_even_with_cycles() {
+        let mut state = loadable_test_state();
+        for module in state.build_state.modules.values_mut() {
+            module.compile_dirty = true;
+        }
+        let universe = state.build_state.modules.keys().cloned().collect();
+        for plan in [IncrementalPlan::Cutoff, IncrementalPlan::SupportEverything] {
+            let support = support_modules(&state, &universe, &plan);
+            assert!(support.is_empty());
+            assert!(stored_loadable(&state, &universe, &support).is_empty());
+        }
+    }
 
     #[test]
     fn a_record_knows_its_clean_start_and_sources() {
