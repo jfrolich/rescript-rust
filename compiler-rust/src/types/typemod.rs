@@ -18595,7 +18595,7 @@ fn type_structure_item<'a>(
 
             // OCaml typedecl.ml transl_type_extension rejects incompatible
             // targets before translating any extension constructors.
-            let target_type_decl = Some(env.lookup_type(&path).ok().cloned().unwrap_or(found_decl));
+            let target_type_decl = Some(env.lookup_type(&path).ok().cloned().unwrap_or_else(|| (*found_decl).clone()));
             if let Some(type_decl) = &target_type_decl {
                 if !matches!(type_decl.type_kind, crate::types::TypeKind::TypeOpen) {
                     return Err(TypeModError::NotExtensibleType {
