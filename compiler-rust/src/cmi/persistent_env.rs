@@ -5144,7 +5144,7 @@ fn substitute_type_expr_path(
                 }
 
                 // Push type arguments onto work stack
-                for &arg in ctx.type_list(args).iter() {
+                for arg in ctx.type_list(args).iter() {
                     work_stack.push(arg);
                 }
             }
@@ -5153,7 +5153,7 @@ fn substitute_type_expr_path(
                 work_stack.push(*ret);
             }
             TypeDesc::Ttuple(types) => {
-                for &t in ctx.type_list(types).iter() {
+                for t in ctx.type_list(types).iter() {
                     work_stack.push(t);
                 }
             }
@@ -5162,7 +5162,7 @@ fn substitute_type_expr_path(
             }
             TypeDesc::Tpoly { body, vars } => {
                 work_stack.push(*body);
-                for &v in ctx.type_list(vars).iter() {
+                for v in ctx.type_list(vars).iter() {
                     work_stack.push(v);
                 }
             }
@@ -5233,7 +5233,7 @@ fn substitute_type_expr_path(
                     }
                     replacement = Some(new_desc);
                 }
-                for &arg in ctx.type_list(args).iter() {
+                for arg in ctx.type_list(args).iter() {
                     work_stack.push(arg);
                 }
             }
@@ -5326,7 +5326,7 @@ pub fn type_expr_mentions_path_prefixes(
                     || ctx
                         .type_list(args)
                         .iter()
-                        .any(|a| walk(*a, prefixes, ctx, visited))
+                        .any(|a| walk(a, prefixes, ctx, visited))
             }
             TypeDesc::Tarrow { args, ret } => {
                 ctx.type_args(args)
@@ -5337,14 +5337,14 @@ pub fn type_expr_mentions_path_prefixes(
             TypeDesc::Ttuple(items) => ctx
                 .type_list(items)
                 .iter()
-                .any(|a| walk(*a, prefixes, ctx, visited)),
+                .any(|a| walk(a, prefixes, ctx, visited)),
             TypeDesc::Tlink(t) | TypeDesc::Tsubst(t) => walk(*t, prefixes, ctx, visited),
             TypeDesc::Tpoly { body, vars } => {
                 walk(*body, prefixes, ctx, visited)
                     || ctx
                         .type_list(vars)
                         .iter()
-                        .any(|v| walk(*v, prefixes, ctx, visited))
+                        .any(|v| walk(v, prefixes, ctx, visited))
             }
             TypeDesc::Tobject { fields } => walk(*fields, prefixes, ctx, visited),
             TypeDesc::Tfield { typ, rest, .. } => {
@@ -5370,7 +5370,7 @@ pub fn type_expr_mentions_path_prefixes(
                     || ctx
                         .type_list(args)
                         .iter()
-                        .any(|a| walk(*a, prefixes, ctx, visited))
+                        .any(|a| walk(a, prefixes, ctx, visited))
             }
             TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => false,
         }
@@ -5643,7 +5643,7 @@ fn rewrite_type_expr_prefix(
                 }
                 ctx.set_desc(ty_ref, new_desc);
             }
-            for &arg in ctx.type_list(args).iter() {
+            for arg in ctx.type_list(args).iter() {
                 rewrite_type_expr_prefix(arg, old_name, new_prefix, ctx, visited);
             }
         }
@@ -5654,7 +5654,7 @@ fn rewrite_type_expr_prefix(
             rewrite_type_expr_prefix(*ret, old_name, new_prefix, ctx, visited);
         }
         TypeDesc::Ttuple(types) => {
-            for &t in ctx.type_list(types).iter() {
+            for t in ctx.type_list(types).iter() {
                 rewrite_type_expr_prefix(t, old_name, new_prefix, ctx, visited);
             }
         }
@@ -5666,7 +5666,7 @@ fn rewrite_type_expr_prefix(
         }
         TypeDesc::Tpoly { body, vars } => {
             rewrite_type_expr_prefix(*body, old_name, new_prefix, ctx, visited);
-            for &v in ctx.type_list(vars).iter() {
+            for v in ctx.type_list(vars).iter() {
                 rewrite_type_expr_prefix(v, old_name, new_prefix, ctx, visited);
             }
         }
@@ -5717,7 +5717,7 @@ fn rewrite_type_expr_prefix(
                 }
                 ctx.set_desc(ty_ref, new_desc);
             }
-            for &arg in ctx.type_list(args).iter() {
+            for arg in ctx.type_list(args).iter() {
                 rewrite_type_expr_prefix(arg, old_name, new_prefix, ctx, visited);
             }
         }
@@ -6346,7 +6346,7 @@ fn rewrite_type_expr_by_path_prefix_in(
                 }
                 ctx.set_desc(ty_ref, new_desc);
             }
-            for &arg in ctx.type_list(args).iter() {
+            for arg in ctx.type_list(args).iter() {
                 rewrite_type_expr_by_path_prefix_in(arg, old_prefix, new_prefix, ctx, visited);
             }
         }
@@ -6357,7 +6357,7 @@ fn rewrite_type_expr_by_path_prefix_in(
             rewrite_type_expr_by_path_prefix_in(*ret, old_prefix, new_prefix, ctx, visited);
         }
         TypeDesc::Ttuple(types) => {
-            for &t in ctx.type_list(types).iter() {
+            for t in ctx.type_list(types).iter() {
                 rewrite_type_expr_by_path_prefix_in(t, old_prefix, new_prefix, ctx, visited);
             }
         }
@@ -6369,7 +6369,7 @@ fn rewrite_type_expr_by_path_prefix_in(
         }
         TypeDesc::Tpoly { body, vars } => {
             rewrite_type_expr_by_path_prefix_in(*body, old_prefix, new_prefix, ctx, visited);
-            for &v in ctx.type_list(vars).iter() {
+            for v in ctx.type_list(vars).iter() {
                 rewrite_type_expr_by_path_prefix_in(v, old_prefix, new_prefix, ctx, visited);
             }
         }
@@ -6424,7 +6424,7 @@ fn rewrite_type_expr_by_path_prefix_in(
                 }
                 ctx.set_desc(ty_ref, new_desc);
             }
-            for &arg in ctx.type_list(args).iter() {
+            for arg in ctx.type_list(args).iter() {
                 rewrite_type_expr_by_path_prefix_in(arg, old_prefix, new_prefix, ctx, visited);
             }
         }
@@ -6463,7 +6463,7 @@ fn rewrite_type_expr_by_path_prefixes(
                 }
                 ctx.set_desc(ty_ref, new_desc);
             }
-            for &arg in ctx.type_list(args).iter() {
+            for arg in ctx.type_list(args).iter() {
                 rewrite_type_expr_by_path_prefixes(arg, prefixes, ctx, visited);
             }
         }
@@ -6474,7 +6474,7 @@ fn rewrite_type_expr_by_path_prefixes(
             rewrite_type_expr_by_path_prefixes(*ret, prefixes, ctx, visited);
         }
         TypeDesc::Ttuple(types) => {
-            for &t in ctx.type_list(types).iter() {
+            for t in ctx.type_list(types).iter() {
                 rewrite_type_expr_by_path_prefixes(t, prefixes, ctx, visited);
             }
         }
@@ -6483,7 +6483,7 @@ fn rewrite_type_expr_by_path_prefixes(
         }
         TypeDesc::Tpoly { body, vars } => {
             rewrite_type_expr_by_path_prefixes(*body, prefixes, ctx, visited);
-            for &v in ctx.type_list(vars).iter() {
+            for v in ctx.type_list(vars).iter() {
                 rewrite_type_expr_by_path_prefixes(v, prefixes, ctx, visited);
             }
         }
@@ -6534,7 +6534,7 @@ fn rewrite_type_expr_by_path_prefixes(
                 }
                 ctx.set_desc(ty_ref, new_desc);
             }
-            for &arg in ctx.type_list(args).iter() {
+            for arg in ctx.type_list(args).iter() {
                 rewrite_type_expr_by_path_prefixes(arg, prefixes, ctx, visited);
             }
         }

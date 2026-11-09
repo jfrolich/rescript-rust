@@ -1177,7 +1177,7 @@ pub mod exp {
         }
     }
 
-    fn conjunction_contains_expression(j: &JsArena, conjunction: Expr, needle: Expr) -> bool {
+    pub(crate) fn conjunction_contains_expression(j: &JsArena, conjunction: Expr, needle: Expr) -> bool {
         if ocaml_eq_expression(j, conjunction, needle) {
             return true;
         }
@@ -1675,3 +1675,7 @@ pub mod stmt {
         raw_if(cond, &then_, &else_, j)
     }
 }
+
+#[cfg(test)]
+#[path = "build_tests.rs"]
+mod tests;
