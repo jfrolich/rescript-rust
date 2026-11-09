@@ -32,127 +32,103 @@ fn absorb_info(x: &mut UsedInfo, y: UsedInfo) {
     }
 }
 
-/// Occurrence table mirroring OCaml's `Hash_ident.t` of mutable `used_info`
-/// records (lam_pass_count.ml:25-26). Each binding owns a slot in `values`;
-/// `entries` maps an ident to the slot of its most recent binding, so a
-/// rebinding gets a fresh slot while outer scopes keep pointing at theirs.
+/// One identifier lookup finds both the latest occurrence slot and the active
+/// lexical binding. Slots stay dense even when a binding is shadowed.
 #[derive(Default)]
 pub(crate) struct OccurrenceTable {
-    pub(crate) entries: HashMap<Ident, usize>,
+    entries: HashMap<Ident, BindingSlots>,
     pub(crate) values: Vec<UsedInfo>,
 }
 
+#[derive(Default)]
+struct BindingSlots {
+    latest: usize,
+    active: Option<(usize, usize)>, // (capture scope depth, occurrence slot)
+}
+
 impl OccurrenceTable {
-    /// The info of the latest binding of `id`, or the default
-    /// (lam_pass_count.ml:30).
     pub(crate) fn get(&self, id: &Ident) -> UsedInfo {
         self.entries
             .get(id)
-            .map(|index| self.values[*index])
+            .map(|slots| self.values[slots.latest])
             .unwrap_or_default()
-    }
-
-    /// Allocate a fresh slot for `id` (lam_pass_count.ml:69-73).
-    pub(crate) fn bind(&mut self, id: &Ident) -> usize {
-        let index = self.values.len();
-        self.values.push(UsedInfo::default());
-        self.entries.insert(*id, index);
-        index
     }
 
     pub(crate) fn used(&self, id: &Ident) -> bool {
         self.get(id).times > 0
     }
 
-    /// `absorb_info` (lam_pass_count.ml:33-37) applied to a slot.
     pub(crate) fn absorb(&mut self, index: usize, other: UsedInfo) {
         absorb_info(&mut self.values[index], other);
     }
 }
 
-/// Bindings in scope, pointing at their slots of the occurrence table
-/// (`local_tbl = used_info Map_ident.t`, lam_pass_count.ml:28).
-type LocalTbl = HashMap<Ident, usize>;
-
 /// `Lam_pass_count.collect_occurs` (lam_pass_count.ml:59-203).
-///
-/// Needs the arena mutably: applications of inlinable functions are counted
-/// on their beta-reduced form, which is built here.
 pub(crate) fn collect_occurs(a: &mut LamArena, lam: Lam) -> OccurrenceTable {
     let mut occ = OccurrenceTable::default();
-    let mut bv = LocalTbl::new();
-    count(a, &mut occ, &mut bv, lam);
+    count(a, &mut occ, 0, lam);
     occ
 }
 
-/// `bind_var` (lam_pass_count.ml:69-73). Returns the shadowed slot.
-fn bind_var(occ: &mut OccurrenceTable, bv: &mut LocalTbl, id: &Ident) -> Option<usize> {
-    let index = occ.bind(id);
-    bv.insert(*id, index)
+fn bind_var(occ: &mut OccurrenceTable, scope: usize, id: &Ident) -> Option<(usize, usize)> {
+    let index = occ.values.len();
+    occ.values.push(UsedInfo::default());
+    let slots = occ.entries.entry(*id).or_default();
+    slots.latest = index;
+    slots.active.replace((scope, index))
 }
 
-fn restore_var(bv: &mut LocalTbl, id: &Ident, previous: Option<usize>) {
-    match previous {
-        Some(previous) => {
-            bv.insert(*id, previous);
-        }
-        None => {
-            bv.remove(id);
-        }
+fn restore_var(occ: &mut OccurrenceTable, id: &Ident, previous: Option<(usize, usize)>) {
+    occ.entries.get_mut(id).unwrap().active = previous;
+}
+
+/// The OCaml local table is empty across function and loop boundaries
+/// (lam_pass_count.ml:110-123). A depth check expresses that without allocating
+/// another map. Bindings are restored before leaving each body, so sibling
+/// scopes cannot see one another's active slots.
+fn use_slot(occ: &OccurrenceTable, scope: usize, id: &Ident) -> Option<(usize, bool)> {
+    let slots = occ.entries.get(id)?;
+    match slots.active {
+        Some((binding_scope, index)) if binding_scope == scope => Some((index, false)),
+        _ => Some((slots.latest, true)),
     }
 }
 
-/// `add_one_use` (lam_pass_count.ml:76-89).
-fn add_one_use(occ: &mut OccurrenceTable, bv: &LocalTbl, id: &Ident) {
-    if let Some(&index) = bv.get(id) {
+fn add_one_use(occ: &mut OccurrenceTable, scope: usize, id: &Ident) {
+    if let Some((index, captured)) = use_slot(occ, scope, id) {
         occ.values[index].times += 1;
-    } else if let Some(&index) = occ.entries.get(id) {
-        occ.absorb(
-            index,
-            UsedInfo {
-                times: 1,
-                captured: true,
-            },
-        );
+        occ.values[index].captured |= captured;
     }
 }
 
-/// `inherit_use` (lam_pass_count.ml:91-108).
-fn inherit_use(occ: &mut OccurrenceTable, bv: &LocalTbl, id: &Ident, bid: &Ident) {
-    let n = occ.get(bid);
-    if let Some(&index) = bv.get(id) {
+fn inherit_use(occ: &mut OccurrenceTable, scope: usize, id: &Ident, bid: &Ident) {
+    let mut n = occ.get(bid);
+    if let Some((index, captured)) = use_slot(occ, scope, id) {
+        n.captured |= captured;
         occ.absorb(index, n);
-    } else if let Some(&index) = occ.entries.get(id) {
-        occ.absorb(
-            index,
-            UsedInfo {
-                captured: true,
-                ..n
-            },
-        );
     }
 }
 
 /// `count` (lam_pass_count.ml:110-201).
-fn count(a: &mut LamArena, occ: &mut OccurrenceTable, bv: &mut LocalTbl, lam: Lam) {
+fn count(a: &mut LamArena, occ: &mut OccurrenceTable, scope: usize, lam: Lam) {
     match a.node(lam) {
-        Node::Function { body, .. } => count(a, occ, &mut LocalTbl::new(), body),
+        Node::Function { body, .. } => count(a, occ, scope + 1, body),
         Node::For { kids, .. } => {
             let (start, finish, body) = a.for_parts(kids);
-            count(a, occ, bv, start);
-            count(a, occ, bv, finish);
-            count(a, occ, &mut LocalTbl::new(), body);
+            count(a, occ, scope, start);
+            count(a, occ, scope, finish);
+            count(a, occ, scope + 1, body);
         }
         Node::ForOf { iter, body, .. } | Node::ForAwaitOf { iter, body, .. } => {
-            count(a, occ, bv, iter);
-            count(a, occ, &mut LocalTbl::new(), body);
+            count(a, occ, scope, iter);
+            count(a, occ, scope + 1, body);
         }
         Node::While(c, b) => {
-            let mut empty = LocalTbl::new();
-            count(a, occ, &mut empty, c);
-            count(a, occ, &mut empty, b);
+            let inner_scope = scope + 1;
+            count(a, occ, inner_scope, c);
+            count(a, occ, inner_scope, b);
         }
-        Node::Var(v) => add_one_use(occ, bv, &a.ident(v)),
+        Node::Var(v) => add_one_use(occ, scope, &a.ident(v)),
         Node::Let {
             kind,
             id,
@@ -162,21 +138,21 @@ fn count(a: &mut LamArena, occ: &mut OccurrenceTable, bv: &mut LocalTbl, lam: La
             let v = a.ident(id);
             if let Some(w) = a.as_var(value) {
                 // lam_pass_count.ml:126-130
-                let previous = bind_var(occ, bv, &v);
-                count(a, occ, bv, body);
-                restore_var(bv, &v, previous);
-                inherit_use(occ, bv, &w, &v);
+                let previous = bind_var(occ, scope, &v);
+                count(a, occ, scope, body);
+                restore_var(occ, &v, previous);
+                inherit_use(occ, scope, &w, &v);
             } else {
                 // lam_pass_count.ml:131-135
-                let previous = bind_var(occ, bv, &v);
-                count(a, occ, bv, body);
-                restore_var(bv, &v, previous);
+                let previous = bind_var(occ, scope, &v);
+                count(a, occ, scope, body);
+                restore_var(occ, &v, previous);
                 if matches!(kind, LetKind::Strict) || occ.used(&v) {
-                    count(a, occ, bv, value);
+                    count(a, occ, scope, value);
                 }
             }
         }
-        Node::Assign { value, .. } => count(a, occ, bv, value),
+        Node::Assign { value, .. } => count(a, occ, scope, value),
         Node::Apply { func, args, .. } => {
             if let Node::Function { body, info } = a.node(func)
                 && a.params(info).len() == a.list_len(args)
@@ -187,11 +163,11 @@ fn count(a: &mut LamArena, occ: &mut OccurrenceTable, bv: &mut LocalTbl, lam: La
                     a.params(info).iter().copied().collect();
                 let args = a.list_vec(args);
                 let reduced = no_names_beta_reduce(a, &params, body, &args);
-                count(a, occ, bv, reduced);
+                count(a, occ, scope, reduced);
             } else {
-                count(a, occ, bv, func);
+                count(a, occ, scope, func);
                 for x in a.list_vec(args) {
-                    count(a, occ, bv, x);
+                    count(a, occ, scope, x);
                 }
             }
         }
@@ -209,21 +185,21 @@ fn count(a: &mut LamArena, occ: &mut OccurrenceTable, bv: &mut LocalTbl, lam: La
             let cases: smallvec::SmallVec<[Lam; 8]> =
                 acts.consts.iter().chain(acts.blocks).copied().collect();
             if let Some(fail) = fail {
-                count(a, occ, bv, fail);
+                count(a, occ, scope, fail);
                 if !consts_full && !blocks_full {
-                    count(a, occ, bv, fail);
+                    count(a, occ, scope, fail);
                 }
             }
-            count(a, occ, bv, scrut);
+            count(a, occ, scope, scrut);
             for x in cases {
-                count(a, occ, bv, x);
+                count(a, occ, scope, x);
             }
         }
         _ => {
             let mut kids: smallvec::SmallVec<[Lam; 8]> = smallvec::SmallVec::new();
             a.iter_children(lam, |x| kids.push(x));
             for x in kids {
-                count(a, occ, bv, x);
+                count(a, occ, scope, x);
             }
         }
     }
@@ -407,5 +383,45 @@ impl LetsState<'_> {
         let new_l2 = self.simplif(a, l2);
         let new_l1 = self.simplif(a, l1);
         a.let_(LetKind::Alias, v, new_l1, new_l2)
+    }
+}
+
+#[cfg(test)]
+mod occurrence_scope_tests {
+    use super::*;
+
+    #[test]
+    fn shadowing_restores_active_slot_but_keeps_latest_occurrence() {
+        let id = Ident::create_persistent("x");
+        let mut occ = OccurrenceTable::default();
+        let outer = bind_var(&mut occ, 0, &id);
+        add_one_use(&mut occ, 0, &id);
+        let inner = bind_var(&mut occ, 1, &id);
+        add_one_use(&mut occ, 1, &id);
+        restore_var(&mut occ, &id, inner);
+        add_one_use(&mut occ, 0, &id);
+        assert_eq!(occ.values[0].times, 2);
+        assert!(!occ.values[0].captured);
+        // A separate capture scope has an empty local table: it uses the
+        // latest binding, rather than the restored outer lexical binding.
+        add_one_use(&mut occ, 1, &id);
+        assert_eq!(occ.get(&id).times, 2);
+        assert!(occ.get(&id).captured);
+        restore_var(&mut occ, &id, outer);
+        assert!(occ.entries[&id].active.is_none());
+    }
+
+    #[test]
+    fn captured_alias_use_is_inherited() {
+        let x = Ident::create_persistent("x");
+        let y = Ident::create_persistent("y");
+        let mut occ = OccurrenceTable::default();
+        bind_var(&mut occ, 0, &x);
+        let previous = bind_var(&mut occ, 0, &y);
+        add_one_use(&mut occ, 1, &y);
+        restore_var(&mut occ, &y, previous);
+        inherit_use(&mut occ, 0, &x, &y);
+        assert_eq!(occ.get(&x).times, 1);
+        assert!(occ.get(&x).captured);
     }
 }
