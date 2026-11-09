@@ -2920,7 +2920,7 @@ pub(crate) fn js_eq_literal(x: &ExpressionDesc, y: &ExpressionDesc) -> Option<bo
 /// js_analyzer.ml `is_array_function`: `Array.isArray` on the JavaScript
 /// global `Array` (`Ext_ident.is_js`; Rust creates JS globals as persistent
 /// idents).
-fn is_array_is_array_callee(expr: &Expression) -> bool {
+pub(crate) fn is_array_is_array_callee(expr: &Expression) -> bool {
     matches!(
         &expr.desc,
         ExpressionDesc::StaticIndex(target, field, None)

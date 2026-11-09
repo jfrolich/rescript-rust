@@ -82,6 +82,12 @@ pub(crate) fn js_expr_no_side_effects(expr: &Expression) -> bool {
         ExpressionDesc::InterpolatedTemplate { values, .. } => {
             values.iter().all(js_expr_no_side_effects)
         }
+        // js_analyzer.ml: `Call (fn, [e], _) when is_array_function fn`.
+        ExpressionDesc::Call(func, args, _)
+            if args.len() == 1 && crate::js_ir::is_array_is_array_callee(func) =>
+        {
+            js_expr_no_side_effects(&args[0])
+        }
         ExpressionDesc::FlatCall(_, _)
         | ExpressionDesc::Call(_, _, _)
         | ExpressionDesc::New(_, _)
