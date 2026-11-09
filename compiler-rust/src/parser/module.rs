@@ -4212,16 +4212,17 @@ pub(super) fn raw_source_extension_payload(
     id: &StringLoc,
     payload: Payload,
 ) -> Payload {
-    if p.arena().get_string(id.txt) == "re" {
+    // res_core.ml `parse_extension`: removed extensions are reported at the
+    // extension name, and the payload is still returned.
+    let removed = match p.arena().get_string(id.txt) {
+        "re" => Some("The %re extension has been removed. Use a regexp literal such as /abc/i."),
+        "debugger" => Some("The %debugger extension has been removed. Use debugger() instead."),
+        _ => None,
+    };
+    if let Some(message) = removed {
         let start = p.loc_start(id.loc);
         let end = p.loc_end(id.loc);
-        p.err_at(
-            start,
-            end,
-            DiagnosticCategory::message(
-                "The %re extension has been removed. Use a regexp literal such as /abc/i.",
-            ),
-        );
+        p.err_at(start, end, DiagnosticCategory::message(message));
     }
     payload
 }
@@ -4344,5 +4345,35 @@ mod tests {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<Structure>();
         assert_send_sync::<Signature>();
+    }
+
+    /// res_core.ml `parse_extension`: `%debugger` (expression, with a payload,
+    /// and item `%%debugger`) is reported at the extension's `%`-prefixed name
+    /// after its payload is parsed, and parsing goes on with the extension.
+    #[test]
+    fn removed_debugger_extension_is_a_syntax_error_at_its_name() {
+        let source =
+            "let f = x => {\n  %debugger\n  x\n}\nlet g = %debugger(1)\n%%debugger\nlet h = %foo\n";
+        let mut parser = Parser::new("debugger.res", source);
+        let structure = parse_structure(&mut parser);
+        assert_eq!(structure.len(), 4);
+        let spans: Vec<(&str, String)> = parser
+            .diagnostics()
+            .iter()
+            .map(|diagnostic| {
+                let start = diagnostic.start_pos().cnum as usize;
+                let end = diagnostic.end_pos().cnum as usize;
+                (&source[start..end], diagnostic.explain())
+            })
+            .collect();
+        let message = "The %debugger extension has been removed. Use debugger() instead.";
+        assert_eq!(
+            spans,
+            vec![
+                ("%debugger", message.to_string()),
+                ("%debugger", message.to_string()),
+                ("%%debugger", message.to_string()),
+            ]
+        );
     }
 }

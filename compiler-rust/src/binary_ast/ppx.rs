@@ -4780,7 +4780,6 @@ fn transform_inline_binding(
 /// Transforms:
 /// - %raw("...") into the local_external_apply pattern
 /// - %re("...") into %raw with RegExp type constraint (TODO)
-/// - %debugger into debugger call (TODO)
 /// - Other extensions are returned unchanged
 fn handle_extension(
     expr: &Expression,
@@ -4799,7 +4798,6 @@ fn handle_extension(
         "todo" => handle_todo(payload, arena, ext_loc),
         "raw" => handle_raw(expr, payload, arena, arena.prim_raw_expr(), ext_loc),
         "ffi" => handle_ffi(expr, payload, arena, ext_loc),
-        "debugger" => handle_debugger(expr, payload, arena, ext_loc),
         _ => expr.clone(),
     }
 }
@@ -4876,153 +4874,6 @@ fn build_arrows(
         ptyp_desc: CoreTypeDesc::Ptyp_arrow(Box::new((Box::new(first), ret, arity))),
         ptyp_loc: loc,
         ptyp_attributes: Attributes::new(),
-    }
-}
-
-/// Handle %debugger extension by transforming it into local_external_apply pattern.
-///
-/// OCaml transforms `%debugger` into:
-/// ```text
-/// let module J = struct
-///   external unsafe_expr: _ -> unit = "%debugger"
-/// end in J.unsafe_expr(())
-/// ```
-fn handle_debugger(
-    expr: &Expression,
-    payload: &Payload,
-    arena: &mut ParseArena,
-    ext_loc: LocIdx,
-) -> Expression {
-    // %debugger doesn't accept arguments
-    if !payload_is_empty_str(payload) {
-        return expr.clone(); // Error case - return unchanged
-    }
-
-    // OCaml: loc comes from the extension identifier's location ({txt; loc} pattern)
-    let loc = ext_loc;
-    let none_loc = arena.none_loc();
-
-    // Create the type: _ -> unit
-    let any_type = CoreType {
-        ptyp_desc: CoreTypeDesc::Ptyp_any,
-        ptyp_loc: none_loc,
-        ptyp_attributes: Attributes::new(),
-    };
-
-    // Create "unit" type
-    let unit_ident = arena.push_lident_static("unit");
-    let unit_type = CoreType {
-        ptyp_desc: CoreTypeDesc::Ptyp_constr((
-            Located {
-                txt: unit_ident,
-                loc: none_loc,
-            },
-            crate::parse_arena::ArenaList::EMPTY,
-        )),
-        ptyp_loc: none_loc,
-        ptyp_attributes: Attributes::new(),
-    };
-
-    let pval_type = CoreType {
-        ptyp_desc: CoreTypeDesc::Ptyp_arrow(Box::new((
-            Box::new(TypeArg {
-                fixed: None,
-                attrs: Attributes::new(),
-                lbl: ArgLabel::Nolabel,
-                typ: arena.push_core_type(any_type),
-            }),
-            arena.push_core_type(unit_type),
-            arena.push_arity(Some(1)),
-        ))),
-        ptyp_loc: none_loc,
-        ptyp_attributes: Attributes::new(),
-    };
-
-    // Create strings for the module/function names
-    let module_name_idx = arena.intern_string("J");
-    let func_name_idx = arena.intern_string("unsafe_expr");
-
-    // Create the value description (external primitive) - uses %debugger
-    let vd = ValueDescription {
-        pval_jsx_component: None,
-        pval_name: Located {
-            txt: func_name_idx,
-            loc,
-        },
-        pval_type: arena.push_core_type(pval_type),
-        pval_prim: Some(PrimitiveRepr::PrimName(prim_str(arena, "%debugger"))),
-        pval_attributes: Attributes::new(),
-        pval_loc: loc,
-    };
-
-    // Create the module structure
-    let mod_structure = vec![StructureItem {
-        pstr_desc: StructureItemDesc::Pstr_primitive(Box::new(vd)),
-        pstr_loc: loc,
-    }];
-
-    let mod_expr = ModuleExpr {
-        pmod_desc: ModuleExprDesc::Pmod_structure(Box::new(mod_structure)),
-        pmod_loc: loc,
-        pmod_attributes: Attributes::new(),
-    };
-
-    // Create the longident J.unsafe_expr
-    let j_lident = arena.push_lident_static("J");
-    let j_unsafe_expr = arena.push_ldot_static(j_lident, "unsafe_expr");
-
-    // `Ast_literal.val_unit ~loc ()` (ast_literal.ml:100-103): the
-    // constructor has the default (none) location, its name the extension's.
-    let unit_construct = arena.push_lident_static("()");
-    let unit_expr = Expression {
-        pexp_desc: ExpressionDesc::Pexp_construct(
-            Located {
-                txt: unit_construct,
-                loc,
-            },
-            // ast_literal.ml `val_unit ~loc`: the argument list takes `loc`.
-            crate::parse_arena::Located::new(crate::parse_arena::ExprList::EMPTY, loc),
-        ),
-        pexp_loc: none_loc,
-        pexp_attributes: Attributes::new(),
-    };
-
-    // Create the function application: J.unsafe_expr(())
-    let func_ident = Expression {
-        pexp_desc: ExpressionDesc::Pexp_ident(Located {
-            txt: j_unsafe_expr,
-            loc,
-        }),
-        pexp_loc: loc,
-        pexp_attributes: Attributes::new(),
-    };
-
-    let apply_expr = Expression {
-        pexp_desc: ExpressionDesc::Pexp_apply(PexpApply {
-            funct: arena.push_expr(func_ident),
-            args: {
-                let items = [(ArgLabel::Nolabel, arena.push_expr(unit_expr))];
-                arena.push_apply_args(&items)
-            },
-            partial: false,
-            transformed_jsx: false,
-        }),
-        pexp_loc: loc,
-        pexp_attributes: Attributes::new(),
-    };
-
-    // Create the final expression: let module J = struct ... end in J.unsafe_expr(())
-    Expression {
-        pexp_desc: ExpressionDesc::Pexp_letmodule(Box::new((
-            Located {
-                txt: module_name_idx,
-                loc,
-            },
-            arena.push_mod_expr(mod_expr),
-            arena.push_expr(apply_expr),
-        ))),
-        pexp_loc: loc,
-        pexp_attributes: expr.pexp_attributes.clone(),
     }
 }
 
@@ -9145,10 +8996,6 @@ fn validate_expression_extension_payload_error(
     let (ext_name, payload) = extension;
     let name = arena.get_string(ext_name.txt);
     match name {
-        "debugger" if !payload_is_empty_str(payload) => Err(PpxError::at_loc(
-            ext_name.loc,
-            "%debugger extension doesn't accept arguments",
-        )),
         "raw" if payload_raw_source_info(payload, arena).is_none() => Err(PpxError::at_loc(
             ext_name.loc,
             "%raw extension can only be applied to a string",
