@@ -364,7 +364,7 @@ fn find_path(
     lam: Lam,
     fields: &[String],
     groups: &AHashMap<Ident, Lam>,
-    positions: &mut Vec<(i32, String)>,
+    positions: &mut Vec<(i32, crate::name::Name)>,
 ) -> Option<Option<Ident>> {
     let (resolved, id) = resolve_binding(a, lam, groups, &mut AHashSet::new());
     let Some((field, rest)) = fields.split_first() else {
@@ -374,7 +374,7 @@ fn find_path(
         return None;
     };
     let pos = names.iter().position(|name| name == field)?;
-    positions.push((pos as i32, field.clone()));
+    positions.push((pos as i32, crate::name::Name::new(field)));
     find_path(a, *args.get(pos)?, rest, groups, positions)
 }
 

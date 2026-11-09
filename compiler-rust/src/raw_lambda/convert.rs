@@ -317,7 +317,7 @@ fn raw_polyvariant_const(rb: &RawArena, tag: &str) -> RawLambda {
 }
 
 fn raw_record_field_access(lbl: &LabelDescription) -> Option<(i32, FieldDbgInfo)> {
-    let name = label_runtime_name(lbl);
+    let name = lbl.lbl_runtime_name;
     let info = match &lbl.lbl_repres {
         RecordRepresentation::RecordRegular => FieldDbgInfo::Record { name },
         RecordRepresentation::RecordFloatUnused => return None,
@@ -333,7 +333,7 @@ fn raw_record_field_access(lbl: &LabelDescription) -> Option<(i32, FieldDbgInfo)
 }
 
 fn raw_record_setfield_access(lbl: &LabelDescription) -> Option<(i32, SetFieldDbgInfo)> {
-    let name = label_runtime_name(lbl);
+    let name = lbl.lbl_runtime_name;
     let info = match &lbl.lbl_repres {
         RecordRepresentation::RecordRegular => SetFieldDbgInfo::RecordSet(name),
         RecordRepresentation::RecordFloatUnused | RecordRepresentation::RecordUnboxed(_) => {
@@ -1904,7 +1904,7 @@ impl<'a> RawLambdaConverter<'a> {
             "%makeref" => Some(Primitive::Pmakeblock(TagInfo::ref_tag(), Mutable::Mutable)),
             "%refset" => Some(Primitive::Psetfield(
                 0,
-                crate::lambda::lam_compat::SetFieldDbgInfo::RecordSet("contents".to_string()),
+                crate::lambda::lam_compat::SetFieldDbgInfo::RecordSet(crate::name::Name::new("contents")),
             )),
             "%identity" | "%component_identity" => Some(Primitive::Pidentity),
             "%ignore" => Some(Primitive::Pignore),
@@ -2064,7 +2064,7 @@ impl<'a> RawLambdaConverter<'a> {
                     if let Ok(n) = n_str.parse::<i32>() {
                         return Some(Primitive::Psetfield(
                             n,
-                            crate::lambda::lam_compat::SetFieldDbgInfo::RecordSet(String::new()),
+                            crate::lambda::lam_compat::SetFieldDbgInfo::RecordSet(crate::name::Name::new("")),
                         ));
                     }
                 }
@@ -3181,7 +3181,7 @@ impl<'a> RawLambdaConverter<'a> {
                     Primitive::Pfield(
                         *pos as i32,
                         FieldDbgInfo::Module {
-                            name: id.name().to_string(),
+                            name: id.name_atom(),
                         },
                     ),
                     &[rb.var(*mid)],
@@ -3458,7 +3458,7 @@ impl<'a> RawLambdaConverter<'a> {
                     Primitive::Pfield(
                         resolved_pos,
                         FieldDbgInfo::Module {
-                            name: name.to_string(),
+                            name: crate::name::Name::new(name),
                         },
                     ),
                     &[prefix_lam],
@@ -4270,7 +4270,7 @@ impl<'a> RawLambdaConverter<'a> {
                                 let field = rb.prim(
                                     Primitive::Pfield(
                                         *pos as i32,
-                                        FieldDbgInfo::Module { name: name.clone() },
+                                        FieldDbgInfo::Module { name: crate::name::Name::new(name) },
                                     ),
                                     &[named],
                                     node_loc,
@@ -4288,7 +4288,7 @@ impl<'a> RawLambdaConverter<'a> {
                                 Primitive::Pfield(
                                     pos as i32,
                                     FieldDbgInfo::Module {
-                                        name: name.to_string(),
+                                        name: crate::name::Name::new(name),
                                     },
                                 ),
                                 &[named],
@@ -6408,14 +6408,14 @@ impl<'a> RawLambdaConverter<'a> {
                             };
                             let info = match repr {
                                 RecordRepresentation::RecordRegular => {
-                                    FieldDbgInfo::Record { name: name.clone() }
+                                    FieldDbgInfo::Record { name: crate::name::Name::new(name) }
                                 }
                                 RecordRepresentation::RecordFloatUnused => continue,
                                 RecordRepresentation::RecordInlined { .. } => {
-                                    FieldDbgInfo::RecordInline { name: name.clone() }
+                                    FieldDbgInfo::RecordInline { name: crate::name::Name::new(name) }
                                 }
                                 RecordRepresentation::RecordExtension => {
-                                    FieldDbgInfo::RecordExtension { name: name.clone() }
+                                    FieldDbgInfo::RecordExtension { name: crate::name::Name::new(name) }
                                 }
                                 RecordRepresentation::RecordUnboxed(_) => unreachable!(),
                             };

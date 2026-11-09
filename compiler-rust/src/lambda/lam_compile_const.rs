@@ -201,7 +201,7 @@ impl LambdaCompiler {
                     if let Some(constant) = self.resolve_cmj_module_field_constant(&module, name) {
                         return constant;
                     }
-                    E::qualified(module, Some(name.clone()), &mut self.j)
+                    E::qualified(module, Some(name.to_string()), &mut self.j)
                 }
                 _ => indexed(&mut self.j, &convert_ident_name(name), Some(idx)),
             },

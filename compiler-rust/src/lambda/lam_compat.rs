@@ -3,6 +3,8 @@
 //! This module contains types that are shared between Lambda IR and other
 //! parts of the compiler, maintaining compatibility with the OCaml types.
 
+use crate::name::Name;
+
 /// Comparison operators
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Comparison {
@@ -60,16 +62,16 @@ pub enum LetKind {
 }
 
 /// Field debug info for record/tuple field access
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum FieldDbgInfo {
     /// Record field
-    Record { name: String },
+    Record { name: Name },
     /// Module field
-    Module { name: String },
+    Module { name: Name },
     /// Inlined record field
-    RecordInline { name: String },
+    RecordInline { name: Name },
     /// Record extension field
-    RecordExtension { name: String },
+    RecordExtension { name: Name },
     /// Tuple field
     Tuple,
     /// Poly variant tag
@@ -93,7 +95,7 @@ impl FieldDbgInfo {
             FieldDbgInfo::Record { name }
             | FieldDbgInfo::Module { name }
             | FieldDbgInfo::RecordInline { name }
-            | FieldDbgInfo::RecordExtension { name } => Some(name),
+            | FieldDbgInfo::RecordExtension { name } => Some(name.as_str()),
             FieldDbgInfo::Tuple
             | FieldDbgInfo::PolyVarTag
             | FieldDbgInfo::PolyVarContent
@@ -106,14 +108,14 @@ impl FieldDbgInfo {
 }
 
 /// Set field debug info for record field mutation
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SetFieldDbgInfo {
     /// Record set
-    RecordSet(String),
+    RecordSet(Name),
     /// Inlined record set
-    RecordInlineSet(String),
+    RecordInlineSet(Name),
     /// Record extension set
-    RecordExtensionSet(String),
+    RecordExtensionSet(Name),
 }
 
 impl SetFieldDbgInfo {
@@ -122,7 +124,7 @@ impl SetFieldDbgInfo {
         match self {
             SetFieldDbgInfo::RecordSet(name)
             | SetFieldDbgInfo::RecordInlineSet(name)
-            | SetFieldDbgInfo::RecordExtensionSet(name) => name,
+            | SetFieldDbgInfo::RecordExtensionSet(name) => name.as_str(),
         }
     }
 }
@@ -166,7 +168,7 @@ mod tests {
     #[test]
     fn test_field_dbg_info_name() {
         let record = FieldDbgInfo::Record {
-            name: "field".to_string(),
+            name: Name::new("field"),
         };
         assert_eq!(record.name(), Some("field"));
 
@@ -176,7 +178,7 @@ mod tests {
 
     #[test]
     fn test_set_field_dbg_info_name() {
-        let set = SetFieldDbgInfo::RecordSet("contents".to_string());
+        let set = SetFieldDbgInfo::RecordSet(Name::new("contents"));
         assert_eq!(set.name(), "contents");
     }
 }

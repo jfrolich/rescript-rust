@@ -3764,10 +3764,10 @@ fn decode_cmj_field_dbg_info(value: &OcamlValue) -> Option<FieldDbgInfo> {
     match value {
         // compiler/core/lam_compat.ml:65-75.
         OcamlValue::Block(0, fields) if fields.len() == 1 => Some(FieldDbgInfo::Record {
-            name: fields[0].as_string().to_string(),
+            name: Name::new(fields[0].as_string()),
         }),
         OcamlValue::Block(1, fields) if fields.len() == 1 => Some(FieldDbgInfo::Module {
-            name: fields[0].as_string().to_string(),
+            name: Name::new(fields[0].as_string()),
         }),
         OcamlValue::Int(0) => Some(FieldDbgInfo::Tuple),
         OcamlValue::Int(5) => Some(FieldDbgInfo::Cons),

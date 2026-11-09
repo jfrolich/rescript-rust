@@ -1093,7 +1093,7 @@ mod tests {
     fn same_classes_as_debug() {
         let x = Ident::create_local("x");
         let field = |name: &str| FieldDbgInfo::Record {
-            name: name.to_string(),
+            name: crate::name::Name::new(name),
         };
         let prims = [
             Primitive::Paddint,

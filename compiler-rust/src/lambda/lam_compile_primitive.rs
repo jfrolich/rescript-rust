@@ -64,7 +64,7 @@ impl LambdaCompiler {
             let Primitive::Pfield(_, FieldDbgInfo::Module { name }) = prim else {
                 return None;
             };
-            segments.push(name.clone());
+            segments.push(name.to_string());
             let [arg] = args else {
                 return None;
             };
