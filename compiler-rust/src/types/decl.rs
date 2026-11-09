@@ -43,7 +43,7 @@ pub enum ValueKind {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PrimKind {
     KindIntrinsic,
-    KindExternal(Box<crate::types::external_ffi_types::ExternalFfi>),
+    KindExternal(std::sync::Arc<crate::types::external_ffi_types::ExternalFfi>),
     KindInlineConst(Box<crate::types::external_ffi_types::InlineConst>),
 }
 
