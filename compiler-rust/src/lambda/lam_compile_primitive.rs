@@ -37,12 +37,40 @@ impl LambdaCompiler {
             return self.compile_debugger(args, loc);
         }
 
+        if let (Primitive::PjsObjectGet(property), [obj]) = (prim, args) {
+            return self.compile_js_object_get(property, obj);
+        }
         // lam_compile.ml `compile_arguments lambda_cxt args`, shared by
         // `compile_primitive_default`, `Pjs_object_set` and
         // `Pjs_object_create`; the remaining cases take a single argument,
         // which `sequence_arguments` leaves as it is.
         let (prelude, compiled_args) = self.compile_arguments(false, args.iter());
         self.compile_primitive_js(prim, compiled_args, prelude, loc)
+    }
+
+    /// lam_compile.ml `Pjs_object_get property, [obj]`: a property read.
+    /// When the object compiles to statements, `Js_ast_util.named_expression`
+    /// binds it to a temporary after them unless it is
+    /// `is_okay_to_duplicate`.
+    fn compile_js_object_get(&mut self, property: &str, obj: &Lambda) -> Compiled {
+        let Compiled {
+            mut prelude,
+            expr: obj,
+            ..
+        } = self.compile_expr(obj);
+        let expr = if prelude.is_empty() || super::lam_compile_arguments::is_okay_to_duplicate(&obj)
+        {
+            self.static_index(obj, property)
+        } else {
+            let tmp = self.fresh_tmp_ident();
+            prelude.push(super::lam_compile_arguments::define_strict_variable(tmp, obj));
+            self.static_index(Expression::var(tmp), property)
+        };
+        Compiled {
+            prelude,
+            expr,
+            finished: OutputFinished::False,
+        }
     }
 
     /// lam_compile.ml:1689-1704 `Pdebugger`: `debugger(arg)` takes a unit

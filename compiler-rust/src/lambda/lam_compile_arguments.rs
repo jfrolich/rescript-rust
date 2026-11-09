@@ -66,6 +66,19 @@ pub(crate) fn delay_safe(assignable: &AHashSet<Ident>, e: &Expression) -> bool {
     }
 }
 
+/// js_analyzer.ml `is_okay_to_duplicate`.
+pub(crate) fn is_okay_to_duplicate(e: &Expression) -> bool {
+    match &e.desc {
+        ExpressionDesc::Var(_)
+        | ExpressionDesc::Bool(_)
+        | ExpressionDesc::Str(_)
+        | ExpressionDesc::TemplateLiteral(_)
+        | ExpressionDesc::Number(_) => true,
+        ExpressionDesc::StaticIndex(e, _, _) => is_okay_to_duplicate(e),
+        _ => false,
+    }
+}
+
 /// js_stmt_make.ml `define_variable ~kind:Strict v e`: an `Undefined` value
 /// becomes a bare declaration (`declare_variable`).
 pub(crate) fn define_strict_variable(ident: Ident, value: Expression) -> Statement {
