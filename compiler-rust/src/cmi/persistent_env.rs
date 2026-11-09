@@ -3844,10 +3844,10 @@ fn decode_cmj_list<T>(
 /// in-process compilation stores signatures produced by independent compiler
 /// contexts whose local stamp counters can overlap.
 /// The `name_map` maps type names (for persistent idents with stamp 0) to their qualified paths.
-type ModuleStampSubstMap = HashMap<i32, (Name, Path)>;
+type ModuleStampSubstMap = HashMap<i32, Path>;
 
 fn insert_module_stamp_subst(map: &mut ModuleStampSubstMap, id: &Ident, path: Path) {
-    map.insert(id.stamp(), (id.name_atom(), path));
+    map.insert(id.stamp(), path);
 }
 
 fn nonpersistent_path_head(path: &Path) -> Option<(i32, Name)> {
@@ -3863,9 +3863,9 @@ fn nonpersistent_path_head(path: &Path) -> Option<(i32, Name)> {
 #[derive(Clone, Debug)]
 struct SubstMaps {
     type_stamp_map: HashMap<i32, Path>,
-    type_name_map: HashMap<String, Path>,
+    type_name_map: HashMap<Name, Path>,
     module_stamp_map: ModuleStampSubstMap,
-    module_name_map: HashMap<String, Path>,
+    module_name_map: HashMap<Name, Path>,
     protected_module_head: Option<(i32, Name)>,
 }
 
@@ -3910,25 +3910,25 @@ fn build_subst_maps(sig_items: &[SignatureItem], module_path: &Path) -> SubstMap
     for item in sig_items {
         match item {
             SignatureItem::SigType(id, _, _) | SignatureItem::SigModtype(id, _) => {
-                let qualified_path = Path::pdot(*module_path, id.name());
+                let qualified_path = Path::pdot(*module_path, id.name_atom());
                 if id.stamp() != 0 {
                     // OCaml Subst uses identifier identity for non-persistent ids.
                     maps.type_stamp_map.insert(id.stamp(), qualified_path);
                 } else {
                     // Persistent ids (stamp=0) rewrite by name.
                     maps.type_name_map
-                        .insert(id.name().to_string(), qualified_path);
+                        .insert(id.name_atom(), qualified_path);
                 }
             }
             SignatureItem::SigModule(id, _, _) => {
-                let qualified_path = Path::pdot(*module_path, id.name());
+                let qualified_path = Path::pdot(*module_path, id.name_atom());
                 if id.stamp() != 0 {
                     // OCaml Subst uses identifier identity for non-persistent ids.
                     insert_module_stamp_subst(&mut maps.module_stamp_map, id, qualified_path);
                 } else {
                     // Persistent ids (stamp=0) rewrite by name.
                     maps.module_name_map
-                        .insert(id.name().to_string(), qualified_path);
+                        .insert(id.name_atom(), qualified_path);
                 }
             }
             _ => {}
@@ -3944,7 +3944,7 @@ fn insert_type_subst_path(maps: &mut SubstMaps, old_id: &Ident, new_id: &Ident) 
         maps.type_stamp_map.insert(old_id.stamp(), new_path);
     } else {
         maps.type_name_map
-            .insert(old_id.name().to_string(), new_path);
+            .insert(old_id.name_atom(), new_path);
     }
 }
 
@@ -3954,7 +3954,7 @@ fn insert_module_subst_path(maps: &mut SubstMaps, old_id: &Ident, new_id: &Ident
         insert_module_stamp_subst(&mut maps.module_stamp_map, old_id, new_path);
     } else {
         maps.module_name_map
-            .insert(old_id.name().to_string(), new_path);
+            .insert(old_id.name_atom(), new_path);
     }
 }
 
@@ -4317,7 +4317,7 @@ pub(crate) fn substitute_functor_result_module_path(
         insert_module_stamp_subst(&mut maps.module_stamp_map, old_param, *arg_path);
     } else {
         maps.module_name_map
-            .insert(old_param.name().to_string(), *arg_path);
+            .insert(old_param.name_atom(), *arg_path);
     }
     freshen_module_type_bound_idents_with_maps(&mut copied, &maps, ctx);
     copied
@@ -4339,7 +4339,7 @@ pub(crate) fn substitute_module_type_with_module_path_subst(
             insert_module_stamp_subst(&mut maps.module_stamp_map, id, *path);
         } else {
             maps.module_name_map
-                .insert(id.name().to_string(), *path);
+                .insert(id.name_atom(), *path);
         }
     }
     freshen_module_type_bound_idents_with_maps(&mut copied, &maps, ctx);
@@ -4896,8 +4896,8 @@ pub fn substitute_type_paths_in_sig(
         match item {
             SignatureItem::SigType(id, _, _) | SignatureItem::SigModtype(id, _) => {
                 direct_type_name_map
-                    .entry(id.name().to_string())
-                    .or_insert_with(|| Path::pdot(*module_path, id.name()));
+                    .entry(id.name_atom())
+                    .or_insert_with(|| Path::pdot(*module_path, id.name_atom()));
             }
             _ => {}
         }
@@ -5114,7 +5114,7 @@ pub(crate) fn substitute_type_paths_in_sig_with_stamp_map(
     if stamp_map.is_empty() {
         return;
     }
-    let empty: HashMap<String, Path> = HashMap::new();
+    let empty: HashMap<Name, Path> = HashMap::new();
     let empty_module_stamp: ModuleStampSubstMap = HashMap::new();
     let mut visited = HashSet::new();
     for item in sig_items {
@@ -5166,9 +5166,9 @@ pub(crate) fn substitute_type_paths_in_sig_with_stamp_map(
 fn substitute_type_expr_path(
     initial_ty_ref: TypeExprRef,
     type_stamp_map: &HashMap<i32, Path>,
-    type_name_map: &HashMap<String, Path>,
+    type_name_map: &HashMap<Name, Path>,
     module_stamp_map: &ModuleStampSubstMap,
-    module_name_map: &HashMap<String, Path>,
+    module_name_map: &HashMap<Name, Path>,
     protected_module_head: Option<&(i32, Name)>,
     ctx: &TypeContext,
     visited: &mut HashSet<usize>,
@@ -5445,7 +5445,7 @@ pub fn type_expr_mentions_path_prefixes(
 #[derive(Debug)]
 pub struct ValueSubstMaps {
     maps: SubstMaps,
-    direct_type_name_map: HashMap<String, Path>,
+    direct_type_name_map: HashMap<Name, Path>,
 }
 
 pub fn build_value_subst_maps(sig_items: &[SignatureItem], module_path: &Path) -> ValueSubstMaps {
@@ -5460,8 +5460,8 @@ pub fn build_value_subst_maps(sig_items: &[SignatureItem], module_path: &Path) -
         match item {
             SignatureItem::SigType(id, _, _) | SignatureItem::SigModtype(id, _) => {
                 direct_type_name_map
-                    .entry(id.name().to_string())
-                    .or_insert_with(|| Path::pdot(*module_path, id.name()));
+                    .entry(id.name_atom())
+                    .or_insert_with(|| Path::pdot(*module_path, id.name_atom()));
             }
             _ => {}
         }
@@ -5527,7 +5527,7 @@ pub fn substitute_type_paths_in_value_with_maps(
                 continue;
             };
             let old_path = Path::pdot(alias_source, id.name());
-            let new_path = Path::pdot(*module_path, id.name());
+            let new_path = Path::pdot(*module_path, id.name_atom());
             if old_path.same(&new_path) {
                 continue;
             }
@@ -5550,9 +5550,9 @@ fn direct_manifest_substitution_would_self_alias(
     manifest: TypeExprRef,
     module_path: &Path,
     type_stamp_map: &HashMap<i32, Path>,
-    type_name_map: &HashMap<String, Path>,
+    type_name_map: &HashMap<Name, Path>,
     module_stamp_map: &ModuleStampSubstMap,
-    module_name_map: &HashMap<String, Path>,
+    module_name_map: &HashMap<Name, Path>,
     protected_module_head: Option<&(i32, Name)>,
 ) -> bool {
     let manifest = ctx.repr(manifest);
@@ -5572,15 +5572,15 @@ fn direct_manifest_substitution_would_self_alias(
         module_name_map,
         protected_module_head,
     );
-    substituted.same(&Path::pdot(*module_path, id.name()))
+    substituted.same(&Path::pdot(*module_path, id.name_atom()))
 }
 
 fn substitute_type_path(
     path: &Path,
     type_stamp_map: &HashMap<i32, Path>,
-    type_name_map: &HashMap<String, Path>,
+    type_name_map: &HashMap<Name, Path>,
     module_stamp_map: &ModuleStampSubstMap,
-    module_name_map: &HashMap<String, Path>,
+    module_name_map: &HashMap<Name, Path>,
     protected_module_head: Option<&(i32, Name)>,
 ) -> Path {
     match path.view() {
@@ -5595,7 +5595,7 @@ fn substitute_type_path(
                     .unwrap_or_else(|| *path)
             } else {
                 type_name_map
-                    .get(ident.name())
+                    .get(&ident.name_atom())
                     .cloned()
                     .unwrap_or_else(|| *path)
             }
@@ -5607,7 +5607,13 @@ fn substitute_type_path(
                 module_name_map,
                 protected_module_head,
             );
-            Path::pdot_pos(rewritten_prefix, *name, *pos)
+            // Paths are interned, so an unchanged prefix gives back `path`
+            // itself; skip re-interning it.
+            if rewritten_prefix.node_addr() == prefix.node_addr() {
+                *path
+            } else {
+                Path::pdot_pos(rewritten_prefix, *name, *pos)
+            }
         }
         PathView::Papply(left, right) => Path::papply(
             substitute_module_path(
@@ -5629,24 +5635,24 @@ fn substitute_type_path(
 fn substitute_module_path(
     path: &Path,
     module_stamp_map: &ModuleStampSubstMap,
-    module_name_map: &HashMap<String, Path>,
+    module_name_map: &HashMap<Name, Path>,
     protected_module_head: Option<&(i32, Name)>,
 ) -> Path {
     match path.view() {
         PathView::Pident(ident) => {
             if ident.stamp() != 0 {
                 let protected = protected_module_head
-                    .is_some_and(|(stamp, name)| *stamp == ident.stamp() && name == ident.name());
+                    .is_some_and(|(stamp, name)| *stamp == ident.stamp() && *name == ident.name_atom());
                 // OCaml compiler/ml/subst.ml:69-76 `module_path` rewrites
                 // non-persistent ids through Ident.find_same only. It does not
                 // fall back to declaration names or flattened path spelling.
                 module_stamp_map
                     .get(&ident.stamp())
-                    .and_then(|(_, path)| (!protected).then(|| *path))
+                    .and_then(|path| (!protected).then(|| *path))
                     .unwrap_or_else(|| *path)
             } else {
                 module_name_map
-                    .get(ident.name())
+                    .get(&ident.name_atom())
                     .cloned()
                     .unwrap_or_else(|| *path)
             }
@@ -5658,7 +5664,13 @@ fn substitute_module_path(
                 module_name_map,
                 protected_module_head,
             );
-            Path::pdot_pos(rewritten_prefix, *name, *pos)
+            // Paths are interned, so an unchanged prefix gives back `path`
+            // itself; skip re-interning it.
+            if rewritten_prefix.node_addr() == prefix.node_addr() {
+                *path
+            } else {
+                Path::pdot_pos(rewritten_prefix, *name, *pos)
+            }
         }
         PathView::Papply(left, right) => Path::papply(
             substitute_module_path(
