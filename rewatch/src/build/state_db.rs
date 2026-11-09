@@ -19,6 +19,7 @@
 
 use super::packages::Package;
 use ahash::AHashMap;
+use rayon::prelude::*;
 use rusqlite::{Connection, OpenFlags, params};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -689,6 +690,22 @@ pub fn write_record(package: &Package, previous: Option<&PackageState>, new: &Pa
     {
         return;
     }
+    // Encode the rows to set up front, in parallel: the transaction below
+    // runs on one thread, and a large package sets ~100k rows.
+    let reads: Vec<(&String, String)> = new
+        .reads_updates
+        .par_iter()
+        .map(|(module, reads)| (module, encode_reads(reads)))
+        .collect();
+    let items: Vec<(&String, String)> = new
+        .items_updates
+        .par_iter()
+        .map(|(module, items)| (module, encode_items(items)))
+        .collect();
+    let module_rows = changed_rows(&previous.modules, &new.modules, |row| {
+        row.imports.as_ref().map(Imports::encode)
+    });
+    let deps_rows = changed_rows(&previous.deps, &new.deps, |row| row.deps.join("\n"));
     let write = || -> rusqlite::Result<()> {
         let mut conn = open_for_write(package)?;
         let tx = conn.transaction()?;
@@ -716,12 +733,12 @@ pub fn write_record(package: &Package, previous: Option<&PackageState>, new: &Pa
             )?;
 
             let mut set_reads = tx.prepare("INSERT OR REPLACE INTO reads (module, data) VALUES (?1, ?2)")?;
-            for (module, reads) in &new.reads_updates {
-                set_reads.execute(params![module, encode_reads(reads)])?;
+            for (module, reads) in &reads {
+                set_reads.execute(params![module, reads])?;
             }
             let mut set_items = tx.prepare("INSERT OR REPLACE INTO items (module, data) VALUES (?1, ?2)")?;
-            for (module, items) in &new.items_updates {
-                set_items.execute(params![module, encode_items(items)])?;
+            for (module, items) in &items {
+                set_items.execute(params![module, items])?;
             }
             let mut set_interface =
                 tx.prepare("INSERT OR REPLACE INTO interfaces (module, hash, data) VALUES (?1, ?2, ?3)")?;
@@ -745,9 +762,10 @@ pub fn write_record(package: &Package, previous: Option<&PackageState>, new: &Pa
                   interface_digest, imports)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             )?;
-            sync_rows(
+            sync_encoded_rows(
                 &previous.modules,
                 &new.modules,
+                &module_rows,
                 partial,
                 |module| {
                     delete_interface.execute(params![module])?;
@@ -756,7 +774,7 @@ pub fn write_record(package: &Package, previous: Option<&PackageState>, new: &Pa
                     delete_items.execute(params![module])?;
                     delete_module.execute(params![module]).map(drop)
                 },
-                |module, row| {
+                |module, row, imports| {
                     set_module
                         .execute(params![
                             module,
@@ -764,7 +782,7 @@ pub fn write_record(package: &Package, previous: Option<&PackageState>, new: &Pa
                             row.implementation_warnings,
                             row.interface_warnings,
                             row.interface_digest.map(|digest| digest as i64),
-                            row.imports.as_ref().map(Imports::encode)
+                            imports
                         ])
                         .map(drop)
                 },
@@ -784,16 +802,13 @@ pub fn write_record(package: &Package, previous: Option<&PackageState>, new: &Pa
             let mut delete_deps = tx.prepare("DELETE FROM deps WHERE source = ?1")?;
             let mut set_deps =
                 tx.prepare("INSERT OR REPLACE INTO deps (source, mtime, deps) VALUES (?1, ?2, ?3)")?;
-            sync_rows(
+            sync_encoded_rows(
                 &previous.deps,
                 &new.deps,
+                &deps_rows,
                 partial,
                 |source| delete_deps.execute(params![source]).map(drop),
-                |source, row| {
-                    set_deps
-                        .execute(params![source, row.mtime, row.deps.join("\n")])
-                        .map(drop)
-                },
+                |source, row, deps| set_deps.execute(params![source, row.mtime, deps]).map(drop),
             )?;
         }
         tx.commit()
@@ -803,6 +818,45 @@ pub fn write_record(package: &Package, previous: Option<&PackageState>, new: &Pa
         // A half-known record is worse than none.
         let _ = std::fs::remove_file(path(package));
     }
+}
+
+/// The rows of `new` that differ from `previous`, in key order, each with
+/// `encode` of it.
+fn changed_rows<'a, K, V, E>(
+    previous: &BTreeMap<K, V>,
+    new: &'a BTreeMap<K, V>,
+    encode: impl Fn(&V) -> E + Sync,
+) -> Vec<(&'a K, &'a V, E)>
+where
+    K: Ord + Sync,
+    V: PartialEq + Sync,
+    E: Send,
+{
+    new.par_iter()
+        .filter(|(key, value)| previous.get(*key) != Some(*value))
+        .map(|(key, value)| (key, value, encode(value)))
+        .collect()
+}
+
+/// [`sync_rows`] with the rows to set already found and encoded by
+/// [`changed_rows`].
+fn sync_encoded_rows<K: Ord, V, E>(
+    previous: &BTreeMap<K, V>,
+    new: &BTreeMap<K, V>,
+    changed: &[(&K, &V, E)],
+    partial: bool,
+    mut delete: impl FnMut(&K) -> rusqlite::Result<()>,
+    mut set: impl FnMut(&K, &V, &E) -> rusqlite::Result<()>,
+) -> rusqlite::Result<()> {
+    for key in previous.keys() {
+        if !partial && !new.contains_key(key) {
+            delete(key)?;
+        }
+    }
+    for (key, value, encoded) in changed {
+        set(key, value, encoded)?;
+    }
+    Ok(())
 }
 
 /// Delete the rows of `previous` missing from `new` and set the rows of
