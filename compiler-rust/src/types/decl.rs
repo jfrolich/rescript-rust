@@ -301,10 +301,10 @@ pub struct LabelDeclaration {
 impl LabelDeclaration {
     /// OCaml `Record_runtime.declaration_name`: the field's runtime name,
     /// its `@as` rename or else its declared name.
-    pub fn declaration_name(&self) -> String {
+    pub fn declaration_name(&self) -> crate::name::Name {
         match &self.ld_runtime_name {
-            Some(name) => name.clone(),
-            None => self.ld_id.name().to_string(),
+            Some(name) => crate::name::Name::new(name),
+            None => self.ld_id.name_atom(),
         }
     }
 }
@@ -426,10 +426,10 @@ pub fn may_equal_constructor(c1: &ConstructorDescription, c2: &ConstructorDescri
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LabelDescription {
     /// Short name
-    pub lbl_name: String,
+    pub lbl_name: crate::name::Name,
     /// The name the field has at run time: its `@as` payload when it has
     /// one, otherwise `lbl_name` (OCaml `lbl_runtime_name`).
-    pub lbl_runtime_name: String,
+    pub lbl_runtime_name: crate::name::Name,
     /// Result type (the record type)
     pub lbl_res: TypeExprRef,
     /// Argument type (the field type)

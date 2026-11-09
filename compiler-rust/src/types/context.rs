@@ -383,7 +383,7 @@ impl QualifiedRecordLabelCacheKey {
 
 #[derive(Clone, Debug)]
 pub(crate) struct RecordLabelDescriptionSummary {
-    label_positions: Arc<crate::fast_hash::AHashMap<String, usize>>,
+    label_positions: Arc<crate::fast_hash::AHashMap<crate::name::Name, usize>>,
     pub(crate) mandatory_count: usize,
     pub(crate) has_optional: bool,
     pub(crate) has_dotdotdot: bool,
@@ -399,7 +399,7 @@ impl RecordLabelDescriptionSummary {
         let mut all_regular = true;
 
         for (idx, label) in labels.iter().enumerate() {
-            label_positions.insert(label.lbl_name.clone(), idx);
+            label_positions.insert(label.lbl_name, idx);
             if label.lbl_optional {
                 has_optional = true;
             } else {
@@ -426,13 +426,14 @@ impl RecordLabelDescriptionSummary {
     }
 
     #[inline]
-    pub(crate) fn label_index(&self, name: &str) -> Option<usize> {
-        self.label_positions.get(name).copied()
+    pub(crate) fn label_index(&self, name: impl crate::name::NameKey) -> Option<usize> {
+        self.label_positions.get(&name.name_key()?).copied()
     }
 
     #[inline]
-    pub(crate) fn contains_label(&self, name: &str) -> bool {
-        self.label_positions.contains_key(name)
+    pub(crate) fn contains_label(&self, name: impl crate::name::NameKey) -> bool {
+        name.name_key()
+            .is_some_and(|name| self.label_positions.contains_key(&name))
     }
 }
 

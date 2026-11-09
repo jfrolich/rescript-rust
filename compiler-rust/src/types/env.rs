@@ -2393,7 +2393,7 @@ fn build_initial_env(ctx: &TypeContext) -> Env {
                 let res_ty = ctx.new_generic_constr(type_path.clone(), decl.type_params.clone());
                 for (pos, ld) in labels.iter().enumerate() {
                     let label_desc = LabelDescription {
-                        lbl_name: ld.ld_id.name().to_string(),
+                        lbl_name: ld.ld_id.name_atom(),
                         lbl_runtime_name: ld.declaration_name(),
                         lbl_res: res_ty,
                         lbl_arg: crate::types::ctype::remap_label_type_to_params(

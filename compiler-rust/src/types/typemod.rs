@@ -5868,7 +5868,7 @@ fn check_variant_tag_field_conflicts(
         for field in fields {
             let field_name = field.ld_id.name().to_string();
             // `Record_runtime.declaration_name field`.
-            let effective_field_name = field.declaration_name();
+            let effective_field_name = field.declaration_name().to_string();
             if effective_field_name == effective_tag_name {
                 return Err(ast_untagged_variant_error(
                     ctx.resolve_loc(constructor.cd_loc),
@@ -18222,7 +18222,7 @@ fn type_structure_item<'a>(
                     let mut label_descs = Vec::with_capacity(labels.len());
                     for (pos, ld) in labels.iter().enumerate() {
                         let lbl_desc = crate::types::LabelDescription {
-                            lbl_name: ld.ld_id.name().to_string(),
+                            lbl_name: ld.ld_id.name_atom(),
                             lbl_runtime_name: ld.declaration_name(),
                             lbl_res: ty_res,
                             lbl_arg: crate::types::ctype::remap_label_type_to_params(
@@ -20102,7 +20102,7 @@ fn type_structure_item<'a>(
                                         lbl_arg,
                                     );
                                     let lbl_desc = crate::types::LabelDescription {
-                                        lbl_name: ld.ld_id.name().to_string(),
+                                        lbl_name: ld.ld_id.name_atom(),
                                         lbl_runtime_name: ld.declaration_name(),
                                         lbl_res: ty_res,
                                         lbl_arg,

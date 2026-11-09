@@ -5136,7 +5136,7 @@ fn build_as_type(
                     for (idx, label_decl) in label_decls.iter().enumerate() {
                         let label_name = label_decl.ld_id.name().to_string();
                         let resolved_label = crate::types::LabelDescription {
-                            lbl_name: label_decl.ld_id.name().to_string(),
+                            lbl_name: label_decl.ld_id.name_atom(),
                             lbl_runtime_name: label_decl.declaration_name(),
                             // Keep OCaml's build_as_type constraint: each label
                             // result type must point to the concrete record type.
@@ -6268,7 +6268,7 @@ fn type_pattern_record(
                 if field.opt && !env_label.lbl_optional {
                     return Err(TypeCoreError::FieldNotOptional {
                         loc: tctx.arena.get_pat(field.pat).ppat_loc,
-                        name: env_label.lbl_name.clone(),
+                        name: env_label.lbl_name.to_string(),
                         typ: env_label.lbl_res,
                     });
                 }
@@ -6309,9 +6309,9 @@ fn type_pattern_record(
                 }
                 let field_ty = ctx.new_var(None);
                 let label_desc = crate::types::LabelDescription {
-                    lbl_name: field.field_name.to_string(),
+                    lbl_name: field.field_name,
                     // typecore.ml `Label` name choice: `lbl_runtime_name = name`.
-                    lbl_runtime_name: field.field_name.to_string(),
+                    lbl_runtime_name: field.field_name,
                     lbl_res: record_ty,
                     lbl_arg: field_ty,
                     lbl_mut: crate::types::MutableFlag::Immutable,
@@ -6435,7 +6435,7 @@ fn type_pattern_record(
             if !defined.insert(label_desc.lbl_pos) {
                 return Err(TypeCoreError::LabelMultiplyDefined {
                     loc: first_loc,
-                    label: label_desc.lbl_name.clone(),
+                    label: label_desc.lbl_name.to_string(),
                     jsx_component_info: None,
                 });
             }
@@ -6468,7 +6468,7 @@ fn type_pattern_record(
                 .iter()
                 .filter_map(|label| {
                     let name = label.ld_id.name();
-                    (!present.contains(name)).then(|| name.to_string())
+                    (!present.contains(&crate::name::Name::new(name))).then(|| name.to_string())
                 })
                 .collect::<Vec<_>>();
             if !missing.is_empty() {
@@ -6921,17 +6921,17 @@ fn type_record_pat_rest(
 
     let explicit_fields: Vec<String> = lbl_pat_list
         .iter()
-        .map(|(_, label, _, _)| label.lbl_name.clone())
+        .map(|(_, label, _, _)| label.lbl_name.to_string())
         .collect();
     let explicit_runtime_labels: Vec<String> = lbl_pat_list
         .iter()
-        .map(|(_, label, _, _)| label.lbl_runtime_name.clone())
+        .map(|(_, label, _, _)| label.lbl_runtime_name.to_string())
         .collect();
     let explicit_optional_fields: Vec<String> = lbl_pat_list
         .iter()
         .filter_map(|(_, label, _, optional)| {
             if *optional {
-                Some(label.lbl_name.clone())
+                Some(label.lbl_name.to_string())
             } else {
                 None
             }
@@ -7005,7 +7005,7 @@ fn type_record_pat_rest(
     }
     for rest_label in &rest_labels {
         let rest_field = rest_label.ld_id.name().to_string();
-        let rest_runtime_name = rest_label.declaration_name();
+        let rest_runtime_name = rest_label.declaration_name().to_string();
         let source_field = source_fields
             .iter()
             .find(|field| field.ld_id.name() == rest_field);
@@ -7015,7 +7015,7 @@ fn type_record_pat_rest(
                 RecordRestError::ExtraField(rest_field, rest_type_longident),
             );
         };
-        let source_runtime_name = source_field.declaration_name();
+        let source_runtime_name = source_field.declaration_name().to_string();
         if source_runtime_name != rest_runtime_name {
             return rest_err(
                 rest_type_lid.loc,
@@ -14330,7 +14330,7 @@ fn type_record(
         let mut by_name = HashMap::with_capacity(explicit_entries.len());
         for (idx, entry) in explicit_entries.iter().enumerate() {
             if let Some((_lid, label_desc, _def, _opt)) = entry {
-                by_name.insert(label_desc.lbl_name.clone(), idx);
+                by_name.insert(label_desc.lbl_name.to_string(), idx);
             }
         }
         by_name
@@ -14640,7 +14640,7 @@ fn type_record(
                     if field.opt && !env_label.lbl_optional {
                         return Err(TypeCoreError::FieldNotOptional {
                             loc: tctx.arena.get_expr(field.expr).pexp_loc,
-                            name: env_label.lbl_name.clone(),
+                            name: env_label.lbl_name.to_string(),
                             typ: env_label.lbl_res,
                         });
                     }
@@ -14945,7 +14945,7 @@ fn type_record(
             if lbl1.lbl_pos == lbl2.lbl_pos {
                 return Err(TypeCoreError::LabelMultiplyDefined {
                     loc: lid2.loc,
-                    label: lbl1.lbl_name.clone(),
+                    label: lbl1.lbl_name.to_string(),
                     jsx_component_info: jsx_component_error_info.clone(),
                 });
             }
@@ -14966,7 +14966,7 @@ fn type_record(
                 labels
                     .iter()
                     .filter(|ld| !ld.lbl_optional)
-                    .map(|ld| ld.lbl_name.clone())
+                    .map(|ld| ld.lbl_name.to_string())
                     .collect()
             };
             if !labels_missing.is_empty() {
@@ -15057,11 +15057,11 @@ fn type_record(
                 {
                     let key_pos = raw_label_desc.lbl_pos;
                     if explicit_overrides.contains_key(&key_pos)
-                        || explicit_overrides_by_name.contains_key(&raw_label_desc.lbl_name)
+                        || explicit_overrides_by_name.contains_key(raw_label_desc.lbl_name.as_str())
                     {
                         continue;
                     }
-                    labels_missing.push(raw_label_desc.lbl_name.clone());
+                    labels_missing.push(raw_label_desc.lbl_name.to_string());
                 }
                 labels_missing
             };
@@ -15101,13 +15101,13 @@ fn type_record(
                 let key_pos = raw_label_desc.lbl_pos;
 
                 if let Some(explicit_idx) = explicit_overrides.remove(&key_pos) {
-                    explicit_overrides_by_name.remove(&label_name);
+                    explicit_overrides_by_name.remove(label_name.as_str());
                     if let Some(explicit) = explicit_entries[explicit_idx].take() {
                         typed_fields.push(explicit);
                     }
                     continue;
                 }
-                if let Some(explicit_idx) = explicit_overrides_by_name.remove(&label_name) {
+                if let Some(explicit_idx) = explicit_overrides_by_name.remove(label_name.as_str()) {
                     if let Some(explicit) = explicit_entries[explicit_idx].take() {
                         typed_fields.push(explicit);
                     }
@@ -15151,7 +15151,7 @@ fn type_record(
                         false,
                     ));
                 } else {
-                    labels_missing.push(label_name);
+                    labels_missing.push(label_name.to_string());
                 }
             }
 
@@ -15218,7 +15218,7 @@ fn type_record(
                     }
                 } else {
                     crate::types::LabelDescription {
-                        lbl_name: label_name.clone(),
+                        lbl_name: label_decl.ld_id.name_atom(),
                         lbl_runtime_name: label_decl.declaration_name(),
                         lbl_res: record_ty,
                         lbl_arg: crate::types::instance(ctx, label_decl.ld_type),
@@ -15260,7 +15260,7 @@ fn type_record(
                     }
                 } else {
                     crate::types::LabelDescription {
-                        lbl_name: label_name.clone(),
+                        lbl_name: label_decl.ld_id.name_atom(),
                         lbl_runtime_name: label_decl.declaration_name(),
                         lbl_res: record_ty,
                         lbl_arg: option_ty,
@@ -15674,7 +15674,7 @@ fn get_record_labels(
                 .iter()
                 .enumerate()
                 .map(|(pos, ld)| {
-                    let name = ld.declaration_name();
+                    let name = ld.declaration_name().to_string();
                     (
                         name,
                         pos as i32,
@@ -24597,7 +24597,7 @@ fn build_record_label_descriptions_info(
                 .iter()
                 .enumerate()
                 .map(|(pos, ld)| crate::types::LabelDescription {
-                    lbl_name: ld.ld_id.name().to_string(),
+                    lbl_name: ld.ld_id.name_atom(),
                     lbl_runtime_name: ld.declaration_name(),
                     lbl_res: shared_res,
                     lbl_arg: crate::types::ctype::remap_label_type_to_params(
@@ -24659,7 +24659,7 @@ fn build_record_label_descriptions_info(
                 .iter()
                 .enumerate()
                 .map(|(pos, ld)| crate::types::LabelDescription {
-                    lbl_name: ld.ld_id.name().to_string(),
+                    lbl_name: ld.ld_id.name_atom(),
                     lbl_runtime_name: ld.declaration_name(),
                     lbl_res: shared_res,
                     lbl_arg: crate::types::ctype::remap_label_type_to_params(
@@ -24709,7 +24709,7 @@ fn build_record_label_descriptions_info(
         .iter()
         .enumerate()
         .map(|(pos, ld)| crate::types::LabelDescription {
-            lbl_name: ld.ld_id.name().to_string(),
+            lbl_name: ld.ld_id.name_atom(),
             lbl_runtime_name: ld.declaration_name(),
             lbl_res: shared_res,
             lbl_arg: crate::types::ctype::remap_label_type_to_params(
@@ -24866,7 +24866,7 @@ fn lookup_label_by_expected_type(
     for (pos, ld) in labels.iter().enumerate() {
         if ld.ld_id.name() == label_name {
             let mut selected = crate::types::LabelDescription {
-                lbl_name: ld.ld_id.name().to_string(),
+                lbl_name: ld.ld_id.name_atom(),
                 lbl_runtime_name: ld.declaration_name(),
                 lbl_res: res_ty,
                 lbl_arg: crate::types::ctype::remap_label_type_to_params(
@@ -25008,12 +25008,12 @@ fn materialize_dict_pattern_label(
     }
 
     let mut synthetic = base_label.clone();
-    synthetic.lbl_name = field_name.to_string();
+    synthetic.lbl_name = crate::name::Name::new(field_name);
     synthetic.lbl_pos = cached.len() as i32;
     synthetic.lbl_repres = crate::types::RecordRepresentation::RecordRegular;
 
     cached.push((
-        synthetic.lbl_name.clone(),
+        synthetic.lbl_name.to_string(),
         synthetic.lbl_pos,
         synthetic.lbl_mut,
         synthetic.lbl_repres.clone(),
