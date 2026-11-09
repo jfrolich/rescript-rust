@@ -411,6 +411,11 @@ pub struct JsArena {
     string_switches: Table<StringSwitchInfo>,
     tries: Table<TryInfo>,
     colds: Table<Cold>,
+    /// Scratch stacks for rebuilding lists without a temporary `Vec` per
+    /// node. A user records the length as a mark, pushes above it and
+    /// truncates back to the mark before returning, so nested users stack.
+    expr_scratch: Vec<Expr>,
+    stmt_scratch: Vec<Stmt>,
 }
 
 impl Default for JsArena {
@@ -502,6 +507,8 @@ impl JsArena {
                 finally: None,
             }),
             colds: Table::new(Cold::default()),
+            expr_scratch: Vec::new(),
+            stmt_scratch: Vec::new(),
         }
     }
 
@@ -716,6 +723,52 @@ impl JsArena {
 
     pub fn expr_vec(&self, list: ExprList) -> Vec<Expr> {
         self.exprs(list).to_vec()
+    }
+
+    /// The current top of the expression scratch stack.
+    #[inline]
+    pub fn expr_scratch_mark(&self) -> usize {
+        self.expr_scratch.len()
+    }
+
+    #[inline]
+    pub fn expr_scratch_push(&mut self, e: Expr) {
+        self.expr_scratch.push(e);
+    }
+
+    /// Interns the scratch entries above `mark` as a list and pops them.
+    pub fn expr_list_from_scratch(&mut self, mark: usize) -> ExprList {
+        let list = ExprList::new(self.expr_lists.push_slice(&self.expr_scratch[mark..]));
+        self.expr_scratch.truncate(mark);
+        list
+    }
+
+    #[inline]
+    pub fn expr_scratch_truncate(&mut self, mark: usize) {
+        self.expr_scratch.truncate(mark);
+    }
+
+    /// The current top of the statement scratch stack.
+    #[inline]
+    pub fn stmt_scratch_mark(&self) -> usize {
+        self.stmt_scratch.len()
+    }
+
+    #[inline]
+    pub fn stmt_scratch_push(&mut self, s: Stmt) {
+        self.stmt_scratch.push(s);
+    }
+
+    /// Interns the scratch entries above `mark` as a block and pops them.
+    pub fn stmt_list_from_scratch(&mut self, mark: usize) -> StmtList {
+        let list = StmtList::new(self.stmt_lists.push_slice(&self.stmt_scratch[mark..]));
+        self.stmt_scratch.truncate(mark);
+        list
+    }
+
+    #[inline]
+    pub fn stmt_scratch_truncate(&mut self, mark: usize) {
+        self.stmt_scratch.truncate(mark);
     }
 
     pub fn prop_list(&mut self, items: &[(PropName, Expr)]) -> PropList {

@@ -142,6 +142,14 @@ fn replace_source_fields(
 struct RecordRest;
 
 impl Mapper for RecordRest {
+    fn block(
+        &mut self,
+        j: &mut JsArena,
+        block: crate::js_ir::arena::StmtList,
+    ) -> crate::js_ir::arena::StmtList {
+        crate::js_ir::walk::map_block_with_items(self, j, block)
+    }
+
     fn block_items(&mut self, j: &mut JsArena, block: &[Stmt]) -> Vec<Stmt> {
         let mut reversed: Vec<Stmt> = Vec::with_capacity(block.len());
         for statement in block.iter().rev() {
