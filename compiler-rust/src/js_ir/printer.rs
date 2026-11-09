@@ -16,13 +16,14 @@ use crate::ident::Ident;
 use crate::js_ir::source_map::SourceMapBuilder;
 use crate::lambda::LamLoc;
 use crate::lambda::SwitchCaseTag;
+use crate::name::Name;
 use ahash::{AHashMap as HashMap, AHashSet as HashSet};
 use std::borrow::Cow;
 
 #[derive(Clone, Default)]
 struct NameScope {
-    ident_names: HashMap<Ident, String>,
-    next_suffix: HashMap<String, usize>,
+    ident_names: HashMap<Ident, Name>,
+    next_suffix: HashMap<Name, usize>,
 }
 
 enum JsxChildren<'a> {
@@ -401,82 +402,68 @@ impl<'r> JsPrinter<'r> {
             .expect("printer must always have a name scope")
     }
 
-    fn lookup_visible_name(&self, id: &Ident) -> Option<String> {
+    fn lookup_visible_name(&self, id: &Ident) -> Option<Name> {
         self.name_scopes
             .iter()
             .rev()
-            .find_map(|scope| scope.ident_names.get(id).cloned())
+            .find_map(|scope| scope.ident_names.get(id).copied())
     }
 
-    fn reserve_printed_name(scope: &mut NameScope, printed: &str) {
+    fn reserve_printed_name(scope: &mut NameScope, printed: Name) {
         let (base, next_suffix) = printed_name_base_and_next_suffix(printed);
         let next = scope.next_suffix.entry(base).or_insert(0);
         *next = (*next).max(next_suffix);
     }
 
-    fn visible_next_suffix_for_base(&self, base: &str) -> Option<usize> {
+    fn visible_next_suffix_for_base(&self, base: Name) -> Option<usize> {
         self.name_scopes
             .iter()
             .rev()
-            .find_map(|scope| scope.next_suffix.get(base).copied())
+            .find_map(|scope| scope.next_suffix.get(&base).copied())
     }
 
-    fn assign_scoped_ident_name(&mut self, id: &Ident, base: String) -> String {
-        let scope = self.current_name_scope_mut();
-        let printed = match scope.next_suffix.get_mut(base.as_str()) {
-            Some(next) => {
-                let printed = if *next == 0 {
-                    base
-                } else {
-                    format!("{base}${next}")
-                };
-                *next += 1;
-                printed
-            }
-            None => {
-                scope.next_suffix.insert(base.clone(), 1);
-                base
-            }
-        };
-        scope.ident_names.insert(*id, printed.clone());
-        printed
-    }
-
-    fn fresh_scoped_name(&mut self, base: String) -> String {
+    /// The next printed name for `base` in the current scope: `base`, then
+    /// `base$1`, `base$2`, ...
+    fn next_scoped_name(&mut self, base: Name) -> Name {
         let next = self
             .current_name_scope_mut()
             .next_suffix
-            .entry(base.clone())
+            .entry(base)
             .or_insert(0);
         let printed = if *next == 0 {
-            base.clone()
+            base
         } else {
-            format!("{base}${next}")
+            Name::new(&format!("{base}${next}"))
         };
         *next += 1;
         printed
     }
 
+    fn assign_scoped_ident_name(&mut self, id: &Ident, base: Name) -> Name {
+        let printed = self.next_scoped_name(base);
+        self.current_name_scope_mut().ident_names.insert(*id, printed);
+        printed
+    }
+
     /// Get a unique name for an identifier
-    pub(super) fn ident_name(&mut self, id: &Ident) -> String {
+    pub(super) fn ident_name(&mut self, id: &Ident) -> Name {
         if let Some(name) = self.lookup_visible_name(id) {
             return name;
         }
 
         if id.stamp() == 0 {
-            return id.name().to_string();
+            return id.name_atom();
         }
 
-        self.assign_scoped_ident_name(id, convert_ident_name(id.name()))
+        self.assign_scoped_ident_name(id, convert_ident_atom(id.name_atom()))
     }
 
-    pub(super) fn module_ident_name(&mut self, id: &Ident) -> String {
+    pub(super) fn module_ident_name(&mut self, id: &Ident) -> Name {
         if let Some(name) = self.lookup_visible_name(id) {
             return name;
         }
 
-        let base = convert_ident_name(id.name());
-        self.assign_scoped_ident_name(id, base)
+        self.assign_scoped_ident_name(id, convert_ident_atom(id.name_atom()))
     }
 
     /// Print statements
@@ -630,7 +617,10 @@ impl<'r> JsPrinter<'r> {
                 // cardinal-based counter).
                 let id_name = self.ident_name(&id);
                 let finish_binding = for_range_finish_needs_binding(a, end).then(|| {
-                    self.fresh_scoped_name(format!("{}_finish", convert_ident_name(id.name())))
+                    self.next_scoped_name(Name::new(&format!(
+                        "{}_finish",
+                        convert_ident_atom(id.name_atom())
+                    )))
                 });
 
                 self.write("for ");
@@ -1034,14 +1024,14 @@ impl<'r> JsPrinter<'r> {
         let mut scope = self.spare_name_scopes.pop().unwrap_or_default();
         for ident in reserved_idents {
             let printed = self.ident_name(ident);
-            let (base, next_suffix) = printed_name_base_and_next_suffix(&printed);
+            let (base, next_suffix) = printed_name_base_and_next_suffix(printed);
             // OCaml's Ext_pp_scope.sub_scope copies the whole stamp map for a
             // captured mangled name, not just the one captured identifier
             // (compiler/ext/ext_pp_scope.ml:109-117). That means capturing
             // outer `match` also reserves an already-visible sibling
             // `match$1`, so body-local `match` starts at `match$2`.
             let visible_next = self
-                .visible_next_suffix_for_base(&base)
+                .visible_next_suffix_for_base(base)
                 .unwrap_or(next_suffix);
             scope
                 .next_suffix
@@ -1183,8 +1173,8 @@ impl<'r> JsPrinter<'r> {
                 // OCaml `Ext_pp_scope.merge` reserves the converted printed
                 // name for every id in a function environment, including
                 // stamp-0 JS globals; see compiler/ext/ext_pp_scope.ml:98-100.
-                let base = convert_ident_name(ident.name());
-                Self::reserve_printed_name(self.current_name_scope_mut(), &base);
+                let base = convert_ident_atom(ident.name_atom());
+                Self::reserve_printed_name(self.current_name_scope_mut(), base);
             } else {
                 let _ = self.ident_name(ident);
             }
@@ -1249,7 +1239,7 @@ impl<'r> JsPrinter<'r> {
         is_method: bool,
         params: &[Ident],
         body: &[Stmt],
-    ) -> (Option<String>, Vec<String>) {
+    ) -> (Option<Name>, Vec<Name>) {
         if !is_method {
             let rendered_params = params.iter().map(|param| self.ident_name(param)).collect();
             return (None, rendered_params);
@@ -1273,7 +1263,7 @@ impl<'r> JsPrinter<'r> {
         body: &[Stmt],
         return_unit: bool,
         directive: Option<&str>,
-        this_binding: Option<&String>,
+        this_binding: Option<&Name>,
     ) {
         let body_prints_any = function_body_prints_any(self.a, body);
         self.write(" {");
@@ -3172,6 +3162,22 @@ pub(crate) fn js_export_name(name: &str) -> String {
     }
 }
 
+/// [`convert_ident_name`] for an interned name: the name itself when the
+/// conversion leaves it unchanged (almost always), without building a copy.
+pub(crate) fn convert_ident_atom(name: Name) -> Name {
+    let text = name.as_str();
+    let unwrapped = unwrap_uppercase_exotic(text);
+    if unwrapped.len() == text.len()
+        && !is_js_keyword_or_global(text)
+        && text
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '$'))
+    {
+        return name;
+    }
+    Name::new(&convert_ident_name(text))
+}
+
 pub(crate) fn convert_ident_name(name: &str) -> String {
     let name = unwrap_uppercase_exotic(name);
     if is_js_keyword_or_global(name) {
@@ -3247,12 +3253,12 @@ fn advance_position(line: &mut usize, column: &mut usize, text: &str) {
     }
 }
 
-fn printed_name_base_and_next_suffix(printed: &str) -> (String, usize) {
+fn printed_name_base_and_next_suffix(printed: Name) -> (Name, usize) {
     match printed.rsplit_once('$') {
         Some((base, suffix)) if !base.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()) => {
-            (base.to_string(), suffix.parse::<usize>().unwrap_or(0) + 1)
+            (Name::new(base), suffix.parse::<usize>().unwrap_or(0) + 1)
         }
-        _ => (printed.to_string(), 1),
+        _ => (printed, 1),
     }
 }
 
