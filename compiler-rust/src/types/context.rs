@@ -600,6 +600,8 @@ pub struct TypeContext {
     store_build_poisoned: Cell<bool>,
     /// Effects of the current store build on this compilation.
     store_build_effects: RefCell<Vec<StoreEffect>>,
+    /// Guards of the current store build (see `StorePiece::guards`).
+    store_build_guards: RefCell<Vec<(Path, bool)>>,
     /// Shared pieces whose effects this compilation has already applied.
     touched_store_pieces: RefCell<crate::fast_hash::AHashSet<u64>>,
     /// Component tables of store-resident modules whose build read state
@@ -958,6 +960,12 @@ pub(crate) enum StoreEffect {
 pub(crate) struct StorePiece {
     id: u64,
     effects: Vec<StoreEffect>,
+    /// Answers the build read from this compilation's alias-source table
+    /// (`has_component_paths_for_alias_source`): the alias source and
+    /// whether it had registered component paths. A compilation may reuse
+    /// the piece only when it gives the same answers
+    /// (`TypeContext::store_guards_hold`).
+    guards: Vec<(Path, bool)>,
 }
 
 pub(crate) fn store_debug_enabled() -> bool {
@@ -1138,6 +1146,7 @@ impl TypeContext {
             store_build_row_start: Cell::new(0),
             store_build_poisoned: Cell::new(false),
             store_build_effects: RefCell::new(Vec::new()),
+            store_build_guards: RefCell::new(Vec::new()),
             touched_store_pieces: RefCell::new(crate::fast_hash::AHashSet::new()),
             local_stored_components: RefCell::new(crate::fast_hash::AHashMap::new()),
             mutation_journal: RefCell::new(TypeMutationJournal::default()),
@@ -1618,6 +1627,40 @@ impl TypeContext {
             }
         }
         sources
+    }
+
+    /// Whether any component path has `alias_source` as its alias source.
+    ///
+    /// Inside a store build this is recorded as a guard of the piece being
+    /// built instead of poisoning it. Registrations are only ever added
+    /// (`register_component_alias_source`), and the build's own effects are
+    /// replayed before any later read, so a compilation that gives the same
+    /// answer before replaying the piece gives the same answer at every
+    /// point of the build: the piece is valid for it.
+    pub(crate) fn has_component_paths_for_alias_source(&self, alias_source: &Path) -> bool {
+        let nonempty = self.alias_source_has_component_paths(alias_source);
+        if self.in_store_build() {
+            self.store_build_guards
+                .borrow_mut()
+                .push((alias_source.clone(), nonempty));
+        }
+        nonempty
+    }
+
+    fn alias_source_has_component_paths(&self, alias_source: &Path) -> bool {
+        self.component_paths_by_alias_source
+            .borrow()
+            .get(&SamePathKey(alias_source.clone()))
+            .is_some_and(|paths| !paths.is_empty())
+    }
+
+    /// Whether this compilation answers every guard of `piece` as the build
+    /// that produced it did.
+    pub(crate) fn store_guards_hold(&self, piece: &StorePiece) -> bool {
+        piece
+            .guards
+            .iter()
+            .all(|(source, nonempty)| self.alias_source_has_component_paths(source) == *nonempty)
     }
 
     pub(crate) fn component_paths_for_alias_source(&self, alias_source: &Path) -> Vec<Path> {
@@ -4316,8 +4359,26 @@ impl TypeContext {
         &self,
         build: impl FnOnce() -> R,
     ) -> (R, Option<Arc<StorePiece>>) {
+        self.build_in_store_with_guards(false, build)
+    }
+
+    /// `build_in_store` for a caller that checks `store_guards_hold` before
+    /// reusing the result. Other callers treat a guarded build as private.
+    pub(crate) fn build_in_store_guarded<R>(
+        &self,
+        build: impl FnOnce() -> R,
+    ) -> (R, Option<Arc<StorePiece>>) {
+        self.build_in_store_with_guards(true, build)
+    }
+
+    fn build_in_store_with_guards<R>(
+        &self,
+        guarded: bool,
+        build: impl FnOnce() -> R,
+    ) -> (R, Option<Arc<StorePiece>>) {
         let depth = self.store_build_depth.get();
         let outer_effects = std::mem::take(&mut *self.store_build_effects.borrow_mut());
+        let outer_guards = std::mem::take(&mut *self.store_build_guards.borrow_mut());
         let outer_poisoned = self.store_build_poisoned.replace(false);
         if depth == 0 {
             self.store_build_type_start.set(self.store.type_count());
@@ -4329,7 +4390,14 @@ impl TypeContext {
         self.store_build_depth.set(depth);
         super::thread_store::set_store_build_depth(depth);
         let effects = std::mem::replace(&mut *self.store_build_effects.borrow_mut(), outer_effects);
-        let poisoned = self.store_build_poisoned.replace(outer_poisoned);
+        let guards = std::mem::replace(&mut *self.store_build_guards.borrow_mut(), outer_guards);
+        let mut poisoned = self.store_build_poisoned.replace(outer_poisoned);
+        if !guards.is_empty() && !guarded {
+            if !poisoned && store_debug_enabled() {
+                eprintln!("[store-poison] unguarded-alias-source-read");
+            }
+            poisoned = true;
+        }
         if poisoned {
             if depth > 0 {
                 // The enclosing build may hold this result.
@@ -4338,9 +4406,17 @@ impl TypeContext {
             }
             return (result, None);
         }
+        if depth > 0 {
+            // The enclosing build holds this result, so it depends on the
+            // same answers.
+            self.store_build_guards
+                .borrow_mut()
+                .extend(guards.iter().cloned());
+        }
         let piece = Arc::new(StorePiece {
             id: NEXT_STORE_PIECE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             effects,
+            guards,
         });
         self.touched_store_pieces.borrow_mut().insert(piece.id);
         if depth > 0 {
@@ -4358,6 +4434,9 @@ impl TypeContext {
             self.store_build_effects
                 .borrow_mut()
                 .push(StoreEffect::Piece(piece.clone()));
+            self.store_build_guards
+                .borrow_mut()
+                .extend(piece.guards.iter().cloned());
         }
         if self.touched_store_pieces.borrow().contains(&piece.id) {
             return;

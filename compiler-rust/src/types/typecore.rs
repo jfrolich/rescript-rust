@@ -27145,9 +27145,7 @@ fn flattened_alias_component_parent(
     pers_env
         .and_then(|pers| pers.qualified_alias_path_for_flattened_head(head.name()))
         .is_some()
-        || !ctx
-            .component_paths_for_alias_source(&source_path)
-            .is_empty()
+        || ctx.has_component_paths_for_alias_source(&source_path)
 }
 
 fn build_shared_persistent_root_components(
@@ -27279,6 +27277,12 @@ pub(crate) fn with_resolved_module_components_for_path_with_cache_mode<R>(
     }
     if let Some(shared_key) = shared_key.as_ref()
         && let Some((components, piece)) = ctx.thread_store().shared_components(shared_key)
+        && (ctx.store_guards_hold(&piece) || {
+            if crate::types::context::store_debug_enabled() {
+                eprintln!("[store-guard-miss] {}", module_path.name());
+            }
+            false
+        })
     {
         if crate::types::context::store_debug_enabled() {
             eprintln!("[store-hit] {}", module_path.name());
@@ -27308,7 +27312,7 @@ pub(crate) fn with_resolved_module_components_for_path_with_cache_mode<R>(
             })
     };
     let (components, piece) = if shared_key.is_some() {
-        ctx.build_in_store(|| build(pers_env))
+        ctx.build_in_store_guarded(|| build(pers_env))
     } else {
         (build(pers_env), None)
     };

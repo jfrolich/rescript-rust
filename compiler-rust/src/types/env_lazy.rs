@@ -2163,13 +2163,21 @@ impl StoredModuleComponents {
         f: impl FnOnce(&QualifiedModuleComponents) -> R,
     ) -> Option<R> {
         if let Some(components) = self.cached.get().cloned() {
-            if ctx.compiler_counters_enabled() {
-                crate::perf_counters::record_stored_component_cached();
+            // A shared result is valid for this compilation only when it
+            // answers the build's guarded reads the same way.
+            let piece = self.cached_piece.get();
+            if piece.is_none_or(|piece| ctx.store_guards_hold(piece)) {
+                if ctx.compiler_counters_enabled() {
+                    crate::perf_counters::record_stored_component_cached();
+                }
+                if let Some(piece) = piece {
+                    ctx.touch_store_piece(piece);
+                }
+                return Some(f(components.as_ref()));
             }
-            if let Some(piece) = self.cached_piece.get() {
-                ctx.touch_store_piece(piece);
+            if super::context::store_debug_enabled() {
+                eprintln!("[store-guard-miss] {}", self.access_path.name());
             }
-            return Some(f(components.as_ref()));
         }
 
         if self.in_store {
@@ -2179,12 +2187,16 @@ impl StoredModuleComponents {
                 return Some(f(components.as_ref()));
             }
             let (components, piece) =
-                ctx.build_in_store(|| self.build_components(pers_env, ctx, cache_mode));
+                ctx.build_in_store_guarded(|| self.build_components(pers_env, ctx, cache_mode));
             let components = Arc::new(components?);
             match piece {
                 Some(piece) => {
                     if self.cached.set(components.clone()).is_ok() {
                         let _ = self.cached_piece.set(piece);
+                    } else {
+                        // The shared result failed this compilation's guards:
+                        // keep this build for the rest of the compilation.
+                        ctx.set_local_stored_components(self.local_id, components.clone());
                     }
                 }
                 // Built from this compilation's private state (such as a
