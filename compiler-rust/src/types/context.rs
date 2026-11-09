@@ -700,7 +700,7 @@ pub struct TypeContext {
     /// declaration-derived source path available when Rust later reaches a
     /// cached component view without `PersistentEnv`; it must not be inferred
     /// from flattened module-name spelling.
-    component_alias_sources: RefCell<crate::fast_hash::AHashMap<SamePathKey, Vec<Path>>>,
+    component_alias_sources: RefCell<crate::fast_hash::AHashMap<SamePathKey, AliasPaths>>,
     /// Component-table name indexes of compilation-local signatures, keyed by
     /// address; the entry keeps the signature alive so the key stays unique.
     signature_indexes: RefCell<
@@ -712,7 +712,7 @@ pub struct TypeContext {
             ),
         >,
     >,
-    component_paths_by_alias_source: RefCell<crate::fast_hash::AHashMap<SamePathKey, Vec<Path>>>,
+    component_paths_by_alias_source: RefCell<crate::fast_hash::AHashMap<SamePathKey, AliasPaths>>,
 
     /// Cached dotted value lookups keyed by resolved module access path.
     resolved_module_value_cache: RefCell<
@@ -1116,7 +1116,11 @@ impl hashbrown::Equivalent<(u64, Path, Path)> for ScopedPathPairRef<'_> {
     }
 }
 
-fn push_unique_path(paths: &mut Vec<Path>, path: Path) {
+/// The paths related to one path by an alias: almost always one, so kept
+/// inline.
+type AliasPaths = smallvec::SmallVec<[Path; 2]>;
+
+fn push_unique_path(paths: &mut AliasPaths, path: Path) {
     if !paths.iter().any(|existing| existing.same(&path)) {
         paths.push(path);
     }
@@ -1578,7 +1582,7 @@ impl TypeContext {
         // target path through `find_module`; env.ml:1530 then prefixes the
         // selected component path. Record exactly that pair so later helpers
         // recover alias identity from declarations, not from name spelling.
-        let mut alias_sources = vec![alias_source];
+        let mut alias_sources: AliasPaths = smallvec::smallvec![alias_source];
         for backing_source in self.flattened_backing_sources_for_alias_source(&alias_sources[0]) {
             if !alias_sources
                 .iter()
@@ -1678,7 +1682,7 @@ impl TypeContext {
         self.component_paths_by_alias_source
             .borrow()
             .get(&SamePathKey(*alias_source))
-            .cloned()
+            .map(|paths| paths.to_vec())
             .unwrap_or_default()
     }
 
@@ -1694,7 +1698,7 @@ impl TypeContext {
         self.component_alias_sources
             .borrow()
             .get(&SamePathKey(*component_path))
-            .cloned()
+            .map(|paths| paths.to_vec())
             .unwrap_or_default()
     }
 
