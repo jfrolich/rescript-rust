@@ -8997,3 +8997,60 @@ fn short_circuit_declaration_with_statements_is_a_variable() {
         .expect("the target is declared");
     assert_eq!(declaration.property, LetKind::Variable);
 }
+
+/// lam_compile.ml:1689-1704: the arguments of `Pdebugger` are compiled in
+/// `EffectCall Not_tail` before the statement (a literal unit compiles to
+/// nothing), and the primitive's value is unit in every continuation.
+#[test]
+fn debugger_compiles_its_arguments_for_effect_before_the_statement() {
+    let log = Ident::create_local("log");
+    let effect = || {
+        Lambda::apply(
+            Lambda::var(log),
+            vec![Lambda::const_(Constant::string("before"))],
+            test_apply_info(),
+        )
+    };
+    let debugger = |args| Lambda::prim(Primitive::Pdebugger, args, LamLoc::NONE);
+    // One printed statement per element, so the layout between statements
+    // (the JS printer's business) does not matter here.
+    let statements = |block: &Block| -> Vec<String> {
+        block
+            .iter()
+            .map(|statement| print_block(&vec![statement.clone()]).trim().to_string())
+            .collect()
+    };
+
+    let mut compiler = LambdaCompiler::new();
+    let block = compiler.compile_effect_block(&debugger(vec![Lambda::unit()]));
+    assert_eq!(statements(&block), ["debugger;"]);
+
+    let mut compiler = LambdaCompiler::new();
+    let block = compiler.compile_effect_block(&debugger(vec![effect()]));
+    assert_eq!(statements(&block), ["log(\"before\");", "debugger;"]);
+
+    // NeedValue: the argument and the statement form the prelude, the value
+    // is unit.
+    let mut compiler = LambdaCompiler::new();
+    let compiled = compiler.compile_expr(&debugger(vec![effect()]));
+    assert_eq!(
+        statements(&compiled.prelude),
+        ["log(\"before\");", "debugger;"]
+    );
+    assert!(matches!(
+        compiled.expr.desc,
+        ExpressionDesc::Undefined { is_unit: true }
+    ));
+    assert_eq!(compiled.finished, OutputFinished::False);
+
+    // A control-flow argument is compiled exactly as it is for effect on its
+    // own (`EffectCall Not_tail`), not as a value, then the statement follows.
+    let cond = Ident::create_local("cond");
+    let conditional = || Lambda::if_(Lambda::var(cond), effect(), Lambda::unit());
+    let mut compiler = LambdaCompiler::new();
+    let mut expected = statements(&compiler.compile_effect_block(&conditional()));
+    expected.push("debugger;".to_string());
+    let mut compiler = LambdaCompiler::new();
+    let block = compiler.compile_effect_block(&debugger(vec![conditional()]));
+    assert_eq!(statements(&block), expected);
+}

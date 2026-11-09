@@ -33,6 +33,9 @@ impl LambdaCompiler {
         if let Some(compiled) = self.compile_flat_make_field(prim, LambdaInputs::Recursive(args)) {
             return compiled;
         }
+        if matches!(prim, Primitive::Pdebugger) {
+            return self.compile_debugger(args, loc);
+        }
 
         let mut prelude = vec![];
         let mut compiled_args = Vec::new();
@@ -42,6 +45,29 @@ impl LambdaCompiler {
             compiled_args.push(compiled.expr);
         }
         self.compile_primitive_js(prim, compiled_args, prelude, loc)
+    }
+
+    /// lam_compile.ml:1689-1704 `Pdebugger`: `debugger(arg)` takes a unit
+    /// argument that may have effects, so each argument is compiled first in
+    /// `EffectCall Not_tail` and emitted with `Js_output.output_as_block`
+    /// (`Ext_list.flat_map`, left to right), then the `debugger` statement.
+    /// A literal `()` compiles to nothing. The value is `E.unit`, which the
+    /// caller's continuation consumes (`output_of_block_and_expression`).
+    fn compile_debugger(&mut self, args: &[Lambda], loc: &LamLoc) -> Compiled {
+        let mut prelude = Vec::new();
+        for arg in args {
+            prelude.extend(self.compile_effect_block_output(arg).block);
+        }
+        let mut statement = Statement::debugger();
+        statement.source_loc = self.source_loc(loc);
+        prelude.push(statement);
+        // `E.unit` (js_exp_make.ml:302-305), so an external call taking the
+        // value drops it like any unit argument.
+        Compiled {
+            prelude,
+            expr: Expression::undefined(true),
+            finished: OutputFinished::False,
+        }
     }
 
     /// lam_compile.ml `flat_make_field`: every nested `make` is also exported
