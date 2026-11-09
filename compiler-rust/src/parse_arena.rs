@@ -496,7 +496,7 @@ pub struct ParseArena {
     longidents: Arena<Longident, LidentIdx>,
     /// Slots reserved before type checking for environment-dependent synthetic
     /// longidents, such as record-field qualification and omitted labels.
-    synthetic_longidents: elsa::sync::FrozenVec<Box<Longident>>,
+    synthetic_longidents: SyntheticVec<Longident>,
     synthetic_longident_base: u32,
     /// Arena of arities (returns ArityIdx).
     /// Use `push_arity()` for computed paths (fresh indices).
@@ -570,7 +570,7 @@ pub struct ParseArena {
     /// Replaces `Box<Pattern>` for recursive AST references.
     patterns: Arena<Pattern, PatIdx>,
     /// Append-only stable storage for OCaml-shaped synthetic pattern rewrites.
-    synthetic_patterns: elsa::sync::FrozenVec<Box<Pattern>>,
+    synthetic_patterns: SyntheticVec<Pattern>,
     synthetic_pattern_base: u32,
     /// Typechecker-generated locations (e.g. OCaml's `{loc with loc_ghost =
     /// true}` copies), appended while the arena is shared. Addressed from
@@ -988,7 +988,7 @@ impl Default for ParseArena {
             last_position_file_name: None,
             locations: Arena::default(),
             longidents,
-            synthetic_longidents: elsa::sync::FrozenVec::new(),
+            synthetic_longidents: SyntheticVec::default(),
             synthetic_longident_base: u32::MAX,
             arities,
             expr_overrides: crate::fast_hash::AHashMap::default(),
@@ -1015,7 +1015,7 @@ impl Default for ParseArena {
             builtin_spice_disabled: false,
             used_attributes: std::sync::Mutex::new(HashSet::new()),
             patterns: Arena::default(),
-            synthetic_patterns: elsa::sync::FrozenVec::new(),
+            synthetic_patterns: SyntheticVec::default(),
             synthetic_pattern_base: u32::MAX,
             synthetic_locations: elsa::sync::FrozenVec::new(),
             shared_expressions: elsa::sync::FrozenVec::new(),
@@ -2280,9 +2280,9 @@ impl ParseArena {
         self.strings.reserve(128);
 
         self.synthetic_pattern_base = self.patterns.len() as u32;
-        self.synthetic_patterns = elsa::sync::FrozenVec::new();
+        self.synthetic_patterns = SyntheticVec::default();
         self.synthetic_longident_base = self.longidents.len() as u32;
-        self.synthetic_longidents = elsa::sync::FrozenVec::new();
+        self.synthetic_longidents = SyntheticVec::default();
         self.synthetic_string_base = self.strings.len() as u32;
         self.synthetic_strings = elsa::sync::FrozenVec::new();
     }
@@ -2290,8 +2290,7 @@ impl ParseArena {
     /// Append a typechecker-generated longident to storage reserved before the
     /// arena became shared.
     pub fn push_typecheck_longident(&self, longident: Longident) -> LidentIdx {
-        let slot = self.synthetic_longidents.len();
-        self.synthetic_longidents.push(Box::new(longident));
+        let slot = self.synthetic_longidents.push(longident);
         LidentIdx::from_u32(self.synthetic_longident_base + slot as u32)
     }
 
@@ -2318,8 +2317,7 @@ impl ParseArena {
     /// arena became shared. This is a safe, append-only equivalent of OCaml's
     /// allocation during pattern rewrites.
     pub fn push_typecheck_pattern(&self, pattern: Pattern) -> PatIdx {
-        let slot = self.synthetic_patterns.len();
-        self.synthetic_patterns.push(Box::new(pattern));
+        let slot = self.synthetic_patterns.push(pattern);
         PatIdx::from_u32(self.synthetic_pattern_base + slot as u32)
     }
 
@@ -3411,6 +3409,54 @@ pub type CaseList = ArenaList<Case>;
 /// Lists pushed through a shared arena reference (by the type checker) set
 /// this bit in `ArenaList::start`; the rest is the slot in `ListPool::shared`.
 const SHARED_LIST_FLAG: u32 = 1 << 31;
+
+/// Append-only storage for nodes the type checker adds through a shared
+/// reference. Nodes go into fixed-size chunks, so a node costs no allocation
+/// of its own and references to it stay valid while more are appended.
+struct SyntheticVec<T> {
+    chunks: elsa::sync::FrozenVec<Box<[std::sync::OnceLock<T>]>>,
+    len: std::sync::Mutex<usize>,
+}
+
+impl<T> SyntheticVec<T> {
+    const CHUNK: usize = 64;
+
+    /// Appends `value`; returns its index.
+    fn push(&self, value: T) -> usize {
+        let mut len = self.len.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let index = *len;
+        if index % Self::CHUNK == 0 {
+            self.chunks
+                .push((0..Self::CHUNK).map(|_| std::sync::OnceLock::new()).collect());
+        }
+        let slot = &self.chunks.get(index / Self::CHUNK).expect("chunk pushed above")
+            [index % Self::CHUNK];
+        if slot.set(value).is_err() {
+            unreachable!("synthetic slot {index} filled twice");
+        }
+        *len = index + 1;
+        index
+    }
+
+    fn get(&self, index: usize) -> Option<&T> {
+        self.chunks.get(index / Self::CHUNK)?[index % Self::CHUNK].get()
+    }
+}
+
+impl<T> Default for SyntheticVec<T> {
+    fn default() -> Self {
+        Self {
+            chunks: elsa::sync::FrozenVec::new(),
+            len: std::sync::Mutex::new(0),
+        }
+    }
+}
+
+impl<T: std::fmt::Debug> std::fmt::Debug for SyntheticVec<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SyntheticVec").finish_non_exhaustive()
+    }
+}
 
 /// Backing storage for one kind of `ArenaList`: one buffer for lists built
 /// while the arena is exclusively borrowed, plus append-only slots for the
