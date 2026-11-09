@@ -4561,17 +4561,20 @@ fn parse_template_literal_with_prefix(
     p: &mut Parser<'_>,
     prefix: Option<(LidentIdx, Location)>,
 ) -> Expression {
-    // OCaml `parse_parts`: capture `start_pos`, scan the next template token,
-    // then take a tail, or a part followed by `parse_expr_block`; anything
-    // else is an unexpected token and drops the parts.
+    let template_start_idx = p.start_pos_idx();
+    // OCaml `parse_parts`: scan the next template token, then take a tail, or
+    // a part followed by `parse_expr_block`; anything else is an unexpected
+    // token and drops the parts.
     let mut parts: Vec<(Cow<'static, str>, LocIdx, Option<Expression>)> = vec![];
     let mut first = true;
     loop {
-        let text_start_pos_idx = p.start_pos_idx();
         if !first || p.token == Token::Backtick {
             p.next_template_literal_token();
         }
         first = false;
+        // A segment is its text: it starts after the backquote or `}` before
+        // it and ends before the `${` or backquote after it.
+        let text_start_pos_idx = p.start_pos_idx();
         match &p.token {
             Token::TemplateTail { text, pos } => {
                 let text = extend_cow_lifetime(text.clone());
@@ -4602,14 +4605,8 @@ fn parse_template_literal_with_prefix(
         }
     }
 
-    let template_loc = match (parts.first(), parts.last()) {
-        (Some((_, first_loc, _)), Some((_, last_loc, _))) => {
-            let start_idx = p.loc_start_idx(*first_loc);
-            let end_idx = p.loc_end_idx(*last_loc);
-            p.mk_loc_idx(start_idx, end_idx)
-        }
-        _ => p.none_loc(),
-    };
+    // OCaml `mk_loc template_start (Parser.position p)`: the whole literal.
+    let template_loc = p.mk_loc_idx_to_prev_end(template_start_idx);
     let mut sources: Vec<StringLoc> = Vec::with_capacity(parts.len());
     let mut source_texts: Vec<Cow<'static, str>> = Vec::with_capacity(parts.len());
     let mut values: Vec<Expression> = Vec::new();
@@ -4772,5 +4769,72 @@ mod tests {
     fn test_is_send_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<Constant>();
+    }
+
+    /// res_test.ml: a template segment's location covers its text, without
+    /// the delimiters, and the template's location covers the whole literal.
+    #[test]
+    fn template_segment_locations_cover_their_text() {
+        fn check(source: &str) {
+            let mut parser = Parser::new("templates.res", source);
+            let structure = crate::parser::module::parse_structure(&mut parser);
+            assert!(parser.diagnostics().is_empty(), "{source} parses");
+            let arena = parser.into_arena();
+            // `pos_cnum` is `pos_bol` (the line's start, in bytes) plus the
+            // UTF-16 code units since then, so it is a byte offset only for
+            // ASCII text; these sources are ASCII. Non-ASCII sources are
+            // checked through the file decoding in `mapper_from0`'s tests.
+            let slice = |loc: LocIdx| {
+                let loc = arena.to_location(loc);
+                &source[loc.loc_start.cnum as usize..loc.loc_end.cnum as usize]
+            };
+            let check_segments = |segments: &[StringLoc]| {
+                for segment in segments {
+                    let txt = arena.get_string(segment.txt);
+                    assert_eq!(slice(segment.loc), txt, "segment {txt:?} in {source:?}");
+                }
+            };
+            let mut found = 0;
+            let mut pending: Vec<&Expression> = Vec::new();
+            for item in &structure {
+                if let StructureItemDesc::Pstr_value((_, bindings)) = &item.pstr_desc {
+                    for binding in arena.vb_list(*bindings) {
+                        pending.push(arena.get_expr(binding.pvb_expr));
+                    }
+                }
+            }
+            while let Some(expr) = pending.pop() {
+                match &expr.pexp_desc {
+                    ExpressionDesc::Pexp_template(template) => {
+                        found += 1;
+                        check_segments(&template.source_segments);
+                        let literal = slice(expr.pexp_loc);
+                        assert!(literal.starts_with('`'), "{literal:?} in {source:?}");
+                        assert!(literal.ends_with('`'), "{literal:?} in {source:?}");
+                        assert!(literal.len() >= 2, "{literal:?} in {source:?}");
+                        pending.extend(template.values.iter().map(|v| arena.get_expr(*v)));
+                    }
+                    ExpressionDesc::Pexp_tagged_template(template) => {
+                        found += 1;
+                        check_segments(&template.raw_sources);
+                        pending.extend(template.values.iter().map(|v| arena.get_expr(*v)));
+                    }
+                    _ => {}
+                }
+            }
+            assert!(found > 0, "{source:?} has a template");
+        }
+        for source in [
+            "let a = `template`",
+            "let a = ``",
+            "let a = `a${b}c`",
+            "let a = `${b}${c}`",
+            "let a = `a\\`b\\${c}`",
+            "let a = `first\nsecond ${b}\nthird`",
+            "let a = `outer ${`inner ${b}`} end`",
+            "let a = sql`select ${x} from t`",
+        ] {
+            check(source);
+        }
     }
 }

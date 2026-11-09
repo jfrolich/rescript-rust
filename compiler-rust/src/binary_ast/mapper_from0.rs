@@ -298,6 +298,20 @@ fn has_template_attr0(attrs: &[pt0::Attribute]) -> bool {
     attrs.iter().any(|(name, _)| name.txt == "res.template")
 }
 
+/// ast_mapper_from0.ml `single_template_segment_loc`: a template without
+/// interpolations is a single v0 constant at the template's location,
+/// backquotes included. Its one segment is the text between them.
+fn single_template_segment_loc(loc: &FullLocation) -> FullLocation {
+    if loc.loc_ghost || loc.loc_end.cnum - loc.loc_start.cnum < 2 {
+        return *loc;
+    }
+    let mut segment = *loc;
+    segment.loc_start.cnum += 1;
+    segment.loc_end.cnum -= 1;
+    segment.loc_ghost = false;
+    segment
+}
+
 /// ast_mapper_from0.ml `template_source_from0`: `js`/`*j` strings are source
 /// text; anything else is a semantic value given canonical template spelling.
 fn template_source_from0(text: &str, delimiter: Option<&str>) -> String {
@@ -1767,7 +1781,8 @@ impl<'a> Mapper<'a> {
             {
                 attrs = self.remove_template_attr(attrs);
                 let source = template_source_from0(text, delimiter.as_deref());
-                let segment = self.mk_string_loc(&source, &expr.pexp_loc);
+                let segment_loc = single_template_segment_loc(&expr.pexp_loc);
+                let segment = self.mk_string_loc(&source, &segment_loc);
                 current::ExpressionDesc::Pexp_template(Box::new(current::PexpTemplate {
                     source_segments: vec![segment],
                     values: vec![],
@@ -3593,6 +3608,155 @@ mod tests {
             // Locations included: the parsed literal has real ones.
             assert_eq!(before, sexp_locs(&back, &arena), "{source} roundtrips");
         }
+    }
+
+    /// ounit_ast_mapper0_tests.ml `test_template_locations_roundtrip_through_ast0`:
+    /// templates come back as they were parsed, locations included.
+    #[test]
+    fn template_locations_roundtrip_through_ast0() {
+        let source = "let a = `template`
+let b = %foo(`payload`)
+let c = `multi
+line`
+let d = `a${b}c${d}`
+let e = sql`select ${x}`
+let f = `a\\`b`
+let g = %raw(@foo `\"x\"`)
+let h = ``";
+        let mut parser = crate::parser::Parser::new("Templates.res", source);
+        let structure = crate::parser::module::parse_structure(&mut parser);
+        assert!(
+            parser.diagnostics().is_empty(),
+            "expected valid ReScript source"
+        );
+        let mut arena = parser.into_arena();
+        let before = sexp_locs(&structure, &arena);
+        let tree0 = super::super::mapper_to0::map_structure(&mut arena, &structure);
+        let back = map_structure(&mut arena, &tree0).expect("no mapper error");
+        assert_eq!(before, sexp_locs(&back, &arena));
+    }
+
+    /// Byte offset in `text` of a parser position: `bol` is the line's start
+    /// in bytes and `cnum - bol` counts UTF-16 code units from there
+    /// (`Res_scanner.position`).
+    fn utf8_byte_offset(text: &str, pos: &Position) -> usize {
+        let bol = pos.bol as usize;
+        let mut units = (pos.cnum - pos.bol) as usize;
+        let mut offset = bol;
+        for ch in text[bol..].chars() {
+            if units == 0 {
+                break;
+            }
+            units -= ch.len_utf16();
+            offset += ch.len_utf8();
+        }
+        assert_eq!(units, 0, "position inside a character");
+        offset
+    }
+
+    /// Template locations with non-ASCII text, read like a source file
+    /// (one char per byte): segments cover their text, templates cover the
+    /// literal, a raw payload covers its backquotes, and all of them come
+    /// back from the v0 round trip.
+    #[test]
+    fn non_ascii_template_locations_roundtrip_through_ast0() {
+        let text = "let p = \"\u{e9}t\u{e9}\"
+let a = `h\u{e9}llo ${x} w\u{f6}rld \u{20ac}`
+let b = `\u{1F600}${y}\u{1F389} end`
+let c = `first \u{fc}
+second ${`inner \u{e8} ${z}`}
+third \u{1F600}`
+let d = sql`s\u{e9}lect ${x} \u{20ac}`
+let e = %raw(`/* \u{e9} */ 1`)
+let f = ``
+";
+        let source = crate::source_text::latin1_bytes_to_string(text.as_bytes().to_vec());
+        let mut parser = crate::parser::Parser::new("Unicode.res", &source);
+        let structure = crate::parser::module::parse_structure(&mut parser);
+        assert!(
+            parser.diagnostics().is_empty(),
+            "expected valid ReScript source"
+        );
+        let mut arena = parser.into_arena();
+        let span = |arena: &ParseArena, loc: LocIdx| {
+            let loc = arena.to_location(loc);
+            &text[utf8_byte_offset(text, &loc.loc_start)..utf8_byte_offset(text, &loc.loc_end)]
+        };
+        let mut segments = 0;
+        let mut pending: Vec<&current::Expression> = Vec::new();
+        for item in &structure {
+            if let current::StructureItemDesc::Pstr_value((_, bindings)) = &item.pstr_desc {
+                for binding in arena.vb_list(*bindings) {
+                    pending.push(arena.get_expr(binding.pvb_expr));
+                }
+            }
+        }
+        while let Some(expr) = pending.pop() {
+            let (sources, values) = match &expr.pexp_desc {
+                current::ExpressionDesc::Pexp_template(template) => {
+                    let literal = span(&arena, expr.pexp_loc);
+                    assert!(
+                        literal.starts_with('`') && literal.ends_with('`'),
+                        "{literal:?}"
+                    );
+                    assert!(literal.len() >= 2, "{literal:?}");
+                    (&template.source_segments, &template.values)
+                }
+                current::ExpressionDesc::Pexp_tagged_template(template) => {
+                    assert!(span(&arena, expr.pexp_loc).ends_with('`'));
+                    (&template.raw_sources, &template.values)
+                }
+                current::ExpressionDesc::Pexp_raw(raw) => {
+                    let current::RawSource::Template(source) = &raw.source else {
+                        panic!("expected a template payload");
+                    };
+                    let txt =
+                        crate::source_text::decode_internal_utf8(arena.get_string(source.txt))
+                            .into_owned();
+                    assert_eq!(span(&arena, source.loc), txt);
+                    let payload = crate::ast_raw::payload_loc_shared(&arena, &raw.source);
+                    assert_eq!(span(&arena, payload), format!("`{txt}`"));
+                    segments += 1;
+                    continue;
+                }
+                _ => continue,
+            };
+            for source in sources {
+                let txt = crate::source_text::decode_internal_utf8(arena.get_string(source.txt));
+                assert_eq!(span(&arena, source.loc), txt, "segment {txt:?}");
+                segments += 1;
+            }
+            pending.extend(values.iter().map(|value| arena.get_expr(*value)));
+        }
+        assert_eq!(segments, 12);
+        let before = sexp_locs(&structure, &arena);
+        let tree0 = super::super::mapper_to0::map_structure(&mut arena, &structure);
+        let back = map_structure(&mut arena, &tree0).expect("no mapper error");
+        assert_eq!(before, sexp_locs(&back, &arena));
+    }
+
+    /// ast_mapper_from0.ml `single_template_segment_loc`: a ghost location,
+    /// or one too short to hold both backquotes, is kept whole; otherwise
+    /// the segment drops one character on each side and is not ghost.
+    #[test]
+    fn single_template_segment_loc_branches() {
+        let ghost = Location {
+            loc_ghost: true,
+            ..source_loc(3, 10)
+        };
+        assert_eq!(single_template_segment_loc(&ghost), ghost);
+        for (start, end) in [(4, 4), (4, 5)] {
+            let short = source_loc(start, end);
+            assert_eq!(single_template_segment_loc(&short), short);
+        }
+        assert_eq!(
+            single_template_segment_loc(&source_loc(4, 6)),
+            source_loc(5, 5)
+        );
+        assert_eq!(
+            single_template_segment_loc(&source_loc(8, 18)),
+            source_loc(9, 17)
+        );
     }
 
     fn source_loc(start: i32, end: i32) -> Location {

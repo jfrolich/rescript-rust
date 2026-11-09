@@ -773,7 +773,9 @@ pub struct PexpApply {
 }
 
 /// OCaml `Pexp_template {source_segments; values}`: an ordinary backquoted
-/// expression. There is always one more source segment than value.
+/// expression. Each segment's location covers its text only, without the
+/// backquotes, `${` or `}` around it, and there is always one more source
+/// segment than value.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PexpTemplate {
     pub source_segments: Vec<StringLoc>,

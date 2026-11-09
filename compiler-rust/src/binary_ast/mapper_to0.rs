@@ -1476,9 +1476,17 @@ impl<'a> Mapper<'a> {
                 parts.push(self.map_expr_idx(*value));
             }
         }
+        let single = parts.len() == 1;
         let mut parts = parts.into_iter();
         let first = parts.next().expect("a template has at least one segment");
         let mut expression = first;
+        if single {
+            // ast_mapper_to0.ml `[only]`: the constant stands for the whole
+            // template, so it takes the template's location, which includes
+            // the closing backquote. `Ast_mapper_from0` derives the segment's
+            // location from it.
+            expression.pexp_loc = loc;
+        }
         for rhs in parts {
             let template_attr = self.internal_attr("res.template");
             let caret = self.intern("^");

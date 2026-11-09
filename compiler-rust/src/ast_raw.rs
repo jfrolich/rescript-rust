@@ -38,8 +38,9 @@ pub fn js_source(arena: &ParseArena, source: &RawSource) -> String {
     }
 }
 
-/// The location `Ast_raw.payload_loc` computes, as a full location: for a
-/// template, the source ends before the closing backquote.
+/// The location `Ast_raw.payload_loc` computes, as a full location: a
+/// template source is the text between the backquotes, so the literal is one
+/// character wider on each side.
 fn payload_location(arena: &ParseArena, source: &RawSource) -> Option<crate::location::Location> {
     match source {
         RawSource::String(_) => None,
@@ -48,7 +49,9 @@ fn payload_location(arena: &ParseArena, source: &RawSource) -> Option<crate::loc
                 return None;
             }
             let mut loc = arena.to_location(s.loc);
+            loc.loc_start.cnum -= 1;
             loc.loc_end.cnum += 1;
+            loc.loc_ghost = false;
             Some(loc)
         }
     }
