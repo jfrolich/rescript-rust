@@ -593,7 +593,7 @@ pub struct ParseArena {
     synthetic_positions: elsa::sync::FrozenVec<Box<Position>>,
     /// Slots reserved before type checking for strings discovered only after
     /// environment lookup (notably omitted record labels).
-    synthetic_strings: elsa::sync::FrozenVec<Box<String>>,
+    synthetic_strings: elsa::sync::FrozenVec<String>,
     synthetic_string_base: u32,
     /// The interned [`crate::name::Name`] of each parsed string, filled on
     /// first use: identifier occurrences are resolved several times during
@@ -2303,14 +2303,14 @@ impl ParseArena {
             "typechecker string pushed before reserve_typecheck_synthetic_capacity"
         );
         let slot = self.synthetic_strings.len();
-        self.synthetic_strings.push(Box::new(string));
+        self.synthetic_strings.push(string);
         StrIdx::from_raw(self.synthetic_string_base + slot as u32)
     }
 
     /// Append a typechecker-generated simple identifier, allocating its string
     /// in the matching reserved storage.
-    pub fn push_typecheck_lident(&self, name: &str) -> LidentIdx {
-        let name = self.push_typecheck_string(name.to_owned());
+    pub fn push_typecheck_lident(&self, name: impl Into<String>) -> LidentIdx {
+        let name = self.push_typecheck_string(name.into());
         self.push_typecheck_longident(Longident::Lident(name))
     }
 
