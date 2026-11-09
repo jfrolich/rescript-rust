@@ -437,6 +437,9 @@ pub struct LambdaCompiler {
     /// unit, `let d = await import(Unit)`; reads of nested `make` values
     /// through them use the flat exports too.
     pub(crate) awaited_units: ahash::AHashSet<Ident>,
+    /// `Lam_stats.assignable`: the variables some `Lassign` assigns.
+    /// Reading one of them is never delayed past other code.
+    pub(crate) assignable: ahash::AHashSet<Ident>,
     /// Resolves the location handles of the Lambda being compiled and of the
     /// JS IR built from it; imported lambdas are rebased into it.
     lam_locs: LamLocTable,
@@ -544,6 +547,7 @@ impl LambdaCompiler {
             cmj_export_arities: AHashMap::new(),
             flat_make_paths: Vec::new(),
             awaited_units: ahash::AHashSet::new(),
+            assignable: ahash::AHashSet::new(),
             lam_locs: LamLocTable::opaque(),
             external_module_ids: AHashMap::new(),
             dynamic_import_modules: Vec::new(),
@@ -740,6 +744,10 @@ impl LambdaCompiler {
         // the flat aliases are added.
         self.awaited_units =
             crate::lambda::lam_compile_main::awaited_units(&simplified_result.lambda);
+        // lam_compile_main.ml: `assignable`, the union of
+        // `Lambda_traverse.assigned_variables` over the groups.
+        self.assignable =
+            crate::lambda::lambda_traverse::assigned_variables(&simplified_result.lambda);
         self.cmj_export_constants =
             collect_cmj_export_constants_from_simplified_lambda(&simplified_result.lambda);
         self.cmj_export_lambdas = if self.cross_module_inline {
@@ -1173,20 +1181,24 @@ impl LambdaCompiler {
             return compiled;
         }
 
-        let mut prelude = vec![];
-        let func = self.compile_expr(&apply.ap_func);
-        prelude.extend(func.prelude);
-        let mut args = Vec::new();
-        for arg in &apply.ap_args {
-            let compiled = self.compile_expr(arg);
-            prelude.extend(compiled.prelude);
-            args.push(compiled.expr);
-        }
+        // lam_compile.ml compile_apply: `compile_arguments ~method_callee
+        // lambda_cxt (ap_func :: ap_args)`, with `method_callee` for a JS
+        // method read `Pjs_object_get`.
+        let method_callee = matches!(
+            apply.ap_func.as_ref(),
+            Lambda::Lprim(info) if matches!(info.primitive, Primitive::PjsObjectGet(_))
+        );
+        let (prelude, mut values) = self.compile_arguments(
+            method_callee,
+            std::iter::once(apply.ap_func.as_ref()).chain(apply.ap_args.iter()),
+        );
+        let args = values.split_off(1);
+        let func_expr = values.pop().expect("compiled callee");
 
         Compiled {
             prelude,
             expr: Expression::call(
-                func.expr,
+                func_expr,
                 args,
                 call_info_of_apply_status(apply.ap_info.status),
             ),
@@ -1400,18 +1412,20 @@ impl LambdaCompiler {
                         &func.body,
                         &apply.ap_args,
                     );
-                return Some(self.compile_expr(&reduced));
+                // lam_compile.ml: the inlined body comes from another module,
+                // so the variables it assigns are not in `assignable` yet;
+                // they are added for this body only.
+                let added = self.extend_assignable(&reduced);
+                let compiled = self.compile_expr(&reduced);
+                self.restore_assignable(added);
+                return Some(compiled);
             }
         }
 
         let known_arity = self.resolve_cmj_module_field_arity(&module, field_name);
-        let mut prelude = Vec::new();
-        let mut args = Vec::with_capacity(apply.ap_args.len());
-        for arg in &apply.ap_args {
-            let compiled = self.compile_expr(arg);
-            prelude.extend(compiled.prelude);
-            args.push(compiled.expr);
-        }
+        // lam_compile.ml compile_external_field_apply:
+        // `compile_arguments lambda_cxt ap_args`.
+        let (prelude, args) = self.compile_arguments(false, apply.ap_args.iter());
 
         let func = Expression::qualified(module, Some(field_name.to_string()));
         let expr = match apply.ap_info.status {
@@ -2182,7 +2196,10 @@ impl LambdaCompiler {
                 Some(start_compiled.expr),
                 finish_compiled.expr,
             );
-        } else if js_expr_no_side_effects(&start_compiled.expr) {
+        } else if crate::lambda::lam_compile_arguments::delay_safe(
+            &self.assignable,
+            &start_compiled.expr,
+        ) {
             prelude.extend(finish_compiled.prelude);
             push_loop(
                 &mut prelude,
@@ -4206,13 +4223,13 @@ impl LambdaCompiler {
             return None;
         }
 
-        let mut block = Vec::new();
-        let mut args = Vec::new();
-        for arg in &apply.ap_args {
-            let compiled = self.compile_expr(arg);
-            block.extend(compiled.prelude);
-            args.push(compiled.expr);
-        }
+        // lam_compile.ml compile_apply compiles `ap_func :: ap_args` with
+        // `compile_arguments` before matching the self tail call.
+        let (mut block, mut args) = self.compile_arguments(
+            false,
+            std::iter::once(apply.ap_func.as_ref()).chain(apply.ap_args.iter()),
+        );
+        args.remove(0);
 
         tail_loop.triggered = true;
         let args = if tail_loop.params.is_empty() {

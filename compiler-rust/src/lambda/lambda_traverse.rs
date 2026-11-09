@@ -13,6 +13,23 @@ use crate::lambda::{Apply, Lambda, PrimInfo};
 /// A mapped value and whether it differs from the input.
 pub type Mapped = (Lambda, bool);
 
+/// `Lambda_traverse.assigned_variables`: the variables some `Lassign` in
+/// the term assigns.
+pub fn assigned_variables(lam: &Lambda) -> ahash::AHashSet<crate::ident::Ident> {
+    fn walk(lam: &Lambda, assigned: &mut ahash::AHashSet<crate::ident::Ident>) {
+        if let Lambda::Lassign(id, _) = lam {
+            assigned.insert(*id);
+        }
+        shallow_exists(lam, &mut |child| {
+            walk(child, assigned);
+            false
+        });
+    }
+    let mut assigned = ahash::AHashSet::new();
+    walk(lam, &mut assigned);
+    assigned
+}
+
 /// `Lambda_traverse.shallow_exists`: does any immediate child satisfy `f`?
 /// Children are visited in OCaml's order and the walk short-circuits.
 pub fn shallow_exists(lam: &Lambda, f: &mut impl FnMut(&Lambda) -> bool) -> bool {

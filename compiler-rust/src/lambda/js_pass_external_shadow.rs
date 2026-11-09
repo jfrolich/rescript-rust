@@ -52,7 +52,7 @@ struct Scope {
 
 /// A reference to a JS global (`Ext_ident.is_js`): Rust creates JS globals
 /// as persistent idents.
-fn is_js_global(id: &Ident) -> bool {
+pub(crate) fn is_js_global(id: &Ident) -> bool {
     id.is_js() || (id.is_global() && id.stamp() == 0)
 }
 

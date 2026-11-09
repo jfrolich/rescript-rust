@@ -37,13 +37,11 @@ impl LambdaCompiler {
             return self.compile_debugger(args, loc);
         }
 
-        let mut prelude = vec![];
-        let mut compiled_args = Vec::new();
-        for arg in args {
-            let compiled = self.compile_expr(arg);
-            prelude.extend(compiled.prelude);
-            compiled_args.push(compiled.expr);
-        }
+        // lam_compile.ml `compile_arguments lambda_cxt args`, shared by
+        // `compile_primitive_default`, `Pjs_object_set` and
+        // `Pjs_object_create`; the remaining cases take a single argument,
+        // which `sequence_arguments` leaves as it is.
+        let (prelude, compiled_args) = self.compile_arguments(false, args.iter());
         self.compile_primitive_js(prim, compiled_args, prelude, loc)
     }
 

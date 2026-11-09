@@ -46,6 +46,7 @@ pub mod lam_compile_external;
 pub(crate) mod lam_compile_input;
 pub mod lam_compile_main;
 pub(crate) mod lam_compile_main_indexed;
+pub mod lam_compile_arguments;
 pub mod lam_compile_primitive;
 pub mod lam_compile_variant;
 pub mod lam_constant;
