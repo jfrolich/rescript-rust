@@ -667,17 +667,20 @@ impl<'r> JsPrinter<'r> {
                         self.write(" = ");
                         self.print_expression(end, 1);
                     }
+                    // js_dump.ml: `Some ident_expression, (Number _ | Var _)`
+                    // prints the start at level 0.
                     (Some(init_expr), None) => {
                         self.write("let ");
                         self.write(&id_name);
                         self.write(" = ");
-                        self.print_expression(init_expr, 1);
+                        self.print_expression(init_expr, 0);
                     }
+                    // js_dump.ml: `None, _` prints the finish at level 15.
                     (None, Some(finish_name)) => {
                         self.write("let ");
                         self.write(finish_name);
                         self.write(" = ");
-                        self.print_expression(end, 1);
+                        self.print_expression(end, 15);
                     }
                     (None, None) => {}
                 }
