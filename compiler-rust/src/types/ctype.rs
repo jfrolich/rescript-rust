@@ -1379,6 +1379,9 @@ fn mcomp_record_description(
 /// OCaml `unify3`'s same-path constructor case (compiler/ml/ctype.ml:2218-2245):
 /// argument unification depends on the unification mode, equation
 /// generation, and injectivity.
+/// Constructor arguments paired for unification; most constructors have few.
+type TypePairs = smallvec::SmallVec<[(TypeExprRef, TypeExprRef); 8]>;
+
 fn unify_same_path_constructor_args(
     ctx: &TypeContext,
     state: &mut UnifyState,
@@ -1386,7 +1389,7 @@ fn unify_same_path_constructor_args(
     t1: TypeExprRef,
     t2: TypeExprRef,
     path: &Path,
-    pairs: Vec<(TypeExprRef, TypeExprRef)>,
+    pairs: TypePairs,
 ) -> TypeResult<()> {
     if state.mode == UnifyMode::Expression || !state.generate_equations {
         for (a, b) in pairs {
@@ -1417,7 +1420,7 @@ fn unify_same_path_constructor_args(
         }
         return Ok(());
     }
-    let inj: Vec<bool> = match state
+    let inj: smallvec::SmallVec<[bool; 8]> = match state
         .env()
         .and_then(|env| lookup_type_decl_for_path(ctx, env, path).map(|d| d.into_owned()))
     {
@@ -1430,7 +1433,7 @@ fn unify_same_path_constructor_args(
                 .map(|v| v.mem(VarianceFlag::Inj))
                 .collect()
         }
-        None => vec![false; pairs.len()],
+        None => smallvec::smallvec![false; pairs.len()],
     };
     for (injective, (a, b)) in inj.into_iter().zip(pairs) {
         if injective {
@@ -7216,7 +7219,7 @@ fn unify_after_expansion(
             && args1.len() == args2.len()
         {
             let same_path = *path1;
-            let pairs: Vec<_> = ctx
+            let pairs: TypePairs = ctx
                 .type_list(args1)
                 .iter()
                 .zip(ctx.type_list(args2).iter())
@@ -7727,7 +7730,7 @@ fn unify_types(
 
             // OCaml ctype.ml:2412-2414: after abbreviation expansion, equal
             // concrete constructor paths unify their full argument lists.
-            let pairs: Vec<_> = ctx
+            let pairs: TypePairs = ctx
                 .type_list(args1)
                 .iter()
                 .zip(ctx.type_list(args2).iter())
@@ -7942,7 +7945,7 @@ fn unify_types(
                 return Err(TypeError::Unify(vec![]));
             }
 
-            let pairs: Vec<_> = ctx
+            let pairs: TypePairs = ctx
                 .type_list(args1)
                 .iter()
                 .zip(ctx.type_list(args2).iter())
@@ -11028,7 +11031,7 @@ fn compute_variance_rec(
 /// expand_head. This triggers type alias expansion for function argument/return
 /// types, matching OCaml's behavior during Pexp_apply processing.
 pub fn lower_args(ctx: &TypeContext, env: &Env, ty: TypeExprRef) {
-    let mut seen = Vec::new();
+    let mut seen: smallvec::SmallVec<[TypeExprRef; 8]> = smallvec::SmallVec::new();
     let mut current = ty;
     loop {
         let expanded = expand_head(ctx, env, current);
@@ -11042,7 +11045,7 @@ pub fn lower_args(ctx: &TypeContext, env: &Env, ty: TypeExprRef) {
                     ctx.type_args(args)
                         .iter()
                         .map(|arg| arg.typ)
-                        .collect::<Vec<_>>(),
+                        .collect::<smallvec::SmallVec<[TypeExprRef; 8]>>(),
                     *ret,
                 ))
             } else {

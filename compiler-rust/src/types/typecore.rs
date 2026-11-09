@@ -9669,7 +9669,7 @@ fn type_application(
         ExpressionDesc::Texp_ident(_, _, desc)
             if matches!(&desc.val_kind, crate::types::ValueKind::ValPrim(prim) if prim.prim_name == "%ignore")
     );
-    let mut remaining_args: Vec<usize> = (0..args.len()).collect();
+    let mut remaining_args: smallvec::SmallVec<[usize; 8]> = (0..args.len()).collect();
     let mut argument_thunks: Vec<ApplyArgThunk<'_>> = Vec::with_capacity(function_arity);
     let mut omitted: Vec<OmittedArrow> = Vec::new();
     let mut ignored: Vec<OmittedArrow> = Vec::new();
