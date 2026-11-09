@@ -359,8 +359,19 @@ impl Serialize for Name {
 
 impl<'de> Deserialize<'de> for Name {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let text = Cow::<'de, str>::deserialize(deserializer)?;
-        Ok(Name::new(&text))
+        // Interns straight from the input: `Cow<str>`'s `Deserialize` always
+        // builds an owned `String`, one allocation per decoded name.
+        struct NameVisitor;
+        impl serde::de::Visitor<'_> for NameVisitor {
+            type Value = Name;
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a string")
+            }
+            fn visit_str<E: serde::de::Error>(self, text: &str) -> Result<Name, E> {
+                Ok(Name::new(text))
+            }
+        }
+        deserializer.deserialize_str(NameVisitor)
     }
 }
 
