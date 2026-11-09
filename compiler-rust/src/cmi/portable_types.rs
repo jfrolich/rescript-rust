@@ -897,11 +897,11 @@ impl<'a, 'f> TypeGraphSerializer<'a, 'f> {
                 ret: self.serialize_type(*ret),
             },
             TypeDesc::Ttuple(types) => {
-                PortableTypeDesc::Ttuple(self.ctx.type_list(types).iter().map(|t| self.serialize_type(*t)).collect())
+                PortableTypeDesc::Ttuple(self.ctx.type_list(types).iter().map(|t| self.serialize_type(t)).collect())
             }
             TypeDesc::Tconstr { path, args, .. } => PortableTypeDesc::Tconstr {
                 path: *path,
-                args: self.ctx.type_list(args).iter().map(|t| self.serialize_type(*t)).collect(),
+                args: self.ctx.type_list(args).iter().map(|t| self.serialize_type(t)).collect(),
             },
             TypeDesc::Tobject { fields } => PortableTypeDesc::Tobject {
                 fields: self.serialize_type(*fields),
@@ -926,7 +926,7 @@ impl<'a, 'f> TypeGraphSerializer<'a, 'f> {
             TypeDesc::Tunivar(name) => PortableTypeDesc::Tunivar(*name),
             TypeDesc::Tpoly { body, vars } => PortableTypeDesc::Tpoly {
                 body: self.serialize_type(*body),
-                vars: self.ctx.type_list(vars).iter().map(|t| self.serialize_type(*t)).collect(),
+                vars: self.ctx.type_list(vars).iter().map(|t| self.serialize_type(t)).collect(),
             },
             TypeDesc::Tpackage { path, lids, args } => PortableTypeDesc::Tpackage {
                 path: *path,
@@ -936,7 +936,7 @@ impl<'a, 'f> TypeGraphSerializer<'a, 'f> {
                     .iter()
                     .map(|lid| self.serialize_longident(lid))
                     .collect(),
-                args: self.ctx.type_list(args).iter().map(|t| self.serialize_type(*t)).collect(),
+                args: self.ctx.type_list(args).iter().map(|t| self.serialize_type(t)).collect(),
             },
         }
     }
@@ -2003,7 +2003,7 @@ mod type_arg_tests {
         let TypeDesc::Tarrow { args, ret } = restored else {
             panic!("not arrow")
         };
-        let args = ctx.type_args(args);
+        let args = ctx.type_args(args).to_vec();
         assert_eq!(args[0].typ, ret);
         assert_eq!(args[1].typ, ret);
         assert_ne!(args[2].typ, ret);

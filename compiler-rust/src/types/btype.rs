@@ -308,10 +308,10 @@ where
                 Children::Many(children)
             }
             TypeDesc::Ttuple(types) => {
-                Children::Many(ctx.type_list(types).iter().copied().collect())
+                Children::Many(ctx.type_list(types).iter().collect())
             }
             TypeDesc::Tconstr { args, .. } => {
-                Children::Many(ctx.type_list(args).iter().copied().collect())
+                Children::Many(ctx.type_list(args).iter().collect())
             }
             TypeDesc::Tobject { fields } => Children::One(*fields),
             TypeDesc::Tvariant(row) => {
@@ -326,10 +326,10 @@ where
             TypeDesc::Tsubst(t) => Children::One(*t),
             TypeDesc::Tunivar(_) => Children::None,
             TypeDesc::Tpoly { body, vars } => {
-                Children::Poly(*body, ctx.type_list(vars).iter().copied().collect())
+                Children::Poly(*body, ctx.type_list(vars).iter().collect())
             }
             TypeDesc::Tpackage { args, .. } => {
-                Children::Many(ctx.type_list(args).iter().copied().collect())
+                Children::Many(ctx.type_list(args).iter().collect())
             }
         }
     };
