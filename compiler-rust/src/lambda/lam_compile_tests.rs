@@ -3147,7 +3147,7 @@ pub(super) fn mixed_untagged_string_overlap_switch(
             (
                 crate::lambda::SwitchKey::Constructor(
                     crate::types::VariantConstructorCase::Constant(crate::types::VariantTag {
-                        name: "a".to_string(),
+                        name: crate::name::Name::new("a"),
                         literal: Some(crate::types::VariantLiteralTag::String("a".to_string())),
                     }),
                 ),
@@ -3156,7 +3156,7 @@ pub(super) fn mixed_untagged_string_overlap_switch(
             (
                 crate::lambda::SwitchKey::Constructor(
                     crate::types::VariantConstructorCase::Constant(crate::types::VariantTag {
-                        name: "b".to_string(),
+                        name: crate::name::Name::new("b"),
                         literal: Some(crate::types::VariantLiteralTag::String("b".to_string())),
                     }),
                 ),
@@ -3165,7 +3165,7 @@ pub(super) fn mixed_untagged_string_overlap_switch(
             (
                 crate::lambda::SwitchKey::Constructor(
                     crate::types::VariantConstructorCase::Constant(crate::types::VariantTag {
-                        name: "space".to_string(),
+                        name: crate::name::Name::new("space"),
                         literal: Some(crate::types::VariantLiteralTag::String("space".to_string())),
                     }),
                 ),
@@ -3199,7 +3199,7 @@ pub(super) fn single_complete_array_block_switch(
         sw_consts: vec![(
             crate::lambda::SwitchKey::Constructor(crate::types::VariantConstructorCase::Constant(
                 crate::types::VariantTag {
-                    name: "Empty".to_string(),
+                    name: crate::name::Name::new("Empty"),
                     literal: Some(crate::types::VariantLiteralTag::Undefined),
                 },
             )),
@@ -3210,7 +3210,7 @@ pub(super) fn single_complete_array_block_switch(
             crate::lambda::SwitchKey::Constructor(crate::types::VariantConstructorCase::Block(
                 crate::types::VariantBlock::Untagged {
                     tag: crate::types::VariantTag {
-                        name: "Cons".to_string(),
+                        name: crate::name::Name::new("Cons"),
                         literal: None,
                     },
                     block_type: crate::types::VariantBlockType::Instance(
@@ -3246,7 +3246,7 @@ pub(super) fn default_only_untagged_boolean_switch(
             crate::lambda::SwitchKey::Constructor(crate::types::VariantConstructorCase::Block(
                 crate::types::VariantBlock::Untagged {
                     tag: crate::types::VariantTag {
-                        name: "B".to_string(),
+                        name: crate::name::Name::new("B"),
                         literal: None,
                     },
                     block_type: crate::types::VariantBlockType::Boolean,
@@ -5610,7 +5610,7 @@ fn lowers_cons_pfield_from_pure_caml_block_directly_like_ocaml() {
                         num_nonconst: 1,
                         runtime: Box::new(crate::types::TaggedBlock {
                             tag: crate::types::VariantTag {
-                                name: "::".to_string(),
+                                name: crate::name::Name::new("::"),
                                 literal: None,
                             },
                             tag_name: None,
@@ -5641,7 +5641,7 @@ fn lowers_cons_pfield_from_pure_caml_block_directly_like_ocaml() {
                         num_nonconst: 1,
                         runtime: Box::new(crate::types::TaggedBlock {
                             tag: crate::types::VariantTag {
-                                name: "::".to_string(),
+                                name: crate::name::Name::new("::"),
                                 literal: None,
                             },
                             tag_name: None,
@@ -6642,7 +6642,7 @@ fn recursive_named_variant_block_cases_reenter_tail_loops() {
             sw_consts: vec![(
                 crate::lambda::SwitchKey::Constructor(
                     crate::types::VariantConstructorCase::Constant(crate::types::VariantTag {
-                        name: "Empty".to_string(),
+                        name: crate::name::Name::new("Empty"),
                         literal: None,
                     }),
                 ),
@@ -6653,7 +6653,7 @@ fn recursive_named_variant_block_cases_reenter_tail_loops() {
                 crate::lambda::SwitchKey::Constructor(crate::types::VariantConstructorCase::Block(
                     crate::types::VariantBlock::Tagged(crate::types::TaggedBlock {
                         tag: crate::types::VariantTag {
-                            name: "Node".to_string(),
+                            name: crate::name::Name::new("Node"),
                             literal: None,
                         },
                         tag_name: None,

@@ -228,7 +228,7 @@ fn nested_wrapped_staticcatch_trywith_tail_loops_lower_like_gpr_1701() {
                 num_nonconst: 1,
                 runtime: Box::new(crate::types::TaggedBlock {
                     tag: crate::types::VariantTag {
-                        name: "::".to_string(),
+                        name: crate::name::Name::new("::"),
                         literal: None,
                     },
                     tag_name: None,
@@ -489,7 +489,7 @@ fn nested_staticcatch_switch_forwarders_keep_collapsed_shared_return_like_gpr_36
                         crate::lambda::SwitchKey::Constructor(
                             crate::types::VariantConstructorCase::Constant(
                                 crate::types::VariantTag {
-                                    name: "Empty".to_string(),
+                                    name: crate::name::Name::new("Empty"),
                                     literal: None,
                                 },
                             ),
@@ -503,7 +503,7 @@ fn nested_staticcatch_switch_forwarders_keep_collapsed_shared_return_like_gpr_36
                                 crate::types::VariantConstructorCase::Block(
                                     crate::types::VariantBlock::Tagged(crate::types::TaggedBlock {
                                         tag: crate::types::VariantTag {
-                                            name: "Int1".to_string(),
+                                            name: crate::name::Name::new("Int1"),
                                             literal: None,
                                         },
                                         tag_name: None,
@@ -517,7 +517,7 @@ fn nested_staticcatch_switch_forwarders_keep_collapsed_shared_return_like_gpr_36
                                 crate::types::VariantConstructorCase::Block(
                                     crate::types::VariantBlock::Tagged(crate::types::TaggedBlock {
                                         tag: crate::types::VariantTag {
-                                            name: "Int2".to_string(),
+                                            name: crate::name::Name::new("Int2"),
                                             literal: None,
                                         },
                                         tag_name: None,
@@ -746,7 +746,7 @@ fn single_case_staticcatch_wrapped_named_variant_return_switch_falls_through_to_
                         crate::lambda::SwitchKey::Constructor(
                             crate::types::VariantConstructorCase::Constant(
                                 crate::types::VariantTag {
-                                    name: "One".to_string(),
+                                    name: crate::name::Name::new("One"),
                                     literal: None,
                                 },
                             ),
@@ -793,7 +793,7 @@ fn single_case_staticcatch_wrapped_named_variant_non_unit_return_switch_falls_th
                 sw_consts: vec![(
                     crate::lambda::SwitchKey::Constructor(
                         crate::types::VariantConstructorCase::Constant(crate::types::VariantTag {
-                            name: "One".to_string(),
+                            name: crate::name::Name::new("One"),
                             literal: None,
                         }),
                     ),
@@ -856,7 +856,7 @@ fn single_case_staticcatch_wrapped_named_variant_unit_handler_falls_through_like
                         crate::lambda::SwitchKey::Constructor(
                             crate::types::VariantConstructorCase::Constant(
                                 crate::types::VariantTag {
-                                    name: "One".to_string(),
+                                    name: crate::name::Name::new("One"),
                                     literal: None,
                                 },
                             ),
@@ -933,7 +933,7 @@ fn js_pipeline_keeps_single_case_staticcatch_unit_handler_as_fallthrough_guard()
                             crate::lambda::SwitchKey::Constructor(
                                 crate::types::VariantConstructorCase::Constant(
                                     crate::types::VariantTag {
-                                        name: "One".to_string(),
+                                        name: crate::name::Name::new("One"),
                                         literal: None,
                                     },
                                 ),

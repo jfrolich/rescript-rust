@@ -429,7 +429,7 @@ impl LambdaCompiler {
         tag.literal
             .as_ref()
             .map(Self::literal_tag_value)
-            .unwrap_or_else(|| SwitchCaseTag::String(tag.name.clone()))
+            .unwrap_or_else(|| SwitchCaseTag::String(tag.name.to_string()))
     }
 
     fn literal_cases(&self, switch: &LamSwitch) -> Option<Vec<SwitchCaseTag>> {

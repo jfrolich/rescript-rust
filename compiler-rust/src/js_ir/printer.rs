@@ -6961,7 +6961,7 @@ mod tests {
                         runtime: Box::new(crate::types::VariantBlock::Tagged(
                             crate::types::TaggedBlock {
                                 tag: crate::types::VariantTag {
-                                    name: "One".to_string(),
+                                    name: crate::name::Name::new("One"),
                                     literal: None,
                                 },
                                 tag_name: None,

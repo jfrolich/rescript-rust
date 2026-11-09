@@ -6251,9 +6251,8 @@ fn derive_variant_layout(
 ) -> TypeModResult<crate::types::VariantLayout> {
     let mut cases = Vec::with_capacity(constructors.len());
     for constructor in constructors {
-        let name = constructor.cd_id.name().to_string();
         let tag = crate::types::VariantTag {
-            name,
+            name: constructor.cd_id.name_atom(),
             literal: constructor.cd_runtime_tag.clone(),
         };
         if matches!(&constructor.cd_args, crate::types::ConstructorArguments::CstrTuple(args) if args.is_empty())

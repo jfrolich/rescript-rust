@@ -105,7 +105,7 @@ pub enum TagType {
 /// explicitly declared runtime literal.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Tag {
-    pub name: String,
+    pub name: crate::name::Name,
     pub literal: Option<LiteralTag>,
 }
 
@@ -120,7 +120,7 @@ pub struct MatchableTag {
 /// OCaml `Variant_runtime.to_matchable_tag`.
 pub fn to_matchable_tag(tag: &Tag) -> MatchableTag {
     MatchableTag {
-        name: tag.name.clone(),
+        name: tag.name.to_string(),
         tag_type: tag.literal.clone().map(TagType::Literal),
     }
 }
@@ -290,7 +290,7 @@ impl Layout {
                     let literal = tag
                         .literal
                         .clone()
-                        .unwrap_or_else(|| LiteralTag::String(tag.name.clone()));
+                        .unwrap_or_else(|| LiteralTag::String(tag.name.to_string()));
                     match literal {
                         LiteralTag::Null => has_null = true,
                         LiteralTag::Undefined => has_undefined = true,
@@ -369,7 +369,7 @@ pub fn plain_layout(
         .into_iter()
         .map(|(name, has_payload)| {
             let tag = Tag {
-                name,
+                name: crate::name::Name::new(&name),
                 literal: None,
             };
             if has_payload {
