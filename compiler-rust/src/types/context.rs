@@ -4381,6 +4381,14 @@ impl TypeContext {
                         .insert(key.clone(), components.clone());
                 }
                 StoreEffect::PreparePers(name) => {
+                    let replayed = self
+                        .persistent_env
+                        .borrow()
+                        .as_ref()
+                        .is_none_or(|pers| pers.replay_cached_pers_struct(name, self));
+                    if replayed {
+                        continue;
+                    }
                     if let Some(mut pers) = self.persistent_env_clone() {
                         let _ = pers.find_pers_struct(name, self);
                     }

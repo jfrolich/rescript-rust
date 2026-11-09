@@ -1697,6 +1697,43 @@ impl PersistentEnv {
         units
     }
 
+    /// Replay of `find_pers_struct(name)` for `StoreEffect::PreparePers`:
+    /// apply its lasting effects on the compilation (loading the unit into
+    /// the shared cache, the raw signature registration and `record_import`)
+    /// without copying the resolution view. The unit's alias rewrites would
+    /// only be collected into a throwaway copy of the view, and they cannot
+    /// change the registration decision for the unit itself. Returns `false`
+    /// in the other cases (hidden, missing, or loaded from disk), so the
+    /// caller runs the full lookup.
+    pub(crate) fn replay_cached_pers_struct(&self, name: &str, ctx: &TypeContext) -> bool {
+        let (cache_key, ps) = match self.cache_lookup_entry(name) {
+            Some((cache_key, Some(ps))) => (cache_key, ps),
+            Some((_, None)) => return false,
+            None => {
+                // Not loaded by this compilation yet: internalize the
+                // registry's portable unit as `find_pers_struct_unrecorded`
+                // does. Its alias rewrites are collected when this compilation
+                // first looks the unit up itself (`prepare_cached_pers_struct`).
+                let Some((portable_key, portable)) = self.portable_cache_entry(name) else {
+                    return false;
+                };
+                if self.view.hidden_modules.contains(&portable_key) {
+                    return false;
+                }
+                let ps = portable_types::internalize_pers_struct(portable, ctx);
+                self.cache_insert(portable_key.clone(), Some(ps.clone()));
+                (portable_key, ps)
+            }
+        };
+        if should_register_lazy_raw_sig(&cache_key, &self.view.alias_prefix_rewrites)
+            && !ctx.has_raw_module_sig(&cache_key)
+        {
+            ctx.register_raw_module_sig(&cache_key, ps.ps_sig.clone());
+        }
+        self.record_import(&ps);
+        true
+    }
+
     fn record_import(&self, ps: &PersStruct) {
         let mut imported = self.imported_units.lock().unwrap();
         if imported.recorded.contains(ps.ps_name.as_str()) {
