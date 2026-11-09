@@ -9,7 +9,8 @@ use super::decl::{ConstructorDescription, ConstructorKind, LabelDescription};
 use super::tast_iterator::{self as ti, TastIterator};
 use super::type_expr::{SHARED_REF_BITS, SHARED_REF_TAG, STORE_REF_TAG, TypeDesc, TypeExprRef};
 use super::typedtree::*;
-use crate::cmi::item_deps::{Kind, UnitRead, read_of_path};
+use crate::cmi::item_deps::{Kind, Segs, UnitRead, read_of_path};
+use crate::name::Name;
 use crate::types::path::Path;
 
 /// Visited type nodes: one bitset per reference space (local arena,
@@ -48,6 +49,8 @@ struct Collector<'a> {
     ctx: &'a TypeContext,
     ta: &'a TypedArena,
     seen: SeenTypes,
+    /// The walk stack of [`Collector::ty`], kept to reuse its buffer.
+    stack: Vec<TypeExprRef>,
     out: Vec<UnitRead>,
 }
 
@@ -58,7 +61,8 @@ impl Collector<'_> {
 
     fn ty(&mut self, root: TypeExprRef) {
         let ctx = self.ctx;
-        let mut stack = vec![root];
+        let mut stack = std::mem::take(&mut self.stack);
+        stack.push(root);
         while let Some(ty) = stack.pop() {
             if !self.seen.insert(ty) {
                 continue;
@@ -101,6 +105,7 @@ impl Collector<'_> {
                 }
             }
         }
+        self.stack = stack;
     }
 
     fn constructor(&mut self, cd: &ConstructorDescription) {
@@ -234,8 +239,8 @@ impl<'a> TastIterator<'a> for Collector<'a> {
 
 fn opened(opens: &[String]) -> impl Iterator<Item = UnitRead> + '_ {
     opens.iter().map(|unit| UnitRead {
-        unit: unit.clone(),
-        segs: Vec::new(),
+        unit: Name::new(unit),
+        segs: Segs::new(),
         kind: Kind::Module,
     })
 }
@@ -252,6 +257,7 @@ pub fn structure_reads(
         ctx,
         ta,
         seen: SeenTypes::default(),
+        stack: Vec::new(),
         out: opened(opens).collect(),
     };
     collector.structure(structure);
@@ -269,6 +275,7 @@ pub fn signature_reads(
         ctx,
         ta,
         seen: SeenTypes::default(),
+        stack: Vec::new(),
         out: opened(opens).collect(),
     };
     collector.signature(signature);

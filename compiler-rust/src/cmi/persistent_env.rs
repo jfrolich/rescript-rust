@@ -32,6 +32,7 @@ use crate::lambda::{
     TagInfo,
 };
 use crate::location::Location;
+use crate::name::Name;
 use crate::parser::{Parser, jsx_ppx, module};
 use crate::types::context::TypeContext;
 use crate::types::decl::{
@@ -578,7 +579,7 @@ pub struct ModuleRegistry {
     /// of the JS metadata whose inlinable bodies the references follow
     /// (`usize::MAX` for references without them).
     item_refs_cache:
-        Arc<RwLock<HashMap<(String, usize, u64, usize), Arc<super::item_deps::UnitRefs>>>>,
+        Arc<RwLock<HashMap<(Name, usize, u64, usize), Arc<super::item_deps::UnitRefs>>>>,
 }
 
 impl ModuleRegistry {
@@ -630,12 +631,15 @@ impl ModuleRegistry {
             .get(name)
             .cloned()
             .or_else(|| self.cached_modules.get_cloned(name));
-        let info = self
-            .local_module_info
+        (pers, self.registered_info(name))
+    }
+
+    /// The JS metadata of a registered module.
+    fn registered_info(&self, name: &str) -> Option<InMemoryModuleInfo> {
+        self.local_module_info
             .get(name)
             .cloned()
-            .or_else(|| self.module_info.get_cloned(name));
-        (pers, info)
+            .or_else(|| self.module_info.get_cloned(name))
     }
 
     /// The per-item digests of a registered module
@@ -661,7 +665,7 @@ impl ModuleRegistry {
     pub fn resolve_signature_reads(
         &self,
         reads: Vec<super::item_deps::UnitRead>,
-    ) -> std::collections::BTreeMap<String, std::collections::BTreeSet<String>> {
+    ) -> super::item_deps::ResolvedReads {
         super::item_deps::resolve_reads(
             reads,
             &RegistryUnitSource {
@@ -676,41 +680,37 @@ impl ModuleRegistry {
     /// everything those units' items refer to.
     pub fn lambda_reads(
         &self,
-        resolved: &std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
-    ) -> std::collections::BTreeMap<String, std::collections::BTreeSet<String>> {
-        use super::item_deps::{Kind, UnitRead, item_key};
+        resolved: &super::item_deps::ResolvedReads,
+    ) -> super::item_deps::ResolvedReads {
+        use super::item_deps::{ItemKey, Kind, Segs, UnitRead};
         let source = RegistryUnitSource {
             registry: self,
             lambdas: true,
         };
-        let value_prefix = item_key(Kind::Value, "");
-        let module_prefix = item_key(Kind::Module, "");
         let mut seeds = Vec::new();
         for (unit, keys) in resolved {
-            let Some(info) = self.registered(unit).1 else {
+            let Some(info) = self.registered_info(unit) else {
                 continue;
             };
             if info.cmj_export_lambdas.is_empty() {
                 continue;
             }
             let mut names: Vec<&str> = Vec::new();
-            if keys.contains(super::item_deps::WHOLE) {
+            if keys.contains(&ItemKey::Whole) {
                 names.extend(info.cmj_export_lambdas.keys().map(String::as_str));
             } else {
                 for key in keys {
-                    if let Some(name) = key
-                        .strip_prefix(&value_prefix)
-                        .or_else(|| key.strip_prefix(&module_prefix))
-                    {
-                        names.push(name);
+                    if let ItemKey::Item(Kind::Value | Kind::Module, name) = key {
+                        names.push(name.as_str());
                     }
                 }
             }
             for name in names {
-                for lambda_unit in super::item_deps::UnitSource::lambda_units(&source, unit, name) {
+                for lambda_unit in super::item_deps::UnitSource::lambda_units(&source, *unit, name)
+                {
                     seeds.push(UnitRead {
                         unit: lambda_unit,
-                        segs: Vec::new(),
+                        segs: Segs::new(),
                         kind: Kind::Module,
                     });
                 }
@@ -7738,14 +7738,11 @@ struct RegistryUnitSource<'a> {
 }
 
 impl super::item_deps::UnitSource for RegistryUnitSource<'_> {
-    fn portable(&self, unit: &str) -> Option<Arc<PortablePersStruct>> {
-        self.registry.registered(unit).0
-    }
-    fn lambda_units(&self, unit: &str, name: &str) -> Vec<String> {
+    fn lambda_units(&self, unit: Name, name: &str) -> Vec<Name> {
         if !self.lambdas {
             return Vec::new();
         }
-        let Some(info) = self.registry.registered(unit).1 else {
+        let Some(info) = self.registry.registered_info(&unit) else {
             return Vec::new();
         };
         let Some(lambda) = info.cmj_export_lambdas.get(name) else {
@@ -7753,33 +7750,27 @@ impl super::item_deps::UnitSource for RegistryUnitSource<'_> {
         };
         crate::lambda::lam_compile::collect_possible_required_modules_for_lambda(lambda)
             .into_iter()
-            .map(|module| module.id.name().to_string())
+            .map(|module| module.id.name_atom())
             .collect()
     }
-    fn ignored(&self, unit: &str) -> bool {
-        self.registry.module_info_is_runtime(unit)
+    fn ignored(&self, unit: Name) -> bool {
+        self.registry.module_info_is_runtime(&unit)
     }
-    fn refs(&self, unit: &str) -> Option<Arc<super::item_deps::UnitRefs>> {
+    fn refs(&self, unit: Name) -> Option<Arc<super::item_deps::UnitRefs>> {
         let registry = self.registry;
         let ps = registry
             .local_cached_modules
-            .get(unit)
+            .get(unit.as_str())
             .cloned()
-            .or_else(|| registry.cached_modules.get_cloned(unit))?;
+            .or_else(|| registry.cached_modules.get_cloned(&unit))?;
         let lambdas = if self.lambdas {
             registry
-                .registered(unit)
-                .1
+                .registered_info(&unit)
                 .map_or(0, |info| Arc::as_ptr(&info.cmj_export_lambdas) as usize)
         } else {
             usize::MAX
         };
-        let key = (
-            unit.to_string(),
-            Arc::as_ptr(&ps) as usize,
-            ps.fingerprint,
-            lambdas,
-        );
+        let key = (unit, Arc::as_ptr(&ps) as usize, ps.fingerprint, lambdas);
         if let Some(refs) = registry.item_refs_cache.read().unwrap().get(&key) {
             return Some(refs.clone());
         }
