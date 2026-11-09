@@ -94,20 +94,72 @@ replay. Building views once per build needs:
    is replayed, so stamps stay exactly those of a module that built the view
    itself. Hard constraint: construction must not depend on the consumer. Any
    build that reads consumer state stays poisoned and private, as today.
-4. **Cheaper replay** (independent of 1–3): shrink the poison sources above
-   by making their reads consumer-independent. Skipping a repeated
-   `PreparePers` replay of the same unit was tried and reverted: one batch
-   showed `replay_store_piece` 1.79% -> 1.57%, the next 1.80% -> 1.76%, so
-   repeats are rare. Most replay cost is the first `PreparePers` of each unit
-   per module (resolution-view copy on the throwaway clone,
-   `collect_alias_rewrites`) and `register_component_alias_source`; a
-   copy-free replay of the cached-unit case is the next candidate, at most
-   ~1% of busy CPU.
+4. **Cheaper replay and fewer private views** (landed, see below).
 
-Landed: a component lookup reads the compilation's own cache before it
-computes the worker-shared key, so `unit_visible` runs only on a miss
-(0.63% -> 0.21% of busy CPU).
+## Landed
 
-Order of slices: (4), then (1) without changing ownership, then (2) and the
-cross-thread publication. Each slice must keep typedtree, raw Lambda, Lambda,
-JS and error-output parity, and Tella output, byte-identical.
+* A component lookup reads the compilation's own cache before it computes
+  the worker-shared key, so `unit_visible` runs only on a miss (0.63% ->
+  0.21% of busy CPU).
+* `StoreEffect::PreparePers` is replayed by
+  `PersistentEnv::replay_cached_pers_struct` on the compilation's own
+  persistent env: no `Arc::make_mut` copy of the resolution view and no
+  `collect_alias_rewrites` into a throwaway copy (-0.15% to -0.18% retired
+  instructions). Skipping repeated replays of the same unit was tried
+  earlier and reverted (no reproducible gain).
+* Guarded store builds. `flattened_alias_component_parent`'s read of the
+  alias-source table (`has_component_paths_for_alias_source`) is recorded as
+  a guard `(source, nonempty)` on the `StorePiece` instead of poisoning the
+  build. The two caches that hand out shared views (the worker's
+  persistent-root views in `with_resolved_module_components_for_path_with_cache_mode`
+  and `StoredModuleComponents::with_components`) reuse a piece only when
+  `store_guards_hold`; on a miss the compilation builds its own copy.
+  Exact because registrations are only ever added and the build's own
+  registrations are replayed before use. Other `build_in_store` callers
+  still treat a guarded read as poison. Tella: poisoned builds 1210 -> 4
+  (all `read:renamed_module_sig`), store builds 18024 -> 17189, no guard
+  misses, -0.1% retired instructions.
+
+## Remaining work: process-wide view core (step 1-3 above)
+
+Expected gain: at most the per-worker repeat of `build_in_store` (about
+4.2 builds per view on 10 workers; `build_in_store` is 3.2% of busy CPU
+inclusive, so roughly 2-2.5%). What ties a view to one worker today, and
+what each slice must change:
+
+1. **Type nodes.** A store build allocates into the worker's
+   `ThreadTypeStore` (`STORE_REF_TAG` handles, `!Send`). To share a view
+   across workers, export the nodes a build created
+   (`store_build_type_start..`, `store_build_row_start..`) into a
+   `shared_store::SharedGraph` when the piece is published, the way
+   `extract_module_update`/`portable_types` serialize a unit and
+   `shared_store` publishes it, and rewrite the view's handles to
+   `SHARED_REF_TAG` ones. Start by measuring how many nodes per view a
+   build creates (counter at `build_in_store` exit); if export costs about
+   as much as a rebuild, stop here.
+2. **View object.** `QualifiedModuleComponents` holds
+   `Arc<StructureComponentTables>`, whose memo tables are `RefCell`s and
+   `OnceCell`s filled by later forcing (`force_entry` store pieces per name,
+   `qualified_modules`, `opened_layers`). Split it into an immutable,
+   `Send + Sync` core (access path, substituted signature,
+   `SignatureIndex`) and the forcing tables. Keep the forcing tables per
+   worker at first (they already hold store pieces), keyed by the core's
+   id. Shared core plus worker-local forcing is the first slice that can
+   land parity-clean.
+3. **Pieces.** `StorePiece` effects hold `Arc`s of worker objects
+   (`RegisterComponents(key, Arc<QualifiedModuleComponents>)`,
+   `RegisterQualifiedModuleDecl`). Make them refer to shared cores or ids so
+   a piece can cross threads. The effects and their order must stay exactly
+   as recorded: replay is what keeps Ident stamps equal to OCaml's
+   (`Stamps(n)` advances, `TriggerRename`, `PreparePers`).
+4. **Publication.** Add a process-wide map next to
+   `ThreadTypeStore::shared_components` (same `QualifiedModuleComponentsCacheKey`,
+   `is_worker_shareable` keys only, reset by `begin_build`), consulted after
+   the worker map, with `store_guards_hold` checked exactly as today.
+   Visibility (`unit_visible`) stays a per-compilation check before the
+   lookup.
+
+Each slice must keep typedtree, raw Lambda, Lambda, JS and error-output
+parity, and Tella output, byte-identical. Check `RESCRIPT_STORE_DEBUG=1`
+counts (store-build, store-hit, store-poison, store-guard-miss) before
+and after each slice.
