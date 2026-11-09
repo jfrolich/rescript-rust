@@ -28,6 +28,10 @@ pub type InlineTypeEntry = (
 /// Region status for error reporting.
 ///
 /// Used to avoid reporting duplicate errors in the same region.
+/// The region stack is shallow and is copied on every lookahead, so it stays
+/// inline.
+type Regions = smallvec::SmallVec<[RegionStatus; 16]>;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RegionStatus {
     /// Errors in this region should be reported.
@@ -53,7 +57,7 @@ pub struct ParserSnapshot<'src> {
     /// Arena index for prev end position (for identity-based sharing).
     prev_end_pos_idx: PosIdx,
     breadcrumbs: Vec<(Grammar, Position)>,
-    regions: Vec<RegionStatus>,
+    regions: Regions,
     diagnostics_len: usize,
     warnings_len: usize,
     comments_len: usize,
@@ -107,7 +111,7 @@ pub struct Parser<'src> {
     /// Collected comments.
     comments: Vec<Comment>,
     /// Stack of region statuses for error deduplication.
-    regions: Vec<RegionStatus>,
+    regions: Regions,
     /// Arena for interned positions and locations.
     /// Used for efficient location storage with LocIdx/PosIdx indices.
     arena: ParseArena,
@@ -171,7 +175,7 @@ impl<'src> Parser<'src> {
             diagnostics: Vec::new(),
             warnings: Vec::new(),
             comments: Vec::new(),
-            regions: vec![RegionStatus::Report],
+            regions: smallvec::smallvec![RegionStatus::Report],
             arena,
             in_external: false,
             lookahead_depth: 0,
