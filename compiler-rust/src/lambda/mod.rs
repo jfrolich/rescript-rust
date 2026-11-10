@@ -1653,7 +1653,7 @@ mod node_size_tests {
         assert_eq!(size_of::<super::TagInfo>(), 32);
         assert_eq!(size_of::<super::Primitive>(), 40);
         assert_eq!(size_of::<super::arena::PrimPayload>(), 48);
-        assert_eq!(size_of::<super::Constant>(), 56);
+        assert_eq!(size_of::<super::Constant>(), 40);
         assert_eq!(size_of::<super::Lambda>(), 56);
     }
 }

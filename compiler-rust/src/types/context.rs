@@ -426,15 +426,16 @@ pub(crate) enum ModuleDeprecation {
         name: String,
         deprecated: String,
     },
-    /// A module inside persistent unit `unit`, reached through the submodule
-    /// `components` (empty for the unit itself, whose flag is `ps_comps`'
+    /// A module inside a persistent unit, reached through the submodules of
+    /// `target` (none for the unit itself, whose flag is `ps_comps`'
     /// `Deprecated` persistence flag). Resolved once the lookup has loaded
     /// the unit, without forcing a load.
     Persistent {
         loc: crate::parse_arena::LocIdx,
-        name: String,
-        unit: String,
-        components: Vec<String>,
+        /// The path whose `Path.name` reports the module.
+        name: crate::types::path::Path,
+        /// The module's path from the unit's persistent identifier.
+        target: crate::types::path::Path,
     },
 }
 

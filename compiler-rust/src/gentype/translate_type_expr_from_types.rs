@@ -424,13 +424,13 @@ pub fn translateTypeExprFromTypes_(
             type_: Type::TypeVar(s.to_string()),
         },
         TypeDesc::Tconstr { path, args, .. }
-            if path.name() == "Js.t"
+            if path.name_eq("Js.t")
                 && args.len() == 1
                 && is_js_t_preserved(ctx, &ctx.type_list_at(args, 0)) =>
         {
             translate_obj_type(ClosedFlag::Closed, vec![])
         }
-        TypeDesc::Tconstr { path, args, .. } if path.name() == "Js.t" && args.len() == 1 => {
+        TypeDesc::Tconstr { path, args, .. } if path.name_eq("Js.t") && args.len() == 1 => {
             translateTypeExprFromTypes_(
                 ctx,
                 config,

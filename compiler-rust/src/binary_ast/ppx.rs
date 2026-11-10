@@ -7909,18 +7909,18 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
                 ref transformed_jsx,
                 ..
             } = *inner;
-            let args = arena.apply_args(inner.args).to_vec();
             let funct_expr = arena.get_expr(*funct).clone();
             let rw_funct = rewrite_expression(&funct_expr, arena);
             let funct = arena.push_expr(rw_funct);
-            let args: Vec<_> = args
-                .iter()
-                .map(|(lbl, e)| {
-                    let arg_expr = arena.get_expr(*e).clone();
-                    let rw = rewrite_expression(&arg_expr, arena);
-                    (*lbl, arena.push_expr(rw))
-                })
-                .collect();
+            // Index the arena's argument list: rewriting pushes new nodes but
+            // never changes an existing list.
+            let mut args: smallvec::SmallVec<[_; 8]> = smallvec::SmallVec::new();
+            for i in 0..arena.apply_args(inner.args).len() {
+                let (lbl, e) = arena.apply_args(inner.args)[i];
+                let arg_expr = arena.get_expr(e).clone();
+                let rw = rewrite_expression(&arg_expr, arena);
+                args.push((lbl, arena.push_expr(rw)));
+            }
             ExpressionDesc::Pexp_apply(PexpApply {
                 funct,
                 args: arena.push_apply_args(&args),

@@ -3,12 +3,22 @@ use console::Term;
 use log::LevelFilter;
 use std::{io::Write, path::Path};
 
-#[global_allocator]
+#[cfg(feature = "alloc-stats")]
+mod alloc_stats;
+
 // Intentional rewatch performance choice: clean and in-process builds allocate
 // many short-lived graph nodes and compiler artifacts, and mimalloc has been a
 // measurable win for that workload. Keep this separate from compiler parity
 // work; it must not change generated typedtree/lambda/JS output.
+#[cfg(not(feature = "alloc-stats"))]
+#[global_allocator]
 static GLOBAL_ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+// The `alloc-stats` feature counts allocations on top of mimalloc; see
+// `alloc_stats.rs` and `scripts/perf/README.md`.
+#[cfg(feature = "alloc-stats")]
+#[global_allocator]
+static GLOBAL_ALLOCATOR: alloc_stats::CountingAlloc = alloc_stats::CountingAlloc;
 
 use rescript::{
     build, cli, cmd, format,
@@ -52,6 +62,8 @@ fn bsc_registry(
 }
 
 fn main() {
+    #[cfg(feature = "alloc-stats")]
+    alloc_stats::start();
     // The runtime the build script compiled (see `cli/build.rs`).
     build::embedded_runtime::install(include_bytes!(concat!(env!("OUT_DIR"), "/runtime.bin")));
     // Hidden test commands: run the linked compiler one file at a time, as
@@ -95,6 +107,8 @@ fn main() {
     };
     rescript::build::phase_mark("run-main-end");
     drop(telemetry_guard);
+    #[cfg(feature = "alloc-stats")]
+    alloc_stats::finish();
     std::process::exit(exit_code);
 }
 

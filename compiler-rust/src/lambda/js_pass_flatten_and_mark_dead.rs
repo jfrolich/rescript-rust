@@ -181,9 +181,8 @@ impl Mapper for Substitute<'_> {
             }
             ExprKind::StaticIndex(target, field, pos) => {
                 let target = self.expression(j, target);
-                let name = j.text(field).to_string();
                 if let Some(rewritten) =
-                    direct_projection_from_pure_literal(j, target, Some(&name), pos.get())
+                    direct_projection_from_pure_literal(j, target, Some(j.text(field)), pos.get())
                 {
                     return rewritten;
                 }
@@ -553,7 +552,20 @@ fn collect_mark_dead_states_variable(
 
 /// Every direct sub-expression of `expr`, in field order; function bodies
 /// are returned separately.
-fn expression_children(a: &JsArena, expr: Expr, out: &mut Vec<Expr>) -> Option<StmtList> {
+/// Pending expressions of a pre-order walk; deep enough for nearly every
+/// expression without spilling to the heap.
+type ExprStack = smallvec::SmallVec<[Expr; 16]>;
+
+/// Pushes the children of `expr` (see [`expression_children`]) so that they
+/// pop in field order.
+fn push_children_reversed(a: &JsArena, expr: Expr, stack: &mut ExprStack) -> Option<StmtList> {
+    let base = stack.len();
+    let body = expression_children(a, expr, stack);
+    stack[base..].reverse();
+    body
+}
+
+fn expression_children(a: &JsArena, expr: Expr, out: &mut ExprStack) -> Option<StmtList> {
     match a.ek(expr) {
         ExprKind::Var(_)
         | ExprKind::Qualified(_)
@@ -616,19 +628,18 @@ fn collect_mark_dead_states_expression(
     expr: Expr,
     states: &mut HashMap<Ident, MarkDeadInfo>,
 ) {
-    if let ExprKind::Var(id) = a.ek(expr) {
-        mark_dead_ident_use(&a.ident(id), states);
-        return;
-    }
-    let mut children = Vec::new();
-    if let Some(body) = expression_children(a, expr, &mut children) {
-        for stmt in a.stmts(body) {
-            collect_mark_dead_states_statement(a, *stmt, &HashSet::new(), states);
+    let mut stack = ExprStack::new();
+    stack.push(expr);
+    while let Some(expr) = stack.pop() {
+        if let ExprKind::Var(id) = a.ek(expr) {
+            mark_dead_ident_use(&a.ident(id), states);
+            continue;
         }
-        return;
-    }
-    for child in children {
-        collect_mark_dead_states_expression(a, child, states);
+        if let Some(body) = push_children_reversed(a, expr, &mut stack) {
+            for stmt in a.stmts(body) {
+                collect_mark_dead_states_statement(a, *stmt, &HashSet::new(), states);
+            }
+        }
     }
 }
 
@@ -659,8 +670,10 @@ fn apply_mark_dead_states_list(
     block: StmtList,
     states: &HashMap<Ident, MarkDeadInfo>,
 ) {
-    let block = j.block_vec(block);
-    apply_mark_dead_states_block(j, &block, states);
+    for i in 0..j.stmts(block).len() {
+        let stmt = j.stmts(block)[i];
+        apply_mark_dead_states_statement(j, stmt, states);
+    }
 }
 
 fn apply_mark_dead_states_statement(
@@ -761,13 +774,12 @@ fn apply_mark_dead_states_expression(
     expr: Expr,
     states: &HashMap<Ident, MarkDeadInfo>,
 ) {
-    let mut children = Vec::new();
-    if let Some(body) = expression_children(j, expr, &mut children) {
-        apply_mark_dead_states_list(j, body, states);
-        return;
-    }
-    for child in children {
-        apply_mark_dead_states_expression(j, child, states);
+    let mut stack = ExprStack::new();
+    stack.push(expr);
+    while let Some(expr) = stack.pop() {
+        if let Some(body) = push_children_reversed(j, expr, &mut stack) {
+            apply_mark_dead_states_list(j, body, states);
+        }
     }
 }
 
@@ -791,6 +803,10 @@ fn flatten_block(j: &mut JsArena, block: &[Stmt]) -> Block {
 }
 
 impl Mapper for Flatten {
+    fn block(&mut self, j: &mut JsArena, block: StmtList) -> StmtList {
+        crate::js_ir::walk::map_block_with_items(self, j, block)
+    }
+
     fn block_items(&mut self, j: &mut JsArena, block: &[Stmt]) -> Vec<Stmt> {
         let mut flattened = Vec::new();
         for stmt in block {

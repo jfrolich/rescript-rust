@@ -16,6 +16,7 @@ use crate::ident::Ident;
 use crate::js_ir::source_map::SourceMapBuilder;
 use crate::lambda::LamLoc;
 use crate::lambda::SwitchCaseTag;
+use crate::name::Name;
 use ahash::{AHashMap as HashMap, AHashSet as HashSet};
 use std::borrow::Cow;
 
@@ -24,13 +25,13 @@ use std::borrow::Cow;
 /// `sub_scope` copies them.
 #[derive(Clone, Default)]
 struct NameScope {
-    ident_names: HashMap<Ident, String>,
+    ident_names: HashMap<Ident, Name>,
     /// Per mangled name, the printed name of each stamp.
-    names: HashMap<String, MangledNames>,
+    names: HashMap<Name, MangledNames>,
     /// Every printed name in scope. Identifiers may contain `$`, so a
     /// suffixed name like `x$1` can equal another identifier's mangled name;
     /// new names are checked against `used` instead of being assumed fresh.
-    used: HashSet<String>,
+    used: HashSet<Name>,
 }
 
 /// `Ext_pp_scope.stamps`: `next` is the first suffix to try; every suffix
@@ -38,7 +39,7 @@ struct NameScope {
 #[derive(Clone, Default)]
 struct MangledNames {
     next: usize,
-    stamps: Vec<(i32, String)>,
+    stamps: Vec<(i32, Name)>,
 }
 
 struct FunctionPrintContext<'a> {
@@ -77,7 +78,7 @@ pub struct JsPrinter<'r> {
     name_scopes: Vec<NameScope>,
     /// `Ext_pp_scope.reserve`: the raw JS names the program refers to, which
     /// a suffixed name must not capture.
-    reserved_js_names: HashSet<String>,
+    reserved_js_names: HashSet<Name>,
     /// Stamp of the next fresh identifier (`Ext_ident.create`), counting
     /// down from -1 so it is distinct from every program identifier.
     next_fresh_stamp: i32,
@@ -422,24 +423,24 @@ impl<'r> JsPrinter<'r> {
 
     /// `Ext_pp_scope.add_ident`: the printed name of the identifier with
     /// mangled name `name` and `stamp` in the current scope.
-    fn add_ident(&mut self, name: &str, stamp: i32) -> String {
+    fn add_ident(&mut self, name: Name, stamp: i32) -> Name {
         let scope = self
             .name_scopes
             .last_mut()
             .expect("printer must always have a name scope");
         if let Some((_, printed)) = scope
             .names
-            .get(name)
+            .get(&name)
             .and_then(|names| names.stamps.iter().find(|(s, _)| *s == stamp))
         {
             return printed.clone();
         }
-        let mut i = scope.names.get(name).map_or(0, |names| names.next);
+        let mut i = scope.names.get(&name).map_or(0, |names| names.next);
         let printed = loop {
             let candidate = if i == 0 {
-                name.to_string()
+                name
             } else {
-                format!("{name}${i}")
+                Name::new(&format!("{name}${i}"))
             };
             if !(scope.used.contains(&candidate)
                 || (i > 0 && self.reserved_js_names.contains(&candidate)))
@@ -448,22 +449,22 @@ impl<'r> JsPrinter<'r> {
             }
             i += 1;
         };
-        let names = scope.names.entry(name.to_string()).or_default();
+        let names = scope.names.entry(name).or_default();
         names.next = i + 1;
         names.stamps.push((stamp, printed.clone()));
         scope.used.insert(printed.clone());
         printed
     }
 
-    fn lookup_visible_name(&self, id: &Ident) -> Option<String> {
+    fn lookup_visible_name(&self, id: &Ident) -> Option<Name> {
         self.name_scopes
             .iter()
             .rev()
-            .find_map(|scope| scope.ident_names.get(id).cloned())
+            .find_map(|scope| scope.ident_names.get(id).copied())
     }
 
-    fn assign_scoped_ident_name(&mut self, id: &Ident, base: String) -> String {
-        let printed = self.add_ident(&base, id.stamp());
+    fn assign_scoped_ident_name(&mut self, id: &Ident, base: Name) -> Name {
+        let printed = self.add_ident(base, id.stamp());
         self.current_name_scope_mut()
             .ident_names
             .insert(*id, printed.clone());
@@ -472,20 +473,20 @@ impl<'r> JsPrinter<'r> {
 
     /// The name of a fresh identifier (`Ext_ident.create`), whose stamp no
     /// other identifier has.
-    fn fresh_scoped_name(&mut self, base: String) -> String {
+    fn fresh_scoped_name(&mut self, base: String) -> Name {
         let stamp = self.next_fresh_stamp;
         self.next_fresh_stamp -= 1;
-        self.add_ident(&base, stamp)
+        self.add_ident(Name::new(&base), stamp)
     }
 
     /// Reserve raw JavaScript names so renamed locals cannot capture them.
     pub(super) fn reserve_js_names(&mut self, block: &[Stmt]) {
         #[derive(Default)]
-        struct JsNames(HashSet<String>);
+        struct JsNames(HashSet<Name>);
         impl JsNames {
             fn add(&mut self, id: &Ident) {
                 if id.is_js() || (id.is_global() && id.stamp() == 0) {
-                    self.0.insert(id.name().to_string());
+                    self.0.insert(id.name_atom());
                 }
             }
         }
@@ -527,25 +528,24 @@ impl<'r> JsPrinter<'r> {
     }
 
     /// Get a unique name for an identifier
-    pub(super) fn ident_name(&mut self, id: &Ident) -> String {
+    pub(super) fn ident_name(&mut self, id: &Ident) -> Name {
         if let Some(name) = self.lookup_visible_name(id) {
             return name;
         }
 
         if id.stamp() == 0 {
-            return id.name().to_string();
+            return id.name_atom();
         }
 
-        self.assign_scoped_ident_name(id, convert_ident_name(id.name()))
+        self.assign_scoped_ident_name(id, convert_ident_atom(id.name_atom()))
     }
 
-    pub(super) fn module_ident_name(&mut self, id: &Ident) -> String {
+    pub(super) fn module_ident_name(&mut self, id: &Ident) -> Name {
         if let Some(name) = self.lookup_visible_name(id) {
             return name;
         }
 
-        let base = convert_ident_name(id.name());
-        self.assign_scoped_ident_name(id, base)
+        self.assign_scoped_ident_name(id, convert_ident_atom(id.name_atom()))
     }
 
     /// Print statements
@@ -699,7 +699,10 @@ impl<'r> JsPrinter<'r> {
                 // cardinal-based counter).
                 let id_name = self.ident_name(&id);
                 let finish_binding = for_range_finish_needs_binding(a, end).then(|| {
-                    self.fresh_scoped_name(format!("{}_finish", convert_ident_name(id.name())))
+                    self.fresh_scoped_name(format!(
+                        "{}_finish",
+                        convert_ident_atom(id.name_atom())
+                    ))
                 });
 
                 self.write("for ");
@@ -1112,7 +1115,7 @@ impl<'r> JsPrinter<'r> {
         // and a body-local `match` starts at `match$2`).
         let mut scope = self.spare_name_scopes.pop().unwrap_or_default();
         for ident in reserved_idents {
-            let mangled = convert_ident_name(ident.name());
+            let mangled = convert_ident_atom(ident.name_atom());
             if scope.names.contains_key(&mangled) {
                 continue;
             }
@@ -1265,8 +1268,8 @@ impl<'r> JsPrinter<'r> {
                 // OCaml `Ext_pp_scope.merge` adds every id in a function
                 // environment, including stamp-0 JS globals, under its
                 // converted name.
-                let base = convert_ident_name(ident.name());
-                self.add_ident(&base, 0);
+                let base = convert_ident_atom(ident.name_atom());
+                self.add_ident(base, 0);
             } else {
                 let _ = self.ident_name(ident);
             }
@@ -1331,7 +1334,7 @@ impl<'r> JsPrinter<'r> {
         is_method: bool,
         params: &[Ident],
         body: &[Stmt],
-    ) -> (Option<String>, Vec<String>) {
+    ) -> (Option<Name>, Vec<Name>) {
         if !is_method {
             let rendered_params = params.iter().map(|param| self.ident_name(param)).collect();
             return (None, rendered_params);
@@ -1355,7 +1358,7 @@ impl<'r> JsPrinter<'r> {
         body: &[Stmt],
         return_unit: bool,
         directive: Option<&str>,
-        this_binding: Option<&String>,
+        this_binding: Option<&Name>,
     ) {
         let body_prints_any = function_body_prints_any(self.a, body);
         self.write(" {");
@@ -2163,7 +2166,7 @@ impl<'r> JsPrinter<'r> {
                     level,
                     elements.iter().zip(fields.iter()),
                     |this, (elem, field_name)| {
-                        let field_name = convert_ident_name(field_name);
+                        let field_name = convert_ident_cow(field_name);
                         this.print_literal_property_name(&field_name);
                         this.write(": ");
                         this.print_expression(*elem, 1);
@@ -2361,7 +2364,7 @@ impl<'r> JsPrinter<'r> {
                         self.write_module_ident(&module.id);
                         match &module.kind {
                             Kind::Ml | Kind::Runtime => {
-                                let printed_member = js_export_name(member);
+                                let printed_member = js_export_name_cow(member);
                                 self.write_char('.');
                                 self.write(&printed_member);
                             }
@@ -3022,28 +3025,48 @@ fn unwrap_uppercase_exotic(name: &str) -> &str {
 /// `Js_dump_import_export.js_export_name`: the emitted export name of an ML
 /// binding, JS identifier conversion with the ES default export kept literal.
 pub(crate) fn js_export_name(name: &str) -> String {
+    js_export_name_cow(name).into_owned()
+}
+
+/// [`js_export_name`], borrowing `name` when it needs no conversion.
+pub(crate) fn js_export_name_cow(name: &str) -> Cow<'_, str> {
     if name == "default" {
-        name.to_string()
+        Cow::Borrowed(name)
     } else {
-        convert_ident_name(name)
+        convert_ident_cow(name)
+    }
+}
+
+/// [`convert_ident_name`] for an interned name: the name itself when the
+/// conversion leaves it unchanged (almost always), without building a copy.
+pub(crate) fn convert_ident_atom(name: Name) -> Name {
+    match convert_ident_cow(name.as_str()) {
+        Cow::Borrowed(converted) if converted.len() == name.len() => name,
+        converted => Name::new(&converted),
     }
 }
 
 pub(crate) fn convert_ident_name(name: &str) -> String {
+    convert_ident_cow(name).into_owned()
+}
+
+/// [`convert_ident_name`], borrowing `name` (or the part inside an exotic
+/// `\"..."` wrapper) when it needs no mangling.
+pub(crate) fn convert_ident_cow(name: &str) -> Cow<'_, str> {
     let name = unwrap_uppercase_exotic(name);
     if is_js_keyword_or_global(name) {
-        format!("$${name}")
+        Cow::Owned(format!("$${name}"))
     } else {
         mangle_ident_name(name)
     }
 }
 
-fn mangle_ident_name(name: &str) -> String {
+fn mangle_ident_name(name: &str) -> Cow<'_, str> {
     if name
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '$'))
     {
-        return name.to_string();
+        return Cow::Borrowed(name);
     }
 
     let mut out = String::with_capacity(name.len());
@@ -3054,7 +3077,7 @@ fn mangle_ident_name(name: &str) -> String {
             out.push_str(mangle_ident_char(c, idx == 0));
         }
     }
-    out
+    Cow::Owned(out)
 }
 
 fn mangle_ident_char(c: char, op: bool) -> &'static str {
@@ -6777,7 +6800,7 @@ mod tests {
                         runtime: Box::new(crate::types::VariantBlock::Tagged(
                             crate::types::TaggedBlock {
                                 tag: crate::types::VariantTag {
-                                    name: "One".to_string(),
+                                    name: crate::name::Name::new("One"),
                                     literal: crate::types::VariantLiteralTag::String(
                                         "One".to_string(),
                                     ),

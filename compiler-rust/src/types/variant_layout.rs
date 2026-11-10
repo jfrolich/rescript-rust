@@ -705,12 +705,12 @@ fn check_invariant(
 /// ast_untagged_variants.ml `declared_tag`: a constructor without `@as` is
 /// represented by its name.
 pub(crate) fn declared_tag(cstr: &ConstructorDeclaration) -> Tag {
-    let name = cstr.cd_id.name().to_string();
+    let name = cstr.cd_id.name_atom();
     Tag {
         literal: cstr
             .cd_runtime_tag
             .clone()
-            .unwrap_or_else(|| LiteralTag::String(name.clone())),
+            .unwrap_or_else(|| LiteralTag::String(name.to_string())),
         name,
     }
 }

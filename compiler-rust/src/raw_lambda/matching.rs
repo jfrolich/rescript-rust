@@ -511,15 +511,18 @@ type RecordPatternField = (
     bool,
 );
 
+/// Record sub-patterns aligned for a comparison; small enough to stay inline.
+type PatRefs<'p> = smallvec::SmallVec<[&'p Pattern; 8]>;
+
 fn records_args_for_le_pats<'p>(
     pa: &PatArena<'p>,
     l1: &[RecordPatternField],
     l2: &[RecordPatternField],
     omega: &'p Pattern,
-) -> (Vec<&'p Pattern>, Vec<&'p Pattern>) {
+) -> (PatRefs<'p>, PatRefs<'p>) {
     let pat = |idx: &TPatIdx| pa.pat(*idx);
-    let mut ps = Vec::new();
-    let mut qs = Vec::new();
+    let mut ps = PatRefs::new();
+    let mut qs = PatRefs::new();
     let mut i = 0;
     let mut j = 0;
 
@@ -630,23 +633,34 @@ fn le_pats<A: Borrow<Pattern>, B: Borrow<Pattern>>(pa: &PatArena<'_>, ps: &[A], 
 
 /// Get minimal elements under a partial order `le`.
 /// Equivalent to OCaml's `get_mins`.
-fn get_mins<T: Clone>(le: impl Fn(&T, &T) -> bool, ps: Vec<T>) -> Vec<T> {
+fn get_mins<T>(le: impl Fn(&T, &T) -> bool, mut ps: Vec<T>) -> Vec<T> {
     // OCaml `select_rec` keeps `p` unless a later element is below it and
     // conses kept elements onto the accumulator, so each pass returns the kept
-    // elements in reverse order. Select by reference and clone the survivors.
-    fn select_rec<'t, T>(le: &impl Fn(&T, &T) -> bool, ps: &[&'t T]) -> Vec<&'t T> {
-        let mut kept = ps
+    // elements in reverse order. Two passes restore the input order, so
+    // select indices and keep the survivors in place.
+    type Indices = smallvec::SmallVec<[usize; 16]>;
+    fn select_rec<T>(le: &impl Fn(&T, &T) -> bool, ps: &[T], order: &[usize]) -> Indices {
+        let mut kept: Indices = order
             .iter()
             .enumerate()
-            .filter(|(i, p)| !ps[i + 1..].iter().any(|p0| le(p0, p)))
+            .filter(|(i, p)| !order[i + 1..].iter().any(|p0| le(&ps[*p0], &ps[**p])))
             .map(|(_, p)| *p)
-            .collect::<Vec<_>>();
+            .collect();
         kept.reverse();
         kept
     }
-    let refs = ps.iter().collect::<Vec<_>>();
-    let first_pass = select_rec(&le, &refs);
-    select_rec(&le, &first_pass).into_iter().cloned().collect()
+    let all: Indices = (0..ps.len()).collect();
+    let first_pass = select_rec(&le, &ps, &all);
+    let kept = select_rec(&le, &ps, &first_pass);
+    debug_assert!(kept.windows(2).all(|w| w[0] < w[1]));
+    let mut next = kept.iter().copied().peekable();
+    let mut index = 0;
+    ps.retain(|_| {
+        let keep = next.next_if_eq(&index).is_some();
+        index += 1;
+        keep
+    });
+    ps
 }
 
 /// Raised when patterns are incompatible in lub.
@@ -5205,8 +5219,8 @@ fn matcher_constr_arityN<'p>(
 }
 
 /// The label's runtime name (OCaml `lbl.lbl_runtime_name`).
-fn label_runtime_name_matching(lbl: &LabelDescription) -> String {
-    lbl.lbl_runtime_name.to_string()
+fn label_runtime_name_matching(lbl: &LabelDescription) -> crate::name::Name {
+    lbl.lbl_runtime_name
 }
 
 /// Create field debug info for a record label (equivalent to OCaml's Lambda.fld_record).
@@ -7232,9 +7246,7 @@ fn transl_normal_path(b: &RawArena, path: &crate::types::path::Path) -> RawLambd
         PathView::Pdot(p, s, pos) => b.prim(
             Primitive::Pfield(
                 *pos,
-                FieldDbgInfo::Module {
-                    name: s.to_string(),
-                },
+                FieldDbgInfo::Module { name: *s },
             ),
             &[transl_normal_path(b, p)],
             LamLoc::NONE,

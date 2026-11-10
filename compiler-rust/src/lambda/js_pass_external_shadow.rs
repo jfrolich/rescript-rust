@@ -88,6 +88,10 @@ impl Scope {
 }
 
 impl Mapper for Scope {
+    fn block(&mut self, j: &mut JsArena, block: StmtList) -> StmtList {
+        crate::js_ir::walk::map_block_with_items(self, j, block)
+    }
+
     fn block_items(&mut self, j: &mut JsArena, block: &[Stmt]) -> Block {
         let mark = self.enter();
         self.add_declarations(j, block);

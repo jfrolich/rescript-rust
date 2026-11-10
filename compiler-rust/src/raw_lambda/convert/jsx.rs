@@ -327,7 +327,7 @@ impl<'a> RawLambdaConverter<'a> {
                                         Primitive::Pfield(
                                             lbl.lbl_pos,
                                             FieldDbgInfo::Record {
-                                                name: label_runtime_name(lbl),
+                                                name: lbl.lbl_runtime_name,
                                             },
                                         ),
                                         &vec![rb.var(init_id)],

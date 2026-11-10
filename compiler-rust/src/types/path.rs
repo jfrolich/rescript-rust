@@ -400,6 +400,38 @@ impl Path {
         }
     }
 
+    /// Whether `name()` equals `other.name()`, without building either.
+    pub fn name_equals(&self, other: &Path) -> bool {
+        if std::ptr::eq(self.0, other.0) {
+            return true;
+        }
+        let mut left = smallvec::SmallVec::<[&'static str; 8]>::new();
+        let mut right = smallvec::SmallVec::<[&'static str; 8]>::new();
+        self.name_pieces(&mut left);
+        other.name_pieces(&mut right);
+        left.iter()
+            .flat_map(|piece| piece.bytes())
+            .eq(right.iter().flat_map(|piece| piece.bytes()))
+    }
+
+    /// The pieces `name()` concatenates.
+    fn name_pieces(&self, out: &mut smallvec::SmallVec<[&'static str; 8]>) {
+        match self.view() {
+            PathView::Pident(id) => out.push(id.name()),
+            PathView::Pdot(p, s, _) => {
+                p.name_pieces(out);
+                out.push(".");
+                out.push(s.as_str());
+            }
+            PathView::Papply(p1, p2) => {
+                p1.name_pieces(out);
+                out.push("(");
+                p2.name_pieces(out);
+                out.push(")");
+            }
+        }
+    }
+
     /// Get the string name with parenthesization for operators.
     pub fn name_with_paren(&self, paren: impl Fn(&str) -> bool + Copy) -> String {
         let mut out = String::with_capacity(self.name_len_hint());

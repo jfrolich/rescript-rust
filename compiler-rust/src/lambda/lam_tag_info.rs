@@ -126,7 +126,7 @@ impl TagInfo {
                 // ast_untagged_variants.ml `generated_tag`: a constructor
                 // the compiler generates is represented by its name.
                 tag: crate::types::VariantTag {
-                    name: name.clone(),
+                    name: crate::name::Name::new(&name),
                     literal: crate::types::VariantLiteralTag::String(name.clone()),
                 },
                 tag_name: None,

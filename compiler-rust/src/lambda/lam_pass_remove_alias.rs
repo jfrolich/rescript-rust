@@ -83,12 +83,12 @@ fn lam_not(a: &mut LamArena, loc: LamLoc, x: Lam) -> Lam {
 }
 
 /// The module and field of `Pfield(_, Fld_module name) [Lglobal_module id]`.
-fn module_field_apply_target(a: &LamArena, lam: Lam) -> Option<(Ident, &str)> {
+fn module_field_apply_target(a: &LamArena, lam: Lam) -> Option<(Ident, crate::name::Name)> {
     let (Primitive::Pfield(_, FieldDbgInfo::Module { name }), [m], _) = a.as_prim(lam)? else {
         return None;
     };
     match a.node(*m) {
-        Node::GlobalModule(id) => Some((a.ident(id), name.as_str())),
+        Node::GlobalModule(id) => Some((a.ident(id), *name)),
         _ => None,
     }
 }
@@ -245,7 +245,7 @@ impl Simplifier<'_, '_> {
         }
         match primitive {
             Primitive::Pfield(i, field_info) if a.list_len(args) == 1 => {
-                let (i, field_info) = (*i, field_info.clone());
+                let (i, field_info) = (*i, *field_info);
                 let arg = a.list(args)[0];
                 let new_arg = self.simpl(a, arg);
                 let rebuild = |a: &mut LamArena| {
@@ -299,9 +299,8 @@ impl Simplifier<'_, '_> {
     ) -> Lam {
         // Cross-module inlining (lam_pass_remove_alias.ml:131-162).
         if let Some((module_id, field_name)) = module_field_apply_target(a, func) {
-            let field_name = field_name.to_string();
             let arg_list = a.list_vec(args);
-            if let Some(Lambda::Lfunction(f)) = (self.external_inline)(&module_id, &field_name)
+            if let Some(Lambda::Lfunction(f)) = (self.external_inline)(&module_id, field_name.as_str())
                 && f.params.len() == arg_list.len()
                 && external_inline_args_are_allowed(a, &arg_list, self.ident_tbl)
                 && crate::lambda::lam_analysis::attr_can_be_inlined(&f.attr)

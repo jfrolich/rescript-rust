@@ -217,7 +217,7 @@ impl Lowering<'_> {
                     Primitive::Pfield(
                         0,
                         FieldDbgInfo::Record {
-                            name: EXCEPTION_ID_FIELD.to_string(),
+                            name: crate::name::Name::new(EXCEPTION_ID_FIELD),
                         },
                     ),
                     &[lhs],
@@ -292,7 +292,7 @@ pub(crate) fn wrap_exn_raw(b: &RawArena, loc: LamLoc, arg: RawLambda) -> RawLamb
         Primitive::Pfield(
             0,
             FieldDbgInfo::Module {
-                name: "internalToException".to_string(),
+                name: crate::name::Name::new("internalToException"),
             },
         ),
         &[module],
@@ -315,7 +315,7 @@ pub(crate) fn wrap_exn(loc: LamLoc, arg: Lambda) -> Lambda {
         Primitive::Pfield(
             0,
             FieldDbgInfo::Module {
-                name: "internalToException".to_string(),
+                name: crate::name::Name::new("internalToException"),
             },
         ),
         vec![Lambda::global_module(Ident::create_persistent(
@@ -1310,7 +1310,7 @@ mod tests {
                         crate::lambda::SwitchKey::Constructor(
                             crate::types::VariantConstructorCase::Constant(
                                 crate::types::VariantTag {
-                                    name: "A".to_string(),
+                                    name: crate::name::Name::new("A"),
                                     literal: crate::types::VariantLiteralTag::String(
                                         "A".to_string(),
                                     ),
@@ -1385,7 +1385,7 @@ mod tests {
                             crate::lambda::SwitchKey::Constructor(
                                 crate::types::VariantConstructorCase::Constant(
                                     crate::types::VariantTag {
-                                        name: "A".to_string(),
+                                        name: crate::name::Name::new("A"),
                                         literal: crate::types::VariantLiteralTag::String(
                                             "A".to_string(),
                                         ),
@@ -1398,7 +1398,7 @@ mod tests {
                             crate::lambda::SwitchKey::Constructor(
                                 crate::types::VariantConstructorCase::Constant(
                                     crate::types::VariantTag {
-                                        name: "B".to_string(),
+                                        name: crate::name::Name::new("B"),
                                         literal: crate::types::VariantLiteralTag::String(
                                             "B".to_string(),
                                         ),
@@ -1450,7 +1450,7 @@ mod tests {
                     Primitive::Pfield(
                         1,
                         FieldDbgInfo::Module {
-                            name: "presentLight".to_string(),
+                            name: crate::name::Name::new("presentLight"),
                         },
                     ),
                     &[b.var(module_id)],

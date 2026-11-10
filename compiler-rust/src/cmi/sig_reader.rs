@@ -406,7 +406,7 @@ impl<'a> SigReadContext<'a> {
     fn read_variant_tag(&mut self, value: &OcamlValue) -> crate::types::VariantTag {
         let (_, fields) = value.as_block();
         crate::types::VariantTag {
-            name: fields[0].as_string().to_string(),
+            name: crate::name::Name::new(fields[0].as_string()),
             literal: self.read_variant_literal_tag(&fields[1]),
         }
     }

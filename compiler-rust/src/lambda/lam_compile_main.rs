@@ -362,7 +362,7 @@ fn flat_make_alias(
             Primitive::Pfield(
                 step.pos,
                 FieldDbgInfo::Module {
-                    name: step.name.clone(),
+                    name: crate::name::Name::new(&step.name),
                 },
             ),
             &[read],

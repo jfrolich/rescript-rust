@@ -58,8 +58,12 @@ pub(crate) fn update_declaration_infos(
         l: StmtList,
         f: &mut impl FnMut(Ident, &mut crate::js_ir::op::IdentInfo),
     ) {
-        let block = j.block_vec(l);
-        update_declaration_infos(j, &block, f);
+        // Index the arena list instead of copying it: `f` only touches
+        // declaration infos, never the list pools.
+        for i in 0..j.stmts(l).len() {
+            let stmt = j.stmts(l)[i];
+            update_declaration_infos(j, std::slice::from_ref(&stmt), f);
+        }
     }
     fn expr(j: &mut JsArena, e: Expr, f: &mut impl FnMut(Ident, &mut crate::js_ir::op::IdentInfo)) {
         // Collect the outermost function bodies of `e`; their statements are
@@ -326,6 +330,10 @@ impl TailcallInlineState {
 }
 
 impl Mapper for TailcallInlineState {
+    fn block(&mut self, j: &mut JsArena, block: StmtList) -> StmtList {
+        crate::js_ir::walk::map_block_with_items(self, j, block)
+    }
+
     fn block_items(&mut self, j: &mut JsArena, block: &[Stmt]) -> Vec<Stmt> {
         let len = block.len();
         let mut transformed = Vec::with_capacity(len);
@@ -542,6 +550,10 @@ impl SubstituteInline {
 }
 
 impl Mapper for SubstituteInline {
+    fn block(&mut self, j: &mut JsArena, block: StmtList) -> StmtList {
+        crate::js_ir::walk::map_block_with_items(self, j, block)
+    }
+
     fn block_items(&mut self, j: &mut JsArena, block: &[Stmt]) -> Vec<Stmt> {
         let saved = self.substitution.clone();
         let mut rewritten = Vec::with_capacity(block.len());

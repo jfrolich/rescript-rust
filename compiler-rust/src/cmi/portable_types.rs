@@ -110,7 +110,9 @@ pub enum PortableLongident {
 /// Portable row description for polymorphic variants.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct PortableRowDesc {
-    pub row_fields: Vec<(String, PortableRowField)>,
+    /// Labels as `RowDesc` keeps them: short ones decode inline, without
+    /// an allocation.
+    pub row_fields: Vec<(crate::types::asttypes::Label, PortableRowField)>,
     pub row_more: usize,
     pub row_closed: bool,
     pub row_fixed: bool,
@@ -1066,7 +1068,7 @@ impl<'a, 'f> TypeGraphSerializer<'a, 'f> {
             row_fields: rd
                 .row_fields
                 .iter()
-                .map(|(label, field)| (label.to_string(), self.serialize_row_field(field)))
+                .map(|(label, field)| (label.clone(), self.serialize_row_field(field)))
                 .collect(),
             row_more: self.serialize_type(rd.row_more),
             row_closed: rd.row_closed,
@@ -1889,10 +1891,7 @@ fn internalize_row_desc<S: TypeNodeSink>(
             .row_fields
             .iter()
             .map(|(label, field)| {
-                (
-                    label.as_str().into(),
-                    internalize_row_field(field, remap, ctx),
-                )
+                (label.clone(), internalize_row_field(field, remap, ctx))
             })
             .collect(),
         row_more: remap[prd.row_more],

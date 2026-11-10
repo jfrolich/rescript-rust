@@ -196,18 +196,43 @@ pub(crate) trait Mapper {
     }
 
     /// Maps a block's statements; the default maps each one in place.
+    /// A mapper that overrides this must also override [`Mapper::block`]
+    /// with [`map_block_with_items`], which the default does not call.
     fn block_items(&mut self, j: &mut JsArena, items: &[Stmt]) -> Vec<Stmt> {
         items.iter().map(|s| self.statement(j, *s)).collect()
     }
 
     fn block(&mut self, j: &mut JsArena, block: StmtList) -> StmtList {
-        let items = j.block_vec(block);
-        let mapped = self.block_items(j, &items);
-        if mapped == items {
-            block
-        } else {
-            j.stmt_list(&mapped)
+        let len = j.stmts(block).len();
+        let mark = j.stmt_scratch_mark();
+        let mut changed = false;
+        for i in 0..len {
+            let s = j.stmts(block)[i];
+            let n = self.statement(j, s);
+            changed |= n != s;
+            j.stmt_scratch_push(n);
         }
+        if changed {
+            j.stmt_list_from_scratch(mark)
+        } else {
+            j.stmt_scratch_truncate(mark);
+            block
+        }
+    }
+}
+
+/// [`Mapper::block`] for mappers that override [`Mapper::block_items`].
+pub(crate) fn map_block_with_items<M: Mapper + ?Sized>(
+    m: &mut M,
+    j: &mut JsArena,
+    block: StmtList,
+) -> StmtList {
+    let items = j.block_vec(block);
+    let mapped = m.block_items(j, &items);
+    if mapped == items {
+        block
+    } else {
+        j.stmt_list(&mapped)
     }
 }
 
@@ -217,17 +242,21 @@ pub(crate) fn map_expr_list<M: Mapper + ?Sized>(
     j: &mut JsArena,
     list: ExprList,
 ) -> ExprList {
-    let items = j.expr_vec(list);
+    let len = j.exprs(list).len();
+    let mark = j.expr_scratch_mark();
     let mut changed = false;
-    let mapped: Vec<Expr> = items
-        .iter()
-        .map(|e| {
-            let n = m.expression(j, *e);
-            changed |= n != *e;
-            n
-        })
-        .collect();
-    if changed { j.expr_list(&mapped) } else { list }
+    for i in 0..len {
+        let e = j.exprs(list)[i];
+        let n = m.expression(j, e);
+        changed |= n != e;
+        j.expr_scratch_push(n);
+    }
+    if changed {
+        j.expr_list_from_scratch(mark)
+    } else {
+        j.expr_scratch_truncate(mark);
+        list
+    }
 }
 
 pub(crate) fn map_expression_children<M: Mapper + ?Sized>(

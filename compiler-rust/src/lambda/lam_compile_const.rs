@@ -12,7 +12,6 @@ use crate::cmi::persistent_env::CmjExportConstant;
 use crate::js_ir::arena::{Expr, ExprKind, JsArena};
 use crate::js_ir::build::exp as E;
 use crate::js_ir::op::{Kind, MutableFlag, Number};
-use crate::js_ir::printer::convert_ident_name;
 use crate::js_ir::{BinOp, ModuleId};
 use crate::lambda::lam_compat::FieldDbgInfo;
 use crate::lambda::lam_constant::{Constant, ConstructorRuntimeTag, PointerInfo};
@@ -201,9 +200,13 @@ impl LambdaCompiler {
                     if let Some(constant) = self.resolve_cmj_module_field_constant(&module, name) {
                         return constant;
                     }
-                    E::qualified(module, Some(name.clone()), &mut self.j)
+                    E::qualified(module, Some(name.to_string()), &mut self.j)
                 }
-                _ => indexed(&mut self.j, &convert_ident_name(name), Some(idx)),
+                _ => indexed(
+                    &mut self.j,
+                    &crate::js_ir::printer::convert_ident_cow(name),
+                    Some(idx),
+                ),
             },
             FieldDbgInfo::Record { name }
             | FieldDbgInfo::RecordInline { name }

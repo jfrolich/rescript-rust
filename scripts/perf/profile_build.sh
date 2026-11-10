@@ -10,10 +10,12 @@
 #   CARGO_PROFILE_RELEASE_DEBUG=line-tables-only CARGO_PROFILE_RELEASE_STRIP=none \
 #     cargo build --release --manifest-path rewatch/Cargo.toml
 # To compare two binaries, profile both in the same batch on an idle machine.
+# With ALLOC_STATS=1 and a binary built with `--features alloc-stats`, one more
+# unprofiled clean build reports the allocation totals (scripts/perf/README.md).
 set -euo pipefail
 
 if [ $# -lt 3 ]; then
-  sed -n '2,12p' "$0"
+  sed -n '2,14p' "$0"
   exit 2
 fi
 bin=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
@@ -47,3 +49,7 @@ echo "mean unprofiled CPU (user + sys): ${cpu}s over $runs run(s)"
 dirs=()
 for i in $(seq 1 "$runs"); do dirs+=("$out/run-$i"); done
 python3 "$here/dod_breakdown.py" "${dirs[@]}" --cpu-seconds "$cpu" | tee "$out/breakdown.txt"
+
+if [ "${ALLOC_STATS:-}" = 1 ]; then
+  "$here/alloc_count.sh" "$bin" "$project" | tee "$out/alloc-count.txt"
+fi

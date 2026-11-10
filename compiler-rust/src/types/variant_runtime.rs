@@ -509,7 +509,7 @@ pub enum TagType {
 /// literal: what `@as` states, or the name itself.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Tag {
-    pub name: String,
+    pub name: crate::name::Name,
     pub literal: LiteralTag,
 }
 
@@ -749,7 +749,7 @@ pub fn plain_layout(
             } else {
                 LiteralTag::String(name.clone())
             };
-            let tag = Tag { name, literal };
+            let tag = Tag { name: crate::name::Name::new(&name), literal };
             if has_payload {
                 ConstructorCase::Block(Block::Tagged(TaggedBlock {
                     tag,

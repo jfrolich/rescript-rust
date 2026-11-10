@@ -25,6 +25,9 @@ use crate::lambda::arena::{Lam, LamArena, LamList, PrimId, View};
 use crate::lambda::lam_compat::{Comparison, FieldDbgInfo};
 use crate::lambda::lam_primitive::{Mutable, Primitive};
 
+/// Compiled primitive arguments; primitives take at most a few.
+pub(crate) type PrimArgs = smallvec::SmallVec<[Expr; 4]>;
+
 impl LambdaCompiler {
     pub(crate) fn compile_primitive(
         &mut self,
@@ -46,7 +49,7 @@ impl LambdaCompiler {
         }
         let args = a.list_small(args);
         let (prelude, compiled_args) = self.compile_arguments(a, false, args);
-        self.compile_primitive_js(&prim, compiled_args, prelude, &loc)
+        self.compile_primitive_js(&prim, compiled_args.into(), prelude, &loc)
     }
 
     /// Evaluate debugger's unit argument for effects before emitting the statement.
@@ -114,7 +117,7 @@ impl LambdaCompiler {
             awaited_units: &ahash::AHashSet<Ident>,
             prim: &'a Primitive,
             args: &[Lam],
-            segments: &mut Vec<&'a str>,
+            segments: &mut smallvec::SmallVec<[&'a str; 4]>,
         ) -> Option<Base> {
             let Primitive::Pfield(_, FieldDbgInfo::Module { name }) = prim else {
                 return None;
@@ -132,7 +135,7 @@ impl LambdaCompiler {
                 _ => None,
             }
         }
-        let mut reversed = Vec::new();
+        let mut reversed = smallvec::SmallVec::new();
         let base = extract_field_path(
             a,
             &self.awaited_units,
@@ -173,7 +176,7 @@ impl LambdaCompiler {
     pub(crate) fn compile_primitive_js(
         &mut self,
         prim: &Primitive,
-        mut compiled_args: Vec<Expr>,
+        mut compiled_args: PrimArgs,
         mut prelude: Block,
         loc: &LamLoc,
     ) -> Compiled {
@@ -206,7 +209,7 @@ impl LambdaCompiler {
             }
             Ptemplate(segments) => crate::lambda::js_exp_make::interpolated_template(
                 segments.clone(),
-                std::mem::take(&mut compiled_args),
+                std::mem::take(&mut compiled_args).into_vec(),
                 &mut self.j,
             ),
             // OCaml lam_compile_primitive.ml:87-90 lowers Pjs_apply to a
@@ -228,14 +231,16 @@ impl LambdaCompiler {
                 None => JE::undefined(false, &mut self.j),
             },
             Pstringrefs | Pstringrefu => {
-                self.runtime_call_expr("Primitive_string", "getChar", compiled_args)
+                self.runtime_call_expr("Primitive_string", "getChar", compiled_args.into_vec())
             }
-            Parrayrefu => match <[Expr; 2]>::try_from(compiled_args) {
+            Parrayrefu => match <[Expr; 2]>::try_from(compiled_args.as_slice()) {
                 Ok([array, index]) => JE::new(ExprKind::ArrayIndex(array, index), &mut self.j),
                 _ => JE::undefined(false, &mut self.j),
             },
-            Parrayrefs => self.runtime_call_expr("Primitive_array", "get", compiled_args),
-            Parraysetu => match <[Expr; 3]>::try_from(compiled_args) {
+            Parrayrefs => {
+                self.runtime_call_expr("Primitive_array", "get", compiled_args.into_vec())
+            }
+            Parraysetu => match <[Expr; 3]>::try_from(compiled_args.as_slice()) {
                 Ok([array, index, value]) => {
                     let target = JE::new(ExprKind::ArrayIndex(array, index), &mut self.j);
                     let assign = JE::bin(BinOp::Eq, target, value, &mut self.j);
@@ -380,9 +385,11 @@ impl LambdaCompiler {
                 take_arg(&mut compiled_args, 0),
                 take_arg(&mut compiled_args, 1),
             ),
-            Pobjorder => self.runtime_call_expr("Primitive_object", "compare", compiled_args),
-            Pobjmin => self.runtime_call_expr("Primitive_object", "min", compiled_args),
-            Pobjmax => self.runtime_call_expr("Primitive_object", "max", compiled_args),
+            Pobjorder => {
+                self.runtime_call_expr("Primitive_object", "compare", compiled_args.into_vec())
+            }
+            Pobjmin => self.runtime_call_expr("Primitive_object", "min", compiled_args.into_vec()),
+            Pobjmax => self.runtime_call_expr("Primitive_object", "max", compiled_args.into_vec()),
             Pobjtag => {
                 let tag = self.j.str("TAG");
                 JE::new(
@@ -405,7 +412,7 @@ impl LambdaCompiler {
                 bool_literal(&self.j, compiled_args[1]),
             ) {
                 (Some(left), Some(right)) => int_expr(left.cmp(&right) as i32, &mut self.j),
-                _ => self.runtime_call_expr("Primitive_bool", "compare", compiled_args),
+                _ => self.runtime_call_expr("Primitive_bool", "compare", compiled_args.into_vec()),
             },
             Pboolmin => self.compile_typed_min_max(
                 "Primitive_bool",
@@ -423,7 +430,9 @@ impl LambdaCompiler {
                 take_arg(&mut compiled_args, 1),
                 both_bool_literals,
             ),
-            Pintorder => self.runtime_call_expr("Primitive_int", "compare", compiled_args),
+            Pintorder => {
+                self.runtime_call_expr("Primitive_int", "compare", compiled_args.into_vec())
+            }
             Pintmin => self.compile_typed_min_max(
                 "Primitive_int",
                 "min",
@@ -440,7 +449,9 @@ impl LambdaCompiler {
                 take_arg(&mut compiled_args, 1),
                 both_int_literals,
             ),
-            Pfloatorder => self.runtime_call_expr("Primitive_float", "compare", compiled_args),
+            Pfloatorder => {
+                self.runtime_call_expr("Primitive_float", "compare", compiled_args.into_vec())
+            }
             Pfloatmin => self.compile_typed_min_max(
                 "Primitive_float",
                 "min",
@@ -457,7 +468,9 @@ impl LambdaCompiler {
                 take_arg(&mut compiled_args, 1),
                 both_float_literals,
             ),
-            Pbigintorder => self.runtime_call_expr("Primitive_bigint", "compare", compiled_args),
+            Pbigintorder => {
+                self.runtime_call_expr("Primitive_bigint", "compare", compiled_args.into_vec())
+            }
             Pbigintmin => self.compile_typed_min_max(
                 "Primitive_bigint",
                 "min",
@@ -474,7 +487,9 @@ impl LambdaCompiler {
                 take_arg(&mut compiled_args, 1),
                 both_bigint_literals,
             ),
-            Pstringorder => self.runtime_call_expr("Primitive_string", "compare", compiled_args),
+            Pstringorder => {
+                self.runtime_call_expr("Primitive_string", "compare", compiled_args.into_vec())
+            }
             Pstringmin => self.compile_typed_min_max(
                 "Primitive_string",
                 "min",
@@ -491,13 +506,17 @@ impl LambdaCompiler {
                 take_arg(&mut compiled_args, 1),
                 both_string_literals,
             ),
-            Phash => self.runtime_call_expr("Primitive_hash", "hash", compiled_args),
-            PhashMixint => self.runtime_call_expr("Primitive_hash", "hash_mix_int", compiled_args),
-            PhashMixstring => {
-                self.runtime_call_expr("Primitive_hash", "hash_mix_string", compiled_args)
+            Phash => self.runtime_call_expr("Primitive_hash", "hash", compiled_args.into_vec()),
+            PhashMixint => {
+                self.runtime_call_expr("Primitive_hash", "hash_mix_int", compiled_args.into_vec())
             }
+            PhashMixstring => self.runtime_call_expr(
+                "Primitive_hash",
+                "hash_mix_string",
+                compiled_args.into_vec(),
+            ),
             PhashFinalmix => {
-                self.runtime_call_expr("Primitive_hash", "hash_final_mix", compiled_args)
+                self.runtime_call_expr("Primitive_hash", "hash_final_mix", compiled_args.into_vec())
             }
             Psequand => JE::bin(
                 BinOp::And,
@@ -641,8 +660,8 @@ impl LambdaCompiler {
                 }
                 _ => JE::undefined(false, &mut self.j),
             },
-            ParraySpread => self.runtime_call_expr("Primitive_array", "spread", compiled_args),
-            PlistSpread => self.runtime_call_expr("Primitive_list", "spread", compiled_args),
+            ParraySpread => self.runtime_call_expr("Primitive_array", "spread", compiled_args.into_vec()),
+            PlistSpread => self.runtime_call_expr("Primitive_list", "spread", compiled_args.into_vec()),
             PdictSpread => {
                 let mut entries = Vec::new();
                 for arg in compiled_args {
@@ -660,7 +679,7 @@ impl LambdaCompiler {
                 let entries = self.j.prop_list(&entries);
                 self.j.expr(ExprKind::Object(entries))
             }
-            PdictHas => match <[Expr; 2]>::try_from(compiled_args) {
+            PdictHas => match <[Expr; 2]>::try_from(compiled_args.as_slice()) {
                 Ok([obj, prop]) => JE::new(ExprKind::In(prop, obj), &mut self.j),
                 _ => {
                     self.report_diagnostic(
@@ -670,7 +689,7 @@ impl LambdaCompiler {
                     JE::undefined(false, &mut self.j)
                 }
             },
-            Pduprecord => match <[Expr; 1]>::try_from(compiled_args) {
+            Pduprecord => match <[Expr; 1]>::try_from(compiled_args.as_slice()) {
                 Ok([source]) => {
                     let props = self
                         .j
@@ -679,7 +698,7 @@ impl LambdaCompiler {
                 }
                 _ => JE::undefined(false, &mut self.j),
             },
-            PrecordRest(excluded) => match <[Expr; 1]>::try_from(compiled_args) {
+            PrecordRest(excluded) => match <[Expr; 1]>::try_from(compiled_args.as_slice()) {
                 Ok([source]) => {
                     let fields = self.j.rest_id(
                         excluded
@@ -699,8 +718,12 @@ impl LambdaCompiler {
                 take_arg(&mut compiled_args, 1),
                 &mut self.j,
             ),
-            PinitMod => self.runtime_call_expr("Primitive_module", "init", compiled_args),
-            PupdateMod => self.runtime_call_expr("Primitive_module", "update", compiled_args),
+            PinitMod => {
+                self.runtime_call_expr("Primitive_module", "init", compiled_args.into_vec())
+            }
+            PupdateMod => {
+                self.runtime_call_expr("Primitive_module", "update", compiled_args.into_vec())
+            }
             PnullToOpt => self.null_to_opt_expr(take_arg(&mut compiled_args, 0)),
             PnullUndefinedToOpt => self.null_undefined_to_opt_expr(take_arg(&mut compiled_args, 0)),
             PisNotNone => self.is_not_none_expr(take_arg(&mut compiled_args, 0)),
@@ -773,7 +796,7 @@ impl LambdaCompiler {
                 self.pure_runtime_call_expr("Primitive_exceptions", "create", vec![name])
             }
             PjsObjectCreate(obj_params) => {
-                self.compile_js_object_create(obj_params, compiled_args, &mut prelude)
+                self.compile_js_object_create(obj_params, compiled_args.into_vec(), &mut prelude)
             }
             PjsFnMethod => match first_arg(compiled_args).map(|expr| (expr, self.j.ek(expr))) {
                 // lam_compile.ml:1727-1729: `with_source_loc loc (E.method_ ...)`
@@ -807,10 +830,10 @@ impl LambdaCompiler {
                     _ => JE::undefined(false, &mut self.j),
                 }
             }
-            Pjsx(jsx) => self.compile_jsx(jsx, compiled_args),
+            Pjsx(jsx) => self.compile_jsx(jsx, compiled_args.into_vec()),
             Pimport(source) => self.compile_import(loc, source),
             PjsCall(call) => {
-                self.compile_js_call(&call.prim_name, &call.arg_types, &call.ffi, compiled_args)
+                self.compile_js_call(&call.prim_name, &call.arg_types, &call.ffi, compiled_args.into_vec())
             }
             PextensionSlotEq => unreachable!("PextensionSlotEq is lowered in raw_lambda::lower"),
         };
@@ -1002,7 +1025,7 @@ impl LambdaCompiler {
 
 /// Move argument `index` out of `args`, which the calling arm uses once.
 /// Consume the argument list, returning its first element if any.
-fn first_arg(args: Vec<Expr>) -> Option<Expr> {
+fn first_arg(args: PrimArgs) -> Option<Expr> {
     args.into_iter().next()
 }
 

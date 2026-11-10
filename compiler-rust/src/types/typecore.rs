@@ -1038,7 +1038,7 @@ pub struct PatternState {
     /// Whether modules are allowed.
     allow_modules: bool,
     /// Module variables collected.
-    module_variables: Vec<(crate::parse_arena::Located<String>, Location)>,
+    module_variables: Vec<(crate::parse_arena::Located<crate::name::Name>, Location)>,
     /// Type paths whose component-table side effects must run after the whole
     /// pattern has allocated binders.
     deferred_type_path_forces: Vec<TypeExprRef>,
@@ -1070,7 +1070,7 @@ pub struct PatternVariable {
     /// Original parser location index for this binding.
     pub loc_idx: LocIdx,
     /// The name with location.
-    pub name: crate::parse_arena::Located<String>,
+    pub name: crate::parse_arena::Located<crate::name::Name>,
     /// The location.
     pub loc: Location,
     /// Whether this is an as-variable.
@@ -1120,7 +1120,7 @@ impl PatternState {
         let id = type_ctx.create_ast_ident(arena, name.txt);
         let full_loc = arena.to_location(loc);
         let full_name = crate::parse_arena::Located {
-            txt: name_str.to_string(),
+            txt: interned,
             loc: name.loc,
         };
         self.pattern_variables.push(PatternVariable {
@@ -1608,18 +1608,13 @@ impl<'a> TypeCheckContext<'a> {
                 name,
                 deprecated,
             } => (loc, name, deprecated),
-            ModuleDeprecation::Persistent {
-                loc,
-                name,
-                unit,
-                components,
-            } => {
+            ModuleDeprecation::Persistent { loc, name, target } => {
                 let Some(deprecated) = self.persistent_env.as_ref().and_then(|pers_env| {
-                    persistent_module_deprecated(pers_env, &unit, &components)
+                    persistent_module_deprecated(pers_env, &target)
                 }) else {
                     return;
                 };
-                (loc, name, deprecated)
+                (loc, name.name(), deprecated)
             }
         };
         let txt = if deprecated.is_empty() {
@@ -7564,20 +7559,20 @@ pub(crate) fn invalid_escape_at(
 /// built from (env.ml:1527-1533).
 fn persistent_module_deprecated(
     pers_env: &crate::cmi::persistent_env::PersistentEnv,
-    unit: &str,
-    components: &[String],
+    target: &Path,
 ) -> Option<String> {
-    let ps = pers_env.loaded_pers_struct(unit)?;
+    let (unit, components) = persistent_path_components(target)?;
+    let ps = pers_env.loaded_pers_struct(&unit)?;
     if components.is_empty() {
         return ps.ps_deprecated.clone();
     }
-    signature_submodule_deprecated(pers_env, &ps.ps_sig, components, 0)
+    signature_submodule_deprecated(pers_env, &ps.ps_sig, &components, 0)
 }
 
 fn signature_submodule_deprecated(
     pers_env: &crate::cmi::persistent_env::PersistentEnv,
     items: &[crate::types::decl::SignatureItem],
-    components: &[String],
+    components: &[crate::name::Name],
     depth: usize,
 ) -> Option<String> {
     use crate::types::decl::{ModuleType, SignatureItem};
@@ -7586,7 +7581,7 @@ fn signature_submodule_deprecated(
         return None;
     }
     let md = items.iter().rev().find_map(|item| match item {
-        SignatureItem::SigModule(id, md, _) if id.name() == first.as_str() => Some(md),
+        SignatureItem::SigModule(id, md, _) if id.name_atom() == *first => Some(md),
         _ => None,
     })?;
     if rest.is_empty() {
@@ -7601,7 +7596,7 @@ fn signature_submodule_deprecated(
         }
         ModuleType::MtyAlias(_, path) => {
             let (unit, mut target) = persistent_path_components(path)?;
-            target.extend(rest.iter().cloned());
+            target.extend(rest.iter().copied());
             let ps = pers_env.loaded_pers_struct(&unit)?;
             signature_submodule_deprecated(pers_env, &ps.ps_sig, &target, depth + 1)
         }
@@ -7611,17 +7606,20 @@ fn signature_submodule_deprecated(
 
 /// A module path rooted at a persistent unit, as the unit name and the
 /// submodule names below it.
-fn persistent_path_components(path: &Path) -> Option<(String, Vec<String>)> {
+fn persistent_path_components(path: &Path) -> Option<(crate::name::Name, PathComponents)> {
     match path.view() {
-        PathView::Pident(id) if id.is_persistent() => Some((id.name().to_string(), Vec::new())),
+        PathView::Pident(id) if id.is_persistent() => Some((id.name_atom(), PathComponents::new())),
         PathView::Pdot(parent, name, _) => {
             let (unit, mut components) = persistent_path_components(parent)?;
-            components.push(name.to_string());
+            components.push(*name);
             Some((unit, components))
         }
         _ => None,
     }
 }
+
+/// Submodule names below a persistent unit; module paths are short.
+type PathComponents = smallvec::SmallVec<[crate::name::Name; 4]>;
 
 /// `Builtin_attributes.deprecated_of_attrs_with_migrate`
 /// (builtin_attributes.ml:68-112): the first `deprecated` attribute's reason
@@ -9917,7 +9915,7 @@ fn type_application(
         ExpressionDesc::Texp_ident(_, _, desc)
             if matches!(&desc.val_kind, crate::types::ValueKind::ValPrim(prim) if prim.prim_name == "%ignore")
     );
-    let mut remaining_args: Vec<usize> = (0..args.len()).collect();
+    let mut remaining_args: smallvec::SmallVec<[usize; 8]> = (0..args.len()).collect();
     let mut argument_thunks: Vec<ApplyArgThunk<'_>> = Vec::with_capacity(function_arity);
     let mut omitted: Vec<OmittedArrow> = Vec::new();
     let mut ignored: Vec<OmittedArrow> = Vec::new();
@@ -18714,7 +18712,7 @@ fn type_expect_with_module_unpacks(
     .is_err()
     {
         return Err(TypeCoreError::ScopingLetModule(
-            unpack.name.txt.clone(),
+            unpack.name.txt.to_string(),
             typed_body.exp_type,
         ));
     }
@@ -18723,7 +18721,10 @@ fn type_expect_with_module_unpacks(
         let typed_node = Expression::new(
             crate::types::typedtree::ExpressionDesc::Texp_letmodule(
                 letmod_id,
-                unpack.name.clone(),
+                Located {
+                    txt: unpack.name.txt.to_string(),
+                    loc: unpack.name.loc,
+                },
                 tctx.typed.push_module_expr(unpack_module),
                 tctx.push_expr(typed_body),
             ),
@@ -22927,7 +22928,7 @@ fn extract_variant_type_path_from_expected_with_persistent_env(
         ctx: &crate::types::context::TypeContext,
     ) -> Option<Path> {
         let mut current = *path;
-        let mut visited = HashSet::new();
+        let mut visited = PathNameSet::default();
         loop {
             // Don't normalize module aliases at the top of the loop — this would
             // flatten qualified paths like Pdot(Pdot(Pident("Stdlib"), "JSON"), "t")
@@ -22935,7 +22936,7 @@ fn extract_variant_type_path_from_expected_with_persistent_env(
             // structure. lookup_type_decl_for_path handles module aliases internally
             // via resolve_module_signature_for_path. Module alias normalization is
             // only used as a fallback for self-manifest cycles (below).
-            if !visited.insert(current.name()) {
+            if !visited.insert(current) {
                 return None;
             }
             let Some(decl) = lookup_type_decl_for_path(&current, env, pers_env, ctx) else {
@@ -22983,6 +22984,26 @@ fn extract_variant_type_path_from_expected_with_persistent_env(
     None
 }
 
+/// Paths visited by a type-path expansion, compared by `Path.name` (the
+/// expansions stop at a name they have seen). Short, so a list.
+#[derive(Default)]
+struct PathNameSet(smallvec::SmallVec<[Path; 4]>);
+
+impl PathNameSet {
+    /// Adds `path`; `false` when a path with the same name is already in.
+    fn insert(&mut self, path: Path) -> bool {
+        if self.0.iter().any(|seen| seen.name_equals(&path)) {
+            return false;
+        }
+        self.0.push(path);
+        true
+    }
+
+    fn remove(&mut self, path: &Path) {
+        self.0.retain(|seen| !seen.name_equals(path));
+    }
+}
+
 /// OCaml `typecore.ml` compares constructor/label type paths with
 /// `compare_type_path`, which expands type manifests and normalizes aliases.
 /// Mirror that behavior for constructor disambiguation.
@@ -22992,15 +23013,14 @@ fn expand_type_path_for_compare(
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &crate::types::context::TypeContext,
     depth: usize,
-    visiting: &mut HashSet<String>,
+    visiting: &mut PathNameSet,
     force_env_normalize: bool,
 ) -> Path {
     if depth > 50 {
         return *path;
     }
 
-    let visit_key = path.name();
-    if !visiting.insert(visit_key.clone()) {
+    if !visiting.insert(*path) {
         return *path;
     }
 
@@ -23029,7 +23049,7 @@ fn expand_type_path_for_compare(
                                 visiting,
                                 force_env_normalize,
                             );
-                            visiting.remove(&visit_key);
+                            visiting.remove(path);
                             return expanded;
                         }
                     }
@@ -23047,7 +23067,7 @@ fn expand_type_path_for_compare(
                                 visiting,
                                 force_env_normalize,
                             );
-                            visiting.remove(&visit_key);
+                            visiting.remove(path);
                             return expanded;
                         }
                     }
@@ -23061,7 +23081,7 @@ fn expand_type_path_for_compare(
                     visiting,
                     force_env_normalize,
                 );
-                visiting.remove(&visit_key);
+                visiting.remove(path);
                 return expanded;
             }
         }
@@ -23088,11 +23108,11 @@ fn expand_type_path_for_compare(
             visiting,
             force_env_normalize,
         );
-        visiting.remove(&visit_key);
+        visiting.remove(path);
         return expanded;
     }
 
-    visiting.remove(&visit_key);
+    visiting.remove(path);
     *path
 }
 
@@ -23191,8 +23211,8 @@ fn compare_type_paths_for_disambiguation_impl(
     {
         return cached;
     }
-    let mut left_visiting = HashSet::new();
-    let mut right_visiting = HashSet::new();
+    let mut left_visiting = PathNameSet::default();
+    let mut right_visiting = PathNameSet::default();
     let left_expanded = expand_type_path_for_compare(
         left,
         env,
@@ -23786,7 +23806,7 @@ fn qualified_constructor_type_mismatch(
         return None;
     }
     let mut expand = |path: &Path| {
-        expand_type_path_for_compare(path, env, pers_env, ctx, 0, &mut HashSet::new(), true)
+        expand_type_path_for_compare(path, env, pers_env, ctx, 0, &mut PathNameSet::default(), true)
     };
     let tpath0 = match &*ctx.get_desc(ctx.repr(expected_ty)) {
         TypeDesc::Tconstr { path, .. } => *path,
@@ -25900,17 +25920,15 @@ pub(crate) fn mark_open_lid_use(
 
 /// Where the lookup of a module longident has arrived.
 enum ModuleLidTarget {
-    /// A module declaration of the lookup environment.
+    /// A module declaration of the lookup environment. `name` is the path
+    /// whose `Path.name` reports it.
     Local {
-        name: String,
+        name: Path,
         md_type: crate::types::decl::ModuleType,
     },
-    /// A module inside a persistent unit.
-    Persistent {
-        name: String,
-        unit: String,
-        components: Vec<String>,
-    },
+    /// A module inside a persistent unit: `target` is rooted at the unit's
+    /// persistent identifier (see [`persistent_path_components`]).
+    Persistent { name: Path, target: Path },
 }
 
 type ModuleDeprecationReport<'r> = Option<(
@@ -25935,16 +25953,14 @@ fn mark_module_lid_used(
         Longident::Lident(idx) => {
             let name = arena.get_string(*idx);
             match env.find_module_with_path(arena.name(*idx)) {
-                Ok((path, md)) => (name, path.name(), std::borrow::Cow::Borrowed(md)),
+                Ok((path, md)) => (name, path, std::borrow::Cow::Borrowed(md)),
                 // `find_pers_struct s` then `ps.ps_comps.deprecated`
                 // (env.ml:1043-1048).
                 Err(_) => {
-                    return Some(persistent_module_target(
-                        report,
-                        name.to_string(),
-                        name.to_string(),
-                        Vec::new(),
+                    let unit = Path::pident(crate::ident::Ident::create_persistent(
+                        arena.name(*idx),
                     ));
+                    return Some(persistent_module_target(report, unit, unit));
                 }
             }
         }
@@ -25956,30 +25972,27 @@ fn mark_module_lid_used(
                     name: parent_name,
                     md_type,
                 } => {
-                    let path_name = format!("{parent_name}.{name}");
+                    let path_name = Path::pdot(parent_name, arena.name(*idx));
                     match submodule_declaration(env, &md_type, name, 0) {
                         Some(md) => (name, path_name, std::borrow::Cow::Owned(md)),
                         None => {
-                            let (unit, mut components) =
-                                local_module_type_persistent_target(env, &md_type, 0)?;
-                            components.push(name.to_string());
+                            let target = local_module_type_persistent_target(env, &md_type, 0)?;
                             return Some(persistent_module_target(
-                                report, path_name, unit, components,
+                                report,
+                                path_name,
+                                Path::pdot(target, arena.name(*idx)),
                             ));
                         }
                     }
                 }
                 ModuleLidTarget::Persistent {
                     name: parent_name,
-                    unit,
-                    mut components,
+                    target,
                 } => {
-                    components.push(name.to_string());
                     return Some(persistent_module_target(
                         report,
-                        format!("{parent_name}.{name}"),
-                        unit,
-                        components,
+                        Path::pdot(parent_name, arena.name(*idx)),
+                        Path::pdot(target, arena.name(*idx)),
                     ));
                 }
             }
@@ -25998,7 +26011,7 @@ fn mark_module_lid_used(
     {
         deprecations.push(ModuleDeprecation::Resolved {
             loc: *loc,
-            name: path_name.clone(),
+            name: path_name.name(),
             deprecated,
         });
     }
@@ -26015,23 +26028,17 @@ fn mark_module_lid_used(
 /// lookup has loaded the unit.
 fn persistent_module_target(
     report: &mut ModuleDeprecationReport<'_>,
-    name: String,
-    unit: String,
-    components: Vec<String>,
+    name: Path,
+    target: Path,
 ) -> ModuleLidTarget {
     if let Some((loc, deprecations)) = report.as_mut() {
         deprecations.push(crate::types::context::ModuleDeprecation::Persistent {
             loc: *loc,
-            name: name.clone(),
-            unit: unit.clone(),
-            components: components.clone(),
+            name,
+            target,
         });
     }
-    ModuleLidTarget::Persistent {
-        name,
-        unit,
-        components,
-    }
+    ModuleLidTarget::Persistent { name, target }
 }
 
 /// The persistent module a local module type is an alias of, through local
@@ -26040,7 +26047,7 @@ fn local_module_type_persistent_target(
     env: &Env,
     mty: &crate::types::decl::ModuleType,
     depth: usize,
-) -> Option<(String, Vec<String>)> {
+) -> Option<Path> {
     use crate::types::decl::ModuleType;
     if depth > 32 {
         return None;
@@ -26051,7 +26058,7 @@ fn local_module_type_persistent_target(
             local_module_type_persistent_target(env, &mty, depth + 1)
         }
         ModuleType::MtyAlias(_, path) => match persistent_path_components(path) {
-            Some(target) => Some(target),
+            Some(_) => Some(**path),
             None => {
                 let mty = env.lookup_module(path).ok()?.md_type.clone();
                 local_module_type_persistent_target(env, &mty, depth + 1)
