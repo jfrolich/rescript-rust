@@ -266,42 +266,306 @@ payload_handle!(
     PackageLidsRef
 );
 
+/// Append-only chunked storage with stable element addresses: chunk `k`
+/// holds `1 << (FIRST_BITS + k)` slots, chunks are allocated on first use and
+/// never moved, so a reader holds a plain shared reference into a chunk while
+/// later appends fill other slots (the same layout as `TypeNodes`). `S` is
+/// the slot type: a `Cell` for list elements written once when their list is
+/// appended, a `OnceCell` for single payloads.
+struct PayloadChunks<S, const FIRST_BITS: u32> {
+    chunks: [std::cell::OnceCell<Box<[S]>>; 24],
+    len: Cell<usize>,
+}
+
+impl<S, const FIRST_BITS: u32> Default for PayloadChunks<S, FIRST_BITS> {
+    fn default() -> Self {
+        PayloadChunks {
+            chunks: std::array::from_fn(|_| std::cell::OnceCell::new()),
+            len: Cell::new(0),
+        }
+    }
+}
+
+impl<S, const FIRST_BITS: u32> PayloadChunks<S, FIRST_BITS> {
+    /// Chunk and offset of slot `idx`.
+    #[inline(always)]
+    fn locate(idx: usize) -> (usize, usize) {
+        let biased = idx + (1 << FIRST_BITS);
+        let bit = (usize::BITS - 1 - biased.leading_zeros()) as usize;
+        (bit - FIRST_BITS as usize, biased - (1 << bit))
+    }
+
+    #[inline(always)]
+    fn chunk_size(chunk: usize) -> usize {
+        1 << (FIRST_BITS as usize + chunk)
+    }
+
+    #[inline(always)]
+    fn chunk_base(chunk: usize) -> usize {
+        Self::chunk_size(chunk) - (1 << FIRST_BITS)
+    }
+
+    /// Reserve `n` contiguous slots in one chunk and return their start, the
+    /// chunk's slots (allocated with `init` on first use) and the offset of
+    /// the first reserved slot. A run that does not fit in the current chunk
+    /// starts the next chunk large enough for it; the skipped tail stays
+    /// unused.
+    fn reserve(&self, n: usize, init: impl FnOnce(usize) -> Box<[S]>) -> (usize, &[S], usize) {
+        let mut start = self.len.get();
+        let (mut chunk, mut offset) = Self::locate(start);
+        if offset + n > Self::chunk_size(chunk) {
+            chunk += 1;
+            while Self::chunk_size(chunk) < n {
+                chunk += 1;
+            }
+            start = Self::chunk_base(chunk);
+            offset = 0;
+        }
+        assert!(
+            u32::try_from(start + n).is_ok_and(|end| end & SHARED_REF_BITS == 0),
+            "type payload pool index exceeds the tag range"
+        );
+        let slots = self.chunks[chunk].get_or_init(|| init(Self::chunk_size(chunk)));
+        self.len.set(start + n);
+        (start, slots, offset)
+    }
+
+    /// Slots `start..start + n`, all in one chunk.
+    #[inline(always)]
+    fn slots(&self, start: usize, n: usize) -> &[S] {
+        let (chunk, offset) = Self::locate(start);
+        &self.chunks[chunk]
+            .get()
+            .expect("type payload index refers to an unallocated chunk")[offset..offset + n]
+    }
+}
+
+/// Lists of `Copy` elements (type lists, arrow parameters).
+type ListChunks<T> = PayloadChunks<Cell<T>, 8>;
+
+impl<T: Copy> ListChunks<T> {
+    /// Append `items` (not empty) and return their untagged start.
+    fn append(&self, items: &[T]) -> usize {
+        let first = items[0];
+        let (start, slots, offset) =
+            self.reserve(items.len(), |size| vec![Cell::new(first); size].into_boxed_slice());
+        for (slot, &item) in slots[offset..offset + items.len()].iter().zip(items) {
+            slot.set(item);
+        }
+        start
+    }
+}
+
+/// Single payloads written once (rows, package constraint names).
+type OnceChunks<T> = PayloadChunks<std::cell::OnceCell<T>, 4>;
+
+impl<T> OnceChunks<T> {
+    /// Append `item` and return its untagged index.
+    fn push(&self, item: T) -> usize {
+        let (index, slots, offset) = self.reserve(1, |size| {
+            (0..size).map(|_| std::cell::OnceCell::new()).collect()
+        });
+        if slots[offset].set(item).is_err() {
+            unreachable!("payload slot written twice");
+        }
+        index
+    }
+
+    #[inline]
+    fn get(&self, index: usize) -> &T {
+        self.slots(index, 1)[0]
+            .get()
+            .expect("type payload index refers to an unwritten slot")
+    }
+}
+
+/// A borrowed, read-only view of an immutable payload list: the slots of a
+/// tier-local pool (written once, before the list's handle exists) or the
+/// elements of a published shared graph. Reading an element copies it out;
+/// holding a view does not block allocation in any pool.
+#[derive(Clone, Copy)]
+pub enum PoolSlice<'a, T: Copy> {
+    /// A list in a compilation or worker-store pool.
+    Cells(&'a [Cell<T>]),
+    /// A list in a published shared graph (or the empty list).
+    Plain(&'a [T]),
+}
+
+/// The elements of a [`TypeRefList`].
+pub type TypeSlice<'a> = PoolSlice<'a, TypeExprRef>;
+/// The parameters of a [`TypeArgList`].
+pub type TypeArgSlice<'a> = PoolSlice<'a, TypeArg>;
+
+impl<'a, T: Copy> PoolSlice<'a, T> {
+    /// The empty view.
+    pub const EMPTY: Self = PoolSlice::Plain(&[]);
+
+    /// Number of elements.
+    #[inline]
+    pub fn len(self) -> usize {
+        match self {
+            PoolSlice::Cells(slots) => slots.len(),
+            PoolSlice::Plain(items) => items.len(),
+        }
+    }
+
+    /// Whether the view has no elements.
+    #[inline]
+    pub fn is_empty(self) -> bool {
+        self.len() == 0
+    }
+
+    /// Element `index`, if in range.
+    #[inline]
+    pub fn get(self, index: usize) -> Option<T> {
+        match self {
+            PoolSlice::Cells(slots) => slots.get(index).map(Cell::get),
+            PoolSlice::Plain(items) => items.get(index).copied(),
+        }
+    }
+
+    /// Element `index`; panics when out of range, like slice indexing.
+    #[inline]
+    #[track_caller]
+    pub fn at(self, index: usize) -> T {
+        match self {
+            PoolSlice::Cells(slots) => slots[index].get(),
+            PoolSlice::Plain(items) => items[index],
+        }
+    }
+
+    /// The first element.
+    #[inline]
+    pub fn first(self) -> Option<T> {
+        self.get(0)
+    }
+
+    /// The last element.
+    #[inline]
+    pub fn last(self) -> Option<T> {
+        self.len().checked_sub(1).and_then(|index| self.get(index))
+    }
+
+    /// The elements `range` as a view.
+    #[inline]
+    #[track_caller]
+    pub fn slice(self, range: impl std::slice::SliceIndex<[Cell<T>], Output = [Cell<T>]> + std::slice::SliceIndex<[T], Output = [T]>) -> Self {
+        match self {
+            PoolSlice::Cells(slots) => PoolSlice::Cells(&slots[range]),
+            PoolSlice::Plain(items) => PoolSlice::Plain(&items[range]),
+        }
+    }
+
+    /// Iterate over copies of the elements.
+    #[inline]
+    pub fn iter(self) -> PoolIter<'a, T> {
+        match self {
+            PoolSlice::Cells(slots) => PoolIter::Cells(slots.iter()),
+            PoolSlice::Plain(items) => PoolIter::Plain(items.iter()),
+        }
+    }
+
+    /// The elements as a vector.
+    pub fn to_vec(self) -> Vec<T> {
+        self.iter().collect()
+    }
+
+    /// The elements as an inline-first vector.
+    pub fn to_smallvec<const N: usize>(self) -> smallvec::SmallVec<[T; N]> {
+        self.iter().collect()
+    }
+}
+
+impl<'a, T: Copy> IntoIterator for PoolSlice<'a, T> {
+    type Item = T;
+    type IntoIter = PoolIter<'a, T>;
+
+    #[inline]
+    fn into_iter(self) -> PoolIter<'a, T> {
+        self.iter()
+    }
+}
+
+impl<T: Copy + PartialEq> PartialEq for PoolSlice<'_, T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.len() == other.len() && self.iter().eq(other.iter())
+    }
+}
+
+impl<T: Copy + std::fmt::Debug> std::fmt::Debug for PoolSlice<'_, T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list().entries(self.iter()).finish()
+    }
+}
+
+/// Iterator over a [`PoolSlice`], yielding copies.
+#[derive(Clone)]
+pub enum PoolIter<'a, T: Copy> {
+    Cells(std::slice::Iter<'a, Cell<T>>),
+    Plain(std::slice::Iter<'a, T>),
+}
+
+impl<T: Copy> Iterator for PoolIter<'_, T> {
+    type Item = T;
+
+    #[inline]
+    fn next(&mut self) -> Option<T> {
+        match self {
+            PoolIter::Cells(slots) => slots.next().map(Cell::get),
+            PoolIter::Plain(items) => items.next().copied(),
+        }
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let len = self.len();
+        (len, Some(len))
+    }
+
+    #[inline]
+    fn nth(&mut self, n: usize) -> Option<T> {
+        match self {
+            PoolIter::Cells(slots) => slots.nth(n).map(Cell::get),
+            PoolIter::Plain(items) => items.nth(n).copied(),
+        }
+    }
+}
+
+impl<T: Copy> DoubleEndedIterator for PoolIter<'_, T> {
+    #[inline]
+    fn next_back(&mut self) -> Option<T> {
+        match self {
+            PoolIter::Cells(slots) => slots.next_back().map(Cell::get),
+            PoolIter::Plain(items) => items.next_back().copied(),
+        }
+    }
+}
+
+impl<T: Copy> ExactSizeIterator for PoolIter<'_, T> {
+    #[inline]
+    fn len(&self) -> usize {
+        match self {
+            PoolIter::Cells(slots) => slots.len(),
+            PoolIter::Plain(items) => items.len(),
+        }
+    }
+}
+
+impl<T: Copy> std::iter::FusedIterator for PoolIter<'_, T> {}
+
 /// Append-only pools of the immutable payloads of type descriptors for one
 /// storage tier: type lists ([`TypeRefList`]), arrow parameter lists
 /// ([`TypeArgList`]), rows ([`RowDescRef`]) and package constraint names
 /// ([`PackageLidsRef`]). `tag` is the tier's tag bits, or-ed into every
-/// handle it returns.
+/// handle it returns. Payloads never move once appended, so reads borrow
+/// them without a borrow flag or a copy.
 #[derive(Default)]
 pub(crate) struct TypePayloadPool {
-    items: std::cell::RefCell<Vec<TypeExprRef>>,
-    args: std::cell::RefCell<Vec<TypeArg>>,
-    rows: std::cell::RefCell<Vec<RowDesc>>,
-    lids: std::cell::RefCell<Vec<Vec<Longident>>>,
+    items: ListChunks<TypeExprRef>,
+    args: ListChunks<TypeArg>,
+    rows: OnceChunks<RowDesc>,
+    lids: OnceChunks<Vec<Longident>>,
     tag: u32,
-}
-
-/// Append one payload to `pool`, returning its tagged index.
-fn pool_push<T>(pool: &std::cell::RefCell<Vec<T>>, item: T, tag: u32) -> u32 {
-    let mut pool = pool.borrow_mut();
-    let index = u32::try_from(pool.len()).expect("type payload pool exceeds u32::MAX");
-    assert!(
-        index & SHARED_REF_BITS == 0,
-        "type payload pool index exceeds the tag range"
-    );
-    pool.push(item);
-    index | tag
-}
-
-/// Append `items` to `pool`, returning the tagged start position.
-fn pool_append<T: Copy>(pool: &std::cell::RefCell<Vec<T>>, items: &[T], tag: u32) -> u32 {
-    let mut pool = pool.borrow_mut();
-    let start = u32::try_from(pool.len()).expect("type list pool exceeds u32::MAX");
-    assert!(
-        start & SHARED_REF_BITS == 0,
-        "type list pool index exceeds the tag range"
-    );
-    pool.extend_from_slice(items);
-    start | tag
 }
 
 impl TypePayloadPool {
@@ -312,25 +576,30 @@ impl TypePayloadPool {
         }
     }
 
-    /// Add a row.
-    pub(crate) fn alloc_row(&self, row: RowDesc) -> RowDescRef {
-        RowDescRef(pool_push(&self.rows, row, self.tag))
+    #[inline]
+    fn untag(&self, raw: u32) -> usize {
+        (raw & !self.tag) as usize
     }
 
-    /// A copy of a row allocated by this pool.
+    /// Add a row.
+    pub(crate) fn alloc_row(&self, row: RowDesc) -> RowDescRef {
+        RowDescRef(self.rows.push(row) as u32 | self.tag)
+    }
+
+    /// A row allocated by this pool.
     #[inline]
-    pub(crate) fn get_row(&self, row: RowDescRef) -> RowDesc {
-        self.rows.borrow()[(row.raw() & !self.tag) as usize].clone()
+    pub(crate) fn get_row(&self, row: RowDescRef) -> &RowDesc {
+        self.rows.get(self.untag(row.raw()))
     }
 
     /// Add package constraint names.
     pub(crate) fn alloc_lids(&self, lids: Vec<Longident>) -> PackageLidsRef {
-        PackageLidsRef(pool_push(&self.lids, lids, self.tag))
+        PackageLidsRef(self.lids.push(lids) as u32 | self.tag)
     }
 
-    /// A copy of package constraint names allocated by this pool.
-    pub(crate) fn get_lids(&self, lids: PackageLidsRef) -> Vec<Longident> {
-        self.lids.borrow()[(lids.raw() & !self.tag) as usize].clone()
+    /// Package constraint names allocated by this pool.
+    pub(crate) fn get_lids(&self, lids: PackageLidsRef) -> &[Longident] {
+        self.lids.get(self.untag(lids.raw()))
     }
 
     /// Append `items` as a new list.
@@ -338,21 +607,20 @@ impl TypePayloadPool {
         if items.is_empty() {
             return TypeRefList::EMPTY;
         }
-        TypeRefList::from_parts(pool_append(&self.items, items, self.tag), items.len())
+        TypeRefList::from_parts(self.items.append(items) as u32 | self.tag, items.len())
     }
 
     /// The elements of a list allocated by this pool.
     #[inline]
-    pub(crate) fn get(&self, list: TypeRefList) -> TypeRefs {
-        let start = (list.raw_start() & !self.tag) as usize;
-        TypeRefs::from_slice(&self.items.borrow()[start..start + list.len()])
+    pub(crate) fn get(&self, list: TypeRefList) -> TypeSlice<'_> {
+        PoolSlice::Cells(self.items.slots(self.untag(list.raw_start()), list.len()))
     }
 
     /// One element of a list allocated by this pool.
     #[inline]
     pub(crate) fn get_at(&self, list: TypeRefList, index: usize) -> TypeExprRef {
         assert!(index < list.len(), "type list index out of range");
-        self.items.borrow()[(list.raw_start() & !self.tag) as usize + index]
+        self.items.slots(self.untag(list.raw_start()) + index, 1)[0].get()
     }
 
     /// Append `args` as a new arrow parameter list.
@@ -360,14 +628,13 @@ impl TypePayloadPool {
         if args.is_empty() {
             return TypeArgList::EMPTY;
         }
-        TypeArgList::from_parts(pool_append(&self.args, args, self.tag), args.len())
+        TypeArgList::from_parts(self.args.append(args) as u32 | self.tag, args.len())
     }
 
     /// The parameters of a list allocated by this pool.
     #[inline]
-    pub(crate) fn get_args(&self, list: TypeArgList) -> TypeArgs {
-        let start = (list.raw_start() & !self.tag) as usize;
-        TypeArgs::from_slice(&self.args.borrow()[start..start + list.len()])
+    pub(crate) fn get_args(&self, list: TypeArgList) -> TypeArgSlice<'_> {
+        PoolSlice::Cells(self.args.slots(self.untag(list.raw_start()), list.len()))
     }
 }
 
@@ -1796,7 +2063,7 @@ mod tests {
         let TypeDesc::Ttuple(actual) = &*desc else {
             panic!("tuple expected")
         };
-        let actual = ctx.type_list(actual);
+        let actual = ctx.type_list(actual).to_vec();
         assert_eq!(actual[0], shared);
         assert_eq!(actual[1], shared);
         assert_eq!(actual[2], distinct);
@@ -1816,5 +2083,26 @@ mod tests {
         };
         assert!(row.row_closed);
         assert!(!row.row_fixed);
+    }
+}
+
+impl<'a, T: Copy> From<&'a [T]> for PoolSlice<'a, T> {
+    #[inline]
+    fn from(items: &'a [T]) -> Self {
+        PoolSlice::Plain(items)
+    }
+}
+
+impl<'a, T: Copy> From<&'a Vec<T>> for PoolSlice<'a, T> {
+    #[inline]
+    fn from(items: &'a Vec<T>) -> Self {
+        PoolSlice::Plain(items)
+    }
+}
+
+impl<'a, T: Copy, const N: usize> From<&'a smallvec::SmallVec<[T; N]>> for PoolSlice<'a, T> {
+    #[inline]
+    fn from(items: &'a smallvec::SmallVec<[T; N]>) -> Self {
+        PoolSlice::Plain(items)
     }
 }

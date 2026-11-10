@@ -6470,10 +6470,13 @@ impl<'a> RawLambdaConverter<'a> {
             function.exp_type,
         ));
         let arg_type = match &*ctx.get_desc(fn_type) {
-            TypeDesc::Tarrow { args, .. } => match ctx.type_args(args).as_slice() {
-                [arg] if arg.label().is_nolabel() => arg.typ,
-                _ => return false,
-            },
+            TypeDesc::Tarrow { args, .. } => {
+                let args = ctx.type_args(args);
+                match args.first() {
+                    Some(arg) if args.len() == 1 && arg.label().is_nolabel() => arg.typ,
+                    _ => return false,
+                }
+            }
             _ => return false,
         };
         let arg_type = ctx.repr(crate::types::ctype::expand_head(ctx, env, arg_type));

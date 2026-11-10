@@ -362,7 +362,7 @@ pub fn translate_arrow_type(
     config: &crate::gentype::config::T,
     type_vars_gen: &crate::gentype::gen_ident::TypeVarsGen,
     type_env: &crate::gentype::type_env::T,
-    args: &[crate::types::type_expr::TypeArg],
+    args: crate::types::type_expr::TypeArgSlice<'_>,
     ret: &TypeExprRef,
 ) -> Translation {
     // Mirrors compiler/gentype/translate_type_expr_from_types.ml:454-490: one
@@ -455,7 +455,7 @@ pub fn translateTypeExprFromTypes_(
                 config,
                 type_vars_gen,
                 type_env,
-                &ctx.type_list(args),
+                ctx.type_list(args),
             );
             translate_constr(config, &params_translation, &path, type_env)
         }
@@ -467,7 +467,7 @@ pub fn translateTypeExprFromTypes_(
             config,
             type_vars_gen,
             type_env,
-            &ctx.type_args(args),
+            ctx.type_args(args),
             &ret,
         ),
         TypeDesc::Ttuple(list_exp) => {
@@ -476,7 +476,7 @@ pub fn translateTypeExprFromTypes_(
                 config,
                 type_vars_gen,
                 type_env,
-                &ctx.type_list(list_exp),
+                ctx.type_list(list_exp),
             );
             Translation {
                 dependencies: inner_types_translation
@@ -520,7 +520,7 @@ pub fn translateTypeExprFromTypes_(
                 type_env,
                 &path,
                 &ids,
-                &ctx.type_list(types),
+                ctx.type_list(types),
             )
         }
         TypeDesc::Tfield { .. }
@@ -540,13 +540,13 @@ pub fn translateTypeExprsFromTypes_(
     config: &crate::gentype::config::T,
     type_vars_gen: &crate::gentype::gen_ident::TypeVarsGen,
     type_env: &crate::gentype::type_env::T,
-    type_exprs: &[TypeExprRef],
+    type_exprs: crate::types::type_expr::TypeSlice<'_>,
 ) -> Vec<Translation> {
     // Mirrors compiler/gentype/TranslateTypeExprFromTypes.ml:674-677.
     type_exprs
         .iter()
         .map(|type_expr| {
-            translateTypeExprFromTypes_(ctx, config, type_vars_gen, type_env, type_expr)
+            translateTypeExprFromTypes_(ctx, config, type_vars_gen, type_env, &type_expr)
         })
         .collect()
 }
@@ -647,7 +647,7 @@ pub fn translate_type_exprs_from_types(
     // Mirrors compiler/gentype/TranslateTypeExprFromTypes.ml:750-761.
     let type_vars_gen = crate::gentype::gen_ident::create_type_vars_gen();
     let translations =
-        translateTypeExprsFromTypes_(ctx, config, &type_vars_gen, type_env, type_exprs);
+        translateTypeExprsFromTypes_(ctx, config, &type_vars_gen, type_env, type_exprs.into());
     for translation in &translations {
         log_dependencies(translation);
     }
@@ -909,7 +909,7 @@ fn translate_package(
     type_env: &crate::gentype::type_env::T,
     path: &Path,
     ids: &[Vec<String>],
-    types: &[TypeExprRef],
+    types: crate::types::type_expr::TypeSlice<'_>,
 ) -> Translation {
     match crate::gentype::type_env::lookup_module_type_signature(path, type_env) {
         Some((_, signature, type_env)) => {
@@ -919,7 +919,7 @@ fn translate_package(
                 .map(|(x, t)| {
                     (
                         x.clone(),
-                        translateTypeExprFromTypes_(ctx, config, type_vars_gen, &type_env, t),
+                        translateTypeExprFromTypes_(ctx, config, type_vars_gen, &type_env, &t),
                     )
                 })
                 .collect::<Vec<_>>();

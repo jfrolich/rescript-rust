@@ -373,7 +373,7 @@ fn build_type_constructors(
                             let new_prefix = Arc::new(new_prefix);
                             for arg in ctx.type_list(&args).iter() {
                                 crate::cmi::persistent_env::rewrite_type_expr_by_path_prefix(
-                                    *arg,
+                                    arg,
                                     &old_prefix,
                                     &new_prefix,
                                     ctx,

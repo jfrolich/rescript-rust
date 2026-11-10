@@ -332,7 +332,7 @@ fn get_unboxed_type_representation(
             _ => return Some(ty),
         };
         let applied =
-            crate::types::ctype::apply(ctx, env, &decl.type_params, ty2, &ctx.type_list(args))?;
+            crate::types::ctype::apply(ctx, env, &decl.type_params, ty2, &ctx.type_list(args).to_smallvec::<4>())?;
         go(ctx, env, applied, fuel - 1)
     }
     go(ctx, env, ty, 100)

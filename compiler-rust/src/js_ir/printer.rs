@@ -81,6 +81,8 @@ pub struct JsPrinter<'r> {
     /// Stamp of the next fresh identifier (`Ext_ident.create`), counting
     /// down from -1 so it is distinct from every program identifier.
     next_fresh_stamp: i32,
+    /// Cleared scopes kept for reuse by `with_reserved_ident_scope`.
+    spare_name_scopes: Vec<NameScope>,
     /// Module-path resolver used for printing import declarations.
     pub(super) module_path_resolver: Option<&'r ModulePathResolver>,
     /// Matches OCaml's `!Js_config.debug` toggle in the dumper.
@@ -110,6 +112,7 @@ impl<'r> JsPrinter<'r> {
             name_scopes: vec![NameScope::default()],
             reserved_js_names: HashSet::default(),
             next_fresh_stamp: -1,
+            spare_name_scopes: Vec::new(),
             module_path_resolver: None,
             debug: false,
             jsx_preserve: false,
@@ -197,13 +200,49 @@ impl<'r> JsPrinter<'r> {
     }
 
     fn advance_generated_position(&mut self, text: &str) {
-        for ch in text.chars() {
-            if ch == '\n' {
-                self.generated_line += 1;
-                self.generated_column = 0;
-            } else {
-                self.generated_column += ch.len_utf16();
-            }
+        advance_position(&mut self.generated_line, &mut self.generated_column, text);
+    }
+
+    /// Writes the name `id` already has in a visible scope, without copying
+    /// it out of the scope table. Returns false when `id` has no name yet.
+    fn write_visible_name(&mut self, id: &Ident) -> bool {
+        let Self {
+            name_scopes,
+            output,
+            source_map,
+            generated_line,
+            generated_column,
+            last_new_line,
+            ..
+        } = self;
+        let Some(name) = name_scopes
+            .iter()
+            .rev()
+            .find_map(|scope| scope.ident_names.get(id))
+        else {
+            return false;
+        };
+        output.push_str(name);
+        if source_map.is_some() {
+            advance_position(generated_line, generated_column, name);
+        }
+        *last_new_line = false;
+        true
+    }
+
+    /// `self.write(&self.ident_name(id))` without the intermediate copy.
+    fn write_ident(&mut self, id: &Ident) {
+        if !self.write_visible_name(id) {
+            let name = self.ident_name(id);
+            self.write(&name);
+        }
+    }
+
+    /// `self.write(&self.module_ident_name(id))` without the intermediate copy.
+    fn write_module_ident(&mut self, id: &Ident) {
+        if !self.write_visible_name(id) {
+            let name = self.module_ident_name(id);
+            self.write(&name);
         }
     }
 
@@ -236,6 +275,7 @@ impl<'r> JsPrinter<'r> {
             name_scopes: self.name_scopes.clone(),
             reserved_js_names: self.reserved_js_names.clone(),
             next_fresh_stamp: self.next_fresh_stamp,
+            spare_name_scopes: Vec::new(),
             module_path_resolver: self.module_path_resolver,
             debug: self.debug,
             jsx_preserve: self.jsx_preserve,
@@ -1070,7 +1110,7 @@ impl<'r> JsPrinter<'r> {
         // function. Each of its mangled names keeps all its printed names
         // (so capturing outer `match` also keeps a visible sibling `match$1`,
         // and a body-local `match` starts at `match$2`).
-        let mut scope = NameScope::default();
+        let mut scope = self.spare_name_scopes.pop().unwrap_or_default();
         for ident in reserved_idents {
             let mangled = convert_ident_name(ident.name());
             if scope.names.contains_key(&mangled) {
@@ -1091,7 +1131,11 @@ impl<'r> JsPrinter<'r> {
 
         self.name_scopes.push(scope);
         let out = f(self);
-        self.name_scopes.pop();
+        let mut scope = self.name_scopes.pop().expect("pushed above");
+        scope.ident_names.clear();
+        scope.names.clear();
+        scope.used.clear();
+        self.spare_name_scopes.push(scope);
         out
     }
 
@@ -2303,24 +2347,18 @@ impl<'r> JsPrinter<'r> {
     /// Print a variable identifier
     fn print_vident(&mut self, vident: VIdentRef) {
         match vident {
-            VIdentRef::Id(id) => {
-                let name = self.ident_name(&id);
-                self.write(&name);
-            }
+            VIdentRef::Id(id) => self.write_ident(&id),
             VIdentRef::Qualified(q) => {
                 let (module, member) = self.a.qual(q);
                 match member {
                     None => {
-                        let mod_name = self.module_ident_name(&module.id);
-                        self.write(&mod_name);
+                        self.write_module_ident(&module.id);
                     }
                     Some(_) if matches!(&module.kind, Kind::External { default: true, .. }) => {
-                        let mod_name = self.module_ident_name(&module.id);
-                        self.write(&mod_name);
+                        self.write_module_ident(&module.id);
                     }
                     Some(member) => {
-                        let mod_name = self.module_ident_name(&module.id);
-                        self.write(&mod_name);
+                        self.write_module_ident(&module.id);
                         match &module.kind {
                             Kind::Ml | Kind::Runtime => {
                                 let printed_member = js_export_name(member);
@@ -3052,6 +3090,17 @@ fn mangle_ident_char(c: char, op: bool) -> &'static str {
         '[' => "$lbrack",
         ']' => "$rbrack",
         _ => "$unknown",
+    }
+}
+
+fn advance_position(line: &mut usize, column: &mut usize, text: &str) {
+    for ch in text.chars() {
+        if ch == '\n' {
+            *line += 1;
+            *column = 0;
+        } else {
+            *column += ch.len_utf16();
+        }
     }
 }
 

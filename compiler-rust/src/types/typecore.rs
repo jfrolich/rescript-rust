@@ -7333,7 +7333,7 @@ fn type_pattern_constraint_poly_var(
             // OCaml: begin_def (); let _, ty' = instance_poly ~keep_names:true false tyl body in end_def (); generalize ty'
             ctx.begin_def();
             let (_inst_vars, ty_prime) =
-                crate::types::ctype::instance_poly(ctx, true, false, &vars, body);
+                crate::types::ctype::instance_poly(ctx, true, false, crate::types::type_expr::PoolSlice::from(&vars), body);
             ctx.end_def();
             crate::types::ctype::generalize(ctx, ty_prime);
 
@@ -12946,10 +12946,12 @@ fn type_function_nary(
     if let Some((expected_args, expected_ret)) = expected_arrow {
         for (index, (param, label)) in params.iter().zip(&labels).enumerate() {
             if !crate::types::type_expr::TypeArgLabel::new(label)
-                .same_label(ctx.type_args(expected_args)[index].label())
+                .same_label(ctx.type_args(expected_args).at(index).label())
             {
                 let remainder = ctx.new_type(TypeDesc::Tarrow {
-                    args: ctx.new_type_args(&ctx.type_args(expected_args)[index..]),
+                    args: ctx.new_type_args(
+                        &ctx.type_args(expected_args).slice(index..).to_smallvec::<4>(),
+                    ),
                     ret: expected_ret,
                 });
                 let param_loc = tctx.arena.get_pat(param.p_pat).ppat_loc;
@@ -16862,7 +16864,7 @@ fn object_field_use_type(
             Ok(crate::types::ctype::instance(ctx, body))
         }
         TypeDesc::Tpoly { body, vars } => {
-            Ok(crate::types::ctype::instance_poly(ctx, false, false, &ctx.type_list(vars), body).1)
+            Ok(crate::types::ctype::instance_poly(ctx, false, false, ctx.type_list(vars), body).1)
         }
         TypeDesc::Tvar(..) => {
             let ty2 = ctx.new_var(None);
@@ -17029,7 +17031,7 @@ fn type_object_field_value(
     match poly {
         Some((body, vars)) => {
             ctx.begin_def();
-            let (vars, ty2) = crate::types::ctype::instance_poly(ctx, false, true, &vars, body);
+            let (vars, ty2) = crate::types::ctype::instance_poly(ctx, false, true, crate::types::type_expr::PoolSlice::from(&vars), body);
             let value = type_expect(tctx, env, svalue, ty2, None);
             ctx.end_def();
             let mut value = value?;
@@ -18149,7 +18151,7 @@ fn pack_type_contains_local_module_dependency(
         TypeDesc::Tconstr { path, args, .. } => {
             pack_type_path_has_local_module_dependency(ctx, env, pers_env, path, visited)
                 || ctx.type_list(args).iter().any(|arg| {
-                    pack_type_contains_local_module_dependency(ctx, env, pers_env, *arg, visited)
+                    pack_type_contains_local_module_dependency(ctx, env, pers_env, arg, visited)
                 })
         }
         TypeDesc::Tarrow { args, ret } => {
@@ -18158,7 +18160,7 @@ fn pack_type_contains_local_module_dependency(
             }) || pack_type_contains_local_module_dependency(ctx, env, pers_env, *ret, visited)
         }
         TypeDesc::Ttuple(items) => ctx.type_list(items).iter().any(|item| {
-            pack_type_contains_local_module_dependency(ctx, env, pers_env, *item, visited)
+            pack_type_contains_local_module_dependency(ctx, env, pers_env, item, visited)
         }),
         TypeDesc::Tlink(target) | TypeDesc::Tsubst(target) => {
             pack_type_contains_local_module_dependency(ctx, env, pers_env, *target, visited)
@@ -18214,13 +18216,13 @@ fn pack_type_contains_local_module_dependency(
                 return true;
             }
             ctx.type_list(vars).iter().any(|var| {
-                pack_type_contains_local_module_dependency(ctx, env, pers_env, *var, visited)
+                pack_type_contains_local_module_dependency(ctx, env, pers_env, var, visited)
             })
         }
         TypeDesc::Tpackage { path, args, .. } => {
             pack_type_path_has_local_module_dependency(ctx, env, pers_env, path, visited)
                 || ctx.type_list(args).iter().any(|arg| {
-                    pack_type_contains_local_module_dependency(ctx, env, pers_env, *arg, visited)
+                    pack_type_contains_local_module_dependency(ctx, env, pers_env, arg, visited)
                 })
         }
         TypeDesc::Tvar(..) | TypeDesc::Tunivar(..) | TypeDesc::Tnil => false,
@@ -18570,7 +18572,7 @@ fn module_type_from_package_binding(
     if ctx
         .type_list(args)
         .iter()
-        .any(|arg| crate::types::typemod::type_expr_has_free_variables(ctx, *arg))
+        .any(|arg| crate::types::typemod::type_expr_has_free_variables(ctx, arg))
     {
         return Err(TypeCoreError::ModuleError(Box::new(
             crate::types::typemod::TypeModError::IncompletePackedModule { loc, ty: expanded },
@@ -18580,7 +18582,7 @@ fn module_type_from_package_binding(
         env,
         &path,
         &ctx.package_lids(lids),
-        &ctx.type_list(args),
+        &ctx.type_list(args).to_smallvec::<4>(),
         tctx.arena,
         &mut tctx.persistent_env,
         ctx,
@@ -20479,7 +20481,7 @@ fn type_let_bindings(
                                 ctx,
                                 true,
                                 false,
-                                &ctx.type_list(vars),
+                                ctx.type_list(vars),
                                 body,
                             );
                             instantiated
@@ -20640,7 +20642,7 @@ fn type_let_bindings(
                         // OCaml: begin_def(); let vars, ty' = instance_poly ~keep_names:true true tl ty
                         ctx.begin_def();
                         let (inst_vars, inst_ty) =
-                            crate::types::ctype::instance_poly(ctx, true, true, &ctx.type_list(vars), body);
+                            crate::types::ctype::instance_poly(ctx, true, true, ctx.type_list(vars), body);
                         let exp = type_value_binding_expression(
                             tctx,
                             &typing_env,
@@ -21093,18 +21095,16 @@ where
                 let copied_items = ctx.new_type_list_from(
                     ctx.type_list(types)
                         .iter()
-                        .map(|t| copy_lookup_type_expr_with_paths(ctx, *t, cache, type_path)),
+                        .map(|t| copy_lookup_type_expr_with_paths(ctx, t, cache, type_path)),
                 );
                 TypeDesc::Ttuple(copied_items)
             }
-            CopyTypeExprPlan::Tconstr {
-                path,
-                args,
-
-            } => {
-                let copied_args = ctx.new_type_list_from(ctx.type_list(args)
-                    .iter()
-                    .map(|t| copy_lookup_type_expr_with_paths(ctx, *t, cache, type_path)));
+            CopyTypeExprPlan::Tconstr { path, args } => {
+                let copied_args = ctx.new_type_list_from(
+                    ctx.type_list(args)
+                        .iter()
+                        .map(|t| copy_lookup_type_expr_with_paths(ctx, t, cache, type_path)),
+                );
                 TypeDesc::Tconstr {
                     path,
                     args: copied_args,
@@ -21209,7 +21209,7 @@ where
                 let copied_vars = ctx.new_type_list_from(
                     ctx.type_list(vars)
                         .iter()
-                        .map(|t| copy_lookup_type_expr_with_paths(ctx, *t, cache, type_path)),
+                        .map(|t| copy_lookup_type_expr_with_paths(ctx, t, cache, type_path)),
                 );
                 TypeDesc::Tpoly {
                     body: copied_body,
@@ -21220,7 +21220,7 @@ where
                 let copied_args = ctx.new_type_list_from(
                     ctx.type_list(args)
                         .iter()
-                        .map(|t| copy_lookup_type_expr_with_paths(ctx, *t, cache, type_path)),
+                        .map(|t| copy_lookup_type_expr_with_paths(ctx, t, cache, type_path)),
                 );
                 TypeDesc::Tpackage {
                     path,
@@ -23364,7 +23364,7 @@ fn type_contains_unresolved_local_path(
             }
             ctx.type_list(args)
                 .iter()
-                .any(|arg| type_contains_unresolved_local_path(ctx, env, pers_env, *arg, visited))
+                .any(|arg| type_contains_unresolved_local_path(ctx, env, pers_env, arg, visited))
         }
         TypeDesc::Tarrow { args, ret } => {
             ctx.type_args(args).iter().any(|arg| {
@@ -23374,7 +23374,7 @@ fn type_contains_unresolved_local_path(
         TypeDesc::Ttuple(items) => ctx
             .type_list(items)
             .iter()
-            .any(|item| type_contains_unresolved_local_path(ctx, env, pers_env, *item, visited)),
+            .any(|item| type_contains_unresolved_local_path(ctx, env, pers_env, item, visited)),
         TypeDesc::Tlink(target) | TypeDesc::Tsubst(target) => {
             type_contains_unresolved_local_path(ctx, env, pers_env, *target, visited)
         }
@@ -23423,12 +23423,12 @@ fn type_contains_unresolved_local_path(
             }
             ctx.type_list(vars)
                 .iter()
-                .any(|var| type_contains_unresolved_local_path(ctx, env, pers_env, *var, visited))
+                .any(|var| type_contains_unresolved_local_path(ctx, env, pers_env, var, visited))
         }
         TypeDesc::Tpackage { args, .. } => ctx
             .type_list(args)
             .iter()
-            .any(|arg| type_contains_unresolved_local_path(ctx, env, pers_env, *arg, visited)),
+            .any(|arg| type_contains_unresolved_local_path(ctx, env, pers_env, arg, visited)),
         TypeDesc::Tvar(..) | TypeDesc::Tunivar(..) | TypeDesc::Tnil => false,
     }
 }
@@ -24092,7 +24092,7 @@ fn extract_concrete_record_type_info(
                         if let Some((inline_path, inline_args, inline_decl)) =
                             lookup_inline_record_decl_for_path(
                                 &path,
-                                &ctx.type_list(args),
+                                &ctx.type_list(args).to_smallvec::<4>(),
                                 env,
                                 pers_env,
                                 ctx,
@@ -24121,7 +24121,7 @@ fn extract_concrete_record_type_info(
                             crate::types::ctype::subst_type_params(
                                 ctx,
                                 &decl.type_params,
-                                &ctx.type_list(args),
+                                &ctx.type_list(args).to_smallvec::<4>(),
                                 manifest,
                             )
                         } else {
@@ -24716,7 +24716,7 @@ fn qualify_module_local_type_paths_with_alias_lookup_in_place<'a>(
                     ctx,
                     env,
                     pers_env,
-                    *arg,
+                    arg,
                     module_access_path,
                     alias_target_lookup,
                     visited,
@@ -24920,7 +24920,7 @@ fn qualify_module_local_type_paths_with_alias_lookup_in_place<'a>(
                     ctx,
                     env,
                     pers_env,
-                    *item,
+                    item,
                     module_access_path,
                     alias_target_lookup,
                     visited,
@@ -25038,7 +25038,7 @@ fn qualify_module_local_type_paths_with_alias_lookup_in_place<'a>(
                     ctx,
                     env,
                     pers_env,
-                    *var,
+                    var,
                     module_access_path,
                     alias_target_lookup,
                     visited,
@@ -25051,7 +25051,7 @@ fn qualify_module_local_type_paths_with_alias_lookup_in_place<'a>(
                     ctx,
                     env,
                     pers_env,
-                    *item,
+                    item,
                     module_access_path,
                     alias_target_lookup,
                     visited,
@@ -25276,7 +25276,7 @@ fn lookup_constructor_by_expected_type(
                                 .map(|arg| {
                                     let copied = crate::types::ctype::copy_type_deep(
                                         ctx,
-                                        *arg,
+                                        arg,
                                         &mut inst_cache,
                                     );
                                     if let Some(module_path) = result_module_access_path.as_ref() {
@@ -26635,6 +26635,18 @@ pub(crate) fn with_resolved_module_components_for_path_with_cache_mode<R>(
         return Some(result);
     }
 
+    // Outside a store build, this compilation's own cache answers first; the
+    // shared-view checks below are only needed on a miss.
+    if !ctx.in_store_build()
+        && let Some(module_key) = module_key.as_ref()
+        && let Some(result) = ctx.with_qualified_module_components(module_key, |components| {
+            (f.take()
+                .expect("qualified module components callback reused"))(components)
+        })
+    {
+        return Some(result);
+    }
+
     // A persistent-rooted view is the same for every compilation (OCaml
     // builds `ps_comps` from `Env.empty`, compiler/ml/env.ml:669-678), so it
     // is built once per worker as a store build and shared.
@@ -26652,22 +26664,17 @@ pub(crate) fn with_resolved_module_components_for_path_with_cache_mode<R>(
                     .is_none_or(|pers| pers.unit_visible(module_path.head().name()))
         })
         .cloned();
-    if let Some(module_key) = module_key.as_ref() {
-        let unit_hit = if ctx.in_store_build() && shared_key.is_some() {
-            // A store build must not read this compilation's cache; the
-            // shared cache below answers for the same key.
-            None
-        } else {
-            ctx.with_qualified_module_components(module_key, |components| {
-                (f.take()
-                    .expect("qualified module components callback reused"))(
-                    components
-                )
-            })
-        };
-        if let Some(result) = unit_hit {
-            return Some(result);
-        }
+    if ctx.in_store_build()
+        && shared_key.is_none()
+        && let Some(module_key) = module_key.as_ref()
+        && let Some(result) = ctx.with_qualified_module_components(module_key, |components| {
+            (f.take()
+                .expect("qualified module components callback reused"))(components)
+        })
+    {
+        // A store build must not read this compilation's cache when the
+        // shared cache below answers for the same key.
+        return Some(result);
     }
     if let Some(shared_key) = shared_key.as_ref()
         && let Some((components, piece)) = ctx.thread_store().shared_components(shared_key)
@@ -27842,7 +27849,7 @@ fn raw_alias_target_for_module_path<'a>(
 
 /// Look up a type declaration for a given path.
 /// Tries env first, then module components.
-fn lookup_type_decl_for_path<'a>(
+pub(crate) fn lookup_type_decl_for_path<'a>(
     type_path: &Path,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,

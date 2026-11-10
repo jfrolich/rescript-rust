@@ -23,8 +23,8 @@ use super::env::Env;
 use super::path::Path;
 use super::type_expr::{
     AbbrevMemo, AbbrevMemoRef, FieldMutability, GENERIC_LEVEL, MutabilityRef, PackageLidsRef,
-    RowDesc, RowDescRef, RowField, RowFieldRef, TypeArg, TypeArgList, TypeArgs, TypeDesc,
-    TypeExprRef, TypeRefList, TypeRefs,
+    RowDesc, RowDescRef, RowField, RowFieldRef, TypeArg, TypeArgList, TypeArgSlice, TypeArgs,
+    TypeDesc, TypeExprRef, TypeRefList, TypeRefs, TypeSlice,
 };
 use super::typedtree::EnvRef;
 use crate::context::IdGenerator;
@@ -545,7 +545,7 @@ pub struct TypeContext {
     /// Direct handle to the shared pool's page table for node reads. Never
     /// borrowed mutably: the `RefCell` only lets shared descriptor borrows be
     /// `Ref`s like local ones (`Ref::map`), so callers see one borrow type.
-    shared_pages: RefCell<super::shared_store::SharedPages>,
+    shared_pages: super::shared_store::SharedPages,
 
     /// Nesting depth of `build_in_store`; allocations go to the worker store
     /// while it is non-zero.
@@ -1072,7 +1072,7 @@ impl TypeContext {
             shared_desc_overlay: RefCell::new(super::thread_store::PagedOverlay::new()),
             shared_level_overlay: RefCell::new(super::thread_store::PagedOverlay::new()),
             shared_abbrev_overlay: RefCell::new(super::thread_store::PagedOverlay::new()),
-            shared_pages: RefCell::new(shared_pages),
+            shared_pages,
             store_build_depth: Cell::new(0),
             store_build_type_start: Cell::new(0),
             store_build_row_start: Cell::new(0),
@@ -2068,12 +2068,12 @@ impl TypeContext {
         self.new_type_list(&items)
     }
 
-    /// The elements of a type list.
+    /// The elements of a type list, borrowed from their pool.
     #[inline]
-    pub fn type_list(&self, list: impl Into<TypeRefList>) -> TypeRefs {
+    pub fn type_list(&self, list: impl Into<TypeRefList>) -> TypeSlice<'_> {
         let list = list.into();
         if list.is_empty() {
-            return TypeRefs::new();
+            return TypeSlice::EMPTY;
         }
         if list.is_store() {
             return self.store_type_list(list);
@@ -2086,18 +2086,15 @@ impl TypeContext {
     pub fn type_list_at(&self, list: impl Into<TypeRefList>, index: usize) -> TypeExprRef {
         let list = list.into();
         if list.is_store() {
-            return self.store_type_list(list)[index];
+            return self.store_type_list(list).at(index);
         }
         self.type_lists.get_at(list, index)
     }
 
     #[inline(never)]
-    fn store_type_list(&self, list: TypeRefList) -> TypeRefs {
+    fn store_type_list(&self, list: TypeRefList) -> TypeSlice<'_> {
         if list.is_shared() {
-            return TypeRefs::from_slice(super::shared_store::page_list(
-                &self.shared_pages.borrow(),
-                list,
-            ));
+            return TypeSlice::Plain(super::shared_store::page_list(&self.shared_pages, list));
         }
         self.store.type_list(list)
     }
@@ -2120,12 +2117,12 @@ impl TypeContext {
         self.new_type_args(&args)
     }
 
-    /// The parameters of an arrow parameter list.
+    /// The parameters of an arrow parameter list, borrowed from their pool.
     #[inline]
-    pub fn type_args(&self, list: impl Into<TypeArgList>) -> TypeArgs {
+    pub fn type_args(&self, list: impl Into<TypeArgList>) -> TypeArgSlice<'_> {
         let list = list.into();
         if list.is_empty() {
-            return TypeArgs::new();
+            return TypeArgSlice::EMPTY;
         }
         if list.is_store() {
             return self.store_type_args(list);
@@ -2134,12 +2131,9 @@ impl TypeContext {
     }
 
     #[inline(never)]
-    fn store_type_args(&self, list: TypeArgList) -> TypeArgs {
+    fn store_type_args(&self, list: TypeArgList) -> TypeArgSlice<'_> {
         if list.is_shared() {
-            return TypeArgs::from_slice(super::shared_store::page_args(
-                &self.shared_pages.borrow(),
-                list,
-            ));
+            return TypeArgSlice::Plain(super::shared_store::page_args(&self.shared_pages, list));
         }
         self.store.type_args(list)
     }
@@ -2160,13 +2154,13 @@ impl TypeContext {
         if row.is_store() {
             return self.store_row_desc(row);
         }
-        self.type_lists.get_row(row)
+        self.type_lists.get_row(row).clone()
     }
 
     #[inline(never)]
     fn store_row_desc(&self, row: RowDescRef) -> RowDesc {
         if row.is_shared() {
-            return super::shared_store::page_row(&self.shared_pages.borrow(), row).clone();
+            return super::shared_store::page_row(&self.shared_pages, row).clone();
         }
         self.store.row_desc(row)
     }
@@ -2184,12 +2178,12 @@ impl TypeContext {
     pub fn package_lids(&self, lids: impl Into<PackageLidsRef>) -> Vec<Longident> {
         let lids = lids.into();
         if lids.is_shared() {
-            return super::shared_store::page_lids(&self.shared_pages.borrow(), lids).to_vec();
+            return super::shared_store::page_lids(&self.shared_pages, lids).to_vec();
         }
         if lids.is_store() {
             return self.store.package_lids(lids);
         }
-        self.type_lists.get_lids(lids)
+        self.type_lists.get_lids(lids).to_vec()
     }
 
     /// [`Self::store_type_list_for`] for arrow parameter lists.
@@ -2197,7 +2191,7 @@ impl TypeContext {
         if list.is_empty() || list.is_store() {
             return list;
         }
-        self.store.alloc_type_args(&self.type_lists.get_args(list))
+        self.store.alloc_type_args(&self.type_lists.get_args(list).to_smallvec::<4>())
     }
 
     /// A copy of `list` that store descriptors can hold: lists allocated by
@@ -2207,7 +2201,7 @@ impl TypeContext {
         if list.is_empty() || list.is_store() {
             return list;
         }
-        self.store.alloc_type_list(&self.type_lists.get(list))
+        self.store.alloc_type_list(&self.type_lists.get(list).to_smallvec::<4>())
     }
 
     /// Create a new type at a specific level.
@@ -2256,7 +2250,7 @@ impl TypeContext {
                     args: ret_args,
                     ret,
                 } => {
-                    args.extend(self.type_args(ret_args).iter().copied());
+                    args.extend(self.type_args(ret_args).iter());
                     *ret
                 }
                 _ => ret_type,
@@ -2434,7 +2428,7 @@ impl TypeContext {
             if let Some(index) = self.shared_desc_overlay.borrow().get(idx as usize) {
                 return self.store_descs.desc(*index);
             }
-            return super::shared_store::page_node(&self.shared_pages.borrow(), idx).desc;
+            return super::shared_store::page_node(&self.shared_pages, idx).desc;
         }
         if let Some(index) = self.store_desc_overlay.borrow().get(r.store_index()) {
             return self.store_descs.desc(*index);
@@ -2494,7 +2488,7 @@ impl TypeContext {
                 .get(idx as usize)
                 .copied()
                 .unwrap_or_else(|| {
-                    super::shared_store::page_node(&self.shared_pages.borrow(), idx).level
+                    super::shared_store::page_node(&self.shared_pages, idx).level
                 });
         }
         self.store_level_overlay
@@ -2651,7 +2645,7 @@ impl TypeContext {
             self.store_descs.set_desc(index, desc);
         } else {
             let (level, id) = {
-                let pages = self.shared_pages.borrow();
+                let pages = &self.shared_pages;
                 let original = super::shared_store::page_node(&pages, idx);
                 (original.level, original.id)
             };
@@ -4115,7 +4109,7 @@ impl TypeContext {
             }
             DeclLocKind::Store => self.store.decl_loc(loc),
             DeclLocKind::Shared => super::shared_store::page_location(
-                &self.shared_pages.borrow(),
+                &self.shared_pages,
                 loc.owner(),
                 loc.index(),
             ),
@@ -4153,7 +4147,7 @@ impl TypeContext {
             }
             DeclLocKind::Store => self.store.decl_loc_identity(loc),
             DeclLocKind::Shared => super::shared_store::page_location_identity(
-                &self.shared_pages.borrow(),
+                &self.shared_pages,
                 loc.owner(),
                 loc.index(),
             ),
@@ -4297,7 +4291,7 @@ impl TypeContext {
             | TypeDesc::Tpackage { args: list, .. } => *list = self.store_type_list_for(*list),
             TypeDesc::Tarrow { args, .. } => *args = self.store_type_args_for(*args),
             TypeDesc::Tvariant(row) if !row.is_store() => {
-                *row = self.store.alloc_row_desc(self.type_lists.get_row(*row));
+                *row = self.store.alloc_row_desc(self.type_lists.get_row(*row).clone());
             }
             _ => {}
         }
@@ -4306,7 +4300,7 @@ impl TypeContext {
         {
             *lids = self
                 .store
-                .alloc_package_lids(self.type_lists.get_lids(*lids));
+                .alloc_package_lids(self.type_lists.get_lids(*lids).to_vec());
         }
         desc
     }
@@ -4324,12 +4318,12 @@ impl TypeContext {
             }
             TypeDesc::Ttuple(items) => {
                 for ty in self.type_list(items).iter() {
-                    self.check_store_ref(*ty);
+                    self.check_store_ref(ty);
                 }
             }
             TypeDesc::Tconstr { args, abbrev, .. } => {
                 for ty in self.type_list(args).iter() {
-                    self.check_store_ref(*ty);
+                    self.check_store_ref(ty);
                 }
                 self.check_store_memo(*abbrev);
             }
@@ -4362,12 +4356,12 @@ impl TypeContext {
             TypeDesc::Tpoly { body, vars } => {
                 self.check_store_ref(*body);
                 for ty in self.type_list(vars).iter() {
-                    self.check_store_ref(*ty);
+                    self.check_store_ref(ty);
                 }
             }
             TypeDesc::Tpackage { args, .. } => {
                 for ty in self.type_list(args).iter() {
-                    self.check_store_ref(*ty);
+                    self.check_store_ref(ty);
                 }
             }
         }
@@ -5157,7 +5151,7 @@ mod tests {
         // snapshot (its arena allocation intentionally remains alive).
         ctx.set_desc(ty, TypeDesc::Ttuple(ctx.new_type_list(&[local])));
         assert!(
-            matches!(*ctx.borrow_desc(ty), TypeDesc::Ttuple(ts) if ctx.type_list(ts).as_slice() == [local])
+            matches!(*ctx.borrow_desc(ty), TypeDesc::Ttuple(ts) if ctx.type_list(ts).to_vec() == [local])
         );
     }
 

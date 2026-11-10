@@ -663,7 +663,7 @@ impl<'a> Printtyp<'a> {
                     OutType::Otyp_arrow(args, Box::new(this.tree_of_typexp(sch, *ret)))
                 }
                 TypeDesc::Ttuple(tyl) => {
-                    OutType::Otyp_tuple(this.tree_of_typlist(sch, &this.ctx.type_list(tyl)))
+                    OutType::Otyp_tuple(this.tree_of_typlist(sch, &this.ctx.type_list(tyl).to_smallvec::<4>()))
                 }
                 TypeDesc::Tconstr { path, .. }
                     if this.find_inlined_type(&path.name()).is_some() =>
@@ -678,7 +678,7 @@ impl<'a> Printtyp<'a> {
                 }
                 TypeDesc::Tconstr { path, args, .. } => OutType::Otyp_constr(
                     this.tree_of_path(path),
-                    this.tree_of_typlist(sch, &this.ctx.type_list(args)),
+                    this.tree_of_typlist(sch, &this.ctx.type_list(args).to_smallvec::<4>()),
                 ),
                 TypeDesc::Tvariant(row) => this.tree_of_variant(sch, px, &this.ctx.row_desc(row)),
                 TypeDesc::Tobject { fields } => this.tree_of_typobject(sch, *fields),
@@ -690,7 +690,7 @@ impl<'a> Printtyp<'a> {
                         .ctx
                         .type_list(vars)
                         .iter()
-                        .map(|t| this.ctx.repr(*t))
+                        .map(|t| this.ctx.repr(t))
                         .collect();
                     if tyl.is_empty() {
                         this.tree_of_typexp(sch, *body)
@@ -718,7 +718,7 @@ impl<'a> Printtyp<'a> {
                     OutType::Otyp_module(
                         path.name(),
                         n,
-                        this.tree_of_typlist(sch, &this.ctx.type_list(args)),
+                        this.tree_of_typlist(sch, &this.ctx.type_list(args).to_smallvec::<4>()),
                     )
                 }
             }
@@ -2605,7 +2605,7 @@ impl<'a> Printtyp<'a> {
                         .type_list(tl1)
                         .iter()
                         .zip(self.ctx.type_list(tl2).iter())
-                        .all(|(a, b)| self.ctx.repr(*a) == self.ctx.repr(*b))
+                        .all(|(a, b)| self.ctx.repr(a) == self.ctx.repr(b))
             }
             _ => false,
         }

@@ -390,7 +390,7 @@ impl ThreadTypeStore {
 
     /// A copy of a worker-store row.
     pub(crate) fn row_desc(&self, row: super::type_expr::RowDescRef) -> super::type_expr::RowDesc {
-        self.type_lists.get_row(row)
+        self.type_lists.get_row(row).clone()
     }
 
     /// Store `Tpackage` constraint names in the worker store.
@@ -406,7 +406,7 @@ impl ThreadTypeStore {
         &self,
         lids: super::type_expr::PackageLidsRef,
     ) -> Vec<crate::parser::longident::Longident> {
-        self.type_lists.get_lids(lids)
+        self.type_lists.get_lids(lids).to_vec()
     }
 
     /// Allocate an arrow parameter list in the worker store.
@@ -421,7 +421,7 @@ impl ThreadTypeStore {
     pub(crate) fn type_args(
         &self,
         list: super::type_expr::TypeArgList,
-    ) -> super::type_expr::TypeArgs {
+    ) -> super::type_expr::TypeArgSlice<'_> {
         self.type_lists.get_args(list)
     }
 
@@ -429,7 +429,7 @@ impl ThreadTypeStore {
     pub(crate) fn type_list(
         &self,
         list: super::type_expr::TypeRefList,
-    ) -> super::type_expr::TypeRefs {
+    ) -> super::type_expr::TypeSlice<'_> {
         self.type_lists.get(list)
     }
 

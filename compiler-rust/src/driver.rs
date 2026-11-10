@@ -6494,7 +6494,7 @@ fn format_package_type_expr_for_error(
             format!(
                 "type {} = {}",
                 format_longident_for_report(arena, lid),
-                format_type_expr(type_ctx, *arg)
+                format_type_expr(type_ctx, arg)
             )
         })
         .collect::<Vec<_>>();
@@ -8748,7 +8748,7 @@ fn moregen_link(
             drop(impl_desc);
             drop(iface_desc);
             for (a, b) in ctx.type_list(a1).iter().zip(ctx.type_list(a2).iter()) {
-                moregen_link(ctx, *a, *b, visited);
+                moregen_link(ctx, a, b, visited);
             }
         }
         (TypeDesc::Tarrow { args: a1, ret: r1 }, TypeDesc::Tarrow { args: a2, ret: r2 })
@@ -8768,7 +8768,7 @@ fn moregen_link(
             drop(impl_desc);
             drop(iface_desc);
             for (a, b) in ctx.type_list(t1).iter().zip(ctx.type_list(t2).iter()) {
-                moregen_link(ctx, *a, *b, visited);
+                moregen_link(ctx, a, b, visited);
             }
         }
         _ => {}
