@@ -245,7 +245,7 @@ pub fn prim_kind(value: &OcamlValue) -> Option<PrimKind> {
     match value {
         OcamlValue::Int(0) => Some(PrimKind::KindIntrinsic),
         _ => match value.as_block_opt()? {
-            (0, [spec]) => Some(PrimKind::KindExternal(Box::new(external_ffi(spec)?))),
+            (0, [spec]) => Some(PrimKind::KindExternal(std::sync::Arc::new(external_ffi(spec)?))),
             (1, [c]) => Some(PrimKind::KindInlineConst(Box::new(inline_const(c)?))),
             _ => None,
         },

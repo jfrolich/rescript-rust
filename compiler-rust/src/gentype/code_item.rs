@@ -64,13 +64,37 @@ pub struct TypeDeclarations {
 
 impl TypeDeclarations {
     /// Move `declarations` past the lifetime of the context `locs` resolves.
+    ///
+    /// The locations' files are renumbered in order of first use: GenType
+    /// reads these locations only to report a warning, which does not print
+    /// the file name (`log_::loc::print_loc`), and the indices the compiling
+    /// context named them by depend on the order in which worker threads
+    /// interned them, so keeping them would make the stored declarations
+    /// differ from build to build.
     pub fn portable(declarations: Vec<TypeDeclaration>, locs: &dyn crate::types::DeclLocs) -> Self {
         let mut locations = crate::types::DeclLocTable::default();
+        let mut files: Vec<crate::intern::StrIdx> = Vec::new();
+        let mut file_key = |file: crate::intern::StrIdx| {
+            if file == crate::intern::StrIdx::default() {
+                return file;
+            }
+            let index = files
+                .iter()
+                .position(|seen| *seen == file)
+                .unwrap_or_else(|| {
+                    files.push(file);
+                    files.len() - 1
+                });
+            crate::intern::StrIdx::from_raw(index as u32 + 1)
+        };
         let declarations = declarations
             .into_iter()
             .map(|mut declaration| {
                 let export_type = &mut declaration.export_from_type_declaration.export_type;
-                export_type.loc = locations.intern(locs.resolve_loc(export_type.loc));
+                let mut loc = locs.resolve_loc(export_type.loc);
+                loc.loc_start.file_name = file_key(loc.loc_start.file_name);
+                loc.loc_end.file_name = file_key(loc.loc_end.file_name);
+                export_type.loc = locations.intern(loc);
                 declaration
             })
             .collect();

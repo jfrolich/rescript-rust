@@ -9,7 +9,8 @@ use super::decl::{ConstructorDescription, ConstructorKind, LabelDescription};
 use super::tast_iterator::{self as ti, TastIterator};
 use super::type_expr::{SHARED_REF_BITS, SHARED_REF_TAG, STORE_REF_TAG, TypeDesc, TypeExprRef};
 use super::typedtree::*;
-use crate::cmi::item_deps::{Kind, UnitRead, read_of_path};
+use crate::cmi::item_deps::{Kind, Segs, UnitRead, read_of_path};
+use crate::name::Name;
 use crate::types::path::Path;
 
 /// Visited type nodes: one bitset per reference space (local arena,
@@ -48,17 +49,25 @@ struct Collector<'a> {
     ctx: &'a TypeContext,
     ta: &'a TypedArena,
     seen: SeenTypes,
+    /// The walk stack of [`Collector::ty`], kept to reuse its buffer.
+    stack: Vec<TypeExprRef>,
+    /// The paths already read, by interned node and kind: a path's reads
+    /// depend only on those, and many type nodes share a path.
+    paths: ahash::AHashSet<(usize, Kind)>,
     out: Vec<UnitRead>,
 }
 
 impl Collector<'_> {
     fn path(&mut self, path: &Path, kind: Kind) {
-        read_of_path(path, kind, None, &mut self.out);
+        if self.paths.insert((path.node_addr(), kind)) {
+            read_of_path(path, kind, None, &mut self.out);
+        }
     }
 
     fn ty(&mut self, root: TypeExprRef) {
         let ctx = self.ctx;
-        let mut stack = vec![root];
+        let mut stack = std::mem::take(&mut self.stack);
+        stack.push(root);
         while let Some(ty) = stack.pop() {
             if !self.seen.insert(ty) {
                 continue;
@@ -68,11 +77,11 @@ impl Collector<'_> {
             let desc = ctx.borrow_desc(ty);
             match &*desc {
                 TypeDesc::Tconstr { path, args, .. } => {
-                    read_of_path(path, Kind::Type, None, &mut self.out);
+                    self.path(path, Kind::Type);
                     stack.extend(ctx.type_list(args).iter());
                 }
                 TypeDesc::Tpackage { path, args, .. } => {
-                    read_of_path(path, Kind::Modtype, None, &mut self.out);
+                    self.path(path, Kind::Modtype);
                     stack.extend(ctx.type_list(args).iter());
                 }
                 TypeDesc::Tarrow { args, ret } => {
@@ -94,13 +103,14 @@ impl Collector<'_> {
                 TypeDesc::Tvariant(row) => {
                     let row = &ctx.row_desc(row);
                     if let Some((path, _)) = &row.row_name {
-                        read_of_path(path, Kind::Type, None, &mut self.out);
+                        self.path(path, Kind::Type);
                     }
                     drop(desc);
                     super::btype::iter_type_expr(ctx, ty, |child| stack.push(child));
                 }
             }
         }
+        self.stack = stack;
     }
 
     fn constructor(&mut self, cd: &ConstructorDescription) {
@@ -232,8 +242,8 @@ impl<'a> TastIterator<'a> for Collector<'a> {
 
 fn opened(opens: &[String]) -> impl Iterator<Item = UnitRead> + '_ {
     opens.iter().map(|unit| UnitRead {
-        unit: unit.clone(),
-        segs: Vec::new(),
+        unit: Name::new(unit),
+        segs: Segs::new(),
         kind: Kind::Module,
     })
 }
@@ -250,6 +260,8 @@ pub fn structure_reads(
         ctx,
         ta,
         seen: SeenTypes::default(),
+        stack: Vec::new(),
+        paths: ahash::AHashSet::new(),
         out: opened(opens).collect(),
     };
     collector.structure(structure);
@@ -267,6 +279,8 @@ pub fn signature_reads(
         ctx,
         ta,
         seen: SeenTypes::default(),
+        stack: Vec::new(),
+        paths: ahash::AHashSet::new(),
         out: opened(opens).collect(),
     };
     collector.signature(signature);

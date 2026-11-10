@@ -30,12 +30,59 @@
 
 use crate::name::Name;
 use serde::{Deserialize, Serialize};
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::fmt;
 use std::hash::{Hash, Hasher};
 
 thread_local! {
     static LOCAL_IDENT_COUNTER: Cell<i32> = const { Cell::new(0) };
+    /// While a published signature is encoded (`saving_store_stamps`).
+    static SAVED_STORE_STAMPS: RefCell<Option<SavedStoreStamps>> = const { RefCell::new(None) };
+}
+
+/// First stamp of the binders of a worker's shared type store
+/// (`types::thread_store::next_store_stamp`). Compilation-local stamps stay
+/// far below it.
+pub const STORE_STAMP_BASE: i32 = 1 << 29;
+
+struct SavedStoreStamps {
+    stamps: crate::fast_hash::AHashMap<i32, i32>,
+    /// A store stamp missing from `stamps` was encoded.
+    unmapped: bool,
+}
+
+/// Run `encode` with identifiers whose stamp is a store stamp in `stamps`
+/// serialized with the stamp it maps to. Returns `encode`'s result and
+/// whether an identifier with a store stamp missing from `stamps` was
+/// serialized (it is serialized unchanged).
+///
+/// Used to save a compilation's signature with the local stamps its store
+/// binders stand for (see `TypeContext::saved_store_stamps`).
+pub fn saving_store_stamps<R>(
+    stamps: crate::fast_hash::AHashMap<i32, i32>,
+    encode: impl FnOnce() -> R,
+) -> (R, bool) {
+    let outer = SAVED_STORE_STAMPS.with(|saved| {
+        saved.replace(Some(SavedStoreStamps {
+            stamps,
+            unmapped: false,
+        }))
+    });
+    let result = encode();
+    let saved = SAVED_STORE_STAMPS.with(|saved| saved.replace(outer));
+    (result, saved.is_some_and(|saved| saved.unmapped))
+}
+
+/// The stamp a store-range `stamp` is serialized with.
+#[cold]
+fn saved_store_stamp(stamp: i32) -> i32 {
+    SAVED_STORE_STAMPS.with(|saved| match saved.borrow_mut().as_mut() {
+        Some(saved) => saved.stamps.get(&stamp).copied().unwrap_or_else(|| {
+            saved.unmapped = true;
+            stamp
+        }),
+        None => stamp,
+    })
 }
 
 /// Flags for identifier properties.
@@ -115,11 +162,35 @@ impl IdentFlags {
 /// Two identifiers are considered the "same" (`same` method) if:
 /// - Both have non-zero stamps and the stamps are equal, OR
 /// - Both have stamp 0 and the names are equal
-#[derive(Clone, Copy, Serialize, Deserialize)]
+#[derive(Clone, Copy, Deserialize)]
 pub struct Ident {
     name: Name,
     stamp: i32,
     flags: IdentFlags,
+}
+
+impl Serialize for Ident {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        /// The derived encoding of `Ident`.
+        #[derive(Serialize)]
+        #[serde(rename = "Ident")]
+        struct Repr<'a> {
+            name: &'a Name,
+            stamp: i32,
+            flags: IdentFlags,
+        }
+        let stamp = if self.stamp >= STORE_STAMP_BASE {
+            saved_store_stamp(self.stamp)
+        } else {
+            self.stamp
+        };
+        Repr {
+            name: &self.name,
+            stamp,
+            flags: self.flags,
+        }
+        .serialize(serializer)
+    }
 }
 
 impl Ident {

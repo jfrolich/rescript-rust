@@ -321,6 +321,13 @@ impl Path {
     /// `compiler/ml/path.ml:23-29`): structural, with `Ident.same` on
     /// identifiers and `Pdot` positions ignored.
     #[inline]
+    /// The address of the interned node: equal exactly for identical paths
+    /// (identifier flags and positions included), unlike `==`.
+    #[inline]
+    pub fn node_addr(self) -> usize {
+        std::ptr::from_ref(self.0) as usize
+    }
+
     pub fn same(&self, other: &Path) -> bool {
         std::ptr::eq(self.0.class(), other.0.class())
     }
@@ -451,6 +458,15 @@ impl Path {
     }
 
     /// Get the last component of this path.
+    pub fn last_name(&self) -> Name {
+        match self.view() {
+            PathView::Pident(id) => id.name_atom(),
+            PathView::Pdot(_, s, _) => *s,
+            PathView::Papply(_, p) => p.last_name(),
+        }
+    }
+
+    /// The last component name, as text.
     pub fn last(&self) -> &'static str {
         match self.view() {
             PathView::Pident(id) => id.name(),
@@ -620,8 +636,8 @@ mod tests {
     #[test]
     fn test_name_eq_matches_name() {
         let a = Path::pident(Ident::create_persistent("A"));
-        let ab = Path::pdot(a.clone(), "B");
-        let abc = Path::pdot(ab.clone(), "c");
+        let ab = Path::pdot(a, "B");
+        let abc = Path::pdot(ab, "c");
         for path in [&a, &ab, &abc] {
             assert!(path.name_eq(&path.name()));
         }
@@ -629,7 +645,7 @@ mod tests {
         assert!(!abc.name_eq("AB.c"));
         assert!(!abc.name_eq("B.c"));
         assert!(!ab.name_eq("A.B.c"));
-        let applied = Path::papply(a.clone(), ab.clone());
+        let applied = Path::papply(a, ab);
         assert!(applied.name_eq(&applied.name()));
     }
 

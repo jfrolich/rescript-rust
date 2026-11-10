@@ -31,6 +31,7 @@ use crate::lambda::{
     ApInfo, Apply, ApplyStatus, FunctionAttribute, InlineAttribute, LFunction, Lambda, PrimInfo,
     TagInfo,
 };
+use crate::name::Name;
 use crate::parser::{Parser, jsx_ppx, module};
 use crate::types::context::TypeContext;
 use crate::types::decl::{
@@ -220,6 +221,23 @@ impl<V> SharedRegistryMap<V> {
         }
         self.lazy.as_ref().is_some_and(|lazy| lazy.materialize(key))
             && self.inner.read().unwrap().contains_key(key)
+    }
+}
+
+impl<V> SharedRegistryMap<V> {
+    /// `f` of the value for `key`, read in place under the map's read lock:
+    /// `f` must not look up this map again.
+    fn with_value<R>(&self, key: &str, f: impl FnOnce(&V) -> R) -> Option<R> {
+        {
+            let inner = self.inner.read().unwrap();
+            if let Some(value) = inner.get(key) {
+                return Some(f(value));
+            }
+        }
+        if !self.lazy.as_ref().is_some_and(|lazy| lazy.materialize(key)) {
+            return None;
+        }
+        self.inner.read().unwrap().get(key).map(f)
     }
 }
 
@@ -543,7 +561,9 @@ pub struct ModuleRegistry {
     disk_modules: SharedRegistryMap<bool>,
     /// Module metadata (source paths, purity, runtime status).
     module_info: SharedRegistryMap<InMemoryModuleInfo>,
-    /// Alias prefix rewrites (flattened_name -> qualified_path).
+    /// Alias prefix rewrites (flattened_name -> qualified_path) of the
+    /// registered namespace modules. A compiled or stored module's aliases are
+    /// not shared: a compilation collects them when it loads the module.
     alias_rewrites: SharedRegistryMap<Path>,
     /// Source file paths for ALL modules, including those not yet compiled.
     /// Used for on-demand source-based type checking when a module is needed
@@ -565,7 +585,7 @@ pub struct ModuleRegistry {
     /// of the JS metadata whose inlinable bodies the references follow
     /// (`usize::MAX` for references without them).
     item_refs_cache:
-        Arc<RwLock<HashMap<(String, usize, u64, usize), Arc<super::item_deps::UnitRefs>>>>,
+        Arc<RwLock<HashMap<(Name, usize, u64, usize), Arc<super::item_deps::UnitRefs>>>>,
 }
 
 impl ModuleRegistry {
@@ -625,6 +645,15 @@ impl ModuleRegistry {
         (pers, info)
     }
 
+    /// `f` of the JS metadata of a registered module, read in place. `f`
+    /// must not look up module metadata again.
+    fn with_info<R>(&self, name: &str, f: impl FnOnce(&InMemoryModuleInfo) -> R) -> Option<R> {
+        match self.local_module_info.get(name) {
+            Some(info) => Some(f(info)),
+            None => self.module_info.with_value(name, f),
+        }
+    }
+
     /// The per-item digests of a registered module
     /// (see [`super::item_deps::item_digests`]), `None` when it is not
     /// registered.
@@ -648,7 +677,7 @@ impl ModuleRegistry {
     pub fn resolve_signature_reads(
         &self,
         reads: Vec<super::item_deps::UnitRead>,
-    ) -> std::collections::BTreeMap<String, std::collections::BTreeSet<String>> {
+    ) -> super::item_deps::ResolvedReads {
         super::item_deps::resolve_reads(
             reads,
             &RegistryUnitSource {
@@ -663,59 +692,49 @@ impl ModuleRegistry {
     /// everything those units' items refer to.
     pub fn lambda_reads(
         &self,
-        resolved: &std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
-    ) -> std::collections::BTreeMap<String, std::collections::BTreeSet<String>> {
-        use super::item_deps::{Kind, UnitRead, item_key};
+        resolved: &super::item_deps::ResolvedReads,
+    ) -> super::item_deps::ResolvedReads {
+        use super::item_deps::{ItemKey, Kind, Segs, UnitRead};
         let source = RegistryUnitSource {
             registry: self,
             lambdas: true,
         };
-        let value_prefix = item_key(Kind::Value, "");
-        let module_prefix = item_key(Kind::Module, "");
         let mut seeds = Vec::new();
         for (unit, keys) in resolved {
-            let Some(info) = self.registered(unit).1 else {
-                continue;
-            };
-            if info.cmj_export_lambdas.is_empty() {
-                continue;
-            }
-            let mut names: Vec<&str> = Vec::new();
-            if keys.contains(super::item_deps::WHOLE) {
-                names.extend(info.cmj_export_lambdas.keys().map(String::as_str));
-            } else {
-                for key in keys {
-                    if let Some(name) = key
-                        .strip_prefix(&value_prefix)
-                        .or_else(|| key.strip_prefix(&module_prefix))
-                    {
-                        names.push(name);
+            self.with_info(unit, |info| {
+                let lambdas = &info.cmj_export_lambdas;
+                if lambdas.is_empty() {
+                    return;
+                }
+                let mut push = |name: &str| {
+                    for lambda_unit in lambda_units_of(lambdas, name) {
+                        seeds.push(UnitRead {
+                            unit: lambda_unit,
+                            segs: Segs::new(),
+                            kind: Kind::Module,
+                        });
+                    }
+                };
+                if keys.contains(&ItemKey::Whole) {
+                    lambdas.keys().for_each(|name| push(name));
+                } else {
+                    for key in keys {
+                        if let ItemKey::Item(Kind::Value | Kind::Module, name) = key {
+                            push(name.as_str());
+                        }
                     }
                 }
-            }
-            for name in names {
-                for lambda_unit in super::item_deps::UnitSource::lambda_units(&source, unit, name) {
-                    seeds.push(UnitRead {
-                        unit: lambda_unit,
-                        segs: Vec::new(),
-                        kind: Kind::Module,
-                    });
-                }
-            }
+            });
         }
         if seeds.is_empty() {
-            return std::collections::BTreeMap::new();
+            return super::item_deps::ResolvedReads::default();
         }
         super::item_deps::resolve_reads(seeds, &source)
     }
 
     /// The module's published interface encoded for storage (see
     /// [`super::stored_module`]), `None` when it is not registered.
-    pub fn encode_stored_module(
-        &self,
-        name: &str,
-        alias_rewrites: &[(String, Path)],
-    ) -> Option<Vec<u8>> {
+    pub fn encode_stored_module(&self, name: &str) -> Option<Vec<u8>> {
         let (pers, info) = self.registered(name);
         let info = info?;
         let gentype_declarations = crate::gentype::main::type_declarations_of_module(name);
@@ -723,7 +742,6 @@ impl ModuleRegistry {
             &super::stored_module::StoredModuleRef {
                 pers_struct: pers.as_deref(),
                 info: &info,
-                alias_rewrites,
                 gentype_declarations: &gentype_declarations,
             },
         ))
@@ -731,11 +749,7 @@ impl ModuleRegistry {
 
     /// [`Self::encode_stored_module`] as its extras, `None` when it has none,
     /// and core (see [`super::stored_module::encode_parts`]).
-    pub fn encode_stored_module_parts(
-        &self,
-        name: &str,
-        alias_rewrites: &[(String, Path)],
-    ) -> Option<(Option<Vec<u8>>, Vec<u8>)> {
+    pub fn encode_stored_module_parts(&self, name: &str) -> Option<(Option<Vec<u8>>, Vec<u8>)> {
         let (pers, info) = self.registered(name);
         let info = info?;
         let gentype_declarations = crate::gentype::main::type_declarations_of_module(name);
@@ -743,24 +757,18 @@ impl ModuleRegistry {
             &super::stored_module::StoredModuleRef {
                 pers_struct: pers.as_deref(),
                 info: &info,
-                alias_rewrites,
                 gentype_declarations: &gentype_declarations,
             },
         ))
     }
 
     /// Register a stored module's interface (see
-    /// [`super::stored_module::encode`]), as compiling it would. Its alias
-    /// rewrites and GenType declarations are registered now; its signature
-    /// and JS metadata are decoded by the first lookup of the module, so a
-    /// build that registers many stored modules pays only for those its
-    /// compiles read. Returns the module's alias rewrites, or `None`,
-    /// registering nothing, when the data does not decode.
-    pub fn register_stored_lazily(
-        &mut self,
-        name: &str,
-        data: &[u8],
-    ) -> Option<Vec<(String, Path)>> {
+    /// [`super::stored_module::encode`]), as compiling it would. Its GenType
+    /// declarations are registered now; its signature and JS metadata are
+    /// decoded by the first lookup of the module, so a build that registers
+    /// many stored modules pays only for those its compiles read. Returns
+    /// `None`, registering nothing, when the data does not decode.
+    pub fn register_stored_lazily(&mut self, name: &str, data: &[u8]) -> Option<()> {
         let (extras, core) = super::stored_module::split(data)?;
         self.register_stored_parts(name, Some(extras), PendingCore::Bytes(core.to_vec().into()))
     }
@@ -772,7 +780,7 @@ impl ModuleRegistry {
         &mut self,
         name: &str,
         data: &'static [u8],
-    ) -> Option<Vec<(String, Path)>> {
+    ) -> Option<()> {
         let (extras, core) = super::stored_module::split(data)?;
         self.register_stored_parts(name, Some(extras), PendingCore::Bytes(core.into()))
     }
@@ -786,7 +794,7 @@ impl ModuleRegistry {
         name: &str,
         extras: Option<&[u8]>,
         core: PendingCore,
-    ) -> Option<Vec<(String, Path)>> {
+    ) -> Option<()> {
         assert!(
             !self.write_to_local,
             "stored modules are registered in the shared registry"
@@ -796,13 +804,12 @@ impl ModuleRegistry {
             None => super::stored_module::StoredExtras::default(),
         };
         let lazy = self.lazy_stored_modules();
-        self.extend_alias_rewrites(extras.alias_rewrite_map());
         crate::gentype::main::restore_type_declarations(name, extras.gentype_declarations);
         lazy.pending
             .lock()
             .unwrap()
             .insert(name.to_string(), Arc::new(Mutex::new(Some(core))));
-        Some(extras.alias_rewrites)
+        Some(())
     }
 
     /// Decode `name`'s stored module now if it is registered with
@@ -858,14 +865,7 @@ impl ModuleRegistry {
     }
 
     pub fn module_info_is_runtime(&self, name: &str) -> bool {
-        self.local_module_info
-            .get(name)
-            .map(|info| info.is_runtime)
-            .or_else(|| {
-                self.module_info
-                    .get_cloned(name)
-                    .map(|info| info.is_runtime)
-            })
+        self.with_info(name, |info| info.is_runtime)
             .unwrap_or(false)
     }
 
@@ -977,9 +977,8 @@ impl ModuleRegistry {
         name: &str,
         portable: PortablePersStruct,
         info: InMemoryModuleInfo,
-        new_alias_rewrites: HashMap<String, Path>,
     ) {
-        self.register_module_arc(name, Arc::new(portable), info, new_alias_rewrites);
+        self.register_module_arc(name, Arc::new(portable), info);
     }
 
     /// Store a compiled module's finalized PersStruct and metadata from an
@@ -989,11 +988,9 @@ impl ModuleRegistry {
         name: &str,
         portable: Arc<PortablePersStruct>,
         info: InMemoryModuleInfo,
-        new_alias_rewrites: HashMap<String, Path>,
     ) {
         self.insert_cached_module(name.to_string(), portable);
         self.insert_module_info(name.to_string(), info);
-        self.extend_alias_rewrites(new_alias_rewrites);
     }
 
     fn insert_cached_module(&mut self, name: String, portable: Arc<PortablePersStruct>) {
@@ -1447,21 +1444,25 @@ impl PersistentEnv {
     }
 
     /// Extract the diff produced by this compilation: the newly-registered
-    /// PersStruct (serialized to portable form) and any new alias rewrites.
-    /// Must be called while the TypeContext is still alive so the type graph
-    /// can be serialized. Used to update the shared ModuleRegistry after
-    /// compilation.
+    /// PersStruct, serialized to portable form. Must be called while the
+    /// TypeContext is still alive so the type graph can be serialized. Used
+    /// to update the shared ModuleRegistry after compilation.
+    ///
+    /// The alias rewrites the compilation collected stay with it: a
+    /// compilation that reads this module collects them from its signature
+    /// when it loads it (`find_pers_struct`), as OCaml scrapes the aliases of
+    /// the units a compilation reads (`compiler/ml/env.ml:1513-1538`), so what
+    /// a compilation sees does not depend on which other modules compiled
+    /// before it.
     pub fn extract_module_update(
         &self,
         module_name: &str,
         ctx: &TypeContext,
         arena: Option<&crate::parse_arena::ParseArena>,
-    ) -> (Option<PortablePersStruct>, HashMap<String, Path>) {
-        let portable = self
-            .cache_lookup(module_name)
+    ) -> Option<PortablePersStruct> {
+        self.cache_lookup(module_name)
             .and_then(|opt| opt)
-            .map(|ps| portable_types::serialize_pers_struct(ps.as_ref(), ctx, arena));
-        (portable, self.view.alias_prefix_rewrites.local_clone())
+            .map(|ps| portable_types::serialize_pers_struct(ps.as_ref(), ctx, arena))
     }
 
     /// Extract all currently-cached modules as portable structs, plus the full
@@ -1681,6 +1682,43 @@ impl PersistentEnv {
         units
     }
 
+    /// Replay of `find_pers_struct(name)` for `StoreEffect::PreparePers`:
+    /// apply its lasting effects on the compilation (loading the unit into
+    /// the shared cache, the raw signature registration and `record_import`)
+    /// without copying the resolution view. The unit's alias rewrites would
+    /// only be collected into a throwaway copy of the view, and they cannot
+    /// change the registration decision for the unit itself. Returns `false`
+    /// in the other cases (hidden, missing, or loaded from disk), so the
+    /// caller runs the full lookup.
+    pub(crate) fn replay_cached_pers_struct(&self, name: &str, ctx: &TypeContext) -> bool {
+        let (cache_key, ps) = match self.cache_lookup_entry(name) {
+            Some((cache_key, Some(ps))) => (cache_key, ps),
+            Some((_, None)) => return false,
+            None => {
+                // Not loaded by this compilation yet: internalize the
+                // registry's portable unit as `find_pers_struct_unrecorded`
+                // does. Its alias rewrites are collected when this compilation
+                // first looks the unit up itself (`prepare_cached_pers_struct`).
+                let Some((portable_key, portable)) = self.portable_cache_entry(name) else {
+                    return false;
+                };
+                if self.view.hidden_modules.contains(&portable_key) {
+                    return false;
+                }
+                let ps = portable_types::internalize_pers_struct(portable, ctx);
+                self.cache_insert(portable_key.clone(), Some(ps.clone()));
+                (portable_key, ps)
+            }
+        };
+        if should_register_lazy_raw_sig(&cache_key, &self.view.alias_prefix_rewrites)
+            && !ctx.has_raw_module_sig(&cache_key)
+        {
+            ctx.register_raw_module_sig(&cache_key, ps.ps_sig.clone());
+        }
+        self.record_import(&ps);
+        true
+    }
+
     fn record_import(&self, ps: &PersStruct) {
         let mut imported = self.imported_units.lock().unwrap();
         if imported.recorded.contains(ps.ps_name.as_str()) {
@@ -1769,7 +1807,7 @@ impl PersistentEnv {
                 .view
                 .alias_prefix_rewrites
                 .get(&portable_key)
-                .unwrap_or_else(|| module_path.clone());
+                .unwrap_or_else(|| module_path);
             collect_alias_rewrites(
                 &ps.ps_sig,
                 &effective_module_path,
@@ -1842,7 +1880,7 @@ impl PersistentEnv {
                 .view
                 .alias_prefix_rewrites
                 .get(cache_key)
-                .unwrap_or_else(|| module_path.clone());
+                .unwrap_or_else(|| module_path);
             collect_alias_rewrites(
                 &ps.ps_sig,
                 &effective_module_path,
@@ -1886,7 +1924,7 @@ impl PersistentEnv {
             .view
             .alias_prefix_rewrites
             .get(name)
-            .unwrap_or_else(|| module_path.clone());
+            .unwrap_or_else(|| module_path);
         collect_alias_rewrites(
             &signature,
             &effective_module_path,
@@ -2694,7 +2732,7 @@ impl PersistentEnv {
         };
         let module_path = Path::pident(Ident::create_persistent(name));
         let components_key = crate::types::context::QualifiedModuleComponentsCacheKey::new(
-            module_path.clone(),
+            module_path,
             None,
         );
         // OCaml compiler/ml/env.ml:669-678 stores persistent module components
@@ -2734,10 +2772,10 @@ impl PersistentEnv {
                 // component modtype force with that alias path.
                 let build = || {
                     crate::types::env_lazy::QualifiedModuleComponents::new_with_child_components_arc_and_value_source_prefix(
-                        module_path.clone(),
+                        module_path,
                         ps.ps_sig.clone(),
                         crate::fast_hash::AHashMap::new(),
-                        alias_source.clone(),
+                        alias_source,
                         ctx,
                     )
                 };
@@ -4076,7 +4114,7 @@ mod tests {
                             val_type: ty,
                             val_kind: crate::types::decl::ValueKind::ValReg,
                             val_loc: Default::default(),
-                            val_attributes: vec![],
+                            val_attributes: Default::default(),
                             val_path: Some(source.clone()),
                         },
                     ),
@@ -4734,7 +4772,7 @@ pub(crate) fn substitute_functor_result_module_path(
     let mut copied = crate::types::typecore::copy_lookup_module_type_for_subst(module_type, ctx);
     let mut maps = SubstMaps::default();
     if old_param.stamp() != 0 {
-        insert_module_stamp_subst(&mut maps.module_stamp_map, old_param, arg_path.clone());
+        insert_module_stamp_subst(&mut maps.module_stamp_map, old_param, *arg_path);
     } else {
         maps.module_name_map
             .insert(old_param.name().to_string(), Arc::new(arg_path.clone()));
@@ -4756,7 +4794,7 @@ pub(crate) fn substitute_module_type_with_module_path_subst(
     let mut maps = SubstMaps::default();
     for (id, path) in module_paths {
         if id.stamp() != 0 {
-            insert_module_stamp_subst(&mut maps.module_stamp_map, id, path.clone());
+            insert_module_stamp_subst(&mut maps.module_stamp_map, id, *path);
         } else {
             maps.module_name_map
                 .insert(id.name().to_string(), Arc::new(path.clone()));
@@ -5457,7 +5495,7 @@ fn restore_child_self_manifests_from_parent_scope(
         ctx.set_desc(
             manifest,
             TypeDesc::Tconstr {
-                path: Path::pdot(parent_module_path.clone(), child_id.name()),
+                path: Path::pdot(*parent_module_path, child_id.name()),
                 args,
                 abbrev,
             },
@@ -5862,7 +5900,7 @@ fn substitute_type_expr_path(
                     protected_module_head,
                 );
                 if new_path != *path {
-                    let mut new_desc = (*desc).clone();
+                    let mut new_desc = (*desc);
                     if let TypeDesc::Tconstr { ref mut path, .. } = new_desc {
                         *path = new_path;
                     }
@@ -5962,7 +6000,7 @@ fn substitute_type_expr_path(
                     protected_module_head,
                 );
                 if new_path != *path {
-                    let mut new_desc = (*desc).clone();
+                    let mut new_desc = (*desc);
                     if let TypeDesc::Tpackage { ref mut path, .. } = new_desc {
                         *path = new_path;
                     }
@@ -5990,7 +6028,7 @@ pub fn alias_reroot_prefixes(module_path: &Path, ctx: &TypeContext) -> Vec<(Path
     component_alias_sources(module_path, ctx)
         .into_iter()
         .filter(|source| !source.same(module_path))
-        .map(|source| (source, module_path.clone()))
+        .map(|source| (source, *module_path))
         .collect()
 }
 
@@ -6267,7 +6305,7 @@ fn direct_manifest_substitution_would_self_alias(
         module_name_map,
         protected_module_head,
     );
-    substituted.same(&Path::pdot(module_path.clone(), id.name()))
+    substituted.same(&Path::pdot(*module_path, id.name()))
 }
 
 /// A Subst module target already is one path allocation; an unchanged Pident
@@ -6339,12 +6377,12 @@ fn substitute_type_path(
                     .stamps
                     .get(&ident.stamp())
                     .cloned()
-                    .unwrap_or_else(|| path.clone())
+                    .unwrap_or_else(|| *path)
             } else {
                 type_name_map
                     .get(ident.name())
                     .cloned()
-                    .unwrap_or_else(|| path.clone())
+                    .unwrap_or_else(|| *path)
             }
         }
         PathView::Pdot(..) => ctx.rebuild_dotted(path, |prefix| {
@@ -6442,7 +6480,7 @@ fn rewrite_type_expr_prefix(
         TypeDesc::Tconstr { path, args, .. } => {
             let rewritten = rewrite_path_prefix(path, old_name, new_prefix, ctx);
             if let Some(new_path) = rewritten {
-                let mut new_desc = (*desc).clone();
+                let mut new_desc = (*desc);
                 if let TypeDesc::Tconstr { ref mut path, .. } = new_desc {
                     *path = new_path;
                 }
@@ -6962,7 +7000,7 @@ impl<'a> PathPrefixes<'a> {
             let mut index = ahash::AHashMap::with_capacity(pairs.len());
             for (position, (old_prefix, _)) in pairs.iter().enumerate() {
                 index
-                    .entry(crate::types::context::SamePathKey::new(old_prefix.clone()))
+                    .entry(crate::types::context::SamePathKey::new(*old_prefix))
                     .or_insert(position);
             }
             index
@@ -7697,13 +7735,13 @@ fn collect_alias_rewrites<S: AliasRewriteSink>(
                 if let PathView::Pident(alias_id) = alias_path.view()
                     && !rewrites.has_alias_rewrite(alias_id.name())
                 {
-                    let qualified = Path::pdot(module_path.clone(), id.name_atom());
+                    let qualified = Path::pdot(*module_path, id.name_atom());
                     rewrites.insert_alias_rewrite_if_absent(alias_id.name().to_string(), qualified);
                 }
             }
             // Also recurse into MtySignature submodules to find nested aliases
             if let ModuleType::MtySignature(sub_sig) = &md.md_type {
-                let sub_path = Path::pdot(module_path.clone(), id.name_atom());
+                let sub_path = Path::pdot(*module_path, id.name_atom());
                 collect_alias_rewrites(sub_sig, &sub_path, rewrites);
             }
         }
@@ -7787,7 +7825,7 @@ fn add_signature_to_env_with_options_inner(
     if let Some(source) = precomputed_components.and_then(|c| c.rerooted_value_source())
         && !reroot_prefixes.iter().any(|(from, _)| from.same(source))
     {
-        reroot_prefixes.push((source.clone(), module_path.clone()));
+        reroot_prefixes.push((*source, *module_path));
     }
     let mut opened_values = Vec::new();
     let mut opened_types = Vec::new();
@@ -7814,7 +7852,7 @@ fn add_signature_to_env_with_options_inner(
         )
     };
     for item in sig_items.iter() {
-        let slot_path = |name: &str, p: i32| Path::pdot_pos(module_path.clone(), name, p);
+        let slot_path = |name: &str, p: i32| Path::pdot_pos(*module_path, name, p);
         match item {
             SignatureItem::SigValue(id, desc) => {
                 // Add value binding with qualified path
@@ -7837,7 +7875,7 @@ fn add_signature_to_env_with_options_inner(
             SignatureItem::SigType(id, decl, _rec_status) => {
                 // Add type binding with qualified path
                 let mut decl = (**decl).clone();
-                decl.type_path = Some(Path::pdot(module_path.clone(), id.name()));
+                decl.type_path = Some(Path::pdot(*module_path, id.name()));
                 let decl = Arc::new(decl);
                 if as_opened {
                     opened_types.push((*id, decl.clone()));
@@ -7848,7 +7886,7 @@ fn add_signature_to_env_with_options_inner(
                 // Also add constructors and labels from this type
                 match &decl.type_kind {
                     TypeKind::TypeVariant(constrs, layout) => {
-                        let type_path = Path::pdot(module_path.clone(), id.name());
+                        let type_path = Path::pdot(*module_path, id.name());
                         for (position, cd) in constrs.iter().enumerate() {
                             let inline_record = match &cd.cd_args {
                                 crate::types::decl::ConstructorArguments::CstrRecord(labels) => {
@@ -7857,7 +7895,7 @@ fn add_signature_to_env_with_options_inner(
                                             ctx, labels,
                                         );
                                     let inline_path =
-                                        Path::pdot(type_path.clone(), cd.cd_id.name());
+                                        Path::pdot(type_path, cd.cd_id.name());
                                     let inline_decl = crate::types::TypeDeclaration {
                                         type_params: inline_params.clone(),
                                         type_arity: inline_params.len() as i32,
@@ -7923,7 +7961,7 @@ fn add_signature_to_env_with_options_inner(
                                 crate::types::ctype::subst_identity_copy(ctx, res_ty)
                             } else {
                                 // Default: the type constructor with its params
-                                ctx.new_generic_constr(type_path.clone(), decl.type_params.clone())
+                                ctx.new_generic_constr(type_path, decl.type_params.clone())
                             };
 
                             // datarepr.ml:62-75: the variables of the arguments
@@ -8006,7 +8044,7 @@ fn add_signature_to_env_with_options_inner(
                 let module_pos = pos;
                 let access_path = slot_path(id.name(), module_pos);
                 pos += 1;
-                md.md_path = Some(access_path.clone());
+                md.md_path = Some(access_path);
                 // Rewrite module-type paths against the opened signature.
                 // Persistent identifiers in debug output carry `!` (e.g.
                 // `ArrayExt!`). Keep those top-level alias targets distinct so
@@ -8026,21 +8064,21 @@ fn add_signature_to_env_with_options_inner(
                                 }
                                 let clean = alias_id.name();
                                 if clean == module_name {
-                                    access_path.clone()
+                                    *access_path
                                 } else if clean == module_path.last() {
-                                    module_path.clone()
+                                    *module_path
                                 } else {
                                     path
                                 }
                             }
                             PathView::Pdot(prefix, name, pos) => Path::pdot_pos(
-                                go(prefix.clone(), module_path, module_name, access_path),
+                                go(*prefix, module_path, module_name, access_path),
                                 *name,
                                 *pos,
                             ),
                             PathView::Papply(functor, arg) => Path::papply(
-                                go(functor.clone(), module_path, module_name, access_path),
-                                go(arg.clone(), module_path, module_name, access_path),
+                                go(*functor, module_path, module_name, access_path),
+                                go(*arg, module_path, module_name, access_path),
                             ),
                         }
                     }
@@ -8077,7 +8115,7 @@ fn add_signature_to_env_with_options_inner(
                         // equivalent persistent-alias thunk.
                         let stored = Arc::new(crate::types::env_lazy::StoredModuleComponents::new(
                             Env::empty(),
-                            access_path.clone(),
+                            access_path,
                             md.clone(),
                         ));
                         opened_module_components.push((*id, stored, module_pos));
@@ -8177,7 +8215,7 @@ fn add_signature_to_env_with_options_inner(
         );
         match opened_out {
             Some(out) => *out = Some(layers),
-            None => env.add_prebuilt_open_layers(module_path.clone(), &layers),
+            None => env.add_prebuilt_open_layers(*module_path, &layers),
         }
     }
 }
@@ -8313,28 +8351,15 @@ mod resolution_view_tests {
             "Stored",
             portable,
             InMemoryModuleInfo::new(PathBuf::from("Stored.res"), true, HashMap::new(), true),
-            HashMap::new(),
         );
-        let alias = (
-            "Stored__Flat".to_string(),
-            Path::pident(Ident::create_persistent("Stored")),
-        );
-        let data = compiled
-            .encode_stored_module("Stored", std::slice::from_ref(&alias))
-            .unwrap();
+        let data = compiled.encode_stored_module("Stored").unwrap();
 
         let mut registry = ModuleRegistry::new();
         assert!(registry.register_stored_lazily("Bad", &data[..3]).is_none());
-        let aliases = registry.register_stored_lazily("Stored", &data).unwrap();
-        assert_eq!(aliases.len(), 1);
+        assert!(registry.register_stored_lazily("Stored", &data).is_some());
         assert!(registry.is_pending_stored("Stored"));
         assert!(!registry.is_empty());
-        // Alias rewrites are registered up front.
         let env = PersistentEnv::from_registry(&registry);
-        assert!(
-            env.qualified_alias_path_for_flattened_head("Stored__Flat")
-                .is_some()
-        );
         assert!(registry.is_pending_stored("Stored"));
         // A lookup through any snapshot decodes the module into the shared maps.
         let snapshot = registry.for_worker_snapshot();
@@ -8350,7 +8375,6 @@ mod resolution_view_tests {
             "Other",
             PortablePersStruct::clone(&snapshot.registered("Stored").0.unwrap()),
             InMemoryModuleInfo::new(PathBuf::from("Other.res"), false, HashMap::new(), false),
-            HashMap::new(),
         );
         assert!(!registry.is_pending_stored("Other"));
         assert!(!registry.module_info_is_runtime("Other"));
@@ -8498,6 +8522,17 @@ mod resolution_view_tests {
     }
 }
 
+/// The units the inlinable lambda exported under `name` refers to.
+fn lambda_units_of(lambdas: &crate::lambda::CmjExportLambdas, name: &str) -> Vec<Name> {
+    let Some(lambda) = lambdas.get(name) else {
+        return Vec::new();
+    };
+    crate::lambda::lam_compile::collect_possible_required_modules_for_lambda(lambda)
+        .into_iter()
+        .map(|module| module.id.name_atom())
+        .collect()
+}
+
 /// The registered modules as a [`super::item_deps::UnitSource`].
 struct RegistryUnitSource<'a> {
     registry: &'a ModuleRegistry,
@@ -8506,48 +8541,34 @@ struct RegistryUnitSource<'a> {
 }
 
 impl super::item_deps::UnitSource for RegistryUnitSource<'_> {
-    fn portable(&self, unit: &str) -> Option<Arc<PortablePersStruct>> {
-        self.registry.registered(unit).0
-    }
-    fn lambda_units(&self, unit: &str, name: &str) -> Vec<String> {
+    fn lambda_units(&self, unit: Name, name: &str) -> Vec<Name> {
         if !self.lambdas {
             return Vec::new();
         }
-        let Some(info) = self.registry.registered(unit).1 else {
-            return Vec::new();
-        };
-        let Some(lambda) = info.cmj_export_lambdas.get(name) else {
-            return Vec::new();
-        };
-        crate::lambda::lam_compile::collect_possible_required_modules_for_lambda(lambda)
-            .into_iter()
-            .map(|module| module.id.name().to_string())
-            .collect()
+        self.registry
+            .with_info(&unit, |info| {
+                lambda_units_of(&info.cmj_export_lambdas, name)
+            })
+            .unwrap_or_default()
     }
-    fn ignored(&self, unit: &str) -> bool {
-        self.registry.module_info_is_runtime(unit)
+    fn ignored(&self, unit: Name) -> bool {
+        self.registry.module_info_is_runtime(&unit)
     }
-    fn refs(&self, unit: &str) -> Option<Arc<super::item_deps::UnitRefs>> {
+    fn refs(&self, unit: Name) -> Option<Arc<super::item_deps::UnitRefs>> {
         let registry = self.registry;
         let ps = registry
             .local_cached_modules
-            .get(unit)
+            .get(unit.as_str())
             .cloned()
-            .or_else(|| registry.cached_modules.get_cloned(unit))?;
+            .or_else(|| registry.cached_modules.get_cloned(&unit))?;
         let lambdas = if self.lambdas {
             registry
-                .registered(unit)
-                .1
-                .map_or(0, |info| Arc::as_ptr(&info.cmj_export_lambdas) as usize)
+                .with_info(&unit, |info| Arc::as_ptr(&info.cmj_export_lambdas) as usize)
+                .unwrap_or(0)
         } else {
             usize::MAX
         };
-        let key = (
-            unit.to_string(),
-            Arc::as_ptr(&ps) as usize,
-            ps.fingerprint,
-            lambdas,
-        );
+        let key = (unit, Arc::as_ptr(&ps) as usize, ps.fingerprint, lambdas);
         if let Some(refs) = registry.item_refs_cache.read().unwrap().get(&key) {
             return Some(refs.clone());
         }

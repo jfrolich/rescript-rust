@@ -6478,7 +6478,7 @@ fn format_package_type_expr_for_error(
     ty: TypeExprRef,
 ) -> String {
     let repr = type_ctx.repr(ty);
-    let desc = (*type_ctx.get_desc(repr)).clone();
+    let desc = (*type_ctx.get_desc(repr));
     let TypeDesc::Tpackage { path, lids, args } = desc else {
         return format_type_expr(type_ctx, ty);
     };
@@ -7538,7 +7538,7 @@ fn build_name_based_coercion(
                             // Val_prim implementation + regular interface
                             // value is exported by a primitive coercion.
                             ModuleCoercion::Tcoerce_primitive(PrimitiveCoercion {
-                                pc_desc: prim.clone(),
+                                pc_desc: (**prim).clone(),
                                 pc_type: sig_desc.val_type,
                                 pc_loc: impl_desc.val_loc,
                                 pc_id: *impl_id,
@@ -8743,8 +8743,8 @@ fn moregen_link(
                 path: p2, args: a2, ..
             },
         ) if moregen_paths_compatible(p1, p2) && a1.len() == a2.len() => {
-            let a1 = a1.clone();
-            let a2 = a2.clone();
+            let a1 = *a1;
+            let a2 = *a2;
             drop(impl_desc);
             drop(iface_desc);
             for (a, b) in ctx.type_list(a1).iter().zip(ctx.type_list(a2).iter()) {
@@ -8754,7 +8754,7 @@ fn moregen_link(
         (TypeDesc::Tarrow { args: a1, ret: r1 }, TypeDesc::Tarrow { args: a2, ret: r2 })
             if a1.len() == a2.len() =>
         {
-            let (a1, a2, r1, r2) = (a1.clone(), a2.clone(), *r1, *r2);
+            let (a1, a2, r1, r2) = (*a1, *a2, *r1, *r2);
             drop(impl_desc);
             drop(iface_desc);
             for (a1, a2) in ctx.type_args(a1).iter().zip(ctx.type_args(a2).iter()) {
@@ -8763,8 +8763,8 @@ fn moregen_link(
             moregen_link(ctx, r1, r2, visited);
         }
         (TypeDesc::Ttuple(t1), TypeDesc::Ttuple(t2)) if t1.len() == t2.len() => {
-            let t1 = t1.clone();
-            let t2 = t2.clone();
+            let t1 = *t1;
+            let t2 = *t2;
             drop(impl_desc);
             drop(iface_desc);
             for (a, b) in ctx.type_list(t1).iter().zip(ctx.type_list(t2).iter()) {
@@ -9572,7 +9572,6 @@ pub struct InProcessCompileResult {
     pub js_outputs: Vec<JsOutput>,
     pub signature: crate::types::decl::Signature,
     pub pers_struct: Option<PortablePersStruct>,
-    pub new_alias_rewrites: ahash::AHashMap<String, crate::types::path::Path>,
     pub is_pure: bool,
     pub cmj_export_constants: ahash::AHashMap<String, CmjExportConstant>,
     pub cmj_export_arities: ahash::AHashMap<String, CmjExportArity>,
@@ -9605,7 +9604,6 @@ pub struct InProcessPreJsCompileResult {
     pub jsx_preserve: bool,
     pub signature: crate::types::decl::Signature,
     pub pers_struct: Option<PortablePersStruct>,
-    pub new_alias_rewrites: ahash::AHashMap<String, crate::types::path::Path>,
     /// Resolves the location handles of `lowered_lambda`; outlives the parse
     /// arena and typed tree.
     pub lam_locs: crate::lambda::LamLocTable,
@@ -9634,7 +9632,6 @@ pub struct InProcessJsMetadataReady {
     pub cmj_export_arities: ahash::AHashMap<String, CmjExportArity>,
     pub cmj_export_lambdas: crate::lambda::CmjExportLambdas,
     pub pers_struct: Option<PortablePersStruct>,
-    pub new_alias_rewrites: ahash::AHashMap<String, crate::types::path::Path>,
 }
 
 /// Signature payload produced after in-process implementation typechecking but
@@ -9643,7 +9640,6 @@ pub struct InProcessJsMetadataReady {
 /// (compiler/ml/typemod.ml:1779-1788; compiler/ml/translmod.ml:267).
 pub struct InProcessSignatureReady {
     pub pers_struct: Option<PortablePersStruct>,
-    pub new_alias_rewrites: ahash::AHashMap<String, crate::types::path::Path>,
 }
 
 pub type InProcessSignatureReadyHook<'a> =
@@ -9658,7 +9654,6 @@ pub type InProcessJsMetadataReadyHook<'a> = dyn FnMut(InProcessJsMetadataReady) 
 pub struct InProcessInterfaceResult {
     pub signature: crate::types::decl::Signature,
     pub pers_struct: Option<PortablePersStruct>,
-    pub new_alias_rewrites: ahash::AHashMap<String, crate::types::path::Path>,
     /// What GenType read in the interface (GenTypeMain.ml:91-107), for the
     /// implementation's compile; `None` without GenType.
     pub gentype: Option<crate::gentype::main::InterfaceRead>,
@@ -10685,11 +10680,9 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     // the already-published interface remains the target signature for
     // `Translmod.transl_implementation`; do not replace it with the
     // implementation signature or the export coercion becomes identity.
-    let (mut pers_struct, mut new_alias_rewrites, persistent_env_after_signature) = if has_interface
-    {
+    let (mut pers_struct, persistent_env_after_signature) = if has_interface {
         (
             None,
-            Default::default(),
             tctx.persistent_env
                 .take()
                 .unwrap_or_else(PersistentEnv::new),
@@ -10760,10 +10753,10 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         type_ctx.register_gentype_raw_module_sig(module_name, current_raw_sig.clone());
         type_ctx.register_raw_module_sig(module_name, current_raw_sig);
 
-        let (pers_struct, new_alias_rewrites) = if options.publish_in_process_signature {
+        let pers_struct = if options.publish_in_process_signature {
             internal_env.extract_module_update(module_name, &type_ctx, Some(arena))
         } else {
-            (None, ahash::AHashMap::new())
+            None
         };
         // Keep the just-saved current unit visible through raw-lambda
         // conversion. OCaml saves the inferred signature in the no-interface
@@ -10776,7 +10769,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         if let Some(start) = signature_publish_start {
             crate::timing::record(crate::timing::Phase::SignaturePublish, start.elapsed());
         }
-        (pers_struct, new_alias_rewrites, internal_env)
+        (pers_struct, internal_env)
     };
     // A location-free attempt must not publish a signature before Lambda
     // translation has ruled out a diagnostic or a location-valued constant.
@@ -10786,7 +10779,6 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     {
         let _ = hook(InProcessSignatureReady {
             pers_struct: pers_struct.take(),
-            new_alias_rewrites: std::mem::take(&mut new_alias_rewrites),
         })?;
     }
     tctx.persistent_env = Some(persistent_env_after_signature);
@@ -11095,7 +11087,6 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     if !has_interface && let Some(hook) = signature_ready {
         let _ = hook(InProcessSignatureReady {
             pers_struct: pers_struct.take(),
-            new_alias_rewrites: std::mem::take(&mut new_alias_rewrites),
         })?;
     }
     Ok(InProcessPreJsCompileResult {
@@ -11108,7 +11099,6 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         jsx_preserve,
         signature: published_signature,
         pers_struct,
-        new_alias_rewrites,
         lam_locs,
         typed_tree_sexp,
         raw_lambda_sexp,
@@ -11231,7 +11221,6 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
             cmj_export_arities: std::mem::take(&mut cmj_export_arities),
             cmj_export_lambdas: std::mem::take(&mut cmj_export_lambdas),
             pers_struct: pre_js.pers_struct.take(),
-            new_alias_rewrites: std::mem::take(&mut pre_js.new_alias_rewrites),
         })?;
     }
     let mut rendered_programs = if options.skip_js_render {
@@ -11339,7 +11328,6 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
         js_outputs,
         signature: pre_js.signature,
         pers_struct: pre_js.pers_struct,
-        new_alias_rewrites: pre_js.new_alias_rewrites,
         is_pure,
         cmj_export_constants,
         cmj_export_arities,
@@ -11609,13 +11597,11 @@ pub fn typecheck_preprocessed_signature_in_process(
     );
     type_ctx.register_raw_module_sig(module_name, raw_signature);
 
-    let (pers_struct, new_alias_rewrites) =
-        internal_env.extract_module_update(module_name, &type_ctx, Some(arena));
+    let pers_struct = internal_env.extract_module_update(module_name, &type_ctx, Some(arena));
 
     Ok(InProcessInterfaceResult {
         signature: published_signature,
         pers_struct,
-        new_alias_rewrites,
         gentype,
         dumps,
         warnings,

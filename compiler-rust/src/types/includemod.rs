@@ -1048,13 +1048,13 @@ impl PathSubstMap {
 
     fn get(&self, path: &Path) -> Option<Path> {
         if let Some(value) = self.map.get(path) {
-            return Some(value.clone());
+            return Some(*value);
         }
         if self.any_pos_key {
             return self
                 .map
                 .iter()
-                .find_map(|(key, value)| key.same(path).then(|| value.clone()));
+                .find_map(|(key, value)| key.same(path).then(|| *value));
         }
         if !path_has_pos_hint(path) {
             // No key and not the path carry a position hint, so `same`
@@ -1114,7 +1114,7 @@ fn with_local_pident_module_type<R>(
     namespace: PathNamespace,
     f: impl FnOnce(&ModuleType) -> R,
 ) -> Option<R> {
-    let mut current = path.clone();
+    let mut current = *path;
     let mut namespace = namespace;
     let mut visiting = HashSet::new();
 
@@ -1122,7 +1122,7 @@ fn with_local_pident_module_type<R>(
         let PathView::Pident(id) = current.view() else {
             return None;
         };
-        if id.is_persistent() || id.stamp() == 0 || !visiting.insert((current.clone(), namespace)) {
+        if id.is_persistent() || id.stamp() == 0 || !visiting.insert((current, namespace)) {
             return None;
         }
         let mty = match namespace {
@@ -1133,7 +1133,7 @@ fn with_local_pident_module_type<R>(
             ModuleType::MtyIdent(next)
                 if !(next.same(&current) && namespace == PathNamespace::ModuleType) =>
             {
-                current = next.clone();
+                current = *next;
                 namespace = PathNamespace::ModuleType;
             }
             ModuleType::MtyAlias(_, next)
@@ -1249,7 +1249,7 @@ fn modtypes_inner(
             namespace: PathNamespace,
             visiting: &mut HashSet<(Path, PathNamespace)>,
         ) -> Option<ModuleType> {
-            if !visiting.insert((path.clone(), namespace)) {
+            if !visiting.insert((*path, namespace)) {
                 return None;
             }
 
@@ -1343,7 +1343,7 @@ fn modtypes_inner(
             .lookup_module(path)
             .is_ok_and(|md| matches!(md.md_type, ModuleType::MtyIdent(_)))
         {
-            return Ok(path.clone());
+            return Ok(*path);
         }
         ctype::normalize_path_full_strict(type_ctx, env, path)
             .map_err(|path| IncludeModError::UnboundModulePath { path })
@@ -1878,15 +1878,15 @@ fn register_paired_signature_substitution(
             let impl_path = Path::pident(*impl_id);
             subst
                 .type_paths
-                .insert(Path::pident(*sig_id), impl_path.clone());
+                .insert(Path::pident(*sig_id), impl_path);
             if let Some(access_path) = sig_access_path {
                 subst.type_paths.insert(
-                    Path::pdot(access_path.clone(), sig_id.name()),
-                    impl_path.clone(),
+                    Path::pdot(*access_path, sig_id.name()),
+                    impl_path,
                 );
             }
             if let Some(sig_path) = &sig_decl.type_path {
-                subst.type_paths.insert(sig_path.clone(), impl_path);
+                subst.type_paths.insert(*sig_path, impl_path);
             }
         }
         (
@@ -1899,15 +1899,15 @@ fn register_paired_signature_substitution(
             let impl_path = Path::pident(*impl_id);
             subst
                 .module_paths
-                .insert(Path::pident(*sig_id), impl_path.clone());
+                .insert(Path::pident(*sig_id), impl_path);
             if let Some(access_path) = sig_access_path {
                 subst.module_paths.insert(
-                    Path::pdot(access_path.clone(), sig_id.name()),
-                    impl_path.clone(),
+                    Path::pdot(*access_path, sig_id.name()),
+                    impl_path,
                 );
             }
             if let Some(sig_path) = &sig_decl.md_path {
-                subst.module_paths.insert(sig_path.clone(), impl_path);
+                subst.module_paths.insert(*sig_path, impl_path);
             }
         }
         (SignatureItem::SigModtype(impl_id, _), SignatureItem::SigModtype(sig_id, _)) => {
@@ -2063,10 +2063,9 @@ fn check_paired_signature_items(
                 // includemod.ml:399: `Env.mark_module_used env (Ident.name
                 // id1) md1.md_loc`.
                 if !env.is_implicit_coercion() {
-                    type_ctx.usage().mark_module_used(
-                        impl_id.name(),
-                        type_ctx.resolve_loc(impl_mod_decl.md_loc),
-                    );
+                    type_ctx
+                        .usage()
+                        .mark_module_used(impl_id.name_atom(), type_ctx.resolve_loc(impl_mod_decl.md_loc));
                 }
                 // Match compiler/ml/includemod.ml:396-413:
                 // `module_declarations` always strengthens the implementation
@@ -2079,7 +2078,7 @@ fn check_paired_signature_items(
                     &impl_mod_decl.md_type,
                 );
                 let nested_sig_access_path =
-                    sig_access_path.map(|path| Path::pdot(path.clone(), sig_id.name()));
+                    sig_access_path.map(|path| Path::pdot(*path, sig_id.name()));
                 let coercion = modtypes_inner(
                     type_ctx,
                     env,
@@ -2327,7 +2326,7 @@ fn find_arity_mismatch(
                         args: sig_args,
                         ret: sig_ret,
                     },
-                ) => (impl_args.clone(), *impl_ret, sig_args.clone(), *sig_ret),
+                ) => (*impl_args, *impl_ret, *sig_args, *sig_ret),
                 _ => return None,
             };
         if impl_args.len() != sig_args.len() {
@@ -2371,7 +2370,7 @@ fn value_descriptions(
     if !env.is_implicit_coercion() {
         type_ctx
             .usage()
-            .mark_value_used(id.name(), type_ctx.resolve_loc(impl_desc.val_loc));
+            .mark_value_used(id.name_atom(), type_ctx.resolve_loc(impl_desc.val_loc));
     }
     if let Some(warning) = deprecated_inclusion_warning(
         type_ctx,
@@ -2441,7 +2440,7 @@ fn value_descriptions(
         }
         (ValueKind::ValPrim(prim), _) => Ok(ModuleCoercion::Tcoerce_primitive(
             crate::types::typedtree::PrimitiveCoercion {
-                pc_desc: prim.clone(),
+                pc_desc: (**prim).clone(),
                 pc_type: sig_desc.val_type,
                 pc_loc: impl_desc.val_loc,
                 pc_id: id,
@@ -2722,7 +2721,7 @@ pub(crate) fn substitute_type_declaration_self_path(
     to: &Path,
 ) -> TypeDeclaration {
     let mut subst = InclusionSubst::default();
-    subst.type_paths.insert(from.clone(), to.clone());
+    subst.type_paths.insert(*from, *to);
     substitute_type_declaration_paths(type_ctx, decl, &subst)
 }
 
@@ -2949,7 +2948,7 @@ fn rewrite_substituted_type_paths(
                     ty,
                     TypeDesc::Tconstr {
                         path: new_path,
-                        args: args.clone(),
+                        args: *args,
                         abbrev: *abbrev,
                     },
                 );
@@ -3006,8 +3005,8 @@ fn rewrite_substituted_type_paths(
                     ty,
                     TypeDesc::Tpackage {
                         path: new_path,
-                        lids: lids.clone(),
-                        args: args.clone(),
+                        lids: *lids,
+                        args: *args,
                     },
                 );
             }
@@ -3049,7 +3048,7 @@ pub(crate) fn type_declarations(
     crate::types::typecore::mark_type_used(
         type_ctx,
         env,
-        id.name(),
+        id.name_atom(),
         type_ctx.resolve_loc(impl_decl.type_loc),
     );
     let errs = includecore_type_declarations(
@@ -4333,14 +4332,14 @@ fn type_exprs_equal_for_inclusion_inner(
                 let sig_complete = crate::types::ctype::package_type_lists_have_ocaml_same_label_completion_side_effect(
                     type_ctx,
                     Some(env),
-                    ModuleType::MtyIdent(sig_path.clone()),
+                    ModuleType::MtyIdent(*sig_path),
                     impl_lids,
                     sig_lids,
                 );
                 let impl_complete = crate::types::ctype::package_type_lists_have_ocaml_same_label_completion_side_effect(
                     type_ctx,
                     Some(env),
-                    ModuleType::MtyIdent(impl_path.clone()),
+                    ModuleType::MtyIdent(*impl_path),
                     sig_lids,
                     impl_lids,
                 );
@@ -4542,7 +4541,7 @@ fn flatten_object_fields_for_inclusion(
                 typ,
                 rest,
             } => {
-                flattened.push((name.clone(), type_ctx.mutability_repr(*mutability), *typ));
+                flattened.push((*name, type_ctx.mutability_repr(*mutability), *typ));
                 let next = type_ctx.repr(*rest);
                 drop(desc);
                 current = next;
@@ -4584,16 +4583,16 @@ fn associate_object_fields_for_inclusion(
         let (sig_name, sig_kind, sig_ty) = &sig_fields[sig_index];
         match impl_name.cmp(sig_name) {
             std::cmp::Ordering::Equal => {
-                pairs.push((impl_name.clone(), *impl_kind, *impl_ty, *sig_kind, *sig_ty));
+                pairs.push((*impl_name, *impl_kind, *impl_ty, *sig_kind, *sig_ty));
                 impl_index += 1;
                 sig_index += 1;
             }
             std::cmp::Ordering::Less => {
-                impl_only.push(impl_fields[impl_index].clone());
+                impl_only.push(impl_fields[impl_index]);
                 impl_index += 1;
             }
             std::cmp::Ordering::Greater => {
-                sig_only.push(sig_fields[sig_index].clone());
+                sig_only.push(sig_fields[sig_index]);
                 sig_index += 1;
             }
         }
@@ -4926,7 +4925,7 @@ mod tests {
             val_type,
             val_kind: ValueKind::ValReg,
             val_loc: crate::types::DeclLoc::none(),
-            val_attributes: vec![],
+            val_attributes: Default::default(),
             val_path: None,
         }
     }
@@ -4958,7 +4957,7 @@ mod tests {
                 val_type: val_ty,
                 val_kind: ValueKind::ValReg,
                 val_loc: crate::types::DeclLoc::none(),
-                val_attributes: vec![],
+                val_attributes: Default::default(),
                 val_path: None,
             },
         )];
@@ -4980,7 +4979,7 @@ mod tests {
                 val_type: val_ty,
                 val_kind: ValueKind::ValReg,
                 val_loc: crate::types::DeclLoc::none(),
-                val_attributes: vec![],
+                val_attributes: Default::default(),
                 val_path: None,
             },
         )];
@@ -4990,7 +4989,7 @@ mod tests {
                 val_type: val_ty,
                 val_kind: ValueKind::ValReg,
                 val_loc: crate::types::DeclLoc::none(),
-                val_attributes: vec![],
+                val_attributes: Default::default(),
                 val_path: None,
             },
         )];
@@ -5181,7 +5180,7 @@ mod tests {
                     val_type: val_ty_placeholder,
                     val_kind: ValueKind::ValReg,
                     val_loc: crate::types::DeclLoc::none(),
-                    val_attributes: vec![],
+                    val_attributes: Default::default(),
                     val_path: None,
                 },
             ),

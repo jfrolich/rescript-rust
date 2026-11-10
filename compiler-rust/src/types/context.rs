@@ -356,7 +356,7 @@ impl QualifiedModuleComponentsCacheKey {
 
 #[derive(Clone, Debug)]
 pub(crate) struct RecordLabelDescriptionSummary {
-    label_positions: Arc<crate::fast_hash::AHashMap<String, usize>>,
+    label_positions: Arc<crate::fast_hash::AHashMap<crate::name::Name, usize>>,
     pub(crate) mandatory_count: usize,
     pub(crate) has_optional: bool,
 }
@@ -368,7 +368,7 @@ impl RecordLabelDescriptionSummary {
         let mut has_optional = false;
 
         for (idx, label) in labels.iter().enumerate() {
-            label_positions.insert(label.lbl_name.clone(), idx);
+            label_positions.insert(label.lbl_name, idx);
             if label.lbl_optional {
                 has_optional = true;
             } else {
@@ -384,13 +384,14 @@ impl RecordLabelDescriptionSummary {
     }
 
     #[inline]
-    pub(crate) fn label_index(&self, name: &str) -> Option<usize> {
-        self.label_positions.get(name).copied()
+    pub(crate) fn label_index(&self, name: impl crate::name::NameKey) -> Option<usize> {
+        self.label_positions.get(&name.name_key()?).copied()
     }
 
     #[inline]
-    pub(crate) fn contains_label(&self, name: &str) -> bool {
-        self.label_positions.contains_key(name)
+    pub(crate) fn contains_label(&self, name: impl crate::name::NameKey) -> bool {
+        name.name_key()
+            .is_some_and(|name| self.label_positions.contains_key(&name))
     }
 }
 
@@ -560,8 +561,13 @@ pub struct TypeContext {
     store_build_poisoned: Cell<bool>,
     /// Effects of the current store build on this compilation.
     store_build_effects: RefCell<Vec<StoreEffect>>,
+    /// Guards of the current store build (see `StorePiece::guards`).
+    store_build_guards: RefCell<Vec<(Path, bool)>>,
     /// Shared pieces whose effects this compilation has already applied.
     touched_store_pieces: RefCell<crate::fast_hash::AHashSet<u64>>,
+    /// The local stamp each store binder this compilation built or replayed
+    /// stands for (see [`StoreStampOrigins`]).
+    store_stamp_origins: RefCell<StoreStampOrigins>,
     /// Component tables of store-resident modules whose build read state
     /// private to this compilation, so they could not be published to the
     /// worker store. Keyed by `StoredModuleComponents` id; reused for the rest
@@ -866,8 +872,9 @@ pub struct TypeContext {
 /// forced pieces) evolves exactly as if it had built the data itself.
 #[derive(Debug, Clone)]
 pub(crate) enum StoreEffect {
-    /// Local identifier stamps consumed.
-    Stamps(i32),
+    /// Binders created: their store stamps, in creation order. Each consumed
+    /// one local identifier stamp.
+    Stamps(Vec<i32>),
     /// A shared piece forced while building this one.
     Piece(Arc<StorePiece>),
     /// A component view registered in this compilation's component cache.
@@ -897,6 +904,35 @@ pub(crate) enum StoreEffect {
 pub(crate) struct StorePiece {
     id: u64,
     effects: Vec<StoreEffect>,
+    /// Answers the build read from this compilation's alias-source table
+    /// (`has_component_paths_for_alias_source`): the alias source and
+    /// whether it had registered component paths. A compilation may reuse
+    /// the piece only when it gives the same answers
+    /// (`TypeContext::store_guards_hold`).
+    guards: Vec<(Path, bool)>,
+}
+
+/// Which local stamp each store binder of a compilation stands for.
+///
+/// A binder built into the worker store gets a stamp of the process-wide
+/// store range (`thread_store::next_store_stamp`), so it is never
+/// `Ident::same` as an identifier of another compilation sharing it, while
+/// the compilation's own stamp stream advances as if it had renamed the
+/// identifier itself, and so does the stream of every compilation that later
+/// uses the piece. In OCaml each compilation builds that data itself
+/// (`compiler/ml/env.ml:1513-1588`, `compiler/ml/subst.ml:310-345`), so the
+/// binder has the stamp the compilation's stream skipped. Which store stamp a
+/// binder got depends on the order in which worker threads built shared data;
+/// a signature a compilation publishes (which can mention store binders, e.g.
+/// a functor application's result) saves the local stamps instead
+/// (`TypeContext::saved_store_stamps`), as OCaml's `.cmi` would.
+#[derive(Default)]
+struct StoreStampOrigins {
+    /// `(store stamp, local stamp)` of binders this compilation built.
+    built: Vec<(i32, i32)>,
+    /// Runs of binders this compilation replayed: the piece, the index of
+    /// its `StoreEffect::Stamps` effect, and the local stamp of the first.
+    replayed: Vec<(Arc<StorePiece>, usize, i32)>,
 }
 
 pub(crate) fn store_debug_enabled() -> bool {
@@ -1078,7 +1114,9 @@ impl TypeContext {
             store_build_row_start: Cell::new(0),
             store_build_poisoned: Cell::new(false),
             store_build_effects: RefCell::new(Vec::new()),
+            store_build_guards: RefCell::new(Vec::new()),
             touched_store_pieces: RefCell::new(crate::fast_hash::AHashSet::new()),
+            store_stamp_origins: RefCell::new(StoreStampOrigins::default()),
             local_stored_components: RefCell::new(crate::fast_hash::AHashMap::new()),
             mutation_journal: RefCell::new(TypeMutationJournal::default()),
             mutation_logging: TrailLogging::default(),
@@ -1335,25 +1373,6 @@ impl TypeContext {
         })
     }
 
-    /// Snapshot the synthetic CMI longident component names among `raws` so
-    /// portable signatures can move across TypeContexts without losing the
-    /// side table. Sorted by index.
-    pub fn snapshot_cmi_longident_names(
-        &self,
-        raws: impl IntoIterator<Item = u32>,
-    ) -> Vec<(u32, String)> {
-        // Store and shared-pool names resolve process-wide through
-        // `cmi_longident_component_name`; only this context's own names
-        // travel with the signature.
-        let table = self.cmi_longident_names.borrow();
-        let mut names: Vec<(u32, String)> = raws
-            .into_iter()
-            .filter_map(|raw| table.get(&raw).map(|name| (raw, name.clone())))
-            .collect();
-        names.sort_unstable_by_key(|(raw, _)| *raw);
-        names
-    }
-
     /// Import synthetic CMI longident names from a portable signature.
     pub fn import_cmi_longident_names(&self, names: &[(u32, String)]) {
         self.poison_store_build_for("import_cmi_longident_names");
@@ -1510,8 +1529,8 @@ impl TypeContext {
     pub(crate) fn register_component_alias_source(&self, component_path: Path, alias_source: Path) {
         if self.in_store_build() {
             self.record_store_effect(StoreEffect::RegisterAliasSource(
-                component_path.clone(),
-                alias_source.clone(),
+                component_path,
+                alias_source,
             ));
         }
         // OCaml compiler/ml/env.ml:1440-1446 scrapes aliases by resolving the
@@ -1532,16 +1551,16 @@ impl TypeContext {
             push_unique_path(
                 self.component_alias_sources
                     .borrow_mut()
-                    .entry(SamePathKey(component_path.clone()))
+                    .entry(SamePathKey(component_path))
                     .or_default(),
-                alias_source.clone(),
+                alias_source,
             );
             push_unique_path(
                 self.component_paths_by_alias_source
                     .borrow_mut()
                     .entry(SamePathKey(alias_source))
                     .or_default(),
-                component_path.clone(),
+                component_path,
             );
         }
     }
@@ -1579,11 +1598,45 @@ impl TypeContext {
         sources
     }
 
+    /// Whether any component path has `alias_source` as its alias source.
+    ///
+    /// Inside a store build this is recorded as a guard of the piece being
+    /// built instead of poisoning it. Registrations are only ever added
+    /// (`register_component_alias_source`), and the build's own effects are
+    /// replayed before any later read, so a compilation that gives the same
+    /// answer before replaying the piece gives the same answer at every
+    /// point of the build: the piece is valid for it.
+    pub(crate) fn has_component_paths_for_alias_source(&self, alias_source: &Path) -> bool {
+        let nonempty = self.alias_source_has_component_paths(alias_source);
+        if self.in_store_build() {
+            self.store_build_guards
+                .borrow_mut()
+                .push((alias_source.clone(), nonempty));
+        }
+        nonempty
+    }
+
+    fn alias_source_has_component_paths(&self, alias_source: &Path) -> bool {
+        self.component_paths_by_alias_source
+            .borrow()
+            .get(&SamePathKey(alias_source.clone()))
+            .is_some_and(|paths| !paths.is_empty())
+    }
+
+    /// Whether this compilation answers every guard of `piece` as the build
+    /// that produced it did.
+    pub(crate) fn store_guards_hold(&self, piece: &StorePiece) -> bool {
+        piece
+            .guards
+            .iter()
+            .all(|(source, nonempty)| self.alias_source_has_component_paths(source) == *nonempty)
+    }
+
     pub(crate) fn component_paths_for_alias_source(&self, alias_source: &Path) -> Vec<Path> {
         self.poison_store_build_for("read:component_paths_for_alias_source");
         self.component_paths_by_alias_source
             .borrow()
-            .get(&SamePathKey(alias_source.clone()))
+            .get(&SamePathKey(*alias_source))
             .cloned()
             .unwrap_or_default()
     }
@@ -1599,7 +1652,7 @@ impl TypeContext {
         // the path does first: the same for every compilation.
         self.component_alias_sources
             .borrow()
-            .get(&SamePathKey(component_path.clone()))
+            .get(&SamePathKey(*component_path))
             .cloned()
             .unwrap_or_default()
     }
@@ -1618,7 +1671,7 @@ impl TypeContext {
         module_name: &str,
     ) -> Option<Arc<Path>> {
         self.poison_store_build_for("read:find_module_alias_in_components");
-        let key = QualifiedModuleComponentsCacheKey::new(parent_path.clone(), None);
+        let key = QualifiedModuleComponentsCacheKey::new(*parent_path, None);
         self.with_qualified_module_components(&key, |components| {
             components.lookup_module_alias_target(module_name, true, self)
         })
@@ -1635,7 +1688,7 @@ impl TypeContext {
     ) {
         self.resolved_module_value_cache
             .borrow_mut()
-            .entry(module_path.clone())
+            .entry(*module_path)
             .or_default()
             .insert(value_name.to_string(), (path, desc));
     }
@@ -1665,7 +1718,7 @@ impl TypeContext {
     ) {
         self.resolved_module_type_cache
             .borrow_mut()
-            .entry((env_id, module_path.clone()))
+            .entry((env_id, *module_path))
             .or_default()
             .insert(type_name.to_string(), (access_path, id, decl));
     }
@@ -1736,7 +1789,7 @@ impl TypeContext {
                 scope_id,
                 mode,
                 arity,
-                path: path.clone(),
+                path: *path,
             },
             expansion,
         );
@@ -1765,7 +1818,7 @@ impl TypeContext {
     ) {
         self.resolved_type_item_cache
             .borrow_mut()
-            .insert((scope_id, path.clone(), strengthen_alias_types), (id, decl));
+            .insert((scope_id, *path, strengthen_alias_types), (id, decl));
     }
 
     pub(crate) fn find_resolved_module_type(
@@ -1790,7 +1843,7 @@ impl TypeContext {
     ) {
         self.resolved_child_module_path_cache
             .borrow_mut()
-            .entry(parent_path.clone())
+            .entry(*parent_path)
             .or_default()
             .insert(child_name.to_string(), child_path);
     }
@@ -1822,7 +1875,7 @@ impl TypeContext {
     ) {
         if self.in_store_build() {
             self.record_store_effect(StoreEffect::RegisterQualifiedModuleDecl(
-                parent_path.clone(),
+                *parent_path,
                 child_name.into(),
                 id,
                 md.clone(),
@@ -1836,7 +1889,7 @@ impl TypeContext {
         }
         self.qualified_module_decl_cache
             .borrow_mut()
-            .entry(parent_path.clone())
+            .entry(*parent_path)
             .or_default()
             .insert(child_name.to_string(), (id, md));
     }
@@ -1870,7 +1923,7 @@ impl TypeContext {
     ) {
         self.normalized_path_full_cache
             .borrow_mut()
-            .insert((env_id, original_path.clone()), normalized_path);
+            .insert((env_id, *original_path), normalized_path);
     }
 
     pub(crate) fn find_type_newtype_level(
@@ -1892,7 +1945,7 @@ impl TypeContext {
     ) {
         self.type_newtype_levels
             .borrow_mut()
-            .insert((scope_id, path.clone()), level);
+            .insert((scope_id, *path), level);
     }
 
     pub(crate) fn find_occur_variance_mask(
@@ -1914,7 +1967,7 @@ impl TypeContext {
     ) {
         self.occur_variance_masks
             .borrow_mut()
-            .insert((scope_id, path.clone()), mask);
+            .insert((scope_id, *path), mask);
     }
 
     pub(crate) fn register_normalized_path_forward(
@@ -1925,7 +1978,7 @@ impl TypeContext {
     ) {
         self.normalized_path_forward_cache
             .borrow_mut()
-            .insert((env_id, original_path.clone()), normalized_path);
+            .insert((env_id, *original_path), normalized_path);
     }
 
     pub(crate) fn find_normalized_path_forward(
@@ -1961,7 +2014,7 @@ impl TypeContext {
         self.poison_store_build_for("register_forced_normalized_path_full");
         self.forced_normalized_path_full_cache
             .borrow_mut()
-            .insert((env_id, original_path.clone()), normalized_path);
+            .insert((env_id, *original_path), normalized_path);
     }
 
     /// Look up a side-effectful normalize path result for this environment.
@@ -1987,8 +2040,8 @@ impl TypeContext {
     ) {
         self.poison_store_build_for("register_forced_type_path_compare");
         let mut cache = self.forced_type_path_compare_cache.borrow_mut();
-        cache.insert((env_id, left.clone(), right.clone()), same);
-        cache.insert((env_id, right.clone(), left.clone()), same);
+        cache.insert((env_id, *left, *right), same);
+        cache.insert((env_id, *right, *left), same);
     }
 
     /// Look up a side-effectful type-path comparison for this environment.
@@ -2861,7 +2914,7 @@ impl TypeContext {
             journal.entries[snapshot.cursor.min(journal.entries.len())..]
                 .iter()
                 .filter_map(|mutation| match mutation {
-                    TypeMutation::Compress(ty, old, target) => Some((*ty, old.clone(), *target)),
+                    TypeMutation::Compress(ty, old, target) => Some((*ty, *old, *target)),
                     _ => None,
                 })
                 .collect()
@@ -3920,7 +3973,7 @@ impl TypeContext {
     }
 
     /// Create a new identifier using the typing context's shared stamp source.
-    pub fn create_ident(&self, name: &str) -> Ident {
+    pub fn create_ident(&self, name: impl Into<crate::name::Name>) -> Ident {
         if self.in_store_build() {
             return self.store_binder(&Ident::create_persistent(name));
         }
@@ -3966,13 +4019,17 @@ impl TypeContext {
     /// the binder gets a store stamp so it can never be `Ident::same` as an
     /// identifier of another compilation.
     fn store_binder(&self, id: &Ident) -> Ident {
-        self.id_gen.next_stamp();
+        let local = self.id_gen.next_stamp();
+        let stamp = super::thread_store::next_store_stamp();
         let mut effects = self.store_build_effects.borrow_mut();
         match effects.last_mut() {
-            Some(StoreEffect::Stamps(count)) => *count += 1,
-            _ => effects.push(StoreEffect::Stamps(1)),
+            Some(StoreEffect::Stamps(stamps)) => stamps.push(stamp),
+            _ => effects.push(StoreEffect::Stamps(vec![stamp])),
         }
-        let stamp = super::thread_store::next_store_stamp();
+        self.store_stamp_origins
+            .borrow_mut()
+            .built
+            .push((stamp, local));
         let mut fresh = id.with_stamp(stamp);
         if id.is_persistent() {
             fresh = Ident::new(id.name(), stamp, crate::ident::IdentFlags::NONE);
@@ -4393,8 +4450,26 @@ impl TypeContext {
         &self,
         build: impl FnOnce() -> R,
     ) -> (R, Option<Arc<StorePiece>>) {
+        self.build_in_store_with_guards(false, build)
+    }
+
+    /// `build_in_store` for a caller that checks `store_guards_hold` before
+    /// reusing the result. Other callers treat a guarded build as private.
+    pub(crate) fn build_in_store_guarded<R>(
+        &self,
+        build: impl FnOnce() -> R,
+    ) -> (R, Option<Arc<StorePiece>>) {
+        self.build_in_store_with_guards(true, build)
+    }
+
+    fn build_in_store_with_guards<R>(
+        &self,
+        guarded: bool,
+        build: impl FnOnce() -> R,
+    ) -> (R, Option<Arc<StorePiece>>) {
         let depth = self.store_build_depth.get();
         let outer_effects = std::mem::take(&mut *self.store_build_effects.borrow_mut());
+        let outer_guards = std::mem::take(&mut *self.store_build_guards.borrow_mut());
         let outer_poisoned = self.store_build_poisoned.replace(false);
         if depth == 0 {
             self.store_build_type_start.set(self.store.type_count());
@@ -4406,7 +4481,14 @@ impl TypeContext {
         self.store_build_depth.set(depth);
         super::thread_store::set_store_build_depth(depth);
         let effects = std::mem::replace(&mut *self.store_build_effects.borrow_mut(), outer_effects);
-        let poisoned = self.store_build_poisoned.replace(outer_poisoned);
+        let guards = std::mem::replace(&mut *self.store_build_guards.borrow_mut(), outer_guards);
+        let mut poisoned = self.store_build_poisoned.replace(outer_poisoned);
+        if !guards.is_empty() && !guarded {
+            if !poisoned && store_debug_enabled() {
+                eprintln!("[store-poison] unguarded-alias-source-read");
+            }
+            poisoned = true;
+        }
         if poisoned {
             if depth > 0 {
                 // The enclosing build may hold this result.
@@ -4415,9 +4497,17 @@ impl TypeContext {
             }
             return (result, None);
         }
+        if depth > 0 {
+            // The enclosing build holds this result, so it depends on the
+            // same answers.
+            self.store_build_guards
+                .borrow_mut()
+                .extend(guards.iter().cloned());
+        }
         let piece = Arc::new(StorePiece {
             id: NEXT_STORE_PIECE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             effects,
+            guards,
         });
         self.touched_store_pieces.borrow_mut().insert(piece.id);
         if depth > 0 {
@@ -4435,6 +4525,9 @@ impl TypeContext {
             self.store_build_effects
                 .borrow_mut()
                 .push(StoreEffect::Piece(piece.clone()));
+            self.store_build_guards
+                .borrow_mut()
+                .extend(piece.guards.iter().cloned());
         }
         if self.touched_store_pieces.borrow().contains(&piece.id) {
             return;
@@ -4442,14 +4535,20 @@ impl TypeContext {
         self.suspend_store_build(|| self.replay_store_piece(piece));
     }
 
-    fn replay_store_piece(&self, piece: &StorePiece) {
+    fn replay_store_piece(&self, piece: &Arc<StorePiece>) {
         if !self.touched_store_pieces.borrow_mut().insert(piece.id) {
             return;
         }
-        for effect in &piece.effects {
+        for (index, effect) in piece.effects.iter().enumerate() {
             match effect {
-                StoreEffect::Stamps(count) => {
-                    self.id_gen.advance_stamp_by(*count);
+                StoreEffect::Stamps(stamps) => {
+                    let count = stamps.len() as i32;
+                    let last = self.id_gen.advance_stamp_by(count);
+                    self.store_stamp_origins.borrow_mut().replayed.push((
+                        piece.clone(),
+                        index,
+                        last - count + 1,
+                    ));
                 }
                 StoreEffect::Piece(inner) => self.replay_store_piece(inner),
                 StoreEffect::RegisterComponents(key, components) => {
@@ -4458,19 +4557,46 @@ impl TypeContext {
                         .insert(key.clone(), components.clone());
                 }
                 StoreEffect::PreparePers(name) => {
+                    let replayed = self
+                        .persistent_env
+                        .borrow()
+                        .as_ref()
+                        .is_none_or(|pers| pers.replay_cached_pers_struct(name, self));
+                    if replayed {
+                        continue;
+                    }
                     if let Some(mut pers) = self.persistent_env_clone() {
                         let _ = pers.find_pers_struct(name, self);
                     }
                 }
                 StoreEffect::TriggerRename(name) => self.trigger_module_sig_rename(name),
                 StoreEffect::RegisterAliasSource(component, source) => {
-                    self.register_component_alias_source(component.clone(), source.clone())
+                    self.register_component_alias_source(*component, *source)
                 }
                 StoreEffect::RegisterQualifiedModuleDecl(parent, name, id, md) => {
                     self.register_qualified_module_decl(parent, name, *id, md.clone())
                 }
             }
         }
+    }
+
+    /// The local stamp of each store binder this compilation built or
+    /// replayed, by store stamp (see [`StoreStampOrigins`]).
+    pub(crate) fn saved_store_stamps(&self) -> crate::fast_hash::AHashMap<i32, i32> {
+        let origins = self.store_stamp_origins.borrow();
+        let mut stamps: crate::fast_hash::AHashMap<i32, i32> =
+            origins.built.iter().copied().collect();
+        for (piece, index, first) in &origins.replayed {
+            if let StoreEffect::Stamps(store) = &piece.effects[*index] {
+                stamps.extend(
+                    store
+                        .iter()
+                        .zip(*first..)
+                        .map(|(store, local)| (*store, local)),
+                );
+            }
+        }
+        stamps
     }
 
     /// Record an effect of the current store build on this compilation.
@@ -4842,7 +4968,7 @@ mod tests {
     fn borrowed_path_keys_find_owned_cache_entries() {
         let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
         let module = Path::pdot(super::super::predef::path_int(), "M");
-        let ty = Path::pdot_pos(module.clone(), "t", 3);
+        let ty = Path::pdot_pos(module, "t", 3);
         ctx.register_type_newtype_level(7, &ty, Some(2));
         assert_eq!(ctx.find_type_newtype_level(7, &ty), Some(Some(2)));
         assert_eq!(ctx.find_type_newtype_level(8, &ty), None);
@@ -5052,7 +5178,7 @@ mod tests {
                 .is_empty()
         );
 
-        ctx.register_component_alias_source(selected_path.clone(), alias_source.clone());
+        ctx.register_component_alias_source(selected_path, alias_source);
 
         assert!(
             ctx.component_paths_for_alias_source(&alias_source_no_pos)
@@ -5193,7 +5319,7 @@ mod tests {
         let int_path = super::super::predef::path_int();
         let stored_int = ctx.store.alloc_type(
             TypeDesc::Tconstr {
-                path: int_path.clone(),
+                path: int_path,
                 args: TypeRefList::EMPTY,
                 abbrev: ctx.store.alloc_abbrev(AbbrevMemo::Mnil),
             },
@@ -5383,7 +5509,7 @@ mod tests {
         let abbrev = ctx.new_var(None);
         let expansion = ctx.new_var(None);
         let path = Path::pident(Ident::create_persistent("Allocated"));
-        ctx.memorize_abbrev_expansion(memo, PrivateFlag::Public, path.clone(), abbrev, expansion);
+        ctx.memorize_abbrev_expansion(memo, PrivateFlag::Public, path, abbrev, expansion);
 
         ctx.restore_type_state(snapshot);
 
@@ -5404,7 +5530,7 @@ mod tests {
         let first = ctx.new_var(None);
         let second = ctx.new_var(None);
         let path = Path::pident(Ident::create_persistent("Alias"));
-        ctx.memorize_abbrev_expansion(memo, PrivateFlag::Public, path.clone(), abbrev, first);
+        ctx.memorize_abbrev_expansion(memo, PrivateFlag::Public, path, abbrev, first);
         let snapshot = ctx.snapshot_type_state();
         ctx.memorize_abbrev_expansion(
             memo,
@@ -5474,7 +5600,7 @@ mod tests {
         ctx.memorize_abbrev_expansion(
             pre_memo,
             PrivateFlag::Public,
-            pre_path.clone(),
+            pre_path,
             pre_abbrev,
             pre_expansion,
         );
@@ -5494,7 +5620,7 @@ mod tests {
         ctx.memorize_abbrev_expansion(
             post_memo,
             PrivateFlag::Public,
-            post_path.clone(),
+            post_path,
             post_abbrev,
             post_expansion,
         );
@@ -5521,7 +5647,7 @@ mod tests {
         ctx.memorize_abbrev_expansion(
             post_memo,
             PrivateFlag::Public,
-            post_path.clone(),
+            post_path,
             post_abbrev,
             post_expansion,
         );

@@ -197,7 +197,7 @@ fn build_matching_type_constructors(
     constructor_name: &str,
     ctx: &super::context::TypeContext,
 ) {
-    let type_path = Path::pdot(access_path.clone(), type_name);
+    let type_path = Path::pdot(*access_path, type_name);
     build_type_constructors(out, &type_path, decl, Some(constructor_name), ctx);
 }
 
@@ -254,7 +254,7 @@ pub(crate) fn label_descrs(
         .iter()
         .enumerate()
         .map(|(pos, ld)| LabelDescription {
-            lbl_name: ld.ld_id.name().to_string(),
+            lbl_name: ld.ld_id.name_atom(),
             lbl_runtime_name: ld.declaration_name(),
             lbl_res: res_ty,
             lbl_arg: super::ctype::remap_label_type_to_params(ctx, ld.ld_type, &decl.type_params),
@@ -303,7 +303,7 @@ fn build_type_constructors(
         return;
     };
 
-    let type_path = type_path.clone();
+    let type_path = *type_path;
     for (position, cd) in cstrs.iter().enumerate() {
         if constructor_name.is_some_and(|name| cd.cd_id.name() != name) {
             continue;
@@ -358,7 +358,7 @@ fn build_type_constructors(
                 super::type_expr::TypeDesc::Tconstr { path, args, .. } => {
                     let old_result_module_path = path.parent();
                     let new_result_module_path = type_path.parent();
-                    let args = args.clone();
+                    let args = *args;
                     drop(desc);
                     if let (Some(old_prefix), Some(new_prefix)) =
                         (old_result_module_path, new_result_module_path)
@@ -381,7 +381,7 @@ fn build_type_constructors(
                             }
                         }
                     }
-                    ctx.new_generic_constr(type_path.clone(), ctx.type_list(args).to_vec())
+                    ctx.new_generic_constr(type_path, ctx.type_list(args).to_vec())
                 }
                 _ => {
                     drop(desc);
@@ -389,7 +389,7 @@ fn build_type_constructors(
                 }
             }
         } else {
-            ctx.new_generic_constr(type_path.clone(), decl.type_params.clone())
+            ctx.new_generic_constr(type_path, decl.type_params.clone())
         };
         out.insert(
             0,
@@ -447,7 +447,7 @@ fn build_constructors_for_name(
                 if id.name() != constructor_name {
                     continue;
                 }
-                let ext_path = Path::pdot_pos(access_path.clone(), id.name(), ext_slot);
+                let ext_path = Path::pdot_pos(*access_path, id.name(), ext_slot);
                 let (cstr_args, cstr_arity, cstr_inlined) = match &ext.ext_args {
                     super::decl::ConstructorArguments::CstrTuple(args) => {
                         (args.clone(), args.len() as i32, None)
@@ -456,7 +456,7 @@ fn build_constructors_for_name(
                         let inline_params = super::typecore::inline_record_type_params(ctx, labels);
                         let inline_path = ext_path.clone();
                         let inline_constr =
-                            ctx.new_generic_constr(inline_path.clone(), inline_params.clone());
+                            ctx.new_generic_constr(inline_path, inline_params.clone());
                         let inline_decl = TypeDeclaration {
                             type_params: inline_params.clone(),
                             type_arity: inline_params.len() as i32,
@@ -501,7 +501,7 @@ fn build_constructors_for_name(
                         ),
                         cstr_args,
                         cstr_arity,
-                        cstr_kind: ConstructorKind::Extension(ext_path.clone()),
+                        cstr_kind: ConstructorKind::Extension(ext_path),
                         cstr_generalized: ext.ext_ret_type.is_some(),
                         cstr_private: ext.ext_private,
                         cstr_loc: ext.ext_loc,
@@ -923,7 +923,7 @@ impl QualifiedModuleComponents {
                     // stores thunks under the selected component path.
                     // Preserve the actual source path from the declaration
                     // instead of recovering it from flattened spelling.
-                    ctx.register_component_alias_source(component_path, alias_source.clone());
+                    ctx.register_component_alias_source(component_path, *alias_source);
                 }
             } else {
                 let idx = *modtype_items.next().expect("peeked modtype item");
@@ -1799,7 +1799,7 @@ fn self_alias_raw_parent_module_item(
                     *id,
                     raw_md.clone(),
                     (*raw_parent_sig).clone(),
-                    raw_parent_path.clone(),
+                    raw_parent_path,
                 )),
                 _ => None,
             })
@@ -1877,7 +1877,7 @@ fn build_local_module_components(
             // instead of renaming and copying the unit's signature.
             return Some(
                 QualifiedModuleComponents::new_with_child_components_arc_and_value_source_prefix(
-                    access_path.clone(),
+                    *access_path,
                     ps.ps_sig.clone(),
                     HashMap::new(),
                     Some(source_prefix),
@@ -1935,7 +1935,7 @@ fn build_local_module_components(
                 if let Some(pers) = pers_env.as_mut() {
                     let _ = pers.force_lazy_signature_rename(id.name(), ctx);
                 } else if access_path_is_direct_opened_component(env, access_path)
-                    && env.find_module(id.name()).is_err()
+                    && env.find_module(id.name_atom()).is_err()
                 {
                     // OCaml compiler/ml/env.ml:1440-1446 reaches
                     // env.ml:865-875 for persistent alias targets while
@@ -2046,7 +2046,7 @@ fn build_local_module_components(
             // module declaration, so apply that same parent-prefix-to-selected
             // substitution to the copied signature without consuming extra
             // component-thunk stamps.
-            let target_prefix = Path::pdot(parent_access_path.clone(), alias_name);
+            let target_prefix = Path::pdot(*parent_access_path, alias_name);
             crate::cmi::persistent_env::rewrite_sig_by_path_prefix(
                 &qualified_sig,
                 &target_prefix,
@@ -2160,7 +2160,7 @@ fn build_local_module_components(
                         env_decl,
                         component_decl,
                         child_access_path,
-                        Some((access_path.clone(), qualified_sig_for_children.clone())),
+                        Some((*access_path, qualified_sig_for_children.clone())),
                     );
                 }
                 if let Some(working_env) = working_env.as_ref()
@@ -2191,7 +2191,7 @@ fn build_local_module_components(
 
     Some(
         QualifiedModuleComponents::new_with_complete_child_components_arc(
-            access_path.clone(),
+            *access_path,
             qualified_sig,
             child_components,
             ctx,
@@ -2263,13 +2263,21 @@ impl StoredModuleComponents {
         f: impl FnOnce(&QualifiedModuleComponents) -> R,
     ) -> Option<R> {
         if let Some(components) = self.cached.get().cloned() {
-            if ctx.compiler_counters_enabled() {
-                crate::perf_counters::record_stored_component_cached();
+            // A shared result is valid for this compilation only when it
+            // answers the build's guarded reads the same way.
+            let piece = self.cached_piece.get();
+            if piece.is_none_or(|piece| ctx.store_guards_hold(piece)) {
+                if ctx.compiler_counters_enabled() {
+                    crate::perf_counters::record_stored_component_cached();
+                }
+                if let Some(piece) = piece {
+                    ctx.touch_store_piece(piece);
+                }
+                return Some(f(components.as_ref()));
             }
-            if let Some(piece) = self.cached_piece.get() {
-                ctx.touch_store_piece(piece);
+            if super::context::store_debug_enabled() {
+                eprintln!("[store-guard-miss] {}", self.access_path.name());
             }
-            return Some(f(components.as_ref()));
         }
 
         if self.in_store {
@@ -2279,12 +2287,16 @@ impl StoredModuleComponents {
                 return Some(f(components.as_ref()));
             }
             let (components, piece) =
-                ctx.build_in_store(|| self.build_components(pers_env, ctx, cache_mode));
+                ctx.build_in_store_guarded(|| self.build_components(pers_env, ctx, cache_mode));
             let components = Arc::new(components?);
             match piece {
                 Some(piece) => {
                     if self.cached.set(components.clone()).is_ok() {
                         let _ = self.cached_piece.set(piece);
+                    } else {
+                        // The shared result failed this compilation's guards:
+                        // keep this build for the rest of the compilation.
+                        ctx.set_local_stored_components(self.local_id, components.clone());
                     }
                 }
                 // Built from this compilation's private state (such as a
@@ -2409,7 +2421,7 @@ impl StoredModuleComponents {
             self.functor_result_subst_cache
                 .get_or_init(|| RefCell::new(HashMap::new()))
                 .borrow_mut()
-                .insert(arg_path.clone(), (substituted.clone(), piece));
+                .insert(*arg_path, (substituted.clone(), piece));
         }
         Some(substituted)
     }

@@ -68,7 +68,10 @@ codegen-units = 1
 [profile.dev]
 # Fast compilation for development
 opt-level = 0
-debug = true
+# Line tables keep file:line in backtraces and profiles but drop variable and
+# type info: about 30% smaller target dirs and faster builds. For a debugger
+# session with locals, build with CARGO_PROFILE_DEV_DEBUG=true.
+debug = "line-tables-only"
 
 # Benchmarks will be added later
 # [[bench]]

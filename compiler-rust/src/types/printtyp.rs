@@ -332,7 +332,7 @@ impl<'a> Printtyp<'a> {
             &*self.ctx.borrow_desc(ty)
             && !self.named_vars.contains(name)
         {
-            self.named_vars.push(name.clone());
+            self.named_vars.push(*name);
         }
     }
 
@@ -489,7 +489,7 @@ impl<'a> Printtyp<'a> {
         }
         let depth = visited.len();
         visited.push(px);
-        let desc = (*self.ctx.get_desc(ty)).clone();
+        let desc = (*self.ctx.get_desc(ty));
         match desc {
             TypeDesc::Tvar(..) => self.add_named_var(ty),
             TypeDesc::Tarrow { args, ret } => {
@@ -619,7 +619,7 @@ impl<'a> Printtyp<'a> {
             let name = self.name_of_type(mark, px);
             return OutType::Otyp_var(mark, name);
         }
-        let desc = (*self.ctx.get_desc(ty)).clone();
+        let desc = (*self.ctx.get_desc(ty));
         let pr_typ = |this: &mut Self| -> OutType {
             match &desc {
                 TypeDesc::Tvar(..) => {
@@ -945,7 +945,7 @@ impl<'a> Printtyp<'a> {
                 return;
             }
             visited.push(ty);
-            let desc = (*ctx.get_desc(ty)).clone();
+            let desc = (*ctx.get_desc(ty));
             match desc {
                 TypeDesc::Tvar(..) => vars.push(ty),
                 TypeDesc::Tobject { fields, .. } => go(ctx, visited, vars, fields),
@@ -1034,7 +1034,7 @@ impl<'a> Printtyp<'a> {
         let ty_manifest = decl.type_manifest.map(|ty| {
             // Special hack to hide variant name.
             let repr = self.ctx.repr(ty);
-            let desc = (*self.ctx.get_desc(repr)).clone();
+            let desc = (*self.ctx.get_desc(repr));
             let ty = match desc {
                 TypeDesc::Tvariant(row) => {
                     let row = btype::row_repr(self.ctx, &self.ctx.row_desc(row));
@@ -1420,7 +1420,7 @@ impl<'a> Printtyp<'a> {
         mty: &crate::types::decl::ModuleType,
         origin: &Path,
     ) -> OutModuleType {
-        self.unit_prefixes.push(origin.clone());
+        self.unit_prefixes.push(*origin);
         let tree = self.tree_of_modtype(mty, false);
         self.unit_prefixes.pop();
         tree
@@ -1520,9 +1520,9 @@ impl<'a> Printtyp<'a> {
         let scoped = self
             .unit_prefixes
             .last()
-            .map(|prefix| Path::pdot(prefix.clone(), id.name().to_string()));
+            .map(|prefix| Path::pdot(*prefix, id.name().to_string()));
         if let Some(prefix) = &scoped {
-            self.unit_prefixes.push(prefix.clone());
+            self.unit_prefixes.push(*prefix);
         }
         let tree = self.tree_of_modtype(mty, ellipsis);
         if scoped.is_some() {
@@ -2656,7 +2656,7 @@ impl<'a> Printtyp<'a> {
             &*self.ctx.borrow_desc(self.ctx.repr(t2)),
         ) {
             (TypeDesc::Tconstr { path: p1, .. }, TypeDesc::Tconstr { path: p2, .. }) => {
-                Some((p1.clone(), p2.clone()))
+                Some((*p1, *p2))
             }
             _ => None,
         };
@@ -2705,13 +2705,13 @@ impl<'a> Printtyp<'a> {
     fn unalias(&self, ty: TypeExprRef) -> TypeExprRef {
         let ty = self.ctx.repr(ty);
         let level = self.ctx.get_level(ty);
-        let desc = (*self.ctx.get_desc(ty)).clone();
+        let desc = (*self.ctx.get_desc(ty));
         match desc {
             TypeDesc::Tvar(..) | TypeDesc::Tunivar(..) => ty,
             TypeDesc::Tvariant(row) => {
                 let row = btype::row_repr(self.ctx, &self.ctx.row_desc(row));
                 let more = self.ctx.repr(row.row_more);
-                let more_desc = (*self.ctx.get_desc(more)).clone();
+                let more_desc = (*self.ctx.get_desc(more));
                 let row_more = self
                     .ctx
                     .alloc_type_at_level(more_desc, self.ctx.get_level(more));
@@ -2735,7 +2735,7 @@ impl<'a> Printtyp<'a> {
     fn unalias_object(&self, ty: TypeExprRef) -> TypeExprRef {
         let ty = self.ctx.repr(ty);
         let level = self.ctx.get_level(ty);
-        let desc = (*self.ctx.get_desc(ty)).clone();
+        let desc = (*self.ctx.get_desc(ty));
         match desc {
             TypeDesc::Tfield {
                 name,
@@ -2961,8 +2961,8 @@ impl<'a> Printtyp<'a> {
     ) {
         let t3 = self.ctx.repr(t3);
         let t4 = self.ctx.repr(t4);
-        let d3 = (*self.ctx.get_desc(t3)).clone();
-        let d4 = (*self.ctx.get_desc(t4)).clone();
+        let d3 = (*self.ctx.get_desc(t3));
+        let d4 = (*self.ctx.get_desc(t4));
         let binding_time = |p: &Path| p.binding_time();
         match (&d3, &d4) {
             (TypeDesc::Ttuple(l), TypeDesc::Tvar(..))

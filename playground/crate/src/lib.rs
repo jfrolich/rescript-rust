@@ -151,7 +151,6 @@ pub fn compile_all(source: &str, filename: &str) -> String {
                 if let Some(ps) = compiled.pers_struct {
                     reg.cached_modules.insert(module_name.clone(), ps);
                 }
-                reg.alias_rewrites.extend(compiled.new_alias_rewrites);
             });
             serde_json::json!({
                 "type": "success",

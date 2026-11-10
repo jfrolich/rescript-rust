@@ -345,7 +345,7 @@ pub fn resolve_module_reference<'s>(
                     match &md.item {
                         // Avoid possible infinite loops.
                         Module::Ident(path) if !paths_seen.contains(path) => {
-                            let mut seen = vec![path.clone()];
+                            let mut seen = vec![*path];
                             seen.extend(paths_seen.iter().cloned());
                             resolve_module_reference(session, file, &md.clone(), &seen)
                         }
@@ -513,7 +513,7 @@ pub fn type_definition_for_loc_item(
             let env = QueryEnv::from_file(&full.file);
             let types = &full.source.typed.type_ctx;
             let path = match &*types.get_desc(dig(types, *typ)) {
-                TypeDesc::Tconstr { path, .. } => path.clone(),
+                TypeDesc::Tconstr { path, .. } => *path,
                 _ => return None,
             };
             let (env, declared) = dig_constructor(session, &env, &path)?;

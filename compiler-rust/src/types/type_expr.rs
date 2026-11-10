@@ -2054,7 +2054,7 @@ mod tests {
             val_type: cycle,
             val_kind: ValueKind::ValReg,
             val_loc: crate::types::DeclLoc::none(),
-            val_attributes: vec![],
+            val_attributes: Default::default(),
             val_path: None,
         };
         let copied = crate::types::typecore::copy_lookup_value_description_for_subst(&value, &ctx);

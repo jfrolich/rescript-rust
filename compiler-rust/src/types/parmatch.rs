@@ -390,7 +390,7 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
         let expanded = self.oracle.expand_head(env, ty);
         let ctx = self.oracle.ctx();
         match &*ctx.get_desc(ctx.repr(expanded)) {
-            TypeDesc::Tconstr { path, .. } => Some(path.clone()),
+            TypeDesc::Tconstr { path, .. } => Some(*path),
             _ => None,
         }
     }
@@ -545,7 +545,7 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
         let desc = ctx.get_desc(ctx.repr(expanded));
         match &*desc {
             TypeDesc::Tvariant(row) => {
-                let row = row.clone();
+                let row = *row;
                 drop(desc);
                 matches!(
                     crate::types::btype::row_field(ctx, tag, &ctx.row_desc(row)),
@@ -1081,16 +1081,17 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
     /// `filter_one q pss` (parmatch.ml:724-737).
     fn filter_one(&mut self, q: P, pss: &[Row]) -> Vec<Row> {
         let mut out = Vec::new();
-        let mut stack: Vec<Row> = pss.iter().rev().cloned().collect();
+        let mut stack: Vec<std::borrow::Cow<'_, [P]>> =
+            pss.iter().rev().map(|row| std::borrow::Cow::Borrowed(row.as_slice())).collect();
         while let Some(row) = stack.pop() {
             let Some((&p, ps)) = row.split_first() else {
                 return out;
             };
             match self.desc(p).clone() {
-                Desc::Alias(inner) => stack.push(prepend(inner, ps)),
+                Desc::Alias(inner) => stack.push(std::borrow::Cow::Owned(prepend(inner, ps))),
                 Desc::Or(p1, p2) => {
-                    stack.push(prepend(p2, ps));
-                    stack.push(prepend(p1, ps));
+                    stack.push(std::borrow::Cow::Owned(prepend(p2, ps)));
+                    stack.push(std::borrow::Cow::Owned(prepend(p1, ps)));
                 }
                 _ => {
                     if self.simple_match(q, p) {
@@ -1107,17 +1108,18 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
     /// `filter_extra pss` (parmatch.ml:745-756).
     fn filter_extra(&self, pss: &[Row]) -> Vec<Row> {
         let mut out = Vec::new();
-        let mut stack: Vec<Row> = pss.iter().rev().cloned().collect();
+        let mut stack: Vec<std::borrow::Cow<'_, [P]>> =
+            pss.iter().rev().map(|row| std::borrow::Cow::Borrowed(row.as_slice())).collect();
         while let Some(row) = stack.pop() {
             let Some((&p, ps)) = row.split_first() else {
                 continue;
             };
             match self.desc(p) {
-                Desc::Alias(inner) => stack.push(prepend(*inner, ps)),
+                Desc::Alias(inner) => stack.push(std::borrow::Cow::Owned(prepend(*inner, ps))),
                 Desc::Or(p1, p2) => {
                     let (p1, p2) = (*p1, *p2);
-                    stack.push(prepend(p2, ps));
-                    stack.push(prepend(p1, ps));
+                    stack.push(std::borrow::Cow::Owned(prepend(p2, ps)));
+                    stack.push(std::borrow::Cow::Owned(prepend(p1, ps)));
                 }
                 Desc::Any | Desc::Var(_) => out.push(ps.to_vec()),
                 _ => {}
@@ -1146,16 +1148,17 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                 Vec::new()
             };
         // filter_rec
-        let mut stack: Vec<Row> = pss.iter().rev().cloned().collect();
+        let mut stack: Vec<std::borrow::Cow<'_, [P]>> =
+            pss.iter().rev().map(|row| std::borrow::Cow::Borrowed(row.as_slice())).collect();
         while let Some(row) = stack.pop() {
             let Some((&p, ps)) = row.split_first() else {
                 break;
             };
             match self.desc(p).clone() {
-                Desc::Alias(inner) => stack.push(prepend(inner, ps)),
+                Desc::Alias(inner) => stack.push(std::borrow::Cow::Owned(prepend(inner, ps))),
                 Desc::Or(p1, p2) => {
-                    stack.push(prepend(p2, ps));
-                    stack.push(prepend(p1, ps));
+                    stack.push(std::borrow::Cow::Owned(prepend(p2, ps)));
+                    stack.push(std::borrow::Cow::Owned(prepend(p1, ps)));
                 }
                 Desc::Any | Desc::Var(_) => {}
                 _ => {
@@ -1178,16 +1181,17 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
             }
         }
         // filter_omega
-        let mut stack: Vec<Row> = pss.iter().rev().cloned().collect();
+        let mut stack: Vec<std::borrow::Cow<'_, [P]>> =
+            pss.iter().rev().map(|row| std::borrow::Cow::Borrowed(row.as_slice())).collect();
         while let Some(row) = stack.pop() {
             let Some((&p, ps)) = row.split_first() else {
                 continue;
             };
             match self.desc(p).clone() {
-                Desc::Alias(inner) => stack.push(prepend(inner, ps)),
+                Desc::Alias(inner) => stack.push(std::borrow::Cow::Owned(prepend(inner, ps))),
                 Desc::Or(p1, p2) => {
-                    stack.push(prepend(p2, ps));
-                    stack.push(prepend(p1, ps));
+                    stack.push(std::borrow::Cow::Owned(prepend(p2, ps)));
+                    stack.push(std::borrow::Cow::Owned(prepend(p1, ps)));
                 }
                 Desc::Any | Desc::Var(_) => {
                     let omega = self.omega;

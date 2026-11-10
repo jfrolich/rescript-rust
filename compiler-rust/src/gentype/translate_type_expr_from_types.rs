@@ -22,7 +22,7 @@ fn type_expr_desc(ctx: &TypeContext, type_expr: &TypeExprRef) -> TypeDesc {
     // TypeContext's arena, so descriptor access is explicit while preserving the
     // OCaml traversal order.
     let desc = ctx.get_desc(*type_expr);
-    (*desc).clone()
+    (*desc)
 }
 
 pub fn remove_option(

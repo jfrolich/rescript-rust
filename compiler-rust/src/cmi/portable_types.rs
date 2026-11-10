@@ -202,14 +202,35 @@ impl PortablePersStruct {
         raw: Option<PortableRawSignature>,
         fingerprint: u64,
     ) -> Self {
+        Self::encode(
+            ps_name,
+            ps_filename,
+            ps_deprecated,
+            ps_crcs,
+            &sig,
+            raw.as_ref(),
+            fingerprint,
+        )
+    }
+
+    /// [`Self::new`] from borrowed signatures.
+    fn encode(
+        ps_name: String,
+        ps_filename: String,
+        ps_deprecated: Option<String>,
+        ps_crcs: Vec<(String, Option<[u8; 16]>)>,
+        sig: &PortableSignature,
+        raw: Option<&PortableRawSignature>,
+        fingerprint: u64,
+    ) -> Self {
         PortablePersStruct {
             ps_name,
             ps_filename,
             ps_deprecated,
             ps_crcs,
             shareable: graph_is_shareable(&sig.type_graph),
-            sig: crate::binser::Encoded::encode(&sig),
-            raw: raw.as_ref().map(crate::binser::Encoded::encode),
+            sig: crate::binser::Encoded::encode(sig),
+            raw: raw.map(crate::binser::Encoded::encode),
             fingerprint,
         }
     }
@@ -711,44 +732,64 @@ pub fn serialize_pers_struct(
     ctx: &TypeContext,
     arena: Option<&ParseArena>,
 ) -> PortablePersStruct {
-    // File-name indices used by the signatures' locations: only those names
-    // need to travel with them (`remap_signature_file_names`).
-    let mut file_names = crate::fast_hash::AHashSet::new();
+    // The file names of the signatures' locations travel with them, keyed
+    // in order of first use (see `PortableFileNames`).
+    let mut file_names = PortableFileNames::default();
     let (sig, type_graph, locations) =
         serialize_signature(ps.ps_sig.as_ref(), ctx, arena, &mut file_names);
     let raw = ctx
         .find_raw_module_sig(&ps.ps_name)
         .map(|raw_sig| serialize_signature(&raw_sig, ctx, arena, &mut file_names));
     let fingerprint = compute_type_graph_fingerprint(&HashGraph::of(&type_graph), &sig);
-    PortablePersStruct::new(
-        ps.ps_name.clone(),
-        ps.ps_filename.clone(),
-        ps.ps_deprecated.clone(),
-        ps.ps_crcs.clone(),
-        PortableSignature {
-            ps_sig: sig,
-            cmi_longident_names: ctx.snapshot_cmi_longident_names(file_names),
-            type_graph,
-            locations,
+    let sig = PortableSignature {
+        ps_sig: sig,
+        cmi_longident_names: file_names.names,
+        type_graph,
+        locations,
+    };
+    let raw = raw.map(
+        |(raw_ps_sig, raw_type_graph, raw_locations)| PortableRawSignature {
+            raw_ps_sig,
+            raw_type_graph,
+            raw_locations,
         },
-        raw.map(
-            |(raw_ps_sig, raw_type_graph, raw_locations)| PortableRawSignature {
-                raw_ps_sig,
-                raw_type_graph,
-                raw_locations,
-            },
-        ),
-        fingerprint,
-    )
+    );
+    let encode = || {
+        PortablePersStruct::encode(
+            ps.ps_name.clone(),
+            ps.ps_filename.clone(),
+            ps.ps_deprecated.clone(),
+            ps.ps_crcs.clone(),
+            &sig,
+            raw.as_ref(),
+            fingerprint,
+        )
+    };
+    // Store binders the signature mentions are saved with the local stamps
+    // they stand for (see `TypeContext::saved_store_stamps`); most
+    // signatures mention none, so the table is only built for those that do.
+    let (portable, has_store_stamps) =
+        crate::ident::saving_store_stamps(Default::default(), encode);
+    if !has_store_stamps {
+        return portable;
+    }
+    let (portable, unmapped) = crate::ident::saving_store_stamps(ctx.saved_store_stamps(), encode);
+    if unmapped {
+        log::debug!(
+            "the signature of {} keeps a store stamp this compilation did not build or replay",
+            ps.ps_name
+        );
+    }
+    portable
 }
 
-/// Serialize `sig` with its location table, adding the raw file-name indices
-/// of its locations to `file_names`.
+/// Serialize `sig` with its location table, adding the file names of its
+/// locations to `file_names`.
 fn serialize_signature(
     sig: &Signature,
     ctx: &TypeContext,
     arena: Option<&ParseArena>,
-    file_names: &mut crate::fast_hash::AHashSet<u32>,
+    file_names: &mut PortableFileNames,
 ) -> (Signature, PortableTypeGraph, DeclLocTable) {
     let mut ser = TypeGraphSerializer::new(ctx, arena, file_names);
     let mut sig = sig.clone();
@@ -771,21 +812,76 @@ struct TypeGraphSerializer<'a, 'f> {
     cache: AHashMap<TypeExprRef, usize>,
     variant_layouts: Vec<crate::types::VariantLayout>,
     variant_layout_cache: AHashMap<crate::types::VariantLayoutRef, usize>,
-    /// Source-arena file names re-interned as synthetic CMI names.
-    file_name_cache: AHashMap<crate::intern::StrIdx, crate::intern::StrIdx>,
     mutabilities: Vec<crate::types::asttypes::MutableFlag>,
     mutability_cache: AHashMap<MutabilityRef, usize>,
     /// Locations of the serialized declarations and labels.
     locations: DeclLocTable,
-    /// Raw file-name indices the locations use.
-    file_names: &'f mut crate::fast_hash::AHashSet<u32>,
+    /// File names of the locations, by portable key.
+    file_names: &'f mut PortableFileNames,
+}
+
+/// First key of a portable signature's file names.
+const PORTABLE_FILE_KEY_BASE: u32 = 0xF000_0000;
+
+/// The file names of a portable signature's locations
+/// (`PortableSignature::cmi_longident_names`), keyed in order of first use.
+///
+/// A compilation names files by indices of whichever table interned them:
+/// its source arena, its own synthetic CMI names, or the process-wide shared
+/// pool, whose indices depend on the order in which worker threads
+/// internalized their dependencies. Keying the names by first use makes the
+/// encoding of a signature independent of those indices, so equal
+/// signatures encode to equal bytes, and keeps every name with the
+/// signature, so a signature stored by one process names its files in
+/// another (`FileRemap`).
+#[derive(Default)]
+struct PortableFileNames {
+    /// Key of each file index seen.
+    keys: AHashMap<crate::intern::StrIdx, crate::intern::StrIdx>,
+    /// Key of each name.
+    by_name: AHashMap<String, u32>,
+    /// `(key, name)`, in key order.
+    names: Vec<(u32, String)>,
+}
+
+impl PortableFileNames {
+    /// The portable key of `file`, a file index of `ctx` or `arena`. The
+    /// empty name (`Location::none`) and names that resolve nowhere are kept
+    /// as they are.
+    fn key(
+        &mut self,
+        file: crate::intern::StrIdx,
+        ctx: &TypeContext,
+        arena: Option<&ParseArena>,
+    ) -> crate::intern::StrIdx {
+        if file == crate::intern::StrIdx::default() {
+            return file;
+        }
+        if let Some(key) = self.keys.get(&file) {
+            return *key;
+        }
+        let Some(name) = ctx
+            .resolve_cmi_longident_component(file)
+            .or_else(|| arena.map(|arena| arena.get_string(file).to_string()))
+        else {
+            return file;
+        };
+        let next = PORTABLE_FILE_KEY_BASE + self.names.len() as u32;
+        let key = *self.by_name.entry(name.clone()).or_insert_with(|| {
+            self.names.push((next, name));
+            next
+        });
+        let key = crate::intern::StrIdx::from_raw(key);
+        self.keys.insert(file, key);
+        key
+    }
 }
 
 impl<'a, 'f> TypeGraphSerializer<'a, 'f> {
     fn new(
         ctx: &'a TypeContext,
         arena: Option<&'a ParseArena>,
-        file_names: &'f mut crate::fast_hash::AHashSet<u32>,
+        file_names: &'f mut PortableFileNames,
     ) -> Self {
         TypeGraphSerializer {
             ctx,
@@ -795,7 +891,6 @@ impl<'a, 'f> TypeGraphSerializer<'a, 'f> {
             cache: AHashMap::new(),
             variant_layouts: Vec::new(),
             variant_layout_cache: AHashMap::new(),
-            file_name_cache: AHashMap::new(),
             mutabilities: Vec::new(),
             mutability_cache: AHashMap::new(),
             locations: DeclLocTable::default(),
@@ -811,13 +906,14 @@ impl<'a, 'f> TypeGraphSerializer<'a, 'f> {
         });
     }
 
-    /// The portable handle of a location of the serialized context.
+    /// The portable handle of a location of the serialized context, naming
+    /// its file by portable key.
     fn portable_loc(&mut self, loc: DeclLoc) -> DeclLoc {
         let identity = self.ctx.location_identity(loc);
         let mut loc = self.ctx.resolve_loc(loc);
-        self.remap_loc(&mut loc);
-        self.file_names.insert(loc.loc_start.file_name.raw());
-        self.file_names.insert(loc.loc_end.file_name.raw());
+        for pos in [&mut loc.loc_start, &mut loc.loc_end] {
+            pos.file_name = self.file_names.key(pos.file_name, self.ctx, self.arena);
+        }
         match identity {
             Some(identity) => self.locations.intern_with_identity(loc, identity),
             None => self.locations.intern(loc),
@@ -833,30 +929,6 @@ impl<'a, 'f> TypeGraphSerializer<'a, 'f> {
             ArgLabel::Optional(l) => {
                 ArgLabel::Optional(Located::new(l.txt.clone(), self.portable_loc(l.loc)))
             }
-        }
-    }
-
-    /// Declaration locations name their file through the source arena's
-    /// string table, which does not travel with the signature. Re-intern the
-    /// name in the TypeContext's synthetic CMI name table, as reading a `.cmi`
-    /// does (`sig_reader::read_location`), so the importing compile can
-    /// resolve it.
-    fn remap_loc(&mut self, loc: &mut crate::location::Location) {
-        let Some(arena) = self.arena else {
-            return;
-        };
-        for pos in [&mut loc.loc_start, &mut loc.loc_end] {
-            let idx = pos.file_name;
-            if idx == crate::intern::StrIdx::default()
-                || self.ctx.resolve_cmi_longident_component(idx).is_some()
-            {
-                continue;
-            }
-            let ctx = self.ctx;
-            pos.file_name = *self
-                .file_name_cache
-                .entry(idx)
-                .or_insert_with(|| ctx.intern_cmi_longident_name(arena.get_string(idx)));
         }
     }
 
@@ -900,9 +972,7 @@ impl<'a, 'f> TypeGraphSerializer<'a, 'f> {
 
     fn serialize_desc(&mut self, desc: &TypeDesc) -> PortableTypeDesc {
         match desc {
-            TypeDesc::Tvar(name) => {
-                PortableTypeDesc::Tvar(name.as_deref().map(crate::name::Name::new))
-            }
+            TypeDesc::Tvar(name) => PortableTypeDesc::Tvar(*name),
             TypeDesc::Tarrow { args, ret } => PortableTypeDesc::Tarrow {
                 args: self
                     .ctx
@@ -921,7 +991,7 @@ impl<'a, 'f> TypeGraphSerializer<'a, 'f> {
                 PortableTypeDesc::Ttuple(self.ctx.type_list(types).iter().map(|t| self.serialize_type(t)).collect())
             }
             TypeDesc::Tconstr { path, args, .. } => PortableTypeDesc::Tconstr {
-                path: path.clone(),
+                path: *path,
                 args: self.ctx.type_list(args).iter().map(|t| self.serialize_type(t)).collect(),
             },
             TypeDesc::Tobject { fields } => PortableTypeDesc::Tobject {
@@ -933,7 +1003,7 @@ impl<'a, 'f> TypeGraphSerializer<'a, 'f> {
                 typ,
                 rest,
             } => PortableTypeDesc::Tfield {
-                name: name.clone(),
+                name: *name,
                 mutability: self.serialize_mutability(*mutability),
                 typ: self.serialize_type(*typ),
                 rest: self.serialize_type(*rest),
@@ -950,7 +1020,7 @@ impl<'a, 'f> TypeGraphSerializer<'a, 'f> {
                 vars: self.ctx.type_list(vars).iter().map(|t| self.serialize_type(t)).collect(),
             },
             TypeDesc::Tpackage { path, lids, args } => PortableTypeDesc::Tpackage {
-                path: path.clone(),
+                path: *path,
                 lids: self
                     .ctx
                     .package_lids(lids)
@@ -1003,7 +1073,7 @@ impl<'a, 'f> TypeGraphSerializer<'a, 'f> {
             row_fixed: rd.row_fixed,
             row_name: rd.row_name.as_ref().map(|(p, args)| {
                 (
-                    p.clone(),
+                    *p,
                     args.iter().map(|t| self.serialize_type(*t)).collect(),
                 )
             }),
@@ -1733,7 +1803,7 @@ fn internalize_desc<S: TypeNodeSink>(
     ctx: &S,
 ) -> TypeDesc {
     match desc {
-        PortableTypeDesc::Tvar(name) => TypeDesc::Tvar(name.as_deref().map(crate::name::Name::new)),
+        PortableTypeDesc::Tvar(name) => TypeDesc::Tvar(*name),
         PortableTypeDesc::Tarrow { args, ret } => TypeDesc::Tarrow {
             args: {
                 let args: crate::types::type_expr::TypeArgs = args
@@ -1761,7 +1831,7 @@ fn internalize_desc<S: TypeNodeSink>(
             typ,
             rest,
         } => TypeDesc::Tfield {
-            name: name.clone(),
+            name: *name,
             mutability: mremap[*mutability],
             typ: remap[*typ],
             rest: remap[*rest],
@@ -1831,7 +1901,7 @@ fn internalize_row_desc<S: TypeNodeSink>(
         row_name: prd
             .row_name
             .as_ref()
-            .map(|(p, args)| (p.clone(), args.iter().map(|&i| remap[i]).collect())),
+            .map(|(p, args)| (*p, args.iter().map(|&i| remap[i]).collect())),
     }
 }
 
@@ -2018,7 +2088,7 @@ mod identity_tests {
 
     /// A saved graph with its entries.
     fn save(ctx: &TypeContext, roots: &[TypeExprRef]) -> (Vec<usize>, PortableTypeGraph) {
-        let mut file_names = crate::fast_hash::AHashSet::new();
+        let mut file_names = PortableFileNames::default();
         let mut ser = TypeGraphSerializer::new(ctx, None, &mut file_names);
         let indices = roots.iter().map(|&r| ser.serialize_type(r)).collect();
         let graph = PortableTypeGraph {
@@ -2083,7 +2153,7 @@ mod identity_tests {
                         val_type: typ,
                         val_kind: ValueKind::ValReg,
                         val_loc: loc,
-                        val_attributes: vec![],
+                        val_attributes: Default::default(),
                         val_path: None,
                     },
                 )
@@ -2091,7 +2161,7 @@ mod identity_tests {
             .collect::<Vec<_>>()
             .into();
         let save = |ctx: &TypeContext, sig: &Signature| {
-            serialize_signature(sig, ctx, None, &mut crate::fast_hash::AHashSet::new())
+            serialize_signature(sig, ctx, None, &mut PortableFileNames::default())
         };
         let saved = save(&source, &sig);
         assert_eq!(saved.2.len(), 1, "coordinates still intern once");
@@ -2219,7 +2289,7 @@ mod type_arg_tests {
             ]),
             ret: shared,
         });
-        let mut file_names = crate::fast_hash::AHashSet::new();
+        let mut file_names = PortableFileNames::default();
         let mut ser = TypeGraphSerializer::new(&ctx, None, &mut file_names);
         let index = ser.serialize_type(arrow);
         let PortableTypeDesc::Tarrow { args, ret } = &ser.entries[index].desc else {

@@ -62,9 +62,8 @@ fn compile_on_this_thread(runtime_root: &Path) -> Result<Vec<u8>> {
     }
     let digest = sources_digest(runtime_root, &paths).context("failed to read the runtime sources")?;
     let registry = Mutex::new(ModuleRegistry::new());
-    let (modules, aliases) =
-        compile::compile_runtime_sources(&registry, runtime_root, runtime_root, &config, paths)?;
-    let interfaces = compile::encode_runtime_interfaces(&registry, &modules, aliases)
+    let modules = compile::compile_runtime_sources(&registry, runtime_root, runtime_root, &config, paths)?;
+    let interfaces = compile::encode_runtime_interfaces(&registry, &modules)
         .ok_or_else(|| anyhow!("a compiled runtime module is missing from the registry"))?;
     Ok(encode(&digest, &interfaces))
 }

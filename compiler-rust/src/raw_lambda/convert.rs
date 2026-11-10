@@ -228,7 +228,7 @@ fn nonrecursive_alias_any_binding(ta: &TypedArena, binding: &ValueBinding) -> bo
 /// The label's runtime name, decided when its declaration was typed
 /// (OCaml `lbl.lbl_runtime_name`).
 fn label_runtime_name(lbl: &LabelDescription) -> String {
-    lbl.lbl_runtime_name.clone()
+    lbl.lbl_runtime_name.to_string()
 }
 
 fn constructor_runtime_tag(
@@ -947,7 +947,7 @@ impl<'a> RawLambdaConverter<'a> {
                 .into_iter()
                 .map(|label| {
                     (
-                        label.lbl_runtime_name,
+                        label.lbl_runtime_name.to_string(),
                         label.lbl_pos,
                         label.lbl_mut,
                         label.lbl_repres,
@@ -7118,7 +7118,7 @@ mod tests {
             cstr_existentials: Vec::new(),
             cstr_args: Vec::new(),
             cstr_arity: 0,
-            cstr_kind: crate::types::ConstructorKind::Extension(path.clone()),
+            cstr_kind: crate::types::ConstructorKind::Extension(path),
             cstr_generalized: false,
             cstr_private: crate::types::asttypes::PrivateFlag::Public,
             cstr_loc: crate::types::DeclLoc::none(),
@@ -7840,7 +7840,7 @@ mod tests {
                         val_type: ctx.new_var(None),
                         val_kind: crate::types::decl::ValueKind::ValReg,
                         val_loc: crate::types::DeclLoc::none(),
-                        val_attributes: Vec::new(),
+                        val_attributes: Default::default(),
                         val_path: None,
                     },
                 )]),
@@ -7893,8 +7893,8 @@ mod tests {
         let icon_export_path =
             crate::types::Path::pdot(crate::types::Path::pident(icon), export.name().to_string());
         let subtitles_path =
-            crate::types::Path::pdot(icon_export_path.clone(), subtitles.name().to_string());
-        let main_path = crate::types::Path::pdot(subtitles_path.clone(), main.name().to_string());
+            crate::types::Path::pdot(icon_export_path, subtitles.name().to_string());
+        let main_path = crate::types::Path::pdot(subtitles_path, main.name().to_string());
 
         let main_decl = crate::types::decl::ModuleDeclaration {
             md_type: test_signature_module_type(vec![crate::types::SignatureItem::SigValue(
@@ -7903,7 +7903,7 @@ mod tests {
                     val_type: ctx.new_var(None),
                     val_kind: crate::types::decl::ValueKind::ValReg,
                     val_loc: crate::types::DeclLoc::none(),
-                    val_attributes: Vec::new(),
+                    val_attributes: Default::default(),
                     val_path: None,
                 },
             )]),
@@ -8024,7 +8024,7 @@ mod tests {
                                         val_type: ctx.new_var(None),
                                         val_kind: crate::types::decl::ValueKind::ValReg,
                                         val_loc: crate::types::DeclLoc::none(),
-                                        val_attributes: Vec::new(),
+                                        val_attributes: Default::default(),
                                         val_path: None,
                                     },
                                 ),
@@ -8117,7 +8117,7 @@ mod tests {
                 val_type: func_ty,
                 val_kind: crate::types::decl::ValueKind::ValReg,
                 val_loc: crate::types::DeclLoc::none(),
-                val_attributes: Vec::new(),
+                val_attributes: Default::default(),
                 val_path: None,
             },
         )];

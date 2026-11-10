@@ -5206,7 +5206,7 @@ fn matcher_constr_arityN<'p>(
 
 /// The label's runtime name (OCaml `lbl.lbl_runtime_name`).
 fn label_runtime_name_matching(lbl: &LabelDescription) -> String {
-    lbl.lbl_runtime_name.clone()
+    lbl.lbl_runtime_name.to_string()
 }
 
 /// Create field debug info for a record label (equivalent to OCaml's Lambda.fld_record).

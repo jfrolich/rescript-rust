@@ -43,7 +43,8 @@ use crate::config::{Config, SourceMapCommand};
 use ahash::{AHashMap, AHashSet};
 use rayon::prelude::*;
 use rescript_compiler::binary_ast::Dependencies;
-use rescript_compiler::cmi::item_deps;
+use rescript_compiler::cmi::item_deps::{self, ItemKey};
+use rescript_compiler::name::Name;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::MutexGuard;
@@ -174,22 +175,14 @@ impl UnitDigests {
 
     /// What the inlinable bodies of the items in `resolved` refer to (see
     /// `ModuleRegistry::lambda_reads`), with every module's JS metadata final.
-    pub fn lambda_reads(
-        &self,
-        resolved: &BTreeMap<String, std::collections::BTreeSet<String>>,
-    ) -> BTreeMap<String, std::collections::BTreeSet<String>> {
+    pub fn lambda_reads(&self, resolved: &item_deps::ResolvedReads) -> item_deps::ResolvedReads {
         self.registry.lambda_reads(resolved)
     }
 
     /// The module's interface encoded for storage, as its extras (`None` for
     /// none) and core.
-    pub fn encode_parts(
-        &self,
-        module_name: &str,
-        alias_rewrites: &[(String, rescript_compiler::types::path::Path)],
-    ) -> Option<(Option<Vec<u8>>, Vec<u8>)> {
-        self.registry
-            .encode_stored_module_parts(module_name, alias_rewrites)
+    pub fn encode_parts(&self, module_name: &str) -> Option<(Option<Vec<u8>>, Vec<u8>)> {
+        self.registry.encode_stored_module_parts(module_name)
     }
 
     /// The module's interface digest and item digests, `None` when it is not
@@ -310,7 +303,6 @@ pub fn current_record(
         .as_ref()
         .and_then(|previous| previous.packages.get(package_name))
         .map(|record| &record.state.stored_interfaces);
-    let alias_rewrites = &*compiles.module_alias_rewrites;
     record.interface_updates = build_state
         .compiled_modules
         .par_iter()
@@ -320,8 +312,7 @@ pub fn current_record(
                 .is_some_and(|module| module.package_name == package_name && !module.compile_dirty)
         })
         .filter_map(|module_name| {
-            let aliases = alias_rewrites.get(module_name).map(Vec::as_slice).unwrap_or(&[]);
-            let (extras, core) = digests.encode_parts(module_name, aliases)?;
+            let (extras, core) = digests.encode_parts(module_name)?;
             let mut hasher = blake3::Hasher::new();
             hasher.update(&core);
             if let Some(extras) = &extras {
@@ -823,15 +814,14 @@ pub fn load_stored(build_state: &BuildCommandState, modules: &AHashSet<String>) 
         })
         .collect();
     let mut loaded = AHashSet::new();
-    let mut alias_rewrites = build_state.module_alias_rewrites.lock().unwrap();
     let mut registry = build_state.module_registry.lock().unwrap();
     for (module_name, extras, fetch) in extras {
         let core = rescript_compiler::cmi::persistent_env::PendingCore::Fetch(fetch);
-        let Some(aliases) = registry.register_stored_parts(&module_name, extras.as_deref(), core) else {
+        if registry
+            .register_stored_parts(&module_name, extras.as_deref(), core)
+            .is_none()
+        {
             continue;
-        };
-        if !aliases.is_empty() {
-            alias_rewrites.insert(module_name.clone(), aliases);
         }
         loaded.insert(module_name);
     }
@@ -1558,11 +1548,9 @@ fn dependency_closure(
 /// taking these locks for each module serialized the parallel recording.
 /// Nothing that runs while this is held may take one of these locks.
 pub struct CompileRecords<'a> {
-    loaded_units: MutexGuard<'a, AHashMap<String, AHashSet<String>>>,
+    loaded_units: MutexGuard<'a, AHashMap<String, AHashSet<Name>>>,
     unit_reads: MutexGuard<'a, AHashMap<String, PendingReads>>,
     verified_imports: MutexGuard<'a, AHashMap<String, AHashMap<String, u64>>>,
-    module_alias_rewrites:
-        MutexGuard<'a, AHashMap<String, Vec<(String, rescript_compiler::types::path::Path)>>>,
     in_memory_deps: MutexGuard<'a, AHashMap<String, Dependencies>>,
 }
 
@@ -1572,7 +1560,6 @@ impl<'a> CompileRecords<'a> {
             loaded_units: build_state.loaded_units.lock().unwrap(),
             unit_reads: build_state.unit_reads.lock().unwrap(),
             verified_imports: build_state.verified_imports.lock().unwrap(),
-            module_alias_rewrites: build_state.module_alias_rewrites.lock().unwrap(),
             in_memory_deps: build_state.in_memory_deps.lock().unwrap(),
         }
     }
@@ -1598,45 +1585,47 @@ fn written_interface(
     let own = digests.get(module_name)?;
     // What inlinable bodies refer to is added now, with dependencies' JS
     // metadata final (they may publish it after this module compiled).
-    let mut read_keys: BTreeMap<String, std::collections::BTreeSet<String>> =
-        match compiles.unit_reads.get(module_name) {
-            Some(pending) => {
-                let mut keys = pending.resolved.clone();
-                for (unit, unit_keys) in digests.lambda_reads(&pending.resolved) {
-                    keys.entry(unit).or_default().extend(unit_keys);
-                }
-                for unit in &pending.module_level {
-                    keys.entry(unit.clone())
-                        .or_default()
-                        .insert(item_deps::MODULE_LEVEL.to_string());
-                }
-                keys
+    let mut read_keys: item_deps::ResolvedReads = match compiles.unit_reads.get(module_name) {
+        Some(pending) => {
+            let mut keys = pending.resolved.clone();
+            for (unit, unit_keys) in digests.lambda_reads(&pending.resolved) {
+                keys.entry(unit).or_default().extend(unit_keys);
             }
-            None => BTreeMap::new(),
-        };
+            for unit in &pending.module_level {
+                keys.entry(*unit).or_default().insert(ItemKey::ModuleLevel);
+            }
+            keys
+        }
+        None => item_deps::ResolvedReads::default(),
+    };
     // A unit the compile loaded without a recorded read is read whole.
     for unit in compiles.loaded_units.get(module_name)? {
-        read_keys.entry(unit.clone()).or_insert_with(|| {
-            [item_deps::WHOLE.to_string(), item_deps::MODULE_LEVEL.to_string()]
-                .into_iter()
-                .collect()
-        });
+        read_keys
+            .entry(*unit)
+            .or_insert_with(|| [ItemKey::Whole, ItemKey::ModuleLevel].into_iter().collect());
     }
     let mut imports = Vec::new();
     let mut reads = UnitReads::new();
-    for (unit, mut keys) in read_keys {
-        if unit == module_name || !build_state.modules.contains_key(&unit) {
+    for (unit, keys) in read_keys {
+        let unit = unit.as_str();
+        if unit == module_name || !build_state.modules.contains_key(unit) {
             continue;
         }
         // The digest of every item covers the others.
-        if keys.contains(item_deps::WHOLE) {
-            keys = [item_deps::WHOLE.to_string()].into_iter().collect();
-        }
-        let unit_digests = digests.get(&unit)?;
+        let keys: Vec<String> = if keys.contains(&ItemKey::Whole) {
+            vec![item_deps::WHOLE.to_string()]
+        } else {
+            // Stored in the keys' string order.
+            let mut keys: Vec<ItemKey> = keys.into_iter().collect();
+            keys.sort_unstable();
+            keys.into_iter().map(ItemKey::to_key_string).collect()
+        };
+        let unit_digests = digests.get(unit)?;
         let read_digest = item_deps::read_digest(&unit_digests.1, keys.iter());
-        imports.push((unit.clone(), unit_digests.0));
-        reads.insert(unit, (read_digest, keys.into_iter().collect()));
+        imports.push((unit.to_string(), unit_digests.0));
+        reads.insert(unit.to_string(), (read_digest, keys));
     }
+    imports.sort_unstable_by(|a, b| a.0.cmp(&b.0));
     Some(WrittenRecord {
         digest: own.0,
         imports,

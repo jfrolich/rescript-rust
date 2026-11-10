@@ -354,8 +354,9 @@ pub struct BuildCommandState {
     pub in_memory_deps: Mutex<AHashMap<String, Dependencies>>,
     // The units each module's last compile in this process read the
     // interface of (type checking its interface and implementation, plus
-    // the modules its generated code may require).
-    pub loaded_units: Mutex<AHashMap<String, AHashSet<String>>>,
+    // the modules its generated code may require). Interned: every module
+    // keeps its set for the whole build.
+    pub loaded_units: Mutex<AHashMap<String, AHashSet<rescript_compiler::name::Name>>>,
     // What the last compile of a module read of other units (see
     // `rescript_compiler::cmi::item_deps`), resolved when the build is
     // recorded.
@@ -364,7 +365,6 @@ pub struct BuildCommandState {
     // module -> unit -> the unit's interface digest now.
     pub verified_imports: Mutex<AHashMap<String, AHashMap<String, u64>>>,
     // The alias rewrites each module registered, for its stored interface.
-    pub module_alias_rewrites: Mutex<AHashMap<String, Vec<(String, rescript_compiler::types::path::Path)>>>,
     // The modules this build compiled (written or not).
     pub compiled_modules: AHashSet<String>,
     // Modules compiled after a dependency failed: their results were dropped,
@@ -503,7 +503,6 @@ impl BuildCommandState {
             loaded_units: Mutex::new(AHashMap::new()),
             unit_reads: Mutex::new(AHashMap::new()),
             verified_imports: Mutex::new(AHashMap::new()),
-            module_alias_rewrites: Mutex::new(AHashMap::new()),
             compiled_modules: AHashSet::new(),
             invalidated_modules: AHashSet::new(),
             loaded_modules: AHashSet::new(),
@@ -565,12 +564,17 @@ impl BuildCommandState {
     pub fn record_loaded_units(&self, module_name: &str, units: Vec<String>, reads: PendingReads) {
         let mut loaded = self.loaded_units.lock().unwrap();
         let entry = loaded.entry(module_name.to_string()).or_default();
-        entry.extend(units.into_iter().filter(|unit| unit != module_name));
+        entry.extend(
+            units
+                .iter()
+                .filter(|unit| *unit != module_name)
+                .map(|unit| rescript_compiler::name::Name::new(unit)),
+        );
         drop(loaded);
         let mut all_reads = self.unit_reads.lock().unwrap();
         let entry = all_reads.entry(module_name.to_string()).or_default();
         for (unit, keys) in reads.resolved {
-            if unit != module_name {
+            if unit.as_str() != module_name {
                 entry.resolved.entry(unit).or_default().extend(keys);
             }
         }
@@ -661,7 +665,6 @@ impl BuildCommandState {
         is_pure: bool,
         cmj_export_constants: AHashMap<String, CmjExportConstant>,
         is_runtime: bool,
-        new_alias_rewrites: ahash::AHashMap<String, rescript_compiler::types::path::Path>,
     ) {
         self.update_module_registry_arc(
             module_name,
@@ -670,7 +673,6 @@ impl BuildCommandState {
             is_pure,
             cmj_export_constants,
             is_runtime,
-            new_alias_rewrites,
         );
     }
 
@@ -683,7 +685,6 @@ impl BuildCommandState {
         is_pure: bool,
         cmj_export_constants: AHashMap<String, CmjExportConstant>,
         is_runtime: bool,
-        new_alias_rewrites: ahash::AHashMap<String, rescript_compiler::types::path::Path>,
     ) {
         let info = rescript_compiler::cmi::persistent_env::InMemoryModuleInfo::new(
             source_path,
@@ -691,12 +692,10 @@ impl BuildCommandState {
             cmj_export_constants,
             is_runtime,
         );
-        self.module_registry.lock().unwrap().register_module_arc(
-            module_name,
-            pers_struct,
-            info,
-            new_alias_rewrites,
-        );
+        self.module_registry
+            .lock()
+            .unwrap()
+            .register_module_arc(module_name, pers_struct, info);
     }
 
     /// Register a namespace in the module registry.
@@ -781,8 +780,8 @@ impl std::ops::DerefMut for BuildCommandState {
 /// (`ModuleRegistry::lambda_reads`).
 #[derive(Debug, Default)]
 pub struct PendingReads {
-    pub resolved: std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+    pub resolved: rescript_compiler::cmi::item_deps::ResolvedReads,
     /// Units read only at module level (the modules the generated code may
     /// require).
-    pub module_level: Vec<String>,
+    pub module_level: Vec<rescript_compiler::name::Name>,
 }

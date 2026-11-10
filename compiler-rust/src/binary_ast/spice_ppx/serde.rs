@@ -1112,7 +1112,7 @@ fn json_arr_head(arena: &mut ParseArena) -> Expression {
     apply(arena, get, vec![json_arr, zero])
 }
 
-/// The `@spice.other` default of a legacy decoder.
+/// The `@spice.other` default of a legacy polyvariant decoder.
 fn legacy_other_default(message: &str, value: Expression, arena: &mut ParseArena) -> Expression {
     let length = {
         let func = expr_ident_path(arena, &["Array", "length"]);
@@ -1183,14 +1183,12 @@ pub(super) fn variants_legacy_decoder(
         cases.extend(aliases);
     }
     let default = match other {
+        // A constructor added later, whatever its arguments, so a reader
+        // deployed before it keeps reading.
         Some(name) => {
             let lid = arena.push_lident_from_idx(name);
             let value = expr_construct(lid, None, arena);
-            legacy_other_default(
-                "Invalid number of arguments to variant constructor",
-                value,
-                arena,
-            )
+            construct(arena, "Ok", Some(value))
         }
         None => {
             let head = json_arr_head(arena);

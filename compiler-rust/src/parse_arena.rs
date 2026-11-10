@@ -613,6 +613,12 @@ pub struct ParseArena {
     /// environment lookup (notably omitted record labels).
     synthetic_strings: elsa::sync::FrozenVec<Box<String>>,
     synthetic_string_base: u32,
+    /// The interned [`crate::name::Name`] of each parsed string, filled on
+    /// first use: identifier occurrences are resolved several times during
+    /// type checking (lookup, open/module marking, usage marks), and each
+    /// resolution would otherwise hash the string again. Sized to the parsed
+    /// strings when first read; later strings are interned uncached.
+    string_names: std::sync::OnceLock<Box<[std::sync::OnceLock<crate::name::Name>]>>,
     /// Arena of core types (returns CoreTypeIdx).
     /// Replaces `Box<CoreType>` for recursive AST references.
     core_types: Arena<CoreType, CoreTypeIdx>,
@@ -1048,6 +1054,7 @@ impl Default for ParseArena {
             synthetic_positions: elsa::sync::FrozenVec::new(),
             synthetic_strings: elsa::sync::FrozenVec::new(),
             synthetic_string_base: u32::MAX,
+            string_names: std::sync::OnceLock::new(),
             core_types,
             mod_exprs: Arena::default(),
             mod_types: Arena::default(),
@@ -2262,6 +2269,20 @@ impl ParseArena {
         self.position_file_names
             .contains(&idx)
             .then(|| self.get_string(idx))
+    }
+
+    /// The interned name of string `idx`, computed once per parsed string.
+    #[inline]
+    pub fn name(&self, idx: StrIdx) -> crate::name::Name {
+        let names = self.string_names.get_or_init(|| {
+            (0..self.strings.len())
+                .map(|_| std::sync::OnceLock::new())
+                .collect()
+        });
+        match names.get(idx.raw() as usize) {
+            Some(slot) => *slot.get_or_init(|| crate::name::Name::new(self.get_string(idx))),
+            None => crate::name::Name::new(self.get_string(idx)),
+        }
     }
 
     /// File names referenced by source positions in this arena.

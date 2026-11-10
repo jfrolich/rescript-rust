@@ -395,7 +395,7 @@ fn extract_concrete_typedecl(
     let mut current = ctx.repr(ty);
     loop {
         let path = match &*ctx.borrow_desc(current) {
-            TypeDesc::Tconstr { path, .. } => path.clone(),
+            TypeDesc::Tconstr { path, .. } => *path,
             _ => return None,
         };
         let decl = crate::types::typemod::find_type_decl_for_path(env, ctx, &path)?;
@@ -408,7 +408,7 @@ fn extract_concrete_typedecl(
 
 fn head_path(ctx: &TypeContext, ty: TypeExprRef) -> Option<Path> {
     match &*ctx.borrow_desc(ty) {
-        TypeDesc::Tconstr { path, .. } => Some(path.clone()),
+        TypeDesc::Tconstr { path, .. } => Some(*path),
         _ => None,
     }
 }
@@ -443,7 +443,7 @@ fn print_extra_type_clash_help(
     trace: &[TracePair],
     context: &Option<TypeClashContext>,
 ) {
-    let desc = |t: TypeExprRef| (*ctx.get_desc(t)).clone();
+    let desc = |t: TypeExprRef| (*ctx.get_desc(t));
     let bottom_paths = bottom.map(|(a, e)| (head_path(ctx, a), head_path(ctx, e)));
     match context {
         Some(TypeClashContext::MathOperator {
@@ -1005,7 +1005,7 @@ fn print_extra_type_clash_help_by_types(
         field_name,
         jsx,
     }) = context
-        && is(&p1, option_path.clone())
+        && is(&p1, option_path)
     {
         let text = extract_text_at_loc(arena, source, loc);
         let (what, example) = if jsx.is_none() {
@@ -1507,7 +1507,7 @@ pub(super) fn print_not_a_variant(ppf: &mut Ppf<'_>, ctx: &TypeContext, ty: Type
     ppf.close_box();
     // `Misc.did_you_mean ppf (fun () -> ["`" ^ s])` (PR#7012).
     if let TypeDesc::Tvar(Some(name)) = &*ctx.get_desc(ctx.repr(ty)) {
-        let name = name.clone();
+        let name = *name;
         ppf.flush();
         ppf.newline();
         ppf.str(&format!("Hint: Did you mean `{name}?"));
@@ -1547,7 +1547,7 @@ fn print_contextual_unification_error(
 ) {
     let option = predef::path_option();
     let path_of = |t: TypeExprRef| match &*ctx.borrow_desc(t) {
-        TypeDesc::Tconstr { path, .. } => Some(path.clone()),
+        TypeDesc::Tconstr { path, .. } => Some(*path),
         _ => None,
     };
     let (Some(p1), Some(p2)) = (path_of(t1), path_of(t2)) else {
@@ -1694,7 +1694,7 @@ fn typecore_type_expr(ppf: &mut Ppf<'_>, printer: &mut Printtyp<'_>, ty: TypeExp
 pub(super) fn print_apply_non_function(ppf: &mut Ppf<'_>, ctx: &TypeContext, typ: TypeExprRef) {
     let mut printer = Printtyp::new(ctx);
     let repr = ctx.repr(typ);
-    let desc = (*ctx.get_desc(repr)).clone();
+    let desc = (*ctx.get_desc(repr));
     match desc {
         TypeDesc::Tarrow { args, ret } => {
             let mut count = args.len();
@@ -1970,7 +1970,7 @@ pub(super) fn print_unbound_label(
     hint: Option<&str>,
 ) {
     let from_path = from_type.and_then(|ty| match &*ctx.get_desc(ctx.repr(ty)) {
-        TypeDesc::Tconstr { path, .. } => Some(path.clone()),
+        TypeDesc::Tconstr { path, .. } => Some(*path),
         _ => None,
     });
     match from_path {

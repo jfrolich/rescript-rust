@@ -86,14 +86,20 @@ jobs:
 
       - name: Typedtree parity
         if: ${{ !cancelled() && steps.fixtures.outcome == 'success' }}
+        # Diagnostic only; see "The Correctness Contract" in AGENTS.md.
+        continue-on-error: true
         run: ./scripts/test_typedtree_parity.sh --release --parallel 2
 
       - name: Raw Lambda parity
         if: ${{ !cancelled() && steps.fixtures.outcome == 'success' }}
+        # Diagnostic only; see "The Correctness Contract" in AGENTS.md.
+        continue-on-error: true
         run: ./scripts/test_lambda_parity.sh --release --raw --parallel 2
 
       - name: Optimized Lambda parity
         if: ${{ !cancelled() && steps.fixtures.outcome == 'success' }}
+        # Diagnostic only; see "The Correctness Contract" in AGENTS.md.
+        continue-on-error: true
         run: ./scripts/test_lambda_parity.sh --release --parallel 2
 
       - name: JavaScript output parity

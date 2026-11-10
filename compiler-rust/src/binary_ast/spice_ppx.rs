@@ -1635,6 +1635,28 @@ fn codecs_generate_dict_codecs(
     Ok((encoder, decoder))
 }
 
+/// codecs.ml `apply_each`: a parameterized type's codec takes the codecs of
+/// its type arguments one at a time (`t_encode(encoder_a)(encoder_b)`), as
+/// `Structure.add_params` defines it, so they are applied one at a time.
+fn apply_each(
+    mut func: Expression,
+    args: Vec<Option<Expression>>,
+    require: fn(Option<Expression>) -> SpiceResult<Expression>,
+    arena: &mut ParseArena,
+) -> SpiceResult<Expression> {
+    for arg in args {
+        let arg = require(arg)?;
+        func = expr_apply(
+            func,
+            vec![(ArgLabel::Nolabel, arg)],
+            true,
+            arena.dummy_loc(),
+            arena,
+        );
+    }
+    Ok(func)
+}
+
 fn codecs_parameterize_codecs(
     type_args: &[CoreTypeIdx],
     encoder_func: Option<Expression>,
@@ -1656,26 +1678,12 @@ fn codecs_parameterize_codecs(
 
     let encoder = match encoder_func {
         None => None,
-        Some(func) => {
-            let mut args = Vec::new();
-            for e in sub_encoders.into_iter() {
-                let enc = require_encoder(e)?;
-                args.push((ArgLabel::Nolabel, enc));
-            }
-            Some(expr_apply(func, args, true, arena.dummy_loc(), arena))
-        }
+        Some(func) => Some(apply_each(func, sub_encoders, require_encoder, arena)?),
     };
 
     let decoder = match decoder_func {
         None => None,
-        Some(func) => {
-            let mut args = Vec::new();
-            for d in sub_decoders.into_iter() {
-                let dec = require_decoder(d)?;
-                args.push((ArgLabel::Nolabel, dec));
-            }
-            Some(expr_apply(func, args, true, arena.dummy_loc(), arena))
-        }
+        Some(func) => Some(apply_each(func, sub_decoders, require_decoder, arena)?),
     };
 
     Ok((encoder, decoder))

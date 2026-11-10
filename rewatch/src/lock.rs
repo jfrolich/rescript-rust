@@ -324,9 +324,15 @@ mod tests {
             .collect::<Vec<_>>();
         barrier.wait();
 
-        let acquired = contenders
+        // Join every contender before inspecting the results: a winner's guard
+        // must stay alive until the other thread has finished, or a contender
+        // that runs late could acquire the lock after the winner released it.
+        let results = contenders
             .into_iter()
             .map(|contender| contender.join().unwrap())
+            .collect::<Vec<_>>();
+        let acquired = results
+            .iter()
             .filter(|result| matches!(result, Lock::Acquired(_)))
             .count();
         assert_eq!(acquired, 1);

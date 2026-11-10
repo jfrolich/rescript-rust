@@ -10,9 +10,8 @@
 //! Callbacks are closures in OCaml; here they are the closed set of shapes the
 //! type checker installs.
 
-use std::hash::{Hash, Hasher};
 
-use hashbrown::Equivalent;
+use crate::name::{Name, NameKey};
 
 use crate::location::Location;
 
@@ -62,7 +61,7 @@ enum TypeCallback {
     /// is translated, uses are recorded in its slot; afterwards a use marks
     /// the recorded declarations and runs the previous callback.
     RecSlot {
-        name: String,
+        name: Name,
         loc: Location,
         slot: TypeSlot,
         old: Box<TypeCallback>,
@@ -78,7 +77,7 @@ enum ValueCallback {
     /// typed, record the identifier in its slot; otherwise mark the recorded
     /// identifiers and the identifier used.
     LetSlot {
-        name: String,
+        name: Name,
         loc: Location,
         group: LetGroup,
         slot: LetSlot,
@@ -95,44 +94,24 @@ struct LetGroupState {
 
 type HashMap<K, V> = hashbrown::HashMap<K, V, crate::fast_hash::FastState>;
 
-/// Borrowed `(name, loc)` key, hashing like the owned `(String, Location)`.
-#[derive(Hash)]
-struct NameLoc<'a>(&'a str, Location);
-
-impl Equivalent<(String, Location)> for NameLoc<'_> {
-    fn equivalent(&self, key: &(String, Location)) -> bool {
-        self.1 == key.1 && self.0 == key.0
-    }
-}
-
-/// Borrowed `(type name, loc, constructor name)` key.
-struct NameLocName<'a>(&'a str, Location, &'a str);
-
-impl Hash for NameLocName<'_> {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        (self.0, self.1, self.2).hash(state);
-    }
-}
-
-impl Equivalent<(String, Location, String)> for NameLocName<'_> {
-    fn equivalent(&self, key: &(String, Location, String)) -> bool {
-        self.1 == key.1 && self.0 == key.0 && self.2 == key.2
-    }
+/// The interned name of a name being registered.
+fn intern(name: impl NameKey) -> Name {
+    name.name_key().unwrap_or_else(|| Name::new(name.text()))
 }
 
 #[derive(Debug, Default)]
 pub struct UsageTables {
     /// `Env.value_declarations`; a key's callbacks run in registration order
     /// (`set_value_used_callback` chains `old (); callback ()`).
-    value_declarations: HashMap<(String, Location), Vec<ValueCallback>>,
+    value_declarations: HashMap<(Name, Location), Vec<ValueCallback>>,
     let_groups: Vec<LetGroupState>,
-    let_slots: Vec<Vec<(String, Location)>>,
-    type_declarations: HashMap<(String, Location), TypeCallback>,
-    module_declarations: HashMap<(String, Location), UsedCell>,
-    used_constructors: HashMap<(String, Location, String), ConstructorUsageCell>,
+    let_slots: Vec<Vec<(Name, Location)>>,
+    type_declarations: HashMap<(Name, Location), TypeCallback>,
+    module_declarations: HashMap<(Name, Location), UsedCell>,
+    used_constructors: HashMap<(Name, Location, Name), ConstructorUsageCell>,
     cells: Vec<bool>,
     constructor_usages: Vec<ConstructorUsages>,
-    type_slots: Vec<Vec<(String, Location)>>,
+    type_slots: Vec<Vec<(Name, Location)>>,
     /// `current_slot` of `Typedecl.transl_type_decl` (typedecl.ml:1479).
     current_type_slot: Option<TypeSlot>,
 }
@@ -151,20 +130,24 @@ impl UsageTables {
 
     /// `check_usage loc id warn value_declarations` (env.ml:1562-1576) once the
     /// ghost/active guard passed.
-    pub fn check_value_usage(&mut self, name: &str, loc: Location) -> Option<UsedCell> {
-        if self.value_declarations.contains_key(&NameLoc(name, loc)) {
+    pub fn check_value_usage(&mut self, name: impl NameKey, loc: Location) -> Option<UsedCell> {
+        let name = intern(name);
+        if self.value_declarations.contains_key(&(name, loc)) {
             return None;
         }
         let cell = self.new_cell();
         self.value_declarations
-            .insert((name.to_string(), loc), vec![ValueCallback::SetUsed(cell)]);
+            .insert((name, loc), vec![ValueCallback::SetUsed(cell)]);
         Some(cell)
     }
 
     /// Drop a registration whose delayed check was rolled back with a
     /// speculative typing attempt.
-    pub fn unregister_value_usage(&mut self, name: &str, loc: Location, cell: UsedCell) {
-        let key = NameLoc(name, loc);
+    pub fn unregister_value_usage(&mut self, name: impl NameKey, loc: Location, cell: UsedCell) {
+        let Some(name) = name.name_key() else {
+            return;
+        };
+        let key = (name, loc);
         if let Some(callbacks) = self.value_declarations.get_mut(&key) {
             callbacks.retain(|cb| !matches!(cb, ValueCallback::SetUsed(c) if *c == cell));
             if callbacks.is_empty() {
@@ -175,8 +158,11 @@ impl UsageTables {
 
     /// `Env.mark_value_used` (env.ml:1125-1128) without the
     /// implicit-coercion guard.
-    pub fn mark_value_used(&mut self, name: &str, loc: Location) {
-        let Some(callbacks) = self.value_declarations.get(&NameLoc(name, loc)) else {
+    pub fn mark_value_used(&mut self, name: impl NameKey, loc: Location) {
+        let Some(name) = name.name_key() else {
+            return;
+        };
+        let Some(callbacks) = self.value_declarations.get(&(name, loc)) else {
             return;
         };
         // Slots whose recorded identifiers are marked once the callback list
@@ -240,18 +226,19 @@ impl UsageTables {
     /// with the callback of typecore.ml:4619-4628.
     pub fn set_let_value_used_callback(
         &mut self,
-        name: &str,
+        name: impl NameKey,
         loc: Location,
         group: LetGroup,
         slot: LetSlot,
         used: UsedCell,
         some_used: UsedCell,
     ) {
+        let name = intern(name);
         self.value_declarations
-            .entry((name.to_string(), loc))
+            .entry((name, loc))
             .or_default()
             .push(ValueCallback::LetSlot {
-                name: name.to_string(),
+                name,
                 loc,
                 group,
                 slot,
@@ -271,24 +258,26 @@ impl UsageTables {
     /// `check_usage loc id warn type_declarations` (env.ml:1562-1576) once the
     /// ghost/active guard passed: registers `(name, loc)` unless present.
     /// Returns the flag of a new registration.
-    pub fn check_type_usage(&mut self, name: &str, loc: Location) -> Option<UsedCell> {
-        if self.type_declarations.contains_key(&NameLoc(name, loc)) {
+    pub fn check_type_usage(&mut self, name: impl NameKey, loc: Location) -> Option<UsedCell> {
+        let name = intern(name);
+        if self.type_declarations.contains_key(&(name, loc)) {
             return None;
         }
         let cell = self.new_cell();
         self.type_declarations
-            .insert((name.to_string(), loc), TypeCallback::SetUsed(cell));
+            .insert((name, loc), TypeCallback::SetUsed(cell));
         Some(cell)
     }
 
     /// `check_usage loc id warn module_declarations`.
-    pub fn check_module_usage(&mut self, name: &str, loc: Location) -> Option<UsedCell> {
-        if self.module_declarations.contains_key(&NameLoc(name, loc)) {
+    pub fn check_module_usage(&mut self, name: impl NameKey, loc: Location) -> Option<UsedCell> {
+        let name = intern(name);
+        if self.module_declarations.contains_key(&(name, loc)) {
             return None;
         }
         let cell = self.new_cell();
         self.module_declarations
-            .insert((name.to_string(), loc), cell);
+            .insert((name, loc), cell);
         Some(cell)
     }
 
@@ -296,27 +285,32 @@ impl UsageTables {
     /// (env.ml:1606-1620, 1650-1665).
     pub fn check_constructor_usage(
         &mut self,
-        ty_name: &str,
+        ty_name: impl NameKey,
         loc: Location,
-        cstr_name: &str,
+        cstr_name: impl NameKey,
     ) -> Option<ConstructorUsageCell> {
+        let ty_name = intern(ty_name);
+        let cstr_name = intern(cstr_name);
         if self
             .used_constructors
-            .contains_key(&NameLocName(ty_name, loc, cstr_name))
+            .contains_key(&(ty_name, loc, cstr_name))
         {
             return None;
         }
         self.constructor_usages.push(ConstructorUsages::default());
         let cell = ConstructorUsageCell(self.constructor_usages.len() as u32 - 1);
         self.used_constructors
-            .insert((ty_name.to_string(), loc, cstr_name.to_string()), cell);
+            .insert((ty_name, loc, cstr_name), cell);
         Some(cell)
     }
 
     /// `Env.mark_type_used` (env.ml:1130-1133) without the implicit-coercion
     /// guard, which callers apply.
-    pub fn mark_type_used(&mut self, name: &str, loc: Location) {
-        let callback = match self.type_declarations.get(&NameLoc(name, loc)) {
+    pub fn mark_type_used(&mut self, name: impl NameKey, loc: Location) {
+        let Some(name) = name.name_key() else {
+            return;
+        };
+        let callback = match self.type_declarations.get(&(name, loc)) {
             None => return,
             // The common case needs only the cell; avoid cloning the chain.
             Some(TypeCallback::SetUsed(cell)) => {
@@ -352,18 +346,19 @@ impl UsageTables {
 
     /// `Env.set_type_used_callback name td` with the recursive-slot callback
     /// of typedecl.ml:1489-1496. Returns the new slot.
-    pub fn set_type_rec_slot_callback(&mut self, name: &str, loc: Location) -> Option<TypeSlot> {
+    pub fn set_type_rec_slot_callback(&mut self, name: impl NameKey, loc: Location) -> Option<TypeSlot> {
+        let name = intern(name);
         if loc.loc_ghost {
             return None;
         }
-        let key = (name.to_string(), loc);
+        let key = (name, loc);
         let old = self.type_declarations.get(&key).cloned()?;
         self.type_slots.push(Vec::new());
         let slot = TypeSlot(self.type_slots.len() as u32 - 1);
         self.type_declarations.insert(
             key,
             TypeCallback::RecSlot {
-                name: name.to_string(),
+                name,
                 loc,
                 slot,
                 old: Box::new(old),
@@ -379,8 +374,11 @@ impl UsageTables {
 
     /// `Env.mark_module_used` (env.ml:996-998) without the implicit-coercion
     /// guard.
-    pub fn mark_module_used(&mut self, name: &str, loc: Location) {
-        if let Some(cell) = self.module_declarations.get(&NameLoc(name, loc)) {
+    pub fn mark_module_used(&mut self, name: impl NameKey, loc: Location) {
+        let Some(name) = name.name_key() else {
+            return;
+        };
+        if let Some(cell) = self.module_declarations.get(&(name, loc)) {
             self.cells[cell.0 as usize] = true;
         }
     }
@@ -390,13 +388,16 @@ impl UsageTables {
     pub fn mark_constructor_used(
         &mut self,
         usage: ConstructorUsage,
-        ty_name: &str,
+        ty_name: impl NameKey,
         loc: Location,
-        cstr_name: &str,
+        cstr_name: impl NameKey,
     ) {
+        let (Some(ty_name), Some(cstr_name)) = (ty_name.name_key(), cstr_name.name_key()) else {
+            return;
+        };
         if let Some(cell) = self
             .used_constructors
-            .get(&NameLocName(ty_name, loc, cstr_name))
+            .get(&(ty_name, loc, cstr_name))
         {
             let cu = &mut self.constructor_usages[cell.0 as usize];
             match usage {

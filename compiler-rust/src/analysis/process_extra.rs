@@ -547,7 +547,7 @@ impl ExtraIterator<'_, '_> {
                 .types
                 .get_desc(dig(self.ctx.types, pattern.pat_type))
             {
-                TypeDesc::Tpackage { path, .. } => Some(path.clone()),
+                TypeDesc::Tpackage { path, .. } => Some(*path),
                 _ => None,
             }
         } else {

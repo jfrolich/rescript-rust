@@ -158,7 +158,7 @@ impl<'a> SigReadContext<'a> {
             val_type,
             val_kind,
             val_loc,
-            val_attributes,
+            val_attributes: val_attributes.into(),
             val_path: None,
         }
     }
@@ -171,7 +171,7 @@ impl<'a> SigReadContext<'a> {
             OcamlValue::Int(0) => ValueKind::ValReg,
             OcamlValue::Block(0, fields) => {
                 let prim = read_primitive_description(&fields[0]);
-                ValueKind::ValPrim(prim)
+                ValueKind::ValPrim(std::sync::Arc::new(prim))
             }
             _ => ValueKind::ValReg, // fallback
         }

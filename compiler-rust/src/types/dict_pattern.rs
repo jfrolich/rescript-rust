@@ -100,8 +100,8 @@ fn labels_of_keys(ctx: &TypeContext, keys: Vec<String>) -> Vec<LabelDescription>
         keys.into_iter()
             .enumerate()
             .map(|(pos, key)| LabelDescription {
-                lbl_runtime_name: key.clone(),
-                lbl_name: key,
+                lbl_runtime_name: crate::name::Name::new(&key),
+                lbl_name: crate::name::Name::new(&key),
                 lbl_res,
                 lbl_arg,
                 lbl_mut: MutableFlag::Immutable,
@@ -133,7 +133,7 @@ impl Lowering {
         }
         let labels = labels_of_keys(ctx, keys(ta, pats))
             .into_iter()
-            .map(|lbl| (lbl.lbl_name.clone(), Arc::new(lbl)))
+            .map(|lbl| (lbl.lbl_name.to_string(), Arc::new(lbl)))
             .collect();
         Lowering {
             labels: Some(labels),

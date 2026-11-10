@@ -108,6 +108,88 @@ impl Name {
     }
 }
 
+/// A name argument of a table lookup: an interned [`Name`], used as is, or a
+/// string, looked up without interning it (a string never interned is in no
+/// table keyed by names).
+pub trait NameKey: Copy {
+    /// The interned name, if there is one.
+    fn name_key(self) -> Option<Name>;
+    /// The text of the name.
+    fn text(&self) -> &str;
+}
+
+impl NameKey for Name {
+    #[inline]
+    fn name_key(self) -> Option<Name> {
+        Some(self)
+    }
+
+    #[inline]
+    fn text(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl NameKey for &Name {
+    #[inline]
+    fn name_key(self) -> Option<Name> {
+        Some(*self)
+    }
+
+    #[inline]
+    fn text(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl NameKey for &str {
+    #[inline]
+    fn name_key(self) -> Option<Name> {
+        Name::lookup(self)
+    }
+
+    #[inline]
+    fn text(&self) -> &str {
+        self
+    }
+}
+
+impl NameKey for &String {
+    #[inline]
+    fn name_key(self) -> Option<Name> {
+        Name::lookup(self)
+    }
+
+    #[inline]
+    fn text(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl NameKey for &&str {
+    #[inline]
+    fn name_key(self) -> Option<Name> {
+        Name::lookup(self)
+    }
+
+    #[inline]
+    fn text(&self) -> &str {
+        self
+    }
+}
+
+impl NameKey for &SmolStr {
+    #[inline]
+    fn name_key(self) -> Option<Name> {
+        Name::lookup(self)
+    }
+
+    #[inline]
+    fn text(&self) -> &str {
+        self.as_str()
+    }
+}
+
 impl PartialEq for Name {
     #[inline]
     fn eq(&self, other: &Self) -> bool {
@@ -315,5 +397,11 @@ mod tests {
         assert!(a < b);
         let hasher = content_hasher();
         assert_eq!(hasher.hash_one(a), hasher.hash_one(Name::new("a_name")));
+    }
+}
+
+impl PartialEq<Name> for String {
+    fn eq(&self, other: &Name) -> bool {
+        self.as_str() == other.as_str()
     }
 }
