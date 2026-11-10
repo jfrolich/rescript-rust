@@ -60,8 +60,6 @@ static STORED_COMPONENT_TRANSIENT: AtomicU64 = AtomicU64::new(0);
 
 
 
-static TYPE_ITEM_RESOLVE_CACHE_HITS: AtomicU64 = AtomicU64::new(0);
-static TYPE_ITEM_RESOLVE_MISSING_CACHE_HITS: AtomicU64 = AtomicU64::new(0);
 static TYPE_ITEM_RESOLVE_SCANS: AtomicU64 = AtomicU64::new(0);
 static TYPE_ITEM_RESOLVE_SCANNED_ITEMS: AtomicU64 = AtomicU64::new(0);
 static TYPE_ITEM_RESOLVE_TYPE_ITEMS: AtomicU64 = AtomicU64::new(0);
@@ -356,8 +354,6 @@ pub fn reset() {
         &STORED_COMPONENT_BUILD_PROBE_MODULE_DESCR,
         &STORED_COMPONENT_PUBLISHED,
         &STORED_COMPONENT_TRANSIENT,
-        &TYPE_ITEM_RESOLVE_CACHE_HITS,
-        &TYPE_ITEM_RESOLVE_MISSING_CACHE_HITS,
         &TYPE_ITEM_RESOLVE_SCANS,
         &TYPE_ITEM_RESOLVE_SCANNED_ITEMS,
         &TYPE_ITEM_RESOLVE_TYPE_ITEMS,
@@ -489,22 +485,6 @@ pub(crate) fn record_stored_component_build(mode: ComponentLookupApi, published:
     } else {
         STORED_COMPONENT_TRANSIENT.fetch_add(1, Ordering::Relaxed);
     }
-}
-
-/// Record a cached type-item path lookup.
-///
-/// Caller must check [`enabled`] before calling this hot-path helper.
-#[inline]
-pub(crate) fn record_type_item_resolve_cache_hit() {
-    TYPE_ITEM_RESOLVE_CACHE_HITS.fetch_add(1, Ordering::Relaxed);
-}
-
-/// Record a cached missing type-item path lookup.
-///
-/// Caller must check [`enabled`] before calling this hot-path helper.
-#[inline]
-pub(crate) fn record_type_item_resolve_missing_cache_hit() {
-    TYPE_ITEM_RESOLVE_MISSING_CACHE_HITS.fetch_add(1, Ordering::Relaxed);
 }
 
 /// Record a type-item signature scan.
@@ -668,9 +648,7 @@ pub fn print_report() {
         STORED_COMPONENT_TRANSIENT.load(Ordering::Relaxed),
     );
     eprintln!(
-        "[compiler-counter] type_item_resolve positive_cache_hits={} missing_cache_hits={} scans={} scanned_items={} type_items={} found={}",
-        TYPE_ITEM_RESOLVE_CACHE_HITS.load(Ordering::Relaxed),
-        TYPE_ITEM_RESOLVE_MISSING_CACHE_HITS.load(Ordering::Relaxed),
+        "[compiler-counter] type_item_resolve scans={} scanned_items={} type_items={} found={}",
         TYPE_ITEM_RESOLVE_SCANS.load(Ordering::Relaxed),
         TYPE_ITEM_RESOLVE_SCANNED_ITEMS.load(Ordering::Relaxed),
         TYPE_ITEM_RESOLVE_TYPE_ITEMS.load(Ordering::Relaxed),

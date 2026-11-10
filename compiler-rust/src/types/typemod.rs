@@ -2877,16 +2877,6 @@ pub(crate) fn find_type_decl_for_path(
             return Some((*type_decl).clone());
         }
     }
-    if let Path::Pident(id) = path {
-        if let Some(type_decl) = ctx.find_type_decl_by_stamp(id.stamp()) {
-            return Some((*type_decl).clone());
-        }
-    }
-    let path_str = path.name();
-    if let Some(type_decl) = ctx.find_type_decl_by_path(&path_str) {
-        return Some((*type_decl).clone());
-    }
-
     if let Some(type_decl) = crate::types::ctype::resolve_type_through_modules(ctx, path) {
         return Some(type_decl);
     }
@@ -2904,9 +2894,6 @@ pub(crate) fn find_type_decl_for_path(
                     ModuleType::MtyAlias(..) | ModuleType::MtyIdent(_) => {
                         let alias_path = module_desc.md_type.ident_or_alias_path().unwrap();
                         let resolved_path = Path::pdot(alias_path.clone(), type_name.as_str());
-                        if let Some(type_decl) = ctx.find_type_decl_by_path(&resolved_path.name()) {
-                            return Some((*type_decl).clone());
-                        }
                         if let Some(type_decl) =
                             crate::types::ctype::resolve_type_through_modules(ctx, &resolved_path)
                         {
@@ -2928,8 +2915,7 @@ pub(crate) fn find_type_decl_for_path(
         }
     }
 
-    let short_name = path.head_name();
-    ctx.find_type_decl(short_name).map(|decl| (*decl).clone())
+    None
 }
 
 fn extract_concrete_type_decl_for_record_spread(
@@ -16976,10 +16962,6 @@ fn type_structure_item<'a>(
                     Vec::new(),
                     Vec::new(),
                 ));
-                ctx.register_type_decl(&row_id.name, row_internal_decl.clone());
-                if row_id.id.stamp() != 0 {
-                    ctx.register_type_decl_by_stamp(row_id.id.stamp(), row_internal_decl.clone());
-                }
                 type_entry_ids.push(row_id.id);
                 type_entry_parser_indices.push(row_id.decl_idx);
                 type_entry_is_synthetic_row.push(true);
@@ -18055,12 +18037,6 @@ fn type_structure_item<'a>(
                 // Save for generalization after the loop
                 internal_decls_for_generalize.push(internal_decl.clone());
 
-                // Also register in global type store for alias expansion
-                ctx.register_type_decl(type_name_str, internal_decl.clone());
-                if type_id.stamp() != 0 {
-                    ctx.register_type_decl_by_stamp(type_id.stamp(), internal_decl.clone());
-                }
-
                 // Add constructors to environment. OCaml
                 // compiler/ml/datarepr.ml:273-284 exposes env labels only for
                 // `Type_record`; inline-record labels on `Type_variant`
@@ -18159,17 +18135,6 @@ fn type_structure_item<'a>(
                     for (decl, id) in internal_decls_for_generalize.iter_mut().zip(&ids) {
                         if let Some(shape) = shape_for(&shapes, id) {
                             decl.type_shape = shape;
-                        }
-                    }
-                }
-                for typed_decl in &typed_tree_decls {
-                    if typed_decl.typ_type.type_shape != crate::types::ValueShape::Unstated {
-                        ctx.register_type_decl(&typed_decl.typ_name.txt, typed_decl.typ_type.clone());
-                        if typed_decl.typ_id.stamp() != 0 {
-                            ctx.register_type_decl_by_stamp(
-                                typed_decl.typ_id.stamp(),
-                                typed_decl.typ_type.clone(),
-                            );
                         }
                     }
                 }
@@ -18358,26 +18323,6 @@ fn type_structure_item<'a>(
                         if let Some(internal_decl) = internal_decls_for_generalize.get_mut(idx) {
                             internal_decl.type_variance = variance_row.clone();
                         }
-
-                        let type_name = if type_entry_is_synthetic_row[idx] {
-                            let parser_idx = type_entry_parser_indices[idx];
-                            fixed_row_type_id_for_decl(&fixed_row_type_ids, parser_idx)
-                                .map(|row_id| row_id.name.clone())
-                                .unwrap_or_else(|| {
-                                    fixed_row_name(
-                                        arena.get_string(decls[parser_idx].ptype_name.txt),
-                                    )
-                                })
-                        } else {
-                            let parser_idx = type_entry_parser_indices[idx];
-                            arena
-                                .get_string(decls[parser_idx].ptype_name.txt)
-                                .to_string()
-                        };
-                        ctx.register_type_decl(&type_name, updated_decl.clone());
-                        if type_id.stamp() != 0 {
-                            ctx.register_type_decl_by_stamp(type_id.stamp(), updated_decl.clone());
-                        }
                     }
                 }
 
@@ -18440,12 +18385,6 @@ fn type_structure_item<'a>(
                         }
                         if let Some(internal_decl) = internal_decls_for_generalize.get_mut(idx) {
                             internal_decl.type_variance = variance_row.clone();
-                        }
-
-                        let type_name = arena.get_string(decls[idx].ptype_name.txt);
-                        ctx.register_type_decl(type_name, updated_decl.clone());
-                        if type_id.stamp() != 0 {
-                            ctx.register_type_decl_by_stamp(type_id.stamp(), updated_decl.clone());
                         }
                     }
                 }

@@ -1211,96 +1211,6 @@ impl<'a> RawLambdaConverter<'a> {
         }
     }
 
-    fn register_module_type_paths(
-        &self,
-        module_path: &crate::types::Path,
-        module_type: &crate::types::decl::ModuleType,
-        visited_module_paths: &mut HashSet<String>,
-    ) {
-        match module_type {
-            crate::types::decl::ModuleType::MtySignature(sig) => {
-                self.register_signature_type_paths_inner(
-                    Some(module_path),
-                    sig,
-                    visited_module_paths,
-                );
-            }
-            crate::types::decl::ModuleType::MtyFunctor { result, .. } => {
-                self.register_module_type_paths(module_path, result, visited_module_paths);
-            }
-            crate::types::decl::ModuleType::MtyIdent(_)
-            | crate::types::decl::ModuleType::MtyAlias(_, _) => {}
-        }
-    }
-
-    fn register_signature_type_paths(
-        &self,
-        prefix: Option<&crate::types::Path>,
-        sig: &[SignatureItem],
-    ) {
-        let mut visited_module_paths = HashSet::new();
-        self.register_signature_type_paths_inner(prefix, sig, &mut visited_module_paths);
-    }
-
-    fn should_register_nested_module_type_paths(&self, module_path: &crate::types::Path) -> bool {
-        let Ok((head, _)) = module_path.flatten() else {
-            // OCaml `Path.head` asserts on functor applications and callers use
-            // `Path.flatten` when they need a safe dotted-path test
-            // (compiler/ml/path.ml:58-69). Registration is only a side-table
-            // seed for current/local modules, so functor applications stay out.
-            return false;
-        };
-        !head.is_persistent() && !head.is_global() || head.name() == self.unit_name
-    }
-
-    fn register_signature_type_paths_inner(
-        &self,
-        prefix: Option<&crate::types::Path>,
-        sig: &[SignatureItem],
-        visited_module_paths: &mut HashSet<String>,
-    ) {
-        for item in sig {
-            match item {
-                SignatureItem::SigType(id, decl, _) => {
-                    if id.stamp() != 0 {
-                        self.type_ctx
-                            .register_type_decl_by_stamp(id.stamp(), decl.clone());
-                    }
-                    if let Some(prefix) = prefix {
-                        let path = crate::types::Path::pdot(prefix.clone(), id.name());
-                        self.type_ctx
-                            .register_type_decl_by_path(&path.name(), decl.clone());
-                        self.type_ctx
-                            .register_type_decl_by_exact_path(path, decl.clone());
-                    }
-                }
-                SignatureItem::SigModule(id, md, _) => {
-                    let module_path = md.md_path.clone().unwrap_or_else(|| {
-                        prefix.map_or_else(
-                            || crate::types::Path::pident(*id),
-                            |prefix| crate::types::Path::pdot(prefix.clone(), id.name()),
-                        )
-                    });
-                    // OCaml raw translation walks the current structure and
-                    // coercion (compiler/ml/translmod.ml:290-451), not the full
-                    // signatures of already-compiled dependency modules. Keep
-                    // this Rust side-table seeding to local/current-module
-                    // paths so dependency cycles stay in PersistentEnv lookups.
-                    if self.should_register_nested_module_type_paths(&module_path)
-                        && visited_module_paths.insert(module_path.name())
-                    {
-                        self.register_module_type_paths(
-                            &module_path,
-                            &md.md_type,
-                            visited_module_paths,
-                        );
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-
     fn field_path(
         rootpath: &Option<crate::types::Path>,
         field: &Ident,
@@ -3250,7 +3160,6 @@ impl<'a> RawLambdaConverter<'a> {
         if structure_has_config_string(structure, "-bs-noassertfalse", self.arena) {
             self.no_assert_false = true;
         }
-        self.register_signature_type_paths(None, &structure.str_type);
         // The typed tree is complete: repeated type queries on it have one
         // answer per (env, type).
         self.type_ctx.set_typeopt_cache(true);

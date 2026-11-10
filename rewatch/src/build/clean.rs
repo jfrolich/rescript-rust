@@ -86,11 +86,12 @@ pub fn write_in_process_record(build_state: &BuildCommandState) {
     }
     let digests = build::incremental::UnitDigests::of_compiled(build_state);
     crate::build::phase_mark("record-digests");
+    let compiles = build::incremental::CompileRecords::lock(build_state);
     build_state
         .packages
         .par_iter()
         .for_each(|(package_name, package)| {
-            let record = build::incremental::current_record(build_state, package_name, &digests);
+            let record = build::incremental::current_record(build_state, &compiles, package_name, &digests);
             let previous = build_state
                 .previous_in_process
                 .as_ref()

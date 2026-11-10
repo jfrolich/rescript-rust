@@ -8737,7 +8737,6 @@ fn extract_row_from_type_with_env(
         }
     }
 
-    // Fall back to stamp/path-based lookup
     extract_row_from_type(ctx_ref, ty)
 }
 
@@ -8745,54 +8744,8 @@ fn extract_row_from_type(ctx_ref: &TypeContext, ty: TypeExprRef) -> RowDesc {
     use crate::types::btype;
     use crate::types::type_expr::TypeDesc;
 
-    // Expand through links, Tconstr, and row_more to find the variant row
-    let mut current = ctx_ref.repr(ty);
-    for _ in 0..20 {
-        enum Action {
-            ReturnRow(RowDesc),
-            ExpandConstr(i32, String),
-            Follow(TypeExprRef),
-            Stop,
-        }
-        let action = {
-            let desc = ctx_ref.get_desc(current);
-            match &*desc {
-                TypeDesc::Tvariant(row) => Action::ReturnRow(btype::row_repr(ctx_ref, row)),
-                TypeDesc::Tconstr { path, .. } => {
-                    let stamp = match path {
-                        crate::types::Path::Pident(id) => id.stamp(),
-                        _ => -1,
-                    };
-                    Action::ExpandConstr(stamp, path.name())
-                }
-                TypeDesc::Tlink(next) => Action::Follow(*next),
-                _ => Action::Stop,
-            }
-        };
-        match action {
-            Action::ReturnRow(row) => return row,
-            Action::ExpandConstr(stamp, path_name) => {
-                if stamp >= 0 {
-                    if let Some(decl) = ctx_ref.find_type_decl_by_stamp(stamp) {
-                        if let Some(manifest) = decl.type_manifest {
-                            current = ctx_ref.repr(manifest);
-                            continue;
-                        }
-                    }
-                }
-                if let Some(decl) = ctx_ref.find_type_decl_by_path(&path_name) {
-                    if let Some(manifest) = decl.type_manifest {
-                        current = ctx_ref.repr(manifest);
-                        continue;
-                    }
-                }
-                break;
-            }
-            Action::Follow(next) => {
-                current = ctx_ref.repr(next);
-            }
-            Action::Stop => break,
-        }
+    if let TypeDesc::Tvariant(row) = &*ctx_ref.get_desc(ctx_ref.repr(ty)) {
+        return btype::row_repr(ctx_ref, row);
     }
 
     // Fallback: empty row

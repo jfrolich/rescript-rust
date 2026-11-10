@@ -372,75 +372,23 @@ pub(crate) fn scrape_ty(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> TypeEx
 }
 
 pub(crate) fn is_base_type(ctx: &TypeContext, env: &Env, ty: TypeExprRef, name: &str) -> bool {
-    fn visit(
-        ctx: &TypeContext,
-        env: &Env,
-        ty: TypeExprRef,
-        name: &str,
-        seen: &mut crate::types::type_expr::TypeExprRefSet,
-    ) -> bool {
-        let ty = scrape_ty(ctx, env, ty);
-        if !seen.insert(ty) {
-            return false;
-        }
-        match &*ctx.get_desc(ty) {
-            TypeDesc::Tconstr { path, args, .. } => {
-                // NOTE: OCaml `Typeopt.is_base_type` (typeopt.ml:99-101) tests
-                // `Path.same p Predef.path_*`; this last-component name test
-                // is broader and is kept as-is to preserve output.
-                if path.last() == name {
-                    return true;
-                }
-                // Strengthening can give an expression a stamped owner path
-                // while its captured module-body Env still contains the local
-                // pre-strengthened declaration. Typeopt only needs to inspect
-                // the exact nullary representation here; use Path identity and
-                // never printed-name or structural lookup.
-                let manifest = if args.is_empty() {
-                    ctx.find_type_decl_by_exact_path(path).and_then(|decl| {
-                        if decl.type_params.is_empty() {
-                            decl.type_manifest
-                        } else {
-                            None
-                        }
-                    })
-                } else {
-                    None
-                };
-                if let Some(manifest) = manifest {
-                    return visit(ctx, env, manifest, name, seen);
-                }
-                false
-            }
-            _ => false,
-        }
-    }
-
     // Match OCaml `Typeopt.is_base_type`: inspect `scrape env ty`
     // (compiler/ml/typeopt.ml:99-101).
+    let visit = || {
+        let ty = scrape_ty(ctx, env, ty);
+        // NOTE: OCaml tests `Path.same p Predef.path_*`; this last-component
+        // name test is broader and is kept as-is to preserve output.
+        matches!(&*ctx.get_desc(ty), TypeDesc::Tconstr { path, .. } if path.last() == name)
+    };
     let query = match name {
         "unit" => Some(TYPEOPT_BASE_UNIT),
         "bool" => Some(TYPEOPT_BASE_BOOL),
         _ => None,
     };
-    if let Some(query) = query {
-        return ctx.typeopt_answer(env.id(), ty, query, || {
-            visit(
-                ctx,
-                env,
-                ty,
-                name,
-                &mut crate::types::type_expr::TypeExprRefSet::new(),
-            )
-        });
+    match query {
+        Some(query) => ctx.typeopt_answer(env.id(), ty, query, visit),
+        None => visit(),
     }
-    visit(
-        ctx,
-        env,
-        ty,
-        name,
-        &mut crate::types::type_expr::TypeExprRefSet::new(),
-    )
 }
 
 fn type_is_builtin_path_but_option(path: &Path) -> BuiltinPathTest {
@@ -469,20 +417,6 @@ pub(crate) fn find_type_decl<'a>(
 ) -> Option<crate::types::decl::TypeDeclarationRef<'a>> {
     use crate::types::decl::TypeDeclarationRef;
     crate::types::ctype::lookup_type_decl_for_path(ctx, env, path)
-        .or_else(|| match path {
-            Path::Pident(id) if !id.is_persistent() && id.stamp() != 0 => ctx
-                .find_type_decl_by_stamp(id.stamp())
-                .map(|decl| TypeDeclarationRef::owned(decl.clone())),
-            _ => None,
-        })
-        .or_else(|| {
-            ctx.find_resolved_pdot_type_by_name(path)
-                .map(TypeDeclarationRef::Shared)
-        })
-        .or_else(|| {
-            ctx.find_type_decl_by_path(&path.name())
-                .map(|decl| TypeDeclarationRef::owned(decl.clone()))
-        })
         .or_else(|| env.lookup_type(path).ok().map(TypeDeclarationRef::Borrowed))
 }
 
@@ -528,39 +462,8 @@ mod tests {
     use super::*;
     use crate::context::IdGenerator;
     use crate::ident::Ident;
-    use crate::location::Location;
     use crate::types::asttypes::PrivateFlag;
     use crate::types::decl::TypeDeclaration;
-
-    #[test]
-    fn base_type_expands_strengthened_local_path_by_identity() {
-        let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
-        let module_id = ctx.create_ident("Dimension");
-        let path = Path::pdot(Path::pident(module_id), "t");
-        ctx.register_type_decl_by_exact_path(
-            path.clone(),
-            TypeDeclaration {
-                type_params: vec![],
-                type_arity: 0,
-                type_kind: TypeKind::TypeAbstract,
-                type_private: PrivateFlag::Public,
-                type_manifest: Some(ctx.predef_float()),
-                type_variance: vec![],
-                type_newtype_level: None,
-                type_loc: crate::types::DeclLoc::none(),
-                type_attributes: vec![],
-                type_immediate: false,
-                type_representation: crate::types::TypeRepresentation::Boxed,
-                type_shape: crate::types::ValueShape::Unstated,
-                type_inlined_types: vec![],
-                type_path: Some(path.clone()),
-            },
-        );
-        let ty = ctx.new_constr(path, vec![]);
-
-        assert!(is_base_type(&ctx, &Env::empty(), ty, "float"));
-    }
 
     #[test]
     fn base_type_uses_private_manifest_for_optimization() {
