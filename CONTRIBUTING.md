@@ -103,11 +103,13 @@ Run `yarn install`. This will install the npm dependencies required for the buil
 
 #### rustup install
 
-[Rewatch](./rewatch/) is built with rust. Make sure you have [rustup](https://rustup.rs/) installed to manage rust versions.
+The compiler and [Rewatch](./rewatch/) are built with Rust. Make sure you have [rustup](https://rustup.rs/) installed; it uses the toolchain pinned in `rust-toolchain.toml`.
 
 ```sh
-rustup toolchain install 1.91
-rustup override set 1.91
+# Installs the pinned toolchain (rustup also does this on the first build).
+rustup toolchain install
+# Only if you set a directory override for this checkout before: it wins over the pin.
+rustup override unset
 ```
 
 ### B. Devcontainer

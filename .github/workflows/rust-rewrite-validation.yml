@@ -25,9 +25,9 @@ jobs:
           python3 scripts/test_js_output_fixture_reporting.py
           python3 scripts/test_typedtree_parity_exit.py
 
-      # This is the toolchain used by the release parity measurements. The
-      # crate's minimum supported version is not the validation toolchain.
-      - uses: dtolnay/rust-toolchain@1.93.1
+      # rust-toolchain.toml pins the toolchain of every Rust build here.
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install
 
       - uses: actions/cache/restore@v5
         id: rust-cache
@@ -37,9 +37,9 @@ jobs:
             ~/.cargo/git
             compiler-rust/target
             rewatch/target
-          key: rewrite-release-${{ runner.os }}-${{ hashFiles('compiler-rust/Cargo.lock', 'rewatch/Cargo.lock') }}-${{ github.sha }}
+          key: rewrite-release-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'compiler-rust/Cargo.lock', 'rewatch/Cargo.lock') }}-${{ github.sha }}
           restore-keys: |
-            rewrite-release-${{ runner.os }}-${{ hashFiles('compiler-rust/Cargo.lock', 'rewatch/Cargo.lock') }}-
+            rewrite-release-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'compiler-rust/Cargo.lock', 'rewatch/Cargo.lock') }}-
 
       - uses: ./.github/actions/setup-node
       - uses: ./.github/actions/setup-linux-dependencies
