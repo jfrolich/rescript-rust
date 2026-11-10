@@ -4,17 +4,15 @@
 //! import declarations, export blocks, purity metadata, and the module wrapper.
 //! This corresponds to OCaml's `js_dump_program.ml`.
 
+use super::arena::{
+    ExprKind, JsArena, JsDepsProgram as DepsProgram, JsProgram as Program, Stmt, StmtKind,
+};
 use super::op::Kind;
 use super::printer::{JsPrinter, js_export_name};
 use super::source_map::{SourceMapBuilder, SourceMapMode, inline_comment, linked_comment};
-use super::{
-    Block, DepsProgram, Expression, ExpressionDesc, ModuleFormat, ModulePathResolver, Program,
-    Statement, StatementDesc,
-};
+use super::{ModuleFormat, ModulePathResolver};
 use crate::binary_ast::ppx::{JsStmtClassification, classify_js_stmt};
 use crate::ident::Ident;
-use crate::intern::StrIdx;
-use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -68,7 +66,8 @@ impl JsPrinter<'_> {
             self.write("'use strict';");
             self.newline();
         }
-        let (file_comments, block_start) = split_leading_file_comments(&program.program.block);
+        let (file_comments, block_start) =
+            split_leading_file_comments(&program.program.arena, &program.program.block);
         if file_comments.is_empty() {
             self.at_least_two_lines();
         } else {
@@ -238,19 +237,15 @@ fn deps_program_is_empty(program: &DepsProgram) -> bool {
         && program.program.name_reservations.is_empty()
 }
 
-fn split_leading_file_comments(block: &Block) -> (Vec<&str>, usize) {
+fn split_leading_file_comments<'a>(a: &'a JsArena, block: &[Stmt]) -> (Vec<&'a str>, usize) {
     let mut index = 0;
     let mut comments = Vec::new();
 
-    while let Some(Statement {
-        desc:
-            StatementDesc::Exp(Expression {
-                desc: ExpressionDesc::RawJsCode(info),
-                ..
-            }),
-        ..
-    }) = block.get(index)
+    while let Some(stmt) = block.get(index)
+        && let StmtKind::Exp(expr) = a.sk(*stmt)
+        && let ExprKind::RawJsCode(info) = a.ek(expr)
     {
+        let info = a.raw(info);
         if !info.is_stmt
             || !matches!(
                 classify_js_stmt(&info.code),
@@ -268,13 +263,10 @@ fn split_leading_file_comments(block: &Block) -> (Vec<&str>, usize) {
 
 /// Print a program to a string
 pub fn print_program(program: &Program) -> String {
-    let mut printer = JsPrinter::with_capacity(estimated_block_output_capacity(
-        program.block.len(),
-        program.exports.len(),
-        0,
-        0,
-        true,
-    ));
+    let mut printer = JsPrinter::with_capacity(
+        &program.arena,
+        estimated_block_output_capacity(program.block.len(), program.exports.len(), 0, 0, true),
+    );
     printer.print_program(program);
     printer.into_output()
 }
@@ -346,6 +338,7 @@ pub fn print_deps_program_with_directives_and_options(
 ) -> String {
     let capacity = estimated_deps_program_output_capacity(program, directives, emit_header);
     let mut printer = JsPrinter::with_module_path_resolver_options_and_capacity(
+        &program.program.arena,
         module_path_resolver,
         debug,
         jsx_preserve,
@@ -372,8 +365,40 @@ pub fn print_deps_program_with_source_map(
     source_root: &str,
     lam_locs: Arc<crate::lambda::LamLocTable>,
 ) -> (String, Option<String>) {
+    print_arena_deps_program_with_source_map(
+        program,
+        module_path_resolver,
+        directives,
+        debug,
+        jsx_preserve,
+        emit_header,
+        target_file,
+        source_file,
+        mode,
+        sources_content,
+        source_root,
+        lam_locs,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn print_arena_deps_program_with_source_map(
+    program: &DepsProgram,
+    module_path_resolver: Option<&ModulePathResolver>,
+    directives: &[String],
+    debug: bool,
+    jsx_preserve: bool,
+    emit_header: bool,
+    target_file: &Path,
+    source_file: &Path,
+    mode: SourceMapMode,
+    sources_content: bool,
+    source_root: &str,
+    lam_locs: Arc<crate::lambda::LamLocTable>,
+) -> (String, Option<String>) {
     let capacity = estimated_deps_program_output_capacity(program, directives, emit_header);
     let mut printer = JsPrinter::with_module_path_resolver_options_and_capacity(
+        &program.program.arena,
         module_path_resolver,
         debug,
         jsx_preserve,
@@ -414,23 +439,40 @@ pub fn print_deps_program_with_source_map(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::js_ir::arena::VarDecl;
+    use crate::js_ir::build::{exp as JE, stmt as JS};
     use crate::js_ir::op::{ImportAttributes, Kind, Number};
     use crate::js_ir::printer::JsPrinter;
-    use crate::js_ir::{
-        ExpressionDesc, JsRawInfo, ModuleId, ModulePathResolver, VariableDeclaration,
-    };
+    use crate::js_ir::test_util::test_props;
+    use crate::js_ir::{JsRawInfo, ModuleId, ModulePathResolver};
+
+    /// An arena program over `block`, owning `arena`.
+    fn test_deps(
+        block: Vec<Stmt>,
+        exports: Vec<Ident>,
+        modules: Vec<ModuleId>,
+        side_effect: Option<String>,
+        arena: JsArena,
+    ) -> DepsProgram {
+        let export_set = exports.iter().copied().collect();
+        DepsProgram {
+            program: Program {
+                arena,
+                block,
+                exports,
+                export_set,
+                name_reservations: Vec::new(),
+            },
+            modules,
+            side_effect,
+        }
+    }
     use std::path::Path;
 
     #[test]
     fn test_print_empty_deps_program_uses_ocaml_empty_explanation() {
-        let rendered = print_deps_program(
-            &DepsProgram {
-                program: Program::new(vec![], vec![]),
-                modules: vec![],
-                side_effect: None,
-            },
-            None,
-        );
+        let j = JsArena::new();
+        let rendered = print_deps_program(&test_deps(vec![], vec![], vec![], None, j), None);
         assert_eq!(
             rendered,
             "// Generated by ReScript, PLEASE EDIT WITH CARE\n/* This output is empty. Its source's type definitions, externals and/or unused code got optimized away. */\n"
@@ -439,20 +481,23 @@ mod tests {
 
     #[test]
     fn test_print_deps_program_emits_top_level_directives_before_header() {
+        let mut j = JsArena::new();
         let rendered = print_deps_program_with_directives(
-            &DepsProgram {
-                program: Program::new(
-                    vec![Statement::variable(VariableDeclaration {
+            &test_deps(
+                vec![JS::variable(
+                    VarDecl {
                         ident: Ident::create_local("a"),
-                        value: Some(Expression::var(Ident::create_local("Belt_Array"))),
+                        value: Some(JE::var(Ident::create_local("Belt_Array"), &mut j)),
                         property: crate::lambda::lam_compat::LetKind::Strict,
                         ident_info: Default::default(),
-                    })],
-                    vec![],
-                ),
-                modules: vec![],
-                side_effect: None,
-            },
+                    },
+                    &mut j,
+                )],
+                vec![],
+                vec![],
+                None,
+                j,
+            ),
             None,
             &[
                 "first directive;".to_string(),
@@ -469,6 +514,7 @@ mod tests {
 
     #[test]
     fn test_print_deps_program_keeps_blank_line_after_imports() {
+        let mut j = JsArena::new();
         let import_id = Ident::create_local("Js_dict");
         let resolver = ModulePathResolver::from_compile_options(
             None,
@@ -480,17 +526,21 @@ mod tests {
             false,
         );
         let rendered = print_deps_program(
-            &DepsProgram {
-                program: Program::new(
-                    vec![Statement::variable(VariableDeclaration {
+            &test_deps(
+                vec![JS::variable(
+                    VarDecl {
                         ident: Ident::create_local("dict"),
-                        value: Some(Expression::new(ExpressionDesc::Object(vec![]))),
+                        value: Some(JE::new(
+                            ExprKind::Object(test_props(vec![], &mut j)),
+                            &mut j,
+                        )),
                         property: crate::lambda::lam_compat::LetKind::Strict,
                         ident_info: Default::default(),
-                    })],
-                    vec![],
-                ),
-                modules: vec![ModuleId {
+                    },
+                    &mut j,
+                )],
+                vec![],
+                vec![ModuleId {
                     id: import_id,
                     kind: Kind::External {
                         name: "@rescript/runtime/lib/es6/Js_dict.js".to_string(),
@@ -499,8 +549,9 @@ mod tests {
                     },
                     dynamic_import: false,
                 }],
-                side_effect: Some(String::new()),
-            },
+                Some(String::new()),
+                j,
+            ),
             Some(&resolver),
         );
 
@@ -511,6 +562,7 @@ mod tests {
 
     #[test]
     fn test_print_deps_program_skips_static_import_for_dynamic_dependencies_like_ocaml() {
+        let j = JsArena::new();
         let resolver = ModulePathResolver::from_compile_options(
             None,
             Some(Path::new("/tmp/dynamic_import.mjs")),
@@ -521,9 +573,10 @@ mod tests {
             false,
         );
         let rendered = print_deps_program(
-            &DepsProgram {
-                program: Program::new(vec![], vec![]),
-                modules: vec![ModuleId {
+            &test_deps(
+                vec![],
+                vec![],
+                vec![ModuleId {
                     id: Ident::create_local("Dynamic_dep"),
                     kind: Kind::External {
                         name: "./dynamic_dep.mjs".to_string(),
@@ -532,8 +585,9 @@ mod tests {
                     },
                     dynamic_import: true,
                 }],
-                side_effect: Some("Dynamic_dep".to_string()),
-            },
+                Some("Dynamic_dep".to_string()),
+                j,
+            ),
             Some(&resolver),
         );
 
@@ -544,6 +598,7 @@ mod tests {
     #[test]
     #[ignore = "stale internal shape expectation; covered by strict lambda/JS parity gates"]
     fn test_print_deps_program_scopes_module_import_aliases_across_runtime_and_external_modules() {
+        let mut j = JsArena::new();
         let runtime = ModuleId {
             id: Ident::create_persistent("List"),
             kind: Kind::Runtime,
@@ -577,42 +632,53 @@ mod tests {
             false,
         );
         let rendered = print_deps_program(
-            &DepsProgram {
-                program: Program::new(
-                    vec![
-                        Statement::variable(VariableDeclaration {
+            &test_deps(
+                vec![
+                    JS::variable(
+                        VarDecl {
                             ident: Ident::create_local("runtimeMember"),
-                            value: Some(Expression::qualified(
+                            value: Some(JE::qualified(
                                 runtime.clone(),
                                 Some("map".to_string()),
+                                &mut j,
                             )),
                             property: crate::lambda::lam_compat::LetKind::Strict,
                             ident_info: Default::default(),
-                        }),
-                        Statement::variable(VariableDeclaration {
+                        },
+                        &mut j,
+                    ),
+                    JS::variable(
+                        VarDecl {
                             ident: Ident::create_local("reactVMember"),
-                            value: Some(Expression::qualified(
+                            value: Some(JE::qualified(
                                 react_v.clone(),
                                 Some("ff".to_string()),
+                                &mut j,
                             )),
                             property: crate::lambda::lam_compat::LetKind::Strict,
                             ident_info: Default::default(),
-                        }),
-                        Statement::variable(VariableDeclaration {
+                        },
+                        &mut j,
+                    ),
+                    JS::variable(
+                        VarDecl {
                             ident: Ident::create_local("reactXMember"),
-                            value: Some(Expression::qualified(
+                            value: Some(JE::qualified(
                                 react_x.clone(),
                                 Some("ff2".to_string()),
+                                &mut j,
                             )),
                             property: crate::lambda::lam_compat::LetKind::Strict,
                             ident_info: Default::default(),
-                        }),
-                    ],
-                    vec![],
-                ),
-                modules: vec![runtime, react_v, react_x],
-                side_effect: Some(String::new()),
-            },
+                        },
+                        &mut j,
+                    ),
+                ],
+                vec![],
+                vec![runtime, react_v, react_x],
+                Some(String::new()),
+                j,
+            ),
             Some(&resolver),
         );
 
@@ -636,7 +702,8 @@ mod tests {
             None,
             false,
         );
-        let mut printer = JsPrinter::with_module_path_resolver(Some(&resolver));
+        let a = crate::js_ir::arena::JsArena::new();
+        let mut printer = JsPrinter::with_module_path_resolver(&a, Some(&resolver));
         let printed = printer.print_module_imports(&[ModuleId {
             id: import_id,
             kind: Kind::External {
@@ -661,20 +728,23 @@ mod tests {
 
     #[test]
     fn test_print_deps_program_keeps_header_spacing_without_imports() {
+        let mut j = JsArena::new();
         let rendered = print_deps_program(
-            &DepsProgram {
-                program: Program::new(
-                    vec![Statement::variable(VariableDeclaration {
+            &test_deps(
+                vec![JS::variable(
+                    VarDecl {
                         ident: Ident::create_local("x"),
-                        value: Some(Expression::number(Number::int(1))),
+                        value: Some(JE::number(Number::int(1), &mut j)),
                         property: crate::lambda::lam_compat::LetKind::Strict,
                         ident_info: Default::default(),
-                    })],
-                    vec![],
-                ),
-                modules: vec![],
-                side_effect: None,
-            },
+                    },
+                    &mut j,
+                )],
+                vec![],
+                vec![],
+                None,
+                j,
+            ),
             None,
         );
 
@@ -686,6 +756,7 @@ mod tests {
     #[test]
     #[ignore = "stale internal shape expectation; covered by strict lambda/JS parity gates"]
     fn test_print_deps_program_hoists_leading_raw_js_comment_statements_before_imports() {
+        let mut j = JsArena::new();
         let import_id = Ident::create_local("Belt_List");
         let resolver = ModulePathResolver::from_compile_options(
             None,
@@ -697,33 +768,47 @@ mod tests {
             false,
         );
         let rendered = print_deps_program(
-            &DepsProgram {
-                program: Program::new(
-                    vec![
-                        Statement::exp(Expression::new(ExpressionDesc::RawJsCode(JsRawInfo {
-                            code: "/**\n * copyright\n*/".to_string(),
-                            is_stmt: true,
-                        }))),
-                        Statement::exp(Expression::new(ExpressionDesc::RawJsCode(JsRawInfo {
-                            code: "// hello".to_string(),
-                            is_stmt: true,
-                        }))),
-                        Statement::variable(VariableDeclaration {
+            &test_deps(
+                vec![
+                    JS::exp(
+                        JE::new(
+                            ExprKind::RawJsCode(j.raw_id(JsRawInfo {
+                                code: "/**\n * copyright\n*/".to_string(),
+                                is_stmt: true,
+                            })),
+                            &mut j,
+                        ),
+                        &mut j,
+                    ),
+                    JS::exp(
+                        JE::new(
+                            ExprKind::RawJsCode(j.raw_id(JsRawInfo {
+                                code: "// hello".to_string(),
+                                is_stmt: true,
+                            })),
+                            &mut j,
+                        ),
+                        &mut j,
+                    ),
+                    JS::variable(
+                        VarDecl {
                             ident: Ident::create_local("x"),
-                            value: Some(Expression::number(Number::int(1))),
+                            value: Some(JE::number(Number::int(1), &mut j)),
                             property: crate::lambda::lam_compat::LetKind::Strict,
                             ident_info: Default::default(),
-                        }),
-                    ],
-                    vec![],
-                ),
-                modules: vec![ModuleId {
+                        },
+                        &mut j,
+                    ),
+                ],
+                vec![],
+                vec![ModuleId {
                     id: import_id,
                     kind: Kind::Runtime,
                     dynamic_import: false,
                 }],
-                side_effect: None,
-            },
+                None,
+                j,
+            ),
             Some(&resolver),
         );
 
@@ -734,20 +819,23 @@ mod tests {
 
     #[test]
     fn test_print_deps_program_omits_undefined_initializer() {
+        let mut j = JsArena::new();
         let rendered = print_deps_program(
-            &DepsProgram {
-                program: Program::new(
-                    vec![Statement::variable(VariableDeclaration {
+            &test_deps(
+                vec![JS::variable(
+                    VarDecl {
                         ident: Ident::create_local("VS"),
-                        value: Some(Expression::undefined(false)),
+                        value: Some(JE::undefined(false, &mut j)),
                         property: crate::lambda::lam_compat::LetKind::Strict,
                         ident_info: Default::default(),
-                    })],
-                    vec![],
-                ),
-                modules: vec![],
-                side_effect: None,
-            },
+                    },
+                    &mut j,
+                )],
+                vec![],
+                vec![],
+                None,
+                j,
+            ),
             None,
         );
 
@@ -756,12 +844,15 @@ mod tests {
 
     #[test]
     fn test_print_deps_program_keeps_blank_line_before_purity_trailer_without_exports() {
+        let mut j = JsArena::new();
         let rendered = print_deps_program(
-            &DepsProgram {
-                program: Program::new(vec![Statement::debugger()], vec![]),
-                modules: vec![],
-                side_effect: Some(String::new()),
-            },
+            &test_deps(
+                vec![JS::debugger(&mut j)],
+                vec![],
+                vec![],
+                Some(String::new()),
+                j,
+            ),
             None,
         );
 
@@ -770,21 +861,24 @@ mod tests {
 
     #[test]
     fn test_print_deps_program_aliases_default_export_name() {
+        let mut j = JsArena::new();
         let default_ident = Ident::create_local("default");
         let rendered = print_deps_program(
-            &DepsProgram {
-                program: Program::new(
-                    vec![Statement::variable(VariableDeclaration {
+            &test_deps(
+                vec![JS::variable(
+                    VarDecl {
                         ident: default_ident,
-                        value: Some(Expression::string("xx")),
+                        value: Some(JE::string("xx", &mut j)),
                         property: crate::lambda::lam_compat::LetKind::Strict,
                         ident_info: Default::default(),
-                    })],
-                    vec![default_ident],
-                ),
-                modules: vec![],
-                side_effect: None,
-            },
+                    },
+                    &mut j,
+                )],
+                vec![default_ident],
+                vec![],
+                None,
+                j,
+            ),
             None,
         );
 

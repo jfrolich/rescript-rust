@@ -1,4 +1,7 @@
 use super::*;
+use crate::expect_dump;
+use crate::js_ir::dump;
+use crate::js_ir::printer::print_stmts;
 use crate::lambda::LamLoc;
 
 #[test]
@@ -18,7 +21,7 @@ fn equal_flattened_staticcatch_handlers_share_one_switch_body() {
         )),
         Box::new(Lambda::var(message)),
     );
-    let block = compiler.compile_return_block_tree(&Lambda::LstaticCatch(
+    let block = compiler.compile_return_block_lam(&Lambda::LstaticCatch(
         Box::new(Lambda::LstaticCatch(
             Box::new(Lambda::if_(
                 Lambda::var(cond),
@@ -31,7 +34,7 @@ fn equal_flattened_staticcatch_handlers_share_one_switch_body() {
         (1, vec![]),
         Box::new(handler),
     ));
-    let rendered = print_block(&block);
+    let rendered = print_stmts(&compiler.j, &block);
     assert!(
         rendered.contains("case 1 :") && rendered.contains("case 2 :"),
         "both flattened exit codes must be dispatched:\n{rendered}"
@@ -67,9 +70,9 @@ fn nested_return_staticcatch_preserves_exit_dispatch_in_enclosing_jump() {
         )),
     );
     let block = compiler.with_static_jump_handler(1, &outer_exit, &[], |compiler| {
-        compiler.compile_return_block_tree(&inner)
+        compiler.compile_return_block_lam(&inner)
     });
-    let rendered = print_block(&block);
+    let rendered = print_stmts(&compiler.j, &block);
     assert!(
         rendered.contains("let exit = 0;") && rendered.contains("if (exit === 2)"),
         "a nested catch must dispatch only when its exit was raised:\n{rendered}"
@@ -83,7 +86,7 @@ fn staticcatch_trywith_return_keeps_bound_exit_effects_outside_try_like_ocaml() 
     let g = Ident::create_local("g");
     let exn = Ident::create_local("exn");
     let val = Ident::create_local("val");
-    let block = compiler.compile_return_block_tree(&Lambda::LstaticCatch(
+    let block = compiler.compile_return_block_lam(&Lambda::LstaticCatch(
         Box::new(Lambda::LtryWith(
             Box::new(Lambda::LstaticRaise(
                 -2,
@@ -110,69 +113,10 @@ fn staticcatch_trywith_return_keeps_bound_exit_effects_outside_try_like_ocaml() 
         }))),
     ));
 
-    let [declare, try_stmt, ret] = block.as_slice() else {
-        panic!("expected binding decl, try, and trailing return, got {block:?}");
-    };
-
-    assert!(matches!(
-        &declare.desc,
-        StatementDesc::Variable(VariableDeclaration { ident, value, .. })
-            if ident.same(&val) && value.is_none()
-    ));
-
-    let StatementDesc::Try(body, Some((caught, handler)), None) = &try_stmt.desc else {
-        panic!("expected a try statement, got {try_stmt:?}");
-    };
-    assert!(caught.same(&exn));
-    assert!(matches!(
-        body.as_slice(),
-        [Statement {
-            desc: StatementDesc::Exp(Expression {
-                desc: ExpressionDesc::Bin(BinOp::Eq, lhs, rhs),
-                ..
-            }),
-            ..
-        }] if matches!(
-            (&lhs.as_ref().desc, &rhs.as_ref().desc),
-            (
-                ExpressionDesc::Var(crate::js_ir::VIdent::Id(lhs_id)),
-                ExpressionDesc::Call(func, args, _)
-            ) if lhs_id.same(&val)
-                && args.is_empty()
-                && matches!(
-                    func.as_ref(),
-                    Expression {
-                        desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(func_id)),
-                        ..
-                    } if func_id.same(&x)
-                )
-        )
-    ));
-    assert!(matches!(
-        handler.as_slice(),
-        [Statement {
-            desc: StatementDesc::Return(Expression {
-                desc: ExpressionDesc::Number(Number::Int { i: 1, .. }),
-                ..
-            }),
-            ..
-        }]
-    ));
-
-    assert!(matches!(
-        &ret.desc,
-        StatementDesc::Return(Expression {
-            desc: ExpressionDesc::Call(func, args, _),
-            ..
-        }) if args.is_empty()
-            && matches!(
-                func.as_ref(),
-                Expression {
-                    desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(func_id)),
-                    ..
-                } if func_id.same(&g)
-            )
-    ));
+    expect_dump!(
+        dump::block(&compiler.j, &block),
+        "let[Variable] val; Try{Exp(Eq(val, Call(x; )))} catch(exn){Return(1)}; Return(Call(g; ))"
+    );
 }
 
 #[test]
@@ -222,8 +166,8 @@ fn staticcatch_trywith_tail_loop_keeps_bound_exit_effects_outside_try_like_ocaml
         Lambda::unit(),
     );
 
-    let compiled = compiler.compile_expr_tree(&lam);
-    let rendered = print_block(&compiled.prelude);
+    let compiled = compiler.compile_expr_lam(&lam);
+    let rendered = print_stmts(&compiler.j, &compiled.prelude);
 
     assert!(
         rendered.contains("while (true)"),
@@ -431,30 +375,14 @@ fn fallthrough_handlers_do_not_reorder_grouped_named_string_return_cases() {
     ];
 
     let block = compiler.with_fallthrough_return_handler(1, &[], |this| {
-        this.compile_named_string_switch_return_tree(Expression::var(scrutinee), &cases, None, true)
+        let test = JE::var(scrutinee, &mut this.j);
+        this.compile_named_string_switch_return_lam(test, &cases, None, true)
     });
 
-    let [switch_stmt] = block.as_slice() else {
-        panic!("expected a single string switch");
-    };
-    let StatementDesc::StringSwitch(test, clauses, None) = &switch_stmt.desc else {
-        panic!("expected an exhaustive string switch");
-    };
-    assert!(matches!(
-        test,
-        Expression {
-            desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
-            ..
-        } if id.same(&scrutinee)
-    ));
-
-    assert_eq!(clauses.len(), 3);
-    assert_eq!(clauses[0].tag_type, SwitchCaseTag::String("B".to_string()));
-    assert_switch_case_returns_int_result(&clauses[0].clause.body, 1);
-    assert_eq!(clauses[1].tag_type, SwitchCaseTag::String("A".to_string()));
-    assert!(clauses[1].clause.body.is_empty());
-    assert_eq!(clauses[2].tag_type, SwitchCaseTag::String("C".to_string()));
-    assert_switch_case_returns_int_result(&clauses[2].clause.body, 2);
+    expect_dump!(
+        dump::block(&compiler.j, &block),
+        "StringSwitch(scrutinee) {case \"B\": {Return(1)} case \"A\": {} case \"C\": {Return(2)} }"
+    );
 }
 
 #[test]
@@ -462,7 +390,7 @@ fn fallthrough_handlers_do_not_reorder_grouped_string_switch_return_blocks() {
     let mut compiler = LambdaCompiler::new();
     let scrutinee = Ident::create_local("scrutinee");
     let block = compiler.with_fallthrough_return_handler(1, &[], |this| {
-        this.compile_string_switch_return_block_tree(
+        this.compile_string_switch_return_block_lam(
             &Lambda::var(scrutinee),
             &[
                 ("A".to_string(), Lambda::const_(Constant::int(2))),
@@ -473,27 +401,10 @@ fn fallthrough_handlers_do_not_reorder_grouped_string_switch_return_blocks() {
         )
     });
 
-    let [switch_stmt] = block.as_slice() else {
-        panic!("expected a single string switch");
-    };
-    let StatementDesc::StringSwitch(test, clauses, None) = &switch_stmt.desc else {
-        panic!("expected an exhaustive string switch");
-    };
-    assert!(matches!(
-        test,
-        Expression {
-            desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
-            ..
-        } if id.same(&scrutinee)
-    ));
-
-    assert_eq!(clauses.len(), 3);
-    assert_eq!(clauses[0].tag_type, SwitchCaseTag::String("B".to_string()));
-    assert_switch_case_returns_int_result(&clauses[0].clause.body, 1);
-    assert_eq!(clauses[1].tag_type, SwitchCaseTag::String("A".to_string()));
-    assert!(clauses[1].clause.body.is_empty());
-    assert_eq!(clauses[2].tag_type, SwitchCaseTag::String("C".to_string()));
-    assert_switch_case_returns_int_result(&clauses[2].clause.body, 2);
+    expect_dump!(
+        dump::block(&compiler.j, &block),
+        "StringSwitch(scrutinee) {case \"B\": {Return(1)} case \"A\": {} case \"C\": {Return(2)} }"
+    );
 }
 
 #[test]
@@ -501,7 +412,7 @@ fn partial_int_return_switch_cases_break_to_shared_handler_like_test_set() {
     let mut compiler = LambdaCompiler::new();
     let action = Ident::create_local("action");
     let cond = Ident::create_local("cond");
-    let block = compiler.compile_return_block_tree(&Lambda::LstaticCatch(
+    let block = compiler.compile_return_block_lam(&Lambda::LstaticCatch(
         Box::new(Lambda::Lswitch(
             Box::new(Lambda::var(action)),
             Box::new(LambdaSwitch {
@@ -530,42 +441,16 @@ fn partial_int_return_switch_cases_break_to_shared_handler_like_test_set() {
         Box::new(Lambda::const_(Constant::int(30))),
     ));
 
-    let [switch_stmt, handler_return] = block.as_slice() else {
-        panic!("expected a switch followed by the shared handler return");
-    };
-    let StatementDesc::IntSwitch(test, clauses, None) = &switch_stmt.desc else {
-        panic!("expected the shared handler to stay outside the switch");
-    };
-    assert!(matches!(
-        test,
-        Expression {
-            desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
-            ..
-        } if id.same(&action)
-    ));
-    assert_eq!(clauses.len(), 2);
-    assert_eq!(clauses[0].0, 1);
-    assert!(
-        clauses[0].1.should_break,
-        "expected the partial case to break to the shared handler"
-    );
-    assert_eq!(clauses[1].0, 2);
-    assert_switch_case_returns_int_result(&clauses[1].1.body, 20);
-    assert!(
-        !clauses[1].1.should_break,
-        "expected the fully returning case to omit break"
+    expect_dump!(
+        dump::block(&compiler.j, &block),
+        "Switch(action) {case 1: {If(cond) {Return(10)} else {}} break case 2: {Return(20)} }; Return(30)"
     );
 
-    let rendered = print_block(&block);
+    let rendered = print_stmts(&compiler.j, &block);
     assert_eq!(
         rendered,
         "switch (action) {\n  case 1 :\n    if (cond) {\n      return 10;\n    }\n    break;\n  case 2 :\n    return 20;\n}\n\nreturn 30;"
     );
-
-    match &handler_return.desc {
-        StatementDesc::Return(expr) => assert_int_expr(expr, 30),
-        other => panic!("expected the shared handler return, got {other:?}"),
-    }
 }
 
 #[test]
@@ -575,7 +460,7 @@ fn nested_staticcatch_switch_forwarders_keep_collapsed_shared_return_like_gpr_36
     let int_value = Ident::create_local("intValue");
     let int_func = Ident::create_local("intFunc");
     let int_param = Ident::create_local("intParam");
-    let block = compiler.compile_return_block_tree(&Lambda::LstaticCatch(
+    let block = compiler.compile_return_block_lam(&Lambda::LstaticCatch(
         Box::new(Lambda::LstaticCatch(
             Box::new(Lambda::Lswitch(
                 Box::new(Lambda::var(state)),
@@ -679,7 +564,7 @@ fn nested_staticcatch_switch_forwarders_keep_collapsed_shared_return_like_gpr_36
         )),
     ));
 
-    let rendered = print_block(&block);
+    let rendered = print_stmts(&compiler.j, &block);
     assert!(
         rendered.contains("if (typeof state !== \"object\") {"),
         "expected the outer object split to stay materialized:\n{rendered}"
@@ -704,7 +589,7 @@ fn unit_return_staticcatch_bindings_without_handler_exits_share_fallthrough_tail
     let carried = Ident::create_local("carried");
     let seen = Ident::create_local("seen");
     let block = compiler.with_return_unit_context(true, |compiler| {
-        compiler.compile_return_block_tree(&Lambda::LstaticCatch(
+        compiler.compile_return_block_lam(&Lambda::LstaticCatch(
             Box::new(Lambda::if_(
                 Lambda::var(cond1),
                 Lambda::static_raise(1, vec![Lambda::var(first)]),
@@ -722,7 +607,7 @@ fn unit_return_staticcatch_bindings_without_handler_exits_share_fallthrough_tail
         ))
     });
 
-    let rendered = print_block(&block);
+    let rendered = print_stmts(&compiler.j, &block);
     assert!(
         !rendered.contains("let exit ="),
         "single-handler unit-return staticcatch bindings reintroduced an exit temp:\n{rendered}"
@@ -747,7 +632,7 @@ fn return_staticcatchs_share_nontrivial_handlers_across_multiple_exit_sites() {
     let mut compiler = LambdaCompiler::new();
     let cond = Ident::create_local("cond");
     let kind = Ident::create_local("kind");
-    let block = compiler.compile_return_block_tree(&Lambda::LstaticCatch(
+    let block = compiler.compile_return_block_lam(&Lambda::LstaticCatch(
         Box::new(Lambda::LstaticCatch(
             Box::new(Lambda::if_(
                 Lambda::var(cond),
@@ -769,7 +654,7 @@ fn return_staticcatchs_share_nontrivial_handlers_across_multiple_exit_sites() {
         Box::new(Lambda::const_(Constant::int(6))),
     ));
 
-    let rendered = print_block(&block);
+    let rendered = print_stmts(&compiler.j, &block);
     assert!(
         rendered.contains("let exit = 0;"),
         "expected repeated exits to share the handler behind an exit temp:\n{rendered}"
@@ -790,7 +675,7 @@ fn return_staticcatchs_keep_plain_handlers_inline_across_multiple_exit_sites() {
     let mut compiler = LambdaCompiler::new();
     let kind = Ident::create_local("kind");
     let do_with_b = Ident::create_local("doWithB");
-    let block = compiler.compile_return_block_tree(&Lambda::LstaticCatch(
+    let block = compiler.compile_return_block_lam(&Lambda::LstaticCatch(
         Box::new(Lambda::LstringSwitch(
             Box::new(Lambda::var(kind)),
             vec![
@@ -811,7 +696,7 @@ fn return_staticcatchs_keep_plain_handlers_inline_across_multiple_exit_sites() {
         )),
     ));
 
-    let rendered = print_block(&block);
+    let rendered = print_stmts(&compiler.j, &block);
     assert!(
         !rendered.contains("let exit ="),
         "plain multi-exit handlers should stay inline without an exit temp:\n{rendered}"
@@ -832,7 +717,7 @@ fn single_case_staticcatch_wrapped_named_variant_return_switch_falls_through_to_
     let mut compiler = LambdaCompiler::new();
     let action = Ident::create_local("action");
     let block = compiler.with_return_unit_context(true, |compiler| {
-        compiler.compile_return_block_tree(&Lambda::LstaticCatch(
+        compiler.compile_return_block_lam(&Lambda::LstaticCatch(
             Box::new(Lambda::Lswitch(
                 Box::new(Lambda::var(action)),
                 Box::new(LambdaSwitch {
@@ -869,41 +754,17 @@ fn single_case_staticcatch_wrapped_named_variant_return_switch_falls_through_to_
         ))
     });
 
-    let [if_stmt, handler_return] = block.as_slice() else {
-        panic!("expected an if statement followed by the handler return");
-    };
-    let (cond, then_block, else_block) = match &if_stmt.desc {
-        StatementDesc::If(cond, then_block, else_block) => (cond, then_block, else_block),
-        StatementDesc::Block(inner) => {
-            let [inner_if] = inner.as_slice() else {
-                panic!("expected the staticcatch wrapper block to contain a single if");
-            };
-            let StatementDesc::If(cond, then_block, else_block) = &inner_if.desc else {
-                panic!("expected the single-case staticcatch switch to lower to if/fallthrough");
-            };
-            (cond, then_block, else_block)
-        }
-        other => panic!(
-            "expected the single-case staticcatch switch to lower to if/fallthrough, got {other:?}"
-        ),
-    };
-    assert_string_equality_check(cond, Some(&action), None, "One");
-    assert!(
-        else_block.is_empty(),
-        "unexpected else block: {else_block:?}"
+    expect_dump!(
+        dump::block(&compiler.j, &block),
+        "If(EqEqEq(action, \"One\")) {Return(1)} else {}; Return(2)"
     );
-    assert_switch_case_returns_int_result(then_block, 1);
-    match &handler_return.desc {
-        StatementDesc::Return(expr) => assert_int_expr(expr, 2),
-        other => panic!("expected the fallthrough handler return, got {other:?}"),
-    }
 }
 
 #[test]
 fn single_case_staticcatch_wrapped_named_variant_non_unit_return_switch_falls_through_to_handler() {
     let mut compiler = LambdaCompiler::new();
     let action = Ident::create_local("action");
-    let block = compiler.compile_return_block_tree(&Lambda::LstaticCatch(
+    let block = compiler.compile_return_block_lam(&Lambda::LstaticCatch(
         Box::new(Lambda::Lswitch(
             Box::new(Lambda::var(action)),
             Box::new(LambdaSwitch {
@@ -935,7 +796,7 @@ fn single_case_staticcatch_wrapped_named_variant_non_unit_return_switch_falls_th
         Box::new(Lambda::const_(Constant::int(2))),
     ));
 
-    let rendered = print_block(&block);
+    let rendered = print_stmts(&compiler.j, &block);
     assert!(
         rendered.contains("if (action === \"One\") {"),
         "expected the single-case switch to stay as a positive guard:\n{rendered}"
@@ -962,7 +823,7 @@ fn single_case_staticcatch_wrapped_named_variant_unit_handler_falls_through_like
     let then_seen = Ident::create_local("then_seen");
     let else_seen = Ident::create_local("else_seen");
     let block = compiler.with_return_unit_context(true, |compiler| {
-        compiler.compile_return_block_tree(&Lambda::LstaticCatch(
+        compiler.compile_return_block_lam(&Lambda::LstaticCatch(
             Box::new(Lambda::Lswitch(
                 Box::new(Lambda::var(action)),
                 Box::new(LambdaSwitch {
@@ -1002,7 +863,7 @@ fn single_case_staticcatch_wrapped_named_variant_unit_handler_falls_through_like
         ))
     });
 
-    let rendered = print_block(&block);
+    let rendered = print_stmts(&compiler.j, &block);
     assert!(
         rendered.contains("if (action === \"One\") {"),
         "expected the single-case handler to stay as a positive guard:\n{rendered}"

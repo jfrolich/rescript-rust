@@ -12,11 +12,14 @@ use std::sync::Arc;
 use crate::cmi::persistent_env::{CmjExportArity, CmjExportConstant};
 use crate::context::IdGenerator;
 use crate::ident::Ident;
+use crate::js_ir::arena::{
+    Block, Clause, Expr, ExprKind, JsArena, JsDepsProgram as DepsProgram, JsProgram as Program,
+    Stmt, StmtKind, StringClauseInfo, VarDecl,
+};
+use crate::js_ir::build::{exp as JE, stmt as JS};
 use crate::js_ir::op::{IdentInfo, Kind, MutableFlag, Number, PropertyName, UsedStats};
 use crate::js_ir::{
-    BinOp, Block, CallArity, CallInfo, CallKind, CaseClause, DepsProgram, Expression,
-    ExpressionDesc, ForDirection, ModuleId, ModulePathResolver, Program, Statement, StatementDesc,
-    StringClause, VIdent, VariableDeclaration, block_last_is_terminal, unnest_block,
+    BinOp, CallArity, CallInfo, CallKind, ForDirection, ModuleId, ModulePathResolver,
 };
 use crate::lambda::arena::{
     ApplyId, CatchId, IdentId, Lam, LamArena, LamList, Node, PrimId, StrSwitchId, SwitchId, View,
@@ -48,7 +51,9 @@ use super::js_exp_make::{
     block_with_return_expr_iife, int_expr, int_literal, js_expr_no_side_effects, js_seq,
     remove_pure_subexpression, to_int32,
 };
-use super::js_stmt_make::{block_finishes_output, block_terminates, strict_single_return_expr};
+use super::js_stmt_make::strict_single_return_expr;
+#[cfg(test)]
+use super::js_stmt_make::{block_finishes_output, block_terminates};
 use super::lam_coercion::{
     ExtractedExports, can_reuse_existing_undefined_export_binding, collect_declared_idents,
     extract_toplevel_exports, insert_rebound_export_before_equivalent_later_binding,
@@ -57,6 +62,7 @@ use super::lam_coercion::{
     resolve_declared_same_name_self_alias_target, resolve_export_aliases,
     reusable_same_name_export_binding,
 };
+
 use super::lam_compile_variant::{empty_switch_case_clause, stable_group_switch_cases};
 
 /// `Js_output.finished` (compiler/core/js_output.ml:28-31): whether a
@@ -129,13 +135,11 @@ impl BlockOutput {
     }
 }
 
-/// Compilation result for an expression: prelude statements plus a value
-/// expression, and the `output_finished` flag of the `Js_output.t` that
-/// OCaml's `compile_lambda` returns for it.
+/// Compilation result for an expression: prelude statements plus a value expression.
 #[derive(Debug, Clone)]
 pub(crate) struct Compiled {
     pub(crate) prelude: Block,
-    pub(crate) expr: Expression,
+    pub(crate) expr: Expr,
     pub(crate) finished: OutputFinished,
 }
 
@@ -166,10 +170,10 @@ struct FlatHandler {
 
 // OCaml's export coercion only reuses direct variables and module-field
 // projections while folding `pairs` (`compiler/core/lam_coercion.ml:99-121`).
-fn reusable_export_value_candidate(value: &Expression) -> bool {
-    match &value.desc {
-        ExpressionDesc::Var(_) => true,
-        ExpressionDesc::StaticIndex(target, _, _) => reusable_export_value_candidate(target),
+fn reusable_export_value_candidate(j: &JsArena, value: Expr) -> bool {
+    match j.ek(value) {
+        ExprKind::Var(_) | ExprKind::Qualified(_) => true,
+        ExprKind::StaticIndex(target, _, _) => reusable_export_value_candidate(j, target),
         _ => false,
     }
 }
@@ -269,14 +273,14 @@ pub(crate) enum ShortCircuitOp {
 }
 
 impl ShortCircuitOp {
-    fn default_expr(self) -> Expression {
-        Expression::bool(matches!(self, Self::Or))
+    fn default_expr(self, j: &mut JsArena) -> Expr {
+        JE::bool(matches!(self, Self::Or), j)
     }
 
-    fn test_expr(self, lhs: Expression) -> Expression {
+    fn test_expr(self, lhs: Expr, j: &mut JsArena) -> Expr {
         match self {
             Self::And => lhs,
-            Self::Or => Expression::not(lhs),
+            Self::Or => JE::not(lhs, j),
         }
     }
 
@@ -360,6 +364,14 @@ struct SavedFunctionScope {
 /// Lambda compiler to JS IR.
 pub struct LambdaCompiler {
     pub(crate) id_gen: IdGenerator,
+    /// The JS IR built by this compiler: `Compiled` values and blocks hold
+    /// handles into it, and `compile_deps_program_in_arena` moves it into
+    /// the resulting program.
+    pub(crate) j: JsArena,
+    /// `Js_output.output_finished` of each `Lifthenelse` compiled in a
+    /// return continuation, keyed by its `then` branch: only the
+    /// `return e ? a : b` arm sets it (lam_compile.ml:1514-1518).
+    if_return_finished: AHashMap<Lam, bool>,
     pub(crate) module_path_resolver: Option<ModulePathResolver>,
     pub(crate) jsx_preserve: bool,
     pub(crate) check_div_by_zero: bool,
@@ -388,15 +400,9 @@ pub struct LambdaCompiler {
     /// cross-module inlining (compiler/core/lam_stats_export.ml:53-89).
     pub(crate) cmj_export_lambdas: crate::lambda::CmjExportLambdas,
     pub(crate) cmj_export_arities: AHashMap<String, CmjExportArity>,
-    /// `Translmod.implementation.flat_make_paths`.
     flat_make_paths: Vec<crate::lambda::FlatMakePath>,
-    /// `Lam_stats.awaited_units`: locals bound to an awaited compilation
-    /// unit, `let d = await import(Unit)`; reads of nested `make` values
-    /// through them use the flat exports too.
-    pub(crate) awaited_units: ahash::AHashSet<Ident>,
-    /// `Lam_stats.assignable`: the variables some `Lassign` assigns.
-    /// Reading one of them is never delayed past other code.
-    pub(crate) assignable: ahash::AHashSet<Ident>,
+    pub(crate) awaited_units: AHashSet<Ident>,
+    pub(crate) assignable: AHashSet<Ident>,
     /// Resolves the location handles of the Lambda being compiled and of the
     /// JS IR built from it; imported lambdas are rebased into it.
     lam_locs: LamLocTable,
@@ -493,6 +499,7 @@ impl LambdaCompiler {
     ) -> Self {
         Self {
             id_gen,
+            j: JsArena::new(),
             module_path_resolver,
             jsx_preserve,
             check_div_by_zero,
@@ -505,9 +512,10 @@ impl LambdaCompiler {
             cmj_export_lambdas: Default::default(),
             cmj_export_arities: AHashMap::new(),
             flat_make_paths: Vec::new(),
-            awaited_units: ahash::AHashSet::new(),
-            assignable: ahash::AHashSet::new(),
+            awaited_units: AHashSet::new(),
+            assignable: AHashSet::new(),
             lam_locs: LamLocTable::opaque(),
+            if_return_finished: AHashMap::new(),
             external_module_ids: AHashMap::new(),
             dynamic_import_modules: Vec::new(),
             static_handlers: Vec::new(),
@@ -549,6 +557,39 @@ impl LambdaCompiler {
             check_div_by_zero,
             cross_module_inline,
         )
+    }
+
+    /// A non-method function expression (`E.ocaml_fun`).
+    pub(crate) fn function_expr(
+        &mut self,
+        params: &[Ident],
+        body: &[Stmt],
+        return_unit: bool,
+        async_: bool,
+        directive: Option<&str>,
+        source_loc: Option<LamLoc>,
+    ) -> Expr {
+        let params = self.j.ident_list(params);
+        let body = self.j.stmt_list(body);
+        let directive = directive.map(|d| self.j.str(d));
+        let f = self.j.fun_id(crate::js_ir::arena::FunInfo {
+            is_method: false,
+            params,
+            body,
+            return_unit,
+            async_,
+            directive,
+        });
+        let e = self.j.expr(ExprKind::Fun(f));
+        self.j.with_expr_loc(e, source_loc)
+    }
+
+    /// Interns a property name into the JS arena.
+    pub(crate) fn prop_name(&mut self, name: PropertyName) -> crate::js_ir::arena::PropName {
+        match name {
+            PropertyName::Lit(s) => crate::js_ir::arena::PropName::Lit(self.j.str(&s)),
+            PropertyName::Symbol => crate::js_ir::arena::PropName::Symbol,
+        }
     }
 
     pub fn set_flat_make_paths(&mut self, paths: Vec<crate::lambda::FlatMakePath>) {
@@ -630,6 +671,8 @@ impl LambdaCompiler {
         .entered();
         self.external_module_ids.clear();
         self.dynamic_import_modules.clear();
+        self.if_return_finished.clear();
+        self.j = JsArena::new();
         let mut simplified =
             crate::timing::measure(crate::timing::Phase::LambdaOptimization, || {
                 let _phase = info_span!("compiler.lambda_simplify").entered();
@@ -678,12 +721,8 @@ impl LambdaCompiler {
             &mut simplified,
             &self.flat_make_paths,
         );
-        // lam_compile_main.ml: `awaited_units = awaited_units groups`, after
-        // the flat aliases are added.
         self.awaited_units =
             crate::lambda::lam_compile_main::awaited_units(&simplified.arena, simplified.lam);
-        // lam_compile_main.ml: `assignable`, the union of
-        // `Lambda_traverse.assigned_variables` over the groups.
         self.assignable = crate::lambda::lambda_traverse::arena_assigned_variables(
             &simplified.arena,
             simplified.lam,
@@ -720,17 +759,22 @@ impl LambdaCompiler {
                 let _phase = info_span!("compiler.lambda_compile_expr").entered();
                 self.compile_expr(&mut a, root)
             };
+            let mut j = std::mem::take(&mut self.j);
             let mut block = compiled.prelude;
+            let compiled_expr = compiled.expr;
             let (exports, name_reservations) = {
                 let _phase = info_span!("compiler.lambda_exports").entered();
-                if let Some(mut exports) = extract_toplevel_exports(compiled.expr, &mut block) {
+                if let Some(mut exports) =
+                    extract_toplevel_exports(&mut j, compiled_expr, &mut block)
+                {
                     // lam_compile_main.ml:390-395: a finished toplevel output.
                     if compiled.finished == OutputFinished::True {
                         for value in &mut exports.values {
-                            *value = Expression::undefined(false);
+                            *value = JE::undefined(false, &mut j);
                         }
                     }
                     self.coerce_toplevel_exports_with_name_reservations(
+                        &mut j,
                         &mut block,
                         exports,
                         compiled.finished,
@@ -746,28 +790,31 @@ impl LambdaCompiler {
             if compiled.finished == OutputFinished::True {
                 let declared: AHashSet<Ident> = block
                     .iter()
-                    .filter_map(|stmt| match &stmt.desc {
-                        StatementDesc::Variable(decl) => Some(decl.ident),
+                    .filter_map(|stmt| match j.sk(*stmt) {
+                        StmtKind::Variable(v) => Some(j.var(v).ident),
                         _ => None,
                     })
                     .collect();
                 for id in &exports {
                     if !declared.contains(id) {
-                        block.push(Statement::variable(VariableDeclaration {
-                            ident: *id,
-                            value: None,
-                            property: LetKind::Strict,
-                            ident_info: IdentInfo::default(),
-                        }));
+                        let stmt = JS::define(*id, None, LetKind::Strict, &mut j);
+                        block.push(stmt);
                     }
                 }
             }
-            let exports = resolve_export_aliases(&block, exports);
+            let exports = resolve_export_aliases(&mut j, &block, exports);
             let side_effect = module_side_effect_reason(&a, root);
             drop(a);
 
+            let export_set = exports.iter().copied().collect();
             let mut deps = DepsProgram {
-                program: Program::new_with_name_reservations(block, exports, name_reservations),
+                program: Program {
+                    arena: j,
+                    block,
+                    exports,
+                    export_set,
+                    name_reservations,
+                },
                 modules: vec![],
                 side_effect,
             };
@@ -797,7 +844,12 @@ impl LambdaCompiler {
             };
             {
                 let _phase = info_span!("compiler.js_required_modules").entered();
-                let mut required_modules = self.collect_required_module_set(&deps.program.block);
+                let mut required_modules = OcamlModuleSet::new();
+                collect_modules_from_js_block(
+                    &deps.program.arena,
+                    &deps.program.block,
+                    &mut required_modules,
+                );
                 for module in std::mem::take(&mut self.dynamic_import_modules) {
                     if required_module_side_effect_reason(
                         self.module_path_resolver.as_ref(),
@@ -927,33 +979,24 @@ impl LambdaCompiler {
         }
     }
 
-    fn coerce_toplevel_exports(
-        &mut self,
-        block: &mut Block,
-        extracted: ExtractedExports,
-        finished: OutputFinished,
-    ) -> Vec<Ident> {
-        self.coerce_toplevel_exports_with_name_reservations(block, extracted, finished)
-            .0
-    }
-
     fn coerce_toplevel_exports_with_name_reservations(
         &mut self,
+        j: &mut JsArena,
         block: &mut Block,
         extracted: ExtractedExports,
         finished: OutputFinished,
     ) -> (Vec<Ident>, Vec<Ident>) {
-        let mut max_stamp = max_ident_stamp_in_block(block);
+        let mut max_stamp = max_ident_stamp_in_block(j, block);
         for export in &extracted.exports {
             max_stamp = max_stamp.max(export.stamp());
         }
         for value in &extracted.values {
-            max_stamp = max_stamp.max(max_ident_stamp_in_expression(value));
+            max_stamp = max_stamp.max(max_ident_stamp_in_expression(j, *value));
         }
         self.id_gen.set_current_stamp(max_stamp);
 
         let mut declared = AHashSet::new();
-        collect_declared_idents(block, &mut declared);
+        collect_declared_idents(j, block, &mut declared);
         let block_ended = finished == OutputFinished::True;
 
         let mut exports = Vec::with_capacity(extracted.exports.len());
@@ -966,107 +1009,93 @@ impl LambdaCompiler {
         let mut name_reservations = Vec::new();
         let mut rebound_exports = Vec::new();
 
-        let extracted_len = extracted.exports.len();
         // OCaml's `compiler/core/lam_coercion.ml:82-121` folds over export ids
         // and lambda values, only allocating a renamed export when the branch
         // actually emits a rebound group (`compiler/core/lam_coercion.ml:113-120`
-        // and `compiler/core/lam_coercion.ml:140-156`). Mirror that here: borrow
-        // during classification and clone only for the selected output shape.
-        for index in 0..extracted_len {
+        // and `compiler/core/lam_coercion.ml:140-156`).
+        for index in 0..extracted.exports.len() {
             let export = &extracted.exports[index];
-            let value = &extracted.values[index];
+            let value = extracted.values[index];
             let later_exports = &extracted.exports[index + 1..];
-            let exact_self_export = matches!(
-                &value.desc,
-                ExpressionDesc::Var(VIdent::Id(target)) if target.same(export)
-            );
+            let value_var = match j.ek(value) {
+                ExprKind::Var(target) => Some(j.ident(target)),
+                _ => None,
+            };
+            let exact_self_export = value_var.is_some_and(|target| target.same(export));
             // OCaml's `Lvar id` branch only changes the export list/set and
             // emits no rebound group when the value is already the same
             // physical identifier (`compiler/core/lam_coercion.ml:99-111`).
             // Keep that source binding in place instead of tail-moving it.
-            if !exact_self_export {
-                if let Some((late_value, property)) =
-                    move_same_name_export_alias_to_export_tail(block, export, value)
-                {
-                    exports.push(*export);
-                    rebound_exports.push(Statement::variable(VariableDeclaration {
-                        ident: *export,
-                        value: Some(late_value),
-                        property,
-                        ident_info: IdentInfo::default(),
-                    }));
+            if !exact_self_export
+                && let Some((late_value, property)) =
+                    move_same_name_export_alias_to_export_tail(j, block, export, value)
+            {
+                exports.push(*export);
+                rebound_exports.push(JS::define(*export, Some(late_value), property, j));
+                continue;
+            }
+            if let Some(target) = value_var
+                && target.name() == export.name()
+            {
+                if declared.contains(export) {
+                    let selected =
+                        if keeps_declared_same_name_function_export_alias(j, block, export) {
+                            *export
+                        } else {
+                            resolve_declared_same_name_self_alias_target(j, block, export)
+                                .unwrap_or(*export)
+                        };
+                    if !selected.same(export) {
+                        name_reservations.push(*export);
+                    }
+                    exports.push(selected);
+                    continue;
+                }
+                if declared.contains(&target) {
+                    let start = JE::var(target, j);
+                    let resolved =
+                        resolve_tail_move_replacement_expression(j, block, start, &target, false);
+                    let selected = match j.ek(resolved) {
+                        ExprKind::Var(resolved_target) => j.ident(resolved_target),
+                        _ => target,
+                    };
+                    if !selected.same(export) {
+                        name_reservations.push(*export);
+                    }
+                    exports.push(selected);
                     continue;
                 }
             }
-            if let ExpressionDesc::Var(VIdent::Id(target)) = &value.desc {
-                if target.name() == export.name() {
-                    if declared.contains(export) {
-                        let selected =
-                            if keeps_declared_same_name_function_export_alias(block, export) {
-                                *export
-                            } else {
-                                resolve_declared_same_name_self_alias_target(block, export)
-                                    .unwrap_or(*export)
-                            };
-                        if !selected.same(export) {
-                            name_reservations.push(*export);
-                        }
-                        exports.push(selected);
-                        continue;
-                    }
-                    if declared.contains(target) {
-                        let resolved = resolve_tail_move_replacement_expression(
-                            block,
-                            &Expression::var(*target),
-                            target,
-                            false,
-                        );
-                        let selected = match resolved.desc {
-                            ExpressionDesc::Var(VIdent::Id(resolved_target)) => resolved_target,
-                            _ => *target,
-                        };
-                        if !selected.same(export) {
-                            name_reservations.push(*export);
-                        }
-                        exports.push(selected);
-                        continue;
-                    }
-                }
-            }
-            if matches!(&value.desc, ExpressionDesc::Undefined { .. })
+            if matches!(j.ek(value), ExprKind::Undefined { .. })
                 && ((declared.contains(export)
-                    && can_reuse_existing_undefined_export_binding(block, export))
+                    && can_reuse_existing_undefined_export_binding(j, block, export))
                     || block_ended)
             {
                 exports.push(*export);
                 continue;
             }
-            if reusable_export_value_candidate(value) {
+            if reusable_export_value_candidate(j, value) {
                 // Same OCaml export fold as above: reusable same-name bindings
                 // only arise from variable/module-field export values. See
                 // compiler/core/lam_coercion.ml:99-121.
                 if let Some((late_value, property)) =
-                    move_reused_same_name_export_binding_to_export_tail(block, export, value)
+                    move_reused_same_name_export_binding_to_export_tail(j, block, export, value)
                 {
                     exports.push(*export);
-                    rebound_exports.push(Statement::variable(VariableDeclaration {
-                        ident: *export,
-                        value: Some(late_value),
-                        property,
-                        ident_info: IdentInfo::default(),
-                    }));
+                    rebound_exports.push(JS::define(*export, Some(late_value), property, j));
                     continue;
                 }
-                if keeps_declared_same_name_reusable_export_binding(block, export, value) {
+                if keeps_declared_same_name_reusable_export_binding(j, block, export, value) {
                     exports.push(*export);
                     continue;
                 }
-                if let Some(reused) = reusable_same_name_export_binding(block, export, value) {
+                if let Some(reused) = reusable_same_name_export_binding(j, block, export, value) {
                     exports.push(reused);
                     continue;
                 }
             }
             if let Some(inserted_export) = insert_rebound_export_before_equivalent_later_binding(
+                j,
                 block,
                 export,
                 value,
@@ -1078,18 +1107,13 @@ impl LambdaCompiler {
 
             let rebound = self.id_gen.create(export.name());
             name_reservations.push(*export);
-            let property = if matches!(&value.desc, ExpressionDesc::Var(VIdent::Id(_))) {
+            let property = if value_var.is_some() {
                 LetKind::Alias
             } else {
                 LetKind::Strict
             };
             exports.push(rebound);
-            rebound_exports.push(Statement::variable(VariableDeclaration {
-                ident: rebound,
-                value: Some(value.clone()),
-                property,
-                ident_info: IdentInfo::default(),
-            }));
+            rebound_exports.push(JS::define(rebound, Some(value), property, j));
         }
 
         // OCaml compiler/core/lam_coercion.ml:160-172 folds original flattened
@@ -1108,8 +1132,9 @@ impl LambdaCompiler {
         info: ApplyId,
     ) -> Compiled {
         let mut compiled = self.compile_apply_call_inner(a, func, args, info);
-        if compiled.expr.source_loc.is_none() {
-            compiled.expr.source_loc = self.source_loc(&a.apply_payload(info).info.loc);
+        if self.j.expr_loc(compiled.expr).is_none() {
+            let loc = self.source_loc(&a.apply_payload(info).info.loc);
+            compiled.expr = self.j.with_expr_loc(compiled.expr, loc);
         }
         compiled
     }
@@ -1143,9 +1168,6 @@ impl LambdaCompiler {
             return compiled;
         }
 
-        // lam_compile.ml compile_apply: `compile_arguments ~method_callee
-        // lambda_cxt (ap_func :: ap_args)`, with `method_callee` for a JS
-        // method read `Pjs_object_get`.
         let method_callee = matches!(a.as_prim(func), Some((Primitive::PjsObjectGet(_), _, _)));
         let mut items = smallvec::SmallVec::<[Lam; 8]>::new();
         items.push(func);
@@ -1156,10 +1178,11 @@ impl LambdaCompiler {
 
         Compiled {
             prelude,
-            expr: Expression::call(
+            expr: JE::call(
                 func_expr,
-                compiled_args,
+                &compiled_args,
                 call_info_of_apply_status(apply.info.status),
+                &mut self.j,
             ),
             finished: OutputFinished::False,
         }
@@ -1266,9 +1289,6 @@ impl LambdaCompiler {
                 body,
                 &arg_list,
             );
-            // lam_compile.ml: the inlined body comes from another module,
-            // so the variables it assigns are not in `assignable` yet; they
-            // are added for this body only.
             let added = self.extend_assignable(a, reduced);
             let compiled = self.compile_expr(a, reduced);
             self.restore_assignable(added);
@@ -1276,21 +1296,20 @@ impl LambdaCompiler {
         }
 
         let known_arity = self.resolve_cmj_module_field_arity(&module, &field_name);
-        // lam_compile.ml compile_external_field_apply:
-        // `compile_arguments lambda_cxt ap_args`.
         let arg_list = a.list_small(args);
         let (prelude, compiled_args) = self.compile_arguments(a, false, arg_list);
 
         let apply = a.apply_payload(info);
-        let func = Expression::qualified(module, Some(field_name));
+        let func = JE::qualified(module, Some(field_name), &mut self.j);
         let expr = match apply.info.status {
             // compiler/core/lam_compile.ml:303-309 keeps the explicit
             // App_infer_full/App_uncurry call info instead of consulting CMJ
             // arity. In particular App_uncurry stays Call_na.
-            ApplyStatus::InferFull | ApplyStatus::Uncurry => Expression::call(
+            ApplyStatus::InferFull | ApplyStatus::Uncurry => JE::call(
                 func,
-                compiled_args,
+                &compiled_args,
                 call_info_of_apply_status(apply.info.status),
+                &mut self.j,
             ),
             // compiler/core/lam_compile.ml:310-316 uses
             // `ident_info.arity`; a known `Single` arity is lowered through
@@ -1298,7 +1317,7 @@ impl LambdaCompiler {
             // Call_na information.
             ApplyStatus::Na => match known_arity {
                 Some(arity) if !arity.is_na() => self.apply_with_arity(func, arity, compiled_args),
-                _ => Expression::call(func, compiled_args, CallInfo::default()),
+                _ => JE::call(func, &compiled_args, CallInfo::default(), &mut self.j),
             },
         };
         Some(Compiled {
@@ -1308,29 +1327,25 @@ impl LambdaCompiler {
         })
     }
 
-    fn apply_with_arity(
-        &self,
-        func: Expression,
-        arity: Arity,
-        args: Vec<Expression>,
-    ) -> Expression {
+    fn apply_with_arity(&mut self, func: Expr, arity: Arity, args: Vec<Expr>) -> Expr {
         // Direct port of compiler/core/lam_compile.ml:42-79. The OCaml helper
         // repeatedly consumes known arity groups, emits `ml_full_call` for each
         // saturated group, eta-expands duplicable partial applications, and
         // falls back to dummy Call_na otherwise.
         fn aux(
             id_gen: &IdGenerator,
-            func: Expression,
+            j: &mut JsArena,
+            func: Expr,
             mut arities: Vec<i32>,
-            args: Vec<Expression>,
-        ) -> Expression {
+            args: Vec<Expr>,
+        ) -> Expr {
             let len = args.len();
             if len == 0 {
                 return func;
             }
 
             if arities.is_empty() {
-                return Expression::call(func, args, CallInfo::default());
+                return JE::call(func, &args, CallInfo::default(), j);
             }
 
             let mut x = arities.remove(0);
@@ -1338,51 +1353,32 @@ impl LambdaCompiler {
                 x = 1;
             }
             let x_len = x as usize;
+            let full = CallInfo {
+                kind: CallKind::MlCall,
+                arity: CallArity::Full,
+                ..CallInfo::default()
+            };
             if len >= x_len {
-                let first_part = args[..x_len].to_vec();
-                let continue_args = args[x_len..].to_vec();
-                let call = Expression::call(
-                    func,
-                    first_part,
-                    CallInfo {
-                        kind: CallKind::MlCall,
-                        arity: CallArity::Full,
-                        ..CallInfo::default()
-                    },
-                );
-                aux(id_gen, call, arities, continue_args)
-            } else if args.iter().all(js_expr_no_side_effects) {
+                let call = JE::call(func, &args[..x_len], full, j);
+                aux(id_gen, j, call, arities, args[x_len..].to_vec())
+            } else if args.iter().all(|arg| js_expr_no_side_effects(j, *arg)) {
                 let missing = x_len - len;
                 let params: Vec<Ident> = (0..missing).map(|_| id_gen.create("param")).collect();
                 let mut full_args = args;
-                full_args.extend(params.iter().cloned().map(Expression::var));
-                Expression::new(ExpressionDesc::Fun {
-                    is_method: false,
-                    params,
-                    body: vec![Statement::return_(Expression::call(
-                        func,
-                        full_args,
-                        CallInfo {
-                            kind: CallKind::MlCall,
-                            arity: CallArity::Full,
-                            ..CallInfo::default()
-                        },
-                    ))],
-                    env: Default::default(),
-                    return_unit: false,
-                    async_: false,
-                    directive: None,
-                })
+                full_args.extend(params.iter().map(|p| JE::var(*p, j)));
+                let call = JE::call(func, &full_args, full, j);
+                let body = [JS::return_(call, j)];
+                crate::lambda::js_exp_make::fun_expr(false, &params, &body, false, false, j)
             } else {
-                Expression::call(func, args, CallInfo::default())
+                JE::call(func, &args, CallInfo::default(), j)
             }
         }
 
-        aux(&self.id_gen, func, arity.extract_arity(), args)
+        aux(&self.id_gen, &mut self.j, func, arity.extract_arity(), args)
     }
 
-    fn try_statement(&self, body: Block, exn: &Ident, handler: Block) -> Statement {
-        Statement::new(StatementDesc::Try(body, Some((*exn, handler)), None))
+    fn try_statement(&mut self, body: Block, exn: &Ident, handler: Block) -> Stmt {
+        JS::try_(&body, Some((*exn, &handler)), None, &mut self.j)
     }
 
     /// lam_compile.ml `compile_try` for `Ltryfinally`: an `Ltryfinally`
@@ -1396,7 +1392,7 @@ impl LambdaCompiler {
         body: Lam,
         finally: Lam,
         mut compile: impl FnMut(&mut Self, &mut LamArena, Lam) -> Block,
-    ) -> Statement {
+    ) -> Stmt {
         let (body, catch) = match a.node(body) {
             Node::TryWith { body, id, handler } => (body, Some((a.ident(id), handler))),
             _ => (body, None),
@@ -1404,7 +1400,12 @@ impl LambdaCompiler {
         let body_block = compile(self, a, body);
         let catch = catch.map(|(exn, handler)| (exn, compile(self, a, handler)));
         let finally_block = self.compile_effect_block(a, finally);
-        Statement::new(StatementDesc::Try(body_block, catch, Some(finally_block)))
+        JS::try_(
+            &body_block,
+            catch.as_ref().map(|(id, body)| (*id, body.as_slice())),
+            Some(&finally_block),
+            &mut self.j,
+        )
     }
 
     /// The `Psetfield` field writes of `copy_id` that `lam` is a sequence of,
@@ -1476,12 +1477,18 @@ impl LambdaCompiler {
         Some(Compiled {
             prelude,
             // lam_compile.ml:1813-1815: `with_source_loc loc (E.obj ~dup:init_val props)`.
-            expr: Expression {
-                source_loc: self.source_loc(&loc),
-                ..Expression::new(ExpressionDesc::Object(crate::js_ir::object_entries(
-                    Some(init_expr),
-                    props,
-                )))
+            expr: {
+                let props: Vec<_> = props
+                    .into_iter()
+                    .map(|(name, value)| (self.prop_name(name), value))
+                    .collect();
+                let mut entries = Vec::with_capacity(props.len() + 1);
+                entries.push((crate::js_ir::arena::PropName::RecordSpread, init_expr));
+                entries.extend(props);
+                let props = self.j.prop_list(&entries);
+                let obj = JE::new(ExprKind::Object(props), &mut self.j);
+                let loc = self.source_loc(&loc);
+                self.j.with_expr_loc(obj, loc)
             },
             finished: OutputFinished::False,
         })
@@ -1508,7 +1515,7 @@ impl LambdaCompiler {
         match a.node(lam) {
             Node::Var(id) => Compiled {
                 prelude: vec![],
-                expr: Expression::var(a.ident(id)),
+                expr: JE::var(a.ident(id), &mut self.j),
                 finished: OutputFinished::False,
             },
             Node::GlobalModule(id) => {
@@ -1519,19 +1526,20 @@ impl LambdaCompiler {
                 };
                 Compiled {
                     prelude: vec![],
-                    expr: Expression::qualified(module, None),
+                    expr: JE::qualified(module, None, &mut self.j),
                     finished: OutputFinished::False,
                 }
             }
             Node::Const(cst) => Compiled {
                 prelude: vec![],
-                expr: Self::compile_constant(a.constant(cst)),
+                expr: Self::compile_constant(a.constant(cst), &mut self.j),
                 finished: OutputFinished::False,
             },
             Node::Apply { func, args, info } => {
                 let mut compiled = self.compile_apply_call(a, func, args, info);
-                if compiled.expr.source_loc.is_none() {
-                    compiled.expr.source_loc = self.source_loc(&a.apply_payload(info).info.loc);
+                if self.j.expr_loc(compiled.expr).is_none() {
+                    let loc = self.source_loc(&a.apply_payload(info).info.loc);
+                    compiled.expr = self.j.with_expr_loc(compiled.expr, loc);
                 }
                 compiled
             }
@@ -1557,7 +1565,7 @@ impl LambdaCompiler {
                 };
                 let body = self
                     .try_compile_identity_module_return_expr(a, body)
-                    .map(|expr| vec![Statement::return_(expr)])
+                    .map(|expr| vec![JS::return_(expr, &mut self.j)])
                     .unwrap_or_else(|| {
                         // Mirror OCaml: nested function bodies start with a
                         // fresh `switch_depth = 0; loop_stack = []`.
@@ -1567,17 +1575,16 @@ impl LambdaCompiler {
                             })
                         })
                     });
-                let mut expr = Expression::new(ExpressionDesc::Fun {
-                    is_method: false,
-                    params,
-                    body,
-                    env: Default::default(),
+                // lam_compile.ml:1827-1829: `with_source_loc loc (E.ocaml_fun ...)`.
+                let source_loc = self.source_loc(&loc);
+                let expr = self.function_expr(
+                    &params,
+                    &body,
                     return_unit,
                     async_,
-                    directive: directive.map(Box::new),
-                });
-                // lam_compile.ml:1827-1829: `with_source_loc loc (E.ocaml_fun ...)`.
-                expr.source_loc = self.source_loc(&loc);
+                    directive.as_deref(),
+                    source_loc,
+                );
                 Compiled {
                     prelude: vec![],
                     expr,
@@ -1668,10 +1675,11 @@ impl LambdaCompiler {
                 // lam_compile.ml:1615-1634: only `compile_primitive_default`
                 // wraps its result in `with_source_loc loc`.
                 let p = a.prim_payload(info);
-                if compiled.expr.source_loc.is_none()
+                if self.j.expr_loc(compiled.expr).is_none()
                     && primitive_uses_default_compilation(a, &p.primitive, a.list(args))
                 {
-                    compiled.expr.source_loc = self.source_loc(&p.loc);
+                    let loc = self.source_loc(&p.loc);
+                    compiled.expr = self.j.with_expr_loc(compiled.expr, loc);
                 }
                 compiled
             }
@@ -1689,7 +1697,7 @@ impl LambdaCompiler {
                 if let Some(output) = self.compile_static_raise_jump_output(a, label, args) {
                     return Compiled {
                         prelude: output.block,
-                        expr: Expression::undefined(false),
+                        expr: JE::undefined(false, &mut self.j),
                         finished: output.finished,
                     };
                 }
@@ -1699,11 +1707,11 @@ impl LambdaCompiler {
                 let expr = if let Some(&arg) = a.list(args).first() {
                     self.compile_expr(a, arg).expr
                 } else {
-                    Expression::undefined(false)
+                    JE::undefined(false, &mut self.j)
                 };
                 Compiled {
-                    prelude: vec![Statement::throw(expr)],
-                    expr: Expression::undefined(false),
+                    prelude: vec![JS::throw(expr, &mut self.j)],
+                    expr: JE::undefined(false, &mut self.j),
                     finished: OutputFinished::False,
                 }
             }
@@ -1732,18 +1740,21 @@ impl LambdaCompiler {
                     // OCaml NeedValue staticcatch allocates `Ext_ident.create_tmp ()`
                     // for the result (compiler/core/lam_compile.ml:1027-1034).
                     let result = self.fresh_tmp_ident();
-                    let mut prelude = vec![Statement::variable(VariableDeclaration {
-                        ident: result,
-                        value: None,
-                        property: LetKind::Strict,
-                        ident_info: IdentInfo::default(),
-                    })];
+                    let mut prelude = vec![JS::variable(
+                        VarDecl {
+                            ident: result,
+                            value: None,
+                            property: LetKind::Strict,
+                            ident_info: IdentInfo::default(),
+                        },
+                        &mut self.j,
+                    )];
                     prelude.extend(self.compile_multi_staticcatch_assignment_block(
                         a, &result, &handlers, flat_body,
                     ));
                     Compiled {
                         prelude,
-                        expr: Expression::var(result),
+                        expr: JE::var(result, &mut self.j),
                         finished: OutputFinished::False,
                     }
                 } else {
@@ -1753,35 +1764,33 @@ impl LambdaCompiler {
             Node::TryWith { body, id, handler } => {
                 let exn = a.ident(id);
                 let result = self.fresh_tmp_ident();
-                let mut prelude = vec![Statement::variable(VariableDeclaration {
-                    ident: result,
-                    value: None,
-                    property: LetKind::Variable,
-                    ident_info: IdentInfo::default(),
-                })];
+                let mut prelude = vec![JS::variable(
+                    VarDecl {
+                        ident: result,
+                        value: None,
+                        property: LetKind::Variable,
+                        ident_info: IdentInfo::default(),
+                    },
+                    &mut self.j,
+                )];
                 let body_block = self.compile_assign_to_target_block(a, &result, body);
                 let handler_block = self.compile_assign_to_target_block(a, &result, handler);
                 prelude.push(self.try_statement(body_block, &exn, handler_block));
                 Compiled {
                     prelude,
-                    expr: Expression::var(result),
+                    expr: JE::var(result, &mut self.j),
                     finished: OutputFinished::False,
                 }
             }
             Node::TryFinally { body, finally } => {
                 let result = self.fresh_tmp_ident();
-                let mut prelude = vec![Statement::variable(VariableDeclaration {
-                    ident: result,
-                    value: None,
-                    property: LetKind::Variable,
-                    ident_info: IdentInfo::default(),
-                })];
+                let mut prelude = vec![JS::define(result, None, LetKind::Variable, &mut self.j)];
                 prelude.push(self.compile_try_finally(a, body, finally, |this, a, lam| {
                     this.compile_assign_to_target_block(a, &result, lam)
                 }));
                 Compiled {
                     prelude,
-                    expr: Expression::var(result),
+                    expr: JE::var(result, &mut self.j),
                     finished: OutputFinished::False,
                 }
             }
@@ -1793,10 +1802,11 @@ impl LambdaCompiler {
                 if then_compiled.prelude.is_empty() && else_compiled.prelude.is_empty() {
                     Compiled {
                         prelude,
-                        expr: Expression::cond(
+                        expr: JE::cond(
                             cond_compiled.expr,
                             then_compiled.expr,
                             else_compiled.expr,
+                            &mut self.j,
                         ),
                         finished: OutputFinished::False,
                     }
@@ -1804,16 +1814,24 @@ impl LambdaCompiler {
                     let tmp = self.fresh_tmp_ident();
                     let then_block = self.compile_assign_to_target_block(a, &tmp, then_);
                     let else_block = self.compile_assign_to_target_block(a, &tmp, else_);
-                    prelude.push(Statement::variable(VariableDeclaration {
-                        ident: tmp,
-                        value: None,
-                        property: LetKind::Strict,
-                        ident_info: IdentInfo::default(),
-                    }));
-                    prelude.push(Statement::if_(cond_compiled.expr, then_block, else_block));
+                    prelude.push(JS::variable(
+                        VarDecl {
+                            ident: tmp,
+                            value: None,
+                            property: LetKind::Strict,
+                            ident_info: IdentInfo::default(),
+                        },
+                        &mut self.j,
+                    ));
+                    prelude.push(JS::if_(
+                        cond_compiled.expr,
+                        &then_block,
+                        &else_block,
+                        &mut self.j,
+                    ));
                     Compiled {
                         prelude,
-                        expr: Expression::var(tmp),
+                        expr: JE::var(tmp, &mut self.j),
                         finished: OutputFinished::False,
                     }
                 }
@@ -1829,15 +1847,17 @@ impl LambdaCompiler {
                 } else {
                     self.compile_effect_output(a, first)
                 };
-                // lam_compile.ml:1905-1910: both parts are compiled, then
-                // `append_output` drops the second after a finished first.
+                // Compile both sides before append_output chooses what is retained.
                 let tail = self.compile_expr(a, second);
                 self.append_effect_output(head, tail)
             }
             Node::While(cond, body) => {
                 let cond_compiled = self.compile_expr(a, cond);
-                let cond_expr =
-                    block_with_return_expr_iife(cond_compiled.prelude, cond_compiled.expr);
+                let cond_expr = block_with_return_expr_iife(
+                    cond_compiled.prelude,
+                    cond_compiled.expr,
+                    &mut self.j,
+                );
                 // Mirror OCaml's `push_loop` (compiler/core/lam_compile.ml):
                 // a fresh loop frame is pushed before compiling the body;
                 // its label is filled in lazily if a nested switch needs
@@ -1846,8 +1866,13 @@ impl LambdaCompiler {
                 let body_block = self.compile_block(a, body);
                 let label = self.pop_loop();
                 Compiled {
-                    prelude: vec![Statement::while_with_label(label, cond_expr, body_block)],
-                    expr: Expression::undefined(false),
+                    prelude: vec![JS::while_(
+                        label.as_deref(),
+                        cond_expr,
+                        &body_block,
+                        &mut self.j,
+                    )],
+                    expr: JE::undefined(false, &mut self.j),
                     finished: OutputFinished::False,
                 }
             }
@@ -1879,14 +1904,13 @@ impl LambdaCompiler {
                 );
                 let stmt = if self.switch_depth > 0 {
                     let label = self.ensure_current_loop_label();
-                    Statement::break_label(Some(label))
+                    JS::break_(Some(&label), &mut self.j)
                 } else {
-                    Statement::break_()
+                    JS::break_(None, &mut self.j)
                 };
-                // lam_compile.ml:1934, 1949: `~output_finished:True`.
                 Compiled {
                     prelude: vec![stmt],
-                    expr: Expression::undefined(false),
+                    expr: JE::undefined(false, &mut self.j),
                     finished: OutputFinished::True,
                 }
             }
@@ -1897,31 +1921,26 @@ impl LambdaCompiler {
                 );
                 let stmt = if self.switch_depth > 0 {
                     let label = self.ensure_current_loop_label();
-                    Statement::continue_label(Some(label))
+                    JS::continue_(Some(&label), &mut self.j)
                 } else {
-                    Statement::continue_()
+                    JS::continue_(None, &mut self.j)
                 };
-                // lam_compile.ml:1934, 1949: `~output_finished:True`.
                 Compiled {
                     prelude: vec![stmt],
-                    expr: Expression::undefined(false),
+                    expr: JE::undefined(false, &mut self.j),
                     finished: OutputFinished::True,
                 }
             }
             Node::Assign { id, value } => {
                 let id = a.ident(id);
-                // lam_compile.ml:1320-1334 `compile_assign`: the assignment
-                // is appended to the value's block unconditionally.
                 let compiled = self.compile_expr(a, value);
                 let mut prelude = compiled.prelude;
-                prelude.push(Statement::exp(Expression::bin(
-                    BinOp::Eq,
-                    Expression::var(id),
-                    compiled.expr,
-                )));
+                let target = JE::var(id, &mut self.j);
+                let assign = JE::bin(BinOp::Eq, target, compiled.expr, &mut self.j);
+                prelude.push(JS::exp(assign, &mut self.j));
                 Compiled {
                     prelude,
-                    expr: Expression::undefined(false),
+                    expr: JE::undefined(false, &mut self.j),
                     finished: OutputFinished::False,
                 }
             }
@@ -2029,9 +2048,6 @@ impl LambdaCompiler {
         dir: &crate::lambda::DirectionFlag,
         body: Lam,
     ) -> Compiled {
-        // lam_compile.ml:1232: `(compile_lambda new_cxt start,
-        // compile_lambda new_cxt finish)` is a tuple, which OCaml evaluates
-        // right to left, so the finish bound is compiled first.
         let (finish, direction) = lower_ocaml_for_range_direction(a, dir, end);
         let finish_compiled = self.compile_expr(a, finish);
         let start_compiled = self.compile_expr(a, start);
@@ -2044,47 +2060,54 @@ impl LambdaCompiler {
 
         let mut prelude = start_compiled.prelude;
 
-        let push_loop = |block: &mut Block, init: Option<Expression>, finish: Expression| {
-            block.push(Statement::for_range(
-                loop_label.clone(),
+        let push_loop = |j: &mut JsArena, block: &mut Block, init: Option<Expr>, finish: Expr| {
+            block.push(JS::for_range(
+                loop_label.as_deref(),
                 init,
                 finish,
                 *var,
                 direction,
-                body_block.clone(),
+                &body_block,
+                j,
             ));
         };
 
         if finish_compiled.prelude.is_empty() {
             push_loop(
+                &mut self.j,
                 &mut prelude,
                 Some(start_compiled.expr),
                 finish_compiled.expr,
             );
-        } else if crate::lambda::lam_compile_arguments::delay_safe(
+        } else if super::lam_compile_arguments::delay_safe(
+            &self.j,
             &self.assignable,
-            &start_compiled.expr,
+            start_compiled.expr,
         ) {
             prelude.extend(finish_compiled.prelude);
             push_loop(
+                &mut self.j,
                 &mut prelude,
                 Some(start_compiled.expr),
                 finish_compiled.expr,
             );
         } else {
-            prelude.push(Statement::variable(VariableDeclaration {
-                ident: *var,
-                value: Some(start_compiled.expr),
-                property: LetKind::Variable,
-                ident_info: IdentInfo::default(),
-            }));
+            prelude.push(JS::variable(
+                VarDecl {
+                    ident: *var,
+                    value: Some(start_compiled.expr),
+                    property: LetKind::Variable,
+                    ident_info: IdentInfo::default(),
+                },
+                &mut self.j,
+            ));
             prelude.extend(finish_compiled.prelude);
-            push_loop(&mut prelude, None, finish_compiled.expr);
+            push_loop(&mut self.j, &mut prelude, None, finish_compiled.expr);
         }
 
         Compiled {
             prelude,
-            expr: Expression::undefined(false),
+            expr: JE::undefined(false, &mut self.j),
             finished: OutputFinished::False,
         }
     }
@@ -2123,15 +2146,29 @@ impl LambdaCompiler {
         let label = self.pop_loop();
 
         let stmt = if await_kw {
-            Statement::for_await_of(label, emitted_id, iterable_compiled.expr, body_block)
+            JS::for_of(
+                true,
+                label.as_deref(),
+                emitted_id,
+                iterable_compiled.expr,
+                &body_block,
+                &mut self.j,
+            )
         } else {
-            Statement::for_of(label, emitted_id, iterable_compiled.expr, body_block)
+            JS::for_of(
+                false,
+                label.as_deref(),
+                emitted_id,
+                iterable_compiled.expr,
+                &body_block,
+                &mut self.j,
+            )
         };
         prelude.push(stmt);
 
         Compiled {
             prelude,
-            expr: Expression::undefined(false),
+            expr: JE::undefined(false, &mut self.j),
             finished: OutputFinished::False,
         }
     }
@@ -2181,22 +2218,11 @@ impl LambdaCompiler {
         group: &[usize],
     ) -> (BlockOutput, Block) {
         if let Some(func) = recursive_function_binding_value(a, expr) {
-            // lam_compile.ml:375-388: the function body is compiled under
-            // `Tail_with_name {label = Some ret}` with `ret.id = id`, and
-            // compile_apply starts the loop only for `Ident.same ret.id
-            // fn_id` (lam_compile.ml:1581-1587): an alias is no target.
-            let tail_targets = [*id];
-            return (
-                BlockOutput::make(vec![Statement::variable(VariableDeclaration {
-                    ident: *id,
-                    value: Some(self.compile_recursive_function_expr(a, id, func, &tail_targets)),
-                    property: LetKind::Alias,
-                    ident_info: IdentInfo::default(),
-                })]),
-                vec![],
-            );
+            // Only this function, not aliases, is a target for its self loop.
+            let value = self.compile_recursive_function_expr(a, id, func, &[*id]);
+            let decl = JS::define(*id, Some(value), LetKind::Alias, &mut self.j);
+            return (BlockOutput::make(vec![decl]), vec![]);
         }
-
         let makeblock = match a.view(expr) {
             View::Prim(Primitive::Pmakeblock(tag_info, _), args, _) => Some((
                 tag_info.clone(),
@@ -2206,9 +2232,7 @@ impl LambdaCompiler {
             _ => None,
         };
         match makeblock {
-            // lam_compile.ml:429-431: `compile_lambda` under
-            // `Declare (Alias, id)`.
-            Some((_, true)) => (
+            Some((_, true)) | None => (
                 self.compile_let_binding_output(a, LetKind::Alias, id, expr),
                 vec![],
             ),
@@ -2218,39 +2242,24 @@ impl LambdaCompiler {
                 {
                     return (BlockOutput::make(effects), vec![]);
                 }
-
-                // lam_compile.ml:479-495: `NeedValue Not_tail`, then
-                // `Js_output.make (b @ [updateDummy])`, which is not finished.
                 let compiled = self.compile_expr(a, expr);
                 let mut effects = compiled.prelude;
-                effects.push(Statement::exp(self.runtime_call_expr(
+                let target = JE::var(*id, &mut self.j);
+                let call = self.runtime_call_expr(
                     "Primitive_object",
                     "updateDummy",
-                    vec![Expression::var(*id), compiled.expr],
-                )));
-                (
-                    BlockOutput::make(effects),
-                    vec![Statement::variable(VariableDeclaration {
-                        ident: *id,
-                        value: Some(Self::recursive_dummy_object_expr(&tag_info)),
-                        property: LetKind::Variable,
-                        ident_info: IdentInfo::default(),
-                    })],
-                )
+                    vec![target, compiled.expr],
+                );
+                effects.push(JS::exp(call, &mut self.j));
+                let dummy = self.recursive_dummy_object_expr(&tag_info);
+                let declaration = JS::define(*id, Some(dummy), LetKind::Variable, &mut self.j);
+                (BlockOutput::make(effects), vec![declaration])
             }
-            // OCaml `compile_recursive_let`'s catch-all compiles directly
-            // under `Declare (Alias, id)` (lam_compile.ml:497-519): the
-            // value's prelude precedes a normal declaration, and a finished
-            // value keeps no declaration.
-            None => (
-                self.compile_let_binding_output(a, LetKind::Alias, id, expr),
-                vec![],
-            ),
         }
     }
 
     fn compile_recursive_self_binding_makeblock(
-        &self,
+        &mut self,
         a: &LamArena,
         id: &Ident,
         expr: Lam,
@@ -2283,32 +2292,25 @@ impl LambdaCompiler {
             return None;
         }
 
-        let mut block = vec![Statement::variable(VariableDeclaration {
-            ident: *id,
-            value: Some(Self::recursive_dummy_object_expr(tag_info)),
-            property: LetKind::Variable,
-            ident_info: IdentInfo::default(),
-        })];
+        let dummy = self.recursive_dummy_object_expr(tag_info);
+        let mut block = vec![JS::define(*id, Some(dummy), LetKind::Variable, &mut self.j)];
 
         for (index, arg) in args.iter().enumerate() {
             let field_info = Self::recursive_self_binding_field_info(tag_info, index)?;
             let value = match a.view(*arg) {
-                View::Var(binding) => Expression::var(binding),
-                View::Const(constant) => Self::compile_constant(constant),
+                View::Var(binding) => JE::var(binding, &mut self.j),
+                View::Const(constant) => Self::compile_constant(constant, &mut self.j),
                 _ => return None,
             };
-            block.push(Statement::exp(self.compile_set_field(
-                index as i32,
-                &field_info,
-                &Expression::var(*id),
-                &value,
-            )));
+            let target = JE::var(*id, &mut self.j);
+            let set = self.compile_set_field(index as i32, &field_info, target, value);
+            block.push(JS::exp(set, &mut self.j));
         }
 
         Some(block)
     }
 
-    fn recursive_dummy_object_expr(tag_info: &TagInfo) -> Expression {
+    fn recursive_dummy_object_expr(&mut self, tag_info: &TagInfo) -> Expr {
         match tag_info {
             TagInfo::Record(_)
             | TagInfo::Module(_)
@@ -2316,9 +2318,12 @@ impl LambdaCompiler {
             | TagInfo::RecordInlined(_)
             | TagInfo::PolyVar(_)
             | TagInfo::Extension
-            | TagInfo::RecordExt { .. } => Expression::new(ExpressionDesc::Object(vec![])),
+            | TagInfo::RecordExt { .. } => {
+                let props = self.j.prop_list(&[]);
+                JE::new(ExprKind::Object(props), &mut self.j)
+            }
             TagInfo::Tuple | TagInfo::ModuleExport(_) => {
-                Expression::array(vec![], MutableFlag::Mutable)
+                JE::array(&[], MutableFlag::Mutable, &mut self.j)
             }
             TagInfo::Some | TagInfo::SomeNotNested => {
                 panic!("unexpected option block in recursive dummy-object lowering")
@@ -2354,6 +2359,7 @@ impl LambdaCompiler {
         }
     }
 
+    #[cfg(test)]
     fn compile_let_binding(
         &mut self,
         a: &mut LamArena,
@@ -2402,13 +2408,7 @@ impl LambdaCompiler {
                 // unconditionally. Take that path here; the
                 // `with_static_handler` inline shortcut is a Rust-only
                 // optimization with no OCaml analog for `Declare`.
-                let declaration =
-                    BlockOutput::make(vec![Statement::variable(VariableDeclaration {
-                        ident: *id,
-                        value: None,
-                        property: kind,
-                        ident_info: IdentInfo::default(),
-                    })]);
+                let declaration = BlockOutput::make(vec![JS::define(*id, None, kind, &mut self.j)]);
                 let (handlers, flat_body) =
                     flatten_nested_caches(a, label, &bindings, body, handler);
                 let catch = if handlers.len() > 1 {
@@ -2434,12 +2434,7 @@ impl LambdaCompiler {
                 let body_block = self.compile_assign_to_target_block(a, id, body);
                 let handler_block = self.compile_assign_to_target_block(a, id, handler);
                 BlockOutput::make(vec![
-                    Statement::variable(VariableDeclaration {
-                        ident: *id,
-                        value: None,
-                        property: kind,
-                        ident_info: IdentInfo::default(),
-                    }),
+                    JS::define(*id, None, kind, &mut self.j),
                     self.try_statement(body_block, &exn, handler_block),
                 ])
             }
@@ -2448,12 +2443,7 @@ impl LambdaCompiler {
                     this.compile_assign_to_target_block(a, id, lam)
                 });
                 BlockOutput::make(vec![
-                    Statement::variable(VariableDeclaration {
-                        ident: *id,
-                        value: None,
-                        property: kind,
-                        ident_info: IdentInfo::default(),
-                    }),
+                    JS::define(*id, None, kind, &mut self.j),
                     try_statement,
                 ])
             }
@@ -2506,7 +2496,7 @@ impl LambdaCompiler {
             }
             _ => {
                 let value_compiled = self.compile_expr(a, value);
-                declare_compiled(kind, id, value_compiled)
+                declare_compiled(&mut self.j, kind, id, value_compiled)
             }
         }
     }
@@ -2531,15 +2521,15 @@ impl LambdaCompiler {
     ) -> BlockOutput {
         let output = self.compile_effect_block_inner(a, lam);
         BlockOutput {
-            block: unnest_block(output.block),
+            block: JS::unnest_block(output.block, &self.j),
             finished: output.finished,
         }
     }
 
     /// A grouped switch case that falls through to the next one. OCaml still
     /// gives it the location of its case lambda (lam_compile.ml:676-683).
-    pub(crate) fn empty_switch_case_clause_for(&self, a: &LamArena, lam: Lam) -> CaseClause {
-        CaseClause {
+    pub(crate) fn empty_switch_case_clause_for(&self, a: &LamArena, lam: Lam) -> Clause {
+        Clause {
             source_loc: self.source_loc_of_lam(a, lam),
             ..empty_switch_case_clause()
         }
@@ -2548,11 +2538,17 @@ impl LambdaCompiler {
     /// lam_compile.ml:80-84 `with_block_source_loc`: switch-case bodies
     /// (lam_compile.ml:581-659) tag their first statement with the case
     /// lambda's location.
-    pub(crate) fn with_block_source_loc(&self, a: &LamArena, lam: Lam, mut block: Block) -> Block {
-        if let Some(first) = block.first_mut()
-            && first.source_loc.is_none()
+    pub(crate) fn with_block_source_loc(
+        &mut self,
+        a: &LamArena,
+        lam: Lam,
+        mut block: Block,
+    ) -> Block {
+        if let Some(first) = block.first().copied()
+            && self.j.stmt_loc(first).is_none()
         {
-            first.source_loc = self.source_loc_of_lam(a, lam);
+            let loc = self.source_loc_of_lam(a, lam);
+            block[0] = self.j.with_stmt_loc(first, loc);
         }
         block
     }
@@ -2568,7 +2564,7 @@ impl LambdaCompiler {
                 let id = a.ident(id);
                 if let Some(compiled) = self.try_compile_record_spread(a, &id, value, body) {
                     let mut block = compiled.prelude;
-                    push_effect_expression(&mut block, compiled.expr);
+                    push_effect_expression(&mut self.j, &mut block, compiled.expr);
                     return BlockOutput::make(block);
                 }
                 // lam_compile.ml:1867-1877: compile the binding, then the
@@ -2683,16 +2679,20 @@ impl LambdaCompiler {
         let else_compiled = self.compile_expr(a, else_);
         if then_compiled.prelude.is_empty() && else_compiled.prelude.is_empty() {
             let mut block = cond_compiled.prelude;
-            block.push(Statement::variable(VariableDeclaration {
-                ident: *id,
-                value: Some(Expression::cond(
-                    cond_compiled.expr,
-                    then_compiled.expr,
-                    else_compiled.expr,
-                )),
-                property: kind,
-                ident_info: IdentInfo::default(),
-            }));
+            block.push(JS::variable(
+                VarDecl {
+                    ident: *id,
+                    value: Some(JE::cond(
+                        cond_compiled.expr,
+                        then_compiled.expr,
+                        else_compiled.expr,
+                        &mut self.j,
+                    )),
+                    property: kind,
+                    ident_info: IdentInfo::default(),
+                },
+                &mut self.j,
+            ));
             return block;
         }
 
@@ -2723,12 +2723,15 @@ impl LambdaCompiler {
         // emits `S.declare_variable ~kind id` before compiling the switch
         // body in `Assign id` context. No `declaration` is threaded through,
         // so the switch never folds back into `let id = cond ? a : b`.
-        let mut declared = vec![Statement::variable(VariableDeclaration {
-            ident: *id,
-            value: None,
-            property: kind,
-            ident_info: IdentInfo::default(),
-        })];
+        let mut declared = vec![JS::variable(
+            VarDecl {
+                ident: *id,
+                value: None,
+                property: kind,
+                ident_info: IdentInfo::default(),
+            },
+            &mut self.j,
+        )];
         declared.extend(self.compile_switch_assignment_block(a, id, scrut, sw));
         declared
     }
@@ -2750,7 +2753,7 @@ impl LambdaCompiler {
         // that by folding the final `id = expr` in the emitted assignment
         // block into the pending declaration.
         let body = self.compile_string_switch_assignment_block(a, id, scrut, sw);
-        Self::prepend_declaration_or_fold_final_assignment(kind, id, body)
+        self.prepend_declaration_or_fold_final_assignment(kind, id, body)
     }
 
     fn compile_short_circuit_expr(
@@ -2775,11 +2778,14 @@ impl LambdaCompiler {
 
         if rhs_compiled.prelude.is_empty() {
             let expr = match op {
-                ShortCircuitOp::And => {
-                    Expression::bin(BinOp::And, lhs_compiled.expr, rhs_compiled.expr)
-                }
+                ShortCircuitOp::And => JE::bin(
+                    BinOp::And,
+                    lhs_compiled.expr,
+                    rhs_compiled.expr,
+                    &mut self.j,
+                ),
                 ShortCircuitOp::Or => {
-                    Expression::bin(BinOp::Or, lhs_compiled.expr, rhs_compiled.expr)
+                    JE::bin(BinOp::Or, lhs_compiled.expr, rhs_compiled.expr, &mut self.j)
                 }
             };
             return Compiled {
@@ -2790,26 +2796,27 @@ impl LambdaCompiler {
         }
 
         let tmp = self.fresh_tmp_ident();
-        prelude.push(Statement::variable(VariableDeclaration {
-            ident: tmp,
-            value: Some(op.default_expr()),
-            property: LetKind::Strict,
-            ident_info: IdentInfo::default(),
-        }));
+        prelude.push(JS::variable(
+            VarDecl {
+                ident: tmp,
+                value: Some(op.default_expr(&mut self.j)),
+                property: LetKind::Strict,
+                ident_info: IdentInfo::default(),
+            },
+            &mut self.j,
+        ));
 
         let mut then_block = rhs_compiled.prelude;
-        then_block.push(Statement::exp(Expression::bin(
-            BinOp::Eq,
-            Expression::var(tmp),
-            rhs_compiled.expr,
-        )));
+        let tmp_var = JE::var(tmp, &mut self.j);
+        let assign = JE::bin(BinOp::Eq, tmp_var, rhs_compiled.expr, &mut self.j);
+        then_block.push(JS::exp(assign, &mut self.j));
 
-        let test = op.test_expr(lhs_compiled.expr);
-        prelude.push(Statement::if_(test, then_block, vec![]));
+        let test = op.test_expr(lhs_compiled.expr, &mut self.j);
+        prelude.push(JS::if_(test, &then_block, &[], &mut self.j));
 
         Compiled {
             prelude,
-            expr: Expression::var(tmp),
+            expr: JE::var(tmp, &mut self.j),
             finished: OutputFinished::False,
         }
     }
@@ -2830,55 +2837,47 @@ impl LambdaCompiler {
 
         if rhs_compiled.prelude.is_empty() {
             let expr = match op {
-                ShortCircuitOp::And => {
-                    Expression::bin(BinOp::And, lhs_compiled.expr, rhs_compiled.expr)
-                }
+                ShortCircuitOp::And => JE::bin(
+                    BinOp::And,
+                    lhs_compiled.expr,
+                    rhs_compiled.expr,
+                    &mut self.j,
+                ),
                 ShortCircuitOp::Or => {
-                    Expression::bin(BinOp::Or, lhs_compiled.expr, rhs_compiled.expr)
+                    JE::bin(BinOp::Or, lhs_compiled.expr, rhs_compiled.expr, &mut self.j)
                 }
             };
-            block.push(Statement::variable(VariableDeclaration {
-                ident: *id,
-                value: Some(expr),
-                property: kind,
-                ident_info: IdentInfo::default(),
-            }));
+            block.push(JS::variable(
+                VarDecl {
+                    ident: *id,
+                    value: Some(expr),
+                    property: kind,
+                    ident_info: IdentInfo::default(),
+                },
+                &mut self.j,
+            ));
             return block;
         }
 
         // compile_sequand / compile_sequor `Declare (_kind, v)`: the target
         // is declared with `~kind:Variable` once the right side needs
         // statements (lam_compile.ml:1128-1135, 1168-1175).
-        block.push(Statement::variable(VariableDeclaration {
-            ident: *id,
-            value: Some(op.default_expr()),
-            property: LetKind::Variable,
-            ident_info: IdentInfo::default(),
-        }));
+        block.push(JS::variable(
+            VarDecl {
+                ident: *id,
+                value: Some(op.default_expr(&mut self.j)),
+                property: LetKind::Variable,
+                ident_info: IdentInfo::default(),
+            },
+            &mut self.j,
+        ));
 
         let mut then_block = rhs_compiled.prelude;
         then_block.push(self.result_assignment(id, rhs_compiled.expr));
 
-        block.push(Statement::if_(
-            op.test_expr(lhs_compiled.expr),
-            then_block,
-            vec![],
-        ));
+        let test = op.test_expr(lhs_compiled.expr, &mut self.j);
+        block.push(JS::if_(test, &then_block, &[], &mut self.j));
         block
-    }
-
-    fn compile_short_circuit_return_output(
-        &mut self,
-        a: &mut LamArena,
-        op: ShortCircuitOp,
-        lhs: Lam,
-        rhs: Lam,
-    ) -> BlockOutput {
-        let default = op.default_lambda(a);
-        match op {
-            ShortCircuitOp::And => self.compile_if_return_output(a, lhs, rhs, default),
-            ShortCircuitOp::Or => self.compile_if_return_output(a, lhs, default, rhs),
-        }
     }
 
     pub(crate) fn compile_return_block(&mut self, a: &mut LamArena, lam: Lam) -> Block {
@@ -2898,7 +2897,7 @@ impl LambdaCompiler {
             } => {
                 let id = a.ident(id);
                 if let Some(compiled) = self.try_compile_record_spread(a, &id, value, body) {
-                    return return_compiled(compiled);
+                    return return_compiled(&mut self.j, compiled);
                 }
 
                 // lam_compile.ml:1867-1877: compile the binding, then the
@@ -2926,10 +2925,11 @@ impl LambdaCompiler {
             Node::Apply { func, args, info } => {
                 let mut compiled = self.compile_apply_call(a, func, args, info);
                 // lam_compile.ml:1606-1609: `with_source_loc ap_loc (E.call ...)`.
-                if compiled.expr.source_loc.is_none() {
-                    compiled.expr.source_loc = self.source_loc(&a.apply_payload(info).info.loc);
+                if self.j.expr_loc(compiled.expr).is_none() {
+                    let loc = self.source_loc(&a.apply_payload(info).info.loc);
+                    compiled.expr = self.j.with_expr_loc(compiled.expr, loc);
                 }
-                return_compiled(compiled)
+                return_compiled(&mut self.j, compiled)
             }
             Node::If { cond, then_, else_ } => {
                 // Both branches are `undefined`: OCaml's `return e ? undefined
@@ -2966,7 +2966,10 @@ impl LambdaCompiler {
                 if let Some(handler) = self.resolve_static_raise(a, label, args) {
                     return self.compile_return_output(a, handler);
                 }
-                return_compiled(self.compile_expr(a, lam))
+                {
+                    let compiled = self.compile_expr(a, lam);
+                    return_compiled(&mut self.j, compiled)
+                }
             }
             Node::StaticCatch {
                 body,
@@ -3018,7 +3021,10 @@ impl LambdaCompiler {
                 scrut,
                 StrSw { actions, info },
             )),
-            _ => return_compiled(self.compile_expr(a, lam)),
+            _ => {
+                let compiled = self.compile_expr(a, lam);
+                return_compiled(&mut self.j, compiled)
+            }
         }
     }
 
@@ -3027,8 +3033,22 @@ impl LambdaCompiler {
     pub(crate) fn compile_return_output(&mut self, a: &mut LamArena, lam: Lam) -> BlockOutput {
         let output = self.compile_return_output_inner(a, lam);
         BlockOutput {
-            block: unnest_block(output.block),
+            block: JS::unnest_block(output.block, &self.j),
             finished: output.finished,
+        }
+    }
+
+    fn compile_short_circuit_return_output(
+        &mut self,
+        a: &mut LamArena,
+        op: ShortCircuitOp,
+        lhs: Lam,
+        rhs: Lam,
+    ) -> BlockOutput {
+        let default = op.default_lambda(a);
+        match op {
+            ShortCircuitOp::And => self.compile_if_return_output(a, lhs, rhs, default),
+            ShortCircuitOp::Or => self.compile_if_return_output(a, lhs, default, rhs),
         }
     }
 
@@ -3116,6 +3136,349 @@ impl LambdaCompiler {
         }
     }
 
+    fn compile_static_raise_jump_output(
+        &mut self,
+        a: &mut LamArena,
+        label: i32,
+        args: LamList,
+    ) -> Option<BlockOutput> {
+        let handler = self
+            .static_jump_handlers
+            .iter()
+            .rev()
+            .find(|handler| handler.label == label)?
+            .clone();
+        if handler.bindings.len() != a.list_len(args) {
+            return None;
+        }
+
+        // lam_compile.ml `compile_staticraise`: `Ext_list.fold_right2 largs
+        // bindings exit_assignment (fun larg bind acc -> append_output
+        // (compile larg) acc)`. The nested fold is an argument of `f`, so
+        // the last argument is compiled first; an argument whose output is
+        // finished (a `throw`) drops everything after it, the exit code
+        // assignment included (`Js_output.append_output`).
+        let target = JE::var(handler.exit_id, &mut self.j);
+        let code = JE::int(handler.exit_code, &mut self.j);
+        let assign = JE::bin(BinOp::Eq, target, code, &mut self.j);
+        let exit_assignment = BlockOutput::make(vec![JS::exp(assign, &mut self.j)]);
+        let args = a.list_small(args);
+        let output =
+            handler
+                .bindings
+                .iter()
+                .zip(args)
+                .rev()
+                .fold(exit_assignment, |acc, (binding, arg)| {
+                    let output = self.compile_assign_to_target_output(a, binding, arg);
+                    output.append(acc)
+                });
+        Some(output)
+    }
+
+    /// [`Self::compile_multi_staticcatch_effect_output`] in a return
+    /// continuation.
+    fn compile_multi_staticcatch_tail_loop_return_output(
+        &mut self,
+        a: &mut LamArena,
+        handlers: &[FlatHandler],
+        body: Lam,
+        tail_loop: &mut TailLoopState,
+    ) -> BlockOutput {
+        let (exit_id, first_code, declarations) = self.emit_multi_staticcatch_prelude(handlers);
+        let body_output = self.compile_tail_loop_return_output(a, body, tail_loop);
+        let grouped_handlers = self.compile_grouped_staticcatch_handlers(
+            a,
+            handlers,
+            first_code,
+            |this, a, handler| this.compile_tail_loop_return_output(a, handler, tail_loop),
+        );
+        self.pop_multi_staticcatch_handlers(handlers.len());
+        let cases = BlockOutput::make(
+            self.compile_exit_dispatch(a, &exit_id, grouped_handlers, true)
+                .into_iter()
+                .collect(),
+        );
+        BlockOutput::make(declarations).append(body_output.append(cases))
+    }
+
+    /// [`Self::compile_staticcatch_effect_output`] for a flattened code
+    /// table: every handler is compiled after the body.
+    fn compile_multi_staticcatch_assignment_output(
+        &mut self,
+        a: &mut LamArena,
+        result: &Ident,
+        handlers: &[FlatHandler],
+        body: Lam,
+    ) -> BlockOutput {
+        let (exit_id, first_code, declarations) = self.emit_multi_staticcatch_prelude(handlers);
+        let body_output = self.compile_assign_to_target_output(a, result, body);
+        let grouped_handlers = self.compile_grouped_staticcatch_handlers(
+            a,
+            handlers,
+            first_code,
+            |this, a, handler| this.compile_assign_to_target_output(a, result, handler),
+        );
+        self.pop_multi_staticcatch_handlers(handlers.len());
+        let cases = BlockOutput::make(
+            self.compile_exit_dispatch(a, &exit_id, grouped_handlers, false)
+                .into_iter()
+                .collect(),
+        );
+        BlockOutput::make(declarations).append(body_output.append(cases))
+    }
+
+    /// [`Self::compile_staticcatch_effect_output`] for a flattened code
+    /// table: every handler is compiled after the body.
+    fn compile_multi_staticcatch_effect_output(
+        &mut self,
+        a: &mut LamArena,
+        handlers: &[FlatHandler],
+        body: Lam,
+    ) -> BlockOutput {
+        let (exit_id, first_code, declarations) = self.emit_multi_staticcatch_prelude(handlers);
+        let body_output = self.compile_effect_block_output(a, body);
+        let grouped_handlers = self.compile_grouped_staticcatch_handlers(
+            a,
+            handlers,
+            first_code,
+            |this, a, handler| this.compile_effect_block_output(a, handler),
+        );
+        self.pop_multi_staticcatch_handlers(handlers.len());
+        let cases = BlockOutput::make(
+            self.compile_exit_dispatch(a, &exit_id, grouped_handlers, false)
+                .into_iter()
+                .collect(),
+        );
+        BlockOutput::make(declarations).append(body_output.append(cases))
+    }
+
+    /// [`Self::compile_multi_staticcatch_effect_output`] in a return
+    /// continuation.
+    fn compile_multi_staticcatch_return_output(
+        &mut self,
+        a: &mut LamArena,
+        handlers: &[FlatHandler],
+        body: Lam,
+    ) -> BlockOutput {
+        let (exit_id, first_code, declarations) = self.emit_multi_staticcatch_prelude(handlers);
+        let body_output = self.compile_return_output(a, body);
+        let grouped_handlers = self.compile_grouped_staticcatch_handlers(
+            a,
+            handlers,
+            first_code,
+            |this, a, handler| this.compile_return_output(a, handler),
+        );
+        self.pop_multi_staticcatch_handlers(handlers.len());
+        let cases = BlockOutput::make(
+            self.compile_exit_dispatch(a, &exit_id, grouped_handlers, true)
+                .into_iter()
+                .collect(),
+        );
+        BlockOutput::make(declarations).append(body_output.append(cases))
+    }
+
+    /// [`Self::compile_staticcatch_effect_output`] in a return continuation
+    /// (lam_compile.ml:1063-1101).
+    fn compile_staticcatch_tail_loop_return_output(
+        &mut self,
+        a: &mut LamArena,
+        label: i32,
+        bindings: &[Ident],
+        body: Lam,
+        handler: Lam,
+        tail_loop: &mut TailLoopState,
+    ) -> BlockOutput {
+        let exit_id = self.fresh_ident("exit");
+        let exit_code = self.next_static_jump_exit_code();
+        let declarations = self.staticcatch_declarations(&exit_id, bindings);
+        let (body_output, handler_block) =
+            self.with_static_jump_handler(label, &exit_id, bindings, |this| {
+                let body_output = this.compile_tail_loop_return_output(a, body, tail_loop);
+                let handler_block = this
+                    .compile_tail_loop_return_output(a, handler, tail_loop)
+                    .block;
+                (body_output, handler_block)
+            });
+        let cases = if handler_block.is_empty() {
+            BlockOutput::make(vec![])
+        } else {
+            let cond = self.staticcatch_exit_test(&exit_id, exit_code);
+            BlockOutput::make(vec![JS::if_(cond, &handler_block, &[], &mut self.j)])
+        };
+        BlockOutput::make(declarations).append(body_output.append(cases))
+    }
+
+    /// [`Self::compile_staticcatch_effect_output`] in a return continuation
+    /// (lam_compile.ml:1063-1101).
+    fn compile_staticcatch_return_output(
+        &mut self,
+        a: &mut LamArena,
+        label: i32,
+        bindings: &[Ident],
+        body: Lam,
+        handler: Lam,
+    ) -> BlockOutput {
+        let exit_id = self.fresh_ident("exit");
+        let exit_code = self.next_static_jump_exit_code();
+        let declarations = self.staticcatch_declarations(&exit_id, bindings);
+        let (body_output, handler_block) =
+            self.with_static_jump_handler(label, &exit_id, bindings, |this| {
+                let body_output = this.compile_return_output(a, body);
+                let handler_block = this.compile_return_output(a, handler).block;
+                (body_output, handler_block)
+            });
+        let cases = if handler_block.is_empty() {
+            BlockOutput::make(vec![])
+        } else {
+            let cond = self.staticcatch_exit_test(&exit_id, exit_code);
+            BlockOutput::make(vec![JS::if_(cond, &handler_block, &[], &mut self.j)])
+        };
+        BlockOutput::make(declarations).append(body_output.append(cases))
+    }
+
+    /// lam_compile.ml:1063-1101 `compile_staticcatch`, explicit jumps: the
+    /// body and then the handler are compiled, and the output is
+    /// `append_output (make declares) (append_output lbody (make cases))`,
+    /// so a finished body drops the handler and finishes the catch.
+    fn compile_staticcatch_effect_output(
+        &mut self,
+        a: &mut LamArena,
+        label: i32,
+        bindings: &[Ident],
+        body: Lam,
+        handler: Lam,
+    ) -> BlockOutput {
+        let exit_id = self.fresh_ident("exit");
+        let exit_code = self.next_static_jump_exit_code();
+        let declarations = self.staticcatch_declarations(&exit_id, bindings);
+        let (body_output, handler_block) =
+            self.with_static_jump_handler(label, &exit_id, bindings, |this| {
+                let body_output = this.compile_effect_block_output(a, body);
+                let handler_block = this.compile_effect_block(a, handler);
+                (body_output, handler_block)
+            });
+        let cases = if handler_block.is_empty() {
+            BlockOutput::make(vec![])
+        } else {
+            let cond = self.staticcatch_exit_test(&exit_id, exit_code);
+            BlockOutput::make(vec![JS::if_(cond, &handler_block, &[], &mut self.j)])
+        };
+        BlockOutput::make(declarations).append(body_output.append(cases))
+    }
+
+    /// lam_compile.ml:1063-1101 `compile_staticcatch`, explicit jumps: the
+    /// body and then the handler are compiled, and the output is
+    /// `append_output (make declares) (append_output lbody (make cases))`,
+    /// so a finished body drops the handler and finishes the catch.
+    fn compile_staticcatch_assignment_output(
+        &mut self,
+        a: &mut LamArena,
+        result: &Ident,
+        label: i32,
+        bindings: &[Ident],
+        body: Lam,
+        handler: Lam,
+    ) -> BlockOutput {
+        let exit_id = self.fresh_ident("exit");
+        let exit_code = self.next_static_jump_exit_code();
+        let declarations = self.staticcatch_declarations(&exit_id, bindings);
+        let (body_output, handler_block) =
+            self.with_static_jump_handler(label, &exit_id, bindings, |this| {
+                let body_output = this.compile_assign_to_target_output(a, result, body);
+                let handler_block = this.compile_assign_to_target_block(a, result, handler);
+                (body_output, handler_block)
+            });
+        let cases = if handler_block.is_empty() {
+            BlockOutput::make(vec![])
+        } else {
+            let cond = self.staticcatch_exit_test(&exit_id, exit_code);
+            BlockOutput::make(vec![JS::if_(cond, &handler_block, &[], &mut self.j)])
+        };
+        BlockOutput::make(declarations).append(body_output.append(cases))
+    }
+
+    /// lam_compile.ml:1022-1047, the pseudo-jump arm of
+    /// `compile_staticcatch`: `append_output (make declares) (append_output
+    /// lbody (compile_lambda lambda_cxt handler))`, with the handler compiled
+    /// after the body.
+    fn compile_fallthrough_staticcatch_tail_loop_return_output(
+        &mut self,
+        a: &mut LamArena,
+        label: i32,
+        bindings: &[Ident],
+        body: Lam,
+        handler: Lam,
+        tail_loop: &mut TailLoopState,
+    ) -> BlockOutput {
+        let declarations: Block = bindings
+            .iter()
+            .map(|binding| JS::define(*binding, None, LetKind::Variable, &mut self.j))
+            .collect();
+        let body_output = self.with_fallthrough_return_handler(label, bindings, |this| {
+            this.compile_tail_loop_return_output(a, body, tail_loop)
+        });
+        let handler_output = self.compile_tail_loop_return_output(a, handler, tail_loop);
+        BlockOutput::make(declarations).append(body_output.append(handler_output))
+    }
+
+    /// lam_compile.ml:1022-1047, the pseudo-jump arm of
+    /// `compile_staticcatch`: `append_output (make declares) (append_output
+    /// lbody (compile_lambda lambda_cxt handler))`, with the handler compiled
+    /// after the body.
+    fn compile_fallthrough_staticcatch_return_output(
+        &mut self,
+        a: &mut LamArena,
+        label: i32,
+        bindings: &[Ident],
+        body: Lam,
+        handler: Lam,
+    ) -> BlockOutput {
+        let declarations: Block = bindings
+            .iter()
+            .map(|binding| JS::define(*binding, None, LetKind::Variable, &mut self.j))
+            .collect();
+        let body_output = self.with_fallthrough_return_handler(label, bindings, |this| {
+            this.compile_return_output(a, body)
+        });
+        let handler_output = self.compile_return_output(a, handler);
+        BlockOutput::make(declarations).append(body_output.append(handler_output))
+    }
+
+    /// lam_compile.ml:969-986 `compile_staticraise` to a pseudo jump
+    /// (`order_id < 0`): the arguments are assigned, folded last first onto
+    /// `Js_output.make []`.
+    fn compile_fallthrough_static_raise_return_output(
+        &mut self,
+        a: &mut LamArena,
+        label: i32,
+        args: LamList,
+    ) -> Option<BlockOutput> {
+        let bindings = self
+            .fallthrough_return_handlers
+            .iter()
+            .rev()
+            .find(|handler| handler.label == label)?
+            .bindings
+            .clone();
+        if bindings.len() != a.list_len(args) {
+            return None;
+        }
+
+        let args = a.list_small(args);
+        let output = args.into_iter().zip(&bindings).rev().fold(
+            BlockOutput::make(vec![]),
+            |acc, (arg, binding)| {
+                if a.as_var(arg).is_some_and(|id| id.same(binding)) {
+                    return acc;
+                }
+                self.compile_assign_to_target_output(a, binding, arg)
+                    .append(acc)
+            },
+        );
+        Some(output)
+    }
+
     fn with_fallthrough_return_handler<T>(
         &mut self,
         label: i32,
@@ -3197,7 +3560,7 @@ impl LambdaCompiler {
             let mut block = cond_compiled.prelude;
             // OCaml's `S.if_ cond [] []` keeps only a condition with side
             // effects (js_stmt_make.ml `if_`).
-            push_s_if_empty(&mut block, cond_compiled.expr);
+            push_s_if_empty(&mut self.j, &mut block, cond_compiled.expr);
             return Some(block);
         }
 
@@ -3244,101 +3607,6 @@ impl LambdaCompiler {
             (bindings, a.view(handler)),
             ([binding], View::Var(id)) if id.same(binding)
         )
-    }
-
-    /// lam_compile.ml:969-986 `compile_staticraise` to a pseudo jump
-    /// (`order_id < 0`): the arguments are assigned, folded last first onto
-    /// `Js_output.make []`.
-    fn compile_fallthrough_static_raise_return_output(
-        &mut self,
-        a: &mut LamArena,
-        label: i32,
-        args: LamList,
-    ) -> Option<BlockOutput> {
-        let bindings = self
-            .fallthrough_return_handlers
-            .iter()
-            .rev()
-            .find(|handler| handler.label == label)?
-            .bindings
-            .clone();
-        if bindings.len() != a.list_len(args) {
-            return None;
-        }
-
-        let args = a.list_small(args);
-        let output = args.into_iter().zip(&bindings).rev().fold(
-            BlockOutput::make(vec![]),
-            |acc, (arg, binding)| {
-                if a.as_var(arg).is_some_and(|id| id.same(binding)) {
-                    return acc;
-                }
-                self.compile_assign_to_target_output(a, binding, arg)
-                    .append(acc)
-            },
-        );
-        Some(output)
-    }
-
-    /// lam_compile.ml:1022-1047, the pseudo-jump arm of
-    /// `compile_staticcatch`: `append_output (make declares) (append_output
-    /// lbody (compile_lambda lambda_cxt handler))`, with the handler compiled
-    /// after the body.
-    fn compile_fallthrough_staticcatch_return_output(
-        &mut self,
-        a: &mut LamArena,
-        label: i32,
-        bindings: &[Ident],
-        body: Lam,
-        handler: Lam,
-    ) -> BlockOutput {
-        let declarations: Block = bindings
-            .iter()
-            .map(|binding| {
-                Statement::variable(VariableDeclaration {
-                    ident: *binding,
-                    value: None,
-                    property: LetKind::Variable,
-                    ident_info: IdentInfo::default(),
-                })
-            })
-            .collect();
-        let body_output = self.with_fallthrough_return_handler(label, bindings, |this| {
-            this.compile_return_output(a, body)
-        });
-        let handler_output = self.compile_return_output(a, handler);
-        BlockOutput::make(declarations).append(body_output.append(handler_output))
-    }
-
-    /// lam_compile.ml:1022-1047, the pseudo-jump arm of
-    /// `compile_staticcatch`: `append_output (make declares) (append_output
-    /// lbody (compile_lambda lambda_cxt handler))`, with the handler compiled
-    /// after the body.
-    fn compile_fallthrough_staticcatch_tail_loop_return_output(
-        &mut self,
-        a: &mut LamArena,
-        label: i32,
-        bindings: &[Ident],
-        body: Lam,
-        handler: Lam,
-        tail_loop: &mut TailLoopState,
-    ) -> BlockOutput {
-        let declarations: Block = bindings
-            .iter()
-            .map(|binding| {
-                Statement::variable(VariableDeclaration {
-                    ident: *binding,
-                    value: None,
-                    property: LetKind::Variable,
-                    ident_info: IdentInfo::default(),
-                })
-            })
-            .collect();
-        let body_output = self.with_fallthrough_return_handler(label, bindings, |this| {
-            this.compile_tail_loop_return_output(a, body, tail_loop)
-        });
-        let handler_output = self.compile_tail_loop_return_output(a, handler, tail_loop);
-        BlockOutput::make(declarations).append(body_output.append(handler_output))
     }
 
     fn uses_fallthrough_staticcatch_return(
@@ -3551,7 +3819,7 @@ impl LambdaCompiler {
         a: &mut LamArena,
         grouped_cases: Vec<(T, Lam, bool)>,
         mut to_tag: impl FnMut(T) -> SwitchCaseTag,
-    ) -> Vec<StringClause> {
+    ) -> Vec<StringClauseInfo> {
         let mut clauses = Vec::with_capacity(grouped_cases.len());
         let mut group_start = 0;
         while group_start < grouped_cases.len() {
@@ -3583,9 +3851,12 @@ impl LambdaCompiler {
             }
             clauses.push((
                 to_tag(grouped_cases[group_end].0.clone()),
-                CaseClause {
+                Clause {
                     source_loc: self.source_loc_of_lam(a, body),
-                    body: self.with_block_source_loc(a, body, compiled_body),
+                    body: {
+                        let body = self.with_block_source_loc(a, body, compiled_body);
+                        JS::list(&body, &mut self.j)
+                    },
                     should_break,
                     comment: None,
                 },
@@ -3597,7 +3868,7 @@ impl LambdaCompiler {
 
         self.reorder_fallthrough_return_clauses(clauses, |(_, _, falls_through)| *falls_through)
             .into_iter()
-            .map(|(tag_type, clause, _)| StringClause { tag_type, clause })
+            .map(|(tag_type, clause, _)| StringClauseInfo { tag_type, clause })
             .collect()
     }
 
@@ -3691,7 +3962,7 @@ impl LambdaCompiler {
         _function: &Ident,
         func: Lam,
         tail_targets: &[Ident],
-    ) -> Expression {
+    ) -> Expr {
         let Node::Function { body, info } = a.node(func) else {
             unreachable!("recursive function binding is a function")
         };
@@ -3713,13 +3984,21 @@ impl LambdaCompiler {
             a.params(info).to_vec()
         };
         let mut tail_loop = TailLoopState::new(tail_targets.to_vec(), params.clone());
-        let body = self.compile_tail_loop_return_block(a, body, &mut tail_loop);
+        // OCaml compiler/core/lam_compile.ml:398-407 compiles the body with
+        // `jmp_table = empty_handler_map; switch_depth = 0; loop_stack = []`,
+        // like any other function body: the enclosing function's handlers
+        // and loops do not reach into it.
+        let body = self.with_function_scope(|this| {
+            this.with_return_unit_context(return_unit, |that| {
+                that.compile_tail_loop_return_block(a, body, &mut tail_loop)
+            })
+        });
 
         if !tail_loop.triggered {
             return self.compile_expr(a, func).expr;
         }
 
-        let lowered_params = params
+        let lowered_params: Vec<Ident> = params
             .iter()
             .map(|param| tail_loop.new_params.get(param).cloned().unwrap_or(*param))
             .collect();
@@ -3735,27 +4014,30 @@ impl LambdaCompiler {
 
         let mut loop_body = Vec::new();
         for (param, new_param) in lowered_param_defs {
-            loop_body.push(Statement::variable(VariableDeclaration {
-                ident: *param,
-                value: Some(Expression::var(*new_param)),
-                property: LetKind::Alias,
-                ident_info: IdentInfo::default(),
-            }));
+            loop_body.push(JS::variable(
+                VarDecl {
+                    ident: *param,
+                    value: Some(JE::var(*new_param, &mut self.j)),
+                    property: LetKind::Alias,
+                    ident_info: IdentInfo::default(),
+                },
+                &mut self.j,
+            ));
         }
         loop_body.extend(body);
 
-        let mut expr = Expression::new(ExpressionDesc::Fun {
-            is_method: false,
-            params: lowered_params,
-            body: vec![Statement::while_(Expression::bool(true), loop_body)],
-            env: Default::default(),
+        let always = JE::bool(true, &mut self.j);
+        let body = [JS::while_(None, always, &loop_body, &mut self.j)];
+        // lam_compile.ml:436: `with_source_loc loc result`.
+        let source_loc = self.source_loc(&loc);
+        self.function_expr(
+            &lowered_params,
+            &body,
             return_unit,
             async_,
-            directive: directive.map(Box::new),
-        });
-        // lam_compile.ml:436: `with_source_loc loc result`.
-        expr.source_loc = self.source_loc(&loc);
-        expr
+            directive.as_deref(),
+            source_loc,
+        )
     }
 
     pub(crate) fn compile_tail_loop_return_block(
@@ -3770,18 +4052,92 @@ impl LambdaCompiler {
             .block
     }
 
-    /// [`Self::compile_return_output`] in a function body compiled as a
-    /// self tail call loop.
-    pub(crate) fn compile_tail_loop_return_output(
+    /// [`Self::compile_if_return_output`] in a self tail call loop.
+    fn compile_tail_loop_if_return_output(
         &mut self,
         a: &mut LamArena,
-        lam: Lam,
+        cond: Lam,
+        then_: Lam,
+        else_: Lam,
         tail_loop: &mut TailLoopState,
     ) -> BlockOutput {
-        let output = self.compile_tail_loop_return_output_inner(a, lam, tail_loop);
-        BlockOutput {
-            block: unnest_block(output.block),
-            finished: output.finished,
+        let cond_compiled = self.compile_expr(a, cond);
+        // lam_compile.ml:1514-1518: compile both branches in
+        // `NeedValue should_return` first and emit `return e ? a : b` when
+        // neither needs statements. A branch with a self tail call compiles
+        // to the loop jump there, so it always has a block.
+        if !function_has_self_tailcall(a, &tail_loop.tail_targets, then_)
+            && !function_has_self_tailcall(a, &tail_loop.tail_targets, else_)
+        {
+            let then_value = self.compile_expr(a, then_);
+            let else_value = self.compile_expr(a, else_);
+            if then_value.prelude.is_empty() && else_value.prelude.is_empty() {
+                let mut block = cond_compiled.prelude;
+                let expr = JE::cond(
+                    cond_compiled.expr,
+                    then_value.expr,
+                    else_value.expr,
+                    &mut self.j,
+                );
+                block.push(JS::return_(expr, &mut self.j));
+                return BlockOutput::finished(block);
+            }
+        }
+        let then_block = self.compile_tail_loop_return_block(a, then_, tail_loop);
+        let else_block = self.compile_tail_loop_return_block(a, else_, tail_loop);
+
+        let mut block = cond_compiled.prelude;
+
+        // Mirror OCaml's Lifthenelse compile (lam_compile.ml:1428-1436), which
+        // calls `Js_output.output_as_block` on each compiled branch — that
+        // calls `unnest_block` (js_output.ml:77-80) before passing to `S.if_`.
+        // OCaml's `block_last_is_return_throw_or_continue` (js_stmt_make.ml:186-193)
+        // is non-recursive, so an unnested branch ending in `continue`/`return`/`throw`
+        // lets rule 7 fire while a Block-wrapped branch keeps the if-else.
+        let then_block = JS::unnest_block(then_block, &self.j);
+        let else_block = JS::unnest_block(else_block, &self.j);
+        let cond_expr = cond_compiled.expr;
+        let cond_is_conjunction = matches!(self.j.ek(cond_expr), ExprKind::Bin(BinOp::And, _, _));
+        if cond_is_conjunction
+            && block_last_is_continue(&self.j, &then_block)
+            && block_last_is_non_continue_terminal(&self.j, &else_block)
+        {
+            // OCaml's tail-call path marks self tail-calls `output_finished=True`
+            // and `S.if_` rule 5/7 interactions keep the terminal fallback under
+            // a negative guard before the `continue` tail
+            // (compiler/core/lam_compile.ml:1582-1629,
+            // compiler/core/js_stmt_make.ml:247-250). Rust represents the same
+            // tail call directly as assignment statements plus `Continue`, so
+            // build that shape explicitly before the generic `Statement::if_`
+            // simplifier flips it back to a positive guard.
+            let cond = JE::not(cond_expr, &mut self.j);
+            let else_block = merge_terminal_guard_fallthrough_else(&mut self.j, else_block);
+            let then_ = self.j.stmt_list(&else_block);
+            let else_ = self.j.empty_block();
+            block.push(self.j.stmt(StmtKind::If(cond, then_, else_)));
+            block.extend(then_block);
+            return BlockOutput::make(block);
+        }
+        block.push(JS::if_(cond_expr, &then_block, &else_block, &mut self.j));
+        BlockOutput::make(block)
+    }
+
+    fn compile_short_circuit_tail_loop_return_output(
+        &mut self,
+        a: &mut LamArena,
+        op: ShortCircuitOp,
+        lhs: Lam,
+        rhs: Lam,
+        tail_loop: &mut TailLoopState,
+    ) -> BlockOutput {
+        let default = op.default_lambda(a);
+        match op {
+            ShortCircuitOp::And => {
+                self.compile_tail_loop_if_return_output(a, lhs, rhs, default, tail_loop)
+            }
+            ShortCircuitOp::Or => {
+                self.compile_tail_loop_if_return_output(a, lhs, default, rhs, tail_loop)
+            }
         }
     }
 
@@ -3811,7 +4167,10 @@ impl LambdaCompiler {
                     // finished.
                     return BlockOutput::finished(block);
                 }
-                return_compiled(self.compile_apply_call(a, func, args, info))
+                {
+                    let compiled = self.compile_apply_call(a, func, args, info);
+                    return_compiled(&mut self.j, compiled)
+                }
             }
             Node::If { cond, then_, else_ } => {
                 self.compile_tail_loop_if_return_output(a, cond, then_, else_, tail_loop)
@@ -3843,7 +4202,10 @@ impl LambdaCompiler {
                 if let Some(handler) = self.resolve_static_raise(a, label, args) {
                     return self.compile_tail_loop_return_output(a, handler, tail_loop);
                 }
-                return_compiled(self.compile_expr(a, lam))
+                {
+                    let compiled = self.compile_expr(a, lam);
+                    return_compiled(&mut self.j, compiled)
+                }
             }
             Node::StaticCatch {
                 body,
@@ -3958,94 +4320,25 @@ impl LambdaCompiler {
                 StrSw { actions, info },
                 tail_loop,
             )),
-            _ => return_compiled(self.compile_expr(a, lam)),
+            _ => {
+                let compiled = self.compile_expr(a, lam);
+                return_compiled(&mut self.j, compiled)
+            }
         }
     }
 
-    /// [`Self::compile_if_return_output`] in a self tail call loop.
-    fn compile_tail_loop_if_return_output(
+    /// [`Self::compile_return_output`] in a function body compiled as a
+    /// self tail call loop.
+    pub(crate) fn compile_tail_loop_return_output(
         &mut self,
         a: &mut LamArena,
-        cond: Lam,
-        then_: Lam,
-        else_: Lam,
+        lam: Lam,
         tail_loop: &mut TailLoopState,
     ) -> BlockOutput {
-        let cond_compiled = self.compile_expr(a, cond);
-        // lam_compile.ml:1514-1518: compile both branches in
-        // `NeedValue should_return` first and emit `return e ? a : b` when
-        // neither needs statements. A branch with a self tail call compiles
-        // to the loop jump there, so it always has a block.
-        if !function_has_self_tailcall(a, &tail_loop.tail_targets, then_)
-            && !function_has_self_tailcall(a, &tail_loop.tail_targets, else_)
-        {
-            let then_value = self.compile_expr(a, then_);
-            let else_value = self.compile_expr(a, else_);
-            if then_value.prelude.is_empty() && else_value.prelude.is_empty() {
-                let mut block = cond_compiled.prelude;
-                block.push(Statement::return_(Expression::cond(
-                    cond_compiled.expr,
-                    then_value.expr,
-                    else_value.expr,
-                )));
-                return BlockOutput::finished(block);
-            }
-        }
-        let then_block = self.compile_tail_loop_return_block(a, then_, tail_loop);
-        let else_block = self.compile_tail_loop_return_block(a, else_, tail_loop);
-
-        let mut block = cond_compiled.prelude;
-
-        // Mirror OCaml's Lifthenelse compile (lam_compile.ml:1428-1436), which
-        // calls `Js_output.output_as_block` on each compiled branch — that
-        // calls `unnest_block` (js_output.ml:77-80) before passing to `S.if_`.
-        // OCaml's `block_last_is_return_throw_or_continue` (js_stmt_make.ml:186-193)
-        // is non-recursive, so an unnested branch ending in `continue`/`return`/`throw`
-        // lets rule 7 fire while a Block-wrapped branch keeps the if-else.
-        let then_block = unnest_block(then_block);
-        let else_block = unnest_block(else_block);
-        let cond_expr = cond_compiled.expr;
-        let cond_is_conjunction = matches!(&cond_expr.desc, ExpressionDesc::Bin(BinOp::And, _, _));
-        if cond_is_conjunction
-            && block_last_is_continue(&then_block)
-            && block_last_is_non_continue_terminal(&else_block)
-        {
-            // OCaml's tail-call path marks self tail-calls `output_finished=True`
-            // and `S.if_` rule 5/7 interactions keep the terminal fallback under
-            // a negative guard before the `continue` tail
-            // (compiler/core/lam_compile.ml:1582-1629,
-            // compiler/core/js_stmt_make.ml:247-250). Rust represents the same
-            // tail call directly as assignment statements plus `Continue`, so
-            // build that shape explicitly before the generic `Statement::if_`
-            // simplifier flips it back to a positive guard.
-            block.push(Statement::new(StatementDesc::If(
-                Expression::not(cond_expr),
-                merge_terminal_guard_fallthrough_else(else_block),
-                vec![],
-            )));
-            block.extend(then_block);
-            return BlockOutput::make(block);
-        }
-        block.push(Statement::if_(cond_expr, then_block, else_block));
-        BlockOutput::make(block)
-    }
-
-    fn compile_short_circuit_tail_loop_return_output(
-        &mut self,
-        a: &mut LamArena,
-        op: ShortCircuitOp,
-        lhs: Lam,
-        rhs: Lam,
-        tail_loop: &mut TailLoopState,
-    ) -> BlockOutput {
-        let default = op.default_lambda(a);
-        match op {
-            ShortCircuitOp::And => {
-                self.compile_tail_loop_if_return_output(a, lhs, rhs, default, tail_loop)
-            }
-            ShortCircuitOp::Or => {
-                self.compile_tail_loop_if_return_output(a, lhs, default, rhs, tail_loop)
-            }
+        let output = self.compile_tail_loop_return_output_inner(a, lam, tail_loop);
+        BlockOutput {
+            block: JS::unnest_block(output.block, &self.j),
+            finished: output.finished,
         }
     }
 
@@ -4131,9 +4424,12 @@ impl LambdaCompiler {
             }
             cases.push((
                 grouped_cases[group_end].0.clone(),
-                CaseClause {
+                Clause {
                     source_loc: self.source_loc_of_lam(a, body),
-                    body: self.with_block_source_loc(a, body, compiled_body),
+                    body: {
+                        let body = self.with_block_source_loc(a, body, compiled_body);
+                        JS::list(&body, &mut self.j)
+                    },
                     should_break,
                     comment: None,
                 },
@@ -4153,11 +4449,12 @@ impl LambdaCompiler {
             .map(|fallback| self.compile_tail_loop_return_block(a, fallback, tail_loop))
             .filter(|body| !body.is_empty());
 
-        block.push(Statement::new(StatementDesc::IntSwitch(
+        block.push(JS::int_switch(
             scrut_compiled.expr,
             cases,
-            default_block,
-        )));
+            default_block.map(|b| JS::list(&b, &mut self.j)),
+            &mut self.j,
+        ));
         block
     }
 
@@ -4219,11 +4516,12 @@ impl LambdaCompiler {
             .map(|fallback| self.compile_tail_loop_return_block(a, fallback, tail_loop))
             .filter(|body| !body.is_empty());
 
-        block.push(Statement::new(StatementDesc::StringSwitch(
+        block.push(JS::string_switch(
             scrut_compiled.expr,
             clauses,
-            default_block,
-        )));
+            default_block.map(|b| JS::list(&b, &mut self.j)),
+            &mut self.j,
+        ));
         block
     }
 
@@ -4243,8 +4541,6 @@ impl LambdaCompiler {
             return None;
         }
 
-        // lam_compile.ml compile_apply compiles `ap_func :: ap_args` with
-        // `compile_arguments` before matching the self tail call.
         let args = a.list_small(args);
         let (mut block, mut compiled_args) =
             self.compile_arguments(a, false, std::iter::once(func).chain(args));
@@ -4257,7 +4553,7 @@ impl LambdaCompiler {
         };
         let mut assignments = Vec::new();
         for (param, arg) in tail_loop.params.iter().zip(args) {
-            if matches!(&arg.desc, ExpressionDesc::Var(VIdent::Id(id)) if id.same(param)) {
+            if matches!(self.j.ek(arg), ExprKind::Var(id) if self.j.ident(id).same(param)) {
                 continue;
             }
 
@@ -4265,14 +4561,12 @@ impl LambdaCompiler {
                 .new_params
                 .entry(*param)
                 .or_insert_with(|| self.fresh_ident(&format!("_{}", param.name())));
-            assignments.push(Statement::exp(Expression::bin(
-                BinOp::Eq,
-                Expression::var(target),
-                arg,
-            )));
+            let target = JE::var(target, &mut self.j);
+            let assign = JE::bin(BinOp::Eq, target, arg, &mut self.j);
+            assignments.push(JS::exp(assign, &mut self.j));
         }
         block.extend(assignments.into_iter().rev());
-        block.push(Statement::continue_());
+        block.push(JS::continue_(None, &mut self.j));
         Some(block)
     }
 
@@ -4295,7 +4589,7 @@ impl LambdaCompiler {
                 if binding.finished == OutputFinished::True {
                     return Compiled {
                         prelude,
-                        expr: Expression::undefined(false),
+                        expr: JE::undefined(false, &mut self.j),
                         finished: OutputFinished::True,
                     };
                 }
@@ -4308,7 +4602,8 @@ impl LambdaCompiler {
             }
             Node::Apply { func, args, info } => self.compile_apply_call(a, func, args, info),
             Node::If { cond, then_, else_ } => {
-                compiled_from_effect_block(self.compile_if_effect_block(a, cond, then_, else_))
+                let block = self.compile_if_effect_block(a, cond, then_, else_);
+                compiled_from_effect_block(&mut self.j, block)
             }
             Node::Sequence(first, second) => {
                 let first = self.compile_effect_output(a, first);
@@ -4319,19 +4614,16 @@ impl LambdaCompiler {
                 let exn = a.ident(id);
                 let body_block = self.compile_effect_block(a, body);
                 let handler_block = self.compile_effect_block(a, handler);
-                compiled_from_effect_block(vec![self.try_statement(
-                    body_block,
-                    &exn,
-                    handler_block,
-                )])
+                {
+                    let block = vec![self.try_statement(body_block, &exn, handler_block)];
+                    compiled_from_effect_block(&mut self.j, block)
+                }
             }
             Node::TryFinally { body, finally } => {
-                compiled_from_effect_block(vec![self.compile_try_finally(
-                    a,
-                    body,
-                    finally,
-                    |this, a, lam| this.compile_effect_block(a, lam),
-                )])
+                let block = vec![self.compile_try_finally(a, body, finally, |this, a, lam| {
+                    this.compile_effect_block(a, lam)
+                })];
+                compiled_from_effect_block(&mut self.j, block)
             }
             Node::StaticCatch {
                 body,
@@ -4349,7 +4641,7 @@ impl LambdaCompiler {
                         self.compile_multi_staticcatch_effect_output(a, &handlers, flat_body);
                     return Compiled {
                         prelude: output.block,
-                        expr: Expression::undefined(false),
+                        expr: JE::undefined(false, &mut self.j),
                         finished: output.finished,
                     };
                 }
@@ -4362,7 +4654,7 @@ impl LambdaCompiler {
                     self.compile_staticcatch_effect_output(a, label, &bindings, body, handler);
                 Compiled {
                     prelude: output.block,
-                    expr: Expression::undefined(false),
+                    expr: JE::undefined(false, &mut self.j),
                     finished: output.finished,
                 }
             }
@@ -4372,7 +4664,7 @@ impl LambdaCompiler {
                 info,
             } => Compiled {
                 prelude: self.compile_switch_effect_block(a, scrut, Sw { actions, info }),
-                expr: Expression::undefined(false),
+                expr: JE::undefined(false, &mut self.j),
                 finished: OutputFinished::False,
             },
             Node::StringSwitch {
@@ -4381,7 +4673,7 @@ impl LambdaCompiler {
                 info,
             } => Compiled {
                 prelude: self.compile_string_switch_effect_block(a, scrut, StrSw { actions, info }),
-                expr: Expression::undefined(false),
+                expr: JE::undefined(false, &mut self.j),
                 finished: OutputFinished::False,
             },
             _ => self.compile_expr(a, lam),
@@ -4390,16 +4682,16 @@ impl LambdaCompiler {
 
     /// `Js_output.append_output` (js_output.ml:118-138) of two compiled
     /// outputs.
-    fn append_effect_output(&self, first: Compiled, second: Compiled) -> Compiled {
+    fn append_effect_output(&mut self, first: Compiled, second: Compiled) -> Compiled {
         if first.finished == OutputFinished::True {
             return Compiled {
                 prelude: first.prelude,
-                expr: Expression::undefined(false),
+                expr: JE::undefined(false, &mut self.j),
                 finished: OutputFinished::True,
             };
         }
 
-        let first_is_pure = js_expr_no_side_effects(&first.expr);
+        let first_is_pure = js_expr_no_side_effects(&self.j, first.expr);
         if first.prelude.is_empty() {
             if first_is_pure {
                 return second;
@@ -4407,7 +4699,7 @@ impl LambdaCompiler {
             if second.prelude.is_empty() {
                 return Compiled {
                     prelude: vec![],
-                    expr: js_seq(first.expr, second.expr),
+                    expr: js_seq(first.expr, second.expr, &mut self.j),
                     finished: second.finished,
                 };
             }
@@ -4415,7 +4707,7 @@ impl LambdaCompiler {
 
         let mut prelude = first.prelude;
         if !first_is_pure {
-            push_effect_expression(&mut prelude, first.expr);
+            push_effect_expression(&mut self.j, &mut prelude, first.expr);
         }
         prelude.extend(second.prelude);
         Compiled {
@@ -4427,12 +4719,12 @@ impl LambdaCompiler {
 
     /// `Js_output.output_as_block` (js_output.ml:82-86) of a `NeedValue`
     /// output: a finished output's value is dropped.
-    fn compiled_to_effect_block(&self, compiled: Compiled) -> Block {
+    fn compiled_to_effect_block(&mut self, compiled: Compiled) -> Block {
         let mut block = compiled.prelude;
         if compiled.finished == OutputFinished::True {
             return block;
         }
-        push_effect_expression(&mut block, compiled.expr);
+        push_effect_expression(&mut self.j, &mut block, compiled.expr);
         block
     }
 
@@ -4449,42 +4741,42 @@ impl LambdaCompiler {
 
         let then_prelude_empty = then_compiled.prelude.is_empty();
         let else_prelude_empty = else_compiled.prelude.is_empty();
-        let then_expr_pure = js_expr_no_side_effects(&then_compiled.expr);
-        let else_expr_pure = js_expr_no_side_effects(&else_compiled.expr);
+        let then_expr_pure = js_expr_no_side_effects(&self.j, then_compiled.expr);
+        let else_expr_pure = js_expr_no_side_effects(&self.j, else_compiled.expr);
 
         let mut block = cond_compiled.prelude;
         let cond_expr = cond_compiled.expr;
 
         if then_prelude_empty && else_prelude_empty {
             match (
-                remove_pure_subexpression(then_compiled.expr.clone()),
-                remove_pure_subexpression(else_compiled.expr.clone()),
+                remove_pure_subexpression(then_compiled.expr.clone(), &mut self.j),
+                remove_pure_subexpression(else_compiled.expr.clone(), &mut self.j),
             ) {
                 (None, None) => {
                     // OCaml's `S.if_ cond []` (lam_compile.ml `compile_ifthenelse`).
-                    push_s_if_empty(&mut block, cond_expr);
+                    push_s_if_empty(&mut self.j, &mut block, cond_expr);
                     return block;
                 }
                 (Some(then_expr), Some(else_expr)) => {
-                    push_effect_expression(
-                        &mut block,
-                        Expression::cond(cond_expr, then_expr, else_expr),
-                    );
+                    let value = JE::cond(cond_expr, then_expr, else_expr, &mut self.j);
+                    push_effect_expression(&mut self.j, &mut block, value);
                     return block;
                 }
                 (Some(then_expr), None) => {
-                    block.push(Statement::if_(
+                    block.push(JS::if_(
                         cond_expr,
-                        vec![Statement::exp(then_expr)],
-                        vec![],
+                        &[JS::exp(then_expr, &mut self.j)],
+                        &[],
+                        &mut self.j,
                     ));
                     return block;
                 }
                 (None, Some(else_expr)) => {
-                    block.push(Statement::if_(
-                        Expression::not(cond_expr),
-                        vec![Statement::exp(else_expr)],
-                        vec![],
+                    block.push(JS::if_(
+                        JE::not(cond_expr, &mut self.j),
+                        &[JS::exp(else_expr, &mut self.j)],
+                        &[],
+                        &mut self.j,
                     ));
                     return block;
                 }
@@ -4498,19 +4790,21 @@ impl LambdaCompiler {
         // is non-recursive, so an unnested branch ending in a terminal allows
         // rule 7 to fire while a Block-wrapped branch keeps the if-else.
         if then_prelude_empty && then_expr_pure {
-            block.push(Statement::if_(
-                Expression::not(cond_expr),
-                unnest_block(self.compile_effect_block(a, else_)),
-                vec![],
+            block.push(JS::if_(
+                JE::not(cond_expr, &mut self.j),
+                &JS::unnest_block(self.compile_effect_block(a, else_), &self.j),
+                &[],
+                &mut self.j,
             ));
             return block;
         }
 
         if else_prelude_empty && else_expr_pure {
-            block.push(Statement::if_(
+            block.push(JS::if_(
                 cond_expr,
-                unnest_block(self.compile_effect_block(a, then_)),
-                vec![],
+                &JS::unnest_block(self.compile_effect_block(a, then_), &self.j),
+                &[],
+                &mut self.j,
             ));
             return block;
         }
@@ -4518,16 +4812,17 @@ impl LambdaCompiler {
         // OCaml S.if_ rule 5 (js_stmt_make.ml:247-248): when the else branch
         // is *exactly* `[Return _]`, flip to `if (!cond) { return; }` and
         // emit the then branch as sibling statements.
-        let then_block = unnest_block(self.compile_effect_block(a, then_));
-        let else_block = unnest_block(self.compile_effect_block(a, else_));
+        let then_block = JS::unnest_block(self.compile_effect_block(a, then_), &self.j);
+        let else_block = JS::unnest_block(self.compile_effect_block(a, else_), &self.j);
         if matches!(
             else_block.as_slice(),
-            [stmt] if matches!(stmt.desc, StatementDesc::Return(_))
+            [stmt] if matches!(self.j.sk(*stmt), StmtKind::Return(_))
         ) {
-            block.push(Statement::if_(
-                Expression::not(cond_expr),
-                else_block,
-                vec![],
+            block.push(JS::if_(
+                JE::not(cond_expr, &mut self.j),
+                &else_block,
+                &[],
+                &mut self.j,
             ));
             block.extend(then_block);
             return block;
@@ -4535,13 +4830,13 @@ impl LambdaCompiler {
         // OCaml S.if_ rule 7 (js_stmt_make.ml:249-250): when the then branch
         // ends with return/throw/continue/break, keep `if (cond) { then }`
         // and append the else branch as sibling statements.
-        if !then_block.is_empty() && block_last_is_terminal(&then_block) {
-            block.push(Statement::if_(cond_expr, then_block, vec![]));
+        if !then_block.is_empty() && JS::block_last_is_terminal(&self.j, &then_block) {
+            block.push(JS::if_(cond_expr, &then_block, &[], &mut self.j));
             block.extend(else_block);
             return block;
         }
 
-        block.push(Statement::if_(cond_expr, then_block, else_block));
+        block.push(JS::if_(cond_expr, &then_block, &else_block, &mut self.j));
         block
     }
 
@@ -4568,20 +4863,21 @@ impl LambdaCompiler {
     }
 
     pub(crate) fn compile_test_assignment_block(
-        &self,
+        &mut self,
         result: &Ident,
-        cond: Expression,
+        cond: Expr,
         then_block: Block,
         else_block: Block,
     ) -> Block {
         let (cond, then_block, else_block) =
-            normalize_if_assignment_merge_order(cond, then_block, else_block);
+            normalize_if_assignment_merge_order(&mut self.j, cond, then_block, else_block);
         match (
             self.take_single_result_assignment(result, then_block),
             self.take_single_result_assignment(result, else_block),
         ) {
             (Ok(then_expr), Ok(else_expr)) => {
-                vec![self.result_assignment(result, Expression::cond(cond, then_expr, else_expr))]
+                let value = JE::cond(cond, then_expr, else_expr, &mut self.j);
+                vec![self.result_assignment(result, value)]
             }
             (then_result, else_result) => {
                 let then_block = match then_result {
@@ -4592,32 +4888,35 @@ impl LambdaCompiler {
                     Ok(expr) => vec![self.result_assignment(result, expr)],
                     Err(block) => block,
                 };
-                vec![Statement::if_(cond, then_block, else_block)]
+                vec![JS::if_(cond, &then_block, &else_block, &mut self.j)]
             }
         }
     }
 
     fn compile_declared_if_block(
-        &self,
+        &mut self,
         kind: LetKind,
         id: &Ident,
-        cond: Expression,
+        cond: Expr,
         then_block: Block,
         else_block: Block,
     ) -> Block {
         let (cond, then_block, else_block) =
-            normalize_if_assignment_merge_order(cond, then_block, else_block);
+            normalize_if_assignment_merge_order(&mut self.j, cond, then_block, else_block);
         match (
             self.take_single_result_assignment(id, then_block),
             self.take_single_result_assignment(id, else_block),
         ) {
             (Ok(then_expr), Ok(else_expr)) => {
-                vec![Statement::variable(VariableDeclaration {
-                    ident: *id,
-                    value: Some(Expression::cond(cond, then_expr, else_expr)),
-                    property: kind,
-                    ident_info: IdentInfo::default(),
-                })]
+                vec![JS::variable(
+                    VarDecl {
+                        ident: *id,
+                        value: Some(JE::cond(cond, then_expr, else_expr, &mut self.j)),
+                        property: kind,
+                        ident_info: IdentInfo::default(),
+                    },
+                    &mut self.j,
+                )]
             }
             (then_result, else_result) => {
                 let then_block = match then_result {
@@ -4630,15 +4929,32 @@ impl LambdaCompiler {
                 };
 
                 vec![
-                    Statement::variable(VariableDeclaration {
-                        ident: *id,
-                        value: None,
-                        property: kind,
-                        ident_info: IdentInfo::default(),
-                    }),
-                    Statement::if_(cond, then_block, else_block),
+                    JS::variable(
+                        VarDecl {
+                            ident: *id,
+                            value: None,
+                            property: kind,
+                            ident_info: IdentInfo::default(),
+                        },
+                        &mut self.j,
+                    ),
+                    JS::if_(cond, &then_block, &else_block, &mut self.j),
                 ]
             }
+        }
+    }
+
+    /// `(target, rhs)` of an assignment statement `target = rhs`.
+    fn assignment_parts(&self, stmt: Stmt) -> Option<(Ident, Expr)> {
+        let StmtKind::Exp(e) = self.j.sk(stmt) else {
+            return None;
+        };
+        let ExprKind::Bin(BinOp::Eq, lhs, rhs) = self.j.ek(e) else {
+            return None;
+        };
+        match self.j.ek(lhs) {
+            ExprKind::Var(target) => Some((self.j.ident(target), rhs)),
+            _ => None,
         }
     }
 
@@ -4646,44 +4962,24 @@ impl LambdaCompiler {
         &self,
         id: &Ident,
         block: Block,
-    ) -> Result<Expression, Block> {
-        let [stmt] = block.as_slice() else {
-            return Err(block);
-        };
-        let StatementDesc::Exp(Expression {
-            desc: ExpressionDesc::Bin(BinOp::Eq, lhs, ..),
-            ..
-        }) = &stmt.desc
-        else {
-            return Err(block);
-        };
-        let ExpressionDesc::Var(crate::js_ir::VIdent::Id(target)) = &lhs.desc else {
-            return Err(block);
-        };
-        if !target.same(id) {
-            return Err(block);
+    ) -> Result<Expr, Block> {
+        match block.as_slice() {
+            [stmt] => match self.assignment_parts(*stmt) {
+                Some((target, rhs)) if target.same(id) => Ok(rhs),
+                _ => Err(block),
+            },
+            _ => Err(block),
         }
-
-        let stmt = block.into_iter().next().expect("single-statement block");
-        let Statement {
-            desc:
-                StatementDesc::Exp(Expression {
-                    desc: ExpressionDesc::Bin(BinOp::Eq, _, rhs),
-                    ..
-                }),
-            ..
-        } = stmt
-        else {
-            unreachable!("validated single assignment shape")
-        };
-        Ok(*rhs)
     }
 
-    fn result_assignment(&self, id: &Ident, expr: Expression) -> Statement {
-        Statement::exp(Expression::bin(BinOp::Eq, Expression::var(*id), expr))
+    fn result_assignment(&mut self, id: &Ident, expr: Expr) -> Stmt {
+        JS::exp(
+            JE::bin(BinOp::Eq, JE::var(*id, &mut self.j), expr, &mut self.j),
+            &mut self.j,
+        )
     }
 
-    /// Statement-valued forms make OCaml's preliminary `NeedValue` pass return
+    /// Stmt-valued forms make OCaml's preliminary `NeedValue` pass return
     /// a non-empty block before the `S.if_` fallback
     /// (compiler/core/lam_compile.ml:1495-1524), so Rust must not rebuild them
     /// from later `Return` blocks as if they were pure expressions.
@@ -4742,38 +5038,29 @@ impl LambdaCompiler {
     /// reference `id`; moving the declaration past them preserves semantics
     /// while matching OCaml's shape.
     fn prepend_declaration_or_fold_final_assignment(
+        &mut self,
         kind: LetKind,
         id: &Ident,
         mut body: Block,
     ) -> Block {
-        if let Some(last) = body.last() {
-            if let StatementDesc::Exp(Expression {
-                desc: ExpressionDesc::Bin(BinOp::Eq, lhs, rhs),
-                ..
-            }) = &last.desc
-            {
-                if let ExpressionDesc::Var(VIdent::Id(target)) = &lhs.desc {
-                    if target.same(id) {
-                        let rhs_expr = rhs.as_ref().clone();
-                        body.pop();
-                        body.push(Statement::variable(VariableDeclaration {
-                            ident: *id,
-                            value: Some(rhs_expr),
-                            property: kind,
-                            ident_info: IdentInfo::default(),
-                        }));
-                        return body;
-                    }
-                }
-            }
+        if let Some(last) = body.last().copied()
+            && let Some((target, rhs)) = self.assignment_parts(last)
+            && target.same(id)
+        {
+            body.pop();
+            body.push(JS::define(*id, Some(rhs), kind, &mut self.j));
+            return body;
         }
         let mut result = Vec::with_capacity(body.len() + 1);
-        result.push(Statement::variable(VariableDeclaration {
-            ident: *id,
-            value: None,
-            property: kind,
-            ident_info: IdentInfo::default(),
-        }));
+        result.push(JS::variable(
+            VarDecl {
+                ident: *id,
+                value: None,
+                property: kind,
+                ident_info: IdentInfo::default(),
+            },
+            &mut self.j,
+        ));
         result.extend(body);
         result
     }
@@ -4798,22 +5085,25 @@ impl LambdaCompiler {
     /// exactly `[Exp e1, Exp e2, ..., Return last]`. Accept a single
     /// `[Return tail]` block as well because inner `Lifthenelse` cases can
     /// already have folded to `Return(Seq(Cond, undef))`.
-    fn try_fold_effect_only_return_tail(&self, block: &Block) -> Option<Expression> {
+    fn try_fold_effect_only_return_tail(&mut self, block: &Block) -> Option<Expr> {
         let (last, prefix) = block.split_last()?;
-        let Statement {
-            desc: StatementDesc::Return(tail_expr),
-            ..
-        } = last
-        else {
+        let StmtKind::Return(tail_expr) = self.j.sk(*last) else {
             return None;
         };
+        // Check the shape before building any node.
+        if !prefix
+            .iter()
+            .all(|stmt| matches!(self.j.sk(*stmt), StmtKind::Exp(_)))
+        {
+            return None;
+        }
 
-        let mut result = tail_expr.clone();
+        let mut result = tail_expr;
         for stmt in prefix.iter().rev() {
-            let StatementDesc::Exp(effect) = &stmt.desc else {
-                return None;
+            let StmtKind::Exp(effect) = self.j.sk(*stmt) else {
+                unreachable!("checked above")
             };
-            result = js_seq(effect.clone(), result);
+            result = js_seq(effect, result, &mut self.j);
         }
         Some(result)
     }
@@ -4849,11 +5139,8 @@ impl LambdaCompiler {
                 self.try_fold_effect_only_return_tail(&else_block_raw),
             ) {
                 let mut block = cond_compiled.prelude;
-                block.push(Statement::return_(Expression::cond(
-                    cond_compiled.expr,
-                    then_seq,
-                    else_seq,
-                )));
+                let expr = JE::cond(cond_compiled.expr, then_seq, else_seq, &mut self.j);
+                block.push(JS::return_(expr, &mut self.j));
                 return BlockOutput::finished(block);
             }
         }
@@ -4869,11 +5156,13 @@ impl LambdaCompiler {
         let else_value = self.compile_expr(a, else_);
         if then_value.prelude.is_empty() && else_value.prelude.is_empty() {
             let mut block = cond_compiled.prelude;
-            block.push(Statement::return_(Expression::cond(
+            let expr = JE::cond(
                 cond_compiled.expr,
                 then_value.expr,
                 else_value.expr,
-            )));
+                &mut self.j,
+            );
+            block.push(JS::return_(expr, &mut self.j));
             return BlockOutput::finished(block);
         }
 
@@ -4895,8 +5184,8 @@ impl LambdaCompiler {
     }
 
     pub(crate) fn compile_test_return_block(
-        &self,
-        cond: Expression,
+        &mut self,
+        cond: Expr,
         then_block: Block,
         else_block: Block,
     ) -> Block {
@@ -4910,8 +5199,8 @@ impl LambdaCompiler {
     /// the raw `[Return(Seq(...))]` shape survives until rule 4's chance
     /// to collapse has passed.
     fn compile_test_return_block_with_fallback(
-        &self,
-        cond: Expression,
+        &mut self,
+        cond: Expr,
         then_fallback: Block,
         else_fallback: Block,
     ) -> Block {
@@ -4935,11 +5224,11 @@ impl LambdaCompiler {
         // The fold inspects the same raw blocks that are used as the
         // fallback; move the single return expressions out instead of
         // cloning both branches.
-        if strict_single_return_expr(&then_fallback).is_some()
-            && strict_single_return_expr(&else_fallback).is_some()
+        if strict_single_return_expr(&self.j, &then_fallback).is_some()
+            && strict_single_return_expr(&self.j, &else_fallback).is_some()
         {
-            let take_return = |block: Block| match block.into_iter().next().map(|stmt| stmt.desc) {
-                Some(StatementDesc::Return(expr)) => expr,
+            let take_return = |block: Block| match block.first().map(|stmt| self.j.sk(*stmt)) {
+                Some(StmtKind::Return(expr)) => expr,
                 _ => unreachable!("strict single return block"),
             };
             let then_expr = take_return(then_fallback);
@@ -4947,10 +5236,11 @@ impl LambdaCompiler {
             // Go through `S.if_` instead of calling `E.econd` directly:
             // OCaml applies the `Js_not` branch swap before the
             // single-Return fold (compiler/core/js_stmt_make.ml:237-246).
-            return vec![Statement::if_(
+            return vec![JS::if_(
                 cond,
-                vec![Statement::return_(then_expr)],
-                vec![Statement::return_(else_expr)],
+                &[JS::return_(then_expr, &mut self.j)],
+                &[JS::return_(else_expr, &mut self.j)],
+                &mut self.j,
             )];
         }
         // OCaml S.if_ rule 5 (js_stmt_make.ml:247-248): when the
@@ -4961,21 +5251,26 @@ impl LambdaCompiler {
         // bodies like `if cond then body else ()` in return context.
         if matches!(
             else_fallback.as_slice(),
-            [stmt] if matches!(stmt.desc, StatementDesc::Return(_))
+            [stmt] if matches!(self.j.sk(*stmt), StmtKind::Return(_))
         ) {
-            let mut out = vec![Statement::if_(Expression::not(cond), else_fallback, vec![])];
+            let mut out = vec![JS::if_(
+                JE::not(cond, &mut self.j),
+                &else_fallback,
+                &[],
+                &mut self.j,
+            )];
             out.extend(then_fallback);
             // OCaml wraps the rule-5 result with `block
             // ({If ...} :: ifso)` (compiler/core/js_stmt_make.ml:
             // 247-248, with `block` at lines 37-42). That block
             // boundary is observable by an outer `S.if_`: it hides the
             // trailing return until `js_pass_flatten` runs later.
-            return vec![Statement::block(out)];
+            return vec![JS::block(&out, &mut self.j)];
         }
         // Use the normalized fallback blocks when we can't collapse
         // to `Return(Cond)`, matching the previous behavior for
         // non-both-single-return cases.
-        vec![Statement::if_(cond, then_fallback, else_fallback)]
+        vec![JS::if_(cond, &then_fallback, &else_fallback, &mut self.j)]
     }
 
     pub(crate) fn compile_switch_value_block(
@@ -4987,7 +5282,7 @@ impl LambdaCompiler {
         let output = self.compile_assign_to_target_output(a, result, lam);
         let mut block = output.block;
         if output.finished != OutputFinished::True {
-            block.push(Statement::break_());
+            block.push(JS::break_(None, &mut self.j));
         }
         block
     }
@@ -5019,11 +5314,9 @@ impl LambdaCompiler {
                 let id = a.ident(id);
                 if let Some(compiled) = self.try_compile_record_spread(a, &id, value, body) {
                     let mut block = compiled.prelude;
-                    block.push(Statement::exp(Expression::bin(
-                        BinOp::Eq,
-                        Expression::var(*result),
-                        compiled.expr,
-                    )));
+                    let target = JE::var(*result, &mut self.j);
+                    let assign = JE::bin(BinOp::Eq, target, compiled.expr, &mut self.j);
+                    block.push(JS::exp(assign, &mut self.j));
                     return BlockOutput::make(block);
                 }
                 // lam_compile.ml:1867-1877: compile the binding, then the
@@ -5036,11 +5329,9 @@ impl LambdaCompiler {
             Node::Apply { func, args, info } => {
                 let compiled = self.compile_apply_call(a, func, args, info);
                 let mut block = compiled.prelude;
-                block.push(Statement::exp(Expression::bin(
-                    BinOp::Eq,
-                    Expression::var(*result),
-                    compiled.expr,
-                )));
+                let target = JE::var(*result, &mut self.j);
+                let assign = JE::bin(BinOp::Eq, target, compiled.expr, &mut self.j);
+                block.push(JS::exp(assign, &mut self.j));
                 BlockOutput::make(block)
             }
             Node::Sequence(first, second) => {
@@ -5098,8 +5389,10 @@ impl LambdaCompiler {
                         .expect("checked above");
                 let lhs_compiled = self.compile_expr(a, lhs);
                 let rhs_compiled = self.compile_expr(a, rhs);
-                let assign = |value: Expression| {
-                    Statement::exp(Expression::bin(BinOp::Eq, Expression::var(*result), value))
+                let assign = |j: &mut JsArena, value| {
+                    let target = JE::var(*result, j);
+                    let value = JE::bin(BinOp::Eq, target, value, j);
+                    JS::exp(value, j)
                 };
                 let mut block = lhs_compiled.prelude;
                 if rhs_compiled.prelude.is_empty() {
@@ -5107,20 +5400,16 @@ impl LambdaCompiler {
                         ShortCircuitOp::And => BinOp::And,
                         ShortCircuitOp::Or => BinOp::Or,
                     };
-                    block.push(assign(Expression::bin(
-                        op,
-                        lhs_compiled.expr,
-                        rhs_compiled.expr,
-                    )));
+                    let value = JE::bin(op, lhs_compiled.expr, rhs_compiled.expr, &mut self.j);
+                    block.push(assign(&mut self.j, value));
                     return BlockOutput::make(block);
                 }
                 let mut rhs_block = rhs_compiled.prelude;
-                rhs_block.push(assign(rhs_compiled.expr));
-                block.push(Statement::if_(
-                    op.test_expr(lhs_compiled.expr),
-                    rhs_block,
-                    vec![assign(op.default_expr())],
-                ));
+                rhs_block.push(assign(&mut self.j, rhs_compiled.expr));
+                let cond = op.test_expr(lhs_compiled.expr, &mut self.j);
+                let value = op.default_expr(&mut self.j);
+                let otherwise = assign(&mut self.j, value);
+                block.push(JS::if_(cond, &rhs_block, &[otherwise], &mut self.j));
                 BlockOutput::make(block)
             }
             Node::Switch {
@@ -5154,11 +5443,11 @@ impl LambdaCompiler {
                     return self.compile_assign_to_target_output(a, result, handler);
                 }
                 let compiled = self.compile_expr(a, lam);
-                assign_compiled(result, compiled)
+                assign_compiled(&mut self.j, result, compiled)
             }
             _ => {
                 let compiled = self.compile_expr(a, lam);
-                assign_compiled(result, compiled)
+                assign_compiled(&mut self.j, result, compiled)
             }
         }
     }
@@ -5219,11 +5508,14 @@ impl LambdaCompiler {
         let mut cases = Vec::with_capacity(grouped.len());
         for (tag, body, is_last) in grouped {
             let clause = if is_last {
-                crate::js_ir::CaseClause {
+                crate::js_ir::arena::Clause {
                     source_loc: self.source_loc_of_lam(a, body),
                     body: {
-                        let value_block = self.compile_switch_value_block(a, result, body);
-                        self.with_block_source_loc(a, body, value_block)
+                        let body = {
+                            let value_block = self.compile_switch_value_block(a, result, body);
+                            self.with_block_source_loc(a, body, value_block)
+                        };
+                        JS::list(&body, &mut self.j)
                     },
                     should_break: false,
                     comment: None,
@@ -5239,11 +5531,12 @@ impl LambdaCompiler {
             self.with_block_source_loc(a, fallback, block)
         });
 
-        block.push(Statement::new(StatementDesc::IntSwitch(
+        block.push(JS::int_switch(
             scrut_compiled.expr,
             cases,
-            default_block,
-        )));
+            default_block.map(|b| JS::list(&b, &mut self.j)),
+            &mut self.j,
+        ));
         block
     }
 
@@ -5291,11 +5584,14 @@ impl LambdaCompiler {
         let mut clauses = Vec::with_capacity(grouped.len());
         for (tag, body, is_last) in grouped {
             let clause = if is_last {
-                crate::js_ir::CaseClause {
+                crate::js_ir::arena::Clause {
                     source_loc: self.source_loc_of_lam(a, body),
                     body: {
-                        let value_block = self.compile_switch_value_block(a, result, body);
-                        self.with_block_source_loc(a, body, value_block)
+                        let body = {
+                            let value_block = self.compile_switch_value_block(a, result, body);
+                            self.with_block_source_loc(a, body, value_block)
+                        };
+                        JS::list(&body, &mut self.j)
                     },
                     should_break: false,
                     comment: None,
@@ -5303,7 +5599,7 @@ impl LambdaCompiler {
             } else {
                 self.empty_switch_case_clause_for(a, body)
             };
-            clauses.push(crate::js_ir::StringClause {
+            clauses.push(crate::js_ir::arena::StringClauseInfo {
                 tag_type: SwitchCaseTag::String(tag),
                 clause,
             });
@@ -5314,11 +5610,12 @@ impl LambdaCompiler {
             self.with_block_source_loc(a, fallback, block)
         });
 
-        block.push(Statement::new(StatementDesc::StringSwitch(
+        block.push(JS::string_switch(
             scrut_compiled.expr,
             clauses,
-            default_block,
-        )));
+            default_block.map(|b| JS::list(&b, &mut self.j)),
+            &mut self.j,
+        ));
         block
     }
 
@@ -5385,9 +5682,12 @@ impl LambdaCompiler {
             }
             cases.push((
                 grouped_cases[group_end].0.clone(),
-                crate::js_ir::CaseClause {
+                crate::js_ir::arena::Clause {
                     source_loc: self.source_loc_of_lam(a, body),
-                    body: self.with_block_source_loc(a, body, compiled_body),
+                    body: {
+                        let body = self.with_block_source_loc(a, body, compiled_body);
+                        JS::list(&body, &mut self.j)
+                    },
                     should_break,
                     comment: None,
                 },
@@ -5407,11 +5707,12 @@ impl LambdaCompiler {
             .map(|fallback| self.compile_return_block(a, fallback))
             .filter(|body| !body.is_empty());
 
-        block.push(Statement::new(StatementDesc::IntSwitch(
+        block.push(JS::int_switch(
             scrut_compiled.expr,
             cases,
-            default_block,
-        )));
+            default_block.map(|b| JS::list(&b, &mut self.j)),
+            &mut self.j,
+        ));
         block
     }
 
@@ -5457,11 +5758,12 @@ impl LambdaCompiler {
             .map(|fallback| self.compile_return_block(a, fallback))
             .filter(|body| !body.is_empty());
 
-        block.push(Statement::new(StatementDesc::StringSwitch(
+        block.push(JS::string_switch(
             scrut_compiled.expr,
             clauses,
-            default_block,
-        )));
+            default_block.map(|b| JS::list(&b, &mut self.j)),
+            &mut self.j,
+        ));
         block
     }
 
@@ -5490,11 +5792,11 @@ impl LambdaCompiler {
             };
             let dispatch = {
                 let switch = sw.decode(a);
-                self.compile_named_variant_switch_effect_statements(a, scrut_expr, &switch)
+                self.compile_named_variant_switch_effect_statements(a, scrut_expr.clone(), &switch)
             };
             // lam_compile.ml `compile_general_cases`: the dispatch is built
-            // from `S.if_`s, which keep a condition only when it has side
-            // effects (js_stmt_make.ml `if_`).
+            // from `S.if_`s, which retain only effectful conditions when both
+            // branches are empty (js_stmt_make.ml:256-266).
             block.extend(dispatch);
             return block;
         }
@@ -5512,10 +5814,10 @@ impl LambdaCompiler {
                 let body_output = self.compile_effect_block_output(a, body);
                 let should_break = body_output.finished != OutputFinished::True;
                 let body = self.with_block_source_loc(a, body, body_output.block);
-                crate::js_ir::CaseClause {
+                crate::js_ir::arena::Clause {
                     source_loc,
                     should_break,
-                    body,
+                    body: JS::list(&body, &mut self.j),
                     comment: None,
                 }
             } else {
@@ -5531,20 +5833,23 @@ impl LambdaCompiler {
             })
             .filter(|body| !body.is_empty());
 
-        let has_effectful_case = cases.iter().any(|(_, clause)| !clause.body.is_empty())
+        let has_effectful_case = cases
+            .iter()
+            .any(|(_, clause)| !self.j.stmts(clause.body).is_empty())
             || default_block.as_ref().is_some_and(|body| !body.is_empty());
         if !has_effectful_case {
             // OCaml collapses an all-empty switch to `S.exp scrut`
             // (js_stmt_make.ml:45-53), preserving bare pure expressions.
-            push_s_exp(&mut block, scrut_compiled.expr);
+            push_s_exp(&mut self.j, &mut block, scrut_compiled.expr);
             return block;
         }
 
-        block.push(Statement::new(StatementDesc::IntSwitch(
+        block.push(JS::int_switch(
             scrut_compiled.expr,
             cases,
-            default_block,
-        )));
+            default_block.map(|b| JS::list(&b, &mut self.j)),
+            &mut self.j,
+        ));
         block
     }
 
@@ -5595,16 +5900,16 @@ impl LambdaCompiler {
                 let body_output = self.compile_effect_block_output(a, body);
                 let should_break = body_output.finished != OutputFinished::True;
                 let body = self.with_block_source_loc(a, body, body_output.block);
-                crate::js_ir::CaseClause {
+                crate::js_ir::arena::Clause {
                     source_loc,
                     should_break,
-                    body,
+                    body: JS::list(&body, &mut self.j),
                     comment: None,
                 }
             } else {
                 self.empty_switch_case_clause_for(a, body)
             };
-            clauses.push(crate::js_ir::StringClause {
+            clauses.push(crate::js_ir::arena::StringClauseInfo {
                 tag_type: SwitchCaseTag::String(tag),
                 clause,
             });
@@ -5617,43 +5922,53 @@ impl LambdaCompiler {
             })
             .filter(|body| !body.is_empty());
 
-        let has_effectful_case = clauses.iter().any(|clause| !clause.clause.body.is_empty())
+        let has_effectful_case = clauses
+            .iter()
+            .any(|clause| !self.j.stmts(clause.clause.body).is_empty())
             || default_block.as_ref().is_some_and(|body| !body.is_empty());
         if !has_effectful_case {
             // OCaml collapses an all-empty string switch to `S.exp scrut`
             // (js_stmt_make.ml:45-53), preserving bare pure expressions.
-            push_s_exp(&mut block, scrut_compiled.expr);
+            push_s_exp(&mut self.j, &mut block, scrut_compiled.expr);
             return block;
         }
 
-        block.push(Statement::new(StatementDesc::StringSwitch(
+        block.push(JS::string_switch(
             scrut_compiled.expr,
             clauses,
-            default_block,
-        )));
+            default_block.map(|b| JS::list(&b, &mut self.j)),
+            &mut self.j,
+        ));
         block
     }
 
-    pub(crate) fn compile_external_arg_const(&self, cst: &Cst) -> Expression {
+    pub(crate) fn compile_external_arg_const(&mut self, cst: &Cst) -> Expr {
         match cst {
-            Cst::ArgIntLit(i) => Expression::number(Number::Int {
-                i: *i as i32,
-                c: None,
-            }),
+            Cst::ArgIntLit(i) => JE::number(
+                Number::Int {
+                    i: *i as i32,
+                    c: None,
+                },
+                &mut self.j,
+            ),
             // lam_compile_const.ml `translate_arg_cst`.
-            Cst::ArgStringLit(s) => Expression::string(s.clone()),
-            Cst::ArgJsonLit(s) => Expression::new(ExpressionDesc::JsonLiteral(s.clone())),
+            Cst::ArgStringLit(s) => JE::string(&s, &mut self.j),
+            Cst::ArgJsonLit(s) => JE::new(
+                ExprKind::JsonLiteral(JE::str_id(&s, &mut self.j)),
+                &mut self.j,
+            ),
         }
     }
 
-    pub(crate) fn runtime_member_expr(&self, module_name: &str, member: &str) -> Expression {
-        Expression::qualified(
+    pub(crate) fn runtime_member_expr(&mut self, module_name: &str, member: &str) -> Expr {
+        JE::qualified(
             ModuleId {
                 id: Ident::create_persistent(module_name),
                 kind: Kind::Runtime,
                 dynamic_import: false,
             },
             Some(member.to_string()),
+            &mut self.j,
         )
     }
 
@@ -5672,57 +5987,58 @@ impl LambdaCompiler {
     }
 
     pub(crate) fn runtime_call_expr(
-        &self,
+        &mut self,
         module_name: &str,
         member: &str,
-        args: Vec<Expression>,
-    ) -> Expression {
-        Expression::call(
+        args: Vec<Expr>,
+    ) -> Expr {
+        JE::call(
             self.runtime_member_expr(module_name, member),
-            args,
+            &args,
             Self::builtin_runtime_call_info(),
+            &mut self.j,
         )
     }
 
-    pub(crate) fn int32_div_expr(&self, left: Expression, right: Expression) -> Expression {
-        match (&left.desc, int_literal(&right)) {
-            (ExpressionDesc::Length(_, _), Some(2)) => {
-                Expression::bin(BinOp::Asr, left, int_expr(1))
+    pub(crate) fn int32_div_expr(&mut self, left: Expr, right: Expr) -> Expr {
+        match (self.j.ek(left), int_literal(&mut self.j, right)) {
+            (ExprKind::Length(_, _), Some(2)) => {
+                JE::bin(BinOp::Asr, left, int_expr(1, &mut self.j), &mut self.j)
             }
-            (_, Some(rhs)) if rhs != 0 => match int_literal(&left) {
-                Some(lhs) => int_expr(lhs.wrapping_div(rhs)),
-                None => to_int32(Expression::bin(BinOp::Div, left, right)),
+            (_, Some(rhs)) if rhs != 0 => match int_literal(&self.j, left) {
+                Some(lhs) => int_expr(lhs.wrapping_div(rhs), &mut self.j),
+                None => to_int32(JE::bin(BinOp::Div, left, right, &mut self.j), &mut self.j),
             },
             _ if self.check_div_by_zero => {
                 self.runtime_call_expr("Primitive_int", "div", vec![left, right])
             }
-            _ => to_int32(Expression::bin(BinOp::Div, left, right)),
+            _ => to_int32(JE::bin(BinOp::Div, left, right, &mut self.j), &mut self.j),
         }
     }
 
-    pub(crate) fn int32_mod_expr(&self, left: Expression, right: Expression) -> Expression {
-        match int_literal(&right) {
-            Some(rhs) if rhs != 0 => Expression::bin(BinOp::Mod, left, right),
+    pub(crate) fn int32_mod_expr(&mut self, left: Expr, right: Expr) -> Expr {
+        match int_literal(&mut self.j, right) {
+            Some(rhs) if rhs != 0 => JE::bin(BinOp::Mod, left, right, &mut self.j),
             _ if self.check_div_by_zero => {
                 self.runtime_call_expr("Primitive_int", "mod_", vec![left, right])
             }
-            _ => Expression::bin(BinOp::Mod, left, right),
+            _ => JE::bin(BinOp::Mod, left, right, &mut self.j),
         }
     }
 
-    pub(crate) fn bigint_div_expr(&self, left: Expression, right: Expression) -> Expression {
+    pub(crate) fn bigint_div_expr(&mut self, left: Expr, right: Expr) -> Expr {
         if self.check_div_by_zero {
             self.runtime_call_expr("Primitive_bigint", "div", vec![left, right])
         } else {
-            Expression::bin(BinOp::Div, left, right)
+            JE::bin(BinOp::Div, left, right, &mut self.j)
         }
     }
 
-    pub(crate) fn bigint_mod_expr(&self, left: Expression, right: Expression) -> Expression {
+    pub(crate) fn bigint_mod_expr(&mut self, left: Expr, right: Expr) -> Expr {
         if self.check_div_by_zero {
             self.runtime_call_expr("Primitive_bigint", "mod_", vec![left, right])
         } else {
-            Expression::bin(BinOp::Mod, left, right)
+            JE::bin(BinOp::Mod, left, right, &mut self.j)
         }
     }
 
@@ -6003,70 +6319,36 @@ impl LambdaCompiler {
         i32::try_from(depth + 1).expect("static jump handler depth fits in i32")
     }
 
-    fn compile_static_raise_jump_output(
-        &mut self,
-        a: &mut LamArena,
-        label: i32,
-        args: LamList,
-    ) -> Option<BlockOutput> {
-        let handler = self
-            .static_jump_handlers
-            .iter()
-            .rev()
-            .find(|handler| handler.label == label)?
-            .clone();
-        if handler.bindings.len() != a.list_len(args) {
-            return None;
-        }
-
-        // lam_compile.ml `compile_staticraise`: `Ext_list.fold_right2 largs
-        // bindings exit_assignment (fun larg bind acc -> append_output
-        // (compile larg) acc)`. The nested fold is an argument of `f`, so
-        // the last argument is compiled first; an argument whose output is
-        // finished (a `throw`) drops everything after it, the exit code
-        // assignment included (`Js_output.append_output`).
-        let exit_assignment = BlockOutput::make(vec![Statement::exp(Expression::bin(
-            BinOp::Eq,
-            Expression::var(handler.exit_id),
-            Expression::number(Number::int(handler.exit_code)),
-        ))]);
-        let args = a.list_small(args);
-        let output =
-            handler
-                .bindings
-                .iter()
-                .zip(args)
-                .rev()
-                .fold(exit_assignment, |acc, (binding, arg)| {
-                    let output = self.compile_assign_to_target_output(a, binding, arg);
-                    output.append(acc)
-                });
-        Some(output)
-    }
-
-    fn staticcatch_declarations(&self, exit_id: &Ident, bindings: &[Ident]) -> Block {
-        let mut declarations = vec![Statement::variable(VariableDeclaration {
-            ident: *exit_id,
-            value: Some(Expression::number(Number::int(0))),
-            property: LetKind::Variable,
-            ident_info: IdentInfo::default(),
-        })];
-        declarations.extend(bindings.iter().map(|binding| {
-            Statement::variable(VariableDeclaration {
-                ident: *binding,
-                value: None,
+    fn staticcatch_declarations(&mut self, exit_id: &Ident, bindings: &[Ident]) -> Block {
+        let mut declarations = vec![JS::variable(
+            VarDecl {
+                ident: *exit_id,
+                value: Some(JE::number(Number::int(0), &mut self.j)),
                 property: LetKind::Variable,
                 ident_info: IdentInfo::default(),
-            })
+            },
+            &mut self.j,
+        )];
+        declarations.extend(bindings.iter().map(|binding| {
+            JS::variable(
+                VarDecl {
+                    ident: *binding,
+                    value: None,
+                    property: LetKind::Variable,
+                    ident_info: IdentInfo::default(),
+                },
+                &mut self.j,
+            )
         }));
         declarations
     }
 
-    fn staticcatch_exit_test(&self, exit_id: &Ident, exit_code: i32) -> Expression {
-        Expression::bin(
+    fn staticcatch_exit_test(&mut self, exit_id: &Ident, exit_code: i32) -> Expr {
+        JE::bin(
             BinOp::EqEqEq,
-            Expression::var(*exit_id),
-            Expression::number(Number::int(exit_code)),
+            JE::var(*exit_id, &mut self.j),
+            JE::number(Number::int(exit_code), &mut self.j),
+            &mut self.j,
         )
     }
 
@@ -6083,138 +6365,6 @@ impl LambdaCompiler {
             .block
     }
 
-    /// lam_compile.ml:1063-1101 `compile_staticcatch`, explicit jumps: the
-    /// body and then the handler are compiled, and the output is
-    /// `append_output (make declares) (append_output lbody (make cases))`,
-    /// so a finished body drops the handler and finishes the catch.
-    fn compile_staticcatch_assignment_output(
-        &mut self,
-        a: &mut LamArena,
-        result: &Ident,
-        label: i32,
-        bindings: &[Ident],
-        body: Lam,
-        handler: Lam,
-    ) -> BlockOutput {
-        let exit_id = self.fresh_ident("exit");
-        let exit_code = self.next_static_jump_exit_code();
-        let declarations = self.staticcatch_declarations(&exit_id, bindings);
-        let (body_output, handler_block) =
-            self.with_static_jump_handler(label, &exit_id, bindings, |this| {
-                let body_output = this.compile_assign_to_target_output(a, result, body);
-                let handler_block = this.compile_assign_to_target_block(a, result, handler);
-                (body_output, handler_block)
-            });
-        let cases = if handler_block.is_empty() {
-            BlockOutput::make(vec![])
-        } else {
-            BlockOutput::make(vec![Statement::if_(
-                self.staticcatch_exit_test(&exit_id, exit_code),
-                handler_block,
-                vec![],
-            )])
-        };
-        BlockOutput::make(declarations).append(body_output.append(cases))
-    }
-
-    /// lam_compile.ml:1063-1101 `compile_staticcatch`, explicit jumps: the
-    /// body and then the handler are compiled, and the output is
-    /// `append_output (make declares) (append_output lbody (make cases))`,
-    /// so a finished body drops the handler and finishes the catch.
-    fn compile_staticcatch_effect_output(
-        &mut self,
-        a: &mut LamArena,
-        label: i32,
-        bindings: &[Ident],
-        body: Lam,
-        handler: Lam,
-    ) -> BlockOutput {
-        let exit_id = self.fresh_ident("exit");
-        let exit_code = self.next_static_jump_exit_code();
-        let declarations = self.staticcatch_declarations(&exit_id, bindings);
-        let (body_output, handler_block) =
-            self.with_static_jump_handler(label, &exit_id, bindings, |this| {
-                let body_output = this.compile_effect_block_output(a, body);
-                let handler_block = this.compile_effect_block(a, handler);
-                (body_output, handler_block)
-            });
-        let cases = if handler_block.is_empty() {
-            BlockOutput::make(vec![])
-        } else {
-            BlockOutput::make(vec![Statement::if_(
-                self.staticcatch_exit_test(&exit_id, exit_code),
-                handler_block,
-                vec![],
-            )])
-        };
-        BlockOutput::make(declarations).append(body_output.append(cases))
-    }
-
-    /// [`Self::compile_staticcatch_effect_output`] in a return continuation
-    /// (lam_compile.ml:1063-1101).
-    fn compile_staticcatch_return_output(
-        &mut self,
-        a: &mut LamArena,
-        label: i32,
-        bindings: &[Ident],
-        body: Lam,
-        handler: Lam,
-    ) -> BlockOutput {
-        let exit_id = self.fresh_ident("exit");
-        let exit_code = self.next_static_jump_exit_code();
-        let declarations = self.staticcatch_declarations(&exit_id, bindings);
-        let (body_output, handler_block) =
-            self.with_static_jump_handler(label, &exit_id, bindings, |this| {
-                let body_output = this.compile_return_output(a, body);
-                let handler_block = this.compile_return_output(a, handler).block;
-                (body_output, handler_block)
-            });
-        let cases = if handler_block.is_empty() {
-            BlockOutput::make(vec![])
-        } else {
-            BlockOutput::make(vec![Statement::if_(
-                self.staticcatch_exit_test(&exit_id, exit_code),
-                handler_block,
-                vec![],
-            )])
-        };
-        BlockOutput::make(declarations).append(body_output.append(cases))
-    }
-
-    /// [`Self::compile_staticcatch_effect_output`] in a return continuation
-    /// (lam_compile.ml:1063-1101).
-    fn compile_staticcatch_tail_loop_return_output(
-        &mut self,
-        a: &mut LamArena,
-        label: i32,
-        bindings: &[Ident],
-        body: Lam,
-        handler: Lam,
-        tail_loop: &mut TailLoopState,
-    ) -> BlockOutput {
-        let exit_id = self.fresh_ident("exit");
-        let exit_code = self.next_static_jump_exit_code();
-        let declarations = self.staticcatch_declarations(&exit_id, bindings);
-        let (body_output, handler_block) =
-            self.with_static_jump_handler(label, &exit_id, bindings, |this| {
-                let body_output = this.compile_tail_loop_return_output(a, body, tail_loop);
-                let handler_block = this
-                    .compile_tail_loop_return_output(a, handler, tail_loop)
-                    .block;
-                (body_output, handler_block)
-            });
-        let cases = if handler_block.is_empty() {
-            BlockOutput::make(vec![])
-        } else {
-            BlockOutput::make(vec![Statement::if_(
-                self.staticcatch_exit_test(&exit_id, exit_code),
-                handler_block,
-                vec![],
-            )])
-        };
-        BlockOutput::make(declarations).append(body_output.append(cases))
-    }
-
     fn compile_staticcatch_expr(
         &mut self,
         a: &mut LamArena,
@@ -6226,18 +6376,21 @@ impl LambdaCompiler {
         // OCaml NeedValue staticcatch allocates `Ext_ident.create_tmp ()`
         // for the result (compiler/core/lam_compile.ml:1027-1034).
         let result = self.fresh_tmp_ident();
-        let mut prelude = vec![Statement::variable(VariableDeclaration {
-            ident: result,
-            value: None,
-            property: LetKind::Strict,
-            ident_info: IdentInfo::default(),
-        })];
+        let mut prelude = vec![JS::variable(
+            VarDecl {
+                ident: result,
+                value: None,
+                property: LetKind::Strict,
+                ident_info: IdentInfo::default(),
+            },
+            &mut self.j,
+        )];
         prelude.extend(
             self.compile_staticcatch_assignment_block(a, &result, label, bindings, body, handler),
         );
         Compiled {
             prelude,
-            expr: Expression::var(result),
+            expr: JE::var(result, &mut self.j),
             finished: OutputFinished::False,
         }
     }
@@ -6258,24 +6411,30 @@ impl LambdaCompiler {
     fn emit_multi_staticcatch_prelude(&mut self, handlers: &[FlatHandler]) -> (Ident, i32, Block) {
         let exit_id = self.fresh_ident("exit");
         let first_code = self.next_static_jump_exit_code();
-        let mut block = vec![Statement::variable(VariableDeclaration {
-            ident: exit_id,
-            value: Some(Expression::number(Number::int(0))),
-            property: LetKind::Variable,
-            ident_info: IdentInfo::default(),
-        })];
+        let mut block = vec![JS::variable(
+            VarDecl {
+                ident: exit_id,
+                value: Some(JE::number(Number::int(0), &mut self.j)),
+                property: LetKind::Variable,
+                ident_info: IdentInfo::default(),
+            },
+            &mut self.j,
+        )];
         // lam_compile.ml:973-975: `Ext_list.flat_map code_table (fun
         // {bindings} -> map bindings (fun x -> S.declare_variable))`.
         // Iterate handlers in flat-catches order (innermost first) so the
         // declarations come out in the same order OCaml emits them.
         for handler in handlers {
             for binding in &handler.bindings {
-                block.push(Statement::variable(VariableDeclaration {
-                    ident: *binding,
-                    value: None,
-                    property: LetKind::Variable,
-                    ident_info: IdentInfo::default(),
-                }));
+                block.push(JS::variable(
+                    VarDecl {
+                        ident: *binding,
+                        value: None,
+                        property: LetKind::Variable,
+                        ident_info: IdentInfo::default(),
+                    },
+                    &mut self.j,
+                ));
             }
         }
         for (i, handler) in handlers.iter().enumerate() {
@@ -6337,102 +6496,49 @@ impl LambdaCompiler {
     /// (compile_general_cases lam_compile.ml:551-557). For multiple handlers
     /// it becomes an `int_switch` (lam_compile.ml:567-630).
     fn compile_exit_dispatch(
-        &self,
+        &mut self,
         a: &LamArena,
         exit_id: &Ident,
         handlers: Vec<(i32, BlockOutput, bool, Lam)>,
         is_return_context: bool,
-    ) -> Option<Statement> {
+    ) -> Option<Stmt> {
         if handlers.is_empty() {
             return None;
         }
         if handlers.len() == 1 {
-            let (code, handler_output, _, _) = handlers.into_iter().next().unwrap();
-            let handler_block = handler_output.block;
+            let (code, output, _, _) = handlers.into_iter().next().unwrap();
+            let handler_block = output.block;
             if handler_block.is_empty() {
                 return None;
             }
-            return Some(Statement::if_(
-                self.staticcatch_exit_test(exit_id, code),
-                handler_block,
-                vec![],
-            ));
+            let test = self.staticcatch_exit_test(exit_id, code);
+            return Some(JS::if_(test, &handler_block, &[], &mut self.j));
         }
         // OCaml compile_general_cases (lam_compile.ml:668-707) emits empty
         // clauses for all but the last case of an equal-Lambda group.
-        let clauses: Vec<(i32, CaseClause)> = handlers
+        let clauses: Vec<(i32, Clause)> = handlers
             .into_iter()
             .map(|(code, output, is_last, handler_lam)| {
-                // `Js_output.to_break_block` (js_output.ml:88-100).
                 let should_break = is_last
                     && output.finished != OutputFinished::True
                     && (!is_return_context || has_exit_code(a, handler_lam, &|_| true));
                 (
                     code,
-                    CaseClause {
+                    Clause {
                         source_loc: None,
-                        body: output.block,
+                        body: JS::list(&output.block, &mut self.j),
                         should_break,
                         comment: None,
                     },
                 )
             })
             .collect();
-        Some(Statement::new(StatementDesc::IntSwitch(
-            Expression::var(*exit_id),
+        Some(JS::int_switch(
+            JE::var(*exit_id, &mut self.j),
             clauses,
             None,
-        )))
-    }
-
-    /// [`Self::compile_multi_staticcatch_effect_output`] in a return
-    /// continuation.
-    fn compile_multi_staticcatch_return_output(
-        &mut self,
-        a: &mut LamArena,
-        handlers: &[FlatHandler],
-        body: Lam,
-    ) -> BlockOutput {
-        let (exit_id, first_code, declarations) = self.emit_multi_staticcatch_prelude(handlers);
-        let body_output = self.compile_return_output(a, body);
-        let grouped_handlers = self.compile_grouped_staticcatch_handlers(
-            a,
-            handlers,
-            first_code,
-            |this, a, handler| this.compile_return_output(a, handler),
-        );
-        self.pop_multi_staticcatch_handlers(handlers.len());
-        let cases = BlockOutput::make(
-            self.compile_exit_dispatch(a, &exit_id, grouped_handlers, true)
-                .into_iter()
-                .collect(),
-        );
-        BlockOutput::make(declarations).append(body_output.append(cases))
-    }
-
-    /// [`Self::compile_staticcatch_effect_output`] for a flattened code
-    /// table: every handler is compiled after the body.
-    fn compile_multi_staticcatch_effect_output(
-        &mut self,
-        a: &mut LamArena,
-        handlers: &[FlatHandler],
-        body: Lam,
-    ) -> BlockOutput {
-        let (exit_id, first_code, declarations) = self.emit_multi_staticcatch_prelude(handlers);
-        let body_output = self.compile_effect_block_output(a, body);
-        let grouped_handlers = self.compile_grouped_staticcatch_handlers(
-            a,
-            handlers,
-            first_code,
-            |this, a, handler| this.compile_effect_block_output(a, handler),
-        );
-        self.pop_multi_staticcatch_handlers(handlers.len());
-        let cases = BlockOutput::make(
-            self.compile_exit_dispatch(a, &exit_id, grouped_handlers, false)
-                .into_iter()
-                .collect(),
-        );
-        BlockOutput::make(declarations).append(body_output.append(cases))
+            &mut self.j,
+        ))
     }
 
     fn compile_multi_staticcatch_assignment_block(
@@ -6446,92 +6552,30 @@ impl LambdaCompiler {
             .block
     }
 
-    /// [`Self::compile_staticcatch_effect_output`] for a flattened code
-    /// table: every handler is compiled after the body.
-    fn compile_multi_staticcatch_assignment_output(
-        &mut self,
-        a: &mut LamArena,
-        result: &Ident,
-        handlers: &[FlatHandler],
-        body: Lam,
-    ) -> BlockOutput {
-        let (exit_id, first_code, declarations) = self.emit_multi_staticcatch_prelude(handlers);
-        let body_output = self.compile_assign_to_target_output(a, result, body);
-        let grouped_handlers = self.compile_grouped_staticcatch_handlers(
-            a,
-            handlers,
-            first_code,
-            |this, a, handler| this.compile_assign_to_target_output(a, result, handler),
-        );
-        self.pop_multi_staticcatch_handlers(handlers.len());
-        let cases = BlockOutput::make(
-            self.compile_exit_dispatch(a, &exit_id, grouped_handlers, false)
-                .into_iter()
-                .collect(),
-        );
-        BlockOutput::make(declarations).append(body_output.append(cases))
-    }
-
-    /// [`Self::compile_multi_staticcatch_effect_output`] in a return
-    /// continuation.
-    fn compile_multi_staticcatch_tail_loop_return_output(
-        &mut self,
-        a: &mut LamArena,
-        handlers: &[FlatHandler],
-        body: Lam,
-        tail_loop: &mut TailLoopState,
-    ) -> BlockOutput {
-        let (exit_id, first_code, declarations) = self.emit_multi_staticcatch_prelude(handlers);
-        let body_output = self.compile_tail_loop_return_output(a, body, tail_loop);
-        let grouped_handlers = self.compile_grouped_staticcatch_handlers(
-            a,
-            handlers,
-            first_code,
-            |this, a, handler| this.compile_tail_loop_return_output(a, handler, tail_loop),
-        );
-        self.pop_multi_staticcatch_handlers(handlers.len());
-        let cases = BlockOutput::make(
-            self.compile_exit_dispatch(a, &exit_id, grouped_handlers, true)
-                .into_iter()
-                .collect(),
-        );
-        BlockOutput::make(declarations).append(body_output.append(cases))
-    }
-
-    fn collect_required_module_set(&self, block: &Block) -> OcamlModuleSet {
-        let mut modules = OcamlModuleSet::new();
-        collect_modules_from_block(block, &mut modules);
-        modules
-    }
-
-    fn collect_required_modules(&self, block: &Block) -> Vec<ModuleId> {
-        let mut modules = self.collect_required_module_set(block).to_vec();
+    #[cfg(test)]
+    fn collect_required_modules(&self, block: &[Stmt]) -> Vec<ModuleId> {
+        let mut set = OcamlModuleSet::new();
+        collect_modules_from_js_block(&self.j, block, &mut set);
+        let mut modules = set.to_vec();
         ocaml_sort_modules(&mut modules);
         modules
     }
 }
 
 fn normalize_if_assignment_merge_order(
-    cond: Expression,
+    j: &mut JsArena,
+    cond: Expr,
     then_block: Block,
     else_block: Block,
-) -> (Expression, Block, Block) {
+) -> (Expr, Block, Block) {
     // OCaml's `Js_stmt_make.if_` handles `Js_not` before it folds
     // same-target branch assignments (compiler/core/js_stmt_make.ml:235-286).
     // Keep that rule order for Rust's eager assignment merge, otherwise a
     // `!(x == null) ? value : undefined` conditional survives where OCaml
     // first swaps branches and emits `x == null ? undefined : value`.
-    match cond.desc {
-        ExpressionDesc::JsNot(inner) if !else_block.is_empty() => (*inner, else_block, then_block),
-        other => (
-            Expression {
-                source_loc: None,
-                desc: other,
-                comment: cond.comment,
-            },
-            then_block,
-            else_block,
-        ),
+    match j.ek(cond) {
+        ExprKind::JsNot(inner) if !else_block.is_empty() => (inner, else_block, then_block),
+        _ => (j.with_expr_loc(cond, None), then_block, else_block),
     }
 }
 
@@ -6562,52 +6606,42 @@ fn catch_bindings(a: &LamArena, info: CatchId) -> Vec<Ident> {
     a.idents(a.catch_payload(info).params).to_vec()
 }
 
-/// `Declare (kind, id)` of a value compiled as `NeedValue`: a finished output
-/// (lam_compile.ml:1682, 1934, 1949) is kept as it is, without the
-/// declaration, as `Praise` ignores its continuation.
-fn declare_compiled(kind: LetKind, id: &Ident, compiled: Compiled) -> BlockOutput {
+/// The `should_break` of a switch case in a return continuation:
+/// `Js_output.to_break_block` (js_output.ml:88-100) breaks unless the output
+/// is finished, and `compile_general_cases` keeps the break only when the
+/// case has an exit (lam_compile.ml:610-624).
+pub(crate) fn return_case_needs_break(a: &LamArena, body: Lam, finished: OutputFinished) -> bool {
+    lambda_has_exit(a, body) && finished != OutputFinished::True
+}
+
+/// Declare a compiled value unless its output has already left control flow.
+fn declare_compiled(j: &mut JsArena, kind: LetKind, id: &Ident, compiled: Compiled) -> BlockOutput {
     let mut block = compiled.prelude;
     if compiled.finished == OutputFinished::True {
-        return BlockOutput {
-            block,
-            finished: OutputFinished::True,
-        };
+        return BlockOutput::finished(block);
     }
-    block.push(Statement::variable(VariableDeclaration {
-        ident: *id,
-        value: Some(compiled.expr),
-        property: kind,
-        ident_info: IdentInfo::default(),
-    }));
+    block.push(JS::define(*id, Some(compiled.expr), kind, j));
     BlockOutput::make(block)
 }
 
-/// `output_of_block_and_expression (EffectCall (Maybe_tail_is_return _))`
-/// (js_output.ml:57-59) of a value compiled as `NeedValue`: a `return`,
-/// which finishes the output. A finished value (a raise) stays as it is.
-fn return_compiled(compiled: Compiled) -> BlockOutput {
+/// A return continuation finishes, but does not append a return after a raise.
+fn return_compiled(j: &mut JsArena, compiled: Compiled) -> BlockOutput {
     let mut block = compiled.prelude;
     if compiled.finished != OutputFinished::True {
-        block.push(Statement::return_(compiled.expr));
+        block.push(JS::return_(compiled.expr, j));
     }
     BlockOutput::finished(block)
 }
 
-/// `Assign result` of a value compiled as `NeedValue`; a finished output
-/// stays as it is (see [`declare_compiled`]).
-fn assign_compiled(result: &Ident, compiled: Compiled) -> BlockOutput {
+/// Assign a compiled value unless its output has already left control flow.
+fn assign_compiled(j: &mut JsArena, result: &Ident, compiled: Compiled) -> BlockOutput {
     let mut block = compiled.prelude;
     if compiled.finished == OutputFinished::True {
-        return BlockOutput {
-            block,
-            finished: OutputFinished::True,
-        };
+        return BlockOutput::finished(block);
     }
-    block.push(Statement::exp(Expression::bin(
-        BinOp::Eq,
-        Expression::var(*result),
-        compiled.expr,
-    )));
+    let target = JE::var(*result, j);
+    let assign = JE::bin(BinOp::Eq, target, compiled.expr, j);
+    block.push(JS::exp(assign, j));
     BlockOutput::make(block)
 }
 
@@ -6668,36 +6702,31 @@ fn lower_ocaml_for_range_direction(
     }
 }
 
-fn block_last_is_continue(block: &Block) -> bool {
-    matches!(
-        block.last(),
-        Some(Statement {
-            desc: StatementDesc::Continue(_),
-            ..
-        })
-    )
+fn block_last_is_continue(j: &JsArena, block: &[Stmt]) -> bool {
+    block
+        .last()
+        .is_some_and(|s| matches!(j.sk(*s), StmtKind::Continue(_)))
 }
 
-fn block_last_is_non_continue_terminal(block: &Block) -> bool {
-    matches!(
-        block.last(),
-        Some(Statement {
-            desc: StatementDesc::Return(_) | StatementDesc::Throw(_) | StatementDesc::Break(_),
-            ..
-        })
-    )
+fn block_last_is_non_continue_terminal(j: &JsArena, block: &[Stmt]) -> bool {
+    block.last().is_some_and(|s| {
+        matches!(
+            j.sk(*s),
+            StmtKind::Return(_) | StmtKind::Throw(_) | StmtKind::Break(_)
+        )
+    })
 }
 
-fn merge_terminal_guard_fallthrough_else(block: Block) -> Block {
+fn merge_terminal_guard_fallthrough_else(j: &mut JsArena, block: Block) -> Block {
     let [first, rest @ ..] = block.as_slice() else {
         return block;
     };
-    let StatementDesc::If(cond, then_block, else_block) = &first.desc else {
+    let StmtKind::If(cond, then_block, else_block) = j.sk(*first) else {
         return block;
     };
-    if !else_block.is_empty()
-        || !block_last_is_terminal(then_block)
-        || !block_last_is_terminal(&rest.to_vec())
+    if !j.stmts(else_block).is_empty()
+        || !JS::block_last_is_terminal(j, j.stmts(then_block))
+        || !JS::block_last_is_terminal(j, rest)
     {
         return block;
     }
@@ -6706,11 +6735,8 @@ fn merge_terminal_guard_fallthrough_else(block: Block) -> Block {
     // it as a block-wrapped statement (compiler/core/js_stmt_make.ml:247-250).
     // Rust tail-loop lowering has already flattened that wrapper, so rebuild the
     // same terminal fallback before placing it under the outer negative guard.
-    vec![Statement::new(StatementDesc::If(
-        cond.clone(),
-        then_block.clone(),
-        rest.to_vec(),
-    ))]
+    let rest = JS::list(rest, j);
+    vec![JS::new(StmtKind::If(cond, then_block, rest), j)]
 }
 
 fn function_has_self_tailcall(a: &LamArena, tail_targets: &[Ident], lam: Lam) -> bool {
@@ -6744,15 +6770,13 @@ fn function_has_self_tailcall(a: &LamArena, tail_targets: &[Ident], lam: Lam) ->
             function_has_self_tailcall(a, tail_targets, body)
                 || function_has_self_tailcall(a, tail_targets, handler)
         }
-        // lam_compile.ml `compile_try`: with a finally block neither the body
-        // nor the catch handler is in tail position.
-        View::TryFinally(_, _) => false,
         View::TryWith(_, _, handler) => {
             // OCaml `compile_trywith` changes only the try body's tail type to
             // `Tail_in_try`; the handler keeps the original `Tail_with_name`
             // context (compiler/core/lam_compile.ml:1315-1344).
             function_has_self_tailcall(a, tail_targets, handler)
         }
+        View::TryFinally(_, _) => false,
         View::Var(_)
         | View::GlobalModule(_)
         | View::Const(_)
@@ -7408,33 +7432,30 @@ fn required_module_side_effect_reason(
     })
 }
 
-pub(crate) fn compiled_from_effect_block(mut block: Block) -> Compiled {
-    if block.len() == 1 {
-        let stmt = block.pop().expect("single-item block");
-        let Statement {
-            source_loc: _,
-            desc,
-            comment,
-        } = stmt;
-        return match desc {
-            StatementDesc::Exp(mut expr) => {
-                if expr.comment.is_none() {
-                    expr.comment = comment;
-                }
+pub(crate) fn compiled_from_effect_block(j: &mut JsArena, block: Block) -> Compiled {
+    if let [stmt] = block.as_slice() {
+        let stmt = *stmt;
+        let comment = j.stmt_comment(stmt).map(str::to_string);
+        return match j.sk(stmt) {
+            StmtKind::Exp(expr) => {
+                let expr = if j.expr_comment(expr).is_none() && comment.is_some() {
+                    j.with_expr_comment(expr, comment.as_deref())
+                } else {
+                    expr
+                };
                 Compiled {
                     prelude: vec![],
                     expr,
                     finished: OutputFinished::False,
                 }
             }
-            StatementDesc::Block(inner) if comment.is_none() => compiled_from_effect_block(inner),
-            desc => Compiled {
-                prelude: vec![Statement {
-                    source_loc: None,
-                    desc,
-                    comment,
-                }],
-                expr: Expression::undefined(false),
+            StmtKind::Block(inner) if comment.is_none() => {
+                let inner = j.block_vec(inner);
+                compiled_from_effect_block(j, inner)
+            }
+            _ => Compiled {
+                prelude: vec![j.with_stmt_loc(stmt, None)],
+                expr: JE::undefined(false, j),
                 finished: OutputFinished::False,
             },
         };
@@ -7442,7 +7463,7 @@ pub(crate) fn compiled_from_effect_block(mut block: Block) -> Compiled {
 
     Compiled {
         prelude: block,
-        expr: Expression::undefined(false),
+        expr: JE::undefined(false, j),
         finished: OutputFinished::False,
     }
 }
@@ -7470,14 +7491,6 @@ fn no_static_raise_in_handler_like_ocaml(a: &LamArena, handler: Lam) -> bool {
     !handler_has_static_raise_like_ocaml(a, handler)
 }
 
-/// The `should_break` of a switch case in a return continuation:
-/// `Js_output.to_break_block` (js_output.ml:88-100) breaks unless the output
-/// is finished, and `compile_general_cases` keeps the break only when the
-/// case has an exit (lam_compile.ml:610-624).
-pub(crate) fn return_case_needs_break(a: &LamArena, body: Lam, finished: OutputFinished) -> bool {
-    lambda_has_exit(a, body) && finished != OutputFinished::True
-}
-
 pub(crate) fn lambda_has_exit(a: &LamArena, lam: Lam) -> bool {
     match a.node(lam) {
         Node::Function { .. } => false,
@@ -7485,6 +7498,8 @@ pub(crate) fn lambda_has_exit(a: &LamArena, lam: Lam) -> bool {
         _ => any_child(a, lam, |x| lambda_has_exit(a, x)),
     }
 }
+
+impl LambdaCompiler {}
 
 fn lambda_contains_staticcatch(a: &LamArena, lam: Lam) -> bool {
     // Including function bodies.
@@ -7617,185 +7632,119 @@ fn runtime_module_id(module_name: &str) -> ModuleId {
     }
 }
 
-fn collect_modules_from_block(block: &Block, modules: &mut OcamlModuleSet) {
+fn collect_modules_from_js_list(
+    j: &JsArena,
+    block: crate::js_ir::arena::StmtList,
+    modules: &mut OcamlModuleSet,
+) {
+    collect_modules_from_js_block(j, j.stmts(block), modules);
+}
+
+fn collect_modules_from_js_block(j: &JsArena, block: &[Stmt], modules: &mut OcamlModuleSet) {
     for stmt in block {
-        collect_modules_from_statement(stmt, modules);
+        collect_modules_from_js_statement(j, *stmt, modules);
     }
 }
 
-fn collect_modules_from_statement(stmt: &Statement, modules: &mut OcamlModuleSet) {
-    match &stmt.desc {
-        StatementDesc::Block(block) => collect_modules_from_block(block, modules),
-        StatementDesc::Variable(decl) => match decl.ident_info.used_stats {
-            UsedStats::DeadPure => {}
-            UsedStats::DeadNonPure => {
-                if let Some(value) = &decl.value
-                    && !matches!(value.desc, ExpressionDesc::Var(_))
-                {
-                    collect_modules_from_expression(value, modules);
+fn collect_modules_from_js_statement(j: &JsArena, stmt: Stmt, modules: &mut OcamlModuleSet) {
+    let list = |b, m: &mut OcamlModuleSet| collect_modules_from_js_list(j, b, m);
+    match j.sk(stmt) {
+        StmtKind::Block(block) => list(block, modules),
+        StmtKind::Variable(v) => {
+            let decl = j.var(v);
+            match decl.ident_info.used_stats {
+                UsedStats::DeadPure => {}
+                UsedStats::DeadNonPure => {
+                    if let Some(value) = decl.value
+                        && !matches!(j.ek(value), ExprKind::Var(_) | ExprKind::Qualified(_))
+                    {
+                        collect_modules_from_js_expression(j, value, modules);
+                    }
+                }
+                _ => {
+                    if let Some(value) = decl.value {
+                        collect_modules_from_js_expression(j, value, modules);
+                    }
                 }
             }
-            _ => {
-                if let Some(value) = &decl.value {
-                    collect_modules_from_expression(value, modules);
-                }
+        }
+        StmtKind::Exp(expr) | StmtKind::Throw(expr) | StmtKind::Return(expr) => {
+            collect_modules_from_js_expression(j, expr, modules)
+        }
+        StmtKind::If(cond, then_block, else_block) => {
+            collect_modules_from_js_expression(j, cond, modules);
+            list(then_block, modules);
+            list(else_block, modules);
+        }
+        StmtKind::While(_, cond, body) => {
+            collect_modules_from_js_expression(j, cond, modules);
+            list(body, modules);
+        }
+        StmtKind::ForRange(info) => {
+            let info = j.for_range(info);
+            if let Some(init) = info.init {
+                collect_modules_from_js_expression(j, init, modules);
             }
-        },
-        StatementDesc::Exp(expr) | StatementDesc::Throw(expr) | StatementDesc::Return(expr) => {
-            collect_modules_from_expression(expr, modules)
+            collect_modules_from_js_expression(j, info.end, modules);
+            list(info.body, modules);
         }
-        StatementDesc::If(cond, then_block, else_block) => {
-            collect_modules_from_expression(cond, modules);
-            collect_modules_from_block(then_block, modules);
-            collect_modules_from_block(else_block, modules);
+        StmtKind::ForOf(info) | StmtKind::ForAwaitOf(info) => {
+            let info = j.for_of(info);
+            collect_modules_from_js_expression(j, info.iterable, modules);
+            list(info.body, modules);
         }
-        StatementDesc::While(_, cond, body) => {
-            collect_modules_from_expression(cond, modules);
-            collect_modules_from_block(body, modules);
-        }
-        StatementDesc::ForRange(_, init, finish, _, _, body) => {
-            if let Some(init) = init {
-                collect_modules_from_expression(init, modules);
+        StmtKind::IntSwitch(expr, info) => {
+            collect_modules_from_js_expression(j, expr, modules);
+            let info = j.int_switch(info);
+            for (_, clause) in &info.clauses {
+                list(clause.body, modules);
             }
-            collect_modules_from_expression(finish, modules);
-            collect_modules_from_block(body, modules);
-        }
-        StatementDesc::ForOf(_, _, iterable, body)
-        | StatementDesc::ForAwaitOf(_, _, iterable, body) => {
-            collect_modules_from_expression(iterable, modules);
-            collect_modules_from_block(body, modules);
-        }
-        StatementDesc::IntSwitch(expr, clauses, default) => {
-            collect_modules_from_expression(expr, modules);
-            for (_, clause) in clauses {
-                collect_modules_from_block(&clause.body, modules);
-            }
-            if let Some(default) = default {
-                collect_modules_from_block(default, modules);
+            if let Some(default) = info.default {
+                list(default, modules);
             }
         }
-        StatementDesc::StringSwitch(expr, clauses, default) => {
-            collect_modules_from_expression(expr, modules);
-            for clause in clauses {
-                collect_modules_from_block(&clause.clause.body, modules);
+        StmtKind::StringSwitch(expr, info) => {
+            collect_modules_from_js_expression(j, expr, modules);
+            let info = j.string_switch(info);
+            for clause in &info.clauses {
+                list(clause.clause.body, modules);
             }
-            if let Some(default) = default {
-                collect_modules_from_block(default, modules);
-            }
-        }
-        StatementDesc::Try(body, handler, finalizer) => {
-            collect_modules_from_block(body, modules);
-            if let Some((_, handler_block)) = handler {
-                collect_modules_from_block(handler_block, modules);
-            }
-            if let Some(finalizer_block) = finalizer {
-                collect_modules_from_block(finalizer_block, modules);
+            if let Some(default) = info.default {
+                list(default, modules);
             }
         }
-        StatementDesc::Debugger | StatementDesc::Break(_) | StatementDesc::Continue(_) => {}
+        StmtKind::Try(info) => {
+            let info = j.try_info(info);
+            list(info.body, modules);
+            if let Some((_, handler_block)) = info.catch {
+                list(handler_block, modules);
+            }
+            if let Some(finalizer_block) = info.finally {
+                list(finalizer_block, modules);
+            }
+        }
+        StmtKind::Debugger | StmtKind::Break(_) | StmtKind::Continue(_) => {}
     }
 }
 
-fn collect_modules_from_expression(expr: &Expression, modules: &mut OcamlModuleSet) {
-    match &expr.desc {
-        ExpressionDesc::Var(crate::js_ir::VIdent::Qualified(module, _)) => {
+fn collect_modules_from_js_expression(j: &JsArena, expr: Expr, modules: &mut OcamlModuleSet) {
+    match j.ek(expr) {
+        ExprKind::Qualified(q) => {
+            let (module, _) = j.qual(q);
             if !module.dynamic_import {
-                modules.insert((**module).clone());
+                modules.insert(module.clone());
             }
         }
-        ExpressionDesc::Length(inner, _)
-        | ExpressionDesc::IsNullOrUndefined(inner)
-        | ExpressionDesc::Typeof(inner)
-        | ExpressionDesc::JsNot(inner)
-        | ExpressionDesc::JsBnot(inner)
-        | ExpressionDesc::Await(inner)
-        | ExpressionDesc::Spread(inner)
-        | ExpressionDesc::RecordRest(_, inner)
-        | ExpressionDesc::CamlBlockTag(inner, _) => collect_modules_from_expression(inner, modules),
-        ExpressionDesc::OptionalBlock(inner, identity) => {
+        ExprKind::OptionalBlock(inner, identity) => {
             if !identity {
                 modules.insert(runtime_module_id("Primitive_option"));
             }
-            collect_modules_from_expression(inner, modules);
+            collect_modules_from_js_expression(j, inner, modules);
         }
-        ExpressionDesc::StringAppend(left, right)
-        | ExpressionDesc::Seq(left, right)
-        | ExpressionDesc::Bin(_, left, right)
-        | ExpressionDesc::ArrayIndex(left, right)
-        | ExpressionDesc::In(left, right) => {
-            collect_modules_from_expression(left, modules);
-            collect_modules_from_expression(right, modules);
-        }
-        ExpressionDesc::Cond(test, consequent, alternate) => {
-            collect_modules_from_expression(test, modules);
-            collect_modules_from_expression(consequent, modules);
-            collect_modules_from_expression(alternate, modules);
-        }
-        ExpressionDesc::FlatCall(func, args) => {
-            collect_modules_from_expression(func, modules);
-            collect_modules_from_expression(args, modules);
-        }
-        ExpressionDesc::Call(func, args, _) => {
-            collect_modules_from_expression(func, modules);
-            for arg in args {
-                collect_modules_from_expression(arg, modules);
-            }
-        }
-        ExpressionDesc::TaggedTemplate(tag, _, values) => {
-            collect_modules_from_expression(tag, modules);
-            for value in values {
-                collect_modules_from_expression(value, modules);
-            }
-        }
-        ExpressionDesc::InterpolatedTemplate { values, .. } => {
-            for value in values {
-                collect_modules_from_expression(value, modules);
-            }
-        }
-        ExpressionDesc::StaticIndex(target, _, _) => {
-            collect_modules_from_expression(target, modules)
-        }
-        ExpressionDesc::New(target, args) => {
-            collect_modules_from_expression(target, modules);
-            if let Some(args) = args {
-                for arg in args {
-                    collect_modules_from_expression(arg, modules);
-                }
-            }
-        }
-        ExpressionDesc::Fun { body, .. } => collect_modules_from_block(body, modules),
-        ExpressionDesc::Array(items, _) => {
-            for item in items {
-                collect_modules_from_expression(item, modules);
-            }
-        }
-        ExpressionDesc::CamlBlock(items, _, _) => {
-            for item in items {
-                collect_modules_from_expression(item, modules);
-            }
-        }
-        ExpressionDesc::Jsx(jsx) => {
-            for value in jsx.expressions() {
-                collect_modules_from_expression(value, modules);
-            }
-        }
-        ExpressionDesc::Object(entries) => {
-            for entry in entries {
-                let (crate::js_ir::ObjectEntry::Property(_, value)
-                | crate::js_ir::ObjectEntry::Spread(value)
-                | crate::js_ir::ObjectEntry::RecordSpread(value)) = entry;
-                collect_modules_from_expression(value, modules);
-            }
-        }
-        ExpressionDesc::Bool(_)
-        | ExpressionDesc::Var(crate::js_ir::VIdent::Id(_))
-        | ExpressionDesc::Str(_)
-        | ExpressionDesc::TemplateLiteral(_)
-        | ExpressionDesc::JsonLiteral(_)
-        | ExpressionDesc::RawJsCode(_)
-        | ExpressionDesc::Number(_)
-        | ExpressionDesc::Undefined { .. }
-        | ExpressionDesc::Null => {}
+        ExprKind::Fun(f) => collect_modules_from_js_list(j, j.fun(f).body, modules),
+        _ => crate::js_ir::walk::each_child(j, expr, |child| {
+            collect_modules_from_js_expression(j, child, modules)
+        }),
     }
 }
 
@@ -7890,6 +7839,23 @@ pub(crate) struct Sw {
 }
 
 impl Sw {
+    /// lambda.ml `untagged_plan` over the arms of this switch.
+    pub(crate) fn untagged_plan(
+        self,
+        a: &LamArena,
+    ) -> Option<crate::lambda::untagged_dispatch::Plan<Lam>> {
+        let payload = self.payload(a);
+        crate::lambda::untagged_plan_with(
+            payload.consts_full,
+            &self.consts(a),
+            payload.blocks_full,
+            &self.blocks(a),
+            self.fail(a),
+            &payload.dispatch,
+            |x: &Lam, y: &Lam| a.eq_approx(*x, *y),
+        )
+    }
+
     pub(crate) fn payload(self, a: &LamArena) -> &crate::lambda::arena::SwitchPayload {
         a.switch_payload(self.info)
     }
@@ -7915,23 +7881,6 @@ impl Sw {
     pub(crate) fn fail(self, a: &LamArena) -> Option<Lam> {
         a.switch_actions(self.info, self.actions).fail
     }
-
-    /// lambda.ml `untagged_plan` over the arms of this switch.
-    pub(crate) fn untagged_plan(
-        self,
-        a: &LamArena,
-    ) -> Option<crate::lambda::untagged_dispatch::Plan<Lam>> {
-        let payload = self.payload(a);
-        crate::lambda::untagged_plan_with(
-            payload.consts_full,
-            &self.consts(a),
-            payload.blocks_full,
-            &self.blocks(a),
-            self.fail(a),
-            &payload.dispatch,
-            |x: &Lam, y: &Lam| a.eq_approx(*x, *y),
-        )
-    }
 }
 
 /// A `Lstringswitch` node's actions and metadata.
@@ -7955,39 +7904,5 @@ impl StrSw {
     pub(crate) fn default(self, a: &LamArena) -> Option<Lam> {
         let p = a.str_switch_payload(self.info);
         p.has_default.then(|| a.list(self.actions)[p.n_cases()])
-    }
-}
-
-#[cfg(test)]
-mod restored_effect_regression {
-    use super::*;
-    #[test]
-    fn group_effect_reason_is_captured_before_flat_aliases() {
-        for (name, effectful) in [("pure", false), ("effectful", true)] {
-            let id = Ident::create_local(name);
-            let value = if effectful {
-                crate::lambda::Lambda::prim(Primitive::Pdebugger, vec![], LamLoc::NONE)
-            } else {
-                crate::lambda::Lambda::unit()
-            };
-            let input = crate::lambda::Lambda::prim(
-                Primitive::Pmakeblock(
-                    TagInfo::ModuleExport(vec![id]),
-                    crate::lambda::lam_primitive::Mutable::Immutable,
-                ),
-                vec![value],
-                LamLoc::NONE,
-            );
-            let result = crate::lambda::lam_compile_main::simplify_for_js_backend(
-                &input,
-                false,
-                &mut |_, _| None,
-                &mut |_, _| None,
-            );
-            assert_eq!(
-                module_side_effect_reason(&result.arena, result.lam).as_deref(),
-                effectful.then_some("effectful")
-            );
-        }
     }
 }

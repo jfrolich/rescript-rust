@@ -1,42 +1,16 @@
 use super::*;
+use crate::expect_dump;
+use crate::js_ir::arena::{JsDepsProgram as DepsProgram, JsProgram as Program};
+use crate::js_ir::dump;
+use crate::js_ir::printer::{print_expr, print_stmts};
+use crate::js_ir::test_util::test_props;
 use crate::lambda::LamLoc;
-
-#[test]
-#[ignore = "stale internal shape expectation; covered by strict lambda/JS parity gates"]
-fn import_attributes_exact_lowered_lambda_keeps_aliases_before_logs_through_js_pipeline() {
-    let lam = import_attributes_lowered_lambda();
-    let simplified = simplify_tree_for_js_backend(&lam);
-    let mut compiler = LambdaCompiler::new();
-    let compiled = compiler.compile_expr_tree(&simplified);
-    let mut block = compiled.prelude;
-    let exports = extract_toplevel_exports(compiled.expr, &mut block)
-        .expect("expected ImportAttributes-style lambda to end in a module export block");
-    assert_import_attributes_alias_block_shape(&block, "after export extraction");
-
-    let exports = compiler.coerce_toplevel_exports(&mut block, exports, compiled.finished);
-    let exports = resolve_export_aliases(&block, exports);
-    let program = Program::new(block, exports);
-    assert_import_attributes_alias_block_shape(&program.block, "after top-level export coercion");
-
-    let deps = apply_js_flatten_pass(DepsProgram {
-        program,
-        modules: vec![],
-        side_effect: module_side_effect_reason_tree(&simplified),
-    });
-    assert_import_attributes_alias_block_shape(&deps.program.block, "after js_flatten");
-
-    let deps = apply_external_shadow_pass(deps);
-    assert_import_attributes_alias_block_shape(&deps.program.block, "after external_shadow");
-
-    let deps = apply_js_tailcall_inline_pass(deps);
-    assert_import_attributes_alias_block_shape(&deps.program.block, "after tailcall_inline");
-
-    let deps = apply_js_flatten_and_mark_dead_pass(deps, false);
-    assert_import_attributes_alias_block_shape(&deps.program.block, "after flatten_and_mark_dead");
-
-    let deps = apply_js_shake_pass(deps);
-    assert_import_attributes_alias_block_shape(&deps.program.block, "after js_shake");
-}
+use crate::lambda::js_pass_external_shadow::apply_external_shadow_pass;
+use crate::lambda::js_pass_flatten_and_mark_dead::{
+    apply_js_flatten_and_mark_dead_pass, apply_js_flatten_pass,
+};
+use crate::lambda::js_pass_tailcall_inline::apply_js_tailcall_inline_pass;
+use crate::lambda::js_shake::apply_js_shake_pass;
 
 #[test]
 fn lowers_js_var_without_args_to_a_value() {
@@ -59,15 +33,9 @@ fn lowers_js_var_without_args_to_a_value() {
         LamLoc::NONE,
     );
 
-    let compiled = compiler.compile_expr_tree(&lam);
+    let compiled = compiler.compile_expr_lam(&lam);
     assert!(compiled.prelude.is_empty());
-    assert!(matches!(
-        compiled.expr,
-        Expression {
-            desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(ref id)),
-            ..
-        } if id.name() == "process"
-    ));
+    expect_dump!(dump::expr(&compiler.j, compiled.expr), "process");
 }
 
 #[test]
@@ -95,32 +63,10 @@ fn lowers_js_var_calls_with_runtime_args_even_without_external_arg_metadata() {
     );
 
     let program = compiler.compile_program(&lam);
-    let [stmt] = program.block.as_slice() else {
-        panic!("expected a single expression statement");
-    };
-    match &stmt.desc {
-        StatementDesc::Exp(Expression {
-            desc: ExpressionDesc::Call(func, args, _),
-            ..
-        }) => {
-            assert_eq!(args.len(), 1);
-            assert!(matches!(
-                func.as_ref(),
-                Expression {
-                    desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
-                    ..
-                } if id.name() == "foo1"
-            ));
-            assert!(matches!(
-                args[0],
-                Expression {
-                    desc: ExpressionDesc::Number(Number::Int { i: 10, .. }),
-                    ..
-                }
-            ));
-        }
-        other => panic!("expected a direct js-var call, got {other:?}"),
-    }
+    expect_dump!(
+        dump::block(&program.arena, &program.block),
+        "Exp(Call[Na](foo1; 10))"
+    );
 }
 
 #[test]
@@ -153,30 +99,10 @@ fn lowers_module_external_calls_to_namespace_imports() {
         }] if name == "mocha" && !default
     ));
 
-    let [stmt] = deps.program.block.as_slice() else {
-        panic!("expected a single expression statement");
-    };
-    match &stmt.desc {
-        StatementDesc::Exp(Expression {
-            desc: ExpressionDesc::Call(func, args, _),
-            ..
-        }) => {
-            assert!(args.is_empty());
-            assert!(matches!(
-                func.as_ref(),
-                Expression {
-                    desc: ExpressionDesc::Var(crate::js_ir::VIdent::Qualified(module, Some(field))),
-                    ..
-                } if field == "describe"
-                    && matches!(
-                        &**module,
-                        ModuleId { kind: Kind::External { name, default, .. }, .. }
-                            if name == "mocha" && !default
-                    )
-            ));
-        }
-        other => panic!("expected external module call, got {other:?}"),
-    }
+    expect_dump!(
+        dump::block(&deps.program.arena, &deps.program.block),
+        "Exp(Call[Na](Mocha.describe<External { name: \"mocha\", default: false, import_attributes: None }>; ))"
+    );
 }
 
 #[test]
@@ -188,19 +114,11 @@ fn translates_external_module_values_to_qualified_members_like_ocaml() {
         &[],
     );
 
-    assert!(matches!(
-        expr,
-        Expression {
-            desc: ExpressionDesc::Var(crate::js_ir::VIdent::Qualified(ref module, Some(ref member))),
-            ..
-        } if member == "jsx"
-            && matches!(
-                &**module,
-                ModuleId { kind: Kind::External { name, default, .. }, .. }
-                    if name == "react/jsx-runtime" && !default
-            )
-    ));
-    assert_eq!(print_expression(&expr), "JsxRuntime.jsx");
+    expect_dump!(
+        dump::expr(&compiler.j, expr),
+        "JsxRuntime.jsx<External { name: \"react/jsx-runtime\", default: false, import_attributes: None }>"
+    );
+    assert_eq!(print_expr(&compiler.j, expr), "JsxRuntime.jsx");
 }
 
 #[test]
@@ -219,12 +137,13 @@ fn lowers_pjs_object_get_to_method_calls() {
         ],
         ap_info: ApInfo {
             loc: LamLoc::NONE,
+
             status: ApplyStatus::Uncurry,
         },
     }));
 
     let program = compiler.compile_program(&lam);
-    let rendered = print_block(&program.block);
+    let rendered = print_stmts(&program.arena, &program.block);
     assert_eq!(rendered, "john.say(\"hey\", \"jude\");");
 }
 
@@ -242,7 +161,7 @@ fn lowers_pjs_object_set_to_property_assignments() {
     );
 
     let program = compiler.compile_program(&lam);
-    let rendered = print_block(&program.block);
+    let rendered = print_stmts(&program.arena, &program.block);
     assert_eq!(rendered, "student1.name = \"Mary\";");
 }
 
@@ -275,7 +194,7 @@ fn lowers_spliced_js_calls_by_flattening_literal_variadic_arrays() {
     );
 
     let program = compiler.compile_program(&lam);
-    let rendered = print_block(&program.block);
+    let rendered = print_stmts(&program.arena, &program.block);
     assert_eq!(rendered, "Path.join(\".\", \"Node_path_test\");");
 }
 
@@ -290,106 +209,8 @@ fn lowers_default_module_values_in_dynamic_imports() {
         vec![],
         LamLoc::NONE,
     ));
-    let rendered = print_block(&program.block);
+    let rendered = print_stmts(&program.arena, &program.block);
     assert_eq!(rendered, "import(\"a\").then(m => m.default);");
-}
-
-#[test]
-#[ignore = "stale internal shape expectation; covered by strict lambda/JS parity gates"]
-fn lowers_js_new_to_new_expression() {
-    let mut compiler = LambdaCompiler::new();
-    let arg = Ident::create_local("prim");
-    let lam = Lambda::prim(
-        Primitive::PjsCall(Box::new(crate::lambda::lam_primitive::JsCall {
-            prim_name: "URL".to_string(),
-            arg_types: vec![],
-            ffi: ExternalDecl {
-                kind: DeclKind::DeclNew {
-                    name: "URL".to_string(),
-                },
-                module_: None,
-                scopes: vec![],
-                variadic: false,
-                effective_arity: 1,
-            },
-        })),
-        vec![Lambda::var(arg)],
-        LamLoc::NONE,
-    );
-
-    let program = compiler.compile_program(&lam);
-    let [stmt] = program.block.as_slice() else {
-        panic!("expected a single expression statement");
-    };
-    match &stmt.desc {
-        StatementDesc::Exp(Expression {
-            desc: ExpressionDesc::New(ctor, Some(args)),
-            ..
-        }) => {
-            assert!(matches!(
-                ctor.desc,
-                ExpressionDesc::Var(crate::js_ir::VIdent::Id(ref id)) if id.name() == "URL"
-            ));
-            assert!(matches!(
-                args.as_slice(),
-                [Expression {
-                    desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
-                    ..
-                }] if id.same(&arg)
-            ));
-        }
-        other => panic!("expected a new expression, got {other:?}"),
-    }
-}
-
-#[test]
-#[ignore = "stale internal shape expectation; covered by strict lambda/JS parity gates"]
-fn lowers_js_call_omits_trailing_optional_undefined_args_like_ocaml() {
-    let mut compiler = LambdaCompiler::new();
-    let date = Ident::create_local("date");
-    let lam = Lambda::prim(
-        Primitive::PjsCall(Box::new(crate::lambda::lam_primitive::JsCall {
-            prim_name: "formatDate".to_string(),
-            arg_types: vec![
-                Param {
-                    arg_type: Attr::Nothing,
-                    arg_label: LabelNoname::ArgEmpty,
-                },
-                Param {
-                    arg_type: Attr::Nothing,
-                    arg_label: LabelNoname::ArgOptional,
-                },
-                Param {
-                    arg_type: Attr::Nothing,
-                    arg_label: LabelNoname::ArgOptional,
-                },
-            ],
-            ffi: ExternalDecl {
-                kind: DeclKind::DeclVal {
-                    name: "formatDate".to_string(),
-                },
-                module_: Some(ModuleSource::ModuleNamed(external_module("SomeModule"))),
-                scopes: vec![],
-                variadic: false,
-                effective_arity: 1,
-            },
-        })),
-        vec![
-            Lambda::var(date),
-            Lambda::const_(Constant::JsUndefined { is_unit: false }),
-            Lambda::const_(Constant::JsUndefined { is_unit: false }),
-        ],
-        LamLoc::NONE,
-    );
-
-    let simplified = simplify_tree_for_js_backend(&lam);
-    let compiled = compiler.compile_expr_tree(&simplified);
-    let rendered = if compiled.prelude.is_empty() {
-        print_expression(&compiled.expr)
-    } else {
-        print_block(&compiled.prelude)
-    };
-    assert_eq!(rendered, "SomeModule.formatDate(date);");
 }
 
 #[test]
@@ -425,7 +246,10 @@ fn lowers_js_send_omits_trailing_optional_undefined_args_like_ocaml() {
         LamLoc::NONE,
     );
 
-    let rendered = print_block(&compiler.compile_program(&lam).block);
+    let rendered = {
+        let p = compiler.compile_program(&lam);
+        print_stmts(&p.arena, &p.block)
+    };
     assert_eq!(rendered, "(42).toString();");
 }
 
@@ -462,7 +286,10 @@ fn lowers_js_new_omits_trailing_optional_undefined_args_like_ocaml() {
         LamLoc::NONE,
     );
 
-    let rendered = print_block(&compiler.compile_program(&lam).block);
+    let rendered = {
+        let p = compiler.compile_program(&lam);
+        print_stmts(&p.arena, &p.block)
+    };
     assert_eq!(rendered, "new RegExp(\"ab+c\");");
 }
 
@@ -509,7 +336,10 @@ fn lowers_external_polyvar_string_and_int_args_like_ocaml() {
         LamLoc::NONE,
     );
 
-    let rendered = print_block(&compiler.compile_program(&lam).block);
+    let rendered = {
+        let p = compiler.compile_program(&lam);
+        print_stmts(&p.arena, &p.block)
+    };
     assert_eq!(rendered, "consume(\"in\", 3);");
 }
 
@@ -542,7 +372,10 @@ fn lowers_external_polyvar_payload_args_to_two_js_args_like_ocaml() {
         LamLoc::NONE,
     );
 
-    let rendered = print_block(&compiler.compile_program(&lam).block);
+    let rendered = {
+        let p = compiler.compile_program(&lam);
+        print_stmts(&p.arena, &p.block)
+    };
     assert_eq!(rendered, "handle(\"renamed\", 2);");
 }
 
@@ -609,36 +442,17 @@ fn lowers_marshaled_constant_args_in_js_call() {
     );
 
     let program = compiler.compile_program(&lam);
-    let [stmt] = program.block.as_slice() else {
-        panic!("expected a single expression statement");
-    };
-    match &stmt.desc {
-        StatementDesc::Exp(Expression {
-            desc: ExpressionDesc::Call(func, args, _),
-            ..
-        }) => {
-            assert!(matches!(
-                func.desc,
-                ExpressionDesc::StaticIndex(_, ref field, _)
-                if field == "somefn"
-            ));
-            assert!(matches!(
-                args.as_slice(),
-                [Expression {
-                    desc: ExpressionDesc::JsonLiteral(txt),
-                    ..
-                }] if txt == "{foo:true}"
-            ));
-        }
-        other => panic!("expected a JS call, got {other:?}"),
-    }
+    expect_dump!(
+        dump::block(&program.arena, &program.block),
+        "Exp(Call[Na](somescope.somefn; Json(\"{foo:true}\")))"
+    );
 }
 
 #[test]
 fn lowers_js_object_create_with_marshaled_fields() {
     let mut compiler = LambdaCompiler::new();
     let name_ident = Ident::create_local("name");
-    let compiled = compiler.compile_expr_tree(&Lambda::prim(
+    let compiled = compiler.compile_expr_lam(&Lambda::prim(
         Primitive::PjsObjectCreate(vec![
             ObjParam {
                 obj_arg_type: Attr::ArgCst(Cst::ArgJsonLit("false".to_string())),
@@ -671,48 +485,16 @@ fn lowers_js_object_create_with_marshaled_fields() {
     ));
 
     assert!(compiled.prelude.is_empty());
-    match &compiled.expr.desc {
-        ExpressionDesc::Object(props) => {
-            assert_eq!(props.len(), 3);
-            assert!(matches!(
-                &props[0],
-                crate::js_ir::ObjectEntry::Property(
-                    PropertyName::Lit(name),
-                    Expression {
-                        desc: ExpressionDesc::JsonLiteral(txt),
-                        ..
-                    },
-                ) if name == "objectMode" && txt == "false"
-            ));
-            assert!(matches!(
-                &props[1],
-                crate::js_ir::ObjectEntry::Property(
-                    PropertyName::Lit(name),
-                    Expression {
-                        desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
-                        ..
-                    },
-                ) if name == "name" && id.same(&name_ident)
-            ));
-            assert!(matches!(
-                &props[2],
-                crate::js_ir::ObjectEntry::Property(
-                    PropertyName::Lit(name),
-                    Expression {
-                        desc: ExpressionDesc::JsonLiteral(txt),
-                        ..
-                    },
-                ) if name == "someOther" && txt == "true"
-            ));
-        }
-        other => panic!("expected an object literal expression, got {other:?}"),
-    }
+    expect_dump!(
+        dump::expr(&compiler.j, compiled.expr),
+        "{\"objectMode\": Json(\"false\"), \"name\": name, \"someOther\": Json(\"true\")}"
+    );
 }
 
 #[test]
 fn lowers_js_object_create_with_polyvar_string_field_like_ocaml() {
     let mut compiler = LambdaCompiler::new();
-    let compiled = compiler.compile_expr_tree(&Lambda::prim(
+    let compiled = compiler.compile_expr_lam(&Lambda::prim(
         Primitive::PjsObjectCreate(vec![ObjParam {
             obj_arg_type: Attr::PolyVarString {
                 descr: vec![
@@ -729,28 +511,16 @@ fn lowers_js_object_create_with_polyvar_string_field_like_ocaml() {
     ));
 
     assert!(compiled.prelude.is_empty());
-    match &compiled.expr.desc {
-        ExpressionDesc::Object(props) => {
-            assert_eq!(props.len(), 1);
-            assert!(matches!(
-                &props[0],
-                crate::js_ir::ObjectEntry::Property(
-                    PropertyName::Lit(name),
-                    Expression {
-                        desc: ExpressionDesc::Str(txt),
-                        ..
-                    },
-                ) if name == "localeMatcher" && txt == "best fit"
-            ));
-        }
-        other => panic!("expected an object literal expression, got {other:?}"),
-    }
+    expect_dump!(
+        dump::expr(&compiler.j, compiled.expr),
+        "{\"localeMatcher\": \"best fit\"}"
+    );
 }
 
 #[test]
 fn lowers_js_object_create_with_optional_polyvar_string_field_inline_like_ocaml() {
     let mut compiler = LambdaCompiler::new();
-    let compiled = compiler.compile_expr_tree(&Lambda::prim(
+    let compiled = compiler.compile_expr_lam(&Lambda::prim(
         Primitive::PjsObjectCreate(vec![ObjParam {
             obj_arg_type: Attr::PolyVarString {
                 descr: vec![
@@ -772,63 +542,38 @@ fn lowers_js_object_create_with_optional_polyvar_string_field_inline_like_ocaml(
     ));
 
     assert!(compiled.prelude.is_empty());
-    match &compiled.expr.desc {
-        ExpressionDesc::Object(props) => {
-            assert_eq!(props.len(), 1);
-            assert!(matches!(
-                &props[0],
-                crate::js_ir::ObjectEntry::Property(
-                    PropertyName::Lit(name),
-                    Expression {
-                        desc: ExpressionDesc::Str(txt),
-                        ..
-                    },
-                ) if name == "day" && txt == "2-digit"
-            ));
-        }
-        other => panic!("expected an object literal expression, got {other:?}"),
-    }
+    expect_dump!(
+        dump::expr(&compiler.j, compiled.expr),
+        "{\"day\": \"2-digit\"}"
+    );
 }
 
 #[test]
 fn bind_switch_scrutinee_once_uses_tmp_name_like_ocaml() {
     let mut compiler = LambdaCompiler::new();
-    let (prelude, expr) = compiler.bind_switch_scrutinee_once(
-        vec![],
-        Expression::call(
-            Expression::var(Ident::create_local("compute")),
-            vec![Expression::number(Number::int(1))],
+    let (prelude, expr) = {
+        let a0 = vec![];
+        let a1 = JE::call(
+            JE::var(Ident::create_local("compute"), &mut compiler.j),
+            &[JE::number(Number::int(1), &mut compiler.j)],
             CallInfo::default(),
-        ),
+            &mut compiler.j,
+        );
+        compiler.bind_switch_scrutinee_once(a0, a1)
+    };
+
+    expect_dump!(dump::expr(&compiler.j, expr), "tmp");
+
+    expect_dump!(
+        dump::block(&compiler.j, &prelude),
+        "let[Strict] tmp = Call[Na](compute; 1)"
     );
-
-    let ExpressionDesc::Var(crate::js_ir::VIdent::Id(tmp_ident)) = &expr.desc else {
-        panic!("expected the bound scrutinee expression to become a temp variable");
-    };
-    assert_eq!(tmp_ident.name(), "tmp");
-
-    let [stmt] = prelude.as_slice() else {
-        panic!("expected a single temp binding statement");
-    };
-    match &stmt.desc {
-        StatementDesc::Variable(VariableDeclaration { ident, value, .. }) => {
-            assert!(ident.same(tmp_ident));
-            assert!(matches!(
-                value,
-                Some(Expression {
-                    desc: ExpressionDesc::Call(_, _, _),
-                    ..
-                })
-            ));
-        }
-        other => panic!("expected a temp variable declaration, got {other:?}"),
-    }
 }
 
 #[test]
 fn lowers_js_object_create_with_statically_present_optional_field_inline_like_ocaml() {
     let mut compiler = LambdaCompiler::new();
-    let compiled = compiler.compile_expr_tree(&Lambda::prim(
+    let compiled = compiler.compile_expr_lam(&Lambda::prim(
         Primitive::PjsObjectCreate(vec![ObjParam {
             obj_arg_type: Attr::Nothing,
             obj_arg_label: Label::ObjOptional {
@@ -845,29 +590,14 @@ fn lowers_js_object_create_with_statically_present_optional_field_inline_like_oc
     ));
 
     assert!(compiled.prelude.is_empty());
-    match &compiled.expr.desc {
-        ExpressionDesc::Object(props) => {
-            assert_eq!(props.len(), 1);
-            assert!(matches!(
-                &props[0],
-                crate::js_ir::ObjectEntry::Property(
-                    PropertyName::Lit(name),
-                    Expression {
-                        desc: ExpressionDesc::Str(txt),
-                        ..
-                    },
-                ) if name == "alt" && txt == "pic"
-            ));
-        }
-        other => panic!("expected an inline object literal expression, got {other:?}"),
-    }
+    expect_dump!(dump::expr(&compiler.j, compiled.expr), "{\"alt\": \"pic\"}");
 }
 
 #[test]
 fn lowers_js_object_create_with_unknown_optional_field_to_conditional_assignment_like_ocaml() {
     let mut compiler = LambdaCompiler::new();
     let opt = Ident::create_local("opt");
-    let compiled = compiler.compile_expr_tree(&Lambda::prim(
+    let compiled = compiler.compile_expr_lam(&Lambda::prim(
         Primitive::PjsObjectCreate(vec![ObjParam {
             obj_arg_type: Attr::Nothing,
             obj_arg_label: Label::ObjOptional {
@@ -879,92 +609,18 @@ fn lowers_js_object_create_with_unknown_optional_field_to_conditional_assignment
         LamLoc::NONE,
     ));
 
-    let ExpressionDesc::Var(crate::js_ir::VIdent::Id(obj)) = &compiled.expr.desc else {
-        panic!("expected the conditional path to return the temp object");
-    };
+    expect_dump!(dump::expr(&compiler.j, compiled.expr), "tmp");
 
-    let [init_stmt, if_stmt] = compiled.prelude.as_slice() else {
-        panic!("expected object init plus one conditional assignment");
-    };
-
-    match &init_stmt.desc {
-        StatementDesc::Variable(VariableDeclaration {
-            ident,
-            value:
-                Some(Expression {
-                    desc: ExpressionDesc::Object(props),
-                    ..
-                }),
-            ..
-        }) => {
-            assert!(ident.same(obj));
-            assert!(props.is_empty());
-        }
-        other => panic!("expected an empty object temp, got {other:?}"),
-    }
-
-    match &if_stmt.desc {
-        StatementDesc::If(cond, then_block, else_block) => {
-            assert!(else_block.is_empty());
-            assert!(matches!(
-                &cond.desc,
-                ExpressionDesc::Bin(
-                    BinOp::NotEqEq,
-                    left,
-                    right,
-                ) if matches!(
-                    left.as_ref(),
-                    Expression {
-                        desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
-                        ..
-                    } if id.same(&opt)
-                ) && matches!(
-                    right.as_ref(),
-                    Expression {
-                        desc: ExpressionDesc::Undefined { is_unit: false },
-                        ..
-                    }
-                )
-            ));
-
-            let [assign_stmt] = then_block.as_slice() else {
-                panic!("expected one conditional assignment");
-            };
-            match &assign_stmt.desc {
-                StatementDesc::Exp(Expression {
-                    desc: ExpressionDesc::Bin(BinOp::Eq, target, value),
-                    ..
-                }) => {
-                    assert!(matches!(
-                        target.as_ref(),
-                        Expression {
-                            desc: ExpressionDesc::StaticIndex(target_obj, field, _),
-                            ..
-                        } if field == "alt"
-                            && matches!(
-                                target_obj.as_ref(),
-                                Expression {
-                                    desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
-                                    ..
-                                } if id.same(obj)
-                            )
-                    ));
-                    assert_eq!(
-                        print_expression(value),
-                        "Primitive_option.valFromOption(opt)"
-                    );
-                }
-                other => panic!("expected an object-field assignment, got {other:?}"),
-            }
-        }
-        other => panic!("expected a conditional optional assignment, got {other:?}"),
-    }
+    expect_dump!(
+        dump::block(&compiler.j, &compiled.prelude),
+        "let[Variable] tmp = {}; If(NotEqEq(opt, undefined)) {Exp(Eq(tmp.alt, Call[BuiltinRuntime,full](Primitive_option.valFromOption<Runtime>; opt)))} else {}"
+    );
 }
 
 #[test]
 fn lowers_js_object_create_with_nonduplicable_optional_field_after_object_temp_like_ocaml() {
     let mut compiler = LambdaCompiler::new();
-    let compiled = compiler.compile_expr_tree(&Lambda::prim(
+    let compiled = compiler.compile_expr_lam(&Lambda::prim(
         Primitive::PjsObjectCreate(vec![ObjParam {
             obj_arg_type: Attr::Nothing,
             obj_arg_label: Label::ObjOptional {
@@ -983,108 +639,12 @@ fn lowers_js_object_create_with_nonduplicable_optional_field_after_object_temp_l
         LamLoc::NONE,
     ));
 
-    let ExpressionDesc::Var(crate::js_ir::VIdent::Id(obj)) = &compiled.expr.desc else {
-        panic!("expected the conditional path to return the temp object");
-    };
-    assert_eq!(obj.name(), "tmp");
+    expect_dump!(dump::expr(&compiler.j, compiled.expr), "tmp");
 
-    let [init_stmt, arg_stmt, if_stmt] = compiled.prelude.as_slice() else {
-        panic!("expected object init, prepared arg temp, and one conditional assignment");
-    };
-
-    match &init_stmt.desc {
-        StatementDesc::Variable(VariableDeclaration {
-            ident,
-            value:
-                Some(Expression {
-                    desc: ExpressionDesc::Object(props),
-                    ..
-                }),
-            property,
-            ..
-        }) => {
-            assert!(ident.same(obj));
-            assert_eq!(*property, LetKind::Variable);
-            assert!(props.is_empty());
-        }
-        other => panic!("expected an empty object temp, got {other:?}"),
-    }
-
-    let prepared = match &arg_stmt.desc {
-        StatementDesc::Variable(VariableDeclaration {
-            ident,
-            value:
-                Some(Expression {
-                    desc:
-                        ExpressionDesc::RawJsCode(crate::js_ir::JsRawInfo {
-                            code,
-                            is_stmt: false,
-                        }),
-                    ..
-                }),
-            property,
-            ..
-        }) => {
-            assert_eq!(code, "computeOption()");
-            assert_eq!(*property, LetKind::Strict);
-            assert!(!ident.same(obj));
-            *ident
-        }
-        other => panic!("expected the prepared optional-value temp, got {other:?}"),
-    };
-
-    match &if_stmt.desc {
-        StatementDesc::If(cond, then_block, else_block) => {
-            assert!(else_block.is_empty());
-            assert!(matches!(
-                &cond.desc,
-                ExpressionDesc::Bin(
-                    BinOp::NotEqEq,
-                    left,
-                    right,
-                ) if matches!(
-                    left.as_ref(),
-                    Expression {
-                        desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
-                        ..
-                    } if id.same(&prepared)
-                ) && matches!(
-                    right.as_ref(),
-                    Expression {
-                        desc: ExpressionDesc::Undefined { is_unit: false },
-                        ..
-                    }
-                )
-            ));
-
-            let [assign_stmt] = then_block.as_slice() else {
-                panic!("expected one conditional assignment");
-            };
-            match &assign_stmt.desc {
-                StatementDesc::Exp(Expression {
-                    desc: ExpressionDesc::Bin(BinOp::Eq, target, _value),
-                    ..
-                }) => {
-                    assert!(matches!(
-                        target.as_ref(),
-                        Expression {
-                            desc: ExpressionDesc::StaticIndex(target_obj, field, _),
-                            ..
-                        } if field == "alt"
-                            && matches!(
-                                target_obj.as_ref(),
-                                Expression {
-                                    desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
-                                    ..
-                                } if id.same(obj)
-                            )
-                    ));
-                }
-                other => panic!("expected an object-field assignment, got {other:?}"),
-            }
-        }
-        other => panic!("expected a conditional optional assignment, got {other:?}"),
-    }
+    expect_dump!(
+        dump::block(&compiler.j, &compiled.prelude),
+        "let[Variable] tmp = {}; let[Strict] tmp#1 = Raw(\"computeOption()\"); If(NotEqEq(tmp#1, undefined)) {Exp(Eq(tmp.alt, Call[BuiltinRuntime,full](Primitive_option.valFromOption<Runtime>; tmp#1)))} else {}"
+    );
 }
 
 #[test]
@@ -1130,133 +690,16 @@ fn lowers_ignored_js_call_args_to_ocaml_sequence_effects() {
         LamLoc::NONE,
     );
 
-    let compiled = compiler.compile_expr_tree(&lam);
+    let compiled = compiler.compile_expr_lam(&lam);
     assert!(
         compiled.prelude.is_empty(),
         "expected ignored-call effects to stay in the expression, got {:?}",
         compiled.prelude
     );
-    let ExpressionDesc::Seq(left, call) = &compiled.expr.desc else {
-        panic!("expected outer effect sequence, got {:?}", compiled.expr);
-    };
-    let ExpressionDesc::Seq(effect, kind) = &left.as_ref().desc else {
-        panic!("expected nested ignored-arg sequence, got {:?}", left);
-    };
-    assert!(matches!(
-        effect.as_ref(),
-        Expression {
-            desc: ExpressionDesc::RawJsCode(crate::js_ir::JsRawInfo {
-                code,
-                is_stmt: false,
-            }),
-            ..
-        } if code == "sideEffect()"
-    ));
-    assert!(matches!(
-        kind.as_ref(),
-        Expression {
-            desc: ExpressionDesc::Str(txt),
-            ..
-        } if txt == "Float"
-    ));
-    match &call.as_ref().desc {
-        ExpressionDesc::Call(func, args, _) => {
-            assert!(matches!(func.as_ref().desc, ExpressionDesc::Var(_)));
-            assert!(matches!(
-                args.as_slice(),
-                [Expression {
-                    desc: ExpressionDesc::Number(Number::Int { i: 3, .. }),
-                    ..
-                }]
-            ));
-        }
-        other => panic!("expected a call expression, got {other:?}"),
-    };
-}
-
-#[test]
-#[ignore = "stale internal shape expectation; covered by strict lambda/JS parity gates"]
-fn lowers_ignored_js_object_fields_to_ocaml_sequence_effects() {
-    let mut compiler = LambdaCompiler::new();
-    let lam = Lambda::prim(
-        Primitive::PjsObjectCreate(vec![
-            ObjParam {
-                obj_arg_type: Attr::Ignore,
-                obj_arg_label: Label::ObjLabel {
-                    name: "kind".to_string(),
-                },
-            },
-            ObjParam {
-                obj_arg_type: Attr::Nothing,
-                obj_arg_label: Label::ObjLabel {
-                    name: "hi".to_string(),
-                },
-            },
-        ]),
-        vec![
-            Lambda::Lsequence(
-                Box::new(Lambda::prim(
-                    Primitive::PrawJsCode(JsRawInfo {
-                        code: "sideEffect()".to_string(),
-                        is_stmt: false,
-                    }),
-                    vec![],
-                    LamLoc::NONE,
-                )),
-                Box::new(Lambda::const_(Constant::string("Float"))),
-            ),
-            Lambda::const_(Constant::int(3)),
-        ],
-        LamLoc::NONE,
+    expect_dump!(
+        dump::expr(&compiler.j, compiled.expr),
+        "Seq(Seq(Raw(\"sideEffect()\"), \"Float\"), Call[Na](somefn; 3))"
     );
-
-    let compiled = compiler.compile_expr_tree(&lam);
-    assert!(
-        compiled.prelude.is_empty(),
-        "expected ignored-object effects to stay in the expression, got {:?}",
-        compiled.prelude
-    );
-    let ExpressionDesc::Seq(left, object) = &compiled.expr.desc else {
-        panic!("expected outer effect sequence, got {:?}", compiled.expr);
-    };
-    assert!(matches!(
-        left.as_ref(),
-        Expression {
-            desc: ExpressionDesc::Seq(effect, kind),
-            ..
-        } if matches!(
-            effect.as_ref(),
-            Expression {
-                desc: ExpressionDesc::RawJsCode(crate::js_ir::JsRawInfo {
-                    code,
-                    is_stmt: false,
-                }),
-                ..
-            } if code == "sideEffect()"
-        ) && matches!(
-            kind.as_ref(),
-            Expression {
-                desc: ExpressionDesc::Str(txt),
-                ..
-            } if txt == "Float"
-        )
-    ));
-    match &object.as_ref().desc {
-        ExpressionDesc::Object(props) => {
-            assert_eq!(props.len(), 1);
-            assert!(matches!(
-                &props[0],
-                crate::js_ir::ObjectEntry::Property(
-                    PropertyName::Lit(name),
-                    Expression {
-                        desc: ExpressionDesc::Number(Number::Int { i: 3, .. }),
-                        ..
-                    },
-                ) if name == "hi"
-            ));
-        }
-        other => panic!("expected an object literal expression, got {other:?}"),
-    };
 }
 
 #[test]
@@ -1292,78 +735,69 @@ fn compile_deps_program_keeps_exported_dict_initializer_object_literals() {
 
     let deps = compiler.compile_deps_program(&lam);
 
-    let [stmt] = deps.program.block.as_slice() else {
-        panic!("expected one exported dict binding");
-    };
-    match &stmt.desc {
-        StatementDesc::Variable(VariableDeclaration {
-            ident,
-            value:
-                Some(Expression {
-                    desc: ExpressionDesc::Object(props),
-                    ..
-                }),
-            ..
-        }) => {
-            assert!(ident.same(&dict_ident));
-            assert_eq!(props.len(), 1);
-            assert!(matches!(
-                &props[0],
-                crate::js_ir::ObjectEntry::Property(
-                    PropertyName::Lit(name),
-                    Expression {
-                        desc: ExpressionDesc::Str(txt),
-                        ..
-                    },
-                ) if name == "first" && txt == "hello"
-            ));
-        }
-        other => panic!("expected exported dict object literal, got {other:?}"),
-    }
+    expect_dump!(
+        dump::block(&deps.program.arena, &deps.program.block),
+        "let[StrictOpt,Exported] stringDict = {\"first\": \"hello\"}"
+    );
 }
 
 #[test]
 fn compile_dict_has_primitive_emits_in_operator_like_ocaml() {
     let mut compiler = LambdaCompiler::new();
     let dict = Ident::create_local("dict");
-    let compiled = compiler.compile_expr_tree(&Lambda::prim(
+    let compiled = compiler.compile_expr_lam(&Lambda::prim(
         Primitive::PdictHas,
         vec![Lambda::var(dict), Lambda::const_(Constant::string("key1"))],
         LamLoc::NONE,
     ));
 
     assert!(compiled.prelude.is_empty());
-    assert_eq!(print_expression(&compiled.expr), "\"key1\" in dict");
+    assert_eq!(print_expr(&compiler.j, compiled.expr), "\"key1\" in dict");
 }
 
 #[test]
 fn js_pass_pipeline_preserves_dict_has_in_operator_through_typeof() {
+    let mut j = JsArena::new();
     let dict = Ident::create_local("dict");
     let result = Ident::create_local("result");
     let deps = apply_js_shake_pass(apply_js_flatten_and_mark_dead_pass(
         apply_js_tailcall_inline_pass(apply_external_shadow_pass(apply_js_flatten_pass(
             DepsProgram {
-                program: Program::new(
+                program: Program::new_in(
                     vec![
-                        Statement::variable(VariableDeclaration {
-                            ident: dict,
-                            value: Some(Expression::new(ExpressionDesc::Object(vec![]))),
-                            property: LetKind::Strict,
-                            ident_info: IdentInfo::default(),
-                        }),
-                        Statement::variable(VariableDeclaration {
-                            ident: result,
-                            value: Some(Expression::new(ExpressionDesc::Typeof(Box::new(
-                                Expression::new(ExpressionDesc::In(
-                                    Box::new(Expression::string("key1")),
-                                    Box::new(Expression::var(dict)),
+                        JS::variable(
+                            VarDecl {
+                                ident: dict,
+                                value: Some(JE::new(
+                                    ExprKind::Object(test_props(vec![], &mut j)),
+                                    &mut j,
                                 )),
-                            )))),
-                            property: LetKind::Strict,
-                            ident_info: IdentInfo::default(),
-                        }),
+                                property: LetKind::Strict,
+                                ident_info: IdentInfo::default(),
+                            },
+                            &mut j,
+                        ),
+                        JS::variable(
+                            VarDecl {
+                                ident: result,
+                                value: Some(JE::new(
+                                    ExprKind::Typeof(JE::new(
+                                        ExprKind::In(
+                                            JE::string("key1", &mut j),
+                                            JE::var(dict, &mut j),
+                                        ),
+                                        &mut j,
+                                    )),
+                                    &mut j,
+                                )),
+                                property: LetKind::Strict,
+                                ident_info: IdentInfo::default(),
+                            },
+                            &mut j,
+                        ),
                     ],
                     vec![result],
+                    std::mem::take(&mut j),
                 ),
                 modules: vec![],
                 side_effect: None,
@@ -1434,26 +868,30 @@ fn dynamic_import_only_possible_required_modules_still_mark_effects_like_ocaml()
 
 #[test]
 fn required_modules_skip_dead_pure_external_bindings_like_printer() {
-    let compiler = LambdaCompiler::new();
+    let mut compiler = LambdaCompiler::new();
     let mut dead_info = IdentInfo::default();
     dead_info.used_stats = UsedStats::DeadPure;
-    let block = vec![Statement::variable(VariableDeclaration {
-        ident: Ident::create_local("dead_external"),
-        value: Some(Expression::qualified(
-            ModuleId {
-                id: Ident::create_local("X"),
-                kind: Kind::External {
-                    name: "./x".to_string(),
-                    default: false,
-                    import_attributes: None,
+    let block = vec![JS::variable(
+        VarDecl {
+            ident: Ident::create_local("dead_external"),
+            value: Some(JE::qualified(
+                ModuleId {
+                    id: Ident::create_local("X"),
+                    kind: Kind::External {
+                        name: "./x".to_string(),
+                        default: false,
+                        import_attributes: None,
+                    },
+                    dynamic_import: false,
                 },
-                dynamic_import: false,
-            },
-            Some("x".to_string()),
-        )),
-        property: LetKind::StrictOpt,
-        ident_info: dead_info,
-    })];
+                Some("x".to_string()),
+                &mut compiler.j,
+            )),
+            property: LetKind::StrictOpt,
+            ident_info: dead_info,
+        },
+        &mut compiler.j,
+    )];
 
     let modules = compiler.collect_required_modules(&block);
 
@@ -1465,32 +903,40 @@ fn required_modules_skip_dead_pure_external_bindings_like_printer() {
 
 #[test]
 fn sorts_external_module_dependencies_by_module_name() {
-    let compiler = LambdaCompiler::new();
+    let mut compiler = LambdaCompiler::new();
     let block = vec![
-        Statement::exp(Expression::qualified(
-            ModuleId {
-                id: Ident::create_persistent("JsxRuntime"),
-                kind: Kind::External {
-                    name: "react/jsx-runtime".to_string(),
-                    default: false,
-                    import_attributes: None,
+        JS::exp(
+            JE::qualified(
+                ModuleId {
+                    id: Ident::create_persistent("JsxRuntime"),
+                    kind: Kind::External {
+                        name: "react/jsx-runtime".to_string(),
+                        default: false,
+                        import_attributes: None,
+                    },
+                    dynamic_import: false,
                 },
-                dynamic_import: false,
-            },
-            None,
-        )),
-        Statement::exp(Expression::qualified(
-            ModuleId {
-                id: Ident::create_persistent("ReactIntl"),
-                kind: Kind::External {
-                    name: "react-intl".to_string(),
-                    default: false,
-                    import_attributes: None,
+                None,
+                &mut compiler.j,
+            ),
+            &mut compiler.j,
+        ),
+        JS::exp(
+            JE::qualified(
+                ModuleId {
+                    id: Ident::create_persistent("ReactIntl"),
+                    kind: Kind::External {
+                        name: "react-intl".to_string(),
+                        default: false,
+                        import_attributes: None,
+                    },
+                    dynamic_import: false,
                 },
-                dynamic_import: false,
-            },
-            None,
-        )),
+                None,
+                &mut compiler.j,
+            ),
+            &mut compiler.j,
+        ),
     ];
 
     let modules = compiler.collect_required_modules(&block);
@@ -1502,28 +948,36 @@ fn sorts_external_module_dependencies_by_module_name() {
 
 #[test]
 fn sorts_required_modules_by_length_before_bytes() {
-    let compiler = LambdaCompiler::new();
+    let mut compiler = LambdaCompiler::new();
     let block = vec![
-        Statement::exp(Expression::qualified(
-            ModuleId {
-                id: Ident::create_persistent("Test_utils"),
-                kind: Kind::Ml,
-                dynamic_import: false,
-            },
-            None,
-        )),
-        Statement::exp(Expression::qualified(
-            ModuleId {
-                id: Ident::create_persistent("Mocha"),
-                kind: Kind::External {
-                    name: "mocha".to_string(),
-                    default: false,
-                    import_attributes: None,
+        JS::exp(
+            JE::qualified(
+                ModuleId {
+                    id: Ident::create_persistent("Test_utils"),
+                    kind: Kind::Ml,
+                    dynamic_import: false,
                 },
-                dynamic_import: false,
-            },
-            None,
-        )),
+                None,
+                &mut compiler.j,
+            ),
+            &mut compiler.j,
+        ),
+        JS::exp(
+            JE::qualified(
+                ModuleId {
+                    id: Ident::create_persistent("Mocha"),
+                    kind: Kind::External {
+                        name: "mocha".to_string(),
+                        default: false,
+                        import_attributes: None,
+                    },
+                    dynamic_import: false,
+                },
+                None,
+                &mut compiler.j,
+            ),
+            &mut compiler.j,
+        ),
     ];
 
     let modules = compiler.collect_required_modules(&block);
@@ -1535,7 +989,7 @@ fn sorts_required_modules_by_length_before_bytes() {
 
 #[test]
 fn required_modules_match_ocaml_sort_across_same_name_import_pairs() {
-    let compiler = LambdaCompiler::new();
+    let mut compiler = LambdaCompiler::new();
     let some_default = ModuleId {
         id: Ident::create_local("SomeEs6Module"),
         kind: Kind::External {
@@ -1582,20 +1036,34 @@ fn required_modules_match_ocaml_sort_across_same_name_import_pairs() {
         dynamic_import: false,
     };
     let block = vec![
-        Statement::exp(Expression::qualified(some_default.clone(), None)),
-        Statement::exp(Expression::qualified(
-            some_namespace.clone(),
-            Some("default2".to_string()),
-        )),
-        Statement::exp(Expression::qualified(ome_default.clone(), None)),
-        Statement::exp(Expression::qualified(
-            ome_namespace.clone(),
-            Some("default2".to_string()),
-        )),
-        Statement::exp(Expression::qualified(
-            vscode.clone(),
-            Some("window".to_string()),
-        )),
+        JS::exp(
+            JE::qualified(some_default.clone(), None, &mut compiler.j),
+            &mut compiler.j,
+        ),
+        JS::exp(
+            JE::qualified(
+                some_namespace.clone(),
+                Some("default2".to_string()),
+                &mut compiler.j,
+            ),
+            &mut compiler.j,
+        ),
+        JS::exp(
+            JE::qualified(ome_default.clone(), None, &mut compiler.j),
+            &mut compiler.j,
+        ),
+        JS::exp(
+            JE::qualified(
+                ome_namespace.clone(),
+                Some("default2".to_string()),
+                &mut compiler.j,
+            ),
+            &mut compiler.j,
+        ),
+        JS::exp(
+            JE::qualified(vscode.clone(), Some("window".to_string()), &mut compiler.j),
+            &mut compiler.j,
+        ),
     ];
 
     let modules = compiler.collect_required_modules(&block);
@@ -1733,61 +1201,6 @@ fn module_side_effect_reason_keeps_empty_reason_for_impure_nops() {
 }
 
 #[test]
-#[ignore = "stale internal shape expectation; covered by strict lambda/JS parity gates"]
-fn resolves_runtime_dynamic_import_to_string_path() {
-    let runtime = tempdir().expect("failed to create runtime tempdir");
-    let runtime_ocaml = runtime.path().join("lib").join("ocaml");
-    fs::create_dir_all(&runtime_ocaml).expect("failed to create runtime ocaml dir");
-    fs::write(runtime_ocaml.join("Belt_List.cmi"), []).expect("failed to stub runtime cmi");
-
-    let project = tempdir().expect("failed to create project tempdir");
-    let source = project.path().join("src").join("Import.res");
-    let output = project.path().join("src").join("Import.mjs");
-
-    let resolver = ModulePathResolver::from_compile_options(
-        Some(source.to_str().expect("utf8 source path")),
-        Some(output.as_path()),
-        None,
-        None,
-        Some(runtime.path()),
-        None,
-        false,
-    );
-    let mut compiler = LambdaCompiler::with_module_path_resolver(Some(resolver));
-    let program = compiler.compile_program(&Lambda::prim(
-        Primitive::Pimport(Box::new(ImportSource::ImportModule {
-            module_: Ident::create_persistent("Belt_List"),
-            path: vec![],
-        })),
-        vec![],
-        LamLoc::NONE,
-    ));
-
-    let [stmt] = program.block.as_slice() else {
-        panic!("expected a single import expression statement");
-    };
-    match &stmt.desc {
-        StatementDesc::Exp(Expression {
-            desc: ExpressionDesc::Call(func, args, _),
-            ..
-        }) => {
-            assert!(matches!(
-                func.desc,
-                ExpressionDesc::Var(crate::js_ir::VIdent::Id(ref id)) if id.name() == "import"
-            ));
-            assert!(matches!(
-                args.as_slice(),
-                [Expression {
-                    desc: ExpressionDesc::Str(txt),
-                    ..
-                }] if txt == "@rescript/runtime/lib/es6/Belt_List.js"
-            ));
-        }
-        other => panic!("expected import(\"...\") call, got {other:?}"),
-    }
-}
-
-#[test]
 fn resolves_local_module_paths_from_ast_metadata() {
     let project = tempdir().expect("failed to create project tempdir");
     let source_dir = project.path().join("src");
@@ -1857,75 +1270,35 @@ fn lowers_nullable_predicates_to_js_null_checks() {
     let mut compiler = LambdaCompiler::new();
     let value = Ident::create_local("value");
 
-    let null_compiled = compiler.compile_expr_tree(&Lambda::prim(
+    let null_compiled = compiler.compile_expr_lam(&Lambda::prim(
         Primitive::PisNull,
         vec![Lambda::var(value)],
         LamLoc::NONE,
     ));
-    let undefined_compiled = compiler.compile_expr_tree(&Lambda::prim(
+    let undefined_compiled = compiler.compile_expr_lam(&Lambda::prim(
         Primitive::PisUndefined,
         vec![Lambda::var(value)],
         LamLoc::NONE,
     ));
-    let nullable_compiled = compiler.compile_expr_tree(&Lambda::prim(
+    let nullable_compiled = compiler.compile_expr_lam(&Lambda::prim(
         Primitive::PisNullUndefined,
         vec![Lambda::var(value)],
         LamLoc::NONE,
     ));
 
     assert!(null_compiled.prelude.is_empty());
-    match &null_compiled.expr.desc {
-        ExpressionDesc::Bin(BinOp::EqEqEq, left, right) => {
-            assert!(matches!(
-                left.as_ref(),
-                Expression {
-                    desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
-                    ..
-                } if id.same(&value)
-            ));
-            assert!(matches!(
-                right.as_ref(),
-                Expression {
-                    desc: ExpressionDesc::Null,
-                    ..
-                }
-            ));
-        }
-        other => panic!("expected `value === null`, got {other:?}"),
-    }
-
-    assert!(undefined_compiled.prelude.is_empty());
-    match &undefined_compiled.expr.desc {
-        ExpressionDesc::Bin(BinOp::EqEqEq, left, right) => {
-            assert!(matches!(
-                left.as_ref(),
-                Expression {
-                    desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
-                    ..
-                } if id.same(&value)
-            ));
-            assert!(matches!(
-                right.as_ref(),
-                Expression {
-                    desc: ExpressionDesc::Undefined { .. },
-                    ..
-                }
-            ));
-        }
-        other => panic!("expected `value === undefined`, got {other:?}"),
-    }
-
+    expect_dump!(
+        dump::expr(&compiler.j, null_compiled.expr),
+        "EqEqEq(value, null)"
+    );
+    expect_dump!(
+        dump::expr(&compiler.j, undefined_compiled.expr),
+        "EqEqEq(value, undefined)"
+    );
+    expect_dump!(
+        dump::expr(&compiler.j, nullable_compiled.expr),
+        "IsNullOrUndefined(value)"
+    );
     assert!(nullable_compiled.prelude.is_empty());
-    match &nullable_compiled.expr.desc {
-        ExpressionDesc::IsNullOrUndefined(inner) => {
-            assert!(matches!(
-                inner.as_ref(),
-                Expression {
-                    desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
-                    ..
-                } if id.same(&value)
-            ));
-        }
-        other => panic!("expected `value == null`, got {other:?}"),
-    }
+    assert!(undefined_compiled.prelude.is_empty());
 }

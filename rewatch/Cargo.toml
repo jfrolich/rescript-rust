@@ -4,6 +4,12 @@ version = "13.0.0-alpha.7"
 edition = "2024"
 rust-version = "1.91"
 
+# The `rescript` executable is the `cli` package, so its build script can use
+# this library to compile the runtime into it.
+[workspace]
+members = ["cli"]
+default-members = [".", "cli"]
+
 [dependencies]
 ahash = "0.8.3"
 anyhow = "1.0.93"

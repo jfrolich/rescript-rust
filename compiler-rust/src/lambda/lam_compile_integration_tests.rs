@@ -887,3 +887,16 @@ fn internal_unused_test_omits_dead_private_relative_external_import_like_ocaml()
         "expected checked-in runtime import to remain, got:\n{output}"
     );
 }
+
+#[test]
+fn iterator_effect_only_match_drops_its_unused_result_binding() {
+    let source = r#"
+let iterator: IterableIterator.t<string, unit, unit> = %raw(`['a', 'b'][Symbol.iterator]()`)
+switch iterator->IterableIterator.next {
+| Yield({value: "a"}) => ()
+| _ => ()
+}
+"#;
+    let output = compile_test_source_to_js(source, "iterator_effect_only.res").unwrap();
+    assert!(!output.contains("let match"), "{output}");
+}

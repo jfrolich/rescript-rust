@@ -658,7 +658,7 @@ impl<'a> RawLambdaConverter<'a> {
         let wrapped = rb.let_(
             crate::lambda::lam_compat::LetKind::StrictOpt,
             id,
-            crate::raw_lambda::lower::wrap_exn_raw(rb, LamLoc::NONE, rb.var(raw_id.clone())),
+            crate::raw_lambda::lower::wrap_exn_raw(rb, LamLoc::NONE, rb.var(raw_id)),
             handler,
         );
         (raw_id, wrapped)
@@ -974,7 +974,7 @@ impl<'a> RawLambdaConverter<'a> {
     ) -> Option<crate::types::Path> {
         rootpath
             .as_ref()
-            .map(|path| crate::types::Path::pdot(path.clone(), field.name().to_string()))
+            .map(|path| crate::types::Path::pdot(*path, field.name().to_string()))
     }
 
     /// Find an inline-style attribute, matching OCaml's
@@ -1203,9 +1203,9 @@ impl<'a> RawLambdaConverter<'a> {
         rootpath: &Option<crate::types::Path>,
         param: &Ident,
     ) -> Option<crate::types::Path> {
-        rootpath.as_ref().map(|path| {
-            crate::types::Path::papply(path.clone(), crate::types::Path::pident(*param))
-        })
+        rootpath
+            .as_ref()
+            .map(|path| crate::types::Path::papply(*path, crate::types::Path::pident(*param)))
     }
 
     fn transl_extension_constructor_raw(
@@ -1265,7 +1265,7 @@ impl<'a> RawLambdaConverter<'a> {
     }
 
     fn type_desc(&self, ty: TypeExprRef) -> TypeDesc {
-        (*self.type_ctx.get_desc(self.type_ctx.repr(ty))).clone()
+        (*self.type_ctx.get_desc(self.type_ctx.repr(ty)))
     }
 
     fn is_function_type_with_env(
@@ -2731,7 +2731,7 @@ impl<'a> RawLambdaConverter<'a> {
                     }
                 }
                 RecordRepresentation::RecordUnboxed(_) => match elems.as_slice() {
-                    [value] => value.clone(),
+                    [value] => *value,
                     _ => rb.unit(),
                 },
                 RecordRepresentation::RecordInlined {
@@ -3282,7 +3282,7 @@ impl<'a> RawLambdaConverter<'a> {
                 if force_root {
                     self.force_persistent_normalized_prefix(env, id);
                 }
-                path.clone()
+                *path
             }
         };
 
@@ -3404,7 +3404,7 @@ impl<'a> RawLambdaConverter<'a> {
             ),
             crate::types::path::PathView::Pident(id) => {
                 self.force_persistent_normalized_prefix(env, id);
-                path.clone()
+                *path
             }
         };
 
@@ -3500,8 +3500,8 @@ impl<'a> RawLambdaConverter<'a> {
                 *name,
                 *pos,
             ),
-            crate::types::path::PathView::Pident(_) => path.clone(),
-            crate::types::path::PathView::Papply(_, _) => path.clone(),
+            crate::types::path::PathView::Pident(_) => *path,
+            crate::types::path::PathView::Papply(_, _) => *path,
         }
     }
 
@@ -3702,7 +3702,7 @@ impl<'a> RawLambdaConverter<'a> {
             (coercion, ModuleCoercion::Tcoerce_alias(env, path, inner)) => {
                 ModuleCoercion::Tcoerce_alias(
                     *env,
-                    path.clone(),
+                    *path,
                     Box::new(Self::compose_coercions_raw(coercion, inner)),
                 )
             }
@@ -3822,7 +3822,7 @@ impl<'a> RawLambdaConverter<'a> {
                                         *pos as i32,
                                         FieldDbgInfo::Module { name: name.clone() },
                                     ),
-                                    &[named.clone()],
+                                    &[named],
                                     node_loc,
                                 );
                                 this.apply_coercion_raw(loc, LetKind::Alias, cc, field)
@@ -3841,7 +3841,7 @@ impl<'a> RawLambdaConverter<'a> {
                                         name: name.to_string(),
                                     },
                                 ),
-                                &[named.clone()],
+                                &[named],
                                 node_loc,
                             )
                         },
@@ -4675,11 +4675,11 @@ impl<'a> RawLambdaConverter<'a> {
         for binding in bindings.iter().rev() {
             if let Some((_loc, shape)) = &binding.init {
                 let patch = if Self::shape_is_empty(rb, shape) {
-                    binding.rhs.clone()
+                    binding.rhs
                 } else {
                     rb.prim(
                         Primitive::PupdateMod,
-                        &[shape.clone(), rb.var(binding.id), binding.rhs.clone()],
+                        &[*shape, rb.var(binding.id), binding.rhs],
                         LamLoc::NONE,
                     )
                 };
@@ -4690,7 +4690,7 @@ impl<'a> RawLambdaConverter<'a> {
         // Phase 2: bind_strict - let bindings for modules without shapes
         for binding in bindings.iter().rev() {
             if binding.init.is_none() {
-                result = rb.let_(LetKind::Strict, binding.id, binding.rhs.clone(), result);
+                result = rb.let_(LetKind::Strict, binding.id, binding.rhs, result);
             }
         }
 
@@ -4700,11 +4700,7 @@ impl<'a> RawLambdaConverter<'a> {
                 let init = if Self::shape_is_empty(rb, shape) {
                     rb.unit()
                 } else {
-                    rb.prim(
-                        Primitive::PinitMod,
-                        &[loc.clone(), shape.clone()],
-                        LamLoc::NONE,
-                    )
+                    rb.prim(Primitive::PinitMod, &[*loc, *shape], LamLoc::NONE)
                 };
                 result = rb.let_(LetKind::Strict, binding.id, init, result);
             }
@@ -5879,8 +5875,7 @@ impl<'a> RawLambdaConverter<'a> {
                 rb.let_(LetKind::Alias, *id, scrut, body)
             }
             PatternDesc::Tpat_alias(inner, id, _) => {
-                let inner =
-                    self.bind_irrefutable_pattern_raw(self.ta.pattern(*inner), scrut.clone(), body);
+                let inner = self.bind_irrefutable_pattern_raw(self.ta.pattern(*inner), scrut, body);
                 // OCaml's bind_check: skip binding when scrut is already the same variable
                 if let Some(v) = rb.as_var(scrut) {
                     if v.same(id) {
@@ -6145,12 +6140,9 @@ impl<'a> RawLambdaConverter<'a> {
             PatternDesc::Tpat_construct(_, cstr, args)
                 if constructor_payload_is_unboxed(self.type_ctx, cstr) =>
             {
-                self.ta
-                    .pattern_list(*args)
-                    .first()
-                    .map_or(body.clone(), |arg| {
-                        self.bind_irrefutable_pattern_raw(self.ta.pattern(*arg), scrut, body)
-                    })
+                self.ta.pattern_list(*args).first().map_or(body, |arg| {
+                    self.bind_irrefutable_pattern_raw(self.ta.pattern(*arg), scrut, body)
+                })
             }
             PatternDesc::Tpat_construct(_, cstr, args)
                 if matches!(

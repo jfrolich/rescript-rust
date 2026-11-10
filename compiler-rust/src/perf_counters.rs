@@ -54,9 +54,6 @@ static QUALIFIED_COMPONENT_MISSES: AtomicU64 = AtomicU64::new(0);
 static QUALIFIED_COMPONENT_REGISTERED: AtomicU64 = AtomicU64::new(0);
 static STORED_COMPONENT_CACHED: AtomicU64 = AtomicU64::new(0);
 static STORED_COMPONENT_BUILD_FIND_MODULE: AtomicU64 = AtomicU64::new(0);
-static STORED_COMPONENT_BUILD_PROBE_MODULE_DESCR: AtomicU64 = AtomicU64::new(0);
-static STORED_COMPONENT_PUBLISHED: AtomicU64 = AtomicU64::new(0);
-static STORED_COMPONENT_TRANSIENT: AtomicU64 = AtomicU64::new(0);
 
 
 
@@ -351,9 +348,6 @@ pub fn reset() {
         &QUALIFIED_COMPONENT_REGISTERED,
         &STORED_COMPONENT_CACHED,
         &STORED_COMPONENT_BUILD_FIND_MODULE,
-        &STORED_COMPONENT_BUILD_PROBE_MODULE_DESCR,
-        &STORED_COMPONENT_PUBLISHED,
-        &STORED_COMPONENT_TRANSIENT,
         &TYPE_ITEM_RESOLVE_SCANS,
         &TYPE_ITEM_RESOLVE_SCANNED_ITEMS,
         &TYPE_ITEM_RESOLVE_TYPE_ITEMS,
@@ -466,24 +460,16 @@ pub(crate) fn record_stored_component_cached() {
 ///
 /// Caller must check [`enabled`] before calling this hot-path helper.
 #[inline]
-pub(crate) fn record_stored_component_build(mode: ComponentLookupApi, published: bool) {
+pub(crate) fn record_stored_component_build(mode: ComponentLookupApi) {
     match mode {
         ComponentLookupApi::FindModule => {
             STORED_COMPONENT_BUILD_FIND_MODULE.fetch_add(1, Ordering::Relaxed);
-        }
-        ComponentLookupApi::ProbeModuleDescr => {
-            STORED_COMPONENT_BUILD_PROBE_MODULE_DESCR.fetch_add(1, Ordering::Relaxed);
         }
         ComponentLookupApi::LookupModule
         | ComponentLookupApi::FindModuleDescr
         | ComponentLookupApi::FindType
         | ComponentLookupApi::FindModtype
         | ComponentLookupApi::OpenSignature => {}
-    }
-    if published {
-        STORED_COMPONENT_PUBLISHED.fetch_add(1, Ordering::Relaxed);
-    } else {
-        STORED_COMPONENT_TRANSIENT.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -640,12 +626,9 @@ pub fn print_report() {
         QUALIFIED_COMPONENT_REGISTERED.load(Ordering::Relaxed),
     );
     eprintln!(
-        "[compiler-counter] stored_components cached={} build_find_module={} build_probe_module_descr={} published={} transient={}",
+        "[compiler-counter] stored_components cached={} build_find_module={}",
         STORED_COMPONENT_CACHED.load(Ordering::Relaxed),
         STORED_COMPONENT_BUILD_FIND_MODULE.load(Ordering::Relaxed),
-        STORED_COMPONENT_BUILD_PROBE_MODULE_DESCR.load(Ordering::Relaxed),
-        STORED_COMPONENT_PUBLISHED.load(Ordering::Relaxed),
-        STORED_COMPONENT_TRANSIENT.load(Ordering::Relaxed),
     );
     eprintln!(
         "[compiler-counter] type_item_resolve scans={} scanned_items={} type_items={} found={}",

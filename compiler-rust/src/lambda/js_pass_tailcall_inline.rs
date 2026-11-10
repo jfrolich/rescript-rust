@@ -4,14 +4,18 @@
 //! sites, eliminating the intermediate function wrapper. Also tracks used/dead
 //! status for variable declarations.
 
-use crate::lambda::LamLoc;
 use ahash::{AHashMap as HashMap, AHashSet as HashSet};
 
 use crate::ident::Ident;
-use crate::js_ir::op::{IdentInfo, UsedStats};
-use crate::js_ir::{
-    BinOp, Block, CaseClause, DepsProgram, Expression, ExpressionDesc, Program, Statement,
-    StatementDesc, StringClause, VariableDeclaration,
+use crate::js_ir::BinOp;
+use crate::js_ir::arena::{
+    Block, Expr, ExprKind, FunInfo, IdentList, JsArena, JsDepsProgram as DepsProgram,
+    JsProgram as Program, Stmt, StmtKind, StmtList, StringClauseInfo, VarDecl,
+};
+use crate::js_ir::build::stmt as S;
+use crate::js_ir::op::UsedStats;
+use crate::js_ir::walk::{
+    Mapper, Visitor, each_child, map_expression_children, map_statement_children, walk_block,
 };
 use crate::lambda::lam_compat::LetKind;
 
@@ -25,20 +29,118 @@ fn is_lexical_binding_kind(property: LetKind) -> bool {
 }
 
 pub(crate) fn apply_js_tailcall_inline_pass(mut deps: DepsProgram) -> DepsProgram {
-    deps.program = tailcall_inline_program(deps.program);
+    tailcall_inline_program(&mut deps.program);
     deps
 }
 
-fn tailcall_inline_program(program: Program) -> Program {
-    let mut inliner = TailcallInlineState::new(&program);
-    let mut program = Program {
-        block: inliner.transform_block(program.block),
-        exports: program.exports,
-        export_set: program.export_set,
-        name_reservations: program.name_reservations,
-    };
-    apply_tailcall_used_stats_block(&mut program.block, &inliner.statuses);
-    program
+fn tailcall_inline_program(program: &mut Program) {
+    let mut inliner = TailcallInlineState::new(program);
+    let block = std::mem::take(&mut program.block);
+    program.block = inliner.block_items(&mut program.arena, &block);
+    let block = program.block.clone();
+    update_declaration_infos(&mut program.arena, &block, &mut |ident, info| {
+        if let Some(status) = inliner.statuses.get(&ident).copied() {
+            info.used_stats = status;
+        }
+    });
+}
+
+/// Updates the `ident_info` of every declaration reachable through the
+/// statement positions the OCaml stats passes visit (blocks, initializers and
+/// function bodies; not loop or branch conditions).
+pub(crate) fn update_declaration_infos(
+    j: &mut JsArena,
+    block: &[Stmt],
+    f: &mut impl FnMut(Ident, &mut crate::js_ir::op::IdentInfo),
+) {
+    fn list(
+        j: &mut JsArena,
+        l: StmtList,
+        f: &mut impl FnMut(Ident, &mut crate::js_ir::op::IdentInfo),
+    ) {
+        let block = j.block_vec(l);
+        update_declaration_infos(j, &block, f);
+    }
+    fn expr(j: &mut JsArena, e: Expr, f: &mut impl FnMut(Ident, &mut crate::js_ir::op::IdentInfo)) {
+        // Collect the outermost function bodies of `e`; their statements are
+        // visited (with their own nested functions) below.
+        let mut bodies = Vec::new();
+        collect_outer_fun_bodies(j, e, &mut bodies);
+        for body in bodies {
+            list(j, body, f);
+        }
+    }
+    for stmt in block {
+        match j.sk(*stmt) {
+            StmtKind::Block(b) => list(j, b, f),
+            StmtKind::Variable(v) => {
+                let ident = j.var(v).ident;
+                f(ident, j.var_ident_info_mut(v));
+                if let Some(value) = j.var(v).value {
+                    expr(j, value, f);
+                }
+            }
+            StmtKind::Exp(e) | StmtKind::Return(e) | StmtKind::Throw(e) => expr(j, e, f),
+            StmtKind::If(_, t, e) => {
+                list(j, t, f);
+                list(j, e, f);
+            }
+            StmtKind::While(_, _, body) => list(j, body, f),
+            StmtKind::ForRange(info) => {
+                let body = j.for_range(info).body;
+                list(j, body, f)
+            }
+            StmtKind::ForOf(info) | StmtKind::ForAwaitOf(info) => {
+                let body = j.for_of(info).body;
+                list(j, body, f)
+            }
+            StmtKind::IntSwitch(_, info) => {
+                let info = j.int_switch(info).clone();
+                for (_, clause) in &info.clauses {
+                    list(j, clause.body, f);
+                }
+                if let Some(d) = info.default {
+                    list(j, d, f);
+                }
+            }
+            StmtKind::StringSwitch(_, info) => {
+                let bodies: Vec<StmtList> = j
+                    .string_switch(info)
+                    .clauses
+                    .iter()
+                    .map(|c| c.clause.body)
+                    .collect();
+                let default = j.string_switch(info).default;
+                for b in bodies {
+                    list(j, b, f);
+                }
+                if let Some(d) = default {
+                    list(j, d, f);
+                }
+            }
+            StmtKind::Try(info) => {
+                let info = j.try_info(info);
+                list(j, info.body, f);
+                if let Some((_, b)) = info.catch {
+                    list(j, b, f);
+                }
+                if let Some(b) = info.finally {
+                    list(j, b, f);
+                }
+            }
+            StmtKind::Debugger | StmtKind::Break(_) | StmtKind::Continue(_) => {}
+        }
+    }
+}
+
+/// The bodies of the functions in `e` that are not nested in another
+/// function of `e`, in traversal order.
+fn collect_outer_fun_bodies(a: &JsArena, e: Expr, out: &mut Vec<StmtList>) {
+    if let ExprKind::Fun(f) = a.ek(e) {
+        out.push(a.fun(f).body);
+        return;
+    }
+    each_child(a, e, |child| collect_outer_fun_bodies(a, child, out));
 }
 
 #[derive(Debug)]
@@ -52,36 +154,34 @@ struct TailcallInlineState {
     active_decls: Vec<Ident>,
 }
 
-#[derive(Debug)]
-struct DeclUsageInfo {
-    pure: bool,
-}
-
-#[derive(Debug)]
+/// An inlineable function declaration: handles to its parameters and body,
+/// shared with the declaration itself.
+#[derive(Debug, Clone, Copy)]
 struct InlineFunctionDecl {
-    params: Vec<Ident>,
-    body: Block,
+    params: IdentList,
+    body: StmtList,
 }
 
 impl TailcallInlineState {
     fn new(program: &Program) -> Self {
-        let mut decls = HashMap::new();
-        let mut counts = HashMap::new();
-        collect_tailcall_use_counts_block(&program.block, &mut decls, &mut counts);
+        let a = &program.arena;
+        let mut counter = UseCounts::default();
+        walk_block(&mut counter, a, &program.block);
+        let UseCounts { decls, counts } = counter;
 
         let mut statuses = HashMap::with_capacity(decls.len());
-        for (ident, info) in &decls {
+        for (ident, pure) in &decls {
             let count = counts.get(ident).copied().unwrap_or(0);
             let exported = program.export_set.contains(ident);
             let status = if exported {
                 UsedStats::Exported
             } else if count == 0 {
-                if info.pure {
+                if *pure {
                     UsedStats::DeadPure
                 } else {
                     UsedStats::DeadNonPure
                 }
-            } else if count == 1 && info.pure {
+            } else if count == 1 && *pure {
                 UsedStats::OncePure
             } else {
                 UsedStats::Used
@@ -92,17 +192,15 @@ impl TailcallInlineState {
         // OCaml's stats table keeps the existing variable declarations by
         // pointer (`compiler/core/js_pass_get_used.ml:55-77`) and the tailcall
         // pass only needs function bodies for the Once_pure inline branch
-        // (`compiler/core/js_pass_tailcall_inline.ml:160-192`). Keep Rust's
-        // counted metadata lightweight, then clone only those inlineable
-        // function bodies instead of cloning every JS declaration tree.
-        let tail_callees = collect_tail_callees(&program.block);
-        let mut inline_decls = HashMap::new();
-        collect_once_pure_inline_decls_block(
-            &program.block,
-            &statuses,
-            &tail_callees,
-            &mut inline_decls,
-        );
+        // (`compiler/core/js_pass_tailcall_inline.ml:160-192`).
+        let tail_callees = collect_tail_callees(a, &program.block);
+        let mut collector = OncePureDecls {
+            statuses: &statuses,
+            tail_callees: &tail_callees,
+            inline_decls: HashMap::new(),
+        };
+        walk_block(&mut collector, a, &program.block);
+        let inline_decls = collector.inline_decls;
 
         Self {
             inline_decls,
@@ -112,481 +210,77 @@ impl TailcallInlineState {
         }
     }
 
-    fn transform_block(&mut self, block: Block) -> Block {
-        let len = block.len();
-        let mut transformed = Vec::with_capacity(len);
-        for (index, stmt) in block.into_iter().enumerate() {
-            // OCaml recurses as `x :: xs -> self.statement x :: self.block xs`
-            // before matching the one-statement tail-call inline case
-            // (`compiler/core/js_pass_tailcall_inline.ml:130-159,232`).
-            // Check the final suffix after preceding declarations have updated
-            // `inline_decls`, so `let aux; return aux(...)` can inline.
-            if index + 1 == len {
-                match self.try_inline_single_return_statement(stmt) {
-                    Ok(inlined) => {
-                        transformed.extend(inlined);
-                    }
-                    Err(stmt) => {
-                        transformed.extend(self.transform_statement(stmt));
-                    }
-                }
-            } else {
-                transformed.extend(self.transform_statement(stmt));
+    fn transform_statement(&mut self, j: &mut JsArena, stmt: Stmt) -> Option<Stmt> {
+        let StmtKind::Variable(v) = j.sk(stmt) else {
+            return Some(map_statement_children(self, j, stmt));
+        };
+        let mut decl = j.var(v).clone();
+        if let Some(value) = decl.value {
+            self.active_decls.push(decl.ident);
+            decl.value = Some(self.expression(j, value));
+            self.active_decls.pop();
+        }
+
+        let status = self
+            .statuses
+            .get(&decl.ident)
+            .copied()
+            .unwrap_or(UsedStats::Used);
+        // OCaml rewrites a variable declaration first, then stores the
+        // rewritten declaration back into the stats table
+        // (`compiler/core/js_pass_tailcall_inline.ml:120-129`).
+        if status == UsedStats::OncePure
+            && self.tail_callees.contains(&decl.ident)
+            && let Some(inline_decl) = inline_function_decl_from_variable(j, &decl)
+        {
+            self.inline_decls.insert(decl.ident, inline_decl);
+        }
+        decl.ident_info.used_stats = status;
+        match status {
+            UsedStats::DeadPure => None,
+            UsedStats::DeadNonPure => decl
+                .value
+                .map(|value| j.rekind_stmt(stmt, StmtKind::Exp(value))),
+            _ => {
+                let v = j.var_id(decl);
+                Some(j.rekind_stmt(stmt, StmtKind::Variable(v)))
             }
         }
-        transformed
     }
 
-    fn transform_statement(&mut self, stmt: Statement) -> Vec<Statement> {
-        let Statement {
-            source_loc,
-            desc,
-            comment,
-        } = stmt;
-        match desc {
-            StatementDesc::Block(block) => vec![Statement {
-                source_loc,
-                desc: StatementDesc::Block(self.transform_block(block)),
-                comment,
-            }],
-            StatementDesc::Variable(mut decl) => {
-                if let Some(value) = decl.value.take() {
-                    self.active_decls.push(decl.ident);
-                    decl.value = Some(self.transform_expression(value));
-                    self.active_decls.pop();
-                }
-
-                let status = self
-                    .statuses
-                    .get(&decl.ident)
-                    .copied()
-                    .unwrap_or(UsedStats::Used);
-                // OCaml rewrites a variable declaration first, then stores the
-                // rewritten declaration back into the stats table
-                // (`compiler/core/js_pass_tailcall_inline.ml:120-129`). Do the
-                // same for inlineable function bodies without cloning unrelated
-                // declarations.
-                if status == UsedStats::OncePure
-                    && self.tail_callees.contains(&decl.ident)
-                    && let Some(inline_decl) = inline_function_decl_from_variable(&decl)
+    fn try_inline_single_return_statement(&mut self, j: &mut JsArena, stmt: Stmt) -> Option<Block> {
+        let StmtKind::Return(expr) = j.sk(stmt) else {
+            return None;
+        };
+        let ExprKind::Call(func, args, _) = j.ek(expr) else {
+            return None;
+        };
+        match j.ek(func) {
+            ExprKind::Var(id) => self.inline_named_call(j, &j.ident(id), args),
+            ExprKind::Fun(f) => {
+                let info = j.fun(f);
+                if !info.is_method
+                    && !info.async_
+                    && info.directive.is_none()
+                    && j.ident_slice(info.params).len() == j.exprs(args).len()
                 {
-                    self.inline_decls.insert(decl.ident, inline_decl);
-                }
-                decl.ident_info.used_stats = status;
-                match status {
-                    UsedStats::DeadPure => vec![],
-                    UsedStats::DeadNonPure => decl
-                        .value
-                        .map(|value| {
-                            vec![Statement {
-                                source_loc,
-                                desc: StatementDesc::Exp(value),
-                                comment,
-                            }]
-                        })
-                        .unwrap_or_default(),
-                    _ => vec![Statement {
-                        source_loc,
-                        desc: StatementDesc::Variable(decl),
-                        comment,
-                    }],
+                    Some(self.inline_function_call(j, info.params, info.body, args))
+                } else {
+                    None
                 }
             }
-            StatementDesc::Exp(expr) => vec![Statement {
-                source_loc,
-                desc: StatementDesc::Exp(self.transform_expression(expr)),
-                comment,
-            }],
-            StatementDesc::If(cond, then_block, else_block) => vec![Statement {
-                source_loc,
-                desc: StatementDesc::If(
-                    self.transform_expression(cond),
-                    self.transform_block(then_block),
-                    self.transform_block(else_block),
-                ),
-                comment,
-            }],
-            StatementDesc::While(label, cond, body) => vec![Statement {
-                source_loc,
-                desc: StatementDesc::While(
-                    label,
-                    self.transform_expression(cond),
-                    self.transform_block(body),
-                ),
-                comment,
-            }],
-            StatementDesc::ForRange(label, start, finish, ident, direction, body) => {
-                vec![Statement {
-                    source_loc,
-                    desc: StatementDesc::ForRange(
-                        label,
-                        start.map(|expr| Box::new(self.transform_expression(*expr))),
-                        Box::new(self.transform_expression(*finish)),
-                        ident,
-                        direction,
-                        self.transform_block(body),
-                    ),
-                    comment,
-                }]
-            }
-            StatementDesc::ForOf(label, ident, iterable, body) => vec![Statement {
-                source_loc,
-                desc: StatementDesc::ForOf(
-                    label,
-                    ident,
-                    Box::new(self.transform_expression(*iterable)),
-                    self.transform_block(body),
-                ),
-                comment,
-            }],
-            StatementDesc::ForAwaitOf(label, ident, iterable, body) => vec![Statement {
-                source_loc,
-                desc: StatementDesc::ForAwaitOf(
-                    label,
-                    ident,
-                    Box::new(self.transform_expression(*iterable)),
-                    self.transform_block(body),
-                ),
-                comment,
-            }],
-            StatementDesc::Continue(label) => vec![Statement {
-                source_loc,
-                desc: StatementDesc::Continue(label),
-                comment,
-            }],
-            StatementDesc::Break(label) => vec![Statement {
-                source_loc,
-                desc: StatementDesc::Break(label),
-                comment,
-            }],
-            StatementDesc::Return(expr) => vec![Statement {
-                source_loc,
-                desc: StatementDesc::Return(self.transform_expression(expr)),
-                comment,
-            }],
-            StatementDesc::IntSwitch(test, clauses, default) => vec![Statement {
-                source_loc,
-                desc: StatementDesc::IntSwitch(
-                    self.transform_expression(test),
-                    clauses
-                        .into_iter()
-                        .map(|(value, clause)| {
-                            (
-                                value,
-                                CaseClause {
-                                    source_loc: clause.source_loc,
-                                    body: self.transform_block(clause.body),
-                                    should_break: clause.should_break,
-                                    comment: clause.comment,
-                                },
-                            )
-                        })
-                        .collect(),
-                    default.map(|block| self.transform_block(block)),
-                ),
-                comment,
-            }],
-            StatementDesc::StringSwitch(test, clauses, default) => vec![Statement {
-                source_loc,
-                desc: StatementDesc::StringSwitch(
-                    self.transform_expression(test),
-                    clauses
-                        .into_iter()
-                        .map(|clause| StringClause {
-                            tag_type: clause.tag_type,
-                            clause: CaseClause {
-                                source_loc: clause.clause.source_loc,
-                                body: self.transform_block(clause.clause.body),
-                                should_break: clause.clause.should_break,
-                                comment: clause.clause.comment,
-                            },
-                        })
-                        .collect(),
-                    default.map(|block| self.transform_block(block)),
-                ),
-                comment,
-            }],
-            StatementDesc::Throw(expr) => vec![Statement {
-                source_loc,
-                desc: StatementDesc::Throw(self.transform_expression(expr)),
-                comment,
-            }],
-            StatementDesc::Try(body, catch, finally) => vec![Statement {
-                source_loc,
-                desc: StatementDesc::Try(
-                    self.transform_block(body),
-                    catch.map(|(ident, block)| (ident, self.transform_block(block))),
-                    finally.map(|block| self.transform_block(block)),
-                ),
-                comment,
-            }],
-            StatementDesc::Debugger => vec![Statement {
-                source_loc,
-                desc: StatementDesc::Debugger,
-                comment,
-            }],
+            _ => None,
         }
     }
 
-    fn transform_expression(&mut self, expr: Expression) -> Expression {
-        let Expression {
-            source_loc,
-            desc,
-            comment,
-        } = expr;
-        let desc = match desc {
-            ExpressionDesc::Length(inner, obj) => {
-                ExpressionDesc::Length(Box::new(self.transform_expression(*inner)), obj)
-            }
-            ExpressionDesc::IsNullOrUndefined(inner) => {
-                ExpressionDesc::IsNullOrUndefined(Box::new(self.transform_expression(*inner)))
-            }
-            ExpressionDesc::StringAppend(left, right) => ExpressionDesc::StringAppend(
-                Box::new(self.transform_expression(*left)),
-                Box::new(self.transform_expression(*right)),
-            ),
-            ExpressionDesc::Bool(value) => ExpressionDesc::Bool(value),
-            ExpressionDesc::Typeof(inner) => {
-                ExpressionDesc::Typeof(Box::new(self.transform_expression(*inner)))
-            }
-            ExpressionDesc::In(left, right) => ExpressionDesc::In(
-                Box::new(self.transform_expression(*left)),
-                Box::new(self.transform_expression(*right)),
-            ),
-            ExpressionDesc::JsNot(inner) => {
-                ExpressionDesc::JsNot(Box::new(self.transform_expression(*inner)))
-            }
-            ExpressionDesc::JsBnot(inner) => {
-                ExpressionDesc::JsBnot(Box::new(self.transform_expression(*inner)))
-            }
-            ExpressionDesc::Seq(left, right) => ExpressionDesc::Seq(
-                Box::new(self.transform_expression(*left)),
-                Box::new(self.transform_expression(*right)),
-            ),
-            ExpressionDesc::Cond(test, consequent, alternate) => ExpressionDesc::Cond(
-                Box::new(self.transform_expression(*test)),
-                Box::new(self.transform_expression(*consequent)),
-                Box::new(self.transform_expression(*alternate)),
-            ),
-            ExpressionDesc::Bin(op, left, right) => ExpressionDesc::Bin(
-                op,
-                Box::new(self.transform_expression(*left)),
-                Box::new(self.transform_expression(*right)),
-            ),
-            ExpressionDesc::FlatCall(func, args) => ExpressionDesc::FlatCall(
-                Box::new(self.transform_expression(*func)),
-                Box::new(self.transform_expression(*args)),
-            ),
-            ExpressionDesc::Call(func, args, info) => ExpressionDesc::Call(
-                Box::new(self.transform_expression(*func)),
-                args.into_iter()
-                    .map(|arg| self.transform_expression(arg))
-                    .collect(),
-                info,
-            ),
-            ExpressionDesc::ArrayIndex(left, right) => ExpressionDesc::ArrayIndex(
-                Box::new(self.transform_expression(*left)),
-                Box::new(self.transform_expression(*right)),
-            ),
-            ExpressionDesc::TaggedTemplate(tag, strings, values) => ExpressionDesc::TaggedTemplate(
-                Box::new(self.transform_expression(*tag)),
-                strings,
-                values
-                    .into_iter()
-                    .map(|expr| self.transform_expression(expr))
-                    .collect(),
-            ),
-            ExpressionDesc::InterpolatedTemplate { segments, values } => {
-                ExpressionDesc::InterpolatedTemplate {
-                    segments,
-                    values: values
-                        .into_iter()
-                        .map(|expr| self.transform_expression(expr))
-                        .collect(),
-                }
-            }
-            ExpressionDesc::StaticIndex(target, field, position) => ExpressionDesc::StaticIndex(
-                Box::new(self.transform_expression(*target)),
-                field,
-                position,
-            ),
-            ExpressionDesc::New(target, args) => ExpressionDesc::New(
-                Box::new(self.transform_expression(*target)),
-                args.map(|args| {
-                    args.into_iter()
-                        .map(|arg| self.transform_expression(arg))
-                        .collect()
-                }),
-            ),
-            ExpressionDesc::Var(ident) => ExpressionDesc::Var(ident),
-            ExpressionDesc::Fun {
-                is_method,
-                params,
-                body,
-                env,
-                return_unit,
-                async_,
-                directive,
-            } => ExpressionDesc::Fun {
-                is_method,
-                params,
-                body: self.transform_block(body),
-                env,
-                return_unit,
-                async_,
-                directive,
-            },
-            ExpressionDesc::Str(txt) => ExpressionDesc::Str(txt),
-            ExpressionDesc::TemplateLiteral(segment) => ExpressionDesc::TemplateLiteral(segment),
-            ExpressionDesc::JsonLiteral(source) => ExpressionDesc::JsonLiteral(source),
-            ExpressionDesc::RawJsCode(info) => ExpressionDesc::RawJsCode(info),
-            ExpressionDesc::Array(items, mutable_flag) => ExpressionDesc::Array(
-                items
-                    .into_iter()
-                    .map(|item| self.transform_expression(item))
-                    .collect(),
-                mutable_flag,
-            ),
-            ExpressionDesc::OptionalBlock(inner, flag) => {
-                ExpressionDesc::OptionalBlock(Box::new(self.transform_expression(*inner)), flag)
-            }
-            ExpressionDesc::CamlBlock(items, mutable_flag, info) => ExpressionDesc::CamlBlock(
-                items
-                    .into_iter()
-                    .map(|item| self.transform_expression(item))
-                    .collect(),
-                mutable_flag,
-                info,
-            ),
-            ExpressionDesc::CamlBlockTag(inner, field) => {
-                ExpressionDesc::CamlBlockTag(Box::new(self.transform_expression(*inner)), field)
-            }
-            ExpressionDesc::Number(number) => ExpressionDesc::Number(number),
-            ExpressionDesc::Jsx(jsx) => {
-                ExpressionDesc::Jsx(Box::new(jsx.map(|value| self.transform_expression(value))))
-            }
-            ExpressionDesc::Object(entries) => ExpressionDesc::Object(
-                entries
-                    .into_iter()
-                    .map(|entry| entry.map(|value| self.transform_expression(value)))
-                    .collect(),
-            ),
-            ExpressionDesc::Undefined { is_unit } => ExpressionDesc::Undefined { is_unit },
-            ExpressionDesc::Null => ExpressionDesc::Null,
-            ExpressionDesc::Await(inner) => {
-                ExpressionDesc::Await(Box::new(self.transform_expression(*inner)))
-            }
-            ExpressionDesc::Spread(inner) => {
-                ExpressionDesc::Spread(Box::new(self.transform_expression(*inner)))
-            }
-            ExpressionDesc::RecordRest(fields, source) => {
-                ExpressionDesc::RecordRest(fields, Box::new(self.transform_expression(*source)))
-            }
-        };
-
-        Expression {
-            source_loc,
-            desc,
-            comment,
-        }
-    }
-
-    fn try_inline_single_return_statement(&mut self, stmt: Statement) -> Result<Block, Statement> {
-        let Statement {
-            source_loc: stmt_source_loc,
-            desc,
-            comment,
-        } = stmt;
-        let StatementDesc::Return(expr) = desc else {
-            return Err(Statement {
-                source_loc: stmt_source_loc,
-                desc,
-                comment,
-            });
-        };
-        let Expression {
-            source_loc: expr_source_loc,
-            desc: expr_desc,
-            comment: expr_comment,
-        } = expr;
-        let ExpressionDesc::Call(func, args, info) = expr_desc else {
-            return Err(Statement {
-                source_loc: stmt_source_loc,
-                desc: StatementDesc::Return(Expression {
-                    source_loc: expr_source_loc,
-                    desc: expr_desc,
-                    comment: expr_comment,
-                }),
-                comment,
-            });
-        };
-
-        let Expression {
-            source_loc: func_source_loc,
-            desc: func_desc,
-            comment: func_comment,
-        } = *func;
-        match func_desc {
-            ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)) => {
-                match self.inline_named_call_owned(&id, args) {
-                    Ok(block) => Ok(block),
-                    Err(args) => Err(Statement {
-                        source_loc: stmt_source_loc,
-                        desc: StatementDesc::Return(Expression {
-                            source_loc: expr_source_loc,
-                            desc: ExpressionDesc::Call(
-                                Box::new(Expression {
-                                    source_loc: func_source_loc,
-                                    desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
-                                    comment: func_comment,
-                                }),
-                                args,
-                                info,
-                            ),
-                            comment: expr_comment,
-                        }),
-                        comment,
-                    }),
-                }
-            }
-            ExpressionDesc::Fun {
-                is_method: false,
-                params,
-                body,
-                env: _,
-                return_unit: _,
-                async_: false,
-                directive: None,
-            } if params.len() == args.len() => {
-                Ok(self.inline_function_call_owned(params, body, args))
-            }
-            func_desc => Err(Statement {
-                source_loc: stmt_source_loc,
-                desc: StatementDesc::Return(Expression {
-                    source_loc: expr_source_loc,
-                    desc: ExpressionDesc::Call(
-                        Box::new(Expression {
-                            source_loc: func_source_loc,
-                            desc: func_desc,
-                            comment: func_comment,
-                        }),
-                        args,
-                        info,
-                    ),
-                    comment: expr_comment,
-                }),
-                comment,
-            }),
-        }
-    }
-
-    fn inline_named_call_owned(
+    fn inline_named_call(
         &mut self,
+        j: &mut JsArena,
         ident: &Ident,
-        args: Vec<Expression>,
-    ) -> Result<Block, Vec<Expression>> {
+        args: crate::js_ir::arena::ExprList,
+    ) -> Option<Block> {
         if self.statuses.get(ident).copied() != Some(UsedStats::OncePure) {
-            return Err(args);
+            return None;
         }
         // OCaml keeps the transformed declaration in the stats table while
         // walking blocks, which avoids consuming a recursive function while
@@ -594,668 +288,160 @@ impl TailcallInlineState {
         // `compiler/core/js_pass_tailcall_inline.ml:120-129`). Only inline the
         // stored declaration at an outer tail-call site (`compiler/core/js_pass_tailcall_inline.ml:150-192`).
         if self.active_decls.iter().any(|active| active.same(ident)) {
-            return Err(args);
+            return None;
         }
 
         // `when Ext_list.same_length params args` (js_pass_tailcall_inline.ml:185)
         // is checked against the stored declaration without consuming it.
-        if self
-            .inline_decls
-            .get(ident)
-            .is_none_or(|decl| decl.params.len() != args.len())
-        {
-            return Err(args);
+        let decl = *self.inline_decls.get(ident)?;
+        if j.ident_slice(decl.params).len() != j.exprs(args).len() {
+            return None;
         }
-        let Some(decl) = self.inline_decls.remove(ident) else {
-            return Err(args);
-        };
+        self.inline_decls.remove(ident);
 
         self.statuses.insert(*ident, UsedStats::DeadPure);
-        Ok(self.inline_function_call_owned(decl.params, decl.body, args))
+        Some(self.inline_function_call(j, decl.params, decl.body, args))
     }
 
-    fn inline_function_call_owned(
+    fn inline_function_call(
         &mut self,
-        params: Vec<Ident>,
-        body: Block,
-        args: Vec<Expression>,
+        j: &mut JsArena,
+        params: IdentList,
+        body: StmtList,
+        args: crate::js_ir::arena::ExprList,
     ) -> Block {
-        let processed_body = self.transform_block(body);
-        let immutable_mask = immutable_param_mask(&params, &processed_body);
-        let args = args
+        // OCaml re-transforms the stored, already transformed body at the
+        // call site (`compiler/core/js_pass_tailcall_inline.ml:186-192`).
+        let body = j.block_vec(body);
+        let processed_body = self.block_items(j, &body);
+        let params = j.ident_slice(params).to_vec();
+        let immutable_mask = immutable_param_mask(j, &params, &processed_body);
+        let args = j.expr_vec(args);
+        let args: Vec<Expr> = args
             .into_iter()
-            .map(|arg| self.transform_expression(arg))
+            .map(|arg| self.expression(j, arg))
             .collect();
-        inline_tailcall_call(&immutable_mask, &params, args, processed_body)
+        inline_tailcall_call(j, &immutable_mask, &params, args, processed_body)
     }
 }
 
-fn collect_tailcall_use_counts_block(
-    block: &Block,
-    decls: &mut HashMap<Ident, DeclUsageInfo>,
-    counts: &mut HashMap<Ident, usize>,
-) {
-    for stmt in block {
-        collect_tailcall_use_counts_statement(stmt, decls, counts);
+impl Mapper for TailcallInlineState {
+    fn block_items(&mut self, j: &mut JsArena, block: &[Stmt]) -> Vec<Stmt> {
+        let len = block.len();
+        let mut transformed = Vec::with_capacity(len);
+        for (index, stmt) in block.iter().enumerate() {
+            // OCaml recurses as `x :: xs -> self.statement x :: self.block xs`
+            // before matching the one-statement tail-call inline case
+            // (`compiler/core/js_pass_tailcall_inline.ml:130-159,232`).
+            // Check the final suffix after preceding declarations have updated
+            // `inline_decls`, so `let aux; return aux(...)` can inline.
+            if index + 1 == len
+                && let Some(inlined) = self.try_inline_single_return_statement(j, *stmt)
+            {
+                transformed.extend(inlined);
+                continue;
+            }
+            transformed.extend(self.transform_statement(j, *stmt));
+        }
+        transformed
     }
 }
 
-fn collect_tailcall_use_counts_statement(
-    stmt: &Statement,
-    decls: &mut HashMap<Ident, DeclUsageInfo>,
-    counts: &mut HashMap<Ident, usize>,
-) {
-    match &stmt.desc {
-        StatementDesc::Block(block) => collect_tailcall_use_counts_block(block, decls, counts),
-        StatementDesc::Variable(decl) => {
-            decls.insert(
-                decl.ident,
-                DeclUsageInfo {
-                    pure: decl.value.as_ref().is_some_and(js_expr_no_side_effects),
-                },
-            );
-            if let Some(value) = &decl.value {
-                collect_tailcall_use_counts_expression(value, decls, counts);
-            }
+/// Counts the uses of each local and records each declaration's purity.
+#[derive(Default)]
+struct UseCounts {
+    decls: HashMap<Ident, bool>,
+    counts: HashMap<Ident, usize>,
+}
+
+impl Visitor for UseCounts {
+    fn visit_expression(&mut self, a: &JsArena, e: Expr) {
+        if let ExprKind::Var(id) = a.ek(e) {
+            *self.counts.entry(a.ident(id)).or_insert(0) += 1;
         }
-        StatementDesc::Exp(expr) | StatementDesc::Return(expr) | StatementDesc::Throw(expr) => {
-            collect_tailcall_use_counts_expression(expr, decls, counts);
-        }
-        StatementDesc::If(cond, then_block, else_block) => {
-            collect_tailcall_use_counts_expression(cond, decls, counts);
-            collect_tailcall_use_counts_block(then_block, decls, counts);
-            collect_tailcall_use_counts_block(else_block, decls, counts);
-        }
-        StatementDesc::While(_, cond, body) => {
-            collect_tailcall_use_counts_expression(cond, decls, counts);
-            collect_tailcall_use_counts_block(body, decls, counts);
-        }
-        StatementDesc::ForRange(_, start, finish, _, _, body) => {
-            if let Some(start) = start {
-                collect_tailcall_use_counts_expression(start, decls, counts);
-            }
-            collect_tailcall_use_counts_expression(finish, decls, counts);
-            collect_tailcall_use_counts_block(body, decls, counts);
-        }
-        StatementDesc::ForOf(_, _, iterable, body)
-        | StatementDesc::ForAwaitOf(_, _, iterable, body) => {
-            collect_tailcall_use_counts_expression(iterable, decls, counts);
-            collect_tailcall_use_counts_block(body, decls, counts);
-        }
-        StatementDesc::IntSwitch(test, clauses, default) => {
-            collect_tailcall_use_counts_expression(test, decls, counts);
-            for (_, clause) in clauses {
-                collect_tailcall_use_counts_block(&clause.body, decls, counts);
-            }
-            if let Some(default) = default {
-                collect_tailcall_use_counts_block(default, decls, counts);
-            }
-        }
-        StatementDesc::StringSwitch(test, clauses, default) => {
-            collect_tailcall_use_counts_expression(test, decls, counts);
-            for clause in clauses {
-                collect_tailcall_use_counts_block(&clause.clause.body, decls, counts);
-            }
-            if let Some(default) = default {
-                collect_tailcall_use_counts_block(default, decls, counts);
-            }
-        }
-        StatementDesc::Try(body, catch, finally) => {
-            collect_tailcall_use_counts_block(body, decls, counts);
-            if let Some((_, block)) = catch {
-                collect_tailcall_use_counts_block(block, decls, counts);
-            }
-            if let Some(block) = finally {
-                collect_tailcall_use_counts_block(block, decls, counts);
-            }
-        }
-        StatementDesc::Debugger | StatementDesc::Break(_) | StatementDesc::Continue(_) => {}
+    }
+
+    fn visit_declaration(&mut self, a: &JsArena, decl: &VarDecl) {
+        self.decls.insert(
+            decl.ident,
+            decl.value.is_some_and(|v| js_expr_no_side_effects(a, v)),
+        );
     }
 }
 
-fn collect_tailcall_use_counts_expression(
-    expr: &Expression,
-    decls: &mut HashMap<Ident, DeclUsageInfo>,
-    counts: &mut HashMap<Ident, usize>,
-) {
-    match &expr.desc {
-        ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)) => {
-            *counts.entry(*id).or_insert(0) += 1;
-        }
-        ExpressionDesc::Var(crate::js_ir::VIdent::Qualified(_, _))
-        | ExpressionDesc::Undefined { .. }
-        | ExpressionDesc::Null
-        | ExpressionDesc::Bool(_)
-        | ExpressionDesc::Str(_)
-        | ExpressionDesc::TemplateLiteral(_)
-        | ExpressionDesc::JsonLiteral(_)
-        | ExpressionDesc::RawJsCode(_)
-        | ExpressionDesc::Number(_) => {}
-        ExpressionDesc::Length(inner, _)
-        | ExpressionDesc::IsNullOrUndefined(inner)
-        | ExpressionDesc::Typeof(inner)
-        | ExpressionDesc::JsNot(inner)
-        | ExpressionDesc::JsBnot(inner)
-        | ExpressionDesc::CamlBlockTag(inner, _)
-        | ExpressionDesc::OptionalBlock(inner, _)
-        | ExpressionDesc::Await(inner)
-        | ExpressionDesc::Spread(inner)
-        | ExpressionDesc::RecordRest(_, inner) => {
-            collect_tailcall_use_counts_expression(inner, decls, counts)
-        }
-        ExpressionDesc::StringAppend(left, right)
-        | ExpressionDesc::In(left, right)
-        | ExpressionDesc::Seq(left, right)
-        | ExpressionDesc::Bin(_, left, right)
-        | ExpressionDesc::FlatCall(left, right)
-        | ExpressionDesc::ArrayIndex(left, right) => {
-            collect_tailcall_use_counts_expression(left, decls, counts);
-            collect_tailcall_use_counts_expression(right, decls, counts);
-        }
-        ExpressionDesc::Cond(test, consequent, alternate) => {
-            collect_tailcall_use_counts_expression(test, decls, counts);
-            collect_tailcall_use_counts_expression(consequent, decls, counts);
-            collect_tailcall_use_counts_expression(alternate, decls, counts);
-        }
-        ExpressionDesc::Call(func, args, _) => {
-            collect_tailcall_use_counts_expression(func, decls, counts);
-            for arg in args {
-                collect_tailcall_use_counts_expression(arg, decls, counts);
-            }
-        }
-        ExpressionDesc::TaggedTemplate(tag, _, values) => {
-            collect_tailcall_use_counts_expression(tag, decls, counts);
-            for value in values {
-                collect_tailcall_use_counts_expression(value, decls, counts);
-            }
-        }
-        ExpressionDesc::InterpolatedTemplate { values, .. } => {
-            for value in values {
-                collect_tailcall_use_counts_expression(value, decls, counts);
-            }
-        }
-        ExpressionDesc::StaticIndex(target, _, _) => {
-            collect_tailcall_use_counts_expression(target, decls, counts)
-        }
-        ExpressionDesc::New(target, args) => {
-            collect_tailcall_use_counts_expression(target, decls, counts);
-            if let Some(args) = args {
-                for arg in args {
-                    collect_tailcall_use_counts_expression(arg, decls, counts);
-                }
-            }
-        }
-        ExpressionDesc::Fun { body, .. } => collect_tailcall_use_counts_block(body, decls, counts),
-        ExpressionDesc::Array(items, _) => {
-            for item in items {
-                collect_tailcall_use_counts_expression(item, decls, counts);
-            }
-        }
-        ExpressionDesc::CamlBlock(items, _, _) => {
-            for item in items {
-                collect_tailcall_use_counts_expression(item, decls, counts);
-            }
-        }
-        ExpressionDesc::Jsx(jsx) => {
-            for value in jsx.expressions() {
-                collect_tailcall_use_counts_expression(value, decls, counts);
-            }
-        }
-        ExpressionDesc::Object(entries) => {
-            for entry in entries {
-                let (crate::js_ir::ObjectEntry::Property(_, value)
-                | crate::js_ir::ObjectEntry::Spread(value)
-                | crate::js_ir::ObjectEntry::RecordSpread(value)) = entry;
-                collect_tailcall_use_counts_expression(value, decls, counts);
-            }
-        }
-    }
-}
-
-fn inline_function_decl_from_variable(decl: &VariableDeclaration) -> Option<InlineFunctionDecl> {
+fn inline_function_decl_from_variable(a: &JsArena, decl: &VarDecl) -> Option<InlineFunctionDecl> {
     if !is_lexical_binding_kind(decl.property) {
         return None;
     }
-
-    let Some(Expression {
-        desc:
-            ExpressionDesc::Fun {
-                is_method: false,
-                params,
-                body,
-                async_: false,
-                directive: None,
-                ..
-            },
-        ..
-    }) = &decl.value
-    else {
+    let ExprKind::Fun(f) = a.ek(decl.value?) else {
         return None;
     };
-
-    Some(InlineFunctionDecl {
-        params: params.clone(),
-        body: body.clone(),
-    })
+    let FunInfo {
+        is_method,
+        params,
+        body,
+        async_,
+        directive,
+        ..
+    } = a.fun(f);
+    (!is_method && !async_ && directive.is_none()).then_some(InlineFunctionDecl { params, body })
 }
 
-fn collect_once_pure_inline_decls_block(
-    block: &Block,
-    statuses: &HashMap<Ident, UsedStats>,
-    tail_callees: &HashSet<Ident>,
-    inline_decls: &mut HashMap<Ident, InlineFunctionDecl>,
-) {
-    for stmt in block {
-        collect_once_pure_inline_decls_statement(stmt, statuses, tail_callees, inline_decls);
-    }
+struct OncePureDecls<'s> {
+    statuses: &'s HashMap<Ident, UsedStats>,
+    tail_callees: &'s HashSet<Ident>,
+    inline_decls: HashMap<Ident, InlineFunctionDecl>,
 }
 
-fn collect_once_pure_inline_decls_statement(
-    stmt: &Statement,
-    statuses: &HashMap<Ident, UsedStats>,
-    tail_callees: &HashSet<Ident>,
-    inline_decls: &mut HashMap<Ident, InlineFunctionDecl>,
-) {
-    match &stmt.desc {
-        StatementDesc::Block(block) => {
-            collect_once_pure_inline_decls_block(block, statuses, tail_callees, inline_decls)
-        }
-        StatementDesc::Variable(decl) => {
-            if statuses.get(&decl.ident).copied() == Some(UsedStats::OncePure)
-                && tail_callees.contains(&decl.ident)
-                && let Some(inline_decl) = inline_function_decl_from_variable(decl)
-            {
-                inline_decls.insert(decl.ident, inline_decl);
-            }
-            if let Some(value) = &decl.value {
-                collect_once_pure_inline_decls_expression(
-                    value,
-                    statuses,
-                    tail_callees,
-                    inline_decls,
-                );
-            }
-        }
-        StatementDesc::Exp(expr) | StatementDesc::Return(expr) | StatementDesc::Throw(expr) => {
-            collect_once_pure_inline_decls_expression(expr, statuses, tail_callees, inline_decls);
-        }
-        StatementDesc::If(cond, then_block, else_block) => {
-            collect_once_pure_inline_decls_expression(cond, statuses, tail_callees, inline_decls);
-            collect_once_pure_inline_decls_block(then_block, statuses, tail_callees, inline_decls);
-            collect_once_pure_inline_decls_block(else_block, statuses, tail_callees, inline_decls);
-        }
-        StatementDesc::While(_, cond, body) => {
-            collect_once_pure_inline_decls_expression(cond, statuses, tail_callees, inline_decls);
-            collect_once_pure_inline_decls_block(body, statuses, tail_callees, inline_decls);
-        }
-        StatementDesc::ForRange(_, start, finish, _, _, body) => {
-            if let Some(start) = start {
-                collect_once_pure_inline_decls_expression(
-                    start,
-                    statuses,
-                    tail_callees,
-                    inline_decls,
-                );
-            }
-            collect_once_pure_inline_decls_expression(finish, statuses, tail_callees, inline_decls);
-            collect_once_pure_inline_decls_block(body, statuses, tail_callees, inline_decls);
-        }
-        StatementDesc::ForOf(_, _, iterable, body)
-        | StatementDesc::ForAwaitOf(_, _, iterable, body) => {
-            collect_once_pure_inline_decls_expression(
-                iterable,
-                statuses,
-                tail_callees,
-                inline_decls,
-            );
-            collect_once_pure_inline_decls_block(body, statuses, tail_callees, inline_decls);
-        }
-        StatementDesc::IntSwitch(test, clauses, default) => {
-            collect_once_pure_inline_decls_expression(test, statuses, tail_callees, inline_decls);
-            for (_, clause) in clauses {
-                collect_once_pure_inline_decls_block(
-                    &clause.body,
-                    statuses,
-                    tail_callees,
-                    inline_decls,
-                );
-            }
-            if let Some(default) = default {
-                collect_once_pure_inline_decls_block(default, statuses, tail_callees, inline_decls);
-            }
-        }
-        StatementDesc::StringSwitch(test, clauses, default) => {
-            collect_once_pure_inline_decls_expression(test, statuses, tail_callees, inline_decls);
-            for clause in clauses {
-                collect_once_pure_inline_decls_block(
-                    &clause.clause.body,
-                    statuses,
-                    tail_callees,
-                    inline_decls,
-                );
-            }
-            if let Some(default) = default {
-                collect_once_pure_inline_decls_block(default, statuses, tail_callees, inline_decls);
-            }
-        }
-        StatementDesc::Try(body, catch, finally) => {
-            collect_once_pure_inline_decls_block(body, statuses, tail_callees, inline_decls);
-            if let Some((_, block)) = catch {
-                collect_once_pure_inline_decls_block(block, statuses, tail_callees, inline_decls);
-            }
-            if let Some(block) = finally {
-                collect_once_pure_inline_decls_block(block, statuses, tail_callees, inline_decls);
-            }
-        }
-        StatementDesc::Debugger | StatementDesc::Break(_) | StatementDesc::Continue(_) => {}
-    }
-}
-
-fn collect_once_pure_inline_decls_expression(
-    expr: &Expression,
-    statuses: &HashMap<Ident, UsedStats>,
-    tail_callees: &HashSet<Ident>,
-    inline_decls: &mut HashMap<Ident, InlineFunctionDecl>,
-) {
-    match &expr.desc {
-        ExpressionDesc::Var(_)
-        | ExpressionDesc::Undefined { .. }
-        | ExpressionDesc::Null
-        | ExpressionDesc::Bool(_)
-        | ExpressionDesc::Str(_)
-        | ExpressionDesc::TemplateLiteral(_)
-        | ExpressionDesc::JsonLiteral(_)
-        | ExpressionDesc::RawJsCode(_)
-        | ExpressionDesc::Number(_) => {}
-        ExpressionDesc::Length(inner, _)
-        | ExpressionDesc::IsNullOrUndefined(inner)
-        | ExpressionDesc::Typeof(inner)
-        | ExpressionDesc::JsNot(inner)
-        | ExpressionDesc::JsBnot(inner)
-        | ExpressionDesc::CamlBlockTag(inner, _)
-        | ExpressionDesc::OptionalBlock(inner, _)
-        | ExpressionDesc::Await(inner)
-        | ExpressionDesc::Spread(inner)
-        | ExpressionDesc::StaticIndex(inner, _, _)
-        | ExpressionDesc::New(inner, None) => {
-            collect_once_pure_inline_decls_expression(inner, statuses, tail_callees, inline_decls)
-        }
-        ExpressionDesc::RecordRest(_, inner) => {
-            collect_once_pure_inline_decls_expression(inner, statuses, tail_callees, inline_decls)
-        }
-        ExpressionDesc::StringAppend(left, right)
-        | ExpressionDesc::In(left, right)
-        | ExpressionDesc::Seq(left, right)
-        | ExpressionDesc::Bin(_, left, right)
-        | ExpressionDesc::FlatCall(left, right)
-        | ExpressionDesc::ArrayIndex(left, right) => {
-            collect_once_pure_inline_decls_expression(left, statuses, tail_callees, inline_decls);
-            collect_once_pure_inline_decls_expression(right, statuses, tail_callees, inline_decls);
-        }
-        ExpressionDesc::Cond(test, consequent, alternate) => {
-            collect_once_pure_inline_decls_expression(test, statuses, tail_callees, inline_decls);
-            collect_once_pure_inline_decls_expression(
-                consequent,
-                statuses,
-                tail_callees,
-                inline_decls,
-            );
-            collect_once_pure_inline_decls_expression(
-                alternate,
-                statuses,
-                tail_callees,
-                inline_decls,
-            );
-        }
-        ExpressionDesc::Call(func, args, _) => {
-            collect_once_pure_inline_decls_expression(func, statuses, tail_callees, inline_decls);
-            for arg in args {
-                collect_once_pure_inline_decls_expression(
-                    arg,
-                    statuses,
-                    tail_callees,
-                    inline_decls,
-                );
-            }
-        }
-        ExpressionDesc::TaggedTemplate(tag, _, values) => {
-            collect_once_pure_inline_decls_expression(tag, statuses, tail_callees, inline_decls);
-            for value in values {
-                collect_once_pure_inline_decls_expression(
-                    value,
-                    statuses,
-                    tail_callees,
-                    inline_decls,
-                );
-            }
-        }
-        ExpressionDesc::InterpolatedTemplate { values, .. } => {
-            for value in values {
-                collect_once_pure_inline_decls_expression(
-                    value,
-                    statuses,
-                    tail_callees,
-                    inline_decls,
-                );
-            }
-        }
-        ExpressionDesc::New(target, Some(args)) => {
-            collect_once_pure_inline_decls_expression(target, statuses, tail_callees, inline_decls);
-            for arg in args {
-                collect_once_pure_inline_decls_expression(
-                    arg,
-                    statuses,
-                    tail_callees,
-                    inline_decls,
-                );
-            }
-        }
-        ExpressionDesc::Fun { body, .. } => {
-            collect_once_pure_inline_decls_block(body, statuses, tail_callees, inline_decls)
-        }
-        ExpressionDesc::Array(items, _) => {
-            for item in items {
-                collect_once_pure_inline_decls_expression(
-                    item,
-                    statuses,
-                    tail_callees,
-                    inline_decls,
-                );
-            }
-        }
-        ExpressionDesc::CamlBlock(items, _, _) => {
-            for item in items {
-                collect_once_pure_inline_decls_expression(
-                    item,
-                    statuses,
-                    tail_callees,
-                    inline_decls,
-                );
-            }
-        }
-        ExpressionDesc::Jsx(jsx) => {
-            for value in jsx.expressions() {
-                collect_once_pure_inline_decls_expression(
-                    value,
-                    statuses,
-                    tail_callees,
-                    inline_decls,
-                );
-            }
-        }
-        ExpressionDesc::Object(entries) => {
-            for entry in entries {
-                let (crate::js_ir::ObjectEntry::Property(_, value)
-                | crate::js_ir::ObjectEntry::Spread(value)
-                | crate::js_ir::ObjectEntry::RecordSpread(value)) = entry;
-                collect_once_pure_inline_decls_expression(
-                    value,
-                    statuses,
-                    tail_callees,
-                    inline_decls,
-                );
-            }
+impl Visitor for OncePureDecls<'_> {
+    fn visit_declaration(&mut self, a: &JsArena, decl: &VarDecl) {
+        if self.statuses.get(&decl.ident).copied() == Some(UsedStats::OncePure)
+            && self.tail_callees.contains(&decl.ident)
+            && let Some(inline_decl) = inline_function_decl_from_variable(a, decl)
+        {
+            self.inline_decls.insert(decl.ident, inline_decl);
         }
     }
 }
 
-fn immutable_param_mask(params: &[Ident], body: &Block) -> Vec<bool> {
+fn immutable_param_mask(a: &JsArena, params: &[Ident], body: &[Stmt]) -> Vec<bool> {
     params
         .iter()
-        .map(|param| !block_assigns_ident(body, param))
+        .map(|param| !block_assigns_ident(a, body, param))
         .collect()
 }
 
-fn block_assigns_ident(block: &Block, ident: &Ident) -> bool {
-    block
-        .iter()
-        .any(|stmt| statement_assigns_ident(stmt, ident))
-}
-
-fn statement_assigns_ident(stmt: &Statement, ident: &Ident) -> bool {
-    match &stmt.desc {
-        StatementDesc::Block(block) => block_assigns_ident(block, ident),
-        StatementDesc::Variable(decl) => decl
-            .value
-            .as_ref()
-            .is_some_and(|value| expression_assigns_ident(value, ident)),
-        StatementDesc::Exp(expr) | StatementDesc::Return(expr) | StatementDesc::Throw(expr) => {
-            expression_assigns_ident(expr, ident)
-        }
-        StatementDesc::If(cond, then_block, else_block) => {
-            expression_assigns_ident(cond, ident)
-                || block_assigns_ident(then_block, ident)
-                || block_assigns_ident(else_block, ident)
-        }
-        StatementDesc::While(_, cond, body) => {
-            expression_assigns_ident(cond, ident) || block_assigns_ident(body, ident)
-        }
-        StatementDesc::ForRange(_, start, finish, _, _, body) => {
-            start
-                .as_ref()
-                .is_some_and(|expr| expression_assigns_ident(expr, ident))
-                || expression_assigns_ident(finish, ident)
-                || block_assigns_ident(body, ident)
-        }
-        StatementDesc::ForOf(_, _, iterable, body)
-        | StatementDesc::ForAwaitOf(_, _, iterable, body) => {
-            expression_assigns_ident(iterable, ident) || block_assigns_ident(body, ident)
-        }
-        StatementDesc::IntSwitch(test, clauses, default) => {
-            expression_assigns_ident(test, ident)
-                || clauses
-                    .iter()
-                    .any(|(_, clause)| block_assigns_ident(&clause.body, ident))
-                || default
-                    .as_ref()
-                    .is_some_and(|block| block_assigns_ident(block, ident))
-        }
-        StatementDesc::StringSwitch(test, clauses, default) => {
-            expression_assigns_ident(test, ident)
-                || clauses
-                    .iter()
-                    .any(|clause| block_assigns_ident(&clause.clause.body, ident))
-                || default
-                    .as_ref()
-                    .is_some_and(|block| block_assigns_ident(block, ident))
-        }
-        StatementDesc::Try(body, catch, finally) => {
-            block_assigns_ident(body, ident)
-                || catch
-                    .as_ref()
-                    .is_some_and(|(_, block)| block_assigns_ident(block, ident))
-                || finally
-                    .as_ref()
-                    .is_some_and(|block| block_assigns_ident(block, ident))
-        }
-        StatementDesc::Debugger | StatementDesc::Break(_) | StatementDesc::Continue(_) => false,
+fn block_assigns_ident(a: &JsArena, block: &[Stmt], ident: &Ident) -> bool {
+    struct Assigns<'i> {
+        ident: &'i Ident,
+        found: bool,
     }
-}
-
-fn expression_assigns_ident(expr: &Expression, ident: &Ident) -> bool {
-    match &expr.desc {
-        ExpressionDesc::Bin(BinOp::Eq, left, right) => {
-            matches!(
-                left.as_ref(),
-                Expression {
-                    desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(lhs)),
-                    ..
-                } if lhs.same(ident)
-            ) || expression_assigns_ident(left, ident)
-                || expression_assigns_ident(right, ident)
+    impl Visitor for Assigns<'_> {
+        fn visit_expression(&mut self, a: &JsArena, e: Expr) {
+            if let ExprKind::Bin(BinOp::Eq, left, _) = a.ek(e)
+                && let ExprKind::Var(lhs) = a.ek(left)
+                && a.ident(lhs).same(self.ident)
+            {
+                self.found = true;
+            }
         }
-        ExpressionDesc::Length(inner, _)
-        | ExpressionDesc::IsNullOrUndefined(inner)
-        | ExpressionDesc::Typeof(inner)
-        | ExpressionDesc::JsNot(inner)
-        | ExpressionDesc::JsBnot(inner)
-        | ExpressionDesc::CamlBlockTag(inner, _)
-        | ExpressionDesc::OptionalBlock(inner, _)
-        | ExpressionDesc::Await(inner)
-        | ExpressionDesc::Spread(inner)
-        | ExpressionDesc::RecordRest(_, inner) => expression_assigns_ident(inner, ident),
-        ExpressionDesc::StringAppend(left, right)
-        | ExpressionDesc::In(left, right)
-        | ExpressionDesc::Seq(left, right)
-        | ExpressionDesc::Bin(_, left, right)
-        | ExpressionDesc::FlatCall(left, right)
-        | ExpressionDesc::ArrayIndex(left, right) => {
-            expression_assigns_ident(left, ident) || expression_assigns_ident(right, ident)
+        fn done(&self) -> bool {
+            self.found
         }
-        ExpressionDesc::Cond(test, consequent, alternate) => {
-            expression_assigns_ident(test, ident)
-                || expression_assigns_ident(consequent, ident)
-                || expression_assigns_ident(alternate, ident)
-        }
-        ExpressionDesc::Call(func, args, _) => {
-            expression_assigns_ident(func, ident)
-                || args.iter().any(|arg| expression_assigns_ident(arg, ident))
-        }
-        ExpressionDesc::TaggedTemplate(tag, _, values) => {
-            expression_assigns_ident(tag, ident)
-                || values
-                    .iter()
-                    .any(|expr| expression_assigns_ident(expr, ident))
-        }
-        ExpressionDesc::InterpolatedTemplate { values, .. } => values
-            .iter()
-            .any(|expr| expression_assigns_ident(expr, ident)),
-        ExpressionDesc::StaticIndex(target, _, _) => expression_assigns_ident(target, ident),
-        ExpressionDesc::New(target, args) => {
-            expression_assigns_ident(target, ident)
-                || args
-                    .as_ref()
-                    .is_some_and(|args| args.iter().any(|arg| expression_assigns_ident(arg, ident)))
-        }
-        ExpressionDesc::Fun { body, .. } => block_assigns_ident(body, ident),
-        ExpressionDesc::Array(items, _) => items
-            .iter()
-            .any(|item| expression_assigns_ident(item, ident)),
-        ExpressionDesc::CamlBlock(items, _, _) => items
-            .iter()
-            .any(|item| expression_assigns_ident(item, ident)),
-        ExpressionDesc::Jsx(jsx) => jsx
-            .expressions()
-            .any(|value| expression_assigns_ident(value, ident)),
-        ExpressionDesc::Object(entries) => entries
-            .iter()
-            .any(|entry| expression_assigns_ident(entry.expression(), ident)),
-        ExpressionDesc::Var(_)
-        | ExpressionDesc::Undefined { .. }
-        | ExpressionDesc::Null
-        | ExpressionDesc::Bool(_)
-        | ExpressionDesc::Str(_)
-        | ExpressionDesc::TemplateLiteral(_)
-        | ExpressionDesc::JsonLiteral(_)
-        | ExpressionDesc::RawJsCode(_)
-        | ExpressionDesc::Number(_) => false,
     }
+    let mut assigns = Assigns {
+        ident,
+        found: false,
+    };
+    walk_block(&mut assigns, a, block);
+    assigns.found
 }
 
 fn inline_tailcall_call(
+    j: &mut JsArena,
     immutable_mask: &[bool],
     params: &[Ident],
-    args: Vec<Expression>,
+    args: Vec<Expr>,
     body: Block,
 ) -> Block {
     let mut bindings = Vec::new();
@@ -1263,46 +449,42 @@ fn inline_tailcall_call(
 
     for ((param, arg), immutable) in params
         .iter()
-        .cloned()
-        .zip(args.into_iter())
+        .copied()
+        .zip(args)
         .zip(immutable_mask.iter().copied())
     {
         if immutable {
-            if let ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)) = &arg.desc {
-                substitution.vars.insert(param, *id);
+            if let ExprKind::Var(id) = j.ek(arg) {
+                substitution.vars.insert(param, j.ident(id));
                 continue;
             }
-            if is_substitutable_constant(&arg) {
+            if is_substitutable_constant(j, arg) {
                 substitution.consts.insert(param, arg);
                 continue;
             }
         }
 
-        bindings.push(Statement::variable(VariableDeclaration {
-            ident: param,
-            value: Some(arg),
-            property: LetKind::Variable,
-            ident_info: IdentInfo::default(),
-        }));
+        bindings.push(S::define(param, Some(arg), LetKind::Variable, j));
     }
 
     let body = if substitution.vars.is_empty() && substitution.consts.is_empty() {
         body
     } else {
-        substitute_inline_block(body, &substitution)
+        SubstituteInline { substitution }.block_items(j, &body)
     };
 
     bindings.into_iter().chain(body).collect()
 }
 
-/// js_pass_tailcall_inline.ml `substitute_arguments`: `vars` maps a parameter
-/// to the variable argument that replaces it, `consts` to the constant
-/// argument that replaces it. Both apply only to parameters that are never
-/// assigned, so every occurrence of such a parameter is a read.
+/// The substitution that inlining a tail call applies to the callee body:
+/// each parameter bound to a variable is renamed to it, and each parameter
+/// bound to a substitutable constant is replaced by the constant. Both apply
+/// only to parameters that are never assigned, so every occurrence of such a
+/// parameter is a read.
 #[derive(Clone, Default)]
 struct InlineSubstitution {
     vars: HashMap<Ident, Ident>,
-    consts: HashMap<Ident, Expression>,
+    consts: HashMap<Ident, Expr>,
 }
 
 impl InlineSubstitution {
@@ -1315,13 +497,10 @@ impl InlineSubstitution {
 /// js_pass_tailcall_inline.ml `is_substitutable_constant`: constants that are
 /// as cheap to repeat as the variable they replace: they allocate nothing,
 /// have no side effect, and print short.
-fn is_substitutable_constant(expr: &Expression) -> bool {
+fn is_substitutable_constant(j: &JsArena, expr: Expr) -> bool {
     matches!(
-        expr.desc,
-        ExpressionDesc::Number(_)
-            | ExpressionDesc::Bool(_)
-            | ExpressionDesc::Undefined { .. }
-            | ExpressionDesc::Null
+        j.ek(expr),
+        ExprKind::Number(_) | ExprKind::Bool(_) | ExprKind::Undefined { .. } | ExprKind::Null
     )
 }
 
@@ -1329,596 +508,233 @@ fn is_substitutable_constant(expr: &Expression) -> bool {
 /// condition that is a parameter replaced by a boolean or integer constant, or
 /// its negation. Only such conditions are decided while substituting: the
 /// substitution is what made them constant.
-fn substituted_truth(consts: &HashMap<Ident, Expression>, expr: &Expression) -> Option<bool> {
-    match &expr.desc {
-        ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)) => {
-            match consts.get(id).map(|c| &c.desc) {
-                Some(ExpressionDesc::Bool(b)) => Some(*b),
-                Some(ExpressionDesc::Number(crate::js_ir::op::Number::Int { i, .. })) => {
-                    Some(*i != 0)
-                }
+fn substituted_truth(j: &JsArena, consts: &HashMap<Ident, Expr>, expr: Expr) -> Option<bool> {
+    match j.ek(expr) {
+        ExprKind::Var(id) => match consts.get(&j.ident(id)).map(|c| j.ek(*c)) {
+            Some(ExprKind::Bool(b)) => Some(b),
+            Some(ExprKind::Number(n)) => match j.number(n) {
+                crate::js_ir::op::Number::Int { i, .. } => Some(*i != 0),
                 _ => None,
-            }
-        }
-        ExpressionDesc::JsNot(inner) => substituted_truth(consts, inner).map(|b| !b),
+            },
+            _ => None,
+        },
+        ExprKind::JsNot(inner) => substituted_truth(j, consts, inner).map(|b| !b),
         _ => None,
     }
 }
 
-fn substitute_inline_block(block: Block, substitution: &InlineSubstitution) -> Block {
-    let mut current_substitution = substitution.clone();
-    let mut rewritten = Vec::with_capacity(block.len());
-
-    for stmt in block {
-        let stmt = substitute_inline_statement(stmt, &current_substitution);
-        shadow_inline_statement_bindings(&stmt, &mut current_substitution);
-        rewritten.push(stmt);
-    }
-
-    rewritten
+/// Renames inlined parameters, respecting shadowing by inner bindings.
+struct SubstituteInline {
+    substitution: InlineSubstitution,
 }
 
-fn substitute_inline_statement(stmt: Statement, substitution: &InlineSubstitution) -> Statement {
-    // A conditional whose condition becomes a constant keeps only the branch
-    // it takes.
-    if let StatementDesc::If(pred, _, _) = &stmt.desc
-        && let Some(truth) = substituted_truth(&substitution.consts, pred)
-    {
-        let StatementDesc::If(_, ifso, ifnot) = stmt.desc else {
-            unreachable!("checked above")
-        };
-        return Statement::block(substitute_inline_block(
-            if truth { ifso } else { ifnot },
-            substitution,
-        ));
-    }
-    let Statement {
-        source_loc,
-        desc,
-        comment,
-    } = stmt;
-    let desc = match desc {
-        StatementDesc::Block(block) => {
-            StatementDesc::Block(substitute_inline_block(block, substitution))
+impl SubstituteInline {
+    /// Maps `block` with `shadowed` removed from the substitution.
+    fn pruned_block(&mut self, j: &mut JsArena, block: StmtList, shadowed: &[Ident]) -> StmtList {
+        let saved = self.substitution.clone();
+        for ident in shadowed {
+            self.substitution.remove(ident);
         }
-        StatementDesc::Variable(mut decl) => {
-            decl.value = decl
-                .value
-                .map(|value| substitute_inline_expression(value, substitution));
-            StatementDesc::Variable(decl)
-        }
-        StatementDesc::Exp(expr) => {
-            StatementDesc::Exp(substitute_inline_expression(expr, substitution))
-        }
-        StatementDesc::If(cond, then_block, else_block) => StatementDesc::If(
-            substitute_inline_expression(cond, substitution),
-            substitute_inline_block(then_block, substitution),
-            substitute_inline_block(else_block, substitution),
-        ),
-        StatementDesc::While(label, cond, body) => StatementDesc::While(
-            label,
-            substitute_inline_expression(cond, substitution),
-            substitute_inline_block(body, substitution),
-        ),
-        StatementDesc::ForRange(label, start, finish, ident, direction, body) => {
-            let body_substitution = prune_inline_substitution(substitution, [&ident]);
-            StatementDesc::ForRange(
-                label,
-                start.map(|expr| Box::new(substitute_inline_expression(*expr, substitution))),
-                Box::new(substitute_inline_expression(*finish, substitution)),
-                ident,
-                direction,
-                substitute_inline_block(body, &body_substitution),
-            )
-        }
-        StatementDesc::ForOf(label, ident, iterable, body) => {
-            let body_substitution = prune_inline_substitution(substitution, [&ident]);
-            StatementDesc::ForOf(
-                label,
-                ident,
-                Box::new(substitute_inline_expression(*iterable, substitution)),
-                substitute_inline_block(body, &body_substitution),
-            )
-        }
-        StatementDesc::ForAwaitOf(label, ident, iterable, body) => {
-            let body_substitution = prune_inline_substitution(substitution, [&ident]);
-            StatementDesc::ForAwaitOf(
-                label,
-                ident,
-                Box::new(substitute_inline_expression(*iterable, substitution)),
-                substitute_inline_block(body, &body_substitution),
-            )
-        }
-        StatementDesc::Continue(label) => StatementDesc::Continue(label),
-        StatementDesc::Break(label) => StatementDesc::Break(label),
-        StatementDesc::Return(expr) => {
-            StatementDesc::Return(substitute_inline_expression(expr, substitution))
-        }
-        StatementDesc::IntSwitch(test, clauses, default) => StatementDesc::IntSwitch(
-            substitute_inline_expression(test, substitution),
-            clauses
-                .into_iter()
-                .map(|(value, clause)| {
-                    (
-                        value,
-                        CaseClause {
-                            source_loc: clause.source_loc,
-                            body: substitute_inline_block(clause.body, substitution),
-                            should_break: clause.should_break,
-                            comment: clause.comment,
-                        },
-                    )
-                })
-                .collect(),
-            default.map(|block| substitute_inline_block(block, substitution)),
-        ),
-        StatementDesc::StringSwitch(test, clauses, default) => StatementDesc::StringSwitch(
-            substitute_inline_expression(test, substitution),
-            clauses
-                .into_iter()
-                .map(|clause| StringClause {
-                    tag_type: clause.tag_type,
-                    clause: CaseClause {
-                        source_loc: None,
-                        body: substitute_inline_block(clause.clause.body, substitution),
-                        should_break: clause.clause.should_break,
-                        comment: clause.clause.comment,
-                    },
-                })
-                .collect(),
-            default.map(|block| substitute_inline_block(block, substitution)),
-        ),
-        StatementDesc::Throw(expr) => {
-            StatementDesc::Throw(substitute_inline_expression(expr, substitution))
-        }
-        StatementDesc::Try(body, catch, finally) => StatementDesc::Try(
-            substitute_inline_block(body, substitution),
-            catch.map(|(ident, block)| {
-                let catch_substitution = prune_inline_substitution(substitution, [&ident]);
-                (ident, substitute_inline_block(block, &catch_substitution))
-            }),
-            finally.map(|block| substitute_inline_block(block, substitution)),
-        ),
-        StatementDesc::Debugger => StatementDesc::Debugger,
-    };
-
-    Statement {
-        source_loc,
-        desc,
-        comment,
+        let block = self.block(j, block);
+        self.substitution = saved;
+        block
     }
 }
 
-fn substitute_inline_expression(expr: Expression, substitution: &InlineSubstitution) -> Expression {
-    match &expr.desc {
-        ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)) => {
-            if let Some(constant) = substitution.consts.get(id) {
-                return constant.clone();
+impl Mapper for SubstituteInline {
+    fn block_items(&mut self, j: &mut JsArena, block: &[Stmt]) -> Vec<Stmt> {
+        let saved = self.substitution.clone();
+        let mut rewritten = Vec::with_capacity(block.len());
+        for stmt in block {
+            let stmt = self.statement(j, *stmt);
+            if let StmtKind::Variable(v) = j.sk(stmt) {
+                let ident = j.var(v).ident;
+                self.substitution.remove(&ident);
             }
+            rewritten.push(stmt);
         }
-        ExpressionDesc::Cond(pred, _, _) => {
-            if let Some(truth) = substituted_truth(&substitution.consts, pred) {
-                let ExpressionDesc::Cond(_, ifso, ifnot) = expr.desc else {
-                    unreachable!("checked above")
+        self.substitution = saved;
+        rewritten
+    }
+
+    fn statement(&mut self, j: &mut JsArena, stmt: Stmt) -> Stmt {
+        // A conditional whose condition becomes a constant keeps only the
+        // branch it takes.
+        if let StmtKind::If(pred, ifso, ifnot) = j.sk(stmt)
+            && let Some(truth) = substituted_truth(j, &self.substitution.consts, pred)
+        {
+            let branch = j.block_vec(if truth { ifso } else { ifnot });
+            let branch = self.block_items(j, &branch);
+            return S::block(&branch, j);
+        }
+        match j.sk(stmt) {
+            StmtKind::ForRange(id) => {
+                let info = j.for_range(id);
+                let init = info.init.map(|e| self.expression(j, e));
+                let end = self.expression(j, info.end);
+                let ident = j.ident(info.ident);
+                let body = self.pruned_block(j, info.body, &[ident]);
+                let id = j.for_range_id(crate::js_ir::arena::ForRangeInfo {
+                    init,
+                    end,
+                    body,
+                    ..info
+                });
+                j.rekind_stmt(stmt, StmtKind::ForRange(id))
+            }
+            StmtKind::ForOf(id) | StmtKind::ForAwaitOf(id) => {
+                let info = j.for_of(id);
+                let iterable = self.expression(j, info.iterable);
+                let ident = j.ident(info.ident);
+                let body = self.pruned_block(j, info.body, &[ident]);
+                let new = j.for_of_id(crate::js_ir::arena::ForOfInfo {
+                    iterable,
+                    body,
+                    ..info
+                });
+                let kind = if matches!(j.sk(stmt), StmtKind::ForOf(_)) {
+                    StmtKind::ForOf(new)
+                } else {
+                    StmtKind::ForAwaitOf(new)
                 };
-                return substitute_inline_expression(
-                    *if truth { ifso } else { ifnot },
-                    substitution,
-                );
+                j.rekind_stmt(stmt, kind)
             }
-        }
-        ExpressionDesc::JsNot(pred) => {
-            if let Some(truth) = substituted_truth(&substitution.consts, pred) {
-                return Expression::bool(!truth);
+            StmtKind::StringSwitch(test, id) => {
+                let test = self.expression(j, test);
+                let info = j.string_switch(id).clone();
+                let clauses = info
+                    .clauses
+                    .iter()
+                    .map(|c| {
+                        let body = self.block(j, c.clause.body);
+                        StringClauseInfo {
+                            tag_type: c.tag_type.clone(),
+                            clause: crate::js_ir::arena::Clause {
+                                body,
+                                source_loc: None,
+                                ..c.clause
+                            },
+                        }
+                    })
+                    .collect();
+                let default = info.default.map(|d| self.block(j, d));
+                let id =
+                    j.string_switch_id(crate::js_ir::arena::StringSwitchInfo { clauses, default });
+                j.rekind_stmt(stmt, StmtKind::StringSwitch(test, id))
             }
+            StmtKind::Try(id) => {
+                let info = j.try_info(id);
+                let body = self.block(j, info.body);
+                let catch = info.catch.map(|(ident, b)| {
+                    let shadow = j.ident(ident);
+                    (ident, self.pruned_block(j, b, &[shadow]))
+                });
+                let finally = info.finally.map(|b| self.block(j, b));
+                let id = j.try_id(crate::js_ir::arena::TryInfo {
+                    body,
+                    catch,
+                    finally,
+                });
+                j.rekind_stmt(stmt, StmtKind::Try(id))
+            }
+            _ => map_statement_children(self, j, stmt),
         }
-        _ => {}
     }
-    let Expression {
-        source_loc,
-        desc,
-        comment,
-    } = expr;
-    let desc = match desc {
-        ExpressionDesc::Length(inner, obj) => ExpressionDesc::Length(
-            Box::new(substitute_inline_expression(*inner, substitution)),
-            obj,
-        ),
-        ExpressionDesc::IsNullOrUndefined(inner) => ExpressionDesc::IsNullOrUndefined(Box::new(
-            substitute_inline_expression(*inner, substitution),
-        )),
-        ExpressionDesc::StringAppend(left, right) => ExpressionDesc::StringAppend(
-            Box::new(substitute_inline_expression(*left, substitution)),
-            Box::new(substitute_inline_expression(*right, substitution)),
-        ),
-        ExpressionDesc::Bool(value) => ExpressionDesc::Bool(value),
-        ExpressionDesc::Typeof(inner) => {
-            ExpressionDesc::Typeof(Box::new(substitute_inline_expression(*inner, substitution)))
-        }
-        ExpressionDesc::In(left, right) => ExpressionDesc::In(
-            Box::new(substitute_inline_expression(*left, substitution)),
-            Box::new(substitute_inline_expression(*right, substitution)),
-        ),
-        ExpressionDesc::JsNot(inner) => {
-            ExpressionDesc::JsNot(Box::new(substitute_inline_expression(*inner, substitution)))
-        }
-        ExpressionDesc::JsBnot(inner) => {
-            ExpressionDesc::JsBnot(Box::new(substitute_inline_expression(*inner, substitution)))
-        }
-        ExpressionDesc::Seq(left, right) => ExpressionDesc::Seq(
-            Box::new(substitute_inline_expression(*left, substitution)),
-            Box::new(substitute_inline_expression(*right, substitution)),
-        ),
-        ExpressionDesc::Cond(test, consequent, alternate) => ExpressionDesc::Cond(
-            Box::new(substitute_inline_expression(*test, substitution)),
-            Box::new(substitute_inline_expression(*consequent, substitution)),
-            Box::new(substitute_inline_expression(*alternate, substitution)),
-        ),
-        ExpressionDesc::Bin(op, left, right) => ExpressionDesc::Bin(
-            op,
-            Box::new(substitute_inline_expression(*left, substitution)),
-            Box::new(substitute_inline_expression(*right, substitution)),
-        ),
-        ExpressionDesc::FlatCall(func, args) => ExpressionDesc::FlatCall(
-            Box::new(substitute_inline_expression(*func, substitution)),
-            Box::new(substitute_inline_expression(*args, substitution)),
-        ),
-        ExpressionDesc::Call(func, args, info) => ExpressionDesc::Call(
-            Box::new(substitute_inline_expression(*func, substitution)),
-            args.into_iter()
-                .map(|arg| substitute_inline_expression(arg, substitution))
-                .collect(),
-            info,
-        ),
-        ExpressionDesc::ArrayIndex(left, right) => ExpressionDesc::ArrayIndex(
-            Box::new(substitute_inline_expression(*left, substitution)),
-            Box::new(substitute_inline_expression(*right, substitution)),
-        ),
-        ExpressionDesc::TaggedTemplate(tag, strings, values) => ExpressionDesc::TaggedTemplate(
-            Box::new(substitute_inline_expression(*tag, substitution)),
-            strings,
-            values
-                .into_iter()
-                .map(|expr| substitute_inline_expression(expr, substitution))
-                .collect(),
-        ),
-        ExpressionDesc::InterpolatedTemplate { segments, values } => {
-            ExpressionDesc::InterpolatedTemplate {
-                segments,
-                values: values
-                    .into_iter()
-                    .map(|expr| substitute_inline_expression(expr, substitution))
-                    .collect(),
-            }
-        }
-        ExpressionDesc::StaticIndex(target, field, position) => ExpressionDesc::StaticIndex(
-            Box::new(substitute_inline_expression(*target, substitution)),
-            field,
-            position,
-        ),
-        ExpressionDesc::New(target, args) => ExpressionDesc::New(
-            Box::new(substitute_inline_expression(*target, substitution)),
-            args.map(|args| {
-                args.into_iter()
-                    .map(|arg| substitute_inline_expression(arg, substitution))
-                    .collect()
-            }),
-        ),
-        ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)) => {
-            let id = substitution.vars.get(&id).cloned().unwrap_or(id);
-            ExpressionDesc::Var(crate::js_ir::VIdent::Id(id))
-        }
-        ExpressionDesc::Var(crate::js_ir::VIdent::Qualified(module, member)) => {
-            ExpressionDesc::Var(crate::js_ir::VIdent::Qualified(module, member))
-        }
-        ExpressionDesc::Fun {
-            is_method,
-            params,
-            body,
-            env,
-            return_unit,
-            async_,
-            directive,
-        } => ExpressionDesc::Fun {
-            is_method,
-            body: {
-                let body_substitution = prune_inline_substitution(substitution, params.iter());
-                substitute_inline_block(body, &body_substitution)
-            },
-            params,
-            env,
-            return_unit,
-            async_,
-            directive,
-        },
-        ExpressionDesc::Str(txt) => ExpressionDesc::Str(txt),
-        ExpressionDesc::TemplateLiteral(segment) => ExpressionDesc::TemplateLiteral(segment),
-        ExpressionDesc::JsonLiteral(source) => ExpressionDesc::JsonLiteral(source),
-        ExpressionDesc::RawJsCode(info) => ExpressionDesc::RawJsCode(info),
-        ExpressionDesc::Array(items, mutable_flag) => ExpressionDesc::Array(
-            items
-                .into_iter()
-                .map(|item| substitute_inline_expression(item, substitution))
-                .collect(),
-            mutable_flag,
-        ),
-        ExpressionDesc::OptionalBlock(inner, flag) => ExpressionDesc::OptionalBlock(
-            Box::new(substitute_inline_expression(*inner, substitution)),
-            flag,
-        ),
-        ExpressionDesc::CamlBlock(items, mutable_flag, info) => ExpressionDesc::CamlBlock(
-            items
-                .into_iter()
-                .map(|item| substitute_inline_expression(item, substitution))
-                .collect(),
-            mutable_flag,
-            info,
-        ),
-        ExpressionDesc::CamlBlockTag(inner, field) => ExpressionDesc::CamlBlockTag(
-            Box::new(substitute_inline_expression(*inner, substitution)),
-            field,
-        ),
-        ExpressionDesc::Number(number) => ExpressionDesc::Number(number),
-        ExpressionDesc::Jsx(jsx) => ExpressionDesc::Jsx(Box::new(
-            jsx.map(|value| substitute_inline_expression(value, substitution)),
-        )),
-        ExpressionDesc::Object(entries) => ExpressionDesc::Object(
-            entries
-                .into_iter()
-                .map(|entry| entry.map(|value| substitute_inline_expression(value, substitution)))
-                .collect(),
-        ),
-        ExpressionDesc::Undefined { is_unit } => ExpressionDesc::Undefined { is_unit },
-        ExpressionDesc::Null => ExpressionDesc::Null,
-        ExpressionDesc::Await(inner) => {
-            ExpressionDesc::Await(Box::new(substitute_inline_expression(*inner, substitution)))
-        }
-        ExpressionDesc::Spread(inner) => {
-            ExpressionDesc::Spread(Box::new(substitute_inline_expression(*inner, substitution)))
-        }
-        ExpressionDesc::RecordRest(fields, source) => ExpressionDesc::RecordRest(
-            fields,
-            Box::new(substitute_inline_expression(*source, substitution)),
-        ),
-    };
 
-    Expression {
-        source_loc,
-        desc,
-        comment,
-    }
-}
-
-fn prune_inline_substitution<'a>(
-    substitution: &InlineSubstitution,
-    shadowed: impl IntoIterator<Item = &'a Ident>,
-) -> InlineSubstitution {
-    let mut pruned = substitution.clone();
-    for ident in shadowed {
-        pruned.remove(ident);
-    }
-    pruned
-}
-
-fn shadow_inline_statement_bindings(stmt: &Statement, substitution: &mut InlineSubstitution) {
-    if let StatementDesc::Variable(VariableDeclaration { ident, .. }) = &stmt.desc {
-        substitution.remove(ident);
-    }
-}
-
-fn apply_tailcall_used_stats_block(block: &mut Block, statuses: &HashMap<Ident, UsedStats>) {
-    for stmt in block {
-        apply_tailcall_used_stats_statement(stmt, statuses);
-    }
-}
-
-fn apply_tailcall_used_stats_statement(stmt: &mut Statement, statuses: &HashMap<Ident, UsedStats>) {
-    match &mut stmt.desc {
-        StatementDesc::Block(block) => apply_tailcall_used_stats_block(block, statuses),
-        StatementDesc::Variable(decl) => {
-            if let Some(status) = statuses.get(&decl.ident).copied() {
-                decl.ident_info.used_stats = status;
-            }
-            if let Some(value) = &mut decl.value {
-                apply_tailcall_used_stats_expression(value, statuses);
-            }
-        }
-        StatementDesc::Exp(expr) | StatementDesc::Return(expr) | StatementDesc::Throw(expr) => {
-            apply_tailcall_used_stats_expression(expr, statuses);
-        }
-        StatementDesc::If(_, then_block, else_block) => {
-            apply_tailcall_used_stats_block(then_block, statuses);
-            apply_tailcall_used_stats_block(else_block, statuses);
-        }
-        StatementDesc::While(_, _, body) => apply_tailcall_used_stats_block(body, statuses),
-        StatementDesc::ForRange(_, _, _, _, _, body) => {
-            apply_tailcall_used_stats_block(body, statuses)
-        }
-        StatementDesc::ForOf(_, _, _, body) | StatementDesc::ForAwaitOf(_, _, _, body) => {
-            apply_tailcall_used_stats_block(body, statuses)
-        }
-        StatementDesc::IntSwitch(_, clauses, default) => {
-            for (_, clause) in clauses {
-                apply_tailcall_used_stats_block(&mut clause.body, statuses);
-            }
-            if let Some(default) = default {
-                apply_tailcall_used_stats_block(default, statuses);
-            }
-        }
-        StatementDesc::StringSwitch(_, clauses, default) => {
-            for clause in clauses {
-                apply_tailcall_used_stats_block(&mut clause.clause.body, statuses);
-            }
-            if let Some(default) = default {
-                apply_tailcall_used_stats_block(default, statuses);
-            }
-        }
-        StatementDesc::Try(body, catch, finally) => {
-            apply_tailcall_used_stats_block(body, statuses);
-            if let Some((_, block)) = catch {
-                apply_tailcall_used_stats_block(block, statuses);
-            }
-            if let Some(block) = finally {
-                apply_tailcall_used_stats_block(block, statuses);
-            }
-        }
-        StatementDesc::Debugger | StatementDesc::Break(_) | StatementDesc::Continue(_) => {}
-    }
-}
-
-fn apply_tailcall_used_stats_expression(
-    expr: &mut Expression,
-    statuses: &HashMap<Ident, UsedStats>,
-) {
-    match &mut expr.desc {
-        ExpressionDesc::Length(inner, _)
-        | ExpressionDesc::IsNullOrUndefined(inner)
-        | ExpressionDesc::Typeof(inner)
-        | ExpressionDesc::JsNot(inner)
-        | ExpressionDesc::JsBnot(inner)
-        | ExpressionDesc::CamlBlockTag(inner, _)
-        | ExpressionDesc::OptionalBlock(inner, _)
-        | ExpressionDesc::Await(inner)
-        | ExpressionDesc::Spread(inner)
-        | ExpressionDesc::RecordRest(_, inner) => {
-            apply_tailcall_used_stats_expression(inner, statuses)
-        }
-        ExpressionDesc::StringAppend(left, right)
-        | ExpressionDesc::In(left, right)
-        | ExpressionDesc::Seq(left, right)
-        | ExpressionDesc::Bin(_, left, right)
-        | ExpressionDesc::FlatCall(left, right)
-        | ExpressionDesc::ArrayIndex(left, right) => {
-            apply_tailcall_used_stats_expression(left, statuses);
-            apply_tailcall_used_stats_expression(right, statuses);
-        }
-        ExpressionDesc::Cond(test, consequent, alternate) => {
-            apply_tailcall_used_stats_expression(test, statuses);
-            apply_tailcall_used_stats_expression(consequent, statuses);
-            apply_tailcall_used_stats_expression(alternate, statuses);
-        }
-        ExpressionDesc::Call(func, args, _) => {
-            apply_tailcall_used_stats_expression(func, statuses);
-            for arg in args {
-                apply_tailcall_used_stats_expression(arg, statuses);
-            }
-        }
-        ExpressionDesc::TaggedTemplate(tag, _, values) => {
-            apply_tailcall_used_stats_expression(tag, statuses);
-            for value in values {
-                apply_tailcall_used_stats_expression(value, statuses);
-            }
-        }
-        ExpressionDesc::InterpolatedTemplate { values, .. } => {
-            for value in values {
-                apply_tailcall_used_stats_expression(value, statuses);
-            }
-        }
-        ExpressionDesc::StaticIndex(target, _, _) => {
-            apply_tailcall_used_stats_expression(target, statuses)
-        }
-        ExpressionDesc::New(target, args) => {
-            apply_tailcall_used_stats_expression(target, statuses);
-            if let Some(args) = args {
-                for arg in args {
-                    apply_tailcall_used_stats_expression(arg, statuses);
+    fn expression(&mut self, j: &mut JsArena, expr: Expr) -> Expr {
+        match j.ek(expr) {
+            ExprKind::Var(id) => {
+                if let Some(constant) = self.substitution.consts.get(&j.ident(id)) {
+                    return *constant;
                 }
             }
-        }
-        ExpressionDesc::Fun { body, .. } => apply_tailcall_used_stats_block(body, statuses),
-        ExpressionDesc::Array(items, _) => {
-            for item in items {
-                apply_tailcall_used_stats_expression(item, statuses);
+            ExprKind::Cond(pred, ifso, ifnot) => {
+                if let Some(truth) = substituted_truth(j, &self.substitution.consts, pred) {
+                    return self.expression(j, if truth { ifso } else { ifnot });
+                }
             }
-        }
-        ExpressionDesc::CamlBlock(items, _, _) => {
-            for item in items {
-                apply_tailcall_used_stats_expression(item, statuses);
+            ExprKind::JsNot(pred) => {
+                if let Some(truth) = substituted_truth(j, &self.substitution.consts, pred) {
+                    return crate::js_ir::build::exp::bool(!truth, j);
+                }
             }
+            _ => {}
         }
-        ExpressionDesc::Jsx(jsx) => {
-            for value in jsx.expressions_mut() {
-                apply_tailcall_used_stats_expression(value, statuses);
+        match j.ek(expr) {
+            ExprKind::Var(id) => match self.substitution.vars.get(&j.ident(id)).copied() {
+                Some(target) => {
+                    let target = j.ident_id(target);
+                    j.rekind_expr(expr, ExprKind::Var(target))
+                }
+                None => expr,
+            },
+            ExprKind::Fun(f) => {
+                let info = j.fun(f);
+                let params = j.ident_slice(info.params).to_vec();
+                let body = self.pruned_block(j, info.body, &params);
+                if body == info.body {
+                    return expr;
+                }
+                let f = j.fun_id(FunInfo { body, ..info });
+                j.rekind_expr(expr, ExprKind::Fun(f))
             }
+            _ => map_expression_children(self, j, expr),
         }
-        ExpressionDesc::Object(entries) => {
-            for entry in entries {
-                let (crate::js_ir::ObjectEntry::Property(_, value)
-                | crate::js_ir::ObjectEntry::Spread(value)
-                | crate::js_ir::ObjectEntry::RecordSpread(value)) = entry;
-                apply_tailcall_used_stats_expression(value, statuses);
-            }
-        }
-        ExpressionDesc::Var(_)
-        | ExpressionDesc::Undefined { .. }
-        | ExpressionDesc::Null
-        | ExpressionDesc::Bool(_)
-        | ExpressionDesc::Str(_)
-        | ExpressionDesc::TemplateLiteral(_)
-        | ExpressionDesc::JsonLiteral(_)
-        | ExpressionDesc::RawJsCode(_)
-        | ExpressionDesc::Number(_) => {}
     }
 }
 
 /// Callees of the final `return f(...)` statement of every block.
-fn collect_tail_callees(block: &Block) -> HashSet<Ident> {
+fn collect_tail_callees(a: &JsArena, block: &[Stmt]) -> HashSet<Ident> {
     struct TailCallees(HashSet<Ident>);
-    impl<'a> crate::js_ir::walk::Visitor<'a> for TailCallees {
-        fn visit_block(&mut self, block: &'a Block) {
-            if let Some(Statement {
-                desc:
-                    StatementDesc::Return(Expression {
-                        desc: ExpressionDesc::Call(func, _, _),
-                        ..
-                    }),
-                ..
-            }) = block.last()
-                && let ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)) = &func.desc
+    impl Visitor for TailCallees {
+        fn visit_block(&mut self, a: &JsArena, block: &[Stmt]) {
+            if let Some(last) = block.last()
+                && let StmtKind::Return(e) = a.sk(*last)
+                && let ExprKind::Call(func, _, _) = a.ek(e)
+                && let ExprKind::Var(id) = a.ek(func)
             {
-                self.0.insert(*id);
+                self.0.insert(a.ident(id));
             }
         }
     }
     let mut callees = TailCallees(HashSet::new());
-    crate::js_ir::walk::walk_block(&mut callees, block);
+    walk_block(&mut callees, a, block);
     callees.0
 }
 
 #[cfg(test)]
 mod source_loc_tests {
     use super::*;
-    use crate::js_ir::Number;
-    use LamLoc;
+    use crate::js_ir::build::exp as E;
 
     #[test]
     fn int_switch_clause_keeps_source_loc() {
         // Js_record_map (js_record_map.ml:200-202) rebuilds case clauses with
         // their original `source_loc`.
-        let clause = CaseClause {
-            body: vec![],
-            should_break: true,
-            comment: None,
-            source_loc: Some(LamLoc::NONE),
+        let mut j = JsArena::new();
+        let mut clause = S::clause(&[], true, &mut j);
+        clause.source_loc = Some(crate::lambda::LamLoc::NONE);
+        let zero = E::int(0, &mut j);
+        // Built raw: `S::int_switch` would fold the literal scrutinee.
+        let info = j.int_switch_id(crate::js_ir::arena::IntSwitchInfo {
+            clauses: vec![(0, clause)],
+            default: None,
+        });
+        let switch = j.stmt(StmtKind::IntSwitch(zero, info));
+        let mut program = Program {
+            arena: j,
+            block: vec![switch],
+            exports: vec![],
+            export_set: Default::default(),
+            name_reservations: vec![],
         };
-        let program = Program::new(
-            vec![Statement {
-                source_loc: None,
-                desc: StatementDesc::IntSwitch(
-                    Expression::number(Number::int(0)),
-                    vec![(0, clause)],
-                    None,
-                ),
-                comment: None,
-            }],
-            vec![],
-        );
 
-        let program = tailcall_inline_program(program);
+        tailcall_inline_program(&mut program);
 
-        let StatementDesc::IntSwitch(_, clauses, _) = &program.block[0].desc else {
+        let a = &program.arena;
+        let StmtKind::IntSwitch(_, info) = a.sk(program.block[0]) else {
             panic!("expected an int switch");
         };
-        assert!(clauses[0].1.source_loc.is_some());
+        assert!(a.int_switch(info).clauses[0].1.source_loc.is_some());
     }
 }

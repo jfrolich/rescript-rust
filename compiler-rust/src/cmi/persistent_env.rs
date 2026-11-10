@@ -125,8 +125,9 @@ pub type CoreFetcher = Arc<dyn Fn(&str) -> Option<Vec<u8>> + Send + Sync>;
 /// The not yet decoded core of a stored module: its bytes, or how to read
 /// them, so a module the build never looks up is never read either.
 pub enum PendingCore {
-    /// The encoded core.
-    Bytes(Vec<u8>),
+    /// The encoded core, borrowed when it is part of the executable (see
+    /// [`ModuleRegistry::register_stored_static`]).
+    Bytes(std::borrow::Cow<'static, [u8]>),
     /// Reads the encoded core when the module is first looked up.
     Fetch(CoreFetcher),
 }
@@ -155,9 +156,10 @@ impl LazyStoredModules {
         let Some(core) = pending.take() else {
             return true;
         };
-        let data = match (bytes, core) {
-            (Some(bytes), _) | (None, PendingCore::Bytes(bytes)) => Some(bytes),
-            (None, PendingCore::Fetch(fetch)) => fetch(name),
+        let data: Option<std::borrow::Cow<'static, [u8]>> = match (bytes, core) {
+            (Some(bytes), _) => Some(bytes.into()),
+            (None, PendingCore::Bytes(bytes)) => Some(bytes),
+            (None, PendingCore::Fetch(fetch)) => fetch(name).map(Into::into),
         };
         if let Some(core) = data.as_deref().and_then(super::stored_module::decode_core) {
             if let Some(pers) = core.pers_struct {
@@ -760,7 +762,19 @@ impl ModuleRegistry {
         data: &[u8],
     ) -> Option<Vec<(String, Path)>> {
         let (extras, core) = super::stored_module::split(data)?;
-        self.register_stored_parts(name, Some(extras), PendingCore::Bytes(core.to_vec()))
+        self.register_stored_parts(name, Some(extras), PendingCore::Bytes(core.to_vec().into()))
+    }
+
+    /// [`Self::register_stored_lazily`] for data that lives as long as the
+    /// process (compiled into the executable), which the registry borrows
+    /// instead of copying.
+    pub fn register_stored_static(
+        &mut self,
+        name: &str,
+        data: &'static [u8],
+    ) -> Option<Vec<(String, Path)>> {
+        let (extras, core) = super::stored_module::split(data)?;
+        self.register_stored_parts(name, Some(extras), PendingCore::Bytes(core.into()))
     }
 
     /// [`Self::register_stored_lazily`] for a module stored as its encoded

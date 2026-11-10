@@ -6,60 +6,74 @@
 use ahash::{AHashMap as HashMap, AHashSet as HashSet};
 
 use crate::ident::Ident;
-use crate::js_ir::op::IdentInfo;
-use crate::js_ir::{
-    Block, Expression, ExpressionDesc, Statement, StatementDesc, VIdent, VariableDeclaration,
-    ocaml_eq_expression,
-};
+use crate::js_ir::arena::{Block, Expr, ExprKind, JsArena, Stmt, StmtKind, StmtList};
+use crate::js_ir::build::{exp as E, ocaml_eq_expression, stmt as S};
+use crate::js_ir::walk::each_child;
 use crate::lambda::TagInfo;
 use crate::lambda::js_exp_make::js_expr_no_side_effects;
 use crate::lambda::js_shake::{
-    TailMoveInitializerKind, flatten_toplevel_block_refs, resolve_tail_move_initializer_kind,
+    TailMoveInitializerKind, flatten_toplevel_block, resolve_tail_move_initializer_kind,
     resolve_tail_move_replacement_expression,
 };
 use crate::lambda::lam_compat::LetKind;
 
-pub(crate) fn resolve_export_aliases(block: &Block, exports: Vec<Ident>) -> Vec<Ident> {
+/// The declaration of a variable statement: `(ident, initializer, property)`.
+fn declaration(a: &JsArena, stmt: Stmt) -> Option<(Ident, Option<Expr>, LetKind)> {
+    match a.sk(stmt) {
+        StmtKind::Variable(v) => {
+            let decl = a.var(v);
+            Some((decl.ident, decl.value, decl.property))
+        }
+        _ => None,
+    }
+}
+
+pub(crate) fn resolve_export_aliases(
+    j: &mut JsArena,
+    block: &[Stmt],
+    exports: Vec<Ident>,
+) -> Vec<Ident> {
     let mut declared = HashSet::new();
-    collect_declared_idents(block, &mut declared);
+    collect_declared_idents(j, block, &mut declared);
     let mut aliases = HashMap::new();
-    collect_export_aliases(block, &mut aliases);
+    collect_export_aliases(j, block, &mut aliases);
     exports
         .into_iter()
         .map(|export| {
-            if keeps_declared_same_name_function_export_alias(block, &export) {
+            if keeps_declared_same_name_function_export_alias(j, block, &export) {
                 return export;
             }
-            resolve_declared_same_name_self_alias_target(block, &export)
-                .or_else(|| reusable_declared_same_name_export_alias(block, &export))
+            resolve_declared_same_name_self_alias_target(j, block, &export)
+                .or_else(|| reusable_declared_same_name_export_alias(j, block, &export))
                 .unwrap_or_else(|| resolve_export_alias(&export, &aliases, &declared))
         })
         .collect()
 }
 
 pub(crate) fn keeps_declared_same_name_function_export_alias(
-    block: &Block,
+    a: &JsArena,
+    block: &[Stmt],
     export: &Ident,
 ) -> bool {
-    block_declares_initialized_ident(block, export)
+    block_declares_initialized_ident(a, block, export)
         && matches!(
-            resolve_tail_move_initializer_kind(block, export),
+            resolve_tail_move_initializer_kind(a, block, export),
             Some(TailMoveInitializerKind::Function)
         )
-        && count_materialized_same_name_binding_roots(block, export.name()) > 1
+        && count_materialized_same_name_binding_roots(a, block, export.name()) > 1
 }
 
-pub(crate) fn count_materialized_same_name_binding_roots(block: &Block, name: &str) -> usize {
-    flatten_toplevel_block_refs(block)
+pub(crate) fn count_materialized_same_name_binding_roots(
+    a: &JsArena,
+    block: &[Stmt],
+    name: &str,
+) -> usize {
+    flatten_toplevel_block(a, block)
         .into_iter()
-        .filter(|stmt| match &stmt.desc {
-            StatementDesc::Variable(VariableDeclaration {
-                ident,
-                value: Some(initializer),
-                ..
-            }) if ident.name() == name => !matches!(
-                &initializer.desc,
-                ExpressionDesc::Var(VIdent::Id(target)) if target.name() == ident.name()
+        .filter(|stmt| match declaration(a, *stmt) {
+            Some((ident, Some(initializer), _)) if ident.name() == name => !matches!(
+                a.ek(initializer),
+                ExprKind::Var(target) if a.ident(target).name() == ident.name()
             ),
             _ => false,
         })
@@ -67,248 +81,180 @@ pub(crate) fn count_materialized_same_name_binding_roots(block: &Block, name: &s
 }
 
 pub(crate) fn resolve_declared_same_name_self_alias_target(
-    block: &Block,
+    j: &mut JsArena,
+    block: &[Stmt],
     export: &Ident,
 ) -> Option<Ident> {
-    match resolve_tail_move_replacement_expression(block, &Expression::var(*export), export, false)
-        .desc
-    {
-        ExpressionDesc::Var(VIdent::Id(target))
-            if !target.same(export) && block_declares_ident(block, &target) =>
-        {
-            Some(target)
+    let start = E::var(*export, j);
+    let resolved = resolve_tail_move_replacement_expression(j, block, start, export, false);
+    match j.ek(resolved) {
+        ExprKind::Var(target) => {
+            let target = j.ident(target);
+            (!target.same(export) && block_declares_ident(j, block, &target)).then_some(target)
         }
         _ => None,
     }
 }
 
 pub(crate) fn reusable_declared_same_name_export_alias(
-    block: &Block,
+    a: &JsArena,
+    block: &[Stmt],
     export: &Ident,
 ) -> Option<Ident> {
-    let flattened_refs = flatten_toplevel_block_refs(block);
-    let initializer = flattened_refs.iter().find_map(|stmt| match &stmt.desc {
-        StatementDesc::Variable(VariableDeclaration {
-            ident,
-            value: Some(initializer),
-            ..
-        }) if ident.same(export) => Some(initializer),
-        _ => None,
-    })?;
-    reusable_same_name_export_binding_ref(&flattened_refs, export, initializer)
+    let flattened = flatten_toplevel_block(a, block);
+    let initializer = flattened
+        .iter()
+        .find_map(|stmt| match declaration(a, *stmt) {
+            Some((ident, Some(initializer), _)) if ident.same(export) => Some(initializer),
+            _ => None,
+        })?;
+    reusable_same_name_export_binding_in(a, &flattened, export, initializer)
 }
 
-pub(crate) fn collect_declared_idents(block: &Block, declared: &mut HashSet<Ident>) {
+pub(crate) fn collect_declared_idents(a: &JsArena, block: &[Stmt], declared: &mut HashSet<Ident>) {
     for stmt in block {
-        match &stmt.desc {
-            StatementDesc::Variable(VariableDeclaration { ident, .. }) => {
-                declared.insert(*ident);
+        match a.sk(*stmt) {
+            StmtKind::Variable(v) => {
+                declared.insert(a.var(v).ident);
             }
-            StatementDesc::Block(inner) => collect_declared_idents(inner, declared),
-            StatementDesc::If(_, then_block, else_block) => {
-                collect_declared_idents(then_block, declared);
-                collect_declared_idents(else_block, declared);
+            StmtKind::Block(inner) => collect_declared_idents(a, a.stmts(inner), declared),
+            StmtKind::If(_, then_block, else_block) => {
+                collect_declared_idents(a, a.stmts(then_block), declared);
+                collect_declared_idents(a, a.stmts(else_block), declared);
             }
             _ => {}
         }
     }
 }
 
-pub(crate) fn block_declares_initialized_ident(block: &Block, target: &Ident) -> bool {
-    block.iter().find_map(|stmt| match &stmt.desc {
-        StatementDesc::Variable(VariableDeclaration { ident, value, .. }) if ident.same(target) => {
-            Some(value.is_some())
-        }
+pub(crate) fn block_declares_initialized_ident(
+    a: &JsArena,
+    block: &[Stmt],
+    target: &Ident,
+) -> bool {
+    block.iter().find_map(|stmt| match declaration(a, *stmt) {
+        Some((ident, value, _)) if ident.same(target) => Some(value.is_some()),
         _ => None,
     }) == Some(true)
 }
 
-pub(crate) fn block_declares_ident(block: &Block, target: &Ident) -> bool {
-    block.iter().any(|stmt| {
-        matches!(
-            &stmt.desc,
-            StatementDesc::Variable(VariableDeclaration { ident, .. }) if ident.same(target)
-        )
-    })
+pub(crate) fn block_declares_ident(a: &JsArena, block: &[Stmt], target: &Ident) -> bool {
+    block
+        .iter()
+        .any(|stmt| declaration(a, *stmt).is_some_and(|(ident, _, _)| ident.same(target)))
 }
 
-pub(crate) fn collect_export_aliases(block: &Block, aliases: &mut HashMap<Ident, Ident>) {
+pub(crate) fn collect_export_aliases(
+    a: &JsArena,
+    block: &[Stmt],
+    aliases: &mut HashMap<Ident, Ident>,
+) {
     for stmt in block {
-        match &stmt.desc {
-            StatementDesc::Variable(VariableDeclaration {
-                ident,
-                value:
-                    Some(Expression {
-                        desc: ExpressionDesc::Var(VIdent::Id(target)),
-                        ..
-                    }),
-                ..
-            }) => {
-                aliases.insert(*ident, *target);
+        match a.sk(*stmt) {
+            StmtKind::Variable(v) => {
+                let decl = a.var(v);
+                if let Some(value) = decl.value
+                    && let ExprKind::Var(target) = a.ek(value)
+                {
+                    aliases.insert(decl.ident, a.ident(target));
+                }
             }
-            StatementDesc::Block(inner) => collect_export_aliases(inner, aliases),
-            StatementDesc::If(_, then_block, else_block) => {
-                collect_export_aliases(then_block, aliases);
-                collect_export_aliases(else_block, aliases);
+            StmtKind::Block(inner) => collect_export_aliases(a, a.stmts(inner), aliases),
+            StmtKind::If(_, then_block, else_block) => {
+                collect_export_aliases(a, a.stmts(then_block), aliases);
+                collect_export_aliases(a, a.stmts(else_block), aliases);
             }
             _ => {}
         }
     }
 }
 
-pub(crate) fn max_ident_stamp_in_block(block: &Block) -> i32 {
+pub(crate) fn max_ident_stamp_in_block(a: &JsArena, block: &[Stmt]) -> i32 {
     block.iter().fold(0, |max_stamp, stmt| {
-        max_stamp.max(max_ident_stamp_in_statement(stmt))
+        max_stamp.max(max_ident_stamp_in_statement(a, *stmt))
     })
 }
 
-pub(crate) fn max_ident_stamp_in_statement(stmt: &Statement) -> i32 {
-    match &stmt.desc {
-        StatementDesc::Block(block) => max_ident_stamp_in_block(block),
-        StatementDesc::Variable(VariableDeclaration { ident, value, .. }) => value
-            .as_ref()
-            .map(max_ident_stamp_in_expression)
-            .unwrap_or(0)
-            .max(ident.stamp()),
-        StatementDesc::Exp(expr) | StatementDesc::Return(expr) | StatementDesc::Throw(expr) => {
-            max_ident_stamp_in_expression(expr)
+fn max_ident_stamp_in_list(a: &JsArena, block: StmtList) -> i32 {
+    max_ident_stamp_in_block(a, a.stmts(block))
+}
+
+pub(crate) fn max_ident_stamp_in_statement(a: &JsArena, stmt: Stmt) -> i32 {
+    let expr = |e: Expr| max_ident_stamp_in_expression(a, e);
+    let list = |b: StmtList| max_ident_stamp_in_list(a, b);
+    match a.sk(stmt) {
+        StmtKind::Block(block) => list(block),
+        StmtKind::Variable(v) => {
+            let decl = a.var(v);
+            decl.value.map(expr).unwrap_or(0).max(decl.ident.stamp())
         }
-        StatementDesc::If(cond, then_block, else_block) => max_ident_stamp_in_expression(cond)
-            .max(max_ident_stamp_in_block(then_block))
-            .max(max_ident_stamp_in_block(else_block)),
-        StatementDesc::While(_, cond, body) => {
-            max_ident_stamp_in_expression(cond).max(max_ident_stamp_in_block(body))
+        StmtKind::Exp(e) | StmtKind::Return(e) | StmtKind::Throw(e) => expr(e),
+        StmtKind::If(cond, then_block, else_block) => {
+            expr(cond).max(list(then_block)).max(list(else_block))
         }
-        StatementDesc::ForRange(_, start, finish, ident, _, body) => start
-            .as_deref()
-            .map(max_ident_stamp_in_expression)
-            .unwrap_or(0)
-            .max(max_ident_stamp_in_expression(finish))
-            .max(ident.stamp())
-            .max(max_ident_stamp_in_block(body)),
-        StatementDesc::ForOf(_, ident, iterable, body)
-        | StatementDesc::ForAwaitOf(_, ident, iterable, body) => {
-            max_ident_stamp_in_expression(iterable)
-                .max(ident.stamp())
-                .max(max_ident_stamp_in_block(body))
+        StmtKind::While(_, cond, body) => expr(cond).max(list(body)),
+        StmtKind::ForRange(info) => {
+            let info = a.for_range(info);
+            info.init
+                .map(expr)
+                .unwrap_or(0)
+                .max(expr(info.end))
+                .max(a.ident(info.ident).stamp())
+                .max(list(info.body))
         }
-        StatementDesc::IntSwitch(test, clauses, default) => {
-            let mut max_stamp = max_ident_stamp_in_expression(test);
-            for (_, clause) in clauses {
-                max_stamp = max_stamp.max(max_ident_stamp_in_block(&clause.body));
-            }
-            if let Some(default) = default {
-                max_stamp = max_stamp.max(max_ident_stamp_in_block(default));
-            }
-            max_stamp
+        StmtKind::ForOf(info) | StmtKind::ForAwaitOf(info) => {
+            let info = a.for_of(info);
+            expr(info.iterable)
+                .max(a.ident(info.ident).stamp())
+                .max(list(info.body))
         }
-        StatementDesc::StringSwitch(test, clauses, default) => {
-            let mut max_stamp = max_ident_stamp_in_expression(test);
-            for clause in clauses {
-                max_stamp = max_stamp.max(max_ident_stamp_in_block(&clause.clause.body));
+        StmtKind::IntSwitch(test, info) => {
+            let info = a.int_switch(info);
+            let mut max_stamp = expr(test);
+            for (_, clause) in &info.clauses {
+                max_stamp = max_stamp.max(list(clause.body));
             }
-            if let Some(default) = default {
-                max_stamp = max_stamp.max(max_ident_stamp_in_block(default));
-            }
-            max_stamp
+            info.default.map_or(max_stamp, |d| max_stamp.max(list(d)))
         }
-        StatementDesc::Try(body, catch, finally) => {
-            let mut max_stamp = max_ident_stamp_in_block(body);
-            if let Some((ident, catch_block)) = catch {
-                max_stamp = max_stamp
-                    .max(ident.stamp())
-                    .max(max_ident_stamp_in_block(catch_block));
+        StmtKind::StringSwitch(test, info) => {
+            let info = a.string_switch(info);
+            let mut max_stamp = expr(test);
+            for clause in &info.clauses {
+                max_stamp = max_stamp.max(list(clause.clause.body));
             }
-            if let Some(finally) = finally {
-                max_stamp = max_stamp.max(max_ident_stamp_in_block(finally));
-            }
-            max_stamp
+            info.default.map_or(max_stamp, |d| max_stamp.max(list(d)))
         }
-        StatementDesc::Debugger | StatementDesc::Break(_) | StatementDesc::Continue(_) => 0,
+        StmtKind::Try(info) => {
+            let info = a.try_info(info);
+            let mut max_stamp = list(info.body);
+            if let Some((ident, catch_block)) = info.catch {
+                max_stamp = max_stamp.max(a.ident(ident).stamp()).max(list(catch_block));
+            }
+            info.finally.map_or(max_stamp, |f| max_stamp.max(list(f)))
+        }
+        StmtKind::Debugger | StmtKind::Break(_) | StmtKind::Continue(_) => 0,
     }
 }
 
-pub(crate) fn max_ident_stamp_in_expression(expr: &Expression) -> i32 {
-    match &expr.desc {
-        ExpressionDesc::Var(VIdent::Id(ident)) => ident.stamp(),
-        ExpressionDesc::Var(VIdent::Qualified(module, _)) => module.id.stamp(),
-        ExpressionDesc::Length(inner, _)
-        | ExpressionDesc::IsNullOrUndefined(inner)
-        | ExpressionDesc::Typeof(inner)
-        | ExpressionDesc::JsNot(inner)
-        | ExpressionDesc::JsBnot(inner)
-        | ExpressionDesc::CamlBlockTag(inner, _)
-        | ExpressionDesc::OptionalBlock(inner, _)
-        | ExpressionDesc::Await(inner)
-        | ExpressionDesc::Spread(inner)
-        | ExpressionDesc::RecordRest(_, inner) => max_ident_stamp_in_expression(inner),
-        ExpressionDesc::StringAppend(left, right)
-        | ExpressionDesc::In(left, right)
-        | ExpressionDesc::Seq(left, right)
-        | ExpressionDesc::Bin(_, left, right)
-        | ExpressionDesc::FlatCall(left, right)
-        | ExpressionDesc::ArrayIndex(left, right) => {
-            max_ident_stamp_in_expression(left).max(max_ident_stamp_in_expression(right))
+pub(crate) fn max_ident_stamp_in_expression(a: &JsArena, expr: Expr) -> i32 {
+    match a.ek(expr) {
+        ExprKind::Var(ident) => a.ident(ident).stamp(),
+        ExprKind::Qualified(q) => a.qual(q).0.id.stamp(),
+        ExprKind::Fun(f) => {
+            let info = a.fun(f);
+            a.ident_slice(info.params)
+                .iter()
+                .fold(max_ident_stamp_in_list(a, info.body), |max_stamp, param| {
+                    max_stamp.max(param.stamp())
+                })
         }
-        ExpressionDesc::Cond(test, consequent, alternate) => max_ident_stamp_in_expression(test)
-            .max(max_ident_stamp_in_expression(consequent))
-            .max(max_ident_stamp_in_expression(alternate)),
-        ExpressionDesc::Call(func, args, _) => args
-            .iter()
-            .fold(max_ident_stamp_in_expression(func), |max_stamp, arg| {
-                max_stamp.max(max_ident_stamp_in_expression(arg))
-            }),
-        ExpressionDesc::TaggedTemplate(tag, _, values) => {
-            let mut max_stamp = max_ident_stamp_in_expression(tag);
-            for value in values {
-                max_stamp = max_stamp.max(max_ident_stamp_in_expression(value));
-            }
+        _ => {
+            let mut max_stamp = 0;
+            each_child(a, expr, |child| {
+                max_stamp = max_stamp.max(max_ident_stamp_in_expression(a, child))
+            });
             max_stamp
         }
-        ExpressionDesc::InterpolatedTemplate { values, .. } => {
-            values.iter().fold(0, |max_stamp, value| {
-                max_stamp.max(max_ident_stamp_in_expression(value))
-            })
-        }
-        ExpressionDesc::StaticIndex(target, _, _) => max_ident_stamp_in_expression(target),
-        ExpressionDesc::New(target, args) => {
-            let mut max_stamp = max_ident_stamp_in_expression(target);
-            if let Some(args) = args {
-                for arg in args {
-                    max_stamp = max_stamp.max(max_ident_stamp_in_expression(arg));
-                }
-            }
-            max_stamp
-        }
-        ExpressionDesc::Fun { params, body, .. } => params
-            .iter()
-            .fold(max_ident_stamp_in_block(body), |max_stamp, param| {
-                max_stamp.max(param.stamp())
-            }),
-        ExpressionDesc::Array(items, _) => items.iter().fold(0, |max_stamp, item| {
-            max_stamp.max(max_ident_stamp_in_expression(item))
-        }),
-        ExpressionDesc::CamlBlock(items, _, _) => items.iter().fold(0, |max_stamp, item| {
-            max_stamp.max(max_ident_stamp_in_expression(item))
-        }),
-        ExpressionDesc::Jsx(jsx) => jsx
-            .expressions()
-            .map(max_ident_stamp_in_expression)
-            .max()
-            .unwrap_or(0),
-        ExpressionDesc::Object(entries) => entries
-            .iter()
-            .map(|entry| max_ident_stamp_in_expression(entry.expression()))
-            .max()
-            .unwrap_or(0),
-        ExpressionDesc::Bool(_)
-        | ExpressionDesc::Str(_)
-        | ExpressionDesc::TemplateLiteral(_)
-        | ExpressionDesc::JsonLiteral(_)
-        | ExpressionDesc::RawJsCode(_)
-        | ExpressionDesc::Number(_)
-        | ExpressionDesc::Undefined { .. }
-        | ExpressionDesc::Null => 0,
     }
 }
 
@@ -333,37 +279,35 @@ pub(crate) fn resolve_export_alias(
 #[derive(Debug)]
 pub(crate) struct ExtractedExports {
     pub(crate) exports: Vec<Ident>,
-    pub(crate) values: Vec<Expression>,
+    pub(crate) values: Vec<Expr>,
 }
 
 /// Whether `extract_toplevel_exports` succeeds on `expr`: the right spine of
 /// `Seq`s ends in a module-export block.
-fn ends_in_module_export(mut expr: &Expression) -> bool {
+fn ends_in_module_export(a: &JsArena, mut expr: Expr) -> bool {
     loop {
-        match &expr.desc {
-            ExpressionDesc::CamlBlock(_, _, tag) => {
-                return matches!(**tag, TagInfo::ModuleExport(_));
+        match a.ek(expr) {
+            ExprKind::CamlBlock(_, _, tag) => {
+                return matches!(a.tag(tag), TagInfo::ModuleExport(_));
             }
-            ExpressionDesc::Seq(_, right) => expr = right,
+            ExprKind::Seq(_, right) => expr = right,
             _ => return false,
         }
     }
 }
 
 pub(crate) fn extract_toplevel_exports(
-    expr: Expression,
+    j: &mut JsArena,
+    expr: Expr,
     block: &mut Block,
 ) -> Option<ExtractedExports> {
-    let Expression {
-        source_loc,
-        desc,
-        comment,
-    } = expr;
-    match desc {
-        ExpressionDesc::CamlBlock(values, _, tag) if matches!(*tag, TagInfo::ModuleExport(_)) => {
-            let TagInfo::ModuleExport(exports) = *tag else {
+    match j.ek(expr) {
+        ExprKind::CamlBlock(values, _, tag) if matches!(j.tag(tag), TagInfo::ModuleExport(_)) => {
+            let TagInfo::ModuleExport(exports) = j.tag(tag) else {
                 unreachable!()
             };
+            let exports = exports.clone();
+            let values = j.expr_vec(values);
             debug_assert_eq!(
                 exports.len(),
                 values.len(),
@@ -371,165 +315,126 @@ pub(crate) fn extract_toplevel_exports(
             );
             Some(ExtractedExports { exports, values })
         }
-        ExpressionDesc::Undefined { .. } => None,
-        ExpressionDesc::Seq(left, right) => {
-            if ends_in_module_export(&right) {
-                push_effect_expression(block, *left);
-                extract_toplevel_exports(*right, block)
-            } else {
-                push_effect_expression(
-                    block,
-                    Expression {
-                        source_loc,
-                        desc: ExpressionDesc::Seq(left, right),
-                        comment,
-                    },
-                );
-                None
-            }
+        ExprKind::Undefined { .. } => None,
+        ExprKind::Seq(left, right) if ends_in_module_export(j, right) => {
+            push_effect_expression(j, block, left);
+            extract_toplevel_exports(j, right, block)
         }
-        other => {
-            push_effect_expression(
-                block,
-                Expression {
-                    source_loc,
-                    desc: other,
-                    comment,
-                },
-            );
+        _ => {
+            push_effect_expression(j, block, expr);
             None
         }
     }
 }
 
-pub(crate) fn can_reuse_existing_undefined_export_binding(block: &Block, export: &Ident) -> bool {
-    let flattened = flatten_toplevel_block_refs(block);
-    let Some(export_index) = flattened.iter().position(|stmt| {
-        matches!(
-            &stmt.desc,
-            StatementDesc::Variable(VariableDeclaration { ident, .. }) if ident.same(export)
-        )
-    }) else {
+pub(crate) fn can_reuse_existing_undefined_export_binding(
+    a: &JsArena,
+    block: &[Stmt],
+    export: &Ident,
+) -> bool {
+    let flattened = flatten_toplevel_block(a, block);
+    let Some(export_index) = flattened
+        .iter()
+        .position(|stmt| declaration(a, *stmt).is_some_and(|(ident, _, _)| ident.same(export)))
+    else {
         return false;
     };
 
     flattened[export_index + 1..]
         .iter()
-        .all(|stmt| statement_allows_undefined_export_reuse(stmt))
+        .all(|stmt| statement_allows_undefined_export_reuse(a, *stmt))
 }
 
 pub(crate) fn insert_rebound_export_before_equivalent_later_binding(
+    j: &mut JsArena,
     block: &mut Block,
     export: &Ident,
-    value: &Expression,
+    value: Expr,
     later_exports: &[Ident],
 ) -> Option<Ident> {
     if !matches!(
-        value.desc,
-        ExpressionDesc::Number(_)
-            | ExpressionDesc::Str(_)
-            | ExpressionDesc::Bool(_)
-            | ExpressionDesc::Undefined { .. }
-            | ExpressionDesc::Null
+        j.ek(value),
+        ExprKind::Number(_)
+            | ExprKind::Str(_)
+            | ExprKind::Bool(_)
+            | ExprKind::Undefined { .. }
+            | ExprKind::Null
     ) {
         return None;
     }
 
-    let insert_index = block.iter().position(|stmt| match &stmt.desc {
-        StatementDesc::Variable(VariableDeclaration {
-            ident,
-            value: Some(initializer),
-            ..
-        }) => {
-            later_exports.iter().any(|later| later.same(ident))
-                && ocaml_eq_expression(initializer, value)
+    let a: &JsArena = j;
+    let equivalent_later = |stmt: &Stmt| match declaration(a, *stmt) {
+        Some((ident, Some(initializer), _)) => {
+            later_exports.iter().any(|later| later.same(&ident))
+                && ocaml_eq_expression(a, initializer, value)
         }
         _ => false,
-    })?;
-
-    if !block[insert_index..].iter().all(|stmt| match &stmt.desc {
-        StatementDesc::Variable(VariableDeclaration {
-            ident,
-            value: Some(initializer),
-            ..
-        }) => {
-            later_exports.iter().any(|later| later.same(ident))
-                && ocaml_eq_expression(initializer, value)
-        }
-        _ => false,
-    }) {
+    };
+    let insert_index = block.iter().position(equivalent_later)?;
+    if !block[insert_index..].iter().all(equivalent_later) {
         return None;
     }
 
-    block.insert(
-        insert_index,
-        Statement::variable(VariableDeclaration {
-            ident: *export,
-            value: Some(value.clone()),
-            property: LetKind::Strict,
-            ident_info: IdentInfo::default(),
-        }),
-    );
+    let stmt = S::define(*export, Some(value), LetKind::Strict, j);
+    block.insert(insert_index, stmt);
     Some(*export)
 }
 
 pub(crate) fn reusable_same_name_export_binding(
-    block: &Block,
+    a: &JsArena,
+    block: &[Stmt],
     export: &Ident,
-    value: &Expression,
+    value: Expr,
 ) -> Option<Ident> {
-    let flattened_refs = flatten_toplevel_block_refs(block);
-    reusable_same_name_export_binding_ref(&flattened_refs, export, value)
+    let flattened = flatten_toplevel_block(a, block);
+    reusable_same_name_export_binding_in(a, &flattened, export, value)
 }
 
-fn reusable_same_name_export_binding_ref(
-    block: &[&Statement],
+fn reusable_same_name_export_binding_in(
+    a: &JsArena,
+    block: &[Stmt],
     export: &Ident,
-    value: &Expression,
+    value: Expr,
 ) -> Option<Ident> {
-    block.iter().find_map(|stmt| match &stmt.desc {
-        StatementDesc::Variable(VariableDeclaration {
-            ident,
-            value: Some(initializer),
-            property,
-            ..
-        }) if ident.name() == export.name()
-            && !ident.same(export)
-            && !matches!(property, LetKind::Variable)
-            && same_reusable_export_value(initializer, value) =>
+    block.iter().find_map(|stmt| match declaration(a, *stmt) {
+        Some((ident, Some(initializer), property))
+            if ident.name() == export.name()
+                && !ident.same(export)
+                && !matches!(property, LetKind::Variable)
+                && same_reusable_export_value(a, initializer, value) =>
         {
-            Some(*ident)
+            Some(ident)
         }
         _ => None,
     })
 }
 
-pub(crate) fn same_reusable_export_value(left: &Expression, right: &Expression) -> bool {
-    match (&left.desc, &right.desc) {
-        (ExpressionDesc::Var(left_ident), ExpressionDesc::Var(right_ident)) => {
-            left_ident == right_ident
-        }
+pub(crate) fn same_reusable_export_value(a: &JsArena, left: Expr, right: Expr) -> bool {
+    match (a.ek(left), a.ek(right)) {
+        (ExprKind::Var(l), ExprKind::Var(r)) => a.ident(l) == a.ident(r),
+        (ExprKind::Qualified(l), ExprKind::Qualified(r)) => a.qual(l) == a.qual(r),
         (
-            ExpressionDesc::StaticIndex(left_target, left_field, left_pos),
-            ExpressionDesc::StaticIndex(right_target, right_field, right_pos),
+            ExprKind::StaticIndex(left_target, left_field, left_pos),
+            ExprKind::StaticIndex(right_target, right_field, right_pos),
         ) => {
-            left_field == right_field
+            a.text(left_field) == a.text(right_field)
                 && left_pos == right_pos
-                && same_reusable_export_value(left_target, right_target)
+                && same_reusable_export_value(a, left_target, right_target)
         }
         _ => false,
     }
 }
 
-pub(crate) fn push_effect_expression(block: &mut Block, expr: Expression) {
-    let expr = effect_value_without_unit(expr);
-    match expr.desc {
-        ExpressionDesc::Seq(left, right) => {
-            push_effect_expression(block, *left);
-            push_effect_expression(block, *right);
+pub(crate) fn push_effect_expression(j: &mut JsArena, block: &mut Block, expr: Expr) {
+    let expr = effect_value_without_unit(j, expr);
+    match j.ek(expr) {
+        ExprKind::Seq(left, right) => {
+            push_effect_expression(j, block, left);
+            push_effect_expression(j, block, right);
         }
-        _ if js_expr_no_side_effects(&expr) => {}
-        _ => block.push(Statement::exp(expr)),
+        _ if js_expr_no_side_effects(j, expr) => {}
+        _ => block.push(S::exp(expr, j)),
     }
 }
 
@@ -541,48 +446,37 @@ pub(crate) fn push_effect_expression(block: &mut Block, expr: Expression) {
 /// all-empty switch collapses. `push_effect_expression` is more aggressive and
 /// strips every side-effect-free expression, which matches OCaml's
 /// `output_of_expression` (js_output.ml:42-52) but not `S.exp`.
-/// js_stmt_make.ml `S.if_ cond []` with both branches empty: a constant
-/// condition leaves an empty block, and so does one without side effects;
-/// only a condition with side effects is kept, as `S.exp cond`. An empty
-/// block adds nothing to the output.
-pub(crate) fn push_s_if_empty(block: &mut Block, cond: Expression) {
-    if matches!(cond.desc, ExpressionDesc::Bool(_))
-        || crate::js_ir::expression_has_no_side_effects(&cond)
+pub(crate) fn push_s_if_empty(j: &mut JsArena, block: &mut Block, cond: Expr) {
+    if matches!(j.ek(cond), ExprKind::Bool(_))
+        || crate::js_ir::build::expression_has_no_side_effects(j, cond)
     {
         return;
     }
-    push_s_exp(block, cond);
+    push_s_exp(j, block, cond);
 }
 
-pub(crate) fn push_s_exp(block: &mut Block, expr: Expression) {
-    let source_loc = expr.source_loc.clone();
-    match expr.desc {
-        ExpressionDesc::Number(_) | ExpressionDesc::Undefined { .. } => {}
-        ExpressionDesc::Seq(left, right) => match (&left.desc, &right.desc) {
-            (ExpressionDesc::Number(_) | ExpressionDesc::Undefined { .. }, _) => {
-                push_s_exp(block, *right);
-            }
-            (_, ExpressionDesc::Number(_) | ExpressionDesc::Undefined { .. }) => {
-                push_s_exp(block, *left);
-            }
-            _ => block.push(Statement::exp(Expression {
-                source_loc,
-                desc: ExpressionDesc::Seq(left, right),
-                comment: expr.comment,
-            })),
-        },
-        _ => block.push(Statement::exp(expr)),
+pub(crate) fn push_s_exp(j: &mut JsArena, block: &mut Block, expr: Expr) {
+    let trivial =
+        |a: &JsArena, e: Expr| matches!(a.ek(e), ExprKind::Number(_) | ExprKind::Undefined { .. });
+    match j.ek(expr) {
+        ExprKind::Number(_) | ExprKind::Undefined { .. } => {}
+        ExprKind::Seq(left, _) if trivial(j, left) => {
+            let ExprKind::Seq(_, right) = j.ek(expr) else {
+                unreachable!()
+            };
+            push_s_exp(j, block, right);
+        }
+        ExprKind::Seq(left, right) if trivial(j, right) => push_s_exp(j, block, left),
+        _ => block.push(S::exp(expr, j)),
     }
 }
 
-pub(crate) fn statement_allows_undefined_export_reuse(stmt: &Statement) -> bool {
-    match &stmt.desc {
-        StatementDesc::Variable(VariableDeclaration { value, .. }) => {
-            value.as_ref().is_none_or(|expr| {
-                !matches!(expr.desc, ExpressionDesc::Fun { .. }) && js_expr_no_side_effects(expr)
-            })
-        }
-        _ => false,
+pub(crate) fn statement_allows_undefined_export_reuse(a: &JsArena, stmt: Stmt) -> bool {
+    match declaration(a, stmt) {
+        Some((_, value, _)) => value.is_none_or(|expr| {
+            !matches!(a.ek(expr), ExprKind::Fun(_)) && js_expr_no_side_effects(a, expr)
+        }),
+        None => false,
     }
 }
 
@@ -590,26 +484,24 @@ pub(crate) fn statement_allows_undefined_export_reuse(stmt: &Statement) -> bool 
 /// (`EffectCall Not_tail`) a field or array store is the bare assignment, so
 /// the primitive's `with_source_loc` lands on the assignment itself rather
 /// than on a `(assignment, undefined)` sequence.
-fn effect_value_without_unit(expr: Expression) -> Expression {
-    match expr {
-        Expression {
-            desc: ExpressionDesc::Seq(left, right),
-            source_loc: Some(loc),
-            comment,
-        } if matches!(right.desc, ExpressionDesc::Undefined { is_unit: false })
-            && left.source_loc.is_none()
-            && matches!(
-                left.desc,
-                ExpressionDesc::Bin(crate::js_ir::BinOp::Eq, _, _)
-            ) =>
-        {
-            let mut left = *left;
-            left.source_loc = Some(loc);
-            if left.comment.is_none() {
-                left.comment = comment;
-            }
-            left
-        }
-        expr => expr,
+fn effect_value_without_unit(j: &mut JsArena, expr: Expr) -> Expr {
+    let ExprKind::Seq(left, right) = j.ek(expr) else {
+        return expr;
+    };
+    let cold = j.expr_cold(expr);
+    let Some(loc) = cold.source_loc else {
+        return expr;
+    };
+    if !matches!(j.ek(right), ExprKind::Undefined { is_unit: false })
+        || j.expr_loc(left).is_some()
+        || !matches!(j.ek(left), ExprKind::Bin(crate::js_ir::BinOp::Eq, _, _))
+    {
+        return expr;
     }
+    let mut left_cold = j.expr_cold(left);
+    left_cold.source_loc = Some(loc);
+    if left_cold.comment.is_none() {
+        left_cold.comment = cold.comment;
+    }
+    j.with_expr_cold(left, left_cold)
 }

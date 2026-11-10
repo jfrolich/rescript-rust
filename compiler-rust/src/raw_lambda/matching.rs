@@ -4,6 +4,7 @@
 //! It defines the core data structures (matrix, context, jumps, pattern_matching)
 //! and the operations on them used by the pattern matching compiler.
 
+use super::key_encode::{KeyEncode, KeyOut};
 use crate::fast_hash::AHashMap as HashMap;
 use crate::types::path::PathView;
 use std::borrow::{Borrow, Cow};
@@ -797,10 +798,10 @@ fn record_lubs<'p>(
             }
             (Some((lid1, lbl1, p1, o1)), Some((lid2, lbl2, p2, o2))) => {
                 if lbl1.lbl_pos < lbl2.lbl_pos {
-                    out.push((*lid1, lbl1.clone(), p1.clone(), *o1));
+                    out.push((*lid1, lbl1.clone(), *p1, *o1));
                     i += 1;
                 } else if lbl2.lbl_pos < lbl1.lbl_pos {
-                    out.push((*lid2, lbl2.clone(), p2.clone(), *o2));
+                    out.push((*lid2, lbl2.clone(), *p2, *o2));
                     j += 1;
                 } else {
                     if o1 != o2 {
@@ -2157,9 +2158,9 @@ fn make_key(b: &RawArena, e: RawLambda) -> Option<RawLambda> {
 /// Returns None if the lambda cannot be normalized.
 fn make_key_string(b: &RawArena, e: RawLambda) -> Option<String> {
     let mut writer = MakeKeyWriter::new(b);
-    let mut out = String::with_capacity(128);
+    let mut out = KeyOut::new(128);
     writer.write_raw(&b.get(), e, &mut out)?;
-    Some(out)
+    Some(out.buf)
 }
 
 /// Convert a delayed match action to the same structural key as
@@ -2172,9 +2173,18 @@ fn make_key_string(b: &RawArena, e: RawLambda) -> Option<String> {
 /// `max_raw = 32` cutoff from `lambda.ml:434,438-440`.
 fn make_key_string_action(b: &RawArena, action: &MatchAction) -> Option<String> {
     let mut writer = MakeKeyWriter::new(b);
-    let mut out = String::with_capacity(128);
+    let mut out = KeyOut::new(128);
     writer.write_action(action, &mut out)?;
-    Some(out)
+    Some(out.buf)
+}
+
+/// Whether `e`'s `Lambda.make_key` exists and equals `key`. Writes the key
+/// against `key` and stops at the first byte that differs, so unequal
+/// actions are rejected without normalizing them in full.
+fn make_key_equals(b: &RawArena, e: RawLambda, key: &str) -> bool {
+    let mut writer = MakeKeyWriter::new(b);
+    let mut out = KeyOut::expecting(key);
+    writer.write_raw(&b.get(), e, &mut out).is_some() && out.matches_all()
 }
 
 enum KeyBody<'a> {
@@ -2202,15 +2212,15 @@ impl<'b> MakeKeyWriter<'b> {
         }
     }
 
-    fn write_raw(&mut self, a: &LamArena, e: RawLambda, out: &mut String) -> Option<()> {
+    fn write_raw(&mut self, a: &LamArena, e: RawLambda, out: &mut KeyOut<'_>) -> Option<()> {
         self.count += 1;
-        if self.count > MAX_RAW {
+        if self.count > MAX_RAW || out.diverged {
             return None;
         }
         self.write_raw_after_count(a, e, out)
     }
 
-    fn write_action(&mut self, action: &MatchAction, out: &mut String) -> Option<()> {
+    fn write_action(&mut self, action: &MatchAction, out: &mut KeyOut<'_>) -> Option<()> {
         self.count += 1;
         if self.count > MAX_RAW {
             return None;
@@ -2238,7 +2248,7 @@ impl<'b> MakeKeyWriter<'b> {
         &mut self,
         a: Option<&LamArena>,
         body: KeyBody<'_>,
-        out: &mut String,
+        out: &mut KeyOut<'_>,
     ) -> Option<()> {
         match body {
             KeyBody::Raw(raw) => match a {
@@ -2253,7 +2263,7 @@ impl<'b> MakeKeyWriter<'b> {
         &mut self,
         a: &LamArena,
         e: RawLambda,
-        out: &mut String,
+        out: &mut KeyOut<'_>,
     ) -> Option<()> {
         match a.view(e) {
             View::Var(id) => {
@@ -2268,7 +2278,9 @@ impl<'b> MakeKeyWriter<'b> {
                 Some(())
             }
             View::Const(c) => {
-                write!(out, "Lconst({c:?})").ok()?;
+                out.push_str("Lconst(");
+                c.encode(out);
+                out.push(')');
                 Some(())
             }
             View::GlobalModule(id) => {
@@ -2282,7 +2294,9 @@ impl<'b> MakeKeyWriter<'b> {
                 self.write_raw(a, func, out)?;
                 out.push_str(",[");
                 self.write_raw_list(a, args, out)?;
-                write!(out, "],{:?})", info.status).ok()?;
+                out.push_str("],");
+                info.status.encode(out);
+                out.push(')');
                 Some(())
             }
             View::Let(kind, x, ex, body) => {
@@ -2290,7 +2304,9 @@ impl<'b> MakeKeyWriter<'b> {
             }
             View::Prim(primitive, args, _) => {
                 charge_logical_record_fields(&mut self.count, primitive, args.len())?;
-                write!(out, "Lprim({primitive:?},[").ok()?;
+                out.push_str("Lprim(");
+                primitive.encode(out);
+                out.push_str(",[");
                 self.write_raw_list(a, args, out)?;
                 out.push_str("])");
                 Some(())
@@ -2316,7 +2332,9 @@ impl<'b> MakeKeyWriter<'b> {
                 }
                 out.push_str("],fail=");
                 self.write_raw_opt(a, sw.actions.fail, out)?;
-                write!(out, ",names={:?})", sw.payload.dispatch).ok()?;
+                out.push_str(",names=");
+                sw.payload.dispatch.encode(out);
+                out.push(')');
                 Some(())
             }
             View::StringSwitch(scrut, sw) => {
@@ -2327,7 +2345,8 @@ impl<'b> MakeKeyWriter<'b> {
                     if idx > 0 {
                         out.push(',');
                     }
-                    write!(out, "{label:?}:").ok()?;
+                    label.encode(out);
+                    out.push(':');
                     self.write_raw(a, act, out)?;
                 }
                 out.push_str("],");
@@ -2426,7 +2445,7 @@ impl<'b> MakeKeyWriter<'b> {
         x: &Ident,
         ex: RawLambda,
         body: KeyBody<'_>,
-        out: &mut String,
+        out: &mut KeyOut<'_>,
     ) -> Option<()> {
         if kind == LetKind::Alias {
             let ex_key = match a {
@@ -2451,7 +2470,8 @@ impl<'b> MakeKeyWriter<'b> {
         }
 
         out.push_str("Llet(");
-        write!(out, "{kind:?},").ok()?;
+        kind.encode(out);
+        out.push(',');
         let synthetic_stamp = self.next_id;
         self.next_id += 1;
         write_synthetic_ident_key(out, x.name(), synthetic_stamp);
@@ -2461,11 +2481,11 @@ impl<'b> MakeKeyWriter<'b> {
             None => self.write_raw(&self.b.get(), ex, out)?,
         }
         out.push(',');
-        let mut replacement = String::with_capacity(x.name().len() + 16);
+        let mut replacement = KeyOut::new(x.name().len() + 16);
         replacement.push_str("Lvar(");
         write_synthetic_ident_key(&mut replacement, x.name(), synthetic_stamp);
         replacement.push(')');
-        self.env.push((*x, replacement));
+        self.env.push((*x, replacement.buf));
         let result = self.write_body(a, body, out);
         self.env.pop();
         result?;
@@ -2474,16 +2494,16 @@ impl<'b> MakeKeyWriter<'b> {
     }
 
     fn raw_to_string(&mut self, a: &LamArena, e: RawLambda) -> Option<String> {
-        let mut out = String::with_capacity(64);
+        let mut out = KeyOut::new(64);
         self.write_raw(a, e, &mut out)?;
-        Some(out)
+        Some(out.buf)
     }
 
     fn write_raw_list(
         &mut self,
         a: &LamArena,
         items: &[RawLambda],
-        out: &mut String,
+        out: &mut KeyOut<'_>,
     ) -> Option<()> {
         for (idx, item) in items.iter().enumerate() {
             if idx > 0 {
@@ -2498,7 +2518,7 @@ impl<'b> MakeKeyWriter<'b> {
         &mut self,
         a: &LamArena,
         item: Option<RawLambda>,
-        out: &mut String,
+        out: &mut KeyOut<'_>,
     ) -> Option<()> {
         match item {
             None => out.push_str("None"),
@@ -2522,7 +2542,7 @@ fn same_var_body(a: &LamArena, body: &KeyBody<'_>, id: &Ident) -> bool {
     }
 }
 
-fn write_ident_key(out: &mut String, id: &Ident) {
+fn write_ident_key(out: &mut KeyOut<'_>, id: &Ident) {
     match id.stamp() {
         0 => {
             out.push_str(id.name());
@@ -2536,12 +2556,12 @@ fn write_ident_key(out: &mut String, id: &Ident) {
     }
 }
 
-fn write_synthetic_ident_key(out: &mut String, name: &str, stamp: i32) {
+fn write_synthetic_ident_key(out: &mut KeyOut<'_>, name: &str, stamp: i32) {
     write_synthetic_ident_key_with_global(out, name, stamp, false);
 }
 
 fn write_synthetic_ident_key_with_global(
-    out: &mut String,
+    out: &mut KeyOut<'_>,
     name: &str,
     stamp: i32,
     is_global: bool,
@@ -2554,8 +2574,8 @@ fn write_synthetic_ident_key_with_global(
         out.push('#');
     } else {
         out.push_str(name);
-        write!(out, "/{stamp}").expect("writing to String cannot fail");
-        if is_global {
+        // Fails only when a comparing sink has already diverged.
+        if write!(out, "/{stamp}").is_ok() && is_global {
             out.push('g');
         }
     }
@@ -2954,7 +2974,7 @@ pub fn simplify_cases<'p>(
 
             match &pat.pat_desc {
                 PatternDesc::Tpat_var(id, _) => {
-                    let new_action = action.bind(b, LetKind::Alias, *id, arg.clone());
+                    let new_action = action.bind(b, LetKind::Alias, *id, *arg);
                     let mut row = vec![omega()];
                     row.extend(patl.iter().cloned());
                     result.push((row, new_action));
@@ -2963,7 +2983,7 @@ pub fn simplify_cases<'p>(
                     result.push((pats, action));
                 }
                 PatternDesc::Tpat_alias(p, id, _) => {
-                    let new_action = action.bind(b, LetKind::Alias, *id, arg.clone());
+                    let new_action = action.bind(b, LetKind::Alias, *id, *arg);
                     let mut new_pats = vec![pa.pat(*p)];
                     new_pats.extend(patl.iter().cloned());
                     // OCaml `compiler/ml/matching.ml:565-566` immediately
@@ -2980,7 +3000,7 @@ pub fn simplify_cases<'p>(
                             rest.rest_ident,
                             b.prim(
                                 Primitive::PrecordRest(rest.excluded_runtime_labels.clone()),
-                                &[arg.clone()], // matching.ml:585/596 `bind_record_rest pat.pat_loc`.
+                                &[*arg], // matching.ml:585/596 `bind_record_rest pat.pat_loc`.
                                 arena.lam_loc(pat.pat_loc),
                             ),
                         ),
@@ -2998,7 +3018,7 @@ pub fn simplify_cases<'p>(
                             rest.rest_ident,
                             b.prim(
                                 Primitive::PrecordRest(rest.excluded_runtime_labels.clone()),
-                                &[arg.clone()], // matching.ml:585/596 `bind_record_rest pat.pat_loc`.
+                                &[*arg], // matching.ml:585/596 `bind_record_rest pat.pat_loc`.
                                 arena.lam_loc(pat.pat_loc),
                             ),
                         ),
@@ -3744,7 +3764,7 @@ fn rebuild_nexts<'p>(
             e,
             PmHalfCompiled::PmVar(PmVarCompiled {
                 inside: Box::new(pm),
-                var_arg: arg.clone(),
+                var_arg: *arg,
             }),
         )
     }));
@@ -4452,7 +4472,7 @@ fn precompile_var<'p>(
                             &|_p: &'p Pattern, rem: &[&'p Pattern]| Ok(rem.to_vec()),
                             &def,
                         );
-                        let av = arg_rest[0].0.clone();
+                        let av = arg_rest[0].0;
                         let arg_tail = args.tail(1);
                         let (first_info, nexts) = split_or(
                             ctx_ref,
@@ -4473,7 +4493,7 @@ fn precompile_var<'p>(
                             let rfirst = PmHalfCompiledInfo {
                                 me: PmHalfCompiled::PmVar(PmVarCompiled {
                                     inside: Box::new(first_info.me),
-                                    var_arg: av.clone(),
+                                    var_arg: av,
                                 }),
                                 matrix: add_omega_column(&first_info.matrix),
                                 top_default: rebuild_default(pa, &nexts, def),
@@ -5043,11 +5063,7 @@ fn make_field_args(
     let mut result = Vec::new();
     for pos in first_pos..=last_pos {
         result.push((
-            b.prim(
-                Primitive::Pfield(pos, fld_info.clone()),
-                &[arg.clone()],
-                loc,
-            ),
+            b.prim(Primitive::Pfield(pos, fld_info.clone()), &[*arg], loc),
             binding_kind,
         ));
     }
@@ -5237,7 +5253,7 @@ fn make_constr_matching<'p>(
             let newargs = if cstr.cstr_inlined.is_some()
                 || (payload_is_unboxed && !cstr.cstr_args.is_empty())
             {
-                let mut result = vec![(arg.clone(), LetKind::Alias)];
+                let mut result = vec![(*arg, LetKind::Alias)];
                 result.extend(argl.iter().cloned());
                 result
             } else {
@@ -5277,7 +5293,7 @@ fn make_constr_matching<'p>(
                             _ => Primitive::PvalFromOption,
                         };
                         let mut result = vec![(
-                            b.prim(from_option, &[arg.clone()], arena.lam_loc(p.pat_loc)),
+                            b.prim(from_option, &[*arg], arena.lam_loc(p.pat_loc)),
                             LetKind::Alias,
                         )];
                         result.extend(argl.iter().cloned());
@@ -5536,7 +5552,7 @@ fn make_variant_matching_nonconst<'p>(
             let mut new_args = vec![(
                 b.prim(
                     Primitive::Pfield(1, FieldDbgInfo::PolyVarContent),
-                    &[arg.clone()],
+                    &[*arg],
                     arena.lam_loc(p.pat_loc),
                 ),
                 LetKind::Alias,
@@ -5774,7 +5790,7 @@ fn make_tuple_matching<'p>(
                 new_args.push((
                     b.prim(
                         Primitive::Pfield(pos as i32, FieldDbgInfo::Tuple),
-                        &[arg.clone()],
+                        &[*arg],
                         loc,
                     ),
                     LetKind::Alias,
@@ -5921,10 +5937,10 @@ fn make_record_matching<'p>(
                     RecordRepresentation::RecordInlined { .. } => {
                         b.prim(Primitive::Pfield(lbl.lbl_pos, fld_record_inline(lbl)), &[*arg], loc)
                     }
-                    RecordRepresentation::RecordUnboxed(_) => arg.clone(),
+                    RecordRepresentation::RecordUnboxed(_) => *arg,
                     RecordRepresentation::RecordExtension => b.prim(
                         Primitive::Pfield(lbl.lbl_pos + 1, fld_record_extension(lbl)),
-                        &[arg.clone()],
+                        &[*arg],
                         loc,
                     ),
                 };
@@ -6034,7 +6050,7 @@ fn make_array_matching<'p>(
                     b.prim(
                         Primitive::Parrayrefu,
                         &[
-                            arg.clone(),
+                            *arg,
                             b.const_(crate::lambda::Constant::Int {
                                 i: pos as i32,
                                 comment: None,
@@ -6215,11 +6231,7 @@ fn do_tests_fail_owned(
     // into place instead of recursively cloning them.
     cases.into_iter().rev().fold(fail, |acc, (c, act)| {
         b.if_raw(
-            b.prim(
-                tst.clone(),
-                &[arg.clone(), typed_const_to_lambda_const(b, &c)],
-                loc,
-            ),
+            b.prim(tst.clone(), &[arg, typed_const_to_lambda_const(b, &c)], loc),
             acc,
             act,
         )
@@ -6241,11 +6253,7 @@ fn do_tests_nofail_owned(
     // emit `if c1 then a2 else a1`. See compiler/ml/matching.ml:1761-1833.
     cases.into_iter().rev().fold(last_action, |acc, (c, act)| {
         b.if_raw(
-            b.prim(
-                tst.clone(),
-                &[arg.clone(), typed_const_to_lambda_const(b, &c)],
-                loc,
-            ),
+            b.prim(tst.clone(), &[arg, typed_const_to_lambda_const(b, &c)], loc),
             acc,
             act,
         )
@@ -6301,25 +6309,17 @@ fn make_test_sequence(
             b.if_raw(
                 b.prim(
                     lt_tst.clone(),
-                    &[arg.clone(), typed_const_to_lambda_const(b, pivot_const)],
+                    &[*arg, typed_const_to_lambda_const(b, pivot_const)],
                     *loc,
                 ),
-                make_test_seq_inner_owned(
-                    b,
-                    loc,
-                    fail.clone(),
-                    tst,
-                    lt_tst,
-                    arg,
-                    const_lambda_list,
-                ),
+                make_test_seq_inner_owned(b, loc, fail, tst, lt_tst, arg, const_lambda_list),
                 make_test_seq_inner_owned(b, loc, fail, tst, lt_tst, arg, list2),
             )
         } else {
             match fail {
-                None => do_tests_nofail_owned(b, *loc, tst.clone(), arg.clone(), const_lambda_list),
+                None => do_tests_nofail_owned(b, *loc, tst.clone(), *arg, const_lambda_list),
                 Some(fail) => {
-                    do_tests_fail_owned(b, *loc, fail, tst.clone(), arg.clone(), const_lambda_list)
+                    do_tests_fail_owned(b, *loc, fail, tst.clone(), *arg, const_lambda_list)
                 }
             }
         }
@@ -6969,7 +6969,7 @@ fn scan_def<'p>(
             let action = b.static_raise(*i, &[]);
             let mut new_klist: Vec<(std::sync::Arc<ConstructorDescription>, RawLambda)> = pats
                 .iter()
-                .map(|pat| (get_key_constr(pat), action.clone()))
+                .map(|pat| (get_key_constr(pat), action))
                 .collect();
             new_klist.extend(klist);
             klist = new_klist;
@@ -7012,9 +7012,8 @@ fn all_actions_same_tagged<K>(b: &RawArena, cases: &[(K, RawLambda)]) -> bool {
                 return false;
             };
             for (_, act) in rem {
-                match make_key_string(b, *act) {
-                    Some(raw_act) if raw_act == raw_act0 => {}
-                    _ => return false,
+                if !make_key_equals(b, *act, &raw_act0) {
+                    return false;
                 }
             }
             true
@@ -7213,7 +7212,7 @@ fn get_extension_cases(
     tag_lambda_list
         .into_iter()
         .map(|(cstr, act)| match &cstr.cstr_kind {
-            crate::types::ConstructorKind::Extension(path) => (path.clone(), act),
+            crate::types::ConstructorKind::Extension(path) => (*path, act),
             crate::types::ConstructorKind::Ordinary(_) => unreachable!("ordinary extension case"),
         })
         .collect()
@@ -7279,12 +7278,12 @@ fn normalize_path_via_ctx(
             // First normalize the prefix recursively
             let norm_prefix = normalize_module_path_via_ctx(ctx_ref, prefix);
             if norm_prefix == *prefix {
-                path.clone()
+                *path
             } else {
                 Path::pdot_pos(norm_prefix, *name, *pos)
             }
         }
-        _ => path.clone(),
+        _ => *path,
     }
 }
 
@@ -7301,12 +7300,12 @@ fn normalize_module_path_via_ctx(
         PathView::Pdot(prefix, name, pos) => {
             let norm_prefix = normalize_module_path_via_ctx(ctx_ref, prefix);
             if norm_prefix == *prefix {
-                path.clone()
+                *path
             } else {
                 Path::pdot_pos(norm_prefix, *name, *pos)
             }
         }
-        _ => path.clone(),
+        _ => *path,
     };
 
     // Check if this path resolves to a module alias via sig caches
@@ -7496,7 +7495,7 @@ fn combine_constructor<'p>(
                 let find_action = |name: &str| {
                     consts
                         .iter()
-                        .find_map(|(cstr, action)| (cstr.cstr_name == name).then(|| action.clone()))
+                        .find_map(|(cstr, action)| (cstr.cstr_name == name).then(|| *action))
                         .expect("boolean constructor action")
                 };
                 b.if_raw(arg, find_action("true"), find_action("false"))
@@ -7693,10 +7692,7 @@ fn or_list_polyvar(b: &RawArena, arg: &RawLambda, hash_names: &[(i32, String)]) 
     let (first_hash, first_name) = &hash_names[0];
     let init = b.prim(
         Primitive::Pintcomp(Comparison::Eq),
-        &[
-            arg.clone(),
-            raw_polyvariant_hash_const(b, *first_hash, first_name),
-        ],
+        &[*arg, raw_polyvariant_hash_const(b, *first_hash, first_name)],
         LamLoc::NONE,
     );
     hash_names[1..].iter().fold(init, |acc, (hash, name)| {
@@ -7706,7 +7702,7 @@ fn or_list_polyvar(b: &RawArena, arg: &RawLambda, hash_names: &[(i32, String)]) 
                 acc,
                 b.prim(
                     Primitive::Pintcomp(Comparison::Eq),
-                    &[arg.clone(), raw_polyvariant_hash_const(b, *hash, name)],
+                    &[*arg, raw_polyvariant_hash_const(b, *hash, name)],
                     LamLoc::NONE,
                 ),
             ],
@@ -7854,17 +7850,15 @@ fn combine_variant<'p>(
             // One can compare integers and pointers
             make_test_sequence_variant_constant(b, fail, arg, consts)
         } else if consts.is_empty() {
-            let lam =
-                call_switcher_variant_constr(b, ctx_ref, loc, fail.clone(), arg.clone(), nonconsts);
+            let lam = call_switcher_variant_constr(b, ctx_ref, loc, fail, arg, nonconsts);
             // One must not dereference integers
             match fail {
                 None => lam,
                 Some(fail) => test_int_or_block(arg, fail, lam),
             }
         } else {
-            let lam_const = call_switcher_variant_constant(b, fail.clone(), arg.clone(), consts);
-            let lam_nonconst =
-                call_switcher_variant_constr(b, ctx_ref, loc, fail, arg.clone(), nonconsts);
+            let lam_const = call_switcher_variant_constant(b, fail, arg, consts);
+            let lam_nonconst = call_switcher_variant_constr(b, ctx_ref, loc, fail, arg, nonconsts);
             test_int_or_block(arg, lam_const, lam_nonconst)
         }
     };
@@ -8413,7 +8407,7 @@ fn compile_match<'p>(
         (_, [(arg, str_kind), argl @ ..]) => {
             let (v, newarg) = arg_to_var(b, pa, ctx_ref, arg, &m.cases);
             let new_args = {
-                let mut a = vec![(newarg.clone(), LetKind::Alias)];
+                let mut a = vec![(newarg, LetKind::Alias)];
                 a.extend(argl.iter().cloned());
                 a
             };
@@ -8527,7 +8521,7 @@ fn do_compile_matching<'p>(
                 }
                 PatternDesc::Tpat_constant(_) | PatternDesc::Tpat_interval(_, _) => {
                     let loc = arena.lam_loc(pat.pat_loc);
-                    let arg_clone = arg.clone();
+                    let arg_clone = *arg;
                     let cst_clone = get_key_constant("compile_match", pat).0;
                     compile_test_wrapper(
                         ctx_ref,
@@ -8537,16 +8531,7 @@ fn do_compile_matching<'p>(
                         &|ctx, pm| divide_constant(pa, ctx, pm),
                         &|ctx, def, c_div, nrc| {
                             combine_constant(
-                                b,
-                                pa,
-                                loc,
-                                arg_clone.clone(),
-                                &cst_clone,
-                                partial,
-                                ctx,
-                                def,
-                                c_div,
-                                nrc,
+                                b, pa, loc, arg_clone, &cst_clone, partial, ctx, def, c_div, nrc,
                             )
                         },
                         ctx,
@@ -8556,7 +8541,7 @@ fn do_compile_matching<'p>(
                 }
                 PatternDesc::Tpat_construct(_, cstr, _) => {
                     let loc = arena.lam_loc(pat.pat_loc);
-                    let arg_clone = arg.clone();
+                    let arg_clone = *arg;
                     let ex_pat: &'p Pattern = pat;
                     let cstr_clone = cstr.clone();
                     compile_test_wrapper(
@@ -8571,7 +8556,7 @@ fn do_compile_matching<'p>(
                                 ctx_ref,
                                 pa,
                                 loc,
-                                arg_clone.clone(),
+                                arg_clone,
                                 ex_pat,
                                 &cstr_clone,
                                 partial,
@@ -8588,7 +8573,7 @@ fn do_compile_matching<'p>(
                 }
                 PatternDesc::Tpat_array(_) => {
                     let loc = arena.lam_loc(pat.pat_loc);
-                    let arg_clone = arg.clone();
+                    let arg_clone = *arg;
                     compile_test_wrapper(
                         ctx_ref,
                         pa,
@@ -8597,16 +8582,7 @@ fn do_compile_matching<'p>(
                         &|ctx, pm| divide_array(pa, arena, ctx, pm),
                         &|ctx, def, c_div, nrc| {
                             combine_array(
-                                b,
-                                pa,
-                                ctx_ref,
-                                loc,
-                                arg_clone.clone(),
-                                partial,
-                                ctx,
-                                def,
-                                c_div,
-                                nrc,
+                                b, pa, ctx_ref, loc, arg_clone, partial, ctx, def, c_div, nrc,
                             )
                         },
                         ctx,
@@ -8616,7 +8592,7 @@ fn do_compile_matching<'p>(
                 }
                 PatternDesc::Tpat_variant(_, _, _row_ref) => {
                     let loc = arena.lam_loc(pat.pat_loc);
-                    let arg_clone = arg.clone();
+                    let arg_clone = *arg;
                     let row_desc =
                         extract_row_from_type_with_env(ctx_ref, pat.pat_type, pat.pat_env);
                     let row_desc2 = row_desc.clone();
@@ -8628,15 +8604,7 @@ fn do_compile_matching<'p>(
                         &move |ctx, pm| divide_variant(ctx_ref, pa, arena, &row_desc, ctx, pm),
                         &|ctx, def, c_div, _nrc| {
                             combine_variant(
-                                b,
-                                pa,
-                                ctx_ref,
-                                loc,
-                                &row_desc2,
-                                arg_clone.clone(),
-                                partial,
-                                ctx,
-                                def,
+                                b, pa, ctx_ref, loc, &row_desc2, arg_clone, partial, ctx, def,
                                 c_div,
                             )
                         },
@@ -9190,7 +9158,7 @@ pub fn for_trywith(
     next_raise_count: &mut i32,
 ) -> RawLambda {
     let b = arena.b;
-    let param_clone = param.clone();
+    let param_clone = param;
     compile_matching(
         ctx_ref,
         ta,
@@ -9807,6 +9775,37 @@ mod tests {
                 .iter()
                 .all(|case| matches!(case, crate::types::VariantConstructorCase::Block(_)))
         );
+    }
+
+    #[test]
+    fn make_key_equals_compares_while_writing() {
+        let b = RawArena::new();
+        let x = Ident::create_local("x");
+        let y = Ident::create_local("y");
+        let one = || {
+            b.const_(crate::lambda::lam_constant::Constant::Int {
+                i: 1,
+                comment: None,
+            })
+        };
+        // A strict let whose body is not its variable is keyed with a
+        // synthetic stamp, which a diverged comparison must not fail on.
+        let key_term = |id: Ident, v: RawLambda| {
+            b.let_(
+                LetKind::Strict,
+                id,
+                v,
+                b.prim(Primitive::Paddint, &[b.var(id), b.var(y)], LamLoc::NONE),
+            )
+        };
+        let first = key_term(x, one());
+        let key = make_key_string(&b, first).expect("small term has a key");
+        // A let of another identifier with the same name keys the same.
+        let same_name = Ident::create_local("x");
+        assert!(make_key_equals(&b, key_term(same_name, one()), &key));
+        assert!(!make_key_equals(&b, key_term(x, b.var(y)), &key));
+        assert!(!make_key_equals(&b, one(), &key));
+        assert!(!make_key_equals(&b, b.var(y), &key));
     }
 
     #[test]

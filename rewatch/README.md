@@ -16,8 +16,11 @@ dependencies, and invokes the compiler in dependency order.
   updates build artifacts.
 - [`src/watcher.rs`](src/watcher.rs) maps filesystem and configuration changes
   to incremental rebuilds.
-- [`src/cli.rs`](src/cli.rs) and [`src/main.rs`](src/main.rs) own command-line
-  parsing and dispatch.
+- [`src/cli.rs`](src/cli.rs) and [`cli/src/main.rs`](cli/src/main.rs) own
+  command-line parsing and dispatch. The `rescript` executable is the
+  [`cli`](cli) package, whose [build script](cli/build.rs) compiles
+  `packages/@rescript/runtime` into it
+  ([`src/build/embedded_runtime.rs`](src/build/embedded_runtime.rs)).
 
 Focused documentation:
 
