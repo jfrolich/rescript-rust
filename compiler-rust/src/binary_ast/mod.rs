@@ -51,6 +51,7 @@
 //! - [`ffi_types`] - Marshalling of digested externals (`External_ffi_types`)
 //! - [`types`] - Marshal implementations for core types (Position, Location, Longident)
 //! - [`deps`] - Module dependency extraction
+//! - [`header`] - Binary AST header reader (`Binary_ast.read_header`)
 //! - [`writer`] - Binary AST file writer
 
 pub mod ast_dict;
@@ -58,6 +59,7 @@ pub mod ast_iter;
 pub mod current_marshal;
 pub mod deps;
 pub mod ffi_types;
+pub mod header;
 pub mod mapper_from0;
 pub mod mapper_to0;
 pub mod marshal;

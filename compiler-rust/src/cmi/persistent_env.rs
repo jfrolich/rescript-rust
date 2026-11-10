@@ -1916,25 +1916,12 @@ impl PersistentEnv {
         }
     }
 
+    /// The source path in the header of the binary AST at `ast_path`, read
+    /// with `Binary_ast.read_header` (compiler/depends/binary_ast.ml).
     fn read_ast_source_path(ast_path: &FsPath) -> Option<PathBuf> {
         let content = fs::read(ast_path).ok()?;
-        if content.len() < 5 {
-            return None;
-        }
-
-        let dep_size =
-            u32::from_be_bytes([content[0], content[1], content[2], content[3]]) as usize;
-        let path_start = 4 + dep_size;
-        if path_start >= content.len() {
-            return None;
-        }
-
-        let path_end = content[path_start..]
-            .iter()
-            .position(|&b| b == b'\n')
-            .map(|pos| path_start + pos)
-            .unwrap_or(content.len());
-        let path_bytes = &content[path_start..path_end];
+        let header = crate::binary_ast::header::read_header(&content)?;
+        let path_bytes = crate::binary_ast::header::header_source(&content, &header);
         let path_str = String::from_utf8_lossy(path_bytes);
         if path_str.is_empty() {
             return None;
@@ -4545,6 +4532,46 @@ mod tests {
         );
         assert!(ctx.dotted_allocation(&result).is_none());
         assert!(!result.same(&target));
+    }
+
+    /// Outside in-process builds a module's source path comes from the
+    /// header of its `.ast` on the load path, read like
+    /// `Binary_ast.read_header`: an `.ast` whose source path lacks its
+    /// newline, as when a killed build cut it short, names no source. A
+    /// `.cmj` cut short, which `Ext_io.unmarshal` reads as `End_of_file`,
+    /// has no exports. Files are removed one by one, and the directory only
+    /// when empty.
+    #[test]
+    fn damaged_ast_headers_and_truncated_cmjs_resolve_to_nothing() {
+        let dir = std::env::temp_dir().join(format!("pers-env-ast-header-{}", std::process::id()));
+        std::fs::create_dir(&dir).expect("fresh test directory");
+        let cmj = include_bytes!("../../tests/fixtures/Belt_MapString.cmj");
+        let files: [(&str, &[u8]); 4] = [
+            (
+                "Whole.ast",
+                b"\x00\x00\x00\x06\nBelt\n/src/Whole.res\n\x84\x95",
+            ),
+            ("Cut.ast", b"\x00\x00\x00\x06\nBelt\n/src/Cut.res"),
+            ("Belt_MapString.cmj", &cmj[..cmj.len() - 1]),
+            ("Header.cmj", &cmj[..16]),
+        ];
+        for (name, contents) in &files {
+            std::fs::write(dir.join(name), contents).expect("write fixture");
+        }
+        let mut env = PersistentEnv::new();
+        env.add_load_path(dir.clone());
+        let whole = env.resolve_module_source_path("Whole");
+        let cut = env.resolve_module_source_path("Cut");
+        let truncated = env.module_cmj_export_constants("Belt_MapString").is_none();
+        let header_only = env.module_cmj_export_constants("Header").is_none();
+        for (name, _) in &files {
+            std::fs::remove_file(dir.join(name)).expect("remove fixture");
+        }
+        std::fs::remove_dir(&dir).expect("remove empty test directory");
+        assert_eq!(whole, Some(PathBuf::from("/src/Whole.res")));
+        assert_eq!(cut, None);
+        assert!(truncated, "a truncated .cmj has no exports");
+        assert!(header_only, "a .cmj of only its digest has no exports");
     }
 
     #[test]
