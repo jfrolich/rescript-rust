@@ -83,6 +83,13 @@ BASE_RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }"
 # codegen unit retired fewer instructions than the default 16-unit build.
 export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1
 
+# Profile the Rust code only. The cc crate hands the profile flags on to
+# clang for the C dependencies (mimalloc, SQLite), but the profile format of
+# the system clang need not be the one the Rust toolchain's profiler runtime
+# reads: with Apple clang 21 and a rustc on LLVM 23 the instrumented binary
+# crashes at startup. cc puts CFLAGS after the flags it derives itself.
+export CFLAGS="${CFLAGS:+$CFLAGS }-fno-profile-generate -fno-profile-use"
+
 echo "==> Building instrumented rewatch"
 mkdir -p "$PROFILE_DIR"
 find "$PROFILE_DIR" -name '*.profraw' -type f -delete
