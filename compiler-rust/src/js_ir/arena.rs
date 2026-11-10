@@ -821,6 +821,29 @@ impl JsArena {
 
     // ---- side tables -----------------------------------------------------
 
+    /// An upper bound for fresh identifiers, scanning the identifier payload
+    /// tables rather than recursively visiting the program. Eliminated nodes
+    /// may contribute stamps too; they cannot cause a collision.
+    pub(crate) fn ident_stamp_bound(&self) -> i32 {
+        self.idents
+            .rows
+            .iter()
+            .chain(&self.ident_lists.items)
+            .map(Ident::stamp)
+            .chain(self.vars.rows.iter().map(|decl| decl.ident.stamp()))
+            .chain(self.quals.rows.iter().map(|(module, _)| module.id.stamp()))
+            .chain(
+                self.rests
+                    .rows
+                    .iter()
+                    .flatten()
+                    .filter_map(|field| field.ident.map(|id| id.stamp())),
+            )
+            .max()
+            .unwrap_or(0)
+            .max(0)
+    }
+
     pub fn ident_id(&mut self, id: Ident) -> IdentId {
         IdentId::new(self.idents.push(id))
     }
@@ -1041,6 +1064,38 @@ pub struct JsDepsProgram {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stamp_bound_includes_every_identifier_table() {
+        let mut a = JsArena::new();
+        let id = |stamp| Ident::new("x", stamp, crate::ident::IdentFlags::NONE);
+        assert_eq!(a.ident_stamp_bound(), 0);
+        a.ident_id(id(10));
+        assert_eq!(a.ident_stamp_bound(), 10);
+        a.ident_list(&[id(20)]);
+        assert_eq!(a.ident_stamp_bound(), 20);
+        a.var_id(VarDecl {
+            ident: id(30),
+            value: None,
+            property: Property::Strict,
+            ident_info: IdentInfo::default(),
+        });
+        assert_eq!(a.ident_stamp_bound(), 30);
+        a.qual_id(
+            ModuleId {
+                id: id(40),
+                kind: super::super::Kind::Ml,
+                dynamic_import: false,
+            },
+            None,
+        );
+        assert_eq!(a.ident_stamp_bound(), 40);
+        a.rest_id(vec![RecordRestField {
+            label: "x".into(),
+            ident: Some(id(50)),
+        }]);
+        assert_eq!(a.ident_stamp_bound(), 50);
+    }
 
     #[test]
     fn node_kinds_stay_small() {

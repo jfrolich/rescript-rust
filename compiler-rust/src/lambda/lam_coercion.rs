@@ -6,9 +6,8 @@
 use ahash::{AHashMap as HashMap, AHashSet as HashSet};
 
 use crate::ident::Ident;
-use crate::js_ir::arena::{Block, Expr, ExprKind, JsArena, Stmt, StmtKind, StmtList};
+use crate::js_ir::arena::{Block, Expr, ExprKind, JsArena, Stmt, StmtKind};
 use crate::js_ir::build::{exp as E, ocaml_eq_expression, stmt as S};
-use crate::js_ir::walk::each_child;
 use crate::lambda::TagInfo;
 use crate::lambda::js_exp_make::js_expr_no_side_effects;
 use crate::lambda::js_shake::{
@@ -165,95 +164,6 @@ pub(crate) fn collect_export_aliases(
                 collect_export_aliases(a, a.stmts(else_block), aliases);
             }
             _ => {}
-        }
-    }
-}
-
-pub(crate) fn max_ident_stamp_in_block(a: &JsArena, block: &[Stmt]) -> i32 {
-    block.iter().fold(0, |max_stamp, stmt| {
-        max_stamp.max(max_ident_stamp_in_statement(a, *stmt))
-    })
-}
-
-fn max_ident_stamp_in_list(a: &JsArena, block: StmtList) -> i32 {
-    max_ident_stamp_in_block(a, a.stmts(block))
-}
-
-pub(crate) fn max_ident_stamp_in_statement(a: &JsArena, stmt: Stmt) -> i32 {
-    let expr = |e: Expr| max_ident_stamp_in_expression(a, e);
-    let list = |b: StmtList| max_ident_stamp_in_list(a, b);
-    match a.sk(stmt) {
-        StmtKind::Block(block) => list(block),
-        StmtKind::Variable(v) => {
-            let decl = a.var(v);
-            decl.value.map(expr).unwrap_or(0).max(decl.ident.stamp())
-        }
-        StmtKind::Exp(e) | StmtKind::Return(e) | StmtKind::Throw(e) => expr(e),
-        StmtKind::If(cond, then_block, else_block) => {
-            expr(cond).max(list(then_block)).max(list(else_block))
-        }
-        StmtKind::While(_, cond, body) => expr(cond).max(list(body)),
-        StmtKind::ForRange(info) => {
-            let info = a.for_range(info);
-            info.init
-                .map(expr)
-                .unwrap_or(0)
-                .max(expr(info.end))
-                .max(a.ident(info.ident).stamp())
-                .max(list(info.body))
-        }
-        StmtKind::ForOf(info) | StmtKind::ForAwaitOf(info) => {
-            let info = a.for_of(info);
-            expr(info.iterable)
-                .max(a.ident(info.ident).stamp())
-                .max(list(info.body))
-        }
-        StmtKind::IntSwitch(test, info) => {
-            let info = a.int_switch(info);
-            let mut max_stamp = expr(test);
-            for (_, clause) in &info.clauses {
-                max_stamp = max_stamp.max(list(clause.body));
-            }
-            info.default.map_or(max_stamp, |d| max_stamp.max(list(d)))
-        }
-        StmtKind::StringSwitch(test, info) => {
-            let info = a.string_switch(info);
-            let mut max_stamp = expr(test);
-            for clause in &info.clauses {
-                max_stamp = max_stamp.max(list(clause.clause.body));
-            }
-            info.default.map_or(max_stamp, |d| max_stamp.max(list(d)))
-        }
-        StmtKind::Try(info) => {
-            let info = a.try_info(info);
-            let mut max_stamp = list(info.body);
-            if let Some((ident, catch_block)) = info.catch {
-                max_stamp = max_stamp.max(a.ident(ident).stamp()).max(list(catch_block));
-            }
-            info.finally.map_or(max_stamp, |f| max_stamp.max(list(f)))
-        }
-        StmtKind::Debugger | StmtKind::Break(_) | StmtKind::Continue(_) => 0,
-    }
-}
-
-pub(crate) fn max_ident_stamp_in_expression(a: &JsArena, expr: Expr) -> i32 {
-    match a.ek(expr) {
-        ExprKind::Var(ident) => a.ident(ident).stamp(),
-        ExprKind::Qualified(q) => a.qual(q).0.id.stamp(),
-        ExprKind::Fun(f) => {
-            let info = a.fun(f);
-            a.ident_slice(info.params)
-                .iter()
-                .fold(max_ident_stamp_in_list(a, info.body), |max_stamp, param| {
-                    max_stamp.max(param.stamp())
-                })
-        }
-        _ => {
-            let mut max_stamp = 0;
-            each_child(a, expr, |child| {
-                max_stamp = max_stamp.max(max_ident_stamp_in_expression(a, child))
-            });
-            max_stamp
         }
     }
 }
