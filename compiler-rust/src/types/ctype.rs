@@ -573,14 +573,16 @@ pub(crate) fn lookup_type_decl_for_path_pub(
 /// OCaml `get_level env p` (ctype.ml:666-673): the newtype level of `p`'s
 /// declaration, or `Path.binding_time p`.
 fn get_level_in_env(ctx: &TypeContext, env: &Env, path: &Path) -> i32 {
-    // The lookup also runs for a path rooted at a persistent unit, whose
-    // declaration never carries a newtype level (`Subst.type_declaration`
-    // clears it, compiler/ml/subst.ml:292): OCaml still calls `Env.find_type`
-    // there, and for a dotted path that builds the parent's component tables
-    // (compiler/ml/env.ml:781-813) at this point of level lowering.
+    // A declaration reached through a persistent unit never carries a newtype
+    // level (`Subst.type_declaration` clears it, compiler/ml/subst.ml:292),
+    // so the answer for such a path does not depend on the declaration and
+    // needs no lookup.
     //
     // `Env.find_type` answers from bindings fixed within one module scope, so
     // repeated level checks of the same path reuse the first lookup.
+    if path_root_is_persistent(path) {
+        return path.binding_time();
+    }
     let scope_id = env.scope_id();
     if let Some(found_level) = ctx.find_type_newtype_level(scope_id, path) {
         return found_level.unwrap_or_else(|| path.binding_time());
@@ -592,14 +594,9 @@ fn get_level_in_env(ctx: &TypeContext, env: &Env, path: &Path) -> i32 {
             .and_then(|decl| decl.type_newtype_level.map(|(level, _)| level)),
         PathView::Pdot(_, _, _) => {
             // OCaml compiler/ml/ctype.ml:666-673 calls Env.find_type, whose
-            // dotted path lookup (compiler/ml/env.ml:800-813) runs
-            // `get_components (find_module_descr p env)` and reads
-            // `comp_types`. For a persistent parent that builds its
-            // `ps_comps` table (env.ml:781-788, env.ml:1454-1552) at this
-            // point of level lowering. It does not perform the env.ml:865-887
+            // dotted path lookup (compiler/ml/env.ml:800-813) reads the
+            // parent's `comp_types`. It does not perform the env.ml:865-887
             // find_module alias scrape used by normalize_path/module lookup.
-            // In Rust's in-process mode the active persistent table lives on
-            // TypeContext.
             let mut persistent_env = in_process_module_resolution_env(ctx);
             crate::types::typecore::lookup_type_decl_for_path(path, env, &mut persistent_env, ctx)
                 .and_then(|decl| decl.type_newtype_level.map(|(level, _)| level))
@@ -11107,12 +11104,14 @@ pub fn lower_args(ctx: &TypeContext, env: &Env, ty: TypeExprRef) {
         };
 
         // OCaml compiler/ml/typecore.ml:2341 calls
-        // `unify_var env (newvar ()) arg.typ` (ctype.ml:2820-2837).
+        // `unify_var env (newvar ()) arg.typ` (ctype.ml:2820-2837). The
+        // variable is new, so it cannot occur in the argument type and
+        // nothing else refers to it: all the call leaves behind is the
+        // argument type lowered to the variable's level, the current one.
+        let level = ctx.current_level();
         for arg_ty in arg_types {
-            let mut state = UnifyState::new();
-            state.set_env(env);
-            if unify_var(ctx, &mut state, ctx.new_var(None), arg_ty).is_err() {
-                unreachable!("lower_args failed unify_var")
+            if update_level_checked(ctx, env, level, arg_ty).is_err() {
+                unreachable!("lower_args failed to lower an argument type")
             }
         }
 
