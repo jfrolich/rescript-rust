@@ -1191,6 +1191,9 @@ pub struct TypeCheckContext<'a> {
     pub unify_state: UnifyState,
     /// Newtype level (for local type definitions).
     pub newtype_level: Option<i32>,
+    /// Last [`pattern_env_ref`] result for a GADT-refined pattern env, keyed
+    /// by the ids of the outer env and the unify state's env.
+    pattern_env_memo: Option<((u64, u64), EnvRef)>,
     /// Collected diagnostics.
     pub diagnostics: Vec<TypeCoreDiagnostic>,
     /// Collected warnings.
@@ -1378,6 +1381,7 @@ impl<'a> TypeCheckContext<'a> {
             typed: TypedArena::new(),
             unify_state: UnifyState::new(),
             newtype_level: None,
+            pattern_env_memo: None,
             diagnostics: Vec::new(),
             warnings: Vec::new(),
             value_usage_checks: Vec::new(),
@@ -4341,8 +4345,6 @@ fn type_pattern_inner(
     explode: i32,
 ) -> TypeCoreResult<Pattern> {
     use crate::parser::ast::PatternDesc as PD;
-    let pat_env_ref = tctx.type_ctx.store_typed_env(env);
-
     let expanded_pat = maybe_expand_variant_spread_in_pattern(tctx, env, pat, expected_ty)?;
     let pat = expanded_pat.as_ref().unwrap_or(pat);
     let loc = pat.ppat_loc;
@@ -4392,7 +4394,12 @@ fn type_pattern_inner(
             }
 
             Ok({
-                let typed_node = Pattern::new(PatternDesc::Tpat_any, loc, expected_ty, pat_env_ref);
+                let typed_node = Pattern::new(
+                    PatternDesc::Tpat_any,
+                    loc,
+                    expected_ty,
+                    pattern_env_ref(tctx, env),
+                );
                 tctx.typed
                     .with_pat_attributes(typed_node, pat.ppat_attributes.clone())
             })
@@ -4420,7 +4427,7 @@ fn type_pattern_inner(
                     PatternDesc::Tpat_var(id, convert_located_stridx(name, tctx.arena)),
                     loc,
                     expected_ty,
-                    pat_env_ref,
+                    pattern_env_ref(tctx, env),
                 );
                 tctx.typed
                     .with_pat_attributes(typed_node, pat.ppat_attributes.clone())
@@ -4440,7 +4447,7 @@ fn type_pattern_inner(
                     PatternDesc::Tpat_constant(constant),
                     loc,
                     expected_ty,
-                    pat_env_ref,
+                    pattern_env_ref(tctx, env),
                 );
                 tctx.typed
                     .with_pat_attributes(typed_node, pat.ppat_attributes.clone())
@@ -4484,7 +4491,7 @@ fn type_pattern_inner(
                     PatternDesc::Tpat_tuple(tctx.typed.push_patterns(typed_pats)),
                     loc,
                     expected_ty,
-                    pat_env_ref,
+                    pattern_env_ref(tctx, env),
                 );
                 tctx.typed
                     .with_pat_attributes(typed_node, pat.ppat_attributes.clone())
@@ -4546,7 +4553,7 @@ fn type_pattern_inner(
                     ),
                     loc,
                     expected_ty,
-                    pat_env_ref,
+                    pattern_env_ref(tctx, env),
                 );
                 tctx.typed
                     .with_pat_attributes(typed_node, pat.ppat_attributes.clone())
@@ -4654,7 +4661,7 @@ fn type_pattern_inner(
                                 ),
                                 loc,
                                 expected_ty,
-                                pat_env_ref,
+                                pattern_env_ref(tctx, env),
                             );
                             tctx.typed
                                 .with_pat_attributes(typed_node, pat.ppat_attributes.clone())
@@ -4736,7 +4743,7 @@ fn type_pattern_inner(
                     PatternDesc::Tpat_array(tctx.typed.push_patterns(typed_pats)),
                     loc,
                     expected_ty,
-                    pat_env_ref,
+                    pattern_env_ref(tctx, env),
                 );
                 tctx.typed
                     .with_pat_attributes(typed_node, pat.ppat_attributes.clone())
@@ -4890,7 +4897,7 @@ fn type_pattern_inner(
                 PatternDesc::Tpat_var(id, convert_located_stridx(name, tctx.arena)),
                 loc,
                 expected_ty,
-                pat_env_ref,
+                pattern_env_ref(tctx, env),
             );
             tctx.typed.push_pat_extra(
                 &mut typed_pat,
@@ -4960,6 +4967,49 @@ fn unify_pattern_types(
                 .map(|env| tctx.type_ctx.store_typed_env(env)),
         }),
     }
+}
+
+/// Add the local constraints (GADT equations) of `from` that `env` lacks.
+/// Returns whether any were added.
+fn add_missing_local_constraints(env: &mut Env, from: &Env) -> bool {
+    let missing: Vec<_> = from
+        .iter_local_constraints()
+        .filter(|(path, _)| env.find_local_constraint(path).is_none())
+        .map(|(path, decl)| (*path, decl.clone()))
+        .collect();
+    let added = !missing.is_empty();
+    for (path, decl) in missing {
+        env.add_local_constraint(path, decl);
+    }
+    added
+}
+
+/// The `pat_env` of a pattern node built now.
+///
+/// OCaml types a pattern through one `env ref` and builds every node with
+/// `pat_env = !env` (compiler/ml/typecore.ml:1248-1720), so a node typed after
+/// a GADT constructor sees the equations `unify_pat_types_gadt` added. Rust
+/// passes the outer `env` down and keeps those equations in the unify state's
+/// env; this adds them to `env`, as the case env does after the pattern.
+fn pattern_env_ref(tctx: &mut TypeCheckContext<'_>, env: &Env) -> EnvRef {
+    if let Some(unify_env) = tctx.unify_state.env()
+        && unify_env.id() != env.id()
+        && unify_env.has_local_constraints()
+    {
+        let key = (env.id(), unify_env.id());
+        if let Some((cached_key, env_ref)) = tctx.pattern_env_memo
+            && cached_key == key
+        {
+            return env_ref;
+        }
+        let mut refined = env.clone_preserve_id();
+        if add_missing_local_constraints(&mut refined, unify_env) {
+            let env_ref = tctx.type_ctx.store_typed_env(&refined);
+            tctx.pattern_env_memo = Some((key, env_ref));
+            return env_ref;
+        }
+    }
+    tctx.type_ctx.store_typed_env(env)
 }
 
 /// GADT-mode pattern unification: enables generate_equations and assume_injective
@@ -5756,7 +5806,7 @@ fn type_pattern_construct(
             ),
             loc,
             expected_ty,
-            tctx.type_ctx.store_typed_env(env),
+            pattern_env_ref(tctx, env),
         );
         tctx.typed
             .with_pat_attributes(typed_node, pat.ppat_attributes.clone())
@@ -5861,7 +5911,7 @@ fn type_pattern_variant(
             ),
             loc,
             expected_ty,
-            tctx.type_ctx.store_typed_env(env),
+            pattern_env_ref(tctx, env),
         );
         tctx.typed
             .with_pat_attributes(typed_node, pat.ppat_attributes.clone())
@@ -6370,7 +6420,7 @@ fn type_pattern_record(
                 ),
                 parsed_pat.ppat_loc,
                 field_ty,
-                tctx.type_ctx.store_typed_env(env),
+                pattern_env_ref(tctx, env),
             )
         } else {
             type_pattern_inner(
@@ -6512,7 +6562,7 @@ fn type_pattern_record(
             ),
             loc,
             expected_ty,
-            tctx.type_ctx.store_typed_env(env),
+            pattern_env_ref(tctx, env),
         );
         tctx.typed
             .with_pat_attributes(typed_node, pat.ppat_attributes.clone())
@@ -7229,7 +7279,7 @@ fn type_pattern_constraint_poly_var(
                 PatternDesc::Tpat_var(id, convert_located_stridx(&name, tctx.arena)),
                 lloc,
                 ctype_ty,
-                tctx.type_ctx.store_typed_env(env),
+                pattern_env_ref(tctx, env),
             );
             tctx.typed.push_pat_extra(&mut typed_pat, constraint_extra);
             Ok(typed_pat)
@@ -7295,13 +7345,14 @@ fn type_pattern_interval(
         .unwrap_or_else(|| tctx.arena.none_loc());
 
     // Build all constant patterns for the range
+    let pat_env = pattern_env_ref(tctx, env);
     let mut patterns: Vec<Pattern> = (start_val..=end_val)
         .map(|val| {
             Pattern::new(
                 PatternDesc::Tpat_constant(make_const(val)),
                 ghost_loc,
                 expected_ty,
-                EnvRef(0),
+                pat_env,
             )
         })
         .collect();
@@ -7317,7 +7368,7 @@ fn type_pattern_interval(
             ),
             ghost_loc,
             expected_ty,
-            EnvRef(0),
+            pat_env,
         );
     }
 
@@ -12063,15 +12114,7 @@ fn type_case_pattern_impl<'a>(
     // then restore the original unify state env.
     if needs_case_local_constraints {
         if let Some(unify_env) = tctx.unify_state.env() {
-            let constraints: Vec<_> = unify_env
-                .iter_local_constraints()
-                .map(|(p, d)| (*p, d.clone()))
-                .collect();
-            for (path, decl) in constraints {
-                if case_env.find_local_constraint(&path).is_none() {
-                    case_env.add_local_constraint(path, decl);
-                }
-            }
+            add_missing_local_constraints(&mut case_env, unify_env);
         }
         // Restore the original unify state env
         if let Some(old_env) = saved_unify_env {
