@@ -24,7 +24,9 @@ use crate::types::decl::{
 };
 use crate::types::path::Path;
 use crate::types::type_expr::{RowField, TypeDesc, TypeExprRef};
-use crate::types::typedtree::{Constant, EnvRef, Pattern, PatternDesc};
+use crate::types::typedtree::{
+    Constant, EnvRef, Pattern, PatternDesc, TPatIdx, TPatList, TypedArena,
+};
 
 /// A pattern node in the matrix arena.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -54,6 +56,11 @@ pub(crate) trait Oracle {
     fn is_active(&self, warning: &ParmatchWarning) -> bool;
     /// Whether `loc` is a ghost location.
     fn is_ghost(&self, loc: LocIdx) -> bool;
+    /// The arena counter-examples are stored in: [`Parmatch::export`] adds
+    /// to it and [`Oracle::pred`] retypes from it. It is scratch space,
+    /// separate from the arena holding the patterns being checked.
+    fn scratch(&self) -> &TypedArena;
+    fn scratch_mut(&mut self) -> &mut TypedArena;
     /// `!print_res_pat v` (Pattern_printer.print_pattern).
     fn print_pattern(&mut self, v: &Pattern) -> String;
     /// The type checker's `partial_pred` on `Conv.conv u`
@@ -73,8 +80,8 @@ pub(crate) trait Oracle {
             TypeDesc::Tconstr { path, .. } if path.same(&crate::types::predef::path_dict())
         )
     }
-    /// Whether the pattern carries `res.patFromVariantSpread`.
-    fn is_pat_from_variant_spread(&self, pat: &Pattern) -> bool;
+    /// Whether pattern attributes include `res.patFromVariantSpread`.
+    fn is_pat_from_variant_spread(&self, attrs: &crate::parser::ast::Attributes) -> bool;
     /// `Variant_runtime.length (Variant_runtime.get_layout variant)`.
     fn variant_length(&self, cstr: &ConstructorDescription) -> usize;
     /// `get_type_path ty tenv` (parmatch.ml:334-338).
@@ -197,6 +204,8 @@ pub(crate) type Row = Vec<P>;
 /// The arena and algorithms.
 pub(crate) struct Parmatch<'a, O: Oracle> {
     pub oracle: O,
+    /// The arena of the patterns being checked ([`Parmatch::import`]).
+    ta: &'a TypedArena,
     nodes: Vec<Node<'a>>,
     omega: P,
     extra: P,
@@ -208,9 +217,10 @@ pub(crate) struct Parmatch<'a, O: Oracle> {
 pub(crate) struct Empty;
 
 impl<'a, O: Oracle> Parmatch<'a, O> {
-    pub fn new(oracle: O) -> Self {
+    pub fn new(oracle: O, ta: &'a TypedArena) -> Self {
         let mut pm = Parmatch {
             oracle,
+            ta,
             nodes: Vec::new(),
             omega: P(0),
             extra: P(0),
@@ -297,23 +307,24 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
 
     /// Import a typed-tree pattern.
     pub fn import(&mut self, pat: &'a Pattern) -> P {
+        let ta = self.ta;
         let desc = match &pat.pat_desc {
             PatternDesc::Tpat_any => Desc::Any,
             PatternDesc::Tpat_var(_, _) => Desc::Var(VarKind::Source),
-            PatternDesc::Tpat_alias(inner, _, _) => Desc::Alias(self.import(inner)),
+            PatternDesc::Tpat_alias(inner, _, _) => Desc::Alias(self.import(ta.pattern(*inner))),
             PatternDesc::Tpat_constant(c) => Desc::Constant(Cow::Borrowed(c)),
-            PatternDesc::Tpat_interval(lo, hi) => Desc::Interval(lo.clone(), hi.clone()),
+            PatternDesc::Tpat_interval(lo, hi) => Desc::Interval(lo.constant(), hi.constant()),
             PatternDesc::Tpat_tuple(items) => {
-                Desc::Tuple(items.iter().map(|item| self.import(item)).collect())
+                Desc::Tuple(ta.patterns(*items).map(|item| self.import(item)).collect())
             }
             PatternDesc::Tpat_construct(lid, cstr, args) => Desc::Construct {
                 lid: Some(*lid),
                 cstr: std::sync::Arc::clone(cstr),
-                args: args.iter().map(|arg| self.import(arg)).collect(),
+                args: ta.patterns(*args).map(|arg| self.import(arg)).collect(),
             },
             PatternDesc::Tpat_variant(label, arg, _) => Desc::Variant {
                 label: Cow::Borrowed(label.as_str()),
-                arg: arg.as_deref().map(|arg| self.import(arg)),
+                arg: arg.map(|arg| self.import(ta.pattern(arg))),
             },
             PatternDesc::Tpat_record(fields, closed, rest) => Desc::Record {
                 fields: fields
@@ -321,7 +332,7 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                     .map(|(lid, lbl, p, opt)| Field {
                         lid: Some(*lid),
                         lbl: Cow::Borrowed(lbl),
-                        pat: self.import(p),
+                        pat: self.import(ta.pattern(*p)),
                         opt: *opt,
                     })
                     .collect(),
@@ -329,11 +340,14 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                 has_rest: rest.is_some(),
             },
             PatternDesc::Tpat_array(items) => {
-                Desc::Array(items.iter().map(|item| self.import(item)).collect())
+                Desc::Array(ta.patterns(*items).map(|item| self.import(item)).collect())
             }
             // Callers lower dict patterns to records first (`Dict_pattern`).
             PatternDesc::Tpat_dict(_) => crate::misc::fatal_error("Parmatch.import: dict pattern"),
-            PatternDesc::Tpat_or(left, right, _) => Desc::Or(self.import(left), self.import(right)),
+            PatternDesc::Tpat_or(left, right, _) => Desc::Or(
+                self.import(ta.pattern(*left)),
+                self.import(ta.pattern(*right)),
+            ),
         };
         self.push(
             desc,
@@ -675,18 +689,21 @@ fn is_valid_uchar(i: i64) -> bool {
 pub(crate) fn int_range(p: &Pattern) -> Option<(i64, i64)> {
     match &p.pat_desc {
         PatternDesc::Tpat_constant(c) => int_of_constant(c).map(|i| (i, i)),
-        PatternDesc::Tpat_interval(lo, hi) => Some((int_of_constant(lo)?, int_of_constant(hi)?)),
+        PatternDesc::Tpat_interval(lo, hi) => Some((int_of_constant(&lo.constant())?, int_of_constant(&hi.constant())?)),
         _ => None,
     }
 }
 
 /// `Parmatch.make_int_range` on a typed pattern: a constant or interval for
 /// `lo .. hi`, of the same kind as `p`, as `{p with pat_desc; pat_extra = []}`.
+/// The pattern keeps `p`'s cold side data: its attributes, as in OCaml, and
+/// its `pat_extra`, which the typed arena holds immutably here; match
+/// compilation, the only caller, never reads `pat_extra`.
 pub(crate) fn make_int_range(p: &Pattern, lo: i64, hi: i64) -> Pattern {
     let starts_with_char = matches!(
         &p.pat_desc,
         PatternDesc::Tpat_constant(Constant::Char(_))
-            | PatternDesc::Tpat_interval(Constant::Char(_), _)
+            | PatternDesc::Tpat_interval(crate::types::typedtree::IntervalBound::Char(_), _)
     );
     let chars = is_valid_uchar(lo) && is_valid_uchar(hi) && starts_with_char;
     let konst = |i: i64| {
@@ -700,9 +717,8 @@ pub(crate) fn make_int_range(p: &Pattern, lo: i64, hi: i64) -> Pattern {
     q.pat_desc = if lo == hi {
         PatternDesc::Tpat_constant(konst(lo))
     } else {
-        PatternDesc::Tpat_interval(konst(lo), konst(hi))
+        PatternDesc::Tpat_interval(crate::types::typedtree::IntervalBound::from_constant(konst(lo)), crate::types::typedtree::IntervalBound::from_constant(konst(hi)))
     };
-    q.pat_extra = Default::default();
     q
 }
 
@@ -2448,24 +2464,25 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
 impl<'a, O: Oracle> Parmatch<'a, O> {
     /// Import an owned typed pattern (a counter-example), without a source
     /// reference.
+    /// Import a counter-example returned by [`Oracle::pred`], whose
+    /// sub-patterns are in the oracle's scratch arena, without a source
+    /// reference.
     fn import_owned(&mut self, pat: &Pattern) -> P {
         let desc = match &pat.pat_desc {
             PatternDesc::Tpat_any => Desc::Any,
             PatternDesc::Tpat_var(_, _) => Desc::Var(VarKind::Source),
-            PatternDesc::Tpat_alias(inner, _, _) => Desc::Alias(self.import_owned(inner)),
+            PatternDesc::Tpat_alias(inner, _, _) => Desc::Alias(self.import_scratch(*inner)),
             PatternDesc::Tpat_constant(c) => Desc::Constant(Cow::Owned(c.clone())),
-            PatternDesc::Tpat_interval(lo, hi) => Desc::Interval(lo.clone(), hi.clone()),
-            PatternDesc::Tpat_tuple(items) => {
-                Desc::Tuple(items.iter().map(|item| self.import_owned(item)).collect())
-            }
+            PatternDesc::Tpat_interval(lo, hi) => Desc::Interval(lo.constant(), hi.constant()),
+            PatternDesc::Tpat_tuple(items) => Desc::Tuple(self.import_scratch_list(*items)),
             PatternDesc::Tpat_construct(lid, cstr, args) => Desc::Construct {
                 lid: Some(*lid),
                 cstr: std::sync::Arc::clone(cstr),
-                args: args.iter().map(|arg| self.import_owned(arg)).collect(),
+                args: self.import_scratch_list(*args),
             },
             PatternDesc::Tpat_variant(label, arg, _) => Desc::Variant {
                 label: Cow::Owned(label.clone()),
-                arg: arg.as_deref().map(|arg| self.import_owned(arg)),
+                arg: arg.map(|arg| self.import_scratch(arg)),
             },
             PatternDesc::Tpat_record(fields, closed, rest) => Desc::Record {
                 fields: fields
@@ -2473,26 +2490,48 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                     .map(|(lid, lbl, p, opt)| Field {
                         lid: Some(*lid),
                         lbl: Cow::Owned((**lbl).clone()),
-                        pat: self.import_owned(p),
+                        pat: self.import_scratch(*p),
                         opt: *opt,
                     })
                     .collect(),
                 closed: *closed,
                 has_rest: rest.is_some(),
             },
-            PatternDesc::Tpat_array(items) => {
-                Desc::Array(items.iter().map(|item| self.import_owned(item)).collect())
-            }
+            PatternDesc::Tpat_array(items) => Desc::Array(self.import_scratch_list(*items)),
             // Callers lower dict patterns to records first (`Dict_pattern`).
             PatternDesc::Tpat_dict(_) => crate::misc::fatal_error("Parmatch.import: dict pattern"),
             PatternDesc::Tpat_or(left, right, _) => {
-                Desc::Or(self.import_owned(left), self.import_owned(right))
+                Desc::Or(self.import_scratch(*left), self.import_scratch(*right))
             }
         };
         self.push(desc, Some(pat.pat_type), pat.pat_env, pat.pat_loc, None)
     }
 
+    fn import_scratch(&mut self, pat: TPatIdx) -> P {
+        let pat = self.oracle.scratch().pattern(pat).clone();
+        self.import_owned(&pat)
+    }
+
+    fn import_scratch_list(&mut self, pats: TPatList) -> Vec<P> {
+        let pats = self.oracle.scratch().pattern_list(pats).to_vec();
+        pats.into_iter()
+            .map(|pat| self.import_scratch(pat))
+            .collect()
+    }
+
+    /// Export a node into the scratch arena.
+    fn export_idx(&mut self, p: P) -> TPatIdx {
+        let pat = self.export(p);
+        self.oracle.scratch_mut().push_pattern(pat)
+    }
+
+    fn export_list(&mut self, ps: Vec<P>) -> TPatList {
+        let handles: Vec<TPatIdx> = ps.into_iter().map(|p| self.export_idx(p)).collect();
+        self.oracle.scratch_mut().push_pattern_list(&handles)
+    }
+
     /// Export a node as a typed-tree pattern (the input of `Conv.conv`).
+    /// Its sub-patterns are stored in the oracle's scratch arena.
     pub fn export(&mut self, p: P) -> Pattern {
         let node = self.node(p).clone();
         let ty = match node.ty {
@@ -2512,34 +2551,25 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                     loc,
                 },
             ),
-            Desc::Alias(inner) => {
-                let inner = self.export(inner);
-                match node.src.map(|src| &src.pat_desc) {
-                    Some(PatternDesc::Tpat_alias(_, id, name)) => {
-                        PatternDesc::Tpat_alias(Box::new(inner), *id, name.clone())
-                    }
-                    _ => return inner,
+            Desc::Alias(inner) => match node.src.map(|src| &src.pat_desc) {
+                Some(PatternDesc::Tpat_alias(_, id, name)) => {
+                    PatternDesc::Tpat_alias(self.export_idx(inner), *id, name.clone())
                 }
-            }
+                _ => return self.export(inner),
+            },
             Desc::Constant(c) => PatternDesc::Tpat_constant(c.into_owned()),
-            Desc::Interval(lo, hi) => PatternDesc::Tpat_interval(lo, hi),
-            Desc::Tuple(items) => {
-                PatternDesc::Tpat_tuple(items.into_iter().map(|p| self.export(p)).collect())
-            }
+            Desc::Interval(lo, hi) => PatternDesc::Tpat_interval(crate::types::typedtree::IntervalBound::from_constant(lo), crate::types::typedtree::IntervalBound::from_constant(hi)),
+            Desc::Tuple(items) => PatternDesc::Tpat_tuple(self.export_list(items)),
             Desc::Construct { lid, cstr, args } => {
                 let lid = lid.unwrap_or_else(|| crate::parse_arena::Located {
                     txt: self.oracle.placeholder_lid(),
                     loc: LocIdx::none(),
                 });
-                PatternDesc::Tpat_construct(
-                    lid,
-                    cstr,
-                    args.into_iter().map(|p| self.export(p)).collect(),
-                )
+                PatternDesc::Tpat_construct(lid, cstr, self.export_list(args))
             }
             Desc::Variant { label, arg } => PatternDesc::Tpat_variant(
                 label.into_owned(),
-                arg.map(|arg| Box::new(self.export(arg))),
+                arg.map(|arg| self.export_idx(arg)),
                 crate::types::typedtree::RowDescRef(0),
             ),
             Desc::Record {
@@ -2567,7 +2597,7 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                             (
                                 lid,
                                 std::sync::Arc::new(field.lbl.into_owned()),
-                                self.export(field.pat),
+                                self.export_idx(field.pat),
                                 field.opt,
                             )
                         })
@@ -2576,18 +2606,20 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                     rest,
                 )
             }
-            Desc::Array(items) => {
-                PatternDesc::Tpat_array(items.into_iter().map(|p| self.export(p)).collect())
-            }
+            Desc::Array(items) => PatternDesc::Tpat_array(self.export_list(items)),
             Desc::Or(p1, p2) => {
-                PatternDesc::Tpat_or(Box::new(self.export(p1)), Box::new(self.export(p2)), None)
+                let p1 = self.export_idx(p1);
+                let p2 = self.export_idx(p2);
+                PatternDesc::Tpat_or(p1, p2, None)
             }
         };
         let attributes = node
             .src
-            .map(|src| src.pat_attributes.clone())
+            .map(|src| self.ta.pat_attributes(src).clone())
             .unwrap_or_default();
-        Pattern::new(desc, node.loc, ty, node.env, attributes)
+        self.oracle
+            .scratch_mut()
+            .with_pat_attributes(Pattern::new(desc, node.loc, ty, node.env), attributes)
     }
 
     /// `initial_matrix casel` (parmatch.ml:1783-1787).
@@ -2712,7 +2744,7 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                     if self.check_partial_all(&v, casel).is_some() {
                         errmsg.push_str("\n(However, some guarded clause may match this value.)");
                     }
-                    if contains_extension(&v) {
+                    if contains_extension(self.oracle.scratch(), &v) {
                         errmsg.push_str(
                             "\nMatching over values of extensible variant types (the *extension* above)\nmust include a wild card pattern in order to be exhaustive.",
                         );
@@ -2733,6 +2765,7 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
 
     /// `collect_paths_from_pat r p` (parmatch.ml:2112-2131).
     fn collect_paths_from_pat(&mut self, r: &mut Vec<Path>, p: &Pattern) {
+        let ta = self.ta;
         match &p.pat_desc {
             PatternDesc::Tpat_construct(_, cstr, ps) => {
                 if matches!(cstr.cstr_kind, ConstructorKind::Ordinary(_)) {
@@ -2743,7 +2776,7 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                         r.push(path);
                     }
                 }
-                for p in ps {
+                for p in ta.patterns(*ps) {
                     self.collect_paths_from_pat(r, p);
                 }
             }
@@ -2753,26 +2786,26 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
             | PatternDesc::Tpat_interval(..)
             | PatternDesc::Tpat_variant(_, None, _) => {}
             PatternDesc::Tpat_tuple(ps) | PatternDesc::Tpat_array(ps) => {
-                for p in ps {
+                for p in ta.patterns(*ps) {
                     self.collect_paths_from_pat(r, p);
                 }
             }
             PatternDesc::Tpat_record(fields, _, _) => {
                 for (_, _, p, _) in fields {
-                    self.collect_paths_from_pat(r, p);
+                    self.collect_paths_from_pat(r, ta.pattern(*p));
                 }
             }
             PatternDesc::Tpat_dict(entries) => {
                 for entry in entries {
-                    self.collect_paths_from_pat(r, &entry.tdp_pattern);
+                    self.collect_paths_from_pat(r, ta.pattern(entry.tdp_pattern));
                 }
             }
             PatternDesc::Tpat_variant(_, Some(p), _) | PatternDesc::Tpat_alias(p, _, _) => {
-                self.collect_paths_from_pat(r, p)
+                self.collect_paths_from_pat(r, ta.pattern(*p))
             }
             PatternDesc::Tpat_or(p1, p2, _) => {
-                self.collect_paths_from_pat(r, p1);
-                self.collect_paths_from_pat(r, p2);
+                self.collect_paths_from_pat(r, ta.pattern(*p1));
+                self.collect_paths_from_pat(r, ta.pattern(*p2));
             }
         }
     }
@@ -2991,7 +3024,7 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                         let node = self.node(p);
                         let from_spread = node
                             .src
-                            .is_some_and(|src| self.oracle.is_pat_from_variant_spread(src));
+                            .is_some_and(|src| self.oracle.is_pat_from_variant_spread(self.ta.pat_attributes(src)));
                         let loc = node.loc;
                         if !from_spread && !already_reported.contains(&loc) {
                             self.oracle
@@ -3009,26 +3042,22 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
 }
 
 /// `contains_extension pat` (parmatch.ml:1950-1958).
-pub(crate) fn contains_extension(pat: &Pattern) -> bool {
+pub(crate) fn contains_extension(ta: &TypedArena, pat: &Pattern) -> bool {
+    let sub = |p: &TPatIdx| contains_extension(ta, ta.pattern(*p));
     match &pat.pat_desc {
         PatternDesc::Tpat_var(_, name) if name.txt == "*extension*" => true,
         PatternDesc::Tpat_any
         | PatternDesc::Tpat_var(..)
         | PatternDesc::Tpat_constant(_)
         | PatternDesc::Tpat_interval(..) => false,
-        PatternDesc::Tpat_alias(p, _, _) => contains_extension(p),
-        PatternDesc::Tpat_tuple(ps) | PatternDesc::Tpat_array(ps) => {
-            ps.iter().any(contains_extension)
-        }
-        PatternDesc::Tpat_construct(_, _, ps) => ps.iter().any(contains_extension),
-        PatternDesc::Tpat_variant(_, arg, _) => arg.as_deref().is_some_and(contains_extension),
-        PatternDesc::Tpat_record(fields, _, _) => {
-            fields.iter().any(|(_, _, p, _)| contains_extension(p))
-        }
-        PatternDesc::Tpat_dict(entries) => entries
-            .iter()
-            .any(|entry| contains_extension(&entry.tdp_pattern)),
-        PatternDesc::Tpat_or(p1, p2, _) => contains_extension(p1) || contains_extension(p2),
+        PatternDesc::Tpat_alias(p, _, _) => sub(p),
+        PatternDesc::Tpat_tuple(ps)
+        | PatternDesc::Tpat_array(ps)
+        | PatternDesc::Tpat_construct(_, _, ps) => ta.pattern_list(*ps).iter().any(sub),
+        PatternDesc::Tpat_variant(_, arg, _) => arg.as_ref().is_some_and(sub),
+        PatternDesc::Tpat_record(fields, _, _) => fields.iter().any(|(_, _, p, _)| sub(p)),
+        PatternDesc::Tpat_dict(entries) => entries.iter().any(|entry| sub(&entry.tdp_pattern)),
+        PatternDesc::Tpat_or(p1, p2, _) => sub(p1) || sub(p2),
     }
 }
 
@@ -3280,7 +3309,7 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                 continue;
             };
             let mut vars = IdSet::new();
-            pat_bound_idents(case.lhs, &mut vars);
+            pat_bound_idents(self.ta, case.lhs, &mut vars);
             let all: IdSet = vars.intersection(guard_idents).cloned().collect();
             if all.is_empty() {
                 continue;
@@ -3305,43 +3334,43 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
 }
 
 /// `Typedtree.pat_bound_idents` (typedtree.ml:455-477) as a set.
-fn pat_bound_idents(pat: &Pattern, out: &mut IdSet) {
+fn pat_bound_idents(ta: &TypedArena, pat: &Pattern, out: &mut IdSet) {
     match &pat.pat_desc {
         PatternDesc::Tpat_var(id, _) => {
             out.insert(*id);
         }
         PatternDesc::Tpat_alias(p, id, _) => {
-            pat_bound_idents(p, out);
+            pat_bound_idents(ta, ta.pattern(*p), out);
             out.insert(*id);
         }
-        PatternDesc::Tpat_or(p1, _, _) => pat_bound_idents(p1, out),
+        PatternDesc::Tpat_or(p1, _, _) => pat_bound_idents(ta, ta.pattern(*p1), out),
         PatternDesc::Tpat_record(fields, _, rest) => {
             if let Some(rest) = rest {
                 out.insert(rest.rest_ident);
             }
             for (_, _, p, _) in fields {
-                pat_bound_idents(p, out);
+                pat_bound_idents(ta, ta.pattern(*p), out);
             }
         }
         PatternDesc::Tpat_dict(entries) => {
             for entry in entries {
-                pat_bound_idents(&entry.tdp_pattern, out);
+                pat_bound_idents(ta, ta.pattern(entry.tdp_pattern), out);
             }
         }
         PatternDesc::Tpat_any | PatternDesc::Tpat_constant(_) | PatternDesc::Tpat_interval(..) => {}
         PatternDesc::Tpat_tuple(ps) | PatternDesc::Tpat_array(ps) => {
-            for p in ps {
-                pat_bound_idents(p, out);
+            for p in ta.pattern_list(*ps) {
+                pat_bound_idents(ta, ta.pattern(*p), out);
             }
         }
         PatternDesc::Tpat_construct(_, _, ps) => {
-            for p in ps {
-                pat_bound_idents(p, out);
+            for p in ta.pattern_list(*ps) {
+                pat_bound_idents(ta, ta.pattern(*p), out);
             }
         }
         PatternDesc::Tpat_variant(_, arg, _) => {
             if let Some(p) = arg {
-                pat_bound_idents(p, out);
+                pat_bound_idents(ta, ta.pattern(*p), out);
             }
         }
     }
@@ -3419,7 +3448,7 @@ fn is_type_path(ctx: &TypeContext, path: &Path, ty: TypeExprRef) -> bool {
 
 /// parmatch.ml `pattern_literal`: the runtime value of the only value `p`
 /// matches, when it is a literal.
-fn pattern_literal(ctx: &TypeContext, p: &Pattern) -> Option<LiteralTag> {
+fn pattern_literal(ctx: &TypeContext, ta: &TypedArena, p: &Pattern) -> Option<LiteralTag> {
     match &p.pat_desc {
         PatternDesc::Tpat_constant(Constant::String(s)) => Some(LiteralTag::String(s.clone())),
         PatternDesc::Tpat_constant(Constant::Int(i)) => Some(LiteralTag::Int(*i)),
@@ -3433,7 +3462,7 @@ fn pattern_literal(ctx: &TypeContext, p: &Pattern) -> Option<LiteralTag> {
                 format!("-{digits}")
             }))
         }
-        PatternDesc::Tpat_alias(p, _, _) => pattern_literal(ctx, p),
+        PatternDesc::Tpat_alias(p, _, _) => pattern_literal(ctx, ta, ta.pattern(*p)),
         PatternDesc::Tpat_variant(label, None, _) => {
             // A polymorphic variant is its name, or the number its name
             // spells, as in `Lambda.const_polyvar`.
@@ -3465,11 +3494,11 @@ fn pattern_literal(ctx: &TypeContext, p: &Pattern) -> Option<LiteralTag> {
             None
         }
         PatternDesc::Tpat_construct(_, cstr, args) => match &cstr.cstr_kind {
-            ConstructorKind::Ordinary(r) => match (r.representation(ctx), args.as_slice()) {
+            ConstructorKind::Ordinary(r) => match (r.representation(ctx), ta.pattern_list(*args)) {
                 (RuntimeCase::Constant(tag), []) => Some(tag.literal),
                 // An untagged payload is represented by the payload itself.
                 (RuntimeCase::Block(RuntimeBlock::Untagged { .. }), [arg]) => {
-                    pattern_literal(ctx, arg)
+                    pattern_literal(ctx, ta, ta.pattern(*arg))
                 }
                 _ => None,
             },
@@ -3551,31 +3580,31 @@ fn or_liveness<'p>(
 }
 
 /// parmatch.ml `payload_liveness`.
-pub(crate) fn payload_liveness<'p>(ctx: &TypeContext, p: &'p Pattern) -> PayloadLiveness<'p> {
+pub(crate) fn payload_liveness<'p>(ctx: &TypeContext, ta: &'p TypedArena, p: &'p Pattern) -> PayloadLiveness<'p> {
     match &p.pat_desc {
-        PatternDesc::Tpat_or(p1, p2, _) => or_liveness(|p| payload_liveness(ctx, p), p1, p2),
+        PatternDesc::Tpat_or(p1, p2, _) => or_liveness(|p| payload_liveness(ctx, ta, p), ta.pattern(*p1), ta.pattern(*p2)),
         PatternDesc::Tpat_construct(_, cd, args) if args.len() == 1 => {
             let shadowing = shadowing_literal_cases(ctx, cd);
             if shadowing.is_empty() {
-                subpatterns_liveness(ctx, p)
+                subpatterns_liveness(ctx, ta, p)
             } else {
-                shadowed_argument_liveness(ctx, &shadowing, &args[0])
+                shadowed_argument_liveness(ctx, ta, &shadowing, ta.pattern(ta.pattern_list(*args)[0]))
             }
         }
-        _ => subpatterns_liveness(ctx, p),
+        _ => subpatterns_liveness(ctx, ta, p),
     }
 }
 
 /// `Typedtree.iter_pattern_desc`'s children, in its order.
-fn pattern_children(p: &Pattern) -> Vec<&Pattern> {
+fn pattern_children<'p>(ta: &'p TypedArena, p: &'p Pattern) -> Vec<&'p Pattern> {
     match &p.pat_desc {
-        PatternDesc::Tpat_alias(p, _, _) => vec![p],
-        PatternDesc::Tpat_tuple(ps) | PatternDesc::Tpat_array(ps) => ps.iter().collect(),
-        PatternDesc::Tpat_construct(_, _, ps) => ps.iter().collect(),
-        PatternDesc::Tpat_variant(_, arg, _) => arg.as_deref().into_iter().collect(),
-        PatternDesc::Tpat_record(fields, _, _) => fields.iter().map(|(_, _, p, _)| p).collect(),
-        PatternDesc::Tpat_dict(entries) => entries.iter().map(|e| &e.tdp_pattern).collect(),
-        PatternDesc::Tpat_or(p1, p2, _) => vec![p1, p2],
+        PatternDesc::Tpat_alias(p, _, _) => vec![ta.pattern(*p)],
+        PatternDesc::Tpat_tuple(ps) | PatternDesc::Tpat_array(ps) => ta.patterns(*ps).collect(),
+        PatternDesc::Tpat_construct(_, _, ps) => ta.patterns(*ps).collect(),
+        PatternDesc::Tpat_variant(_, arg, _) => arg.iter().map(|p| ta.pattern(*p)).collect(),
+        PatternDesc::Tpat_record(fields, _, _) => fields.iter().map(|(_, _, p, _)| ta.pattern(*p)).collect(),
+        PatternDesc::Tpat_dict(entries) => entries.iter().map(|e| ta.pattern(e.tdp_pattern)).collect(),
+        PatternDesc::Tpat_or(p1, p2, _) => vec![ta.pattern(*p1), ta.pattern(*p2)],
         PatternDesc::Tpat_any
         | PatternDesc::Tpat_var(..)
         | PatternDesc::Tpat_constant(_)
@@ -3585,13 +3614,13 @@ fn pattern_children(p: &Pattern) -> Vec<&Pattern> {
 
 /// A pattern that is not an or-pattern matches nothing as soon as one of its
 /// subpatterns matches nothing.
-fn subpatterns_liveness<'p>(ctx: &TypeContext, p: &'p Pattern) -> PayloadLiveness<'p> {
+fn subpatterns_liveness<'p>(ctx: &TypeContext, ta: &'p TypedArena, p: &'p Pattern) -> PayloadLiveness<'p> {
     let mut result = PayloadLiveness::Matches(Vec::new());
-    for sub in pattern_children(p) {
+    for sub in pattern_children(ta, p) {
         if let PayloadLiveness::NeverMatches(_) = result {
             continue;
         }
-        match payload_liveness(ctx, sub) {
+        match payload_liveness(ctx, ta, sub) {
             dead @ PayloadLiveness::NeverMatches(_) => result = dead,
             PayloadLiveness::Matches(d2) => {
                 if let PayloadLiveness::Matches(d1) = &mut result {
@@ -3607,14 +3636,15 @@ fn subpatterns_liveness<'p>(ctx: &TypeContext, p: &'p Pattern) -> PayloadLivenes
 /// `arg` matches, outermost first.
 fn shadowed_argument_liveness<'p>(
     ctx: &TypeContext,
+    ta: &'p TypedArena,
     shadowing: &[ShadowedPayload],
     arg: &'p Pattern,
 ) -> PayloadLiveness<'p> {
     match &arg.pat_desc {
         PatternDesc::Tpat_or(p1, p2, _) => {
-            or_liveness(|p| shadowed_argument_liveness(ctx, shadowing, p), p1, p2)
+            or_liveness(|p| shadowed_argument_liveness(ctx, ta, shadowing, p), ta.pattern(*p1), ta.pattern(*p2))
         }
-        PatternDesc::Tpat_alias(p, _, _) => shadowed_argument_liveness(ctx, shadowing, p),
+        PatternDesc::Tpat_alias(p, _, _) => shadowed_argument_liveness(ctx, ta, shadowing, ta.pattern(*p)),
         PatternDesc::Tpat_construct(_, cd, inner)
             if inner.len() == 1 && is_untagged_payload(ctx, cd) =>
         {
@@ -3622,17 +3652,17 @@ fn shadowed_argument_liveness<'p>(
             // around it still take precedence, before its own.
             let mut shadowing = shadowing.to_vec();
             shadowing.extend(shadowing_literal_cases(ctx, cd));
-            shadowed_argument_liveness(ctx, &shadowing, &inner[0])
+            shadowed_argument_liveness(ctx, ta, &shadowing, ta.pattern(ta.pattern_list(*inner)[0]))
         }
         _ => {
-            let shadowing_case = pattern_literal(ctx, arg).and_then(|value| {
+            let shadowing_case = pattern_literal(ctx, ta, arg).and_then(|value| {
                 shadowing.iter().find(|shadowed| {
                     crate::types::variant_runtime::same_literal_value(&value, &shadowed.value)
                 })
             });
             match shadowing_case {
                 Some(shadowed) => PayloadLiveness::NeverMatches(vec![shadowed.clone()]),
-                None => payload_liveness(ctx, arg),
+                None => payload_liveness(ctx, ta, arg),
             }
         }
     }
@@ -3675,8 +3705,8 @@ fn shadowed_payload_reason(shadowed: &[ShadowedPayload]) -> String {
 
 /// Whether `payload_liveness` reports anything for the pattern, so the
 /// unused-case check cannot be skipped as trivial.
-pub(crate) fn has_shadowed_payloads(ctx: &TypeContext, p: &Pattern) -> bool {
-    !matches!(payload_liveness(ctx, p), PayloadLiveness::Matches(d) if d.is_empty())
+pub(crate) fn has_shadowed_payloads(ctx: &TypeContext, ta: &TypedArena, p: &Pattern) -> bool {
+    !matches!(payload_liveness(ctx, ta, p), PayloadLiveness::Matches(d) if d.is_empty())
 }
 
 impl<'a, O: Oracle> Parmatch<'a, O> {
@@ -3688,7 +3718,7 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
         let mut reported = Vec::new();
         let mut dead_cases = Vec::new();
         for (index, case) in casel.iter().enumerate() {
-            let liveness = payload_liveness(self.oracle.ctx(), case.lhs);
+            let liveness = payload_liveness(self.oracle.ctx(), self.ta, case.lhs);
             match liveness {
                 PayloadLiveness::NeverMatches(shadowed) => {
                     let reason = shadowed_payload_reason(&shadowed);
@@ -3715,6 +3745,7 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
     /// This matters for a bool payload, whose values can all be covered, as
     /// in `@as(true) Yes | Ans(bool)` where `Yes | Ans(false)` is exhaustive.
     fn import_with_bool_payload_overlaps(&mut self, pat: &'a Pattern) -> P {
+        let ta = self.ta;
         if let PatternDesc::Tpat_construct(_, cstr, args) = &pat.pat_desc
             && args.is_empty()
             && let ConstructorKind::Ordinary(r) = &cstr.cstr_kind
@@ -3786,26 +3817,23 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
         // `{p with pat_desc = Typedtree.map_pattern_desc ...}`.
         let desc = match &pat.pat_desc {
             PatternDesc::Tpat_alias(inner, _, _) => {
-                Desc::Alias(self.import_with_bool_payload_overlaps(inner))
+                Desc::Alias(self.import_with_bool_payload_overlaps(ta.pattern(*inner)))
             }
             PatternDesc::Tpat_tuple(items) => Desc::Tuple(
-                items
-                    .iter()
+                ta.patterns(*items)
                     .map(|item| self.import_with_bool_payload_overlaps(item))
                     .collect(),
             ),
             PatternDesc::Tpat_construct(lid, cstr, args) => Desc::Construct {
                 lid: Some(*lid),
                 cstr: std::sync::Arc::clone(cstr),
-                args: args
-                    .iter()
+                args: ta.patterns(*args)
                     .map(|arg| self.import_with_bool_payload_overlaps(arg))
                     .collect(),
             },
             PatternDesc::Tpat_variant(label, arg, _) => Desc::Variant {
                 label: Cow::Borrowed(label.as_str()),
-                arg: arg
-                    .as_deref()
+                arg: arg.as_ref().map(|arg| ta.pattern(*arg))
                     .map(|arg| self.import_with_bool_payload_overlaps(arg)),
             },
             PatternDesc::Tpat_record(fields, closed, rest) => Desc::Record {
@@ -3814,7 +3842,7 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                     .map(|(lid, lbl, p, opt)| Field {
                         lid: Some(*lid),
                         lbl: Cow::Borrowed(lbl),
-                        pat: self.import_with_bool_payload_overlaps(p),
+                        pat: self.import_with_bool_payload_overlaps(ta.pattern(*p)),
                         opt: *opt,
                     })
                     .collect(),
@@ -3822,14 +3850,13 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                 has_rest: rest.is_some(),
             },
             PatternDesc::Tpat_array(items) => Desc::Array(
-                items
-                    .iter()
+                ta.patterns(*items)
                     .map(|item| self.import_with_bool_payload_overlaps(item))
                     .collect(),
             ),
             PatternDesc::Tpat_or(left, right, _) => Desc::Or(
-                self.import_with_bool_payload_overlaps(left),
-                self.import_with_bool_payload_overlaps(right),
+                self.import_with_bool_payload_overlaps(ta.pattern(*left)),
+                self.import_with_bool_payload_overlaps(ta.pattern(*right)),
             ),
             PatternDesc::Tpat_any
             | PatternDesc::Tpat_var(..)

@@ -6,7 +6,6 @@
 //! keys: an optional field per key. `lowering` gives the labels to the keys of
 //! one match, so they line up across its cases.
 
-use std::borrow::Cow;
 use std::sync::Arc;
 
 use crate::fast_hash::AHashMap;
@@ -16,44 +15,65 @@ use crate::types::asttypes::{MutableFlag, PrivateFlag};
 use crate::types::context::TypeContext;
 use crate::types::decl::{LabelDescription, RecordRepresentation};
 use crate::types::predef;
-use crate::types::typedtree::{Loc, Pattern, PatternDesc};
+use crate::types::typedtree::{Loc, Pattern, PatternDesc, TPatIdx, TPatList, TypedArena};
+
+/// Where lowering reads patterns and stores the ones it builds: the typed
+/// arena, or the match compiler's overlay of it.
+pub trait PatternStore {
+    /// A pattern by handle.
+    fn pat(&self, idx: TPatIdx) -> &Pattern;
+    /// The handles of a pattern list.
+    fn pat_list(&self, list: TPatList) -> &[TPatIdx];
+    /// Store a pattern.
+    fn push_pat(&mut self, p: Pattern) -> TPatIdx;
+    /// Store a list of pattern handles.
+    fn push_pat_list(&mut self, items: &[TPatIdx]) -> TPatList;
+}
 
 /// The direct subpatterns of `p` (OCaml `Typedtree.iter_pattern_desc`).
-fn for_each_subpattern<'p>(p: &'p Pattern, f: &mut impl FnMut(&'p Pattern)) {
+fn for_each_subpattern<'s>(
+    ta: &'s impl PatternStore,
+    p: &Pattern,
+    f: &mut impl FnMut(&'s Pattern),
+) {
     match &p.pat_desc {
         PatternDesc::Tpat_any
         | PatternDesc::Tpat_var(..)
         | PatternDesc::Tpat_constant(_)
         | PatternDesc::Tpat_interval(..)
         | PatternDesc::Tpat_variant(_, None, _) => {}
-        PatternDesc::Tpat_alias(inner, _, _) => f(inner),
-        PatternDesc::Tpat_variant(_, Some(inner), _) => f(inner),
+        PatternDesc::Tpat_alias(inner, _, _) => f(ta.pat(*inner)),
+        PatternDesc::Tpat_variant(_, Some(inner), _) => f(ta.pat(*inner)),
         PatternDesc::Tpat_tuple(ps)
         | PatternDesc::Tpat_construct(_, _, ps)
-        | PatternDesc::Tpat_array(ps) => ps.iter().for_each(f),
-        PatternDesc::Tpat_record(fields, _, _) => fields.iter().for_each(|(_, _, p, _)| f(p)),
-        PatternDesc::Tpat_dict(entries) => entries.iter().for_each(|e| f(&e.tdp_pattern)),
+        | PatternDesc::Tpat_array(ps) => ta.pat_list(*ps).iter().for_each(|&p| f(ta.pat(p))),
+        PatternDesc::Tpat_record(fields, _, _) => {
+            fields.iter().for_each(|(_, _, p, _)| f(ta.pat(*p)))
+        }
+        PatternDesc::Tpat_dict(entries) => {
+            entries.iter().for_each(|e| f(ta.pat(e.tdp_pattern)))
+        }
         PatternDesc::Tpat_or(p1, p2, _) => {
-            f(p1);
-            f(p2);
+            f(ta.pat(*p1));
+            f(ta.pat(*p2));
         }
     }
 }
 
 /// `Dict_pattern.contains_dict`.
-fn contains_dict(p: &Pattern) -> bool {
+fn contains_dict(ta: &impl PatternStore, p: &Pattern) -> bool {
     if matches!(p.pat_desc, PatternDesc::Tpat_dict(_)) {
         return true;
     }
     let mut found = false;
-    for_each_subpattern(p, &mut |sub| found = found || contains_dict(sub));
+    for_each_subpattern(ta, p, &mut |sub| found = found || contains_dict(ta, sub));
     found
 }
 
 /// `Dict_pattern.keys`: the keys of the dict patterns in `pats`, in order of
 /// appearance.
-fn keys(pats: &[&Pattern]) -> Vec<String> {
-    fn collect(p: &Pattern, keys: &mut Vec<String>) {
+fn keys(ta: &impl PatternStore, pats: &[&Pattern]) -> Vec<String> {
+    fn collect(ta: &impl PatternStore, p: &Pattern, keys: &mut Vec<String>) {
         if let PatternDesc::Tpat_dict(entries) = &p.pat_desc {
             for entry in entries {
                 if !keys.contains(&entry.tdp_key.txt) {
@@ -61,11 +81,11 @@ fn keys(pats: &[&Pattern]) -> Vec<String> {
                 }
             }
         }
-        for_each_subpattern(p, &mut |sub| collect(sub, keys));
+        for_each_subpattern(ta, p, &mut |sub| collect(ta, sub, keys));
     }
     let mut keys = Vec::new();
     for p in pats {
-        collect(p, &mut keys);
+        collect(ta, p, &mut keys);
     }
     keys
 }
@@ -107,11 +127,11 @@ pub struct Lowering {
 
 impl Lowering {
     /// The lowering for a match whose patterns are `pats`.
-    pub fn new(ctx: &TypeContext, pats: &[&Pattern]) -> Lowering {
-        if !pats.iter().any(|p| contains_dict(p)) {
+    pub fn new(ctx: &TypeContext, ta: &impl PatternStore, pats: &[&Pattern]) -> Lowering {
+        if !pats.iter().any(|p| contains_dict(ta, p)) {
             return Lowering { labels: None };
         }
-        let labels = labels_of_keys(ctx, keys(pats))
+        let labels = labels_of_keys(ctx, keys(ta, pats))
             .into_iter()
             .map(|lbl| (lbl.lbl_name.clone(), Arc::new(lbl)))
             .collect();
@@ -120,19 +140,37 @@ impl Lowering {
         }
     }
 
-    /// Lower `p`, borrowing it when there's nothing to lower.
-    pub fn lower<'p>(&self, p: &'p Pattern) -> Cow<'p, Pattern> {
+    /// Whether lowering is the identity: the match has no dict patterns.
+    pub fn is_identity(&self) -> bool {
+        self.labels.is_none()
+    }
+
+    /// Lower the stored pattern `p`, storing the lowered nodes in `ta`;
+    /// `p` itself when there's nothing to lower.
+    pub fn lower(&self, ta: &mut impl PatternStore, p: TPatIdx) -> TPatIdx {
         match &self.labels {
-            None => Cow::Borrowed(p),
-            Some(labels) => Cow::Owned(lower(labels, p)),
+            None => p,
+            Some(labels) => lower(ta, labels, p),
         }
     }
 }
 
-fn lower(labels: &AHashMap<String, Arc<LabelDescription>>, p: &Pattern) -> Pattern {
-    let lower_box = |p: &Pattern| Box::new(lower(labels, p));
-    let lower_all = |ps: &[Pattern]| ps.iter().map(|p| lower(labels, p)).collect();
-    let pat_desc = match &p.pat_desc {
+fn lower(
+    ta: &mut impl PatternStore,
+    labels: &AHashMap<String, Arc<LabelDescription>>,
+    idx: TPatIdx,
+) -> TPatIdx {
+    let p = ta.pat(idx).clone();
+    fn lower_list(
+        ta: &mut impl PatternStore,
+        labels: &AHashMap<String, Arc<LabelDescription>>,
+        ps: TPatList,
+    ) -> TPatList {
+        let handles = ta.pat_list(ps).to_vec();
+        let lowered: Vec<TPatIdx> = handles.into_iter().map(|p| lower(ta, labels, p)).collect();
+        ta.push_pat_list(&lowered)
+    }
+    let pat_desc = match p.pat_desc {
         PatternDesc::Tpat_dict(entries) => {
             let mut fields: Vec<_> = entries
                 .iter()
@@ -146,7 +184,7 @@ fn lower(labels: &AHashMap<String, Arc<LabelDescription>>, p: &Pattern) -> Patte
                     (
                         lid,
                         labels[&entry.tdp_key.txt].clone(),
-                        lower(labels, &entry.tdp_pattern),
+                        lower(ta, labels, entry.tdp_pattern),
                         entry.tdp_optional,
                     )
                 })
@@ -155,40 +193,51 @@ fn lower(labels: &AHashMap<String, Arc<LabelDescription>>, p: &Pattern) -> Patte
             fields.sort_by_key(|(_, lbl, _, _)| lbl.lbl_pos);
             PatternDesc::Tpat_record(fields, ClosedFlag::Open, None)
         }
-        PatternDesc::Tpat_any
+        desc @ (PatternDesc::Tpat_any
         | PatternDesc::Tpat_var(..)
         | PatternDesc::Tpat_constant(_)
         | PatternDesc::Tpat_interval(..)
-        | PatternDesc::Tpat_variant(_, None, _) => p.pat_desc.clone(),
+        | PatternDesc::Tpat_variant(_, None, _)) => desc,
         PatternDesc::Tpat_alias(inner, id, name) => {
-            PatternDesc::Tpat_alias(lower_box(inner), *id, name.clone())
+            PatternDesc::Tpat_alias(lower(ta, labels, inner), id, name)
         }
         PatternDesc::Tpat_variant(label, Some(inner), row) => {
-            PatternDesc::Tpat_variant(label.clone(), Some(lower_box(inner)), *row)
+            PatternDesc::Tpat_variant(label, Some(lower(ta, labels, inner)), row)
         }
-        PatternDesc::Tpat_tuple(ps) => PatternDesc::Tpat_tuple(lower_all(ps)),
+        PatternDesc::Tpat_tuple(ps) => PatternDesc::Tpat_tuple(lower_list(ta, labels, ps)),
         PatternDesc::Tpat_construct(lid, cstr, ps) => {
-            PatternDesc::Tpat_construct(*lid, cstr.clone(), lower_all(ps))
+            PatternDesc::Tpat_construct(lid, cstr, lower_list(ta, labels, ps))
         }
-        PatternDesc::Tpat_array(ps) => PatternDesc::Tpat_array(lower_all(ps)),
+        PatternDesc::Tpat_array(ps) => PatternDesc::Tpat_array(lower_list(ta, labels, ps)),
         PatternDesc::Tpat_record(fields, closed, rest) => PatternDesc::Tpat_record(
             fields
-                .iter()
-                .map(|(lid, lbl, p, opt)| (*lid, lbl.clone(), lower(labels, p), *opt))
+                .into_iter()
+                .map(|(lid, lbl, p, opt)| (lid, lbl, lower(ta, labels, p), opt))
                 .collect(),
-            *closed,
-            rest.clone(),
+            closed,
+            rest,
         ),
         PatternDesc::Tpat_or(p1, p2, row) => {
-            PatternDesc::Tpat_or(lower_box(p1), lower_box(p2), row.clone())
+            let p1 = lower(ta, labels, p1);
+            let p2 = lower(ta, labels, p2);
+            PatternDesc::Tpat_or(p1, p2, row)
         }
     };
-    Pattern {
-        pat_desc,
-        pat_loc: p.pat_loc,
-        pat_extra: p.pat_extra.clone(),
-        pat_type: p.pat_type,
-        pat_env: p.pat_env,
-        pat_attributes: p.pat_attributes.clone(),
+    // The lowered pattern shares the original's extras and attributes.
+    ta.push_pat(Pattern { pat_desc, ..p })
+}
+
+impl PatternStore for TypedArena {
+    fn pat(&self, idx: TPatIdx) -> &Pattern {
+        self.pattern(idx)
+    }
+    fn pat_list(&self, list: TPatList) -> &[TPatIdx] {
+        self.pattern_list(list)
+    }
+    fn push_pat(&mut self, p: Pattern) -> TPatIdx {
+        self.push_pattern(p)
+    }
+    fn push_pat_list(&mut self, items: &[TPatIdx]) -> TPatList {
+        self.push_pattern_list(items)
     }
 }

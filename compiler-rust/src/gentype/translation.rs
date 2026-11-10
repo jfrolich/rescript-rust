@@ -213,6 +213,7 @@ where
 /// [@genType]
 /// [@module] external myBanner : ReasonReact.reactClass = "./MyBanner";
 pub fn translate_primitive(
+    ta: &crate::types::typedtree::TypedArena,
     ctx: &crate::types::context::TypeContext,
     arena: &ParseArena,
     config: &crate::gentype::config::T,
@@ -238,11 +239,12 @@ pub fn translate_primitive(
     };
 
     let type_expr_translation = crate::gentype::translate_core_type::translate_core_type(
+        ta,
         ctx,
         arena,
         config,
         type_env,
-        &value_description.val_desc,
+        ta.core_type(value_description.val_desc),
     )?;
     let (attribute_import, attribute_renaming) =
         crate::gentype::annotation::get_attribute_import_renaming(

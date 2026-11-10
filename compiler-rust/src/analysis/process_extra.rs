@@ -478,15 +478,15 @@ impl ExtraIterator<'_, '_> {
     fn handle_module_expr(&mut self, expr: &tt::ModuleExprDesc) {
         match expr {
             tt::ModuleExprDesc::Tmod_constraint(expr, _, _, _) => {
-                self.handle_module_expr(&expr.mod_desc)
+                self.handle_module_expr(&self.ctx.ta.module_expr(*expr).mod_desc)
             }
             tt::ModuleExprDesc::Tmod_ident(path, lid) => self.add_for_lident(None, path, lid),
             tt::ModuleExprDesc::Tmod_functor(_, _, _, result) => {
-                self.handle_module_expr(&result.mod_desc)
+                self.handle_module_expr(&self.ctx.ta.module_expr(*result).mod_desc)
             }
             tt::ModuleExprDesc::Tmod_apply(obj, arg, _) => {
-                self.handle_module_expr(&obj.mod_desc);
-                self.handle_module_expr(&arg.mod_desc);
+                self.handle_module_expr(&self.ctx.ta.module_expr(*obj).mod_desc);
+                self.handle_module_expr(&self.ctx.ta.module_expr(*arg).mod_desc);
             }
             _ => {}
         }
@@ -534,8 +534,10 @@ impl ExtraIterator<'_, '_> {
             txt: name.txt.clone(),
             loc: self.loc(name.loc),
         };
-        let has_unpack = pattern
-            .pat_extra
+        let has_unpack = self
+            .ctx
+            .ta
+            .pat_extra(pattern)
             .iter()
             .any(|(extra, _, _)| matches!(extra, tt::PatExtra::Tpat_unpack));
         let unpacked = if has_unpack {
@@ -550,7 +552,10 @@ impl ExtraIterator<'_, '_> {
         } else {
             None
         };
-        let attributes = Attrs::Parsed(pattern.pat_attributes.as_slice(), self.ctx.arena);
+        let attributes = Attrs::Parsed(
+            self.ctx.ta.pat_attributes(pattern).as_slice(),
+            self.ctx.arena,
+        );
         match unpacked {
             Some(path) => {
                 let extent = name.loc;
@@ -574,13 +579,19 @@ impl ExtraIterator<'_, '_> {
     }
 }
 
-impl TastIterator for ExtraIterator<'_, '_> {
+impl<'a> TastIterator<'a> for ExtraIterator<'a, '_> {
+    fn arena(&self) -> &'a tt::TypedArena {
+        self.ctx.ta
+    }
+
     fn structure_item(&mut self, item: &tt::StructureItem) {
         match &item.str_desc {
             tt::StructureItemDesc::Tstr_include(incl) => {
-                self.handle_module_expr(&incl.incl_mod.mod_desc)
+                self.handle_module_expr(&self.ctx.ta.module_expr(incl.incl_mod).mod_desc)
             }
-            tt::StructureItemDesc::Tstr_module(mb) => self.handle_module_expr(&mb.mb_expr.mod_desc),
+            tt::StructureItemDesc::Tstr_module(mb) => {
+                self.handle_module_expr(&self.ctx.ta.module_expr(mb.mb_expr).mod_desc)
+            }
             tt::StructureItemDesc::Tstr_open(open) => {
                 let lid = tt::Loc {
                     txt: open.open_txt.txt,
@@ -595,20 +606,26 @@ impl TastIterator for ExtraIterator<'_, '_> {
 
     fn signature_item(&mut self, item: &tt::TypedSignatureItem) {
         if let tt::TypedSignatureItemDesc::Tsig_value(vd) = &item.sig_desc {
-            let stamp = vd.val_id.binding_time();
+            let stamp = self.ctx.ta.value_description(*vd).val_id.binding_time();
             if self.file.stamps.find_value(stamp).is_none() {
                 let name = Located {
-                    txt: vd.val_name.txt.clone(),
-                    loc: self.loc(vd.val_name.loc),
+                    txt: self.ctx.ta.value_description(*vd).val_name.txt.clone(),
+                    loc: self.loc(self.ctx.ta.value_description(*vd).val_name.loc),
                 };
                 let declared = attrs::new_declared(
-                    vd.val_desc.ctyp_type,
-                    self.loc(vd.val_loc),
+                    self.ctx
+                        .ta
+                        .core_type(self.ctx.ta.value_description(*vd).val_desc)
+                        .ctyp_type,
+                    self.loc(self.ctx.ta.value_description(*vd).val_loc),
                     name.clone(),
                     stamp,
                     ModulePath::NotVisible,
                     false,
-                    Attrs::Parsed(vd.val_attributes.as_slice(), self.ctx.arena),
+                    Attrs::Parsed(
+                        self.ctx.ta.value_description(*vd).val_attributes.as_slice(),
+                        self.ctx.arena,
+                    ),
                     self.ctx.raised,
                 );
                 self.file.stamps.add_value(stamp, declared);
@@ -618,7 +635,10 @@ impl TastIterator for ExtraIterator<'_, '_> {
                     name.loc,
                     LocType::Typed(
                         name.txt,
-                        vd.val_desc.ctyp_type,
+                        self.ctx
+                            .ta
+                            .core_type(self.ctx.ta.value_description(*vd).val_desc)
+                            .ctyp_type,
                         LocKind::Definition(stamp, Tip::Value),
                     ),
                 );
@@ -651,8 +671,10 @@ impl TastIterator for ExtraIterator<'_, '_> {
                         loc: self.loc(rest.rest_name.loc),
                     };
                     let extent = name.loc;
-                    let attributes =
-                        Attrs::Parsed(pattern.pat_attributes.as_slice(), self.ctx.arena);
+                    let attributes = Attrs::Parsed(
+                        self.ctx.ta.pat_attributes(pattern).as_slice(),
+                        self.ctx.arena,
+                    );
                     self.add_for_declared_pattern(
                         rest.rest_ident.binding_time(),
                         name,
@@ -684,7 +706,10 @@ impl TastIterator for ExtraIterator<'_, '_> {
             }
             tt::ExpressionDesc::Texp_record { fields, .. } => {
                 // process_extra.ml:434-438: every written field.
-                let items: Vec<RecordItem> = fields
+                let items: Vec<RecordItem> = self
+                    .ctx
+                    .ta
+                    .record_fields(*fields)
                     .iter()
                     .map(|(_, lid, _)| RecordItem {
                         lid: lid.txt,
@@ -712,7 +737,7 @@ impl TastIterator for ExtraIterator<'_, '_> {
                 }
             }
             tt::ExpressionDesc::Texp_field(inner, lid, _) => {
-                self.add_for_field(inner.exp_type, expression.exp_type, lid)
+                self.add_for_field(self.ctx.ta.expr(*inner).exp_type, expression.exp_type, lid)
             }
             _ => {}
         }
@@ -771,11 +796,12 @@ mod tests {
             .expect("typecheck");
         let raised = crate::analysis::process_attributes::Raised::default();
         let ctx = Ctx {
+            ta: &tctx.typed,
             arena,
             types: &type_ctx,
             raised: &raised,
         };
-        let annots = crate::analysis::process_cmt::Annots::Implementation(&typed.str_items);
+        let annots = crate::analysis::process_cmt::Annots::Implementation(tctx.typed.structure_items(typed.str_items));
         let mut file = crate::analysis::process_cmt::file_for_annots(
             ctx,
             0,

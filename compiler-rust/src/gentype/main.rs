@@ -125,6 +125,8 @@ pub enum TypedArtifactAnnots<'a> {
 pub struct TypedArtifact<'a> {
     pub annots: TypedArtifactAnnots<'a>,
     pub arena: &'a ParseArena,
+    /// Node storage of the typed tree in `annots`.
+    pub ta: &'a crate::types::typedtree::TypedArena,
     pub ctx: &'a TypeContext,
     pub source_file: Option<&'a str>,
     pub compiler_module_name: crate::gentype::module_name::T,
@@ -316,6 +318,7 @@ pub fn typed_artifact_check_annotations(
         TypedArtifactAnnots::Implementation(structure) => {
             crate::gentype::annotation::structure_check_annotation(
                 artifact.arena,
+                artifact.ta,
                 &|loc, attributes| check_annotation(artifact.arena, loc, attributes),
                 structure,
             )
@@ -323,6 +326,7 @@ pub fn typed_artifact_check_annotations(
         TypedArtifactAnnots::Interface(signature) => {
             crate::gentype::annotation::signature_check_annotation(
                 artifact.arena,
+                artifact.ta,
                 &|loc, attributes| check_annotation(artifact.arena, loc, attributes),
                 signature,
             )
@@ -376,6 +380,7 @@ pub fn translate_typed_artifact(
             crate::gentype::translate_structure::translate_structure(
                 artifact.ctx,
                 artifact.arena,
+                artifact.ta,
                 config,
                 output_file_relative,
                 resolver,
@@ -387,11 +392,12 @@ pub fn translate_typed_artifact(
             crate::gentype::translate_signature::translate_signature(
                 artifact.ctx,
                 artifact.arena,
+                artifact.ta,
                 config,
                 output_file_relative,
                 resolver,
                 &type_env,
-                signature,
+                artifact.ta.signature_items(signature.sig_items),
             )?
         }
         TypedArtifactAnnots::Packed
@@ -454,14 +460,16 @@ pub fn typed_artifact_translate_type_declarations(
     let type_env = crate::gentype::type_env::root();
     type_env.borrow_mut().notes = notes.clone();
     let translations = match artifact.annots {
-        TypedArtifactAnnots::Implementation(structure) => structure
-            .str_items
+        TypedArtifactAnnots::Implementation(structure) => artifact
+            .ta
+            .structure_items(structure.str_items)
             .iter()
             .filter(|item| structure_item_is_declaration(item))
             .map(|item| {
                 crate::gentype::translate_structure::translate_structure_item(
                     artifact.ctx,
                     artifact.arena,
+                    artifact.ta,
                     config,
                     output_file_relative,
                     resolver,
@@ -470,14 +478,16 @@ pub fn typed_artifact_translate_type_declarations(
                 )
             })
             .collect::<crate::gentype::annotation::Read<_>>()?,
-        TypedArtifactAnnots::Interface(signature) => signature
-            .sig_items
+        TypedArtifactAnnots::Interface(signature) => artifact
+            .ta
+            .signature_items(signature.sig_items)
             .iter()
             .filter(|item| signature_item_is_declaration(item))
             .map(|item| {
                 crate::gentype::translate_signature::translate_signature_item(
                     artifact.ctx,
                     artifact.arena,
+                    artifact.ta,
                     config,
                     output_file_relative,
                     resolver,
@@ -1100,7 +1110,6 @@ mod tests {
         let env = initial_env(&type_ctx);
         let (typed, _) = crate::types::typemod::type_structure(&mut tctx, &env, &arena, &structure)
             .unwrap_or_else(|error| panic!("{module} type checks: {error:?}"));
-        drop(tctx);
         let config = crate::gentype::config::build_config_from_cli_args(
             None,
             &[
@@ -1124,6 +1133,7 @@ mod tests {
             None,
             TypedArtifact {
                 annots: TypedArtifactAnnots::Implementation(&typed),
+                ta: &tctx.typed,
                 arena: &arena,
                 ctx: &type_ctx,
                 source_file: Some(&source_file),

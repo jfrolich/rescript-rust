@@ -15,12 +15,12 @@ use crate::types::decl::{
     RecordRepresentation, TypeKind, TypeRepresentation,
 };
 use crate::types::type_expr::TypeExprRef;
-use crate::types::typedtree::{TypedCoreType, TypedTypeDeclaration};
+use crate::types::typedtree::{TypedTypeDeclaration};
 
 #[derive(Debug, Clone)]
 pub enum DeclarationKind {
     RecordDeclarationFromTypes(Vec<LabelDeclaration>, RecordRepresentation),
-    GeneralDeclaration(Option<TypedCoreType>),
+    GeneralDeclaration(Option<crate::types::typedtree::TCoreTypeIdx>),
     GeneralDeclarationFromTypes(Option<TypeExprRef>),
     VariantDeclarationFromTypes(
         Vec<ConstructorDeclaration>,
@@ -164,6 +164,7 @@ pub fn declared_field_name(
 
 #[allow(non_snake_case)]
 pub fn traslate_declaration_kind(
+    ta: &crate::types::typedtree::TypedArena,
     ctx: &crate::types::context::TypeContext,
     arena: &ParseArena,
     config: &crate::gentype::config::T,
@@ -200,6 +201,7 @@ pub fn traslate_declaration_kind(
         name_as,
     };
     traslate_declaration_kind_with_attribute_info(
+        ta,
         ctx,
         arena,
         config,
@@ -216,6 +218,7 @@ pub fn traslate_declaration_kind(
 
 #[allow(non_snake_case)]
 pub fn traslate_declaration_kind_from_decl_attributes(
+    ta: &crate::types::typedtree::TypedArena,
     ctx: &crate::types::context::TypeContext,
     arena: &ParseArena,
     config: &crate::gentype::config::T,
@@ -256,6 +259,7 @@ pub fn traslate_declaration_kind_from_decl_attributes(
         name_as,
     };
     traslate_declaration_kind_with_attribute_info(
+        ta,
         ctx,
         arena,
         config,
@@ -271,6 +275,7 @@ pub fn traslate_declaration_kind_from_decl_attributes(
 }
 
 fn traslate_declaration_kind_with_attribute_info(
+    ta: &crate::types::typedtree::TypedArena,
     ctx: &crate::types::context::TypeContext,
     arena: &ParseArena,
     config: &crate::gentype::config::T,
@@ -388,8 +393,9 @@ fn traslate_declaration_kind_with_attribute_info(
             return_type_declaration(handle_general_declaration(translation))
         }
         (DeclarationKind::GeneralDeclaration(Some(core_type)), None) => {
+            let core_type = ta.core_type(core_type);
             let translation = crate::gentype::translate_core_type::translate_core_type(
-                ctx, arena, config, type_env, &core_type,
+                ta, ctx, arena, config, type_env, &core_type,
             )?;
             let type_ = match (&core_type.ctyp_desc, translation.type_.clone()) {
                 (
@@ -397,7 +403,7 @@ fn traslate_declaration_kind_with_attribute_info(
                     Type::Variant(mut variant),
                 ) => {
                     let row_fields_variants =
-                        crate::gentype::translate_core_type::process_variant(row_fields);
+                        crate::gentype::translate_core_type::process_variant(ta, row_fields);
                     variant.no_payloads = row_fields_variants
                         .no_payloads
                         .iter()
@@ -579,6 +585,7 @@ pub fn has_some_gadt_leaf(constructor_declarations: &[ConstructorDeclaration]) -
 }
 
 pub fn translate_type_declaration(
+    ta: &crate::types::typedtree::TypedArena,
     ctx: &crate::types::context::TypeContext,
     arena: &ParseArena,
     config: &crate::gentype::config::T,
@@ -598,7 +605,7 @@ pub fn translate_type_declaration(
     let type_params = type_declaration
         .typ_params
         .iter()
-        .map(|(core_type, _)| core_type.clone())
+        .map(|(core_type, _)| ta.core_type(*core_type))
         .collect::<Vec<_>>();
     let type_vars = crate::gentype::type_vars::extract_from_core_type(&type_params);
     let declaration_kind = match &type_declaration.typ_type.type_kind {
@@ -616,11 +623,12 @@ pub fn translate_type_declaration(
             )
         }
         TypeKind::TypeAbstract => {
-            DeclarationKind::GeneralDeclaration(type_declaration.typ_manifest.clone())
+            DeclarationKind::GeneralDeclaration(type_declaration.typ_manifest)
         }
         _ => DeclarationKind::NoDeclaration,
     };
     traslate_declaration_kind(
+        ta,
         ctx,
         arena,
         config,
@@ -645,6 +653,7 @@ pub fn add_type_declaration_id_to_type_env(
 }
 
 pub fn translate_type_declarations(
+    ta: &crate::types::typedtree::TypedArena,
     ctx: &crate::types::context::TypeContext,
     arena: &ParseArena,
     config: &crate::gentype::config::T,
@@ -663,6 +672,7 @@ pub fn translate_type_declarations(
     let mut translations = Vec::new();
     for type_declaration in type_declarations {
         let res = translate_type_declaration(
+            ta,
             ctx,
             arena,
             config,

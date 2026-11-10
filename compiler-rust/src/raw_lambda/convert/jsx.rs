@@ -15,7 +15,7 @@ use crate::types::external_ffi_types::{
 };
 use crate::types::path::Path;
 use crate::types::typedtree::{
-    ApplyArg, Expression, ExpressionDesc, RecordField, record_fields_by_position,
+    TypedArena, ApplyArg, Expression, ExpressionDesc, RecordField, record_fields_by_position,
 };
 
 /// `jsx_props`: the props as the PPX passes them.
@@ -71,6 +71,7 @@ fn is_construct(e: &Expression, name: &str) -> bool {
 /// `children` field wraps that in `Some`, which is the identity on an array
 /// literal.
 fn jsx_children<'e>(
+    ta: &'e TypedArena,
     multi: bool,
     lbl: &LabelDescription,
     child: &'e Expression,
@@ -82,13 +83,13 @@ fn jsx_children<'e>(
         ExpressionDesc::Texp_construct(_, cstr, args)
             if cstr.cstr_name == "Some" && args.len() == 1 && lbl.lbl_optional =>
         {
-            &args[0]
+            ta.expr(ta.expr_list(*args)[0])
         }
         _ => child,
     };
     match &child.exp_desc {
         ExpressionDesc::Texp_apply { funct, args, .. } => {
-            match (&funct.exp_desc, args.as_slice()) {
+            match (&ta.expr(*funct).exp_desc, ta.apply_args(*args)) {
                 (
                     ExpressionDesc::Texp_ident(_, _, desc),
                     [
@@ -98,8 +99,8 @@ fn jsx_children<'e>(
                         },
                     ],
                 ) if matches!(&desc.val_kind, ValueKind::ValPrim(p) if p.prim_name == "%identity") => {
-                    match &array.exp_desc {
-                        ExpressionDesc::Texp_array(children) => Some(children.iter().collect()),
+                    match &ta.expr(*array).exp_desc {
+                        ExpressionDesc::Texp_array(children) => Some(ta.exprs(*children).collect()),
                         _ => None,
                     }
                 }
@@ -130,7 +131,7 @@ fn is_plain_param(param: &Param) -> bool {
 
 impl<'a> RawLambdaConverter<'a> {
     /// `jsx_props_of`.
-    fn jsx_props_of<'e>(&self, multi: bool, props: &'e Expression) -> Option<JsxProps<'e>> {
+    fn jsx_props_of<'e>(&self, multi: bool, props: &'e Expression) -> Option<JsxProps<'e>> where 'a: 'e {
         let ExpressionDesc::Texp_record {
             fields,
             empty_representation,
@@ -139,6 +140,7 @@ impl<'a> RawLambdaConverter<'a> {
         else {
             return Some(JsxProps::Spread(props));
         };
+        let fields = self.ta.record_fields(*fields);
         let representation =
             crate::types::typedtree::record_representation(fields, empty_representation.as_deref());
         if !representation.is_none_or(|repres| *repres == RecordRepresentation::RecordRegular) {
@@ -146,9 +148,9 @@ impl<'a> RawLambdaConverter<'a> {
         }
         let all_labels =
             crate::types::typedtree::record_all_labels(self.type_ctx, fields).unwrap_or_default();
-        let init = extended_expression.as_deref();
+        let init = extended_expression.as_ref().map(|e| self.ta.expr(*e));
         let children = fields.iter().find_map(|(lbl, _, child)| {
-            (lbl.lbl_name == "children" && !is_omitted(lbl, child)).then_some((lbl, child))
+            (lbl.lbl_name == "children" && !is_omitted(lbl, self.ta.expr(*child))).then_some((lbl, self.ta.expr(*child)))
         });
         // `record_copies_fields` (translcore.ml:1037-1050).
         let copy_fields = match init {
@@ -161,7 +163,7 @@ impl<'a> RawLambdaConverter<'a> {
             None => None,
             // Children printed as JSX children must be the `children` prop.
             Some((lbl, _)) if lbl.lbl_runtime_name != "children" => return None,
-            Some((lbl, child)) => Some(jsx_children(multi, lbl, child)?),
+            Some((lbl, child)) => Some(jsx_children(self.ta, multi, lbl, child)?),
         };
         Some(JsxProps::Record {
             fields,
@@ -179,7 +181,7 @@ impl<'a> RawLambdaConverter<'a> {
         e: &Expression,
         funct: &'e Expression,
         args: &'e [ApplyArg],
-    ) -> Option<JsxCall<'e>> {
+    ) -> Option<JsxCall<'e>> where 'a: 'e {
         let ExpressionDesc::Texp_ident(path, _, desc) = &funct.exp_desc else {
             return None;
         };
@@ -256,13 +258,15 @@ impl<'a> RawLambdaConverter<'a> {
                 && key_label.txt == "key"
                 && unit_t.arg_label == LabelNoname::ArgEmpty
                 && matches!(unit_t.arg_type, Attr::Ignore | Attr::ExternUnit)
-                && is_construct(unit, "()") =>
+                && is_construct(self.ta.expr(*unit), "()") =>
             {
                 (tag, props, Some(key))
             }
             _ => return None,
         };
-        let props = self.jsx_props_of(multi, props)?;
+        let tag = self.ta.expr(*tag);
+        let props = self.jsx_props_of(multi, self.ta.expr(*props))?;
+        let key = key.map(|key| self.ta.expr(*key));
         Some(JsxCall {
             name: p.prim_name.clone(),
             ffi: ffi.clone(),
@@ -307,7 +311,7 @@ impl<'a> RawLambdaConverter<'a> {
                             match written {
                                 Some((lbl, _, value)) => {
                                     if !skip(lbl) {
-                                        let value = self.convert_expr_raw(value);
+                                        let value = self.convert_expr_raw(self.ta.expr(*value));
                                         field(lbl, value);
                                     }
                                 }
@@ -330,7 +334,7 @@ impl<'a> RawLambdaConverter<'a> {
                     _ => {
                         for (lbl, _, value) in fields {
                             if !skip(lbl) {
-                                let value = self.convert_expr_raw(value);
+                                let value = self.convert_expr_raw(self.ta.expr(*value));
                                 field(lbl, value);
                             }
                         }

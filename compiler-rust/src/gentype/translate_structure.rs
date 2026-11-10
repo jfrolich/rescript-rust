@@ -4,16 +4,19 @@ use crate::gentype::gen_type_common::{ArgType, StringSet, Type};
 use crate::parse_arena::ParseArena;
 use crate::types::decl::ModuleType as DeclModuleType;
 use crate::types::typedtree::{
-    Expression, ExpressionDesc, FunctionParam, ModuleBinding, ModuleExprDesc, ModuleTypeConstraint,
-    Pattern, PatternDesc, Structure, StructureItem, StructureItemDesc, ValueBinding,
+    ExpressionDesc, FunctionParam, ModuleBinding, ModuleExprDesc, ModuleTypeConstraint,
+    Pattern, PatternDesc, Structure, StructureItem, StructureItemDesc, TExprIdx, TypedArena,
+    ValueBinding,
 };
 
 #[allow(non_snake_case)]
 pub fn addAnnotationsToTypes_(
     arena: &ParseArena,
-    expr: &Expression,
+    ta: &TypedArena,
+    expr: TExprIdx,
     arg_types: &[ArgType],
 ) -> Vec<ArgType> {
+    let expr = ta.expr(expr);
     // Mirrors compiler/gentype/translate_structure.ml:3-25: name the argument
     // types after the function's parameters, continuing into the body once
     // they run out.
@@ -21,13 +24,18 @@ pub fn addAnnotationsToTypes_(
         ExpressionDesc::Texp_function { params, body, .. } => {
             let mut out = Vec::with_capacity(arg_types.len());
             for (index, ArgType { a_type, .. }) in arg_types.iter().enumerate() {
-                match params.get(index) {
+                match ta.function_params(*params).get(index) {
                     Some(param) => out.push(ArgType {
                         a_name: function_param_name(arena, param),
                         a_type: a_type.clone(),
                     }),
                     None => {
-                        out.extend(addAnnotationsToTypes_(arena, body, &arg_types[index..]));
+                        out.extend(addAnnotationsToTypes_(
+                            arena,
+                            ta,
+                            *body,
+                            &arg_types[index..],
+                        ));
                         break;
                     }
                 }
@@ -40,12 +48,13 @@ pub fn addAnnotationsToTypes_(
 
 pub fn add_annotations_to_types(
     arena: &ParseArena,
+    ta: &TypedArena,
     config: &crate::gentype::config::T,
-    expr: &Expression,
+    expr: TExprIdx,
     arg_types: &[ArgType],
 ) -> Vec<ArgType> {
     // Mirrors compiler/gentype/TranslateStructure.ml:34-47.
-    let arg_types = addAnnotationsToTypes_(arena, expr, arg_types);
+    let arg_types = addAnnotationsToTypes_(arena, ta, expr, arg_types);
     if arg_types
         .iter()
         .filter(|ArgType { a_name, .. }| a_name == "param")
@@ -67,9 +76,10 @@ pub fn add_annotations_to_types(
 
 pub fn add_annotations_to_fields(
     arena: &ParseArena,
+    ta: &TypedArena,
     config: &crate::gentype::config::T,
     notes: &crate::gentype::log_::Notes,
-    expr: &Expression,
+    expr: TExprIdx,
     fields: &[crate::gentype::gen_type_common::Field],
     arg_types: &[ArgType],
 ) -> crate::gentype::annotation::Read<(Vec<crate::gentype::gen_type_common::Field>, Vec<ArgType>)> {
@@ -77,16 +87,16 @@ pub fn add_annotations_to_fields(
     let Some((field, next_fields)) = fields.split_first() else {
         return Ok((
             vec![],
-            add_annotations_to_types(arena, config, expr, arg_types),
+            add_annotations_to_types(arena, ta, config, expr, arg_types),
         ));
     };
     let (next_fields1, types1) =
-        add_annotations_to_fields(arena, config, notes, expr, next_fields, arg_types)?;
+        add_annotations_to_fields(arena, ta, config, notes, expr, next_fields, arg_types)?;
     let mut field = field.clone();
     field.name_js = crate::gentype::translate_type_declarations::rename_record_field(
         arena,
         notes,
-        &expr.exp_attributes,
+        ta.exp_attributes(ta.expr(expr)),
         &field.name_js,
     )?;
     let mut fields = vec![field];
@@ -96,15 +106,16 @@ pub fn add_annotations_to_fields(
 
 pub fn add_annotations_to_function_type(
     arena: &ParseArena,
+    ta: &TypedArena,
     config: &crate::gentype::config::T,
-    expr: &Expression,
+    expr: TExprIdx,
     type_: Type,
 ) -> Type {
     // Mirrors compiler/gentype/TranslateStructure.ml:64-73.
     match type_ {
         Type::Function(mut function_) => {
             function_.arg_types =
-                add_annotations_to_types(arena, config, expr, &function_.arg_types);
+                add_annotations_to_types(arena, ta, config, expr, &function_.arg_types);
             Type::Function(function_)
         }
         _ => type_,
@@ -114,6 +125,7 @@ pub fn add_annotations_to_function_type(
 pub fn translate_value_binding(
     ctx: &crate::types::context::TypeContext,
     arena: &ParseArena,
+    ta: &TypedArena,
     config: &crate::gentype::config::T,
     output_file_relative: &str,
     resolver: &crate::gentype::module_resolver::Resolver,
@@ -121,7 +133,7 @@ pub fn translate_value_binding(
     value_binding: &ValueBinding,
 ) -> crate::gentype::annotation::Read<crate::gentype::translation::T> {
     // Mirrors compiler/gentype/TranslateStructure.ml:103-123.
-    let id = match value_binding_id(&value_binding.vb_pat) {
+    let id = match value_binding_id(ta, ta.pattern(value_binding.vb_pat)) {
         None => return Ok(crate::gentype::translation::empty()),
         Some(id) => id,
     };
@@ -135,7 +147,7 @@ pub fn translate_value_binding(
         arena,
         config,
         &crate::gentype::type_env::notes(type_env),
-        value_binding.vb_pat.pat_loc,
+        ta.pattern(value_binding.vb_pat).pat_loc,
         &value_binding.vb_attributes,
     )? == crate::gentype::annotation::T::GenType
     {
@@ -148,8 +160,8 @@ pub fn translate_value_binding(
             output_file_relative,
             resolver,
             type_env,
-            value_binding.vb_pat.pat_type,
-            |t| add_annotations_to_function_type(arena, config, &value_binding.vb_expr, t),
+            ta.pattern(value_binding.vb_pat).pat_type,
+            |t| add_annotations_to_function_type(arena, ta, config, value_binding.vb_expr, t),
             &name,
         )
     } else {
@@ -160,6 +172,7 @@ pub fn translate_value_binding(
 pub fn translate_module_binding(
     ctx: &crate::types::context::TypeContext,
     arena: &ParseArena,
+    ta: &TypedArena,
     config: &crate::gentype::config::T,
     output_file_relative: &str,
     resolver: &crate::gentype::module_resolver::Resolver,
@@ -180,23 +193,23 @@ pub fn translate_module_binding(
     crate::gentype::type_env::update_module_item(module_item, type_env);
     let type_env = crate::gentype::type_env::new_module(name, type_env);
 
-    Ok(match &module_binding.mb_expr.mod_desc {
+    Ok(match &ta.module_expr(module_binding.mb_expr).mod_desc {
         ModuleExprDesc::Tmod_ident(path, _) => {
             let dep = crate::gentype::dependencies::from_path(&config, &type_env, path);
             let internal = crate::gentype::dependencies::is_internal(&dep);
             crate::gentype::type_env::add_module_equation(dep, internal, &type_env);
-            let scraped_module_type =
-                ctx.get_typed_env(module_binding.mb_expr.mod_env)
-                    .and_then(|env| {
-                        scrape_direct_persistent_alias_for_gentype(
-                            ctx,
-                            env.as_ref(),
-                            &module_binding.mb_expr.mod_type,
-                        )
-                    });
+            let scraped_module_type = ctx
+                .get_typed_env(ta.module_expr(module_binding.mb_expr).mod_env)
+                .and_then(|env| {
+                    scrape_direct_persistent_alias_for_gentype(
+                        ctx,
+                        env.as_ref(),
+                        &ta.module_expr(module_binding.mb_expr).mod_type,
+                    )
+                });
             let module_type = scraped_module_type
                 .as_ref()
-                .unwrap_or(&module_binding.mb_expr.mod_type);
+                .unwrap_or(&ta.module_expr(module_binding.mb_expr).mod_type);
             match module_type {
                 DeclModuleType::MtySignature(signature) => crate::gentype::translation::combine(
                     crate::gentype::translate_signature_from_types::translate_signature_from_types(
@@ -226,6 +239,7 @@ pub fn translate_module_binding(
                 crate::gentype::translation::combine(translate_structure(
                     ctx,
                     arena,
+                    ta,
                     &config,
                     output_file_relative,
                     resolver,
@@ -234,7 +248,7 @@ pub fn translate_module_binding(
                 )?)
             }
         }
-        ModuleExprDesc::Tmod_apply(_, _, _) => match &module_binding.mb_expr.mod_type {
+        ModuleExprDesc::Tmod_apply(_, _, _) => match &ta.module_expr(module_binding.mb_expr).mod_type {
             DeclModuleType::MtySignature(signature) => crate::gentype::translation::combine(
                 crate::gentype::translate_signature_from_types::translate_signature_from_types(
                     ctx,
@@ -269,11 +283,12 @@ pub fn translate_module_binding(
                         crate::gentype::translate_signature::translate_signature(
                             ctx,
                             arena,
+                            ta,
                             &config,
                             output_file_relative,
                             resolver,
                             &type_env,
-                            &signature,
+                            ta.signature_items(signature.sig_items),
                         )?,
                     ),
                 }
@@ -290,11 +305,12 @@ pub fn translate_module_binding(
         ) => translate_module_constraint(
             ctx,
             arena,
+            ta,
             &config,
             output_file_relative,
             resolver,
             &type_env,
-            module_expr,
+            ta.module_expr(*module_expr),
             module_type,
             module_type_constraint,
             coercion,
@@ -305,6 +321,7 @@ pub fn translate_module_binding(
 pub fn translate_structure_item(
     ctx: &crate::types::context::TypeContext,
     arena: &ParseArena,
+    ta: &TypedArena,
     config: &crate::gentype::config::T,
     output_file_relative: &str,
     resolver: &crate::gentype::module_resolver::Resolver,
@@ -319,6 +336,7 @@ pub fn translate_structure_item(
                 code_items: vec![],
                 type_declarations:
                     crate::gentype::translate_type_declarations::translate_type_declarations(
+                        ta,
                         ctx,
                         arena,
                         config,
@@ -331,12 +349,13 @@ pub fn translate_structure_item(
             }
         }
         StructureItemDesc::Tstr_value(_, value_bindings) => crate::gentype::translation::combine(
-            value_bindings
+            ta.value_bindings(*value_bindings)
                 .iter()
                 .map(|value_binding| {
                     translate_value_binding(
                         ctx,
                         arena,
+                        ta,
                         config,
                         output_file_relative,
                         resolver,
@@ -348,18 +367,20 @@ pub fn translate_structure_item(
         ),
         StructureItemDesc::Tstr_primitive(value_description) => {
             crate::gentype::translation::translate_primitive(
+                ta,
                 ctx,
                 arena,
                 config,
                 output_file_relative,
                 resolver,
                 type_env,
-                value_description,
+                ta.value_description(*value_description),
             )?
         }
         StructureItemDesc::Tstr_module(module_binding) => translate_module_binding(
             ctx,
             arena,
+            ta,
             config,
             output_file_relative,
             resolver,
@@ -370,6 +391,7 @@ pub fn translate_structure_item(
             crate::gentype::translate_signature::translate_module_type_declaration(
                 ctx,
                 arena,
+                ta,
                 config,
                 output_file_relative,
                 resolver,
@@ -384,6 +406,7 @@ pub fn translate_structure_item(
                     translate_module_binding(
                         ctx,
                         arena,
+                        ta,
                         config,
                         output_file_relative,
                         resolver,
@@ -399,14 +422,16 @@ pub fn translate_structure_item(
             // compiler/gentype/TranslateStructure.ml:309-331 before falling
             // back to signature-from-types include translation.
             if let ModuleExprDesc::Tmod_constraint(inner, _, _, _) =
-                &include_declaration.incl_mod.mod_desc
+                &ta.module_expr(include_declaration.incl_mod).mod_desc
             {
-                if let ModuleExprDesc::Tmod_structure(structure) = &inner.mod_desc {
-                    if let [struct_item1] = structure.str_items.as_slice() {
+                if let ModuleExprDesc::Tmod_structure(structure) = &ta.module_expr(*inner).mod_desc
+                {
+                    if let [struct_item1] = ta.structure_items(structure.str_items) {
                         if matches!(struct_item1.str_desc, StructureItemDesc::Tstr_primitive(_)) {
                             return translate_structure_item(
                                 ctx,
                                 arena,
+                                ta,
                                 config,
                                 output_file_relative,
                                 resolver,
@@ -440,6 +465,7 @@ pub fn translate_structure_item(
 pub fn translate_structure(
     ctx: &crate::types::context::TypeContext,
     arena: &ParseArena,
+    ta: &TypedArena,
     config: &crate::gentype::config::T,
     output_file_relative: &str,
     resolver: &crate::gentype::module_resolver::Resolver,
@@ -459,13 +485,14 @@ pub fn translate_structure(
     }
 
     let mut seen = StringSet::new();
-    let mut items = Vec::with_capacity(structure.str_items.len());
-    for item in structure.str_items.iter().rev() {
+    let mut items = Vec::with_capacity(ta.structure_items(structure.str_items).len());
+    for item in ta.structure_items(structure.str_items).iter().rev() {
         match &item.str_desc {
             StructureItemDesc::Tstr_value(_, value_bindings) => {
-                let value_bindings = value_bindings
+                let value_bindings = ta
+                    .value_bindings(*value_bindings)
                     .iter()
-                    .filter(|binding| match &binding.vb_pat.pat_desc {
+                    .filter(|binding| match &ta.pattern(binding.vb_pat).pat_desc {
                         PatternDesc::Tpat_var(id, _) => seen.insert(id.name().to_string()),
                         _ => true,
                     })
@@ -482,6 +509,7 @@ pub fn translate_structure(
             Item::Borrowed(item) => translate_structure_item(
                 ctx,
                 arena,
+                ta,
                 config,
                 output_file_relative,
                 resolver,
@@ -495,6 +523,7 @@ pub fn translate_structure(
                         translate_value_binding(
                             ctx,
                             arena,
+                            ta,
                             config,
                             output_file_relative,
                             resolver,
@@ -511,6 +540,7 @@ pub fn translate_structure(
 fn translate_module_constraint(
     ctx: &crate::types::context::TypeContext,
     arena: &ParseArena,
+    ta: &TypedArena,
     config: &crate::gentype::config::T,
     output_file_relative: &str,
     resolver: &crate::gentype::module_resolver::Resolver,
@@ -533,6 +563,7 @@ fn translate_module_constraint(
         return Ok(crate::gentype::translation::combine(translate_structure(
             ctx,
             arena,
+            ta,
             config,
             output_file_relative,
             resolver,
@@ -556,11 +587,12 @@ fn translate_module_constraint(
                     crate::gentype::translate_signature::translate_signature(
                         ctx,
                         arena,
+                        ta,
                         config,
                         output_file_relative,
                         resolver,
                         &type_env,
-                        &signature,
+                        ta.signature_items(signature.sig_items),
                     )?,
                 ),
             }
@@ -588,22 +620,23 @@ fn translate_module_constraint(
         }
         (_, ModuleTypeConstraint::Tmodtype_explicit(module_type), _)
             if matches!(
-                module_type.mty_desc,
+                ta.module_type(*module_type).mty_desc,
                 crate::types::typedtree::ModuleTypeDesc::Tmty_signature(_)
             ) =>
         {
             if let crate::types::typedtree::ModuleTypeDesc::Tmty_signature(signature) =
-                &module_type.mty_desc
+                &ta.module_type(*module_type).mty_desc
             {
                 crate::gentype::translation::combine(
                     crate::gentype::translate_signature::translate_signature(
                         ctx,
                         arena,
+                        ta,
                         config,
                         output_file_relative,
                         resolver,
                         type_env,
-                        signature,
+                        ta.signature_items(signature.sig_items),
                     )?,
                 )
             } else {
@@ -691,11 +724,14 @@ fn persistent_alias_module_type(
     }
 }
 
-fn value_binding_id(pattern: &Pattern) -> Option<&crate::ident::Ident> {
+fn value_binding_id<'a>(
+    ta: &'a crate::types::typedtree::TypedArena,
+    pattern: &'a Pattern,
+) -> Option<&'a crate::ident::Ident> {
     match &pattern.pat_desc {
         PatternDesc::Tpat_var(id, _) => Some(id),
         PatternDesc::Tpat_alias(inner, id, _)
-            if matches!(inner.pat_desc, PatternDesc::Tpat_any) =>
+            if matches!(ta.pattern(*inner).pat_desc, PatternDesc::Tpat_any) =>
         {
             Some(id)
         }

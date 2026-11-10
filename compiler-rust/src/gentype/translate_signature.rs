@@ -2,11 +2,12 @@
 
 use crate::parse_arena::ParseArena;
 use crate::types::typedtree::{
-    ModuleTypeDeclaration, ModuleTypeDesc, TypedModuleDeclaration, TypedSignature,
+    ModuleTypeDeclaration, ModuleTypeDesc, TypedModuleDeclaration,
     TypedSignatureItem, TypedSignatureItemDesc,
 };
 
 pub fn translate_signature_value(
+    ta: &crate::types::typedtree::TypedArena,
     ctx: &crate::types::context::TypeContext,
     arena: &ParseArena,
     config: &crate::gentype::config::T,
@@ -22,7 +23,7 @@ pub fn translate_signature_value(
             value_description.val_id.name()
         ));
     }
-    let type_expr = value_description.val_desc.ctyp_type;
+    let type_expr = ta.core_type(value_description.val_desc).ctyp_type;
     Ok(
         match crate::gentype::annotation::from_attributes(
             arena,
@@ -58,6 +59,7 @@ pub fn translate_signature_value(
 pub fn translate_module_declaration(
     ctx: &crate::types::context::TypeContext,
     arena: &ParseArena,
+    ta: &crate::types::typedtree::TypedArena,
     config: &crate::gentype::config::T,
     output_file_relative: &str,
     resolver: &crate::gentype::module_resolver::Resolver,
@@ -70,16 +72,17 @@ pub fn translate_module_declaration(
         crate::gentype::log_::item(&format!("Translate Module Declaration {name}\n"));
     }
     let type_env = crate::gentype::type_env::new_module(name, type_env);
-    Ok(match &module_declaration.md_type.mty_desc {
+    Ok(match &ta.module_type(module_declaration.md_type).mty_desc {
         ModuleTypeDesc::Tmty_signature(signature) => {
             crate::gentype::translation::combine(translate_signature(
                 ctx,
                 arena,
+                ta,
                 config,
                 output_file_relative,
                 resolver,
                 &type_env,
-                signature,
+                ta.signature_items(signature.sig_items),
             )?)
         }
         ModuleTypeDesc::Tmty_ident(path, _) => {
@@ -89,11 +92,12 @@ pub fn translate_module_declaration(
                     crate::gentype::translation::combine(translate_signature(
                         ctx,
                         arena,
+                        ta,
                         config,
                         output_file_relative,
                         resolver,
                         &type_env,
-                        &signature,
+                        ta.signature_items(signature.sig_items),
                     )?)
                 }
             }
@@ -108,6 +112,7 @@ pub fn translate_module_declaration(
 pub fn translate_module_type_declaration(
     ctx: &crate::types::context::TypeContext,
     arena: &ParseArena,
+    ta: &crate::types::typedtree::TypedArena,
     config: &crate::gentype::config::T,
     output_file_relative: &str,
     resolver: &crate::gentype::module_resolver::Resolver,
@@ -123,16 +128,17 @@ pub fn translate_module_type_declaration(
     }
     Ok(match &module_type_declaration.mtd_type {
         None => crate::gentype::translation::empty(),
-        Some(mtd_type) => match &mtd_type.mty_desc {
+        Some(mtd_type) => match &ta.module_type(*mtd_type).mty_desc {
             ModuleTypeDesc::Tmty_signature(signature) => {
                 let name = module_type_declaration.mtd_id.name();
-                let mut signature_without_values = signature.clone();
-                signature_without_values
-                    .sig_items
-                    .retain(|item| !matches!(item.sig_desc, TypedSignatureItemDesc::Tsig_value(_)));
+                let signature_without_values = ta
+                    .signature_items(signature.sig_items)
+                    .iter()
+                    .filter(|item| !matches!(item.sig_desc, TypedSignatureItemDesc::Tsig_value(_)));
                 crate::gentype::translation::combine(translate_signature(
                     ctx,
                     arena,
+                    ta,
                     config,
                     output_file_relative,
                     resolver,
@@ -140,11 +146,11 @@ pub fn translate_module_type_declaration(
                         name,
                         signature.clone(),
                         crate::types::typemod::decl_signature_from_typed_signature(
-                            signature, arena, ctx,
+                            ta, signature, arena, ctx,
                         ),
                         type_env,
                     ),
-                    &signature_without_values,
+                    signature_without_values,
                 )?)
             }
             ModuleTypeDesc::Tmty_ident(_, _) => not_implemented("Tmty_ident"),
@@ -159,6 +165,7 @@ pub fn translate_module_type_declaration(
 pub fn translate_signature_item(
     ctx: &crate::types::context::TypeContext,
     arena: &ParseArena,
+    ta: &crate::types::typedtree::TypedArena,
     config: &crate::gentype::config::T,
     output_file_relative: &str,
     resolver: &crate::gentype::module_resolver::Resolver,
@@ -173,6 +180,7 @@ pub fn translate_signature_item(
                 code_items: vec![],
                 type_declarations:
                     crate::gentype::translate_type_declarations::translate_type_declarations(
+                        ta,
                         ctx,
                         arena,
                         config,
@@ -185,6 +193,7 @@ pub fn translate_signature_item(
             }
         }
         TypedSignatureItemDesc::Tsig_value(value_description) => {
+            let value_description = ta.value_description(*value_description);
             let is_import = crate::gentype::annotation::has_attribute(
                 arena,
                 crate::gentype::annotation::tag_is_gentype_import,
@@ -192,6 +201,7 @@ pub fn translate_signature_item(
             )?;
             if value_description.val_prim.is_some() || is_import {
                 crate::gentype::translation::translate_primitive(
+                    ta,
                     ctx,
                     arena,
                     config,
@@ -205,6 +215,7 @@ pub fn translate_signature_item(
                     crate::gentype::runtime::new_module_item(value_description.val_id.name());
                 crate::gentype::type_env::update_module_item(module_item, type_env);
                 translate_signature_value(
+                    ta,
                     ctx,
                     arena,
                     config,
@@ -218,6 +229,7 @@ pub fn translate_signature_item(
         TypedSignatureItemDesc::Tsig_module(module_declaration) => translate_module_declaration(
             ctx,
             arena,
+            ta,
             config,
             output_file_relative,
             resolver,
@@ -236,6 +248,7 @@ pub fn translate_signature_item(
             translate_module_type_declaration(
                 ctx,
                 arena,
+                ta,
                 &config,
                 output_file_relative,
                 resolver,
@@ -252,26 +265,27 @@ pub fn translate_signature_item(
     })
 }
 
-pub fn translate_signature(
+pub fn translate_signature<'s>(
     ctx: &crate::types::context::TypeContext,
     arena: &ParseArena,
+    ta: &crate::types::typedtree::TypedArena,
     config: &crate::gentype::config::T,
     output_file_relative: &str,
     resolver: &crate::gentype::module_resolver::Resolver,
     type_env: &crate::gentype::type_env::T,
-    signature: &TypedSignature,
+    signature_items: impl IntoIterator<Item = &'s crate::types::typedtree::TypedSignatureItem>,
 ) -> crate::gentype::annotation::Read<Vec<crate::gentype::translation::T>> {
     // Mirrors compiler/gentype/TranslateSignature.ml:163-169.
     if crate::gentype::debug::translation.load(std::sync::atomic::Ordering::Relaxed) {
         crate::gentype::log_::item("Translate Signature\n");
     }
-    signature
-        .sig_items
-        .iter()
+    signature_items
+        .into_iter()
         .map(|signature_item| {
             translate_signature_item(
                 ctx,
                 arena,
+                ta,
                 config,
                 output_file_relative,
                 resolver,

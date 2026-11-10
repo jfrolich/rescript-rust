@@ -20,6 +20,8 @@ pub struct Ctx<'a> {
     pub types: &'a TypeContext,
     /// Where an attribute reader's error is kept (see [`attrs::Raised`]).
     pub raised: &'a attrs::Raised,
+    /// Node storage of the typed tree.
+    pub ta: &'a tt::TypedArena,
 }
 
 impl Ctx<'_> {
@@ -372,13 +374,20 @@ impl Processor<'_> {
         let typ_type = Arc::new(td.typ_type.clone());
         let kind = match &td.typ_kind {
             tt::TypedTypeKind::Ttype_abstract => match &td.typ_manifest {
-                Some(manifest) => match &manifest.ctyp_desc {
-                    tt::TypedCoreTypeDesc::Ttyp_constr(path, _, args) => TypeKind::Abstract(Some(
-                        (path.clone(), args.iter().map(|t| t.ctyp_type).collect()),
-                    )),
-                    tt::TypedCoreTypeDesc::Ttyp_tuple(items) => {
-                        TypeKind::Tuple(items.iter().map(|t| t.ctyp_type).collect())
+                Some(manifest) => match &self.ctx.ta.core_type(*manifest).ctyp_desc {
+                    tt::TypedCoreTypeDesc::Ttyp_constr(path, _, args) => {
+                        TypeKind::Abstract(Some((
+                            path.clone(),
+                            self.ctx.ta.core_types(*args).map(|t| t.ctyp_type).collect(),
+                        )))
                     }
+                    tt::TypedCoreTypeDesc::Ttyp_tuple(items) => TypeKind::Tuple(
+                        self.ctx
+                            .ta
+                            .core_types(*items)
+                            .map(|t| t.ctyp_type)
+                            .collect(),
+                    ),
                     _ => TypeKind::Abstract(None),
                 },
                 None => TypeKind::Abstract(None),
@@ -401,7 +410,9 @@ impl Processor<'_> {
                             args: match &cd.cd_args {
                                 tt::TypedConstructorArguments::Cstr_tuple(args) => {
                                     ConstructorArgs::Args(
-                                        args.iter()
+                                        self.ctx
+                                            .ta
+                                            .core_types(*args)
                                             .map(|t| (t.ctyp_type, self.ctx.loc(t.ctyp_loc)))
                                             .collect(),
                                     )
@@ -418,7 +429,7 @@ impl Processor<'_> {
                                                     fname: Located::mknoloc(
                                                         f.ld_id.name().to_string(),
                                                     ),
-                                                    typ: f.ld_type.ctyp_type,
+                                                    typ: self.ctx.ta.core_type(f.ld_type).ctyp_type,
                                                     optional: f.ld_optional,
                                                     docstring: attrs_to_docstring(
                                                         self.ctx.raised,
@@ -435,7 +446,10 @@ impl Processor<'_> {
                                     )
                                 }
                             },
-                            res: cd.cd_res.as_ref().map(|t| t.ctyp_type),
+                            res: cd
+                                .cd_res
+                                .as_ref()
+                                .map(|t| self.ctx.ta.core_type(*t).ctyp_type),
                             type_decl: (td.typ_name.txt.clone(), typ_type.clone()),
                             docstring: attrs_to_docstring(self.ctx.raised, cd_attributes),
                         };
@@ -462,7 +476,7 @@ impl Processor<'_> {
                         Field {
                             stamp: f.ld_id.binding_time(),
                             fname: self.ctx.located(&f.ld_name),
-                            typ: f.ld_type.ctyp_type,
+                            typ: self.ctx.ta.core_type(f.ld_type).ctyp_type,
                             optional: f.ld_optional,
                             docstring: attrs_to_docstring(self.ctx.raised, f_attributes),
                             deprecated: self
@@ -526,8 +540,11 @@ impl Processor<'_> {
         md: &tt::TypedModuleDeclaration,
     ) -> ModuleItem {
         let name = self.ctx.located(&md.md_name);
-        let item =
-            self.for_type_module(&name.txt, &env.add_module(&name.txt), &md.md_type.mty_type);
+        let item = self.for_type_module(
+            &name.txt,
+            &env.add_module(&name.txt),
+            &self.ctx.ta.module_type(md.md_type).mty_type,
+        );
         let stamps = &mut self.stamps;
         let declared = add_declared(
             name,
@@ -555,14 +572,23 @@ impl Processor<'_> {
                 let stamps = &mut self.stamps;
                 let declared = add_declared(
                     Located {
-                        txt: vd.val_name.txt.clone(),
-                        loc: Loc::of_idx(self.ctx.arena, vd.val_name.loc),
+                        txt: self.ctx.ta.value_description(*vd).val_name.txt.clone(),
+                        loc: Loc::of_idx(
+                            self.ctx.arena,
+                            self.ctx.ta.value_description(*vd).val_name.loc,
+                        ),
                     },
-                    Loc::of_idx(self.ctx.arena, vd.val_loc),
-                    vd.val_id.binding_time(),
+                    Loc::of_idx(self.ctx.arena, self.ctx.ta.value_description(*vd).val_loc),
+                    self.ctx.ta.value_description(*vd).val_id.binding_time(),
                     env,
-                    vd.val_desc.ctyp_type,
-                    Attrs::Parsed(vd.val_attributes.as_slice(), self.ctx.arena),
+                    self.ctx
+                        .ta
+                        .core_type(self.ctx.ta.value_description(*vd).val_desc)
+                        .ctyp_type,
+                    Attrs::Parsed(
+                        self.ctx.ta.value_description(*vd).val_attributes.as_slice(),
+                        self.ctx.arena,
+                    ),
                     Some((exported, ExportedKind::Value)),
                     |stamp, d| stamps.add_value(stamp, d),
                     self.ctx.raised,
@@ -580,7 +606,7 @@ impl Processor<'_> {
                 .map(|md| self.for_module_declaration(env, exported, md))
                 .collect(),
             tt::TypedSignatureItemDesc::Tsig_include(incl) => {
-                let env = match &incl.incl_mod.mty_desc {
+                let env = match &self.ctx.ta.module_type(incl.incl_mod).mty_desc {
                     tt::ModuleTypeDesc::Tmty_ident(path, _)
                     | tt::ModuleTypeDesc::Tmty_alias(path, _) => ProcessEnv {
                         module_path: ModulePath::IncludedModule(
@@ -648,9 +674,14 @@ impl Processor<'_> {
                 let stamp = ident.binding_time();
                 // Detect first-class module unpack patterns and register them
                 // as modules.
-                let unpack_loc = pat.pat_extra.iter().find_map(|(extra, loc, _)| {
-                    matches!(extra, tt::PatExtra::Tpat_unpack).then_some(*loc)
-                });
+                let unpack_loc = self
+                    .ctx
+                    .ta
+                    .pat_extra(pat)
+                    .iter()
+                    .find_map(|(extra, loc, _)| {
+                        matches!(extra, tt::PatExtra::Tpat_unpack).then_some(*loc)
+                    });
                 let unpacked_path = unpack_loc.and_then(|_| {
                     match &*self.ctx.types.get_desc(dig(self.ctx.types, pat.pat_type)) {
                         TypeDesc::Tpackage { path, .. } => Some(path.clone()),
@@ -689,19 +720,22 @@ impl Processor<'_> {
             tt::PatternDesc::Tpat_tuple(pats)
             | tt::PatternDesc::Tpat_array(pats)
             | tt::PatternDesc::Tpat_construct(_, _, pats) => {
-                for p in pats {
+                for p in self.ctx.ta.patterns(*pats) {
                     self.handle_pattern(env, exported, items, None, p);
                 }
             }
-            tt::PatternDesc::Tpat_or(p, _, _) => self.handle_pattern(env, exported, items, None, p),
+            tt::PatternDesc::Tpat_or(p, _, _) => {
+                self.handle_pattern(env, exported, items, None, self.ctx.ta.pattern(*p))
+            }
             tt::PatternDesc::Tpat_dict(entries) => {
                 for entry in entries {
-                    self.handle_pattern(env, exported, items, None, &entry.tdp_pattern);
+                    let p = self.ctx.ta.pattern(entry.tdp_pattern);
+                    self.handle_pattern(env, exported, items, None, p);
                 }
             }
             tt::PatternDesc::Tpat_record(record_items, _, rest) => {
                 for (_, _, p, _) in record_items {
-                    self.handle_pattern(env, exported, items, None, p);
+                    self.handle_pattern(env, exported, items, None, self.ctx.ta.pattern(*p));
                 }
                 if let Some(rest) = rest {
                     let name = self.ctx.located(&rest.rest_name);
@@ -722,7 +756,7 @@ impl Processor<'_> {
                 }
             }
             tt::PatternDesc::Tpat_variant(_, Some(p), _) => {
-                self.handle_pattern(env, exported, items, None, p)
+                self.handle_pattern(env, exported, items, None, self.ctx.ta.pattern(*p))
             }
             tt::PatternDesc::Tpat_variant(_, None, _)
             | tt::PatternDesc::Tpat_any
@@ -741,17 +775,17 @@ impl Processor<'_> {
         match item {
             tt::StructureItemDesc::Tstr_value(_, bindings) => {
                 let mut items = Vec::new();
-                for binding in bindings {
+                for binding in self.ctx.ta.value_bindings(*bindings) {
                     self.handle_pattern(
                         env,
                         exported,
                         &mut items,
                         Some(&binding.vb_attributes),
-                        &binding.vb_pat,
+                        self.ctx.ta.pattern(binding.vb_pat),
                     );
                 }
-                for binding in bindings {
-                    self.scan_let_modules(env, &binding.vb_expr);
+                for binding in self.ctx.ta.value_bindings(*bindings) {
+                    self.scan_let_modules(env, binding.vb_expr);
                 }
                 items
             }
@@ -770,7 +804,11 @@ impl Processor<'_> {
                 };
                 let name = self.ctx.located(&mtd.mtd_name);
                 let env = env.add_module_type(&name.txt);
-                let item = self.for_type_module(&name.txt, &env, &mtd_type.mty_type);
+                let item = self.for_type_module(
+                    &name.txt,
+                    &env,
+                    &self.ctx.ta.module_type(*mtd_type).mty_type,
+                );
                 let stamps = &mut self.stamps;
                 let declared = add_declared(
                     name,
@@ -786,7 +824,10 @@ impl Processor<'_> {
                 vec![module_item_of(&declared)]
             }
             tt::StructureItemDesc::Tstr_include(incl) => {
-                let env = match get_module_path(&incl.incl_mod.mod_desc) {
+                let env = match get_module_path(
+                    self.ctx.ta,
+                    &self.ctx.ta.module_expr(incl.incl_mod).mod_desc,
+                ) {
                     Some(path) => ProcessEnv {
                         module_path: ModulePath::IncludedModule(
                             path,
@@ -799,15 +840,24 @@ impl Processor<'_> {
                     self.for_type_signature_item(&env, exported, item)
                 })
             }
-            tt::StructureItemDesc::Tstr_primitive(vd) if !self.primitive_is_fragment(vd) => {
+            tt::StructureItemDesc::Tstr_primitive(vd)
+                if !self.primitive_is_fragment(self.ctx.ta.value_description(*vd)) =>
+            {
                 let stamps = &mut self.stamps;
                 let declared = add_declared(
-                    self.ctx.located(&vd.val_name),
-                    Loc::of_idx(self.ctx.arena, vd.val_loc),
-                    vd.val_id.binding_time(),
+                    self.ctx
+                        .located(&self.ctx.ta.value_description(*vd).val_name),
+                    Loc::of_idx(self.ctx.arena, self.ctx.ta.value_description(*vd).val_loc),
+                    self.ctx.ta.value_description(*vd).val_id.binding_time(),
                     env,
-                    vd.val_desc.ctyp_type,
-                    Attrs::Parsed(vd.val_attributes.as_slice(), self.ctx.arena),
+                    self.ctx
+                        .ta
+                        .core_type(self.ctx.ta.value_description(*vd).val_desc)
+                        .ctyp_type,
+                    Attrs::Parsed(
+                        self.ctx.ta.value_description(*vd).val_attributes.as_slice(),
+                        self.ctx.arena,
+                    ),
                     Some((exported, ExportedKind::Value)),
                     |stamp, d| stamps.add_value(stamp, d),
                     self.ctx.raised,
@@ -829,7 +879,11 @@ impl Processor<'_> {
         mb: &tt::ModuleBinding,
     ) -> ModuleItem {
         let name = self.ctx.located(&mb.mb_name);
-        let item = self.for_module(env, &mb.mb_expr.mod_desc, &name.txt);
+        let item = self.for_module(
+            env,
+            &self.ctx.ta.module_expr(mb.mb_expr).mod_desc,
+            &name.txt,
+        );
         let stamps = &mut self.stamps;
         let declared = add_declared(
             name,
@@ -872,13 +926,14 @@ impl Processor<'_> {
                 Module::Structure(Arc::new(self.for_structure(
                     module_name,
                     &env,
-                    &structure.str_items,
+                    self.ctx.ta.structure_items(structure.str_items),
                 )))
             }
             tt::ModuleExprDesc::Tmod_functor(ident, arg_name, maybe_type, result) => {
                 if let Some(t) = maybe_type {
                     let name = self.ctx.located(arg_name);
-                    let kind = self.for_type_module(&name.txt, env, &t.mty_type);
+                    let kind =
+                        self.for_type_module(&name.txt, env, &self.ctx.ta.module_type(*t).mty_type);
                     let stamp = ident.binding_time();
                     let extent = name.loc;
                     let declared = attrs::new_declared(
@@ -893,17 +948,20 @@ impl Processor<'_> {
                     );
                     self.stamps.add_module(stamp, declared);
                 }
-                self.for_module(env, &result.mod_desc, module_name)
+                self.for_module(env, &self.ctx.ta.module_expr(*result).mod_desc, module_name)
             }
-            tt::ModuleExprDesc::Tmod_apply(functor, _, _) => {
-                self.for_module(env, &functor.mod_desc, module_name)
-            }
+            tt::ModuleExprDesc::Tmod_apply(functor, _, _) => self.for_module(
+                env,
+                &self.ctx.ta.module_expr(*functor).mod_desc,
+                module_name,
+            ),
             tt::ModuleExprDesc::Tmod_unpack(_, module_type) => {
                 let env = env.add_module(module_name);
                 self.for_type_module(module_name, &env, module_type)
             }
             tt::ModuleExprDesc::Tmod_constraint(expr, typ, _, _) => {
-                let mod_kind = self.for_module(env, &expr.mod_desc, module_name);
+                let mod_kind =
+                    self.for_module(env, &self.ctx.ta.module_expr(*expr).mod_desc, module_name);
                 let env = env.add_module(module_name);
                 let mod_type_kind = self.for_type_module(module_name, &env, typ);
                 Module::Constraint(Box::new(mod_kind), Box::new(mod_type_kind))
@@ -913,11 +971,13 @@ impl Processor<'_> {
 
     /// `scan_let_modules`: register `let module M = ...` bindings inside
     /// expressions as local modules.
-    fn scan_let_modules(&mut self, env: &ProcessEnv, e: &tt::Expression) {
-        match &e.exp_desc {
+    fn scan_let_modules(&mut self, env: &ProcessEnv, e: tt::TExprIdx) {
+        let ta = self.ctx.ta;
+        match &ta.expr(e).exp_desc {
             tt::ExpressionDesc::Texp_letmodule(id, name, mexpr, body) => {
                 let stamp = id.binding_time();
-                let item = self.for_module(env, &mexpr.mod_desc, &name.txt);
+                let item =
+                    self.for_module(env, &self.ctx.ta.module_expr(*mexpr).mod_desc, &name.txt);
                 let name = self.ctx.located(name);
                 let extent = name.loc;
                 let declared = attrs::new_declared(
@@ -931,58 +991,58 @@ impl Processor<'_> {
                     self.ctx.raised,
                 );
                 self.stamps.add_module(stamp, declared);
-                self.scan_let_modules(env, body);
+                self.scan_let_modules(env, *body);
             }
             tt::ExpressionDesc::Texp_let(_, bindings, body) => {
-                for binding in bindings {
-                    self.scan_let_modules(env, &binding.vb_expr);
+                for binding in self.ctx.ta.value_bindings(*bindings) {
+                    self.scan_let_modules(env, binding.vb_expr);
                 }
-                self.scan_let_modules(env, body);
+                self.scan_let_modules(env, *body);
             }
             tt::ExpressionDesc::Texp_apply { funct, args, .. } => {
-                self.scan_let_modules(env, funct);
-                for arg in args {
-                    if let Some(e) = &arg.expression {
+                self.scan_let_modules(env, *funct);
+                for arg in self.ctx.ta.apply_args(*args) {
+                    if let Some(e) = arg.expression {
                         self.scan_let_modules(env, e);
                     }
                 }
             }
             tt::ExpressionDesc::Texp_tuple(exprs) => {
-                for e in exprs {
-                    self.scan_let_modules(env, e);
+                for e in ta.expr_list(*exprs) {
+                    self.scan_let_modules(env, *e);
                 }
             }
             tt::ExpressionDesc::Texp_sequence(e1, e2) => {
-                self.scan_let_modules(env, e1);
-                self.scan_let_modules(env, e2);
+                self.scan_let_modules(env, *e1);
+                self.scan_let_modules(env, *e2);
             }
             tt::ExpressionDesc::Texp_match(e, cases, exn_cases, _) => {
-                self.scan_let_modules(env, e);
-                for case in cases.iter().chain(exn_cases) {
-                    if let Some(g) = &case.c_guard {
+                self.scan_let_modules(env, *e);
+                for case in ta.cases(*cases).iter().chain(ta.cases(*exn_cases)) {
+                    if let Some(g) = case.c_guard {
                         self.scan_let_modules(env, g);
                     }
-                    self.scan_let_modules(env, &case.c_rhs);
+                    self.scan_let_modules(env, case.c_rhs);
                 }
             }
-            tt::ExpressionDesc::Texp_function { body, .. } => self.scan_let_modules(env, body),
+            tt::ExpressionDesc::Texp_function { body, .. } => self.scan_let_modules(env, *body),
             tt::ExpressionDesc::Texp_try(e, cases, finally) => {
-                self.scan_let_modules(env, e);
-                for case in cases {
-                    if let Some(g) = &case.c_guard {
+                self.scan_let_modules(env, *e);
+                for case in self.ctx.ta.cases(*cases) {
+                    if let Some(g) = case.c_guard {
                         self.scan_let_modules(env, g);
                     }
-                    self.scan_let_modules(env, &case.c_rhs);
+                    self.scan_let_modules(env, case.c_rhs);
                 }
                 if let Some(finally) = finally {
-                    self.scan_let_modules(env, finally);
+                    self.scan_let_modules(env, *finally);
                 }
             }
             tt::ExpressionDesc::Texp_ifthenelse(e1, e2, e3) => {
-                self.scan_let_modules(env, e1);
-                self.scan_let_modules(env, e2);
+                self.scan_let_modules(env, *e1);
+                self.scan_let_modules(env, *e2);
                 if let Some(e3) = e3 {
-                    self.scan_let_modules(env, e3);
+                    self.scan_let_modules(env, *e3);
                 }
             }
             _ => {}
@@ -1022,11 +1082,18 @@ impl Processor<'_> {
 }
 
 /// `get_module_path`.
-fn get_module_path(mod_desc: &tt::ModuleExprDesc) -> Option<crate::types::Path> {
+fn get_module_path(
+    ta: &tt::TypedArena,
+    mod_desc: &tt::ModuleExprDesc,
+) -> Option<crate::types::Path> {
     match mod_desc {
         tt::ModuleExprDesc::Tmod_ident(path, _) => Some(path.clone()),
-        tt::ModuleExprDesc::Tmod_apply(functor, _, _) => get_module_path(&functor.mod_desc),
-        tt::ModuleExprDesc::Tmod_constraint(expr, _, _, _) => get_module_path(&expr.mod_desc),
+        tt::ModuleExprDesc::Tmod_apply(functor, _, _) => {
+            get_module_path(ta, &ta.module_expr(*functor).mod_desc)
+        }
+        tt::ModuleExprDesc::Tmod_constraint(expr, _, _, _) => {
+            get_module_path(ta, &ta.module_expr(*expr).mod_desc)
+        }
         tt::ModuleExprDesc::Tmod_structure(_)
         | tt::ModuleExprDesc::Tmod_functor(..)
         | tt::ModuleExprDesc::Tmod_unpack(..) => None,
