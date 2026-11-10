@@ -68,6 +68,12 @@ pub(crate) trait Oracle {
     /// The type checker's `partial_pred` on `Conv.conv u`
     /// (typecore.ml:1743-1776): `None` when the counter-example does not type.
     fn pred(&mut self, kind: PredKind, u: Pattern, loc: Option<LocIdx>) -> Option<Pattern>;
+    /// Whether typing a wildcard of type `ty` (`None`: the type of the
+    /// scrutinee) in [`Oracle::pred`] could meet a GADT constructor. Typing
+    /// replaces such a wildcard by the constructors or fields of its type,
+    /// and theirs in turn (`type_pat ~explode`, typecore.ml:1166-1186).
+    /// `true` when that is not known.
+    fn wildcard_may_reach_gadt(&mut self, ty: Option<TypeExprRef>) -> bool;
     /// `Path.same path Predef.path_{bool,list,unit,option}`.
     fn is_non_extendable_predef_path(&self, path: &Path) -> bool;
     /// A longident to use for the `?temp?`/`?pat_of_constr?` placeholders.
@@ -2721,6 +2727,58 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
         self.with_desc(p, desc)
     }
 
+    /// Whether [`Oracle::pred`] could reject the counter-example `u` of
+    /// [`Parmatch::check_unused`]. `u` is built from patterns that typed and
+    /// from constructors of their types, so typing it again fails only where
+    /// a GADT constructor refines the type: one in `u`, or one that typing
+    /// puts in place of a wildcard (see [`Oracle::wildcard_may_reach_gadt`]).
+    ///
+    /// A wildcard taken from a typed pattern carries its type. One the
+    /// algorithm made does not: its type is an instance of the declared
+    /// argument type of the constructor or label above it, with the
+    /// parameters taken from the nearest typed pattern around it, so both of
+    /// those are checked.
+    fn counter_example_may_not_type(&mut self, u: P) -> bool {
+        let mut wildcard_types: Vec<Option<TypeExprRef>> = Vec::new();
+        let mut todo: Vec<(P, Option<TypeExprRef>)> = vec![(u, None)];
+        while let Some((p, enclosing)) = todo.pop() {
+            let node = self.node(p);
+            let ty = node.ty.or(enclosing);
+            match &node.desc {
+                Desc::Any | Desc::Var(_) => wildcard_types.push(ty),
+                Desc::Constant(_) => {}
+                Desc::Alias(p) => todo.push((*p, ty)),
+                Desc::Tuple(ps) | Desc::Array(ps) => todo.extend(ps.iter().map(|p| (*p, ty))),
+                Desc::Or(p1, p2) => todo.extend([(*p1, ty), (*p2, ty)]),
+                Desc::Variant { arg, .. } => todo.extend(arg.iter().map(|p| (*p, ty))),
+                Desc::Construct { cstr, args, .. } => {
+                    if cstr.cstr_generalized || cstr.cstr_args.len() != args.len() {
+                        return true;
+                    }
+                    for (arg, declared) in args.iter().zip(&cstr.cstr_args) {
+                        if self.node(*arg).ty.is_none() {
+                            wildcard_types.push(Some(*declared));
+                        }
+                        todo.push((*arg, ty));
+                    }
+                }
+                Desc::Record { fields, .. } => {
+                    for field in fields {
+                        if self.node(field.pat).ty.is_none() {
+                            wildcard_types.push(Some(field.lbl.lbl_arg));
+                        }
+                        todo.push((field.pat, ty));
+                    }
+                }
+            }
+        }
+        wildcard_types.sort_unstable_by_key(|ty| ty.map(|ty| ty.0));
+        wildcard_types.dedup();
+        wildcard_types
+            .into_iter()
+            .any(|ty| self.oracle.wildcard_may_reach_gadt(ty))
+    }
+
     /// `check_unused pred casel` (parmatch.ml:2159-2232).
     pub fn check_unused(&mut self, casel: &[CaseRef<'a>]) {
         if !self.oracle.is_active(&ParmatchWarning::UnusedMatch) {
@@ -2769,15 +2827,14 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                         })
                         .collect();
                     let u = self.orify_many(&sfs);
-                    // Retyped even when it cannot fail: typing it expands
-                    // the scrutinee's type, which forces signatures in Env
-                    // order (parmatch.ml:2206-2210).
-                    let exported = self.export(u);
-                    if self
-                        .oracle
-                        .pred(PredKind::Unused, exported, Some(case.lhs.pat_loc))
-                        .is_none()
-                    {
+                    // parmatch.ml:2206-2210 types every counter-example
+                    // again; that is skipped when it cannot fail.
+                    if self.counter_example_may_not_type(u) && {
+                        let exported = self.export(u);
+                        self.oracle
+                            .pred(PredKind::Unused, exported, Some(case.lhs.pat_loc))
+                            .is_none()
+                    } {
                         self.oracle
                             .warn(case.lhs.pat_loc, ParmatchWarning::UnreachableCase);
                         r = Answer::Used;
