@@ -67,6 +67,12 @@ cargo clippy --manifest-path rewatch/Cargo.toml --all-targets --all-features
 cargo fmt --check --manifest-path rewatch/Cargo.toml
 ```
 
+`make rewatch-pgo` makes a profile-guided release build
+([`scripts/build_rewatch_pgo.sh`](../scripts/build_rewatch_pgo.sh)): it builds
+an instrumented binary, has it compile a copy of `tests/tests`, and builds
+again with the recorded profile. Use it for a binary whose speed matters; it
+takes two release builds and needs `rustup component add llvm-tools`.
+
 The integration suite is [`tests/suite.sh`](tests/suite.sh). It creates and
 modifies projects under `testrepo/`; use its helpers for portable path and file
 operations rather than adding platform-specific `sed` commands or fixed
