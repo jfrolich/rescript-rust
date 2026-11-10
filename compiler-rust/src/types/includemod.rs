@@ -7,6 +7,7 @@
 //! The main function is `modtypes` which checks if one module type is
 //! a subtype of another.
 
+use crate::types::path::PathView;
 use std::cell::Cell;
 
 use crate::diagnostics::Warning;
@@ -26,7 +27,7 @@ use crate::types::includecore::TypeMismatch;
 use crate::types::type_expr::{RowDesc, RowField, TypeDesc};
 use crate::types::typedtree::ModuleCoercion;
 use crate::types::{TypeContext, TypeExprRef};
-use crate::{parser::code_frame, types::ArgLabel};
+use crate::parser::code_frame;
 
 // ============================================================================
 // Error Types
@@ -1067,29 +1068,26 @@ impl PathSubstMap {
 }
 
 fn path_has_pos_hint(path: &Path) -> bool {
-    match path {
-        Path::Pident(_) => false,
-        Path::Pdot(parent, _, pos) => {
+    match path.view() {
+        PathView::Pident(_) => false,
+        PathView::Pdot(parent, _, pos) => {
             *pos != crate::types::path::NOPOS || path_has_pos_hint(parent)
         }
-        Path::Papply(functor, argument) => {
+        PathView::Papply(functor, argument) => {
             path_has_pos_hint(functor) || path_has_pos_hint(argument)
         }
     }
 }
 
 fn strip_pos_hints(path: &Path) -> Path {
-    match path {
-        Path::Pident(_) => path.clone(),
-        Path::Pdot(parent, name, _) => Path::Pdot(
-            std::sync::Arc::new(strip_pos_hints(parent)),
-            *name,
-            crate::types::path::NOPOS,
-        ),
-        Path::Papply(functor, argument) => Path::Papply(
-            std::sync::Arc::new(strip_pos_hints(functor)),
-            std::sync::Arc::new(strip_pos_hints(argument)),
-        ),
+    match path.view() {
+        PathView::Pident(_) => path.clone(),
+        PathView::Pdot(parent, name, _) => {
+            Path::pdot_pos(strip_pos_hints(parent), *name, crate::types::path::NOPOS)
+        }
+        PathView::Papply(functor, argument) => {
+            Path::papply(strip_pos_hints(functor), strip_pos_hints(argument))
+        }
     }
 }
 
@@ -1121,7 +1119,7 @@ fn with_local_pident_module_type<R>(
     let mut visiting = HashSet::new();
 
     loop {
-        let Path::Pident(id) = &current else {
+        let PathView::Pident(id) = current.view() else {
             return None;
         };
         if id.is_persistent() || id.stamp() == 0 || !visiting.insert((current.clone(), namespace)) {
@@ -1238,10 +1236,10 @@ fn modtypes_inner(
         use crate::types::decl::SignatureItem as SigItem;
 
         fn should_try_env_lazy(path: &Path) -> bool {
-            match path {
-                Path::Pident(id) => id.is_persistent() || id.stamp() == 0,
-                Path::Pdot(_, _, _) => true,
-                Path::Papply(_, _) => false,
+            match path.view() {
+                PathView::Pident(id) => id.is_persistent() || id.stamp() == 0,
+                PathView::Pdot(_, _, _) => true,
+                PathView::Papply(_, _) => false,
             }
         }
 
@@ -1255,8 +1253,8 @@ fn modtypes_inner(
                 return None;
             }
 
-            let mty = match path {
-                Path::Pident(id) => match namespace {
+            let mty = match path.view() {
+                PathView::Pident(id) => match namespace {
                     PathNamespace::Module => {
                         env.lookup_module(&Path::pident(*id)).ok()?.md_type.clone()
                     }
@@ -1266,7 +1264,7 @@ fn modtypes_inner(
                         .mtd_type
                         .clone()?,
                 },
-                Path::Pdot(parent, name, _) => {
+                PathView::Pdot(parent, name, _) => {
                     let parent_mty = expand_local(env, parent, PathNamespace::Module, visiting)?;
                     let parent_sig = match &parent_mty {
                         ModuleType::MtySignature(sig) => sig.clone(),
@@ -1303,7 +1301,7 @@ fn modtypes_inner(
                         _ => None,
                     })?
                 }
-                Path::Papply(_, _) => return None,
+                PathView::Papply(_, _) => return None,
             };
             match &mty {
                 ModuleType::MtyIdent(next) => {
@@ -2335,14 +2333,19 @@ fn find_arity_mismatch(
         if impl_args.len() != sig_args.len() {
             return Some((impl_args.len(), sig_args.len()));
         }
-        if !impl_args
+        if !type_ctx
+            .type_args(impl_args)
             .iter()
-            .zip(&sig_args)
+            .zip(type_ctx.type_args(sig_args).iter())
             .all(|(impl_arg, sig_arg)| impl_arg.label().same_label(sig_arg.label()))
         {
             return None;
         }
-        for (impl_arg, sig_arg) in impl_args.iter().zip(&sig_args) {
+        for (impl_arg, sig_arg) in type_ctx
+            .type_args(impl_args)
+            .iter()
+            .zip(type_ctx.type_args(sig_args).iter())
+        {
             if let Some(mismatch) = loop_(type_ctx, env, seen, impl_arg.typ, sig_arg.typ) {
                 return Some(mismatch);
             }
@@ -2749,14 +2752,14 @@ fn substitute_type_constructor_path(path: &Path, subst: &InclusionSubst) -> Path
     if let Some(replacement) = subst.type_paths.get(path) {
         return replacement;
     }
-    match path {
-        Path::Pident(_) => path.clone(),
-        Path::Pdot(prefix, name, pos) => {
-            Path::Pdot(substitute_module_path_block(prefix, subst), *name, *pos)
+    match &path.view() {
+        PathView::Pident(_) => path.clone(),
+        PathView::Pdot(prefix, name, pos) => {
+            Path::pdot_pos(substitute_module_path(prefix, subst), *name, *pos)
         }
-        Path::Papply(functor, arg) => Path::Papply(
-            std::sync::Arc::new(substitute_type_constructor_path(functor, subst)),
-            substitute_module_path_block(arg, subst),
+        PathView::Papply(functor, arg) => Path::papply(
+            substitute_type_constructor_path(functor, subst),
+            substitute_module_path(arg, subst),
         ),
     }
 }
@@ -2767,8 +2770,8 @@ fn substitute_module_path_block(
     path: &std::sync::Arc<Path>,
     subst: &InclusionSubst,
 ) -> std::sync::Arc<Path> {
-    match path.as_ref() {
-        Path::Pident(_) if subst.module_paths.get(path).is_none() => path.clone(),
+    match &path.view() {
+        PathView::Pident(_) if subst.module_paths.get(path).is_none() => path.clone(),
         _ => std::sync::Arc::new(substitute_module_path(path, subst)),
     }
 }
@@ -2777,14 +2780,14 @@ fn substitute_module_path(path: &Path, subst: &InclusionSubst) -> Path {
     if let Some(replacement) = subst.module_paths.get(path) {
         return replacement;
     }
-    match path {
-        Path::Pident(_) => path.clone(),
-        Path::Pdot(prefix, name, pos) => {
-            Path::Pdot(substitute_module_path_block(prefix, subst), *name, *pos)
+    match &path.view() {
+        PathView::Pident(_) => path.clone(),
+        PathView::Pdot(prefix, name, pos) => {
+            Path::pdot_pos(substitute_module_path(prefix, subst), *name, *pos)
         }
-        Path::Papply(functor, arg) => Path::Papply(
-            substitute_module_path_block(functor, subst),
-            substitute_module_path_block(arg, subst),
+        PathView::Papply(functor, arg) => Path::papply(
+            substitute_module_path(functor, subst),
+            substitute_module_path(arg, subst),
         ),
     }
 }
@@ -2793,14 +2796,14 @@ fn substitute_modtype_path(path: &Path, subst: &InclusionSubst) -> Path {
     if let Some(replacement) = subst.modtype_paths.get(path) {
         return replacement;
     }
-    match path {
-        Path::Pident(_) => path.clone(),
-        Path::Pdot(prefix, name, pos) => {
-            Path::Pdot(substitute_module_path_block(prefix, subst), *name, *pos)
+    match &path.view() {
+        PathView::Pident(_) => path.clone(),
+        PathView::Pdot(prefix, name, pos) => {
+            Path::pdot_pos(substitute_module_path(prefix, subst), *name, *pos)
         }
-        Path::Papply(functor, arg) => Path::Papply(
-            std::sync::Arc::new(substitute_modtype_path(functor, subst)),
-            substitute_module_path_block(arg, subst),
+        PathView::Papply(functor, arg) => Path::papply(
+            substitute_modtype_path(functor, subst),
+            substitute_module_path(arg, subst),
         ),
     }
 }
@@ -2936,10 +2939,8 @@ fn rewrite_substituted_type_paths(
 
     let desc = type_ctx.get_desc(ty);
     match &*desc {
-        TypeDesc::Tconstr {
-            path, args, abbrev, ..
-        } => {
-            for arg in args {
+        TypeDesc::Tconstr { path, args, abbrev } => {
+            for arg in type_ctx.type_list(args).iter() {
                 rewrite_substituted_type_paths(type_ctx, *arg, subst, seen);
             }
             let new_path = substitute_type_constructor_path(path, subst);
@@ -2950,19 +2951,18 @@ fn rewrite_substituted_type_paths(
                         path: new_path,
                         args: args.clone(),
                         abbrev: *abbrev,
-                        path_block: type_ctx.fresh_path_block(),
                     },
                 );
             }
         }
         TypeDesc::Tarrow { args, ret } => {
-            for arg in args {
+            for arg in type_ctx.type_args(args).iter() {
                 rewrite_substituted_type_paths(type_ctx, arg.typ, subst, seen);
             }
             rewrite_substituted_type_paths(type_ctx, *ret, subst, seen);
         }
         TypeDesc::Ttuple(items) => {
-            for item in items {
+            for item in type_ctx.type_list(items).iter() {
                 rewrite_substituted_type_paths(type_ctx, *item, subst, seen);
             }
         }
@@ -2974,7 +2974,7 @@ fn rewrite_substituted_type_paths(
             rewrite_substituted_type_paths(type_ctx, *rest, subst, seen);
         }
         TypeDesc::Tvariant(row0) => {
-            let row = crate::types::btype::row_repr(type_ctx, row0);
+            let row = crate::types::btype::row_repr(type_ctx, &type_ctx.row_desc(row0));
             for (_, field) in &row.row_fields {
                 match field {
                     RowField::Rpresent(Some(arg)) => {
@@ -2992,12 +2992,12 @@ fn rewrite_substituted_type_paths(
         }
         TypeDesc::Tpoly { body, vars } => {
             rewrite_substituted_type_paths(type_ctx, *body, subst, seen);
-            for var in vars {
+            for var in type_ctx.type_list(vars).iter() {
                 rewrite_substituted_type_paths(type_ctx, *var, subst, seen);
             }
         }
         TypeDesc::Tpackage { path, args, lids } => {
-            for arg in args {
+            for arg in type_ctx.type_list(args).iter() {
                 rewrite_substituted_type_paths(type_ctx, *arg, subst, seen);
             }
             let new_path = substitute_modtype_path(path, subst);
@@ -3813,10 +3813,7 @@ fn type_manifest_is_absrow(type_ctx: &TypeContext, env: &Env, ty: TypeExprRef) -
         let desc = type_ctx.get_desc(ty);
         matches!(
             &*desc,
-            TypeDesc::Tconstr {
-                path: Path::Pident(_),
-                ..
-            }
+            TypeDesc::Tconstr { path, .. } if path.as_pident().is_some()
         )
     };
     if !is_pident_constr {
@@ -4065,7 +4062,7 @@ fn type_manifest_for_inclusion(
 
     match (&impl_desc, &sig_desc) {
         (TypeDesc::Tvariant(impl_row), TypeDesc::Tvariant(sig_row))
-            if type_manifest_is_absrow(type_ctx, env, sig_row.row_more) =>
+            if type_manifest_is_absrow(type_ctx, env, type_ctx.row_desc(sig_row).row_more) =>
         {
             return fixed_private_variant_manifest_for_inclusion(
                 type_ctx,
@@ -4073,8 +4070,8 @@ fn type_manifest_for_inclusion(
                 impl_manifest,
                 impl_params,
                 sig_params,
-                impl_row,
-                sig_row,
+                &type_ctx.row_desc(impl_row),
+                &type_ctx.row_desc(sig_row),
                 param_map,
             );
         }
@@ -4207,9 +4204,10 @@ fn type_exprs_equal_for_inclusion_inner(
         // paths before `expand_head_rigid`. Parameterized constructors must
         // expand first; aliases can expose package types whose comparison has
         // observable Env/Ident allocation side effects.
-        return impl_args
+        return type_ctx
+            .type_list(impl_args)
             .iter()
-            .zip(sig_args.iter())
+            .zip(type_ctx.type_list(sig_args).iter())
             .all(|(impl_arg, sig_arg)| {
                 type_exprs_equal_for_inclusion_inner(
                     type_ctx, env, param_map, *impl_arg, *sig_arg, seen,
@@ -4233,8 +4231,8 @@ fn type_exprs_equal_for_inclusion_inner(
     }
 
     match (&*type_ctx.get_desc(impl_ty), &*type_ctx.get_desc(sig_ty)) {
-        (TypeDesc::Tvar(impl_name, ..), TypeDesc::Tvar(sig_name, ..))
-        | (TypeDesc::Tunivar(impl_name, ..), TypeDesc::Tunivar(sig_name, ..)) => {
+        (TypeDesc::Tvar(impl_name), TypeDesc::Tvar(sig_name))
+        | (TypeDesc::Tunivar(impl_name), TypeDesc::Tunivar(sig_name)) => {
             impl_name == sig_name
         }
         (
@@ -4248,7 +4246,7 @@ fn type_exprs_equal_for_inclusion_inner(
             },
         ) => {
             impl_args.len() == sig_args.len()
-                && impl_args.iter().zip(sig_args).all(|(impl_arg, sig_arg)| {
+                && type_ctx.type_args(impl_args).iter().zip(type_ctx.type_args(sig_args).iter()).all(|(impl_arg, sig_arg)| {
                     arg_labels_equal(impl_arg.label(), sig_arg.label())
                         && type_exprs_equal_for_inclusion_inner(
                             type_ctx,
@@ -4265,9 +4263,10 @@ fn type_exprs_equal_for_inclusion_inner(
         }
         (TypeDesc::Ttuple(impl_items), TypeDesc::Ttuple(sig_items)) => {
             impl_items.len() == sig_items.len()
-                && impl_items
+                && type_ctx
+                    .type_list(impl_items)
                     .iter()
-                    .zip(sig_items.iter())
+                    .zip(type_ctx.type_list(sig_items).iter())
                     .all(|(impl_item, sig_item)| {
                         type_exprs_equal_for_inclusion_inner(
                             type_ctx, env, param_map, *impl_item, *sig_item, seen,
@@ -4288,9 +4287,10 @@ fn type_exprs_equal_for_inclusion_inner(
         ) => {
             impl_path.same(sig_path)
                 && impl_args.len() == sig_args.len()
-                && impl_args
+                && type_ctx
+                    .type_list(impl_args)
                     .iter()
-                    .zip(sig_args.iter())
+                    .zip(type_ctx.type_list(sig_args).iter())
                     .all(|(impl_arg, sig_arg)| {
                         type_exprs_equal_for_inclusion_inner(
                             type_ctx, env, param_map, *impl_arg, *sig_arg, seen,
@@ -4327,6 +4327,8 @@ fn type_exprs_equal_for_inclusion_inner(
             // Ctype.equal. Its package branch calls complete_type_list twice
             // (compiler/ml/ctype.ml:3048-3053, 2044-2047), allocating one
             // hidden `Pkg` module per side before comparing package arguments.
+            let impl_lids = &type_ctx.package_lids(impl_lids);
+            let sig_lids = &type_ctx.package_lids(sig_lids);
             let labels_complete = env.is_none_or(|env| {
                 let sig_complete = crate::types::ctype::package_type_lists_have_ocaml_same_label_completion_side_effect(
                     type_ctx,
@@ -4347,9 +4349,10 @@ fn type_exprs_equal_for_inclusion_inner(
             labels_complete
                 && impl_path.same(sig_path)
                 && impl_args.len() == sig_args.len()
-                && impl_args
+                && type_ctx
+                    .type_list(impl_args)
                     .iter()
-                    .zip(sig_args.iter())
+                    .zip(type_ctx.type_list(sig_args).iter())
                     .all(|(impl_arg, sig_arg)| {
                         type_exprs_equal_for_inclusion_inner(
                             type_ctx, env, param_map, *impl_arg, *sig_arg, seen,
@@ -4362,7 +4365,14 @@ fn type_exprs_equal_for_inclusion_inner(
             // polymorphic variant rows by row_repr/merge_row_fields and then
             // recursively equal-checks paired payloads under the same parameter
             // renaming map.
-            rows_equal_for_inclusion(type_ctx, env, param_map, impl_row, sig_row, seen)
+            rows_equal_for_inclusion(
+                type_ctx,
+                env,
+                param_map,
+                &type_ctx.row_desc(impl_row),
+                &type_ctx.row_desc(sig_row),
+                seen,
+            )
         }
         // OCaml compiler/ml/ctype.ml:3293-3330 compares object
         // manifests through `eqtype_fields`, not physical identity.
@@ -4520,7 +4530,7 @@ fn row_fields_equal_for_inclusion(
 fn flatten_object_fields_for_inclusion(
     type_ctx: &TypeContext,
     fields: TypeExprRef,
-) -> (Vec<(String, FieldKind, TypeExprRef)>, TypeExprRef) {
+) -> (Vec<ObjectFieldForInclusion>, TypeExprRef) {
     let mut flattened = Vec::new();
     let mut current = type_ctx.repr(fields);
     loop {
@@ -4547,13 +4557,19 @@ fn flatten_object_fields_for_inclusion(
     (flattened, current)
 }
 
-type ObjectFieldForInclusion = (String, FieldKind, TypeExprRef);
+type ObjectFieldForInclusion = (crate::name::Name, FieldKind, TypeExprRef);
 
 fn associate_object_fields_for_inclusion(
     impl_fields: Vec<ObjectFieldForInclusion>,
     sig_fields: Vec<ObjectFieldForInclusion>,
 ) -> (
-    Vec<(String, FieldKind, TypeExprRef, FieldKind, TypeExprRef)>,
+    Vec<(
+        crate::name::Name,
+        FieldKind,
+        TypeExprRef,
+        FieldKind,
+        TypeExprRef,
+    )>,
     Vec<ObjectFieldForInclusion>,
     Vec<ObjectFieldForInclusion>,
 ) {
@@ -4641,13 +4657,11 @@ fn object_fields_equal_for_inclusion(
         })
 }
 
-fn arg_labels_equal(left: &ArgLabel, right: &ArgLabel) -> bool {
-    match (left, right) {
-        (ArgLabel::Nolabel, ArgLabel::Nolabel) => true,
-        (ArgLabel::Labelled(left), ArgLabel::Labelled(right))
-        | (ArgLabel::Optional(left), ArgLabel::Optional(right)) => left.txt == right.txt,
-        _ => false,
-    }
+fn arg_labels_equal(
+    left: crate::types::type_expr::TypeArgLabel,
+    right: crate::types::type_expr::TypeArgLabel,
+) -> bool {
+    left.same_label(right)
 }
 
 /// Check if extension constructor `impl_ext` is compatible with `sig_ext`.

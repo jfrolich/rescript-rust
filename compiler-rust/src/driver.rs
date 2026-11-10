@@ -5,6 +5,8 @@
 
 mod type_clash;
 
+use crate::types::path::PathView;
+
 use std::ffi::OsString;
 use std::fmt;
 use std::path::{Component, Path as FsPath, PathBuf};
@@ -4733,7 +4735,7 @@ fn format_unbound_type_declaration_variable_report(
                     labels.iter().map(|l| l.ld_type).collect()
                 }
             };
-            let typ_ti = type_ctx.new_generic_type(TypeDesc::Ttuple(tys.into()));
+            let typ_ti = type_ctx.new_generic_type(TypeDesc::Ttuple(type_ctx.new_type_list(&tys)));
             let mut printer = TypeExprPrinter::new(type_ctx);
             printer.reset();
             printer.mark_loops(typ_ti);
@@ -6450,7 +6452,12 @@ fn collect_function_arg_labels(
 
         match &*type_ctx.get_desc(current) {
             TypeDesc::Tarrow { args, ret } => {
-                labels.extend(args.iter().map(|arg| arg.label().clone()));
+                labels.extend(
+                    type_ctx
+                        .type_args(args)
+                        .iter()
+                        .map(|arg| arg.label().to_arg_label()),
+                );
                 current = *ret;
             }
             _ => break,
@@ -6474,13 +6481,14 @@ fn format_package_type_expr_for_error(
     let TypeDesc::Tpackage { path, lids, args } = desc else {
         return format_type_expr(type_ctx, ty);
     };
+    let lids = type_ctx.package_lids(lids);
     if lids.is_empty() {
         return format_type_expr(type_ctx, ty);
     }
 
     let constraints = lids
         .iter()
-        .zip(args.iter())
+        .zip(type_ctx.type_list(args).iter())
         .map(|(lid, arg)| {
             format!(
                 "type {} = {}",
@@ -7135,6 +7143,7 @@ fn compile_source_to_js_with_options_inner(
             has_resi,
         )
     });
+    let raw_arena = crate::raw_lambda::RawArena::new();
     let mut raw_converter =
         crate::raw_lambda::convert::RawLambdaConverter::with_start_stamp_and_unit_name(
             parser.arena(),
@@ -7143,6 +7152,7 @@ fn compile_source_to_js_with_options_inner(
             &env,
             lambda_start_stamp,
             unit_name,
+            &raw_arena,
         );
     raw_converter.set_preserve_expanded_sparse_records(
         options.dump_lambda || options.dump_lambda_sexp || options.dump_lambda_sexp_locs,
@@ -7207,12 +7217,20 @@ fn compile_source_to_js_with_options_inner(
     if let Some(trace) = discriminator_trace.as_deref_mut() {
         trace.type_context_stamp = type_ctx.current_stamp();
         trace.raw_converter_stamp = raw_lambda_current_stamp;
-        trace.raw_max_stamp = crate::raw_lambda::lower::max_ident_stamp_for_test(&raw_lambda);
-        trace.raw_lambda = format!("{raw_lambda:#?}");
+        trace.raw_max_stamp =
+            crate::raw_lambda::lower::max_ident_stamp_for_test(&raw_arena.get(), raw_lambda);
+        trace.raw_lambda =
+            crate::raw_lambda::print::RawLambdaPrinter::new(&raw_arena.get(), raw_lambda)
+                .to_string();
     }
 
+    if SKIP_CLI_CLEANUP.load(Ordering::Relaxed) {
+        std::mem::forget(raw_converter);
+    } else {
+        drop(raw_converter);
+    }
     let (mut lowered_arena, lowered_root, export_idents) =
-        crate::raw_lambda::lower::lower_to_translmod_lambda(raw_lambda);
+        crate::raw_lambda::lower::lower_to_translmod_lambda(raw_arena.into_inner(), raw_lambda);
     // js_implementation.ml:165 prints `-drawlambda` on Translmod's result.
     if options.dump_lambda {
         use std::io::Write;
@@ -7365,7 +7383,6 @@ fn compile_source_to_js_with_options_inner(
     if SKIP_CLI_CLEANUP.load(Ordering::Relaxed) {
         std::mem::forget(compiler);
         std::mem::forget(program);
-        std::mem::forget(raw_converter);
         std::mem::forget(implementation_coercion);
         std::mem::forget(typed_structure);
         std::mem::forget(final_env);
@@ -8669,18 +8686,17 @@ fn extract_pat_name(pat: &crate::types::typedtree::Pattern) -> Option<String> {
 /// impl has local Pident while iface has qualified Pdot, so we compare
 /// the leaf name instead.
 fn moregen_paths_compatible(p1: &crate::types::Path, p2: &crate::types::Path) -> bool {
-    use crate::types::Path;
     if p1.same(p2) {
         return true;
     }
-    let leaf1 = match p1 {
-        Path::Pident(id) => id.name(),
-        Path::Pdot(_, name, _) => name.as_str(),
+    let leaf1 = match p1.view() {
+        PathView::Pident(id) => id.name(),
+        PathView::Pdot(_, name, _) => name.as_str(),
         _ => return false,
     };
-    let leaf2 = match p2 {
-        Path::Pident(id) => id.name(),
-        Path::Pdot(_, name, _) => name.as_str(),
+    let leaf2 = match p2.view() {
+        PathView::Pident(id) => id.name(),
+        PathView::Pdot(_, name, _) => name.as_str(),
         _ => return false,
     };
     leaf1 == leaf2
@@ -8730,7 +8746,7 @@ fn moregen_link(
             let a2 = a2.clone();
             drop(impl_desc);
             drop(iface_desc);
-            for (a, b) in a1.iter().zip(a2.iter()) {
+            for (a, b) in ctx.type_list(a1).iter().zip(ctx.type_list(a2).iter()) {
                 moregen_link(ctx, *a, *b, visited);
             }
         }
@@ -8740,7 +8756,7 @@ fn moregen_link(
             let (a1, a2, r1, r2) = (a1.clone(), a2.clone(), *r1, *r2);
             drop(impl_desc);
             drop(iface_desc);
-            for (a1, a2) in a1.iter().zip(&a2) {
+            for (a1, a2) in ctx.type_args(a1).iter().zip(ctx.type_args(a2).iter()) {
                 moregen_link(ctx, a1.typ, a2.typ, visited);
             }
             moregen_link(ctx, r1, r2, visited);
@@ -8750,7 +8766,7 @@ fn moregen_link(
             let t2 = t2.clone();
             drop(impl_desc);
             drop(iface_desc);
-            for (a, b) in t1.iter().zip(t2.iter()) {
+            for (a, b) in ctx.type_list(t1).iter().zip(ctx.type_list(t2).iter()) {
                 moregen_link(ctx, *a, *b, visited);
             }
         }
@@ -10819,7 +10835,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
 
     let unit_name = options.current_unit_name().unwrap_or_default();
     let (
-        raw_lambda,
+        (raw_arena, raw_lambda),
         raw_warnings,
         raw_diagnostic,
         raw_possible_required_modules,
@@ -10846,6 +10862,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
                 has_interface,
             ),
         };
+        let raw_arena = crate::raw_lambda::RawArena::new();
         let mut raw_converter =
             crate::raw_lambda::convert::RawLambdaConverter::with_start_stamp_and_unit_name(
                 arena,
@@ -10854,6 +10871,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
                 &env,
                 lambda_start_stamp,
                 unit_name,
+                &raw_arena,
             );
         raw_converter.set_preserve_expanded_sparse_records(
             options.capture_intermediates || options.dumps.iter().any(|kind| kind.is_lambda()),
@@ -10899,8 +10917,9 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         let raw_lambda_current_stamp = raw_converter.current_stamp();
         let flat_make_paths = raw_converter.take_flat_make_paths();
         let lam_locs = raw_converter.take_lam_locs();
+        drop(raw_converter);
         Ok((
-            raw_lambda,
+            (raw_arena.into_inner(), raw_lambda),
             raw_warnings,
             raw_diagnostic,
             possible_required_modules,
@@ -11005,7 +11024,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     // Capture raw lambda sexp for the playground (only if requested).
     let raw_lambda_sexp = if options.capture_intermediates {
         let mut buf = Vec::new();
-        crate::raw_lambda::print::print_raw_lambda(&raw_lambda, &mut buf);
+        crate::raw_lambda::print::print_raw_lambda(&raw_arena, raw_lambda, &mut buf);
         String::from_utf8_lossy(&buf).into_owned()
     } else {
         String::new()
@@ -11014,7 +11033,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     let (mut lowered_arena, lowered_root, export_idents) =
         crate::timing::measure(crate::timing::Phase::Lambda, || {
             let _phase = info_span!("compiler.lower_lambda").entered();
-            crate::raw_lambda::lower::lower_to_translmod_lambda(raw_lambda)
+            crate::raw_lambda::lower::lower_to_translmod_lambda(raw_arena, raw_lambda)
         });
     // js_implementation.ml:165 prints `-drawlambda` on Translmod's result.
     if options.dumps.contains(&DumpKind::RawLambda) {

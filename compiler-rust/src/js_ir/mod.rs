@@ -701,18 +701,22 @@ fn normalize_absolute_path(path: &FsPath) -> PathBuf {
     normalize_lexical_path(base)
 }
 
+/// Whether `bytes` is an absolute Unix path with no empty, `.` or `..`
+/// component and no trailing separator, so lexical normalization keeps it.
+#[cfg(unix)]
+fn is_normal_absolute_unix_path(bytes: &[u8]) -> bool {
+    bytes.len() > 1
+        && bytes[0] == b'/'
+        && bytes[1..]
+            .split(|&byte| byte == b'/')
+            .all(|part| !part.is_empty() && part != b"." && part != b"..")
+}
+
 fn normalize_lexical_path(path: PathBuf) -> PathBuf {
-    // An absolute Unix path without `.`/`..` components, doubled or trailing
-    // separators is already normal; skip rebuilding it component by component.
     #[cfg(unix)]
     {
         use std::os::unix::ffi::OsStrExt;
-        let bytes = path.as_os_str().as_bytes();
-        if bytes.first() == Some(&b'/')
-            && bytes.len() > 1
-            && !bytes.ends_with(b"/")
-            && !bytes.windows(2).any(|pair| pair == b"//" || pair == b"/.")
-        {
+        if is_normal_absolute_unix_path(path.as_os_str().as_bytes()) {
             return path;
         }
     }
@@ -755,6 +759,47 @@ fn normalize_lexical_path(path: PathBuf) -> PathBuf {
 }
 
 fn relative_path_between(base_dir: &FsPath, target: &FsPath) -> Option<PathBuf> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::{OsStrExt, OsStringExt};
+        let base = base_dir.as_os_str().as_bytes();
+        let target = target.as_os_str().as_bytes();
+        if is_normal_absolute_unix_path(base) && is_normal_absolute_unix_path(target) {
+            // Both paths are already normal, so their components are the
+            // `/`-separated parts; this is the general case below without
+            // copying and re-parsing either path.
+            let base_parts = base[1..].split(|&byte| byte == b'/');
+            let mut target_parts = target[1..].split(|&byte| byte == b'/').peekable();
+            let mut ups = 0usize;
+            let mut diverged = false;
+            for part in base_parts {
+                if !diverged && target_parts.peek() == Some(&part) {
+                    target_parts.next();
+                } else {
+                    diverged = true;
+                    ups += 1;
+                }
+            }
+            let mut relative = Vec::with_capacity(ups * 3 + target.len());
+            for _ in 0..ups {
+                if !relative.is_empty() {
+                    relative.push(b'/');
+                }
+                relative.extend_from_slice(b"..");
+            }
+            for part in target_parts {
+                if !relative.is_empty() {
+                    relative.push(b'/');
+                }
+                relative.extend_from_slice(part);
+            }
+            return Some(PathBuf::from(std::ffi::OsString::from_vec(relative)));
+        }
+    }
+    relative_path_between_general(base_dir, target)
+}
+
+fn relative_path_between_general(base_dir: &FsPath, target: &FsPath) -> Option<PathBuf> {
     let base = normalize_lexical_path(base_dir.to_path_buf());
     let target = normalize_lexical_path(target.to_path_buf());
 
@@ -3387,6 +3432,37 @@ fn dispose_expression_nonrecursive(expression: Expression, stack: &mut Vec<Dispo
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn relative_path_fast_path_matches_general_case() {
+        use super::{relative_path_between, relative_path_between_general};
+        use std::path::Path;
+        let paths = [
+            "/a",
+            "/a/b",
+            "/a/b/c",
+            "/a/bc",
+            "/a/.hidden/c",
+            "/a/.hidden/d/e.js",
+            "/x/y",
+            "/a/b/c/d",
+        ];
+        for base in paths {
+            for target in paths {
+                assert_eq!(
+                    relative_path_between(Path::new(base), Path::new(target)),
+                    relative_path_between_general(Path::new(base), Path::new(target)),
+                    "{base} -> {target}"
+                );
+            }
+        }
+        assert!(!super::is_normal_absolute_unix_path(b"/a/./b"));
+        assert!(!super::is_normal_absolute_unix_path(b"/a/../b"));
+        assert!(!super::is_normal_absolute_unix_path(b"/a//b"));
+        assert!(!super::is_normal_absolute_unix_path(b"/a/"));
+        assert!(super::is_normal_absolute_unix_path(b"/a/.b/..c"));
+    }
+
     use super::*;
 
     fn conjunction_contains_expression(conjunction: &Expression, needle: &Expression) -> bool {

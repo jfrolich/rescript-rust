@@ -7,6 +7,7 @@
 //! module-resolution paths use as their source of truth.
 
 use crate::fast_hash::AHashMap as HashMap;
+use crate::types::path::PathView;
 use std::cell::{OnceCell, RefCell};
 use std::sync::Arc;
 
@@ -141,10 +142,10 @@ fn check_signature_store_resident(signature: &[SignatureItem], ctx: &super::cont
 
 fn path_non_apply_root_is_persistent_or_global(path: &Path) -> bool {
     fn root_ident(path: &Path) -> Option<&Ident> {
-        match path {
-            Path::Pident(id) => Some(id),
-            Path::Pdot(prefix, _, _) => root_ident(prefix),
-            Path::Papply(_, _) => None,
+        match path.view() {
+            PathView::Pident(id) => Some(id),
+            PathView::Pdot(prefix, _, _) => root_ident(prefix),
+            PathView::Papply(_, _) => None,
         }
     }
 
@@ -370,7 +371,7 @@ fn build_type_constructors(
                             // Mirror that component-prefix substitution before
                             // exposing the constructor description table.
                             let new_prefix = Arc::new(new_prefix);
-                            for arg in &args {
+                            for arg in ctx.type_list(&args).iter() {
                                 crate::cmi::persistent_env::rewrite_type_expr_by_path_prefix(
                                     *arg,
                                     &old_prefix,
@@ -380,7 +381,7 @@ fn build_type_constructors(
                             }
                         }
                     }
-                    ctx.new_generic_constr(type_path.clone(), args.to_vec())
+                    ctx.new_generic_constr(type_path.clone(), ctx.type_list(args).to_vec())
                 }
                 _ => {
                     drop(desc);
@@ -1790,7 +1791,7 @@ fn self_alias_raw_parent_module_item(
     raw_sig_candidate_paths_for_access_path(access_path, ctx)
         .into_iter()
         .filter_map(|raw_parent_path| {
-            let Path::Pident(id) = &raw_parent_path else {
+            let PathView::Pident(id) = raw_parent_path.view() else {
                 return None;
             };
             if !(id.is_persistent() || id.stamp() == 0) {
@@ -1838,7 +1839,9 @@ fn access_path_is_direct_opened_component(env: &super::env::Env, access_path: &P
     // compiler/ml/env.ml:1874-1877, which adds opened component bindings
     // without a root module binding. Test that origin in Env rather than
     // matching root names.
-    matches!(access_path.parent(), Some(Path::Pident(_)))
+    access_path
+        .parent()
+        .is_some_and(|p| p.as_pident().is_some())
         && env.path_starts_with_opened_component(access_path)
 }
 
@@ -1853,7 +1856,8 @@ fn build_local_module_components(
     cache_mode: super::typecore::ComponentLookupApi,
 ) -> Option<QualifiedModuleComponents> {
     if ctx.persistent_env_is_in_process()
-        && let Some(Path::Pident(alias_id)) = md.md_type.ident_or_alias_path()
+        && let Some(alias_path) = md.md_type.ident_or_alias_path()
+        && let PathView::Pident(alias_id) = alias_path.view()
         && alias_id.is_persistent()
         && cache_mode.forces_alias_sig()
     {
@@ -1900,7 +1904,8 @@ fn build_local_module_components(
     // (env.ml:475-477).
     if cache_mode.forces_alias_sig()
         && !matches!(md.md_type, super::decl::ModuleType::MtyAlias(..))
-        && let Some(source @ Path::Pdot(parent, name, _)) = source_prefix
+        && let Some(source) = source_prefix
+        && let PathView::Pdot(parent, name, _) = source.view()
         && !source.same(access_path)
     {
         let _ = crate::types::typecore::lookup_module_in_resolved_path(
@@ -1918,8 +1923,8 @@ fn build_local_module_components(
         // alias with `find_module`, and env.ml:865-882 forces the final
         // env.ml:1568 `comp_modules` thunk for that target before returning
         // the module type whose signature is used below.
-        match alias_path.as_ref() {
-            Path::Pdot(parent, name, _) => {
+        match &alias_path.view() {
+            PathView::Pdot(parent, name, _) => {
                 if cache_mode.forces_alias_sig() {
                     // OCaml compiler/ml/env.ml:1517 calls `scrape_alias` for
                     // real component-table construction, and scrape_alias
@@ -1936,7 +1941,7 @@ fn build_local_module_components(
                     );
                 }
             }
-            Path::Pident(id) if id.is_persistent() => {
+            PathView::Pident(id) if id.is_persistent() => {
                 // OCaml compiler/ml/env.ml:1516-1518 scrapes aliases while
                 // building real component tables, which can force
                 // env.ml:719-721 `ps_sig` through env.ml:865-875. Rust-only
@@ -1967,8 +1972,8 @@ fn build_local_module_components(
                     ctx.trigger_module_sig_rename(id.name());
                 }
             }
-            Path::Pident(_) => {}
-            Path::Papply(_, _) => {}
+            PathView::Pident(_) => {}
+            PathView::Papply(_, _) => {}
         }
     }
     let (raw_sig, resolved_name) =
@@ -1979,8 +1984,8 @@ fn build_local_module_components(
                 super::decl::ModuleType::MtyAlias(_, target) => Some(target.as_ref()),
                 _ => None,
             };
-            let Some((raw_sig, resolved_name)) = (match alias_target {
-                Some(Path::Pident(alias_id))
+            let Some((raw_sig, resolved_name)) = (match alias_target.map(|p| p.view()) {
+                Some(PathView::Pident(alias_id))
                     if alias_id.is_persistent() && cache_mode.forces_alias_sig() =>
                 {
                     // OCaml compiler/ml/env.ml:1517 calls `scrape_alias` before
@@ -2017,7 +2022,7 @@ fn build_local_module_components(
                 let super::decl::ModuleType::MtyAlias(_, target) = &md.md_type else {
                     return None;
                 };
-                let Path::Pident(alias_id) = target.as_ref() else {
+                let PathView::Pident(alias_id) = &target.view() else {
                     return None;
                 };
                 parent_sig
@@ -2440,7 +2445,7 @@ mod provenance_tests {
     fn scanned_child_paths_share_the_component_root_and_keep_cached_allocations() {
         let ctx =
             super::super::context::TypeContext::new(Arc::new(crate::context::IdGenerator::new()));
-        let root = Path::Pident(ctx.create_ident("Root"));
+        let root = Path::pident(ctx.create_ident("Root"));
         let first = ctx.create_ident("First");
         let second = ctx.create_ident("Second");
         let module = |id| {
@@ -2460,24 +2465,10 @@ mod provenance_tests {
         let (first_pos, a) = components.lookup_child_components("First", &ctx).unwrap();
         let (second_pos, b) = components.lookup_child_components("Second", &ctx).unwrap();
         assert_eq!((first_pos, second_pos), (0, 1));
-        let first_allocation = ctx.dotted_allocation(&a.access_path).unwrap();
-        let second_allocation = ctx.dotted_allocation(&b.access_path).unwrap();
-        assert!(Arc::ptr_eq(
-            &first_allocation.prefix,
-            &components.access_path
-        ));
-        assert!(Arc::ptr_eq(
-            &first_allocation.prefix,
-            &second_allocation.prefix
-        ));
-        assert_ne!(first_allocation.key(), second_allocation.key());
-        assert_eq!(first_allocation.name, ctx.ident_name_allocation(&first));
-        assert_eq!(second_allocation.name, ctx.ident_name_allocation(&second));
+        assert_eq!(a.access_path, Path::pdot_pos(root, first.name_atom(), 0));
+        assert_eq!(b.access_path, Path::pdot_pos(root, second.name_atom(), 1));
         let (_, again) = components.lookup_child_components("First", &ctx).unwrap();
-        assert_eq!(
-            ctx.dotted_allocation(&again.access_path).unwrap().key(),
-            first_allocation.key()
-        );
+        assert_eq!(again.access_path, a.access_path);
     }
 
     #[test]
@@ -2488,7 +2479,7 @@ mod provenance_tests {
         let name = arena.push_string("Shared");
         let module_id = ctx.create_ast_ident(&arena, name);
         let modtype_id = ctx.create_ast_ident(&arena, name);
-        let source = Arc::new(Path::Pident(ctx.create_ident("Source")));
+        let source = Arc::new(Path::pident(ctx.create_ident("Source")));
         let mut sig = vec![SignatureItem::SigModtype(
             modtype_id,
             super::super::decl::ModtypeDeclaration {
@@ -2508,39 +2499,20 @@ mod provenance_tests {
         let ModuleType::MtyAlias(_, path) = &child.md_type else {
             panic!("alias")
         };
-        assert!(matches!(path.as_ref(), Path::Pdot(_, _, 3)));
-        let child_allocation = ctx.dotted_allocation(path).unwrap();
+        assert_eq!(**path, Path::pdot_pos(*source, module_id.name_atom(), 3));
         let SignatureItem::SigModtype(_, mtd) = &sig[0] else {
             panic!("modtype")
         };
         let Some(ModuleType::MtyIdent(path)) = &mtd.mtd_type else {
             panic!("ident")
         };
-        let mtd_allocation = ctx.dotted_allocation(path).unwrap();
-        assert!(Arc::ptr_eq(&child_allocation.prefix, &source));
-        assert!(Arc::ptr_eq(
-            &child_allocation.prefix,
-            &mtd_allocation.prefix
-        ));
-        assert_eq!(child_allocation.name, mtd_allocation.name);
-        assert_eq!(child_allocation.name, ctx.ident_name_allocation(&module_id));
-        assert_ne!(child_allocation.key(), mtd_allocation.key());
-        let unchanged = strengthened_child_env_decl(&child, module_id, Some(&source), 3, &ctx);
-        let ModuleType::MtyAlias(_, path) = &unchanged.md_type else {
-            panic!("alias")
-        };
-        assert_eq!(
-            ctx.dotted_allocation(path).unwrap().key(),
-            child_allocation.key()
-        );
-        let separate_source = Arc::new((*source).clone());
-        let separate = strengthened_child_env_decl(&md, module_id, Some(&separate_source), 3, &ctx);
-        let ModuleType::MtyAlias(_, path) = &separate.md_type else {
-            panic!("alias")
-        };
-        assert!(!Arc::ptr_eq(
-            &ctx.dotted_allocation(path).unwrap().prefix,
-            &source
-        ));
+        assert!(path.same(&Path::pdot(*source, modtype_id.name_atom())));
+        for source in [&source, &Arc::new(*source)] {
+            let unchanged = strengthened_child_env_decl(&child, module_id, Some(source), 3, &ctx);
+            let ModuleType::MtyAlias(_, path) = &unchanged.md_type else {
+                panic!("alias")
+            };
+            assert_eq!(**path, Path::pdot_pos(**source, module_id.name_atom(), 3));
+        }
     }
 }

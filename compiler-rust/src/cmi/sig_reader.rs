@@ -8,7 +8,7 @@
 //! Each OCaml variant constructor gets an integer tag assigned in definition order.
 //! Records are blocks with tag 0. See the tag tables in the module-level comments below.
 
-use crate::ident::{Ident, IdentOrigin};
+use crate::ident::{Ident};
 use crate::location::{Location, Position};
 use crate::types::asttypes::{ArgLabel, Located, MutableFlag, PrivateFlag};
 use crate::types::context::TypeContext;
@@ -20,8 +20,8 @@ use crate::types::decl::{
 };
 use crate::types::path::Path;
 use crate::types::type_expr::{
-    FieldMutability, GENERIC_LEVEL, MutabilityRef, PathBlock, RowDesc, RowField, TypeArg, TypeDesc,
-    TypeExprRef, VarDescBlock,
+    FieldMutability, GENERIC_LEVEL, MutabilityRef, RowDesc, RowField, TypeArg, TypeDesc,
+    TypeExprRef,
 };
 use crate::types::variance::Variance;
 use std::sync::Arc;
@@ -43,21 +43,7 @@ pub struct SigReadContext<'a> {
     /// Object field mutability cells are shared `ref` blocks; keep their
     /// sharing by marshal block identity.
     mutability_cache: AHashMap<usize, MutabilityRef>,
-    /// The physical sharing of the marshalled graph, by block address. The
-    /// `cmi_sign` value being read keeps every block alive while this
-    /// context exists, so an address names one block. Their only reader
-    /// went with `Includemod.is_big`.
-    ///
-    /// Retained `Ident.t` blocks, each with its own [`IdentOrigin`].
-    ident_origins: AHashMap<usize, (OcamlValue, IdentOrigin)>,
-    /// `Path.t` blocks: a path read twice is one `Arc`.
-    paths: AHashMap<usize, (OcamlValue, Arc<Path>)>,
-    /// `Pident` blocks held by `Tconstr` nodes, each its own path block.
-    pident_blocks: AHashMap<usize, PathBlock>,
-    /// `Tvar`/`Tunivar` descriptor blocks, by the first node holding one.
-    var_descs: AHashMap<usize, TypeExprRef>,
-    /// Labelled `arg_label` blocks of arrows, as an argument holding it.
-    labels: AHashMap<usize, TypeArg>,
+    /// Scope of location allocation identities decoded from this graph.
     location_scope: u64,
     /// Retained marshal blocks keep pointer keys valid even if this reader
     /// is reused after the caller drops a previously decoded value tree.
@@ -88,11 +74,6 @@ impl<'a> SigReadContext<'a> {
             type_expr_cache: AHashMap::new(),
             variant_layout_cache: AHashMap::new(),
             mutability_cache: AHashMap::new(),
-            ident_origins: AHashMap::new(),
-            paths: AHashMap::new(),
-            pident_blocks: AHashMap::new(),
-            var_descs: AHashMap::new(),
-            labels: AHashMap::new(),
             location_scope: ctx.fresh_location_scope(),
             location_blocks: AHashMap::new(),
             location_positions: AHashMap::new(),
@@ -760,33 +741,12 @@ impl<'a> SigReadContext<'a> {
         }
         self.type_expr_cache.insert(id, ty_ref);
 
-        let desc = match self.read_type_desc(&fields[0]) {
-            // Nodes holding one marshalled `Tvar`/`Tunivar` block (the
-            // writer's static `Tvar None`, subst.ml:121-126) share it.
-            TypeDesc::Tvar(name, _) => {
-                TypeDesc::Tvar(name, self.var_desc_block(&fields[0], ty_ref))
-            }
-            TypeDesc::Tunivar(name, _) => {
-                TypeDesc::Tunivar(name, self.var_desc_block(&fields[0], ty_ref))
-            }
-            desc => desc,
-        };
+        let desc = self.read_type_desc(&fields[0]);
         self.ctx.set_desc(ty_ref, desc);
         ty_ref
     }
 
-    fn var_desc_block(&mut self, desc: &OcamlValue, node: TypeExprRef) -> VarDescBlock {
-        let Some(address) = block_address(desc) else {
-            return VarDescBlock::OWN;
-        };
-        match self.var_descs.get(&address) {
-            Some(&owner) => VarDescBlock::OWN.copied_from(owner),
-            None => {
-                self.var_descs.insert(address, node);
-                VarDescBlock::OWN
-            }
-        }
-    }
+
 
     /// Read a type_desc.
     ///
@@ -806,17 +766,20 @@ impl<'a> SigReadContext<'a> {
             OcamlValue::Block(tag, fields) => match tag {
                 0 => {
                     // Tvar(string option)
-                    let name = fields[0].as_option().map(|s| s.as_string().to_string());
-                    TypeDesc::Tvar(name, crate::types::type_expr::VarDescBlock::OWN)
+                    let name = fields[0]
+                        .as_option()
+                        .map(|s| crate::name::Name::new(s.as_string()));
+                    TypeDesc::Tvar(name)
                 }
                 1 => {
                     // Caml1999I024 stores the complete parameter list directly;
                     // keep that allocation shape rather than rebuilding unary nodes.
-                    let args = fields[0]
+                    let args: crate::types::type_expr::TypeArgs = fields[0]
                         .as_list()
                         .iter()
                         .map(|arg| self.read_arg(arg))
                         .collect();
+                    let args = self.ctx.new_type_args(&args);
                     let ret = self.read_type_expr(&fields[1]);
                     TypeDesc::Tarrow { args, ret }
                 }
@@ -827,12 +790,11 @@ impl<'a> SigReadContext<'a> {
                         .iter()
                         .map(|te| self.read_type_expr(te))
                         .collect();
-                    TypeDesc::Ttuple(types.into())
+                    TypeDesc::Ttuple(self.ctx.new_type_list(&types))
                 }
                 3 => {
                     // Tconstr(Path.t, type_expr list, abbrev_memo ref)
                     let path = self.read_path(&fields[0]);
-                    let path_block = self.tconstr_path_block(&fields[0]);
                     let args: Vec<TypeExprRef> = fields[1]
                         .as_list()
                         .iter()
@@ -842,9 +804,8 @@ impl<'a> SigReadContext<'a> {
 
                     TypeDesc::Tconstr {
                         path,
-                        args: args.into(),
+                        args: self.ctx.new_type_list(&args),
                         abbrev,
-                        path_block,
                     }
                 }
                 4 => {
@@ -855,7 +816,7 @@ impl<'a> SigReadContext<'a> {
                 }
                 5 => {
                     // Tfield {name; mutability: field_mutability ref; typ; rest}
-                    let name = fields[0].as_string().to_string();
+                    let name = crate::name::Name::new(fields[0].as_string());
                     let mutability = self.read_mutability_ref(&fields[1]);
                     let typ = self.read_type_expr(&fields[2]);
                     let rest = self.read_type_expr(&fields[3]);
@@ -879,12 +840,14 @@ impl<'a> SigReadContext<'a> {
                 8 => {
                     // Tvariant(row_desc)
                     let row = self.read_row_desc(&fields[0]);
-                    TypeDesc::Tvariant(Box::new(row))
+                    TypeDesc::Tvariant(self.ctx.new_row_desc(row))
                 }
                 9 => {
                     // Tunivar(string option)
-                    let name = fields[0].as_option().map(|s| s.as_string().to_string());
-                    TypeDesc::Tunivar(name, crate::types::type_expr::VarDescBlock::OWN)
+                    let name = fields[0]
+                        .as_option()
+                        .map(|s| crate::name::Name::new(s.as_string()));
+                    TypeDesc::Tunivar(name)
                 }
                 10 => {
                     // Tpoly(type_expr, type_expr list)
@@ -896,7 +859,7 @@ impl<'a> SigReadContext<'a> {
                         .collect();
                     TypeDesc::Tpoly {
                         body,
-                        vars: vars.into(),
+                        vars: self.ctx.new_type_list(&vars),
                     }
                 }
                 11 => {
@@ -914,16 +877,16 @@ impl<'a> SigReadContext<'a> {
                         .collect();
                     TypeDesc::Tpackage {
                         path,
-                        lids: Box::new(lids),
-                        args: args.into(),
+                        lids: self.ctx.new_package_lids(lids),
+                        args: self.ctx.new_type_list(&args),
                     }
                 }
                 _ => {
                     // Unknown type_desc tag, treat as Tvar
-                    TypeDesc::Tvar(None, crate::types::type_expr::VarDescBlock::OWN)
+                    TypeDesc::Tvar(None)
                 }
             },
-            _ => TypeDesc::Tvar(None, crate::types::type_expr::VarDescBlock::OWN), // fallback
+            _ => TypeDesc::Tvar(None), // fallback
         }
     }
 
@@ -960,116 +923,37 @@ impl<'a> SigReadContext<'a> {
         }
     }
 
-    /// Read an arg record {lbl: arg_label; typ: type_expr}. Arguments
-    /// holding one `lbl` block share its label.
+    /// Read an arg record {lbl: arg_label; typ: type_expr}.
     fn read_arg(&mut self, value: &OcamlValue) -> TypeArg {
         let fields = &value.as_block().1;
         let typ = self.read_type_expr(&fields[1]);
-        let Some(address) = block_address(&fields[0]) else {
-            return TypeArg::new(self.read_arg_label(&fields[0]), typ);
-        };
-        if let Some(arg) = self.labels.get(&address) {
-            return arg.with_type(typ);
-        }
-        let arg = TypeArg::new(self.read_arg_label(&fields[0]), typ);
-        self.labels.insert(address, arg.clone());
-        arg
+        TypeArg::new(self.read_arg_label(&fields[0]), typ)
     }
 
-    /// Read an Ident.t.
-    ///
-    /// Record fields:
-    /// 0: stamp: int
-    /// 1: name: string
-    /// 2: flags: int (mutable)
     fn read_ident(&mut self, value: &OcamlValue) -> Ident {
-        let id = read_ident_value(value);
-        let Some(address) = block_address(value) else {
-            return id;
-        };
-        let ctx = self.ctx;
-        let origin = self
-            .ident_origins
-            .entry(address)
-            .or_insert_with(|| (value.clone(), ctx.fresh_ident_origin()))
-            .1;
-        let id = id.with_origin(origin);
-        if let OcamlValue::String(name) = &value.as_block().1[1] {
-            if let Some((scope, string)) = name.allocation() {
-                ctx.record_ident_name(
-                    &id,
-                    crate::types::path_provenance::NameAllocation::Source { scope, string },
-                );
-            }
-        }
-        id
+        read_ident_value(value)
     }
 
-    /// Read a Path.t.
-    ///
-    /// Tags:
-    /// - 0: Pident(Ident.t)
-    /// - 1: Pdot(Path.t, string, int)
-    /// - 2: Papply(Path.t, Path.t)
     fn read_path(&mut self, value: &OcamlValue) -> Path {
-        Path::clone(&self.read_shared_path(value))
+        match value {
+            OcamlValue::Block(0, fields) => Path::pident(self.read_ident(&fields[0])),
+            OcamlValue::Block(1, fields) => Path::pdot_pos(
+                self.read_path(&fields[0]),
+                fields[1].as_string(),
+                fields[2].as_int() as i32,
+            ),
+            OcamlValue::Block(2, fields) => {
+                Path::papply(self.read_path(&fields[0]), self.read_path(&fields[1]))
+            }
+            _ => Path::pident(Ident::create_persistent("?")),
+        }
     }
 
     fn read_shared_path(&mut self, value: &OcamlValue) -> Arc<Path> {
-        let address = block_address(value);
-        if let Some((_, path)) = address.and_then(|address| self.paths.get(&address)) {
-            return path.clone();
-        }
-        let path = Arc::new(match value {
-            OcamlValue::Block(0, fields) => Path::Pident(self.read_ident(&fields[0])),
-            OcamlValue::Block(1, fields) => {
-                let prefix = self.read_shared_path(&fields[0]);
-                let name = fields[1].as_string().to_string();
-                let pos = fields[2].as_int() as i32;
-                let allocation = match &fields[1] {
-                    OcamlValue::String(decoded) => decoded.allocation(),
-                    _ => None,
-                };
-                if let Some((scope, string)) = allocation {
-                    self.ctx.dotted_with_name(
-                        prefix,
-                        name.into(),
-                        crate::types::path_provenance::NameAllocation::Source { scope, string },
-                        pos,
-                    )
-                } else {
-                    Path::Pdot(prefix, name.into(), pos)
-                }
-            }
-            OcamlValue::Block(2, fields) => {
-                let f = self.read_shared_path(&fields[0]);
-                let a = self.read_shared_path(&fields[1]);
-                Path::Papply(f, a)
-            }
-            _ => Path::Pident(Ident::create_persistent("?")), // fallback
-        });
-        if let Some(address) = address {
-            self.paths.insert(address, (value.clone(), path.clone()));
-        }
-        path
+        Arc::new(self.read_path(value))
     }
 
-    /// The path block of a `Tconstr` holding the marshalled path `value`.
-    /// `Subst` keeps a `Pident` and rebuilds a `Pdot` (subst.ml:87-94) when
-    /// the unit's signature is copied (env.ml:677, 1462-1464), so a `Pident`
-    /// is its marshal block and any other path a block of the node.
-    fn tconstr_path_block(&mut self, value: &OcamlValue) -> PathBlock {
-        match (value, block_address(value)) {
-            (OcamlValue::Block(0, _), Some(address)) => {
-                let ctx = self.ctx;
-                *self
-                    .pident_blocks
-                    .entry(address)
-                    .or_insert_with(|| ctx.fresh_path_block())
-            }
-            _ => PathBlock::OWN,
-        }
-    }
+
 
     /// Read a row_desc record.
     ///
@@ -2044,75 +1928,16 @@ mod tests {
         let copy = reader.read_path(&raw_a);
         let b = reader.read_path(&raw_b);
         let c = reader.read_path(&raw_c);
-        let a = ctx.dotted_allocation(&a).unwrap();
-        let b = ctx.dotted_allocation(&b).unwrap();
-        let c = ctx.dotted_allocation(&c).unwrap();
-        assert_eq!(a.key(), ctx.dotted_allocation(&copy).unwrap().key());
-        assert_ne!(a.key(), b.key());
-        assert!(Arc::ptr_eq(&a.prefix, &b.prefix));
-        assert!(Arc::ptr_eq(&a.prefix, &c.prefix));
-        assert_eq!(a.name, b.name);
-        assert_ne!(a.name, c.name);
-        assert_eq!(a.name, ctx.ident_name_allocation(&reader.read_ident(&id)));
-        let OcamlValue::Block(_, fields) = &raw_a else {
-            unreachable!()
-        };
-        let retained = Arc::downgrade(fields);
-        drop(raw_a);
-        assert!(retained.upgrade().is_some());
-        drop(reader);
-        assert!(retained.upgrade().is_none());
-        assert_eq!(ctx.dotted_allocation(&copy).unwrap().name, a.name);
+        assert_eq!(a, copy);
+        assert_eq!(a, b);
+        assert_eq!(a, c);
+        assert_eq!(
+            a,
+            Path::pdot_pos(Path::pident(reader.read_ident(&id)), "x", 0)
+        );
     }
 
-    #[test]
-    fn decoded_identifier_names_keep_shared_string_tokens() {
-        use crate::cmi::marshal_reader::MarshalReader;
-        let payload = [
-            0xb0, // three identifiers
-            0xb0, 0x6a, 0x21, b'x', 0x40, // first name allocation
-            0xb0, 0x6b, 0x04, 2, 0x40, // shared name, distinct identifier
-            0xb0, 0x6c, 0x21, b'x', 0x40, // equal text, new allocation
-        ];
-        let ctx = TypeContext::new(Arc::new(crate::context::IdGenerator::new()));
-        let values = MarshalReader::new()
-            .read_value(&mut std::io::Cursor::new(payload))
-            .unwrap();
-        let mut reader = SigReadContext::new(&ctx);
-        let (_, fields) = values.as_block();
-        let a = reader.read_ident(&fields[0]);
-        let b = reader.read_ident(&fields[1]);
-        let c = reader.read_ident(&fields[2]);
-        assert_ne!(a.origin(), b.origin());
-        assert_eq!(ctx.ident_name_allocation(&a), ctx.ident_name_allocation(&b));
-        assert_ne!(ctx.ident_name_allocation(&a), ctx.ident_name_allocation(&c));
-        let renamed = ctx.rename_ident(&a);
-        assert_eq!(
-            ctx.ident_name_allocation(&a),
-            ctx.ident_name_allocation(&renamed)
-        );
-        let other_values = MarshalReader::new()
-            .read_value(&mut std::io::Cursor::new(payload))
-            .unwrap();
-        let other = reader.read_ident(&other_values.as_block().1[0]);
-        assert_ne!(
-            ctx.ident_name_allocation(&a),
-            ctx.ident_name_allocation(&other)
-        );
-        let OcamlValue::Block(_, ident_fields) = &fields[0] else {
-            unreachable!()
-        };
-        let retained = Arc::downgrade(ident_fields);
-        drop(values);
-        drop(other_values);
-        assert!(
-            retained.upgrade().is_some(),
-            "identifier address stays live"
-        );
-        drop(reader);
-        assert!(retained.upgrade().is_none());
-        assert_eq!(ctx.ident_name_allocation(&a), ctx.ident_name_allocation(&b));
-    }
+
 
     #[test]
     fn decoded_identifiers_and_paths_keep_their_marshal_block_identity() {
@@ -2134,9 +1959,6 @@ mod tests {
         let shared = reader.read_ident(&int.clone());
         let other = reader.read_ident(&int_again);
         assert_eq!(first, other, "the same identifier");
-        assert_ne!(first.origin().get(), 0);
-        assert_eq!(first.origin(), shared.origin());
-        assert_ne!(first.origin(), other.origin());
 
         let unit = block(
             0,
@@ -2163,12 +1985,10 @@ mod tests {
         let a = reader.read_shared_path(&unit_t);
         let b = reader.read_shared_path(&unit_t.clone());
         let c = reader.read_shared_path(&pdot(&unit));
-        assert!(Arc::ptr_eq(&a, &b));
-        assert!(!Arc::ptr_eq(&a, &c));
-        let (Path::Pdot(prefix_a, ..), Path::Pdot(prefix_c, ..)) = (&*a, &*c) else {
-            panic!("not Pdot")
-        };
-        assert!(Arc::ptr_eq(prefix_a, prefix_c), "one Unit block");
+        assert_eq!(first, shared);
+        assert_eq!(a, b);
+        assert_eq!(a, c);
+        assert_eq!(a.name(), "Unit.t");
     }
 
     fn cmi_ident_pstr(name: &str) -> OcamlValue {

@@ -85,6 +85,8 @@ pub struct JsPrinter<'r> {
     source_map: Option<SourceMapBuilder>,
     generated_line: usize,
     generated_column: usize,
+    /// Scratch sets for function free-variable computation.
+    free_vars: FreeVarScratch,
 }
 
 impl Default for JsPrinter<'_> {
@@ -111,6 +113,7 @@ impl<'r> JsPrinter<'r> {
             source_map: None,
             generated_line: 0,
             generated_column: 0,
+            free_vars: FreeVarScratch::default(),
         }
     }
 
@@ -230,6 +233,7 @@ impl<'r> JsPrinter<'r> {
             source_map: None,
             generated_line: 0,
             generated_column: 0,
+            free_vars: FreeVarScratch::default(),
         };
         printer.print_expression(expr, level);
         printer.output
@@ -510,7 +514,11 @@ impl<'r> JsPrinter<'r> {
     pub fn print_statement(&mut self, stmt: &Statement, top_level: bool) {
         // OCaml js_dump.ml marks after the optional comment and immediately
         // before printing the statement description.
-        // Print comment if present
+        self.print_statement_comment_and_mark(stmt);
+        self.print_statement_desc(&stmt.desc, top_level);
+    }
+
+    fn print_statement_comment_and_mark(&mut self, stmt: &Statement) {
         if let Some(ref comment) = stmt.comment {
             self.write("/* ");
             self.write(comment);
@@ -520,7 +528,6 @@ impl<'r> JsPrinter<'r> {
 
         // js_dump.ml:1321-1324.
         self.mark_source_loc(stmt.source_loc.as_ref());
-        self.print_statement_desc(&stmt.desc, top_level);
     }
 
     fn statement_prints_anything(&self, stmt: &Statement, top_level: bool) -> bool {
@@ -607,20 +614,7 @@ impl<'r> JsPrinter<'r> {
             }
 
             StatementDesc::If(cond, then_block, else_block) => {
-                self.write("if ");
-                self.write_char('(');
-                self.with_indent(1, |this| this.print_expression(cond, 0));
-                self.write(") ");
-                self.print_brace_block(then_block);
-
-                if !else_block_is_omitted_like_ocaml(else_block) {
-                    self.write(" else ");
-                    if let Some(nested_if) = single_else_if_stmt_like_ocaml(else_block) {
-                        self.print_statement(nested_if, false);
-                        return;
-                    }
-                    self.print_brace_block(else_block);
-                }
+                self.print_if_statement(cond, then_block, else_block);
             }
 
             StatementDesc::While(label, cond, body) => {
@@ -987,7 +981,7 @@ impl<'r> JsPrinter<'r> {
             // OCaml reserves the unbounded function environment plus the
             // Name_non_top binding before printing it; see
             // compiler/core/js_dump.ml:337-345 and 411-414.
-            let reserved = function_reserved_idents(params, body, Some(&decl.ident));
+            let reserved = self.function_reserved_idents(params, body, Some(&decl.ident));
             self.reserve_idents_in_current_scope(&reserved);
             Some(reserved)
         } else {
@@ -1045,7 +1039,7 @@ impl<'r> JsPrinter<'r> {
         function_ident: Option<&Ident>,
         f: impl FnOnce(&mut Self) -> T,
     ) -> T {
-        let reserved_idents = function_reserved_idents(params, body, function_ident);
+        let reserved_idents = self.function_reserved_idents(params, body, function_ident);
         self.with_reserved_ident_scope(&reserved_idents, f)
     }
 
@@ -1088,6 +1082,26 @@ impl<'r> JsPrinter<'r> {
         out
     }
 
+    /// The identifiers a function reserves in the enclosing scope: its free
+    /// variables plus its own binding, sorted (`Js_fun_env.get_unbounded`
+    /// plus the `Name_top`/`Name_non_top` id, compiler/core/js_dump.ml:337-345).
+    fn function_reserved_idents(
+        &mut self,
+        params: &[Ident],
+        body: &Block,
+        function_ident: Option<&Ident>,
+    ) -> Vec<Ident> {
+        let mut reserved_idents = self
+            .free_vars
+            .free_variables_sorted(body, params.iter().copied());
+        if let Some(function_ident) = function_ident {
+            reserved_idents.push(*function_ident);
+            reserved_idents.sort();
+        }
+        reserved_idents.dedup();
+        reserved_idents
+    }
+
     fn print_function_expression(&mut self, context: FunctionPrintContext<'_>) {
         let FunctionPrintContext {
             is_method,
@@ -1103,7 +1117,8 @@ impl<'r> JsPrinter<'r> {
         let reserved_idents = match reserved_idents {
             Some(reserved_idents) => reserved_idents,
             None => {
-                computed_reserved_idents = function_reserved_idents(params, body, function_ident);
+                computed_reserved_idents =
+                    self.function_reserved_idents(params, body, function_ident);
                 &computed_reserved_idents
             }
         };
@@ -1235,7 +1250,7 @@ impl<'r> JsPrinter<'r> {
         // OCaml reserves the unbounded function environment plus the Name_top
         // binding before printing the function id; see
         // compiler/core/js_dump.ml:337-345 and 416-419.
-        let reserved_idents = function_reserved_idents(params, body, Some(ident));
+        let reserved_idents = self.function_reserved_idents(params, body, Some(ident));
         self.reserve_idents_in_current_scope(&reserved_idents);
         if async_ {
             self.write("async ");
@@ -1272,7 +1287,9 @@ impl<'r> JsPrinter<'r> {
         let (this_param, args) = params
             .split_first()
             .expect("method functions must carry an explicit `this` parameter");
-        let free = free_variables_of_block_with_defined(body, std::iter::empty());
+        let free = self
+            .free_vars
+            .free_variables_sorted(body, std::iter::empty());
         let this_binding = free
             .contains(this_param)
             .then(|| self.ident_name(this_param));
@@ -2669,17 +2686,30 @@ impl<'r> JsPrinter<'r> {
         }
     }
 
+    fn print_if_statement(&mut self, cond: &Expression, then_block: &Block, else_block: &Block) {
+        self.write("if ");
+        self.write_char('(');
+        self.with_indent(1, |this| this.print_expression(cond, 0));
+        self.write(") ");
+        self.print_brace_block(then_block);
+
+        if !else_block_is_omitted_like_ocaml(else_block) {
+            self.write(" else ");
+            if let Some(nested_if) = single_else_if_stmt_like_ocaml(else_block) {
+                self.print_statement(nested_if, false);
+                return;
+            }
+            self.print_brace_block(else_block);
+        }
+    }
+
     fn print_function_tail_statement(&mut self, stmt: &Statement, return_unit: bool) {
         match &stmt.desc {
             StatementDesc::If(cond, then_, else_) if else_is_single_return_undefined(else_) => {
-                self.print_statement(
-                    &Statement {
-                        source_loc: stmt.source_loc.clone(),
-                        desc: StatementDesc::If(cond.clone(), then_.clone(), vec![]),
-                        comment: stmt.comment.clone(),
-                    },
-                    false,
-                );
+                // `print_statement` of `If (cond, then_, [])` with the same
+                // comment and location, without copying the branches.
+                self.print_statement_comment_and_mark(stmt);
+                self.print_if_statement(cond, then_, &Vec::new());
             }
             StatementDesc::Return(Expression {
                 desc: ExpressionDesc::Undefined { .. },
@@ -3236,12 +3266,6 @@ struct JsIdentStats {
 }
 
 impl JsIdentStats {
-    fn with_defined(defined: impl IntoIterator<Item = Ident>) -> Self {
-        let mut stats = Self::default();
-        stats.defined_idents.extend(defined);
-        stats
-    }
-
     fn add_defined_ident(&mut self, ident: &Ident) {
         self.defined_idents.insert(*ident);
     }
@@ -3251,53 +3275,67 @@ impl JsIdentStats {
             self.used_idents.insert(*ident);
         }
     }
+}
 
-    fn extend_free_idents(&mut self, other: HashSet<Ident>) {
-        self.used_idents.extend(other);
+/// Reusable sets for computing the free variables of function bodies.
+///
+/// OCaml computes each function's free variables once per program in
+/// `Js_pass_scope` and stores them in its `Js_fun_env`
+/// (compiler/core/js_pass_scope.ml, compiler/core/js_fun_env.ml), which
+/// `pp_function` reads (compiler/core/js_dump.ml:337-345). The printer
+/// recomputes them per function from the body; these pooled sets keep that
+/// from allocating a pair of hash sets per nested scope.
+#[derive(Default)]
+struct FreeVarScratch {
+    pool: Vec<JsIdentStats>,
+}
+
+impl FreeVarScratch {
+    /// Adds the free variables of `block`, with `defined` bound around it, to
+    /// `out`'s used identifiers.
+    fn collect_nested(
+        &mut self,
+        block: &Block,
+        defined: impl IntoIterator<Item = Ident>,
+        out: &mut JsIdentStats,
+    ) {
+        let mut inner = self.pool.pop().unwrap_or_default();
+        inner.defined_idents.extend(defined);
+        collect_block_idents(block, &mut inner, self);
+        out.used_idents.extend(
+            inner
+                .used_idents
+                .drain()
+                .filter(|ident| !inner.defined_idents.contains(ident)),
+        );
+        inner.defined_idents.clear();
+        self.pool.push(inner);
     }
 
-    fn free_variables(mut self) -> HashSet<Ident> {
-        self.used_idents
-            .retain(|ident| !self.defined_idents.contains(ident));
-        self.used_idents
+    /// The free variables of `block` with `defined` bound around it, sorted.
+    fn free_variables_sorted(
+        &mut self,
+        block: &Block,
+        defined: impl IntoIterator<Item = Ident>,
+    ) -> Vec<Ident> {
+        let mut stats = self.pool.pop().unwrap_or_default();
+        self.collect_nested(block, defined, &mut stats);
+        let mut free: Vec<Ident> = stats.used_idents.drain().collect();
+        self.pool.push(stats);
+        free.sort();
+        free
     }
 }
 
-fn free_variables_of_block_with_defined(
-    block: &Block,
-    defined: impl IntoIterator<Item = Ident>,
-) -> HashSet<Ident> {
-    let mut stats = JsIdentStats::with_defined(defined);
-    collect_block_idents(block, &mut stats);
-    stats.free_variables()
-}
-
-fn function_reserved_idents(
-    params: &[Ident],
-    body: &Block,
-    function_ident: Option<&Ident>,
-) -> Vec<Ident> {
-    let mut reserved_idents: Vec<Ident> =
-        free_variables_of_block_with_defined(body, params.iter().cloned())
-            .into_iter()
-            .collect();
-    if let Some(function_ident) = function_ident {
-        reserved_idents.push(*function_ident);
-    }
-    reserved_idents.sort();
-    reserved_idents.dedup();
-    reserved_idents
-}
-
-fn collect_block_idents(block: &Block, stats: &mut JsIdentStats) {
+fn collect_block_idents(block: &Block, stats: &mut JsIdentStats, memo: &mut FreeVarScratch) {
     for stmt in block {
-        collect_statement_idents(stmt, stats);
+        collect_statement_idents(stmt, stats, memo);
     }
 }
 
-fn collect_statement_idents(stmt: &Statement, stats: &mut JsIdentStats) {
+fn collect_statement_idents(stmt: &Statement, stats: &mut JsIdentStats, memo: &mut FreeVarScratch) {
     match &stmt.desc {
-        StatementDesc::Block(block) => collect_block_idents(block, stats),
+        StatementDesc::Block(block) => collect_block_idents(block, stats, memo),
         StatementDesc::Variable(VariableDeclaration { ident, value, .. }) => {
             stats.add_defined_ident(ident);
             if let Some(value) = value {
@@ -3308,74 +3346,69 @@ fn collect_statement_idents(stmt: &Statement, stats: &mut JsIdentStats) {
                         }
                     }
                 }
-                collect_expression_idents(value, stats);
+                collect_expression_idents(value, stats, memo);
             }
         }
         StatementDesc::Exp(expr) | StatementDesc::Return(expr) | StatementDesc::Throw(expr) => {
-            collect_expression_idents(expr, stats);
+            collect_expression_idents(expr, stats, memo);
         }
         StatementDesc::If(cond, then_block, else_block) => {
-            collect_expression_idents(cond, stats);
-            collect_block_idents(then_block, stats);
-            collect_block_idents(else_block, stats);
+            collect_expression_idents(cond, stats, memo);
+            collect_block_idents(then_block, stats, memo);
+            collect_block_idents(else_block, stats, memo);
         }
         StatementDesc::While(_, cond, body) => {
-            collect_expression_idents(cond, stats);
-            collect_block_idents(body, stats);
+            collect_expression_idents(cond, stats, memo);
+            collect_block_idents(body, stats, memo);
         }
         StatementDesc::ForRange(_, start, finish, loop_ident, _, body) => {
             if let Some(start) = start {
-                collect_expression_idents(start, stats);
+                collect_expression_idents(start, stats, memo);
             }
-            collect_expression_idents(finish, stats);
-            stats.extend_free_idents(free_variables_of_block_with_defined(
-                body,
-                std::iter::once(*loop_ident),
-            ));
+            collect_expression_idents(finish, stats, memo);
+            memo.collect_nested(body, std::iter::once(*loop_ident), stats);
         }
         StatementDesc::ForOf(_, loop_ident, iterable, body)
         | StatementDesc::ForAwaitOf(_, loop_ident, iterable, body) => {
-            collect_expression_idents(iterable, stats);
-            stats.extend_free_idents(free_variables_of_block_with_defined(
-                body,
-                std::iter::once(*loop_ident),
-            ));
+            collect_expression_idents(iterable, stats, memo);
+            memo.collect_nested(body, std::iter::once(*loop_ident), stats);
         }
         StatementDesc::IntSwitch(test, clauses, default) => {
-            collect_expression_idents(test, stats);
+            collect_expression_idents(test, stats, memo);
             for (_, clause) in clauses {
-                collect_block_idents(&clause.body, stats);
+                collect_block_idents(&clause.body, stats, memo);
             }
             if let Some(default) = default {
-                collect_block_idents(default, stats);
+                collect_block_idents(default, stats, memo);
             }
         }
         StatementDesc::StringSwitch(test, clauses, default) => {
-            collect_expression_idents(test, stats);
+            collect_expression_idents(test, stats, memo);
             for clause in clauses {
-                collect_block_idents(&clause.clause.body, stats);
+                collect_block_idents(&clause.clause.body, stats, memo);
             }
             if let Some(default) = default {
-                collect_block_idents(default, stats);
+                collect_block_idents(default, stats, memo);
             }
         }
         StatementDesc::Try(body, catch, finally) => {
-            collect_block_idents(body, stats);
+            collect_block_idents(body, stats, memo);
             if let Some((catch_ident, catch_block)) = catch {
-                stats.extend_free_idents(free_variables_of_block_with_defined(
-                    catch_block,
-                    std::iter::once(*catch_ident),
-                ));
+                memo.collect_nested(catch_block, std::iter::once(*catch_ident), stats);
             }
             if let Some(finally) = finally {
-                collect_block_idents(finally, stats);
+                collect_block_idents(finally, stats, memo);
             }
         }
         StatementDesc::Debugger | StatementDesc::Break(_) | StatementDesc::Continue(_) => {}
     }
 }
 
-fn collect_expression_idents(expr: &Expression, stats: &mut JsIdentStats) {
+fn collect_expression_idents(
+    expr: &Expression,
+    stats: &mut JsIdentStats,
+    memo: &mut FreeVarScratch,
+) {
     match &expr.desc {
         ExpressionDesc::Var(VIdent::Id(ident)) => stats.add_used_ident(ident),
         ExpressionDesc::Var(VIdent::Qualified(module, _)) => stats.add_used_ident(&module.id),
@@ -3396,67 +3429,64 @@ fn collect_expression_idents(expr: &Expression, stats: &mut JsIdentStats) {
         | ExpressionDesc::OptionalBlock(inner, _)
         | ExpressionDesc::Await(inner)
         | ExpressionDesc::Spread(inner)
-        | ExpressionDesc::RecordRest(_, inner) => collect_expression_idents(inner, stats),
+        | ExpressionDesc::RecordRest(_, inner) => collect_expression_idents(inner, stats, memo),
         ExpressionDesc::StringAppend(left, right)
         | ExpressionDesc::In(left, right)
         | ExpressionDesc::Seq(left, right)
         | ExpressionDesc::Bin(_, left, right)
         | ExpressionDesc::FlatCall(left, right)
         | ExpressionDesc::ArrayIndex(left, right) => {
-            collect_expression_idents(left, stats);
-            collect_expression_idents(right, stats);
+            collect_expression_idents(left, stats, memo);
+            collect_expression_idents(right, stats, memo);
         }
         ExpressionDesc::Cond(test, consequent, alternate) => {
-            collect_expression_idents(test, stats);
-            collect_expression_idents(consequent, stats);
-            collect_expression_idents(alternate, stats);
+            collect_expression_idents(test, stats, memo);
+            collect_expression_idents(consequent, stats, memo);
+            collect_expression_idents(alternate, stats, memo);
         }
         ExpressionDesc::Call(func, args, _) => {
-            collect_expression_idents(func, stats);
+            collect_expression_idents(func, stats, memo);
             for arg in args {
-                collect_expression_idents(arg, stats);
+                collect_expression_idents(arg, stats, memo);
             }
         }
         ExpressionDesc::TaggedTemplate(tag, _, values) => {
             // js_record_iter.ml:104-106 visits the tag before the values.
-            collect_expression_idents(tag, stats);
+            collect_expression_idents(tag, stats, memo);
             for value in values {
-                collect_expression_idents(value, stats);
+                collect_expression_idents(value, stats, memo);
             }
         }
         ExpressionDesc::InterpolatedTemplate { values, .. } => {
             for value in values {
-                collect_expression_idents(value, stats);
+                collect_expression_idents(value, stats, memo);
             }
         }
-        ExpressionDesc::StaticIndex(target, _, _) => collect_expression_idents(target, stats),
+        ExpressionDesc::StaticIndex(target, _, _) => collect_expression_idents(target, stats, memo),
         ExpressionDesc::New(target, args) => {
-            collect_expression_idents(target, stats);
+            collect_expression_idents(target, stats, memo);
             if let Some(args) = args {
                 for arg in args {
-                    collect_expression_idents(arg, stats);
+                    collect_expression_idents(arg, stats, memo);
                 }
             }
         }
         ExpressionDesc::Fun { params, body, .. } => {
-            stats.extend_free_idents(free_variables_of_block_with_defined(
-                body,
-                params.iter().cloned(),
-            ));
+            memo.collect_nested(body, params.iter().copied(), stats);
         }
         ExpressionDesc::Array(items, _) => {
             for item in items {
-                collect_expression_idents(item, stats);
+                collect_expression_idents(item, stats, memo);
             }
         }
         ExpressionDesc::CamlBlock(items, _, _) => {
             for item in items {
-                collect_expression_idents(item, stats);
+                collect_expression_idents(item, stats, memo);
             }
         }
         ExpressionDesc::Jsx(jsx) => {
             for value in jsx.expressions() {
-                collect_expression_idents(value, stats);
+                collect_expression_idents(value, stats, memo);
             }
         }
         ExpressionDesc::Object(entries) => {
@@ -3464,7 +3494,7 @@ fn collect_expression_idents(expr: &Expression, stats: &mut JsIdentStats) {
                 let (ObjectEntry::Property(_, value)
                 | ObjectEntry::Spread(value)
                 | ObjectEntry::RecordSpread(value)) = entry;
-                collect_expression_idents(value, stats);
+                collect_expression_idents(value, stats, memo);
             }
         }
     }

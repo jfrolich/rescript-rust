@@ -13,7 +13,6 @@ use crate::types::decl::{LabelDescription, PrimKind, RecordRepresentation, Value
 use crate::types::external_ffi_types::{
     Attr, DeclKind, ExternalDecl, ExternalFfi, LabelNoname, ModuleSource, Param, ReturnWrapper,
 };
-use crate::types::path::Path;
 use crate::types::typedtree::{
     TypedArena, ApplyArg, Expression, ExpressionDesc, RecordField, record_fields_by_position,
 };
@@ -52,9 +51,15 @@ pub(super) struct JsxCall<'e> {
 fn jsx_is_fragment(funct: &Expression, tag: &Expression) -> bool {
     match (&funct.exp_desc, &tag.exp_desc) {
         (
-            ExpressionDesc::Texp_ident(Path::Pdot(jsx_module, _, _), _, _),
-            ExpressionDesc::Texp_ident(Path::Pdot(tag_module, name, _), _, _),
-        ) => name.as_str() == "jsxFragment" && jsx_module.same(tag_module),
+            ExpressionDesc::Texp_ident(jsx_path, _, _),
+            ExpressionDesc::Texp_ident(tag_path, _, _),
+        ) => match (jsx_path.view(), tag_path.view()) {
+            (
+                crate::types::path::PathView::Pdot(jsx_module, _, _),
+                crate::types::path::PathView::Pdot(tag_module, name, _),
+            ) => name.as_str() == "jsxFragment" && jsx_module.same(tag_module),
+            _ => false,
+        },
         _ => false,
     }
 }
@@ -282,6 +287,7 @@ impl<'a> RawLambdaConverter<'a> {
     /// call evaluates them, except that the children come after the other
     /// props, as in JSX.
     pub(super) fn transl_jsx_element(&mut self, loc: LamLoc, call: JsxCall<'_>) -> RawLambda {
+        let rb = self.b;
         let init_id = self.fresh_ident("init");
         let (init, spread, fields, children) = match call.props {
             JsxProps::Spread(props) => (None, Some(self.convert_expr_raw(props)), Vec::new(), None),
@@ -317,14 +323,14 @@ impl<'a> RawLambdaConverter<'a> {
                                 }
                                 None => field(
                                     lbl,
-                                    RawLambda::prim(
+                                    rb.prim(
                                         Primitive::Pfield(
                                             lbl.lbl_pos,
                                             FieldDbgInfo::Record {
                                                 name: label_runtime_name(lbl),
                                             },
                                         ),
-                                        vec![RawLambda::var(init_id)],
+                                        &vec![rb.var(init_id)],
                                         loc,
                                     ),
                                 ),
@@ -377,10 +383,10 @@ impl<'a> RawLambdaConverter<'a> {
         args.extend(fields.into_iter().map(|(_, _, value)| value));
         args.extend(children.into_iter().flatten());
         args.extend(key);
-        let lam = RawLambda::prim(Primitive::Pjsx(Box::new(element)), args, loc);
+        let lam = rb.prim(Primitive::Pjsx(Box::new(element)), &args, loc);
         match init {
             None => lam,
-            Some(init) => RawLambda::let_(LetKind::Strict, init_id, init, lam),
+            Some(init) => rb.let_(LetKind::Strict, init_id, init, lam),
         }
     }
 }

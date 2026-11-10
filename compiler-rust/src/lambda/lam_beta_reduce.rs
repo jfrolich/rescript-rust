@@ -424,3 +424,52 @@ pub(crate) fn max_ident_stamp_in_lambda(a: &LamArena, lam: Lam) -> i32 {
     a.iter_children(lam, |x| max = max.max(max_ident_stamp_in_lambda(a, x)));
     max
 }
+
+#[cfg(test)]
+mod regression_tests {
+    use super::*;
+    use crate::ident::IdentFlags;
+    fn ids(start: i32, count: usize) -> Vec<Ident> {
+        (0..count)
+            .map(|i| Ident::new(format!("p{i}"), start + i as i32, IdentFlags::NONE))
+            .collect()
+    }
+    fn effect(name: &str) -> crate::lambda::Lambda {
+        crate::lambda::Lambda::prim(
+            Primitive::PjsCall(Box::new(crate::lambda::lam_primitive::JsCall {
+                prim_name: name.into(),
+                arg_types: vec![],
+                ffi: crate::lambda::lam_primitive::ExternalDecl::test_val("", 0),
+            })),
+            vec![],
+            LamLoc::NONE,
+        )
+    }
+    #[test]
+    fn unused_effectful_arguments_are_evaluated_in_parameter_order() {
+        let params = ids(1, 3);
+        let body = crate::lambda::Lambda::prim(
+            Primitive::Pidentity,
+            vec![crate::lambda::Lambda::var(params[0])],
+            LamLoc::NONE,
+        );
+        let mut store = LamArena::new();
+        let root = store.import(&body);
+        let args: Vec<_> = ["a", "b", "c"]
+            .into_iter()
+            .map(|name| store.import(&effect(name)))
+            .collect();
+        let reduced = simple_beta_reduce(&mut store, &params, root, &args).unwrap();
+        let mut names = Vec::new();
+        let mut current = store.export(reduced);
+        while let crate::lambda::Lambda::Lsequence(first, rest) = current {
+            if let crate::lambda::Lambda::Lprim(info) = *first
+                && let Primitive::PjsCall(call) = info.primitive
+            {
+                names.push(call.prim_name);
+            }
+            current = *rest;
+        }
+        assert_eq!(names, vec!["b", "c"]);
+    }
+}

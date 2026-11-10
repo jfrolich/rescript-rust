@@ -10,6 +10,7 @@
 //! searches the load path for a corresponding `.cmi` file. The search is
 //! case-insensitive on the first character (matching OCaml's `find_in_path_uncap`).
 
+use crate::types::path::PathView;
 use ahash::{AHashMap as HashMap, AHashSet as HashSet};
 use std::fs;
 use std::path::Path as FsPath;
@@ -886,7 +887,7 @@ impl ModuleRegistry {
                     // `type_module_aux` is `Mty_alias (Mta_absent, path)`.
                     md_type: ModuleType::MtyAlias(
                         AliasPresence::MtaAbsent,
-                        Arc::new(Path::Pident(Ident::create_persistent(
+                        Arc::new(Path::pident(Ident::create_persistent(
                             internal_name.as_str(),
                         ))),
                     ),
@@ -899,7 +900,7 @@ impl ModuleRegistry {
         }
 
         // Record alias rewrites
-        let module_path = Path::Pident(Ident::create_persistent(namespace_name));
+        let module_path = Path::pident(Ident::create_persistent(namespace_name));
         let mut new_alias_rewrites = HashMap::new();
         collect_alias_rewrites(&sig_items, &module_path, &mut new_alias_rewrites);
         self.extend_alias_rewrites(new_alias_rewrites);
@@ -928,7 +929,6 @@ impl ModuleRegistry {
                     entries: Vec::new(),
                     variant_layouts: Vec::new(),
                     mutabilities: Vec::new(),
-                    identities: Default::default(),
                 },
                 locations: Default::default(),
             },
@@ -1750,7 +1750,7 @@ impl PersistentEnv {
             }
             ctx.poison_store_build_for("find_pers_struct:load");
             let ps = portable_types::internalize_pers_struct(portable, ctx);
-            let module_path = Path::Pident(Ident::create_persistent(&portable_key));
+            let module_path = Path::pident(Ident::create_persistent(&portable_key));
             let effective_module_path = self
                 .view
                 .alias_prefix_rewrites
@@ -1823,7 +1823,7 @@ impl PersistentEnv {
             self.view_mut()
                 .prepared_cached_alias_rewrites
                 .insert(cache_key.to_string());
-            let module_path = Path::Pident(Ident::create_persistent(cache_key));
+            let module_path = Path::pident(Ident::create_persistent(cache_key));
             let effective_module_path = self
                 .view
                 .alias_prefix_rewrites
@@ -1853,7 +1853,7 @@ impl PersistentEnv {
         ps_crcs: Vec<(String, Option<[u8; 16]>)>,
         ctx: &TypeContext,
     ) -> PersStruct {
-        let module_path = Path::Pident(Ident::create_persistent(name));
+        let module_path = Path::pident(Ident::create_persistent(name));
 
         // Apply path substitution: rewrite Tconstr paths from internal
         // (e.g., Pident "ref") to qualified (e.g., Pdot(Pident "Pervasives") "ref").
@@ -2678,7 +2678,7 @@ impl PersistentEnv {
             Some(ps) => ps,
             None => return false,
         };
-        let module_path = Path::Pident(Ident::create_persistent(name));
+        let module_path = Path::pident(Ident::create_persistent(name));
         let components_key = crate::types::context::QualifiedModuleComponentsCacheKey::new(
             module_path.clone(),
             None,
@@ -2850,7 +2850,7 @@ impl PersistentEnv {
                     // `type_module_aux` is `Mty_alias (Mta_absent, path)`.
                     md_type: ModuleType::MtyAlias(
                         AliasPresence::MtaAbsent,
-                        Arc::new(Path::Pident(Ident::create_persistent(
+                        Arc::new(Path::pident(Ident::create_persistent(
                             internal_name.as_str(),
                         ))),
                     ),
@@ -2863,7 +2863,7 @@ impl PersistentEnv {
         }
 
         // Record alias rewrites (e.g., "Foo-MyApp" → Pdot(Pident("MyApp"), "Foo"))
-        let module_path = Path::Pident(Ident::create_persistent(namespace_name));
+        let module_path = Path::pident(Ident::create_persistent(namespace_name));
         collect_alias_rewrites(
             &sig_items,
             &module_path,
@@ -3820,7 +3820,7 @@ impl ModuleStampSubstMap {
     /// The target of a non-identifier key `path` (`Path_map.find`,
     /// subst.ml:70).
     fn path_target(&self, path: &Path) -> Option<&Arc<Path>> {
-        if self.paths.is_empty() || matches!(path, Path::Pident(_)) {
+        if self.paths.is_empty() || matches!(path.view(), PathView::Pident(_)) {
             return None;
         }
         self.paths
@@ -3834,10 +3834,10 @@ fn insert_module_stamp_subst(map: &mut ModuleStampSubstMap, id: &Ident, path: Pa
 }
 
 fn nonpersistent_path_head(path: &Path) -> Option<(i32, String)> {
-    match path {
-        Path::Pident(id) => (id.stamp() != 0).then(|| (id.stamp(), id.name().to_string())),
-        Path::Pdot(prefix, _, _) => nonpersistent_path_head(prefix),
-        Path::Papply(left, right) => {
+    match path.view() {
+        PathView::Pident(id) => (id.stamp() != 0).then(|| (id.stamp(), id.name().to_string())),
+        PathView::Pdot(prefix, _, _) => nonpersistent_path_head(prefix),
+        PathView::Papply(left, right) => {
             nonpersistent_path_head(left).or_else(|| nonpersistent_path_head(right))
         }
     }
@@ -3886,7 +3886,6 @@ impl TypeSubstPaths {
 struct SubstMaps {
     type_stamp_map: TypeSubstPaths,
     type_name_map: HashMap<String, Path>,
-    target_blocks: HashMap<crate::types::context::SamePathKey, crate::types::type_expr::PathBlock>,
     module_stamp_map: ModuleStampSubstMap,
     module_name_map: HashMap<String, Arc<Path>>,
     protected_module_head: Option<(i32, String)>,
@@ -3910,7 +3909,6 @@ impl Default for SubstMaps {
         Self {
             type_stamp_map: TypeSubstPaths::default(),
             type_name_map: subst_map(),
-            target_blocks: subst_map(),
             module_stamp_map: ModuleStampSubstMap::default(),
             module_name_map: subst_map(),
             protected_module_head: None,
@@ -3943,7 +3941,7 @@ fn build_subst_maps(
                     ctx.dotted_from_ident(prefix.clone(), *id, crate::types::path::NOPOS);
                 if let SignatureItem::SigType(_, decl, _) = item
                     && let Some(source) = &decl.type_path
-                    && matches!(source, Path::Pdot(..))
+                    && matches!(source.view(), PathView::Pdot(..))
                 {
                     maps.type_stamp_map.qualified.insert(
                         crate::types::context::SamePathKey::new(source.clone()),
@@ -3978,12 +3976,7 @@ fn build_subst_maps(
     maps
 }
 
-fn insert_type_subst_path(maps: &mut SubstMaps, old_id: &Ident, new_id: &Ident, ctx: &TypeContext) {
-    // One allocation per Subst.add_type target, shared by all uses.
-    maps.target_blocks.insert(
-        crate::types::context::SamePathKey::new(Path::pident(*old_id)),
-        ctx.fresh_path_block(),
-    );
+fn insert_type_subst_path(maps: &mut SubstMaps, old_id: &Ident, new_id: &Ident) {
     let new_path = Path::pident(*new_id);
     if old_id.stamp() != 0 {
         maps.type_stamp_map.stamps.insert(old_id.stamp(), new_path);
@@ -4017,7 +4010,7 @@ mod tests {
         insert_module_stamp_subst(
             &mut maps.module_stamp_map,
             &renamed,
-            Path::Pident(ctx.create_ident("Fresh")),
+            Path::pident(ctx.create_ident("Fresh")),
         );
         let stored = maps
             .module_stamp_map
@@ -4032,15 +4025,15 @@ mod tests {
             _ => panic!("alias"),
         };
         // subst.ml:69-75: an unreplaced `Pident` target is the block itself.
-        let kept_target = Arc::new(Path::Pident(kept));
+        let kept_target = Arc::new(Path::pident(kept));
         let mut a = alias(&kept_target);
         substitute_module_type_paths_with_maps(&ctx, &mut a, &maps);
         assert!(Arc::ptr_eq(&target_of(&a), &kept_target));
         // A replaced target is the substitution's one stored target block,
         // shared by separately allocated equal sources.
         let (first, second) = (
-            Arc::new(Path::Pident(renamed)),
-            Arc::new(Path::Pident(renamed)),
+            Arc::new(Path::pident(renamed)),
+            Arc::new(Path::pident(renamed)),
         );
         let (mut b, mut c) = (alias(&first), alias(&second));
         substitute_module_type_paths_with_maps(&ctx, &mut b, &maps);
@@ -4057,10 +4050,10 @@ mod tests {
         for by_name in [false, true] {
             for shallow in [false, true] {
                 let ctx = TypeContext::new(Arc::new(crate::context::IdGenerator::new()));
-                let root = Arc::new(Path::Pident(ctx.create_ident("Source")));
+                let root = Arc::new(Path::pident(ctx.create_ident("Source")));
                 let name = ctx.create_ident("t");
                 let source = ctx.dotted_from_ident(root.clone(), name, 7);
-                let target = Arc::new(Path::Pident(ctx.create_ident("Target")));
+                let target = Arc::new(Path::pident(ctx.create_ident("Target")));
                 let ty = ctx.new_generic_constr(source.clone(), vec![]);
                 let mut sig = vec![
                     SignatureItem::SigValue(
@@ -4111,18 +4104,12 @@ mod tests {
                 let TypeDesc::Tconstr { path, .. } = &*desc else {
                     panic!("constructor")
                 };
-                let type_allocation = ctx.dotted_allocation(path).unwrap();
+                let expected = Path::pdot_pos(*target, name.name_atom(), 7);
+                assert_eq!(*path, expected);
                 let SignatureItem::SigValue(_, value) = &sig[0] else {
                     panic!("value")
                 };
-                let value_allocation = ctx
-                    .dotted_allocation(value.val_path.as_ref().unwrap())
-                    .unwrap();
-                assert!(Arc::ptr_eq(&type_allocation.prefix, &target));
-                assert!(Arc::ptr_eq(&value_allocation.prefix, &target));
-                assert_ne!(type_allocation.key(), value_allocation.key());
-                assert_eq!(type_allocation.name, ctx.ident_name_allocation(&name));
-                assert_eq!(type_allocation.name, value_allocation.name);
+                assert_eq!(value.val_path, Some(expected));
                 let SignatureItem::SigModule(_, child, _) = &sig[1] else {
                     panic!("child")
                 };
@@ -4130,22 +4117,12 @@ mod tests {
                     panic!("alias")
                 };
                 for path in [alias, child.md_path.as_ref().unwrap()] {
-                    let allocation = ctx.dotted_allocation(path).unwrap();
-                    if shallow {
-                        assert_eq!(
-                            allocation.key(),
-                            ctx.dotted_allocation(&source).unwrap().key()
-                        );
-                    } else {
-                        assert!(Arc::ptr_eq(&allocation.prefix, &target));
-                        assert_eq!(allocation.name, type_allocation.name);
-                        assert_ne!(allocation.key(), type_allocation.key());
-                    }
+                    assert_eq!(*path, if shallow { source } else { expected });
                 }
                 let unknown = Path::pdot((*root).clone(), "unknown");
                 let copied =
                     rewrite_path_with_shared_prefix(&unknown, &root, &target, &ctx).unwrap();
-                assert!(ctx.dotted_allocation(&copied).is_none());
+                assert!(copied.same(&Path::pdot(*target, "unknown")));
             }
         }
     }
@@ -4153,73 +4130,45 @@ mod tests {
     #[test]
     fn scoped_rerooting_keeps_suffix_names_and_target_prefix_allocations() {
         let ctx = TypeContext::new(Arc::new(crate::context::IdGenerator::new()));
-        let root = Arc::new(Path::Pident(ctx.create_ident("Root")));
+        let root = Arc::new(Path::pident(ctx.create_ident("Root")));
         let name = ctx.create_ident("t");
         let source = ctx.dotted_from_ident(root.clone(), name, 7);
-        let target = Path::Pident(ctx.create_ident("Target"));
+        let target = Path::pident(ctx.create_ident("Target"));
         let pairs = vec![((*root).clone(), target.clone())];
         let mapper = reroot_path_mapper(&pairs, &ctx);
         let a = mapper(&source);
         let b = mapper(&source);
-        let a = ctx.dotted_allocation(&a).unwrap();
-        let b = ctx.dotted_allocation(&b).unwrap();
-        assert_ne!(a.key(), b.key());
-        assert_eq!(a.name, ctx.ident_name_allocation(&name));
-        assert_eq!(a.name, b.name);
-        assert!(Arc::ptr_eq(&a.prefix, &b.prefix));
-        assert!(a.prefix.same(&target));
-        let separate = reroot_path_mapper(&pairs, &ctx)(&source);
-        assert!(!Arc::ptr_eq(
-            &a.prefix,
-            &ctx.dotted_allocation(&separate).unwrap().prefix
-        ));
-
-        let nested = ctx.dotted_from_ident(Arc::new(source.clone()), name, 9);
-        let nested_copy = mapper(&nested);
-        let outer = ctx.dotted_allocation(&nested_copy).unwrap();
-        let inner = ctx.dotted_allocation(&outer.prefix).unwrap();
-        assert_eq!(outer.name, a.name);
-        assert_eq!(inner.name, a.name);
-        assert_ne!(inner.key(), a.key());
-        assert!(Arc::ptr_eq(&inner.prefix, &a.prefix));
+        let expected = Path::pdot_pos(target, name.name_atom(), 7);
+        assert_eq!(a, expected);
+        assert_eq!(b, expected);
+        assert_eq!(reroot_path_mapper(&pairs, &ctx)(&source), expected);
+        let nested = ctx.dotted_from_ident(Arc::new(source), name, 9);
+        let expected_nested = Path::pdot_pos(expected, name.name_atom(), 9);
+        assert_eq!(mapper(&nested), expected_nested);
         let untouched =
-            ctx.dotted_from_ident(Arc::new(Path::Pident(ctx.create_ident("Other"))), name, 7);
-        let unchanged = mapper(&untouched);
-        assert_eq!(
-            ctx.dotted_allocation(&untouched).unwrap().key(),
-            ctx.dotted_allocation(&unchanged).unwrap().key()
-        );
-
-        // A second explicit replacement has its own allocation even when its
-        // target is equal. No structural identity inference is permitted.
-        let other = Path::Pident(ctx.create_ident("OtherSource"));
-        let other_dot = ctx.dotted_from_ident(Arc::new(other.clone()), name, 7);
-        let pairs = vec![((*root).clone(), target.clone()), (other, target.clone())];
+            Path::pdot_pos(Path::pident(ctx.create_ident("Other")), name.name_atom(), 7);
+        assert_eq!(mapper(&untouched), untouched);
+        let other = Path::pident(ctx.create_ident("OtherSource"));
+        let other_dot = Path::pdot_pos(other, name.name_atom(), 7);
+        let pairs = vec![(*root, target), (other, target)];
         let mapper = reroot_path_mapper(&pairs, &ctx);
-        let first = mapper(&source);
-        let second = mapper(&other_dot);
-        assert!(!Arc::ptr_eq(
-            &ctx.dotted_allocation(&first).unwrap().prefix,
-            &ctx.dotted_allocation(&second).unwrap().prefix,
-        ));
+        assert_eq!(mapper(&source), mapper(&other_dot));
 
         // Both linear and indexed lookup choose the first matching pair,
         // rather than preferring the nearest matching ancestor.
         for count in [2, 6] {
             let mut pairs = vec![
                 ((*root).clone(), target.clone()),
-                (source.clone(), Path::Pident(ctx.create_ident("Later"))),
+                (source.clone(), Path::pident(ctx.create_ident("Later"))),
             ];
             for _ in 2..count {
-                pairs.push((Path::Pident(ctx.create_ident("Unused")), target.clone()));
+                pairs.push((Path::pident(ctx.create_ident("Unused")), target.clone()));
             }
             let prefixes = PathPrefixes::new(&pairs);
             assert_eq!(prefixes.matching_prefix(&nested), Some(0));
             assert!(prefixes.targets.get().is_none());
             let copied = rewrite_path_by_path_prefixes(&nested, &prefixes, &ctx).unwrap();
-            let outer = ctx.dotted_allocation(&copied).unwrap();
-            let inner = ctx.dotted_allocation(&outer.prefix).unwrap();
-            assert!(inner.prefix.same(&target));
+            assert_eq!(copied, expected_nested);
         }
     }
 
@@ -4227,7 +4176,7 @@ mod tests {
     fn dotted_substitution_keeps_suffix_names_and_module_prefix_allocations() {
         let ctx = TypeContext::new(Arc::new(crate::context::IdGenerator::new()));
         let root_id = ctx.create_ident("Root");
-        let root = Arc::new(Path::Pident(root_id));
+        let root = Arc::new(Path::pident(root_id));
         let name = ctx.create_ident("t");
         let source = ctx.dotted_from_ident(root.clone(), name, 7);
         let types = TypeSubstPaths::default();
@@ -4247,34 +4196,16 @@ mod tests {
         };
         let a = copy(&modules);
         let b = copy(&modules);
-        let original = ctx.dotted_allocation(&source).unwrap();
-        let a = ctx.dotted_allocation(&a).unwrap();
-        let b = ctx.dotted_allocation(&b).unwrap();
-        assert_ne!(original.key(), a.key());
-        assert_ne!(a.key(), b.key());
-        assert_eq!(original.name, a.name);
-        assert_eq!(a.name, b.name);
-        assert!(Arc::ptr_eq(&a.prefix, &root));
-        assert!(Arc::ptr_eq(&a.prefix, &b.prefix));
-        // One stored module substitution target is shared by separate uses.
+        assert_eq!(a, source);
+        assert_eq!(b, source);
         let target = ctx.create_ident("Other");
-        insert_module_stamp_subst(&mut modules, &root_id, Path::Pident(target));
-        let a = copy(&modules);
-        let b = copy(&modules);
-        let a = ctx.dotted_allocation(&a).unwrap();
-        let b = ctx.dotted_allocation(&b).unwrap();
-        assert!(Arc::ptr_eq(&a.prefix, &b.prefix));
-        assert!(!Arc::ptr_eq(&a.prefix, &root));
-        assert!(a.prefix.same(&Path::Pident(target)));
-        assert_eq!(a.name, original.name);
-        // Equal target text/value inserted separately still allocates separately.
+        insert_module_stamp_subst(&mut modules, &root_id, Path::pident(target));
+        let expected = Path::pdot_pos(Path::pident(target), name.name_atom(), 7);
+        assert_eq!(copy(&modules), expected);
+        assert_eq!(copy(&modules), expected);
         let mut separate = ModuleStampSubstMap::new();
-        insert_module_stamp_subst(&mut separate, &root_id, Path::Pident(target));
-        let c = copy(&separate);
-        assert!(!Arc::ptr_eq(
-            &a.prefix,
-            &ctx.dotted_allocation(&c).unwrap().prefix
-        ));
+        insert_module_stamp_subst(&mut separate, &root_id, Path::pident(target));
+        assert_eq!(copy(&separate), expected);
         // Nested dots are rebuilt, but their unchanged terminal prefix is retained.
         let nested = ctx.dotted_from_ident(Arc::new(source), name, 9);
         let copied = substitute_module_path(
@@ -4284,25 +4215,20 @@ mod tests {
             &module_names,
             None,
         );
-        let outer = ctx.dotted_allocation(&copied).unwrap();
-        let inner = ctx.dotted_allocation(&outer.prefix).unwrap();
-        assert_ne!(inner.key(), original.key());
-        assert!(Arc::ptr_eq(&inner.prefix, &root));
-        assert_eq!(inner.name, original.name);
-        assert_eq!(outer.name, original.name);
+        assert_eq!(copied, nested);
     }
 
     #[test]
-    fn renamed_substitution_target_keeps_one_path_block() {
-        use crate::types::typecore::{AllocatedTypePathMap, CopiedTypePath, copy_type_expr_mapping_paths};
-        use crate::types::type_expr::{PathBlock, TypeExprRefMap};
+    fn renamed_substitution_targets_follow_identifier_identity() {
+        use crate::types::typecore::copy_type_expr_mapping_paths;
+        use crate::types::type_expr::{TypeExprRefMap};
         let ctx = TypeContext::new(Arc::new(crate::context::IdGenerator::new()));
         let old = ctx.create_ident("t");
         let new = ctx.rename_ident(&old);
         let mut maps = SubstMaps::default();
-        insert_type_subst_path(&mut maps, &old, &new, &ctx);
-        let mapper = AllocatedTypePathMap(|path: &Path| CopiedTypePath {
-            path: substitute_type_path(
+        insert_type_subst_path(&mut maps, &old, &new);
+        let mapper = |path: &Path| {
+            substitute_type_path(
                 &ctx,
                 path,
                 &maps.type_stamp_map,
@@ -4310,43 +4236,33 @@ mod tests {
                 &maps.module_stamp_map,
                 &maps.module_name_map,
                 None,
-            ),
-            block: maps
-                .target_blocks
-                .get(&crate::types::context::SamePathKey::new(path.clone()))
-                .copied(),
-        });
+            )
+        };
         let a = ctx.new_generic_constr(Path::pident(old), vec![]);
         let b = ctx.new_generic_constr(Path::pident(old), vec![]);
         let unrelated = ctx.create_ident("t");
         let c = ctx.new_generic_constr(Path::pident(unrelated), vec![]);
         let mut cache = TypeExprRefMap::new();
-        let mut blocks = Vec::new();
         for ty in [a, b, c] {
             let copied = copy_type_expr_mapping_paths(&ctx, ty, &mut cache, &mapper);
             let desc = ctx.get_desc(copied);
-            let TypeDesc::Tconstr { path, path_block, .. } = &*desc else { panic!("constructor") };
+            let TypeDesc::Tconstr { path, .. } = &*desc else {
+                panic!("constructor")
+            };
             assert!(path.same(&Path::pident(if ty == c { unrelated } else { new })));
-            blocks.push(*path_block);
         }
-        assert_eq!(blocks[0], blocks[1]);
-        assert_ne!(blocks[0], PathBlock::OWN);
-        assert_eq!(blocks[2], PathBlock::OWN.copied_from(c));
-        let mut separate = SubstMaps::default();
-        insert_type_subst_path(&mut separate, &old, &new, &ctx);
-        assert_ne!(maps.target_blocks, separate.target_blocks);
     }
 
     #[test]
-    fn component_substitution_keeps_equal_valued_target_allocation() {
+    fn component_substitution_keeps_values_and_distinct_bindings() {
         let ctx = TypeContext::new(Arc::new(crate::context::IdGenerator::new()));
         let root_id = Ident::create_local("Component");
-        let root = Arc::new(Path::Pident(root_id));
+        let root = Arc::new(Path::pident(root_id));
         let binder = Ident::create_local("t");
         let source = Path::pdot((*root).clone(), binder.name_atom());
         let target = ctx.dotted_from_ident(root, binder, crate::types::path::NOPOS);
         assert_eq!(source, target);
-        assert!(!same_path_allocation(&source, &target));
+        assert_eq!(source, target);
         let mut types = TypeSubstPaths::default();
         types.qualified.insert(
             crate::types::context::SamePathKey::new(source.clone()),
@@ -4371,14 +4287,10 @@ mod tests {
             let TypeDesc::Tconstr { path, .. } = &*desc else {
                 panic!("constructor")
             };
-            assert!(same_path_allocation(path, &target));
-            assert_eq!(
-                ctx.dotted_allocation(path).unwrap().key(),
-                ctx.dotted_allocation(&target).unwrap().key()
-            );
+            assert_eq!(*path, target);
         }
         // An equal-spelled but different binding is not this substitution's key.
-        let unrelated = Path::pdot(Path::Pident(Ident::create_local("Component")), "t");
+        let unrelated = Path::pdot(Path::pident(Ident::create_local("Component")), "t");
         let result = substitute_type_path(
             &ctx,
             &unrelated,
@@ -4388,7 +4300,7 @@ mod tests {
             &HashMap::new(),
             None,
         );
-        assert!(ctx.dotted_allocation(&result).is_none());
+        assert_eq!(result, unrelated);
         assert!(!result.same(&target));
     }
 
@@ -4470,7 +4382,6 @@ fn merge_subst_maps(parent: &SubstMaps, child: &SubstMaps) -> SubstMaps {
         .functions
         .extend(child.type_stamp_map.functions.clone());
     merged.type_name_map.extend(child.type_name_map.clone());
-    merged.target_blocks.extend(child.target_blocks.clone());
     merged
         .module_stamp_map
         .extend(child.module_stamp_map.clone());
@@ -4586,13 +4497,13 @@ fn freshen_signature_bound_idents_rec(
             SignatureItem::SigType(id, _, _) => {
                 let old_id = *id;
                 let new_id = ctx.rename_ident(&old_id);
-                insert_type_subst_path(&mut local_maps, &old_id, &new_id, ctx);
+                insert_type_subst_path(&mut local_maps, &old_id, &new_id);
                 *id = new_id;
             }
             SignatureItem::SigModtype(id, _) => {
                 let old_id = *id;
                 let new_id = ctx.rename_ident(&old_id);
-                insert_type_subst_path(&mut local_maps, &old_id, &new_id, ctx);
+                insert_type_subst_path(&mut local_maps, &old_id, &new_id);
                 *id = new_id;
             }
             SignatureItem::SigModule(id, _, _) => {
@@ -4652,13 +4563,13 @@ fn freshened_signature_ident_plan(
             }
             SignatureItem::SigType(id, _, _) => {
                 let new_id = ctx.rename_ident(id);
-                insert_type_subst_path(&mut local_maps, id, &new_id, ctx);
+                insert_type_subst_path(&mut local_maps, id, &new_id);
                 new_idents.push(Some(new_id));
             }
             SignatureItem::SigModtype(id, mtd) => {
                 has_nested_module_types |= mtd.mtd_type.is_some();
                 let new_id = ctx.rename_ident(id);
-                insert_type_subst_path(&mut local_maps, id, &new_id, ctx);
+                insert_type_subst_path(&mut local_maps, id, &new_id);
                 new_idents.push(Some(new_id));
             }
             SignatureItem::SigModule(id, _, _) => {
@@ -4742,10 +4653,7 @@ pub(crate) fn freshened_signature_bound_idents_from_kind(
     let (new_idents, local_maps, has_nested_module_types) =
         freshened_signature_ident_plan(sig_items, ctx);
     let maps_empty = local_maps.is_empty();
-    let rewrite_type_path = crate::types::typecore::AllocatedTypePathMap(|path: &Path| {
-        let block = local_maps.target_blocks.get(
-            &crate::types::context::SamePathKey::new(path.clone()),
-        ).copied();
+    let rewrite_type_path = |path: &Path| {
         let path = if maps_empty {
             path.clone()
         } else {
@@ -4759,8 +4667,8 @@ pub(crate) fn freshened_signature_bound_idents_from_kind(
                 local_maps.protected_module_head.as_ref(),
             )
         };
-        crate::types::typecore::CopiedTypePath { path, block }
-    });
+        path
+    };
     // Alias targets: the stored substitution target, or an unreplaced
     // `Pident` block itself (subst.ml:69-75).
     let rewrite_module_path = |path: &Arc<Path>| {
@@ -4869,13 +4777,13 @@ pub(crate) fn substitute_signature_with_path_subst(
     let mut maps = SubstMaps::default();
     for (key, replacement) in types {
         match replacement {
-            TypeReplacement::Path(target) => match key {
-                Path::Pident(id) if id.stamp() != 0 => {
+            TypeReplacement::Path(target) => match &key.view() {
+                PathView::Pident(id) if id.stamp() != 0 => {
                     maps.type_stamp_map
                         .stamps
                         .insert(id.stamp(), target.clone());
                 }
-                Path::Pident(id) => {
+                PathView::Pident(id) => {
                     maps.type_name_map
                         .insert(id.name().to_string(), target.clone());
                 }
@@ -4895,11 +4803,11 @@ pub(crate) fn substitute_signature_with_path_subst(
         }
     }
     for (key, target) in modules {
-        match key {
-            Path::Pident(id) if id.stamp() != 0 => {
+        match &key.view() {
+            PathView::Pident(id) if id.stamp() != 0 => {
                 insert_module_stamp_subst(&mut maps.module_stamp_map, id, target.clone());
             }
-            Path::Pident(id) => {
+            PathView::Pident(id) => {
                 maps.module_name_map
                     .insert(id.name().to_string(), Arc::new(target.clone()));
             }
@@ -5505,7 +5413,7 @@ fn restore_child_self_manifests_from_parent_scope(
         else {
             continue;
         };
-        let Path::Pident(manifest_id) = &path else {
+        let PathView::Pident(manifest_id) = path.view() else {
             continue;
         };
         if !manifest_id.same(child_id) {
@@ -5538,7 +5446,6 @@ fn restore_child_self_manifests_from_parent_scope(
                 path: Path::pdot(parent_module_path.clone(), child_id.name()),
                 args,
                 abbrev,
-                path_block: ctx.fresh_path_block(),
             },
         );
     }
@@ -5870,16 +5777,7 @@ pub(crate) fn substitute_type_paths_in_sig_with_stamp_map(
     }
 }
 
-/// Whether retaining the old path would retain the substitution result's
-/// actual carrier. Equal path values can still be different allocations.
-fn same_path_allocation(left: &Path, right: &Path) -> bool {
-    match (left, right) {
-        (Path::Pident(a), Path::Pident(b)) => a == b && a.origin() == b.origin(),
-        (Path::Pdot(a, an, ap), Path::Pdot(b, bn, bp)) => Arc::ptr_eq(a, b) && an == bn && ap == bp,
-        (Path::Papply(a, aa), Path::Papply(b, ba)) => Arc::ptr_eq(a, b) && Arc::ptr_eq(aa, ba),
-        _ => false,
-    }
-}
+
 
 /// Recursively walk a type expression and substitute Tconstr paths.
 fn substitute_type_expr_path(
@@ -5910,7 +5808,7 @@ fn substitute_type_expr_path(
         if let TypeDesc::Tconstr { path, args, .. } = &*desc
             && let Some((params, body)) = type_stamp_map.function(path)
         {
-            let (params, body, args) = (params.clone(), *body, args.clone());
+            let (params, body, args) = (params.clone(), *body, ctx.type_list(*args).to_vec());
             drop(desc);
             for &arg in &args {
                 substitute_type_expr_path(
@@ -5933,7 +5831,7 @@ fn substitute_type_expr_path(
             )
             .expect("Ctype.apply of a substituted type function");
             // `ty'.desc <- (apply ...).desc` shares the result's descriptor.
-            let applied_desc = ctx.get_desc(applied).into_desc().shared_from(applied);
+            let applied_desc = ctx.get_desc(applied).into_desc();
             ctx.set_desc(ty_ref, applied_desc);
             continue;
         }
@@ -5949,7 +5847,7 @@ fn substitute_type_expr_path(
                     module_name_map,
                     protected_module_head,
                 );
-                if !same_path_allocation(&new_path, path) {
+                if new_path != *path {
                     let mut new_desc = (*desc).clone();
                     if let TypeDesc::Tconstr { ref mut path, .. } = new_desc {
                         *path = new_path;
@@ -5958,16 +5856,16 @@ fn substitute_type_expr_path(
                 }
 
                 // Push type arguments onto work stack
-                for &arg in args {
+                for &arg in ctx.type_list(args).iter() {
                     work_stack.push(arg);
                 }
             }
             TypeDesc::Tarrow { args, ret } => {
-                work_stack.extend(args.iter().map(|arg| arg.typ));
+                work_stack.extend(ctx.type_args(args).iter().map(|arg| arg.typ));
                 work_stack.push(*ret);
             }
             TypeDesc::Ttuple(types) => {
-                for &t in types {
+                for &t in ctx.type_list(types).iter() {
                     work_stack.push(t);
                 }
             }
@@ -5976,7 +5874,7 @@ fn substitute_type_expr_path(
             }
             TypeDesc::Tpoly { body, vars } => {
                 work_stack.push(*body);
-                for &v in vars {
+                for &v in ctx.type_list(vars).iter() {
                     work_stack.push(v);
                 }
             }
@@ -5988,17 +5886,16 @@ fn substitute_type_expr_path(
                 work_stack.push(*rest);
             }
             TypeDesc::Tvariant(row) => {
+                let row = &ctx.row_desc(row);
                 // OCaml compiler/ml/subst.ml:226-235 rewrites
                 // polymorphic-variant row_name paths while copying the row,
                 // and drops a name substituted by a type function.
                 if let Some((path, _)) = &row.row_name
                     && type_stamp_map.function(path).is_some()
                 {
-                    let mut new_desc = (*desc).clone();
-                    if let TypeDesc::Tvariant(ref mut row) = new_desc {
-                        row.row_name = None;
-                    }
-                    replacement = Some(new_desc);
+                    let mut new_row = row.clone();
+                    new_row.row_name = None;
+                    replacement = Some(TypeDesc::Tvariant(ctx.new_row_desc(new_row)));
                 } else if let Some((path, _)) = &row.row_name {
                     let new_path = substitute_type_path(
                         ctx,
@@ -6009,13 +5906,12 @@ fn substitute_type_expr_path(
                         module_name_map,
                         protected_module_head,
                     );
-                    if !same_path_allocation(&new_path, path) {
-                        let mut new_desc = (*desc).clone();
-                        if let TypeDesc::Tvariant(ref mut row) = new_desc
-                            && let Some((ref mut path, _)) = row.row_name
-                        {
+                    if new_path != *path {
+                        let mut new_row = row.clone();
+                        if let Some((path, _)) = &mut new_row.row_name {
                             *path = new_path;
                         }
+                        let new_desc = TypeDesc::Tvariant(ctx.new_row_desc(new_row));
                         replacement = Some(new_desc);
                     }
                 }
@@ -6051,14 +5947,14 @@ fn substitute_type_expr_path(
                     module_name_map,
                     protected_module_head,
                 );
-                if !same_path_allocation(&new_path, path) {
+                if new_path != *path {
                     let mut new_desc = (*desc).clone();
                     if let TypeDesc::Tpackage { ref mut path, .. } = new_desc {
                         *path = new_path;
                     }
                     replacement = Some(new_desc);
                 }
-                for &arg in args {
+                for &arg in ctx.type_list(args).iter() {
                     work_stack.push(arg);
                 }
             }
@@ -6110,7 +6006,7 @@ pub fn reroot_value_description(
 /// from the parent's prefixed signature).
 fn component_alias_sources(module_path: &Path, ctx: &TypeContext) -> Vec<Path> {
     let mut sources = ctx.alias_sources_for_component_path(module_path);
-    if let Path::Pdot(parent, name, _) = module_path {
+    if let PathView::Pdot(parent, name, _) = module_path.view() {
         for parent_source in component_alias_sources(parent, ctx) {
             let derived = Path::pdot(parent_source, name.as_str());
             if !derived.same(module_path) && !sources.iter().any(|s| s.same(&derived)) {
@@ -6151,23 +6047,36 @@ pub fn type_expr_mentions_path_prefixes(
         let hit = |p: &Path| prefixes.matching_prefix(p).is_some();
         match &*desc {
             TypeDesc::Tconstr { path, args, .. } => {
-                hit(path) || args.iter().any(|a| walk(*a, prefixes, ctx, visited))
+                hit(path)
+                    || ctx
+                        .type_list(args)
+                        .iter()
+                        .any(|a| walk(*a, prefixes, ctx, visited))
             }
             TypeDesc::Tarrow { args, ret } => {
-                args.iter().any(|a| walk(a.typ, prefixes, ctx, visited))
+                ctx.type_args(args)
+                    .iter()
+                    .any(|a| walk(a.typ, prefixes, ctx, visited))
                     || walk(*ret, prefixes, ctx, visited)
             }
-            TypeDesc::Ttuple(items) => items.iter().any(|a| walk(*a, prefixes, ctx, visited)),
+            TypeDesc::Ttuple(items) => ctx
+                .type_list(items)
+                .iter()
+                .any(|a| walk(*a, prefixes, ctx, visited)),
             TypeDesc::Tlink(t) | TypeDesc::Tsubst(t) => walk(*t, prefixes, ctx, visited),
             TypeDesc::Tpoly { body, vars } => {
                 walk(*body, prefixes, ctx, visited)
-                    || vars.iter().any(|v| walk(*v, prefixes, ctx, visited))
+                    || ctx
+                        .type_list(vars)
+                        .iter()
+                        .any(|v| walk(*v, prefixes, ctx, visited))
             }
             TypeDesc::Tobject { fields } => walk(*fields, prefixes, ctx, visited),
             TypeDesc::Tfield { typ, rest, .. } => {
                 walk(*typ, prefixes, ctx, visited) || walk(*rest, prefixes, ctx, visited)
             }
             TypeDesc::Tvariant(row) => {
+                let row = &ctx.row_desc(row);
                 row.row_name.as_ref().is_some_and(|(p, args)| {
                     hit(p) || args.iter().any(|a| walk(*a, prefixes, ctx, visited))
                 }) || walk(row.row_more, prefixes, ctx, visited)
@@ -6182,7 +6091,11 @@ pub fn type_expr_mentions_path_prefixes(
                     })
             }
             TypeDesc::Tpackage { path, args, .. } => {
-                hit(path) || args.iter().any(|a| walk(*a, prefixes, ctx, visited))
+                hit(path)
+                    || ctx
+                        .type_list(args)
+                        .iter()
+                        .any(|a| walk(*a, prefixes, ctx, visited))
             }
             TypeDesc::Tvar(..) | TypeDesc::Tunivar(..) | TypeDesc::Tnil => false,
         }
@@ -6352,7 +6265,7 @@ fn substitute_shared_module_path(
     module_name_map: &HashMap<String, Arc<Path>>,
     protected_module_head: Option<&(i32, String)>,
 ) -> Arc<Path> {
-    if let Path::Pident(id) = path.as_ref() {
+    if let PathView::Pident(id) = &path.view() {
         let target =
             module_path_target(id, module_stamp_map, module_name_map, protected_module_head);
         return target.unwrap_or(path).clone();
@@ -6402,8 +6315,8 @@ fn substitute_type_path(
     {
         return target.clone();
     }
-    match path {
-        Path::Pident(ident) => {
+    match &path.view() {
+        PathView::Pident(ident) => {
             if ident.stamp() != 0 {
                 // OCaml compiler/ml/subst.ml:87-100 `type_path` rewrites
                 // non-persistent ids through Ident.find_same only. It does not
@@ -6420,7 +6333,7 @@ fn substitute_type_path(
                     .unwrap_or_else(|| path.clone())
             }
         }
-        Path::Pdot(..) => ctx.rebuild_dotted(path, |prefix| {
+        PathView::Pdot(..) => ctx.rebuild_dotted(path, |prefix| {
             substitute_shared_module_path(
                 ctx,
                 prefix,
@@ -6429,15 +6342,15 @@ fn substitute_type_path(
                 protected_module_head,
             )
         }),
-        Path::Papply(left, right) => Path::Papply(
-            substitute_shared_module_path(
+        PathView::Papply(left, right) => Path::papply(
+            substitute_module_path(
                 ctx,
                 left,
                 module_stamp_map,
                 module_name_map,
                 protected_module_head,
             ),
-            substitute_shared_module_path(
+            substitute_module_path(
                 ctx,
                 right,
                 module_stamp_map,
@@ -6458,15 +6371,15 @@ fn substitute_module_path(
     if let Some(target) = module_stamp_map.path_target(path) {
         return (**target).clone();
     }
-    match path {
-        Path::Pident(ident) => module_path_target(
+    match &path.view() {
+        PathView::Pident(ident) => module_path_target(
             ident,
             module_stamp_map,
             module_name_map,
             protected_module_head,
         )
         .map_or_else(|| path.clone(), |target| (**target).clone()),
-        Path::Pdot(..) => ctx.rebuild_dotted(path, |prefix| {
+        PathView::Pdot(..) => ctx.rebuild_dotted(path, |prefix| {
             substitute_shared_module_path(
                 ctx,
                 prefix,
@@ -6475,15 +6388,15 @@ fn substitute_module_path(
                 protected_module_head,
             )
         }),
-        Path::Papply(left, right) => Path::Papply(
-            substitute_shared_module_path(
+        PathView::Papply(left, right) => Path::papply(
+            substitute_module_path(
                 ctx,
                 left,
                 module_stamp_map,
                 module_name_map,
                 protected_module_head,
             ),
-            substitute_shared_module_path(
+            substitute_module_path(
                 ctx,
                 right,
                 module_stamp_map,
@@ -6521,18 +6434,18 @@ fn rewrite_type_expr_prefix(
                 }
                 ctx.set_desc(ty_ref, new_desc);
             }
-            for &arg in args {
+            for &arg in ctx.type_list(args).iter() {
                 rewrite_type_expr_prefix(arg, old_name, new_prefix, ctx, visited);
             }
         }
         TypeDesc::Tarrow { args, ret } => {
-            for arg in args {
+            for arg in ctx.type_args(args).iter() {
                 rewrite_type_expr_prefix(arg.typ, old_name, new_prefix, ctx, visited);
             }
             rewrite_type_expr_prefix(*ret, old_name, new_prefix, ctx, visited);
         }
         TypeDesc::Ttuple(types) => {
-            for &t in types {
+            for &t in ctx.type_list(types).iter() {
                 rewrite_type_expr_prefix(t, old_name, new_prefix, ctx, visited);
             }
         }
@@ -6544,7 +6457,7 @@ fn rewrite_type_expr_prefix(
         }
         TypeDesc::Tpoly { body, vars } => {
             rewrite_type_expr_prefix(*body, old_name, new_prefix, ctx, visited);
-            for &v in vars {
+            for &v in ctx.type_list(vars).iter() {
                 rewrite_type_expr_prefix(v, old_name, new_prefix, ctx, visited);
             }
         }
@@ -6556,15 +6469,15 @@ fn rewrite_type_expr_prefix(
             rewrite_type_expr_prefix(*rest, old_name, new_prefix, ctx, visited);
         }
         TypeDesc::Tvariant(row) => {
+            let row = &ctx.row_desc(row);
             if let Some((path, _)) = &row.row_name
                 && let Some(new_path) = rewrite_path_prefix(path, old_name, new_prefix, ctx)
             {
-                let mut new_desc = (*desc).clone();
-                if let TypeDesc::Tvariant(ref mut row) = new_desc
-                    && let Some((ref mut path, _)) = row.row_name
-                {
+                let mut new_row = (*row).clone();
+                if let Some((ref mut path, _)) = new_row.row_name {
                     *path = new_path;
                 }
+                let new_desc = TypeDesc::Tvariant(ctx.new_row_desc(new_row));
                 ctx.set_desc(ty_ref, new_desc);
             }
             if let Some((_, args)) = &row.row_name {
@@ -6595,7 +6508,7 @@ fn rewrite_type_expr_prefix(
                 }
                 ctx.set_desc(ty_ref, new_desc);
             }
-            for &arg in args {
+            for &arg in ctx.type_list(args).iter() {
                 rewrite_type_expr_prefix(arg, old_name, new_prefix, ctx, visited);
             }
         }
@@ -6611,11 +6524,11 @@ fn rewrite_path_prefix(
     new_prefix: &Arc<Path>,
     ctx: &TypeContext,
 ) -> Option<Path> {
-    match path {
-        Path::Pident(id) if id.name() == old_name => Some((**new_prefix).clone()),
-        Path::Pdot(inner, _, _) => {
-            let prefix = match inner.as_ref() {
-                Path::Pident(id) if id.name() == old_name => new_prefix.clone(),
+    match &path.view() {
+        PathView::Pident(id) if id.name() == old_name => Some((**new_prefix).clone()),
+        PathView::Pdot(inner, _, _) => {
+            let prefix = match &inner.view() {
+                PathView::Pident(id) if id.name() == old_name => new_prefix.clone(),
                 _ => Arc::new(rewrite_path_prefix(inner, old_name, new_prefix, ctx)?),
             };
             Some(ctx.copy_dotted_with_prefix(path, prefix))
@@ -6638,7 +6551,7 @@ fn rewrite_module_type_prefix_paths(
         }
         ModuleType::MtyAlias(_, path) => {
             // A replaced `Pident` target is the shared replacement block.
-            if matches!(path.as_ref(), Path::Pident(id) if id.name() == old_name) {
+            if matches!(path.view(), PathView::Pident(id) if id.name() == old_name) {
                 *path = new_prefix.clone();
             } else if let Some(rewritten) = rewrite_path_prefix(path, old_name, new_prefix, ctx) {
                 *path = Arc::new(rewritten);
@@ -7052,13 +6965,13 @@ impl PathPrefixes<'_> {
     fn matching_prefix(&self, path: &Path) -> Option<usize> {
         if self.index.is_none() {
             return self.pairs.iter().position(|(old, _)| {
-                let mut ancestor = path;
+                let mut ancestor = *path;
                 loop {
                     if ancestor.same(old) {
                         return true;
                     }
-                    match ancestor {
-                        Path::Pdot(inner, _, _) => ancestor = inner,
+                    match ancestor.view() {
+                        PathView::Pdot(inner, _, _) => ancestor = *inner,
                         _ => return false,
                     }
                 }
@@ -7067,15 +6980,15 @@ impl PathPrefixes<'_> {
         // Preserve first-pair order, not nearest-ancestor order.
         let index = self.index.as_ref().unwrap();
         let mut first: Option<usize> = None;
-        let mut ancestor = path;
+        let mut ancestor = *path;
         loop {
             if let Some(&position) =
                 index.get(&crate::types::context::SamePathKey::new(ancestor.clone()))
             {
                 first = Some(first.map_or(position, |found| found.min(position)));
             }
-            match ancestor {
-                Path::Pdot(inner, _, _) => ancestor = inner,
+            match ancestor.view() {
+                PathView::Pdot(inner, _, _) => ancestor = *inner,
                 _ => break,
             }
         }
@@ -7092,8 +7005,8 @@ fn rewrite_path_with_shared_prefix(
     if path.same(old_prefix) {
         return Some((**new_prefix).clone());
     }
-    match path {
-        Path::Pdot(inner, _, _) => {
+    match &path.view() {
+        PathView::Pdot(inner, _, _) => {
             let prefix = if inner.same(old_prefix) {
                 new_prefix.clone()
             } else {
@@ -7291,18 +7204,18 @@ fn rewrite_type_expr_by_path_prefix_in(
                 }
                 ctx.set_desc(ty_ref, new_desc);
             }
-            for &arg in args {
+            for &arg in ctx.type_list(args).iter() {
                 rewrite_type_expr_by_path_prefix_in(arg, old_prefix, new_prefix, ctx, visited);
             }
         }
         TypeDesc::Tarrow { args, ret } => {
-            for arg in args {
+            for arg in ctx.type_args(args).iter() {
                 rewrite_type_expr_by_path_prefix_in(arg.typ, old_prefix, new_prefix, ctx, visited);
             }
             rewrite_type_expr_by_path_prefix_in(*ret, old_prefix, new_prefix, ctx, visited);
         }
         TypeDesc::Ttuple(types) => {
-            for &t in types {
+            for &t in ctx.type_list(types).iter() {
                 rewrite_type_expr_by_path_prefix_in(t, old_prefix, new_prefix, ctx, visited);
             }
         }
@@ -7314,7 +7227,7 @@ fn rewrite_type_expr_by_path_prefix_in(
         }
         TypeDesc::Tpoly { body, vars } => {
             rewrite_type_expr_by_path_prefix_in(*body, old_prefix, new_prefix, ctx, visited);
-            for &v in vars {
+            for &v in ctx.type_list(vars).iter() {
                 rewrite_type_expr_by_path_prefix_in(v, old_prefix, new_prefix, ctx, visited);
             }
         }
@@ -7326,16 +7239,16 @@ fn rewrite_type_expr_by_path_prefix_in(
             rewrite_type_expr_by_path_prefix_in(*rest, old_prefix, new_prefix, ctx, visited);
         }
         TypeDesc::Tvariant(row) => {
+            let row = &ctx.row_desc(row);
             if let Some((path, _)) = &row.row_name
                 && let Some(new_path) =
                     rewrite_path_with_shared_prefix(path, old_prefix, new_prefix, ctx)
             {
-                let mut new_desc = (*desc).clone();
-                if let TypeDesc::Tvariant(ref mut row) = new_desc
-                    && let Some((ref mut path, _)) = row.row_name
-                {
+                let mut new_row = (*row).clone();
+                if let Some((ref mut path, _)) = new_row.row_name {
                     *path = new_path;
                 }
+                let new_desc = TypeDesc::Tvariant(ctx.new_row_desc(new_row));
                 ctx.set_desc(ty_ref, new_desc);
             }
             if let Some((_, args)) = &row.row_name {
@@ -7372,7 +7285,7 @@ fn rewrite_type_expr_by_path_prefix_in(
                 }
                 ctx.set_desc(ty_ref, new_desc);
             }
-            for &arg in args {
+            for &arg in ctx.type_list(args).iter() {
                 rewrite_type_expr_by_path_prefix_in(arg, old_prefix, new_prefix, ctx, visited);
             }
         }
@@ -7411,18 +7324,18 @@ fn rewrite_type_expr_by_path_prefixes(
                 }
                 ctx.set_desc(ty_ref, new_desc);
             }
-            for &arg in args {
+            for &arg in ctx.type_list(args).iter() {
                 rewrite_type_expr_by_path_prefixes(arg, prefixes, ctx, visited);
             }
         }
         TypeDesc::Tarrow { args, ret } => {
-            for arg in args {
+            for arg in ctx.type_args(args).iter() {
                 rewrite_type_expr_by_path_prefixes(arg.typ, prefixes, ctx, visited);
             }
             rewrite_type_expr_by_path_prefixes(*ret, prefixes, ctx, visited);
         }
         TypeDesc::Ttuple(types) => {
-            for &t in types {
+            for &t in ctx.type_list(types).iter() {
                 rewrite_type_expr_by_path_prefixes(t, prefixes, ctx, visited);
             }
         }
@@ -7431,7 +7344,7 @@ fn rewrite_type_expr_by_path_prefixes(
         }
         TypeDesc::Tpoly { body, vars } => {
             rewrite_type_expr_by_path_prefixes(*body, prefixes, ctx, visited);
-            for &v in vars {
+            for &v in ctx.type_list(vars).iter() {
                 rewrite_type_expr_by_path_prefixes(v, prefixes, ctx, visited);
             }
         }
@@ -7443,15 +7356,15 @@ fn rewrite_type_expr_by_path_prefixes(
             rewrite_type_expr_by_path_prefixes(*rest, prefixes, ctx, visited);
         }
         TypeDesc::Tvariant(row) => {
+            let row = &ctx.row_desc(row);
             if let Some((path, _)) = &row.row_name
                 && let Some(new_path) = rewrite_path_by_path_prefixes(path, prefixes, ctx)
             {
-                let mut new_desc = (*desc).clone();
-                if let TypeDesc::Tvariant(ref mut row) = new_desc
-                    && let Some((ref mut path, _)) = row.row_name
-                {
+                let mut new_row = (*row).clone();
+                if let Some((ref mut path, _)) = new_row.row_name {
                     *path = new_path;
                 }
+                let new_desc = TypeDesc::Tvariant(ctx.new_row_desc(new_row));
                 ctx.set_desc(ty_ref, new_desc);
             }
             if let Some((_, args)) = &row.row_name {
@@ -7482,7 +7395,7 @@ fn rewrite_type_expr_by_path_prefixes(
                 }
                 ctx.set_desc(ty_ref, new_desc);
             }
-            for &arg in args {
+            for &arg in ctx.type_list(args).iter() {
                 rewrite_type_expr_by_path_prefixes(arg, prefixes, ctx, visited);
             }
         }
@@ -7767,7 +7680,7 @@ fn collect_alias_rewrites<S: AliasRewriteSink>(
                 // as `Webapi__Fetch`.
                 // Only the first mapping for a name is kept; skip building
                 // the key and path for names already mapped.
-                if let Path::Pident(alias_id) = alias_path
+                if let PathView::Pident(alias_id) = alias_path.view()
                     && !rewrites.has_alias_rewrite(alias_id.name())
                 {
                     let qualified = Path::pdot(module_path.clone(), id.name_atom());
@@ -7887,13 +7800,7 @@ fn add_signature_to_env_with_options_inner(
         )
     };
     for item in sig_items.iter() {
-        let slot_path = |name: &str, p: i32| {
-            Path::Pdot(
-                std::sync::Arc::new(module_path.clone()),
-                name.to_string().into(),
-                p,
-            )
-        };
+        let slot_path = |name: &str, p: i32| Path::pdot_pos(module_path.clone(), name, p);
         match item {
             SignatureItem::SigValue(id, desc) => {
                 // Add value binding with qualified path
@@ -8098,10 +8005,10 @@ fn add_signature_to_env_with_options_inner(
                         module_name: &str,
                         access_path: &Path,
                     ) -> Path {
-                        match path {
-                            Path::Pident(alias_id) => {
+                        match path.view() {
+                            PathView::Pident(alias_id) => {
                                 if alias_id.is_persistent() {
-                                    return Path::Pident(alias_id);
+                                    return path;
                                 }
                                 let clean = alias_id.name();
                                 if clean == module_name {
@@ -8109,32 +8016,17 @@ fn add_signature_to_env_with_options_inner(
                                 } else if clean == module_path.last() {
                                     module_path.clone()
                                 } else {
-                                    Path::Pident(alias_id)
+                                    path
                                 }
                             }
-                            Path::Pdot(prefix, name, pos) => Path::Pdot(
-                                std::sync::Arc::new(go(
-                                    prefix.as_ref().clone(),
-                                    module_path,
-                                    module_name,
-                                    access_path,
-                                )),
-                                name,
-                                pos,
+                            PathView::Pdot(prefix, name, pos) => Path::pdot_pos(
+                                go(prefix.clone(), module_path, module_name, access_path),
+                                *name,
+                                *pos,
                             ),
-                            Path::Papply(functor, arg) => Path::Papply(
-                                std::sync::Arc::new(go(
-                                    functor.as_ref().clone(),
-                                    module_path,
-                                    module_name,
-                                    access_path,
-                                )),
-                                std::sync::Arc::new(go(
-                                    arg.as_ref().clone(),
-                                    module_path,
-                                    module_name,
-                                    access_path,
-                                )),
+                            PathView::Papply(functor, arg) => Path::papply(
+                                go(functor.clone(), module_path, module_name, access_path),
+                                go(arg.clone(), module_path, module_name, access_path),
                             ),
                         }
                     }
@@ -8159,8 +8051,8 @@ fn add_signature_to_env_with_options_inner(
                 };
                 if as_opened {
                     let direct_persistent_alias = matches!(
-                        md.md_type.ident_or_alias_path(),
-                        Some(Path::Pident(alias_id)) if alias_id.is_persistent()
+                        md.md_type.ident_or_alias_path().map(|p| p.view()),
+                        Some(PathView::Pident(alias_id)) if alias_id.is_persistent()
                     );
                     if direct_persistent_alias && precomputed_components.is_some() {
                         // OCaml compiler/ml/env.ml:1516-1518 scrapes a
@@ -8396,7 +8288,6 @@ mod resolution_view_tests {
                     entries: vec![],
                     variant_layouts: vec![],
                     mutabilities: vec![],
-                    identities: Default::default(),
                 },
                 locations: Default::default(),
             },
@@ -8465,7 +8356,6 @@ mod resolution_view_tests {
                     entries: vec![],
                     variant_layouts: vec![],
                     mutabilities: vec![],
-                    identities: Default::default(),
                 },
                 locations: Default::default(),
             },

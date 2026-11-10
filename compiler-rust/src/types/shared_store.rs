@@ -19,7 +19,11 @@
 //!
 //! References carry `type_expr::STORE_REF_TAG | SHARED_REF_TAG`.
 
-use super::type_expr::{TypeDesc, TypeExprRef};
+use super::type_expr::{
+    PackageLidsRef, RowDesc, RowDescRef, SHARED_REF_BITS, TypeArg, TypeArgList, TypeDesc,
+    TypeExprRef, TypeRefList,
+};
+use crate::parser::longident::Longident;
 use super::variant_runtime::{Layout, LayoutRef};
 use crate::cmi::persistent_env::PersStruct;
 use crate::cmi::portable_types::PortablePersStruct;
@@ -56,6 +60,12 @@ pub(crate) struct SharedTypeNode {
 pub(crate) struct SharedGraph {
     base: u32,
     nodes: Box<[SharedTypeNode]>,
+    /// Descriptor payloads, indexed after the nodes (see
+    /// [`SharedGraphSizes`]).
+    lists: Box<[TypeExprRef]>,
+    args: Box<[TypeArg]>,
+    rows: Box<[RowDesc]>,
+    lids: Box<[Vec<Longident>]>,
     layouts: Box<[Layout]>,
     /// Locations of the graph's declarations and type labels
     /// (`DeclLocKind::Shared` handles naming this graph by `base`).
@@ -103,7 +113,50 @@ pub(crate) fn page_location_identity(
     graph.locations.identity(index)
 }
 
-/// Resolve shared node `idx` through a page table.
+/// The graph owning shared index `idx`, and `idx`'s offset in it.
+#[inline]
+fn page_graph(pages: &[OnceLock<Arc<SharedGraph>>], raw: u32) -> (&SharedGraph, usize) {
+    let idx = raw & !SHARED_REF_BITS;
+    let graph = pages[(idx >> PAGE_BITS) as usize]
+        .get()
+        .expect("shared type index refers to an unpublished page");
+    (graph, (idx - graph.base) as usize)
+}
+
+/// The elements of a shared type list.
+#[inline]
+pub(crate) fn page_list(pages: &[OnceLock<Arc<SharedGraph>>], list: TypeRefList) -> &[TypeExprRef] {
+    let (graph, offset) = page_graph(pages, list.raw_start());
+    let start = offset - graph.nodes.len();
+    &graph.lists[start..start + list.len()]
+}
+
+/// The parameters of a shared arrow parameter list.
+#[inline]
+pub(crate) fn page_args(pages: &[OnceLock<Arc<SharedGraph>>], list: TypeArgList) -> &[TypeArg] {
+    let (graph, offset) = page_graph(pages, list.raw_start());
+    let start = offset - graph.nodes.len() - graph.lists.len();
+    &graph.args[start..start + list.len()]
+}
+
+/// A shared row.
+#[inline]
+pub(crate) fn page_row(pages: &[OnceLock<Arc<SharedGraph>>], row: RowDescRef) -> &RowDesc {
+    let (graph, offset) = page_graph(pages, row.raw());
+    &graph.rows[offset - graph.nodes.len() - graph.lists.len() - graph.args.len()]
+}
+
+/// The constraint names of a shared package type.
+#[inline]
+pub(crate) fn page_lids(
+    pages: &[OnceLock<Arc<SharedGraph>>],
+    lids: PackageLidsRef,
+) -> &[Longident] {
+    let (graph, offset) = page_graph(pages, lids.raw());
+    &graph.lids
+        [offset - graph.nodes.len() - graph.lists.len() - graph.args.len() - graph.rows.len()]
+}
+
 #[inline]
 pub(crate) fn page_node(pages: &[OnceLock<Arc<SharedGraph>>], idx: u32) -> &SharedTypeNode {
     let graph = pages[(idx >> PAGE_BITS) as usize]
@@ -112,13 +165,60 @@ pub(crate) fn page_node(pages: &[OnceLock<Arc<SharedGraph>>], idx: u32) -> &Shar
     &graph.nodes[(idx - graph.base) as usize]
 }
 
-/// Node descriptors with levels, variant layouts and locations of a graph
-/// being published.
-pub(crate) type SharedGraphParts = (
-    Vec<(TypeDesc, i32)>,
-    Vec<Layout>,
-    super::decl_loc::DeclLocTable,
-);
+/// Sizes of a graph to publish. The graph's shared indices are its nodes,
+/// then its type-list elements, arrow parameters, rows and package
+/// constraint lists, in that order; variant layouts index separately from
+/// the same base.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct SharedGraphSizes {
+    pub(crate) nodes: usize,
+    pub(crate) list_items: usize,
+    pub(crate) arg_items: usize,
+    pub(crate) rows: usize,
+    pub(crate) lids: usize,
+    pub(crate) layouts: usize,
+}
+
+impl SharedGraphSizes {
+    /// Offset of the first type-list element from the graph's base.
+    pub(crate) fn lists_start(&self) -> usize {
+        self.nodes
+    }
+
+    pub(crate) fn args_start(&self) -> usize {
+        self.lists_start() + self.list_items
+    }
+
+    pub(crate) fn rows_start(&self) -> usize {
+        self.args_start() + self.arg_items
+    }
+
+    pub(crate) fn lids_start(&self) -> usize {
+        self.rows_start() + self.rows
+    }
+
+    fn indices(&self) -> usize {
+        self.lids_start() + self.lids
+    }
+}
+
+/// Descriptor payloads of a graph being published (see [`SharedGraphSizes`]).
+#[derive(Default)]
+pub(crate) struct SharedGraphPayloads {
+    pub(crate) lists: Vec<TypeExprRef>,
+    pub(crate) args: Vec<TypeArg>,
+    pub(crate) rows: Vec<RowDesc>,
+    pub(crate) lids: Vec<Vec<Longident>>,
+}
+
+/// Node descriptors with levels, payloads, variant layouts and locations of
+/// a graph being published.
+pub(crate) struct SharedGraphParts {
+    pub(crate) nodes: Vec<(TypeDesc, i32)>,
+    pub(crate) payloads: SharedGraphPayloads,
+    pub(crate) layouts: Vec<Layout>,
+    pub(crate) locations: super::decl_loc::DeclLocTable,
+}
 
 pub(crate) struct SharedTypePool {
     generation: u64,
@@ -127,92 +227,20 @@ pub(crate) struct SharedTypePool {
     pers: Mutex<HashMap<usize, Arc<PersSlot>>>,
     longident_names: RwLock<HashMap<u32, String>>,
     next_longident_idx: AtomicU32,
-    /// The next origin of an identifier block of a published graph.
-    next_ident_origin: AtomicU32,
-    path_provenance: RwLock<super::path_provenance::PathProvenance>,
 }
 
 impl SharedTypePool {
-    pub(crate) fn dotted_with_name(
-        &self,
-        prefix: Arc<super::Path>,
-        text: crate::name::Name,
-        name: super::path_provenance::NameAllocation,
-        pos: i32,
-    ) -> super::Path {
-        self.path_provenance
-            .write()
-            .unwrap()
-            .dotted(prefix, text, name, pos)
-    }
 
-    pub(crate) fn dotted_parts(
-        &self,
-        path: &super::Path,
-    ) -> Option<(Arc<super::Path>, super::path_provenance::NameAllocation)> {
-        if path
-            .head_opt()
-            .is_some_and(|id| !crate::ident::IdentOrigin::SHARED.contains(&id.origin().get()))
-        {
-            return None;
-        }
-        let table = self.path_provenance.read().unwrap();
-        table
-            .parts(path)
-            .map(|(prefix, name)| (prefix.clone(), name))
-    }
 
-    pub(crate) fn dotted_allocation(
-        &self,
-        path: &super::Path,
-    ) -> Option<super::path_provenance::DottedAllocation> {
-        // Published paths contain shared-origin identifiers. Ordinary local
-        // paths need no read lock on the pool's cold provenance table.
-        if path
-            .head_opt()
-            .is_some_and(|id| !crate::ident::IdentOrigin::SHARED.contains(&id.origin().get()))
-        {
-            return None;
-        }
-        self.path_provenance.read().unwrap().get(path).cloned()
-    }
 
-    /// Cold allocation evidence, published before a signature becomes visible.
-    pub(crate) fn record_ident_name(
-        &self,
-        id: &crate::ident::Ident,
-        allocation: super::path_provenance::NameAllocation,
-    ) {
-        self.path_provenance
-            .write()
-            .unwrap()
-            .record_name(id, allocation);
-    }
 
-    pub(crate) fn ident_name_allocation(
-        &self,
-        id: &crate::ident::Ident,
-    ) -> Option<super::path_provenance::NameAllocation> {
-        if !crate::ident::IdentOrigin::SHARED.contains(&id.origin().get()) {
-            return None;
-        }
-        self.path_provenance.read().unwrap().name(id)
-    }
 
-    /// An identifier origin for a graph being published.
-    pub(crate) fn fresh_ident_origin(&self) -> crate::ident::IdentOrigin {
-        use crate::ident::IdentOrigin;
-        let span = IdentOrigin::SHARED.end - IdentOrigin::SHARED.start;
-        // Stop counting at the end of the range, so the counter cannot wrap
-        // however often an exhausted pool is asked.
-        let n = self
-            .next_ident_origin
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
-                (n < span).then_some(n + 1)
-            })
-            .unwrap_or(span);
-        IdentOrigin::nth_in(IdentOrigin::SHARED, n)
-    }
+
+
+
+
+
+
 
     fn new(generation: u64) -> Self {
         let pages = (0..MAX_SHARED_INDEX / PAGE_SIZE)
@@ -225,8 +253,6 @@ impl SharedTypePool {
             pers: Mutex::new(HashMap::new()),
             longident_names: RwLock::new(HashMap::new()),
             next_longident_idx: AtomicU32::new(SHARED_LONGIDENT_IDX_BASE),
-            next_ident_origin: AtomicU32::new(0),
-            path_provenance: Default::default(),
         }
     }
 
@@ -265,20 +291,43 @@ impl SharedTypePool {
     }
 
     /// Build and publish one graph. `build` receives the base index and
-    /// returns the node descriptors (with levels) and layouts, which must
-    /// match the reserved sizes, and the graph's location table.
+    /// returns the graph's parts, which must match `sizes`.
     pub(crate) fn publish(
         &self,
-        nodes: usize,
-        layouts: usize,
+        sizes: SharedGraphSizes,
         build: impl FnOnce(u32) -> SharedGraphParts,
     ) -> Option<u32> {
-        let (base, end) = self.reserve(nodes, layouts)?;
-        let (descs, built_layouts, locations) = build(base);
-        assert_eq!(descs.len(), nodes, "shared graph node count changed");
+        let (base, end) = self.reserve(sizes.indices(), sizes.layouts)?;
+        let SharedGraphParts {
+            nodes: descs,
+            payloads,
+            layouts: built_layouts,
+            locations,
+        } = build(base);
+        assert_eq!(descs.len(), sizes.nodes, "shared graph node count changed");
+        assert_eq!(
+            payloads.lists.len(),
+            sizes.list_items,
+            "shared graph list size changed"
+        );
+        assert_eq!(
+            payloads.args.len(),
+            sizes.arg_items,
+            "shared graph parameter count changed"
+        );
+        assert_eq!(
+            payloads.rows.len(),
+            sizes.rows,
+            "shared graph row count changed"
+        );
+        assert_eq!(
+            payloads.lids.len(),
+            sizes.lids,
+            "shared graph package count changed"
+        );
         assert_eq!(
             built_layouts.len(),
-            layouts,
+            sizes.layouts,
             "shared graph layout count changed"
         );
         let graph = Arc::new(SharedGraph {
@@ -292,6 +341,10 @@ impl SharedTypePool {
                     id: SHARED_TYPE_ID_BASE + (base as i32) + offset as i32,
                 })
                 .collect(),
+            lists: payloads.lists.into_boxed_slice(),
+            args: payloads.args.into_boxed_slice(),
+            rows: payloads.rows.into_boxed_slice(),
+            lids: payloads.lids.into_boxed_slice(),
             layouts: built_layouts.into_boxed_slice(),
             locations,
         });
@@ -372,54 +425,49 @@ pub(crate) fn pool_for(generation: u64) -> Arc<SharedTypePool> {
 mod tests {
     use super::*;
 
-    /// The pool's last origin is handed out once; after that every request
-    /// fails and the counter stays at the end of the range.
-    #[test]
-    fn the_pool_runs_out_of_origins_without_wrapping() {
-        use crate::ident::IdentOrigin;
-        let pool = SharedTypePool::new(u64::MAX);
-        let first = pool.fresh_ident_origin();
-        assert_eq!(first.get(), IdentOrigin::SHARED.start);
-        let span = IdentOrigin::SHARED.end - IdentOrigin::SHARED.start;
-        pool.next_ident_origin.store(span - 1, Ordering::Relaxed);
-        assert_eq!(pool.fresh_ident_origin().get(), IdentOrigin::SHARED.end - 1);
-        for _ in 0..2 {
-            let again = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                pool.fresh_ident_origin()
-            }));
-            assert!(again.is_err());
-            assert_eq!(pool.next_ident_origin.load(Ordering::Relaxed), span);
-        }
-    }
+
 
     #[test]
     fn published_graphs_are_readable_from_other_threads() {
         let pool = Arc::new(SharedTypePool::new(u64::MAX));
         let base = pool
-            .publish(3, 0, |_| {
-                (
-                    vec![
+            .publish(
+                SharedGraphSizes {
+                    nodes: 3,
+                    ..Default::default()
+                },
+                |_| SharedGraphParts {
+                    nodes: vec![
                         (TypeDesc::Tnil, 7),
                         (
                             TypeDesc::Tvar(
                                 Some("a".into()),
-                                crate::types::type_expr::VarDescBlock::OWN,
                             ),
                             8,
                         ),
                         (TypeDesc::Tnil, 9),
                     ],
-                    Vec::new(),
-                    [crate::location::Location::in_file(StrIdx::from_raw(4))]
+                    payloads: Default::default(),
+                    layouts: Vec::new(),
+                    locations: [crate::location::Location::in_file(StrIdx::from_raw(4))]
                         .into_iter()
                         .collect(),
-                )
-            })
+                },
+            )
             .unwrap();
         let second = pool
-            .publish(1, 0, |_| {
-                (vec![(TypeDesc::Tnil, 1)], Vec::new(), Default::default())
-            })
+            .publish(
+                SharedGraphSizes {
+                    nodes: 1,
+                    ..Default::default()
+                },
+                |_| SharedGraphParts {
+                    nodes: vec![(TypeDesc::Tnil, 1)],
+                    payloads: Default::default(),
+                    layouts: Vec::new(),
+                    locations: Default::default(),
+                },
+            )
             .unwrap();
         assert_eq!(second % PAGE_SIZE, 0);
         assert_ne!(base, second);
@@ -428,7 +476,7 @@ mod tests {
             assert_eq!(page_node(&reader.pages(), base + 1).level, 8);
             assert!(matches!(
                 page_node(&reader.pages(), base + 1).desc,
-                TypeDesc::Tvar(Some(_), ..)
+                TypeDesc::Tvar(Some(_))
             ));
             assert!(reader.contains(base + 2));
             assert_eq!(

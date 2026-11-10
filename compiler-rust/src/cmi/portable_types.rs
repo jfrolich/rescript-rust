@@ -52,50 +52,6 @@ pub struct PortableTypeGraph {
     /// Object field mutability cells (subst.ml `for_saving` gives the saved
     /// graph its own cells; fields sharing a cell share an index here).
     pub mutabilities: Vec<crate::types::asttypes::MutableFlag>,
-    /// The physical sharing of the interface OCaml would save for these
-    /// types. Cold, and outside every interface digest.
-    pub identities: PortableIdentities,
-}
-
-/// The physical sharing of a saved interface's types, read only by the
-/// removed `Includemod.is_big`.
-///
-/// OCaml saves `Subst.signature` with `for_saving` (subst.ml:132-232) and
-/// the importer unmarshals it, so the importer's blocks are shared exactly as
-/// the saved copy shares them, and none is one of its own: a `Pident` path,
-/// its `Ident.t`, an arrow's `lbl` and a variable's descriptor are those of
-/// the source graph (kept by `type_path`, `copy_type_desc` and `norm`); a
-/// `Pdot` is rebuilt for each copied node; every `Tvar None` is the one
-/// static `tvar_none`. Each kind of block is numbered within the unit.
-#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
-pub struct PortableIdentities {
-    /// For each entry: the path block of a `Tconstr`, the descriptor block of
-    /// a `Tvar` or `Tunivar`, else [`PortableIdentities::NONE`].
-    blocks: Vec<u32>,
-    /// The `Ident.t` blocks of the paths of `Tconstr`, `Tpackage` and row
-    /// name entries, in entry order and, within a path, prefix first.
-    path_idents: Vec<u32>,
-    /// Declaration and module-path identifiers in signature traversal order.
-    signature_idents: Vec<u32>,
-    /// Name-string allocation class, indexed by identifier block number.
-    ident_names: Vec<u32>,
-    /// Path allocations in postorder, graph paths then signature paths.
-    paths: Vec<PortablePathAllocation>,
-    /// The `lbl` blocks of labelled arrow arguments, in entry order.
-    labels: Vec<u32>,
-}
-
-/// `Subst` rebuilds dotted/application blocks, but retains Pident prefixes
-/// and suffix strings (compiler/ml/subst.ml:69-100). Unknown evidence stays
-/// unknown; interned text is never an allocation key.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-struct PortablePathAllocation {
-    block: u32,
-    name: u32,
-}
-
-impl PortableIdentities {
-    const NONE: u32 = u32::MAX;
 }
 
 /// One type expression in portable form.
@@ -108,7 +64,7 @@ pub struct PortableTypeEntry {
 /// TypeDesc with indices into `PortableTypeGraph.entries` instead of arena refs.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum PortableTypeDesc {
-    Tvar(Option<String>),
+    Tvar(Option<crate::name::Name>),
     Tarrow {
         args: Vec<(ArgLabel, usize)>,
         ret: usize,
@@ -122,7 +78,7 @@ pub enum PortableTypeDesc {
         fields: usize,
     },
     Tfield {
-        name: String,
+        name: crate::name::Name,
         /// Index into `PortableTypeGraph.mutabilities`.
         mutability: usize,
         typ: usize,
@@ -132,7 +88,7 @@ pub enum PortableTypeDesc {
     Tlink(usize),
     Tsubst(usize),
     Tvariant(PortableRowDesc),
-    Tunivar(Option<String>),
+    Tunivar(Option<crate::name::Name>),
     Tpoly {
         body: usize,
         vars: Vec<usize>,
@@ -333,8 +289,8 @@ pub fn compute_type_graph_fingerprint(entries: &HashGraph<'_>, sig: &Signature) 
 /// Hash a Path using only names, not stamps. This makes the fingerprint stable
 /// across recompilations where dependency stamps may shift.
 fn hash_path_by_name(hasher: &mut impl Hasher, path: &Path) {
-    use crate::types::path::Path as P;
-    match path {
+    use crate::types::path::PathView as P;
+    match path.view() {
         P::Pident(ident) => {
             0u8.hash(hasher);
             ident.name().hash(hasher);
@@ -786,721 +742,6 @@ pub fn serialize_pers_struct(
     )
 }
 
-/// Visit declaration identifiers and path identifiers outside the type graph.
-// Keep the saving traversal read-only: observing identities must not clone
-// shared prefix allocations or change declaration sharing.
-fn visit_signature_identifiers(sig: &[SignatureItem], f: &mut dyn FnMut(&crate::ident::Ident)) {
-    fn path(p: &Path, f: &mut dyn FnMut(&crate::ident::Ident)) {
-        match p {
-            Path::Pident(id) => f(id),
-            Path::Pdot(prefix, ..) => path(prefix, f),
-            Path::Papply(functor, argument) => {
-                path(functor, f);
-                path(argument, f);
-            }
-        }
-    }
-    fn opt_path(p: &Option<Path>, f: &mut dyn FnMut(&crate::ident::Ident)) {
-        if let Some(p) = p {
-            path(p, f);
-        }
-    }
-    fn labels<'a>(
-        lds: impl IntoIterator<Item = &'a LabelDeclaration>,
-        f: &mut dyn FnMut(&crate::ident::Ident),
-    ) {
-        for ld in lds {
-            f(&ld.ld_id);
-        }
-    }
-    fn args(args: &ConstructorArguments, f: &mut dyn FnMut(&crate::ident::Ident)) {
-        if let ConstructorArguments::CstrRecord(lds) = args {
-            labels(lds.iter(), f);
-        }
-    }
-    fn module_type(mty: &ModuleType, f: &mut dyn FnMut(&crate::ident::Ident)) {
-        match mty {
-            ModuleType::MtyIdent(_) | ModuleType::MtyAlias(..) => {
-                path(mty.ident_or_alias_path().unwrap(), f)
-            }
-            ModuleType::MtySignature(sig) => {
-                visit_signature_identifiers(sig, f);
-            }
-            ModuleType::MtyFunctor {
-                param,
-                param_type,
-                result,
-            } => {
-                f(param);
-                if let Some(param_type) = param_type {
-                    module_type(param_type, f);
-                }
-                module_type(result, f);
-            }
-        }
-    }
-    for item in sig {
-        match item {
-            SignatureItem::SigValue(i, vd) => {
-                f(i);
-                opt_path(&vd.val_path, f);
-            }
-            SignatureItem::SigType(i, td, _) => {
-                f(i);
-                let td = td.as_ref();
-                opt_path(&td.type_path, f);
-                match &td.type_kind {
-                    TypeKind::TypeRecord(lds, _) => labels(lds.iter(), f),
-                    TypeKind::TypeVariant(cds, _) => {
-                        for cd in cds.iter() {
-                            f(&cd.cd_id);
-                            args(&cd.cd_args, f);
-                        }
-                    }
-                    TypeKind::TypeAbstract | TypeKind::TypeOpen => {}
-                }
-                for inlined in &td.type_inlined_types {
-                    let crate::types::decl::TypeInlinedType::Record { labels: lds, .. } = inlined;
-                    labels(lds.iter(), f);
-                }
-            }
-            SignatureItem::SigTypext(i, ext, _) => {
-                f(i);
-                path(&ext.ext_type_path, f);
-                args(&ext.ext_args, f);
-            }
-            SignatureItem::SigModule(i, md, _) => {
-                f(i);
-                opt_path(&md.md_path, f);
-                module_type(&md.md_type, f);
-            }
-            SignatureItem::SigModtype(i, mtd) => {
-                f(i);
-                if let Some(mty) = &mtd.mtd_type {
-                    module_type(mty, f);
-                }
-            }
-            SignatureItem::SigClass | SignatureItem::SigClassType => {}
-        }
-    }
-}
-
-fn map_signature_identifiers(
-    sig: &mut [SignatureItem],
-    f: &mut dyn FnMut(&mut crate::ident::Ident),
-) {
-    type Prefixes = AHashMap<usize, (Arc<Path>, Arc<Path>)>;
-    fn prefix(
-        p: &mut Arc<Path>,
-        f: &mut dyn FnMut(&mut crate::ident::Ident),
-        prefixes: &mut Prefixes,
-    ) {
-        let key = Arc::as_ptr(p) as usize;
-        let source = p.clone();
-        let mut mapped = (**p).clone();
-        path(&mut mapped, f, prefixes);
-        let (_, target) = prefixes
-            .entry(key)
-            .or_insert_with(|| (source, Arc::new(mapped)));
-        *p = target.clone();
-    }
-    fn path(p: &mut Path, f: &mut dyn FnMut(&mut crate::ident::Ident), prefixes: &mut Prefixes) {
-        match p {
-            Path::Pident(id) => f(id),
-            Path::Pdot(p, ..) => prefix(p, f, prefixes),
-            Path::Papply(functor, argument) => {
-                prefix(functor, f, prefixes);
-                prefix(argument, f, prefixes);
-            }
-        }
-    }
-    fn opt_path(
-        p: &mut Option<Path>,
-        f: &mut dyn FnMut(&mut crate::ident::Ident),
-        prefixes: &mut Prefixes,
-    ) {
-        if let Some(p) = p {
-            path(p, f, prefixes);
-        }
-    }
-    fn labels<'a>(
-        lds: impl IntoIterator<Item = &'a mut LabelDeclaration>,
-        f: &mut dyn FnMut(&mut crate::ident::Ident),
-    ) {
-        for ld in lds {
-            f(&mut ld.ld_id);
-        }
-    }
-    fn args(args: &mut ConstructorArguments, f: &mut dyn FnMut(&mut crate::ident::Ident)) {
-        if let ConstructorArguments::CstrRecord(lds) = args {
-            labels(lds.iter_mut(), f);
-        }
-    }
-    fn module_type(
-        mty: &mut ModuleType,
-        f: &mut dyn FnMut(&mut crate::ident::Ident),
-        prefixes: &mut Prefixes,
-    ) {
-        match mty {
-            ModuleType::MtyIdent(p) => path(p, f, prefixes),
-            // The target is a shared block, remapped once per source block.
-            ModuleType::MtyAlias(_, p) => prefix(p, f, prefixes),
-            ModuleType::MtySignature(sig) => {
-                walk(&mut Arc::make_mut(sig)[..], f, prefixes);
-            }
-            ModuleType::MtyFunctor {
-                param,
-                param_type,
-                result,
-            } => {
-                f(param);
-                if let Some(param_type) = param_type {
-                    module_type(param_type, f, prefixes);
-                }
-                module_type(result, f, prefixes);
-            }
-        }
-    }
-    fn walk(
-        sig: &mut [SignatureItem],
-        f: &mut dyn FnMut(&mut crate::ident::Ident),
-        prefixes: &mut Prefixes,
-    ) {
-        for item in sig {
-            match item {
-                SignatureItem::SigValue(i, vd) => {
-                    f(i);
-                    opt_path(&mut vd.val_path, f, prefixes);
-                }
-                SignatureItem::SigType(i, td, _) => {
-                    f(i);
-                    let td = Arc::make_mut(td);
-                    opt_path(&mut td.type_path, f, prefixes);
-                    match &mut td.type_kind {
-                        TypeKind::TypeRecord(lds, _) => labels(lds.iter_mut(), f),
-                        TypeKind::TypeVariant(cds, _) => {
-                            for cd in cds.iter_mut() {
-                                f(&mut cd.cd_id);
-                                args(&mut cd.cd_args, f);
-                            }
-                        }
-                        TypeKind::TypeAbstract | TypeKind::TypeOpen => {}
-                    }
-                    for inlined in &mut td.type_inlined_types {
-                        let crate::types::decl::TypeInlinedType::Record { labels: lds, .. } =
-                            inlined;
-                        labels(lds.iter_mut(), f);
-                    }
-                }
-                SignatureItem::SigTypext(i, ext, _) => {
-                    f(i);
-                    path(&mut ext.ext_type_path, f, prefixes);
-                    args(&mut ext.ext_args, f);
-                }
-                SignatureItem::SigModule(i, md, _) => {
-                    f(i);
-                    opt_path(&mut md.md_path, f, prefixes);
-                    module_type(&mut md.md_type, f, prefixes);
-                }
-                SignatureItem::SigModtype(i, mtd) => {
-                    f(i);
-                    if let Some(mty) = &mut mtd.mtd_type {
-                        module_type(mty, f, prefixes);
-                    }
-                }
-                SignatureItem::SigClass | SignatureItem::SigClassType => {}
-            }
-        }
-    }
-    walk(sig, f, &mut Prefixes::new());
-}
-/// Visit only path roots outside the type graph. The callback owns recursive
-/// path traversal; declaration identifiers are handled by the identifier pass.
-fn map_signature_paths(sig: &mut [SignatureItem], f: &mut dyn FnMut(&Path) -> Path) {
-    fn optional(path: &mut Option<Path>, f: &mut dyn FnMut(&Path) -> Path) {
-        if let Some(p) = path {
-            *p = f(p);
-        }
-    }
-    fn module_type(mty: &mut ModuleType, f: &mut dyn FnMut(&Path) -> Path) {
-        match mty {
-            ModuleType::MtyIdent(p) => *p = f(p),
-            ModuleType::MtyAlias(_, p) => {
-                let mapped = f(p);
-                // Saving keeps an unreplaced `Pident` target block and
-                // rebuilds a dotted one (subst.ml:69-75); the identifier pass
-                // already remapped the `Pident` block per source block.
-                if !matches!(p.as_ref(), Path::Pident(_)) {
-                    *p = Arc::new(mapped);
-                }
-            }
-            ModuleType::MtySignature(sig) => map_signature_paths(&mut Arc::make_mut(sig)[..], f),
-            ModuleType::MtyFunctor {
-                param_type, result, ..
-            } => {
-                if let Some(param_type) = param_type {
-                    module_type(param_type, f);
-                }
-                module_type(result, f);
-            }
-        }
-    }
-    for item in sig {
-        match item {
-            SignatureItem::SigValue(_, vd) => optional(&mut vd.val_path, f),
-            SignatureItem::SigType(_, td, _) => optional(&mut Arc::make_mut(td).type_path, f),
-            SignatureItem::SigTypext(_, ext, _) => ext.ext_type_path = f(&ext.ext_type_path),
-            SignatureItem::SigModule(_, md, _) => {
-                optional(&mut md.md_path, f);
-                module_type(&mut md.md_type, f);
-            }
-            SignatureItem::SigModtype(_, mtd) => {
-                if let Some(mty) = &mut mtd.mtd_type {
-                    module_type(mty, f);
-                }
-            }
-            SignatureItem::SigClass | SignatureItem::SigClassType => {}
-        }
-    }
-}
-
-/// The blocks of the saved copy of `nodes` (see [`PortableIdentities`]),
-/// numbered in entry order from the identities of the source graph.
-#[cfg(test)]
-fn saved_identities(ctx: &TypeContext, nodes: &[TypeExprRef]) -> PortableIdentities {
-    saved_signature_identities(ctx, nodes, &mut Signature::default())
-}
-
-fn saved_signature_identities(
-    ctx: &TypeContext,
-    nodes: &[TypeExprRef],
-    sig: &Signature,
-) -> PortableIdentities {
-    use crate::types::type_expr::{PathBlockOwner, VarDescBlock};
-
-    #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-    enum Block {
-        Node(TypeExprRef),
-        Predef(i32),
-        Token(u32),
-        TvarNone,
-        TunivarNone,
-    }
-
-    struct Numbering<K> {
-        numbers: AHashMap<K, u32>,
-    }
-
-    impl<K> Default for Numbering<K> {
-        fn default() -> Self {
-            Numbering {
-                numbers: AHashMap::new(),
-            }
-        }
-    }
-
-    impl<K: std::hash::Hash + Eq> Numbering<K> {
-        fn number(&mut self, key: K) -> u32 {
-            let next = self.numbers.len() as u32;
-            *self.numbers.entry(key).or_insert(next)
-        }
-
-        fn fresh(&mut self, key: K) -> u32 {
-            let next = self.numbers.len() as u32;
-            self.numbers.insert(key, next);
-            next
-        }
-    }
-
-    fn number_ident(
-        id: &crate::ident::Ident,
-        ctx: &TypeContext,
-        idents: &mut Numbering<(i32, usize, u32)>,
-        names: &mut Numbering<crate::types::path_provenance::NameAllocation>,
-        out: &mut Vec<u32>,
-    ) -> u32 {
-        let number = idents.number((id.stamp(), id.name().as_ptr() as usize, id.origin().get()));
-        if number as usize == out.len() {
-            out.push(names.number(ctx.ident_name_allocation(id)));
-        }
-        number
-    }
-
-    fn push_idents(
-        path: &Path,
-        ctx: &TypeContext,
-        idents: &mut Numbering<(i32, usize, u32)>,
-        names: &mut Numbering<crate::types::path_provenance::NameAllocation>,
-        ids: &mut PortableIdentities,
-    ) {
-        match path {
-            Path::Pident(id) => {
-                let number = number_ident(id, ctx, idents, names, &mut ids.ident_names);
-                ids.path_idents.push(number);
-            }
-            Path::Pdot(prefix, _, _) => push_idents(prefix, ctx, idents, names, ids),
-            Path::Papply(functor, argument) => {
-                push_idents(functor, ctx, idents, names, ids);
-                push_idents(argument, ctx, idents, names, ids);
-            }
-        }
-    }
-
-    fn save_path(
-        path: &Path,
-        owner: Option<usize>,
-        ctx: &TypeContext,
-        prefixes: &mut Numbering<usize>,
-        names: &mut Numbering<crate::types::path_provenance::NameAllocation>,
-        out: &mut Vec<PortablePathAllocation>,
-    ) {
-        let mut evidence = PortablePathAllocation {
-            block: PortableIdentities::NONE,
-            name: PortableIdentities::NONE,
-        };
-        match path {
-            Path::Pident(_) => {
-                if let Some(owner) = owner {
-                    evidence.block = prefixes.number(owner);
-                }
-            }
-            Path::Pdot(prefix, _, _) => {
-                let allocation = ctx.dotted_allocation(path);
-                let prefix = allocation.as_ref().map_or(prefix, |a| &a.prefix);
-                save_path(
-                    prefix,
-                    Some(Arc::as_ptr(prefix) as usize),
-                    ctx,
-                    prefixes,
-                    names,
-                    out,
-                );
-                if let Some(allocation) = allocation {
-                    evidence.name = names.number(allocation.name);
-                }
-            }
-            Path::Papply(functor, argument) => {
-                for prefix in [functor, argument] {
-                    save_path(
-                        prefix,
-                        Some(Arc::as_ptr(prefix) as usize),
-                        ctx,
-                        prefixes,
-                        names,
-                        out,
-                    );
-                }
-            }
-        }
-        out.push(evidence);
-    }
-
-    let mut ids = PortableIdentities::default();
-    let mut paths = Numbering::<Block>::default();
-    let mut vars = Numbering::<Block>::default();
-    let mut idents = Numbering::default();
-    let mut names = Numbering::default();
-    let mut prefixes = Numbering::default();
-    let mut labels = Numbering::<usize>::default();
-    for &node in nodes {
-        let desc = ctx.get_desc(node);
-        let block = match &*desc {
-            TypeDesc::Tconstr {
-                path, path_block, ..
-            } => {
-                push_idents(path, ctx, &mut idents, &mut names, &mut ids);
-                save_path(path, None, ctx, &mut prefixes, &mut names, &mut ids.paths);
-                // `type_path` keeps a `Pident` (subst.ml:87-94).
-                match (path, path_block.owner()) {
-                    (Path::Pident(_), PathBlockOwner::Own) => paths.number(Block::Node(node)),
-                    (Path::Pident(_), PathBlockOwner::Of(owner)) => {
-                        paths.number(Block::Node(owner))
-                    }
-                    (Path::Pident(id), PathBlockOwner::Predef) => {
-                        paths.number(Block::Predef(id.stamp()))
-                    }
-                    (Path::Pident(_), PathBlockOwner::Token(token)) => {
-                        paths.number(Block::Token(token))
-                    }
-                    _ => paths.fresh(Block::Node(node)),
-                }
-            }
-            // `norm` (subst.ml:121-126) shares every `Tvar None`; another
-            // descriptor is the source's.
-            TypeDesc::Tvar(None, _) => vars.number(Block::TvarNone),
-            TypeDesc::Tunivar(None, _) => vars.number(Block::TunivarNone),
-            TypeDesc::Tvar(_, block) | TypeDesc::Tunivar(_, block) => match block {
-                VarDescBlock::Of(owner) => vars.number(Block::Node(*owner)),
-                VarDescBlock::Own | VarDescBlock::Static => vars.number(Block::Node(node)),
-            },
-            TypeDesc::Tarrow { args, .. } => {
-                for arg in args.iter() {
-                    if let Some(label) = arg.label_block() {
-                        ids.labels.push(labels.number(label));
-                    }
-                }
-                PortableIdentities::NONE
-            }
-            TypeDesc::Tpackage { path, .. } => {
-                push_idents(path, ctx, &mut idents, &mut names, &mut ids);
-                save_path(path, None, ctx, &mut prefixes, &mut names, &mut ids.paths);
-                PortableIdentities::NONE
-            }
-            TypeDesc::Tvariant(row) => {
-                if let Some((path, _)) = &row.row_name {
-                    push_idents(path, ctx, &mut idents, &mut names, &mut ids);
-                    save_path(path, None, ctx, &mut prefixes, &mut names, &mut ids.paths);
-                }
-                PortableIdentities::NONE
-            }
-            _ => PortableIdentities::NONE,
-        };
-        ids.blocks.push(block);
-    }
-    visit_signature_identifiers(sig, &mut |id| {
-        let number = number_ident(id, ctx, &mut idents, &mut names, &mut ids.ident_names);
-        ids.signature_idents.push(number);
-    });
-    // Cloning the signature leaves all source path carriers retained. The
-    // callback observes them without rebuilding any prefix allocations.
-    map_signature_paths(&mut sig.clone(), &mut |path| {
-        save_path(path, None, ctx, &mut prefixes, &mut names, &mut ids.paths);
-        path.clone()
-    });
-    ids
-}
-
-/// A table indexed by the dense numbers [`PortableIdentities`] assigns.
-struct Numbered<T>(Vec<Option<T>>);
-
-impl<T> Default for Numbered<T> {
-    fn default() -> Self {
-        Numbered(Vec::new())
-    }
-}
-
-impl<T> Numbered<T> {
-    fn get(&self, number: u32) -> Option<&T> {
-        self.0.get(number as usize)?.as_ref()
-    }
-
-    fn insert(&mut self, number: u32, value: T) {
-        let index = number as usize;
-        if index >= self.0.len() {
-            self.0.resize_with(index + 1, || None);
-        }
-        self.0[index] = Some(value);
-    }
-}
-
-/// The importer's side of [`PortableIdentities`]: each saved block becomes
-/// the block of the first node imported with it, each saved identifier a
-/// fresh origin, each saved label one allocation.
-struct ImportedIdentities<'g> {
-    ids: &'g PortableIdentities,
-    name_scope: u64,
-    idents: usize,
-    paths: usize,
-    prefixes: Numbered<Arc<Path>>,
-    labels: usize,
-    path_blocks: Numbered<TypeExprRef>,
-    var_descs: Numbered<TypeExprRef>,
-    origins: Numbered<crate::ident::IdentOrigin>,
-    label_args: Numbered<TypeArg>,
-}
-
-impl<'g> ImportedIdentities<'g> {
-    fn new(ids: &'g PortableIdentities) -> Self {
-        ImportedIdentities {
-            ids,
-            name_scope: if ids.ident_names.is_empty() {
-                0
-            } else {
-                (crate::types::decl_loc::next_table_owner() as u64) << 32
-            },
-            idents: 0,
-            paths: 0,
-            prefixes: Numbered::default(),
-            labels: 0,
-            path_blocks: Numbered::default(),
-            var_descs: Numbered::default(),
-            origins: Numbered::default(),
-            label_args: Numbered::default(),
-        }
-    }
-
-    /// Whether the graph was saved with its identities (a graph built
-    /// directly, not by `serialize_signature`, has none, and then every
-    /// block is the node's own).
-    fn present(&self) -> bool {
-        !self.ids.blocks.is_empty()
-    }
-
-    fn block_of(
-        numbers: &mut Numbered<TypeExprRef>,
-        number: u32,
-        node: TypeExprRef,
-    ) -> Option<TypeExprRef> {
-        match numbers.get(number) {
-            Some(&owner) => Some(owner),
-            None => {
-                numbers.insert(number, node);
-                None
-            }
-        }
-    }
-
-    fn path_block(
-        &mut self,
-        entry: usize,
-        node: TypeExprRef,
-    ) -> crate::types::type_expr::PathBlock {
-        use crate::types::type_expr::PathBlock;
-        if !self.present() {
-            return PathBlock::OWN;
-        }
-        match Self::block_of(&mut self.path_blocks, self.ids.blocks[entry], node) {
-            Some(owner) => PathBlock::OWN.copied_from(owner),
-            None => PathBlock::OWN,
-        }
-    }
-
-    fn var_desc(
-        &mut self,
-        entry: usize,
-        node: TypeExprRef,
-    ) -> crate::types::type_expr::VarDescBlock {
-        use crate::types::type_expr::VarDescBlock;
-        if !self.present() {
-            return VarDescBlock::OWN;
-        }
-        match Self::block_of(&mut self.var_descs, self.ids.blocks[entry], node) {
-            Some(owner) => VarDescBlock::OWN.copied_from(owner),
-            None => VarDescBlock::OWN,
-        }
-    }
-
-    fn ident<S: TypeNodeSink>(
-        &mut self,
-        number: u32,
-        id: &crate::ident::Ident,
-        sink: &S,
-    ) -> crate::ident::Ident {
-        if let Some(origin) = self.origins.get(number) {
-            return id.with_origin(*origin);
-        }
-        let origin = sink.fresh_ident_origin();
-        self.origins.insert(number, origin);
-        let id = id.with_origin(origin);
-        if self.name_scope != 0 {
-            sink.record_ident_name(
-                &id,
-                crate::types::path_provenance::NameAllocation::Source {
-                    scope: self.name_scope,
-                    string: self.ids.ident_names[number as usize],
-                },
-            );
-        }
-        id
-    }
-
-    /// Remap names and retained Pident prefixes. Every dotted/application
-    /// occurrence is fresh, as in the saved Subst copy, not source deduplication.
-    fn shared_path<S: TypeNodeSink>(&mut self, path: &Path, sink: &S, graph: bool) -> Arc<Path> {
-        let mapped = self.mapped_path(path, sink, graph);
-        let evidence = &self.ids.paths[self.paths - 1];
-        if evidence.block != PortableIdentities::NONE {
-            if let Some(prefix) = self.prefixes.get(evidence.block) {
-                return prefix.clone();
-            }
-            let prefix = Arc::new(mapped);
-            self.prefixes.insert(evidence.block, prefix.clone());
-            prefix
-        } else {
-            Arc::new(mapped)
-        }
-    }
-
-    fn mapped_path<S: TypeNodeSink>(&mut self, path: &Path, sink: &S, graph: bool) -> Path {
-        let mapped = match path {
-            Path::Pident(id) if graph => {
-                let number = self.ids.path_idents[self.idents];
-                self.idents += 1;
-                Path::Pident(self.ident(number, id, sink))
-            }
-            Path::Pident(_) => path.clone(),
-            Path::Pdot(prefix, name, pos) => {
-                let prefix = self.shared_path(prefix, sink, graph);
-                let evidence = &self.ids.paths[self.paths];
-                if evidence.name != PortableIdentities::NONE {
-                    sink.dotted_with_name(
-                        prefix,
-                        *name,
-                        crate::types::path_provenance::NameAllocation::Source {
-                            scope: self.name_scope,
-                            string: evidence.name,
-                        },
-                        *pos,
-                    )
-                } else {
-                    Path::Pdot(prefix, *name, *pos)
-                }
-            }
-            Path::Papply(functor, argument) => {
-                let functor = self.shared_path(functor, sink, graph);
-                Path::Papply(functor, self.shared_path(argument, sink, graph))
-            }
-        };
-        self.paths += 1;
-        mapped
-    }
-
-    fn path<S: TypeNodeSink>(&mut self, path: &Path, sink: &S) -> Path {
-        if !self.present() {
-            return path.clone();
-        }
-        self.mapped_path(path, sink, true)
-    }
-
-    fn signature<S: TypeNodeSink>(&mut self, sig: &mut Signature, sink: &S) {
-        // Directly constructed graphs do not carry a signature identity table.
-        if self.ids.signature_idents.is_empty() {
-            return;
-        }
-        let mut numbers = self.ids.signature_idents.iter();
-        map_signature_identifiers(sig, &mut |id| {
-            let number = *numbers
-                .next()
-                .expect("missing signature identifier identity");
-            *id = self.ident(number, id, sink);
-        });
-        assert!(
-            numbers.next().is_none(),
-            "unused signature identifier identities"
-        );
-        map_signature_paths(sig, &mut |path| self.mapped_path(path, sink, false));
-        assert_eq!(
-            self.paths,
-            self.ids.paths.len(),
-            "unused saved path evidence"
-        );
-    }
-
-    fn arg(&mut self, label: &ArgLabel, typ: TypeExprRef, locs: &DeclLocImport<'_>) -> TypeArg {
-        if !self.present() || matches!(label, ArgLabel::Nolabel) {
-            return TypeArg::new(import_label(label, locs), typ);
-        }
-        let number = self.ids.labels[self.labels];
-        self.labels += 1;
-        if let Some(arg) = self.label_args.get(number) {
-            return arg.with_type(typ);
-        }
-        let arg = TypeArg::new(import_label(label, locs), typ);
-        self.label_args.insert(number, arg.clone());
-        arg
-    }
-}
-
 /// Serialize `sig` with its location table, adding the raw file-name indices
 /// of its locations to `file_names`.
 fn serialize_signature(
@@ -1513,12 +754,10 @@ fn serialize_signature(
     let mut sig = sig.clone();
     ser.remap_signature(&mut sig);
     ser.remap_signature_locations(&mut sig);
-    let identities = saved_signature_identities(ctx, &ser.nodes, &sig);
     let type_graph = PortableTypeGraph {
         entries: ser.entries,
         variant_layouts: ser.variant_layouts,
         mutabilities: ser.mutabilities,
-        identities,
     };
     (sig, type_graph, ser.locations)
 }
@@ -1661,13 +900,17 @@ impl<'a, 'f> TypeGraphSerializer<'a, 'f> {
 
     fn serialize_desc(&mut self, desc: &TypeDesc) -> PortableTypeDesc {
         match desc {
-            TypeDesc::Tvar(name, ..) => PortableTypeDesc::Tvar(name.clone()),
+            TypeDesc::Tvar(name) => {
+                PortableTypeDesc::Tvar(name.as_deref().map(crate::name::Name::new))
+            }
             TypeDesc::Tarrow { args, ret } => PortableTypeDesc::Tarrow {
-                args: args
+                args: self
+                    .ctx
+                    .type_args(args)
                     .iter()
                     .map(|arg| {
                         (
-                            self.portable_label(arg.label()),
+                            self.portable_label(&arg.label().to_arg_label()),
                             self.serialize_type(arg.typ),
                         )
                     })
@@ -1675,11 +918,16 @@ impl<'a, 'f> TypeGraphSerializer<'a, 'f> {
                 ret: self.serialize_type(*ret),
             },
             TypeDesc::Ttuple(types) => {
-                PortableTypeDesc::Ttuple(types.iter().map(|t| self.serialize_type(*t)).collect())
+                PortableTypeDesc::Ttuple(self.ctx.type_list(types).iter().map(|t| self.serialize_type(*t)).collect())
             }
             TypeDesc::Tconstr { path, args, .. } => PortableTypeDesc::Tconstr {
                 path: path.clone(),
-                args: args.iter().map(|t| self.serialize_type(*t)).collect(),
+                args: self
+                    .ctx
+                    .type_list(args)
+                    .iter()
+                    .map(|t| self.serialize_type(*t))
+                    .collect(),
             },
             TypeDesc::Tobject { fields } => PortableTypeDesc::Tobject {
                 fields: self.serialize_type(*fields),
@@ -1699,20 +947,32 @@ impl<'a, 'f> TypeGraphSerializer<'a, 'f> {
             TypeDesc::Tlink(r) => PortableTypeDesc::Tlink(self.serialize_type(*r)),
             TypeDesc::Tsubst(r) => PortableTypeDesc::Tsubst(self.serialize_type(*r)),
             TypeDesc::Tvariant(row_desc) => {
-                PortableTypeDesc::Tvariant(self.serialize_row_desc(row_desc))
+                PortableTypeDesc::Tvariant(self.serialize_row_desc(&self.ctx.row_desc(row_desc)))
             }
-            TypeDesc::Tunivar(name, ..) => PortableTypeDesc::Tunivar(name.clone()),
+            TypeDesc::Tunivar(name) => PortableTypeDesc::Tunivar(*name),
             TypeDesc::Tpoly { body, vars } => PortableTypeDesc::Tpoly {
                 body: self.serialize_type(*body),
-                vars: vars.iter().map(|t| self.serialize_type(*t)).collect(),
+                vars: self
+                    .ctx
+                    .type_list(vars)
+                    .iter()
+                    .map(|t| self.serialize_type(*t))
+                    .collect(),
             },
             TypeDesc::Tpackage { path, lids, args } => PortableTypeDesc::Tpackage {
                 path: path.clone(),
-                lids: lids
+                lids: self
+                    .ctx
+                    .package_lids(lids)
                     .iter()
                     .map(|lid| self.serialize_longident(lid))
                     .collect(),
-                args: args.iter().map(|t| self.serialize_type(*t)).collect(),
+                args: self
+                    .ctx
+                    .type_list(args)
+                    .iter()
+                    .map(|t| self.serialize_type(*t))
+                    .collect(),
             },
         }
     }
@@ -1933,20 +1193,20 @@ impl<'a, 'f> TypeGraphSerializer<'a, 'f> {
 pub(crate) trait TypeNodeSink {
     fn abbrev_nil(&self) -> AbbrevMemoRef;
     fn longident_name(&self, name: &str) -> crate::intern::StrIdx;
-    /// The origin of an identifier block of an imported graph.
-    fn fresh_ident_origin(&self) -> crate::ident::IdentOrigin;
-    fn dotted_with_name(
+    fn new_type_list(&self, items: &[TypeExprRef]) -> crate::types::type_expr::TypeRefList;
+    fn new_type_args(&self, args: &[TypeArg]) -> crate::types::type_expr::TypeArgList;
+    fn new_row_desc(&self, row: RowDesc) -> crate::types::type_expr::RowDescRef;
+    fn new_package_lids(
         &self,
-        prefix: Arc<Path>,
-        text: crate::name::Name,
-        name: crate::types::path_provenance::NameAllocation,
-        pos: i32,
-    ) -> Path;
-    fn record_ident_name(
+        lids: Vec<crate::parser::longident::Longident>,
+    ) -> crate::types::type_expr::PackageLidsRef;
+    fn new_type_list_from_iter(
         &self,
-        id: &crate::ident::Ident,
-        allocation: crate::types::path_provenance::NameAllocation,
-    );
+        items: impl Iterator<Item = TypeExprRef>,
+    ) -> crate::types::type_expr::TypeRefList {
+        let items: crate::types::type_expr::TypeRefs = items.collect();
+        self.new_type_list(&items)
+    }
     /// A cell for an internalized graph. Store and shared graphs outlive any
     /// one compilation, so they get persistent cells.
     fn new_mutability(&self, flag: crate::types::asttypes::MutableFlag) -> MutabilityRef {
@@ -1967,31 +1227,15 @@ fn internalize_mutabilities<S: TypeNodeSink>(
 }
 
 impl TypeNodeSink for TypeContext {
-    fn dotted_with_name(
-        &self,
-        prefix: Arc<Path>,
-        text: crate::name::Name,
-        name: crate::types::path_provenance::NameAllocation,
-        pos: i32,
-    ) -> Path {
-        TypeContext::dotted_with_name(self, prefix, text, name, pos)
-    }
 
-    fn record_ident_name(
-        &self,
-        id: &crate::ident::Ident,
-        allocation: crate::types::path_provenance::NameAllocation,
-    ) {
-        TypeContext::record_ident_name(self, id, allocation);
-    }
+
+
 
     fn abbrev_nil(&self) -> AbbrevMemoRef {
         self.alloc_abbrev_nil()
     }
 
-    fn fresh_ident_origin(&self) -> crate::ident::IdentOrigin {
-        TypeContext::fresh_ident_origin(self)
-    }
+
 
     fn new_mutability(&self, flag: crate::types::asttypes::MutableFlag) -> MutabilityRef {
         self.alloc_mutability(crate::types::type_expr::FieldMutability::Value(flag))
@@ -2000,26 +1244,31 @@ impl TypeNodeSink for TypeContext {
     fn longident_name(&self, name: &str) -> crate::intern::StrIdx {
         self.intern_cmi_longident_name(name)
     }
+
+    fn new_type_list(&self, items: &[TypeExprRef]) -> crate::types::type_expr::TypeRefList {
+        TypeContext::new_type_list(self, items)
+    }
+
+    fn new_type_args(&self, args: &[TypeArg]) -> crate::types::type_expr::TypeArgList {
+        TypeContext::new_type_args(self, args)
+    }
+
+    fn new_row_desc(&self, row: RowDesc) -> crate::types::type_expr::RowDescRef {
+        TypeContext::new_row_desc(self, row)
+    }
+
+    fn new_package_lids(
+        &self,
+        lids: Vec<crate::parser::longident::Longident>,
+    ) -> crate::types::type_expr::PackageLidsRef {
+        TypeContext::new_package_lids(self, lids)
+    }
 }
 
 impl TypeNodeSink for ThreadTypeStore {
-    fn dotted_with_name(
-        &self,
-        prefix: Arc<Path>,
-        text: crate::name::Name,
-        name: crate::types::path_provenance::NameAllocation,
-        pos: i32,
-    ) -> Path {
-        ThreadTypeStore::dotted_with_name(self, prefix, text, name, pos)
-    }
 
-    fn record_ident_name(
-        &self,
-        id: &crate::ident::Ident,
-        allocation: crate::types::path_provenance::NameAllocation,
-    ) {
-        ThreadTypeStore::record_ident_name(self, id, allocation);
-    }
+
+
 
     fn abbrev_nil(&self) -> AbbrevMemoRef {
         self.alloc_abbrev(AbbrevMemo::Mnil)
@@ -2029,8 +1278,25 @@ impl TypeNodeSink for ThreadTypeStore {
         self.intern_longident_name(name)
     }
 
-    fn fresh_ident_origin(&self) -> crate::ident::IdentOrigin {
-        ThreadTypeStore::fresh_ident_origin(self)
+
+
+    fn new_type_list(&self, items: &[TypeExprRef]) -> crate::types::type_expr::TypeRefList {
+        self.alloc_type_list(items)
+    }
+
+    fn new_type_args(&self, args: &[TypeArg]) -> crate::types::type_expr::TypeArgList {
+        self.alloc_type_args(args)
+    }
+
+    fn new_row_desc(&self, row: RowDesc) -> crate::types::type_expr::RowDescRef {
+        self.alloc_row_desc(row)
+    }
+
+    fn new_package_lids(
+        &self,
+        lids: Vec<crate::parser::longident::Longident>,
+    ) -> crate::types::type_expr::PackageLidsRef {
+        self.alloc_package_lids(lids)
     }
 }
 
@@ -2145,9 +1411,8 @@ fn internalize_signature_into_store(
         .map(|i| TypeExprRef::from_store_index(base + i))
         .collect();
     let mremap = internalize_mutabilities(graph, store);
-    let mut ids = ImportedIdentities::new(&graph.identities);
     for (i, entry) in graph.entries.iter().enumerate() {
-        let desc = internalize_desc(&entry.desc, i, &remap, &mremap, locs, &mut ids, store);
+        let desc = internalize_desc(&entry.desc, &remap, &mremap, locs, store);
         let level = match entry.desc {
             PortableTypeDesc::Tlink(_) => GENERIC_LEVEL,
             _ => entry.level,
@@ -2169,7 +1434,6 @@ fn internalize_signature_into_store(
         })
         .collect();
     let mut sig = portable_sig.clone();
-    ids.signature(&mut sig, store);
     remap_signature_refs(&mut sig, &remap, &layout_remap);
     import_signature_locations(&mut sig, locs);
     shapes.signature(&mut sig);
@@ -2181,26 +1445,24 @@ fn internalize_signature_into_store(
 struct SharedSink<'a> {
     pool: &'a crate::types::shared_store::SharedTypePool,
     current: std::cell::Cell<u32>,
+    /// The graph's base index and sizes, which place each payload section.
+    base: u32,
+    sizes: crate::types::shared_store::SharedGraphSizes,
+    /// Payloads allocated so far.
+    payloads: std::cell::RefCell<crate::types::shared_store::SharedGraphPayloads>,
+}
+
+impl SharedSink<'_> {
+    /// Tagged shared index of entry `len` of the section at `start`.
+    fn section_index(&self, start: usize, len: usize) -> u32 {
+        (self.base + (start + len) as u32) | crate::types::type_expr::SHARED_REF_BITS
+    }
 }
 
 impl TypeNodeSink for SharedSink<'_> {
-    fn dotted_with_name(
-        &self,
-        prefix: Arc<Path>,
-        text: crate::name::Name,
-        name: crate::types::path_provenance::NameAllocation,
-        pos: i32,
-    ) -> Path {
-        self.pool.dotted_with_name(prefix, text, name, pos)
-    }
 
-    fn record_ident_name(
-        &self,
-        id: &crate::ident::Ident,
-        allocation: crate::types::path_provenance::NameAllocation,
-    ) {
-        self.pool.record_ident_name(id, allocation);
-    }
+
+
 
     fn abbrev_nil(&self) -> AbbrevMemoRef {
         AbbrevMemoRef::from_shared_index(self.current.get())
@@ -2210,9 +1472,62 @@ impl TypeNodeSink for SharedSink<'_> {
         self.pool.intern_longident_name(name)
     }
 
-    fn fresh_ident_origin(&self) -> crate::ident::IdentOrigin {
-        self.pool.fresh_ident_origin()
+
+    fn new_type_list(&self, items: &[TypeExprRef]) -> crate::types::type_expr::TypeRefList {
+        let mut payloads = self.payloads.borrow_mut();
+        let start = self.section_index(self.sizes.lists_start(), payloads.lists.len());
+        payloads.lists.extend_from_slice(items);
+        crate::types::type_expr::TypeRefList::from_parts(start, items.len())
     }
+
+    fn new_type_args(&self, args: &[TypeArg]) -> crate::types::type_expr::TypeArgList {
+        let mut payloads = self.payloads.borrow_mut();
+        let start = self.section_index(self.sizes.args_start(), payloads.args.len());
+        payloads.args.extend_from_slice(args);
+        crate::types::type_expr::TypeArgList::from_parts(start, args.len())
+    }
+
+    fn new_row_desc(&self, row: RowDesc) -> crate::types::type_expr::RowDescRef {
+        let mut payloads = self.payloads.borrow_mut();
+        let index = self.section_index(self.sizes.rows_start(), payloads.rows.len());
+        payloads.rows.push(row);
+        crate::types::type_expr::RowDescRef::from_raw(index)
+    }
+
+    fn new_package_lids(
+        &self,
+        lids: Vec<crate::parser::longident::Longident>,
+    ) -> crate::types::type_expr::PackageLidsRef {
+        let mut payloads = self.payloads.borrow_mut();
+        let index = self.section_index(self.sizes.lids_start(), payloads.lids.len());
+        payloads.lids.push(lids);
+        crate::types::type_expr::PackageLidsRef::from_raw(index)
+    }
+}
+
+/// Sizes of the shared graph `internalize_desc` builds for `graph`: one
+/// payload per type list element, arrow parameter, row and package.
+fn shared_graph_sizes(graph: &PortableTypeGraph) -> crate::types::shared_store::SharedGraphSizes {
+    let mut sizes = crate::types::shared_store::SharedGraphSizes {
+        nodes: graph.entries.len(),
+        layouts: graph.variant_layouts.len(),
+        ..Default::default()
+    };
+    for entry in &graph.entries {
+        match &entry.desc {
+            PortableTypeDesc::Ttuple(items) => sizes.list_items += items.len(),
+            PortableTypeDesc::Tconstr { args, .. } => sizes.list_items += args.len(),
+            PortableTypeDesc::Tpackage { args, .. } => {
+                sizes.list_items += args.len();
+                sizes.lids += 1;
+            }
+            PortableTypeDesc::Tpoly { vars, .. } => sizes.list_items += vars.len(),
+            PortableTypeDesc::Tarrow { args, .. } => sizes.arg_items += args.len(),
+            PortableTypeDesc::Tvariant(_) => sizes.rows += 1,
+            _ => {}
+        }
+    }
+    sizes
 }
 
 /// Internalize a graph into the process-wide shared pool. The graph is built
@@ -2229,17 +1544,20 @@ fn internalize_signature_into_shared(
     let mut sig = portable_sig.clone();
     let mut scopes = crate::fast_hash::AHashMap::default();
     let map = |file| files.map(file);
-    let base = pool.publish(graph.entries.len(), graph.variant_layouts.len(), |base| {
+    let sizes = shared_graph_sizes(graph);
+    let base = pool.publish(sizes, |base| {
         remap = (0..graph.entries.len())
             .map(|i| crate::types::shared_store::shared_ref(base, i))
             .collect();
         let sink = SharedSink {
             pool,
             current: std::cell::Cell::new(base),
+            base,
+            sizes,
+            payloads: Default::default(),
         };
         let locs = shared_decl_locs(base, &map);
         let mremap = internalize_mutabilities(graph, &sink);
-        let mut ids = ImportedIdentities::new(&graph.identities);
         let nodes = graph
             .entries
             .iter()
@@ -2247,7 +1565,7 @@ fn internalize_signature_into_shared(
             .map(|(i, entry)| {
                 sink.current.set(base + i as u32);
                 let desc =
-                    internalize_desc(&entry.desc, i, &remap, &mremap, &locs, &mut ids, &sink);
+                    internalize_desc(&entry.desc, &remap, &mremap, &locs, &sink);
                 let level = match entry.desc {
                     PortableTypeDesc::Tlink(_) => GENERIC_LEVEL,
                     _ => entry.level,
@@ -2255,7 +1573,6 @@ fn internalize_signature_into_shared(
                 (desc, level)
             })
             .collect();
-        ids.signature(&mut sig, &sink);
         let mut table = locations.clone();
         scopes = table.remap_for_import(&map);
         let mut shapes = crate::types::variant_runtime::ShapeImport::new(&scopes);
@@ -2269,7 +1586,12 @@ fn internalize_signature_into_shared(
             })
             .collect();
         shapes.signature(&mut sig);
-        (nodes, layouts, table)
+        crate::types::shared_store::SharedGraphParts {
+            nodes,
+            payloads: sink.payloads.into_inner(),
+            layouts,
+            locations: table,
+        }
     })?;
     let layout_remap: Vec<_> = (0..graph.variant_layouts.len())
         .map(|i| crate::types::VariantLayoutRef::from_shared_index(base + i as u32))
@@ -2384,7 +1706,7 @@ fn internalize_signature(
                 entry.level
             };
             ctx.alloc_type_at_level(
-                TypeDesc::Tvar(None, crate::types::type_expr::VarDescBlock::OWN),
+                TypeDesc::Tvar(None),
                 level,
             )
         })
@@ -2392,9 +1714,8 @@ fn internalize_signature(
 
     // Phase 2: set descriptors using remapped refs.
     let mremap = internalize_mutabilities(graph, ctx);
-    let mut ids = ImportedIdentities::new(&graph.identities);
     for (i, entry) in graph.entries.iter().enumerate() {
-        let desc = internalize_desc(&entry.desc, i, &remap, &mremap, locs, &mut ids, ctx);
+        let desc = internalize_desc(&entry.desc, &remap, &mremap, locs, ctx);
         ctx.set_desc(remap[i], desc);
     }
 
@@ -2411,7 +1732,6 @@ fn internalize_signature(
 
     // Phase 3: clone and remap the signature.
     let mut sig = portable_sig.clone();
-    ids.signature(&mut sig, ctx);
     remap_signature_refs(&mut sig, &remap, &layout_remap);
     import_signature_locations(&mut sig, locs);
     shapes.signature(&mut sig);
@@ -2422,31 +1742,30 @@ fn internalize_signature(
 #[allow(clippy::too_many_arguments)]
 fn internalize_desc<S: TypeNodeSink>(
     desc: &PortableTypeDesc,
-    entry: usize,
     remap: &[TypeExprRef],
     mremap: &[MutabilityRef],
     locs: &DeclLocImport<'_>,
-    ids: &mut ImportedIdentities<'_>,
     ctx: &S,
 ) -> TypeDesc {
-    let node = remap[entry];
     match desc {
-        PortableTypeDesc::Tvar(name) => TypeDesc::Tvar(name.clone(), ids.var_desc(entry, node)),
+        PortableTypeDesc::Tvar(name) => TypeDesc::Tvar(name.as_deref().map(crate::name::Name::new)),
         PortableTypeDesc::Tarrow { args, ret } => TypeDesc::Tarrow {
-            args: args
-                .iter()
-                .map(|(lbl, typ)| ids.arg(lbl, remap[*typ], locs))
-                .collect(),
+            args: {
+                let args: crate::types::type_expr::TypeArgs = args
+                    .iter()
+                    .map(|(lbl, typ)| TypeArg::new(import_label(lbl, locs), remap[*typ]))
+                    .collect();
+                ctx.new_type_args(&args)
+            },
             ret: remap[*ret],
         },
         PortableTypeDesc::Ttuple(types) => {
-            TypeDesc::Ttuple(types.iter().map(|&i| remap[i]).collect())
+            TypeDesc::Ttuple(ctx.new_type_list_from_iter(types.iter().map(|&i| remap[i])))
         }
         PortableTypeDesc::Tconstr { path, args } => TypeDesc::Tconstr {
-            path: ids.path(path, ctx),
-            args: args.iter().map(|&i| remap[i]).collect(),
+            path: *path,
+            args: ctx.new_type_list_from_iter(args.iter().map(|&i| remap[i])),
             abbrev: ctx.abbrev_nil(),
-            path_block: ids.path_block(entry, node),
         },
         PortableTypeDesc::Tobject { fields } => TypeDesc::Tobject {
             fields: remap[*fields],
@@ -2468,25 +1787,25 @@ fn internalize_desc<S: TypeNodeSink>(
         PortableTypeDesc::Tvariant(prd) => {
             let mut row = internalize_row_desc(prd, remap, ctx);
             if let Some((path, _)) = &mut row.row_name {
-                *path = ids.path(path, ctx);
+                *path = *path;
             }
-            TypeDesc::Tvariant(Box::new(row))
+            TypeDesc::Tvariant(ctx.new_row_desc(row))
         }
         PortableTypeDesc::Tunivar(name) => {
-            TypeDesc::Tunivar(name.clone(), ids.var_desc(entry, node))
+            TypeDesc::Tunivar(name.as_deref().map(crate::name::Name::new))
         }
         PortableTypeDesc::Tpoly { body, vars } => TypeDesc::Tpoly {
             body: remap[*body],
-            vars: vars.iter().map(|&i| remap[i]).collect(),
+            vars: ctx.new_type_list_from_iter(vars.iter().map(|&i| remap[i])),
         },
         PortableTypeDesc::Tpackage { path, lids, args } => TypeDesc::Tpackage {
-            path: ids.path(path, ctx),
-            lids: Box::new(
+            path: *path,
+            lids: ctx.new_package_lids(
                 lids.iter()
                     .map(|lid| internalize_longident(lid, ctx))
                     .collect(),
             ),
-            args: args.iter().map(|&i| remap[i]).collect(),
+            args: ctx.new_type_list_from_iter(args.iter().map(|&i| remap[i])),
         },
     }
 }
@@ -2711,19 +2030,16 @@ fn remap_module_type_refs(
 mod identity_tests {
     use super::*;
     use crate::context::IdGenerator;
-    use crate::types::type_expr::{PathBlockOwner, VarDescBlock};
 
-    /// A saved graph with its entries and identities.
+    /// A saved graph with its entries.
     fn save(ctx: &TypeContext, roots: &[TypeExprRef]) -> (Vec<usize>, PortableTypeGraph) {
         let mut file_names = crate::fast_hash::AHashSet::new();
         let mut ser = TypeGraphSerializer::new(ctx, None, &mut file_names);
         let indices = roots.iter().map(|&r| ser.serialize_type(r)).collect();
-        let identities = saved_identities(ctx, &ser.nodes);
         let graph = PortableTypeGraph {
             entries: std::mem::take(&mut ser.entries),
             variant_layouts: Vec::new(),
             mutabilities: Vec::new(),
-            identities,
         };
         (indices, graph)
     }
@@ -2733,126 +2049,18 @@ mod identity_tests {
     fn import(ctx: &TypeContext, graph: &PortableTypeGraph) -> Vec<TypeExprRef> {
         let remap: Vec<_> = graph.entries.iter().map(|_| ctx.new_var(None)).collect();
         let locs = ctx.import_decl_locs(std::iter::empty(), &|file| file);
-        let mut ids = ImportedIdentities::new(&graph.identities);
         for (i, entry) in graph.entries.iter().enumerate() {
-            let desc = internalize_desc(&entry.desc, i, &remap, &[], &locs, &mut ids, ctx);
+            let desc = internalize_desc(&entry.desc, &remap, &[], &locs, ctx);
             ctx.set_desc(remap[i], desc);
         }
         remap
     }
 
-    fn path_of(ctx: &TypeContext, node: TypeExprRef) -> (Path, PathBlockOwner) {
-        match &*ctx.get_desc(node) {
-            TypeDesc::Tconstr {
-                path, path_block, ..
-            } => (path.clone(), path_block.owner()),
-            _ => panic!("not a constructor"),
-        }
-    }
 
-    fn origin_of(path: &Path) -> u32 {
-        match path {
-            Path::Pident(id) => id.origin().get(),
-            _ => panic!("not a Pident"),
-        }
-    }
 
-    /// OCaml saves an interface with `Subst.signature` `for_saving` and the
-    /// importer unmarshals the copy, whose blocks are shared as the source's
-    /// are (subst.ml:87-94, 121-126, btype.ml:511-512) and are none of the
-    /// importer's own.
-    #[test]
-    fn an_imported_graph_shares_the_saved_blocks_and_holds_none_of_the_importers() {
-        let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
-        let int_a = ctx.new_predef_constr(crate::types::predef::path_int(), vec![]);
-        let int_b = ctx.new_predef_constr(crate::types::predef::path_int(), vec![]);
-        let t = Path::Pident(crate::ident::Ident::create_persistent("t"));
-        let own = ctx.new_constr(t.clone(), vec![]);
-        let kept = ctx.new_type(ctx.get_desc(own).clone().shared_from(own));
-        let respelled = ctx.new_constr(t, vec![]);
-        let none_a = ctx.new_var(None);
-        let none_b = ctx.new_var(None);
-        let named = ctx.new_var(Some("a".into()));
-        let named_copy = ctx.new_type(TypeDesc::Tvar(
-            Some("a".into()),
-            VarDescBlock::OWN.copied_from(named),
-        ));
-        let arg = TypeArg::new(ArgLabel::labelled("x", DeclLoc::default()), int_a);
-        let arrow_a = ctx.new_type(TypeDesc::Tarrow {
-            args: vec![arg.clone()].into(),
-            ret: int_a,
-        });
-        let arrow_b = ctx.new_type(TypeDesc::Tarrow {
-            args: vec![arg.with_type(int_b)].into(),
-            ret: int_b,
-        });
-        let other_label = ctx.new_type(TypeDesc::Tarrow {
-            args: vec![TypeArg::new(
-                ArgLabel::labelled("x", DeclLoc::default()),
-                int_a,
-            )]
-            .into(),
-            ret: int_a,
-        });
-        let roots = [
-            int_a,
-            int_b,
-            own,
-            kept,
-            respelled,
-            none_a,
-            none_b,
-            named,
-            named_copy,
-            arrow_a,
-            arrow_b,
-            other_label,
-        ];
-        let (at, graph) = save(&ctx, &roots);
 
-        let importer = TypeContext::new(Arc::new(IdGenerator::new()));
-        let nodes = import(&importer, &graph);
-        let node = |i: usize| nodes[at[i]];
 
-        // The saved predefined `int`: one block, the unit's, not Predef's.
-        let (int_path, int_block) = path_of(&importer, node(0));
-        assert_eq!(int_block, PathBlockOwner::Own);
-        assert_eq!(path_of(&importer, node(1)).1, PathBlockOwner::Of(node(0)));
-        assert_ne!(origin_of(&int_path), 0);
-        assert_eq!(
-            origin_of(&int_path),
-            origin_of(&path_of(&importer, node(1)).0)
-        );
-        // A kept path stays shared; one allocated again does not.
-        assert_eq!(path_of(&importer, node(3)).1, PathBlockOwner::Of(node(2)));
-        assert_eq!(path_of(&importer, node(4)).1, PathBlockOwner::Own);
-        // Every `Tvar None` is the static one; a copied descriptor stays shared.
-        let var_block = |n| match &*importer.get_desc(n) {
-            TypeDesc::Tvar(_, block) => *block,
-            _ => panic!("not a variable"),
-        };
-        assert_eq!(var_block(node(6)), VarDescBlock::Of(node(5)));
-        assert_eq!(var_block(node(7)), VarDescBlock::Own);
-        assert_eq!(var_block(node(8)), VarDescBlock::Of(node(7)));
-        // A label shared by two arrows stays shared; an equal one does not.
-        let label = |n| match &*importer.get_desc(n) {
-            TypeDesc::Tarrow { args, .. } => args[0].label_block().expect("labelled"),
-            _ => panic!("not an arrow"),
-        };
-        assert_eq!(label(node(9)), label(node(10)));
-        assert_ne!(label(node(9)), label(node(11)));
 
-        // A second import holds blocks of its own.
-        let again = import(&importer, &graph);
-        assert_ne!(
-            origin_of(&path_of(&importer, again[at[0]]).0),
-            origin_of(&int_path)
-        );
-        assert_eq!(
-            path_of(&importer, again[at[1]]).1,
-            PathBlockOwner::Of(again[at[0]])
-        );
-    }
 
     #[test]
     fn location_allocations_survive_cold_warm_store_and_shared_imports() {
@@ -2979,392 +2187,20 @@ mod identity_tests {
         assert_eq!(digest(&saved), digest(&without));
         assert_eq!(std::mem::size_of::<DeclLoc>(), 8);
         assert_eq!(std::mem::size_of::<crate::ident::Ident>(), 16);
-        assert_eq!(std::mem::size_of::<Path>(), 24);
-        assert_eq!(std::mem::size_of::<TypeDesc>(), 64);
-        assert_eq!(std::mem::size_of::<crate::types::TypeExpr>(), 80);
+        assert_eq!(std::mem::size_of::<Path>(), 8);
+        assert_eq!(std::mem::size_of::<TypeDesc>(), 24);
+        assert_eq!(std::mem::size_of::<crate::types::TypeExpr>(), 40);
     }
 
-    #[test]
-    fn dotted_allocations_survive_saved_cold_warm_store_and_shared_imports() {
-        let save_sig = |ctx: &TypeContext, sig: &Signature| {
-            serialize_signature(sig, ctx, None, &mut crate::fast_hash::AHashSet::new())
-        };
-        let saved = {
-            let source = TypeContext::new(Arc::new(IdGenerator::new()));
-            let mut arena = ParseArena::new();
-            let name = arena.push_string("same");
-            let equal = arena.push_string("same");
-            let id = source.create_ast_ident(&arena, name);
-            let other = source.create_ast_ident(&arena, equal);
-            let prefix = Arc::new(Path::Pident(id));
-            let a = source.dotted_from_ident(prefix.clone(), id, 0);
-            let b = source.dotted_from_ident(prefix, other, 0);
-            let c = source.dotted_from_ident(Arc::new(Path::Pident(id)), id, 0);
-            let nested = source.dotted_from_ident(Arc::new(a.clone()), id, 0);
-            let sig: Signature = [a.clone(), a, b, c]
-                .into_iter()
-                .map(|path| {
-                    SignatureItem::SigValue(
-                        id,
-                        ValueDescription {
-                            val_type: source.new_generic_constr(path, vec![]),
-                            val_kind: ValueKind::ValReg,
-                            val_loc: DeclLoc::default(),
-                            val_attributes: vec![],
-                            val_path: Some(nested.clone()),
-                        },
-                    )
-                })
-                .collect::<Vec<_>>()
-                .into();
-            save_sig(&source, &sig)
-        };
-        let verify = |ctx: &TypeContext, sig: &Signature| {
-            let mut dots = Vec::new();
-            let mut nested_dots = Vec::new();
-            for item in sig.iter() {
-                let SignatureItem::SigValue(id, value) = item else {
-                    panic!("value")
-                };
-                let (path, _) = path_of(ctx, value.val_type);
-                let dot = ctx.dotted_allocation(&path).expect("graph dotted evidence");
-                let nested = ctx
-                    .dotted_allocation(value.val_path.as_ref().unwrap())
-                    .expect("signature dotted evidence");
-                let inner = ctx
-                    .dotted_allocation(&nested.prefix)
-                    .expect("nested dotted evidence");
-                assert_eq!(nested.name, ctx.ident_name_allocation(id));
-                assert_eq!(inner.name, nested.name);
-                assert_ne!(inner.key(), dot.key());
-                nested_dots.push((nested, inner));
-                dots.push(dot);
-            }
-            for (i, dot) in dots.iter().enumerate() {
-                for other in &dots[i + 1..] {
-                    assert_ne!(dot.key(), other.key());
-                }
-            }
-            assert!(Arc::ptr_eq(&dots[0].prefix, &dots[1].prefix));
-            assert!(Arc::ptr_eq(&dots[0].prefix, &dots[2].prefix));
-            assert!(!Arc::ptr_eq(&dots[0].prefix, &dots[3].prefix));
-            assert_eq!(dots[0].name, dots[1].name);
-            assert_eq!(dots[0].name, dots[3].name);
-            assert_ne!(dots[0].name, dots[2].name);
-            for (i, (outer, inner)) in nested_dots.iter().enumerate() {
-                assert!(Arc::ptr_eq(&dots[0].prefix, &inner.prefix));
-                assert_eq!(dots[0].name, inner.name);
-                for (next_outer, next_inner) in &nested_dots[i + 1..] {
-                    assert_ne!(outer.key(), next_outer.key());
-                    assert_ne!(inner.key(), next_inner.key());
-                }
-            }
-            dots[0].name
-        };
-        let target = TypeContext::new(Arc::new(IdGenerator::new()));
-        let locs = target.import_decl_locs(std::iter::empty(), &|file| file);
-        let decoded = crate::binser::Encoded::encode(&saved).decode();
-        let warm = internalize_signature(&saved.0, &saved.1, &locs, &target);
-        let cold = internalize_signature(&decoded.0, &decoded.1, &locs, &target);
-        assert_ne!(verify(&target, &warm), verify(&target, &cold));
-        let workers: Vec<_> = (0..2)
-            .map(|_| TypeContext::new(Arc::new(IdGenerator::new())))
-            .collect();
-        let mut names = Vec::new();
-        for worker in &workers {
-            let store = worker.thread_store();
-            let locs = store.import_decl_locs(std::iter::empty(), &|file| file);
-            let imported = internalize_signature_into_store(&saved.0, &saved.1, &locs, store);
-            names.push(verify(worker, &imported));
-            let again = save_sig(worker, &imported);
-            let imported = internalize_signature(
-                &again.0,
-                &again.1,
-                &target.import_decl_locs(std::iter::empty(), &|file| file),
-                &target,
-            );
-            names.push(verify(&target, &imported));
-        }
-        for (i, a) in names.iter().enumerate() {
-            for b in &names[i + 1..] {
-                assert_ne!(a, b);
-            }
-        }
-        let intern = |name: &str| target.intern_cmi_longident_name(name);
-        let files = FileRemap::new(&[], &intern);
-        let shared = internalize_signature_into_shared(
-            &saved.0,
-            &saved.1,
-            &saved.2,
-            &files,
-            target.thread_store().shared_pool(),
-        )
-        .unwrap();
-        let shared_name = verify(&target, &shared);
-        assert_ne!(shared_name, verify(&target, &warm));
-        let again = save_sig(&target, &shared);
-        let imported = internalize_signature(&again.0, &again.1, &locs, &target);
-        assert_ne!(shared_name, verify(&target, &imported));
-        let digest = |value: &(Signature, PortableTypeGraph, DeclLocTable)| {
-            let mut hash = std::collections::hash_map::DefaultHasher::new();
-            crate::cmi::digest_ser::Canonical::new(&mut hash).hash(value);
-            std::hash::Hasher::finish(&hash)
-        };
-        let mut without = saved.clone();
-        without.1.identities.paths.clear();
-        assert_eq!(digest(&saved), digest(&without));
-    }
 
-    #[test]
-    fn name_allocations_survive_cold_warm_store_and_shared_imports() {
-        let save_sig = |ctx: &TypeContext, sig: &Signature| {
-            serialize_signature(sig, ctx, None, &mut crate::fast_hash::AHashSet::new())
-        };
-        let (saved, source_name) = {
-            let source = TypeContext::new(Arc::new(IdGenerator::new()));
-            let mut arena = ParseArena::new();
-            let name = arena.push_string("same");
-            let equal = arena.push_string("same");
-            let a = source.create_ast_ident(&arena, name);
-            let b = source.create_ast_ident(&arena, name);
-            let c = source.create_ast_ident(&arena, equal);
-            let typ = source.new_generic_constr(Path::Pident(a), vec![]);
-            let value = |id| {
-                SignatureItem::SigValue(
-                    id,
-                    ValueDescription {
-                        val_type: typ,
-                        val_kind: ValueKind::ValReg,
-                        val_loc: DeclLoc::default(),
-                        val_attributes: vec![],
-                        val_path: Some(Path::Pident(a)),
-                    },
-                )
-            };
-            let sig: Signature = vec![value(a), value(b), value(c)].into();
-            (save_sig(&source, &sig), source.ident_name_allocation(&a))
-        };
-        let verify = |ctx: &TypeContext, sig: &Signature| {
-            let ids: Vec<_> = sig
-                .iter()
-                .map(|item| match item {
-                    SignatureItem::SigValue(id, _) => *id,
-                    _ => panic!("value"),
-                })
-                .collect();
-            assert_ne!(ids[0].origin(), ids[1].origin());
-            let a = ctx.ident_name_allocation(&ids[0]);
-            assert_eq!(a, ctx.ident_name_allocation(&ids[1]));
-            assert_ne!(a, ctx.ident_name_allocation(&ids[2]));
-            assert_ne!(a, source_name);
-            let SignatureItem::SigValue(_, value) = &sig[0] else {
-                unreachable!()
-            };
-            let (Path::Pident(path_id), _) = path_of(ctx, value.val_type) else {
-                panic!("path")
-            };
-            assert_eq!(a, ctx.ident_name_allocation(&path_id));
-            a
-        };
-        let target = TypeContext::new(Arc::new(IdGenerator::new()));
-        let locs = target.import_decl_locs(std::iter::empty(), &|file| file);
-        let decoded = crate::binser::Encoded::encode(&saved).decode();
-        let warm = internalize_signature(&saved.0, &saved.1, &locs, &target);
-        let cold = internalize_signature(&decoded.0, &decoded.1, &locs, &target);
-        assert_ne!(verify(&target, &warm), verify(&target, &cold));
-        let workers: Vec<_> = (0..2)
-            .map(|_| TypeContext::new(Arc::new(IdGenerator::new())))
-            .collect();
-        let mut names = Vec::new();
-        for worker in &workers {
-            let store = worker.thread_store();
-            let locs = store.import_decl_locs(std::iter::empty(), &|file| file);
-            let sig = internalize_signature_into_store(&saved.0, &saved.1, &locs, store);
-            names.push(verify(worker, &sig));
-            let saved_again = save_sig(worker, &sig);
-            let imported = internalize_signature(
-                &saved_again.0,
-                &saved_again.1,
-                &target.import_decl_locs(std::iter::empty(), &|file| file),
-                &target,
-            );
-            names.push(verify(&target, &imported));
-        }
-        for (i, a) in names.iter().enumerate() {
-            for b in &names[i + 1..] {
-                assert_ne!(a, b);
-            }
-        }
-        let intern = |name: &str| target.intern_cmi_longident_name(name);
-        let files = FileRemap::new(&[], &intern);
-        let shared = internalize_signature_into_shared(
-            &saved.0,
-            &saved.1,
-            &saved.2,
-            &files,
-            target.thread_store().shared_pool(),
-        )
-        .unwrap();
-        let shared_name = verify(&target, &shared);
-        assert_ne!(shared_name, verify(&target, &warm));
-        let again = save_sig(&target, &shared);
-        let imported = internalize_signature(&again.0, &again.1, &locs, &target);
-        assert_ne!(shared_name, verify(&target, &imported));
-        let mut without = saved.clone();
-        without.1.identities.ident_names.clear();
-        let digest = |value: &(Signature, PortableTypeGraph, DeclLocTable)| {
-            let mut hash = std::collections::hash_map::DefaultHasher::new();
-            crate::cmi::digest_ser::Canonical::new(&mut hash).hash(value);
-            std::hash::Hasher::finish(&hash)
-        };
-        assert_eq!(digest(&saved), digest(&without));
-    }
 
-    #[test]
-    fn mapping_signature_identifiers_keeps_shared_prefix_allocations() {
-        use crate::ident::Ident;
-        let shared = Arc::new(Path::Pident(Ident::create_persistent("Prefix")));
-        let distinct = Arc::new((*shared).clone());
-        let item = |prefix: Arc<Path>| {
-            SignatureItem::SigModtype(
-                Ident::create_persistent("S"),
-                ModtypeDeclaration {
-                    mtd_type: Some(ModuleType::MtyIdent(Path::Pdot(prefix, "t".into(), 0))),
-                    mtd_attributes: vec![],
-                    mtd_loc: DeclLoc::default(),
-                },
-            )
-        };
-        let mut sig: Signature = vec![item(shared.clone()), item(shared), item(distinct)].into();
-        map_signature_identifiers(&mut sig, &mut |id| {
-            *id = id.with_origin(crate::ident::IdentOrigin::new(1));
-        });
-        let prefix = |i| match &sig[i] {
-            SignatureItem::SigModtype(_, mtd) => match mtd.mtd_type.as_ref().unwrap() {
-                ModuleType::MtyIdent(Path::Pdot(prefix, ..)) => prefix.clone(),
-                _ => panic!("path"),
-            },
-            _ => panic!("modtype"),
-        };
-        assert!(Arc::ptr_eq(&prefix(0), &prefix(1)));
-        assert!(!Arc::ptr_eq(&prefix(0), &prefix(2)));
-    }
 
-    /// Signature paths and graph paths use one saved namespace. Encoding
-    /// discards runtime origins, so cold and warm imports must use the table.
-    #[test]
-    fn signature_and_graph_identities_survive_cold_warm_and_cross_store_imports() {
-        use crate::ident::Ident;
-        let source = TypeContext::new(Arc::new(IdGenerator::new()));
-        let a = Ident::create_persistent("same").with_origin(source.fresh_ident_origin());
-        let b = Ident::create_persistent("same").with_origin(source.fresh_ident_origin());
-        let typ = source.new_constr(Path::Pident(a.clone()), vec![]);
-        let sig: Signature = vec![
-            SignatureItem::SigValue(
-                a.clone(),
-                ValueDescription {
-                    val_type: typ,
-                    val_kind: ValueKind::ValReg,
-                    val_loc: DeclLoc::default(),
-                    val_attributes: vec![],
-                    val_path: Some(Path::Pident(a.clone())),
-                },
-            ),
-            SignatureItem::SigModtype(
-                b,
-                ModtypeDeclaration {
-                    mtd_type: Some(ModuleType::MtyIdent(Path::Pident(a))),
-                    mtd_attributes: vec![],
-                    mtd_loc: DeclLoc::default(),
-                },
-            ),
-        ]
-        .into();
-        let save_sig = |ctx: &TypeContext, sig: &Signature| {
-            serialize_signature(sig, ctx, None, &mut crate::fast_hash::AHashSet::new())
-        };
-        let saved = save_sig(&source, &sig);
-        let decoded = crate::binser::Encoded::encode(&saved).decode();
-        let verify = |ctx: &TypeContext, sig: &Signature| {
-            let SignatureItem::SigValue(a, value) = &sig[0] else {
-                panic!("value")
-            };
-            let SignatureItem::SigModtype(b, mtd) = &sig[1] else {
-                panic!("modtype")
-            };
-            let Some(ModuleType::MtyIdent(path)) = &mtd.mtd_type else {
-                panic!("path")
-            };
-            assert_ne!(a.origin().get(), 0);
-            assert_ne!(
-                a.origin(),
-                b.origin(),
-                "equal spelling does not merge blocks"
-            );
-            assert_eq!(
-                a.origin().get(),
-                origin_of(value.val_path.as_ref().unwrap())
-            );
-            assert_eq!(a.origin().get(), origin_of(path));
-            assert_eq!(a.origin().get(), origin_of(&path_of(ctx, value.val_type).0));
-            a.origin()
-        };
-        let target = TypeContext::new(Arc::new(IdGenerator::new()));
-        let locs = target.import_decl_locs(std::iter::empty(), &|file| file);
-        let warm = internalize_signature(&saved.0, &saved.1, &locs, &target);
-        let cold = internalize_signature(&decoded.0, &decoded.1, &locs, &target);
-        assert_ne!(verify(&target, &warm), verify(&target, &cold));
 
-        // Both stores are live simultaneously. Their numeric origin spaces
-        // may overlap; exporting each into one target must remap them apart.
-        let worker_a = TypeContext::new(Arc::new(IdGenerator::new()));
-        let worker_b = TypeContext::new(Arc::new(IdGenerator::new()));
-        let into_store = |ctx: &TypeContext| {
-            let store = ctx.thread_store();
-            let locs = store.import_decl_locs(std::iter::empty(), &|file| file);
-            internalize_signature_into_store(&saved.0, &saved.1, &locs, store)
-        };
-        let a = into_store(&worker_a);
-        let b = into_store(&worker_b);
-        verify(&worker_a, &a);
-        verify(&worker_b, &b);
-        let a = save_sig(&worker_a, &a);
-        let b = save_sig(&worker_b, &b);
-        let a = internalize_signature(&a.0, &a.1, &locs, &target);
-        let b = internalize_signature(&b.0, &b.1, &locs, &target);
-        assert_ne!(verify(&target, &a), verify(&target, &b));
 
-        // The entire saved signature, not only its graph, has the same
-        // semantic digest after clearing all physical identity metadata.
-        let mut without = saved.clone();
-        without.1.identities = PortableIdentities::default();
-        let digest = |value: &(Signature, PortableTypeGraph, DeclLocTable)| {
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            crate::cmi::digest_ser::Canonical::new(&mut hasher).hash(value);
-            std::hash::Hasher::finish(&hasher)
-        };
-        assert_eq!(digest(&saved), digest(&without));
-    }
 
-    /// The identities describe how the saved graph is laid out in memory,
-    /// not what it means: no interface digest sees them.
-    #[test]
-    fn identities_stay_out_of_the_interface_digest() {
-        let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
-        let int = ctx.new_predef_constr(crate::types::predef::path_int(), vec![]);
-        let (_, graph) = save(&ctx, &[int, int, ctx.new_var(None)]);
-        assert!(!graph.identities.blocks.is_empty());
-        let without = PortableTypeGraph {
-            identities: PortableIdentities::default(),
-            ..graph.clone()
-        };
-        let digest = |graph: &PortableTypeGraph| {
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            crate::cmi::digest_ser::Canonical::new(&mut hasher).hash(graph);
-            std::hash::Hasher::finish(&hasher)
-        };
-        assert_eq!(digest(&graph), digest(&without));
-    }
+
+
+
 }
 
 #[cfg(test)]
@@ -3391,12 +2227,11 @@ mod type_arg_tests {
             ArgLabel::optional("opt", ctx.intern_loc(loc)),
         ];
         let arrow = ctx.new_type(TypeDesc::Tarrow {
-            args: vec![
+            args: ctx.new_type_args(&[
                 TypeArg::unlabeled(shared),
                 TypeArg::new(labels[1].clone(), shared),
                 TypeArg::new(labels[2].clone(), distinct),
-            ]
-            .into(),
+            ]),
             ret: shared,
         });
         let mut file_names = crate::fast_hash::AHashSet::new();
@@ -3420,26 +2255,26 @@ mod type_arg_tests {
         let same = |file| file;
         let locs = ctx.import_decl_locs(locations.locations().iter().copied(), &same);
         let remap: Vec<_> = entries.iter().map(|_| ctx.new_var(None)).collect();
-        let none = PortableIdentities::default();
-        let mut ids = ImportedIdentities::new(&none);
         let restored = internalize_desc(
             &entries[index].desc,
-            index,
             &remap,
             &[],
             &locs,
-            &mut ids,
             &ctx,
         );
         let TypeDesc::Tarrow { args, ret } = restored else {
             panic!("not arrow")
         };
+        let args = ctx.type_args(args);
         assert_eq!(args[0].typ, ret);
         assert_eq!(args[1].typ, ret);
         assert_ne!(args[2].typ, ret);
-        assert!(matches!(args[0].label(), ArgLabel::Nolabel));
+        assert!(args[0].label().is_nolabel());
         for (arg, expected) in args.iter().zip(&labels).skip(1) {
-            assert!(arg.label().same_label(expected));
+            assert!(
+                arg.label()
+                    .same_label(crate::types::type_expr::TypeArgLabel::new(expected))
+            );
             assert_eq!(ctx.resolve_loc(arg.label().loc()), loc);
         }
     }

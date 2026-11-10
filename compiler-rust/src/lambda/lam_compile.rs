@@ -7957,3 +7957,37 @@ impl StrSw {
         p.has_default.then(|| a.list(self.actions)[p.n_cases()])
     }
 }
+
+#[cfg(test)]
+mod restored_effect_regression {
+    use super::*;
+    #[test]
+    fn group_effect_reason_is_captured_before_flat_aliases() {
+        for (name, effectful) in [("pure", false), ("effectful", true)] {
+            let id = Ident::create_local(name);
+            let value = if effectful {
+                crate::lambda::Lambda::prim(Primitive::Pdebugger, vec![], LamLoc::NONE)
+            } else {
+                crate::lambda::Lambda::unit()
+            };
+            let input = crate::lambda::Lambda::prim(
+                Primitive::Pmakeblock(
+                    TagInfo::ModuleExport(vec![id]),
+                    crate::lambda::lam_primitive::Mutable::Immutable,
+                ),
+                vec![value],
+                LamLoc::NONE,
+            );
+            let result = crate::lambda::lam_compile_main::simplify_for_js_backend(
+                &input,
+                false,
+                &mut |_, _| None,
+                &mut |_, _| None,
+            );
+            assert_eq!(
+                module_side_effect_reason(&result.arena, result.lam).as_deref(),
+                effectful.then_some("effectful")
+            );
+        }
+    }
+}

@@ -542,3 +542,149 @@ pub fn cmj_export_arities(s: &Simplified) -> AHashMap<String, CmjExportArity> {
     }
     arities
 }
+
+#[cfg(test)]
+mod regression_tests {
+    use super::*;
+    use crate::lambda::Lambda;
+    use crate::ident::IdentFlags;
+    fn id(name: &str, stamp: i32) -> Ident {
+        Ident::new(name, stamp, IdentFlags::NONE)
+    }
+    fn step(pos: i32, name: &str) -> crate::lambda::FlatMakeStep {
+        crate::lambda::FlatMakeStep {
+            pos,
+            name: name.into(),
+        }
+    }
+    fn export_node(exports: Vec<Ident>, args: Vec<Lambda>) -> Lambda {
+        Lambda::prim(
+            Primitive::Pmakeblock(TagInfo::ModuleExport(exports), Mutable::Immutable),
+            args,
+            LamLoc::NONE,
+        )
+    }
+
+    fn run(input: Lambda, paths: &[FlatMakePath]) -> Simplified {
+        let mut result = simplify_for_js_backend(&input, false, &mut |_, _| None, &mut |_, _| None);
+        add_flat_make_aliases(&mut result, paths);
+        result
+    }
+    fn export_values(result: &Simplified) -> Vec<(Ident, Lambda)> {
+        let mut groups = AHashMap::new();
+        collect_groups(&result.arena, result.lam, &mut groups);
+        let (ids, values) = super::module_export(&result.arena, result.lam).unwrap();
+        ids.iter()
+            .zip(values)
+            .map(|(id, value)| {
+                let value = result
+                    .arena
+                    .as_var(*value)
+                    .and_then(|id| groups.get(&id).copied())
+                    .unwrap_or(*value);
+                (*id, result.arena.export(value))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn flat_alias_of_another_unit_reads_its_flat_export_path() {
+        let module = id("Provider", 1);
+        let other = id("Sidebar", 0);
+        let input = Lambda::let_(
+            LetKind::Alias,
+            module,
+            Lambda::prim(
+                Primitive::Pfield(
+                    0,
+                    FieldDbgInfo::Module {
+                        name: "Provider".into(),
+                    },
+                ),
+                vec![Lambda::global_module(other)],
+                LamLoc::NONE,
+            ),
+            export_node(vec![module], vec![Lambda::var(module)]),
+        );
+        let result = run(input, &[vec![step(0, "Provider"), step(0, "make")]]);
+        let (_, value) = export_values(&result)
+            .into_iter()
+            .find(|(id, _)| id.name() == "Provider$make")
+            .unwrap();
+        // `Sidebar.Provider.make`, a path the JS backend reads as the flat
+        // export `Sidebar.Provider$make`.
+        let Lambda::Lprim(make) = &value else {
+            panic!("{value:?}")
+        };
+        assert!(matches!(
+            (&make.primitive, make.args.as_slice()),
+            (Primitive::Pfield(0, FieldDbgInfo::Module { name }), [Lambda::Lprim(_)]) if name == "make"
+        ));
+    }
+    #[test]
+    fn flat_aliases_follow_the_paths_and_are_exported_in_path_order() {
+        let first = id("make", 2);
+        let second = id("make", 3);
+        let module_a = id("A", 1);
+        let module_b = id("B", 4);
+        let block = |binding| {
+            Lambda::prim(
+                Primitive::Pmakeblock(TagInfo::Module(vec!["make".into()]), Mutable::Immutable),
+                vec![Lambda::var(binding)],
+                LamLoc::NONE,
+            )
+        };
+        let function =
+            || Lambda::function_(0, vec![], Lambda::unit(), Default::default(), LamLoc::NONE);
+        let input = Lambda::let_(
+            LetKind::Strict,
+            first,
+            function(),
+            Lambda::let_(
+                LetKind::Strict,
+                module_a,
+                block(first),
+                Lambda::let_(
+                    LetKind::Strict,
+                    second,
+                    function(),
+                    Lambda::let_(
+                        LetKind::Strict,
+                        module_b,
+                        block(second),
+                        export_node(
+                            vec![module_a, module_b],
+                            vec![Lambda::var(module_a), Lambda::var(module_b)],
+                        ),
+                    ),
+                ),
+            ),
+        );
+        let result = run(
+            input,
+            &[
+                vec![step(0, "A"), step(0, "make")],
+                vec![step(1, "B"), step(0, "make")],
+            ],
+        );
+        let names = result
+            .meta
+            .exports
+            .iter()
+            .map(|id| id.name())
+            .collect::<Vec<_>>();
+        assert_eq!(names[names.len() - 2..], ["A$make", "B$make"]);
+        // Each alias resolves through the module block to a toplevel binding.
+        for (id, value) in export_values(&result) {
+            if id.name().ends_with("$make") {
+                assert!(matches!(value, Lambda::Lvar(_)), "{value:?}");
+            }
+        }
+        assert!(
+            !super::module_export(&result.arena, result.lam)
+                .unwrap()
+                .1
+                .is_empty()
+        );
+    }
+}

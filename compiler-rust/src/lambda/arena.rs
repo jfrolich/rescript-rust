@@ -1148,6 +1148,13 @@ impl LamArena {
         }
     }
 
+    /// [`Self::prim`] reusing an existing primitive payload, with new
+    /// arguments.
+    pub fn prim_with_id(&mut self, info: PrimId, args: &[Lam]) -> Lam {
+        let args = self.add_list(args);
+        self.prim_with(info, args)
+    }
+
     fn fold_prim(&self, primitive: &Primitive, args: &[Lam]) -> Option<Folded> {
         let c = |c| Some(Folded::Const(c));
         let b = |v: bool| {

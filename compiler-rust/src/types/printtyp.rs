@@ -15,6 +15,7 @@ use crate::types::asttypes::ArgLabel;
 use crate::types::btype;
 use crate::types::context::TypeContext;
 use crate::types::path::Path;
+use crate::types::path::PathView;
 use crate::types::type_expr::{GENERIC_LEVEL, RowDesc, RowField, TypeDesc, TypeExprRef};
 
 // ============================================================================
@@ -172,7 +173,7 @@ pub(crate) struct Printtyp<'a> {
     ctx: &'a TypeContext,
     names: Vec<(TypeExprRef, String)>,
     name_counter: usize,
-    named_vars: Vec<String>,
+    named_vars: Vec<crate::name::Name>,
     weak_counter: usize,
     weak_var_map: Vec<(TypeExprRef, String)>,
     named_weak_vars: Vec<String>,
@@ -231,10 +232,10 @@ impl<'a> Printtyp<'a> {
     // ------------------------------------------------------------------
 
     fn non_shadowed_pervasive_or_stdlib(&self, path: &Path) -> bool {
-        let Path::Pdot(parent, s, _) = path else {
+        let PathView::Pdot(parent, s, _) = path.view() else {
             return false;
         };
-        let Path::Pident(id) = parent.as_ref() else {
+        let PathView::Pident(id) = parent.view() else {
             return false;
         };
         if !(id.is_persistent() && matches!(id.name(), "Pervasives" | "Stdlib")) {
@@ -280,22 +281,22 @@ impl<'a> Printtyp<'a> {
         if let Some(relative) = self.unit_relative_path(path) {
             return relative;
         }
-        match path {
-            Path::Pident(id) => OutIdent::Oide_ident(self.ident_name(id)),
-            Path::Pdot(_, s, _) if self.non_shadowed_pervasive_or_stdlib(path) => {
+        match path.view() {
+            PathView::Pident(id) => OutIdent::Oide_ident(self.ident_name(id)),
+            PathView::Pdot(_, s, _) if self.non_shadowed_pervasive_or_stdlib(path) => {
                 OutIdent::Oide_ident(s.to_string())
             }
-            Path::Pdot(p, s, _) if p.name().starts_with("Stdlib_") => {
+            PathView::Pdot(p, s, _) if p.name().starts_with("Stdlib_") => {
                 let path_name = p.name();
                 OutIdent::Oide_dot(
                     Box::new(OutIdent::Oide_ident(path_name[7..].to_string())),
                     s.to_string(),
                 )
             }
-            Path::Pdot(p, s, _) => {
+            PathView::Pdot(p, s, _) => {
                 OutIdent::Oide_dot(Box::new(self.tree_of_path(p)), s.to_string())
             }
-            Path::Papply(p1, p2) => OutIdent::Oide_apply(
+            PathView::Papply(p1, p2) => OutIdent::Oide_apply(
                 Box::new(self.tree_of_path(p1)),
                 Box::new(self.tree_of_path(p2)),
             ),
@@ -327,7 +328,7 @@ impl<'a> Printtyp<'a> {
     }
 
     fn add_named_var(&mut self, ty: TypeExprRef) {
-        if let TypeDesc::Tvar(Some(name), ..) | TypeDesc::Tunivar(Some(name), ..) =
+        if let TypeDesc::Tvar(Some(name)) | TypeDesc::Tunivar(Some(name)) =
             &*self.ctx.borrow_desc(ty)
             && !self.named_vars.contains(name)
         {
@@ -377,9 +378,7 @@ impl<'a> Printtyp<'a> {
             return name.clone();
         }
         let given = match &*self.ctx.borrow_desc(t) {
-            TypeDesc::Tvar(Some(name), ..) | TypeDesc::Tunivar(Some(name), ..) => {
-                Some(name.clone())
-            }
+            TypeDesc::Tvar(Some(name)) | TypeDesc::Tunivar(Some(name)) => Some(name.to_string()),
             _ => None,
         };
         let name = match given {
@@ -494,23 +493,23 @@ impl<'a> Printtyp<'a> {
         match desc {
             TypeDesc::Tvar(..) => self.add_named_var(ty),
             TypeDesc::Tarrow { args, ret } => {
-                for arg in &args {
+                for arg in self.ctx.type_args(&args).iter() {
                     self.mark_loops_rec(visited, arg.typ);
                 }
                 self.mark_loops_rec(visited, ret);
             }
             TypeDesc::Ttuple(tyl) => {
-                for t in tyl {
+                for t in self.ctx.type_list(tyl) {
                     self.mark_loops_rec(visited, t);
                 }
             }
             TypeDesc::Tconstr { args, .. } => {
-                for t in args {
+                for t in self.ctx.type_list(args) {
                     self.mark_loops_rec(visited, t);
                 }
             }
             TypeDesc::Tpackage { args, .. } => {
-                for t in args {
+                for t in self.ctx.type_list(args) {
                     self.mark_loops_rec(visited, t);
                 }
             }
@@ -518,7 +517,7 @@ impl<'a> Printtyp<'a> {
                 if self.visited_objects.contains(&px) {
                     self.add_alias(px);
                 } else {
-                    let row = btype::row_repr(self.ctx, &row);
+                    let row = btype::row_repr(self.ctx, &self.ctx.row_desc(row));
                     if !btype::static_row(self.ctx, &row) {
                         self.visited_objects.insert(0, px);
                     }
@@ -559,7 +558,7 @@ impl<'a> Printtyp<'a> {
             TypeDesc::Tsubst(t) => self.mark_loops_rec(visited, t),
             TypeDesc::Tlink(_) => unreachable!("Printtyp.mark_loops_rec (2)"),
             TypeDesc::Tpoly { body, vars } => {
-                for t in vars {
+                for t in self.ctx.type_list(vars) {
                     self.add_alias(t);
                 }
                 self.mark_loops_rec(visited, body);
@@ -629,10 +628,12 @@ impl<'a> Printtyp<'a> {
                     OutType::Otyp_var(non_gen, name)
                 }
                 TypeDesc::Tarrow { args, ret } => {
-                    let args = args
+                    let args = self
+                        .ctx
+                        .type_args(args)
                         .iter()
                         .map(|arg| {
-                            let label = arg.label();
+                            let label = arg.label().to_arg_label();
                             let t1 = if matches!(label, ArgLabel::Optional(_)) {
                                 let repr = this.ctx.repr(arg.typ);
                                 let inner = match &*this.ctx.borrow_desc(repr) {
@@ -640,7 +641,7 @@ impl<'a> Printtyp<'a> {
                                         if args.len() == 1
                                             && path.same(&crate::types::predef::path_option()) =>
                                     {
-                                        Some(args[0])
+                                        Some(this.ctx.type_list_at(args, 0))
                                     }
                                     _ => None,
                                 };
@@ -661,7 +662,9 @@ impl<'a> Printtyp<'a> {
                         .collect();
                     OutType::Otyp_arrow(args, Box::new(this.tree_of_typexp(sch, *ret)))
                 }
-                TypeDesc::Ttuple(tyl) => OutType::Otyp_tuple(this.tree_of_typlist(sch, tyl)),
+                TypeDesc::Ttuple(tyl) => {
+                    OutType::Otyp_tuple(this.tree_of_typlist(sch, &this.ctx.type_list(tyl)))
+                }
                 TypeDesc::Tconstr { path, .. }
                     if this.find_inlined_type(&path.name()).is_some() =>
                 {
@@ -673,16 +676,22 @@ impl<'a> Printtyp<'a> {
                     let labels = labels.iter().map(|l| this.tree_of_label(l)).collect();
                     OutType::Otyp_record(labels)
                 }
-                TypeDesc::Tconstr { path, args, .. } => {
-                    OutType::Otyp_constr(this.tree_of_path(path), this.tree_of_typlist(sch, args))
-                }
-                TypeDesc::Tvariant(row) => this.tree_of_variant(sch, px, row),
+                TypeDesc::Tconstr { path, args, .. } => OutType::Otyp_constr(
+                    this.tree_of_path(path),
+                    this.tree_of_typlist(sch, &this.ctx.type_list(args)),
+                ),
+                TypeDesc::Tvariant(row) => this.tree_of_variant(sch, px, &this.ctx.row_desc(row)),
                 TypeDesc::Tobject { fields } => this.tree_of_typobject(sch, *fields),
                 TypeDesc::Tnil | TypeDesc::Tfield { .. } => this.tree_of_typobject(sch, ty),
                 TypeDesc::Tsubst(t) => this.tree_of_typexp(sch, *t),
                 TypeDesc::Tlink(_) => unreachable!("Printtyp.tree_of_typexp"),
                 TypeDesc::Tpoly { body, vars } => {
-                    let tyl: Vec<TypeExprRef> = vars.iter().map(|t| this.ctx.repr(*t)).collect();
+                    let tyl: Vec<TypeExprRef> = this
+                        .ctx
+                        .type_list(vars)
+                        .iter()
+                        .map(|t| this.ctx.repr(*t))
+                        .collect();
                     if tyl.is_empty() {
                         this.tree_of_typexp(sch, *body)
                     } else {
@@ -700,11 +709,17 @@ impl<'a> Printtyp<'a> {
                 }
                 TypeDesc::Tunivar(..) => OutType::Otyp_var(false, this.name_of_type(false, ty)),
                 TypeDesc::Tpackage { path, lids, args } => {
-                    let n = lids
+                    let n = this
+                        .ctx
+                        .package_lids(lids)
                         .iter()
                         .map(|li| flatten_longident(this.ctx, li).join("."))
                         .collect();
-                    OutType::Otyp_module(path.name(), n, this.tree_of_typlist(sch, args))
+                    OutType::Otyp_module(
+                        path.name(),
+                        n,
+                        this.tree_of_typlist(sch, &this.ctx.type_list(args)),
+                    )
                 }
             }
         };
@@ -809,7 +824,7 @@ impl<'a> Printtyp<'a> {
                     self.ctx.mutability_repr(f.mutability),
                     crate::types::asttypes::MutableFlag::Mutable
                 );
-                (f.name, mutable, f.typ)
+                (f.name.to_string(), mutable, f.typ)
             })
             .collect();
         present.sort_by(|(a, _, _), (b, _, _)| a.as_bytes().cmp(b.as_bytes()));
@@ -833,7 +848,7 @@ impl<'a> Printtyp<'a> {
             TypeDesc::Tconstr { path, args, .. }
                 if opt && args.len() == 1 && path.same(&crate::types::predef::path_option()) =>
             {
-                args[0]
+                self.ctx.type_list_at(args, 0)
             }
             _ => l.ld_type,
         };
@@ -939,7 +954,7 @@ impl<'a> Printtyp<'a> {
                     go(ctx, visited, vars, rest);
                 }
                 TypeDesc::Tvariant(row) => {
-                    let row = btype::row_repr(ctx, &row);
+                    let row = btype::row_repr(ctx, &ctx.row_desc(row));
                     let mut children = Vec::new();
                     btype::iter_row(ctx, &row, |t| children.push(t));
                     for t in children {
@@ -996,11 +1011,11 @@ impl<'a> Printtyp<'a> {
         if let Some(ty) = decl.type_manifest {
             let vars = self.free_variables(ty);
             for param in &params {
-                let is_underscore = matches!(&*self.ctx.borrow_desc(*param), TypeDesc::Tvar(Some(name), ..) if name == "_");
+                let is_underscore = matches!(&*self.ctx.borrow_desc(*param), TypeDesc::Tvar(Some(name)) if name == "_");
                 if is_underscore && vars.contains(param) {
                     self.ctx.set_desc(
                         *param,
-                        TypeDesc::Tvar(None, crate::types::type_expr::VarDescBlock::OWN),
+                        TypeDesc::Tvar(None),
                     );
                 }
             }
@@ -1022,15 +1037,14 @@ impl<'a> Printtyp<'a> {
             let desc = (*self.ctx.get_desc(repr)).clone();
             let ty = match desc {
                 TypeDesc::Tvariant(row) => {
-                    let row = btype::row_repr(self.ctx, &row);
+                    let row = btype::row_repr(self.ctx, &self.ctx.row_desc(row));
                     match &row.row_name {
-                        Some((Path::Pident(id2), _)) if id2.same(id) => {
-                            self.ctx
-                                .new_generic_type(TypeDesc::Tvariant(Box::new(RowDesc {
-                                    row_name: None,
-                                    ..row
-                                })))
-                        }
+                        Some((p, _)) if p.as_pident().is_some_and(|id2| id2.same(id)) => self
+                            .ctx
+                            .new_generic_type(TypeDesc::Tvariant(self.ctx.new_row_desc(RowDesc {
+                                row_name: None,
+                                ..row
+                            }))),
                         _ => ty,
                     }
                 }
@@ -1380,8 +1394,8 @@ impl<'a> Printtyp<'a> {
             if path.same(prefix) {
                 return Some(Vec::new());
             }
-            match path {
-                Path::Pdot(parent, name, _) => {
+            match path.view() {
+                PathView::Pdot(parent, name, _) => {
                     let mut rest = strip(parent, prefix)?;
                     rest.push(name.to_string());
                     Some(rest)
@@ -1445,7 +1459,7 @@ impl<'a> Printtyp<'a> {
             }
             if let SignatureItem::SigType(id, _, _) = item {
                 self.signature_types
-                    .push((id.name().to_string(), Path::Pident(*id)));
+                    .push((id.name().to_string(), Path::pident(*id)));
             }
         }
         self.signature_types.truncate(saved_visible);
@@ -2586,9 +2600,11 @@ impl<'a> Printtyp<'a> {
             ) => {
                 self.normalized_paths_same(p1, p2)
                     && tl1.len() == tl2.len()
-                    && tl1
+                    && self
+                        .ctx
+                        .type_list(tl1)
                         .iter()
-                        .zip(tl2.iter())
+                        .zip(self.ctx.type_list(tl2).iter())
                         .all(|(a, b)| self.ctx.repr(*a) == self.ctx.repr(*b))
             }
             _ => false,
@@ -2616,17 +2632,17 @@ impl<'a> Printtyp<'a> {
     }
 
     fn path_same_name(&mut self, p1: &Path, p2: &Path) {
-        match (p1, p2) {
-            (Path::Pident(id1), Path::Pident(id2)) => {
+        match (p1.view(), p2.view()) {
+            (PathView::Pident(id1), PathView::Pident(id2)) => {
                 if id1.name() == id2.name() && !id1.same(id2) {
                     self.add_unique(id1);
                     self.add_unique(id2);
                 }
             }
-            (Path::Pdot(p1, s1, _), Path::Pdot(p2, s2, _)) if s1 == s2 => {
+            (PathView::Pdot(p1, s1, _), PathView::Pdot(p2, s2, _)) if s1 == s2 => {
                 self.path_same_name(p1, p2)
             }
-            (Path::Papply(p1, p1b), Path::Papply(p2, p2b)) => {
+            (PathView::Papply(p1, p1b), PathView::Papply(p2, p2b)) => {
                 self.path_same_name(p1, p2);
                 self.path_same_name(p1b, p2b);
             }
@@ -2663,7 +2679,7 @@ impl<'a> Printtyp<'a> {
     fn hide_variant_name(&self, t: TypeExprRef) -> TypeExprRef {
         let t = self.ctx.repr(t);
         let row = match &*self.ctx.borrow_desc(t) {
-            TypeDesc::Tvariant(row) => btype::row_repr(self.ctx, row),
+            TypeDesc::Tvariant(row) => btype::row_repr(self.ctx, &self.ctx.row_desc(row)),
             _ => return t,
         };
         if row.row_name.is_none() {
@@ -2671,12 +2687,12 @@ impl<'a> Printtyp<'a> {
         }
         let more_level = self.ctx.get_level(btype::row_more(self.ctx, &row));
         let row_more = self.ctx.alloc_type_at_level(
-            TypeDesc::Tvar(None, crate::types::type_expr::VarDescBlock::OWN),
+            TypeDesc::Tvar(None),
             more_level,
         );
         let level = self.ctx.get_level(t);
         self.ctx.alloc_type_at_level(
-            TypeDesc::Tvariant(Box::new(RowDesc {
+            TypeDesc::Tvariant(self.ctx.new_row_desc(RowDesc {
                 row_name: None,
                 row_more,
                 ..row
@@ -2693,14 +2709,14 @@ impl<'a> Printtyp<'a> {
         match desc {
             TypeDesc::Tvar(..) | TypeDesc::Tunivar(..) => ty,
             TypeDesc::Tvariant(row) => {
-                let row = btype::row_repr(self.ctx, &row);
+                let row = btype::row_repr(self.ctx, &self.ctx.row_desc(row));
                 let more = self.ctx.repr(row.row_more);
                 let more_desc = (*self.ctx.get_desc(more)).clone();
                 let row_more = self
                     .ctx
                     .alloc_type_at_level(more_desc, self.ctx.get_level(more));
                 self.ctx.alloc_type_at_level(
-                    TypeDesc::Tvariant(Box::new(RowDesc { row_more, ..row })),
+                    TypeDesc::Tvariant(self.ctx.new_row_desc(RowDesc { row_more, ..row })),
                     level,
                 )
             }
@@ -2743,7 +2759,7 @@ impl<'a> Printtyp<'a> {
             }
             TypeDesc::Tunivar(..) => ty,
             _ => self.ctx.alloc_type_at_level(
-                TypeDesc::Tvar(None, crate::types::type_expr::VarDescBlock::OWN),
+                TypeDesc::Tvar(None),
                 level,
             ),
         }
@@ -2753,14 +2769,11 @@ impl<'a> Printtyp<'a> {
     fn is_constr_row(&self, allow_ident: bool, t: TypeExprRef) -> bool {
         let is_row_name = |s: &str| s.len() >= 4 && s.ends_with("#row");
         match &*self.ctx.borrow_desc(self.ctx.repr(t)) {
-            TypeDesc::Tconstr {
-                path: Path::Pident(id),
-                ..
-            } if allow_ident => is_row_name(id.name()),
-            TypeDesc::Tconstr {
-                path: Path::Pdot(_, s, _),
-                ..
-            } => is_row_name(s),
+            TypeDesc::Tconstr { path, .. } => match path.view() {
+                PathView::Pident(id) => allow_ident && is_row_name(id.name()),
+                PathView::Pdot(_, s, _) => is_row_name(s),
+                PathView::Papply(..) => false,
+            },
             _ => false,
         }
     }
@@ -3112,8 +3125,8 @@ impl<'a> Printtyp<'a> {
                 ppf.close_box();
             }
             (TypeDesc::Tvariant(row1), TypeDesc::Tvariant(row2)) => {
-                let row1 = btype::row_repr(self.ctx, row1);
-                let row2 = btype::row_repr(self.ctx, row2);
+                let row1 = btype::row_repr(self.ctx, &self.ctx.row_desc(row1));
+                let row2 = btype::row_repr(self.ctx, &self.ctx.row_desc(row2));
                 let f1: Vec<(String, RowField)> = row1
                     .row_fields
                     .iter()
@@ -3168,7 +3181,7 @@ impl<'a> Printtyp<'a> {
 
     /// `escape_explanation ppf p` (printtyp.ml:1303-1318).
     fn escape_scope<W: std::io::Write>(&mut self, ppf: &mut Formatter<W>, p: &Path) {
-        if let Path::Pident(id) = p
+        if let PathView::Pident(id) = p.view()
             && let Some(constructor) = self.ctx.existential_constructor(id)
         {
             let constructor = constructor.as_str();
@@ -3245,11 +3258,11 @@ impl<'a> Printtyp<'a> {
 
     /// `Printtyp.path ppf p`.
     pub(crate) fn path_text(&self, p: &Path) -> String {
-        match p {
-            Path::Pident(id) => self.ident_name(id),
-            Path::Pdot(_, s, _) if self.non_shadowed_pervasive_or_stdlib(p) => s.to_string(),
-            Path::Pdot(parent, s, _) => format!("{}.{}", self.path_text(parent), s),
-            Path::Papply(p1, p2) => format!("{}({})", self.path_text(p1), self.path_text(p2)),
+        match p.view() {
+            PathView::Pident(id) => self.ident_name(id),
+            PathView::Pdot(_, s, _) if self.non_shadowed_pervasive_or_stdlib(p) => s.to_string(),
+            PathView::Pdot(parent, s, _) => format!("{}.{}", self.path_text(parent), s),
+            PathView::Papply(p1, p2) => format!("{}({})", self.path_text(p1), self.path_text(p2)),
         }
     }
 

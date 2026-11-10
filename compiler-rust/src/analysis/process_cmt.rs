@@ -215,11 +215,11 @@ impl Processor<'_> {
                         Some(manifest) => match &*self.ctx.types.get_desc(manifest) {
                             TypeDesc::Tconstr { path, args, .. } => TypeKind::Abstract(Some((
                                 path.clone(),
-                                args.iter().copied().collect(),
+                                self.ctx.types.type_list(args).iter().copied().collect(),
                             ))),
-                            TypeDesc::Ttuple(items) => {
-                                TypeKind::Tuple(items.iter().copied().collect())
-                            }
+                            TypeDesc::Ttuple(items) => TypeKind::Tuple(
+                                self.ctx.types.type_list(items).iter().copied().collect(),
+                            ),
                             _ => TypeKind::Abstract(None),
                         },
                         None => TypeKind::Abstract(None),

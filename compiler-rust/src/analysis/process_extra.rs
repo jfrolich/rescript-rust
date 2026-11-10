@@ -9,6 +9,7 @@ use crate::ident::{Ident, IdentFlags};
 use crate::parse_arena::{LidentIdx, LocIdx};
 use crate::parser::longident::Longident;
 use crate::types::decl::ConstructorDescription;
+use crate::types::path::PathView;
 use crate::types::tast_iterator::{self as ti, TastIterator};
 use crate::types::typedtree as tt;
 use crate::types::{Path, TypeDesc, TypeExprRef};
@@ -85,7 +86,7 @@ fn extra_for_file(file: &File, types: &crate::types::TypeContext) -> Extra {
             TypeKind::Variant(constructors) => {
                 for c in constructors {
                     add_reference(&mut extra, c.stamp, c.cname.loc);
-                    let path = Path::Pident(Ident::new(
+                    let path = Path::pident(Ident::new(
                         d.name.txt.as_str(),
                         c.stamp,
                         IdentFlags::from_bits_truncate(0),
@@ -94,7 +95,6 @@ fn extra_for_file(file: &File, types: &crate::types::TypeContext) -> Extra {
                         path,
                         args: Default::default(),
                         abbrev: types.alloc_abbrev_nil(),
-                        path_block: crate::types::type_expr::PathBlock::OWN,
                     });
                     add_loc_item(
                         &mut extra,
@@ -455,7 +455,8 @@ impl ExtraIterator<'_, '_> {
                 Some((t, tip)) => self.add_for_path(path, txt, l, t, tip),
                 None => self.add_for_path_parent(path, l),
             }
-            if let (Path::Pdot(pinner, _, _), Longident::Ldot(inner, name)) = (path, txt) {
+            if let (PathView::Pdot(pinner, _, _), Longident::Ldot(inner, name)) = (path.view(), txt)
+            {
                 let name_len = self.ctx.arena.get_string(*name).len() as i32;
                 self.add_for_longident(None, pinner, inner, loc.chop_location_end(name_len + 1));
             }

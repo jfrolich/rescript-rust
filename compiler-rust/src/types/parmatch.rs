@@ -548,7 +548,7 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                 let row = row.clone();
                 drop(desc);
                 matches!(
-                    crate::types::btype::row_field(ctx, tag, &row),
+                    crate::types::btype::row_field(ctx, tag, &ctx.row_desc(row)),
                     RowField::Rabsent
                 )
             }

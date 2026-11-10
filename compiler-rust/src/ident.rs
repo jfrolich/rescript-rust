@@ -120,90 +120,6 @@ pub struct Ident {
     name: Name,
     stamp: i32,
     flags: IdentFlags,
-    /// Which `Ident.t` block this is, for identifiers decoded from a
-    /// compiled interface (see [`IdentOrigin`]). Never compared, hashed or
-    /// serialized.
-    #[serde(skip)]
-    origin: IdentOrigin,
-}
-
-/// The physical identity of an identifier read from a compiled interface.
-///
-/// OCaml's `Ident.t` is a heap block: an identifier unmarshalled from a
-/// `.cmi` is a block of its own, apart from the compiler's `Predef.ident_*`
-/// or any identifier of the compilation, even with the same stamp and name.
-/// Rust identifiers are values, so a decoded one carries the number of its
-/// marshal block, or of its block in the saved interface a stored graph was
-/// imported from (0 for every other identifier). Its only reader went with
-/// `Includemod.is_big`, which counted each block once. Three bytes, in the padding after `flags`.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub struct IdentOrigin([u8; 3]);
-
-impl IdentOrigin {
-    /// The largest origin number.
-    pub const MAX: u32 = 0x00FF_FFFF;
-    /// The origins of graphs a compilation imports into its own arena,
-    /// restarting with each compilation.
-    pub const COMPILATION: std::ops::Range<u32> = 1..0x0040_0000;
-    /// The origins of graphs imported into a worker's store, which a
-    /// worker's compilations share for one build.
-    pub const STORE: std::ops::Range<u32> = 0x0040_0000..0x0080_0000;
-    /// The origins of graphs published to the process-wide shared pool for
-    /// one build.
-    pub const SHARED: std::ops::Range<u32> = 0x0080_0000..0x0100_0000;
-
-    /// The origin `next` holds in `range`, advancing it. The ranges keep the
-    /// three importer kinds apart. Within one allocator an origin is never
-    /// handed out twice: running out is an error rather than a reuse of an
-    /// origin some identifier may still hold. Crossing allocator lifetimes
-    /// requires remapping; these numeric ranges do not identify instances.
-    pub fn next_in(range: std::ops::Range<u32>, next: &std::cell::Cell<u32>) -> Self {
-        Self::validate_range(&range);
-        let origin = next.get();
-        assert!(
-            range.start <= origin,
-            "identifier origin counter {origin:#x} is below its range {range:x?}"
-        );
-        assert!(
-            origin < range.end,
-            "identifier origins exhausted: {} identifier blocks imported in the range {range:x?}",
-            range.end - range.start
-        );
-        next.set(origin + 1);
-        Self::new(origin)
-    }
-
-    /// The `n`-th origin of `range` for an allocator shared by threads,
-    /// checked as [`IdentOrigin::next_in`] checks it.
-    pub fn nth_in(range: std::ops::Range<u32>, n: u32) -> Self {
-        Self::validate_range(&range);
-        assert!(
-            n < range.end - range.start,
-            "identifier origins exhausted: {} identifier blocks imported in the range {range:x?}",
-            range.end - range.start
-        );
-        Self::new(range.start + n)
-    }
-
-    fn validate_range(range: &std::ops::Range<u32>) {
-        assert!(
-            *range == Self::COMPILATION || *range == Self::STORE || *range == Self::SHARED,
-            "invalid identifier origin range {range:x?}"
-        );
-    }
-
-    /// The origin numbered `n`.
-    pub fn new(n: u32) -> Self {
-        assert!(n <= Self::MAX, "identifier origins exhausted");
-        let [a, b, c, _] = n.to_le_bytes();
-        Self([a, b, c])
-    }
-
-    /// The number of this origin; 0 for an identifier not decoded.
-    pub fn get(self) -> u32 {
-        let [a, b, c] = self.0;
-        u32::from_le_bytes([a, b, c, 0])
-    }
 }
 
 impl Ident {
@@ -216,7 +132,6 @@ impl Ident {
             name: name.into(),
             stamp,
             flags,
-            origin: IdentOrigin::default(),
         }
     }
 
@@ -230,7 +145,6 @@ impl Ident {
             name: name.into(),
             stamp: 0,
             flags: IdentFlags::GLOBAL,
-            origin: IdentOrigin::default(),
         }
     }
 
@@ -254,7 +168,6 @@ impl Ident {
             name,
             stamp,
             flags: IdentFlags::NONE,
-            origin: IdentOrigin::default(),
         }
     }
 
@@ -368,21 +281,7 @@ impl Ident {
             name: self.name,
             stamp: self.stamp,
             flags: self.flags.with_global(),
-            // `Ident.make_global` sets the flag of the same block.
-            origin: self.origin,
         }
-    }
-
-    /// This identifier as the decoded block numbered by `origin`.
-    #[inline]
-    pub fn with_origin(self, origin: IdentOrigin) -> Self {
-        Self { origin, ..self }
-    }
-
-    /// The block this identifier was decoded from, if any.
-    #[inline]
-    pub fn origin(&self) -> IdentOrigin {
-        self.origin
     }
 
     /// Create a hidden version of this identifier (stamp = -1).
@@ -392,7 +291,6 @@ impl Ident {
             name: self.name,
             stamp: -1,
             flags: self.flags,
-            origin: IdentOrigin::default(),
         }
     }
 
@@ -403,7 +301,6 @@ impl Ident {
             name: self.name,
             stamp,
             flags: self.flags,
-            origin: IdentOrigin::default(),
         }
     }
 
@@ -418,7 +315,6 @@ impl Ident {
             name: self.name,
             stamp,
             flags: self.flags,
-            origin: IdentOrigin::default(),
         }
     }
 }
@@ -634,85 +530,6 @@ mod tests {
         // All stamps should be unique
         let stamps: std::collections::HashSet<i32> = all_ids.iter().map(|id| id.stamp()).collect();
         assert_eq!(stamps.len(), all_ids.len());
-    }
-}
-
-#[cfg(test)]
-mod origin_tests {
-    use super::*;
-    use std::cell::Cell;
-    use std::ops::Range;
-
-    const RANGES: [Range<u32>; 3] = [
-        IdentOrigin::COMPILATION,
-        IdentOrigin::STORE,
-        IdentOrigin::SHARED,
-    ];
-
-    #[test]
-    fn origin_ranges_are_disjoint_nonzero_and_fit_three_bytes() {
-        assert_eq!(IdentOrigin::COMPILATION.start, 1, "0 is no origin");
-        assert_eq!(IdentOrigin::COMPILATION.end, IdentOrigin::STORE.start);
-        assert_eq!(IdentOrigin::STORE.end, IdentOrigin::SHARED.start);
-        assert_eq!(IdentOrigin::SHARED.end, IdentOrigin::MAX + 1);
-        assert_eq!(std::mem::size_of::<Ident>(), 16);
-    }
-
-    /// An allocator hands out the last origin of its range once, then
-    /// refuses: it never returns to an origin it already handed out.
-    #[test]
-    fn each_range_ends_without_reusing_an_origin() {
-        for range in RANGES {
-            let next = Cell::new(range.end - 2);
-            let a = IdentOrigin::next_in(range.clone(), &next);
-            let b = IdentOrigin::next_in(range.clone(), &next);
-            assert_eq!((a.get(), b.get()), (range.end - 2, range.end - 1));
-            for _ in 0..2 {
-                let again = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    IdentOrigin::next_in(range.clone(), &next)
-                }));
-                assert!(
-                    again.is_err(),
-                    "{range:x?} handed out an origin past its end"
-                );
-                assert_eq!(next.get(), range.end, "the counter does not wrap");
-            }
-            let span = range.end - range.start;
-            assert_eq!(
-                IdentOrigin::nth_in(range.clone(), span - 1).get(),
-                range.end - 1
-            );
-            assert!(std::panic::catch_unwind(|| IdentOrigin::nth_in(range.clone(), span)).is_err());
-        }
-    }
-
-    #[test]
-    fn invalid_ranges_are_refused_before_advancing() {
-        for range in [0..1, 1..1, 5..4, 1..u32::MAX, 2..10] {
-            let next = Cell::new(range.start);
-            assert!(
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    IdentOrigin::next_in(range.clone(), &next)
-                }))
-                .is_err()
-            );
-            assert_eq!(next.get(), range.start);
-            assert!(std::panic::catch_unwind(|| IdentOrigin::nth_in(range.clone(), 0)).is_err());
-        }
-    }
-
-    #[test]
-    fn a_counter_outside_its_range_is_refused() {
-        for range in RANGES {
-            let below = Cell::new(range.start - 1);
-            assert!(
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| IdentOrigin::next_in(
-                    range.clone(),
-                    &below
-                )))
-                .is_err()
-            );
-        }
     }
 }
 

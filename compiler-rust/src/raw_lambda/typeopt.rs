@@ -4,6 +4,7 @@
 //! consults when deciding raw-lambda shapes such as `Blk_some_not_nested`.
 
 use crate::fast_hash::AHashSet as HashSet;
+use crate::types::path::PathView;
 
 use crate::types::context::TypeContext;
 use crate::types::decl::{
@@ -331,7 +332,7 @@ fn get_unboxed_type_representation(
             _ => return Some(ty),
         };
         let applied =
-            crate::types::ctype::apply(ctx, env, &decl.type_params, ty2, args.as_slice())?;
+            crate::types::ctype::apply(ctx, env, &decl.type_params, ty2, &ctx.type_list(args))?;
         go(ctx, env, applied, fuel - 1)
     }
     go(ctx, env, ty, 100)
@@ -392,7 +393,7 @@ pub(crate) fn is_base_type(ctx: &TypeContext, env: &Env, ty: TypeExprRef, name: 
 }
 
 fn type_is_builtin_path_but_option(path: &Path) -> BuiltinPathTest {
-    let Path::Pident(id) = path else {
+    let PathView::Pident(id) = path.view() else {
         return BuiltinPathTest::NotApplicable;
     };
     // OCaml checks by stamp range (predef stamps are in a known range).
@@ -491,8 +492,50 @@ mod tests {
             },
         );
 
-        let alias_ty = ctx.new_constr(Path::Pident(alias_id), vec![]);
+        let alias_ty = ctx.new_constr(Path::pident(alias_id), vec![]);
 
         assert!(is_base_type(&ctx, &env, alias_ty, "string"));
+    }
+    #[test]
+    fn base_type_expands_strengthened_local_path_by_identity() {
+        let id_gen = IdGenerator::new();
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
+        let module_id = ctx.create_ident("Dimension");
+        let path = Path::pdot(Path::pident(module_id), "t");
+        let decl = TypeDeclaration {
+            type_params: vec![],
+            type_arity: 0,
+            type_kind: TypeKind::TypeAbstract,
+            type_private: PrivateFlag::Public,
+            type_manifest: Some(ctx.predef_float()),
+            type_variance: vec![],
+            type_newtype_level: None,
+            type_loc: crate::types::DeclLoc::none(),
+            type_attributes: vec![],
+            type_immediate: false,
+            type_representation: crate::types::TypeRepresentation::Boxed,
+            type_shape: crate::types::ValueShape::Unstated,
+            type_inlined_types: vec![],
+            type_path: Some(path.clone()),
+        };
+        let mut env = Env::empty();
+        env.add_module(
+            module_id,
+            crate::types::decl::ModuleDeclaration {
+                md_type: crate::types::decl::ModuleType::MtySignature(std::sync::Arc::new(vec![
+                    crate::types::decl::SignatureItem::SigType(
+                        ctx.create_ident("t"),
+                        std::sync::Arc::new(decl),
+                        crate::types::decl::RecStatus::TrecNot,
+                    ),
+                ])),
+                md_loc: crate::types::DeclLoc::none(),
+                md_attributes: vec![],
+                md_path: None,
+            },
+        );
+        let ty = ctx.new_constr(path, vec![]);
+
+        assert!(is_base_type(&ctx, &env, ty, "float"));
     }
 }

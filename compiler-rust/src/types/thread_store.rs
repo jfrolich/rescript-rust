@@ -15,11 +15,9 @@
 //!
 //! Design: `projects/in-process-performance/THREAD_TYPE_STORE.md`.
 
-use super::context::TypeArena;
+use super::context::TypeNodes;
 use super::decl::Signature;
-use super::type_expr::{
-    AbbrevMemo, AbbrevMemoRef, RowField, RowFieldRef, TypeDesc, TypeExpr, TypeExprRef,
-};
+use super::type_expr::{AbbrevMemo, AbbrevMemoRef, RowField, RowFieldRef, TypeDesc, TypeExprRef};
 use super::variant_runtime::{Layout, LayoutRef};
 use crate::cmi::persistent_env::PersStruct;
 use crate::cmi::portable_types::PortablePersStruct;
@@ -78,21 +76,15 @@ struct PersEntry {
 
 /// Shared dependency state for one worker thread.
 pub(crate) struct ThreadTypeStore {
-    types: TypeArena,
+    types: TypeNodes,
     /// Initial memo values of store `Tconstr` nodes (always `Mnil` after
     /// internalization, like `compiler/ml/subst.ml:173-177` on save). Writes go
     /// to the reading compilation's overlay.
     abbrevs: RefCell<Vec<AbbrevMemo>>,
     row_fields: RefCell<Vec<Option<RowField>>>,
+    type_lists: super::type_expr::TypePayloadPool,
     variant_layouts: RefCell<Vec<Layout>>,
     next_type_id: Cell<i32>,
-    /// The next [`PathBlock`](crate::types::type_expr::PathBlock) token for a
-    /// path written into an existing node. Kept here so tokens are unique
-    /// among every node one worker's compilations can reach.
-    next_path_block_token: Cell<u32>,
-    /// The next [`IdentOrigin`](crate::ident::IdentOrigin) for an identifier
-    /// block decoded from a compiled interface (0 is "not decoded").
-    next_ident_origin: Cell<u32>,
     /// Internalized dependency signatures keyed by the identity of the
     /// portable struct they were built from (`compiler/ml/env.ml:669-678`:
     /// one `persistent_structures` entry per read unit).
@@ -133,36 +125,22 @@ pub(crate) struct ThreadTypeStore {
     /// (`DeclLocKind::Store` handles; see `types::decl_loc`).
     decl_locs: super::decl_loc::OwnedDeclLocs,
     decl_loc_owner: u32,
-    path_provenance: RefCell<super::path_provenance::PathProvenance>,
 }
 
 impl ThreadTypeStore {
-    /// An identifier origin no other decoded block holds.
-    pub(crate) fn fresh_ident_origin(&self) -> crate::ident::IdentOrigin {
-        crate::ident::IdentOrigin::next_in(
-            crate::ident::IdentOrigin::STORE,
-            &self.next_ident_origin,
-        )
-    }
 
-    /// A path block no other node holds.
-    pub(crate) fn fresh_path_block(&self) -> crate::types::type_expr::PathBlock {
-        let token = self.next_path_block_token.get();
-        self.next_path_block_token
-            .set(token.checked_add(1).expect("path block tokens exhausted"));
-        crate::types::type_expr::PathBlock::token(token)
-    }
 
     fn new() -> Self {
         let generation = BUILD_GENERATION.load(Ordering::SeqCst);
         ThreadTypeStore {
-            types: TypeArena::new(),
+            types: TypeNodes::new(),
             abbrevs: RefCell::new(Vec::new()),
             row_fields: RefCell::new(Vec::new()),
+            type_lists: super::type_expr::TypePayloadPool::with_tag(
+                super::type_expr::STORE_REF_TAG,
+            ),
             variant_layouts: RefCell::new(Vec::new()),
             next_type_id: Cell::new(STORE_TYPE_ID_BASE),
-            next_path_block_token: Cell::new(0),
-            next_ident_origin: Cell::new(crate::ident::IdentOrigin::STORE.start),
             pers: RefCell::new(HashMap::new()),
             shared_signatures: RefCell::new(HashSet::new()),
             signature_indexes: RefCell::new(HashMap::new()),
@@ -172,61 +150,19 @@ impl ThreadTypeStore {
             generation,
             shared: super::shared_store::pool_for(generation),
             decl_locs: Default::default(),
-            path_provenance: Default::default(),
             decl_loc_owner: super::decl_loc::next_table_owner(),
         }
     }
 
-    pub(crate) fn record_ident_name(
-        &self,
-        id: &crate::ident::Ident,
-        allocation: super::path_provenance::NameAllocation,
-    ) {
-        self.path_provenance
-            .borrow_mut()
-            .record_name(id, allocation);
-    }
 
-    pub(crate) fn ident_name_allocation(
-        &self,
-        id: &crate::ident::Ident,
-    ) -> Option<super::path_provenance::NameAllocation> {
-        self.path_provenance.borrow().name(id)
-            .or_else(|| self.shared.ident_name_allocation(id))
-    }
 
-    pub(crate) fn dotted_with_name(
-        &self,
-        prefix: Arc<super::Path>,
-        text: crate::name::Name,
-        name: super::path_provenance::NameAllocation,
-        pos: i32,
-    ) -> super::Path {
-        self.path_provenance
-            .borrow_mut()
-            .dotted(prefix, text, name, pos)
-    }
 
-    pub(crate) fn dotted_parts(
-        &self,
-        path: &super::Path,
-    ) -> Option<(Arc<super::Path>, super::path_provenance::NameAllocation)> {
-        if let Some((prefix, name)) = self.path_provenance.borrow().parts(path) {
-            return Some((prefix.clone(), name));
-        }
-        self.shared.dotted_parts(path)
-    }
 
-    pub(crate) fn dotted_allocation(
-        &self,
-        path: &super::Path,
-    ) -> Option<super::path_provenance::DottedAllocation> {
-        self.path_provenance
-            .borrow()
-            .get(path)
-            .cloned()
-            .or_else(|| self.shared.dotted_allocation(path))
-    }
+
+
+
+
+
 
     /// Store handle for a declaration location built into the store.
     pub(crate) fn intern_decl_loc(&self, loc: crate::location::Location) -> super::DeclLoc {
@@ -423,9 +359,78 @@ impl ThreadTypeStore {
         self.shared_pool().intern_longident_name(name)
     }
 
+    /// The descriptor of store node `r` as written in the store.
     #[inline]
-    pub(crate) fn node(&self, r: TypeExprRef) -> &TypeExpr {
-        self.types.get_at(r.store_index())
+    pub(crate) fn desc(&self, r: TypeExprRef) -> TypeDesc {
+        self.types.desc(r.store_index())
+    }
+
+    #[inline]
+    pub(crate) fn level(&self, r: TypeExprRef) -> i32 {
+        self.types.level(r.store_index())
+    }
+
+    #[inline]
+    pub(crate) fn id(&self, r: TypeExprRef) -> i32 {
+        self.types.id(r.store_index())
+    }
+
+    /// Allocate a type list in the worker store.
+    pub(crate) fn alloc_type_list(&self, items: &[TypeExprRef]) -> super::type_expr::TypeRefList {
+        self.type_lists.alloc(items)
+    }
+
+    /// Store a `Tvariant` row in the worker store.
+    pub(crate) fn alloc_row_desc(
+        &self,
+        row: super::type_expr::RowDesc,
+    ) -> super::type_expr::RowDescRef {
+        self.type_lists.alloc_row(row)
+    }
+
+    /// A copy of a worker-store row.
+    pub(crate) fn row_desc(&self, row: super::type_expr::RowDescRef) -> super::type_expr::RowDesc {
+        self.type_lists.get_row(row)
+    }
+
+    /// Store `Tpackage` constraint names in the worker store.
+    pub(crate) fn alloc_package_lids(
+        &self,
+        lids: Vec<crate::parser::longident::Longident>,
+    ) -> super::type_expr::PackageLidsRef {
+        self.type_lists.alloc_lids(lids)
+    }
+
+    /// A copy of worker-store `Tpackage` constraint names.
+    pub(crate) fn package_lids(
+        &self,
+        lids: super::type_expr::PackageLidsRef,
+    ) -> Vec<crate::parser::longident::Longident> {
+        self.type_lists.get_lids(lids)
+    }
+
+    /// Allocate an arrow parameter list in the worker store.
+    pub(crate) fn alloc_type_args(
+        &self,
+        args: &[super::type_expr::TypeArg],
+    ) -> super::type_expr::TypeArgList {
+        self.type_lists.alloc_args(args)
+    }
+
+    /// The parameters of a worker-store arrow parameter list.
+    pub(crate) fn type_args(
+        &self,
+        list: super::type_expr::TypeArgList,
+    ) -> super::type_expr::TypeArgs {
+        self.type_lists.get_args(list)
+    }
+
+    /// The elements of a worker-store type list.
+    pub(crate) fn type_list(
+        &self,
+        list: super::type_expr::TypeRefList,
+    ) -> super::type_expr::TypeRefs {
+        self.type_lists.get(list)
     }
 
     pub(crate) fn type_count(&self) -> usize {
@@ -436,18 +441,18 @@ impl ThreadTypeStore {
         let id = self.next_type_id.get();
         self.next_type_id
             .set(id.checked_add(1).expect("thread store type id exhausted"));
-        TypeExprRef::from_store_index(self.types.push_raw(TypeExpr::new(desc, level, id)))
+        TypeExprRef::from_store_index(self.types.push(desc, level, id))
     }
 
     /// Write the descriptor of a store node that is still being built by the
     /// current compilation (see `TypeContext::build_in_store`).
     pub(crate) fn set_desc_backing(&self, r: TypeExprRef, desc: TypeDesc) {
-        self.node(r).set_desc(desc);
+        self.types.set_desc(r.store_index(), desc);
     }
 
     /// Write the level of a store node that is still being built.
     pub(crate) fn set_level_backing(&self, r: TypeExprRef, level: i32) {
-        self.node(r).set_level(level);
+        self.types.set_level(r.store_index(), level);
     }
 
     pub(crate) fn row_field_count(&self) -> usize {
@@ -646,16 +651,13 @@ mod tests {
             let outer_ty = outer.alloc_type(TypeDesc::Tnil, GENERIC_LEVEL);
             let nested = current();
             assert_eq!(nested.type_count(), 0);
-            nested.alloc_type(
-                TypeDesc::Tvar(None, crate::types::type_expr::VarDescBlock::OWN),
-                GENERIC_LEVEL,
-            );
-            assert!(matches!(*outer.node(outer_ty).desc(), TypeDesc::Tnil));
+            nested.alloc_type(TypeDesc::Tvar(None), GENERIC_LEVEL);
+            assert!(matches!(outer.desc(outer_ty), TypeDesc::Tnil));
             drop(nested);
             drop(outer);
             let reused = current();
             assert_eq!(reused.type_count(), 1);
-            assert!(matches!(*reused.node(outer_ty).desc(), TypeDesc::Tnil));
+            assert!(matches!(reused.desc(outer_ty), TypeDesc::Tnil));
         })
         .join()
         .unwrap();

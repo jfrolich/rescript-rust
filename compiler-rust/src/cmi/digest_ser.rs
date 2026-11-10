@@ -254,7 +254,7 @@ impl<'a, 'h, H: Hasher> ser::Serializer for &'a mut Canonical<'h, H> {
             // allocation order; cache validity must not depend on that.
             "Location" | "Position" | "LamLoc" | "DeclLoc" | "DeclLocTable" => Fields::Skip,
             // The physical sharing of a saved graph, not its meaning.
-            "PortableIdentities" | "ShapeBlocks" | "ClassBlocks" => Fields::Skip,
+            "ShapeBlocks" | "ClassBlocks" => Fields::Skip,
             "Ident" => Fields::Ident,
             _ => {
                 self.tag(18);
