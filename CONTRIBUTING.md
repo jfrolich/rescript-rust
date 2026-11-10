@@ -35,7 +35,7 @@ algorithm and representation invariants belong beside their implementation.
 - [Node.js](https://nodejs.org/) v22.x or newer
 - [Yarn CLI](https://yarnpkg.com/getting-started/install) (can be installed with `corepack`, Homebrew, etc)
 - C compiler toolchain (usually installed with `xcode` on Mac)
-- Rust toolchain (required to build rewatch; follow the instructions at https://www.rust-lang.org/tools/install and install the version listed as `rust-version` in `rewatch/Cargo.toml`)
+- Rust toolchain (required to build rewatch; follow the instructions at https://www.rust-lang.org/tools/install and `rustup` then installs the toolchain pinned in `rust-toolchain.toml` on the first build)
 - `opam` (OCaml Package Manager) v2.2.0 or newer
 - VSCode (+ [OCaml Platform Extension](https://marketplace.visualstudio.com/items?itemName=ocamllabs.ocaml-platform))
 

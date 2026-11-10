@@ -42,6 +42,7 @@
 
 #### :house: Internal
 
+- Pin the Rust nightly toolchain and enable parallel frontend compilation for development builds. https://github.com/jfrolich/rescript-rust/pull/78
 - Parallelize ordinary Rust release code generation while preserving the profile-guided release configuration. https://github.com/jfrolich/rescript-rust/pull/77
 
 - Build the `rescript` binaries of the Linux and macOS platform packages with profile-guided optimization. https://github.com/jfrolich/rescript-rust/pull/75
