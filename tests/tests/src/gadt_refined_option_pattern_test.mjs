@@ -32,8 +32,20 @@ function field(h) {
   }
 }
 
+function bindsFirst(y, x) {
+  if (y !== undefined && x === "Int") {
+    return y + 1 | 0;
+  }
+  if (x === "Int") {
+    return 1;
+  } else {
+    return 3;
+  }
+}
+
 export {
   local,
   field,
+  bindsFirst,
 }
 /* No side effect */
