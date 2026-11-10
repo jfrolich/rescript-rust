@@ -42,6 +42,7 @@
 
 #### :house: Internal
 
+- CI: share caches between validation runs and build the Rust compiler once less per run. https://github.com/jfrolich/rescript-rust/pull/79
 - Pin the Rust nightly toolchain and enable parallel frontend compilation for development builds. https://github.com/jfrolich/rescript-rust/pull/78
 - Parallelize ordinary Rust release code generation while preserving the profile-guided release configuration. https://github.com/jfrolich/rescript-rust/pull/77
 
