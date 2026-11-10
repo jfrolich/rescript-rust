@@ -1,1250 +1,426 @@
-//! Lambda beta reduction.
-//!
-//! This module provides beta reduction (function inlining) for Lambda expressions.
-//!
-//! Beta reduction transforms `(fun x y -> body) arg1 arg2` into
-//! `let x = arg1 in let y = arg2 in body`, but with optimizations:
-//!
-//! - Simple cases: direct substitution when arguments are values
-//! - Complex cases: create let bindings with proper evaluation order
-//! - Side effect handling: preserve evaluation semantics
-//!
-//! # Evaluation Order
-//!
-//! OCaml/ReScript has unspecified evaluation order for function arguments.
-//! We ensure that side effects happen in a consistent order by binding
-//! arguments to variables when needed.
+//! `Lam_beta_reduce` and `Lam_bounded_vars` over the Lambda arena.
 
-use crate::lambda::LamLoc;
 use ahash::AHashMap as HashMap;
 
 use crate::context::IdGenerator;
 use crate::ident::Ident;
+use crate::lambda::LamLoc;
+use crate::lambda::arena::{Lam, LamArena, Node};
 use crate::lambda::lam_analysis::no_side_effects;
 use crate::lambda::lam_closure::StatsMap;
 use crate::lambda::lam_compat::LetKind;
-use crate::lambda::lam_compile_context::{IdKind, IdentTable};
 use crate::lambda::lam_pass_collect::kind_of_lambda_block;
 use crate::lambda::lam_primitive::{Mutable, Primitive};
+use crate::lambda::lam_stats::{IdKind, IdentTable};
 use crate::lambda::lam_subst::Subst;
 use crate::lambda::lam_util::refine_let;
-use crate::lambda::{Apply, Lambda, PrimInfo};
 
-/// Tracking state for simple beta reduction.
-struct ArgUsage {
-    /// The argument expression
-    lambda: Lambda,
-    /// Whether this argument has been used
-    used: bool,
-}
-
-/// Attempt simple beta reduction.
-///
-/// This handles the common case where the function body is a primitive
-/// or simple application, and all arguments can be directly substituted.
-///
-/// # Conditions for simple reduction:
-/// - Function body is a primitive or application
-/// - Each parameter is used at most once
-/// - Arguments in the body are variables or constants
-///
-/// Returns `Some(reduced)` if reduction is possible, `None` otherwise.
-pub fn simple_beta_reduce(params: &[Ident], body: &Lambda, args: &[Lambda]) -> Option<Lambda> {
-    // Build parameter -> argument mapping
+/// `Lam_beta_reduce_util.simple_beta_reduce`: a body that is one primitive
+/// or one call of a variable or module field, whose operands are variables
+/// and constants each parameter fills at most once.
+pub fn simple_beta_reduce(
+    a: &mut LamArena,
+    params: &[Ident],
+    body: Lam,
+    args: &[Lam],
+) -> Option<Lam> {
     let indices: HashMap<Ident, usize> = params
         .iter()
         .enumerate()
         .map(|(index, param)| (*param, index))
         .collect();
-    let mut usages: Vec<ArgUsage> = params
-        .iter()
-        .zip(args.iter())
-        .map(|(_, arg)| ArgUsage {
-            lambda: arg.clone(),
-            used: false,
-        })
-        .collect();
+    let n = params.len().min(args.len());
+    let mut used = smallvec::SmallVec::<[bool; 8]>::from_elem(false, n);
 
-    fn take_param(
-        indices: &HashMap<Ident, usize>,
-        usages: &mut [ArgUsage],
-        x: &Ident,
-    ) -> Option<Option<Lambda>> {
-        match indices.get(x).and_then(|index| usages.get_mut(*index)) {
-            Some(usage) if usage.used => None,
-            Some(usage) => {
-                usage.used = true;
-                Some(Some(usage.lambda.clone()))
+    // `Some(Some(arg))`: the parameter's argument; `Some(None)`: not a
+    // parameter; `None`: a parameter used twice.
+    let take_param = |used: &mut [bool], x: &Ident| -> Option<Option<Lam>> {
+        match indices.get(x).copied().filter(|i| *i < n) {
+            Some(i) if used[i] => None,
+            Some(i) => {
+                used[i] = true;
+                Some(Some(args[i]))
             }
             None => Some(None),
         }
-    }
-
-    // Try to substitute arguments in the body
-    fn substitute_args(
-        lams: &[Lambda],
-        indices: &HashMap<Ident, usize>,
-        usages: &mut [ArgUsage],
-    ) -> Option<Vec<Lambda>> {
-        let mut result = Vec::with_capacity(lams.len());
-        for lam in lams {
-            match lam {
-                Lambda::Lvar(x) => {
-                    result.push(take_param(indices, usages, x)?.unwrap_or_else(|| lam.clone()));
-                }
-                Lambda::Lconst(_) => {
-                    result.push(lam.clone());
-                }
-                _ => {
-                    // Complex argument - can't do simple reduction
-                    return None;
+    };
+    let substitute_args =
+        |a: &LamArena, used: &mut [bool], lams: &[Lam]| -> Option<smallvec::SmallVec<[Lam; 8]>> {
+            let mut result = smallvec::SmallVec::with_capacity(lams.len());
+            for &lam in lams {
+                match a.node(lam) {
+                    Node::Var(x) => result.push(take_param(used, &a.ident(x))?.unwrap_or(lam)),
+                    Node::Const(_) => result.push(lam),
+                    _ => return None,
                 }
             }
-        }
-        Some(result)
-    }
-
+            Some(result)
+        };
     // `Lam_beta_reduce_util.seq_unused`: sequence the unused arguments
     // before the body, in parameter order.
-    let wrap_unused = |usages: &[ArgUsage], mut result: Lambda| {
-        for usage in usages.iter().rev() {
-            if !usage.used {
-                result = Lambda::seq(usage.lambda.clone(), result);
+    let wrap_unused = |a: &mut LamArena, used: &[bool], mut result: Lam| {
+        for index in (0..n).rev() {
+            if !used[index] {
+                result = a.seq(args[index], result);
             }
         }
         result
     };
 
-    match body {
-        // Primitive application: (fun x y -> prim(x, y)) a b => prim(a, b)
-        Lambda::Lprim(prim_info) => {
-            let new_args = substitute_args(&prim_info.args, &indices, &mut usages)?;
-
-            // lam_beta_reduce_util.ml:79-81 builds it through the folding
-            // `Lambda.prim`.
-            let result = Lambda::prim(prim_info.primitive.clone(), new_args, prim_info.loc);
-
-            // Add sequences for unused arguments (preserve side effects)
-            Some(wrap_unused(&usages, result))
+    match a.node(body) {
+        Node::Prim { args: pargs, info } => {
+            let new_args = substitute_args(a, &mut used, a.list(pargs))?;
+            let new_args = a.add_list(&new_args);
+            let result = a.prim_with(info, new_args);
+            Some(wrap_unused(a, &used, result))
         }
-
-        // Function application: (fun x y -> f(x, y)) a b => f(a, b)
-        Lambda::Lapply(apply) => {
-            // Check if the function is simple (variable or module access)
-            let is_simple_func = match &*apply.ap_func {
-                Lambda::Lvar(_) => true,
-                Lambda::Lprim(__prim2)
-                    if matches!(
-                        __prim2.as_ref(),
-                        PrimInfo {
-                            primitive: Primitive::Pfield(_, _),
-                            args: _,
-                            ..
-                        }
-                    ) =>
-                {
-                    let PrimInfo {
-                        primitive: Primitive::Pfield(_, _),
-                        args,
-                        ..
-                    } = __prim2.as_ref()
-                    else {
-                        unreachable!()
-                    };
-
-                    matches!(args.as_slice(), [Lambda::LglobalModule(_)])
-                }
+        Node::Apply {
+            func,
+            args: fargs,
+            info,
+        } => {
+            let simple_func = match a.node(func) {
+                Node::Var(_) => true,
+                Node::Prim { .. } => matches!(
+                    a.as_prim(func),
+                    Some((Primitive::Pfield(_, _), [m], _)) if matches!(a.node(*m), Node::GlobalModule(_))
+                ),
                 _ => false,
             };
-
-            if !is_simple_func {
+            if !simple_func {
                 return None;
             }
-
-            let new_args = substitute_args(&apply.ap_args, &indices, &mut usages)?;
-
-            // Handle function substitution if it's a variable
-            let new_func = match &*apply.ap_func {
-                Lambda::Lvar(fn_name) => take_param(&indices, &mut usages, fn_name)?
-                    .unwrap_or_else(|| (*apply.ap_func).clone()),
-                _ => (*apply.ap_func).clone(),
+            let new_args = substitute_args(a, &mut used, a.list(fargs))?;
+            let new_func = match a.node(func) {
+                Node::Var(f) => take_param(&mut used, &a.ident(f))?.unwrap_or(func),
+                _ => func,
             };
-
-            // Build the new application
-            let result = Lambda::Lapply(Box::new(Apply {
-                ap_func: Box::new(new_func),
-                ap_args: new_args,
-                ap_info: apply.ap_info.clone(),
-            }));
-
-            // Add sequences for unused arguments
-            Some(wrap_unused(&usages, result))
+            let new_args = a.add_list(&new_args);
+            let result = a.apply_raw_with(new_func, new_args, info);
+            Some(wrap_unused(a, &used, result))
         }
-
         _ => None,
     }
 }
 
-/// Perform beta reduction without variable usage statistics.
-///
-/// This is the simplest form of beta reduction that creates let bindings
-/// for all arguments.
-pub fn no_names_beta_reduce(params: &[Ident], body: &Lambda, args: &[Lambda]) -> Lambda {
-    // Try simple beta reduce first
-    if let Some(result) = simple_beta_reduce(params, body, args) {
+/// `Lam_beta_reduce.no_names_beta_reduce`.
+pub fn no_names_beta_reduce(a: &mut LamArena, params: &[Ident], body: Lam, args: &[Lam]) -> Lam {
+    if let Some(result) = simple_beta_reduce(a, params, body, args) {
         return result;
     }
-
-    // Fall back to creating let bindings
-    let mut result = body.clone();
-    for (param, arg) in params.iter().zip(args.iter()) {
-        result = refine_let(LetKind::Strict, *param, arg.clone(), result);
+    let mut result = body;
+    for (param, arg) in params.iter().zip(args) {
+        result = refine_let(a, LetKind::Strict, *param, *arg, result);
     }
     result
 }
 
-/// Perform beta reduction that matches OCaml's `Lam_beta_reduce.propagate_beta_reduce`.
-///
-/// This substitutes only constants/variables directly and introduces fresh let-bindings
-/// for other arguments so returned wrapper structure is preserved instead of being
-/// collapsed by `subst`.
-///
-/// Back-compat variant without meta threading — primarily used by unit tests.
-/// Mirrors the OCaml signature change introduced by `Lam_beta_reduce` which takes
-/// `meta : Lam_stats.t`; the production call path uses
-/// [`propagate_beta_reduce_with_meta`] instead.
-#[cfg(test)]
-pub fn propagate_beta_reduce(params: &[Ident], body: &Lambda, args: &[Lambda]) -> Lambda {
-    let mut scratch = HashMap::new();
-    propagate_beta_reduce_with_meta(&mut scratch, params, body, args)
-}
-
-/// Port of `Lam_beta_reduce.propagate_beta_reduce` (lam_beta_reduce.ml:47-74).
-///
-/// When a parameter argument is bound to a fresh variable rather than inlined,
-/// OCaml also registers the new variable in `meta.ident_tbl` via
-/// `kind_of_lambda_block` / `Normal_optional` so subsequent
-/// `Lam_pass_remove_alias` field lookups (`field_flatten_get`) can continue to
-/// see through the wrapper. Without this, `let X = {foo: funarg.foo}` stays
-/// alive as a dead binding after `simplify_alias` rewrites `X.foo` to
-/// `funarg.foo`.
-#[cfg(test)]
-pub fn propagate_beta_reduce_with_meta(
-    ident_tbl: &mut IdentTable,
-    params: &[Ident],
-    body: &Lambda,
-    args: &[Lambda],
-) -> Lambda {
-    let id_gen = IdGenerator::with_start_stamp(max_ident_stamp(params, body, args));
-    propagate_beta_reduce_with_meta_and_id_gen(ident_tbl, &id_gen, params, body, args)
-}
-
-/// Variant of [`propagate_beta_reduce_with_meta`] that uses a caller-supplied
-/// `IdGenerator`. OCaml's `Ident.rename` consults a single global mutable
-/// stamp counter, so every renamed ident gets a fresh stamp unused anywhere
-/// else in the program. Using a fresh `IdGenerator::with_start_stamp(..)` per
-/// beta-reduce call made two inlinings of the same function (e.g. a shared
-/// `let l = x => console.log(x)`) rename their parameters to the same new
-/// stamp, which the JS printer then emitted as two `let prim = …` declarations
-/// at module top level — invalid JS. Threading the pipeline-wide generator
-/// from [`crate::lambda::lam_compile_context::LamStats::id_gen`] preserves the
-/// OCaml invariant.
-pub fn propagate_beta_reduce_with_meta_and_id_gen(
+/// `Lam_beta_reduce.propagate_beta_reduce` (lam_beta_reduce.ml:47-74).
+pub fn propagate_beta_reduce(
+    a: &mut LamArena,
     ident_tbl: &mut IdentTable,
     id_gen: &IdGenerator,
     params: &[Ident],
-    body: &Lambda,
-    args: &[Lambda],
-) -> Lambda {
-    if let Some(result) = simple_beta_reduce(params, body, args) {
-        return result;
-    }
-
-    let mut rest_bindings: Vec<(Ident, Lambda)> = Vec::new();
-    let mut substitution: Subst = HashMap::new();
-
-    for (param, arg) in params.iter().zip(args.iter()) {
-        match arg {
-            Lambda::Lconst(_) | Lambda::Lvar(_) => {
-                substitution.insert(*param, arg.clone());
-            }
-            _ => {
-                let new_param = param.rename(id_gen);
-                rest_bindings.push((new_param, bound_param_binding(arg)));
-                substitution.insert(*param, bound_param_substitution(new_param, arg));
-            }
-        }
-    }
-
-    let new_body = rewrite_bounded_vars(&mut substitution, body, id_gen);
-    // OCaml builds `rest_bindings` in reverse parameter order and folds it
-    // left, making the first source argument's strict binding outermost. Rust
-    // appends in parameter order, so walk that vector in reverse to preserve
-    // the same left-to-right argument evaluation order.
-    let mut result = new_body;
-    for (param, arg) in rest_bindings.into_iter().rev() {
-        register_bound_param_kind(ident_tbl, &param, &arg);
-        result = refine_let(LetKind::Strict, param, arg, result);
-    }
-    result
+    body: Lam,
+    args: &[Lam],
+) -> Lam {
+    propagate(a, ident_tbl, id_gen, None, params, body, args)
 }
 
-/// Perform beta reduction with smart inlining decisions.
-///
-/// This uses closure analysis to determine which arguments can be
-/// directly substituted vs. bound to let variables.
-///
-/// Arguments that are:
-/// - Constants or variables: always substituted
-/// - Pure and used 0-1 times: substituted
-/// - Otherwise: bound to let variables
-///
-/// Back-compat variant without meta threading — unit tests only.
-#[cfg(test)]
+/// `Lam_beta_reduce.propagate_beta_reduce_with_map` (lam_beta_reduce.ml:76-115).
 pub fn propagate_beta_reduce_with_map(
-    stats: &StatsMap,
-    params: &[Ident],
-    body: &Lambda,
-    args: &[Lambda],
-) -> Lambda {
-    let mut scratch = HashMap::new();
-    propagate_beta_reduce_with_map_and_meta(&mut scratch, stats, params, body, args)
-}
-
-/// Port of `Lam_beta_reduce.propagate_beta_reduce_with_map`
-/// (lam_beta_reduce.ml:76-115). Same ident_tbl tracking as
-/// [`propagate_beta_reduce_with_meta`] — when a non-inlined argument is bound
-/// to a fresh variable, we register its shape in `ident_tbl` so later
-/// `simplify_alias` passes can continue to see through it.
-#[cfg(test)]
-pub fn propagate_beta_reduce_with_map_and_meta(
-    ident_tbl: &mut IdentTable,
-    stats: &StatsMap,
-    params: &[Ident],
-    body: &Lambda,
-    args: &[Lambda],
-) -> Lambda {
-    let id_gen = IdGenerator::with_start_stamp(max_ident_stamp(params, body, args));
-    propagate_beta_reduce_with_map_and_meta_and_id_gen(
-        ident_tbl, &id_gen, stats, params, body, args,
-    )
-}
-
-/// Variant of [`propagate_beta_reduce_with_map_and_meta`] that uses a
-/// caller-supplied `IdGenerator`, matching OCaml's global-counter semantics for
-/// `Ident.rename` across repeated inlinings. See
-/// [`propagate_beta_reduce_with_meta_and_id_gen`] for the rationale.
-pub fn propagate_beta_reduce_with_map_and_meta_and_id_gen(
+    a: &mut LamArena,
     ident_tbl: &mut IdentTable,
     id_gen: &IdGenerator,
     stats: &StatsMap,
     params: &[Ident],
-    body: &Lambda,
-    args: &[Lambda],
-) -> Lambda {
-    // Try simple beta reduce first
-    if let Some(result) = simple_beta_reduce(params, body, args) {
+    body: Lam,
+    args: &[Lam],
+) -> Lam {
+    propagate(a, ident_tbl, id_gen, Some(stats), params, body, args)
+}
+
+fn propagate(
+    a: &mut LamArena,
+    ident_tbl: &mut IdentTable,
+    id_gen: &IdGenerator,
+    stats: Option<&StatsMap>,
+    params: &[Ident],
+    body: Lam,
+    args: &[Lam],
+) -> Lam {
+    if let Some(result) = simple_beta_reduce(a, params, body, args) {
         return result;
     }
-
-    // Categorize arguments
-    let mut rest_bindings: Vec<(Ident, Lambda)> = Vec::new();
+    let mut rest_bindings: smallvec::SmallVec<[(Ident, Lam); 8]> = smallvec::SmallVec::new();
     let mut substitution: Subst = HashMap::new();
-
-    for (param, arg) in params.iter().zip(args.iter()) {
-        match arg {
-            // Constants and variables can always be substituted
-            Lambda::Lconst(_) | Lambda::Lvar(_) => {
-                substitution.insert(*param, arg.clone());
+    for (param, &arg) in params.iter().zip(args) {
+        match a.node(arg) {
+            Node::Const(_) | Node::Var(_) => {
+                substitution.insert(*param, arg);
             }
-            // Global modules need to be bound (for proper module loading)
-            Lambda::LglobalModule(_) => {
+            Node::GlobalModule(_) if stats.is_some() => {
                 let new_param = param.rename(id_gen);
-                rest_bindings.push((new_param, arg.clone()));
-                substitution.insert(*param, Lambda::var(new_param));
+                rest_bindings.push((new_param, arg));
+                let v = a.var(new_param);
+                substitution.insert(*param, v);
             }
             _ => {
-                // Check if we can substitute based on usage stats
-                if no_side_effects(arg) {
-                    if let Some(stat) = stats.get(param) {
-                        if stat.top_and_used_zero_or_one() {
-                            substitution.insert(*param, arg.clone());
-                            continue;
-                        }
-                    }
+                if let Some(stats) = stats
+                    && no_side_effects(a, arg)
+                    && stats
+                        .get(param)
+                        .is_some_and(|stat| stat.top_and_used_zero_or_one())
+                {
+                    substitution.insert(*param, arg);
+                    continue;
                 }
-                // Bind to a new variable
                 let new_param = param.rename(id_gen);
-                rest_bindings.push((new_param, bound_param_binding(arg)));
-                substitution.insert(*param, bound_param_substitution(new_param, arg));
+                let boxed = is_boxed_optional_binding(a, arg);
+                let binding = if boxed {
+                    a.prim(Primitive::Pidentity, &[arg], LamLoc::NONE)
+                } else {
+                    arg
+                };
+                rest_bindings.push((new_param, binding));
+                let v = a.var(new_param);
+                let replacement = if boxed {
+                    a.prim(Primitive::Pidentity, &[v], LamLoc::NONE)
+                } else {
+                    v
+                };
+                substitution.insert(*param, replacement);
             }
         }
     }
-
-    // Apply substitution to body
-    let new_body = rewrite_bounded_vars(&mut substitution, body, id_gen);
-
-    // See `propagate_beta_reduce_with_meta_and_id_gen`: Rust stores bindings
-    // in parameter order, so reverse iteration makes the first source
-    // argument's binding outermost, matching OCaml's reverse-list fold-left.
-    let mut result = new_body;
+    let mut result = rewrite_bounded_vars(a, &mut substitution, body, id_gen);
+    // OCaml builds `rest_bindings` in reverse parameter order and folds it
+    // left, making the first source argument's binding outermost.
     for (param, arg) in rest_bindings.into_iter().rev() {
-        register_bound_param_kind(ident_tbl, &param, &arg);
-        result = refine_let(LetKind::Strict, param, arg, result);
+        register_bound_param_kind(a, ident_tbl, &param, arg);
+        result = refine_let(a, LetKind::Strict, param, arg, result);
     }
     result
 }
 
-/// Direct port of the `meta.ident_tbl` update in
-/// `Lam_beta_reduce.propagate_beta_reduce` (lam_beta_reduce.ml:66-73) and
-/// `propagate_beta_reduce_with_map` (lam_beta_reduce.ml:107-114). OCaml only
-/// registers `ImmutableBlock` / `Normal_optional` here — everything else is
-/// a no-op so downstream `Lam_pass_remove_alias` keeps treating the binding
-/// as an opaque `Lvar`.
-fn register_bound_param_kind(ident_tbl: &mut IdentTable, param: &Ident, arg: &Lambda) {
-    match arg {
-        Lambda::Lprim(__prim1)
-            if matches!(
-                __prim1.as_ref(),
-                PrimInfo {
-                    primitive: Primitive::Pmakeblock(_, Mutable::Immutable),
-                    args: _,
-                    ..
-                }
-            ) =>
-        {
-            let PrimInfo {
-                primitive: Primitive::Pmakeblock(_, Mutable::Immutable),
-                args,
-                ..
-            } = __prim1.as_ref()
-            else {
-                unreachable!()
-            };
-
-            ident_tbl.insert(*param, kind_of_lambda_block(args));
+/// The `meta.ident_tbl` update of `propagate_beta_reduce`
+/// (lam_beta_reduce.ml:66-73, 107-114).
+fn register_bound_param_kind(a: &LamArena, ident_tbl: &mut IdentTable, param: &Ident, arg: Lam) {
+    match a.as_prim(arg) {
+        Some((Primitive::Pmakeblock(_, Mutable::Immutable), args, _)) => {
+            ident_tbl.insert(*param, kind_of_lambda_block(a, args));
         }
-        Lambda::Lprim(__prim0)
-            if matches!(__prim0.as_ref(), PrimInfo {
-            primitive: Primitive::Psome | Primitive::PsomeNotNest,
-            args,
-            ..
-        } if args.len() == 1) =>
-        {
-            let PrimInfo {
-                primitive: Primitive::Psome | Primitive::PsomeNotNest,
-                args,
-                ..
-            } = __prim0.as_ref()
-            else {
-                unreachable!()
-            };
-
-            ident_tbl.insert(*param, IdKind::NormalOptional(args[0].clone()));
+        Some((Primitive::Psome | Primitive::PsomeNotNest, [x], _)) => {
+            ident_tbl.insert(*param, IdKind::NormalOptional(*x));
         }
         _ => {}
     }
 }
 
-fn bound_param_substitution(new_param: Ident, arg: &Lambda) -> Lambda {
-    if is_boxed_optional_binding(arg) {
-        Lambda::prim(
-            Primitive::Pidentity,
-            vec![Lambda::var(new_param)],
-            LamLoc::NONE,
-        )
-    } else {
-        Lambda::var(new_param)
-    }
-}
-
-fn bound_param_binding(arg: &Lambda) -> Lambda {
-    if is_boxed_optional_binding(arg) {
-        Lambda::prim(Primitive::Pidentity, vec![arg.clone()], LamLoc::NONE)
-    } else {
-        arg.clone()
-    }
-}
-
-fn is_boxed_optional_binding(arg: &Lambda) -> bool {
+fn is_boxed_optional_binding(a: &LamArena, arg: Lam) -> bool {
     matches!(
-            arg,
-            Lambda::Lprim(__prim108) if matches!(__prim108.as_ref(), PrimInfo {
-                primitive: Primitive::PnullToOpt | Primitive::PnullUndefinedToOpt,
-                ..
-            })
+        a.as_prim(arg),
+        Some((Primitive::PnullToOpt | Primitive::PnullUndefinedToOpt, _, _))
     )
 }
 
-#[cfg(test)]
-fn max_ident_stamp(params: &[Ident], body: &Lambda, args: &[Lambda]) -> i32 {
-    let params_max = params
-        .iter()
-        .fold(0, |max_stamp, param| max_stamp.max(param.stamp()));
-    let body_max = max_ident_stamp_in_lambda(body);
-    let args_max = args.iter().fold(0, |max_stamp, arg| {
-        max_stamp.max(max_ident_stamp_in_lambda(arg))
-    });
-    params_max.max(body_max).max(args_max)
-}
-
-fn rewrite_bounded_vars(substitution: &mut Subst, lam: &Lambda, id_gen: &IdGenerator) -> Lambda {
-    fn rebind(id: &Ident, substitution: &mut Subst, id_gen: &IdGenerator) -> Ident {
+/// `Lam_bounded_vars.rewrite`: substitute and give every binder of `lam` a
+/// fresh name, rebuilding through the smart constructors.
+fn rewrite_bounded_vars(a: &mut LamArena, s: &mut Subst, lam: Lam, id_gen: &IdGenerator) -> Lam {
+    fn rebind(a: &mut LamArena, id: Ident, s: &mut Subst, id_gen: &IdGenerator) -> Ident {
         let renamed = id.rename(id_gen);
-        substitution.insert(*id, Lambda::var(renamed));
+        let v = a.var(renamed);
+        s.insert(id, v);
         renamed
     }
-
-    match lam {
-        Lambda::Lvar(id) => substitution.get(id).cloned().unwrap_or_else(|| lam.clone()),
-        Lambda::Lconst(_) => lam.clone(),
-        // lam_bounded_vars.ml `rewrite` rebuilds every node through the
-        // smart constructors (`Lambda.apply`, `Lambda.prim`, `Lambda.if_`,
-        // `Lambda.seq`, ...).
-        Lambda::Lapply(apply) => {
-            let func = rewrite_bounded_vars(substitution, &apply.ap_func, id_gen);
-            let args = apply
-                .ap_args
-                .iter()
-                .map(|arg| rewrite_bounded_vars(substitution, arg, id_gen))
-                .collect();
-            Lambda::apply(func, args, apply.ap_info.clone())
+    let rw = |a: &mut LamArena, s: &mut Subst, x: Lam| rewrite_bounded_vars(a, s, x, id_gen);
+    match a.node(lam) {
+        Node::Var(id) => s.get(&a.ident(id)).copied().unwrap_or(lam),
+        Node::Const(_) | Node::GlobalModule(_) => lam,
+        Node::Apply { func, args, info } => {
+            let func = rw(a, s, func);
+            let args: smallvec::SmallVec<[Lam; 8]> =
+                a.list_vec(args).into_iter().map(|x| rw(a, s, x)).collect();
+            let p = a.apply_payload(info).clone();
+            a.apply(func, &args, p.info)
         }
-        Lambda::Lfunction(func) => {
-            let params = func
-                .params
-                .iter()
-                .map(|param| rebind(param, substitution, id_gen))
-                .collect();
-            Lambda::function_(
-                func.arity,
-                params,
-                rewrite_bounded_vars(substitution, &func.body, id_gen),
-                func.attr.clone(),
-                func.loc,
-            )
-        }
-        Lambda::Llet(kind, id, arg, body) => {
-            let id = rebind(id, substitution, id_gen);
-            Lambda::let_(
-                *kind,
-                id,
-                rewrite_bounded_vars(substitution, arg, id_gen),
-                rewrite_bounded_vars(substitution, body, id_gen),
-            )
-        }
-        Lambda::Lletrec(bindings, body) => {
-            let renamed_ids: Vec<_> = bindings
-                .iter()
-                .map(|(id, _)| rebind(id, substitution, id_gen))
-                .collect();
-            let bindings = renamed_ids
+        Node::Function { body, info } => {
+            let p = a.func_payload(info).clone();
+            let params: smallvec::SmallVec<[Ident; 8]> = a
+                .idents(p.params)
+                .to_vec()
                 .into_iter()
-                .zip(bindings.iter())
-                .map(|(id, (_, expr))| (id, rewrite_bounded_vars(substitution, expr, id_gen)))
+                .map(|x| rebind(a, x, s, id_gen))
                 .collect();
-            Lambda::letrec(bindings, rewrite_bounded_vars(substitution, body, id_gen))
+            let body = rw(a, s, body);
+            a.function_(p.arity, &params, body, p.attr, p.loc)
         }
-        Lambda::Lprim(prim_info) => Lambda::prim(
-            prim_info.primitive.clone(),
-            prim_info
-                .args
-                .iter()
-                .map(|arg| rewrite_bounded_vars(substitution, arg, id_gen))
-                .collect(),
-            prim_info.loc,
-        ),
-        Lambda::LglobalModule(_) => lam.clone(),
-        Lambda::Lswitch(arg, switch) => Lambda::switch(
-            rewrite_bounded_vars(substitution, arg, id_gen),
-            crate::lambda::LambdaSwitch {
-                sw_consts_full: switch.sw_consts_full,
-                sw_consts: switch
-                    .sw_consts
-                    .iter()
-                    .map(|(key, value)| {
-                        (
-                            key.clone(),
-                            rewrite_bounded_vars(substitution, value, id_gen),
-                        )
-                    })
-                    .collect(),
-                sw_blocks_full: switch.sw_blocks_full,
-                sw_blocks: switch
-                    .sw_blocks
-                    .iter()
-                    .map(|(key, value)| {
-                        (
-                            key.clone(),
-                            rewrite_bounded_vars(substitution, value, id_gen),
-                        )
-                    })
-                    .collect(),
-                sw_failaction: switch
-                    .sw_failaction
-                    .as_ref()
-                    .map(|value| Box::new(rewrite_bounded_vars(substitution, value, id_gen))),
-                sw_dispatch: switch.sw_dispatch.clone(),
-            },
-        ),
-        Lambda::LstringSwitch(arg, cases, default) => Lambda::string_switch(
-            rewrite_bounded_vars(substitution, arg, id_gen),
-            cases
-                .iter()
-                .map(|(key, value)| {
-                    (
-                        key.clone(),
-                        rewrite_bounded_vars(substitution, value, id_gen),
-                    )
-                })
-                .collect(),
-            default
-                .as_ref()
-                .map(|value| Box::new(rewrite_bounded_vars(substitution, value, id_gen))),
-        ),
-        Lambda::LstaticRaise(id, args) => Lambda::static_raise(
-            *id,
-            args.iter()
-                .map(|arg| rewrite_bounded_vars(substitution, arg, id_gen))
-                .collect(),
-        ),
-        Lambda::LstaticCatch(body, (exit, vars), handler) => {
-            let body = rewrite_bounded_vars(substitution, body, id_gen);
-            let vars = vars
-                .iter()
-                .map(|var| rebind(var, substitution, id_gen))
+        Node::Let {
+            kind,
+            id,
+            value,
+            body,
+        } => {
+            let id = rebind(a, a.ident(id), s, id_gen);
+            let value = rw(a, s, value);
+            let body = rw(a, s, body);
+            a.let_(kind, id, value, body)
+        }
+        Node::LetRec { ids, values, body } => {
+            let values = a.list_vec(values);
+            let old: smallvec::SmallVec<[Ident; 8]> =
+                a.ident_run(ids, values.len()).iter().copied().collect();
+            let renamed: smallvec::SmallVec<[Ident; 8]> =
+                old.into_iter().map(|x| rebind(a, x, s, id_gen)).collect();
+            let bindings: smallvec::SmallVec<[(Ident, Lam); 8]> = renamed
+                .into_iter()
+                .zip(values)
+                .map(|(id, x)| (id, rw(a, s, x)))
                 .collect();
-            Lambda::LstaticCatch(
-                Box::new(body),
-                (*exit, vars),
-                Box::new(rewrite_bounded_vars(substitution, handler, id_gen)),
-            )
+            let body = rw(a, s, body);
+            a.letrec(&bindings, body)
+        }
+        Node::Prim { args, info } => {
+            let args: smallvec::SmallVec<[Lam; 8]> =
+                a.list_vec(args).into_iter().map(|x| rw(a, s, x)).collect();
+            let args = a.add_list(&args);
+            a.prim_with(info, args)
+        }
+        Node::Switch {
+            scrut,
+            actions,
+            info,
+        } => {
+            let scrut = rw(a, s, scrut);
+            let actions: smallvec::SmallVec<[Lam; 8]> = a
+                .list_vec(actions)
+                .into_iter()
+                .map(|x| rw(a, s, x))
+                .collect();
+            let actions = a.add_list(&actions);
+            a.switch_with(scrut, actions, info)
+        }
+        Node::StringSwitch {
+            scrut,
+            actions,
+            info,
+        } => {
+            let scrut = rw(a, s, scrut);
+            let actions: smallvec::SmallVec<[Lam; 8]> = a
+                .list_vec(actions)
+                .into_iter()
+                .map(|x| rw(a, s, x))
+                .collect();
+            let actions = a.add_list(&actions);
+            a.string_switch_with(scrut, actions, info)
+        }
+        Node::StaticRaise { label, args } => {
+            let args: smallvec::SmallVec<[Lam; 8]> =
+                a.list_vec(args).into_iter().map(|x| rw(a, s, x)).collect();
+            a.static_raise(label, &args)
+        }
+        Node::StaticCatch {
+            body,
+            handler,
+            info,
+        } => {
+            let body = rw(a, s, body);
+            let p = a.catch_payload(info);
+            let vars: smallvec::SmallVec<[Ident; 8]> = a
+                .idents(p.params)
+                .to_vec()
+                .into_iter()
+                .map(|x| rebind(a, x, s, id_gen))
+                .collect();
+            let handler = rw(a, s, handler);
+            a.static_catch(body, p.label, &vars, handler)
+        }
+        Node::TryWith { body, id, handler } => {
+            let body = rw(a, s, body);
+            let exn = rebind(a, a.ident(id), s, id_gen);
+            let handler = rw(a, s, handler);
+            a.try_(body, exn, handler)
         }
         // lam_bounded_vars.ml: `let l1 = aux l1 in let l2 = aux l2 in try_finally l1 l2`.
-        Lambda::LtryFinally(body, finally) => {
-            let body = rewrite_bounded_vars(substitution, body, id_gen);
-            let finally = rewrite_bounded_vars(substitution, finally, id_gen);
-            Lambda::try_finally(body, finally)
+        Node::TryFinally { body, finally } => {
+            let body = rw(a, s, body);
+            let finally = rw(a, s, finally);
+            a.try_finally(body, finally)
         }
-        Lambda::LtryWith(body, exn, handler) => {
-            let body = rewrite_bounded_vars(substitution, body, id_gen);
-            let exn = rebind(exn, substitution, id_gen);
-            Lambda::LtryWith(
-                Box::new(body),
-                exn,
-                Box::new(rewrite_bounded_vars(substitution, handler, id_gen)),
-            )
+        Node::If { cond, then_, else_ } => {
+            let cond = rw(a, s, cond);
+            let then_ = rw(a, s, then_);
+            let else_ = rw(a, s, else_);
+            a.if_(cond, then_, else_)
         }
-        Lambda::LifThenElse(cond, then_, else_) => {
-            let cond = rewrite_bounded_vars(substitution, cond, id_gen);
-            let then_ = rewrite_bounded_vars(substitution, then_, id_gen);
-            let else_ = rewrite_bounded_vars(substitution, else_, id_gen);
-            Lambda::if_(cond, then_, else_)
+        Node::Sequence(x, y) => {
+            let x = rw(a, s, x);
+            let y = rw(a, s, y);
+            a.seq(x, y)
         }
-        Lambda::Lsequence(first, second) => {
-            let first = rewrite_bounded_vars(substitution, first, id_gen);
-            let second = rewrite_bounded_vars(substitution, second, id_gen);
-            Lambda::seq(first, second)
+        Node::While(x, y) => {
+            let x = rw(a, s, x);
+            let y = rw(a, s, y);
+            a.while_(x, y)
         }
-        Lambda::Lwhile(cond, body) => Lambda::Lwhile(
-            Box::new(rewrite_bounded_vars(substitution, cond, id_gen)),
-            Box::new(rewrite_bounded_vars(substitution, body, id_gen)),
-        ),
-        Lambda::Lfor(id, from, to, direction, body) => {
-            let id = rebind(id, substitution, id_gen);
-            let from = rewrite_bounded_vars(substitution, from, id_gen);
-            let to = rewrite_bounded_vars(substitution, to, id_gen);
-            let body = rewrite_bounded_vars(substitution, body, id_gen);
+        Node::For { dir, id, kids } => {
+            let (from, to, body) = a.for_parts(kids);
+            let id = rebind(a, a.ident(id), s, id_gen);
+            let from = rw(a, s, from);
+            let to = rw(a, s, to);
+            let body = rw(a, s, body);
             // lam_bounded_vars.ml: `Lambda.for_ ident (aux l1) l2 dir l3`
             // rewrites the already rewritten start expression once more.
-            let from = rewrite_bounded_vars(substitution, &from, id_gen);
-            Lambda::Lfor(id, Box::new(from), Box::new(to), *direction, Box::new(body))
+            let from = rw(a, s, from);
+            a.for_(id, from, to, dir, body)
         }
-        Lambda::Lfor_of(id, iterable, body) => {
-            let id = rebind(id, substitution, id_gen);
-            Lambda::for_of(
-                id,
-                rewrite_bounded_vars(substitution, iterable, id_gen),
-                rewrite_bounded_vars(substitution, body, id_gen),
-            )
+        Node::ForOf { id, iter, body } => {
+            let id = rebind(a, a.ident(id), s, id_gen);
+            let iter = rw(a, s, iter);
+            let body = rw(a, s, body);
+            a.for_of(id, iter, body)
         }
-        Lambda::Lfor_await_of(id, iterable, body) => {
-            let id = rebind(id, substitution, id_gen);
-            Lambda::for_await_of(
-                id,
-                rewrite_bounded_vars(substitution, iterable, id_gen),
-                rewrite_bounded_vars(substitution, body, id_gen),
-            )
+        Node::ForAwaitOf { id, iter, body } => {
+            let id = rebind(a, a.ident(id), s, id_gen);
+            let iter = rw(a, s, iter);
+            let body = rw(a, s, body);
+            a.for_await_of(id, iter, body)
         }
-        Lambda::Lbreak => Lambda::break_(),
-        Lambda::Lcontinue => Lambda::continue_(),
-        Lambda::Lassign(id, value) => Lambda::Lassign(
-            *id,
-            Box::new(rewrite_bounded_vars(substitution, value, id_gen)),
-        ),
+        Node::Break | Node::Continue => lam,
+        Node::Assign { id, value } => {
+            let value = rw(a, s, value);
+            a.assign_with(id, value)
+        }
     }
 }
 
-pub(crate) fn max_ident_stamp_in_lambda(lam: &Lambda) -> i32 {
-    match lam {
-        Lambda::Lvar(id) | Lambda::LglobalModule(id) => id.stamp(),
-        Lambda::Lconst(_) => 0,
-        Lambda::Lapply(apply) => apply.ap_args.iter().fold(
-            max_ident_stamp_in_lambda(&apply.ap_func),
-            |max_stamp, arg| max_stamp.max(max_ident_stamp_in_lambda(arg)),
-        ),
-        Lambda::Lfunction(func) => func
-            .params
+/// The largest identifier stamp in `lam`.
+pub(crate) fn max_ident_stamp_in_lambda(a: &LamArena, lam: Lam) -> i32 {
+    let own = match a.node(lam) {
+        Node::Var(id)
+        | Node::GlobalModule(id)
+        | Node::Let { id, .. }
+        | Node::TryWith { id, .. }
+        | Node::For { id, .. }
+        | Node::ForOf { id, .. }
+        | Node::ForAwaitOf { id, .. }
+        | Node::Assign { id, .. } => a.ident(id).stamp(),
+        Node::Function { info, .. } => a.params(info).iter().map(Ident::stamp).max().unwrap_or(0),
+        Node::LetRec { ids, values, .. } => a
+            .ident_run(ids, a.list_len(values))
             .iter()
-            .fold(max_ident_stamp_in_lambda(&func.body), |max_stamp, param| {
-                max_stamp.max(param.stamp())
-            }),
-        Lambda::Llet(_, id, value, body) => id
-            .stamp()
-            .max(max_ident_stamp_in_lambda(value))
-            .max(max_ident_stamp_in_lambda(body)),
-        Lambda::Lletrec(bindings, body) => {
-            bindings
-                .iter()
-                .fold(max_ident_stamp_in_lambda(body), |max_stamp, (id, lam)| {
-                    max_stamp
-                        .max(id.stamp())
-                        .max(max_ident_stamp_in_lambda(lam))
-                })
-        }
-        Lambda::Lprim(info) => info.args.iter().fold(0, |max_stamp, arg| {
-            max_stamp.max(max_ident_stamp_in_lambda(arg))
-        }),
-        Lambda::Lswitch(scrutinee, switch) => {
-            let mut max_stamp = max_ident_stamp_in_lambda(scrutinee);
-            for (_, lam) in &switch.sw_consts {
-                max_stamp = max_stamp.max(max_ident_stamp_in_lambda(lam));
-            }
-            for (_, lam) in &switch.sw_blocks {
-                max_stamp = max_stamp.max(max_ident_stamp_in_lambda(lam));
-            }
-            if let Some(failaction) = &switch.sw_failaction {
-                max_stamp = max_stamp.max(max_ident_stamp_in_lambda(failaction));
-            }
-            max_stamp
-        }
-        Lambda::LstringSwitch(scrutinee, cases, default) => {
-            let mut max_stamp = max_ident_stamp_in_lambda(scrutinee);
-            for (_, lam) in cases {
-                max_stamp = max_stamp.max(max_ident_stamp_in_lambda(lam));
-            }
-            if let Some(default) = default {
-                max_stamp = max_stamp.max(max_ident_stamp_in_lambda(default));
-            }
-            max_stamp
-        }
-        Lambda::LstaticRaise(_, args) => args.iter().fold(0, |max_stamp, arg| {
-            max_stamp.max(max_ident_stamp_in_lambda(arg))
-        }),
-        Lambda::LstaticCatch(body, (_, ids), handler) => ids.iter().fold(
-            max_ident_stamp_in_lambda(body).max(max_ident_stamp_in_lambda(handler)),
-            |max_stamp, id| max_stamp.max(id.stamp()),
-        ),
-        Lambda::LtryWith(body, id, handler) => id
-            .stamp()
-            .max(max_ident_stamp_in_lambda(body))
-            .max(max_ident_stamp_in_lambda(handler)),
-        Lambda::LtryFinally(body, finally) => {
-            max_ident_stamp_in_lambda(body).max(max_ident_stamp_in_lambda(finally))
-        }
-        Lambda::LifThenElse(cond, then_, else_) => max_ident_stamp_in_lambda(cond)
-            .max(max_ident_stamp_in_lambda(then_))
-            .max(max_ident_stamp_in_lambda(else_)),
-        Lambda::Lsequence(first, second) | Lambda::Lwhile(first, second) => {
-            max_ident_stamp_in_lambda(first).max(max_ident_stamp_in_lambda(second))
-        }
-        Lambda::Lfor(id, start, end, _, body) => id
-            .stamp()
-            .max(max_ident_stamp_in_lambda(start))
-            .max(max_ident_stamp_in_lambda(end))
-            .max(max_ident_stamp_in_lambda(body)),
-        Lambda::Lfor_of(id, iterable, body) | Lambda::Lfor_await_of(id, iterable, body) => id
-            .stamp()
-            .max(max_ident_stamp_in_lambda(iterable))
-            .max(max_ident_stamp_in_lambda(body)),
-        Lambda::Lbreak | Lambda::Lcontinue => 0,
-        Lambda::Lassign(id, value) => id.stamp().max(max_ident_stamp_in_lambda(value)),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::lambda::lam_closure::VarStats;
-    use crate::lambda::{Constant, FunctionAttribute, LambdaSwitch, Primitive};
-    use LamLoc;
-
-    #[test]
-    fn test_simple_beta_reduce_prim() {
-        let x = Ident::create_local("x");
-        let y = Ident::create_local("y");
-
-        // (fun x y -> x + y) 1 2 => 1 + 2
-        let params = vec![x, y];
-        let body = Lambda::prim(
-            Primitive::Paddint,
-            vec![Lambda::var(x), Lambda::var(y)],
-            LamLoc::NONE,
-        );
-        let args = vec![
-            Lambda::const_(Constant::int(1)),
-            Lambda::const_(Constant::int(2)),
-        ];
-
-        let result = simple_beta_reduce(&params, &body, &args);
-        assert!(result.is_some());
-
-        // lam_beta_reduce_util.ml builds the result with the folding
-        // `Lambda.prim`, so `1 + 2` is the constant `3`.
-        let reduced = result.unwrap();
-        assert!(
-            matches!(reduced, Lambda::Lconst(Constant::Int { i: 3, .. })),
-            "Expected folded constant, got {reduced:?}"
-        );
-    }
-
-    #[test]
-    fn test_simple_beta_reduce_unused_arg() {
-        let x = Ident::create_local("x");
-        let y = Ident::create_local("y");
-
-        // (fun x y -> x) 1 (side_effect) => side_effect; 1
-        // Note: y is unused, but we need to evaluate the argument
-        let params = vec![x, y];
-        let body = Lambda::var(x); // Only uses x
-
-        // For simple_beta_reduce, complex unused args prevent optimization
-        let args = vec![
-            Lambda::const_(Constant::int(1)),
-            Lambda::var(Ident::create_local("z")), // Variable, so it's okay
-        ];
-
-        // This should NOT work because body is not a prim or apply
-        let result = simple_beta_reduce(&params, &body, &args);
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn test_simple_beta_reduce_double_use() {
-        let x = Ident::create_local("x");
-
-        // (fun x -> x + x) 1 => should NOT simple reduce (x used twice)
-        let params = vec![x];
-        let body = Lambda::prim(
-            Primitive::Paddint,
-            vec![Lambda::var(x), Lambda::var(x)],
-            LamLoc::NONE,
-        );
-        let args = vec![Lambda::const_(Constant::int(1))];
-
-        let result = simple_beta_reduce(&params, &body, &args);
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn test_no_names_beta_reduce() {
-        let x = Ident::create_local("x");
-        let y = Ident::create_local("y");
-
-        // (fun x y -> x + x + y) (f) (g)
-        // x is used twice, so simple_beta_reduce won't work
-        // => let x = f in let y = g in x + x + y
-        let params = vec![x, y];
-        // Body uses x twice, which prevents simple_beta_reduce
-        let body = Lambda::prim(
-            Primitive::Paddint,
-            vec![
-                Lambda::prim(
-                    Primitive::Paddint,
-                    vec![Lambda::var(x), Lambda::var(x)],
-                    LamLoc::NONE,
-                ),
-                Lambda::var(y),
-            ],
-            LamLoc::NONE,
-        );
-        let f = Ident::create_local("f");
-        let g = Ident::create_local("g");
-        let args = vec![Lambda::var(f), Lambda::var(g)];
-
-        let result = no_names_beta_reduce(&params, &body, &args);
-
-        // Should create let bindings because x is used twice
-        match result {
-            Lambda::Llet(_, _, _, _) => {}
-            _ => panic!("Expected Llet, got {result:?}"),
-        }
-    }
-
-    #[test]
-    fn test_propagate_beta_reduce_preserves_source_argument_order() {
-        let x = Ident::create_local("x");
-        let y = Ident::create_local("y");
-        // A sequence is deliberately outside `simple_beta_reduce`'s
-        // primitive/application fast path, so both effectful arguments become
-        // explicit strict bindings whose nesting order is observable.
-        let body = Lambda::seq(Lambda::var(x), Lambda::var(y));
-        let call = |name: &str| {
-            Lambda::prim(
-                Primitive::PjsCall {
-                    prim_name: name.to_string(),
-                    arg_types: vec![],
-                    ffi: Box::new(crate::lambda::lam_primitive::ExternalDecl::test_val("", 0)),
-                },
-                vec![],
-                LamLoc::NONE,
-            )
-        };
-        let first = call("first");
-        let second = call("second");
-
-        let reduced = propagate_beta_reduce(&[x, y], &body, &[first, second]);
-        let Lambda::Llet(_, _, outer_value, inner) = reduced else {
-            panic!("expected first argument binding to be outermost");
-        };
-        assert!(matches!(
-                    outer_value.as_ref(),
-                    Lambda::Lprim(__prim107) if matches!(__prim107.as_ref(), PrimInfo {
-                        primitive: Primitive::PjsCall { prim_name, .. },
-                        ..
-                    } if prim_name == "first")
-        ));
-        assert!(matches!(
-                    inner.as_ref(),
-                    Lambda::Llet(
-                        _,
-                        _,
-                        inner_value,
-                        _
-                    ) if matches!(
-                        inner_value.as_ref(),
-                        Lambda::Lprim(__prim106) if matches!(__prim106.as_ref(), PrimInfo {
-                            primitive: Primitive::PjsCall { prim_name, .. },
-                            ..
-                        } if prim_name == "second")
-        )
-                ));
-    }
-
-    #[test]
-    #[ignore = "stale internal shape expectation; covered by strict lambda/JS parity gates"]
-    fn test_propagate_beta_reduce_keeps_let_wrapped_returned_functions() {
-        let outer = Ident::create_local("outer");
-        let helper = Ident::create_local("helper");
-        let inner = Ident::create_local("inner");
-        let params = vec![outer];
-        let body = Lambda::let_(
-            LetKind::Strict,
-            helper,
-            Lambda::const_(Constant::int(1)),
-            Lambda::function_(
-                1,
-                vec![inner],
-                Lambda::const_(Constant::int(0)),
-                FunctionAttribute::default(),
-                LamLoc::NONE,
-            ),
-        );
-        let args = vec![Lambda::const_(Constant::String("".to_string()))];
-
-        let reduced = propagate_beta_reduce(&params, &body, &args);
-        let Lambda::Llet(kind, id, value, body) = reduced else {
-            panic!("expected helper let-binding to remain");
-        };
-        assert_eq!(kind, LetKind::Strict);
-        assert_eq!(id, helper);
-        assert!(matches!(*value, Lambda::Lconst(Constant::Int { i, .. }) if i == 1));
-        let Lambda::Lfunction(func) = *body else {
-            panic!("expected returned function to remain wrapped by the let");
-        };
-        assert_eq!(func.params, vec![inner]);
-    }
-
-    #[test]
-    fn test_propagate_beta_reduce_marks_boxed_nullable_bindings_with_identity() {
-        let x = Ident::create_local("x");
-        let params = vec![x];
-        let body = Lambda::if_(
-            Lambda::prim(Primitive::PisNotNone, vec![Lambda::var(x)], LamLoc::NONE),
-            Lambda::prim(
-                Primitive::PvalFromOption,
-                vec![Lambda::var(x)],
-                LamLoc::NONE,
-            ),
-            Lambda::const_(Constant::JsUndefined { is_unit: false }),
-        );
-        let args = vec![Lambda::prim(
-            Primitive::PnullToOpt,
-            vec![Lambda::prim(
-                Primitive::PjsCall {
-                    prim_name: "exec".to_string(),
-                    arg_types: vec![],
-                    ffi: Box::new(crate::lambda::lam_primitive::ExternalDecl::test_val("", 0)),
-                },
-                vec![Lambda::const_(Constant::string("subject"))],
-                LamLoc::NONE,
-            )],
-            LamLoc::NONE,
-        )];
-
-        let reduced = propagate_beta_reduce(&params, &body, &args);
-        let Lambda::Llet(kind, fresh, value, body) = reduced else {
-            panic!("expected boxed nullable beta reduction to introduce a fresh let");
-        };
-        assert_eq!(kind, LetKind::Strict);
-        assert!(matches!(
-                    *value,
-                    Lambda::Lprim(__prim105) if matches!(__prim105.as_ref(), PrimInfo {
-                        primitive: Primitive::Pidentity,
-                        args,
-                        ..
-                    } if matches!(
-                        args.as_slice(),
-                        [Lambda::Lprim(__prim104)] if matches!(__prim104.as_ref(), PrimInfo {
-                            primitive: Primitive::PnullToOpt,
-                            ..
-                        })
-        ))
-        ));
-        let Lambda::LifThenElse(cond, then_, _) = *body else {
-            panic!("expected the reduced body to stay as an if");
-        };
-        assert!(matches!(
-                    cond.as_ref(),
-                    Lambda::Lprim(__prim103) if matches!(__prim103.as_ref(), PrimInfo {
-                        primitive: Primitive::PisNotNone,
-                        args,
-                        ..
-                    } if matches!(
-                        args.as_slice(),
-                        [Lambda::Lprim(__prim102)] if matches!(__prim102.as_ref(), PrimInfo {
-                            primitive: Primitive::Pidentity,
-                            args: inner_args,
-                            ..
-                        } if matches!(inner_args.as_slice(), [Lambda::Lvar(id)] if id.same(&fresh)))
-        ))
-        ));
-        assert!(matches!(
-                    then_.as_ref(),
-                    Lambda::Lprim(__prim101) if matches!(__prim101.as_ref(), PrimInfo {
-                        primitive: Primitive::PvalFromOption,
-                        args,
-                        ..
-                    } if matches!(
-                        args.as_slice(),
-                        [Lambda::Lprim(__prim100)] if matches!(__prim100.as_ref(), PrimInfo {
-                            primitive: Primitive::Pidentity,
-                            args: inner_args,
-                            ..
-                        } if matches!(inner_args.as_slice(), [Lambda::Lvar(id)] if id.same(&fresh)))
-        ))
-        ));
-    }
-
-    #[test]
-    fn test_propagate_beta_reduce_renames_reused_returned_function_params() {
-        let none = Ident::create_local("none");
-        let params = vec![none];
-        let body = Lambda::function_(
-            1,
-            vec![none],
-            Lambda::var(none),
-            FunctionAttribute::default(),
-            LamLoc::NONE,
-        );
-        let args = vec![Lambda::const_(Constant::JsUndefined { is_unit: false })];
-
-        let reduced = propagate_beta_reduce(&params, &body, &args);
-        let Lambda::Lfunction(func) = reduced else {
-            panic!("expected beta reduction to keep the returned wrapper");
-        };
-        let [param] = func.params.as_slice() else {
-            panic!("expected a single returned parameter");
-        };
-        assert!(
-            !param.same(&none),
-            "expected the reused returned parameter to be alpha-renamed"
-        );
-        assert!(
-            matches!(func.body.as_ref(), Lambda::Lvar(body_id) if body_id.same(param)),
-            "expected the returned wrapper body to keep using its own parameter, got {func:?}"
-        );
-    }
-
-    #[test]
-    fn test_propagate_beta_reduce_with_map_const() {
-        let x = Ident::create_local("x");
-
-        // (fun x -> x + 1) 5
-        // With stats showing x is used once in top position
-        // => 5 + 1 (direct substitution)
-        let params = vec![x];
-        let body = Lambda::prim(
-            Primitive::Paddint,
-            vec![Lambda::var(x), Lambda::const_(Constant::int(1))],
-            LamLoc::NONE,
-        );
-        let args = vec![Lambda::const_(Constant::int(5))];
-
-        let mut stats = StatsMap::new();
-        stats.insert(
-            x,
-            VarStats {
-                top: true,
-                times: 1,
-            },
-        );
-
-        let result = propagate_beta_reduce_with_map(&stats, &params, &body, &args);
-
-        // Direct substitution through the folding `Lambda.prim`
-        // (lam_beta_reduce_util.ml) gives the constant `6`.
-        assert!(
-            matches!(result, Lambda::Lconst(Constant::Int { i: 6, .. })),
-            "Expected folded constant, got {result:?}"
-        );
-    }
-
-    #[test]
-    fn test_propagate_beta_reduce_with_map_pure_once() {
-        let x = Ident::create_local("x");
-        let y = Ident::create_local("y");
-
-        // (fun x -> x + 1) y where y is pure
-        // With stats showing x is used once in top position
-        // => y + 1 (substitute because pure and used once)
-        let params = vec![x];
-        let body = Lambda::prim(
-            Primitive::Paddint,
-            vec![Lambda::var(x), Lambda::const_(Constant::int(1))],
-            LamLoc::NONE,
-        );
-        // Lambda::var is pure
-        let args = vec![Lambda::var(y)];
-
-        let mut stats = StatsMap::new();
-        stats.insert(
-            x,
-            VarStats {
-                top: true,
-                times: 1,
-            },
-        );
-
-        let result = propagate_beta_reduce_with_map(&stats, &params, &body, &args);
-
-        // Should substitute y directly
-        match result {
-            Lambda::Lprim(ref info) => match &info.args[0] {
-                Lambda::Lvar(id) => assert_eq!(id.name(), "y"),
-                _ => panic!("Expected Lvar"),
-            },
-            _ => panic!("Expected Lprim, got {result:?}"),
-        }
-    }
-
-    #[test]
-    fn test_propagate_beta_reduce_with_map_renames_reused_returned_function_params() {
-        let none = Ident::create_local("none");
-        let params = vec![none];
-        let body = Lambda::function_(
-            1,
-            vec![none],
-            Lambda::var(none),
-            FunctionAttribute::default(),
-            LamLoc::NONE,
-        );
-        let args = vec![Lambda::const_(Constant::JsUndefined { is_unit: false })];
-
-        let mut stats = StatsMap::new();
-        stats.insert(
-            none,
-            VarStats {
-                top: true,
-                times: 1,
-            },
-        );
-
-        let reduced = propagate_beta_reduce_with_map(&stats, &params, &body, &args);
-        let Lambda::Lfunction(func) = reduced else {
-            panic!("expected beta reduction with stats to keep the returned wrapper");
-        };
-        let [param] = func.params.as_slice() else {
-            panic!("expected a single returned parameter");
-        };
-        assert!(
-            !param.same(&none),
-            "expected the reused returned parameter to be alpha-renamed"
-        );
-        assert!(
-            matches!(func.body.as_ref(), Lambda::Lvar(body_id) if body_id.same(param)),
-            "expected the returned wrapper body to keep using its own parameter, got {func:?}"
-        );
-    }
-
-    #[test]
-    fn test_propagate_beta_reduce_folds_constant_switch_scrutinee_like_ocaml() {
-        let x = Ident::create_local("x");
-        let reduced = propagate_beta_reduce(
-            std::slice::from_ref(&x),
-            &Lambda::Lswitch(
-                Box::new(Lambda::var(x)),
-                Box::new(LambdaSwitch {
-                    sw_consts_full: true,
-                    sw_consts: vec![
-                        (
-                            crate::lambda::SwitchKey::Int(0),
-                            Lambda::const_(Constant::JsFalse),
-                        ),
-                        (
-                            crate::lambda::SwitchKey::Int(1),
-                            Lambda::const_(Constant::JsTrue),
-                        ),
-                    ],
-                    sw_blocks_full: true,
-                    sw_blocks: vec![],
-                    sw_failaction: None,
-                    sw_dispatch: crate::lambda::SwitchDispatch::Direct,
-                }),
-            ),
-            &[Lambda::const_(Constant::int(1))],
-        );
-
-        assert!(matches!(reduced, Lambda::Lconst(Constant::JsTrue)));
-    }
-
-    #[test]
-    fn test_refine_let_identity() {
-        let x = Ident::create_local("x");
-
-        // let x = v in x => v
-        let value = Lambda::const_(Constant::int(42));
-        let body = Lambda::var(x);
-
-        let result = refine_let(LetKind::Strict, x, value.clone(), body);
-
-        assert!(matches!(
-            result,
-            Lambda::Lconst(Constant::Int { i: 42, .. })
-        ));
-    }
-
-    #[test]
-    fn test_refine_let_normal() {
-        let x = Ident::create_local("x");
-        let y = Ident::create_local("y");
-
-        // let x = 42 in y => let x = 42 in y (can't optimize)
-        let value = Lambda::const_(Constant::int(42));
-        let body = Lambda::var(y);
-
-        let result = refine_let(LetKind::Strict, x, value, body);
-
-        assert!(matches!(result, Lambda::Llet(_, _, _, _)));
-    }
+            .map(Ident::stamp)
+            .max()
+            .unwrap_or(0),
+        Node::StaticCatch { info, .. } => a
+            .idents(a.catch_payload(info).params)
+            .iter()
+            .map(Ident::stamp)
+            .max()
+            .unwrap_or(0),
+        _ => 0,
+    };
+    let mut max = own;
+    a.iter_children(lam, |x| max = max.max(max_ident_stamp_in_lambda(a, x)));
+    max
 }

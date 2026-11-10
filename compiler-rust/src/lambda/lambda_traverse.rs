@@ -30,6 +30,26 @@ pub fn assigned_variables(lam: &Lambda) -> ahash::AHashSet<crate::ident::Ident> 
     assigned
 }
 
+/// [`assigned_variables`] over a term of the Lambda arena.
+pub fn arena_assigned_variables(
+    a: &crate::lambda::arena::LamArena,
+    lam: crate::lambda::arena::Lam,
+) -> ahash::AHashSet<crate::ident::Ident> {
+    fn walk(
+        a: &crate::lambda::arena::LamArena,
+        lam: crate::lambda::arena::Lam,
+        assigned: &mut ahash::AHashSet<crate::ident::Ident>,
+    ) {
+        if let crate::lambda::arena::Node::Assign { id, .. } = a.node(lam) {
+            assigned.insert(a.ident(id));
+        }
+        a.iter_children(lam, |child| walk(a, child, assigned));
+    }
+    let mut assigned = ahash::AHashSet::new();
+    walk(a, lam, &mut assigned);
+    assigned
+}
+
 /// `Lambda_traverse.shallow_exists`: does any immediate child satisfy `f`?
 /// Children are visited in OCaml's order and the walk short-circuits.
 pub fn shallow_exists(lam: &Lambda, f: &mut impl FnMut(&Lambda) -> bool) -> bool {

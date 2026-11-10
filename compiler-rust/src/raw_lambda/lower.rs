@@ -1,132 +1,159 @@
 //! Raw Lambda -> lowered Lambda boundary.
 //!
-//! This stage is the Rust port of the first `Lam_convert.convert` slice used
-//! by optimized-lambda parity dumps and now also feeds the JS backend entry
-//! point in `driver.rs`.
+//! The Rust port of the `Lam_convert.convert` slice that turns the
+//! translation's Lambda into the backend's, building straight into a
+//! [`LamArena`].
 
 use crate::fast_hash::AHashSet as HashSet;
 use crate::lambda::LamLoc;
 
 use crate::ident::Ident;
-use crate::lambda::lam_compat::{Comparison, FieldDbgInfo, LetKind};
+use crate::lambda::arena::{Lam, LamArena, Node, SwitchSpec};
+use crate::lambda::lam_compat::{Comparison, FieldDbgInfo};
 use crate::lambda::lam_constant::{Constant, ConstructorRuntimeTag, PointerInfo};
 use crate::lambda::lam_primitive::Primitive;
 use crate::lambda::lam_tag_info::TagInfo;
-use crate::lambda::{ApInfo, Apply, ApplyStatus, LFunction, Lambda, LambdaSwitch, PrimInfo};
+use crate::lambda::{ApInfo, ApplyStatus, Lambda};
 use crate::raw_lambda::{RawApply, RawLambda, RawLambdaSwitch};
 
 const EXCEPTION_ID_FIELD: &str = "RE_EXN_ID";
 
-/// Lowers raw Lambda to Lambda. It holds no state: raw and lowered
-/// expressions share their identifiers.
-struct LoweringContext;
+/// Lowers raw Lambda into an arena. It holds no other state: raw and
+/// lowered expressions share their identifiers.
+struct Lowering<'a> {
+    a: &'a mut LamArena,
+}
 
-impl LoweringContext {
-    fn lower_lambda(&mut self, raw: RawLambda) -> Lambda {
+impl Lowering<'_> {
+    fn lower(&mut self, raw: RawLambda) -> Lam {
         match raw {
-            RawLambda::Lshared(inner) => self.lower_lambda(std::sync::Arc::unwrap_or_clone(inner)),
-            RawLambda::Lvar(id) => Lambda::var(id),
+            RawLambda::Lshared(inner) => self.lower(std::sync::Arc::unwrap_or_clone(inner)),
+            RawLambda::Lvar(id) => self.a.var(id),
             RawLambda::LglobalModule(id) => {
                 if id.is_predef_exn() {
-                    Lambda::const_(Constant::String(id.name().to_string()))
+                    self.a.const_(Constant::String(id.name().to_string()))
                 } else {
-                    Lambda::global_module(id)
+                    self.a.global_module(id)
                 }
             }
-            RawLambda::Lconst(c) => Lambda::const_(lower_constant(c)),
+            RawLambda::Lconst(c) => self.a.const_(lower_constant(c)),
             RawLambda::Lapply(apply) => self.lower_apply(*apply),
-            RawLambda::Lfunction(func) => Lambda::function_(
-                func.arity,
-                func.params,
-                self.lower_lambda(*func.body),
-                func.attr,
-                func.loc,
-            ),
-            RawLambda::Llet(kind, id, value, body) => self.lower_let(kind, id, *value, *body),
-            RawLambda::Lletrec(bindings, body) => self.lower_letrec(bindings, *body),
-            RawLambda::Lprim(info) => self.lower_primitive(info.primitive, info.args, info.loc),
+            RawLambda::Lfunction(func) => {
+                let func = *func;
+                let body = self.lower(*func.body);
+                self.a
+                    .function_(func.arity, &func.params, body, func.attr, func.loc)
+            }
+            RawLambda::Llet(kind, id, value, body) => {
+                let value = self.lower(*value);
+                let body = self.lower(*body);
+                self.a.let_(kind, id, value, body)
+            }
+            RawLambda::Lletrec(bindings, body) => {
+                let bindings: Vec<(Ident, Lam)> = bindings
+                    .into_iter()
+                    .map(|(id, lam)| (id, self.lower(lam)))
+                    .collect();
+                let body = self.lower(*body);
+                // `Lambda_scc.bind_rec` already split the group at translation
+                // (compiler/ml/lambda_scc.ml); conversion is the identity.
+                self.a.letrec(&bindings, body)
+            }
+            RawLambda::Lprim(info) => {
+                let info = *info;
+                self.lower_primitive(info.primitive, info.args, info.loc)
+            }
             RawLambda::Lswitch(scrutinee, switch) => self.lower_switch(*scrutinee, *switch),
             RawLambda::LstringSwitch(scrutinee, cases, default) => {
-                // `Lam.stringswitch (convert_aux e) ... (convert_aux default)` depends on
-                // OCaml's right-to-left argument evaluation, so lower the tail before
-                // the scrutinee to keep alias/exit-map visibility aligned.
-                let lowered_default = default.map(|lam| Box::new(self.lower_lambda(*lam)));
-                let lowered_cases = cases
+                // `Lam.stringswitch (convert_aux e) ... (convert_aux default)`:
+                // OCaml evaluates the arguments right to left.
+                let default = default.map(|lam| self.lower(*lam));
+                let (keys, mut actions): (Vec<String>, Vec<Lam>) = cases
                     .into_iter()
-                    .map(|(name, lam)| (name, self.lower_lambda(lam)))
-                    .collect();
-                let lowered_scrutinee = self.lower_lambda(*scrutinee);
-                Lambda::LstringSwitch(Box::new(lowered_scrutinee), lowered_cases, lowered_default)
+                    .map(|(name, lam)| (name, self.lower(lam)))
+                    .unzip();
+                let scrutinee = self.lower(*scrutinee);
+                actions.extend(default);
+                let actions = self.a.add_list(&actions);
+                let info = self
+                    .a
+                    .add_str_switch(keys.iter().map(String::as_str), default.is_some());
+                self.a.string_switch_raw(scrutinee, actions, info)
             }
-            RawLambda::LstaticRaise(id, args) => Lambda::static_raise(
-                id,
-                args.into_iter().map(|arg| self.lower_lambda(arg)).collect(),
-            ),
+            RawLambda::LstaticRaise(id, args) => {
+                let args: Vec<Lam> = args.into_iter().map(|arg| self.lower(arg)).collect();
+                self.a.static_raise(id, &args)
+            }
             RawLambda::LstaticCatch(body, (i, ids), handler) => {
-                let lowered_handler = self.lower_lambda(*handler);
-                let lowered_body = self.lower_lambda(*body);
-                Lambda::static_catch(lowered_body, i, ids, lowered_handler)
+                let handler = self.lower(*handler);
+                let body = self.lower(*body);
+                self.a.static_catch(body, i, &ids, handler)
             }
-            RawLambda::LtryWith(body, id, handler) => self.lower_try_with(*body, id, *handler),
+            RawLambda::LtryWith(body, id, handler) => {
+                // The conversion already packed the caught value
+                // (`Translcore.pack_trywith_exn`).
+                let body = self.lower(*body);
+                let handler = self.lower(*handler);
+                self.a.try_(body, id, handler)
+            }
             RawLambda::LtryFinally(body, finally) => {
-                let lowered_body = self.lower_lambda(*body);
-                let lowered_finally = self.lower_lambda(*finally);
-                Lambda::try_finally(lowered_body, lowered_finally)
+                let body = self.lower(*body);
+                let finally = self.lower(*finally);
+                self.a.try_finally(body, finally)
             }
             RawLambda::LifThenElse(cond, then_, else_) => {
-                let lowered_else = self.lower_lambda(*else_);
-                let lowered_then = self.lower_lambda(*then_);
-                let lowered_cond = self.lower_lambda(*cond);
-                Lambda::if_(lowered_cond, lowered_then, lowered_else)
+                let else_ = self.lower(*else_);
+                let then_ = self.lower(*then_);
+                let cond = self.lower(*cond);
+                self.a.if_(cond, then_, else_)
             }
             RawLambda::Lsequence(first, second) => {
-                let lowered_second = self.lower_lambda(*second);
-                let lowered_first = self.lower_lambda(*first);
-                Lambda::seq(lowered_first, lowered_second)
+                let second = self.lower(*second);
+                let first = self.lower(*first);
+                self.a.seq(first, second)
             }
             RawLambda::Lwhile(cond, body) => {
-                let lowered_body = self.lower_lambda(*body);
-                let lowered_cond = self.lower_lambda(*cond);
-                Lambda::while_(lowered_cond, lowered_body)
+                let body = self.lower(*body);
+                let cond = self.lower(*cond);
+                self.a.while_(cond, body)
             }
             RawLambda::Lfor(var, start, end, dir, body) => {
-                let lowered_body = self.lower_lambda(*body);
-                let lowered_end = self.lower_lambda(*end);
-                let lowered_start = self.lower_lambda(*start);
-                Lambda::for_(var, lowered_start, lowered_end, dir, lowered_body)
+                let body = self.lower(*body);
+                let end = self.lower(*end);
+                let start = self.lower(*start);
+                self.a.for_(var, start, end, dir, body)
             }
             RawLambda::Lfor_of(var, iterable, body) => {
-                let lowered_body = self.lower_lambda(*body);
-                let lowered_iterable = self.lower_lambda(*iterable);
-                Lambda::for_of(var, lowered_iterable, lowered_body)
+                let body = self.lower(*body);
+                let iterable = self.lower(*iterable);
+                self.a.for_of(var, iterable, body)
             }
             RawLambda::Lfor_await_of(var, iterable, body) => {
-                let lowered_body = self.lower_lambda(*body);
-                let lowered_iterable = self.lower_lambda(*iterable);
-                Lambda::for_await_of(var, lowered_iterable, lowered_body)
+                let body = self.lower(*body);
+                let iterable = self.lower(*iterable);
+                self.a.for_await_of(var, iterable, body)
             }
-            RawLambda::Lbreak => Lambda::break_(),
-            RawLambda::Lcontinue => Lambda::continue_(),
-            RawLambda::Lassign(id, value) => Lambda::assign(id, self.lower_lambda(*value)),
+            RawLambda::Lbreak => self.a.break_(),
+            RawLambda::Lcontinue => self.a.continue_(),
+            RawLambda::Lassign(id, value) => {
+                let value = self.lower(*value);
+                self.a.assign(id, value)
+            }
         }
     }
 
-    fn lower_apply(&mut self, apply: RawApply) -> Lambda {
+    fn lower_apply(&mut self, apply: RawApply) -> Lam {
         let RawApply {
             ap_func,
             ap_args,
             ap_info,
         } = apply;
-
-        let func = *ap_func;
-        let lowered_args = ap_args
-            .into_iter()
-            .map(|arg| self.lower_lambda(arg))
-            .collect();
-        let lowered_func = self.lower_lambda(func);
+        let args: Vec<Lam> = ap_args.into_iter().map(|arg| self.lower(arg)).collect();
+        let func = self.lower(*ap_func);
         make_apply(
-            lowered_func,
-            lowered_args,
+            self.a,
+            func,
+            &args,
             ApInfo {
                 loc: ap_info.loc,
                 status: ApplyStatus::Uncurry,
@@ -134,134 +161,126 @@ impl LoweringContext {
         )
     }
 
-    fn lower_let(&mut self, kind: LetKind, id: Ident, value: RawLambda, body: RawLambda) -> Lambda {
-        let lowered_value = self.lower_lambda(value);
-        let lowered_body = self.lower_lambda(body);
-
-        Lambda::let_(kind, id, lowered_value, lowered_body)
-    }
-
-    fn lower_letrec(&mut self, bindings: Vec<(Ident, RawLambda)>, body: RawLambda) -> Lambda {
-        let lowered_bindings = bindings
-            .into_iter()
-            .map(|(id, lam)| (id, self.lower_lambda(lam)))
-            .collect::<Vec<_>>();
-        let lowered_body = self.lower_lambda(body);
-        // `Lambda_scc.bind_rec` already split the group at translation
-        // (compiler/ml/lambda_scc.ml); conversion is the identity.
-        Lambda::letrec(lowered_bindings, lowered_body)
-    }
-
     fn lower_primitive(
         &mut self,
         primitive: Primitive,
         args: Vec<RawLambda>,
         loc: LamLoc,
-    ) -> Lambda {
+    ) -> Lam {
         if let Primitive::PrawJsCode(info) = &primitive {
             let mut info = info.clone();
             match args.as_slice() {
                 [RawLambda::Lconst(Constant::String(s))]
                 | [RawLambda::Lconst(Constant::ImmString(s))] => {
                     info.code = s.clone();
-                    return Lambda::prim(Primitive::PrawJsCode(info), Vec::new(), loc);
+                    return self.a.prim(Primitive::PrawJsCode(info), &[], loc);
                 }
-                [] => return Lambda::prim(Primitive::PrawJsCode(info), Vec::new(), loc),
+                [] => return self.a.prim(Primitive::PrawJsCode(info), &[], loc),
                 _ => {}
             }
         }
 
-        let args = args
-            .into_iter()
-            .map(|arg| self.lower_lambda(arg))
-            .collect::<Vec<_>>();
-
+        let args: Vec<Lam> = args.into_iter().map(|arg| self.lower(arg)).collect();
+        let a = &mut *self.a;
         match primitive {
-            Primitive::Pidentity => args.into_iter().next().unwrap_or_else(Lambda::unit),
-            Primitive::PextensionSlotEq => match <[Lambda; 2]>::try_from(args) {
-                Ok([lhs, rhs]) => Lambda::prim(
-                    Primitive::Pstringcomp(Comparison::Eq),
-                    vec![
-                        Lambda::prim(
-                            Primitive::Pfield(
-                                0,
-                                FieldDbgInfo::Record {
-                                    name: EXCEPTION_ID_FIELD.to_string(),
-                                },
-                            ),
-                            vec![lhs],
-                            loc,
-                        ),
-                        rhs,
-                    ],
-                    loc,
-                ),
-                Err(_) => unreachable!("PextensionSlotEq expects exactly two arguments"),
+            Primitive::Pidentity => match args.first() {
+                Some(arg) => *arg,
+                None => a.unit(),
             },
+            Primitive::PextensionSlotEq => {
+                let [lhs, rhs] = args[..] else {
+                    unreachable!("PextensionSlotEq expects exactly two arguments")
+                };
+                let id = a.prim(
+                    Primitive::Pfield(
+                        0,
+                        FieldDbgInfo::Record {
+                            name: EXCEPTION_ID_FIELD.to_string(),
+                        },
+                    ),
+                    &[lhs],
+                    loc,
+                );
+                a.prim(Primitive::Pstringcomp(Comparison::Eq), &[id, rhs], loc)
+            }
             // lambda.ml `mk_builtin`: `Lsequence (arg, lambda_unit)`, not the
             // folding `Lambda.seq`.
             Primitive::Pignore => {
-                let arg = args.into_iter().next().unwrap_or_else(Lambda::unit);
-                Lambda::Lsequence(Box::new(arg), Box::new(Lambda::unit()))
+                let arg = match args.first() {
+                    Some(arg) => *arg,
+                    None => a.unit(),
+                };
+                let unit = a.unit();
+                a.seq_raw(arg, unit)
             }
             Primitive::Pmakeblock(TagInfo::PolyVar(name), mutable_flag) => {
-                match <[Lambda; 2]>::try_from(args) {
-                    Ok([_, value]) => Lambda::prim(
-                        Primitive::Pmakeblock(TagInfo::PolyVar(name.clone()), mutable_flag),
-                        vec![Lambda::const_(polyvar_block_tag_constant(&name)), value],
-                        loc,
-                    ),
-                    Err(_) => unreachable!("polyvariant blocks expect tag and payload"),
-                }
+                let [_, value] = args[..] else {
+                    unreachable!("polyvariant blocks expect tag and payload")
+                };
+                let tag = a.const_(polyvar_block_tag_constant(&name));
+                a.prim(
+                    Primitive::Pmakeblock(TagInfo::PolyVar(name), mutable_flag),
+                    &[tag, value],
+                    loc,
+                )
             }
             Primitive::Pmakeblock(TagInfo::SomeNotNested, _) => {
-                Lambda::prim(Primitive::PsomeNotNest, args, loc)
+                a.prim(Primitive::PsomeNotNest, &args, loc)
             }
-            Primitive::Pmakeblock(TagInfo::Some, _) => Lambda::prim(Primitive::Psome, args, loc),
-            primitive @ Primitive::PinitMod => Lambda::prim(primitive, args, loc),
-            other => lower_primitive_default(other, args, loc),
+            Primitive::Pmakeblock(TagInfo::Some, _) => a.prim(Primitive::Psome, &args, loc),
+            primitive @ Primitive::PinitMod => a.prim(primitive, &args, loc),
+            other => lower_primitive_default(a, other, &args, loc),
         }
     }
 
-    fn lower_switch(&mut self, scrutinee: RawLambda, switch: RawLambdaSwitch) -> Lambda {
+    fn lower_switch(&mut self, scrutinee: RawLambda, switch: RawLambdaSwitch) -> Lam {
         // `convert_switch` builds the switch record before passing the
-        // scrutinee to `Lam.switch`, so OCaml's right-to-left evaluation keeps
-        // case/failaction exit-alias updates visible to the scrutinee, not the
-        // other way around.
-        let lowered_consts = switch
+        // scrutinee to `Lam.switch` (OCaml evaluates right to left).
+        let consts: Vec<(crate::lambda::SwitchKey, Lam)> = switch
             .sw_consts
             .into_iter()
-            .map(|(tag, lam)| (tag, self.lower_lambda(lam)))
-            .collect::<Vec<_>>();
-        let lowered_blocks = switch
+            .map(|(tag, lam)| (tag, self.lower(lam)))
+            .collect();
+        let blocks: Vec<(crate::lambda::SwitchKey, Lam)> = switch
             .sw_blocks
             .into_iter()
-            .map(|(tag, lam)| (tag, self.lower_lambda(lam)))
-            .collect::<Vec<_>>();
-        let lowered_failaction = switch
-            .sw_failaction
-            .map(|lam| Box::new(self.lower_lambda(*lam)));
-        let lowered_scrutinee = self.lower_lambda(scrutinee);
+            .map(|(tag, lam)| (tag, self.lower(lam)))
+            .collect();
+        let fail = switch.sw_failaction.map(|lam| self.lower(*lam));
+        let scrutinee = self.lower(scrutinee);
+        let a = &mut *self.a;
 
-        Lambda::Lswitch(
-            Box::new(lowered_scrutinee),
-            Box::new(LambdaSwitch {
-                sw_consts_full: switch.sw_consts_full,
-                sw_consts: lowered_consts,
-                sw_blocks_full: switch.sw_blocks_full,
-                sw_blocks: lowered_blocks,
-                sw_failaction: lowered_failaction,
-                sw_dispatch: switch.sw_dispatch,
-            }),
-        )
-    }
-
-    fn lower_try_with(&mut self, body: RawLambda, id: Ident, handler: RawLambda) -> Lambda {
-        // The conversion already packed the caught value
-        // (`Translcore.pack_trywith_exn`, `RawLambdaConverter::pack_trywith_exn`).
-        let lowered_body = self.lower_lambda(body);
-        let lowered_handler = self.lower_lambda(handler);
-        Lambda::try_(lowered_body, id, lowered_handler)
+        let SwitchSpec {
+            consts_full,
+            consts,
+            blocks_full,
+            blocks,
+            fail,
+            dispatch,
+        } = SwitchSpec {
+            consts_full: switch.sw_consts_full,
+            consts,
+            blocks_full: switch.sw_blocks_full,
+            blocks,
+            fail,
+            dispatch: switch.sw_dispatch,
+        };
+        let actions = a.add_list_iter(
+            consts
+                .iter()
+                .map(|(_, l)| *l)
+                .chain(blocks.iter().map(|(_, l)| *l))
+                .chain(fail),
+        );
+        let info = a.add_switch(
+            consts_full,
+            consts.into_iter().map(|(k, _)| k),
+            blocks_full,
+            blocks.into_iter().map(|(k, _)| k),
+            fail.is_some(),
+            dispatch,
+        );
+        a.switch_raw(scrutinee, actions, info)
     }
 }
 
@@ -521,111 +540,109 @@ fn is_valid_hash_number(value: &str) -> bool {
     }
 }
 
-fn make_apply(func: Lambda, args: Vec<Lambda>, ap_info: ApInfo) -> Lambda {
-    match func {
-        Lambda::Lfunction(function) => {
-            if let Some(reduced) = eta_reduce_function_apply(&function, &args, &ap_info) {
+/// `Lambda.apply` (lambda.ml): eta-reduce an applied primitive wrapper and
+/// push the application under `let`s that bind a function.
+fn make_apply(a: &mut LamArena, func: Lam, args: &[Lam], ap_info: ApInfo) -> Lam {
+    match a.node(func) {
+        Node::Function { body, info } => {
+            if let Some(reduced) = eta_reduce_function_apply(a, info, body, args, &ap_info) {
                 return reduced;
             }
-            make_lapply(Lambda::Lfunction(function), args, ap_info)
+            a.apply_raw(func, args, ap_info)
         }
-        Lambda::Llet(kind, id, value, body) => match *body {
-            body @ Lambda::Lfunction(_) => {
-                Lambda::let_(kind, id, *value, make_apply(body, args, ap_info))
-            }
-            body => make_lapply(Lambda::Llet(kind, id, value, Box::new(body)), args, ap_info),
-        },
-        func => make_lapply(func, args, ap_info),
+        Node::Let {
+            kind,
+            id,
+            value,
+            body,
+        } if matches!(a.node(body), Node::Function { .. }) => {
+            let body = make_apply(a, body, args, ap_info);
+            a.let_with(kind, id, value, body)
+        }
+        _ => a.apply_raw(func, args, ap_info),
     }
 }
 
 fn eta_reduce_function_apply(
-    function: &LFunction,
-    args: &[Lambda],
+    a: &mut LamArena,
+    function: crate::lambda::arena::FuncId,
+    body: Lam,
+    args: &[Lam],
     ap_info: &ApInfo,
-) -> Option<Lambda> {
-    match function.body.as_ref() {
-        Lambda::Lprim(wrap)
-            if matches!(
-                wrap.primitive,
-                Primitive::PnullToOpt
-                    | Primitive::PnullUndefinedToOpt
-                    | Primitive::PisNull
-                    | Primitive::PisNullUndefined
-                    | Primitive::Ptypeof
-            ) =>
-        {
-            let [Lambda::Lprim(inner_call)] = wrap.args.as_slice() else {
-                return None;
-            };
-            let eta_args = eta_conversion_args(&function.params, &inner_call.args, args)?;
+) -> Option<Lam> {
+    let params: Vec<Ident> = a.params(function).to_vec();
+    match a.as_prim(body) {
+        Some((
+            wrap @ (Primitive::PnullToOpt
+            | Primitive::PnullUndefinedToOpt
+            | Primitive::PisNull
+            | Primitive::PisNullUndefined
+            | Primitive::Ptypeof),
+            [inner_call],
+            _,
+        )) => {
+            let wrap = wrap.clone();
+            let (inner, inner_args, _) = a.as_prim(*inner_call)?;
+            let inner = inner.clone();
+            let eta_args = eta_conversion_args(a, &params, inner_args, args)?;
             // lambda.ml `apply` builds the result through the folding `prim`.
-            let inner = Lambda::prim(inner_call.primitive.clone(), eta_args, ap_info.loc);
-            Some(Lambda::prim(
-                wrap.primitive.clone(),
-                vec![inner],
-                ap_info.loc,
-            ))
+            let inner = a.prim(inner, &eta_args, ap_info.loc);
+            Some(a.prim(wrap, &[inner], ap_info.loc))
         }
-        Lambda::Lprim(inner_call) => {
-            let eta_args = eta_conversion_args(&function.params, &inner_call.args, args)?;
-            Some(Lambda::prim(
-                inner_call.primitive.clone(),
-                eta_args,
-                ap_info.loc,
-            ))
+        Some((
+            Primitive::PnullToOpt
+            | Primitive::PnullUndefinedToOpt
+            | Primitive::PisNull
+            | Primitive::PisNullUndefined
+            | Primitive::Ptypeof,
+            _,
+            _,
+        )) => None,
+        Some((inner, inner_args, _)) => {
+            let inner = inner.clone();
+            let eta_args = eta_conversion_args(a, &params, inner_args, args)?;
+            Some(a.prim(inner, &eta_args, ap_info.loc))
         }
-        Lambda::Lsequence(first, second) => {
-            let Lambda::Lprim(inner_call) = first.as_ref() else {
+        None => {
+            let Node::Sequence(first, second) = a.node(body) else {
                 return None;
             };
-            let Lambda::Lconst(constant) = second.as_ref() else {
+            let (inner, inner_args, _) = a.as_prim(first)?;
+            if !a.is_const(second) {
                 return None;
-            };
-            let eta_args = eta_conversion_args(&function.params, &inner_call.args, args)?;
-            Some(Lambda::seq(
-                Lambda::prim(inner_call.primitive.clone(), eta_args, ap_info.loc),
-                Lambda::Lconst(constant.clone()),
-            ))
+            }
+            let inner = inner.clone();
+            let eta_args = eta_conversion_args(a, &params, inner_args, args)?;
+            let call = a.prim(inner, &eta_args, ap_info.loc);
+            Some(a.seq(call, second))
         }
-        _ => None,
     }
 }
 
 fn eta_conversion_args(
+    a: &LamArena,
     params: &[Ident],
-    inner_args: &[Lambda],
-    outer_args: &[Lambda],
-) -> Option<Vec<Lambda>> {
+    inner_args: &[Lam],
+    outer_args: &[Lam],
+) -> Option<Vec<Lam>> {
     if params.len() != inner_args.len() || params.len() != outer_args.len() {
         return None;
     }
-
     params
         .iter()
-        .zip(inner_args.iter())
-        .zip(outer_args.iter())
-        .map(|((param, inner_arg), outer_arg)| match inner_arg {
-            Lambda::Lvar(id) if param.same(id) => Some(outer_arg.clone()),
-            _ => None,
-        })
+        .zip(inner_args)
+        .zip(outer_args)
+        .map(
+            |((param, inner_arg), outer_arg)| match a.as_var(*inner_arg) {
+                Some(id) if param.same(&id) => Some(*outer_arg),
+                _ => None,
+            },
+        )
         .collect()
 }
 
-fn make_lapply(func: Lambda, args: Vec<Lambda>, ap_info: ApInfo) -> Lambda {
-    Lambda::Lapply(Box::new(Apply {
-        ap_func: Box::new(func),
-        ap_args: args,
-        ap_info,
-    }))
-}
-
-fn bool_const(value: bool) -> Lambda {
-    if value {
-        Lambda::true_()
-    } else {
-        Lambda::false_()
-    }
+fn bool_const(a: &mut LamArena, value: bool) -> Lam {
+    if value { a.true_() } else { a.false_() }
 }
 
 fn string_constant_value(constant: &Constant) -> Option<&str> {
@@ -649,81 +666,64 @@ fn pointer_constant_value(constant: &Constant) -> Option<&str> {
     }
 }
 
-fn lower_primitive_default(primitive: Primitive, args: Vec<Lambda>, loc: LamLoc) -> Lambda {
-    match args.as_slice() {
-        [Lambda::Lconst(constant)] => match (&primitive, constant) {
-            (Primitive::Pnegint, Constant::Int { i, .. }) => {
-                return Lambda::const_(Constant::Int {
-                    i: i.wrapping_neg(),
-                    comment: None,
-                });
-            }
-            (Primitive::Pintoffloat, Constant::Float(value)) => {
-                if let Ok(value) = value.parse::<f64>() {
-                    return Lambda::const_(Constant::Int {
-                        i: value as i32,
-                        comment: None,
-                    });
-                }
-            }
-            (Primitive::Pstringlength, constant) => {
-                // lambda.ml `Lambda.prim`: `String_literal.utf16_length`.
-                if let Some(value) = string_constant_value(constant) {
-                    return Lambda::const_(Constant::Int {
-                        i: crate::string_literal::utf16_length(value)
-                            .expect("String_literal.utf16_length: Invalid_utf8")
-                            as i32,
-                        comment: None,
-                    });
-                }
-            }
-            (Primitive::Pnot, Constant::JsTrue) => return Lambda::false_(),
-            (Primitive::Pnot, Constant::JsFalse) => return Lambda::true_(),
-            _ => {}
+/// Constant folding of `Lam.prim` for the operands lowering sees, before
+/// the generic smart constructor.
+fn fold_constants(primitive: &Primitive, args: &[&Constant]) -> Option<Folded> {
+    match *args {
+        [constant] => match (primitive, constant) {
+            (Primitive::Pnegint, Constant::Int { i, .. }) => Some(Folded::Int(i.wrapping_neg())),
+            (Primitive::Pintoffloat, Constant::Float(value)) => value
+                .parse::<f64>()
+                .ok()
+                .map(|value| Folded::Int(value as i32)),
+            // lambda.ml `Lambda.prim`: `String_literal.utf16_length`.
+            (Primitive::Pstringlength, constant) => string_constant_value(constant).map(|value| {
+                Folded::Int(
+                    crate::string_literal::utf16_length(value)
+                        .expect("String_literal.utf16_length: Invalid_utf8")
+                        as i32,
+                )
+            }),
+            (Primitive::Pnot, Constant::JsTrue) => Some(Folded::Bool(false)),
+            (Primitive::Pnot, Constant::JsFalse) => Some(Folded::Bool(true)),
+            _ => None,
         },
-        [Lambda::Lconst(lhs), Lambda::Lconst(rhs)] => match (&primitive, lhs, rhs) {
+        [lhs, rhs] => match (primitive, lhs, rhs) {
             (
                 Primitive::Pintcomp(comparison),
                 Constant::Int { i: lhs, .. },
                 Constant::Int { i: rhs, .. },
-            ) => {
-                return bool_const(comparison.cmp_int32(*lhs, *rhs));
-            }
+            ) => Some(Folded::Bool(comparison.cmp_int32(*lhs, *rhs))),
             (Primitive::Pfloatcomp(comparison), lhs, rhs) => {
-                if let (Some(lhs), Some(rhs)) =
-                    (float_constant_value(lhs), float_constant_value(rhs))
-                {
-                    return bool_const(comparison.cmp_float(lhs, rhs));
-                }
+                let (lhs, rhs) = (float_constant_value(lhs)?, float_constant_value(rhs)?);
+                Some(Folded::Bool(comparison.cmp_float(lhs, rhs)))
             }
             (Primitive::Pintcomp(Comparison::Eq), lhs, rhs) => {
-                if let (Some(lhs), Some(rhs)) =
-                    (pointer_constant_value(lhs), pointer_constant_value(rhs))
-                {
-                    return bool_const(lhs == rhs);
-                }
+                let (lhs, rhs) = (pointer_constant_value(lhs)?, pointer_constant_value(rhs)?);
+                Some(Folded::Bool(lhs == rhs))
             }
             (Primitive::Pintcomp(Comparison::Neq), lhs, rhs) => {
-                if let (Some(lhs), Some(rhs)) =
-                    (pointer_constant_value(lhs), pointer_constant_value(rhs))
-                {
-                    return bool_const(lhs != rhs);
-                }
+                let (lhs, rhs) = (pointer_constant_value(lhs)?, pointer_constant_value(rhs)?);
+                Some(Folded::Bool(lhs != rhs))
             }
-            (Primitive::Paddint, _, _)
-            | (Primitive::Psubint, _, _)
-            | (Primitive::Pmulint, _, _)
-            | (Primitive::Pdivint, _, _)
-            | (Primitive::Pmodint, _, _)
-            | (Primitive::Pandint, _, _)
-            | (Primitive::Porint, _, _)
-            | (Primitive::Pxorint, _, _)
-            | (Primitive::Plslint, _, _)
-            | (Primitive::Plsrint, _, _)
-            | (Primitive::Pasrint, _, _) => {
+            (
+                Primitive::Paddint
+                | Primitive::Psubint
+                | Primitive::Pmulint
+                | Primitive::Pdivint
+                | Primitive::Pmodint
+                | Primitive::Pandint
+                | Primitive::Porint
+                | Primitive::Pxorint
+                | Primitive::Plslint
+                | Primitive::Plsrint
+                | Primitive::Pasrint,
+                lhs,
+                rhs,
+            ) => {
                 let (&Constant::Int { i: lhs, .. }, &Constant::Int { i: rhs, .. }) = (lhs, rhs)
                 else {
-                    return Lambda::prim(primitive, args, loc);
+                    return Some(Folded::Unfolded);
                 };
                 let folded = match primitive {
                     Primitive::Paddint => Some(lhs.wrapping_add(rhs)),
@@ -739,106 +739,117 @@ fn lower_primitive_default(primitive: Primitive, args: Vec<Lambda>, loc: LamLoc)
                     Primitive::Pasrint => Some(lhs.wrapping_shr((rhs & 31) as u32)),
                     _ => None,
                 };
-                if let Some(value) = folded {
-                    return Lambda::const_(Constant::Int {
-                        i: value,
-                        comment: None,
-                    });
-                }
+                folded.map(Folded::Int)
             }
             (Primitive::Psequand, Constant::JsFalse, Constant::JsTrue | Constant::JsFalse)
             | (Primitive::Psequand, Constant::JsTrue, Constant::JsFalse)
             | (Primitive::Psequor, Constant::JsFalse, Constant::JsFalse) => {
-                return Lambda::false_();
+                Some(Folded::Bool(false))
             }
             (Primitive::Psequand, Constant::JsTrue, Constant::JsTrue)
             | (Primitive::Psequor, Constant::JsTrue, Constant::JsTrue | Constant::JsFalse)
-            | (Primitive::Psequor, Constant::JsFalse, Constant::JsTrue) => {
-                return Lambda::true_();
-            }
+            | (Primitive::Psequor, Constant::JsFalse, Constant::JsTrue) => Some(Folded::Bool(true)),
             (Primitive::Pstringadd, lhs, rhs) => {
-                if let (Some(lhs), Some(rhs)) =
-                    (string_constant_value(lhs), string_constant_value(rhs))
-                {
-                    return Lambda::const_(Constant::String(format!("{lhs}{rhs}")));
-                }
+                let (lhs, rhs) = (string_constant_value(lhs)?, string_constant_value(rhs)?);
+                Some(Folded::String(format!("{lhs}{rhs}")))
             }
+            // lambda.ml `Lambda.prim`: `String_literal.code_point_at_utf16_index`.
             (Primitive::Pstringrefs | Primitive::Pstringrefu, lhs, Constant::Int { i, .. }) => {
-                // lambda.ml `Lambda.prim`: `String_literal.code_point_at_utf16_index`.
-                if let Some(value) = string_constant_value(lhs)
-                    && let Ok(Some(codepoint)) =
-                        crate::string_literal::code_point_at_utf16_index(value, *i as i64)
-                {
-                    return Lambda::const_(Constant::Char(codepoint as i32));
+                let value = string_constant_value(lhs)?;
+                match crate::string_literal::code_point_at_utf16_index(value, *i as i64) {
+                    Ok(Some(codepoint)) => Some(Folded::Char(codepoint as i32)),
+                    _ => None,
                 }
             }
-            _ => {}
+            _ => None,
         },
-        _ => {}
+        _ => None,
     }
-
-    if let Primitive::Pmakeblock(TagInfo::Module(fields), _) = &primitive {
-        if let Some(module_alias) = collapse_module_alias(fields, &args) {
-            return module_alias;
-        }
-    }
-
-    Lambda::prim(primitive, args, loc)
 }
 
-fn collapse_module_alias(fields: &[String], args: &[Lambda]) -> Option<Lambda> {
+enum Folded {
+    Int(i32),
+    Bool(bool),
+    String(String),
+    Char(i32),
+    /// An integer operation on non-integer constants: build it as is.
+    Unfolded,
+}
+
+fn lower_primitive_default(
+    a: &mut LamArena,
+    primitive: Primitive,
+    args: &[Lam],
+    loc: LamLoc,
+) -> Lam {
+    let folded = {
+        let constants: smallvec::SmallVec<[&Constant; 2]> =
+            args.iter().map_while(|arg| a.as_const(*arg)).collect();
+        (constants.len() == args.len())
+            .then(|| fold_constants(&primitive, &constants))
+            .flatten()
+    };
+    {
+        match folded {
+            Some(Folded::Int(i)) => return a.const_(Constant::Int { i, comment: None }),
+            Some(Folded::Bool(value)) => return bool_const(a, value),
+            Some(Folded::String(s)) => return a.const_(Constant::String(s)),
+            Some(Folded::Char(c)) => return a.const_(Constant::Char(c)),
+            Some(Folded::Unfolded) => return a.prim(primitive, args, loc),
+            None => {}
+        }
+    }
+    if let Primitive::Pmakeblock(TagInfo::Module(fields), _) = &primitive
+        && let Some(module_alias) = collapse_module_alias(a, fields, args)
+    {
+        return module_alias;
+    }
+    a.prim(primitive, args, loc)
+}
+
+/// A module block whose fields are, in order, all fields of one module:
+/// that module (lambda.ml `Lambda.prim`, `Blk_module`).
+fn collapse_module_alias(a: &LamArena, fields: &[String], args: &[Lam]) -> Option<Lam> {
     let (first_field, rest_fields) = fields.split_first()?;
     let (first_arg, rest_args) = args.split_first()?;
-
-    let (field_name, first_index, module_value) = module_field_access(first_arg)?;
+    let (field_name, first_index, module_value) = module_field_access(a, *first_arg)?;
     if field_name != first_field || first_index != 0 {
         return None;
     }
-
     let mut expected_index = 1i32;
-    for (field, arg) in rest_fields.iter().zip(rest_args.iter()) {
-        let (field_name, arg_index, arg_module_value) = module_field_access(arg)?;
+    for (field, arg) in rest_fields.iter().zip(rest_args) {
+        let (field_name, arg_index, arg_module_value) = module_field_access(a, *arg)?;
         if field_name != field
             || arg_index != expected_index
-            || !same_module_source(module_value, arg_module_value)
+            || !same_module_source(a, module_value, arg_module_value)
         {
             return None;
         }
         expected_index += 1;
     }
-
     if rest_fields.len() != rest_args.len() {
         return None;
     }
-
-    Some(module_value.clone())
+    Some(module_value)
 }
 
-fn module_field_access(arg: &Lambda) -> Option<(&str, i32, &Lambda)> {
-    let Lambda::Lprim(prim) = arg else {
-        return None;
-    };
-    let PrimInfo {
-        primitive: Primitive::Pfield(index, FieldDbgInfo::Module { name }),
-        args,
-        ..
-    } = prim.as_ref()
+fn module_field_access(a: &LamArena, arg: Lam) -> Option<(&str, i32, Lam)> {
+    let (Primitive::Pfield(index, FieldDbgInfo::Module { name }), [module_value], _) =
+        a.as_prim(arg)?
     else {
         return None;
     };
-    let [module_value @ (Lambda::LglobalModule(_) | Lambda::Lvar(_))] = args.as_slice() else {
-        return None;
-    };
-    if *index < 0 {
+    if !matches!(a.node(*module_value), Node::GlobalModule(_) | Node::Var(_)) || *index < 0 {
         return None;
     }
-    Some((name.as_str(), *index, module_value))
+    Some((name.as_str(), *index, *module_value))
 }
 
-fn same_module_source(lhs: &Lambda, rhs: &Lambda) -> bool {
-    match (lhs, rhs) {
-        (Lambda::Lvar(lhs), Lambda::Lvar(rhs)) => lhs.same(rhs),
-        (Lambda::LglobalModule(lhs), Lambda::LglobalModule(rhs)) => lhs.same(rhs),
+fn same_module_source(a: &LamArena, lhs: Lam, rhs: Lam) -> bool {
+    match (a.node(lhs), a.node(rhs)) {
+        (Node::Var(lhs), Node::Var(rhs)) | (Node::GlobalModule(lhs), Node::GlobalModule(rhs)) => {
+            a.ident(lhs).same(&a.ident(rhs))
+        }
         _ => false,
     }
 }
@@ -1021,18 +1032,26 @@ pub(crate) fn max_ident_stamp_for_test(raw: &RawLambda) -> i32 {
 /// The Lambda `Translmod.transl_implementation` returns, as `-drawlambda`
 /// prints it, and the module's exported identifiers. Lowering creates no
 /// identifiers: the conversion made them where OCaml's translation does.
-pub fn lower_to_translmod_lambda(raw: RawLambda) -> (Lambda, HashSet<Ident>) {
+pub fn lower_to_translmod_lambda(raw: RawLambda) -> (LamArena, Lam, HashSet<Ident>) {
     let mut exported_idents = HashSet::new();
     collect_exported_idents(&raw, &mut exported_idents);
-    let lambda = LoweringContext.lower_lambda(raw);
-    (lambda, exported_idents)
+    let mut arena = LamArena::with_capacity(1024);
+    let lam = Lowering { a: &mut arena }.lower(raw);
+    (arena, lam, exported_idents)
 }
 
 /// The lowered Lambda after `Lam_pass_collapse_var_aliases`, the first pass
 /// of `Lam_compile_main.compile` (lam_compile_main.ml:288-290).
+pub fn lower_to_arena(raw: RawLambda) -> (LamArena, Lam) {
+    let (mut arena, lam, exports) = lower_to_translmod_lambda(raw);
+    let lam = crate::lambda::lam_pass_collapse_var_aliases::collapse(&mut arena, lam, &exports);
+    (arena, lam)
+}
+
+/// [`lower_to_arena`] as a tree.
 pub fn lower_to_lambda(raw: RawLambda) -> Lambda {
-    let (lambda, exports) = lower_to_translmod_lambda(raw);
-    crate::lambda::lam_pass_collapse_var_aliases::collapse(lambda, &exports)
+    let (arena, lam) = lower_to_arena(raw);
+    arena.export(lam)
 }
 
 #[cfg(test)]

@@ -7,57 +7,61 @@ use super::js_exp_make::{
     bool_literal, both_bigint_literals, both_bool_literals, both_float_literals, both_int_literals,
     both_string_literals, compare_bigint_literals, compare_bool_literals, compare_string_literals,
     comparison_to_binop, comparison_to_float_binop, comparison_to_runtime_member,
-    compile_int_equality,
-    compile_nullish_strict_comparison, compile_raw_comparison, int_bnot, int_expr, int_literal,
-    int32_add, int32_band, int32_bor, int32_bxor, int32_lsl, int32_lsr, int32_minus, int32_mul,
-    int32_pow, is_nullish_literal, is_optional_block, is_type_object_expr, is_zero_int,
-    js_expr_no_side_effects, js_seq, ocaml_typeof_expr, runtime_compare_call_args, to_int32,
+    compile_int_equality, compile_nullish_strict_comparison, compile_raw_comparison, int_bnot,
+    int_expr, int_literal, int32_add, int32_band, int32_bor, int32_bxor, int32_lsl, int32_lsr,
+    int32_minus, int32_mul, int32_pow, is_nullish_literal, is_optional_block, is_type_object_expr,
+    is_zero_int, js_expr_no_side_effects, js_seq, ocaml_typeof_expr, runtime_compare_call_args,
+    to_int32,
 };
 use super::lam_compile::{Compiled, LambdaCompiler, OutputFinished};
-use super::lam_compile_input::{LambdaInputView, LambdaInputs};
 use crate::ident::Ident;
 use crate::js_ir::op::{LengthObject, MutableFlag, Number, PropertyName};
 use crate::js_ir::{BinOp, Block, CallInfo, Expression, ExpressionDesc, Statement};
 use crate::lambda::LamLoc;
+use crate::lambda::TagInfo;
+use crate::lambda::arena::{Lam, LamArena, LamList, PrimId, View};
 use crate::lambda::lam_compat::{Comparison, FieldDbgInfo};
 use crate::lambda::lam_primitive::{Mutable, Primitive};
-use crate::lambda::{Lambda, TagInfo};
 
 impl LambdaCompiler {
     pub(crate) fn compile_primitive(
         &mut self,
-        prim: &Primitive,
-        args: &[Lambda],
-        loc: &LamLoc,
+        a: &mut LamArena,
+        info: PrimId,
+        args: LamList,
     ) -> Compiled {
-        if let Some(compiled) = self.compile_flat_make_field(prim, LambdaInputs::Recursive(args)) {
+        if let Some(compiled) = self.compile_flat_make_field(a, info, args) {
             return compiled;
         }
+        let p = a.prim_payload(info);
+        let (prim, loc) = (p.primitive.clone(), p.loc);
         if matches!(prim, Primitive::Pdebugger) {
-            return self.compile_debugger(args, loc);
+            return self.compile_debugger(a, args, &loc);
         }
 
-        if let (Primitive::PjsObjectGet(property), [obj]) = (prim, args) {
-            return self.compile_js_object_get(property, obj);
+        if let (Primitive::PjsObjectGet(property), [obj]) = (&prim, a.list(args)) {
+            let obj = *obj;
+            return self.compile_js_object_get(a, property, obj);
         }
         // lam_compile.ml `compile_arguments lambda_cxt args`, shared by
         // `compile_primitive_default`, `Pjs_object_set` and
         // `Pjs_object_create`; the remaining cases take a single argument,
         // which `sequence_arguments` leaves as it is.
-        let (prelude, compiled_args) = self.compile_arguments(false, args.iter());
-        self.compile_primitive_js(prim, compiled_args, prelude, loc)
+        let args = a.list_small(args);
+        let (prelude, compiled_args) = self.compile_arguments(a, false, args);
+        self.compile_primitive_js(&prim, compiled_args, prelude, &loc)
     }
 
     /// lam_compile.ml `Pjs_object_get property, [obj]`: a property read.
     /// When the object compiles to statements, `Js_ast_util.named_expression`
     /// binds it to a temporary after them unless it is
     /// `is_okay_to_duplicate`.
-    fn compile_js_object_get(&mut self, property: &str, obj: &Lambda) -> Compiled {
+    fn compile_js_object_get(&mut self, a: &mut LamArena, property: &str, obj: Lam) -> Compiled {
         let Compiled {
             mut prelude,
             expr: obj,
             ..
-        } = self.compile_expr(obj);
+        } = self.compile_expr(a, obj);
         let expr = if prelude.is_empty() || super::lam_compile_arguments::is_okay_to_duplicate(&obj)
         {
             self.static_index(obj, property)
@@ -79,10 +83,10 @@ impl LambdaCompiler {
     /// (`Ext_list.flat_map`, left to right), then the `debugger` statement.
     /// A literal `()` compiles to nothing. The value is `E.unit`, which the
     /// caller's continuation consumes (`output_of_block_and_expression`).
-    fn compile_debugger(&mut self, args: &[Lambda], loc: &LamLoc) -> Compiled {
+    fn compile_debugger(&mut self, a: &mut LamArena, args: LamList, loc: &LamLoc) -> Compiled {
         let mut prelude = Vec::new();
-        for arg in args {
-            prelude.extend(self.compile_effect_block_output(arg).block);
+        for arg in a.list_small(args) {
+            prelude.extend(self.compile_effect_block_output(a, arg).block);
         }
         let mut statement = Statement::debugger();
         statement.source_loc = self.source_loc(loc);
@@ -104,44 +108,52 @@ impl LambdaCompiler {
     /// `let d = await import(Other)`. Other reads are left to the caller.
     pub(crate) fn compile_flat_make_field(
         &mut self,
-        prim: &Primitive,
-        args: LambdaInputs<'_>,
+        a: &LamArena,
+        info: PrimId,
+        args: LamList,
     ) -> Option<Compiled> {
-        enum Base<'a> {
-            Global(&'a Ident),
-            Awaited(&'a Ident),
+        enum Base {
+            Global(Ident),
+            Awaited(Ident),
         }
         fn extract_field_path<'a>(
+            a: &'a LamArena,
             awaited_units: &ahash::AHashSet<Ident>,
             prim: &'a Primitive,
-            args: LambdaInputs<'a>,
+            args: &[Lam],
             segments: &mut Vec<&'a str>,
-        ) -> Option<Base<'a>> {
+        ) -> Option<Base> {
             let Primitive::Pfield(_, FieldDbgInfo::Module { name }) = prim else {
                 return None;
             };
-            if args.len() != 1 {
+            let [arg] = args else {
                 return None;
-            }
+            };
             segments.push(name);
-            match args.first()?.view() {
-                LambdaInputView::Prim(prim, args, _) => {
-                    extract_field_path(awaited_units, prim, args, segments)
+            match a.view(*arg) {
+                View::Prim(prim, args, _) => {
+                    extract_field_path(a, awaited_units, prim, args, segments)
                 }
-                LambdaInputView::GlobalModule(id) => Some(Base::Global(id)),
-                LambdaInputView::Var(id) if awaited_units.contains(id) => Some(Base::Awaited(id)),
+                View::GlobalModule(id) => Some(Base::Global(id)),
+                View::Var(id) if awaited_units.contains(&id) => Some(Base::Awaited(id)),
                 _ => None,
             }
         }
         let mut reversed = Vec::new();
-        let base = extract_field_path(&self.awaited_units, prim, args, &mut reversed)?;
+        let base = extract_field_path(
+            a,
+            &self.awaited_units,
+            &a.prim_payload(info).primitive,
+            a.list(args),
+            &mut reversed,
+        )?;
         reversed.reverse();
         let name = crate::lambda::flat_make_name(&reversed)?;
         let expr = match base {
             // `E.ml_var_dot id name`
             Base::Global(id) => Expression::qualified(
                 crate::js_ir::ModuleId {
-                    id: *id,
+                    id,
                     kind: crate::js_ir::Kind::Ml,
                     dynamic_import: false,
                 },
@@ -149,7 +161,7 @@ impl LambdaCompiler {
             ),
             // `E.dot (E.var id) name`
             Base::Awaited(id) => Expression::new(crate::js_ir::ExpressionDesc::StaticIndex(
-                Box::new(Expression::var(*id)),
+                Box::new(Expression::var(id)),
                 name,
                 None,
             )),
@@ -161,8 +173,8 @@ impl LambdaCompiler {
         })
     }
 
-    /// Lower already-compiled arguments. The recursive or indexed caller owns
-    /// traversal and releases Lambda-store borrows before invoking this helper.
+    /// Lower already-compiled arguments. The caller owns traversal of the
+    /// Lambda arguments.
     /// This is the Js_of_lam_primitive boundary in
     /// compiler/core/lam_compile_primitive.ml, not a Lambda compatibility step.
     pub(crate) fn compile_primitive_js(
@@ -720,14 +732,14 @@ impl LambdaCompiler {
             }
             Pdebugger => {
                 let mut statement = Statement::debugger();
-                statement.source_loc = (self.source_loc(loc));
+                statement.source_loc = self.source_loc(loc);
                 prelude.push(statement);
                 Expression::undefined(false)
             }
             Praise => {
                 let expr = first_arg(compiled_args).unwrap_or_else(|| Expression::undefined(false));
                 let mut statement = Statement::throw(expr);
-                statement.source_loc = (self.source_loc(loc));
+                statement.source_loc = self.source_loc(loc);
                 prelude.push(statement);
                 Expression::undefined(false)
             }
@@ -807,11 +819,9 @@ impl LambdaCompiler {
                 }
             }
             Pimport(source) => self.compile_import(loc, source),
-            PjsCall {
-                prim_name,
-                arg_types,
-                ffi,
-            } => self.compile_js_call(prim_name, arg_types, ffi, compiled_args),
+            PjsCall(call) => {
+                self.compile_js_call(&call.prim_name, &call.arg_types, &call.ffi, compiled_args)
+            }
             Pjsx(jsx) => self.compile_jsx(jsx, compiled_args),
             PextensionSlotEq => unreachable!("PextensionSlotEq is lowered in raw_lambda::lower"),
         };

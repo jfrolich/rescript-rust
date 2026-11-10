@@ -1,3 +1,4 @@
+pub(super) use super::test_support::*;
 use super::*;
 pub(super) use crate::cmi::persistent_env::PersistentEnv;
 pub(super) use crate::js_ir::op::{ImportAttributes as JsImportAttributes, PropertyName};
@@ -6,6 +7,7 @@ pub(super) use crate::js_ir::{
     print_expression,
 };
 pub(super) use crate::lambda::LamLoc;
+pub(super) use crate::lambda::LambdaSwitch;
 pub(super) use crate::lambda::js_exp_make::{int32_band, int32_bxor, int32_mul, ocaml_typeof_expr};
 pub(super) use crate::lambda::lam_coercion::resolve_export_aliases;
 pub(super) use crate::lambda::lam_compile_external::external_module_import_attributes;
@@ -151,10 +153,10 @@ fn external_module_with_attrs(
 
 fn js_var_external(name: &str, external_module_name: Option<ExternalModuleName>) -> Lambda {
     Lambda::prim(
-        Primitive::PjsCall {
+        Primitive::PjsCall(Box::new(crate::lambda::lam_primitive::JsCall {
             prim_name: name.to_string(),
             arg_types: vec![],
-            ffi: Box::new(ExternalDecl {
+            ffi: ExternalDecl {
                 kind: DeclKind::DeclVal {
                     name: name.to_string(),
                 },
@@ -162,8 +164,8 @@ fn js_var_external(name: &str, external_module_name: Option<ExternalModuleName>)
                 scopes: vec![],
                 variadic: false,
                 effective_arity: 0,
-            }),
-        },
+            },
+        })),
         vec![],
         LamLoc::NONE,
     )
@@ -233,11 +235,11 @@ fn test_unit_function(ident: Ident) -> (Ident, Lambda) {
 fn console_log_effect(arg: Lambda) -> Lambda {
     Lambda::seq(
         Lambda::prim(
-            Primitive::PjsCall {
+            Primitive::PjsCall(Box::new(crate::lambda::lam_primitive::JsCall {
                 prim_name: "console.log".to_string(),
                 arg_types: vec![],
-                ffi: Box::new(crate::lambda::lam_primitive::ExternalDecl::test_val("", 0)),
-            },
+                ffi: crate::lambda::lam_primitive::ExternalDecl::test_val("", 0),
+            })),
             vec![arg],
             LamLoc::NONE,
         ),
@@ -559,7 +561,7 @@ fn compile_constant_nested_some_none_preserves_nested_optional_boxes() {
 #[test]
 fn compile_float_pow_uses_js_exponentiation_operator() {
     let mut compiler = LambdaCompiler::new();
-    let compiled = compiler.compile_expr(&Lambda::prim(
+    let compiled = compiler.compile_expr_tree(&Lambda::prim(
         Primitive::Ppowfloat,
         vec![
             Lambda::const_(Constant::float("2.")),
@@ -602,7 +604,7 @@ fn compile_float_pow_uses_js_exponentiation_operator() {
 #[test]
 fn compile_int_pow_folds_small_int_literals_like_ocaml_ext_int() {
     let mut compiler = LambdaCompiler::new();
-    let compiled = compiler.compile_expr(&Lambda::prim(
+    let compiled = compiler.compile_expr_tree(&Lambda::prim(
         Primitive::Ppowint,
         vec![
             Lambda::const_(Constant::int(2)),
@@ -618,7 +620,7 @@ fn compile_int_pow_folds_small_int_literals_like_ocaml_ext_int() {
 #[test]
 fn compile_int_pow_folds_overflowing_int_literals_like_ocaml_ext_int() {
     let mut compiler = LambdaCompiler::new();
-    let compiled = compiler.compile_expr(&Lambda::prim(
+    let compiled = compiler.compile_expr_tree(&Lambda::prim(
         Primitive::Ppowint,
         vec![
             Lambda::const_(Constant::int(2_147_483_647)),
@@ -634,7 +636,7 @@ fn compile_int_pow_folds_overflowing_int_literals_like_ocaml_ext_int() {
 #[test]
 fn compile_create_extension_uses_primitive_exceptions_create() {
     let mut compiler = LambdaCompiler::new();
-    let compiled = compiler.compile_expr(&Lambda::prim(
+    let compiled = compiler.compile_expr_tree(&Lambda::prim(
         Primitive::PcreateExtension("Local_exception_test.A".to_string()),
         vec![],
         LamLoc::NONE,
@@ -672,7 +674,7 @@ fn compile_create_extension_uses_primitive_exceptions_create() {
 fn compile_wrap_exn_uses_primitive_exceptions_internal_to_exception() {
     let mut compiler = LambdaCompiler::new();
     let exn = Ident::create_local("exn");
-    let compiled = compiler.compile_expr(&crate::raw_lambda::lower::wrap_exn(
+    let compiled = compiler.compile_expr_tree(&crate::raw_lambda::lower::wrap_exn(
         LamLoc::NONE,
         Lambda::var(exn),
     ));
@@ -700,7 +702,7 @@ fn compile_wrap_exn_uses_primitive_exceptions_internal_to_exception() {
 #[test]
 fn compile_integer_inequality_preserves_typeof_string_comparison_like_ocaml() {
     let mut compiler = LambdaCompiler::new();
-    let compiled = compiler.compile_expr(&Lambda::prim(
+    let compiled = compiler.compile_expr_tree(&Lambda::prim(
         Primitive::Pintcomp(Comparison::Neq),
         vec![
             Lambda::prim(
@@ -728,7 +730,7 @@ fn compile_integer_inequality_preserves_typeof_string_comparison_like_ocaml() {
 fn compile_module_primitives_lower_to_primitive_module_runtime_calls_like_ocaml() {
     let mut compiler = LambdaCompiler::new();
     let loc = LamLoc::NONE;
-    let init = compiler.compile_expr(&Lambda::prim(
+    let init = compiler.compile_expr_tree(&Lambda::prim(
         Primitive::PinitMod,
         vec![
             Lambda::const_(Constant::int(1)),
@@ -742,7 +744,7 @@ fn compile_module_primitives_lower_to_primitive_module_runtime_calls_like_ocaml(
         "Primitive_module.init(1, shape)"
     );
 
-    let update = compiler.compile_expr(&Lambda::prim(
+    let update = compiler.compile_expr_tree(&Lambda::prim(
         Primitive::PupdateMod,
         vec![
             Lambda::var(Ident::create_local("shape")),
@@ -763,7 +765,7 @@ fn compile_int_order_uses_primitive_int_compare() {
     let mut compiler = LambdaCompiler::new();
     let left = Ident::create_local("left");
     let right = Ident::create_local("right");
-    let compiled = compiler.compile_expr(&Lambda::prim(
+    let compiled = compiler.compile_expr_tree(&Lambda::prim(
         Primitive::Pintorder,
         vec![Lambda::var(left), Lambda::var(right)],
         LamLoc::NONE,
@@ -780,7 +782,7 @@ fn compile_int_order_uses_primitive_int_compare() {
 fn compile_checked_int_div_uses_primitive_int_runtime_call_like_ocaml() {
     let mut compiler = LambdaCompiler::new();
     let left = Ident::create_local("left");
-    let compiled = compiler.compile_expr(&Lambda::prim(
+    let compiled = compiler.compile_expr_tree(&Lambda::prim(
         Primitive::Pdivint,
         vec![Lambda::var(left), Lambda::const_(Constant::int(0))],
         LamLoc::NONE,
@@ -797,7 +799,7 @@ fn compile_checked_int_div_uses_primitive_int_runtime_call_like_ocaml() {
 fn compile_checked_int_mod_uses_primitive_int_runtime_call_like_ocaml() {
     let mut compiler = LambdaCompiler::new();
     let left = Ident::create_local("left");
-    let compiled = compiler.compile_expr(&Lambda::prim(
+    let compiled = compiler.compile_expr_tree(&Lambda::prim(
         Primitive::Pmodint,
         vec![Lambda::var(left), Lambda::const_(Constant::int(0))],
         LamLoc::NONE,
@@ -814,7 +816,7 @@ fn compile_checked_int_mod_uses_primitive_int_runtime_call_like_ocaml() {
 fn compile_checked_bigint_div_uses_primitive_bigint_runtime_call_like_ocaml() {
     let mut compiler = LambdaCompiler::new();
     let left = Ident::create_local("left");
-    let compiled = compiler.compile_expr(&Lambda::prim(
+    let compiled = compiler.compile_expr_tree(&Lambda::prim(
         Primitive::Pdivbigint,
         vec![
             Lambda::var(left),
@@ -834,7 +836,7 @@ fn compile_checked_bigint_div_uses_primitive_bigint_runtime_call_like_ocaml() {
 fn compile_checked_bigint_mod_uses_primitive_bigint_runtime_call_like_ocaml() {
     let mut compiler = LambdaCompiler::new();
     let left = Ident::create_local("left");
-    let compiled = compiler.compile_expr(&Lambda::prim(
+    let compiled = compiler.compile_expr_tree(&Lambda::prim(
         Primitive::Pmodbigint,
         vec![
             Lambda::var(left),
@@ -855,7 +857,7 @@ fn compile_string_order_uses_primitive_string_compare() {
     let mut compiler = LambdaCompiler::new();
     let left = Ident::create_local("left");
     let right = Ident::create_local("right");
-    let compiled = compiler.compile_expr(&Lambda::prim(
+    let compiled = compiler.compile_expr_tree(&Lambda::prim(
         Primitive::Pstringorder,
         vec![Lambda::var(left), Lambda::var(right)],
         LamLoc::NONE,
@@ -873,7 +875,7 @@ fn compile_arrayrefu_uses_direct_array_index() {
     let mut compiler = LambdaCompiler::new();
     let array = Ident::create_local("arr");
     let index = Ident::create_local("i");
-    let compiled = compiler.compile_expr(&Lambda::prim(
+    let compiled = compiler.compile_expr_tree(&Lambda::prim(
         Primitive::Parrayrefu,
         vec![Lambda::var(array), Lambda::var(index)],
         LamLoc::NONE,
@@ -888,7 +890,7 @@ fn compile_arrayrefs_uses_primitive_array_get() {
     let mut compiler = LambdaCompiler::new();
     let array = Ident::create_local("arr");
     let index = Ident::create_local("i");
-    let compiled = compiler.compile_expr(&Lambda::prim(
+    let compiled = compiler.compile_expr_tree(&Lambda::prim(
         Primitive::Parrayrefs,
         vec![Lambda::var(array), Lambda::var(index)],
         LamLoc::NONE,
@@ -907,7 +909,7 @@ fn compile_arraysetu_sequences_assignment_to_unit() {
     let array = Ident::create_local("arr");
     let index = Ident::create_local("i");
     let value = Ident::create_local("value");
-    let compiled = compiler.compile_expr(&Lambda::prim(
+    let compiled = compiler.compile_expr_tree(&Lambda::prim(
         Primitive::Parraysetu,
         vec![Lambda::var(array), Lambda::var(index), Lambda::var(value)],
         LamLoc::NONE,
@@ -958,7 +960,7 @@ fn compile_string_refs_use_primitive_string_get_char() {
     let mut compiler = LambdaCompiler::new();
     let string = Ident::create_local("str");
     let index = Ident::create_local("i");
-    let compiled = compiler.compile_expr(&Lambda::prim(
+    let compiled = compiler.compile_expr_tree(&Lambda::prim(
         Primitive::Pstringrefs,
         vec![Lambda::var(string), Lambda::var(index)],
         LamLoc::NONE,
@@ -975,7 +977,7 @@ fn compile_string_refs_use_primitive_string_get_char() {
 fn compile_obj_compare_against_null_uses_strict_equality() {
     let mut compiler = LambdaCompiler::new();
     let value = Ident::create_local("value");
-    let compiled = compiler.compile_expr(&Lambda::prim(
+    let compiled = compiler.compile_expr_tree(&Lambda::prim(
         Primitive::Pobjcomp(Comparison::Eq),
         vec![Lambda::const_(Constant::JsNull), Lambda::var(value)],
         LamLoc::NONE,
@@ -988,7 +990,7 @@ fn compile_obj_compare_against_null_uses_strict_equality() {
 #[test]
 fn compile_obj_compare_null_against_number_literal_folds_false() {
     let mut compiler = LambdaCompiler::new();
-    let compiled = compiler.compile_expr(&Lambda::prim(
+    let compiled = compiler.compile_expr_tree(&Lambda::prim(
         Primitive::Pobjcomp(Comparison::Eq),
         vec![
             Lambda::const_(Constant::JsNull),
@@ -1004,7 +1006,7 @@ fn compile_obj_compare_null_against_number_literal_folds_false() {
 #[test]
 fn compile_obj_notequal_undefined_against_number_literal_folds_true() {
     let mut compiler = LambdaCompiler::new();
-    let compiled = compiler.compile_expr(&Lambda::prim(
+    let compiled = compiler.compile_expr_tree(&Lambda::prim(
         Primitive::Pobjcomp(Comparison::Neq),
         vec![
             Lambda::const_(Constant::JsUndefined { is_unit: false }),
@@ -1022,7 +1024,7 @@ fn compile_obj_order_uses_primitive_object_compare() {
     let mut compiler = LambdaCompiler::new();
     let left = Ident::create_local("left");
     let right = Ident::create_local("right");
-    let compiled = compiler.compile_expr(&Lambda::prim(
+    let compiled = compiler.compile_expr_tree(&Lambda::prim(
         Primitive::Pobjorder,
         vec![Lambda::var(left), Lambda::var(right)],
         LamLoc::NONE,
@@ -1040,7 +1042,7 @@ fn compile_eta_wrapped_object_compare_function_aliases_runtime_member() {
     let mut compiler = LambdaCompiler::new();
     let left = Ident::create_local("left");
     let right = Ident::create_local("right");
-    let compiled = compiler.compile_expr(&Lambda::function_(
+    let compiled = compiler.compile_expr_tree(&Lambda::function_(
         2,
         vec![left, right],
         Lambda::prim(
@@ -1060,7 +1062,7 @@ fn compile_eta_wrapped_object_compare_function_aliases_runtime_member() {
 fn compile_obj_tag_uses_caml_block_tag_access_like_ocaml() {
     let mut compiler = LambdaCompiler::new();
     let value = Ident::create_local("value");
-    let compiled = compiler.compile_expr(&Lambda::prim(
+    let compiled = compiler.compile_expr_tree(&Lambda::prim(
         Primitive::Pobjtag,
         vec![Lambda::var(value)],
         LamLoc::NONE,
@@ -1075,7 +1077,7 @@ fn compile_eta_wrapped_float_compare_function_aliases_runtime_member() {
     let mut compiler = LambdaCompiler::new();
     let left = Ident::create_local("x");
     let right = Ident::create_local("y");
-    let compiled = compiler.compile_expr(&Lambda::function_(
+    let compiled = compiler.compile_expr_tree(&Lambda::function_(
         2,
         vec![left, right],
         Lambda::prim(
@@ -1098,7 +1100,7 @@ fn compile_expr_keeps_forwarded_module_call_params_like_ocaml() {
     let icmp = Ident::create_persistent("Icmp");
     let belt_map = Ident::create_persistent("Belt_Map");
 
-    let compiled = compiler.compile_expr(&Lambda::function_(
+    let compiled = compiler.compile_expr_tree(&Lambda::function_(
         1,
         vec![none],
         Lambda::Lapply(Box::new(Apply {
@@ -1146,7 +1148,7 @@ fn compile_expr_keeps_forwarded_nested_wrapper_params_like_ocaml() {
     let extra = Ident::create_local("extra");
     let belt_map = Ident::create_persistent("Belt_Map");
 
-    let compiled = compiler.compile_expr(&Lambda::function_(
+    let compiled = compiler.compile_expr_tree(&Lambda::function_(
         2,
         vec![a, b],
         Lambda::function_(
@@ -1269,7 +1271,7 @@ fn compile_hash_primitives_lower_to_primitive_hash_runtime_calls_like_ocaml() {
     let seed = Ident::create_local("seed");
     let value = Ident::create_local("value");
 
-    let hash = compiler.compile_expr(&Lambda::prim(
+    let hash = compiler.compile_expr_tree(&Lambda::prim(
         Primitive::Phash,
         vec![
             Lambda::const_(Constant::int(10)),
@@ -1285,7 +1287,7 @@ fn compile_hash_primitives_lower_to_primitive_hash_runtime_calls_like_ocaml() {
         "Primitive_hash.hash(10, 100, 0, x)"
     );
 
-    let hash_mix_int = compiler.compile_expr(&Lambda::prim(
+    let hash_mix_int = compiler.compile_expr_tree(&Lambda::prim(
         Primitive::PhashMixint,
         vec![Lambda::var(seed), Lambda::var(value)],
         LamLoc::NONE,
@@ -1296,7 +1298,7 @@ fn compile_hash_primitives_lower_to_primitive_hash_runtime_calls_like_ocaml() {
         "Primitive_hash.hash_mix_int(seed, value)"
     );
 
-    let hash_mix_string = compiler.compile_expr(&Lambda::prim(
+    let hash_mix_string = compiler.compile_expr_tree(&Lambda::prim(
         Primitive::PhashMixstring,
         vec![Lambda::var(seed), Lambda::var(value)],
         LamLoc::NONE,
@@ -1307,7 +1309,7 @@ fn compile_hash_primitives_lower_to_primitive_hash_runtime_calls_like_ocaml() {
         "Primitive_hash.hash_mix_string(seed, value)"
     );
 
-    let hash_final_mix = compiler.compile_expr(&Lambda::prim(
+    let hash_final_mix = compiler.compile_expr_tree(&Lambda::prim(
         Primitive::PhashFinalmix,
         vec![Lambda::var(seed)],
         LamLoc::NONE,
@@ -1326,7 +1328,7 @@ fn compile_eta_wrapped_hash_function_aliases_runtime_member() {
     let hash_count = Ident::create_local("hash_count");
     let hash_acc = Ident::create_local("hash_acc");
     let value = Ident::create_local("value");
-    let compiled = compiler.compile_expr(&Lambda::function_(
+    let compiled = compiler.compile_expr_tree(&Lambda::function_(
         4,
         vec![hash_limit, hash_count, hash_acc, value],
         Lambda::prim(
@@ -1352,7 +1354,7 @@ fn compile_compare_against_zero_elides_runtime_compare_call_like_ocaml() {
     let mut compiler = LambdaCompiler::new();
     let left = Ident::create_local("x");
     let right = Ident::create_local("y");
-    let compiled = compiler.compile_expr(&Lambda::prim(
+    let compiled = compiler.compile_expr_tree(&Lambda::prim(
         Primitive::Pintcomp(Comparison::Gt),
         vec![
             Lambda::prim(
@@ -1372,7 +1374,7 @@ fn compile_compare_against_zero_elides_runtime_compare_call_like_ocaml() {
 #[test]
 fn compile_bigint_compare_against_zero_elides_runtime_compare_call_like_ocaml() {
     let mut compiler = LambdaCompiler::new();
-    let compiled = compiler.compile_expr(&Lambda::prim(
+    let compiled = compiler.compile_expr_tree(&Lambda::prim(
         Primitive::Pintcomp(Comparison::Lt),
         vec![
             Lambda::prim(
@@ -1401,7 +1403,7 @@ fn compile_bigint_compare_against_zero_elides_runtime_compare_call_like_ocaml() 
 #[test]
 fn compile_bigint_literal_equality_folds_like_ocaml() {
     let mut compiler = LambdaCompiler::new();
-    let compiled = compiler.compile_expr(&Lambda::prim(
+    let compiled = compiler.compile_expr_tree(&Lambda::prim(
         Primitive::Pbigintcomp(Comparison::Eq),
         vec![
             Lambda::const_(Constant::BigInt {
@@ -1425,7 +1427,7 @@ fn compile_eta_wrapped_float_equality_stays_as_function() {
     let mut compiler = LambdaCompiler::new();
     let left = Ident::create_local("x");
     let right = Ident::create_local("y");
-    let compiled = compiler.compile_expr(&Lambda::function_(
+    let compiled = compiler.compile_expr_tree(&Lambda::function_(
         2,
         vec![left, right],
         Lambda::prim(
@@ -1444,7 +1446,7 @@ fn compile_eta_wrapped_float_equality_stays_as_function() {
 #[test]
 fn compile_bigint_min_literals_use_conditional_fast_path() {
     let mut compiler = LambdaCompiler::new();
-    let compiled = compiler.compile_expr(&Lambda::prim(
+    let compiled = compiler.compile_expr_tree(&Lambda::prim(
         Primitive::Pbigintmin,
         vec![
             Lambda::const_(Constant::BigInt {
@@ -1475,7 +1477,7 @@ fn compile_bigint_arithmetic_primitives_use_raw_js_bigint_ops_like_ocaml() {
         value: "1".to_string(),
     });
 
-    let add = compiler.compile_expr(&Lambda::prim(
+    let add = compiler.compile_expr_tree(&Lambda::prim(
         Primitive::Paddbigint,
         vec![lhs.clone(), rhs.clone()],
         LamLoc::NONE,
@@ -1483,7 +1485,7 @@ fn compile_bigint_arithmetic_primitives_use_raw_js_bigint_ops_like_ocaml() {
     assert!(add.prelude.is_empty());
     assert_eq!(print_expression(&add.expr), "9n + 1n");
 
-    let pow = compiler.compile_expr(&Lambda::prim(
+    let pow = compiler.compile_expr_tree(&Lambda::prim(
         Primitive::Ppowbigint,
         vec![lhs.clone(), rhs.clone()],
         LamLoc::NONE,
@@ -1491,7 +1493,7 @@ fn compile_bigint_arithmetic_primitives_use_raw_js_bigint_ops_like_ocaml() {
     assert!(pow.prelude.is_empty());
     assert_eq!(print_expression(&pow.expr), "9n ** 1n");
 
-    let neg = compiler.compile_expr(&Lambda::prim(
+    let neg = compiler.compile_expr_tree(&Lambda::prim(
         Primitive::Pnegbigint,
         vec![lhs],
         LamLoc::NONE,
@@ -1512,7 +1514,7 @@ fn compile_bigint_bitwise_primitives_use_raw_js_bigint_ops_like_ocaml() {
         value: "1".to_string(),
     });
 
-    let land = compiler.compile_expr(&Lambda::prim(
+    let land = compiler.compile_expr_tree(&Lambda::prim(
         Primitive::Pandbigint,
         vec![lhs.clone(), rhs.clone()],
         LamLoc::NONE,
@@ -1520,7 +1522,7 @@ fn compile_bigint_bitwise_primitives_use_raw_js_bigint_ops_like_ocaml() {
     assert!(land.prelude.is_empty());
     assert_eq!(print_expression(&land.expr), "9n & 1n");
 
-    let lsl = compiler.compile_expr(&Lambda::prim(
+    let lsl = compiler.compile_expr_tree(&Lambda::prim(
         Primitive::Plslbigint,
         vec![lhs.clone(), rhs.clone()],
         LamLoc::NONE,
@@ -1528,7 +1530,7 @@ fn compile_bigint_bitwise_primitives_use_raw_js_bigint_ops_like_ocaml() {
     assert!(lsl.prelude.is_empty());
     assert_eq!(print_expression(&lsl.expr), "(9n << 1n)");
 
-    let lnot = compiler.compile_expr(&Lambda::prim(
+    let lnot = compiler.compile_expr_tree(&Lambda::prim(
         Primitive::Pnotbigint,
         vec![lhs],
         LamLoc::NONE,
@@ -1541,7 +1543,7 @@ fn compile_bigint_bitwise_primitives_use_raw_js_bigint_ops_like_ocaml() {
 fn compile_duprecord_lowers_to_object_spread_like_ocaml() {
     let mut compiler = LambdaCompiler::new();
     let source = Ident::create_local("source");
-    let compiled = compiler.compile_expr(&Lambda::prim(
+    let compiled = compiler.compile_expr_tree(&Lambda::prim(
         Primitive::Pduprecord,
         vec![Lambda::var(source)],
         LamLoc::NONE,
@@ -2135,7 +2137,7 @@ fn compile_deps_program_declares_export_left_unbound_by_nested_throwing_binding(
 #[test]
 fn compile_return_block_skips_unreachable_sequence_after_throw() {
     let mut compiler = LambdaCompiler::new();
-    let block = compiler.compile_return_block(&Lambda::seq(
+    let block = compiler.compile_return_block_tree(&Lambda::seq(
         Lambda::prim(
             Primitive::Praise,
             vec![Lambda::const_(Constant::string("boom"))],
@@ -2164,7 +2166,7 @@ fn compile_return_block_lowers_trywith_in_return_position() {
     let mut compiler = LambdaCompiler::new();
     let callee = Ident::create_local("g");
     let exn = Ident::create_local("exn");
-    let block = compiler.compile_return_block(&Lambda::LtryWith(
+    let block = compiler.compile_return_block_tree(&Lambda::LtryWith(
         Box::new(Lambda::Lapply(Box::new(Apply {
             ap_func: Box::new(Lambda::var(callee)),
             ap_args: vec![],
@@ -2208,7 +2210,7 @@ fn compile_return_block_lowers_trywith_in_return_position() {
 fn trywith_expression_result_temp_uses_tmp_name_like_ocaml() {
     let mut compiler = LambdaCompiler::new();
     let exn = Ident::create_local("exn");
-    let compiled = compiler.compile_expr(&Lambda::LtryWith(
+    let compiled = compiler.compile_expr_tree(&Lambda::LtryWith(
         Box::new(Lambda::const_(Constant::int(1))),
         exn,
         Box::new(Lambda::const_(Constant::int(2))),
@@ -2297,7 +2299,7 @@ fn direct_recursive_trywith_self_calls_do_not_lower_to_loops_like_ocaml() {
         Lambda::unit(),
     );
 
-    let compiled = compiler.compile_expr(&lam);
+    let compiled = compiler.compile_expr_tree(&lam);
     let rendered = print_block(&compiled.prelude);
 
     assert!(
@@ -2356,7 +2358,7 @@ fn recursive_trywith_handler_self_calls_lower_to_loops_like_ocaml() {
         Lambda::unit(),
     );
 
-    let compiled = compiler.compile_expr(&lam);
+    let compiled = compiler.compile_expr_tree(&lam);
     let rendered = print_block(&compiled.prelude);
 
     assert!(
@@ -2489,7 +2491,7 @@ fn nested_effect_sequences_drop_intermediate_pignore_suffixes_when_appended_to_v
         Box::new(Lambda::var(value)),
     );
 
-    let compiled = compiler.compile_expr(&sequence);
+    let compiled = compiler.compile_expr_tree(&sequence);
 
     assert!(
         compiled.prelude.is_empty(),
@@ -2526,7 +2528,7 @@ fn nested_effect_sequences_drop_intermediate_pignore_suffixes_when_appended_to_v
 fn int_switch_expressions_group_non_adjacent_equal_cases_like_ocaml_stable_group() {
     let mut compiler = LambdaCompiler::new();
     let scrutinee = Ident::create_local("scrutinee");
-    let compiled = compiler.compile_expr(&Lambda::Lswitch(
+    let compiled = compiler.compile_expr_tree(&Lambda::Lswitch(
         Box::new(Lambda::var(scrutinee)),
         Box::new(LambdaSwitch {
             sw_consts_full: true,
@@ -2583,7 +2585,7 @@ fn string_switch_effects_group_adjacent_equal_cases_and_drop_default_duplicates(
     let mut compiler = LambdaCompiler::new();
     let scrutinee = Ident::create_local("scrutinee");
     let captured = Ident::create_local("captured");
-    let block = compiler.compile_effect_block(&Lambda::LstringSwitch(
+    let block = compiler.compile_effect_block_tree(&Lambda::LstringSwitch(
         Box::new(Lambda::var(scrutinee)),
         vec![
             (
@@ -2640,7 +2642,7 @@ fn string_switch_effects_group_non_adjacent_equal_cases_like_ocaml_stable_group(
     let mut compiler = LambdaCompiler::new();
     let scrutinee = Ident::create_local("scrutinee");
     let captured = Ident::create_local("captured");
-    let block = compiler.compile_effect_block(&Lambda::LstringSwitch(
+    let block = compiler.compile_effect_block_tree(&Lambda::LstringSwitch(
         Box::new(Lambda::var(scrutinee)),
         vec![
             (
@@ -2773,16 +2775,16 @@ fn compile_deps_program_keeps_gpr_1438_fallthrough_return_outside_switch() {
         ),
     );
 
-    let simplified = crate::lambda::lam_compile_main::simplify_for_js_backend(&lam);
+    let simplified = simplify_tree_for_js_backend(&lam);
     let mut direct_compiler = LambdaCompiler::new();
     let direct_body =
-        direct_compiler.compile_return_block(extract_first_function_body(&simplified));
+        direct_compiler.compile_return_block_tree(extract_first_function_body(&simplified));
     assert_fallthrough_return_outside_switch_body(
         &direct_body,
         "after simplify + direct compile_return_block",
     );
 
-    let compiled = compiler.compile_expr(&simplified);
+    let compiled = compiler.compile_expr_tree(&simplified);
     let mut block = compiled.prelude;
     assert_first_function_body_keeps_fallthrough_return_outside_switch(
         &block,
@@ -2808,7 +2810,7 @@ fn compile_deps_program_keeps_gpr_1438_fallthrough_return_outside_switch() {
     let deps = apply_js_flatten_pass(DepsProgram {
         program,
         modules: vec![],
-        side_effect: module_side_effect_reason(&simplified),
+        side_effect: module_side_effect_reason_tree(&simplified),
     });
     assert_first_function_body_keeps_fallthrough_return_outside_switch(
         &deps.program.block,
@@ -2849,32 +2851,33 @@ fn compile_deps_program_keeps_gpr_1438_fallthrough_return_outside_switch() {
 fn function_return_blocks_lower_switches_without_a_result_temp() {
     let mut compiler = LambdaCompiler::new();
     let scrutinee = Ident::create_local("scrutinee");
-    let compiled = compiler.compile_expr(&Lambda::Lfunction(Box::new(crate::lambda::LFunction {
-        loc: LamLoc::NONE,
-        arity: 1,
-        params: vec![scrutinee],
-        body: Box::new(Lambda::Lswitch(
-            Box::new(Lambda::var(scrutinee)),
-            Box::new(LambdaSwitch {
-                sw_consts_full: true,
-                sw_consts: vec![
-                    (
-                        crate::lambda::SwitchKey::Int(0),
-                        Lambda::const_(Constant::int(1)),
-                    ),
-                    (
-                        crate::lambda::SwitchKey::Int(1),
-                        Lambda::const_(Constant::int(2)),
-                    ),
-                ],
-                sw_blocks_full: false,
-                sw_blocks: vec![],
-                sw_failaction: Some(Box::new(Lambda::const_(Constant::int(3)))),
-                sw_dispatch: crate::lambda::SwitchDispatch::Direct,
-            }),
-        )),
-        attr: crate::lambda::FunctionAttribute::default(),
-    })));
+    let compiled =
+        compiler.compile_expr_tree(&Lambda::Lfunction(Box::new(crate::lambda::LFunction {
+            loc: LamLoc::NONE,
+            arity: 1,
+            params: vec![scrutinee],
+            body: Box::new(Lambda::Lswitch(
+                Box::new(Lambda::var(scrutinee)),
+                Box::new(LambdaSwitch {
+                    sw_consts_full: true,
+                    sw_consts: vec![
+                        (
+                            crate::lambda::SwitchKey::Int(0),
+                            Lambda::const_(Constant::int(1)),
+                        ),
+                        (
+                            crate::lambda::SwitchKey::Int(1),
+                            Lambda::const_(Constant::int(2)),
+                        ),
+                    ],
+                    sw_blocks_full: false,
+                    sw_blocks: vec![],
+                    sw_failaction: Some(Box::new(Lambda::const_(Constant::int(3)))),
+                    sw_dispatch: crate::lambda::SwitchDispatch::Direct,
+                }),
+            )),
+            attr: crate::lambda::FunctionAttribute::default(),
+        })));
 
     let Expression {
         desc: ExpressionDesc::Fun { body, .. },
@@ -2911,22 +2914,23 @@ fn function_return_blocks_lower_ifs_without_a_result_temp() {
     let mut compiler = LambdaCompiler::new();
     let cond = Ident::create_local("cond");
     let branch = Ident::create_local("branch");
-    let compiled = compiler.compile_expr(&Lambda::Lfunction(Box::new(crate::lambda::LFunction {
-        loc: LamLoc::NONE,
-        arity: 1,
-        params: vec![cond],
-        body: Box::new(Lambda::LifThenElse(
-            Box::new(Lambda::var(cond)),
-            Box::new(Lambda::let_(
-                LetKind::Strict,
-                branch,
-                Lambda::const_(Constant::int(1)),
-                Lambda::var(branch),
+    let compiled =
+        compiler.compile_expr_tree(&Lambda::Lfunction(Box::new(crate::lambda::LFunction {
+            loc: LamLoc::NONE,
+            arity: 1,
+            params: vec![cond],
+            body: Box::new(Lambda::LifThenElse(
+                Box::new(Lambda::var(cond)),
+                Box::new(Lambda::let_(
+                    LetKind::Strict,
+                    branch,
+                    Lambda::const_(Constant::int(1)),
+                    Lambda::var(branch),
+                )),
+                Box::new(Lambda::const_(Constant::int(0))),
             )),
-            Box::new(Lambda::const_(Constant::int(0))),
-        )),
-        attr: crate::lambda::FunctionAttribute::default(),
-    })));
+            attr: crate::lambda::FunctionAttribute::default(),
+        })));
 
     let Expression {
         desc: ExpressionDesc::Fun { body, .. },
@@ -3119,16 +3123,17 @@ fn unit_return_function_with_trivial_if_branches_keeps_condition_effect_only() {
         Box::new(Lambda::const_(Constant::JsUndefined { is_unit: true })),
         Box::new(Lambda::const_(Constant::JsUndefined { is_unit: true })),
     );
-    let compiled = compiler.compile_expr(&Lambda::Lfunction(Box::new(crate::lambda::LFunction {
-        loc: LamLoc::NONE,
-        arity: 1,
-        params: vec![effect],
-        body: Box::new(body),
-        attr: crate::lambda::FunctionAttribute {
-            return_unit: true,
-            ..Default::default()
-        },
-    })));
+    let compiled =
+        compiler.compile_expr_tree(&Lambda::Lfunction(Box::new(crate::lambda::LFunction {
+            loc: LamLoc::NONE,
+            arity: 1,
+            params: vec![effect],
+            body: Box::new(body),
+            attr: crate::lambda::FunctionAttribute {
+                return_unit: true,
+                ..Default::default()
+            },
+        })));
 
     let Expression {
         desc: ExpressionDesc::Fun { body, .. },
@@ -3365,7 +3370,7 @@ fn let_bindings_lower_ifs_without_a_result_temp() {
     let cond = Ident::create_local("cond");
     let result = Ident::create_local("result");
     let branch = Ident::create_local("branch");
-    let compiled = compiler.compile_expr(&Lambda::Llet(
+    let compiled = compiler.compile_expr_tree(&Lambda::Llet(
         LetKind::Strict,
         result,
         Box::new(Lambda::LifThenElse(
@@ -3471,7 +3476,7 @@ fn let_bindings_lower_effectful_short_circuits_without_a_result_alias_temp() {
     let cond = Ident::create_local("cond");
     let result = Ident::create_local("result");
     let branch = Ident::create_local("branch");
-    let compiled = compiler.compile_expr(&Lambda::Llet(
+    let compiled = compiler.compile_expr_tree(&Lambda::Llet(
         LetKind::Strict,
         result,
         Box::new(Lambda::prim(
@@ -3562,7 +3567,7 @@ fn let_bindings_merge_direct_if_assignments_into_initialized_declarations() {
     let mut compiler = LambdaCompiler::new();
     let cond = Ident::create_local("cond");
     let result = Ident::create_local("result");
-    let compiled = compiler.compile_expr(&Lambda::Llet(
+    let compiled = compiler.compile_expr_tree(&Lambda::Llet(
         LetKind::Strict,
         result,
         Box::new(Lambda::LifThenElse(
@@ -3617,7 +3622,7 @@ fn effect_blocks_lower_ifs_without_a_result_temp() {
     let mut compiler = LambdaCompiler::new();
     let cond = Ident::create_local("cond");
     let slot = Ident::create_local("slot");
-    let block = compiler.compile_effect_block(&Lambda::LifThenElse(
+    let block = compiler.compile_effect_block_tree(&Lambda::LifThenElse(
         Box::new(Lambda::var(cond)),
         Box::new(Lambda::Lsequence(
             Box::new(Lambda::Lassign(
@@ -3677,7 +3682,7 @@ fn effect_blocks_keep_nested_effect_ifs_out_of_value_temps() {
     let lhs = Ident::create_local("lhs");
     let rhs = Ident::create_local("rhs");
     let fallback = Ident::create_local("fallback");
-    let block = compiler.compile_effect_block(&Lambda::LifThenElse(
+    let block = compiler.compile_effect_block_tree(&Lambda::LifThenElse(
         Box::new(Lambda::var(outer)),
         Box::new(Lambda::Lassign(
             lhs,
@@ -3725,7 +3730,7 @@ fn effect_blocks_keep_allocating_branches_inside_conditional_expressions_like_oc
         elements: vec![Constant::int(1), Constant::int(2)],
     });
 
-    let block = compiler.compile_effect_block(&Lambda::LifThenElse(
+    let block = compiler.compile_effect_block_tree(&Lambda::LifThenElse(
         Box::new(Lambda::var(cond)),
         Box::new(Lambda::Lsequence(
             Box::new(Lambda::apply(
@@ -3793,7 +3798,7 @@ fn effect_blocks_keep_conditional_expressions_when_both_branches_are_effectful()
     let cond = Ident::create_local("cond");
     let lhs = Ident::create_local("lhs");
     let rhs = Ident::create_local("rhs");
-    let block = compiler.compile_effect_block(&Lambda::LifThenElse(
+    let block = compiler.compile_effect_block_tree(&Lambda::LifThenElse(
         Box::new(Lambda::var(cond)),
         Box::new(Lambda::Lassign(
             lhs,
@@ -3856,7 +3861,7 @@ fn sequence_prefix_ifs_use_effect_lowering_without_result_temps() {
     let mut compiler = LambdaCompiler::new();
     let cond = Ident::create_local("cond");
     let value = Ident::create_local("value");
-    let compiled = compiler.compile_expr(&Lambda::Lsequence(
+    let compiled = compiler.compile_expr_tree(&Lambda::Lsequence(
         Box::new(Lambda::LifThenElse(
             Box::new(Lambda::var(cond)),
             Box::new(Lambda::const_(Constant::int(0))),
@@ -3913,7 +3918,7 @@ fn if_value_branches_keep_assignment_continuation_through_let_bindings() {
     let outer_cond = Ident::create_local("outerCond");
     let inner_cond = Ident::create_local("innerCond");
     let alias = Ident::create_local("alias");
-    let compiled = compiler.compile_expr(&Lambda::LifThenElse(
+    let compiled = compiler.compile_expr_tree(&Lambda::LifThenElse(
         Box::new(Lambda::var(outer_cond)),
         Box::new(Lambda::Llet(
             LetKind::Strict,
@@ -4066,7 +4071,7 @@ fn if_expression_result_temp_uses_tmp_name_like_ocaml() {
     let mut compiler = LambdaCompiler::new();
     let cond = Ident::create_local("cond");
     let alias = Ident::create_local("alias");
-    let compiled = compiler.compile_expr(&Lambda::LifThenElse(
+    let compiled = compiler.compile_expr_tree(&Lambda::LifThenElse(
         Box::new(Lambda::var(cond)),
         Box::new(Lambda::Llet(
             LetKind::Strict,
@@ -4711,7 +4716,7 @@ fn effect_context_calls_with_arg_preludes_skip_intermediate_call_temps() {
 fn value_context_direct_calls_stay_as_call_expressions() {
     let mut compiler = LambdaCompiler::new();
     let callback = Ident::create_local("callback");
-    let compiled = compiler.compile_expr(&Lambda::Lapply(Box::new(Apply {
+    let compiled = compiler.compile_expr_tree(&Lambda::Lapply(Box::new(Apply {
         ap_func: Box::new(Lambda::var(callback)),
         ap_args: vec![Lambda::const_(Constant::int(1))],
         ap_info: ApInfo {
@@ -4811,8 +4816,8 @@ fn nested_app_na_calls_reassociate_through_lam_apply_for_ari_regress_shape() {
         ),
     );
 
-    let simplified = crate::lambda::lam_compile_main::simplify_for_js_backend(&lam);
-    let compiled = compiler.compile_expr(&simplified);
+    let simplified = simplify_tree_for_js_backend(&lam);
+    let compiled = compiler.compile_expr_tree(&simplified);
     let rendered = format!(
         "{}\n{}",
         print_block(&compiled.prelude),
@@ -4909,8 +4914,8 @@ fn nested_app_na_calls_reassociate_multi_arg_returned_functions_for_test_demo_sh
         ),
     );
 
-    let simplified = crate::lambda::lam_compile_main::simplify_for_js_backend(&lam);
-    let compiled = compiler.compile_expr(&simplified);
+    let simplified = simplify_tree_for_js_backend(&lam);
+    let compiled = compiler.compile_expr_tree(&simplified);
     let rendered = print_expression(&compiled.expr);
     assert_eq!(
         rendered.trim(),
@@ -4928,7 +4933,7 @@ fn let_bound_direct_calls_skip_intermediate_call_aliases() {
     let mut compiler = LambdaCompiler::new();
     let callback = Ident::create_local("callback");
     let x = Ident::create_local("x");
-    let compiled = compiler.compile_expr(&Lambda::Llet(
+    let compiled = compiler.compile_expr_tree(&Lambda::Llet(
         LetKind::Strict,
         x,
         Box::new(Lambda::Lapply(Box::new(Apply {
@@ -5023,7 +5028,7 @@ fn return_context_calls_with_arg_preludes_skip_intermediate_call_temps() {
         },
     }));
 
-    let block = compiler.compile_return_block(&lam);
+    let block = compiler.compile_return_block_tree(&lam);
     let rendered = print_block(&block);
     assert!(
         !rendered.contains("let call ="),
@@ -5080,7 +5085,7 @@ fn assignment_context_calls_with_arg_preludes_skip_intermediate_call_temps() {
         },
     }));
 
-    let block = compiler.compile_assign_to_target_block(&result, &lam);
+    let block = compiler.compile_assign_to_target_block_tree(&result, &lam);
     let rendered = print_block(&block);
     assert!(
         !rendered.contains("let call ="),
@@ -5124,13 +5129,14 @@ fn function_bodies_drop_pure_undefined_sequence_suffixes() {
             Box::new(Lambda::var(value)),
         )),
     );
-    let compiled = compiler.compile_expr(&Lambda::Lfunction(Box::new(crate::lambda::LFunction {
-        loc: LamLoc::NONE,
-        arity: 1,
-        params: vec![value],
-        body: Box::new(body),
-        attr: crate::lambda::FunctionAttribute::default(),
-    })));
+    let compiled =
+        compiler.compile_expr_tree(&Lambda::Lfunction(Box::new(crate::lambda::LFunction {
+            loc: LamLoc::NONE,
+            arity: 1,
+            params: vec![value],
+            body: Box::new(body),
+            attr: crate::lambda::FunctionAttribute::default(),
+        })));
 
     let Expression {
         desc: ExpressionDesc::Fun { body, .. },
@@ -5673,31 +5679,35 @@ fn function_return_blocks_collapse_identity_module_wrapper_to_parameter() {
     let field_alias = Ident::create_local("x");
     let loc = LamLoc::NONE;
 
-    let compiled = compiler.compile_expr(&Lambda::Lfunction(Box::new(crate::lambda::LFunction {
-        loc: LamLoc::NONE,
-        arity: 1,
-        params: vec![module_param],
-        body: Box::new(Lambda::let_(
-            LetKind::Alias,
-            field_alias,
-            Lambda::prim(
-                Primitive::Pfield(
-                    0,
-                    FieldDbgInfo::Module {
-                        name: "x".to_string(),
-                    },
+    let compiled =
+        compiler.compile_expr_tree(&Lambda::Lfunction(Box::new(crate::lambda::LFunction {
+            loc: LamLoc::NONE,
+            arity: 1,
+            params: vec![module_param],
+            body: Box::new(Lambda::let_(
+                LetKind::Alias,
+                field_alias,
+                Lambda::prim(
+                    Primitive::Pfield(
+                        0,
+                        FieldDbgInfo::Module {
+                            name: "x".to_string(),
+                        },
+                    ),
+                    vec![Lambda::var(module_param)],
+                    loc,
                 ),
-                vec![Lambda::var(module_param)],
-                loc,
-            ),
-            Lambda::prim(
-                Primitive::Pmakeblock(TagInfo::Module(vec!["x".to_string()]), Mutable::Immutable),
-                vec![Lambda::var(field_alias)],
-                loc,
-            ),
-        )),
-        attr: crate::lambda::FunctionAttribute::default(),
-    })));
+                Lambda::prim(
+                    Primitive::Pmakeblock(
+                        TagInfo::Module(vec!["x".to_string()]),
+                        Mutable::Immutable,
+                    ),
+                    vec![Lambda::var(field_alias)],
+                    loc,
+                ),
+            )),
+            attr: crate::lambda::FunctionAttribute::default(),
+        })));
 
     let Expression {
         desc: ExpressionDesc::Fun { body, .. },
@@ -5725,26 +5735,27 @@ fn function_return_blocks_collapse_inlined_identity_module_wrapper_to_parameter(
     let module_param = Ident::create_local("U");
     let loc = LamLoc::NONE;
 
-    let compiled = compiler.compile_expr(&Lambda::Lfunction(Box::new(crate::lambda::LFunction {
-        loc: LamLoc::NONE,
-        arity: 1,
-        params: vec![module_param],
-        body: Box::new(Lambda::prim(
-            Primitive::Pmakeblock(TagInfo::Module(vec!["x".to_string()]), Mutable::Immutable),
-            vec![Lambda::prim(
-                Primitive::Pfield(
-                    0,
-                    FieldDbgInfo::Module {
-                        name: "x".to_string(),
-                    },
-                ),
-                vec![Lambda::var(module_param)],
-                loc,
-            )],
-            LamLoc::NONE,
-        )),
-        attr: crate::lambda::FunctionAttribute::default(),
-    })));
+    let compiled =
+        compiler.compile_expr_tree(&Lambda::Lfunction(Box::new(crate::lambda::LFunction {
+            loc: LamLoc::NONE,
+            arity: 1,
+            params: vec![module_param],
+            body: Box::new(Lambda::prim(
+                Primitive::Pmakeblock(TagInfo::Module(vec!["x".to_string()]), Mutable::Immutable),
+                vec![Lambda::prim(
+                    Primitive::Pfield(
+                        0,
+                        FieldDbgInfo::Module {
+                            name: "x".to_string(),
+                        },
+                    ),
+                    vec![Lambda::var(module_param)],
+                    loc,
+                )],
+                LamLoc::NONE,
+            )),
+            attr: crate::lambda::FunctionAttribute::default(),
+        })));
 
     let Expression {
         desc: ExpressionDesc::Fun { body, .. },
@@ -5775,48 +5786,49 @@ fn function_return_blocks_keep_non_identity_module_wrapper() {
     let right_alias = Ident::create_local("y");
     let loc = LamLoc::NONE;
 
-    let compiled = compiler.compile_expr(&Lambda::Lfunction(Box::new(crate::lambda::LFunction {
-        loc: LamLoc::NONE,
-        arity: 2,
-        params: vec![left, right],
-        body: Box::new(Lambda::let_(
-            LetKind::Alias,
-            left_alias,
-            Lambda::prim(
-                Primitive::Pfield(
-                    0,
-                    FieldDbgInfo::Module {
-                        name: "x".to_string(),
-                    },
-                ),
-                vec![Lambda::var(left)],
-                loc,
-            ),
-            Lambda::let_(
+    let compiled =
+        compiler.compile_expr_tree(&Lambda::Lfunction(Box::new(crate::lambda::LFunction {
+            loc: LamLoc::NONE,
+            arity: 2,
+            params: vec![left, right],
+            body: Box::new(Lambda::let_(
                 LetKind::Alias,
-                right_alias,
+                left_alias,
                 Lambda::prim(
                     Primitive::Pfield(
-                        1,
+                        0,
                         FieldDbgInfo::Module {
-                            name: "y".to_string(),
+                            name: "x".to_string(),
                         },
                     ),
-                    vec![Lambda::var(right)],
+                    vec![Lambda::var(left)],
                     loc,
                 ),
-                Lambda::prim(
-                    Primitive::Pmakeblock(
-                        TagInfo::Module(vec!["x".to_string(), "y".to_string()]),
-                        Mutable::Immutable,
+                Lambda::let_(
+                    LetKind::Alias,
+                    right_alias,
+                    Lambda::prim(
+                        Primitive::Pfield(
+                            1,
+                            FieldDbgInfo::Module {
+                                name: "y".to_string(),
+                            },
+                        ),
+                        vec![Lambda::var(right)],
+                        loc,
                     ),
-                    vec![Lambda::var(left_alias), Lambda::var(right_alias)],
-                    loc,
+                    Lambda::prim(
+                        Primitive::Pmakeblock(
+                            TagInfo::Module(vec!["x".to_string(), "y".to_string()]),
+                            Mutable::Immutable,
+                        ),
+                        vec![Lambda::var(left_alias), Lambda::var(right_alias)],
+                        loc,
+                    ),
                 ),
-            ),
-        )),
-        attr: crate::lambda::FunctionAttribute::default(),
-    })));
+            )),
+            attr: crate::lambda::FunctionAttribute::default(),
+        })));
 
     let Expression {
         desc: ExpressionDesc::Fun { body, .. },
@@ -6400,18 +6412,20 @@ fn js_flatten_and_mark_dead_materializes_strictopt_identity_optional_record_fiel
                             Expression::undefined(false),
                         ],
                         MutableFlag::Immutable,
-                        Box::new(TagInfo::Record {
-                            fields: vec![
-                                ("id".to_string(), true),
-                                ("name".to_string(), true),
-                                ("title".to_string(), true),
-                                ("className".to_string(), true),
-                                ("x".to_string(), true),
-                                ("y".to_string(), true),
-                            ],
-                            logical_field_count: None,
-                            mutable_flag: crate::parser::ast::MutableFlag::Immutable,
-                        }),
+                        Box::new(TagInfo::Record(Box::new(
+                            crate::lambda::lam_tag_info::RecordTag {
+                                fields: vec![
+                                    ("id".to_string(), true),
+                                    ("name".to_string(), true),
+                                    ("title".to_string(), true),
+                                    ("className".to_string(), true),
+                                    ("x".to_string(), true),
+                                    ("y".to_string(), true),
+                                ],
+                                logical_field_count: None,
+                                mutable_flag: crate::parser::ast::MutableFlag::Immutable,
+                            },
+                        ))),
                     ))),
                     property: LetKind::StrictOpt,
                     ident_info: IdentInfo::default(),
@@ -6527,15 +6541,17 @@ fn js_flatten_and_mark_dead_materializes_strict_identity_optional_record_fields_
                             )),
                         ],
                         MutableFlag::Immutable,
-                        Box::new(TagInfo::Record {
-                            fields: vec![
-                                ("pk".to_string(), false),
-                                ("exportStatus".to_string(), true),
-                                ("instantPlayerEligible".to_string(), true),
-                            ],
-                            logical_field_count: None,
-                            mutable_flag: crate::parser::ast::MutableFlag::Immutable,
-                        }),
+                        Box::new(TagInfo::Record(Box::new(
+                            crate::lambda::lam_tag_info::RecordTag {
+                                fields: vec![
+                                    ("pk".to_string(), false),
+                                    ("exportStatus".to_string(), true),
+                                    ("instantPlayerEligible".to_string(), true),
+                                ],
+                                logical_field_count: None,
+                                mutable_flag: crate::parser::ast::MutableFlag::Immutable,
+                            },
+                        ))),
                     ))),
                     property: LetKind::Strict,
                     ident_info: IdentInfo::default(),
@@ -6639,22 +6655,26 @@ fn js_flatten_and_mark_dead_keeps_alias_bound_deep_constant_records_inline_like_
                                     Expression::number(Number::int(3)),
                                 ],
                                 MutableFlag::Immutable,
-                                Box::new(TagInfo::Record {
-                                    fields: vec![
-                                        ("xx".to_string(), false),
-                                        ("yy".to_string(), false),
-                                    ],
-                                    logical_field_count: None,
-                                    mutable_flag: crate::parser::ast::MutableFlag::Immutable,
-                                }),
+                                Box::new(TagInfo::Record(Box::new(
+                                    crate::lambda::lam_tag_info::RecordTag {
+                                        fields: vec![
+                                            ("xx".to_string(), false),
+                                            ("yy".to_string(), false),
+                                        ],
+                                        logical_field_count: None,
+                                        mutable_flag: crate::parser::ast::MutableFlag::Immutable,
+                                    },
+                                ))),
                             )),
                         ],
                         MutableFlag::Immutable,
-                        Box::new(TagInfo::Record {
-                            fields: vec![("a".to_string(), false), ("b".to_string(), false)],
-                            logical_field_count: None,
-                            mutable_flag: crate::parser::ast::MutableFlag::Immutable,
-                        }),
+                        Box::new(TagInfo::Record(Box::new(
+                            crate::lambda::lam_tag_info::RecordTag {
+                                fields: vec![("a".to_string(), false), ("b".to_string(), false)],
+                                logical_field_count: None,
+                                mutable_flag: crate::parser::ast::MutableFlag::Immutable,
+                            },
+                        ))),
                     ))),
                     property: LetKind::Alias,
                     ident_info: IdentInfo::default(),
@@ -6803,11 +6823,11 @@ fn top_level_record_field_assignments_on_pure_fresh_literals_collapse_to_rhs_eff
             vec![
                 Lambda::prim(
                     Primitive::Pmakeblock(
-                        TagInfo::Record {
+                        TagInfo::Record(Box::new(crate::lambda::lam_tag_info::RecordTag {
                             fields: vec![("x".to_string(), false)],
                             logical_field_count: None,
                             mutable_flag: crate::parser::ast::MutableFlag::Mutable,
-                        },
+                        })),
                         Mutable::Immutable,
                     ),
                     vec![Lambda::const_(Constant::int(3))],
@@ -6944,7 +6964,7 @@ b := b.contents + tmp
 fn lassign_expression_lowers_to_statement_prelude_and_unit_value() {
     let mut compiler = LambdaCompiler::new();
     let cell = Ident::create_local("cell");
-    let compiled = compiler.compile_expr(&Lambda::Lassign(
+    let compiled = compiler.compile_expr_tree(&Lambda::Lassign(
         cell,
         Box::new(Lambda::prim(
             Primitive::Paddint,
@@ -6968,7 +6988,7 @@ fn let_bindings_of_unit_lassigns_emit_effects_before_undefined_declarations() {
     let mut compiler = LambdaCompiler::new();
     let u = Ident::create_local("u");
     let v = Ident::create_local("v");
-    let block = compiler.compile_let_binding(
+    let block = compiler.compile_let_binding_tree(
         LetKind::Strict,
         &v,
         &Lambda::Lassign(
@@ -6987,7 +7007,7 @@ fn let_bindings_of_unit_lassigns_emit_effects_before_undefined_declarations() {
 fn lowers_pis_poly_var_block_to_typeof_object_check() {
     let mut compiler = LambdaCompiler::new();
     let value = Ident::create_local("value");
-    let compiled = compiler.compile_expr(&Lambda::prim(
+    let compiled = compiler.compile_expr_tree(&Lambda::prim(
         Primitive::PisPolyVarBlock,
         vec![Lambda::var(value)],
         LamLoc::NONE,
@@ -7113,7 +7133,7 @@ fn int32_band_drops_redundant_bor_on_left_operand() {
 fn lowers_psome_not_nest_to_identity_optional_block() {
     let mut compiler = LambdaCompiler::new();
     let value = Ident::create_local("value");
-    let compiled = compiler.compile_expr(&Lambda::prim(
+    let compiled = compiler.compile_expr_tree(&Lambda::prim(
         Primitive::PsomeNotNest,
         vec![Lambda::var(value)],
         LamLoc::NONE,
@@ -7137,7 +7157,7 @@ fn lowers_psome_not_nest_to_identity_optional_block() {
 #[test]
 fn lowers_psome_immediates_to_identity_optional_block_like_ocaml() {
     let mut compiler = LambdaCompiler::new();
-    let compiled = compiler.compile_expr(&Lambda::prim(
+    let compiled = compiler.compile_expr_tree(&Lambda::prim(
         Primitive::Psome,
         vec![Lambda::const_(Constant::int(3))],
         LamLoc::NONE,
@@ -7187,7 +7207,7 @@ fn lowers_pval_from_option_optional_block_to_inner_value() {
 fn lowers_pval_from_option_to_primitive_option_runtime_call() {
     let mut compiler = LambdaCompiler::new();
     let value = Ident::create_local("value");
-    let compiled = compiler.compile_expr(&Lambda::prim(
+    let compiled = compiler.compile_expr_tree(&Lambda::prim(
         Primitive::PvalFromOption,
         vec![Lambda::var(value)],
         LamLoc::NONE,
@@ -7220,7 +7240,7 @@ fn lowers_pval_from_option_to_primitive_option_runtime_call() {
 #[test]
 fn lowers_pnull_to_opt_non_inline_operand_to_primitive_option_from_null() {
     let mut compiler = LambdaCompiler::new();
-    let compiled = compiler.compile_expr(&Lambda::prim(
+    let compiled = compiler.compile_expr_tree(&Lambda::prim(
         Primitive::PnullToOpt,
         vec![Lambda::const_(Constant::string("value"))],
         LamLoc::NONE,
@@ -7253,7 +7273,7 @@ fn lowers_pnull_to_opt_non_inline_operand_to_primitive_option_from_null() {
 #[test]
 fn lowers_pnull_undefined_to_opt_non_inline_operand_to_primitive_option_from_nullable() {
     let mut compiler = LambdaCompiler::new();
-    let compiled = compiler.compile_expr(&Lambda::prim(
+    let compiled = compiler.compile_expr_tree(&Lambda::prim(
         Primitive::PnullUndefinedToOpt,
         vec![Lambda::const_(Constant::string("value"))],
         LamLoc::NONE,
@@ -7409,11 +7429,13 @@ fn lowers_record_pfield_from_pure_caml_block_directly_like_ocaml() {
         &Expression::new(ExpressionDesc::CamlBlock(
             vec![Expression::var(value)],
             MutableFlag::Immutable,
-            Box::new(TagInfo::Record {
-                fields: vec![("d".to_string(), false)],
-                logical_field_count: None,
-                mutable_flag: crate::parser::ast::MutableFlag::Immutable,
-            }),
+            Box::new(TagInfo::Record(Box::new(
+                crate::lambda::lam_tag_info::RecordTag {
+                    fields: vec![("d".to_string(), false)],
+                    logical_field_count: None,
+                    mutable_flag: crate::parser::ast::MutableFlag::Immutable,
+                },
+            ))),
         )),
     );
 
@@ -7438,17 +7460,19 @@ fn lowers_cons_pfield_from_pure_caml_block_directly_like_ocaml() {
         &Expression::new(ExpressionDesc::CamlBlock(
             vec![Expression::var(head), Expression::var(tail)],
             MutableFlag::Immutable,
-            Box::new(TagInfo::Constructor {
-                name: "::".to_string(),
-                num_nonconst: 1,
-                runtime: Box::new(crate::types::TaggedBlock {
-                    tag: crate::types::VariantTag {
-                        name: "::".to_string(),
-                        literal: crate::types::VariantLiteralTag::String("::".to_string()),
-                    },
-                    tag_name: None,
-                }),
-            }),
+            Box::new(TagInfo::Constructor(Box::new(
+                crate::lambda::lam_tag_info::ConstructorTag {
+                    name: "::".to_string(),
+                    num_nonconst: 1,
+                    runtime: Box::new(crate::types::TaggedBlock {
+                        tag: crate::types::VariantTag {
+                            name: "::".to_string(),
+                            literal: crate::types::VariantLiteralTag::String("::".to_string()),
+                        },
+                        tag_name: None,
+                    }),
+                },
+            ))),
         )),
     );
     let tail_expr = compiler.compile_field_access(
@@ -7457,17 +7481,19 @@ fn lowers_cons_pfield_from_pure_caml_block_directly_like_ocaml() {
         &Expression::new(ExpressionDesc::CamlBlock(
             vec![Expression::var(head), Expression::var(tail)],
             MutableFlag::Immutable,
-            Box::new(TagInfo::Constructor {
-                name: "::".to_string(),
-                num_nonconst: 1,
-                runtime: Box::new(crate::types::TaggedBlock {
-                    tag: crate::types::VariantTag {
-                        name: "::".to_string(),
-                        literal: crate::types::VariantLiteralTag::String("::".to_string()),
-                    },
-                    tag_name: None,
-                }),
-            }),
+            Box::new(TagInfo::Constructor(Box::new(
+                crate::lambda::lam_tag_info::ConstructorTag {
+                    name: "::".to_string(),
+                    num_nonconst: 1,
+                    runtime: Box::new(crate::types::TaggedBlock {
+                        tag: crate::types::VariantTag {
+                            name: "::".to_string(),
+                            literal: crate::types::VariantLiteralTag::String("::".to_string()),
+                        },
+                        tag_name: None,
+                    }),
+                },
+            ))),
         )),
     );
 
@@ -7774,7 +7800,7 @@ fn js_shake_pass_removes_unused_pure_toplevel_bindings_and_statements() {
 #[test]
 fn one_unit_arg_functions_lower_to_zero_arg_js_functions() {
     let mut compiler = LambdaCompiler::new();
-    let compiled = compiler.compile_expr(&Lambda::function_(
+    let compiled = compiler.compile_expr_tree(&Lambda::function_(
         1,
         vec![Ident::create_local("param")],
         Lambda::unit(),
@@ -7811,7 +7837,7 @@ fn recursive_function_bindings_lower_directly_without_placeholder_assignments() 
         Lambda::unit(),
     );
 
-    let compiled = compiler.compile_expr(&lam);
+    let compiled = compiler.compile_expr_tree(&lam);
     let rendered = print_block(&compiled.prelude);
 
     assert!(
@@ -7860,7 +7886,7 @@ fn mutually_recursive_function_bindings_lower_without_placeholder_assignments() 
         Lambda::unit(),
     );
 
-    let compiled = compiler.compile_expr(&lam);
+    let compiled = compiler.compile_expr_tree(&lam);
     let rendered = print_block(&compiled.prelude);
 
     assert!(
@@ -7928,7 +7954,7 @@ fn recursive_singleton_nested_let_function_bindings_avoid_placeholder_assignment
         Lambda::unit(),
     );
 
-    let compiled = compiler.compile_expr(&lam);
+    let compiled = compiler.compile_expr_tree(&lam);
     let rendered = print_block(&compiled.prelude);
     let make_decl = compiled.prelude.iter().find_map(|stmt| match &stmt.desc {
         StatementDesc::Variable(VariableDeclaration { ident, value, .. }) if ident.same(&make) => {
@@ -7969,7 +7995,7 @@ fn recursive_self_referential_record_bindings_lower_to_dummy_object_updates_like
         Lambda::unit(),
     );
 
-    let compiled = compiler.compile_expr(&lam);
+    let compiled = compiler.compile_expr_tree(&lam);
     let [declare, assign] = compiled.prelude.as_slice() else {
         panic!("expected a dummy-object declaration followed by a field update");
     };
@@ -8060,7 +8086,7 @@ fn mutually_recursive_record_bindings_lower_to_runtime_update_dummy_calls() {
         Lambda::unit(),
     );
 
-    let rendered = print_block(&compiler.compile_expr(&lam).prelude);
+    let rendered = print_block(&compiler.compile_expr_tree(&lam).prelude);
 
     assert!(
         rendered.contains("let a = {};") && rendered.contains("let b = {};"),
@@ -8110,7 +8136,7 @@ fn recursive_self_tailcalls_lower_to_looping_while_bodies() {
         Lambda::unit(),
     );
 
-    let compiled = compiler.compile_expr(&lam);
+    let compiled = compiler.compile_expr_tree(&lam);
     let rendered = print_block(&compiled.prelude);
 
     assert!(
@@ -8179,7 +8205,7 @@ fn recursive_int_switch_fallthrough_handler_breaks_before_tail_loop_continue() {
         Lambda::unit(),
     );
 
-    let rendered = print_block(&compiler.compile_expr(&lam).prelude);
+    let rendered = print_block(&compiler.compile_expr_tree(&lam).prelude);
 
     assert!(
         rendered.contains("case 2 :\n        break;\n      default:"),
@@ -8227,7 +8253,7 @@ fn recursive_string_switch_fallthrough_handler_breaks_before_tail_loop_continue(
         Lambda::unit(),
     );
 
-    let rendered = print_block(&compiler.compile_expr(&lam).prelude);
+    let rendered = print_block(&compiler.compile_expr_tree(&lam).prelude);
 
     assert!(
         rendered.contains("case \"?\" :\n        break;\n      default:"),
@@ -8266,7 +8292,7 @@ fn recursive_self_tailcalls_lower_sequands_to_looping_while_bodies() {
         Lambda::unit(),
     );
 
-    let compiled = compiler.compile_expr(&lam);
+    let compiled = compiler.compile_expr_tree(&lam);
     let rendered = print_block(&compiled.prelude);
 
     assert!(
@@ -8314,7 +8340,7 @@ fn recursive_self_tailcalls_lower_sequors_to_looping_while_bodies() {
         Lambda::unit(),
     );
 
-    let compiled = compiler.compile_expr(&lam);
+    let compiled = compiler.compile_expr_tree(&lam);
     let rendered = print_block(&compiled.prelude);
 
     assert!(
@@ -8366,7 +8392,7 @@ fn recursive_self_tailcalls_rename_params_before_loop_assignments() {
         Lambda::unit(),
     );
 
-    let compiled = compiler.compile_expr(&lam);
+    let compiled = compiler.compile_expr_tree(&lam);
     let rendered = print_block(&compiled.prelude);
 
     assert!(
@@ -8436,10 +8462,13 @@ fn recursive_self_tailcalls_preserve_ocaml_loop_ordering() {
     // does not seed the lowering generator from the input Lambda. Construct
     // this fixture with that same generator, as OCaml's Ext_ident.create does.
     assert!(
-        compiler.id_gen.current_stamp()
-            >= crate::lambda::lam_beta_reduce::max_ident_stamp_in_lambda(&lam)
+        compiler.id_gen.current_stamp() >= {
+            let mut a = LamArena::new();
+            let l = a.import(&lam);
+            crate::lambda::lam_beta_reduce::max_ident_stamp_in_lambda(&a, l)
+        }
     );
-    let compiled = compiler.compile_expr(&lam);
+    let compiled = compiler.compile_expr_tree(&lam);
     let rendered = print_block(&compiled.prelude);
     let alias_start = rendered
         .find("let acc = _acc;")
@@ -8497,8 +8526,8 @@ fn recursive_function_bindings_lower_to_looping_while_bodies() {
         Lambda::var(loop_),
     );
 
-    let simplified = crate::lambda::lam_compile_main::simplify_for_js_backend(&lam);
-    let compiled = compiler.compile_expr(&simplified);
+    let simplified = simplify_tree_for_js_backend(&lam);
+    let compiled = compiler.compile_expr_tree(&simplified);
     let rendered = if compiled.prelude.is_empty() {
         print_expression(&compiled.expr)
     } else {
@@ -8584,7 +8613,7 @@ fn recursive_named_variant_block_cases_reenter_tail_loops() {
         Lambda::unit(),
     );
 
-    let compiled = compiler.compile_expr(&lam);
+    let compiled = compiler.compile_expr_tree(&lam);
     let rendered = print_block(&compiled.prelude);
 
     assert!(
@@ -8645,32 +8674,32 @@ fn finished_output_drops_but_compiles_what_follows() {
 
     for lam in [&seq, &let_] {
         let mut compiler = LambdaCompiler::new();
-        let assign = compiler.compile_assign_to_target_output(&result, lam);
+        let assign = compiler.compile_assign_to_target_output_tree(&result, lam);
         assert_eq!(assign.finished, OutputFinished::True);
         let [stmt] = assign.block.as_slice() else {
             panic!("expected only the throw, got {:?}", assign.block);
         };
         assert!(matches!(stmt.desc, StatementDesc::Throw(_)));
 
-        let effect = LambdaCompiler::new().compile_effect_block_output(lam);
+        let effect = LambdaCompiler::new().compile_effect_block_output_tree(lam);
         assert_eq!(effect.finished, OutputFinished::True);
         assert_eq!(effect.block.len(), 1);
 
         let declare =
-            LambdaCompiler::new().compile_let_binding_output(LetKind::Strict, &result, lam);
+            LambdaCompiler::new().compile_let_binding_output_tree(LetKind::Strict, &result, lam);
         assert_eq!(declare.finished, OutputFinished::True);
         assert_eq!(declare.block.len(), 1);
 
-        let compiled = LambdaCompiler::new().compile_expr(lam);
+        let compiled = LambdaCompiler::new().compile_expr_tree(lam);
         assert_eq!(compiled.finished, OutputFinished::True);
     }
 
     // The dropped catch still allocated its `exit` identifier.
     let raise_only = next_stamp_after(|c| {
-        c.compile_assign_to_target_output(&result, &raise_boom());
+        c.compile_assign_to_target_output_tree(&result, &raise_boom());
     });
     let raise_then_catch = next_stamp_after(|c| {
-        c.compile_assign_to_target_output(&result, &seq);
+        c.compile_assign_to_target_output_tree(&result, &seq);
     });
     assert!(raise_then_catch > raise_only);
 }
@@ -8687,7 +8716,7 @@ fn static_catch_carries_its_body_finished_flag() {
         Box::new(allocating_catch()),
     );
     let mut compiler = LambdaCompiler::new();
-    let output = compiler.compile_assign_to_target_output(&result, &catch);
+    let output = compiler.compile_assign_to_target_output_tree(&result, &catch);
     assert_eq!(output.finished, OutputFinished::True);
     assert!(
         !output
@@ -8698,7 +8727,7 @@ fn static_catch_carries_its_body_finished_flag() {
         output.block
     );
     let without_handler_allocation = next_stamp_after(|c| {
-        c.compile_assign_to_target_output(
+        c.compile_assign_to_target_output_tree(
             &result,
             &Lambda::LstaticCatch(
                 Box::new(raise_boom()),
@@ -8708,7 +8737,7 @@ fn static_catch_carries_its_body_finished_flag() {
         );
     });
     let with_handler_allocation = next_stamp_after(|c| {
-        c.compile_assign_to_target_output(&result, &catch);
+        c.compile_assign_to_target_output_tree(&result, &catch);
     });
     assert!(with_handler_allocation > without_handler_allocation);
 }
@@ -8724,7 +8753,7 @@ fn conditional_of_raises_is_not_finished() {
         Lambda::if_(Lambda::var(cond), raise_boom(), raise_boom()),
         Lambda::const_(Constant::int(2)),
     );
-    let output = LambdaCompiler::new().compile_assign_to_target_output(&result, &lam);
+    let output = LambdaCompiler::new().compile_assign_to_target_output_tree(&result, &lam);
     assert_eq!(output.finished, OutputFinished::False);
     assert!(
         output.block.len() >= 2,
@@ -8756,7 +8785,7 @@ fn recursive_lets_compile_last_binding_first() {
         vec![(first, allocating_catch()), (second, allocating_catch())],
         Box::new(Lambda::const_(Constant::int(0))),
     );
-    let output = LambdaCompiler::new().compile_effect_block_output(&lam);
+    let output = LambdaCompiler::new().compile_effect_block_output_tree(&lam);
     let stamps = declared_exit_stamps(&output.block);
     let [first_exit, second_exit] = stamps.as_slice() else {
         panic!("expected two exit declarations, got {:?}", output.block);
@@ -8779,22 +8808,22 @@ fn recursive_lets_carry_a_raising_binding_flag() {
         Box::new(allocating_catch()),
     );
     let mut compiler = LambdaCompiler::new();
-    let output = compiler.compile_effect_block_output(&lam);
+    let output = compiler.compile_effect_block_output_tree(&lam);
     assert_eq!(output.finished, OutputFinished::True);
     let [stmt] = output.block.as_slice() else {
         panic!("expected only the throw, got {:?}", output.block);
     };
     assert!(matches!(stmt.desc, StatementDesc::Throw(_)));
-    let compiled = LambdaCompiler::new().compile_expr(&lam);
+    let compiled = LambdaCompiler::new().compile_expr_tree(&lam);
     assert_eq!(compiled.finished, OutputFinished::True);
     let raise_only = next_stamp_after(|c| {
-        c.compile_effect_block_output(&Lambda::Lletrec(
+        c.compile_effect_block_output_tree(&Lambda::Lletrec(
             vec![(first, raise_boom())],
             Box::new(Lambda::const_(Constant::int(0))),
         ));
     });
     let with_dropped = next_stamp_after(|c| {
-        c.compile_effect_block_output(&lam);
+        c.compile_effect_block_output_tree(&lam);
     });
     assert!(with_dropped > raise_only);
 }
@@ -8816,7 +8845,7 @@ fn return_if_is_finished_only_as_a_conditional_return() {
         Lambda::const_(Constant::int(1)),
         Lambda::const_(Constant::int(2)),
     );
-    let output = LambdaCompiler::new().compile_return_output(&values);
+    let output = LambdaCompiler::new().compile_return_output_tree(&values);
     assert_eq!(output.finished, OutputFinished::True);
 
     // A static catch needs statements under `NeedValue`.
@@ -8825,7 +8854,7 @@ fn return_if_is_finished_only_as_a_conditional_return() {
         allocating_catch(),
         Lambda::seq(call_of(callee), allocating_catch()),
     );
-    let output = LambdaCompiler::new().compile_return_output(&statements);
+    let output = LambdaCompiler::new().compile_return_output_tree(&statements);
     assert_eq!(output.finished, OutputFinished::False);
 }
 
@@ -8850,7 +8879,7 @@ fn return_static_catch_drops_the_handler_of_a_returning_body() {
         )
     };
     let lam = catch(allocating_catch());
-    let output = LambdaCompiler::new().compile_return_output(&lam);
+    let output = LambdaCompiler::new().compile_return_output_tree(&lam);
     assert_eq!(output.finished, OutputFinished::True);
     assert!(
         matches!(
@@ -8861,10 +8890,10 @@ fn return_static_catch_drops_the_handler_of_a_returning_body() {
         output.block
     );
     let plain = next_stamp_after(|c| {
-        c.compile_return_output(&catch(Lambda::const_(Constant::int(1))));
+        c.compile_return_output_tree(&catch(Lambda::const_(Constant::int(1))));
     });
     let allocating = next_stamp_after(|c| {
-        c.compile_return_output(&lam);
+        c.compile_return_output_tree(&lam);
     });
     assert!(allocating > plain, "the dropped handler is compiled");
 }
@@ -8876,7 +8905,7 @@ fn return_static_catch_drops_the_handler_of_a_returning_body() {
 fn assign_of_a_raise_keeps_its_assignment() {
     let target = Ident::create_local("target");
     let compiled =
-        LambdaCompiler::new().compile_expr(&Lambda::Lassign(target, Box::new(raise_boom())));
+        LambdaCompiler::new().compile_expr_tree(&Lambda::Lassign(target, Box::new(raise_boom())));
     assert_eq!(compiled.finished, OutputFinished::False);
     let [throw, assign] = compiled.prelude.as_slice() else {
         panic!(
@@ -8906,7 +8935,7 @@ fn recursive_lets_put_functions_before_values_without_resplitting() {
         ],
         Box::new(Lambda::const_(Constant::int(0))),
     );
-    let output = LambdaCompiler::new().compile_effect_block_output(&lam);
+    let output = LambdaCompiler::new().compile_effect_block_output_tree(&lam);
     let names: Vec<_> = output
         .block
         .iter()
@@ -8932,7 +8961,7 @@ fn for_loop_compiles_its_finish_bound_before_its_start_bound() {
         crate::lambda::DirectionFlag::Upto,
         Box::new(Lambda::const_(Constant::JsUndefined { is_unit: true })),
     );
-    let compiled = LambdaCompiler::new().compile_expr(&lam);
+    let compiled = LambdaCompiler::new().compile_expr_tree(&lam);
     let stamps = declared_exit_stamps(&compiled.prelude);
     let [start_exit, finish_exit] = stamps.as_slice() else {
         panic!("expected two exit declarations, got {:?}", compiled.prelude);
@@ -8960,7 +8989,7 @@ fn recursive_function_loops_only_on_calls_to_itself() {
         );
         print_block(
             &LambdaCompiler::new()
-                .compile_effect_block_output(&lam)
+                .compile_effect_block_output_tree(&lam)
                 .block,
         )
     };
@@ -8976,7 +9005,7 @@ fn recursive_function_loops_only_on_calls_to_itself() {
 fn short_circuit_declaration_with_statements_is_a_variable() {
     let flag = Ident::create_local("flag");
     let target = Ident::create_local("target");
-    let output = LambdaCompiler::new().compile_let_binding_output(
+    let output = LambdaCompiler::new().compile_let_binding_output_tree(
         LetKind::Strict,
         &target,
         &Lambda::prim(
@@ -9022,17 +9051,17 @@ fn debugger_compiles_its_arguments_for_effect_before_the_statement() {
     };
 
     let mut compiler = LambdaCompiler::new();
-    let block = compiler.compile_effect_block(&debugger(vec![Lambda::unit()]));
+    let block = compiler.compile_effect_block_tree(&debugger(vec![Lambda::unit()]));
     assert_eq!(statements(&block), ["debugger;"]);
 
     let mut compiler = LambdaCompiler::new();
-    let block = compiler.compile_effect_block(&debugger(vec![effect()]));
+    let block = compiler.compile_effect_block_tree(&debugger(vec![effect()]));
     assert_eq!(statements(&block), ["log(\"before\");", "debugger;"]);
 
     // NeedValue: the argument and the statement form the prelude, the value
     // is unit.
     let mut compiler = LambdaCompiler::new();
-    let compiled = compiler.compile_expr(&debugger(vec![effect()]));
+    let compiled = compiler.compile_expr_tree(&debugger(vec![effect()]));
     assert_eq!(
         statements(&compiled.prelude),
         ["log(\"before\");", "debugger;"]
@@ -9048,9 +9077,9 @@ fn debugger_compiles_its_arguments_for_effect_before_the_statement() {
     let cond = Ident::create_local("cond");
     let conditional = || Lambda::if_(Lambda::var(cond), effect(), Lambda::unit());
     let mut compiler = LambdaCompiler::new();
-    let mut expected = statements(&compiler.compile_effect_block(&conditional()));
+    let mut expected = statements(&compiler.compile_effect_block_tree(&conditional()));
     expected.push("debugger;".to_string());
     let mut compiler = LambdaCompiler::new();
-    let block = compiler.compile_effect_block(&debugger(vec![conditional()]));
+    let block = compiler.compile_effect_block_tree(&debugger(vec![conditional()]));
     assert_eq!(statements(&block), expected);
 }

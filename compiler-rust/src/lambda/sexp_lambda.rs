@@ -178,41 +178,26 @@ fn mutable_sexp(m: &Mutable) -> Sexp {
 // Tag info
 fn tag_info(info: &TagInfo) -> Sexp {
     match info {
-        TagInfo::Constructor {
-            name,
-            num_nonconst,
-            runtime,
-        } => Sexp::list(vec![
+        TagInfo::Constructor(c) => Sexp::list(vec![
             Sexp::atom("Blk_constructor"),
-            string(name),
-            int(*num_nonconst),
-            variant_tagged_block(runtime),
+            string(&c.name),
+            int(c.num_nonconst),
+            variant_tagged_block(&c.runtime),
         ]),
         TagInfo::Tuple => Sexp::atom("Blk_tuple"),
         TagInfo::PolyVar(_) => Sexp::atom("Blk_poly_var"),
-        TagInfo::Record {
-            fields,
-            mutable_flag,
-            ..
-        } => Sexp::list(vec![
+        TagInfo::Record(r) => Sexp::list(vec![
             Sexp::atom("Blk_record"),
-            Sexp::list(fields.iter().map(|(name, _)| string(name)).collect()),
-            mutable_flag_sexp(mutable_flag),
+            Sexp::list(r.fields.iter().map(|(name, _)| string(name)).collect()),
+            mutable_flag_sexp(&r.mutable_flag),
         ]),
-        TagInfo::RecordInlined {
-            name,
-            num_nonconst,
-            fields,
-            mutable_flag,
-            runtime,
-            ..
-        } => Sexp::list(vec![
+        TagInfo::RecordInlined(r) => Sexp::list(vec![
             Sexp::atom("Blk_record_inlined"),
-            string(name),
-            int(*num_nonconst),
-            variant_block(runtime),
-            Sexp::list(fields.iter().map(|(name, _)| string(name)).collect()),
-            mutable_flag_sexp(mutable_flag),
+            string(&r.name),
+            int(r.num_nonconst),
+            variant_block(&r.runtime),
+            Sexp::list(r.fields.iter().map(|(name, _)| string(name)).collect()),
+            mutable_flag_sexp(&r.mutable_flag),
         ]),
         TagInfo::Module(fields) => {
             let mut items = vec![Sexp::atom("Blk_module")];
@@ -493,8 +478,8 @@ fn primitive(prim: &Primitive, _with_locs: bool) -> Sexp {
                 .collect(),
         ),
         // Skip arg_types and ffi for brevity.
-        Primitive::PjsCall { prim_name, .. } => {
-            Sexp::list(vec![Sexp::atom("Pjs_call"), string(prim_name)])
+        Primitive::PjsCall(call) => {
+            Sexp::list(vec![Sexp::atom("Pjs_call"), string(&call.prim_name)])
         }
         Primitive::Pjsx(jsx) => Sexp::list(vec![
             Sexp::atom("Pjsx"),
@@ -825,177 +810,6 @@ fn lambda_switch(sw: &LambdaSwitch, with_locs: bool) -> Sexp {
     ])
 }
 
-fn indexed_lambda(
-    store: &crate::lambda::indexed::IndexedLambda,
-    node: crate::lambda::indexed::NodeId,
-    with_locs: bool,
-) -> Sexp {
-    use crate::lambda::indexed::NodeView;
-    let child = |node| indexed_lambda(store, node, with_locs);
-    match store.view(node) {
-        NodeView::Var(id) => Sexp::list(vec![Sexp::atom("Lvar"), ident(id)]),
-        NodeView::GlobalModule(id) => Sexp::list(vec![Sexp::atom("Lglobal_module"), ident(id)]),
-        NodeView::Const(value) => Sexp::list(vec![Sexp::atom("Lconst"), constant(value)]),
-        NodeView::Apply(function, args, info) => Sexp::list(vec![
-            Sexp::atom("Lapply"),
-            child(function),
-            Sexp::list(args.iter().map(|node| child(*node)).collect()),
-            ap_info_sexp(info, with_locs),
-        ]),
-        NodeView::Function(_, params, body, attr, _) => Sexp::list(vec![
-            Sexp::atom("Lfunction"),
-            Sexp::list(params.iter().map(ident).collect()),
-            child(body),
-            function_attribute(attr),
-        ]),
-        NodeView::Let(kind, id, value, body) => Sexp::list(vec![
-            Sexp::atom("Llet"),
-            let_kind(&kind),
-            ident(id),
-            child(value),
-            child(body),
-        ]),
-        NodeView::LetRec(bindings, body) => Sexp::list(vec![
-            Sexp::atom("Lletrec"),
-            Sexp::list(
-                bindings
-                    .iter()
-                    .map(|(id, node)| Sexp::list(vec![ident(id), child(*node)]))
-                    .collect(),
-            ),
-            child(body),
-        ]),
-        NodeView::Prim(prim, args, _) => Sexp::list(vec![
-            Sexp::atom("Lprim"),
-            primitive(prim, with_locs),
-            Sexp::list(args.iter().map(|node| child(*node)).collect()),
-        ]),
-        NodeView::Switch {
-            scrutinee,
-            consts_full,
-            consts,
-            blocks_full,
-            blocks,
-            fail_action,
-            dispatch,
-        } => {
-            let switch = Sexp::list(vec![
-                Sexp::atom("lambda_switch"),
-                Sexp::list(vec![Sexp::atom("sw_consts_full"), bool_sexp(consts_full)]),
-                Sexp::list(vec![
-                    Sexp::atom("sw_consts"),
-                    Sexp::list(
-                        consts
-                            .iter()
-                            .map(|(key, node)| Sexp::list(vec![switch_key(key), child(*node)]))
-                            .collect(),
-                    ),
-                ]),
-                Sexp::list(vec![Sexp::atom("sw_blocks_full"), bool_sexp(blocks_full)]),
-                Sexp::list(vec![
-                    Sexp::atom("sw_blocks"),
-                    Sexp::list(
-                        blocks
-                            .iter()
-                            .map(|(key, node)| Sexp::list(vec![switch_key(key), child(*node)]))
-                            .collect(),
-                    ),
-                ]),
-                Sexp::list(vec![
-                    Sexp::atom("sw_failaction"),
-                    match fail_action {
-                        None => Sexp::atom("None"),
-                        Some(node) => Sexp::list(vec![Sexp::atom("Some"), child(node)]),
-                    },
-                ]),
-                Sexp::list(vec![Sexp::atom("sw_dispatch"), switch_dispatch(dispatch)]),
-            ]);
-            Sexp::list(vec![Sexp::atom("Lswitch"), child(scrutinee), switch])
-        }
-        NodeView::StringSwitch(scrutinee, cases, default) => Sexp::list(vec![
-            Sexp::atom("Lstringswitch"),
-            child(scrutinee),
-            Sexp::list(
-                cases
-                    .iter()
-                    .map(|(key, node)| Sexp::list(vec![string(key), child(*node)]))
-                    .collect(),
-            ),
-            match default {
-                None => Sexp::atom("None"),
-                Some(node) => Sexp::list(vec![Sexp::atom("Some"), child(node)]),
-            },
-        ]),
-        NodeView::StaticRaise(exit, args) => Sexp::list(vec![
-            Sexp::atom("Lstaticraise"),
-            int(exit),
-            Sexp::list(args.iter().map(|node| child(*node)).collect()),
-        ]),
-        NodeView::StaticCatch(body, exit, params, handler) => Sexp::list(vec![
-            Sexp::atom("Lstaticcatch"),
-            child(body),
-            int(exit),
-            Sexp::list(params.iter().map(ident).collect()),
-            child(handler),
-        ]),
-        NodeView::TryWith(body, exn, handler) => Sexp::list(vec![
-            Sexp::atom("Ltrywith"),
-            child(body),
-            ident(exn),
-            child(handler),
-        ]),
-        NodeView::TryFinally(body, finally) => Sexp::list(vec![
-            Sexp::atom("Ltryfinally"),
-            child(body),
-            child(finally),
-        ]),
-        NodeView::IfThenElse(cond, then_, else_) => Sexp::list(vec![
-            Sexp::atom("Lifthenelse"),
-            child(cond),
-            child(then_),
-            child(else_),
-        ]),
-        NodeView::Sequence(first, second) => {
-            Sexp::list(vec![Sexp::atom("Lsequence"), child(first), child(second)])
-        }
-        NodeView::While(cond, body) => {
-            Sexp::list(vec![Sexp::atom("Lwhile"), child(cond), child(body)])
-        }
-        NodeView::For(id, start, end, direction, body) => Sexp::list(vec![
-            Sexp::atom("Lfor"),
-            ident(id),
-            child(start),
-            child(end),
-            direction_flag(&direction),
-            child(body),
-        ]),
-        NodeView::ForOf(..) => Sexp::list(vec![Sexp::atom("Lfor_of")]),
-        NodeView::ForAwaitOf(..) => Sexp::list(vec![Sexp::atom("Lfor_await_of")]),
-        NodeView::Break => Sexp::list(vec![Sexp::atom("Lbreak")]),
-        NodeView::Continue => Sexp::list(vec![Sexp::atom("Lcontinue")]),
-        NodeView::Assign(id, value) => {
-            Sexp::list(vec![Sexp::atom("Lassign"), ident(id), child(value)])
-        }
-    }
-}
-
-pub(crate) fn print_indexed_node(
-    store: &crate::lambda::indexed::IndexedLambda,
-    node: crate::lambda::indexed::NodeId,
-    with_locs: bool,
-    out: &mut impl Write,
-) -> std::io::Result<()> {
-    writeln!(out, "{}", indexed_lambda(store, node, with_locs))
-}
-
-pub(crate) fn print_indexed_context(
-    context: &crate::lambda::indexed::IndexedLambdaContext,
-    with_locs: bool,
-    out: &mut impl Write,
-) -> std::io::Result<()> {
-    print_indexed_node(context.store(), context.current_root(), with_locs, out)
-}
-
 /// Print lambda as sexp (without locations)
 pub fn print_lambda(lam: &Lambda, out: &mut impl Write) -> std::io::Result<()> {
     let sexp = lambda(lam, false);
@@ -1023,23 +837,6 @@ mod tests {
             Sexp::list(vec![]),
         ]);
         assert_eq!(sexp.to_string(), "(a\n  (b\n    c)\n  ((d\n    e))\n  ())");
-    }
-
-    #[test]
-    fn indexed_printer_matches_recursive_output_without_materializing_for_print() {
-        let id = crate::ident::Ident::new("value", 7, crate::ident::IdentFlags::GLOBAL);
-        let location = LamLoc::for_test(31);
-        let lambda = crate::lambda::Lambda::prim(
-            crate::lambda::Primitive::Pidentity,
-            vec![crate::lambda::Lambda::var(id)],
-            location,
-        );
-        let context = crate::lambda::indexed::IndexedLambdaContext::from_lambda(lambda.clone(), []);
-        let mut indexed = Vec::new();
-        super::print_indexed_context(&context, true, &mut indexed).unwrap();
-        let mut recursive = Vec::new();
-        super::print_lambda_with_locs(&lambda, &mut recursive).unwrap();
-        assert_eq!(indexed, recursive);
     }
 
     #[test]

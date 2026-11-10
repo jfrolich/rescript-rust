@@ -4,49 +4,54 @@
 use crate::fast_hash::{AHashMap as HashMap, AHashSet as HashSet};
 
 use crate::ident::Ident;
-use crate::lambda::Lambda;
+use crate::lambda::arena::{Lam, LamArena, Node};
 use crate::lambda::lam_compat::LetKind;
-use crate::lambda::lambda_traverse::{Mapped, shallow_map_sharing};
 
 fn resolve(tbl: &HashMap<Ident, Ident>, id: &Ident) -> Ident {
     let mut id = id;
     while let Some(next) = tbl.get(id) {
         id = next;
     }
-    id.clone()
+    *id
 }
 
 /// `Lam_pass_collapse_var_aliases.collapse ~exports lam`.
-pub fn collapse(lam: Lambda, exports: &HashSet<Ident>) -> Lambda {
+pub fn collapse(a: &mut LamArena, lam: Lam, exports: &HashSet<Ident>) -> Lam {
     let mut tbl = HashMap::new();
-    go(lam, exports, &mut tbl).0
+    go(a, lam, exports, &mut tbl)
 }
 
-fn go(lam: Lambda, exports: &HashSet<Ident>, tbl: &mut HashMap<Ident, Ident>) -> Mapped {
-    match lam {
-        Lambda::Lvar(x) => {
+fn go(
+    a: &mut LamArena,
+    lam: Lam,
+    exports: &HashSet<Ident>,
+    tbl: &mut HashMap<Ident, Ident>,
+) -> Lam {
+    match a.node(lam) {
+        Node::Var(x) => {
+            let x = a.ident(x);
             let resolved = resolve(tbl, &x);
-            if resolved == x {
-                (Lambda::Lvar(x), false)
-            } else {
-                (Lambda::var(resolved), true)
-            }
+            if resolved == x { lam } else { a.var(resolved) }
         }
-        Lambda::Llet(LetKind::Alias, id, value, body) if matches!(*value, Lambda::Lvar(_)) => {
-            let Lambda::Lvar(u) = *value else {
-                unreachable!()
-            };
-            let u = resolve(tbl, &u);
-            tbl.insert(id.clone(), u.clone());
+        Node::Let {
+            kind: LetKind::Alias,
+            id,
+            value,
+            body,
+        } if matches!(a.node(value), Node::Var(_)) => {
+            let id = a.ident(id);
+            let u = resolve(tbl, &a.as_var(value).expect("checked variable"));
+            tbl.insert(id, u);
             // The binding is dropped unless the name is exported, in which
             // case it has to survive under its own name.
+            let body = go(a, body, exports, tbl);
             if exports.contains(&id) {
-                let body = go(*body, exports, tbl).0;
-                (Lambda::let_(LetKind::Alias, id, Lambda::var(u), body), true)
+                let v = a.var(u);
+                a.let_(LetKind::Alias, id, v, body)
             } else {
-                (go(*body, exports, tbl).0, true)
+                body
             }
         }
-        lam => shallow_map_sharing(lam, &mut |child| go(child, exports, tbl)),
+        _ => a.shallow_map(lam, &mut |a, child| go(a, child, exports, tbl)),
     }
 }

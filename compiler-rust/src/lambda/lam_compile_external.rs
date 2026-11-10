@@ -9,7 +9,6 @@ use super::js_exp_make::{
     string_switch_iife,
 };
 use super::lam_compile::{ExternalModuleCacheKey, LambdaCompiler};
-use super::lam_compile_input::{FunctionInput, LambdaInput, LambdaInputView};
 use crate::ident::Ident;
 use crate::js_ir::op::{IdentInfo, ImportAttributes as JsImportAttributes, Kind, PropertyName};
 use crate::js_ir::printer::js_export_name;
@@ -18,12 +17,13 @@ use crate::js_ir::{
     VariableDeclaration, expression_has_no_side_effects,
 };
 use crate::lambda::LamLoc;
+use crate::lambda::TagInfo;
+use crate::lambda::arena::{FuncId, Lam, LamArena, View};
 use crate::lambda::lam_compat::{FieldDbgInfo, LetKind};
 use crate::lambda::lam_primitive::{
     Attr, DeclKind, ExternalDecl, ExternalModuleName, ImportSource, JsxElement, Label, LabelNoname,
     ModuleBindName, ModuleSource, Mutable, ObjParam, Param, Primitive,
 };
-use crate::lambda::{Lambda, TagInfo};
 
 pub(crate) fn external_module_import_attributes(
     module_name: &ExternalModuleName,
@@ -267,31 +267,22 @@ impl LambdaCompiler {
 
     pub(crate) fn compile_eta_wrapped_runtime_alias(
         &self,
-        func: &crate::lambda::LFunction,
+        a: &LamArena,
+        info: FuncId,
+        body: Lam,
     ) -> Option<Expression> {
-        self.compile_eta_wrapped_runtime_alias_input(FunctionInput {
-            arity: func.arity,
-            params: &func.params,
-            body: (&func.body).into(),
-            attr: &func.attr,
-        })
-    }
-
-    pub(crate) fn compile_eta_wrapped_runtime_alias_input(
-        &self,
-        func: FunctionInput<'_>,
-    ) -> Option<Expression> {
+        let func = a.func_payload(info);
         if func.attr.one_unit_arg || func.attr.async_ || func.attr.directive.is_some() {
             return None;
         }
 
-        let LambdaInputView::Prim(primitive, args, _) = func.body.view() else {
-            return None;
-        };
-        if func.params.len() != args.len()
-            || !func.params.iter().zip(args.iter()).all(
-                |(param, arg)| matches!(arg.view(), LambdaInputView::Var(id) if id.same(param)),
-            )
+        let (primitive, args, _) = a.as_prim(body)?;
+        let params = a.params(info);
+        if params.len() != args.len()
+            || !params
+                .iter()
+                .zip(args)
+                .all(|(param, arg)| a.as_var(*arg).is_some_and(|id| id.same(param)))
         {
             return None;
         }
@@ -301,42 +292,36 @@ impl LambdaCompiler {
 
     pub(crate) fn try_compile_identity_module_return_expr(
         &mut self,
-        lam: &Lambda,
-    ) -> Option<Expression> {
-        self.try_compile_identity_module_return_input(lam.into())
-    }
-
-    pub(crate) fn try_compile_identity_module_return_input(
-        &mut self,
-        lam: LambdaInput<'_>,
+        a: &LamArena,
+        lam: Lam,
     ) -> Option<Expression> {
         let mut module_target_var: Option<Ident> = None;
         let mut module_target_global: Option<Ident> = None;
         let mut alias_chain = Vec::new();
         let mut cursor = lam;
 
-        let mut note_target = |target: LambdaInput<'_>| -> Option<()> {
-            match target.view() {
-                LambdaInputView::Var(id) => {
+        let mut note_target = |target: Lam| -> Option<()> {
+            match a.view(target) {
+                View::Var(id) => {
                     if module_target_global.is_some()
                         || module_target_var
                             .as_ref()
-                            .is_some_and(|current| !current.same(id))
+                            .is_some_and(|current| !current.same(&id))
                     {
                         return None;
                     }
-                    module_target_var.get_or_insert(*id);
+                    module_target_var.get_or_insert(id);
                     Some(())
                 }
-                LambdaInputView::GlobalModule(id) => {
+                View::GlobalModule(id) => {
                     if module_target_var.is_some()
                         || module_target_global
                             .as_ref()
-                            .is_some_and(|current_id| !current_id.same(id))
+                            .is_some_and(|current_id| !current_id.same(&id))
                     {
                         return None;
                     }
-                    module_target_global.get_or_insert(*id);
+                    module_target_global.get_or_insert(id);
                     Some(())
                 }
                 _ => None,
@@ -344,26 +329,23 @@ impl LambdaCompiler {
         };
 
         loop {
-            match cursor.view() {
-                LambdaInputView::Let(kind, alias_id, value, body)
+            match a.view(cursor) {
+                View::Let(kind, alias_id, value, body)
                     if matches!(kind, LetKind::Alias | LetKind::Strict | LetKind::StrictOpt) =>
                 {
-                    let LambdaInputView::Prim(primitive, args, _) = value.view() else {
-                        return None;
-                    };
+                    let (primitive, args, _) = a.as_prim(value)?;
                     let Primitive::Pfield(index, FieldDbgInfo::Module { name }) = primitive else {
                         return None;
                     };
                     if args.len() != 1 {
                         return None;
                     }
-                    let target = args.first()?;
-                    note_target(target)?;
+                    note_target(*args.first()?)?;
 
-                    alias_chain.push((*alias_id, *index, name.clone()));
+                    alias_chain.push((alias_id, *index, name.clone()));
                     cursor = body;
                 }
-                LambdaInputView::Prim(primitive, args, _) => {
+                View::Prim(primitive, args, _) => {
                     let Primitive::Pmakeblock(TagInfo::Module(fields), Mutable::Immutable) =
                         primitive
                     else {
@@ -379,11 +361,11 @@ impl LambdaCompiler {
 
                     for (position, arg) in args.iter().enumerate() {
                         let expected_field = &fields[position];
-                        match arg.view() {
-                            LambdaInputView::Var(arg_id) => {
+                        match a.view(*arg) {
+                            View::Var(arg_id) => {
                                 let Some((_, field_index, field_name)) = alias_chain
                                     .iter()
-                                    .find(|(alias_id, _, _)| alias_id.same(arg_id))
+                                    .find(|(alias_id, _, _)| alias_id.same(&arg_id))
                                 else {
                                     return None;
                                 };
@@ -391,7 +373,7 @@ impl LambdaCompiler {
                                     return None;
                                 }
                             }
-                            LambdaInputView::Prim(
+                            View::Prim(
                                 Primitive::Pfield(
                                     field_index,
                                     FieldDbgInfo::Module { name: field_name },
@@ -405,8 +387,7 @@ impl LambdaCompiler {
                                 if args.len() != 1 {
                                     return None;
                                 }
-                                let target = args.first()?;
-                                note_target(target)?;
+                                note_target(*args.first()?)?;
                             }
                             _ => return None,
                         }

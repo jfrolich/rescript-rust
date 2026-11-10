@@ -169,7 +169,7 @@ pub fn format_primitive(p: &Primitive, f: &mut fmt::Formatter<'_>) -> fmt::Resul
         Primitive::PrecordRest(excluded) => {
             write!(f, "record_rest({})", excluded.join(", "))
         }
-        Primitive::PjsCall { prim_name, .. } => write!(f, "{prim_name}[js]"),
+        Primitive::PjsCall(call) => write!(f, "{}[js]", call.prim_name),
         Primitive::Pjsx(jsx) => write!(f, "{}[jsx]", jsx.jsx_name),
         Primitive::PjsObjectCreate(_) => write!(f, "[js.obj]"),
         Primitive::Praise => write!(f, "raise"),
@@ -562,11 +562,13 @@ fn format_raw_tag_info(tag_info: &TagInfo, f: &mut fmt::Formatter<'_>) -> fmt::R
         TagInfo::Extension => write!(f, "ext"),
         TagInfo::RecordExt { fields, .. } => write!(f, "[{}]", fields.join(";")),
         TagInfo::Tuple => write!(f, "tuple"),
-        TagInfo::Constructor {
-            name, num_nonconst, ..
-        } => write!(f, "{name}/{num_nonconst}"),
+        TagInfo::Constructor(c) => {
+            let (name, num_nonconst) = (&c.name, c.num_nonconst);
+            write!(f, "{name}/{num_nonconst}")
+        }
         TagInfo::PolyVar(name) => write!(f, "`{name}"),
-        TagInfo::Record { fields, .. } | TagInfo::RecordInlined { fields, .. } => {
+        TagInfo::Record(_) | TagInfo::RecordInlined(_) => {
+            let fields = tag_info.record_fields().expect("record block");
             let field_names: Vec<&str> = fields.iter().map(|(name, _)| name.as_str()).collect();
             write!(f, "[{}]", field_names.join(";"))
         }
@@ -595,7 +597,7 @@ fn format_raw_field_info(field_info: &FieldDbgInfo, f: &mut fmt::Formatter<'_>) 
 
 fn format_raw_primitive(p: &Primitive, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     match p {
-        Primitive::PjsCall { prim_name, .. } => write!(f, "{prim_name}"),
+        Primitive::PjsCall(call) => write!(f, "{}", call.prim_name),
         Primitive::PjsFnMethod => write!(f, "#fn_method"),
         Primitive::Pjscomp(cmp) => write!(f, "{}", format_comparison(*cmp)),
         Primitive::Pstringadd => write!(f, "string.concat"),

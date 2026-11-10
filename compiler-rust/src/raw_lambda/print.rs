@@ -128,14 +128,13 @@ fn print_tag_info<W: Write>(f: &mut Formatter<W>, tag_info: &TagInfo) {
             f.string("]");
         }
         TagInfo::Tuple => f.string("tuple"),
-        TagInfo::Constructor {
-            name, num_nonconst, ..
-        } => f.print(format_args!("{name}/{num_nonconst}")),
+        TagInfo::Constructor(c) => f.print(format_args!("{}/{}", c.name, c.num_nonconst)),
         TagInfo::PolyVar(name) => {
             f.string("`");
             print_internal_utf8(f, name);
         }
-        TagInfo::Record { fields, .. } | TagInfo::RecordInlined { fields, .. } => {
+        TagInfo::Record(_) | TagInfo::RecordInlined(_) => {
+            let fields = tag_info.record_fields().expect("record block");
             let names = fields
                 .iter()
                 .map(|(name, _)| name.as_str())
@@ -190,20 +189,12 @@ fn print_struct_const<W: Write>(f: &mut Formatter<W>, cst: &Constant) {
             }
         }
         Constant::Pointer(name) => print_internal_utf8(f, name),
-        Constant::Block { tag_info, elements } if elements.is_empty() => match &**tag_info {
-            TagInfo::Constructor { name, .. } | TagInfo::RecordInlined { name, .. } => {
-                f.print(format_args!("[{name}]"))
-            }
-            _ => f.print(format_args!("[{}]", tag_info.tag_label())),
-        },
+        Constant::Block { tag_info, elements } if elements.is_empty() => {
+            f.print(format_args!("[{}]", tag_info.tag_label()))
+        }
         Constant::Block { tag_info, elements } => {
             f.open_box(BoxKind::Box, 1);
-            match &**tag_info {
-                TagInfo::Constructor { name, .. } | TagInfo::RecordInlined { name, .. } => {
-                    f.print(format_args!("[{name}:"))
-                }
-                _ => f.print(format_args!("[{}:", tag_info.tag_label())),
-            }
+            f.print(format_args!("[{}:", tag_info.tag_label()));
             f.space();
             f.open_box(BoxKind::HOV, 0);
             if let Some((first, rest)) = elements.split_first() {
@@ -229,7 +220,7 @@ fn print_struct_const<W: Write>(f: &mut Formatter<W>, cst: &Constant) {
 
 fn print_primitive<W: Write>(f: &mut Formatter<W>, prim: &Primitive) {
     match prim {
-        Primitive::PjsCall { prim_name, .. } => f.string(prim_name),
+        Primitive::PjsCall(call) => f.string(&call.prim_name),
         Primitive::PrawJsCode(info) => {
             if info.is_stmt {
                 f.string("#raw_stmt");

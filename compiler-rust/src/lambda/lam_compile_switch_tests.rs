@@ -5,7 +5,7 @@ use crate::lambda::LamLoc;
 fn named_variant_switch_expressions_split_const_and_block_dispatch() {
     let mut compiler = LambdaCompiler::new();
     let scrutinee = Ident::create_local("scrutinee");
-    let compiled = compiler.compile_expr(&Lambda::Lswitch(
+    let compiled = compiler.compile_expr_tree(&Lambda::Lswitch(
         Box::new(Lambda::var(scrutinee)),
         Box::new(LambdaSwitch {
             sw_consts_full: false,
@@ -69,7 +69,7 @@ fn named_variant_switch_expressions_split_const_and_block_dispatch() {
 #[test]
 fn named_variant_constant_return_switch_skips_redundant_match_temp() {
     let mut compiler = LambdaCompiler::new();
-    let block = compiler.compile_return_block(&Lambda::Lswitch(
+    let block = compiler.compile_return_block_tree(&Lambda::Lswitch(
         Box::new(Lambda::const_(Constant::int(2))),
         Box::new(LambdaSwitch {
             sw_consts_full: true,
@@ -137,7 +137,7 @@ fn named_variant_constant_return_switch_skips_redundant_match_temp() {
 fn named_variant_return_switches_with_only_payload_cases_skip_object_split() {
     let mut compiler = LambdaCompiler::new();
     let action = Ident::create_local("action");
-    let block = compiler.compile_return_block(&Lambda::Lswitch(
+    let block = compiler.compile_return_block_tree(&Lambda::Lswitch(
         Box::new(Lambda::var(action)),
         Box::new(LambdaSwitch {
             sw_consts_full: true,
@@ -212,7 +212,7 @@ fn named_variant_mixed_const_and_identical_payload_return_cases_drop_redundant_t
         ],
         LamLoc::NONE,
     );
-    let block = compiler.compile_return_block(&Lambda::Lswitch(
+    let block = compiler.compile_return_block_tree(&Lambda::Lswitch(
         Box::new(Lambda::var(state)),
         Box::new(LambdaSwitch {
             sw_consts_full: true,
@@ -283,7 +283,7 @@ fn named_variant_mixed_const_and_identical_payload_return_cases_drop_redundant_t
 fn named_variant_incomplete_payload_only_return_switches_keep_default_as_negated_guard() {
     let mut compiler = LambdaCompiler::new();
     let action = Ident::create_local("action");
-    let block = compiler.compile_return_block(&Lambda::Lswitch(
+    let block = compiler.compile_return_block_tree(&Lambda::Lswitch(
         Box::new(Lambda::var(action)),
         Box::new(LambdaSwitch {
             sw_consts_full: false,
@@ -326,7 +326,7 @@ fn named_variant_incomplete_payload_only_return_switches_keep_default_as_negated
 fn named_variant_incomplete_const_only_return_switches_keep_literal_guard() {
     let mut compiler = LambdaCompiler::new();
     let action = Ident::create_local("action");
-    let block = compiler.compile_return_block(&Lambda::Lswitch(
+    let block = compiler.compile_return_block_tree(&Lambda::Lswitch(
         Box::new(Lambda::var(action)),
         Box::new(LambdaSwitch {
             sw_consts_full: false,
@@ -366,7 +366,7 @@ fn named_variant_incomplete_const_only_return_switches_keep_literal_guard() {
 fn named_variant_return_switches_keep_default_only_const_side_inside_outer_else_like_typeof_test() {
     let mut compiler = LambdaCompiler::new();
     let action = Ident::create_local("action");
-    let block = compiler.compile_named_variant_switch_return_statements(
+    let block = compiler.compile_named_variant_switch_return_statements_tree(
         Expression::var(action),
         &LambdaSwitch {
             sw_consts_full: false,
@@ -575,7 +575,7 @@ fn named_variant_return_switches_keep_default_only_const_side_inside_outer_else_
 fn named_variant_return_switches_keep_shared_final_groups_inside_the_switch_without_exits() {
     let mut compiler = LambdaCompiler::new();
     let action = Ident::create_local("action");
-    let block = compiler.compile_return_block(&Lambda::Lswitch(
+    let block = compiler.compile_return_block_tree(&Lambda::Lswitch(
         Box::new(Lambda::var(action)),
         Box::new(LambdaSwitch {
             sw_consts_full: true,
@@ -671,7 +671,7 @@ fn builtin_untagged_block_switch_expressions_dispatch_on_object_runtime_shape() 
     let mut compiler = LambdaCompiler::new();
     let value = Ident::create_local("value");
     let body_id = Ident::create_local("body");
-    let compiled = compiler.compile_expr(&Lambda::Lswitch(
+    let compiled = compiler.compile_expr_tree(&Lambda::Lswitch(
         Box::new(Lambda::var(value)),
         Box::new(LambdaSwitch {
             sw_consts_full: false,
@@ -761,7 +761,7 @@ fn builtin_untagged_block_switch_expressions_dispatch_on_object_runtime_shape() 
 fn small_untagged_object_value_switches_keep_ocaml_runtime_guards() {
     let mut compiler = LambdaCompiler::new();
     let value = Ident::create_local("value");
-    let compiled = compiler.compile_expr(&Lambda::Lswitch(
+    let compiled = compiler.compile_expr_tree(&Lambda::Lswitch(
         Box::new(Lambda::var(value)),
         Box::new(LambdaSwitch {
             sw_consts_full: false,
@@ -809,7 +809,7 @@ fn complete_single_untagged_array_value_branch_skips_redundant_instance_guard() 
     let mut compiler = LambdaCompiler::new();
     let value = Ident::create_local("value");
     let result = Ident::create_local("result");
-    let block = compiler.compile_untagged_variant_switch_assignment_statements(
+    let block = compiler.compile_untagged_variant_switch_assignment_statements_tree(
         &result,
         Expression::var(value),
         &single_complete_array_block_switch(
@@ -847,7 +847,7 @@ fn complete_single_untagged_array_value_branch_skips_redundant_instance_guard() 
 fn complete_single_untagged_array_return_branch_skips_redundant_instance_guard() {
     let mut compiler = LambdaCompiler::new();
     let value = Ident::create_local("value");
-    let block = compiler.compile_untagged_variant_switch_return_statements(
+    let block = compiler.compile_untagged_variant_switch_return_statements_tree(
         Expression::var(value),
         &single_complete_array_block_switch(
             Lambda::const_(Constant::int(1)),
@@ -876,7 +876,7 @@ fn complete_single_untagged_array_effect_branch_skips_redundant_instance_guard()
     let value = Ident::create_local("value");
     let empty_seen = Ident::create_local("empty_seen");
     let cons_seen = Ident::create_local("cons_seen");
-    let block = compiler.compile_untagged_variant_switch_effect_statements(
+    let block = compiler.compile_untagged_variant_switch_effect_statements_tree(
         Expression::var(value),
         &single_complete_array_block_switch(
             Lambda::Lassign(cons_seen, Box::new(Lambda::const_(Constant::int(1)))),
@@ -904,7 +904,7 @@ fn default_only_untagged_boolean_assignment_skips_literal_dispatch_when_defaults
     let mut compiler = LambdaCompiler::new();
     let value = Ident::create_local("value");
     let result = Ident::create_local("result");
-    let block = compiler.compile_untagged_variant_switch_assignment_statements(
+    let block = compiler.compile_untagged_variant_switch_assignment_statements_tree(
         &result,
         Expression::var(value),
         &default_only_untagged_boolean_switch(
@@ -942,7 +942,7 @@ fn default_only_untagged_boolean_assignment_skips_literal_dispatch_when_defaults
 fn default_only_untagged_boolean_return_skips_literal_dispatch_when_defaults_match() {
     let mut compiler = LambdaCompiler::new();
     let value = Ident::create_local("value");
-    let block = compiler.compile_untagged_variant_switch_return_statements(
+    let block = compiler.compile_untagged_variant_switch_return_statements_tree(
         Expression::var(value),
         &default_only_untagged_boolean_switch(
             Lambda::const_(Constant::int(1)),
@@ -970,7 +970,7 @@ fn default_only_untagged_object_return_keeps_literal_default_branch_outside_obje
     let mut compiler = LambdaCompiler::new();
     let value = Ident::create_local("value");
     let body_id = Ident::create_local("body");
-    let block = compiler.compile_untagged_variant_switch_return_statements(
+    let block = compiler.compile_untagged_variant_switch_return_statements_tree(
         Expression::var(value),
         &LambdaSwitch {
             sw_consts_full: false,

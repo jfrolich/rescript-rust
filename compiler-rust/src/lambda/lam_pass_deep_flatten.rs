@@ -1,522 +1,235 @@
-//! Direct port of `compiler/core/lam_pass_deep_flatten.ml`.
+//! `Lam_pass_deep_flatten.deep_flatten` over the Lambda arena.
 //!
-//! Flattens nested `Llet` chains and pulls projected tuple/record fields out
-//! of named module-block bindings so downstream passes see a flat sequence of
-//! single bindings. Mirrors `Lam_pass_deep_flatten.deep_flatten`.
+//! Flattens nested `let` chains and pulls the fields of named immutable
+//! blocks out into single bindings.
 
-use crate::lambda::LamLoc;
-use crate::lambda::map_box;
 use ahash::AHashMap as HashMap;
 
 use crate::context::IdGenerator;
 use crate::ident::Ident;
+use crate::lambda::LamLoc;
+use crate::lambda::arena::{IdentId, Lam, LamArena, LamList, Node};
 use crate::lambda::lam_compat::LetKind;
 use crate::lambda::lam_hit::hit_variable;
 use crate::lambda::lam_primitive::{Mutable, Primitive};
-use crate::lambda::lam_util::refine_let;
-use crate::lambda::{Lambda, PrimInfo};
+use crate::lambda::lam_util::{refine_let, refine_let_original};
 
-enum FlattenGroup {
-    Single(LetKind, Ident, Lambda),
-    Recursive(Vec<(Ident, Lambda)>),
-    Nop(Lambda),
+enum Group {
+    Single(LetKind, Ident, Lam),
+    Recursive(IdentId, LamList),
+    Nop(Lam),
 }
 
-/// Test-only entry point that derives a stamp counter from the tree. Real
-/// callers must share the compilation's counter via
-/// [`deep_flatten_owned_with_id_gen`].
-#[cfg(test)]
-fn deep_flatten_owned(lam: Lambda) -> Lambda {
-    let id_gen = IdGenerator::with_start_stamp(
-        crate::lambda::lam_beta_reduce::max_ident_stamp_in_lambda(&lam),
-    );
-    deep_flatten_owned_with_id_gen(lam, &id_gen)
+/// `Lam_pass_deep_flatten.deep_flatten`
+/// (compiler/core/lam_pass_deep_flatten.ml:96-266), with the caller's
+/// `Ident.currentstamp`.
+pub fn deep_flatten(a: &mut LamArena, lam: Lam, id_gen: &IdGenerator) -> Lam {
+    aux(a, lam, id_gen)
 }
 
-/// Direct port of `Lam_pass_deep_flatten.deep_flatten`
-/// (compiler/core/lam_pass_deep_flatten.ml:96-266), using the caller's
-/// OCaml-style `Ident.currentstamp`.
-pub fn deep_flatten_owned_with_id_gen(lam: Lambda, id_gen: &IdGenerator) -> Lambda {
-    fn lambda_of_groups(bindings: Vec<FlattenGroup>, result: Lambda) -> Lambda {
-        // lam_pass_deep_flatten.ml:108 — fold each Single back through
-        // `Lam_util.refine_let` so Strict bindings whose RHS is safe to alias
-        // (e.g. module field reads) are downgraded to Alias. Without this the
-        // later `simplify_lets` Alias arm cannot inline single-use bindings.
-        // OCaml prepends groups while scanning and then folds left over the
-        // reversed list (compiler/core/lam_pass_deep_flatten.ml:108,126-145).
-        // Keep the observed order but store groups chronologically so long
-        // top-level chains do not repeatedly copy the accumulator.
-        bindings
-            .into_iter()
-            .rev()
-            .fold(result, |acc, group| match group {
-                FlattenGroup::Single(kind, ident, lam) => refine_let(kind, ident, lam, acc),
-                FlattenGroup::Recursive(bindings) => Lambda::letrec(bindings, acc),
-                FlattenGroup::Nop(lam) => Lambda::seq(lam, acc),
-            })
-    }
+/// lam_pass_deep_flatten.ml:108: fold the groups back through
+/// `Lam_util.refine_let`, last group innermost.
+fn lambda_of_groups(a: &mut LamArena, groups: Vec<Group>, result: Lam) -> Lam {
+    groups
+        .into_iter()
+        .rev()
+        .fold(result, |acc, group| match group {
+            Group::Single(kind, id, lam) => refine_let(a, kind, id, lam, acc),
+            Group::Recursive(ids, values) => a.letrec_with(ids, values, acc),
+            Group::Nop(lam) => a.seq(lam, acc),
+        })
+}
 
-    fn can_eliminate_tuple<'a>(
-        id: &Ident,
-        lam: &'a Lambda,
-        mut tuple_mapping: HashMap<i32, Ident>,
-    ) -> Option<(HashMap<i32, Ident>, &'a Lambda)> {
-        if let Lambda::Llet(LetKind::Alias, projected, value, body) = lam
-            && let Lambda::Lprim(prim) = value.as_ref()
-            && let (Primitive::Pfield(index, _), [Lambda::Lvar(tuple)]) =
-                (&prim.primitive, prim.args.as_slice())
-            && tuple.same(id)
+/// `let projected = Pfield(i, tuple)` chains at the head of `lam`, if `id`
+/// occurs nowhere after them (lam_pass_deep_flatten.ml:31-34).
+fn eliminate_tuple(a: &LamArena, id: &Ident, mut lam: Lam) -> Option<(HashMap<i32, Ident>, Lam)> {
+    let mut mapping = HashMap::new();
+    loop {
+        if let Node::Let {
+            kind: LetKind::Alias,
+            id: projected,
+            value,
+            body,
+        } = a.node(lam)
+            && let Some((Primitive::Pfield(index, _), [tuple], _)) = a.as_prim(value)
+            && a.as_var(*tuple).is_some_and(|t| t.same(id))
         {
-            tuple_mapping.insert(*index, *projected);
-            return can_eliminate_tuple(id, body, tuple_mapping);
+            mapping.insert(*index, a.ident(projected));
+            lam = body;
+            continue;
         }
-        if hit_variable(id, lam) {
+        return if hit_variable(a, id, lam) {
             None
         } else {
-            Some((tuple_mapping, lam))
-        }
+            Some((mapping, lam))
+        };
     }
+}
 
-    fn strip_tuple_owned(
-        id: &Ident,
-        lam: Lambda,
-        tuple_mapping: HashMap<i32, Ident>,
-    ) -> (HashMap<i32, Ident>, Lambda) {
-        match lam {
-            Lambda::Llet(LetKind::Alias, projected, value, body) => match *value {
-                Lambda::Lprim(__prim1)
-                    if matches!(__prim1.as_ref(), PrimInfo {
-                    primitive: Primitive::Pfield(index, _),
-                    args,
-                    loc: _,
-                } if matches!(args.as_slice(), [Lambda::Lvar(tuple)] if tuple.same(id))) =>
-                {
-                    let PrimInfo {
-                        primitive: Primitive::Pfield(index, _),
-                        args: _,
-                        loc: _,
-                    } = *__prim1
-                    else {
-                        unreachable!()
-                    };
-
-                    let mut tuple_mapping = tuple_mapping;
-                    tuple_mapping.insert(index, projected);
-                    strip_tuple_owned(id, *body, tuple_mapping)
-                }
-                value => {
-                    let lam = Lambda::Llet(LetKind::Alias, projected, Box::new(value), body);
-                    (tuple_mapping, lam)
-                }
-            },
-            _ => (tuple_mapping, lam),
+/// `let x = <immutable block or variable> in ... in apply f args`: the
+/// residue of beta-reducing an immediately applied function.
+fn rhs_is_beta_residue(a: &LamArena, lam: Lam) -> bool {
+    match a.node(lam) {
+        Node::Let {
+            kind: LetKind::Alias | LetKind::Strict | LetKind::StrictOpt,
+            value,
+            body,
+            ..
+        } if matches!(
+            a.as_prim(value),
+            Some((Primitive::Pmakeblock(_, Mutable::Immutable), _, _))
+        ) || matches!(a.node(value), Node::Var(_)) =>
+        {
+            rhs_is_beta_residue(a, body)
         }
+        Node::Apply { .. } => true,
+        _ => false,
     }
+}
 
-    // The shape `let x = <immutable block> in ... in apply f args` is the
-    // residue left by beta reduction of an immediately applied function.
-    fn rhs_is_beta_residue(lam: &Lambda) -> bool {
-        match lam {
-            Lambda::Llet(LetKind::Alias | LetKind::Strict | LetKind::StrictOpt, _, value, rest)
-                if matches!(
-                    value.as_ref(),
-                    Lambda::Lprim(prim)
-                        if matches!(prim.primitive, Primitive::Pmakeblock(_, Mutable::Immutable))
-                ) || matches!(value.as_ref(), Lambda::Lvar(_)) =>
-            {
-                rhs_is_beta_residue(rest)
+/// lam_pass_deep_flatten.ml `regroups_binding`: whether `flatten`
+/// restructures this binding.
+fn regroups_binding(a: &LamArena, kind: LetKind, id: &Ident, arg: Lam) -> bool {
+    if rhs_is_beta_residue(a, arg) {
+        return false;
+    }
+    match a.node(arg) {
+        Node::Let { .. } | Node::Sequence(..) | Node::LetRec { .. } => true,
+        Node::Prim { .. } => match a.as_prim(arg).expect("checked primitive") {
+            (Primitive::PnullToOpt | Primitive::PnullUndefinedToOpt, args, _) => {
+                !matches!(args, [x] if matches!(a.node(*x), Node::Var(_)))
             }
-            Lambda::Lapply(_) => true,
-            _ => false,
-        }
-    }
-
-    /// lam_pass_deep_flatten.ml `regroups_binding`: whether `flatten`
-    /// restructures this binding. Every other binding is rebuilt in place.
-    fn regroups_binding(kind: LetKind, id: &Ident, arg: &Lambda) -> bool {
-        if rhs_is_beta_residue(arg) {
-            return false;
-        }
-        match arg {
-            Lambda::Llet(..) | Lambda::Lsequence(..) | Lambda::Lletrec(..) => true,
-            Lambda::Lprim(prim)
-                if matches!(
-                    prim.primitive,
-                    Primitive::PnullToOpt | Primitive::PnullUndefinedToOpt
-                ) =>
-            {
-                !matches!(prim.args.as_slice(), [Lambda::Lvar(_)])
-            }
-            Lambda::Lprim(prim) => {
-                matches!(prim.primitive, Primitive::Pmakeblock(_, Mutable::Immutable))
-                    && matches!(id.name(), "match" | "include" | "param")
+            (Primitive::Pmakeblock(_, Mutable::Immutable), _, _) => {
+                matches!(id.name(), "match" | "include" | "param")
                     && matches!(kind, LetKind::Alias | LetKind::Strict | LetKind::StrictOpt)
             }
             _ => false,
-        }
+        },
+        _ => false,
     }
-
-    fn flatten(acc: &mut Vec<FlattenGroup>, lam: Lambda, id_gen: &IdGenerator) -> Lambda {
-        match lam {
-            Lambda::Llet(kind, id, value, body) if rhs_is_beta_residue(&value) => {
-                // Keep beta-reduction residue local so `Lam_pass_lets_dce`
-                // can substitute its single-use arguments back into the call.
-                acc.push(FlattenGroup::Single(kind, id, aux(*value, id_gen)));
-                flatten(acc, *body, id_gen)
-            }
-            Lambda::Llet(kind, id, value, body) => {
-                let value = match *value {
-                    Lambda::Lprim(__prim0)
-                        if matches!(__prim0.as_ref(), PrimInfo {
-                        primitive,
-                        args,
-                        loc,
-                    } if matches!(
-                        &primitive,
-                        Primitive::PnullToOpt | Primitive::PnullUndefinedToOpt
-                    ) && args.len() == 1) =>
-                    {
-                        let PrimInfo {
-                            primitive,
-                            args,
-                            loc,
-                        } = *__prim0;
-
-                        let mut args = args;
-                        let arg = args.pop().expect("checked args length");
-                        if matches!(arg, Lambda::Lvar(_)) {
-                            let res = aux(
-                                Lambda::Lprim(Box::new(PrimInfo {
-                                    primitive,
-                                    args: vec![arg],
-                                    loc,
-                                })),
-                                id_gen,
-                            );
-                            acc.push(FlattenGroup::Single(kind, id, res));
-                            return flatten(acc, *body, id_gen);
-                        } else {
-                            // lam_pass_deep_flatten.ml:126-141 uses
-                            // `Ident.rename id`; this must share the
-                            // JS-backend stamp source so the temporary cannot
-                            // collide with an existing lambda binder.
-                            let new_id = id.rename(id_gen);
-                            let lowered = Lambda::Llet(
-                                kind,
-                                new_id,
-                                Box::new(arg),
-                                map_box(body, |inner| {
-                                    Lambda::let_(
-                                        LetKind::Alias,
-                                        id,
-                                        Lambda::prim(
-                                            primitive,
-                                            vec![Lambda::var(new_id)],
-                                            LamLoc::NONE,
-                                        ),
-                                        inner,
-                                    )
-                                }),
-                            );
-                            return flatten(acc, lowered, id_gen);
-                        }
-                    }
-                    value => value,
-                };
-
-                let res = flatten(acc, value, id_gen);
-                let flatten_named_module_block = matches!(
-                    (id.name(), kind, &res),
-                    (
-                        "match" | "include" | "param",
-                        LetKind::Alias | LetKind::Strict | LetKind::StrictOpt,
-                        Lambda::Lprim(prim)
-                    ) if matches!(prim.primitive, Primitive::Pmakeblock(_, Mutable::Immutable))
-                );
-                if flatten_named_module_block {
-                    let body = *body;
-                    if can_eliminate_tuple(&id, &body, HashMap::new()).is_some() {
-                        // OCaml's `eliminate_tuple` returns `None` without
-                        // consuming the original body, so the failure arm keeps
-                        // every projection intact (lam_pass_deep_flatten.ml:31-34,
-                        // 141-145). Mirror that in Rust by probing on borrows,
-                        // then doing the owned strip only after success.
-                        let (tuple_mapping, stripped_body) =
-                            strip_tuple_owned(&id, body, HashMap::new());
-                        let Lambda::Lprim(__prim201) = res else {
-                            unreachable!();
-                        };
-                        let PrimInfo { args, .. } = *__prim201;
-                        let mut flattened_args = args
-                            .into_iter()
-                            .enumerate()
-                            .map(|(index, arg)| match tuple_mapping.get(&(index as i32)) {
-                                Some(projected) => FlattenGroup::Single(kind, *projected, arg),
-                                None => FlattenGroup::Nop(arg),
-                            })
-                            .collect::<Vec<_>>();
-                        acc.append(&mut flattened_args);
-                        return flatten(acc, stripped_body, id_gen);
-                    } else {
-                        acc.push(FlattenGroup::Single(kind, id, res));
-                        return flatten(acc, body, id_gen);
-                    }
-                }
-
-                acc.push(FlattenGroup::Single(kind, id, res));
-                flatten(acc, *body, id_gen)
-            }
-            Lambda::Lletrec(bindings, body) => {
-                let bindings = bindings
-                    .into_iter()
-                    .map(|(id, expr)| (id, aux(expr, id_gen)))
-                    .collect();
-                acc.push(FlattenGroup::Recursive(bindings));
-                flatten(acc, *body, id_gen)
-            }
-            Lambda::Lsequence(first, second) => {
-                let res = flatten(acc, *first, id_gen);
-                // `Lam_group.nop_cons` drops pure heads (lam_group.ml:36-39).
-                if !matches!(
-                    res,
-                    Lambda::Lvar(_) | Lambda::Lconst(_) | Lambda::Lfunction(_)
-                ) {
-                    acc.push(FlattenGroup::Nop(res));
-                }
-                flatten(acc, *second, id_gen)
-            }
-            _ => aux(lam, id_gen),
-        }
-    }
-
-    fn aux(lam: Lambda, id_gen: &IdGenerator) -> Lambda {
-        aux_sharing(lam, id_gen).0
-    }
-
-    /// lam_pass_deep_flatten.ml `aux`: `Llet`/`Lletrec` are regrouped, every
-    /// other node goes through `Lambda_traverse.shallow_map_sharing`, which
-    /// rebuilds (through the folding smart constructors such as
-    /// `Lambda.seq`) only when a child changed.
-    fn aux_sharing(lam: Lambda, id_gen: &IdGenerator) -> crate::lambda::lambda_traverse::Mapped {
-        match lam {
-            // `Lam_util.refine_let ~original:lam ~kind:str id (aux arg) (aux body)`;
-            // OCaml evaluates the arguments right to left.
-            Lambda::Llet(kind, id, value, body) if !regroups_binding(kind, &id, &value) => {
-                let (body, body_changed) = aux_sharing(*body, id_gen);
-                let (value, value_changed) = aux_sharing(*value, id_gen);
-                crate::lambda::lam_util::refine_let_original(
-                    kind,
-                    id,
-                    value,
-                    body,
-                    !(value_changed || body_changed),
-                )
-            }
-            Lambda::Llet(_, _, _, _) => {
-                let mut groups = Vec::new();
-                let result = flatten(&mut groups, lam, id_gen);
-                (lambda_of_groups(groups, result), true)
-            }
-            Lambda::Lletrec(bindings, body) => {
-                let mut changed = false;
-                let bindings = bindings
-                    .into_iter()
-                    .map(|(id, expr)| {
-                        let (expr, c) = aux_sharing(expr, id_gen);
-                        changed |= c;
-                        (id, expr)
-                    })
-                    .collect();
-                let (body, c) = aux_sharing(*body, id_gen);
-                (Lambda::Lletrec(bindings, Box::new(body)), changed || c)
-            }
-            lam => crate::lambda::lambda_traverse::shallow_map_sharing(lam, &mut |inner| {
-                aux_sharing(inner, id_gen)
-            }),
-        }
-    }
-
-    aux(lam, id_gen)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::ident::{Ident, IdentFlags};
-    use crate::lambda::lam_compat::FieldDbgInfo;
-    use crate::lambda::{Constant, TagInfo};
-
-    fn ident(name: &str, stamp: i32) -> Ident {
-        Ident::new(name, stamp, IdentFlags::NONE)
-    }
-
-    fn int(value: i32) -> Lambda {
-        Lambda::const_(Constant::int(value))
-    }
-
-    fn tuple(args: Vec<Lambda>) -> Lambda {
-        Lambda::prim(
-            Primitive::Pmakeblock(TagInfo::Tuple, Mutable::Immutable),
-            args,
-            LamLoc::NONE,
-        )
-    }
-
-    fn field(index: i32, id: &Ident) -> Lambda {
-        Lambda::prim(
-            Primitive::Pfield(index, FieldDbgInfo::Tuple),
-            vec![Lambda::var(*id)],
-            LamLoc::NONE,
-        )
-    }
-
-    fn has_binding(lam: &Lambda, target: &Ident) -> bool {
-        match lam {
-            Lambda::Llet(_, id, value, body) => {
-                id.same(target) || has_binding(value, target) || has_binding(body, target)
+fn flatten(a: &mut LamArena, acc: &mut Vec<Group>, mut lam: Lam, id_gen: &IdGenerator) -> Lam {
+    loop {
+        match a.node(lam) {
+            Node::Let {
+                kind,
+                id,
+                value,
+                body,
+            } if rhs_is_beta_residue(a, value) => {
+                // Keep beta-reduction residue local so `Lam_pass_lets_dce`
+                // can substitute its single-use arguments back into the call.
+                let value = aux(a, value, id_gen);
+                acc.push(Group::Single(kind, a.ident(id), value));
+                lam = body;
             }
-            Lambda::Lletrec(bindings, body) => {
-                bindings
-                    .iter()
-                    .any(|(id, lam)| id.same(target) || has_binding(lam, target))
-                    || has_binding(body, target)
+            Node::Let {
+                kind,
+                id: id_ref,
+                value,
+                body,
+            } => {
+                let id = a.ident(id_ref);
+                if let Node::Prim { args, info } = a.node(value)
+                    && matches!(
+                        a.prim_payload(info).primitive,
+                        Primitive::PnullToOpt | Primitive::PnullUndefinedToOpt
+                    )
+                    && let [arg] = a.list(args)
+                {
+                    let arg = *arg;
+                    if matches!(a.node(arg), Node::Var(_)) {
+                        let res = aux(a, value, id_gen);
+                        acc.push(Group::Single(kind, id, res));
+                        lam = body;
+                        continue;
+                    }
+                    // lam_pass_deep_flatten.ml:126-141 uses `Ident.rename id`
+                    // from the shared stamp source.
+                    let new_id = id.rename(id_gen);
+                    let primitive = a.prim_payload(info).primitive.clone();
+                    let v = a.var(new_id);
+                    let wrapped = a.prim(primitive, &[v], LamLoc::NONE);
+                    let inner = a.let_(LetKind::Alias, id, wrapped, body);
+                    lam = a.let_(kind, new_id, arg, inner);
+                    continue;
+                }
+                let res = flatten(a, acc, value, id_gen);
+                let named_module_block = matches!(id.name(), "match" | "include" | "param")
+                    && matches!(kind, LetKind::Alias | LetKind::Strict | LetKind::StrictOpt)
+                    && matches!(
+                        a.as_prim(res),
+                        Some((Primitive::Pmakeblock(_, Mutable::Immutable), _, _))
+                    );
+                if named_module_block
+                    && let Some((mapping, stripped)) = eliminate_tuple(a, &id, body)
+                {
+                    let (_, args, _) = a.as_prim(res).expect("checked block");
+                    for (index, arg) in args.iter().enumerate() {
+                        acc.push(match mapping.get(&(index as i32)) {
+                            Some(projected) => Group::Single(kind, *projected, *arg),
+                            None => Group::Nop(*arg),
+                        });
+                    }
+                    lam = stripped;
+                    continue;
+                }
+                acc.push(Group::Single(kind, id, res));
+                lam = body;
             }
-            Lambda::Lprim(info) => info.args.iter().any(|arg| has_binding(arg, target)),
-            Lambda::Lapply(apply) => {
-                has_binding(&apply.ap_func, target)
-                    || apply.ap_args.iter().any(|arg| has_binding(arg, target))
+            Node::LetRec { ids, values, body } => {
+                let (values, _) = a.map_list(values, &mut |a, x| aux(a, x, id_gen));
+                acc.push(Group::Recursive(ids, values));
+                lam = body;
             }
-            Lambda::Lfunction(func) => has_binding(&func.body, target),
-            Lambda::Lswitch(arg, switch) => {
-                has_binding(arg, target)
-                    || switch
-                        .sw_consts
-                        .iter()
-                        .any(|(_, lam)| has_binding(lam, target))
-                    || switch
-                        .sw_blocks
-                        .iter()
-                        .any(|(_, lam)| has_binding(lam, target))
-                    || switch
-                        .sw_failaction
-                        .as_deref()
-                        .is_some_and(|lam| has_binding(lam, target))
+            Node::Sequence(first, second) => {
+                let res = flatten(a, acc, first, id_gen);
+                // `Lam_group.nop_cons` drops pure heads (lam_group.ml:36-39).
+                if !matches!(
+                    a.node(res),
+                    Node::Var(_) | Node::Const(_) | Node::Function { .. }
+                ) {
+                    acc.push(Group::Nop(res));
+                }
+                lam = second;
             }
-            Lambda::LstringSwitch(arg, cases, default) => {
-                has_binding(arg, target)
-                    || cases.iter().any(|(_, lam)| has_binding(lam, target))
-                    || default
-                        .as_deref()
-                        .is_some_and(|lam| has_binding(lam, target))
-            }
-            Lambda::LstaticRaise(_, args) => args.iter().any(|arg| has_binding(arg, target)),
-            Lambda::LstaticCatch(body, _, handler)
-            | Lambda::LtryWith(body, _, handler)
-            | Lambda::LtryFinally(body, handler) => {
-                has_binding(body, target) || has_binding(handler, target)
-            }
-            Lambda::LifThenElse(cond, then_, else_) => {
-                has_binding(cond, target)
-                    || has_binding(then_, target)
-                    || has_binding(else_, target)
-            }
-            Lambda::Lsequence(first, second) | Lambda::Lwhile(first, second) => {
-                has_binding(first, target) || has_binding(second, target)
-            }
-            Lambda::Lfor(_, start, end, _, body) => {
-                has_binding(start, target) || has_binding(end, target) || has_binding(body, target)
-            }
-            Lambda::Lfor_of(_, iterable, body) | Lambda::Lfor_await_of(_, iterable, body) => {
-                has_binding(iterable, target) || has_binding(body, target)
-            }
-            Lambda::Lassign(_, value) => has_binding(value, target),
-            Lambda::Lvar(_)
-            | Lambda::LglobalModule(_)
-            | Lambda::Lconst(_)
-            | Lambda::Lbreak
-            | Lambda::Lcontinue => false,
+            _ => return aux(a, lam, id_gen),
         }
     }
+}
 
-    #[test]
-    fn bailout_keeps_interleaved_projection_bindings() {
-        let tuple_id = ident("match", 1);
-        let right = ident("match", 2);
-        let y1 = ident("y1", 3);
-        let x1 = ident("x1", 4);
-        let left = ident("match", 5);
-        let y0 = ident("y0", 6);
-        let x0 = ident("x0", 7);
-
-        let result = tuple(vec![
-            Lambda::var(x1),
-            Lambda::var(y1),
-            Lambda::var(x0),
-            Lambda::var(y0),
-        ]);
-        let body = Lambda::let_(LetKind::Alias, x0, field(0, &left), result);
-        let body = Lambda::let_(LetKind::Alias, y0, field(1, &left), body);
-        let body = Lambda::let_(LetKind::Alias, left, field(0, &tuple_id), body);
-        let body = Lambda::let_(LetKind::Alias, x1, field(0, &right), body);
-        let body = Lambda::let_(LetKind::Alias, y1, field(1, &right), body);
-        let body = Lambda::let_(LetKind::Alias, right, field(1, &tuple_id), body);
-
-        let lam = Lambda::let_(
-            LetKind::Strict,
-            tuple_id,
-            tuple(vec![
-                tuple(vec![int(1), int(2)]),
-                tuple(vec![int(3), int(4)]),
-            ]),
+/// lam_pass_deep_flatten.ml `aux`: `let`/`let rec` are regrouped, every other
+/// node goes through `shallow_map_sharing`.
+fn aux(a: &mut LamArena, lam: Lam, id_gen: &IdGenerator) -> Lam {
+    match a.node(lam) {
+        // `Lam_util.refine_let ~original:lam ~kind:str id (aux arg) (aux body)`;
+        // OCaml evaluates the arguments right to left.
+        Node::Let {
+            kind,
+            id,
+            value,
             body,
-        );
-
-        let flattened = deep_flatten_owned(lam);
-
-        // OCaml leaves the original body untouched when `eliminate_tuple`
-        // returns `None` (compiler/core/lam_pass_deep_flatten.ml:31-34,
-        // 141-145). Interleaved projections must therefore keep the first
-        // projection binding instead of stripping it and leaving free uses.
-        assert!(has_binding(&flattened, &right));
-    }
-
-    #[test]
-    #[ignore = "stale internal shape expectation; covered by strict lambda/JS parity gates"]
-    fn nullable_wrapper_split_renames_from_shared_stamp_source() {
-        let wrapped = ident("popoverButton", 2000);
-        let id_gen = IdGenerator::with_start_stamp(3000);
-        let lam = Lambda::let_(
-            LetKind::Strict,
-            wrapped,
-            Lambda::prim(
-                Primitive::PnullUndefinedToOpt,
-                vec![Lambda::const_(Constant::JsNull)],
-                LamLoc::NONE,
-            ),
-            Lambda::var(wrapped),
-        );
-
-        let flattened = deep_flatten_owned_with_id_gen(lam, &id_gen);
-
-        // OCaml splits nullable wrappers with `Ident.rename id`
-        // (compiler/core/lam_pass_deep_flatten.ml:126-141), so the
-        // intermediate keeps the source name but receives the next stamp from
-        // the caller's currentstamp sequence.
-        let Lambda::Llet(_, split_id, _, split_body) = flattened else {
-            panic!("expected split binding");
-        };
-        assert_eq!(split_id.name(), wrapped.name());
-        assert_eq!(split_id.stamp(), 3001);
-        assert!(!split_id.same(&wrapped));
-
-        let Lambda::Llet(_, alias_id, alias_value, _) = *split_body else {
-            panic!("expected wrapper alias binding");
-        };
-        assert!(alias_id.same(&wrapped));
-        let Lambda::Lprim(__prim200) = *alias_value else {
-            panic!("expected nullable wrapper alias");
-        };
-        let PrimInfo { args, .. } = *__prim200;
-        assert!(matches!(args.as_slice(), [Lambda::Lvar(id)] if id.same(&split_id)));
+        } if !regroups_binding(a, kind, &a.ident(id), value) => {
+            let body = aux(a, body, id_gen);
+            let value = aux(a, value, id_gen);
+            let id = a.ident(id);
+            refine_let_original(a, lam, kind, id, value, body)
+        }
+        Node::Let { .. } => {
+            let mut groups = Vec::new();
+            let result = flatten(a, &mut groups, lam, id_gen);
+            lambda_of_groups(a, groups, result)
+        }
+        Node::LetRec { ids, values, body } => {
+            let (nvalues, changed) = a.map_list(values, &mut |a, x| aux(a, x, id_gen));
+            let nbody = aux(a, body, id_gen);
+            if !changed && nbody == body {
+                lam
+            } else {
+                a.letrec_with(ids, nvalues, nbody)
+            }
+        }
+        _ => a.shallow_map(lam, &mut |a, x| aux(a, x, id_gen)),
     }
 }

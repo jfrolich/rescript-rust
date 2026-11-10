@@ -13,7 +13,7 @@ use crate::js_ir::{
     BinOp, Block, Expression, ExpressionDesc, ObjectEntry, Statement, StatementDesc, VIdent,
     VariableDeclaration,
 };
-use crate::lambda::Lambda;
+use crate::lambda::arena::{Lam, LamArena};
 use crate::lambda::lam_compat::LetKind;
 use ahash::AHashSet;
 
@@ -254,15 +254,16 @@ impl LambdaCompiler {
     /// lam_compile.ml `compile_arguments`: compiles the arguments of a call
     /// or literal (`Ext_list.map`, left to right, in `NeedValue Not_tail`),
     /// then orders them with `sequence_arguments`.
-    pub(crate) fn compile_arguments<'a>(
+    pub(crate) fn compile_arguments(
         &mut self,
+        a: &mut LamArena,
         method_callee: bool,
-        args: impl IntoIterator<Item = &'a Lambda>,
+        args: impl IntoIterator<Item = Lam>,
     ) -> (Block, Vec<Expression>) {
         let compiled = args
             .into_iter()
             .map(|arg| {
-                let compiled = self.compile_expr(arg);
+                let compiled = self.compile_expr(a, arg);
                 (compiled.prelude, compiled.expr)
             })
             .collect();
@@ -273,9 +274,9 @@ impl LambdaCompiler {
     /// already in it, and returns them so the caller can drop them again.
     /// lam_compile.ml scopes the union to the inlined body
     /// (`compile_lambda {lambda_cxt with meta} inlined`).
-    pub(crate) fn extend_assignable(&mut self, lam: &Lambda) -> Vec<Ident> {
+    pub(crate) fn extend_assignable(&mut self, a: &LamArena, lam: Lam) -> Vec<Ident> {
         let mut added = Vec::new();
-        for id in crate::lambda::lambda_traverse::assigned_variables(lam) {
+        for id in crate::lambda::lambda_traverse::arena_assigned_variables(a, lam) {
             if self.assignable.insert(id) {
                 added.push(id);
             }
@@ -294,6 +295,7 @@ impl LambdaCompiler {
 mod tests {
     use super::*;
     use crate::js_ir::CallInfo;
+    use crate::lambda::Lambda;
 
     fn var(id: Ident) -> Expression {
         Expression::var(id)
@@ -495,7 +497,9 @@ mod tests {
         let mut compiler = LambdaCompiler::new();
         let r = compiler.fresh_ident("r");
         assert!(delay_safe(&compiler.assignable, &var(r)));
-        let added = compiler.extend_assignable(&Lambda::seq(unit_assign(r), Lambda::var(r)));
+        let mut arena = LamArena::new();
+        let lam = arena.import(&Lambda::seq(unit_assign(r), Lambda::var(r)));
+        let added = compiler.extend_assignable(&arena, lam);
         assert_eq!(added, vec![r]);
         assert!(!delay_safe(&compiler.assignable, &var(r)));
         let (held, value) = compiler.evaluate_now(var(r));
@@ -529,8 +533,9 @@ mod tests {
         compiler.assignable.insert(module_var);
         let original = assignable_names(&compiler);
 
-        let outer =
-            compiler.extend_assignable(&Lambda::seq(unit_assign(module_var), unit_assign(a)));
+        let mut arena = LamArena::new();
+        let outer_body = arena.import(&Lambda::seq(unit_assign(module_var), unit_assign(a)));
+        let outer = compiler.extend_assignable(&arena, outer_body);
         assert_eq!(outer, vec![a]);
         let after_outer = assignable_names(&compiler);
 
@@ -541,11 +546,13 @@ mod tests {
                 function_body(Lambda::seq(unit_assign(b), unit_assign(b))),
             ),
         );
-        let mut inner = compiler.extend_assignable(&inner_body);
+        let inner_body = arena.import(&inner_body);
+        let mut inner = compiler.extend_assignable(&arena, inner_body);
         assert_eq!(inner, vec![b]);
         assert!(delay_safe(&compiler.assignable, &var(a_same_name)));
 
-        let inner_same_name = compiler.extend_assignable(&unit_assign(a_same_name));
+        let same_name_body = arena.import(&unit_assign(a_same_name));
+        let inner_same_name = compiler.extend_assignable(&arena, same_name_body);
         assert_eq!(inner_same_name, vec![a_same_name]);
         assert!(!delay_safe(&compiler.assignable, &var(a_same_name)));
         compiler.restore_assignable(inner_same_name);

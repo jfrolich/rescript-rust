@@ -22,8 +22,7 @@
 //! - [`print`] - Pretty printing for debugging
 //! - [`compile_context`] - Compilation context for Lambda to JS IR
 
-pub(crate) mod untagged_dispatch;
-pub mod indexed;
+pub mod arena;
 pub mod js_exp_make;
 pub mod js_pass_external_shadow;
 pub mod js_pass_flatten_and_mark_dead;
@@ -32,56 +31,41 @@ pub mod js_pass_tailcall_inline;
 pub mod js_shake;
 pub mod js_stmt_make;
 pub mod lam_analysis;
-pub(crate) mod lam_analysis_indexed;
 pub mod lam_arity;
 pub mod lam_beta_reduce;
-pub(crate) mod lam_beta_reduce_indexed;
 pub mod lam_closure;
 pub mod lam_coercion;
 pub mod lam_compat;
 pub mod lam_compile;
+pub mod lam_compile_arguments;
 pub mod lam_compile_const;
 pub mod lam_compile_context;
 pub mod lam_compile_external;
-pub(crate) mod lam_compile_input;
 pub mod lam_compile_main;
-pub(crate) mod lam_compile_main_indexed;
-pub mod lam_compile_arguments;
 pub mod lam_compile_primitive;
 pub mod lam_compile_variant;
 pub mod lam_constant;
-pub mod lam_eta_conversion;
-pub mod lam_exit_code;
-pub mod lam_free_variables;
 pub mod lam_hit;
-pub(crate) mod lam_indexed_helpers;
 pub mod lam_loc;
 pub mod lam_pass_alpha_conversion;
-pub(crate) mod lam_pass_alpha_conversion_indexed;
 pub mod lam_pass_collapse_var_aliases;
 pub mod lam_pass_collect;
-pub mod lam_pass_collect_indexed;
-pub mod lam_pass_count;
-pub(crate) mod lam_pass_count_indexed;
 pub mod lam_pass_deep_flatten;
-pub(crate) mod lam_pass_deep_flatten_indexed;
-pub(crate) mod lam_pass_eliminate_ref_indexed;
 pub mod lam_pass_exits;
-pub mod lam_pass_exits_indexed;
 pub mod lam_pass_guard_raises;
 pub mod lam_pass_lets_dce;
-pub(crate) mod lam_pass_lets_dce_indexed;
 pub mod lam_pass_remove_alias;
-pub(crate) mod lam_pass_remove_alias_indexed;
 pub mod lam_pass_sroa;
 pub mod lam_primitive;
 pub mod lam_print;
+pub mod lam_stats;
 pub mod lam_subst;
 pub mod lam_tag_info;
 pub mod lam_util;
 pub mod lambda_traverse;
 pub mod printlambda;
 pub mod sexp_lambda;
+pub(crate) mod untagged_dispatch;
 
 use crate::ident::Ident;
 pub use lam_compat::{Comparison, FieldDbgInfo, LetKind, SetFieldDbgInfo};
@@ -238,7 +222,8 @@ pub(crate) fn untagged_value(c: &Constant) -> Option<untagged_dispatch::Value> {
         })),
         Constant::Block { tag_info, .. } => match &**tag_info {
             TagInfo::Tuple => Value::Array,
-            TagInfo::Record { fields, .. } => {
+            TagInfo::Record(record) => {
+                let fields = &record.fields;
                 if !fields.is_empty()
                     && fields
                         .iter()
@@ -267,7 +252,7 @@ fn is_decimal_index(name: &str, i: usize) -> bool {
 
 /// lambda.ml `literal_denotes_same` = `Variant_runtime.same_literal_value`:
 /// runtime equality, rather than equality of tags.
-fn literal_denotes_same(
+pub(crate) fn literal_denotes_same(
     a: &crate::types::VariantLiteralTag,
     b: &crate::types::VariantLiteralTag,
 ) -> bool {
@@ -424,34 +409,6 @@ pub struct Apply {
     pub ap_args: Vec<Lambda>,
     /// Application info
     pub ap_info: ApInfo,
-}
-
-/// Transform the lambda in `boxed` and store the result in the same
-/// allocation, so passes that rebuild the tree do not free and reallocate
-/// every child box.
-#[inline]
-pub(crate) fn map_box(mut boxed: Box<Lambda>, f: impl FnOnce(Lambda) -> Lambda) -> Box<Lambda> {
-    let inner = std::mem::replace(&mut *boxed, Lambda::Lbreak);
-    *boxed = f(inner);
-    boxed
-}
-
-/// Rebuild an `Lprim` with mapped arguments, reusing its boxed payload.
-/// Applies the same constant folding as [`Lambda::prim`].
-pub(crate) fn map_prim_args(mut info: Box<PrimInfo>, f: impl FnMut(Lambda) -> Lambda) -> Lambda {
-    let args = std::mem::take(&mut info.args);
-    info.args = args.into_iter().map(f).collect();
-    Lambda::prim_boxed(info)
-}
-
-/// Rebuild an `Lfunction` with a mapped body, reusing its boxed payload.
-pub(crate) fn map_function_body(
-    mut func: Box<LFunction>,
-    f: impl FnOnce(Lambda) -> Lambda,
-) -> Lambda {
-    let body = std::mem::replace(&mut *func.body, Lambda::Lbreak);
-    *func.body = f(body);
-    Lambda::Lfunction(func)
 }
 
 /// Lambda IR expression
@@ -840,10 +797,10 @@ impl Lambda {
             }
             Lambda::Lconst(Constant::Block { tag_info, elements }) => {
                 let runtime = match &*tag_info {
-                    TagInfo::Constructor { runtime, .. } => {
-                        Some(crate::types::VariantBlock::Tagged((**runtime).clone()))
+                    TagInfo::Constructor(c) => {
+                        Some(crate::types::VariantBlock::Tagged((*c.runtime).clone()))
                     }
-                    TagInfo::RecordInlined { runtime, .. } => Some((**runtime).clone()),
+                    TagInfo::RecordInlined(r) => Some((*r.runtime).clone()),
                     _ => None,
                 };
                 let action = switch
@@ -1641,7 +1598,10 @@ mod tests {
         );
         // The constructor keeps the shape; the final pass moves the code.
         assert!(matches!(if_expr, Lambda::LifThenElse(..)));
-        let if_expr = crate::lambda::lam_pass_guard_raises::guard_raises(if_expr);
+        let mut a = crate::lambda::arena::LamArena::new();
+        let root = a.import(&if_expr);
+        let root = crate::lambda::lam_pass_guard_raises::guard_raises(&mut a, root);
+        let if_expr = a.export(root);
 
         match if_expr {
             Lambda::Lsequence(first, second) => {
@@ -1688,7 +1648,11 @@ mod node_size_tests {
     #[test]
     fn lambda_node_sizes_stay_compact() {
         use std::mem::size_of;
-        assert_eq!(size_of::<super::Primitive>(), 88);
+        // Constructor/record block tags and JS call specs are boxed
+        // (`ConstructorTag`, `RecordTag`, `RecordInlinedTag`, `JsCall`).
+        assert_eq!(size_of::<super::TagInfo>(), 32);
+        assert_eq!(size_of::<super::Primitive>(), 40);
+        assert_eq!(size_of::<super::arena::PrimPayload>(), 48);
         assert_eq!(size_of::<super::Constant>(), 56);
         assert_eq!(size_of::<super::Lambda>(), 56);
     }
