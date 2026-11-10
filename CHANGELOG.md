@@ -42,6 +42,7 @@
 
 #### :house: Internal
 
+- Build the `rescript` binaries of the Linux and macOS platform packages with profile-guided optimization. https://github.com/jfrolich/rescript-rust/pull/75
 - Retain location-free parsed ASTs in ordinary Rust builds instead of parsing every module twice; retry with location side tables for diagnostics and location-dependent output. https://github.com/jfrolich/rescript-rust/pull/38
 
 - Represent inline record definitions with an explicit parsetree origin while retaining the existing PPX wire representation. https://github.com/rescript-lang/rescript/pull/8686

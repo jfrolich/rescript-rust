@@ -17,6 +17,16 @@ inputs:
     description: Run Clippy and Rust unit tests when populating the cache.
     required: false
     default: "false"
+  profile-guided:
+    description: >-
+      Make a profile-guided build (scripts/build_rewatch_pgo.sh): an
+      instrumented build compiles tests/tests, and the build is repeated with
+      that profile. Needs the dependencies of tests/tests installed and a
+      target whose binaries run on the runner. Windows builds are never
+      profile-guided: the Rust toolchain has no profiler runtime for
+      x86_64-pc-windows-gnu.
+    required: false
+    default: "true"
 
 runs:
   using: composite
@@ -26,7 +36,8 @@ runs:
       uses: actions/cache@v6
       with:
         path: rewatch/target
-        key: rewatch-build-v5-${{ inputs.cache-target }}-${{ hashFiles('rewatch/src/**', 'rewatch/cli/**', 'rewatch/Cargo.toml', 'rewatch/Cargo.lock', 'compiler-rust/src/**', 'compiler-rust/Cargo.toml', 'packages/@rescript/runtime/*.res', 'packages/@rescript/runtime/*.resi', 'packages/@rescript/runtime/rescript.json') }}
+        # A profile-guided build also depends on the script and on what it trains with.
+        key: rewatch-build-v6-${{ inputs.cache-target }}-${{ inputs.profile-guided == 'true' && runner.os != 'Windows' && 'pgo' || 'plain' }}-${{ hashFiles('rewatch/src/**', 'rewatch/cli/**', 'rewatch/Cargo.toml', 'rewatch/Cargo.lock', 'compiler-rust/src/**', 'compiler-rust/Cargo.toml', 'packages/@rescript/runtime/*.res', 'packages/@rescript/runtime/*.resi', 'packages/@rescript/runtime/rescript.json', 'scripts/build_rewatch_pgo.sh', 'tests/tests/rescript.json', 'tests/tests/src/**/*.res', 'tests/tests/src/**/*.resi') }}
 
     - name: Determine Rust toolchain version
       id: rust-version
@@ -44,7 +55,7 @@ runs:
       uses: dtolnay/rust-toolchain@master
       with:
         toolchain: ${{ steps.rust-version.outputs.version }}
-        components: clippy, rustfmt
+        components: clippy, rustfmt, llvm-tools
 
     - name: Install Rust toolchain for explicit target
       if: steps.build-cache.outputs.cache-hit != 'true' && inputs.rust-target != ''
@@ -52,17 +63,30 @@ runs:
       with:
         toolchain: ${{ steps.rust-version.outputs.version }}
         targets: ${{ inputs.rust-target }}
-        components: clippy, rustfmt
+        components: clippy, rustfmt, llvm-tools
 
     - name: Build rewatch for native target
-      if: steps.build-cache.outputs.cache-hit != 'true' && inputs.rust-target == ''
+      if: steps.build-cache.outputs.cache-hit != 'true' && inputs.rust-target == '' && (inputs.profile-guided != 'true' || runner.os == 'Windows')
       shell: bash
       run: cargo build --manifest-path rewatch/Cargo.toml --release
 
     - name: Build rewatch for explicit target
-      if: steps.build-cache.outputs.cache-hit != 'true' && inputs.rust-target != ''
+      if: steps.build-cache.outputs.cache-hit != 'true' && inputs.rust-target != '' && (inputs.profile-guided != 'true' || runner.os == 'Windows')
       shell: bash
       run: cargo build --manifest-path rewatch/Cargo.toml --target "${{ inputs.rust-target }}" --release
+
+    # The instrumented build is not cached: it is rebuilt with the sources.
+    - name: Build profile-guided rewatch
+      if: steps.build-cache.outputs.cache-hit != 'true' && inputs.profile-guided == 'true' && runner.os != 'Windows'
+      shell: bash
+      env:
+        RUST_TARGET: ${{ inputs.rust-target }}
+      run: |
+        if [[ -n "$RUST_TARGET" ]]; then
+          ./scripts/build_rewatch_pgo.sh --discard-instrumented --target "$RUST_TARGET"
+        else
+          ./scripts/build_rewatch_pgo.sh --discard-instrumented
+        fi
 
     - name: Lint rewatch
       if: steps.build-cache.outputs.cache-hit != 'true' && inputs.run-quality-checks == 'true'
