@@ -98,6 +98,12 @@ $(RESCRIPT_EXE): $(REWATCH_TARGET)
 $(REWATCH_TARGET): $(REWATCH_SOURCES)
 	cargo build --manifest-path rewatch/Cargo.toml $(REWATCH_CARGO_FLAGS)
 
+# A profile-guided release build, trained on a copy of tests/tests. It takes
+# two release builds and needs the llvm-tools rustup component.
+rewatch-pgo: yarn-install
+	./scripts/build_rewatch_pgo.sh
+	$(call COPY_EXE,rewatch/target/release/rescript$(PLATFORM_EXE_EXT),$(RESCRIPT_EXE))
+
 clean-rewatch:
 	cargo clean --manifest-path rewatch/Cargo.toml && rm -rf rewatch/target && rm -f $(RESCRIPT_EXE)
 
@@ -412,4 +418,4 @@ clean: clean-lib clean-compiler clean-rewatch clean-coverage
 
 .DEFAULT_GOAL := build
 
-.PHONY: yarn-install build rewatch compiler lib artifacts bench test test-analysis test-reanalyze benchmark-reanalyze test-tools test-syntax test-syntax-roundtrip test-gentype test-rewatch test-rewatch-rust test-all rust-compiler rust-test rust-test-parser rust-test-ast clean-rust-compiler playground playground-compiler playground-test playground-cmijs playground-release format checkformat semantic-diff clean-rewatch clean-compiler clean-lib clean-gentype clean-tests clean
+.PHONY: yarn-install build rewatch rewatch-pgo compiler lib artifacts bench test test-analysis test-reanalyze benchmark-reanalyze test-tools test-syntax test-syntax-roundtrip test-gentype test-rewatch test-rewatch-rust test-all rust-compiler rust-test rust-test-parser rust-test-ast clean-rust-compiler playground playground-compiler playground-test playground-cmijs playground-release format checkformat semantic-diff clean-rewatch clean-compiler clean-lib clean-gentype clean-tests clean

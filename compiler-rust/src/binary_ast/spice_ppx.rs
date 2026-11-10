@@ -714,14 +714,6 @@ fn mk_type_arrow(arg_type: CoreType, ret_type: CoreType, arena: &mut ParseArena)
     mk_type_arrow_with_arity(arg_type, ret_type, Some(1), arena)
 }
 
-fn mk_type_arrow_no_arity(
-    arg_type: CoreType,
-    ret_type: CoreType,
-    arena: &mut ParseArena,
-) -> CoreType {
-    mk_type_arrow_with_arity(arg_type, ret_type, None, arena)
-}
-
 fn mk_type_arrow_with_arity(
     arg_type: CoreType,
     ret_type: CoreType,
@@ -5688,7 +5680,7 @@ fn add_encoder_params(
     }
     let mut res = result_type;
     for name in param_names.iter().rev() {
-        let arg_type = mk_type_arrow_no_arity(mk_type_var(name, arena), ctyp_json_t(arena), arena);
+        let arg_type = mk_type_arrow(mk_type_var(name, arena), ctyp_json_t(arena), arena);
         res = mk_type_arrow(arg_type, res, arena);
     }
     res

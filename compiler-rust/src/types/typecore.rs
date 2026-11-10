@@ -1279,6 +1279,9 @@ pub struct TypeCheckContext<'a> {
     /// pattern being typed comes from parmatch, through `partial_pred` or an
     /// exploded wildcard (typecore.ml:1361-1371).
     pattern_constrs_given: bool,
+    /// Whether a wildcard of the type at each path can turn into a GADT
+    /// constructor when typed again (see [`wildcard_may_reach_gadt`]).
+    wildcard_reaches_gadt: HashMap<Path, bool>,
     /// Current warning configuration.
     pub warning_config: WarningConfig,
     /// Current loop nesting depth for validating break/continue.
@@ -1470,6 +1473,7 @@ impl<'a> TypeCheckContext<'a> {
             generated_pattern_constructors: Vec::new(),
             generated_pattern_labels: Vec::new(),
             pattern_constrs_given: false,
+            wildcard_reaches_gadt: HashMap::default(),
             warning_config: WarningConfig::new(),
             loop_depth: 0,
             in_finally: false,
@@ -28798,6 +28802,128 @@ fn pm_type_shape(
     }
 }
 
+/// Whether typing a wildcard of type `ty` with `~explode` could meet a GADT
+/// constructor. `type_pat` (typecore.ml:1166-1186) types
+/// `Parmatch.ppat_of_type` in place of the wildcard: the fields of a record
+/// or tuple type, the constructors of a variant type that has one
+/// constructor or only GADT ones (parmatch.ml:936-960), each again holding
+/// wildcards. This walks the types that can reach, without typing anything.
+///
+/// It over-approximates: every type argument is followed, as it may stand
+/// for a parameter of the declaration, and so is a manifest. Declarations
+/// found free of GADT constructors are remembered. A walk that gets long
+/// answers `true`.
+fn wildcard_may_reach_gadt(tctx: &mut TypeCheckContext<'_>, env: &Env, ty: TypeExprRef) -> bool {
+    const MAX_TYPES: usize = 2048;
+    const MAX_DECLARATIONS: usize = 256;
+    let ctx = tctx.type_ctx;
+    let root = ctx.repr(ty);
+    let root_path = match &*ctx.borrow_desc(root) {
+        // `Ctype.none`: the type is not known.
+        TypeDesc::Ttuple(items) if items.is_empty() => return true,
+        TypeDesc::Tconstr { path, args, .. } if args.is_empty() => Some(*path),
+        _ => None,
+    };
+    let mut todo = vec![root];
+    let mut seen_types: HashSet<TypeExprRef> = HashSet::default();
+    let mut seen_paths: HashSet<Path> = HashSet::default();
+    // The declarations to remember as free of GADT constructors when the
+    // walk ends without finding one. None are when the walk met a locally
+    // abstract type: that is equal to another type in some match cases only,
+    // so what was found holds for this place alone.
+    let mut walked: Vec<Path> = Vec::new();
+    let mut met_local_type = false;
+    let mut found = false;
+    while let Some(ty) = todo.pop() {
+        let ty = ctx.repr(ty);
+        if !seen_types.insert(ty) {
+            continue;
+        }
+        if seen_types.len() > MAX_TYPES || seen_paths.len() > MAX_DECLARATIONS {
+            // Too long to be worth it; next time too, for a type without
+            // arguments.
+            if let Some(path) = root_path {
+                tctx.wildcard_reaches_gadt.insert(path, true);
+            }
+            return true;
+        }
+        let path = match &*ctx.borrow_desc(ty) {
+            TypeDesc::Tconstr { path, .. } => Some(*path),
+            _ => None,
+        };
+        if let Some(path) = path
+            && seen_paths.insert(path)
+        {
+            match tctx.wildcard_reaches_gadt.get(&path) {
+                Some(true) => {
+                    found = true;
+                    break;
+                }
+                Some(false) => {}
+                None => {
+                    // No declaration: the wildcard stays (parmatch.ml:957).
+                    if let Some(decl) =
+                        lookup_type_decl_for_path(&path, env, &mut tctx.persistent_env, ctx)
+                    {
+                        match &decl.type_kind {
+                            crate::types::TypeKind::TypeVariant(cl, _)
+                                if cl.iter().any(|cd| cd.cd_res.is_some()) =>
+                            {
+                                tctx.wildcard_reaches_gadt.insert(path, true);
+                                found = true;
+                                break;
+                            }
+                            crate::types::TypeKind::TypeVariant(cl, _) if cl.len() != 1 => {}
+                            kind => crate::types::btype::iter_type_expr_kind(kind, |ty| {
+                                todo.push(ty)
+                            }),
+                        }
+                        todo.extend(decl.type_manifest);
+                        met_local_type |= decl.type_newtype_level.is_some();
+                        walked.push(path);
+                    }
+                }
+            }
+        }
+        crate::types::btype::iter_type_expr(ctx, ty, |ty| todo.push(ty));
+    }
+    if !found && !met_local_type {
+        for path in walked {
+            tctx.wildcard_reaches_gadt.insert(path, false);
+        }
+    }
+    found
+}
+
+fn pm_is_predef_some_lid(arena: &ParseArena, lid: LidentIdx) -> bool {
+    match arena.get_longident(lid) {
+        Longident::Ldot(prefix, name) => {
+            arena.get_string(*name) == "Some"
+                && matches!(prefix.as_ref(), Longident::Lident(p) if arena.get_string(*p) == "*predef*")
+        }
+        _ => false,
+    }
+}
+
+fn pm_is_block_that_cannot_be_undefined(
+    ctx: &TypeContext,
+    cstr: &crate::types::ConstructorDescription,
+) -> bool {
+    use crate::types::variant_runtime::{BlockType, ConstructorCase};
+    let crate::types::ConstructorKind::Ordinary(reference) = cstr.cstr_kind else {
+        return false;
+    };
+    match reference.representation(ctx) {
+        // Ast_untagged_variants.block_type_can_be_undefined
+        // (ast_untagged_variants.ml:89-93).
+        ConstructorCase::Block(crate::types::VariantBlock::Untagged { block_type, .. }) => {
+            block_type != BlockType::Unknown
+        }
+        ConstructorCase::Block(crate::types::VariantBlock::Tagged(_)) => false,
+        ConstructorCase::Constant(_) => false,
+    }
+}
+
 fn pm_variant_length(ctx: &TypeContext, cstr: &crate::types::ConstructorDescription) -> usize {
     match cstr.cstr_kind {
         crate::types::ConstructorKind::Ordinary(reference) => {
@@ -28923,6 +29049,10 @@ impl crate::types::parmatch::Oracle for TypecoreParmatchOracle<'_, '_> {
         )
     }
 
+    fn wildcard_may_reach_gadt(&mut self, ty: Option<TypeExprRef>) -> bool {
+        wildcard_may_reach_gadt(self.tctx, self.env, ty.unwrap_or(self.expected_ty))
+    }
+
     fn is_non_extendable_predef_path(&self, path: &Path) -> bool {
         !extendable_fragile_match_path(path)
     }
@@ -29033,6 +29163,10 @@ impl crate::types::parmatch::Oracle for TranslParmatchOracle<'_> {
         _loc: Option<LocIdx>,
     ) -> Option<Pattern> {
         Some(u)
+    }
+
+    fn wildcard_may_reach_gadt(&mut self, _ty: Option<TypeExprRef>) -> bool {
+        true
     }
 
     fn is_non_extendable_predef_path(&self, path: &Path) -> bool {

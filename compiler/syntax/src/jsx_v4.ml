@@ -55,6 +55,15 @@ let jsx_component_expr config ~loc expr =
     (Exp.ident ~loc {loc; txt = module_access_name config "component"})
     [(Nolabel, expr)]
 
+(* An async component runs its code in the inner [make]; the generated wrapper
+   only returns that promise. A directive ('use cache', 'use server') has to sit
+   on the async function, so it stays on [make]. A sync wrapper has [make]
+   inlined into it, so there the directive stays on the wrapper. Returns the
+   wrapper's attributes and [make]'s. *)
+let split_directive_attrs ~async attrs =
+  if async then List.partition (fun ({txt}, _) -> txt <> "directive") attrs
+  else (attrs, [])
+
 (* Finds the name of the variable the binding is assigned to, otherwise raises Invalid_argument *)
 let rec get_fn_name binding =
   match binding with
@@ -602,6 +611,9 @@ let map_binding ~config ~empty_loc ~pstr_loc ~file_name binding =
       modified_binding ~binding_loc ~binding_pat_loc ~fn_name binding
     in
     let is_async = Ast_async.dig_async_payload_from_function binding.pvb_expr in
+    let wrapper_attrs, make_attrs =
+      split_directive_attrs ~async:is_async binding.pvb_expr.pexp_attributes
+    in
     let named_arg_list, newtypes, _typeConstraints =
       recursively_transform_named_args_for_make
         (modified_binding_old binding)
@@ -652,7 +664,7 @@ let map_binding ~config ~empty_loc ~pstr_loc ~file_name binding =
           ]
         else [props_param]
       in
-      Exp.fun_ ~attrs:binding.pvb_expr.pexp_attributes params inner_expression
+      Exp.fun_ ~attrs:wrapper_attrs params inner_expression
     in
     let full_expression =
       match full_module_name with
@@ -801,7 +813,7 @@ let map_binding ~config ~empty_loc ~pstr_loc ~file_name binding =
                   | _ -> [Typ.any ()]))))
       in
       (* Add the collected newtypes (type a b c) to make's definition *)
-      Exp.fun_ ~async:is_async ~newtypes:(List.rev newtypes)
+      Exp.fun_ ~attrs:make_attrs ~async:is_async ~newtypes:(List.rev newtypes)
         (props_param :: nolabel_params)
         expression
     in
@@ -824,6 +836,9 @@ let map_binding ~config ~empty_loc ~pstr_loc ~file_name binding =
 
     let is_async =
       Ast_async.dig_async_payload_from_function modified_binding.pvb_expr
+    in
+    let wrapper_attrs, make_attrs =
+      split_directive_attrs ~async:is_async binding.pvb_expr.pexp_attributes
     in
 
     let make_new_binding ~loc ~full_module_name binding =
@@ -884,7 +899,7 @@ let map_binding ~config ~empty_loc ~pstr_loc ~file_name binding =
       in
       let applied_expression = constrain_jsx_return applied_expression in
       let wrapper_expr =
-        Exp.fun_ ~attrs:binding.pvb_expr.pexp_attributes
+        Exp.fun_ ~attrs:wrapper_attrs
           [Exp.fun_param Nolabel props_pattern]
           applied_expression
       in
@@ -908,8 +923,8 @@ let map_binding ~config ~empty_loc ~pstr_loc ~file_name binding =
     let binding_expr =
       {
         binding.pvb_expr with
-        (* moved to wrapper_expr *)
-        pexp_attributes = [];
+        (* moved to wrapper_expr, but for a directive on an async component *)
+        pexp_attributes = make_attrs;
       }
     in
     ( None,
