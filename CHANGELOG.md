@@ -42,6 +42,8 @@
 
 #### :house: Internal
 
+- Size the compile worker pool to one worker per core on CPUs with efficiency cores, instead of oversubscribing it. https://github.com/jfrolich/rescript-rust/pull/83
+
 - Reduce backend identifier-allocation setup work by scanning arena identifier tables instead of recursively walking Lambda and JavaScript trees. https://github.com/jfrolich/rescript-rust/pull/82
 
 - CI: share caches between validation runs and build the Rust compiler once less per run. https://github.com/jfrolich/rescript-rust/pull/79

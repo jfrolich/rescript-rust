@@ -37,7 +37,21 @@ pub fn compile_threads() -> usize {
     if let Some(threads) = threads_from_env() {
         return threads;
     }
-    let logical = num_cpus::get().max(1);
+    compile_threads_for(num_cpus::get().max(1), super::qos::efficiency_core_count())
+}
+
+/// The compile pool's size on a machine with `logical` cores, of which
+/// `efficiency` are efficiency cores.
+fn compile_threads_for(logical: usize, efficiency: usize) -> usize {
+    // With efficiency cores, more workers than cores cost more than the
+    // parked workers described below lose: the extra threads move work that
+    // was running on a performance core to an efficiency core, which runs
+    // it several times slower. On a 4 + 6 core Apple M4, a worker per core
+    // builds a 3,700-module project about 2% faster than 16 workers do, and
+    // peaks 11% lower in memory.
+    if efficiency > 0 {
+        return logical;
+    }
     let target = logical.saturating_mul(8).div_ceil(5);
     let scaling_cap = logical.saturating_add(8);
     // In-process compilation publishes signatures before JS is emitted so
@@ -88,4 +102,24 @@ pub fn in_place_scope_for<'scope, R>(work: usize, op: impl FnOnce(&rayon::Scope<
 /// The number of threads of the pool for `work` items.
 pub fn threads_for(work: usize) -> usize {
     pool_for(work).map_or_else(rayon::current_num_threads, rayon::ThreadPool::current_num_threads)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::compile_threads_for;
+
+    #[test]
+    fn cores_of_one_class_are_oversubscribed() {
+        assert_eq!(compile_threads_for(1, 0), 2);
+        assert_eq!(compile_threads_for(4, 0), 7);
+        assert_eq!(compile_threads_for(10, 0), 16);
+        // The cap: at most eight workers more than cores.
+        assert_eq!(compile_threads_for(64, 0), 72);
+    }
+
+    #[test]
+    fn efficiency_cores_get_a_worker_per_core() {
+        assert_eq!(compile_threads_for(10, 6), 10);
+        assert_eq!(compile_threads_for(16, 4), 16);
+    }
 }
