@@ -113,13 +113,30 @@ pub fn verify_compiler_info_with(
 }
 
 /// Record the compiler identity of this build for every package.
-pub fn write_compiler_info(build_state: &BuildCommandState) {
-    let source_map_args = build_state
+/// The compiler identity to record for each package of the build (see
+/// [`recorded_entries`]).
+pub fn source_map_args(build_state: &BuildCommandState) -> Vec<String> {
+    build_state
         .get_root_config()
-        .get_source_map_args(build_state.source_map_command);
+        .get_source_map_args(build_state.source_map_command)
+}
+
+/// The compiler identity of this build as recorded for `package`, `None`
+/// when its configuration cannot be hashed.
+pub fn recorded_entries(
+    build_state: &BuildCommandState,
+    package: &packages::Package,
+    source_map_args: &[String],
+) -> Option<Vec<(&'static str, String)>> {
+    let mut entries = current_entries(package, &build_state.compiler_info, source_map_args)?;
+    entries.push((VERSION, env!("CARGO_PKG_VERSION").to_string()));
+    Some(entries)
+}
+
+pub fn write_compiler_info(build_state: &BuildCommandState) {
+    let source_map_args = source_map_args(build_state);
     build_state.packages.par_iter().for_each(|(_, package)| {
-        if let Some(mut entries) = current_entries(package, &build_state.compiler_info, &source_map_args) {
-            entries.push((VERSION, env!("CARGO_PKG_VERSION").to_string()));
+        if let Some(entries) = recorded_entries(build_state, package, &source_map_args) {
             // The record read at the start of the build holds the package's
             // metadata, unless the package was cleaned since.
             let recorded = build_state

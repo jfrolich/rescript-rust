@@ -1273,8 +1273,8 @@ pub struct TypeCheckContext<'a> {
     delayed_open_checks: Vec<DelayedOpenCheck>,
     /// `Parmatch.Conv.name_counter`.
     conv_name_counter: u32,
-    generated_pattern_constructors: Vec<(String, Arc<crate::types::ConstructorDescription>)>,
-    generated_pattern_labels: Vec<(String, Arc<crate::types::LabelDescription>)>,
+    generated_pattern_constructors: Vec<(crate::name::Name, Arc<crate::types::ConstructorDescription>)>,
+    generated_pattern_labels: Vec<(crate::name::Name, Arc<crate::types::LabelDescription>)>,
     /// OCaml `type_pat`'s `constrs <> None` (typecore.ml:1330-1331): the
     /// pattern being typed comes from parmatch, through `partial_pred` or an
     /// exploded wildcard (typecore.ml:1361-1371).
@@ -4464,7 +4464,7 @@ fn type_pattern_with_existentials_at_level(
                 env,
                 &mut tctx.persistent_env,
                 field_ty,
-                &mut HashSet::new(),
+                &mut crate::types::type_marks::visit_set(),
             );
         }
     }
@@ -15681,11 +15681,22 @@ fn get_record_labels(
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ty: TypeExprRef,
 ) -> Option<Vec<crate::types::decl::LabelDeclaration>> {
+    with_record_labels(ctx, env, pers_env, ty, <[_]>::to_vec)
+}
+
+/// `get_record_labels` that lends the labels to `f` instead of copying them.
+fn with_record_labels<R>(
+    ctx: &TypeContext,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ty: TypeExprRef,
+    f: impl FnOnce(&[crate::types::decl::LabelDeclaration]) -> R,
+) -> Option<R> {
     if let Some((_path, _actual_args, type_decl)) =
         extract_concrete_record_type_info(ty, env, pers_env, ctx)
     {
         if let crate::types::TypeKind::TypeRecord(ref labels, _) = type_decl.type_kind {
-            return Some(labels.to_vec());
+            return Some(f(labels));
         }
     }
 
@@ -15725,7 +15736,7 @@ fn get_record_labels(
             if matches_inline_record_path(cstr) {
                 if let Some(ref inlined) = cstr.cstr_inlined {
                     if let crate::types::TypeKind::TypeRecord(ref labels, _) = inlined.type_kind {
-                        return Some(labels.to_vec());
+                        return Some(f(labels));
                     }
                 }
             }
@@ -24325,12 +24336,12 @@ fn force_type_paths_for_lookup_from_type(
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ty: TypeExprRef,
-    seen: &mut HashSet<TypeExprRef>,
+    seen: &mut crate::types::type_marks::TypeVisitSet,
 ) {
     use crate::types::type_expr::RowField;
 
     let ty = ctx.repr(ty);
-    if !seen.insert(ty) {
+    if !seen.visit(ty) {
         return;
     }
 
@@ -29231,38 +29242,58 @@ fn conv_counter_example(
 ) -> crate::parse_arena::PatIdx {
     use crate::parser::ast::{PatternDesc as P, PatternRecordField};
 
-    fn fresh(counter: &mut u32, name: &str) -> String {
-        let current = *counter;
-        *counter += 1;
-        format!("#${name}{current}")
+    /// The state of one conversion. Borrows the typed arena and the generated
+    /// tables separately, so walking the counter-example copies no pattern.
+    struct Conv<'a> {
+        ctx: &'a TypeContext,
+        typed: &'a TypedArena,
+        arena: &'a ParseArena,
+        constructors: &'a mut Vec<(crate::name::Name, Arc<crate::types::ConstructorDescription>)>,
+        labels: &'a mut Vec<(crate::name::Name, Arc<crate::types::LabelDescription>)>,
+        counter: u32,
     }
 
-    fn lp(
-        tctx: &mut TypeCheckContext<'_>,
-        pat: &Pattern,
-        counter: &mut u32,
-        loc: LocIdx,
-    ) -> crate::parse_arena::PatIdx {
-        let arena = tctx.arena;
-        let none = LocIdx::none();
-        match &pat.pat_desc {
-            PatternDesc::Tpat_or(left, right, _) => {
-                let left = lp(tctx, &tctx.typed.pattern(*left).clone(), counter, none);
-                let right = lp(tctx, &tctx.typed.pattern(*right).clone(), counter, none);
-                push_parsed_pattern(arena, loc, P::Ppat_or(left, right))
-            }
-            PatternDesc::Tpat_var(_, name) if name.txt == "*extension*" => {
-                let txt = arena.push_typecheck_string(name.txt.clone());
-                push_parsed_pattern(arena, loc, P::Ppat_var(Located::new(txt, name.loc)))
-            }
-            PatternDesc::Tpat_any | PatternDesc::Tpat_var(_, _) => {
-                push_parsed_pattern(arena, loc, P::Ppat_any)
-            }
-            PatternDesc::Tpat_constant(constant) => push_parsed_pattern(
-                arena,
-                loc,
-                P::Ppat_constant(untype_constant(constant, arena)),
-            ),
+    impl Conv<'_> {
+        /// `Conv.fresh` (parmatch.ml:1943-1946): `#$<name><counter>`, as a
+        /// name for the generated table and as an identifier in the arena.
+        fn fresh(&mut self, name: &str) -> (crate::name::Name, LidentIdx) {
+            let current = self.counter;
+            self.counter += 1;
+            let text = format!("#${name}{current}");
+            let id = crate::name::Name::new(&text);
+            (id, self.arena.push_typecheck_lident(text))
+        }
+
+        fn list(&mut self, items: &[crate::types::tast_arena::TPatIdx]) -> Vec<crate::parse_arena::PatIdx> {
+            let typed = self.typed;
+            items
+                .iter()
+                .map(|item| self.lp(typed.pattern(*item), LocIdx::none()))
+                .collect()
+        }
+
+        fn lp(&mut self, pat: &Pattern, loc: LocIdx) -> crate::parse_arena::PatIdx {
+            let arena = self.arena;
+            let typed = self.typed;
+            let none = LocIdx::none();
+            match &pat.pat_desc {
+                PatternDesc::Tpat_or(left, right, _) => {
+                    let left = self.lp(typed.pattern(*left), none);
+                    let right = self.lp(typed.pattern(*right), none);
+                    push_parsed_pattern(arena, loc, P::Ppat_or(left, right))
+                }
+                PatternDesc::Tpat_var(_, name) if name.txt == "*extension*" => {
+                    let txt = arena.push_typecheck_string(name.txt.clone());
+                    push_parsed_pattern(arena, loc, P::Ppat_var(Located::new(txt, name.loc)))
+                }
+                PatternDesc::Tpat_any | PatternDesc::Tpat_var(_, _) => {
+                    push_parsed_pattern(arena, loc, P::Ppat_any)
+                }
+                PatternDesc::Tpat_constant(constant) => push_parsed_pattern(
+                    arena,
+                    loc,
+                    P::Ppat_constant(untype_constant(constant, arena)),
+                ),
             PatternDesc::Tpat_interval(c1, c2) => push_parsed_pattern(
                 arena,
                 loc,
@@ -29271,57 +29302,44 @@ fn conv_counter_example(
                     untype_constant(&c2.constant(), arena),
                 ))),
             ),
-            PatternDesc::Tpat_alias(inner, _, _) => { let p = tctx.typed.pattern(*inner).clone(); lp(tctx, &p, counter, loc) },
-            PatternDesc::Tpat_tuple(items) => {
-                let items = tctx
-                    .typed
-                    .pattern_list(*items)
-                    .to_vec()
-                    .into_iter()
-                    .map(|item| lp(tctx, &tctx.typed.pattern(item).clone(), counter, none))
-                    .collect::<Vec<_>>();
-                push_parsed_pattern(
-                    arena,
-                    loc,
-                    P::Ppat_tuple(arena.push_shared_pat_list(&items)),
-                )
-            }
-            PatternDesc::Tpat_construct(cstr_lid, cstr, args) => {
-                let id = fresh(counter, &cstr.cstr_name);
-                tctx.generated_pattern_constructors
-                    .push((id.clone(), cstr.clone()));
-                let lid = Located::new(arena.push_typecheck_lident(&id), cstr_lid.loc);
-                // parmatch.ml Conv: `Location.mknoloc (List.map loop lst)`.
-                let items: Vec<_> = tctx
-                    .typed
-                    .pattern_list(*args)
-                    .to_vec()
-                    .into_iter()
-                    .map(|arg| lp(tctx, &tctx.typed.pattern(arg).clone(), counter, none))
-                    .collect();
-                push_parsed_pattern(
-                    arena,
-                    loc,
-                    P::Ppat_construct(lid, arena.shared_pat_ctor_args(&items, none)),
-                )
-            }
-            PatternDesc::Tpat_variant(label, arg, _) => {
-                let args: Vec<_> = arg
-                    .map(|arg| lp(tctx, &tctx.typed.pattern(arg).clone(), counter, none))
-                    .into_iter()
-                    .collect();
-                push_parsed_pattern(
-                    arena,
-                    loc,
-                    P::Ppat_variant(Box::new((
-                        label.clone().into(),
-                        arena.shared_pat_ctor_args(&args, none),
-                    ))),
-                )
-            }
+                PatternDesc::Tpat_alias(inner, _, _) => self.lp(typed.pattern(*inner), loc),
+                PatternDesc::Tpat_tuple(items) => {
+                    let items = self.list(typed.pattern_list(*items));
+                    push_parsed_pattern(
+                        arena,
+                        loc,
+                        P::Ppat_tuple(arena.push_shared_pat_list(&items)),
+                    )
+                }
+                PatternDesc::Tpat_construct(cstr_lid, cstr, args) => {
+                    let (id, lid) = self.fresh(&cstr.cstr_name);
+                    self.constructors.push((id, cstr.clone()));
+                    let lid = Located::new(lid, cstr_lid.loc);
+                    // parmatch.ml Conv: `Location.mknoloc (List.map loop lst)`.
+                    let items = self.list(typed.pattern_list(*args));
+                    push_parsed_pattern(
+                        arena,
+                        loc,
+                        P::Ppat_construct(lid, arena.shared_pat_ctor_args(&items, none)),
+                    )
+                }
+                PatternDesc::Tpat_variant(label, arg, _) => {
+                    let args: Vec<_> = arg
+                        .map(|arg| self.lp(typed.pattern(arg), none))
+                        .into_iter()
+                        .collect();
+                    push_parsed_pattern(
+                        arena,
+                        loc,
+                        P::Ppat_variant(Box::new((
+                            label.clone().into(),
+                            arena.shared_pat_ctor_args(&args, none),
+                        ))),
+                    )
+                }
             // A lowered dict pattern: its labels are the keys, in order of
             // appearance in the match.
-            PatternDesc::Tpat_record(fields, _, _) if typed_pattern_is_dict(tctx.type_ctx, pat) => {
+            PatternDesc::Tpat_record(fields, _, _) if typed_pattern_is_dict(self.ctx, pat) => {
                 let mut fields: Vec<_> = fields.iter().collect();
                 fields.sort_by_key(|(_, lbl, _, _)| lbl.lbl_pos);
                 let entries = fields
@@ -29329,10 +29347,10 @@ fn conv_counter_example(
                     .map(
                         |(_, lbl, p, optional)| crate::parser::ast::DictPatternEntry {
                             pdp_key: Located::new(
-                                tctx.arena.push_typecheck_string(lbl.lbl_name.to_string()),
+                                arena.push_typecheck_string(lbl.lbl_name.to_string()),
                                 none,
                             ),
-                            pdp_pattern: { let p = tctx.typed.pattern(*p).clone(); lp(tctx, &p, counter, none) },
+                            pdp_pattern: self.lp(typed.pattern(*p), none),
                             pdp_optional: *optional,
                         },
                     )
@@ -29344,62 +29362,63 @@ fn conv_counter_example(
                     .iter()
                     .map(|entry| crate::parser::ast::DictPatternEntry {
                         pdp_key: Located::new(
-                            tctx.arena.push_typecheck_string(entry.tdp_key.txt.clone()),
+                            arena.push_typecheck_string(entry.tdp_key.txt.clone()),
                             entry.tdp_key.loc,
                         ),
-                        pdp_pattern: { let p = tctx.typed.pattern(entry.tdp_pattern).clone(); lp(tctx, &p, counter, none) },
+                        pdp_pattern: self.lp(typed.pattern(entry.tdp_pattern), none),
                         pdp_optional: entry.tdp_optional,
                     })
                     .collect();
                 push_parsed_pattern(arena, loc, P::Ppat_dict(Box::new(entries)))
             }
-            PatternDesc::Tpat_record(fields, _, _) => {
-                let fields = fields
-                    .iter()
-                    .map(|(_, lbl, p, optional)| {
-                        let id = fresh(counter, &lbl.lbl_name);
-                        tctx.generated_pattern_labels
-                            .push((id.clone(), lbl.clone()));
-                        PatternRecordField {
-                            lid: Located::new(arena.push_typecheck_lident(&id), none),
-                            pat: lp(tctx, &tctx.typed.pattern(*p).clone(), counter, none),
-                            opt: *optional,
-                        }
-                    })
-                    .collect::<Vec<_>>();
-                // TODO: Conv.conv_record_rest (parmatch.ml:1948-1959) keeps the
-                // rest binding with a `Typ.constr` annotation.
-                push_parsed_pattern(
-                    arena,
-                    loc,
-                    P::Ppat_record(Box::new((
-                        arena.push_shared_pat_field_list(&fields),
-                        crate::parser::ast::ClosedFlag::Open,
-                        None,
-                    ))),
-                )
-            }
-            PatternDesc::Tpat_array(items) => {
-                let items = tctx
-                    .typed
-                    .pattern_list(*items)
-                    .to_vec()
-                    .into_iter()
-                    .map(|item| lp(tctx, &tctx.typed.pattern(item).clone(), counter, none))
-                    .collect::<Vec<_>>();
-                push_parsed_pattern(
-                    arena,
-                    loc,
-                    P::Ppat_array(arena.push_shared_pat_list(&items)),
-                )
+                PatternDesc::Tpat_record(fields, _, _) => {
+                    let fields = fields
+                        .iter()
+                        .map(|(_, lbl, p, optional)| {
+                            let (id, lid) = self.fresh(&lbl.lbl_name);
+                            self.labels.push((id, lbl.clone()));
+                            PatternRecordField {
+                                lid: Located::new(lid, none),
+                                pat: self.lp(typed.pattern(*p), none),
+                                opt: *optional,
+                            }
+                        })
+                        .collect::<Vec<_>>();
+                    // TODO: Conv.conv_record_rest (parmatch.ml:1948-1959) keeps the
+                    // rest binding with a `Typ.constr` annotation.
+                    push_parsed_pattern(
+                        arena,
+                        loc,
+                        P::Ppat_record(Box::new((
+                            arena.push_shared_pat_field_list(&fields),
+                            crate::parser::ast::ClosedFlag::Open,
+                            None,
+                        ))),
+                    )
+                }
+                PatternDesc::Tpat_array(items) => {
+                    let items = self.list(typed.pattern_list(*items));
+                    push_parsed_pattern(
+                        arena,
+                        loc,
+                        P::Ppat_array(arena.push_shared_pat_list(&items)),
+                    )
+                }
             }
         }
     }
 
     // `Conv.name_counter` is global and never reset (parmatch.ml:1942).
-    let mut counter = tctx.conv_name_counter;
-    let result = lp(tctx, typed, &mut counter, top_loc.unwrap_or(LocIdx::none()));
-    tctx.conv_name_counter = counter;
+    let mut conv = Conv {
+        ctx: tctx.type_ctx,
+        typed: &tctx.typed,
+        arena: tctx.arena,
+        constructors: &mut tctx.generated_pattern_constructors,
+        labels: &mut tctx.generated_pattern_labels,
+        counter: tctx.conv_name_counter,
+    };
+    let result = conv.lp(typed, top_loc.unwrap_or(LocIdx::none()));
+    tctx.conv_name_counter = conv.counter;
     result
 }
 
@@ -29591,7 +29610,7 @@ fn print_counter_example(ta: &TypedArena, arena: &ParseArena, typed: &Pattern) -
                             FieldState::Normal => (*opt, untype(ta, arena, ta.pattern(*p))),
                         };
                         PatternRecordField {
-                            lid: Located::new(arena.push_typecheck_lident(&lbl.lbl_name), none),
+                            lid: Located::new(arena.push_typecheck_lident(lbl.lbl_name.as_str()), none),
                             pat,
                             opt,
                         }

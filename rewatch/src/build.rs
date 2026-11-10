@@ -421,8 +421,20 @@ pub fn incremental_build(
             show_progress,
             only_incremental,
             plain_output,
+            CompilerInfoWrite::AfterBuild,
         )
     })
+}
+
+/// When a successful build records the compiler identity in the package
+/// databases (see `compiler_info`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompilerInfoWrite {
+    /// Right after the build.
+    AfterBuild,
+    /// With the build record (`clean::write_in_process_record`), in the
+    /// same transaction: for a one-shot build, which records itself next.
+    WithRecord,
 }
 
 // `build` needs to lock before initialization because initialization mutates previous
@@ -446,6 +458,7 @@ pub fn incremental_build_without_lock(
     show_progress: bool,
     only_incremental: bool,
     plain_output: bool,
+    compiler_info_write: CompilerInfoWrite,
 ) -> Result<CompilationOutcome, IncrementalBuildError> {
     let phase_timing_enabled = rescript_compiler::timing::enabled();
     if phase_timing_enabled {
@@ -505,7 +518,9 @@ pub fn incremental_build_without_lock(
         if initial_build {
             log_config_warnings(build_state);
         }
-        write_compiler_info(build_state);
+        if compiler_info_write == CompilerInfoWrite::AfterBuild {
+            write_compiler_info(build_state);
+        }
         build_state.build_run.succeed();
         print_compiler_reports(phase_timing_enabled, compiler_counters_enabled);
         return Ok(
@@ -713,6 +728,8 @@ pub fn incremental_build_without_lock(
             rescript_compiler::cmi::persistent_env::ModuleRegistry::new();
         build_state.stored_asts.lock().unwrap().clear();
         build_state.in_memory_interfaces.lock().unwrap().clear();
+        build_state.published_item_digests.lock().unwrap().clear();
+        build_state.prepared_interfaces.lock().unwrap().clear();
         build_state.loaded_units.lock().unwrap().clear();
         build_state.unit_reads.lock().unwrap().clear();
         build_state.verified_imports.lock().unwrap().clear();
@@ -728,6 +745,7 @@ pub fn incremental_build_without_lock(
             show_progress,
             only_incremental,
             plain_output,
+            compiler_info_write,
         );
         build_state.diagnostic_locations = false;
         return result;
@@ -804,8 +822,10 @@ pub fn incremental_build_without_lock(
             log_config_warnings(build_state);
         }
 
-        // Write per-package compiler metadata to `lib/bs/compiler-info.json` (idempotent)
-        write_compiler_info(build_state);
+        // Write per-package compiler metadata to the package databases (idempotent)
+        if compiler_info_write == CompilerInfoWrite::AfterBuild {
+            write_compiler_info(build_state);
+        }
         phase_mark("compiler-info-end");
 
         print_compiler_reports(phase_timing_enabled, compiler_counters_enabled);
@@ -955,6 +975,7 @@ pub fn build(
             show_progress,
             false,
             plain_output,
+            CompilerInfoWrite::WithRecord,
         ) {
             Ok(result) => {
                 if !plain_output && show_progress {
@@ -968,12 +989,12 @@ pub fn build(
                         )
                     );
                 }
-                clean::cleanup_after_build(&build_state);
+                clean::cleanup_after_build(&build_state, CompilerInfoWrite::WithRecord);
                 phase_mark("cleanup-end");
                 Ok(build_state)
             }
             Err(e) => {
-                clean::cleanup_after_build(&build_state);
+                clean::cleanup_after_build(&build_state, CompilerInfoWrite::WithRecord);
                 Err(anyhow!("Incremental build failed. Error: {e}"))
             }
         }

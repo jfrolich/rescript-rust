@@ -54,6 +54,7 @@ pub mod tast_arena;
 pub mod tast_iterator;
 pub mod thread_store;
 pub mod type_expr;
+pub(crate) mod type_marks;
 pub mod typecore;
 pub mod typedtree;
 pub mod typemod;

@@ -40,7 +40,23 @@ pub(crate) struct SignatureIndex {
 
 impl SignatureIndex {
     pub(crate) fn build(signature: &Signature) -> Self {
-        let mut index = SignatureIndex::default();
+        // Size the tables up front: a signature is indexed once, and growing
+        // three maps item by item rehashed each of them several times.
+        let (mut values, mut types, mut modules) = (0, 0, 0);
+        for item in signature.iter() {
+            match item {
+                SignatureItem::SigValue(..) => values += 1,
+                SignatureItem::SigType(..) => types += 1,
+                SignatureItem::SigModule(..) => modules += 1,
+                _ => {}
+            }
+        }
+        let mut index = SignatureIndex {
+            values: HashMap::with_capacity(values),
+            types: HashMap::with_capacity(types),
+            modules: HashMap::with_capacity(modules),
+            ..SignatureIndex::default()
+        };
         let mut runtime_pos = 0usize;
         for (idx, item) in signature.iter().enumerate() {
             match item {
@@ -128,13 +144,13 @@ fn check_signature_store_resident(signature: &[SignatureItem], ctx: &super::cont
     }
     let mut stack = Vec::new();
     signature_roots(signature, &mut stack);
-    let mut seen = crate::fast_hash::AHashSet::new();
+    let mut seen = super::type_marks::visit_set();
     while let Some(ty) = stack.pop() {
         if !ty.is_store() {
             ctx.poison_store_build_for("unit-signature");
             return;
         }
-        if seen.insert(ty) {
+        if seen.visit(ty) {
             super::btype::iter_type_expr(ctx, ty, |child| stack.push(child));
         }
     }

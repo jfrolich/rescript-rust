@@ -308,7 +308,57 @@ impl std::hash::Hasher for PairKeyHasher {
 
 /// Unordered type pairs already entered by `unify`, packed as
 /// `(smaller id << 32) | larger id`.
-type UnifiedPairSet = std::collections::HashSet<u64, std::hash::BuildHasherDefault<PairKeyHasher>>;
+type PairTable = std::collections::HashSet<u64, std::hash::BuildHasherDefault<PairKeyHasher>>;
+
+/// Pair tables kept per thread for reuse, and the largest one worth keeping.
+const PAIR_POOL_LIMIT: usize = 16;
+const PAIR_POOL_MAX_CAPACITY: usize = 1 << 12;
+
+thread_local! {
+    static PAIR_TABLE_POOL: std::cell::RefCell<Vec<PairTable>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The unified-pair set of a [`UnifyState`]. Most states live for one
+/// `unify`/`moregen` call, so their tables come from a per-thread pool and go
+/// back to it, cleared, on drop instead of regrowing from empty every time.
+struct UnifiedPairSet(PairTable);
+
+impl Default for UnifiedPairSet {
+    fn default() -> Self {
+        UnifiedPairSet(
+            PAIR_TABLE_POOL
+                .try_with(|pool| pool.borrow_mut().pop())
+                .ok()
+                .flatten()
+                .unwrap_or_default(),
+        )
+    }
+}
+
+impl Clone for UnifiedPairSet {
+    fn clone(&self) -> Self {
+        UnifiedPairSet(self.0.clone())
+    }
+}
+
+impl Drop for UnifiedPairSet {
+    fn drop(&mut self) {
+        let mut table = std::mem::take(&mut self.0);
+        if table.capacity() == 0 || table.capacity() > PAIR_POOL_MAX_CAPACITY {
+            return;
+        }
+        table.clear();
+        PAIR_TABLE_POOL
+            .try_with(|pool| {
+                let mut pool = pool.borrow_mut();
+                if pool.len() < PAIR_POOL_LIMIT {
+                    pool.push(table);
+                }
+            })
+            .ok();
+    }
+}
 
 /// A unified-pair set moved out of a [`UnifyState`].
 pub(crate) struct UnifiedPairSetOwned(UnifiedPairSet);
@@ -420,12 +470,12 @@ impl UnifyState {
 
     /// Check if two types have already been unified.
     pub fn already_unified(&self, t1: TypeExprRef, t2: TypeExprRef) -> bool {
-        self.unified_pairs.contains(&unified_pair_key(t1, t2))
+        self.unified_pairs.0.contains(&unified_pair_key(t1, t2))
     }
 
     /// Mark two types as unified.
     pub fn mark_unified(&mut self, t1: TypeExprRef, t2: TypeExprRef) {
-        self.unified_pairs.insert(unified_pair_key(t1, t2));
+        self.unified_pairs.0.insert(unified_pair_key(t1, t2));
     }
 
     /// Move the unified-pair set out, leaving an empty one, for a
@@ -12431,7 +12481,7 @@ pub fn subst_identity_copy(ctx: &TypeContext, ty: TypeExprRef) -> TypeExprRef {
 }
 
 pub fn subst_identity_copy_many(ctx: &TypeContext, types: &[TypeExprRef]) -> Vec<TypeExprRef> {
-    let mut seen = HashMap::new();
+    let mut seen = super::type_marks::ref_table();
     // OCaml compiler/ml/subst.ml:273-301 calls `typexp` for every type slot
     // in a declaration before the single `cleanup_types` call, so temporary
     // Tsubst markers preserve sharing between params, kind fields, and manifest.
@@ -12512,7 +12562,7 @@ fn subst_identity_copy_with_mode(
     ty: TypeExprRef,
     mode: SubstCopyMode,
 ) -> TypeExprRef {
-    let mut seen = HashMap::new();
+    let mut seen = super::type_marks::ref_table();
     // OCaml Subst.typexp uses a temporary `row_more.desc <- Tsubst(Ttuple [...])`
     // marker window to preserve recursive row sharing while copying.
     // Keep the same lifetime semantics in a scoped side table.
@@ -12532,7 +12582,7 @@ fn subst_identity_copy_rec(
     ctx: &TypeContext,
     ty: TypeExprRef,
     mode: SubstCopyMode,
-    seen: &mut HashMap<TypeExprRef, TypeExprRef>,
+    seen: &mut super::type_marks::TypeNodeTable<TypeExprRef>,
     row_more_markers: &mut HashMap<TypeExprRef, SubstRowMoreMarker>,
 ) -> TypeExprRef {
     let ty = ctx.repr(ty);
@@ -12543,7 +12593,7 @@ fn subst_identity_copy_rec(
         return marker.tuple;
     }
 
-    if let Some(&cached) = seen.get(&ty) {
+    if let Some(cached) = seen.get(ty) {
         return cached;
     }
 
@@ -12649,7 +12699,7 @@ fn subst_identity_copy_rec(
                     let mutability = {
                         let seen = &*seen;
                         ctx.copy_field_mutability(mutability, rest, false, &|t| {
-                            seen.get(&t).copied()
+                            seen.get(t)
                         })
                     };
                     let rest_copy =
@@ -13494,7 +13544,7 @@ pub fn tuple_elements(ctx: &TypeContext, ty: TypeExprRef) -> Option<Vec<TypeExpr
 /// For Tobject: flattens fields (sorts alphabetically), rebuilds chain, mutates desc.
 /// Recursively visits all sub-types.
 pub fn normalize_type(ctx: &TypeContext, env: &Env, ty: TypeExprRef) {
-    let mut visited = HashSet::new();
+    let mut visited = super::type_marks::visit_set();
     normalize_type_rec(ctx, env, &mut visited, ty);
 }
 
@@ -13581,11 +13631,11 @@ pub fn normalize_all_types(ctx: &TypeContext) {
 fn normalize_type_rec(
     ctx: &TypeContext,
     env: &Env,
-    visited: &mut HashSet<TypeExprRef>,
+    visited: &mut super::type_marks::TypeVisitSet,
     ty: TypeExprRef,
 ) {
     let ty = ctx.repr(ty);
-    if !visited.insert(ty) {
+    if !visited.visit(ty) {
         return;
     }
 

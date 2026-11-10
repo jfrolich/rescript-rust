@@ -1340,7 +1340,7 @@ impl LambdaCompiler {
             id_gen: &IdGenerator,
             j: &mut JsArena,
             func: Expr,
-            mut arities: Vec<i32>,
+            mut arities: crate::lambda::lam_arity::Arities,
             args: Vec<Expr>,
         ) -> Expr {
             let len = args.len();

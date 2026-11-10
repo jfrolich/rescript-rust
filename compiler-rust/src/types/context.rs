@@ -662,7 +662,7 @@ pub struct TypeContext {
     /// declaration-derived source path available when Rust later reaches a
     /// cached component view without `PersistentEnv`; it must not be inferred
     /// from flattened module-name spelling.
-    component_alias_sources: RefCell<crate::fast_hash::AHashMap<SamePathKey, Vec<Path>>>,
+    component_alias_sources: RefCell<crate::fast_hash::AHashMap<SamePathKey, AliasPaths>>,
     /// Component-table name indexes of compilation-local signatures, keyed by
     /// address; the entry keeps the signature alive so the key stays unique.
     signature_indexes: RefCell<
@@ -674,7 +674,7 @@ pub struct TypeContext {
             ),
         >,
     >,
-    component_paths_by_alias_source: RefCell<crate::fast_hash::AHashMap<SamePathKey, Vec<Path>>>,
+    component_paths_by_alias_source: RefCell<crate::fast_hash::AHashMap<SamePathKey, AliasPaths>>,
 
     /// Cached dotted value lookups keyed by resolved module access path.
     resolved_module_value_cache: RefCell<
@@ -943,6 +943,16 @@ pub(crate) fn store_debug_enabled() -> bool {
 
 static NEXT_STORE_PIECE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
+thread_local! {
+    /// The piece of every store build with no effects and no guards (id 0;
+    /// built pieces count from 1). Pieces stay on their worker thread.
+    static EMPTY_STORE_PIECE: Arc<StorePiece> = Arc::new(StorePiece {
+        id: 0,
+        effects: Vec::new(),
+        guards: Vec::new(),
+    });
+}
+
 /// A map key that compares paths with `Path::same` (ignoring `Pdot`
 /// positions and comparing identifiers by stamp, or by name when persistent).
 #[derive(Clone, Debug)]
@@ -1056,7 +1066,11 @@ impl hashbrown::Equivalent<(u64, Path, Path)> for ScopedPathPairRef<'_> {
     }
 }
 
-fn push_unique_path(paths: &mut Vec<Path>, path: Path) {
+/// The paths related to one path by an alias: almost always one, so kept
+/// inline.
+type AliasPaths = smallvec::SmallVec<[Path; 2]>;
+
+fn push_unique_path(paths: &mut AliasPaths, path: Path) {
     if !paths.iter().any(|existing| existing.same(&path)) {
         paths.push(path);
     }
@@ -1538,7 +1552,7 @@ impl TypeContext {
         // target path through `find_module`; env.ml:1530 then prefixes the
         // selected component path. Record exactly that pair so later helpers
         // recover alias identity from declarations, not from name spelling.
-        let mut alias_sources = vec![alias_source];
+        let mut alias_sources: AliasPaths = smallvec::smallvec![alias_source];
         for backing_source in self.flattened_backing_sources_for_alias_source(&alias_sources[0]) {
             if !alias_sources
                 .iter()
@@ -1638,7 +1652,7 @@ impl TypeContext {
         self.component_paths_by_alias_source
             .borrow()
             .get(&SamePathKey(*alias_source))
-            .cloned()
+            .map(|paths| paths.to_vec())
             .unwrap_or_default()
     }
 
@@ -1654,7 +1668,7 @@ impl TypeContext {
         self.component_alias_sources
             .borrow()
             .get(&SamePathKey(*component_path))
-            .cloned()
+            .map(|paths| paths.to_vec())
             .unwrap_or_default()
     }
 
@@ -4505,6 +4519,13 @@ impl TypeContext {
                 .borrow_mut()
                 .extend(guards.iter().cloned());
         }
+        if effects.is_empty() && guards.is_empty() {
+            // Most builds have no effect on the compilation and read no
+            // guarded answer: touching, replaying or checking such a piece
+            // does nothing, so they all share one piece and the enclosing
+            // build need not record it.
+            return (result, Some(EMPTY_STORE_PIECE.with(Arc::clone)));
+        }
         let piece = Arc::new(StorePiece {
             id: NEXT_STORE_PIECE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             effects,
@@ -4522,6 +4543,9 @@ impl TypeContext {
     /// Note that this compilation is using shared store data built by `piece`:
     /// the first time, apply the effects that building it had.
     pub(crate) fn touch_store_piece(&self, piece: &Arc<StorePiece>) {
+        if piece.effects.is_empty() && piece.guards.is_empty() {
+            return;
+        }
         if self.in_store_build() {
             self.store_build_effects
                 .borrow_mut()

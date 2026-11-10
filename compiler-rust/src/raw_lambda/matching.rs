@@ -230,18 +230,29 @@ type Clause<'p> = (Vec<&'p Pattern>, MatchAction);
 /// directly, so every `args.to_vec()` recursively cloned raw-lambda scrutinees.
 /// Store the backing vector once and represent OCaml tail lists with a start
 /// offset to preserve the same functional sharing.
+/// Match arguments being collected before they become a [`MatchArgs`].
+type ArgsBuf = smallvec::SmallVec<[(RawLambda, LetKind); 8]>;
+
 #[derive(Clone)]
 pub struct MatchArgs {
-    values: Arc<Vec<(RawLambda, LetKind)>>,
+    values: Arc<[(RawLambda, LetKind)]>,
     start: usize,
 }
 
 impl MatchArgs {
-    fn new(values: Vec<(RawLambda, LetKind)>) -> Self {
+    /// Builds the shared list in one allocation: the items are gathered
+    /// inline first, since most argument lists are short.
+    fn new(values: impl IntoIterator<Item = (RawLambda, LetKind)>) -> Self {
+        let items: ArgsBuf = values.into_iter().collect();
         Self {
-            values: Arc::new(values),
+            values: Arc::from(items.as_slice()),
             start: 0,
         }
+    }
+
+    /// `head :: tail`.
+    fn cons(head: (RawLambda, LetKind), tail: &[(RawLambda, LetKind)]) -> Self {
+        Self::new(std::iter::once(head).chain(tail.iter().copied()))
     }
 
     fn tail(&self, count: usize) -> Self {
@@ -631,16 +642,13 @@ fn le_pats<A: Borrow<Pattern>, B: Borrow<Pattern>>(pa: &PatArena<'_>, ps: &[A], 
         .all(|(p, q)| le_pat(pa, p.borrow(), q.borrow()))
 }
 
-/// Get minimal elements under a partial order `le`.
-/// Equivalent to OCaml's `get_mins`.
-fn get_mins<T>(le: impl Fn(&T, &T) -> bool, mut ps: Vec<T>) -> Vec<T> {
-    // OCaml `select_rec` keeps `p` unless a later element is below it and
-    // conses kept elements onto the accumulator, so each pass returns the kept
-    // elements in reverse order. Two passes restore the input order, so
-    // select indices and keep the survivors in place.
-    type Indices = smallvec::SmallVec<[usize; 16]>;
-    fn select_rec<T>(le: &impl Fn(&T, &T) -> bool, ps: &[T], order: &[usize]) -> Indices {
-        let mut kept: Indices = order
+/// Indices of the minimal elements of `ps` under a partial order `le`,
+/// ascending. OCaml `select_rec` keeps `p` unless a later element is below
+/// it and conses kept elements onto the accumulator, so each pass returns
+/// the kept elements in reverse order and two passes restore input order.
+fn get_mins_indices<T>(le: impl Fn(&T, &T) -> bool, ps: &[T]) -> MinIndices {
+    fn select_rec<T>(le: &impl Fn(&T, &T) -> bool, ps: &[T], order: &[usize]) -> MinIndices {
+        let mut kept: MinIndices = order
             .iter()
             .enumerate()
             .filter(|(i, p)| !order[i + 1..].iter().any(|p0| le(&ps[*p0], &ps[**p])))
@@ -649,10 +657,19 @@ fn get_mins<T>(le: impl Fn(&T, &T) -> bool, mut ps: Vec<T>) -> Vec<T> {
         kept.reverse();
         kept
     }
-    let all: Indices = (0..ps.len()).collect();
-    let first_pass = select_rec(&le, &ps, &all);
-    let kept = select_rec(&le, &ps, &first_pass);
+    let all: MinIndices = (0..ps.len()).collect();
+    let first_pass = select_rec(&le, ps, &all);
+    let kept = select_rec(&le, ps, &first_pass);
     debug_assert!(kept.windows(2).all(|w| w[0] < w[1]));
+    kept
+}
+
+type MinIndices = smallvec::SmallVec<[usize; 16]>;
+
+/// Get minimal elements under a partial order `le`, keeping the survivors
+/// in place. Equivalent to OCaml's `get_mins`.
+fn get_mins<T>(le: impl Fn(&T, &T) -> bool, mut ps: Vec<T>) -> Vec<T> {
+    let kept = get_mins_indices(le, &ps);
     let mut next = kept.iter().copied().peekable();
     let mut index = 0;
     ps.retain(|_| {
@@ -3109,13 +3126,12 @@ pub fn what_is_cases<'p>(cases: &[Clause<'p>]) -> &'p Pattern {
 /// Convert cases to a pattern matrix (taking the minimal rows under le_pats).
 /// Equivalent to OCaml's `as_matrix`.
 pub fn as_matrix<'p>(pa: &PatArena<'p>, cases: &[Clause<'p>]) -> Matrix<'p> {
-    let rows: Vec<&Vec<&'p Pattern>> = cases.iter().map(|(ps, _)| ps).collect();
-    get_mins(
-        |a: &&Vec<&'p Pattern>, b: &&Vec<&'p Pattern>| le_pats(pa, a, b),
-        rows,
+    get_mins_indices(
+        |a: &Clause<'p>, b: &Clause<'p>| le_pats(pa, &a.0, &b.0),
+        cases,
     )
-    .into_iter()
-    .cloned()
+    .iter()
+    .map(|&i| cases[i].0.clone())
     .collect()
 }
 
@@ -5073,16 +5089,17 @@ fn make_field_args(
     first_pos: i32,
     last_pos: i32,
     argl: &MatchArgs,
-) -> Vec<(RawLambda, LetKind)> {
-    let mut result = Vec::new();
-    for pos in first_pos..=last_pos {
-        result.push((
-            b.prim(Primitive::Pfield(pos, fld_info.clone()), &[*arg], loc),
-            binding_kind,
-        ));
-    }
-    result.extend(argl.iter().cloned());
-    result
+) -> MatchArgs {
+    MatchArgs::new(
+        (first_pos..=last_pos)
+            .map(|pos| {
+                (
+                    b.prim(Primitive::Pfield(pos, fld_info.clone()), &[*arg], loc),
+                    binding_kind,
+                )
+            })
+            .chain(argl.iter().copied()),
+    )
 }
 
 /// Get the declared constructor from a constructor pattern.
@@ -5267,9 +5284,7 @@ fn make_constr_matching<'p>(
             let newargs = if cstr.cstr_inlined.is_some()
                 || (payload_is_unboxed && !cstr.cstr_args.is_empty())
             {
-                let mut result = vec![(*arg, LetKind::Alias)];
-                result.extend(argl.iter().cloned());
-                result
+                MatchArgs::cons((*arg, LetKind::Alias), &argl)
             } else {
                 match &cstr.cstr_kind {
                     // OCaml compiler/ml/matching.ml only unwraps option-shaped
@@ -5306,12 +5321,13 @@ fn make_constr_matching<'p>(
                             }
                             _ => Primitive::PvalFromOption,
                         };
-                        let mut result = vec![(
-                            b.prim(from_option, &[*arg], arena.lam_loc(p.pat_loc)),
-                            LetKind::Alias,
-                        )];
-                        result.extend(argl.iter().cloned());
-                        result
+                        MatchArgs::cons(
+                            (
+                                b.prim(from_option, &[*arg], arena.lam_loc(p.pat_loc)),
+                                LetKind::Alias,
+                            ),
+                            &argl,
+                        )
                     }
                     crate::types::ConstructorKind::Ordinary(_) => {
                         let fld_info = if cstr.cstr_name == "::" {
@@ -5347,7 +5363,7 @@ fn make_constr_matching<'p>(
             MatchCell {
                 pm: PatternMatching {
                     cases: Vec::new(),
-                    args: MatchArgs::new(newargs),
+                    args: newargs,
                     default: make_default(
                         pa,
                         &|p2, rem| matcher_constr(pa, &cstr_clone, p2, rem),
@@ -5563,19 +5579,21 @@ fn make_variant_matching_nonconst<'p>(
                 def,
             );
             let ctx = filter_ctx(None, pa, p, ctx);
-            let mut new_args = vec![(
-                b.prim(
-                    Primitive::Pfield(1, FieldDbgInfo::PolyVarContent),
-                    &[*arg],
-                    arena.lam_loc(p.pat_loc),
+            let new_args = MatchArgs::cons(
+                (
+                    b.prim(
+                        Primitive::Pfield(1, FieldDbgInfo::PolyVarContent),
+                        &[*arg],
+                        arena.lam_loc(p.pat_loc),
+                    ),
+                    LetKind::Alias,
                 ),
-                LetKind::Alias,
-            )];
-            new_args.extend(argl.iter().cloned());
+                &argl,
+            );
             MatchCell {
                 pm: PatternMatching {
                     cases: Vec::new(),
-                    args: MatchArgs::new(new_args),
+                    args: new_args,
                     default: def,
                 },
                 ctx,
@@ -5799,7 +5817,7 @@ fn make_tuple_matching<'p>(
         None => crate::misc::fatal_error("Matching.make_tuple_matching"),
         Some(((arg, _mut), _)) => {
             let argl = args.tail(1);
-            let mut new_args = Vec::new();
+            let mut new_args: ArgsBuf = ArgsBuf::new();
             for pos in 0..arity {
                 new_args.push((
                     b.prim(
@@ -5942,7 +5960,7 @@ fn make_record_matching<'p>(
         None => crate::misc::fatal_error("Matching.make_record_matching"),
         Some(((arg, _mut), _)) => {
             let argl = args.tail(1);
-            let mut new_args = Vec::new();
+            let mut new_args: ArgsBuf = ArgsBuf::new();
             for lbl in all_labels.iter() {
                 let access = match &lbl.lbl_repres {
                     RecordRepresentation::RecordRegular => {
@@ -6058,7 +6076,7 @@ fn make_array_matching<'p>(
         Some(((arg, _mut), _)) => {
             let argl = args.tail(1);
             let len = get_key_array(p);
-            let mut new_args = Vec::new();
+            let mut new_args: ArgsBuf = ArgsBuf::new();
             for pos in 0..len {
                 new_args.push((
                     b.prim(
@@ -7935,7 +7953,7 @@ fn compile_list<'p, K: Clone>(
     pa: &'p PatArena<'p>,
     compile_fun: &mut dyn FnMut(
         &[Ctx<'p>],
-        &PatternMatching<'p>,
+        PatternMatching<'p>,
     ) -> Result<(RawLambda, Jumps<'p>), Unused>,
     division: Vec<(K, MatchCell<'p>)>,
 ) -> Result<(Vec<(K, RawLambda)>, Jumps<'p>, Vec<&'p Pattern>), Unused> {
@@ -7947,7 +7965,7 @@ fn compile_list<'p, K: Clone>(
         if cell.ctx.is_empty() {
             continue;
         }
-        if let Ok((lambda1, total1)) = compile_fun(&cell.ctx, &cell.pm) {
+        if let Ok((lambda1, total1)) = compile_fun(&cell.ctx, cell.pm) {
             // OCaml `compiler/ml/matching.ml:2358-2364` recurses on the
             // tail with `jumps_map ctx_combine total1 :: totals`, then
             // conses `(key, lambda1)` and `cell.pat` onto the returned
@@ -8391,24 +8409,72 @@ fn compile_match<'p>(
     m: &PatternMatching<'p>,
     next_raise_count: &mut i32,
 ) -> Result<(RawLambda, Jumps<'p>), Unused> {
+    compile_match_cow(
+        ctx_ref,
+        pa,
+        arena,
+        partial,
+        ctx,
+        Cow::Borrowed(m),
+        next_raise_count,
+    )
+}
+
+/// [`compile_match`] on a matching the caller gives up, so its cases and
+/// default environment move on instead of being copied.
+fn compile_match_owned<'p>(
+    ctx_ref: &TypeContext,
+    pa: &'p PatArena<'p>,
+    arena: &LocArena<'_>,
+    partial: &Partial,
+    ctx: &[Ctx<'p>],
+    m: PatternMatching<'p>,
+    next_raise_count: &mut i32,
+) -> Result<(RawLambda, Jumps<'p>), Unused> {
+    compile_match_cow(
+        ctx_ref,
+        pa,
+        arena,
+        partial,
+        ctx,
+        Cow::Owned(m),
+        next_raise_count,
+    )
+}
+
+fn compile_match_cow<'p>(
+    ctx_ref: &TypeContext,
+    pa: &'p PatArena<'p>,
+    arena: &LocArena<'_>,
+    partial: &Partial,
+    ctx: &[Ctx<'p>],
+    m: Cow<'_, PatternMatching<'p>>,
+    next_raise_count: &mut i32,
+) -> Result<(RawLambda, Jumps<'p>), Unused> {
     let b = arena.b;
     match (m.cases.as_slice(), m.args.as_slice()) {
-        ([], []) => comp_exit(b, ctx, m),
-        ([(pats, action), rem @ ..], _) if pats.is_empty() => {
+        ([], []) => comp_exit(b, ctx, &m),
+        ([(pats, action), ..], _) if pats.is_empty() => {
             if action.is_guarded() {
-                let remaining = PatternMatching {
-                    cases: rem.to_vec(),
-                    args: m.args.clone(),
-                    default: m.default.clone(),
+                let action = action.clone();
+                let remaining = match m {
+                    Cow::Borrowed(m) => PatternMatching {
+                        cases: m.cases[1..].to_vec(),
+                        args: m.args.clone(),
+                        default: m.default.clone(),
+                    },
+                    Cow::Owned(mut m) => {
+                        m.cases.remove(0);
+                        m
+                    }
                 };
-                let (lambda, total) = compile_match(
+                let (lambda, total) = compile_match_owned(
                     ctx_ref,
                     pa,
                     arena,
-                    None,
                     partial,
                     ctx,
-                    &remaining,
+                    remaining,
                     next_raise_count,
                 )?;
                 Ok((action.body_with(b, lambda), total))
@@ -8417,11 +8483,12 @@ fn compile_match<'p>(
             }
         }
         (_, [(arg, str_kind), argl @ ..]) => {
-            let (v, newarg) = arg_to_var(b, pa, ctx_ref, arg, &m.cases);
-            let new_args = {
-                let mut a = vec![(newarg, LetKind::Alias)];
-                a.extend(argl.iter().cloned());
-                a
+            let (arg, str_kind) = (*arg, *str_kind);
+            let (v, newarg) = arg_to_var(b, pa, ctx_ref, &arg, &m.cases);
+            let new_args = MatchArgs::cons((newarg, LetKind::Alias), argl);
+            let (cases, default) = match m {
+                Cow::Borrowed(m) => (m.cases.clone(), m.default.clone()),
+                Cow::Owned(m) => (m.cases, m.default),
             };
             // `split_precompile` on a matching with the new args, without
             // first copying the cases into that matching.
@@ -8430,9 +8497,9 @@ fn compile_match<'p>(
                 pa,
                 arena,
                 &Some(v),
-                m.cases.clone(),
-                &MatchArgs::new(new_args),
-                m.default.clone(),
+                cases,
+                &new_args,
+                default,
                 next_raise_count,
             );
             let first_match = info.me;
@@ -8455,7 +8522,7 @@ fn compile_match<'p>(
                 LetKind::StrictOpt => jumps_map(ctx_erase_first_col, total),
                 LetKind::Strict | LetKind::Alias | LetKind::Variable => total,
             };
-            Ok((bind_check(b, *str_kind, &v, arg, lam), total))
+            Ok((bind_check(b, str_kind, &v, &arg, lam), total))
         }
         (cases, []) if !cases.is_empty() => {
             // Cases exist but no args — shouldn't happen normally.
@@ -8684,14 +8751,13 @@ fn compile_no_test<'p>(
     next_raise_count: &mut i32,
 ) -> Result<(RawLambda, Jumps<'p>), Unused> {
     let cell = divide_fn(ctx, to_match);
-    let (lambda, total) = compile_match(
+    let (lambda, total) = compile_match_owned(
         ctx_ref,
         pa,
         arena,
-        None,
         partial,
         &cell.ctx,
-        &cell.pm,
+        cell.pm,
         next_raise_count,
     )?;
     Ok((lambda, jumps_map(|c| up_ctx(&c), total)))
@@ -8727,10 +8793,10 @@ fn compile_test_wrapper<'p, K: Clone>(
     // Step 2: compile_list
     let c_div = {
         let mut compile_fn = |ctx: &[Ctx<'p>],
-                              pm: &PatternMatching<'p>|
+                              pm: PatternMatching<'p>|
          -> Result<(RawLambda, Jumps<'p>), Unused> {
             let mut next_raise = raise_counter.get();
-            let result = compile_match(ctx_ref, pa, arena, None, partial, ctx, pm, &mut next_raise);
+            let result = compile_match_owned(ctx_ref, pa, arena, partial, ctx, pm, &mut next_raise);
             raise_counter.set(next_raise);
             result
         };
@@ -9041,17 +9107,16 @@ fn compile_matching_unresolved<'p>(
                     .into_iter()
                     .map(|(pat, act)| (vec![pat], MatchAction::from_case(act)))
                     .collect(),
-                args: MatchArgs::new(vec![(arg, LetKind::Strict)]),
+                args: MatchArgs::new([(arg, LetKind::Strict)]),
                 default: vec![(vec![vec![omega()]], raise_num)],
             };
-            match compile_match(
+            match compile_match_owned(
                 ctx_ref,
                 pa,
                 arena,
-                None,
                 &partial,
                 &start_ctx(1),
-                &pm,
+                pm,
                 next_raise_count,
             ) {
                 Ok((lambda, total)) => check_total(b, &total, lambda, raise_num, handler_fun),
@@ -9064,17 +9129,16 @@ fn compile_matching_unresolved<'p>(
                     .into_iter()
                     .map(|(pat, act)| (vec![pat], MatchAction::from_case(act)))
                     .collect(),
-                args: MatchArgs::new(vec![(arg, LetKind::Strict)]),
+                args: MatchArgs::new([(arg, LetKind::Strict)]),
                 default: Vec::new(),
             };
-            match compile_match(
+            match compile_match_owned(
                 ctx_ref,
                 pa,
                 arena,
-                None,
                 &partial,
                 &start_ctx(1),
-                &pm,
+                pm,
                 next_raise_count,
             ) {
                 Ok((lambda, total)) => {
@@ -9281,22 +9345,16 @@ fn for_tupled_function_unresolved<'p>(
     let omegas_row: Vec<Vec<&'p Pattern>> = vec![omegas(paraml.len())];
     let pm = PatternMatching {
         cases: pats_act_list,
-        args: MatchArgs::new(
-            paraml
-                .iter()
-                .map(|id| (b.var(*id), LetKind::Strict))
-                .collect(),
-        ),
+        args: MatchArgs::new(paraml.iter().map(|id| (b.var(*id), LetKind::Strict))),
         default: vec![(omegas_row, raise_num)],
     };
-    match compile_match(
+    match compile_match_owned(
         ctx_ref,
         pa,
         arena,
-        None,
         &partial,
         &start_ctx(paraml.len()),
-        &pm,
+        pm,
         next_raise_count,
     ) {
         Ok((lambda, total)) => {
@@ -9528,7 +9586,7 @@ pub fn do_for_multiple_match<'p>(
                 raise_num,
                 PatternMatching {
                     cases,
-                    args: MatchArgs::new(vec![(tuple_arg, LetKind::Strict)]),
+                    args: MatchArgs::new([(tuple_arg, LetKind::Strict)]),
                     default: vec![(vec![vec![omega()]], raise_num)],
                 },
             )
@@ -9537,7 +9595,7 @@ pub fn do_for_multiple_match<'p>(
             -1,
             PatternMatching {
                 cases,
-                args: MatchArgs::new(vec![(tuple_arg, LetKind::Strict)]),
+                args: MatchArgs::new([(tuple_arg, LetKind::Strict)]),
                 default: Vec::new(),
             },
         ),
@@ -9555,7 +9613,7 @@ pub fn do_for_multiple_match<'p>(
             .iter()
             .map(|_| ctx_ref.create_ident("match"))
             .collect();
-        let args = MatchArgs::new(idl.iter().map(|id| (b.var(*id), LetKind::Alias)).collect());
+        let args = MatchArgs::new(idl.iter().map(|id| (b.var(*id), LetKind::Alias)));
 
         let flat_next = flatten_precompiled(pa, size, &args, next)?;
         let flat_nexts: Vec<(i32, PmHalfCompiled<'_>)> = nexts
@@ -9609,14 +9667,13 @@ pub fn do_for_multiple_match<'p>(
         Ok(lam) => lam,
         Err(CannotFlattenExn) => {
             // Fallback: compile without flattening
-            match compile_match(
+            match compile_match_owned(
                 ctx_ref,
                 pa,
                 arena,
-                None,
                 &partial,
                 &start_ctx(1),
-                &pm1,
+                pm1,
                 next_raise_count,
             ) {
                 Ok((lambda, total)) => match &partial {

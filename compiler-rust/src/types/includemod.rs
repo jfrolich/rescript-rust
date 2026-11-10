@@ -2691,7 +2691,7 @@ fn substitute_type_declaration_paths(
 
     let copied = ctype::subst_identity_copy_many(type_ctx, &slots);
     if !subst.is_empty() {
-        let mut seen = HashSet::new();
+        let mut seen = super::type_marks::visit_set();
         for ty in &copied {
             rewrite_substituted_type_paths(type_ctx, *ty, subst, &mut seen);
         }
@@ -2929,10 +2929,10 @@ fn rewrite_substituted_type_paths(
     type_ctx: &TypeContext,
     ty: TypeExprRef,
     subst: &InclusionSubst,
-    seen: &mut HashSet<TypeExprRef>,
+    seen: &mut super::type_marks::TypeVisitSet,
 ) {
     let ty = type_ctx.repr(ty);
-    if !seen.insert(ty) {
+    if !seen.visit(ty) {
         return;
     }
 
@@ -3027,7 +3027,7 @@ fn substitute_value_type_paths(
     // before more-general checking; compiler/ml/subst.ml:303-309 copies and
     // substitutes the value type rather than mutating the original scheme.
     let copied = ctype::subst_identity_copy(type_ctx, ty);
-    let mut seen = HashSet::new();
+    let mut seen = super::type_marks::visit_set();
     rewrite_substituted_type_paths(type_ctx, copied, subst, &mut seen);
     copied
 }

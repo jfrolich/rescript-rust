@@ -490,9 +490,45 @@ fn ident_tbl_fold_name_order<'a>(names: impl Iterator<Item = (&'a str, i32)>) ->
     order
 }
 
-/// Same-name bindings in an Env table, oldest first. Shared so that copying a
-/// persistent-map node on insert only bumps reference counts.
-type IdBucket<T> = std::rc::Rc<Vec<(Ident, T)>>;
+/// Same-name bindings in an Env table, oldest first. Most names are bound
+/// once, so a single binding is stored inline; a name bound again moves its
+/// bindings to a shared vector, so copying a persistent-map node on insert
+/// only bumps reference counts.
+#[derive(Debug, Clone)]
+enum IdBucket<T> {
+    One([(Ident, T); 1]),
+    Many(std::rc::Rc<Vec<(Ident, T)>>),
+}
+
+impl<T: Clone> IdBucket<T> {
+    fn push(&mut self, id: Ident, value: T) {
+        match self {
+            IdBucket::One([first]) => {
+                *self = IdBucket::Many(std::rc::Rc::new(vec![first.clone(), (id, value)]));
+            }
+            IdBucket::Many(entries) => std::rc::Rc::make_mut(entries).push((id, value)),
+        }
+    }
+
+    fn last_mut(&mut self) -> Option<&mut (Ident, T)> {
+        match self {
+            IdBucket::One([entry]) => Some(entry),
+            IdBucket::Many(entries) => std::rc::Rc::make_mut(entries).last_mut(),
+        }
+    }
+}
+
+impl<T> std::ops::Deref for IdBucket<T> {
+    type Target = [(Ident, T)];
+
+    #[inline]
+    fn deref(&self) -> &[(Ident, T)] {
+        match self {
+            IdBucket::One(entry) => entry,
+            IdBucket::Many(entries) => entries,
+        }
+    }
+}
 
 /// A table of bindings indexed by identifier.
 ///
@@ -515,12 +551,14 @@ impl<T: Clone> IdTbl<T> {
 
     pub fn add(&mut self, id: Ident, value: T) {
         let key = id.name_atom();
-        match self.current.get_mut(&key) {
-            Some(entries) => std::rc::Rc::make_mut(entries).push((id, value)),
-            None => {
-                self.current
-                    .insert(key, std::rc::Rc::new(vec![(id, value)]));
-            }
+        // `get_mut` copies the shared map path even when the key is absent,
+        // so probe first: most added names are new.
+        if self.current.contains_key(&key)
+            && let Some(entries) = self.current.get_mut(&key)
+        {
+            entries.push(id, value);
+        } else {
+            self.current.insert(key, IdBucket::One([(id, value)]));
         }
     }
 
@@ -689,8 +727,9 @@ impl<T: Clone> IdTbl<T> {
     where
         F: FnMut(&T) -> T,
     {
-        if let Some(entries) = self.current.get_mut(&key)
-            && let Some((id, value)) = std::rc::Rc::make_mut(entries).last_mut()
+        if self.current.contains_key(&key)
+            && let Some(entries) = self.current.get_mut(&key)
+            && let Some((id, value)) = entries.last_mut()
         {
             let updated = f(value);
             *value = updated.clone();
@@ -853,14 +892,14 @@ impl<T: Clone> TycompTbl<T> {
 
     pub fn add(&mut self, id: Ident, value: T) {
         let key = id.name_atom();
-        match self.current.get_mut(&key) {
-            Some(entries) => std::rc::Rc::make_mut(entries).push((id, value)),
-            None => {
-                let seq = self.current_first_add.len() as i32;
-                self.current_first_add.insert(key, seq);
-                self.current
-                    .insert(key, std::rc::Rc::new(vec![(id, value)]));
-            }
+        if self.current.contains_key(&key)
+            && let Some(entries) = self.current.get_mut(&key)
+        {
+            entries.push(id, value);
+        } else {
+            let seq = self.current_first_add.len() as i32;
+            self.current_first_add.insert(key, seq);
+            self.current.insert(key, IdBucket::One([(id, value)]));
         }
     }
 
