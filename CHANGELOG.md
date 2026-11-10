@@ -42,6 +42,8 @@
 
 #### :house: Internal
 
+- Reduce backend identifier-allocation setup work by scanning arena identifier tables instead of recursively walking Lambda and JavaScript trees. https://github.com/jfrolich/rescript-rust/pull/82
+
 - CI: share caches between validation runs and build the Rust compiler once less per run. https://github.com/jfrolich/rescript-rust/pull/79
 - Pin the Rust nightly toolchain and enable parallel frontend compilation for development builds. https://github.com/jfrolich/rescript-rust/pull/78
 - Parallelize ordinary Rust release code generation while preserving the profile-guided release configuration. https://github.com/jfrolich/rescript-rust/pull/77
