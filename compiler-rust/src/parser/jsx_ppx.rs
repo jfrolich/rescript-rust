@@ -575,6 +575,11 @@ fn transform_react_component_binding(
 
     // Detect if function is async
     let is_async = is_async_function(arena, binding.pvb_expr);
+    let (wrapper_attrs, make_attrs) = split_directive_attrs(
+        arena,
+        is_async,
+        &arena.get_expr(binding.pvb_expr).pexp_attributes,
+    );
 
     // Filter out @react.component attribute
     let filtered_attrs: Attributes = binding
@@ -776,7 +781,7 @@ fn transform_react_component_binding(
             is_async,
         })),
         pexp_loc: empty_loc(),
-        pexp_attributes: Attributes::new(),
+        pexp_attributes: make_attrs,
     };
 
     // Current Parsetree stores locally abstract types directly on the n-ary
@@ -815,7 +820,7 @@ fn transform_react_component_binding(
             && (core_type_of_attr.is_none() || !typ_vars_of_core_type.is_empty());
 
         let binding_name_idx = arena.push_interned_string(&binding_name);
-        let binding_expr_attrs = arena.get_expr(binding.pvb_expr).pexp_attributes.clone();
+        let binding_expr_attrs = wrapper_attrs;
         let generated_wrapper_expr = make_props_wrapper_expr_with_ref(
             arena,
             &fn_name,
@@ -955,6 +960,11 @@ fn transform_react_component_with_props_binding(
 
     // Check if async
     let is_async = is_async_function(arena, binding.pvb_expr);
+    let (wrapper_attrs, make_attrs) = split_directive_attrs(
+        arena,
+        is_async,
+        &arena.get_expr(binding.pvb_expr).pexp_attributes,
+    );
 
     // Filter out @react.componentWithProps attribute
     let filtered_attrs: Attributes = binding
@@ -1032,7 +1042,7 @@ fn transform_react_component_with_props_binding(
             is_async: false,
         })),
         pexp_loc: empty_loc(),
-        pexp_attributes: arena.get_expr(binding.pvb_expr).pexp_attributes.clone(),
+        pexp_attributes: wrapper_attrs,
     };
 
     // Create let binding: let full_module_name = wrapper_expr in full_module_name
@@ -1122,9 +1132,10 @@ fn transform_react_component_with_props_binding(
                 transform_expression(arena.get_expr(binding.pvb_expr).clone(), config, arena);
             let constrained_expr =
                 wrap_function_body_with_constraint(arena, transformed_expr, config);
-            // OCaml line 905-909: clear pexp_attributes (they were moved to wrapper_expr)
+            // jsx_v4.ml: the attributes moved to wrapper_expr, but for an async
+            // component's directive
             let constrained_expr = Expression {
-                pexp_attributes: Attributes::new(),
+                pexp_attributes: make_attrs,
                 ..constrained_expr
             };
             let modified_binding = ValueBinding {
@@ -2265,6 +2276,28 @@ fn has_react_component_attr(arena: &ParseArena, attrs: &Attributes) -> bool {
     attrs
         .iter()
         .any(|attr| is_react_component_attr(arena, attr))
+}
+
+/// `split_directive_attrs` (jsx_v4.ml): an async component's directive
+/// (`'use cache'`) stays on its inner async `make`; the wrapper keeps the rest.
+/// A sync wrapper has `make` inlined, so it keeps every attribute. Returns the
+/// wrapper's attributes and `make`'s.
+fn split_directive_attrs(
+    arena: &ParseArena,
+    is_async: bool,
+    attrs: &Attributes,
+) -> (Attributes, Attributes) {
+    if !is_async {
+        return (attrs.clone(), Attributes::new());
+    }
+    let (make_attrs, wrapper_attrs): (Vec<_>, Vec<_>) = attrs
+        .iter()
+        .cloned()
+        .partition(|attr| arena.get_string(attr.0.txt) == "directive");
+    (
+        wrapper_attrs.into_iter().collect(),
+        make_attrs.into_iter().collect(),
+    )
 }
 
 fn is_react_component_attr(arena: &ParseArena, attr: &Attribute) -> bool {

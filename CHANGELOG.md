@@ -23,6 +23,7 @@
 
 #### :bug: Bug fix
 
+- JSX v4: keep `@directive` on an async component's own function instead of its generated sync wrapper, so `@react.component let make = @directive("'use cache';") async (...) => ...` compiles to an async function that starts with `'use cache'` (ReScript 12 dropped the directive; Next.js rejects it on a sync function).
 - Make rewatch compile independent modules after an unrelated failure and recompile blocked dependents when a changed interface survives a failed implementation, including across full watcher rebuilds. https://github.com/rescript-lang/rescript/pull/8667
 - GenType: type inline-record cases of untagged variants as objects instead of their single field's type. https://github.com/rescript-lang/rescript/pull/8693
 - Keep comments on labelled parameters with default values, and before `=?` in optional arrow-type arguments, when formatting. https://github.com/rescript-lang/rescript/pull/8690
