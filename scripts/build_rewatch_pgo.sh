@@ -99,6 +99,10 @@ rsync -a --delete --exclude node_modules --exclude lib "$PROJECT_ROOT/tests/test
 
 export RESCRIPT_RUNTIME="${RESCRIPT_RUNTIME:-$PROJECT_ROOT/packages/@rescript/runtime}"
 INSTRUMENTED="$INSTRUMENTED_TARGET/$RELEASE_SUBDIR/rescript"
+# Every project build reads the runtime's lib/ocaml, which a fresh checkout
+# does not have: the release workflow builds rewatch before the runtime.
+echo "==> Building the runtime"
+"$INSTRUMENTED" build "$RESCRIPT_RUNTIME" > /dev/null
 echo "==> Training ($RUNS clean in-process builds)"
 for _ in $(seq "$RUNS"); do
     "$INSTRUMENTED" clean "$TRAIN_DIR" > /dev/null
