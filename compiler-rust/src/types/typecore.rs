@@ -991,6 +991,12 @@ pub struct PatternState {
     /// `Typetexp.transl_simple_type_delayed` for pattern constraints, in
     /// registration order.
     globalize_forces: Vec<GlobalizeForce>,
+    /// OCaml `type_pat`'s `constrs <> None`: the pattern is a counter-example
+    /// Parmatch built, typed again by `partial_pred` (typecore.ml:1788-1798).
+    /// Its exploded wildcards are typed with `~constrs` too
+    /// (typecore.ml:1270-1288), and `explode > 0` only comes from
+    /// `partial_pred`, so this holds for the whole pattern.
+    counter_example: bool,
 }
 
 /// One deferred unification of `Typetexp.globalize_used_variables`'s force
@@ -1033,6 +1039,15 @@ impl PatternState {
             module_variables: Vec::new(),
             deferred_type_path_forces: Vec::new(),
             globalize_forces: Vec::new(),
+            counter_example: false,
+        }
+    }
+
+    /// The state for typing a counter-example in `partial_pred`.
+    fn for_counter_example() -> Self {
+        PatternState {
+            counter_example: true,
+            ..PatternState::new()
         }
     }
 
@@ -5686,6 +5701,12 @@ fn type_pattern_construct(
     // env.ml:1197-1206), then typecore.ml:1392: `Env.mark_constructor
     // Env.Pattern !env (Longident.last lid.txt) constr`.
     mark_type_path_of(tctx.type_ctx, env, cstr_desc.cstr_res);
+    // typecore.ml:1444-1445: a generalized constructor of a counter-example
+    // typed `Inside_or` splits the or-pattern, so each alternative is typed
+    // on its own with GADT unification.
+    if cstr_desc.cstr_generalized && state.counter_example && mode == PatternMode::InsideOr {
+        return Err(TypeCoreError::NeedBacktrack);
+    }
     mark_constructor(
         tctx.type_ctx,
         env,
@@ -29849,7 +29870,7 @@ fn partial_pred(
     let unified_pairs = tctx.unify_state.take_unified_pairs();
     let unify_snapshot = tctx.unify_state.snapshot_backtrack_state();
     let diagnostic_len = tctx.diagnostics.len();
-    let mut state = PatternState::new();
+    let mut state = PatternState::for_counter_example();
     // `let env = ref env` (typecore.ml:1744): GADT equations added while
     // typing the counter-example go to a fresh env, not one left behind by
     // earlier pattern typing.
