@@ -59,8 +59,46 @@ function record(h) {
   };
 }
 
+function secondAlternative(x, y, z) {
+  switch (x) {
+    case "Int" :
+    case "Bool" :
+      break;
+    case "Str" :
+      return 0;
+  }
+  switch (y) {
+    case "Int" :
+      return 2;
+    case "Bool" :
+      if (z) {
+        return 1;
+      }
+      throw {
+        RE_EXN_ID: "Match_failure",
+        _1: [
+          "gadt_partial_match_failure_test.res",
+          31,
+          2
+        ],
+        Error: new Error()
+      };
+    case "Str" :
+      throw {
+        RE_EXN_ID: "Match_failure",
+        _1: [
+          "gadt_partial_match_failure_test.res",
+          31,
+          2
+        ],
+        Error: new Error()
+      };
+  }
+}
+
 export {
   bothPartial,
   record,
+  secondAlternative,
 }
 /* No side effect */
