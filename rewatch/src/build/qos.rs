@@ -123,13 +123,11 @@ fn set_thread_class(_class: ThreadClass) -> bool {
     false
 }
 
-/// Number of logical performance cores, or the logical core count when the
-/// platform does not distinguish core classes.
+/// The value of the integer sysctl `name`, when the system has it.
 #[cfg(target_os = "macos")]
-fn performance_core_count() -> usize {
+fn sysctl_u32(name: &std::ffi::CStr) -> Option<u32> {
     let mut value: u32 = 0;
     let mut len = std::mem::size_of::<u32>();
-    let name = c"hw.perflevel0.logicalcpu";
     // SAFETY: `sysctlbyname` writes at most `len` bytes into `value`, and both
     // pointers stay valid for the duration of the call.
     let rc = unsafe {
@@ -141,11 +139,29 @@ fn performance_core_count() -> usize {
             0,
         )
     };
-    if rc == 0 && value > 0 {
-        value as usize
-    } else {
-        num_cpus::get_physical().max(1)
+    (rc == 0).then_some(value)
+}
+
+/// Number of logical performance cores, or the logical core count when the
+/// platform does not distinguish core classes.
+#[cfg(target_os = "macos")]
+fn performance_core_count() -> usize {
+    match sysctl_u32(c"hw.perflevel0.logicalcpu") {
+        Some(count) if count > 0 => count as usize,
+        _ => num_cpus::get_physical().max(1),
     }
+}
+
+/// Number of logical efficiency cores; 0 when the CPU has one core class or
+/// the platform does not report core classes.
+#[cfg(target_os = "macos")]
+pub fn efficiency_core_count() -> usize {
+    sysctl_u32(c"hw.perflevel1.logicalcpu").unwrap_or(0) as usize
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn efficiency_core_count() -> usize {
+    0
 }
 
 #[cfg(not(target_os = "macos"))]
