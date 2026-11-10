@@ -37,15 +37,15 @@ runs:
       with:
         path: rewatch/target
         # A profile-guided build also depends on the script and on what it trains with.
-        key: rewatch-build-v6-${{ inputs.cache-target }}-${{ inputs.profile-guided == 'true' && runner.os != 'Windows' && 'pgo' || 'plain' }}-${{ hashFiles('rewatch/src/**', 'rewatch/cli/**', 'rewatch/Cargo.toml', 'rewatch/Cargo.lock', 'compiler-rust/src/**', 'compiler-rust/Cargo.toml', 'packages/@rescript/runtime/*.res', 'packages/@rescript/runtime/*.resi', 'packages/@rescript/runtime/rescript.json', 'scripts/build_rewatch_pgo.sh', 'tests/tests/rescript.json', 'tests/tests/src/**/*.res', 'tests/tests/src/**/*.resi') }}
+        key: rewatch-build-v6-${{ inputs.cache-target }}-${{ inputs.profile-guided == 'true' && runner.os != 'Windows' && 'pgo' || 'plain' }}-${{ hashFiles('rust-toolchain.toml', '.cargo/config.toml', 'rewatch/src/**', 'rewatch/cli/**', 'rewatch/Cargo.toml', 'rewatch/Cargo.lock', 'compiler-rust/src/**', 'compiler-rust/Cargo.toml', 'packages/@rescript/runtime/*.res', 'packages/@rescript/runtime/*.resi', 'packages/@rescript/runtime/rescript.json', 'scripts/build_rewatch_pgo.sh', 'tests/tests/rescript.json', 'tests/tests/src/**/*.res', 'tests/tests/src/**/*.resi') }}
 
     - name: Determine Rust toolchain version
       id: rust-version
       shell: bash
       run: |
-        version="$(awk -F '"' '/^rust-version[[:space:]]*=/ { print $2; exit }' rewatch/Cargo.toml)"
+        version="$(awk -F '"' '/^channel[[:space:]]*=/ { print $2; exit }' rust-toolchain.toml)"
         if [ -z "$version" ]; then
-          echo "rust-version missing in rewatch/Cargo.toml" >&2
+          echo "channel missing in rust-toolchain.toml" >&2
           exit 1
         fi
         echo "version=${version}" >> "$GITHUB_OUTPUT"
