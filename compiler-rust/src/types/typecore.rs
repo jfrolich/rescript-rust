@@ -10151,6 +10151,8 @@ fn materialize_pattern_of_type(
 ) -> Option<crate::parse_arena::PatIdx> {
     // The exported pattern's sub-patterns go to a scratch arena (see
     // [`PatCase`]).
+    // `Parmatch.ppat_of_type !env expected_ty` (typecore.ml:1278).
+    let pat_env = pattern_env_ref(tctx, env);
     let ta = std::mem::take(&mut tctx.typed);
     let oracle = TypecoreParmatchOracle {
         tctx: &mut *tctx,
@@ -10161,7 +10163,7 @@ fn materialize_pattern_of_type(
         none_type: None,
     };
     let mut pm = crate::types::parmatch::Parmatch::new(oracle, &ta);
-    let pats = pm.pats_of_type(false, EnvRef(0), expected_ty);
+    let pats = pm.pats_of_type(false, pat_env, expected_ty);
     let result = if let [p] = pats.as_slice()
         && pm.is_any(*p)
     {
@@ -10768,6 +10770,7 @@ fn parmatch_pressure_variants(tctx: &mut TypeCheckContext<'_>, env: &Env, patl: 
     };
     // The patterns' sub-patterns are read from the arena set aside for the
     // check (see [`PatCase`]).
+    let tdefs = tctx.type_ctx.store_typed_env(env);
     let ta = std::mem::take(&mut tctx.typed);
     let oracle = TypecoreParmatchOracle {
         tctx: &mut *tctx,
@@ -10779,7 +10782,7 @@ fn parmatch_pressure_variants(tctx: &mut TypeCheckContext<'_>, env: &Env, patl: 
     };
     let mut pm = crate::types::parmatch::Parmatch::new(oracle, &ta);
     let imported: Vec<_> = patl.iter().map(|pat| pm.import(pat)).collect();
-    pm.pressure_variants(EnvRef(0), &imported);
+    pm.pressure_variants(tdefs, &imported);
     drop(pm);
     tctx.typed = ta;
 }
@@ -29411,6 +29414,16 @@ fn pm_variant_length(ctx: &TypeContext, cstr: &crate::types::ConstructorDescript
 }
 
 /// `get_type_path ty tenv` (parmatch.ml:334-338).
+/// The `pat_env` of a pattern the checks inspect. Unlike the match env, it
+/// holds the GADT equations of constructors matched earlier in the same
+/// pattern, and Parmatch reads pattern types in it: `get_type_path p.pat_type
+/// p.pat_env` (parmatch.ml:350-354, 906, 1019), `row_of_pat`
+/// (parmatch.ml:844-847), `Ctype.expand_head p.pat_env` (parmatch.ml:149).
+fn pm_pattern_env(ctx: &TypeContext, env: EnvRef) -> Arc<Env> {
+    ctx.get_typed_env(env)
+        .expect("Parmatch: pattern env is stored in the type context")
+}
+
 fn pm_type_path(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> Path {
     let ty = ctx.repr(crate::types::ctype::expand_head(ctx, env, ty));
     match &*ctx.get_desc(ty) {
@@ -29449,19 +29462,21 @@ impl crate::types::parmatch::Oracle for TypecoreParmatchOracle<'_, '_> {
         self.tctx.type_ctx
     }
 
-    fn expand_head(&mut self, _env: EnvRef, ty: TypeExprRef) -> TypeExprRef {
+    fn expand_head(&mut self, env: EnvRef, ty: TypeExprRef) -> TypeExprRef {
         let ctx = self.tctx.type_ctx;
-        ctx.repr(crate::types::ctype::expand_head(ctx, self.env, ty))
+        let env = pm_pattern_env(ctx, env);
+        ctx.repr(crate::types::ctype::expand_head(ctx, &env, ty))
     }
 
     fn variant_constructors(
         &mut self,
-        _env: EnvRef,
+        env: EnvRef,
         ty: TypeExprRef,
     ) -> Vec<crate::types::ConstructorDescription> {
+        let env = pm_pattern_env(self.tctx.type_ctx, env);
         pm_variant_constructors(
             self.tctx.type_ctx,
-            self.env,
+            &env,
             &mut self.tctx.persistent_env,
             ty,
         )
@@ -29469,12 +29484,13 @@ impl crate::types::parmatch::Oracle for TypecoreParmatchOracle<'_, '_> {
 
     fn record_labels(
         &mut self,
-        _env: EnvRef,
+        env: EnvRef,
         record_ty: TypeExprRef,
     ) -> Vec<crate::types::LabelDescription> {
+        let env = pm_pattern_env(self.tctx.type_ctx, env);
         pm_record_labels(
             self.tctx.type_ctx,
-            self.env,
+            &env,
             &mut self.tctx.persistent_env,
             record_ty,
         )
@@ -29482,13 +29498,14 @@ impl crate::types::parmatch::Oracle for TypecoreParmatchOracle<'_, '_> {
 
     fn type_shape(
         &mut self,
-        _env: EnvRef,
+        env: EnvRef,
         ty: TypeExprRef,
         always: bool,
     ) -> crate::types::parmatch::TypeShape {
+        let env = pm_pattern_env(self.tctx.type_ctx, env);
         pm_type_shape(
             self.tctx.type_ctx,
-            self.env,
+            &env,
             &mut self.tctx.persistent_env,
             ty,
             always,
@@ -29587,12 +29604,14 @@ impl crate::types::parmatch::Oracle for TypecoreParmatchOracle<'_, '_> {
         pm_variant_length(self.tctx.type_ctx, cstr)
     }
 
-    fn type_path(&mut self, _env: EnvRef, ty: TypeExprRef) -> Path {
-        pm_type_path(self.tctx.type_ctx, self.env, ty)
+    fn type_path(&mut self, env: EnvRef, ty: TypeExprRef) -> Path {
+        let pat_env = pm_pattern_env(self.tctx.type_ctx, env);
+        pm_type_path(self.tctx.type_ctx, &pat_env, ty)
     }
 
-    fn row_of(&mut self, _env: EnvRef, ty: TypeExprRef) -> crate::types::type_expr::RowDesc {
-        pm_row_of(self.tctx.type_ctx, self.env, ty)
+    fn row_of(&mut self, env: EnvRef, ty: TypeExprRef) -> crate::types::type_expr::RowDesc {
+        let env = pm_pattern_env(self.tctx.type_ctx, env);
+        pm_row_of(self.tctx.type_ctx, &env, ty)
     }
 }
 
