@@ -22,3 +22,12 @@ let field: type a. holder<a> => int = h =>
   | {tag: Bool, value: Some(true)} => 2
   | {tag: Bool, _} => 3
   }
+
+// The binder is typed before the constructor that refines `a`; it still gets
+// the equation, as every pattern node gets the env of the whole pattern.
+let bindsFirst: type a. (option<a>, t<a>) => int = (y, x) =>
+  switch (y, x) {
+  | (Some(v), Int) => v + 1
+  | (_, Int) => 1
+  | (_, Bool) => 3
+  }
