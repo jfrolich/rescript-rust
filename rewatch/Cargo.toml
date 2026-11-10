@@ -58,7 +58,8 @@ opentelemetry-otlp = { version = "0.32", default-features = false, features = [
 ] }
 
 [profile.release]
-codegen-units = 1
+# Keep fat LTO, but use the default 16 codegen units for parallel pre-link
+# optimization. Profile-guided builds override this in build_rewatch_pgo.sh.
 lto = true
 
 [profile.dev]

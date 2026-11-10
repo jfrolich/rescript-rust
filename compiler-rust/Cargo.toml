@@ -62,8 +62,9 @@ native = ["rayon", "env_logger", "clap"]
 wasm = ["wasm-bindgen"]
 
 [profile.release]
+# As in rewatch/Cargo.toml, whose profile applies when rewatch builds this
+# crate: fat LTO, and the default number of codegen units.
 lto = true
-codegen-units = 1
 
 [profile.dev]
 # Fast compilation for development

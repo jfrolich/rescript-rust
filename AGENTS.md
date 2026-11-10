@@ -782,6 +782,21 @@ RUSTFLAGS="-Z sanitizer=thread" cargo test --manifest-path compiler-rust/Cargo.t
 cargo clippy --manifest-path compiler-rust/Cargo.toml --all-targets
 ```
 
+Optimized builds of the `rescript` executable:
+
+```bash
+# The release profile: fat LTO. Use it for benchmarks and parity runs.
+cargo build --release --manifest-path rewatch/Cargo.toml
+
+# Thin LTO trades some runtime performance for faster optimized builds.
+# Use it for iteration, not shipping or release-performance comparisons.
+# Switching the LTO setting invalidates the existing build artifacts.
+CARGO_PROFILE_RELEASE_LTO=thin cargo build --release --manifest-path rewatch/Cargo.toml
+
+# What ships: a profile-guided build, two release builds long.
+make rewatch-pgo
+```
+
 ### Comparing Against the OCaml Compiler
 
 When the Rust output differs from OCaml, run both compilers on the same `.res`

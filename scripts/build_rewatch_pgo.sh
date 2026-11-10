@@ -79,6 +79,10 @@ fi
 # Flags already set (CI denies warnings) apply to both builds as well.
 BASE_RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }"
 
+# Preserve the shipping configuration: the measured PGO build with one
+# codegen unit retired fewer instructions than the default 16-unit build.
+export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1
+
 echo "==> Building instrumented rewatch"
 mkdir -p "$PROFILE_DIR"
 find "$PROFILE_DIR" -name '*.profraw' -type f -delete
