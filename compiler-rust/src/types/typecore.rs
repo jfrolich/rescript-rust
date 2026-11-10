@@ -4364,6 +4364,14 @@ fn type_pattern_inner(
 ) -> TypeCoreResult<Pattern> {
     use crate::parser::ast::PatternDesc as PD;
     let pat_env_ref = tctx.type_ctx.store_typed_env(env);
+    // OCaml's `mode'` (typecore.ml:1257): `Splitting_or` makes an or-pattern
+    // split itself, and everything below this node is typed in `Normal` mode.
+    let split_or = matches!(mode, PatternMode::SplitOr | PatternMode::SplittingOr);
+    let mode = if mode == PatternMode::SplittingOr {
+        PatternMode::Normal
+    } else {
+        mode
+    };
 
     let expanded_pat = maybe_expand_variant_spread_in_pattern(tctx, env, pat, expected_ty)?;
     let pat = expanded_pat.as_ref().unwrap_or(pat);
@@ -4391,17 +4399,12 @@ fn type_pattern_inner(
                     } else {
                         explode - 1
                     };
-                    let next_mode = if mode == PatternMode::SplittingOr {
-                        PatternMode::Normal
-                    } else {
-                        mode
-                    };
                     let result = type_pattern_inner(
                         tctx,
                         env,
                         tctx.arena.get_pat(generated),
                         expected_ty,
-                        next_mode,
+                        mode,
                         allow_existentials,
                         state,
                         next_explode,
@@ -4578,14 +4581,9 @@ fn type_pattern_inner(
         PD::Ppat_or(p1_idx, p2_idx) => {
             // Or-pattern: P1 | P2
             let or_entry_state = state.checkpoint();
-            let backtrack_state = if matches!(mode, PatternMode::SplitOr | PatternMode::SplittingOr)
-            {
-                Some(save_pattern_backtrack_state(tctx, state))
-            } else {
-                None
-            };
+            let backtrack_state = split_or.then(|| save_pattern_backtrack_state(tctx, state));
             let typed_or_result = (|| -> TypeCoreResult<Pattern> {
-                if matches!(mode, PatternMode::SplitOr | PatternMode::SplittingOr) {
+                if split_or {
                     return Err(TypeCoreError::NeedBacktrack);
                 }
 
