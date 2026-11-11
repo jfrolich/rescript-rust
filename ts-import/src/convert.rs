@@ -253,7 +253,7 @@ impl<'a> Converter<'a> {
         let flags = symbol.flags();
         if !flags.intersects(SymbolFlags::Value) {
             return Err(format!(
-                "`{export}` is a type in \"{module}\", not a value. Import it with `type {} = %ts(\"{module}\", \"{export}\")`.",
+                "`{export}` is a type in \"{module}\", not a value. Import it with `type {} = %ts(\"{module}#{export}\")`.",
                 lower_ident(export)
             ));
         }

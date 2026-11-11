@@ -656,6 +656,9 @@ pub struct CompilerOptions {
     pub spice_ppx: bool,
     /// External `-ppx` rewriters, in command-line order.
     pub external_ppxs: Vec<String>,
+    /// TypeScript files `%ts` imports read instead of the file system, as
+    /// absolute paths with their contents (tests, the playground).
+    pub ts_files: Option<Vec<(String, String)>>,
     /// When true, do not implicitly open Pervasives and Stdlib.
     pub nopervasives: bool,
     /// The module name being compiled. Used to filter self-opens.
@@ -860,6 +863,7 @@ impl Default for CompilerOptions {
             no_builtin_ppx: false,
             spice_ppx: false,
             external_ppxs: Vec::new(),
+            ts_files: None,
             nopervasives: false,
             module_name: None,
             package_name: None,
@@ -6651,6 +6655,17 @@ pub fn run_implementation_frontend(
     if parser.has_errors() {
         return Err(parser_error_to_anyhow(parser, source, filename));
     }
+    // `%ts` imports become ordinary declarations before anything else looks
+    // at the structure (src/ts_import.rs).
+    #[cfg(feature = "ts-import")]
+    let structure = crate::ts_import::expand_structure(
+        parser,
+        structure,
+        source,
+        filename,
+        options.ts_files.as_deref(),
+    )
+    .map_err(|err| ppx_error_to_anyhow(err, parser.arena(), source, filename))?;
     // cmd_ppx_apply.ml `apply_rewriters_str`: with external PPXs configured,
     // the removed `ocaml.` spellings are rejected before the bridge renames
     // them.

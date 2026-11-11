@@ -63,6 +63,8 @@ pub mod source_text;
 pub mod string_literal;
 /// Optional aggregate compiler phase timings.
 pub mod timing;
+#[cfg(feature = "ts-import")]
+pub mod ts_import;
 pub mod types;
 #[cfg(target_arch = "wasm32")]
 pub mod wasm_vfs;

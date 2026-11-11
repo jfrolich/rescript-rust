@@ -1739,6 +1739,22 @@ impl ParseArena {
         self.locations.len()
     }
 
+    /// Gives every location from index `first` on the span of `loc`. Code a
+    /// frontend step generates and parses into this arena is located at the
+    /// source item it stands for, so diagnostics about it point there. A
+    /// location-free arena stores no spans and has nothing to move.
+    pub fn relocate_locations_from(&mut self, first: usize, loc: LocIdx) {
+        if !self.store_locations {
+            return;
+        }
+        let (start, end) = (self.loc_start_idx(loc), self.loc_end_idx(loc));
+        for index in first..self.locations.len() {
+            let location = self.locations.get_mut(LocIdx(index as u32));
+            location.loc_start = start;
+            location.loc_end = end;
+        }
+    }
+
     // ========== Location accessor helpers ==========
 
     /// Get the start position of a location.
@@ -3377,6 +3393,12 @@ impl ParseArena {
     #[inline]
     pub fn get_mod_expr(&self, idx: ModExprIdx) -> &ModuleExpr {
         self.mod_exprs.get(idx)
+    }
+
+    /// Get a mutable module expression by index.
+    #[inline]
+    pub fn get_mod_expr_mut(&mut self, idx: ModExprIdx) -> &mut ModuleExpr {
+        self.mod_exprs.get_mut(idx)
     }
 
     /// Push a module type into the arena and return its index.

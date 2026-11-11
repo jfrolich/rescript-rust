@@ -4,7 +4,7 @@
 //!
 //! ```rescript
 //! let {getUser, add} = %ts("./api.ts")
-//! type user = %ts("./api.ts", "User")
+//! type user = %ts("./api.ts#User")
 //! module Api = %ts("./api.ts")
 //! ```
 //!
@@ -44,11 +44,11 @@ pub struct ValueImport {
 pub enum RequestKind {
     /// `let {a, b: c} = %ts("module")`
     Values(Vec<ValueImport>),
-    /// `type local = %ts("module", "Export")`
+    /// `type local = %ts("module#Export")`
     Type { export: String, local: String },
     /// `module Local = %ts("module")`: every export.
     Module { local: String },
-    /// `module Local = %ts("module", "Class")`: a class as a module with
+    /// `module Local = %ts("module#Class")`: a class as a module with
     /// `type t`, `make` and its static members.
     Class { export: String, local: String },
 }
@@ -203,7 +203,7 @@ fn expand(
             let symbol = find_export(converter, module_symbol, module, export)?;
             if !symbol.flags().intersects(SymbolFlags::Class) {
                 return Err(format!(
-                    "`{export}` in \"{module}\" is not a class. `module {local} = %ts(\"{module}\", \"{export}\")` imports a class; use `%ts(\"{module}\")` for the whole module."
+                    "`{export}` in \"{module}\" is not a class. `module {local} = %ts(\"{module}#{export}\")` imports a class; use `%ts(\"{module}\")` for the whole module."
                 ));
             }
             let class = converter.class_module(module, export, local, symbol);
