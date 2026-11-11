@@ -1,0 +1,2771 @@
+//! All tree mutations and the incremental maintenance they require.
+use super::*;
+use crate::lambda::lam_primitive::Primitive;
+use smallvec::{SmallVec, smallvec};
+use std::collections::HashMap;
+
+impl Bir {
+    /// Construct an operation without rewrite rules. Children must be distinct,
+    /// detached live roots. `aux` carries the operation's small enum/arity payload.
+    /// No child handles may be shared, including through different list entries.
+    pub fn new_node(&mut self, view: View<'_>, aux: u16) -> NodeId {
+        if let View::Var { var } = view {
+            assert!(
+                !self
+                    .vars
+                    .binder(var)
+                    .is_some_and(|b| self.node(b).flags().contains(NodeFlags::DEAD)),
+                "cannot reference a released dead binding"
+            );
+        }
+        let children = view.children();
+        for (i, &child) in children.iter().enumerate() {
+            self.node(child);
+            debug_assert!(
+                self.parents[child.index()].is_none(),
+                "child already attached"
+            );
+            debug_assert!(!children[..i].contains(&child), "shared child");
+        }
+        let packed = Node::pack(view, aux, &mut self.lists);
+        let id = self.allocate(packed);
+        self.check_shape(id);
+        self.bind(id);
+        for child in children {
+            self.parents[child.index()] = Some(id);
+            let multiplier = self.edge_weight(id, child);
+            if multiplier != 1 {
+                self.adjust_counts(child, i64::from(multiplier) - 1);
+            }
+        }
+        self.adjust_direct(id, 1);
+        self.repair(id);
+        self.capture_created(id);
+        id
+    }
+
+    fn allocate(&mut self, node: Node) -> NodeId {
+        self.visit();
+        self.tails_valid = false;
+        self.register_kind(node, true);
+        if let Some(id) = self.free_nodes.pop() {
+            self.nodes[id.index()] = node;
+            self.parents[id.index()] = None;
+            self.weights[id.index()] = (0, 0);
+            if !self.cold.is_empty() {
+                self.cold[id.index()] = None;
+            }
+            id
+        } else {
+            let id = NodeId(index(self.nodes.len()));
+            self.nodes.push(node);
+            self.parents.push(None);
+            self.weights.push((0, 0));
+            self.capture_chain.push((0, false));
+            if !self.cold.is_empty() {
+                self.cold.push(None);
+            }
+            id
+        }
+    }
+
+    pub(super) fn check_shape(&self, id: NodeId) {
+        match self.view(id) {
+            View::For { parts, .. } => assert_eq!(parts.len(), 3),
+            View::SForRange { parts, .. } => assert!((2..=3).contains(&parts.len())),
+            View::STry { parts, exception } => {
+                assert!((2..=3).contains(&parts.len()));
+                assert!(exception.is_some() || parts.len() == 2);
+            }
+            View::SForOf { parts, .. } | View::SForAwaitOf { parts, .. } => {
+                assert_eq!(parts.len(), 2)
+            }
+            View::Switch {
+                actions, header, ..
+            }
+            | View::StrSwitch {
+                actions, header, ..
+            }
+            | View::SSwitch {
+                actions, header, ..
+            } => {
+                let h = self.switch(header);
+                assert_eq!(actions.len(), h.keys.len() + usize::from(h.has_default));
+            }
+            View::Let { value: None, .. } => {
+                assert!(self.node(id).flags().contains(NodeFlags::DEAD))
+            }
+            View::Var { var } | View::Assign { var, .. } => assert!(var.index() < self.vars.len()),
+            View::Const { value } | View::JNumber { value } => {
+                self.constant(value);
+            }
+            View::Prim { primitive, .. } => {
+                assert!(primitive.index() < self.pools.prims.len());
+            }
+            View::Apply { info, .. } => {
+                assert!(info.index() < self.pools.apply.len());
+            }
+            View::JCall { info, .. } => {
+                assert!(matches!(self.pools.js[info.index()], JsPayload::Call(_)))
+            }
+            View::JObject { values, info } => {
+                let JsPayload::Object(keys) = &self.pools.js[info.index()] else {
+                    panic!("object needs property keys")
+                };
+                assert_eq!(values.len(), keys.len());
+            }
+            View::JBlockLit { info, .. } => {
+                assert!(matches!(self.pools.js[info.index()], JsPayload::Block(_)))
+            }
+            View::JJsx { values, info } => {
+                let JsPayload::Jsx(h) = &self.pools.js[info.index()] else {
+                    panic!("JSX needs shape metadata")
+                };
+                assert_eq!(
+                    values.len(),
+                    2 + usize::from(h.spread)
+                        + h.props.len()
+                        + h.children as usize
+                        + usize::from(h.key)
+                );
+            }
+            View::JTemplate { values, info } | View::JTagged { values, info, .. } => {
+                let (JsPayload::Template(parts) | JsPayload::Tagged(parts)) =
+                    &self.pools.js[info.index()]
+                else {
+                    panic!("template needs segments")
+                };
+                assert_eq!(parts.len(), values.len() + 1);
+            }
+            View::JRecordRest { info, .. } | View::SRest { info, .. } => {
+                assert!(matches!(self.pools.js[info.index()], JsPayload::Rest(_)))
+            }
+            _ => {}
+        }
+    }
+
+    pub(super) fn binders(&self, id: NodeId) -> SmallVec<[VarId; 4]> {
+        match self.view(id) {
+            View::Let { var, .. }
+            | View::SDecl { var, .. }
+            | View::For { var, .. }
+            | View::ForOf { var, .. }
+            | View::ForAwaitOf { var, .. }
+            | View::SForRange { var, .. }
+            | View::SForOf { var, .. }
+            | View::SForAwaitOf { var, .. } => smallvec![var],
+            View::SRest { var, info, .. } => {
+                let mut binders = smallvec![var];
+                if let JsPayload::Rest(fields) = self.javascript(info) {
+                    binders.extend(fields.iter().filter_map(|field| field.binding));
+                }
+                binders
+            }
+            View::Try { exception, .. } => smallvec![exception],
+            View::STry { exception, .. } => exception.into_iter().collect(),
+            View::LetRec { first, values, .. } => (0..index(values.len()))
+                .map(|i| VarId(first.0 + i))
+                .collect(),
+            View::Fun { header, .. } | View::JFun { header, .. } => {
+                self.function(header).params.iter().collect()
+            }
+            View::Catch { header, .. } => self.catch(header).params.iter().collect(),
+            _ => SmallVec::new(),
+        }
+    }
+    fn bind(&mut self, id: NodeId) {
+        if let View::Fun { header, .. } | View::JFun { header, .. } = self.view(id) {
+            assert!(
+                self.func_owners[header.index()].replace(id).is_none(),
+                "function header already owned"
+            );
+        }
+        for var in self.binders(id) {
+            assert!(
+                self.vars.binder[var.index()].is_none(),
+                "variable already bound"
+            );
+            self.vars.binder[var.index()] = Some(id);
+        }
+        self.update_facts(id);
+    }
+    fn unbind(&mut self, id: NodeId) {
+        if let View::Fun { header, .. } | View::JFun { header, .. } = self.view(id) {
+            if self.func_owners[header.index()] == Some(id) {
+                self.func_owners[header.index()] = None;
+            }
+        }
+        for var in self.binders(id) {
+            if self.vars.binder[var.index()] == Some(id) {
+                self.vars.binder[var.index()] = None;
+                self.vars.fact[var.index()] = Fact::Unknown;
+            }
+        }
+    }
+    pub(super) fn value_fact(&self, id: NodeId, rec: RecFlag) -> Fact {
+        match self.view(id) {
+            View::Var { var } => Fact::Alias(var),
+            View::Const { value } | View::JNumber { value } => Fact::Const(value),
+            View::Global { module } => Fact::Module(module.0),
+            View::Fun { .. } | View::JFun { .. } => Fact::Function { node: id, rec },
+            View::JOptional { value } => Fact::Optional(value),
+            View::JBlockLit { .. } | View::JArray { .. } => {
+                if self.node(id).aux() == 0 {
+                    Fact::Block(id)
+                } else {
+                    Fact::MutableBlock(id)
+                }
+            }
+            View::Prim { primitive, args } => {
+                match &self.pools.prims[primitive.index()].primitive {
+                    Primitive::Pmakeblock(_, mutable) => {
+                        if matches!(mutable, crate::lambda::lam_primitive::Mutable::Immutable) {
+                            Fact::Block(id)
+                        } else {
+                            Fact::MutableBlock(id)
+                        }
+                    }
+                    Primitive::Psome | Primitive::PsomeNotNest if args.len() == 1 => {
+                        Fact::Optional(args[0])
+                    }
+                    Primitive::PnullToOpt if args.len() == 1 => {
+                        Fact::NullableOptional(args[0], BoxedNullable::Null)
+                    }
+                    Primitive::PnullUndefinedToOpt if args.len() == 1 => {
+                        Fact::NullableOptional(args[0], BoxedNullable::Both)
+                    }
+                    _ => Fact::Unknown,
+                }
+            }
+            _ => Fact::Unknown,
+        }
+    }
+    pub(super) fn binding_facts(&self, id: NodeId) -> SmallVec<[(VarId, Fact); 4]> {
+        match self.view(id) {
+            View::Let { var, value, .. } | View::SDecl { var, value } => smallvec![(
+                var,
+                value.map_or(Fact::Unknown, |v| self.value_fact(v, RecFlag::No)),
+            )],
+            View::LetRec { first, values, .. } => values
+                .iter()
+                .enumerate()
+                .map(|(i, &v)| (VarId(first.0 + index(i)), self.value_fact(v, RecFlag::Yes)))
+                .collect(),
+            View::Fun { .. } | View::JFun { .. } | View::Catch { .. } => self
+                .binders(id)
+                .into_iter()
+                .map(|v| (v, Fact::Param))
+                .collect(),
+            _ => self
+                .binders(id)
+                .into_iter()
+                .map(|v| (v, Fact::Unknown))
+                .collect(),
+        }
+    }
+    fn update_facts(&mut self, id: NodeId) -> bool {
+        let mut changed = false;
+        for (var, fact) in self.binding_facts(id) {
+            changed |= self.vars.fact[var.index()] != fact;
+            self.vars.fact[var.index()] = fact;
+            if matches!(fact, Fact::Module(_)) {
+                self.vars.flags[var.index()].0 |= VarFlags::MODULE;
+            }
+            if fact == Fact::Param {
+                self.vars.flags[var.index()].0 |= VarFlags::PARAM;
+            }
+        }
+        if let View::Assign { var, .. } = self.view(id) {
+            self.vars.flags[var.index()].0 |= VarFlags::ASSIGNED;
+        }
+        if let View::JBin { left, .. } = self.view(id) {
+            if self.node(id).aux() == crate::js_ir::op::BinOp::Eq as u16 {
+                if let View::Var { var } = self.view(left) {
+                    self.vars.flags[var.index()].0 |= VarFlags::ASSIGNED;
+                }
+            }
+        }
+        changed
+    }
+
+    pub(super) fn edge_weight(&self, parent: NodeId, child: NodeId) -> u32 {
+        if let View::Switch {
+            actions, header, ..
+        } = self.view(parent)
+        {
+            let h = self.switch(header);
+            if h.has_default && !h.consts_full && !h.blocks_full && actions.last() == Some(&child) {
+                return 2;
+            }
+        }
+        1
+    }
+    pub(super) fn is_weighted_switch(&self, node: Node) -> bool {
+        if let View::Switch { header, .. } = node.view(&self.lists) {
+            let h = self.switch(header);
+            h.has_default && !h.consts_full && !h.blocks_full
+        } else {
+            false
+        }
+    }
+    pub(super) fn is_capture_kind(node: Node) -> bool {
+        matches!(
+            node.op(),
+            Op::Fun | Op::JFun | Op::While | Op::SWhile | Op::For | Op::SForRange
+        )
+    }
+    fn invalidate_weights(&mut self) {
+        self.weight_epoch = self
+            .weight_epoch
+            .checked_add(1)
+            .expect("weight epoch overflow");
+    }
+    fn register_kind(&mut self, node: Node, add: bool) {
+        if self.is_weighted_switch(node) {
+            if add {
+                self.weighted_switches += 1;
+            } else {
+                self.weighted_switches -= 1;
+            }
+            self.invalidate_weights();
+        }
+        if Self::is_capture_kind(node) {
+            if add {
+                self.capture_boundaries += 1;
+            } else {
+                self.capture_boundaries -= 1;
+            }
+        }
+    }
+    fn weight(&mut self, mut id: NodeId) -> u32 {
+        // Ordinary modules need no ancestor walk, however deep their Let spine.
+        if self.weighted_switches == 0 {
+            return 1;
+        }
+        let requested = id;
+        let mut path = SmallVec::<[(NodeId, u32); 8]>::new();
+        let mut weight;
+        loop {
+            self.visit();
+            let (epoch, cached) = self.weights[id.index()];
+            if epoch == self.weight_epoch && cached != 0 {
+                weight = cached;
+                break;
+            }
+            if let Some(parent) = self.parents[id.index()] {
+                path.push((id, self.edge_weight(parent, id)));
+                id = parent;
+            } else {
+                self.weights[id.index()] = (self.weight_epoch, 1);
+                weight = 1;
+                break;
+            }
+        }
+        for (id, multiplier) in path.into_iter().rev() {
+            weight = weight
+                .checked_mul(multiplier)
+                .expect("Bir use weight overflow");
+            self.weights[id.index()] = (self.weight_epoch, weight);
+        }
+        debug_assert!(self.weights[requested.index()].1 != 0);
+        weight
+    }
+    fn adjust_direct(&mut self, id: NodeId, delta: i64) {
+        match self.view(id) {
+            View::Var { var } => {
+                self.vars.uses[var.index()] =
+                    u32::try_from(i64::from(self.vars.uses[var.index()]) + delta)
+                        .expect("Bir use count overflow/underflow");
+                if delta < 0 && self.vars.uses(var) == 0 {
+                    if let Some(binder) = self.vars.binder(var) {
+                        self.death_candidates.push(binder);
+                    }
+                }
+            }
+            View::Exit { label, .. } => {
+                // Headers may be built before their handlers, but before their exits.
+                let header_id = self
+                    .pools
+                    .catch_labels
+                    .get(&label)
+                    .expect("unknown static exit label");
+                let header = &mut self.pools.catches[header_id.index()];
+                header.uses = u32::try_from(i64::from(header.uses) + delta)
+                    .expect("Bir exit count overflow/underflow");
+            }
+            _ => {}
+        }
+    }
+    fn adjust_counts(&mut self, root: NodeId, delta: i64) {
+        let mut stack = vec![(root, delta)];
+        while let Some((id, delta)) = stack.pop() {
+            self.adjust_direct(id, delta);
+            for child in self.view(id).children() {
+                stack.push((
+                    child,
+                    delta
+                        .checked_mul(i64::from(self.edge_weight(id, child)))
+                        .expect("Bir use weight overflow"),
+                ));
+            }
+        }
+    }
+
+    pub(super) fn effects(
+        &self,
+        id: NodeId,
+        child_effects: impl Fn(NodeId) -> (bool, bool),
+    ) -> (bool, bool) {
+        let children = self.view(id).children();
+        let all_pure = children.iter().all(|&c| child_effects(c).0);
+        let no_alloc = children.iter().all(|&c| child_effects(c).1);
+        match self.view(id) {
+            View::Var { .. }
+            | View::Global { .. }
+            | View::JNumber { .. }
+            | View::JStr { .. }
+            | View::JBool
+            | View::JNull
+            | View::JUndefined => (true, true),
+            View::Const { value } => (
+                true,
+                !matches!(
+                    self.constant(value),
+                    Constant::Block { .. } | Constant::Some(_)
+                ),
+            ),
+            View::Fun { .. } | View::JFun { .. } => (true, false),
+            View::Prim { primitive, args } => {
+                let p = &self.pools.prims[primitive.index()].primitive;
+                let second = args.get(1).and_then(|&n| match self.view(n) {
+                    View::Const { value } => match self.constant(value) {
+                        Constant::Int(n) => {
+                            Some(crate::lambda::lam_constant::Constant::NativeInt {
+                                i: *n,
+                                comment: None,
+                            })
+                        }
+                        _ => None,
+                    },
+                    _ => None,
+                });
+                let pure = crate::lambda::lam_analysis::is_pure_primitive(p, second.as_ref());
+                // Deliberately conservative: allocation-free primitives are a small whitelist.
+                let alloc_free = matches!(
+                    p,
+                    Primitive::Pidentity
+                        | Primitive::Pignore
+                        | Primitive::Pnot
+                        | Primitive::Paddint
+                        | Primitive::Psubint
+                        | Primitive::Pmulint
+                        | Primitive::Pnegint
+                );
+                (all_pure && pure, no_alloc && alloc_free)
+            }
+            View::Let { .. }
+            | View::LetRec { .. }
+            | View::Try { .. }
+            | View::TryFinally { .. }
+            | View::If { .. }
+            | View::Seq { .. }
+            | View::JCond { .. }
+            | View::JSeq { .. }
+            | View::SBlock { .. }
+            | View::SExp { .. }
+            | View::SDecl { .. } => (all_pure, no_alloc),
+            View::JArray { .. } | View::JBlockLit { .. } | View::JOptional { .. } => {
+                (all_pure, false)
+            }
+            // Property access, coercions, proxies, calls and raw JS may run user code.
+            _ => (false, false),
+        }
+    }
+    fn repair(&mut self, mut id: NodeId) {
+        loop {
+            let (pure, no_alloc) = self.effects(id, |c| {
+                let f = self.node(c).flags();
+                (f.contains(NodeFlags::PURE), f.contains(NodeFlags::NO_ALLOC))
+            });
+            let old_flags = self.node(id).flags();
+            let mut flags = old_flags;
+            flags.0 &= !(NodeFlags::PURE | NodeFlags::NO_ALLOC);
+            if pure {
+                flags.0 |= NodeFlags::PURE;
+            }
+            if no_alloc {
+                flags.0 |= NodeFlags::NO_ALLOC;
+            }
+            self.nodes[id.index()].set_flags(flags);
+            let facts_changed = self.update_facts(id);
+            if flags == old_flags && !facts_changed {
+                break;
+            }
+            match self.parents[id.index()] {
+                Some(parent) => id = parent,
+                None => break,
+            }
+        }
+    }
+    pub(super) fn capture_boundary(&self, id: NodeId, child: NodeId) -> bool {
+        match self.view(id) {
+            View::Fun { .. } | View::JFun { .. } | View::While { .. } | View::SWhile { .. } => true,
+            View::For { parts, .. } | View::SForRange { parts, .. } => parts.last() == Some(&child),
+            _ => false,
+        }
+    }
+    pub(super) fn is_descendant(&self, mut id: NodeId, ancestor: NodeId) -> bool {
+        loop {
+            self.visit();
+            if id == ancestor {
+                return true;
+            }
+            match self.parents[id.index()] {
+                Some(parent) => id = parent,
+                None => return false,
+            }
+        }
+    }
+    pub(super) fn is_captured(&self, id: NodeId, var: VarId) -> bool {
+        let mut child = id;
+        while let Some(parent) = self.parents[child.index()] {
+            if self.capture_boundary(parent, child)
+                && !self.vars.binder[var.index()].is_some_and(|b| self.is_descendant(b, parent))
+            {
+                return true;
+            }
+            child = parent;
+        }
+        false
+    }
+    fn next_capture_epoch(&mut self) -> u64 {
+        self.capture_epoch = self
+            .capture_epoch
+            .checked_add(1)
+            .expect("capture epoch overflow");
+        self.capture_epoch
+    }
+    // One tree walk records both binders and uses; the second loop touches only
+    // variable IDs. Buffers and epoch columns survive calls, so no clearing pass.
+    fn collect_capture(&mut self, root: NodeId, epoch: u64) {
+        let mut stack = std::mem::take(&mut self.capture_stack);
+        let mut uses = std::mem::take(&mut self.capture_uses);
+        stack.clear();
+        uses.clear();
+        stack.push(root);
+        while let Some(id) = stack.pop() {
+            for var in self.binders(id) {
+                self.capture_binders[var.index()] = epoch;
+            }
+            if let View::Var { var } = self.view(id) {
+                uses.push(var);
+            }
+            stack.extend(self.view(id).children());
+        }
+        self.capture_stack = stack;
+        self.capture_uses = uses;
+    }
+    fn capture_created(&mut self, id: NodeId) {
+        let root = match self.view(id) {
+            View::Fun { .. } | View::JFun { .. } | View::While { .. } | View::SWhile { .. } => id,
+            View::For { parts, .. } | View::SForRange { parts, .. } => *parts.last().unwrap(),
+            _ => return,
+        };
+        let epoch = self.next_capture_epoch();
+        for var in self.binders(id) {
+            self.capture_binders[var.index()] = epoch;
+        }
+        self.collect_capture(root, epoch);
+        for &var in &self.capture_uses {
+            if self.capture_binders[var.index()] != epoch {
+                self.vars.flags[var.index()].0 |= VarFlags::CAPTURED;
+            }
+        }
+    }
+    fn capture_moved(&mut self, root: NodeId) {
+        if self.capture_boundaries == 0 || self.parents[root.index()].is_none() {
+            return;
+        }
+        let epoch = self.next_capture_epoch();
+        self.collect_capture(root, epoch);
+        if self.capture_uses.iter().all(|v| {
+            self.capture_binders[v.index()] == epoch
+                || self.vars.flags(*v).contains(VarFlags::CAPTURED)
+        }) {
+            return;
+        }
+        let mut child = root;
+        let mut boundary = false;
+        while let Some(parent) = self.parents[child.index()] {
+            self.visit();
+            // A binder on the boundary itself is inside its own scope.
+            self.capture_chain[parent.index()] = (epoch, boundary);
+            boundary |= self.capture_boundary(parent, child);
+            child = parent;
+        }
+        if !boundary {
+            return;
+        }
+        for &var in &self.capture_uses {
+            if self.capture_binders[var.index()] == epoch {
+                continue;
+            }
+            let captured = self.vars.binder(var).is_none_or(|binder| {
+                let (seen, crossed) = self.capture_chain[binder.index()];
+                seen != epoch || crossed
+            });
+            if captured {
+                self.vars.flags[var.index()].0 |= VarFlags::CAPTURED;
+            }
+        }
+    }
+
+    /// Compute tail positions and function self-tail-call flags explicitly.
+    /// Edits invalidate these flags; consumers run this once before reading them.
+    pub fn mark_tail_positions(&mut self, root: NodeId) {
+        assert!(
+            self.parents[root.index()].is_none(),
+            "tail marking starts at a root"
+        );
+        let mut stack = vec![(root, false, None::<FuncId>, None::<VarId>)];
+        while let Some((id, tail, function, self_var)) = stack.pop() {
+            let mut flags = self.node(id).flags();
+            flags.0 &= !NodeFlags::TAIL;
+            if tail {
+                flags.0 |= NodeFlags::TAIL;
+            }
+            self.nodes[id.index()].set_flags(flags);
+            if let View::Fun { body, header } | View::JFun { body, header } = self.view(id) {
+                self.pools.funcs[header.index()].flags &= !FuncHeader::SELF_TAILCALL;
+                let own = self.parents[id.index()].and_then(|parent| match self.view(parent) {
+                    View::Let {
+                        var,
+                        value: Some(value),
+                        ..
+                    } if value == id => Some(var),
+                    View::LetRec { first, values, .. } => values
+                        .iter()
+                        .position(|&v| v == id)
+                        .map(|i| VarId(first.0 + index(i))),
+                    _ => None,
+                });
+                stack.push((body, true, Some(header), own));
+                continue;
+            }
+            if tail {
+                if let View::Apply { callee, .. } = self.view(id) {
+                    if let View::Var { var } = self.view(callee) {
+                        if Some(var) == self_var {
+                            if let Some(header) = function {
+                                self.pools.funcs[header.index()].flags |= FuncHeader::SELF_TAILCALL;
+                            }
+                        }
+                    }
+                }
+            }
+            for child in self.view(id).children() {
+                let child_tail = tail && self.tail_child(id, child);
+                stack.push((child, child_tail, function, self_var));
+            }
+        }
+        self.tails_valid = true;
+    }
+    pub(super) fn tail_child(&self, id: NodeId, child: NodeId) -> bool {
+        match self.view(id) {
+            View::Let { body, .. } | View::LetRec { body, .. } => body == child,
+            View::If { then_, else_, .. } | View::JCond { then_, else_, .. } => {
+                child == then_ || child == else_
+            }
+            View::Switch { scrutinee, .. } | View::StrSwitch { scrutinee, .. } => {
+                child != scrutinee
+            }
+            View::Catch { body, handler, .. } => child == body || child == handler,
+            View::Seq { second, .. } | View::JSeq { second, .. } => second == child,
+            _ => false,
+        }
+    }
+
+    /// Overwrite a live slot with a detached tree or a descendant of that slot.
+    /// The replacement handle is invalid afterwards; the target handle survives.
+    pub fn replace(&mut self, target: NodeId, replacement: NodeId) {
+        assert_ne!(target, replacement);
+        self.node(target);
+        self.node(replacement);
+        debug_assert!(
+            self.parents[replacement.index()].is_none() || self.is_descendant(replacement, target),
+            "replacement belongs to another tree"
+        );
+        debug_assert!(
+            self.view(replacement).children().is_empty()
+                || !self.is_descendant(target, replacement),
+            "replacement creates a cycle"
+        );
+        let target_weight = self.weight(target);
+        let replacement_weight = self.weight(replacement);
+        self.adjust_counts(replacement, -i64::from(replacement_weight));
+        let parent = self.parents[target.index()];
+        self.release_nodes(target, Some(replacement), false);
+        let content = self.nodes[replacement.index()];
+        let cold = self.cold.get(replacement.index()).copied().flatten();
+        self.unbind(replacement);
+        self.nodes[target.index()] = content;
+        self.tails_valid = false;
+        if self.weighted_switches != 0 {
+            self.invalidate_weights();
+        }
+        self.parents[target.index()] = parent;
+        for child in self.view(target).children() {
+            self.parents[child.index()] = Some(target);
+        }
+        self.nodes[replacement.index()] = Node::free();
+        self.parents[replacement.index()] = None;
+        self.free_nodes.push(replacement);
+        if !self.cold.is_empty() {
+            self.cold[target.index()] = cold;
+            self.cold[replacement.index()] = None;
+        }
+        self.bind(target);
+        self.adjust_counts(target, i64::from(target_weight));
+        self.repair(target);
+        if let Some(parent) = parent {
+            self.repair(parent);
+        }
+        self.capture_moved(target);
+        self.drain_dead();
+    }
+
+    /// Release a detached subtree. Attached nodes must be edited with `replace`.
+    pub fn release(&mut self, root: NodeId) {
+        self.node(root);
+        assert!(
+            self.parents[root.index()].is_none(),
+            "release requires a detached root"
+        );
+        self.release_nodes(root, None, true);
+        self.drain_dead();
+    }
+    fn release_nodes(&mut self, root: NodeId, keep: Option<NodeId>, free_root: bool) {
+        self.tails_valid = false;
+        let mut stack = vec![(root, self.weight(root))];
+        while let Some((id, weight)) = stack.pop() {
+            if Some(id) == keep {
+                continue;
+            }
+            for child in self.view(id).children() {
+                stack.push((
+                    child,
+                    weight
+                        .checked_mul(self.edge_weight(id, child))
+                        .expect("Bir use weight overflow"),
+                ));
+            }
+            self.adjust_direct(id, -i64::from(weight));
+            self.unbind(id);
+            self.register_kind(self.nodes[id.index()], false);
+            if id != root || free_root {
+                self.nodes[id.index()] = Node::free();
+                self.parents[id.index()] = None;
+                if !self.cold.is_empty() {
+                    self.cold[id.index()] = None;
+                }
+                self.free_nodes.push(id);
+            }
+        }
+    }
+    fn drain_dead(&mut self) {
+        // A worklist avoids recursive cascades when releasing one value kills another.
+        while let Some(id) = self.death_candidates.pop() {
+            if self.nodes[id.index()].op() == Op::Free {
+                continue;
+            }
+            if let View::Let {
+                var,
+                value: Some(value),
+                ..
+            } = self.view(id)
+            {
+                if self.vars.uses(var) == 0 && self.node(value).flags().contains(NodeFlags::PURE) {
+                    self.nodes[id.index()].kill_value();
+                    self.vars.fact[var.index()] = Fact::Unknown;
+                    self.release_nodes(value, None, true);
+                    self.repair(id);
+                }
+            }
+        }
+    }
+
+    /// Copy a subtree, freshening every internal binder and static label. Explicit
+    /// renaming applies only to free variables; internal binders always win.
+    pub fn copy_subtree(&mut self, root: NodeId, renaming: &[(VarId, VarId)]) -> NodeId {
+        let mut order = Vec::new();
+        let mut stack = vec![root];
+        while let Some(id) = stack.pop() {
+            order.push(id);
+            stack.extend(self.view(id).children());
+        }
+        let mut vars: HashMap<_, _> = renaming.iter().copied().collect();
+        for &id in &order {
+            for var in self.binders(id) {
+                let fresh = self.new_var_id(self.vars.name(var), index(self.vars.len()));
+                self.vars.flags[fresh.index()].0 =
+                    self.vars.flags[var.index()].0 & !VarFlags::EXPORTED;
+                vars.insert(var, fresh);
+            }
+        }
+        let mut funcs = HashMap::new();
+        let mut catches = HashMap::new();
+        let mut labels = HashMap::new();
+        let mut js = HashMap::new();
+        for &id in &order {
+            match self.view(id) {
+                View::Fun { header, .. } | View::JFun { header, .. } => {
+                    let old = *self.function(header);
+                    let params = VarSpan {
+                        start: old.params.iter().next().map_or(0, |v| vars[&v].0),
+                        len: old.params.len,
+                    };
+                    let new = self.function_header(
+                        params,
+                        self.function_attributes(header).clone(),
+                        old.loc,
+                    );
+                    self.pools.funcs[new.index()].flags = old.flags;
+                    funcs.insert(header, new);
+                }
+                View::Catch { header, .. } => {
+                    let old = *self.catch(header);
+                    let label =
+                        u32::try_from(self.pools.next_label).expect("static label overflow");
+                    let params = VarSpan {
+                        start: old.params.iter().next().map_or(0, |v| vars[&v].0),
+                        len: old.params.len,
+                    };
+                    let new = self.catch_header(label, params);
+                    catches.insert(header, new);
+                    labels.insert(old.label, label);
+                }
+                _ => {}
+            }
+        }
+        for &id in &order {
+            if let View::JRecordRest { info, .. } | View::SRest { info, .. } = self.view(id) {
+                if let JsPayload::Rest(fields) = self.javascript(info) {
+                    let fields = fields
+                        .iter()
+                        .map(|field| RestField {
+                            name: field.name,
+                            binding: field.binding.map(|v| vars.get(&v).copied().unwrap_or(v)),
+                        })
+                        .collect();
+                    let copied = self.js_info(JsPayload::Rest(fields));
+                    js.insert(info, copied);
+                }
+            }
+        }
+        let mut nodes = HashMap::new();
+        for &id in order.iter().rev() {
+            let packed = self.node(id).remap(
+                &mut self.lists,
+                &super::node::Renaming {
+                    nodes: &nodes,
+                    vars: &vars,
+                    funcs: &funcs,
+                    catches: &catches,
+                    labels: &labels,
+                    js: &js,
+                },
+            );
+            let new = self.allocate(packed);
+            self.bind(new);
+            for child in self.view(new).children() {
+                self.parents[child.index()] = Some(new);
+                let multiplier = self.edge_weight(new, child);
+                if multiplier != 1 {
+                    self.adjust_counts(child, i64::from(multiplier) - 1);
+                }
+            }
+            self.adjust_direct(new, 1);
+            self.repair(new);
+            if let Some(cold) = self.cold(id) {
+                self.set_cold(new, cold);
+            }
+            nodes.insert(id, new);
+        }
+        let result = nodes[&root];
+        self.capture_moved(result);
+        result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lambda::{LamLoc, SwitchDispatch};
+    use crate::name::Name;
+
+    fn lit(b: &mut Bir) -> NodeId {
+        let value = b.intern_const(Constant::Int(7));
+        b.new_node(View::Const { value }, 0)
+    }
+    fn var(b: &mut Bir, v: VarId) -> NodeId {
+        b.new_node(View::Var { var: v }, 0)
+    }
+    fn valid(b: &Bir, root: NodeId) {
+        b.validate(Some(root), false)
+            .unwrap_or_else(|e| panic!("{e}\n{}", b.dump()));
+    }
+
+    #[test]
+    fn layout() {
+        use std::mem::size_of;
+        assert_eq!(size_of::<Node>(), 16);
+        assert_eq!(size_of::<Op>(), 1);
+        assert_eq!(size_of::<NodeFlags>(), 1);
+        assert_eq!(size_of::<Fact>(), 8);
+        assert_eq!(size_of::<VarFlags>(), 1);
+        assert_eq!(size_of::<VarSpan>(), 8);
+        assert_eq!(size_of::<FuncHeader>(), 20);
+        assert_eq!(size_of::<CatchHeader>(), 16);
+        assert_eq!(size_of::<NodeId>(), 4);
+        assert_eq!(size_of::<ListId>(), 4);
+        assert_eq!(size_of::<VarId>(), 4);
+        assert_eq!(size_of::<ConstId>(), 4);
+        assert_eq!(size_of::<PrimId>(), 4);
+        assert_eq!(size_of::<FuncId>(), 4);
+        assert_eq!(size_of::<SwitchId>(), 4);
+        assert_eq!(size_of::<ColdId>(), 4);
+        assert_eq!(size_of::<StrId>(), 4);
+    }
+
+    #[test]
+    fn replace_release_and_reuse() {
+        let mut b = Bir::default();
+        let v = b.new_var_id(Name::new("x"), 0);
+        let value = lit(&mut b);
+        let body = var(&mut b, v);
+        let root = b.new_node(
+            View::Let {
+                var: v,
+                value: Some(value),
+                body,
+            },
+            0,
+        );
+        valid(&b, root);
+        let replacement = lit(&mut b);
+        b.replace(body, replacement);
+        assert_eq!(b.vars.uses(v), 0);
+        assert!(b.node(root).flags().contains(NodeFlags::DEAD));
+        assert_eq!(b.vars.fact(v), Fact::Unknown);
+        valid(&b, root);
+        b.replace(root, body);
+        valid(&b, root);
+        b.release(root);
+        b.validate(None, false).unwrap();
+        let reused = lit(&mut b);
+        assert_eq!(root, reused);
+        valid(&b, reused);
+    }
+
+    #[test]
+    fn default_weights_copy_and_capture() {
+        let mut b = Bir::default();
+        let v = b.new_var_id(Name::new("free"), 0);
+        let condition = lit(&mut b);
+        let use_ = var(&mut b, v);
+        let h = b.switch_header(SwitchHeader {
+            keys: vec![],
+            clauses: vec![],
+            constants: 0,
+            consts_full: false,
+            blocks_full: false,
+            has_default: true,
+            dispatch: SwitchDispatch::Direct,
+        });
+        let switch = b.new_node(
+            View::Switch {
+                scrutinee: condition,
+                actions: &[use_],
+                header: h,
+            },
+            0,
+        );
+        assert_eq!(b.vars.uses(v), 2);
+        valid(&b, switch);
+        let params = b.new_vars(&[Name::new("p")]);
+        let parameter = params.iter().next().unwrap();
+        let p = var(&mut b, parameter);
+        let body = b.new_node(
+            View::Seq {
+                first: switch,
+                second: p,
+            },
+            0,
+        );
+        let h = b.function_header(params, FunctionAttribute::default(), LamLoc::NONE);
+        let fun = b.new_node(View::Fun { body, header: h }, 1);
+        valid(&b, fun);
+        assert!(b.vars.flags(v).contains(VarFlags::CAPTURED));
+        assert!(!b.vars.flags(parameter).contains(VarFlags::CAPTURED));
+        let copy = b.copy_subtree(fun, &[]);
+        let root = b.new_node(
+            View::Seq {
+                first: fun,
+                second: copy,
+            },
+            0,
+        );
+        valid(&b, root);
+        assert_eq!(b.vars.uses(v), 4);
+        let View::Fun {
+            header: copied_h, ..
+        } = b.view(copy)
+        else {
+            panic!()
+        };
+        assert_ne!(b.function(copied_h).params, params);
+        b.release(root);
+        b.validate(None, false).unwrap();
+    }
+
+    #[test]
+    fn effects_and_facts_follow_nested_edits() {
+        let mut b = Bir::default();
+        let v = b.new_var_id(Name::new("f"), 0);
+        let value = lit(&mut b);
+        let body = var(&mut b, v);
+        let root = b.new_node(
+            View::Let {
+                var: v,
+                value: Some(value),
+                body,
+            },
+            0,
+        );
+        assert!(matches!(b.vars.fact(v), Fact::Const(_)));
+        let text = b.intern_text("sideEffect()");
+        let raw = b.new_node(View::JRaw { text }, 0);
+        b.replace(value, raw);
+        assert_eq!(b.vars.fact(v), Fact::Unknown);
+        assert!(!b.node(root).flags().contains(NodeFlags::PURE));
+        valid(&b, root);
+        let new = lit(&mut b);
+        b.replace(body, new);
+        assert!(!b.node(root).flags().contains(NodeFlags::DEAD));
+        valid(&b, root);
+    }
+
+    #[test]
+    fn cascading_dead_bindings() {
+        let mut b = Bir::default();
+        let x = b.new_var_id(Name::new("x"), 0);
+        let y = b.new_var_id(Name::new("y"), 1);
+        let xv = lit(&mut b);
+        let yv = var(&mut b, x);
+        let body = var(&mut b, y);
+        let inner = b.new_node(
+            View::Let {
+                var: y,
+                value: Some(yv),
+                body,
+            },
+            0,
+        );
+        let root = b.new_node(
+            View::Let {
+                var: x,
+                value: Some(xv),
+                body: inner,
+            },
+            0,
+        );
+        valid(&b, root);
+        let replacement = lit(&mut b);
+        b.replace(body, replacement);
+        assert!(b.node(root).flags().contains(NodeFlags::DEAD));
+        assert!(b.node(inner).flags().contains(NodeFlags::DEAD));
+        valid(&b, root);
+    }
+
+    #[test]
+    fn metadata_and_deterministic_dump() {
+        let mut b = Bir::default();
+        let value = b.intern_const(Constant::Int(1));
+        assert_eq!(value, b.intern_const(Constant::Int(1)));
+        let s = b.intern_text("hello\nλ");
+        assert_eq!(s, b.intern_text("hello\nλ"));
+        assert_eq!(b.text(s), "hello\nλ");
+        let root = b.new_node(View::Const { value }, 0);
+        assert!(b.cold.is_empty());
+        b.set_cold(
+            root,
+            Cold {
+                loc: LamLoc::NONE,
+                comment: Some(s),
+            },
+        );
+        let copied = b.copy_subtree(root, &[]);
+        assert_eq!(b.cold(copied).unwrap().comment, Some(s));
+        let tree = b.new_node(
+            View::Seq {
+                first: root,
+                second: copied,
+            },
+            0,
+        );
+        valid(&b, tree);
+        assert_eq!(b.dump(), b.dump());
+        assert!(b.dump().contains("const0 Int(1)"));
+    }
+
+    #[test]
+    fn validator_rejects_corruption() {
+        let mut b = Bir::default();
+        let v = b.new_var_id(Name::new("v"), 0);
+        let root = var(&mut b, v);
+        b.vars.uses[v.index()] += 1;
+        assert!(
+            b.validate(Some(root), false)
+                .unwrap_err()
+                .contains("use count")
+        );
+        b.vars.uses[v.index()] -= 1;
+        valid(&b, root);
+        let other = lit(&mut b);
+        assert!(
+            b.validate(Some(root), false)
+                .unwrap_err()
+                .contains("unreachable")
+        );
+        b.release(other);
+        valid(&b, root);
+    }
+
+    #[test]
+    fn seeded_random_edits_validate_after_every_edit() {
+        // xorshift64: fixed seed and no dependency on a platform RNG or hash order.
+        let mut state = 0x7b8c_9d01_2345_6789u64;
+        let mut rand = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut b = Bir::for_typed_exprs(64);
+        let vars: Vec<_> = (0..8).map(|i| b.new_var_id(Name::new("free"), i)).collect();
+        let mut root = lit(&mut b);
+        for step in 0..5000 {
+            match rand() % 9 {
+                0 => {
+                    let new = var(&mut b, vars[(rand() % 8) as usize]);
+                    b.replace(root, new);
+                }
+                1 => {
+                    let new = lit(&mut b);
+                    root = b.new_node(
+                        View::Seq {
+                            first: root,
+                            second: new,
+                        },
+                        0,
+                    );
+                }
+                2 => {
+                    let copy = b.copy_subtree(root, &[]);
+                    b.replace(root, copy);
+                }
+                3 => {
+                    let params = b.new_vars(&[Name::new("p")]);
+                    let header =
+                        b.function_header(params, FunctionAttribute::default(), LamLoc::NONE);
+                    root = b.new_node(View::Fun { body: root, header }, 1);
+                }
+                4 => {
+                    let var = b.new_var_id(Name::new("binding"), index(b.vars.len()));
+                    let value = lit(&mut b);
+                    root = b.new_node(
+                        View::Let {
+                            var,
+                            value: Some(value),
+                            body: root,
+                        },
+                        0,
+                    );
+                }
+                5 => {
+                    let children = b.view(root).children();
+                    if let Some(&child) = children.last() {
+                        b.replace(root, child);
+                    }
+                }
+                6 => {
+                    let scrutinee = lit(&mut b);
+                    let header = b.switch_header(SwitchHeader {
+                        keys: vec![],
+                        clauses: vec![],
+                        constants: 0,
+                        consts_full: false,
+                        blocks_full: false,
+                        has_default: true,
+                        dispatch: SwitchDispatch::Direct,
+                    });
+                    root = b.new_node(
+                        View::Switch {
+                            scrutinee,
+                            actions: &[root],
+                            header,
+                        },
+                        0,
+                    );
+                }
+                7 => {
+                    let live: Vec<_> = b
+                        .nodes
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, n)| n.op() != Op::Free)
+                        .map(|(i, _)| NodeId(index(i)))
+                        .collect();
+                    let target = live[(rand() as usize) % live.len()];
+                    let replacement = lit(&mut b);
+                    b.replace(target, replacement);
+                }
+                _ => {
+                    b.release(root);
+                    b.validate(None, false).unwrap();
+                    root = lit(&mut b);
+                }
+            }
+            b.mark_tail_positions(root);
+            b.validate(Some(root), true)
+                .unwrap_or_else(|e| panic!("step {step}: {e}\n{}", b.dump()));
+        }
+    }
+}
+
+#[cfg(test)]
+mod constructor_tests {
+    use super::*;
+    use crate::lambda::{ApplyStatus, SwitchDispatch};
+    use crate::name::Name;
+    fn leaf(b: &mut Bir) -> NodeId {
+        b.new_node(View::JNull, 0)
+    }
+
+    macro_rules! case {
+        ($name:ident, |$b:ident| $build:block, $op:ident) => {
+            #[test]
+            fn $name() {
+                let mut $b = Bir::default();
+                let root = $build;
+                assert_eq!($b.node(root).op(), Op::$op);
+                $b.validate(Some(root), false).unwrap();
+                let copied = $b.copy_subtree(root, &[]);
+                let pair = $b.new_node(
+                    View::Seq {
+                        first: root,
+                        second: copied,
+                    },
+                    0,
+                );
+                $b.validate(Some(pair), false).unwrap();
+                $b.replace(pair, copied);
+                $b.validate(Some(pair), false).unwrap();
+                $b.release(pair);
+                $b.validate(None, false).unwrap();
+            }
+        };
+    }
+    case!(
+        constructs_var,
+        |b| {
+            let var = b.new_var_id(Name::new("v"), 0);
+            b.new_node(View::Var { var }, 0)
+        },
+        Var
+    );
+    case!(
+        constructs_global,
+        |b| {
+            let path = b.intern_text("module");
+            let module = b.import(Import {
+                name: Name::new("Module"),
+                path,
+            });
+            b.new_node(View::Global { module }, 0)
+        },
+        Global
+    );
+    case!(
+        constructs_const,
+        |b| {
+            let value = b.intern_const(Constant::Int(1));
+            b.new_node(View::Const { value }, 0)
+        },
+        Const
+    );
+    case!(
+        constructs_apply,
+        |b| {
+            let callee = leaf(&mut b);
+            let args = [leaf(&mut b), leaf(&mut b)];
+            let info = b.apply_info(crate::lambda::ApInfo {
+                loc: LamLoc::NONE,
+                status: ApplyStatus::Na,
+            });
+            b.new_node(
+                View::Apply {
+                    callee,
+                    args: &args,
+                    info,
+                },
+                0,
+            )
+        },
+        Apply
+    );
+    case!(
+        constructs_fun,
+        |b| {
+            let body = leaf(&mut b);
+            let params = b.new_vars(&[Name::new("p")]);
+            let header = b.function_header(params, FunctionAttribute::default(), LamLoc::NONE);
+            b.new_node(View::Fun { body, header }, 0)
+        },
+        Fun
+    );
+    case!(
+        constructs_let,
+        |b| {
+            let var = b.new_var_id(Name::new("v"), 0);
+            let value = Some(leaf(&mut b));
+            let body = leaf(&mut b);
+            b.new_node(View::Let { var, value, body }, 0)
+        },
+        Let
+    );
+    case!(
+        constructs_letrec,
+        |b| {
+            let first = b
+                .new_vars(&[Name::new("a"), Name::new("b")])
+                .iter()
+                .next()
+                .unwrap();
+            let values = [leaf(&mut b), leaf(&mut b)];
+            let body = leaf(&mut b);
+            b.new_node(
+                View::LetRec {
+                    first,
+                    values: &values,
+                    body,
+                },
+                0,
+            )
+        },
+        LetRec
+    );
+    case!(
+        constructs_prim,
+        |b| {
+            let args = [leaf(&mut b), leaf(&mut b)];
+            let primitive = b.intern_prim(PrimPayload {
+                primitive: Primitive::Paddint,
+                loc: LamLoc::NONE,
+            });
+            b.new_node(
+                View::Prim {
+                    args: &args,
+                    primitive,
+                },
+                0,
+            )
+        },
+        Prim
+    );
+    case!(
+        constructs_switch,
+        |b| {
+            let scrutinee = leaf(&mut b);
+            let actions = [leaf(&mut b)];
+            let header = b.switch_header(SwitchHeader {
+                keys: vec![],
+                clauses: vec![],
+                constants: 0,
+                consts_full: false,
+                blocks_full: false,
+                has_default: true,
+                dispatch: SwitchDispatch::Direct,
+            });
+            b.new_node(
+                View::Switch {
+                    scrutinee,
+                    actions: &actions,
+                    header,
+                },
+                0,
+            )
+        },
+        Switch
+    );
+    case!(
+        constructs_strswitch,
+        |b| {
+            let scrutinee = leaf(&mut b);
+            let actions = [leaf(&mut b)];
+            let header = b.switch_header(SwitchHeader {
+                keys: vec![],
+                clauses: vec![],
+                constants: 0,
+                consts_full: false,
+                blocks_full: false,
+                has_default: true,
+                dispatch: SwitchDispatch::Direct,
+            });
+            b.new_node(
+                View::StrSwitch {
+                    scrutinee,
+                    actions: &actions,
+                    header,
+                },
+                0,
+            )
+        },
+        StrSwitch
+    );
+    case!(
+        constructs_exit,
+        |b| {
+            b.catch_header(1, VarSpan::default());
+            let label = 1;
+            let args = [leaf(&mut b), leaf(&mut b)];
+            b.new_node(View::Exit { label, args: &args }, 0)
+        },
+        Exit
+    );
+    case!(
+        constructs_catch,
+        |b| {
+            let body = leaf(&mut b);
+            let handler = leaf(&mut b);
+            let params = b.new_vars(&[Name::new("p")]);
+            let header = b.catch_header(1, params);
+            b.new_node(
+                View::Catch {
+                    body,
+                    handler,
+                    header,
+                },
+                0,
+            )
+        },
+        Catch
+    );
+    case!(
+        constructs_try,
+        |b| {
+            let body = leaf(&mut b);
+            let exception = b.new_var_id(Name::new("v"), 0);
+            let handler = leaf(&mut b);
+            b.new_node(
+                View::Try {
+                    body,
+                    exception,
+                    handler,
+                },
+                0,
+            )
+        },
+        Try
+    );
+    case!(
+        constructs_tryfinally,
+        |b| {
+            let body = leaf(&mut b);
+            let finaliser = leaf(&mut b);
+            b.new_node(View::TryFinally { body, finaliser }, 0)
+        },
+        TryFinally
+    );
+    case!(
+        constructs_if,
+        |b| {
+            let condition = leaf(&mut b);
+            let then_ = leaf(&mut b);
+            let else_ = leaf(&mut b);
+            b.new_node(
+                View::If {
+                    condition,
+                    then_,
+                    else_,
+                },
+                0,
+            )
+        },
+        If
+    );
+    case!(
+        constructs_seq,
+        |b| {
+            let first = leaf(&mut b);
+            let second = leaf(&mut b);
+            b.new_node(View::Seq { first, second }, 0)
+        },
+        Seq
+    );
+    case!(
+        constructs_while,
+        |b| {
+            let condition = leaf(&mut b);
+            let body = leaf(&mut b);
+            b.new_node(View::While { condition, body }, 0)
+        },
+        While
+    );
+    case!(
+        constructs_for,
+        |b| {
+            let var = b.new_var_id(Name::new("v"), 0);
+            let parts = [leaf(&mut b), leaf(&mut b), leaf(&mut b)];
+            b.new_node(View::For { var, parts: &parts }, 0)
+        },
+        For
+    );
+    case!(
+        constructs_forof,
+        |b| {
+            let var = b.new_var_id(Name::new("v"), 0);
+            let iterable = leaf(&mut b);
+            let body = leaf(&mut b);
+            b.new_node(
+                View::ForOf {
+                    var,
+                    iterable,
+                    body,
+                },
+                0,
+            )
+        },
+        ForOf
+    );
+    case!(
+        constructs_forawaitof,
+        |b| {
+            let var = b.new_var_id(Name::new("v"), 0);
+            let iterable = leaf(&mut b);
+            let body = leaf(&mut b);
+            b.new_node(
+                View::ForAwaitOf {
+                    var,
+                    iterable,
+                    body,
+                },
+                0,
+            )
+        },
+        ForAwaitOf
+    );
+    case!(
+        constructs_assign,
+        |b| {
+            let var = b.new_var_id(Name::new("v"), 0);
+            let value = leaf(&mut b);
+            b.new_node(View::Assign { var, value }, 0)
+        },
+        Assign
+    );
+    case!(constructs_break, |b| { b.new_node(View::Break, 0) }, Break);
+    case!(
+        constructs_continue,
+        |b| { b.new_node(View::Continue, 0) },
+        Continue
+    );
+    case!(
+        constructs_jbin,
+        |b| {
+            let left = leaf(&mut b);
+            let right = leaf(&mut b);
+            b.new_node(View::JBin { left, right }, 0)
+        },
+        JBin
+    );
+    case!(
+        constructs_jnot,
+        |b| {
+            let value = leaf(&mut b);
+            b.new_node(View::JNot { value }, 0)
+        },
+        JNot
+    );
+    case!(
+        constructs_jbnot,
+        |b| {
+            let value = leaf(&mut b);
+            b.new_node(View::JBnot { value }, 0)
+        },
+        JBnot
+    );
+    case!(
+        constructs_jtypeof,
+        |b| {
+            let value = leaf(&mut b);
+            b.new_node(View::JTypeof { value }, 0)
+        },
+        JTypeof
+    );
+    case!(
+        constructs_jin,
+        |b| {
+            let left = leaf(&mut b);
+            let right = leaf(&mut b);
+            b.new_node(View::JIn { left, right }, 0)
+        },
+        JIn
+    );
+    case!(
+        constructs_jcond,
+        |b| {
+            let condition = leaf(&mut b);
+            let then_ = leaf(&mut b);
+            let else_ = leaf(&mut b);
+            b.new_node(
+                View::JCond {
+                    condition,
+                    then_,
+                    else_,
+                },
+                0,
+            )
+        },
+        JCond
+    );
+    case!(
+        constructs_jseq,
+        |b| {
+            let first = leaf(&mut b);
+            let second = leaf(&mut b);
+            b.new_node(View::JSeq { first, second }, 0)
+        },
+        JSeq
+    );
+    case!(
+        constructs_jcall,
+        |b| {
+            let callee = leaf(&mut b);
+            let args = [leaf(&mut b), leaf(&mut b)];
+            let info = b.js_info(JsPayload::Call(crate::js_ir::CallInfo::default()));
+            b.new_node(
+                View::JCall {
+                    callee,
+                    args: &args,
+                    info,
+                },
+                0,
+            )
+        },
+        JCall
+    );
+    case!(
+        constructs_jflatcall,
+        |b| {
+            let callee = leaf(&mut b);
+            let args = leaf(&mut b);
+            b.new_node(View::JFlatCall { callee, args }, 0)
+        },
+        JFlatCall
+    );
+    case!(
+        constructs_jnew,
+        |b| {
+            let callee = leaf(&mut b);
+            let args = [leaf(&mut b), leaf(&mut b)];
+            b.new_node(
+                View::JNew {
+                    callee,
+                    args: &args,
+                },
+                0,
+            )
+        },
+        JNew
+    );
+    case!(
+        constructs_jindex,
+        |b| {
+            let object = leaf(&mut b);
+            let index = leaf(&mut b);
+            b.new_node(View::JIndex { object, index }, 0)
+        },
+        JIndex
+    );
+    case!(
+        constructs_jdot,
+        |b| {
+            let object = leaf(&mut b);
+            let property = b.intern_text("text");
+            b.new_node(
+                View::JDot {
+                    object,
+                    property,
+                    position: crate::js_ir::arena::FieldPos::NONE,
+                },
+                0,
+            )
+        },
+        JDot
+    );
+    case!(
+        constructs_jlength,
+        |b| {
+            let value = leaf(&mut b);
+            b.new_node(View::JLength { value }, 0)
+        },
+        JLength
+    );
+    case!(
+        constructs_jisnullish,
+        |b| {
+            let value = leaf(&mut b);
+            b.new_node(View::JIsNullish { value }, 0)
+        },
+        JIsNullish
+    );
+    case!(
+        constructs_jstrappend,
+        |b| {
+            let left = leaf(&mut b);
+            let right = leaf(&mut b);
+            b.new_node(View::JStrAppend { left, right }, 0)
+        },
+        JStrAppend
+    );
+    case!(
+        constructs_jfun,
+        |b| {
+            let body = leaf(&mut b);
+            let params = b.new_vars(&[Name::new("p")]);
+            let header = b.function_header(params, FunctionAttribute::default(), LamLoc::NONE);
+            b.new_node(View::JFun { body, header }, 0)
+        },
+        JFun
+    );
+    case!(
+        constructs_jobject,
+        |b| {
+            let values = [leaf(&mut b), leaf(&mut b)];
+            let key = b.intern_text("key");
+            let info = b.js_info(JsPayload::Object(vec![PropertyKey::Literal(key); 2]));
+            b.new_node(
+                View::JObject {
+                    values: &values,
+                    info,
+                },
+                0,
+            )
+        },
+        JObject
+    );
+    case!(
+        constructs_jarray,
+        |b| {
+            let values = [leaf(&mut b), leaf(&mut b)];
+            b.new_node(View::JArray { values: &values }, 0)
+        },
+        JArray
+    );
+    case!(
+        constructs_jblocklit,
+        |b| {
+            let values = [leaf(&mut b), leaf(&mut b)];
+            let info = b.js_info(JsPayload::Block(
+                crate::lambda::lam_tag_info::TagInfo::Tuple,
+            ));
+            b.new_node(
+                View::JBlockLit {
+                    values: &values,
+                    info,
+                },
+                0,
+            )
+        },
+        JBlockLit
+    );
+    case!(
+        constructs_joptional,
+        |b| {
+            let value = leaf(&mut b);
+            b.new_node(View::JOptional { value }, 0)
+        },
+        JOptional
+    );
+    case!(
+        constructs_jjsx,
+        |b| {
+            let values = [leaf(&mut b), leaf(&mut b)];
+            let info = b.js_info(JsPayload::Jsx(JsxHeader::default()));
+            b.new_node(
+                View::JJsx {
+                    values: &values,
+                    info,
+                },
+                0,
+            )
+        },
+        JJsx
+    );
+    case!(
+        constructs_jtemplate,
+        |b| {
+            let values = [leaf(&mut b), leaf(&mut b)];
+            let text = b.intern_text("");
+            let info = b.js_info(JsPayload::Template(vec![
+                TemplatePart {
+                    raw: text,
+                    cooked: Some(text)
+                };
+                3
+            ]));
+            b.new_node(
+                View::JTemplate {
+                    values: &values,
+                    info,
+                },
+                0,
+            )
+        },
+        JTemplate
+    );
+    case!(
+        constructs_jtagged,
+        |b| {
+            let tag = leaf(&mut b);
+            let values = [leaf(&mut b), leaf(&mut b)];
+            let text = b.intern_text("");
+            let info = b.js_info(JsPayload::Tagged(vec![
+                TemplatePart {
+                    raw: text,
+                    cooked: Some(text)
+                };
+                3
+            ]));
+            b.new_node(
+                View::JTagged {
+                    tag,
+                    values: &values,
+                    info,
+                },
+                0,
+            )
+        },
+        JTagged
+    );
+    case!(
+        constructs_jraw,
+        |b| {
+            let text = b.intern_text("text");
+            b.new_node(View::JRaw { text }, 0)
+        },
+        JRaw
+    );
+    case!(
+        constructs_jawait,
+        |b| {
+            let value = leaf(&mut b);
+            b.new_node(View::JAwait { value }, 0)
+        },
+        JAwait
+    );
+    case!(
+        constructs_jspread,
+        |b| {
+            let value = leaf(&mut b);
+            b.new_node(View::JSpread { value }, 0)
+        },
+        JSpread
+    );
+    case!(
+        constructs_jqualified,
+        |b| {
+            let path = b.intern_text("module");
+            let module = b.import(Import {
+                name: Name::new("Module"),
+                path,
+            });
+            let member = b.intern_text("text");
+            b.new_node(
+                View::JQualified {
+                    module,
+                    member: Some(member),
+                },
+                0,
+            )
+        },
+        JQualified
+    );
+    case!(
+        constructs_jnumber,
+        |b| {
+            let value = b.intern_const(Constant::Int(1));
+            b.new_node(View::JNumber { value }, 0)
+        },
+        JNumber
+    );
+    case!(
+        constructs_jstr,
+        |b| {
+            let text = b.intern_text("text");
+            b.new_node(View::JStr { text }, 0)
+        },
+        JStr
+    );
+    case!(constructs_jbool, |b| { b.new_node(View::JBool, 0) }, JBool);
+    case!(constructs_jnull, |b| { b.new_node(View::JNull, 0) }, JNull);
+    case!(
+        constructs_jundefined,
+        |b| { b.new_node(View::JUndefined, 0) },
+        JUndefined
+    );
+    case!(
+        constructs_jjson,
+        |b| {
+            let text = b.intern_text("text");
+            b.new_node(View::JJson { text }, 0)
+        },
+        JJson
+    );
+    case!(
+        constructs_jrecordrest,
+        |b| {
+            let value = leaf(&mut b);
+            let info = b.js_info(JsPayload::Rest(vec![]));
+            b.new_node(View::JRecordRest { value, info }, 0)
+        },
+        JRecordRest
+    );
+    case!(
+        constructs_sblock,
+        |b| {
+            let statements = [leaf(&mut b), leaf(&mut b)];
+            b.new_node(
+                View::SBlock {
+                    statements: &statements,
+                },
+                0,
+            )
+        },
+        SBlock
+    );
+    case!(
+        constructs_sdecl,
+        |b| {
+            let var = b.new_var_id(Name::new("v"), 0);
+            let value = Some(leaf(&mut b));
+            b.new_node(View::SDecl { var, value }, 0)
+        },
+        SDecl
+    );
+    case!(
+        constructs_sexp,
+        |b| {
+            let value = leaf(&mut b);
+            b.new_node(View::SExp { value }, 0)
+        },
+        SExp
+    );
+    case!(
+        constructs_sif,
+        |b| {
+            let condition = leaf(&mut b);
+            let then_ = leaf(&mut b);
+            let else_ = Some(leaf(&mut b));
+            b.new_node(
+                View::SIf {
+                    condition,
+                    then_,
+                    else_,
+                },
+                0,
+            )
+        },
+        SIf
+    );
+    case!(
+        constructs_swhile,
+        |b| {
+            let condition = leaf(&mut b);
+            let body = leaf(&mut b);
+            let label = b.intern_text("text");
+            b.new_node(
+                View::SWhile {
+                    condition,
+                    body,
+                    label: Some(label),
+                },
+                0,
+            )
+        },
+        SWhile
+    );
+    case!(
+        constructs_sforrange,
+        |b| {
+            let var = b.new_var_id(Name::new("v"), 0);
+            let parts = [leaf(&mut b), leaf(&mut b), leaf(&mut b)];
+            let label = b.intern_text("text");
+            b.new_node(
+                View::SForRange {
+                    var,
+                    parts: &parts,
+                    label: Some(label),
+                },
+                0,
+            )
+        },
+        SForRange
+    );
+    case!(
+        constructs_sforof,
+        |b| {
+            let var = b.new_var_id(Name::new("v"), 0);
+            let iterable = leaf(&mut b);
+            let body = leaf(&mut b);
+            b.new_node(
+                View::SForOf {
+                    var,
+                    parts: &[iterable, body],
+                    label: None,
+                },
+                0,
+            )
+        },
+        SForOf
+    );
+    case!(
+        constructs_sforawaitof,
+        |b| {
+            let var = b.new_var_id(Name::new("v"), 0);
+            let iterable = leaf(&mut b);
+            let body = leaf(&mut b);
+            b.new_node(
+                View::SForAwaitOf {
+                    var,
+                    parts: &[iterable, body],
+                    label: None,
+                },
+                0,
+            )
+        },
+        SForAwaitOf
+    );
+    case!(
+        constructs_sswitch,
+        |b| {
+            let scrutinee = leaf(&mut b);
+            let actions = [leaf(&mut b)];
+            let header = b.switch_header(SwitchHeader {
+                keys: vec![],
+                clauses: vec![],
+                constants: 0,
+                consts_full: false,
+                blocks_full: false,
+                has_default: true,
+                dispatch: SwitchDispatch::Direct,
+            });
+            b.new_node(
+                View::SSwitch {
+                    scrutinee,
+                    actions: &actions,
+                    header,
+                },
+                0,
+            )
+        },
+        SSwitch
+    );
+    case!(
+        constructs_sreturn,
+        |b| {
+            let value = leaf(&mut b);
+            b.new_node(View::SReturn { value }, 0)
+        },
+        SReturn
+    );
+    case!(
+        constructs_sthrow,
+        |b| {
+            let value = leaf(&mut b);
+            b.new_node(View::SThrow { value }, 0)
+        },
+        SThrow
+    );
+    case!(
+        constructs_stry,
+        |b| {
+            let parts = [leaf(&mut b), leaf(&mut b)];
+            let exception = b.new_var_id(Name::new("v"), 0);
+            b.new_node(
+                View::STry {
+                    parts: &parts,
+                    exception: Some(exception),
+                },
+                0,
+            )
+        },
+        STry
+    );
+    case!(
+        constructs_sbreak,
+        |b| {
+            let label = b.intern_text("text");
+            b.new_node(View::SBreak { label: Some(label) }, 0)
+        },
+        SBreak
+    );
+    case!(
+        constructs_scontinue,
+        |b| {
+            let label = b.intern_text("text");
+            b.new_node(View::SContinue { label: Some(label) }, 0)
+        },
+        SContinue
+    );
+    case!(
+        constructs_sdebugger,
+        |b| { b.new_node(View::SDebugger, 0) },
+        SDebugger
+    );
+    case!(
+        constructs_srest,
+        |b| {
+            let var = b.new_var_id(Name::new("v"), 0);
+            let value = leaf(&mut b);
+            let info = b.js_info(JsPayload::Rest(vec![]));
+            b.new_node(View::SRest { var, value, info }, 0)
+        },
+        SRest
+    );
+}
+
+#[cfg(test)]
+mod boundary_tests {
+    use super::*;
+    use crate::lambda::{ApInfo, ApplyStatus, SwitchDispatch};
+    use crate::name::Name;
+
+    #[test]
+    fn tail_calls_follow_binding_and_replacement() {
+        let mut b = Bir::default();
+        let v = b.new_var_id(Name::new("f"), 0);
+        let callee = b.new_node(View::Var { var: v }, 0);
+        let info = b.apply_info(ApInfo {
+            loc: LamLoc::NONE,
+            status: ApplyStatus::Na,
+        });
+        let call = b.new_node(
+            View::Apply {
+                callee,
+                args: &[],
+                info,
+            },
+            0,
+        );
+        let header = b.function_header(
+            VarSpan::default(),
+            FunctionAttribute::default(),
+            LamLoc::NONE,
+        );
+        let fun = b.new_node(View::Fun { body: call, header }, 0);
+        let body = b.new_node(View::Var { var: v }, 0);
+        let root = b.new_node(
+            View::LetRec {
+                first: v,
+                values: &[fun],
+                body,
+            },
+            0,
+        );
+        b.mark_tail_positions(root);
+        assert!(b.node(call).flags().contains(NodeFlags::TAIL));
+        assert_eq!(b.function(header).flags & 1, 1);
+        b.validate(Some(root), false).unwrap();
+        let replacement = b.new_node(View::JNull, 0);
+        b.replace(call, replacement);
+        b.mark_tail_positions(root);
+        assert!(b.node(call).flags().contains(NodeFlags::TAIL));
+        assert_eq!(b.function(header).flags & 1, 0);
+        b.validate(Some(root), false).unwrap();
+    }
+
+    #[test]
+    fn switch_default_multipliers_compose_and_stop_at_full_tables() {
+        for (consts_full, blocks_full, count) in [
+            (false, false, 4),
+            (true, false, 1),
+            (false, true, 1),
+            (true, true, 1),
+        ] {
+            let mut b = Bir::default();
+            let var = b.new_var_id(Name::new("v"), 0);
+            let mut root = b.new_node(View::Var { var }, 0);
+            for _ in 0..2 {
+                let scrutinee = b.new_node(View::JNull, 0);
+                let header = b.switch_header(SwitchHeader {
+                    keys: vec![],
+                    clauses: vec![],
+                    constants: 0,
+                    consts_full,
+                    blocks_full,
+                    has_default: true,
+                    dispatch: SwitchDispatch::Direct,
+                });
+                root = b.new_node(
+                    View::Switch {
+                        scrutinee,
+                        actions: &[root],
+                        header,
+                    },
+                    0,
+                );
+            }
+            assert_eq!(b.vars.uses(var), count);
+            b.validate(Some(root), false).unwrap();
+            let copy = b.copy_subtree(root, &[]);
+            b.replace(root, copy);
+            assert_eq!(b.vars.uses(var), count);
+            b.validate(Some(root), false).unwrap();
+            b.release(root);
+            b.validate(None, false).unwrap();
+        }
+    }
+
+    #[test]
+    fn static_catch_copy_renames_labels_and_params() {
+        let mut b = Bir::default();
+        let params = b.new_vars(&[Name::new("e")]);
+        let var = params.iter().next().unwrap();
+        let header = b.catch_header(7, params);
+        let arg = b.new_node(View::JNull, 0);
+        let body = b.new_node(
+            View::Exit {
+                label: 7,
+                args: &[arg],
+            },
+            0,
+        );
+        let handler = b.new_node(View::Var { var }, 0);
+        let root = b.new_node(
+            View::Catch {
+                body,
+                handler,
+                header,
+            },
+            0,
+        );
+        assert_eq!(b.catch(header).uses(), 1);
+        let copied = b.copy_subtree(root, &[]);
+        let View::Catch {
+            header: new_header, ..
+        } = b.view(copied)
+        else {
+            panic!()
+        };
+        assert_ne!(header, new_header);
+        assert_ne!(b.catch(header).label, b.catch(new_header).label);
+        assert_eq!(b.catch(new_header).uses(), 1);
+        let pair = b.new_node(
+            View::Seq {
+                first: root,
+                second: copied,
+            },
+            0,
+        );
+        b.validate(Some(pair), false).unwrap();
+        b.release(pair);
+        assert_eq!(b.catch(header).uses(), 0);
+        assert_eq!(b.catch(new_header).uses(), 0);
+        b.validate(None, false).unwrap();
+    }
+
+    #[test]
+    fn copying_renames_free_uses_but_freshens_local_binders() {
+        let mut b = Bir::default();
+        let free = b.new_var_id(Name::new("free"), 0);
+        let renamed = b.new_var_id(Name::new("renamed"), 1);
+        let local = b.new_var_id(Name::new("local"), 2);
+        let value = b.new_node(View::Var { var: free }, 0);
+        let body = b.new_node(View::Var { var: local }, 0);
+        let root = b.new_node(
+            View::Let {
+                var: local,
+                value: Some(value),
+                body,
+            },
+            0,
+        );
+        let copied = b.copy_subtree(root, &[(free, renamed), (local, renamed)]);
+        let View::Let {
+            var: copied_local, ..
+        } = b.view(copied)
+        else {
+            panic!()
+        };
+        assert_ne!(copied_local, local);
+        assert_ne!(copied_local, renamed);
+        assert_eq!(b.vars.uses(renamed), 1);
+        let pair = b.new_node(
+            View::Seq {
+                first: root,
+                second: copied,
+            },
+            0,
+        );
+        b.validate(Some(pair), false).unwrap();
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    fn sharing_rejected_before_modifying_arena() {
+        let mut b = Bir::default();
+        let child = b.new_node(View::JNull, 0);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            b.new_node(
+                View::Seq {
+                    first: child,
+                    second: child,
+                },
+                0,
+            )
+        }));
+        assert!(result.is_err());
+        b.validate(Some(child), false).unwrap();
+    }
+
+    #[test]
+    fn effect_and_capture_corruption_are_detected() {
+        let mut b = Bir::default();
+        let var = b.new_var_id(Name::new("v"), 0);
+        let body = b.new_node(View::Var { var }, 0);
+        let header = b.function_header(
+            VarSpan::default(),
+            FunctionAttribute::default(),
+            LamLoc::NONE,
+        );
+        let root = b.new_node(View::Fun { body, header }, 0);
+        b.vars.flags[var.index()].0 &= !VarFlags::CAPTURED;
+        assert!(
+            b.validate(Some(root), false)
+                .unwrap_err()
+                .contains("capture")
+        );
+        b.vars.flags[var.index()].0 |= VarFlags::CAPTURED;
+        b.nodes[root.index()].set_flags(NodeFlags(0));
+        assert!(
+            b.validate(Some(root), false)
+                .unwrap_err()
+                .contains("effect")
+        );
+    }
+}
+
+#[cfg(test)]
+mod js_metadata_tests {
+    use super::*;
+    use crate::js_ir::arena::FieldPos;
+    use crate::name::Name;
+
+    #[test]
+    fn optional_js_operands_round_trip_through_copy() {
+        let mut b = Bir::default();
+        let body = b.new_node(View::SBlock { statements: &[] }, 0);
+        let finaliser = b.new_node(View::SBlock { statements: &[] }, 0);
+        let try_ = b.new_node(
+            View::STry {
+                parts: &[body, finaliser],
+                exception: None,
+            },
+            0,
+        );
+        let object = b.new_node(View::JNull, 0);
+        let property = b.intern_text("field");
+        let dot = b.new_node(
+            View::JDot {
+                object,
+                property,
+                position: FieldPos::new(Some(123456)),
+            },
+            0,
+        );
+        let label = b.new_node(View::SBreak { label: None }, 0);
+        let loop_body = b.new_node(
+            View::SBlock {
+                statements: &[label],
+            },
+            0,
+        );
+        let iterable = b.new_node(View::JArray { values: &[] }, 0);
+        let var = b.new_var_id(Name::new("item"), 0);
+        let loop_ = b.new_node(
+            View::SForOf {
+                var,
+                parts: &[iterable, loop_body],
+                label: None,
+            },
+            0,
+        );
+        let root = b.new_node(
+            View::SBlock {
+                statements: &[try_, dot, loop_],
+            },
+            0,
+        );
+        b.validate(Some(root), false).unwrap();
+        let copy = b.copy_subtree(root, &[]);
+        b.replace(root, copy);
+        b.validate(Some(root), false).unwrap();
+        let View::SBlock { statements } = b.view(root) else {
+            panic!()
+        };
+        assert!(matches!(
+            b.view(statements[0]),
+            View::STry {
+                exception: None,
+                ..
+            }
+        ));
+        let View::JDot { position, .. } = b.view(statements[1]) else {
+            panic!()
+        };
+        assert_eq!(position.get(), Some(123456));
+    }
+
+    #[test]
+    fn rest_fields_are_binders_and_are_freshened() {
+        let mut b = Bir::default();
+        let rest = b.new_var_id(Name::new("rest"), 0);
+        let field = b.new_var_id(Name::new("field"), 1);
+        let name = b.intern_text("field");
+        let info = b.js_info(JsPayload::Rest(vec![RestField {
+            name,
+            binding: Some(field),
+        }]));
+        let value = b.new_node(View::JNull, 0);
+        let decl = b.new_node(
+            View::SRest {
+                var: rest,
+                value,
+                info,
+            },
+            0,
+        );
+        let usage = b.new_node(View::Var { var: field }, 0);
+        let root = b.new_node(
+            View::SBlock {
+                statements: &[decl, usage],
+            },
+            0,
+        );
+        assert_eq!(b.vars.binder(field), Some(decl));
+        let copied = b.copy_subtree(root, &[]);
+        let View::SBlock { statements } = b.view(copied) else {
+            panic!()
+        };
+        let View::SRest { info, .. } = b.view(statements[0]) else {
+            panic!()
+        };
+        let JsPayload::Rest(fields) = b.javascript(info) else {
+            panic!()
+        };
+        let fresh = fields[0].binding.unwrap();
+        assert_ne!(fresh, field);
+        assert_eq!(b.vars.binder(fresh), Some(statements[0]));
+        let pair = b.new_node(
+            View::SBlock {
+                statements: &[root, copied],
+            },
+            0,
+        );
+        b.validate(Some(pair), false).unwrap();
+    }
+
+    #[test]
+    fn methods_keep_their_representation_when_copied() {
+        let mut b = Bir::default();
+        let body = b.new_node(View::SBlock { statements: &[] }, 0);
+        let header = b.method_header(
+            VarSpan::default(),
+            FunctionAttribute::default(),
+            LamLoc::NONE,
+        );
+        let root = b.new_node(View::JFun { body, header }, 0);
+        let copied = b.copy_subtree(root, &[]);
+        let View::JFun { header, .. } = b.view(copied) else {
+            panic!()
+        };
+        assert_eq!(
+            b.function(header).flags & FuncHeader::METHOD,
+            FuncHeader::METHOD
+        );
+        let pair = b.new_node(
+            View::JArray {
+                values: &[root, copied],
+            },
+            0,
+        );
+        b.validate(Some(pair), false).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod cost_measurements {
+    use super::*;
+    use crate::name::Name;
+    #[test]
+    fn sampled_edit_costs() {
+        let mut b = Bir::default();
+        let leaf = b.new_node(View::JNull, 0);
+        let mut root = leaf;
+        for i in 0..1000 {
+            let var = b.new_var_id(Name::new("x"), i);
+            let value = b.new_node(View::JNull, 0);
+            root = b.new_node(
+                View::Let {
+                    var,
+                    value: Some(value),
+                    body: root,
+                },
+                0,
+            );
+        }
+        println!("COST build 2001 nodes: {} visits", b.steps.get());
+        b.steps.set(0);
+        for _ in 0..100 {
+            let new = b.new_node(View::JNull, 0);
+            b.replace(leaf, new);
+        }
+        println!(
+            "COST replace 100 times at depth 1000: {} visits",
+            b.steps.get()
+        );
+        b.validate(Some(root), false).unwrap();
+        let mut b = Bir::default();
+        for i in 0..5000 {
+            b.intern_text(&format!("symbol_{i}"));
+        }
+        for i in 0..5000 {
+            b.intern_text(&format!("symbol_{i}"));
+        }
+        println!(
+            "COST intern 5000 distinct strings twice: {} comparisons",
+            b.intern_comparisons.get()
+        );
+    }
+}
+
+#[cfg(test)]
+mod incremental_cost_tests {
+    use super::*;
+    use crate::name::Name;
+
+    fn chain(b: &mut Bir, depth: u32) -> (NodeId, NodeId) {
+        let leaf = b.new_node(View::JNull, 0);
+        let mut root = leaf;
+        for i in 0..depth {
+            let var = b.new_var_id(Name::new("x"), i);
+            let value = b.new_node(View::JNull, 0);
+            root = b.new_node(
+                View::Let {
+                    var,
+                    value: Some(value),
+                    body: root,
+                },
+                0,
+            );
+        }
+        (root, leaf)
+    }
+
+    #[test]
+    fn hundred_thousand_nodes_have_linear_construction_cost() {
+        let mut b = Bir::for_typed_exprs(100_000);
+        let (root, _) = chain(&mut b, 49_999);
+        let root = b.new_node(View::SExp { value: root }, 0);
+        assert_eq!(b.nodes.len(), 100_000);
+        let steps = b.steps.get();
+        println!("COST build 100000 nodes: {steps} visits (bound 24*n)");
+        assert!(steps <= 24 * 100_000, "{steps} visits");
+        b.validate(Some(root), false).unwrap();
+        b.mark_tail_positions(root);
+        b.validate(Some(root), true).unwrap();
+    }
+
+    #[test]
+    fn ten_thousand_leaf_replacements_do_not_walk_the_ten_thousand_deep_spine() {
+        let mut b = Bir::default();
+        let (root, leaf) = chain(&mut b, 10_000);
+        b.steps.set(0);
+        for _ in 0..10_000 {
+            let new = b.new_node(View::JNull, 0);
+            b.replace(leaf, new);
+        }
+        let steps = b.steps.get();
+        println!("COST replace 10000 times at depth 10000: {steps} visits (bound 64*n)");
+        assert!(steps <= 64 * 10_000, "{steps} visits");
+        b.validate(Some(root), false).unwrap();
+    }
+
+    #[test]
+    fn fifty_thousand_distinct_strings_have_linear_lookup_comparisons() {
+        let mut b = Bir::default();
+        let ids: Vec<_> = (0..50_000)
+            .map(|i| b.intern_text(&format!("symbol_{i}")))
+            .collect();
+        for (i, &id) in ids.iter().enumerate() {
+            assert_eq!(b.intern_text(&format!("symbol_{i}")), id);
+        }
+        let comparisons = b.intern_comparisons.get();
+        println!("COST intern 50000 distinct strings twice: {comparisons} comparisons (bound 3*n)");
+        assert!(comparisons <= 3 * 50_000, "{comparisons} comparisons");
+    }
+
+    #[test]
+    fn moved_free_uses_cross_capture_boundaries_without_per_use_parent_walks() {
+        let mut b = Bir::default();
+        let free = b.new_var_id(Name::new("free"), 0);
+        let body = b.new_node(View::JNull, 0);
+        let header = b.function_header(
+            VarSpan::default(),
+            FunctionAttribute::default(),
+            LamLoc::NONE,
+        );
+        let root = b.new_node(View::Fun { body, header }, 0);
+        let uses: Vec<_> = (0..10_000)
+            .map(|_| b.new_node(View::Var { var: free }, 0))
+            .collect();
+        let replacement = b.new_node(View::JArray { values: &uses }, 0);
+        b.steps.set(0);
+        b.replace(body, replacement);
+        assert!(b.vars.flags(free).contains(VarFlags::CAPTURED));
+        assert!(b.steps.get() < 25 * 10_000);
+        b.validate(Some(root), false).unwrap();
+    }
+
+    #[test]
+    fn optional_tail_validation_rejects_stale_and_corrupt_results() {
+        let mut b = Bir::default();
+        let body = b.new_node(View::JNull, 0);
+        let header = b.function_header(
+            VarSpan::default(),
+            FunctionAttribute::default(),
+            LamLoc::NONE,
+        );
+        let root = b.new_node(View::Fun { body, header }, 0);
+        assert!(
+            b.validate(Some(root), true)
+                .unwrap_err()
+                .contains("need marking")
+        );
+        b.mark_tail_positions(root);
+        b.validate(Some(root), true).unwrap();
+        let mut flags = b.node(body).flags();
+        flags.0 &= !NodeFlags::TAIL;
+        b.nodes[body.index()].set_flags(flags);
+        b.validate(Some(root), false).unwrap();
+        assert!(
+            b.validate(Some(root), true)
+                .unwrap_err()
+                .contains("tail position")
+        );
+        b.mark_tail_positions(root);
+        let new = b.new_node(View::JNull, 0);
+        b.replace(body, new);
+        assert!(
+            b.validate(Some(root), true)
+                .unwrap_err()
+                .contains("need marking")
+        );
+    }
+
+    #[test]
+    fn hashed_payloads_preserve_float_bits_and_primitive_identity() {
+        use std::hash::{Hash, Hasher};
+        let mut b = Bir::default();
+        let pos = b.intern_const(Constant::float(0.0));
+        let neg = b.intern_const(Constant::float(-0.0));
+        assert_ne!(pos, neg);
+        let nan = Constant::float(f64::from_bits(0x7ff8_0000_0000_0001));
+        assert_eq!(nan, nan.clone());
+        let id = b.intern_const(nan.clone());
+        assert_eq!(id, b.intern_const(nan.clone()));
+        assert_ne!(
+            id,
+            b.intern_const(Constant::float(f64::from_bits(0x7ff8_0000_0000_0002)))
+        );
+        let mut h1 = std::collections::hash_map::DefaultHasher::new();
+        let mut h2 = std::collections::hash_map::DefaultHasher::new();
+        nan.hash(&mut h1);
+        nan.clone().hash(&mut h2);
+        assert_eq!(h1.finish(), h2.finish());
+        let prim = PrimPayload {
+            primitive: Primitive::Paddint,
+            loc: LamLoc::NONE,
+        };
+        let id = b.intern_prim(prim.clone());
+        for _ in 0..10_000 {
+            assert_eq!(b.intern_prim(prim.clone()), id);
+        }
+        assert_ne!(
+            id,
+            b.intern_prim(PrimPayload {
+                primitive: Primitive::Psubint,
+                loc: LamLoc::NONE
+            })
+        );
+    }
+
+    #[test]
+    fn catch_labels_are_indexed_and_weights_are_cached_between_queries() {
+        let mut b = Bir::default();
+        for label in 0..10_000 {
+            b.catch_header(label, VarSpan::default());
+        }
+        let root = b.new_node(
+            View::Exit {
+                label: 9999,
+                args: &[],
+            },
+            0,
+        );
+        b.validate(Some(root), false).unwrap();
+        b.release(root);
+        b.validate(None, false).unwrap();
+        let (body, leaf) = chain(&mut b, 1000);
+        let scrutinee = b.new_node(View::JNull, 0);
+        let header = b.switch_header(SwitchHeader {
+            keys: vec![],
+            clauses: vec![],
+            constants: 0,
+            consts_full: false,
+            blocks_full: false,
+            has_default: true,
+            dispatch: crate::lambda::SwitchDispatch::Direct,
+        });
+        let root = b.new_node(
+            View::Switch {
+                scrutinee,
+                actions: &[body],
+                header,
+            },
+            0,
+        );
+        assert_eq!(b.weight(leaf), 2);
+        b.steps.set(0);
+        for _ in 0..10_000 {
+            assert_eq!(b.weight(leaf), 2);
+        }
+        assert_eq!(b.steps.get(), 10_000);
+        b.validate(Some(root), false).unwrap();
+        b.release(root);
+        assert_eq!(b.weighted_switches, 0);
+        b.validate(None, false).unwrap();
+    }
+}
