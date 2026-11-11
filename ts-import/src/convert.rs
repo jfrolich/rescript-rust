@@ -1221,6 +1221,24 @@ impl<'a> Converter<'a> {
             }
         }
 
+        // The members of one enum (what is left of `Priority | undefined`):
+        // the enum's own type.
+        if !whole_boolean {
+            let enum_of = |member: &P<Type>| {
+                member
+                    .flags()
+                    .intersects(TypeFlags::EnumLiteral)
+                    .then(|| member.symbol().and_then(|symbol| symbol.parent()))
+                    .flatten()
+                    .filter(|parent| parent.flags().intersects(SymbolFlags::Enum))
+            };
+            if let Some(first) = enum_of(&members[0])
+                && members.iter().all(|member| enum_of(member).is_some_and(|parent| parent == first))
+            {
+                return Structure::Ty(self.symbol_type(first, &[]));
+            }
+        }
+
         // Only literals: a polymorphic variant, which needs no declaration.
         if !whole_boolean {
             let tags: Vec<Tag> = members.iter().filter_map(|&member| literal_tag(member)).collect();

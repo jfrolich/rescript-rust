@@ -168,10 +168,11 @@ pub enum Item {
     Module(String, Vec<Item>),
 }
 
+/// The reserved words of ReScript (`Token::lookup_keyword` in the parser).
 const KEYWORDS: &[&str] = &[
-    "and", "as", "assert", "async", "await", "catch", "constraint", "dict", "else", "exception",
-    "external", "false", "for", "if", "in", "include", "let", "list", "module", "mutable", "of",
-    "open", "private", "rec", "switch", "true", "try", "type", "when", "while",
+    "and", "as", "assert", "await", "break", "constraint", "continue", "else", "exception",
+    "external", "false", "for", "if", "in", "include", "let", "module", "mutable", "of", "open",
+    "private", "rec", "switch", "true", "try", "type", "when", "while",
 ];
 
 pub fn is_keyword(name: &str) -> bool {

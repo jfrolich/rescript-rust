@@ -369,6 +369,8 @@ module Features = {
   @module("./features.ts") external neverArray: array<'a> = "neverArray"
   /** TypeScript: `(args: string[]) => number` */
   @module("./features.ts") external default: array<string> => float = "default"
+  /** TypeScript: `(level?: Level | undefined) => Level | null` */
+  @module("./features.ts") external withLevel: (~level: level=?) => Null.t<level> = "withLevel"
 }
 
 // Where ReScript says less than TypeScript:

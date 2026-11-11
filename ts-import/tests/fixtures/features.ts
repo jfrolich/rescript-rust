@@ -162,3 +162,7 @@ export declare const neverArray: never[];
 // --- default export and namespaces ---
 export default function main(args: string[]): number { return args.length; }
 export namespace Util { export const version = "1"; export function helper(): void {} }
+
+// An optional enum parameter keeps the enum's type.
+export enum Level { Low, High }
+export function withLevel(level?: Level): Level | null { return level ?? null; }
