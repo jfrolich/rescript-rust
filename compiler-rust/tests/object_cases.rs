@@ -412,3 +412,27 @@ let viaInclude = Included.message
         "{js}"
     );
 }
+
+#[test]
+fn a_joined_test_keeps_only_the_checks_it_needs() {
+    let js = js(r#"
+type regex = {pattern: string, flags: string}
+@unboxed type node =
+  | StringLiteral({@as("type") type_: [#Literal], value: string, raw: Null.t<string>})
+  | NumericLiteral({@as("type") type_: [#Literal], value: float, raw: Null.t<string>})
+  | RegExpLiteral({@as("type") type_: [#Literal], value: Null.t<RegExp.t>, regex: regex})
+  | IdentifierName({@as("type") type_: [#Identifier], name: string})
+let f = node =>
+  switch node {
+  | StringLiteral(_) => 1
+  | NumericLiteral(_) => 2
+  | RegExpLiteral(_) => 3
+  | IdentifierName(_) => 4
+  }
+"#);
+    let f = function(&js, "f");
+    assert!(
+        f.starts_with(r#"if ("raw" in node && typeof node.value === "string") { return 1; }"#),
+        "{f}"
+    );
+}

@@ -1330,11 +1330,30 @@ fn test_against(case: &ObjectShape, others: &[&ObjectShape]) -> Option<Vec<Field
             uncovered.retain(|other| !fails(&check, other));
             test.push(check);
             if uncovered.is_empty() {
-                return Some(test);
+                return Some(without_unneeded_checks(test, others));
             }
         }
     }
     None
+}
+
+/// A joined test without the checks it does not need: each check, first to
+/// last, is dropped when every other case still fails one of the rest.
+fn without_unneeded_checks(mut test: Vec<FieldCheck>, others: &[&ObjectShape]) -> Vec<FieldCheck> {
+    let mut index = 0;
+    while index < test.len() && test.len() > 1 {
+        let still_enough = others.iter().all(|other| {
+            test.iter()
+                .enumerate()
+                .any(|(at, check)| at != index && fails(check, other))
+        });
+        if still_enough {
+            test.remove(index);
+        } else {
+            index += 1;
+        }
+    }
+    test
 }
 
 /// The order the object cases of an `@unboxed` variant are tested in, each
