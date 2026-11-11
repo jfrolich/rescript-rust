@@ -12,7 +12,7 @@
 //! [`TypeCheckContext::macro_expansion_required`] set, which tells the driver
 //! to expand the file first.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use serde_json::{Value, json};
@@ -71,27 +71,19 @@ pub struct ComptimeSite {
 /// A generated function: `Json.encode` at the type `user`.
 struct Instance {
     name: String,
-    /// Original offset of the top-level item the instance was generated
-    /// for. Items at or after that offset can call it.
+    /// Original offset of the first top-level item that calls the instance:
+    /// the instance is defined in the group before that item.
     ordinal: u32,
 }
 
 /// The instances of a file, kept from pass to pass.
 #[derive(Default)]
 pub struct InstanceTable {
-    by_key: HashMap<String, Vec<Instance>>,
+    by_key: HashMap<String, Instance>,
     names: HashSet<String>,
 }
 
 impl InstanceTable {
-    fn find(&self, key: &str, ordinal: u32) -> Option<&str> {
-        self.by_key
-            .get(key)?
-            .iter()
-            .find(|instance| instance.ordinal <= ordinal)
-            .map(|instance| instance.name.as_str())
-    }
-
     fn add(&mut self, key: String, base: &str, ordinal: u32) -> String {
         let mut name = base.to_string();
         let mut counter = 1;
@@ -100,12 +92,33 @@ impl InstanceTable {
             name = format!("{base}${counter}");
         }
         self.names.insert(name.clone());
-        self.by_key.entry(key).or_default().push(Instance {
-            name: name.clone(),
-            ordinal,
-        });
+        self.by_key.insert(
+            key,
+            Instance {
+                name: name.clone(),
+                ordinal,
+            },
+        );
         name
     }
+}
+
+/// A group of instances that is in the text: a `let rec` an earlier pass
+/// added before the top-level item that needed them.
+struct Group {
+    /// The range of the whole item.
+    item: (u32, u32),
+    /// Name and range of each function, `name = (...) => body`.
+    functions: Vec<(String, u32, u32)>,
+}
+
+const GROUP_SEPARATOR: &str = "\nand ";
+
+fn render_group(functions: &[String]) -> String {
+    format!(
+        "@{INSTANCES_ATTRIBUTE} @warning(\"-39\") let rec {}",
+        functions.join(GROUP_SEPARATOR)
+    )
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -290,11 +303,14 @@ pub struct Discovery {
     item_pending: bool,
     /// The application whose function is being typed.
     apply: Option<(LocIdx, PendingCall)>,
-    /// End of the instance group already in the text, by ordinal.
-    group_ends: HashMap<u32, u32>,
-    /// Instances added by this pass that start a new group, by the offset of
-    /// the item they go before.
-    new_groups: Vec<(u32, Vec<String>)>,
+    /// The instance groups in the text, by ordinal.
+    groups: BTreeMap<u32, Group>,
+    /// Instances this pass generated: the ordinal of the item that needs
+    /// the instance, the offset of that item, and the function.
+    added: Vec<(u32, u32, String)>,
+    /// Instances an earlier item turned out to need as well: name, ordinal
+    /// and offset of that item. They move to its group.
+    moved: Vec<(String, u32, u32)>,
 }
 
 /// What a discovery pass found.
@@ -327,20 +343,79 @@ impl Discovery {
             item_start: 0,
             item_pending: false,
             apply: None,
-            group_ends: HashMap::new(),
-            new_groups: Vec::new(),
+            groups: BTreeMap::new(),
+            added: Vec::new(),
+            moved: Vec::new(),
         }
     }
 
     pub fn finish(mut self) -> PassResult {
-        for (at, functions) in std::mem::take(&mut self.new_groups) {
-            self.edits.push(Edit::insert(
-                at,
-                format!(
-                    "@{INSTANCES_ATTRIBUTE} @warning(\"-39\") let rec {}\n",
-                    functions.join("\nand ")
-                ),
-            ));
+        // Where each instance that moves goes: the earliest item that needs
+        // it. What a moved function calls moves with it.
+        let mut targets: BTreeMap<String, (u32, u32)> = BTreeMap::new();
+        let mut queue: VecDeque<(String, u32, u32)> = std::mem::take(&mut self.moved).into();
+        while let Some((name, ordinal, at)) = queue.pop_front() {
+            let Some((home, function)) = self.function_in_text(&name) else {
+                continue;
+            };
+            if home <= ordinal || targets.get(&name).is_some_and(|(target, _)| *target <= ordinal) {
+                continue;
+            }
+            targets.insert(name, (ordinal, at));
+            for word in function.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '$')) {
+                if word.contains('$') && self.instances.names.contains(word) {
+                    queue.push_back((word.to_string(), ordinal, at));
+                }
+            }
+        }
+        for instance in self.instances.by_key.values_mut() {
+            if let Some((ordinal, _)) = targets.get(&instance.name) {
+                instance.ordinal = instance.ordinal.min(*ordinal);
+            }
+        }
+
+        // What each group gains, by ordinal: the offset to start a new group
+        // at, and the functions.
+        let mut gains: BTreeMap<u32, (u32, Vec<String>)> = BTreeMap::new();
+        for (name, (ordinal, at)) in &targets {
+            if let Some((_, function)) = self.function_in_text(name) {
+                gains.entry(*ordinal).or_insert((*at, Vec::new())).1.push(function);
+            }
+        }
+        let removed: HashSet<&String> = targets.keys().collect();
+        for (ordinal, at, function) in std::mem::take(&mut self.added) {
+            gains.entry(ordinal).or_insert((at, Vec::new())).1.push(function);
+        }
+        for (ordinal, group) in &self.groups {
+            let gained = gains.remove(ordinal).map(|(_, functions)| functions).unwrap_or_default();
+            let loses = group.functions.iter().any(|(name, _, _)| removed.contains(name));
+            if !loses {
+                if !gained.is_empty() {
+                    let text: String = gained
+                        .iter()
+                        .map(|function| format!("{GROUP_SEPARATOR}{function}"))
+                        .collect();
+                    self.edits.push(Edit::insert(group.item.1, text));
+                }
+                continue;
+            }
+            let mut functions: Vec<String> = group
+                .functions
+                .iter()
+                .filter(|(name, _, _)| !removed.contains(name))
+                .map(|(_, start, end)| self.text.slice(*start, *end).to_string())
+                .collect();
+            functions.extend(gained);
+            let text = if functions.is_empty() {
+                String::new()
+            } else {
+                render_group(&functions)
+            };
+            self.edits.push(Edit::replace(group.item.0, group.item.1, text));
+        }
+        for (_, (at, functions)) in gains {
+            self.edits
+                .push(Edit::insert(at, format!("{}\n", render_group(&functions))));
         }
         PassResult {
             edits: self.edits,
@@ -359,20 +434,32 @@ impl Discovery {
         });
     }
 
+    /// The group an instance is defined in, and its text.
+    fn function_in_text(&self, name: &str) -> Option<(u32, String)> {
+        self.groups.iter().find_map(|(home, group)| {
+            group
+                .functions
+                .iter()
+                .find(|(function, _, _)| function == name)
+                .map(|(_, start, end)| (*home, self.text.slice(*start, *end).to_string()))
+        })
+    }
+
+    /// The name of the instance for `key`, if there is one. When it is
+    /// defined for an item after the one being typed, it moves here.
+    fn instance(&mut self, key: &str) -> Option<String> {
+        let ordinal = self.text.origin(self.item_start);
+        let instance = self.instances.by_key.get_mut(key)?;
+        if instance.ordinal > ordinal {
+            instance.ordinal = ordinal;
+            self.moved.push((instance.name.clone(), ordinal, self.item_start));
+        }
+        Some(instance.name.clone())
+    }
+
     fn add_instance(&mut self, function: String) {
         let ordinal = self.text.origin(self.item_start);
-        if let Some(end) = self.group_ends.get(&ordinal).copied() {
-            self.edits.push(Edit::insert(end, format!("\nand {function}")));
-            return;
-        }
-        match self
-            .new_groups
-            .iter_mut()
-            .find(|(at, _)| *at == self.item_start)
-        {
-            Some((_, functions)) => functions.push(function),
-            None => self.new_groups.push((self.item_start, vec![function])),
-        }
+        self.added.push((ordinal, self.item_start, function));
     }
 
     /// Run a macro: ask the engine, answer its questions, ask again.
@@ -1000,9 +1087,37 @@ pub(crate) fn begin_item(tctx: &mut TypeCheckContext<'_>, item: &ParsedStructure
     discovery.item_start = start;
     discovery.item_pending = false;
     // An instance group that an earlier pass added.
-    if is_instance_group(arena, item) {
+    if is_instance_group(arena, item)
+        && let ParsedStructureItemDesc::Pstr_value((_, bindings)) = &item.pstr_desc
+    {
+        let bindings = arena.vb_list(*bindings);
+        let starts: Vec<u32> = bindings
+            .iter()
+            .map(|binding| range(arena, arena.get_pat(binding.pvb_pat).ppat_loc).0)
+            .collect();
+        let functions = bindings
+            .iter()
+            .enumerate()
+            .filter_map(|(index, binding)| {
+                let PatternDesc::Ppat_var(name) = &arena.get_pat(binding.pvb_pat).ppat_desc else {
+                    return None;
+                };
+                // A function ends where the separator before the next starts.
+                let function_end = match starts.get(index + 1) {
+                    Some(next) => next.saturating_sub(GROUP_SEPARATOR.len() as u32),
+                    None => end,
+                };
+                Some((arena.get_string(name.txt).to_string(), starts[index], function_end))
+            })
+            .collect();
         let ordinal = discovery.text.origin(start);
-        discovery.group_ends.insert(ordinal, end);
+        discovery.groups.insert(
+            ordinal,
+            Group {
+                item: (start, end),
+                functions,
+            },
+        );
     }
 }
 
@@ -1127,8 +1242,8 @@ fn resolve_generic(tctx: &mut TypeCheckContext<'_>, discovery: &mut Discovery, g
     let key = format!("{full_name}({})->{result}", key_parts.join(","));
     let ordinal = discovery.text.origin(discovery.item_start);
 
-    let name = match discovery.instances.find(&key, ordinal) {
-        Some(name) => name.to_string(),
+    let name = match discovery.instance(&key) {
+        Some(name) => name,
         None => {
             let expected = reflect::type_ref(ctx, &mut table, ret);
             let request = json!({

@@ -51,7 +51,14 @@ fn diagnostic(
         Position::new(crate::intern::StrIdx::from_raw(0), line, bol as i32, offset as i32)
     };
     UserDiagnostic::new(
-        code_frame::format_error(filename, original, &position(start), &position(end), message),
+        code_frame::format_error_with_intro(
+            "We've found a bug for you!",
+            filename,
+            original,
+            &position(start),
+            &position(end),
+            message,
+        ),
         2,
     )
     .into()

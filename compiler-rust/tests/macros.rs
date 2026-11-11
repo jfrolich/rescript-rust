@@ -544,3 +544,54 @@ fn compile_playground_examples() {
         }
     }
 }
+
+#[test]
+fn an_instance_is_generated_once() {
+    let mut project = Project::new();
+    compile_ok(&mut project, "Json.res", JSON);
+    let js = compile_ok(
+        &mut project,
+        "Twice.res",
+        r#"
+type point = {x: float, y: float}
+type line = {from: point, to: point}
+
+let a = (l: line) => Json.encode(l)
+let b = (p: point) => Json.encode(p)
+let c = (xs: array<float>) => Json.encode(xs)
+let d = (p: point, n: float) => (Json.encode(p), Json.encode(n))
+"#,
+    );
+    let expanded = project.expanded.clone().unwrap();
+    for name in ["encode$point", "encode$float", "encode$line", "encode$array_float"] {
+        assert_eq!(expanded.matches(&format!("{name} = (")).count(), 1, "{name}\n{expanded}");
+    }
+    assert!(!expanded.contains("$2"), "{expanded}");
+    assert_eq!(js.matches("function encode$point(").count(), 1, "{js}");
+}
+
+#[test]
+fn an_instance_moves_to_the_first_item_that_needs_it() {
+    let mut project = Project::new();
+    compile_ok(&mut project, "Json.res", JSON);
+    // `tree` is needed by the first item only through `forest`, which is
+    // found a pass after the second item made `encode$tree`.
+    let js = compile_ok(
+        &mut project,
+        "Forest.res",
+        r#"
+type rec tree = {value: int, children: array<tree>}
+type forest = {trees: array<tree>, name: option<string>}
+
+let a = (f: forest) => Json.encode(f)
+let b = (t: tree) => Json.encode(t)
+"#,
+    );
+    let expanded = project.expanded.clone().unwrap();
+    for name in ["encode$tree", "encode$forest", "encode$int", "encode$array_tree"] {
+        assert_eq!(expanded.matches(&format!("{name} = (")).count(), 1, "{name}\n{expanded}");
+    }
+    assert_eq!(js.matches("function encode$tree(").count(), 1, "{js}");
+    // One group, before the first item.
+    assert_eq!(expanded.matches("@res.macroInstances").count(), 1, "{expanded}");
+}
