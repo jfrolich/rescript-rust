@@ -4,11 +4,11 @@
 #
 # Add explicit cases here when a fixture needs different flags.
 tests/error_output_parity/compiler/cases/jsx_not_enabled.res	-w +A -color never
-tests/error_output_parity/compiler/cases/missing_module.res	-w +A -bs-jsx 4 -color never -I tests/error_output_parity/compiler/cases/missing_module_pkg/lib/ocaml
-tests/error_output_parity/compiler/cases/include_alias_lax_normalization.res	-w +A -bs-jsx 4 -color never -I tests/error_output_parity/compiler/cases/missing_module_pkg/lib/ocaml
-tests/error_output_parity/compiler/cases/include_unbound_module_path.res	-w +A -bs-jsx 4 -color never -I tests/error_output_parity/compiler/cases/missing_module_pkg/lib/ocaml
-tests/error_output_parity/compiler/cases/cannot_scrape_alias_type_path.res	-w +A -bs-jsx 4 -color never -I tests/error_output_parity/compiler/cases/missing_module_pkg/lib/ocaml
-tests/error_output_parity/compiler/cases/cannot_scrape_alias_module_type_with.res	-w +A -bs-jsx 4 -color never -I tests/error_output_parity/compiler/cases/missing_module_pkg/lib/ocaml
+tests/error_output_parity/compiler/cases/missing_module.res	-w +A -bs-jsx 4 -color never -I tests/error_output_parity/compiler/cases/missing_module_pkg/lib/rescript
+tests/error_output_parity/compiler/cases/include_alias_lax_normalization.res	-w +A -bs-jsx 4 -color never -I tests/error_output_parity/compiler/cases/missing_module_pkg/lib/rescript
+tests/error_output_parity/compiler/cases/include_unbound_module_path.res	-w +A -bs-jsx 4 -color never -I tests/error_output_parity/compiler/cases/missing_module_pkg/lib/rescript
+tests/error_output_parity/compiler/cases/cannot_scrape_alias_type_path.res	-w +A -bs-jsx 4 -color never -I tests/error_output_parity/compiler/cases/missing_module_pkg/lib/rescript
+tests/error_output_parity/compiler/cases/cannot_scrape_alias_module_type_with.res	-w +A -bs-jsx 4 -color never -I tests/error_output_parity/compiler/cases/missing_module_pkg/lib/rescript
 tests/error_output_parity/compiler/cases/bs_ast_parse_error.res	-w +A -bs-jsx 4 -color never -bs-ast
 tests/error_output_parity/compiler/cases/bs_iast_parse_error.resi	-w +A -bs-jsx 4 -color never -bs-ast
 tests/error_output_parity/compiler/cases/no_builtin_raw_extension.res	-w +A -bs-jsx 4 -color never -bs-no-builtin-ppx
@@ -22,8 +22,8 @@ tests/error_output_parity/compiler/cases/parmatch_all_guarded.res	-w +A -warn-er
 .parity-cache/error-output/compiler/compunit_value_mismatch.res	-w +A -bs-jsx 4 -color never -bs-read-cmi -I .parity-cache/error-output/compiler
 tests/error_output_parity/compiler/cases/no_cmi_file_warning.res	-w +A -bs-jsx 4 -color never -no-alias-deps
 tests/error_output_parity/compiler/cases/module_alias_current_unit_no_alias_deps.res	-w +A -bs-jsx 4 -color never -no-alias-deps
-tests/error_output_parity/compiler/cases/package_missing_ml_dependency.res	-w -A -bs-jsx 4 -color never -I tests/error_output_parity/compiler/cases/package_missing_ml_dependency_pkg/lib/ocaml -bs-project-root . -bs-package-name pkg -bs-package-output esmodule:src:.mjs
+tests/error_output_parity/compiler/cases/package_missing_ml_dependency.res	-w -A -bs-jsx 4 -color never -I tests/error_output_parity/compiler/cases/package_missing_ml_dependency_pkg/lib/rescript -bs-project-root . -bs-package-name pkg -bs-package-output esmodule:src:.mjs
 tests/error_output_parity/compiler/cases/bs_ast_error_extension.res	-w +A -bs-jsx 4 -color never -bs-ast
 tests/error_output_parity/compiler/cases/bs_ast_error_extension_empty.res	-w +A -bs-jsx 4 -color never -bs-ast
 tests/error_output_parity/compiler/cases/bs_ast_error_extension.resi	-w +A -bs-jsx 4 -color never -bs-ast
-tests/error_output_parity/compiler/cases/deprecated_module_persistent_submodule.res	-w +A -bs-jsx 4 -color never -I packages/@rescript/belt/lib/ocaml
+tests/error_output_parity/compiler/cases/deprecated_module_persistent_submodule.res	-w +A -bs-jsx 4 -color never -I packages/@rescript/belt/lib/rescript

@@ -26,7 +26,7 @@ Use `cases.tsv` when a fixture needs custom compiler flags.
 
 A case that needs another compilation unit uses a fixture package under
 `cases/` (a `rescript.json` and its sources) and passes
-`-I cases/<package>/lib/ocaml`. The harness builds the package with the OCaml
+`-I cases/<package>/lib/rescript`. The harness builds the package with the OCaml
 `bsc` first (`rescript build-reference`), whose `.cmi`/`.cmj` files the OCaml
 compile reads; `rescript bsc` compiles the package in memory and reads no
 compiled files. A `-bs-read-cmi` case lives in `.parity-cache/error-output/compiler/`:

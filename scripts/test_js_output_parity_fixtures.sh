@@ -120,9 +120,7 @@ if [[ ! -d "$RESCRIPT_RUNTIME" ]]; then
     exit 2
 fi
 export RESCRIPT_RUNTIME
-# The OCaml side reads the runtime's .cmi files: build it with the OCaml bsc
-# (after the in-process build that provides its lib/ocaml sources).
-"$REWATCH_BIN" build "$RESCRIPT_RUNTIME" > /dev/null 2>&1 || true
+# The OCaml side reads the runtime's .cmi files: build it with the OCaml bsc.
 if ! "$REWATCH_BIN" build-reference --bsc "$OCAML_BSC" "$RESCRIPT_RUNTIME" > /dev/null; then
     echo -e "${RED}OCaml reference build of the runtime failed${RESET}" >&2
     exit 2
