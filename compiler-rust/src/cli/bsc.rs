@@ -494,6 +494,7 @@ fn run(args: Vec<String>, registry: Option<RegistryProvider>) -> Result<()> {
         .and_then(|spec| parse_package_output(spec));
 
     let compiler_opts = CompilerOptions {
+        check_only: false,
         dump_lambda: opts.dump_lambda,
         dump_typed_sexp: opts.dump_typed_sexp,
         dump_typed_sexp_locs: opts.dump_typed_sexp_locs,

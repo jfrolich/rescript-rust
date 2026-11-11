@@ -174,6 +174,7 @@ mod tests {
         fs::write(&config_path, format!(r#"{{"name":"{name}"}}"#)).expect("rescript.json should be written");
 
         Package {
+            check_only: false,
             name: name.to_string(),
             config: config::tests::create_config(config::tests::CreateConfigArgs {
                 name: name.to_string(),
