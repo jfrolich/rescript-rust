@@ -219,18 +219,18 @@ Two kinds of union that used to be in the first row are imported exactly now: `s
 - **Library interfaces** (about 140). `NodeJS.ReadableStream | WritableStream`, `EventEmitter | EventTarget`, `EventListener | EventListenerObject`, `boolean | AddEventListenerOptions`, `T | PromiseLike<T>`. TypeScript declares these as interfaces, so nothing says which class to test for, and the import makes a library interface an abstract type. The DOM option objects could be records; the converter does not do that yet.
 - **Unions of tuples** (about 40): the arguments of an event listener, `[] | [err: Error] | [chunk: any]`.
 
-None of the four needs a new language feature to be imported: steps 1 to 3 and 8 of the [plan](#plan-bridging-the-rest) cover them with ReScript that compiles today.
+Steps 1 to 3 and 8 of the [plan](#plan-bridging-the-rest) cover all four. Step 1 uses the language change for object cases; the others need no language change.
 
 ## Plan: bridging the rest
 
 66.5% of the surveyed declarations are imported exactly today. This is a plan to reach about 89.5%. What stays out is `any` (9.9% of the declarations: a hole in the TypeScript, not in ReScript) and types computed from a type parameter that TypeScript cannot evaluate before the parameter is known (0.6%).
 
-Most of the distance is converter work. Seventeen of the twenty-three points need no change to the language or the standard library: the ReScript to generate exists, and every encoding shown below compiles with the current compiler. None of the steps is implemented yet.
+Most of the distance is converter work. Steps 2 to 9 need no change to the language or the standard library: the ReScript to generate exists, and every encoding shown for them compiles with the current compiler. Step 1 uses one language change, [object cases told apart by their fields](#object-cases-told-apart-by-their-fields). None of the steps is implemented yet.
 
 | # | Step | Needs | Declarations made exact | Exact after |
 |---|---|---|---|---|
 | | Today | | | 66.5% |
-| 1 | Members of a union that share a tag become one case | converter | 182 | 72.8% |
+| 1 | Members of a union that share a tag become cases told apart by another field | converter and the object-case language change | 182 | 72.8% |
 | 2 | Library types that are imported as nothing today | converter | 84 | 75.7% |
 | 3 | Members that cannot be told apart become one opaque case | converter | 78 | 78.4% |
 | 4 | Namespaces and enum objects as modules | converter | 72 | 80.9% |
@@ -292,22 +292,32 @@ The syntax tree of vite's parser is a union of 183 interfaces tagged by `type`. 
 ```ts
 interface StringLiteral { type: "Literal"; value: string; raw: string | null }
 interface NumericLiteral { type: "Literal"; value: number; raw: string | null }
+interface RegExpLiteral { type: "Literal"; value: RegExp | null; regex: Regex }
 interface IdentifierName { type: "Identifier"; name: string }
-type Node = StringLiteral | NumericLiteral | IdentifierName // and 180 more
+type Node = StringLiteral | NumericLiteral | RegExpLiteral | IdentifierName // and 179 more
 ```
 
-Members with the same tag become one case. A field they all have gets the union of its types, a field only some have is optional:
+A tag that does not decide the member alone is one field among others. Such a union is imported as an untagged union of object cases, with the language change [object cases told apart by their fields](#object-cases-told-apart-by-their-fields): every member is a case, the tag is a literal check, and where members share a tag another field decides.
 
 ```rescript
-@unboxed type literalValue = String(string) | Number(float)
-
-@tag("type")
+@unboxed
 type node =
-  | @as("Literal") Literal({value: literalValue, raw: Null.t<string>})
-  | @as("Identifier") Identifier({name: string})
+  | StringLiteral({@as("type") type_: [#Literal], value: string, raw: Null.t<string>})
+  | NumericLiteral({@as("type") type_: [#Literal], value: float, raw: Null.t<string>})
+  | RegExpLiteral({@as("type") type_: [#Literal], value: Null.t<RegExp.t>, regex: regex})
+  | IdentifierName({@as("type") type_: [#Identifier], name: string})
 ```
 
-Every value TypeScript allows has this type, so reading is exact. Building is not quite: the merged case also accepts a literal whose fields belong to two different members.
+```js
+if (x.type === "Literal" && "regex" in x) { /* RegExpLiteral */ }
+else if (x.type === "Literal" && typeof x.value === "string") { /* StringLiteral */ }
+else if (x.type === "Literal") { /* NumericLiteral */ }
+else { /* IdentifierName */ }
+```
+
+Building and reading are both exact, and the cases keep their TypeScript names.
+
+Some members that share a tag differ in no field a check can see. `ArrayPattern` and `ArrayAssignmentTarget` are both `{type: "ArrayPattern", elements: [...]}`; only the types of the elements differ. JavaScript cannot tell them apart without walking the elements, so they become one case whose fields have the union of the members' types. That case is exact for reading and accepts more than TypeScript when building. Measured on the oxc types vite uses: the 37 members that share a tag become 22 cases, and 15 members end up in 8 merged cases. The Literal members, the four `Property` members, the three member expressions and the two module declarations are told apart; the identifier variants, the binding and assignment patterns, `Directive` and `ExpressionStatement`, and `BlockStatement` and `FunctionBody` are merged.
 
 ### 2. Library types
 
@@ -440,7 +450,7 @@ The plan needs three changes to the language. One is implemented, two are specif
 | Change | Status | What it covers |
 |---|---|---|
 | [Classes on records](#classes-on-records) | implemented | Unions of classes: `Car \| Vehicle \| string`, `Readable \| Writable`, with the fields of the class still readable. |
-| [Object cases told apart by their fields](#object-cases-told-apart-by-their-fields) | specified, not implemented | Unions of plain objects: `{result} \| {error}`, React's `ReactNode`, same-tag members that differ in one field. About 85 declarations become cases a `switch` can open instead of one opaque case (step 3), and step 1 becomes exact for building too. |
+| [Object cases told apart by their fields](#object-cases-told-apart-by-their-fields) | specified, not implemented | Unions of plain objects: `{result} \| {error}`, React's `ReactNode`, members of a union that share a tag (step 1, 182 declarations). About 85 more become cases a `switch` can open instead of one opaque case (step 3). |
 | [Bounded type variables](#bounded-type-variables) | specified, not implemented | `T extends Writable`: 86 declarations have a constraint, and for 22 it is the last thing missing (step 13). |
 
 The counts for the two that are not implemented are estimates from the survey's notes; they are measured once the import uses the change.
@@ -550,6 +560,8 @@ The literals of a type are those of a polymorphic variant without payloads (`[#c
 **No order.** Two cases with the same fields at the same kinds cannot be told apart: `A({x: int}) | B({x: int})`. The declaration is rejected, with the message the compiler has today for two object cases.
 
 **Where the tests go.** Where the test of the single object case is today: after the literal cases, the primitive kinds and the class instances, and guarded against `null` as it is today. A `switch` that does not name every case tests only the ones it names.
+
+**Many cases.** A union like vite's syntax tree has 168 object cases. When one field's literal tells most of them apart, the tests are a `switch` on that field, and the cases that share a literal are told apart inside its arm: `switch (x.type) { case "Literal": if ("regex" in x) ... }`. A chain of 168 `if`s is correct but slow and unreadable.
 
 **What is trusted.** A record built in ReScript has its declared fields and no others, so for those values the tests are exact. A value that comes from JavaScript can carry more: an object that TypeScript calls `{error: string}` may also have a `result`. TypeScript's own `in` narrowing makes the same assumption. As everywhere in untagged variants, recognition trusts the type.
 
