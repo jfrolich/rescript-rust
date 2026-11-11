@@ -202,7 +202,7 @@ To see which gaps matter, every export of twelve modules was imported: `react`, 
 | Constructor types, classes as values | 2.8% | `unknown` | Step 10: a constructor type in the standard library. |
 | Conditional, mapped and indexed types over a type parameter | 2.8% | The constraint, or `unknown` | Step 8 where the parameter is a key of a known object type. Otherwise import at an instantiation, `%ts("./m.ts#Pick<User, 'id'>")`, which TypeScript can evaluate. |
 | Enum and namespace objects as values | 2.5% | Skipped (the enum's type is imported) | Step 4: a module with one value per member. |
-| Tuples with optional or rest elements | 2.3% | `array` | Step 14. Language: optional tuple elements. |
+| Tuples with optional or rest elements, one-element tuples | 2.3% | `array` | Step 8 for a tuple that is a rest parameter: its elements become the arguments. Step 14 for the rest. |
 | Generic function type nested in a type | 2.1% | `unknown` for its own type parameters | Step 9: an unboxed record with a polymorphic field. |
 | Type parameter out of scope where the type is declared | 2.1% | `unknown`, or the constraint | Steps 8 and 9. |
 | Explicit `this` parameter | 1.1% | Dropped | Step 7: `@this` already expresses it. |
@@ -220,49 +220,6 @@ Two kinds of union that used to be in the first row are imported exactly now: `s
 - **Unions of tuples** (about 40): the arguments of an event listener, `[] | [err: Error] | [chunk: any]`.
 
 None of the four needs a new language feature to be imported: steps 1 to 3 and 8 of the [plan](#plan-bridging-the-rest) cover them with ReScript that compiles today.
-
-## Classes on records
-
-The unions of classes are imported through a change to the language, which is part of this branch and implemented in the Rust compiler only.
-
-An untagged variant tells a class case apart with `instanceof`. Before, the class could be declared on an abstract type only (`@instanceOf("Blob") type blob`), which has no fields, and the class had to be a global. Now:
-
-```rescript
-@instanceOf("Blob")
-type blob = private {
-  size: float,
-  @as("type") type_: string,
-}
-
-@instanceOf("File") @extends(: blob)
-type file = private {
-  ...blob,
-  name: string,
-}
-
-@unboxed
-type part = Text(string) | Blob(blob) | File(file)
-
-let name = part =>
-  switch part {
-  | Text(text) => text
-  | File(file) => file.name // tested before Blob
-  | Blob(blob) => blob.type_
-  }
-
-let asBlob = (file: file) => (file :> blob)
-
-@module("three") @instanceOf("Mesh")
-type mesh // part instanceof Three.Mesh, with the import
-```
-
-- **`@instanceOf` on a record** makes the record a class: its values are the instances. The record must be `private`, so that a record literal cannot pass for an instance; the fields are read as on any record.
-- **`@extends(: parent)`** names the superclass. The parent must be a class, and the record must have the parent's fields at types that coerce to the parent's. A method that returns its own class is fine: `rename: string => dog` in the subclass, `string => animal` in the superclass.
-- **A subclass coerces to its superclass** with `:>`, and to nothing else: a record with the same fields that is not a declared subclass does not coerce to a class.
-- **In a variant the subclass is tested first**, whatever the order of the cases. A variant with two classes where neither is declared a subclass of the other tests them in the order written.
-- **`@module("m")` beside `@instanceOf`** imports the class from `m`. Classes of the same name from two modules are two classes.
-
-This follows the upstream RFC "Class hierarchies in WebAPI" (rescript-lang/rescript issue 9058, proposals A and B) and fixes what issue 9239 reports for `@module`. `@instanceOf` on abstract types and `@typeOf` were already in the compiler; the import now uses them too. Not implemented: `@scope` beside `@instanceOf` (write a dotted class name), and the OCaml compiler, which rejects these declarations.
 
 ## Plan: bridging the rest
 
@@ -286,7 +243,7 @@ Most of the distance is converter work. Seventeen of the twenty-three points nee
 | 11 | Callbacks with a rest parameter | standard library | 15 | 87.0% |
 | 12 | A type without values for `never` | standard library | 4 | 87.1% |
 | 13 | Bounded type variables | language | 22 | 87.9% |
-| 14 | `{}` and `object`, index signatures beside named properties, optional tuple elements, deeper nesting | language and converter | 46 | 89.5% |
+| 14 | `{}` and `object`, index signatures beside named properties, one-element tuples, deeper nesting | language and converter | 46 | 89.5% |
 
 A step's count is the number of declarations whose last note it removes, in this order. That understates steps 8, 9 and 11, which share declarations with each other and with `any`. Counted by notes (the places in a type where something is lost) step 8 removes 3,434 of the 11,014 notes, almost a third: they are the `on`, `once` and `emit` methods of every stream, socket and server of Node.
 
@@ -406,15 +363,157 @@ type never
 
 `variadic` is the only step that adds code at run time, a wrapper around the callback. The alternative is in the language: `@variadic` on a function type, with the compiler emitting the rest parameter.
 
-### Language changes, by what they buy
+The language steps are specified in the next section.
 
-1. **Bounded type variables.** `pipe<T extends WritableStream>(destination: T): T` is imported with an unconstrained `'t`, so ReScript accepts a call TypeScript rejects. The converter can close two cases alone: a parameter that occurs once, as the type of an argument, is its bound; and a bound that is a class is that class, with `:>` at the call. The rest needs a bound on a type variable. 86 declarations have a constraint, and for 22 of them it is the last thing missing.
-2. **Telling plain objects apart by a field.** The upstream proposal (rescript-lang/rescript issue 7988, draft pull request 8809) allows several object cases when a field they share differs in its literal or its primitive type. With field presence added, `{result} | {error}` and the members of step 1 that differ in one field become cases a `switch` can open. This changes none of the counts above, since step 3 already imports these unions; it makes about 85 declarations matchable instead of opaque.
-3. **Two fields with one JavaScript name**, as in `@as("write") write2`, keep overloaded methods as fields. 84 declarations have an overloaded method.
-4. **Optional tuple elements** and one-element tuples: 20 declarations.
-5. **A record with a `dict` remainder**, for named properties beside an index signature: 20 declarations.
+## Language changes
 
-Classes on records, above, was the first of these, and the only one implemented.
+The plan needs three changes to the language. One is implemented, one is specified here in full and is next, one is a sketch.
+
+| Change | Status | What it covers |
+|---|---|---|
+| [Classes on records](#classes-on-records) | implemented | Unions of classes: `Car \| Vehicle \| string`, `Readable \| Writable`, with the fields of the class still readable. |
+| [Object cases told apart by their fields](#object-cases-told-apart-by-their-fields) | specified, not implemented | Unions of plain objects: `{result} \| {error}`, React's `ReactNode`, same-tag members that differ in one field. About 85 declarations become cases a `switch` can open instead of one opaque case (step 3), and step 1 becomes exact for building too. |
+| [Bounded type variables](#bounded-type-variables) | sketch | `T extends Writable`: 86 declarations have a constraint, and for 22 it is the last thing missing (step 13). |
+
+The counts for the two that are not implemented are estimates from the survey's notes; they are measured once the import uses the change.
+
+Three things the earlier version of this document listed as language changes turn out not to need one:
+
+- **Overloaded methods.** A record cannot have two fields with one JavaScript name, but `@send` externals next to the record can: `write` and `write2` (step 5).
+- **Generic function types and constructor types.** An unboxed record with a polymorphic field (step 9), and a type in the standard library (step 10).
+- **Rest parameters in callbacks.** A wrapper in the standard library (step 11).
+
+Named properties beside an index signature (`{[header: string]: string; accept?: string}`, 20 declarations) would need a record with a `dict` remainder. It is not designed here.
+
+### Classes on records
+
+Status: implemented, in the Rust compiler only.
+
+An untagged variant tells a class case apart with `instanceof`. Before, the class could be declared on an abstract type only (`@instanceOf("Blob") type blob`), which has no fields, and the class had to be a global. Now:
+
+```rescript
+@instanceOf("Blob")
+type blob = private {
+  size: float,
+  @as("type") type_: string,
+}
+
+@instanceOf("File") @extends(: blob)
+type file = private {
+  ...blob,
+  name: string,
+}
+
+@unboxed
+type part = Text(string) | Blob(blob) | File(file)
+
+let name = part =>
+  switch part {
+  | Text(text) => text
+  | File(file) => file.name // tested before Blob
+  | Blob(blob) => blob.type_
+  }
+
+let asBlob = (file: file) => (file :> blob)
+
+@module("three") @instanceOf("Mesh")
+type mesh // part instanceof Three.Mesh, with the import
+```
+
+- **`@instanceOf` on a record** makes the record a class: its values are the instances. The record must be `private`, so that a record literal cannot pass for an instance; the fields are read as on any record.
+- **`@extends(: parent)`** names the superclass. The parent must be a class, and the record must have the parent's fields at types that coerce to the parent's. A method that returns its own class is fine: `rename: string => dog` in the subclass, `string => animal` in the superclass.
+- **A subclass coerces to its superclass** with `:>`, and to nothing else: a record with the same fields that is not a declared subclass does not coerce to a class.
+- **In a variant the subclass is tested first**, whatever the order of the cases. A variant with two classes where neither is declared a subclass of the other tests them in the order written.
+- **`@module("m")` beside `@instanceOf`** imports the class from `m`. Classes of the same name from two modules are two classes.
+
+This follows the upstream RFC "Class hierarchies in WebAPI" (rescript-lang/rescript issue 9058, proposals A and B) and fixes what issue 9239 reports for `@module`. `@instanceOf` on abstract types and `@typeOf` were already in the compiler; the import now uses them too. Not implemented: `@scope` beside `@instanceOf` (write a dotted class name), and the OCaml compiler, which rejects these declarations.
+
+### Object cases told apart by their fields
+
+Status: specified, not implemented.
+
+An `@unboxed` variant can have one case whose payload is a plain object, because `typeof` answers `"object"` for all of them. This change allows several, when a field shows which one a value is.
+
+```rescript
+@unboxed
+type outcome =
+  | Ok({result: string})
+  | Failed({error: string, code?: int})
+
+let message = outcome =>
+  switch outcome {
+  | Ok({result}) => result
+  | Failed({error}) => error
+  }
+```
+
+```js
+function message(outcome) {
+  if ("result" in outcome) {
+    return outcome.result;
+  } else {
+    return outcome.error;
+  }
+}
+```
+
+**Object cases.** A case whose payload is a record or an inline record is a *closed* object case: its fields are known. Its *required* fields are the ones that are not optional. A case whose payload is a `dict`, an object type `{"x": int}` or a type declared `@typeOf("object")` is an *open* object case. A variant may have any number of closed object cases and at most one open one.
+
+**Checks.** A check looks at one field `f` of the value `x`. A case *passes* a check when every value of the case does, and *fails* it when no value of the case does.
+
+| Check | JavaScript | A case passes when | A case fails when |
+|---|---|---|---|
+| presence | `"f" in x` | `f` is required | it does not declare `f` |
+| literal | `x.f === "circle"` | `f` is required and its type has only that literal | it does not declare `f`, or the type of `f` cannot be that literal |
+| kind | `typeof x.f === "string"`, `Array.isArray(x.f)` | `f` is required and its type has that kind | it does not declare `f`, or the type of `f` has another kind |
+
+The literals of a type are those of a polymorphic variant without payloads (`[#circle | #square]`), of a variant without payloads, and `true` and `false` for `bool`; a check may test several of them. The kinds are the ones an untagged variant already tells apart for a payload: string, number, bigint, boolean, function, array, object. A field whose type is none of these (an option, a type variable, an abstract type) takes no part in literal or kind checks.
+
+**Order.** The compiler picks a case that has a test every other remaining case fails, tests it first, and goes on with the rest. A test is one check, or several joined with `&&` when no single one is enough. The last case is not tested. Where there is a choice: the earlier case in the declaration, then a literal check before a kind check before a presence check, then the earlier field. An open case declares no fields, so it fails every presence check and is always last.
+
+| Declaration | Tests, in order |
+|---|---|
+| `Ok({result: string}) \| Failed({error: string})` | `"result" in x` |
+| `Text({value: string}) \| Number({value: float})` | `typeof x.value === "string"` |
+| `Named({name: string}) \| Person({name: string, age: float})` | `"age" in x`: the case with more fields first |
+| `Element(element) \| Portal(portal) \| Other(dict<unknown>)` with `portal` = `element` plus `children` | `"children" in x`, then `"props" in x` |
+| `A({kind: [#a], x: int}) \| B({kind: [#b], x: int})` | `x.kind === "a"` |
+
+**No order.** Two cases with the same fields at the same kinds cannot be told apart: `A({x: int}) | B({x: int})`. The declaration is rejected, with the message the compiler has today for two object cases.
+
+**Where the tests go.** Where the test of the single object case is today: after the literal cases, the primitive kinds and the class instances, and guarded against `null` as it is today. A `switch` that does not name every case tests only the ones it names.
+
+**What is trusted.** A record built in ReScript has its declared fields and no others, so for those values the tests are exact. A value that comes from JavaScript can carry more: an object that TypeScript calls `{error: string}` may also have a `result`. TypeScript's own `in` narrowing makes the same assumption. As everywhere in untagged variants, recognition trusts the type.
+
+**Interfaces.** The tests follow from the declaration alone, so an interface and its implementation agree on them when they agree on the cases, as they must already.
+
+**In the import.** A union of object types becomes one case per member when an order exists. The members that still cannot be told apart share one opaque case (step 3), which is then the exception: a bare type parameter, or two types with the same fields.
+
+### Bounded type variables
+
+Status: a sketch. The syntax is open.
+
+```ts
+function pipe<T extends Writable>(source: Readable, destination: T): T
+```
+
+This is imported as `(readable, 'destination) => 'destination`, which ReScript lets you call with anything. The bound is checked by TypeScript and assumed by the JavaScript, so it should be checked here too, without giving up the precise result type.
+
+The smallest version is a bound on a type variable of an `external`, checked where the external is used:
+
+```rescript
+@bound(: writable as 'destination)
+external pipe: (readable, 'destination) => 'destination = "pipe"
+
+let socket = pipe(file, socket) // 'destination is the socket's class; it extends writable
+let wrong = pipe(file, "text")  // error: string is not a writable
+```
+
+- At each use, the type the variable was given must coerce to the bound, by the rules of `:>`. With classes on records that includes a declared subclass.
+- A variable that nothing else decides is the bound.
+- A bound that is an object type needs none of this: `({.. "id": string} as 'item)` exists.
+
+The converter closes two cases without it: a type parameter that occurs once, as the type of an argument, is imported as its bound; and a bounded method of a record becomes an external, where the bound can be written.
 
 ## How it works
 
