@@ -351,6 +351,15 @@ fn replace_uses(
     Ok(out)
 }
 
+/// Whether the text of a file can hold a `%ts` import. Nearly every file
+/// has none, and this runs for every file: most have no `%` at all, which
+/// counting one byte settles in a loop the compiler vectorizes, where a
+/// substring search does not.
+fn mentions_import(source: &str) -> bool {
+    let percents = source.bytes().filter(|byte| *byte == b'%').count();
+    percents != 0 && source.contains("%ts")
+}
+
 /// The frontend step: every `%ts` item of `structure` becomes the ReScript
 /// declarations it stands for. `memory_files` replaces the file system with
 /// the given TypeScript files (tests, the playground).
@@ -361,8 +370,7 @@ pub fn expand_structure(
     filename: &str,
     memory_files: Option<&[(String, String)]>,
 ) -> Result<Structure, PpxError> {
-    // Nearly every file has no import: one scan of the text settles that.
-    if !source.contains("%ts") {
+    if !mentions_import(source) {
         return Ok(structure);
     }
     let mut uses = Vec::new();
@@ -384,7 +392,7 @@ pub fn report(
     filename: &str,
     memory_files: Option<&[(String, String)]>,
 ) -> Result<Report, String> {
-    if !source.contains("%ts") {
+    if !mentions_import(source) {
         return Ok(Report::default());
     }
     let mut parser = Parser::new(filename, source);
