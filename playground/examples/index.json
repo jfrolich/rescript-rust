@@ -110,6 +110,42 @@
     ]
   },
   {
+    "id": "record",
+    "title": "A record built from data",
+    "summary": "Convert.to(user) fills a record of the expected type from the fields of another one, an entry per field.",
+    "files": [
+      "Convert.res",
+      "Main.res"
+    ]
+  },
+  {
+    "id": "splice",
+    "title": "Splice holes: lists in a quote",
+    "summary": "${...items} stands for any number of record fields, call arguments or switch cases in a quote.",
+    "files": [
+      "Splice.res",
+      "Main.res"
+    ]
+  },
+  {
+    "id": "optional",
+    "title": "Optional fields",
+    "summary": "%Patch.t(user) makes every field optional and Patch.apply merges a patch: optional fields need no special case.",
+    "files": [
+      "Patch.res",
+      "Main.res"
+    ]
+  },
+  {
+    "id": "attrs",
+    "title": "Attributes on generated code",
+    "summary": "An attribute on the value of a field, and on a whole record: here @warning(\"-27\") for functions the macro writes.",
+    "files": [
+      "Mock.res",
+      "Main.res"
+    ]
+  },
+  {
     "id": "pattern",
     "title": "Pattern macros and checked literals",
     "summary": "%Http.status(\"ok\") is a pattern; %Http.color(\"#ff8800\") is checked and converted while compiling.",
