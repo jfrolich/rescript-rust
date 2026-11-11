@@ -6,7 +6,7 @@ use crate::name::Name;
 macro_rules! handles {
     ($($name:ident),*) => {$ (
         #[doc = concat!("A module-local `", stringify!($name), "` pool index.")]
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize)]
         #[repr(transparent)]
         pub struct $name(pub(super) u32);
         impl $name {
@@ -62,7 +62,7 @@ impl Lists {
 }
 
 /// Flat constant payload: compound constants reference earlier constants.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub enum Constant {
     /// Null.
     Null,
@@ -87,8 +87,8 @@ pub enum Constant {
     },
     /// Character code point.
     Char(u32),
-    /// Float spelling.
-    Float(StrId),
+    /// IEEE-754 bits, retaining signed zero and NaN payloads.
+    Float(u64),
     /// Big integer spelling, including sign.
     BigInt(StrId),
     /// Decoded bytes encoded using the compiler's string convention.
@@ -109,21 +109,54 @@ pub enum Constant {
     /// Module alias marker.
     ModuleAlias,
 }
+impl Constant {
+    /// A floating constant with bitwise equality and hashing, including NaNs.
+    pub fn float(value: f64) -> Self {
+        Self::Float(value.to_bits())
+    }
+}
 /// Range in the constant-field pool.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct ConstSpan {
     pub(super) start: u32,
     pub(super) len: u32,
 }
 
 /// Primitive identity and source location, interned together.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct PrimPayload {
     /// Operation with its existing compiler metadata.
     pub primitive: Primitive,
     /// Source location.
     pub loc: LamLoc,
 }
+// Legacy primitive/tag payloads implement Serialize, but not Hash/Eq. Their
+// compiler-owned binary encoding is a canonical key, including bitwise IEEE
+// float encoding (unlike JSON and ordinary float equality). Cache these bytes
+// once at interning; no changes to the legacy metadata types are necessary.
+macro_rules! payload_key {
+    ($ty:ty) => {
+        impl $ty {
+            pub(super) fn key(&self) -> Vec<u8> {
+                crate::binser::to_vec(self).expect("Bir payload serialization")
+            }
+        }
+        impl PartialEq for $ty {
+            fn eq(&self, other: &Self) -> bool {
+                self.key() == other.key()
+            }
+        }
+        impl Eq for $ty {}
+        impl std::hash::Hash for $ty {
+            fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+                std::hash::Hash::hash(&self.key(), state);
+            }
+        }
+    };
+}
+payload_key!(Constant);
+payload_key!(PrimPayload);
+
 /// Compact function header. Attributes are in a separate cold pool.
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
@@ -267,7 +300,7 @@ pub enum JsPayload {
     Rest(Vec<RestField>),
 }
 /// Imported module identity, retained in encounter order.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Import {
     /// Module name.
     pub name: Name,
@@ -277,8 +310,18 @@ pub struct Import {
 
 #[derive(Default)]
 pub(super) struct Pools {
+    pub hash_builder: ahash::RandomState,
+    pub text_index: hashbrown::HashTable<(u64, StrId)>,
+    pub const_index: hashbrown::HashTable<(u64, ConstId)>,
+    pub const_keys: Vec<Vec<u8>>,
+    pub prim_index: hashbrown::HashTable<(u64, PrimId)>,
+    pub prim_keys: Vec<Vec<u8>>,
+    pub import_index: hashbrown::HashTable<(u64, ImportId)>,
+    pub catch_labels: hashbrown::HashMap<u32, CatchId, ahash::RandomState>,
+    pub next_label: u64,
     pub consts: Vec<Constant>,
     pub const_fields: Vec<ConstId>,
+    pub const_fields_index: hashbrown::HashTable<(u64, ConstSpan)>,
     pub prims: Vec<PrimPayload>,
     pub funcs: Vec<FuncHeader>,
     pub attrs: Vec<FunctionAttribute>,

@@ -2,6 +2,7 @@
 //! traversal, so adding an operand cannot silently omit it from copy or release.
 use super::pools::*;
 use crate::js_ir::arena::FieldPos;
+use smallvec::SmallVec;
 use std::collections::HashMap;
 
 /// Cached effects and positional information.
@@ -48,7 +49,7 @@ pub(super) struct Renaming<'a> {
 trait Operand<'a>: Sized {
     fn encode(self, lists: &mut Lists) -> u32;
     fn decode(raw: u32, lists: &'a Lists) -> Self;
-    fn children(self, _out: &mut Vec<NodeId>) {}
+    fn children(self, _out: &mut SmallVec<[NodeId; 4]>) {}
     fn remap(raw: u32, _lists: &mut Lists, _map: &Renaming<'_>) -> u32 {
         raw
     }
@@ -99,7 +100,7 @@ impl Operand<'_> for NodeId {
     fn decode(raw: u32, _lists: &Lists) -> Self {
         Self(raw)
     }
-    fn children(self, out: &mut Vec<NodeId>) {
+    fn children(self, out: &mut SmallVec<[NodeId; 4]>) {
         out.push(self);
     }
     fn remap(raw: u32, _lists: &mut Lists, map: &Renaming<'_>) -> u32 {
@@ -113,7 +114,7 @@ impl Operand<'_> for Option<NodeId> {
     fn decode(raw: u32, _lists: &Lists) -> Self {
         (raw != u32::MAX).then_some(NodeId(raw))
     }
-    fn children(self, out: &mut Vec<NodeId>) {
+    fn children(self, out: &mut SmallVec<[NodeId; 4]>) {
         out.extend(self);
     }
     fn remap(raw: u32, _lists: &mut Lists, map: &Renaming<'_>) -> u32 {
@@ -160,7 +161,7 @@ impl<'a> Operand<'a> for &'a [NodeId] {
     fn decode(raw: u32, lists: &'a Lists) -> Self {
         lists.get(ListId(raw))
     }
-    fn children(self, out: &mut Vec<NodeId>) {
+    fn children(self, out: &mut SmallVec<[NodeId; 4]>) {
         out.extend_from_slice(self);
     }
     fn remap(raw: u32, lists: &mut Lists, map: &Renaming<'_>) -> u32 {
@@ -219,8 +220,8 @@ macro_rules! nodes {
             }
         }
         impl View<'_> {
-            pub(super) fn children(self) -> Vec<NodeId> {
-                let mut result = Vec::new();
+            pub(super) fn children(self) -> SmallVec<[NodeId; 4]> {
+                let mut result = SmallVec::new();
                 match self { $(Self::$op $({ $($field),* })? => { $($($field.children(&mut result);)*)? }),* }
                 result
             }

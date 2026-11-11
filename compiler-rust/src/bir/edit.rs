@@ -1,7 +1,8 @@
 //! All tree mutations and the incremental maintenance they require.
 use super::*;
 use crate::lambda::lam_primitive::Primitive;
-use std::collections::{HashMap, HashSet};
+use smallvec::{SmallVec, smallvec};
+use std::collections::HashMap;
 
 impl Bir {
     /// Construct an operation without rewrite rules. Children must be distinct,
@@ -18,24 +19,17 @@ impl Bir {
             );
         }
         let children = view.children();
-        let mut seen = HashSet::new();
-        for &child in &children {
+        for (i, &child) in children.iter().enumerate() {
             self.node(child);
-            assert!(
+            debug_assert!(
                 self.parents[child.index()].is_none(),
                 "child already attached"
             );
-            assert!(seen.insert(child), "shared child");
+            debug_assert!(!children[..i].contains(&child), "shared child");
         }
         let packed = Node::pack(view, aux, &mut self.lists);
         let id = self.allocate(packed);
         self.check_shape(id);
-        if let View::Fun { header, .. } | View::JFun { header, .. } = self.view(id) {
-            assert!(!self.nodes.iter().enumerate().any(|(i, node)| {
-                i != id.index() && matches!(node.op(), Op::Fun | Op::JFun)
-                    && matches!(node.view(&self.lists), View::Fun { header: h, .. } | View::JFun { header: h, .. } if h == header)
-            }), "function header already owned");
-        }
         self.bind(id);
         for child in children {
             self.parents[child.index()] = Some(id);
@@ -46,15 +40,18 @@ impl Bir {
         }
         self.adjust_direct(id, 1);
         self.repair(id);
-        self.capture(id);
-        self.refresh_tail(id);
+        self.capture_created(id);
         id
     }
 
     fn allocate(&mut self, node: Node) -> NodeId {
+        self.visit();
+        self.tails_valid = false;
+        self.register_kind(node, true);
         if let Some(id) = self.free_nodes.pop() {
             self.nodes[id.index()] = node;
             self.parents[id.index()] = None;
+            self.weights[id.index()] = (0, 0);
             if !self.cold.is_empty() {
                 self.cold[id.index()] = None;
             }
@@ -63,6 +60,8 @@ impl Bir {
             let id = NodeId(index(self.nodes.len()));
             self.nodes.push(node);
             self.parents.push(None);
+            self.weights.push((0, 0));
+            self.capture_chain.push((0, false));
             if !self.cold.is_empty() {
                 self.cold.push(None);
             }
@@ -145,7 +144,7 @@ impl Bir {
         }
     }
 
-    pub(super) fn binders(&self, id: NodeId) -> Vec<VarId> {
+    pub(super) fn binders(&self, id: NodeId) -> SmallVec<[VarId; 4]> {
         match self.view(id) {
             View::Let { var, .. }
             | View::SDecl { var, .. }
@@ -154,15 +153,15 @@ impl Bir {
             | View::ForAwaitOf { var, .. }
             | View::SForRange { var, .. }
             | View::SForOf { var, .. }
-            | View::SForAwaitOf { var, .. } => vec![var],
+            | View::SForAwaitOf { var, .. } => smallvec![var],
             View::SRest { var, info, .. } => {
-                let mut binders = vec![var];
+                let mut binders = smallvec![var];
                 if let JsPayload::Rest(fields) = self.javascript(info) {
                     binders.extend(fields.iter().filter_map(|field| field.binding));
                 }
                 binders
             }
-            View::Try { exception, .. } => vec![exception],
+            View::Try { exception, .. } => smallvec![exception],
             View::STry { exception, .. } => exception.into_iter().collect(),
             View::LetRec { first, values, .. } => (0..index(values.len()))
                 .map(|i| VarId(first.0 + i))
@@ -171,10 +170,16 @@ impl Bir {
                 self.function(header).params.iter().collect()
             }
             View::Catch { header, .. } => self.catch(header).params.iter().collect(),
-            _ => Vec::new(),
+            _ => SmallVec::new(),
         }
     }
     fn bind(&mut self, id: NodeId) {
+        if let View::Fun { header, .. } | View::JFun { header, .. } = self.view(id) {
+            assert!(
+                self.func_owners[header.index()].replace(id).is_none(),
+                "function header already owned"
+            );
+        }
         for var in self.binders(id) {
             assert!(
                 self.vars.binder[var.index()].is_none(),
@@ -185,6 +190,11 @@ impl Bir {
         self.update_facts(id);
     }
     fn unbind(&mut self, id: NodeId) {
+        if let View::Fun { header, .. } | View::JFun { header, .. } = self.view(id) {
+            if self.func_owners[header.index()] == Some(id) {
+                self.func_owners[header.index()] = None;
+            }
+        }
         for var in self.binders(id) {
             if self.vars.binder[var.index()] == Some(id) {
                 self.vars.binder[var.index()] = None;
@@ -230,9 +240,9 @@ impl Bir {
             _ => Fact::Unknown,
         }
     }
-    pub(super) fn binding_facts(&self, id: NodeId) -> Vec<(VarId, Fact)> {
+    pub(super) fn binding_facts(&self, id: NodeId) -> SmallVec<[(VarId, Fact); 4]> {
         match self.view(id) {
-            View::Let { var, value, .. } | View::SDecl { var, value } => vec![(
+            View::Let { var, value, .. } | View::SDecl { var, value } => smallvec![(
                 var,
                 value.map_or(Fact::Unknown, |v| self.value_fact(v, RecFlag::No)),
             )],
@@ -253,8 +263,10 @@ impl Bir {
                 .collect(),
         }
     }
-    fn update_facts(&mut self, id: NodeId) {
+    fn update_facts(&mut self, id: NodeId) -> bool {
+        let mut changed = false;
         for (var, fact) in self.binding_facts(id) {
+            changed |= self.vars.fact[var.index()] != fact;
             self.vars.fact[var.index()] = fact;
             if matches!(fact, Fact::Module(_)) {
                 self.vars.flags[var.index()].0 |= VarFlags::MODULE;
@@ -273,6 +285,7 @@ impl Bir {
                 }
             }
         }
+        changed
     }
 
     pub(super) fn edge_weight(&self, parent: NodeId, child: NodeId) -> u32 {
@@ -287,14 +300,74 @@ impl Bir {
         }
         1
     }
-    fn weight(&self, mut id: NodeId) -> u32 {
-        let mut weight = 1u32;
-        while let Some(parent) = self.parents[id.index()] {
-            weight = weight
-                .checked_mul(self.edge_weight(parent, id))
-                .expect("Bir use weight overflow");
-            id = parent;
+    pub(super) fn is_weighted_switch(&self, node: Node) -> bool {
+        if let View::Switch { header, .. } = node.view(&self.lists) {
+            let h = self.switch(header);
+            h.has_default && !h.consts_full && !h.blocks_full
+        } else {
+            false
         }
+    }
+    pub(super) fn is_capture_kind(node: Node) -> bool {
+        matches!(
+            node.op(),
+            Op::Fun | Op::JFun | Op::While | Op::SWhile | Op::For | Op::SForRange
+        )
+    }
+    fn invalidate_weights(&mut self) {
+        self.weight_epoch = self
+            .weight_epoch
+            .checked_add(1)
+            .expect("weight epoch overflow");
+    }
+    fn register_kind(&mut self, node: Node, add: bool) {
+        if self.is_weighted_switch(node) {
+            if add {
+                self.weighted_switches += 1;
+            } else {
+                self.weighted_switches -= 1;
+            }
+            self.invalidate_weights();
+        }
+        if Self::is_capture_kind(node) {
+            if add {
+                self.capture_boundaries += 1;
+            } else {
+                self.capture_boundaries -= 1;
+            }
+        }
+    }
+    fn weight(&mut self, mut id: NodeId) -> u32 {
+        // Ordinary modules need no ancestor walk, however deep their Let spine.
+        if self.weighted_switches == 0 {
+            return 1;
+        }
+        let requested = id;
+        let mut path = SmallVec::<[(NodeId, u32); 8]>::new();
+        let mut weight;
+        loop {
+            self.visit();
+            let (epoch, cached) = self.weights[id.index()];
+            if epoch == self.weight_epoch && cached != 0 {
+                weight = cached;
+                break;
+            }
+            if let Some(parent) = self.parents[id.index()] {
+                path.push((id, self.edge_weight(parent, id)));
+                id = parent;
+            } else {
+                self.weights[id.index()] = (self.weight_epoch, 1);
+                weight = 1;
+                break;
+            }
+        }
+        for (id, multiplier) in path.into_iter().rev() {
+            weight = weight
+                .checked_mul(multiplier)
+                .expect("Bir use weight overflow");
+            self.weights[id.index()] = (self.weight_epoch, weight);
+        }
+        debug_assert!(self.weights[requested.index()].1 != 0);
         weight
     }
     fn adjust_direct(&mut self, id: NodeId, delta: i64) {
@@ -311,12 +384,12 @@ impl Bir {
             }
             View::Exit { label, .. } => {
                 // Headers may be built before their handlers, but before their exits.
-                let header = self
+                let header_id = self
                     .pools
-                    .catches
-                    .iter_mut()
-                    .find(|h| h.label == label)
+                    .catch_labels
+                    .get(&label)
                     .expect("unknown static exit label");
+                let header = &mut self.pools.catches[header_id.index()];
                 header.uses = u32::try_from(i64::from(header.uses) + delta)
                     .expect("Bir exit count overflow/underflow");
             }
@@ -414,7 +487,8 @@ impl Bir {
                 let f = self.node(c).flags();
                 (f.contains(NodeFlags::PURE), f.contains(NodeFlags::NO_ALLOC))
             });
-            let mut flags = self.node(id).flags();
+            let old_flags = self.node(id).flags();
+            let mut flags = old_flags;
             flags.0 &= !(NodeFlags::PURE | NodeFlags::NO_ALLOC);
             if pure {
                 flags.0 |= NodeFlags::PURE;
@@ -423,7 +497,10 @@ impl Bir {
                 flags.0 |= NodeFlags::NO_ALLOC;
             }
             self.nodes[id.index()].set_flags(flags);
-            self.update_facts(id);
+            let facts_changed = self.update_facts(id);
+            if flags == old_flags && !facts_changed {
+                break;
+            }
             match self.parents[id.index()] {
                 Some(parent) => id = parent,
                 None => break,
@@ -439,6 +516,7 @@ impl Bir {
     }
     pub(super) fn is_descendant(&self, mut id: NodeId, ancestor: NodeId) -> bool {
         loop {
+            self.visit();
             if id == ancestor {
                 return true;
             }
@@ -460,24 +538,95 @@ impl Bir {
         }
         false
     }
-    fn capture(&mut self, root: NodeId) {
-        let mut stack = vec![root];
+    fn next_capture_epoch(&mut self) -> u64 {
+        self.capture_epoch = self
+            .capture_epoch
+            .checked_add(1)
+            .expect("capture epoch overflow");
+        self.capture_epoch
+    }
+    // One tree walk records both binders and uses; the second loop touches only
+    // variable IDs. Buffers and epoch columns survive calls, so no clearing pass.
+    fn collect_capture(&mut self, root: NodeId, epoch: u64) {
+        let mut stack = std::mem::take(&mut self.capture_stack);
+        let mut uses = std::mem::take(&mut self.capture_uses);
+        stack.clear();
+        uses.clear();
+        stack.push(root);
         while let Some(id) = stack.pop() {
+            for var in self.binders(id) {
+                self.capture_binders[var.index()] = epoch;
+            }
             if let View::Var { var } = self.view(id) {
-                if self.is_captured(id, var) {
-                    self.vars.flags[var.index()].0 |= VarFlags::CAPTURED;
-                }
+                uses.push(var);
             }
             stack.extend(self.view(id).children());
         }
+        self.capture_stack = stack;
+        self.capture_uses = uses;
+    }
+    fn capture_created(&mut self, id: NodeId) {
+        let root = match self.view(id) {
+            View::Fun { .. } | View::JFun { .. } | View::While { .. } | View::SWhile { .. } => id,
+            View::For { parts, .. } | View::SForRange { parts, .. } => *parts.last().unwrap(),
+            _ => return,
+        };
+        let epoch = self.next_capture_epoch();
+        for var in self.binders(id) {
+            self.capture_binders[var.index()] = epoch;
+        }
+        self.collect_capture(root, epoch);
+        for &var in &self.capture_uses {
+            if self.capture_binders[var.index()] != epoch {
+                self.vars.flags[var.index()].0 |= VarFlags::CAPTURED;
+            }
+        }
+    }
+    fn capture_moved(&mut self, root: NodeId) {
+        if self.capture_boundaries == 0 || self.parents[root.index()].is_none() {
+            return;
+        }
+        let epoch = self.next_capture_epoch();
+        self.collect_capture(root, epoch);
+        if self.capture_uses.iter().all(|v| {
+            self.capture_binders[v.index()] == epoch
+                || self.vars.flags(*v).contains(VarFlags::CAPTURED)
+        }) {
+            return;
+        }
+        let mut child = root;
+        let mut boundary = false;
+        while let Some(parent) = self.parents[child.index()] {
+            self.visit();
+            // A binder on the boundary itself is inside its own scope.
+            self.capture_chain[parent.index()] = (epoch, boundary);
+            boundary |= self.capture_boundary(parent, child);
+            child = parent;
+        }
+        if !boundary {
+            return;
+        }
+        for &var in &self.capture_uses {
+            if self.capture_binders[var.index()] == epoch {
+                continue;
+            }
+            let captured = self.vars.binder(var).is_none_or(|binder| {
+                let (seen, crossed) = self.capture_chain[binder.index()];
+                seen != epoch || crossed
+            });
+            if captured {
+                self.vars.flags[var.index()].0 |= VarFlags::CAPTURED;
+            }
+        }
     }
 
-    // Tail position is contextual, unlike effects. Revisit the enclosing tree
-    // after moving a subtree; function bodies establish fresh tail contexts.
-    fn refresh_tail(&mut self, mut root: NodeId) {
-        while let Some(parent) = self.parents[root.index()] {
-            root = parent;
-        }
+    /// Compute tail positions and function self-tail-call flags explicitly.
+    /// Edits invalidate these flags; consumers run this once before reading them.
+    pub fn mark_tail_positions(&mut self, root: NodeId) {
+        assert!(
+            self.parents[root.index()].is_none(),
+            "tail marking starts at a root"
+        );
         let mut stack = vec![(root, false, None::<FuncId>, None::<VarId>)];
         while let Some((id, tail, function, self_var)) = stack.pop() {
             let mut flags = self.node(id).flags();
@@ -519,6 +668,7 @@ impl Bir {
                 stack.push((child, child_tail, function, self_var));
             }
         }
+        self.tails_valid = true;
     }
     pub(super) fn tail_child(&self, id: NodeId, child: NodeId) -> bool {
         match self.view(id) {
@@ -526,8 +676,8 @@ impl Bir {
             View::If { then_, else_, .. } | View::JCond { then_, else_, .. } => {
                 child == then_ || child == else_
             }
-            View::Switch { actions, .. } | View::StrSwitch { actions, .. } => {
-                actions.contains(&child)
+            View::Switch { scrutinee, .. } | View::StrSwitch { scrutinee, .. } => {
+                child != scrutinee
             }
             View::Catch { body, handler, .. } => child == body || child == handler,
             View::Seq { second, .. } | View::JSeq { second, .. } => second == child,
@@ -541,12 +691,13 @@ impl Bir {
         assert_ne!(target, replacement);
         self.node(target);
         self.node(replacement);
-        assert!(
+        debug_assert!(
             self.parents[replacement.index()].is_none() || self.is_descendant(replacement, target),
             "replacement belongs to another tree"
         );
-        assert!(
-            !self.is_descendant(target, replacement),
+        debug_assert!(
+            self.view(replacement).children().is_empty()
+                || !self.is_descendant(target, replacement),
             "replacement creates a cycle"
         );
         let target_weight = self.weight(target);
@@ -558,6 +709,10 @@ impl Bir {
         let cold = self.cold.get(replacement.index()).copied().flatten();
         self.unbind(replacement);
         self.nodes[target.index()] = content;
+        self.tails_valid = false;
+        if self.weighted_switches != 0 {
+            self.invalidate_weights();
+        }
         self.parents[target.index()] = parent;
         for child in self.view(target).children() {
             self.parents[child.index()] = Some(target);
@@ -572,8 +727,10 @@ impl Bir {
         self.bind(target);
         self.adjust_counts(target, i64::from(target_weight));
         self.repair(target);
-        self.capture(target);
-        self.refresh_tail(target);
+        if let Some(parent) = parent {
+            self.repair(parent);
+        }
+        self.capture_moved(target);
         self.drain_dead();
     }
 
@@ -588,6 +745,7 @@ impl Bir {
         self.drain_dead();
     }
     fn release_nodes(&mut self, root: NodeId, keep: Option<NodeId>, free_root: bool) {
+        self.tails_valid = false;
         let mut stack = vec![(root, self.weight(root))];
         while let Some((id, weight)) = stack.pop() {
             if Some(id) == keep {
@@ -603,6 +761,7 @@ impl Bir {
             }
             self.adjust_direct(id, -i64::from(weight));
             self.unbind(id);
+            self.register_kind(self.nodes[id.index()], false);
             if id != root || free_root {
                 self.nodes[id.index()] = Node::free();
                 self.parents[id.index()] = None;
@@ -648,6 +807,8 @@ impl Bir {
         for &id in &order {
             for var in self.binders(id) {
                 let fresh = self.new_var_id(self.vars.name(var), index(self.vars.len()));
+                self.vars.flags[fresh.index()].0 =
+                    self.vars.flags[var.index()].0 & !VarFlags::EXPORTED;
                 vars.insert(var, fresh);
             }
         }
@@ -673,15 +834,8 @@ impl Bir {
                 }
                 View::Catch { header, .. } => {
                     let old = *self.catch(header);
-                    let label = self
-                        .pools
-                        .catches
-                        .iter()
-                        .map(|h| h.label)
-                        .max()
-                        .unwrap_or(0)
-                        .checked_add(1)
-                        .expect("static label overflow");
+                    let label =
+                        u32::try_from(self.pools.next_label).expect("static label overflow");
                     let params = VarSpan {
                         start: old.params.iter().next().map_or(0, |v| vars[&v].0),
                         len: old.params.len,
@@ -738,8 +892,7 @@ impl Bir {
             nodes.insert(id, new);
         }
         let result = nodes[&root];
-        self.capture(result);
-        self.refresh_tail(result);
+        self.capture_moved(result);
         result
     }
 }
@@ -758,7 +911,7 @@ mod tests {
         b.new_node(View::Var { var: v }, 0)
     }
     fn valid(b: &Bir, root: NodeId) {
-        b.validate(Some(root))
+        b.validate(Some(root), false)
             .unwrap_or_else(|e| panic!("{e}\n{}", b.dump()));
     }
 
@@ -808,7 +961,7 @@ mod tests {
         b.replace(root, body);
         valid(&b, root);
         b.release(root);
-        b.validate(None).unwrap();
+        b.validate(None, false).unwrap();
         let reused = lit(&mut b);
         assert_eq!(root, reused);
         valid(&b, reused);
@@ -872,7 +1025,7 @@ mod tests {
         };
         assert_ne!(b.function(copied_h).params, params);
         b.release(root);
-        b.validate(None).unwrap();
+        b.validate(None, false).unwrap();
     }
 
     #[test]
@@ -971,11 +1124,19 @@ mod tests {
         let v = b.new_var_id(Name::new("v"), 0);
         let root = var(&mut b, v);
         b.vars.uses[v.index()] += 1;
-        assert!(b.validate(Some(root)).unwrap_err().contains("use count"));
+        assert!(
+            b.validate(Some(root), false)
+                .unwrap_err()
+                .contains("use count")
+        );
         b.vars.uses[v.index()] -= 1;
         valid(&b, root);
         let other = lit(&mut b);
-        assert!(b.validate(Some(root)).unwrap_err().contains("unreachable"));
+        assert!(
+            b.validate(Some(root), false)
+                .unwrap_err()
+                .contains("unreachable")
+        );
         b.release(other);
         valid(&b, root);
     }
@@ -994,7 +1155,7 @@ mod tests {
         let vars: Vec<_> = (0..8).map(|i| b.new_var_id(Name::new("free"), i)).collect();
         let mut root = lit(&mut b);
         for step in 0..5000 {
-            match rand() % 7 {
+            match rand() % 9 {
                 0 => {
                     let new = var(&mut b, vars[(rand() % 8) as usize]);
                     b.replace(root, new);
@@ -1037,13 +1198,46 @@ mod tests {
                         b.replace(root, child);
                     }
                 }
+                6 => {
+                    let scrutinee = lit(&mut b);
+                    let header = b.switch_header(SwitchHeader {
+                        keys: vec![],
+                        clauses: vec![],
+                        constants: 0,
+                        consts_full: false,
+                        blocks_full: false,
+                        has_default: true,
+                        dispatch: SwitchDispatch::Direct,
+                    });
+                    root = b.new_node(
+                        View::Switch {
+                            scrutinee,
+                            actions: &[root],
+                            header,
+                        },
+                        0,
+                    );
+                }
+                7 => {
+                    let live: Vec<_> = b
+                        .nodes
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, n)| n.op() != Op::Free)
+                        .map(|(i, _)| NodeId(index(i)))
+                        .collect();
+                    let target = live[(rand() as usize) % live.len()];
+                    let replacement = lit(&mut b);
+                    b.replace(target, replacement);
+                }
                 _ => {
                     b.release(root);
-                    b.validate(None).unwrap();
+                    b.validate(None, false).unwrap();
                     root = lit(&mut b);
                 }
             }
-            b.validate(Some(root))
+            b.mark_tail_positions(root);
+            b.validate(Some(root), true)
                 .unwrap_or_else(|e| panic!("step {step}: {e}\n{}", b.dump()));
         }
     }
@@ -1065,7 +1259,7 @@ mod constructor_tests {
                 let mut $b = Bir::default();
                 let root = $build;
                 assert_eq!($b.node(root).op(), Op::$op);
-                $b.validate(Some(root)).unwrap();
+                $b.validate(Some(root), false).unwrap();
                 let copied = $b.copy_subtree(root, &[]);
                 let pair = $b.new_node(
                     View::Seq {
@@ -1074,11 +1268,11 @@ mod constructor_tests {
                     },
                     0,
                 );
-                $b.validate(Some(pair)).unwrap();
+                $b.validate(Some(pair), false).unwrap();
                 $b.replace(pair, copied);
-                $b.validate(Some(pair)).unwrap();
+                $b.validate(Some(pair), false).unwrap();
                 $b.release(pair);
-                $b.validate(None).unwrap();
+                $b.validate(None, false).unwrap();
             }
         };
     }
@@ -1990,14 +2184,16 @@ mod boundary_tests {
             },
             0,
         );
+        b.mark_tail_positions(root);
         assert!(b.node(call).flags().contains(NodeFlags::TAIL));
         assert_eq!(b.function(header).flags & 1, 1);
-        b.validate(Some(root)).unwrap();
+        b.validate(Some(root), false).unwrap();
         let replacement = b.new_node(View::JNull, 0);
         b.replace(call, replacement);
+        b.mark_tail_positions(root);
         assert!(b.node(call).flags().contains(NodeFlags::TAIL));
         assert_eq!(b.function(header).flags & 1, 0);
-        b.validate(Some(root)).unwrap();
+        b.validate(Some(root), false).unwrap();
     }
 
     #[test]
@@ -2032,13 +2228,13 @@ mod boundary_tests {
                 );
             }
             assert_eq!(b.vars.uses(var), count);
-            b.validate(Some(root)).unwrap();
+            b.validate(Some(root), false).unwrap();
             let copy = b.copy_subtree(root, &[]);
             b.replace(root, copy);
             assert_eq!(b.vars.uses(var), count);
-            b.validate(Some(root)).unwrap();
+            b.validate(Some(root), false).unwrap();
             b.release(root);
-            b.validate(None).unwrap();
+            b.validate(None, false).unwrap();
         }
     }
 
@@ -2083,11 +2279,11 @@ mod boundary_tests {
             },
             0,
         );
-        b.validate(Some(pair)).unwrap();
+        b.validate(Some(pair), false).unwrap();
         b.release(pair);
         assert_eq!(b.catch(header).uses(), 0);
         assert_eq!(b.catch(new_header).uses(), 0);
-        b.validate(None).unwrap();
+        b.validate(None, false).unwrap();
     }
 
     #[test]
@@ -2123,10 +2319,11 @@ mod boundary_tests {
             },
             0,
         );
-        b.validate(Some(pair)).unwrap();
+        b.validate(Some(pair), false).unwrap();
     }
 
     #[test]
+    #[cfg(debug_assertions)]
     fn sharing_rejected_before_modifying_arena() {
         let mut b = Bir::default();
         let child = b.new_node(View::JNull, 0);
@@ -2140,7 +2337,7 @@ mod boundary_tests {
             )
         }));
         assert!(result.is_err());
-        b.validate(Some(child)).unwrap();
+        b.validate(Some(child), false).unwrap();
     }
 
     #[test]
@@ -2155,10 +2352,18 @@ mod boundary_tests {
         );
         let root = b.new_node(View::Fun { body, header }, 0);
         b.vars.flags[var.index()].0 &= !VarFlags::CAPTURED;
-        assert!(b.validate(Some(root)).unwrap_err().contains("capture"));
+        assert!(
+            b.validate(Some(root), false)
+                .unwrap_err()
+                .contains("capture")
+        );
         b.vars.flags[var.index()].0 |= VarFlags::CAPTURED;
         b.nodes[root.index()].set_flags(NodeFlags(0));
-        assert!(b.validate(Some(root)).unwrap_err().contains("effect"));
+        assert!(
+            b.validate(Some(root), false)
+                .unwrap_err()
+                .contains("effect")
+        );
     }
 }
 
@@ -2213,10 +2418,10 @@ mod js_metadata_tests {
             },
             0,
         );
-        b.validate(Some(root)).unwrap();
+        b.validate(Some(root), false).unwrap();
         let copy = b.copy_subtree(root, &[]);
         b.replace(root, copy);
-        b.validate(Some(root)).unwrap();
+        b.validate(Some(root), false).unwrap();
         let View::SBlock { statements } = b.view(root) else {
             panic!()
         };
@@ -2279,7 +2484,7 @@ mod js_metadata_tests {
             },
             0,
         );
-        b.validate(Some(pair)).unwrap();
+        b.validate(Some(pair), false).unwrap();
     }
 
     #[test]
@@ -2306,6 +2511,261 @@ mod js_metadata_tests {
             },
             0,
         );
-        b.validate(Some(pair)).unwrap();
+        b.validate(Some(pair), false).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod cost_measurements {
+    use super::*;
+    use crate::name::Name;
+    #[test]
+    fn sampled_edit_costs() {
+        let mut b = Bir::default();
+        let leaf = b.new_node(View::JNull, 0);
+        let mut root = leaf;
+        for i in 0..1000 {
+            let var = b.new_var_id(Name::new("x"), i);
+            let value = b.new_node(View::JNull, 0);
+            root = b.new_node(
+                View::Let {
+                    var,
+                    value: Some(value),
+                    body: root,
+                },
+                0,
+            );
+        }
+        println!("COST build 2001 nodes: {} visits", b.steps.get());
+        b.steps.set(0);
+        for _ in 0..100 {
+            let new = b.new_node(View::JNull, 0);
+            b.replace(leaf, new);
+        }
+        println!(
+            "COST replace 100 times at depth 1000: {} visits",
+            b.steps.get()
+        );
+        b.validate(Some(root), false).unwrap();
+        let mut b = Bir::default();
+        for i in 0..5000 {
+            b.intern_text(&format!("symbol_{i}"));
+        }
+        for i in 0..5000 {
+            b.intern_text(&format!("symbol_{i}"));
+        }
+        println!(
+            "COST intern 5000 distinct strings twice: {} comparisons",
+            b.intern_comparisons.get()
+        );
+    }
+}
+
+#[cfg(test)]
+mod incremental_cost_tests {
+    use super::*;
+    use crate::name::Name;
+
+    fn chain(b: &mut Bir, depth: u32) -> (NodeId, NodeId) {
+        let leaf = b.new_node(View::JNull, 0);
+        let mut root = leaf;
+        for i in 0..depth {
+            let var = b.new_var_id(Name::new("x"), i);
+            let value = b.new_node(View::JNull, 0);
+            root = b.new_node(
+                View::Let {
+                    var,
+                    value: Some(value),
+                    body: root,
+                },
+                0,
+            );
+        }
+        (root, leaf)
+    }
+
+    #[test]
+    fn hundred_thousand_nodes_have_linear_construction_cost() {
+        let mut b = Bir::for_typed_exprs(100_000);
+        let (root, _) = chain(&mut b, 49_999);
+        let root = b.new_node(View::SExp { value: root }, 0);
+        assert_eq!(b.nodes.len(), 100_000);
+        let steps = b.steps.get();
+        println!("COST build 100000 nodes: {steps} visits (bound 24*n)");
+        assert!(steps <= 24 * 100_000, "{steps} visits");
+        b.validate(Some(root), false).unwrap();
+        b.mark_tail_positions(root);
+        b.validate(Some(root), true).unwrap();
+    }
+
+    #[test]
+    fn ten_thousand_leaf_replacements_do_not_walk_the_ten_thousand_deep_spine() {
+        let mut b = Bir::default();
+        let (root, leaf) = chain(&mut b, 10_000);
+        b.steps.set(0);
+        for _ in 0..10_000 {
+            let new = b.new_node(View::JNull, 0);
+            b.replace(leaf, new);
+        }
+        let steps = b.steps.get();
+        println!("COST replace 10000 times at depth 10000: {steps} visits (bound 64*n)");
+        assert!(steps <= 64 * 10_000, "{steps} visits");
+        b.validate(Some(root), false).unwrap();
+    }
+
+    #[test]
+    fn fifty_thousand_distinct_strings_have_linear_lookup_comparisons() {
+        let mut b = Bir::default();
+        let ids: Vec<_> = (0..50_000)
+            .map(|i| b.intern_text(&format!("symbol_{i}")))
+            .collect();
+        for (i, &id) in ids.iter().enumerate() {
+            assert_eq!(b.intern_text(&format!("symbol_{i}")), id);
+        }
+        let comparisons = b.intern_comparisons.get();
+        println!("COST intern 50000 distinct strings twice: {comparisons} comparisons (bound 3*n)");
+        assert!(comparisons <= 3 * 50_000, "{comparisons} comparisons");
+    }
+
+    #[test]
+    fn moved_free_uses_cross_capture_boundaries_without_per_use_parent_walks() {
+        let mut b = Bir::default();
+        let free = b.new_var_id(Name::new("free"), 0);
+        let body = b.new_node(View::JNull, 0);
+        let header = b.function_header(
+            VarSpan::default(),
+            FunctionAttribute::default(),
+            LamLoc::NONE,
+        );
+        let root = b.new_node(View::Fun { body, header }, 0);
+        let uses: Vec<_> = (0..10_000)
+            .map(|_| b.new_node(View::Var { var: free }, 0))
+            .collect();
+        let replacement = b.new_node(View::JArray { values: &uses }, 0);
+        b.steps.set(0);
+        b.replace(body, replacement);
+        assert!(b.vars.flags(free).contains(VarFlags::CAPTURED));
+        assert!(b.steps.get() < 25 * 10_000);
+        b.validate(Some(root), false).unwrap();
+    }
+
+    #[test]
+    fn optional_tail_validation_rejects_stale_and_corrupt_results() {
+        let mut b = Bir::default();
+        let body = b.new_node(View::JNull, 0);
+        let header = b.function_header(
+            VarSpan::default(),
+            FunctionAttribute::default(),
+            LamLoc::NONE,
+        );
+        let root = b.new_node(View::Fun { body, header }, 0);
+        assert!(
+            b.validate(Some(root), true)
+                .unwrap_err()
+                .contains("need marking")
+        );
+        b.mark_tail_positions(root);
+        b.validate(Some(root), true).unwrap();
+        let mut flags = b.node(body).flags();
+        flags.0 &= !NodeFlags::TAIL;
+        b.nodes[body.index()].set_flags(flags);
+        b.validate(Some(root), false).unwrap();
+        assert!(
+            b.validate(Some(root), true)
+                .unwrap_err()
+                .contains("tail position")
+        );
+        b.mark_tail_positions(root);
+        let new = b.new_node(View::JNull, 0);
+        b.replace(body, new);
+        assert!(
+            b.validate(Some(root), true)
+                .unwrap_err()
+                .contains("need marking")
+        );
+    }
+
+    #[test]
+    fn hashed_payloads_preserve_float_bits_and_primitive_identity() {
+        use std::hash::{Hash, Hasher};
+        let mut b = Bir::default();
+        let pos = b.intern_const(Constant::float(0.0));
+        let neg = b.intern_const(Constant::float(-0.0));
+        assert_ne!(pos, neg);
+        let nan = Constant::float(f64::from_bits(0x7ff8_0000_0000_0001));
+        assert_eq!(nan, nan.clone());
+        let id = b.intern_const(nan.clone());
+        assert_eq!(id, b.intern_const(nan.clone()));
+        assert_ne!(
+            id,
+            b.intern_const(Constant::float(f64::from_bits(0x7ff8_0000_0000_0002)))
+        );
+        let mut h1 = std::collections::hash_map::DefaultHasher::new();
+        let mut h2 = std::collections::hash_map::DefaultHasher::new();
+        nan.hash(&mut h1);
+        nan.clone().hash(&mut h2);
+        assert_eq!(h1.finish(), h2.finish());
+        let prim = PrimPayload {
+            primitive: Primitive::Paddint,
+            loc: LamLoc::NONE,
+        };
+        let id = b.intern_prim(prim.clone());
+        for _ in 0..10_000 {
+            assert_eq!(b.intern_prim(prim.clone()), id);
+        }
+        assert_ne!(
+            id,
+            b.intern_prim(PrimPayload {
+                primitive: Primitive::Psubint,
+                loc: LamLoc::NONE
+            })
+        );
+    }
+
+    #[test]
+    fn catch_labels_are_indexed_and_weights_are_cached_between_queries() {
+        let mut b = Bir::default();
+        for label in 0..10_000 {
+            b.catch_header(label, VarSpan::default());
+        }
+        let root = b.new_node(
+            View::Exit {
+                label: 9999,
+                args: &[],
+            },
+            0,
+        );
+        b.validate(Some(root), false).unwrap();
+        b.release(root);
+        b.validate(None, false).unwrap();
+        let (body, leaf) = chain(&mut b, 1000);
+        let scrutinee = b.new_node(View::JNull, 0);
+        let header = b.switch_header(SwitchHeader {
+            keys: vec![],
+            clauses: vec![],
+            constants: 0,
+            consts_full: false,
+            blocks_full: false,
+            has_default: true,
+            dispatch: crate::lambda::SwitchDispatch::Direct,
+        });
+        let root = b.new_node(
+            View::Switch {
+                scrutinee,
+                actions: &[body],
+                header,
+            },
+            0,
+        );
+        assert_eq!(b.weight(leaf), 2);
+        b.steps.set(0);
+        for _ in 0..10_000 {
+            assert_eq!(b.weight(leaf), 2);
+        }
+        assert_eq!(b.steps.get(), 10_000);
+        b.validate(Some(root), false).unwrap();
+        b.release(root);
+        assert_eq!(b.weighted_switches, 0);
+        b.validate(None, false).unwrap();
     }
 }

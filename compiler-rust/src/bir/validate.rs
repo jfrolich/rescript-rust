@@ -5,8 +5,9 @@ impl Bir {
     /// Recount live uses and exits, rebuild parent/binder information and effects,
     /// and check the tree, cached facts, conservative captures and dead bindings.
     /// `None` validates a completely released arena. Detached temporary roots are
-    /// rejected: finish constructing/replacing before invoking this gate.
-    pub fn validate(&self, root: Option<NodeId>) -> Result<(), String> {
+    /// rejected: finish constructing/replacing before invoking this gate. Set
+    /// `check_tails` only after `mark_tail_positions`; edits invalidate that pass.
+    pub fn validate(&self, root: Option<NodeId>, check_tails: bool) -> Result<(), String> {
         let fail = |message: &str| Err(message.to_owned());
         if self.nodes.len() != self.parents.len()
             || (!self.cold.is_empty() && self.cold.len() != self.nodes.len())
@@ -27,6 +28,11 @@ impl Bir {
         {
             return fail("parallel variable arrays differ in length");
         }
+        if check_tails && root.is_some() && !self.tails_valid {
+            return fail("tail positions need marking after edits");
+        }
+        let mut weighted_switches = 0;
+        let mut boundaries = 0;
         let mut seen = vec![false; self.nodes.len()];
         let mut free = vec![false; self.nodes.len()];
         for &id in &self.free_nodes {
@@ -55,6 +61,12 @@ impl Bir {
                 return fail("shared child or cycle");
             }
             seen[id.index()] = true;
+            weighted_switches += usize::from(self.is_weighted_switch(self.node(id)));
+            boundaries += usize::from(Self::is_capture_kind(self.node(id)));
+            let (epoch, cached) = self.weights[id.index()];
+            if epoch == self.weight_epoch && cached != 0 && cached != weight {
+                return fail("stale weight cache");
+            }
             order.push(id);
             if self.parents[id.index()] != parent {
                 return fail("stale parent link");
@@ -77,6 +89,9 @@ impl Bir {
                         return fail("shared function header");
                     }
                     functions[header.index()] = true;
+                    if self.func_owners[header.index()] != Some(id) {
+                        return fail("stale function owner");
+                    }
                 }
                 View::SForOf { parts, .. } | View::SForAwaitOf { parts, .. }
                     if parts.len() != 2 =>
@@ -139,6 +154,14 @@ impl Bir {
                 return fail("free node has parent");
             }
         }
+        if weighted_switches != self.weighted_switches || boundaries != self.capture_boundaries {
+            return fail("stale boundary counters");
+        }
+        for (i, live) in functions.iter().enumerate() {
+            if !live && self.func_owners[i].is_some() {
+                return fail("released function retains owner");
+            }
+        }
         if uses != self.vars.uses {
             return fail("stale weighted use count");
         }
@@ -199,6 +222,64 @@ impl Bir {
         for &(var, _) in &self.exports {
             if var.index() >= nvars || !self.vars.flags(var).contains(VarFlags::EXPORTED) {
                 return fail("missing export flag");
+            }
+        }
+        if check_tails {
+            if let Some(root) = root {
+                self.validate_tails(root)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_tails(&self, root: NodeId) -> Result<(), String> {
+        let mut self_calls = vec![false; self.pools.funcs.len()];
+        let mut functions = Vec::new();
+        let mut stack = vec![(root, false, None::<(FuncId, Option<VarId>)>)];
+        while let Some((id, expected, context)) = stack.pop() {
+            if self.node(id).flags().contains(NodeFlags::TAIL) != expected {
+                return Err("incorrect tail position".into());
+            }
+            match self.view(id) {
+                View::Fun { body, header } | View::JFun { body, header } => {
+                    functions.push(header);
+                    let own = self.parents[id.index()].and_then(|parent| match self.view(parent) {
+                        View::Let {
+                            var,
+                            value: Some(value),
+                            ..
+                        } if value == id => Some(var),
+                        View::LetRec { first, values, .. } => values
+                            .iter()
+                            .position(|&v| v == id)
+                            .map(|i| VarId(first.0 + index(i))),
+                        _ => None,
+                    });
+                    stack.push((body, true, Some((header, own))));
+                }
+                _ => {
+                    if expected {
+                        if let (View::Apply { callee, .. }, Some((function, own))) =
+                            (self.view(id), context)
+                        {
+                            if let View::Var { var } = self.view(callee) {
+                                if Some(var) == own {
+                                    self_calls[function.index()] = true;
+                                }
+                            }
+                        }
+                    }
+                    for child in self.view(id).children() {
+                        stack.push((child, expected && self.tail_child(id, child), context));
+                    }
+                }
+            }
+        }
+        for header in functions {
+            if (self.function(header).flags & FuncHeader::SELF_TAILCALL != 0)
+                != self_calls[header.index()]
+            {
+                return Err("incorrect self-tail-call flag".into());
             }
         }
         Ok(())

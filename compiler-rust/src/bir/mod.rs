@@ -4,6 +4,14 @@
 //! forests are permitted while building an edit. `validate` checks a finished
 //! tree, including all allocated slots. Handles belong to one arena and become
 //! invalid when released (slots are reused). No compiler pipeline uses this IR.
+//! `TAIL` and function self-tail-call flags are valid only after explicitly
+//! running `mark_tail_positions`; edits invalidate that analysis.
+//!
+//! Ordinary constructors touch direct operands. Capture boundaries inspect their
+//! captured subtree; attaching a doubled switch default updates its affected use
+//! counts. Replacement visits removed/replacement subtrees, stops effect/fact
+//! repair at the first unchanged ancestor, and walks the capture ancestor chain
+//! at most once when new uncaptured free uses require it.
 mod dump;
 mod edit;
 mod node;
@@ -29,8 +37,34 @@ pub struct Bir {
     exports: Vec<(VarId, Name)>,
     free_nodes: Vec<NodeId>,
     death_candidates: Vec<NodeId>,
+    func_owners: Vec<Option<NodeId>>,
+    capture_boundaries: usize,
+    weighted_switches: usize,
+    weight_epoch: u64,
+    weights: Vec<(u64, u32)>,
+    capture_epoch: u64,
+    capture_binders: Vec<u64>,
+    capture_chain: Vec<(u64, bool)>,
+    capture_stack: Vec<NodeId>,
+    capture_uses: Vec<VarId>,
+    tails_valid: bool,
+    #[cfg(test)]
+    steps: std::cell::Cell<u64>,
+    #[cfg(test)]
+    intern_comparisons: std::cell::Cell<u64>,
 }
 impl Bir {
+    #[inline]
+    fn visit(&self) {
+        #[cfg(test)]
+        self.steps.set(self.steps.get() + 1);
+    }
+    #[inline]
+    fn compare_interned(&self) {
+        #[cfg(test)]
+        self.intern_comparisons
+            .set(self.intern_comparisons.get() + 1);
+    }
     /// Reserve the hot arrays using a typed-expression count.
     pub fn for_typed_exprs(count: usize) -> Self {
         Self {
@@ -41,6 +75,7 @@ impl Bir {
     }
     /// Read a live packed node.
     pub fn node(&self, id: NodeId) -> Node {
+        self.visit();
         let node = self.nodes[id.index()];
         assert_ne!(node.op(), Op::Free, "released Bir handle");
         node
@@ -76,6 +111,7 @@ impl Bir {
     /// Allocate a variable with an explicit naming order.
     pub fn new_var_id(&mut self, name: Name, order: u32) -> VarId {
         let id = VarId(index(self.vars.len()));
+        self.capture_binders.push(0);
         self.vars.name.push(name);
         self.vars.order.push(order);
         self.vars.flags.push(VarFlags::default());
@@ -115,19 +151,21 @@ impl Bir {
     }
     /// Intern text in the module's contiguous text buffer.
     pub fn intern_text(&mut self, text: &str) -> StrId {
-        if let Some(i) = self
-            .pools
-            .strings
-            .iter()
-            .position(|&(s, n)| &self.pools.text[s as usize..(s + n) as usize] == text)
-        {
-            return StrId(index(i));
+        let hash = self.pools.hash_builder.hash_one(text);
+        if let Some(&(_, id)) = self.pools.text_index.find(hash, |&(_, id)| {
+            self.compare_interned();
+            self.text(id) == text
+        }) {
+            return id;
         }
         let id = StrId(index(self.pools.strings.len()));
         self.pools
             .strings
             .push((index(self.pools.text.len()), index(text.len())));
         self.pools.text.push_str(text);
+        self.pools
+            .text_index
+            .insert_unique(hash, (hash, id), |&(hash, _)| hash);
         id
     }
     /// Borrow interned text.
@@ -137,11 +175,20 @@ impl Bir {
     }
     /// Intern a constant. Compound fields must already exist.
     pub fn intern_const(&mut self, value: Constant) -> ConstId {
-        if let Some(i) = self.pools.consts.iter().position(|v| v == &value) {
-            return ConstId(index(i));
+        let key = value.key();
+        let hash = self.pools.hash_builder.hash_one(&key);
+        if let Some(&(_, id)) = self.pools.const_index.find(hash, |&(_, id)| {
+            self.compare_interned();
+            self.pools.const_keys[id.index()] == key
+        }) {
+            return id;
         }
         let id = ConstId(index(self.pools.consts.len()));
         self.pools.consts.push(value);
+        self.pools.const_keys.push(key);
+        self.pools
+            .const_index
+            .insert_unique(hash, (hash, id), |&(hash, _)| hash);
         id
     }
     /// Store flat compound-constant fields.
@@ -149,25 +196,21 @@ impl Bir {
         for v in values {
             assert!(v.index() < self.pools.consts.len());
         }
-        if values.is_empty() {
-            return ConstSpan { start: 0, len: 0 };
-        }
-        if let Some(start) = self
-            .pools
-            .const_fields
-            .windows(values.len())
-            .position(|items| items == values)
-        {
-            return ConstSpan {
-                start: index(start),
-                len: index(values.len()),
-            };
+        let hash = self.pools.hash_builder.hash_one(values);
+        if let Some(&(_, span)) = self.pools.const_fields_index.find(hash, |&(_, span)| {
+            self.compare_interned();
+            self.constant_fields(span) == values
+        }) {
+            return span;
         }
         let span = ConstSpan {
             start: index(self.pools.const_fields.len()),
             len: index(values.len()),
         };
         self.pools.const_fields.extend_from_slice(values);
+        self.pools
+            .const_fields_index
+            .insert_unique(hash, (hash, span), |&(hash, _)| hash);
         span
     }
     /// Read a constant.
@@ -176,11 +219,20 @@ impl Bir {
     }
     /// Intern a primitive and its location.
     pub fn intern_prim(&mut self, payload: PrimPayload) -> PrimId {
-        if let Some(i) = self.pools.prims.iter().position(|p| p == &payload) {
-            return PrimId(index(i));
+        let key = payload.key();
+        let hash = self.pools.hash_builder.hash_one(&key);
+        if let Some(&(_, id)) = self.pools.prim_index.find(hash, |&(_, id)| {
+            self.compare_interned();
+            self.pools.prim_keys[id.index()] == key
+        }) {
+            return id;
         }
         let id = PrimId(index(self.pools.prims.len()));
         self.pools.prims.push(payload);
+        self.pools.prim_keys.push(key);
+        self.pools
+            .prim_index
+            .insert_unique(hash, (hash, id), |&(hash, _)| hash);
         id
     }
     /// Read a primitive payload.
@@ -213,6 +265,7 @@ impl Bir {
         let id = FuncId(index(self.pools.funcs.len()));
         let attr_id = index(self.pools.attrs.len());
         self.pools.attrs.push(attr);
+        self.func_owners.push(None);
         self.pools.funcs.push(FuncHeader {
             params,
             attr: attr_id,
@@ -254,10 +307,12 @@ impl Bir {
     /// Allocate a static catch header.
     pub fn catch_header(&mut self, label: u32, params: VarSpan) -> CatchId {
         assert!(
-            !self.pools.catches.iter().any(|h| h.label == label),
+            !self.pools.catch_labels.contains_key(&label),
             "duplicate static label"
         );
         let id = CatchId(index(self.pools.catches.len()));
+        self.pools.catch_labels.insert(label, id);
+        self.pools.next_label = self.pools.next_label.max(u64::from(label) + 1);
         self.pools.catches.push(CatchHeader {
             label,
             params,
@@ -283,11 +338,18 @@ impl Bir {
     }
     /// Intern a module reference in first-use order.
     pub fn import(&mut self, module: Import) -> ImportId {
-        if let Some(i) = self.pools.imports.iter().position(|m| m == &module) {
-            return ImportId(index(i));
+        let hash = self.pools.hash_builder.hash_one(&module);
+        if let Some(&(_, id)) = self.pools.import_index.find(hash, |&(_, id)| {
+            self.compare_interned();
+            self.pools.imports[id.index()] == module
+        }) {
+            return id;
         }
         let id = ImportId(index(self.pools.imports.len()));
         self.pools.imports.push(module);
+        self.pools
+            .import_index
+            .insert_unique(hash, (hash, id), |&(hash, _)| hash);
         id
     }
 }
