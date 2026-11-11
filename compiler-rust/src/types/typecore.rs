@@ -7667,6 +7667,20 @@ fn deprecated_warning_from_attrs(
         .map(|(reason, can_be_automigrated)| deprecated_warning(name, reason, can_be_automigrated)))
 }
 
+/// `deprecated_warning_from_attrs` for an item named by its path. The name is
+/// printed only for a deprecated item: this runs on every use of a value or
+/// type, and almost none of them is deprecated.
+fn deprecated_warning_for_path(
+    path: &Path,
+    attrs: &[crate::types::decl::Attribute],
+) -> Result<Option<Warning>, crate::types::DeclLoc> {
+    Ok(
+        deprecated_attr_payload(attrs)?.map(|(reason, can_be_automigrated)| {
+            deprecated_warning(path.name().as_str(), reason, can_be_automigrated)
+        }),
+    )
+}
+
 /// `Builtin_attributes.deprecated_of_attrs` (builtin_attributes.ml:59-62):
 /// `string_of_opt_payload` of the first `deprecated` attribute, the record
 /// form reading as `""`; `Err` where it raises.
@@ -7835,14 +7849,14 @@ fn deprecated_warning_for_value(
     path: &Path,
     desc: &ValueDescription,
 ) -> Result<Option<Warning>, crate::types::DeclLoc> {
-    deprecated_warning_from_attrs(path.name().as_str(), &desc.val_attributes)
+    deprecated_warning_for_path(path, &desc.val_attributes)
 }
 
 fn deprecated_warning_for_type(
     path: &Path,
     decl: &crate::types::decl::TypeDeclaration,
 ) -> Result<Option<Warning>, crate::types::DeclLoc> {
-    deprecated_warning_from_attrs(path.name().as_str(), &decl.type_attributes)
+    deprecated_warning_for_path(path, &decl.type_attributes)
 }
 
 /// Type check an expression against an expected type.
