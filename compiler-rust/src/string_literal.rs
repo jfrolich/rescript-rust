@@ -17,10 +17,14 @@ use std::borrow::Cow;
 /// `InvalidSource` is confined to ordinary-string parser recovery.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum StringLiteral {
+    /// A literal with valid source spelling and its decoded runtime value.
     Valid {
+        /// Literal body as written, excluding delimiters.
         source: Cow<'static, str>,
+        /// Decoded runtime value in the compiler byte-string representation.
         semantic: Cow<'static, str>,
     },
+    /// Malformed ordinary-string spelling retained during parser recovery.
     InvalidSource(Cow<'static, str>),
 }
 
@@ -178,11 +182,8 @@ fn decode_js_escapes_with(normalize_template_line_endings: bool, s: &[u8]) -> Op
     let mut buf = Vec::with_capacity(len);
     let decode_fixed_hex = |start: usize, count: usize| -> Option<u32> {
         let mut value = 0u32;
-        for index in start..start + count {
-            if index >= len {
-                return None;
-            }
-            let digit = hex_value(s[index]);
+        for &byte in s.get(start..start.checked_add(count)?)? {
+            let digit = hex_value(byte);
             if digit < 0 {
                 return None;
             }
@@ -545,10 +546,15 @@ pub fn utf16_length(s: &str) -> Option<usize> {
     Some(length)
 }
 
+/// Invalid UTF-8 encountered while interpreting a compiler byte string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("invalid UTF-8 in string literal")]
+pub struct InvalidUtf8;
+
 /// OCaml `String_literal.code_point_at_utf16_index`: JavaScript's
-/// `String.codePointAt` for a UTF-16 code unit index. `Err(())` stands for
+/// `String.codePointAt` for a UTF-16 code unit index. An error stands for
 /// OCaml's `Invalid_utf8` exception.
-pub fn code_point_at_utf16_index(s: &str, index: i64) -> Result<Option<u32>, ()> {
+pub fn code_point_at_utf16_index(s: &str, index: i64) -> Result<Option<u32>, InvalidUtf8> {
     if index < 0 {
         return Ok(None);
     }
@@ -558,7 +564,7 @@ pub fn code_point_at_utf16_index(s: &str, index: i64) -> Result<Option<u32>, ()>
     while byte_index < bytes.len() {
         let (valid, codepoint, len) = get_utf_8_uchar(&bytes, byte_index);
         if !valid {
-            return Err(());
+            return Err(InvalidUtf8);
         }
         if utf16_index == index {
             return Ok(Some(codepoint));
@@ -599,6 +605,20 @@ mod tests {
         assert_eq!(encode_js_string("\u{1f}\u{7f}\u{0}"), "\\x1F\\x7F\\x00");
         assert_eq!(encode_char_source(0x27), "\\'");
         assert_eq!(encode_char_source(0x110000), "\\u{110000}");
+    }
+
+    #[test]
+    fn rejects_invalid_utf8_for_code_point_lookup() {
+        let invalid = string_of_bytes(vec![0xff]);
+        assert_eq!(code_point_at_utf16_index(&invalid, 0), Err(InvalidUtf8));
+        assert_eq!(code_point_at_utf16_index(&invalid, -1), Ok(None));
+    }
+
+    #[test]
+    fn rejects_incomplete_or_non_hex_escapes() {
+        for source in [r"\x", r"\x0", r"\xGG", r"\u000", r"\u000G"] {
+            assert_eq!(decode_js_escapes(source), None, "{source}");
+        }
     }
 
     #[test]
