@@ -175,7 +175,6 @@ pub fn row_repr_ref<'row>(ctx: &TypeContext, row: &'row RowDesc) -> Cow<'row, Ro
     let more = ctx.repr(row.row_more);
     let desc = ctx.borrow_desc(more);
     if matches!(&*desc, TypeDesc::Tvariant(_)) {
-        drop(desc);
         Cow::Owned(row_repr(ctx, row))
     } else {
         Cow::Borrowed(row)
@@ -502,12 +501,10 @@ fn proxy_obj(ctx: &TypeContext, ty: TypeExprRef, original: TypeExprRef) -> TypeE
     match &*desc {
         TypeDesc::Tfield { rest, .. } => {
             let rest = *rest;
-            drop(desc);
             proxy_obj(ctx, rest, original)
         }
         TypeDesc::Tlink(t) => {
             let t = *t;
-            drop(desc);
             proxy_obj(ctx, t, original)
         }
         TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tconstr { .. } => ty,
@@ -549,7 +546,6 @@ fn get_row(ctx: &TypeContext, t: TypeExprRef) -> TypeExprRef {
     match &*desc {
         TypeDesc::Tfield { rest, .. } => {
             let rest = *rest;
-            drop(desc);
             get_row(ctx, rest)
         }
         _ => t,

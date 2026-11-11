@@ -1666,7 +1666,7 @@ impl TypeContext {
         if self.in_store_build() {
             self.store_build_guards
                 .borrow_mut()
-                .push((alias_source.clone(), nonempty));
+                .push((*alias_source, nonempty));
         }
         nonempty
     }
@@ -1674,7 +1674,7 @@ impl TypeContext {
     fn alias_source_has_component_paths(&self, alias_source: &Path) -> bool {
         self.component_paths_by_alias_source
             .borrow()
-            .get(&SamePathKey(alias_source.clone()))
+            .get(&SamePathKey(*alias_source))
             .is_some_and(|paths| !paths.is_empty())
     }
 
@@ -2736,7 +2736,7 @@ impl TypeContext {
         } else {
             let (level, id) = {
                 let pages = &self.shared_pages;
-                let original = super::shared_store::page_node(&pages, idx);
+                let original = super::shared_store::page_node(pages, idx);
                 (original.level, original.id)
             };
             let index = self.store_descs.push(desc, level, id);

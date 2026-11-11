@@ -471,7 +471,6 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
         match &*desc {
             TypeDesc::Tvariant(row) => {
                 let row = *row;
-                drop(desc);
                 matches!(
                     crate::types::btype::row_field(ctx, tag, &ctx.row_desc(row)),
                     RowField::Rabsent
@@ -748,13 +747,12 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                 let inner = *inner;
                 match self.desc(inner) {
                     Desc::Constant(_) => chosen.pat = inner,
-                    Desc::Construct { cstr, .. } => {
+                    Desc::Construct { cstr, .. }
                         if matches!(cstr.cstr_kind, ConstructorKind::Ordinary(_))
                             && self.oracle.is_block_that_cannot_be_undefined(cstr)
-                        {
+                        => {
                             chosen.pat = inner;
                         }
-                    }
                     _ => {}
                 }
             }

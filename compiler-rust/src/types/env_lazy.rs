@@ -382,7 +382,6 @@ fn build_type_constructors(
                     let old_result_module_path = path.parent();
                     let new_result_module_path = type_path.parent();
                     let args = *args;
-                    drop(desc);
                     if let (Some(old_prefix), Some(new_prefix)) =
                         (old_result_module_path, new_result_module_path)
                     {
@@ -393,7 +392,7 @@ fn build_type_constructors(
                             // already gone through compiler/ml/subst.ml:303-309.
                             // Mirror that component-prefix substitution before
                             // exposing the constructor description table.
-                            for arg in ctx.type_list(&args).iter() {
+                            for arg in ctx.type_list(args).iter() {
                                 crate::cmi::persistent_env::rewrite_type_expr_by_path_prefix(
                                     arg,
                                     &old_prefix,
@@ -406,7 +405,6 @@ fn build_type_constructors(
                     ctx.new_generic_constr(type_path, ctx.type_list(args).to_vec())
                 }
                 _ => {
-                    drop(desc);
                     res_ty
                 }
             }

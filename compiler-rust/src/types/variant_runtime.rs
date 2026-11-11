@@ -1,7 +1,7 @@
 //! Canonical JavaScript runtime representation of variant declarations.
 //!
 //! This mirrors `compiler/ml/variant_runtime.ml`. Layouts live in the
-//! per-compilation [`TypeContext`](super::context::TypeContext); [`LayoutRef`]
+//! per-compilation [`TypeContext`]; [`LayoutRef`]
 //! is a stable arena index used while recursive declaration groups are being
 //! completed.
 

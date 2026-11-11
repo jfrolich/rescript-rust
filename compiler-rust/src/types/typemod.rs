@@ -238,7 +238,7 @@ fn translate_type_declaration_params<'a>(
                         loc: core_type.ptyp_loc,
                     });
                 }
-                let type_ref = ctx.new_var(Some(crate::name::Name::new(&name)));
+                let type_ref = ctx.new_var(Some(crate::name::Name::new(name)));
                 (
                     TypedCoreType {
                         ctyp_desc: TypedCoreTypeDesc::Ttyp_var(Some(name.to_string())),
@@ -3324,6 +3324,9 @@ fn make_typed_spread_label(
 /// Result type for module type checking operations.
 pub type TypeModResult<T> = Result<T, TypeModError>;
 
+// Keep the error of every module-typing `Result` small; box cold payloads.
+const _: () = assert!(std::mem::size_of::<TypeModError>() <= 120);
+
 /// `Includecore.type_mismatch` cases used by type-extension compatibility.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TypeExtensionMismatch {
@@ -3390,7 +3393,7 @@ pub enum TypeModError {
     /// Signature mismatch.
     SignatureMismatch {
         loc: LocIdx,
-        error: crate::types::includemod::IncludeModError,
+        error: Box<crate::types::includemod::IncludeModError>,
     },
     /// `Typedecl.Type_clash` (typedecl.ml:2176-2180) from `update_type`.
     TypeDeclTypeClash {
@@ -3700,7 +3703,7 @@ pub enum TypeModError {
         /// Constrained component path.
         lid: Longident,
         /// Inclusion error from checking the replacement against the original.
-        error: crate::types::includemod::IncludeModError,
+        error: Box<crate::types::includemod::IncludeModError>,
     },
     /// A destructive `with` constraint changes a module that is aliased in the signature.
     WithChangesModuleAlias {
@@ -3722,7 +3725,7 @@ pub enum TypeModError {
         /// Applicative functor path in the constrained signature.
         path: Path,
         /// Inclusion error from retyping the functor application argument.
-        error: crate::types::includemod::IncludeModError,
+        error: Box<crate::types::includemod::IncludeModError>,
     },
     /// A destructive type substitution would remove constrained type parameters.
     WithCannotRemoveConstrainedType {
@@ -4816,7 +4819,6 @@ fn check_type_declaration_coherence(
             });
         }
     };
-    drop(manifest_desc);
 
     if manifest_args.len() != decl.type_params.len() {
         return Err(TypeModError::DefinitionMismatch {
@@ -4911,7 +4913,6 @@ fn object_field_rest(ctx: &crate::types::context::TypeContext, fields: TypeExprR
             TypeDesc::Tfield { rest, .. } => Some(ctx.repr(*rest)),
             _ => None,
         };
-        drop(desc);
         let Some(next) = next else {
             return current;
         };
@@ -6427,8 +6428,8 @@ fn type_exprs_equal_for_abbrev_recursion(
         return true;
     }
 
-    let left_desc = (*ctx.get_desc(left));
-    let right_desc = (*ctx.get_desc(right));
+    let left_desc = *ctx.get_desc(left);
+    let right_desc = *ctx.get_desc(right);
     match (left_desc, right_desc) {
         (
             TypeDesc::Tarrow {
@@ -6598,7 +6599,7 @@ fn check_type_abbrev_recursion_regular(
         return Ok(());
     }
 
-    match (*ctx.get_desc(ty)) {
+    match *ctx.get_desc(ty) {
         TypeDesc::Tconstr { path, args, .. } => {
             if path.same(target_path) {
                 if !type_expr_lists_equal_for_abbrev_recursion(
@@ -6809,7 +6810,7 @@ fn check_well_founded(
             if fini {
                 return Ok(());
             }
-            let desc = (*ctx.get_desc(ty));
+            let desc = *ctx.get_desc(ty);
             let rec_ok = matches!(desc, TypeDesc::Tobject { .. } | TypeDesc::Tvariant(_));
             let visited_after = self.visited.update(ty, parents.clone());
             self.visited = visited_after.clone();
@@ -8596,7 +8597,7 @@ fn with_type_subst_replacement_is_same_arg_alias(
     let CoreTypeDesc::Ptyp_constr(inner) = &manifest.ptyp_desc else {
         return false;
     };
-    let (_, args) = &*inner;
+    let (_, args) = inner;
     if args.len() != decl.ptype_params.len() {
         return false;
     }
@@ -8883,7 +8884,7 @@ fn apply_with_type_constraints_to_module_type(
         let desc = ctx.get_desc(ty).into_desc();
         match desc {
             TypeDesc::Tconstr { path, args, .. } => {
-                for arg in ctx.type_list(&args).iter() {
+                for arg in ctx.type_list(args).iter() {
                     rewrite_type_with_substs(ctx, arg, substs, cache, visited);
                 }
 
@@ -9325,7 +9326,7 @@ fn cannot_scrape_alias_path_for_module_type<'a>(
         &mut tctx.persistent_env,
         tctx.type_ctx,
     )
-    .or_else(|| Some(*path))
+    .or(Some(*path))
 }
 
 fn check_module_type_extracts_signature<'a>(
@@ -9484,7 +9485,7 @@ fn collect_pmty_with_type_constraints<'a>(
                         inclusion_result.map_err(|error| TypeModError::WithMismatch {
                             loc,
                             lid: longident.clone(),
-                            error,
+                            error: Box::new(error),
                         })?;
                         if !with_type_subst_replacement_is_same_arg_alias(arena, decl)
                             && typed_params_are_constrained(
@@ -9741,7 +9742,7 @@ fn check_usage_of_path_of_substituted_item(
                         loc,
                         lid: lid.clone(),
                         path: *referenced_path,
-                        error,
+                        error: Box::new(error),
                     });
                 }
             }
@@ -10198,7 +10199,7 @@ fn transl_with_constraints<'a>(
                         inclusion_result.map_err(|error| TypeModError::WithMismatch {
                             loc,
                             lid: longident.clone(),
-                            error,
+                            error: Box::new(error),
                         })?;
                         typed_constraints.push((
                             path,
@@ -10256,7 +10257,7 @@ fn transl_with_constraints<'a>(
                         inclusion_result.map_err(|error| TypeModError::WithMismatch {
                             loc,
                             lid: longident.clone(),
-                            error,
+                            error: Box::new(error),
                         })?;
                         if !with_type_subst_replacement_is_same_arg_alias(arena, decl)
                             && typed_params_are_constrained(
@@ -12071,7 +12072,7 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                                                 loc: param_ty.ptyp_loc,
                                             });
                                         }
-                                        tctx.type_ctx.new_var(Some(crate::name::Name::new(&name)))
+                                        tctx.type_ctx.new_var(Some(crate::name::Name::new(name)))
                                     }
                                     _ => {
                                         let (_typed_param, param_ref) =
@@ -15241,7 +15242,7 @@ fn type_module_expr_with_alias_inner<'a>(
                 path
             } else {
                 flattened_persistent_alias_path(&path, tctx.persistent_env.as_ref())
-                    .unwrap_or_else(|| path)
+                    .unwrap_or(path)
             };
             let alias_mod_type = crate::types::decl::ModuleType::MtyAlias(
                 crate::types::decl::AliasPresence::MtaAbsent,
@@ -15327,7 +15328,7 @@ fn type_module_expr_with_alias_inner<'a>(
                     &mut tctx.persistent_env,
                     tctx.type_ctx,
                 )
-                .unwrap_or_else(|| crate::types::decl::ModuleType::MtyIdent(alias_target));
+                .unwrap_or(crate::types::decl::ModuleType::MtyIdent(alias_target));
                 // typemod.ml:1250-1251: strengthen only when `sttn`.
                 let outer_mod_type = if sttn {
                     strengthen_semantic_ident_module_type(
@@ -15399,8 +15400,10 @@ fn type_module_expr_with_alias_inner<'a>(
                     &mut inclusion_warnings,
                 );
                 report_inclusion_warnings(tctx, loc, inclusion_warnings);
-                let coercion = coercion_result
-                    .map_err(|err| TypeModError::SignatureMismatch { loc, error: err })?;
+                let coercion = coercion_result.map_err(|err| TypeModError::SignatureMismatch {
+                    loc,
+                    error: Box::new(err),
+                })?;
                 Ok(ModuleExpr {
                     mod_desc: ModuleExprDesc::Tmod_constraint(
                         tctx.typed.push_module_expr(md),
@@ -15567,7 +15570,7 @@ fn type_module_expr_with_alias_inner<'a>(
                     report_inclusion_warnings(tctx, arg.pmod_loc, inclusion_warnings);
                     coercion_result.map_err(|err| TypeModError::SignatureMismatch {
                         loc: arg.pmod_loc,
-                        error: err,
+                        error: Box::new(err),
                     })?
                 }
                 _ => {
@@ -15695,7 +15698,7 @@ fn type_module_expr_with_alias_inner<'a>(
                                 &mut tctx.persistent_env,
                                 tctx.type_ctx,
                             )
-                            .unwrap_or_else(|| {
+                            .unwrap_or({
                                 crate::types::decl::ModuleType::MtyIdent(*path)
                             })
                         })
@@ -15791,7 +15794,7 @@ fn wrap_constraint_with_decl_and_arg_mty<'a>(
     report_inclusion_warnings(tctx, error_loc, inclusion_warnings);
     let coercion = coercion_result.map_err(|err| TypeModError::SignatureMismatch {
         loc: error_loc,
-        error: err,
+        error: Box::new(err),
     })?;
     let env_ref = tctx.type_ctx.store_typed_env(env);
 
@@ -15813,8 +15816,8 @@ fn recmodule_substitute_module_path(path: &Path, subst: &[(Ident, Path)]) -> Pat
     match path.view() {
         PathView::Pident(id) => subst
             .iter()
-            .find_map(|(old_id, new_path)| old_id.same(id).then(|| *new_path))
-            .unwrap_or_else(|| *path),
+            .find_map(|(old_id, new_path)| old_id.same(id).then_some(*new_path))
+            .unwrap_or(*path),
         PathView::Pdot(prefix, name, pos) => {
             Path::pdot_pos(recmodule_substitute_module_path(prefix, subst), *name, *pos)
         }
@@ -15876,7 +15879,7 @@ fn wrap_recmodule_constraint_with_inclusion_mtys<'a>(
     report_inclusion_warnings(tctx, error_loc, inclusion_warnings);
     let coercion = coercion_result.map_err(|err| TypeModError::SignatureMismatch {
         loc: error_loc,
-        error: err,
+        error: Box::new(err),
     })?;
     let env_ref = tctx.type_ctx.store_typed_env(env);
 
@@ -17182,7 +17185,7 @@ fn type_structure_item<'a>(
                                     loc: core_type.ptyp_loc,
                                 });
                             }
-                            let type_ref = ctx.new_var(Some(crate::name::Name::new(&name)));
+                            let type_ref = ctx.new_var(Some(crate::name::Name::new(name)));
                             (
                                 TypedCoreType {
                                     ctyp_desc: TypedCoreTypeDesc::Ttyp_var(Some(name.to_string())),
@@ -18599,7 +18602,7 @@ fn type_structure_item<'a>(
                 if !matches!(type_decl.type_kind, crate::types::TypeKind::TypeOpen) {
                     return Err(TypeModError::NotExtensibleType {
                         loc,
-                        path: path,
+                        path,
                     });
                 }
 
@@ -18612,7 +18615,7 @@ fn type_structure_item<'a>(
                     }) {
                         return Err(TypeModError::CannotExtendPrivateType {
                             loc: decl_constructor.pext_loc,
-                            path: path,
+                            path,
                         });
                     }
                 }
@@ -18644,7 +18647,7 @@ fn type_structure_item<'a>(
                 if let Some(mismatch) = mismatch {
                     return Err(TypeModError::ExtensionMismatch {
                         loc,
-                        path: path,
+                        path,
                         mismatch,
                     });
                 }
@@ -20408,7 +20411,7 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
                                 loc: core_type.ptyp_loc,
                             });
                         }
-                        let type_ref = ctx.new_var(Some(crate::name::Name::new(&name)));
+                        let type_ref = ctx.new_var(Some(crate::name::Name::new(name)));
                         (
                             TypedCoreType {
                                 ctyp_desc: TypedCoreTypeDesc::Ttyp_var(Some(name.to_string())),

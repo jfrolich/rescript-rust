@@ -105,7 +105,6 @@ impl Collector<'_> {
                     if let Some((path, _)) = &row.row_name {
                         self.path(path, Kind::Type);
                     }
-                    drop(desc);
                     super::btype::iter_type_expr(ctx, ty, |child| stack.push(child));
                 }
             }

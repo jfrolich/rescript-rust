@@ -151,7 +151,7 @@ pub(crate) fn overlay_pattern_list_index(list: TPatList) -> Option<usize> {
         return None;
     }
     let start = list.start();
-    (start & OVERLAY_BIT != 0).then(|| (start & !OVERLAY_BIT) as usize)
+    (start & OVERLAY_BIT != 0).then_some((start & !OVERLAY_BIT) as usize)
 }
 
 /// A list of typed core types (tuple and constructor arguments).

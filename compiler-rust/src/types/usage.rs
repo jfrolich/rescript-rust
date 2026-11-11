@@ -185,7 +185,7 @@ impl UsageTables {
                     match state.current_slot {
                         Some(current) => {
                             state.rec_needed = true;
-                            self.let_slots[current.0 as usize].push((name.clone(), *loc));
+                            self.let_slots[current.0 as usize].push((*name, *loc));
                         }
                         None => released.push((*slot, *used, *some_used)),
                     }
@@ -195,7 +195,7 @@ impl UsageTables {
         for (slot, used, some_used) in released {
             let recorded = std::mem::take(&mut self.let_slots[slot.0 as usize]);
             for (name, loc) in recorded {
-                self.mark_value_used(&name, loc);
+                self.mark_value_used(name, loc);
             }
             self.cells[used.0 as usize] = true;
             self.cells[some_used.0 as usize] = true;
@@ -336,7 +336,7 @@ impl UsageTables {
                     // `List.iter mark_type_used (get_ref slot); old_callback ()`.
                     let recorded = std::mem::take(&mut self.type_slots[slot.0 as usize]);
                     for (name, loc) in recorded {
-                        self.mark_type_used(&name, loc);
+                        self.mark_type_used(name, loc);
                     }
                     self.run_type_callback(*old);
                 }

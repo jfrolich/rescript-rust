@@ -36,6 +36,9 @@ use crate::parser::code_frame;
 /// Result type for inclusion checking.
 pub type IncludeModResult<T> = Result<T, IncludeModError>;
 
+// Keep the error of every inclusion-check `Result` small; box declarations.
+const _: () = assert!(std::mem::size_of::<IncludeModError>() <= 64);
+
 fn deprecated_payload_from_attrs<'a>(
     attrs: &'a [Attribute],
     names: &[&str],
@@ -129,8 +132,8 @@ pub enum IncludeModError {
     /// Value type mismatch.
     ValueTypeMismatch {
         name: Ident,
-        actual: ValueDescription,
-        expected: ValueDescription,
+        actual: Box<ValueDescription>,
+        expected: Box<ValueDescription>,
         arity_mismatch: Option<(usize, usize)>,
     },
     /// Type declaration mismatch.
@@ -138,23 +141,23 @@ pub enum IncludeModError {
     /// Type declaration mismatch with enough context to print OCaml's report.
     TypeDeclarationMismatch {
         name: Ident,
-        actual: TypeDeclaration,
-        expected: TypeDeclaration,
+        actual: Box<TypeDeclaration>,
+        expected: Box<TypeDeclaration>,
         detail: TypeDeclarationMismatchDetail,
     },
     /// Extension constructor mismatch.
     ExtensionConstructorMismatch {
         name: Ident,
-        actual: ExtensionConstructor,
-        expected: ExtensionConstructor,
+        actual: Box<ExtensionConstructor>,
+        expected: Box<ExtensionConstructor>,
     },
     /// Module type mismatch.
     ModuleTypeMismatch { name: Ident, reason: String },
     /// Module type declaration mismatch.
     ModuleTypeDeclarationMismatch {
         name: Ident,
-        actual: ModtypeDeclaration,
-        expected: ModtypeDeclaration,
+        actual: Box<ModtypeDeclaration>,
+        expected: Box<ModtypeDeclaration>,
         error: Box<IncludeModError>,
     },
     /// Equivalent module type declarations require a structure-field permutation.
@@ -868,7 +871,7 @@ impl PathSubstMap {
             return self
                 .map
                 .iter()
-                .find_map(|(key, value)| key.same(path).then(|| *value));
+                .find_map(|(key, value)| key.same(path).then_some(*value));
         }
         if !path_has_pos_hint(path) {
             // No key and not the path carry a position hint, so `same`
@@ -1945,7 +1948,7 @@ pub fn simplify_signature(sig: &Signature) -> Signature {
 /// values, so the full check pairs each of its items with that same item of
 /// the unit and every comparison succeeds. What the check leaves behind is
 /// the coercion and the items it marked as used. Each paired item is exported
-/// as it is (see [`includes_itself_plainly`]), so the coercion only selects
+/// as it is (see `includes_itself_plainly`), so the coercion only selects
 /// the fields that are not shadowed, as `signatures_with_subst` builds it.
 pub fn inferred_signature_coercion(
     type_ctx: &TypeContext,
@@ -2094,13 +2097,13 @@ fn mark_self_included_items_used(type_ctx: &TypeContext, env: &Env, sig: &Signat
             SignatureItem::SigType(id, decl, _) => {
                 let loc = type_ctx.resolve_loc(decl.type_loc);
                 let mut usage_tables = type_ctx.usage();
-                usage_tables.mark_type_used(id.name_atom(), loc.clone());
+                usage_tables.mark_type_used(id.name_atom(), loc);
                 if let crate::types::TypeKind::TypeVariant(cstrs, _) = &decl.type_kind {
                     for cstr in cstrs {
                         usage_tables.mark_constructor_used(
                             usage,
                             id.name(),
-                            loc.clone(),
+                            loc,
                             cstr.cd_id.name(),
                         );
                     }
@@ -2391,8 +2394,8 @@ fn value_descriptions(
         let arity_mismatch = find_arity_mismatch(type_ctx, env, impl_desc.val_type, expected_ty);
         return Err(IncludeModError::ValueTypeMismatch {
             name: id,
-            actual: impl_desc.clone(),
-            expected: expected_desc,
+            actual: Box::new(impl_desc.clone()),
+            expected: Box::new(expected_desc),
             arity_mismatch,
         });
     }
@@ -2404,8 +2407,8 @@ fn value_descriptions(
     let dont_match = || {
         Err(IncludeModError::ValueTypeMismatch {
             name: id,
-            actual: impl_desc.clone(),
-            expected: expected_desc.clone(),
+            actual: Box::new(impl_desc.clone()),
+            expected: Box::new(expected_desc.clone()),
             arity_mismatch: None,
         })
     };
@@ -3438,8 +3441,8 @@ fn type_decl_mismatch(
 ) -> IncludeModError {
     IncludeModError::TypeDeclarationMismatch {
         name,
-        actual: actual.clone(),
-        expected: expected.clone(),
+        actual: Box::new(actual.clone()),
+        expected: Box::new(expected.clone()),
         detail: detail.into(),
     }
 }
@@ -4400,16 +4403,14 @@ fn flatten_object_fields_for_inclusion(
             } => {
                 flattened.push((*name, type_ctx.mutability_repr(*mutability), *typ));
                 let next = type_ctx.repr(*rest);
-                drop(desc);
                 current = next;
             }
             _ => {
-                drop(desc);
                 break;
             }
         }
     }
-    flattened.sort_by(|left, right| left.0.cmp(&right.0));
+    flattened.sort_by_key(|left| left.0);
     (flattened, current)
 }
 
@@ -4544,8 +4545,8 @@ fn extension_constructors(
     let sig_ext = substitute_extension_constructor_paths(type_ctx, sig_ext, subst);
     let mismatch = || IncludeModError::ExtensionConstructorMismatch {
         name: id,
-        actual: impl_ext.clone(),
-        expected: sig_ext.clone(),
+        actual: Box::new(impl_ext.clone()),
+        expected: Box::new(sig_ext.clone()),
     };
 
     if !impl_ext.ext_type_path.same(&sig_ext.ext_type_path) {
@@ -4700,8 +4701,8 @@ fn modtype_declarations(
 
             let mismatch = |error| IncludeModError::ModuleTypeDeclarationMismatch {
                 name: id,
-                actual: impl_decl.clone(),
-                expected: sig_decl.clone(),
+                actual: Box::new(impl_decl.clone()),
+                expected: Box::new(sig_decl.clone()),
                 error: Box::new(with_modtype_context(id, error)),
             };
 
@@ -4709,9 +4710,9 @@ fn modtype_declarations(
             // rejects equivalent declarations when either direction needs a
             // structure-field permutation.
             let impl_to_sig = modtypes_with_warnings(type_ctx, env, impl_mty, sig_mty, warnings)
-                .map_err(&mismatch)?;
+                .map_err(mismatch)?;
             let sig_to_impl = modtypes_with_warnings(type_ctx, env, sig_mty, impl_mty, warnings)
-                .map_err(&mismatch)?;
+                .map_err(mismatch)?;
             if !matches!(impl_to_sig, ModuleCoercion::Tcoerce_none)
                 || !matches!(sig_to_impl, ModuleCoercion::Tcoerce_none)
             {

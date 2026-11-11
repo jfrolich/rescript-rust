@@ -18,14 +18,12 @@
 use super::asttypes::{MutableFlag, PrivateFlag};
 use super::context::TypeContext;
 use super::decl::{
-    ConstructorArguments, ConstructorDeclaration, ConstructorDescription, ConstructorKind,
-    LabelDeclaration, LabelDescription, ModtypeDeclaration, ModuleDeclaration, ModuleType,
-    RecordRepresentation, Signature, SignatureItem, TypeDeclaration, TypeKind, ValueDescription,
+    ConstructorArguments, ConstructorDeclaration, ConstructorDescription, ConstructorKind, LabelDescription, ModtypeDeclaration, ModuleDeclaration, ModuleType, Signature, SignatureItem, TypeDeclaration, TypeKind, ValueDescription,
 };
 use super::path::Path;
 use super::type_expr::{TypeDesc, TypeExprRef};
 use crate::fast_hash::{AHashMap as HashMap, AHashSet as HashSet};
-use crate::ident::{Ident, IdentFlags};
+use crate::ident::Ident;
 use crate::location::Location;
 use crate::types::path::PathView;
 use std::cell::RefCell;
@@ -67,7 +65,6 @@ fn free_vars_rec(
             result.insert(ty);
         }
         _ => {
-            drop(desc);
             super::btype::iter_type_expr(ctx, ty, |child| {
                 free_vars_rec(ctx, child, result, visited);
             });

@@ -6,12 +6,12 @@
 //! Key differences from the parse tree (`Parsetree`):
 //! - Every identifier has a resolved [`Path`]
 //! - Every expression and pattern has a [`TypeExprRef`]
-//! - Type annotations are type-checked [`CoreType`] values
+//! - Type annotations are type-checked [`TypedCoreType`] values
 //!
 //! # Architecture
 //!
 //! The typed tree uses reference types (`TypeExprRef`) instead of owning types,
-//! requiring a [`TypeContext`] for allocation. This enables efficient sharing
+//! requiring a [`TypeContext`](crate::types::context::TypeContext) for allocation. This enables efficient sharing
 //! and modification during type checking.
 
 #![allow(missing_docs)]

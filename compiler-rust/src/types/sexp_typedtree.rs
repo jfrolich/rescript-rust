@@ -14,7 +14,7 @@ use crate::types::path::PathView;
 use crate::types::tast_arena::{TExprIdx, TypedArena};
 use crate::types::type_expr::{RowDesc, RowField, TypeDesc, TypeExprRef};
 use crate::types::typedtree::{
-    Case, Constant, Expression, ExpressionDesc, ExtensionConstructor, ExtensionConstructorKind,
+    Case, Constant, ExpressionDesc, ExtensionConstructor, ExtensionConstructorKind,
     Loc, ModuleBinding, ModuleExpr, ModuleExprDesc, ModuleTypeConstraint, OpenDeclaration, Partial,
     Pattern, PatternDesc, RecordField, RecordLabelDefinition, Structure, StructureItem,
     StructureItemDesc, TypeExtension, TypedConstructorArguments, TypedConstructorDeclaration,
@@ -411,7 +411,6 @@ fn sexp_type_expr_inline(
         }
         _ => {}
     }
-    drop(desc);
 
     if let Some(id) = state.lookup_active_binding(te) {
         return Sexp::list(vec![Sexp::atom("ref"), Sexp::atom(&id.to_string())]);
