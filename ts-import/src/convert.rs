@@ -92,7 +92,7 @@ impl Gap {
 }
 
 /// One place where the ReScript type says less than the TypeScript type.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Note {
     pub gap: Gap,
     /// The import the type belongs to, as the ReScript file names it.
@@ -135,9 +135,11 @@ enum Structure {
     Decl(DeclKind),
 }
 
-/// What can be rolled back when a generic alias turns out not to be
-/// expressible with its parameters.
-#[derive(Clone)]
+/// The declarations made so far. A conversion that turns out not to be
+/// expressible (a generic alias, a union) is rolled back to a `Mark`: every
+/// change to the maps is journaled, so a mark costs nothing and a rollback
+/// costs what was done since.
+#[derive(Default)]
 struct State {
     by_symbol: HashMap<P<Symbol>, Named>,
     by_type: HashMap<P<Type>, Named>,
@@ -145,6 +147,83 @@ struct State {
     used: HashSet<String>,
     pending: Vec<Decl>,
     notes: Vec<Note>,
+    /// The notes, for telling a repeated one without a scan.
+    noted: HashSet<Note>,
+    journal: Vec<Undo>,
+}
+
+enum Undo {
+    Symbol(P<Symbol>, Option<Named>),
+    Type(P<Type>, Option<Named>),
+    Shape(String, Option<Named>),
+    Used(String),
+}
+
+struct Mark {
+    journal: usize,
+    pending: usize,
+    notes: usize,
+}
+
+impl State {
+    fn mark(&self) -> Mark {
+        Mark { journal: self.journal.len(), pending: self.pending.len(), notes: self.notes.len() }
+    }
+
+    fn rollback(&mut self, mark: Mark) {
+        fn restore<K: std::hash::Hash + Eq>(map: &mut HashMap<K, Named>, key: K, old: Option<Named>) {
+            match old {
+                Some(old) => map.insert(key, old),
+                None => map.remove(&key),
+            };
+        }
+        while self.journal.len() > mark.journal {
+            match self.journal.pop().expect("journal entry") {
+                Undo::Symbol(key, old) => restore(&mut self.by_symbol, key, old),
+                Undo::Type(key, old) => restore(&mut self.by_type, key, old),
+                Undo::Shape(key, old) => restore(&mut self.by_shape, key, old),
+                Undo::Used(name) => {
+                    self.used.remove(&name);
+                }
+            }
+        }
+        self.pending.truncate(mark.pending);
+        for note in self.notes.drain(mark.notes..) {
+            self.noted.remove(&note);
+        }
+    }
+
+    fn add_note(&mut self, note: Note) {
+        if self.noted.insert(note.clone()) {
+            self.notes.push(note);
+        }
+    }
+
+    fn take_notes(&mut self) -> Vec<Note> {
+        self.noted.clear();
+        std::mem::take(&mut self.notes)
+    }
+
+    fn set_symbol(&mut self, symbol: P<Symbol>, named: Named) {
+        let old = self.by_symbol.insert(symbol, named);
+        self.journal.push(Undo::Symbol(symbol, old));
+    }
+
+    fn set_type(&mut self, ty: P<Type>, named: Named) {
+        let old = self.by_type.insert(ty, named);
+        self.journal.push(Undo::Type(ty, old));
+    }
+
+    fn set_shape(&mut self, key: String, named: Named) {
+        let old = self.by_shape.insert(key.clone(), named);
+        self.journal.push(Undo::Shape(key, old));
+    }
+
+    fn use_name(&mut self, name: String) {
+        if self.used.insert(name.clone()) {
+            self.journal.push(Undo::Used(name));
+        }
+    }
 }
 
 pub(crate) struct Converter<'a> {
@@ -193,14 +272,7 @@ impl<'a> Converter<'a> {
         Converter {
             c,
             program,
-            state: State {
-                by_symbol: HashMap::new(),
-                by_type: HashMap::new(),
-                by_shape: HashMap::new(),
-                used: HashSet::new(),
-                pending: Vec::new(),
-                notes: Vec::new(),
-            },
+            state: State::default(),
             opaque_aliases: HashSet::new(),
             scope: Vec::new(),
             subject: String::new(),
@@ -220,7 +292,9 @@ impl<'a> Converter<'a> {
     pub(crate) fn begin_request(&mut self, scope: &[String]) {
         self.scope = scope.to_vec();
         self.state.pending.clear();
-        self.state.notes.clear();
+        self.state.take_notes();
+        // No mark outlives a request.
+        self.state.journal.clear();
     }
 
     /// Records an export of a whole-module import that has no ReScript form.
@@ -230,7 +304,7 @@ impl<'a> Converter<'a> {
     }
 
     pub(crate) fn take_notes(&mut self) -> Vec<Note> {
-        std::mem::take(&mut self.state.notes)
+        self.state.take_notes()
     }
 
     /// The type declarations made since `begin_request`, dependencies first,
@@ -460,7 +534,7 @@ impl<'a> Converter<'a> {
         let params: Vec<String> = (0..existing.params).map(|index| format!("t{index}")).collect();
         let args = params.iter().map(|param| Ty::Var(param.clone())).collect();
         let target = Ty::App(self.reference(&existing), args);
-        self.state.used.insert(local.to_string());
+        self.state.use_name(local.to_string());
         self.state.pending.push(Decl {
             name: local.to_string(),
             params,
@@ -480,7 +554,7 @@ impl<'a> Converter<'a> {
             name = format!("{base}{index}");
             index += 1;
         }
-        self.state.used.insert(name.clone());
+        self.state.use_name(name.clone());
         name
     }
 
@@ -529,9 +603,7 @@ impl<'a> Converter<'a> {
             ts,
             message: message.to_string(),
         };
-        if !self.state.notes.contains(&note) {
-            self.state.notes.push(note);
-        }
+        self.state.add_note(note);
     }
 
     /// Whether the symbol is declared by TypeScript's own `lib.*.d.ts` files.
@@ -577,13 +649,13 @@ impl<'a> Converter<'a> {
         let probe = Decl { name: String::new(), params: Vec::new(), kind, ts: None };
         let key = shape_key(&probe);
         if let Some(named) = self.state.by_shape.get(&key).cloned() {
-            self.state.by_type.insert(ty, named.clone());
+            self.state.set_type(ty, named.clone());
             return Ty::App(self.reference(&named), Vec::new());
         }
         let name = self.fresh_type_name(&self.context_name());
         let named = Named { scope: self.scope.clone(), name: name.clone(), params: 0 };
-        self.state.by_type.insert(ty, named.clone());
-        self.state.by_shape.insert(key, named);
+        self.state.set_type(ty, named.clone());
+        self.state.set_shape(key, named);
         self.state.pending.push(Decl { name: name.clone(), ..probe });
         Ty::App(name, Vec::new())
     }
@@ -629,11 +701,11 @@ impl<'a> Converter<'a> {
         let params = self.c.get_local_type_parameters_of_class_or_interface_or_type_alias_exported(symbol);
         let is_alias = symbol.flags().intersects(SymbolFlags::TypeAlias)
             && !symbol.flags().intersects(SymbolFlags::Class | SymbolFlags::Interface | SymbolFlags::Enum);
-        let snapshot = if is_alias && !params.is_empty() { Some(self.state.clone()) } else { None };
+        let mark = (is_alias && !params.is_empty()).then(|| self.state.mark());
 
         let name = match local {
             Some(local) => {
-                self.state.used.insert(local.to_string());
+                self.state.use_name(local.to_string());
                 local.to_string()
             }
             None => self.fresh_type_name(symbol.name()),
@@ -649,7 +721,7 @@ impl<'a> Converter<'a> {
             }
             param_names.push(param_name);
         }
-        self.state.by_symbol.insert(
+        self.state.set_symbol(
             symbol,
             Named { scope: self.scope.clone(), name: name.clone(), params: params.len() },
         );
@@ -687,10 +759,10 @@ impl<'a> Converter<'a> {
         self.free_vars = saved_free;
         self.deferred_seen = saved_deferred;
 
-        if let Some(snapshot) = snapshot
+        if let Some(mark) = mark
             && deferred
         {
-            self.state = snapshot;
+            self.state.rollback(mark);
             self.opaque_aliases.insert(symbol);
             return false;
         }
@@ -927,7 +999,7 @@ impl<'a> Converter<'a> {
                 }
                 let type_name = self.fresh_type_name(name);
                 let named = Named { scope: self.scope.clone(), name: type_name.clone(), params: 0 };
-                self.state.by_symbol.insert(symbol, named);
+                self.state.set_symbol(symbol, named);
                 self.state.pending.push(Decl {
                     name: type_name.clone(),
                     params: Vec::new(),
@@ -1249,12 +1321,9 @@ impl<'a> Converter<'a> {
                 return Structure::Decl(tagged);
             }
         }
-        let snapshot = self.state.clone();
         match self.untagged_union(&members, whole_boolean) {
             Some(kind) => Structure::Decl(kind),
             None => {
-                // Drop the declarations made for the members tried so far.
-                self.state = snapshot;
                 self.note(
                     Gap::Union,
                     whole,
@@ -1325,29 +1394,21 @@ impl<'a> Converter<'a> {
     /// A union ReScript can discriminate with `typeof`, `Array.isArray` and
     /// `instanceof`: at most one member of each runtime kind.
     fn untagged_union(&mut self, members: &[P<Type>], whole_boolean: bool) -> Option<DeclKind> {
-        let mut ctors: Vec<Ctor> = Vec::new();
+        // First whether the members can be told apart at run time, from the
+        // TypeScript types alone: converting a member declares what it
+        // mentions, which is wasted on a union that is then given up.
         let mut kinds: HashSet<&'static str> = HashSet::new();
         if whole_boolean {
             kinds.insert("boolean");
-            ctors.push(Ctor { name: "Boolean".to_string(), tag: None, payload: Payload::Ty(Ty::name("bool")) });
         }
-        let saved_free = std::mem::replace(&mut self.free_vars, false);
-        let mut ok = true;
+        let mut bases: Vec<Option<&'static str>> = Vec::with_capacity(members.len());
         for &member in members {
-            if let Some(tag) = literal_tag(member) {
-                let base = match &tag {
-                    Tag::Str(text) => upper_ident(text),
-                    Tag::Num(text) => upper_ident(text),
-                    Tag::Bool(value) => upper_ident(&value.to_string()),
-                    Tag::Null => "Null".to_string(),
-                    Tag::Undefined => "Undefined".to_string(),
-                };
-                let name = unique_ctor(&ctors, &base);
-                ctors.push(Ctor { name, tag: Some(tag), payload: Payload::None });
+            if literal_tag(member).is_some() {
+                bases.push(None);
                 continue;
             }
             let flags = member.flags();
-            let (kind, base): (&'static str, &str) = if flags.intersects(TypeFlags::String | TypeFlags::TemplateLiteral | TypeFlags::StringMapping) {
+            let (kind, base): (&'static str, &'static str) = if flags.intersects(TypeFlags::String | TypeFlags::TemplateLiteral | TypeFlags::StringMapping) {
                 ("string", "String")
             } else if flags.intersects(TypeFlags::Number) {
                 ("number", "Number")
@@ -1369,26 +1430,46 @@ impl<'a> Converter<'a> {
                     }
                 }
             } else {
-                ok = false;
-                break;
+                return None;
             };
             if !kinds.insert(kind) {
-                ok = false;
-                break;
+                return None;
             }
+            bases.push(Some(base));
+        }
+
+        let mut ctors: Vec<Ctor> = Vec::new();
+        if whole_boolean {
+            ctors.push(Ctor { name: "Boolean".to_string(), tag: None, payload: Payload::Ty(Ty::name("bool")) });
+        }
+        let saved_free = std::mem::replace(&mut self.free_vars, false);
+        for (&member, base) in members.iter().zip(bases) {
+            let Some(base) = base else {
+                let tag = literal_tag(member).expect("a literal member");
+                let base = match &tag {
+                    Tag::Str(text) => upper_ident(text),
+                    Tag::Num(text) => upper_ident(text),
+                    Tag::Bool(value) => upper_ident(&value.to_string()),
+                    Tag::Null => "Null".to_string(),
+                    Tag::Undefined => "Undefined".to_string(),
+                };
+                let name = unique_ctor(&ctors, &base);
+                ctors.push(Ctor { name, tag: Some(tag), payload: Payload::None });
+                continue;
+            };
             self.path.push(base.to_string());
             let payload = self.convert(member);
             self.path.pop();
             // An object member is named after its type: `User(user)`.
-            let base = match (&payload, kind) {
-                (Ty::App(name, _), "object") if !name.contains('.') && name != "dict" => capitalize(name),
+            let base = match (&payload, base) {
+                (Ty::App(name, _), "Object") if !name.contains('.') && name != "dict" => capitalize(name),
                 _ => base.to_string(),
             };
             let name = unique_ctor(&ctors, &base);
             ctors.push(Ctor { name, tag: None, payload: Payload::Ty(payload) });
         }
         self.free_vars = saved_free;
-        if ok { Some(DeclKind::Variant { tag: None, ctors }) } else { None }
+        Some(DeclKind::Variant { tag: None, ctors })
     }
 
     /// A function type. `top` is the imported function itself, where a rest
