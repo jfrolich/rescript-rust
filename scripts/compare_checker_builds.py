@@ -30,8 +30,11 @@ compared, its signatures are.
 and `--candidate-runtime` when each has its own runtime package; a runtime
 named either way is built by its executable before the project.
 
-An executable that does not know the `sig` dump (one older than this script)
-is built without it, and signatures are then not compared.
+Both builds are full builds (`RESCRIPT_FULL_BUILD`): the state one executable
+leaves in the project does not decide what the other compiles.
+
+When an executable does not know the `sig` dump (one older than this script),
+both are built without it and signatures are not compared.
 """
 
 import argparse
@@ -160,11 +163,14 @@ class Side:
         self.sig_directory = self.directory / "sig"
         self.generated_directory = self.directory / "generated"
         self.build_args = build_args
-        self.env = dict(os.environ)
+        self.env = dict(os.environ, RESCRIPT_FULL_BUILD="1")
         self.runtime = runtime
         if runtime:
             self.env["RESCRIPT_RUNTIME"] = str(Path(runtime).resolve())
-        self.has_signatures = True
+        # Without `--dump-dir` the command line is rejected before anything
+        # is built, for the unknown dump kind or for the missing directory.
+        probe = self.run("build", str(project), "--dump", "sig")
+        self.has_signatures = "unknown dump kind" not in probe.stderr
         self.exit_code = None
         self.signatures = {}
         self.diagnostics = {}
@@ -175,7 +181,7 @@ class Side:
             [self.executable, *args], env=self.env, capture_output=True, text=True, errors="replace"
         )
 
-    def build(self):
+    def build(self, with_signatures):
         if self.runtime:
             result = self.run("build", self.env["RESCRIPT_RUNTIME"])
             if result.returncode != 0:
@@ -188,14 +194,13 @@ class Side:
         before = generated_candidates(self.project)
 
         build = ["build", str(self.project), *self.build_args]
-        result = self.run(*build, "--dump", "sig", "--dump-dir", str(self.sig_directory))
-        if "unknown dump kind" in result.stderr:
-            self.has_signatures = False
-            result = self.run(*build)
+        if with_signatures:
+            build += ["--dump", "sig", "--dump-dir", str(self.sig_directory)]
+        result = self.run(*build)
         self.exit_code = result.returncode
         (self.directory / "build.log").write_text(result.stdout + result.stderr)
 
-        for path in sorted(self.sig_directory.rglob("*.sig")) if self.has_signatures else []:
+        for path in sorted(self.sig_directory.rglob("*.sig")) if with_signatures else []:
             self.signatures[str(path.relative_to(self.sig_directory))[: -len(".sig")]] = path
         for log in compiler_logs(self.project):
             text = log.read_text(errors="replace")
@@ -210,7 +215,7 @@ class Side:
             self.generated[str(relative)] = copy
         print(
             f"{self.name}: exit code {self.exit_code}, "
-            f"{len(self.signatures) if self.has_signatures else 'no'} signatures, "
+            f"{len(self.signatures) if with_signatures else 'no'} signatures, "
             f"{sum(map(len, self.diagnostics.values()))} diagnostics in {len(self.diagnostics)} files, "
             f"{len(self.generated)} generated files",
             file=sys.stderr,
@@ -321,8 +326,9 @@ def main():
     candidate = Side(
         "candidate", args.candidate, args.candidate_runtime, project, work_dir, args.build_arg
     )
-    base.build()
-    candidate.build()
+    with_signatures = base.has_signatures and candidate.has_signatures
+    base.build(with_signatures)
+    candidate.build(with_signatures)
 
     differences = 0
     if base.exit_code != candidate.exit_code:
@@ -330,7 +336,7 @@ def main():
         print(f"outcome: the base exits with {base.exit_code}, the candidate with {candidate.exit_code}")
     else:
         print(f"outcome: both exit with {base.exit_code}")
-    if base.has_signatures and candidate.has_signatures:
+    if with_signatures:
         differences += compare_files(
             "signatures", base.signatures, candidate.signatures, args.max_diffs, args.diff_lines
         )
