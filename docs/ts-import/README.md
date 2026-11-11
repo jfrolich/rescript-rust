@@ -196,7 +196,7 @@ To see which gaps matter, every export of twelve modules was imported: `react`, 
 |---|---|---|---|
 | Union whose members cannot be told apart at run time | 18.1% | `unknown` | Steps 1 to 3 of the [plan](#plan-bridging-the-rest). |
 | `any` | 9.9% | A type variable as an argument, `unknown` as a result | Nothing: `any` is a hole in the TypeScript, not in ReScript. |
-| Overloads | 6.9% | The first signature | Step 5: one external per signature (`parse`, `parse2`). |
+| Overloads | 6.9% | The first signature | Step 5: one external per signature (`parse`, `parseWithRadix`). |
 | Constraint on a type parameter (`T extends U`) | 3.8% | An unconstrained type variable | Step 13: bounded type variables. For object bounds the open object type `{.. "id": string}` already exists, but not for records. |
 | Rest parameter in a callback type | 3.5% | One array argument | Step 11: a wrapper type in the standard library, or `@variadic` on function types. |
 | Constructor types, classes as values | 2.8% | `unknown` | Step 10: a constructor type in the standard library. |
@@ -210,7 +210,7 @@ To see which gaps matter, every export of twelve modules was imported: `react`, 
 | Functions with properties | 1.0% | The function | Step 6: an abstract type that converts to the function and to a record of its properties. |
 | Named properties next to an index signature | 0.7% | The named properties | Step 14. Language: a record with a `dict` remainder. |
 | `never` outside a result | 0.6% | `unknown` | Step 12: a type without values in the standard library. |
-| Branded primitives (`string & {__brand: "Id"}`) | 0.3% | The primitive | Converter: `type id = private string`. |
+| Branded primitives (`string & {__brand: "Id"}`) | 0.3% | The primitive | Change B of the plan: a single-case unboxed variant. |
 
 Two kinds of union that used to be in the first row are imported exactly now: `string | symbol` (124 declarations, all event names and property keys) and unions of classes such as `Readable | Writable` or `Car | Vehicle`. What is left, 522 declarations, is not one problem:
 
@@ -242,12 +242,48 @@ Most of the distance is converter work. Seventeen of the twenty-three points nee
 | 10 | Constructors as values | standard library | 77 | 86.5% |
 | 11 | Callbacks with a rest parameter | standard library | 15 | 87.0% |
 | 12 | A type without values for `never` | standard library | 4 | 87.1% |
-| 13 | Bounded type variables | language | 22 | 87.9% |
+| 13 | Bounded type variables (part of it converter work, see A below) | language | 22 | 87.9% |
 | 14 | `{}` and `object`, index signatures beside named properties, one-element tuples, deeper nesting | language and converter | 46 | 89.5% |
 
 A step's count is the number of declarations whose last note it removes, in this order. That understates steps 8, 9 and 11, which share declarations with each other and with `any`. Counted by notes (the places in a type where something is lost) step 8 removes 3,434 of the 11,014 notes, almost a third: they are the `on`, `once` and `emit` methods of every stream, socket and server of Node.
 
 The counts are estimates. Each note of the survey was assigned to the step that would remove it, by its kind and the TypeScript type it quotes. Step 2 is the least certain, because its causes have not been looked at one by one.
+
+Several ideas below come from [rescript-bindgen](https://github.com/juspay/rescript-bindgen), a generator of ReScript bindings for React component packages that also reads types through the TypeScript checker: the rule for type parameters, the names of overloads, readers on opaque unions, functions with properties as modules, branded types, a table of known React and DOM types, stable names and a corpus of pinned packages in CI.
+
+### Before the steps: what the survey does not count
+
+The survey counts what an import loses. It does not count an import that is wrong without a note, a type that is exact but not the one a ReScript user expects, or a name that changes between two versions of a library. These come first, because they decide whether an import can be trusted, and none of them changes the numbers in the table.
+
+| | Change | Needs |
+|---|---|---|
+| A | A rule for type parameters | converter |
+| B | Branded primitives stay distinct | converter |
+| C | Known React and DOM types map to the standard library | converter |
+| D | Generated names that do not depend on the order of conversion | converter |
+| E | A corpus of pinned packages in CI | tests |
+
+**A. Type parameters.** Today every type parameter becomes a type variable. That is wrong in two places:
+
+- **Only in the result.** `json<T>(): Promise<T>` is imported as `unit => promise<'t>`, and ReScript infers `'t` from the use, so `let user: user = await json()` compiles with no cast in sight. TypeScript lets the caller choose `T` too, but writes it at the call (`json<User>()`). 24 of the 585 imported functions of the survey have a type variable only in their result. Most are constructors and hooks, where choosing is the point (`new EventEmitter<Events>()`, `createRef<T>()`), and there the variable is a type argument of the returned type. The rule: a variable that is a type argument of the returned type stays a variable; one that is the result, or the element of a promise, an array or a tuple in it, is `unknown`, with a note.
+- **With a bound, in one argument.** `greet<T extends string>(name: T): void` is imported as `'t => unit`, which accepts anything. A bounded parameter that occurs in one argument and not in the result is its bound: `string => unit`. Where it also occurs in the result (`pipe<T extends Writable>(destination: T): T`) the variable is kept with a note, until [bounded type variables](#bounded-type-variables) exist. This moves part of step 13 into the converter.
+
+Some result-only variables are a lost link: React's `useState<S>(initialState: S | (() => S))` comes out as `unknown => ('s, ...)` because the argument's union is `unknown` today. Step 3 restores the link.
+
+**B. Branded primitives.** `type UserId = string & {__brand: "user"}` is imported as `string`, so any string is a user id. A single-case unboxed variant keeps it distinct at no cost:
+
+```rescript
+@unboxed type userId = UserId(string)
+
+let UserId(raw) = lookup(UserId("u1")) // lookup("u1")
+```
+
+**C. Known types.** `react` is imported as structure today: `ReactNode` is an opaque union, events are records. A user of `@rescript/react` expects `React.element`, `ReactEvent.Mouse.t`, `React.ref<Nullable.t<Dom.element>>`, `JsxDOM.style` and `Dom.element`. A table maps these TypeScript types to the existing ReScript types before the converter walks them. This matters more to React code than any single row of the survey, and the survey cannot show it.
+
+**D. Stable names.** Names of generated types come from where a type is first met (`parkWhat`, `refAttributesRef`) and get a number on a collision (`dict2`, `ref2`). A new version of a library can change the order of conversion and rename a type that user code refers to. A name should depend on the TypeScript declaration alone: the declaration's own name, else the path from the nearest named declaration (`socket.on.listener`), and on a collision the module it comes from, never a counter. rescript-bindgen keeps a committed file of the names it gave out; an import inside the compiler has no such file, so the scheme itself has to be stable.
+
+**E. A corpus.** The survey runs on whatever is installed, and `installed_packages_compile` skips what is missing. The packages should be pinned, with the output and the notes of each kept as a baseline: a change that stops one compiling, or adds notes, fails; one that removes notes updates the baseline.
+
 
 ### 1. Members that share a tag
 
@@ -305,9 +341,41 @@ let child = Object(element(someElement))
 
 Building a value is exact, and a `switch` tells apart everything JavaScript can. It stops at `Object`, as JavaScript does. A union with a bare type parameter (`T | PromiseLike<T>`) is opaque as a whole: an abstract type with one conversion per member. With this step no union is imported as `unknown` any more.
 
+Conversions go both ways. Where the library hands a value over, a conversion into the opaque type is no use: each member also gets a reader, `asElement: reactNodeObject => reactElement`, which the caller uses after establishing which member it has, as in TypeScript after a type guard. The conversions are grouped in a module per opaque type:
+
+```rescript
+module ReactNodeObject = {
+  @typeOf("object") type t
+  external fromElement: reactElement => t = "%identity"
+  external asElement: t => reactElement = "%identity"
+}
+```
+
 ### 5. Overloads
 
-Each signature becomes an external: `write` and `write2`. For an overloaded method they are `@send` externals next to the record, because a record cannot have two fields with one JavaScript name.
+Each signature becomes an external. The first keeps the name; the others are named after what they add: a parameter (`parseWithRadix`), or for signatures of the same length the first parameter whose type differs (`wrapForCount`). A counter (`parse2`) says nothing about which one to call. For an overloaded method they are `@send` externals next to the record, because a record cannot have two fields with one JavaScript name.
+
+```rescript
+@module("./api.ts") external parse: string => float = "parse"
+@module("./api.ts") external parseWithRadix: (string, float) => float = "parse"
+@send external write: (writable, string) => bool = "write"
+@send external writeWithEncoding: (writable, string, string) => bool = "write"
+```
+
+### 6. Functions with properties
+
+i18next's `t` and an axios instance are functions with properties. Today the properties are dropped. Instead the type is a module with the call as a conversion and one accessor per property:
+
+```rescript
+module Translator = {
+  type t
+  external asFn: t => (string => string) = "%identity"
+  @get external locale: t => string = "locale"
+  @send external setLocale: (t, string) => unit = "setLocale"
+}
+
+let hello = Translator.asFn(t)("hello") // t("hello")
+```
 
 ### 8. Generics over the keys of an object type
 
@@ -367,13 +435,13 @@ The language steps are specified in the next section.
 
 ## Language changes
 
-The plan needs three changes to the language. One is implemented, one is specified here in full and is next, one is a sketch.
+The plan needs three changes to the language. One is implemented, two are specified here.
 
 | Change | Status | What it covers |
 |---|---|---|
 | [Classes on records](#classes-on-records) | implemented | Unions of classes: `Car \| Vehicle \| string`, `Readable \| Writable`, with the fields of the class still readable. |
 | [Object cases told apart by their fields](#object-cases-told-apart-by-their-fields) | specified, not implemented | Unions of plain objects: `{result} \| {error}`, React's `ReactNode`, same-tag members that differ in one field. About 85 declarations become cases a `switch` can open instead of one opaque case (step 3), and step 1 becomes exact for building too. |
-| [Bounded type variables](#bounded-type-variables) | sketch | `T extends Writable`: 86 declarations have a constraint, and for 22 it is the last thing missing (step 13). |
+| [Bounded type variables](#bounded-type-variables) | specified, not implemented | `T extends Writable`: 86 declarations have a constraint, and for 22 it is the last thing missing (step 13). |
 
 The counts for the two that are not implemented are estimates from the survey's notes; they are measured once the import uses the change.
 
@@ -491,7 +559,7 @@ The literals of a type are those of a polymorphic variant without payloads (`[#c
 
 ### Bounded type variables
 
-Status: a sketch. The syntax is open.
+Status: specified, not implemented. The syntax is `@bound(: type as 'variable)` on an external; it may change once it is used.
 
 ```ts
 function pipe<T extends Writable>(source: Readable, destination: T): T
@@ -513,7 +581,7 @@ let wrong = pipe(file, "text")  // error: string is not a writable
 - A variable that nothing else decides is the bound.
 - A bound that is an object type needs none of this: `({.. "id": string} as 'item)` exists.
 
-The converter closes two cases without it: a type parameter that occurs once, as the type of an argument, is imported as its bound; and a bounded method of a record becomes an external, where the bound can be written.
+The converter closes two cases without it: a bounded type parameter that occurs in one argument and not in the result is imported as its bound (rule A of the plan); and a bounded method of a record becomes an external, where the bound can be written.
 
 ## How it works
 
