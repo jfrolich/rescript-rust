@@ -160,6 +160,11 @@ pub struct PortablePersStruct {
     /// logical interface will have the same fingerprint even if internal stamps
     /// differ due to dependency changes.
     pub fingerprint: u64,
+    /// What incremental builds read of the signature. Filled while the
+    /// signature is at hand decoded; one read from storage decodes it for
+    /// this on first use.
+    #[serde(skip)]
+    summary: std::sync::OnceLock<Arc<super::item_deps::SignatureSummary>>,
 }
 
 /// The decoded signature of a [`PortablePersStruct`].
@@ -225,6 +230,7 @@ impl PortablePersStruct {
         raw: Option<&PortableRawSignature>,
         fingerprint: u64,
     ) -> Self {
+        let summary = super::item_deps::SignatureSummary::of(&ps_name, sig);
         PortablePersStruct {
             ps_name,
             ps_filename,
@@ -234,7 +240,18 @@ impl PortablePersStruct {
             sig: crate::binser::Encoded::encode(sig),
             raw: raw.map(crate::binser::Encoded::encode),
             fingerprint,
+            summary: std::sync::OnceLock::from(Arc::new(summary)),
         }
+    }
+
+    /// The item digests and references of the signature.
+    pub fn summary(&self) -> &Arc<super::item_deps::SignatureSummary> {
+        self.summary.get_or_init(|| {
+            Arc::new(super::item_deps::SignatureSummary::of(
+                &self.ps_name,
+                &self.signature(),
+            ))
+        })
     }
 
     /// The signature, decoded.
