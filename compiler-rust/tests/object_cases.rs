@@ -373,3 +373,42 @@ fn a_variant_of_another_module() {
 }
 
 
+
+#[test]
+fn a_field_that_may_be_null_or_missing_has_no_kind() {
+    // `typeof x.v === "string"` fails for `None`, `null` and `undefined`, so
+    // none of these types gives `A` a kind test: `B` is told apart by `w`.
+    for field in ["option<string>", "Null.t<string>", "Nullable.t<string>"] {
+        assert_eq!(
+            tests_of(&format!("A({{v: {field}}}) | B({{v: float, w: int}})"), &["A", "B"]),
+            [r#""w" in x"#],
+            "{field}"
+        );
+    }
+}
+
+#[test]
+fn a_variant_through_a_functor_argument_and_an_include() {
+    let js = js(r#"
+module type S = {
+  @unboxed type t = Ok({result: string}) | Failed({error: string})
+}
+module Make = (M: S) => {
+  let message = (v: M.t) => switch v { | M.Ok({result}) => result | M.Failed({error}) => error }
+}
+module Impl = {
+  @unboxed type t = Ok({result: string}) | Failed({error: string})
+}
+module Applied = Make(Impl)
+module Included = {
+  include Impl
+  let message = v => switch v { | Ok({result}) => result | Failed({error}) => error }
+}
+let viaFunctor = Applied.message
+let viaInclude = Included.message
+"#);
+    assert!(
+        js.matches(r#"if ("result" in v) {"#).count() >= 2,
+        "{js}"
+    );
+}

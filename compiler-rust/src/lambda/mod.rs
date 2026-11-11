@@ -272,6 +272,17 @@ pub(crate) fn untagged_plan_with<'s, A: Clone>(
             | SwitchKey::Int(_) => None,
         })
         .collect::<Option<Vec<_>>>()?;
+    // The declaration stored the order of its object cases; without it the
+    // arms of several object cases would share one `typeof` test.
+    let objects = facts
+        .block_types
+        .iter()
+        .filter(|kind| **kind == crate::types::VariantBlockType::Object)
+        .count();
+    assert!(
+        objects < 2 || facts.object_cases.len() == objects,
+        "untagged variant with {objects} object cases and no stored order"
+    );
     let mut payload_arms = Vec::with_capacity(sw_blocks.len());
     let mut object_arms = Vec::new();
     for (key, action) in sw_blocks {

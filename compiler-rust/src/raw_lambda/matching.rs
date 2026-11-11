@@ -7068,38 +7068,6 @@ fn normalize_module_path_via_ctx(
 
 /// Combine constructor matching results.
 /// Equivalent to OCaml's `combine_constructor`.
-/// The order the object cases of an untagged variant with several are
-/// tested in, derived from the variant's declaration as it was when the
-/// declaration was checked.
-fn object_cases(
-    ctx: &TypeContext,
-    env: &crate::types::env::Env,
-    cstr: &ConstructorDescription,
-    facts: &crate::types::VariantMatchingFacts,
-) -> Vec<crate::types::variant_runtime::ObjectCase> {
-    let objects = facts
-        .block_types
-        .iter()
-        .filter(|kind| **kind == crate::types::VariantBlockType::Object)
-        .count();
-    if objects < 2 {
-        return Vec::new();
-    }
-    let path = match &*ctx.get_desc(ctx.repr(cstr.cstr_res)) {
-        crate::types::TypeDesc::Tconstr { path, .. } => *path,
-        _ => return Vec::new(),
-    };
-    let Some(decl) = crate::types::ctype::lookup_type_decl_for_path(ctx, env, &path) else {
-        return Vec::new();
-    };
-    match &decl.type_kind {
-        crate::types::TypeKind::TypeVariant(cstrs, _) => {
-            crate::types::variant_layout::object_case_order(ctx, env, cstrs).unwrap_or_default()
-        }
-        _ => Vec::new(),
-    }
-}
-
 fn combine_constructor<'p>(
     site: &CombineSite<'p, '_>,
     ex_pat: &'p Pattern,
@@ -7162,7 +7130,7 @@ fn combine_constructor<'p>(
             crate::types::ConstructorKind::Ordinary(reference) => reference,
             crate::types::ConstructorKind::Extension(_) => unreachable!(),
         };
-        let (num_consts, num_nonconsts, sig_complete, mut matching_facts) = ctx_ref
+        let (num_consts, num_nonconsts, sig_complete, matching_facts) = ctx_ref
             .with_variant_layout(reference.variant, |layout| {
                 (
                     layout.num_constants(),
@@ -7171,9 +7139,6 @@ fn combine_constructor<'p>(
                     layout.matching_facts.clone(),
                 )
             });
-        if let Some(env) = ctx_ref.get_typed_env(ex_pat.pat_env) {
-            matching_facts.object_cases = object_cases(ctx_ref, &env, cstr, &matching_facts);
-        }
         let (fail_opt, fails, local_jumps) = if sig_complete {
             (None, Vec::new(), jumps_empty())
         } else {

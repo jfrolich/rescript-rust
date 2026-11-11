@@ -843,7 +843,7 @@ pub(crate) fn layout_from_type_variant(
             located.push((cstr.cd_loc, ConstructorCase::Block(block)));
         }
     }
-    {
+    let object_cases = {
         let consts: Vec<_> = located
             .iter()
             .filter_map(|(loc, case)| match case {
@@ -860,19 +860,29 @@ pub(crate) fn layout_from_type_variant(
             .collect();
         // Several object cases are told apart by their fields, when an order
         // exists. Otherwise the second one is rejected as before.
-        let objects_ordered = configuration.unboxed
+        let object_cases = if configuration.unboxed
             && blocks
                 .iter()
                 .filter(|(_, block)| block.block_type() == Some(&BlockType::Object))
                 .count()
                 > 1
-            && object_case_order(ctx, env, cstrs).is_some();
-        check_invariant(ctx, &consts, &blocks, objects_ordered)?;
-    }
-    Ok(Layout::new(
+        {
+            object_case_order(ctx, env, cstrs)
+        } else {
+            None
+        };
+        check_invariant(ctx, &consts, &blocks, object_cases.is_some())?;
+        object_cases.unwrap_or_default()
+    };
+    // The order is stored with the layout, so that a match in any module,
+    // through an interface, a functor or an `include`, tests what the
+    // declaration was checked with.
+    let mut layout = Layout::new(
         configuration,
         located.into_iter().map(|(_, case)| case).collect(),
-    ))
+    );
+    layout.matching_facts.object_cases = object_cases;
+    Ok(layout)
 }
 
 /// typedecl.ml `check_manifest_annotation`: an annotation on an abbreviation
@@ -1291,9 +1301,13 @@ fn candidate_checks(case: &ObjectShape) -> Vec<FieldCheck> {
             | BlockType::Bigint
             | BlockType::Boolean
             | BlockType::Function
-            | BlockType::Object
-            | BlockType::Instance(Instance::Array(_))),
+            | BlockType::Object),
         ) => Some(FieldCheck::Kind(field.name.clone(), kind.clone())),
+        // Stored in the layout: one allocation for every array check.
+        Some(BlockType::Instance(Instance::Array(_))) => Some(FieldCheck::Kind(
+            field.name.clone(),
+            BlockType::Instance(Instance::Array(ShapeAllocation::TUPLE_ARRAY)),
+        )),
         _ => None,
     });
     literal.chain(presence).chain(kind).collect()
@@ -1362,10 +1376,8 @@ fn order_object_cases(
 }
 
 /// The object cases of an `@unboxed` variant with several, in the order they
-/// are tested, with their tests; `None` when they cannot be told apart. The
-/// tests follow from the declaration alone, so a match in any module derives
-/// the ones the declaration was checked with.
-pub(crate) fn object_case_order(
+/// are tested, with their tests; `None` when they cannot be told apart.
+fn object_case_order(
     ctx: &TypeContext,
     env: &Env,
     cstrs: &[ConstructorDeclaration],
