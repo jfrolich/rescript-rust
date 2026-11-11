@@ -199,9 +199,9 @@ One row per gap, with the solution this document proposes, what it needs, and wh
 | Gap | Declarations | Imported today as | Solution | Needs | Status |
 |---|---|---|---|---|---|
 | **Unions** | **18.1%** | | | | |
-| Members share a tag: vite's syntax tree, where six members say `type: "Literal"` | about 6.7% | `unknown` | [Each member a case](#members-that-share-a-tag); another field tells apart the members that share a tag | language: object cases | being implemented |
+| Members share a tag: vite's syntax tree, where six members say `type: "Literal"` | about 6.7% | `unknown` | [Each member a case](#members-that-share-a-tag); another field tells apart the members that share a tag | language: object cases, then converter | language done; the converter does small unions, not yet vite's tree |
 | Library interfaces: `NodeJS.ReadableStream \| WritableStream`, `boolean \| AddEventListenerOptions`, `EventListener \| EventListenerObject` | about 4.9% | `unknown` | [Import the interfaces as records and function types](#library-interfaces); object cases then tell them apart | converter, then object cases | not started |
-| Plain objects without a tag: `ReactNode`, `{result} \| {error}`, `AddressInfo \| {}` | about 3.0% | `unknown` | Object cases, told apart by a field that is present or by its kind | language: object cases | being implemented |
+| Plain objects without a tag: `ReactNode`, `{result} \| {error}`, `AddressInfo \| {}` | about 3.0% | `unknown` | Object cases, told apart by a field that is present or by its kind | language: object cases | done |
 | Arguments of an event listener: `[] \| [err: Error] \| [chunk: Buffer]` | about 1.5% | `unknown` | [A GADT of the event names](#event-maps): each name fixes the arguments | converter | not started |
 | Nothing tells the members apart: `T \| PromiseLike<T>`, two types with the same fields | about 1.3% | `unknown` | [An opaque type](#nothing-tells-the-members-apart) with a conversion to and from each member | converter | not started |
 | Not yet looked at one by one | about 2.5% | `unknown` | | | |
@@ -235,7 +235,7 @@ Four of the solutions need a change to ReScript. Everything else in the table is
 | Change | Status | What it closes |
 |---|---|---|
 | [Classes on records](#classes-on-records) | implemented, Rust compiler only | Unions of classes, with the fields of the class readable. Together with `symbol` cases, 39 fewer unions with a note in the survey. |
-| [Object cases told apart by their fields](#object-cases-told-apart-by-their-fields) | being implemented, Rust compiler only | The first three union rows: members that share a tag, library interfaces once they are records, plain objects without a tag. About 420 declarations, 14.6%. The largest single gain. |
+| [Object cases told apart by their fields](#object-cases-told-apart-by-their-fields) | implemented, Rust compiler only | The first three union rows: members that share a tag, library interfaces once they are records, plain objects without a tag. Estimated at about 420 declarations, 14.6%, once the converter uses it everywhere. Measured so far: 27 fewer declarations with a union note. |
 | [Bounded type variables](#bounded-type-variables) | specified | Constraints where the parameter also decides the result, such as `pipe<T extends Writable>(destination: T): T`. Part of the 3.8%. |
 | [A record with a `dict` remainder](#a-record-with-a-dict-remainder) | not designed | Named properties next to an index signature, 0.7%. |
 
@@ -286,7 +286,7 @@ This follows the upstream RFC "Class hierarchies in WebAPI" (rescript-lang/rescr
 
 ### Object cases told apart by their fields
 
-Status: being implemented, in the Rust compiler only.
+Status: implemented, in the Rust compiler only. The OCaml compiler rejects a variant with two object cases.
 
 An `@unboxed` variant can have one case whose payload is a plain object, because `typeof` answers `"object"` for all of them. This change allows several, when a field shows which one a value is.
 
@@ -323,9 +323,9 @@ function message(outcome) {
 | literal | `x.f === "circle"` | `f` is required and its type has only that literal | it does not declare `f`, or the type of `f` cannot be that literal |
 | kind | `typeof x.f === "string"`, `Array.isArray(x.f)` | `f` is required and its type has that kind | it does not declare `f`, or the type of `f` has another kind |
 
-The literals of a type are those of a polymorphic variant without payloads (`[#circle | #square]`), of a variant without payloads, and `true` and `false` for `bool`; a check may test several of them. The kinds are the ones an untagged variant already tells apart for a payload: string, number, bigint, boolean, function, array, object. A field whose type is none of these (an option, a type variable, an abstract type) takes no part in literal or kind checks.
+The literals of a type are those of a polymorphic variant without payloads (`[#circle | #square]`), of a variant without payloads, and `true` and `false` for `bool`. A literal check tests every literal of the field's type: `x.kind === "a" || x.kind === "c"` for `kind: [#a | #c]`. The kinds are the ones an untagged variant already tells apart for a payload: string, number, bigint, boolean, function, array, object. A field whose type is none of these (an option, a type variable, an abstract type) takes no part in literal or kind checks. An optional field gives its own case no check, but a case that declares it does not fail a presence check on it.
 
-**Order.** The compiler picks a case that has a test every other remaining case fails, tests it first, and goes on with the rest. A test is one check, or several joined with `&&` when no single one is enough. The last case is not tested. Where there is a choice: the earlier case in the declaration, then a literal check before a kind check before a presence check, then the earlier field. An open case declares no fields, so it fails every presence check and is always last.
+**Order.** The compiler picks a case that has a test every other remaining case fails, tests it first, and goes on with the rest. A test is one check, or several joined with `&&` when no single one is enough. The last case is not tested. Where there is a choice: the earlier case in the declaration, then a literal check before a presence check before a kind check, then the earlier field. An open case declares no fields, so it fails every presence check and is always last.
 
 | Declaration | Tests, in order |
 |---|---|
@@ -335,17 +335,35 @@ The literals of a type are those of a polymorphic variant without payloads (`[#c
 | `Element(element) \| Portal(portal) \| Other(dict<unknown>)` with `portal` = `element` plus `children` | `"children" in x`, then `"props" in x` |
 | `A({kind: [#a], x: int}) \| B({kind: [#b], x: int})` | `x.kind === "a"` |
 
-**No order.** Two cases with the same fields at the same kinds cannot be told apart: `A({x: int}) | B({x: int})`. The declaration is rejected, with the message the compiler has today for two object cases.
+**No order.** Two cases with the same fields at the same kinds cannot be told apart: `A({x: int}) | B({x: int})`. The declaration is rejected with the message both compilers already give for two object cases: "At most one case can be an object type." Two open cases are rejected the same way.
 
 **Where the tests go.** Where the test of the single object case is today: after the literal cases, the primitive kinds and the class instances, and guarded against `null` as it is today. A `switch` that does not name every case tests only the ones it names.
 
-**Many cases.** A union like vite's syntax tree has 168 object cases. When one field's literal tells most of them apart, the tests are a `switch` on that field, and the cases that share a literal are told apart inside its arm: `switch (x.type) { case "Literal": if ("regex" in x) ... }`. A chain of 168 `if`s is correct but slow and unreadable.
+**Many cases.** Not implemented: the tests are a chain of `if`s, one per case. A union like vite's syntax tree has more than 160 object cases, and a chain that long is correct but slow and unreadable. When one field's literal tells most of the cases apart, the tests should be a `switch` on that field, with the cases that share a literal told apart inside its arm: `switch (x.type) { case "Literal": if ("regex" in x) ... }`.
 
 **What is trusted.** A record built in ReScript has its declared fields and no others, so for those values the tests are exact. A value that comes from JavaScript can carry more: an object that TypeScript calls `{error: string}` may also have a `result`. TypeScript's own `in` narrowing makes the same assumption. As everywhere in untagged variants, recognition trusts the type.
 
-**Interfaces.** The tests follow from the declaration alone, so an interface and its implementation agree on them when they agree on the cases, as they must already.
+**Interfaces.** The tests follow from the declaration alone, so an interface and its implementation agree on them when they agree on the cases, as they must already. A `switch` in another module works out the same tests from the declaration.
 
-**In the import.** A union of object types becomes one case per member when an order exists. Members that no check separates are merged into one case when they share a tag (see [members that share a tag](#members-that-share-a-tag)), and otherwise fall back to an [opaque type](#nothing-tells-the-members-apart).
+**In the import.** A union of object types becomes one case per member when an order exists. Members with the same fields are one case. Members that no check separates are merged into one case when they share a tag (see [members that share a tag](#members-that-share-a-tag)). A union with no order is still `unknown`; the [opaque type](#nothing-tells-the-members-apart) for it is not built.
+
+<!-- example: shapes -->
+```rescript
+module Jobs = %ts("./jobs.ts")
+
+let message = job =>
+  switch Jobs.run(job) {
+  | Done({result}) => result
+  | Failed({error, ?code}) =>
+    switch code {
+    | Some(code) => `${error} (${Float.toString(code)})`
+    | None => error
+    }
+  }
+```
+<!-- /example -->
+
+**Measured.** On a newer install of the twelve surveyed modules (react 19.3, vite 8.3), the declarations with a union note went from 535 to 508. The gain is small for two reasons. vite's syntax tree, the largest union, is still `unknown`: some of its merged cases mention type variables, and the converter gives those up. Library interfaces are not records yet. Converting vite also takes 3.1 s where it took 0.17 s; the cause is not found yet. The survey numbers elsewhere in this document are from before this change.
 
 ### Bounded type variables
 
@@ -383,7 +401,7 @@ Status: not designed.
 
 ## Converter and standard-library work
 
-Every encoding in this section was compiled with the current compiler. None of it is implemented in the import yet. Several of the ideas come from [rescript-bindgen](https://github.com/juspay/rescript-bindgen), a generator of ReScript bindings for React component packages that also reads types through the TypeScript checker: the rule for type parameters, names of overloads, conversions in both directions on opaque types, functions with properties as modules, branded types, a table of known React types, stable names and a corpus of pinned packages.
+Every encoding in this section was compiled with the current compiler. Apart from [members that share a tag](#members-that-share-a-tag), which works for small unions, none of it is implemented in the import yet. Several of the ideas come from [rescript-bindgen](https://github.com/juspay/rescript-bindgen), a generator of ReScript bindings for React component packages that also reads types through the TypeScript checker: the rule for type parameters, names of overloads, conversions in both directions on opaque types, functions with properties as modules, branded types, a table of known React types, stable names and a corpus of pinned packages.
 
 ### Type parameters
 
@@ -421,15 +439,17 @@ type node =
 ```
 
 ```js
-if (x.type === "Literal" && "regex" in x) { /* RegExpLiteral */ }
-else if (x.type === "Literal" && typeof x.value === "string") { /* StringLiteral */ }
-else if (x.type === "Literal") { /* NumericLiteral */ }
+if (x.type === "Literal" && "raw" in x && typeof x.value === "string") { /* StringLiteral */ }
+else if ("raw" in x) { /* NumericLiteral */ }
+else if (x.type === "Literal") { /* RegExpLiteral */ }
 else { /* IdentifierName */ }
 ```
 
-Building and reading are both exact, and the cases keep their TypeScript names.
+That is what the compiler generates today. The first test has a check it does not need (`x.type === "Literal"`): checks are added until every other case fails, and none is taken away afterwards. Building and reading are both exact, and the cases keep their TypeScript names.
 
-Some members that share a tag differ in no field a check can see. `ArrayPattern` and `ArrayAssignmentTarget` are both `{type: "ArrayPattern", elements: [...]}`; only the types of the elements differ. They become one case whose fields have the union of the members' types: exact for reading, and accepting more than TypeScript when building. On the oxc types vite uses, the 37 members that share a tag become 22 cases, 8 of them merged from 15 members.
+Some members that share a tag differ in no field a check can see. `ArrayPattern` and `ArrayAssignmentTarget` are both `{type: "ArrayPattern", elements: [...]}`; only the types of the elements differ. They become one case. A field every member has is required, and a field only some have is optional. A field whose types differ should be the union of the members' types; today it is `unknown`, with a note, unless all the types are literals.
+
+The import does this for unions it can finish. vite's tree is not one of them yet. On vite 8.3 a trial build made 162 cases from the 188 members the checker reports, 12 of them merged, but the result did not compile: a merged case that mentions a type variable was declared without it. The converter now gives such a union up, so the tree is still `unknown`.
 
 ### Library interfaces
 

@@ -16,9 +16,9 @@ let message = job =>
 // `typeof cell.value === "number"`.
 let text = (cell: Jobs.showCell) =>
   switch cell {
-  | Amount({value, unit}) => `${Float.toString(value)} ${unit}`
+  | Amount({value}) => Float.toFixed(value, ~digits=2)
   | Label({value}) => value
   }
 
 // A case is the plain object itself.
-let shown = Jobs.show(Amount({value: 3., unit: "kg"}))
+let shown = Jobs.show(Amount({value: 3.}))

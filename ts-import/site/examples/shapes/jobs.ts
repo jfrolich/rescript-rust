@@ -18,10 +18,9 @@ export interface Label {
 
 export interface Amount {
   value: number;
-  unit: string;
 }
 
 // A field both have, of a different kind in each.
 export function show(cell: Label | Amount): string {
-  return typeof cell.value === "string" ? cell.value : `${cell.value} ${cell.unit}`;
+  return typeof cell.value === "string" ? cell.value : cell.value.toFixed(2);
 }

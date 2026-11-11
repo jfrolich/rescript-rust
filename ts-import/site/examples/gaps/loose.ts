@@ -7,9 +7,9 @@ export function parse(input: unknown): unknown {
   return input;
 }
 
-// A union with nothing to tell its members apart at run time: both have
-// `id`, and `label` may be missing from either.
-export type Target = { id: string; label?: string } | { id: string };
+// A union with nothing to tell its members apart at run time: both are
+// functions, and JavaScript cannot ask a function what it takes.
+export type Target = ((id: string) => boolean) | ((id: string, index: number) => boolean);
 export function resolve(target: Target): string {
   return "";
 }
