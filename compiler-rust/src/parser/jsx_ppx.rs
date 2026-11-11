@@ -538,7 +538,7 @@ fn transform_react_component_binding(
 
     // Get function name and location from pattern
     let binding_pat = arena.get_pat(binding.pvb_pat).clone();
-    let fn_name = get_fn_name(arena, config, &binding_pat, config.empty_loc)?;
+    let fn_name = get_fn_name(arena, &binding_pat, config.empty_loc)?;
     let fn_name_loc = get_fn_name_loc(&binding_pat);
     let original_binding_loc = binding.pvb_loc;
 
@@ -933,7 +933,7 @@ fn transform_react_component_with_props_binding(
 ) -> JsxPreprocessorResult<(ValueBinding, Option<ValueBinding>)> {
     // Get function name and location from pattern
     let binding_pat = arena.get_pat(binding.pvb_pat);
-    let fn_name = get_fn_name(arena, config, binding_pat, binding_pat.ppat_loc)?;
+    let fn_name = get_fn_name(arena, binding_pat, binding_pat.ppat_loc)?;
     let _fn_name_loc = get_fn_name_loc(arena.get_pat(binding.pvb_pat));
     let internal_fn_name = format!("{}$Internal", fn_name);
     let full_module_name = make_module_name(config, &fn_name);
@@ -2643,7 +2643,6 @@ fn string_int_attribute_loc_in_core_type(
 /// `@react.component` (jsx_v4.ml:582-590), not for `componentWithProps`.
 fn get_fn_name(
     arena: &ParseArena,
-    config: &mut JsxConfig,
     pat: &Pattern,
     pat_loc: Location,
 ) -> JsxPreprocessorResult<String> {
@@ -2653,7 +2652,7 @@ fn get_fn_name(
             let (ref inner_idx, _) = **inner;
             let inner_pat = arena.get_pat(*inner_idx);
             let inner_loc = inner_pat.ppat_loc;
-            get_fn_name(arena, config, inner_pat, inner_loc)
+            get_fn_name(arena, inner_pat, inner_loc)
         }
         _ => Err(jsx_error(pat_loc, REACT_COMPONENT_DESTRUCTURE_MSG)),
     }
@@ -3615,10 +3614,9 @@ fn update_config_from_attribute(
     if let Some(version_field) = fields_named("version").next() {
         let version = fields_named("version").find_map(|field| {
             match &crate::ast_payload::unwrap_braces(arena, arena.get_expr(field.expr)).pexp_desc {
-                ExpressionDesc::Pexp_constant(c) => match c {
-                    Constant::Integer(value, None) => Some(arena.get_string(*value)),
-                    _ => None,
-                },
+                ExpressionDesc::Pexp_constant(Constant::Integer(value, None)) => {
+                    Some(arena.get_string(*value))
+                }
                 _ => None,
             }
         });

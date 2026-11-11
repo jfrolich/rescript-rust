@@ -553,7 +553,9 @@ impl<'a> Mapper<'a> {
             else {
                 return None;
             };
-            let key_txt = self.arena.intern(&payload.semantic(self.arena).to_string());
+            // `intern` needs the arena mutably, so the key cannot borrow it.
+            let key = payload.semantic(self.arena).to_owned();
+            let key_txt = self.arena.intern(&key);
             rows.push((Located::new(key_txt, key_loc), value));
         }
         Some(rows)

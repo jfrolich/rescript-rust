@@ -1921,10 +1921,10 @@ fn validate_external_attribute_payload_errors(
             "val" | "send" | "set" | "get" | "new" => {
                 // ast_external_process.ml: an empty payload is fine; otherwise
                 // reject a `json` literal, then require a semantic string.
-                if !payload_is_empty_str(payload) {
-                    if payload_semantic_string(payload, arena)?.is_none() {
-                        return Err(PpxError::at_loc(attr_name.loc, "Invalid payload"));
-                    }
+                if !payload_is_empty_str(payload)
+                    && payload_semantic_string(payload, arena)?.is_none()
+                {
+                    return Err(PpxError::at_loc(attr_name.loc, "Invalid payload"));
                 }
             }
             "module" => {
@@ -8574,9 +8574,8 @@ fn parse_deriving_actions(
 
         if name == "deriving" {
             for config in deriving_config_actions(payload, arena).unwrap_or_default() {
-                match config.name.as_str() {
-                    "accessors" => actions.push(DeriveAction::Accessors),
-                    _ => {}
+                if config.name == "accessors" {
+                    actions.push(DeriveAction::Accessors);
                 }
             }
         } else {

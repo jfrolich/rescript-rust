@@ -609,7 +609,7 @@ pub struct ParseArena {
     /// Strings built through a shared arena, addressed from
     /// `SHARED_STRING_BASE`: the payloads printers rebuild for `%raw`
     /// (`Ast_raw.to_extension`).
-    shared_strings: elsa::sync::FrozenVec<Box<String>>,
+    shared_strings: elsa::sync::FrozenVec<Box<str>>,
     /// `Lident` of `true`, `false`, `null` and `undefined`, for those payloads.
     runtime_tag_lidents: [LidentIdx; 4],
     /// The attribute name `as`.
@@ -2367,7 +2367,7 @@ impl ParseArena {
     /// not interned and are never marshalled.
     pub fn push_shared_string(&self, string: String) -> StrIdx {
         let slot = self.shared_strings.len();
-        self.shared_strings.push(Box::new(string));
+        self.shared_strings.push(string.into_boxed_str());
         StrIdx::from_raw(SHARED_STRING_BASE + slot as u32)
     }
 

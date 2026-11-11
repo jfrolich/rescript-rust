@@ -77,11 +77,20 @@ pub enum Doc {
     /// line, and a blank line when `prev` or `next`, the list's children at
     /// those positions printed on each side of it, span several lines. It
     /// measures them but does not print them.
-    ItemSeparator { prev: u32, next: u32 },
+    ItemSeparator {
+        /// Position of the item before the separator.
+        prev: u32,
+        /// Position of the item after the separator.
+        next: u32,
+    },
     /// `Res_doc.Comment`, over the documents of a concatenation: prints like
     /// them, and an item separator does not measure them.
     Comment(Vec<Doc>),
 }
+
+/// A deferred line suffix: the indentation and mode it was met in, and the
+/// document to print at the end of the line.
+type LineSuffix<'a> = (i32, Mode, &'a Doc);
 
 /// A command of the `to_string` stack: a document, or an `ItemSeparator`
 /// resolved against the `ItemList` that holds it.
@@ -625,7 +634,7 @@ impl Doc {
         let mut pos = 0i32;
         // `line_suffices`, oldest first: OCaml conses each new suffix and
         // reverses the list when it flushes them.
-        let mut line_suffices: Vec<(i32, Mode, &Doc)> = Vec::new();
+        let mut line_suffices: Vec<LineSuffix<'_>> = Vec::new();
         let mut stack: Vec<(i32, Mode, Cmd<'_>)> = vec![(0, Mode::Flat, Cmd::Doc(self))];
 
         // `Mini_buffer.flush_newline`: trim the spaces before the line break.
@@ -662,7 +671,7 @@ impl Doc {
                         // lines, the other comments as they are, a
                         // separator, then what follows.
                         let mut same_line = Vec::with_capacity(line_suffices.len());
-                        let mut below: Vec<(&[Doc], (i32, Mode, &Doc))> = Vec::new();
+                        let mut below: Vec<(&[Doc], LineSuffix<'_>)> = Vec::new();
                         for suffix in line_suffices.drain(..) {
                             match suffix.2.own_line_suffix() {
                                 None => same_line.push(suffix),

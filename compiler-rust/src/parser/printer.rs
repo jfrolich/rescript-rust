@@ -4029,10 +4029,7 @@ fn print_object_set_expr(
 fn print_assignment_rhs(arena: &ParseArena, operator: &str, rhs: &Expression, rhs_doc: Doc) -> Doc {
     let should_indent = !parsetree_viewer::is_braced_expr(rhs)
         && (parsetree_viewer::is_binary_expression(arena, rhs)
-            || match &rhs.pexp_desc {
-                ExpressionDesc::Pexp_match(_) => true,
-                _ => false,
-            });
+            || matches!(&rhs.pexp_desc, ExpressionDesc::Pexp_match(_)));
     Doc::concat(vec![
         Doc::text(operator),
         if should_indent {

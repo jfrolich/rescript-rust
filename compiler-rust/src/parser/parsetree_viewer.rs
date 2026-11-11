@@ -321,10 +321,9 @@ pub fn is_huggable_expression(arena: &crate::parse_arena::ParseArena, expr: &Exp
         }
         ExpressionDesc::Pexp_object_literal(_) | ExpressionDesc::Pexp_braces(_) => true,
         _ if is_block_expr(arena, expr) => true,
-        ExpressionDesc::Pexp_constant(c) => match c {
-            Constant::String(payload) => is_multiline_text(payload.source(arena)),
-            _ => false,
-        },
+        ExpressionDesc::Pexp_constant(Constant::String(payload)) => {
+            is_multiline_text(payload.source(arena))
+        }
         _ => false,
     }
 }

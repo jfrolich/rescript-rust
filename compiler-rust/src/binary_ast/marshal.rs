@@ -1355,13 +1355,10 @@ impl<'a> MarshalWriter<'a> {
     /// on little-endian systems. Most modern systems are little-endian.
     pub fn write_double(&mut self, f: f64) {
         // Detect endianness at compile time
-        #[cfg(target_endian = "little")]
-        {
+        if cfg!(target_endian = "little") {
             self.write_u8(CODE_DOUBLE_LITTLE);
             self.write_bytes(&f.to_le_bytes());
-        }
-        #[cfg(target_endian = "big")]
-        {
+        } else {
             self.write_u8(CODE_DOUBLE_BIG);
             self.write_bytes(&f.to_be_bytes());
         }

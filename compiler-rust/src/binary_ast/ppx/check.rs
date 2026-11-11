@@ -683,11 +683,8 @@ impl<'a> Checker<'a> {
     /// `Bs_builtin_ppx.pat_mapper` (bs_builtin_ppx.ml:93-100).
     fn pat(&mut self, idx: PatIdx) -> PpxResult<()> {
         let pat = self.arena.get_pat(idx).clone();
-        if let PatternDesc::Ppat_constant(constant) = &pat.ppat_desc {
-            match constant {
-                Constant::Integer(_, Some('l')) => return Ok(()),
-                _ => {}
-            }
+        if let PatternDesc::Ppat_constant(Constant::Integer(_, Some('l'))) = &pat.ppat_desc {
+            return Ok(());
         }
         self.default_pat(&pat)
     }
