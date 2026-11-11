@@ -4434,6 +4434,7 @@ fn type_pattern_inner(
     } else {
         mode
     };
+    let options = PatternOptions { mode, ..options };
 
     let expanded_pat = maybe_expand_variant_spread_in_pattern(tctx, env, pat, expected_ty)?;
     let pat = expanded_pat.as_ref().unwrap_or(pat);
