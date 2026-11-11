@@ -951,6 +951,17 @@ const _: () = assert!(std::mem::size_of::<TypeCoreError>() <= 112);
 // Pattern Mode
 // ============================================================================
 
+/// How `type_pattern_inner` types a pattern; fixed for a whole pattern
+/// except where an or-pattern changes the mode of its branches.
+#[derive(Debug, Clone, Copy)]
+struct PatternOptions {
+    mode: PatternMode,
+    /// Whether GADT constructors may bind existential types here.
+    allow_existentials: bool,
+    /// The level delayed pattern checks run at (`type_pat ~lev`).
+    level: i32,
+}
+
 /// Mode for pattern type checking.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PatternMode {
@@ -4291,10 +4302,12 @@ pub fn type_pattern(
         env,
         pat,
         expected_ty,
-        mode,
-        true,
+        PatternOptions {
+            mode,
+            allow_existentials: true,
+            level: tctx.type_ctx.current_level(),
+        },
         state,
-        tctx.type_ctx.current_level(),
         0,
     )
 }
@@ -4312,10 +4325,12 @@ fn type_pattern_without_existentials(
         env,
         pat,
         expected_ty,
-        mode,
-        false,
+        PatternOptions {
+            mode,
+            allow_existentials: false,
+            level: tctx.type_ctx.current_level(),
+        },
         state,
-        tctx.type_ctx.current_level(),
         0,
     )
 }
@@ -4360,12 +4375,11 @@ fn type_pattern_with_existentials_at_level(
     env: &Env,
     pat: &ParsedPattern,
     expected_ty: TypeExprRef,
-    mode: PatternMode,
-    allow_existentials: bool,
+    options: PatternOptions,
     state: &mut PatternState,
-    level: i32,
     explode: i32,
 ) -> TypeCoreResult<Pattern> {
+    let level = options.level;
     // Match OCaml's type_pat: delayed checks reuse the level captured by
     // type_cases rather than the level current when the queue is flushed.
     let old_newtype_level = tctx.newtype_level;
@@ -4375,8 +4389,7 @@ fn type_pattern_with_existentials_at_level(
         env,
         pat,
         expected_ty,
-        mode,
-        allow_existentials,
+        options,
         state,
         explode,
     );
@@ -4414,11 +4427,11 @@ fn type_pattern_inner(
     env: &Env,
     pat: &ParsedPattern,
     expected_ty: TypeExprRef,
-    mode: PatternMode,
-    allow_existentials: bool,
+    options: PatternOptions,
     state: &mut PatternState,
     explode: i32,
 ) -> TypeCoreResult<Pattern> {
+    let mode = options.mode;
     use crate::parser::ast::PatternDesc as PD;
     let pat_env_ref = tctx.type_ctx.store_typed_env(env);
     // OCaml's `mode'` (typecore.ml:1257): `Splitting_or` makes an or-pattern
@@ -4461,8 +4474,7 @@ fn type_pattern_inner(
                         env,
                         tctx.arena.get_pat(generated),
                         expected_ty,
-                        mode,
-                        allow_existentials,
+                        options,
                         state,
                         next_explode,
                     );
@@ -4552,8 +4564,7 @@ fn type_pattern_inner(
                     env,
                     tctx.arena.get_pat(*p),
                     *ty,
-                    mode,
-                    allow_existentials,
+                    options,
                     state,
                     explode,
                 )?;
@@ -4593,8 +4604,7 @@ fn type_pattern_inner(
                 env,
                 inner_pat,
                 expected_ty,
-                mode,
-                allow_existentials,
+                options,
                 state,
                 explode,
             )?;
@@ -4663,8 +4673,10 @@ fn type_pattern_inner(
                     env,
                     p1,
                     expected_ty,
-                    PatternMode::InsideOr,
-                    allow_existentials,
+                    PatternOptions {
+                        mode: PatternMode::InsideOr,
+                        ..options
+                    },
                     state,
                     explode,
                 ) {
@@ -4691,8 +4703,10 @@ fn type_pattern_inner(
                     env,
                     p2,
                     expected_ty,
-                    PatternMode::InsideOr,
-                    allow_existentials,
+                    PatternOptions {
+                        mode: PatternMode::InsideOr,
+                        ..options
+                    },
                     state,
                     explode,
                 ) {
@@ -4768,8 +4782,10 @@ fn type_pattern_inner(
                         env,
                         tctx.arena.get_pat(alternative),
                         expected_ty,
-                        split_mode,
-                        allow_existentials,
+                        PatternOptions {
+                            mode: split_mode,
+                            ..options
+                        },
                         state,
                         explode,
                     )
@@ -4791,8 +4807,7 @@ fn type_pattern_inner(
                     env,
                     tctx.arena.get_pat(*p),
                     elem_ty,
-                    mode,
-                    allow_existentials,
+                    options,
                     state,
                     explode,
                 )?;
@@ -4820,8 +4835,7 @@ fn type_pattern_inner(
                 lid,
                 sargs,
                 expected_ty,
-                mode,
-                allow_existentials,
+                options,
                 state,
                 explode,
                 pat,
@@ -4853,8 +4867,7 @@ fn type_pattern_inner(
                 label,
                 sarg.map(|idx| tctx.arena.get_pat(idx)),
                 expected_ty,
-                mode,
-                allow_existentials,
+                options,
                 state,
                 explode,
                 pat,
@@ -4872,8 +4885,7 @@ fn type_pattern_inner(
                 *closed_flag,
                 record_rest.as_ref(),
                 expected_ty,
-                mode,
-                allow_existentials,
+                options,
                 state,
                 explode,
                 pat,
@@ -4898,8 +4910,7 @@ fn type_pattern_inner(
                     *name,
                     core_ty,
                     expected_ty,
-                    mode,
-                    allow_existentials,
+                    options,
                     state,
                     explode,
                     pat,
@@ -4912,8 +4923,7 @@ fn type_pattern_inner(
                     inner_pat,
                     core_ty,
                     expected_ty,
-                    mode,
-                    allow_existentials,
+                    options,
                     state,
                     explode,
                     pat,
@@ -5550,12 +5560,16 @@ fn type_pattern_construct(
     lid: &Located<crate::parse_arena::LidentIdx>,
     sargs: &Located<crate::parse_arena::PatList>,
     expected_ty: TypeExprRef,
-    mode: PatternMode,
-    allow_existentials: bool,
+    options: PatternOptions,
     state: &mut PatternState,
     explode: i32,
     pat: &ParsedPattern,
 ) -> TypeCoreResult<Pattern> {
+    let PatternOptions {
+        mode,
+        allow_existentials,
+        ..
+    } = options;
     let ctx = tctx.type_ctx;
 
     // Look up constructor with disambiguation following OCaml's approach:
@@ -5874,8 +5888,7 @@ fn type_pattern_construct(
             env,
             arg_pat,
             *arg_ty,
-            mode,
-            allow_existentials,
+            options,
             state,
             explode,
         )?);
@@ -5934,8 +5947,7 @@ fn type_pattern_variant(
     label: &str,
     arg: Option<&ParsedPattern>,
     expected_ty: TypeExprRef,
-    mode: PatternMode,
-    allow_existentials: bool,
+    options: PatternOptions,
     state: &mut PatternState,
     explode: i32,
     pat: &ParsedPattern,
@@ -5978,8 +5990,7 @@ fn type_pattern_variant(
             env,
             arg_pat,
             arg_ty,
-            mode,
-            allow_existentials,
+            options,
             state,
             explode,
         )?)),
@@ -6123,8 +6134,7 @@ fn type_pattern_record(
     closed_flag: crate::parser::ast::ClosedFlag,
     record_rest: Option<&crate::parser::ast::RecordPatRest>,
     expected_ty: TypeExprRef,
-    mode: PatternMode,
-    allow_existentials: bool,
+    options: PatternOptions,
     state: &mut PatternState,
     explode: i32,
     pat: &ParsedPattern,
@@ -6257,12 +6267,10 @@ fn type_pattern_record(
             .or(by_ids_label)
             .or_else(|| {
                 lookup_label_by_lid(
+                    tctx,
                     &resolved_lid,
                     Some(field.lid.loc),
-                    tctx.arena,
                     env,
-                    &mut tctx.persistent_env,
-                    ctx,
                     Some(record_ty),
                     None,
                 )
@@ -6483,8 +6491,7 @@ fn type_pattern_record(
                 env,
                 parsed_pat,
                 inner_ty,
-                mode,
-                allow_existentials,
+                options,
                 state,
                 explode,
             )?;
@@ -6512,8 +6519,7 @@ fn type_pattern_record(
                 env,
                 parsed_pat,
                 field_ty,
-                mode,
-                allow_existentials,
+                options,
                 state,
                 explode,
             )?
@@ -7201,8 +7207,7 @@ fn type_pattern_constraint(
     inner_pat: &ParsedPattern,
     core_type: &crate::parser::ast::CoreType,
     expected_ty: TypeExprRef,
-    mode: PatternMode,
-    allow_existentials: bool,
+    options: PatternOptions,
     state: &mut PatternState,
     explode: i32,
     _pat: &ParsedPattern,
@@ -7228,8 +7233,7 @@ fn type_pattern_constraint(
         env,
         inner_pat,
         inner_expected_ty,
-        mode,
-        allow_existentials,
+        options,
         state,
         explode,
     )?;
@@ -7297,8 +7301,7 @@ fn type_pattern_constraint_poly_var(
     name: crate::parser::ast::StringLoc,
     core_type: &crate::parser::ast::CoreType,
     expected_ty: TypeExprRef,
-    _mode: PatternMode,
-    _allow_existentials: bool,
+    options: PatternOptions,
     state: &mut PatternState,
     _explode: i32,
     pat: &ParsedPattern,
@@ -7373,8 +7376,7 @@ fn type_pattern_constraint_poly_var(
                 inner_pat,
                 core_type,
                 expected_ty,
-                _mode,
-                _allow_existentials,
+                options,
                 state,
                 _explode,
                 pat,
@@ -10072,6 +10074,10 @@ fn extendable_fragile_match_path(path: &Path) -> bool {
         || path.same(&crate::types::predef::path_option()))
 }
 
+/// The end of `type_cases` for exception cases and `try` handlers, which
+/// OCaml types with `partial_flag = false` (typecore.ml:2681-2685): no
+/// exhaustiveness check, but the `init_env` stamps, the result unification
+/// and the unused-case check still run.
 fn finish_non_gadt_type_cases(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
@@ -10080,8 +10086,7 @@ fn finish_non_gadt_type_cases(
     ty_arg: TypeExprRef,
     parsed_cases: &[&crate::parser::ast::Case],
     typed_cases: &[crate::types::typedtree::Case],
-    partial_flag: bool,
-) -> TypeCoreResult<crate::types::typedtree::Partial> {
+) -> TypeCoreResult<()> {
     let ctx = tctx.type_ctx;
     let needs_exhaust_check = !matches!(
         parsed_cases,
@@ -10089,7 +10094,7 @@ fn finish_non_gadt_type_cases(
     );
     let mut unused_check_level = ctx.current_level();
     let mut unused_expected_ty = ty_arg;
-    let partial = if needs_exhaust_check {
+    if needs_exhaust_check {
         // OCaml compiler/ml/typecore.ml:4511-4535 runs init_env after
         // type_cases body typing, even when partial_flag is false (for try
         // handlers from typecore.ml:2681-2685). Ident.set_current_time reserves
@@ -10100,19 +10105,6 @@ fn finish_non_gadt_type_cases(
         ctx.init_def(lev + 1000);
         unused_check_level = lev;
         unused_expected_ty = crate::types::ctype::subst_identity_copy(ctx, ty_arg);
-        let partial = if partial_flag {
-            parmatch_check_partial(
-                tctx,
-                env,
-                lev,
-                None,
-                unused_expected_ty,
-                loc,
-                &case_refs(typed_cases),
-            )
-        } else {
-            crate::types::typedtree::Partial::Partial
-        };
         ctx.end_def();
         unify_expression_types(
             tctx,
@@ -10121,20 +10113,7 @@ fn finish_non_gadt_type_cases(
             ctx.new_var(None),
             None,
         )?;
-        partial
-    } else if partial_flag {
-        parmatch_check_partial(
-            tctx,
-            env,
-            unused_check_level,
-            None,
-            ty_arg,
-            loc,
-            &case_refs(typed_cases),
-        )
-    } else {
-        crate::types::typedtree::Partial::Partial
-    };
+    }
 
     // type_cases always schedules check_unused, including try handlers where
     // partial_flag is false (typecore.ml:4483-4496).
@@ -10150,7 +10129,7 @@ fn finish_non_gadt_type_cases(
         unused_expected_ty,
         true,
     );
-    Ok(partial)
+    Ok(())
 }
 
 fn pattern_from_variant_spread_attr(arena: &ParseArena, attrs: &Attributes) -> bool {
@@ -10634,10 +10613,8 @@ fn type_match_cases_sequential(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
     cases: &[&crate::parser::ast::Case],
-    scrutinee_ty: TypeExprRef,
-    generic_scrutinee_ty: TypeExprRef,
+    scrutinee: CaseScrutinee,
     body_ty: TypeExprRef,
-    erase_either: bool,
     body_context: Option<TypeClashContext>,
     lev: i32,
 ) -> TypeCoreResult<Vec<crate::types::typedtree::Case>> {
@@ -10648,15 +10625,7 @@ fn type_match_cases_sequential(
     // strict typedtree stamps.
     let mut pending_cases = Vec::with_capacity(cases.len());
     for case in cases {
-        pending_cases.push(type_case_pattern(
-            tctx,
-            env,
-            case,
-            scrutinee_ty,
-            generic_scrutinee_ty,
-            erase_either,
-            lev,
-        )?);
+        pending_cases.push(type_case_pattern(tctx, env, case, scrutinee, lev)?);
     }
 
     // OCaml typecore.ml:4441-4444: `unify_pats ty_arg'` once every pattern is
@@ -10837,12 +10806,15 @@ fn type_match_cases_batch_non_gadt<'a>(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
     cases: &[&'a crate::parser::ast::Case],
-    ty_arg: TypeExprRef,
-    generic_scrutinee_ty: TypeExprRef,
+    scrutinee: CaseScrutinee,
     body_ty: TypeExprRef,
-    erase_either: bool,
     body_context: Option<TypeClashContext>,
 ) -> TypeCoreResult<Vec<crate::types::typedtree::Case>> {
+    let CaseScrutinee {
+        ty: ty_arg,
+        generic_ty: generic_scrutinee_ty,
+        erase_either,
+    } = scrutinee;
     if cases.is_empty() {
         return Ok(Vec::new());
     }
@@ -10889,10 +10861,12 @@ fn type_match_cases_batch_non_gadt<'a>(
                 env,
                 tctx.arena.get_pat(case.pc_lhs),
                 case_scrutinee_ty,
-                PatternMode::Normal,
-                true,
+                PatternOptions {
+                    mode: PatternMode::Normal,
+                    allow_existentials: true,
+                    level: lev,
+                },
                 &mut state,
-                lev,
                 0,
             )?;
             let mut case_env = if state.pattern_variables.is_empty() {
@@ -11201,10 +11175,12 @@ fn type_match(
             tctx,
             val_case_env,
             &val_caselist,
-            ty_arg,
-            ty_arg,
+            CaseScrutinee {
+                ty: ty_arg,
+                generic_ty: ty_arg,
+                erase_either,
+            },
             ty_res,
-            erase_either,
             body_context.clone(),
             gadt_lev,
         )
@@ -11213,10 +11189,12 @@ fn type_match(
             tctx,
             env,
             &val_caselist,
-            ty_arg,
-            generic_scrutinee_ty,
+            CaseScrutinee {
+                ty: ty_arg,
+                generic_ty: generic_scrutinee_ty,
+                erase_either,
+            },
             ty_res,
-            erase_either,
             body_context.clone(),
         ) {
             Ok(cases) => Ok(cases),
@@ -11350,10 +11328,12 @@ fn type_match(
             tctx,
             env,
             &exn_case_refs,
-            exn_ty,
-            generic_exn_ty,
+            CaseScrutinee {
+                ty: exn_ty,
+                generic_ty: generic_exn_ty,
+                erase_either: false,
+            },
             expected_ty,
-            false,
             body_context.clone(),
         )?;
         // `type_cases ... Predef.type_exn ty_expected false loc exn_caselist`
@@ -11367,7 +11347,6 @@ fn type_match(
             exn_ty,
             &exn_case_refs,
             &typed,
-            false,
         )?;
         typed
     } else {
@@ -12021,38 +12000,32 @@ fn instance_for_erase_either_patterns(ctx: &TypeContext, ty: TypeExprRef) -> Typ
     crate::types::ctype::instance_partial(ctx, ty, false)
 }
 
+/// The scrutinee a list of cases is typed against.
+#[derive(Clone, Copy)]
+struct CaseScrutinee {
+    /// The scrutinee type the patterns unify with.
+    ty: TypeExprRef,
+    /// The scrutinee type before instantiation, for the exhaustiveness check.
+    generic_ty: TypeExprRef,
+    /// `type_cases`'s `erase_either`: reopen closed polymorphic-variant
+    /// rows of pattern instances.
+    erase_either: bool,
+}
+
 fn type_case_pattern<'a>(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
     case: &'a crate::parser::ast::Case,
-    scrutinee_ty: TypeExprRef,
-    generic_scrutinee_ty: TypeExprRef,
-    erase_either: bool,
+    scrutinee: CaseScrutinee,
     lev: i32,
 ) -> TypeCoreResult<PendingSequentialMatchCase<'a>> {
     let case_has_gadt =
         pattern_contains_generalized_constructor(tctx, env, tctx.arena.get_pat(case.pc_lhs));
-    match type_case_pattern_impl(
-        tctx,
-        env,
-        case,
-        scrutinee_ty,
-        generic_scrutinee_ty,
-        erase_either,
-        false,
-        lev,
-    ) {
+    match type_case_pattern_impl(tctx, env, case, scrutinee, false, lev) {
         Ok(case) => Ok(case),
-        Err(TypeCoreError::PatternTypeClash { .. }) if !case_has_gadt => type_case_pattern_impl(
-            tctx,
-            env,
-            case,
-            scrutinee_ty,
-            generic_scrutinee_ty,
-            erase_either,
-            true,
-            lev,
-        ),
+        Err(TypeCoreError::PatternTypeClash { .. }) if !case_has_gadt => {
+            type_case_pattern_impl(tctx, env, case, scrutinee, true, lev)
+        }
         Err(err) => Err(err),
     }
 }
@@ -12061,12 +12034,15 @@ fn type_case_pattern_impl<'a>(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
     case: &'a crate::parser::ast::Case,
-    scrutinee_ty: TypeExprRef,
-    generic_scrutinee_ty: TypeExprRef,
-    erase_either: bool,
+    scrutinee: CaseScrutinee,
     force_case_local_constraints: bool,
     lev: i32,
 ) -> TypeCoreResult<PendingSequentialMatchCase<'a>> {
+    let CaseScrutinee {
+        ty: scrutinee_ty,
+        generic_ty: generic_scrutinee_ty,
+        erase_either,
+    } = scrutinee;
     let mut case_env = env.clone();
     let case_has_gadt =
         pattern_contains_generalized_constructor(tctx, env, tctx.arena.get_pat(case.pc_lhs));
@@ -12108,10 +12084,12 @@ fn type_case_pattern_impl<'a>(
         &case_env,
         tctx.arena.get_pat(case.pc_lhs),
         case_scrutinee_ty,
-        PatternMode::Normal,
-        true,
+        PatternOptions {
+            mode: PatternMode::Normal,
+            allow_existentials: true,
+            level: lev,
+        },
         &mut state,
-        lev,
         0,
     );
     tctx.type_ctx.end_def();
@@ -12251,13 +12229,15 @@ fn type_try(
         tctx,
         env,
         &handler_refs,
-        exn_ty,
-        generic_exn_ty,
+        CaseScrutinee {
+            ty: exn_ty,
+            generic_ty: generic_exn_ty,
+            erase_either: false,
+        },
         expected_ty,
-        false,
         Some(TypeClashContext::TryReturn),
     )?;
-    let _ = finish_non_gadt_type_cases(
+    finish_non_gadt_type_cases(
         tctx,
         env,
         loc,
@@ -12265,7 +12245,6 @@ fn type_try(
         exn_ty,
         &handler_refs,
         &typed_handlers,
-        false,
     )?;
 
     // Keep sharing: use typed_body.exp_type instead of expected_ty
@@ -14527,12 +14506,10 @@ fn type_record(
         let disambiguated = disambiguated
             .or_else(|| {
                 lookup_label_by_lid(
+                    tctx,
                     resolved_lid,
                     Some(field.lid.loc),
-                    tctx.arena,
                     env,
-                    &mut tctx.persistent_env,
-                    ctx,
                     record_opath_ty,
                     Some((&field_names, closed_record)),
                 )
@@ -15991,12 +15968,10 @@ fn type_field(
 
     // Disambiguate label: use the record expression's type to find the right label
     let (env_label, needs_label_qualification) = if let Some(label) = lookup_label_by_lid(
+        tctx,
         &resolved_lid,
         Some(field_lid.loc),
-        tctx.arena,
         env,
-        &mut tctx.persistent_env,
-        tctx.type_ctx,
         label_expected_record_ty,
         None,
     ) {
@@ -16199,12 +16174,10 @@ fn type_setfield(
     }
 
     let env_label = lookup_label_by_lid(
+        tctx,
         &resolved_lid,
         Some(field_lid.loc),
-        tctx.arena,
         env,
-        &mut tctx.persistent_env,
-        ctx,
         label_expected_record_ty,
         None,
     )
@@ -24358,15 +24331,16 @@ where
 /// when `find_all_labels` is empty. Mirror that by inspecting the expected
 /// record type declaration directly.
 fn lookup_label_by_lid(
+    tctx: &mut TypeCheckContext<'_>,
     lid: &Longident,
     loc: Option<LocIdx>,
-    arena: &ParseArena,
     env: &Env,
-    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &crate::types::context::TypeContext,
     expected_record_ty: Option<TypeExprRef>,
     record_field_names: Option<(&[&str], bool)>,
 ) -> Option<crate::types::LabelDescription> {
+    let arena = tctx.arena;
+    let ctx = tctx.type_ctx;
+    let pers_env = &mut tctx.persistent_env;
     let Longident::Ldot(module_lid, label_idx) = lid else {
         return None;
     };
@@ -29187,8 +29161,11 @@ impl crate::types::parmatch::Oracle for TypecoreParmatchOracle<'_, '_> {
         partial_pred(
             self.tctx,
             self.env,
-            self.level,
-            mode,
+            PatternOptions {
+                mode,
+                allow_existentials: true,
+                level: self.level,
+            },
             explode,
             self.expected_ty,
             &u,
@@ -29443,12 +29420,10 @@ fn pattern_contains_or(ta: &TypedArena, p: &Pattern) -> bool {
 
 /// `partial_pred ~lev ?mode ?explode env expected_ty constrs labels p`
 /// (typecore.ml:1788-1803) applied to `Conv.conv u` (parmatch.ml:1961-2001).
-#[allow(clippy::too_many_arguments)]
 fn partial_pred(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
-    level: i32,
-    mode: PatternMode,
+    options: PatternOptions,
     explode: i32,
     expected_ty: TypeExprRef,
     u: &Pattern,
@@ -29482,10 +29457,8 @@ fn partial_pred(
             env,
             tctx.arena.get_pat(parsed),
             expected_ty,
-            mode,
-            true,
+            options,
             &mut state,
-            level,
             explode,
         );
         ctx.restore_type_state(type_snapshot);

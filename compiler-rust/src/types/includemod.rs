@@ -3075,12 +3075,14 @@ pub(crate) fn type_declarations(
             if !type_manifest_for_inclusion(
                 type_ctx,
                 env,
+                &ParamCorrespondence {
+                    impl_params: &impl_decl.type_params,
+                    sig_params: &sig_decl.type_params,
+                    map: &param_map,
+                },
                 impl_manifest,
-                &impl_decl.type_params,
                 sig_manifest,
-                &sig_decl.type_params,
                 sig_decl.type_private,
-                &param_map,
             ) {
                 return Err(type_decl_mismatch(id, impl_decl, sig_decl, String::new()));
             }
@@ -3194,17 +3196,21 @@ pub(crate) fn type_declarations(
                 env,
                 &impl_decl.type_params,
                 &sig_decl.type_params,
-                impl_constructors,
-                sig_constructors,
-                type_ctx.variant_layout(
-                    impl_decl
-                        .variant_layout_ref()
-                        .expect("variant declaration layout"),
+                (
+                    impl_constructors,
+                    type_ctx.variant_layout(
+                        impl_decl
+                            .variant_layout_ref()
+                            .expect("variant declaration layout"),
+                    ),
                 ),
-                type_ctx.variant_layout(
-                    sig_decl
-                        .variant_layout_ref()
-                        .expect("variant declaration layout"),
+                (
+                    sig_constructors,
+                    type_ctx.variant_layout(
+                        sig_decl
+                            .variant_layout_ref()
+                            .expect("variant declaration layout"),
+                    ),
                 ),
                 warnings,
             ) {
@@ -3292,6 +3298,19 @@ pub(crate) fn type_declarations(
     Ok(())
 }
 
+/// How the parameters of an implementation declaration correspond to those
+/// of the signature declaration it is checked against.
+#[derive(Clone, Copy)]
+struct ParamCorrespondence<'a> {
+    impl_params: &'a [TypeExprRef],
+    sig_params: &'a [TypeExprRef],
+    /// Each implementation parameter's signature counterpart.
+    map: &'a HashMap<TypeExprRef, TypeExprRef>,
+}
+
+/// A variant declaration's constructors and runtime layout.
+type VariantShape<'a> = (&'a [ConstructorDeclaration], crate::types::VariantLayout);
+
 fn compare_record_declarations(
     type_ctx: &TypeContext,
     env: &Env,
@@ -3305,9 +3324,11 @@ fn compare_record_declarations(
     compare_record_declarations_with_param_map(
         type_ctx,
         env,
-        &param_map,
-        impl_params,
-        sig_params,
+        &ParamCorrespondence {
+            impl_params,
+            sig_params,
+            map: &param_map,
+        },
         impl_labels,
         sig_labels,
         warnings,
@@ -3317,13 +3338,16 @@ fn compare_record_declarations(
 fn compare_record_declarations_with_param_map(
     type_ctx: &TypeContext,
     env: &Env,
-    param_map: &HashMap<TypeExprRef, TypeExprRef>,
-    impl_params: &[TypeExprRef],
-    sig_params: &[TypeExprRef],
+    params: &ParamCorrespondence<'_>,
     impl_labels: &[LabelDeclaration],
     sig_labels: &[LabelDeclaration],
     warnings: &mut Vec<Warning>,
 ) -> Option<String> {
+    let ParamCorrespondence {
+        impl_params,
+        sig_params,
+        map: param_map,
+    } = *params;
     // OCaml compiler/ml/includecore.ml:396 starts record comparison at 1,
     // so diagnostics report declaration field positions as 1-based.
     let mut index = 0usize;
@@ -3595,13 +3619,16 @@ fn fixed_private_row_pair_types(
 fn fixed_private_variant_manifest_for_inclusion(
     type_ctx: &TypeContext,
     env: &Env,
+    params: &ParamCorrespondence<'_>,
     impl_manifest: TypeExprRef,
-    impl_params: &[TypeExprRef],
-    sig_params: &[TypeExprRef],
     impl_row: &RowDesc,
     sig_row: &RowDesc,
-    param_map: &HashMap<TypeExprRef, TypeExprRef>,
 ) -> bool {
+    let ParamCorrespondence {
+        impl_params,
+        sig_params,
+        map: param_map,
+    } = *params;
     // Direct port of compiler/ml/includecore.ml:87-125:
     // private fixed rows compare the implementation row against the abstract
     // row carried by the signature manifest, while preserving the declaration
@@ -3664,13 +3691,16 @@ fn fixed_private_variant_manifest_for_inclusion(
 fn fixed_private_object_manifest_for_inclusion(
     type_ctx: &TypeContext,
     env: &Env,
+    params: &ParamCorrespondence<'_>,
     impl_manifest: TypeExprRef,
-    impl_params: &[TypeExprRef],
-    sig_params: &[TypeExprRef],
     impl_fields: TypeExprRef,
     sig_fields: TypeExprRef,
-    param_map: &HashMap<TypeExprRef, TypeExprRef>,
 ) -> bool {
+    let ParamCorrespondence {
+        impl_params,
+        sig_params,
+        map: param_map,
+    } = *params;
     // Direct port of compiler/ml/includecore.ml:126-151 for private fixed
     // object rows.
     let (sig_fields_flat, sig_rest) = flatten_object_fields_for_inclusion(type_ctx, sig_fields);
@@ -3733,13 +3763,12 @@ fn fixed_private_object_manifest_for_inclusion(
 fn type_manifest_for_inclusion(
     type_ctx: &TypeContext,
     env: &Env,
+    params: &ParamCorrespondence<'_>,
     impl_manifest: TypeExprRef,
-    impl_params: &[TypeExprRef],
     sig_manifest: TypeExprRef,
-    sig_params: &[TypeExprRef],
     sig_private: crate::types::PrivateFlag,
-    param_map: &HashMap<TypeExprRef, TypeExprRef>,
 ) -> bool {
+    let param_map = params.map;
     // Direct port of compiler/ml/includecore.ml:87-159 `type_manifest`.
     let impl_expanded = type_ctx.repr(crate::types::ctype::expand_head(
         type_ctx,
@@ -3761,12 +3790,10 @@ fn type_manifest_for_inclusion(
             return fixed_private_variant_manifest_for_inclusion(
                 type_ctx,
                 env,
+                params,
                 impl_manifest,
-                impl_params,
-                sig_params,
                 &type_ctx.row_desc(impl_row),
                 &type_ctx.row_desc(sig_row),
-                param_map,
             );
         }
         (
@@ -3785,12 +3812,10 @@ fn type_manifest_for_inclusion(
             return fixed_private_object_manifest_for_inclusion(
                 type_ctx,
                 env,
+                params,
                 impl_manifest,
-                impl_params,
-                sig_params,
                 *impl_fields,
                 *sig_fields,
-                param_map,
             );
         }
         _ => {}
@@ -3828,10 +3853,8 @@ fn compare_variant_declarations(
     env: &Env,
     impl_params: &[TypeExprRef],
     sig_params: &[TypeExprRef],
-    impl_constructors: &[ConstructorDeclaration],
-    sig_constructors: &[ConstructorDeclaration],
-    impl_layout: crate::types::VariantLayout,
-    sig_layout: crate::types::VariantLayout,
+    (impl_constructors, impl_layout): VariantShape<'_>,
+    (sig_constructors, sig_layout): VariantShape<'_>,
     warnings: &mut Vec<Warning>,
 ) -> Option<String> {
     let param_map = build_type_param_map(type_ctx, impl_params, sig_params);
@@ -3900,9 +3923,11 @@ fn compare_variant_declarations(
                 if let Some(detail) = compare_record_declarations_with_param_map(
                     type_ctx,
                     env,
-                    &arg_param_map,
-                    &arg_impl_params,
-                    &arg_sig_params,
+                    &ParamCorrespondence {
+                        impl_params: &arg_impl_params,
+                        sig_params: &arg_sig_params,
+                        map: &arg_param_map,
+                    },
                     impl_labels,
                     sig_labels,
                     warnings,
