@@ -75,19 +75,22 @@ The translation starts from the checker's types, not from the syntax of the decl
 | `number` | `float` |
 | `T[]`, `readonly T[]`, `[A, B]` | `array<t>`, `array<t>`, `(a, b)` |
 | `T \| undefined`, `T \| null`, both | `option<t>`, `Null.t<t>`, `Nullable.t<t>` |
-| `interface`, object type, class instance | record; methods are fields of function type |
+| `interface`, object type | record; methods are fields of function type |
+| instance of a class the module exports | private record with `@instanceOf`, and `@extends` for its superclass |
 | optional property `p?: T` | optional field `p?: t` |
 | `Record<string, T>`, `{[key: string]: T}` | `dict<t>` |
 | `"a" \| "b"`, `1 \| 2` | `[#a \| #b]`, `[#1 \| #2]` |
 | objects sharing a literal property (`kind: "circle"`) | `@tag("kind")` variant with inline records |
-| `string \| number`, `number \| "auto"`, `T[] \| Date` | `@unboxed` variant |
+| `string \| number`, `number \| "auto"`, `T[] \| Date`, `string \| symbol` | `@unboxed` variant |
+| `Car \| Vehicle`, `Readable \| Writable`, `URL \| Headers \| string` | `@unboxed` variant with one case per class |
 | `enum` | variant with `@as` |
 | type parameters, on types and functions | type variables |
 | generic method | field with a polymorphic type (`'u. ...`) |
 | optional parameter | optional labelled argument `~name=?` |
 | rest parameter of the imported function | `@variadic` |
 | `Promise`, `Map`, `Set`, `Date`, `RegExp`, `Error`, typed arrays | `promise`, `Map.t`, `Set.t`, `Date.t`, `RegExp.t`, `JsError.t`, ... |
-| other library types (DOM, iterables) | an abstract type per type |
+| library classes (`URL`, `Headers`, `Element`) | an abstract type with `@instanceOf`; a subclass abbreviates its superclass |
+| other library types (DOM option objects, iterables) | an abstract type per type |
 | `unknown` | `unknown` |
 
 Object types without a name get one from where they are used (`loadResult`, `updatePatch`), and two with the same shape share a declaration. Types that refer to each other become one `type rec` group.
@@ -98,6 +101,21 @@ let {area, scale, place} = %ts("./shapes.ts")
 
 let circle = Circle({radius: 2.})
 let placed = place(circle, #center, Auto)
+```
+<!-- /example -->
+
+A class that something names at run time (an export of the module, a class of a Node module, a global such as `URL`) is declared with that class, so that it can be a member of a union. This uses a language change that is part of this branch, described under [Classes on records](#classes-on-records).
+
+<!-- example: instances -->
+```rescript
+module Garage = %ts("./garage.ts")
+
+let describe = (what: Garage.parkWhat) =>
+  switch what {
+  | String(plate) => plate
+  | Car(car) => car.honk()
+  | Vehicle(vehicle) => Float.toString(vehicle.wheels)
+  }
 ```
 <!-- /example -->
 
@@ -172,37 +190,81 @@ let {parse, resolve, log, byId, debounce} = %ts("./loose.ts")
 ```
 <!-- /example -->
 
-To see which gaps matter, every export of twelve modules was imported: `react`, `react-dom`, `semver`, `chalk`, `vite` and seven Node built-ins (`fs`, `path`, `url`, `child_process`, `os`, `events`, `http`). That is 585 values and 2,196 types. 66% of them have an exact ReScript type. The other 34% carry at least one note:
+To see which gaps matter, every export of twelve modules was imported: `react`, `react-dom`, `semver`, `chalk`, `vite` and seven Node built-ins (`fs`, `path`, `url`, `child_process`, `os`, `events`, `http`). That is 585 values and 2,292 types, and all twelve compile. 66% of the declarations have an exact ReScript type. The other 34% carry at least one note:
 
 | Gap | Declarations affected | Imported as | What would close it |
 |---|---|---|---|
-| Union whose members cannot be told apart at run time | 20.2% | `unknown` | See below: this is three different problems. |
-| `any` | 10.3% | A type variable as an argument, `unknown` as a result | Nothing: `any` is a hole in the TypeScript, not in ReScript. |
+| Union whose members cannot be told apart at run time | 18.1% | `unknown` | See below: these are four different problems. |
+| `any` | 9.9% | A type variable as an argument, `unknown` as a result | Nothing: `any` is a hole in the TypeScript, not in ReScript. |
 | Overloads | 6.9% | The first signature | Converter: one external per signature (`parse`, `parse2`). Language: an external with several types, chosen by the arguments. |
 | Constraint on a type parameter (`T extends U`) | 3.8% | An unconstrained type variable | Language: bounded type variables. For object bounds the open object type `{.. "id": string}` already exists, but not for records. |
-| Rest parameter in a callback type | 3.4% | One array argument | Language: `@variadic` on function types, not only on externals. |
-| Constructor types, classes as values | 2.9% | `unknown` | Language: a function type that is called with `new`. |
-| Conditional, mapped and indexed types over a type parameter | 2.7% | The constraint, or `unknown` | Converter: import at an instantiation, `%ts("./m.ts#Pick<User, 'id'>")`, which TypeScript can evaluate. |
+| Rest parameter in a callback type | 3.5% | One array argument | Language: `@variadic` on function types, not only on externals. |
+| Constructor types, classes as values | 2.8% | `unknown` | Language: a function type that is called with `new`. |
+| Conditional, mapped and indexed types over a type parameter | 2.8% | The constraint, or `unknown` | Converter: import at an instantiation, `%ts("./m.ts#Pick<User, 'id'>")`, which TypeScript can evaluate. |
 | Enum and namespace objects as values | 2.5% | Skipped (the enum's type is imported) | Converter: a module with one value per member. |
-| Tuples with optional or rest elements | 2.2% | `array` | Language: optional tuple elements. |
-| Generic function type nested in a type | 1.9% | `unknown` for its own type parameters | Language: polymorphic function types anywhere, not only as record fields. |
-| Type parameter out of scope where the type is declared | 1.9% | `unknown`, or the constraint | The same. |
+| Tuples with optional or rest elements | 2.3% | `array` | Language: optional tuple elements. |
+| Generic function type nested in a type | 2.1% | `unknown` for its own type parameters | Language: polymorphic function types anywhere, not only as record fields. |
+| Type parameter out of scope where the type is declared | 2.1% | `unknown`, or the constraint | The same. |
 | Explicit `this` parameter | 1.1% | Dropped | Converter: `@this` already expresses it. |
-| `object` and `{}` | 1.1% | `unknown` | Converter: `{..}` for `object`. |
+| `object` and `{}` | 1.0% | `unknown` | Converter: `{..}` for `object`. |
 | Functions with properties | 1.0% | The function | Converter: an abstract type with a `call` external and one getter per property. |
 | Named properties next to an index signature | 0.7% | The named properties | Language: a record with a `dict` remainder. |
 | `never` outside a result | 0.6% | `unknown` | Language: an empty variant type. |
 | Branded primitives (`string & {__brand: "Id"}`) | 0.3% | The primitive | Converter: `type id = private string`. |
 
-The unions are a fifth of everything, and they are not one problem:
+Two kinds of union that used to be in the first row are imported exactly now: `string | symbol` (124 declarations, all event names and property keys) and unions of classes such as `Readable | Writable` or `Car | Vehicle`. What is left, 522 declarations, is not one problem:
 
-- **More than one object member.** `Readable | Writable`, `Headers | Map<string, string>`, React's `ReactNode`. An `@unboxed` variant allows one object case, because `typeof` cannot tell two objects apart. Allowing several, told apart by `instanceof` when the members are classes, would cover the Node stream and event APIs.
-- **`symbol`.** `string | symbol` alone accounts for 124 of the 561 declarations, all of them event names and property keys. `@unboxed` variants have no `symbol` case; `typeof x === "symbol"` is as cheap as the checks they already do.
-- **Tagged unions that share a tag.** The syntax tree `Node` of vite's parser (177 declarations) is a union of interfaces tagged by `type`, where six of them say `type: "Literal"` and six more `type: "Identifier"`. A `@tag` variant needs distinct tags.
+- **Tagged unions that share a tag** (about 180). The syntax tree `Node` of vite's parser is a union of interfaces tagged by `type`, where six of them say `type: "Literal"` and six more `type: "Identifier"`. A `@tag` variant needs distinct tags.
+- **More than one plain object.** React's `ReactNode` (about 70), `{result} | {error}`, `AddressInfo | {}`. Nothing at run time tells two plain objects apart unless a field does; the upstream proposal for that is objects told apart by a field they share (rescript-lang/rescript issue 7988).
+- **Library interfaces** (about 140). `NodeJS.ReadableStream | WritableStream`, `EventEmitter | EventTarget`, `EventListener | EventListenerObject`, `boolean | AddEventListenerOptions`, `T | PromiseLike<T>`. TypeScript declares these as interfaces, so nothing says which class to test for, and the import makes a library interface an abstract type. The DOM option objects could be records; the converter does not do that yet.
+- **Unions of tuples** (about 40): the arguments of an event listener, `[] | [err: Error] | [chunk: any]`.
 
 For arguments none of this needs solving: a function that accepts `A | B` can be given an `A`. A union type that can be built from any member but not matched on would make every union importable in argument position, which is where most of them are.
 
-None of these language changes is part of this branch. The table is the proposed order of work: `symbol` cases and the converter-only rows first, since they need no design.
+## Classes on records
+
+The unions of classes are imported through a change to the language, which is part of this branch and implemented in the Rust compiler only.
+
+An untagged variant tells a class case apart with `instanceof`. Before, the class could be declared on an abstract type only (`@instanceOf("Blob") type blob`), which has no fields, and the class had to be a global. Now:
+
+```rescript
+@instanceOf("Blob")
+type blob = private {
+  size: float,
+  @as("type") type_: string,
+}
+
+@instanceOf("File") @extends(: blob)
+type file = private {
+  ...blob,
+  name: string,
+}
+
+@unboxed
+type part = Text(string) | Blob(blob) | File(file)
+
+let name = part =>
+  switch part {
+  | Text(text) => text
+  | File(file) => file.name // tested before Blob
+  | Blob(blob) => blob.type_
+  }
+
+let asBlob = (file: file) => (file :> blob)
+
+@module("three") @instanceOf("Mesh")
+type mesh // part instanceof Three.Mesh, with the import
+```
+
+- **`@instanceOf` on a record** makes the record a class: its values are the instances. The record must be `private`, so that a record literal cannot pass for an instance; the fields are read as on any record.
+- **`@extends(: parent)`** names the superclass. The parent must be a class, and the record must have the parent's fields at types that coerce to the parent's. A method that returns its own class is fine: `rename: string => dog` in the subclass, `string => animal` in the superclass.
+- **A subclass coerces to its superclass** with `:>`, and to nothing else: a record with the same fields that is not a declared subclass does not coerce to a class.
+- **In a variant the subclass is tested first**, whatever the order of the cases. A variant with two classes where neither is declared a subclass of the other tests them in the order written.
+- **`@module("m")` beside `@instanceOf`** imports the class from `m`. Classes of the same name from two modules are two classes.
+
+This follows the upstream RFC "Class hierarchies in WebAPI" (rescript-lang/rescript issue 9058, proposals A and B) and fixes what issue 9239 reports for `@module`. `@instanceOf` on abstract types and `@typeOf` were already in the compiler; the import now uses them too. Not implemented: `@scope` beside `@instanceOf` (write a dotted class name), and the OCaml compiler, which rejects these declarations.
+
+The remaining table is the proposed order of work: the converter-only rows first, since they need no design.
 
 ## How it works
 
@@ -214,7 +276,7 @@ None of these language changes is part of this branch. The table is the proposed
 
 The implementation is the crate `ts-import/` (TypeScript types to ReScript declarations; it does not depend on the compiler) and `compiler-rust/src/ts_import.rs` (finding `%ts`, splicing the declarations). The Cargo feature `ts-import` of the compiler is on by default; without it `%ts` is an unknown extension.
 
-The catalog `ts-import/tests/fixtures/features.ts` has about 130 exports, one per TypeScript feature, with the expected ReScript next to it in `features.res.txt`. A compiler test type checks every declaration in it.
+The catalog `ts-import/tests/fixtures/features.ts` has about 140 exports, one per TypeScript feature, with the expected ReScript next to it in `features.res.txt`. A compiler test type checks every declaration in it, and another imports every export of the twelve modules of the survey and compiles the result, where they are installed.
 
 ## Limitations and open questions
 
