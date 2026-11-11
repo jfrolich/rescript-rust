@@ -14494,6 +14494,7 @@ fn type_record(
     // 1) disambiguate labels
     // 2) sort by lbl_pos before typing each field
     let mut explicit_fields: Vec<ExplicitField<'_>> = Vec::with_capacity(fields.len());
+    let mut last_marked_label_path: Option<Path> = None;
     for (idx, field) in fields.iter().enumerate() {
         let resolved_lid = arena.get_longident(field.lid.txt);
         let field_name = arena.get_string(resolved_lid.last_idx());
@@ -14660,9 +14661,15 @@ fn type_record(
             }
         }
         // `Label.disambiguate` calls the chosen label's `use ()`, which marks
-        // its type (`Env.lookup_all_labels`, env.ml:1230-1238).
-        if let Some(label) = disambiguated.as_ref() {
-            mark_type_path_of(ctx, env, label.lbl_res);
+        // its type (`Env.lookup_all_labels`, env.ml:1230-1238). The fields of
+        // one record usually share that type: mark it once.
+        if let Some(path) = disambiguated
+            .as_ref()
+            .and_then(|label| label_result_path(ctx, label))
+            && !last_marked_label_path.is_some_and(|marked| marked.same(&path))
+        {
+            mark_type_path(ctx, env, &path);
+            last_marked_label_path = Some(path);
         }
         explicit_fields.push(ExplicitField {
             original_index: idx,
