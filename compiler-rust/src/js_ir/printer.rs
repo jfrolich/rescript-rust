@@ -6842,10 +6842,14 @@ mod tests {
                     &mut j,
                 ),
                 MutableFlag::Immutable,
-                j.tag_id(TagInfo::record(
-                    vec![("0".to_string(), false), ("1".to_string(), false)],
-                    crate::parser::ast::MutableFlag::Immutable,
-                )),
+                // A `RecordArray` block, as typedecl gives a record with
+                // the runtime names "0", "1".
+                j.tag_id(TagInfo::Record(Box::new(crate::lambda::lam_tag_info::RecordTag {
+                    fields: vec![("0".to_string(), false), ("1".to_string(), false)],
+                    logical_field_count: None,
+                    mutable_flag: crate::parser::ast::MutableFlag::Immutable,
+                    array: true,
+                }))),
             ),
             &mut j,
         );

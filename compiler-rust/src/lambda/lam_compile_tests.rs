@@ -4746,7 +4746,7 @@ fn js_flatten_and_mark_dead_materializes_strictopt_identity_optional_record_fiel
 
     expect_dump!(
         dump::block(&deps.program.arena, &deps.program.block),
-        "Block{let[Strict] x_name = OptionalBlock[true](\"test\"); let[Strict] x_x = OptionalBlock[true](\"test\"); let[StrictOpt,DeadPure] x = CamlBlock[Immutable, Record(RecordTag { fields: [(\"id\", true), (\"name\", true), (\"title\", true), (\"className\", true), (\"x\", true), (\"y\", true)], logical_field_count: None, mutable_flag: Immutable })](undefined, x_name, undefined, undefined, x_x, undefined)}"
+        "Block{let[Strict] x_name = OptionalBlock[true](\"test\"); let[Strict] x_x = OptionalBlock[true](\"test\"); let[StrictOpt,DeadPure] x = CamlBlock[Immutable, Record(RecordTag { fields: [(\"id\", true), (\"name\", true), (\"title\", true), (\"className\", true), (\"x\", true), (\"y\", true)], logical_field_count: None, mutable_flag: Immutable, array: false })](undefined, x_name, undefined, undefined, x_x, undefined)}"
     );
 }
 
@@ -4811,7 +4811,7 @@ fn js_flatten_and_mark_dead_materializes_strict_identity_optional_record_fields_
 
     expect_dump!(
         dump::block(&deps.program.arena, &deps.program.block),
-        "Block{let[Strict] story_exportStatus = OptionalBlock[true](\"IDLE\"); let[Strict] story_instantPlayerEligible = OptionalBlock[true](true); let[Strict,DeadPure] story = CamlBlock[Immutable, Record(RecordTag { fields: [(\"pk\", false), (\"exportStatus\", true), (\"instantPlayerEligible\", true)], logical_field_count: None, mutable_flag: Immutable })](\"STORY#id\", story_exportStatus, story_instantPlayerEligible)}"
+        "Block{let[Strict] story_exportStatus = OptionalBlock[true](\"IDLE\"); let[Strict] story_instantPlayerEligible = OptionalBlock[true](true); let[Strict,DeadPure] story = CamlBlock[Immutable, Record(RecordTag { fields: [(\"pk\", false), (\"exportStatus\", true), (\"instantPlayerEligible\", true)], logical_field_count: None, mutable_flag: Immutable, array: false })](\"STORY#id\", story_exportStatus, story_instantPlayerEligible)}"
     );
 }
 
@@ -4861,7 +4861,7 @@ fn js_flatten_and_mark_dead_keeps_alias_bound_deep_constant_records_inline_like_
 
     expect_dump!(
         dump::block(&deps.program.arena, &deps.program.block),
-        "let[Alias,DeadPure] v = CamlBlock[Immutable, Record(RecordTag { fields: [(\"a\", false), (\"b\", false)], logical_field_count: None, mutable_flag: Immutable })](OptionalBlock[true](3), CamlBlock[Immutable, Record(RecordTag { fields: [(\"xx\", false), (\"yy\", false)], logical_field_count: None, mutable_flag: Immutable })](2, 3))"
+        "let[Alias,DeadPure] v = CamlBlock[Immutable, Record(RecordTag { fields: [(\"a\", false), (\"b\", false)], logical_field_count: None, mutable_flag: Immutable, array: false })](OptionalBlock[true](3), CamlBlock[Immutable, Record(RecordTag { fields: [(\"xx\", false), (\"yy\", false)], logical_field_count: None, mutable_flag: Immutable, array: false })](2, 3))"
     );
 }
 
