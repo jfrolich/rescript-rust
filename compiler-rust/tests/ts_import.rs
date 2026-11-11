@@ -124,3 +124,27 @@ fn a_missing_export_is_reported_at_the_import() {
     assert!(error.contains("has no export named `nope`"), "{error}");
     assert!(error.contains("Demo.res"), "{error}");
 }
+
+/// Everything the converter generates for `ts-import/tests/fixtures/features.ts`
+/// (one export per TypeScript feature) is ReScript the type checker accepts.
+#[test]
+fn every_catalog_declaration_type_checks() {
+    let features = Path::new(env!("CARGO_MANIFEST_DIR")).join("../ts-import/tests/fixtures/features.ts");
+    let features = std::fs::read_to_string(features).unwrap();
+    let js = compile(
+        r#"
+module Features = %ts("./features.ts")
+let point: Features.point = {x: 1., y: 2.}
+let direction: Features.direction = #up
+let shape = Features.Circle({radius: 1.})
+let json = Features.Array([Features.String("a"), Features.Null])
+let dog = Features.Dog.make("Rex")
+let fetched = dog.fetch("ball")
+"#,
+        &[("/app/src/features.ts", &features)],
+    );
+    match js {
+        Ok(js) => assert!(js.contains("new FeaturesTs.Dog(\"Rex\")"), "{js}"),
+        Err(error) => panic!("{error}"),
+    }
+}

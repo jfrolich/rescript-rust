@@ -236,9 +236,11 @@ fn expand(
                 let flags = symbol.flags();
                 if flags.intersects(SymbolFlags::Class) {
                     values.push(converter.class_module(module, export, &model::upper_ident(export), symbol));
-                } else if flags.intersects(SymbolFlags::Value)
-                    && !flags.intersects(SymbolFlags::Module | SymbolFlags::Enum)
-                {
+                } else if flags.intersects(SymbolFlags::Module) {
+                    converter.skipped_export(export, "a namespace is not imported; import what it contains from its own module");
+                } else if flags.intersects(SymbolFlags::Enum) {
+                    converter.skipped_export(export, "the enum's type is imported; its object is not, write the constructors instead");
+                } else if flags.intersects(SymbolFlags::Value) {
                     values.extend(converter.value(module, export, &lower_ident(export), symbol)?);
                 }
             }

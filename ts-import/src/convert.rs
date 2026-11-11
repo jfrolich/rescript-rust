@@ -13,7 +13,8 @@ use std::collections::{HashMap, HashSet};
 
 use tsrs_ast::{ModifierFlags, Symbol, SymbolFlags};
 use tsrs_checker::{
-    Checker, ElementFlags, LiteralValue, ObjectFlags, Signature, SignatureKind, Type, TypeFlags,
+    Checker, ElementFlags, LiteralValue, ObjectFlags, Signature, SignatureFlags, SignatureKind, Type,
+    TypeFlags,
 };
 use tsrs_compiler::Program;
 use tsrs_core::P;
@@ -222,6 +223,12 @@ impl<'a> Converter<'a> {
         self.state.notes.clear();
     }
 
+    /// Records an export of a whole-module import that has no ReScript form.
+    pub(crate) fn skipped_export(&mut self, export: &str, what: &str) {
+        self.begin_subject(export);
+        self.note_text(Gap::ValueObject, export.to_string(), what);
+    }
+
     pub(crate) fn take_notes(&mut self) -> Vec<Note> {
         std::mem::take(&mut self.state.notes)
     }
@@ -369,17 +376,14 @@ impl<'a> Converter<'a> {
     ) -> Item {
         self.begin_subject(local);
         let instance = self.c.get_declared_type_of_symbol(symbol);
+        // `type t<'a> = stack<'a>` for a generic class.
+        let class_params = self.c.get_local_type_parameters_of_class_or_interface_or_type_alias_exported(symbol);
+        for &param in &class_params {
+            let name = lower_ident(param.symbol().map_or("t", |symbol| symbol.name()));
+            self.type_params.push((param, name));
+        }
         let instance_ty = self.convert(instance);
-        let params = match &instance_ty {
-            Ty::App(_, args) => args
-                .iter()
-                .filter_map(|arg| match arg {
-                    Ty::Var(name) => Some(name.clone()),
-                    _ => None,
-                })
-                .collect(),
-            _ => Vec::new(),
-        };
+        let params: Vec<String> = self.type_params.drain(..).map(|(_, name)| name).collect();
         let mut items = vec![Item::Types(vec![Decl {
             name: "t".to_string(),
             params,
@@ -387,7 +391,9 @@ impl<'a> Converter<'a> {
             ts: None,
         }])];
         let statics = self.c.get_type_of_symbol(symbol);
-        if !self.c.get_signatures_of_type(statics, SignatureKind::Construct).is_empty() {
+        let constructs = self.c.get_signatures_of_type(statics, SignatureKind::Construct);
+        // An abstract class has a construct signature nobody may call.
+        if constructs.first().is_some_and(|signature| !signature.flags().intersects(SignatureFlags::Abstract)) {
             items.push(self.constructor(module, export, "make", symbol, &[]));
         }
         let scope_attr = format!("scope({})", crate::model::string_literal(export));
@@ -660,7 +666,9 @@ impl<'a> Converter<'a> {
         let saved_deferred = std::mem::replace(&mut self.deferred_seen, false);
 
         let declared = self.c.get_declared_type_of_symbol(symbol);
-        let saved_declaring = std::mem::replace(&mut self.declaring, Some(declared));
+        let is_object_declaration = symbol.flags().intersects(SymbolFlags::Class | SymbolFlags::Interface);
+        let saved_declaring =
+            std::mem::replace(&mut self.declaring, if is_object_declaration { Some(declared) } else { None });
         let kind = if symbol.flags().intersects(SymbolFlags::Enum) {
             self.enum_decl(symbol)
         } else {
@@ -889,12 +897,13 @@ impl<'a> Converter<'a> {
             "Set" | "ReadonlySet" => Ty::app("Set.t", vec![arg(self, 0)]),
             "WeakMap" => Ty::app("WeakMap.t", vec![arg(self, 0), arg(self, 1)]),
             "WeakSet" => Ty::app("WeakSet.t", vec![arg(self, 0)]),
-            "Iterator" | "Iterable" | "IterableIterator" | "IteratorObject" | "Generator"
-            | "ArrayIterator" | "MapIterator" | "SetIterator" => {
+            "Iterator" | "IterableIterator" | "IteratorObject" | "Generator" | "ArrayIterator"
+            | "MapIterator" | "SetIterator" => {
                 Ty::app("Iterator.t", vec![arg(self, 0)])
             }
-            "AsyncIterator" | "AsyncIterable" | "AsyncIterableIterator" | "AsyncGenerator"
-            | "AsyncIteratorObject" => Ty::app("AsyncIterator.t", vec![arg(self, 0)]),
+            "AsyncIterator" | "AsyncIterableIterator" | "AsyncGenerator" | "AsyncIteratorObject" => {
+                Ty::app("AsyncIterator.t", vec![arg(self, 0)])
+            }
             "Date" => Ty::name("Date.t"),
             "RegExp" => Ty::name("RegExp.t"),
             "Error" | "TypeError" | "RangeError" | "SyntaxError" | "ReferenceError" | "EvalError"
@@ -977,7 +986,9 @@ impl<'a> Converter<'a> {
             .copied()
             .filter(|property| {
                 let name = property.name();
-                if name.starts_with("__@") || name.starts_with('#') || name == "prototype" {
+                // Private `#names` and symbol-keyed members carry TypeScript's
+                // internal name prefix; neither is a string-named property.
+                if name.starts_with(tsrs_ast::INTERNAL_SYMBOL_NAME_PREFIX) || name.starts_with("__@") || name.starts_with('#') || name == "prototype" {
                     return false;
                 }
                 if property.flags().intersects(SymbolFlags::Prototype) {
@@ -1029,6 +1040,13 @@ impl<'a> Converter<'a> {
             // Outside an external's own type there is nothing to bind the
             // signature's type parameters to.
             let generic = self.free_vars;
+            if generic && !first.type_parameters().is_empty() {
+                self.note(
+                    Gap::GenericCallback,
+                    ty,
+                    "the callback's own type parameters become type parameters of the import, so the callback is checked for one type, not for all",
+                );
+            }
             return Structure::Ty(self.signature_with(first, false, generic).0);
         }
         if properties.is_empty() {
@@ -1213,9 +1231,12 @@ impl<'a> Converter<'a> {
                 return Structure::Decl(tagged);
             }
         }
+        let snapshot = self.state.clone();
         match self.untagged_union(&members, whole_boolean) {
             Some(kind) => Structure::Decl(kind),
             None => {
+                // Drop the declarations made for the members tried so far.
+                self.state = snapshot;
                 self.note(
                     Gap::Union,
                     whole,
@@ -1261,7 +1282,9 @@ impl<'a> Converter<'a> {
                 let base = match &tag {
                     Tag::Str(text) => upper_ident(text),
                     Tag::Num(text) => upper_ident(text),
-                    Tag::Bool(value) => upper_ident(&value.to_string()),
+                    // `{ok: true, ...} | {ok: false, ...}` reads as `Ok` and `NotOk`.
+                    Tag::Bool(true) => upper_ident(name),
+                    Tag::Bool(false) => format!("Not{}", upper_ident(name)),
                     Tag::Null => "Null".to_string(),
                     Tag::Undefined => "Undefined".to_string(),
                 };

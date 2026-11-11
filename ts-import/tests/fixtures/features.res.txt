@@ -1,0 +1,400 @@
+module Features = {
+  type point = {
+    x: float,
+    y: float,
+  }
+  type options = {
+    name: string,
+    retries?: float,
+    @as("content-type") contentType?: string,
+    @as("type") type_: string,
+  }
+  type nestedInlineB = {
+    c: string,
+  }
+  type nestedInline = {
+    a: float,
+    b: nestedInlineB,
+  }
+  type nested = {
+    point: point,
+    inline: nestedInline,
+  }
+  type rec box<'t> = {
+    value: 't,
+    map: 'u. ('t => 'u) => box<'u>,
+  }
+  type pair<'a, 'b> = {
+    first: 'a,
+    second: 'b,
+  }
+  type maybe<'t> = option<'t>
+  type direction = [#down | #left | #right | #up]
+  type digit = [#0 | #1 | #2]
+  @unboxed type size =
+    | Number(float)
+    | @as("auto") Auto
+  @unboxed type stringOrNumber =
+    | String(string)
+    | Number(float)
+  @tag("kind") type shape =
+    | @as("circle") Circle({
+      radius: float,
+    })
+    | @as("square") Square({
+      size: float,
+    })
+    | @as("empty") Empty
+  @tag("ok") type outcome<'t> =
+    | @as(true) Ok({
+      value: 't,
+    })
+    | @as(false) NotOk({
+      error: string,
+    })
+  @tag("type") type byId =
+    | @as(1) N1({
+      id: float,
+    })
+    | @as(2) N2({
+      name: string,
+    })
+  @unboxed type oneOrMany =
+    | String(string)
+    | Array(array<string>)
+  type loose = unknown
+  @unboxed type rec json =
+    | Boolean(bool)
+    | String(string)
+    | Number(float)
+    | Array(array<json>)
+    | Object(dict<json>)
+    | @as(null) Null
+  @unboxed type callback =
+    | String(string)
+    | Function(unit => unit)
+  @unboxed type dateOrText =
+    | String(string)
+    | Date(Date.t)
+  type falsy2 =
+    | @as("") Empty
+    | @as(0) N0
+    | @as(false) False
+    | @as(null) Null
+  type falsy = option<falsy2>
+  type color =
+    | @as(0) Red
+    | @as(1) Green
+    | @as(2) Blue
+  type level =
+    | @as("low") Low
+    | @as("high") High
+  type flag =
+    | @as(1) A
+    | @as(2) B
+  type named = {
+    name: string,
+  }
+  type rec employee = {
+    salary: float,
+    manager?: employee,
+    name: string,
+  }
+  type callable = string => float
+  type hybrid = string => float
+  type constructable = unknown
+  type rec tree = {
+    value: float,
+    children: array<tree>,
+  }
+  type partialOptions = {
+    name?: string,
+    retries?: float,
+    @as("content-type") contentType?: string,
+    @as("type") type_?: string,
+  }
+  type pickedPoint = {
+    point: point,
+  }
+  type withoutType = {
+    name: string,
+    retries?: float,
+    @as("content-type") contentType?: string,
+  }
+  type requiredOptions = {
+    name: string,
+    retries: float,
+    @as("content-type") contentType: string,
+    @as("type") type_: string,
+  }
+  type pointKeys = [#x | #y]
+  type pointX = float
+  type returned = bool
+  type params = (string, float)
+  type unwrapped = point
+  type nonNull = string
+  type getters = {
+    getX: unit => float,
+    getY: unit => float,
+  }
+  type eventName = [#onDown | #onLeft | #onRight | #onUp]
+  type id = string
+  type merged = {
+    x: float,
+    y: float,
+    z: float,
+  }
+  type findResult = {
+    id: string,
+  }
+  type keyedRecord = {
+    a: float,
+    b: float,
+  }
+  type mixedIndex = {
+    known: string,
+  }
+  type inferredObject = {
+    host: string,
+    port: float,
+    tags: array<string>,
+  }
+  type arrowResult = {
+    id: float,
+    label: string,
+  }
+  type rec animal = {
+    name: string,
+    legs: float,
+    speak: (~loud: bool=?) => string,
+    shout: string,
+    rename: string => animal,
+  }
+  type rec dog = {
+    fetch: string => promise<string>,
+    name: string,
+    legs: float,
+    speak: (~loud: bool=?) => string,
+    shout: string,
+    rename: string => dog,
+  }
+  type stack<'t> = {
+    push: 't => unit,
+    pop: unit => option<'t>,
+    size: float,
+  }
+  type base = {
+    id: unit => string,
+  }
+  /** TypeScript: `Iterable` */
+  type iterable
+  /** TypeScript: `AsyncIterable` */
+  type asyncIterable
+  /** TypeScript: `URL` */
+  type url
+  /** TypeScript: `AbortSignal` */
+  type abortSignal
+  type fetchLikeInit = {
+    signal?: abortSignal,
+  }
+  /** TypeScript: `Response` */
+  type response
+  /** TypeScript: `string` */
+  @module("./features.ts") external aString: string = "aString"
+  /** TypeScript: `number` */
+  @module("./features.ts") external aNumber: float = "aNumber"
+  /** TypeScript: `boolean` */
+  @module("./features.ts") external aBoolean: bool = "aBoolean"
+  /** TypeScript: `bigint` */
+  @module("./features.ts") external aBigint: bigint = "aBigint"
+  /** TypeScript: `symbol` */
+  @module("./features.ts") external aSymbol: Symbol.t = "aSymbol"
+  /** TypeScript: `undefined` */
+  @module("./features.ts") external nothing: unit = "nothing"
+  /** TypeScript: `null` */
+  @module("./features.ts") external aNull: Null.t<unknown> = "aNull"
+  /** TypeScript: `"hello"` */
+  @module("./features.ts") external literalString: string = "literalString"
+  /** TypeScript: `42` */
+  @module("./features.ts") external literalNumber: float = "literalNumber"
+  /** TypeScript: `"on"` */
+  @module("./features.ts") external stringLiteralType: string = "stringLiteralType"
+  /** TypeScript: `() => void` */
+  @module("./features.ts") external returnsVoid: unit => unit = "returnsVoid"
+  /** TypeScript: `string | undefined` */
+  @module("./features.ts") external maybeString: option<string> = "maybeString"
+  /** TypeScript: `string | null` */
+  @module("./features.ts") external nullableString: Null.t<string> = "nullableString"
+  /** TypeScript: `string | null | undefined` */
+  @module("./features.ts") external nullishString: Nullable.t<string> = "nullishString"
+  /** TypeScript: `(id: string) => { id: string; } | undefined` */
+  @module("./features.ts") external find: string => option<findResult> = "find"
+  /** TypeScript: `number[]` */
+  @module("./features.ts") external numbers: array<float> = "numbers"
+  /** TypeScript: `readonly number[]` */
+  @module("./features.ts") external readonlyNumbers: array<float> = "readonlyNumbers"
+  /** TypeScript: `[string, number]` */
+  @module("./features.ts") external pair: (string, float) = "pair"
+  /** TypeScript: `readonly [string, number, boolean]` */
+  @module("./features.ts") external triple: (string, float, bool) = "triple"
+  /** TypeScript: `[string]` */
+  @module("./features.ts") external single: array<string> = "single"
+  /** TypeScript: `[string, (number | undefined)?]` */
+  @module("./features.ts") external optionalTuple: array<unknown> = "optionalTuple"
+  /** TypeScript: `[string, ...number[]]` */
+  @module("./features.ts") external restTuple: array<unknown> = "restTuple"
+  /** TypeScript: `readonly ["a", 1]` */
+  @module("./features.ts") external constTuple: ([#a], [#1]) = "constTuple"
+  /** TypeScript: `{ [key: string]: number; }` */
+  @module("./features.ts") external dictionary: dict<float> = "dictionary"
+  /** TypeScript: `Record<string, Point>` */
+  @module("./features.ts") external record: dict<point> = "record"
+  /** TypeScript: `Record<"a" | "b", number>` */
+  @module("./features.ts") external keyedRecord: keyedRecord = "keyedRecord"
+  /** TypeScript: `{ [key: string]: string; known: string; }` */
+  @module("./features.ts") external mixedIndex: mixedIndex = "mixedIndex"
+  /** TypeScript: `{}` */
+  @module("./features.ts") external emptyObject: unknown = "emptyObject"
+  /** TypeScript: `object` */
+  @module("./features.ts") external anyObject: unknown = "anyObject"
+  /** TypeScript: `{ host: string; port: number; tags: string[]; }` */
+  @module("./features.ts") external inferredObject: inferredObject = "inferredObject"
+  /** TypeScript: `(a: string, b: number) => boolean` */
+  @module("./features.ts") external twoArgs: (string, float) => bool = "twoArgs"
+  /** TypeScript: `(a: string, b?: number | undefined) => string` */
+  @module("./features.ts") external optionalArg: (string, ~b: float=?) => string = "optionalArg"
+  /** TypeScript: `(a: string, b?: number) => number` */
+  @module("./features.ts") external defaultArg: (string, ~b: float=?) => float = "defaultArg"
+  /** TypeScript: `(first: string, ...rest: number[]) => void` */
+  @module("./features.ts") @variadic external restArgs: (string, array<float>) => unit = "restArgs"
+  /** TypeScript: `(done: (error: Error | null, value?: string | undefined) => void) => void` */
+  @module("./features.ts") external callback: ((Null.t<JsError.t>, ~value: string=?) => unit) => unit = "callback"
+  /** TypeScript: `(f: (...args: number[]) => number) => void` */
+  @module("./features.ts") external restCallback: (array<float> => float) => unit = "restCallback"
+  /** TypeScript: `(prefix: string) => (name: string) => string` */
+  @module("./features.ts") external returnsFunction: string => string => string = "returnsFunction"
+  /** TypeScript: `{ (value: string): string; (value: number): number; }` */
+  @module("./features.ts") external overloaded: string => string = "overloaded"
+  /** TypeScript: `(this: Point, scale: number) => Point` */
+  @module("./features.ts") external withThis: float => point = "withThis"
+  /** TypeScript: `(value: unknown) => value is string` */
+  @module("./features.ts") external isString: 'a => bool = "isString"
+  /** TypeScript: `(value: unknown) => asserts value is string` */
+  @module("./features.ts") external assertString: 'a => unit = "assertString"
+  /** TypeScript: `(id: number) => Promise<{ id: number; label: string; }>` */
+  @module("./features.ts") external arrow: float => promise<arrowResult> = "arrow"
+  /** TypeScript: `<T>(value: T) => T` */
+  @module("./features.ts") external identity: 't => 't = "identity"
+  /** TypeScript: `<T, U>(items: T[], f: (item: T, index: number) => U) => U[]` */
+  @module("./features.ts") external mapArray: (array<'t>, ('t, float) => 'u) => array<'u> = "mapArray"
+  /** TypeScript: `<T extends { id: string; }>(item: T) => T` */
+  @module("./features.ts") external constrained: 't => 't = "constrained"
+  /** TypeScript: `<T, K extends keyof T>(item: T, key: K) => T[K]` */
+  @module("./features.ts") external pluck: ('t, 'k) => unknown = "pluck"
+  /** TypeScript: `(run: <T>(value: T) => T) => void` */
+  @module("./features.ts") external genericCallback: ('t => 't) => unit = "genericCallback"
+  /** TypeScript: `<T>(value: T) => Maybe<T>` */
+  @module("./features.ts") external maybe: 't => maybe<'t> = "maybe"
+  /** TypeScript: `(color: Color, level: Level, flag: Flag) => void` */
+  @module("./features.ts") external paint: (color, level, flag) => unit = "paint"
+  /** TypeScript: `(color: Color.Red) => void` */
+  @module("./features.ts") external onlyRed: color => unit = "onlyRed"
+  module Animal = {
+    type t = animal
+    /** TypeScript: `typeof Animal` */
+    @module("./features.ts") @new external make: (string, ~legs: float=?) => animal = "Animal"
+    /** TypeScript: `number` */
+    @module("./features.ts") @scope("Animal") external count: float = "count"
+    /** TypeScript: `(name: string) => Animal` */
+    @module("./features.ts") @scope("Animal") external create: string => animal = "create"
+  }
+  module Dog = {
+    type t = dog
+    /** TypeScript: `typeof Dog` */
+    @module("./features.ts") @new external make: (string, ~legs: float=?) => dog = "Dog"
+    /** TypeScript: `number` */
+    @module("./features.ts") @scope("Dog") external count: float = "count"
+    /** TypeScript: `(name: string) => Animal` */
+    @module("./features.ts") @scope("Dog") external create: string => animal = "create"
+  }
+  module Stack = {
+    type t<'t> = stack<'t>
+    /** TypeScript: `typeof Stack` */
+    @module("./features.ts") @new external make: unit => stack<'t> = "Stack"
+  }
+  module Base = {
+    type t = base
+  }
+  /** TypeScript: `(animal: Animal) => Dog` */
+  @module("./features.ts") external adopt: animal => dog = "adopt"
+  /** TypeScript: `typeof Animal` */
+  @module("./features.ts") external animalClass: unknown = "AnimalClass"
+  /** TypeScript: `"text"` */
+  @module("./features.ts") external resolvedConditional: string = "resolvedConditional"
+  /** TypeScript: `<T>(value: T) => Conditional<T>` */
+  @module("./features.ts") external deferredConditional: 't => [#other | #text] = "deferredConditional"
+  /** TypeScript: `Promise<Point>` */
+  @module("./features.ts") external promise: promise<point> = "promise"
+  /** TypeScript: `Map<string, Point>` */
+  @module("./features.ts") external map: Map.t<string, point> = "map"
+  /** TypeScript: `Set<number>` */
+  @module("./features.ts") external set: Set.t<float> = "set"
+  /** TypeScript: `Date` */
+  @module("./features.ts") external date: Date.t = "date"
+  /** TypeScript: `RegExp` */
+  @module("./features.ts") external regexp: RegExp.t = "regexp"
+  /** TypeScript: `Error` */
+  @module("./features.ts") external error: JsError.t = "error"
+  /** TypeScript: `Uint8Array<ArrayBufferLike>` */
+  @module("./features.ts") external bytes: Uint8Array.t = "bytes"
+  /** TypeScript: `ArrayBuffer` */
+  @module("./features.ts") external buffer: ArrayBuffer.t = "buffer"
+  /** TypeScript: `Iterable<number>` */
+  @module("./features.ts") external iterable: iterable = "iterable"
+  /** TypeScript: `AsyncIterable<string>` */
+  @module("./features.ts") external asyncIterable: asyncIterable = "asyncIterable"
+  /** TypeScript: `URL` */
+  @module("./features.ts") external url: url = "url"
+  /** TypeScript: `(input: string, init?: { signal?: AbortSignal | undefined; } | undefined) => Promise<Response>` */
+  @module("./features.ts") external fetchLike: (string, ~init: fetchLikeInit=?) => promise<response> = "fetchLike"
+  /** TypeScript: `(value: any) => any` */
+  @module("./features.ts") external takesAny: 'a => unknown = "takesAny"
+  /** TypeScript: `(value: unknown) => unknown` */
+  @module("./features.ts") external takesUnknown: 'a => unknown = "takesUnknown"
+  /** TypeScript: `(message: string) => never` */
+  @module("./features.ts") external fails: string => 'a = "fails"
+  /** TypeScript: `any` */
+  @module("./features.ts") external anyValue: unknown = "anyValue"
+  /** TypeScript: `never[]` */
+  @module("./features.ts") external neverArray: array<'a> = "neverArray"
+  /** TypeScript: `(args: string[]) => number` */
+  @module("./features.ts") external default: array<string> => float = "default"
+}
+
+// Where ReScript says less than TypeScript:
+// [union] loose: `Loose`: ReScript cannot tell the members of this union apart at run time
+// [callable-object] hybrid: `Hybrid`: the function's properties are dropped
+// [constructor] constructable: `Constructable`: a constructor is not a ReScript value; import the class as a module instead
+// [intersection] id: `Id`: the brand is dropped; the primitive type is used
+// [tuple] single: `[string]`: ReScript has no one-element tuple; an array is used
+// [tuple] optionalTuple: `[string, (number | undefined)?]`: tuples with optional or rest elements are imported as arrays
+// [tuple] restTuple: `[string, ...number[]]`: tuples with optional or rest elements are imported as arrays
+// [index-signature] mixedIndex: `{ [key: string]: string; known: string; }`: the index signature is dropped; only the named properties are imported
+// [any-object] emptyObject: `{}`: `{}` accepts any value that is not null or undefined
+// [any-object] anyObject: `object`: `object` says nothing about the value's fields
+// [rest-in-callback] restCallback (f, args): `number[]`: only an imported function can be variadic; here the rest arguments are one array
+// [overloads] overloaded: `{ (value: string): string; (value: number): number; }`: 2 overloads; the first one is imported
+// [this-parameter] withThis: `this`: the `this` parameter is dropped
+// [constraint] constrained: `T extends { id: string; }`: the constraint is not checked by ReScript
+// [constraint] pluck: `K extends keyof T`: the constraint is not checked by ReScript
+// [deferred] pluck (result): `T[K]`: the type depends on a type parameter
+// [generic-callback] genericCallback (run): `<T>(value: T) => T`: the callback's own type parameters become type parameters of the import, so the callback is checked for one type, not for all
+// [value-object] Color: `Color`: the enum's type is imported; its object is not, write the constructors instead
+// [value-object] Level: `Level`: the enum's type is imported; its object is not, write the constructors instead
+// [value-object] Flag: `Flag`: the enum's type is imported; its object is not, write the constructors instead
+// [constructor] animalClass: `typeof Animal`: a constructor is not a ReScript value; import the class as a module instead
+// [deferred] deferredConditional (result): `Conditional<T>`: the type depends on a type parameter; its constraint is used
+// [any] takesAny (value): `any`: `any` turns checking off; it is imported as `unknown` (or a type variable for an argument)
+// [any] takesAny (result): `any`: `any` turns checking off; it is imported as `unknown` (or a type variable for an argument)
+// [any] anyValue: `any`: `any` turns checking off; it is imported as `unknown` (or a type variable for an argument)
+// [value-object] Util: `Util`: a namespace is not imported; import what it contains from its own module
