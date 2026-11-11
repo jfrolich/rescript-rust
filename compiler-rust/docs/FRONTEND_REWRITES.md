@@ -195,4 +195,3 @@ tests/tests`, using the same environment as above:
 
 This short local timing sample is supporting evidence, not a performance
 promise. The CI instruction gate remains authoritative.
-
