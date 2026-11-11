@@ -56,6 +56,8 @@ pub struct ParserSnapshot<'src> {
     end_pos_idx: PosIdx,
     /// Arena index for prev end position (for identity-based sharing).
     prev_end_pos_idx: PosIdx,
+    token_line_break: Option<usize>,
+    line_break: Option<usize>,
     breadcrumbs: Vec<(Grammar, Position)>,
     regions: Regions,
     diagnostics_len: usize,
@@ -96,6 +98,12 @@ pub struct Parser<'src> {
     pub end_pos_idx: PosIdx,
     /// Arena index for end position of previous token.
     pub prev_end_pos_idx: PosIdx,
+    /// Byte offset of the first LF between the previous token and the
+    /// current one, outside comments (res_parser.ml `token_cache.line_break`).
+    token_line_break: Option<usize>,
+    /// Byte offset of the first LF before a consumed token, outside literals
+    /// and comments (res_parser.ml `line_break`); see `newline`.
+    line_break: Option<usize>,
     /// Stack of breadcrumbs for error recovery.
     breadcrumbs: Vec<(Grammar, Position)>,
     /// Inside `lookahead`: number of breadcrumbs, from the bottom, that are
@@ -173,6 +181,8 @@ impl<'src> Parser<'src> {
             start_pos_idx: default_pos_idx,
             end_pos_idx: default_pos_idx,
             prev_end_pos_idx: default_pos_idx,
+            token_line_break: None,
+            line_break: None,
             breadcrumbs: Vec::new(),
             lookahead_breadcrumb_floor: 0,
             lookahead_popped_breadcrumbs: Vec::new(),
@@ -555,6 +565,10 @@ impl<'src> Parser<'src> {
         if self.token == Token::Eof {
             return;
         }
+        self.consume_line_break();
+        // res_parser.ml `read`: the scanner records the first LF from here
+        // on, across the comments before the next token.
+        self.scanner.take_line_break();
 
         // The new prev_end is the current token's end. In OCaml this is the
         // SAME position object, so we reuse the current end_pos_idx.
@@ -605,6 +619,7 @@ impl<'src> Parser<'src> {
                         self.arena.require_locations();
                     }
                     self.token = result.token;
+                    self.token_line_break = self.scanner.take_line_break();
                     self.prev_end_pos = prev_end;
                     self.start_pos = result.start_pos;
                     self.end_pos = result.end_pos;
@@ -627,8 +642,41 @@ impl<'src> Parser<'src> {
         }
     }
 
+    /// Record the line break before the current token as it is consumed
+    /// (res_parser.ml `next`): only consumed tokens count, since lookahead
+    /// can read the text after a backtick as code before it is rescanned as
+    /// template text.
+    fn consume_line_break(&mut self) {
+        if self.line_break.is_none() {
+            self.line_break = self.token_line_break;
+        }
+    }
+
+    /// The newline to format the source with: CRLF when its first line break
+    /// between tokens, outside literals and comments, is CRLF, LF otherwise
+    /// (res_parser.ml `newline`, with the break before `Eof` that `finish`
+    /// adds). Complete once the parse has reached `Eof`.
+    pub fn newline(&self) -> &'static str {
+        let line_break = match self.line_break {
+            None if self.token == Token::Eof => self.token_line_break,
+            line_break => line_break,
+        };
+        match line_break {
+            Some(index) if index > 0 && self.scanner.src().as_bytes()[index - 1] == b'\r' => "\r\n",
+            _ => "\n",
+        }
+    }
+
     /// Scan the next template literal token.
+    ///
+    /// res_parser.ml `next_template_literal_token`: the delimiter that is
+    /// the current token is consumed, and the template text has no line
+    /// break before it.
     pub fn next_template_literal_token(&mut self) {
+        if self.token != Token::Eof {
+            self.consume_line_break();
+        }
+        self.token_line_break = None;
         let result = self.scanner.scan_template_literal_token();
 
         // Propagate scanner diagnostics to parser
@@ -752,6 +800,8 @@ impl<'src> Parser<'src> {
         let start_pos_idx = self.start_pos_idx;
         let end_pos_idx = self.end_pos_idx;
         let prev_end_pos_idx = self.prev_end_pos_idx;
+        let token_line_break = self.token_line_break;
+        let line_break = self.line_break;
         // Breadcrumbs are restored from the untouched bottom of the stack
         // plus the entries popped from it (see `eat_breadcrumb`).
         let outer_breadcrumb_floor =
@@ -790,6 +840,8 @@ impl<'src> Parser<'src> {
         self.start_pos_idx = start_pos_idx;
         self.end_pos_idx = end_pos_idx;
         self.prev_end_pos_idx = prev_end_pos_idx;
+        self.token_line_break = token_line_break;
+        self.line_break = line_break;
         self.breadcrumbs.truncate(self.lookahead_breadcrumb_floor);
         while self.lookahead_popped_breadcrumbs.len() > popped_breadcrumbs_len {
             let popped = self
@@ -831,6 +883,8 @@ impl<'src> Parser<'src> {
             start_pos_idx: self.start_pos_idx,
             end_pos_idx: self.end_pos_idx,
             prev_end_pos_idx: self.prev_end_pos_idx,
+            token_line_break: self.token_line_break,
+            line_break: self.line_break,
             breadcrumbs: self.breadcrumbs.clone(),
             regions: self.regions.clone(),
             diagnostics_len: self.diagnostics.len(),
@@ -860,6 +914,8 @@ impl<'src> Parser<'src> {
         self.start_pos_idx = snapshot.start_pos_idx;
         self.end_pos_idx = snapshot.end_pos_idx;
         self.prev_end_pos_idx = snapshot.prev_end_pos_idx;
+        self.token_line_break = snapshot.token_line_break;
+        self.line_break = snapshot.line_break;
         self.breadcrumbs = snapshot.breadcrumbs;
         // res_parser.ml `with_checkpoint`: immutable region states also roll
         // back error suppression.

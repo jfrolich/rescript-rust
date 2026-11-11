@@ -170,10 +170,6 @@ fn run(args: Vec<String>) {
         return;
     }
 
-    // res_cli.ml:79-82: the res target keeps the line endings of a CRLF
-    // file, like bsc -format; the source is parsed as it is.
-    let newline = crate::parser::line_endings::newline(&source);
-
     // Determine if we're parsing an interface
     let is_interface = args.interface || filename.ends_with(".resi") || filename.ends_with(".mli");
 
@@ -182,6 +178,9 @@ fn run(args: Vec<String>) {
     // Parse structure or signature
     if is_interface {
         let signature = module::parse_signature(&mut parser);
+        // res_cli.ml:87-89: the res target takes the line endings of the
+        // parsed source, like bsc -format.
+        let newline = parser.newline();
 
         // OCaml compiler/syntax/src/res_core.ml:292-300 reports deprecated
         // uncurried-dot syntax through Location.prerr_warning, which writes
@@ -329,6 +328,7 @@ fn run(args: Vec<String>) {
         }
     } else {
         let structure = module::parse_structure(&mut parser);
+        let newline = parser.newline();
 
         // OCaml compiler/syntax/src/res_core.ml:292-300 reports deprecated
         // uncurried-dot syntax through Location.prerr_warning, which writes

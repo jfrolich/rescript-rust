@@ -749,10 +749,9 @@ pub fn format_source_with(
     filename: &str,
     ignore_parse_errors: bool,
 ) -> (String, Option<Vec<u8>>) {
-    // res_multi_printer.ml:2-3,28-32: parse the source as it is and print
-    // the line breaks the printer writes with the source's newline.
+    // res_multi_printer.ml: parse the source as it is and print the line
+    // breaks the printer writes with the newline of the parsed source.
     let raw_source = crate::source_text::latin1_bytes_to_string(source.to_vec());
-    let newline = crate::parser::line_endings::newline(&raw_source);
     let source: &str = &raw_source;
     let is_interface = filename.ends_with(".resi");
     let mut parser = Parser::new(filename, source);
@@ -763,6 +762,7 @@ pub fn format_source_with(
             return (report, None);
         }
         let comments = parser.comments().to_vec();
+        let newline = parser.newline();
         let output = crate::parser::printer::print_signature_with_comments(
             &signature,
             comments,
@@ -777,6 +777,7 @@ pub fn format_source_with(
             return (report, None);
         }
         let comments = parser.comments().to_vec();
+        let newline = parser.newline();
         let output = crate::parser::printer::print_structure_with_comments(
             &structure,
             comments,
@@ -11692,6 +11693,58 @@ mod tests {
         assert_eq!(format(&to_crlf(&formatted)), to_crlf(&formatted));
         let unformatted = super::format_source(b"let  x  =  1\r\n", "A.res").unwrap();
         assert_eq!(unformatted, b"let x = 1\r\n");
+    }
+
+    /// tests/syntax_tests/res_test.ml:95-142: the first line break outside
+    /// literals and comments gives the line endings, also with no line break
+    /// or no final one, and after a regex, a JSX closing tag or a division
+    /// that holds what would otherwise start a literal. Lookahead that reads
+    /// the text of a template as code does not count.
+    #[test]
+    fn format_takes_line_endings_from_a_break_between_tokens() {
+        let format = |source: &str| {
+            String::from_utf8(super::format_source(source.as_bytes(), "A.res").unwrap()).unwrap()
+        };
+        for (source, expected) in [
+            ("let a = 1", "let a = 1\n"),
+            ("let a = \"x\r\ny\"", "let a = \"x\r\ny\"\n"),
+            ("let a = 1 // c\r", "let a = 1 // c\n"),
+            ("let a = \"x\r\ny\"\nlet b = 1", "let a = \"x\r\ny\"\n\nlet b = 1\n"),
+            ("let a = \"x\ny\"\r\nlet b = 1", "let a = \"x\ny\"\r\n\r\nlet b = 1\r\n"),
+            ("/* a\r\nb */\nlet b = 1\n", "/* a\n b */\nlet b = 1\n"),
+            ("/* a\nb */\r\nlet b = 1\r\n", "/* a\r\n b */\r\nlet b = 1\r\n"),
+            (
+                "let a = 1 /* a\r\nb */\nlet b = 1\n",
+                "let a = 1 /* a\n b */\n\nlet b = 1\n",
+            ),
+            (
+                "let t = `${f({a: 1},\r\n 2)}`\nlet x = 1\n",
+                "let t = `${f({a: 1}, 2)}`\r\nlet x = 1\r\n",
+            ),
+        ] {
+            assert_eq!(format(source), expected, "{source:?}");
+            assert_eq!(format(expected), expected, "{expected:?}");
+        }
+        for source in [
+            "let a = \"x\r\ny\"\n\nlet b = 1\n",
+            "let a = \"x\ny\"\r\n\r\nlet b = 1\r\n",
+            "let c = '\"'\n\nlet s = \"a\r\nb\"\n",
+            "let t = `a${b}c\r\nd`\n\nlet x = 1\n",
+            "let t = `a${b}c\nd`\r\n\r\nlet x = 1\r\n",
+            "let t = `${f({\n    \"a\": `${x}\r\n`,\n  })}\r\n`\n\nlet x = 1\n",
+            "let t = `${switch x {\n  | _ => 1\n  }}\r\n`\n\nlet x = 1\n",
+            "let r = /\"/\n\nlet s = \"a\r\nb\"\n",
+            "let r = (1, /\"/)\n\nlet s = \"a\r\nb\"\n",
+            "let x = a / f(\"/\")\r\nlet y = 2\r\n",
+            "let x = a->f / g(\"/\")\r\nlet y = 2\r\n",
+            "let e = (<a></a>, \"/\")\r\n\r\nlet s = \"a\nb\"\r\n",
+            "let e = <a>{/\"/->f}</a>\r\n\r\nlet s = \"a\nb\"\r\n",
+            "let t = `${/\"/->f}\r\n`\n\nlet x = 1\n",
+            "/** a\r\nb */\nlet x = 1\n",
+            "let e = (\r\n  <a />,\r\n  <a></a>,\r\n  \"x/y\nz\",\r\n)\r\n\r\nlet y = 2\r\n",
+        ] {
+            assert_eq!(format(source), source, "{source:?}");
+        }
     }
 
     /// tests/syntax_tests/data/printer/expr/coerce.res:15-19: a labelled

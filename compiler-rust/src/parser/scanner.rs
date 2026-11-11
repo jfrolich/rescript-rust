@@ -84,6 +84,10 @@ pub struct Scanner<'src> {
     lnum: i32,
     /// Collected diagnostics.
     diagnostics: Vec<ParserDiagnostic>,
+    /// Byte offset of the first LF skipped between tokens since the last
+    /// `take_line_break` (res_scanner.ml `line_break`). Literals and
+    /// comments consume their own line breaks.
+    line_break: Option<usize>,
 }
 
 /// Result of scanning a token.
@@ -128,7 +132,14 @@ impl<'src> Scanner<'src> {
             line_offset: char_pos,
             lnum: 1,
             diagnostics: Vec::new(),
+            line_break: None,
         }
+    }
+
+    /// The first LF skipped between tokens since the previous call, and
+    /// forget it (res_parser.ml `read`).
+    pub fn take_line_break(&mut self) -> Option<usize> {
+        self.line_break.take()
     }
 
     /// Get collected diagnostics.
@@ -375,6 +386,9 @@ impl<'src> Scanner<'src> {
     /// Skip whitespace characters.
     fn skip_whitespace(&mut self) {
         while Self::is_whitespace(self.ch) {
+            if self.ch == '\n' && self.line_break.is_none() {
+                self.line_break = Some(self.offset);
+            }
             self.next();
         }
     }
