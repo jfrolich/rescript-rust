@@ -1,4 +1,5 @@
-"""Test the exit-status guard of the res_parser JSX warning stage.
+"""Test the exit-status guard of the res_parser JSX warning stage, and that
+the compiler cases report the same results run one at a time or in parallel.
 
 Runs the real test_error_output_parity.sh (`--parser-only`, limited to the
 JSX warning fixtures) with fake OCaml and Rust parsers. The fakes print the
@@ -78,6 +79,57 @@ class JsxParserWarningStatusTests(unittest.TestCase):
                                               status)
                 self.assertEqual(code, 1, output)
                 self.assertIn(f"OCaml {status}, Rust {status}, expected 0", output)
+
+
+# `bsc flags... file`: prints a diagnostic naming the file. The Rust side
+# (FAKE_SIDE=rust) prints a different one for files containing FAKE_DIFFER and
+# exits 124, like a timeout, for files containing FAKE_TIMEOUT.
+FAKE_BSC = r'''
+import os, sys
+path = sys.argv[-1]
+side = os.environ["FAKE_SIDE"]
+if side == "rust" and os.environ["FAKE_TIMEOUT"] in path:
+    sys.exit(124)
+text = "rust" if side == "rust" and os.environ["FAKE_DIFFER"] in path else "same"
+sys.stderr.write(f"\\n  {text} diagnostic\\n  {path}:1:1\\n\\n")
+sys.exit(1)
+'''
+
+
+class ParallelCompilerCaseTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.dir = tempfile.TemporaryDirectory()
+        root = Path(cls.dir.name)
+        (root / "fake_bsc.py").write_text(FAKE_BSC)
+        for side in ("ocaml", "rust"):
+            exe = root / f"{side}_bsc"
+            exe.write_text(f'#!/bin/sh\nFAKE_SIDE={side} exec python3 -I "{root}/fake_bsc.py" "$@"\n')
+            exe.chmod(0o755)
+        cls.root = root
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.dir.cleanup()
+
+    def run_cases(self, jobs):
+        env = dict(os.environ, OCAML_BSC=str(self.root / "ocaml_bsc"),
+                   RUST_BSC=str(self.root / "rust_bsc"), RUST_TARGET="none",
+                   PARITY_JOBS=str(jobs), FAKE_DIFFER="jsx_warning_then_error",
+                   FAKE_TIMEOUT="jsx_error_then_warning")
+        result = subprocess.run(["bash", str(SCRIPT), "--compiler-only", "fixtures/jsx_"],
+                                env=env, capture_output=True, text=True, timeout=120)
+        output = (result.stdout + result.stderr).replace("\x1b", "")
+        summary = output[output.index("Error output parity summary"):]
+        summary = "\n".join(line for line in summary.splitlines() if "cache:" not in line)
+        return result.returncode, summary
+
+    def test_parallel_cases_report_what_serial_cases_report(self):
+        serial = self.run_cases(1)
+        self.assertEqual(serial[0], 1, serial[1])
+        self.assertIn("jsx_warning_then_error.res (output differs)", serial[1])
+        self.assertIn("jsx_error_then_warning.res (exit status differs)", serial[1])
+        self.assertEqual(self.run_cases(4), serial)
 
 
 if __name__ == "__main__":
