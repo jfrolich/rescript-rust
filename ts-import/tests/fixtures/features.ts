@@ -232,3 +232,12 @@ export type Prop = NamedProp | KnownProp | Other | Third | Fourth;
 export type Holder<T> = { type: "Held"; value: T; note?: string } | { type: "Held"; value: T } | { type: "Empty" };
 export declare function hold<T>(value: T): Holder<T>;
 export declare function prop(): Prop;
+
+// Literals told apart by the kind of `value`: `typeof null` is "object".
+export interface StrLit { type: "Lit"; value: string; raw: string | null }
+export interface NumLit { type: "Lit"; value: number; raw: string | null }
+export interface BoolLit { type: "Lit"; value: boolean; raw: string | null }
+export interface NullLit { type: "Lit"; value: null; raw: "null" | null }
+export interface Ident { type: "Ident"; name: string }
+export type Lit = StrLit | NumLit | BoolLit | NullLit | Ident;
+export declare function lit(): Lit;

@@ -307,21 +307,68 @@ impl State {
             fields
                 .iter()
                 .map(|field| {
-                    let literals = if field.optional { None } else { self.literals_of(&field.ty) };
-                    let kind = match &literals {
-                        _ if field.optional => None,
-                        Some(literals) => literals_kind(literals),
-                        None => self.runtime_of(&field.ty, 0),
+                    let (literals, kinds) = if field.optional {
+                        (None, None)
+                    } else {
+                        (self.literals_of(&field.ty), self.kinds_of(&field.ty, 0))
                     };
                     FieldShape {
                         name: field.js_name.clone().unwrap_or_else(|| field.name.clone()),
                         required: !field.optional,
                         literals,
-                        kind,
+                        kinds,
                     }
                 })
                 .collect(),
         )
+    }
+
+    /// What `typeof` can answer for the values of a converted type, as the
+    /// compiler has it; `None` when it cannot know.
+    fn kinds_of(&self, ty: &Ty, depth: usize) -> Option<Kinds> {
+        let of_tags = |tags: &[Tag], hash: bool| {
+            tags.iter()
+                .map(|tag| {
+                    Kinds::of_typeof(match tag {
+                        Tag::Num(text) if !hash || is_hash_number(text) => "number",
+                        Tag::Num(_) | Tag::Str(_) => "string",
+                        Tag::Bool(_) => "boolean",
+                        Tag::Null => "object",
+                        Tag::Undefined => "undefined",
+                    })
+                })
+                .reduce(Kinds::union)
+        };
+        let with = |name: &str, args: &[Ty]| {
+            Some(self.kinds_of(args.first()?, depth + 1)?.union(Kinds::of_typeof(name)))
+        };
+        match ty {
+            Ty::Poly(tags) => of_tags(tags, true),
+            Ty::Fn(..) => Some(Kinds::of_typeof("function")),
+            Ty::Tuple(_) => Some(Kinds { arrays: true, other_objects: false, ..Kinds::of_typeof("object") }),
+            Ty::Var(_) => None,
+            _ if depth > 16 => None,
+            Ty::App(name, args) => match name.as_str() {
+                "bool" => Some(Kinds::of_typeof("boolean")),
+                "option" => with("undefined", args),
+                "Null.t" => with("object", args),
+                "Nullable.t" => Some(with("object", args)?.union(Kinds::of_typeof("undefined"))),
+                _ => {
+                    let local = name.rsplit('.').next().unwrap_or(name);
+                    if let Some(tags) = self.literal_types.get(local) {
+                        return of_tags(tags, false);
+                    }
+                    if let Some(Runtime::Alias(target)) = self.runtime.get(local) {
+                        return self.kinds_of(target, depth + 1);
+                    }
+                    match self.runtime_of(ty, depth)? {
+                        "array" => Some(Kinds { arrays: true, other_objects: false, ..Kinds::of_typeof("object") }),
+                        "instance" => Some(Kinds::of_typeof("object")),
+                        name => Some(Kinds::of_typeof(name)),
+                    }
+                }
+            },
+        }
     }
 
     /// The literals a field type stands for: a polymorphic variant, a
@@ -911,6 +958,31 @@ impl<'a> Converter<'a> {
     }
 
     /// How the current request refers to a declaration.
+    /// The type of `null` alone, `type nullValue = | @as(null) Null`, declared
+    /// once: unlike `Null.t<unknown>`, the compiler knows its values are
+    /// `null`, which tells object cases apart by `typeof`.
+    fn null_type(&mut self) -> Ty {
+        let key = "null alone".to_string();
+        let named = match self.state.by_shape.get(&key).cloned() {
+            Some(named) => named,
+            None => {
+                let name = self.fresh_type_name("nullValue");
+                let named = Named { scope: self.scope.clone(), name: name.clone(), params: 0 };
+                self.state.set_shape(key, named.clone());
+                let ctors = vec![Ctor { name: "Null".to_string(), tag: Some(Tag::Null), payload: Payload::None }];
+                self.state.declare(Decl {
+                    name,
+                    params: Vec::new(),
+                    kind: DeclKind::Variant { tag: None, ctors },
+                    ts: None,
+                    class: None,
+                });
+                named
+            }
+        };
+        Ty::App(self.reference(&named), Vec::new())
+    }
+
     fn reference(&self, named: &Named) -> String {
         let common = named
             .scope
@@ -1332,7 +1404,7 @@ impl<'a> Converter<'a> {
             return simple("unit");
         }
         if flags.intersects(TypeFlags::Null) {
-            return Structure::Ty(Ty::app("Null.t", vec![Ty::unknown()]));
+            return Structure::Ty(self.null_type());
         }
         if flags.intersects(TypeFlags::TypeParameter) {
             if let Some((_, name)) = self.type_params.iter().rev().find(|(param, _)| *param == ty) {
@@ -2529,15 +2601,16 @@ impl<'a> Converter<'a> {
             .map(|&property| {
                 let optional = property.flags().intersects(SymbolFlags::Optional);
                 let ty = self.c.get_type_of_symbol(property);
-                let (literals, kind) = if optional { (None, None) } else { self.ts_field_values(ty) };
-                FieldShape { name: property.name().to_string(), required: !optional, literals, kind }
+                let (literals, kinds) = if optional { (None, None) } else { self.ts_field_values(ty) };
+                FieldShape { name: property.name().to_string(), required: !optional, literals, kinds }
             })
             .collect();
         ObjectShape::Closed(fields)
     }
 
-    /// The literals and the kind of the values of a field's TypeScript type.
-    fn ts_field_values(&mut self, ty: P<Type>) -> (Option<Vec<Literal>>, Option<&'static str>) {
+    /// The literals and the `typeof` answers of the values of a field's
+    /// TypeScript type.
+    fn ts_field_values(&mut self, ty: P<Type>) -> (Option<Vec<Literal>>, Option<Kinds>) {
         let flags = ty.flags();
         let literal = |tag: Tag| match tag {
             Tag::Num(text) if is_hash_number(&text) => Literal::Num(text),
@@ -2546,38 +2619,58 @@ impl<'a> Converter<'a> {
             Tag::Null | Tag::Undefined => Literal::Other,
         };
         if flags.intersects(TypeFlags::Boolean | TypeFlags::BooleanLiteral) {
-            return (Some(vec![Literal::Bool(true), Literal::Bool(false)]), Some("boolean"));
+            return (Some(vec![Literal::Bool(true), Literal::Bool(false)]), Some(Kinds::of_typeof("boolean")));
         }
         let tags: Option<Vec<Tag>> = if flags.intersects(TypeFlags::Union) {
             ty.types().iter().map(|&member| literal_tag(member)).collect()
         } else {
             literal_tag(ty).map(|tag| vec![tag])
         };
-        if let Some(tags) = tags {
-            let literals: Vec<Literal> = tags.into_iter().map(literal).collect();
-            let kind = literals_kind(&literals);
-            return (Some(literals), kind);
+        let kinds = self.ts_kinds(ty);
+        (tags.map(|tags| tags.into_iter().map(literal).collect()), kinds)
+    }
+
+    /// What `typeof` can answer for the values of a TypeScript type, as the
+    /// compiler sees the converted type; `None` when it cannot know.
+    fn ts_kinds(&mut self, ty: P<Type>) -> Option<Kinds> {
+        let flags = ty.flags();
+        if flags.intersects(TypeFlags::Union) {
+            return ty
+                .types()
+                .iter()
+                .map(|&member| self.ts_kinds(member))
+                .collect::<Option<Vec<_>>>()?
+                .into_iter()
+                .reduce(Kinds::union);
         }
-        let kind = if flags.intersects(TypeFlags::String | TypeFlags::TemplateLiteral | TypeFlags::StringMapping) {
-            Some("string")
-        } else if flags.intersects(TypeFlags::Number) {
-            Some("number")
-        } else if flags.intersects(TypeFlags::BigInt) {
-            Some("bigint")
+        let name = if flags.intersects(
+            TypeFlags::String | TypeFlags::StringLiteral | TypeFlags::TemplateLiteral | TypeFlags::StringMapping,
+        ) {
+            "string"
+        } else if flags.intersects(TypeFlags::Number | TypeFlags::NumberLiteral) {
+            "number"
+        } else if flags.intersects(TypeFlags::BigInt | TypeFlags::BigIntLiteral) {
+            "bigint"
+        } else if flags.intersects(TypeFlags::Boolean | TypeFlags::BooleanLiteral) {
+            "boolean"
+        } else if flags.intersects(TypeFlags::Null) {
+            "object"
+        } else if flags.intersects(TypeFlags::Undefined | TypeFlags::Void) {
+            "undefined"
         } else if flags.intersects(TypeFlags::Object) {
             if self.c.is_array_or_tuple_type(ty) {
-                Some("array")
+                return Some(Kinds { arrays: true, other_objects: false, ..Kinds::of_typeof("object") });
             } else if !self.c.get_signatures_of_type(ty, SignatureKind::Call).is_empty() {
-                Some("function")
+                "function"
             } else {
                 // A plain object or a class instance; the check is kept
                 // permissive, the converted types decide.
-                Some("object")
+                "object"
             }
         } else {
-            None
+            return None;
         };
-        (None, kind)
+        Some(Kinds::of_typeof(name))
     }
 
     /// A function type. `top` is the imported function itself, where a rest
@@ -2886,8 +2979,53 @@ struct FieldShape {
     name: String,
     required: bool,
     literals: Option<Vec<Literal>>,
-    /// As [`State::runtime_of`]: `"string"`, `"array"`, `"instance"`, ...
-    kind: Option<&'static str>,
+    /// What `typeof` can answer for its values, when that is known.
+    kinds: Option<Kinds>,
+}
+
+/// The answers `typeof` can give for the values of a field, as the compiler
+/// has them (`Kinds` in `compiler-rust/src/types/variant_layout.rs`):
+/// `null` is an object, arrays are told apart for `Array.isArray`.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct Kinds {
+    typeofs: u8,
+    /// Some values are arrays.
+    arrays: bool,
+    /// Some values are objects that are not arrays, `null` among them.
+    other_objects: bool,
+}
+
+impl Kinds {
+    const BITS: [&'static str; 8] = ["string", "number", "bigint", "boolean", "symbol", "function", "object", "undefined"];
+
+    fn of_typeof(name: &str) -> Kinds {
+        let bit = Self::BITS.iter().position(|other| *other == name).expect("a typeof answer");
+        Kinds { typeofs: 1 << bit, arrays: false, other_objects: name == "object" }
+    }
+
+    fn union(self, other: Kinds) -> Kinds {
+        Kinds {
+            typeofs: self.typeofs | other.typeofs,
+            arrays: self.arrays || other.arrays,
+            other_objects: self.other_objects || other.other_objects,
+        }
+    }
+
+    fn has(self, name: &str) -> bool {
+        Self::BITS.iter().position(|other| *other == name).is_some_and(|bit| self.typeofs & (1 << bit) != 0)
+    }
+
+    /// The kind check every value passes, if there is one.
+    fn check(self) -> Option<&'static str> {
+        if self.typeofs.count_ones() != 1 {
+            return None;
+        }
+        match Self::BITS[self.typeofs.trailing_zeros() as usize] {
+            "object" if !self.other_objects => Some("array"),
+            "symbol" | "undefined" => None,
+            name => Some(name),
+        }
+    }
 }
 
 /// An object member: its fields, or an open object.
@@ -2931,25 +3069,6 @@ fn literal_kind(literal: &Literal) -> Option<&'static str> {
     }
 }
 
-fn literals_kind(literals: &[Literal]) -> Option<&'static str> {
-    let first = literal_kind(literals.first()?)?;
-    literals.iter().all(|literal| literal_kind(literal) == Some(first)).then_some(first)
-}
-
-/// What `typeof` answers for a kind.
-fn typeof_of(kind: &str) -> Option<&'static str> {
-    match kind {
-        "string" => Some("string"),
-        "number" => Some("number"),
-        "bigint" => Some("bigint"),
-        "boolean" => Some("boolean"),
-        "symbol" => Some("symbol"),
-        "function" => Some("function"),
-        "object" | "array" | "instance" => Some("object"),
-        _ => None,
-    }
-}
-
 /// No value of the member passes the check. This mirrors the compiler
 /// (`compiler-rust/src/types/variant_layout.rs`, `fails`).
 fn check_fails(check: &Check, shape: &ObjectShape) -> bool {
@@ -2961,18 +3080,13 @@ fn check_fails(check: &Check, shape: &ObjectShape) -> bool {
     };
     match check {
         Check::Present(_) => false,
-        Check::Literals(_, literals) => !literals.iter().any(|literal| {
-            match (&field.literals, field.kind.and_then(typeof_of)) {
-                (Some(own), _) => own.contains(literal),
-                (None, Some(own)) => literal_kind(literal).is_none_or(|kind| typeof_of(kind) == Some(own)),
-                (None, None) => true,
-            }
+        Check::Literals(_, literals) => !literals.iter().any(|literal| match (&field.literals, field.kinds) {
+            (Some(own), _) => own.contains(literal),
+            (None, Some(kinds)) => literal_kind(literal).is_none_or(|kind| kinds.has(kind)),
+            (None, None) => true,
         }),
-        Check::Kind(_, "array") => field.kind.is_some_and(|kind| kind != "array"),
-        Check::Kind(_, kind) => match (field.kind.and_then(typeof_of), typeof_of(kind)) {
-            (Some(own), Some(checked)) => own != checked,
-            _ => false,
-        },
+        Check::Kind(_, "array") => field.kinds.is_some_and(|kinds| !kinds.arrays),
+        Check::Kind(_, kind) => field.kinds.is_some_and(|kinds| !kinds.has(kind)),
     }
 }
 
@@ -2986,12 +3100,7 @@ fn candidate_checks(shape: &ObjectShape) -> Vec<Check> {
     let literal = required()
         .filter_map(|field| field.literals.clone().map(|literals| Check::Literals(field.name.clone(), literals)));
     let presence = required().map(|field| Check::Present(field.name.clone()));
-    let kind = required().filter_map(|field| match field.kind {
-        Some(kind @ ("string" | "number" | "bigint" | "boolean" | "function" | "object" | "array")) => {
-            Some(Check::Kind(field.name.clone(), kind))
-        }
-        _ => None,
-    });
+    let kind = required().filter_map(|field| Some(Check::Kind(field.name.clone(), field.kinds?.check()?)));
     literal.chain(presence).chain(kind).collect()
 }
 
@@ -3115,9 +3224,9 @@ fn merge_shapes(a: &ObjectShape, b: &ObjectShape) -> ObjectShape {
                     }
                     _ => None,
                 },
-                kind: if x.kind == y.kind { x.kind } else { None },
+                kinds: x.kinds.zip(y.kinds).map(|(x, y)| x.union(y)),
             },
-            _ => FieldShape { name: field.name.clone(), required: false, literals: None, kind: None },
+            _ => FieldShape { name: field.name.clone(), required: false, literals: None, kinds: None },
         });
     }
     ObjectShape::Closed(fields)

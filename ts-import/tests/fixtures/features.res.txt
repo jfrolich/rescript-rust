@@ -277,6 +277,38 @@ module Features = {
     | Object2({
       @as("type") type_: [#Empty],
     })
+  type strLit = {
+    @as("type") type_: [#Lit],
+    value: string,
+    raw: Null.t<string>,
+  }
+  type numLit = {
+    @as("type") type_: [#Lit],
+    value: float,
+    raw: Null.t<string>,
+  }
+  type boolLit = {
+    @as("type") type_: [#Lit],
+    value: bool,
+    raw: Null.t<string>,
+  }
+  type nullValue =
+    | @as(null) Null
+  type nullLit = {
+    @as("type") type_: [#Lit],
+    value: nullValue,
+    raw: Null.t<[#null]>,
+  }
+  type ident = {
+    @as("type") type_: [#Ident],
+    name: string,
+  }
+  @unboxed type lit =
+    | BoolLit(boolLit)
+    | Ident(ident)
+    | NullLit(nullLit)
+    | NumLit(numLit)
+    | StrLit(strLit)
   type findResult = {
     id: string,
   }
@@ -414,7 +446,7 @@ module Features = {
   external nothing: unit = "nothing"
   /** TypeScript: `null` */
   @module("./features.ts")
-  external aNull: Null.t<unknown> = "aNull"
+  external aNull: nullValue = "aNull"
   /** TypeScript: `"hello"` */
   @module("./features.ts")
   external literalString: string = "literalString"
@@ -709,6 +741,9 @@ module Features = {
   /** TypeScript: `() => Prop` */
   @module("./features.ts")
   external prop: unit => prop = "prop"
+  /** TypeScript: `() => Lit` */
+  @module("./features.ts")
+  external lit: unit => lit = "lit"
 }
 
 // Where ReScript says less than TypeScript:

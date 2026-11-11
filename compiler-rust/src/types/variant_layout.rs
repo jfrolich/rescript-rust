@@ -1077,9 +1077,101 @@ struct FieldShape {
     /// The only values the field can have, when its type is a set of
     /// literals.
     literals: Option<Vec<LiteralTag>>,
-    /// The payload kind of the field's values (rule 4 of
-    /// `compiler/ml/UntaggedVariants.md`), when it is known.
-    kind: Option<BlockType>,
+    /// What `typeof` can answer for the field's values, when it is known.
+    kinds: Option<Kinds>,
+}
+
+/// The answers `typeof` can give for the values of a type: `null` is an
+/// object, `option<t>` adds `undefined`. Arrays are told apart from other
+/// objects, for `Array.isArray`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Kinds {
+    /// One bit per answer, as in [`Kinds::BITS`].
+    typeofs: u8,
+    /// Some values are arrays.
+    arrays: bool,
+    /// Some values are objects that are not arrays, `null` among them.
+    other_objects: bool,
+}
+
+impl Kinds {
+    const BITS: [&'static str; 8] = [
+        "string",
+        "number",
+        "bigint",
+        "boolean",
+        "symbol",
+        "function",
+        "object",
+        "undefined",
+    ];
+
+    fn of_typeof(name: &str) -> Kinds {
+        let bit = Self::BITS
+            .iter()
+            .position(|other| *other == name)
+            .expect("a typeof answer");
+        Kinds {
+            typeofs: 1 << bit,
+            arrays: false,
+            other_objects: name == "object",
+        }
+    }
+
+    fn of_kind(kind: &BlockType) -> Option<Kinds> {
+        match kind {
+            BlockType::Instance(Instance::Array(_)) => Some(Kinds {
+                arrays: true,
+                other_objects: false,
+                ..Kinds::of_typeof("object")
+            }),
+            kind => typeof_of_kind(kind).map(Kinds::of_typeof),
+        }
+    }
+
+    fn of_literal(literal: &LiteralTag) -> Kinds {
+        Kinds::of_typeof(match literal {
+            LiteralTag::String(_) => "string",
+            LiteralTag::Int(_) | LiteralTag::Float(_) => "number",
+            LiteralTag::BigInt(_) => "bigint",
+            LiteralTag::Bool(_) => "boolean",
+            LiteralTag::Null => "object",
+            LiteralTag::Undefined => "undefined",
+        })
+    }
+
+    fn union(self, other: Kinds) -> Kinds {
+        Kinds {
+            typeofs: self.typeofs | other.typeofs,
+            arrays: self.arrays || other.arrays,
+            other_objects: self.other_objects || other.other_objects,
+        }
+    }
+
+    fn has(self, name: &str) -> bool {
+        Self::BITS
+            .iter()
+            .position(|other| *other == name)
+            .is_some_and(|bit| self.typeofs & (1 << bit) != 0)
+    }
+
+    /// The check every value passes: its one `typeof` answer, or
+    /// `Array.isArray` when every value is an array.
+    fn check(self, field: &str) -> Option<FieldCheck> {
+        if self.typeofs.count_ones() != 1 {
+            return None;
+        }
+        let name = Self::BITS[self.typeofs.trailing_zeros() as usize];
+        let kind = match name {
+            // Stored in the layout: one allocation for every array check.
+            "object" if !self.other_objects => {
+                BlockType::Instance(Instance::Array(ShapeAllocation::TUPLE_ARRAY))
+            }
+            "symbol" | "undefined" => return None,
+            name => BlockType::of_typeof(name)?,
+        };
+        Some(FieldCheck::Kind(field.to_string(), kind))
+    }
 }
 
 /// The payload of an object case.
@@ -1158,20 +1250,65 @@ fn polyvariant_literal(label: &str) -> LiteralTag {
     }
 }
 
-/// The kind all of these literals have, if they have one.
-fn literals_kind(literals: &[LiteralTag]) -> Option<BlockType> {
-    let kind = |literal: &LiteralTag| match literal {
-        LiteralTag::String(_) => Some(BlockType::String),
-        LiteralTag::Int(_) | LiteralTag::Float(_) => Some(BlockType::Number),
-        LiteralTag::BigInt(_) => Some(BlockType::Bigint),
-        LiteralTag::Bool(_) => Some(BlockType::Boolean),
-        LiteralTag::Null | LiteralTag::Undefined => None,
-    };
-    let first = kind(literals.first()?)?;
-    literals
-        .iter()
-        .all(|literal| kind(literal).as_ref() == Some(&first))
-        .then_some(first)
+/// What `typeof` can answer for the values of `t`: those of its literals;
+/// of `option<t>`, `undefined` and those of `t`; of an `@unboxed` variant,
+/// those of its cases; otherwise its payload kind's. `None` for a type
+/// variable, an abstract type or `unknown`.
+fn kinds_of(ctx: &TypeContext, env: &Env, t: TypeExprRef, fuel: u32) -> Option<Kinds> {
+    if fuel == 0 {
+        return None;
+    }
+    if let Some(literals) = field_literals(ctx, env, t) {
+        return literals
+            .iter()
+            .map(Kinds::of_literal)
+            .reduce(Kinds::union);
+    }
+    if let Some(declared) = recognized_as(ctx, env, t) {
+        return Kinds::of_kind(&declared);
+    }
+    let expanded = crate::types::ctype::expand_head_opt(ctx, env, t);
+    if let TypeDesc::Tconstr { path, args, .. } = &*ctx.get_desc(expanded) {
+        let args = ctx.type_list(*args).to_vec();
+        if path.same(&crate::types::predef::path_option()) {
+            let inner = kinds_of(ctx, env, *args.first()?, fuel - 1)?;
+            return Some(inner.union(Kinds::of_typeof("undefined")));
+        }
+        if let Some(decl) = find_type(ctx, env, path)
+            && let TypeKind::TypeVariant(cstrs, _) = &decl.type_kind
+            && decl
+                .type_attributes
+                .iter()
+                .any(|attr| attr.attr_name.txt == "unboxed")
+        {
+            // A payload that is a parameter of the variant has the type of
+            // the argument.
+            let payload_type = |payload: TypeExprRef| {
+                let payload = ctx.repr(payload);
+                decl.type_params
+                    .iter()
+                    .position(|param| ctx.repr(*param) == payload)
+                    .and_then(|index| args.get(index).copied())
+                    .unwrap_or(payload)
+            };
+            return cstrs
+                .iter()
+                .map(|cstr| match &cstr.cd_args {
+                    ConstructorArguments::CstrTuple(payloads) => match payloads.as_slice() {
+                        [] => Some(Kinds::of_literal(&declared_tag(cstr).literal)),
+                        [payload] => kinds_of(ctx, env, payload_type(*payload), fuel - 1),
+                        _ => None,
+                    },
+                    ConstructorArguments::CstrRecord(_) => Some(Kinds::of_typeof("object")),
+                })
+                .collect::<Option<Vec<_>>>()?
+                .into_iter()
+                .reduce(Kinds::union);
+        }
+    }
+    payload_kind(ctx, env, t)
+        .filter(|kind| *kind != BlockType::Unknown)
+        .and_then(|kind| Kinds::of_kind(&kind))
 }
 
 fn field_shape(
@@ -1180,16 +1317,11 @@ fn field_shape(
     field: &crate::types::decl::LabelDeclaration,
     field_type: TypeExprRef,
 ) -> FieldShape {
-    let literals = field_literals(ctx, env, field_type);
-    let kind = match &literals {
-        Some(literals) => literals_kind(literals),
-        None => payload_kind(ctx, env, field_type).filter(|kind| *kind != BlockType::Unknown),
-    };
     FieldShape {
         name: field.declaration_name().to_string(),
         required: !field.ld_optional,
-        literals,
-        kind,
+        literals: field_literals(ctx, env, field_type),
+        kinds: kinds_of(ctx, env, field_type, 8),
     }
 }
 
@@ -1259,23 +1391,22 @@ fn fails(check: &FieldCheck, case: &ObjectShape) -> bool {
     match check {
         FieldCheck::Present(_) => false,
         FieldCheck::Literals(_, literals) => !literals.iter().any(|literal| {
-            match (&field.literals, field.kind.as_ref().and_then(typeof_of_kind)) {
+            match (&field.literals, field.kinds) {
                 (Some(own), _) => own.iter().any(|l| same_literal_value(l, literal)),
-                (None, Some(typeof_name)) => literals_kind(std::slice::from_ref(literal))
-                    .is_none_or(|kind| kind.typeof_name() == Some(typeof_name)),
+                (None, Some(kinds)) => kinds.typeofs & Kinds::of_literal(literal).typeofs != 0,
                 (None, None) => true,
             }
         }),
-        FieldCheck::Kind(_, BlockType::Instance(Instance::Array(_))) => field
-            .kind
-            .as_ref()
-            .is_some_and(|kind| !matches!(kind, BlockType::Instance(Instance::Array(_)))),
-        FieldCheck::Kind(_, kind) => {
-            match (field.kind.as_ref().and_then(typeof_of_kind), kind.typeof_name()) {
-                (Some(own), Some(checked)) => own != checked,
-                _ => false,
-            }
+        // `Array.isArray` fails for a field with no array among its values.
+        FieldCheck::Kind(_, BlockType::Instance(Instance::Array(_))) => {
+            field.kinds.is_some_and(|kinds| !kinds.arrays)
         }
+        // `typeof` fails for a field none of whose values have the kind:
+        // `typeof null` is "object".
+        FieldCheck::Kind(_, kind) => match (field.kinds, kind.typeof_name()) {
+            (Some(kinds), Some(checked)) => !kinds.has(checked),
+            _ => false,
+        },
     }
 }
 
@@ -1294,22 +1425,7 @@ fn candidate_checks(case: &ObjectShape) -> Vec<FieldCheck> {
             .map(|literals| FieldCheck::Literals(field.name.clone(), literals))
     });
     let presence = required().map(|field| FieldCheck::Present(field.name.clone()));
-    let kind = required().filter_map(|field| match &field.kind {
-        Some(
-            kind @ (BlockType::String
-            | BlockType::Number
-            | BlockType::Bigint
-            | BlockType::Boolean
-            | BlockType::Function
-            | BlockType::Object),
-        ) => Some(FieldCheck::Kind(field.name.clone(), kind.clone())),
-        // Stored in the layout: one allocation for every array check.
-        Some(BlockType::Instance(Instance::Array(_))) => Some(FieldCheck::Kind(
-            field.name.clone(),
-            BlockType::Instance(Instance::Array(ShapeAllocation::TUPLE_ARRAY)),
-        )),
-        _ => None,
-    });
+    let kind = required().filter_map(|field| field.kinds?.check(&field.name));
     literal.chain(presence).chain(kind).collect()
 }
 

@@ -375,16 +375,35 @@ fn a_variant_of_another_module() {
 
 
 #[test]
-fn a_field_that_may_be_null_or_missing_has_no_kind() {
-    // `typeof x.v === "string"` fails for `None`, `null` and `undefined`, so
-    // none of these types gives `A` a kind test: `B` is told apart by `w`.
+fn a_field_that_may_be_null_or_missing_has_several_kinds() {
+    // `typeof x.v` is "string", "object" (`null`) or "undefined" for these
+    // types, so `A` has no kind test of its own; but none of them is
+    // "number", so `B` is told apart by the kind of `v`.
     for field in ["option<string>", "Null.t<string>", "Nullable.t<string>"] {
         assert_eq!(
-            tests_of(&format!("A({{v: {field}}}) | B({{v: float, w: int}})"), &["A", "B"]),
-            [r#""w" in x"#],
+            tests_of(&format!("A({{v: {field}}}) | B({{v: float}})"), &["A", "B"]),
+            [r#"typeof x.v === "number""#],
             "{field}"
         );
     }
+}
+
+#[test]
+fn null_is_an_object() {
+    // `typeof null` is "object": a field that is always `null` fails a
+    // `typeof` check for "string" or "number".
+    let js = js(r#"
+type nil = | @as(null) Nil
+@unboxed type literal =
+  | Str({value: string})
+  | Nil({value: nil})
+  | Num({value: float})
+let f = literal => switch literal { | Str(_) => 1 | Nil(_) => 2 | Num(_) => 3 }
+"#);
+    assert_eq!(
+        function(&js, "f"),
+        r#"if (typeof literal.value === "string") { return 1; } else if (literal.value === null) { return 2; } else { return 3; }"#
+    );
 }
 
 #[test]
@@ -430,9 +449,11 @@ let f = node =>
   | IdentifierName(_) => 4
   }
 "#);
+    // `RegExpLiteral`'s `value` is never a string (`typeof null` is
+    // "object"), so the presence check on `raw` is not needed.
     let f = function(&js, "f");
     assert!(
-        f.starts_with(r#"if ("raw" in node && typeof node.value === "string") { return 1; }"#),
+        f.starts_with(r#"if (typeof node.value === "string") { return 1; }"#),
         "{f}"
     );
 }
@@ -472,7 +493,7 @@ let describe = node =>
     assert_eq!(
         function(&js, "describe"),
         concat!(
-            r#"switch (node.type) { case "Literal" : if ("raw" in node && typeof node.value === "string") { return 1; } "#,
+            r#"switch (node.type) { case "Literal" : if (typeof node.value === "string") { return 1; } "#,
             r#"else if ("raw" in node) { return 2; } else { return 3; } "#,
             r#"case "IdentifierName" : case "Identifier" : return 4; "#,
             r#"case "BlockStatement" : return 5; case "EmptyStatement" : return 6; default: return 7; }"#
