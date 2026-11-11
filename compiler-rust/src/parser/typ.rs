@@ -801,6 +801,15 @@ fn parse_atomic_typ_expr_with_start(
             p.next();
             parse_package_type_with_parens(p, start_pos_idx)
         }
+        Token::DollarLbrace => {
+            let ext = super::module::parse_hole_extension(p);
+            let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+            CoreType {
+                ptyp_desc: CoreTypeDesc::Ptyp_extension(Box::new(ext)),
+                ptyp_loc: loc,
+                ptyp_attributes: Attributes::new(),
+            }
+        }
         Token::Percent => {
             // Extension: %ext
             let ext = parse_extension(p);
@@ -2131,6 +2140,9 @@ fn parse_extension(p: &mut Parser<'_>) -> Extension {
     p.expect(Token::Percent);
     let id = super::module::parse_extension_id(p, id_start_idx);
 
+    if let Some(payload) = super::module::parse_macro_type_arguments(p, &id) {
+        return (id, payload);
+    }
     let payload = super::module::parse_payload_region(p);
     let payload = super::module::raw_source_extension_payload(p, &id, payload);
 

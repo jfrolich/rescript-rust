@@ -191,6 +191,12 @@ impl<'src> Parser<'src> {
         parser
     }
 
+    /// Accept `$` inside identifiers, as macro-expanded source uses for
+    /// generated names. Call before the first token is consumed.
+    pub fn set_generated_names(&mut self, enabled: bool) {
+        self.scanner.generated_names = enabled;
+    }
+
     /// Create a location for the current token (start_pos to end_pos).
     /// Uses the stored start_pos_idx and end_pos_idx directly.
     pub fn mk_loc_current(&mut self) -> LocIdx {

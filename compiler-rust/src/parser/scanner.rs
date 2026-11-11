@@ -45,6 +45,9 @@ pub struct ScannerSnapshot {
 /// The lexical scanner state.
 #[derive(Debug)]
 pub struct Scanner<'src> {
+    /// Macro-expanded source: identifiers may contain `$`, which source
+    /// written by hand cannot, so generated names never collide with it.
+    pub generated_names: bool,
     /// Source filename (interned string index for sharing in marshal output).
     pub filename: StrIdx,
     /// Source code being scanned.
@@ -97,6 +100,7 @@ impl<'src> Scanner<'src> {
         };
 
         Self {
+            generated_names: false,
             filename,
             src,
             bytes,
@@ -409,7 +413,9 @@ impl<'src> Scanner<'src> {
         let start_off = self.offset;
 
         // Skip valid identifier characters (all ASCII, so byte == char)
-        while matches!(self.ch, 'A'..='Z' | 'a'..='z' | '0'..='9' | '_' | '\'') {
+        while matches!(self.ch, 'A'..='Z' | 'a'..='z' | '0'..='9' | '_' | '\'')
+            || (self.ch == '$' && self.generated_names && self.peek() != '{')
+        {
             self.next();
         }
 
@@ -1046,6 +1052,12 @@ impl<'src> Scanner<'src> {
                         self.next();
                         Token::Percent
                     }
+                }
+
+                // A hole in a macro quote: `%code(${e} + 1)`.
+                '$' if self.peek() == '{' => {
+                    self.next2();
+                    Token::DollarLbrace
                 }
 
                 '|' => match (self.peek(), self.peek2()) {

@@ -237,6 +237,7 @@ pub fn is_atomic_pattern_start(token: &Token<'_>) -> bool {
             | Token::Dict
             | Token::Exception
             | Token::Percent
+            | Token::DollarLbrace
     )
 }
 
@@ -261,6 +262,7 @@ pub fn is_atomic_expr_start(token: &Token<'_>) -> bool {
             | Token::LessThan
             | Token::Module
             | Token::Percent
+            | Token::DollarLbrace
             | Token::Forwardslash
             | Token::ForwardslashDot
             | Token::Regex { .. }
@@ -279,6 +281,7 @@ pub fn is_atomic_typ_expr_start(token: &Token<'_>) -> bool {
             | Token::Uident(_)
             | Token::Lident(_)
             | Token::Percent
+            | Token::DollarLbrace
     )
 }
 
@@ -308,6 +311,7 @@ pub fn is_expr_start(token: &Token<'_>) -> bool {
             | Token::MinusDot
             | Token::Module
             | Token::Percent
+            | Token::DollarLbrace
             | Token::Plus
             | Token::PlusDot
             | Token::Bnot
@@ -362,6 +366,7 @@ pub fn is_block_expr_start(token: &Token<'_>) -> bool {
             | Token::Module
             | Token::Open
             | Token::Percent
+            | Token::DollarLbrace
             | Token::Plus
             | Token::PlusDot
             | Token::String(_)
@@ -423,6 +428,7 @@ pub fn is_pattern_start(token: &Token<'_>) -> bool {
             | Token::Hash
             | Token::Exception
             | Token::Percent
+            | Token::DollarLbrace
             | Token::Module
             | Token::At
     )
@@ -470,6 +476,7 @@ pub fn is_typ_expr_start(token: &Token<'_>) -> bool {
             | Token::Lident(_)
             | Token::Module
             | Token::Percent
+            | Token::DollarLbrace
             | Token::Lbrace
     )
 }
