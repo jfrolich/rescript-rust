@@ -310,9 +310,9 @@ impl<W: Write> Formatter<W> {
                                 // Have the line just been broken here?
                                 if self.is_new_line {
                                     self.break_same_line(*nspaces);
-                                } else if size > self.space_left {
-                                    self.break_new_line(*offset, width);
-                                } else if self.current_indent > self.margin - width + *offset {
+                                } else if size > self.space_left
+                                    || self.current_indent > self.margin - width + *offset
+                                {
                                     self.break_new_line(*offset, width);
                                 } else {
                                     self.break_same_line(*nspaces);

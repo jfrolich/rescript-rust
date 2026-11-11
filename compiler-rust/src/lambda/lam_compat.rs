@@ -65,13 +65,25 @@ pub enum LetKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum FieldDbgInfo {
     /// Record field
-    Record { name: Name },
+    Record {
+        /// The field name.
+        name: Name,
+    },
     /// Module field
-    Module { name: Name },
+    Module {
+        /// The field name.
+        name: Name,
+    },
     /// Inlined record field
-    RecordInline { name: Name },
+    RecordInline {
+        /// The field name.
+        name: Name,
+    },
     /// Record extension field
-    RecordExtension { name: Name },
+    RecordExtension {
+        /// The field name.
+        name: Name,
+    },
     /// Tuple field
     Tuple,
     /// Poly variant tag

@@ -62,7 +62,9 @@ struct MatchActionData {
 /// (`compiler/ml/matching.ml:348-360`): the guard stays data until the
 /// fallthrough it needs is known.
 pub struct CaseAction {
+    /// The guard, if the case has one.
     pub guard: Option<RawLambda>,
+    /// The case body.
     pub body: RawLambda,
 }
 
@@ -222,6 +224,16 @@ impl MatchAction {
 
 type Clause<'p> = (Vec<&'p Pattern>, MatchAction);
 
+/// An or-pattern handler: the matrix of its rows, its exit label, the
+/// variables it passes to the handler, and the matching of its rows.
+type OrHandler<'p> = (Matrix<'p>, i32, Vec<Ident>, PatternMatching<'p>);
+
+/// A constructor case and its action.
+type ConstrCase = (std::sync::Arc<ConstructorDescription>, RawLambda);
+
+/// Match arguments being collected before they become a [`MatchArgs`].
+type ArgsBuf = smallvec::SmallVec<[(RawLambda, LetKind); 8]>;
+
 /// Shared match arguments used while compiling pattern matrices.
 ///
 /// OCaml `compiler/ml/matching.ml:814-1090` passes immutable `args` lists
@@ -230,9 +242,6 @@ type Clause<'p> = (Vec<&'p Pattern>, MatchAction);
 /// directly, so every `args.to_vec()` recursively cloned raw-lambda scrutinees.
 /// Store the backing vector once and represent OCaml tail lists with a start
 /// offset to preserve the same functional sharing.
-/// Match arguments being collected before they become a [`MatchArgs`].
-type ArgsBuf = smallvec::SmallVec<[(RawLambda, LetKind); 8]>;
-
 #[derive(Clone)]
 pub struct MatchArgs {
     values: Arc<[(RawLambda, LetKind)]>,
@@ -1015,7 +1024,7 @@ fn do_set_args<'p>(
         _ => crate::misc::fatal_error("Parmatch.set_args"),
     };
     let mut result = Vec::with_capacity(rest.len() + 1);
-    result.push(&*pa.alloc(head));
+    result.push(pa.alloc(head));
     result.extend_from_slice(rest);
     result
 }
@@ -1080,7 +1089,7 @@ fn all_record_args(
             // Fill in the actual patterns from the provided fields
             for (id, lbl, pat, opt) in lbls {
                 if (lbl.lbl_pos as usize) < result.len() {
-                    result[lbl.lbl_pos as usize] = (*id, lbl.clone(), pat.clone(), *opt);
+                    result[lbl.lbl_pos as usize] = (*id, lbl.clone(), *pat, *opt);
                 }
             }
             result
@@ -1243,7 +1252,9 @@ pub fn add_omega_column<'p>(pss: &Matrix<'p>) -> Matrix<'p> {
 /// partitioned into left and right parts.
 #[derive(Debug, Clone)]
 pub struct Ctx<'p> {
+    /// Patterns of the left columns.
     pub left: Vec<&'p Pattern>,
+    /// Patterns of the right columns.
     pub right: Vec<&'p Pattern>,
 }
 
@@ -1396,6 +1407,11 @@ pub fn ncols<'p>(pss: &Matrix<'p>) -> usize {
 // NoMatch / OrPat exceptions (represented as Result/enum in Rust)
 // ============================================================================
 
+/// Matcher used by `filter_matrix` and `make_default`: given a row's head
+/// pattern and the rest of the row, the row's replacement.
+type RowMatcher<'p, 'a> =
+    dyn Fn(&'p Pattern, &[&'p Pattern]) -> Result<Vec<&'p Pattern>, MatchError> + 'a;
+
 /// Errors that can occur during pattern matching filtering.
 enum MatchError {
     /// Pattern doesn't match.
@@ -1416,14 +1432,14 @@ enum MatchError {
 /// remaining rows when it peels an alias, a variable or an or-pattern; each
 /// row's results come before the remaining rows' results, so filtering one
 /// row at a time gives the same matrix.
-pub fn filter_matrix<'p>(
+fn filter_matrix<'p>(
     pa: &PatArena<'p>,
-    matcher: &dyn Fn(&'p Pattern, &[&'p Pattern]) -> Result<Vec<&'p Pattern>, MatchError>,
+    matcher: &RowMatcher<'p, '_>,
     pss: &Matrix<'p>,
 ) -> Matrix<'p> {
     fn filter_row<'p>(
         pa: &PatArena<'p>,
-        matcher: &dyn Fn(&'p Pattern, &[&'p Pattern]) -> Result<Vec<&'p Pattern>, MatchError>,
+        matcher: &RowMatcher<'p, '_>,
         p: &'p Pattern,
         ps: &[&'p Pattern],
         out: &mut Matrix<'p>,
@@ -1466,14 +1482,14 @@ pub type DefaultEnv<'p> = Vec<(Matrix<'p>, i32)>;
 
 /// Build default environment by filtering each matrix with the given matcher.
 /// Equivalent to OCaml's `make_default`.
-pub fn make_default<'p>(
+fn make_default<'p>(
     pa: &PatArena<'p>,
-    matcher: &dyn Fn(&'p Pattern, &[&'p Pattern]) -> Result<Vec<&'p Pattern>, MatchError>,
+    matcher: &RowMatcher<'p, '_>,
     env: &DefaultEnv<'p>,
 ) -> DefaultEnv<'p> {
     fn make_rec<'p>(
         pa: &PatArena<'p>,
-        matcher: &dyn Fn(&'p Pattern, &[&'p Pattern]) -> Result<Vec<&'p Pattern>, MatchError>,
+        matcher: &RowMatcher<'p, '_>,
         env: &[(Matrix<'p>, i32)],
     ) -> DefaultEnv<'p> {
         match env.split_first() {
@@ -1509,9 +1525,11 @@ pub fn make_default<'p>(
 /// Matcher built by `ctx_matcher`: given a context column head `q` and the
 /// rest of the column list, the normalized pattern to move left and the
 /// expanded right list.
-type CtxMatcher<'p, 'a> = Box<
-    dyn Fn(&'p Pattern, &[&'p Pattern]) -> Result<(&'p Pattern, Vec<&'p Pattern>), MatchError> + 'a,
->;
+type CtxMatcher<'p, 'a> = Box<CtxMatcherFn<'p, 'a>>;
+
+/// The function behind a [`CtxMatcher`].
+type CtxMatcherFn<'p, 'a> =
+    dyn Fn(&'p Pattern, &[&'p Pattern]) -> Result<(&'p Pattern, Vec<&'p Pattern>), MatchError> + 'a;
 
 /// `args @ rem` as a fresh row.
 fn prepend_row<'p>(
@@ -1528,7 +1546,7 @@ fn prepend_row<'p>(
 /// returns (to_left_pattern, expanded_right) or Err(NoMatch).
 ///
 /// Equivalent to OCaml's `ctx_matcher`.
-pub fn ctx_matcher<'p, 'a>(
+fn ctx_matcher<'p, 'a>(
     ctx_ref: Option<&'a TypeContext>,
     pa: &'p PatArena<'p>,
     p: &'p Pattern,
@@ -1651,10 +1669,7 @@ pub fn filter_ctx<'p>(
 
     fn filter_one<'p>(
         pa: &PatArena<'p>,
-        matcher: &dyn Fn(
-            &'p Pattern,
-            &[&'p Pattern],
-        ) -> Result<(&'p Pattern, Vec<&'p Pattern>), MatchError>,
+        matcher: &CtxMatcherFn<'p, '_>,
         left: &[&'p Pattern],
         p: &'p Pattern,
         ps: &[&'p Pattern],
@@ -1920,7 +1935,7 @@ pub struct PmOrCompiled<'p> {
     /// The body pattern matching.
     pub body: PatternMatching<'p>,
     /// Handlers for or-patterns: (matrix, exit_number, idents, pattern_matching).
-    pub handlers: Vec<(Matrix<'p>, i32, Vec<Ident>, PatternMatching<'p>)>,
+    pub handlers: Vec<OrHandler<'p>>,
     /// The or-pattern matrix.
     pub or_matrix: Matrix<'p>,
 }
@@ -2761,7 +2776,7 @@ pub fn as_simple_exit(a: &LamArena, lam: RawLambda) -> Option<i32> {
 // ============================================================================
 
 /// Create a delayed catch: returns the exit number and the handler to wrap
-/// with, if any (see [`apply_catch_delayed`]). If the handler is already a
+/// with, if any (see `apply_catch_delayed`). If the handler is already a
 /// simple exit, there is nothing to wrap.
 ///
 /// Equivalent to OCaml's `make_catch_delayed`.
@@ -2806,31 +2821,6 @@ fn raw_static_raise(b: &RawArena, l: RawLambda) -> Option<(i32, Vec<RawLambda>)>
     match b.node(raw) {
         Node::StaticRaise { label, args } => Some((label, b.list(args))),
         _ => None,
-    }
-}
-
-// ============================================================================
-// same_actions — Check if all actions in a list are the same
-// ============================================================================
-
-/// Check if all actions in a case list are the same lambda.
-/// Returns `Some(act)` with the first action if all are equal,
-/// `None` otherwise.
-///
-/// Equivalent to OCaml's `same_actions`.
-pub fn same_actions<'p>(b: &RawArena, cases: &[Clause<'p>]) -> Option<RawLambda> {
-    match cases {
-        [] => None,
-        [(_, act)] => Some(act.to_raw(b)),
-        [(_, act0), rem @ ..] => {
-            let raw_act0_str = act0.normalized_key(b)?;
-            for (_, act) in rem {
-                if act.normalized_key(b)? != raw_act0_str {
-                    return None;
-                }
-            }
-            Some(act0.to_raw(b))
-        }
     }
 }
 
@@ -2976,7 +2966,7 @@ fn bind(b: &RawArena, kind: LetKind, id: &Ident, arg: &RawLambda, action: RawLam
 /// - Or-patterns are simplified (but not removed)
 ///
 /// Equivalent to OCaml's `simplify_cases`.
-pub fn simplify_cases<'p>(
+fn simplify_cases<'p>(
     ctx_ref: Option<&TypeContext>,
     pa: &'p PatArena<'p>,
     arena: &LocArena<'_>,
@@ -3100,7 +3090,7 @@ pub fn simplify_cases<'p>(
 /// Returns the first non-wildcard pattern, or omega if all are wildcards.
 ///
 /// Equivalent to OCaml's `what_is_cases`.
-pub fn what_is_cases<'p>(cases: &[Clause<'p>]) -> &'p Pattern {
+fn what_is_cases<'p>(cases: &[Clause<'p>]) -> &'p Pattern {
     match cases.split_first() {
         None => omega(),
         Some(((pats, _), rem)) => {
@@ -3125,7 +3115,7 @@ pub fn what_is_cases<'p>(cases: &[Clause<'p>]) -> &'p Pattern {
 
 /// Convert cases to a pattern matrix (taking the minimal rows under le_pats).
 /// Equivalent to OCaml's `as_matrix`.
-pub fn as_matrix<'p>(pa: &PatArena<'p>, cases: &[Clause<'p>]) -> Matrix<'p> {
+fn as_matrix<'p>(pa: &PatArena<'p>, cases: &[Clause<'p>]) -> Matrix<'p> {
     get_mins_indices(
         |a: &Clause<'p>, b: &Clause<'p>| le_pats(pa, &a.0, &b.0),
         cases,
@@ -3380,95 +3370,87 @@ fn alpha_pat(pa: &PatArena<'_>, env: &[(Ident, Ident)], pat: &Pattern) -> Patter
     }
 }
 
-/// Expand an or-pattern into separate cases with alpha-renamed variables.
-///
-/// `arg`: optional binding for alias variables
-/// `patl`: surrounding pattern context
-/// `mk_action`: closure that builds an action given a list of fresh idents
-/// `rem`: accumulator of already-expanded cases
-/// `vars`: set of variables that need alpha-renaming
-/// `aliases`: accumulated alias identifiers from Tpat_alias wrappers
-/// `pat`: the pattern being exploded
-///
-/// Equivalent to OCaml's `explode_or_pat`.
-pub fn explode_or_pat<'p, F>(
-    ctx_ref: Option<&TypeContext>,
-    pa: &'p PatArena<'p>,
-    arg: &Option<Ident>,
-    patl: &[&'p Pattern],
-    mk_action: &F,
-    rem: Vec<Clause<'p>>,
-    vars: &IdentSet,
-    aliases: &[Ident],
-    pat: &'p Pattern,
-) -> Result<Vec<Clause<'p>>, CannotFlatten>
-where
-    F: Fn(&[Ident]) -> RawLambda,
-{
-    // OCaml conses each expanded row onto `rem`. Keep the list reversed so a
-    // cons is a push: prepending to a vector made an or-pattern of many
-    // alternatives (an expanded character range) quadratic.
-    let mut acc = rem;
-    acc.reverse();
-    explode_or_pat_rev(
-        ctx_ref, pa, arg, patl, mk_action, &mut acc, vars, aliases, pat,
-    )?;
-    acc.reverse();
-    Ok(acc)
-}
+impl<'p> Split<'p, '_> {
+    /// Expand an or-pattern into separate cases with alpha-renamed variables.
+    ///
+    /// `patl`: surrounding pattern context
+    /// `mk_action`: closure that builds an action given a list of fresh idents
+    /// `rem`: accumulator of already-expanded cases
+    /// `vars`: set of variables that need alpha-renaming
+    /// `aliases`: accumulated alias identifiers from Tpat_alias wrappers
+    /// `pat`: the pattern being exploded
+    ///
+    /// Equivalent to OCaml's `explode_or_pat`; the optional binding for alias
+    /// variables is the split's `argo`.
+    fn explode_or_pat<F>(
+        &self,
+        patl: &[&'p Pattern],
+        mk_action: &F,
+        rem: Vec<Clause<'p>>,
+        vars: &IdentSet,
+        aliases: &[Ident],
+        pat: &'p Pattern,
+    ) -> Result<Vec<Clause<'p>>, CannotFlatten>
+    where
+        F: Fn(&[Ident]) -> RawLambda,
+    {
+        // OCaml conses each expanded row onto `rem`. Keep the list reversed so a
+        // cons is a push: prepending to a vector made an or-pattern of many
+        // alternatives (an expanded character range) quadratic.
+        let mut acc = rem;
+        acc.reverse();
+        self.explode_or_pat_rev(patl, mk_action, &mut acc, vars, aliases, pat)?;
+        acc.reverse();
+        Ok(acc)
+    }
 
-/// `explode_or_pat` onto `acc`, which holds the result list reversed.
-fn explode_or_pat_rev<'p, F>(
-    ctx_ref: Option<&TypeContext>,
-    pa: &'p PatArena,
-    arg: &Option<Ident>,
-    patl: &[&'p Pattern],
-    mk_action: &F,
-    acc: &mut Vec<Clause<'p>>,
-    vars: &IdentSet,
-    aliases: &[Ident],
-    pat: &'p Pattern,
-) -> Result<(), CannotFlatten>
-where
-    F: Fn(&[Ident]) -> RawLambda,
-{
-    match &pat.pat_desc {
-        PatternDesc::Tpat_or(p1, p2, _) => {
-            explode_or_pat_rev(ctx_ref, pa, arg, patl, mk_action, acc, vars, aliases, pa.pat(*p2))?;
-            explode_or_pat_rev(ctx_ref, pa, arg, patl, mk_action, acc, vars, aliases, pa.pat(*p1))
-        }
-        PatternDesc::Tpat_alias(p, id, _) => {
-            let mut new_aliases = vec![*id];
-            new_aliases.extend_from_slice(aliases);
-            explode_or_pat_rev(
-                ctx_ref,
-                pa,
-                arg,
-                patl,
-                mk_action,
-                acc,
-                vars,
-                &new_aliases,
-                pa.pat(*p),
-            )
-        }
-        PatternDesc::Tpat_var(x, _) => {
-            let mut x_aliases = vec![*x];
-            x_aliases.extend_from_slice(aliases);
-            let env = mk_alpha_env(ctx_ref, arg, &x_aliases, vars)?;
-            let new_ids: Vec<Ident> = env.iter().map(|(_, id)| *id).collect();
-            let mut row = vec![omega()];
-            row.extend_from_slice(patl);
-            acc.push((row, MatchAction::new(mk_action(&new_ids))));
-            Ok(())
-        }
-        _ => {
-            let env = mk_alpha_env(ctx_ref, arg, aliases, vars)?;
-            let new_ids: Vec<Ident> = env.iter().map(|(_, id)| *id).collect();
-            let mut row: Vec<&'p Pattern> = vec![pa.alloc(alpha_pat(pa, &env, pat))];
-            row.extend_from_slice(patl);
-            acc.push((row, MatchAction::new(mk_action(&new_ids))));
-            Ok(())
+    /// `explode_or_pat` onto `acc`, which holds the result list reversed.
+    fn explode_or_pat_rev<F>(
+        &self,
+        patl: &[&'p Pattern],
+        mk_action: &F,
+        acc: &mut Vec<Clause<'p>>,
+        vars: &IdentSet,
+        aliases: &[Ident],
+        pat: &'p Pattern,
+    ) -> Result<(), CannotFlatten>
+    where
+        F: Fn(&[Ident]) -> RawLambda,
+    {
+        let Split {
+            ctx_ref,
+            pa,
+            argo: arg,
+            ..
+        } = *self;
+        match &pat.pat_desc {
+            PatternDesc::Tpat_or(p1, p2, _) => {
+                self.explode_or_pat_rev(patl, mk_action, acc, vars, aliases, pa.pat(*p2))?;
+                self.explode_or_pat_rev(patl, mk_action, acc, vars, aliases, pa.pat(*p1))
+            }
+            PatternDesc::Tpat_alias(p, id, _) => {
+                let mut new_aliases = vec![*id];
+                new_aliases.extend_from_slice(aliases);
+                self.explode_or_pat_rev(patl, mk_action, acc, vars, &new_aliases, pa.pat(*p))
+            }
+            PatternDesc::Tpat_var(x, _) => {
+                let mut x_aliases = vec![*x];
+                x_aliases.extend_from_slice(aliases);
+                let env = mk_alpha_env(ctx_ref, arg, &x_aliases, vars)?;
+                let new_ids: Vec<Ident> = env.iter().map(|(_, id)| *id).collect();
+                let mut row = vec![omega()];
+                row.extend_from_slice(patl);
+                acc.push((row, MatchAction::new(mk_action(&new_ids))));
+                Ok(())
+            }
+            _ => {
+                let env = mk_alpha_env(ctx_ref, arg, aliases, vars)?;
+                let new_ids: Vec<Ident> = env.iter().map(|(_, id)| *id).collect();
+                let mut row: Vec<&'p Pattern> = vec![pa.alloc(alpha_pat(pa, &env, pat))];
+                row.extend_from_slice(patl);
+                acc.push((row, MatchAction::new(mk_action(&new_ids))));
+                Ok(())
+            }
         }
     }
 }
@@ -3806,487 +3788,179 @@ fn rebuild_nexts<'p>(
 // Split functions (lines 814-1090)
 // ============================================================================
 
-/// Split a matching, directed first by or-patterns, then by tests/variable transitions.
-/// Equivalent to OCaml's `split_or`.
-fn split_or<'p>(
-    ctx_ref: Option<&TypeContext>,
-    pa: &'p PatArena<'p>,
-    arena: &LocArena<'_>,
-    argo: &Option<Ident>,
-    cls: Vec<Clause<'p>>,
-    args: &MatchArgs,
-    def: DefaultEnv<'p>,
-    next_raise: &mut i32,
-) -> (PmHalfCompiledInfo<'p>, Vec<(i32, PmHalfCompiled<'p>)>) {
-    let cls = simplify_cases(ctx_ref, pa, arena, args, cls);
 
-    do_split_or(
-        ctx_ref,
-        pa,
-        arena,
-        argo,
-        VecDeque::new(),
-        VecDeque::new(),
-        VecDeque::new(),
-        cls.into(),
-        args,
-        &def,
-        next_raise,
-    )
+/// What the split functions share: the compilation's context and exit
+/// counter, and the arguments of the `split_or` call being split.
+struct Split<'p, 'a> {
+    ctx_ref: Option<&'a TypeContext>,
+    pa: &'p PatArena<'p>,
+    arena: &'a LocArena<'a>,
+    /// The variable the first argument is bound to, if any.
+    argo: &'a Option<Ident>,
+    args: &'a MatchArgs,
+    next_raise: &'a mut i32,
 }
 
-/// Inner do_split for split_or.
-fn do_split_or<'p>(
-    ctx_ref: Option<&TypeContext>,
-    pa: &'p PatArena<'p>,
-    arena: &LocArena<'_>,
-    argo: &Option<Ident>,
-    mut before: VecDeque<Clause<'p>>,
-    mut ors: VecDeque<Clause<'p>>,
-    mut no: VecDeque<Clause<'p>>,
-    mut rest: VecDeque<Clause<'p>>,
-    args: &MatchArgs,
-    def: &DefaultEnv<'p>,
-    next_raise: &mut i32,
-) -> (PmHalfCompiledInfo<'p>, Vec<(i32, PmHalfCompiled<'p>)>) {
-    let b = arena.b;
-    // OCaml `compiler/ml/matching.ml:817-828` is tail-recursive. Rust does not
-    // guarantee tail-call elimination, and large generated matches build very
-    // deep `do_split_or` stacks. Keep the exact branch order but run it as an
-    // explicit loop.
-    loop {
-        let Some(cl) = rest.pop_front() else {
-            let before = rev_deque_to_vec(before);
-            let ors = rev_deque_to_vec(ors);
-            let no = rev_deque_to_vec(no);
-            return cons_next_or(
-                ctx_ref, pa, arena, argo, before, ors, no, args, def, next_raise,
-            );
-        };
+impl<'p> Split<'p, '_> {
+    /// Split a matching, directed first by or-patterns, then by tests/variable transitions.
+    /// Equivalent to OCaml's `split_or`.
+    fn split_or(
+        &mut self,
+        cls: Vec<Clause<'p>>,
+        def: DefaultEnv<'p>,
+    ) -> (PmHalfCompiledInfo<'p>, Vec<(i32, PmHalfCompiled<'p>)>) {
+        let Split {
+            ctx_ref,
+            pa,
+            arena,
+            args,
+            ..
+        } = *self;
+        let cls = simplify_cases(ctx_ref, pa, arena, args, cls);
 
-        let push_to_before_or_ors = {
-            let (p, ps) = cl.0.split_first().expect("split_or: empty pattern row");
-            let act = &cl.1;
-            if up_ok_iter(b, pa, ctx_ref, cl.0.as_slice(), act, no.iter()) {
-                if is_or(p, ps) {
-                    let (new_ors, new_no) = insert_or_append(pa, p, ps, act, ors, no);
-                    ors = new_ors;
-                    no = new_no;
-                    continue;
-                } else if up_ok_iter(b, pa, ctx_ref, cl.0.as_slice(), act, ors.iter()) {
-                    // OCaml `do_split` moves the current row into `before` with
-                    // `(cl :: before)` (compiler/ml/matching.ml:820-826).
-                    Some(true)
-                } else if or_ok_iter(pa, p, ps, ors.iter()) {
-                    Some(false)
+        self.do_split_or(cls.into(), &def)
+    }
+
+    /// Inner do_split for split_or.
+    fn do_split_or(
+        &mut self,
+        mut rest: VecDeque<Clause<'p>>,
+        def: &DefaultEnv<'p>,
+    ) -> (PmHalfCompiledInfo<'p>, Vec<(i32, PmHalfCompiled<'p>)>) {
+        let Split {
+            ctx_ref, pa, arena, ..
+        } = *self;
+        let b = arena.b;
+        let mut before = VecDeque::new();
+        let mut ors = VecDeque::new();
+        let mut no = VecDeque::new();
+        // OCaml `compiler/ml/matching.ml:817-828` is tail-recursive. Rust does not
+        // guarantee tail-call elimination, and large generated matches build very
+        // deep `do_split_or` stacks. Keep the exact branch order but run it as an
+        // explicit loop.
+        loop {
+            let Some(cl) = rest.pop_front() else {
+                let before = rev_deque_to_vec(before);
+                let ors = rev_deque_to_vec(ors);
+                let no = rev_deque_to_vec(no);
+                return self.cons_next_or(before, ors, no, def);
+            };
+
+            let push_to_before_or_ors = {
+                let (p, ps) = cl.0.split_first().expect("split_or: empty pattern row");
+                let act = &cl.1;
+                if up_ok_iter(b, pa, ctx_ref, cl.0.as_slice(), act, no.iter()) {
+                    if is_or(p, ps) {
+                        let (new_ors, new_no) = insert_or_append(pa, p, ps, act, ors, no);
+                        ors = new_ors;
+                        no = new_no;
+                        continue;
+                    } else if up_ok_iter(b, pa, ctx_ref, cl.0.as_slice(), act, ors.iter()) {
+                        // OCaml `do_split` moves the current row into `before` with
+                        // `(cl :: before)` (compiler/ml/matching.ml:820-826).
+                        Some(true)
+                    } else if or_ok_iter(pa, p, ps, ors.iter()) {
+                        Some(false)
+                    } else {
+                        None
+                    }
                 } else {
                     None
                 }
-            } else {
-                None
-            }
-        };
+            };
 
-        match push_to_before_or_ors {
-            Some(true) => before.push_front(cl),
-            Some(false) => ors.push_front(cl),
-            None => no.push_front(cl),
+            match push_to_before_or_ors {
+                Some(true) => before.push_front(cl),
+                Some(false) => ors.push_front(cl),
+                None => no.push_front(cl),
+            }
         }
     }
-}
 
-/// cons_next helper for split_or.
-fn cons_next_or<'p>(
-    ctx_ref: Option<&TypeContext>,
-    pa: &'p PatArena<'p>,
-    arena: &LocArena<'_>,
-    argo: &Option<Ident>,
-    yes: Vec<Clause<'p>>,
-    yesor: Vec<Clause<'p>>,
-    no: Vec<Clause<'p>>,
-    args: &MatchArgs,
-    def: &DefaultEnv<'p>,
-    next_raise: &mut i32,
-) -> (PmHalfCompiledInfo<'p>, Vec<(i32, PmHalfCompiled<'p>)>) {
-    if no.is_empty() {
-        precompile_or(
-            ctx_ref,
-            pa,
-            arena,
-            argo,
-            yes,
-            yesor,
-            args,
-            def.clone(),
-            Vec::new(),
-            next_raise,
-        )
-    } else {
-        let (info, nexts) = do_split_or(
-            ctx_ref,
-            pa,
-            arena,
-            argo,
-            VecDeque::new(),
-            VecDeque::new(),
-            VecDeque::new(),
-            no.into(),
-            args,
-            def,
-            next_raise,
-        );
-        let idef = bump_raise_count(next_raise);
-        let PmHalfCompiledInfo {
-            me: next,
-            matrix,
-            top_default,
-        } = info;
-        let new_def = cons_default(matrix, idef, top_default);
-        let mut new_nexts = vec![(idef, next)];
-        new_nexts.extend(nexts);
-        precompile_or(
-            ctx_ref, pa, arena, argo, yes, yesor, args, new_def, new_nexts, next_raise,
-        )
+    /// cons_next helper for split_or.
+    fn cons_next_or(
+        &mut self,
+        yes: Vec<Clause<'p>>,
+        yesor: Vec<Clause<'p>>,
+        no: Vec<Clause<'p>>,
+        def: &DefaultEnv<'p>,
+    ) -> (PmHalfCompiledInfo<'p>, Vec<(i32, PmHalfCompiled<'p>)>) {
+        if no.is_empty() {
+            self.precompile_or(yes, yesor, def.clone(), Vec::new())
+        } else {
+            let (info, nexts) = self.do_split_or(no.into(), def);
+            let idef = bump_raise_count(self.next_raise);
+            let PmHalfCompiledInfo {
+                me: next,
+                matrix,
+                top_default,
+            } = info;
+            let new_def = cons_default(matrix, idef, top_default);
+            let mut new_nexts = vec![(idef, next)];
+            new_nexts.extend(nexts);
+            self.precompile_or(yes, yesor, new_def, new_nexts)
+        }
     }
-}
 
-/// Ultra-naive splitting, close to semantics, used for extension constructors.
-/// Equivalent to OCaml's `split_naive`.
-fn split_naive<'p>(
-    ctx_ref: Option<&TypeContext>,
-    pa: &'p PatArena<'p>,
-    arena: &LocArena<'_>,
-    cls: &[Clause<'p>],
-    args: &MatchArgs,
-    def: DefaultEnv<'p>,
-    k: Vec<(i32, PmHalfCompiled<'p>)>,
-    next_raise: &mut i32,
-) -> (PmHalfCompiledInfo<'p>, Vec<(i32, PmHalfCompiled<'p>)>) {
-    match cls.split_first() {
-        None => panic!("split_naive: empty cases"),
-        Some((cl, rem)) => match cl.0.first() {
-            Some(p) if group_constructor(p) => split_exc(
-                ctx_ref,
-                pa,
-                arena,
-                pat_as_constr(p),
-                vec![cl.clone()],
-                rem,
-                args,
-                def,
-                k,
-                next_raise,
-            ),
-            Some(_) => split_noexc(
-                ctx_ref,
-                pa,
-                arena,
-                vec![cl.clone()],
-                rem,
-                args,
-                def,
-                k,
-                next_raise,
-            ),
-            None => panic!("split_naive: empty pattern row"),
-        },
-    }
-}
-
-/// Split on extension constructors (naive).
-// `split_exc`, `split_noexc`, `split_ex` and `split_noex` (matching.ml
-// split_or/split_constr) cons rows onto `yes`/`no` and `List.rev` them when
-// done. Rust pushes instead, so the vectors are already in source order; a
-// shifting `insert(0, ..)` per row made a column of many distinct constants
-// (an expanded character range) quadratic.
-fn split_exc<'p>(
-    ctx_ref: Option<&TypeContext>,
-    pa: &'p PatArena<'p>,
-    arena: &LocArena<'_>,
-    cstr0: &crate::types::ConstructorDescription,
-    yes: Vec<Clause<'p>>,
-    rest: &[Clause<'p>],
-    args: &MatchArgs,
-    def: DefaultEnv<'p>,
-    k: Vec<(i32, PmHalfCompiled<'p>)>,
-    next_raise: &mut i32,
-) -> (PmHalfCompiledInfo<'p>, Vec<(i32, PmHalfCompiled<'p>)>) {
-    match rest.split_first() {
-        None => (
-            PmHalfCompiledInfo {
-                me: PmHalfCompiled::Pm(PatternMatching {
-                    cases: yes.clone(),
-                    args: args.clone(),
-                    default: def.clone(),
-                }),
-                matrix: as_matrix(pa, &yes),
-                top_default: def,
-            },
-            k,
-        ),
-        Some((cl, rem)) => match cl.0.first() {
-            Some(p) if group_constructor(p) => {
-                let cstr = pat_as_constr(p);
-                if same_constructor(cstr, cstr0) {
-                    let mut new_yes = yes;
-                    new_yes.push(cl.clone());
-                    split_exc(
-                        ctx_ref, pa, arena, cstr0, new_yes, rem, args, def, k, next_raise,
-                    )
-                } else {
-                    let (info, nexts) = split_exc(
-                        ctx_ref,
-                        pa,
-                        arena,
-                        cstr,
-                        vec![cl.clone()],
-                        rem,
-                        args,
-                        def.clone(),
-                        k,
-                        next_raise,
-                    );
-                    let idef = bump_raise_count(next_raise);
-                    let PmHalfCompiledInfo {
-                        me: next,
-                        matrix,
-                        top_default,
-                    } = info;
-                    let new_def = cons_default(matrix, idef, top_default);
-                    let mut new_nexts = vec![(idef, next)];
-                    new_nexts.extend(nexts);
-                    (
-                        PmHalfCompiledInfo {
-                            me: PmHalfCompiled::Pm(PatternMatching {
-                                cases: yes.clone(),
-                                args: args.clone(),
-                                default: new_def.clone(),
-                            }),
-                            matrix: as_matrix(pa, &yes),
-                            top_default: new_def,
-                        },
-                        new_nexts,
-                    )
+    /// Ultra-naive splitting, close to semantics, used for extension constructors.
+    /// Equivalent to OCaml's `split_naive`.
+    fn split_naive(
+        &mut self,
+        cls: &[Clause<'p>],
+        def: DefaultEnv<'p>,
+        k: Vec<(i32, PmHalfCompiled<'p>)>,
+    ) -> (PmHalfCompiledInfo<'p>, Vec<(i32, PmHalfCompiled<'p>)>) {
+        match cls.split_first() {
+            None => panic!("split_naive: empty cases"),
+            Some((cl, rem)) => match cl.0.first() {
+                Some(p) if group_constructor(p) => {
+                    self.split_exc(pat_as_constr(p), vec![cl.clone()], rem, def, k)
                 }
-            }
-            Some(_) => {
-                let (info, nexts) = split_noexc(
-                    ctx_ref,
-                    pa,
-                    arena,
-                    vec![cl.clone()],
-                    rem,
-                    args,
-                    def.clone(),
-                    k,
-                    next_raise,
-                );
-                let idef = bump_raise_count(next_raise);
-                let PmHalfCompiledInfo {
-                    me: next,
-                    matrix,
-                    top_default,
-                } = info;
-                let new_def = cons_default(matrix, idef, top_default);
-                let mut new_nexts = vec![(idef, next)];
-                new_nexts.extend(nexts);
-                (
-                    PmHalfCompiledInfo {
-                        me: PmHalfCompiled::Pm(PatternMatching {
-                            cases: yes.clone(),
-                            args: args.clone(),
-                            default: new_def.clone(),
-                        }),
-                        matrix: as_matrix(pa, &yes),
-                        top_default: new_def,
-                    },
-                    new_nexts,
-                )
-            }
-            None => panic!("split_exc: empty pattern row"),
-        },
-    }
-}
-
-/// Split on non-extension constructors (naive).
-fn split_noexc<'p>(
-    ctx_ref: Option<&TypeContext>,
-    pa: &'p PatArena<'p>,
-    arena: &LocArena<'_>,
-    yes: Vec<Clause<'p>>,
-    rest: &[Clause<'p>],
-    args: &MatchArgs,
-    def: DefaultEnv<'p>,
-    k: Vec<(i32, PmHalfCompiled<'p>)>,
-    next_raise: &mut i32,
-) -> (PmHalfCompiledInfo<'p>, Vec<(i32, PmHalfCompiled<'p>)>) {
-    match rest.split_first() {
-        None => precompile_var(ctx_ref, pa, arena, args, yes, def, k, next_raise),
-        Some((cl, rem)) => match cl.0.first() {
-            Some(p) if group_constructor(p) => {
-                let (info, nexts) = split_exc(
-                    ctx_ref,
-                    pa,
-                    arena,
-                    pat_as_constr(p),
-                    vec![cl.clone()],
-                    rem,
-                    args,
-                    def.clone(),
-                    k,
-                    next_raise,
-                );
-                let idef = bump_raise_count(next_raise);
-                let PmHalfCompiledInfo {
-                    me: next,
-                    matrix,
-                    top_default,
-                } = info;
-                precompile_var(
-                    ctx_ref,
-                    pa,
-                    arena,
-                    args,
-                    yes,
-                    cons_default(matrix, idef, top_default),
-                    {
-                        let mut new_nexts = vec![(idef, next)];
-                        new_nexts.extend(nexts);
-                        new_nexts
-                    },
-                    next_raise,
-                )
-            }
-            Some(_) => {
-                let mut new_yes = yes;
-                new_yes.push(cl.clone());
-                split_noexc(ctx_ref, pa, arena, new_yes, rem, args, def, k, next_raise)
-            }
-            None => panic!("split_noexc: empty pattern row"),
-        },
-    }
-}
-
-/// Split on constructors using group predicates.
-/// Equivalent to OCaml's `split_constr`.
-fn split_constr<'p>(
-    ctx_ref: Option<&TypeContext>,
-    pa: &'p PatArena<'p>,
-    arena: &LocArena<'_>,
-    cls: &[Clause<'p>],
-    args: &MatchArgs,
-    def: DefaultEnv<'p>,
-    k: Vec<(i32, PmHalfCompiled<'p>)>,
-    next_raise: &mut i32,
-) -> (PmHalfCompiledInfo<'p>, Vec<(i32, PmHalfCompiled<'p>)>) {
-    let ex_pat = what_is_cases(cls);
-    match &ex_pat.pat_desc {
-        PatternDesc::Tpat_any => {
-            precompile_var(ctx_ref, pa, arena, args, cls.to_vec(), def, k, next_raise)
+                Some(_) => self.split_noexc(vec![cl.clone()], rem, def, k),
+                None => panic!("split_naive: empty pattern row"),
+            },
         }
-        PatternDesc::Tpat_construct(_, cstr, _)
-            if matches!(&cstr.cstr_kind, crate::types::ConstructorKind::Extension(_)) =>
-        {
-            split_naive(ctx_ref, pa, arena, cls, args, def, k, next_raise)
-        }
-        _ => {
-            let group = get_group(ex_pat);
-            match cls.split_first() {
-                Some((cl, rem)) => match cl.0.first() {
-                    Some(p) if group(p) => split_ex(
-                        ctx_ref,
-                        pa,
-                        arena,
-                        group,
-                        vec![cl.clone()],
-                        Vec::new(),
-                        rem,
-                        args,
-                        def,
-                        k,
-                        next_raise,
-                    ),
-                    _ => split_noex(
-                        ctx_ref,
-                        pa,
-                        arena,
-                        group,
-                        vec![cl.clone()],
-                        Vec::new(),
-                        rem,
-                        args,
-                        def,
-                        k,
-                        next_raise,
-                    ),
+    }
+
+    /// Split on extension constructors (naive).
+    // `split_exc`, `split_noexc`, `split_ex` and `split_noex` (matching.ml
+    // split_or/split_constr) cons rows onto `yes`/`no` and `List.rev` them when
+    // done. Rust pushes instead, so the vectors are already in source order; a
+    // shifting `insert(0, ..)` per row made a column of many distinct constants
+    // (an expanded character range) quadratic.
+    fn split_exc(
+        &mut self,
+        cstr0: &crate::types::ConstructorDescription,
+        yes: Vec<Clause<'p>>,
+        rest: &[Clause<'p>],
+        def: DefaultEnv<'p>,
+        k: Vec<(i32, PmHalfCompiled<'p>)>,
+    ) -> (PmHalfCompiledInfo<'p>, Vec<(i32, PmHalfCompiled<'p>)>) {
+        let Split { pa, args, .. } = *self;
+        match rest.split_first() {
+            None => (
+                PmHalfCompiledInfo {
+                    me: PmHalfCompiled::Pm(PatternMatching {
+                        cases: yes.clone(),
+                        args: args.clone(),
+                        default: def.clone(),
+                    }),
+                    matrix: as_matrix(pa, &yes),
+                    top_default: def,
                 },
-                None => panic!("split_constr: empty cases"),
-            }
-        }
-    }
-}
-
-/// split_ex: raise constructor rows up.
-fn split_ex<'p>(
-    ctx_ref: Option<&TypeContext>,
-    pa: &'p PatArena<'p>,
-    arena: &LocArena<'_>,
-    group: fn(&'p Pattern) -> bool,
-    yes: Vec<Clause<'p>>,
-    no: Vec<Clause<'p>>,
-    rest: &[Clause<'p>],
-    args: &MatchArgs,
-    def: DefaultEnv<'p>,
-    k: Vec<(i32, PmHalfCompiled<'p>)>,
-    next_raise: &mut i32,
-) -> (PmHalfCompiledInfo<'p>, Vec<(i32, PmHalfCompiled<'p>)>) {
-    let b = arena.b;
-    match rest.split_first() {
-        None => {
-            match no.split_first() {
-                None => (
-                    PmHalfCompiledInfo {
-                        me: PmHalfCompiled::Pm(PatternMatching {
-                            cases: yes.clone(),
-                            args: args.clone(),
-                            default: def.clone(),
-                        }),
-                        matrix: as_matrix(pa, &yes),
-                        top_default: def,
-                    },
-                    k,
-                ),
-                Some((no_cl, no_rem)) => {
-                    if yes.is_empty() {
-                        // Could not succeed in raising up a constr matching up
-                        split_noex(
-                            ctx_ref,
-                            pa,
-                            arena,
-                            group,
-                            vec![no_cl.clone()],
-                            Vec::new(),
-                            no_rem,
-                            args,
-                            def,
-                            k,
-                            next_raise,
-                        )
+                k,
+            ),
+            Some((cl, rem)) => match cl.0.first() {
+                Some(p) if group_constructor(p) => {
+                    let cstr = pat_as_constr(p);
+                    if same_constructor(cstr, cstr0) {
+                        let mut new_yes = yes;
+                        new_yes.push(cl.clone());
+                        self.split_exc(cstr0, new_yes, rem, def, k)
                     } else {
-                        let (info, nexts) = split_noex(
-                            ctx_ref,
-                            pa,
-                            arena,
-                            group,
-                            vec![no_cl.clone()],
-                            Vec::new(),
-                            no_rem,
-                            args,
-                            def.clone(),
-                            k,
-                            next_raise,
-                        );
-                        let idef = bump_raise_count(next_raise);
+                        let (info, nexts) =
+                            self.split_exc(cstr, vec![cl.clone()], rem, def.clone(), k);
+                        let idef = bump_raise_count(self.next_raise);
                         let PmHalfCompiledInfo {
                             me: next,
                             matrix,
@@ -4309,234 +3983,470 @@ fn split_ex<'p>(
                         )
                     }
                 }
-            }
+                Some(_) => {
+                    let (info, nexts) = self.split_noexc(vec![cl.clone()], rem, def.clone(), k);
+                    let idef = bump_raise_count(self.next_raise);
+                    let PmHalfCompiledInfo {
+                        me: next,
+                        matrix,
+                        top_default,
+                    } = info;
+                    let new_def = cons_default(matrix, idef, top_default);
+                    let mut new_nexts = vec![(idef, next)];
+                    new_nexts.extend(nexts);
+                    (
+                        PmHalfCompiledInfo {
+                            me: PmHalfCompiled::Pm(PatternMatching {
+                                cases: yes.clone(),
+                                args: args.clone(),
+                                default: new_def.clone(),
+                            }),
+                            matrix: as_matrix(pa, &yes),
+                            top_default: new_def,
+                        },
+                        new_nexts,
+                    )
+                }
+                None => panic!("split_exc: empty pattern row"),
+            },
         }
-        Some((cl, rem)) => match cl.0.first() {
-            Some(p) if group(p) && up_ok(b, pa, ctx_ref, &cl.0, &cl.1, &no) => {
-                let mut new_yes = yes;
-                new_yes.push(cl.clone());
-                split_ex(
-                    ctx_ref, pa, arena, group, new_yes, no, rem, args, def, k, next_raise,
-                )
-            }
-            _ => {
-                let mut new_no = no;
-                new_no.push(cl.clone());
-                split_ex(
-                    ctx_ref, pa, arena, group, yes, new_no, rem, args, def, k, next_raise,
-                )
-            }
-        },
     }
-}
 
-/// split_noex: raise non-constructor rows up.
-fn split_noex<'p>(
-    ctx_ref: Option<&TypeContext>,
-    pa: &'p PatArena<'p>,
-    arena: &LocArena<'_>,
-    group: fn(&'p Pattern) -> bool,
-    yes: Vec<Clause<'p>>,
-    no: Vec<Clause<'p>>,
-    rest: &[Clause<'p>],
-    args: &MatchArgs,
-    def: DefaultEnv<'p>,
-    k: Vec<(i32, PmHalfCompiled<'p>)>,
-    next_raise: &mut i32,
-) -> (PmHalfCompiledInfo<'p>, Vec<(i32, PmHalfCompiled<'p>)>) {
-    let b = arena.b;
-    match rest.split_first() {
-        None => match no.split_first() {
-            None => precompile_var(ctx_ref, pa, arena, args, yes, def, k, next_raise),
-            Some((no_cl, no_rem)) => {
-                let (info, nexts) = split_ex(
-                    ctx_ref,
-                    pa,
-                    arena,
-                    group,
-                    vec![no_cl.clone()],
-                    Vec::new(),
-                    no_rem,
-                    args,
-                    def.clone(),
-                    k,
-                    next_raise,
-                );
-                let idef = bump_raise_count(next_raise);
-                let PmHalfCompiledInfo {
-                    me: next,
-                    matrix,
-                    top_default,
-                } = info;
-                precompile_var(
-                    ctx_ref,
-                    pa,
-                    arena,
-                    args,
-                    yes,
-                    cons_default(matrix, idef, top_default),
-                    {
+    /// Split on non-extension constructors (naive).
+    fn split_noexc(
+        &mut self,
+        yes: Vec<Clause<'p>>,
+        rest: &[Clause<'p>],
+        def: DefaultEnv<'p>,
+        k: Vec<(i32, PmHalfCompiled<'p>)>,
+    ) -> (PmHalfCompiledInfo<'p>, Vec<(i32, PmHalfCompiled<'p>)>) {
+        match rest.split_first() {
+            None => self.precompile_var(yes, def, k),
+            Some((cl, rem)) => match cl.0.first() {
+                Some(p) if group_constructor(p) => {
+                    let (info, nexts) =
+                        self.split_exc(pat_as_constr(p), vec![cl.clone()], rem, def.clone(), k);
+                    let idef = bump_raise_count(self.next_raise);
+                    let PmHalfCompiledInfo {
+                        me: next,
+                        matrix,
+                        top_default,
+                    } = info;
+                    self.precompile_var(yes, cons_default(matrix, idef, top_default), {
                         let mut new_nexts = vec![(idef, next)];
                         new_nexts.extend(nexts);
                         new_nexts
-                    },
-                    next_raise,
-                )
+                    })
+                }
+                Some(_) => {
+                    let mut new_yes = yes;
+                    new_yes.push(cl.clone());
+                    self.split_noexc(new_yes, rem, def, k)
+                }
+                None => panic!("split_noexc: empty pattern row"),
+            },
+        }
+    }
+
+    /// Split on constructors using group predicates.
+    /// Equivalent to OCaml's `split_constr`.
+    fn split_constr(
+        &mut self,
+        cls: &[Clause<'p>],
+        def: DefaultEnv<'p>,
+        k: Vec<(i32, PmHalfCompiled<'p>)>,
+    ) -> (PmHalfCompiledInfo<'p>, Vec<(i32, PmHalfCompiled<'p>)>) {
+        let ex_pat = what_is_cases(cls);
+        match &ex_pat.pat_desc {
+            PatternDesc::Tpat_any => self.precompile_var(cls.to_vec(), def, k),
+            PatternDesc::Tpat_construct(_, cstr, _)
+                if matches!(&cstr.cstr_kind, crate::types::ConstructorKind::Extension(_)) =>
+            {
+                self.split_naive(cls, def, k)
             }
-        },
-        Some((_cl, _rem)) if rest.len() == 1 => {
-            // Check for the special case: last row is all variables and yes is non-empty
-            let cl = &rest[0];
-            if cl.0.iter().all(|p| group_var(p)) && !yes.is_empty() {
-                // This enables an extra division in some frequent cases:
-                // last row is made of variables only
-                let mut new_no = no;
-                new_no.push(cl.clone());
-                split_noex(
-                    ctx_ref,
-                    pa,
-                    arena,
-                    group,
-                    yes,
-                    new_no,
-                    &[],
-                    args,
-                    def,
-                    k,
-                    next_raise,
-                )
-            } else {
-                // Fall through to normal case
-                let cl = &rest[0];
-                match cl.0.first() {
-                    Some(p) if !group(p) && up_ok(b, pa, ctx_ref, &cl.0, &cl.1, &no) => {
-                        let mut new_yes = yes;
-                        new_yes.push(cl.clone());
-                        split_noex(
-                            ctx_ref,
-                            pa,
-                            arena,
-                            group,
-                            new_yes,
-                            no,
-                            &[],
-                            args,
-                            def,
-                            k,
-                            next_raise,
-                        )
-                    }
-                    _ => {
-                        let mut new_no = no;
-                        new_no.push(cl.clone());
-                        split_noex(
-                            ctx_ref,
-                            pa,
-                            arena,
-                            group,
-                            yes,
-                            new_no,
-                            &[],
-                            args,
-                            def,
-                            k,
-                            next_raise,
-                        )
-                    }
+            _ => {
+                let group = get_group(ex_pat);
+                match cls.split_first() {
+                    Some((cl, rem)) => match cl.0.first() {
+                        Some(p) if group(p) => {
+                            self.split_ex(group, vec![cl.clone()], Vec::new(), rem, def, k)
+                        }
+                        _ => self.split_noex(group, vec![cl.clone()], Vec::new(), rem, def, k),
+                    },
+                    None => panic!("split_constr: empty cases"),
                 }
             }
         }
-        Some((cl, rem)) => match cl.0.first() {
-            Some(p) if !group(p) && up_ok(b, pa, ctx_ref, &cl.0, &cl.1, &no) => {
-                let mut new_yes = yes;
-                new_yes.push(cl.clone());
-                split_noex(
-                    ctx_ref, pa, arena, group, new_yes, no, rem, args, def, k, next_raise,
-                )
-            }
-            _ => {
-                let mut new_no = no;
-                new_no.push(cl.clone());
-                split_noex(
-                    ctx_ref, pa, arena, group, yes, new_no, rem, args, def, k, next_raise,
-                )
-            }
-        },
     }
-}
 
-/// Precompile variable patterns: if the match argument is a variable,
-/// split further on the second column.
-/// Equivalent to OCaml's `precompile_var`.
-fn precompile_var<'p>(
-    ctx_ref: Option<&TypeContext>,
-    pa: &'p PatArena<'p>,
-    arena: &LocArena<'_>,
-    args: &MatchArgs,
-    cls: Vec<Clause<'p>>,
-    def: DefaultEnv<'p>,
-    k: Vec<(i32, PmHalfCompiled<'p>)>,
-    next_raise: &mut i32,
-) -> (PmHalfCompiledInfo<'p>, Vec<(i32, PmHalfCompiled<'p>)>) {
-    let b = arena.b;
-    match args.as_slice() {
-        [] => panic!("precompile_var: empty args"),
-        [_, arg_rest @ ..] if !arg_rest.is_empty() => {
-            // Check if second arg is Lvar
-            match b.as_var(arg_rest[0].0) {
-                Some(v) => {
-                    if cls.len() == 1 {
-                        // as split as it can
-                        dont_precompile_var(pa, args, cls, def, k)
+    /// split_ex: raise constructor rows up.
+    fn split_ex(
+        &mut self,
+        group: fn(&'p Pattern) -> bool,
+        yes: Vec<Clause<'p>>,
+        no: Vec<Clause<'p>>,
+        rest: &[Clause<'p>],
+        def: DefaultEnv<'p>,
+        k: Vec<(i32, PmHalfCompiled<'p>)>,
+    ) -> (PmHalfCompiledInfo<'p>, Vec<(i32, PmHalfCompiled<'p>)>) {
+        let Split {
+            ctx_ref,
+            pa,
+            arena,
+            args,
+            ..
+        } = *self;
+        let b = arena.b;
+        match rest.split_first() {
+            None => match no.split_first() {
+                None => (
+                    PmHalfCompiledInfo {
+                        me: PmHalfCompiled::Pm(PatternMatching {
+                            cases: yes.clone(),
+                            args: args.clone(),
+                            default: def.clone(),
+                        }),
+                        matrix: as_matrix(pa, &yes),
+                        top_default: def,
+                    },
+                    k,
+                ),
+                Some((no_cl, no_rem)) => {
+                    if yes.is_empty() {
+                        // Could not succeed in raising up a constr matching up
+                        self.split_noex(group, vec![no_cl.clone()], Vec::new(), no_rem, def, k)
                     } else {
-                        // Precompile: strip first pattern from each case
-                        let var_cls: Vec<Clause<'p>> = cls
-                            .iter()
-                            .map(|(ps, act)| match ps.split_first() {
-                                Some((_, rest)) => (rest.to_vec(), act.clone()),
-                                None => panic!("precompile_var: empty pattern row"),
-                            })
-                            .collect();
-                        let var_def = make_default(
-                            pa,
-                            &|_p: &'p Pattern, rem: &[&'p Pattern]| Ok(rem.to_vec()),
-                            &def,
+                        let (info, nexts) = self.split_noex(
+                            group,
+                            vec![no_cl.clone()],
+                            Vec::new(),
+                            no_rem,
+                            def.clone(),
+                            k,
                         );
-                        let av = arg_rest[0].0;
-                        let arg_tail = args.tail(1);
-                        let (first_info, nexts) = split_or(
-                            ctx_ref,
-                            pa,
-                            arena,
-                            &Some(v),
-                            var_cls,
-                            &arg_tail,
-                            var_def,
-                            next_raise,
-                        );
-
-                        // Compute top information
-                        if nexts.is_empty() {
-                            // If you need
-                            dont_precompile_var(pa, args, cls, def, k)
-                        } else {
-                            let rfirst = PmHalfCompiledInfo {
-                                me: PmHalfCompiled::PmVar(PmVarCompiled {
-                                    inside: Box::new(first_info.me),
-                                    var_arg: av,
+                        let idef = bump_raise_count(self.next_raise);
+                        let PmHalfCompiledInfo {
+                            me: next,
+                            matrix,
+                            top_default,
+                        } = info;
+                        let new_def = cons_default(matrix, idef, top_default);
+                        let mut new_nexts = vec![(idef, next)];
+                        new_nexts.extend(nexts);
+                        (
+                            PmHalfCompiledInfo {
+                                me: PmHalfCompiled::Pm(PatternMatching {
+                                    cases: yes.clone(),
+                                    args: args.clone(),
+                                    default: new_def.clone(),
                                 }),
-                                matrix: add_omega_column(&first_info.matrix),
-                                top_default: rebuild_default(pa, &nexts, def),
-                            };
-                            let rnexts = rebuild_nexts(&av, nexts, k);
-                            (rfirst, rnexts)
+                                matrix: as_matrix(pa, &yes),
+                                top_default: new_def,
+                            },
+                            new_nexts,
+                        )
+                    }
+                }
+            },
+            Some((cl, rem)) => match cl.0.first() {
+                Some(p) if group(p) && up_ok(b, pa, ctx_ref, &cl.0, &cl.1, &no) => {
+                    let mut new_yes = yes;
+                    new_yes.push(cl.clone());
+                    self.split_ex(group, new_yes, no, rem, def, k)
+                }
+                _ => {
+                    let mut new_no = no;
+                    new_no.push(cl.clone());
+                    self.split_ex(group, yes, new_no, rem, def, k)
+                }
+            },
+        }
+    }
+
+    /// split_noex: raise non-constructor rows up.
+    fn split_noex(
+        &mut self,
+        group: fn(&'p Pattern) -> bool,
+        yes: Vec<Clause<'p>>,
+        no: Vec<Clause<'p>>,
+        rest: &[Clause<'p>],
+        def: DefaultEnv<'p>,
+        k: Vec<(i32, PmHalfCompiled<'p>)>,
+    ) -> (PmHalfCompiledInfo<'p>, Vec<(i32, PmHalfCompiled<'p>)>) {
+        let Split {
+            ctx_ref, pa, arena, ..
+        } = *self;
+        let b = arena.b;
+        match rest.split_first() {
+            None => match no.split_first() {
+                None => self.precompile_var(yes, def, k),
+                Some((no_cl, no_rem)) => {
+                    let (info, nexts) = self.split_ex(
+                        group,
+                        vec![no_cl.clone()],
+                        Vec::new(),
+                        no_rem,
+                        def.clone(),
+                        k,
+                    );
+                    let idef = bump_raise_count(self.next_raise);
+                    let PmHalfCompiledInfo {
+                        me: next,
+                        matrix,
+                        top_default,
+                    } = info;
+                    self.precompile_var(yes, cons_default(matrix, idef, top_default), {
+                        let mut new_nexts = vec![(idef, next)];
+                        new_nexts.extend(nexts);
+                        new_nexts
+                    })
+                }
+            },
+            Some((_cl, _rem)) if rest.len() == 1 => {
+                // Check for the special case: last row is all variables and yes is non-empty
+                let cl = &rest[0];
+                if cl.0.iter().all(|p| group_var(p)) && !yes.is_empty() {
+                    // This enables an extra division in some frequent cases:
+                    // last row is made of variables only
+                    let mut new_no = no;
+                    new_no.push(cl.clone());
+                    self.split_noex(group, yes, new_no, &[], def, k)
+                } else {
+                    // Fall through to normal case
+                    let cl = &rest[0];
+                    match cl.0.first() {
+                        Some(p) if !group(p) && up_ok(b, pa, ctx_ref, &cl.0, &cl.1, &no) => {
+                            let mut new_yes = yes;
+                            new_yes.push(cl.clone());
+                            self.split_noex(group, new_yes, no, &[], def, k)
+                        }
+                        _ => {
+                            let mut new_no = no;
+                            new_no.push(cl.clone());
+                            self.split_noex(group, yes, new_no, &[], def, k)
                         }
                     }
                 }
-                _ => dont_precompile_var(pa, args, cls, def, k),
+            }
+            Some((cl, rem)) => match cl.0.first() {
+                Some(p) if !group(p) && up_ok(b, pa, ctx_ref, &cl.0, &cl.1, &no) => {
+                    let mut new_yes = yes;
+                    new_yes.push(cl.clone());
+                    self.split_noex(group, new_yes, no, rem, def, k)
+                }
+                _ => {
+                    let mut new_no = no;
+                    new_no.push(cl.clone());
+                    self.split_noex(group, yes, new_no, rem, def, k)
+                }
+            },
+        }
+    }
+
+    /// Precompile variable patterns: if the match argument is a variable,
+    /// split further on the second column.
+    /// Equivalent to OCaml's `precompile_var`.
+    fn precompile_var(
+        &mut self,
+        cls: Vec<Clause<'p>>,
+        def: DefaultEnv<'p>,
+        k: Vec<(i32, PmHalfCompiled<'p>)>,
+    ) -> (PmHalfCompiledInfo<'p>, Vec<(i32, PmHalfCompiled<'p>)>) {
+        let Split {
+            pa, arena, args, ..
+        } = *self;
+        let b = arena.b;
+        match args.as_slice() {
+            [] => panic!("precompile_var: empty args"),
+            [_, arg_rest @ ..] if !arg_rest.is_empty() => {
+                // Check if second arg is Lvar
+                match b.as_var(arg_rest[0].0) {
+                    Some(v) => {
+                        if cls.len() == 1 {
+                            // as split as it can
+                            dont_precompile_var(pa, args, cls, def, k)
+                        } else {
+                            // Precompile: strip first pattern from each case
+                            let var_cls: Vec<Clause<'p>> = cls
+                                .iter()
+                                .map(|(ps, act)| match ps.split_first() {
+                                    Some((_, rest)) => (rest.to_vec(), act.clone()),
+                                    None => panic!("precompile_var: empty pattern row"),
+                                })
+                                .collect();
+                            let var_def = make_default(
+                                pa,
+                                &|_p: &'p Pattern, rem: &[&'p Pattern]| Ok(rem.to_vec()),
+                                &def,
+                            );
+                            let av = arg_rest[0].0;
+                            let arg_tail = args.tail(1);
+                            let argo = Some(v);
+                            let (first_info, nexts) = Split {
+                                ctx_ref: self.ctx_ref,
+                                pa,
+                                arena,
+                                argo: &argo,
+                                args: &arg_tail,
+                                next_raise: &mut *self.next_raise,
+                            }
+                            .split_or(var_cls, var_def);
+
+                            // Compute top information
+                            if nexts.is_empty() {
+                                // If you need
+                                dont_precompile_var(pa, args, cls, def, k)
+                            } else {
+                                let rfirst = PmHalfCompiledInfo {
+                                    me: PmHalfCompiled::PmVar(PmVarCompiled {
+                                        inside: Box::new(first_info.me),
+                                        var_arg: av,
+                                    }),
+                                    matrix: add_omega_column(&first_info.matrix),
+                                    top_default: rebuild_default(pa, &nexts, def),
+                                };
+                                let rnexts = rebuild_nexts(&av, nexts, k);
+                                (rfirst, rnexts)
+                            }
+                        }
+                    }
+                    _ => dont_precompile_var(pa, args, cls, def, k),
+                }
+            }
+            _ => dont_precompile_var(pa, args, cls, def, k),
+        }
+    }
+
+    /// Precompile or-patterns.
+    /// Equivalent to OCaml's `precompile_or`.
+    fn precompile_or(
+        &mut self,
+        cls: Vec<Clause<'p>>,
+        ors: Vec<Clause<'p>>,
+        def: DefaultEnv<'p>,
+        k: Vec<(i32, PmHalfCompiled<'p>)>,
+    ) -> (PmHalfCompiledInfo<'p>, Vec<(i32, PmHalfCompiled<'p>)>) {
+        let Split { pa, args, .. } = *self;
+        if ors.is_empty() {
+            return self.split_constr(&cls, def, k);
+        }
+
+        // do_cases processes the or-pattern list
+        let (end_body, handlers) = self.do_cases_or(&ors, &def);
+
+        let matrix = as_matrix(pa, &[cls.as_slice(), ors.as_slice()].concat());
+        let body = PatternMatching {
+            cases: [cls, end_body].concat(),
+            args: args.clone(),
+            default: def.clone(),
+        };
+        (
+            PmHalfCompiledInfo {
+                me: PmHalfCompiled::PmOr(PmOrCompiled {
+                    body,
+                    handlers,
+                    or_matrix: matrix.clone(),
+                }),
+                matrix,
+                top_default: def,
+            },
+            k,
+        )
+    }
+
+    /// Process or-pattern cases for precompile_or.
+    /// Equivalent to the inner `do_cases` in OCaml's `precompile_or`.
+    fn do_cases_or(
+        &mut self,
+        ors: &[Clause<'p>],
+        def: &DefaultEnv<'p>,
+    ) -> (Vec<Clause<'p>>, Vec<OrHandler<'p>>) {
+        let (body, handlers) = self.do_cases_or_deque(ors, def);
+        (body.into_iter().collect(), handlers)
+    }
+
+    fn do_cases_or_deque(
+        &mut self,
+        ors: &[Clause<'p>],
+        def: &DefaultEnv<'p>,
+    ) -> (VecDeque<Clause<'p>>, Vec<OrHandler<'p>>) {
+        let Split { pa, args, .. } = *self;
+        let b = self.arena.b;
+        match ors.split_first() {
+            None => (VecDeque::new(), Vec::new()),
+            Some((cl, rem)) => {
+                match cl.0.first() {
+                    Some(orp) if is_or(orp, &cl.0[1..]) => {
+                        let patl = &cl.0[1..];
+                        let action = &cl.1;
+
+                        let (others, rem) = get_equiv(pa, orp, rem);
+
+                        let orpm_cases = {
+                            let mut cases = vec![(patl.to_vec(), action.clone())];
+                            cases.extend(others.iter().map(|(ps, act)| match ps.split_first() {
+                                Some((_, rest)) => (rest.to_vec(), act.clone()),
+                                None => panic!("do_cases_or: empty pattern row"),
+                            }));
+                            cases
+                        };
+                        let orpm_args = match args.split_first() {
+                            Some(_) => args.tail(1),
+                            None => panic!("do_cases_or: empty args"),
+                        };
+                        let orpm = PatternMatching {
+                            cases: orpm_cases,
+                            args: orpm_args,
+                            default: default_compat(pa, orp, def),
+                        };
+
+                        let vars: Vec<Ident> = {
+                            let orp_vars = extract_vars(pa, BTreeSet::new(), orp);
+                            let pm_fv = pm_free_variables(b, &orpm);
+                            orp_vars.intersection(&pm_fv).cloned().collect()
+                        };
+
+                        let or_num = bump_raise_count(self.next_raise);
+                        let new_patl = omegas(patl.len());
+
+                        let mk_new_action = |vs: &[Ident]| -> RawLambda {
+                            let vars: Vec<RawLambda> = vs.iter().map(|v| b.var(*v)).collect();
+                            b.static_raise(or_num, &vars)
+                        };
+
+                        let (body, handlers) = self.do_cases_or_deque(&rem, def);
+
+                        let exploded = self.explode_or_pat(
+                            &new_patl,
+                            &mk_new_action,
+                            body.into_iter().collect(),
+                            &vars.iter().cloned().collect(),
+                            &[],
+                            orp,
+                        );
+
+                        let new_body = match exploded {
+                            Ok(b) => b,
+                            Err(_) => panic!("do_cases_or: Cannot_flatten"),
+                        };
+
+                        let mat = vec![vec![*orp]];
+                        let mut new_handlers = vec![(mat, or_num, vars, orpm)];
+                        new_handlers.extend(handlers);
+                        (new_body.into(), new_handlers)
+                    }
+                    _ => {
+                        // OCaml compiler/ml/matching.ml:846-1090 conses ordinary
+                        // rows before the recursively processed tail. Use
+                        // `push_front` for the same list shape without shifting a
+                        // Rust Vec on every row.
+                        let (mut new_ord, new_to_catch) = self.do_cases_or_deque(rem, def);
+                        new_ord.push_front(cl.clone());
+                        (new_ord, new_to_catch)
+                    }
+                }
             }
         }
-        _ => dont_precompile_var(pa, args, cls, def, k),
     }
 }
 
@@ -4563,162 +4473,6 @@ fn dont_precompile_var<'p>(
     )
 }
 
-/// Precompile or-patterns.
-/// Equivalent to OCaml's `precompile_or`.
-fn precompile_or<'p>(
-    ctx_ref: Option<&TypeContext>,
-    pa: &'p PatArena<'p>,
-    arena: &LocArena<'_>,
-    argo: &Option<Ident>,
-    cls: Vec<Clause<'p>>,
-    ors: Vec<Clause<'p>>,
-    args: &MatchArgs,
-    def: DefaultEnv<'p>,
-    k: Vec<(i32, PmHalfCompiled<'p>)>,
-    next_raise: &mut i32,
-) -> (PmHalfCompiledInfo<'p>, Vec<(i32, PmHalfCompiled<'p>)>) {
-    let b = arena.b;
-    if ors.is_empty() {
-        return split_constr(ctx_ref, pa, arena, &cls, args, def, k, next_raise);
-    }
-
-    // do_cases processes the or-pattern list
-    let (end_body, handlers) = do_cases_or(b, ctx_ref, pa, argo, &ors, args, &def, next_raise);
-
-    let matrix = as_matrix(pa, &[cls.as_slice(), ors.as_slice()].concat());
-    let body = PatternMatching {
-        cases: [cls, end_body].concat(),
-        args: args.clone(),
-        default: def.clone(),
-    };
-    (
-        PmHalfCompiledInfo {
-            me: PmHalfCompiled::PmOr(PmOrCompiled {
-                body,
-                handlers,
-                or_matrix: matrix.clone(),
-            }),
-            matrix,
-            top_default: def,
-        },
-        k,
-    )
-}
-
-/// Process or-pattern cases for precompile_or.
-/// Equivalent to the inner `do_cases` in OCaml's `precompile_or`.
-fn do_cases_or<'p>(
-    b: &RawArena,
-    ctx_ref: Option<&TypeContext>,
-    pa: &'p PatArena<'p>,
-    argo: &Option<Ident>,
-    ors: &[Clause<'p>],
-    args: &MatchArgs,
-    def: &DefaultEnv<'p>,
-    next_raise: &mut i32,
-) -> (
-    Vec<Clause<'p>>,
-    Vec<(Matrix<'p>, i32, Vec<Ident>, PatternMatching<'p>)>,
-) {
-    let (body, handlers) = do_cases_or_deque(b, ctx_ref, pa, argo, ors, args, def, next_raise);
-    (body.into_iter().collect(), handlers)
-}
-
-fn do_cases_or_deque<'p>(
-    b: &RawArena,
-    ctx_ref: Option<&TypeContext>,
-    pa: &'p PatArena<'p>,
-    argo: &Option<Ident>,
-    ors: &[Clause<'p>],
-    args: &MatchArgs,
-    def: &DefaultEnv<'p>,
-    next_raise: &mut i32,
-) -> (
-    VecDeque<Clause<'p>>,
-    Vec<(Matrix<'p>, i32, Vec<Ident>, PatternMatching<'p>)>,
-) {
-    match ors.split_first() {
-        None => (VecDeque::new(), Vec::new()),
-        Some((cl, rem)) => {
-            match cl.0.first() {
-                Some(orp) if is_or(orp, &cl.0[1..]) => {
-                    let patl = &cl.0[1..];
-                    let action = &cl.1;
-
-                    let (others, rem) = get_equiv(pa, orp, rem);
-
-                    let orpm_cases = {
-                        let mut cases = vec![(patl.to_vec(), action.clone())];
-                        cases.extend(others.iter().map(|(ps, act)| match ps.split_first() {
-                            Some((_, rest)) => (rest.to_vec(), act.clone()),
-                            None => panic!("do_cases_or: empty pattern row"),
-                        }));
-                        cases
-                    };
-                    let orpm_args = match args.split_first() {
-                        Some(_) => args.tail(1),
-                        None => panic!("do_cases_or: empty args"),
-                    };
-                    let orpm = PatternMatching {
-                        cases: orpm_cases,
-                        args: orpm_args,
-                        default: default_compat(pa, orp, def),
-                    };
-
-                    let vars: Vec<Ident> = {
-                        let orp_vars = extract_vars(pa, BTreeSet::new(), orp);
-                        let pm_fv = pm_free_variables(b, &orpm);
-                        orp_vars.intersection(&pm_fv).cloned().collect()
-                    };
-
-                    let or_num = bump_raise_count(next_raise);
-                    let new_patl = omegas(patl.len());
-
-                    let mk_new_action = |vs: &[Ident]| -> RawLambda {
-                        let vars: Vec<RawLambda> = vs.iter().map(|v| b.var(*v)).collect();
-                        b.static_raise(or_num, &vars)
-                    };
-
-                    let (body, handlers) =
-                        do_cases_or_deque(b, ctx_ref, pa, argo, &rem, args, def, next_raise);
-
-                    let exploded = explode_or_pat(
-                        ctx_ref,
-                        pa,
-                        argo,
-                        &new_patl,
-                        &mk_new_action,
-                        body.into_iter().collect(),
-                        &vars.iter().cloned().collect(),
-                        &[],
-                        orp,
-                    );
-
-                    let new_body = match exploded {
-                        Ok(b) => b,
-                        Err(_) => panic!("do_cases_or: Cannot_flatten"),
-                    };
-
-                    let mat = vec![vec![*orp]];
-                    let mut new_handlers = vec![(mat, or_num, vars, orpm)];
-                    new_handlers.extend(handlers);
-                    (new_body.into(), new_handlers)
-                }
-                _ => {
-                    // OCaml compiler/ml/matching.ml:846-1090 conses ordinary
-                    // rows before the recursively processed tail. Use
-                    // `push_front` for the same list shape without shifting a
-                    // Rust Vec on every row.
-                    let (mut new_ord, new_to_catch) =
-                        do_cases_or_deque(b, ctx_ref, pa, argo, rem, args, def, next_raise);
-                    new_ord.push_front(cl.clone());
-                    (new_ord, new_to_catch)
-                }
-            }
-        }
-    }
-}
-
 /// Top-level split_precompile.
 /// Equivalent to OCaml's `split_precompile`.
 pub fn split_precompile<'p>(
@@ -4729,16 +4483,15 @@ pub fn split_precompile<'p>(
     pm: &PatternMatching<'p>,
     next_raise: &mut i32,
 ) -> (PmHalfCompiled<'p>, Vec<(i32, PmHalfCompiled<'p>)>) {
-    let (info, nexts) = split_or(
+    let (info, nexts) = Split {
         ctx_ref,
         pa,
         arena,
         argo,
-        pm.cases.clone(),
-        &pm.args,
-        pm.default.clone(),
+        args: &pm.args,
         next_raise,
-    );
+    }
+    .split_or(pm.cases.clone(), pm.default.clone());
     (info.me, nexts)
 }
 
@@ -5078,23 +4831,24 @@ fn divide_constant<'p>(
 
 // --- Constructors (lines 1180-1289) ---
 
-/// Make field access arguments for a constructor.
-/// Equivalent to OCaml's `make_field_args`.
+/// Make field access arguments for a constructor: the fields at `positions`
+/// of `arg`, then `argl`.
+/// Equivalent to OCaml's `make_field_args`, whose `first_pos` and `last_pos`
+/// are the bounds of `positions`.
 fn make_field_args(
     b: &RawArena,
     fld_info: FieldDbgInfo,
     loc: LamLoc,
     binding_kind: LetKind,
     arg: &RawLambda,
-    first_pos: i32,
-    last_pos: i32,
+    positions: std::ops::RangeInclusive<i32>,
     argl: &MatchArgs,
 ) -> MatchArgs {
     MatchArgs::new(
-        (first_pos..=last_pos)
+        positions
             .map(|pos| {
                 (
-                    b.prim(Primitive::Pfield(pos, fld_info.clone()), &[*arg], loc),
+                    b.prim(Primitive::Pfield(pos, fld_info), &[*arg], loc),
                     binding_kind,
                 )
             })
@@ -5136,7 +4890,7 @@ fn matcher_constr<'p>(
     match cstr.cstr_arity {
         0 => matcher_constr_arity0(pa, cstr, p, rem),
         1 => matcher_constr_arity1(pa, cstr, p, rem),
-        _ => matcher_constr_arityN(pa, cstr, p, rem),
+        _ => matcher_constr_arity_n(pa, cstr, p, rem),
     }
 }
 
@@ -5189,7 +4943,7 @@ fn matcher_constr_arity1<'p>(
                             pat_type: a1.pat_type,
                             pat_env: a1.pat_env,
                         };
-                        let mut result = vec![&*pa.alloc(or_pat)];
+                        let mut result = vec![pa.alloc(or_pat)];
                         result.extend(rem.iter().cloned());
                         Ok(result)
                     }
@@ -5214,7 +4968,7 @@ fn matcher_constr_arity1<'p>(
 }
 
 /// Matcher for N-arity constructor (N >= 2).
-fn matcher_constr_arityN<'p>(
+fn matcher_constr_arity_n<'p>(
     pa: &PatArena<'p>,
     cstr: &ConstructorDescription,
     q: &'p Pattern,
@@ -5342,8 +5096,7 @@ fn make_constr_matching<'p>(
                             arena.lam_loc(p.pat_loc),
                             LetKind::Alias,
                             arg,
-                            0,
-                            cstr.cstr_arity - 1,
+                            0..=cstr.cstr_arity - 1,
                             &argl,
                         )
                     }
@@ -5353,8 +5106,7 @@ fn make_constr_matching<'p>(
                         arena.lam_loc(p.pat_loc),
                         LetKind::Alias,
                         arg,
-                        1,
-                        cstr.cstr_arity,
+                        1..=cstr.cstr_arity,
                         &argl,
                     ),
                 }
@@ -5616,23 +5368,21 @@ fn divide_variant<'p>(
     let row = btype::row_repr(ctx_ref, row);
 
     fn divide_rec<'p>(
-        ctx_ref: &TypeContext,
-        pa: &'p PatArena<'p>,
-        arena: &LocArena<'_>,
+        cx: MatchCx<'p, '_>,
         row: &RowDesc,
         cases: &[Clause<'p>],
         def: &DefaultEnv<'p>,
         ctx: &[Ctx<'p>],
         al: &MatchArgs,
     ) -> Vec<((String, bool), MatchCell<'p>)> {
+        let MatchCx { ctx_ref, pa, arena } = cx;
         match cases.split_first() {
             Some(((patl, action), rem)) => {
                 match patl.split_first() {
                     Some((p, rest_patl)) => {
                         match &p.pat_desc {
                             PatternDesc::Tpat_variant(lab, pato, _) => {
-                                let variants =
-                                    divide_rec(ctx_ref, pa, arena, row, rem, def, ctx, al);
+                                let variants = divide_rec(cx, row, rem, def, ctx, al);
 
                                 // Check if this label is absent in the row
                                 let is_absent = match row.row_fields.iter().find(|(l, _)| l == lab)
@@ -5698,9 +5448,7 @@ fn divide_variant<'p>(
     }
 
     divide_rec(
-        ctx_ref,
-        pa,
-        arena,
+        MatchCx { ctx_ref, pa, arena },
         &row,
         &pm.cases,
         &pm.default,
@@ -6131,6 +5879,11 @@ fn divide_array<'p>(
 // Generic test trees — Sharing (OCaml matching.ml lines 1609-1659)
 // ============================================================================
 
+/// What the `share_actions_tree` functions return: the catch handlers by
+/// exit label, the cases with shared actions replaced by exits, and the
+/// default.
+type SharedActions<K, H> = (Vec<(i32, H)>, Vec<(K, RawLambda)>, Option<RawLambda>);
+
 /// Process shared actions for tree-based matching.
 /// Returns `(wrapper_fn, processed_sw, processed_d)`.
 /// The wrapper_fn wraps the result with catch handlers.
@@ -6141,11 +5894,7 @@ fn share_actions_tree(
     sw: Vec<(Constant, RawLambda)>,
     d: Option<RawLambda>,
     next_raise_count: &mut i32,
-) -> (
-    Vec<(i32, RawLambda)>,
-    Vec<(Constant, RawLambda)>,
-    Option<RawLambda>,
-) {
+) -> SharedActions<Constant, RawLambda> {
     let mut store = StoreExp::mk_store(b);
 
     // Default action is always shared
@@ -6310,17 +6059,19 @@ fn typed_const_to_lambda_const(b: &RawArena, c: &Constant) -> RawLambda {
 
 /// Build a test sequence for constant matching.
 /// Uses dichotomic splitting when there are enough cases and a less-than test is available.
-/// Equivalent to OCaml's `make_test_sequence`.
+/// Equivalent to OCaml's `make_test_sequence`; `comparison` builds its `tst`
+/// (`Neq`) and `lt_tst` (`Lt`) primitives.
 fn make_test_sequence(
     b: &RawArena,
     loc: LamLoc,
     fail: Option<RawLambda>,
-    tst: Primitive,
-    lt_tst: Primitive,
+    comparison: fn(Comparison) -> Primitive,
     arg: RawLambda,
     const_lambda_list: Vec<(Constant, RawLambda)>,
     next_raise_count: &mut i32,
 ) -> RawLambda {
+    let tst = comparison(Comparison::Neq);
+    let lt_tst = comparison(Comparison::Lt);
     let const_lambda_list = sort_lambda_list(const_lambda_list);
     let (handlers, const_lambda_list, fail) =
         share_actions_tree(b, const_lambda_list, fail, next_raise_count);
@@ -6526,7 +6277,7 @@ type IntCases = std::vec::IntoIter<(i32, i32, RawLambda)>;
 /// `i .. j` is used for each of its values. Storing it as shared emits it
 /// once, as an expanded range sharing the action of each value used to;
 /// copies would declare its variables twice.
-fn store_range_action(store: &mut StoreExp, i: i32, j: i32, act: RawLambda) -> usize {
+fn store_range_action(store: &mut StoreExp<'_>, i: i32, j: i32, act: RawLambda) -> usize {
     if i < j {
         store.act_store_shared(act)
     } else {
@@ -6545,7 +6296,7 @@ fn as_interval_canfail(
     low: i32,
     high: i32,
     l: Vec<(i32, i32, RawLambda)>,
-) -> (Vec<(i32, i32, usize)>, StoreExp) {
+) -> (Vec<(i32, i32, usize)>, StoreExp<'_>) {
     let mut store = StoreExp::mk_store(b);
 
     let fail_idx = store_range_action(&mut store, 0, 0, fail);
@@ -6681,6 +6432,10 @@ fn as_interval_nofail(
     (inters, store)
 }
 
+/// Switch intervals `(low, high, action index)` and the action store they
+/// index into.
+type Intervals<'a> = (Vec<(i32, i32, usize)>, StoreExp<'a>);
+
 /// `as_interval_ranges fail low high l`: `l` maps disjoint ranges
 /// `lo .. hi` to actions.
 fn as_interval_ranges(
@@ -6689,7 +6444,7 @@ fn as_interval_ranges(
     low: i32,
     high: i32,
     mut l: Vec<(i32, i32, RawLambda)>,
-) -> ((i32, i32), (Vec<(i32, i32, usize)>, StoreExp<'_>)) {
+) -> ((i32, i32), Intervals<'_>) {
     l.sort_by_key(|&(i, _, _)| i);
     let edges = get_edges(low, high, &l);
     let result = match fail {
@@ -6801,7 +6556,7 @@ fn complete_pats_constrs<'p>(
             others.sort_by_key(|cnstr| cnstr.cstr_arity != 0);
             others
                 .iter()
-                .map(|cnstr| &*pa.alloc(pat_of_constr(pa, p, cnstr)))
+                .map(|cnstr| pa.alloc(pat_of_constr(pa, p, cnstr)))
                 .collect()
         }
     }
@@ -6873,7 +6628,7 @@ fn get_variant_constructors_from_env(
         if let Some(decl) = env_decl {
             match &decl.type_kind {
                 TypeKind::TypeVariant(_, _) => {
-                    return build_descriptions(ctx_ref, &path, decl);
+                    return build_descriptions(ctx_ref, path, decl);
                 }
                 TypeKind::TypeAbstract => {
                     if let Some(manifest) = decl.type_manifest {
@@ -6889,7 +6644,7 @@ fn get_variant_constructors_from_env(
         } else if let Some(decl) = fallback_decl {
             match &decl.type_kind {
                 TypeKind::TypeVariant(_, _) => {
-                    return build_descriptions(ctx_ref, &path, &decl);
+                    return build_descriptions(ctx_ref, path, &decl);
                 }
                 TypeKind::TypeAbstract => {
                     if let Some(manifest) = decl.type_manifest {
@@ -6958,11 +6713,7 @@ fn mk_failaction_pos<'p>(
     seen: &[&'p Pattern],
     ctx: &[Ctx<'p>],
     defs: &DefaultEnv<'p>,
-) -> (
-    Option<RawLambda>,
-    Vec<(std::sync::Arc<ConstructorDescription>, RawLambda)>,
-    Jumps<'p>,
-) {
+) -> (Option<RawLambda>, Vec<ConstrCase>, Jumps<'p>) {
     let fail_pats = complete_pats_constrs(ctx_ref, pa, seen);
     if fail_pats.len() < 32 {
         let to_test: Vec<(&'p Pattern, Vec<Ctx<'p>>)> = fail_pats
@@ -6989,17 +6740,14 @@ fn scan_def<'p>(
     env: Vec<(Vec<&'p Pattern>, i32)>,
     to_test: Vec<(&'p Pattern, Vec<Ctx<'p>>)>,
     defs: &[(Matrix<'p>, i32)],
-) -> (
-    Vec<(std::sync::Arc<ConstructorDescription>, RawLambda)>,
-    Jumps<'p>,
-) {
+) -> (Vec<ConstrCase>, Jumps<'p>) {
     if to_test.is_empty() || defs.is_empty() {
         // Fold env to build (klist, jumps)
-        let mut klist: Vec<(std::sync::Arc<ConstructorDescription>, RawLambda)> = Vec::new();
+        let mut klist: Vec<ConstrCase> = Vec::new();
         let mut jumps = jumps_empty();
         for (pats, i) in &env {
             let action = b.static_raise(*i, &[]);
-            let mut new_klist: Vec<(std::sync::Arc<ConstructorDescription>, RawLambda)> = pats
+            let mut new_klist: Vec<ConstrCase> = pats
                 .iter()
                 .map(|pat| (get_key_constr(pat), action))
                 .collect();
@@ -7060,11 +6808,7 @@ fn share_actions_tree_string(
     sw: Vec<(String, RawLambda)>,
     d: Option<RawLambda>,
     next_raise_count: &mut i32,
-) -> (
-    Vec<(i32, Option<RawLambda>)>,
-    Vec<(String, RawLambda)>,
-    Option<RawLambda>,
-) {
+) -> SharedActions<String, Option<RawLambda>> {
     let mut store = StoreExp::mk_store(b);
 
     let d_idx = d.map(|d| store.act_store_shared(d));
@@ -7101,20 +6845,36 @@ fn share_actions_tree_string(
     (handlers, sw, d)
 }
 
+/// The test a `combine_*` function builds: the match compiler's context,
+/// the test's location and scrutinee, and the partiality, contexts and
+/// default environment of the match it is part of.
+#[derive(Clone, Copy)]
+struct CombineSite<'p, 'a> {
+    cx: MatchCx<'p, 'a>,
+    loc: LamLoc,
+    arg: RawLambda,
+    partial: &'a Partial,
+    ctx: &'a [Ctx<'p>],
+    def: &'a DefaultEnv<'p>,
+}
+
 /// Combine constant matching results.
 /// Equivalent to OCaml's `combine_constant`.
 fn combine_constant<'p>(
-    b: &RawArena,
-    pa: &PatArena<'p>,
-    loc: LamLoc,
-    arg: RawLambda,
+    site: &CombineSite<'p, '_>,
     cst: &Constant,
-    partial: &Partial,
-    ctx: &[Ctx<'p>],
-    def: &DefaultEnv<'p>,
     c_div: (Vec<(ConstantKey, RawLambda)>, Jumps<'p>, Vec<&'p Pattern>),
     next_raise_count: &mut i32,
 ) -> (RawLambda, Jumps<'p>) {
+    let CombineSite {
+        cx: MatchCx { pa, arena, .. },
+        loc,
+        arg,
+        partial,
+        ctx,
+        def,
+    } = *site;
+    let b = arena.b;
     let (const_lambda_list, total, _pats) = c_div;
     let (fail, local_jumps) = mk_failaction_neg(b, partial, ctx, def);
     let lambda1 = match cst {
@@ -7161,8 +6921,7 @@ fn combine_constant<'p>(
             b,
             loc,
             fail,
-            Primitive::Pfloatcomp(Comparison::Neq),
-            Primitive::Pfloatcomp(Comparison::Lt),
+            Primitive::Pfloatcomp,
             arg,
             const_lambda_list
                 .into_iter()
@@ -7174,8 +6933,7 @@ fn combine_constant<'p>(
             b,
             loc,
             fail,
-            Primitive::Pbigintcomp(Comparison::Neq),
-            Primitive::Pbigintcomp(Comparison::Lt),
+            Primitive::Pbigintcomp,
             arg,
             const_lambda_list
                 .into_iter()
@@ -7189,12 +6947,7 @@ fn combine_constant<'p>(
 
 /// Split case list into constant and non-constant constructor cases.
 /// Equivalent to OCaml's `split_cases`.
-fn split_cases(
-    tag_lambda_list: Vec<(std::sync::Arc<ConstructorDescription>, RawLambda)>,
-) -> (
-    Vec<(std::sync::Arc<ConstructorDescription>, RawLambda)>,
-    Vec<(std::sync::Arc<ConstructorDescription>, RawLambda)>,
-) {
+fn split_cases(tag_lambda_list: Vec<ConstrCase>) -> (Vec<ConstrCase>, Vec<ConstrCase>) {
     let (mut consts, mut nonconsts): (Vec<_>, Vec<_>) =
         tag_lambda_list
             .into_iter()
@@ -7213,14 +6966,14 @@ fn split_cases(
     (consts, nonconsts)
 }
 
+/// A polymorphic variant case: the tag's hash, its name and its action.
+type HashedVariantCase = (i32, (String, RawLambda));
+
 /// Split variant case list into constant and non-constant.
 /// Equivalent to OCaml's `split_variant_cases`.
 fn split_variant_cases(
     tag_lambda_list: Vec<((String, bool), RawLambda)>,
-) -> (
-    Vec<(i32, (String, RawLambda))>,
-    Vec<(i32, (String, RawLambda))>,
-) {
+) -> (Vec<HashedVariantCase>, Vec<HashedVariantCase>) {
     let mut consts = Vec::new();
     let mut nonconsts = Vec::new();
     for ((name, is_const), act) in tag_lambda_list {
@@ -7239,7 +6992,7 @@ fn split_variant_cases(
 /// Get extension constructor cases.
 /// Equivalent to OCaml's `get_extension_cases`.
 fn get_extension_cases(
-    tag_lambda_list: Vec<(std::sync::Arc<ConstructorDescription>, RawLambda)>,
+    tag_lambda_list: Vec<ConstrCase>,
 ) -> Vec<(crate::types::path::Path, RawLambda)> {
     tag_lambda_list
         .into_iter()
@@ -7389,23 +7142,21 @@ fn normalize_module_path_via_ctx(
 /// Combine constructor matching results.
 /// Equivalent to OCaml's `combine_constructor`.
 fn combine_constructor<'p>(
-    b: &RawArena,
-    ctx_ref: &TypeContext,
-    pa: &'p PatArena<'p>,
-    loc: LamLoc,
-    arg: RawLambda,
+    site: &CombineSite<'p, '_>,
     ex_pat: &'p Pattern,
     cstr: &ConstructorDescription,
-    partial: &Partial,
-    ctx: &[Ctx<'p>],
-    def: &DefaultEnv<'p>,
-    c_div: (
-        Vec<(std::sync::Arc<ConstructorDescription>, RawLambda)>,
-        Jumps<'p>,
-        Vec<&'p Pattern>,
-    ),
+    c_div: CompiledCells<'p, std::sync::Arc<ConstructorDescription>>,
     next_raise_count: &mut i32,
 ) -> (RawLambda, Jumps<'p>) {
+    let CombineSite {
+        cx: MatchCx { ctx_ref, pa, arena },
+        loc,
+        arg,
+        partial,
+        ctx,
+        def,
+    } = *site;
+    let b = arena.b;
     let (tag_lambda_list, total1, pats) = c_div;
 
     if matches!(cstr.cstr_kind, crate::types::ConstructorKind::Extension(_)) {
@@ -7525,7 +7276,7 @@ fn combine_constructor<'p>(
                 let find_action = |name: &str| {
                     consts
                         .iter()
-                        .find_map(|(cstr, action)| (cstr.cstr_name == name).then(|| *action))
+                        .find_map(|(cstr, action)| (cstr.cstr_name == name).then_some(*action))
                         .expect("boolean constructor action")
                 };
                 b.if_raw(arg, find_action("true"), find_action("false"))
@@ -7536,24 +7287,23 @@ fn combine_constructor<'p>(
                 // matching.ml:2190. Skipping that pure computation
                 // avoids normalizing/cloning switch actions without
                 // changing the emitted lambda.
-                let switch_cases =
-                    |cases: Vec<(std::sync::Arc<ConstructorDescription>, RawLambda)>| {
-                        cases
-                            .into_iter()
-                            .map(|(cstr, action)| {
-                                let reference = match cstr.cstr_kind {
-                                    crate::types::ConstructorKind::Ordinary(reference) => reference,
-                                    crate::types::ConstructorKind::Extension(_) => unreachable!(),
-                                };
-                                (
-                                    crate::lambda::SwitchKey::Constructor(
-                                        reference.representation(ctx_ref),
-                                    ),
-                                    action,
-                                )
-                            })
-                            .collect()
-                    };
+                let switch_cases = |cases: Vec<ConstrCase>| {
+                    cases
+                        .into_iter()
+                        .map(|(cstr, action)| {
+                            let reference = match cstr.cstr_kind {
+                                crate::types::ConstructorKind::Ordinary(reference) => reference,
+                                crate::types::ConstructorKind::Extension(_) => unreachable!(),
+                            };
+                            (
+                                crate::lambda::SwitchKey::Constructor(
+                                    reference.representation(ctx_ref),
+                                ),
+                                action,
+                            )
+                        })
+                        .collect()
+                };
                 let sw = RawLambdaSwitch {
                     sw_consts_full: consts.len() >= num_consts,
                     sw_consts: switch_cases(consts),
@@ -7704,7 +7454,7 @@ fn convert_polyvar_list(
 
     for (hash_names, _) in &mut groups {
         // Sort hashes descending within each group to match OCaml's Switcher.test_sequence ordering
-        hash_names.sort_by(|a, b| b.0.cmp(&a.0));
+        hash_names.sort_by_key(|(hash, _)| std::cmp::Reverse(*hash));
     }
     groups
 }
@@ -7811,21 +7561,19 @@ fn call_switcher_variant_constr(
 /// Combine variant matching results.
 /// Equivalent to OCaml's `combine_variant`.
 fn combine_variant<'p>(
-    b: &RawArena,
-    pa: &PatArena<'p>,
-    ctx_ref: &TypeContext,
-    loc: LamLoc,
+    site: &CombineSite<'p, '_>,
     row: &RowDesc,
-    arg: RawLambda,
-    partial: &Partial,
-    ctx: &[Ctx<'p>],
-    def: &DefaultEnv<'p>,
-    c_div: (
-        Vec<((String, bool), RawLambda)>,
-        Jumps<'p>,
-        Vec<&'p Pattern>,
-    ),
+    c_div: CompiledCells<'p, (String, bool)>,
 ) -> (RawLambda, Jumps<'p>) {
+    let CombineSite {
+        cx: MatchCx { ctx_ref, pa, arena },
+        loc,
+        arg,
+        partial,
+        ctx,
+        def,
+    } = *site;
+    let b = arena.b;
     let (tag_lambda_list, total1, _pats) = c_div;
     let row = btype::row_repr(ctx_ref, row);
     let mut num_constr: usize = 0;
@@ -7898,17 +7646,19 @@ fn combine_variant<'p>(
 /// Combine array matching results.
 /// Equivalent to OCaml's `combine_array`.
 fn combine_array<'p>(
-    b: &RawArena,
-    pa: &PatArena<'p>,
-    ctx_ref: &TypeContext,
-    loc: LamLoc,
-    arg: RawLambda,
-    partial: &Partial,
-    ctx: &[Ctx<'p>],
-    def: &DefaultEnv<'p>,
+    site: &CombineSite<'p, '_>,
     c_div: (Vec<(usize, RawLambda)>, Jumps<'p>, Vec<&'p Pattern>),
     next_raise_count: &mut i32,
 ) -> (RawLambda, Jumps<'p>) {
+    let CombineSite {
+        cx: MatchCx { ctx_ref, pa, arena },
+        loc,
+        arg,
+        partial,
+        ctx,
+        def,
+    } = *site;
+    let b = arena.b;
     let (len_lambda_list, total1, _pats) = c_div;
     let (fail, local_jumps) = mk_failaction_neg(b, partial, ctx, def);
     let lambda1 = {
@@ -7946,17 +7696,40 @@ fn combine_array<'p>(
 #[derive(Debug)]
 struct Unused;
 
+/// A compiled match: its code and the jumps it may take.
+type Compiled<'p> = (RawLambda, Jumps<'p>);
+
+/// What `compile_list` returns: one action per key, the union of their
+/// jumps, and the patterns of the compiled cells.
+type CompiledCells<'p, K> = (Vec<(K, RawLambda)>, Jumps<'p>, Vec<&'p Pattern>);
+
+/// Compiles one divided cell, given its contexts (`compile_list`).
+type CellCompiler<'p, 'f> =
+    dyn FnMut(&[Ctx<'p>], PatternMatching<'p>) -> Result<Compiled<'p>, Unused> + 'f;
+
+/// Compiles an or-pattern handler's matching (`compile_orhandlers`).
+type OrHandlerCompiler<'p, 'f> =
+    dyn FnMut(&[Ctx<'p>], &PatternMatching<'p>) -> Result<Compiled<'p>, Unused> + 'f;
+
+/// Compiles one half-compiled match (`comp_match_handlers`).
+type HalfCompiledCompiler<'p, 'f> = dyn FnMut(&Partial, &[Ctx<'p>], &RawLambda, &PmHalfCompiled<'p>) -> Result<Compiled<'p>, Unused>
+    + 'f;
+
+/// Divides a matching into cells by key (`compile_test`'s `divide`).
+type Divider<'p, 'f, K> = dyn Fn(&[Ctx<'p>], &PatternMatching<'p>) -> Vec<(K, MatchCell<'p>)> + 'f;
+
+/// Combines the compiled cells into one test (`compile_test`'s `combine`).
+type Combiner<'p, 'f, K> =
+    dyn Fn(&[Ctx<'p>], &DefaultEnv<'p>, CompiledCells<'p, K>, &mut i32) -> Compiled<'p> + 'f;
+
 /// Compile a list of divided cells.
 /// Returns (key-action list, total jumps, pattern list).
 /// Equivalent to OCaml's `compile_list`.
 fn compile_list<'p, K: Clone>(
     pa: &'p PatArena<'p>,
-    compile_fun: &mut dyn FnMut(
-        &[Ctx<'p>],
-        PatternMatching<'p>,
-    ) -> Result<(RawLambda, Jumps<'p>), Unused>,
+    compile_fun: &mut CellCompiler<'p, '_>,
     division: Vec<(K, MatchCell<'p>)>,
-) -> Result<(Vec<(K, RawLambda)>, Jumps<'p>, Vec<&'p Pattern>), Unused> {
+) -> Result<CompiledCells<'p, K>, Unused> {
     let mut compiled = Vec::new();
     let mut totals = Vec::new();
     let mut new_pats = Vec::new();
@@ -7987,15 +7760,12 @@ fn compile_list<'p, K: Clone>(
 fn compile_orhandlers<'p>(
     b: &RawArena,
     pa: &'p PatArena<'p>,
-    compile_fun: &mut dyn FnMut(
-        &[Ctx<'p>],
-        &PatternMatching<'p>,
-    ) -> Result<(RawLambda, Jumps<'p>), Unused>,
+    compile_fun: &mut OrHandlerCompiler<'p, '_>,
     lambda1: RawLambda,
     total1: Jumps<'p>,
     ctx: &[Ctx<'p>],
-    to_catch: &[(Matrix<'p>, i32, Vec<Ident>, PatternMatching<'p>)],
-) -> (RawLambda, Jumps<'p>) {
+    to_catch: &[OrHandler<'p>],
+) -> Compiled<'p> {
     /// `add_raised_exits raised lam`: adds the static exits `lam` jumps to.
     /// Exits cannot leave a function, so function bodies are skipped.
     fn add_raised_exits(a: &LamArena, raised: &mut std::collections::HashSet<i32>, lam: RawLambda) {
@@ -8009,27 +7779,22 @@ fn compile_orhandlers<'p>(
         a.iter_children(lam, |child| add_raised_exits(a, raised, child));
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn do_rec<'p>(
         b: &RawArena,
         pa: &'p PatArena<'p>,
-        compile_fun: &mut dyn FnMut(
-            &[Ctx<'p>],
-            &PatternMatching<'p>,
-        ) -> Result<(RawLambda, Jumps<'p>), Unused>,
+        compile_fun: &mut OrHandlerCompiler<'p, '_>,
         raised: &mut std::collections::HashSet<i32>,
-        r: RawLambda,
-        total_r: Jumps<'p>,
+        (r, total_r): Compiled<'p>,
         ctx: &[Ctx<'p>],
-        to_catch: &[(Matrix<'p>, i32, Vec<Ident>, PatternMatching<'p>)],
-    ) -> (RawLambda, Jumps<'p>) {
+        to_catch: &[OrHandler<'p>],
+    ) -> Compiled<'p> {
         match to_catch.split_first() {
             None => (r, total_r),
             // The or-pattern is unreachable, e.g. after a wildcard. Its
             // handler is not compiled: with a guard and no default, its
             // failure has no exit.
             Some(((_, i, _, _), rem)) if !raised.contains(i) => {
-                do_rec(b, pa, compile_fun, raised, r, total_r, ctx, rem)
+                do_rec(b, pa, compile_fun, raised, (r, total_r), ctx, rem)
             }
             Some(((mat, i, vars, pm), rem)) => {
                 let ctx_i = select_columns(pa, mat, ctx);
@@ -8050,8 +7815,7 @@ fn compile_orhandlers<'p>(
                                     pa,
                                     compile_fun,
                                     raised,
-                                    body,
-                                    jumps_map(|c| ctx_rshift_num(ncols(mat), &c), total_i),
+                                    (body, jumps_map(|c| ctx_rshift_num(ncols(mat), &c), total_i)),
                                     ctx,
                                     rem,
                                 )
@@ -8061,18 +7825,20 @@ fn compile_orhandlers<'p>(
                                 // skips a handler when `raw_action r` is a
                                 // different static raise.
                                 drop(args);
-                                do_rec(b, pa, compile_fun, raised, r, total_r, ctx, rem)
+                                do_rec(b, pa, compile_fun, raised, (r, total_r), ctx, rem)
                             }
                             None => do_rec(
                                 b,
                                 pa,
                                 compile_fun,
                                 raised,
-                                b.static_catch(r, *i, vars, handler_i),
-                                jumps_union(
-                                    pa,
-                                    jumps_remove(*i, total_r),
-                                    jumps_map(|c| ctx_rshift_num(ncols(mat), &c), total_i),
+                                (
+                                    b.static_catch(r, *i, vars, handler_i),
+                                    jumps_union(
+                                        pa,
+                                        jumps_remove(*i, total_r),
+                                        jumps_map(|c| ctx_rshift_num(ncols(mat), &c), total_i),
+                                    ),
                                 ),
                                 ctx,
                                 rem,
@@ -8084,8 +7850,7 @@ fn compile_orhandlers<'p>(
                         pa,
                         compile_fun,
                         raised,
-                        b.static_catch(r, *i, vars, lambda_unit(b)),
-                        total_r,
+                        (b.static_catch(r, *i, vars, lambda_unit(b)), total_r),
                         ctx,
                         rem,
                     ),
@@ -8102,8 +7867,7 @@ fn compile_orhandlers<'p>(
         pa,
         compile_fun,
         &mut raised,
-        lambda1,
-        total1,
+        (lambda1, total1),
         ctx,
         to_catch,
     )
@@ -8213,7 +7977,7 @@ fn comp_exit<'p>(
     b: &RawArena,
     ctx: &[Ctx<'p>],
     m: &PatternMatching<'p>,
-) -> Result<(RawLambda, Jumps<'p>), Unused> {
+) -> Result<Compiled<'p>, Unused> {
     match m.default.first() {
         Some((_, i)) => Ok((b.static_raise(*i, &[]), jumps_singleton(*i, ctx.to_vec()))),
         None => crate::misc::fatal_error("Matching.comp_exit"),
@@ -8223,20 +7987,14 @@ fn comp_exit<'p>(
 /// Compile a match with multiple handlers (for split results).
 /// Equivalent to OCaml's `comp_match_handlers`.
 fn comp_match_handlers<'p>(
-    b: &RawArena,
-    pa: &PatArena<'p>,
-    comp_fun: &mut dyn FnMut(
-        &Partial,
-        &[Ctx<'p>],
-        &RawLambda,
-        &PmHalfCompiled<'p>,
-    ) -> Result<(RawLambda, Jumps<'p>), Unused>,
+    cx: MatchCx<'p, '_>,
+    comp_fun: &mut HalfCompiledCompiler<'p, '_>,
     partial: &Partial,
     ctx: &[Ctx<'p>],
     arg: &RawLambda,
     first_match: &PmHalfCompiled<'p>,
     next_matchs: &[(i32, PmHalfCompiled<'p>)],
-) -> Result<(RawLambda, Jumps<'p>), Unused> {
+) -> Result<Compiled<'p>, Unused> {
     if next_matchs.is_empty() {
         return comp_fun(partial, ctx, arg, first_match);
     }
@@ -8246,31 +8004,26 @@ fn comp_match_handlers<'p>(
     // same control flow instead of cloning precompiled match trees.
     match comp_fun(&Partial::Partial, ctx, arg, first_match) {
         Ok((first_lam, total)) => {
-            c_rec(b, pa, comp_fun, partial, arg, first_lam, total, next_matchs)
+            c_rec(cx, comp_fun, partial, arg, (first_lam, total), next_matchs)
         }
         Err(Unused) => match next_matchs.split_first() {
             None => Err(Unused),
-            Some(((_, x), xs)) => comp_match_handlers(b, pa, comp_fun, partial, ctx, arg, x, xs),
+            Some(((_, x), xs)) => comp_match_handlers(cx, comp_fun, partial, ctx, arg, x, xs),
         },
     }
 }
 
 /// Inner recursive function for comp_match_handlers.
 fn c_rec<'p>(
-    b: &RawArena,
-    pa: &PatArena<'p>,
-    comp_fun: &mut dyn FnMut(
-        &Partial,
-        &[Ctx<'p>],
-        &RawLambda,
-        &PmHalfCompiled<'p>,
-    ) -> Result<(RawLambda, Jumps<'p>), Unused>,
+    cx: MatchCx<'p, '_>,
+    comp_fun: &mut HalfCompiledCompiler<'p, '_>,
     partial: &Partial,
     arg: &RawLambda,
-    body: RawLambda,
-    total_body: Jumps<'p>,
+    (body, total_body): Compiled<'p>,
     rest: &[(i32, PmHalfCompiled<'p>)],
-) -> Result<(RawLambda, Jumps<'p>), Unused> {
+) -> Result<Compiled<'p>, Unused> {
+    let MatchCx { pa, arena, .. } = cx;
+    let b = arena.b;
     match rest.split_first() {
         None => Ok((body, total_body)),
         Some(((i, pm), rem)) => {
@@ -8279,7 +8032,7 @@ fn c_rec<'p>(
             let has_ctx_i =
                 jumps_position(*i, &total_body).is_some_and(|p| !total_body[p].1.is_empty());
             if !has_ctx_i {
-                c_rec(b, pa, comp_fun, partial, arg, body, total_body, rem)
+                c_rec(cx, comp_fun, partial, arg, (body, total_body), rem)
             } else {
                 let (ctx_i, total_rem) = jumps_extract(*i, total_body);
                 let this_partial = if rem.is_empty() {
@@ -8289,23 +8042,22 @@ fn c_rec<'p>(
                 };
                 match comp_fun(&this_partial, &ctx_i, arg, pm) {
                     Ok((li, total_i)) => c_rec(
-                        b,
-                        pa,
+                        cx,
                         comp_fun,
                         partial,
                         arg,
-                        b.static_catch(body, *i, &[], li),
-                        jumps_union(pa, total_i, total_rem),
+                        (
+                            b.static_catch(body, *i, &[], li),
+                            jumps_union(pa, total_i, total_rem),
+                        ),
                         rem,
                     ),
                     Err(Unused) => c_rec(
-                        b,
-                        pa,
+                        cx,
                         comp_fun,
                         partial,
                         arg,
-                        b.static_catch(body, *i, &[], lambda_unit(b)),
-                        total_rem,
+                        (b.static_catch(body, *i, &[], lambda_unit(b)), total_rem),
                         rem,
                     ),
                 }
@@ -8400,57 +8152,36 @@ fn lambda_unit(b: &RawArena) -> RawLambda {
 ///
 /// Equivalent to OCaml's `compile_match`.
 fn compile_match<'p>(
-    ctx_ref: &TypeContext,
-    pa: &'p PatArena<'p>,
-    arena: &LocArena<'_>,
+    cx: MatchCx<'p, '_>,
     _repr: Option<()>,
     partial: &Partial,
     ctx: &[Ctx<'p>],
     m: &PatternMatching<'p>,
     next_raise_count: &mut i32,
-) -> Result<(RawLambda, Jumps<'p>), Unused> {
-    compile_match_cow(
-        ctx_ref,
-        pa,
-        arena,
-        partial,
-        ctx,
-        Cow::Borrowed(m),
-        next_raise_count,
-    )
+) -> Result<Compiled<'p>, Unused> {
+    compile_match_cow(cx, partial, ctx, Cow::Borrowed(m), next_raise_count)
 }
 
 /// [`compile_match`] on a matching the caller gives up, so its cases and
 /// default environment move on instead of being copied.
 fn compile_match_owned<'p>(
-    ctx_ref: &TypeContext,
-    pa: &'p PatArena<'p>,
-    arena: &LocArena<'_>,
+    cx: MatchCx<'p, '_>,
     partial: &Partial,
     ctx: &[Ctx<'p>],
     m: PatternMatching<'p>,
     next_raise_count: &mut i32,
-) -> Result<(RawLambda, Jumps<'p>), Unused> {
-    compile_match_cow(
-        ctx_ref,
-        pa,
-        arena,
-        partial,
-        ctx,
-        Cow::Owned(m),
-        next_raise_count,
-    )
+) -> Result<Compiled<'p>, Unused> {
+    compile_match_cow(cx, partial, ctx, Cow::Owned(m), next_raise_count)
 }
 
 fn compile_match_cow<'p>(
-    ctx_ref: &TypeContext,
-    pa: &'p PatArena<'p>,
-    arena: &LocArena<'_>,
+    cx: MatchCx<'p, '_>,
     partial: &Partial,
     ctx: &[Ctx<'p>],
     m: Cow<'_, PatternMatching<'p>>,
     next_raise_count: &mut i32,
-) -> Result<(RawLambda, Jumps<'p>), Unused> {
+) -> Result<Compiled<'p>, Unused> {
+    let MatchCx { ctx_ref, pa, arena } = cx;
     let b = arena.b;
     match (m.cases.as_slice(), m.args.as_slice()) {
         ([], []) => comp_exit(b, ctx, &m),
@@ -8468,15 +8199,8 @@ fn compile_match_cow<'p>(
                         m
                     }
                 };
-                let (lambda, total) = compile_match_owned(
-                    ctx_ref,
-                    pa,
-                    arena,
-                    partial,
-                    ctx,
-                    remaining,
-                    next_raise_count,
-                )?;
+                let (lambda, total) =
+                    compile_match_owned(cx, partial, ctx, remaining, next_raise_count)?;
                 Ok((action.body_with(b, lambda), total))
             } else {
                 Ok((action.to_raw(b), jumps_empty()))
@@ -8492,28 +8216,28 @@ fn compile_match_cow<'p>(
             };
             // `split_precompile` on a matching with the new args, without
             // first copying the cases into that matching.
-            let (info, rem) = split_or(
-                Some(ctx_ref),
+            let argo = Some(v);
+            let (info, rem) = Split {
+                ctx_ref: Some(ctx_ref),
                 pa,
                 arena,
-                &Some(v),
-                cases,
-                &new_args,
-                default,
-                next_raise_count,
-            );
+                argo: &argo,
+                args: &new_args,
+                next_raise: next_raise_count,
+            }
+            .split_or(cases, default);
             let first_match = info.me;
 
             let mut comp_fn = |partial: &Partial,
                                ctx: &[Ctx<'p>],
                                arg: &RawLambda,
                                pmh: &PmHalfCompiled<'p>|
-             -> Result<(RawLambda, Jumps<'p>), Unused> {
-                do_compile_matching(ctx_ref, pa, arena, partial, ctx, arg, pmh, next_raise_count)
+             -> Result<Compiled<'p>, Unused> {
+                do_compile_matching(cx, partial, ctx, arg, pmh, next_raise_count)
             };
 
             let (lam, total) =
-                comp_match_handlers(b, pa, &mut comp_fn, partial, ctx, &newarg, &first_match, &rem)?;
+                comp_match_handlers(cx, &mut comp_fn, partial, ctx, &newarg, &first_match, &rem)?;
             // matching.ml:2800-2808: a mutable field or array element is read
             // once into `v` here. The code that the exits jump to reads it
             // again and may see another value, as a guard may have changed
@@ -8541,24 +8265,21 @@ fn compile_match_cow<'p>(
 /// Main dispatch for compiling half-compiled pattern matchings.
 /// Equivalent to OCaml's `do_compile_matching`.
 fn do_compile_matching<'p>(
-    ctx_ref: &TypeContext,
-    pa: &'p PatArena<'p>,
-    arena: &LocArena<'_>,
+    cx: MatchCx<'p, '_>,
     partial: &Partial,
     ctx: &[Ctx<'p>],
     arg: &RawLambda,
     pmh: &PmHalfCompiled<'p>,
     next_raise_count: &mut i32,
-) -> Result<(RawLambda, Jumps<'p>), Unused> {
+) -> Result<Compiled<'p>, Unused> {
+    let MatchCx { ctx_ref, pa, arena } = cx;
     let b = arena.b;
     match pmh {
         PmHalfCompiled::Pm(pm) => {
             let pat = what_is_cases(&pm.cases);
             match &pat.pat_desc {
                 PatternDesc::Tpat_any => compile_no_test(
-                    ctx_ref,
-                    pa,
-                    arena,
+                    cx,
                     &|ctx, pm| divide_var(pa, ctx, pm),
                     &|ctx| ctx_rshift(ctx),
                     partial,
@@ -8570,9 +8291,7 @@ fn do_compile_matching<'p>(
                     let arity = patl.len();
                     let norm_pat = normalize_pat(pa, pat);
                     compile_no_test(
-                        ctx_ref,
-                        pa,
-                        arena,
+                        cx,
                         &move |ctx, pm| divide_tuple(pa, arena, arity, norm_pat, ctx, pm),
                         &|ctx| ctx_combine(pa, ctx),
                         partial,
@@ -8585,9 +8304,7 @@ fn do_compile_matching<'p>(
                     let all_labels = resolve_all_record_labels(ctx_ref, fields);
                     let norm_pat = normalize_pat(pa, pat);
                     compile_no_test(
-                        ctx_ref,
-                        pa,
-                        arena,
+                        cx,
                         &move |ctx, pm| {
                             divide_record(ctx_ref, pa, arena, &all_labels, norm_pat, ctx, pm)
                         },
@@ -8603,14 +8320,22 @@ fn do_compile_matching<'p>(
                     let arg_clone = *arg;
                     let cst_clone = get_key_constant("compile_match", pat).0;
                     compile_test_wrapper(
-                        ctx_ref,
-                        pa,
-                        arena,
+                        cx,
                         partial,
                         &|ctx, pm| divide_constant(pa, ctx, pm),
                         &|ctx, def, c_div, nrc| {
                             combine_constant(
-                                b, pa, loc, arg_clone, &cst_clone, partial, ctx, def, c_div, nrc,
+                                &CombineSite {
+                                    cx,
+                                    loc,
+                                    arg: arg_clone,
+                                    partial,
+                                    ctx,
+                                    def,
+                                },
+                                &cst_clone,
+                                c_div,
+                                nrc,
                             )
                         },
                         ctx,
@@ -8624,23 +8349,21 @@ fn do_compile_matching<'p>(
                     let ex_pat: &'p Pattern = pat;
                     let cstr_clone = cstr.clone();
                     compile_test_wrapper(
-                        ctx_ref,
-                        pa,
-                        arena,
+                        cx,
                         partial,
                         &|ctx, pm| divide_constructor(b, ctx_ref, pa, arena, ctx, pm),
                         &|ctx, def, c_div, nrc| {
                             combine_constructor(
-                                b,
-                                ctx_ref,
-                                pa,
-                                loc,
-                                arg_clone,
+                                &CombineSite {
+                                    cx,
+                                    loc,
+                                    arg: arg_clone,
+                                    partial,
+                                    ctx,
+                                    def,
+                                },
                                 ex_pat,
                                 &cstr_clone,
-                                partial,
-                                ctx,
-                                def,
                                 c_div,
                                 nrc,
                             )
@@ -8654,14 +8377,21 @@ fn do_compile_matching<'p>(
                     let loc = arena.lam_loc(pat.pat_loc);
                     let arg_clone = *arg;
                     compile_test_wrapper(
-                        ctx_ref,
-                        pa,
-                        arena,
+                        cx,
                         partial,
                         &|ctx, pm| divide_array(pa, arena, ctx, pm),
                         &|ctx, def, c_div, nrc| {
                             combine_array(
-                                b, pa, ctx_ref, loc, arg_clone, partial, ctx, def, c_div, nrc,
+                                &CombineSite {
+                                    cx,
+                                    loc,
+                                    arg: arg_clone,
+                                    partial,
+                                    ctx,
+                                    def,
+                                },
+                                c_div,
+                                nrc,
                             )
                         },
                         ctx,
@@ -8676,14 +8406,20 @@ fn do_compile_matching<'p>(
                         extract_row_from_type_with_env(ctx_ref, pat.pat_type, pat.pat_env);
                     let row_desc2 = row_desc.clone();
                     compile_test_wrapper(
-                        ctx_ref,
-                        pa,
-                        arena,
+                        cx,
                         partial,
                         &move |ctx, pm| divide_variant(ctx_ref, pa, arena, &row_desc, ctx, pm),
                         &|ctx, def, c_div, _nrc| {
                             combine_variant(
-                                b, pa, ctx_ref, loc, &row_desc2, arg_clone, partial, ctx, def,
+                                &CombineSite {
+                                    cx,
+                                    loc,
+                                    arg: arg_clone,
+                                    partial,
+                                    ctx,
+                                    def,
+                                },
+                                &row_desc2,
                                 c_div,
                             )
                         },
@@ -8697,9 +8433,7 @@ fn do_compile_matching<'p>(
         }
         PmHalfCompiled::PmVar(PmVarCompiled { inside, var_arg }) => {
             let (lam, total) = do_compile_matching(
-                ctx_ref,
-                pa,
-                arena,
+                cx,
                 partial,
                 &ctx_lshift(pa, ctx),
                 var_arg,
@@ -8709,21 +8443,11 @@ fn do_compile_matching<'p>(
             Ok((lam, jumps_map(|c| ctx_rshift(&c), total)))
         }
         PmHalfCompiled::PmOr(PmOrCompiled { body, handlers, .. }) => {
-            let (lam, total) = compile_match(
-                ctx_ref,
-                pa,
-                arena,
-                None,
-                partial,
-                ctx,
-                body,
-                next_raise_count,
-            )?;
-            let mut compile_fn = |ctx: &[Ctx<'p>],
-                                  pm: &PatternMatching<'p>|
-             -> Result<(RawLambda, Jumps<'p>), Unused> {
-                compile_match(ctx_ref, pa, arena, None, partial, ctx, pm, next_raise_count)
-            };
+            let (lam, total) = compile_match(cx, None, partial, ctx, body, next_raise_count)?;
+            let mut compile_fn =
+                |ctx: &[Ctx<'p>], pm: &PatternMatching<'p>| -> Result<Compiled<'p>, Unused> {
+                    compile_match(cx, None, partial, ctx, pm, next_raise_count)
+                };
             Ok(compile_orhandlers(
                 b,
                 pa,
@@ -8740,26 +8464,16 @@ fn do_compile_matching<'p>(
 /// Compile without test (divide_line + compile_match).
 /// Equivalent to OCaml's `compile_no_test`.
 fn compile_no_test<'p>(
-    ctx_ref: &TypeContext,
-    pa: &'p PatArena<'p>,
-    arena: &LocArena<'_>,
+    cx: MatchCx<'p, '_>,
     divide_fn: &dyn Fn(&[Ctx<'p>], &PatternMatching<'p>) -> MatchCell<'p>,
     up_ctx: &dyn Fn(&[Ctx<'p>]) -> Vec<Ctx<'p>>,
     partial: &Partial,
     ctx: &[Ctx<'p>],
     to_match: &PatternMatching<'p>,
     next_raise_count: &mut i32,
-) -> Result<(RawLambda, Jumps<'p>), Unused> {
+) -> Result<Compiled<'p>, Unused> {
     let cell = divide_fn(ctx, to_match);
-    let (lambda, total) = compile_match_owned(
-        ctx_ref,
-        pa,
-        arena,
-        partial,
-        &cell.ctx,
-        cell.pm,
-        next_raise_count,
-    )?;
+    let (lambda, total) = compile_match_owned(cx, partial, &cell.ctx, cell.pm, next_raise_count)?;
     Ok((lambda, jumps_map(|c| up_ctx(&c), total)))
 }
 
@@ -8769,21 +8483,15 @@ fn compile_no_test<'p>(
 /// We inline compile_test here to avoid borrow conflicts with next_raise_count
 /// being captured by both compile_fn and combine_fn closures.
 fn compile_test_wrapper<'p, K: Clone>(
-    ctx_ref: &TypeContext,
-    pa: &'p PatArena<'p>,
-    arena: &LocArena<'_>,
+    cx: MatchCx<'p, '_>,
     partial: &Partial,
-    divide_fn: &dyn Fn(&[Ctx<'p>], &PatternMatching<'p>) -> Vec<(K, MatchCell<'p>)>,
-    combine_fn: &dyn Fn(
-        &[Ctx<'p>],
-        &DefaultEnv<'p>,
-        (Vec<(K, RawLambda)>, Jumps<'p>, Vec<&'p Pattern>),
-        &mut i32,
-    ) -> (RawLambda, Jumps<'p>),
+    divide_fn: &Divider<'p, '_, K>,
+    combine_fn: &Combiner<'p, '_, K>,
     ctx: &[Ctx<'p>],
     pm: &PatternMatching<'p>,
     next_raise_count: &mut i32,
-) -> Result<(RawLambda, Jumps<'p>), Unused> {
+) -> Result<Compiled<'p>, Unused> {
+    let MatchCx { pa, arena, .. } = cx;
     let b = arena.b;
     let raise_counter = std::cell::Cell::new(*next_raise_count);
 
@@ -8792,14 +8500,13 @@ fn compile_test_wrapper<'p, K: Clone>(
 
     // Step 2: compile_list
     let c_div = {
-        let mut compile_fn = |ctx: &[Ctx<'p>],
-                              pm: PatternMatching<'p>|
-         -> Result<(RawLambda, Jumps<'p>), Unused> {
-            let mut next_raise = raise_counter.get();
-            let result = compile_match_owned(ctx_ref, pa, arena, partial, ctx, pm, &mut next_raise);
-            raise_counter.set(next_raise);
-            result
-        };
+        let mut compile_fn =
+            |ctx: &[Ctx<'p>], pm: PatternMatching<'p>| -> Result<Compiled<'p>, Unused> {
+                let mut next_raise = raise_counter.get();
+                let result = compile_match_owned(cx, partial, ctx, pm, &mut next_raise);
+                raise_counter.set(next_raise);
+                result
+            };
         compile_list(pa, &mut compile_fn, division)?
     };
 
@@ -8818,24 +8525,6 @@ fn compile_test_wrapper<'p, K: Clone>(
     };
     *next_raise_count = raise_counter.get();
     result
-}
-
-/// Extract all record label descriptions from a Tpat_record pattern's fields.
-/// Sorted by field position (lbl_pos).
-fn get_all_labels_from_record_fields(
-    fields: &[(
-        crate::types::typedtree::Loc<crate::parse_arena::LidentIdx>,
-        std::sync::Arc<LabelDescription>,
-        TPatIdx,
-        bool,
-    )],
-) -> Vec<LabelDescription> {
-    let mut labels: Vec<LabelDescription> = fields
-        .iter()
-        .map(|(_, lbl, _, _)| (**lbl).clone())
-        .collect();
-    labels.sort_by_key(|l| l.lbl_pos);
-    labels
 }
 
 /// `lbl.lbl_all` of a record pattern's first label (compiler/ml/matching.ml:
@@ -9021,8 +8710,6 @@ fn check_total<'p>(
     }
 }
 
-
-
 /// The match compiler's patterns as a store for `Dict_pattern` lowering,
 /// which adds the lowered patterns to the overlay.
 impl crate::types::dict_pattern::PatternStore for &PatArena<'_> {
@@ -9059,26 +8746,52 @@ fn lower_dict_patterns<'p>(
         .collect()
 }
 
+/// The type context, pattern arena and location arena the match compiler
+/// threads through its compile functions.
+#[derive(Clone, Copy)]
+struct MatchCx<'p, 'a> {
+    ctx_ref: &'a TypeContext,
+    pa: &'p PatArena<'p>,
+    arena: &'a LocArena<'a>,
+}
+
+/// The translation state a match is compiled in.
+pub struct MatchEnv<'a> {
+    /// The type context the patterns' types live in.
+    pub ctx_ref: &'a TypeContext,
+    /// The typed tree the patterns live in.
+    pub ta: &'a TypedArena,
+    /// The arenas the compiled Lambda and its locations are built in.
+    pub arena: &'a LocArena<'a>,
+    /// The static-raise counter, shared with the rest of the translation.
+    pub next_raise_count: &'a mut i32,
+}
+
 /// `Matching.compile_matching` on the cases of `Matching.for_function`,
 /// `for_trywith` or `for_let`, which all lower their dict patterns first
 /// (`lower_dict_patterns`).
 pub fn compile_matching(
-    ctx_ref: &TypeContext,
-    ta: &TypedArena,
-    arena: &LocArena<'_>,
+    env: MatchEnv<'_>,
     handler_fun: impl FnOnce() -> RawLambda,
     arg: RawLambda,
     pat_act_list: Vec<(&Pattern, CaseAction)>,
     partial: Partial,
-    next_raise_count: &mut i32,
 ) -> RawLambda {
+    let MatchEnv {
+        ctx_ref,
+        ta,
+        arena,
+        next_raise_count,
+    } = env;
     let store = PatStore::default();
     let pa = PatArena::new(ta, &store);
     let pat_act_list = lower_dict_patterns(ctx_ref, &pa, pat_act_list);
     compile_matching_unresolved(
-        ctx_ref,
-        &pa,
-        arena,
+        MatchCx {
+            ctx_ref,
+            pa: &pa,
+            arena,
+        },
         handler_fun,
         arg,
         pat_act_list,
@@ -9088,15 +8801,14 @@ pub fn compile_matching(
 }
 
 fn compile_matching_unresolved<'p>(
-    ctx_ref: &TypeContext,
-    pa: &'p PatArena<'p>,
-    arena: &LocArena<'_>,
+    cx: MatchCx<'p, '_>,
     handler_fun: impl FnOnce() -> RawLambda,
     arg: RawLambda,
     pat_act_list: Vec<(&'p Pattern, CaseAction)>,
     partial: Partial,
     next_raise_count: &mut i32,
 ) -> RawLambda {
+    let MatchCx { pa, arena, .. } = cx;
     let b = arena.b;
     let partial = check_partial_single(pa, &pat_act_list, partial);
     match partial {
@@ -9110,15 +8822,7 @@ fn compile_matching_unresolved<'p>(
                 args: MatchArgs::new([(arg, LetKind::Strict)]),
                 default: vec![(vec![vec![omega()]], raise_num)],
             };
-            match compile_match_owned(
-                ctx_ref,
-                pa,
-                arena,
-                &partial,
-                &start_ctx(1),
-                pm,
-                next_raise_count,
-            ) {
+            match compile_match_owned(cx, &partial, &start_ctx(1), pm, next_raise_count) {
                 Ok((lambda, total)) => check_total(b, &total, lambda, raise_num, handler_fun),
                 Err(Unused) => panic!("compile_matching: Unused"),
             }
@@ -9132,15 +8836,7 @@ fn compile_matching_unresolved<'p>(
                 args: MatchArgs::new([(arg, LetKind::Strict)]),
                 default: Vec::new(),
             };
-            match compile_match_owned(
-                ctx_ref,
-                pa,
-                arena,
-                &partial,
-                &start_ctx(1),
-                pm,
-                next_raise_count,
-            ) {
+            match compile_match_owned(cx, &partial, &start_ctx(1), pm, next_raise_count) {
                 Ok((lambda, total)) => {
                     assert!(jumps_is_empty(&total));
                     lambda
@@ -9201,90 +8897,71 @@ pub fn partial_function(arena: &LocArena<'_>, loc: Location) -> RawLambda {
 /// Compile a match for a function body.
 /// Equivalent to OCaml's `for_function`.
 pub fn for_function(
-    ctx_ref: &TypeContext,
-    ta: &TypedArena,
-    arena: &LocArena<'_>,
+    env: MatchEnv<'_>,
     loc: Location,
     param: RawLambda,
     pat_act_list: Vec<(&Pattern, CaseAction)>,
     partial: Partial,
-    next_raise_count: &mut i32,
 ) -> RawLambda {
+    let arena = env.arena;
     let loc_clone = loc;
     compile_matching(
-        ctx_ref,
-        ta,
-        arena,
+        env,
         || partial_function(arena, loc_clone),
         param,
         pat_act_list,
         partial,
-        next_raise_count,
     )
 }
 
 /// Compile a match for a try-with handler.
 /// Equivalent to OCaml's `for_trywith`.
 pub fn for_trywith(
-    ctx_ref: &TypeContext,
-    ta: &TypedArena,
-    arena: &LocArena<'_>,
+    env: MatchEnv<'_>,
     param: RawLambda,
     pat_act_list: Vec<(&Pattern, CaseAction)>,
-    next_raise_count: &mut i32,
 ) -> RawLambda {
-    let b = arena.b;
+    let b = env.arena.b;
     let param_clone = param;
     compile_matching(
-        ctx_ref,
-        ta,
-        arena,
+        env,
         || b.prim(Primitive::Praise, &[param_clone], LamLoc::NONE),
         param,
         pat_act_list,
         Partial::Partial,
-        next_raise_count,
     )
 }
 
 /// Simple let matching.
 /// Equivalent to OCaml's `simple_for_let`.
 pub fn simple_for_let(
-    ctx_ref: &TypeContext,
-    ta: &TypedArena,
-    arena: &LocArena<'_>,
+    env: MatchEnv<'_>,
     loc: Location,
     param: RawLambda,
     pat: &Pattern,
     body: RawLambda,
-    next_raise_count: &mut i32,
 ) -> RawLambda {
+    let arena = env.arena;
     let loc_clone = loc;
     compile_matching(
-        ctx_ref,
-        ta,
-        arena,
+        env,
         || partial_function(arena, loc_clone),
         param,
         vec![(pat, CaseAction::unguarded(body))],
         Partial::Partial,
-        next_raise_count,
     )
 }
 
 /// Compile a let binding match (with optimization for simple cases).
 /// Equivalent to OCaml's `for_let`.
 pub fn for_let(
-    ctx_ref: &TypeContext,
-    ta: &TypedArena,
-    arena: &LocArena<'_>,
+    env: MatchEnv<'_>,
     loc: Location,
     param: RawLambda,
     pat: &Pattern,
     body: RawLambda,
-    next_raise_count: &mut i32,
 ) -> RawLambda {
-    let b = arena.b;
+    let b = env.arena.b;
     match &pat.pat_desc {
         PatternDesc::Tpat_any => {
             // Eliminates a useless variable
@@ -9294,47 +8971,50 @@ pub fn for_let(
             // Fast path
             b.let_(LetKind::Strict, *id, param, body)
         }
-        _ => simple_for_let(ctx_ref, ta, arena, loc, param, pat, body, next_raise_count),
+        _ => simple_for_let(env, loc, param, pat, body),
     }
 }
 
 /// Compile a tupled function match.
 /// Equivalent to OCaml's `for_tupled_function`.
 pub fn for_tupled_function(
-    ctx_ref: &TypeContext,
-    ta: &TypedArena,
-    arena: &LocArena<'_>,
+    env: MatchEnv<'_>,
     loc: Location,
     paraml: &[Ident],
     pats_act_list: Vec<(Vec<&Pattern>, CaseAction)>,
     partial: Partial,
-    next_raise_count: &mut i32,
 ) -> RawLambda {
+    let MatchEnv {
+        ctx_ref,
+        ta,
+        arena,
+        next_raise_count,
+    } = env;
     let store = PatStore::default();
     let pa = PatArena::new(ta, &store);
-    let lambda = for_tupled_function_unresolved(
-        ctx_ref,
-        &pa,
-        arena,
+    for_tupled_function_unresolved(
+        MatchCx {
+            ctx_ref,
+            pa: &pa,
+            arena,
+        },
         loc,
         paraml,
         pats_act_list,
         partial,
         next_raise_count,
-    );
-    lambda
+    )
 }
 
 fn for_tupled_function_unresolved<'p>(
-    ctx_ref: &TypeContext,
-    pa: &'p PatArena<'p>,
-    arena: &LocArena<'_>,
+    cx: MatchCx<'p, '_>,
     loc: Location,
     paraml: &[Ident],
     pats_act_list: Vec<(Vec<&'p Pattern>, CaseAction)>,
     partial: Partial,
     next_raise_count: &mut i32,
 ) -> RawLambda {
+    let MatchCx { pa, arena, .. } = cx;
     let b = arena.b;
     let pats_act_list: Vec<Clause<'p>> = pats_act_list
         .into_iter()
@@ -9348,15 +9028,7 @@ fn for_tupled_function_unresolved<'p>(
         args: MatchArgs::new(paraml.iter().map(|id| (b.var(*id), LetKind::Strict))),
         default: vec![(omegas_row, raise_num)],
     };
-    match compile_match_owned(
-        ctx_ref,
-        pa,
-        arena,
-        &partial,
-        &start_ctx(paraml.len()),
-        pm,
-        next_raise_count,
-    ) {
+    match compile_match_owned(cx, &partial, &start_ctx(paraml.len()), pm, next_raise_count) {
         Ok((lambda, total)) => {
             let loc_clone = loc;
             check_total(b, &total, lambda, raise_num, || {
@@ -9508,36 +9180,23 @@ fn flatten_precompiled<'p>(
 /// Hence it needs a fourth argument (arg), which it ignores.
 /// Equivalent to OCaml's `compile_flattened`.
 fn compile_flattened<'p>(
-    ctx_ref: &TypeContext,
-    pa: &'p PatArena<'p>,
-    arena: &LocArena<'_>,
+    cx: MatchCx<'p, '_>,
     partial: &Partial,
     ctx: &[Ctx<'p>],
     _arg: &RawLambda,
     pmh: &PmHalfCompiled<'p>,
     next_raise_count: &mut i32,
-) -> Result<(RawLambda, Jumps<'p>), Unused> {
+) -> Result<Compiled<'p>, Unused> {
+    let MatchCx { pa, arena, .. } = cx;
     let b = arena.b;
     match pmh {
-        PmHalfCompiled::Pm(pm) => {
-            compile_match(ctx_ref, pa, arena, None, partial, ctx, pm, next_raise_count)
-        }
+        PmHalfCompiled::Pm(pm) => compile_match(cx, None, partial, ctx, pm, next_raise_count),
         PmHalfCompiled::PmOr(PmOrCompiled { body, handlers, .. }) => {
-            let (lam, total) = compile_match(
-                ctx_ref,
-                pa,
-                arena,
-                None,
-                partial,
-                ctx,
-                body,
-                next_raise_count,
-            )?;
-            let mut compile_fn = |ctx: &[Ctx<'p>],
-                                  pm: &PatternMatching<'p>|
-             -> Result<(RawLambda, Jumps<'p>), Unused> {
-                compile_match(ctx_ref, pa, arena, None, partial, ctx, pm, next_raise_count)
-            };
+            let (lam, total) = compile_match(cx, None, partial, ctx, body, next_raise_count)?;
+            let mut compile_fn =
+                |ctx: &[Ctx<'p>], pm: &PatternMatching<'p>| -> Result<Compiled<'p>, Unused> {
+                    compile_match(cx, None, partial, ctx, pm, next_raise_count)
+                };
             Ok(compile_orhandlers(
                 b,
                 pa,
@@ -9554,16 +9213,15 @@ fn compile_flattened<'p>(
 
 /// Compile a multiple-match expression (tuple patterns on arguments).
 /// Equivalent to OCaml's `do_for_multiple_match`.
-pub fn do_for_multiple_match<'p>(
-    ctx_ref: &TypeContext,
-    pa: &'p PatArena<'p>,
-    arena: &LocArena<'_>,
+fn do_for_multiple_match<'p>(
+    cx: MatchCx<'p, '_>,
     loc: Location,
     paraml: Vec<RawLambda>,
     pat_act_list: Vec<(&'p Pattern, CaseAction)>,
     partial: Partial,
     next_raise_count: &mut i32,
 ) -> RawLambda {
+    let MatchCx { ctx_ref, pa, arena } = cx;
     let b = arena.b;
     let partial = check_partial_single(pa, &pat_act_list, partial);
     // OCaml `compiler/ml/matching.ml:3846-3852` builds the matrix from the
@@ -9628,14 +9286,13 @@ pub fn do_for_multiple_match<'p>(
                               ctx: &[Ctx<'p>],
                               arg: &RawLambda,
                               pmh: &PmHalfCompiled<'p>|
-         -> Result<(RawLambda, Jumps<'p>), Unused> {
-            compile_flattened(ctx_ref, pa, arena, partial, ctx, arg, pmh, next_raise_count)
+         -> Result<Compiled<'p>, Unused> {
+            compile_flattened(cx, partial, ctx, arg, pmh, next_raise_count)
         };
 
         let dummy_arg = b.const_(crate::lambda::Constant::int(0));
         let (lam, total) = comp_match_handlers(
-            b,
-            pa,
+            cx,
             &mut compile_fn,
             &partial,
             &start_ctx(size),
@@ -9667,15 +9324,7 @@ pub fn do_for_multiple_match<'p>(
         Ok(lam) => lam,
         Err(CannotFlattenExn) => {
             // Fallback: compile without flattening
-            match compile_match_owned(
-                ctx_ref,
-                pa,
-                arena,
-                &partial,
-                &start_ctx(1),
-                pm1,
-                next_raise_count,
-            ) {
+            match compile_match_owned(cx, &partial, &start_ctx(1), pm1, next_raise_count) {
                 Ok((lambda, total)) => match &partial {
                     Partial::Partial => {
                         let loc_clone = loc;
@@ -9719,15 +9368,18 @@ fn bind_opt(b: &RawArena, v_eo: (Ident, Option<RawLambda>), k: RawLambda) -> Raw
 /// Compile a multiple match expression.
 /// Equivalent to OCaml's `for_multiple_match`.
 pub fn for_multiple_match(
-    ctx_ref: &TypeContext,
-    ta: &TypedArena,
-    arena: &LocArena<'_>,
+    env: MatchEnv<'_>,
     loc: Location,
     paraml: Vec<RawLambda>,
     pat_act_list: Vec<(&Pattern, CaseAction)>,
     partial: Partial,
-    next_raise_count: &mut i32,
 ) -> RawLambda {
+    let MatchEnv {
+        ctx_ref,
+        ta,
+        arena,
+        next_raise_count,
+    } = env;
     let b = arena.b;
     let v_paraml: Vec<(Ident, Option<RawLambda>)> = paraml
         .iter()
@@ -9737,10 +9389,12 @@ pub fn for_multiple_match(
     let store = PatStore::default();
     let pa = PatArena::new(ta, &store);
     let pat_act_list = lower_dict_patterns(ctx_ref, &pa, pat_act_list);
-    let mut inner = do_for_multiple_match(
-        ctx_ref,
-        &pa,
-        arena,
+    let inner = do_for_multiple_match(
+        MatchCx {
+            ctx_ref,
+            pa: &pa,
+            arena,
+        },
         loc,
         new_paraml,
         pat_act_list,

@@ -1524,7 +1524,7 @@ pub fn parse_atomic_expr(p: &mut Parser<'_>) -> Expression {
                 },
             };
             Expression {
-                pexp_desc: pexp_desc,
+                pexp_desc,
                 pexp_loc: loc,
                 pexp_attributes: Attributes::new(),
             }

@@ -1,7 +1,7 @@
 //! Marshal implementations for core types
 //!
 //! This module provides Marshal implementations for the fundamental types used
-//! in the AST: Position, Location, Located<T>, and Longident.
+//! in the AST: Position, Location, `Located<T>`, and Longident.
 
 use super::marshal::MarshalWriter;
 use super::serialize::Marshal;
@@ -60,7 +60,7 @@ impl Marshal for Location {
 // ========== Located<T> ('a loc) from crate::location ==========
 
 impl<T: Marshal> Marshal for Located<T> {
-    /// Serialize a Located<T> to Marshal format.
+    /// Serialize a `Located<T>` to Marshal format.
     ///
     /// OCaml type:
     /// ```ocaml
@@ -103,7 +103,7 @@ impl Marshal for StrIdx {
 }
 
 impl<T: Marshal> Marshal for parse_arena::Located<T> {
-    /// Serialize a parse_arena::Located<T> to Marshal format.
+    /// Serialize a `parse_arena::Located<T>` to Marshal format.
     ///
     /// OCaml type:
     /// ```ocaml

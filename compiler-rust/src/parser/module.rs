@@ -101,7 +101,7 @@ pub struct InlineTypesContext {
     /// OCaml compiler/syntax/src/res_core.ml:27-36 stores `params` on each
     /// inline type definition, so external inline records keep the parameter
     /// set from the moment that record was discovered.
-    pub found_inline_types: Vec<(StrIdx, Location, TypeKind, Vec<(CoreTypeIdx, Variance)>)>,
+    pub found_inline_types: Vec<super::state::InlineTypeEntry>,
     /// Type parameters from the outer type declaration
     pub params: Vec<(CoreTypeIdx, Variance)>,
     /// Location of the outer type's name (used for inline type declarations)
@@ -4041,6 +4041,7 @@ fn parse_attribute_body(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Attribute 
 /// - Type: `(: type)` - indicated by leading colon followed by type
 /// - Signature: `(: signature_items)` - indicated by leading colon followed by signature items
 /// - Pattern: `(? pattern)` or `(? pattern when guard)` - indicated by leading question mark
+///
 /// OCaml `parse_payload` (compiler/syntax/src/res_core.ml:7568-7612): an
 /// adjacent `(` opens an `AttributePayload` region that ends at `)`;
 /// anything else is an empty payload.
@@ -4057,6 +4058,8 @@ pub fn parse_payload_region(p: &mut Parser<'_>) -> Payload {
     }
 }
 
+/// Parse an attribute payload after its opening `(`, which the caller has
+/// consumed; the closing `)` is left for the caller.
 pub fn parse_payload(p: &mut Parser<'_>) -> Payload {
     // OCaml `parse_payload` (compiler/syntax/src/res_core.ml:7568-7610), after the
     // opening `(` has been consumed by the caller.

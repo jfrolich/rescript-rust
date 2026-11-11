@@ -57,53 +57,85 @@ pub struct PortableTypeGraph {
 /// One type expression in portable form.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct PortableTypeEntry {
+    /// What the type is.
     pub desc: PortableTypeDesc,
+    /// The type's binding level (`GENERIC_LEVEL` for generalized types).
     pub level: i32,
 }
 
 /// TypeDesc with indices into `PortableTypeGraph.entries` instead of arena refs.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum PortableTypeDesc {
+    /// `TypeDesc::Tvar`: a type variable, with its name if it has one.
     Tvar(Option<crate::name::Name>),
+    /// `TypeDesc::Tarrow`: a function type.
     Tarrow {
+        /// The labelled parameter types.
         args: Vec<(ArgLabel, usize)>,
+        /// The result type.
         ret: usize,
     },
+    /// `TypeDesc::Ttuple`: the element types of a tuple.
     Ttuple(Vec<usize>),
+    /// `TypeDesc::Tconstr`: a type constructor applied to arguments.
     Tconstr {
+        /// The constructor.
         path: Path,
+        /// The type arguments.
         args: Vec<usize>,
     },
+    /// `TypeDesc::Tobject`: an object type.
     Tobject {
+        /// The first `Tfield` of the field list (or its `Tnil`/row variable).
         fields: usize,
     },
+    /// `TypeDesc::Tfield`: one field of an object's field list.
     Tfield {
+        /// The field's name.
         name: crate::name::Name,
         /// Index into `PortableTypeGraph.mutabilities`.
         mutability: usize,
+        /// The field's type.
         typ: usize,
+        /// The rest of the field list.
         rest: usize,
     },
+    /// `TypeDesc::Tnil`: the end of a closed object's field list.
     Tnil,
+    /// `TypeDesc::Tlink`: an alias of another entry.
     Tlink(usize),
+    /// `TypeDesc::Tsubst`: a substitution placeholder for another entry.
     Tsubst(usize),
+    /// `TypeDesc::Tvariant`: a polymorphic variant type.
     Tvariant(PortableRowDesc),
+    /// `TypeDesc::Tunivar`: a universally quantified variable.
     Tunivar(Option<crate::name::Name>),
+    /// `TypeDesc::Tpoly`: a polymorphic type.
     Tpoly {
+        /// The quantified type.
         body: usize,
+        /// The `Tunivar` entries it quantifies over.
         vars: Vec<usize>,
     },
+    /// `TypeDesc::Tpackage`: a first-class module type.
     Tpackage {
+        /// The module type.
         path: Path,
+        /// The constrained type names (`with type lid = ...`).
         lids: Vec<PortableLongident>,
+        /// The types the constrained names are bound to, parallel to `lids`.
         args: Vec<usize>,
     },
 }
 
+/// A `Longident` that owns its names, independent of any `ParseArena`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum PortableLongident {
+    /// A plain name.
     Lident(String),
+    /// A name inside a module: `M.x`.
     Ldot(Box<PortableLongident>, String),
+    /// A functor application: `F(X)`.
     Lapply(Box<PortableLongident>, Box<PortableLongident>),
 }
 
@@ -113,21 +145,31 @@ pub struct PortableRowDesc {
     /// Labels as `RowDesc` keeps them: short ones decode inline, without
     /// an allocation.
     pub row_fields: Vec<(crate::types::asttypes::Label, PortableRowField)>,
+    /// The row variable (or `Tnil`) standing for the other tags.
     pub row_more: usize,
+    /// Whether no tags beyond `row_fields` are allowed.
     pub row_closed: bool,
+    /// Whether the row may not be extended by unification.
     pub row_fixed: bool,
+    /// The abbreviation the row was expanded from, with its arguments.
     pub row_name: Option<(Path, Vec<usize>)>,
 }
 
 /// Portable row field.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum PortableRowField {
+    /// `RowField::Rpresent`: the tag is present, with its argument type.
     Rpresent(Option<usize>),
+    /// `RowField::Reither`: the tag may be present.
     Reither {
+        /// Whether the tag may have no argument.
         constant: bool,
+        /// The argument types it may have.
         types: Vec<usize>,
+        /// Whether the tag was matched in a pattern.
         matched: bool,
     },
+    /// `RowField::Rabsent`: the tag is absent.
     Rabsent,
 }
 
@@ -141,7 +183,9 @@ pub enum PortableRowField {
 /// build's memory.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct PortablePersStruct {
+    /// `PersStruct::ps_name`.
     pub ps_name: String,
+    /// `PersStruct::ps_filename`.
     pub ps_filename: String,
     /// `PersStruct::ps_deprecated`.
     pub ps_deprecated: Option<String>,
@@ -222,6 +266,8 @@ pub struct PortableSignature {
 /// component signature later.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct PortableRawSignature {
+    /// The raw signature, its type references being indices into
+    /// `raw_type_graph.entries`.
     pub raw_ps_sig: Signature,
     /// Self-contained type graph for `raw_ps_sig`.
     pub raw_type_graph: PortableTypeGraph,
@@ -230,6 +276,7 @@ pub struct PortableRawSignature {
 }
 
 impl PortablePersStruct {
+    /// Encode a module's signatures for the registry.
     pub fn new(
         ps_name: String,
         ps_filename: String,
@@ -324,6 +371,7 @@ impl PortablePersStruct {
         self.raw.as_ref().map(crate::binser::Encoded::decode)
     }
 
+    /// Whether the module has a raw signature, without decoding it.
     pub fn has_raw_signature(&self) -> bool {
         self.raw.is_some()
     }
@@ -333,24 +381,22 @@ impl PortablePersStruct {
 // Fingerprinting: stamp-independent structural hash
 // ============================================================================
 
-/// Compute a stamp-independent structural fingerprint of a portable type graph
-/// and signature. Uses name-based identity for Paths (ignoring stamps) so that
-/// recompilations producing the same logical interface get the same fingerprint
-/// even if internal stamps shift due to dependency changes.
-/// Public API for computing a fingerprint outside of `serialize_pers_struct`
-/// (e.g., for namespace signatures synthesized directly).
 /// What hashing a signature reads of its portable type graph: the type
 /// entries, and the variant layouts and object-field mutabilities that
 /// entries and declarations refer to by index (indices follow allocation
 /// order, so they are hashed by what they point to).
 #[derive(Clone, Copy)]
 pub struct HashGraph<'a> {
+    /// `PortableTypeGraph::entries`.
     pub entries: &'a [PortableTypeEntry],
+    /// `PortableTypeGraph::variant_layouts`.
     pub layouts: &'a [crate::types::VariantLayout],
+    /// `PortableTypeGraph::mutabilities`.
     pub mutabilities: &'a [crate::types::asttypes::MutableFlag],
 }
 
 impl<'a> HashGraph<'a> {
+    /// What hashing reads of `graph`.
     pub fn of(graph: &'a PortableTypeGraph) -> Self {
         HashGraph {
             entries: &graph.entries,
@@ -367,6 +413,12 @@ impl std::ops::Deref for HashGraph<'_> {
     }
 }
 
+/// Compute a stamp-independent structural fingerprint of a portable type graph
+/// and signature. Uses name-based identity for Paths (ignoring stamps) so that
+/// recompilations producing the same logical interface get the same fingerprint
+/// even if internal stamps shift due to dependency changes.
+/// Public API for computing a fingerprint outside of `serialize_pers_struct`
+/// (e.g., for namespace signatures synthesized directly).
 pub fn compute_type_graph_fingerprint(entries: &HashGraph<'_>, sig: &Signature) -> u64 {
     // Deterministic within a build (fixed seeds); the fingerprint only lives
     // in the in-memory interface registry.
@@ -1923,10 +1975,7 @@ fn internalize_desc<S: TypeNodeSink>(
         PortableTypeDesc::Tlink(i) => TypeDesc::Tlink(remap[*i]),
         PortableTypeDesc::Tsubst(i) => TypeDesc::Tsubst(remap[*i]),
         PortableTypeDesc::Tvariant(prd) => {
-            let mut row = internalize_row_desc(prd, remap, ctx);
-            if let Some((path, _)) = &mut row.row_name {
-                *path = *path;
-            }
+            let row = internalize_row_desc(prd, remap, ctx);
             TypeDesc::Tvariant(ctx.new_row_desc(row))
         }
         PortableTypeDesc::Tunivar(name) => {
@@ -2166,37 +2215,6 @@ mod identity_tests {
     use super::*;
     use crate::context::IdGenerator;
 
-    /// A saved graph with its entries.
-    fn save(ctx: &TypeContext, roots: &[TypeExprRef]) -> (Vec<usize>, PortableTypeGraph) {
-        let mut file_names = PortableFileNames::default();
-        let mut ser = TypeGraphSerializer::new(ctx, None, &mut file_names);
-        let indices = roots.iter().map(|&r| ser.serialize_type(r)).collect();
-        let graph = PortableTypeGraph {
-            entries: std::mem::take(&mut ser.entries),
-            variant_layouts: Vec::new(),
-            mutabilities: Vec::new(),
-        };
-        (indices, graph)
-    }
-
-    /// The nodes of `graph` imported into `ctx`, as `internalize_signature`
-    /// imports them.
-    fn import(ctx: &TypeContext, graph: &PortableTypeGraph) -> Vec<TypeExprRef> {
-        let remap: Vec<_> = graph.entries.iter().map(|_| ctx.new_var(None)).collect();
-        let locs = ctx.import_decl_locs(std::iter::empty(), &|file| file);
-        for (i, entry) in graph.entries.iter().enumerate() {
-            let desc = internalize_desc(&entry.desc, &remap, &[], &locs, ctx);
-            ctx.set_desc(remap[i], desc);
-        }
-        remap
-    }
-
-
-
-
-
-
-
     #[test]
     fn location_allocations_survive_cold_warm_store_and_shared_imports() {
         use crate::types::decl_loc::LocationIdentity;
@@ -2238,8 +2256,7 @@ mod identity_tests {
                     },
                 )
             })
-            .collect::<Vec<_>>()
-            .into();
+            .collect::<Vec<_>>();
         let save = |ctx: &TypeContext, sig: &Signature| {
             serialize_signature(sig, ctx, None, &mut PortableFileNames::default())
         };

@@ -956,7 +956,7 @@ pub(super) fn expr(e: Expression, c: &mut JsxConfig, a: &mut ParseArena) -> R<Ex
     }
     match e.pexp_desc {
         ExpressionDesc::Pexp_jsx_element(jsx) if c.version == 4 => {
-            let pexp_desc = transform_jsx_element(*jsx, c, &e.pexp_loc, &e.pexp_attributes, a)?;
+            let pexp_desc = transform_jsx_element(*jsx, c, &e.pexp_loc, a)?;
             Ok(Expression {
                 pexp_desc,
                 pexp_loc: e.pexp_loc,

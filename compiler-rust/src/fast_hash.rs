@@ -58,11 +58,13 @@ where
 pub struct AHashSet<T>(std::collections::HashSet<T, FastState>);
 
 impl<K, V> AHashMap<K, V> {
+    /// Create an empty collection using the fixed compiler hash keys.
     #[inline]
     pub fn new() -> Self {
         AHashMap(std::collections::HashMap::with_hasher(FastState))
     }
 
+    /// Reserve space for at least `capacity` entries using the fixed hash keys.
     #[inline]
     pub fn with_capacity(capacity: usize) -> Self {
         AHashMap(std::collections::HashMap::with_capacity_and_hasher(
@@ -72,11 +74,13 @@ impl<K, V> AHashMap<K, V> {
 }
 
 impl<T> AHashSet<T> {
+    /// Create an empty collection using the fixed compiler hash keys.
     #[inline]
     pub fn new() -> Self {
         AHashSet(std::collections::HashSet::with_hasher(FastState))
     }
 
+    /// Reserve space for at least `capacity` entries using the fixed hash keys.
     #[inline]
     pub fn with_capacity(capacity: usize) -> Self {
         AHashSet(std::collections::HashSet::with_capacity_and_hasher(
@@ -86,6 +90,7 @@ impl<T> AHashSet<T> {
 }
 
 impl<K, V> AHashMap<K, V> {
+    /// Reserve entry capacity with the supplied compiler hasher.
     #[inline]
     pub fn with_capacity_and_hasher(capacity: usize, hasher: FastState) -> Self {
         AHashMap(std::collections::HashMap::with_capacity_and_hasher(
@@ -93,16 +98,19 @@ impl<K, V> AHashMap<K, V> {
         ))
     }
 
+    /// Consume the map and iterate over its values in unspecified order.
     #[inline]
     pub fn into_values(self) -> hash_map::IntoValues<K, V> {
         self.0.into_values()
     }
 
+    /// Consume the map and iterate over its keys in unspecified order.
     #[inline]
     pub fn into_keys(self) -> hash_map::IntoKeys<K, V> {
         self.0.into_keys()
     }
 
+    /// Unwrap the standard map without changing its entries or hash keys.
     #[inline]
     pub fn into_inner(self) -> std::collections::HashMap<K, V, FastState> {
         self.0
@@ -113,11 +121,13 @@ impl<K, V> AHashMap<K, V> {
 // as `map.insert(k, self.compute())` keep two-phase borrows, which do not
 // apply through `DerefMut`.
 impl<K: Eq + Hash, V> AHashMap<K, V> {
+    /// Insert a value, returning the previous value for the key, if any.
     #[inline]
     pub fn insert(&mut self, key: K, value: V) -> Option<V> {
         self.0.insert(key, value)
     }
 
+    /// Remove the borrowed key and return its previous value, if any.
     #[inline]
     pub fn remove<Q>(&mut self, key: &Q) -> Option<V>
     where
@@ -127,6 +137,7 @@ impl<K: Eq + Hash, V> AHashMap<K, V> {
         self.0.remove(key)
     }
 
+    /// Borrow the value associated with a borrowed key.
     #[inline]
     pub fn get<Q>(&self, key: &Q) -> Option<&V>
     where
@@ -136,6 +147,7 @@ impl<K: Eq + Hash, V> AHashMap<K, V> {
         self.0.get(key)
     }
 
+    /// Mutably borrow the value associated with a borrowed key.
     #[inline]
     pub fn get_mut<Q>(&mut self, key: &Q) -> Option<&mut V>
     where
@@ -145,6 +157,7 @@ impl<K: Eq + Hash, V> AHashMap<K, V> {
         self.0.get_mut(key)
     }
 
+    /// Access an occupied or vacant entry for in-place updates.
     #[inline]
     pub fn entry(&mut self, key: K) -> hash_map::Entry<'_, K, V> {
         self.0.entry(key)
@@ -152,6 +165,7 @@ impl<K: Eq + Hash, V> AHashMap<K, V> {
 }
 
 impl<T: Eq + Hash> AHashSet<T> {
+    /// Reserve entry capacity with the supplied compiler hasher.
     #[inline]
     pub fn with_capacity_and_hasher(capacity: usize, hasher: FastState) -> Self {
         AHashSet(std::collections::HashSet::with_capacity_and_hasher(
@@ -159,11 +173,13 @@ impl<T: Eq + Hash> AHashSet<T> {
         ))
     }
 
+    /// Insert a value and report whether it was absent.
     #[inline]
     pub fn insert(&mut self, value: T) -> bool {
         self.0.insert(value)
     }
 
+    /// Remove a borrowed value and report whether it was present.
     #[inline]
     pub fn remove<Q>(&mut self, value: &Q) -> bool
     where
@@ -173,6 +189,7 @@ impl<T: Eq + Hash> AHashSet<T> {
         self.0.remove(value)
     }
 
+    /// Unwrap the standard set without changing its entries or hash keys.
     #[inline]
     pub fn into_inner(self) -> std::collections::HashSet<T, FastState> {
         self.0

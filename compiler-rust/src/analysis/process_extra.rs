@@ -510,8 +510,7 @@ impl ExtraIterator<'_, '_> {
                 stamp,
                 ModulePath::NotVisible,
                 false,
-                attributes,
-                self.ctx.raised,
+                self.ctx.raised.declared_attributes(attributes),
             );
             self.file.stamps.add_value(stamp, declared);
             add_reference(&mut self.extra, stamp, name.loc);
@@ -567,8 +566,7 @@ impl ExtraIterator<'_, '_> {
                     stamp,
                     ModulePath::NotVisible,
                     false,
-                    attributes,
-                    self.ctx.raised,
+                    self.ctx.raised.declared_attributes(attributes),
                 );
                 self.file.stamps.add_module(stamp, declared);
             }
@@ -623,11 +621,10 @@ impl<'a> TastIterator<'a> for ExtraIterator<'a, '_> {
                     stamp,
                     ModulePath::NotVisible,
                     false,
-                    Attrs::Parsed(
+                    self.ctx.raised.declared_attributes(Attrs::Parsed(
                         self.ctx.ta.value_description(*vd).val_attributes.as_slice(),
                         self.ctx.arena,
-                    ),
-                    self.ctx.raised,
+                    )),
                 );
                 self.file.stamps.add_value(stamp, declared);
                 add_reference(&mut self.extra, stamp, name.loc);

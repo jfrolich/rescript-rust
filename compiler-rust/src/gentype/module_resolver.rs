@@ -9,6 +9,7 @@ use crate::gentype::paths::concat;
 
 type ModuleNameMap = BTreeMap<crate::gentype::module_name::T, String>;
 
+/// The directories below `root`, relative to it, deepest first.
 pub fn read_bs_dependencies_dirs(root: &str) -> Vec<String> {
     // Mirrors compiler/gentype/ModuleResolver.ml:6-20.
     let mut dirs = Vec::new();
@@ -36,6 +37,9 @@ pub fn read_bs_dependencies_dirs(root: &str) -> Vec<String> {
     dirs
 }
 
+/// The module maps of the project's source directories and of its
+/// `bs-dependencies`: each module name, from a file with one of `extensions`
+/// that `exclude_file` does not reject, mapped to its directory.
 pub fn sourcedirs_to_map(
     config: &crate::gentype::config::T,
     extensions: &[String],
@@ -109,12 +113,17 @@ pub fn sourcedirs_to_map(
     (file_map, bs_dependencies_file_map)
 }
 
+/// The case a module was found in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Case {
+    /// The file name starts with a lowercase letter.
     Lowercase,
+    /// The file name is capitalized like the module.
     Uppercase,
 }
 
+/// Finds the directory of a module among the package's sources and its
+/// `bs-dependencies`.
 pub struct Resolver {
     config: crate::gentype::config::T,
     extensions: Vec<String>,
@@ -123,6 +132,8 @@ pub struct Resolver {
     maps: OnceLock<(ModuleNameMap, ModuleNameMap)>,
 }
 
+/// A resolver over the files with one of `extensions` that `exclude_file`
+/// does not reject; the source directories are scanned on first use.
 pub fn create_lazy_resolver(
     config: &crate::gentype::config::T,
     extensions: &[String],
@@ -161,6 +172,9 @@ fn find(
     }
 }
 
+/// The directory of `module_name`, the case its file name has, and whether
+/// it is in a dependency; dependencies are searched when
+/// `use_bs_dependencies` is set.
 pub fn apply(
     resolver: &Resolver,
     use_bs_dependencies: bool,
@@ -203,6 +217,9 @@ fn source_file_exists(path: &str) -> bool {
     })
 }
 
+/// The path a generated file at `output_file_relative` imports
+/// `module_name` from: next to it when that module's `.res` file is there,
+/// else wherever the resolver finds it.
 pub fn resolve_module(
     config: &crate::gentype::config::T,
     import_extension: &str,
@@ -257,6 +274,8 @@ pub fn resolve_module(
     }
 }
 
+/// The path a generated file imports the generated file of `module_name`
+/// from.
 pub fn resolve_generated_module(
     config: &crate::gentype::config::T,
     output_file_relative: &str,
@@ -287,6 +306,9 @@ pub fn resolve_generated_module(
     import_path
 }
 
+/// The path a generated file imports the TypeScript of ReScript module
+/// `module_name` from: its shim when one is configured, else its generated
+/// file.
 pub fn import_path_for_reason_module_name(
     config: &crate::gentype::config::T,
     output_file_relative: &str,

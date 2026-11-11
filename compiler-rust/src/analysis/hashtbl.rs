@@ -6,6 +6,7 @@ use std::borrow::Borrow;
 
 /// `Hashtbl.hash` of a key.
 pub trait OcamlHash {
+    /// The key's hash as OCaml's `Hashtbl.hash` computes it.
     fn ocaml_hash(&self) -> u32;
 }
 
@@ -161,6 +162,7 @@ impl<K: OcamlHash + Eq, V> Hashtbl<K, V> {
             .map(|(_, v)| v)
     }
 
+    /// `Hashtbl.find_opt`, giving mutable access to the binding.
     pub fn find_mut<Q>(&mut self, key: &Q) -> Option<&mut V>
     where
         K: Borrow<Q>,
@@ -173,6 +175,7 @@ impl<K: OcamlHash + Eq, V> Hashtbl<K, V> {
             .map(|(_, v)| v)
     }
 
+    /// `Hashtbl.mem`: whether `key` is bound.
     pub fn mem<Q>(&self, key: &Q) -> bool
     where
         K: Borrow<Q>,

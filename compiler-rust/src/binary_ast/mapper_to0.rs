@@ -4,12 +4,12 @@
 //! format used for binary AST serialization.
 //!
 //! Key transformations:
-//! - Function arity → [@res.arity N] attribute + Function$ wrapper
+//! - Function arity → `[@res.arity N]` attribute + Function$ wrapper
 //! - Arrow type arity → function$ type constructor
-//! - async flag → [@res.async] attribute
-//! - Pexp_await → [@res.await] attribute on expression
-//! - partial flag → [@res.partial] attribute
-//! - optional record fields → [@res.optional] attribute
+//! - async flag → `[@res.async]` attribute
+//! - Pexp_await → `[@res.await]` attribute on expression
+//! - partial flag → `[@res.partial]` attribute
+//! - optional record fields → `[@res.optional]` attribute
 //! - JSX elements → already handled by JSX PPX
 //!
 //! This mirrors `compiler/common/ast_mapper_to0.ml`.
@@ -102,6 +102,7 @@ pub struct Mapper<'a> {
 const CONSTRUCTOR_ARGS_ATTR: &str = "_res.constructor_args";
 
 impl<'a> Mapper<'a> {
+    /// A mapper reading locations and strings from `arena`.
     pub fn new(arena: &'a mut ParseArena) -> Self {
         Self {
             arena,
@@ -184,14 +185,6 @@ impl<'a> Mapper<'a> {
     /// Convert a LocIdx to full Location
     fn loc(&mut self, idx: LocIdx) -> FullLocation {
         self.arena.to_location(idx)
-    }
-
-    /// Convert an arena-based Located<T> to a full Located<T>
-    fn map_loc<T: Clone>(&mut self, located: &Located<T>) -> OldLocated<T> {
-        OldLocated {
-            txt: located.txt.clone(),
-            loc: self.loc(located.loc),
-        }
     }
 
     /// Convert a Located<Cow<'static, str>> to OldLocated<String> for labels
@@ -546,6 +539,7 @@ impl<'a> Mapper<'a> {
 
     // ========== Core Types ==========
 
+    /// Map a type expression to parsetree0.
     pub fn map_core_type(&mut self, ty: &current::CoreType) -> pt0::CoreType {
         let current::CoreTypeDesc::Ptyp_arrow(inner) = &ty.ptyp_desc else {
             return pt0::CoreType {
@@ -838,6 +832,7 @@ impl<'a> Mapper<'a> {
 
     // ========== Patterns ==========
 
+    /// Map a pattern to parsetree0.
     pub fn map_pattern(&mut self, pat: &current::Pattern) -> pt0::Pattern {
         if let current::PatternDesc::Ppat_dict(entries) = &pat.ppat_desc {
             // ast_mapper_to0.ml P.map Ppat_dict: v0 has no dict patterns,
@@ -1307,6 +1302,7 @@ impl<'a> Mapper<'a> {
 
     // ========== Expressions ==========
 
+    /// Map an expression to parsetree0.
     pub fn map_expression(&mut self, expr: &current::Expression) -> pt0::Expression {
         self.map_expression_with_owner(expr, None)
     }
@@ -1976,7 +1972,7 @@ impl<'a> Mapper<'a> {
             current::ExpressionDesc::Pexp_letexception(inner) => {
                 let (ref ext, ref body_idx) = **inner;
                 pt0::ExpressionDesc::Letexception(
-                    self.map_extension_constructor(ext),
+                    Box::new(self.map_extension_constructor(ext)),
                     Box::new(self.map_expr_idx(*body_idx)),
                 )
             }

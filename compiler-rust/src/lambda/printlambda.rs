@@ -696,8 +696,8 @@ fn lam<W: Write>(f: &mut Formatter<W>, lambda: &Lambda) {
             f.string(")");
             f.close_box();
         }
-        Lambda::Lfor_of(param, iterable, body) => for_of(f, "for_of", param, iterable, body),
-        Lambda::Lfor_await_of(param, iterable, body) => {
+        Lambda::LforOf(param, iterable, body) => for_of(f, "for_of", param, iterable, body),
+        Lambda::LforAwaitOf(param, iterable, body) => {
             for_of(f, "for_await_of", param, iterable, body)
         }
         Lambda::Lassign(id, expr) => {

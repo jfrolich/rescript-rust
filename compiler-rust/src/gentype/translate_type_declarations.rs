@@ -5,6 +5,7 @@ use crate::gentype::gen_type_common::{
     Case as VariantCase, ClosedFlag, Field, LabelJs, Mutable, Optional, Payload, Type,
     create_variant, ident_with, sanitize_type_name, unknown,
 };
+use crate::gentype::translation::Input;
 use crate::location::Location;
 use crate::parse_arena::{LocIdx, ParseArena};
 use crate::parser::ast::Attributes;
@@ -15,19 +16,38 @@ use crate::types::decl::{
     RecordRepresentation, TypeKind, TypeRepresentation,
 };
 use crate::types::type_expr::TypeExprRef;
-use crate::types::typedtree::{TypedTypeDeclaration};
+use crate::types::typedtree::TypedTypeDeclaration;
 
+/// What a type declaration defines, in the form it is translated from.
 #[derive(Debug, Clone)]
 pub enum DeclarationKind {
+    /// A record type, with its fields and representation.
     RecordDeclarationFromTypes(Vec<LabelDeclaration>, RecordRepresentation),
+    /// An abstract type or an abbreviation, with the manifest as written.
     GeneralDeclaration(Option<crate::types::typedtree::TCoreTypeIdx>),
+    /// An abstract type or an abbreviation, with its inferred manifest.
     GeneralDeclarationFromTypes(Option<TypeExprRef>),
+    /// A variant type, with its constructors, layout and representation.
     VariantDeclarationFromTypes(
         Vec<ConstructorDeclaration>,
         crate::types::VariantLayout,
         TypeRepresentation,
     ),
+    /// A declaration gentype does not translate, such as a GADT.
     NoDeclaration,
+}
+
+/// A type declaration to translate: where it is, its name, the names of its
+/// type parameters, and what it declares.
+pub struct Declaration<'a> {
+    /// The declaration's location.
+    pub loc: Location,
+    /// The declared type's name.
+    pub type_name: &'a str,
+    /// The names of the declaration's type parameters.
+    pub type_vars: Vec<String>,
+    /// What the declaration declares.
+    pub kind: DeclarationKind,
 }
 
 struct DeclarationAttributeInfo {
@@ -38,18 +58,39 @@ struct DeclarationAttributeInfo {
     name_as: Option<String>,
 }
 
+/// What every export of one type declaration shares: the type environment
+/// its name is resolved in, its doc comment, its name and its type
+/// parameters.
+pub struct ExportTypeHeader<'a> {
+    /// The environment of the module declaring the type.
+    pub type_env: &'a crate::gentype::type_env::T,
+    /// The declaration's doc comment.
+    pub doc_string: crate::gentype::gen_type_common::doc_string::T,
+    /// The declared type's name.
+    pub type_name: &'a str,
+    /// The names of the declaration's type parameters.
+    pub type_vars: Vec<String>,
+}
+
+/// `createExportTypeFromTypeDeclaration`: the export of the declaration
+/// described by `header` as `type_`.
 pub fn create_export_type_from_type_declaration(
+    header: &ExportTypeHeader<'_>,
     annotation: crate::gentype::annotation::T,
     loc: crate::types::DeclLoc,
     name_as: Option<String>,
     opaque: Option<bool>,
     type_: Type,
-    type_env: &crate::gentype::type_env::T,
-    doc_string: crate::gentype::gen_type_common::doc_string::T,
-    type_name: &str,
-    type_vars: Vec<String>,
 ) -> code_item::ExportFromTypeDeclaration {
     // Mirrors compiler/gentype/TranslateTypeDeclarations.ml:11-21.
+    let ExportTypeHeader {
+        type_env,
+        doc_string,
+        type_name,
+        type_vars,
+    } = header;
+    let doc_string = doc_string.clone();
+    let type_vars = type_vars.clone();
     let resolved_type_name =
         crate::gentype::type_env::add_module_path(type_env, &sanitize_type_name(type_name));
     code_item::ExportFromTypeDeclaration {
@@ -66,6 +107,8 @@ pub fn create_export_type_from_type_declaration(
     }
 }
 
+/// The variant case of `label`, with the runtime value its `@as` attribute
+/// gives, or else the label; `poly` makes numeric labels numbers.
 pub fn create_case(
     arena: &ParseArena,
     label: &str,
@@ -125,6 +168,7 @@ fn create_variant_case(tag: &crate::types::VariantLiteralTag) -> VariantCase {
     VariantCase { label_js }
 }
 
+/// The JavaScript name of a record field: its `@as` name, or else its own.
 pub fn rename_record_field(
     arena: &ParseArena,
     notes: &crate::gentype::log_::Notes,
@@ -162,23 +206,19 @@ pub fn declared_field_name(
     })
 }
 
+/// `TranslateTypeDeclarations.traslateDeclarationKind`: translate a type
+/// declaration with the parse-tree `type_attributes` at `loc_idx`.
 #[allow(non_snake_case)]
 pub fn traslate_declaration_kind(
-    ta: &crate::types::typedtree::TypedArena,
-    ctx: &crate::types::context::TypeContext,
-    arena: &ParseArena,
+    input: Input<'_>,
     config: &crate::gentype::config::T,
-    loc: Location,
-    loc_idx: LocIdx,
-    output_file_relative: &str,
-    resolver: &crate::gentype::module_resolver::Resolver,
-    type_attributes: &Attributes,
     type_env: &crate::gentype::type_env::T,
-    type_name: &str,
-    type_vars: Vec<String>,
-    declaration_kind: DeclarationKind,
+    loc_idx: LocIdx,
+    type_attributes: &Attributes,
+    declaration: Declaration<'_>,
 ) -> crate::gentype::annotation::Read<Vec<code_item::TypeDeclaration>> {
     // Mirrors compiler/gentype/TranslateTypeDeclarations.ml:54-321.
+    let Input { arena, .. } = input;
     let doc_string = crate::gentype::annotation::doc_string_from_attrs(arena, type_attributes)?;
     let annotation = crate::gentype::annotation::from_attributes(
         arena,
@@ -201,36 +241,24 @@ pub fn traslate_declaration_kind(
         name_as,
     };
     traslate_declaration_kind_with_attribute_info(
-        ta,
-        ctx,
-        arena,
+        input,
         config,
-        loc,
-        output_file_relative,
-        resolver,
-        attribute_info,
         type_env,
-        type_name,
-        type_vars,
-        declaration_kind,
+        attribute_info,
+        declaration,
     )
 }
 
+/// Translate a type declaration whose attributes are declaration
+/// attributes, as found in signature types.
 #[allow(non_snake_case)]
 pub fn traslate_declaration_kind_from_decl_attributes(
-    ta: &crate::types::typedtree::TypedArena,
-    ctx: &crate::types::context::TypeContext,
-    arena: &ParseArena,
+    input: Input<'_>,
     config: &crate::gentype::config::T,
-    loc: Location,
-    loc_file: &dyn Fn() -> String,
-    output_file_relative: &str,
-    resolver: &crate::gentype::module_resolver::Resolver,
-    type_attributes: &[DeclAttribute],
     type_env: &crate::gentype::type_env::T,
-    type_name: &str,
-    type_vars: Vec<String>,
-    declaration_kind: DeclarationKind,
+    loc_file: &dyn Fn() -> String,
+    type_attributes: &[DeclAttribute],
+    declaration: Declaration<'_>,
 ) -> crate::gentype::annotation::Read<Vec<code_item::TypeDeclaration>> {
     // OCaml TranslateSignatureFromTypes.ml:3-29 passes
     // Types.type_declaration.type_attributes through to
@@ -242,7 +270,7 @@ pub fn traslate_declaration_kind_from_decl_attributes(
         config,
         &crate::gentype::type_env::notes(type_env),
         loc_file,
-        &loc,
+        &declaration.loc,
         type_attributes,
     )?;
     let opaque = match annotation == crate::gentype::annotation::T::GenTypeOpaque {
@@ -259,35 +287,28 @@ pub fn traslate_declaration_kind_from_decl_attributes(
         name_as,
     };
     traslate_declaration_kind_with_attribute_info(
-        ta,
-        ctx,
-        arena,
+        input,
         config,
-        loc,
-        output_file_relative,
-        resolver,
-        attribute_info,
         type_env,
-        type_name,
-        type_vars,
-        declaration_kind,
+        attribute_info,
+        declaration,
     )
 }
 
 fn traslate_declaration_kind_with_attribute_info(
-    ta: &crate::types::typedtree::TypedArena,
-    ctx: &crate::types::context::TypeContext,
-    arena: &ParseArena,
+    input: Input<'_>,
     config: &crate::gentype::config::T,
-    loc: Location,
-    output_file_relative: &str,
-    resolver: &crate::gentype::module_resolver::Resolver,
-    attribute_info: DeclarationAttributeInfo,
     type_env: &crate::gentype::type_env::T,
-    type_name: &str,
-    type_vars: Vec<String>,
-    declaration_kind: DeclarationKind,
+    attribute_info: DeclarationAttributeInfo,
+    declaration: Declaration<'_>,
 ) -> crate::gentype::annotation::Read<Vec<code_item::TypeDeclaration>> {
+    let Input {
+        ta,
+        ctx,
+        arena,
+        output_file_relative,
+        resolver,
+    } = input;
     let DeclarationAttributeInfo {
         doc_string,
         annotation,
@@ -295,6 +316,18 @@ fn traslate_declaration_kind_with_attribute_info(
         import_string_opt,
         name_as,
     } = attribute_info;
+    let Declaration {
+        loc,
+        type_name,
+        type_vars,
+        kind: declaration_kind,
+    } = declaration;
+    let header = ExportTypeHeader {
+        type_env,
+        doc_string,
+        type_name,
+        type_vars,
+    };
 
     let return_type_declaration =
         |mut type_declaration: code_item::TypeDeclaration| -> Vec<code_item::TypeDeclaration> {
@@ -307,15 +340,12 @@ fn traslate_declaration_kind_with_attribute_info(
     let handle_general_declaration =
         |translation: crate::gentype::translate_type_expr_from_types::Translation| {
             let export_from_type_declaration = create_export_type_from_type_declaration(
+                &header,
                 annotation,
                 ctx.intern_loc(loc),
                 name_as.clone(),
                 opaque,
                 translation.type_,
-                type_env,
-                doc_string.clone(),
-                type_name,
-                type_vars.clone(),
             );
             let import_types = crate::gentype::translation::translate_dependencies(
                 config,
@@ -331,7 +361,7 @@ fn traslate_declaration_kind_with_attribute_info(
 
     Ok(match (declaration_kind, import_string_opt) {
         (_, Some(import_string)) => {
-            let type_name_original = type_name.to_string();
+            let type_name_original = header.type_name.to_string();
             let name_with_module_path = crate::gentype::resolved_name::to_string(
                 &crate::gentype::type_env::add_module_path(type_env, &type_name_original),
             );
@@ -348,19 +378,20 @@ fn traslate_declaration_kind_with_attribute_info(
                 import_path: crate::gentype::import_path::from_string_unsafe(&import_string),
             }];
             let export_from_type_declaration = create_export_type_from_type_declaration(
+                &header,
                 crate::gentype::annotation::T::GenType,
                 ctx.intern_loc(loc),
                 None,
                 Some(false),
                 ident_with(
                     true,
-                    type_vars.iter().map(|s| Type::TypeVar(s.clone())).collect(),
+                    header
+                        .type_vars
+                        .iter()
+                        .map(|s| Type::TypeVar(s.clone()))
+                        .collect(),
                     &as_type_name,
                 ),
-                type_env,
-                doc_string,
-                &type_name_original,
-                type_vars,
             );
             vec![code_item::TypeDeclaration {
                 import_types,
@@ -374,15 +405,12 @@ fn traslate_declaration_kind_with_attribute_info(
         ) => return_type_declaration(code_item::TypeDeclaration {
             import_types: vec![],
             export_from_type_declaration: create_export_type_from_type_declaration(
+                &header,
                 annotation,
                 ctx.intern_loc(loc),
                 name_as,
                 Some(true),
                 unknown(),
-                type_env,
-                doc_string,
-                type_name,
-                type_vars,
             ),
         }),
         (DeclarationKind::GeneralDeclarationFromTypes(Some(type_expr)), None) => {
@@ -395,7 +423,7 @@ fn traslate_declaration_kind_with_attribute_info(
         (DeclarationKind::GeneralDeclaration(Some(core_type)), None) => {
             let core_type = ta.core_type(core_type);
             let translation = crate::gentype::translate_core_type::translate_core_type(
-                ta, ctx, arena, config, type_env, &core_type,
+                ta, ctx, arena, config, type_env, core_type,
             )?;
             let type_ = match (&core_type.ctyp_desc, translation.type_.clone()) {
                 (
@@ -451,15 +479,12 @@ fn traslate_declaration_kind_with_attribute_info(
             return_type_declaration(code_item::TypeDeclaration {
                 import_types,
                 export_from_type_declaration: create_export_type_from_type_declaration(
+                    &header,
                     annotation,
                     ctx.intern_loc(loc),
                     name_as,
                     opaque,
                     translation.type_,
-                    type_env,
-                    doc_string,
-                    type_name,
-                    type_vars,
                 ),
             })
         }
@@ -550,17 +575,19 @@ fn traslate_declaration_kind_with_attribute_info(
                 type_representation == TypeRepresentation::Unboxed
                     || layout.configuration().unboxed,
             );
-            let resolved_type_name =
-                crate::gentype::type_env::add_module_path(type_env, &sanitize_type_name(type_name));
+            let resolved_type_name = crate::gentype::type_env::add_module_path(
+                type_env,
+                &sanitize_type_name(header.type_name),
+            );
             let export_from_type_declaration = code_item::ExportFromTypeDeclaration {
                 export_type: code_item::ExportType {
                     loc: ctx.intern_loc(loc),
                     name_as,
                     opaque,
                     type_: variant_typ,
-                    type_vars,
+                    type_vars: header.type_vars,
                     resolved_type_name,
-                    doc_string,
+                    doc_string: header.doc_string,
                 },
                 annotation,
             };
@@ -577,6 +604,7 @@ fn traslate_declaration_kind_with_attribute_info(
     })
 }
 
+/// Whether a constructor has its own result type, making the type a GADT.
 pub fn has_some_gadt_leaf(constructor_declarations: &[ConstructorDeclaration]) -> bool {
     // Mirrors compiler/gentype/TranslateTypeDeclarations.ml:323-326.
     constructor_declarations
@@ -584,17 +612,15 @@ pub fn has_some_gadt_leaf(constructor_declarations: &[ConstructorDeclaration]) -
         .any(|declaration| declaration.cd_res.is_some())
 }
 
+/// Translate a typed type declaration.
 pub fn translate_type_declaration(
-    ta: &crate::types::typedtree::TypedArena,
-    ctx: &crate::types::context::TypeContext,
-    arena: &ParseArena,
+    input: Input<'_>,
     config: &crate::gentype::config::T,
-    output_file_relative: &str,
-    resolver: &crate::gentype::module_resolver::Resolver,
     type_env: &crate::gentype::type_env::T,
     type_declaration: &TypedTypeDeclaration,
 ) -> crate::gentype::annotation::Read<Vec<code_item::TypeDeclaration>> {
     // Mirrors compiler/gentype/TranslateTypeDeclarations.ml:328-351.
+    let Input { ta, ctx, arena, .. } = input;
     if crate::gentype::debug::translation.load(std::sync::atomic::Ordering::Relaxed) {
         crate::gentype::log_::item(&format!(
             "Translate Type Declaration {}\n",
@@ -628,22 +654,21 @@ pub fn translate_type_declaration(
         _ => DeclarationKind::NoDeclaration,
     };
     traslate_declaration_kind(
-        ta,
-        ctx,
-        arena,
+        input,
         config,
-        arena.to_location(type_declaration.typ_loc),
-        type_declaration.typ_loc,
-        output_file_relative,
-        resolver,
-        &type_declaration.typ_attributes,
         type_env,
-        &type_name,
-        type_vars,
-        declaration_kind,
+        type_declaration.typ_loc,
+        &type_declaration.typ_attributes,
+        Declaration {
+            loc: arena.to_location(type_declaration.typ_loc),
+            type_name: &type_name,
+            type_vars,
+            kind: declaration_kind,
+        },
     )
 }
 
+/// Declare the type of a type declaration in `type_env`.
 pub fn add_type_declaration_id_to_type_env(
     type_env: &crate::gentype::type_env::T,
     type_declaration: &TypedTypeDeclaration,
@@ -652,14 +677,13 @@ pub fn add_type_declaration_id_to_type_env(
     crate::gentype::type_env::new_type(type_declaration.typ_id.name(), type_env);
 }
 
+/// `TranslateTypeDeclarations.translateTypeDeclarations`: translate the
+/// declarations of one `type` item, declaring all of their names first when
+/// it is recursive.
 pub fn translate_type_declarations(
-    ta: &crate::types::typedtree::TypedArena,
-    ctx: &crate::types::context::TypeContext,
-    arena: &ParseArena,
+    input: Input<'_>,
     config: &crate::gentype::config::T,
-    output_file_relative: &str,
     recursive: bool,
-    resolver: &crate::gentype::module_resolver::Resolver,
     type_env: &crate::gentype::type_env::T,
     type_declarations: &[TypedTypeDeclaration],
 ) -> crate::gentype::annotation::Read<Vec<code_item::TypeDeclaration>> {
@@ -671,16 +695,7 @@ pub fn translate_type_declarations(
     }
     let mut translations = Vec::new();
     for type_declaration in type_declarations {
-        let res = translate_type_declaration(
-            ta,
-            ctx,
-            arena,
-            config,
-            output_file_relative,
-            resolver,
-            type_env,
-            type_declaration,
-        )?;
+        let res = translate_type_declaration(input, config, type_env, type_declaration)?;
         if !recursive {
             add_type_declaration_id_to_type_env(type_env, type_declaration);
         }

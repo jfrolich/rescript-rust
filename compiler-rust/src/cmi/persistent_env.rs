@@ -15,6 +15,7 @@ use ahash::{AHashMap as HashMap, AHashSet as HashSet};
 use std::fs;
 use std::path::Path as FsPath;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::{Arc, Mutex, RwLock};
 
 use crate::cmi::marshal_reader::{MarshalReader, OcamlValue};
@@ -347,63 +348,101 @@ impl PersStruct {
     }
 }
 
+/// A closed constant a module exports, as its `.cmj` records it; other
+/// modules inline it instead of reading the export.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum CmjExportConstant {
+    /// `true` or `false`.
     Bool(bool),
+    /// `null`.
     Null,
-    Undefined { is_unit: bool },
+    /// `undefined`.
+    Undefined {
+        /// Whether the constant is the unit value `()`.
+        is_unit: bool,
+    },
 }
 
+/// The arity of an export, as its `.cmj` records it.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum CmjExportArity {
+    /// The arity of a value export.
     Single(Arity),
+    /// A submodule (an immutable block): the arity of each of its fields.
     Submodule(Vec<Arity>),
 }
 
+/// The module-level facts of a decoded `.cmj` file.
 #[derive(Debug, Clone)]
 pub struct CmjModuleMetadata {
+    /// Whether the module is side-effect free.
     pub is_pure: bool,
+    /// The closed constants the module exports, by export name.
     pub export_constants: HashMap<String, CmjExportConstant>,
+    /// The package the module belongs to and where its JavaScript goes.
     pub package_spec: CmjPackageSpec,
+    /// The case of the module's JavaScript file name.
     pub file_case: CmjFileCase,
 }
 
+/// The package of a `.cmj` (`Js_packages_info.package_name`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CmjPackageName {
+    /// No package (`Pkg_empty`).
     Empty,
+    /// `@rescript/runtime` (`Pkg_runtime`).
     Runtime,
+    /// A named package (`Pkg_normal`).
     Normal(String),
 }
 
+/// A JavaScript module system a package emits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum CmjPackageModuleSystem {
+    /// CommonJS (`require`).
     CommonJs,
+    /// ES modules (`import`).
     EsModule,
 }
 
+/// Where a module's JavaScript goes for one module system.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct CmjPackageInfo {
+    /// The module system.
     pub module_system: CmjPackageModuleSystem,
+    /// The output directory, relative to the package root.
     pub path: String,
+    /// The JavaScript file suffix.
     pub suffix: String,
 }
 
+/// A `.cmj`'s package information (`Js_packages_info.t`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CmjPackageSpec {
+    /// The package.
     pub name: CmjPackageName,
+    /// Where the module's JavaScript goes, per module system.
     pub module_systems: Vec<CmjPackageInfo>,
 }
 
+/// The case of a module's JavaScript file name (`Ext_js_file_kind.case`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CmjFileCase {
+    /// The module name, capitalized as it is.
     Upper,
+    /// The module name with its first letter lowercased.
     Little,
 }
 
+/// What generating an import of a dependency needs to know of it
+/// (`Lam_compile_env.get_package_path_from_cmj`).
 #[derive(Debug, Clone)]
 pub struct CmjModuleImportInfo {
+    /// The dependency's package root.
     pub package_path: PathBuf,
+    /// The dependency's package and output directories.
     pub package_spec: CmjPackageSpec,
+    /// The case of the dependency's JavaScript file name.
     pub file_case: CmjFileCase,
 }
 
@@ -416,6 +455,10 @@ fn serialize_sorted<V: serde::Serialize, S: serde::Serializer>(
     entries.sort_unstable_by(|a, b| a.0.cmp(b.0));
     serializer.collect_map(entries)
 }
+
+/// A module's package name, package root and JS output suffix, as
+/// [`PersistentEnv::module_js_package_info`] gives them.
+pub type JsPackageInfo = (Arc<str>, Arc<PathBuf>, Option<Arc<str>>);
 
 /// In-memory module metadata for the `--in-process` build mode.
 ///
@@ -452,6 +495,8 @@ pub struct InMemoryModuleInfo {
 }
 
 impl InMemoryModuleInfo {
+    /// Metadata with the given source path, purity and constants, and no
+    /// arities, lambdas or package.
     pub fn new(
         source_path: PathBuf,
         is_pure: bool,
@@ -472,11 +517,13 @@ impl InMemoryModuleInfo {
         }
     }
 
+    /// Set where the module's JavaScript goes, per module system.
     pub fn with_package_outputs(mut self, package_outputs: Vec<CmjPackageInfo>) -> Self {
         self.package_outputs = Arc::new(package_outputs);
         self
     }
 
+    /// Set the exports other modules may inline.
     pub fn with_cmj_export_lambdas(
         mut self,
         cmj_export_lambdas: crate::lambda::CmjExportLambdas,
@@ -485,6 +532,7 @@ impl InMemoryModuleInfo {
         self
     }
 
+    /// Set the arities of the exports.
     pub fn with_cmj_export_arities(
         mut self,
         cmj_export_arities: HashMap<String, CmjExportArity>,
@@ -493,6 +541,7 @@ impl InMemoryModuleInfo {
         self
     }
 
+    /// Set the package name, root and JS suffix used for import rebasing.
     pub fn with_package(
         mut self,
         package_name: String,
@@ -668,15 +717,21 @@ pub struct ModuleRegistry {
     /// Keyed by unit, signature identity and fingerprint, and the identity
     /// of the JS metadata whose inlinable bodies the references follow
     /// (`usize::MAX` for references without them).
-    item_refs_cache:
-        Arc<RwLock<HashMap<(Name, usize, u64, usize), Arc<super::item_deps::UnitRefs>>>>,
+    item_refs_cache: Arc<RwLock<HashMap<ItemRefsKey, Arc<super::item_deps::UnitRefs>>>>,
 }
 
+/// Key of `ModuleRegistry::item_refs_cache`: the unit, its signature's
+/// identity and fingerprint, and the identity of its JS metadata.
+type ItemRefsKey = (Name, usize, u64, usize);
+
 impl ModuleRegistry {
+    /// An empty registry.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// A copy for one worker's compilation: it shares the published entries
+    /// and writes the entries the worker registers to tables of its own.
     pub fn for_worker_snapshot(&self) -> Self {
         if crate::perf_counters::enabled() {
             let shared_entries = self.cached_modules.len()
@@ -696,6 +751,7 @@ impl ModuleRegistry {
         snapshot
     }
 
+    /// Whether a signature is registered for `name`.
     pub fn has_cached_module(&self, name: &str) -> bool {
         self.local_cached_modules.contains_key(name) || self.cached_modules.contains_key(name)
     }
@@ -932,11 +988,15 @@ impl ModuleRegistry {
         lazy
     }
 
+    /// Register a clean module whose typed artifacts on disk are valid, with
+    /// its JS metadata; its signature is read from its `.cmi`.
     pub fn register_disk_module(&mut self, name: &str, info: InMemoryModuleInfo) {
         self.disk_modules.insert(name.to_string(), true);
         self.insert_module_info(name.to_string(), info);
     }
 
+    /// Whether no module signatures are registered: none compiled, none on
+    /// disk and none waiting to be decoded.
     pub fn is_empty(&self) -> bool {
         self.local_cached_modules.is_empty()
             && self.cached_modules.len() == 0
@@ -948,6 +1008,7 @@ impl ModuleRegistry {
                 .is_none_or(|lazy| lazy.pending.lock().unwrap().is_empty())
     }
 
+    /// Whether registered module `name` belongs to `@rescript/runtime`.
     pub fn module_info_is_runtime(&self, name: &str) -> bool {
         self.with_info(name, |info| info.is_runtime)
             .unwrap_or(false)
@@ -1089,6 +1150,7 @@ impl ModuleRegistry {
         }
     }
 
+    /// Register the JS metadata of module `name`.
     pub fn insert_module_info(&mut self, name: String, info: InMemoryModuleInfo) {
         if self.write_to_local {
             self.local_module_info.insert(name, info);
@@ -1097,6 +1159,7 @@ impl ModuleRegistry {
         }
     }
 
+    /// Register alias prefix rewrites (flattened name -> qualified path).
     pub fn extend_alias_rewrites(&mut self, new_alias_rewrites: HashMap<String, Path>) {
         if self.write_to_local {
             self.local_alias_rewrites.extend(
@@ -1109,6 +1172,8 @@ impl ModuleRegistry {
         }
     }
 
+    /// Register the source file of module `name`, for type checking it on
+    /// demand before it is compiled.
     pub fn insert_source_fallback_path(&mut self, name: String, path: PathBuf) {
         if self.write_to_local {
             self.local_source_fallback_paths.insert(name, path);
@@ -1117,6 +1182,7 @@ impl ModuleRegistry {
         }
     }
 
+    /// Replace the source files registered for on-demand type checking.
     pub fn set_source_fallback_paths(&mut self, paths: HashMap<String, PathBuf>) {
         if self.write_to_local {
             self.local_source_fallback_paths = paths;
@@ -1226,7 +1292,7 @@ pub struct PersistentEnv {
     /// First persistent-loader error observed through any clone of this env.
     last_error: Arc<Mutex<Option<PersistentEnvError>>>,
     /// Consistency table for imported CMI digests, matching OCaml `Consistbl`.
-    crc_units: Arc<Mutex<HashMap<String, (Vec<u8>, String)>>>,
+    crc_units: Arc<Mutex<CrcUnits>>,
     /// `imported_units` with their recorded CRCs (env.ml:612-646): the
     /// units this compilation found and the units their CRC lists name.
     imported_units: Arc<Mutex<ImportedUnits>>,
@@ -1235,6 +1301,10 @@ pub struct PersistentEnv {
     cmj_values: Arc<Mutex<HashMap<PathBuf, Option<OcamlValue>>>>,
     view: Arc<ResolutionView>,
 }
+
+/// `Consistbl.t`: each imported interface's assumed digest, with the file
+/// that first assumed it.
+type CrcUnits = HashMap<String, (Vec<u8>, String)>;
 
 /// Per-environment memo of `outside_load_path`. Each clone starts empty:
 /// clones are per compilation, and sharing one lock across workers made it
@@ -1254,6 +1324,12 @@ impl Clone for OutsideLoadPathMemo {
 struct ImportedUnits {
     units: std::collections::BTreeMap<String, Option<[u8; 16]>>,
     recorded: crate::fast_hash::AHashSet<String>,
+}
+
+impl Default for PersistentEnv {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Errors reported by OCaml's `Env` persistent interface loader.
@@ -1394,6 +1470,7 @@ impl PersistentEnv {
         }
     }
 
+    /// The first loader error recorded through any clone of this env.
     pub fn last_error(&self) -> Option<PersistentEnvError> {
         self.last_error.lock().unwrap().clone()
     }
@@ -1616,6 +1693,8 @@ impl PersistentEnv {
         self.load_path_display = display_paths;
     }
 
+    /// Set the load path, with the spelling of each entry that diagnostics
+    /// show (`display_paths`, parallel to `paths`).
     pub fn set_load_path_with_display(&mut self, paths: Vec<PathBuf>, display_paths: Vec<PathBuf>) {
         debug_assert_eq!(paths.len(), display_paths.len());
         self.load_path = Arc::new(paths);
@@ -1671,34 +1750,42 @@ impl PersistentEnv {
         outside
     }
 
+    /// Set the modules opened implicitly by `-open` flags.
     pub fn set_open_modules(&mut self, open_modules: Vec<String>) {
         self.open_modules = Arc::new(open_modules);
     }
 
+    /// Set the JSX module from CLI flags.
     pub fn set_jsx_module(&mut self, jsx_module: Option<String>) {
         self.jsx_module = jsx_module;
     }
 
+    /// Set the default JSX version from CLI flags.
     pub fn set_jsx_version(&mut self, jsx_version: Option<i32>) {
         self.jsx_version = jsx_version;
     }
 
+    /// Set whether the compilation uses `-enable-experimental LetUnwrap`.
     pub fn set_experimental_let_unwrap(&mut self, experimental_let_unwrap: bool) {
         self.experimental_let_unwrap = experimental_let_unwrap;
     }
 
+    /// Set whether the compilation uses `-nopervasives`.
     pub fn set_nopervasives(&mut self, nopervasives: bool) {
         self.nopervasives = nopervasives;
     }
 
+    /// The name of the unit being compiled, if set.
     pub fn compiling_module_name(&self) -> Option<&str> {
         self.view.compiling_module.as_deref()
     }
 
+    /// Set the name of the unit being compiled.
     pub fn set_compiling_module(&mut self, module_name: Option<String>) {
         self.view_mut().compiling_module = module_name;
     }
 
+    /// Whether `module_name` is the unit being compiled.
     pub fn is_compiling_module(&self, module_name: &str) -> bool {
         self.view
             .compiling_module
@@ -1729,10 +1816,12 @@ impl PersistentEnv {
             .flattened_alias_heads_for_path(qualified_path)
     }
 
+    /// The qualified path a flattened unit name is an alias of, if any.
     pub fn qualified_alias_path_for_flattened_head(&self, flat_head: &str) -> Option<Path> {
         self.view.alias_prefix_rewrites.get(flat_head)
     }
 
+    /// Whether unit `name` can be found, without loading its signature.
     pub fn has_known_module_without_loading(&self, name: &str) -> bool {
         // OCaml compiler/ml/env.ml:1058-1062 checks a persistent unit without
         // forcing its signature when `lookup_module ~load:false` only needs to
@@ -2000,7 +2089,7 @@ impl PersistentEnv {
             ctx.poison_store_build_for("find_pers_struct:prepare");
             self.view_mut()
                 .prepared_cached_alias_rewrites
-                .insert(Name::new(&cache_key));
+                .insert(Name::new(cache_key));
             self.record_alias_rewrites(cache_key, ps);
         }
 
@@ -2011,10 +2100,11 @@ impl PersistentEnv {
         }
     }
 
+    /// The persistent structure of unit `name` loaded from a file: its
+    /// signature with paths qualified by the unit, its aliases recorded.
     fn finalize_loaded_signature(
         &mut self,
         name: &str,
-        ps_name: String,
         mut signature: Signature,
         ps_filename: String,
         ps_deprecated: Option<String>,
@@ -2040,7 +2130,7 @@ impl PersistentEnv {
             .view
             .alias_prefix_rewrites
             .get(name)
-            .unwrap_or_else(|| module_path);
+            .unwrap_or(module_path);
         collect_alias_rewrites(
             &signature,
             &effective_module_path,
@@ -2052,7 +2142,7 @@ impl PersistentEnv {
         }
 
         PersStruct {
-            ps_name,
+            ps_name: name.to_string(),
             ps_sig: signature,
             ps_filename,
             ps_deprecated,
@@ -2112,10 +2202,7 @@ impl PersistentEnv {
     }
 
     /// Return in-memory package metadata for JS import rebasing.
-    pub fn module_js_package_info(
-        &self,
-        name: &str,
-    ) -> Option<(Arc<str>, Arc<PathBuf>, Option<Arc<str>>)> {
+    pub fn module_js_package_info(&self, name: &str) -> Option<JsPackageInfo> {
         self.in_memory_info_with(name, |info| {
             Some((
                 info.package_name.clone()?,
@@ -2171,6 +2258,7 @@ impl PersistentEnv {
         })
     }
 
+    /// Whether JS metadata is registered for module `name`.
     pub fn module_has_in_memory_info(&self, name: &str) -> bool {
         self.in_memory_info_with(name, |_| ()).is_some()
     }
@@ -2181,6 +2269,7 @@ impl PersistentEnv {
         self.find_in_path_uncap(filename)
     }
 
+    /// Whether [`Self::find_in_load_path_uncap`] finds `filename`.
     pub fn file_exists_in_load_path_uncap(&self, filename: &str) -> bool {
         self.find_in_path_uncap(filename).is_some()
     }
@@ -2557,7 +2646,6 @@ impl PersistentEnv {
                 .unwrap_or_default();
         Some(self.finalize_loaded_signature(
             name,
-            name.to_string(),
             signature,
             preferred_path.to_string_lossy().into_owned(),
             deprecated,
@@ -2625,7 +2713,6 @@ impl PersistentEnv {
                 .collect();
             return Some(self.finalize_loaded_signature(
                 name,
-                name.to_string(),
                 signature,
                 display_path,
                 deprecated,
@@ -2678,7 +2765,6 @@ impl PersistentEnv {
             .unwrap_or_default();
         Some(self.finalize_loaded_signature(
             name,
-            name.to_string(),
             signature,
             source_path.to_string_lossy().into_owned(),
             deprecated,
@@ -2794,6 +2880,7 @@ impl PersistentEnv {
         })
     }
 
+    /// [`Self::get_renamed_sig_shared`], copied.
     pub fn get_renamed_sig(&mut self, name: &str, ctx: &TypeContext) -> Option<Signature> {
         self.get_renamed_sig_shared(name, ctx)
             .map(|sig| sig.as_ref().clone())
@@ -2857,7 +2944,7 @@ impl PersistentEnv {
         let alias_source = self.qualified_alias_path_for_flattened_head(name);
         let components = ctx
             .with_qualified_module_components(&components_key, |components| {
-                Arc::new(components.clone())
+                Rc::new(components.clone())
             })
             .unwrap_or_else(|| {
                 // The view of a unit loaded into the worker store is the same
@@ -2872,7 +2959,7 @@ impl PersistentEnv {
                         ctx.thread_store().shared_components(&components_key)
                 {
                     ctx.touch_store_piece(&piece);
-                    ctx.register_qualified_module_components_arc(
+                    ctx.register_qualified_module_components_shared(
                         components_key.clone(),
                         components.clone(),
                     );
@@ -2898,7 +2985,7 @@ impl PersistentEnv {
                 } else {
                     (build(), None)
                 };
-                let components = Arc::new(components);
+                let components = Rc::new(components);
                 if shareable {
                     match piece {
                         Some(piece) => ctx.thread_store().publish_shared_components(
@@ -2909,7 +2996,7 @@ impl PersistentEnv {
                         None => components.make_private(),
                     }
                 }
-                ctx.register_qualified_module_components_arc(components_key, components.clone());
+                ctx.register_qualified_module_components_shared(components_key, components.clone());
                 components
             });
         open_components_into_env(&components, root, env, ctx);
@@ -2960,7 +3047,6 @@ impl PersistentEnv {
     ) {
         let ps = self.finalize_loaded_signature(
             name,
-            name.to_string(),
             signature,
             source_filename.to_string(),
             deprecated,
@@ -3070,6 +3156,8 @@ impl PersistentEnv {
         self.in_process_mode
     }
 
+    /// Whether module `name` belongs to `@rescript/runtime` (in-memory
+    /// metadata only).
     pub fn module_is_runtime(&self, name: &str) -> bool {
         self.in_memory_info_with(name, |info| info.is_runtime)
             .unwrap_or(false)
@@ -3993,7 +4081,7 @@ impl ModuleStampSubstMap {
             return None;
         }
         self.paths
-            .get(&crate::types::context::SamePathKey::new(path.clone()))
+            .get(&crate::types::context::SamePathKey::new(*path))
     }
 }
 
@@ -4047,7 +4135,7 @@ impl TypeSubstPaths {
             return None;
         }
         self.functions
-            .get(&crate::types::context::SamePathKey::new(path.clone()))
+            .get(&crate::types::context::SamePathKey::new(*path))
     }
 }
 
@@ -4085,7 +4173,28 @@ impl Default for SubstMaps {
     }
 }
 
+/// The substitution maps a type-path walk reads, borrowed: those of a
+/// [`SubstMaps`], or ones with a type-name map of the caller's own.
+#[derive(Clone, Copy)]
+struct SubstPaths<'a> {
+    type_stamp_map: &'a TypeSubstPaths,
+    type_name_map: &'a HashMap<Name, Path>,
+    module_stamp_map: &'a ModuleStampSubstMap,
+    module_name_map: &'a HashMap<Name, Arc<Path>>,
+    protected_module_head: Option<&'a (i32, Name)>,
+}
+
 impl SubstMaps {
+    fn paths(&self) -> SubstPaths<'_> {
+        SubstPaths {
+            type_stamp_map: &self.type_stamp_map,
+            type_name_map: &self.type_name_map,
+            module_stamp_map: &self.module_stamp_map,
+            module_name_map: &self.module_name_map,
+            protected_module_head: self.protected_module_head.as_ref(),
+        }
+    }
+
     fn is_empty(&self) -> bool {
         self.type_stamp_map.is_empty()
             && self.type_name_map.is_empty()
@@ -4099,10 +4208,12 @@ fn build_subst_maps(
     module_path: &Path,
     ctx: &TypeContext,
 ) -> SubstMaps {
-    let mut maps = SubstMaps::default();
-    maps.protected_module_head = nonpersistent_path_head(module_path);
+    let mut maps = SubstMaps {
+        protected_module_head: nonpersistent_path_head(module_path),
+        ..SubstMaps::default()
+    };
 
-    let prefix = Arc::new(module_path.clone());
+    let prefix = Arc::new(*module_path);
     for item in sig_items {
         match item {
             SignatureItem::SigType(id, _, _) | SignatureItem::SigModtype(id, _) => {
@@ -4113,8 +4224,8 @@ fn build_subst_maps(
                     && matches!(source.view(), PathView::Pdot(..))
                 {
                     maps.type_stamp_map.qualified.insert(
-                        crate::types::context::SamePathKey::new(source.clone()),
-                        qualified_path.clone(),
+                        crate::types::context::SamePathKey::new(*source),
+                        qualified_path,
                     );
                 }
                 if id.stamp() != 0 {
@@ -4223,7 +4334,7 @@ mod tests {
                 let name = ctx.create_ident("t");
                 let source = ctx.dotted_from_ident(root.clone(), name, 7);
                 let target = Arc::new(Path::pident(ctx.create_ident("Target")));
-                let ty = ctx.new_generic_constr(source.clone(), vec![]);
+                let ty = ctx.new_generic_constr(source, vec![]);
                 let mut sig = vec![
                     SignatureItem::SigValue(
                         ctx.create_ident("value"),
@@ -4232,7 +4343,7 @@ mod tests {
                             val_kind: crate::types::decl::ValueKind::ValReg,
                             val_loc: Default::default(),
                             val_attributes: Default::default(),
-                            val_path: Some(source.clone()),
+                            val_path: Some(source),
                         },
                     ),
                     SignatureItem::SigModule(
@@ -4240,11 +4351,11 @@ mod tests {
                         crate::types::decl::ModuleDeclaration {
                             md_type: ModuleType::MtyAlias(
                                 crate::types::decl::AliasPresence::MtaPresent,
-                                Arc::new(source.clone()),
+                                Arc::new(source),
                             ),
                             md_loc: Default::default(),
                             md_attributes: vec![],
-                            md_path: Some(source.clone()),
+                            md_path: Some(source),
                         },
                         RecStatus::TrecNot,
                     ),
@@ -4288,7 +4399,7 @@ mod tests {
                 for path in [alias, child.md_path.as_ref().unwrap()] {
                     assert_eq!(*path, if shallow { source } else { expected });
                 }
-                let unknown = Path::pdot((*root).clone(), "unknown");
+                let unknown = Path::pdot(*root, "unknown");
                 let copied =
                     rewrite_path_with_shared_prefix(&unknown, &root, &target, &ctx).unwrap();
                 assert!(copied.same(&Path::pdot(*target, "unknown")));
@@ -4303,7 +4414,7 @@ mod tests {
         let name = ctx.create_ident("t");
         let source = ctx.dotted_from_ident(root.clone(), name, 7);
         let target = Path::pident(ctx.create_ident("Target"));
-        let pairs = vec![((*root).clone(), target.clone())];
+        let pairs = vec![((*root), target)];
         let mapper = reroot_path_mapper(&pairs, &ctx);
         let a = mapper(&source);
         let b = mapper(&source);
@@ -4327,11 +4438,11 @@ mod tests {
         // rather than preferring the nearest matching ancestor.
         for count in [2, 6] {
             let mut pairs = vec![
-                ((*root).clone(), target.clone()),
-                (source.clone(), Path::pident(ctx.create_ident("Later"))),
+                ((*root), target),
+                (source, Path::pident(ctx.create_ident("Later"))),
             ];
             for _ in 2..count {
-                pairs.push((Path::pident(ctx.create_ident("Unused")), target.clone()));
+                pairs.push((Path::pident(ctx.create_ident("Unused")), target));
             }
             let prefixes = PathPrefixes::new(&pairs);
             assert_eq!(prefixes.matching_prefix(&nested), Some(0));
@@ -4428,30 +4539,29 @@ mod tests {
         let root_id = Ident::create_local("Component");
         let root = Arc::new(Path::pident(root_id));
         let binder = Ident::create_local("t");
-        let source = Path::pdot((*root).clone(), binder.name_atom());
+        let source = Path::pdot(*root, binder.name_atom());
         let target = ctx.dotted_from_ident(root, binder, crate::types::path::NOPOS);
         assert_eq!(source, target);
         assert_eq!(source, target);
         let mut types = TypeSubstPaths::default();
         types.qualified.insert(
-            crate::types::context::SamePathKey::new(source.clone()),
-            target.clone(),
+            crate::types::context::SamePathKey::new(source),
+            target,
         );
         let names = HashMap::new();
         let modules = ModuleStampSubstMap::new();
-        let a = ctx.new_generic_constr(source.clone(), vec![]);
-        let b = ctx.new_generic_constr(source.clone(), vec![]);
+        let module_names = HashMap::new();
+        let paths = SubstPaths {
+            type_stamp_map: &types,
+            type_name_map: &names,
+            module_stamp_map: &modules,
+            module_name_map: &module_names,
+            protected_module_head: None,
+        };
+        let a = ctx.new_generic_constr(source, vec![]);
+        let b = ctx.new_generic_constr(source, vec![]);
         for node in [a, b] {
-            substitute_type_expr_path(
-                node,
-                &types,
-                &names,
-                &modules,
-                &HashMap::new(),
-                None,
-                &ctx,
-                &mut visit_set(),
-            );
+            substitute_type_expr_path(node, paths, &ctx, &mut visit_set());
             let desc = ctx.get_desc(node);
             let TypeDesc::Tconstr { path, .. } = &*desc else {
                 panic!("constructor")
@@ -4556,7 +4666,7 @@ fn merge_subst_maps(parent: &SubstMaps, child: &SubstMaps) -> SubstMaps {
         .extend(child.module_stamp_map.clone());
     merged.module_name_map.extend(child.module_name_map.clone());
     if merged.protected_module_head.is_none() {
-        merged.protected_module_head = child.protected_module_head.clone();
+        merged.protected_module_head = child.protected_module_head;
     }
     merged
 }
@@ -4823,8 +4933,8 @@ pub(crate) fn freshened_signature_bound_idents_from_kind(
         freshened_signature_ident_plan(sig_items, ctx);
     let maps_empty = local_maps.is_empty();
     let rewrite_type_path = |path: &Path| {
-        let path = if maps_empty {
-            path.clone()
+        if maps_empty {
+            *path
         } else {
             substitute_type_path(
                 ctx,
@@ -4835,8 +4945,7 @@ pub(crate) fn freshened_signature_bound_idents_from_kind(
                 &local_maps.module_name_map,
                 local_maps.protected_module_head.as_ref(),
             )
-        };
-        path
+        }
     };
     // Alias targets: the stored substitution target, or an unreplaced
     // `Pident` block itself (subst.ml:69-75).
@@ -4892,7 +5001,7 @@ pub(crate) fn substitute_functor_result_module_path(
         insert_module_stamp_subst(&mut maps.module_stamp_map, old_param, *arg_path);
     } else {
         maps.module_name_map
-            .insert(old_param.name_atom(), Arc::new(arg_path.clone()));
+            .insert(old_param.name_atom(), Arc::new(*arg_path));
     }
     freshen_module_type_bound_idents_with_maps(&mut copied, &maps, ctx);
     copied
@@ -4914,7 +5023,7 @@ pub(crate) fn substitute_module_type_with_module_path_subst(
             insert_module_stamp_subst(&mut maps.module_stamp_map, id, *path);
         } else {
             maps.module_name_map
-                .insert(id.name_atom(), Arc::new(path.clone()));
+                .insert(id.name_atom(), Arc::new(*path));
         }
     }
     freshen_module_type_bound_idents_with_maps(&mut copied, &maps, ctx);
@@ -4950,22 +5059,22 @@ pub(crate) fn substitute_signature_with_path_subst(
                 PathView::Pident(id) if id.stamp() != 0 => {
                     maps.type_stamp_map
                         .stamps
-                        .insert(id.stamp(), target.clone());
+                        .insert(id.stamp(), *target);
                 }
                 PathView::Pident(id) => {
                     maps.type_name_map
-                        .insert(id.name_atom(), target.clone());
+                        .insert(id.name_atom(), *target);
                 }
                 _ => {
                     maps.type_stamp_map.qualified.insert(
-                        crate::types::context::SamePathKey::new(key.clone()),
-                        target.clone(),
+                        crate::types::context::SamePathKey::new(*key),
+                        *target,
                     );
                 }
             },
             TypeReplacement::Function { params, body } => {
                 maps.type_stamp_map.functions.insert(
-                    crate::types::context::SamePathKey::new(key.clone()),
+                    crate::types::context::SamePathKey::new(*key),
                     (params.clone(), *body),
                 );
             }
@@ -4974,16 +5083,16 @@ pub(crate) fn substitute_signature_with_path_subst(
     for (key, target) in modules {
         match &key.view() {
             PathView::Pident(id) if id.stamp() != 0 => {
-                insert_module_stamp_subst(&mut maps.module_stamp_map, id, target.clone());
+                insert_module_stamp_subst(&mut maps.module_stamp_map, id, *target);
             }
             PathView::Pident(id) => {
                 maps.module_name_map
-                    .insert(id.name_atom(), Arc::new(target.clone()));
+                    .insert(id.name_atom(), Arc::new(*target));
             }
             _ => {
                 maps.module_stamp_map.paths.insert(
-                    crate::types::context::SamePathKey::new(key.clone()),
-                    Arc::new(target.clone()),
+                    crate::types::context::SamePathKey::new(*key),
+                    Arc::new(*target),
                 );
             }
         }
@@ -5094,6 +5203,7 @@ pub(crate) fn substitute_component_module_type_path(
     Some(module_type)
 }
 
+/// `path` with the items of `sig_items` it names qualified by `module_path`.
 pub fn substitute_sig_path(
     path: &Path,
     sig_items: &[SignatureItem],
@@ -5284,6 +5394,9 @@ fn substitute_sig_decl_paths_in_place_with_maps_rec(
     }
 }
 
+/// Qualify the declaration paths of `sig_items` (value, type and extension
+/// paths, and module type paths) that name its own items by `module_path`,
+/// in nested signatures too.
 pub fn substitute_sig_decl_paths_in_place(
     sig_items: &mut [SignatureItem],
     module_path: &Path,
@@ -5295,7 +5408,7 @@ pub fn substitute_sig_decl_paths_in_place(
 
 /// Qualify the declaration paths Rust caches on a loaded unit's signature
 /// (`type_path`, `val_path`, `md_path`), keeping module alias targets raw as
-/// OCaml's `ps_sig` keeps them (see [`AliasTargets::KeepRaw`]).
+/// OCaml's `ps_sig` keeps them (see `AliasTargets::KeepRaw`).
 pub fn qualify_unit_sig_decl_paths_in_place(
     sig_items: &mut [SignatureItem],
     module_path: &Path,
@@ -5337,42 +5450,15 @@ fn substitute_type_paths_in_sig_items(
     for item in sig_items {
         match item {
             SignatureItem::SigValue(_id, desc) => {
-                substitute_type_expr_path(
-                    desc.val_type,
-                    &maps.type_stamp_map,
-                    &maps.type_name_map,
-                    &maps.module_stamp_map,
-                    &maps.module_name_map,
-                    maps.protected_module_head.as_ref(),
-                    ctx,
-                    visited,
-                );
+                substitute_type_expr_path(desc.val_type, maps.paths(), ctx, visited);
             }
             SignatureItem::SigType(_id, decl, _) => {
                 for &param in &decl.type_params {
-                    substitute_type_expr_path(
-                        param,
-                        &maps.type_stamp_map,
-                        &maps.type_name_map,
-                        &maps.module_stamp_map,
-                        &maps.module_name_map,
-                        maps.protected_module_head.as_ref(),
-                        ctx,
-                        visited,
-                    );
+                    substitute_type_expr_path(param, maps.paths(), ctx, visited);
                 }
 
                 if let Some(manifest) = decl.type_manifest {
-                    substitute_type_expr_path(
-                        manifest,
-                        &maps.type_stamp_map,
-                        &maps.type_name_map,
-                        &maps.module_stamp_map,
-                        &maps.module_name_map,
-                        maps.protected_module_head.as_ref(),
-                        ctx,
-                        visited,
-                    );
+                    substitute_type_expr_path(manifest, maps.paths(), ctx, visited);
                 }
 
                 match &decl.type_kind {
@@ -5381,27 +5467,14 @@ fn substitute_type_paths_in_sig_items(
                             match &cd.cd_args {
                                 crate::types::decl::ConstructorArguments::CstrTuple(args) => {
                                     for &arg in args {
-                                        substitute_type_expr_path(
-                                            arg,
-                                            &maps.type_stamp_map,
-                                            &maps.type_name_map,
-                                            &maps.module_stamp_map,
-                                            &maps.module_name_map,
-                                            maps.protected_module_head.as_ref(),
-                                            ctx,
-                                            visited,
-                                        );
+                                        substitute_type_expr_path(arg, maps.paths(), ctx, visited);
                                     }
                                 }
                                 crate::types::decl::ConstructorArguments::CstrRecord(labels) => {
                                     for lbl in labels {
                                         substitute_type_expr_path(
                                             lbl.ld_type,
-                                            &maps.type_stamp_map,
-                                            &maps.type_name_map,
-                                            &maps.module_stamp_map,
-                                            &maps.module_name_map,
-                                            maps.protected_module_head.as_ref(),
+                                            maps.paths(),
                                             ctx,
                                             visited,
                                         );
@@ -5409,31 +5482,13 @@ fn substitute_type_paths_in_sig_items(
                                 }
                             }
                             if let Some(res) = cd.cd_res {
-                                substitute_type_expr_path(
-                                    res,
-                                    &maps.type_stamp_map,
-                                    &maps.type_name_map,
-                                    &maps.module_stamp_map,
-                                    &maps.module_name_map,
-                                    maps.protected_module_head.as_ref(),
-                                    ctx,
-                                    visited,
-                                );
+                                substitute_type_expr_path(res, maps.paths(), ctx, visited);
                             }
                         }
                     }
                     TypeKind::TypeRecord(labels, _) => {
                         for lbl in labels {
-                            substitute_type_expr_path(
-                                lbl.ld_type,
-                                &maps.type_stamp_map,
-                                &maps.type_name_map,
-                                &maps.module_stamp_map,
-                                &maps.module_name_map,
-                                maps.protected_module_head.as_ref(),
-                                ctx,
-                                visited,
-                            );
+                            substitute_type_expr_path(lbl.ld_type, maps.paths(), ctx, visited);
                         }
                     }
                     _ => {}
@@ -5441,58 +5496,22 @@ fn substitute_type_paths_in_sig_items(
             }
             SignatureItem::SigTypext(_id, ext, _) => {
                 for &param in &ext.ext_type_params {
-                    substitute_type_expr_path(
-                        param,
-                        &maps.type_stamp_map,
-                        &maps.type_name_map,
-                        &maps.module_stamp_map,
-                        &maps.module_name_map,
-                        maps.protected_module_head.as_ref(),
-                        ctx,
-                        visited,
-                    );
+                    substitute_type_expr_path(param, maps.paths(), ctx, visited);
                 }
                 match &ext.ext_args {
                     crate::types::decl::ConstructorArguments::CstrTuple(args) => {
                         for &arg in args {
-                            substitute_type_expr_path(
-                                arg,
-                                &maps.type_stamp_map,
-                                &maps.type_name_map,
-                                &maps.module_stamp_map,
-                                &maps.module_name_map,
-                                maps.protected_module_head.as_ref(),
-                                ctx,
-                                visited,
-                            );
+                            substitute_type_expr_path(arg, maps.paths(), ctx, visited);
                         }
                     }
                     crate::types::decl::ConstructorArguments::CstrRecord(labels) => {
                         for lbl in labels {
-                            substitute_type_expr_path(
-                                lbl.ld_type,
-                                &maps.type_stamp_map,
-                                &maps.type_name_map,
-                                &maps.module_stamp_map,
-                                &maps.module_name_map,
-                                maps.protected_module_head.as_ref(),
-                                ctx,
-                                visited,
-                            );
+                            substitute_type_expr_path(lbl.ld_type, maps.paths(), ctx, visited);
                         }
                     }
                 }
                 if let Some(ret) = ext.ext_ret_type {
-                    substitute_type_expr_path(
-                        ret,
-                        &maps.type_stamp_map,
-                        &maps.type_name_map,
-                        &maps.module_stamp_map,
-                        &maps.module_name_map,
-                        maps.protected_module_head.as_ref(),
-                        ctx,
-                        visited,
-                    );
+                    substitute_type_expr_path(ret, maps.paths(), ctx, visited);
                 }
             }
             SignatureItem::SigModule(_id, md, _) => {
@@ -5658,6 +5677,8 @@ pub fn substitute_type_paths_in_child_module_type(
     }
 }
 
+/// Qualify the paths in the type expressions of `sig_items` that name its
+/// own items by `module_path`.
 pub fn substitute_type_paths_in_sig(
     sig_items: &[SignatureItem],
     module_path: &Path,
@@ -5677,7 +5698,7 @@ pub fn substitute_type_paths_in_sig(
             SignatureItem::SigType(id, _, _) | SignatureItem::SigModtype(id, _) => {
                 direct_type_name_map
                     .entry(id.name_atom())
-                    .or_insert_with(|| maps.type_stamp_map.stamps[&id.stamp()].clone());
+                    .or_insert_with(|| maps.type_stamp_map.stamps[&id.stamp()]);
             }
             _ => {}
         }
@@ -5686,6 +5707,13 @@ pub fn substitute_type_paths_in_sig(
     let module_stamp_map = &maps.module_stamp_map;
     let module_name_map = &maps.module_name_map;
     let protected_module_head = maps.protected_module_head.as_ref();
+    let paths = SubstPaths {
+        type_stamp_map,
+        type_name_map: &type_name_map,
+        module_stamp_map,
+        module_name_map,
+        protected_module_head,
+    };
 
     if type_stamp_map.is_empty()
         && type_name_map.is_empty()
@@ -5702,30 +5730,12 @@ pub fn substitute_type_paths_in_sig(
     for item in sig_items {
         match item {
             SignatureItem::SigValue(_id, desc) => {
-                substitute_type_expr_path(
-                    desc.val_type,
-                    type_stamp_map,
-                    &type_name_map,
-                    module_stamp_map,
-                    module_name_map,
-                    protected_module_head,
-                    ctx,
-                    &mut visited,
-                );
+                substitute_type_expr_path(desc.val_type, paths, ctx, &mut visited);
             }
             SignatureItem::SigType(id, decl, _) => {
                 // Substitute in type params
                 for &param in &decl.type_params {
-                    substitute_type_expr_path(
-                        param,
-                        type_stamp_map,
-                        &type_name_map,
-                        module_stamp_map,
-                        module_name_map,
-                        protected_module_head,
-                        ctx,
-                        &mut visited,
-                    );
+                    substitute_type_expr_path(param, paths, ctx, &mut visited);
                 }
                 // Substitute in manifest
                 if let Some(manifest) = decl.type_manifest {
@@ -5740,22 +5750,9 @@ pub fn substitute_type_paths_in_sig(
                         id,
                         manifest,
                         module_path,
-                        type_stamp_map,
-                        &type_name_map,
-                        module_stamp_map,
-                        module_name_map,
-                        protected_module_head,
+                        paths,
                     ) {
-                        substitute_type_expr_path(
-                            manifest,
-                            type_stamp_map,
-                            &type_name_map,
-                            module_stamp_map,
-                            module_name_map,
-                            protected_module_head,
-                            ctx,
-                            &mut visited,
-                        );
+                        substitute_type_expr_path(manifest, paths, ctx, &mut visited);
                     }
                 }
                 // Substitute in constructor/label types
@@ -5765,27 +5762,14 @@ pub fn substitute_type_paths_in_sig(
                             match &cd.cd_args {
                                 crate::types::decl::ConstructorArguments::CstrTuple(args) => {
                                     for &arg in args {
-                                        substitute_type_expr_path(
-                                            arg,
-                                            type_stamp_map,
-                                            &type_name_map,
-                                            module_stamp_map,
-                                            module_name_map,
-                                            protected_module_head,
-                                            ctx,
-                                            &mut visited,
-                                        );
+                                        substitute_type_expr_path(arg, paths, ctx, &mut visited);
                                     }
                                 }
                                 crate::types::decl::ConstructorArguments::CstrRecord(labels) => {
                                     for lbl in labels {
                                         substitute_type_expr_path(
                                             lbl.ld_type,
-                                            type_stamp_map,
-                                            &type_name_map,
-                                            module_stamp_map,
-                                            module_name_map,
-                                            protected_module_head,
+                                            paths,
                                             ctx,
                                             &mut visited,
                                         );
@@ -5793,31 +5777,13 @@ pub fn substitute_type_paths_in_sig(
                                 }
                             }
                             if let Some(res) = cd.cd_res {
-                                substitute_type_expr_path(
-                                    res,
-                                    type_stamp_map,
-                                    &type_name_map,
-                                    module_stamp_map,
-                                    module_name_map,
-                                    protected_module_head,
-                                    ctx,
-                                    &mut visited,
-                                );
+                                substitute_type_expr_path(res, paths, ctx, &mut visited);
                             }
                         }
                     }
                     TypeKind::TypeRecord(labels, _) => {
                         for lbl in labels {
-                            substitute_type_expr_path(
-                                lbl.ld_type,
-                                type_stamp_map,
-                                &type_name_map,
-                                module_stamp_map,
-                                module_name_map,
-                                protected_module_head,
-                                ctx,
-                                &mut visited,
-                            );
+                            substitute_type_expr_path(lbl.ld_type, paths, ctx, &mut visited);
                         }
                     }
                     _ => {}
@@ -5825,58 +5791,22 @@ pub fn substitute_type_paths_in_sig(
             }
             SignatureItem::SigTypext(_id, ext, _) => {
                 for &param in &ext.ext_type_params {
-                    substitute_type_expr_path(
-                        param,
-                        type_stamp_map,
-                        &type_name_map,
-                        module_stamp_map,
-                        module_name_map,
-                        protected_module_head,
-                        ctx,
-                        &mut visited,
-                    );
+                    substitute_type_expr_path(param, paths, ctx, &mut visited);
                 }
                 match &ext.ext_args {
                     crate::types::decl::ConstructorArguments::CstrTuple(args) => {
                         for &arg in args {
-                            substitute_type_expr_path(
-                                arg,
-                                type_stamp_map,
-                                &type_name_map,
-                                module_stamp_map,
-                                module_name_map,
-                                protected_module_head,
-                                ctx,
-                                &mut visited,
-                            );
+                            substitute_type_expr_path(arg, paths, ctx, &mut visited);
                         }
                     }
                     crate::types::decl::ConstructorArguments::CstrRecord(labels) => {
                         for lbl in labels {
-                            substitute_type_expr_path(
-                                lbl.ld_type,
-                                type_stamp_map,
-                                &type_name_map,
-                                module_stamp_map,
-                                module_name_map,
-                                protected_module_head,
-                                ctx,
-                                &mut visited,
-                            );
+                            substitute_type_expr_path(lbl.ld_type, paths, ctx, &mut visited);
                         }
                     }
                 }
                 if let Some(ret) = ext.ext_ret_type {
-                    substitute_type_expr_path(
-                        ret,
-                        type_stamp_map,
-                        &type_name_map,
-                        module_stamp_map,
-                        module_name_map,
-                        protected_module_head,
-                        ctx,
-                        &mut visited,
-                    );
+                    substitute_type_expr_path(ret, paths, ctx, &mut visited);
                 }
             }
             _ => {}
@@ -5900,45 +5830,26 @@ pub(crate) fn substitute_type_paths_in_sig_with_stamp_map(
     };
     let empty: HashMap<Name, Path> = HashMap::new();
     let empty_module_stamp = ModuleStampSubstMap::new();
+    let empty_module_names: HashMap<Name, Arc<Path>> = HashMap::new();
+    let paths = SubstPaths {
+        type_stamp_map: stamp_map,
+        type_name_map: &empty,
+        module_stamp_map: &empty_module_stamp,
+        module_name_map: &empty_module_names,
+        protected_module_head: None,
+    };
     let mut visited = visit_set();
     for item in sig_items {
         match item {
             SignatureItem::SigValue(_id, desc) => {
-                substitute_type_expr_path(
-                    desc.val_type,
-                    stamp_map,
-                    &empty,
-                    &empty_module_stamp,
-                    &HashMap::new(),
-                    None,
-                    ctx,
-                    &mut visited,
-                );
+                substitute_type_expr_path(desc.val_type, paths, ctx, &mut visited);
             }
             SignatureItem::SigType(_id, decl, _) => {
                 for &param in &decl.type_params {
-                    substitute_type_expr_path(
-                        param,
-                        stamp_map,
-                        &empty,
-                        &empty_module_stamp,
-                        &HashMap::new(),
-                        None,
-                        ctx,
-                        &mut visited,
-                    );
+                    substitute_type_expr_path(param, paths, ctx, &mut visited);
                 }
                 if let Some(manifest) = decl.type_manifest {
-                    substitute_type_expr_path(
-                        manifest,
-                        stamp_map,
-                        &empty,
-                        &empty_module_stamp,
-                        &HashMap::new(),
-                        None,
-                        ctx,
-                        &mut visited,
-                    );
+                    substitute_type_expr_path(manifest, paths, ctx, &mut visited);
                 }
             }
             _ => {}
@@ -5951,14 +5862,17 @@ pub(crate) fn substitute_type_paths_in_sig_with_stamp_map(
 /// Recursively walk a type expression and substitute Tconstr paths.
 fn substitute_type_expr_path(
     initial_ty_ref: TypeExprRef,
-    type_stamp_map: &TypeSubstPaths,
-    type_name_map: &HashMap<Name, Path>,
-    module_stamp_map: &ModuleStampSubstMap,
-    module_name_map: &HashMap<Name, Arc<Path>>,
-    protected_module_head: Option<&(i32, Name)>,
+    paths: SubstPaths<'_>,
     ctx: &TypeContext,
     visited: &mut TypeVisitSet,
 ) {
+    let SubstPaths {
+        type_stamp_map,
+        type_name_map,
+        module_stamp_map,
+        module_name_map,
+        protected_module_head,
+    } = paths;
     // Use an explicit work stack instead of recursion to avoid stack overflow
     // on large type graphs (e.g., objects with hundreds of fields create deep
     // Tfield chains, and Tlink chains from unification can be thousands deep).
@@ -5978,18 +5892,8 @@ fn substitute_type_expr_path(
             && let Some((params, body)) = type_stamp_map.function(path)
         {
             let (params, body, args) = (params.clone(), *body, ctx.type_list(*args).to_vec());
-            drop(desc);
             for &arg in &args {
-                substitute_type_expr_path(
-                    arg,
-                    type_stamp_map,
-                    type_name_map,
-                    module_stamp_map,
-                    module_name_map,
-                    protected_module_head,
-                    ctx,
-                    visited,
-                );
+                substitute_type_expr_path(arg, paths, ctx, visited);
             }
             let applied = crate::types::ctype::apply(
                 ctx,
@@ -6017,7 +5921,7 @@ fn substitute_type_expr_path(
                     protected_module_head,
                 );
                 if new_path != *path {
-                    let mut new_desc = (*desc);
+                    let mut new_desc = *desc;
                     if let TypeDesc::Tconstr { ref mut path, .. } = new_desc {
                         *path = new_path;
                     }
@@ -6117,7 +6021,7 @@ fn substitute_type_expr_path(
                     protected_module_head,
                 );
                 if new_path != *path {
-                    let mut new_desc = (*desc);
+                    let mut new_desc = *desc;
                     if let TypeDesc::Tpackage { ref mut path, .. } = new_desc {
                         *path = new_path;
                     }
@@ -6129,7 +6033,6 @@ fn substitute_type_expr_path(
             }
             TypeDesc::Tvar(..) | TypeDesc::Tunivar(..) | TypeDesc::Tnil => {}
         }
-        drop(desc);
         if let Some(new_desc) = replacement {
             ctx.set_desc(ty_ref, new_desc);
         }
@@ -6193,7 +6096,7 @@ pub fn reroot_path_mapper<'a>(
     ctx: &'a TypeContext,
 ) -> impl Fn(&Path) -> Path + 'a {
     let prefixes = PathPrefixes::new(prefixes);
-    move |path| rewrite_path_by_path_prefixes(path, &prefixes, ctx).unwrap_or_else(|| path.clone())
+    move |path| rewrite_path_by_path_prefixes(path, &prefixes, ctx).unwrap_or(*path)
 }
 
 /// Whether any type constructor or package path reachable from `ty` starts
@@ -6281,6 +6184,8 @@ pub struct ValueSubstMaps {
     direct_type_name_map: HashMap<Name, Path>,
 }
 
+/// The substitution qualifying the items of `sig_items` by `module_path` in
+/// value types (see [`substitute_type_paths_in_value_with_maps`]).
 pub fn build_value_subst_maps(
     sig_items: &[SignatureItem],
     module_path: &Path,
@@ -6298,7 +6203,7 @@ pub fn build_value_subst_maps(
             SignatureItem::SigType(id, _, _) | SignatureItem::SigModtype(id, _) => {
                 direct_type_name_map
                     .entry(id.name_atom())
-                    .or_insert_with(|| maps.type_stamp_map.stamps[&id.stamp()].clone());
+                    .or_insert_with(|| maps.type_stamp_map.stamps[&id.stamp()]);
             }
             _ => {}
         }
@@ -6309,6 +6214,8 @@ pub fn build_value_subst_maps(
     }
 }
 
+/// [`substitute_type_paths_in_value_with_maps`] with the maps of
+/// `sig_items` and `module_path`.
 pub fn substitute_type_paths_in_value_from_sig(
     desc: &mut crate::types::decl::ValueDescription,
     sig_items: &[SignatureItem],
@@ -6319,6 +6226,9 @@ pub fn substitute_type_paths_in_value_from_sig(
     substitute_type_paths_in_value_with_maps(desc, &value_maps, sig_items, module_path, ctx);
 }
 
+/// Qualify the paths in the type of `desc`, a value of `sig_items`, that
+/// name items of `sig_items` by `module_path`, and re-root paths through the
+/// module's alias sources at `module_path`.
 pub fn substitute_type_paths_in_value_with_maps(
     desc: &mut crate::types::decl::ValueDescription,
     value_maps: &ValueSubstMaps,
@@ -6333,6 +6243,13 @@ pub fn substitute_type_paths_in_value_with_maps(
     let module_stamp_map = &maps.module_stamp_map;
     let module_name_map = &maps.module_name_map;
     let protected_module_head = maps.protected_module_head.as_ref();
+    let paths = SubstPaths {
+        type_stamp_map,
+        type_name_map,
+        module_stamp_map,
+        module_name_map,
+        protected_module_head,
+    };
 
     if type_stamp_map.is_empty()
         && type_name_map.is_empty()
@@ -6343,16 +6260,7 @@ pub fn substitute_type_paths_in_value_with_maps(
     }
 
     let mut visited = visit_set();
-    substitute_type_expr_path(
-        desc.val_type,
-        type_stamp_map,
-        type_name_map,
-        module_stamp_map,
-        module_name_map,
-        protected_module_head,
-        ctx,
-        &mut visited,
-    );
+    substitute_type_expr_path(desc.val_type, paths, ctx, &mut visited);
 
     for alias_source in component_alias_sources(module_path, ctx) {
         for item in sig_items {
@@ -6363,7 +6271,7 @@ pub fn substitute_type_paths_in_value_with_maps(
             else {
                 continue;
             };
-            let old_path = Path::pdot(alias_source.clone(), id.name());
+            let old_path = Path::pdot(alias_source, id.name());
             // Reuse the component's one prefix_idents target, including
             // its allocation, for every selected value description.
             let new_path = match item {
@@ -6398,11 +6306,7 @@ fn direct_manifest_substitution_would_self_alias(
     id: &Ident,
     manifest: TypeExprRef,
     module_path: &Path,
-    type_stamp_map: &TypeSubstPaths,
-    type_name_map: &HashMap<Name, Path>,
-    module_stamp_map: &ModuleStampSubstMap,
-    module_name_map: &HashMap<Name, Arc<Path>>,
-    protected_module_head: Option<&(i32, Name)>,
+    paths: SubstPaths<'_>,
 ) -> bool {
     let manifest = ctx.repr(manifest);
     let desc = ctx.get_desc(manifest);
@@ -6416,11 +6320,11 @@ fn direct_manifest_substitution_would_self_alias(
     let substituted = substitute_type_path(
         ctx,
         path,
-        type_stamp_map,
-        type_name_map,
-        module_stamp_map,
-        module_name_map,
-        protected_module_head,
+        paths.type_stamp_map,
+        paths.type_name_map,
+        paths.module_stamp_map,
+        paths.module_name_map,
+        paths.protected_module_head,
     );
     substituted.same(&Path::pdot(*module_path, id.name_atom()))
 }
@@ -6480,9 +6384,9 @@ fn substitute_type_path(
     if !type_stamp_map.qualified.is_empty()
         && let Some(target) = type_stamp_map
             .qualified
-            .get(&crate::types::context::SamePathKey::new(path.clone()))
+            .get(&crate::types::context::SamePathKey::new(*path))
     {
-        return target.clone();
+        return *target;
     }
     match &path.view() {
         PathView::Pident(ident) => {
@@ -6494,12 +6398,12 @@ fn substitute_type_path(
                     .stamps
                     .get(&ident.stamp())
                     .cloned()
-                    .unwrap_or_else(|| *path)
+                    .unwrap_or(*path)
             } else {
                 type_name_map
                     .get(&ident.name_atom())
                     .cloned()
-                    .unwrap_or_else(|| *path)
+                    .unwrap_or(*path)
             }
         }
         PathView::Pdot(..) => ctx.rebuild_dotted(path, |prefix| {
@@ -6538,7 +6442,7 @@ fn substitute_module_path(
     protected_module_head: Option<&(i32, Name)>,
 ) -> Path {
     if let Some(target) = module_stamp_map.path_target(path) {
-        return (**target).clone();
+        return **target;
     }
     match &path.view() {
         PathView::Pident(ident) => module_path_target(
@@ -6547,7 +6451,7 @@ fn substitute_module_path(
             module_name_map,
             protected_module_head,
         )
-        .map_or_else(|| path.clone(), |target| (**target).clone()),
+        .map_or(*path, |target| **target),
         PathView::Pdot(..) => ctx.rebuild_dotted(path, |prefix| {
             substitute_shared_module_path(
                 ctx,
@@ -6597,7 +6501,7 @@ fn rewrite_type_expr_prefix(
         TypeDesc::Tconstr { path, args, .. } => {
             let rewritten = rewrite_path_prefix(path, old_name, new_prefix, ctx);
             if let Some(new_path) = rewritten {
-                let mut new_desc = (*desc);
+                let mut new_desc = *desc;
                 if let TypeDesc::Tconstr { ref mut path, .. } = new_desc {
                     *path = new_path;
                 }
@@ -6671,7 +6575,7 @@ fn rewrite_type_expr_prefix(
         }
         TypeDesc::Tpackage { path, args, .. } => {
             if let Some(new_path) = rewrite_path_prefix(path, old_name, new_prefix, ctx) {
-                let mut new_desc = (*desc).clone();
+                let mut new_desc = *desc;
                 if let TypeDesc::Tpackage { ref mut path, .. } = new_desc {
                     *path = new_path;
                 }
@@ -6694,7 +6598,7 @@ fn rewrite_path_prefix(
     ctx: &TypeContext,
 ) -> Option<Path> {
     match &path.view() {
-        PathView::Pident(id) if id.name() == old_name => Some((**new_prefix).clone()),
+        PathView::Pident(id) if id.name() == old_name => Some(**new_prefix),
         PathView::Pdot(inner, _, _) => {
             let prefix = match &inner.view() {
                 PathView::Pident(id) if id.name() == old_name => new_prefix.clone(),
@@ -6745,6 +6649,8 @@ fn rewrite_module_type_prefix_paths(
     }
 }
 
+/// Rewrite the declaration paths of `sig_items` rooted at unit `old_name`
+/// to be rooted at `new_prefix` instead, in nested signatures too.
 pub fn rewrite_module_prefix_paths_in_sig(
     sig_items: &mut [SignatureItem],
     old_name: &str,
@@ -6792,6 +6698,7 @@ pub fn rewrite_module_prefix_paths_in_sig(
     }
 }
 
+/// [`rewrite_module_prefix_paths_in_sig`] for this signature level only.
 // OCaml compiler/ml/env.ml:1530-1578 builds one component-table level at a
 // time; child module declarations remain lazy component thunks at env.ml:1568
 // and env.ml:1573. This path-metadata rewrite therefore intentionally stops at
@@ -6847,6 +6754,8 @@ pub fn rewrite_module_prefix_in_sig(
     rewrite_module_prefix_in_sig_with_visited(sig_items, old_name, new_prefix, ctx, &mut visited);
 }
 
+/// Rewrite the paths rooted at unit `old_name` in the type expressions of
+/// `sig_items` to be rooted at `new_prefix`, for this signature level only.
 // OCaml compiler/ml/env.ml:1530-1578 applies prefix_idents substitution only to
 // the component table currently being built. Child module bodies are represented
 // by env.ml:1568/env.ml:1573 lazy thunks, so their type expressions are rewritten
@@ -7152,7 +7061,7 @@ impl PathPrefixes<'_> {
         let mut ancestor = *path;
         loop {
             if let Some(&position) =
-                index.get(&crate::types::context::SamePathKey::new(ancestor.clone()))
+                index.get(&crate::types::context::SamePathKey::new(ancestor))
             {
                 first = Some(first.map_or(position, |found| found.min(position)));
             }
@@ -7172,7 +7081,7 @@ fn rewrite_path_with_shared_prefix(
     ctx: &TypeContext,
 ) -> Option<Path> {
     if path.same(old_prefix) {
-        return Some((**new_prefix).clone());
+        return Some(**new_prefix);
     }
     match &path.view() {
         PathView::Pdot(inner, _, _) => {
@@ -7201,7 +7110,7 @@ fn rewrite_path_by_path_prefixes(
         prefixes
             .pairs
             .iter()
-            .map(|(_, target)| Arc::new(target.clone()))
+            .map(|(_, target)| Arc::new(*target))
             .collect()
     });
     rewrite_path_with_shared_prefix(path, &prefixes.pairs[position].0, &targets[position], ctx)
@@ -7250,6 +7159,8 @@ fn rewrite_module_type_by_path_prefix(
     }
 }
 
+/// Rewrite the declaration paths of `sig_items` that are or extend
+/// `old_prefix` to start with `new_prefix` instead, in nested signatures too.
 pub fn rewrite_sig_paths_by_path_prefix(
     sig_items: &mut [SignatureItem],
     old_prefix: &Path,
@@ -7303,6 +7214,7 @@ pub fn rewrite_sig_paths_by_path_prefix(
     }
 }
 
+/// [`rewrite_sig_paths_by_path_prefix`] for this signature level only.
 // OCaml compiler/ml/env.ml:1530-1578 exposes selected component paths for the
 // current table, while mtype.ml:98-102 keeps child modules strengthened as
 // aliases to the scraped target. Keep this rewrite shallow so child module
@@ -7367,7 +7279,7 @@ fn rewrite_type_expr_by_path_prefix_in(
             if let Some(new_path) =
                 rewrite_path_with_shared_prefix(path, old_prefix, new_prefix, ctx)
             {
-                let mut new_desc = (*desc).clone();
+                let mut new_desc = *desc;
                 if let TypeDesc::Tconstr { ref mut path, .. } = new_desc {
                     *path = new_path;
                 }
@@ -7448,7 +7360,7 @@ fn rewrite_type_expr_by_path_prefix_in(
             if let Some(new_path) =
                 rewrite_path_with_shared_prefix(path, old_prefix, new_prefix, ctx)
             {
-                let mut new_desc = (*desc).clone();
+                let mut new_desc = *desc;
                 if let TypeDesc::Tpackage { ref mut path, .. } = new_desc {
                     *path = new_path;
                 }
@@ -7462,7 +7374,7 @@ fn rewrite_type_expr_by_path_prefix_in(
     }
 }
 
-/// [`rewrite_type_expr_by_path_prefix_in`] with a fresh visited set.
+/// `rewrite_type_expr_by_path_prefix_in` with a fresh visited set.
 pub fn rewrite_type_expr_by_path_prefix(
     ty_ref: TypeExprRef,
     old_prefix: &Path,
@@ -7487,7 +7399,7 @@ fn rewrite_type_expr_by_path_prefixes(
     match &*desc {
         TypeDesc::Tconstr { path, args, .. } => {
             if let Some(new_path) = rewrite_path_by_path_prefixes(path, prefixes, ctx) {
-                let mut new_desc = (*desc).clone();
+                let mut new_desc = *desc;
                 if let TypeDesc::Tconstr { ref mut path, .. } = new_desc {
                     *path = new_path;
                 }
@@ -7558,7 +7470,7 @@ fn rewrite_type_expr_by_path_prefixes(
         }
         TypeDesc::Tpackage { path, args, .. } => {
             if let Some(new_path) = rewrite_path_by_path_prefixes(path, prefixes, ctx) {
-                let mut new_desc = (*desc).clone();
+                let mut new_desc = *desc;
                 if let TypeDesc::Tpackage { ref mut path, .. } = new_desc {
                     *path = new_path;
                 }
@@ -7797,8 +7709,8 @@ pub fn substitute_submodule_paths(
                     module_path,
                     ctx,
                 );
-                substitute_type_paths_in_sig(sub_sig, &sub_path, ctx);
-                substitute_submodule_paths(sub_sig, &sub_path, ctx);
+                substitute_type_paths_in_sig(sub_sig, sub_path, ctx);
+                substitute_submodule_paths(sub_sig, sub_path, ctx);
             }
         }
     }
@@ -8240,7 +8152,7 @@ fn add_signature_to_env_with_options_inner(
                         // need the parent component environment. Avoid forcing
                         // the parent's `comp_components` just to open an
                         // equivalent persistent-alias thunk.
-                        let stored = Arc::new(crate::types::env_lazy::StoredModuleComponents::new(
+                        let stored = Rc::new(crate::types::env_lazy::StoredModuleComponents::new(
                             Env::empty(),
                             access_path,
                             md.clone(),

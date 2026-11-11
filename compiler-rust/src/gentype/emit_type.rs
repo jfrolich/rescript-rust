@@ -5,6 +5,7 @@ use crate::gentype::gen_type_common::{
     ident_with, is_js_safe_property_name, label_js_to_string, sanitize_type_name, unknown,
 };
 
+/// The comment that opens a generated file, naming its `source_file`.
 pub fn file_header(source_file: &str) -> String {
     // Mirrors compiler/gentype/EmitType.ml:3-15.
     let lines = vec![format!(
@@ -24,6 +25,8 @@ pub fn file_header(source_file: &str) -> String {
     format!("{header}/* eslint-disable */\n/* tslint:disable */\n")
 }
 
+/// The name a type is exported under as an interface: `I` + `name` when
+/// interfaces are exported.
 pub fn interface_name(config: &crate::gentype::config::T, name: &str) -> String {
     // Mirrors compiler/gentype/EmitType.ml:16-19.
     match config.export_interfaces {
@@ -33,48 +36,60 @@ pub fn interface_name(config: &crate::gentype::config::T, name: &str) -> String 
 }
 
 // Mirrors compiler/gentype/EmitType.ml:21-61.
+/// TypeScript's `any`.
 pub fn type_any() -> Type {
     ident("any")
 }
 
+/// `React.ComponentType<props_type>`.
 pub fn type_react_component(props_type: Type) -> Type {
     ident_with(true, vec![props_type], "React.ComponentType")
 }
 
+/// `React.Context<type_>`.
 pub fn type_react_context(type_: Type) -> Type {
     ident_with(true, vec![type_], "React.Context")
 }
 
+/// `React.JSX.Element`.
 pub fn type_react_element_type_script() -> Type {
     ident("React.JSX.Element")
 }
 
+/// `React.ReactNode`.
 pub fn type_react_child_type_script() -> Type {
     ident("React.ReactNode")
 }
 
+/// The type of a React element.
 pub fn type_react_element() -> Type {
     type_react_element_type_script()
 }
 
+/// The type of a React child.
 pub fn type_react_child() -> Type {
     type_react_child_type_script()
 }
 
+/// Whether `type_` is the type of a React element.
 pub fn is_type_react_element(type_: &Type) -> bool {
     *type_ == type_react_element()
 }
 
+/// The type of a DOM ref, `React.Ref<unknown>`.
 pub fn type_react_d_o_m_re_dom_ref() -> Type {
     ident_with(true, vec![unknown()], "React.Ref")
 }
 
+/// `MouseEvent`.
 pub fn type_react_event_mouse_t() -> Type {
     ident("MouseEvent")
 }
 
+/// The field of a React ref that holds its value.
 pub const REACT_REF_CURRENT: &str = "current";
 
+/// The object type of a React ref holding a `type_` or `null`.
 pub fn type_react_ref(type_: Type) -> Type {
     Type::Object(
         ClosedFlag::Open,
@@ -88,6 +103,7 @@ pub fn type_react_ref(type_: Type) -> Type {
     )
 }
 
+/// Whether `fields` are those of a React ref.
 pub fn is_type_react_ref(fields: &[Field]) -> bool {
     // Mirrors compiler/gentype/EmitType.ml:54-58.
     matches!(
@@ -101,10 +117,14 @@ pub fn is_type_react_ref(fields: &[Field]) -> bool {
     )
 }
 
+/// Whether a function with props `fields` returning `type_` is a function
+/// component.
 pub fn is_type_function_component(fields: &[Field], type_: &Type) -> bool {
     is_type_react_element(type_) && !is_type_react_ref(fields)
 }
 
+/// `type0` as TypeScript, broken over lines according to `indent`;
+/// `in_fun_type` is set inside a function type.
 pub fn render_type(
     config: &crate::gentype::config::T,
     indent: crate::gentype::indent::T,
@@ -273,6 +293,7 @@ pub fn render_type(
     }
 }
 
+/// An object type field as TypeScript.
 pub fn render_field(
     config: &crate::gentype::config::T,
     indent: crate::gentype::indent::T,
@@ -323,6 +344,7 @@ pub fn render_field(
     }
 }
 
+/// The fields of an object type as TypeScript.
 pub fn render_fields(
     config: &crate::gentype::config::T,
     indent: crate::gentype::indent::T,
@@ -355,6 +377,7 @@ pub fn render_fields(
     )
 }
 
+/// A function type as TypeScript.
 pub fn render_fun_type(
     config: &crate::gentype::config::T,
     indent: crate::gentype::indent::T,
@@ -402,6 +425,7 @@ pub fn render_fun_type(
     )
 }
 
+/// `type_` as TypeScript, on one line.
 pub fn type_to_string(
     config: &crate::gentype::config::T,
     type_name_is_interface: &impl Fn(&str) -> bool,
@@ -411,18 +435,37 @@ pub fn type_to_string(
     render_type(config, None, type_name_is_interface, false, type_)
 }
 
+/// A typed constant to export: `export const name: type_ = line as any;`.
+pub struct ExportConst<'a> {
+    /// A `//` comment emitted above the export, unless empty.
+    pub comment: &'a str,
+    /// The constant's doc comment.
+    pub doc_string: crate::gentype::gen_type_common::doc_string::T,
+    /// The exported name.
+    pub name: &'a str,
+    /// The constant's type.
+    pub type_: &'a Type,
+    /// The JavaScript expression the constant is bound to.
+    pub line: &'a str,
+}
+
+/// `EmitType.emitExportConst`: emit `export_const`, among the early exports
+/// when `early` is set.
 pub fn emit_export_const(
-    early: bool,
-    comment: &str,
     config: &crate::gentype::config::T,
-    doc_string: crate::gentype::gen_type_common::doc_string::T,
     emitters: crate::gentype::emitters::T,
-    name: &str,
-    type_: &Type,
     type_name_is_interface: &impl Fn(&str) -> bool,
-    line: &str,
+    early: bool,
+    export_const: ExportConst<'_>,
 ) -> crate::gentype::emitters::T {
     // Mirrors compiler/gentype/EmitType.ml:331-343.
+    let ExportConst {
+        comment,
+        doc_string,
+        name,
+        type_,
+        line,
+    } = export_const;
     let type_string = type_to_string(config, type_name_is_interface, type_);
     let output = format!(
         "{}{}export const {name}: {type_string} = {line} as any;",
@@ -439,6 +482,7 @@ pub fn emit_export_const(
     }
 }
 
+/// Emit `export default name;`.
 pub fn emit_export_default(
     emitters: crate::gentype::emitters::T,
     name: &str,
@@ -446,19 +490,27 @@ pub fn emit_export_default(
     crate::gentype::emitters::export(emitters, format!("export default {name};"))
 }
 
+/// `EmitType.emitExportType`: emit `export_type` as a type alias, an
+/// interface, or (when `opaque`) an abstract class.
 pub fn emit_export_type(
     config: &crate::gentype::config::T,
     emitters: crate::gentype::emitters::T,
-    name_as: Option<String>,
-    opaque: bool,
-    type_: &Type,
     type_name_is_interface: &impl Fn(&str) -> bool,
-    type_vars: &[String],
-    doc_string: crate::gentype::gen_type_common::doc_string::T,
-    resolved_type_name: &str,
+    export_type: &crate::gentype::code_item::ExportType,
+    opaque: bool,
 ) -> crate::gentype::emitters::T {
     // Mirrors compiler/gentype/EmitType.ml:348-388.
-    let doc_string = crate::gentype::gen_type_common::doc_string::render(&doc_string);
+    let crate::gentype::code_item::ExportType {
+        name_as,
+        type_,
+        type_vars,
+        resolved_type_name,
+        doc_string,
+        ..
+    } = export_type;
+    let resolved_type_name = crate::gentype::resolved_name::to_string(resolved_type_name);
+    let resolved_type_name = resolved_type_name.as_str();
+    let doc_string = crate::gentype::gen_type_common::doc_string::render(doc_string);
     let type_params_string = crate::gentype::emit_text::generics_string(type_vars);
     let is_interface = type_name_is_interface(resolved_type_name);
     let resolved_type_name = match config.export_interfaces && is_interface {
@@ -495,6 +547,7 @@ pub fn emit_export_type(
     crate::gentype::emitters::export(emitters, output)
 }
 
+/// Emit an early `import` of `name`, renamed to `name_as` when given.
 pub fn emit_import_value_as_early(
     emitters: crate::gentype::emitters::T,
     name: &str,
@@ -515,6 +568,9 @@ pub fn emit_import_value_as_early(
     )
 }
 
+/// Emit the import of the runtime `module_name` from `import_path`: an ES
+/// module import, or `require` for CommonJS and when a value or component
+/// is imported.
 pub fn emit_require(
     imported_value_or_component: bool,
     early: bool,
@@ -539,6 +595,7 @@ pub fn emit_require(
     }
 }
 
+/// Emit the early `import` of React.
 pub fn emit_import_react(emitters: crate::gentype::emitters::T) -> crate::gentype::emitters::T {
     // Mirrors compiler/gentype/EmitType.ml:419-425.
     require(
@@ -548,6 +605,7 @@ pub fn emit_import_react(emitters: crate::gentype::emitters::T) -> crate::gentyp
     )
 }
 
+/// Emit a runtime import, among the early ones when `early` is set.
 pub fn require(
     early: bool,
     emitters: crate::gentype::emitters::T,
@@ -561,6 +619,8 @@ pub fn require(
     }
 }
 
+/// Emit `import type` of `type_name`, renamed to `as_type_name` when given,
+/// using interface names for interfaces.
 pub fn emit_import_type_as(
     emitters: crate::gentype::emitters::T,
     config: &crate::gentype::config::T,
@@ -593,6 +653,7 @@ pub fn emit_import_type_as(
     )
 }
 
+/// The expression `s` cast to `type_`.
 pub fn emit_type_cast(
     config: &crate::gentype::config::T,
     type_: &Type,

@@ -361,57 +361,57 @@ fn effects_after(a: &LamArena, args: &[Lam]) -> smallvec::SmallVec<[bool; 8]> {
     result
 }
 
+/// What a beta reduction reads and updates besides the arena: the
+/// `meta.ident_tbl` it records the bound parameters in, the stamp generator
+/// for renamed parameters, and the variables the code may assign.
+pub struct BetaReduceEnv<'a> {
+    /// The identifier kinds the reduction records bound parameters in.
+    pub ident_tbl: &'a mut IdentTable,
+    /// Generator for the stamps of renamed parameters.
+    pub id_gen: &'a IdGenerator,
+    /// The variables the code may assign.
+    pub assignable: &'a AHashSet<Ident>,
+}
+
 /// `Lam_beta_reduce.propagate_beta_reduce` (lam_beta_reduce.ml:47-74).
 pub fn propagate_beta_reduce(
     a: &mut LamArena,
-    ident_tbl: &mut IdentTable,
-    id_gen: &IdGenerator,
-    assignable: &AHashSet<Ident>,
+    env: BetaReduceEnv<'_>,
     params: &[Ident],
     body: Lam,
     args: &[Lam],
 ) -> Lam {
-    propagate(a, ident_tbl, id_gen, assignable, None, params, body, args)
+    propagate(a, env, None, params, body, args)
 }
 
 /// `Lam_beta_reduce.propagate_beta_reduce_with_map` (lam_beta_reduce.ml:76-115).
-#[allow(clippy::too_many_arguments)]
 pub fn propagate_beta_reduce_with_map(
     a: &mut LamArena,
-    ident_tbl: &mut IdentTable,
-    id_gen: &IdGenerator,
-    assignable: &AHashSet<Ident>,
+    env: BetaReduceEnv<'_>,
     stats: &StatsMap,
     params: &[Ident],
     body: Lam,
     args: &[Lam],
 ) -> Lam {
-    propagate(
-        a,
-        ident_tbl,
-        id_gen,
-        assignable,
-        Some(stats),
-        params,
-        body,
-        args,
-    )
+    propagate(a, env, Some(stats), params, body, args)
 }
 
 /// An argument goes where the body reads its parameter only when
 /// `can_move` allows it, so the arguments otherwise evaluate in call order
 /// (lam_beta_reduce.ml:115-201).
-#[allow(clippy::too_many_arguments)]
 fn propagate(
     a: &mut LamArena,
-    ident_tbl: &mut IdentTable,
-    id_gen: &IdGenerator,
-    assignable: &AHashSet<Ident>,
+    env: BetaReduceEnv<'_>,
     stats: Option<&StatsMap>,
     params: &[Ident],
     body: Lam,
     args: &[Lam],
 ) -> Lam {
+    let BetaReduceEnv {
+        ident_tbl,
+        id_gen,
+        assignable,
+    } = env;
     if let Some(result) = simple_beta_reduce(a, assignable, params, body, args) {
         return result;
     }

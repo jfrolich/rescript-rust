@@ -6,12 +6,17 @@ use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
+/// Whether a source map is produced and how the JavaScript refers to it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SourceMapMode {
+    /// No source map.
     #[default]
     None,
+    /// A `.map` file next to the output, named by a `sourceMappingURL` comment.
     Linked,
+    /// The map embedded in the output as a base64 `data:` URL.
     Inline,
+    /// A `.map` file with no `sourceMappingURL` comment in the output.
     Hidden,
 }
 
@@ -49,6 +54,8 @@ pub struct SourceMapBuilder {
 }
 
 impl SourceMapBuilder {
+    /// A builder for the map of `generated_file`; locations without a usable file
+    /// name map to `default_source`. `sources_content` embeds each source's text.
     pub fn new(
         generated_file: &Path,
         default_source: &Path,
@@ -74,6 +81,7 @@ impl SourceMapBuilder {
         }
     }
 
+    /// Use `lam_locs` to resolve the location handles passed to [`Self::add_mapping`].
     pub fn with_lam_locs(mut self, lam_locs: Arc<LamLocTable>) -> Self {
         self.lam_locs = lam_locs;
         self
@@ -110,6 +118,8 @@ impl SourceMapBuilder {
         index
     }
 
+    /// Map the generated position (zero-based line and UTF-16 column) to the
+    /// start of `loc`. Ghost locations and repeats of the previous position are skipped.
     pub fn add_mapping(&mut self, generated_line: usize, generated_column: usize, loc: &LamLoc) {
         let Some(loc) = self.lam_locs.get(*loc) else {
             return;
@@ -140,6 +150,7 @@ impl SourceMapBuilder {
         self.last_generated = Some((generated_line, generated_column));
     }
 
+    /// The Source Map v3 JSON for the mappings added so far.
     pub fn json(&self) -> String {
         fn push_json_str(result: &mut String, value: &str) {
             result.push_str(&serde_json::to_string(value).expect("JSON string"));
@@ -340,6 +351,7 @@ fn encode_mappings(input: &[Mapping]) -> String {
     output
 }
 
+/// The `sourceMappingURL` comment pointing at `map_file` by its file name.
 pub fn linked_comment(map_file: &Path) -> String {
     format!(
         "//# sourceMappingURL={}\n",
@@ -347,6 +359,7 @@ pub fn linked_comment(map_file: &Path) -> String {
     )
 }
 
+/// The `sourceMappingURL` comment embedding the map `json` as a base64 data URL.
 pub fn inline_comment(json: &str) -> String {
     format!(
         "//# sourceMappingURL=data:application/json;base64,{}\n",

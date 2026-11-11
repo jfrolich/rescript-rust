@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
+/// `right` inside directory `left`.
 pub fn concat(left: &str, right: &str) -> String {
     Path::new(left).join(right).to_string_lossy().to_string()
 }
@@ -13,6 +14,8 @@ fn chop_extension(path: &str) -> String {
     }
 }
 
+/// The path of a `.cmt` file without its extension and namespace suffix
+/// (`-Namespace`).
 pub fn handle_namespace(cmt: &str) -> String {
     fn cut_after_dash(s: &str) -> String {
         match s.find('-') {
@@ -38,6 +41,7 @@ pub fn handle_namespace(cmt: &str) -> String {
     }
 }
 
+/// `path` relative to directory `prefix`, when it is inside it.
 pub fn remove_path_prefix(prefix: &str, path: &str) -> String {
     let normalized_prefix = concat(prefix, "");
     path.strip_prefix(normalized_prefix.as_str())
@@ -45,6 +49,7 @@ pub fn remove_path_prefix(prefix: &str, path: &str) -> String {
         .to_string()
 }
 
+/// The generated file's path for `source_path`.
 pub fn append_suffix(config: &crate::gentype::config::T, source_path: &str) -> String {
     format!(
         "{}{}",
@@ -53,16 +58,20 @@ pub fn append_suffix(config: &crate::gentype::config::T, source_path: &str) -> S
     )
 }
 
+/// The generated file's path for `source_path`, relative to the project
+/// root.
 pub fn get_output_file_relative(config: &crate::gentype::config::T, source_path: &str) -> String {
     let relative_path = remove_path_prefix(&config.project_root, source_path);
     append_suffix(config, &relative_path)
 }
 
+/// The generated file's absolute path for `source_path`.
 pub fn get_output_file(config: &crate::gentype::config::T, source_path: &str) -> String {
     let relative_output_path = get_output_file_relative(config, source_path);
     concat(&config.project_root, &relative_output_path)
 }
 
+/// The module name of a `.cmt` file.
 pub fn get_module_name(cmt: &str) -> crate::gentype::module_name::T {
     let handled = handle_namespace(cmt);
     let basename = Path::new(&handled)
@@ -72,6 +81,7 @@ pub fn get_module_name(cmt: &str) -> crate::gentype::module_name::T {
     crate::gentype::module_name::from_string_unsafe(basename)
 }
 
+/// The module name of a source file.
 pub fn get_module_name_from_source_path(source_path: &str) -> crate::gentype::module_name::T {
     // The in-process GenType hook has the source filename instead of the
     // outputprefix.cmt passed by compiler/core/js_implementation.ml:72 and
@@ -81,6 +91,9 @@ pub fn get_module_name_from_source_path(source_path: &str) -> crate::gentype::mo
     get_module_name(&format!("{}.cmt", chop_extension(source_path)))
 }
 
+/// The typed artifact gentype reads for `cmt` (resolved against `cwd`):
+/// the first that `exists` of the `.cmti` and `.cmt` files, with the
+/// module name uncapitalized or not; empty when there is none.
 pub fn get_cmt_file_from_cwd_with_exists(
     cwd: &Path,
     cmt: &str,

@@ -5,6 +5,10 @@ use crate::gentype::gen_type_common::{
     ArgType, Function, Ident, Payload, StringSet, Type, Variant,
 };
 
+/// `Converter.type_get_inlined`: `type0` with each named type that
+/// `lookup_id` finds exported with `@genType` replaced by its definition,
+/// recursively. Opaque and unannotated types, and a type reached again
+/// inside its own definition, stay names.
 pub fn type_get_inlined(
     config: &crate::gentype::config::T,
     lookup_id: &impl Fn(&str) -> Option<code_item::ExportTypeItem>,

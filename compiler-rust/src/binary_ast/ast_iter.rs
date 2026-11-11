@@ -11,97 +11,127 @@
 use crate::parse_arena::{CoreTypeIdx, ExprIdx, ModExprIdx, ModTypeIdx, ParseArena, PatIdx};
 use crate::parser::ast::*;
 
+/// A read-only AST visitor (OCaml `Ast_iterator.iterator`). Each hook
+/// defaults to the matching `walk_*` function.
 pub trait AstIter {
+    /// Visit an attribute; the default calls [`walk_attribute`].
     fn attribute(&mut self, arena: &ParseArena, attr: &Attribute) {
         walk_attribute(self, arena, attr);
     }
+    /// Visit each attribute of a list with [`AstIter::attribute`].
     fn attributes(&mut self, arena: &ParseArena, attrs: &[Attribute]) {
         for attr in attrs {
             self.attribute(arena, attr);
         }
     }
+    /// Visit the `index`-th case of the expression `owner` (a `switch` or
+    /// `try`); the default calls [`walk_case`].
     fn case(&mut self, arena: &ParseArena, owner: ExprIdx, index: usize, case: &Case) {
         walk_case(self, arena, owner, index, case);
     }
+    /// Visit a variant constructor declaration; the default calls [`walk_constructor_declaration`].
     fn constructor_declaration(&mut self, arena: &ParseArena, cd: &ConstructorDeclaration) {
         walk_constructor_declaration(self, arena, cd);
     }
+    /// Visit an expression; the default calls [`walk_expr`].
     fn expr(&mut self, arena: &ParseArena, idx: ExprIdx) {
         walk_expr(self, arena, idx);
     }
+    /// Visit an extension node (`%name`); the default calls [`walk_extension`].
     fn extension(&mut self, arena: &ParseArena, ext: &Extension) {
         walk_extension(self, arena, ext);
     }
+    /// Visit an extension constructor; the default calls [`walk_extension_constructor`].
     fn extension_constructor(&mut self, arena: &ParseArena, ec: &ExtensionConstructor) {
         walk_extension_constructor(self, arena, ec);
     }
+    /// Visit a record field declaration; the default calls [`walk_label_declaration`].
     fn label_declaration(&mut self, arena: &ParseArena, ld: &LabelDeclaration) {
         walk_label_declaration(self, arena, ld);
     }
+    /// Visit a module binding; the default calls [`walk_module_binding`].
     fn module_binding(&mut self, arena: &ParseArena, mb: &ModuleBinding) {
         walk_module_binding(self, arena, mb);
     }
+    /// Visit a module declaration in a signature; the default calls [`walk_module_declaration`].
     fn module_declaration(&mut self, arena: &ParseArena, md: &ModuleDeclaration) {
         walk_module_declaration(self, arena, md);
     }
+    /// Visit a module expression; the default calls [`walk_module_expr`].
     fn module_expr(&mut self, arena: &ParseArena, idx: ModExprIdx) {
         walk_module_expr(self, arena, idx);
     }
+    /// Visit a module type; the default calls [`walk_module_type`].
     fn module_type(&mut self, arena: &ParseArena, idx: ModTypeIdx) {
         walk_module_type(self, arena, idx);
     }
+    /// Visit a module type declaration; the default calls [`walk_module_type_declaration`].
     fn module_type_declaration(&mut self, arena: &ParseArena, mtd: &ModuleTypeDeclaration) {
         walk_module_type_declaration(self, arena, mtd);
     }
+    /// Visit a pattern; the default calls [`walk_pat`].
     fn pat(&mut self, arena: &ParseArena, idx: PatIdx) {
         walk_pat(self, arena, idx);
     }
+    /// Visit an attribute or extension payload; the default calls [`walk_payload`].
     fn payload(&mut self, arena: &ParseArena, payload: &Payload) {
         walk_payload(self, arena, payload);
     }
+    /// Visit a signature item; the default calls [`walk_signature_item`].
     fn signature_item(&mut self, arena: &ParseArena, item: &SignatureItem) {
         walk_signature_item(self, arena, item);
     }
+    /// Visit a structure item; the default calls [`walk_structure_item`].
     fn structure_item(&mut self, arena: &ParseArena, item: &StructureItem) {
         walk_structure_item(self, arena, item);
     }
+    /// Visit a type expression; the default calls [`walk_typ`].
     fn typ(&mut self, arena: &ParseArena, idx: CoreTypeIdx) {
         walk_typ(self, arena, idx);
     }
+    /// Visit a type declaration; the default calls [`walk_type_declaration`].
     fn type_declaration(&mut self, arena: &ParseArena, td: &TypeDeclaration) {
         walk_type_declaration(self, arena, td);
     }
+    /// Visit a type extension (`type t +=`); the default calls [`walk_type_extension`].
     fn type_extension(&mut self, arena: &ParseArena, te: &TypeExtension) {
         walk_type_extension(self, arena, te);
     }
+    /// Visit a `let` binding; the default calls [`walk_value_binding`].
     fn value_binding(&mut self, arena: &ParseArena, vb: &ValueBinding) {
         walk_value_binding(self, arena, vb);
     }
+    /// Visit a value description (`let` in a signature or `external`); the default calls [`walk_value_description`].
     fn value_description(&mut self, arena: &ParseArena, vd: &ValueDescription) {
         walk_value_description(self, arena, vd);
     }
 }
 
+/// Visit every item of a structure.
 pub fn walk_structure<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, items: &[StructureItem]) {
     for item in items {
         v.structure_item(arena, item);
     }
 }
 
+/// Visit every item of a signature.
 pub fn walk_signature<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, items: &[SignatureItem]) {
     for item in items {
         v.signature_item(arena, item);
     }
 }
 
+/// Visit the children of an attribute.
 pub fn walk_attribute<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, attr: &Attribute) {
     v.payload(arena, &attr.1);
 }
 
+/// Visit the children of an extension node (`%name`).
 pub fn walk_extension<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, ext: &Extension) {
     v.payload(arena, &ext.1);
 }
 
+/// Visit the children of an attribute or extension payload.
 pub fn walk_payload<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, payload: &Payload) {
     match payload {
         Payload::PStr(items) => walk_structure(v, arena, items),
@@ -117,6 +147,7 @@ pub fn walk_payload<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, payload:
     }
 }
 
+/// Visit the children of a type expression.
 pub fn walk_typ<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, idx: CoreTypeIdx) {
     let typ = arena.get_core_type(idx);
     v.attributes(arena, typ.ptyp_attributes.as_slice());
@@ -176,6 +207,7 @@ pub fn walk_typ<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, idx: CoreTyp
     }
 }
 
+/// Visit the children of a type declaration.
 pub fn walk_type_declaration<V: AstIter + ?Sized>(
     v: &mut V,
     arena: &ParseArena,
@@ -226,6 +258,7 @@ fn walk_constructor_arguments<V: AstIter + ?Sized>(
     }
 }
 
+/// Visit the children of a variant constructor declaration.
 pub fn walk_constructor_declaration<V: AstIter + ?Sized>(
     v: &mut V,
     arena: &ParseArena,
@@ -238,6 +271,7 @@ pub fn walk_constructor_declaration<V: AstIter + ?Sized>(
     v.attributes(arena, cd.pcd_attributes.as_slice());
 }
 
+/// Visit the children of a record field declaration.
 pub fn walk_label_declaration<V: AstIter + ?Sized>(
     v: &mut V,
     arena: &ParseArena,
@@ -247,6 +281,7 @@ pub fn walk_label_declaration<V: AstIter + ?Sized>(
     v.attributes(arena, ld.pld_attributes.as_slice());
 }
 
+/// Visit the children of a type extension (`type t +=`).
 pub fn walk_type_extension<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, te: &TypeExtension) {
     for ec in &te.ptyext_constructors {
         v.extension_constructor(arena, ec);
@@ -257,6 +292,7 @@ pub fn walk_type_extension<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, t
     v.attributes(arena, te.ptyext_attributes.as_slice());
 }
 
+/// Visit the children of an extension constructor.
 pub fn walk_extension_constructor<V: AstIter + ?Sized>(
     v: &mut V,
     arena: &ParseArena,
@@ -274,6 +310,7 @@ pub fn walk_extension_constructor<V: AstIter + ?Sized>(
     v.attributes(arena, ec.pext_attributes.as_slice());
 }
 
+/// Visit the children of a module type.
 pub fn walk_module_type<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, idx: ModTypeIdx) {
     let mty = arena.get_mod_type(idx);
     v.attributes(arena, mty.pmty_attributes.as_slice());
@@ -304,6 +341,7 @@ pub fn walk_module_type<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, idx:
     }
 }
 
+/// Visit the children of a signature item.
 pub fn walk_signature_item<V: AstIter + ?Sized>(
     v: &mut V,
     arena: &ParseArena,
@@ -339,6 +377,7 @@ pub fn walk_signature_item<V: AstIter + ?Sized>(
     }
 }
 
+/// Visit the children of a module expression.
 pub fn walk_module_expr<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, idx: ModExprIdx) {
     let me = arena.get_mod_expr(idx);
     v.attributes(arena, me.pmod_attributes.as_slice());
@@ -366,6 +405,7 @@ pub fn walk_module_expr<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, idx:
     }
 }
 
+/// Visit the children of a structure item.
 pub fn walk_structure_item<V: AstIter + ?Sized>(
     v: &mut V,
     arena: &ParseArena,
@@ -422,6 +462,7 @@ fn walk_jsx_props<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, props: &[J
     }
 }
 
+/// Visit the children of an expression.
 pub fn walk_expr<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, idx: ExprIdx) {
     let expr = arena.get_expr(idx);
     v.attributes(arena, expr.pexp_attributes.as_slice());
@@ -438,7 +479,7 @@ pub fn walk_expr<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, idx: ExprId
         | ExpressionDesc::Pexp_break
         | ExpressionDesc::Pexp_continue => {}
         ExpressionDesc::Pexp_let(inner) => {
-            let (_, vbs, body) = &*inner;
+            let (_, vbs, body) = inner;
             for vb in arena.vb_list(*vbs) {
                 v.value_binding(arena, vb);
             }
@@ -613,6 +654,7 @@ pub fn walk_expr<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, idx: ExprId
     }
 }
 
+/// Visit the pattern, guard and body of a case.
 pub fn walk_case<V: AstIter + ?Sized>(
     v: &mut V,
     arena: &ParseArena,
@@ -627,6 +669,7 @@ pub fn walk_case<V: AstIter + ?Sized>(
     v.expr(arena, case.pc_rhs);
 }
 
+/// Visit the children of a pattern.
 pub fn walk_pat<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, idx: PatIdx) {
     let pat = arena.get_pat(idx);
     v.attributes(arena, pat.ppat_attributes.as_slice());
@@ -681,6 +724,7 @@ pub fn walk_pat<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, idx: PatIdx)
     }
 }
 
+/// Visit the children of a `let` binding.
 pub fn walk_value_binding<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, vb: &ValueBinding) {
     v.pat(arena, vb.pvb_pat);
     if let Some(constraint) = arena.value_constraint(vb.pvb_pat) {
@@ -695,6 +739,7 @@ pub fn walk_value_binding<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, vb
     );
 }
 
+/// Visit the children of a value description (`let` in a signature or `external`).
 pub fn walk_value_description<V: AstIter + ?Sized>(
     v: &mut V,
     arena: &ParseArena,
@@ -707,11 +752,13 @@ pub fn walk_value_description<V: AstIter + ?Sized>(
     );
 }
 
+/// Visit the children of a module binding.
 pub fn walk_module_binding<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, mb: &ModuleBinding) {
     v.module_expr(arena, mb.pmb_expr);
     v.attributes(arena, mb.pmb_attributes.as_slice());
 }
 
+/// Visit the children of a module declaration in a signature.
 pub fn walk_module_declaration<V: AstIter + ?Sized>(
     v: &mut V,
     arena: &ParseArena,
@@ -721,6 +768,7 @@ pub fn walk_module_declaration<V: AstIter + ?Sized>(
     v.attributes(arena, md.pmd_attributes.as_slice());
 }
 
+/// Visit the children of a module type declaration.
 pub fn walk_module_type_declaration<V: AstIter + ?Sized>(
     v: &mut V,
     arena: &ParseArena,

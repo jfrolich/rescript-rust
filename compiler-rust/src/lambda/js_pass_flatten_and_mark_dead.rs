@@ -102,7 +102,7 @@ impl Mapper for Substitute<'_> {
                         rewritten_items.push(item);
                     } else {
                         let rewritten = self.expression(j, item);
-                        let temp = self.id_gen.create(&block_substitution_name(
+                        let temp = self.id_gen.create(block_substitution_name(
                             &decl.ident,
                             j.tag(tag),
                             index,

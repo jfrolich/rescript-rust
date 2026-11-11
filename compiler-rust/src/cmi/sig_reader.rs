@@ -1699,8 +1699,6 @@ fn payload_semantic_string(payload: &OcamlValue) -> Option<&super::marshal_reade
     find(payload, 0)
 }
 
-/// Read field_kind.
-
 #[cfg(test)]
 mod tests {
     use super::*;

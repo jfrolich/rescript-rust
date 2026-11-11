@@ -2,10 +2,14 @@
 
 use std::cmp::Ordering;
 
+/// A module name.
 pub type T = String;
 
+/// The module gentype imports ReScript's `list` type from.
 pub const RESCRIPT_PERVASIVES: &str = "RescriptPervasives";
 
+/// `s` as a JavaScript identifier: `.`, `[` and `]` replaced by `_`, and a
+/// `_` prefix unless it starts with a letter.
 pub fn sanitize_id(s: &str) -> String {
     let s = if s.contains('.') || s.contains('[') || s.contains(']') {
         s.chars()
@@ -24,26 +28,32 @@ pub fn sanitize_id(s: &str) -> String {
     }
 }
 
+/// The name the compiled JavaScript of module `s` is imported as.
 pub fn for_js_file(s: &str) -> T {
     format!("{}JS", sanitize_id(s))
 }
 
+/// How a submodule of the compiled JavaScript of `file_name` is reached.
 pub fn for_inner_module(file_name: &str, inner_module_name: &str) -> T {
     format!("{}.{}", for_js_file(file_name), inner_module_name)
 }
 
+/// `s` as a module name, unchecked.
 pub fn from_string_unsafe(s: &str) -> T {
     s.to_string()
 }
 
+/// The module name as a string.
 pub fn to_string(s: &T) -> String {
     s.clone()
 }
 
+/// Compare module names.
 pub fn compare(s1: &T, s2: &T) -> Ordering {
     s1.cmp(s2)
 }
 
+/// The name with its first ASCII letter lowercased.
 pub fn uncapitalize(s: &T) -> T {
     // OCaml String.uncapitalize_ascii (module_name.ml:28): only an ASCII
     // first byte is lowercased.

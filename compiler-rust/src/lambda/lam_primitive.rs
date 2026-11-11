@@ -30,16 +30,19 @@ pub use crate::types::external_ffi_types::{
 pub struct JsxElement {
     /// Name of the external, for the fallback call.
     pub jsx_name: String,
+    /// The external's FFI declaration, for the fallback call.
     pub jsx_ffi: ExternalDecl,
     /// `jsxs`: each child is a separate argument.
     pub jsx_multi: bool,
     /// The tag is the JSX module's `jsxFragment`.
     pub jsx_fragment: bool,
+    /// Whether a spread-props argument follows the tag.
     pub jsx_spread: bool,
     /// Runtime name, optional.
     pub jsx_props: Vec<(String, bool)>,
     /// `None`: no children prop.
     pub jsx_children: Option<usize>,
+    /// Whether a key argument comes last.
     pub jsx_key: bool,
 }
 
@@ -52,13 +55,17 @@ pub enum ImportSource {
     /// the module itself). The JS export name for a nested `path` is resolved
     /// where the cmj tables live, at emission.
     ImportModule {
+        /// The imported module.
         module_: crate::ident::Ident,
+        /// The access path inside the module; `[]` means the module itself.
         path: Vec<String>,
     },
     /// An external's module: `path` is the access path inside the module
     /// (`@scope` segments then the name; `[]` means the module itself).
     ImportExternal {
+        /// The external's module.
         module_: ExternalModuleName,
+        /// The access path inside the module.
         path: Vec<String>,
     },
 }
@@ -88,8 +95,11 @@ impl ImportSource {
 /// external's spec at translation.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct JsCall {
+    /// The primitive name of the external.
     pub prim_name: String,
+    /// The external's parameter specs.
     pub arg_types: Vec<Param>,
+    /// The external's FFI declaration.
     pub ffi: ExternalDecl,
 }
 
@@ -394,7 +404,9 @@ pub enum Primitive {
 /// Mutable flag
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Mutable {
+    /// The block may be mutated.
     Mutable,
+    /// The block is never mutated.
     Immutable,
 }
 

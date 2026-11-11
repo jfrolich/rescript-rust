@@ -10,9 +10,12 @@ use crate::types::path::Path;
 use crate::types::path::PathView;
 use crate::types::type_expr::{RowDesc, RowField, TypeDesc, TypeExprRef};
 
+/// A translated type, with the types it depends on.
 #[derive(Debug, Clone)]
 pub struct Translation {
+    /// The types the translated type refers to, which may need importing.
     pub dependencies: Vec<Dep>,
+    /// The translated type.
     pub type_: Type,
 }
 
@@ -22,9 +25,10 @@ fn type_expr_desc(ctx: &TypeContext, type_expr: &TypeExprRef) -> TypeDesc {
     // TypeContext's arena, so descriptor access is explicit while preserving the
     // OCaml traversal order.
     let desc = ctx.get_desc(*type_expr);
-    (*desc)
+    *desc
 }
 
+/// For an optional argument of type `option<t>`, its label and `t`.
 pub fn remove_option(
     ctx: &TypeContext,
     label: &ArgLabel,
@@ -43,6 +47,8 @@ pub fn remove_option(
     }
 }
 
+/// The names of `path`, innermost first, with a `Stdlib_` module split into
+/// `Stdlib` and its submodule.
 pub fn path_to_list(path: &Path) -> Vec<String> {
     // Mirrors compiler/gentype/TranslateTypeExprFromTypes.ml:14-22.
     match path.view() {
@@ -60,6 +66,8 @@ pub fn path_to_list(path: &Path) -> Vec<String> {
     }
 }
 
+/// An object type from its translated fields; fields of option type become
+/// optional.
 pub fn translate_obj_type(
     closed_flag: ClosedFlag,
     fields_translations: Vec<(String, Mutable, Translation)>,
@@ -109,6 +117,9 @@ fn is_temporal_value_type(name: &str) -> bool {
     )
 }
 
+/// `TranslateTypeExprFromTypes.translateConstr`: translate the type
+/// constructor `path` applied to translated `params_translation`, mapping
+/// built-in types to TypeScript ones.
 pub fn translate_constr(
     config: &crate::gentype::config::T,
     params_translation: &[Translation],
@@ -324,13 +335,18 @@ pub fn translate_constr(
     }
 }
 
+/// The cases of a polymorphic variant type.
 #[derive(Debug, Clone)]
 pub struct ProcessVariant {
+    /// The cases without a payload.
     pub no_payloads: Vec<String>,
+    /// The cases with a payload, with its type.
     pub payloads: Vec<(String, TypeExprRef)>,
+    /// The cases that may or may not be present.
     pub unknowns: Vec<String>,
 }
 
+/// Sort the row fields of a polymorphic variant type into its cases.
 pub fn process_variant(row_fields: &[(crate::types::asttypes::Label, RowField)]) -> ProcessVariant {
     // Mirrors compiler/gentype/TranslateTypeExprFromTypes.ml:441-468.
     let mut no_payloads = Vec::new();
@@ -356,6 +372,8 @@ pub fn process_variant(row_fields: &[(crate::types::asttypes::Label, RowField)])
     }
 }
 
+/// Translate a function type as one function of all its arguments; a
+/// function-typed result stays a nested function.
 #[allow(non_snake_case)]
 pub fn translate_arrow_type(
     ctx: &TypeContext,
@@ -400,6 +418,8 @@ pub fn translate_arrow_type(
     }
 }
 
+/// `TranslateTypeExprFromTypes.translateTypeExprFromTypes_`: translate an
+/// inferred type expression.
 #[allow(non_snake_case)]
 pub fn translateTypeExprFromTypes_(
     ctx: &TypeContext,
@@ -534,6 +554,7 @@ pub fn translateTypeExprFromTypes_(
     }
 }
 
+/// Translate each of `type_exprs`.
 #[allow(non_snake_case)]
 pub fn translateTypeExprsFromTypes_(
     ctx: &TypeContext,
@@ -551,6 +572,8 @@ pub fn translateTypeExprsFromTypes_(
         .collect()
 }
 
+/// The object type that represents a module with `signature` at runtime,
+/// with the types it depends on.
 pub fn signature_to_module_runtime_representation(
     ctx: &TypeContext,
     config: &crate::gentype::config::T,
@@ -625,6 +648,8 @@ pub fn signature_to_module_runtime_representation(
     (dependencies, Type::Object(ClosedFlag::Closed, fields))
 }
 
+/// `TranslateTypeExprFromTypes.translateTypeExprFromTypes`: translate an
+/// inferred type expression, with fresh names for anonymous type variables.
 pub fn translate_type_expr_from_types(
     ctx: &TypeContext,
     config: &crate::gentype::config::T,
@@ -638,6 +663,8 @@ pub fn translate_type_expr_from_types(
     translation
 }
 
+/// Translate each of `type_exprs`, sharing names for anonymous type
+/// variables.
 pub fn translate_type_exprs_from_types(
     ctx: &TypeContext,
     config: &crate::gentype::config::T,

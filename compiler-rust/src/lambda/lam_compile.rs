@@ -591,6 +591,8 @@ impl LambdaCompiler {
         }
     }
 
+    /// Sets the paths of the flat `make` exports to emit
+    /// (`Translmod.flat_make_path`).
     pub fn set_flat_make_paths(&mut self, paths: Vec<crate::lambda::FlatMakePath>) {
         self.flat_make_paths = paths;
     }
@@ -643,6 +645,8 @@ impl LambdaCompiler {
         )
     }
 
+    /// Compiles an owned Lambda program whose possibly required modules were
+    /// already collected, without collecting them again.
     pub fn compile_deps_program_with_collected_possible_required_modules_owned(
         &mut self,
         lam: Lambda,
@@ -877,6 +881,7 @@ impl LambdaCompiler {
         })
     }
 
+    /// Whether to record source locations for a source map.
     pub fn set_source_map_enabled(&mut self, enabled: bool) {
         self.source_map_enabled = enabled;
     }
@@ -886,6 +891,7 @@ impl LambdaCompiler {
         self.lam_locs = lam_locs;
     }
 
+    /// The location table that resolves this compiler's handles.
     pub fn lam_locs(&self) -> &LamLocTable {
         &self.lam_locs
     }
@@ -1176,7 +1182,7 @@ impl LambdaCompiler {
             prelude,
             expr: JE::call(
                 func_expr,
-                &compiled_args,
+                compiled_args,
                 call_info_of_apply_status(apply.info.status),
                 &mut self.j,
             ),
@@ -1282,9 +1288,11 @@ impl LambdaCompiler {
             let arg_list = a.list_small(args);
             let reduced = crate::lambda::lam_beta_reduce::propagate_beta_reduce_with_map(
                 a,
-                &mut ident_tbl,
-                &self.id_gen,
-                &self.assignable,
+                crate::lambda::lam_beta_reduce::BetaReduceEnv {
+                    ident_tbl: &mut ident_tbl,
+                    id_gen: &self.id_gen,
+                    assignable: &self.assignable,
+                },
                 &param_map,
                 &f.params,
                 body,
@@ -2136,7 +2144,7 @@ impl LambdaCompiler {
         }
     }
 
-    /// Compile a `Lfor_of` / `Lfor_await_of` lambda. Mirrors OCaml
+    /// Compile a `LforOf` / `LforAwaitOf` lambda. Mirrors OCaml
     /// `compile_for_of` / `compile_for_await_of` in
     /// `compiler/core/lam_compile.ml` (#7887): evaluate the iterable, push
     /// a fresh loop frame, compile the body and emit a JS `for-of` /
@@ -2734,7 +2742,6 @@ impl LambdaCompiler {
         block
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn compile_switch_binding_block(
         &mut self,
         a: &mut LamArena,
@@ -2760,7 +2767,6 @@ impl LambdaCompiler {
         declared
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn compile_string_switch_binding_block(
         &mut self,
         a: &mut LamArena,
@@ -2845,7 +2851,6 @@ impl LambdaCompiler {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn compile_short_circuit_binding_block(
         &mut self,
         a: &mut LamArena,
@@ -3554,7 +3559,7 @@ impl LambdaCompiler {
                     .all(|value| lam_analysis::no_side_effects(a, *value))
                     && self.lambda_is_trivial_unit_undefined(a, body)
             }
-            View::StaticCatch(body, _, bindings, handler) if bindings.is_empty() => {
+            View::StaticCatch(body, _, [], handler) => {
                 self.lambda_is_trivial_unit_undefined(a, body)
                     && self.lambda_is_trivial_unit_undefined(a, handler)
             }
@@ -3693,23 +3698,22 @@ impl LambdaCompiler {
         match a.view(body) {
             View::Switch(_, switch) => {
                 let (consts, blocks) = (switch.actions.consts, switch.actions.blocks);
-                if handler_is_raise_of_arity && body_has_target_exit {
-                    true
-                } else if !self.uses_untagged_variant_view(&switch)
-                    && !keep_complete_named_variant_plain_handler_inline
-                    && shared_multi_exit_fallthrough_like_ocaml
-                {
-                    true
-                } else if !self.uses_untagged_variant_view(&switch)
-                    && !keep_complete_named_variant_plain_handler_inline
-                    && no_static_raise_in_handler_like_ocaml(a, handler)
-                    && !lambda_contains_staticcatch(a, handler)
-                    && switch_cases_contain_static_raise_to_label(a, consts, blocks, label, arity)
-                    && body_has_target_exit
-                    && (lambda_contains_static_raise_to_other_label(a, body, label)
-                        || switch_cases_contain_nontrivial_static_raise_to_label(
+                if (handler_is_raise_of_arity && body_has_target_exit)
+                    || (!self.uses_untagged_variant_view(&switch)
+                        && !keep_complete_named_variant_plain_handler_inline
+                        && shared_multi_exit_fallthrough_like_ocaml)
+                    || (!self.uses_untagged_variant_view(&switch)
+                        && !keep_complete_named_variant_plain_handler_inline
+                        && no_static_raise_in_handler_like_ocaml(a, handler)
+                        && !lambda_contains_staticcatch(a, handler)
+                        && switch_cases_contain_static_raise_to_label(
                             a, consts, blocks, label, arity,
-                        ))
+                        )
+                        && body_has_target_exit
+                        && (lambda_contains_static_raise_to_other_label(a, body, label)
+                            || switch_cases_contain_nontrivial_static_raise_to_label(
+                                a, consts, blocks, label, arity,
+                            )))
                 {
                     true
                 }
@@ -3737,23 +3741,20 @@ impl LambdaCompiler {
                 }
             }
             View::StringSwitch(_, sw) => {
-                if handler_is_raise_of_arity && body_has_target_exit {
-                    true
-                } else if !keep_complete_named_variant_plain_handler_inline
-                    && shared_multi_exit_fallthrough_like_ocaml
-                {
-                    true
-                } else if no_static_raise_in_handler_like_ocaml(a, handler)
-                    && !keep_complete_named_variant_plain_handler_inline
-                    && !lambda_contains_staticcatch(a, handler)
-                    && string_switch_cases_contain_static_raise_to_label(
-                        a, sw.actions, label, arity,
-                    )
-                    && body_has_target_exit
-                    && (lambda_contains_static_raise_to_other_label(a, body, label)
-                        || string_switch_cases_contain_nontrivial_static_raise_to_label(
+                if (handler_is_raise_of_arity && body_has_target_exit)
+                    || (!keep_complete_named_variant_plain_handler_inline
+                        && shared_multi_exit_fallthrough_like_ocaml)
+                    || (no_static_raise_in_handler_like_ocaml(a, handler)
+                        && !keep_complete_named_variant_plain_handler_inline
+                        && !lambda_contains_staticcatch(a, handler)
+                        && string_switch_cases_contain_static_raise_to_label(
                             a, sw.actions, label, arity,
-                        ))
+                        )
+                        && body_has_target_exit
+                        && (lambda_contains_static_raise_to_other_label(a, body, label)
+                            || string_switch_cases_contain_nontrivial_static_raise_to_label(
+                                a, sw.actions, label, arity,
+                            )))
                 {
                     true
                 }
@@ -4512,7 +4513,7 @@ impl LambdaCompiler {
 
         if let Some(small) = self.compile_small_string_switch_tail_loop_return(
             a,
-            scrut_compiled.expr.clone(),
+            scrut_compiled.expr,
             &borrowed_cases,
             default,
             default.is_none(),
@@ -4773,8 +4774,8 @@ impl LambdaCompiler {
 
         if then_prelude_empty && else_prelude_empty {
             match (
-                remove_pure_subexpression(then_compiled.expr.clone(), &mut self.j),
-                remove_pure_subexpression(else_compiled.expr.clone(), &mut self.j),
+                remove_pure_subexpression(then_compiled.expr, &mut self.j),
+                remove_pure_subexpression(else_compiled.expr, &mut self.j),
             ) {
                 (None, None) => {
                     // OCaml's `S.if_ cond []` (lam_compile.ml `compile_ifthenelse`).
@@ -5595,7 +5596,7 @@ impl LambdaCompiler {
         if let Some(small) = self.compile_small_string_switch_assignment(
             a,
             result,
-            scrut_compiled.expr.clone(),
+            scrut_compiled.expr,
             &borrowed_cases,
             default,
             default.is_none(),
@@ -5766,7 +5767,7 @@ impl LambdaCompiler {
 
         if let Some(small) = self.compile_small_string_switch_return(
             a,
-            scrut_compiled.expr.clone(),
+            scrut_compiled.expr,
             &borrowed_cases,
             default,
             default.is_none(),
@@ -5816,7 +5817,7 @@ impl LambdaCompiler {
             };
             let dispatch = {
                 let switch = sw.decode(a);
-                self.compile_named_variant_switch_effect_statements(a, scrut_expr.clone(), &switch)
+                self.compile_named_variant_switch_effect_statements(a, scrut_expr, &switch)
             };
             // lam_compile.ml `compile_general_cases`: the dispatch is built
             // from `S.if_`s, which retain only effectful conditions when both
@@ -5903,7 +5904,7 @@ impl LambdaCompiler {
 
         if let Some(small) = self.compile_small_string_switch_effect(
             a,
-            scrut_compiled.expr.clone(),
+            scrut_compiled.expr,
             &borrowed_cases,
             default,
             false,
@@ -5976,9 +5977,9 @@ impl LambdaCompiler {
                 &mut self.j,
             ),
             // lam_compile_const.ml `translate_arg_cst`.
-            Cst::ArgStringLit(s) => JE::string(&s, &mut self.j),
+            Cst::ArgStringLit(s) => JE::string(s, &mut self.j),
             Cst::ArgJsonLit(s) => JE::new(
-                ExprKind::JsonLiteral(JE::str_id(&s, &mut self.j)),
+                ExprKind::JsonLiteral(JE::str_id(s, &mut self.j)),
                 &mut self.j,
             ),
         }
@@ -6025,7 +6026,7 @@ impl LambdaCompiler {
     }
 
     pub(crate) fn int32_div_expr(&mut self, left: Expr, right: Expr) -> Expr {
-        match (self.j.ek(left), int_literal(&mut self.j, right)) {
+        match (self.j.ek(left), int_literal(&self.j, right)) {
             (ExprKind::Length(_, _), Some(2)) => {
                 JE::bin(BinOp::Asr, left, int_expr(1, &mut self.j), &mut self.j)
             }
@@ -6041,7 +6042,7 @@ impl LambdaCompiler {
     }
 
     pub(crate) fn int32_mod_expr(&mut self, left: Expr, right: Expr) -> Expr {
-        match int_literal(&mut self.j, right) {
+        match int_literal(&self.j, right) {
             Some(rhs) if rhs != 0 => JE::bin(BinOp::Mod, left, right, &mut self.j),
             _ if self.check_div_by_zero => {
                 self.runtime_call_expr("Primitive_int", "mod_", vec![left, right])
@@ -7323,7 +7324,7 @@ fn collect_modules_from_lambda(lam: &Lambda, seen: &mut AHashSet<ModuleId>) {
             collect_modules_from_lambda(finish, seen);
             collect_modules_from_lambda(body, seen);
         }
-        Lambda::Lfor_of(_, iterable, body) | Lambda::Lfor_await_of(_, iterable, body) => {
+        Lambda::LforOf(_, iterable, body) | Lambda::LforAwaitOf(_, iterable, body) => {
             collect_modules_from_lambda(iterable, seen);
             collect_modules_from_lambda(body, seen);
         }

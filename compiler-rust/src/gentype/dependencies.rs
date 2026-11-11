@@ -4,6 +4,8 @@ use crate::gentype::gen_type_common::{Dep, dep_to_string};
 use crate::types::Path;
 use crate::types::path::PathView;
 
+/// `dep` with the package namespace `name` removed from its outermost
+/// module.
 pub fn handle_namespace(name: &str, dep: &Dep) -> Dep {
     match dep {
         Dep::External(_) | Dep::Internal(_) => dep.clone(),
@@ -14,6 +16,8 @@ pub fn handle_namespace(name: &str, dep: &Dep) -> Dep {
     }
 }
 
+/// The dependency a type path resolves to in `type_env`, with the
+/// environment of the module the path ends in.
 pub fn from_path1(
     config: &crate::gentype::config::T,
     type_env: &crate::gentype::type_env::T,
@@ -77,6 +81,7 @@ pub fn from_path1(
     }
 }
 
+/// Whether the dependency is a type of this module.
 pub fn is_internal(dep: &Dep) -> bool {
     match dep {
         Dep::External(_) => false,
@@ -85,6 +90,8 @@ pub fn is_internal(dep: &Dep) -> bool {
     }
 }
 
+/// `Dependencies.from_path`: the dependency `path` resolves to in
+/// `type_env`, without the package namespace.
 pub fn from_path(
     config: &crate::gentype::config::T,
     type_env: &crate::gentype::type_env::T,
@@ -109,6 +116,7 @@ pub fn from_path(
     }
 }
 
+/// The module the dependency's outermost name refers to.
 pub fn get_outer_module_name(dep: &Dep) -> crate::gentype::module_name::T {
     match dep {
         Dep::External(name) => crate::gentype::module_name::from_string_unsafe(name),
@@ -119,6 +127,8 @@ pub fn get_outer_module_name(dep: &Dep) -> crate::gentype::module_name::T {
     }
 }
 
+/// `dep` with its outermost external module dropped, leaving the path
+/// within that module.
 pub fn remove_external_outer_module(dep: &Dep) -> Dep {
     match dep {
         Dep::External(_) | Dep::Internal(_) => dep.clone(),

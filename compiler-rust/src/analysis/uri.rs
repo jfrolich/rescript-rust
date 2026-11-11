@@ -7,8 +7,11 @@
 /// `Lsp.Uri.t`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LspUri {
+    /// The scheme, such as `file`.
     pub scheme: String,
+    /// The authority (host), empty for local files.
     pub authority: String,
+    /// The path.
     pub path: String,
 }
 
@@ -178,6 +181,7 @@ pub fn lsp_to_path(uri: &LspUri) -> String {
 /// out.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct UriStyle {
+    /// Whether URIs are printed in the test style (`Uri.strip_path`).
     pub strip_path: bool,
 }
 

@@ -64,8 +64,8 @@ impl Marshal for Variance {
 impl Marshal for ArgLabel {
     /// ArgLabel encoding:
     /// - Nolabel: int 0 (constant constructor)
-    /// - Labelled(s): Block(tag=0, [s])
-    /// - Optional(s): Block(tag=1, [s])
+    /// - `Labelled(s)`: `Block(tag=0, [s])`
+    /// - `Optional(s)`: `Block(tag=1, [s])`
     ///
     /// Uses StrIdx-based sharing to match OCaml's behavior where the same
     /// string (e.g., in punned ~compare) shares memory.
@@ -88,10 +88,10 @@ impl Marshal for ArgLabel {
 
 impl Marshal for Constant {
     /// Constant encoding:
-    /// - Integer(s, opt): Block(tag=0, [s, opt])
-    /// - Char(i): Block(tag=1, [i])
-    /// - String(s, opt): Block(tag=2, [s, opt])
-    /// - Float(s, opt): Block(tag=3, [s, opt])
+    /// - `Integer(s, opt)`: `Block(tag=0, [s, opt])`
+    /// - `Char(i)`: `Block(tag=1, [i])`
+    /// - `String(s, opt)`: `Block(tag=2, [s, opt])`
+    /// - `Float(s, opt)`: `Block(tag=3, [s, opt])`
     fn marshal(&self, w: &mut MarshalWriter<'_>) {
         match self {
             Constant::Integer(s, opt) => {
@@ -122,10 +122,10 @@ impl Marshal for Constant {
 
 impl Marshal for Payload {
     /// Payload encoding:
-    /// - PStr(Box::new(s)): Block(tag=0, [s])
-    /// - PSig(Box::new(s)): Block(tag=1, [s])
-    /// - PTyp(t): Block(tag=2, [t])
-    /// - PPat(Box::new((p, e))): Block(tag=3, [p, e])
+    /// - `PStr(Box::new(s))`: `Block(tag=0, [s])`
+    /// - `PSig(Box::new(s))`: `Block(tag=1, [s])`
+    /// - `PTyp(t)`: `Block(tag=2, [t])`
+    /// - `PPat(Box::new((p, e)))`: `Block(tag=3, [p, e])`
     fn marshal(&self, w: &mut MarshalWriter<'_>) {
         match self {
             Payload::PStr(s) => {
@@ -236,8 +236,8 @@ impl Marshal for CoreTypeDesc {
 
 impl Marshal for RowField {
     /// RowField encoding:
-    /// - Rtag(...): Block(tag=0, [label, attrs, bool, types])
-    /// - Rinherit(t): Block(tag=1, [t])
+    /// - `Rtag(...)`: `Block(tag=0, [label, attrs, bool, types])`
+    /// - `Rinherit(t)`: `Block(tag=1, [t])`
     fn marshal(&self, w: &mut MarshalWriter<'_>) {
         match self {
             RowField::Rtag(label, attrs, b, types) => {
@@ -257,8 +257,8 @@ impl Marshal for RowField {
 
 impl Marshal for ObjectField {
     /// ObjectField encoding:
-    /// - Otag(...): Block(tag=0, [label, attrs, type])
-    /// - Oinherit(t): Block(tag=1, [t])
+    /// - `Otag(...)`: `Block(tag=0, [label, attrs, type])`
+    /// - `Oinherit(t)`: `Block(tag=1, [t])`
     fn marshal(&self, w: &mut MarshalWriter<'_>) {
         match self {
             ObjectField::Otag(label, attrs, t) => {
@@ -692,8 +692,8 @@ impl Marshal for ConstructorDeclaration {
 
 impl Marshal for ConstructorArguments {
     /// ConstructorArguments encoding:
-    /// - Tuple: Block(tag=0, [types])
-    /// - Record: Block(tag=1, [labels])
+    /// - `Tuple`: `Block(tag=0, [types])`
+    /// - `Record`: `Block(tag=1, [labels])`
     fn marshal(&self, w: &mut MarshalWriter<'_>) {
         match self {
             ConstructorArguments::Tuple(types) => {
@@ -733,8 +733,8 @@ impl Marshal for ExtensionConstructor {
 
 impl Marshal for ExtensionConstructorKind {
     /// ExtensionConstructorKind encoding:
-    /// - Decl: Block(tag=0, [args, res])
-    /// - Rebind: Block(tag=1, [lid])
+    /// - `Decl`: `Block(tag=0, [args, res])`
+    /// - `Rebind`: `Block(tag=1, [lid])`
     fn marshal(&self, w: &mut MarshalWriter<'_>) {
         match self {
             ExtensionConstructorKind::Decl(args, res) => {
@@ -809,10 +809,10 @@ impl Marshal for ModuleTypeDesc {
 
 impl Marshal for WithConstraint {
     /// WithConstraint encoding:
-    /// - Type: Block(tag=0, [lid, decl])
-    /// - Module: Block(tag=1, [lid1, lid2])
-    /// - TypeSubst: Block(tag=2, [lid, decl])
-    /// - ModSubst: Block(tag=3, [lid1, lid2])
+    /// - `Type`: `Block(tag=0, [lid, decl])`
+    /// - `Module`: `Block(tag=1, [lid1, lid2])`
+    /// - `TypeSubst`: `Block(tag=2, [lid, decl])`
+    /// - `ModSubst`: `Block(tag=3, [lid1, lid2])`
     fn marshal(&self, w: &mut MarshalWriter<'_>) {
         match self {
             WithConstraint::Type(lid, decl) => {

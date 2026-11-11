@@ -11,7 +11,9 @@
 //!
 //! References into the store carry `type_expr::STORE_REF_TAG`. The store is
 //! `!Send` by construction and is only reached through the exclusive owned lease a
-//! `TypeContext` takes at creation; no node or store is refcounted.
+//! `TypeContext` takes at creation; no node or store is refcounted. Lazy
+//! component caches and replay records use `Rc` to share ownership between
+//! compilations on that worker; the process-wide type pool remains in `Arc`.
 //!
 //! Design: `projects/in-process-performance/THREAD_TYPE_STORE.md`.
 
@@ -25,6 +27,7 @@ use crate::fast_hash::{AHashMap as HashMap, AHashSet as HashSet};
 use crate::intern::StrIdx;
 use std::cell::{Cell, RefCell};
 use std::ops::Deref;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 
@@ -73,6 +76,11 @@ struct PersEntry {
     ps: Arc<PersStruct>,
 }
 
+/// A persistent-rooted component view and the replay record of building it.
+type SharedComponents = (
+    Rc<crate::types::env_lazy::QualifiedModuleComponents>,
+    Rc<crate::types::context::StorePiece>,
+);
 
 /// Shared dependency state for one worker thread.
 pub(crate) struct ThreadTypeStore {
@@ -99,13 +107,7 @@ pub(crate) struct ThreadTypeStore {
     /// builds, with the replay record of building them (OCaml builds such a
     /// view once per process, from `Env.empty`: compiler/ml/env.ml:669-678).
     shared_components: RefCell<
-        HashMap<
-            crate::types::context::QualifiedModuleComponentsCacheKey,
-            (
-                Arc<crate::types::env_lazy::QualifiedModuleComponents>,
-                Arc<crate::types::context::StorePiece>,
-            ),
-        >,
+        HashMap<crate::types::context::QualifiedModuleComponentsCacheKey, SharedComponents>,
     >,
     /// The `lbl_all` arrays built during store builds (`LabelArrayRef::store`).
     label_families: RefCell<Vec<Arc<Vec<crate::types::decl::LabelDescription>>>>,
@@ -114,7 +116,7 @@ pub(crate) struct ThreadTypeStore {
     initial_env: RefCell<
         Option<(
             crate::types::env::Env,
-            Arc<crate::types::context::StorePiece>,
+            Rc<crate::types::context::StorePiece>,
         )>,
     >,
     generation: u64,
@@ -216,22 +218,6 @@ impl ThreadTypeStore {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn import_decl_locs<'a>(
-        &self,
-        locations: impl IntoIterator<Item = crate::location::Location>,
-        files: &'a dyn Fn(StrIdx) -> StrIdx,
-    ) -> super::decl_loc::DeclLocImport<'a> {
-        super::decl_loc::DeclLocImport {
-            kind: super::decl_loc::DeclLocKind::Store,
-            owner: self.decl_loc_owner,
-            base: self.decl_locs.append(locations),
-            instances: Vec::new(),
-            files,
-            scopes: Default::default(),
-        }
-    }
-
     /// The location of a store handle.
     pub(crate) fn decl_loc(&self, loc: super::DeclLoc) -> crate::location::Location {
         assert_eq!(
@@ -295,8 +281,8 @@ impl ThreadTypeStore {
         &self,
         key: &crate::types::context::QualifiedModuleComponentsCacheKey,
     ) -> Option<(
-        Arc<crate::types::env_lazy::QualifiedModuleComponents>,
-        Arc<crate::types::context::StorePiece>,
+        Rc<crate::types::env_lazy::QualifiedModuleComponents>,
+        Rc<crate::types::context::StorePiece>,
     )> {
         self.shared_components.borrow().get(key).cloned()
     }
@@ -304,8 +290,8 @@ impl ThreadTypeStore {
     pub(crate) fn publish_shared_components(
         &self,
         key: crate::types::context::QualifiedModuleComponentsCacheKey,
-        components: Arc<crate::types::env_lazy::QualifiedModuleComponents>,
-        piece: Arc<crate::types::context::StorePiece>,
+        components: Rc<crate::types::env_lazy::QualifiedModuleComponents>,
+        piece: Rc<crate::types::context::StorePiece>,
     ) {
         self.shared_components
             .borrow_mut()
@@ -339,7 +325,7 @@ impl ThreadTypeStore {
         &self,
     ) -> Option<(
         crate::types::env::Env,
-        Arc<crate::types::context::StorePiece>,
+        Rc<crate::types::context::StorePiece>,
     )> {
         self.initial_env.borrow().clone()
     }
@@ -347,7 +333,7 @@ impl ThreadTypeStore {
     pub(crate) fn publish_initial_env(
         &self,
         env: crate::types::env::Env,
-        piece: Arc<crate::types::context::StorePiece>,
+        piece: Rc<crate::types::context::StorePiece>,
     ) {
         self.initial_env.borrow_mut().get_or_insert((env, piece));
     }

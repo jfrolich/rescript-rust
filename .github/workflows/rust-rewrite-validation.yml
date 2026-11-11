@@ -18,6 +18,22 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  compiler-warnings:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install --component clippy
+      - name: Check all compiler targets and feature configurations
+        run: |
+          cargo clippy --locked --manifest-path compiler-rust/Cargo.toml --all-targets --all-features -- -D warnings
+          cargo clippy --locked --manifest-path compiler-rust/Cargo.toml --all-targets --no-default-features -- -D warnings
+      - name: Check compiler documentation
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+        run: cargo doc --locked --manifest-path compiler-rust/Cargo.toml --all-features --no-deps
+
   release-parity:
     runs-on: ubuntu-24.04
     timeout-minutes: 90

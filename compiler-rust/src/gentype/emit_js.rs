@@ -8,16 +8,22 @@ use crate::gentype::gen_type_common::{
     ArgType, Field, Function, Ident, StringMap, Type, doc_string, unknown,
 };
 
+/// The runtime modules a generated file imports, with their paths.
 pub type RequiresMap = BTreeMap<crate::gentype::module_name::T, crate::gentype::import_path::T>;
 
+/// What emitting a file has gathered so far.
 #[derive(Debug, Clone)]
 pub struct Env {
+    /// Runtime modules imported before the early exports.
     pub requires_early: RequiresMap,
+    /// Runtime modules imported after them.
     pub requires: RequiresMap,
     /// For each .cmt we import types from, keep the map of exported types.
     pub cmt_to_export_type_map: StringMap<code_item::ExportTypeMap>,
     /// Map of types imported from other files.
     pub export_type_map_from_other_files: code_item::ExportTypeMap,
+    /// Whether a value is imported with `@genType.import`, which makes runtime
+    /// imports use `require`.
     pub imported_value_or_component: bool,
 }
 
@@ -32,15 +38,39 @@ pub type InputCmtTranslateTypeDeclarations<'a> = dyn Fn(
     ) -> Result<std::sync::Arc<code_item::TypeDeclarations>, String>
     + 'a;
 
+/// Maps the `.cmt` file an import path names to the typed artifact gentype
+/// reads, or to an empty string when there is none.
 pub type GetCmtFile<'a> = dyn Fn(&str) -> String + 'a;
 
 /// Where emitting a translation puts its genType warnings: the compile's
 /// notes, and the file a declaration location is in.
 pub struct EmitNotes<'a> {
+    /// The compile's notes.
     pub notes: &'a crate::gentype::log_::Notes,
+    /// The file a declaration location is in.
     pub file: &'a dyn Fn(crate::types::DeclLoc) -> String,
 }
 
+/// The generated file being emitted, where its warnings go, and how the
+/// declarations of the types it imports are found.
+#[derive(Clone, Copy)]
+pub struct EmitTarget<'a> {
+    /// Where emitting puts its warnings.
+    pub notes: &'a EmitNotes<'a>,
+    /// The module the file is generated for.
+    pub file_name: &'a crate::gentype::module_name::T,
+    /// The generated file's path, relative to the project root.
+    pub output_file_relative: &'a str,
+    /// Finds the source directories of imported modules.
+    pub resolver: &'a crate::gentype::module_resolver::Resolver,
+    /// Maps an imported module's path to its `.cmt` file.
+    pub get_cmt_file: &'a GetCmtFile<'a>,
+    /// Translates the type declarations of an imported `.cmt` file.
+    pub input_cmt_translate_type_declarations: &'a InputCmtTranslateTypeDeclarations<'a>,
+}
+
+/// `env` with the runtime module `module_name` imported from `import_path`,
+/// among the early imports when `import` is set.
 pub fn require_module(
     import: bool,
     mut env: Env,
@@ -56,6 +86,9 @@ pub fn require_module(
     env
 }
 
+/// The exported types of `type_declarations` in `file`, by resolved name.
+/// When the declarations were read from an imported `.cmt`
+/// (`from_cmt_read_recursively`), unannotated ones count as exported.
 pub fn create_export_type_map(
     config: &crate::gentype::config::T,
     file: &str,
@@ -107,6 +140,7 @@ pub fn create_export_type_map(
     export_type_map
 }
 
+/// The code item, for the debug log.
 pub fn code_item_to_string(
     config: &crate::gentype::config::T,
     type_name_is_interface: &impl Fn(&str) -> bool,
@@ -132,6 +166,8 @@ pub fn code_item_to_string(
     }
 }
 
+/// Emit an exported type, as opaque when it is a GADT, which TypeScript
+/// cannot express; warns about that.
 pub fn emit_export_type(
     locs: &dyn crate::types::DeclLocs,
     notes: &EmitNotes<'_>,
@@ -163,21 +199,17 @@ pub fn emit_export_type(
         opaque => opaque,
     };
     let opaque = opaque.unwrap_or(false);
-    let resolved_type_name =
-        crate::gentype::resolved_name::to_string(&export_type.resolved_type_name);
     crate::gentype::emit_type::emit_export_type(
         config,
         emitters,
-        export_type.name_as.clone(),
-        opaque,
-        &export_type.type_,
         type_name_is_interface,
-        &export_type.type_vars,
-        export_type.doc_string.clone(),
-        &resolved_type_name,
+        export_type,
+        opaque,
     )
 }
 
+/// Whether `type_name`, exported by this file or imported from another,
+/// is an object type and so can be a TypeScript interface.
 pub fn type_name_is_interface(
     export_type_map: &code_item::ExportTypeMap,
     export_type_map_from_other_files: &code_item::ExportTypeMap,
@@ -199,6 +231,7 @@ pub fn type_name_is_interface(
         .unwrap_or(false)
 }
 
+/// Emit the type a declaration exports.
 pub fn emit_export_from_type_declaration(
     locs: &dyn crate::types::DeclLocs,
     notes: &EmitNotes<'_>,
@@ -222,6 +255,7 @@ pub fn emit_export_from_type_declaration(
     )
 }
 
+/// Emit the types the declarations export.
 pub fn emit_export_from_type_declarations(
     locs: &dyn crate::types::DeclLocs,
     notes: &EmitNotes<'_>,
@@ -265,27 +299,50 @@ fn replace_react_element_children(fields: &[Field], filter_key: bool) -> Vec<Fie
         .collect()
 }
 
+/// The `Props` type emitted for a React component.
 #[derive(Debug, Clone)]
 pub struct HookType {
+    /// The props object type.
     pub props_type: Type,
+    /// The name the props type is exported under.
     pub resolved_type_name: crate::gentype::resolved_name::T,
+    /// The component's type parameters.
     pub type_vars: Vec<String>,
 }
 
+/// How the code items of one file look up the types they mention.
+#[derive(Clone, Copy)]
+pub struct ExportTypeLookups<'f> {
+    /// Replaces a type defined in this file, or imported into it, by its
+    /// definition; other types are returned unchanged.
+    pub inline_one_level: &'f dyn Fn(&Type) -> Type,
+    /// Whether a type name stands for a TypeScript interface.
+    pub type_name_is_interface: &'f dyn Fn(&str) -> bool,
+}
+
+/// `EmitJs.emitCodeItem`: emit one value export or import.
 pub fn emit_code_item(
-    notes: &EmitNotes<'_>,
+    target: EmitTarget<'_>,
     config: &mut crate::gentype::config::T,
     emitters: crate::gentype::emitters::T,
     module_items_emitter: &mut crate::gentype::export_module::ExportModuleItems,
     env: Env,
-    file_name: &crate::gentype::module_name::T,
-    output_file_relative: &str,
-    resolver: &crate::gentype::module_resolver::Resolver,
-    inline_one_level: &impl Fn(&Type) -> Type,
-    type_name_is_interface: &impl Fn(&str) -> bool,
+    lookups: ExportTypeLookups<'_>,
     code_item: &code_item::T,
 ) -> (Env, crate::gentype::emitters::T) {
     // Mirrors compiler/gentype/EmitJs.ml:139-389.
+    let EmitTarget {
+        notes,
+        file_name,
+        output_file_relative,
+        resolver,
+        ..
+    } = target;
+    let ExportTypeLookups {
+        inline_one_level,
+        type_name_is_interface,
+    } = lookups;
+    let type_name_is_interface = &type_name_is_interface;
     if crate::gentype::debug::code_items.load(std::sync::atomic::Ordering::Relaxed) {
         crate::gentype::log_::item(&format!(
             "Code Item: {}\n",
@@ -382,15 +439,17 @@ pub fn emit_code_item(
                 crate::gentype::import_path::emit(import_path)
             );
             let emitters = crate::gentype::emit_type::emit_export_const(
-                true,
-                &comment,
                 config,
-                doc_string::empty,
                 emitters,
-                &value_name_type_checked,
-                &type_,
                 type_name_is_interface,
-                &checked_line,
+                true,
+                crate::gentype::emit_type::ExportConst {
+                    comment: &comment,
+                    doc_string: doc_string::empty,
+                    name: &value_name_type_checked,
+                    type_: &type_,
+                    line: &checked_line,
+                },
             );
 
             let value_name_not_default = match value_name.as_str() {
@@ -405,17 +464,19 @@ pub fn emit_code_item(
             );
             let unknown = unknown();
             let emitters = crate::gentype::emit_type::emit_export_const(
-                true,
-                &format!(
-                    "Export '{value_name_not_default}' early to allow circular import from the '.bs.js' file."
-                ),
                 config,
-                doc_string::empty,
                 emitters,
-                &value_name_not_default,
-                &unknown,
                 type_name_is_interface,
-                &cast_line,
+                true,
+                crate::gentype::emit_type::ExportConst {
+                    comment: &format!(
+                        "Export '{value_name_not_default}' early to allow circular import from the '.bs.js' file."
+                    ),
+                    doc_string: doc_string::empty,
+                    name: &value_name_not_default,
+                    type_: &unknown,
+                    line: &cast_line,
+                },
             );
             let emitters = match value_name.as_str() {
                 "default" => crate::gentype::emit_type::emit_export_default(
@@ -563,15 +624,17 @@ pub fn emit_code_item(
                 crate::gentype::runtime::emit_module_access_path(config, module_access_path)
             );
             let emitters = crate::gentype::emit_type::emit_export_const(
-                false,
-                "",
                 config,
-                doc_string.clone(),
                 emitters,
-                &name,
-                &type_,
                 type_name_is_interface,
-                &line,
+                false,
+                crate::gentype::emit_type::ExportConst {
+                    comment: "",
+                    doc_string: doc_string.clone(),
+                    name: &name,
+                    type_: &type_,
+                    line: &line,
+                },
             );
             let emitters = match original_name == default {
                 true => crate::gentype::emit_type::emit_export_default(
@@ -585,17 +648,14 @@ pub fn emit_code_item(
     }
 }
 
+/// `EmitJs.emitCodeItems`: emit `code_items` in order.
 pub fn emit_code_items(
-    notes: &EmitNotes<'_>,
+    target: EmitTarget<'_>,
     config: &mut crate::gentype::config::T,
-    output_file_relative: &str,
     emitters: crate::gentype::emitters::T,
     module_items_emitter: &mut crate::gentype::export_module::ExportModuleItems,
     env: Env,
-    file_name: &crate::gentype::module_name::T,
-    resolver: &crate::gentype::module_resolver::Resolver,
-    type_name_is_interface: &impl Fn(&str) -> bool,
-    inline_one_level: &impl Fn(&Type) -> Type,
+    lookups: ExportTypeLookups<'_>,
     code_items: &[code_item::T],
 ) -> (Env, crate::gentype::emitters::T) {
     // Mirrors compiler/gentype/EmitJs.ml:391-400.
@@ -603,21 +663,18 @@ pub fn emit_code_items(
         .iter()
         .fold((env, emitters), |(env, emitters), code_item| {
             emit_code_item(
-                notes,
+                target,
                 config,
                 emitters,
                 module_items_emitter,
                 env,
-                file_name,
-                output_file_relative,
-                resolver,
-                inline_one_level,
-                type_name_is_interface,
+                lookups,
                 code_item,
             )
         })
 }
 
+/// Emit the imports of the runtime modules in `requires`.
 pub fn emit_requires(
     imported_value_or_component: bool,
     early: bool,
@@ -640,6 +697,7 @@ pub fn emit_requires(
         })
 }
 
+/// `type_` with the types `export_type_map` defines inlined.
 pub fn type_get_inlined(
     config: &crate::gentype::config::T,
     export_type_map: &code_item::ExportTypeMap,
@@ -654,17 +712,24 @@ pub fn type_get_inlined(
     )
 }
 
+/// Read the exported types of the `.cmt` file `import_type` comes from, and
+/// of the files its declarations import types from, into `env`.
 pub fn read_cmt_files_recursively(
-    notes: &crate::gentype::log_::Notes,
+    target: EmitTarget<'_>,
     config: &mut crate::gentype::config::T,
     env: Env,
-    get_cmt_file: &GetCmtFile<'_>,
-    input_cmt_translate_type_declarations: &InputCmtTranslateTypeDeclarations<'_>,
-    output_file_relative: &str,
-    resolver: &crate::gentype::module_resolver::Resolver,
     import_type: &code_item::ImportType,
 ) -> Result<Env, String> {
     // Mirrors compiler/gentype/EmitJs.ml:417-484.
+    let EmitTarget {
+        notes,
+        get_cmt_file,
+        input_cmt_translate_type_declarations,
+        output_file_relative,
+        resolver,
+        ..
+    } = target;
+    let notes = notes.notes;
     fn update_type_map_from_other_files(
         config: &crate::gentype::config::T,
         type_name: &str,
@@ -739,16 +804,7 @@ pub fn read_cmt_files_recursively(
                     new_import_types
                         .iter()
                         .try_fold(env, |env, new_import_type| {
-                            read_cmt_files_recursively(
-                                notes,
-                                config,
-                                env,
-                                get_cmt_file,
-                                input_cmt_translate_type_declarations,
-                                output_file_relative,
-                                resolver,
-                                new_import_type,
-                            )
+                            read_cmt_files_recursively(target, config, env, new_import_type)
                         })
                 }
             }
@@ -757,29 +813,17 @@ pub fn read_cmt_files_recursively(
     }
 }
 
+/// Emit a type import, after reading the declarations it refers to.
 pub fn emit_import_type(
-    notes: &crate::gentype::log_::Notes,
+    target: EmitTarget<'_>,
     config: &mut crate::gentype::config::T,
     emitters: crate::gentype::emitters::T,
     env: Env,
-    get_cmt_file: &GetCmtFile<'_>,
-    input_cmt_translate_type_declarations: &InputCmtTranslateTypeDeclarations<'_>,
-    output_file_relative: &str,
-    resolver: &crate::gentype::module_resolver::Resolver,
     type_name_is_interface: &impl Fn(&Env, &str) -> bool,
     import_type: &code_item::ImportType,
 ) -> Result<(Env, crate::gentype::emitters::T), String> {
     // Mirrors compiler/gentype/EmitJs.ml:486-500.
-    let env = read_cmt_files_recursively(
-        notes,
-        config,
-        env,
-        get_cmt_file,
-        input_cmt_translate_type_declarations,
-        output_file_relative,
-        resolver,
-        import_type,
-    )?;
+    let env = read_cmt_files_recursively(target, config, env, import_type)?;
     let emitters = crate::gentype::emit_type::emit_import_type_as(
         emitters,
         config,
@@ -791,15 +835,12 @@ pub fn emit_import_type(
     Ok((env, emitters))
 }
 
+/// Emit the type imports.
 pub fn emit_import_types(
-    notes: &crate::gentype::log_::Notes,
+    target: EmitTarget<'_>,
     config: &mut crate::gentype::config::T,
     emitters: crate::gentype::emitters::T,
     env: Env,
-    get_cmt_file: &GetCmtFile<'_>,
-    input_cmt_translate_type_declarations: &InputCmtTranslateTypeDeclarations<'_>,
-    output_file_relative: &str,
-    resolver: &crate::gentype::module_resolver::Resolver,
     type_name_is_interface: &impl Fn(&Env, &str) -> bool,
     import_types: &[code_item::ImportType],
 ) -> Result<(Env, crate::gentype::emitters::T), String> {
@@ -808,20 +849,18 @@ pub fn emit_import_types(
         .iter()
         .try_fold((env, emitters), |(env, emitters), import_type| {
             emit_import_type(
-                notes,
+                target,
                 config,
                 emitters,
                 env,
-                get_cmt_file,
-                input_cmt_translate_type_declarations,
-                output_file_relative,
-                resolver,
                 type_name_is_interface,
                 import_type,
             )
         })
 }
 
+/// The declarations to emit: those annotated for export, and those whose
+/// names are in `annotated_set`, marked as exported.
 pub fn get_annotated_typed_declarations(
     annotated_set: &BTreeSet<String>,
     type_declarations: &[code_item::TypeDeclaration],
@@ -852,6 +891,8 @@ pub fn get_annotated_typed_declarations(
         .collect()
 }
 
+/// Mark as exported every type that an exported type or value refers to,
+/// transitively. Returns the updated map and the names newly marked.
 pub fn propagate_annotation_to_sub_types(
     code_items: &[code_item::T],
     type_map: &code_item::ExportTypeMap,
@@ -974,19 +1015,19 @@ pub fn propagate_annotation_to_sub_types(
     (new_type_map, annotated_set)
 }
 
+/// `EmitJs.emit_translation_as_string`: the contents of the generated file
+/// for `translation`, without its header.
 #[allow(non_snake_case)]
 pub fn emit_translation_as_string(
+    target: EmitTarget<'_>,
     locs: &dyn crate::types::DeclLocs,
-    notes: &EmitNotes<'_>,
     config: &mut crate::gentype::config::T,
-    file_name: &crate::gentype::module_name::T,
-    get_cmt_file: &GetCmtFile<'_>,
-    input_cmt_translate_type_declarations: &InputCmtTranslateTypeDeclarations<'_>,
-    output_file_relative: &str,
-    resolver: &crate::gentype::module_resolver::Resolver,
     translation: &crate::gentype::translation::T,
 ) -> Result<String, String> {
     // Mirrors compiler/gentype/EmitJs.ml:604-711.
+    let EmitTarget {
+        notes, file_name, ..
+    } = target;
     let initial_env = Env {
         requires: BTreeMap::new(),
         requires_early: BTreeMap::new(),
@@ -1051,14 +1092,10 @@ pub fn emit_translation_as_string(
         .map(|(_, import_type)| import_type)
         .collect();
     let (env, emitters) = emit_import_types(
-        notes.notes,
+        target,
         config,
         emitters,
         env,
-        get_cmt_file,
-        input_cmt_translate_type_declarations,
-        output_file_relative,
-        resolver,
         &type_name_is_interface_for_env,
         &import_types,
     )?;
@@ -1104,16 +1141,17 @@ pub fn emit_translation_as_string(
         _ => type_.clone(),
     };
     let (env, emitters) = emit_code_items(
-        notes,
+        target,
         config,
-        output_file_relative,
         emitters,
         &mut module_items_emitter,
         env,
-        file_name,
-        resolver,
-        &|type_name| type_name_is_interface_for_env(&env_for_code_items, type_name),
-        &inline_one_level,
+        ExportTypeLookups {
+            inline_one_level: &inline_one_level,
+            type_name_is_interface: &|type_name| {
+                type_name_is_interface_for_env(&env_for_code_items, type_name)
+            },
+        },
         &translation.code_items,
     );
     let emitters = match config.emit_import_react {

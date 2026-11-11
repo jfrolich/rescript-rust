@@ -3,7 +3,6 @@
 //! This module provides pretty-printing for Lambda expressions,
 //! useful for debugging the compilation pipeline.
 
-use crate::lambda::LamLoc;
 use std::fmt;
 
 use crate::ident::Ident;
@@ -16,10 +15,15 @@ use crate::lambda::{DirectionFlag, Lambda};
 /// Print kind for let bindings.
 #[derive(Debug, Clone, Copy)]
 pub enum PrintKind {
+    /// `let` alias binding.
     Alias,
+    /// Strict `let` binding.
     Strict,
+    /// Strict `let` binding that may be dropped when unused.
     StrictOpt,
+    /// Mutable variable binding.
     Variable,
+    /// `let rec` binding.
     Recursive,
 }
 
@@ -269,6 +273,7 @@ pub struct LambdaPrinter<'a> {
 }
 
 impl<'a> LambdaPrinter<'a> {
+    /// A printer for `lambda`.
     pub fn new(lambda: &'a Lambda) -> Self {
         Self { lambda }
     }
@@ -466,7 +471,7 @@ fn format_lambda(lam: &Lambda, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             write!(f, ")")
         }
 
-        Lambda::Lfor_of(v, iterable, body) => {
+        Lambda::LforOf(v, iterable, body) => {
             write!(f, "(for {} of ", v.name())?;
             format_lambda(iterable, f)?;
             write!(f, " ")?;
@@ -474,7 +479,7 @@ fn format_lambda(lam: &Lambda, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             write!(f, ")")
         }
 
-        Lambda::Lfor_await_of(v, iterable, body) => {
+        Lambda::LforAwaitOf(v, iterable, body) => {
             write!(f, "(for await {} of ", v.name())?;
             format_lambda(iterable, f)?;
             write!(f, " ")?;
@@ -639,8 +644,7 @@ fn format_raw_primitive(p: &Primitive, f: &mut fmt::Formatter<'_>) -> fmt::Resul
 mod tests {
     use super::*;
     use crate::ident::Ident;
-    use crate::lambda::{Constant, FunctionAttribute};
-    use LamLoc;
+    use crate::lambda::{Constant, FunctionAttribute, LamLoc};
 
     #[test]
     fn test_print_var() {

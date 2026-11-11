@@ -20,8 +20,11 @@ use super::portable_types::PortablePersStruct;
 
 /// Borrowed form, for encoding straight from the registry.
 pub struct StoredModuleRef<'a> {
+    /// The portable signature, if the module has one.
     pub pers_struct: Option<&'a PortablePersStruct>,
+    /// The JS metadata other modules' code generation reads.
     pub info: &'a InMemoryModuleInfo,
+    /// The GenType declarations of each typed artifact, by `.cmt` path.
     pub gentype_declarations: &'a [(String, GentypeDeclarations)],
 }
 

@@ -14,57 +14,74 @@ use crate::parser::longident::Longident;
 /// Recursion flag: whether a let binding is recursive
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum RecFlag {
+    /// `let`.
     Nonrecursive = 0,
+    /// `let rec`.
     Recursive = 1,
 }
 
 /// Direction flag for for-loops
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum DirectionFlag {
+    /// `for i in a to b`.
     Upto = 0,
+    /// `for i in a downto b`.
     Downto = 1,
 }
 
 /// Private flag for type declarations
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PrivateFlag {
+    /// `private`: values can be read but not built outside the definition.
     Private = 0,
+    /// No `private` marker.
     Public = 1,
 }
 
 /// Mutability flag for record fields
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum MutableFlag {
+    /// An immutable field.
     Immutable = 0,
+    /// A `mutable` field.
     Mutable = 1,
 }
 
 /// Virtual flag (unused in ReScript, kept for OCaml compatibility)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VirtualFlag {
+    /// `virtual`.
     Virtual = 0,
+    /// Not `virtual`.
     Concrete = 1,
 }
 
 /// Override flag for open statements
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum OverrideFlag {
+    /// `open!`, which silences shadowing warnings.
     Override = 0,
+    /// Plain `open`.
     Fresh = 1,
 }
 
 /// Closed flag for record patterns and polymorphic variants
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ClosedFlag {
+    /// Closed: no further fields or constructors.
     Closed = 0,
+    /// Open: `..` allows more fields or constructors.
     Open = 1,
 }
 
 /// Variance for type parameters
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Variance {
+    /// `+'a`.
     Covariant = 0,
+    /// `-'a`.
     Contravariant = 1,
+    /// No variance annotation.
     Invariant = 2,
 }
 
@@ -101,7 +118,7 @@ pub enum Constant {
 
 // ========== Attributes and Extensions ==========
 
-/// An attribute: [@id ARG] or [@@id ARG]
+/// An attribute: `[@id ARG]` or `[@@id ARG]`
 pub type Attribute = (Located<String>, Payload);
 
 /// An extension point: [%id ARG] or [%%id ARG]
@@ -128,8 +145,11 @@ pub enum Payload {
 /// A type expression
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CoreType {
+    /// What kind of type expression this is.
     pub ptyp_desc: CoreTypeDesc,
+    /// Source location of the type expression.
     pub ptyp_loc: Location,
+    /// Attributes attached to the type expression.
     pub ptyp_attributes: Attributes,
 }
 
@@ -170,7 +190,7 @@ pub type PackageType = (Located<Longident>, Vec<(Located<Longident>, CoreType)>)
 pub enum RowField {
     /// Tag: `A, `A of T, etc.
     Rtag(Located<Label>, Attributes, bool, Vec<CoreType>),
-    /// Inherited type: [ T ]
+    /// Inherited type: `[ T ]`
     Rinherit(CoreType),
 }
 
@@ -188,8 +208,11 @@ pub enum ObjectField {
 /// A pattern
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Pattern {
+    /// What kind of pattern this is.
     pub ppat_desc: PatternDesc,
+    /// Source location of the pattern.
     pub ppat_loc: Location,
+    /// Attributes attached to the pattern.
     pub ppat_attributes: Attributes,
 }
 
@@ -240,8 +263,11 @@ pub enum PatternDesc {
 /// An expression
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Expression {
+    /// What kind of expression this is.
     pub pexp_desc: ExpressionDesc,
+    /// Source location of the expression.
     pub pexp_loc: Location,
+    /// Attributes attached to the expression.
     pub pexp_attributes: Attributes,
 }
 
@@ -317,7 +343,7 @@ pub enum ExpressionDesc {
     /// Let module: let module M = ME in E
     Letmodule(Located<String>, Box<ModuleExpr>, Box<Expression>),
     /// Let exception: let exception C in E
-    Letexception(ExtensionConstructor, Box<Expression>),
+    Letexception(Box<ExtensionConstructor>, Box<Expression>),
     /// Assert: assert E
     Assert(Box<Expression>),
     /// Lazy: lazy E
@@ -341,8 +367,11 @@ pub enum ExpressionDesc {
 /// A case in a match or function expression
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Case {
+    /// The case pattern.
     pub pc_lhs: Pattern,
+    /// The `when` guard, if any.
     pub pc_guard: Option<Expression>,
+    /// The case body.
     pub pc_rhs: Expression,
 }
 
@@ -351,19 +380,28 @@ pub struct Case {
 /// A value binding: let P = E
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ValueBinding {
+    /// The bound pattern.
     pub pvb_pat: Pattern,
+    /// The bound expression.
     pub pvb_expr: Expression,
+    /// Attributes on the binding.
     pub pvb_attributes: Attributes,
+    /// Source location of the binding.
     pub pvb_loc: Location,
 }
 
 /// A value description: val x: T or external x: T = "s1" ... "sn"
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ValueDescription {
+    /// The value name.
     pub pval_name: Located<String>,
+    /// The declared type.
     pub pval_type: CoreType,
+    /// The `external` primitive strings; empty for a plain `let` declaration.
     pub pval_prim: Vec<String>,
+    /// Attributes on the declaration.
     pub pval_attributes: Attributes,
+    /// Source location of the declaration.
     pub pval_loc: Location,
 }
 
@@ -372,13 +410,21 @@ pub struct ValueDescription {
 /// A type declaration
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TypeDeclaration {
+    /// The type name.
     pub ptype_name: Located<String>,
+    /// Type parameters with their variance.
     pub ptype_params: Vec<(CoreType, Variance)>,
+    /// `constraint 'a = typ` clauses.
     pub ptype_cstrs: Vec<(CoreType, CoreType, Location)>,
+    /// Abstract, variant, record or open.
     pub ptype_kind: TypeKind,
+    /// Whether the type is `private`.
     pub ptype_private: PrivateFlag,
+    /// The `= typ` the declaration abbreviates, if any.
     pub ptype_manifest: Option<CoreType>,
+    /// Attributes on the declaration.
     pub ptype_attributes: Attributes,
+    /// Source location of the declaration.
     pub ptype_loc: Location,
 }
 
@@ -398,20 +444,30 @@ pub enum TypeKind {
 /// A label declaration (record field)
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct LabelDeclaration {
+    /// The field name.
     pub pld_name: Located<String>,
+    /// Whether the field is `mutable`.
     pub pld_mutable: MutableFlag,
+    /// The field type.
     pub pld_type: CoreType,
+    /// Source location of the field.
     pub pld_loc: Location,
+    /// Attributes on the field.
     pub pld_attributes: Attributes,
 }
 
 /// A constructor declaration
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ConstructorDeclaration {
+    /// The constructor name.
     pub pcd_name: Located<String>,
+    /// The constructor arguments.
     pub pcd_args: ConstructorArguments,
+    /// The GADT result type, if any.
     pub pcd_res: Option<CoreType>,
+    /// Source location of the constructor.
     pub pcd_loc: Location,
+    /// Attributes on the constructor.
     pub pcd_attributes: Attributes,
 }
 
@@ -429,19 +485,28 @@ pub enum ConstructorArguments {
 /// A type extension: type t += ...
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TypeExtension {
+    /// The extended type.
     pub ptyext_path: Located<Longident>,
+    /// Type parameters with their variance.
     pub ptyext_params: Vec<(CoreType, Variance)>,
+    /// The added constructors.
     pub ptyext_constructors: Vec<ExtensionConstructor>,
+    /// Whether the extension is `private`.
     pub ptyext_private: PrivateFlag,
+    /// Attributes on the extension.
     pub ptyext_attributes: Attributes,
 }
 
 /// An extension constructor
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ExtensionConstructor {
+    /// The constructor name.
     pub pext_name: Located<String>,
+    /// A new constructor or a rebinding of an existing one.
     pub pext_kind: ExtensionConstructorKind,
+    /// Source location of the constructor.
     pub pext_loc: Location,
+    /// Attributes on the constructor.
     pub pext_attributes: Attributes,
 }
 
@@ -459,8 +524,11 @@ pub enum ExtensionConstructorKind {
 /// A module type
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ModuleType {
+    /// What kind of module type this is.
     pub pmty_desc: ModuleTypeDesc,
+    /// Source location of the module type.
     pub pmty_loc: Location,
+    /// Attributes attached to the module type.
     pub pmty_attributes: Attributes,
 }
 
@@ -504,7 +572,9 @@ pub type Signature = Vec<SignatureItem>;
 /// A signature item
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SignatureItem {
+    /// What kind of signature item this is.
     pub psig_desc: SignatureItemDesc,
+    /// Source location of the item.
     pub psig_loc: Location,
 }
 
@@ -533,7 +603,7 @@ pub enum SignatureItemDesc {
     Class,
     /// Class type (dummy)
     ClassType,
-    /// Attribute: [@@@id]
+    /// Attribute: `[@@@id]`
     Attribute(Attribute),
     /// Extension: [%%id]
     Extension(Extension, Attributes),
@@ -542,35 +612,50 @@ pub enum SignatureItemDesc {
 /// Module declaration
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ModuleDeclaration {
+    /// The module name.
     pub pmd_name: Located<String>,
+    /// The module type.
     pub pmd_type: ModuleType,
+    /// Attributes on the declaration.
     pub pmd_attributes: Attributes,
+    /// Source location of the declaration.
     pub pmd_loc: Location,
 }
 
 /// Module type declaration
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ModuleTypeDeclaration {
+    /// The module type name.
     pub pmtd_name: Located<String>,
+    /// The definition; `None` for an abstract module type.
     pub pmtd_type: Option<ModuleType>,
+    /// Attributes on the declaration.
     pub pmtd_attributes: Attributes,
+    /// Source location of the declaration.
     pub pmtd_loc: Location,
 }
 
 /// Open description
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct OpenDescription {
+    /// The opened module path.
     pub popen_lid: Located<Longident>,
+    /// `open!` or plain `open`.
     pub popen_override: OverrideFlag,
+    /// Source location of the `open`.
     pub popen_loc: Location,
+    /// Attributes on the `open`.
     pub popen_attributes: Attributes,
 }
 
 /// Include infos (generic)
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct IncludeInfos<A> {
+    /// The included module or module type.
     pub pincl_mod: A,
+    /// Source location of the `include`.
     pub pincl_loc: Location,
+    /// Attributes on the `include`.
     pub pincl_attributes: Attributes,
 }
 
@@ -585,8 +670,11 @@ pub type IncludeDeclaration = IncludeInfos<ModuleExpr>;
 /// A module expression
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ModuleExpr {
+    /// What kind of module expression this is.
     pub pmod_desc: ModuleExprDesc,
+    /// Source location of the module expression.
     pub pmod_loc: Location,
+    /// Attributes attached to the module expression.
     pub pmod_attributes: Attributes,
 }
 
@@ -617,7 +705,9 @@ pub type Structure = Vec<StructureItem>;
 /// A structure item
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct StructureItem {
+    /// What kind of structure item this is.
     pub pstr_desc: StructureItemDesc,
+    /// Source location of the item.
     pub pstr_loc: Location,
 }
 
@@ -650,7 +740,7 @@ pub enum StructureItemDesc {
     ClassType,
     /// Include: include ME
     Include(IncludeDeclaration),
-    /// Attribute: [@@@id]
+    /// Attribute: `[@@@id]`
     Attribute(Attribute),
     /// Extension: [%%id]
     Extension(Extension, Attributes),
@@ -659,8 +749,12 @@ pub enum StructureItemDesc {
 /// A module binding: X = ME
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ModuleBinding {
+    /// The module name.
     pub pmb_name: Located<String>,
+    /// The bound module expression.
     pub pmb_expr: ModuleExpr,
+    /// Attributes on the binding.
     pub pmb_attributes: Attributes,
+    /// Source location of the binding.
     pub pmb_loc: Location,
 }
