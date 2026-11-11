@@ -1,0 +1,10 @@
+/node_modules/
+dist/
+public/compiler.wasm
+public/stdlib.json
+src/prebuilt.json
+crate/target/
+# The root .gitignore excludes *.jsx (ReScript build output).
+!*.jsx
+# The package of the "package" example is source, not an install.
+!examples/package/node_modules/

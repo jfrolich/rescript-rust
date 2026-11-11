@@ -1,0 +1,71 @@
+[
+  {
+    "id": "values",
+    "title": "Values",
+    "summary": "Functions and constants, typed by TypeScript, inferred results included.",
+    "files": ["math.ts", "Demo.res"]
+  },
+  {
+    "id": "records",
+    "title": "Interfaces",
+    "summary": "An interface is a record; optional, nullable and promised values keep their meaning.",
+    "files": ["users.ts", "Demo.res"]
+  },
+  {
+    "id": "unions",
+    "title": "Unions",
+    "summary": "Tagged unions, literal unions and primitive unions each have a ReScript form.",
+    "files": ["shapes.ts", "Demo.res"]
+  },
+  {
+    "id": "generics",
+    "title": "Generics",
+    "summary": "Type parameters become type variables, on types and on functions.",
+    "files": ["result.ts", "Demo.res"]
+  },
+  {
+    "id": "classes",
+    "title": "Classes",
+    "summary": "A class is a module with a type, a constructor and its static members.",
+    "files": ["counter.ts", "Demo.res"]
+  },
+  {
+    "id": "module",
+    "title": "A whole module",
+    "summary": "module Api = %ts(...) imports every export; type t = %ts(\"...#Name\") imports one type.",
+    "files": ["api.ts", "Demo.res"]
+  },
+  {
+    "id": "resolved",
+    "title": "Computed types",
+    "summary": "Utility, mapped and inferred types arrive already evaluated.",
+    "files": ["settings.ts", "Demo.res"]
+  },
+  {
+    "id": "package",
+    "title": "A package",
+    "summary": "Module specifiers resolve the way TypeScript resolves them.",
+    "files": ["node_modules/tiny-money/package.json", "node_modules/tiny-money/index.d.ts", "Demo.res"]
+  },
+  {
+    "id": "lazy",
+    "title": "Only what is imported is checked",
+    "summary": "One function out of a module of sixty-two, one of which does not even type check.",
+    "files": ["billing.ts", "Demo.res"],
+    "compare": true,
+    "view": "typescript"
+  },
+  {
+    "id": "mismatch",
+    "title": "A type error",
+    "summary": "Using an import wrongly is an ordinary ReScript error.",
+    "files": ["geometry.ts", "Demo.res"],
+    "fails": true
+  },
+  {
+    "id": "gaps",
+    "title": "What does not fit",
+    "summary": "Overloads, any, constraints, untagged object unions: imported, with a note.",
+    "files": ["loose.ts", "Demo.res"]
+  }
+]

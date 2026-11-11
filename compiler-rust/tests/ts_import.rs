@@ -148,3 +148,42 @@ let fetched = dog.fetch("ball")
         Err(error) => panic!("{error}"),
     }
 }
+
+/// The examples of the documentation page (`ts-import/site/examples`) compile,
+/// except the ones that show an error.
+#[test]
+fn site_examples_compile() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../ts-import/site/examples");
+    let index = std::fs::read_to_string(root.join("index.json")).unwrap();
+    let index: serde_json::Value = serde_json::from_str(&index).unwrap();
+    for example in index.as_array().unwrap() {
+        let id = example["id"].as_str().unwrap();
+        let mut ts: Vec<(String, String)> = Vec::new();
+        let mut source = String::new();
+        for name in example["files"].as_array().unwrap() {
+            let name = name.as_str().unwrap();
+            let text = std::fs::read_to_string(root.join(id).join(name)).unwrap();
+            if name.ends_with(".res") {
+                source = text;
+            } else {
+                ts.push((format!("/app/src/{name}"), text));
+            }
+        }
+        let ts: Vec<(&str, &str)> = ts.iter().map(|(path, text)| (path.as_str(), text.as_str())).collect();
+        let result = compile(&source, &ts);
+        let fails = example["fails"].as_bool().unwrap_or(false);
+        match result {
+            Ok(_) if fails => panic!("{id} compiles, but is marked as failing"),
+            Err(error) if !fails => panic!("{id} does not compile:\n{error}"),
+            _ => {}
+        }
+    }
+}
+
+/// Two compilations on one thread that both type check the runtime from
+/// source: the second must not see declarations of the first.
+#[test]
+fn compilations_on_one_thread_are_independent() {
+    compile("let x = Array.length([1])", &[]).unwrap();
+    compile("let y = Array.length([1])", &[]).unwrap();
+}
