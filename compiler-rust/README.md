@@ -2505,3 +2505,52 @@ Use this process for documentation changes:
 1. Update this README in `compiler-rust/`.
 2. Keep root README focused on project-level user/contributor information.
 3. No parity run is required for README-only changes.
+
+## Parse-only instruction benchmark
+
+Run `scripts/bench_parse.sh` from a checkout with Cargo on `PATH`. It builds
+`examples/parse_bench.rs` in release mode and benchmarks `tests/tests/src` and
+`packages/@rescript/runtime` in `scan` and `parse` modes. With Valgrind installed
+it uses the instruction-count CI flags (`--tool=cachegrind --cache-sim=no`)
+and reports instructions per source line; otherwise it reports timing only.
+Set `ITERATIONS=N` to repeat the corpus (default 1). To select other inputs:
+
+```sh
+cargo run --release --manifest-path compiler-rust/Cargo.toml --example parse_bench -- \
+  --mode parse --iterations 1 tests/tests/src packages/@rescript/runtime
+```
+
+Files are recursively collected, canonicalized, sorted and deduplicated; symlinks
+are skipped. All input is read and decoded using the build's Latin-1 conversion
+before timing starts. A line is an LF-terminated line or a final nonempty line
+without LF (empty files have zero lines). Files, lines and bytes describe one
+corpus pass; diagnostics count all iterations, and nanoseconds/instructions per
+line divide by `lines * iterations`. The timed region includes allocation and
+AST destruction, but no I/O, printing, frontend rewrites, JSX transform or type
+checking. Parsing uses `Parser::new` (locations enabled), `parse_structure` for
+`.res` and `parse_signature` for `.resi`, just like the compiler before its
+frontend. Scanner mode repeatedly calls `Scanner::scan` to EOF; it deliberately
+has no parser context for JSX, templates or regexes, so its lexical diagnostics
+can differ from parse mode. The `parse_errors` field counts diagnostics (lexical
+ones in scan mode), not files with errors; errors do not fail the benchmark.
+
+Cachegrind counts the **whole process**, including startup, discovery, loading
+and output; timing measures only the in-memory loop. Compare the same corpus,
+iterations, checkout path, toolchain and machine. This is an instruction-work
+metric, not hardware retired instructions or a timing measurement under Valgrind.
+
+Initial x86-64 Linux measurements, Valgrind 3.22.0, release fat LTO, one iteration,
+894 files / 67,935 lines / 1,745,497 bytes:
+
+| Mode | Run 1 instructions | Run 2 instructions | Run 1 instructions/line | Run 2 instructions/line |
+| --- | ---: | ---: | ---: | ---: |
+| scan | 192,651,045 | 192,651,164 | 2835.814308 | 2835.816059 |
+| parse | 632,055,990 | 631,790,848 | 9303.834401 | 9299.931523 |
+
+Parse mode reported zero errors; scanner mode reported 210 lexical diagnostics.
+**Repeatability limitation:** scan differed by 0.000062%, but parse differed by
+0.04195%, exceeding a 0.01% comparison threshold. The parser still constructs
+randomly seeded hash tables, a likely source of this noise. Increasing to 20 iterations did not reliably remove
+this variation. Do not use this benchmark to gate changes at 0.01% until that
+noise is resolved; the benchmark does not substitute a different parser or
+change production hashing just to improve its scores.
