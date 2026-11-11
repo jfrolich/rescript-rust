@@ -3,6 +3,7 @@
 //! This stage ports the OCaml raw-lambda structure shape first and then
 //! incrementally ports expression lowering from `translcore.ml`.
 
+use crate::raw_lambda::builder::{RawLambdaBuilder, RawLambdaRead};
 mod jsx;
 
 use crate::fast_hash::{AHashMap as HashMap, AHashSet as HashSet};
@@ -14,7 +15,7 @@ use crate::ident::{Ident, IdentFlags};
 use crate::js_ir::{Kind, ModuleId};
 use crate::lambda::Constant;
 use crate::lambda::LamLoc;
-use crate::lambda::arena::{LamArena, Node, View};
+use crate::lambda::arena::{Node, View};
 use crate::lambda::lam_compat::LetKind;
 use crate::lambda::lam_constant::{
     ConstructorRuntimeTag, ConstructorTag as PointerConstructorTag, PointerInfo,
@@ -28,13 +29,13 @@ use crate::lambda::{
 use crate::location::Location;
 use crate::parse_arena::{LidentIdx, LocIdx, ParseArena};
 use crate::parser::ast::MutableFlag as ParserMutableFlag;
+use crate::raw_lambda::RawLambda;
 use crate::raw_lambda::matching as full_matching;
 use crate::raw_lambda::typeopt::{
     constructor_case, constructor_has_optional_shape, constructor_payload_is_unboxed,
     is_base_type as typeopt_is_base_type, type_cannot_contain_undefined,
     type_cannot_contain_undefined_no_env,
 };
-use crate::raw_lambda::{RawArena, RawLambda};
 use crate::types::path::PathView;
 use crate::types::SignatureItem;
 use crate::types::asttypes::MutableFlag as TypeMutableFlag;
@@ -129,34 +130,22 @@ fn raw_optional_none_constant() -> Constant {
     }
 }
 
-fn raw_optional_none(rb: &RawArena) -> RawLambda {
+fn raw_optional_none<B: RawLambdaBuilder>(rb: &B) -> RawLambda {
     rb.const_(raw_optional_none_constant())
 }
 
-fn raw_free_variables(rb: &RawArena, lam: &RawLambda) -> HashSet<Ident> {
+fn raw_free_variables<B: RawLambdaBuilder>(rb: &B, lam: &RawLambda) -> HashSet<Ident> {
     let mut fv = HashSet::new();
-    crate::raw_lambda::collect_free_variables(&rb.get(), *lam, &mut fv);
+    crate::raw_lambda::collect_free_variables(&*rb.get(), *lam, &mut fv);
     fv
 }
 
-fn raw_subst_idents_owned(
-    rb: &RawArena,
+fn raw_subst_idents_owned<B: RawLambdaBuilder>(
+    rb: &B,
     subst: &HashMap<Ident, Ident>,
     lam: RawLambda,
 ) -> RawLambda {
-    if subst.is_empty() {
-        return lam;
-    }
-    fn go(a: &mut LamArena, subst: &HashMap<Ident, Ident>, lam: RawLambda) -> RawLambda {
-        if let Some(id) = a.as_var(lam) {
-            return match subst.get(&id) {
-                Some(id) => a.var(*id),
-                None => lam,
-            };
-        }
-        a.shallow_map_plain(lam, &mut |a, child| go(a, subst, child))
-    }
-    rb.with_mut(|a| go(a, subst, lam))
+    rb.subst_idents(subst, lam)
 }
 
 fn iter_bound_pattern_idents<'a, F>(ta: &'a TypedArena, pat: &'a Pattern, f: &mut F)
@@ -313,7 +302,7 @@ fn structure_has_config_string(
     })
 }
 
-fn raw_polyvariant_const(rb: &RawArena, tag: &str) -> RawLambda {
+fn raw_polyvariant_const<B: RawLambdaBuilder>(rb: &B, tag: &str) -> RawLambda {
     rb.const_(Constant::Int {
         i: crate::types::btype::hash_variant(tag),
         comment: Some(Box::new(PointerInfo::PolyVariant(tag.to_string()))),
@@ -449,7 +438,7 @@ pub struct RawLambdaDiagnostic {
 }
 
 /// Converter from typedtree to raw lambda.
-pub struct RawLambdaConverter<'a> {
+pub struct RawLambdaConverter<'a, B: RawLambdaBuilder> {
     arena: &'a ParseArena,
     /// Node storage of the typed tree being lowered.
     ta: &'a TypedArena,
@@ -473,17 +462,17 @@ pub struct RawLambdaConverter<'a> {
     /// Location handles attached to the nodes this conversion builds.
     lam_locs: crate::raw_lambda::loc::LamLocBuilder,
     /// The arena the conversion builds raw Lambda into.
-    b: &'a RawArena,
+    b: &'a B,
 }
 
-impl<'a> RawLambdaConverter<'a> {
+impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
     /// Create a new raw-lambda converter.
     pub fn new(
         arena: &'a ParseArena,
         ta: &'a TypedArena,
         type_ctx: &'a TypeContext,
         env: &'a crate::types::env::Env,
-        b: &'a RawArena,
+        b: &'a B,
     ) -> Self {
         Self {
             arena,
@@ -515,7 +504,7 @@ impl<'a> RawLambdaConverter<'a> {
         type_ctx: &'a TypeContext,
         env: &'a crate::types::env::Env,
         start_stamp: i32,
-        b: &'a RawArena,
+        b: &'a B,
     ) -> Self {
         Self {
             arena,
@@ -548,7 +537,7 @@ impl<'a> RawLambdaConverter<'a> {
         env: &'a crate::types::env::Env,
         start_stamp: i32,
         unit_name: String,
-        b: &'a RawArena,
+        b: &'a B,
     ) -> Self {
         Self {
             arena,
@@ -679,7 +668,7 @@ impl<'a> RawLambdaConverter<'a> {
     /// Called where OCaml calls it, so `raw_<id>` takes the next stamp.
     fn pack_trywith_exn(&mut self, id: Ident, handler: RawLambda) -> (Ident, RawLambda) {
         let rb = self.b;
-        if !crate::raw_lambda::lower::exception_id_destructed_raw(&rb.get(), handler, &id) {
+        if !crate::raw_lambda::lower::exception_id_destructed_raw(&*rb.get(), handler, &id) {
             return (id, handler);
         }
         let raw_id = self.fresh_ident(&format!("raw_{}", id.name()));
@@ -725,14 +714,14 @@ impl<'a> RawLambdaConverter<'a> {
     }
 
     fn note_possible_required_modules_in_raw_lambda(&mut self, lam: &RawLambda) {
-        fn collect(a: &LamArena, lam: RawLambda, out: &mut Vec<Ident>) {
+        fn collect(a: &impl RawLambdaRead, lam: RawLambda, out: &mut Vec<Ident>) {
             if let View::GlobalModule(id) = a.view(lam) {
                 out.push(id);
             }
             a.iter_children(lam, |child| collect(a, child, out));
         }
         let mut ids = Vec::new();
-        collect(&self.b.get(), *lam, &mut ids);
+        collect(&*self.b.get(), *lam, &mut ids);
         for id in &ids {
             self.note_possible_required_module(id);
         }
@@ -2048,7 +2037,7 @@ impl<'a> RawLambdaConverter<'a> {
 
     /// `Translcore.external_result_wrap`.
     fn external_result_wrap(
-        rb: &RawArena,
+        rb: &B,
         loc: LamLoc,
         result_type: crate::types::external_ffi_types::ReturnWrapper,
         returns_unit: bool,
@@ -2409,7 +2398,7 @@ impl<'a> RawLambdaConverter<'a> {
 
     /// translcore.ml `is_null_undefined_constant`: unit shares the
     /// undefined constant but is not a `%null` / `%undefined` literal.
-    fn raw_lambda_is_nullish_constant(rb: &RawArena, lam: &RawLambda) -> bool {
+    fn raw_lambda_is_nullish_constant(rb: &B, lam: &RawLambda) -> bool {
         matches!(
             rb.get().as_const(*lam),
             Some(Constant::JsNull | Constant::JsUndefined { is_unit: false })
@@ -2438,7 +2427,7 @@ impl<'a> RawLambdaConverter<'a> {
         }
     }
 
-    fn extract_constant_raw(rb: &RawArena, lam: &RawLambda) -> Option<Constant> {
+    fn extract_constant_raw(rb: &B, lam: &RawLambda) -> Option<Constant> {
         rb.const_of(*lam)
     }
 
@@ -2879,7 +2868,7 @@ impl<'a> RawLambdaConverter<'a> {
     /// module. It depends only on the export list and the paths, so it runs
     /// as soon as both are known; a translation error is reported first.
     fn check_flat_make_exports(&mut self, lam: &RawLambda) {
-        fn terminal_exports(a: &LamArena, lam: RawLambda) -> Option<&[Ident]> {
+        fn terminal_exports(a: &impl RawLambdaRead, lam: RawLambda) -> Option<&[Ident]> {
             match a.view(lam) {
                 View::Let(_, _, _, body) | View::LetRec(_, _, body) | View::Sequence(_, body) => {
                     terminal_exports(a, body)
@@ -2891,7 +2880,7 @@ impl<'a> RawLambdaConverter<'a> {
         if self.flat_make_paths.is_empty() {
             return;
         }
-        let exports = terminal_exports(&self.b.get(), *lam)
+        let exports = terminal_exports(&*self.b.get(), *lam)
             .unwrap_or_default()
             .to_vec();
         let mut occupied = exports
@@ -3078,13 +3067,13 @@ impl<'a> RawLambdaConverter<'a> {
             return Some(pos);
         }
 
-        fn module_type_for_path(
-            this: &mut RawLambdaConverter<'_>,
+        fn module_type_for_path<B: RawLambdaBuilder>(
+            this: &mut RawLambdaConverter<'_, B>,
             env: &crate::types::env::Env,
             module_path: &crate::types::Path,
         ) -> Option<ModuleType> {
-            fn submodule_type_from_module_type(
-                this: &mut RawLambdaConverter<'_>,
+            fn submodule_type_from_module_type<B: RawLambdaBuilder>(
+                this: &mut RawLambdaConverter<'_, B>,
                 env: &crate::types::env::Env,
                 module_path: &crate::types::Path,
                 mty: ModuleType,
@@ -3151,8 +3140,8 @@ impl<'a> RawLambdaConverter<'a> {
                 })
         }
 
-        fn resolve_runtime_field_position(
-            this: &mut RawLambdaConverter<'_>,
+        fn resolve_runtime_field_position<B: RawLambdaBuilder>(
+            this: &mut RawLambdaConverter<'_, B>,
             env: &crate::types::env::Env,
             module_path: &crate::types::Path,
             mty: ModuleType,
@@ -3569,8 +3558,8 @@ impl<'a> RawLambdaConverter<'a> {
     }
 
     fn note_possible_required_modules_from_module_expr(&mut self, module_expr: &ModuleExpr) {
-        fn note_from_path(
-            this: &mut RawLambdaConverter<'_>,
+        fn note_from_path<B: RawLambdaBuilder>(
+            this: &mut RawLambdaConverter<'_, B>,
             env: &crate::types::env::Env,
             path: &crate::types::Path,
         ) {
@@ -4513,7 +4502,11 @@ impl<'a> RawLambdaConverter<'a> {
     /// Used to decide if we can use simple `letrec` for recursive modules.
     ///
     /// Mirrors OCaml's `Transl_recmodule.is_function_or_const_block`.
-    fn is_function_or_const_block(a: &LamArena, lam: RawLambda, acc: &HashSet<Ident>) -> bool {
+    fn is_function_or_const_block(
+        a: &impl RawLambdaRead,
+        lam: RawLambda,
+        acc: &HashSet<Ident>,
+    ) -> bool {
         match a.view(lam) {
             View::Prim(Primitive::Pmakeblock(_, _), args, _) => {
                 args.iter().all(|arg| match a.view(*arg) {
@@ -4551,11 +4544,11 @@ impl<'a> RawLambdaConverter<'a> {
     }
 
     /// Check if all bindings are either strict (no shape) or all-function blocks.
-    fn is_strict_or_all_functions(rb: &RawArena, bindings: &[RecModuleBinding]) -> bool {
+    fn is_strict_or_all_functions(rb: &B, bindings: &[RecModuleBinding]) -> bool {
         let a = rb.get();
         bindings.iter().all(|binding| match &binding.init {
             None => true,
-            Some(_) => Self::is_function_or_const_block(&a, binding.rhs, &HashSet::new()),
+            Some(_) => Self::is_function_or_const_block(&*a, binding.rhs, &HashSet::new()),
         })
     }
 
@@ -4659,11 +4652,7 @@ impl<'a> RawLambdaConverter<'a> {
     /// 1. `let M = #init_mod(loc, shape)` for modules with shapes
     /// 2. `let M = rhs` for strict modules (no shape)
     /// 3. `seq #update_mod(shape, M, rhs)` to fill in actual values
-    fn eval_rec_bindings(
-        rb: &RawArena,
-        bindings: Vec<RecModuleBinding>,
-        cont: RawLambda,
-    ) -> RawLambda {
+    fn eval_rec_bindings(rb: &B, bindings: Vec<RecModuleBinding>, cont: RawLambda) -> RawLambda {
         if Self::is_strict_or_all_functions(rb, &bindings) {
             // Simple letrec: all modules are just function/const blocks
             let rec_bindings: Vec<(Ident, RawLambda)> = bindings
@@ -4716,7 +4705,7 @@ impl<'a> RawLambdaConverter<'a> {
     /// OCaml `Transl_recmodule.shape_is_empty`: a shape with no fields has
     /// nothing to initialize and nothing to patch, but the right hand side
     /// still runs for its effects.
-    fn shape_is_empty(rb: &RawArena, shape: &RawLambda) -> bool {
+    fn shape_is_empty(rb: &B, shape: &RawLambda) -> bool {
         matches!(
             rb.get().as_const(*shape),
             Some(Constant::Block { elements, .. })
@@ -6628,7 +6617,12 @@ impl<'a> RawLambdaConverter<'a> {
         uncurried_partial_application: Option<i32>,
     ) -> RawLambda {
         let rb = self.b;
-        fn lapply(rb: &RawArena, loc: LamLoc, func: RawLambda, args: Vec<RawLambda>) -> RawLambda {
+        fn lapply<B: RawLambdaBuilder>(
+            rb: &B,
+            loc: LamLoc,
+            func: RawLambda,
+            args: Vec<RawLambda>,
+        ) -> RawLambda {
             rb.apply(
                 func,
                 &args,
@@ -6643,7 +6637,7 @@ impl<'a> RawLambdaConverter<'a> {
         // function. Its callee and arguments are bound outside that function,
         // so they are evaluated once, where the application is, and an await
         // in them stays in the enclosing function.
-        fn is_module_path(a: &LamArena, lam: RawLambda) -> bool {
+        fn is_module_path(a: &impl RawLambdaRead, lam: RawLambda) -> bool {
             match a.view(lam) {
                 View::Var(_) | View::GlobalModule(_) => true,
                 View::Prim(Primitive::Pfield(_, FieldDbgInfo::Module { .. }), [m], _) => {
@@ -6657,16 +6651,16 @@ impl<'a> RawLambdaConverter<'a> {
         // reads the same on each call, so it stays in place and keeps the
         // function a known one that can be inlined. A closure, a constant
         // block or an external value does not.
-        fn is_simple(rb: &RawArena, lam: RawLambda) -> bool {
+        fn is_simple<B: RawLambdaBuilder>(rb: &B, lam: RawLambda) -> bool {
             let a = rb.get();
             match a.view(lam) {
                 View::Const(c) => !c.is_allocating(),
-                _ => is_module_path(&a, lam),
+                _ => is_module_path(&*a, lam),
             }
         }
 
-        fn protect(
-            conv: &mut RawLambdaConverter<'_>,
+        fn protect<B: RawLambdaBuilder>(
+            conv: &mut RawLambdaConverter<'_, B>,
             name: &str,
             lam: RawLambda,
             defs: &mut Vec<(Ident, RawLambda)>,
@@ -6682,8 +6676,8 @@ impl<'a> RawLambdaConverter<'a> {
 
         // OCaml prepends each def to a list and folds it from the head, so
         // the first protected term (the callee) is the outermost binding.
-        fn bind_protected(
-            rb: &RawArena,
+        fn bind_protected<B: RawLambdaBuilder>(
+            rb: &B,
             defs: Vec<(Ident, RawLambda)>,
             body: RawLambda,
         ) -> RawLambda {
@@ -6692,8 +6686,8 @@ impl<'a> RawLambdaConverter<'a> {
             })
         }
 
-        fn build_apply(
-            conv: &mut RawLambdaConverter<'_>,
+        fn build_apply<B: RawLambdaBuilder>(
+            conv: &mut RawLambdaConverter<'_, B>,
             lam: RawLambda,
             mut args_rev: Vec<(RawLambda, bool)>,
             mut pending: std::collections::VecDeque<(Option<RawLambda>, bool)>,
@@ -6952,6 +6946,7 @@ impl<'a> RawLambdaConverter<'a> {
 
 #[cfg(test)]
 mod tests {
+    use crate::raw_lambda::RawArena;
     fn test_signature_module_type(
         items: Vec<crate::types::SignatureItem>,
     ) -> crate::types::decl::ModuleType {

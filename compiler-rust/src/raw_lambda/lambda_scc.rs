@@ -5,14 +5,15 @@
 use crate::fast_hash::AHashMap;
 use crate::ident::Ident;
 use crate::lambda::LetKind;
-use crate::lambda::arena::{LamArena, View};
-use crate::raw_lambda::{RawArena, RawLambda};
+use crate::lambda::arena::View;
+use crate::raw_lambda::RawLambda;
+use crate::raw_lambda::builder::{RawLambdaBuilder, RawLambdaRead};
 
 type Bindings = Vec<(Ident, RawLambda)>;
 
 /// OCaml `Lambda_scc.exists_var`: walk `l`, stopping as soon as `p` returns
 /// true for a variable or assigned identifier.
-fn exists_var(a: &LamArena, p: &mut impl FnMut(&Ident) -> bool, l: RawLambda) -> bool {
+fn exists_var(a: &impl RawLambdaRead, p: &mut impl FnMut(&Ident) -> bool, l: RawLambda) -> bool {
     match a.view(l) {
         View::Var(id) => return p(&id),
         View::Assign(id, _) if p(&id) => return true,
@@ -30,7 +31,7 @@ fn exists_var(a: &LamArena, p: &mut impl FnMut(&Ident) -> bool, l: RawLambda) ->
 /// side refers to, in binding order. One `seen` array is shared by all bodies
 /// (`seen[j] == i` once body `i` has referred to binding `j`), so finding the
 /// edges costs the size of the bodies rather than the group size per body.
-fn preprocess_deps(a: &LamArena, groups: &Bindings) -> Vec<Vec<usize>> {
+fn preprocess_deps(a: &impl RawLambdaRead, groups: &Bindings) -> Vec<Vec<usize>> {
     let len = groups.len();
     // `Hash_ident.replace index id i`: a repeated member keeps its last index.
     let mut index = AHashMap::with_capacity(len);
@@ -120,16 +121,16 @@ fn graph(e: &[Vec<usize>]) -> Vec<Vec<usize>> {
 
 /// OCaml `Lambda_scc.bind_rec`: split a syntactic `let rec` group into the
 /// actual recursive clusters and demote bindings that are not recursive.
-pub(crate) fn bind_rec(b: &RawArena, groups: Bindings, body: RawLambda) -> RawLambda {
+pub(crate) fn bind_rec<B: RawLambdaBuilder>(b: &B, groups: Bindings, body: RawLambda) -> RawLambda {
     if let [(id, bind)] = groups.as_slice() {
-        let recursive = exists_var(&b.get(), &mut |v: &Ident| id.same(v), *bind);
+        let recursive = exists_var(&*b.get(), &mut |v: &Ident| id.same(v), *bind);
         return if recursive {
             b.letrec(&groups, body)
         } else {
             b.let_(LetKind::Strict, *id, *bind, body)
         };
     }
-    let node_vec = preprocess_deps(&b.get(), &groups);
+    let node_vec = preprocess_deps(&*b.get(), &groups);
     let clusters = graph(&node_vec);
     if clusters.len() <= 1 {
         return b.letrec(&groups, body);
@@ -156,6 +157,7 @@ mod tests {
     use super::*;
     use crate::lambda::FunctionAttribute;
     use crate::lambda::LamLoc;
+    use crate::raw_lambda::RawArena;
 
     fn function(b: &RawArena, param: &str, body: RawLambda) -> RawLambda {
         b.function_(
