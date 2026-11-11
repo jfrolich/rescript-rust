@@ -3,7 +3,6 @@
 //! This module contains the module parsing logic, converting tokens
 //! into module AST nodes (structures, signatures, module expressions, etc.).
 
-use std::borrow::Cow;
 use std::cell::RefCell;
 
 use crate::location::Position;

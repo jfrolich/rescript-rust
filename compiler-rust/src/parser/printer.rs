@@ -2128,12 +2128,12 @@ fn parameters_should_hug(parameters: &[parsetree_viewer::FunParam<'_>]) -> bool 
     match parameters {
         [
             FunParam::Parameter {
-                attrs,
+                attrs: [],
                 label: ArgLabel::Nolabel,
                 default_expr: None,
                 pat,
             },
-        ] if attrs.is_empty() => parsetree_viewer::is_huggable_pattern(pat),
+        ] => parsetree_viewer::is_huggable_pattern(pat),
         _ => false,
     }
 }
@@ -3131,7 +3131,7 @@ fn print_dict_rows(
                         let value_expr = arena.get_expr(arena.expr_list(*tuple_items)[1]);
                         // Key should be a string constant
                         if let ExpressionDesc::Pexp_constant(c) = &key_expr.pexp_desc {
-                            if let Constant::String(payload) = &*c {
+                            if let Constant::String(payload) = c {
                                 let txt = payload.semantic(arena);
                                 // Create combined location from key to value (for row comments)
                                 let (cmt_pos_range, cmt_full_loc) = make_combined_pos_range(
@@ -8023,7 +8023,7 @@ fn print_attribute(
                     let (ref expr_idx, _) = **eval_inner;
                     let expr = arena.get_expr(*expr_idx);
                     if let ExpressionDesc::Pexp_constant(c) = &expr.pexp_desc {
-                        if let Constant::String(payload) = &*c {
+                        if let Constant::String(payload) = c {
                             return Doc::concat(vec![
                                 Doc::text(if standalone { "/***" } else { "/**" }),
                                 Doc::text(payload.semantic(arena)),

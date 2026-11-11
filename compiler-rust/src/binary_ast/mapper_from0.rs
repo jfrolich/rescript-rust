@@ -60,20 +60,6 @@ fn map_closed_flag(flag: &pt0::ClosedFlag) -> current::ClosedFlag {
 
 // ========== Attribute helpers ==========
 
-fn remove_await_attribute(attrs: &[pt0::Attribute]) -> Vec<pt0::Attribute> {
-    attrs
-        .iter()
-        .filter(|(name, _)| name.txt != "res.await")
-        .cloned()
-        .collect()
-}
-
-fn has_async_attribute(arena: &ParseArena, attrs: &[current::Attribute]) -> bool {
-    attrs
-        .iter()
-        .any(|(name, _)| arena.get_string(name.txt) == "res.async")
-}
-
 fn has_partial_attribute(attrs: &[pt0::Attribute]) -> bool {
     attrs.iter().any(|(name, _)| name.txt == "res.partial")
 }
@@ -124,38 +110,6 @@ fn has_explicit_arity_attr(arena: &ParseArena, attrs: &Attributes) -> bool {
         let name = arena.get_string(name.txt);
         name == "ocaml.explicit_arity" || name == "explicit_arity"
     })
-}
-
-fn get_arity_from_attributes(arena: &ParseArena, attrs: &[current::Attribute]) -> Option<i32> {
-    for (name, payload) in attrs {
-        if arena.get_string(name.txt) == "res.arity" {
-            if let current::Payload::PStr(items) = payload {
-                if let Some(item) = items.first() {
-                    if let current::StructureItemDesc::Pstr_eval(inner) = &item.pstr_desc {
-                        let (ref eval_expr_idx, _) = **inner;
-                        let eval_expr = arena.get_expr(*eval_expr_idx);
-                        if let current::ExpressionDesc::Pexp_constant(c) = &eval_expr.pexp_desc {
-                            if let current::Constant::Integer(s, _) = c {
-                                return arena.get_string(*s).parse().ok();
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    None
-}
-
-fn remove_arity_attribute(
-    arena: &ParseArena,
-    attrs: &[current::Attribute],
-) -> Vec<current::Attribute> {
-    attrs
-        .iter()
-        .filter(|(name, _)| arena.get_string(name.txt) != "res.arity")
-        .cloned()
-        .collect()
 }
 
 // ========== for-of helpers (upstream #7887) ==========
@@ -453,14 +407,6 @@ impl<'a> Mapper<'a> {
         self.arena.from_location(loc)
     }
 
-    /// Create a Located value from old Located
-    fn map_loc<T: Clone>(&mut self, old: &OldLocated<T>) -> Located<T> {
-        Located {
-            txt: old.txt.clone(),
-            loc: self.loc(&old.loc),
-        }
-    }
-
     /// Convert a Located<String> to Located<Cow<'static, str>>
     fn map_label_loc(&mut self, old: &OldLocated<String>) -> Located<Cow<'static, str>> {
         Located {
@@ -556,12 +502,6 @@ impl<'a> Mapper<'a> {
         }
     }
 
-    /// Create a Located<StrIdx> with an interned string and no location
-    fn mk_string_noloc(&mut self, s: &str) -> Located<StrIdx> {
-        let str_idx = self.arena.intern(s);
-        Located::mknoloc(str_idx)
-    }
-
     /// Map a Located<Longident> to Located<LidentIdx> by pushing to arena
     fn map_longident_loc(
         &mut self,
@@ -577,14 +517,6 @@ impl<'a> Mapper<'a> {
     /// Push a longident to the arena and get back an index
     fn push_longident(&mut self, lid: Longident) -> crate::parse_arena::LidentIdx {
         self.arena.push_longident(lid)
-    }
-
-    /// Create a Located value with given text and location
-    fn mkloc<T>(&mut self, txt: T, loc: &FullLocation) -> Located<T> {
-        Located {
-            txt,
-            loc: self.loc(loc),
-        }
     }
 
     /// Get a string from a StrIdx
@@ -1588,10 +1520,7 @@ impl<'a> Mapper<'a> {
                 let mut values = Vec::new();
                 let mut collected = None;
                 let mut index = 0;
-                loop {
-                    let Some(part) = parts.get(index) else {
-                        break;
-                    };
+                while let Some(part) = parts.get(index) {
                     let pt0::ExpressionDesc::Constant(pt0::Constant::String(text, delimiter)) =
                         &part.pexp_desc
                     else {

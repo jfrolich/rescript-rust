@@ -436,7 +436,7 @@ pub fn walk_expr<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, idx: ExprId
         | ExpressionDesc::Pexp_break
         | ExpressionDesc::Pexp_continue => {}
         ExpressionDesc::Pexp_let(inner) => {
-            let (_, vbs, body) = &*inner;
+            let (_, vbs, body) = inner;
             for vb in arena.vb_list(*vbs) {
                 v.value_binding(arena, vb);
             }
@@ -462,7 +462,7 @@ pub fn walk_expr<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, idx: ExprId
             }
         }
         ExpressionDesc::Pexp_match(inner) | ExpressionDesc::Pexp_try(inner) => {
-            let (scrutinee, cases) = &*inner;
+            let (scrutinee, cases) = inner;
             v.expr(arena, *scrutinee);
             for (index, case) in arena.case_list(*cases).iter().enumerate() {
                 v.case(arena, idx, index, case);

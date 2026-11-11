@@ -862,7 +862,8 @@ fn walk_structure_item(
         StructureItemDesc::Pstr_open(od) => walk_open_description(od, t, comments, arena),
         StructureItemDesc::Pstr_value(inner) => {
             let (_, ref bindings) = *inner;
-            walk_value_bindings(&arena.vb_list(*bindings).to_vec(), t, comments, arena)
+            let bindings = arena.vb_list(*bindings).to_vec();
+            walk_value_bindings(&bindings, t, comments, arena)
         }
         StructureItemDesc::Pstr_type(inner) => {
             let (_, ref declarations) = **inner;
@@ -1586,11 +1587,12 @@ fn walk_expression(
             let body = arena.get_expr(*body_idx).clone();
             // Check if body is unit
             let body_is_unit = matches!(&body.pexp_desc, ExpressionDesc::Pexp_construct(name, args) if arena.is_lident(name.txt, "()") && args.txt.is_empty());
+            let bindings = arena.vb_list(*bindings).to_vec();
             if body_is_unit {
-                walk_value_bindings(&arena.vb_list(*bindings).to_vec(), t, comments, arena);
+                walk_value_bindings(&bindings, t, comments, arena);
             } else {
                 let comments = visit_list_but_continue_with_remaining_comments(
-                    &arena.vb_list(*bindings).to_vec(),
+                    &bindings,
                     |vb, arena| {
                         let pvb_pat = arena.get_pat(vb.pvb_pat);
                         if arena.loc_ghost(pvb_pat.ppat_loc) {
@@ -3248,8 +3250,9 @@ fn walk_core_type(
                 let (after_name, rest) = partition_adjacent_trailing(name.loc, trailing, arena);
                 t.attach_trailing(name.loc, after_name, arena);
 
+                let args = arena.type_list(*args).to_vec();
                 visit_list_but_continue_with_remaining_comments(
-                    &arena.type_list(*args).to_vec(),
+                    &args,
                     |arg, arena| arena.get_core_type(*arg).ptyp_loc,
                     |arg, t, comments, arena| {
                         // Safety: arena is append-only, core type won't be invalidated

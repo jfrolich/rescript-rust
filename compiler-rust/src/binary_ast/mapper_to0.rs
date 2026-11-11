@@ -137,14 +137,6 @@ impl<'a> Mapper<'a> {
         self.arena.to_location(idx)
     }
 
-    /// Convert an arena-based Located<T> to a full Located<T>
-    fn map_loc<T: Clone>(&mut self, located: &Located<T>) -> OldLocated<T> {
-        OldLocated {
-            txt: located.txt.clone(),
-            loc: self.loc(located.loc),
-        }
-    }
-
     /// Convert a Located<Cow<'static, str>> to OldLocated<String> for labels
     fn map_label_loc(
         &mut self,

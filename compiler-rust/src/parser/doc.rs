@@ -501,7 +501,8 @@ impl Doc {
             }
         }
 
-        // Process any remaining line suffices
+        // Process any remaining line suffices. Nothing measures widths past
+        // this point, so the column is no longer tracked.
         for (indent, mode, doc) in line_suffices.into_iter().rev() {
             stack.push((indent, mode, doc));
         }
@@ -510,7 +511,6 @@ impl Doc {
                 Doc::Nil | Doc::BreakParent | Doc::LineSuffix(_) => {}
                 Doc::Text(txt) => {
                     buffer.push_str(txt);
-                    pos += text_width(txt);
                 }
                 Doc::Concat(docs) => {
                     for doc in docs.iter().rev() {
@@ -524,7 +524,6 @@ impl Doc {
                     if mode == Mode::Break {
                         if *style == LineStyle::Literal {
                             buffer.push('\n');
-                            pos = 0;
                         } else {
                             let trimmed_len = buffer.trim_end_matches(' ').len();
                             buffer.truncate(trimmed_len);
@@ -532,24 +531,20 @@ impl Doc {
                             if indent > 0 {
                                 buffer.push_str(&" ".repeat(indent as usize));
                             }
-                            pos = indent;
                         }
                     } else {
                         // Flat mode
                         match style {
                             LineStyle::Classic => {
                                 buffer.push(' ');
-                                pos += 1;
                             }
                             LineStyle::Hard => {
                                 let trimmed_len = buffer.trim_end_matches(' ').len();
                                 buffer.truncate(trimmed_len);
                                 buffer.push('\n');
-                                pos = 0;
                             }
                             LineStyle::Literal => {
                                 buffer.push('\n');
-                                pos = 0;
                             }
                             LineStyle::Soft => {}
                         }

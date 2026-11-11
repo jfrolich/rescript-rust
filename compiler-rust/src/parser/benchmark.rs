@@ -186,7 +186,7 @@ mod tests {
         }
 
         // Sort by size descending (largest files first)
-        files.sort_by(|a, b| b.size.cmp(&a.size));
+        files.sort_by_key(|a| std::cmp::Reverse(a.size));
         files
     }
 

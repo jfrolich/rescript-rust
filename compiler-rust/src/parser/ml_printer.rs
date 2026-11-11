@@ -1425,7 +1425,7 @@ fn print_expression_inner<W: Write>(
             print_longident_idx(f, arena, lid.txt);
         }
         ExpressionDesc::Pexp_constant(c) => {
-            let is_negative = match &*c {
+            let is_negative = match c {
                 Constant::Integer(s, _) | Constant::Float(s, _) => {
                     arena.get_string(*s).starts_with('-')
                 }

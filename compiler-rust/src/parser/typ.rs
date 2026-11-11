@@ -1190,10 +1190,7 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
         let regular_attrs = parse_attributes(p);
 
         // Combine: doc_attrs @ regular_attrs (OCaml: doc_attr @ parse_attributes p)
-        let param_attrs: Attributes = doc_attrs
-            .into_iter()
-            .chain(regular_attrs.into_iter())
-            .collect();
+        let param_attrs: Attributes = doc_attrs.into_iter().chain(regular_attrs).collect();
 
         // Capture start position before label - OCaml includes the ~ in arrow location
         // But if there's an uncurried marker (.), the arrow should start at the .

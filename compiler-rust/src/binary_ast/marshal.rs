@@ -49,7 +49,6 @@ const CODE_SHARED32: u8 = 0x06;
 const CODE_BLOCK32: u8 = 0x08;
 const CODE_STRING8: u8 = 0x09;
 const CODE_STRING32: u8 = 0x0A;
-const CODE_DOUBLE_BIG: u8 = 0x0B;
 const CODE_DOUBLE_LITTLE: u8 = 0x0C;
 #[allow(dead_code)]
 const CODE_BLOCK64: u8 = 0x13;
@@ -1929,7 +1928,7 @@ mod tests {
         let mut arena = ParseArena::default();
         // Create two different StrIdx with the same content
         let idx1 = arena.intern_string("same");
-        let idx2 = arena.push_string("same".to_string()); // Different idx, same content
+        let idx2 = arena.push_string("same"); // Different idx, same content
 
         let mut w = MarshalWriter::new();
         w.set_arena(&arena);

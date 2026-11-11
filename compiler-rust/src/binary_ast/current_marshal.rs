@@ -106,16 +106,13 @@ fn should_share_singleton_attr_list(name: &str) -> bool {
 
 fn is_singleton_template_attr(attrs: &Attributes, w: &MarshalWriter<'_>) -> bool {
     let arena = w.get_arena();
-    match attrs.as_slice() {
+    matches!(
+        attrs.as_slice(),
         [(name, payload)]
             if arena.get_string(name.txt) == "res.template"
                 && name.loc == LocIdx::default()
-                && matches!(payload, Payload::PStr(items) if items.is_empty()) =>
-        {
-            true
-        }
-        _ => false,
-    }
+                && matches!(payload, Payload::PStr(items) if items.is_empty())
+    )
 }
 
 fn is_none_loc_idx(loc: LocIdx, w: &MarshalWriter<'_>) -> bool {
@@ -277,7 +274,7 @@ fn is_external_ext_expr(expr: &Expression, w: &MarshalWriter<'_>) -> bool {
     let eq_arg1_expr = arena.get_expr(eq_args[1].1);
     matches!(
         &eq_arg1_expr.pexp_desc,
-        ExpressionDesc::Pexp_constant(c) if matches!(&*c, Constant::String(s) if s.semantic(arena) == "undefined")
+        ExpressionDesc::Pexp_constant(c) if matches!(c, Constant::String(s) if s.semantic(arena) == "undefined")
     )
 }
 
@@ -303,7 +300,7 @@ fn is_external_raw_expansion_body(expr: &Expression, w: &MarshalWriter<'_>) -> b
     let arg_expr = w.get_arena().get_expr(args[0].1);
     matches!(
         &arg_expr.pexp_desc,
-        ExpressionDesc::Pexp_constant(c) if matches!(&*c, Constant::RawSource(_))
+        ExpressionDesc::Pexp_constant(c) if matches!(c, Constant::RawSource(_))
     )
 }
 
@@ -796,25 +793,6 @@ impl Marshal for Arity {
 // are in types.rs - don't duplicate them here.
 
 // ========== Constant ==========
-
-/// `String_literal.payload`: `Valid {source; semantic}` is tag 0, and
-/// `Invalid_source of string` is tag 1.
-fn marshal_string_literal(
-    payload: &crate::string_literal::StringLiteral,
-    w: &mut MarshalWriter<'_>,
-) {
-    match payload {
-        crate::string_literal::StringLiteral::Valid { source, semantic } => {
-            w.write_block_header(0, 2);
-            w.write_str(source);
-            w.write_str(semantic);
-        }
-        crate::string_literal::StringLiteral::InvalidSource(source) => {
-            w.write_block_header(1, 1);
-            w.write_str(source);
-        }
-    }
-}
 
 /// `String_literal.payload` of an interned literal, written by content.
 fn marshal_string_const(payload: StringConst, w: &mut MarshalWriter<'_>) {
@@ -1346,7 +1324,7 @@ impl Marshal for Expression {
         // the default mapper which creates fresh tuples.
         let share_attrs = matches!(
             &self.pexp_desc,
-            ExpressionDesc::Pexp_constant(c) if matches!(&*c, Constant::Integer(_, Some(_)))
+            ExpressionDesc::Pexp_constant(c) if matches!(c, Constant::Integer(_, Some(_)))
         ) || matches!(
             &self.pexp_desc,
             ExpressionDesc::Pexp_extension(_) | ExpressionDesc::Pexp_newtype(_)

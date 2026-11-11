@@ -1422,7 +1422,7 @@ mod tests {
         println!("\n=== AST Enum Sizes (after boxing) ===");
         println!(
             "Token:              {} bytes",
-            size_of::<crate::parser::token::Token>()
+            size_of::<crate::parser::token::Token<'_>>()
         );
         println!("ExpressionDesc:     {} bytes", size_of::<ExpressionDesc>());
         println!("PatternDesc:        {} bytes", size_of::<PatternDesc>());

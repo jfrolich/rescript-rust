@@ -140,12 +140,6 @@ impl<'a> DependencyCollector<'a> {
         self.add_expression(expr);
     }
 
-    fn add_pat_idx(&mut self, idx: PatIdx) {
-        let arena = self.arena;
-        let pat = arena.get_pat(idx);
-        self.add_pattern(pat);
-    }
-
     fn add_pat_idx_collecting_unpack(&mut self, idx: PatIdx) -> HashSet<String> {
         let arena = self.arena;
         let pat = arena.get_pat(idx);
@@ -849,13 +843,6 @@ impl<'a> DependencyCollector<'a> {
         unpack_names
     }
 
-    fn add_pattern(&mut self, pat: &Pattern) {
-        let mut unpack_names = HashSet::new();
-        self.add_pattern_inner(pat, &mut unpack_names);
-        // Note: we don't use unpack_names here because add_pattern is called
-        // in contexts where the unpack bindings don't persist (e.g., match cases)
-    }
-
     fn add_pattern_inner(&mut self, pat: &Pattern, unpack_names: &mut HashSet<String>) {
         match &pat.ppat_desc {
             PatternDesc::Ppat_any | PatternDesc::Ppat_var(_) | PatternDesc::Ppat_constant(_) => {}
@@ -1290,32 +1277,6 @@ impl<'a> DependencyCollector<'a> {
         self.add_expr_idx(case.pc_rhs);
         for name in &newly_added {
             self.bound_modules.shift_remove(name);
-        }
-    }
-
-    fn add_payload(&mut self, payload: &Payload) {
-        match payload {
-            Payload::PStr(str) => {
-                self.add_structure(str);
-            }
-            Payload::PSig(sig) => {
-                self.add_signature(sig);
-            }
-            Payload::PTyp(ty) => {
-                // ty is CoreTypeIdx
-                let ty = *ty;
-                self.add_core_type_idx(ty);
-            }
-            Payload::PPat(inner) => {
-                let (ref pat, ref guard) = **inner;
-                // pat is PatIdx, guard is Option<ExprIdx>
-                let pat = *pat;
-                self.add_pat_idx(pat);
-                if let Some(guard) = guard {
-                    let guard = *guard;
-                    self.add_expr_idx(guard);
-                }
-            }
         }
     }
 }

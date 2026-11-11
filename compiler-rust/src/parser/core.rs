@@ -4,7 +4,7 @@
 //! stream into an AST. It mirrors `res_core.ml` from the OCaml implementation.
 
 use crate::location::Position;
-use crate::parse_arena::{CoreTypeIdx, LocIdx, ParseArena, PosIdx, StrIdx};
+use crate::parse_arena::{LocIdx, ParseArena, PosIdx, StrIdx};
 use crate::parser::DiagnosticCategory;
 
 use super::ast::*;
@@ -1505,7 +1505,7 @@ mod tests {
     #[test]
     fn test_ast_helper_make_var_pat() {
         let mut arena = crate::parse_arena::ParseArena::new();
-        let str_idx = arena.push_string("x".to_string());
+        let str_idx = arena.push_string("x");
         let loc = LocIdx::none();
         let pat = ast_helper::make_var_pat(str_idx, loc);
         assert!(matches!(pat.ppat_desc, PatternDesc::Ppat_var(_)));

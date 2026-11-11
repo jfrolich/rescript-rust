@@ -11,7 +11,7 @@
 //! - Key props use `jsxKeyed`/`jsxsKeyed` instead
 //! - `@react.component` transforms functions to accept props record
 
-use std::{borrow::Cow, fmt};
+use std::fmt;
 
 use super::ast::*;
 use super::longident::Longident;
@@ -482,7 +482,7 @@ fn spelunk_for_fun_expression(
         ExpressionDesc::Pexp_fun(_) | ExpressionDesc::Pexp_newtype(_) => (None, false, expr),
         // let make = {let foo = bar in (~prop) => ...}
         ExpressionDesc::Pexp_let(inner) => {
-            let (rec_flag, bindings, body_idx) = &*inner;
+            let (rec_flag, bindings, body_idx) = inner;
             let (binding_wrapper, has_forward_ref, inner_expr) =
                 spelunk_for_fun_expression(arena, *body_idx);
             let inner_expr_idx = arena.push_expr(inner_expr);
@@ -490,11 +490,7 @@ fn spelunk_for_fun_expression(
                 binding_wrapper,
                 has_forward_ref,
                 Expression {
-                    pexp_desc: ExpressionDesc::Pexp_let((
-                        *rec_flag,
-                        bindings.clone(),
-                        inner_expr_idx,
-                    )),
+                    pexp_desc: ExpressionDesc::Pexp_let((*rec_flag, *bindings, inner_expr_idx)),
                     pexp_loc: expr.pexp_loc,
                     pexp_attributes: expr.pexp_attributes.clone(),
                 },
@@ -505,7 +501,7 @@ fn spelunk_for_fun_expression(
             if apply_inner.args.len() == 1
                 && matches!(&arena.apply_args(apply_inner.args)[0].0, ArgLabel::Nolabel) =>
         {
-            let PexpApply { funct, .. } = &*apply_inner;
+            let PexpApply { funct, .. } = apply_inner;
             let args = arena.apply_args(apply_inner.args);
             let (_, _, inner_expr) = spelunk_for_fun_expression(arena, args[0].1);
             let funct_expr = arena.get_expr(*funct).clone();
@@ -2478,7 +2474,7 @@ fn component_props_need_labelled_error_loc(
             component_props_need_labelled_error_loc(arena, *body_idx, has_application)
         }
         ExpressionDesc::Pexp_let(inner) => {
-            let (_, _, body_idx) = &*inner;
+            let (_, _, body_idx) = inner;
             component_props_need_labelled_error_loc(arena, *body_idx, has_application)
         }
         ExpressionDesc::Pexp_apply(apply)
@@ -2855,11 +2851,7 @@ fn constrain_jsx_return(
             let constrained_body = constrain_jsx_return(arena, body_expr, config);
             let constrained_body_idx = arena.push_expr(constrained_body);
             Expression {
-                pexp_desc: ExpressionDesc::Pexp_let((
-                    *rec_flag,
-                    bindings.clone(),
-                    constrained_body_idx,
-                )),
+                pexp_desc: ExpressionDesc::Pexp_let((*rec_flag, *bindings, constrained_body_idx)),
                 pexp_loc: expr.pexp_loc,
                 pexp_attributes: expr.pexp_attributes.clone(),
             }
@@ -3578,7 +3570,7 @@ fn update_config_from_attribute(arena: &ParseArena, attr: &Attribute, config: &m
                                     )
                                     .pexp_desc
                                 {
-                                    if let Constant::Integer(s, _) = &*c {
+                                    if let Constant::Integer(s, _) = c {
                                         if let Ok(v) = arena.get_string(*s).parse::<i32>() {
                                             version_raw = Some(v);
                                         }
@@ -5190,7 +5182,7 @@ let make = (~value: string) => React.null
         else {
             panic!("expected generated value binding");
         };
-        let (_, bindings) = &*value;
+        let (_, bindings) = value;
         let ExpressionDesc::Pexp_apply(apply) = &parser
             .arena()
             .get_expr(parser.arena().vb_list(*bindings)[0].pvb_expr)
