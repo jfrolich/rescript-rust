@@ -586,8 +586,9 @@ impl<'src> Parser<'src> {
             let result = self.scanner.scan();
 
             // Propagate scanner diagnostics to parser
-            let scanner_diagnostics = self.scanner.take_diagnostics();
-            self.diagnostics.extend(scanner_diagnostics);
+            if !self.scanner.diagnostics().is_empty() {
+                self.collect_scanner_diagnostics();
+            }
 
             match result.token {
                 Token::Comment(mut comment) => {
@@ -634,6 +635,12 @@ impl<'src> Parser<'src> {
                 }
             }
         }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn collect_scanner_diagnostics(&mut self) {
+        self.diagnostics.extend(self.scanner.take_diagnostics());
     }
 
     /// Advance to the next token, but only if not at EOF.
