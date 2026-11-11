@@ -696,7 +696,10 @@ fn flow_like_raw_js_expression_parse_warning(
     start_offset: usize,
     end_offset: usize,
 ) -> (String, usize, usize) {
-    if is_js_regex_like_literal(code) && oxc_message == "Unterminated regular expression" {
+    if is_js_regex_like_literal(code)
+        && (oxc_message == "Unterminated regular expression"
+            || (code.trim() == "/" && oxc_message == "Unexpected token"))
+    {
         let eof_offset = code.len();
         return (
             "Invalid regular expression: missing /".to_string(),
@@ -863,6 +866,19 @@ fn raw_js_expression_parse_warning(
     let first_label = first_error.labels.first();
     let start_offset = first_label.map_or(code.len(), |label| label.offset() as usize);
     let end_offset = first_label.map_or(start_offset, |label| (label.offset() + label.len()) as usize);
+    // Flow's `do_parse ... Parse.expression false` does not require EOF
+    // (compiler/ml/ast_payload.ml:177-180). Oxc 0.158 does. A complete
+    // expression followed by another token is not a Flow parse warning.
+    if first_error.to_string() == "Unexpected token"
+        && start_offset > 0
+        && code.get(..start_offset).is_some_and(|prefix| {
+            Parser::new(&allocator, prefix, SourceType::default())
+                .parse_expression()
+                .is_ok()
+        })
+    {
+        return None;
+    }
     let (message, start_offset, end_offset) = flow_like_raw_js_expression_parse_warning(
         code,
         &first_error.to_string(),
