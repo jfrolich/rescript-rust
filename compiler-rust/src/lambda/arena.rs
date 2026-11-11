@@ -1474,11 +1474,14 @@ impl LamArena {
         }
     }
 
-    /// `Lam.apply`.
+    /// `Lam.apply`. An async function or one with a directive stays a
+    /// function (lambda.ml:1096-1097, `lfunction_can_be_inlined`).
     pub fn apply(&mut self, func: Lam, args: &[Lam], info: ApInfo) -> Lam {
         match self.node(func) {
             Node::Function { body, info: f } => {
-                if let Some(reduced) = self.eta_reduce_function_apply(f, body, args, &info) {
+                if crate::lambda::lam_analysis::lfunction_can_be_inlined(self, f)
+                    && let Some(reduced) = self.eta_reduce_function_apply(f, body, args, &info)
+                {
                     return reduced;
                 }
                 self.apply_raw(func, args, info)

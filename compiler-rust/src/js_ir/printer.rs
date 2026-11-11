@@ -1025,7 +1025,14 @@ impl<'r> JsPrinter<'r> {
         if let Some((_, info)) = fun {
             let params = a.ident_slice(info.params);
             let body = a.stmts(info.body);
-            if let Some(target) = eta_reduce_function_body(a, info.is_method, params, body) {
+            if let Some(target) = eta_reduce_function_body(
+                a,
+                info.is_method,
+                info.async_,
+                info.directive.is_some(),
+                params,
+                body,
+            ) {
                 self.write("let ");
                 let var_name = self.ident_name(&decl.ident);
                 self.write(&var_name);
@@ -1191,7 +1198,9 @@ impl<'r> JsPrinter<'r> {
         // OCaml's `Is_return | No_name _` arm of pp_function that emits
         // `optimize len ~p cxt f v` -> `vident` for the clean
         // `arity = Full, call_info = Call_ml | Call_builtin_runtime` case.
-        if let Some(target) = eta_reduce_function_body(a, is_method, params, body) {
+        if let Some(target) =
+            eta_reduce_function_body(a, is_method, async_, directive.is_some(), params, body)
+        {
             self.with_reserved_ident_scope(reserved_idents, |this| {
                 this.print_vident(target);
             });
@@ -1292,7 +1301,9 @@ impl<'r> JsPrinter<'r> {
         // a single `return Call(Var v, ls, _)` whose argument list matches the
         // parameter list positionally and v does not appear in the params (to
         // avoid turning `function x { return x(x); }` into `let x = x;`).
-        if let Some(target) = eta_reduce_function_body(self.a, is_method, params, body) {
+        if let Some(target) =
+            eta_reduce_function_body(self.a, is_method, async_, directive.is_some(), params, body)
+        {
             self.write("let ");
             let fn_name = self.ident_name(ident);
             self.write(&fn_name);
@@ -2706,14 +2717,18 @@ impl<'r> JsPrinter<'r> {
 /// Direct port of the eta-reduction check in OCaml's `pp_function`
 /// (compiler/core/js_dump.ml:299-344). Returns the callee to print when the
 /// function body is `[ Return (Call (Var v, args, _)) ]`, every argument is the
-/// matching parameter, and call info permits the rewrite.
+/// matching parameter, and call info permits the rewrite. A method, an async
+/// function and a function with a directive stay functions
+/// (js_dump.ml:397-401, `Lambda.lfunction_can_be_inlined`).
 fn eta_reduce_function_body(
     a: &JsArena,
     is_method: bool,
+    async_: bool,
+    has_directive: bool,
     params: &[Ident],
     body: &[Stmt],
 ) -> Option<VIdentRef> {
-    if is_method {
+    if is_method || async_ || has_directive {
         return None;
     }
     let [stmt] = body else {

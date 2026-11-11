@@ -179,7 +179,6 @@ pub const SMALL_INLINE_SIZE: i32 = 5;
 /// Exit inline size threshold (for static raise handlers).
 pub const EXIT_INLINE_SIZE: i32 = 7;
 
-/// `Lam_analysis.lfunction_can_be_inlined` on a function's attributes.
 /// Check if a constant is definitely not zero.
 /// Used in side effect analysis to determine safe division.
 fn not_zero_constant(c: &Constant) -> bool {
@@ -205,7 +204,9 @@ fn raw_js_is_pure(info: &crate::lambda::lam_primitive::JsRawInfo) -> bool {
     }
 }
 
-/// `Lam_analysis.lfunction_can_be_inlined` on a function's attributes.
+/// `Lambda.lfunction_can_be_inlined` (lambda.ml:1091-1092) on a function's
+/// attributes: an async function or one with a directive must stay a
+/// function, neither inlined nor replaced by the call it forwards.
 pub fn attr_can_be_inlined(attr: &crate::lambda::FunctionAttribute) -> bool {
     !attr.async_ && attr.directive.is_none()
 }
@@ -427,7 +428,7 @@ pub fn args_all_const(a: &LamArena, args: &[Lam]) -> bool {
     args.iter().all(|x| a.is_const(*x))
 }
 
-/// `Lam_analysis.lfunction_can_be_inlined`.
+/// `Lambda.lfunction_can_be_inlined` (lambda.ml:1091-1092).
 pub fn lfunction_can_be_inlined(a: &LamArena, func: FuncId) -> bool {
     attr_can_be_inlined(&a.func_payload(func).attr)
 }

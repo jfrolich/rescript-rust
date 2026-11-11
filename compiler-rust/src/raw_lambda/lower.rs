@@ -465,11 +465,15 @@ fn is_valid_hash_number(value: &str) -> bool {
 }
 
 /// `Lambda.apply` (lambda.ml): eta-reduce an applied primitive wrapper and
-/// push the application under `let`s that bind a function.
+/// push the application under `let`s that bind a function. An async function
+/// or one with a directive stays a function (lambda.ml:1096-1097,
+/// `lfunction_can_be_inlined`).
 fn make_apply(a: &mut LamArena, func: Lam, args: &[Lam], ap_info: ApInfo) -> Lam {
     match a.node(func) {
         Node::Function { body, info } => {
-            if let Some(reduced) = eta_reduce_function_apply(a, info, body, args, &ap_info) {
+            if crate::lambda::lam_analysis::lfunction_can_be_inlined(a, info)
+                && let Some(reduced) = eta_reduce_function_apply(a, info, body, args, &ap_info)
+            {
                 return reduced;
             }
             a.apply_raw(func, args, ap_info)
