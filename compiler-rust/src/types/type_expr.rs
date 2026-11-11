@@ -1695,6 +1695,27 @@ impl RowFieldRef {
     }
 }
 
+impl<'a, T: Copy> From<&'a [T]> for PoolSlice<'a, T> {
+    #[inline]
+    fn from(items: &'a [T]) -> Self {
+        PoolSlice::Plain(items)
+    }
+}
+
+impl<'a, T: Copy> From<&'a Vec<T>> for PoolSlice<'a, T> {
+    #[inline]
+    fn from(items: &'a Vec<T>) -> Self {
+        PoolSlice::Plain(items)
+    }
+}
+
+impl<'a, T: Copy, const N: usize> From<&'a smallvec::SmallVec<[T; N]>> for PoolSlice<'a, T> {
+    #[inline]
+    fn from(items: &'a smallvec::SmallVec<[T; N]>) -> Self {
+        PoolSlice::Plain(items)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2053,26 +2074,5 @@ mod tests {
         };
         assert!(row.row_closed);
         assert!(!row.row_fixed);
-    }
-}
-
-impl<'a, T: Copy> From<&'a [T]> for PoolSlice<'a, T> {
-    #[inline]
-    fn from(items: &'a [T]) -> Self {
-        PoolSlice::Plain(items)
-    }
-}
-
-impl<'a, T: Copy> From<&'a Vec<T>> for PoolSlice<'a, T> {
-    #[inline]
-    fn from(items: &'a Vec<T>) -> Self {
-        PoolSlice::Plain(items)
-    }
-}
-
-impl<'a, T: Copy, const N: usize> From<&'a smallvec::SmallVec<[T; N]>> for PoolSlice<'a, T> {
-    #[inline]
-    fn from(items: &'a smallvec::SmallVec<[T; N]>) -> Self {
-        PoolSlice::Plain(items)
     }
 }

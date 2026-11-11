@@ -4866,8 +4866,7 @@ impl TypeContext {
         // Path compression: relink all traversed nodes to the representative
         // (OCaml `Btype.repr_link`). Stored handles use compilation-local
         // descriptor overlays, just like ordinary unification writes.
-        for i in 0..chain_len {
-            let node = chain[i];
+        for &node in &chain[..chain_len] {
             if node != current {
                 // A direct link already points at the representative. OCaml
                 // btype.ml:107-115 does not log/write it (`compress = false`);

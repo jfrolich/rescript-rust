@@ -110,9 +110,7 @@ fn extension_error(
     if matches!(name, "error" | "ocaml.error") {
         return match &extension.1 {
             crate::parser::ast::Payload::PStr(items) => {
-                let Some(item) = items.first() else {
-                    return None;
-                };
+                let item = items.first()?;
                 let Some(message) = extension_eval_string(arena, item) else {
                     return Some(BuiltinExtensionError {
                         loc: extension.0.loc,
@@ -1060,6 +1058,18 @@ struct PatternStateCheckpoint {
     globalize_forces_len: usize,
 }
 
+/// How a pattern binds a variable (`Typecore.enter_variable`'s
+/// `is_as_variable` and `is_module` flags, which never hold together).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PatternVariableKind {
+    /// An ordinary variable pattern.
+    Value,
+    /// The name bound by an `as` alias pattern.
+    Alias,
+    /// A first-class module unpacked by the pattern.
+    Module,
+}
+
 /// A pattern variable with its binding information.
 #[derive(Debug, Clone)]
 pub struct PatternVariable {
@@ -1110,10 +1120,11 @@ impl PatternState {
         loc: LocIdx,
         name: &Located<StrIdx>,
         ty: TypeExprRef,
-        is_as_variable: bool,
-        is_module: bool,
+        kind: PatternVariableKind,
         arena: &ParseArena,
     ) -> TypeCoreResult<Ident> {
+        let is_as_variable = kind == PatternVariableKind::Alias;
+        let is_module = kind == PatternVariableKind::Module;
         let interned = arena.name(name.txt);
         let name_str = interned.as_str();
         // Check for duplicate binding
@@ -2136,10 +2147,9 @@ pub fn type_constant(ctx: &TypeContext, env: &Env, cst: &Constant) -> TypeExprRe
 /// Returns the value as i64, or None if it can't be parsed.
 fn parse_int_literal(s: &str) -> Option<i64> {
     let stripped: String = s.chars().filter(|c| *c != '_').collect();
-    let (negative, digits) = if stripped.starts_with('-') {
-        (true, &stripped[1..])
-    } else {
-        (false, &stripped[..])
+    let (negative, digits) = match stripped.strip_prefix('-') {
+        Some(digits) => (true, digits),
+        None => (false, &stripped[..]),
     };
     let abs_val = if digits.starts_with("0x") || digits.starts_with("0X") {
         i64::from_str_radix(&digits[2..], 16).ok()?
@@ -3234,11 +3244,14 @@ fn transl_type_inner(
             let mut typed_fields = Vec::new();
             // Match OCaml Typetexp.transl_fields: collect unique fields in a
             // hashtable, then iterate in Hashtbl.fold order.
-            let mut field_entries: HashMap<
-                String,
-                (TypeExprRef, crate::types::asttypes::MutableFlag),
-            > = HashMap::new();
-            let mut field_insertions: Vec<String> = Vec::new();
+            /// The fields collected so far: each name's type and mutability,
+            /// and the names in first-insertion order.
+            #[derive(Default)]
+            struct ObjectFieldTable {
+                entries: HashMap<String, (TypeExprRef, crate::types::asttypes::MutableFlag)>,
+                insertions: Vec<String>,
+            }
+            let mut field_table = ObjectFieldTable::default();
 
             // `add_typed_field` (typetexp.ml:571-579): skip equal types,
             // otherwise unify in the translation env.
@@ -3246,21 +3259,17 @@ fn transl_type_inner(
                 tctx: &mut TypeCheckContext<'_>,
                 env: &Env,
                 loc: LocIdx,
-                field_entries: &mut HashMap<
-                    String,
-                    (TypeExprRef, crate::types::asttypes::MutableFlag),
-                >,
-                field_insertions: &mut Vec<String>,
+                fields: &mut ObjectFieldTable,
                 field_name: String,
                 field_type: TypeExprRef,
                 mutability: crate::types::asttypes::MutableFlag,
             ) -> TypeCoreResult<()> {
-                if let Some((existing_type, _)) = field_entries.get(&field_name).copied() {
+                if let Some((existing_type, _)) = fields.entries.get(&field_name).copied() {
                     // When duplicate declarations of a field are collapsed,
                     // preserve `Mutable` if any declaration has `@set`
                     // (`Hashtbl.replace` keeps the binding's position).
                     if mutability == crate::types::asttypes::MutableFlag::Mutable {
-                        field_entries.insert(
+                        fields.entries.insert(
                             field_name.clone(),
                             (existing_type, crate::types::asttypes::MutableFlag::Mutable),
                         );
@@ -3281,8 +3290,8 @@ fn transl_type_inner(
                         },
                     )?;
                 } else {
-                    field_insertions.push(field_name.clone());
-                    field_entries.insert(field_name, (field_type, mutability));
+                    fields.insertions.push(field_name.clone());
+                    fields.entries.insert(field_name, (field_type, mutability));
                 }
                 Ok(())
             }
@@ -3333,8 +3342,7 @@ fn transl_type_inner(
                             tctx,
                             env,
                             field_ct.ptyp_loc,
-                            &mut field_entries,
-                            &mut field_insertions,
+                            &mut field_table,
                             field_name.clone(),
                             poly_ty,
                             mutability,
@@ -3400,8 +3408,7 @@ fn transl_type_inner(
                                             tctx,
                                             env,
                                             inherit_ct.ptyp_loc,
-                                            &mut field_entries,
-                                            &mut field_insertions,
+                                            &mut field_table,
                                             name.to_string(),
                                             *typ,
                                             ctx.mutability_repr(*mutability),
@@ -3445,7 +3452,7 @@ fn transl_type_inner(
                 crate::parser::ast::ClosedFlag::Closed => ctx.new_type(TypeDesc::Tnil),
                 crate::parser::ast::ClosedFlag::Open => ctx.new_var(None),
             };
-            let mut ordered_field_names = ocaml_hashtbl_fold_order(&field_insertions);
+            let mut ordered_field_names = ocaml_hashtbl_fold_order(&field_table.insertions);
             // OCaml transl_fields uses:
             //   fields = Hashtbl.fold (fun s ty l -> (s, ty) :: l) ...
             // followed by List.fold_left building Tfield(..., acc).
@@ -3454,7 +3461,7 @@ fn transl_type_inner(
             ordered_field_names.reverse();
             let field_entries = ordered_field_names
                 .into_iter()
-                .filter_map(|name| field_entries.remove(&name).map(|ty| (name, ty)))
+                .filter_map(|name| field_table.entries.remove(&name).map(|ty| (name, ty)))
                 .collect::<Vec<_>>();
             // Fold fields into Tfield chain
             let fields_ty =
@@ -4485,8 +4492,7 @@ fn type_pattern_inner(
                     loc,
                     name,
                     expected_ty,
-                    false,
-                    false,
+                    PatternVariableKind::Value,
                     tctx.arena,
                 )?
             };
@@ -4609,8 +4615,14 @@ fn type_pattern_inner(
             crate::types::ctype::generalize(ctx, ty_var);
 
             // Enter the variable with the as-type
-            let id =
-                state.enter_variable(tctx.type_ctx, loc, name, ty_var, true, false, tctx.arena)?;
+            let id = state.enter_variable(
+                tctx.type_ctx,
+                loc,
+                name,
+                ty_var,
+                PatternVariableKind::Alias,
+                tctx.arena,
+            )?;
 
             Ok({
                 let typed_node = Pattern::new(
@@ -4938,8 +4950,7 @@ fn type_pattern_inner(
                 loc,
                 name,
                 expected_ty,
-                false,
-                true,
+                PatternVariableKind::Module,
                 tctx.arena,
             )?;
             let mut typed_pat = Pattern::new(
@@ -7162,8 +7173,7 @@ fn type_record_pat_rest(
         rest_loc,
         &rest.rest_name,
         rest_type_expr,
-        false,
-        false,
+        PatternVariableKind::Value,
         tctx.arena,
     )?;
 
@@ -7327,8 +7337,7 @@ fn type_pattern_constraint_poly_var(
                 lloc,
                 &name,
                 ty_prime,
-                false,
-                false,
+                PatternVariableKind::Value,
                 tctx.arena,
             )?;
             // OCaml compiler/ml/typecore.ml:1273-1289 queues the delayed
@@ -8396,28 +8405,9 @@ fn type_expect_with_recarg_unscoped<'a>(
         }
 
         ED::Pexp_apply(inner) => {
-            let PexpApply {
-                ref funct,
-                ref partial,
-                ref transformed_jsx,
-                ..
-            } = *inner;
-            let args = tctx.arena.apply_args(inner.args);
             // Function application
-            let funct_expr = tctx.arena.get_expr(*funct);
-
-            let typed_apply = type_application(
-                tctx,
-                env,
-                loc,
-                funct_expr,
-                args,
-                *partial,
-                *transformed_jsx,
-                expected_ty,
-                context.clone(),
-                &expr.pexp_attributes,
-            )?;
+            let typed_apply =
+                type_application(tctx, env, expr, inner, expected_ty, context.clone())?;
             // Match OCaml Pexp_apply: mk_apply applies rue once, then the
             // caller applies rue again on the resulting expression.
             rue_unify(tctx, loc, typed_apply.exp_type, expected_ty, context)?;
@@ -8490,25 +8480,8 @@ fn type_expect_with_recarg_unscoped<'a>(
         }
 
         ED::Pexp_for(inner) => {
-            let (ref pat, ref start_idx, ref end_idx, ref direction, ref body_idx) = **inner;
             // For loop
-            let pat_ref = tctx.arena.get_pat(*pat);
-            let start_expr = tctx.arena.get_expr(*start_idx);
-            let end_expr = tctx.arena.get_expr(*end_idx);
-            let body = tctx.arena.get_expr(*body_idx);
-            type_for(
-                tctx,
-                env,
-                loc,
-                pat_ref,
-                start_expr,
-                end_expr,
-                *direction,
-                body,
-                expected_ty,
-                context,
-                &expr.pexp_attributes,
-            )
+            type_for(tctx, env, expr, inner, expected_ty, context)
         }
 
         // Upstream #7887: for-of / for-await-of typing.
@@ -8585,17 +8558,16 @@ fn type_expect_with_recarg_unscoped<'a>(
             type_variant(
                 tctx,
                 env,
-                loc,
+                expr,
                 label,
                 sarg.map(|idx| tctx.arena.get_expr(idx)),
                 expected_ty,
                 context,
-                &expr.pexp_attributes,
             )
         }
 
         ED::Pexp_record(inner) => {
-            let (ref fields, ref base) = *inner;
+            let (_, ref base) = *inner;
             // Record expression
             // OCaml quirk: in `Pexp_record (lid_sexp_list, Some sexp)`, the pattern
             // variable `sexp` shadows the outer function parameter, so
@@ -8605,16 +8577,7 @@ fn type_expect_with_recarg_unscoped<'a>(
                 Some(base_expr) => &tctx.arena.get_expr(*base_expr).pexp_attributes,
                 None => &expr.pexp_attributes,
             };
-            type_record(
-                tctx,
-                env,
-                loc,
-                tctx.arena.expr_field_list(*fields),
-                (*base).map(|idx| tctx.arena.get_expr(idx)),
-                expected_ty,
-                attrs,
-                recarg,
-            )
+            type_record(tctx, env, loc, inner, expected_ty, attrs, recarg)
         }
 
         ED::Pexp_field(record_expr_idx, field_lid) => {
@@ -8658,12 +8621,11 @@ fn type_expect_with_recarg_unscoped<'a>(
             type_constraint(
                 tctx,
                 env,
-                loc,
+                expr,
                 inner_expr,
                 core_type_ref,
                 expected_ty,
                 context,
-                &expr.pexp_attributes,
             )
         }
 
@@ -8689,16 +8651,7 @@ fn type_expect_with_recarg_unscoped<'a>(
             let (ref override_flag, ref lid, ref body_idx) = **inner;
             // Open expression: M.{ E } or open M; E
             let body = tctx.arena.get_expr(*body_idx);
-            type_open(
-                tctx,
-                env,
-                loc,
-                override_flag,
-                lid,
-                body,
-                expected_ty,
-                &expr.pexp_attributes,
-            )
+            type_open(tctx, env, expr, override_flag, lid, body, expected_ty)
         }
 
         ED::Pexp_newtype(inner) => {
@@ -9041,14 +8994,16 @@ fn unified_expected_type(env: &Env, ctx: &TypeContext, type_name: &str) -> TypeE
 fn translate_unified_ops(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
-    loc: LocIdx,
+    sexp: &ParsedExpression,
+    apply: &PexpApply,
     typed_funct: &Expression,
-    args: &[(ArgLabel, crate::parse_arena::ExprIdx)],
-    transformed_jsx: bool,
     expected_ty: TypeExprRef,
     context: Option<TypeClashContext>,
-    attributes: &[crate::parser::ast::Attribute],
 ) -> Option<TypeCoreResult<Expression>> {
+    let loc = sexp.pexp_loc;
+    let attributes: &[crate::parser::ast::Attribute] = &sexp.pexp_attributes;
+    let args = tctx.arena.apply_args(apply.args);
+    let transformed_jsx = apply.transformed_jsx;
     use crate::types::typedtree::ApplyArg;
 
     // Check if the function is a unified op (`Pervasives.<op>`).
@@ -9481,12 +9436,9 @@ fn function_argument_type_clash_context(typed_funct_value_path: Option<&Path>) -
 
 fn math_operator_constant_text(expr: &ParsedExpression, arena: &ParseArena) -> Option<String> {
     match &expr.pexp_desc {
-        crate::parser::ast::ExpressionDesc::Pexp_constant(c) => match c {
-            ParsedConstant::Integer(txt, _) | ParsedConstant::Float(txt, _) => {
-                Some(arena.get_string(*txt).to_string())
-            }
-            _ => None,
-        },
+        crate::parser::ast::ExpressionDesc::Pexp_constant(
+            ParsedConstant::Integer(txt, _) | ParsedConstant::Float(txt, _),
+        ) => Some(arena.get_string(*txt).to_string()),
         _ => None,
     }
 }
@@ -9543,15 +9495,18 @@ fn filter_arrow_for_lowered_apply(
 fn type_application(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
-    loc: LocIdx,
-    funct: &ParsedExpression,
-    args: &[(ArgLabel, crate::parse_arena::ExprIdx)],
-    partial: bool,
-    transformed_jsx: bool,
+    sexp: &ParsedExpression,
+    apply: &PexpApply,
     expected_ty: TypeExprRef,
     context: Option<TypeClashContext>,
-    attributes: &[crate::parser::ast::Attribute],
 ) -> TypeCoreResult<Expression> {
+    let loc = sexp.pexp_loc;
+    let attributes: &[crate::parser::ast::Attribute] = &sexp.pexp_attributes;
+    let arena = tctx.arena;
+    let funct = arena.get_expr(apply.funct);
+    let args = arena.apply_args(apply.args);
+    let partial = apply.partial;
+    let transformed_jsx = apply.transformed_jsx;
     use crate::types::typedtree::ApplyArg;
 
     // compiler/frontend/ast_exp_apply.ml:47-50 validates all arguments to
@@ -9699,13 +9654,11 @@ fn type_application(
     if let Some(result) = translate_unified_ops(
         tctx,
         env,
-        loc,
+        sexp,
+        apply,
         &typed_funct,
-        args,
-        transformed_jsx,
         expected_ty,
         context.clone(),
-        attributes,
     ) {
         ctx.end_def();
         return result;
@@ -13014,19 +12967,31 @@ fn type_function_nary(
     })
 }
 
+/// The payload of `Pexp_for`: index pattern, bounds, direction and body.
+type ForLoop = (
+    crate::parse_arena::PatIdx,
+    crate::parse_arena::ExprIdx,
+    crate::parse_arena::ExprIdx,
+    crate::parser::ast::DirectionFlag,
+    crate::parse_arena::ExprIdx,
+);
+
 fn type_for(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
-    loc: LocIdx,
-    pat: &ParsedPattern,
-    start_expr: &ParsedExpression,
-    end_expr: &ParsedExpression,
-    direction: crate::parser::ast::DirectionFlag,
-    body: &ParsedExpression,
+    sexp: &ParsedExpression,
+    for_loop: &ForLoop,
     expected_ty: TypeExprRef,
     context: Option<TypeClashContext>,
-    attributes: &[crate::parser::ast::Attribute],
 ) -> TypeCoreResult<Expression> {
+    let loc = sexp.pexp_loc;
+    let attributes: &[crate::parser::ast::Attribute] = &sexp.pexp_attributes;
+    let arena = tctx.arena;
+    let (pat, start_expr, end_expr, direction, body) = *for_loop;
+    let pat = arena.get_pat(pat);
+    let start_expr = arena.get_expr(start_expr);
+    let end_expr = arena.get_expr(end_expr);
+    let body = arena.get_expr(body);
     let ctx = tctx.type_ctx;
     // OCaml passes Predef.type_int (generic singleton) to type_expect for each bound.
     // Inside type_expect, `rue` calls instance(ty_expected) — creating a FRESH copy
@@ -13621,13 +13586,14 @@ fn type_construct(
 fn type_variant(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
-    loc: LocIdx,
+    sexp: &ParsedExpression,
     label: &str,
     arg: Option<&ParsedExpression>,
     expected_ty: TypeExprRef,
     context: Option<TypeClashContext>,
-    attributes: &[crate::parser::ast::Attribute],
 ) -> TypeCoreResult<Expression> {
+    let loc = sexp.pexp_loc;
+    let attributes: &[crate::parser::ast::Attribute] = &sexp.pexp_attributes;
     let ctx = tctx.type_ctx;
 
     if let Some(arg_expr) = arg {
@@ -14276,12 +14242,14 @@ fn type_record(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
     loc: LocIdx,
-    fields: &[crate::parser::ast::ExpressionRecordField],
-    base: Option<&ParsedExpression>,
+    record: &(crate::parse_arena::ExprFieldList, Option<crate::parse_arena::ExprIdx>),
     expected_ty: TypeExprRef,
     attributes: &[crate::parser::ast::Attribute],
     recarg: RecArg,
 ) -> TypeCoreResult<Expression> {
+    let arena = tctx.arena;
+    let fields = arena.expr_field_list(record.0);
+    let base = record.1.map(|idx| arena.get_expr(idx));
     use crate::types::typedtree::RecordLabelDefinition;
 
     let ctx = tctx.type_ctx;
@@ -16471,13 +16439,14 @@ fn type_setfield(
 fn type_constraint(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
-    loc: LocIdx,
+    sexp: &ParsedExpression,
     inner_expr: &ParsedExpression,
     core_type: &crate::parser::ast::CoreType,
     expected_ty: TypeExprRef,
     context: Option<TypeClashContext>,
-    attributes: &[crate::parser::ast::Attribute],
 ) -> TypeCoreResult<Expression> {
+    let loc = sexp.pexp_loc;
+    let attributes: &[crate::parser::ast::Attribute] = &sexp.pexp_attributes;
     let ctx = tctx.type_ctx;
 
     // Match OCaml typecore.ml Pexp_constraint:
@@ -16642,13 +16611,14 @@ fn type_coerce(
 fn type_open(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
-    loc: LocIdx,
+    sexp: &ParsedExpression,
     override_flag: &crate::parser::ast::OverrideFlag,
     lid: &Located<LidentIdx>,
     body: &ParsedExpression,
     expected_ty: TypeExprRef,
-    attributes: &[crate::parser::ast::Attribute],
 ) -> TypeCoreResult<Expression> {
+    let loc = sexp.pexp_loc;
+    let attributes: &[crate::parser::ast::Attribute] = &sexp.pexp_attributes;
     // Open the module's bindings into scope for the body
     let open_lid = tctx.arena.get_longident(lid.txt);
     let mut open_env = env.clone();
@@ -28621,24 +28591,7 @@ fn lookup_type_decl_for_path_with_cache_mode(
         {
             if let crate::types::TypeKind::TypeVariant(ref constrs, layout) = parent_decl.type_kind
             {
-                let num_consts = constrs
-                    .iter()
-                    .filter(|c| {
-                        matches!(
-                            c.cd_args,
-                            crate::types::ConstructorArguments::CstrTuple(ref args)
-                                if args.is_empty()
-                        )
-                    })
-                    .count() as i32;
-                let num_nonconsts = constrs.len() as i32 - num_consts;
-                let mut block_idx = 0i32;
                 for (position, cd) in constrs.iter().enumerate() {
-                    let is_constant = matches!(
-                        cd.cd_args,
-                        crate::types::ConstructorArguments::CstrTuple(ref args) if args.is_empty()
-                    );
-
                     if cd.cd_id.name() == type_name.as_str() {
                         if let crate::types::ConstructorArguments::CstrRecord(labels) = &cd.cd_args
                         {
@@ -28679,10 +28632,6 @@ fn lookup_type_decl_for_path_with_cache_mode(
                                 type_path: None,
                             }));
                         }
-                    }
-
-                    if !is_constant {
-                        block_idx += 1;
                     }
                 }
             }
@@ -28849,377 +28798,6 @@ fn lookup_type_decl_for_path_with_cache_mode(
     }
 
     None
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::context::IdGenerator;
-    
-
-    #[test]
-    fn counter_example_splits_retry_in_depth_first_order() {
-        let mut splits = OrSplits::default();
-        let mut paths = Vec::new();
-        loop {
-            let outer_second = splits.take_second();
-            let mut path = vec![outer_second];
-            // Only the first outer alternative contains another split.
-            if !outer_second {
-                path.push(splits.take_second());
-            }
-            paths.push(path);
-            if !splits.backtrack() {
-                break;
-            }
-        }
-        assert_eq!(paths, vec![vec![false, false], vec![false, true], vec![true]]);
-        assert!(!OrSplits::default().backtrack());
-    }
-
-    #[test]
-    fn value_usage_marks_all_declarations_with_the_same_key() {
-        let type_ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
-        let arena = ParseArena::new();
-        let mut tctx = TypeCheckContext::new(&type_ctx, &arena);
-        let val_loc = Location::none();
-        let val_loc = Location {
-            loc_ghost: false,
-            origin: Default::default(),
-            ..val_loc
-        };
-        // `check_usage` registers a (name, loc) key once.
-        for _ in 0..2 {
-            tctx.add_value_usage_check(
-                "x",
-                val_loc,
-                LocIdx::none(),
-                Warning::UnusedValueDeclaration {
-                    name: "x".to_string(),
-                },
-            );
-        }
-        assert_eq!(tctx.value_usage_checks.len(), 1);
-
-        tctx.mark_value_used(&Env::empty(), "x", val_loc);
-
-        assert!(
-            tctx.value_usage_checks
-                .iter()
-                .all(|check| type_ctx.usage().is_used(check.cell))
-        );
-    }
-
-    #[test]
-    fn copying_with_paths_maps_the_row_name_path() {
-        // `Subst.typexp` maps a row name's path like a `Tconstr` path
-        // (compiler/ml/subst.ml:226-231): `[> Types.t]` reached through an
-        // including module must name that module's `Types`.
-        let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
-        let local = Path::pdot(Path::pident(Ident::create_local("Types")), "t");
-        let rerooted = Path::pdot(
-            Path::pdot(Path::pident(Ident::create_persistent("C")), "Types"),
-            "t",
-        );
-        let row_more = ctx.new_var(None);
-        let ty = ctx.new_variant(crate::types::type_expr::RowDesc {
-            row_fields: Vec::new().into(),
-            row_more,
-            row_closed: false,
-            row_fixed: false,
-            row_name: Some((local, Vec::new())),
-        });
-        let map = |p: &Path| {
-            if p.same(&local) {
-                rerooted
-            } else {
-                *p
-            }
-        };
-        let copied = copy_type_expr_mapping_paths(&ctx, ty, &mut TypeExprRefMap::new(), &map);
-        match &*ctx.get_desc(ctx.repr(copied)) {
-            TypeDesc::Tvariant(row) => {
-                let row = ctx.row_desc(row);
-                let (name, _) = row.row_name.as_ref().expect("row name");
-                assert!(name.same(&rerooted));
-            }
-            other => panic!("expected a variant, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn test_convert_constant_int() {
-        let mut arena = crate::parse_arena::ParseArena::new();
-        let cst = crate::parser::ast::Constant::Integer(arena.intern_string("42"), None);
-        let result = convert_constant(&cst, LocIdx(0), &arena).unwrap();
-        assert_eq!(result, Constant::Int(42));
-    }
-
-    #[test]
-    fn test_convert_constant_large_fits_63bit() {
-        let mut arena = crate::parse_arena::ParseArena::new();
-        // Values that fit in 63-bit should be preserved
-        let cst =
-            crate::parser::ast::Constant::Integer(arena.intern_string("99999999999999999"), None);
-        let result = convert_constant(&cst, LocIdx(0), &arena).unwrap();
-        assert_eq!(result, Constant::Int(99999999999999999));
-    }
-
-    #[test]
-    fn test_convert_constant_overflow_too_large() {
-        let mut arena = crate::parse_arena::ParseArena::new();
-        // Values that don't fit in i64 should still error
-        let cst = crate::parser::ast::Constant::Integer(
-            arena.intern_string("99999999999999999999999"),
-            None,
-        );
-        let result = convert_constant(&cst, LocIdx(0), &arena);
-        assert!(matches!(result, Err(TypeCoreError::LiteralOverflow { .. })));
-    }
-
-    #[test]
-    fn test_convert_constant_underscores() {
-        let mut arena = crate::parse_arena::ParseArena::new();
-        // 949460645006 fits in 63 bits, should be preserved
-        let cst =
-            crate::parser::ast::Constant::Integer(arena.intern_string("949_460_645_006"), None);
-        let result = convert_constant(&cst, LocIdx(0), &arena).unwrap();
-        assert_eq!(result, Constant::Int(949_460_645_006));
-    }
-
-    #[test]
-    fn test_convert_constant_hex() {
-        let mut arena = crate::parse_arena::ParseArena::new();
-        // 0xFFFFFFFF = 4294967295, fits in 63 bits
-        let cst = crate::parser::ast::Constant::Integer(arena.intern_string("0xffff_ffff"), None);
-        let result = convert_constant(&cst, LocIdx(0), &arena).unwrap();
-        assert_eq!(result, Constant::Int(4294967295));
-    }
-
-    #[test]
-    fn test_convert_constant_63bit_wrap() {
-        let mut arena = crate::parse_arena::ParseArena::new();
-        // 4611686018427387904 = 2^62, wraps to -2^62 in 63-bit
-        let cst =
-            crate::parser::ast::Constant::Integer(arena.intern_string("4611686018427387904"), None);
-        let result = convert_constant(&cst, LocIdx(0), &arena).unwrap();
-        assert_eq!(result, Constant::Int(-4611686018427387904));
-    }
-
-    #[test]
-    fn test_convert_constant_string() {
-        let mut arena = crate::parse_arena::ParseArena::new();
-        let cst = arena.string_constant("hello");
-        let result = convert_constant(&cst, LocIdx(0), &arena).unwrap();
-        assert!(matches!(result, Constant::String(s) if s == "hello"));
-    }
-
-    #[test]
-    fn test_convert_constant_bigint() {
-        let mut arena = crate::parse_arena::ParseArena::new();
-        let cst = crate::parser::ast::Constant::Integer(arena.intern_string("12345"), Some('n'));
-        let result = convert_constant(&cst, LocIdx(0), &arena).unwrap();
-        assert!(matches!(result, Constant::BigInt(true, d) if d == "12345"));
-    }
-
-    #[test]
-    fn test_convert_constant_bigint_removes_underscores() {
-        let mut arena = crate::parse_arena::ParseArena::new();
-        let cst =
-            crate::parser::ast::Constant::Integer(arena.intern_string("01_000_000"), Some('n'));
-        let result = convert_constant(&cst, LocIdx(0), &arena).unwrap();
-        assert!(matches!(result, Constant::BigInt(true, d) if d == "1000000"));
-    }
-
-    #[test]
-    fn test_convert_constant_bigint_preserves_non_decimal_heads() {
-        let mut arena = crate::parse_arena::ParseArena::new();
-        let cst =
-            crate::parser::ast::Constant::Integer(arena.intern_string("00x1_000_000"), Some('n'));
-        let result = convert_constant(&cst, LocIdx(0), &arena).unwrap();
-        assert!(matches!(result, Constant::BigInt(true, d) if d == "00x1000000"));
-    }
-
-    #[test]
-    fn test_type_constant() {
-        let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
-        let env = crate::types::initial_env(&ctx);
-
-        let cst = Constant::Int(42);
-        let ty = type_constant(&ctx, &env, &cst);
-        // Check that we got a valid type (can get its description)
-        let desc = ctx.get_desc(ty);
-        assert!(matches!(&*desc, crate::types::TypeDesc::Tconstr { .. }));
-    }
-
-    #[test]
-    fn test_pattern_state_enter_variable() {
-        let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
-        let _env = crate::types::initial_env(&ctx);
-        let mut state = PatternState::new();
-
-        let mut arena = ParseArena::new();
-        let loc = LocIdx::none();
-        let ty = ctx.new_var(None);
-        let x_idx = arena.intern("x");
-        let name = Located { txt: x_idx, loc };
-
-        let id = state.enter_variable(&ctx, loc, &name, ty, false, false, &arena);
-        assert!(id.is_ok());
-
-        // Duplicate should fail
-        let id2 = state.enter_variable(&ctx, loc, &name, ty, false, false, &arena);
-        assert!(matches!(
-            id2,
-            Err(TypeCoreError::MultiplyBoundVariable { .. })
-        ));
-    }
-
-    #[test]
-    fn test_type_pattern_or_reuses_left_branch_ident() {
-        let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
-        let env = crate::types::initial_env(&ctx);
-        let mut arena = ParseArena::new();
-
-        let loc = LocIdx::none();
-        let x_idx = arena.intern("x");
-        let x_name = Located { txt: x_idx, loc };
-        let left = arena.push_pat(crate::parser::ast::Pattern {
-            ppat_desc: crate::parser::ast::PatternDesc::Ppat_var(x_name),
-            ppat_loc: loc,
-            ppat_attributes: Attributes::new(),
-        });
-        let right = arena.push_pat(crate::parser::ast::Pattern {
-            ppat_desc: crate::parser::ast::PatternDesc::Ppat_var(x_name),
-            ppat_loc: loc,
-            ppat_attributes: Attributes::new(),
-        });
-        let or_pat = crate::parser::ast::Pattern {
-            ppat_desc: crate::parser::ast::PatternDesc::Ppat_or(left, right),
-            ppat_loc: loc,
-            ppat_attributes: Attributes::new(),
-        };
-        let mut tctx = TypeCheckContext::new(&ctx, &arena);
-        let mut state = PatternState::new();
-
-        let typed_pat = type_pattern(
-            &mut tctx,
-            &env,
-            &or_pat,
-            env.type_int(&ctx),
-            PatternMode::Normal,
-            &mut state,
-        )
-        .expect("or-pattern should type-check");
-
-        let crate::types::typedtree::PatternDesc::Tpat_or(left_pat, right_pat, None) =
-            typed_pat.pat_desc
-        else {
-            panic!("expected typed or-pattern");
-        };
-        let crate::types::typedtree::PatternDesc::Tpat_var(left_id, _) =
-            &tctx.typed.pattern(left_pat).pat_desc
-        else {
-            panic!("expected left branch variable");
-        };
-        let crate::types::typedtree::PatternDesc::Tpat_var(right_id, _) =
-            &tctx.typed.pattern(right_pat).pat_desc
-        else {
-            panic!("expected right branch variable");
-        };
-
-        assert_eq!(state.pattern_variables.len(), 1);
-        assert!(left_id.same(right_id));
-        assert!(state.pattern_variables[0].id.same(left_id));
-    }
-
-    #[test]
-    fn test_type_check_context_creation() {
-        let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
-        let arena = ParseArena::new();
-        let tctx = TypeCheckContext::new(&ctx, &arena);
-
-        assert!(tctx.newtype_level.is_none());
-        assert!(tctx.diagnostics.is_empty());
-    }
-
-    #[test]
-    fn test_env_type_constructors() {
-        let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
-        let env = crate::types::initial_env(&ctx);
-
-        let int_ty = env.type_int(&ctx);
-        let bool_ty = env.type_bool(&ctx);
-        let string_ty = env.type_string(&ctx);
-
-        // All should be valid Tconstr types
-        assert!(matches!(
-            &*ctx.borrow_desc(int_ty),
-            crate::types::TypeDesc::Tconstr { .. }
-        ));
-        assert!(matches!(
-            &*ctx.borrow_desc(bool_ty),
-            crate::types::TypeDesc::Tconstr { .. }
-        ));
-        assert!(matches!(
-            &*ctx.borrow_desc(string_ty),
-            crate::types::TypeDesc::Tconstr { .. }
-        ));
-
-        // Array type with element type
-        let elem_ty = ctx.new_var(None);
-        let array_ty = env.type_array(&ctx, elem_ty);
-        assert!(matches!(
-            &*ctx.borrow_desc(array_ty),
-            crate::types::TypeDesc::Tconstr { .. }
-        ));
-    }
-
-    #[test]
-    fn test_ocaml_hashtbl_hash_string_matches_ocaml() {
-        assert_eq!(ocaml_hashtbl_hash_string("_self"), 448_023_825);
-        assert_eq!(ocaml_hashtbl_hash_string("_blank"), 482_879_870);
-        assert_eq!(ocaml_hashtbl_hash_string("_parent"), 914_286_090);
-        assert_eq!(ocaml_hashtbl_hash_string("_top"), 861_764_747);
-        assert_eq!(ocaml_hashtbl_hash_string("foo"), 763_646_369);
-        assert_eq!(ocaml_hashtbl_hash_string("Some"), 26_923_831);
-    }
-
-    #[test]
-    fn test_ocaml_hashtbl_fold_order_matches_ocaml() {
-        let labels = vec![
-            "_self".to_string(),
-            "_blank".to_string(),
-            "_parent".to_string(),
-            "_top".to_string(),
-        ];
-        assert_eq!(
-            ocaml_hashtbl_fold_order(&labels),
-            vec![
-                "_parent".to_string(),
-                "_top".to_string(),
-                "_self".to_string(),
-                "_blank".to_string()
-            ]
-        );
-    }
-
-    #[test]
-    fn test_ocaml_hashtbl_fold_order_pair_int_string() {
-        // bs_unwrap_test: [#Pair(string, int) | #Int(int) | #String(string)]
-        // OCaml output order: Pair, String, Int
-        let labels = vec!["Pair".to_string(), "Int".to_string(), "String".to_string()];
-        let result = ocaml_hashtbl_fold_order(&labels);
-        assert_eq!(
-            result,
-            vec!["Pair".to_string(), "String".to_string(), "Int".to_string(),]
-        );
-    }
 }
 
 // ============================================================================
@@ -30445,4 +30023,375 @@ fn parmatch_check_unused(
     };
     let mut pm = crate::types::parmatch::Parmatch::new(oracle, ta);
     pm.check_unused(cases);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::context::IdGenerator;
+    
+
+    #[test]
+    fn counter_example_splits_retry_in_depth_first_order() {
+        let mut splits = OrSplits::default();
+        let mut paths = Vec::new();
+        loop {
+            let outer_second = splits.take_second();
+            let mut path = vec![outer_second];
+            // Only the first outer alternative contains another split.
+            if !outer_second {
+                path.push(splits.take_second());
+            }
+            paths.push(path);
+            if !splits.backtrack() {
+                break;
+            }
+        }
+        assert_eq!(paths, vec![vec![false, false], vec![false, true], vec![true]]);
+        assert!(!OrSplits::default().backtrack());
+    }
+
+    #[test]
+    fn value_usage_marks_all_declarations_with_the_same_key() {
+        let type_ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
+        let arena = ParseArena::new();
+        let mut tctx = TypeCheckContext::new(&type_ctx, &arena);
+        let val_loc = Location::none();
+        let val_loc = Location {
+            loc_ghost: false,
+            origin: Default::default(),
+            ..val_loc
+        };
+        // `check_usage` registers a (name, loc) key once.
+        for _ in 0..2 {
+            tctx.add_value_usage_check(
+                "x",
+                val_loc,
+                LocIdx::none(),
+                Warning::UnusedValueDeclaration {
+                    name: "x".to_string(),
+                },
+            );
+        }
+        assert_eq!(tctx.value_usage_checks.len(), 1);
+
+        tctx.mark_value_used(&Env::empty(), "x", val_loc);
+
+        assert!(
+            tctx.value_usage_checks
+                .iter()
+                .all(|check| type_ctx.usage().is_used(check.cell))
+        );
+    }
+
+    #[test]
+    fn copying_with_paths_maps_the_row_name_path() {
+        // `Subst.typexp` maps a row name's path like a `Tconstr` path
+        // (compiler/ml/subst.ml:226-231): `[> Types.t]` reached through an
+        // including module must name that module's `Types`.
+        let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
+        let local = Path::pdot(Path::pident(Ident::create_local("Types")), "t");
+        let rerooted = Path::pdot(
+            Path::pdot(Path::pident(Ident::create_persistent("C")), "Types"),
+            "t",
+        );
+        let row_more = ctx.new_var(None);
+        let ty = ctx.new_variant(crate::types::type_expr::RowDesc {
+            row_fields: Vec::new().into(),
+            row_more,
+            row_closed: false,
+            row_fixed: false,
+            row_name: Some((local, Vec::new())),
+        });
+        let map = |p: &Path| {
+            if p.same(&local) {
+                rerooted
+            } else {
+                *p
+            }
+        };
+        let copied = copy_type_expr_mapping_paths(&ctx, ty, &mut TypeExprRefMap::new(), &map);
+        match &*ctx.get_desc(ctx.repr(copied)) {
+            TypeDesc::Tvariant(row) => {
+                let row = ctx.row_desc(row);
+                let (name, _) = row.row_name.as_ref().expect("row name");
+                assert!(name.same(&rerooted));
+            }
+            other => panic!("expected a variant, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_convert_constant_int() {
+        let mut arena = crate::parse_arena::ParseArena::new();
+        let cst = crate::parser::ast::Constant::Integer(arena.intern_string("42"), None);
+        let result = convert_constant(&cst, LocIdx(0), &arena).unwrap();
+        assert_eq!(result, Constant::Int(42));
+    }
+
+    #[test]
+    fn test_convert_constant_large_fits_63bit() {
+        let mut arena = crate::parse_arena::ParseArena::new();
+        // Values that fit in 63-bit should be preserved
+        let cst =
+            crate::parser::ast::Constant::Integer(arena.intern_string("99999999999999999"), None);
+        let result = convert_constant(&cst, LocIdx(0), &arena).unwrap();
+        assert_eq!(result, Constant::Int(99999999999999999));
+    }
+
+    #[test]
+    fn test_convert_constant_overflow_too_large() {
+        let mut arena = crate::parse_arena::ParseArena::new();
+        // Values that don't fit in i64 should still error
+        let cst = crate::parser::ast::Constant::Integer(
+            arena.intern_string("99999999999999999999999"),
+            None,
+        );
+        let result = convert_constant(&cst, LocIdx(0), &arena);
+        assert!(matches!(result, Err(TypeCoreError::LiteralOverflow { .. })));
+    }
+
+    #[test]
+    fn test_convert_constant_underscores() {
+        let mut arena = crate::parse_arena::ParseArena::new();
+        // 949460645006 fits in 63 bits, should be preserved
+        let cst =
+            crate::parser::ast::Constant::Integer(arena.intern_string("949_460_645_006"), None);
+        let result = convert_constant(&cst, LocIdx(0), &arena).unwrap();
+        assert_eq!(result, Constant::Int(949_460_645_006));
+    }
+
+    #[test]
+    fn test_convert_constant_hex() {
+        let mut arena = crate::parse_arena::ParseArena::new();
+        // 0xFFFFFFFF = 4294967295, fits in 63 bits
+        let cst = crate::parser::ast::Constant::Integer(arena.intern_string("0xffff_ffff"), None);
+        let result = convert_constant(&cst, LocIdx(0), &arena).unwrap();
+        assert_eq!(result, Constant::Int(4294967295));
+    }
+
+    #[test]
+    fn test_convert_constant_63bit_wrap() {
+        let mut arena = crate::parse_arena::ParseArena::new();
+        // 4611686018427387904 = 2^62, wraps to -2^62 in 63-bit
+        let cst =
+            crate::parser::ast::Constant::Integer(arena.intern_string("4611686018427387904"), None);
+        let result = convert_constant(&cst, LocIdx(0), &arena).unwrap();
+        assert_eq!(result, Constant::Int(-4611686018427387904));
+    }
+
+    #[test]
+    fn test_convert_constant_string() {
+        let mut arena = crate::parse_arena::ParseArena::new();
+        let cst = arena.string_constant("hello");
+        let result = convert_constant(&cst, LocIdx(0), &arena).unwrap();
+        assert!(matches!(result, Constant::String(s) if s == "hello"));
+    }
+
+    #[test]
+    fn test_convert_constant_bigint() {
+        let mut arena = crate::parse_arena::ParseArena::new();
+        let cst = crate::parser::ast::Constant::Integer(arena.intern_string("12345"), Some('n'));
+        let result = convert_constant(&cst, LocIdx(0), &arena).unwrap();
+        assert!(matches!(result, Constant::BigInt(true, d) if d == "12345"));
+    }
+
+    #[test]
+    fn test_convert_constant_bigint_removes_underscores() {
+        let mut arena = crate::parse_arena::ParseArena::new();
+        let cst =
+            crate::parser::ast::Constant::Integer(arena.intern_string("01_000_000"), Some('n'));
+        let result = convert_constant(&cst, LocIdx(0), &arena).unwrap();
+        assert!(matches!(result, Constant::BigInt(true, d) if d == "1000000"));
+    }
+
+    #[test]
+    fn test_convert_constant_bigint_preserves_non_decimal_heads() {
+        let mut arena = crate::parse_arena::ParseArena::new();
+        let cst =
+            crate::parser::ast::Constant::Integer(arena.intern_string("00x1_000_000"), Some('n'));
+        let result = convert_constant(&cst, LocIdx(0), &arena).unwrap();
+        assert!(matches!(result, Constant::BigInt(true, d) if d == "00x1000000"));
+    }
+
+    #[test]
+    fn test_type_constant() {
+        let id_gen = IdGenerator::new();
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
+        let env = crate::types::initial_env(&ctx);
+
+        let cst = Constant::Int(42);
+        let ty = type_constant(&ctx, &env, &cst);
+        // Check that we got a valid type (can get its description)
+        let desc = ctx.get_desc(ty);
+        assert!(matches!(&*desc, crate::types::TypeDesc::Tconstr { .. }));
+    }
+
+    #[test]
+    fn test_pattern_state_enter_variable() {
+        let id_gen = IdGenerator::new();
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
+        let _env = crate::types::initial_env(&ctx);
+        let mut state = PatternState::new();
+
+        let mut arena = ParseArena::new();
+        let loc = LocIdx::none();
+        let ty = ctx.new_var(None);
+        let x_idx = arena.intern("x");
+        let name = Located { txt: x_idx, loc };
+
+        let id = state.enter_variable(&ctx, loc, &name, ty, PatternVariableKind::Value, &arena);
+        assert!(id.is_ok());
+
+        // Duplicate should fail
+        let id2 = state.enter_variable(&ctx, loc, &name, ty, PatternVariableKind::Value, &arena);
+        assert!(matches!(
+            id2,
+            Err(TypeCoreError::MultiplyBoundVariable { .. })
+        ));
+    }
+
+    #[test]
+    fn test_type_pattern_or_reuses_left_branch_ident() {
+        let id_gen = IdGenerator::new();
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
+        let env = crate::types::initial_env(&ctx);
+        let mut arena = ParseArena::new();
+
+        let loc = LocIdx::none();
+        let x_idx = arena.intern("x");
+        let x_name = Located { txt: x_idx, loc };
+        let left = arena.push_pat(crate::parser::ast::Pattern {
+            ppat_desc: crate::parser::ast::PatternDesc::Ppat_var(x_name),
+            ppat_loc: loc,
+            ppat_attributes: Attributes::new(),
+        });
+        let right = arena.push_pat(crate::parser::ast::Pattern {
+            ppat_desc: crate::parser::ast::PatternDesc::Ppat_var(x_name),
+            ppat_loc: loc,
+            ppat_attributes: Attributes::new(),
+        });
+        let or_pat = crate::parser::ast::Pattern {
+            ppat_desc: crate::parser::ast::PatternDesc::Ppat_or(left, right),
+            ppat_loc: loc,
+            ppat_attributes: Attributes::new(),
+        };
+        let mut tctx = TypeCheckContext::new(&ctx, &arena);
+        let mut state = PatternState::new();
+
+        let typed_pat = type_pattern(
+            &mut tctx,
+            &env,
+            &or_pat,
+            env.type_int(&ctx),
+            PatternMode::Normal,
+            &mut state,
+        )
+        .expect("or-pattern should type-check");
+
+        let crate::types::typedtree::PatternDesc::Tpat_or(left_pat, right_pat, None) =
+            typed_pat.pat_desc
+        else {
+            panic!("expected typed or-pattern");
+        };
+        let crate::types::typedtree::PatternDesc::Tpat_var(left_id, _) =
+            &tctx.typed.pattern(left_pat).pat_desc
+        else {
+            panic!("expected left branch variable");
+        };
+        let crate::types::typedtree::PatternDesc::Tpat_var(right_id, _) =
+            &tctx.typed.pattern(right_pat).pat_desc
+        else {
+            panic!("expected right branch variable");
+        };
+
+        assert_eq!(state.pattern_variables.len(), 1);
+        assert!(left_id.same(right_id));
+        assert!(state.pattern_variables[0].id.same(left_id));
+    }
+
+    #[test]
+    fn test_type_check_context_creation() {
+        let id_gen = IdGenerator::new();
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
+        let arena = ParseArena::new();
+        let tctx = TypeCheckContext::new(&ctx, &arena);
+
+        assert!(tctx.newtype_level.is_none());
+        assert!(tctx.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn test_env_type_constructors() {
+        let id_gen = IdGenerator::new();
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
+        let env = crate::types::initial_env(&ctx);
+
+        let int_ty = env.type_int(&ctx);
+        let bool_ty = env.type_bool(&ctx);
+        let string_ty = env.type_string(&ctx);
+
+        // All should be valid Tconstr types
+        assert!(matches!(
+            &*ctx.borrow_desc(int_ty),
+            crate::types::TypeDesc::Tconstr { .. }
+        ));
+        assert!(matches!(
+            &*ctx.borrow_desc(bool_ty),
+            crate::types::TypeDesc::Tconstr { .. }
+        ));
+        assert!(matches!(
+            &*ctx.borrow_desc(string_ty),
+            crate::types::TypeDesc::Tconstr { .. }
+        ));
+
+        // Array type with element type
+        let elem_ty = ctx.new_var(None);
+        let array_ty = env.type_array(&ctx, elem_ty);
+        assert!(matches!(
+            &*ctx.borrow_desc(array_ty),
+            crate::types::TypeDesc::Tconstr { .. }
+        ));
+    }
+
+    #[test]
+    fn test_ocaml_hashtbl_hash_string_matches_ocaml() {
+        assert_eq!(ocaml_hashtbl_hash_string("_self"), 448_023_825);
+        assert_eq!(ocaml_hashtbl_hash_string("_blank"), 482_879_870);
+        assert_eq!(ocaml_hashtbl_hash_string("_parent"), 914_286_090);
+        assert_eq!(ocaml_hashtbl_hash_string("_top"), 861_764_747);
+        assert_eq!(ocaml_hashtbl_hash_string("foo"), 763_646_369);
+        assert_eq!(ocaml_hashtbl_hash_string("Some"), 26_923_831);
+    }
+
+    #[test]
+    fn test_ocaml_hashtbl_fold_order_matches_ocaml() {
+        let labels = vec![
+            "_self".to_string(),
+            "_blank".to_string(),
+            "_parent".to_string(),
+            "_top".to_string(),
+        ];
+        assert_eq!(
+            ocaml_hashtbl_fold_order(&labels),
+            vec![
+                "_parent".to_string(),
+                "_top".to_string(),
+                "_self".to_string(),
+                "_blank".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn test_ocaml_hashtbl_fold_order_pair_int_string() {
+        // bs_unwrap_test: [#Pair(string, int) | #Int(int) | #String(string)]
+        // OCaml output order: Pair, String, Int
+        let labels = vec!["Pair".to_string(), "Int".to_string(), "String".to_string()];
+        let result = ocaml_hashtbl_fold_order(&labels);
+        assert_eq!(
+            result,
+            vec!["Pair".to_string(), "String".to_string(), "Int".to_string(),]
+        );
+    }
 }

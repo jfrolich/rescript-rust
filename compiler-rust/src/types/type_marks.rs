@@ -87,11 +87,6 @@ impl<V: Copy> TypeNodeTable<V> {
         (epoch == self.epoch).then_some(value)
     }
 
-    #[inline]
-    pub(crate) fn contains(&self, ty: TypeExprRef) -> bool {
-        self.get(ty).is_some()
-    }
-
     /// Set the value of `ty`, returning the previous one.
     #[inline]
     pub(crate) fn insert(&mut self, ty: TypeExprRef, value: V) -> Option<V> {
@@ -239,15 +234,15 @@ mod tests {
             assert!(set.visit(local));
             assert!(!set.visit(local));
             assert!(set.visit(store));
-            assert!(set.contains(store));
+            assert!(set.get(store).is_some());
             // A nested walk gets its own table.
             let mut inner = visit_set();
-            assert!(!inner.contains(local));
+            assert!(inner.get(local).is_none());
             assert!(inner.visit(local));
         }
         let set = visit_set();
-        assert!(!set.contains(local));
-        assert!(!set.contains(store));
+        assert!(set.get(local).is_none());
+        assert!(set.get(store).is_none());
     }
 
     #[test]
@@ -267,7 +262,7 @@ mod tests {
         table.epoch = u32::MAX;
         assert!(table.visit(TypeExprRef(1)));
         table.clear();
-        assert!(!table.contains(TypeExprRef(1)));
+        assert!(table.get(TypeExprRef(1)).is_none());
         assert!(table.visit(TypeExprRef(1)));
     }
 }

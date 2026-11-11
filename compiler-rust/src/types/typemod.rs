@@ -653,12 +653,9 @@ fn parser_attr_to_decl_attr(
                             .expr_list(*elements)
                             .iter()
                             .map(|element| match &arena.get_expr(*element).pexp_desc {
-                                crate::parser::ast::ExpressionDesc::Pexp_constant(c) => match c {
-                                    crate::parser::ast::Constant::String(value) => {
-                                        Some(value.semantic(arena).to_string())
-                                    }
-                                    _ => None,
-                                },
+                                crate::parser::ast::ExpressionDesc::Pexp_constant(
+                                    crate::parser::ast::Constant::String(value),
+                                ) => Some(value.semantic(arena).to_string()),
                                 _ => None,
                             })
                             .collect::<Option<Vec<_>>>()
@@ -866,12 +863,9 @@ fn parser_deprecated_of_attr(arena: &ParseArena, attr: &ParsedAttribute) -> Opti
             [item] => match &item.pstr_desc {
                 ParsedStructureItemDesc::Pstr_eval(eval_box) => {
                     match &arena.get_expr(eval_box.0).pexp_desc {
-                        crate::parser::ast::ExpressionDesc::Pexp_constant(c) => match c {
-                            crate::parser::ast::Constant::String(value) => {
-                                Some(value.semantic(arena).to_string())
-                            }
-                            _ => None,
-                        },
+                        crate::parser::ast::ExpressionDesc::Pexp_constant(
+                            crate::parser::ast::Constant::String(value),
+                        ) => Some(value.semantic(arena).to_string()),
                         _ => None,
                     }
                 }
@@ -1392,14 +1386,33 @@ fn include_module_root_path(ta: &TypedArena, mod_expr: &ModuleExpr) -> Option<Pa
     }
 }
 
+/// The members an `include` brings into scope, for rewriting paths that
+/// reach them through the included module into local identifiers.
+#[derive(Clone, Copy)]
+struct IncludeLocalization<'a> {
+    /// The included module's path, when the include names one.
+    root_path: Option<&'a Path>,
+    /// Single-identifier aliases of the included module.
+    alias_heads: &'a [String],
+    /// Included type names and their local identifiers.
+    types: &'a HashMap<String, Ident>,
+    /// Included module names and their local identifiers.
+    modules: &'a HashMap<String, Ident>,
+    /// Included module type names and their local identifiers.
+    modtypes: &'a HashMap<String, Ident>,
+}
+
 fn rewrite_included_path_to_local(
     path: &Path,
-    include_root_path: Option<&Path>,
-    include_alias_heads: &[String],
-    local_type_ids: &HashMap<String, Ident>,
-    local_module_ids: &HashMap<String, Ident>,
-    local_modtype_ids: &HashMap<String, Ident>,
+    localization: &IncludeLocalization<'_>,
 ) -> Option<Path> {
+    let IncludeLocalization {
+        root_path: include_root_path,
+        alias_heads: include_alias_heads,
+        types: local_type_ids,
+        modules: local_module_ids,
+        modtypes: local_modtype_ids,
+    } = *localization;
     let rewrite_direct_child = |name: &str| {
         local_type_ids
             .get(name)
@@ -1430,30 +1443,18 @@ fn rewrite_included_path_to_local(
 
             rewrite_included_path_to_local(
                 prefix,
-                include_root_path,
-                include_alias_heads,
-                local_type_ids,
-                local_module_ids,
-                local_modtype_ids,
+                localization,
             )
             .map(|rewritten_prefix| Path::pdot_pos(rewritten_prefix, *name, *pos))
         }
         PathView::Papply(functor, arg) => {
             let rewritten_functor = rewrite_included_path_to_local(
                 functor,
-                include_root_path,
-                include_alias_heads,
-                local_type_ids,
-                local_module_ids,
-                local_modtype_ids,
+                localization,
             );
             let rewritten_arg = rewrite_included_path_to_local(
                 arg,
-                include_root_path,
-                include_alias_heads,
-                local_type_ids,
-                local_module_ids,
-                local_modtype_ids,
+                localization,
             );
             if rewritten_functor.is_none() && rewritten_arg.is_none() {
                 None
@@ -1611,11 +1612,7 @@ fn rewrite_type_paths_in_place(
 fn rewrite_included_type_paths_to_local(
     ctx: &crate::types::context::TypeContext,
     ty_ref: TypeExprRef,
-    include_root_path: Option<&Path>,
-    include_alias_heads: &[String],
-    local_type_ids: &HashMap<String, Ident>,
-    local_module_ids: &HashMap<String, Ident>,
-    local_modtype_ids: &HashMap<String, Ident>,
+    localization: &IncludeLocalization<'_>,
     visited: &mut HashSet<TypeExprRef>,
 ) {
     rewrite_type_paths_in_place(
@@ -1629,11 +1626,7 @@ fn rewrite_included_type_paths_to_local(
         &mut |path| {
             rewrite_included_path_to_local(
                 path,
-                include_root_path,
-                include_alias_heads,
-                local_type_ids,
-                local_module_ids,
-                local_modtype_ids,
+                localization,
             )
         },
     );
@@ -1643,11 +1636,7 @@ fn rewrite_included_type_decl_paths_to_local(
     ctx: &crate::types::context::TypeContext,
     id: &Ident,
     decl: &mut crate::types::decl::TypeDeclaration,
-    include_root_path: Option<&Path>,
-    include_alias_heads: &[String],
-    local_type_ids: &HashMap<String, Ident>,
-    local_module_ids: &HashMap<String, Ident>,
-    local_modtype_ids: &HashMap<String, Ident>,
+    localization: &IncludeLocalization<'_>,
     visited: &mut HashSet<TypeExprRef>,
 ) {
     decl.type_path = Some(Path::pident(*id));
@@ -1655,11 +1644,7 @@ fn rewrite_included_type_decl_paths_to_local(
         rewrite_included_type_paths_to_local(
             ctx,
             *param,
-            include_root_path,
-            include_alias_heads,
-            local_type_ids,
-            local_module_ids,
-            local_modtype_ids,
+            localization,
             visited,
         );
     }
@@ -1672,11 +1657,7 @@ fn rewrite_included_type_decl_paths_to_local(
             crate::types::TypeDesc::Tconstr { path, args, .. }
                 if rewrite_included_path_to_local(
                     path,
-                    include_root_path,
-                    include_alias_heads,
-                    local_type_ids,
-                    local_module_ids,
-                    local_modtype_ids,
+                    localization,
                 )
                 .is_some_and(
                     |local| matches!(local.view(), PathView::Pident(local_id) if local_id.same(id)),
@@ -1693,11 +1674,7 @@ fn rewrite_included_type_decl_paths_to_local(
                     rewrite_included_type_paths_to_local(
                         ctx,
                         arg,
-                        include_root_path,
-                        include_alias_heads,
-                        local_type_ids,
-                        local_module_ids,
-                        local_modtype_ids,
+                        localization,
                         visited,
                     );
                 }
@@ -1705,11 +1682,7 @@ fn rewrite_included_type_decl_paths_to_local(
             None => rewrite_included_type_paths_to_local(
                 ctx,
                 manifest,
-                include_root_path,
-                include_alias_heads,
-                local_type_ids,
-                local_module_ids,
-                local_modtype_ids,
+                localization,
                 visited,
             ),
         }
@@ -1723,11 +1696,7 @@ fn rewrite_included_type_decl_paths_to_local(
                             rewrite_included_type_paths_to_local(
                                 ctx,
                                 *arg,
-                                include_root_path,
-                                include_alias_heads,
-                                local_type_ids,
-                                local_module_ids,
-                                local_modtype_ids,
+                                localization,
                                 visited,
                             );
                         }
@@ -1737,11 +1706,7 @@ fn rewrite_included_type_decl_paths_to_local(
                             rewrite_included_type_paths_to_local(
                                 ctx,
                                 label.ld_type,
-                                include_root_path,
-                                include_alias_heads,
-                                local_type_ids,
-                                local_module_ids,
-                                local_modtype_ids,
+                                localization,
                                 visited,
                             );
                         }
@@ -1751,11 +1716,7 @@ fn rewrite_included_type_decl_paths_to_local(
                     rewrite_included_type_paths_to_local(
                         ctx,
                         res_ty,
-                        include_root_path,
-                        include_alias_heads,
-                        local_type_ids,
-                        local_module_ids,
-                        local_modtype_ids,
+                        localization,
                         visited,
                     );
                 }
@@ -1766,11 +1727,7 @@ fn rewrite_included_type_decl_paths_to_local(
                 rewrite_included_type_paths_to_local(
                     ctx,
                     label.ld_type,
-                    include_root_path,
-                    include_alias_heads,
-                    local_type_ids,
-                    local_module_ids,
-                    local_modtype_ids,
+                    localization,
                     visited,
                 );
             }
@@ -1782,11 +1739,7 @@ fn rewrite_included_type_decl_paths_to_local(
 fn rewrite_included_module_type_paths_to_local(
     ctx: &crate::types::context::TypeContext,
     mty: &mut crate::types::decl::ModuleType,
-    include_root_path: Option<&Path>,
-    include_alias_heads: &[String],
-    local_type_ids: &HashMap<String, Ident>,
-    local_module_ids: &HashMap<String, Ident>,
-    local_modtype_ids: &HashMap<String, Ident>,
+    localization: &IncludeLocalization<'_>,
     visited: &mut HashSet<TypeExprRef>,
 ) {
     match mty {
@@ -1794,11 +1747,7 @@ fn rewrite_included_module_type_paths_to_local(
         | crate::types::decl::ModuleType::MtyAlias(_, path) => {
             if let Some(rewritten) = rewrite_included_path_to_local(
                 path,
-                include_root_path,
-                include_alias_heads,
-                local_type_ids,
-                local_module_ids,
-                local_modtype_ids,
+                localization,
             ) {
                 *path = rewritten;
             }
@@ -1807,11 +1756,7 @@ fn rewrite_included_module_type_paths_to_local(
             rewrite_included_signature_paths_to_local(
                 ctx,
                 crate::types::decl::signature_mut(sig),
-                include_root_path,
-                include_alias_heads,
-                local_type_ids,
-                local_module_ids,
-                local_modtype_ids,
+                localization,
                 visited,
             );
         }
@@ -1822,22 +1767,14 @@ fn rewrite_included_module_type_paths_to_local(
                 rewrite_included_module_type_paths_to_local(
                     ctx,
                     param_type,
-                    include_root_path,
-                    include_alias_heads,
-                    local_type_ids,
-                    local_module_ids,
-                    local_modtype_ids,
+                    localization,
                     visited,
                 );
             }
             rewrite_included_module_type_paths_to_local(
                 ctx,
                 result,
-                include_root_path,
-                include_alias_heads,
-                local_type_ids,
-                local_module_ids,
-                local_modtype_ids,
+                localization,
                 visited,
             );
         }
@@ -1847,11 +1784,7 @@ fn rewrite_included_module_type_paths_to_local(
 fn rewrite_included_signature_paths_to_local(
     ctx: &crate::types::context::TypeContext,
     sig: &mut [crate::types::decl::SignatureItem],
-    include_root_path: Option<&Path>,
-    include_alias_heads: &[String],
-    local_type_ids: &HashMap<String, Ident>,
-    local_module_ids: &HashMap<String, Ident>,
-    local_modtype_ids: &HashMap<String, Ident>,
+    localization: &IncludeLocalization<'_>,
     visited: &mut HashSet<TypeExprRef>,
 ) {
     for item in sig {
@@ -1861,11 +1794,7 @@ fn rewrite_included_signature_paths_to_local(
                 rewrite_included_type_paths_to_local(
                     ctx,
                     desc.val_type,
-                    include_root_path,
-                    include_alias_heads,
-                    local_type_ids,
-                    local_module_ids,
-                    local_modtype_ids,
+                    localization,
                     visited,
                 );
             }
@@ -1874,22 +1803,14 @@ fn rewrite_included_signature_paths_to_local(
                     ctx,
                     id,
                     std::sync::Arc::make_mut(decl),
-                    include_root_path,
-                    include_alias_heads,
-                    local_type_ids,
-                    local_module_ids,
-                    local_modtype_ids,
+                    localization,
                     visited,
                 );
             }
             crate::types::decl::SignatureItem::SigTypext(_, ext, _) => {
                 if let Some(rewritten) = rewrite_included_path_to_local(
                     &ext.ext_type_path,
-                    include_root_path,
-                    include_alias_heads,
-                    local_type_ids,
-                    local_module_ids,
-                    local_modtype_ids,
+                    localization,
                 ) {
                     ext.ext_type_path = rewritten;
                 }
@@ -1897,11 +1818,7 @@ fn rewrite_included_signature_paths_to_local(
                     rewrite_included_type_paths_to_local(
                         ctx,
                         *param,
-                        include_root_path,
-                        include_alias_heads,
-                        local_type_ids,
-                        local_module_ids,
-                        local_modtype_ids,
+                        localization,
                         visited,
                     );
                 }
@@ -1911,11 +1828,7 @@ fn rewrite_included_signature_paths_to_local(
                             rewrite_included_type_paths_to_local(
                                 ctx,
                                 *arg,
-                                include_root_path,
-                                include_alias_heads,
-                                local_type_ids,
-                                local_module_ids,
-                                local_modtype_ids,
+                                localization,
                                 visited,
                             );
                         }
@@ -1925,11 +1838,7 @@ fn rewrite_included_signature_paths_to_local(
                             rewrite_included_type_paths_to_local(
                                 ctx,
                                 label.ld_type,
-                                include_root_path,
-                                include_alias_heads,
-                                local_type_ids,
-                                local_module_ids,
-                                local_modtype_ids,
+                                localization,
                                 visited,
                             );
                         }
@@ -1939,11 +1848,7 @@ fn rewrite_included_signature_paths_to_local(
                     rewrite_included_type_paths_to_local(
                         ctx,
                         ret_ty,
-                        include_root_path,
-                        include_alias_heads,
-                        local_type_ids,
-                        local_module_ids,
-                        local_modtype_ids,
+                        localization,
                         visited,
                     );
                 }
@@ -1964,8 +1869,8 @@ fn rewrite_included_signature_paths_to_local(
                         // would create a self-alias that cannot be expanded.
                         included_path_is_direct_child(
                             path,
-                            include_root_path,
-                            include_alias_heads,
+                            localization.root_path,
+                            localization.alias_heads,
                             id.name(),
                         )
                     }
@@ -1975,11 +1880,7 @@ fn rewrite_included_signature_paths_to_local(
                     rewrite_included_module_type_paths_to_local(
                         ctx,
                         &mut md.md_type,
-                        include_root_path,
-                        include_alias_heads,
-                        local_type_ids,
-                        local_module_ids,
-                        local_modtype_ids,
+                        localization,
                         visited,
                     );
                 }
@@ -1989,11 +1890,7 @@ fn rewrite_included_signature_paths_to_local(
                     rewrite_included_module_type_paths_to_local(
                         ctx,
                         mty,
-                        include_root_path,
-                        include_alias_heads,
-                        local_type_ids,
-                        local_module_ids,
-                        local_modtype_ids,
+                        localization,
                         visited,
                     );
                 }
@@ -7105,16 +7002,12 @@ type RecModuleTypeDecl = (
     Attributes,
     LocIdx,
 );
-/// The second transition's declarations, `env2`, and the module identifiers.
-type RecModuleTypes = (
-    Vec<crate::types::typedtree::TypedModuleDeclaration>,
-    Env,
-    Vec<Ident>,
-);
+/// The second transition's declarations and `env2`.
+type RecModuleTypes = (Vec<crate::types::typedtree::TypedModuleDeclaration>, Env);
 
 /// OCaml `Typemod.transl_recmodule_modtypes` (typemod.ml:914-981), shared by
 /// `module rec` structures and signatures. Returns the second transition's
-/// declarations, their environment (`env2`) and the module identifiers.
+/// declarations and their environment (`env2`).
 fn transl_recmodule_modtypes<'a>(
     tctx: &mut TypeCheckContext<'a>,
     env: &Env,
@@ -7224,7 +7117,7 @@ fn transl_recmodule_modtypes<'a>(
             &tctx.typed.module_type(decl.md_type).mty_type,
         )?;
     }
-    Ok((dcl2, rec_env, mod_ids))
+    Ok((dcl2, rec_env))
 }
 
 /// OCaml `Typemod.check_recmod_typedecls` for one module (typemod.ml:591-601)
@@ -9469,7 +9362,7 @@ fn collect_pmty_with_type_constraints<'a>(
                         RecFlag::Nonrecursive,
                         std::slice::from_ref(decl),
                         Some(std::slice::from_ref(&id)),
-                        Some(std::slice::from_ref(&original_decl)),
+                        Some(std::slice::from_ref(&*original_decl)),
                     )?;
                     if let Some(typed_decl) = typed_decls.pop() {
                         let mut inclusion_warnings = Vec::new();
@@ -9529,7 +9422,7 @@ enum ResolvedWithConstraintTarget {
     Type {
         path: Path,
         id: Ident,
-        decl: crate::types::decl::TypeDeclaration,
+        decl: std::sync::Arc<crate::types::decl::TypeDeclaration>,
     },
     Module {
         path: Path,
@@ -9568,7 +9461,7 @@ fn resolve_with_constraint_target_in_sig(
                 return Some(ResolvedWithConstraintTarget::Type {
                     path: resolved_constraint_path(prefix, id),
                     id: *id,
-                    decl: (**decl).clone(),
+                    decl: std::sync::Arc::clone(decl),
                 });
             }
             SignatureItem::SigModule(id, md, _) if id.name() == head.as_str() => {
@@ -10183,7 +10076,7 @@ fn transl_with_constraints<'a>(
                         RecFlag::Nonrecursive,
                         std::slice::from_ref(decl),
                         Some(std::slice::from_ref(&id)),
-                        Some(std::slice::from_ref(&original_decl)),
+                        Some(std::slice::from_ref(&*original_decl)),
                     )?;
                     if let Some(typed_decl) = typed_decls.pop() {
                         let mut inclusion_warnings = Vec::new();
@@ -10241,7 +10134,7 @@ fn transl_with_constraints<'a>(
                         RecFlag::Nonrecursive,
                         std::slice::from_ref(decl),
                         Some(std::slice::from_ref(&id)),
-                        Some(std::slice::from_ref(&original_decl)),
+                        Some(std::slice::from_ref(&*original_decl)),
                     )?;
                     if let Some(typed_decl) = typed_decls.pop() {
                         let mut inclusion_warnings = Vec::new();
@@ -11628,11 +11521,13 @@ fn localize_scraped_signature_vec(
     rewrite_included_signature_paths_to_local(
         ctx,
         &mut sig,
-        Some(root),
-        &heads,
-        &types,
-        &modules,
-        &modtypes,
+        &IncludeLocalization {
+            root_path: Some(root),
+            alias_heads: &heads,
+            types: &types,
+            modules: &modules,
+            modtypes: &modtypes,
+        },
         &mut visited,
     );
     // The raw `ps_sig` (env.ml:719-721, 872-875) names members locally at
@@ -12451,7 +12346,6 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                     crate::parser::ast::SignatureItemDesc::Psig_open(od) => {
                         // Process open declarations to extend sig_env with
                         // opened module's types, matching transl_signature behavior.
-                        let longident = tctx.resolve_lid(od.popen_lid.txt).clone();
                         let open_lid = arena.get_longident(od.popen_lid.txt);
                         if open_direct_persistent_module(
                             &mut sig_env,
@@ -14073,38 +13967,6 @@ fn extract_module_type_from_mod_expr_inner(
 
     use crate::types::includemod::add_sig_item_to_env;
 
-    fn module_expr_contains_unpack(ta: &TypedArena, mod_expr: &ModuleExpr) -> bool {
-        match &mod_expr.mod_desc {
-            ModuleExprDesc::Tmod_ident(_, _) => false,
-            ModuleExprDesc::Tmod_structure(structure) => ta
-                .structure_items(structure.str_items)
-                .iter()
-                .any(|item| match &item.str_desc {
-                    StructureItemDesc::Tstr_module(mb) => {
-                        module_expr_contains_unpack(ta, ta.module_expr(mb.mb_expr))
-                    }
-                    StructureItemDesc::Tstr_recmodule(mbs) => mbs
-                        .iter()
-                        .any(|mb| module_expr_contains_unpack(ta, ta.module_expr(mb.mb_expr))),
-                    StructureItemDesc::Tstr_include(include) => {
-                        module_expr_contains_unpack(ta, ta.module_expr(include.incl_mod))
-                    }
-                    _ => false,
-                }),
-            ModuleExprDesc::Tmod_apply(functor, arg, _) => {
-                module_expr_contains_unpack(ta, ta.module_expr(*functor))
-                    || module_expr_contains_unpack(ta, ta.module_expr(*arg))
-            }
-            ModuleExprDesc::Tmod_functor(_, _, _, body) => {
-                module_expr_contains_unpack(ta, ta.module_expr(*body))
-            }
-            ModuleExprDesc::Tmod_constraint(inner, _, _, _) => {
-                module_expr_contains_unpack(ta, ta.module_expr(*inner))
-            }
-            ModuleExprDesc::Tmod_unpack(_, _) => true,
-        }
-    }
-
     match &mod_expr.mod_desc {
         ModuleExprDesc::Tmod_ident(_, _) => Some(mod_expr.mod_type.clone()),
         ModuleExprDesc::Tmod_unpack(_, mty) => Some(mty.clone()),
@@ -15653,14 +15515,12 @@ fn type_module_expr_with_alias_inner<'a>(
             let decl_mty = decl_module_type_from_typed(&typed_mty).unwrap_or(
                 crate::types::decl::ModuleType::MtySignature(std::sync::Arc::new(vec![])),
             );
-            let typed_mod_for_unused_check = typed_mod.clone();
-            let typed_mty_idx = tctx.typed.push_module_type(typed_mty.clone());
+            let typed_mty_idx = tctx.typed.push_module_type(typed_mty);
             let constrained = wrap_constraint_with_decl_mty(
                 tctx,
                 env,
                 typed_mod,
-                typed_mty.clone(),
-                decl_mty.clone(),
+                decl_mty,
                 crate::types::typedtree::ModuleTypeConstraint::Tmodtype_explicit(typed_mty_idx),
                 loc,
                 mod_expr.pmod_attributes.clone(),
@@ -15744,7 +15604,6 @@ fn wrap_constraint_with_decl_mty<'a>(
     tctx: &mut TypeCheckContext<'a>,
     env: &Env,
     arg: ModuleExpr,
-    mty: ModuleType,
     decl_mty: crate::types::decl::ModuleType,
     explicit: crate::types::typedtree::ModuleTypeConstraint,
     mod_loc: LocIdx,
@@ -15762,7 +15621,6 @@ fn wrap_constraint_with_decl_mty<'a>(
         tctx,
         env,
         arg,
-        mty,
         arg_mty,
         decl_mty,
         explicit,
@@ -15775,7 +15633,6 @@ fn wrap_constraint_with_decl_and_arg_mty<'a>(
     tctx: &mut TypeCheckContext<'a>,
     env: &Env,
     arg: ModuleExpr,
-    mty: ModuleType,
     arg_mty: crate::types::decl::ModuleType,
     decl_mty: crate::types::decl::ModuleType,
     explicit: crate::types::typedtree::ModuleTypeConstraint,
@@ -16249,9 +16106,6 @@ pub fn transl_signature<'a>(
         let ctx = tctx.type_ctx;
         ctx.init_def(ctx.current_stamp());
         let mut loc = item.psig_loc;
-        let env_before_item = sig_env.clone_preserve_id();
-        let warnings_before_item = tctx.warnings.len();
-        let item_index = typed_items.len();
         let desc = match &item.psig_desc {
             PSigDesc::Psig_value(vd) => {
                 let name_str = arena.get_string(vd.pval_name.txt).to_string();
@@ -16425,7 +16279,7 @@ pub fn transl_signature<'a>(
                         )
                     })
                     .collect();
-                let (decls, rec_env, _) =
+                let (decls, rec_env) =
                     transl_recmodule_modtypes(tctx, &sig_env, arena, &rec_type_decls)?;
                 sig_env = rec_env;
                 TSigDesc::Tsig_recmodule(decls)
@@ -16654,7 +16508,6 @@ fn type_structure_unscoped<'a>(
         let ctx = tctx.type_ctx;
         ctx.init_def(ctx.current_stamp());
         tctx.set_unify_env(&current_env);
-        let warnings_before_item = tctx.warnings.len();
         let (typed_item, item_sig, new_env) = type_structure_item(tctx, &current_env, arena, item)?;
         if let StructureItemDesc::Tstr_include(incl) = &typed_item.str_desc {
             // OCaml compiler/ml/typemod.ml:1579.
@@ -17464,7 +17317,6 @@ fn type_structure_item<'a>(
                                 process_constructor_tag(arena, cstr).map_err(|(loc, error)| {
                                     ast_untagged_variant_error(arena.to_location(loc), error)
                                 })?;
-                            let is_constant = matches!(cstr.pcd_args, crate::parser::ast::ConstructorArguments::Pcstr_tuple(ref args) if args.is_empty());
                             // OCaml `make_constructor` (compiler/ml/typedecl.ml:337-356):
                             // a generalized constructor is translated after
                             // `narrow ()` and `reset_type_variables ()`, so its type
@@ -19521,7 +19373,6 @@ fn type_structure_item<'a>(
 
         ParsedStructureItemDesc::Pstr_recmodule(mbs) => {
             // Recursive modules: module rec M : S = ...
-            let ctx = tctx.type_ctx;
             let mut rec_bindings = Vec::with_capacity(mbs.len());
             for mb in mbs.iter() {
                 let mod_name_str = arena.get_string(mb.pmb_name.txt);
@@ -19551,7 +19402,7 @@ fn type_structure_item<'a>(
                     (name.clone(), *name_loc, *mty_idx, attrs.clone(), *mb_loc)
                 })
                 .collect();
-            let (dcl2, rec_env, mod_ids) =
+            let (dcl2, rec_env) =
                 transl_recmodule_modtypes(tctx, env, arena, &rec_type_decls)?;
 
             // Type-check each module body with the environment produced by the
@@ -19942,11 +19793,13 @@ fn type_structure_item<'a>(
                 rewrite_included_signature_paths_to_local(
                     tctx.type_ctx,
                     &mut sig,
-                    include_root_path.as_ref(),
-                    &include_alias_heads,
-                    &local_include_types,
-                    &local_include_modules,
-                    &local_include_modtypes,
+                    &IncludeLocalization {
+                        root_path: include_root_path.as_ref(),
+                        alias_heads: &include_alias_heads,
+                        types: &local_include_types,
+                        modules: &local_include_modules,
+                        modtypes: &local_include_modtypes,
+                    },
                     &mut visited,
                 );
                 sig
@@ -19978,31 +19831,10 @@ fn type_structure_item<'a>(
                                     ty_res,
                                 );
 
-                                let num_consts = constructors
-                                    .iter()
-                                    .filter(|c| {
-                                        matches!(
-                                            c.cd_args,
-                                            crate::types::decl::ConstructorArguments::CstrTuple(
-                                                ref args
-                                            ) if args.is_empty()
-                                        ) && c.cd_res.is_none()
-                                    })
-                                    .count()
-                                    as i32;
-                                let num_nonconsts = constructors.len() as i32 - num_consts;
-
                                 let mut inline_record_descs: Option<
                                     Vec<crate::types::ConstructorDescription>,
                                 > = None;
                                 for (position, cd) in constructors.iter().enumerate() {
-                                    let is_constant = matches!(
-                                        cd.cd_args,
-                                        crate::types::decl::ConstructorArguments::CstrTuple(
-                                            ref args
-                                        ) if args.is_empty()
-                                    ) && cd.cd_res.is_none();
-
                                     // `Datarepr.constructor_args` (datarepr.ml:64-92): an
                                     // inline record is one argument, the record type at
                                     // `Pdot (type_path, cstr_name)`, with its declaration

@@ -3677,7 +3677,7 @@ pub(crate) fn normalize_path_full(ctx: &TypeContext, env: &Env, path: &Path) -> 
     if let Some(cached) = ctx.find_normalized_path_full(env_id, path) {
         return cached;
     }
-    let normalized = normalize_path_full_inner(ctx, env, path, 0, &mut HashSet::new(), true, false);
+    let normalized = normalize_path_full_inner(ctx, env, path, 0, &mut HashSet::new(), false);
     ctx.register_normalized_path_full(env_id, path, normalized);
     normalized
 }
@@ -3757,7 +3757,7 @@ pub(crate) fn force_normalize_path_full_side_effects(
     if let Some(cached) = ctx.find_forced_normalized_path_full(env_id, path) {
         return cached;
     }
-    let normalized = normalize_path_full_inner(ctx, env, path, 0, &mut HashSet::new(), true, true);
+    let normalized = normalize_path_full_inner(ctx, env, path, 0, &mut HashSet::new(), true);
     ctx.register_forced_normalized_path_full(env_id, path, normalized);
     normalized
 }
@@ -3770,8 +3770,7 @@ fn normalize_path_forward_only(ctx: &TypeContext, env: &Env, path: &Path) -> Pat
     if let Some(cached) = ctx.find_normalized_path_forward(env_id, path) {
         return cached;
     }
-    let normalized =
-        normalize_path_full_inner(ctx, env, path, 0, &mut HashSet::new(), false, false);
+    let normalized = normalize_path_full_inner(ctx, env, path, 0, &mut HashSet::new(), false);
     ctx.register_normalized_path_forward(env_id, path, normalized);
     normalized
 }
@@ -3782,7 +3781,6 @@ fn normalize_path_full_inner(
     path: &Path,
     depth: usize,
     visiting: &mut HashSet<Path>,
-    allow_reverse_local_aliases: bool,
     force_module_lookup_side_effects: bool,
 ) -> Path {
     if depth > 20 {
@@ -3814,7 +3812,6 @@ fn normalize_path_full_inner(
                 &alias_path,
                 depth + 1,
                 visiting,
-                allow_reverse_local_aliases,
                 force_module_lookup_side_effects,
             );
         }
@@ -3836,7 +3833,6 @@ fn normalize_path_full_inner(
                 p,
                 depth + 1,
                 visiting,
-                allow_reverse_local_aliases,
                 force_module_lookup_side_effects,
             );
             if p_norm == *p {
@@ -3852,7 +3848,6 @@ fn normalize_path_full_inner(
                 p1,
                 depth + 1,
                 visiting,
-                allow_reverse_local_aliases,
                 force_module_lookup_side_effects,
             );
             let p2_norm = normalize_path_full_inner(
@@ -3861,7 +3856,6 @@ fn normalize_path_full_inner(
                 p2,
                 depth + 1,
                 visiting,
-                allow_reverse_local_aliases,
                 force_module_lookup_side_effects,
             );
             if p1_norm == *p1 && p2_norm == *p2 {
@@ -3905,7 +3899,6 @@ fn normalize_path_full_inner(
             &alias_path,
             depth + 1,
             visiting,
-            allow_reverse_local_aliases,
             force_module_lookup_side_effects,
         );
     }
@@ -3930,7 +3923,6 @@ fn normalize_path_full_inner(
                 &alias_path,
                 depth + 1,
                 visiting,
-                allow_reverse_local_aliases,
                 force_module_lookup_side_effects,
             );
         }
@@ -3953,7 +3945,6 @@ fn normalize_path_full_inner(
                 alias_path,
                 depth + 1,
                 visiting,
-                allow_reverse_local_aliases,
                 force_module_lookup_side_effects,
             );
         }
@@ -4119,9 +4110,11 @@ fn try_expand_head_with_mode(
                         ty,
                         lookup_abbrev,
                         private_flag,
-                        params.into(),
+                        AbbrevDefinition {
+                            params: params.into(),
+                            body: manifest,
+                        },
                         ctx.type_list(args),
-                        manifest,
                     )
                 };
 
@@ -6362,13 +6355,12 @@ fn expand_head_with_mode(
     // Stack-allocated cycle detection for up to 20 iterations.
     // Linear scan is faster than HashSet for this small size.
     let mut seen = [TypeExprRef(0); 20];
-    let mut seen_len: usize = 0;
-    for _ in 0..20 {
+    for seen_len in 0..seen.len() {
         if seen[..seen_len].contains(&current) {
             break;
         }
         seen[seen_len] = current;
-        seen_len += 1;
+        let seen_len = seen_len + 1;
         match try_expand_head_with_mode(ctx, env, current, mode) {
             Some(expanded) => {
                 let expanded = ctx.repr(expanded);
@@ -6740,6 +6732,14 @@ fn subst_type(
     }
 }
 
+/// A type abbreviation's definition: its declared parameters and the
+/// manifest they occur in.
+#[derive(Clone, Copy)]
+struct AbbrevDefinition<'a> {
+    params: crate::types::type_expr::TypeSlice<'a>,
+    body: TypeExprRef,
+}
+
 /// OCaml's `subst` with abbreviation memoization.
 ///
 /// Matches OCaml ctype.ml:1218 `subst`:
@@ -6752,14 +6752,14 @@ fn subst_type(
 /// 7. Substitute fresh params with actual args
 fn subst_with_memo(
     ctx: &TypeContext,
-    _env: &Env,
+    env: &Env,
     ty: TypeExprRef,              // original Tconstr being expanded
     lookup_abbrev: AbbrevMemoRef, // proper_abbrevs target memo
     private_flag: PrivateFlag,    // OCaml subst `priv` argument
-    params: crate::types::type_expr::TypeSlice<'_>,       // type declaration params
-    args: crate::types::type_expr::TypeSlice<'_>,         // actual type arguments
-    body: TypeExprRef,            // manifest
+    definition: AbbrevDefinition<'_>,
+    args: crate::types::type_expr::TypeSlice<'_>, // actual type arguments
 ) -> TypeExprRef {
+    let AbbrevDefinition { params, body } = definition;
     // Match OCaml subst: run the whole substitution/unification at the
     // Tconstr's level, then restore.
     let tconstr_level = ctx.get_level(ctx.repr(ty));
@@ -6810,7 +6810,7 @@ fn subst_with_memo(
     // top-level `unify` snapshot (ctype.ml:2589-2594); a snapshot here would
     // trail links of the fresh instance that an outer backtrack must keep.
     let mut unify_state = UnifyState::new();
-    unify_state.set_env(_env);
+    unify_state.set_env(env);
     if unify_var(ctx, &mut unify_state, body0, fresh_body).is_err() {
         // Preserve previous behavior if full unification fails.
         link_type(ctx, body0, fresh_body);
@@ -8469,7 +8469,7 @@ fn unify_rows<'a>(
         set_more(ctx, state, row1, true, &r2)?;
         for (label, f1, f2) in &pairs {
             // ctype.ml:2485-2491 prefixes the single-field variants.
-            if let Err(err) = unify_row_field(ctx, state, fixed1, fixed2, more, label, f1, f2) {
+            if let Err(err) = unify_row_field(ctx, state, fixed1, fixed2, more, f1, f2) {
                 return Err(match err {
                     TypeError::Unify(trace) => {
                         let mut new_trace = vec![(
@@ -8522,7 +8522,6 @@ fn unify_row_field(
     fixed1: bool,
     fixed2: bool,
     more: TypeExprRef,
-    label: &str,
     field1: &RowField,
     field2: &RowField,
 ) -> TypeResult<()> {
@@ -8595,7 +8594,7 @@ fn unify_row_field(
                     let has_existing_link =
                         ctx.get_row_field(*e1).is_some() || ctx.get_row_field(*e2).is_some();
                     if has_existing_link {
-                        return unify_row_field(ctx, state, fixed1, fixed2, more, label, &f1, &f2);
+                        return unify_row_field(ctx, state, fixed1, fixed2, more, &f1, &f2);
                     }
                 }
             }
@@ -8743,24 +8742,19 @@ pub(crate) struct FieldInfo {
 pub(crate) fn flatten_fields(ctx: &TypeContext, ty: TypeExprRef) -> (Vec<FieldInfo>, TypeExprRef) {
     let mut fields = Vec::new();
     let mut current = ctx.repr(ty);
-    loop {
-        let next = match &*ctx.get_desc(current) {
-            TypeDesc::Tfield {
-                name,
-                mutability,
-                typ,
-                rest,
-            } => {
-                fields.push(FieldInfo {
-                    name: *name,
-                    mutability: *mutability,
-                    typ: *typ,
-                });
-                *rest
-            }
-            _ => break,
-        };
-        current = ctx.repr(next);
+    while let TypeDesc::Tfield {
+        name,
+        mutability,
+        typ,
+        rest,
+    } = *ctx.get_desc(current)
+    {
+        fields.push(FieldInfo {
+            name,
+            mutability,
+            typ,
+        });
+        current = ctx.repr(rest);
     }
     // OCaml accumulates the fields in reverse before its stable sort.
     fields.reverse();
@@ -11221,16 +11215,15 @@ struct CopySepVisitedEntry {
     bound: Vec<TypeExprRef>,
 }
 
+/// Copy a row's fields and name with `copy` (`copy_sep` on each type),
+/// terminating the copy at `more`.
 fn copy_sep_row(
     ctx: &TypeContext,
     row: &RowDesc,
     fixed: bool,
     keep: bool,
     more: TypeExprRef,
-    free_univars: &HashMap<TypeExprRef, HashSet<TypeExprRef>>,
-    bound: &[TypeExprRef],
-    visited: &[CopySepVisitedEntry],
-    delayed_copy: &mut Vec<(TypeExprRef, TypeExprRef)>,
+    copy: &mut dyn FnMut(TypeExprRef) -> TypeExprRef,
 ) -> RowDesc {
     RowDesc {
         row_fields: row
@@ -11239,15 +11232,7 @@ fn copy_sep_row(
             .map(|(label, field)| {
                 let field = super::btype::row_field_repr(ctx, field);
                 let copied = match field {
-                    RowField::Rpresent(Some(ty)) => RowField::Rpresent(Some(copy_sep_inner(
-                        ctx,
-                        ty,
-                        fixed,
-                        free_univars,
-                        bound,
-                        visited,
-                        delayed_copy,
-                    ))),
+                    RowField::Rpresent(Some(ty)) => RowField::Rpresent(Some(copy(ty))),
                     RowField::Reither {
                         constant,
                         types,
@@ -11257,17 +11242,7 @@ fn copy_sep_row(
                         constant,
                         types: types
                             .iter()
-                            .map(|t| {
-                                copy_sep_inner(
-                                    ctx,
-                                    *t,
-                                    fixed,
-                                    free_univars,
-                                    bound,
-                                    visited,
-                                    delayed_copy,
-                                )
-                            })
+                            .map(|t| copy(*t))
                             .collect(),
                         matched: if row.row_fixed { fixed } else { matched },
                         link: if keep {
@@ -11287,12 +11262,7 @@ fn copy_sep_row(
         row_name: row.row_name.as_ref().map(|(path, types)| {
             (
                 *path,
-                types
-                    .iter()
-                    .map(|t| {
-                        copy_sep_inner(ctx, *t, fixed, free_univars, bound, visited, delayed_copy)
-                    })
-                    .collect(),
+                types.iter().map(|t| copy(*t)).collect(),
             )
         }),
     }
@@ -11499,10 +11469,17 @@ fn copy_sep_inner(
                 fixed_prime,
                 keep,
                 more_copy,
-                free_univars,
-                bound,
-                &visited_for_children,
-                delayed_copy,
+                &mut |ty| {
+                    copy_sep_inner(
+                        ctx,
+                        ty,
+                        fixed_prime,
+                        free_univars,
+                        bound,
+                        &visited_for_children,
+                        delayed_copy,
+                    )
+                },
             )))
         }
         TypeDesc::Tpoly { body, vars } => {
@@ -13489,9 +13466,11 @@ fn nondep_type_rec(
                                 ty,
                                 proper_abbrevs(ctx, path, ctx.type_list(args), *abbrev),
                                 PrivateFlag::Public,
-                                params.into(),
+                                AbbrevDefinition {
+                                    params: params.into(),
+                                    body: manifest,
+                                },
                                 ctx.type_list(args),
-                                manifest,
                             );
                             Some(expanded)
                         } else {

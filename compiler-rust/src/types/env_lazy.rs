@@ -1767,15 +1767,19 @@ fn access_path_is_direct_opened_component(env: &super::env::Env, access_path: &P
 }
 
 fn build_local_module_components(
-    env: &super::env::Env,
-    access_path: &Path,
-    md: &ModuleDeclaration,
-    parent_substitution_context: Option<(&Path, &[SignatureItem])>,
-    source_prefix: Option<&Path>,
+    stored: &StoredModuleComponents,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &super::context::TypeContext,
     cache_mode: super::typecore::ComponentLookupApi,
 ) -> Option<QualifiedModuleComponents> {
+    let env = stored.seed_env.as_ref();
+    let access_path = &stored.access_path;
+    let md = &stored.module_decl;
+    let parent_substitution_context = stored
+        .parent_context
+        .as_ref()
+        .map(|(parent_access_path, parent_sig)| (parent_access_path, parent_sig.as_ref().as_slice()));
+    let source_prefix = stored.source_prefix.get();
     if ctx.persistent_env_is_in_process()
         && let super::decl::ModuleType::MtyAlias(_, alias_path)
         | super::decl::ModuleType::MtyIdent(alias_path) = &md.md_type
@@ -1891,7 +1895,7 @@ fn build_local_module_components(
         if let Some(resolved) = env.resolve_module_type(&md.md_type, pers_env, ctx, cache_mode) {
             resolved
         } else {
-            let Some((raw_sig, resolved_name)) = (match &md.md_type {
+            (match &md.md_type {
                 super::decl::ModuleType::MtyAlias(_, alias_path)
                     if alias_path
                         .as_pident()
@@ -1920,10 +1924,7 @@ fn build_local_module_components(
                     })
                 }
                 _ => None,
-            }) else {
-                return None;
-            };
-            (raw_sig, resolved_name)
+            })?
         };
     let pident_sibling_alias_name =
         parent_substitution_context
@@ -2236,22 +2237,7 @@ impl StoredModuleComponents {
         ctx: &super::context::TypeContext,
         cache_mode: super::typecore::ComponentLookupApi,
     ) -> Option<QualifiedModuleComponents> {
-        let parent_substitution_context =
-            self.parent_context
-                .as_ref()
-                .map(|(parent_access_path, parent_sig)| {
-                    (parent_access_path, parent_sig.as_ref().as_slice())
-                });
-        let components = build_local_module_components(
-            self.seed_env.as_ref(),
-            &self.access_path,
-            &self.module_decl,
-            parent_substitution_context,
-            self.source_prefix.get(),
-            pers_env,
-            ctx,
-            cache_mode,
-        )?;
+        let components = build_local_module_components(self, pers_env, ctx, cache_mode)?;
         if ctx.compiler_counters_enabled() {
             crate::perf_counters::record_stored_component_build(cache_mode);
         }
