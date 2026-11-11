@@ -4044,7 +4044,7 @@ mod tests {
 
         assert_eq!(
             print_expr(&j, expr),
-            format!("tag`\u{4f60}\u{597d}\u{ff0c}\n\u{4e16}\u{754c}`")
+            "tag`\u{4f60}\u{597d}\u{ff0c}\n\u{4e16}\u{754c}`"
         );
     }
 
