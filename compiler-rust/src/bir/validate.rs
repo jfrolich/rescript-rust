@@ -63,8 +63,8 @@ impl Bir {
             seen[id.index()] = true;
             weighted_switches += usize::from(self.is_weighted_switch(self.node(id)));
             boundaries += usize::from(Self::is_capture_kind(self.node(id)));
-            let (epoch, cached) = self.weights[id.index()];
-            if epoch == self.weight_epoch && cached != 0 && cached != weight {
+            let cached = self.weights[id.index()];
+            if cached != 0 && cached != weight {
                 return fail("stale weight cache");
             }
             order.push(id);
@@ -149,6 +149,9 @@ impl Bir {
         for i in 0..self.nodes.len() {
             if !seen[i] && !free[i] {
                 return fail("unreachable live node or untracked free slot");
+            }
+            if free[i] && self.weights[i] != 0 {
+                return fail("free node has cached weight");
             }
             if free[i] && self.parents[i].is_some() {
                 return fail("free node has parent");

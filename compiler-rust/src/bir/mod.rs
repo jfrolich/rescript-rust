@@ -40,8 +40,12 @@ pub struct Bir {
     func_owners: Vec<Option<NodeId>>,
     capture_boundaries: usize,
     weighted_switches: usize,
-    weight_epoch: u64,
-    weights: Vec<(u64, u32)>,
+    // Zero is unknown; every valid use weight is positive. Cache invalidation
+    // follows only the affected subtree, never an unrelated module-wide epoch.
+    weights: Vec<u32>,
+    weight_path: Vec<(NodeId, u32)>,
+    count_stack: Vec<(NodeId, i64)>,
+    release_stack: Vec<(NodeId, u32)>,
     capture_epoch: u64,
     capture_binders: Vec<u64>,
     capture_chain: Vec<(u64, bool)>,
