@@ -201,5 +201,24 @@ export function createEngine(wasm, stdlib) {
     return { order, results, logs: ok ? run(order) : null };
   }
 
-  return { build };
+  /**
+   * Type check the parts of the standard library most programs use, so
+   * that the first real build does not wait for them.
+   */
+  function warm() {
+    build([
+      {
+        name: "Warm.res",
+        source:
+          'let run = () => {\n' +
+          '  Console.log([1]->Array.map(x => x + 1)->Array.join(","))\n' +
+          '  let entries = Dict.fromArray([("a", JSON.Encode.string("b"))])\n' +
+          '  JSON.stringify(JSON.Encode.object(entries))->String.length->Int.toString->Option.Some\n' +
+          '}\n',
+      },
+    ]);
+    build([]);
+  }
+
+  return { build, warm };
 }

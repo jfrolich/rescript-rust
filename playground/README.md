@@ -1,14 +1,19 @@
-# Macros playground
+# Macros site and playground
 
-A browser playground for the Rust compiler and its compile-time macros
-([docs/comptime](../docs/comptime/README.md)). The compiler runs in
-WebAssembly in a worker; macros run in the browser's JavaScript engine. A
+A static site for the Rust compiler's compile-time macros. The compiler runs
+in WebAssembly in a worker; macros run in the browser's JavaScript engine. A
 project is a few files: they are compiled in dependency order, and the
 compiled program is run.
 
-The right-hand side shows, for the selected file, the source after macro
-expansion, the JavaScript, the program's output, and the compiler's
-intermediate trees.
+| Page | What |
+| --- | --- |
+| `index.html` | The RFC, rendered from [docs/comptime/README.md](../docs/comptime/README.md). Each `<!-- example: id -->` block in it becomes a live example: the project on the left, and on the right the source after expansion with the generated lines marked, the JavaScript, the compiler's trees, and the program's output. |
+| `implementation.html` | [docs/comptime/IMPLEMENTATION.md](../docs/comptime/IMPLEMENTATION.md). |
+| `playground.html` | The full playground: any number of files, share links. |
+
+The examples on the RFC page show a result that was built with the site, so
+the page reads without loading the compiler; it is loaded when an example is
+edited or its trees are opened.
 
 ## Build
 
@@ -17,7 +22,7 @@ cd playground
 npm ci
 npm run build:wasm   # compiler-rust -> crate/pkg (needs wasm-pack and the wasm32-unknown-unknown target)
 npm run smoke        # builds and runs every example with the wasm compiler, in Node
-npm run build        # static site in dist/
+npm run build        # builds the examples for the RFC page, then the static site in dist/
 ```
 
 `npm run dev` serves it with hot reload.
@@ -37,9 +42,10 @@ and the compiled program import. `npm run build` bundles both into
 | --- | --- |
 | `crate/` | The wasm-bindgen entry points: `compile_file`, the virtual file system, and the macro host that calls into the page. |
 | `src/engine.js` | The build: file order, compiling, running macros and the program. No dependency on the page; `scripts/smoke.mjs` runs it in Node. |
+| `src/rfc/` | The RFC pages: the Markdown renderer, the live example, the diagrams. `scripts/prebuild-examples.mjs` writes the results they start from. |
 | `src/compiler-worker.js`, `src/compiler-client.js` | The worker the compiler runs in, and the page's side: a build that takes more than 20 seconds is stopped by replacing the worker. |
 | `src/App.jsx` | The page. |
-| `examples/` | The example projects, listed in `examples/index.json`. `compiler-rust/tests/macros.rs` compiles all of them. |
+| `examples/` | The example projects, listed in `examples/index.json`. `compiler-rust/tests/macros.rs` compiles all of them; the RFC page and the playground both show them. |
 
 ## Adding an example
 

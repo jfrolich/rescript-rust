@@ -286,6 +286,9 @@ export default function App() {
     <div className="app">
       <header className="header">
         <div className="header-left">
+          <a className="back" href="./" title="The RFC, with live examples">
+            ← RFC
+          </a>
           <h1>ReScript macros</h1>
           <span className="badge">Rust Compiler</span>
           <select className="example-select" value={exampleId} onChange={handleExampleChange}>

@@ -3,3 +3,4 @@ dist/
 public/stdlib.json
 # Override root .gitignore that excludes *.jsx (ReScript build artifacts)
 !*.jsx
+src/rfc/prebuilt.json

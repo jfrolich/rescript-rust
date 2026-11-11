@@ -15,6 +15,7 @@ self.onmessage = async (event) => {
       const response = await fetch(message.stdlibUrl);
       if (!response.ok) throw new Error(`cannot load the standard library (${response.status})`);
       engine = createEngine(wasm, await response.json());
+      engine.warm();
       self.postMessage({ type: "ready" });
     } else if (message.type === "build") {
       const started = performance.now();

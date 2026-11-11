@@ -525,3 +525,17 @@ h1 {
 .problem.skipped {
   color: var(--text-muted);
 }
+
+.back {
+  color: var(--text-muted);
+  font-size: 12px;
+  text-decoration: none;
+  padding-right: 12px;
+  margin-right: 4px;
+  border-right: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.back:hover {
+  color: inherit;
+}

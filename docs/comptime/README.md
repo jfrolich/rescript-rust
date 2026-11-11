@@ -71,8 +71,9 @@ ReScript, and is type checked like code written by hand.
 
 ## A tour
 
-Every example here is a project in `playground/examples` and is compiled by
-the tests.
+Every example here is a project in `playground/examples`, compiled by the
+tests. On the web version of this page each one is live: edit the code and
+the expansion, the JavaScript and the output follow.
 
 ### Quotes and holes
 
@@ -83,10 +84,32 @@ code. `%type(...)` and `%pat(...)` quote a type and a pattern.
 A quote is checked for syntax where it is written. Its types are checked
 where the macro is used, after the holes are filled.
 
+<!-- example: debug -->
+
+```rescript
+// Debug.res
+@macro
+let log = (e: code<'a>): code<'a> =>
+  %code({
+    let value = ${e}
+    Console.log2(${Code.string(Code.print(e) ++ " =")}, value)
+    value
+  })
+
+// Main.res
+let total = %Debug.log(price *. Int.toFloat(quantity))
+```
+
+<!-- /example -->
+
+### Code and values
+
 A parameter of type `code<'a>` receives the code of the argument. A parameter
 of an ordinary type receives a value, which the call site has to write as a
 literal. There is no `comptime` keyword: the type of the parameter says when
 it exists.
+
+<!-- example: staged -->
 
 ```rescript
 @generic
@@ -102,6 +125,8 @@ let rec pow = (base: code<float>, n: int): code<float> =>
     %code(${base} *. ${pow(base, n - 1)})
   }
 ```
+
+<!-- /example -->
 
 `Power.pow(x, 10)` compiles to four multiplications. The recursion ran in the
 compiler.
@@ -124,6 +149,8 @@ comparisons, printers.
 `typeOf(value)` is the type of an argument of a `@generic`. `Type.info`
 describes a type one level deep: its fields or constructors, with their types
 as values that can be asked again.
+
+<!-- example: json -->
 
 ```rescript
 @generic
@@ -156,9 +183,7 @@ let encode = (value: code<'a>): code<JSON.t> =>
   }
 ```
 
-The macro does not recurse into the fields. It returns code that calls
-`encode` on each field, and the compiler expands those calls in turn. That is
-why a recursive type works, and why each type gets one function.
+Used on a record:
 
 ```rescript
 type user = {
@@ -171,18 +196,18 @@ type user = {
 let json = Json.encode(alice)
 ```
 
-The file the compiler compiles after expansion (redundant parentheses
-removed):
+The file the compiler compiles after expansion:
 
 ```rescript
-@res.macroInstances @warning("-39")
 let rec encode$user = (a$: user): JSON.t =>
-  JSON.Encode.object(Dict.fromArray([
-    ("name", encode$string(a$.name)),
-    ("user_age", encode$int(a$.age)),
-    ("email", encode$option_string(a$.email)),
-    ("tags", encode$array_string(a$.tags)),
-  ]))
+  JSON.Encode.object(
+    Dict.fromArray([
+      ("name", encode$string(a$.name)),
+      ("user_age", encode$int(a$.age)),
+      ("email", encode$option_string(a$.email)),
+      ("tags", encode$array_string(a$.tags)),
+    ]),
+  )
 and encode$string = (a$: string): JSON.t => JSON.Encode.string(a$)
 and encode$int = (a$: int): JSON.t => JSON.Encode.int(a$)
 and encode$option_string = (a$: option<string>): JSON.t =>
@@ -196,9 +221,16 @@ and encode$array_string = (a$: array<string>): JSON.t =>
 let json = encode$user(alice)
 ```
 
+<!-- /example -->
+
+The macro does not recurse into the fields. It returns code that calls
+`encode` on each field, and the compiler expands those calls in turn. That is
+why a recursive type works, and why each type gets one function: an
+*instance*.
+
 A name with a `$` cannot be written in source, so an instance cannot collide
-with a name of the file. The group is not part of the module's signature and
-is not exported. The backend inlines the small ones: the JavaScript of
+with a name of the file. The instances are not part of the module's signature
+and are not exported. The backend inlines the small ones: the JavaScript of
 `encode$user` reads `a$.name` directly.
 
 A `@generic` waits for inference. It is expanded when the top-level item that
@@ -217,10 +249,85 @@ is the value `toJson` in the module that defines the type, if there is one:
 the way a library says "encode my type like this" without the macro knowing
 the library.
 
+### By the type that is expected
+
+`expected()` is the type the call site of a `@generic` wants as result. A
+decoder has nothing else to go on: its argument is always `JSON.t`.
+
+<!-- example: decode -->
+
+```rescript
+@generic
+let fromJson = (json: code<JSON.t>): code<'a> =>
+  switch Type.info(expected()) {
+  | String =>
+    %code(
+      switch ${json} {
+      | String(text) => text
+      | _ => fail("expected a string")
+      }
+    )
+  | Option(inner) =>
+    %code(
+      switch ${json} {
+      | Null => None
+      | present => Some((fromJson(present): ${inner}))
+      }
+    )
+  | Record({fields}) =>
+    Code.record(
+      fields->Array.map(f => (
+        f.name,
+        %code((fromJson(field(${json}, ${Code.string(f.jsName)})): ${f.typ})),
+      )),
+    )
+  // ...
+  }
+
+// Main.res: the annotation is what the macro decodes to
+let user: user = Decode.fromJson(json)
+```
+
+<!-- /example -->
+
+The same idea gives a value for every type:
+
+<!-- example: default -->
+
+```rescript
+let initial: settings = Default.value()
+```
+
+<!-- /example -->
+
+### Two arguments
+
+A `@generic` can take several pieces of code. Structural equality, written
+out per type:
+
+<!-- example: equal -->
+
+```rescript
+@generic
+let equal = (a: code<'a>, b: code<'a>): code<bool> =>
+  switch Type.info(typeOf(a)) {
+  | Int | Float | String | Bool | Unit | BigInt | Char => %code(${a} === ${b})
+  | Record({fields}) =>
+    fields->Array.reduce(%code(true), (all, f) =>
+      %code(${all} && equal(${a->Code.field(f.name)}, ${b->Code.field(f.name)}))
+    )
+  // ...
+  }
+```
+
+<!-- /example -->
+
 ### Declarations from a type
 
 A macro attached to a type receives the declaration and returns
 declarations, which are added after the type.
+
+<!-- example: derive -->
 
 ```rescript
 @macro
@@ -251,9 +358,28 @@ type color = Red | Green | @Enum.label("navy blue") Blue
 colorValues->Array.map(colorToString)   // ["Red", "Green", "navy blue"]
 ```
 
+<!-- /example -->
+
 Names are built with `Pat.var`: a hole can stand where a name is bound.
 
-### Types, patterns, modules
+One declaration per field, with the field's type in it:
+
+<!-- example: lens -->
+
+```rescript
+@Lens.derive
+type point = {x: int, y: int, label: string}
+
+origin->Lens.update(point_x, x => x + 10)
+```
+
+<!-- /example -->
+
+### Types
+
+A macro in a type position takes types and returns a type.
+
+<!-- example: types -->
 
 ```rescript
 // Partial.res: every field optional
@@ -263,28 +389,57 @@ let t = (source: typ): typ =>
   | Record({fields}) => Type.record(fields->Array.map(f => {...f, optional: true}))
   | _ => error(`Partial.t needs a record type, and ${Type.name(source)} is not one`)
   }
+
+// Main.res
+type userPatch = %Partial.t(user)
 ```
 
-```rescript
-type userPatch = %Partial.t(user)
+<!-- /example -->
 
+### Patterns and checked literals
+
+A macro that returns `pat` is used where a pattern is written. A macro that
+takes a literal can check it and convert it while compiling: a color that is
+not a color is not a program.
+
+<!-- example: pattern -->
+
+```rescript
 let describe = code =>
   switch code {
-  | %Http.status("ok") => "fine"          // a macro that returns pat
+  | %Http.status("ok") => "fine"
+  | %Http.status("missing") => "not found"
   | _ => "other"
   }
 
+let (red, green, blue) = %Http.color("#ff8800")
+```
+
+<!-- /example -->
+
+### Modules and lets
+
+A macro that returns declarations can fill a module, stand at the top level,
+or replace the `let` it is attached to.
+
+<!-- example: items -->
+
+```rescript
 module Length = %Units.table("meters", [("feet", 0.3048), ("miles", 1609.344)])
 
 @Trace.calls
 let marathon = (miles: float) => Length.milesToMeters(miles) /. 1000.0
 ```
 
+<!-- /example -->
+
 ### Computing now
 
 `%comptime(expr)` evaluates an expression while compiling and puts the value
 in its place as a literal. It needs no macro: `expr` is ordinary code that
 uses other modules.
+
+<!-- example: comptime -->
 
 ```rescript
 let primes = %comptime(Sieve.primesBelow(60))
@@ -294,14 +449,27 @@ let primes = %comptime(Sieve.primesBelow(60))
 let primes = [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59];
 ```
 
+<!-- /example -->
+
 The output does not import `Sieve`.
 
 ### Reading files
 
-`Macro.readFile(path)` is the text of a file of the project. The example
-`files` reads `en.json`: `%I18n.t("title")` is a string, `%I18n.t("greeting")`
-is a function with a labelled argument for each placeholder of the message,
-and a key that is not in the file does not compile:
+`Macro.readFile(path)` is the text of a file of the project. Here
+`%I18n.t("title")` is a string, `%I18n.t("greeting")` is a function with a
+labelled argument for each placeholder of the message, and a key that is not
+in `en.json` does not compile.
+
+<!-- example: files -->
+
+```rescript
+let title: string = %I18n.t("title")
+let greet = %I18n.t("greeting")
+
+greet(~name="Alice", ~count="3")
+```
+
+<!-- /example -->
 
 ```
   We've found a bug for you!
@@ -488,6 +656,8 @@ text.
 
 Measured on an Apple M-series Mac mini, release builds.
 
+<!-- chart: cost -->
+
 | What | Time |
 | --- | --- |
 | Create a QuickJS engine | 92 µs, once per compiler thread |
@@ -495,6 +665,8 @@ Measured on an Apple M-series Mac mini, release builds.
 | Run a derive-style macro (10-field record, 41 questions to the compiler) | 14 µs |
 | Start ppx-spice once (it is started once per file) | 6.1 ms |
 | Start Node once | 70 ms |
+
+<!-- /chart -->
 
 The engine numbers are from a benchmark of the embedding with stub answers
 (rquickjs 0.9); they do not include the type checker's work to answer.
@@ -588,6 +760,5 @@ npm run build:wasm
 npm run dev
 ```
 
-The playground has an example for each section of the tour. Its "Expanded"
-tab shows the file after expansion, "JavaScript" the output, and "Output"
-what the program prints.
+The playground's main page is this document with the examples live; the
+full playground, with any number of files, is `playground.html`.

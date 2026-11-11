@@ -1,6 +1,7 @@
 use wasm_bindgen::prelude::*;
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -37,6 +38,8 @@ fn from_compiler_text(text: &str) -> String {
 
 thread_local! {
     static REGISTRY: RefCell<ModuleRegistry> = RefCell::new(new_registry());
+    /// The modules of the standard library, with the path of their source.
+    static RUNTIME_SOURCES: RefCell<HashMap<String, PathBuf>> = RefCell::new(HashMap::new());
 }
 
 fn new_registry() -> ModuleRegistry {
@@ -65,6 +68,7 @@ pub fn vfs_delete_file(path: &str) {
 pub fn vfs_clear() {
     wasm_vfs::clear();
     REGISTRY.with(|r| *r.borrow_mut() = new_registry());
+    RUNTIME_SOURCES.with(|sources| sources.borrow_mut().clear());
 }
 
 /// Register a module's source path for on-demand type checking.
@@ -76,6 +80,142 @@ pub fn register_source_module(module_name: &str, source_path: &str) {
         r.borrow_mut()
             .insert_source_fallback_path(module_name.to_string(), source_path.into());
     });
+    RUNTIME_SOURCES.with(|sources| {
+        sources
+            .borrow_mut()
+            .insert(module_name.to_string(), source_path.into());
+    });
+}
+
+/// Keep the standard library modules a compilation type checked from
+/// source, so that the next compilation does not check them again.
+fn keep_runtime_modules(loaded: Vec<rescript_compiler::cmi::portable_types::PortablePersStruct>) {
+    RUNTIME_SOURCES.with(|sources| {
+        let sources = sources.borrow();
+        REGISTRY.with(|r| {
+            let mut registry = r.borrow_mut();
+            for module in loaded {
+                let name = module.ps_name.clone();
+                let Some(path) = sources.get(&name) else {
+                    continue;
+                };
+                if registry.has_cached_module(&name) {
+                    continue;
+                }
+                registry.register_module(
+                    &name,
+                    module,
+                    InMemoryModuleInfo::new(path.clone(), false, Default::default(), true),
+                );
+            }
+        });
+    });
+}
+
+// ── Expanded source ─────────────────────────────────────────────────────────
+
+/// The macro-expanded source of a file as a person wants to read it: without
+/// the bookkeeping attributes of expansion, and formatted.
+fn readable_expansion(expanded: &str, filename: &str) -> String {
+    let text = strip_expansion_attributes(expanded);
+    let mut parser = Parser::for_expanded_source(filename, &text);
+    let structure = module::parse_structure(&mut parser);
+    if parser.has_errors() {
+        return text;
+    }
+    let comments = parser.comments().to_vec();
+    let printed = rescript_compiler::parser::printer::print_structure_with_comments(
+        &structure,
+        comments,
+        parser.arena_mut(),
+    );
+    space_instance_groups(&unescape_generated_names(&printed))
+}
+
+/// An instance group reads as one block: no blank line between its
+/// functions, one after it.
+fn space_instance_groups(text: &str) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut in_group = false;
+    for (index, line) in lines.iter().enumerate() {
+        let continues = |line: &str| {
+            line.starts_with("and ") || line.starts_with([' ', '}', ')', ']', '|'])
+        };
+        if in_group {
+            if line.is_empty() {
+                let next = lines[index + 1..].iter().find(|next| !next.is_empty());
+                if next.is_some_and(|next| continues(next)) {
+                    continue;
+                }
+                in_group = false;
+            } else if !continues(line) {
+                in_group = false;
+                out.push('\n');
+            }
+        }
+        if let Some(rest) = line.strip_prefix("let rec ")
+            && rest.split([' ', ':', '=']).next().is_some_and(|name| name.contains('$'))
+        {
+            in_group = true;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
+/// Remove `@res.macroInstances`, the `@warning("-39")` that follows it, and
+/// `@expanded.M.f`, the mark of a macro attribute that was expanded.
+fn strip_expansion_attributes(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    loop {
+        let next = ["@res.macroInstances @warning(\"-39\") ", "@expanded."]
+            .iter()
+            .filter_map(|marker| rest.find(marker).map(|at| (at, *marker)))
+            .min();
+        let Some((at, marker)) = next else {
+            out.push_str(rest);
+            return out;
+        };
+        out.push_str(&rest[..at]);
+        rest = &rest[at + marker.len()..];
+        if marker == "@expanded." {
+            // The macro's name, and the whitespace up to what it was on.
+            let end = rest
+                .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '.'))
+                .unwrap_or(rest.len());
+            rest = rest[end..].trim_start();
+        }
+    }
+}
+
+/// The printer writes a name with a `$` as an exotic identifier, `\"a$"`.
+fn unescape_generated_names(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find("\\\"") {
+        out.push_str(&rest[..at]);
+        let after = &rest[at + 2..];
+        match after.find('"') {
+            Some(end)
+                if after[..end].contains('$')
+                    && after[..end]
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$' || c == '\'') =>
+            {
+                out.push_str(&after[..end]);
+                rest = &after[end + 1..];
+            }
+            _ => {
+                out.push_str("\\\"");
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Forget a compiled module, so that modules compiled later cannot see it.
@@ -161,7 +301,7 @@ fn parse_tree_sexp(source: &str, filename: &str) -> Option<String> {
 /// of `@rescript/runtime` itself. Returns JSON with the JavaScript, the
 /// macro-expanded source when the file uses macros, the warnings and the
 /// intermediate representations:
-/// `{ type: "success", js, expanded, warnings, parse_tree, typed_tree, raw_lambda, lambda }`
+/// `{ type: "success", js, expanded, expanded_raw, formatted, warnings, parse_tree, typed_tree, raw_lambda, lambda }`
 /// or `{ type: "error", message, parse_tree }`.
 #[wasm_bindgen]
 pub fn compile_file(source: &str, filename: &str, is_runtime: bool) -> String {
@@ -179,6 +319,7 @@ pub fn compile_file(source: &str, filename: &str, is_runtime: bool) -> String {
         source_filename: Some(filename.to_string()),
         module_name: Some(module_name.clone()),
         capture_intermediates: true,
+        capture_loaded_modules: true,
         output_module_format: Some(ModuleFormat::EsModule),
         macro_host: Some(host),
         ..Default::default()
@@ -195,7 +336,8 @@ pub fn compile_file(source: &str, filename: &str, is_runtime: bool) -> String {
     );
 
     match result {
-        Ok(compiled) => {
+        Ok(mut compiled) => {
+            keep_runtime_modules(std::mem::take(&mut compiled.loaded_modules));
             if let Some(pers_struct) = compiled.pers_struct {
                 REGISTRY.with(|r| {
                     r.borrow_mut().register_module(
@@ -213,7 +355,17 @@ pub fn compile_file(source: &str, filename: &str, is_runtime: bool) -> String {
             serde_json::json!({
                 "type": "success",
                 "js": from_compiler_text(&compiled.js_output),
-                "expanded": compiled.expanded_source.as_deref().map(from_compiler_text),
+                "expanded": compiled
+                    .expanded_source
+                    .as_deref()
+                    .map(|expanded| from_compiler_text(&readable_expansion(expanded, filename))),
+                "expanded_raw": compiled.expanded_source.as_deref().map(from_compiler_text),
+                // The file as written, printed the same way: the lines of
+                // `expanded` that are not in it were generated.
+                "formatted": compiled
+                    .expanded_source
+                    .is_some()
+                    .then(|| from_compiler_text(&readable_expansion(&source, filename))),
                 "warnings": from_compiler_text(&compiled.warnings),
                 "parse_tree": parse_tree,
                 "typed_tree": compiled.typed_tree_sexp,
