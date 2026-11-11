@@ -833,41 +833,38 @@ fn recursive_module_test_keeps_include_field_alias_binding_materialized_like_oca
 }
 
 #[test]
-fn complex_while_loop_keeps_effectful_condition_blocks_inside_iifes() {
+fn complex_while_loop_runs_condition_blocks_inside_the_loop() {
+    // lam_compile.ml:1342-1354: a condition that compiles to statements
+    // becomes `while (true) { block; if (!e) break; body }`, not a closure
+    // called on each iteration.
     let output = compile_checked_in_test_file_to_js("complex_while_loop");
     assert!(
-        output.contains("while ((() => {")
-            && output.contains("let fib = x => {")
-            && output.contains("return fib(n) > 10;"),
-        "expected complex_while_loop to keep the recursive condition binding scoped inside the while predicate IIFE, got:\n{output}"
+        output.contains("while (true) {\n    let fib = x => {")
+            && output.contains("if (fib(n) <= 10) {\n      break;\n    }\n    console.log(n.toString());"),
+        "expected complex_while_loop's recursive condition binding inside the loop, got:\n{output}"
     );
     assert!(
-        output.contains("let b = 9;") && output.contains("return (3 + b | 0) > 10;"),
-        "expected complex_while_loop's second predicate to stay as an IIFE-wrapped block, got:\n{output}"
+        output.contains("let b = 9;\n    if ((3 + b | 0) <= 10) {\n      break;\n    }"),
+        "expected complex_while_loop's second condition block inside the loop, got:\n{output}"
     );
     assert!(
-        !output.contains("while (fib(n) > 10)") && !output.contains("while ((3 + b | 0) > 10)"),
-        "unexpected dropped predicate-prelude scope in complex_while_loop:\n{output}"
+        !output.contains("while ((() => {"),
+        "unexpected condition closure in complex_while_loop:\n{output}"
     );
 }
 
 #[test]
-fn test_while_side_effect_keeps_local_condition_bindings_in_iifes() {
+fn test_while_side_effect_runs_condition_bindings_inside_the_loop() {
     let output = compile_checked_in_test_file_to_js("test_while_side_effect");
     assert!(
-        output.contains("while ((() => {")
-            && output.contains("let y = 3;")
-            && output.contains("console.log(x.contents.toString());")
-            && output.contains("y = y + 1 | 0;")
-            && output.contains("x.contents = x.contents + 1 | 0;")
-            && output.contains("return (fib(x.contents) + fib(x.contents) | 0) < 20;"),
-        "expected test_while_side_effect to keep the local binding and side effects inside the predicate IIFE, got:\n{output}"
+        output.contains(
+            "while (true) {\n  let y = 3;\n  console.log(x.contents.toString());\n  y = y + 1 | 0;\n  if (!(x.contents = x.contents + 1 | 0, (fib(x.contents) + fib(x.contents) | 0) < 20)) {\n    break;\n  }"
+        ),
+        "expected test_while_side_effect's condition bindings and effects inside the loop, got:\n{output}"
     );
     assert!(
-        !output.contains(
-            "while (x.contents = x.contents + 1 | 0, (fib(x.contents) + fib(x.contents) | 0) < 20)"
-        ),
-        "unexpected flattened predicate sequence lost the local binding scope in test_while_side_effect:\n{output}"
+        !output.contains("while ((() => {"),
+        "unexpected condition closure in test_while_side_effect:\n{output}"
     );
 }
 
