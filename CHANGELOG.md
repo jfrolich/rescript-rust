@@ -100,6 +100,7 @@
 - Allocate the map of an environment table layer on its first binding, so an `open` no longer creates and drops empty maps in every table. https://github.com/jfrolich/rescript-rust/pull/93
 - Size the compile worker pool to one worker per core on CPUs with efficiency cores, instead of oversubscribing it. https://github.com/jfrolich/rescript-rust/pull/83
 - Reduce backend identifier-allocation setup work by scanning arena identifier tables instead of recursively walking Lambda and JavaScript trees. https://github.com/jfrolich/rescript-rust/pull/82
+- Compile the arguments of a primitive or call into inline buffers and read the primitive from the Lambda arena without copying it. https://github.com/jfrolich/rescript-rust/pull/104
 - Remove OCaml leftovers: unused warning numbers, the `Record_float_unused` representation, the `ns.braces` attribute name and unused `Ast_helper` functions. https://github.com/rescript-lang/rescript/pull/8805
 - Remove the S-expression parsetree printer (`res_parser -print sexp`). https://github.com/rescript-lang/rescript/pull/8803
 - Compute the module alias rewrites of a loaded unit once and share them between compilations, instead of collecting the standard library's aliases again for every module compiled. https://github.com/jfrolich/rescript-rust/pull/92
