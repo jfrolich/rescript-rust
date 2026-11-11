@@ -4634,6 +4634,15 @@ impl TypeContext {
         }
     }
 
+    /// Whether there is any store binder to map when publishing a signature.
+    /// This avoids allocating the replay map just to decide whether to walk.
+    pub(crate) fn has_saved_store_stamps(&self) -> bool {
+        let origins = self.store_stamp_origins.borrow();
+        !origins.built.is_empty() || origins.replayed.iter().any(|(piece, index, _)| {
+            matches!(&piece.effects[*index], StoreEffect::Stamps(stamps) if !stamps.is_empty())
+        })
+    }
+
     /// The local stamp of each store binder this compilation built or
     /// replayed, by store stamp (see [`StoreStampOrigins`]).
     pub(crate) fn saved_store_stamps(&self) -> crate::fast_hash::AHashMap<i32, i32> {
@@ -4999,6 +5008,28 @@ impl TypeContext {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    #[test]
+    fn saved_stamp_presence_matches_built_and_replayed_maps() {
+        let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+        assert!(!ctx.has_saved_store_stamps());
+        let stamp = crate::ident::STORE_STAMP_BASE + 7;
+        ctx.store_stamp_origins.borrow_mut().built.push((stamp, 12));
+        assert!(ctx.has_saved_store_stamps());
+        assert_eq!(ctx.saved_store_stamps().get(&stamp), Some(&12));
+        ctx.store_stamp_origins.borrow_mut().built.clear();
+        let piece = Rc::new(StorePiece {
+            id: 0,
+            effects: vec![StoreEffect::Stamps(vec![]), StoreEffect::Stamps(vec![stamp])],
+            guards: vec![],
+        });
+        ctx.store_stamp_origins.borrow_mut().replayed.push((piece.clone(), 0, 20));
+        assert!(!ctx.has_saved_store_stamps());
+        assert!(ctx.saved_store_stamps().is_empty());
+        ctx.store_stamp_origins.borrow_mut().replayed.push((piece, 1, 20));
+        assert!(ctx.has_saved_store_stamps());
+        assert_eq!(ctx.saved_store_stamps().get(&stamp), Some(&20));
+    }
 
     #[test]
     fn typed_environment_snapshots_share_ownership() {

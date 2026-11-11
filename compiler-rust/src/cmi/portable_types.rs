@@ -923,18 +923,20 @@ pub fn serialize_pers_struct(
             cmi_longident_names: sig.cmi_longident_names.clone(),
         },
     );
-    // Most exported signatures mention no store binders. Building the replay
-    // map eagerly would traverse every imported store piece even for those.
-    let stamps = std::cell::OnceCell::new();
-    let saved_stamp = |stamp| {
-        stamps
-            .get_or_init(|| ctx.saved_store_stamps())
-            .get(&stamp)
-            .copied()
-    };
-    remap_saved_stamps(&mut sig.ps_sig, &mut sig.type_graph, &saved_stamp);
-    if let Some(raw) = &mut raw {
-        remap_saved_stamps(&mut raw.raw_ps_sig, &mut raw.raw_type_graph, &saved_stamp);
+    if ctx.has_saved_store_stamps() {
+        // Most exported signatures mention no store binders. Building the replay
+        // map eagerly would traverse every imported store piece even for those.
+        let stamps = std::cell::OnceCell::new();
+        let saved_stamp = |stamp| {
+            stamps
+                .get_or_init(|| ctx.saved_store_stamps())
+                .get(&stamp)
+                .copied()
+        };
+        remap_saved_stamps(&mut sig.ps_sig, &mut sig.type_graph, &saved_stamp);
+        if let Some(raw) = &mut raw {
+            remap_saved_stamps(&mut raw.raw_ps_sig, &mut raw.raw_type_graph, &saved_stamp);
+        }
     }
     let fingerprint = compute_type_graph_fingerprint(&HashGraph::of(&sig.type_graph), &sig.ps_sig);
     PortablePersStruct::new(
