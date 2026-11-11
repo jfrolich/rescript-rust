@@ -831,10 +831,8 @@ mod checker {
         pub case: u8,
     }
 
-    const ZERO: AtomicU64 = AtomicU64::new(0);
-
-    static COPY_SESSIONS: [AtomicU64; 4] = [ZERO; 4];
-    static COPY_NODES: [AtomicU64; 4] = [ZERO; 4];
+    static COPY_SESSIONS: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
+    static COPY_NODES: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
     static TYPE_CONTEXTS: AtomicU64 = AtomicU64::new(0);
     static LOCAL_NODES: AtomicU64 = AtomicU64::new(0);
     static STORE_BUILDS: AtomicU64 = AtomicU64::new(0);
@@ -856,10 +854,10 @@ mod checker {
     impl WalkCounters {
         const fn new() -> Self {
             WalkCounters {
-                calls: ZERO,
-                ground_calls: ZERO,
-                visits: ZERO,
-                ground_visits: ZERO,
+                calls: AtomicU64::new(0),
+                ground_calls: AtomicU64::new(0),
+                visits: AtomicU64::new(0),
+                ground_visits: AtomicU64::new(0),
             }
         }
 
@@ -900,7 +898,7 @@ mod checker {
         "structure_one_ground",
         "structure_nonground",
     ];
-    static UNIFY: [AtomicU64; UNIFY_SHAPES] = [ZERO; UNIFY_SHAPES];
+    static UNIFY: [AtomicU64; UNIFY_SHAPES] = [const { AtomicU64::new(0) }; UNIFY_SHAPES];
     /// Top-level unifications by the two head constructors.
     static UNIFY_HEADS: Mutex<Option<HashMap<(&'static str, &'static str), u64>>> =
         Mutex::new(None);
