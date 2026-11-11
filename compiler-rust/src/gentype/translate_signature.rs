@@ -6,6 +6,7 @@ use crate::types::typedtree::{
     TypedSignatureItemDesc,
 };
 
+/// Translate a value declared in a signature, when it is exported.
 pub fn translate_signature_value(
     input: Input<'_>,
     config: &crate::gentype::config::T,
@@ -43,6 +44,7 @@ pub fn translate_signature_value(
     }
 }
 
+/// Translate a submodule declared in a signature.
 pub fn translate_module_declaration(
     input: Input<'_>,
     config: &crate::gentype::config::T,
@@ -85,6 +87,8 @@ pub fn translate_module_declaration(
     }
 }
 
+/// Translate a module type declaration's types; its values are not
+/// exported.
 pub fn translate_module_type_declaration(
     input: Input<'_>,
     config: &crate::gentype::config::T,
@@ -131,6 +135,7 @@ pub fn translate_module_type_declaration(
     }
 }
 
+/// Translate one signature item.
 pub fn translate_signature_item(
     input: Input<'_>,
     config: &crate::gentype::config::T,
@@ -203,6 +208,7 @@ pub fn translate_signature_item(
     }
 }
 
+/// `TranslateSignature.translateSignature`: translate each signature item.
 pub fn translate_signature<'s>(
     input: Input<'_>,
     config: &crate::gentype::config::T,

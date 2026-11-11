@@ -8,32 +8,50 @@ use crate::gentype::gen_type_common::{Dep, StringMap, Type, dep_to_resolved_name
 use crate::types::path::Path;
 use crate::types::typedtree::TypedSignature;
 
+/// What a module is an alias of.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModuleEquation {
+    /// Whether the aliased module is in this file.
     pub internal: bool,
+    /// The aliased module.
     pub dep: Dep,
 }
 
+/// The types and submodules a module declares, as translation goes.
 #[derive(Debug, Clone)]
 pub struct TypeEnv {
+    /// The module's declared types and submodules, by name.
     pub map: StringMap<Entry>,
+    /// The module types the module declares, by name: their typed and declared
+    /// signatures, and their environments.
     pub map_module_types: StringMap<(TypedSignature, crate::types::decl::Signature, T)>,
+    /// What the module is an alias of, if it is one.
     pub module_equation: Option<ModuleEquation>,
+    /// The runtime name of the item being translated.
     pub module_item: crate::gentype::runtime::ModuleItem,
+    /// The module's name.
     pub name: String,
+    /// The enclosing module's environment.
     pub parent: Option<T>,
+    /// Types fixed by a package type's `with type` constraints, by name.
     pub type_equations: StringMap<Type>,
+    /// The names the compilation unit's own paths start with.
     pub current_module_names: Vec<String>,
 }
 
+/// A name a module declares.
 #[derive(Debug, Clone)]
 pub enum Entry {
+    /// A submodule, with its environment.
     Module(T),
+    /// A type.
     Type(String),
 }
 
+/// A shared, growing module environment.
 pub type T = Rc<RefCell<TypeEnv>>;
 
+/// A new environment for module `name`, inside `parent`.
 pub fn create_type_env(name: &str, parent: Option<T>) -> T {
     // Mirrors compiler/gentype/TypeEnv.ml:17-27.
     let module_item = crate::gentype::runtime::new_module_item(name);
@@ -53,11 +71,14 @@ pub fn create_type_env(name: &str, parent: Option<T>) -> T {
     }))
 }
 
+/// The environment of a compilation unit.
 pub fn root() -> T {
     // Mirrors compiler/gentype/TypeEnv.ml:29.
     create_type_env("__root__", None)
 }
 
+/// The environment of a compilation unit whose own paths may start with
+/// `module_names`.
 pub fn root_for_current_module_names(module_names: Vec<String>) -> T {
     // OCaml GenType reads the saved CMT at compiler/gentype/GenTypeMain.ml:53-70,
     // where current-unit type paths reach Dependencies.ml:15-38 and
@@ -71,6 +92,7 @@ pub fn root_for_current_module_names(module_names: Vec<String>) -> T {
     root
 }
 
+/// Whether `name` is one of the compilation unit's own names.
 pub fn is_current_module_name(type_env: &T, name: &str) -> bool {
     type_env
         .borrow()
@@ -79,6 +101,7 @@ pub fn is_current_module_name(type_env: &T, name: &str) -> bool {
         .any(|current_name| current_name == name)
 }
 
+/// `path` without the compilation unit's own name in front, when it has it.
 pub fn strip_current_module_prefix(path: &Path, type_env: &T) -> Option<Path> {
     match path.view() {
         PathView::Pdot(prefix, segment, _) if matches!(prefix.view(), PathView::Pident(id) if is_current_module_name(type_env, id.name())) => {
@@ -92,11 +115,13 @@ pub fn strip_current_module_prefix(path: &Path, type_env: &T) -> Option<Path> {
     }
 }
 
+/// The module's name.
 pub fn to_string(type_env: &T) -> String {
     // Mirrors compiler/gentype/TypeEnv.ml:30.
     type_env.borrow().name.clone()
 }
 
+/// Declare submodule `name` in `type_env` and return its environment.
 pub fn new_module(name: &str, type_env: &T) -> T {
     // Mirrors compiler/gentype/TypeEnv.ml:32-37.
     if crate::gentype::debug::type_env.load(std::sync::atomic::Ordering::Relaxed) {
@@ -114,6 +139,8 @@ pub fn new_module(name: &str, type_env: &T) -> T {
     new_type_env
 }
 
+/// Declare module type `name` in `type_env`, with its typed and declared
+/// signatures, and return its environment.
 pub fn new_module_type(
     name: &str,
     signature: TypedSignature,
@@ -139,6 +166,7 @@ pub fn new_module_type(
     new_type_env
 }
 
+/// Declare type `name` in `type_env`.
 pub fn new_type(name: &str, type_env: &T) {
     // Mirrors compiler/gentype/TypeEnv.ml:47-50.
     if crate::gentype::debug::type_env.load(std::sync::atomic::Ordering::Relaxed) {
@@ -154,6 +182,7 @@ pub fn new_type(name: &str, type_env: &T) {
         .insert(name.to_string(), Entry::Type(name.to_string()));
 }
 
+/// The environment of submodule `name` of `type_env`.
 pub fn get_module(name: &str, type_env: &T) -> Option<T> {
     // Mirrors compiler/gentype/TypeEnv.ml:52-56.
     match type_env.borrow().map.get(name) {
@@ -162,6 +191,7 @@ pub fn get_module(name: &str, type_env: &T) -> Option<T> {
     }
 }
 
+/// The external module that submodule `name` is an alias of.
 pub fn expand_alias_to_external_module(name: &str, type_env: &T) -> Option<Dep> {
     // Mirrors compiler/gentype/TypeEnv.ml:58-65.
     match get_module(name, type_env) {
@@ -186,6 +216,7 @@ pub fn expand_alias_to_external_module(name: &str, type_env: &T) -> Option<Dep> 
     }
 }
 
+/// Record that the module is an alias of `dep`.
 pub fn add_module_equation(dep: Dep, internal: bool, type_env: &T) {
     // Mirrors compiler/gentype/TypeEnv.ml:67-74.
     if crate::gentype::debug::type_env.load(std::sync::atomic::Ordering::Relaxed) {
@@ -202,6 +233,7 @@ pub fn add_module_equation(dep: Dep, internal: bool, type_env: &T) {
     type_env.borrow_mut().module_equation = Some(ModuleEquation { internal, dep });
 }
 
+/// `type_env` with the type at path `flattened` fixed to `type_`.
 pub fn add_type_equation(flattened: &[String], type_: Type, type_env: &T) -> T {
     // Mirrors compiler/gentype/TypeEnv.ml:76-94. OCaml uses record-copy here
     // rather than mutating type_env in place.
@@ -224,6 +256,7 @@ pub fn add_type_equation(flattened: &[String], type_: Type, type_env: &T) -> T {
     }
 }
 
+/// `type_env` with each path fixed to its type.
 pub fn add_type_equations(type_equations: &[(Vec<String>, Type)], type_env: &T) -> T {
     // Mirrors compiler/gentype/TypeEnv.ml:96-104. The OCaml input is
     // (Longident.t * type_) and calls Longident.flatten; the Rust integration
@@ -235,6 +268,7 @@ pub fn add_type_equations(type_equations: &[(Vec<String>, Type)], type_env: &T) 
         })
 }
 
+/// The type a `with type` constraint fixes `path` to.
 pub fn apply_type_equations(
     config: &crate::gentype::config::T,
     path: &Path,
@@ -261,6 +295,7 @@ pub fn apply_type_equations(
     }
 }
 
+/// The environment, `type_env` or an enclosing one, that declares `name`.
 pub fn lookup(name: &str, type_env: &T) -> Option<T> {
     // Mirrors compiler/gentype/TypeEnv.ml:121-127.
     let has_name = type_env.borrow().map.contains_key(name);
@@ -324,6 +359,7 @@ fn lookup_module_type(
     }
 }
 
+/// The names of `path`, innermost first.
 pub fn path_to_list(path: &Path) -> Vec<String> {
     // Mirrors compiler/gentype/TypeEnv.ml:154-158.
     match path.view() {
@@ -337,6 +373,7 @@ pub fn path_to_list(path: &Path) -> Vec<String> {
     }
 }
 
+/// The signatures and environment of the module type at `path`.
 pub fn lookup_module_type_signature(
     path: &Path,
     type_env: &T,
@@ -361,11 +398,13 @@ pub fn lookup_module_type_signature(
     lookup_module_type(&path, type_env)
 }
 
+/// Set the runtime name of the item being translated.
 pub fn update_module_item(module_item: crate::gentype::runtime::ModuleItem, type_env: &T) {
     // Mirrors compiler/gentype/TypeEnv.ml:166-167.
     type_env.borrow_mut().module_item = module_item;
 }
 
+/// `name` qualified by the modules enclosing `type_env`.
 pub fn add_module_path(type_env: &T, name: &str) -> crate::gentype::resolved_name::T {
     // Mirrors compiler/gentype/TypeEnv.ml:169-173.
     match &type_env.borrow().parent {
@@ -377,6 +416,8 @@ pub fn add_module_path(type_env: &T, name: &str) -> crate::gentype::resolved_nam
     }
 }
 
+/// The equations between the names of this module's aliases and the
+/// modules they alias, including those of nested submodules.
 pub fn get_module_equations(type_env: &T) -> Vec<crate::gentype::resolved_name::Eq> {
     // Mirrors compiler/gentype/type_env.ml:176-191. The sub-module equations
     // are only used when this env has no equation of its own, and computing
@@ -398,6 +439,7 @@ pub fn get_module_equations(type_env: &T) -> Vec<crate::gentype::resolved_name::
     }
 }
 
+/// How the value `name` of this module is reached at runtime.
 pub fn get_module_access_path(
     name: &str,
     type_env: &T,

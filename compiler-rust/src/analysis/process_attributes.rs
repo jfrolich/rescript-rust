@@ -14,7 +14,9 @@ use crate::types::decl;
 /// Attributes in either of their Rust forms.
 #[derive(Clone, Copy)]
 pub enum Attrs<'a> {
+    /// Parse-tree attributes, with the arena their names and payloads live in.
     Parsed(&'a [Attribute], &'a ParseArena),
+    /// The attributes stored on a type declaration.
     Decl(&'a [decl::Attribute]),
 }
 

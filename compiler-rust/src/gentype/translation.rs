@@ -6,6 +6,7 @@ use crate::parse_arena::ParseArena;
 use crate::parser::ast::Attributes;
 use crate::types::typedtree::TypedValueDescription;
 
+/// What translating a module produces.
 pub type T = code_item::Translation;
 
 /// What every translation of one typed artifact reads: the trees the
@@ -26,6 +27,7 @@ pub struct Input<'a> {
     pub resolver: &'a crate::gentype::module_resolver::Resolver,
 }
 
+/// An empty translation.
 pub fn empty() -> T {
     T {
         import_types: vec![],
@@ -34,6 +36,7 @@ pub fn empty() -> T {
     }
 }
 
+/// The name an import is deduplicated by: its type name and alias.
 pub fn get_import_type_unique_name(import_type: &code_item::ImportType) -> String {
     let code_item::ImportType {
         type_name,
@@ -50,6 +53,7 @@ pub fn get_import_type_unique_name(import_type: &code_item::ImportType) -> Strin
     )
 }
 
+/// The translations' imports, code items and type declarations, each in order.
 pub fn combine(translations: Vec<T>) -> T {
     let mut import_types = Vec::new();
     let mut code_items = Vec::new();
@@ -84,6 +88,9 @@ pub fn abstract_the_type_parameters(type_vars: Vec<String>, type_: Type) -> Type
     }
 }
 
+/// The imports a dependency needs: ReScript's `list` from the pervasives
+/// module, and a type of another module from that module's generated file;
+/// none for this module's types.
 pub fn dep_to_import_type(
     config: &crate::gentype::config::T,
     output_file_relative: &str,
@@ -128,6 +135,7 @@ pub fn dep_to_import_type(
     }
 }
 
+/// The imports `dependencies` need.
 pub fn translate_dependencies(
     config: &crate::gentype::config::T,
     output_file_relative: &str,
@@ -247,8 +255,9 @@ where
     }
 }
 
-/// [@genType]
-/// [@module] external myBanner : ReasonReact.reactClass = "./MyBanner";
+/// `Translation.translatePrimitive`: translate an `external`. One annotated
+/// with `@genType.import` becomes an import of the value it names; others
+/// translate to nothing.
 pub fn translate_primitive(
     input: Input<'_>,
     config: &crate::gentype::config::T,
@@ -327,6 +336,8 @@ pub fn translate_primitive(
     }
 }
 
+/// Add, for each type declaration, an alias under each name that module
+/// aliases make it available as.
 pub fn add_type_declarations_from_module_equations(
     type_env: &crate::gentype::type_env::T,
     translation: T,

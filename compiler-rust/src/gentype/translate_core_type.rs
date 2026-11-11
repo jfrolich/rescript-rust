@@ -15,6 +15,8 @@ use crate::types::typedtree::{
     TypedCoreType, TypedCoreTypeDesc,
 };
 
+/// For an optional argument whose written type is `option<t>`, its label
+/// and `t`.
 pub fn remove_option(
     ta: &TypedArena,
     label: &ArgLabel,
@@ -39,13 +41,18 @@ pub fn remove_option(
     }
 }
 
+/// The cases of a polymorphic variant type as written.
 #[derive(Debug, Clone)]
 pub struct ProcessVariant {
+    /// The cases without a payload, with their attributes.
     pub no_payloads: Vec<(String, crate::parser::ast::Attributes)>,
+    /// The cases with one payload: label, attributes and payload type.
     pub payloads: Vec<(String, crate::parser::ast::Attributes, TCoreTypeIdx)>,
+    /// The variant types the type includes.
     pub inherits: Vec<TCoreTypeIdx>,
 }
 
+/// Sort the row fields of a polymorphic variant type into its cases.
 pub fn process_variant(ta: &TypedArena, row_fields: &[RowFieldType]) -> ProcessVariant {
     // Mirrors compiler/gentype/TranslateCoreType.ml:17-50.
     let mut no_payloads = Vec::new();
@@ -92,6 +99,9 @@ pub struct CoreTypeEnv<'a> {
     pub type_vars_gen: &'a crate::gentype::gen_ident::TypeVarsGen,
 }
 
+/// Translate a function type as one function of all its arguments; the
+/// result type's dependencies are left out when
+/// `no_function_return_dependencies` is set.
 pub fn translate_arrow_type(
     env: CoreTypeEnv<'_>,
     no_function_return_dependencies: bool,
@@ -149,6 +159,8 @@ pub fn translate_arrow_type(
     }
 }
 
+/// `TranslateCoreType.translateCoreType_`: translate a type expression
+/// written in the source.
 #[allow(non_snake_case)]
 pub fn translateCoreType_(
     env: CoreTypeEnv<'_>,
@@ -233,6 +245,7 @@ pub fn translateCoreType_(
     }
 }
 
+/// Translate each of `type_exprs`.
 #[allow(non_snake_case)]
 pub fn translateCoreTypes_(
     env: CoreTypeEnv<'_>,
@@ -247,6 +260,8 @@ pub fn translateCoreTypes_(
         .collect()
 }
 
+/// `TranslateCoreType.translateCoreType`: translate a type expression
+/// written in the source, with fresh names for anonymous type variables.
 pub fn translate_core_type(
     ta: &TypedArena,
     ctx: &TypeContext,

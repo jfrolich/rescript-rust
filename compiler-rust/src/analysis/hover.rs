@@ -63,8 +63,11 @@ fn go_to_definition_text(style: UriStyle, file_uri: &str, pos: Pos) -> String {
 
 /// What hovering works with: the session and the command's options.
 pub struct Hover<'h, 's> {
+    /// The modules the hovered file can refer to.
     pub session: &'h ProjectSession<'s>,
+    /// How URIs in the hover text are printed.
     pub style: UriStyle,
+    /// Whether the client renders command links in Markdown.
     pub supports_markdown_links: bool,
 }
 

@@ -8,19 +8,27 @@ use crate::gentype::gen_type_common::{
     ArgType, Field, Function, Ident, StringMap, Type, doc_string, unknown,
 };
 
+/// The runtime modules a generated file imports, with their paths.
 pub type RequiresMap = BTreeMap<crate::gentype::module_name::T, crate::gentype::import_path::T>;
 
+/// What emitting a file has gathered so far.
 #[derive(Debug, Clone)]
 pub struct Env {
+    /// Runtime modules imported before the early exports.
     pub requires_early: RequiresMap,
+    /// Runtime modules imported after them.
     pub requires: RequiresMap,
     /// For each .cmt we import types from, keep the map of exported types.
     pub cmt_to_export_type_map: StringMap<code_item::ExportTypeMap>,
     /// Map of types imported from other files.
     pub export_type_map_from_other_files: code_item::ExportTypeMap,
+    /// Whether a value is imported with `@genType.import`, which makes runtime
+    /// imports use `require`.
     pub imported_value_or_component: bool,
 }
 
+/// Translates the type declarations of an imported `.cmt` file, given the
+/// configuration, the generated file's relative path and the resolver.
 pub type InputCmtTranslateTypeDeclarations<'a> = dyn Fn(
         &mut crate::gentype::config::T,
         &str,
@@ -29,6 +37,8 @@ pub type InputCmtTranslateTypeDeclarations<'a> = dyn Fn(
     ) -> std::sync::Arc<code_item::TypeDeclarations>
     + 'a;
 
+/// Maps the `.cmt` file an import path names to the typed artifact gentype
+/// reads, or to an empty string when there is none.
 pub type GetCmtFile<'a> = dyn Fn(&str) -> String + 'a;
 
 /// The generated file being emitted, and how the declarations of the types
@@ -47,6 +57,8 @@ pub struct EmitTarget<'a> {
     pub input_cmt_translate_type_declarations: &'a InputCmtTranslateTypeDeclarations<'a>,
 }
 
+/// `env` with the runtime module `module_name` imported from `import_path`,
+/// among the early imports when `import` is set.
 pub fn require_module(
     import: bool,
     mut env: Env,
@@ -62,6 +74,9 @@ pub fn require_module(
     env
 }
 
+/// The exported types of `type_declarations` in `file`, by resolved name.
+/// When the declarations were read from an imported `.cmt`
+/// (`from_cmt_read_recursively`), unannotated ones count as exported.
 pub fn create_export_type_map(
     config: &crate::gentype::config::T,
     file: &str,
@@ -113,6 +128,7 @@ pub fn create_export_type_map(
     export_type_map
 }
 
+/// The code item, for the debug log.
 pub fn code_item_to_string(
     config: &crate::gentype::config::T,
     type_name_is_interface: &impl Fn(&str) -> bool,
@@ -138,6 +154,8 @@ pub fn code_item_to_string(
     }
 }
 
+/// Emit an exported type, as opaque when it is a GADT, which TypeScript
+/// cannot express; warns about that.
 pub fn emit_export_type(
     locs: &dyn crate::types::DeclLocs,
     emitters: crate::gentype::emitters::T,
@@ -178,6 +196,8 @@ pub fn emit_export_type(
     )
 }
 
+/// Whether `type_name`, exported by this file or imported from another,
+/// is an object type and so can be a TypeScript interface.
 pub fn type_name_is_interface(
     export_type_map: &code_item::ExportTypeMap,
     export_type_map_from_other_files: &code_item::ExportTypeMap,
@@ -199,6 +219,7 @@ pub fn type_name_is_interface(
         .unwrap_or(false)
 }
 
+/// Emit the type a declaration exports.
 pub fn emit_export_from_type_declaration(
     locs: &dyn crate::types::DeclLocs,
     config: &crate::gentype::config::T,
@@ -220,6 +241,7 @@ pub fn emit_export_from_type_declaration(
     )
 }
 
+/// Emit the types the declarations export.
 pub fn emit_export_from_type_declarations(
     locs: &dyn crate::types::DeclLocs,
     config: &crate::gentype::config::T,
@@ -261,10 +283,14 @@ fn replace_react_element_children(fields: &[Field], filter_key: bool) -> Vec<Fie
         .collect()
 }
 
+/// The `Props` type emitted for a React component.
 #[derive(Debug, Clone)]
 pub struct HookType {
+    /// The props object type.
     pub props_type: Type,
+    /// The name the props type is exported under.
     pub resolved_type_name: crate::gentype::resolved_name::T,
+    /// The component's type parameters.
     pub type_vars: Vec<String>,
 }
 
@@ -630,6 +656,7 @@ pub fn emit_code_items(
         })
 }
 
+/// Emit the imports of the runtime modules in `requires`.
 pub fn emit_requires(
     imported_value_or_component: bool,
     early: bool,
@@ -652,6 +679,7 @@ pub fn emit_requires(
         })
 }
 
+/// `type_` with the types `export_type_map` defines inlined.
 pub fn type_get_inlined(
     config: &crate::gentype::config::T,
     export_type_map: &code_item::ExportTypeMap,
@@ -666,6 +694,8 @@ pub fn type_get_inlined(
     )
 }
 
+/// Read the exported types of the `.cmt` file `import_type` comes from, and
+/// of the files its declarations import types from, into `env`.
 pub fn read_cmt_files_recursively(
     target: EmitTarget<'_>,
     config: &mut crate::gentype::config::T,
@@ -760,6 +790,7 @@ pub fn read_cmt_files_recursively(
     }
 }
 
+/// Emit a type import, after reading the declarations it refers to.
 pub fn emit_import_type(
     target: EmitTarget<'_>,
     config: &mut crate::gentype::config::T,
@@ -781,6 +812,7 @@ pub fn emit_import_type(
     (env, emitters)
 }
 
+/// Emit the type imports.
 pub fn emit_import_types(
     target: EmitTarget<'_>,
     config: &mut crate::gentype::config::T,
@@ -804,6 +836,8 @@ pub fn emit_import_types(
         })
 }
 
+/// The declarations to emit: those annotated for export, and those whose
+/// names are in `annotated_set`, marked as exported.
 pub fn get_annotated_typed_declarations(
     annotated_set: &BTreeSet<String>,
     type_declarations: &[code_item::TypeDeclaration],
@@ -834,6 +868,8 @@ pub fn get_annotated_typed_declarations(
         .collect()
 }
 
+/// Mark as exported every type that an exported type or value refers to,
+/// transitively. Returns the updated map and the names newly marked.
 pub fn propagate_annotation_to_sub_types(
     code_items: &[code_item::T],
     type_map: &code_item::ExportTypeMap,
@@ -956,6 +992,8 @@ pub fn propagate_annotation_to_sub_types(
     (new_type_map, annotated_set)
 }
 
+/// `EmitJs.emit_translation_as_string`: the contents of the generated file
+/// for `translation`, without its header.
 #[allow(non_snake_case)]
 pub fn emit_translation_as_string(
     target: EmitTarget<'_>,

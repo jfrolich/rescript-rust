@@ -10,6 +10,8 @@ use crate::types::typedtree::{
     PatternDesc, Structure, StructureItem, StructureItemDesc, TExprIdx, TypedArena, ValueBinding,
 };
 
+/// Name the argument types after the function's parameters, continuing into
+/// the body of a function that returns a function.
 #[allow(non_snake_case)]
 pub fn addAnnotationsToTypes_(
     arena: &ParseArena,
@@ -47,6 +49,8 @@ pub fn addAnnotationsToTypes_(
     }
 }
 
+/// Name the argument types after the parameters of function `expr`,
+/// numbering them when more than one would be called `param`.
 pub fn add_annotations_to_types(
     arena: &ParseArena,
     ta: &TypedArena,
@@ -74,6 +78,8 @@ pub fn add_annotations_to_types(
     }
 }
 
+/// Rename the fields after the `@as` attributes of `expr`, and name the
+/// argument types as [`add_annotations_to_types`] does.
 pub fn add_annotations_to_fields(
     arena: &ParseArena,
     ta: &TypedArena,
@@ -97,6 +103,8 @@ pub fn add_annotations_to_fields(
     (fields, types1)
 }
 
+/// Name the argument types of a function type after the parameters of
+/// `expr`.
 pub fn add_annotations_to_function_type(
     arena: &ParseArena,
     ta: &TypedArena,
@@ -113,6 +121,7 @@ pub fn add_annotations_to_function_type(
     }
 }
 
+/// Translate a `let` binding of a variable, when it is exported.
 pub fn translate_value_binding(
     input: Input<'_>,
     config: &crate::gentype::config::T,
@@ -152,6 +161,7 @@ pub fn translate_value_binding(
     }
 }
 
+/// Translate a submodule.
 pub fn translate_module_binding(
     input: Input<'_>,
     config: &crate::gentype::config::T,
@@ -267,6 +277,7 @@ pub fn translate_module_binding(
     }
 }
 
+/// Translate one structure item.
 pub fn translate_structure_item(
     input: Input<'_>,
     config: &crate::gentype::config::T,
@@ -359,6 +370,8 @@ pub fn translate_structure_item(
     }
 }
 
+/// `TranslateStructure.translateStructure`: translate each structure item;
+/// of several bindings of one name, only the last is exported.
 pub fn translate_structure(
     input: Input<'_>,
     config: &crate::gentype::config::T,

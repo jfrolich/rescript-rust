@@ -27,11 +27,14 @@ use std::path::{Path, PathBuf};
 /// `Files.classify_source_file`, for the files analysis works on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileKind {
+    /// A `.res` implementation.
     Res,
+    /// A `.resi` interface.
     Resi,
 }
 
 impl FileKind {
+    /// The kind of the file at `path`, judged by its extension.
     pub fn of_path(path: &str) -> FileKind {
         if path.ends_with(".resi") {
             FileKind::Resi
@@ -44,7 +47,9 @@ impl FileKind {
 /// An LSP position: 0-based line and character offset.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Position {
+    /// The 0-based line.
     pub line: i32,
+    /// The 0-based character offset within the line.
     pub character: i32,
 }
 
@@ -57,6 +62,7 @@ impl Position {
         }
     }
 
+    /// The position as an LSP `Position` object.
     pub fn to_json(self) -> Json {
         Json::assoc([
             ("character", Json::Int(self.character.into())),
@@ -68,7 +74,9 @@ impl Position {
 /// An LSP range.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Range {
+    /// Where the range starts.
     pub start: Position,
+    /// Where the range ends.
     pub end: Position,
 }
 
@@ -84,6 +92,7 @@ impl Range {
         }
     }
 
+    /// The range as an LSP `Range` object.
     pub fn to_json(self) -> Json {
         Json::assoc([("end", self.end.to_json()), ("start", self.start.to_json())])
     }
@@ -105,6 +114,8 @@ pub struct Request {
     /// The client's working directory, which relative paths are resolved
     /// against (and printed as given, as the OCaml binary does).
     pub cwd: PathBuf,
+    /// The command line after the program name, as `rescript-editor-analysis`
+    /// receives it: the command name, then its arguments.
     pub args: Vec<String>,
 }
 
@@ -113,15 +124,18 @@ pub struct Request {
 pub struct Output(String);
 
 impl Output {
+    /// `print_string`.
     pub fn print(&mut self, s: &str) {
         self.0.push_str(s);
     }
 
+    /// `print_endline`.
     pub fn print_endline(&mut self, s: &str) {
         self.0.push_str(s);
         self.0.push('\n');
     }
 
+    /// `print_newline`.
     pub fn print_newline(&mut self) {
         self.0.push('\n');
     }

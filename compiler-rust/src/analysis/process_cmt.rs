@@ -16,7 +16,9 @@ use std::sync::Arc;
 /// locations and attributes point into it) and type context.
 #[derive(Clone, Copy)]
 pub struct Ctx<'a> {
+    /// The module's parse arena.
     pub arena: &'a ParseArena,
+    /// The module's type context.
     pub types: &'a TypeContext,
     /// Node storage of the typed tree.
     pub ta: &'a tt::TypedArena,
@@ -154,7 +156,9 @@ fn map_record_field(ld: &decl::LabelDeclaration) -> Field {
 
 /// The processing state shared by a file's items: its stamps.
 pub struct Processor<'a> {
+    /// What the items are read from.
     pub ctx: Ctx<'a>,
+    /// The declarations found so far, by stamp.
     pub stamps: Stamps,
 }
 
@@ -1043,7 +1047,9 @@ fn get_module_path(
 /// What a module's typed annotations are (`Cmt_format.binary_annots`).
 #[derive(Clone, Copy)]
 pub enum Annots<'a> {
+    /// A `.res` file's structure.
     Implementation(&'a [tt::StructureItem]),
+    /// A `.resi` file's signature.
     Interface(&'a [tt::TypedSignatureItem]),
 }
 

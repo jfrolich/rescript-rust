@@ -18,16 +18,22 @@ use crate::types::decl::{
 use crate::types::type_expr::TypeExprRef;
 use crate::types::typedtree::TypedTypeDeclaration;
 
+/// What a type declaration defines, in the form it is translated from.
 #[derive(Debug, Clone)]
 pub enum DeclarationKind {
+    /// A record type, with its fields and representation.
     RecordDeclarationFromTypes(Vec<LabelDeclaration>, RecordRepresentation),
+    /// An abstract type or an abbreviation, with the manifest as written.
     GeneralDeclaration(Option<crate::types::typedtree::TCoreTypeIdx>),
+    /// An abstract type or an abbreviation, with its inferred manifest.
     GeneralDeclarationFromTypes(Option<TypeExprRef>),
+    /// A variant type, with its constructors, layout and representation.
     VariantDeclarationFromTypes(
         Vec<ConstructorDeclaration>,
         crate::types::VariantLayout,
         TypeRepresentation,
     ),
+    /// A declaration gentype does not translate, such as a GADT.
     NoDeclaration,
 }
 
@@ -101,6 +107,8 @@ pub fn create_export_type_from_type_declaration(
     }
 }
 
+/// The variant case of `label`, with the runtime value its `@as` attribute
+/// gives, or else the label; `poly` makes numeric labels numbers.
 pub fn create_case(
     arena: &ParseArena,
     label: &str,
@@ -159,6 +167,7 @@ fn create_variant_case(label: &str, tag: &Option<crate::types::VariantLiteralTag
     VariantCase { label_js }
 }
 
+/// The JavaScript name of a record field: its `@as` name, or else its own.
 pub fn rename_record_field(arena: &ParseArena, attributes: &Attributes, name: &str) -> String {
     // Mirrors compiler/gentype/TranslateTypeDeclarations.ml:39-53.
     crate::gentype::annotation::check_unsupported_gentype_as_renaming(arena, attributes);
@@ -199,6 +208,8 @@ fn string_escaped_like_ocaml(s: &str) -> String {
     out
 }
 
+/// `TranslateTypeDeclarations.traslateDeclarationKind`: translate a type
+/// declaration with the parse-tree `type_attributes` at `loc_idx`.
 #[allow(non_snake_case)]
 pub fn traslate_declaration_kind(
     input: Input<'_>,
@@ -235,6 +246,8 @@ pub fn traslate_declaration_kind(
     )
 }
 
+/// Translate a type declaration whose attributes are declaration
+/// attributes, as found in signature types.
 #[allow(non_snake_case)]
 pub fn traslate_declaration_kind_from_decl_attributes(
     input: Input<'_>,
@@ -584,6 +597,7 @@ fn traslate_declaration_kind_with_attribute_info(
     }
 }
 
+/// Whether a constructor has its own result type, making the type a GADT.
 pub fn has_some_gadt_leaf(constructor_declarations: &[ConstructorDeclaration]) -> bool {
     // Mirrors compiler/gentype/TranslateTypeDeclarations.ml:323-326.
     constructor_declarations
@@ -591,6 +605,7 @@ pub fn has_some_gadt_leaf(constructor_declarations: &[ConstructorDeclaration]) -
         .any(|declaration| declaration.cd_res.is_some())
 }
 
+/// Translate a typed type declaration.
 pub fn translate_type_declaration(
     input: Input<'_>,
     config: &crate::gentype::config::T,
@@ -646,6 +661,7 @@ pub fn translate_type_declaration(
     )
 }
 
+/// Declare the type of a type declaration in `type_env`.
 pub fn add_type_declaration_id_to_type_env(
     type_env: &crate::gentype::type_env::T,
     type_declaration: &TypedTypeDeclaration,
@@ -654,6 +670,9 @@ pub fn add_type_declaration_id_to_type_env(
     crate::gentype::type_env::new_type(type_declaration.typ_id.name(), type_env);
 }
 
+/// `TranslateTypeDeclarations.translateTypeDeclarations`: translate the
+/// declarations of one `type` item, declaring all of their names first when
+/// it is recursive.
 pub fn translate_type_declarations(
     input: Input<'_>,
     config: &crate::gentype::config::T,

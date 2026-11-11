@@ -10,19 +10,27 @@ use crate::parser::formatter::{BoxKind, Formatter};
 /// A JSON value (`Yojson.Safe.t` without the literal variants).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Json {
+    /// `null`.
     Null,
+    /// A boolean.
     Bool(bool),
+    /// An integer.
     Int(i64),
+    /// A string, escaped when printed.
     String(String),
+    /// An array.
     List(Vec<Json>),
+    /// An object, with its fields in this order.
     Assoc(Vec<(String, Json)>),
 }
 
 impl Json {
+    /// A string value.
     pub fn str(s: impl Into<String>) -> Json {
         Json::String(s.into())
     }
 
+    /// An object with `fields`, in this order.
     pub fn assoc<const N: usize>(fields: [(&str, Json); N]) -> Json {
         Json::Assoc(
             fields

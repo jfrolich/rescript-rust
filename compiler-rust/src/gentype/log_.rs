@@ -2,22 +2,33 @@
 
 use crate::location::Location;
 
+/// ANSI colors for diagnostics.
 pub mod color {
+    /// A foreground color.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum Color {
+        /// Red.
         Red,
+        /// Yellow.
         Yellow,
+        /// Magenta.
         Magenta,
+        /// Cyan.
         Cyan,
     }
 
+    /// A text style.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum Style {
+        /// A foreground color.
         FG(Color),
+        /// Bold.
         Bold,
+        /// Dim.
         Dim,
     }
 
+    /// The ANSI SGR code of `style`.
     pub fn code_of_style(style: Style) -> &'static str {
         match style {
             Style::FG(Color::Red) => "31",
@@ -29,6 +40,7 @@ pub mod color {
         }
     }
 
+    /// The styles of a semantic tag such as `error` or `filename`.
     pub fn style_of_stag(s: &str) -> Vec<Style> {
         match s {
             "error" => vec![Style::Bold, Style::FG(Color::Red)],
@@ -40,6 +52,7 @@ pub mod color {
         }
     }
 
+    /// The ANSI escape sequence that starts tag `s`.
     pub fn ansi_of_stag(s: &str) -> String {
         let codes = style_of_stag(s)
             .into_iter()
@@ -49,27 +62,35 @@ pub mod color {
         format!("\u{1b}[{codes}m")
     }
 
+    /// The ANSI escape sequence that resets the style.
     pub const RESET_LIT: &str = "\u{1b}[0m";
 
+    /// Prepare colored output. Styles are applied when text is rendered, so
+    /// there is nothing to set up.
     pub fn setup() {
         // OCaml installs formatter tag functions here. Rust logging can apply
         // tags at render time, so setup is intentionally a no-op in this port.
     }
 
+    /// `s` styled as an error.
     pub fn error(s: &str) -> String {
         format!("{}{}{}", ansi_of_stag("error"), s, RESET_LIT)
     }
 
+    /// `s` styled as information.
     pub fn info(s: &str) -> String {
         format!("{}{}{}", ansi_of_stag("info"), s, RESET_LIT)
     }
 }
 
+/// Printing of source locations.
 pub mod loc {
     use super::Location;
 
+    /// The 1-based start and end of a location as (line, character) pairs.
     pub type NormalizedRange = Option<((i32, i32), (i32, i32))>;
 
+    /// The file name as printed, with a placeholder for locations without one.
     pub fn print_filename(file: &str) -> String {
         match file {
             "_none_" | "" => "(No file name)".to_string(),
@@ -77,6 +98,8 @@ pub mod loc {
         }
     }
 
+    /// `loc` as `file:line:char-char`, using `normalized_range` for the lines
+    /// and characters.
     pub fn print_loc(normalized_range: NormalizedRange, loc: &Location) -> String {
         // OCaml compiler/gentype/Log_.ml:54-77 gets the filename from
         // Location.get_pos_info. Rust Location stores an interned filename id,
@@ -106,6 +129,7 @@ pub mod loc {
         }
     }
 
+    /// `loc` as `file:line:char-char`.
     pub fn print(loc: &Location) -> String {
         let normalized_range =
             loc.normalize_range()
@@ -116,11 +140,14 @@ pub mod loc {
     }
 }
 
+/// Print a debug log line.
 pub fn item(message: &str) {
     print!("  ");
     print!("{message}");
 }
 
+/// Print a diagnostic: its `name` styled by `color`, its location, then the
+/// message `body` produces.
 pub fn log_kind<F>(body: F, color: fn(&str) -> String, loc: &Location, name: &str)
 where
     F: FnOnce() -> String,
@@ -128,6 +155,7 @@ where
     println!("\n{}\n{}\n{}", color(name), loc::print(loc), body());
 }
 
+/// Print an informational diagnostic.
 pub fn info<F>(body: F, loc: &Location, name: &str)
 where
     F: FnOnce() -> String,

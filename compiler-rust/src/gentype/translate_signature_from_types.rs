@@ -3,6 +3,7 @@
 use crate::gentype::translation::Input;
 use crate::types::decl::{ModuleType, SignatureItem, TypeKind};
 
+/// Translate a type declaration found in a signature type.
 pub fn translate_type_declaration_from_types(
     input: Input<'_>,
     config: &crate::gentype::config::T,
@@ -58,6 +59,7 @@ pub fn translate_type_declaration_from_types(
     )
 }
 
+/// Translate a submodule found in a signature type.
 pub fn translate_module_declaration_from_types(
     input: Input<'_>,
     config: &crate::gentype::config::T,
@@ -97,6 +99,7 @@ pub fn translate_module_declaration_from_types(
     }
 }
 
+/// Translate one item of a signature type.
 pub fn translate_signature_item_from_types(
     input: Input<'_>,
     config: &crate::gentype::config::T,
@@ -172,6 +175,8 @@ pub fn translate_signature_item_from_types(
     }
 }
 
+/// `TranslateSignatureFromTypes.translateSignatureFromTypes`: translate
+/// each item of a signature type.
 pub fn translate_signature_from_types(
     input: Input<'_>,
     config: &crate::gentype::config::T,

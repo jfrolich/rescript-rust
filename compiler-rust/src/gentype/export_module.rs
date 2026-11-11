@@ -8,32 +8,48 @@ use indexmap::IndexMap;
 // OCaml uses Hashtbl here (compiler/gentype/ExportModule.ml:3-9), not a sorted
 // map. Keep this order-sensitive instead of using BTreeMap; final integration
 // must verify the exact OCaml Hashtbl fold order against generated output.
+/// The members of a submodule object, by field name, in insertion order.
 pub type ExportModuleItem = IndexMap<String, ExportModuleValue>;
 
+/// A member of a submodule object.
 #[derive(Debug, Clone)]
 pub enum ExportModuleValue {
+    /// A value, bound in the generated file under a toplevel name.
     S {
+        /// The toplevel name the value is bound to.
         name: String,
+        /// The value's type.
         type_: Type,
+        /// The value's doc comment.
         doc_string: doc_string::T,
     },
+    /// A nested submodule.
     M {
+        /// Its members.
         export_module_item: ExportModuleItem,
     },
 }
 
+/// The submodule objects of a file, by toplevel module name.
 pub type ExportModuleItems = IndexMap<String, ExportModuleItem>;
 
+/// The types of a submodule member.
 #[derive(Debug, Clone)]
 pub struct Types {
+    /// The type of the member in the object value: the name of its binding.
     pub type_for_value: Type,
+    /// The member's declared type.
     pub type_for_type: Type,
+    /// The member's doc comment.
     pub doc_string: doc_string::T,
 }
 
+/// A submodule member as a field of the object type.
 #[derive(Debug, Clone)]
 pub struct FieldInfo {
+    /// The field in the type of the object value.
     pub field_for_value: Field,
+    /// The field in the object's declared type.
     pub field_for_type: Field,
 }
 
@@ -140,6 +156,7 @@ fn ocaml_hashtbl_replace_fold_cons_order<'a>(
     traversal
 }
 
+/// The types of a submodule member.
 pub fn export_module_value_to_type(
     config: &crate::gentype::config::T,
     export_module_value: &ExportModuleValue,
@@ -177,6 +194,8 @@ pub fn export_module_value_to_type(
     }
 }
 
+/// The fields of a submodule object, in the order OCaml's `Hashtbl.fold`
+/// visits its members.
 pub fn export_module_item_to_fields(
     config: &crate::gentype::config::T,
     export_module_item: &ExportModuleItem,
@@ -209,6 +228,7 @@ pub fn export_module_item_to_fields(
         .collect()
 }
 
+/// Add the value `value_name` to `export_module_item` at the field path `x`.
 pub fn extend_export_module_item(
     x: &[String],
     doc_string: doc_string::T,
@@ -256,6 +276,8 @@ pub fn extend_export_module_item(
     }
 }
 
+/// Add the value `value_name`, whose qualified name is `x`, to the
+/// submodule objects of its toplevel module; toplevel values are skipped.
 pub fn extend_export_module_items(
     x: &[String],
     doc_string: doc_string::T,
@@ -273,10 +295,13 @@ pub fn extend_export_module_items(
     }
 }
 
+/// No submodule objects.
 pub fn create_module_items_emitter() -> ExportModuleItems {
     IndexMap::new()
 }
 
+/// Fold `f` over the submodule objects in the order OCaml's `Hashtbl.fold`
+/// visits them.
 pub fn rev_fold<F, TBase>(f: F, tbl: &ExportModuleItems, base: TBase) -> TBase
 where
     F: Fn(&String, &ExportModuleItem, TBase) -> TBase,
@@ -289,6 +314,7 @@ where
         })
 }
 
+/// Emit each submodule object as an exported constant.
 pub fn emit_all_module_items(
     config: &crate::gentype::config::T,
     emitters: crate::gentype::emitters::T,
@@ -331,6 +357,8 @@ pub fn emit_all_module_items(
     )
 }
 
+/// Add a value export, under its qualified `resolved_name`, to the
+/// submodule objects.
 pub fn extend_export_modules(
     module_items_emitter: &mut ExportModuleItems,
     doc_string: doc_string::T,

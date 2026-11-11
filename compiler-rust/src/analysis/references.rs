@@ -249,8 +249,11 @@ pub fn exported_for_tip(
 /// What `defined_for_loc` found (OCaml's polymorphic variants). A
 /// constructor comes with the module its types belong to.
 pub enum Defined {
+    /// A variant constructor, with the session module its type belongs to.
     Constructor(Constructor, ModuleId),
+    /// A record field.
     Field,
+    /// Any other declaration.
     Declared,
 }
 
@@ -554,7 +557,9 @@ fn is_visible(declared: &Declared<()>) -> bool {
 /// `references`: a reference's file and location; `None` is the whole of a
 /// toplevel module.
 pub struct Reference {
+    /// The file's URI.
     pub uri: String,
+    /// The reference's location, or `None` for the whole module.
     pub loc: Option<Loc>,
 }
 

@@ -3,15 +3,22 @@
 use std::fs;
 use std::io;
 
+/// What happened to a generated file, for the debug log.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileAction {
+    /// The module needs no generated file.
     NoMatch,
+    /// An existing file was replaced.
     Replace,
+    /// An existing file already had the generated contents.
     Identical,
+    /// The module had type errors.
     TypeError,
+    /// A new file was written.
     Write,
 }
 
+/// Log `file_action` on `file_name`, when that debug flag is on.
 pub fn log_file_action(file_action: FileAction, file_name: &str) {
     if crate::gentype::debug::basic.load(std::sync::atomic::Ordering::Relaxed) {
         let action = match file_action {
@@ -25,15 +32,19 @@ pub fn log_file_action(file_action: FileAction, file_name: &str) {
     }
 }
 
+/// The lines of `file`.
 pub fn read_lines(file: &str) -> io::Result<Vec<String>> {
     let contents = fs::read_to_string(file)?;
     Ok(contents.lines().map(|line| line.to_string()).collect())
 }
 
+/// The lines of `file`, joined by `
+/// `.
 pub fn read_file(file: &str) -> io::Result<String> {
     Ok(read_lines(file)?.join("\n"))
 }
 
+/// Write `contents` to `file_path`.
 pub fn write_file(file_path: &str, contents: &str) -> io::Result<()> {
     fs::write(file_path, contents)
 }
@@ -57,6 +68,8 @@ fn joined_lines_equal(raw: &str, expected: &str) -> bool {
     rest.is_empty()
 }
 
+/// Write `file_contents` to `output_file` unless the file already has them,
+/// so unchanged files keep their modification time.
 pub fn write_file_if_required(output_file: &str, file_contents: &str) -> io::Result<()> {
     if std::path::Path::new(output_file).exists() {
         let identical = joined_lines_equal(&fs::read_to_string(output_file)?, file_contents);

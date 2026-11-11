@@ -3,11 +3,15 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
+/// Maps module names to the modules that shim them.
 pub type ModuleNameMap = BTreeMap<crate::gentype::module_name::T, crate::gentype::module_name::T>;
 
+/// The JavaScript module format the compiler emits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Module {
+    /// CommonJS (`require`).
     CommonJS,
+    /// ES modules (`import`).
     ESModule,
 }
 
@@ -22,31 +26,50 @@ pub enum ModuleResolution {
     Bundler,
 }
 
+/// A compiler version as major, minor and patch.
 pub type BsVersion = (i32, i32, i32);
 
+/// A package's gentype configuration (`GenTypeConfig.t`).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct T {
+    /// The root of the build, which may be an enclosing monorepo.
     pub bsb_project_root: String,
+    /// The package's dependencies.
     pub bs_dependencies: Vec<String>,
     /// Map from package name to its install path, used to locate [.cmt]/[.cmti]
     /// files of cross-package references.
     pub dep_paths: HashMap<String, String>,
+    /// Whether the generated file needs to import the `Curry` runtime module.
     pub emit_import_curry: bool,
+    /// Whether the generated file needs to import React.
     pub emit_import_react: bool,
+    /// Whether the `Props` type of the file's component has been emitted.
     pub emit_type_prop_done: bool,
+    /// Whether every item is exported, as in a module annotated with `@genType`.
     pub everything: bool,
+    /// Whether object types are exported as TypeScript interfaces.
     pub export_interfaces: bool,
+    /// The extension of generated files, instead of the default `.gen.tsx`.
     pub generated_file_extension: Option<String>,
+    /// The module format of the compiled JavaScript.
     pub module_: Module,
+    /// How generated files write import paths.
     pub module_resolution: ModuleResolution,
+    /// The package's namespace, if it has one.
     pub namespace: Option<String>,
+    /// The name of the compiler's npm package.
     pub platform_lib: String,
+    /// The package's root directory.
     pub project_root: String,
+    /// The shims that replace modules in imports.
     pub shims_map: ModuleNameMap,
+    /// The package's source directories, relative to its root.
     pub sources: Vec<String>,
+    /// The suffix of compiled JavaScript files, such as `.bs.js`.
     pub suffix: String,
 }
 
+/// The configuration with every option at its default.
 pub fn default() -> T {
     T {
         bsb_project_root: String::new(),
@@ -69,6 +92,7 @@ pub fn default() -> T {
     }
 }
 
+/// The directory of the compiler's runtime in the configured module format.
 pub fn bs_platform_lib(config: &T) -> String {
     match config.module_ {
         Module::ESModule => format!("{}/lib/es6", config.platform_lib),
@@ -76,6 +100,7 @@ pub fn bs_platform_lib(config: &T) -> String {
     }
 }
 
+/// The path of the runtime's `curry.js`.
 pub fn get_bs_curry_path(config: &T) -> String {
     Path::new(&bs_platform_lib(config))
         .join("curry.js")
@@ -89,19 +114,31 @@ pub fn get_bs_curry_path(config: &T) -> String {
 /// gentype config used to read from rescript.json now comes through here.
 #[derive(Debug, Clone, Default)]
 pub struct FlagState {
+    /// `-bs-project-root`.
     pub project_root: String,
+    /// `-bs-gentype-bsb-project-root`.
     pub bsb_project_root: String,
+    /// `-bs-gentype-module`.
     pub module_flag: Option<Module>,
+    /// `-bs-gentype-module-resolution`.
     pub module_resolution_flag: Option<ModuleResolution>,
+    /// `-bs-gentype-export-interfaces`.
     pub export_interfaces_flag: bool,
+    /// `-bs-gentype-generated-extension`.
     pub generated_file_extension_flag: Option<String>,
+    /// `-bs-gentype-suffix`.
     pub suffix_flag: Option<String>,
+    /// `-bs-gentype-shim`, as (module, shim) pairs, last flag first.
     pub shims: Vec<(String, String)>,
+    /// `-bs-gentype-dep`, last flag first.
     pub bs_dependencies_flag: Vec<String>,
+    /// `-bs-gentype-source-dir`, last flag first.
     pub source_dirs_flag: Vec<String>,
+    /// `-bs-gentype-dep-path`, as (package, path) pairs, last flag first.
     pub dep_paths_flag: Vec<(String, String)>,
 }
 
+/// The module format named by a `-bs-gentype-module` value.
 pub fn module_of_string(s: &str) -> Option<Module> {
     match s {
         "commonjs" => Some(Module::CommonJS),
@@ -110,6 +147,7 @@ pub fn module_of_string(s: &str) -> Option<Module> {
     }
 }
 
+/// The module resolution named by a `-bs-gentype-module-resolution` value.
 pub fn module_resolution_of_string(s: &str) -> Option<ModuleResolution> {
     match s {
         "node" => Some(ModuleResolution::Node),
@@ -121,6 +159,8 @@ pub fn module_resolution_of_string(s: &str) -> Option<ModuleResolution> {
 
 // ----- Build the Config.t from flags ----------------------------------
 
+/// `GenTypeConfig.read_config`: the configuration from the flags, in
+/// package `namespace`.
 pub fn build_config_from_flags(namespace: Option<String>, flags: FlagState) -> T {
     // Mirrors compiler/gentype/GenTypeConfig.ml:112-177. The input is the
     // same CLI-backed flag state that OCaml populates from
@@ -268,6 +308,7 @@ impl FlagState {
     }
 }
 
+/// The flag state that the gentype flags in `args` set.
 pub fn flag_state_from_cli_args(args: &[String]) -> FlagState {
     // Mirrors compiler/bsc/rescript_compiler_main.ml:300-343. This helper lets
     // the bsc subprocess path and rewatch in-process path build GenTypeConfig.t
@@ -280,6 +321,8 @@ pub fn flag_state_from_cli_args(args: &[String]) -> FlagState {
     flags
 }
 
+/// The configuration bsc would build from the `-bs-gentype*` and related
+/// flags in `args`.
 pub fn build_config_from_cli_args(namespace: Option<String>, args: &[String]) -> T {
     build_config_from_flags(namespace, flag_state_from_cli_args(args))
 }

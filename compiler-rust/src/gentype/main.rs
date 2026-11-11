@@ -32,23 +32,37 @@ struct InProcessTypeDeclarationsTables {
 
 type InProcessTypeDeclarationsCache = Mutex<InProcessTypeDeclarationsTables>;
 
+/// The typed tree of an artifact (`Cmt_format.binary_annots`).
 pub enum TypedArtifactAnnots<'a> {
+    /// A `.res` file's typed structure.
     Implementation(&'a Structure),
+    /// A `.resi` file's typed signature.
     Interface(&'a TypedSignature),
+    /// A packed module, which gentype does not translate.
     Packed,
+    /// The partial structure of a `.res` file with type errors.
     PartialImplementation,
+    /// The partial signature of a `.resi` file with type errors.
     PartialInterface,
 }
 
+/// A type-checked module, as the compiler hands it to gentype.
 pub struct TypedArtifact<'a> {
+    /// The module's typed tree.
     pub annots: TypedArtifactAnnots<'a>,
+    /// The parse arena the typed tree's attributes and locations point into.
     pub arena: &'a ParseArena,
     /// Node storage of the typed tree in `annots`.
     pub ta: &'a crate::types::typedtree::TypedArena,
+    /// The type state the typed tree's types live in.
     pub ctx: &'a TypeContext,
+    /// The source file's path, when known.
     pub source_file: Option<&'a str>,
+    /// The module's name as the compiler knows it.
     pub compiler_module_name: crate::gentype::module_name::T,
+    /// The module name gentype derives from the source file's path.
     pub file_name: crate::gentype::module_name::T,
+    /// Whether the artifact is an interface.
     pub is_interface: bool,
     /// Only register the artifact's type declarations, for modules that
     /// import its types; generate no output (a module compiled only for its
@@ -224,6 +238,8 @@ fn get_cmt_file_for_typed_artifact_import(project_root: &str, cmt: &str) -> Stri
     })
 }
 
+/// `GenTypeMain.signature_check_annotations` / `structure_check_annotations`:
+/// whether any item of the artifact is accepted by `check_annotation`.
 pub fn typed_artifact_check_annotations(
     check_annotation: &impl Fn(&ParseArena, LocIdx, &Attributes) -> bool,
     artifact: &TypedArtifact<'_>,
@@ -253,6 +269,7 @@ pub fn typed_artifact_check_annotations(
     }
 }
 
+/// Whether the artifact is the partial tree of a module with type errors.
 pub fn typed_artifact_has_type_errors(artifact: &TypedArtifact<'_>) -> bool {
     // Mirrors compiler/gentype/GenTypeMain.ml:11-14 for the in-memory path.
     matches!(
@@ -279,6 +296,8 @@ impl TypedArtifact<'_> {
     }
 }
 
+/// Whether a structure item declares types or modules, whose type
+/// declarations importers may need.
 pub fn structure_item_is_declaration(struct_item: &StructureItem) -> bool {
     // Mirrors compiler/gentype/GenTypeMain.ml:16-20.
     matches!(
@@ -289,6 +308,8 @@ pub fn structure_item_is_declaration(struct_item: &StructureItem) -> bool {
     )
 }
 
+/// Whether a signature item declares types or module types, whose type
+/// declarations importers may need.
 pub fn signature_item_is_declaration(signature_item: &TypedSignatureItem) -> bool {
     // Mirrors compiler/gentype/GenTypeMain.ml:21-24.
     matches!(
@@ -297,6 +318,8 @@ pub fn signature_item_is_declaration(signature_item: &TypedSignatureItem) -> boo
     )
 }
 
+/// `GenTypeMain.translateCMT`: translate the artifact for the generated file
+/// at `output_file_relative`.
 pub fn translate_typed_artifact(
     config: &crate::gentype::config::T,
     output_file_relative: &str,
@@ -366,6 +389,8 @@ fn current_module_names_for_typed_artifact(artifact: &TypedArtifact<'_>) -> Vec<
     names
 }
 
+/// Translate only the type declarations of the artifact, as importers of its
+/// types need them.
 pub fn typed_artifact_translate_type_declarations(
     config: &crate::gentype::config::T,
     output_file_relative: &str,
@@ -413,6 +438,9 @@ pub fn typed_artifact_translate_type_declarations(
     )
 }
 
+/// The type declarations translated from the `.cmt` file `cmt_file`, from
+/// the registry of artifacts this process has translated; reading a `.cmt`
+/// from disk is a fatal error.
 pub fn input_cmt_translate_type_declarations(
     _config: &mut crate::gentype::config::T,
     _output_file_relative: &str,
@@ -484,6 +512,8 @@ fn read_cmt(cmt_file: &str) -> ! {
     }
 }
 
+/// `GenTypeMain.processCmtFile`: translate the artifact and write its
+/// generated file, or remove a stale one when nothing is annotated.
 pub fn process_typed_artifact(
     config: &crate::gentype::config::T,
     shared_resolver: Option<&crate::gentype::module_resolver::Resolver>,

@@ -2,6 +2,7 @@
 
 use crate::gentype::config::{ModuleResolution, T};
 
+/// The extension that imports of a shim module use.
 pub fn shim_ts_output_file_extension(config: &T) -> String {
     match config.module_resolution {
         ModuleResolution::Node => ".shim".to_string(),
@@ -26,6 +27,8 @@ fn extension(s: &str) -> String {
     }
 }
 
+/// The extension of generated files without the TypeScript suffix, `.gen`
+/// unless configured.
 pub fn generated_files_extension(config: &T) -> String {
     match &config.generated_file_extension {
         Some(s) => remove_extension(s),
@@ -33,6 +36,7 @@ pub fn generated_files_extension(config: &T) -> String {
     }
 }
 
+/// The full extension of generated TypeScript files, such as `.gen.tsx`.
 pub fn ts_input_file_suffix(config: &T) -> String {
     match &config.generated_file_extension {
         Some(s) if !extension(s).is_empty() => s.clone(),
@@ -40,10 +44,14 @@ pub fn ts_input_file_suffix(config: &T) -> String {
     }
 }
 
+/// The extension of the JavaScript compiled from generated files, such as
+/// `.gen.js`.
 pub fn ts_output_file_suffix(config: &T) -> String {
     format!("{}.js", generated_files_extension(config))
 }
 
+/// The extension that imports of generated modules use, which depends on
+/// the module resolution.
 pub fn generated_module_extension(config: &T) -> String {
     match config.module_resolution {
         ModuleResolution::Node => generated_files_extension(config),
