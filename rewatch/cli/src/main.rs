@@ -22,7 +22,7 @@ static GLOBAL_ALLOCATOR: alloc_stats::CountingAlloc = alloc_stats::CountingAlloc
 
 use rescript::{
     build, cli, cmd, format,
-    lock::{LockKind, drop_lock, get_lock_or_exit},
+    lock::{LockKind, drop_lock, get_clean_lock_or_exit, get_lock_or_exit},
     telemetry, watcher,
 };
 
@@ -237,9 +237,13 @@ fn run_main(otel_enabled: bool) -> Result<()> {
             }
         }
         cli::Command::Clean { folder, prod } => {
+            // The watch lock first, as `rescript watch` takes it: a watcher
+            // keeps reading the artifacts the clean removes.
+            let _watch_lock = get_clean_lock_or_exit(&folder);
             let _lock = get_lock_or_exit(LockKind::Build, &folder);
             let result = build::clean::clean(folder.as_ref(), show_progress, plain_output, prod);
             let _ = drop_lock(LockKind::Build, &folder);
+            let _ = drop_lock(LockKind::Watch, &folder);
 
             result
         }

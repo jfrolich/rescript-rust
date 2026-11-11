@@ -166,6 +166,26 @@ pub fn get_lock_or_exit(kind: LockKind, folder: &str) -> LockGuard {
     }
 }
 
+/// The watch lock of `folder` for `rescript clean`, which a watcher holds
+/// while it runs: a watcher of the project would keep reading the artifacts
+/// the clean removes (rewatch-ocaml's `Clean.run`). Drop it with
+/// `drop_lock(LockKind::Watch, folder)`.
+pub fn get_clean_lock_or_exit(folder: &str) -> LockGuard {
+    match get(LockKind::Watch, folder) {
+        Lock::Error(Error::Locked(pid)) => {
+            eprintln!(
+                "Could not clean while rescript watch or another clean is running. The process ID (PID) is {pid}"
+            );
+            std::process::exit(1);
+        }
+        Lock::Error(error) => {
+            eprintln!("Could not start Rescript build: {error}");
+            std::process::exit(1);
+        }
+        Lock::Acquired(guard) => guard,
+    }
+}
+
 pub fn drop_lock(kind: LockKind, folder: &str) -> Result<()> {
     let project_folder = Path::new(folder);
     if !project_folder.exists() {
