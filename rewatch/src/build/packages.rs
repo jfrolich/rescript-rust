@@ -54,6 +54,7 @@ struct Dependency {
 
 #[derive(Debug, Clone)]
 pub struct Package {
+    pub check_only: bool,
     pub name: String,
     pub config: config::Config,
     pub source_folders: AHashSet<config::PackageSource>,
@@ -556,6 +557,7 @@ This inconsistency will cause issues with package resolution.\n",
     }
 
     Ok(Package {
+        check_only: false,
         name: package_name,
         config: config.to_owned(),
         source_folders,
@@ -961,11 +963,13 @@ fn parse_packages_inner(build_state: &mut BuildState, packages: &AHashMap<String
         }
         let build_path_abs = package.get_build_path();
         let bs_build_path = package.get_ocaml_build_path();
-        create_dir(&build_path_abs)?;
-        create_dir(&bs_build_path)?;
+        if !build_state.check_only {
+            create_dir(&build_path_abs)?;
+            create_dir(&bs_build_path)?;
+        }
 
         for spec in package_specs.iter() {
-            if !spec.in_source {
+            if !build_state.check_only && !spec.in_source {
                 // we don't want to calculate this if we don't have out of source specs
                 // we do this twice, but we almost never have multiple package specs
                 // so this optimization is less important
@@ -1316,6 +1320,7 @@ mod test {
 
     fn create_package(args: CreatePackageArgs) -> Package {
         Package {
+            check_only: false,
             name: args.name.clone(),
             config: config::tests::create_config(config::tests::CreateConfigArgs {
                 name: args.name,
@@ -1601,6 +1606,7 @@ mod test {
         config.sources = Some(config::OneOrMore::Multiple(sources));
         config.features = features_map;
         super::Package {
+            check_only: false,
             name: "root".to_string(),
             config,
             source_folders: AHashSet::new(),
@@ -1684,6 +1690,7 @@ mod test {
         packages.insert(
             "root".to_string(),
             super::Package {
+                check_only: false,
                 name: "root".to_string(),
                 config: root_config,
                 source_folders: AHashSet::new(),
@@ -1736,6 +1743,7 @@ mod test {
         packages.insert(
             "root".to_string(),
             super::Package {
+                check_only: false,
                 name: "root".to_string(),
                 config: root_config,
                 source_folders: AHashSet::new(),
@@ -1806,6 +1814,7 @@ mod test {
         packages.insert(
             "root".to_string(),
             super::Package {
+                check_only: false,
                 name: "root".to_string(),
                 config: root_config,
                 source_folders: AHashSet::new(),
