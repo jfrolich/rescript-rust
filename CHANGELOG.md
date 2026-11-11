@@ -18,8 +18,6 @@
 
 #### :rocket: New Feature
 
-- Add a whole-project benchmark script comparing generated output and clean-build instructions between compiler binaries. [#112](https://github.com/jfrolich/rescript-rust/pull/112)
-
 #### :bug: Bug fix
 
 - JSX v4: keep `@directive` on an async component's own function instead of its generated sync wrapper, so `@react.component let make = @directive("'use cache';") async (...) => ...` compiles to an async function that starts with `'use cache'` (ReScript 12 dropped the directive; Next.js rejects it on a sync function).
