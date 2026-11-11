@@ -662,6 +662,9 @@ pub struct CompilerOptions {
     /// When true, `compile_source_in_process` captures the typed tree,
     /// raw lambda, and lambda sexps for display (used by the playground).
     pub capture_intermediates: bool,
+    /// Return the units a compilation loaded in its result's
+    /// `loaded_modules`.
+    pub capture_loaded_modules: bool,
     /// Intermediate representations an in-process compile captures into its
     /// result's `dumps`, in this order.
     pub dumps: Vec<DumpKind>,
@@ -869,6 +872,7 @@ impl Default for CompilerOptions {
             gentype_resolver: None,
             gentype_declarations_only: false,
             capture_intermediates: false,
+            capture_loaded_modules: false,
             dumps: Vec::new(),
             skip_js_render: false,
             publish_in_process_signature: true,
@@ -12493,6 +12497,9 @@ pub struct InProcessCompileResult {
     pub warnings: String,
     /// The source after macro expansion, when the file uses macros.
     pub expanded_source: Option<String>,
+    /// The other units this compilation loaded, with
+    /// `CompilerOptions::capture_loaded_modules`.
+    pub loaded_modules: Vec<PortablePersStruct>,
 }
 
 /// Owned in-process compilation state after typechecking and Lambda lowering,
@@ -12508,6 +12515,9 @@ pub struct InProcessPreJsCompileResult {
     pub jsx_preserve: bool,
     pub signature: crate::types::decl::Signature,
     pub pers_struct: Option<PortablePersStruct>,
+    /// The other units this compilation loaded, with
+    /// `CompilerOptions::capture_loaded_modules`.
+    pub loaded_modules: Vec<PortablePersStruct>,
     /// Resolves the location handles of `lowered_lambda` and
     /// `hoisted_functions`; outlives the parse arena and typed tree.
     pub lam_locs: crate::lambda::LamLocTable,
@@ -13600,6 +13610,22 @@ pub fn compile_preprocessed_structure_in_process_until_js(
             pers_struct: pers_struct.take(),
         })?;
     }
+    // The units this compilation loaded, for a host that keeps them for the
+    // next compilation instead of loading them again (the playground, which
+    // type checks the standard library from source).
+    let loaded_modules = if options.capture_loaded_modules {
+        let (modules, _) =
+            persistent_env_after_signature.extract_all_cached_modules(&type_ctx, Some(arena));
+        let mut modules: Vec<PortablePersStruct> = modules
+            .into_iter()
+            .filter(|(name, _)| name != module_name)
+            .map(|(_, module)| module)
+            .collect();
+        modules.sort_by(|a, b| a.ps_name.cmp(&b.ps_name));
+        modules
+    } else {
+        Vec::new()
+    };
     tctx.persistent_env = Some(persistent_env_after_signature);
 
     // Capture typed tree sexp for the playground (only if requested).
@@ -13901,6 +13927,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         jsx_preserve,
         signature: published_signature,
         pers_struct,
+        loaded_modules,
         lam_locs,
         typed_tree_sexp,
         raw_lambda_sexp,
@@ -14126,6 +14153,7 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
     });
     Ok(InProcessCompileResult {
         expanded_source: None,
+        loaded_modules: std::mem::take(&mut pre_js.loaded_modules),
         js_output: js,
         js_outputs,
         signature: pre_js.signature,

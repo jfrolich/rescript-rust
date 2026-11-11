@@ -544,6 +544,7 @@ fn run(args: Vec<String>, registry: Option<RegistryProvider>) -> Result<()> {
         gentype_declarations_only: false,
         js_package_specs: Vec::new(),
         capture_intermediates: false,
+        capture_loaded_modules: false,
         dumps: Vec::new(),
         skip_js_render: false,
         publish_in_process_signature: true,

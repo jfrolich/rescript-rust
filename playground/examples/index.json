@@ -81,5 +81,41 @@
       "Units.res",
       "Main.res"
     ]
+  },
+  {
+    "id": "decode",
+    "title": "Generic by result type: JSON decoder",
+    "summary": "Decode.fromJson(json) decodes to the type the call site expects.",
+    "files": [
+      "Decode.res",
+      "Main.res"
+    ]
+  },
+  {
+    "id": "equal",
+    "title": "Generic with two arguments: equality",
+    "summary": "Equal.equal(a, b) is written out field by field for the type of its arguments.",
+    "files": [
+      "Equal.res",
+      "Main.res"
+    ]
+  },
+  {
+    "id": "default",
+    "title": "A value for every type",
+    "summary": "Default.value() builds a value from the expected type alone.",
+    "files": [
+      "Default.res",
+      "Main.res"
+    ]
+  },
+  {
+    "id": "pattern",
+    "title": "Pattern macros and checked literals",
+    "summary": "%Http.status(\"ok\") is a pattern; %Http.color(\"#ff8800\") is checked and converted while compiling.",
+    "files": [
+      "Http.res",
+      "Main.res"
+    ]
   }
 ]

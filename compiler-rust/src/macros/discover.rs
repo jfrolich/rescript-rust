@@ -147,6 +147,15 @@ enum ResultKind {
 struct Signature {
     params: Vec<ParamKind>,
     result: ResultKind,
+    /// Per parameter, and for the result: whether the declared type has a
+    /// type variable, so that its type differs from use to use.
+    open_params: Vec<bool>,
+    open_result: bool,
+}
+
+/// Whether a type of a macro's declared signature has a type variable.
+fn is_open(ctx: &TypeContext, ty: TypeExprRef) -> bool {
+    reflect::print_type(ctx, ty).contains('\'')
 }
 
 fn macro_type_name(ctx: &TypeContext, ty: TypeExprRef) -> Option<(String, Vec<TypeExprRef>)> {
@@ -198,6 +207,8 @@ fn signature(ctx: &TypeContext, ty: TypeExprRef) -> (Signature, Vec<TypeExprRef>
                 Signature {
                     params: types.iter().map(|ty| param_kind(ctx, *ty)).collect(),
                     result: result_kind(ctx, *ret),
+                    open_params: types.iter().map(|ty| is_open(ctx, *ty)).collect(),
+                    open_result: is_open(ctx, *ret),
                 },
                 types,
                 *ret,
@@ -207,6 +218,8 @@ fn signature(ctx: &TypeContext, ty: TypeExprRef) -> (Signature, Vec<TypeExprRef>
             Signature {
                 params: Vec::new(),
                 result: result_kind(ctx, ty),
+                open_params: Vec::new(),
+                open_result: is_open(ctx, ty),
             },
             Vec::new(),
             ty,
@@ -1222,10 +1235,10 @@ fn resolve_generic(tctx: &mut TypeCheckContext<'_>, discovery: &mut Discovery, g
                 let mut code = json!({ "c": param });
                 code["t"] = reflect::type_ref(ctx, &mut table, ty);
                 macro_args.push(code);
-                params.push(format!("{param}: {printed}"));
+                params.push((param, printed.clone()));
                 key_parts.push(printed.clone());
-                // A unit argument says nothing about the instance.
-                if printed != "unit" {
+                // The name says what differs from instance to instance.
+                if generic.signature.open_params.get(index) == Some(&true) {
                     name_parts.push(printed);
                 }
                 if let Some(call) = &generic.call
@@ -1289,7 +1302,7 @@ fn resolve_generic(tctx: &mut TypeCheckContext<'_>, discovery: &mut Discovery, g
                     return;
                 }
             };
-            if name_parts.is_empty() {
+            if generic.signature.open_result || name_parts.is_empty() {
                 name_parts.push(result.clone());
             }
             let name = discovery
@@ -1302,7 +1315,17 @@ fn resolve_generic(tctx: &mut TypeCheckContext<'_>, discovery: &mut Discovery, g
             };
             discovery.add_instance(format!(
                 "{name} = ({}){annotation} => {body}",
-                params.join(", ")
+                params
+                    .iter()
+                    .map(|(param, ty)| {
+                        // A parameter the macro's code does not mention.
+                        let used = body
+                            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '$'))
+                            .any(|word| word == param);
+                        format!("{}: {ty}", if used { param } else { "_" })
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ));
             name
         }
