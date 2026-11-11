@@ -439,6 +439,8 @@ pub(crate) struct Converter<'a> {
     declared_parents: HashMap<P<Symbol>, P<Symbol>>,
     /// The classes whose declaration states the class.
     declared_classes: HashSet<P<Symbol>>,
+    /// For each module, its exported union aliases by their members.
+    alias_index: HashMap<P<Symbol>, HashMap<Vec<usize>, P<Symbol>>>,
     /// [`object_groups`] of the plain object members of a union, by members.
     object_groups: HashMap<Vec<P<Type>>, Option<Vec<Vec<usize>>>>,
 }
@@ -490,6 +492,7 @@ impl<'a> Converter<'a> {
             declared_parents: HashMap::new(),
             declared_classes: HashSet::new(),
             object_groups: HashMap::new(),
+            alias_index: HashMap::new(),
         }
     }
 
@@ -1012,8 +1015,25 @@ impl<'a> Converter<'a> {
             let name = match reserved {
                 Some(name) => name,
                 None => {
-                    let name = self.fresh_type_name(&self.context_name());
+                    // Named after the interface it extends, not after the
+                    // fields that lead to it.
+                    let named_part = ty
+                        .types()
+                        .iter()
+                        .find_map(|part| part.symbol().filter(|symbol| !symbol.name().starts_with("__")));
+                    let base = match named_part {
+                        Some(symbol) => format!("{}Intersection", symbol.name()),
+                        None => self.context_name(),
+                    };
+                    let name = self.fresh_type_name(&base);
                     self.unnamed_in_progress.insert(ty, Some(name.clone()));
+                    // An intersection of object types is a record, which a
+                    // union tells apart before it is declared.
+                    if ty.flags().intersects(TypeFlags::Intersection)
+                        && ty.types().iter().all(|part| part.flags().intersects(TypeFlags::Object))
+                    {
+                        self.state.runtime.insert(name.clone(), Runtime::Object);
+                    }
                     name
                 }
             };
@@ -1647,9 +1667,17 @@ impl<'a> Converter<'a> {
         if members.len() == ty.types().len() {
             return self.convert(ty);
         }
-        let inner = match self.union_members(ty, &members) {
-            Structure::Ty(inner) => inner,
-            Structure::Decl(kind) => self.declare_anonymous(ty, kind),
+        // `parent?: Node` is the union of Node's members and `undefined`.
+        let alias = match members.as_slice() {
+            [_, _, ..] if ty.alias().is_none() => self.alias_of_members(&members),
+            _ => None,
+        };
+        let inner = match alias {
+            Some(alias) => self.symbol_type(alias, &[]),
+            None => match self.union_members(ty, &members) {
+                Structure::Ty(inner) => inner,
+                Structure::Decl(kind) => self.declare_anonymous(ty, kind),
+            },
         };
         if null { Ty::app("Null.t", vec![inner]) } else { inner }
     }
@@ -1700,9 +1728,49 @@ impl<'a> Converter<'a> {
         Structure::Decl(DeclKind::Record(self.fields(&properties, None)))
     }
 
+    /// The type alias without parameters, exported by the module of the
+    /// first member, whose union has exactly these members: `Node` for the
+    /// members of `Node | undefined`, which TypeScript makes a union of its
+    /// own, without the alias.
+    fn alias_of_members(&mut self, members: &[P<Type>]) -> Option<P<Symbol>> {
+        let module = members[0].symbol()?.parent()?;
+        if !self.alias_index.contains_key(&module) {
+            let mut index: HashMap<Vec<usize>, P<Symbol>> = HashMap::new();
+            if let Some(exports) = module.exports() {
+                let mut aliases: Vec<P<Symbol>> = exports
+                    .values()
+                    .into_iter()
+                    .filter(|symbol| symbol.flags().intersects(SymbolFlags::TypeAlias))
+                    .collect();
+                aliases.sort_by_key(|symbol| symbol.declarations().first().map(|node| node.pos()));
+                for alias in aliases {
+                    let declared = self.c.get_declared_type_of_symbol(alias);
+                    if !declared.flags().intersects(TypeFlags::Union)
+                        || declared.alias().is_some_and(|alias| !alias.type_arguments().is_empty())
+                    {
+                        continue;
+                    }
+                    let (alias_members, _, _) = split_nullish(declared);
+                    index.entry(member_key(&alias_members)).or_insert(alias);
+                }
+            }
+            self.alias_index.insert(module, index);
+        }
+        self.alias_index[&module].get(&member_key(members)).copied()
+    }
+
     fn union(&mut self, ty: P<Type>) -> Structure {
         let (members, undefined, null) = split_nullish(ty);
-        let inner = self.union_members(ty, &members);
+        // `Node | undefined` is the union `Node` and `undefined`: unions are
+        // interned by their members, so the members' union is `Node` with its
+        // alias, which names the declaration.
+        let inner = match members.as_slice() {
+            [_, _, ..] if (undefined || null) && ty.alias().is_none() => match self.alias_of_members(&members) {
+                Some(alias) => Structure::Ty(self.symbol_type(alias, &[])),
+                None => self.union_members(ty, &members),
+            },
+            _ => self.union_members(ty, &members),
+        };
         if !undefined && !null {
             return inner;
         }
@@ -2836,4 +2904,11 @@ fn object_groups(shapes: Vec<ObjectShape>) -> Option<Vec<Vec<usize>>> {
     }
     objects_ordered(groups.iter().map(|(_, shape)| shape.clone()).collect())
         .then(|| groups.into_iter().map(|(indices, _)| indices).collect())
+}
+
+/// The members of a union as a key, in no particular order.
+fn member_key(members: &[P<Type>]) -> Vec<usize> {
+    let mut key: Vec<usize> = members.iter().map(|member| member.to_bits()).collect();
+    key.sort_unstable();
+    key
 }
