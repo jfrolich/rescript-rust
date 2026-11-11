@@ -256,6 +256,200 @@ pub fn no_side_effects(a: &LamArena, lam: Lam) -> bool {
     }
 }
 
+/// `Lam_analysis.delay_safe` (lam_analysis.ml:141-193), the Lambda
+/// counterpart of the JS-level `lam_compile_arguments::delay_safe`: `lam` has
+/// no side effects and reads nothing other code can change, so evaluating it
+/// later gives the same value. Fields of records, which may be mutable,
+/// arrays, dictionaries and the variables in `assignable` can change.
+pub fn delay_safe(a: &LamArena, assignable: &ahash::AHashSet<Ident>, lam: Lam) -> bool {
+    match a.node(lam) {
+        Node::Const(_) | Node::Function { .. } | Node::GlobalModule(_) => true,
+        Node::Var(id) => !assignable.contains(&a.ident(id)),
+        Node::If { cond, then_, else_ } => {
+            delay_safe(a, assignable, cond)
+                && delay_safe(a, assignable, then_)
+                && delay_safe(a, assignable, else_)
+        }
+        Node::Prim { args, info } => {
+            a.list(args).iter().all(|x| delay_safe(a, assignable, *x))
+                && match &a.prim_payload(info).primitive {
+                    // They raise unless an operand is a suitable constant.
+                    Primitive::Pdivint
+                    | Primitive::Pmodint
+                    | Primitive::Pdivbigint
+                    | Primitive::Pmodbigint
+                    | Primitive::Ppowbigint => no_side_effects(a, lam),
+                    primitive => primitive_is_delay_safe(primitive),
+                }
+        }
+        Node::Let { .. }
+        | Node::LetRec { .. }
+        | Node::Apply { .. }
+        | Node::Switch { .. }
+        | Node::StringSwitch { .. }
+        | Node::StaticRaise { .. }
+        | Node::StaticCatch { .. }
+        | Node::TryWith { .. }
+        | Node::TryFinally { .. }
+        | Node::Sequence(..)
+        | Node::While(..)
+        | Node::For { .. }
+        | Node::ForOf { .. }
+        | Node::ForAwaitOf { .. }
+        | Node::Assign { .. }
+        | Node::Break
+        | Node::Continue => false,
+    }
+}
+
+/// Whether a primitive other than a division is a value or builds a fresh
+/// block from its operands (lam_analysis.ml:157-193), rather than reading
+/// the heap or having side effects.
+fn primitive_is_delay_safe(primitive: &Primitive) -> bool {
+    match primitive {
+        Primitive::Pfield(_, field) => match field {
+            FieldDbgInfo::Module { .. }
+            | FieldDbgInfo::Tuple
+            | FieldDbgInfo::PolyVarTag
+            | FieldDbgInfo::PolyVarContent
+            | FieldDbgInfo::Extension
+            | FieldDbgInfo::Variant
+            // The tag of a variant block, which is immutable like its fields.
+            | FieldDbgInfo::VariantTag
+            | FieldDbgInfo::Cons => true,
+            FieldDbgInfo::Record { .. }
+            | FieldDbgInfo::RecordInline { .. }
+            | FieldDbgInfo::RecordExtension { .. } => false,
+        },
+        // `%identity` is its operand. A function's arity does not change.
+        Primitive::Pidentity
+        | Primitive::PfnArity
+        | Primitive::Ptypeof
+        | Primitive::Psome
+        | Primitive::PsomeNotNest
+        | Primitive::Pmakeblock(..)
+        | Primitive::PjsObjectCreate(_)
+        | Primitive::Pmakearray
+        | Primitive::Pmakelist
+        | Primitive::Pmakedict
+        | Primitive::Ptemplate(_)
+        | Primitive::Pstringadd
+        | Primitive::Pstringlength
+        | Primitive::Pstringcomp(_)
+        | Primitive::Pstringorder
+        | Primitive::Pstringmin
+        | Primitive::Pstringmax
+        | Primitive::Psequand
+        | Primitive::Psequor
+        | Primitive::Pnot
+        | Primitive::Pboolcomp(_)
+        | Primitive::Pboolorder
+        | Primitive::Pboolmin
+        | Primitive::Pboolmax
+        | Primitive::Pnegint
+        | Primitive::Paddint
+        | Primitive::Psubint
+        | Primitive::Pmulint
+        | Primitive::Ppowint
+        | Primitive::Pandint
+        | Primitive::Porint
+        | Primitive::Pxorint
+        | Primitive::Pnotint
+        | Primitive::Plslint
+        | Primitive::Plsrint
+        | Primitive::Pasrint
+        | Primitive::Pintcomp(_)
+        | Primitive::Pintorder
+        | Primitive::Pintmin
+        | Primitive::Pintmax
+        | Primitive::Pintoffloat
+        | Primitive::Pfloatofint
+        | Primitive::Pnegfloat
+        | Primitive::Pmodfloat
+        | Primitive::Paddfloat
+        | Primitive::Psubfloat
+        | Primitive::Pmulfloat
+        | Primitive::Pdivfloat
+        | Primitive::Ppowfloat
+        | Primitive::Pfloatcomp(_)
+        | Primitive::Pfloatorder
+        | Primitive::Pfloatmin
+        | Primitive::Pfloatmax
+        | Primitive::Pnegbigint
+        | Primitive::Paddbigint
+        | Primitive::Psubbigint
+        | Primitive::Pmulbigint
+        | Primitive::Pandbigint
+        | Primitive::Porbigint
+        | Primitive::Pxorbigint
+        | Primitive::Pnotbigint
+        | Primitive::Plslbigint
+        | Primitive::Pasrbigint
+        | Primitive::Pbigintcomp(_)
+        | Primitive::Pbigintorder
+        | Primitive::Pbigintmin
+        | Primitive::Pbigintmax
+        | Primitive::PhashMixint
+        | Primitive::PhashMixstring
+        | Primitive::PhashFinalmix
+        | Primitive::PisNullUndefined
+        | Primitive::Pjscomp(_)
+        | Primitive::PnullToOpt
+        | Primitive::PnullUndefinedToOpt
+        | Primitive::PisNull
+        | Primitive::PisUndefined
+        | Primitive::PisNotNone
+        | Primitive::PvalFromOption
+        | Primitive::PvalFromOptionNotNest
+        | Primitive::PisPolyVarBlock => true,
+        // Reads of the heap, and primitives with side effects. `%ignore`
+        // stands for OCaml's `Lsequence (arg, unit)`, and an extension slot
+        // test lowers to a read of the exception's id field.
+        Primitive::Pignore
+        | Primitive::PextensionSlotEq
+        | Primitive::PjsApply
+        | Primitive::Pdebugger
+        | Primitive::Psetfield(..)
+        | Primitive::Pduprecord
+        | Primitive::PrecordRest(_)
+        | Primitive::PjsCall(_)
+        | Primitive::Pjsx(_)
+        | Primitive::PjsObjectGet(_)
+        | Primitive::PjsObjectSet(_)
+        | Primitive::Praise
+        | Primitive::Pobjcomp(_)
+        | Primitive::Pobjorder
+        | Primitive::Pobjmin
+        | Primitive::Pobjmax
+        | Primitive::Pobjtag
+        | Primitive::Pobjsize
+        | Primitive::Pstringrefu
+        | Primitive::Pstringrefs
+        | Primitive::Parraylength
+        | Primitive::Parrayrefu
+        | Primitive::Parraysetu
+        | Primitive::Parrayrefs
+        | Primitive::PdictHas
+        | Primitive::Pawait
+        | Primitive::Pimport(_)
+        | Primitive::PinitMod
+        | Primitive::PupdateMod
+        | Primitive::Phash
+        | Primitive::PcreateExtension(_)
+        | Primitive::PrawJsCode(_)
+        | Primitive::PjsFnMethod
+        | Primitive::PtaggedTemplate(_)
+        | Primitive::PdictSpread
+        | Primitive::ParraySpread
+        | Primitive::PlistSpread => false,
+        Primitive::Pdivint
+        | Primitive::Pmodint
+        | Primitive::Pdivbigint
+        | Primitive::Pmodbigint
+        | Primitive::Ppowbigint => false,
+    }
+}
+
 const TOO_BIG_TO_INLINE: i32 = 1000;
 
 /// The size count reached the limit of `size_upto`.

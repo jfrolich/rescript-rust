@@ -48,8 +48,7 @@ use crate::lambda::{LamLoc, LamLocTable};
 use tracing::info_span;
 
 use super::js_exp_make::{
-    block_with_return_expr_iife, int_expr, int_literal, js_expr_no_side_effects, js_seq,
-    remove_pure_subexpression, to_int32,
+    int_expr, int_literal, js_expr_no_side_effects, js_seq, remove_pure_subexpression, to_int32,
 };
 use super::js_stmt_make::strict_single_return_expr;
 #[cfg(test)]
@@ -1285,6 +1284,7 @@ impl LambdaCompiler {
                 a,
                 &mut ident_tbl,
                 &self.id_gen,
+                &self.assignable,
                 &param_map,
                 &f.params,
                 body,
@@ -1498,8 +1498,12 @@ impl LambdaCompiler {
     /// Whether `body` continues a top-level group spine: OCaml compiles each
     /// `Single`/`Recursive`/`Nop` group with a fresh `loop_label_counter`
     /// (`lam_compile_main.ml`), and a binding is top-level exactly when its
-    /// body is another group or the module-export block.
-    fn continues_toplevel_spine(a: &LamArena, body: Lam) -> bool {
+    /// body is another group or the module-export block. Code in a loop, such
+    /// as a `while` condition, is never a top-level group.
+    fn continues_toplevel_spine(&self, a: &LamArena, body: Lam) -> bool {
+        if !self.loop_stack.is_empty() {
+            return false;
+        }
         match a.view(body) {
             View::Let(..) | View::LetRec(..) | View::Sequence(..) => true,
             View::Prim(primitive, _, _) => {
@@ -1609,7 +1613,7 @@ impl LambdaCompiler {
                 // inside an expression keep the surrounding counter (so
                 // the OCaml flow naturally inherits across function bodies
                 // within one Single group).
-                let binding = if Self::continues_toplevel_spine(a, body) {
+                let binding = if self.continues_toplevel_spine(a, body) {
                     self.with_fresh_loop_label_counter(|this| {
                         this.compile_let_binding_output(a, kind, &id, value)
                     })
@@ -1638,7 +1642,7 @@ impl LambdaCompiler {
                 let bindings = letrec_bindings(a, ids, values);
                 // Same as Llet: per-Recursive group, OCaml resets
                 // `loop_label_counter` (`lam_compile_main.ml:77`).
-                let recursive = if Self::continues_toplevel_spine(a, body) {
+                let recursive = if self.continues_toplevel_spine(a, body) {
                     self.with_fresh_loop_label_counter(|this| {
                         this.compile_recursive_bindings_output(a, &bindings)
                     })
@@ -1843,7 +1847,7 @@ impl LambdaCompiler {
                 // compiles its head with a fresh `loop_label_counter`,
                 // matching `Lam_compile_main.compile_lambda` for `Nop`
                 // groups (`lam_compile_main.ml:86`).
-                let head = if Self::continues_toplevel_spine(a, second) {
+                let head = if self.continues_toplevel_spine(a, second) {
                     self.with_fresh_loop_label_counter(|this| this.compile_effect_output(a, first))
                 } else {
                     self.compile_effect_output(a, first)
@@ -1853,18 +1857,35 @@ impl LambdaCompiler {
                 self.append_effect_output(head, tail)
             }
             Node::While(cond, body) => {
-                let cond_compiled = self.compile_expr(a, cond);
-                let cond_expr = block_with_return_expr_iife(
-                    cond_compiled.prelude,
-                    cond_compiled.expr,
-                    &mut self.j,
-                );
+                // lam_compile.ml:1322-1330: a condition that compiles to
+                // statements runs inside the loop (below), so a break or
+                // continue in it for an enclosing loop needs that loop's
+                // label, as in a switch.
+                let cond_compiled = self.with_switch_depth(|this| this.compile_expr(a, cond));
                 // Mirror OCaml's `push_loop` (compiler/core/lam_compile.ml):
                 // a fresh loop frame is pushed before compiling the body;
                 // its label is filled in lazily if a nested switch needs
                 // labeled break/continue.
                 self.push_loop();
-                let body_block = self.compile_block(a, body);
+                let mut body_block = self.compile_block(a, body);
+                // lam_compile.ml:1342-1354: a condition with statements
+                // becomes `while (true) { block; if (!e) break; body }`. It is
+                // still evaluated before each iteration, also after a
+                // continue, and its statements stay in the enclosing
+                // function, where they may await, rather than in a closure
+                // called for every iteration.
+                let cond_expr = if cond_compiled.prelude.is_empty() {
+                    cond_compiled.expr
+                } else {
+                    let negated = JE::not(cond_compiled.expr, &mut self.j);
+                    let exit = JS::break_(None, &mut self.j);
+                    let exit = JS::if_(negated, &[exit], &[], &mut self.j);
+                    let mut block = cond_compiled.prelude;
+                    block.push(exit);
+                    block.append(&mut body_block);
+                    body_block = block;
+                    JE::bool(true, &mut self.j)
+                };
                 let label = self.pop_loop();
                 Compiled {
                     prelude: vec![JS::while_(

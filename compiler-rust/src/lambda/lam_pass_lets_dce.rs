@@ -2,6 +2,7 @@
 //! over the Lambda arena.
 
 use ahash::AHashMap as HashMap;
+use ahash::AHashSet;
 
 use crate::ident::Ident;
 use crate::lambda::arena::{Lam, LamArena, Node};
@@ -78,10 +79,14 @@ type LocalTbl = HashMap<Ident, usize>;
 ///
 /// Needs the arena mutably: applications of inlinable functions are counted
 /// on their beta-reduced form, which is built here.
-pub(crate) fn collect_occurs(a: &mut LamArena, lam: Lam) -> OccurrenceTable {
+pub(crate) fn collect_occurs(
+    a: &mut LamArena,
+    assignable: &AHashSet<Ident>,
+    lam: Lam,
+) -> OccurrenceTable {
     let mut occ = OccurrenceTable::default();
     let mut bv = LocalTbl::new();
-    count(a, &mut occ, &mut bv, lam);
+    count(a, assignable, &mut occ, &mut bv, lam);
     occ
 }
 
@@ -134,23 +139,29 @@ fn inherit_use(occ: &mut OccurrenceTable, bv: &LocalTbl, id: &Ident, bid: &Ident
 }
 
 /// `count` (lam_pass_count.ml:110-201).
-fn count(a: &mut LamArena, occ: &mut OccurrenceTable, bv: &mut LocalTbl, lam: Lam) {
+fn count(
+    a: &mut LamArena,
+    assignable: &AHashSet<Ident>,
+    occ: &mut OccurrenceTable,
+    bv: &mut LocalTbl,
+    lam: Lam,
+) {
     match a.node(lam) {
-        Node::Function { body, .. } => count(a, occ, &mut LocalTbl::new(), body),
+        Node::Function { body, .. } => count(a, assignable, occ, &mut LocalTbl::new(), body),
         Node::For { kids, .. } => {
             let (start, finish, body) = a.for_parts(kids);
-            count(a, occ, bv, start);
-            count(a, occ, bv, finish);
-            count(a, occ, &mut LocalTbl::new(), body);
+            count(a, assignable, occ, bv, start);
+            count(a, assignable, occ, bv, finish);
+            count(a, assignable, occ, &mut LocalTbl::new(), body);
         }
         Node::ForOf { iter, body, .. } | Node::ForAwaitOf { iter, body, .. } => {
-            count(a, occ, bv, iter);
-            count(a, occ, &mut LocalTbl::new(), body);
+            count(a, assignable, occ, bv, iter);
+            count(a, assignable, occ, &mut LocalTbl::new(), body);
         }
         Node::While(c, b) => {
             let mut empty = LocalTbl::new();
-            count(a, occ, &mut empty, c);
-            count(a, occ, &mut empty, b);
+            count(a, assignable, occ, &mut empty, c);
+            count(a, assignable, occ, &mut empty, b);
         }
         Node::Var(v) => add_one_use(occ, bv, &a.ident(v)),
         Node::Let {
@@ -163,20 +174,20 @@ fn count(a: &mut LamArena, occ: &mut OccurrenceTable, bv: &mut LocalTbl, lam: La
             if let Some(w) = a.as_var(value) {
                 // lam_pass_count.ml:126-130
                 let previous = bind_var(occ, bv, &v);
-                count(a, occ, bv, body);
+                count(a, assignable, occ, bv, body);
                 restore_var(bv, &v, previous);
                 inherit_use(occ, bv, &w, &v);
             } else {
                 // lam_pass_count.ml:131-135
                 let previous = bind_var(occ, bv, &v);
-                count(a, occ, bv, body);
+                count(a, assignable, occ, bv, body);
                 restore_var(bv, &v, previous);
                 if matches!(kind, LetKind::Strict) || occ.used(&v) {
-                    count(a, occ, bv, value);
+                    count(a, assignable, occ, bv, value);
                 }
             }
         }
-        Node::Assign { value, .. } => count(a, occ, bv, value),
+        Node::Assign { value, .. } => count(a, assignable, occ, bv, value),
         Node::Apply { func, args, .. } => {
             if let Node::Function { body, info } = a.node(func)
                 && a.params(info).len() == a.list_len(args)
@@ -186,12 +197,12 @@ fn count(a: &mut LamArena, occ: &mut OccurrenceTable, bv: &mut LocalTbl, lam: La
                 let params: smallvec::SmallVec<[Ident; 8]> =
                     a.params(info).iter().copied().collect();
                 let args = a.list_vec(args);
-                let reduced = no_names_beta_reduce(a, &params, body, &args);
-                count(a, occ, bv, reduced);
+                let reduced = no_names_beta_reduce(a, assignable, &params, body, &args);
+                count(a, assignable, occ, bv, reduced);
             } else {
-                count(a, occ, bv, func);
+                count(a, assignable, occ, bv, func);
                 for x in a.list_vec(args) {
-                    count(a, occ, bv, x);
+                    count(a, assignable, occ, bv, x);
                 }
             }
         }
@@ -209,30 +220,35 @@ fn count(a: &mut LamArena, occ: &mut OccurrenceTable, bv: &mut LocalTbl, lam: La
             let cases: smallvec::SmallVec<[Lam; 8]> =
                 acts.consts.iter().chain(acts.blocks).copied().collect();
             if let Some(fail) = fail {
-                count(a, occ, bv, fail);
+                count(a, assignable, occ, bv, fail);
                 if !consts_full && !blocks_full {
-                    count(a, occ, bv, fail);
+                    count(a, assignable, occ, bv, fail);
                 }
             }
-            count(a, occ, bv, scrut);
+            count(a, assignable, occ, bv, scrut);
             for x in cases {
-                count(a, occ, bv, x);
+                count(a, assignable, occ, bv, x);
             }
         }
         _ => {
             let mut kids: smallvec::SmallVec<[Lam; 8]> = smallvec::SmallVec::new();
             a.iter_children(lam, |x| kids.push(x));
             for x in kids {
-                count(a, occ, bv, x);
+                count(a, assignable, occ, bv, x);
             }
         }
     }
 }
 
 /// `Lam_pass_lets_dce.simplify_lets` (lam_pass_lets_dce.ml:216-219).
+///
+/// The count and the rewrite reduce immediately applied functions alike,
+/// keeping the reads of the variables `lam` assigns in call order.
 pub fn simplify_lets(a: &mut LamArena, lam: Lam) -> Lam {
-    let occ = collect_occurs(a, lam);
+    let assignable = crate::lambda::lambda_traverse::arena_assigned_variables(a, lam);
+    let occ = collect_occurs(a, &assignable, lam);
     let mut state = LetsState {
+        assignable: &assignable,
         occ: &occ,
         subst: HashMap::with_capacity(32),
         string_table: HashMap::with_capacity(32),
@@ -242,6 +258,7 @@ pub fn simplify_lets(a: &mut LamArena, lam: Lam) -> Lam {
 
 /// `lets_helper`'s substitution and string tables (lam_pass_lets_dce.ml:15-16).
 struct LetsState<'a> {
+    assignable: &'a AHashSet<Ident>,
     occ: &'a OccurrenceTable,
     subst: HashMap<Ident, Lam>,
     string_table: HashMap<Ident, String>,
@@ -334,7 +351,7 @@ impl LetsState<'_> {
                     let params: smallvec::SmallVec<[Ident; 8]> =
                         a.params(info).iter().copied().collect();
                     let args = a.list_vec(args);
-                    let reduced = no_names_beta_reduce(a, &params, body, &args);
+                    let reduced = no_names_beta_reduce(a, self.assignable, &params, body, &args);
                     return self.simplif(a, reduced);
                 }
                 a.shallow_map(lam, &mut |a, x| self.simplif(a, x))

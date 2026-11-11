@@ -117,8 +117,13 @@ pub fn simplify_alias(
 ) -> Lam {
     let export_idents = std::mem::take(&mut meta.export_idents);
     let id_gen = meta.id_gen.clone();
+    // lam_pass_remove_alias.ml:57-61: inlining keeps the reads of assigned
+    // variables in order (see `lam_beta_reduce`). Only SROA, which runs
+    // later, makes assignments now, so this is usually empty.
+    let assignable = crate::lambda::lambda_traverse::arena_assigned_variables(a, lam);
     let result = Simplifier {
         ident_tbl: &mut meta.ident_tbl,
+        assignable: &assignable,
         export_idents: &export_idents,
         id_gen: &id_gen,
         inline_depth: 0,
@@ -132,6 +137,8 @@ pub fn simplify_alias(
 
 struct Simplifier<'a, 'r> {
     ident_tbl: &'a mut IdentTable,
+    /// The variables the module assigns (`meta.assignable`).
+    assignable: &'a ahash::AHashSet<Ident>,
     export_idents: &'a ahash::AHashSet<Ident>,
     id_gen: &'a crate::context::IdGenerator,
     inline_depth: usize,
@@ -286,7 +293,15 @@ impl Simplifier<'_, '_> {
     }
 
     fn beta(&mut self, a: &mut LamArena, params: &[Ident], body: Lam, args: &[Lam]) -> Lam {
-        propagate_beta_reduce(a, self.ident_tbl, self.id_gen, params, body, args)
+        propagate_beta_reduce(
+            a,
+            self.ident_tbl,
+            self.id_gen,
+            self.assignable,
+            params,
+            body,
+            args,
+        )
     }
 
     fn simpl_apply(
@@ -367,6 +382,7 @@ impl Simplifier<'_, '_> {
                         a,
                         self.ident_tbl,
                         self.id_gen,
+                        self.assignable,
                         &param_map,
                         &params,
                         body,
@@ -385,6 +401,7 @@ impl Simplifier<'_, '_> {
                                 a,
                                 self.ident_tbl,
                                 self.id_gen,
+                                self.assignable,
                                 &param_map,
                                 &params,
                                 body,

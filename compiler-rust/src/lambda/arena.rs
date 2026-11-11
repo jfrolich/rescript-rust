@@ -1543,9 +1543,9 @@ impl LamArena {
                 else {
                     return None;
                 };
-                let eta_args = self.eta_conversion_args(params, inner_args, args)?;
-                let wrap_prim = self.prims[wrap.index()].primitive.clone();
                 let inner_prim = self.prims[inner_info.index()].primitive.clone();
+                let eta_args = self.eta_conversion_args(&inner_prim, params, inner_args, args)?;
+                let wrap_prim = self.prims[wrap.index()].primitive.clone();
                 let inner = self.prim(inner_prim, &eta_args, ap_info.loc);
                 Some(self.prim(wrap_prim, &[inner], ap_info.loc))
             }
@@ -1553,8 +1553,8 @@ impl LamArena {
                 args: inner_args,
                 info: inner_info,
             } => {
-                let eta_args = self.eta_conversion_args(params, inner_args, args)?;
                 let inner_prim = self.prims[inner_info.index()].primitive.clone();
+                let eta_args = self.eta_conversion_args(&inner_prim, params, inner_args, args)?;
                 Some(self.prim(inner_prim, &eta_args, ap_info.loc))
             }
             Node::Sequence(first, second) => {
@@ -1568,8 +1568,8 @@ impl LamArena {
                 if !self.is_const(second) {
                     return None;
                 }
-                let eta_args = self.eta_conversion_args(params, inner_args, args)?;
                 let inner_prim = self.prims[inner_info.index()].primitive.clone();
+                let eta_args = self.eta_conversion_args(&inner_prim, params, inner_args, args)?;
                 let inner = self.prim(inner_prim, &eta_args, ap_info.loc);
                 Some(self.seq(inner, second))
             }
@@ -1577,12 +1577,19 @@ impl LamArena {
         }
     }
 
+    /// `Lambda.is_eta_conversion_exn` behind `evaluates_args_as_call`
+    /// (lambda.ml:760-771): `&&` and `||` may skip their right operand, so the
+    /// call's argument for it must be one whose evaluation does nothing.
     fn eta_conversion_args(
         &self,
+        primitive: &Primitive,
         params: IdentSpan,
         inner_args: LamList,
         outer_args: &[Lam],
     ) -> Option<smallvec::SmallVec<[Lam; 8]>> {
+        if !self.evaluates_args_as_call(primitive, outer_args) {
+            return None;
+        }
         let params = self.idents(params);
         let inner_args = self.list(inner_args);
         if params.len() != inner_args.len() || params.len() != outer_args.len() {
@@ -1599,6 +1606,17 @@ impl LamArena {
                 },
             )
             .collect()
+    }
+
+    /// `Lambda.evaluates_args_as_call` (lambda.ml:760-771): whether
+    /// `primitive` on `args`, the arguments of a call, evaluates them as the
+    /// call does.
+    pub(crate) fn evaluates_args_as_call(&self, primitive: &Primitive, args: &[Lam]) -> bool {
+        !primitive.may_skip_operands()
+            || args
+                .iter()
+                .skip(1)
+                .all(|arg| matches!(self.node(*arg), Node::Const(_) | Node::Var(_)))
     }
 
     /// `Lam.seq`.

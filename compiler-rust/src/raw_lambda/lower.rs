@@ -512,7 +512,7 @@ fn eta_reduce_function_apply(
             let wrap = wrap.clone();
             let (inner, inner_args, _) = a.as_prim(*inner_call)?;
             let inner = inner.clone();
-            let eta_args = eta_conversion_args(a, &params, inner_args, args)?;
+            let eta_args = eta_conversion_args(a, &inner, &params, inner_args, args)?;
             // lambda.ml `apply` builds the result through the folding `prim`.
             let inner = a.prim(inner, &eta_args, ap_info.loc);
             Some(a.prim(wrap, &[inner], ap_info.loc))
@@ -528,7 +528,7 @@ fn eta_reduce_function_apply(
         )) => None,
         Some((inner, inner_args, _)) => {
             let inner = inner.clone();
-            let eta_args = eta_conversion_args(a, &params, inner_args, args)?;
+            let eta_args = eta_conversion_args(a, &inner, &params, inner_args, args)?;
             Some(a.prim(inner, &eta_args, ap_info.loc))
         }
         None => {
@@ -540,19 +540,26 @@ fn eta_reduce_function_apply(
                 return None;
             }
             let inner = inner.clone();
-            let eta_args = eta_conversion_args(a, &params, inner_args, args)?;
+            let eta_args = eta_conversion_args(a, &inner, &params, inner_args, args)?;
             let call = a.prim(inner, &eta_args, ap_info.loc);
             Some(a.seq(call, second))
         }
     }
 }
 
+/// `Lambda.is_eta_conversion_exn` behind `evaluates_args_as_call`
+/// (lambda.ml:760-771): `&&` and `||` may skip their right operand, so the
+/// call's argument for it must be one whose evaluation does nothing.
 fn eta_conversion_args(
     a: &LamArena,
+    primitive: &Primitive,
     params: &[Ident],
     inner_args: &[Lam],
     outer_args: &[Lam],
 ) -> Option<Vec<Lam>> {
+    if !a.evaluates_args_as_call(primitive, outer_args) {
+        return None;
+    }
     if params.len() != inner_args.len() || params.len() != outer_args.len() {
         return None;
     }

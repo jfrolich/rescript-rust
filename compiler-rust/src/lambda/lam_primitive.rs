@@ -399,6 +399,12 @@ pub enum Mutable {
 }
 
 impl Primitive {
+    /// `Lambda.may_skip_operands` (lambda.ml:730-756): `&&` and `||` may
+    /// leave their right operand unevaluated.
+    pub fn may_skip_operands(&self) -> bool {
+        matches!(self, Primitive::Psequand | Primitive::Psequor)
+    }
+
     /// Check if two primitives are approximately equal (for optimization).
     ///
     /// 1:1 port of `Lam_primitive.eq_primitive_approx`
