@@ -705,6 +705,35 @@ pub fn skip_doc_comments(p: &mut Parser<'_>) {
     }
 }
 
+/// Whether the current token is `|` or a run of doc comments followed by `|`.
+/// OCaml `is_bar_or_doc_comment_then_bar` (compiler/syntax/src/res_core.ml).
+pub fn is_bar_or_doc_comment_then_bar(p: &mut Parser<'_>) -> bool {
+    match p.token {
+        Token::Bar => true,
+        Token::DocComment { .. } => p.lookahead(|state| {
+            skip_doc_comments(state);
+            matches!(state.token, Token::Bar)
+        }),
+        _ => false,
+    }
+}
+
+/// The doc comments before the `|` of a constructor or tag, as `res.doc`
+/// attributes in source order. The printer puts every doc comment of a
+/// constructor on its own line before the `|`. OCaml `parse_doc_comments`
+/// (compiler/syntax/src/res_core.ml).
+pub fn parse_doc_comments(p: &mut Parser<'_>) -> Vec<Attribute> {
+    let mut attrs = Vec::new();
+    while let Token::DocComment { loc, content } = &p.token {
+        let loc = *loc;
+        let content = content.clone();
+        p.next();
+        let loc = p.from_location(&loc);
+        attrs.push(doc_comment_to_attribute(p.arena_mut(), loc, content));
+    }
+    attrs
+}
+
 /// Convert a doc comment to a res.doc attribute.
 pub fn doc_comment_to_attribute(
     arena: &mut ParseArena,

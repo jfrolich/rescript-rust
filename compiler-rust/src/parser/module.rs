@@ -11,7 +11,10 @@ use crate::parse_arena::{CoreTypeIdx, LidentIdx, LocIdx, Located, PosIdx, StrIdx
 // Import Location as alias to LocIdx from ast
 use super::ast::Location;
 use super::ast::*;
-use super::core::{error_messages, is_es6_arrow_functor, mknoloc, recover, with_loc};
+use super::core::{
+    error_messages, is_bar_or_doc_comment_then_bar, is_es6_arrow_functor, mknoloc,
+    parse_doc_comments, recover, with_loc,
+};
 use super::diagnostics::DiagnosticCategory;
 use super::expr;
 use super::grammar;
@@ -2586,20 +2589,8 @@ fn parse_constructors(p: &mut Parser<'_>) -> Vec<ConstructorDeclaration> {
     // - Remaining constructors: only if token is `|` or doc-comment-then-`|`
     let mut constructors = vec![];
 
-    // First constructor: optional leading doc comment attribute.
-    let first_doc_attrs = if let Token::DocComment { loc, content } = &p.token {
-        let loc = *loc;
-        let content = content.clone();
-        p.next();
-        let loc = p.from_location(&loc);
-        vec![super::core::doc_comment_to_attribute(
-            p.arena_mut(),
-            loc,
-            content,
-        )]
-    } else {
-        vec![]
-    };
+    // First constructor: the doc comments before its optional leading bar.
+    let first_doc_attrs = parse_doc_comments(p);
 
     // First constructor (optional leading bar).
     let first_start_idx = p.start_pos_idx();
@@ -2631,19 +2622,7 @@ fn parse_constructor_declarations_with_bar(
             break;
         }
 
-        let doc_attrs = if let Token::DocComment { loc, content } = &p.token {
-            let loc = *loc;
-            let content = content.clone();
-            p.next();
-            let loc = p.from_location(&loc);
-            vec![super::core::doc_comment_to_attribute(
-                p.arena_mut(),
-                loc,
-                content,
-            )]
-        } else {
-            vec![]
-        };
+        let doc_attrs = parse_doc_comments(p);
 
         let bar_start_idx = p.start_pos_idx();
         p.next(); // consume `|`
@@ -2658,19 +2637,6 @@ fn parse_constructor_declarations_with_bar(
         }
     }
     p.eat_breadcrumb();
-}
-
-/// Check if current token is `|` or doc-comment followed by `|`.
-/// Matches OCaml's `is_bar_or_doc_comment_then_bar`.
-fn is_bar_or_doc_comment_then_bar(p: &mut Parser<'_>) -> bool {
-    match p.token {
-        Token::Bar => true,
-        Token::DocComment { .. } => p.lookahead(|state| {
-            state.next();
-            matches!(state.token, Token::Bar)
-        }),
-        _ => false,
-    }
 }
 
 /// The `Uident` constructor branch of OCaml `parse_type_equation_or_constr_decl`
@@ -4238,6 +4204,93 @@ mod tests {
     /// Parse source code into a structure with a timeout.
     fn parse_with_timeout(source: &str) -> Structure {
         crate::parser::test_utils::parse_with_timeout(source, parse_structure)
+    }
+
+    /// The formatter prints every doc comment of a constructor, variant
+    /// spread or polymorphic variant tag on its own line before the `|`;
+    /// parsing that output keeps each doc comment, in source order
+    /// (res_core.ml `parse_doc_comments`).
+    #[test]
+    fn several_doc_comments_before_a_bar_parse_and_format_stably() {
+        let source = "type base = A
+type t =
+  | C
+  /** a */
+  /** b */
+  | ...base
+  /** c */
+  /** d */
+  | D
+type p = [
+  | #x
+  /** e */
+  /** f */
+  | #y
+]
+";
+        let mut parser = crate::parser::Parser::new("A.res", source);
+        let structure = parse_structure(&mut parser);
+        assert!(!parser.has_errors(), "{:?}", parser.diagnostics());
+        let arena = parser.into_arena();
+        let doc_texts = |attrs: &Attributes| -> Vec<String> {
+            attrs
+                .iter()
+                .filter(|attr| {
+                    crate::parser::parsetree_viewer::is_doc_comment_attribute(&arena, attr)
+                })
+                .map(|attr| {
+                    let Payload::PStr(items) = &attr.1 else {
+                        unreachable!()
+                    };
+                    let StructureItemDesc::Pstr_eval(eval) = &items[0].pstr_desc else {
+                        unreachable!()
+                    };
+                    let ExpressionDesc::Pexp_constant(c) = &arena.get_expr(eval.0).pexp_desc else {
+                        unreachable!()
+                    };
+                    let Constant::String(s) = c else {
+                        unreachable!()
+                    };
+                    s.source(&arena).to_string()
+                })
+                .collect()
+        };
+        let StructureItemDesc::Pstr_type(inner) = &structure[1].pstr_desc else {
+            panic!("expected a type declaration");
+        };
+        let TypeKind::Ptype_variant(constructors) = &inner.1[0].ptype_kind else {
+            panic!("expected a variant");
+        };
+        let docs: Vec<Vec<String>> = constructors
+            .iter()
+            .map(|c| doc_texts(&c.pcd_attributes))
+            .collect();
+        assert_eq!(
+            docs,
+            vec![
+                vec![],
+                vec![" a ".to_string(), " b ".to_string()],
+                vec![" c ".to_string(), " d ".to_string()]
+            ]
+        );
+        let StructureItemDesc::Pstr_type(inner) = &structure[2].pstr_desc else {
+            panic!("expected a type declaration");
+        };
+        let ptyp = inner.1[0].ptype_manifest.expect("a manifest");
+        let CoreTypeDesc::Ptyp_variant(variant) = &arena.get_core_type(ptyp).ptyp_desc else {
+            panic!("expected a polymorphic variant");
+        };
+        let RowField::Rtag(_, attrs, _, _) = &variant.0[1] else {
+            panic!("expected a tag");
+        };
+        assert_eq!(doc_texts(attrs), vec![" e ".to_string(), " f ".to_string()]);
+
+        let formatted = crate::driver::format_source(source.as_bytes(), "A.res").unwrap();
+        let reformatted = crate::driver::format_source(&formatted, "A.res").unwrap();
+        assert_eq!(
+            String::from_utf8(reformatted).unwrap(),
+            String::from_utf8(formatted).unwrap()
+        );
     }
 
     #[test]

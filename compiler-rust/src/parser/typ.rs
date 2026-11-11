@@ -8,7 +8,9 @@ use std::borrow::Cow;
 use std::collections::HashSet;
 
 use super::ast::*;
-use super::core::{ast_helper, recover, with_loc};
+use super::core::{
+    ast_helper, is_bar_or_doc_comment_then_bar, parse_doc_comments, recover, with_loc,
+};
 use super::diagnostics::DiagnosticCategory;
 use super::grammar;
 use super::grammar::Grammar;
@@ -1955,7 +1957,7 @@ fn parse_tag_specs(p: &mut Parser<'_>) -> Vec<RowField> {
     while matches!(p.token, Token::Bar | Token::DocComment { .. })
         && is_bar_or_doc_comment_then_bar(p)
     {
-        let doc_attrs = parse_optional_doc_comment_attr(p);
+        let doc_attrs = Attributes::from_vec(parse_doc_comments(p));
         p.expect(Token::Bar);
         let tag = parse_tag_spec(p);
         fields.push(prepend_row_field_attrs(p, tag, doc_attrs));
@@ -1980,7 +1982,7 @@ fn parse_tag_spec_first(p: &mut Parser<'_>) -> Vec<RowField> {
     let bar_first = is_bar_or_doc_comment_then_bar(p);
     match p.token {
         Token::Bar | Token::DocComment { .. } if bar_first => {
-            let doc_attrs = parse_optional_doc_comment_attr(p);
+            let doc_attrs = Attributes::from_vec(parse_doc_comments(p));
             p.expect(Token::Bar);
             let tag = parse_tag_spec(p);
             vec![prepend_row_field_attrs(p, tag, doc_attrs)]
@@ -2036,22 +2038,6 @@ fn parse_polymorphic_variant_type_spec_hash(
         tuples.push(parse_polymorphic_variant_type_args(p));
     }
     RowField::Rtag(with_loc(Cow::Owned(ident), loc), attrs, constant, tuples)
-}
-
-/// Check if the current token is `|` or is a doc comment followed by `|`.
-/// This matches OCaml's is_bar_or_doc_comment_then_bar function.
-fn is_bar_or_doc_comment_then_bar(p: &mut Parser<'_>) -> bool {
-    match &p.token {
-        Token::Bar => true,
-        Token::DocComment { .. } => {
-            // Look ahead to see if there's a Bar after the doc comment
-            p.lookahead(|state| {
-                state.next(); // skip doc comment
-                matches!(state.token, Token::Bar)
-            })
-        }
-        _ => false,
-    }
 }
 
 // ============================================================================
