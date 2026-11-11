@@ -5292,6 +5292,14 @@ fn make_constr_matching<'p>(
                     crate::types::ConstructorKind::Ordinary(_)
                         if !cstr.cstr_args.is_empty() && constructor_has_optional_shape(cstr) =>
                     {
+                        // The payload is unwrapped unless its type rules out
+                        // the object that represents `Some` of undefined. The
+                        // patterns can't rule it out: a switch on the payload
+                        // gets a case for each constructor, from the default
+                        // rows of the match for those the patterns don't name,
+                        // and takes its last case without a test, so the
+                        // object can reach any arm (compiler/ml/matching.ml
+                        // `make_constr_matching`).
                         let from_option = match &p.pat_desc {
                             PatternDesc::Tpat_construct(_, _, args_inner)
                                 if args_inner.len() == 1 =>
@@ -5380,7 +5388,6 @@ fn make_constr_matching<'p>(
 /// Divide a pattern matching by constructor.
 /// Equivalent to OCaml's `divide_constructor`.
 fn divide_constructor<'p>(
-    b: &RawArena,
     ctx_ref: &TypeContext,
     pa: &'p PatArena<'p>,
     arena: &LocArena<'_>,
@@ -5395,86 +5402,6 @@ fn divide_constructor<'p>(
         ctx,
         pm,
     )
-    .into_iter()
-    .map(|(cstr, cell)| (cstr, skip_nested_some_check(b, ctx_ref, pa, cell)))
-    .collect()
-}
-
-/// matching.ml `rejects_nested_some`: whether the payload pattern `p` of
-/// `Some` can't match the object that represents `Some` of a value like
-/// `None` or undefined (see `Primitive_option.some`): it doesn't bind the
-/// payload itself, and tests it with a literal comparison or with a type test
-/// that an object fails. An untagged case binds its argument only once its
-/// type test has passed.
-fn rejects_nested_some(ctx_ref: &TypeContext, pa: &PatArena<'_>, p: &Pattern) -> bool {
-    use crate::types::variant_runtime::{Block, BlockType, ConstructorCase, LiteralTag};
-    match &p.pat_desc {
-        PatternDesc::Tpat_any | PatternDesc::Tpat_constant(_) | PatternDesc::Tpat_interval(..) => {
-            true
-        }
-        PatternDesc::Tpat_or(p1, p2, _) => {
-            rejects_nested_some(ctx_ref, pa, pa.pat(*p1))
-                && rejects_nested_some(ctx_ref, pa, pa.pat(*p2))
-        }
-        PatternDesc::Tpat_construct(_, cstr, _) => match cstr.cstr_kind {
-            crate::types::ConstructorKind::Ordinary(reference)
-                if !constructor_has_optional_shape(cstr) =>
-            {
-                match reference.representation(ctx_ref) {
-                    ConstructorCase::Constant(tag) => tag.literal != LiteralTag::Undefined,
-                    ConstructorCase::Block(Block::Untagged {
-                        block_type: BlockType::Object | BlockType::Unknown,
-                        ..
-                    }) => false,
-                    ConstructorCase::Block(Block::Untagged { .. }) => true,
-                    ConstructorCase::Block(Block::Tagged(_)) => false,
-                }
-            }
-            crate::types::ConstructorKind::Ordinary(_)
-            | crate::types::ConstructorKind::Extension(_) => false,
-        },
-        _ => false,
-    }
-}
-
-/// matching.ml `skip_nested_some_check`: a `Some` payload whose patterns all
-/// reject the representation of a nested `Some` is matched as it is, without
-/// checking for that representation.
-fn skip_nested_some_check<'p>(
-    b: &RawArena,
-    ctx_ref: &TypeContext,
-    pa: &PatArena<'p>,
-    mut cell: MatchCell<'p>,
-) -> MatchCell<'p> {
-    let args = cell.pm.args.as_slice();
-    let Some((arg, kind)) = args.first() else {
-        return cell;
-    };
-    let primitive = {
-        let a = b.get();
-        match a.view(*arg) {
-            View::Prim(Primitive::PvalFromOption, [payload], loc) => Some((*payload, loc)),
-            _ => None,
-        }
-    };
-    let Some((payload, loc)) = primitive else {
-        return cell;
-    };
-    if !cell.pm.cases.iter().all(|(pats, _)| match pats.first() {
-            Some(p) => rejects_nested_some(ctx_ref, pa, p),
-            None => false,
-        })
-    {
-        return cell;
-    }
-    let mut new_args = Vec::with_capacity(args.len());
-    new_args.push((
-        b.prim(Primitive::PvalFromOptionNotNest, &[payload], loc),
-        *kind,
-    ));
-    new_args.extend(args[1..].iter().cloned());
-    cell.pm.args = MatchArgs::new(new_args);
-    cell
 }
 
 // --- Variants (lines 1293-1362) ---
@@ -8628,7 +8555,7 @@ fn do_compile_matching<'p>(
                         pa,
                         arena,
                         partial,
-                        &|ctx, pm| divide_constructor(b, ctx_ref, pa, arena, ctx, pm),
+                        &|ctx, pm| divide_constructor(ctx_ref, pa, arena, ctx, pm),
                         &|ctx, def, c_div, nrc| {
                             combine_constructor(
                                 b,

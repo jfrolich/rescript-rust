@@ -1008,3 +1008,28 @@ let f = (A2(y), A1(x), A3(z)) => z == x
         "{message}"
     );
 }
+
+// #9206 (matching.ml `make_constr_matching`): `Some(U)` of a variant with an
+// `@as(undefined)` case is an object that the payload switch can send to any
+// arm, so the payload is unwrapped before it is matched even when every
+// payload pattern would reject the object itself.
+#[test]
+fn some_of_a_variant_with_an_undefined_case_is_unwrapped_before_matching() {
+    let source = r#"
+@unboxed type t = @as(undefined) U | S(string) | I(int)
+
+let g = (x: option<t>) =>
+  switch x {
+  | None => "None"
+  | Some(S(_)) => "SS"
+  | Some(I(_)) => "SI"
+  | Some(_) => "SU"
+  }
+"#;
+    let js = compile_test_source_to_js(source, "option_untagged_undefined.res").unwrap();
+    assert!(
+        js.contains("let tmp = Primitive_option.valFromOption(x);"),
+        "{js}"
+    );
+    assert!(js.contains("if (tmp === undefined) {"), "{js}");
+}
