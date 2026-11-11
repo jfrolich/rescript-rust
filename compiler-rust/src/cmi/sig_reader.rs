@@ -1419,8 +1419,6 @@ pub(crate) fn decode_variant_block_type(value: &OcamlValue) -> crate::types::Var
     }
 }
 
-/// Read field_kind.
-
 #[cfg(test)]
 mod tests {
     use super::*;

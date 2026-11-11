@@ -40,10 +40,15 @@ pub const MODULE_LEVEL: &str = "@";
     Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
 )]
 pub enum Kind {
+    /// A value (`let`, `external`).
     Value,
+    /// A type declaration.
     Type,
+    /// A module.
     Module,
+    /// A module type.
     Modtype,
+    /// An extension constructor (including exceptions).
     Extension,
 }
 
@@ -69,8 +74,11 @@ pub fn item_key(kind: Kind, name: &str) -> String {
 /// [`item_key`] (see [`ItemKey::to_key_string`]); orders as those strings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ItemKey {
+    /// Every item of the unit ([`WHOLE`]).
     Whole,
+    /// The unit's module-level facts ([`MODULE_LEVEL`]).
     ModuleLevel,
+    /// One top-level item, by kind and name.
     Item(Kind, Name),
 }
 
@@ -123,8 +131,11 @@ pub type Segs = SmallVec<[Name; 3]>;
 /// is of `kind`. Empty `segs` is the unit itself, as a whole module.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct UnitRead {
+    /// The unit read.
     pub unit: Name,
+    /// The path below the unit; the first segment is a top-level item.
     pub segs: Segs,
+    /// The namespace of the last segment.
     pub kind: Kind,
 }
 

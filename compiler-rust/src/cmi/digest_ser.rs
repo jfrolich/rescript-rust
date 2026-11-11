@@ -16,6 +16,8 @@ use std::collections::HashMap;
 use std::fmt;
 use std::hash::Hasher;
 
+/// A serialization error. Canonical hashing never produces one; serde's
+/// `Serializer` trait requires the type.
 #[derive(Debug)]
 pub struct Error(String);
 
@@ -43,6 +45,7 @@ pub struct Canonical<'h, H: Hasher> {
 }
 
 impl<'h, H: Hasher> Canonical<'h, H> {
+    /// Start hashing into `hasher`, with no identifiers numbered yet.
     pub fn new(hasher: &'h mut H) -> Self {
         Canonical {
             hasher,
@@ -50,6 +53,8 @@ impl<'h, H: Hasher> Canonical<'h, H> {
         }
     }
 
+    /// Feed `value` into the hasher, numbering its local identifiers after
+    /// those of the values hashed before it.
     pub fn hash<T: Serialize + ?Sized>(&mut self, value: &T) {
         // Hashing cannot fail: every serializer method below succeeds, and
         // identifier stamps are always integers.
@@ -87,6 +92,7 @@ enum Fields {
     Ident,
 }
 
+/// The serializer of a sequence, tuple, map or struct being hashed.
 pub struct Compound<'a, 'h, H: Hasher> {
     ser: &'a mut Canonical<'h, H>,
     fields: Fields,
