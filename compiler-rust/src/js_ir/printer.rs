@@ -3987,7 +3987,7 @@ mod tests {
             &mut j,
         );
 
-        let rendered = print_stmts(&j, &vec![first, second]);
+        let rendered = print_stmts(&j, &[first, second]);
 
         assert!(rendered.contains("for (let i = 0, i_finish = finishExpr(1); i < i_finish; ++i)"));
         assert!(
@@ -4145,13 +4145,8 @@ mod tests {
         let value = JE::var(Ident::create_local("x"), &mut j);
         let expr = JE::bin(
             BinOp::Or,
-            JE::bin(BinOp::EqEqEq, value.clone(), JE::null(&mut j), &mut j),
-            JE::bin(
-                BinOp::EqEqEq,
-                value.clone(),
-                JE::undefined(false, &mut j),
-                &mut j,
-            ),
+            JE::bin(BinOp::EqEqEq, value, JE::null(&mut j), &mut j),
+            JE::bin(BinOp::EqEqEq, value, JE::undefined(false, &mut j), &mut j),
             &mut j,
         );
 
@@ -4164,13 +4159,8 @@ mod tests {
         let value = JE::var(Ident::create_local("x"), &mut j);
         let expr = JE::bin(
             BinOp::Or,
-            JE::bin(
-                BinOp::EqEqEq,
-                value.clone(),
-                JE::undefined(false, &mut j),
-                &mut j,
-            ),
-            JE::bin(BinOp::EqEqEq, value.clone(), JE::null(&mut j), &mut j),
+            JE::bin(BinOp::EqEqEq, value, JE::undefined(false, &mut j), &mut j),
+            JE::bin(BinOp::EqEqEq, value, JE::null(&mut j), &mut j),
             &mut j,
         );
 
@@ -4360,7 +4350,7 @@ mod tests {
         );
 
         assert_eq!(
-            print_stmts(&j, &vec![stmt]),
+            print_stmts(&j, &[stmt]),
             "({\n    high: add(1, 2),\n    low: 3\n  });"
         );
     }
@@ -4533,7 +4523,7 @@ mod tests {
         );
 
         assert_eq!(
-            print_stmts(&j, &vec![stmt]),
+            print_stmts(&j, &[stmt]),
             "if (Primitive_object.equal(e, {\n    RE_EXN_ID: Not_found\n  }) !== false) {\n  return 1;\n}"
         );
     }
@@ -4851,7 +4841,7 @@ mod tests {
             ),
             &mut j,
         );
-        let result = print_stmts(&j, &vec![stmt]);
+        let result = print_stmts(&j, &[stmt]);
         assert!(result.contains("if (true)"));
         assert!(result.contains("return 1;"));
         assert!(result.contains("else"));
@@ -4873,7 +4863,7 @@ mod tests {
             &mut j,
         );
 
-        assert_eq!(print_stmts(&j, &vec![stmt]), "if (true) {\n  return 1;\n}");
+        assert_eq!(print_stmts(&j, &[stmt]), "if (true) {\n  return 1;\n}");
     }
 
     #[test]
@@ -4897,7 +4887,7 @@ mod tests {
             &mut j,
         );
 
-        assert_eq!(print_stmts(&j, &vec![stmt]), "if (true) {\n  return 1;\n}");
+        assert_eq!(print_stmts(&j, &[stmt]), "if (true) {\n  return 1;\n}");
     }
 
     #[test]
@@ -4933,7 +4923,7 @@ mod tests {
         );
 
         assert_eq!(
-            print_stmts(&j, &vec![stmt]),
+            print_stmts(&j, &[stmt]),
             "if (true) {\n  return 1;\n} else if (false) {\n  return 2;\n}"
         );
     }
@@ -5047,7 +5037,7 @@ mod tests {
             &[JS::break_(None, &mut j)],
             &mut j,
         );
-        let result = print_stmts(&j, &vec![stmt]);
+        let result = print_stmts(&j, &[stmt]);
         assert!(result.contains("while (true)"));
         assert!(result.contains("break;"));
     }
@@ -5090,7 +5080,7 @@ mod tests {
                             ),
                             &mut j,
                         ),
-                        hidden.clone(),
+                        hidden,
                     ],
                     &mut j,
                 ),
@@ -5100,7 +5090,7 @@ mod tests {
         );
 
         assert_eq!(
-            print_stmts(&j, &vec![stmt]),
+            print_stmts(&j, &[stmt]),
             "if (true) {\n  log();\n  \n} else {\n  \n}"
         );
     }
@@ -5164,7 +5154,7 @@ mod tests {
             &mut j,
         );
         assert_eq!(
-            print_stmts(&j, &vec![stmt]),
+            print_stmts(&j, &[stmt]),
             "for (let i = 0, i_finish = xs.length; i < i_finish; ++i) {}"
         );
     }
@@ -5181,7 +5171,7 @@ mod tests {
         );
         let stmt = JS::for_range(None, None, finish, i, ForDirection::Upto, &[], &mut j);
         assert_eq!(
-            print_stmts(&j, &vec![stmt]),
+            print_stmts(&j, &[stmt]),
             "for (let i_finish = xs.length; i <= i_finish; ++i) {}"
         );
     }
@@ -5211,7 +5201,7 @@ mod tests {
         );
         let stmt = JS::for_range(None, Some(init), finish, i, ForDirection::Upto, &[], &mut j);
         assert_eq!(
-            print_stmts(&j, &vec![stmt]),
+            print_stmts(&j, &[stmt]),
             "for (let i = (sideEffect(), 0), i_finish = xs.length; i <= i_finish; ++i) {}"
         );
     }
@@ -5258,7 +5248,7 @@ mod tests {
             &mut j,
         );
 
-        let rendered = print_stmts(&j, &vec![stmt_before, stmt_fun, stmt_after]);
+        let rendered = print_stmts(&j, &[stmt_before, stmt_fun, stmt_after]);
         let before_idx = rendered.find("let before").unwrap();
         let fun_idx = rendered.find("function url").unwrap();
         let after_idx = rendered.find("let after").unwrap();
@@ -6059,8 +6049,9 @@ mod tests {
     #[ignore = "stale internal shape expectation; covered by strict lambda/JS parity gates"]
     fn test_print_dead_pure_variable_declaration_is_omitted_like_ocaml() {
         let mut j = JsArena::new();
-        let mut dead_info = IdentInfo::default();
-        dead_info.used_stats = UsedStats::DeadPure;
+        let dead_info = IdentInfo {
+            used_stats: UsedStats::DeadPure,
+        };
 
         let rendered = {
             let v = vec![
@@ -6096,8 +6087,9 @@ mod tests {
     #[test]
     fn test_print_dead_non_pure_variable_declaration_as_expression_like_ocaml() {
         let mut j = JsArena::new();
-        let mut dead_info = IdentInfo::default();
-        dead_info.used_stats = UsedStats::DeadNonPure;
+        let dead_info = IdentInfo {
+            used_stats: UsedStats::DeadNonPure,
+        };
         let effect = Ident::create_local("effect");
 
         let rendered = {
@@ -6125,8 +6117,9 @@ mod tests {
     #[ignore = "stale internal shape expectation; covered by strict lambda/JS parity gates"]
     fn test_print_dead_pure_top_level_function_binding_is_omitted_like_ocaml() {
         let mut j = JsArena::new();
-        let mut dead_info = IdentInfo::default();
-        dead_info.used_stats = UsedStats::DeadPure;
+        let dead_info = IdentInfo {
+            used_stats: UsedStats::DeadPure,
+        };
 
         let rendered = {
             let v = vec![
@@ -6474,7 +6467,7 @@ mod tests {
         );
 
         assert_eq!(
-            print_stmts(&j, &vec![stmt]),
+            print_stmts(&j, &[stmt]),
             "if (true) {\n  return $$Promise.all([\n    p1,\n    p2,\n    p3\n  ]).then;\n}"
         );
     }

@@ -97,8 +97,11 @@ pub enum Kind {
     Runtime,
     /// External JavaScript module
     External {
+        /// The module specifier passed to `import` or `require`.
         name: String,
+        /// Whether the binding is the module's default export.
         default: bool,
+        /// The `with { ... }` attributes of an ES import, if any.
         import_attributes: Option<ImportAttributes>,
     },
 }
@@ -233,10 +236,15 @@ pub struct IdentInfo {
 /// Length object type (for .length property)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum LengthObject {
+    /// An array.
     Array,
+    /// A string.
     String,
+    /// A byte sequence.
     Bytes,
+    /// A function (its `length` is its arity).
     Function,
+    /// A block: a record, tuple or variant payload.
     CamlBlock,
 }
 

@@ -28,6 +28,8 @@ impl JsPrinter<'_> {
         self.print_deps_program_with_directives(program, &[]);
     }
 
+    /// Print a module-level program preceded by `directives` (one per line),
+    /// with the generated-by header.
     pub fn print_deps_program_with_directives(
         &mut self,
         program: &DepsProgram,
@@ -36,6 +38,8 @@ impl JsPrinter<'_> {
         self.print_deps_program_with_directives_and_options(program, directives, true);
     }
 
+    /// Print a module-level program preceded by `directives`; `emit_header`
+    /// controls the generated-by header comment.
     pub fn print_deps_program_with_directives_and_options(
         &mut self,
         program: &DepsProgram,
@@ -309,6 +313,9 @@ pub fn print_deps_program(
     print_deps_program_with_directives(program, module_path_resolver, &[], false, false)
 }
 
+/// Print a module-level program to a string, preceded by `directives` and the
+/// generated-by header. `debug` and `jsx_preserve` mirror `Js_config.debug` and
+/// `Js_config.jsx_preserve`.
 pub fn print_deps_program_with_directives(
     program: &DepsProgram,
     module_path_resolver: Option<&ModulePathResolver>,
@@ -326,6 +333,8 @@ pub fn print_deps_program_with_directives(
     )
 }
 
+/// Like [`print_deps_program_with_directives`], with `emit_header` choosing
+/// whether the generated-by header comment is printed.
 pub fn print_deps_program_with_directives_and_options(
     program: &DepsProgram,
     module_path_resolver: Option<&ModulePathResolver>,
@@ -349,6 +358,7 @@ pub fn print_deps_program_with_directives_and_options(
 /// Print one concrete output target and collect mappings from JS IR source
 /// locations. This is the Rust counterpart of
 /// `Lam_compile_main.dump_deps_program_with_source_map`.
+#[allow(clippy::too_many_arguments)]
 pub fn print_deps_program_with_source_map(
     program: &DepsProgram,
     module_path_resolver: Option<&ModulePathResolver>,

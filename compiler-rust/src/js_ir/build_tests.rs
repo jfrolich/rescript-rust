@@ -456,15 +456,12 @@ fn test_statement_exp_peels_trivial_seq_wrappers_like_ocaml() {
     );
 
     let leading = JS::exp(
-        JE::new(
-            ExprKind::Seq(JE::undefined(false, &mut j), effect.clone()),
-            &mut j,
-        ),
+        JE::new(ExprKind::Seq(JE::undefined(false, &mut j), effect), &mut j),
         &mut j,
     );
     let trailing = JS::exp(
         JE::new(
-            ExprKind::Seq(effect.clone(), JE::number(Number::int(0), &mut j)),
+            ExprKind::Seq(effect, JE::number(Number::int(0), &mut j)),
             &mut j,
         ),
         &mut j,
@@ -521,8 +518,8 @@ fn test_if_statement_merges_nested_then_if_with_shared_else_into_and_condition()
         &[JS::new(
             StmtKind::If(
                 JE::var(inner, &mut j),
-                JS::list(&[JS::exp(truthy.clone(), &mut j)], &mut j),
-                JS::list(&[JS::exp(falsy.clone(), &mut j)], &mut j),
+                JS::list(&[JS::exp(truthy, &mut j)], &mut j),
+                JS::list(&[JS::exp(falsy, &mut j)], &mut j),
             ),
             &mut j,
         )],
@@ -555,12 +552,7 @@ fn test_if_statement_rewrites_await_return_tail() {
     let then_block = vec![effect, JS::return_(JE::undefined(true, &mut j), &mut j)];
     let else_block = vec![JS::return_(JE::undefined(true, &mut j), &mut j)];
 
-    let stmt = JS::if_(
-        cond.clone(),
-        &then_block.clone(),
-        &else_block.clone(),
-        &mut j,
-    );
+    let stmt = JS::if_(cond, &then_block.clone(), &else_block.clone(), &mut j);
     // js_stmt_make.ml:262-269: a single Return else becomes an early guard.
     let mut expected = vec![JS::new(
         StmtKind::If(
@@ -571,7 +563,7 @@ fn test_if_statement_rewrites_await_return_tail() {
         &mut j,
     )];
     expected.extend(then_block);
-    assert_eq!(print_stmts(&j, &vec![stmt]), {
+    assert_eq!(print_stmts(&j, &[stmt]), {
         let v = vec![JS::block(&expected, &mut j)];
         print_stmts(&j, &v)
     },);
@@ -593,7 +585,7 @@ fn test_if_statement_rewrites_sync_return_undefined_tail_to_negative_guard() {
     let then_block = vec![effect, JS::return_(JE::undefined(true, &mut j), &mut j)];
     let else_block = vec![JS::return_(JE::undefined(true, &mut j), &mut j)];
 
-    let stmt = JS::if_(cond.clone(), &then_block, &else_block, &mut j);
+    let stmt = JS::if_(cond, &then_block, &else_block, &mut j);
 
     expect_dump!(
         dump::stmt(&j, stmt),
@@ -630,7 +622,7 @@ fn test_if_statement_rewrites_literal_dispatch_return_tail() {
     );
     let then_block = vec![JS::new(
         StmtKind::If(
-            inner_cond.clone(),
+            inner_cond,
             JS::list(
                 &[JS::new(
                     StmtKind::If(
@@ -662,12 +654,7 @@ fn test_if_statement_rewrites_literal_dispatch_return_tail() {
     )];
     let else_block = vec![JS::return_(JE::undefined(true, &mut j), &mut j)];
 
-    let stmt = JS::if_(
-        dispatch.clone(),
-        &then_block.clone(),
-        &else_block.clone(),
-        &mut j,
-    );
+    let stmt = JS::if_(dispatch, &then_block.clone(), &else_block.clone(), &mut j);
     // js_stmt_make.ml:262-269: a single Return else becomes an early guard.
     let mut expected = vec![JS::new(
         StmtKind::If(
@@ -678,7 +665,7 @@ fn test_if_statement_rewrites_literal_dispatch_return_tail() {
         &mut j,
     )];
     expected.extend(then_block);
-    assert_eq!(print_stmts(&j, &vec![stmt]), {
+    assert_eq!(print_stmts(&j, &[stmt]), {
         let v = vec![JS::block(&expected, &mut j)];
         print_stmts(&j, &v)
     },);
@@ -746,7 +733,7 @@ fn test_if_statement_rewrites_block_wrapped_literal_dispatch_return_tail() {
         StmtKind::Block(JS::list(
             &[JS::new(
                 StmtKind::If(
-                    inner_cond.clone(),
+                    inner_cond,
                     JS::list(
                         &[JS::new(
                             StmtKind::Block(JS::list(&[active_guard], &mut j)),
@@ -764,12 +751,7 @@ fn test_if_statement_rewrites_block_wrapped_literal_dispatch_return_tail() {
     )];
     let else_block = vec![JS::return_(JE::undefined(true, &mut j), &mut j)];
 
-    let stmt = JS::if_(
-        dispatch.clone(),
-        &then_block.clone(),
-        &else_block.clone(),
-        &mut j,
-    );
+    let stmt = JS::if_(dispatch, &then_block.clone(), &else_block.clone(), &mut j);
     // js_stmt_make.ml:262-269: a single Return else becomes an early guard.
     let mut expected = vec![JS::new(
         StmtKind::If(
@@ -780,7 +762,7 @@ fn test_if_statement_rewrites_block_wrapped_literal_dispatch_return_tail() {
         &mut j,
     )];
     expected.extend(then_block);
-    assert_eq!(print_stmts(&j, &vec![stmt]), {
+    assert_eq!(print_stmts(&j, &[stmt]), {
         let v = vec![JS::block(&expected, &mut j)];
         print_stmts(&j, &v)
     },);
@@ -810,12 +792,7 @@ fn test_if_statement_keeps_positive_strict_null_success_return_branch() {
     ];
     let else_block = vec![JS::return_(JE::number(Number::int(1), &mut j), &mut j)];
 
-    let stmt = JS::if_(
-        cond.clone(),
-        &then_block.clone(),
-        &else_block.clone(),
-        &mut j,
-    );
+    let stmt = JS::if_(cond, &then_block.clone(), &else_block.clone(), &mut j);
 
     expect_dump!(
         dump::stmt(&j, stmt),
@@ -842,19 +819,14 @@ fn test_if_statement_rewrites_loose_nullish_else_to_fallthrough() {
         JS::return_(JE::number(Number::int(2), &mut j), &mut j),
     ];
 
-    let stmt = JS::if_(
-        cond.clone(),
-        &then_block.clone(),
-        &else_block.clone(),
-        &mut j,
-    );
+    let stmt = JS::if_(cond, &then_block.clone(), &else_block.clone(), &mut j);
     // js_stmt_make.ml:270-274: terminal then arm precedes the else body.
     let mut expected = vec![JS::new(
         StmtKind::If(cond, JS::list(&then_block, &mut j), j.empty_block()),
         &mut j,
     )];
     expected.extend(else_block);
-    assert_eq!(print_stmts(&j, &vec![stmt]), {
+    assert_eq!(print_stmts(&j, &[stmt]), {
         let v = vec![JS::block(&expected, &mut j)];
         print_stmts(&j, &v)
     },);
@@ -900,12 +872,7 @@ fn test_if_statement_rewrites_loose_nullish_conditional_unit_success_tail_like_o
     ];
     let else_block = vec![JS::return_(JE::undefined(true, &mut j), &mut j)];
 
-    let stmt = JS::if_(
-        cond.clone(),
-        &then_block.clone(),
-        &else_block.clone(),
-        &mut j,
-    );
+    let stmt = JS::if_(cond, &then_block.clone(), &else_block.clone(), &mut j);
 
     expect_dump!(
         dump::stmt(&j, stmt),
@@ -937,12 +904,7 @@ fn test_if_statement_keeps_positive_strict_undefined_unit_success_tail() {
     ];
     let else_block = vec![JS::return_(JE::undefined(true, &mut j), &mut j)];
 
-    let stmt = JS::if_(
-        cond.clone(),
-        &then_block.clone(),
-        &else_block.clone(),
-        &mut j,
-    );
+    let stmt = JS::if_(cond, &then_block.clone(), &else_block.clone(), &mut j);
 
     expect_dump!(
         dump::stmt(&j, stmt),
@@ -974,12 +936,7 @@ fn test_if_statement_rewrites_strict_null_unit_success_tail_like_ocaml() {
     ];
     let else_block = vec![JS::return_(JE::undefined(true, &mut j), &mut j)];
 
-    let stmt = JS::if_(
-        cond.clone(),
-        &then_block.clone(),
-        &else_block.clone(),
-        &mut j,
-    );
+    let stmt = JS::if_(cond, &then_block.clone(), &else_block.clone(), &mut j);
 
     expect_dump!(
         dump::stmt(&j, stmt),
@@ -1011,7 +968,7 @@ fn test_if_statement_rewrites_nullish_guard_when_fallback_returns_guarded_value(
     ];
     let else_block = vec![JS::return_(JE::var(value, &mut j), &mut j)];
 
-    let stmt = JS::if_(cond.clone(), &then_block, &else_block, &mut j);
+    let stmt = JS::if_(cond, &then_block, &else_block, &mut j);
 
     expect_dump!(
         dump::stmt(&j, stmt),
@@ -1115,12 +1072,12 @@ fn test_if_statement_merges_nested_else_if_with_shared_then_into_or_condition() 
     );
     let stmt = JS::if_(
         JE::var(outer, &mut j),
-        &[JS::exp(truthy.clone(), &mut j)],
+        &[JS::exp(truthy, &mut j)],
         &[JS::new(
             StmtKind::If(
                 JE::var(inner, &mut j),
                 JS::list(&[JS::exp(truthy, &mut j)], &mut j),
-                JS::list(&[JS::exp(falsy.clone(), &mut j)], &mut j),
+                JS::list(&[JS::exp(falsy, &mut j)], &mut j),
             ),
             &mut j,
         )],
@@ -1224,21 +1181,21 @@ fn test_js_and_simplifies_boolean_typeof_nullish_guards_like_ocaml() {
 
     expect_dump!(
         {
-            let v = JE::js_and(typeof_boolean.clone(), equals_null, &mut j);
+            let v = JE::js_and(typeof_boolean, equals_null, &mut j);
             dump::expr(&j, v)
         },
         "false"
     );
     expect_dump!(
         {
-            let v = JE::js_and(typeof_boolean.clone(), not_equals_null, &mut j);
+            let v = JE::js_and(typeof_boolean, not_equals_null, &mut j);
             dump::expr(&j, v)
         },
         "EqEqEq(Typeof(value), \"boolean\")"
     );
     expect_dump!(
         {
-            let v = JE::js_and(typeof_boolean.clone(), equals_undefined, &mut j);
+            let v = JE::js_and(typeof_boolean, equals_undefined, &mut j);
             dump::expr(&j, v)
         },
         "false"
@@ -1296,21 +1253,21 @@ fn test_js_and_simplifies_static_array_is_array_nullish_guards_like_ocaml() {
 
     expect_dump!(
         {
-            let v = JE::js_and(array_is_array.clone(), equals_null, &mut j);
+            let v = JE::js_and(array_is_array, equals_null, &mut j);
             dump::expr(&j, v)
         },
         "false"
     );
     expect_dump!(
         {
-            let v = JE::js_and(array_is_array.clone(), not_equals_null, &mut j);
+            let v = JE::js_and(array_is_array, not_equals_null, &mut j);
             dump::expr(&j, v)
         },
         "Call[Na](Array.isArray; value)"
     );
     expect_dump!(
         {
-            let v = JE::js_and(array_is_array.clone(), equals_undefined, &mut j);
+            let v = JE::js_and(array_is_array, equals_undefined, &mut j);
             dump::expr(&j, v)
         },
         "false"
@@ -1336,7 +1293,7 @@ fn test_js_and_keeps_duplicate_effectful_calls_like_ocaml() {
 
     expect_dump!(
         {
-            let v = JE::js_and(call.clone(), call, &mut j);
+            let v = JE::js_and(call, call, &mut j);
             dump::expr(&j, v)
         },
         "And(Call[Na](equal; 1), Call[Na](equal; 1))"
@@ -1355,7 +1312,7 @@ fn test_js_or_keeps_duplicate_effectful_calls_like_ocaml() {
 
     expect_dump!(
         {
-            let v = JE::js_or(call.clone(), call, &mut j);
+            let v = JE::js_or(call, call, &mut j);
             dump::expr(&j, v)
         },
         "Or(Call[Na](equal; 1), Call[Na](equal; 1))"
@@ -1374,7 +1331,7 @@ fn test_cond_keeps_duplicate_effectful_calls_instead_of_collapsing_to_and() {
 
     expect_dump!(
         {
-            let v = JE::cond(call.clone(), call, JE::bool(false, &mut j), &mut j);
+            let v = JE::cond(call, call, JE::bool(false, &mut j), &mut j);
             dump::expr(&j, v)
         },
         "Cond(Call[Na](equal; 1), Call[Na](equal; 1), false)"
@@ -1428,7 +1385,7 @@ fn test_js_and_simplifies_object_guard_with_static_array_exclusion_like_ocaml() 
         &mut j,
     );
 
-    let simplified = JE::js_and(not_equals_undefined, object_guard.clone(), &mut j);
+    let simplified = JE::js_and(not_equals_undefined, object_guard, &mut j);
     let needle = JE::bin(
         BinOp::NotEqEq,
         JE::var(value, &mut j),
@@ -1459,11 +1416,7 @@ fn test_js_and_simplifies_or_literal_membership_against_same_literal_like_ocaml(
         &mut j,
     );
 
-    let simplified = JE::js_and(
-        JE::bin(BinOp::Or, space.clone(), letter_a, &mut j),
-        space.clone(),
-        &mut j,
-    );
+    let simplified = JE::js_and(JE::bin(BinOp::Or, space, letter_a, &mut j), space, &mut j);
 
     expect_dump!(dump::expr(&j, simplified), "EqEqEq(key, \"space\")");
 }
@@ -1492,7 +1445,7 @@ fn test_js_or_absorbs_large_conjunction_membership_against_same_literal_like_oca
 
     let simplified = JE::bin(
         BinOp::Or,
-        space.clone(),
+        space,
         JE::raw_bin(BinOp::And, rest, space, &mut j),
         &mut j,
     );
