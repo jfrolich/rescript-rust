@@ -1665,8 +1665,15 @@ let concurrent_request_isolation_tests _context =
 
 let concurrent_async_context_tests _context =
   with_temp_dir "rewatch-driver-async-domains-" (fun root ->
-      let runtime = Runtime_package.get_path () in
-      let runtime_ocaml = Filename.concat runtime "lib/ocaml" in
+      (* `await` is typed through the runtime's Primitive_promise. Compile
+         it here from the runtime source, so the test does not depend on a
+         build of the runtime package having written its lib/ocaml. *)
+      let runtime_ocaml = Filename.concat root "runtime" in
+      ensure_dir runtime_ocaml;
+      write runtime_ocaml "Primitive_promise.res"
+        (read_file
+           (Filename.concat (Runtime_package.get_path ()) "Primitive_promise.res"));
+      expect_code 0 (snd (run runtime_ocaml "Primitive_promise.res"));
       let async_source =
         "external get: unit => promise<int> = \"get\"\n"
         ^ (List.init 80 (fun index ->
