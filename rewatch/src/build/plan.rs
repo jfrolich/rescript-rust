@@ -496,3 +496,32 @@ fn source_step(
         copies,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn reference_spice_resolves_package_relative_executable() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("rescript.json"),
+            r#"{"name":"example","sources":[]}"#,
+        ).unwrap();
+        let package = root.path().join("node_modules/@jfrolich/ppx-spice");
+        std::fs::create_dir_all(&package).unwrap();
+        std::fs::write(
+            package.join("rescript.json"),
+            r#"{"name":"@jfrolich/ppx-spice","sources":[],"ppx-flags":["./ppx"]}"#,
+        ).unwrap();
+        std::fs::write(package.join("ppx"), "reference executable").unwrap();
+        let context = super::ProjectContext::new(root.path()).unwrap();
+        let config = crate::config::Config::new(&package.join("rescript.json")).unwrap();
+        let mut args = vec!["-bs-builtin-spice-ppx".to_string()];
+        super::reference_spice_args(&mut args, &config, &context, &[]).unwrap();
+        assert_eq!(args.len(), 2);
+        assert_eq!(args[0], "-ppx");
+        assert_eq!(
+            std::path::Path::new(&args[1]).canonicalize().unwrap(),
+            package.join("ppx").canonicalize().unwrap(),
+        );
+    }
+}

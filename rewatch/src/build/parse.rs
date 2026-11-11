@@ -258,7 +258,7 @@ pub fn parser_args(
     let root_config = project_context.get_root_config();
     let file = &filename;
     let ast_path = helpers::get_ast_path(file);
-    let ppx_flags = if filter_ppx_flags(&package_config.ppx_flags, contents)
+    let ppx_flags = if filter_ppx_flags(package_config, contents)
         .is_some_and(|flags| !flags.is_empty())
     {
         vec!["-bs-builtin-spice-ppx".to_string()]
@@ -357,7 +357,7 @@ fn generate_ast(
     // Configuration validation has already rejected all non-spice rewriters.
     // The built-in mapper needs neither executable resolution nor a v0 AST.
     let contents = std::str::from_utf8(&source_bytes).unwrap_or_default();
-    let spice_ppx = filter_ppx_flags(&package.config.ppx_flags, contents)
+    let spice_ppx = filter_ppx_flags(&package.config, contents)
         .is_some_and(|flags| !flags.is_empty());
     let frontend_options = {
         let root_config = build_state.project_context.get_root_config();
@@ -470,8 +470,8 @@ pub(crate) fn reparse_arena_with_locations(
     }
 }
 
-fn should_run_ppx(flag: &str, contents: &str) -> bool {
-    flag.contains("spice") && contents.contains("@spice")
+fn should_run_ppx(config: &Config, flag: &str, contents: &str) -> bool {
+    config.is_spice_ppx(flag) && contents.contains("@spice")
 }
 
 fn open_dependencies_from_bsc_flags(flags: &[String]) -> Vec<String> {
@@ -617,18 +617,17 @@ fn parse_source(
 }
 
 fn filter_ppx_flags(
-    ppx_flags: &Option<Vec<OneOrMore<String>>>,
+    config: &Config,
     contents: &str,
 ) -> Option<Vec<OneOrMore<String>>> {
-    // get the environment variable "BISECT_ENABLE" if it exists set the filter to "bisect"
-    ppx_flags.as_ref().map(|flags| {
+    config.ppx_flags.as_ref().map(|flags| {
         flags
             .iter()
             .filter(|flag| match flag {
-                config::OneOrMore::Single(str) => should_run_ppx(str, contents),
+                config::OneOrMore::Single(str) => should_run_ppx(config, str, contents),
                 config::OneOrMore::Multiple(str) => str
                     .first()
-                    .is_some_and(|command| should_run_ppx(command, contents)),
+                    .is_some_and(|command| should_run_ppx(config, command, contents)),
             })
             .map(|x| x.to_owned())
             .collect::<Vec<OneOrMore<String>>>()
@@ -718,7 +717,7 @@ mod tests {
     use super::{
         filter_ppx_flags, open_dependencies_from_bsc_flags, rust_parser_let_unwrap_enabled, should_run_ppx,
     };
-    use crate::config::{Config, OneOrMore};
+    use crate::config::Config;
 
     #[test]
     fn location_free_frontend_keeps_ast_and_dependencies_for_compilation() {
@@ -919,16 +918,25 @@ mod tests {
 
     #[test]
     fn spice_only_runs_for_matching_sources() {
-        assert!(!should_run_ppx("ppx-spice", "let value = 1"));
-        assert!(should_run_ppx("ppx-spice", "@spice type t = int"));
+        let config = Config::new_from_json_string(r#"{"name":"example","sources":[]}"#).unwrap();
+        assert!(!should_run_ppx(&config, "ppx-spice", "let value = 1"));
+        assert!(should_run_ppx(&config, "ppx-spice", "@spice type t = int"));
+    }
+
+    #[test]
+    fn relative_spice_command_enables_builtin_mapper() {
+        let config = Config::new_from_json_string(
+            r#"{"name":"@jfrolich/ppx-spice","sources":[],"ppx-flags":["./ppx"]}"#,
+        ).unwrap();
+        assert!(filter_ppx_flags(&config, "let value = 1").unwrap().is_empty());
+        assert_eq!(filter_ppx_flags(&config, "@spice type t = int").unwrap().len(), 1);
     }
 
     #[test]
     fn empty_ppx_commands_are_ignored() {
-        let flags = Some(vec![
-            OneOrMore::Multiple(vec![]),
-            OneOrMore::Single("ppx-spice".to_string()),
-        ]);
-        assert_eq!(filter_ppx_flags(&flags, "@spice").unwrap().len(), 1);
+        let config = Config::new_from_json_string(
+            r#"{"name":"example","sources":[],"ppx-flags":[[],"ppx-spice"]}"#,
+        ).unwrap();
+        assert_eq!(filter_ppx_flags(&config, "@spice").unwrap().len(), 1);
     }
 }

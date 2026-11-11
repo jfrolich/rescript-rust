@@ -669,6 +669,16 @@ impl Config {
         Ok(config)
     }
 
+    /// Recognize spice from its package-relative spec, without resolving an executable.
+    pub(crate) fn is_spice_ppx(&self, command: &str) -> bool {
+        let spec = if command.starts_with('.') {
+            std::borrow::Cow::Owned(format!("{}/{}", self.name, command))
+        } else {
+            std::borrow::Cow::Borrowed(command)
+        };
+        spec.contains("spice")
+    }
+
     /// Reject unsupported rewriters before source discovery or marker filtering.
     fn validate_ppx_flags(&self) -> Result<()> {
         for flag in self.ppx_flags.iter().flatten() {
@@ -677,7 +687,7 @@ impl Config {
                 OneOrMore::Multiple(parts) => parts.first(),
             };
             if let Some(command) = command
-                && !command.contains("spice")
+                && !self.is_spice_ppx(command)
             {
                 return Err(anyhow!(
                     "Package '{}' has unsupported ppx-flags entry '{}': external PPXs are no longer supported; only built-in spice derives are supported",
@@ -1389,6 +1399,21 @@ pub mod tests {
             r#"{"name":"example","sources":[],"ppx-flags":["ppx-spice",["./spice", "--arg"]]}"#,
         ).unwrap();
         config.validate_ppx_flags().unwrap();
+    }
+
+    #[test]
+    fn relative_spice_command_validates_only_in_spice_package() {
+        for (name, accepted) in [("@jfrolich/ppx-spice", true), ("example", false)] {
+            let json = format!(r#"{{"name":"{name}","sources":[],"ppx-flags":["./ppx"]}}"#);
+            let config = super::Config::new_from_json_string(&json).unwrap();
+            let result = config.validate_ppx_flags();
+            if accepted {
+                result.unwrap();
+            } else {
+                assert_eq!(result.unwrap_err().to_string(),
+                    "Package 'example' has unsupported ppx-flags entry './ppx': external PPXs are no longer supported; only built-in spice derives are supported");
+            }
+        }
     }
 
     use super::*;
