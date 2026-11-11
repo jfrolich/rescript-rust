@@ -15582,16 +15582,17 @@ fn type_record(
         let labels_missing: Vec<String> = match record_family.as_ref() {
             // `written_labels` and `labels_missing` (typecore.ml:387-391,
             // 3081-3097): the mandatory labels the literal does not write, in
-            // `lbl_all` order.
+            // `lbl_all` order. A record whose labels are all optional, like
+            // the hundreds of host element props of JsxDOM.domProps, cannot
+            // miss one, so it skips the per-label `written` table.
+            Some(family) if family.iter().all(|label| label.lbl_optional) => Vec::new(),
             Some(family) => {
                 let written = record_written_labels(family.len(), &explicit_entries);
-                {
-                    family
-                        .iter()
-                        .filter(|label| !written[label.lbl_pos as usize] && !label.lbl_optional)
-                        .map(|label| label.lbl_name.to_string())
-                        .collect()
-                }
+                family
+                    .iter()
+                    .filter(|label| !written[label.lbl_pos as usize] && !label.lbl_optional)
+                    .map(|label| label.lbl_name.to_string())
+                    .collect()
             }
             // OCaml typecore.ml:3060-3080: `{}` of the expected concrete
             // record misses its mandatory fields; with none it is

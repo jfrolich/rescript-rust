@@ -11743,6 +11743,34 @@ mod tests {
         assert!(warnings.contains("Warning number 21"), "{warnings}");
     }
 
+    /// typecore.ml's `labels_missing`: a literal of a record whose labels
+    /// are all optional misses none, and one with required labels still
+    /// lists every required label it leaves out, in declaration order.
+    #[test]
+    fn record_literal_missing_labels_with_optional_labels() {
+        let compile = |source: &str| {
+            let mut options = super::CompilerOptions::default();
+            options.nopervasives = true;
+            super::compile_source_in_process(
+                source,
+                "Missing.res",
+                "Missing",
+                &options,
+                &crate::cmi::persistent_env::ModuleRegistry::new(),
+                false,
+                None,
+            )
+            .map(|result| result.js_output)
+            .map_err(|err| format!("{err:#}"))
+        };
+        compile("type o = {a?: int, b?: string}\nlet r: o = {a: 1}\n").expect("compiles");
+        let err = compile(
+            "type t = {a?: int, b: string, c?: bool, mutable d: int}\nlet r: t = {a: 1}\n",
+        )
+        .expect_err("misses b and d");
+        assert!(err.contains("Some required record fields are missing: b d."), "{err}");
+    }
+
     /// GenTypeMain.ml:93-107's walk over a parsed interface whose `"BAD"`
     /// strings are replaced with a PPX's undecodable template `Fo\xo`:
     /// `Ok(ignore_interface)`, or the offset of the template it raised at.
