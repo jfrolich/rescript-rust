@@ -6,6 +6,7 @@
 
 use super::key_encode::{KeyEncode, KeyOut};
 use crate::fast_hash::AHashMap as HashMap;
+use crate::raw_lambda::builder::{RawLambdaBuilder, RawLambdaRead};
 use crate::types::path::PathView;
 use std::borrow::{Borrow, Cow};
 use std::collections::BTreeSet;
@@ -29,7 +30,7 @@ use crate::raw_lambda::typeopt::{
     constructor_has_optional_shape, constructor_payload_is_unboxed, type_cannot_contain_undefined,
     type_cannot_contain_undefined_no_env,
 };
-use crate::raw_lambda::{RawArena, RawLambda, RawLambdaSwitch};
+use crate::raw_lambda::{RawLambda, RawLambdaSwitch};
 use crate::types::asttypes::MutableFlag;
 use crate::types::btype;
 use crate::types::context::TypeContext;
@@ -93,7 +94,7 @@ impl From<RawLambda> for CaseAction {
 /// (`compiler/ml/matching.ml:381-386`). OCaml makes a fresh variable per
 /// comparison so no real action can mention it; a negative stamp is never
 /// allocated, which gives the same guarantee and lets keys be cached.
-fn fallthrough_stand_in(b: &RawArena) -> RawLambda {
+fn fallthrough_stand_in<B: RawLambdaBuilder>(b: &B) -> RawLambda {
     b.var(Ident::new(
         "fallthrough",
         -1,
@@ -134,7 +135,7 @@ impl MatchAction {
         }))
     }
 
-    fn bind(self, b: &RawArena, kind: LetKind, id: Ident, arg: RawLambda) -> Self {
+    fn bind<B: RawLambdaBuilder>(self, b: &B, kind: LetKind, id: Ident, arg: RawLambda) -> Self {
         // OCaml `compiler/ml/matching.ml:556-566` calls
         // `Lambda.bind Alias id arg action`, and `compiler/ml/lambda.ml:560-565`
         // shares the immutable action below the new `Llet`. The `Llet` is
@@ -153,7 +154,7 @@ impl MatchAction {
 
     /// `Matching.action_body_with ~fail` (`compiler/ml/matching.ml:370-376`):
     /// the guard falls through to `fail`, under the action's bindings.
-    fn body_with(&self, b: &RawArena, fail: RawLambda) -> RawLambda {
+    fn body_with<B: RawLambdaBuilder>(&self, b: &B, fail: RawLambda) -> RawLambda {
         match &self.0.kind {
             MatchActionKind::Case { guard: None, body } => *body,
             MatchActionKind::Case {
@@ -173,7 +174,7 @@ impl MatchAction {
     }
 
     /// An unguarded action's term (`action_body_with ~fail:lambda_unit`).
-    fn to_raw(&self, b: &RawArena) -> RawLambda {
+    fn to_raw<B: RawLambdaBuilder>(&self, b: &B) -> RawLambda {
         if let MatchActionKind::Case { guard: None, body } = &self.0.kind {
             return *body;
         }
@@ -181,7 +182,7 @@ impl MatchAction {
         self.body_with(b, unit)
     }
 
-    fn normalized_key(&self, b: &RawArena) -> Option<&str> {
+    fn normalized_key<B: RawLambdaBuilder>(&self, b: &B) -> Option<&str> {
         // OCaml `compiler/ml/lambda.ml:432-466` computes `Lambda.make_key`, and
         // `compiler/ml/matching.ml:489-500,708-846` compares those pure keys while
         // shuffling the same immutable actions through match matrices. Cache the
@@ -201,7 +202,7 @@ impl MatchAction {
     }
 
     /// `Matching.action_free_variables` (`compiler/ml/matching.ml:388-397`).
-    fn free_variables(&self, a: &LamArena) -> IdentSet {
+    fn free_variables(&self, a: &impl RawLambdaRead) -> IdentSet {
         match &self.0.kind {
             MatchActionKind::Case { guard, body } => {
                 let mut fv = raw_lambda_free_variables(a, *body);
@@ -2013,10 +2014,10 @@ fn charge_logical_record_fields(
 /// Returns None if the lambda is too complex (functions, letrec, loops, etc.)
 ///
 /// Equivalent to OCaml's `Lambda.make_key`.
-fn make_key(b: &RawArena, e: RawLambda) -> Option<RawLambda> {
+fn make_key<B: RawLambdaBuilder>(b: &B, e: RawLambda) -> Option<RawLambda> {
     type KeyEnv = Vec<(Ident, RawLambda)>;
-    fn tr_rec(
-        b: &RawArena,
+    fn tr_rec<B: RawLambdaBuilder>(
+        b: &B,
         env: &mut KeyEnv,
         e: RawLambda,
         count: &mut i32,
@@ -2181,8 +2182,8 @@ fn make_key(b: &RawArena, e: RawLambda) -> Option<RawLambda> {
         }
     }
 
-    fn tr_recs(
-        b: &RawArena,
+    fn tr_recs<B: RawLambdaBuilder>(
+        b: &B,
         env: &mut KeyEnv,
         es: &[RawLambda],
         count: &mut i32,
@@ -2202,10 +2203,10 @@ fn make_key(b: &RawArena, e: RawLambda) -> Option<RawLambda> {
 
 /// Convert a RawLambda to a string key for comparison purposes.
 /// Returns None if the lambda cannot be normalized.
-fn make_key_string(b: &RawArena, e: RawLambda) -> Option<String> {
+fn make_key_string<B: RawLambdaBuilder>(b: &B, e: RawLambda) -> Option<String> {
     let mut writer = MakeKeyWriter::new(b);
     let mut out = KeyOut::new(128);
-    writer.write_raw(&b.get(), e, &mut out)?;
+    writer.write_raw(&*b.get(), e, &mut out)?;
     Some(out.buf)
 }
 
@@ -2217,7 +2218,7 @@ fn make_key_string(b: &RawArena, e: RawLambda) -> Option<String> {
 /// action lets as `MatchActionKind::Bind` to preserve that sharing; this
 /// traverses those wrappers as if they were `Llet` nodes while keeping the
 /// `max_raw = 32` cutoff from `lambda.ml:434,438-440`.
-fn make_key_string_action(b: &RawArena, action: &MatchAction) -> Option<String> {
+fn make_key_string_action<B: RawLambdaBuilder>(b: &B, action: &MatchAction) -> Option<String> {
     let mut writer = MakeKeyWriter::new(b);
     let mut out = KeyOut::new(128);
     writer.write_action(action, &mut out)?;
@@ -2227,10 +2228,10 @@ fn make_key_string_action(b: &RawArena, action: &MatchAction) -> Option<String> 
 /// Whether `e`'s `Lambda.make_key` exists and equals `key`. Writes the key
 /// against `key` and stops at the first byte that differs, so unequal
 /// actions are rejected without normalizing them in full.
-fn make_key_equals(b: &RawArena, e: RawLambda, key: &str) -> bool {
+fn make_key_equals<B: RawLambdaBuilder>(b: &B, e: RawLambda, key: &str) -> bool {
     let mut writer = MakeKeyWriter::new(b);
     let mut out = KeyOut::expecting(key);
-    writer.write_raw(&b.get(), e, &mut out).is_some() && out.matches_all()
+    writer.write_raw(&*b.get(), e, &mut out).is_some() && out.matches_all()
 }
 
 enum KeyBody<'a> {
@@ -2241,15 +2242,15 @@ enum KeyBody<'a> {
 /// Writes `Lambda.make_key`. Reads hold the arena only inside
 /// [`MakeKeyWriter::write_raw_after_count`], which never reaches an action;
 /// a guarded action's key term is built in [`MakeKeyWriter::write_action`].
-struct MakeKeyWriter<'b> {
-    b: &'b RawArena,
+struct MakeKeyWriter<'b, B: RawLambdaBuilder> {
+    b: &'b B,
     count: i32,
     next_id: i32,
     env: Vec<(Ident, String)>,
 }
 
-impl<'b> MakeKeyWriter<'b> {
-    fn new(b: &'b RawArena) -> Self {
+impl<'b, B: RawLambdaBuilder> MakeKeyWriter<'b, B> {
+    fn new(b: &'b B) -> Self {
         Self {
             b,
             count: 0,
@@ -2258,7 +2259,7 @@ impl<'b> MakeKeyWriter<'b> {
         }
     }
 
-    fn write_raw(&mut self, a: &LamArena, e: RawLambda, out: &mut KeyOut<'_>) -> Option<()> {
+    fn write_raw(&mut self, a: &B::Reader, e: RawLambda, out: &mut KeyOut<'_>) -> Option<()> {
         self.count += 1;
         if self.count > MAX_RAW || out.diverged {
             return None;
@@ -2273,13 +2274,13 @@ impl<'b> MakeKeyWriter<'b> {
         }
         match &action.0.kind {
             MatchActionKind::Case { guard: None, body } => {
-                self.write_raw_after_count(&self.b.get(), *body, out)
+                self.write_raw_after_count(&*self.b.get(), *body, out)
             }
             // `Matching.action_key_term` (`compiler/ml/matching.ml:381-386`).
             MatchActionKind::Case { guard: Some(_), .. } => {
                 let fallthrough = fallthrough_stand_in(self.b);
                 let term = action.body_with(self.b, fallthrough);
-                self.write_raw_after_count(&self.b.get(), term, out)
+                self.write_raw_after_count(&*self.b.get(), term, out)
             }
             MatchActionKind::Bind {
                 kind,
@@ -2292,14 +2293,14 @@ impl<'b> MakeKeyWriter<'b> {
 
     fn write_body(
         &mut self,
-        a: Option<&LamArena>,
+        a: Option<&B::Reader>,
         body: KeyBody<'_>,
         out: &mut KeyOut<'_>,
     ) -> Option<()> {
         match body {
             KeyBody::Raw(raw) => match a {
                 Some(a) => self.write_raw(a, raw, out),
-                None => self.write_raw(&self.b.get(), raw, out),
+                None => self.write_raw(&*self.b.get(), raw, out),
             },
             KeyBody::Action(action) => self.write_action(action, out),
         }
@@ -2307,7 +2308,7 @@ impl<'b> MakeKeyWriter<'b> {
 
     fn write_raw_after_count(
         &mut self,
-        a: &LamArena,
+        a: &B::Reader,
         e: RawLambda,
         out: &mut KeyOut<'_>,
     ) -> Option<()> {
@@ -2486,7 +2487,7 @@ impl<'b> MakeKeyWriter<'b> {
     /// an action's binding (whose body may need building).
     fn write_let(
         &mut self,
-        a: Option<&LamArena>,
+        a: Option<&B::Reader>,
         kind: LetKind,
         x: &Ident,
         ex: RawLambda,
@@ -2496,7 +2497,7 @@ impl<'b> MakeKeyWriter<'b> {
         if kind == LetKind::Alias {
             let ex_key = match a {
                 Some(a) => self.raw_to_string(a, ex)?,
-                None => self.raw_to_string(&self.b.get(), ex)?,
+                None => self.raw_to_string(&*self.b.get(), ex)?,
             };
             self.env.push((*x, ex_key));
             let result = self.write_body(a, body, out);
@@ -2506,12 +2507,12 @@ impl<'b> MakeKeyWriter<'b> {
 
         let same_var = match a {
             Some(a) => same_var_body(a, &body, x),
-            None => same_var_body(&self.b.get(), &body, x),
+            None => same_var_body(&*self.b.get(), &body, x),
         };
         if matches!(kind, LetKind::Strict | LetKind::StrictOpt) && same_var {
             return match a {
                 Some(a) => self.write_raw(a, ex, out),
-                None => self.write_raw(&self.b.get(), ex, out),
+                None => self.write_raw(&*self.b.get(), ex, out),
             };
         }
 
@@ -2524,7 +2525,7 @@ impl<'b> MakeKeyWriter<'b> {
         out.push(',');
         match a {
             Some(a) => self.write_raw(a, ex, out)?,
-            None => self.write_raw(&self.b.get(), ex, out)?,
+            None => self.write_raw(&*self.b.get(), ex, out)?,
         }
         out.push(',');
         let mut replacement = KeyOut::new(x.name().len() + 16);
@@ -2539,7 +2540,7 @@ impl<'b> MakeKeyWriter<'b> {
         Some(())
     }
 
-    fn raw_to_string(&mut self, a: &LamArena, e: RawLambda) -> Option<String> {
+    fn raw_to_string(&mut self, a: &B::Reader, e: RawLambda) -> Option<String> {
         let mut out = KeyOut::new(64);
         self.write_raw(a, e, &mut out)?;
         Some(out.buf)
@@ -2547,7 +2548,7 @@ impl<'b> MakeKeyWriter<'b> {
 
     fn write_raw_list(
         &mut self,
-        a: &LamArena,
+        a: &B::Reader,
         items: &[RawLambda],
         out: &mut KeyOut<'_>,
     ) -> Option<()> {
@@ -2562,7 +2563,7 @@ impl<'b> MakeKeyWriter<'b> {
 
     fn write_raw_opt(
         &mut self,
-        a: &LamArena,
+        a: &B::Reader,
         item: Option<RawLambda>,
         out: &mut KeyOut<'_>,
     ) -> Option<()> {
@@ -2578,7 +2579,7 @@ impl<'b> MakeKeyWriter<'b> {
     }
 }
 
-fn same_var_body(a: &LamArena, body: &KeyBody<'_>, id: &Ident) -> bool {
+fn same_var_body(a: &impl RawLambdaRead, body: &KeyBody<'_>, id: &Ident) -> bool {
     match body {
         KeyBody::Raw(raw) => matches!(a.as_var(*raw), Some(v) if v.same(id)),
         KeyBody::Action(action) => matches!(
@@ -2637,8 +2638,8 @@ fn write_synthetic_ident_key_with_global(
 ///
 /// Uses string keys (from `make_key` normalization) for comparison,
 /// since RawLambda doesn't implement PartialEq/Ord.
-pub struct StoreExp<'b> {
-    b: &'b RawArena,
+pub struct StoreExp<'b, B: RawLambdaBuilder> {
+    b: &'b B,
     /// Map from normalized key string -> action index.
     ///
     /// OCaml uses `AMap` for lookup in `Switch.Store.store`
@@ -2651,10 +2652,10 @@ pub struct StoreExp<'b> {
     acts: Vec<(bool, RawLambda)>,
 }
 
-impl<'b> StoreExp<'b> {
+impl<'b, B: RawLambdaBuilder> StoreExp<'b, B> {
     /// Create a new empty store.
     /// Equivalent to OCaml's `mk_store`.
-    pub fn mk_store(b: &'b RawArena) -> Self {
+    pub fn mk_store(b: &'b B) -> Self {
         StoreExp {
             b,
             map: HashMap::new(),
@@ -2725,7 +2726,7 @@ impl<'b> StoreExp<'b> {
 
 /// Create a static raise with no arguments.
 /// Equivalent to OCaml's `make_exit`.
-pub fn make_exit(b: &RawArena, i: i32) -> RawLambda {
+pub fn make_exit<B: RawLambdaBuilder>(b: &B, i: i32) -> RawLambda {
     b.static_raise(i, &[])
 }
 
@@ -2738,8 +2739,8 @@ pub fn make_exit(b: &RawArena, i: i32) -> RawLambda {
 /// Otherwise, allocates a new exit number, returns `Lstaticcatch(k(exit(e)), (e,[]), d)`.
 ///
 /// Equivalent to OCaml's `make_catch`.
-pub fn make_catch(
-    b: &RawArena,
+pub fn make_catch<B: RawLambdaBuilder>(
+    b: &B,
     d: RawLambda,
     next_raise_count: &mut i32,
     k: impl FnOnce(RawLambda) -> RawLambda,
@@ -2763,7 +2764,7 @@ pub fn make_catch(
 /// Returns the exit number if so.
 ///
 /// Equivalent to OCaml's `as_simple_exit`.
-pub fn as_simple_exit(a: &LamArena, lam: RawLambda) -> Option<i32> {
+pub fn as_simple_exit(a: &impl RawLambdaRead, lam: RawLambda) -> Option<i32> {
     match a.view(lam) {
         View::StaticRaise(i, []) => Some(i),
         View::Let(LetKind::Alias, _, _, e) => as_simple_exit(a, e),
@@ -2780,12 +2781,12 @@ pub fn as_simple_exit(a: &LamArena, lam: RawLambda) -> Option<i32> {
 /// simple exit, there is nothing to wrap.
 ///
 /// Equivalent to OCaml's `make_catch_delayed`.
-pub fn make_catch_delayed(
-    b: &RawArena,
+pub fn make_catch_delayed<B: RawLambdaBuilder>(
+    b: &B,
     handler: RawLambda,
     next_raise_count: &mut i32,
 ) -> (i32, Option<RawLambda>) {
-    let simple = as_simple_exit(&b.get(), handler);
+    let simple = as_simple_exit(&*b.get(), handler);
     match simple {
         Some(i) => (i, None),
         None => (bump_raise_count(next_raise_count), Some(handler)),
@@ -2795,8 +2796,8 @@ pub fn make_catch_delayed(
 /// The wrapper `make_catch_delayed` returns: the identity without a handler,
 /// else `Lstaticcatch(body, (i,[]), handler)`, or just `handler` when `body`
 /// is `Lstaticraise(i, _)`.
-fn apply_catch_delayed(
-    b: &RawArena,
+fn apply_catch_delayed<B: RawLambdaBuilder>(
+    b: &B,
     i: i32,
     handler: Option<RawLambda>,
     body: RawLambda,
@@ -2816,7 +2817,7 @@ fn apply_catch_delayed(
 
 /// `raw_action r` (`compiler/ml/matching.ml:479-482`) when it is a static
 /// raise: `make_key r`, or `r` itself when `make_key` fails.
-fn raw_static_raise(b: &RawArena, l: RawLambda) -> Option<(i32, Vec<RawLambda>)> {
+fn raw_static_raise<B: RawLambdaBuilder>(b: &B, l: RawLambda) -> Option<(i32, Vec<RawLambda>)> {
     let raw = make_key(b, l).unwrap_or(l);
     match b.node(raw) {
         Node::StaticRaise { label, args } => Some((label, b.list(args))),
@@ -2832,8 +2833,8 @@ fn raw_static_raise(b: &RawArena, l: RawLambda) -> Option<(i32, Vec<RawLambda>)>
 /// Returns true if both can be normalized and their normalized forms are equal.
 ///
 /// Equivalent to OCaml's `up_ok_action`.
-fn up_ok_action(
-    b: &RawArena,
+fn up_ok_action<B: RawLambdaBuilder>(
+    b: &B,
     ctx_ref: Option<&TypeContext>,
     act1: &MatchAction,
     act2: &MatchAction,
@@ -2860,8 +2861,8 @@ fn up_ok_action(
 /// are incompatible.
 ///
 /// Equivalent to OCaml's `up_ok`.
-fn up_ok<'p>(
-    b: &RawArena,
+fn up_ok<'p, B: RawLambdaBuilder>(
+    b: &B,
     pa: &PatArena<'p>,
     ctx_ref: Option<&TypeContext>,
     ps: &[&'p Pattern],
@@ -2871,8 +2872,8 @@ fn up_ok<'p>(
     up_ok_iter(b, pa, ctx_ref, ps, act_p, l.iter())
 }
 
-fn up_ok_iter<'p: 'a, 'a>(
-    b: &RawArena,
+fn up_ok_iter<'p: 'a, 'a, B: RawLambdaBuilder>(
+    b: &B,
     pa: &PatArena<'p>,
     ctx_ref: Option<&TypeContext>,
     ps: &[&'p Pattern],
@@ -2952,7 +2953,13 @@ fn simplify_or<'p>(
 
 /// Bind a variable to an argument in an action.
 /// Equivalent to OCaml's `Lambda.bind Alias id arg action`.
-fn bind(b: &RawArena, kind: LetKind, id: &Ident, arg: &RawLambda, action: RawLambda) -> RawLambda {
+fn bind<B: RawLambdaBuilder>(
+    b: &B,
+    kind: LetKind,
+    id: &Ident,
+    arg: &RawLambda,
+    action: RawLambda,
+) -> RawLambda {
     match b.as_var(*arg) {
         Some(v) if v.same(id) => action,
         _ => b.let_(kind, *id, *arg, action),
@@ -2966,10 +2973,10 @@ fn bind(b: &RawArena, kind: LetKind, id: &Ident, arg: &RawLambda, action: RawLam
 /// - Or-patterns are simplified (but not removed)
 ///
 /// Equivalent to OCaml's `simplify_cases`.
-fn simplify_cases<'p>(
+fn simplify_cases<'p, B: RawLambdaBuilder>(
     ctx_ref: Option<&TypeContext>,
     pa: &'p PatArena<'p>,
-    arena: &LocArena<'_>,
+    arena: &LocArena<'_, B>,
     args: &[(RawLambda, LetKind)],
     cls: Vec<Clause<'p>>,
 ) -> Vec<Clause<'p>> {
@@ -2977,10 +2984,10 @@ fn simplify_cases<'p>(
 
     let (ref arg, _) = args[0];
 
-    fn simplify<'p>(
+    fn simplify<'p, B: RawLambdaBuilder>(
         ctx_ref: Option<&TypeContext>,
         pa: &'p PatArena<'p>,
-        arena: &LocArena<'_>,
+        arena: &LocArena<'_, B>,
         arg: &RawLambda,
         cls: Vec<Clause<'p>>,
     ) -> Vec<Clause<'p>> {
@@ -3370,7 +3377,7 @@ fn alpha_pat(pa: &PatArena<'_>, env: &[(Ident, Ident)], pat: &Pattern) -> Patter
     }
 }
 
-impl<'p> Split<'p, '_> {
+impl<'p, B: RawLambdaBuilder> Split<'p, '_, B> {
     /// Expand an or-pattern into separate cases with alpha-renamed variables.
     ///
     /// `patl`: surrounding pattern context
@@ -3457,21 +3464,21 @@ impl<'p> Split<'p, '_> {
 
 /// Compute the free variables of a pattern matching's actions.
 /// Equivalent to OCaml's `pm_free_variables`.
-pub fn pm_free_variables<'p>(b: &RawArena, pm: &PatternMatching<'p>) -> IdentSet {
+pub fn pm_free_variables<'p, B: RawLambdaBuilder>(b: &B, pm: &PatternMatching<'p>) -> IdentSet {
     let a = b.get();
     // OCaml uses IdentSet.union (free_variables act) r folded right over cases.
     pm.cases
         .iter()
         .rev()
         .fold(BTreeSet::new(), |mut r, (_, act)| {
-            let fv = act.free_variables(&a);
+            let fv = act.free_variables(&*a);
             r.extend(fv);
             r
         })
 }
 
 /// Free variables of a RawLambda expression (`Lambda.free_variables`).
-fn raw_lambda_free_variables(a: &LamArena, lam: RawLambda) -> IdentSet {
+fn raw_lambda_free_variables(a: &impl RawLambdaRead, lam: RawLambda) -> IdentSet {
     let mut fv = IdentSet::new();
     crate::raw_lambda::collect_free_variables(a, lam, &mut fv);
     fv
@@ -3791,17 +3798,17 @@ fn rebuild_nexts<'p>(
 
 /// What the split functions share: the compilation's context and exit
 /// counter, and the arguments of the `split_or` call being split.
-struct Split<'p, 'a> {
+struct Split<'p, 'a, B: RawLambdaBuilder> {
     ctx_ref: Option<&'a TypeContext>,
     pa: &'p PatArena<'p>,
-    arena: &'a LocArena<'a>,
+    arena: &'a LocArena<'a, B>,
     /// The variable the first argument is bound to, if any.
     argo: &'a Option<Ident>,
     args: &'a MatchArgs,
     next_raise: &'a mut i32,
 }
 
-impl<'p> Split<'p, '_> {
+impl<'p, B: RawLambdaBuilder> Split<'p, '_, B> {
     /// Split a matching, directed first by or-patterns, then by tests/variable transitions.
     /// Equivalent to OCaml's `split_or`.
     fn split_or(
@@ -4475,10 +4482,10 @@ fn dont_precompile_var<'p>(
 
 /// Top-level split_precompile.
 /// Equivalent to OCaml's `split_precompile`.
-pub fn split_precompile<'p>(
+pub fn split_precompile<'p, B: RawLambdaBuilder>(
     ctx_ref: Option<&TypeContext>,
     pa: &'p PatArena<'p>,
-    arena: &LocArena<'_>,
+    arena: &LocArena<'_, B>,
     argo: &Option<Ident>,
     pm: &PatternMatching<'p>,
     next_raise: &mut i32,
@@ -4835,8 +4842,8 @@ fn divide_constant<'p>(
 /// of `arg`, then `argl`.
 /// Equivalent to OCaml's `make_field_args`, whose `first_pos` and `last_pos`
 /// are the bounds of `positions`.
-fn make_field_args(
-    b: &RawArena,
+fn make_field_args<B: RawLambdaBuilder>(
+    b: &B,
     fld_info: FieldDbgInfo,
     loc: LamLoc,
     binding_kind: LetKind,
@@ -5017,10 +5024,10 @@ fn fld_record_extension(lbl: &LabelDescription) -> FieldDbgInfo {
 
 /// Make a constructor matching cell.
 /// Equivalent to OCaml's `make_constr_matching`.
-fn make_constr_matching<'p>(
+fn make_constr_matching<'p, B: RawLambdaBuilder>(
     ctx_ref: &TypeContext,
     pa: &'p PatArena<'p>,
-    arena: &LocArena<'_>,
+    arena: &LocArena<'_, B>,
     p: &'p Pattern,
     def: &DefaultEnv<'p>,
     ctx: &[Ctx<'p>],
@@ -5139,10 +5146,10 @@ fn make_constr_matching<'p>(
 
 /// Divide a pattern matching by constructor.
 /// Equivalent to OCaml's `divide_constructor`.
-fn divide_constructor<'p>(
+fn divide_constructor<'p, B: RawLambdaBuilder>(
     ctx_ref: &TypeContext,
     pa: &'p PatArena<'p>,
-    arena: &LocArena<'_>,
+    arena: &LocArena<'_, B>,
     ctx: &[Ctx<'p>],
     pm: &PatternMatching<'p>,
 ) -> Vec<(std::sync::Arc<ConstructorDescription>, MatchCell<'p>)> {
@@ -5237,9 +5244,9 @@ fn matcher_variant_nonconst<'p>(
 
 /// Make a variant matching cell for non-constant variants.
 /// Equivalent to OCaml's `make_variant_matching_nonconst`.
-fn make_variant_matching_nonconst<'p>(
+fn make_variant_matching_nonconst<'p, B: RawLambdaBuilder>(
     pa: &'p PatArena<'p>,
-    arena: &LocArena<'_>,
+    arena: &LocArena<'_, B>,
     p: &'p Pattern,
     lab: &str,
     def: &DefaultEnv<'p>,
@@ -5284,18 +5291,18 @@ fn make_variant_matching_nonconst<'p>(
 
 /// Divide a pattern matching by variant tag.
 /// Equivalent to OCaml's `divide_variant`.
-fn divide_variant<'p>(
+fn divide_variant<'p, B: RawLambdaBuilder>(
     ctx_ref: &TypeContext,
     pa: &'p PatArena<'p>,
-    arena: &LocArena<'_>,
+    arena: &LocArena<'_, B>,
     row: &RowDesc,
     ctx: &[Ctx<'p>],
     pm: &PatternMatching<'p>,
 ) -> Vec<((String, bool), MatchCell<'p>)> {
     let row = btype::row_repr(ctx_ref, row);
 
-    fn divide_rec<'p>(
-        cx: MatchCx<'p, '_>,
+    fn divide_rec<'p, B: RawLambdaBuilder>(
+        cx: MatchCx<'p, '_, B>,
         row: &RowDesc,
         cases: &[Clause<'p>],
         def: &DefaultEnv<'p>,
@@ -5480,8 +5487,8 @@ fn matcher_tuple<'p>(
 
 /// Make a tuple matching.
 /// Equivalent to OCaml's `make_tuple_matching`.
-fn make_tuple_matching<'p>(
-    b: &RawArena,
+fn make_tuple_matching<'p, B: RawLambdaBuilder>(
+    b: &B,
     pa: &PatArena<'p>,
     loc: LamLoc,
     arity: usize,
@@ -5515,9 +5522,9 @@ fn make_tuple_matching<'p>(
 
 /// Divide a pattern matching by tuple.
 /// Equivalent to OCaml's `divide_tuple`.
-fn divide_tuple<'p>(
+fn divide_tuple<'p, B: RawLambdaBuilder>(
     pa: &'p PatArena<'p>,
-    arena: &LocArena<'_>,
+    arena: &LocArena<'_, B>,
     arity: usize,
     p: &'p Pattern,
     ctx: &[Ctx<'p>],
@@ -5623,8 +5630,8 @@ fn matcher_record<'p>(
 
 /// Make a record matching.
 /// Equivalent to OCaml's `make_record_matching`.
-fn make_record_matching<'p>(
-    b: &RawArena,
+fn make_record_matching<'p, B: RawLambdaBuilder>(
+    b: &B,
     pa: &PatArena<'p>,
     loc: LamLoc,
     all_labels: &[LabelDescription],
@@ -5671,10 +5678,10 @@ fn make_record_matching<'p>(
 
 /// Divide a pattern matching by record fields.
 /// Equivalent to OCaml's `divide_record`.
-fn divide_record<'p>(
+fn divide_record<'p, B: RawLambdaBuilder>(
     ctx_ref: &TypeContext,
     pa: &'p PatArena<'p>,
-    arena: &LocArena<'_>,
+    arena: &LocArena<'_, B>,
     all_labels: &[LabelDescription],
     p: &'p Pattern,
     ctx: &[Ctx<'p>],
@@ -5737,9 +5744,9 @@ fn matcher_array<'p>(
 
 /// Make an array matching cell.
 /// Equivalent to OCaml's `make_array_matching`.
-fn make_array_matching<'p>(
+fn make_array_matching<'p, B: RawLambdaBuilder>(
     pa: &'p PatArena<'p>,
-    arena: &LocArena<'_>,
+    arena: &LocArena<'_, B>,
     p: &'p Pattern,
     def: &DefaultEnv<'p>,
     ctx: &[Ctx<'p>],
@@ -5786,9 +5793,9 @@ fn make_array_matching<'p>(
 
 /// Divide a pattern matching by array length.
 /// Equivalent to OCaml's `divide_array`.
-fn divide_array<'p>(
+fn divide_array<'p, B: RawLambdaBuilder>(
     pa: &'p PatArena<'p>,
-    arena: &LocArena<'_>,
+    arena: &LocArena<'_, B>,
     ctx: &[Ctx<'p>],
     pm: &PatternMatching<'p>,
 ) -> Vec<(usize, MatchCell<'p>)> {
@@ -5816,8 +5823,8 @@ type SharedActions<K, H> = (Vec<(i32, H)>, Vec<(K, RawLambda)>, Option<RawLambda
 /// The wrapper_fn wraps the result with catch handlers.
 ///
 /// Equivalent to OCaml's `share_actions_tree`.
-fn share_actions_tree(
-    b: &RawArena,
+fn share_actions_tree<B: RawLambdaBuilder>(
+    b: &B,
     sw: Vec<(Constant, RawLambda)>,
     d: Option<RawLambda>,
     next_raise_count: &mut i32,
@@ -5867,8 +5874,8 @@ fn share_actions_tree(
 /// Apply handler wrappers to a result lambda.
 /// The handlers are applied in forward order (first handler = innermost).
 /// Equivalent to OCaml's `!hs result`.
-fn apply_handlers(
-    b: &RawArena,
+fn apply_handlers<B: RawLambdaBuilder>(
+    b: &B,
     mut result: RawLambda,
     handlers: Vec<(i32, RawLambda)>,
 ) -> RawLambda {
@@ -5924,8 +5931,8 @@ fn sort_lambda_list(mut l: Vec<(Constant, RawLambda)>) -> Vec<(Constant, RawLamb
 // Layer 8: Integer/switch matching — OCaml matching.ml lines 1661-1941
 // ============================================================================
 
-fn do_tests_fail_owned(
-    b: &RawArena,
+fn do_tests_fail_owned<B: RawLambdaBuilder>(
+    b: &B,
     loc: LamLoc,
     fail: RawLambda,
     tst: Primitive,
@@ -5946,8 +5953,8 @@ fn do_tests_fail_owned(
     })
 }
 
-fn do_tests_nofail_owned(
-    b: &RawArena,
+fn do_tests_nofail_owned<B: RawLambdaBuilder>(
+    b: &B,
     loc: LamLoc,
     tst: Primitive,
     arg: RawLambda,
@@ -5970,7 +5977,7 @@ fn do_tests_nofail_owned(
 
 /// Convert a typedtree constant to a lambda constant wrapped in Lconst.
 /// Equivalent to OCaml's `Lconst(Const_base c)`.
-fn typed_const_to_lambda_const(b: &RawArena, c: &Constant) -> RawLambda {
+fn typed_const_to_lambda_const<B: RawLambdaBuilder>(b: &B, c: &Constant) -> RawLambda {
     let lc = match c {
         Constant::Int(i) => crate::lambda::Constant::int(*i as i32),
         Constant::Char(c) => crate::lambda::Constant::Char(*c),
@@ -5988,8 +5995,8 @@ fn typed_const_to_lambda_const(b: &RawArena, c: &Constant) -> RawLambda {
 /// Uses dichotomic splitting when there are enough cases and a less-than test is available.
 /// Equivalent to OCaml's `make_test_sequence`; `comparison` builds its `tst`
 /// (`Neq`) and `lt_tst` (`Lt`) primitives.
-fn make_test_sequence(
-    b: &RawArena,
+fn make_test_sequence<B: RawLambdaBuilder>(
+    b: &B,
     loc: LamLoc,
     fail: Option<RawLambda>,
     comparison: fn(Comparison) -> Primitive,
@@ -6003,8 +6010,8 @@ fn make_test_sequence(
     let (handlers, const_lambda_list, fail) =
         share_actions_tree(b, const_lambda_list, fail, next_raise_count);
 
-    fn make_test_seq_inner_owned(
-        b: &RawArena,
+    fn make_test_seq_inner_owned<B: RawLambdaBuilder>(
+        b: &B,
         loc: &LamLoc,
         fail: Option<RawLambda>,
         tst: &Primitive,
@@ -6045,8 +6052,8 @@ fn make_test_sequence(
 
 /// Deduplicate switch actions by wrapping shared actions in catch/exit.
 /// Equivalent to OCaml's `share_actions_sw`.
-pub fn share_actions_sw(
-    b: &RawArena,
+pub fn share_actions_sw<B: RawLambdaBuilder>(
+    b: &B,
     sw: RawLambdaSwitch,
     next_raise_count: &mut i32,
 ) -> (Vec<(i32, RawLambda)>, RawLambdaSwitch) {
@@ -6116,14 +6123,14 @@ pub fn share_actions_sw(
 /// When a static exit appears >= 3 times in the cases and there's no failaction,
 /// extract it as the failaction to reduce switch size.
 /// Equivalent to OCaml's `reintroduce_fail`.
-pub fn reintroduce_fail(b: &RawArena, sw: RawLambdaSwitch) -> RawLambdaSwitch {
+pub fn reintroduce_fail<B: RawLambdaBuilder>(b: &B, sw: RawLambdaSwitch) -> RawLambdaSwitch {
     if sw.sw_failaction.is_some() {
         return sw;
     }
 
     let mut counts: HashMap<i32, i32> = HashMap::new();
     let seen = |counts: &mut HashMap<i32, i32>, lam: &RawLambda| {
-        if let Some(i) = as_simple_exit(&b.get(), *lam) {
+        if let Some(i) = as_simple_exit(&*b.get(), *lam) {
             let old = counts.get(&i).copied().unwrap_or(0);
             counts.insert(i, old + 1);
         }
@@ -6147,9 +6154,9 @@ pub fn reintroduce_fail(b: &RawArena, sw: RawLambdaSwitch) -> RawLambdaSwitch {
 
     if max >= 3 {
         let default = i_max;
-        fn remove<K>(b: &RawArena, ls: Vec<(K, RawLambda)>, default: i32) -> Vec<(K, RawLambda)> {
+        fn remove<K, B: RawLambdaBuilder>(b: &B, ls: Vec<(K, RawLambda)>, default: i32) -> Vec<(K, RawLambda)> {
             ls.into_iter()
-                .filter(|(_, lam)| match as_simple_exit(&b.get(), *lam) {
+                .filter(|(_, lam)| match as_simple_exit(&*b.get(), *lam) {
                     Some(j) => j != default,
                     None => true,
                 })
@@ -6204,7 +6211,12 @@ type IntCases = std::vec::IntoIter<(i32, i32, RawLambda)>;
 /// `i .. j` is used for each of its values. Storing it as shared emits it
 /// once, as an expanded range sharing the action of each value used to;
 /// copies would declare its variables twice.
-fn store_range_action(store: &mut StoreExp<'_>, i: i32, j: i32, act: RawLambda) -> usize {
+fn store_range_action<B: RawLambdaBuilder>(
+    store: &mut StoreExp<'_, B>,
+    i: i32,
+    j: i32,
+    act: RawLambda,
+) -> usize {
     if i < j {
         store.act_store_shared(act)
     } else {
@@ -6217,25 +6229,25 @@ fn store_range_action(store: &mut StoreExp<'_>, i: i32, j: i32, act: RawLambda) 
 ///
 /// The actions are moved into the store; the recursion mirrors OCaml's
 /// list recursion with `rest` as an owning iterator.
-fn as_interval_canfail(
-    b: &RawArena,
+fn as_interval_canfail<B: RawLambdaBuilder>(
+    b: &B,
     fail: RawLambda,
     low: i32,
     high: i32,
     l: Vec<(i32, i32, RawLambda)>,
-) -> (Vec<(i32, i32, usize)>, StoreExp<'_>) {
+) -> (Vec<(i32, i32, usize)>, StoreExp<'_, B>) {
     let mut store = StoreExp::mk_store(b);
 
     let fail_idx = store_range_action(&mut store, 0, 0, fail);
     assert_eq!(fail_idx, 0); // fail has action index 0
 
-    fn nofail_rec(
+    fn nofail_rec<B: RawLambdaBuilder>(
         cur_low: i32,
         cur_high: i32,
         cur_act: usize,
         rest: &mut IntCases,
         high: i32,
-        store: &mut StoreExp<'_>,
+        store: &mut StoreExp<'_, B>,
     ) -> Vec<(i32, i32, usize)> {
         let Some((i, j, act_i)) = rest.next() else {
             return if cur_high == high {
@@ -6272,12 +6284,12 @@ fn as_interval_canfail(
         }
     }
 
-    fn fail_rec(
+    fn fail_rec<B: RawLambdaBuilder>(
         cur_low: i32,
         cur_high: i32,
         rest: &mut IntCases,
         high: i32,
-        store: &mut StoreExp<'_>,
+        store: &mut StoreExp<'_, B>,
     ) -> Vec<(i32, i32, usize)> {
         let Some((i, j, act_i)) = rest.next() else {
             return vec![(cur_low, cur_high, 0)];
@@ -6314,18 +6326,18 @@ fn as_interval_canfail(
 
 /// Convert a sorted range-lambda list (no fail action) into intervals.
 /// Equivalent to OCaml's `as_interval_nofail`.
-fn as_interval_nofail(
-    b: &RawArena,
+fn as_interval_nofail<B: RawLambdaBuilder>(
+    b: &B,
     l: Vec<(i32, i32, RawLambda)>,
-) -> (Vec<(i32, i32, usize)>, StoreExp<'_>) {
+) -> (Vec<(i32, i32, usize)>, StoreExp<'_, B>) {
     let mut store = StoreExp::mk_store(b);
 
-    fn i_rec(
+    fn i_rec<B: RawLambdaBuilder>(
         cur_low: i32,
         cur_high: i32,
         cur_act: usize,
         rest: &mut IntCases,
-        store: &mut StoreExp<'_>,
+        store: &mut StoreExp<'_, B>,
     ) -> Vec<(i32, i32, usize)> {
         let Some((i, j, act)) = rest.next() else {
             return vec![(cur_low, cur_high, cur_act)];
@@ -6361,17 +6373,17 @@ fn as_interval_nofail(
 
 /// Switch intervals `(low, high, action index)` and the action store they
 /// index into.
-type Intervals<'a> = (Vec<(i32, i32, usize)>, StoreExp<'a>);
+type Intervals<'a, B> = (Vec<(i32, i32, usize)>, StoreExp<'a, B>);
 
 /// `as_interval_ranges fail low high l`: `l` maps disjoint ranges
 /// `lo .. hi` to actions.
-fn as_interval_ranges(
-    b: &RawArena,
+fn as_interval_ranges<B: RawLambdaBuilder>(
+    b: &B,
     fail: Option<RawLambda>,
     low: i32,
     high: i32,
     mut l: Vec<(i32, i32, RawLambda)>,
-) -> ((i32, i32), Intervals<'_>) {
+) -> ((i32, i32), Intervals<'_, B>) {
     l.sort_by_key(|&(i, _, _)| i);
     let edges = get_edges(low, high, &l);
     let result = match fail {
@@ -6383,8 +6395,8 @@ fn as_interval_ranges(
 
 /// Compile an integer switch using the switch module.
 /// Equivalent to OCaml's `call_switcher`.
-pub fn call_switcher(
-    b: &RawArena,
+pub fn call_switcher<B: RawLambdaBuilder>(
+    b: &B,
     fail: Option<RawLambda>,
     arg: RawLambda,
     low: i32,
@@ -6400,8 +6412,8 @@ pub fn call_switcher(
 }
 
 /// `call_switcher_ranges fail arg low high range_lambda_list`.
-fn call_switcher_ranges(
-    b: &RawArena,
+fn call_switcher_ranges<B: RawLambdaBuilder>(
+    b: &B,
     fail: Option<RawLambda>,
     arg: RawLambda,
     low: i32,
@@ -6608,8 +6620,8 @@ fn get_variant_constructors_from_env(
 /// Compute negative fail action (jump to default).
 /// Returns (optional fail lambda, jumps).
 /// Equivalent to OCaml's `mk_failaction_neg`.
-fn mk_failaction_neg<'p>(
-    b: &RawArena,
+fn mk_failaction_neg<'p, B: RawLambdaBuilder>(
+    b: &B,
     partial: &Partial,
     ctx: &[Ctx<'p>],
     def: &DefaultEnv<'p>,
@@ -6632,8 +6644,8 @@ fn mk_failaction_neg<'p>(
 /// Compute positive fail action (enumerating missing constructors).
 /// Returns (optional fail lambda, additional cases, jumps).
 /// Equivalent to OCaml's `mk_failaction_pos`.
-fn mk_failaction_pos<'p>(
-    b: &RawArena,
+fn mk_failaction_pos<'p, B: RawLambdaBuilder>(
+    b: &B,
     ctx_ref: &TypeContext,
     pa: &'p PatArena<'p>,
     partial: &Partial,
@@ -6660,8 +6672,8 @@ fn mk_failaction_pos<'p>(
 /// Scan default environment to build per-constructor fail actions.
 /// Returns (key-action list, jumps).
 /// Equivalent to OCaml's inner `scan_def` in `mk_failaction_pos`.
-fn scan_def<'p>(
-    b: &RawArena,
+fn scan_def<'p, B: RawLambdaBuilder>(
+    b: &B,
     pa: &'p PatArena<'p>,
     ctx: &[Ctx<'p>],
     env: Vec<(Vec<&'p Pattern>, i32)>,
@@ -6710,7 +6722,7 @@ fn scan_def<'p>(
 
 /// Overloaded version of `same_actions` for tagged lists (ConstructorTag, lambda).
 /// Checks if all actions in a case list are the same.
-fn all_actions_same_tagged<K>(b: &RawArena, cases: &[(K, RawLambda)]) -> bool {
+fn all_actions_same_tagged<K, B: RawLambdaBuilder>(b: &B, cases: &[(K, RawLambda)]) -> bool {
     match cases {
         [] => false,
         [_] => true,
@@ -6730,8 +6742,8 @@ fn all_actions_same_tagged<K>(b: &RawArena, cases: &[(K, RawLambda)]) -> bool {
 
 /// Share actions for tree-based string matching.
 /// Like share_actions_tree but for (String, RawLambda) pairs.
-fn share_actions_tree_string(
-    b: &RawArena,
+fn share_actions_tree_string<B: RawLambdaBuilder>(
+    b: &B,
     sw: Vec<(String, RawLambda)>,
     d: Option<RawLambda>,
     next_raise_count: &mut i32,
@@ -6775,9 +6787,8 @@ fn share_actions_tree_string(
 /// The test a `combine_*` function builds: the match compiler's context,
 /// the test's location and scrutinee, and the partiality, contexts and
 /// default environment of the match it is part of.
-#[derive(Clone, Copy)]
-struct CombineSite<'p, 'a> {
-    cx: MatchCx<'p, 'a>,
+struct CombineSite<'p, 'a, B: RawLambdaBuilder> {
+    cx: MatchCx<'p, 'a, B>,
     loc: LamLoc,
     arg: RawLambda,
     partial: &'a Partial,
@@ -6785,10 +6796,17 @@ struct CombineSite<'p, 'a> {
     def: &'a DefaultEnv<'p>,
 }
 
+impl<'p, 'a, B: RawLambdaBuilder> Copy for CombineSite<'p, 'a, B> {}
+impl<'p, 'a, B: RawLambdaBuilder> Clone for CombineSite<'p, 'a, B> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
 /// Combine constant matching results.
 /// Equivalent to OCaml's `combine_constant`.
-fn combine_constant<'p>(
-    site: &CombineSite<'p, '_>,
+fn combine_constant<'p, B: RawLambdaBuilder>(
+    site: &CombineSite<'p, '_, B>,
     cst: &Constant,
     c_div: (Vec<(ConstantKey, RawLambda)>, Jumps<'p>, Vec<&'p Pattern>),
     next_raise_count: &mut i32,
@@ -6932,7 +6950,7 @@ fn get_extension_cases(
 
 /// Translate a path to a RawLambda access expression.
 /// Equivalent to OCaml's `transl_normal_path`.
-fn transl_normal_path(b: &RawArena, path: &crate::types::path::Path) -> RawLambda {
+fn transl_normal_path<B: RawLambdaBuilder>(b: &B, path: &crate::types::path::Path) -> RawLambda {
     match path.view() {
         PathView::Pident(id) => {
             if id.is_global() {
@@ -6955,8 +6973,8 @@ fn transl_normal_path(b: &RawArena, path: &crate::types::path::Path) -> RawLambd
 
 /// Translate an extension path to a RawLambda.
 /// Equivalent to OCaml's `transl_extension_path`.
-fn transl_extension_path(
-    b: &RawArena,
+fn transl_extension_path<B: RawLambdaBuilder>(
+    b: &B,
     ctx_ref: &TypeContext,
     env: EnvRef,
     path: &crate::types::path::Path,
@@ -7068,8 +7086,8 @@ fn normalize_module_path_via_ctx(
 
 /// Combine constructor matching results.
 /// Equivalent to OCaml's `combine_constructor`.
-fn combine_constructor<'p>(
-    site: &CombineSite<'p, '_>,
+fn combine_constructor<'p, B: RawLambdaBuilder>(
+    site: &CombineSite<'p, '_, B>,
     ex_pat: &'p Pattern,
     cstr: &ConstructorDescription,
     c_div: CompiledCells<'p, std::sync::Arc<ConstructorDescription>>,
@@ -7252,8 +7270,8 @@ fn combine_constructor<'p>(
 
 
 /// `matching.ml value_test_defaults_on_undefined`, over arena handles.
-fn value_test_defaults_on_undefined(
-    b: &RawArena,
+fn value_test_defaults_on_undefined<B: RawLambdaBuilder>(
+    b: &B,
     arg: RawLambda,
     absent: RawLambda,
     present: RawLambda,
@@ -7357,8 +7375,8 @@ fn switch_defaults_on_undefined(sw: crate::lambda::arena::SwitchView<'_>) -> boo
 ///
 /// Groups entries that have the same lambda action together, producing a list
 /// of `(hash_names, action)` pairs in order of first occurrence.
-fn convert_polyvar_list(
-    b: &RawArena,
+fn convert_polyvar_list<B: RawLambdaBuilder>(
+    b: &B,
     xs: Vec<(i32, (String, RawLambda))>,
 ) -> Vec<(Vec<(i32, String)>, RawLambda)> {
     // Group by normalized action equality, matching OCaml's make_key-based
@@ -7388,14 +7406,18 @@ fn convert_polyvar_list(
 
 /// Create a disjunction of equality tests for polyvar hash values.
 /// Equivalent to OCaml's `Polyvar_pattern_match.or_list`.
-fn raw_polyvariant_hash_const(b: &RawArena, hash: i32, name: &str) -> RawLambda {
+fn raw_polyvariant_hash_const<B: RawLambdaBuilder>(b: &B, hash: i32, name: &str) -> RawLambda {
     b.const_(crate::lambda::lam_constant::Constant::Int {
         i: hash,
         comment: Some(Box::new(PointerInfo::PolyVariant(name.to_string()))),
     })
 }
 
-fn or_list_polyvar(b: &RawArena, arg: &RawLambda, hash_names: &[(i32, String)]) -> RawLambda {
+fn or_list_polyvar<B: RawLambdaBuilder>(
+    b: &B,
+    arg: &RawLambda,
+    hash_names: &[(i32, String)],
+) -> RawLambda {
     let (first_hash, first_name) = &hash_names[0];
     let init = b.prim(
         Primitive::Pintcomp(Comparison::Eq),
@@ -7420,8 +7442,8 @@ fn or_list_polyvar(b: &RawArena, arg: &RawLambda, hash_names: &[(i32, String)]) 
 
 /// Build an if-chain from converted polyvar list.
 /// Used by both make_test_sequence_variant_constant and call_switcher_variant_constant.
-fn polyvar_if_chain(
-    b: &RawArena,
+fn polyvar_if_chain<B: RawLambdaBuilder>(
+    b: &B,
     fail: Option<RawLambda>,
     arg: &RawLambda,
     int_lambda_list: Vec<(i32, (String, RawLambda))>,
@@ -7446,8 +7468,8 @@ fn polyvar_if_chain(
 
 /// Make a test sequence for variant constant matching.
 /// Equivalent to OCaml's `Polyvar_pattern_match.make_test_sequence_variant_constant`.
-fn make_test_sequence_variant_constant(
-    b: &RawArena,
+fn make_test_sequence_variant_constant<B: RawLambdaBuilder>(
+    b: &B,
     fail: Option<RawLambda>,
     arg: RawLambda,
     int_lambda_list: Vec<(i32, (String, RawLambda))>,
@@ -7457,8 +7479,8 @@ fn make_test_sequence_variant_constant(
 
 /// Call switcher for variant constant matching.
 /// Equivalent to OCaml's `Polyvar_pattern_match.call_switcher_variant_constant`.
-fn call_switcher_variant_constant(
-    b: &RawArena,
+fn call_switcher_variant_constant<B: RawLambdaBuilder>(
+    b: &B,
     fail: Option<RawLambda>,
     arg: RawLambda,
     int_lambda_list: Vec<(i32, (String, RawLambda))>,
@@ -7468,8 +7490,8 @@ fn call_switcher_variant_constant(
 
 /// Call switcher for variant non-constant (block) matching.
 /// Equivalent to OCaml's `Polyvar_pattern_match.call_switcher_variant_constr`.
-fn call_switcher_variant_constr(
-    b: &RawArena,
+fn call_switcher_variant_constr<B: RawLambdaBuilder>(
+    b: &B,
     ctx_ref: &TypeContext,
     loc: LamLoc,
     fail: Option<RawLambda>,
@@ -7487,8 +7509,8 @@ fn call_switcher_variant_constr(
 
 /// Combine variant matching results.
 /// Equivalent to OCaml's `combine_variant`.
-fn combine_variant<'p>(
-    site: &CombineSite<'p, '_>,
+fn combine_variant<'p, B: RawLambdaBuilder>(
+    site: &CombineSite<'p, '_, B>,
     row: &RowDesc,
     c_div: CompiledCells<'p, (String, bool)>,
 ) -> (RawLambda, Jumps<'p>) {
@@ -7572,8 +7594,8 @@ fn combine_variant<'p>(
 
 /// Combine array matching results.
 /// Equivalent to OCaml's `combine_array`.
-fn combine_array<'p>(
-    site: &CombineSite<'p, '_>,
+fn combine_array<'p, B: RawLambdaBuilder>(
+    site: &CombineSite<'p, '_, B>,
     c_div: (Vec<(usize, RawLambda)>, Jumps<'p>, Vec<&'p Pattern>),
     next_raise_count: &mut i32,
 ) -> (RawLambda, Jumps<'p>) {
@@ -7684,8 +7706,8 @@ fn compile_list<'p, K: Clone>(
 
 /// Compile or-pattern handlers.
 /// Equivalent to OCaml's `compile_orhandlers`.
-fn compile_orhandlers<'p>(
-    b: &RawArena,
+fn compile_orhandlers<'p, B: RawLambdaBuilder>(
+    b: &B,
     pa: &'p PatArena<'p>,
     compile_fun: &mut OrHandlerCompiler<'p, '_>,
     lambda1: RawLambda,
@@ -7695,7 +7717,11 @@ fn compile_orhandlers<'p>(
 ) -> Compiled<'p> {
     /// `add_raised_exits raised lam`: adds the static exits `lam` jumps to.
     /// Exits cannot leave a function, so function bodies are skipped.
-    fn add_raised_exits(a: &LamArena, raised: &mut std::collections::HashSet<i32>, lam: RawLambda) {
+    fn add_raised_exits(
+        a: &impl RawLambdaRead,
+        raised: &mut std::collections::HashSet<i32>,
+        lam: RawLambda,
+    ) {
         match a.node(lam) {
             Node::Function { .. } => return,
             Node::StaticRaise { label, .. } => {
@@ -7706,8 +7732,8 @@ fn compile_orhandlers<'p>(
         a.iter_children(lam, |child| add_raised_exits(a, raised, child));
     }
 
-    fn do_rec<'p>(
-        b: &RawArena,
+    fn do_rec<'p, B: RawLambdaBuilder>(
+        b: &B,
         pa: &'p PatArena<'p>,
         compile_fun: &mut OrHandlerCompiler<'p, '_>,
         raised: &mut std::collections::HashSet<i32>,
@@ -7727,7 +7753,7 @@ fn compile_orhandlers<'p>(
                 let ctx_i = select_columns(pa, mat, ctx);
                 match compile_fun(&ctx_i, pm) {
                     Ok((handler_i, total_i)) => {
-                        add_raised_exits(&b.get(), raised, handler_i);
+                        add_raised_exits(&*b.get(), raised, handler_i);
                         match raw_static_raise(b, r) {
                             Some((j, args)) if j == *i => {
                                 let body = vars
@@ -7788,7 +7814,7 @@ fn compile_orhandlers<'p>(
 
     // The exits of the match and of the handlers compiled so far.
     let mut raised = std::collections::HashSet::new();
-    add_raised_exits(&b.get(), &mut raised, lambda1);
+    add_raised_exits(&*b.get(), &mut raised, lambda1);
     do_rec(
         b,
         pa,
@@ -7805,7 +7831,7 @@ fn compile_orhandlers<'p>(
 /// matching.ml `approx_present`: anything but a constant, a static raise,
 /// a primitive, an alias let or a variable (including `Lglobal_module`)
 /// counts as present.
-fn approx_present(a: &LamArena, v: &Ident, lam: RawLambda) -> bool {
+fn approx_present(a: &impl RawLambdaRead, v: &Ident, lam: RawLambda) -> bool {
     match a.view(lam) {
         View::Const(_) => false,
         View::StaticRaise(_, args) | View::Prim(_, args, _) => {
@@ -7821,10 +7847,10 @@ fn approx_present(a: &LamArena, v: &Ident, lam: RawLambda) -> bool {
 
 /// Lower a binding into the appropriate branch.
 /// Equivalent to OCaml's `lower_bind`.
-fn lower_bind(b: &RawArena, v: &Ident, arg: &RawLambda, lam: RawLambda) -> RawLambda {
+fn lower_bind<B: RawLambdaBuilder>(b: &B, v: &Ident, arg: &RawLambda, lam: RawLambda) -> RawLambda {
     // OCaml `compiler/ml/matching.ml:2413-2435` rebuilds only the branch that
     // needs the alias binding.
-    let present = |l: RawLambda| approx_present(&b.get(), v, l);
+    let present = |l: RawLambda| approx_present(&*b.get(), v, l);
     match b.node(lam) {
         Node::If { cond, then_, else_ } => {
             let pcond = present(cond);
@@ -7884,8 +7910,8 @@ fn lower_bind(b: &RawArena, v: &Ident, arg: &RawLambda, lam: RawLambda) -> RawLa
 
 /// Bind with check — try to lower alias bindings.
 /// Equivalent to OCaml's `bind_check`.
-fn bind_check(
-    b: &RawArena,
+fn bind_check<B: RawLambdaBuilder>(
+    b: &B,
     str_kind: LetKind,
     v: &Ident,
     arg: &RawLambda,
@@ -7900,8 +7926,8 @@ fn bind_check(
 
 /// Compile the default/exit case.
 /// Equivalent to OCaml's `comp_exit`.
-fn comp_exit<'p>(
-    b: &RawArena,
+fn comp_exit<'p, B: RawLambdaBuilder>(
+    b: &B,
     ctx: &[Ctx<'p>],
     m: &PatternMatching<'p>,
 ) -> Result<Compiled<'p>, Unused> {
@@ -7913,8 +7939,8 @@ fn comp_exit<'p>(
 
 /// Compile a match with multiple handlers (for split results).
 /// Equivalent to OCaml's `comp_match_handlers`.
-fn comp_match_handlers<'p>(
-    cx: MatchCx<'p, '_>,
+fn comp_match_handlers<'p, B: RawLambdaBuilder>(
+    cx: MatchCx<'p, '_, B>,
     comp_fun: &mut HalfCompiledCompiler<'p, '_>,
     partial: &Partial,
     ctx: &[Ctx<'p>],
@@ -7941,8 +7967,8 @@ fn comp_match_handlers<'p>(
 }
 
 /// Inner recursive function for comp_match_handlers.
-fn c_rec<'p>(
-    cx: MatchCx<'p, '_>,
+fn c_rec<'p, B: RawLambdaBuilder>(
+    cx: MatchCx<'p, '_, B>,
     comp_fun: &mut HalfCompiledCompiler<'p, '_>,
     partial: &Partial,
     arg: &RawLambda,
@@ -8047,8 +8073,8 @@ fn id_of_pattern(pa: &PatArena<'_>, ctx_ref: &TypeContext, pat: &Pattern) -> Opt
 
 /// Convert arg to a variable (bind if not already a variable).
 /// Equivalent to OCaml's `arg_to_var`.
-fn arg_to_var<'p>(
-    b: &RawArena,
+fn arg_to_var<'p, B: RawLambdaBuilder>(
+    b: &B,
     pa: &PatArena<'p>,
     ctx_ref: &TypeContext,
     arg: &RawLambda,
@@ -8065,7 +8091,7 @@ fn arg_to_var<'p>(
 
 /// Lambda unit value.
 /// Equivalent to OCaml's `Lambda.lambda_unit`.
-fn lambda_unit(b: &RawArena) -> RawLambda {
+fn lambda_unit<B: RawLambdaBuilder>(b: &B) -> RawLambda {
     b.unit()
 }
 
@@ -8078,8 +8104,8 @@ fn lambda_unit(b: &RawArena) -> RawLambda {
 /// Output: a lambda term, a jump summary
 ///
 /// Equivalent to OCaml's `compile_match`.
-fn compile_match<'p>(
-    cx: MatchCx<'p, '_>,
+fn compile_match<'p, B: RawLambdaBuilder>(
+    cx: MatchCx<'p, '_, B>,
     _repr: Option<()>,
     partial: &Partial,
     ctx: &[Ctx<'p>],
@@ -8091,8 +8117,8 @@ fn compile_match<'p>(
 
 /// [`compile_match`] on a matching the caller gives up, so its cases and
 /// default environment move on instead of being copied.
-fn compile_match_owned<'p>(
-    cx: MatchCx<'p, '_>,
+fn compile_match_owned<'p, B: RawLambdaBuilder>(
+    cx: MatchCx<'p, '_, B>,
     partial: &Partial,
     ctx: &[Ctx<'p>],
     m: PatternMatching<'p>,
@@ -8101,8 +8127,8 @@ fn compile_match_owned<'p>(
     compile_match_cow(cx, partial, ctx, Cow::Owned(m), next_raise_count)
 }
 
-fn compile_match_cow<'p>(
-    cx: MatchCx<'p, '_>,
+fn compile_match_cow<'p, B: RawLambdaBuilder>(
+    cx: MatchCx<'p, '_, B>,
     partial: &Partial,
     ctx: &[Ctx<'p>],
     m: Cow<'_, PatternMatching<'p>>,
@@ -8191,8 +8217,8 @@ fn compile_match_cow<'p>(
 
 /// Main dispatch for compiling half-compiled pattern matchings.
 /// Equivalent to OCaml's `do_compile_matching`.
-fn do_compile_matching<'p>(
-    cx: MatchCx<'p, '_>,
+fn do_compile_matching<'p, B: RawLambdaBuilder>(
+    cx: MatchCx<'p, '_, B>,
     partial: &Partial,
     ctx: &[Ctx<'p>],
     arg: &RawLambda,
@@ -8390,8 +8416,8 @@ fn do_compile_matching<'p>(
 
 /// Compile without test (divide_line + compile_match).
 /// Equivalent to OCaml's `compile_no_test`.
-fn compile_no_test<'p>(
-    cx: MatchCx<'p, '_>,
+fn compile_no_test<'p, B: RawLambdaBuilder>(
+    cx: MatchCx<'p, '_, B>,
     divide_fn: &dyn Fn(&[Ctx<'p>], &PatternMatching<'p>) -> MatchCell<'p>,
     up_ctx: &dyn Fn(&[Ctx<'p>]) -> Vec<Ctx<'p>>,
     partial: &Partial,
@@ -8409,8 +8435,8 @@ fn compile_no_test<'p>(
 ///
 /// We inline compile_test here to avoid borrow conflicts with next_raise_count
 /// being captured by both compile_fn and combine_fn closures.
-fn compile_test_wrapper<'p, K: Clone>(
-    cx: MatchCx<'p, '_>,
+fn compile_test_wrapper<'p, K: Clone, B: RawLambdaBuilder>(
+    cx: MatchCx<'p, '_, B>,
     partial: &Partial,
     divide_fn: &Divider<'p, '_, K>,
     combine_fn: &Combiner<'p, '_, K>,
@@ -8623,8 +8649,8 @@ fn start_ctx<'p>(n: usize) -> Vec<Ctx<'p>> {
 
 /// Check total: add a catch handler if jumps are not empty.
 /// Equivalent to OCaml's `check_total`.
-fn check_total<'p>(
-    b: &RawArena,
+fn check_total<'p, B: RawLambdaBuilder>(
+    b: &B,
     total: &Jumps<'p>,
     lambda: RawLambda,
     i: i32,
@@ -8675,21 +8701,27 @@ fn lower_dict_patterns<'p>(
 
 /// The type context, pattern arena and location arena the match compiler
 /// threads through its compile functions.
-#[derive(Clone, Copy)]
-struct MatchCx<'p, 'a> {
+struct MatchCx<'p, 'a, B: RawLambdaBuilder> {
     ctx_ref: &'a TypeContext,
     pa: &'p PatArena<'p>,
-    arena: &'a LocArena<'a>,
+    arena: &'a LocArena<'a, B>,
+}
+
+impl<'p, 'a, B: RawLambdaBuilder> Copy for MatchCx<'p, 'a, B> {}
+impl<'p, 'a, B: RawLambdaBuilder> Clone for MatchCx<'p, 'a, B> {
+    fn clone(&self) -> Self {
+        *self
+    }
 }
 
 /// The translation state a match is compiled in.
-pub struct MatchEnv<'a> {
+pub struct MatchEnv<'a, B: RawLambdaBuilder> {
     /// The type context the patterns' types live in.
     pub ctx_ref: &'a TypeContext,
     /// The typed tree the patterns live in.
     pub ta: &'a TypedArena,
     /// The arenas the compiled Lambda and its locations are built in.
-    pub arena: &'a LocArena<'a>,
+    pub arena: &'a LocArena<'a, B>,
     /// The static-raise counter, shared with the rest of the translation.
     pub next_raise_count: &'a mut i32,
 }
@@ -8697,8 +8729,8 @@ pub struct MatchEnv<'a> {
 /// `Matching.compile_matching` on the cases of `Matching.for_function`,
 /// `for_trywith` or `for_let`, which all lower their dict patterns first
 /// (`lower_dict_patterns`).
-pub fn compile_matching(
-    env: MatchEnv<'_>,
+pub fn compile_matching<B: RawLambdaBuilder>(
+    env: MatchEnv<'_, B>,
     handler_fun: impl FnOnce() -> RawLambda,
     arg: RawLambda,
     pat_act_list: Vec<(&Pattern, CaseAction)>,
@@ -8727,8 +8759,8 @@ pub fn compile_matching(
     )
 }
 
-fn compile_matching_unresolved<'p>(
-    cx: MatchCx<'p, '_>,
+fn compile_matching_unresolved<'p, B: RawLambdaBuilder>(
+    cx: MatchCx<'p, '_, B>,
     handler_fun: impl FnOnce() -> RawLambda,
     arg: RawLambda,
     pat_act_list: Vec<(&'p Pattern, CaseAction)>,
@@ -8780,7 +8812,7 @@ fn compile_matching_unresolved<'p>(
 
 /// Build a match failure exception raise.
 /// Equivalent to OCaml's `partial_function`.
-pub fn partial_function(arena: &LocArena<'_>, loc: Location) -> RawLambda {
+pub fn partial_function<B: RawLambdaBuilder>(arena: &LocArena<'_, B>, loc: Location) -> RawLambda {
     let b = arena.b;
     // OCaml matching.ml:2688-2691 embeds the source position in the payload.
     arena.require_locations();
@@ -8823,8 +8855,8 @@ pub fn partial_function(arena: &LocArena<'_>, loc: Location) -> RawLambda {
 
 /// Compile a match for a function body.
 /// Equivalent to OCaml's `for_function`.
-pub fn for_function(
-    env: MatchEnv<'_>,
+pub fn for_function<B: RawLambdaBuilder>(
+    env: MatchEnv<'_, B>,
     loc: Location,
     param: RawLambda,
     pat_act_list: Vec<(&Pattern, CaseAction)>,
@@ -8843,8 +8875,8 @@ pub fn for_function(
 
 /// Compile a match for a try-with handler.
 /// Equivalent to OCaml's `for_trywith`.
-pub fn for_trywith(
-    env: MatchEnv<'_>,
+pub fn for_trywith<B: RawLambdaBuilder>(
+    env: MatchEnv<'_, B>,
     param: RawLambda,
     pat_act_list: Vec<(&Pattern, CaseAction)>,
 ) -> RawLambda {
@@ -8861,8 +8893,8 @@ pub fn for_trywith(
 
 /// Simple let matching.
 /// Equivalent to OCaml's `simple_for_let`.
-pub fn simple_for_let(
-    env: MatchEnv<'_>,
+pub fn simple_for_let<B: RawLambdaBuilder>(
+    env: MatchEnv<'_, B>,
     loc: Location,
     param: RawLambda,
     pat: &Pattern,
@@ -8881,8 +8913,8 @@ pub fn simple_for_let(
 
 /// Compile a let binding match (with optimization for simple cases).
 /// Equivalent to OCaml's `for_let`.
-pub fn for_let(
-    env: MatchEnv<'_>,
+pub fn for_let<B: RawLambdaBuilder>(
+    env: MatchEnv<'_, B>,
     loc: Location,
     param: RawLambda,
     pat: &Pattern,
@@ -8904,8 +8936,8 @@ pub fn for_let(
 
 /// Compile a tupled function match.
 /// Equivalent to OCaml's `for_tupled_function`.
-pub fn for_tupled_function(
-    env: MatchEnv<'_>,
+pub fn for_tupled_function<B: RawLambdaBuilder>(
+    env: MatchEnv<'_, B>,
     loc: Location,
     paraml: &[Ident],
     pats_act_list: Vec<(Vec<&Pattern>, CaseAction)>,
@@ -8933,8 +8965,8 @@ pub fn for_tupled_function(
     )
 }
 
-fn for_tupled_function_unresolved<'p>(
-    cx: MatchCx<'p, '_>,
+fn for_tupled_function_unresolved<'p, B: RawLambdaBuilder>(
+    cx: MatchCx<'p, '_, B>,
     loc: Location,
     paraml: &[Ident],
     pats_act_list: Vec<(Vec<&'p Pattern>, CaseAction)>,
@@ -9106,8 +9138,8 @@ fn flatten_precompiled<'p>(
 /// Compiled_flattened: a comp_fun argument to comp_match_handlers.
 /// Hence it needs a fourth argument (arg), which it ignores.
 /// Equivalent to OCaml's `compile_flattened`.
-fn compile_flattened<'p>(
-    cx: MatchCx<'p, '_>,
+fn compile_flattened<'p, B: RawLambdaBuilder>(
+    cx: MatchCx<'p, '_, B>,
     partial: &Partial,
     ctx: &[Ctx<'p>],
     _arg: &RawLambda,
@@ -9140,8 +9172,8 @@ fn compile_flattened<'p>(
 
 /// Compile a multiple-match expression (tuple patterns on arguments).
 /// Equivalent to OCaml's `do_for_multiple_match`.
-fn do_for_multiple_match<'p>(
-    cx: MatchCx<'p, '_>,
+fn do_for_multiple_match<'p, B: RawLambdaBuilder>(
+    cx: MatchCx<'p, '_, B>,
     loc: Location,
     paraml: Vec<RawLambda>,
     pat_act_list: Vec<(&'p Pattern, CaseAction)>,
@@ -9272,8 +9304,8 @@ fn do_for_multiple_match<'p>(
 
 /// Extract a variable from a param, binding if needed.
 /// Equivalent to OCaml's `param_to_var`.
-fn param_to_var(
-    b: &RawArena,
+fn param_to_var<B: RawLambdaBuilder>(
+    b: &B,
     ctx_ref: &TypeContext,
     param: &RawLambda,
 ) -> (Ident, Option<RawLambda>) {
@@ -9285,7 +9317,11 @@ fn param_to_var(
 
 /// Optionally bind a variable.
 /// Equivalent to OCaml's `bind_opt`.
-fn bind_opt(b: &RawArena, v_eo: (Ident, Option<RawLambda>), k: RawLambda) -> RawLambda {
+fn bind_opt<B: RawLambdaBuilder>(
+    b: &B,
+    v_eo: (Ident, Option<RawLambda>),
+    k: RawLambda,
+) -> RawLambda {
     match v_eo {
         (_, None) => k,
         (v, Some(e)) => bind(b, LetKind::Strict, &v, &e, k),
@@ -9294,8 +9330,8 @@ fn bind_opt(b: &RawArena, v_eo: (Ident, Option<RawLambda>), k: RawLambda) -> Raw
 
 /// Compile a multiple match expression.
 /// Equivalent to OCaml's `for_multiple_match`.
-pub fn for_multiple_match(
-    env: MatchEnv<'_>,
+pub fn for_multiple_match<B: RawLambdaBuilder>(
+    env: MatchEnv<'_, B>,
     loc: Location,
     paraml: Vec<RawLambda>,
     pat_act_list: Vec<(&Pattern, CaseAction)>,
@@ -9336,6 +9372,7 @@ pub fn for_multiple_match(
 
 #[cfg(test)]
 mod tests {
+    use crate::raw_lambda::RawArena;
     fn empty_ctxs<'p>(n: usize) -> Vec<super::Ctx<'p>> {
         (0..n)
             .map(|_| super::Ctx {
