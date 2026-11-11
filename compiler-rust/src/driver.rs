@@ -6590,6 +6590,7 @@ fn compile_source_to_js_with_options_inner(
 
     // Type check
     let type_ctx = fresh_type_context();
+    type_ctx.set_location_namespace(filename);
     crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
     let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
     tctx.experimental_let_unwrap = experimental_let_unwrap;
@@ -7809,6 +7810,7 @@ pub fn typecheck_interface_source(
 
     // Type check
     let type_ctx = fresh_type_context();
+    type_ctx.set_location_namespace(filename);
     crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
     let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
     tctx.experimental_let_unwrap = experimental_let_unwrap;
@@ -10148,6 +10150,7 @@ pub fn typecheck_structure_for_tooling(
         ppx::collect_leading_builtin_warning_attribute_specs(structure, arena)
             .expect("the frontend read these attributes");
     let type_ctx = fresh_type_context();
+    type_ctx.set_location_namespace(filename);
     let (typed, typed_arena) = {
         let (mut tctx, env) = in_process_type_check_context(
             &type_ctx,
@@ -10198,6 +10201,7 @@ pub fn typecheck_signature_for_tooling(
         ppx::collect_leading_builtin_warning_signature_attribute_specs(signature, arena)
             .expect("the frontend read these attributes");
     let type_ctx = fresh_type_context();
+    type_ctx.set_location_namespace(filename);
     let (typed, typed_arena) = {
         let (mut tctx, env) = in_process_type_check_context(
             &type_ctx,
@@ -10289,6 +10293,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     let env_setup_span = info_span!("compiler.env_setup").entered();
     let env_setup_start = crate::timing::enabled().then(std::time::Instant::now);
     let type_ctx = fresh_type_context();
+    type_ctx.set_location_namespace(filename);
     let (mut tctx, env) = in_process_type_check_context(
         &type_ctx,
         arena,
@@ -11295,6 +11300,7 @@ pub fn typecheck_preprocessed_signature_in_process(
             .expect("the frontend read these attributes");
 
     let type_ctx = fresh_type_context();
+    type_ctx.set_location_namespace(filename);
     let (mut tctx, env) = in_process_type_check_context(
         &type_ctx,
         arena,

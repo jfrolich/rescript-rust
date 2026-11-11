@@ -670,7 +670,8 @@ pub struct TypeContext {
     /// handles.
     decl_locs: super::decl_loc::OwnedDeclLocs,
     decl_loc_owner: u32,
-    next_parse_location_scope: Cell<u32>,
+    next_identity_scope: Cell<u32>,
+    location_namespace: Cell<Option<u64>>,
 
     /// Parser warnings of the snippets error reports re-parse
     /// (`Error_message_utils.Parser.parse_source`), printed before the error
@@ -1188,7 +1189,8 @@ impl TypeContext {
             usage: RefCell::new(super::usage::UsageTables::default()),
             decl_locs: Default::default(),
             decl_loc_owner: super::decl_loc::next_table_owner(),
-            next_parse_location_scope: Cell::new(1),
+            next_identity_scope: Cell::new(1),
+            location_namespace: Cell::new(None),
             reparse_warnings: RefCell::new(Vec::new()),
             report_warning_config: RefCell::new(None),
             variant_layouts: RefCell::new(Vec::new()),
@@ -4238,13 +4240,32 @@ impl TypeContext {
         super::Path::pdot_pos(*f(&Arc::new(*prefix)), *text, *pos)
     }
 
-    /// A scope for one parser arena or decoded interface. Uses the existing
-    /// table-owner namespace and never reuses an ordinal.
+    /// Select the stable namespace before allocating this unit's locations,
+    /// shape blocks or private interface imports.
+    pub(crate) fn set_location_namespace(&self, unit: &str) {
+        use std::hash::{Hash, Hasher};
+        assert_eq!(self.next_identity_scope.get(), 1);
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        ("source unit", unit).hash(&mut hash);
+        self.location_namespace.set(Some(hash.finish()));
+    }
+
+    /// A scope for one parser arena or decoded interface. Named compilations
+    /// use a unit-local ordinal, not the worker's table-owner counter. Anonymous
+    /// contexts (such as standalone identity tests) retain process uniqueness.
     pub(crate) fn fresh_location_scope(&self) -> u64 {
-        let next = self.next_parse_location_scope.get();
-        self.next_parse_location_scope
+        let next = self.next_identity_scope.get();
+        self.next_identity_scope
             .set(next.checked_add(1).expect("location scopes exhausted"));
-        ((self.decl_loc_owner as u64) << 32) | next as u64
+        if let Some(namespace) = self.location_namespace.get() {
+            super::variant_runtime::identity_in_namespace(namespace, next as u64)
+        } else {
+            ((self.decl_loc_owner as u64) << 32) | next as u64
+        }
+    }
+
+    pub(crate) fn fresh_shape_allocation(&self) -> super::ShapeAllocation {
+        super::ShapeAllocation::in_namespace(self.fresh_location_scope(), 0)
     }
 
     pub(crate) fn intern_loc_with_identity(
@@ -4362,7 +4383,10 @@ impl TypeContext {
         files: &'a dyn Fn(crate::intern::StrIdx) -> crate::intern::StrIdx,
     ) -> super::decl_loc::DeclLocImport<'a> {
         let mut table = table.clone();
-        let scopes = table.remap_for_import(files);
+        let namespace = self.fresh_location_scope();
+        let scopes = table.remap_for_import_with(files, |scope| {
+            super::variant_runtime::identity_in_namespace(namespace, scope)
+        });
         let (base, instances) = self.decl_locs.append_portable(&table);
         super::decl_loc::DeclLocImport {
             kind: super::decl_loc::DeclLocKind::Local,
@@ -4371,6 +4395,7 @@ impl TypeContext {
             instances,
             files,
             scopes,
+            namespace: Some(namespace),
         }
     }
 
@@ -4387,6 +4412,7 @@ impl TypeContext {
             instances: Vec::new(),
             files,
             scopes: Default::default(),
+            namespace: None,
         }
     }
 
