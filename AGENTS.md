@@ -433,6 +433,8 @@ These principles apply to all performance-sensitive Rust code in the compiler, e
 
 - **Always benchmark with `hyperfine`** — Every performance change must have before/after numbers. "Should be faster" is not evidence. Use `hyperfine` with multiple runs and a representative `--prepare` step for clean-build measurements, then report the mean, standard deviation, and min/max range.
 
+- **CI blocks instruction increases** — The `Instruction count` workflow counts the instructions of a clean `tests/tests` build (cachegrind, one worker thread) with the pull request's `rescript` and its base's, both built like a release, and fails when the pull request's executes more than 0.1% more. When a change has to cost more, give one of its commits an `Instruction-count-increase: <why>` trailer. On Linux, `scripts/compare_build_instructions.py` runs the same comparison locally.
+
 - **Profile before optimizing** — Use flamegraphs (`cargo flamegraph`), `perf stat` (cache misses, branch misses), or DHAT (heap profiling) to find actual bottlenecks. Don't guess.
 
 - **Measure struct sizes** — Add `assert_eq!(std::mem::size_of::<T>(), N)` tests for critical types. Enum size regressions (someone adds a large variant) silently degrade cache performance across the entire codebase.

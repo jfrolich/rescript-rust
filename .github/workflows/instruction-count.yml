@@ -1,0 +1,216 @@
+name: Instruction count
+
+# Counts the instructions a clean build of tests/tests executes with the
+# pull request's compiler and with its base's (scripts/compare_build_instructions.py),
+# and fails when the pull request's executes more than 0.1% more: a change
+# that adds instructions makes every build slower.
+#
+# Cachegrind counts instructions in software, because GitHub's runners have
+# no hardware counters. With one worker thread the count of one executable
+# varies by about 0.1% between runs, hence the threshold.
+#
+# An increase can be accepted by a commit in the pull request whose message
+# has an `Instruction-count-increase:` trailer saying why.
+#
+# Trunk runs build and cache the executable of each trunk commit, so a pull
+# request normally builds only its own. When the base's is not cached, the
+# base job builds it at the same time.
+
+on:
+  pull_request:
+  push:
+    branches: [ocaml-to-rust-rewrite]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: instruction-count-${{ github.ref }}
+  # A trunk run is left to finish, so that it caches its executable.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # The shipped configuration without profile-guided optimization: fat LTO
+  # and one codegen unit. With more units, how the code happens to be
+  # partitioned moves the count by up to 1%.
+  CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "1"
+  CACHE_PREFIX: instruction-count-rescript-v1
+
+jobs:
+  # The executable of the commit under test: the pull request merged into
+  # its base, or a trunk commit.
+  head:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rewatch -> target
+          shared-key: instruction-count
+          save-if: ${{ github.event_name == 'push' }}
+
+      - name: Build
+        run: |
+          cargo build --release --locked --manifest-path rewatch/Cargo.toml
+          mkdir -p executable
+          cp rewatch/target/release/rescript executable/
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: rescript-head
+          path: executable/rescript
+          retention-days: 3
+
+      - name: Cache the executable for pull requests based on this commit
+        if: ${{ github.event_name == 'push' }}
+        uses: actions/cache/save@v5
+        with:
+          path: executable/rescript
+          key: ${{ env.CACHE_PREFIX }}-${{ github.sha }}
+
+  # The executable of the parent commit: the base of a pull request, or the
+  # previous trunk commit. A trunk run only reuses a cached one, for the
+  # report; it does not build it.
+  base:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    outputs:
+      available: ${{ steps.result.outputs.available }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 2
+
+      - name: Find the parent commit
+        id: parent
+        run: echo "sha=$(git rev-parse HEAD^1)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache/restore@v5
+        id: cached
+        with:
+          path: executable/rescript
+          key: ${{ env.CACHE_PREFIX }}-${{ steps.parent.outputs.sha }}
+
+      - name: Check out the parent commit
+        if: ${{ steps.cached.outputs.cache-hit != 'true' && github.event_name == 'pull_request' }}
+        run: git checkout --detach "${{ steps.parent.outputs.sha }}"
+
+      - name: Install the pinned Rust toolchain
+        if: ${{ steps.cached.outputs.cache-hit != 'true' && github.event_name == 'pull_request' }}
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        if: ${{ steps.cached.outputs.cache-hit != 'true' && github.event_name == 'pull_request' }}
+        with:
+          workspaces: rewatch -> target
+          shared-key: instruction-count
+          save-if: false
+
+      - name: Build
+        if: ${{ steps.cached.outputs.cache-hit != 'true' && github.event_name == 'pull_request' }}
+        run: |
+          cargo build --release --locked --manifest-path rewatch/Cargo.toml
+          mkdir -p executable
+          cp rewatch/target/release/rescript executable/
+
+      - name: Record whether there is an executable
+        id: result
+        run: |
+          if [[ -x executable/rescript ]]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No cached executable of the parent commit; nothing to compare against."
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/upload-artifact@v7
+        if: ${{ steps.result.outputs.available == 'true' }}
+        with:
+          name: rescript-base
+          path: executable/rescript
+          retention-days: 3
+
+  compare:
+    needs: [head, base]
+    if: ${{ needs.base.outputs.available == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 2
+
+      - uses: ./.github/actions/setup-node
+
+      - name: Install Valgrind
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends valgrind
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: rescript-*
+          path: executables
+
+      # Both executables build the parent's tests/tests, so a pull request
+      # that adds or edits tests does not change what is measured. Each
+      # builds its own commit's runtime, which its executable embeds.
+      #
+      # The two checkouts are at paths of the same depth and length: the
+      # compiler walks and compares source paths, and a deeper checkout
+      # alone costs about 0.08% more instructions.
+      - name: Prepare the two checkouts
+        run: |
+          chmod +x executables/*/rescript
+          parent=$(git rev-parse HEAD^1)
+          git worktree add --detach "$RUNNER_TEMP/base" "$parent"
+          git worktree add --detach "$RUNNER_TEMP/head" HEAD
+          git -C "$RUNNER_TEMP/head" restore --source="$parent" --worktree -- tests/tests tests/dependencies
+          for side in base head; do
+            (cd "$RUNNER_TEMP/$side" && yarn install --immutable)
+          done
+
+      # Only a real trailer counts: the line has to be in the message's last
+      # paragraph of `Key: value` lines, as git interpret-trailers reads it.
+      - name: Find an accepted increase
+        id: accepted
+        if: ${{ github.event_name == 'pull_request' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          reasons=""
+          while read -r message; do
+            reason=$(printf '%s' "$message" | base64 -d |
+              git interpret-trailers --parse | sed -n 's/^Instruction-count-increase: *//Ip')
+            reasons+=${reason:+$reason$'\n'}
+          done < <(gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/commits?per_page=100" \
+            --jq '.[].commit.message | @base64')
+          if [[ -n "$reasons" ]]; then
+            printf 'Accepted increase: %s' "$reasons"
+            echo "flag=--allow-increase" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Compare
+        run: |
+          python3 scripts/compare_build_instructions.py \
+            --base executables/rescript-base/rescript "$RUNNER_TEMP/base" \
+            --head executables/rescript-head/rescript "$RUNNER_TEMP/head" \
+            --runs 5 \
+            --work-dir "$RUNNER_TEMP/cachegrind" \
+            --summary "$GITHUB_STEP_SUMMARY" \
+            ${{ steps.accepted.outputs.flag }} \
+            ${{ github.event_name == 'push' && '--allow-increase' || '' }}
+
+      - uses: actions/upload-artifact@v7
+        if: ${{ always() }}
+        with:
+          name: cachegrind
+          path: ${{ runner.temp }}/cachegrind
+          if-no-files-found: ignore
+          retention-days: 7
