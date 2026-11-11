@@ -6,7 +6,7 @@
 //! # Concurrency
 //!
 //! Unlike the OCaml implementation which uses a global `currentstamp` counter,
-//! this implementation requires an [`IdGenerator`] to be passed explicitly.
+//! this implementation requires an [`IdGenerator`](crate::context::IdGenerator) to be passed explicitly.
 //! This enables concurrent compilation of multiple files. The legacy
 //! [`Ident::create_local`] counter is thread-local so parallel in-process
 //! compilations can reset OCaml-style stamps without racing each other.
@@ -197,7 +197,7 @@ impl Serialize for Ident {
 impl Ident {
     /// Create a new identifier with explicit stamp and flags.
     ///
-    /// Prefer using [`IdGenerator::create`] for normal identifier creation.
+    /// Prefer using [`IdGenerator::create`](crate::context::IdGenerator::create) for normal identifier creation.
     #[inline]
     pub fn new(name: impl Into<Name>, stamp: i32, flags: IdentFlags) -> Self {
         Self {
@@ -223,7 +223,7 @@ impl Ident {
     /// Create a local identifier with an auto-incrementing stamp.
     ///
     /// This uses a thread-local counter for stamp generation. For new compiler
-    /// code, prefer using [`IdGenerator`] explicitly so the counter is tied to
+    /// code, prefer using [`IdGenerator`](crate::context::IdGenerator) explicitly so the counter is tied to
     /// the current compilation context.
     ///
     /// This is mainly useful for tests and simple cases where

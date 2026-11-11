@@ -1343,7 +1343,7 @@ impl ParseArena {
         self.static_pat_from_variant_spread_attr_str
     }
 
-    /// Create a Located<LidentIdx> with the placeholder longident and given location.
+    /// Create a `Located<LidentIdx>` with the placeholder longident and given location.
     pub fn placeholder_located(&self, loc: LocIdx) -> Located<LidentIdx> {
         Located {
             txt: self.placeholder_lid(),
@@ -2517,7 +2517,7 @@ impl ParseArena {
         self.get_string(str_idx)
     }
 
-    /// Convert a Located<LidentIdx> to Located<Longident>.
+    /// Convert a `Located<LidentIdx>` to `Located<Longident>`.
     /// Useful when you need to match on the Longident structure.
     pub fn to_longident_loc(
         &self,
