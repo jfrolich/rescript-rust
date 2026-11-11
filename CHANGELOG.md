@@ -42,6 +42,8 @@
 
 #### :house: Internal
 
+- Load a compiled module's interface into its first dependent without decoding it again, and keep the syntax tree nodes the built-in frontend pass leaves unchanged instead of copying them. https://github.com/jfrolich/rescript-rust/pull/89 https://github.com/jfrolich/rescript-rust/pull/85
+
 - Compute the item digests and item references of a compiled module's interface once, when it is published, instead of decoding the stored interface again for each. https://github.com/jfrolich/rescript-rust/pull/87
 
 - Type-check faster: lower argument levels directly, settle the checks before binding a type variable in one walk, and skip the inclusion check of a unit against its own inferred signature. https://github.com/jfrolich/rescript-rust/pull/84
