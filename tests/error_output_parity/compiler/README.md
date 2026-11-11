@@ -34,3 +34,8 @@ the harness copies it and its `.resi` there and compiles the interface with
 OCaml first, while `rescript bsc -bs-read-cmi` types the `.resi` itself.
 Errors only a compiled file can cause (a corrupt or foreign `.cmi`, a missing
 `.cmj`) have no case: the Rust compiler never reads one.
+
+External PPXs are intentionally unsupported by Rust. The former wrong-magic
+case now lives in `rewatch/tests/fixtures/external-ppx` and is checked by
+`rewatch/tests/compile/26-external-ppx-rejected.sh`: the compiler rejects the
+flag before running the executable, rather than comparing its output to OCaml.

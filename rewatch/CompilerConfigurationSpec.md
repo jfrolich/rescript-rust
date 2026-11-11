@@ -27,7 +27,7 @@ recommended for new projects.
 | gentypeconfig         | Gentype                 |                                                             |     [x]      |
 | compiler-flags        | array of string         |                                                             |     [x]      |
 | warnings              | Warnings                |                                                             |     [x]      |
-| ppx-flags             | array of string         |                                                             |     [x]      |
+| ppx-flags             | array of string         | Built-in spice only; external PPXs are rejected              |     [x]      |
 | pp-flags              | array of string         |                                                             |     [_]      |
 | js-post-build         | Js-Post-Build           | Path respects `in-source` setting; stdout/stderr are logged |     [x]      |
 | package-specs         | array of Module-Format  |                                                             |     [_]      |

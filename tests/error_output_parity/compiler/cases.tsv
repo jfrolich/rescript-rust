@@ -15,7 +15,6 @@ tests/error_output_parity/compiler/cases/no_builtin_raw_extension.res	-w +A -bs-
 tests/error_output_parity/compiler/cases/no_builtin_normal_external.res	-w +A -bs-jsx 4 -color never -bs-no-builtin-ppx
 tests/error_output_parity/compiler/cases/no_builtin_let_unwrap.res	-w +A -bs-jsx 4 -color never -bs-no-builtin-ppx
 tests/error_output_parity/compiler/cases/no_builtin_js_delimiter_success.res	-w +A -bs-jsx 4 -color never -bs-no-builtin-ppx
-tests/error_output_parity/compiler/cases/external_ppx_wrong_magic.res	-w +A -bs-jsx 4 -color never -ppx tests/error_output_parity/compiler/cases/ppx_wrong_magic.sh
 tests/error_output_parity/compiler/cases/warn_error_unused_variable.res	-w +A -warn-error +A -bs-jsx 4 -color never
 tests/error_output_parity/compiler/cases/parmatch_all_guarded.res	-w +A -warn-error +8 -bs-jsx 4 -color never
 .parity-cache/error-output/compiler/compunit_deprecated_inclusion.res	-w +A -bs-jsx 4 -color never -bs-read-cmi -I .parity-cache/error-output/compiler

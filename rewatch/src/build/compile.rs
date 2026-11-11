@@ -716,10 +716,11 @@ pub fn compile(
     let pre_compile_result: Result<()> = std::thread::scope(|scope| {
         spawn_runtime_precompile(scope, || {
             let _parent = parent_span.enter();
-            pre_compile_runtime_modules(
+            pre_compile_runtime_modules_with_mode(
                 &build_state.module_registry,
                 &build_state.build_state.compiler_info.runtime_path,
                 RuntimeStore::of_build(build_state).as_ref(),
+                build_state.check_only,
             )
         })
         .and_then(join_runtime_precompile)
@@ -2279,6 +2280,7 @@ fn build_package_compiler_options(
         };
 
     Ok(rescript_compiler::driver::CompilerOptions {
+        check_only: build_command_state.check_only,
         include_paths,
         runtime_path,
         open_modules,
@@ -2955,7 +2957,13 @@ pub(crate) struct RuntimeStore {
 
 impl RuntimeStore {
     pub(crate) fn of_build(build_state: &BuildCommandState) -> Option<Self> {
-        let root = build_state.packages.values().find(|package| package.is_root)?;
+        if build_state.check_only {
+            return None;
+        }
+        let root = build_state
+            .packages
+            .values()
+            .find(|package| package.is_root)?;
         Some(Self {
             db: super::state_db::path(root),
             compiler_hash: build_state.compiler_info.bsc_hash.to_hex().to_string(),
@@ -3051,6 +3059,15 @@ pub(crate) fn pre_compile_runtime_modules(
     runtime_root: &Path,
     store: Option<&RuntimeStore>,
 ) -> Result<()> {
+    pre_compile_runtime_modules_with_mode(registry, runtime_root, store, false)
+}
+
+pub(crate) fn pre_compile_runtime_modules_with_mode(
+    registry: &Mutex<ModuleRegistry>,
+    runtime_root: &Path,
+    store: Option<&RuntimeStore>,
+    check_only: bool,
+) -> Result<()> {
     let _span = info_span!("build.runtime_precompile").entered();
     let runtime_timing_enabled =
         std::env::var_os("RESCRIPT_RUNTIME_TIMINGS").is_some() || module_timings_enabled();
@@ -3095,12 +3112,13 @@ pub(crate) fn pre_compile_runtime_modules(
         return Ok(());
     }
 
-    let runtime_modules = compile_runtime_sources(
+    let runtime_modules = compile_runtime_sources_with_mode(
         registry,
         runtime_root,
         &runtime_path,
         &runtime_config,
         runtime_paths,
+        check_only,
     )?;
     if let Some((store, key)) = &store_key {
         store_runtime_interfaces(registry, store, key, &runtime_modules);
@@ -3159,6 +3177,24 @@ pub(crate) fn compile_runtime_sources(
     runtime_config: &config::Config,
     runtime_paths: Vec<(String, PathBuf)>,
 ) -> Result<Vec<RuntimeModuleSource>> {
+    compile_runtime_sources_with_mode(
+        registry,
+        runtime_root,
+        runtime_path,
+        runtime_config,
+        runtime_paths,
+        false,
+    )
+}
+
+pub(crate) fn compile_runtime_sources_with_mode(
+    registry: &Mutex<ModuleRegistry>,
+    runtime_root: &Path,
+    runtime_path: &Path,
+    runtime_config: &config::Config,
+    runtime_paths: Vec<(String, PathBuf)>,
+    check_only: bool,
+) -> Result<Vec<RuntimeModuleSource>> {
     let runtime_compile_threads = super::pools::compile_threads().max(2);
     // Runtime module compilation runs inside Rayon workers, so the outer
     // precompile thread stack is not enough for very large runtime IR cleanup.
@@ -3181,6 +3217,7 @@ pub(crate) fn compile_runtime_sources(
             runtime_path,
             runtime_config,
             &runtime_modules,
+            check_only,
         )
     })?;
     Ok(runtime_modules)
@@ -3213,6 +3250,7 @@ fn compile_runtime_modules_parallel(
     runtime_path: &Path,
     runtime_config: &config::Config,
     runtime_modules: &[RuntimeModuleSource],
+    check_only: bool,
 ) -> Result<()> {
     let (mut pending_deps, dependents) = runtime_dependency_graph(runtime_modules);
     let priorities = runtime_critical_path_priorities(runtime_modules, &dependents);
@@ -3256,6 +3294,7 @@ fn compile_runtime_modules_parallel(
                             runtime_config,
                             module,
                             registry_snapshot,
+                            check_only,
                         ),
                     },
                     move |message| RuntimeCompletionMsg {
@@ -3310,6 +3349,7 @@ fn compile_runtime_modules_parallel(
             runtime_config,
             runtime_modules,
             &completed,
+            check_only,
         )?;
     }
 
@@ -3323,6 +3363,7 @@ fn compile_runtime_cycle_remainder_serial(
     runtime_config: &config::Config,
     runtime_modules: &[RuntimeModuleSource],
     completed: &[bool],
+    check_only: bool,
 ) -> Result<()> {
     debug!("runtime dependency graph has a cycle; compiling remaining modules serially");
     let worker_registry_template = registry.lock().unwrap().for_worker_snapshot();
@@ -3338,6 +3379,7 @@ fn compile_runtime_cycle_remainder_serial(
             runtime_config,
             &runtime_modules[idx],
             registry_snapshot,
+            check_only,
         )?;
     }
     Ok(())
@@ -3350,8 +3392,9 @@ fn compile_runtime_module_from_source(
     runtime_config: &config::Config,
     module: &RuntimeModuleSource,
     registry_snapshot: ModuleRegistry,
+    check_only: bool,
 ) -> Result<()> {
-    let options = runtime_compiler_options(
+    let mut options = runtime_compiler_options(
         runtime_root,
         runtime_path,
         &module.module_name,
@@ -3359,6 +3402,7 @@ fn compile_runtime_module_from_source(
         runtime_config,
     );
 
+    options.check_only = check_only;
     let mut local_registry = registry_snapshot;
     let has_runtime_interface = module.resi.is_some();
     let mut interface_pers_struct = None;
@@ -4321,6 +4365,28 @@ fn finish_in_process_js_inner(
     // The warnings bsc prints to stderr, filtered like the subprocess path.
     let compiler_warnings = std::mem::take(&mut pre_js.warnings);
     let warning = visible_compiler_warnings(&compiler_warnings, package.is_local_dep);
+    if build_command_state.check_only {
+        let registry_updates = js_metadata_registry_updates_for_package(
+            &module_name,
+            package,
+            build_command_state.get_root_config(),
+            source_abs,
+            false,
+            AHashMap::new(),
+            AHashMap::new(),
+            Default::default(),
+            is_runtime,
+            has_interface,
+            interface_registry_update,
+            pre_js.pers_struct,
+        );
+        return Ok(InProcessModuleResult {
+            warning,
+            gentype_output: None,
+            registry_updates: send_js_metadata_ready(metadata_tx, module_name, registry_updates),
+        });
+    }
+
     // GenType runs once the JavaScript is written (js_implementation.ml:164-171).
     let gentype = pre_js.gentype.take();
     let _span = if tracing::enabled!(tracing::Level::INFO) {
@@ -4671,6 +4737,7 @@ mod tests {
 
     fn test_package(name: &str, path: PathBuf) -> Package {
         Package {
+            check_only: false,
             name: name.to_string(),
             config: config::tests::create_config(config::tests::CreateConfigArgs {
                 name: name.to_string(),

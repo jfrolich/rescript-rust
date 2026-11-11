@@ -194,6 +194,7 @@ fn run_main(otel_enabled: bool) -> Result<()> {
                             kinds: build_args.dump.clone(),
                             dir,
                         }),
+                    build_args.check_only,
                 )
             });
             match build_result {

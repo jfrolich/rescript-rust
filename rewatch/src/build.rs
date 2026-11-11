@@ -230,12 +230,24 @@ fn executable_hash(path: &Path) -> Option<blake3::Hash> {
 }
 
 pub fn get_compiler_info(project_context: &ProjectContext) -> Result<CompilerInfo> {
+    get_compiler_info_with_mode(project_context, false)
+}
+
+fn get_compiler_info_with_mode(
+    project_context: &ProjectContext,
+    check_only: bool,
+) -> Result<CompilerInfo> {
     // Builds compile with the compiler linked into this executable, so its
     // identity invalidates previous builds.
     let bsc_path = std::env::current_exe()
         .and_then(|path| path.canonicalize())
         .context("Could not resolve the rescript executable")?;
-    let bsc_hash = executable_hash(&bsc_path).ok_or(anyhow!(
+    let bsc_hash = (if check_only {
+        helpers::compute_file_hash(&bsc_path)
+    } else {
+        executable_hash(&bsc_path)
+    })
+    .ok_or(anyhow!(
         "Failed to compute bsc hash for {}",
         bsc_path.to_string_lossy()
     ))?;
@@ -260,6 +272,32 @@ pub fn initialize_build(
     features: Option<Vec<String>>,
     source_map_command: SourceMapCommand,
 ) -> Result<BuildCommandState> {
+    initialize_build_with_mode(
+        default_timing,
+        filter,
+        show_progress,
+        path,
+        plain_output,
+        warn_error,
+        prod,
+        features,
+        source_map_command,
+        false,
+    )
+}
+
+fn initialize_build_with_mode(
+    default_timing: Option<Duration>,
+    filter: &Option<regex::Regex>,
+    show_progress: bool,
+    path: &Path,
+    plain_output: bool,
+    warn_error: Option<String>,
+    prod: bool,
+    features: Option<Vec<String>>,
+    source_map_command: SourceMapCommand,
+    check_only: bool,
+) -> Result<BuildCommandState> {
     let _span = info_span!(
         "build.initialize",
         working_dir = %path.display(),
@@ -271,7 +309,7 @@ pub fn initialize_build(
     // Hashing the compiler binary is independent of package discovery, so
     // overlap the two.
     let (compiler, packages) = std::thread::scope(|scope| {
-        let compiler = scope.spawn(|| get_compiler_info(&project_context));
+        let compiler = scope.spawn(|| get_compiler_info_with_mode(&project_context, check_only));
         let packages = packages::make(filter, &project_context, show_progress, prod, features.as_ref());
         let compiler = compiler
             .join()
@@ -279,17 +317,32 @@ pub fn initialize_build(
         (compiler, packages)
     });
     let compiler = compiler?;
-    let packages = packages?;
+    let mut packages = packages?;
+    for package in packages.values_mut() {
+        package.check_only = check_only;
+    }
     phase_mark("init:packages-make");
 
     let source_map_args = project_context
         .get_root_config()
         .get_source_map_args(source_map_command);
     // Read before `verify_compiler_info` may clean a package's build state.
-    let metas = compiler_info::read_metas(&packages);
+    let metas = if check_only {
+        Default::default()
+    } else {
+        compiler_info::read_metas(&packages)
+    };
     let recorded_outputs = clean::recorded_outputs(&metas);
-    let compiler_check =
-        compiler_info::verify_compiler_info_with(&packages, &compiler, &source_map_args, &metas);
+    let compiler_check = if check_only {
+        None
+    } else {
+        Some(compiler_info::verify_compiler_info_with(
+            &packages,
+            &compiler,
+            &source_map_args,
+            &metas,
+        ))
+    };
 
     if !packages::validate_packages_dependencies(&packages) {
         return Err(anyhow!("Failed to validate package dependencies"));
@@ -305,24 +358,29 @@ pub fn initialize_build(
         source_map_command,
     );
     phase_mark("init:validate");
+    build_state.check_only = check_only;
     build_state.recorded_outputs = recorded_outputs;
     packages::parse_packages(&mut build_state)?;
     phase_mark("init:parse-packages");
 
-    let (diff_cleanup, total_cleanup) = clean::cleanup_previous_in_process_build(&mut build_state);
+    let (diff_cleanup, total_cleanup) = if check_only {
+        (0, 0)
+    } else {
+        clean::cleanup_previous_in_process_build(&mut build_state)
+    };
     phase_mark("init:read-compile-state");
     phase_mark("init:cleanup-previous");
     let timing_clean_total = timing_clean_start.elapsed();
 
     if show_progress {
         if plain_output {
-            if let CompilerCheckResult::CleanedPackagesDueToCompiler = compiler_check {
+            if let Some(CompilerCheckResult::CleanedPackagesDueToCompiler) = compiler_check {
                 // Snapshot-friendly output (no progress prefixes or emojis)
                 println!("Cleaned previous build due to compiler update");
             }
             println!("Cleaned {diff_cleanup}/{total_cleanup}")
         } else {
-            if let CompilerCheckResult::CleanedPackagesDueToCompiler = compiler_check {
+            if let Some(CompilerCheckResult::CleanedPackagesDueToCompiler) = compiler_check {
                 println!(
                     "{}{} {}Cleaned previous build due to compiler update",
                     LINE_CLEAR,
@@ -480,8 +538,10 @@ pub fn incremental_build_without_lock(
     // A fresh in-process build compiles only what changed since the JavaScript
     // was written (see `incremental`). It still parses every module: the
     // dependency graph comes from the parse.
-    let incremental =
-        fresh_in_process && !build_state.diagnostic_locations && incremental::applies(build_state);
+    let incremental = fresh_in_process
+        && !build_state.check_only
+        && !build_state.diagnostic_locations
+        && incremental::applies(build_state);
     if incremental
         && build_state.build_state.source_map_command == SourceMapCommand::Build
         && incremental::everything_up_to_date(build_state)
@@ -571,10 +631,15 @@ pub fn incremental_build_without_lock(
         let registry = std::mem::take(&mut build_state.module_registry);
         let runtime_root = build_state.build_state.compiler_info.runtime_path.clone();
         let runtime_store = compile::RuntimeStore::of_build(build_state);
+        let check_only = build_state.check_only;
         let (result_asts, precompile_result) = std::thread::scope(|scope| {
             let handle = compile::spawn_runtime_precompile(scope, || {
-                let result =
-                    compile::pre_compile_runtime_modules(&registry, &runtime_root, runtime_store.as_ref());
+                let result = compile::pre_compile_runtime_modules_with_mode(
+                    &registry,
+                    &runtime_root,
+                    runtime_store.as_ref(),
+                    check_only,
+                );
                 phase_mark("runtime-precompile-done");
                 result
             });
@@ -939,6 +1004,7 @@ pub fn build(
     prod: bool,
     features: Option<Vec<String>>,
     dump: Option<DumpRequest>,
+    check_only: bool,
 ) -> Result<BuildCommandState> {
     let _span = info_span!(
         "rewatch.build",
@@ -953,8 +1019,8 @@ pub fn build(
     };
     let timing_total = Instant::now();
     phase_mark("build-start");
-    with_build_lock(path, || {
-        let mut build_state = initialize_build(
+    let run = || {
+        let mut build_state = initialize_build_with_mode(
             default_timing,
             filter,
             show_progress,
@@ -964,6 +1030,7 @@ pub fn build(
             prod,
             features,
             crate::config::SourceMapCommand::Build,
+            check_only,
         )
         .with_context(|| "Could not initialize build")?;
         build_state.dump = dump;
@@ -989,16 +1056,25 @@ pub fn build(
                         )
                     );
                 }
-                clean::cleanup_after_build(&build_state, CompilerInfoWrite::WithRecord);
+                if !check_only {
+                    clean::cleanup_after_build(&build_state, CompilerInfoWrite::WithRecord);
+                }
                 phase_mark("cleanup-end");
                 Ok(build_state)
             }
             Err(e) => {
-                clean::cleanup_after_build(&build_state, CompilerInfoWrite::WithRecord);
+                if !check_only {
+                    clean::cleanup_after_build(&build_state, CompilerInfoWrite::WithRecord);
+                }
                 Err(anyhow!("Incremental build failed. Error: {e}"))
             }
         }
-    })
+    };
+    if check_only {
+        run()
+    } else {
+        with_build_lock(path, run)
+    }
 }
 
 #[cfg(test)]
@@ -1094,6 +1170,7 @@ mod tests {
                 false,
                 None,
                 None,
+                false,
             );
             sender.send(result.is_err()).expect("result should be sent");
         });
