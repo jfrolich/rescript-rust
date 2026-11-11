@@ -923,12 +923,18 @@ pub fn serialize_pers_struct(
             cmi_longident_names: sig.cmi_longident_names.clone(),
         },
     );
-    let stamps = ctx.saved_store_stamps();
-    if !stamps.is_empty() {
-        remap_saved_stamps(&mut sig.ps_sig, &mut sig.type_graph, &stamps);
-        if let Some(raw) = &mut raw {
-            remap_saved_stamps(&mut raw.raw_ps_sig, &mut raw.raw_type_graph, &stamps);
-        }
+    // Most exported signatures mention no store binders. Building the replay
+    // map eagerly would traverse every imported store piece even for those.
+    let stamps = std::cell::OnceCell::new();
+    let saved_stamp = |stamp| {
+        stamps
+            .get_or_init(|| ctx.saved_store_stamps())
+            .get(&stamp)
+            .copied()
+    };
+    remap_saved_stamps(&mut sig.ps_sig, &mut sig.type_graph, &saved_stamp);
+    if let Some(raw) = &mut raw {
+        remap_saved_stamps(&mut raw.raw_ps_sig, &mut raw.raw_type_graph, &saved_stamp);
     }
     let fingerprint = compute_type_graph_fingerprint(&HashGraph::of(&sig.type_graph), &sig.ps_sig);
     PortablePersStruct::new(
@@ -947,42 +953,47 @@ pub fn serialize_pers_struct(
 fn remap_saved_stamps(
     sig: &mut Signature,
     graph: &mut PortableTypeGraph,
-    stamps: &AHashMap<i32, i32>,
+    stamps: &dyn Fn(i32) -> Option<i32>,
 ) {
-    fn ident(id: &mut crate::ident::Ident, stamps: &AHashMap<i32, i32>) {
-        if let Some(stamp) = stamps.get(&id.stamp()) {
-            *id = id.with_stamp(*stamp);
+    fn ident(id: &mut crate::ident::Ident, stamps: &dyn Fn(i32) -> Option<i32>) {
+        if id.stamp() >= crate::ident::STORE_STAMP_BASE
+            && let Some(stamp) = stamps(id.stamp())
+        {
+            *id = id.with_stamp(stamp);
         }
     }
-    fn path(p: &mut Path, stamps: &AHashMap<i32, i32>) {
+    fn path(p: &mut Path, stamps: &dyn Fn(i32) -> Option<i32>) {
         use crate::types::path::PathView;
         *p = match *p.view() {
             PathView::Pident(mut id) => {
+                let before = id.stamp();
                 ident(&mut id, stamps);
-                Path::pident(id)
+                if id.stamp() == before { *p } else { Path::pident(id) }
             }
             PathView::Pdot(mut parent, name, pos) => {
+                let before = parent;
                 path(&mut parent, stamps);
-                Path::pdot_pos(parent, name, pos)
+                if parent == before { *p } else { Path::pdot_pos(parent, name, pos) }
             }
             PathView::Papply(mut f, mut arg) => {
+                let before = (f, arg);
                 path(&mut f, stamps);
                 path(&mut arg, stamps);
-                Path::papply(f, arg)
+                if (f, arg) == before { *p } else { Path::papply(f, arg) }
             }
         };
     }
-    fn labels(labels: &mut [LabelDeclaration], stamps: &AHashMap<i32, i32>) {
+    fn labels(labels: &mut [LabelDeclaration], stamps: &dyn Fn(i32) -> Option<i32>) {
         for label in labels {
             ident(&mut label.ld_id, stamps);
         }
     }
-    fn args(args: &mut ConstructorArguments, stamps: &AHashMap<i32, i32>) {
+    fn args(args: &mut ConstructorArguments, stamps: &dyn Fn(i32) -> Option<i32>) {
         if let ConstructorArguments::CstrRecord(fields) = args {
             labels(fields, stamps);
         }
     }
-    fn module(mty: &mut ModuleType, stamps: &AHashMap<i32, i32>) {
+    fn module(mty: &mut ModuleType, stamps: &dyn Fn(i32) -> Option<i32>) {
         match mty {
             ModuleType::MtyIdent(p) => path(p, stamps),
             ModuleType::MtyAlias(_, p) => path(Arc::make_mut(p), stamps),
@@ -1000,7 +1011,7 @@ fn remap_saved_stamps(
             }
         }
     }
-    fn signature(sig: &mut Signature, stamps: &AHashMap<i32, i32>) {
+    fn signature(sig: &mut Signature, stamps: &dyn Fn(i32) -> Option<i32>) {
         for item in sig {
             match item {
                 SignatureItem::SigValue(id, vd) => {
@@ -2449,7 +2460,13 @@ mod identity_tests {
             crate::binser::to_vec(&(&sig, &graph)).unwrap()
         });
         assert!(!unmapped);
-        remap_saved_stamps(&mut sig, &mut graph, &stamps);
+        remap_saved_stamps(&mut sig, &mut graph, &|stamp| stamps.get(&stamp).copied());
+        assert_eq!(crate::binser::to_vec(&(&sig, &graph)).unwrap(), expected);
+        // Once mapped, ordinary binders and paths must not ask for a store
+        // replay table at all (the common publication path).
+        remap_saved_stamps(&mut sig, &mut graph, &|_| {
+            panic!("ordinary binder requested store stamps")
+        });
         assert_eq!(crate::binser::to_vec(&(&sig, &graph)).unwrap(), expected);
     }
 
