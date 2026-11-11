@@ -194,22 +194,22 @@ To see which gaps matter, every export of twelve modules was imported: `react`, 
 
 | Gap | Declarations affected | Imported as | What would close it |
 |---|---|---|---|
-| Union whose members cannot be told apart at run time | 18.1% | `unknown` | See below: these are four different problems. |
+| Union whose members cannot be told apart at run time | 18.1% | `unknown` | Steps 1 to 3 of the [plan](#plan-bridging-the-rest). |
 | `any` | 9.9% | A type variable as an argument, `unknown` as a result | Nothing: `any` is a hole in the TypeScript, not in ReScript. |
-| Overloads | 6.9% | The first signature | Converter: one external per signature (`parse`, `parse2`). Language: an external with several types, chosen by the arguments. |
-| Constraint on a type parameter (`T extends U`) | 3.8% | An unconstrained type variable | Language: bounded type variables. For object bounds the open object type `{.. "id": string}` already exists, but not for records. |
-| Rest parameter in a callback type | 3.5% | One array argument | Language: `@variadic` on function types, not only on externals. |
-| Constructor types, classes as values | 2.8% | `unknown` | Language: a function type that is called with `new`. |
-| Conditional, mapped and indexed types over a type parameter | 2.8% | The constraint, or `unknown` | Converter: import at an instantiation, `%ts("./m.ts#Pick<User, 'id'>")`, which TypeScript can evaluate. |
-| Enum and namespace objects as values | 2.5% | Skipped (the enum's type is imported) | Converter: a module with one value per member. |
-| Tuples with optional or rest elements | 2.3% | `array` | Language: optional tuple elements. |
-| Generic function type nested in a type | 2.1% | `unknown` for its own type parameters | Language: polymorphic function types anywhere, not only as record fields. |
-| Type parameter out of scope where the type is declared | 2.1% | `unknown`, or the constraint | The same. |
-| Explicit `this` parameter | 1.1% | Dropped | Converter: `@this` already expresses it. |
-| `object` and `{}` | 1.0% | `unknown` | Converter: `{..}` for `object`. |
-| Functions with properties | 1.0% | The function | Converter: an abstract type with a `call` external and one getter per property. |
-| Named properties next to an index signature | 0.7% | The named properties | Language: a record with a `dict` remainder. |
-| `never` outside a result | 0.6% | `unknown` | Language: an empty variant type. |
+| Overloads | 6.9% | The first signature | Step 5: one external per signature (`parse`, `parse2`). |
+| Constraint on a type parameter (`T extends U`) | 3.8% | An unconstrained type variable | Step 13: bounded type variables. For object bounds the open object type `{.. "id": string}` already exists, but not for records. |
+| Rest parameter in a callback type | 3.5% | One array argument | Step 11: a wrapper type in the standard library, or `@variadic` on function types. |
+| Constructor types, classes as values | 2.8% | `unknown` | Step 10: a constructor type in the standard library. |
+| Conditional, mapped and indexed types over a type parameter | 2.8% | The constraint, or `unknown` | Step 8 where the parameter is a key of a known object type. Otherwise import at an instantiation, `%ts("./m.ts#Pick<User, 'id'>")`, which TypeScript can evaluate. |
+| Enum and namespace objects as values | 2.5% | Skipped (the enum's type is imported) | Step 4: a module with one value per member. |
+| Tuples with optional or rest elements | 2.3% | `array` | Step 14. Language: optional tuple elements. |
+| Generic function type nested in a type | 2.1% | `unknown` for its own type parameters | Step 9: an unboxed record with a polymorphic field. |
+| Type parameter out of scope where the type is declared | 2.1% | `unknown`, or the constraint | Steps 8 and 9. |
+| Explicit `this` parameter | 1.1% | Dropped | Step 7: `@this` already expresses it. |
+| `object` and `{}` | 1.0% | `unknown` | Step 14. |
+| Functions with properties | 1.0% | The function | Step 6: an abstract type that converts to the function and to a record of its properties. |
+| Named properties next to an index signature | 0.7% | The named properties | Step 14. Language: a record with a `dict` remainder. |
+| `never` outside a result | 0.6% | `unknown` | Step 12: a type without values in the standard library. |
 | Branded primitives (`string & {__brand: "Id"}`) | 0.3% | The primitive | Converter: `type id = private string`. |
 
 Two kinds of union that used to be in the first row are imported exactly now: `string | symbol` (124 declarations, all event names and property keys) and unions of classes such as `Readable | Writable` or `Car | Vehicle`. What is left, 522 declarations, is not one problem:
@@ -219,7 +219,7 @@ Two kinds of union that used to be in the first row are imported exactly now: `s
 - **Library interfaces** (about 140). `NodeJS.ReadableStream | WritableStream`, `EventEmitter | EventTarget`, `EventListener | EventListenerObject`, `boolean | AddEventListenerOptions`, `T | PromiseLike<T>`. TypeScript declares these as interfaces, so nothing says which class to test for, and the import makes a library interface an abstract type. The DOM option objects could be records; the converter does not do that yet.
 - **Unions of tuples** (about 40): the arguments of an event listener, `[] | [err: Error] | [chunk: any]`.
 
-For arguments none of this needs solving: a function that accepts `A | B` can be given an `A`. A union type that can be built from any member but not matched on would make every union importable in argument position, which is where most of them are.
+None of the four needs a new language feature to be imported: steps 1 to 3 and 8 of the [plan](#plan-bridging-the-rest) cover them with ReScript that compiles today.
 
 ## Classes on records
 
@@ -264,7 +264,157 @@ type mesh // part instanceof Three.Mesh, with the import
 
 This follows the upstream RFC "Class hierarchies in WebAPI" (rescript-lang/rescript issue 9058, proposals A and B) and fixes what issue 9239 reports for `@module`. `@instanceOf` on abstract types and `@typeOf` were already in the compiler; the import now uses them too. Not implemented: `@scope` beside `@instanceOf` (write a dotted class name), and the OCaml compiler, which rejects these declarations.
 
-The remaining table is the proposed order of work: the converter-only rows first, since they need no design.
+## Plan: bridging the rest
+
+66.5% of the surveyed declarations are imported exactly today. This is a plan to reach about 89.5%. What stays out is `any` (9.9% of the declarations: a hole in the TypeScript, not in ReScript) and types computed from a type parameter that TypeScript cannot evaluate before the parameter is known (0.6%).
+
+Most of the distance is converter work. Seventeen of the twenty-three points need no change to the language or the standard library: the ReScript to generate exists, and every encoding shown below compiles with the current compiler. None of the steps is implemented yet.
+
+| # | Step | Needs | Declarations made exact | Exact after |
+|---|---|---|---|---|
+| | Today | | | 66.5% |
+| 1 | Members of a union that share a tag become one case | converter | 182 | 72.8% |
+| 2 | Library types that are imported as nothing today | converter | 84 | 75.7% |
+| 3 | Members that cannot be told apart become one opaque case | converter | 78 | 78.4% |
+| 4 | Namespaces and enum objects as modules | converter | 72 | 80.9% |
+| 5 | One external per overload | converter | 50 | 82.7% |
+| 6 | Functions with properties | converter | 20 | 83.4% |
+| 7 | `this` parameters as `@this` | converter | 10 | 83.7% |
+| 8 | Generics over the keys of an object type as a GADT of keys | converter | 3 | 83.8% |
+| 9 | Generic function types as unboxed records | converter | 0 | 83.8% |
+| 10 | Constructors as values | standard library | 77 | 86.5% |
+| 11 | Callbacks with a rest parameter | standard library | 15 | 87.0% |
+| 12 | A type without values for `never` | standard library | 4 | 87.1% |
+| 13 | Bounded type variables | language | 22 | 87.9% |
+| 14 | `{}` and `object`, index signatures beside named properties, optional tuple elements, deeper nesting | language and converter | 46 | 89.5% |
+
+A step's count is the number of declarations whose last note it removes, in this order. That understates steps 8, 9 and 11, which share declarations with each other and with `any`. Counted by notes (the places in a type where something is lost) step 8 removes 3,434 of the 11,014 notes, almost a third: they are the `on`, `once` and `emit` methods of every stream, socket and server of Node.
+
+The counts are estimates. Each note of the survey was assigned to the step that would remove it, by its kind and the TypeScript type it quotes. Step 2 is the least certain, because its causes have not been looked at one by one.
+
+### 1. Members that share a tag
+
+The syntax tree of vite's parser is a union of 183 interfaces tagged by `type`. Thirteen tags are used by more than one interface, 37 interfaces in all, and that is enough to make the whole union `unknown`, and with it the `parent` of every node.
+
+```ts
+interface StringLiteral { type: "Literal"; value: string; raw: string | null }
+interface NumericLiteral { type: "Literal"; value: number; raw: string | null }
+interface IdentifierName { type: "Identifier"; name: string }
+type Node = StringLiteral | NumericLiteral | IdentifierName // and 180 more
+```
+
+Members with the same tag become one case. A field they all have gets the union of its types, a field only some have is optional:
+
+```rescript
+@unboxed type literalValue = String(string) | Number(float)
+
+@tag("type")
+type node =
+  | @as("Literal") Literal({value: literalValue, raw: Null.t<string>})
+  | @as("Identifier") Identifier({name: string})
+```
+
+Every value TypeScript allows has this type, so reading is exact. Building is not quite: the merged case also accepts a literal whose fields belong to two different members.
+
+### 2. Library types
+
+Three kinds of type from declaration files come out as an abstract type or as `unknown` today, and take every union they are in with them:
+
+- A class that is also a namespace, such as `EventEmitter` of `node:events`, the superclass of every stream and server.
+- Interfaces of the DOM library that only carry data (`AddEventListenerOptions`) or are a function (`EventListener`). They should be records and function types; `boolean | AddEventListenerOptions` is then an ordinary variant.
+- Interfaces that a class implements (`NodeJS.ReadableStream`). Where nothing names the class they fall under step 3.
+
+### 3. One opaque case
+
+`ReactNode` has two members that are plain objects and one that is any iterable. JavaScript cannot tell them apart, so neither can a variant. Today the whole union is `unknown`. Instead, the members that share a runtime test become one case with an abstract payload, and each of them converts to it:
+
+```rescript
+@typeOf("object") type reactNodeObject
+external element: reactElement => reactNodeObject = "%identity"
+external iterable: iterable<'node> => reactNodeObject = "%identity"
+
+@unboxed
+type rec reactNode =
+  | String(string)
+  | Number(float)
+  | BigInt(bigint)
+  | Boolean(bool)
+  | Promise(promise<reactNode>)
+  | Object(reactNodeObject)
+  | @as(null) Null
+
+let child = Object(element(someElement))
+```
+
+Building a value is exact, and a `switch` tells apart everything JavaScript can. It stops at `Object`, as JavaScript does. A union with a bare type parameter (`T | PromiseLike<T>`) is opaque as a whole: an abstract type with one conversion per member. With this step no union is imported as `unknown` any more.
+
+### 5. Overloads
+
+Each signature becomes an external: `write` and `write2`. For an overloaded method they are `@send` externals next to the record, because a record cannot have two fields with one JavaScript name.
+
+### 8. Generics over the keys of an object type
+
+```ts
+interface SocketEvents { close: []; data: [chunk: Buffer]; error: [err: Error] }
+class Socket {
+  on<E extends keyof SocketEvents>(event: E, listener: (...args: SocketEvents[E]) => void): this
+}
+```
+
+`SocketEvents[E]` has no value before `E` is known, so today the listener takes `array<unknown>` and the method carries several notes. But `E` ranges over three names, and each name fixes the listener. That is a GADT whose constructors are the keys:
+
+```rescript
+type rec socketEvent<_> =
+  | @as("close") Close: socketEvent<unit => unit>
+  | @as("data") Data: socketEvent<buffer => unit>
+  | @as("error") Error: socketEvent<JsError.t => unit>
+
+type rec socket = {on: 'listener. (socketEvent<'listener>, 'listener) => socket}
+
+socket.on(Data, chunk => Console.log(chunk)) // socket.on("data", chunk => ...)
+```
+
+The same covers `get<K extends keyof T>(key: K): T[K]` and overloads that differ only in a literal first argument.
+
+### 9. Generic function types
+
+A function type with type parameters of its own can only be a record field in ReScript. An unboxed record with one field is that function at run time:
+
+```rescript
+@unboxed type eachVisit = {call: 'item. array<'item> => array<'item>}
+external each: eachVisit => unit = "each"
+
+each({call: items => items->Array.toReversed}) // each(items => items.toReversed())
+```
+
+### 10 to 12. The standard library
+
+```rescript
+// `typeof EventEmitter`: a value that is called with `new`.
+type constructor<'args, 'instance>
+@val @scope("Reflect")
+external construct: (constructor<'args, 'instance>, 'args) => 'instance = "construct"
+
+// `(...args: string[]) => void` as a callback: JavaScript passes any number
+// of arguments, ReScript receives them as one array.
+type variadic<'arg, 'result>
+let variadic: (array<'arg> => 'result) => variadic<'arg, 'result> // f => (...args) => f(args)
+
+// `never`
+type never
+```
+
+`variadic` is the only step that adds code at run time, a wrapper around the callback. The alternative is in the language: `@variadic` on a function type, with the compiler emitting the rest parameter.
+
+### Language changes, by what they buy
+
+1. **Bounded type variables.** `pipe<T extends WritableStream>(destination: T): T` is imported with an unconstrained `'t`, so ReScript accepts a call TypeScript rejects. The converter can close two cases alone: a parameter that occurs once, as the type of an argument, is its bound; and a bound that is a class is that class, with `:>` at the call. The rest needs a bound on a type variable. 86 declarations have a constraint, and for 22 of them it is the last thing missing.
+2. **Telling plain objects apart by a field.** The upstream proposal (rescript-lang/rescript issue 7988, draft pull request 8809) allows several object cases when a field they share differs in its literal or its primitive type. With field presence added, `{result} | {error}` and the members of step 1 that differ in one field become cases a `switch` can open. This changes none of the counts above, since step 3 already imports these unions; it makes about 85 declarations matchable instead of opaque.
+3. **Two fields with one JavaScript name**, as in `@as("write") write2`, keep overloaded methods as fields. 84 declarations have an overloaded method.
+4. **Optional tuple elements** and one-element tuples: 20 declarations.
+5. **A record with a `dict` remainder**, for named properties beside an index signature: 20 declarations.
+
+Classes on records, above, was the first of these, and the only one implemented.
 
 ## How it works
 
