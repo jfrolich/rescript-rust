@@ -1654,6 +1654,7 @@ impl PersistentEnv {
         module_name: &str,
         ctx: &TypeContext,
         arena: Option<&crate::parse_arena::ParseArena>,
+        publication: portable_types::SignaturePublicationMode,
     ) -> Option<Arc<PortablePersStruct>> {
         self.cache_lookup(module_name)
             .and_then(|opt| opt)
@@ -1661,6 +1662,7 @@ impl PersistentEnv {
                 portable_types::publish_pers_struct(
                     portable_types::serialize_pers_struct(ps.as_ref(), ctx, arena),
                     ctx,
+                    publication,
                 )
             })
     }

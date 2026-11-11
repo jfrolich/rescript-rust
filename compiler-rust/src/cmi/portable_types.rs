@@ -337,6 +337,12 @@ impl PortablePersStruct {
         }
     }
 
+    /// Finish a leaf publication after signature release. No dependent needs
+    /// its decoded graph, so keep only the bytes storage will need anyway.
+    pub fn prepare_for_storage(&self) {
+        self.encoded();
+    }
+
     fn encoded(&self) -> &EncodedSignatures {
         self.encoded.get_or_init(|| {
             let mut decoded = self.decoded.lock().unwrap();
@@ -1684,14 +1690,24 @@ fn graph_is_shareable(graph: &PortableTypeGraph) -> bool {
     graph.entries.iter().all(entry_is_shareable)
 }
 
-/// Fill the address-keyed pool and worker map before exposing this Arc.
+/// When the scheduler needs a live shared graph for this signature.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SignaturePublicationMode {
+    /// A dependent in this build (including an interface's implementation).
+    Eager,
+    /// No dependent in this build; a later reader can fill the pool slot.
+    OnDemand,
+}
+
+/// Prepare the address-keyed pool and worker map when dependents need them.
 pub fn publish_pers_struct(
     mut pps: PortablePersStruct,
     ctx: &TypeContext,
+    mode: SignaturePublicationMode,
 ) -> Arc<PortablePersStruct> {
     pps.published_generation = Some(crate::types::thread_store::build_generation());
     let pps = Arc::new(pps);
-    if pps.shareable {
+    if mode == SignaturePublicationMode::Eager && pps.shareable {
         let store = ctx.thread_store();
         let pool = store.shared_pool();
         let decoded = pps.decoded.lock().unwrap();
@@ -2489,7 +2505,7 @@ mod identity_tests {
         );
         let published = {
             let _guard = crate::perf_counters::SignaturePublication::begin();
-            publish_pers_struct(portable, &ctx)
+            publish_pers_struct(portable, &ctx, SignaturePublicationMode::Eager)
         };
         assert!(published.has_decoded_signatures());
         let pool = ctx.thread_store().shared_pool();
@@ -2503,6 +2519,47 @@ mod identity_tests {
             &ctx.thread_store().pers_struct(&published).unwrap()
         ));
         assert!(published.has_decoded_signatures());
+    }
+
+    #[test]
+    fn leaf_publication_encodes_then_internalizes_on_demand() {
+        let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+        let portable = serialize_pers_struct(
+            &PersStruct {
+                ps_name: "Leaf".into(),
+                ps_sig: Arc::new(vec![]),
+                ps_filename: "Leaf.res".into(),
+                ps_deprecated: None,
+                ps_crcs: vec![],
+                ps_alias_rewrites: Default::default(),
+            },
+            &ctx,
+            None,
+        );
+        let published = {
+            let _guard = crate::perf_counters::SignaturePublication::begin();
+            publish_pers_struct(portable, &ctx, SignaturePublicationMode::OnDemand)
+        };
+        assert!(published.has_decoded_signatures());
+        assert!(ctx.thread_store().pers_struct(&published).is_none());
+        published.prepare_for_storage();
+        assert!(!published.has_decoded_signatures());
+
+        let built = std::cell::Cell::new(false);
+        let pool = ctx.thread_store().shared_pool();
+        let shared = pool
+            .pers_struct(&published, || {
+                built.set(true);
+                shared_pers_struct(&published, &published.signature(), pool)
+            })
+            .unwrap();
+        assert!(built.get(), "leaf allocated a pool slot eagerly");
+        let loaded = internalize_pers_struct(published.clone(), &ctx);
+        assert!(Arc::ptr_eq(&shared, &loaded));
+        assert!(Arc::ptr_eq(
+            &loaded,
+            &ctx.thread_store().pers_struct(&published).unwrap()
+        ));
     }
 
     #[test]

@@ -19,7 +19,7 @@ use rayon::prelude::*;
 use rescript_compiler::cmi::persistent_env::{
     CmjExportArity, CmjExportConstant, InMemoryModuleInfo, ModuleRegistry,
 };
-use rescript_compiler::cmi::portable_types::PortablePersStruct;
+use rescript_compiler::cmi::portable_types::{PortablePersStruct, SignaturePublicationMode};
 use rescript_compiler::parse_arena::ParseArena;
 use rescript_compiler::parser::ast::{Signature, Structure};
 use std::cmp::Ordering;
@@ -468,6 +468,17 @@ fn compute_critical_path_priorities(
     priorities
 }
 
+fn signature_publication_mode(
+    dependents: &AHashSet<String>,
+    compile_universe: &AHashSet<String>,
+) -> SignaturePublicationMode {
+    if dependents.iter().any(|name| compile_universe.contains(name)) {
+        SignaturePublicationMode::Eager
+    } else {
+        SignaturePublicationMode::OnDemand
+    }
+}
+
 /// Run the short-circuit check or the in-process compile for a single module.
 /// Invoked from worker threads inside the dispatcher scope; only reads
 /// `BuildState`, never mutates it (except via the `BuildCommandState` mutex
@@ -483,6 +494,7 @@ fn compile_one(
     parent_span: Span,
     in_process_hooks: InProcessSchedulerHooks,
     placement: qos::UnitClass,
+    publication: SignaturePublicationMode,
 ) -> WorkerMsg {
     let _placement = qos::UnitPlacementGuard::enter(placement);
     let module = build_state.get_module(module_name).unwrap();
@@ -530,6 +542,7 @@ fn compile_one(
                 build_state,
                 build_command_state,
                 Some(&in_process_hooks),
+                publication,
             );
             let interface_generation_after = build_command_state.get_interface_generation(module_name);
             match result {
@@ -965,6 +978,10 @@ pub fn compile(
                     }
                     let module_name = work.module_name.clone();
                     let is_dirty = dirty_set.contains(&module_name);
+                    let publication = signature_publication_mode(
+                        &build_state_ref.get_module(&module_name).unwrap().dependents,
+                        &compile_universe,
+                    );
                     let tx = tx.clone();
                     let inc_ref = &inc;
                     in_flight += 1;
@@ -1015,6 +1032,7 @@ pub fn compile(
                                 parent_span,
                                 in_process_hooks,
                                 placement,
+                                publication,
                             );
                             if show_progress && matches!(msg, WorkerMsg::Completed(_)) {
                                 inc_ref();
@@ -3964,6 +3982,7 @@ fn compile_module_in_process_to_js_boundary(
     build_state: &BuildState,
     build_command_state: &BuildCommandState,
     scheduler_hooks: Option<&InProcessSchedulerHooks>,
+    publication: SignaturePublicationMode,
 ) -> Result<PreJsMsg> {
     build_command_state
         .loaded_units
@@ -4153,6 +4172,14 @@ fn compile_module_in_process_to_js_boundary(
             let Some(hooks) = signature_hooks.as_ref() else {
                 return Ok(None);
             };
+            // The driver has left the signature-release guard. A leaf has no
+            // waiting dependent and needs only stored bytes; release its decoded
+            // graphs now instead of retaining them through the remaining phases.
+            if publication == SignaturePublicationMode::OnDemand
+                && let Some(pers) = &ready.pers_struct
+            {
+                pers.prepare_for_storage();
+            }
             let fingerprint = ready.pers_struct.as_ref().map(|ps| ps.fingerprint).unwrap_or(0);
             let module_info = signature_module_info.clone();
             let registry_updates = if let Some(pers_struct) = ready.pers_struct {
@@ -4216,6 +4243,7 @@ fn compile_module_in_process_to_js_boundary(
                             has_interface,
                             gentype_interface.clone(),
                             signature_hook,
+                            publication,
                         )
                     })
                 }
@@ -4705,6 +4733,25 @@ mod tests {
     use std::sync::RwLock;
     use std::time::SystemTime;
     use tempfile::TempDir;
+
+    #[test]
+    fn signature_publication_uses_only_dependents_in_this_build() {
+        let universe = AHashSet::from_iter(["Reader".to_string()]);
+        assert_eq!(
+            signature_publication_mode(&AHashSet::new(), &universe),
+            SignaturePublicationMode::OnDemand,
+        );
+        let dependents = AHashSet::from_iter(["OtherBuild".to_string()]);
+        assert_eq!(
+            signature_publication_mode(&dependents, &universe),
+            SignaturePublicationMode::OnDemand,
+        );
+        let dependents = AHashSet::from_iter(["OtherBuild".to_string(), "Reader".to_string()]);
+        assert_eq!(
+            signature_publication_mode(&dependents, &universe),
+            SignaturePublicationMode::Eager,
+        );
+    }
 
     /// The runtime's stored interfaces are keyed by the compiler that
     /// encoded them: another compiler's key misses them.

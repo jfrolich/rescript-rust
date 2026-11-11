@@ -20,7 +20,7 @@ use crate::binary_ast::ppx;
 use crate::cmi::persistent_env::{
     CmjExportArity, CmjExportConstant, ModuleRegistry, PersistentEnv, PersistentEnvError,
 };
-use crate::cmi::portable_types::PortablePersStruct;
+use crate::cmi::portable_types::{PortablePersStruct, SignaturePublicationMode};
 use crate::context::IdGenerator;
 use crate::diagnostics::WarningConfig;
 use crate::ident::Ident;
@@ -10011,6 +10011,7 @@ pub fn compile_preprocessed_structure_in_process_with_signature_hook(
         has_interface,
         gentype_interface,
         signature_ready,
+        SignaturePublicationMode::Eager,
     )?;
 
     let refreshed_registry = if let Some(hook) = before_js {
@@ -10220,6 +10221,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     has_interface: bool,
     gentype_interface: Option<crate::gentype::main::InterfaceRead>,
     mut signature_ready: Option<&mut InProcessSignatureReadyHook<'_>>,
+    publication: SignaturePublicationMode,
 ) -> Result<InProcessPreJsCompileResult> {
     if !arena.stores_locations()
         && (options.source_map != crate::js_ir::source_map::SourceMapMode::None
@@ -10584,7 +10586,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         type_ctx.register_raw_module_sig(module_name, current_raw_sig);
 
         let pers_struct = if options.publish_in_process_signature {
-            internal_env.extract_module_update(module_name, &type_ctx, Some(arena))
+            internal_env.extract_module_update(module_name, &type_ctx, Some(arena), publication)
         } else {
             None
         };
@@ -11491,7 +11493,13 @@ pub fn typecheck_preprocessed_signature_in_process(
     );
     type_ctx.register_raw_module_sig(module_name, raw_signature);
 
-    let pers_struct = internal_env.extract_module_update(module_name, &type_ctx, Some(arena));
+    // The implementation reads its own interface even when the module is a leaf.
+    let pers_struct = internal_env.extract_module_update(
+        module_name,
+        &type_ctx,
+        Some(arena),
+        SignaturePublicationMode::Eager,
+    );
 
     Ok(InProcessInterfaceResult {
         signature: published_signature,
