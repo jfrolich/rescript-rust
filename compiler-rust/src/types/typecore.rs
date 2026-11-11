@@ -21044,9 +21044,12 @@ pub(crate) fn copy_type_expr_mapping_paths<TP: Fn(&Path) -> Path>(
     cache: &mut TypeExprRefMap<TypeExprRef>,
     map_path: &TP,
 ) -> TypeExprRef {
-    ctx.counted_copy(crate::perf_counters::CopyCause::Lookup, || {
-        copy_lookup_type_expr_with_paths(ctx, ty, cache, map_path)
-    })
+    if ctx.counts_this_call() {
+        return ctx.counted_copy(crate::perf_counters::CopyCause::Lookup, || {
+            copy_type_expr_mapping_paths(ctx, ty, cache, map_path)
+        });
+    }
+    copy_lookup_type_expr_with_paths(ctx, ty, cache, map_path)
 }
 
 fn copy_lookup_type_expr_with_paths<TP>(
@@ -21593,10 +21596,13 @@ pub(crate) fn copy_lookup_type_decl_for_subst(
     decl: &crate::types::decl::TypeDeclaration,
     ctx: &TypeContext,
 ) -> crate::types::decl::TypeDeclaration {
+    if ctx.counts_this_call() {
+        return ctx.counted_copy(crate::perf_counters::CopyCause::Lookup, || {
+            copy_lookup_type_decl_for_subst(decl, ctx)
+        });
+    }
     let mut cache = TypeExprRefMap::new();
-    ctx.counted_copy(crate::perf_counters::CopyCause::Lookup, || {
-        ctx.with_copy_session(|| copy_lookup_type_decl(decl, ctx, &mut cache))
-    })
+    ctx.with_copy_session(|| copy_lookup_type_decl(decl, ctx, &mut cache))
 }
 
 fn copy_lookup_value_description_with_paths<TP>(
@@ -21621,11 +21627,14 @@ pub(crate) fn copy_lookup_value_description_for_subst(
     desc: &crate::types::decl::ValueDescription,
     ctx: &TypeContext,
 ) -> crate::types::decl::ValueDescription {
+    if ctx.counts_this_call() {
+        return ctx.counted_copy(crate::perf_counters::CopyCause::Lookup, || {
+            copy_lookup_value_description_for_subst(desc, ctx)
+        });
+    }
     let mut cache = TypeExprRefMap::new();
-    ctx.counted_copy(crate::perf_counters::CopyCause::Lookup, || {
-        ctx.with_copy_session(|| {
-            copy_lookup_value_description_with_paths(desc, ctx, &mut cache, &clone_copy_lookup_path)
-        })
+    ctx.with_copy_session(|| {
+        copy_lookup_value_description_with_paths(desc, ctx, &mut cache, &clone_copy_lookup_path)
     })
 }
 
@@ -22009,6 +22018,11 @@ pub(crate) fn copy_lookup_signature_for_subst(
     sig_items: &[crate::types::decl::SignatureItem],
     ctx: &TypeContext,
 ) -> crate::types::decl::Signature {
+    if ctx.counts_this_call() {
+        return ctx.counted_copy(crate::perf_counters::CopyCause::Lookup, || {
+            copy_lookup_signature_for_subst(sig_items, ctx)
+        });
+    }
     if ctx.compiler_counters_enabled() {
         crate::perf_counters::record_signature_copy(
             std::panic::Location::caller(),
@@ -22016,9 +22030,7 @@ pub(crate) fn copy_lookup_signature_for_subst(
         );
     }
     let mut cache = TypeExprRefMap::new();
-    ctx.counted_copy(crate::perf_counters::CopyCause::Lookup, || {
-        ctx.with_copy_session(|| copy_lookup_signature(sig_items, ctx, &mut cache))
-    })
+    ctx.with_copy_session(|| copy_lookup_signature(sig_items, ctx, &mut cache))
 }
 
 #[track_caller]
@@ -22032,6 +22044,11 @@ where
     TP: Fn(&Path) -> Path,
     MP: Fn(&std::sync::Arc<Path>) -> std::sync::Arc<Path>,
 {
+    if ctx.counts_this_call() {
+        return ctx.counted_copy(crate::perf_counters::CopyCause::Lookup, || {
+            copy_lookup_signature_for_subst_with_paths(sig_items, ctx, type_path, module_path)
+        });
+    }
     if ctx.compiler_counters_enabled() {
         crate::perf_counters::record_signature_copy(
             std::panic::Location::caller(),
@@ -22039,10 +22056,8 @@ where
         );
     }
     let mut cache = TypeExprRefMap::new();
-    ctx.counted_copy(crate::perf_counters::CopyCause::Lookup, || {
-        ctx.with_copy_session(|| {
-            copy_lookup_signature_with_paths(sig_items, ctx, &mut cache, type_path, module_path)
-        })
+    ctx.with_copy_session(|| {
+        copy_lookup_signature_with_paths(sig_items, ctx, &mut cache, type_path, module_path)
     })
 }
 
@@ -22058,6 +22073,17 @@ where
     TP: Fn(&Path) -> Path,
     MP: Fn(&std::sync::Arc<Path>) -> std::sync::Arc<Path>,
 {
+    if ctx.counts_this_call() {
+        return ctx.counted_copy(crate::perf_counters::CopyCause::Lookup, || {
+            copy_lookup_signature_for_subst_with_paths_and_idents(
+                sig_items,
+                ctx,
+                type_path,
+                module_path,
+                new_idents,
+            )
+        });
+    }
     if ctx.compiler_counters_enabled() {
         crate::perf_counters::record_signature_copy(
             std::panic::Location::caller(),
@@ -22065,17 +22091,15 @@ where
         );
     }
     let mut cache = TypeExprRefMap::new();
-    ctx.counted_copy(crate::perf_counters::CopyCause::Lookup, || {
-        ctx.with_copy_session(|| {
-            copy_lookup_signature_with_paths_and_idents(
-                sig_items,
-                ctx,
-                &mut cache,
-                type_path,
-                module_path,
-                Some(new_idents.into_iter()),
-            )
-        })
+    ctx.with_copy_session(|| {
+        copy_lookup_signature_with_paths_and_idents(
+            sig_items,
+            ctx,
+            &mut cache,
+            type_path,
+            module_path,
+            Some(new_idents.into_iter()),
+        )
     })
 }
 
@@ -22087,10 +22111,13 @@ pub(crate) fn copy_lookup_module_type_for_subst(
     module_type: &crate::types::decl::ModuleType,
     ctx: &TypeContext,
 ) -> crate::types::decl::ModuleType {
+    if ctx.counts_this_call() {
+        return ctx.counted_copy(crate::perf_counters::CopyCause::Lookup, || {
+            copy_lookup_module_type_for_subst(module_type, ctx)
+        });
+    }
     let mut cache = TypeExprRefMap::new();
-    ctx.counted_copy(crate::perf_counters::CopyCause::Lookup, || {
-        ctx.with_copy_session(|| copy_lookup_module_type(module_type, ctx, &mut cache))
-    })
+    ctx.with_copy_session(|| copy_lookup_module_type(module_type, ctx, &mut cache))
 }
 
 // ============================================================================

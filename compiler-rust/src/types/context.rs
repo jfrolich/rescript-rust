@@ -699,6 +699,9 @@ pub struct TypeContext {
     /// With the compiler counters on: the type nodes already counted as
     /// copied for some cause (see `counted_copy`).
     counted_copy_nodes: Cell<usize>,
+    /// With the compiler counters on: the next call of a counted function
+    /// is the counting code calling it again (see `counts_this_call`).
+    counted_call_reentered: Cell<bool>,
 
     /// Cache for resolved module signatures. Keyed by module path name.
     /// OCaml `compiler/ml/env.ml:1513-1514,1516-1588` stores forced module
@@ -1194,6 +1197,7 @@ impl TypeContext {
             mutability_overlay: RefCell::new(crate::fast_hash::AHashMap::new()),
             copy_sessions: RefCell::new(Vec::new()),
             counted_copy_nodes: Cell::new(0),
+            counted_call_reentered: Cell::new(false),
             resolved_module_sig_cache: RefCell::new(crate::fast_hash::AHashMap::new()),
             qualified_module_components_cache: RefCell::new(crate::fast_hash::AHashMap::new()),
             component_alias_sources: RefCell::new(crate::fast_hash::AHashMap::new()),
@@ -3676,21 +3680,40 @@ impl TypeContext {
         f()
     }
 
-    /// Run the copy `copy` and, with the compiler counters on, count the
-    /// type nodes it allocates as copied for `cause`. Nodes of a counted
-    /// copy nested in it are counted once, for the inner cause.
+    /// For the compiler counters: whether the function asking should count
+    /// this call. A counted function starts with
+    ///
+    /// ```ignore
+    /// if ctx.counts_this_call() {
+    ///     return ctx.counted_copy(cause, || this_function(same arguments));
+    /// }
+    /// ```
+    ///
+    /// so that with the counters off it pays this one test and its body is
+    /// what it was. With them on, the counting code calls the function
+    /// again, and that second call, which must not count itself, gets
+    /// `false` here.
     #[inline]
+    pub(crate) fn counts_this_call(&self) -> bool {
+        self.compiler_counters_enabled && !self.counted_call_reentered.replace(false)
+    }
+
+    /// See [`Self::counts_this_call`]: run `again`, the calling function
+    /// called again, and count the type nodes it allocates as copied for
+    /// `cause`. Nodes of a counted copy nested in it are counted once, for
+    /// the inner cause.
+    #[cold]
+    #[inline(never)]
     pub(crate) fn counted_copy<R>(
         &self,
         cause: crate::perf_counters::CopyCause,
-        copy: impl FnOnce() -> R,
+        again: impl FnOnce() -> R,
     ) -> R {
-        if !self.compiler_counters_enabled {
-            return copy();
-        }
         let allocated = self.allocated_type_nodes();
         let counted = self.counted_copy_nodes.get();
-        let result = copy();
+        self.counted_call_reentered.set(true);
+        let result = again();
+        self.counted_call_reentered.set(false);
         let nested = self.counted_copy_nodes.get() - counted;
         let own = self.allocated_type_nodes() - allocated - nested;
         self.counted_copy_nodes.set(counted + nested + own);
