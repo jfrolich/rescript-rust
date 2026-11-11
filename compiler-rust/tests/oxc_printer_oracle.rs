@@ -46,6 +46,12 @@ fn run() {
         }
     }
     files.sort();
+    // Alias-bearing interfaces may need their source fallback. build-reference
+    // writes artifacts, not the flat source copies an in-process build leaves.
+    let source_dirs: std::collections::BTreeSet<_> = files
+        .iter()
+        .map(|path| path.parent().unwrap().to_path_buf())
+        .collect();
     assert!(
         files.len() > 700,
         "expected full corpora, not a filtered sample"
@@ -72,11 +78,14 @@ fn run() {
             let mut options = CompilerOptions {
                 js_printer: PrinterMode::Legacy,
                 runtime_path: Some(runtime.clone()),
-                include_paths: vec![
+                include_paths: [
                     root.join("tests/tests/lib/ocaml"),
                     root.join("tests/dependencies/rescript-react/lib/ocaml"),
                     runtime.join("lib/ocaml"),
-                ],
+                ]
+                .into_iter()
+                .chain(source_dirs.iter().cloned())
+                .collect(),
                 source_filename: Some(path.to_string_lossy().into_owned()),
                 output_path: Some(path.with_extension(if format == ModuleFormat::EsModule {
                     "mjs"
