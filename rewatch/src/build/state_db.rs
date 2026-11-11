@@ -28,8 +28,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 pub const DB_FILE: &str = "rescript.sqlite";
 
 /// Bump when the schema changes; an older database is then discarded.
-// PortableIdentities no longer stores obsolete descriptor/arrow-label blocks.
-const SCHEMA_VERSION: i64 = 18;
+// PortableRawSignature now carries its own file names.
+const SCHEMA_VERSION: i64 = 19;
 
 const SCHEMA: &str = "
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID;

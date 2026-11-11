@@ -327,14 +327,6 @@ fn apply_pending_registry_updates(
     let mut registry = build_command_state.module_registry.lock().unwrap();
     for update in updates {
         if let Some(pers_struct) = update.pers_struct {
-            // No compilation loads the signature of a module nothing depends
-            // on, so it need not keep a decoded one for that.
-            if build_command_state
-                .get_module(&update.module_name)
-                .is_some_and(|module| module.dependents.is_empty())
-            {
-                pers_struct.release_signature_for_dependent();
-            }
             registry.register_module_arc(&update.module_name, pers_struct, update.module_info);
         } else {
             registry.insert_module_info(update.module_name, update.module_info);
@@ -2450,7 +2442,7 @@ fn js_metadata_registry_updates_for_package(
     is_runtime: bool,
     has_interface: bool,
     interface_registry_update: Option<PendingRegistryUpdate>,
-    pers_struct: Option<PortablePersStruct>,
+    pers_struct: Option<Arc<PortablePersStruct>>,
 ) -> Vec<PendingRegistryUpdate> {
     let module_info = in_memory_module_info_for_package(
         package,
@@ -2477,7 +2469,7 @@ fn js_metadata_registry_updates_for_package(
     } else if let Some(ps) = pers_struct {
         vec![PendingRegistryUpdate {
             module_name: module_name.to_string(),
-            pers_struct: Some(Arc::new(ps)),
+            pers_struct: Some(ps),
             module_info,
         }]
     } else {
@@ -2490,6 +2482,11 @@ fn send_js_metadata_ready(
     module_name: String,
     registry_updates: Vec<PendingRegistryUpdate>,
 ) -> Vec<PendingRegistryUpdate> {
+    for update in &registry_updates {
+        if let Some(pers) = &update.pers_struct {
+            pers.summary();
+        }
+    }
     match metadata_tx.send(WorkerMsg::JsMetadataReady(JsMetadataReadyMsg {
         module_name,
         registry_updates,
@@ -3478,7 +3475,6 @@ fn compile_runtime_module_from_source(
         })?;
 
         if let Some(pers_struct) = intf_result.pers_struct {
-            let pers_struct = Arc::new(pers_struct);
             local_registry.register_module_arc(
                 &module.module_name,
                 pers_struct.clone(),
@@ -3524,7 +3520,7 @@ fn compile_runtime_module_from_source(
             shared_registry.insert_module_info(module.module_name.clone(), module_info);
         }
     } else if let Some(pers_struct) = compile_result.pers_struct {
-        shared_registry.register_module(&module.module_name, pers_struct, module_info);
+        shared_registry.register_module_arc(&module.module_name, pers_struct, module_info);
     }
 
     Ok(())
@@ -4110,7 +4106,6 @@ fn compile_module_in_process_to_js_boundary(
             .map(|ps| ps.fingerprint)
             .unwrap_or(0);
         if let Some(ps) = intf_result.pers_struct {
-            let ps = Arc::new(ps);
             let module_info = provisional_module_info.clone();
             local_registry.register_module_arc(module_name, ps.clone(), module_info.clone());
             interface_registry_update = Some(PendingRegistryUpdate {
@@ -4163,7 +4158,7 @@ fn compile_module_in_process_to_js_boundary(
             let registry_updates = if let Some(pers_struct) = ready.pers_struct {
                 vec![PendingRegistryUpdate {
                     module_name: signature_module_name.clone(),
-                    pers_struct: Some(Arc::new(pers_struct)),
+                    pers_struct: Some(pers_struct),
                     module_info,
                 }]
             } else {
@@ -4476,6 +4471,7 @@ fn finish_in_process_js_inner(
             metadata.cmj_export_lambdas,
             is_runtime,
         );
+        registry_snapshot.prepare_signature_summary(&module_name);
         let registry_updates = vec![PendingRegistryUpdate {
             module_name: module_name.clone(),
             pers_struct: None,

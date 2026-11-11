@@ -1,0 +1,1 @@
+- Publish checked signatures into the shared type pool before releasing dependents, and defer signature encoding and summaries until needed.
