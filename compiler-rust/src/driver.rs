@@ -10030,7 +10030,7 @@ pub fn compile_source_in_process(
     };
 
     crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
-    let result = compile_preprocessed_structure_in_process(
+    let result = compile_preprocessed_structure_in_process_with_signature_hook(
         parser.arena(),
         &structure,
         filename,
@@ -10039,6 +10039,8 @@ pub fn compile_source_in_process(
         registry,
         has_interface,
         gentype_interface,
+        None,
+        None,
     )?;
     // Like the direct compile: a frontend warning configured as an error fails
     // the compilation once type checking has reported its own diagnostics.
@@ -10328,7 +10330,6 @@ pub fn compile_preprocessed_structure_in_process(
     options: &CompilerOptions,
     registry: &ModuleRegistry,
     has_interface: bool,
-    gentype_interface: Option<crate::gentype::main::InterfaceRead>,
 ) -> Result<InProcessCompileResult> {
     compile_preprocessed_structure_in_process_with_signature_hook(
         arena,
@@ -10338,7 +10339,7 @@ pub fn compile_preprocessed_structure_in_process(
         options,
         registry,
         has_interface,
-        gentype_interface,
+        None,
         None,
         None,
     )
@@ -12256,7 +12257,6 @@ mod tests {
                 &options,
                 &registry,
                 false,
-                None,
             )
             .map(|result| result.gentype)
         };
