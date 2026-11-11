@@ -84,6 +84,8 @@
 
 #### :house: Internal
 
+- Normalize a type's path through its module prefix only, without first looking the type's name up as a module. https://github.com/jfrolich/rescript-rust/pull/101
+
 - Skip the walk that collects a program's assigned variables when it contains no assignment; the walk ran for every optimization pass and every inlined call. https://github.com/jfrolich/rescript-rust/pull/94
 
 - Load a compiled module's interface into its first dependent without decoding it again, and keep the syntax tree nodes the built-in frontend pass leaves unchanged instead of copying them. https://github.com/jfrolich/rescript-rust/pull/89 https://github.com/jfrolich/rescript-rust/pull/85
