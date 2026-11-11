@@ -411,18 +411,37 @@ pub fn type_to_string(
     render_type(config, None, type_name_is_interface, false, type_)
 }
 
+/// A typed constant to export: `export const name: type_ = line as any;`.
+pub struct ExportConst<'a> {
+    /// A `//` comment emitted above the export, unless empty.
+    pub comment: &'a str,
+    /// The constant's doc comment.
+    pub doc_string: crate::gentype::gen_type_common::doc_string::T,
+    /// The exported name.
+    pub name: &'a str,
+    /// The constant's type.
+    pub type_: &'a Type,
+    /// The JavaScript expression the constant is bound to.
+    pub line: &'a str,
+}
+
+/// `EmitType.emitExportConst`: emit `export_const`, among the early exports
+/// when `early` is set.
 pub fn emit_export_const(
-    early: bool,
-    comment: &str,
     config: &crate::gentype::config::T,
-    doc_string: crate::gentype::gen_type_common::doc_string::T,
     emitters: crate::gentype::emitters::T,
-    name: &str,
-    type_: &Type,
     type_name_is_interface: &impl Fn(&str) -> bool,
-    line: &str,
+    early: bool,
+    export_const: ExportConst<'_>,
 ) -> crate::gentype::emitters::T {
     // Mirrors compiler/gentype/EmitType.ml:331-343.
+    let ExportConst {
+        comment,
+        doc_string,
+        name,
+        type_,
+        line,
+    } = export_const;
     let type_string = type_to_string(config, type_name_is_interface, type_);
     let output = format!(
         "{}{}export const {name}: {type_string} = {line} as any;",
@@ -446,19 +465,27 @@ pub fn emit_export_default(
     crate::gentype::emitters::export(emitters, format!("export default {name};"))
 }
 
+/// `EmitType.emitExportType`: emit `export_type` as a type alias, an
+/// interface, or (when `opaque`) an abstract class.
 pub fn emit_export_type(
     config: &crate::gentype::config::T,
     emitters: crate::gentype::emitters::T,
-    name_as: Option<String>,
-    opaque: bool,
-    type_: &Type,
     type_name_is_interface: &impl Fn(&str) -> bool,
-    type_vars: &[String],
-    doc_string: crate::gentype::gen_type_common::doc_string::T,
-    resolved_type_name: &str,
+    export_type: &crate::gentype::code_item::ExportType,
+    opaque: bool,
 ) -> crate::gentype::emitters::T {
     // Mirrors compiler/gentype/EmitType.ml:348-388.
-    let doc_string = crate::gentype::gen_type_common::doc_string::render(&doc_string);
+    let crate::gentype::code_item::ExportType {
+        name_as,
+        type_,
+        type_vars,
+        resolved_type_name,
+        doc_string,
+        ..
+    } = export_type;
+    let resolved_type_name = crate::gentype::resolved_name::to_string(resolved_type_name);
+    let resolved_type_name = resolved_type_name.as_str();
+    let doc_string = crate::gentype::gen_type_common::doc_string::render(doc_string);
     let type_params_string = crate::gentype::emit_text::generics_string(type_vars);
     let is_interface = type_name_is_interface(resolved_type_name);
     let resolved_type_name = match config.export_interfaces && is_interface {

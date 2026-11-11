@@ -1,19 +1,17 @@
 // Port of compiler/gentype/TranslateSignatureFromTypes.ml:1-110.
 
-use crate::parse_arena::ParseArena;
+use crate::gentype::translation::Input;
 use crate::types::decl::{ModuleType, SignatureItem, TypeKind};
 
 pub fn translate_type_declaration_from_types(
-    ctx: &crate::types::context::TypeContext,
-    arena: &ParseArena,
+    input: Input<'_>,
     config: &crate::gentype::config::T,
-    output_file_relative: &str,
-    resolver: &crate::gentype::module_resolver::Resolver,
     type_env: &crate::gentype::type_env::T,
     id: &crate::ident::Ident,
     type_declaration: &crate::types::decl::TypeDeclaration,
 ) -> Vec<crate::gentype::code_item::TypeDeclaration> {
     // Mirrors compiler/gentype/TranslateSignatureFromTypes.ml:3-29.
+    let Input { ctx, .. } = input;
     crate::gentype::type_env::new_type(id.name(), type_env);
     let type_name = id.name().to_string();
     let type_vars =
@@ -47,28 +45,22 @@ pub fn translate_type_declaration_from_types(
         _ => crate::gentype::translate_type_declarations::DeclarationKind::NoDeclaration,
     };
     crate::gentype::translate_type_declarations::traslate_declaration_kind_from_decl_attributes(
-        // Declarations read from types carry no typed annotations.
-        &crate::types::typedtree::TypedArena::new(),
-        ctx,
-        arena,
+        input,
         config,
-        ctx.resolve_loc(type_declaration.type_loc),
-        output_file_relative,
-        resolver,
-        &type_declaration.type_attributes,
         type_env,
-        &type_name,
-        type_vars,
-        declaration_kind,
+        &type_declaration.type_attributes,
+        crate::gentype::translate_type_declarations::Declaration {
+            loc: ctx.resolve_loc(type_declaration.type_loc),
+            type_name: &type_name,
+            type_vars,
+            kind: declaration_kind,
+        },
     )
 }
 
 pub fn translate_module_declaration_from_types(
-    ctx: &crate::types::context::TypeContext,
-    arena: &ParseArena,
+    input: Input<'_>,
     config: &crate::gentype::config::T,
-    output_file_relative: &str,
-    resolver: &crate::gentype::module_resolver::Resolver,
     type_env: &crate::gentype::type_env::T,
     id: &crate::ident::Ident,
     module_declaration: &crate::types::decl::ModuleDeclaration,
@@ -78,11 +70,8 @@ pub fn translate_module_declaration_from_types(
         ModuleType::MtySignature(signature) => {
             let name = id.name();
             crate::gentype::translation::combine(translate_signature_from_types(
-                ctx,
-                arena,
+                input,
                 config,
-                output_file_relative,
-                resolver,
                 &crate::gentype::type_env::new_module(name, type_env),
                 signature,
             ))
@@ -109,25 +98,20 @@ pub fn translate_module_declaration_from_types(
 }
 
 pub fn translate_signature_item_from_types(
-    ctx: &crate::types::context::TypeContext,
-    arena: &ParseArena,
+    input: Input<'_>,
     config: &crate::gentype::config::T,
-    output_file_relative: &str,
-    resolver: &crate::gentype::module_resolver::Resolver,
     type_env: &crate::gentype::type_env::T,
     signature_item: &SignatureItem,
 ) -> crate::gentype::translation::T {
     // Mirrors compiler/gentype/TranslateSignatureFromTypes.ml:51-101.
+    let Input { ctx, .. } = input;
     match signature_item {
         SignatureItem::SigType(id, type_declaration, _) => crate::gentype::translation::T {
             import_types: vec![],
             code_items: vec![],
             type_declarations: translate_type_declaration_from_types(
-                ctx,
-                arena,
+                input,
                 config,
-                output_file_relative,
-                resolver,
                 type_env,
                 id,
                 type_declaration,
@@ -141,11 +125,8 @@ pub fn translate_signature_item_from_types(
             );
             crate::gentype::type_env::update_module_item(module_item, type_env);
             translate_module_declaration_from_types(
-                ctx,
-                arena,
+                input,
                 &config,
-                output_file_relative,
-                resolver,
                 type_env,
                 id,
                 module_declaration,
@@ -165,20 +146,20 @@ pub fn translate_signature_item_from_types(
             ) == crate::gentype::annotation::T::GenType
             {
                 crate::gentype::translation::translate_value_with_name_as(
-                    ctx,
-                    crate::gentype::annotation::get_decl_gentype_as_renaming(
-                        &value_description.val_attributes,
-                    ),
+                    input,
                     config,
-                    crate::gentype::annotation::doc_string_from_decl_attrs(
-                        &value_description.val_attributes,
-                    ),
-                    output_file_relative,
-                    resolver,
                     type_env,
                     value_description.val_type,
                     |t| t,
-                    &name,
+                    crate::gentype::translation::ValueExport {
+                        name: &name,
+                        name_as: crate::gentype::annotation::get_decl_gentype_as_renaming(
+                            &value_description.val_attributes,
+                        ),
+                        doc_string: crate::gentype::annotation::doc_string_from_decl_attrs(
+                            &value_description.val_attributes,
+                        ),
+                    },
                 )
             } else {
                 crate::gentype::translation::empty()
@@ -192,11 +173,8 @@ pub fn translate_signature_item_from_types(
 }
 
 pub fn translate_signature_from_types(
-    ctx: &crate::types::context::TypeContext,
-    arena: &ParseArena,
+    input: Input<'_>,
     config: &crate::gentype::config::T,
-    output_file_relative: &str,
-    resolver: &crate::gentype::module_resolver::Resolver,
     type_env: &crate::gentype::type_env::T,
     signature: &[SignatureItem],
 ) -> Vec<crate::gentype::translation::T> {
@@ -207,15 +185,7 @@ pub fn translate_signature_from_types(
     signature
         .iter()
         .map(|signature_item| {
-            translate_signature_item_from_types(
-                ctx,
-                arena,
-                config,
-                output_file_relative,
-                resolver,
-                type_env,
-                signature_item,
-            )
+            translate_signature_item_from_types(input, config, type_env, signature_item)
         })
         .collect()
 }

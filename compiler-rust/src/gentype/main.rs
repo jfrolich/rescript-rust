@@ -261,6 +261,24 @@ pub fn typed_artifact_has_type_errors(artifact: &TypedArtifact<'_>) -> bool {
     )
 }
 
+impl TypedArtifact<'_> {
+    /// The artifact's trees as a translation reads them, with imports
+    /// resolved for `output_file_relative`.
+    fn translation_input<'s>(
+        &'s self,
+        output_file_relative: &'s str,
+        resolver: &'s crate::gentype::module_resolver::Resolver,
+    ) -> crate::gentype::translation::Input<'s> {
+        crate::gentype::translation::Input {
+            ta: self.ta,
+            ctx: self.ctx,
+            arena: self.arena,
+            output_file_relative,
+            resolver,
+        }
+    }
+}
+
 pub fn structure_item_is_declaration(struct_item: &StructureItem) -> bool {
     // Mirrors compiler/gentype/GenTypeMain.ml:16-20.
     matches!(
@@ -286,30 +304,20 @@ pub fn translate_typed_artifact(
     artifact: &TypedArtifact<'_>,
 ) -> crate::gentype::translation::T {
     // Mirrors compiler/gentype/GenTypeMain.ml:53-70 for in-memory artifacts.
+    let input = artifact.translation_input(output_file_relative, resolver);
     let type_env = crate::gentype::type_env::root_for_current_module_names(
         current_module_names_for_typed_artifact(artifact),
     );
     let translations = match artifact.annots {
         TypedArtifactAnnots::Implementation(structure) => {
             crate::gentype::translate_structure::translate_structure(
-                artifact.ctx,
-                artifact.arena,
-                artifact.ta,
-                config,
-                output_file_relative,
-                resolver,
-                &type_env,
-                structure,
+                input, config, &type_env, structure,
             )
         }
         TypedArtifactAnnots::Interface(signature) => {
             crate::gentype::translate_signature::translate_signature(
-                artifact.ctx,
-                artifact.arena,
-                artifact.ta,
+                input,
                 config,
-                output_file_relative,
-                resolver,
                 &type_env,
                 artifact.ta.signature_items(signature.sig_items),
             )
@@ -368,6 +376,7 @@ pub fn typed_artifact_translate_type_declarations(
     // typedtree path. OCaml reopens the imported CMT at EmitJs.ml:437-453;
     // Rust already has the typed artifact here, so cache the same declaration
     // translation under the CMT path before EmitJs asks for it recursively.
+    let input = artifact.translation_input(output_file_relative, resolver);
     let type_env = crate::gentype::type_env::root();
     let translations = match artifact.annots {
         TypedArtifactAnnots::Implementation(structure) => artifact
@@ -377,14 +386,7 @@ pub fn typed_artifact_translate_type_declarations(
             .filter(|item| structure_item_is_declaration(item))
             .map(|item| {
                 crate::gentype::translate_structure::translate_structure_item(
-                    artifact.ctx,
-                    artifact.arena,
-                    artifact.ta,
-                    config,
-                    output_file_relative,
-                    resolver,
-                    &type_env,
-                    item,
+                    input, config, &type_env, item,
                 )
             })
             .collect(),
@@ -395,14 +397,7 @@ pub fn typed_artifact_translate_type_declarations(
             .filter(|item| signature_item_is_declaration(item))
             .map(|item| {
                 crate::gentype::translate_signature::translate_signature_item(
-                    artifact.ctx,
-                    artifact.arena,
-                    artifact.ta,
-                    config,
-                    output_file_relative,
-                    resolver,
-                    &type_env,
-                    item,
+                    input, config, &type_env, item,
                 )
             })
             .collect(),
@@ -432,28 +427,19 @@ pub fn input_cmt_translate_type_declarations(
     }
 }
 
+/// `GenTypeMain.emitTranslation`: write `translation` to `output_file`,
+/// the file `target` describes, unless it already has that content.
 pub fn emit_translation(
     locs: &dyn crate::types::DeclLocs,
     config: &mut crate::gentype::config::T,
-    file_name: &crate::gentype::module_name::T,
+    target: crate::gentype::emit_js::EmitTarget<'_>,
     output_file: &str,
-    output_file_relative: &str,
-    resolver: &crate::gentype::module_resolver::Resolver,
-    get_cmt_file: &crate::gentype::emit_js::GetCmtFile<'_>,
     source_file: &str,
     translation: &crate::gentype::translation::T,
 ) -> std::io::Result<()> {
     // Mirrors compiler/gentype/GenTypeMain.ml:72-83.
-    let code_text = crate::gentype::emit_js::emit_translation_as_string(
-        locs,
-        config,
-        file_name,
-        get_cmt_file,
-        &input_cmt_translate_type_declarations,
-        output_file_relative,
-        resolver,
-        translation,
-    );
+    let code_text =
+        crate::gentype::emit_js::emit_translation_as_string(target, locs, config, translation);
     let source_file = Path::new(source_file)
         .file_name()
         .and_then(|s| s.to_str())
@@ -582,11 +568,14 @@ pub fn process_typed_artifact(
         emit_translation(
             artifact.ctx,
             &mut config,
-            &artifact.file_name,
+            crate::gentype::emit_js::EmitTarget {
+                file_name: &artifact.file_name,
+                output_file_relative: &output_file_relative,
+                resolver,
+                get_cmt_file: &get_cmt_file,
+                input_cmt_translate_type_declarations: &input_cmt_translate_type_declarations,
+            },
             &output_file,
-            &output_file_relative,
-            resolver,
-            &get_cmt_file,
             &source_file,
             &translation,
         )?;

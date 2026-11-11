@@ -8,6 +8,24 @@ use crate::types::typedtree::TypedValueDescription;
 
 pub type T = code_item::Translation;
 
+/// What every translation of one typed artifact reads: the trees the
+/// artifact is made of, and the generated file and resolver that imports
+/// are resolved with. The configuration is passed separately, as module
+/// attributes can change it for the items they enclose.
+#[derive(Clone, Copy)]
+pub struct Input<'a> {
+    /// Node storage of the artifact's typed tree.
+    pub ta: &'a crate::types::typedtree::TypedArena,
+    /// The type state the typed tree's type expressions live in.
+    pub ctx: &'a crate::types::context::TypeContext,
+    /// The parse arena holding the tree's attributes, strings and locations.
+    pub arena: &'a ParseArena,
+    /// The generated file's path, relative to the project root.
+    pub output_file_relative: &'a str,
+    /// Finds the source directories of the modules the translation imports.
+    pub resolver: &'a crate::gentype::module_resolver::Resolver,
+}
+
 pub fn empty() -> T {
     T {
         import_types: vec![],
@@ -122,14 +140,23 @@ pub fn translate_dependencies(
         .collect()
 }
 
+/// How a value is exported: its ReScript name, the name it is exported
+/// under when `@genType.as` renames it, and its doc comment.
+pub struct ValueExport<'n> {
+    /// The value's name in the ReScript source.
+    pub name: &'n str,
+    /// The exported name, when it differs from `name`.
+    pub name_as: Option<String>,
+    /// The doc comment emitted above the export.
+    pub doc_string: crate::gentype::gen_type_common::doc_string::T,
+}
+
+/// `Translation.translateValue`: the export of a value annotated with
+/// `@genType`, renamed and documented by its `attributes`.
 pub fn translate_value<F>(
-    ctx: &crate::types::context::TypeContext,
-    arena: &ParseArena,
+    input: Input<'_>,
     attributes: &Attributes,
     config: &crate::gentype::config::T,
-    doc_string: crate::gentype::gen_type_common::doc_string::T,
-    output_file_relative: &str,
-    resolver: &crate::gentype::module_resolver::Resolver,
     type_env: &crate::gentype::type_env::T,
     type_expr: crate::types::type_expr::TypeExprRef,
     add_annotations_to_function: F,
@@ -138,35 +165,34 @@ pub fn translate_value<F>(
 where
     F: Fn(Type) -> Type,
 {
+    let arena = input.arena;
     let name_as = match crate::gentype::annotation::get_gentype_as_renaming(arena, attributes) {
         Some(s) => s,
         _ => name.to_string(),
     };
     translate_value_with_name_as(
-        ctx,
-        Some(name_as),
+        input,
         config,
-        doc_string,
-        output_file_relative,
-        resolver,
         type_env,
         type_expr,
         add_annotations_to_function,
-        name,
+        ValueExport {
+            name,
+            name_as: Some(name_as),
+            doc_string: crate::gentype::annotation::doc_string_from_attrs(arena, attributes),
+        },
     )
 }
 
+/// The export of a value of type `type_expr` whose name and renaming are
+/// already known; `add_annotations_to_function` adjusts the translated type.
 pub fn translate_value_with_name_as<F>(
-    ctx: &crate::types::context::TypeContext,
-    name_as: Option<String>,
+    input: Input<'_>,
     config: &crate::gentype::config::T,
-    doc_string: crate::gentype::gen_type_common::doc_string::T,
-    output_file_relative: &str,
-    resolver: &crate::gentype::module_resolver::Resolver,
     type_env: &crate::gentype::type_env::T,
     type_expr: crate::types::type_expr::TypeExprRef,
     add_annotations_to_function: F,
-    name: &str,
+    value: ValueExport<'_>,
 ) -> T
 where
     F: Fn(Type) -> Type,
@@ -174,6 +200,17 @@ where
     // Mirrors compiler/gentype/Translation.ml:80-112. This entry is used by
     // Types.signature callers after Annotation.ml-equivalent decl attribute
     // scanning has already recovered `name_as`.
+    let Input {
+        ctx,
+        output_file_relative,
+        resolver,
+        ..
+    } = input;
+    let ValueExport {
+        name,
+        name_as,
+        doc_string,
+    } = value;
     let name_as = name_as.unwrap_or_else(|| name.to_string());
     let type_expr_translation =
         crate::gentype::translate_type_expr_from_types::translate_type_expr_from_types(
@@ -213,15 +250,19 @@ where
 /// [@genType]
 /// [@module] external myBanner : ReasonReact.reactClass = "./MyBanner";
 pub fn translate_primitive(
-    ta: &crate::types::typedtree::TypedArena,
-    ctx: &crate::types::context::TypeContext,
-    arena: &ParseArena,
+    input: Input<'_>,
     config: &crate::gentype::config::T,
-    output_file_relative: &str,
-    resolver: &crate::gentype::module_resolver::Resolver,
     type_env: &crate::gentype::type_env::T,
     value_description: &TypedValueDescription,
 ) -> T {
+    let Input {
+        ta,
+        ctx,
+        arena,
+        output_file_relative,
+        resolver,
+        ..
+    } = input;
     if crate::gentype::debug::translation.load(std::sync::atomic::Ordering::Relaxed) {
         crate::gentype::log_::item("Translate Primitive\n");
     }

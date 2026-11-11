@@ -313,15 +313,17 @@ pub fn emit_all_module_items(
             let emitted_module_item =
                 crate::gentype::module_name::for_inner_module(file_name, module_name);
             crate::gentype::emit_type::emit_export_const(
-                false,
-                "",
                 config,
-                doc_string,
                 emitters,
-                module_name,
-                &type_for_type,
                 &|_name| false,
-                &emitted_module_item,
+                false,
+                crate::gentype::emit_type::ExportConst {
+                    comment: "",
+                    doc_string,
+                    name: module_name,
+                    type_: &type_for_type,
+                    line: &emitted_module_item,
+                },
             )
         },
         export_module_items,
