@@ -190,41 +190,41 @@ let {parse, resolve, log, byId, debounce} = %ts("./loose.ts")
 ```
 <!-- /example -->
 
-To see which gaps matter, every export of twelve modules was imported: `react`, `react-dom`, `semver`, `chalk`, `vite` and seven Node built-ins (`fs`, `path`, `url`, `child_process`, `os`, `events`, `http`). That is 585 values and 2,292 types, and all twelve compile. 66% of the declarations have an exact ReScript type. The other 34% carry at least one note.
+To see which gaps matter, every export of twelve modules was imported: `react`, `react-dom`, `semver`, `chalk`, `vite` and seven Node built-ins (`fs`, `path`, `url`, `child_process`, `os`, `events`, `http`). That is 603 values and 3,061 types (react 19.3, vite 8.3), and all twelve compile. 78% of the declarations have an exact ReScript type. The other 22%, 809 declarations, carry at least one note.
 
 ### The gaps and how to close them
 
-One row per gap, with the solution this document proposes, what it needs, and where it stands. *Converter* is work in the import alone: the ReScript it would generate compiles today. *Language* is a change to ReScript, described under [language changes](#language-changes). A declaration can have several gaps, so the shares add up to more than 34%. The unions are split by cause, because each cause has its own solution; those shares come from sorting the notes by the TypeScript type they quote, and are approximate.
+One row per gap, with the solution this document proposes, what it needs, and where it stands. *Converter* is work in the import alone: the ReScript it would generate compiles today. *Language* is a change to ReScript, described under [language changes](#language-changes). A declaration can have several gaps, so the shares add up to more than 22%. The unions are split by cause, because each cause has its own solution. The 306 union declarations that remain are not counted per cause yet.
 
 | Gap | Declarations | Imported today as | Solution | Needs | Status |
 |---|---|---|---|---|---|
-| **Unions** | **18.1%** | | | | |
-| Members share a tag: vite's syntax tree, where six members say `type: "Literal"` | about 6.7% | `unknown` | [Each member a case](#members-that-share-a-tag); another field tells apart the members that share a tag | language: object cases, then converter | language done; the converter does small unions, not yet vite's tree |
-| Library interfaces: `NodeJS.ReadableStream \| WritableStream`, `boolean \| AddEventListenerOptions`, `EventListener \| EventListenerObject` | about 4.9% | `unknown` | [Import the interfaces as records and function types](#library-interfaces); object cases then tell them apart | converter, then object cases | not started |
-| Plain objects without a tag: `ReactNode`, `{result} \| {error}`, `AddressInfo \| {}` | about 3.0% | `unknown` | Object cases, told apart by a field that is present or by its kind | language: object cases | done |
-| Arguments of an event listener: `[] \| [err: Error] \| [chunk: Buffer]` | about 1.5% | `unknown` | [A GADT of the event names](#event-maps): each name fixes the arguments | converter | not started |
-| Nothing tells the members apart: `T \| PromiseLike<T>`, two types with the same fields | about 1.3% | `unknown` | [An opaque type](#nothing-tells-the-members-apart) with a conversion to and from each member | converter | not started |
-| Not yet looked at one by one | about 2.5% | `unknown` | | | |
+| **Unions** | **8.4%** | | | | |
+| Members share a tag: vite's syntax tree, where six members say `type: "Literal"` | closed | A variant | [Each member a case](#members-that-share-a-tag); another field tells apart the members that share a tag | language: object cases, then converter | done; the tests are an `if` chain, see [many cases](#object-cases-told-apart-by-their-fields) |
+| Library interfaces: `NodeJS.ReadableStream \| WritableStream`, `boolean \| AddEventListenerOptions`, `EventListener \| EventListenerObject` | part of the 8.4% | `unknown` | [Import the interfaces as records and function types](#library-interfaces); object cases then tell them apart | converter | not started |
+| Plain objects without a tag: `{result} \| {error}`, `{value: string} \| {value: number}` | closed | A variant | Object cases, told apart by a field that is present or by its kind | language: object cases | done |
+| Arguments of an event listener: `[] \| [err: Error] \| [chunk: Buffer]` | part of the 8.4% | `unknown` | [A GADT of the event names](#event-maps): each name fixes the arguments | converter | not started |
+| Nothing tells the members apart: `T \| PromiseLike<T>`, two function types | part of the 8.4% | `unknown` | [An opaque type](#nothing-tells-the-members-apart) with a conversion to and from each member | converter | not started |
+| Merged members whose fields mention a type variable (react's `PendingReactPromise`) | part of the 8.4% | `unknown` | The merged case takes the variables as parameters | converter | not started |
 | `string \| symbol`, unions of classes (`Car \| Vehicle`, `Readable \| Writable`) | | | `@typeOf("symbol")`; [classes on records](#classes-on-records) | language | done |
 | **Other gaps** | | | | | |
-| `any` | 9.9% | A type variable as an argument, `unknown` as a result | None. `any` is a hole in the TypeScript, not in ReScript. | | stays |
-| Overloads | 6.9% | The first signature | [One external per signature](#overloads), named after what it adds | converter | not started |
-| Constraint on a type parameter (`T extends U`) | 3.8% | An unconstrained type variable | [The bound](#type-parameters) when the parameter is in one argument only; otherwise a bounded type variable | converter, then language | not started |
-| Rest parameter in a callback type | 3.5% | One array argument | [A wrapper type](#standard-library-types) that turns the arguments into an array | standard library | not started |
-| Constructor types, classes as values | 2.8% | `unknown` | [A constructor type](#standard-library-types) with `Reflect.construct` | standard library | not started |
-| Conditional, mapped and indexed types over a type parameter | 2.8% | The constraint, or `unknown` | A GADT of keys where the parameter ranges over the keys of a known type ([event maps](#event-maps)); the rest stays | converter | not started |
-| Enum and namespace objects as values | 2.5% | Skipped | [A module](#namespaces-and-enum-objects) with one value per member | converter | not started |
-| Tuples with optional or rest elements, one-element tuples | 2.3% | `array` | Most are the arguments of event listeners: [event maps](#event-maps). One-element tuples stay arrays. | converter | not started |
-| Generic function type inside another type | 2.1% | `unknown` for its own type parameters | [An unboxed record](#generic-function-types) with a polymorphic field | converter | not started |
-| Type parameter out of scope where the type is declared | 2.1% | `unknown`, or the constraint | Mostly the event name of an event map: [event maps](#event-maps). The rest as generic function types. | converter | not started |
+| `any` | 9.0% | A type variable as an argument, `unknown` as a result | None. `any` is a hole in the TypeScript, not in ReScript. | | stays |
+| Overloads | 5.9% | The first signature | [One external per signature](#overloads), named after what it adds | converter | not started |
+| Constraint on a type parameter (`T extends U`) | 3.2% | An unconstrained type variable | [The bound](#type-parameters) when the parameter is in one argument only; otherwise a bounded type variable | converter, then language | not started |
+| Rest parameter in a callback type | 3.4% | One array argument | [A wrapper type](#standard-library-types) that turns the arguments into an array | standard library | not started |
+| Constructor types, classes as values | 2.2% | `unknown` | [A constructor type](#standard-library-types) with `Reflect.construct` | standard library | not started |
+| Conditional, mapped and indexed types over a type parameter | 2.4% | The constraint, or `unknown` | A GADT of keys where the parameter ranges over the keys of a known type ([event maps](#event-maps)); the rest stays | converter | not started |
+| Enum and namespace objects as values | 2.0% | Skipped | [A module](#namespaces-and-enum-objects) with one value per member | converter | not started |
+| Tuples with optional or rest elements, one-element tuples | 2.2% | `array` | Most are the arguments of event listeners: [event maps](#event-maps). One-element tuples stay arrays. | converter | not started |
+| Generic function type inside another type | 1.8% | `unknown` for its own type parameters | [An unboxed record](#generic-function-types) with a polymorphic field | converter | not started |
+| Type parameter out of scope where the type is declared | 1.8% | `unknown`, or the constraint | Mostly the event name of an event map: [event maps](#event-maps). The rest as generic function types. | converter | not started |
 | Explicit `this` parameter | 1.1% | Dropped | `@this` | converter | not started |
-| `object` and `{}` | 1.0% | `unknown` | The open object type `{..}` for `object`; `{}` (any value but `null` and `undefined`) stays `unknown` | converter | not started |
-| Functions with properties | 1.0% | The function | [A module](#functions-with-properties) with the call and one accessor per property | converter | not started |
+| `object` and `{}` | 1.2% | `unknown` | The open object type `{..}` for `object`; `{}` (any value but `null` and `undefined`) stays `unknown` | converter | not started |
+| Functions with properties | 0.9% | The function | [A module](#functions-with-properties) with the call and one accessor per property | converter | not started |
 | Named properties next to an index signature | 0.7% | The named properties | [A record with a `dict` remainder](#a-record-with-a-dict-remainder) | language | not designed |
-| `never` outside a result | 0.6% | `unknown` | [A type without values](#standard-library-types) | standard library | not started |
+| `never` outside a result | 0.5% | `unknown` | [A type without values](#standard-library-types) | standard library | not started |
 | Branded primitives (`string & {__brand: "Id"}`) | 0.3% | The primitive | [A single-case unboxed variant](#branded-primitives) | converter | not started |
 
-If every row but `any` and the types TypeScript cannot compute is closed, about 89% of the declarations are exact, against 66% today. That number is an estimate: each note of the survey was assigned to the solution that would remove it.
+If every row but `any` and the types TypeScript cannot compute is closed, about 89% of the declarations would be exact, against 78% today. The 89% is an estimate from an earlier run of the survey, in which each note was assigned to the solution that would remove it.
 
 Two things the survey does not measure come before any of these rows, because they decide whether an import can be trusted at all: [type parameters](#type-parameters) that let a caller choose a result type silently, and [names](#stable-names) that can change between two versions of a library.
 
@@ -235,8 +235,8 @@ Four of the solutions need a change to ReScript. Everything else in the table is
 | Change | Status | What it closes |
 |---|---|---|
 | [Classes on records](#classes-on-records) | implemented, Rust compiler only | Unions of classes, with the fields of the class readable. Together with `symbol` cases, 39 fewer unions with a note in the survey. |
-| [Object cases told apart by their fields](#object-cases-told-apart-by-their-fields) | implemented, Rust compiler only | The first three union rows: members that share a tag, library interfaces once they are records, plain objects without a tag. Estimated at about 420 declarations, 14.6%, once the converter uses it everywhere. Measured so far: 27 fewer declarations with a union note. |
-| [Bounded type variables](#bounded-type-variables) | specified | Constraints where the parameter also decides the result, such as `pipe<T extends Writable>(destination: T): T`. Part of the 3.8%. |
+| [Object cases told apart by their fields](#object-cases-told-apart-by-their-fields) | implemented, Rust compiler only | Unions of plain objects and of members that share a tag. Measured: the declarations with a union note went from 535 to 306, and vite's syntax tree is a variant of 162 cases. Library interfaces follow once they are records. |
+| [Bounded type variables](#bounded-type-variables) | specified | Constraints where the parameter also decides the result, such as `pipe<T extends Writable>(destination: T): T`. Part of the 3.2%. |
 | [A record with a `dict` remainder](#a-record-with-a-dict-remainder) | not designed | Named properties next to an index signature, 0.7%. |
 
 These were considered and are not needed, because the converter or the standard library covers them with ReScript that compiles today: two record fields with one JavaScript name (overloaded methods become `@send` externals), polymorphic function types outside record fields (an unboxed record with one field), a constructor type and an empty type (standard-library types), and `@variadic` on function types (a wrapper; the language change would only save the wrapper's closure at run time).
@@ -325,7 +325,7 @@ function message(outcome) {
 
 The literals of a type are those of a polymorphic variant without payloads (`[#circle | #square]`), of a variant without payloads, and `true` and `false` for `bool`. A literal check tests every literal of the field's type: `x.kind === "a" || x.kind === "c"` for `kind: [#a | #c]`. The kinds are the ones an untagged variant already tells apart for a payload: string, number, bigint, boolean, function, array, object. A field whose type is none of these (an option, a type variable, an abstract type) takes no part in literal or kind checks. An optional field gives its own case no check, but a case that declares it does not fail a presence check on it.
 
-**Order.** The compiler picks a case that has a test every other remaining case fails, tests it first, and goes on with the rest. A test is one check, or several joined with `&&` when no single one is enough. The last case is not tested. Where there is a choice: the earlier case in the declaration, then a literal check before a presence check before a kind check, then the earlier field. An open case declares no fields, so it fails every presence check and is always last.
+**Order.** The compiler picks a case that has a test every other remaining case fails, tests it first, and goes on with the rest. A test is one check, or several joined with `&&` when no single one is enough; a joined test keeps only the checks it needs. The last case is not tested. Where there is a choice: the earlier case in the declaration, then a literal check before a presence check before a kind check, then the earlier field. An open case declares no fields, so it fails every presence check and is always last.
 
 | Declaration | Tests, in order |
 |---|---|
@@ -339,13 +339,13 @@ The literals of a type are those of a polymorphic variant without payloads (`[#c
 
 **Where the tests go.** Where the test of the single object case is today: after the literal cases, the primitive kinds and the class instances, and guarded against `null` as it is today. A `switch` that does not name every case tests only the ones it names.
 
-**Many cases.** Not implemented: the tests are a chain of `if`s, one per case. A union like vite's syntax tree has more than 160 object cases, and a chain that long is correct but slow and unreadable. When one field's literal tells most of the cases apart, the tests should be a `switch` on that field, with the cases that share a literal told apart inside its arm: `switch (x.type) { case "Literal": if ("regex" in x) ... }`.
+**Many cases.** Not implemented: the tests are a chain of `if`s, one per case. vite's syntax tree has 162 object cases, so a `switch` over it runs up to 161 tests. That is correct but slow and unreadable. When one field's literal tells most of the cases apart, the tests should be a `switch` on that field, with the cases that share a literal told apart inside its arm: `switch (x.type) { case "Literal": if ("regex" in x) ... }`.
 
 **What is trusted.** A record built in ReScript has its declared fields and no others, so for those values the tests are exact. A value that comes from JavaScript can carry more: an object that TypeScript calls `{error: string}` may also have a `result`. TypeScript's own `in` narrowing makes the same assumption. As everywhere in untagged variants, recognition trusts the type.
 
 **Interfaces.** The tests follow from the declaration alone, so an interface and its implementation agree on them when they agree on the cases, as they must already. A `switch` in another module works out the same tests from the declaration.
 
-**In the import.** A union of object types becomes one case per member when an order exists. Members with the same fields are one case. Members that no check separates are merged into one case when they share a tag (see [members that share a tag](#members-that-share-a-tag)). A union with no order is still `unknown`; the [opaque type](#nothing-tells-the-members-apart) for it is not built.
+**In the import.** A union of object types becomes one case per member when an order exists. A named interface is a case with that record (`Done(done)`). An unnamed member is an inline record, named after its first required field that no other member has: `{result: string} | {error: string}` is `Result({result: string}) | Error({error: string})`. Members with the same fields are one case. Members that no check separates are merged into one case when they share a tag (see [members that share a tag](#members-that-share-a-tag)); a union whose members all merge is that one record. A union with no order is still `unknown`; the [opaque type](#nothing-tells-the-members-apart) for it is not built.
 
 <!-- example: shapes -->
 ```rescript
@@ -363,7 +363,7 @@ let message = job =>
 ```
 <!-- /example -->
 
-**Measured.** On a newer install of the twelve surveyed modules (react 19.3, vite 8.3), the declarations with a union note went from 535 to 508. The gain is small for two reasons. vite's syntax tree, the largest union, is still `unknown`: some of its merged cases mention type variables, and the converter gives those up. Library interfaces are not records yet. Converting vite also takes 3.1 s where it took 0.17 s; the cause is not found yet. The survey numbers elsewhere in this document are from before this change.
+**Measured.** On the twelve surveyed modules, without and with object cases in the import: the declarations with a union note go from 535 to 306, and the declarations with any note from 1,003 to 809. The number of types goes from 2,419 to 3,061, because the members of a union that was `unknown` are now declared. Converting vite takes 0.30 to 0.41 s, against 0.17 to 0.20 s without.
 
 ### Bounded type variables
 
@@ -401,13 +401,13 @@ Status: not designed.
 
 ## Converter and standard-library work
 
-Every encoding in this section was compiled with the current compiler. Apart from [members that share a tag](#members-that-share-a-tag), which works for small unions, none of it is implemented in the import yet. Several of the ideas come from [rescript-bindgen](https://github.com/juspay/rescript-bindgen), a generator of ReScript bindings for React component packages that also reads types through the TypeScript checker: the rule for type parameters, names of overloads, conversions in both directions on opaque types, functions with properties as modules, branded types, a table of known React types, stable names and a corpus of pinned packages.
+Every encoding in this section was compiled with the current compiler. Apart from [members that share a tag](#members-that-share-a-tag), none of it is implemented in the import yet. Several of the ideas come from [rescript-bindgen](https://github.com/juspay/rescript-bindgen), a generator of ReScript bindings for React component packages that also reads types through the TypeScript checker: the rule for type parameters, names of overloads, conversions in both directions on opaque types, functions with properties as modules, branded types, a table of known React types, stable names and a corpus of pinned packages.
 
 ### Type parameters
 
 Today every type parameter becomes a type variable. That is wrong in two places.
 
-**Only in the result.** `json<T>(): Promise<T>` is imported as `unit => promise<'t>`. ReScript infers `'t` from the use, so `let user: user = await json()` compiles, and nothing at the call shows that the type was chosen there. TypeScript lets the caller choose `T` too, but writes it at the call (`json<User>()`). In the survey, 24 of the 585 functions have a type variable only in their result. Most are constructors and hooks, where choosing is the point (`new EventEmitter<Events>()`, `createRef<T>()`): there the variable is a type argument of the returned type. The rule: a variable that is a type argument of the returned type stays a variable; a variable that is the result, or the element of a promise, an array or a tuple in it, becomes `unknown`, with a note.
+**Only in the result.** `json<T>(): Promise<T>` is imported as `unit => promise<'t>`. ReScript infers `'t` from the use, so `let user: user = await json()` compiles, and nothing at the call shows that the type was chosen there. TypeScript lets the caller choose `T` too, but writes it at the call (`json<User>()`). In an earlier run of the survey, 24 of 585 functions had a type variable only in their result. Most are constructors and hooks, where choosing is the point (`new EventEmitter<Events>()`, `createRef<T>()`): there the variable is a type argument of the returned type. The rule: a variable that is a type argument of the returned type stays a variable; a variable that is the result, or the element of a promise, an array or a tuple in it, becomes `unknown`, with a note.
 
 **With a bound, in one argument.** `greet<T extends string>(name: T): void` is imported as `'t => unit`, which accepts anything. A bounded parameter that occurs in one argument and not in the result is its bound: `string => unit`. Where it also occurs in the result, the variable is kept with a note until [bounded type variables](#bounded-type-variables) exist.
 
@@ -417,7 +417,7 @@ Generated types are named after where they are first met (`parkWhat`, `refAttrib
 
 ### Members that share a tag
 
-The syntax tree of vite's parser is a union of 183 interfaces tagged by `type`. Thirteen tags are used by more than one interface, 37 interfaces in all, and that is enough to make the whole union `unknown`, and with it the `parent` of every node.
+The syntax tree of vite's parser is a union of 188 interfaces tagged by `type`, and several tags are used by more than one interface. A `@tag` variant needs one case per tag, so it cannot hold this union. Without a type for it, the `parent` of every node is `unknown` too.
 
 ```ts
 interface StringLiteral { type: "Literal"; value: string; raw: string | null }
@@ -439,17 +439,17 @@ type node =
 ```
 
 ```js
-if (x.type === "Literal" && "raw" in x && typeof x.value === "string") { /* StringLiteral */ }
+if ("raw" in x && typeof x.value === "string") { /* StringLiteral */ }
 else if ("raw" in x) { /* NumericLiteral */ }
 else if (x.type === "Literal") { /* RegExpLiteral */ }
 else { /* IdentifierName */ }
 ```
 
-That is what the compiler generates today. The first test has a check it does not need (`x.type === "Literal"`): checks are added until every other case fails, and none is taken away afterwards. Building and reading are both exact, and the cases keep their TypeScript names.
+That is what the compiler generates. Building and reading are both exact, and the cases keep their TypeScript names.
 
 Some members that share a tag differ in no field a check can see. `ArrayPattern` and `ArrayAssignmentTarget` are both `{type: "ArrayPattern", elements: [...]}`; only the types of the elements differ. They become one case. A field every member has is required, and a field only some have is optional. A field whose types differ should be the union of the members' types; today it is `unknown`, with a note, unless all the types are literals.
 
-The import does this for unions it can finish. vite's tree is not one of them yet. On vite 8.3 a trial build made 162 cases from the 188 members the checker reports, 12 of them merged, but the result did not compile: a merged case that mentions a type variable was declared without it. The converter now gives such a union up, so the tree is still `unknown`.
+The import does this. The 188 members of vite's tree become the variant `node` with 162 cases, 13 of them merged from several members, and `parent` has that type. Not done: a merged case whose fields mention a type variable. Such a union is still `unknown`.
 
 ### Library interfaces
 
@@ -579,10 +579,10 @@ type never
 
 ### Order of work
 
-1. **Object cases**, with members that share a tag and library interfaces as records. Together the largest gain, about 14.6% of the declarations. The compiler part is being implemented.
+1. **Finish object cases**: the `switch` on one field for variants with many cases, type variables in merged cases, and library interfaces as records, which most of the remaining unions wait for.
 2. **Type parameters and stable names.** They change no count, but today an import can be wrong without a note, and a library upgrade can rename a type.
 3. **Event maps.** A third of all notes.
-4. **Overloads, namespaces and constructors**: about 12% of the declarations touched, all converter or standard-library work.
+4. **Overloads, namespaces and constructors**: about 10% of the declarations touched, all converter or standard-library work.
 5. **A corpus of pinned packages** with their output and notes kept as a baseline, so that a change which stops one compiling, or adds notes, fails a test. Today the survey runs on whatever is installed.
 6. The remaining rows, then bounded type variables and the `dict` remainder.
 
