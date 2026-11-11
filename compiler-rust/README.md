@@ -60,11 +60,11 @@ code, read the matching OCaml source first.
 | Initial environment | `compiler/core/res_compmisc.ml`, `compiler/ml/env.ml` | `src/types/predef.rs`, `src/types/env.rs`, `src/cmi/persistent_env.rs`, `src/driver.rs` | Pervasives/Stdlib loading and implicit opens must preserve OCaml lookup and force order. |
 | Persistent environment | `compiler/ml/env.ml`, `compiler/ml/cmi_format.ml`, `compiler/ml/cmi_format.mli`, `compiler/core/js_cmj_format.ml` | `src/cmi/persistent_env.rs`, `src/cmi/cmi_format.rs`, `src/cmi/sig_reader.rs`, `src/cmi/portable_types.rs` | Rust reads OCaml `.cmi`/`.cmj` data and has an in-memory registry mode. Disk writing of `.cmi`/`.cmj` is not currently equivalent to OCaml. |
 | Lazy module components | `compiler/ml/env.ml` (`EnvLazy` module), `compiler/ml/subst.ml` | `src/types/env_lazy.rs`, `src/types/env.rs`, `src/types/context.rs` | This is a high-risk parity area. Rust must preserve OCaml API boundaries such as `find_module_descr` versus `find_module`. |
-| Core type operations | `compiler/ml/ctype.ml`, `compiler/ml/btype.ml` | `src/types/ctype.rs`, `src/types/btype.rs`, `src/types/type_expr.rs` | Physical sharing created by `instance`, `copy`, `link_type`, `unify`, generalization, and row mutation is observable in typedtree sexp parity. |
+| Core type operations | `compiler/ml/ctype.ml`, `compiler/ml/btype.ml` | `src/types/ctype.rs`, `src/types/btype.rs`, `src/types/type_expr.rs` | Physical sharing created by `instance`, `copy`, `link_type`, `unify`, generalization, and row mutation decides what unifies and how types print; the typed tree's own sharing need not match OCaml. |
 | Type declarations and data representation | `compiler/ml/typedecl.ml`, `compiler/ml/datarepr.ml`, `compiler/ml/typetexp.ml` | `src/types/typemod.rs`, `src/types/typecore.rs`, `src/types/decl.rs` | Constructors, labels, records, variants, objects, externals, and type attributes must build equivalent declarations. |
 | Expression and pattern typing | `compiler/ml/typecore.ml`, `compiler/ml/typeopt.ml`, `compiler/ml/parmatch.ml` | `src/types/typecore.rs`, `src/raw_lambda/typeopt.rs` | Includes expression inference, pattern typing, labels, application, rows, warnings, and error messages. |
 | Module and signature typing | `compiler/ml/typemod.ml`, `compiler/ml/includemod.ml`, `compiler/ml/mtype.ml` | `src/types/typemod.rs`, `src/types/includemod.rs` | Includes structures, signatures, functors, includes, opens, recursive modules, interface inclusion, delayed checks, and signature simplification. |
-| Typedtree definitions and dumps | `compiler/ml/typedtree.ml`, `compiler/ml/sexp_typedtree.ml` | `src/types/typedtree.rs`, `src/types/sexp_typedtree.rs` | Serializer must reflect typechecker output. It must not normalize content to hide typechecker differences. |
+| Typedtree definitions and dumps | `compiler/ml/typedtree.ml`, `compiler/ml/sexp_typedtree.ml` | `src/types/typedtree.rs`, `src/types/sexp_typedtree.rs` | Debugging dumps only; they are not compared with OCaml's. |
 | Typedtree to first Lambda representation | `compiler/ml/translcore.ml`, `compiler/ml/translmod.ml`, `compiler/ml/matching.ml`, `compiler/ml/typeopt.ml`, `compiler/ml/lambda.ml` | `src/raw_lambda/convert.rs`, `src/raw_lambda/matching.rs`, `src/raw_lambda/typeopt.rs`, `src/raw_lambda/mod.rs` | Rust `RawLambda` is the counterpart of OCaml `Lambda.lambda`. |
 | First Lambda to JS-backend Lambda, then optimization | `compiler/core/lam_convert.ml`, `compiler/core/lam.ml`, `compiler/core/lam_compile_main.ml`, `compiler/core/lam_pass_*.ml` | `src/raw_lambda/lower.rs`, `src/lambda/mod.rs`, `src/lambda/lam_compile_main.rs`, `src/lambda/lam_pass_*.rs` | OCaml also has this second Lambda-level representation: `Lam_convert.convert` converts `Lambda.lambda` into backend `Lam.t`. Pass order is fixed by the OCaml backend. |
 | JavaScript backend | `compiler/core/lam_compile.ml`, `compiler/core/js_*.ml`, `compiler/core/j.ml`, `compiler/core/js_cmj_format.ml` | `src/lambda/lam_compile.rs`, `src/lambda/js_*`, `src/js_ir/*`, `src/cmi/persistent_env.rs` | Includes JS IR, externals, primitives, module paths, exports, side effects, printer behavior, and `.cmj` metadata reads. |
@@ -159,15 +159,16 @@ typechecks and dumps typed output but does not write OCaml-compatible `.cmi` or
 
 These details are not implementation trivia; tests and users can observe them.
 
-- Identifier stamps are part of compiler output. Typedtree sexps, Lambda dumps,
-  generated JS names, export identifiers, and module metadata all depend on
-  stamp allocation order.
-- Type expression identity is physical identity. OCaml typedtree sexp dedup is
-  based on `type_expr.id`, not structural equality. Rust must preserve the same
-  sharing through `TypeExprRef`.
-- Lazy environment force order is semantic for parity. Forcing a component table
-  can allocate paths, substitute declarations, copy type nodes, and cache child
-  components in an order that later dumps expose.
+Only the generated JavaScript (with gentype output and source maps), the
+ReScript the parser and printer emit, and the type system's results (accepted
+programs, inferred and printed types, errors and warnings) are compared with
+OCaml. Intermediate representations (parse tree, parsetree0, `.ast` files,
+typed tree, Lambda) and identifier stamps are not; they may differ freely.
+
+- Identifier stamps matter only where they reach that output, for example the
+  names and order of generated JS bindings.
+- Lazy environment force order matters only where it changes types, paths or
+  diagnostics.
 - Path spelling is observable. `Pident`, `Pdot`, `Papply`, flattened module names,
   generated nested module names, and alias paths must be produced by the same
   declaration/substitution flow as OCaml.
@@ -259,8 +260,8 @@ Compiler options affect every later stage:
 - `-nopervasives`, implicit opens, `-bs-jsx`, debug flags, warning flags, and
   file-level `@@config` affect frontend and typechecker behavior.
 - Dump flags such as `-dtyped-sexp`, `-drawlambda`, and `-dlambda-sexp` expose
-  intermediate representations and can short-circuit downstream work in parity
-  scripts.
+  intermediate representations for debugging and skip the work after the
+  dumped stage.
 - In-process options can skip JS rendering, capture intermediates, publish
   signatures through hooks, or compile multiple JS targets from one Lambda tree.
 
@@ -978,11 +979,11 @@ Typemod.type_module
 ### `btype.ml`: Mutable Type-Node Substrate
 
 `btype.ml` is not just utility code. It defines the mutable graph discipline
-that typedtree parity exposes.
+the type checker's results depend on.
 
 - Every type node has `desc`, `level`, and `id`. `id` is allocated by `newty2`
-  from a mutable counter. Rust `TypeExprRef` must preserve equivalent physical
-  identity and allocation order where dumps expose it.
+  from a mutable counter. Rust need not reproduce OCaml's ids or sharing; only
+  what they decide (unification, generalization, printed types) must match.
 - `generic_level`, `lowest_level`, and `pivot_level` are special marker levels.
   `pivot_level - level` is used to mark nodes during traversals without
   side tables. Rust can use side tables internally, but the observable order and
@@ -1015,7 +1016,6 @@ Rust parity implications:
 
 - Any arena optimization must keep type-node identity stable and must not turn
   OCaml's mutating mark/unmark/backtrack pattern into structural rebuilding.
-- Physical identity, not structural content, drives typedtree sexp dedup.
 - Row helpers are algorithmic operations, not serializer conveniences.
 
 ### `ctype.ml`: Levels, Instantiation, Expansion, And Unification
@@ -1512,12 +1512,13 @@ Nonexpansive/value restriction:
 
 Rust parity implications:
 
-- For typedtree parity, the order "type patterns, run delayed forces, type
-  expressions, check let-pattern partiality, close level, value restriction,
-  generalize" must be preserved.
+- The order "type patterns, run delayed forces, type expressions, check
+  let-pattern partiality, close level, value restriction, generalize" decides
+  generalization and warnings; change it only where types and diagnostics stay
+  the same.
 - Record typing is highly sensitive to expected-type propagation and final
-  `instance env ty_expected` calls. Sparse record representations must expand
-  to the same typedtree and RawLambda-facing shape.
+  `instance env ty_expected` calls. Sparse record representations must lower
+  to the same JavaScript.
 - Application typing has nested definition levels. Collapsing them can change
   level numbers and generalization.
 
@@ -1918,8 +1919,6 @@ Why this stage is sensitive:
 - Match compilation affects generated JS shape and performance.
 - It affects warning behavior through partial/fragile match analysis.
 - Static-exit shape affects later Lambda simplification and output byte parity.
-- Typeopt lookups can force environment components, so matching can affect
-  typedtree/lambda parity indirectly when it queries declarations.
 
 ## Stage 15: RawLambda To Lambda
 
@@ -2293,8 +2292,6 @@ Known algorithmic risk areas:
   lookup/normalization.
 - Stdlib/Pervasives special cases should be justified by the implicit-open path
   in `res_compmisc.ml` and `env.ml`, not by a single observed parity fixture.
-- Serializer-level normalization is not a valid typedtree parity fix. The
-  serializer should faithfully emit the typechecker result.
 
 Current semantic and coverage caveats:
 
@@ -2365,10 +2362,6 @@ parity.
   `after_parsing_impl`. Warning order, config timing, JSX, extension expansion,
   and built-in rewrite ordering should be checked against OCaml before changing
   this area.
-- Typedtree and Lambda dump parity can depend on internal performance
-  representations such as sparse record nodes and sparse extras. Those
-  representations are valid only because serializers and RawLambda lowering
-  restore the OCaml-facing shape at observable boundaries.
 
 ## Performance Improvements Versus OCaml
 
@@ -2510,8 +2503,8 @@ Optimization workflow:
 3. Read the OCaml reference implementation for the same stage.
 4. Simplify Rust toward the OCaml boundary rather than adding a compatibility
    layer.
-5. Check typedtree parity, Lambda parity when relevant, JS output parity, and
-   error-output parity before committing source changes.
+5. Check JS output parity and error-output parity before committing source
+   changes.
 6. For docs-only README changes, parity is not required.
 
 ## Workflow For Architecture Changes
@@ -2529,7 +2522,7 @@ Use this process for compiler behavior changes:
    equivalence, and fixture-specific logic.
 6. Add or update focused tests for the behavior.
 7. Run focused parity first, then full non-tella parity, then tella parity when
-   the change affects typedtree/Lambda/output behavior.
+   the change can affect output.
 8. For performance work, run release measurements after correctness is stable.
 
 Use this process for documentation changes:

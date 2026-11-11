@@ -123,13 +123,13 @@ Do not add mechanisms whose only purpose is reproducing OCaml's typedtree
 sharing, stamp order or force order. Remove existing ones when they are in the
 way and the contract still holds.
 
-**Typedtree sexp and Lambda parity are diagnostics, not requirements.**
-`scripts/test_typedtree_parity.sh` and `scripts/test_lambda_parity.sh` help
-locate which layer a JavaScript or diagnostic difference comes from. A change
-that alters them is worth a look, but a typedtree or Lambda difference is
-acceptable when the JavaScript and the type-checking results are unchanged.
-Never make the typedtree serializer normalize, sort or rewrite its input to hide
-a difference; it must print what the type checker produced.
+**No intermediate representation is compared with OCaml.** The parse tree,
+the PPX-facing parsetree0 and `.ast` files, the typed tree, raw and optimized
+Lambda, and identifier stamps may all differ from OCaml's; there are no parity
+tests for them. The dump flags (`-dparsetree`, `-dtypedtree`, `-drawlambda`,
+`-dlambda-sexp`, ...) remain as debugging aids for finding where a JavaScript
+or diagnostic difference starts. The checks of ReScript the parser and printer
+emit (formatting, JSX output, syntax errors) stay, through the syntax tests.
 
 Beyond the two points above, keep these working:
 
@@ -150,15 +150,18 @@ cite the OCaml location (`compiler/ml/<file>.ml:<line>`) in a comment.
 
 - Refactors with no intended behaviour change: `cargo build` and `cargo test`
   for `compiler-rust` and `rewatch`, plus `./scripts/test_js_output_parity.sh`.
-- Type checker changes: also `./scripts/test_error_output_parity.sh`. Run
-  typedtree parity to see what moved, and confirm any difference is
-  JS-invisible and type-invisible.
-- Lambda or JS backend changes: JS output parity is the gate; Lambda parity
-  shows where a difference starts.
+- Type checker changes: also `./scripts/test_error_output_parity.sh` and the
+  `super_errors` build tests.
+- Lambda or JS backend changes: JS output parity (including
+  `./scripts/test_stdlib_output_parity.sh` and
+  `./scripts/test_gentype_output_parity.sh`) is the gate.
+- Parser or printer changes: `make test-syntax` and
+  `./scripts/test_rust_parity.sh --skip-js` (the Rust parser against the
+  ReScript and syntax-error snapshots).
 
 ### Rebuilding the OCaml bsc
 
-If you modify OCaml source files (e.g., `compiler/ml/sexp_typedtree.ml`), rebuild with:
+If you modify OCaml source files (e.g., under `compiler/ml/`), rebuild with:
 ```bash
 eval $(opam env) && dune clean --root . && dune build --root .
 ```
@@ -801,10 +804,12 @@ make rewatch-pgo
 
 ### Comparing Against the OCaml Compiler
 
-When the Rust output differs from OCaml, run both compilers on the same `.res`
-file and compare layer by layer (`-dparsetree`, `-dtypedtree`, `-drawlambda`,
-then the JavaScript) to find where the difference starts. Fix the cause in that
-layer; do not patch the symptom in a later one. Commit each fix on its own.
+When the Rust JavaScript or a diagnostic differs from OCaml, run both
+compilers on the same `.res` file and compare layer by layer (`-dparsetree`,
+`-dtypedtree`, `-drawlambda`, then the JavaScript) to find where the difference
+starts. This is a debugging aid: a difference in an intermediate layer is fine
+on its own. Fix the cause in the layer it starts in; do not patch the symptom in
+a later one. Commit each fix on its own.
 
 ### Key Design Decisions
 

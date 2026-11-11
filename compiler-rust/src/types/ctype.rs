@@ -3342,9 +3342,8 @@ fn strengthen_module_type_for_module_access_path(
 
     // Match OCaml compiler/ml/mtype.ml:22-32: `strengthen` calls `scrape`
     // first, and `scrape` expands `Mty_ident` with Env.find_modtype_expansion
-    // before signature strengthening. This matters for strict typedtree parity
-    // because each expansion walks/freshens the module type at OCaml's exact
-    // inclusion points.
+    // before signature strengthening, so strengthening sees the expanded
+    // module type.
     let mut visiting = HashSet::new();
     let scraped = scrape_modtype_ident_for_strengthen(env, mty, &mut visiting);
 

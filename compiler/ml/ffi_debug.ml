@@ -1,6 +1,5 @@
 (* Fork-only: a deterministic textual rendering of a digested external, used
-   by the sexp parity printers so the Rust compiler can be compared against
-   this reference. *)
+   by the sexp debugging printers. *)
 
 open External_arg_spec
 open External_ffi_types

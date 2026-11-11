@@ -4,26 +4,11 @@ This document describes the binary AST serialization in the Rust compiler.
 
 ## Status
 
-- **AST structure (sexp-locs)**: 100% parity (1049/1049 files)
-- **Binary output (bsc-ast)**: ~121 files with exact byte parity, ~928 with differences
-
-The AST structure is correct (sexp-locs match), but there are two categories of remaining differences:
-
-1. **Position sharing differences**: Many files where Rust creates fewer/more shared references than OCaml
-2. **FFI encoding differences**: Files with `external` declarations where OCaml's PPX encodes FFI metadata into `pval_prim`
-
-### Known Issues
-
-#### FFI Metadata Encoding
-When OCaml processes external declarations, the PPX encodes FFI type information as a marshalled blob inside `pval_prim`. This creates strings containing OCaml Marshal data (starting with magic `84 95 a6 be`). The Rust implementation doesn't currently perform this encoding, resulting in smaller binary output for files with externals.
-
-See `compiler/frontend/external_ffi_types.ml`:
-```ocaml
-let to_string (t : t) = Marshal.to_string t []
-```
-
-#### Position Sharing Patterns
-OCaml's position sharing is based on pointer equality - when the same position variable is referenced multiple times in OCaml code, they share the same memory object and get the same marshal reference. The Rust implementation uses arena indices to approximate this, but some patterns still produce different sharing behavior.
+The `.ast` files are an intermediate representation that only this build
+system reads; they are not compared with the OCaml compiler's (there is no
+parse-tree or `bsc -bs-ast` parity test). Byte layout, position sharing and
+FFI metadata encoding may all differ from OCaml as long as the Rust compiler
+reads back what it wrote and the generated JavaScript is unchanged.
 
 ---
 
@@ -383,59 +368,6 @@ When `partial: true`, add `[@res.partial]` attribute.
 
 ---
 
-## Debugging Tools
-
-### Binary AST Inspector (`scripts/inspect_binary_ast.py`)
-
-A pure Python 3 tool (no external dependencies) for decoding, comparing, and analyzing binary AST files. Handles the `bsc -bs-ast` format (dependency header + marshal payload).
-
-```bash
-# Decode a .ast file into a human-readable tree with object indices [N] and type annotations
-python3 scripts/inspect_binary_ast.py decode <file.ast> [--max-depth N]
-
-# Compare two .ast files: shows header diffs, first byte divergence, parallel tree walk
-python3 scripts/inspect_binary_ast.py compare <ocaml.ast> <rust.ast>
-
-# Quick overview: file size, deps, marshal header, object type histogram, top shared targets
-python3 scripts/inspect_binary_ast.py summary <file.ast>
-
-# Sharing analysis: groups all shared references by target, annotates Position/Location details
-python3 scripts/inspect_binary_ast.py sharing <file.ast>
-
-# End-to-end: runs both OCaml and Rust bsc, auto-compares, shows decoded diff at divergence
-python3 scripts/inspect_binary_ast.py test <source.res>
-```
-
-**Key features for parity debugging:**
-- Identifies the classic sharing mismatch pattern: "OCaml has `SHARED -> [N]`, Rust writes a fresh block"
-- Reports structural differences with full tree paths to pinpoint exact AST node locations
-- Shows hex context around first byte difference in marshal payload
-- Annotates blocks with inferred types (Position, Location, Pair/Record2, Cons/Variant1, etc.)
-- Groups sharing targets by reference count to identify most-shared objects
-
-**Typical workflow for investigating a parity failure:**
-```bash
-# 1. Quick check
-python3 scripts/inspect_binary_ast.py test path/to/file.res
-
-# 2. If mismatch, look at sharing differences (the most common cause)
-python3 scripts/inspect_binary_ast.py sharing /tmp/ocaml.ast
-python3 scripts/inspect_binary_ast.py sharing /tmp/rust.ast
-
-# 3. Deep comparison
-python3 scripts/inspect_binary_ast.py compare /tmp/ocaml.ast /tmp/rust.ast
-```
-
-### Existing: OCaml Marshal Debugger (`scripts/debug_marshal.ml`)
-
-Handles the `res_parser` format (`Caml1999M022`/`Caml1999N022` magic). Useful for the older sexp-based format but does **not** handle the `bsc -bs-ast` format. Use `inspect_binary_ast.py` for `bsc -bs-ast` files.
-
-```bash
-ocaml scripts/debug_marshal.ml <file.ast>
-```
-
----
-
 ## References
 
 ### OCaml Sources
@@ -459,5 +391,3 @@ ocaml scripts/debug_marshal.ml <file.ast>
 
 ---
 
-*Document consolidated from: BINARY_AST_PLAN.md, BINARY_AST_MASTER_PLAN.md, BINARY_AST_PARITY_PLAN.md, BINARY_AST_PARITY_COMPREHENSIVE_PLAN.md*
-*Last updated: 2026-02-01*
