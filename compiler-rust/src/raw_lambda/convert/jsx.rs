@@ -7,6 +7,7 @@
 use super::{RawLambdaConverter, label_runtime_name};
 use crate::lambda::lam_primitive::JsxElement;
 use crate::lambda::{FieldDbgInfo, LamLoc, Primitive};
+use crate::raw_lambda::builder::RawLambdaBuilder;
 use crate::raw_lambda::{LetKind, RawLambda};
 use crate::types::asttypes::ArgLabel;
 use crate::types::decl::{LabelDescription, PrimKind, RecordRepresentation, ValueKind};
@@ -125,7 +126,7 @@ fn is_plain_param(param: &Param) -> bool {
     param.arg_label == LabelNoname::ArgEmpty && param.arg_type == Attr::Nothing
 }
 
-impl<'a> RawLambdaConverter<'a> {
+impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
     /// `jsx_props_of`.
     fn jsx_props_of<'e>(&self, multi: bool, props: &'e Expression) -> Option<JsxProps<'e>> where 'a: 'e {
         let ExpressionDesc::Texp_record {
