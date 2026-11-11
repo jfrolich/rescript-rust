@@ -545,7 +545,7 @@ impl DumpKind {
 
     /// Whether the dump prints source locations or text, so that the
     /// compile needs a parse that stores them.
-    fn needs_locations(self) -> bool {
+    pub fn needs_locations(self) -> bool {
         match self {
             DumpKind::TypedTree
             | DumpKind::TypedTreeLocs

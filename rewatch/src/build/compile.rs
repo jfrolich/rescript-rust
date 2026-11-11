@@ -3948,7 +3948,7 @@ fn compile_with_location_retry<T>(
         );
         return super::parse::reparse_with_locations(ast).and_then(|located| compile(&located, options));
     }
-    if !build.diagnostic_locations && build.dump.is_none() && result.is_err() {
+    if !build.parses_with_locations() && result.is_err() {
         // Type errors can quote declarations from dependency interfaces.
         // Rebuild those with locations as well before reporting the error.
         build
@@ -4364,7 +4364,7 @@ fn finish_in_process_js(
         metadata_tx,
         write_tx,
     );
-    if !build_command_state.diagnostic_locations && build_command_state.dump.is_none() && result.is_err() {
+    if !build_command_state.parses_with_locations() && result.is_err() {
         build_command_state
             .diagnostic_retry
             .store(true, std::sync::atomic::Ordering::Relaxed);
