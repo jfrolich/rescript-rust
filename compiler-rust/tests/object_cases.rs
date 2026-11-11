@@ -154,6 +154,14 @@ let f = x => switch x { | Round(_) => 1 | Other(_) => 2 }
 }
 
 #[test]
+fn a_numeric_polymorphic_variant_tag_is_a_number() {
+    assert_eq!(
+        tests_of("A({k: [#1], v: int}) | B({k: [#2], v: int})", &["A", "B"]),
+        ["x.k === 1"]
+    );
+}
+
+#[test]
 fn checks_are_joined_when_no_single_one_is_enough() {
     assert_eq!(
         tests_of("Both({x: int, y: int}) | X({x: int}) | Y({y: int})", &["Both", "X", "Y"]),
@@ -363,4 +371,5 @@ fn a_variant_of_another_module() {
         r#"if ("result" in v) { return v.result; } else { return v.error; }"#
     );
 }
+
 

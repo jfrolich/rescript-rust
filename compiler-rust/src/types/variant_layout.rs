@@ -1124,11 +1124,27 @@ fn field_literals(ctx: &TypeContext, env: &Env, t: TypeExprRef) -> Option<Vec<Li
                     crate::types::type_expr::RowField::Rabsent => continue,
                     _ => return None,
                 }
-                literals.push(LiteralTag::String(label.to_string()));
+                literals.push(polyvariant_literal(label));
             }
             (!literals.is_empty()).then_some(literals)
         }
         _ => None,
+    }
+}
+
+/// The JavaScript value of a polymorphic variant tag without payload: a
+/// number for a tag spelled as one (`#1`), a string otherwise
+/// (`raw_lambda::lower::polyvar_block_tag_constant`).
+fn polyvariant_literal(label: &str) -> LiteralTag {
+    let bytes = label.as_bytes();
+    let number = match bytes {
+        [b'0'..=b'9'] => true,
+        [b'1'..=b'9', rest @ ..] => rest.iter().all(u8::is_ascii_digit),
+        _ => false,
+    };
+    match label.parse::<i32>() {
+        Ok(value) if number => LiteralTag::Int(value.into()),
+        _ => LiteralTag::String(label.to_string()),
     }
 }
 
