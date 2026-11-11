@@ -618,6 +618,23 @@ fn pending(tctx: &mut TypeCheckContext<'_>, loc: LocIdx) -> TypeCoreError {
     error_at(loc, "(macro expansion pending)")
 }
 
+/// Report a misuse of a macro that only a discovery pass sees: an ordinary
+/// compilation stops at the macro before it gets this far.
+fn fail(tctx: &mut TypeCheckContext<'_>, loc: LocIdx, message: impl Into<String>) -> TypeCoreError {
+    let message = message.into();
+    let at = range(tctx.arena, loc);
+    match &mut tctx.macro_mode {
+        MacroMode::Discover(discovery) => {
+            discovery.error(at, message);
+            pending(tctx, loc)
+        }
+        MacroMode::Off => error_at(loc, message),
+    }
+}
+
+const HOLE_OUTSIDE_QUOTE: &str =
+    "A hole `${...}` can only be used inside a quote: %code(...), %type(...) or %pat(...).";
+
 fn discovering(tctx: &TypeCheckContext<'_>) -> bool {
     matches!(tctx.macro_mode, MacroMode::Discover(_))
 }
@@ -663,15 +680,12 @@ fn lookup_value(
     env.lookup_value_by_lid(&longident, tctx.arena, &mut tctx.persistent_env, tctx.type_ctx)
 }
 
-/// `Json.encode` → (`Json`, `encode`): the module whose JavaScript the
-/// engine loads and the export it calls.
+/// `Json.encode` → (`Json`, `encode`): the file whose JavaScript the engine
+/// loads, and the path of the macro in its exports (`Inner.encode` for a
+/// macro in a submodule).
 fn split_macro_name(name: &str) -> (String, String) {
-    match name.rsplit_once('.') {
-        Some((module, value)) => (module.split('.').next().unwrap_or(module).to_string(), {
-            // A macro in a submodule is not reachable as an export by name.
-            let _ = module;
-            value.to_string()
-        }),
+    match name.split_once('.') {
+        Some((module, path)) => (module.to_string(), path.to_string()),
         None => (String::new(), name.to_string()),
     }
 }
@@ -813,7 +827,21 @@ fn find_macro(
     name: &str,
 ) -> Result<Arc<ValueDescription>, TypeCoreError> {
     let Some((_, desc)) = lookup_value(tctx, env, name) else {
-        return Err(error_at(loc, format!("The macro `{name}` cannot be found.")));
+        let own_module = tctx
+            .persistent_env
+            .as_ref()
+            .and_then(|persistent_env| persistent_env.compiling_module_name())
+            .is_some_and(|module| name.split('.').next() == Some(module));
+        return Err(error_at(
+            loc,
+            if own_module {
+                format!(
+                    "`{name}` is defined in this file. A macro cannot be used in the file that defines it: the compiler runs the compiled file."
+                )
+            } else {
+                format!("The macro `{name}` cannot be found.")
+            },
+        ));
     };
     match macro_kind(&desc) {
         Some(_) => Ok(desc),
@@ -877,12 +905,9 @@ pub(crate) fn expression_extension(
         return Some(Err(if !discovering(tctx) {
             required(tctx, loc)
         } else if is_hole {
-            error_at(
-                loc,
-                "A hole `${...}` can only be used inside a quote: %code(...), %type(...) or %pat(...).",
-            )
+            fail(tctx, loc, HOLE_OUTSIDE_QUOTE)
         } else {
-            error_at(loc, format!("The quote `%{name}` needs a payload: `%{name}(...)`."))
+            fail(tctx, loc, format!("The quote `%{name}` needs a payload: `%{name}(...)`."))
         }));
     }
     if name == "comptime" {
@@ -903,7 +928,8 @@ pub(crate) fn expression_extension(
     let (signature, _, result_type) = signature(ctx, macro_type);
     let at = range(tctx.arena, loc);
     if signature.result != ResultKind::Code {
-        return Some(Err(error_at(
+        return Some(Err(fail(
+            tctx,
             loc,
             format!("The macro `{name}` does not return an expression, so it cannot be used as one."),
         )));
@@ -945,7 +971,7 @@ fn comptime(
     }
     let expr_idx = match payload_expressions(tctx.arena, &extension.1, 1) {
         Ok(exprs) if exprs.len() == 1 => exprs[0],
-        _ => return Err(error_at(loc, "%comptime takes one expression: `%comptime(expr)`.")),
+        _ => return Err(fail(tctx, loc, "%comptime takes one expression: `%comptime(expr)`.")),
     };
     let expr = tctx.arena.get_expr(expr_idx);
     let typed = crate::types::typecore::type_expect(tctx, env, expr, expected_ty, None)?;
@@ -1306,6 +1332,51 @@ pub(crate) fn skips_failed_item(tctx: &TypeCheckContext<'_>) -> bool {
     matches!(&tctx.macro_mode, MacroMode::Discover(discovery) if discovery.depth == 0)
 }
 
+/// An extension where a pattern is expected: `| %Http.status("ok") => ...`.
+pub(crate) fn pattern_extension(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    loc: LocIdx,
+    extension: &Extension,
+) -> Option<TypeCoreError> {
+    let name = tctx.arena.get_string(extension.0.txt).to_string();
+    if name == HOLE_EXTENSION {
+        return Some(if discovering(tctx) {
+            fail(tctx, loc, HOLE_OUTSIDE_QUOTE)
+        } else {
+            required(tctx, loc)
+        });
+    }
+    if !is_macro_name(&name) {
+        return None;
+    }
+    let desc = match find_macro(tctx, env, loc, &name) {
+        Ok(desc) => desc,
+        Err(error) => return Some(error),
+    };
+    if !discovering(tctx) {
+        return Some(required(tctx, loc));
+    }
+    let ctx = tctx.type_ctx;
+    let (signature, _, _) = signature(ctx, crate::types::instance(ctx, desc.val_type));
+    if signature.result != ResultKind::Pat {
+        return Some(fail(
+            tctx,
+            loc,
+            format!("The macro `{name}` does not return a pattern (`pat`), so it cannot be used as one."),
+        ));
+    }
+    let at = range(tctx.arena, loc);
+    let mut table = TypeTable::default();
+    with_discovery(tctx, |tctx, discovery| {
+        let args = call_arguments(tctx, env, discovery, &mut table, &name, &signature, &extension.1);
+        if let Some(code) = run_call(tctx, env, discovery, &mut table, at, &name, args, None) {
+            discovery.edits.push(Edit::replace(at.0, at.1, format!("({code})")));
+        }
+    });
+    Some(pending(tctx, loc))
+}
+
 /// An extension where a type is expected: `type t = %Partial.t(user)`.
 pub(crate) fn type_extension(
     tctx: &mut TypeCheckContext<'_>,
@@ -1316,7 +1387,7 @@ pub(crate) fn type_extension(
     let name = tctx.arena.get_string(extension.0.txt).to_string();
     if name == HOLE_EXTENSION {
         return Some(if discovering(tctx) {
-            error_at(loc, "A hole `${...}` can only be used inside a quote: %code(...), %type(...) or %pat(...).")
+            fail(tctx, loc, HOLE_OUTSIDE_QUOTE)
         } else {
             required(tctx, loc)
         });
@@ -1334,7 +1405,8 @@ pub(crate) fn type_extension(
     let ctx = tctx.type_ctx;
     let (signature, _, _) = signature(ctx, crate::types::instance(ctx, desc.val_type));
     if signature.result != ResultKind::Typ {
-        return Some(error_at(
+        return Some(fail(
+            tctx,
             loc,
             format!("The macro `{name}` does not return a type, so it cannot be used as one."),
         ));
@@ -1418,7 +1490,8 @@ pub(crate) fn declarations_extension(
     let ctx = tctx.type_ctx;
     let (signature, _, _) = signature(ctx, crate::types::instance(ctx, desc.val_type));
     if signature.result != ResultKind::Decls {
-        return Some(error_at(
+        return Some(fail(
+            tctx,
             loc,
             format!("The macro `{name}` does not return declarations (`decls`), so it cannot be used here."),
         ));
@@ -1500,12 +1573,13 @@ pub(crate) fn value_item(
         return Some(required(tctx, loc));
     }
     if bindings.len() != 1 {
-        return Some(error_at(attr_loc, format!("`@{name}` works on a `let` with one binding.")));
+        return Some(fail(tctx, attr_loc, format!("`@{name}` works on a `let` with one binding.")));
     }
     let ctx = tctx.type_ctx;
     let (signature, _, _) = signature(ctx, crate::types::instance(ctx, desc.val_type));
     if signature.params != [ParamKind::Binding] || signature.result != ResultKind::Decls {
-        return Some(error_at(
+        return Some(fail(
+            tctx,
             attr_loc,
             format!("A macro on a `let` has the type `Decl.value => decls`, and `{name}` does not."),
         ));

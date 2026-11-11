@@ -595,3 +595,133 @@ let b = (t: tree) => Json.encode(t)
     // One group, before the first item.
     assert_eq!(expanded.matches("@res.macroInstances").count(), 1, "{expanded}");
 }
+
+fn compile_err(project: &mut Project, filename: &str, source: &str) -> String {
+    match project.compile(filename, source) {
+        Ok(js) => panic!("{filename} compiled:\n{js}"),
+        Err(error) => {
+            println!("--- {filename}\n{error}");
+            error
+        }
+    }
+}
+
+#[test]
+fn misuse_is_explained() {
+    let mut project = Project::new();
+    compile_ok(&mut project, "Json.res", JSON);
+    compile_ok(&mut project, "Debug.res", DEBUG);
+
+    let error = compile_err(
+        &mut project,
+        "Same.res",
+        "open Macro\n@macro\nlet one = (): code<int> => %code(1)\nlet x = %Same.one()\n",
+    );
+    assert!(error.contains("cannot be used in the file that defines it"), "{error}");
+    assert!(error.contains("Same.res:4:9"), "{error}");
+
+    let error = compile_err(&mut project, "Unknown.res", "let x = %Nope.f(1)\n");
+    assert!(error.contains("The macro `Nope.f` cannot be found."), "{error}");
+
+    let error = compile_err(&mut project, "Plain.res", "let x = %Stdlib.Int.toString(1)\n");
+    assert!(error.contains("is not a macro"), "{error}");
+
+    let error = compile_err(&mut project, "Arity.res", "let x = %Debug.dbg\n");
+    assert!(error.contains("takes 1 argument, and 0 are given"), "{error}");
+
+    let error = compile_err(&mut project, "Hole.res", "let x = ${1}\n");
+    assert!(error.contains("can only be used inside a quote"), "{error}");
+    assert!(error.contains("Hole.res:1:9"), "{error}");
+
+    let error = compile_err(&mut project, "Kind.res", "type t = %Debug.dbg(int)\n");
+    assert!(error.contains("does not return a type"), "{error}");
+
+    // The generated code is type checked like written code.
+    let error = compile_err(&mut project, "TypeErr.res", "let x: string = %Debug.dbg(1 + 1)\n");
+    assert!(error.contains("This has type: int"), "{error}");
+}
+
+#[test]
+fn macro_code_has_no_clock_and_no_random_numbers() {
+    let mut project = Project::new();
+    compile_ok(
+        &mut project,
+        "Rand.res",
+        "open Macro\n@macro\nlet r = (): code<float> => Code.float(Math.random())\n@macro\nlet now = (): code<float> => Code.float(Date.now())\n",
+    );
+    let error = compile_err(&mut project, "UseRand.res", "let x = %Rand.r()\n");
+    assert!(error.contains("Math.random is not available at compile time"), "{error}");
+    let error = compile_err(&mut project, "UseNow.res", "let x = %Rand.now()\n");
+    assert!(error.contains("Date.now is not available at compile time"), "{error}");
+}
+
+#[test]
+fn generated_syntax_errors_show_the_generated_code() {
+    let mut project = Project::new();
+    compile_ok(
+        &mut project,
+        "Bad.res",
+        "open Macro\n@macro\nlet bad = (): code<int> => Code.raw(\"1 +\")\n",
+    );
+    let error = compile_err(&mut project, "UseBad.res", "let x = %Bad.bad()\n");
+    assert!(error.contains("A macro generated code with a syntax error"), "{error}");
+    assert!(error.contains("let x = (1 +)"), "{error}");
+}
+
+#[test]
+fn pattern_macro() {
+    let mut project = Project::new();
+    compile_ok(
+        &mut project,
+        "Http.res",
+        r#"
+open Macro
+
+@macro
+let status = (name: string): pat =>
+  switch name {
+  | "ok" => %pat(200 | 201 | 204)
+  | "missing" => Pat.int(404)
+  | _ => error(`Http.status: unknown status "${name}"`)
+  }
+"#,
+    );
+    let js = compile_ok(
+        &mut project,
+        "Handle.res",
+        r#"
+let describe = code =>
+  switch code {
+  | %Http.status("ok") => "fine"
+  | %Http.status("missing") => "not found"
+  | _ => "other"
+  }
+"#,
+    );
+    assert!(js.contains("404"), "{js}");
+    assert!(js.contains("204"), "{js}");
+}
+
+#[test]
+fn macro_in_a_submodule() {
+    let mut project = Project::new();
+    compile_ok(
+        &mut project,
+        "Lib.res",
+        "open Macro\nmodule Numbers = {\n  @macro\n  let answer = (): code<int> => %code(42)\n}\n",
+    );
+    let js = compile_ok(&mut project, "UseLib.res", "let x = %Lib.Numbers.answer()\n");
+    assert!(js.contains("42"), "{js}");
+}
+
+#[test]
+fn generic_as_a_value_and_in_a_pipe() {
+    let mut project = Project::new();
+    compile_ok(&mut project, "Json.res", JSON);
+    let js = compile_ok(
+        &mut project,
+        "Values.res",
+        "type p = {x: int}\nlet all = (ps: array<p>) => ps->Array.map(Json.encode)\nlet one = (p: p) => p->Json.encode\n",
+    );
+    assert!(js.contains("ps.map(encode$p)"), "{js}");
+}

@@ -197,8 +197,11 @@
         run(request.source, module);
         return JSON.stringify({ ok: reify(module.exports.value, request.shape) });
       }
-      var exports = load(request.module);
-      var macro = exports[request.name];
+      // `name` is a path in the module's exports: `Inner.encode` is a macro
+      // in a submodule.
+      var macro = request.name.split(".").reduce(function (value, key) {
+        return value === null || value === undefined ? undefined : value[key];
+      }, load(request.module));
       if (typeof macro !== "function") {
         throw { __macro_error: "`" + request.module + "." + request.name + "` is not a function, so it cannot run as a macro." };
       }

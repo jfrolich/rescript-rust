@@ -4994,7 +4994,12 @@ fn type_pattern_inner(
             Ok(result)
         }
 
-        PD::Ppat_extension(extension) => Err(builtin_extension_error(tctx.arena, extension)),
+        PD::Ppat_extension(extension) => {
+            if let Some(error) = crate::macros::discover::pattern_extension(tctx, env, loc, extension) {
+                return Err(error);
+            }
+            Err(builtin_extension_error(tctx.arena, extension))
+        }
     }
 }
 
