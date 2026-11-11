@@ -5588,6 +5588,12 @@ fn format_type_warnings(
 /// The source text an in-process compile reports diagnostics against. Like
 /// OCaml's code frames (location.ml), it is read back from the source file.
 fn read_in_process_source(filename: &str) -> String {
+    #[cfg(target_arch = "wasm32")]
+    {
+        if let Some(content) = crate::wasm_vfs::read_file(filename) {
+            return content;
+        }
+    }
     std::fs::read(filename)
         .map(crate::source_text::latin1_bytes_to_string)
         .unwrap_or_default()

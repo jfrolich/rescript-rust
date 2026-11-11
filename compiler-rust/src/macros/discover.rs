@@ -386,9 +386,7 @@ impl Discovery {
         let mut answers = serde_json::Map::new();
         for _ in 0..4096 {
             request["answers"] = Value::Object(answers.clone());
-            let response = self
-                .host
-                .call(&request.to_string())
+            let response = super::call_host(&*self.host, &request.to_string())
                 .map_err(|message| (format!("The macro engine failed: {message}"), None))?;
             let response: Value = serde_json::from_str(&response)
                 .map_err(|error| (format!("The macro engine returned invalid JSON: {error}"), None))?;
@@ -458,14 +456,17 @@ pub(crate) fn answer_input(base_dir: &std::path::Path, question: &str) -> Option
             None => json!({ "__error": format!("readFile: cannot read `{rest}`.") }),
         }),
         "env" => Some(match std::env::var(rest) {
-            Ok(value) => Value::String(value),
+            Ok(value) => {
+                Value::String(crate::source_text::latin1_bytes_to_string(value.into_bytes()))
+            }
             Err(_) => Value::Null,
         }),
         _ => None,
     }
 }
 
-/// Read `path` relative to `base` or one of its ancestors.
+/// Read `path` relative to `base` or one of its ancestors, as the compiler
+/// reads a source file: one `char` per byte.
 fn read_file(base: &std::path::Path, path: &str) -> Option<String> {
     #[cfg(feature = "wasm")]
     {
@@ -479,18 +480,23 @@ fn read_file(base: &std::path::Path, path: &str) -> Option<String> {
     }
     #[cfg(not(feature = "wasm"))]
     {
+        let read = |path: &std::path::Path| {
+            std::fs::read(path)
+                .ok()
+                .map(crate::source_text::latin1_bytes_to_string)
+        };
         let relative = std::path::Path::new(path);
         if relative.is_absolute() {
-            return std::fs::read_to_string(relative).ok();
+            return read(relative);
         }
         let mut dir = Some(base);
         while let Some(current) = dir {
-            if let Ok(text) = std::fs::read_to_string(current.join(relative)) {
+            if let Some(text) = read(&current.join(relative)) {
                 return Some(text);
             }
             dir = current.parent();
         }
-        std::fs::read_to_string(relative).ok()
+        read(relative)
     }
 }
 

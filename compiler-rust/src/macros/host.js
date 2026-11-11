@@ -4,6 +4,10 @@
 // browser. The embedder provides `__rescript_macro_source(moduleName)`, which
 // returns the compiled JavaScript of a module or undefined.
 //
+// Macro code sees no clock, no random numbers and no network: a macro gets
+// its inputs from the compiler (`readFile`, `env`, `Type.info`), which is
+// what makes an expansion a function of recorded inputs.
+//
 // A macro cannot call back into the compiler. When it needs an answer the
 // compiler has not given yet (the shape of a type, the text of a file), `ask`
 // throws, the call returns `{need: question}`, and the compiler runs the macro
@@ -30,6 +34,10 @@
     },
     expected: function () {
       return state.expected;
+    },
+    // For embedders that also run compiled modules themselves.
+    toCommonJs: function (source) {
+      return toCommonJs(source);
     },
   };
 
@@ -62,6 +70,48 @@
       });
   }
 
+  function refuse(what) {
+    return function () {
+      throw { __macro_error: what + " is not available at compile time: a macro has to give the same result every time." };
+    };
+  }
+
+  // What a module of macro code sees in place of the globals of the same
+  // name. The names of the browser's and Node's input and output are
+  // undefined.
+  var hidden = [
+    "fetch", "XMLHttpRequest", "WebSocket", "importScripts", "postMessage", "navigator", "location",
+    "indexedDB", "caches", "localStorage", "sessionStorage", "document", "window", "self", "process",
+    "setTimeout", "setInterval", "setImmediate", "queueMicrotask", "performance", "crypto",
+  ];
+  var sandbox = (function () {
+    var math = Object.create(Math);
+    math.random = refuse("Math.random");
+    var RealDate = Date;
+    function FixedDate() {
+      if (arguments.length === 0) refuse("The current time")();
+      return new (Function.prototype.bind.apply(RealDate, [null].concat(Array.prototype.slice.call(arguments))))();
+    }
+    FixedDate.prototype = RealDate.prototype;
+    FixedDate.UTC = RealDate.UTC;
+    FixedDate.parse = RealDate.parse;
+    FixedDate.now = refuse("Date.now");
+    return { Math: math, Date: FixedDate };
+  })();
+
+  function run(source, module) {
+    var parameters = ["require", "exports", "module", "Math", "Date"].concat(hidden);
+    Function.apply(null, parameters.concat([toCommonJs(source)]))(
+      function (specifier) {
+        return load(moduleName(specifier));
+      },
+      module.exports,
+      module,
+      sandbox.Math,
+      sandbox.Date,
+    );
+  }
+
   function load(name) {
     var loaded = modules[name];
     if (loaded) return loaded.exports;
@@ -72,13 +122,7 @@
     var module = { exports: {} };
     modules[name] = module;
     try {
-      new Function("require", "exports", "module", toCommonJs(source))(
-        function (specifier) {
-          return load(moduleName(specifier));
-        },
-        module.exports,
-        module,
-      );
+      run(source, module);
     } catch (error) {
       delete modules[name];
       throw error;
@@ -150,11 +194,7 @@
       if (request.kind === "eval") {
         // %comptime: `source` is a compiled module that exports `value`.
         var module = { exports: {} };
-        new Function("require", "exports", "module", toCommonJs(request.source))(
-          function (specifier) { return load(moduleName(specifier)); },
-          module.exports,
-          module,
-        );
+        run(request.source, module);
         return JSON.stringify({ ok: reify(module.exports.value, request.shape) });
       }
       var exports = load(request.module);

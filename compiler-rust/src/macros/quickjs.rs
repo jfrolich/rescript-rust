@@ -1,9 +1,8 @@
 //! The macro engine of native builds: QuickJS, linked into the compiler.
 //!
-//! One engine per thread that expands macros, created on first use. It has
-//! no file system, no network, no clock and no random numbers: a macro gets
-//! its inputs from the compiler (`readFile`, `env`, `Type.info`), which is
-//! what makes an expansion a function of recorded inputs.
+//! One engine per thread that expands macros, created on first use. QuickJS
+//! has no file system and no network; `host.js` hides the clock and random
+//! numbers from macro code.
 
 use std::cell::RefCell;
 use std::sync::Arc;
@@ -21,27 +20,6 @@ pub type ModuleSources = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
 const MEMORY_LIMIT: usize = 512 * 1024 * 1024;
 /// Time one macro call may take.
 const TIME_LIMIT: Duration = Duration::from_secs(20);
-
-const SANDBOX_JS: &str = r#"
-(function () {
-  function refuse(what) {
-    return function () {
-      throw { __macro_error: what + " is not available at compile time: a macro has to give the same result every time." };
-    };
-  }
-  Math.random = refuse("Math.random");
-  var RealDate = Date;
-  function FixedDate() {
-    if (arguments.length === 0) refuse("The current time")();
-    return new (Function.prototype.bind.apply(RealDate, [null].concat(Array.prototype.slice.call(arguments))))();
-  }
-  FixedDate.prototype = RealDate.prototype;
-  FixedDate.UTC = RealDate.UTC;
-  FixedDate.parse = RealDate.parse;
-  FixedDate.now = refuse("Date.now");
-  globalThis.Date = FixedDate;
-})();
-"#;
 
 static NEXT_HOST: AtomicU64 = AtomicU64::new(1);
 
@@ -99,7 +77,6 @@ impl QuickJsHost {
                     sources(&name)
                 })?;
                 ctx.globals().set("__rescript_macro_source", source)?;
-                ctx.eval::<(), _>(SANDBOX_JS)?;
                 ctx.eval::<(), _>(HOST_JS)?;
                 Ok(())
             })

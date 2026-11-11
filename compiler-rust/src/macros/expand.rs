@@ -308,8 +308,7 @@ fn evaluate_comptime(
             "shape": site.shape,
             "answers": answers,
         });
-        let response = host
-            .call(&request.to_string())
+        let response = super::call_host(&**host, &request.to_string())
             .map_err(|message| format!("%comptime: the macro engine failed: {message}"))?;
         let response: Value = serde_json::from_str(&response)
             .map_err(|error| format!("%comptime: the macro engine returned invalid JSON: {error}"))?;

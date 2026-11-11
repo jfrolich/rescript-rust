@@ -72,6 +72,9 @@ impl Project {
             macro_host: Some(host),
             ..Default::default()
         };
+        // As the compiler reads a file: one `char` per byte.
+        let source: String = source.bytes().map(char::from).collect();
+        let source = source.as_str();
         match driver::compile_source_in_process(
             source,
             filename,
@@ -93,15 +96,16 @@ impl Project {
                         ),
                     );
                 }
-                self.javascript
-                    .lock()
-                    .unwrap()
-                    .insert(module_name, compiled.js_output.clone());
+                let text = |text: &str| {
+                    rescript_compiler::source_text::decode_internal_utf8(text).into_owned()
+                };
+                let js = text(&compiled.js_output);
+                self.javascript.lock().unwrap().insert(module_name, js.clone());
                 self.host.invalidate();
-                self.expanded = compiled.expanded_source;
-                Ok(compiled.js_output)
+                self.expanded = compiled.expanded_source.as_deref().map(text);
+                Ok(js)
             }
-            Err(e) => Err(format!("{e:#}")),
+            Err(e) => Err(rescript_compiler::source_text::decode_internal_utf8(&format!("{e:#}")).into_owned()),
         }
     }
 }
@@ -417,4 +421,39 @@ fn macro_errors_point_at_the_use() {
         .unwrap_err();
     println!("{error}");
     assert!(error.contains("generated per type"), "{error}");
+}
+
+#[test]
+fn text_outside_ascii() {
+    let mut project = Project::new();
+    compile_ok(
+        &mut project,
+        "Shout.res",
+        r#"
+open Macro
+
+@macro
+let label = (text: string): code<string> => Code.string("« " ++ String.toUpperCase(text) ++ " » ✓")
+"#,
+    );
+    let js = compile_ok(
+        &mut project,
+        "Menu.res",
+        "let cafe = \"crème brûlée\"\nlet title = %Shout.label(\"déjà vu\")\nlet both = cafe ++ title\n",
+    );
+    assert!(js.contains("\"« DÉJÀ VU » ✓\""), "{js}");
+    assert!(js.contains("crème brûlée"), "{js}");
+
+    // A macro error after non-ASCII text is reported at the right column.
+    compile_ok(
+        &mut project,
+        "Fail.res",
+        "open Macro\n@macro\nlet now = (text: string): code<string> => error(\"no \" ++ text)\n",
+    );
+    let error = project
+        .compile("Late.res", "let s = \"déjà\"; let t = %Fail.now(\"été\")\n")
+        .unwrap_err();
+    println!("{error}");
+    assert!(error.contains("no été"), "{error}");
+    assert!(error.contains("Late.res:1:"), "{error}");
 }

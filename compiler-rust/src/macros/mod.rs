@@ -41,6 +41,17 @@ pub trait MacroHost: Send + Sync {
     fn call(&self, request: &str) -> Result<String, String>;
 }
 
+/// Call the engine with a request built from the compiler's text.
+///
+/// The compiler keeps source text as one `char` per byte of the file, so
+/// that every offset is a byte offset; the engine works with the text those
+/// bytes encode. Everything that crosses is converted here: the request to
+/// real text, the response back to one `char` per byte.
+pub(crate) fn call_host(host: &dyn MacroHost, request: &str) -> Result<String, String> {
+    let response = host.call(&crate::source_text::decode_internal_utf8(request))?;
+    Ok(crate::source_text::latin1_bytes_to_string(response.into_bytes()))
+}
+
 impl std::fmt::Debug for dyn MacroHost {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("MacroHost")
