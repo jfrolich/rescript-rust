@@ -481,11 +481,18 @@ impl<'r> JsPrinter<'r> {
 
     /// Reserve raw JavaScript names so renamed locals cannot capture them.
     pub(super) fn reserve_js_names(&mut self, block: &[Stmt]) {
+        // A renamed local is `name$1`, `name$2`, ...: only a raw name of
+        // that form can be captured, and a program rarely uses one. The
+        // arena's identifier tables tell without walking the program.
+        if !self.a.may_use_js_name_of_renamed_local() {
+            self.reserved_js_names.clear();
+            return;
+        }
         #[derive(Default)]
         struct JsNames(HashSet<Name>);
         impl JsNames {
             fn add(&mut self, id: &Ident) {
-                if id.is_js() || (id.is_global() && id.stamp() == 0) {
+                if super::arena::is_raw_js_name(id) {
                     self.0.insert(id.name_atom());
                 }
             }
