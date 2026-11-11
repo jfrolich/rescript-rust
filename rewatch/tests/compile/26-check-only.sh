@@ -48,6 +48,12 @@ check_unchanged "$project"
 timeout 10 "$REWATCH_EXECUTABLE" build "$project" > "$work/out" 2> "$work/err"
 check_unchanged "$project"
 
+# Typing warning locations must not be remapped twice on location-free parses.
+printf 'let value = { let unused = 1; A.value }\n' > "$project/src/B.res"
+timeout 10 "$REWATCH_EXECUTABLE" build "$project" > "$work/out" 2> "$work/normal.err"
+check_unchanged "$project"
+diff -u "$work/normal.err" "$work/err"
+
 printf 'let value: int = "wrong"\n' > "$project/src/B.res"
 normal_status=0
 timeout 10 "$REWATCH_EXECUTABLE" build "$project" > "$work/out" 2> "$work/normal.err" || normal_status=$?
