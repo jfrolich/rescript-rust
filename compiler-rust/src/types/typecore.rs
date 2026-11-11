@@ -49,6 +49,7 @@ use crate::types::{
 };
 use std::borrow::Cow;
 use std::cmp::Ordering;
+use std::rc::Rc;
 use std::sync::Arc;
 
 const DICT_PATTERN_ATTRIBUTE: &str = "res.dictPattern";
@@ -27093,7 +27094,7 @@ fn build_functor_application_components(
 
     let applied_mty = match functor_path.view() {
         PathView::Pident(_) => {
-            let stored = env.local_module_components_arc(functor_path)?;
+            let stored = env.local_module_components_shared(functor_path)?;
             stored.instantiate_functor_result_for_application(arg_path, ctx)?
         }
         PathView::Pdot(parent, module_name, _) => {
@@ -27304,7 +27305,7 @@ pub(crate) fn with_resolved_module_components_for_path_with_cache_mode<R>(
         let result =
             (f.take()
                 .expect("qualified module components callback reused"))(&components);
-        ctx.register_qualified_module_components_arc(shared_key.clone(), components);
+        ctx.register_qualified_module_components_shared(shared_key.clone(), components);
         return Some(result);
     }
 
@@ -27329,7 +27330,7 @@ pub(crate) fn with_resolved_module_components_for_path_with_cache_mode<R>(
     } else {
         (build(pers_env), None)
     };
-    let components = Arc::new(components?);
+    let components = Rc::new(components?);
     if shared_key.is_some() && piece.is_none() {
         components.make_private();
     }
@@ -27348,7 +27349,7 @@ pub(crate) fn with_resolved_module_components_for_path_with_cache_mode<R>(
             ctx.thread_store()
                 .publish_shared_components(shared_key, components.clone(), piece);
         }
-        ctx.register_qualified_module_components_arc(module_key, components);
+        ctx.register_qualified_module_components_shared(module_key, components);
     }
     Some(result)
 }
@@ -28992,7 +28993,7 @@ fn pm_variant_length(ctx: &TypeContext, cstr: &crate::types::ConstructorDescript
 /// pattern, and Parmatch reads pattern types in it: `get_type_path p.pat_type
 /// p.pat_env` (parmatch.ml:350-354, 906, 1019), `row_of_pat`
 /// (parmatch.ml:844-847), `Ctype.expand_head p.pat_env` (parmatch.ml:149).
-fn pm_pattern_env(ctx: &TypeContext, env: EnvRef) -> Arc<Env> {
+fn pm_pattern_env(ctx: &TypeContext, env: EnvRef) -> Rc<Env> {
     ctx.get_typed_env(env)
         .expect("Parmatch: pattern env is stored in the type context")
 }

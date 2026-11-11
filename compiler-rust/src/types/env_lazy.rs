@@ -9,6 +9,7 @@
 use crate::fast_hash::AHashMap as HashMap;
 use crate::types::path::PathView;
 use std::cell::{OnceCell, RefCell};
+use std::rc::Rc;
 use std::sync::Arc;
 
 use crate::ident::Ident;
@@ -626,11 +627,11 @@ impl ChildScanCursor {
 type ComponentValue = (usize, Ident, ValueDescription);
 
 /// A forced child module's position in the signature and component tables.
-type ChildComponents = (usize, Arc<StoredModuleComponents>);
+type ChildComponents = (usize, Rc<StoredModuleComponents>);
 
 /// A functor result substituted for one argument path, with the replay
 /// record of computing it during a store build.
-type FunctorResultSubst = (ModuleType, Option<Arc<super::context::StorePiece>>);
+type FunctorResultSubst = (ModuleType, Option<Rc<super::context::StorePiece>>);
 
 #[derive(Debug, Clone)]
 struct StructureComponentTables {
@@ -662,11 +663,11 @@ struct StructureComponentTables {
     in_store: std::cell::Cell<bool>,
     /// Store pieces per forced entry, one table per `ForcedKind` so lookups
     /// can borrow the entry name.
-    store_pieces: RefCell<[HashMap<String, Arc<super::context::StorePiece>>; FORCED_KIND_COUNT]>,
+    store_pieces: RefCell<[HashMap<String, Rc<super::context::StorePiece>>; FORCED_KIND_COUNT]>,
     /// The layer tables `open` adds for this view, built on first open.
     opened_layers: OnceCell<(
-        Arc<super::env::OpenedLayers>,
-        Option<Arc<super::context::StorePiece>>,
+        Rc<super::env::OpenedLayers>,
+        Option<Rc<super::context::StorePiece>>,
     )>,
 }
 
@@ -687,7 +688,7 @@ const _: () = assert!(ForcedKind::QualifiedModule as usize + 1 == FORCED_KIND_CO
 pub(crate) struct QualifiedModuleComponents {
     access_path: Arc<Path>,
     signature: Arc<Signature>,
-    tables: Arc<StructureComponentTables>,
+    tables: Rc<StructureComponentTables>,
     compiler_counters_enabled: bool,
     value_source_prefix: Option<Arc<Path>>,
 }
@@ -727,10 +728,10 @@ fn scan_child_component_from_signature(
     access_path: &Path,
     source_prefix: Option<&Path>,
     signature: &Arc<Signature>,
-    child_components: &mut HashMap<String, Option<(usize, Arc<StoredModuleComponents>)>>,
+    child_components: &mut HashMap<String, Option<(usize, Rc<StoredModuleComponents>)>>,
     state: &mut ChildComponentScanState,
     child_name: &str,
-) -> (Option<(usize, Arc<StoredModuleComponents>)>, usize) {
+) -> (Option<(usize, Rc<StoredModuleComponents>)>, usize) {
     let ChildComponentScanState::Pending(cursor) = state else {
         return (None, 0);
     };
@@ -772,7 +773,7 @@ fn scan_child_component_from_signature(
                         Some((*access_path, signature.clone())),
                     );
                     working_env
-                        .local_module_components_arc(&Path::pident(*id))
+                        .local_module_components_shared(&Path::pident(*id))
                         .map(|stored| (runtime_pos, stored))
                 };
                 if let (Some(source), Some((_, stored))) = (source_prefix, &stored) {
@@ -821,7 +822,7 @@ impl QualifiedModuleComponents {
     pub(crate) fn new_with_child_components_arc(
         access_path: Path,
         signature: Arc<Signature>,
-        child_components: HashMap<String, (usize, Arc<StoredModuleComponents>)>,
+        child_components: HashMap<String, (usize, Rc<StoredModuleComponents>)>,
         ctx: &super::context::TypeContext,
     ) -> Self {
         Self::new_with_child_components_arc_and_value_source_prefix(
@@ -836,7 +837,7 @@ impl QualifiedModuleComponents {
     pub(crate) fn new_with_complete_child_components_arc(
         access_path: Path,
         signature: Arc<Signature>,
-        child_components: HashMap<String, (usize, Arc<StoredModuleComponents>)>,
+        child_components: HashMap<String, (usize, Rc<StoredModuleComponents>)>,
         ctx: &super::context::TypeContext,
     ) -> Self {
         Self::new_with_child_components_arc_and_value_source_prefix_inner(
@@ -852,7 +853,7 @@ impl QualifiedModuleComponents {
     pub(crate) fn new_with_child_components_arc_and_value_source_prefix(
         access_path: Path,
         signature: Arc<Signature>,
-        child_components: HashMap<String, (usize, Arc<StoredModuleComponents>)>,
+        child_components: HashMap<String, (usize, Rc<StoredModuleComponents>)>,
         value_source_prefix: Option<Path>,
         ctx: &super::context::TypeContext,
     ) -> Self {
@@ -869,7 +870,7 @@ impl QualifiedModuleComponents {
     fn new_with_child_components_arc_and_value_source_prefix_inner(
         access_path: Path,
         signature: Arc<Signature>,
-        child_components: HashMap<String, (usize, Arc<StoredModuleComponents>)>,
+        child_components: HashMap<String, (usize, Rc<StoredModuleComponents>)>,
         value_source_prefix: Option<Path>,
         child_component_scan_complete: bool,
         ctx: &super::context::TypeContext,
@@ -990,7 +991,7 @@ impl QualifiedModuleComponents {
         Self {
             access_path: Arc::new(access_path),
             signature,
-            tables: Arc::new(StructureComponentTables {
+            tables: Rc::new(StructureComponentTables {
                 index,
                 component_values: RefCell::new(HashMap::new()),
                 constructors: RefCell::new(HashMap::new()),
@@ -1073,7 +1074,7 @@ impl QualifiedModuleComponents {
         &self,
         ctx: &super::context::TypeContext,
         build: impl FnOnce() -> super::env::OpenedLayers,
-    ) -> Arc<super::env::OpenedLayers> {
+    ) -> Rc<super::env::OpenedLayers> {
         if let Some((layers, piece)) = self.tables.opened_layers.get() {
             if let Some(piece) = piece {
                 ctx.touch_store_piece(piece);
@@ -1082,13 +1083,13 @@ impl QualifiedModuleComponents {
         }
         if self.tables.in_store.get() {
             let (layers, piece) = ctx.build_in_store(build);
-            let layers = Arc::new(layers);
+            let layers = Rc::new(layers);
             if let Some(piece) = piece {
                 let _ = self.tables.opened_layers.set((layers.clone(), Some(piece)));
             }
             return layers;
         }
-        let layers = Arc::new(build());
+        let layers = Rc::new(build());
         let _ = self.tables.opened_layers.set((layers.clone(), None));
         layers
     }
@@ -1347,7 +1348,7 @@ impl QualifiedModuleComponents {
         &self,
         name: &str,
         ctx: &super::context::TypeContext,
-    ) -> Option<(usize, Arc<StoredModuleComponents>)> {
+    ) -> Option<(usize, Rc<StoredModuleComponents>)> {
         self.force_entry(ForcedKind::ChildComponents, name, ctx, || {
             self.lookup_child_components_inner(name)
         })
@@ -1356,7 +1357,7 @@ impl QualifiedModuleComponents {
     fn lookup_child_components_inner(
         &self,
         name: &str,
-    ) -> Option<(usize, Arc<StoredModuleComponents>)> {
+    ) -> Option<(usize, Rc<StoredModuleComponents>)> {
         if let Some(cached) = self.tables.child_components.borrow().get(name).cloned() {
             if self.compiler_counters_enabled {
                 crate::perf_counters::record_lazy_hit(
@@ -2094,7 +2095,7 @@ fn build_local_module_components(
                 }
                 if let Some(working_env) = working_env.as_ref()
                     && let Some(stored) =
-                        working_env.local_module_components_arc(&Path::pident(*id))
+                        working_env.local_module_components_shared(&Path::pident(*id))
                 {
                     child_components.insert(id.name().to_string(), (runtime_pos, stored));
                 }
@@ -2137,15 +2138,15 @@ pub(crate) struct StoredModuleComponents {
     /// For a child of components whose signature names its items through an
     /// in-process unit (`Unit.Sub.t`), that unit-rooted path of this child.
     source_prefix: OnceCell<Path>,
-    cached: OnceCell<Arc<QualifiedModuleComponents>>,
+    cached: OnceCell<Rc<QualifiedModuleComponents>>,
     /// Built during a store build (see `StructureComponentTables::in_store`).
     in_store: bool,
     /// Key of this module's compilation-private components (see
     /// `TypeContext::local_stored_components`).
     local_id: u64,
-    cached_piece: OnceCell<Arc<super::context::StorePiece>>,
+    cached_piece: OnceCell<Rc<super::context::StorePiece>>,
     functor_component_result: OnceCell<ModuleType>,
-    functor_component_piece: OnceCell<Arc<super::context::StorePiece>>,
+    functor_component_piece: OnceCell<Rc<super::context::StorePiece>>,
     functor_result_subst_cache: OnceCell<RefCell<HashMap<Path, FunctorResultSubst>>>,
 }
 
@@ -2216,7 +2217,7 @@ impl StoredModuleComponents {
             }
             let (components, piece) =
                 ctx.build_in_store_guarded(|| self.build_components(pers_env, ctx, cache_mode));
-            let components = Arc::new(components?);
+            let components = Rc::new(components?);
             match piece {
                 Some(piece) => {
                     if self.cached.set(components.clone()).is_ok() {
@@ -2235,7 +2236,7 @@ impl StoredModuleComponents {
             return Some(f(components.as_ref()));
         }
 
-        let components = Arc::new(self.build_components(pers_env, ctx, cache_mode)?);
+        let components = Rc::new(self.build_components(pers_env, ctx, cache_mode)?);
         if self.cached.set(components.clone()).is_err()
             && let Some(cached) = self.cached.get().cloned()
         {

@@ -15,6 +15,7 @@ use ahash::{AHashMap as HashMap, AHashSet as HashSet};
 use std::fs;
 use std::path::Path as FsPath;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::{Arc, Mutex, RwLock};
 
 use crate::cmi::marshal_reader::{MarshalReader, OcamlValue};
@@ -2865,7 +2866,7 @@ impl PersistentEnv {
         let alias_source = self.qualified_alias_path_for_flattened_head(name);
         let components = ctx
             .with_qualified_module_components(&components_key, |components| {
-                Arc::new(components.clone())
+                Rc::new(components.clone())
             })
             .unwrap_or_else(|| {
                 // The view of a unit loaded into the worker store is the same
@@ -2880,7 +2881,7 @@ impl PersistentEnv {
                         ctx.thread_store().shared_components(&components_key)
                 {
                     ctx.touch_store_piece(&piece);
-                    ctx.register_qualified_module_components_arc(
+                    ctx.register_qualified_module_components_shared(
                         components_key.clone(),
                         components.clone(),
                     );
@@ -2906,7 +2907,7 @@ impl PersistentEnv {
                 } else {
                     (build(), None)
                 };
-                let components = Arc::new(components);
+                let components = Rc::new(components);
                 if shareable {
                     match piece {
                         Some(piece) => ctx.thread_store().publish_shared_components(
@@ -2917,7 +2918,7 @@ impl PersistentEnv {
                         None => components.make_private(),
                     }
                 }
-                ctx.register_qualified_module_components_arc(components_key, components.clone());
+                ctx.register_qualified_module_components_shared(components_key, components.clone());
                 components
             });
         open_components_into_env(&components, env, ctx);
@@ -7310,7 +7311,7 @@ fn add_signature_to_env_with_options_inner(
                         // need the parent component environment. Avoid forcing
                         // the parent's `comp_components` just to open an
                         // equivalent persistent-alias thunk.
-                        let stored = Arc::new(crate::types::env_lazy::StoredModuleComponents::new(
+                        let stored = Rc::new(crate::types::env_lazy::StoredModuleComponents::new(
                             Env::empty(),
                             access_path,
                             md.clone(),

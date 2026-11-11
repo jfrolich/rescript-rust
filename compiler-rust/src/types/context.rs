@@ -35,6 +35,7 @@ use crate::parser::longident::Longident;
 use crate::types::path::PathView;
 use std::cell::{Cell, RefCell};
 use std::ops::Deref;
+use std::rc::Rc;
 use std::sync::Arc;
 
 /// Append-only store of type nodes (OCaml `type_expr` records,
@@ -644,7 +645,7 @@ pub struct TypeContext {
     /// worker store. Keyed by `StoredModuleComponents` id; reused for the rest
     /// of this compilation instead of being rebuilt on every lookup.
     local_stored_components:
-        RefCell<crate::fast_hash::AHashMap<u64, Arc<super::env_lazy::QualifiedModuleComponents>>>,
+        RefCell<crate::fast_hash::AHashMap<u64, Rc<super::env_lazy::QualifiedModuleComponents>>>,
     /// OCaml-shaped mutation trail. Logging is dormant unless a snapshot lives.
     mutation_journal: RefCell<TypeMutationJournal>,
     mutation_logging: TrailLogging,
@@ -719,7 +720,7 @@ pub struct TypeContext {
     qualified_module_components_cache: RefCell<
         crate::fast_hash::AHashMap<
             QualifiedModuleComponentsCacheKey,
-            Arc<super::env_lazy::QualifiedModuleComponents>,
+            Rc<super::env_lazy::QualifiedModuleComponents>,
         >,
     >,
 
@@ -918,7 +919,7 @@ pub struct TypeContext {
     synthesized_record_lidents: RefCell<crate::fast_hash::AHashMap<String, LidentIdx>>,
 
     /// Stored typedtree environment snapshots, keyed by EnvRef.
-    typed_envs: RefCell<Vec<Arc<Env>>>,
+    typed_envs: RefCell<Vec<Rc<Env>>>,
 
     /// Reuse EnvRefs for identical logical environments.
     typed_envs_by_id: RefCell<crate::fast_hash::AHashMap<u64, EnvRef>>,
@@ -942,11 +943,11 @@ pub(crate) enum StoreEffect {
     /// one local identifier stamp.
     Stamps(Vec<i32>),
     /// A shared piece forced while building this one.
-    Piece(Arc<StorePiece>),
+    Piece(Rc<StorePiece>),
     /// A component view registered in this compilation's component cache.
     RegisterComponents(
         QualifiedModuleComponentsCacheKey,
-        Arc<super::env_lazy::QualifiedModuleComponents>,
+        Rc<super::env_lazy::QualifiedModuleComponents>,
     ),
     /// `PersistentEnv::find_pers_struct` for this unit, which prepares the
     /// module for the compilation on first use.
@@ -998,7 +999,7 @@ struct StoreStampOrigins {
     built: Vec<(i32, i32)>,
     /// Runs of binders this compilation replayed: the piece, the index of
     /// its `StoreEffect::Stamps` effect, and the local stamp of the first.
-    replayed: Vec<(Arc<StorePiece>, usize, i32)>,
+    replayed: Vec<(Rc<StorePiece>, usize, i32)>,
 }
 
 pub(crate) fn store_debug_enabled() -> bool {
@@ -1011,7 +1012,7 @@ static NEXT_STORE_PIECE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::At
 thread_local! {
     /// The piece of every store build with no effects and no guards (id 0;
     /// built pieces count from 1). Pieces stay on their worker thread.
-    static EMPTY_STORE_PIECE: Arc<StorePiece> = Arc::new(StorePiece {
+    static EMPTY_STORE_PIECE: Rc<StorePiece> = Rc::new(StorePiece {
         id: 0,
         effects: Vec::new(),
         guards: Vec::new(),
@@ -1375,7 +1376,7 @@ impl TypeContext {
         let env_ref = {
             let mut typed_envs = self.typed_envs.borrow_mut();
             let env_ref = EnvRef::from_usize(typed_envs.len());
-            typed_envs.push(Arc::new(env.clone_preserve_id()));
+            typed_envs.push(Rc::new(env.clone_preserve_id()));
             env_ref
         };
         self.typed_envs_by_id.borrow_mut().insert(env.id(), env_ref);
@@ -1384,7 +1385,7 @@ impl TypeContext {
     }
 
     /// Resolve a typedtree environment reference.
-    pub fn get_typed_env(&self, env_ref: EnvRef) -> Option<Arc<Env>> {
+    pub fn get_typed_env(&self, env_ref: EnvRef) -> Option<Rc<Env>> {
         self.typed_envs.borrow().get(env_ref.index()).cloned()
     }
 
@@ -1516,10 +1517,10 @@ impl TypeContext {
     /// Cache a lazily-built qualified module-components view.
     /// Register a (possibly shared) component view in this compilation's
     /// component cache.
-    pub(crate) fn register_qualified_module_components_arc(
+    pub(crate) fn register_qualified_module_components_shared(
         &self,
         key: QualifiedModuleComponentsCacheKey,
-        components: Arc<super::env_lazy::QualifiedModuleComponents>,
+        components: Rc<super::env_lazy::QualifiedModuleComponents>,
     ) {
         if self.compiler_counters_enabled {
             crate::perf_counters::record_qualified_component_registered();
@@ -1546,7 +1547,7 @@ impl TypeContext {
         }
         self.qualified_module_components_cache
             .borrow_mut()
-            .insert(key, Arc::new(components));
+            .insert(key, Rc::new(components));
     }
 
     /// Borrow a cached qualified module-components view.
@@ -4384,14 +4385,14 @@ impl TypeContext {
     pub(crate) fn local_stored_components(
         &self,
         id: u64,
-    ) -> Option<Arc<super::env_lazy::QualifiedModuleComponents>> {
+    ) -> Option<Rc<super::env_lazy::QualifiedModuleComponents>> {
         self.local_stored_components.borrow().get(&id).cloned()
     }
 
     pub(crate) fn set_local_stored_components(
         &self,
         id: u64,
-        components: Arc<super::env_lazy::QualifiedModuleComponents>,
+        components: Rc<super::env_lazy::QualifiedModuleComponents>,
     ) {
         self.local_stored_components
             .borrow_mut()
@@ -4406,7 +4407,7 @@ impl TypeContext {
     pub(crate) fn build_in_store<R>(
         &self,
         build: impl FnOnce() -> R,
-    ) -> (R, Option<Arc<StorePiece>>) {
+    ) -> (R, Option<Rc<StorePiece>>) {
         self.build_in_store_with_guards(false, build)
     }
 
@@ -4415,7 +4416,7 @@ impl TypeContext {
     pub(crate) fn build_in_store_guarded<R>(
         &self,
         build: impl FnOnce() -> R,
-    ) -> (R, Option<Arc<StorePiece>>) {
+    ) -> (R, Option<Rc<StorePiece>>) {
         self.build_in_store_with_guards(true, build)
     }
 
@@ -4423,7 +4424,7 @@ impl TypeContext {
         &self,
         guarded: bool,
         build: impl FnOnce() -> R,
-    ) -> (R, Option<Arc<StorePiece>>) {
+    ) -> (R, Option<Rc<StorePiece>>) {
         let depth = self.store_build_depth.get();
         let outer_effects = std::mem::take(&mut *self.store_build_effects.borrow_mut());
         let outer_guards = std::mem::take(&mut *self.store_build_guards.borrow_mut());
@@ -4466,9 +4467,9 @@ impl TypeContext {
             // guarded answer: touching, replaying or checking such a piece
             // does nothing, so they all share one piece and the enclosing
             // build need not record it.
-            return (result, Some(EMPTY_STORE_PIECE.with(Arc::clone)));
+            return (result, Some(EMPTY_STORE_PIECE.with(Rc::clone)));
         }
-        let piece = Arc::new(StorePiece {
+        let piece = Rc::new(StorePiece {
             id: NEXT_STORE_PIECE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             effects,
             guards,
@@ -4484,7 +4485,7 @@ impl TypeContext {
 
     /// Note that this compilation is using shared store data built by `piece`:
     /// the first time, apply the effects that building it had.
-    pub(crate) fn touch_store_piece(&self, piece: &Arc<StorePiece>) {
+    pub(crate) fn touch_store_piece(&self, piece: &Rc<StorePiece>) {
         if piece.effects.is_empty() && piece.guards.is_empty() {
             return;
         }
@@ -4502,7 +4503,7 @@ impl TypeContext {
         self.suspend_store_build(|| self.replay_store_piece(piece));
     }
 
-    fn replay_store_piece(&self, piece: &Arc<StorePiece>) {
+    fn replay_store_piece(&self, piece: &Rc<StorePiece>) {
         if !self.touched_store_pieces.borrow_mut().insert(piece.id) {
             return;
         }
@@ -4908,6 +4909,24 @@ impl TypeContext {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    #[test]
+    fn typed_environment_snapshots_share_ownership() {
+        let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+        let env = Env::empty();
+        let env_ref = ctx.store_typed_env(&env);
+        let first = ctx.get_typed_env(env_ref).expect("stored environment");
+        let other = Env::empty();
+        ctx.store_typed_env(&other);
+        assert_eq!(ctx.store_typed_env(&env), env_ref);
+        let second = ctx.get_typed_env(env_ref).expect("same environment");
+        assert!(Rc::ptr_eq(&first, &second));
+
+        // A retained snapshot must remain usable after its context is dropped.
+        drop(ctx);
+        assert_eq!(first.id(), env.id());
+        assert_eq!(second.id(), env.id());
+    }
 
     #[test]
     fn type_nodes_address_every_node_across_chunks() {

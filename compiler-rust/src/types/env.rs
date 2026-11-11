@@ -29,6 +29,7 @@ use crate::ident::Ident;
 use crate::location::Location;
 use crate::types::path::PathView;
 use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use crate::name::Name;
@@ -196,13 +197,13 @@ pub type OpenSlotMark<'a, T> = Option<(u32, Option<&'a T>)>;
 /// and attachable to any number of Envs (see `Env::add_prebuilt_open_layers`).
 #[derive(Debug)]
 pub(crate) struct OpenedLayers {
-    values: Arc<OpenedMap<(Ident, Arc<ValueDescription>, i32)>>,
-    types: Arc<OpenedMap<(Ident, Arc<TypeDeclaration>, i32)>>,
-    constrs: Arc<OpenedMap<Candidates<ConstructorDescription>>>,
-    labels: Arc<OpenedMap<Candidates<LabelDescription>>>,
-    modules: Arc<OpenedMap<(Ident, Arc<ModuleDeclaration>, i32)>>,
-    module_components: Arc<OpenedMap<(Ident, Arc<super::env_lazy::StoredModuleComponents>, i32)>>,
-    modtypes: Arc<OpenedMap<(Ident, Arc<ModtypeDeclaration>, i32)>>,
+    values: Rc<OpenedMap<(Ident, Arc<ValueDescription>, i32)>>,
+    types: Rc<OpenedMap<(Ident, Arc<TypeDeclaration>, i32)>>,
+    constrs: Rc<OpenedMap<Candidates<ConstructorDescription>>>,
+    labels: Rc<OpenedMap<Candidates<LabelDescription>>>,
+    modules: Rc<OpenedMap<(Ident, Arc<ModuleDeclaration>, i32)>>,
+    module_components: Rc<OpenedMap<(Ident, Rc<super::env_lazy::StoredModuleComponents>, i32)>>,
+    modtypes: Rc<OpenedMap<(Ident, Arc<ModtypeDeclaration>, i32)>>,
 }
 
 impl OpenedLayers {
@@ -213,42 +214,42 @@ impl OpenedLayers {
         constructors: Vec<(Ident, ConstructorDescription)>,
         labels: Vec<(Ident, LabelDescription)>,
         modules: Vec<(Ident, ModuleDeclaration, i32)>,
-        module_components: Vec<(Ident, Arc<super::env_lazy::StoredModuleComponents>, i32)>,
+        module_components: Vec<(Ident, Rc<super::env_lazy::StoredModuleComponents>, i32)>,
         modtypes: Vec<(Ident, ModtypeDeclaration)>,
     ) -> Self {
         OpenedLayers {
-            values: Arc::new(id_open_table(
+            values: Rc::new(id_open_table(
                 values
                     .into_iter()
                     .map(|(id, desc, pos)| (id, Arc::new(desc), pos))
                     .collect(),
             )),
-            types: Arc::new(id_open_table(
+            types: Rc::new(id_open_table(
                 types
                     .into_iter()
                     .map(|(id, decl)| (id, decl, crate::types::path::NOPOS))
                     .collect(),
             )),
-            constrs: Arc::new(tycomp_open_table(
+            constrs: Rc::new(tycomp_open_table(
                 constructors
                     .into_iter()
                     .map(|(id, desc)| (id, Arc::new(desc)))
                     .collect(),
             )),
-            labels: Arc::new(tycomp_open_table(
+            labels: Rc::new(tycomp_open_table(
                 labels
                     .into_iter()
                     .map(|(id, desc)| (id, Arc::new(desc)))
                     .collect(),
             )),
-            modules: Arc::new(id_open_table(
+            modules: Rc::new(id_open_table(
                 modules
                     .into_iter()
                     .map(|(id, decl, pos)| (id, Arc::new(decl), pos))
                     .collect(),
             )),
-            module_components: Arc::new(id_open_table(module_components)),
-            modtypes: Arc::new(id_open_table(
+            module_components: Rc::new(id_open_table(module_components)),
+            modtypes: Rc::new(id_open_table(
                 modtypes
                     .into_iter()
                     .map(|(id, decl)| (id, Arc::new(decl), crate::types::path::NOPOS))
@@ -276,8 +277,8 @@ impl OpenedLayers {
 #[derive(Debug, Clone)]
 struct IdOpened<T> {
     root: Option<Path>,
-    components: Arc<OpenedMap<(Ident, T, i32)>>,
-    next: Arc<IdTbl<T>>,
+    components: Rc<OpenedMap<(Ident, T, i32)>>,
+    next: Rc<IdTbl<T>>,
     /// The open's `using` callback (OCaml `IdTbl.opened.using`), as a slot
     /// registered with the type checker.
     slot: Option<u32>,
@@ -486,7 +487,7 @@ impl<T> std::ops::Deref for IdBucket<T> {
 #[derive(Debug, Clone)]
 pub struct IdTbl<T> {
     current: PersistentHashMap<Name, IdBucket<T>>,
-    opened: Option<Arc<IdOpened<T>>>,
+    opened: Option<Rc<IdOpened<T>>>,
 }
 
 impl<T: Clone> IdTbl<T> {
@@ -520,14 +521,14 @@ impl<T: Clone> IdTbl<T> {
         components: Vec<(Ident, T, i32)>,
         slot: Option<u32>,
     ) {
-        self.add_open_layer_table(root, Arc::new(id_open_table(components)), slot);
+        self.add_open_layer_table(root, Rc::new(id_open_table(components)), slot);
     }
 
     /// Open a prebuilt layer table (possibly shared with other Envs).
     fn add_open_layer_table(
         &mut self,
         root: Path,
-        components: Arc<OpenedMap<(Ident, T, i32)>>,
+        components: Rc<OpenedMap<(Ident, T, i32)>>,
         slot: Option<u32>,
     ) {
         if components.is_empty() {
@@ -536,10 +537,10 @@ impl<T: Clone> IdTbl<T> {
         let next = std::mem::take(self);
         *self = Self {
             current: PersistentHashMap::default(),
-            opened: Some(Arc::new(IdOpened {
+            opened: Some(Rc::new(IdOpened {
                 root: Some(root),
                 components,
-                next: Arc::new(next),
+                next: Rc::new(next),
                 slot,
             })),
         };
@@ -694,13 +695,13 @@ impl<T: Clone> IdTbl<T> {
         }
 
         if let Some(opened) = self.opened.as_mut() {
-            let opened = Arc::make_mut(opened);
-            if let Some((id, value, _)) = Arc::make_mut(&mut opened.components).get_mut(&key) {
+            let opened = Rc::make_mut(opened);
+            if let Some((id, value, _)) = Rc::make_mut(&mut opened.components).get_mut(&key) {
                 let updated = f(value);
                 *value = updated.clone();
                 return Some((*id, updated));
             }
-            return Arc::make_mut(&mut opened.next).update_by_key(key, f);
+            return Rc::make_mut(&mut opened.next).update_by_key(key, f);
         }
 
         None
@@ -823,8 +824,8 @@ impl<T: Clone> Default for IdTbl<T> {
 
 #[derive(Debug, Clone)]
 struct TycompOpened<T> {
-    components: Arc<OpenedMap<Vec<(Ident, T)>>>,
-    next: Arc<TycompTbl<T>>,
+    components: Rc<OpenedMap<Vec<(Ident, T)>>>,
+    next: Rc<TycompTbl<T>>,
     /// The open's `using` callback slot.
     slot: Option<u32>,
 }
@@ -840,7 +841,7 @@ pub struct TycompTbl<T> {
     /// Order in which each name of `current` was first added: the `Ident.add`
     /// sequence that shapes OCaml's AVL tree (compiler/ext/ident.ml:144-150).
     current_first_add: PersistentHashMap<Name, i32>,
-    opened: Option<Arc<TycompOpened<T>>>,
+    opened: Option<Rc<TycompOpened<T>>>,
 }
 
 impl<T: Clone> TycompTbl<T> {
@@ -870,13 +871,13 @@ impl<T: Clone> TycompTbl<T> {
     /// Add the components of an opened module as a new layer; `slot`
     /// identifies the open for unused-open warnings.
     pub fn add_open_layer(&mut self, components: Vec<(Ident, T)>, slot: Option<u32>) {
-        self.add_open_layer_table(Arc::new(tycomp_open_table(components)), slot);
+        self.add_open_layer_table(Rc::new(tycomp_open_table(components)), slot);
     }
 
     /// Open a prebuilt layer table (possibly shared with other Envs).
     fn add_open_layer_table(
         &mut self,
-        components: Arc<OpenedMap<Vec<(Ident, T)>>>,
+        components: Rc<OpenedMap<Vec<(Ident, T)>>>,
         slot: Option<u32>,
     ) {
         if components.is_empty() {
@@ -886,9 +887,9 @@ impl<T: Clone> TycompTbl<T> {
         *self = Self {
             current: PersistentHashMap::default(),
             current_first_add: PersistentHashMap::default(),
-            opened: Some(Arc::new(TycompOpened {
+            opened: Some(Rc::new(TycompOpened {
                 components,
-                next: Arc::new(next),
+                next: Rc::new(next),
                 slot,
             })),
         };
@@ -1176,7 +1177,7 @@ struct EnvData {
 
     /// Lazily-forced qualified component views for local module bindings.
     /// This mirrors OCaml's `env.components` table for local `Pident` paths.
-    module_components: IdTbl<Arc<super::env_lazy::StoredModuleComponents>>,
+    module_components: IdTbl<Rc<super::env_lazy::StoredModuleComponents>>,
 
     /// Module type bindings.
     modtypes: IdTbl<Arc<ModtypeDeclaration>>,
@@ -1897,7 +1898,7 @@ impl Env {
         parent_context: Option<(Path, Arc<Signature>)>,
     ) {
         let seed_env = self.clone_preserve_id();
-        let stored_components = Arc::new(
+        let stored_components = Rc::new(
             super::env_lazy::StoredModuleComponents::new_with_parent_context(
                 seed_env,
                 component_path,
@@ -2078,16 +2079,16 @@ impl Env {
         Some(f(components.as_ref()))
     }
 
-    pub(crate) fn local_module_components_arc(
+    pub(crate) fn local_module_components_shared(
         &self,
         path: &Path,
-    ) -> Option<Arc<super::env_lazy::StoredModuleComponents>> {
+    ) -> Option<Rc<super::env_lazy::StoredModuleComponents>> {
         let PathView::Pident(id) = path.view() else {
             return None;
         };
         // OCaml compiler/ml/env.ml:1573-1578 stores component thunks in the
         // component table and shares the forced lazy value. Return the stored
-        // Arc directly so child component maps keep the same thunk instead of
+        // Rc directly so child component maps keep the same thunk instead of
         // deep-cloning its captured seed environment.
         self.data.module_components.find_by_ident(id).cloned()
     }
@@ -2861,6 +2862,27 @@ mod tests {
                 "predef declarations live in the worker store"
             );
         }
+    }
+
+    #[test]
+    fn opened_table_updates_preserve_shared_snapshots() {
+        let root = Path::pident(Ident::create_persistent("M"));
+        let mut table = IdTbl::new();
+        table.add_open_layer(root, vec![(Ident::create_local("x"), 1, 0)], None);
+        table.add_open_layer(root, vec![(Ident::create_local("y"), 2, 0)], None);
+        let snapshot = table.clone();
+        assert!(Rc::ptr_eq(
+            table.opened.as_ref().unwrap(),
+            snapshot.opened.as_ref().unwrap(),
+        ));
+
+        // Exercise copy-on-write both in the newest layer and through `next`.
+        assert!(table.update_by_name("y", &mut |value| value + 10).is_some());
+        assert!(table.update_by_name("x", &mut |value| value + 10).is_some());
+        assert_eq!(table.find_by_name("x"), Some(&11));
+        assert_eq!(table.find_by_name("y"), Some(&12));
+        assert_eq!(snapshot.find_by_name("x"), Some(&1));
+        assert_eq!(snapshot.find_by_name("y"), Some(&2));
     }
 
     #[test]

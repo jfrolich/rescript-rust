@@ -4085,14 +4085,14 @@ impl<'a> RawLambdaConverter<'a> {
         }
     }
 
-    fn env_for_expr(&self, expr: &Expression) -> Option<std::sync::Arc<crate::types::env::Env>> {
+    fn env_for_expr(&self, expr: &Expression) -> Option<std::rc::Rc<crate::types::env::Env>> {
         self.type_ctx.get_typed_env(expr.exp_env)
     }
 
     fn env_for_module_expr(
         &self,
         module_expr: &ModuleExpr,
-    ) -> Option<std::sync::Arc<crate::types::env::Env>> {
+    ) -> Option<std::rc::Rc<crate::types::env::Env>> {
         self.type_ctx.get_typed_env(module_expr.mod_env)
     }
 

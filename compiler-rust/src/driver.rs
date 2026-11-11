@@ -5652,7 +5652,7 @@ struct WrongName<'a> {
 
 fn format_wrong_name_report(
     type_ctx: &TypeContext,
-    env: Option<std::sync::Arc<crate::types::env::Env>>,
+    env: Option<std::rc::Rc<crate::types::env::Env>>,
     site: ReportSite<'_>,
     wrong: WrongName<'_>,
     alternatives: &[String],
