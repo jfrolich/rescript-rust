@@ -204,9 +204,15 @@ impl ThreadTypeStore {
         &self,
         table: &super::decl_loc::DeclLocTable,
         files: &'a dyn Fn(crate::intern::StrIdx) -> crate::intern::StrIdx,
+        namespace: Option<u64>,
     ) -> super::decl_loc::DeclLocImport<'a> {
         let mut table = table.clone();
-        let scopes = table.remap_for_import(files);
+        let scopes = match namespace {
+            Some(namespace) => table.remap_for_import_with(files, |scope| {
+                super::variant_runtime::identity_in_namespace(namespace, scope)
+            }),
+            None => table.remap_for_import(files),
+        };
         let (base, instances) = self.decl_locs.append_portable(&table);
         super::decl_loc::DeclLocImport {
             kind: super::decl_loc::DeclLocKind::Store,
@@ -215,6 +221,7 @@ impl ThreadTypeStore {
             instances,
             files,
             scopes,
+            namespace,
         }
     }
 
