@@ -145,6 +145,17 @@ module Features = {
     z: float,
   }
   type autocapitalize = string
+  type readyState = [#"and" | #closed | #"in" | #"open" | #"true"]
+  type dict2<'t> = dict<option<'t>>
+  type ref2<'t> = {
+    current: 't,
+  }
+  @unboxed type refAttributesRef<'t> =
+    | Ref2(ref2<Null.t<'t>>)
+    | Function(Null.t<'t> => unit)
+  type refAttributes<'t> = {
+    ref?: refAttributesRef<'t>,
+  }
   type findResult = {
     id: string,
   }
@@ -200,6 +211,9 @@ module Features = {
   }
   /** TypeScript: `Response` */
   type response
+  type pickFrom<'t> = {
+    items: array<'t>,
+  }
   /** TypeScript: `string` */
   @module("./features.ts")
   external aString: string = "aString"
@@ -455,6 +469,15 @@ module Features = {
   /** TypeScript: `(mode?: Autocapitalize | undefined) => void` */
   @module("./features.ts")
   external capitalize: (~mode: string=?) => unit = "capitalize"
+  /** TypeScript: `() => Dict<string>` */
+  @module("./features.ts")
+  external env: unit => dict2<string> = "env"
+  /** TypeScript: `<T>(from: { items: T[]; }) => T` */
+  @module("./features.ts")
+  external pick: pickFrom<'t> => 't = "pick"
+  /** TypeScript: `() => IterableIterator<[string, number]>` */
+  @module("./features.ts")
+  external entries: unit => Iterator.t<(string, float), unknown, unknown> = "entries"
 }
 
 // Where ReScript says less than TypeScript:

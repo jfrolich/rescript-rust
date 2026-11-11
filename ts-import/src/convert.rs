@@ -146,6 +146,8 @@ struct State {
     by_shape: HashMap<String, Named>,
     used: HashSet<String>,
     pending: Vec<Decl>,
+    /// The parameters of each type declared for an unnamed TypeScript type.
+    anonymous_params: HashMap<String, Vec<String>>,
     notes: Vec<Note>,
     /// The notes, for telling a repeated one without a scan.
     noted: HashSet<Note>,
@@ -550,7 +552,7 @@ impl<'a> Converter<'a> {
         let base = lower_ident(base);
         let mut name = base.clone();
         let mut index = 2;
-        while self.state.used.contains(&name) {
+        while self.state.used.contains(&name) || crate::model::is_builtin_type(&name) {
             name = format!("{base}{index}");
             index += 1;
         }
@@ -636,7 +638,13 @@ impl<'a> Converter<'a> {
             return named;
         }
         if let Some(named) = self.state.by_type.get(&ty).cloned() {
-            return Ty::App(self.reference(&named), Vec::new());
+            // The type's parameters are the variables it mentions, under the
+            // names they had where it was declared. Somewhere they are not
+            // in scope, the type is declared again.
+            let params = self.state.anonymous_params.get(&named.name).cloned().unwrap_or_default();
+            if params.iter().all(|param| self.type_params.iter().any(|(_, name)| name == param)) {
+                return Ty::App(self.reference(&named), params.into_iter().map(Ty::Var).collect());
+            }
         }
         match self.structure(ty) {
             Structure::Ty(converted) => converted,
@@ -644,20 +652,25 @@ impl<'a> Converter<'a> {
         }
     }
 
-    /// Declares a record or variant for a type TypeScript did not name.
+    /// Declares a record or variant for a type TypeScript did not name. The
+    /// type variables it mentions become its parameters.
     fn declare_anonymous(&mut self, ty: P<Type>, kind: DeclKind) -> Ty {
-        let probe = Decl { name: String::new(), params: Vec::new(), kind, ts: None };
+        let params = free_variables(&kind);
+        let args = |params: &[String]| params.iter().cloned().map(Ty::Var).collect::<Vec<Ty>>();
+        let probe = Decl { name: String::new(), params, kind, ts: None };
         let key = shape_key(&probe);
         if let Some(named) = self.state.by_shape.get(&key).cloned() {
             self.state.set_type(ty, named.clone());
-            return Ty::App(self.reference(&named), Vec::new());
+            return Ty::App(self.reference(&named), args(&probe.params));
         }
         let name = self.fresh_type_name(&self.context_name());
-        let named = Named { scope: self.scope.clone(), name: name.clone(), params: 0 };
+        let named = Named { scope: self.scope.clone(), name: name.clone(), params: probe.params.len() };
         self.state.set_type(ty, named.clone());
         self.state.set_shape(key, named);
-        self.state.pending.push(Decl { name: name.clone(), ..probe });
-        Ty::App(name, Vec::new())
+        let reference = Ty::App(name.clone(), args(&probe.params));
+        self.state.anonymous_params.insert(name.clone(), probe.params.clone());
+        self.state.pending.push(Decl { name, ..probe });
+        reference
     }
 
     /// A type written through a type alias keeps the alias's name.
@@ -971,10 +984,10 @@ impl<'a> Converter<'a> {
             "WeakSet" => Ty::app("WeakSet.t", vec![arg(self, 0)]),
             "Iterator" | "IterableIterator" | "IteratorObject" | "Generator" | "ArrayIterator"
             | "MapIterator" | "SetIterator" => {
-                Ty::app("Iterator.t", vec![arg(self, 0)])
+                Ty::app("Iterator.t", vec![arg(self, 0), Ty::unknown(), Ty::unknown()])
             }
             "AsyncIterator" | "AsyncIterableIterator" | "AsyncGenerator" | "AsyncIteratorObject" => {
-                Ty::app("AsyncIterator.t", vec![arg(self, 0)])
+                Ty::app("AsyncIterator.t", vec![arg(self, 0), Ty::unknown(), Ty::unknown()])
             }
             "Date" => Ty::name("Date.t"),
             "RegExp" => Ty::name("RegExp.t"),
@@ -1650,6 +1663,47 @@ fn unique_ctor(ctors: &[Ctor], base: &str) -> String {
 
 /// Orders declarations so each comes after what it mentions, and groups the
 /// ones that mention each other (Tarjan's strongly connected components).
+/// The type variables a declaration body mentions and does not bind, in
+/// the order they appear.
+fn free_variables(kind: &DeclKind) -> Vec<String> {
+    fn of_ty(ty: &Ty, bound: &[String], out: &mut Vec<String>) {
+        match ty {
+            Ty::Var(name) => {
+                if !bound.contains(name) && !out.contains(name) {
+                    out.push(name.clone());
+                }
+            }
+            Ty::App(_, args) | Ty::Tuple(args) => args.iter().for_each(|arg| of_ty(arg, bound, out)),
+            Ty::Fn(params, result) => {
+                params.iter().for_each(|param| of_ty(&param.ty, bound, out));
+                of_ty(result, bound, out);
+            }
+            Ty::Poly(_) => {}
+        }
+    }
+    fn of_fields(fields: &[Field], out: &mut Vec<String>) {
+        for field in fields {
+            of_ty(&field.ty, &field.poly, out);
+        }
+    }
+    let mut out = Vec::new();
+    match kind {
+        DeclKind::Abstract => {}
+        DeclKind::Alias(ty) => of_ty(ty, &[], &mut out),
+        DeclKind::Record(fields) => of_fields(fields, &mut out),
+        DeclKind::Variant { ctors, .. } => {
+            for ctor in ctors {
+                match &ctor.payload {
+                    Payload::None => {}
+                    Payload::Ty(ty) => of_ty(ty, &[], &mut out),
+                    Payload::Record(fields) => of_fields(fields, &mut out),
+                }
+            }
+        }
+    }
+    out
+}
+
 fn order_decls(decls: Vec<Decl>) -> Vec<Item> {
     let index_of: HashMap<String, usize> =
         decls.iter().enumerate().map(|(index, decl)| (decl.name.clone(), index)).collect();

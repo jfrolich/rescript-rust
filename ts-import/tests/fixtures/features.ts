@@ -169,3 +169,16 @@ export function withLevel(level?: Level): Level | null { return level ?? null; }
 // Literals next to `string & {}` are suggestions: any string is accepted.
 export type Autocapitalize = "none" | "off" | "on" | (string & {});
 export function capitalize(mode?: Autocapitalize): void {}
+
+// --- names and shapes that once produced declarations that do not compile ---
+// A literal that is a ReScript keyword.
+export type ReadyState = "open" | "closed" | "in" | "and" | "true";
+// A type named like a built-in ReScript type.
+export interface Dict<T> { [key: string]: T | undefined }
+export declare function env(): Dict<string>;
+// An unnamed member of a generic type has the type's parameters.
+export interface Ref<T> { current: T }
+export interface RefAttributes<T> { ref?: Ref<T | null> | ((instance: T | null) => void) }
+export declare function pick<T>(from: { items: T[] }): T;
+// Iterators.
+export declare function entries(): IterableIterator<[string, number]>;

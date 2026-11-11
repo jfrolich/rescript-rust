@@ -175,6 +175,17 @@ const KEYWORDS: &[&str] = &[
     "private", "rec", "switch", "true", "try", "type", "when", "while",
 ];
 
+/// The type names the generated code uses unqualified. A declaration with
+/// one of these names would hide the type from everything after it.
+const BUILTIN_TYPES: &[&str] = &[
+    "array", "bigint", "bool", "char", "dict", "exn", "float", "int", "list", "null", "nullable",
+    "option", "promise", "ref", "result", "string", "undefined", "unit", "unknown",
+];
+
+pub fn is_builtin_type(name: &str) -> bool {
+    BUILTIN_TYPES.contains(&name)
+}
+
 pub fn is_keyword(name: &str) -> bool {
     KEYWORDS.contains(&name)
 }
@@ -288,7 +299,8 @@ fn print_poly_tag(tag: &Tag) -> String {
         Tag::Str(text) => {
             let plain = !text.is_empty()
                 && text.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
-                && !text.as_bytes()[0].is_ascii_digit();
+                && !text.as_bytes()[0].is_ascii_digit()
+                && !is_keyword(text);
             if plain { format!("#{text}") } else { format!("#{}", string_literal(text)) }
         }
         Tag::Num(text) => format!("#{text}"),
