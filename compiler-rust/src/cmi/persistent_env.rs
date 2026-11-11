@@ -323,6 +323,28 @@ pub struct PersStruct {
     pub ps_deprecated: Option<String>,
     /// `ps_crcs` (env.ml:669-678): the unit's `.cmi` CRC list, itself first.
     pub ps_crcs: Vec<(String, Option<[u8; 16]>)>,
+    /// See [`PersStruct::own_alias_rewrites`].
+    pub(crate) ps_alias_rewrites: std::sync::OnceLock<Option<Arc<UnitAliasRewrites>>>,
+}
+
+/// The alias rewrites of one unit's signature, by flattened module name.
+pub(crate) type UnitAliasRewrites = HashMap<Name, Path>;
+
+impl PersStruct {
+    /// The alias rewrites `collect_alias_rewrites` finds in this unit's
+    /// signature when the unit is reached under its own name, `None` when
+    /// there are none. Computed once: a structure shared between
+    /// compilations hands every one of them the same table.
+    fn own_alias_rewrites(&self) -> Option<&Arc<UnitAliasRewrites>> {
+        self.ps_alias_rewrites
+            .get_or_init(|| {
+                let mut rewrites = UnitAliasRewrites::new();
+                let unit_path = Path::pident(Ident::create_persistent(&self.ps_name));
+                collect_alias_rewrites(&self.ps_sig, &unit_path, &mut rewrites);
+                (!rewrites.is_empty()).then(|| Arc::new(rewrites))
+            })
+            .as_ref()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -484,12 +506,20 @@ impl InMemoryModuleInfo {
     }
 }
 
+/// The alias rewrites a compilation knows: the first rewrite recorded for a
+/// flattened module name is the one that counts.
 #[derive(Clone)]
 struct AliasPrefixRewrites {
     base: SharedRegistryMap<Path>,
     /// Keyed by `Name`, so the view copies `view_mut` makes copy this table
     /// without cloning every key.
     local: HashMap<Name, Path>,
+    /// The tables of loaded units that are reached under their own name, in
+    /// load order (see [`PersStruct::own_alias_rewrites`]). A unit's table
+    /// stands for recording each of its rewrites when the unit was loaded:
+    /// it yields to `base`, to the entries `local` had by then and to the
+    /// tables before it, and `local` never gains a name a table holds.
+    units: Vec<Arc<UnitAliasRewrites>>,
 }
 
 impl AliasPrefixRewrites {
@@ -497,22 +527,45 @@ impl AliasPrefixRewrites {
         Self {
             base: SharedRegistryMap::default(),
             local: HashMap::new(),
+            units: Vec::new(),
         }
     }
 
     fn from_base(base: SharedRegistryMap<Path>, local: HashMap<Name, Path>) -> Self {
-        Self { base, local }
+        Self {
+            base,
+            local,
+            units: Vec::new(),
+        }
     }
 
     fn get(&self, key: &str) -> Option<Path> {
-        Name::lookup(key)
-            .and_then(|key| self.local.get(&key).copied())
+        let name = Name::lookup(key);
+        name.and_then(|name| self.local.get(&name).copied())
             .or_else(|| self.base.get_cloned(key))
+            .or_else(|| self.unit_rewrite(name?))
+    }
+
+    fn unit_rewrite(&self, key: Name) -> Option<Path> {
+        self.units.iter().find_map(|unit| unit.get(&key).copied())
+    }
+
+    fn contains(&self, key: Name) -> bool {
+        self.local.contains_key(&key)
+            || self.base.contains_key(key.as_str())
+            || self.unit_rewrite(key).is_some()
     }
 
     fn insert_if_absent(&mut self, key: Name, value: Path) {
-        if !self.local.contains_key(&key) && !self.base.contains_key(key.as_str()) {
+        if !self.contains(key) {
             self.local.insert(key, value);
+        }
+    }
+
+    /// Record every rewrite of a loaded unit's table that is not known yet.
+    fn add_unit(&mut self, unit: &Arc<UnitAliasRewrites>) {
+        if !self.units.iter().any(|known| Arc::ptr_eq(known, unit)) {
+            self.units.push(unit.clone());
         }
     }
 
@@ -522,13 +575,25 @@ impl AliasPrefixRewrites {
         }
     }
 
-    fn local_clone(&self) -> HashMap<Name, Path> {
-        self.local.clone()
+    /// The rewrites this compilation recorded itself, outside `base`.
+    fn recorded(&self) -> HashMap<Name, Path> {
+        let mut rewrites = self.local.clone();
+        for unit in &self.units {
+            for (key, path) in unit.iter() {
+                rewrites.entry(*key).or_insert(*path);
+            }
+        }
+        rewrites
     }
 
     fn to_hash_map(&self) -> HashMap<String, Path> {
         let mut rewrites = self.base.clone_map();
         rewrites.extend(self.local.iter().map(|(key, path)| (key.to_string(), *path)));
+        for unit in &self.units {
+            for (key, path) in unit.iter() {
+                rewrites.entry(key.to_string()).or_insert(*path);
+            }
+        }
         rewrites
     }
 
@@ -544,6 +609,19 @@ impl AliasPrefixRewrites {
         for (flat_head, qualified) in self.local.iter() {
             if qualified.same(qualified_path) {
                 heads.push(flat_head.to_string());
+            }
+        }
+        for (index, unit) in self.units.iter().enumerate() {
+            for (flat_head, qualified) in unit.iter() {
+                if qualified.same(qualified_path)
+                    && !self.local.contains_key(flat_head)
+                    && !self.base.contains_key(flat_head.as_str())
+                    && !self.units[..index]
+                        .iter()
+                        .any(|earlier| earlier.contains_key(flat_head))
+                {
+                    heads.push(flat_head.to_string());
+                }
             }
         }
         heads
@@ -1836,17 +1914,7 @@ impl PersistentEnv {
             }
             ctx.poison_store_build_for("find_pers_struct:load");
             let ps = portable_types::internalize_pers_struct(portable, ctx);
-            let module_path = Path::pident(Ident::create_persistent(&portable_key));
-            let effective_module_path = self
-                .view
-                .alias_prefix_rewrites
-                .get(&portable_key)
-                .unwrap_or_else(|| module_path);
-            collect_alias_rewrites(
-                &ps.ps_sig,
-                &effective_module_path,
-                &mut self.view_mut().alias_prefix_rewrites,
-            );
+            self.record_alias_rewrites(&portable_key, &ps);
             if should_register_lazy_raw_sig(&portable_key, &self.view.alias_prefix_rewrites)
                 && !ctx.has_raw_module_sig(&portable_key)
             {
@@ -1903,6 +1971,28 @@ impl PersistentEnv {
         result
     }
 
+    /// Record the alias rewrites of the signature of `ps`, loaded as `key`.
+    fn record_alias_rewrites(&mut self, key: &str, ps: &PersStruct) {
+        match self.view.alias_prefix_rewrites.get(key) {
+            // Reached under its own name: the rewrites are those of the
+            // unit's own table, which is not walked again.
+            None if ps.ps_name == key => {
+                if let Some(unit) = ps.own_alias_rewrites() {
+                    self.view_mut().alias_prefix_rewrites.add_unit(unit);
+                }
+            }
+            effective_module_path => {
+                let module_path = effective_module_path
+                    .unwrap_or_else(|| Path::pident(Ident::create_persistent(key)));
+                collect_alias_rewrites(
+                    &ps.ps_sig,
+                    &module_path,
+                    &mut self.view_mut().alias_prefix_rewrites,
+                );
+            }
+        }
+    }
+
     fn prepare_cached_pers_struct(&mut self, cache_key: &str, ps: &PersStruct, ctx: &TypeContext) {
         if !Name::lookup(cache_key)
             .is_some_and(|key| self.view.prepared_cached_alias_rewrites.contains(&key))
@@ -1911,17 +2001,7 @@ impl PersistentEnv {
             self.view_mut()
                 .prepared_cached_alias_rewrites
                 .insert(Name::new(&cache_key));
-            let module_path = Path::pident(Ident::create_persistent(cache_key));
-            let effective_module_path = self
-                .view
-                .alias_prefix_rewrites
-                .get(cache_key)
-                .unwrap_or_else(|| module_path);
-            collect_alias_rewrites(
-                &ps.ps_sig,
-                &effective_module_path,
-                &mut self.view_mut().alias_prefix_rewrites,
-            );
+            self.record_alias_rewrites(cache_key, ps);
         }
 
         if should_register_lazy_raw_sig(cache_key, &self.view.alias_prefix_rewrites)
@@ -1977,6 +2057,7 @@ impl PersistentEnv {
             ps_filename,
             ps_deprecated,
             ps_crcs,
+            ps_alias_rewrites: Default::default(),
         }
     }
 
@@ -2454,7 +2535,7 @@ impl PersistentEnv {
             self.typecheck_source_signature(preferred_path, ctx)?;
         self.view_mut()
             .alias_prefix_rewrites
-            .extend_missing(fallback_pers.view.alias_prefix_rewrites.local_clone());
+            .extend_missing(fallback_pers.view.alias_prefix_rewrites.recorded());
         let fallback_entries = fallback_pers
             .cache
             .lock()
@@ -2576,7 +2657,7 @@ impl PersistentEnv {
         // Merge any modules the fallback discovered
         self.view_mut()
             .alias_prefix_rewrites
-            .extend_missing(fallback_pers.view.alias_prefix_rewrites.local_clone());
+            .extend_missing(fallback_pers.view.alias_prefix_rewrites.recorded());
         let fallback_entries = fallback_pers
             .cache
             .lock()
@@ -2961,6 +3042,7 @@ impl PersistentEnv {
             ps_filename: format!("{}.mlmap", namespace_name),
             ps_deprecated: None,
             ps_crcs: Vec::new(),
+            ps_alias_rewrites: Default::default(),
         };
         self.unhide_module(namespace_name);
         self.cache_insert(namespace_name.to_string(), Some(Arc::new(ps)));
@@ -7737,9 +7819,19 @@ impl AliasRewriteSink for HashMap<String, Path> {
     }
 }
 
+impl AliasRewriteSink for UnitAliasRewrites {
+    fn has_alias_rewrite(&self, key: Name) -> bool {
+        self.contains_key(&key)
+    }
+
+    fn insert_alias_rewrite_if_absent(&mut self, key: Name, value: Path) {
+        self.entry(key).or_insert(value);
+    }
+}
+
 impl AliasRewriteSink for AliasPrefixRewrites {
     fn has_alias_rewrite(&self, key: Name) -> bool {
-        self.local.contains_key(&key) || self.base.contains_key(key.as_str())
+        self.contains(key)
     }
 
     fn insert_alias_rewrite_if_absent(&mut self, key: Name, value: Path) {
@@ -8259,6 +8351,168 @@ fn add_signature_to_env_with_options_inner(
 mod resolution_view_tests {
     use super::*;
     use crate::context::IdGenerator;
+
+    fn alias_module(name: &str, target: &str) -> SignatureItem {
+        SignatureItem::SigModule(
+            Ident::create_persistent(name),
+            ModuleDeclaration {
+                md_type: ModuleType::MtyAlias(
+                    AliasPresence::MtaAbsent,
+                    Arc::new(Path::pident(Ident::create_persistent(target))),
+                ),
+                md_attributes: vec![],
+                md_loc: crate::types::DeclLoc::none(),
+                md_path: None,
+            },
+            RecStatus::TrecNot,
+        )
+    }
+
+    /// `module A = Unit_A`, `module B = Unit_B`, `module Again = Unit_A` and
+    /// `module Inner: { module C = Unit_C }`.
+    fn unit_with_aliases(name: &str) -> PersStruct {
+        let inner = SignatureItem::SigModule(
+            Ident::create_persistent("Inner"),
+            ModuleDeclaration {
+                md_type: ModuleType::MtySignature(Arc::new(vec![alias_module("C", "Unit_C")])),
+                md_attributes: vec![],
+                md_loc: crate::types::DeclLoc::none(),
+                md_path: None,
+            },
+            RecStatus::TrecNot,
+        );
+        PersStruct {
+            ps_name: name.to_string(),
+            ps_sig: Arc::new(vec![
+                alias_module("A", "Unit_A"),
+                alias_module("B", "Unit_B"),
+                alias_module("Again", "Unit_A"),
+                inner,
+            ]),
+            ps_filename: format!("{name}.res"),
+            ps_deprecated: None,
+            ps_crcs: Vec::new(),
+            ps_alias_rewrites: Default::default(),
+        }
+    }
+
+    /// What every reader of the rewrites sees, in a comparable form.
+    fn alias_rewrite_readings(rewrites: &AliasPrefixRewrites) -> Vec<String> {
+        let mut readings = Vec::new();
+        for flat in ["Unit_A", "Unit_B", "Unit_C", "Late", "Unknown"] {
+            let path = rewrites.get(flat);
+            readings.push(format!("{flat} -> {:?}", path.map(|path| path.name())));
+            if let Some(path) = path {
+                let mut heads = rewrites.flattened_alias_heads_for_path(&path);
+                heads.sort();
+                readings.push(format!("{} <- {heads:?}", path.name()));
+            }
+        }
+        let mut all: Vec<_> = rewrites
+            .to_hash_map()
+            .into_iter()
+            .map(|(flat, path)| format!("{flat}={}", path.name()))
+            .collect();
+        all.sort();
+        readings.push(format!("all: {all:?}"));
+        let mut recorded: Vec<_> = rewrites
+            .recorded()
+            .into_iter()
+            .map(|(flat, path)| format!("{flat}={}", path.name()))
+            .collect();
+        recorded.sort();
+        readings.push(format!("recorded: {recorded:?}"));
+        readings
+    }
+
+    #[test]
+    fn a_units_alias_table_reads_like_recording_each_of_its_rewrites() {
+        let first = unit_with_aliases("First");
+        let second = unit_with_aliases("Second");
+        // `walked` records every rewrite as the signatures are walked,
+        // `shared` adds each unit's table.
+        let mut walked = AliasPrefixRewrites::new();
+        let mut shared = AliasPrefixRewrites::new();
+        let earlier = Path::pident(Ident::create_persistent("Earlier"));
+        let late = Path::pident(Ident::create_persistent("Late_target"));
+        for rewrites in [&mut walked, &mut shared] {
+            // Known before either unit is loaded: it wins over both.
+            rewrites.insert_if_absent(Name::new("Unit_B"), earlier);
+        }
+        for unit in [&first, &second] {
+            let unit_path = Path::pident(Ident::create_persistent(&unit.ps_name));
+            collect_alias_rewrites(&unit.ps_sig, &unit_path, &mut walked);
+            shared.add_unit(unit.own_alias_rewrites().expect("the unit has aliases"));
+            // Adding a unit again changes nothing.
+            shared.add_unit(unit.own_alias_rewrites().expect("the unit has aliases"));
+        }
+        for rewrites in [&mut walked, &mut shared] {
+            // Recorded after the units: a name they hold stays theirs.
+            rewrites.insert_if_absent(Name::new("Unit_A"), late);
+            rewrites.insert_if_absent(Name::new("Late"), late);
+        }
+
+        assert_eq!(shared.units.len(), 2);
+        assert_eq!(
+            alias_rewrite_readings(&shared),
+            alias_rewrite_readings(&walked)
+        );
+        assert_eq!(
+            shared.get("Unit_A").map(|path| path.name()).as_deref(),
+            Some("First.A")
+        );
+        assert_eq!(
+            shared.get("Unit_B").map(|path| path.name()).as_deref(),
+            Some("Earlier")
+        );
+        assert_eq!(
+            shared.get("Unit_C").map(|path| path.name()).as_deref(),
+            Some("First.Inner.C")
+        );
+    }
+
+    #[test]
+    fn a_loaded_unit_shares_its_alias_table_unless_it_is_reached_through_an_alias() {
+        let unit = unit_with_aliases("Shared");
+        let mut own_name = PersistentEnv::new();
+        own_name.record_alias_rewrites("Shared", &unit);
+        let table = unit.own_alias_rewrites().expect("the unit has aliases");
+        assert!(own_name.view.alias_prefix_rewrites.local.is_empty());
+        assert_eq!(own_name.view.alias_prefix_rewrites.units.len(), 1);
+        assert!(Arc::ptr_eq(
+            &own_name.view.alias_prefix_rewrites.units[0],
+            table
+        ));
+
+        // Reached as `Outer.Shared`: its rewrites carry that prefix, so they
+        // are recorded for this compilation only.
+        let mut aliased = PersistentEnv::new();
+        aliased.view_mut().alias_prefix_rewrites.insert_if_absent(
+            Name::new("Shared"),
+            Path::pdot(Path::pident(Ident::create_persistent("Outer")), "Shared"),
+        );
+        aliased.record_alias_rewrites("Shared", &unit);
+        assert!(aliased.view.alias_prefix_rewrites.units.is_empty());
+        assert_eq!(
+            aliased
+                .view
+                .alias_prefix_rewrites
+                .get("Unit_C")
+                .map(|path| path.name())
+                .as_deref(),
+            Some("Outer.Shared.Inner.C")
+        );
+
+        // A unit without aliases costs a compilation nothing.
+        let plain = PersStruct {
+            ps_sig: Arc::new(Vec::new()),
+            ..unit_with_aliases("Plain")
+        };
+        let mut env = PersistentEnv::new();
+        let view = env.view.clone();
+        env.record_alias_rewrites("Plain", &plain);
+        assert!(Arc::ptr_eq(&env.view, &view));
+    }
 
     #[test]
     fn cloned_views_share_reads_but_isolate_every_owned_overlay() {

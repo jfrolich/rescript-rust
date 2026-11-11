@@ -768,6 +768,7 @@ mod tests {
                 ps_filename: "Unit.res".to_string(),
                 ps_deprecated: None,
                 ps_crcs: vec![],
+                ps_alias_rewrites: Default::default(),
             },
             &ctx,
             None,
