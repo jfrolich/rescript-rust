@@ -183,6 +183,105 @@ fn site_examples_compile() {
 /// Two compilations on one thread that both type check the runtime from
 /// source: the second must not see declarations of the first.
 #[test]
+fn classes_and_symbols_are_cases_of_a_union() {
+    let ts = r#"
+export class Vehicle { constructor(public wheels: number) {} }
+export class Car extends Vehicle { honk(): string { return "beep"; } }
+export function park(what: Car | Vehicle | string): void {}
+export function on(name: string | symbol, target: URL | Date): void {}
+"#;
+    let js = compile(
+        r#"
+module Garage = %ts("./garage.ts")
+
+let describe = (what: Garage.parkWhat) =>
+  switch what {
+  | String(plate) => plate
+  | Car(car) => car.honk()
+  | Vehicle(vehicle) => Float.toString(vehicle.wheels)
+  }
+let isSymbol = (name: Garage.onName) =>
+  switch name {
+  | Symbol(_) => true
+  | String(_) => false
+  }
+let isUrl = (target: Garage.onTarget) =>
+  switch target {
+  | Url(_) => true
+  | Date(_) => false
+  }
+let car = Garage.Car.make(4.)
+Garage.park(Car(car))
+Garage.park(Vehicle((car :> Garage.vehicle)))
+"#,
+        &[("/app/src/garage.ts", ts)],
+    )
+    .unwrap();
+    // The class is the module's export, and the subclass is tested first.
+    assert!(js.contains("require(\"./garage.ts\")"), "{js}");
+    // so the superclass is what is left and needs no test.
+    assert!(js.contains("what instanceof GarageTs.Car"), "{js}");
+    assert!(!js.contains("instanceof GarageTs.Vehicle"), "{js}");
+    assert!(js.contains("typeof name !== \"string\""), "{js}");
+    assert!(js.contains("!(target instanceof Date)"), "{js}");
+}
+
+/// Whole modules of real packages compile. The packages are those the
+/// repository installs for its own tooling; without `node_modules` (or
+/// `TS_IMPORT_PACKAGES`, a directory that has one) there is nothing to
+/// check.
+#[test]
+fn installed_packages_compile() {
+    let root = match std::env::var("TS_IMPORT_PACKAGES") {
+        Ok(dir) => PathBuf::from(dir),
+        Err(_) => Path::new(env!("CARGO_MANIFEST_DIR")).join(".."),
+    };
+    let Ok(root) = root.canonicalize() else { return };
+    let installed = |package: &str| root.join("node_modules").join(package).is_dir();
+    let mut modules: Vec<&str> = Vec::new();
+    if installed("@types/node") {
+        modules.extend([
+            "node:events",
+            "node:url",
+            "node:path",
+            "node:os",
+            "node:child_process",
+            "node:fs",
+            "node:http",
+        ]);
+    }
+    for (package, types) in [
+        ("semver", "@types/semver"),
+        ("chalk", "chalk"),
+        ("react", "@types/react"),
+        ("react-dom", "@types/react-dom"),
+        ("vite", "vite"),
+    ] {
+        if installed(package) && installed(types) {
+            modules.push(package);
+        }
+    }
+    let file = root.join("Importer.res").to_string_lossy().to_string();
+    let mut failures = Vec::new();
+    for module in modules {
+        let source = format!("module M = %ts(\"{module}\")\n");
+        let options = CompilerOptions {
+            source_filename: Some(file.clone()),
+            module_name: Some("Importer".to_string()),
+            ..Default::default()
+        };
+        if let Err(error) =
+            driver::compile_source_in_process(&source, &file, "Importer", &options, &registry(), false, None)
+        {
+            let text = format!("{error:#}");
+            let kept: Vec<&str> = text.split("\n\n\n").filter(|part| !part.contains("Warning number")).collect();
+            failures.push(format!("{module}:\n{}", kept.join("\n").chars().take(1500).collect::<String>()));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
+#[test]
 fn compilations_on_one_thread_are_independent() {
     compile("let x = Array.length([1])", &[]).unwrap();
     compile("let y = Array.length([1])", &[]).unwrap();

@@ -20,7 +20,7 @@ use tsrs_compiler::Program;
 use tsrs_core::P;
 
 use crate::model::{
-    Ctor, Decl, DeclKind, External, Field, Item, Param, Payload, Tag, Ty, is_plain_field_name,
+    Class, Ctor, Decl, DeclKind, External, Field, Item, Param, Payload, Tag, Ty, is_plain_field_name,
     lower_ident, shape_key, upper_ident,
 };
 
@@ -148,10 +148,36 @@ struct State {
     pending: Vec<Decl>,
     /// The parameters of each type declared for an unnamed TypeScript type.
     anonymous_params: HashMap<String, Vec<String>>,
+    /// What the values of each declared type are at run time, by type name.
+    runtime: HashMap<String, Runtime>,
     notes: Vec<Note>,
     /// The notes, for telling a repeated one without a scan.
     noted: HashSet<Note>,
     journal: Vec<Undo>,
+}
+
+/// What tells the values of a declared type apart in an untagged variant.
+#[derive(Clone)]
+enum Runtime {
+    /// A plain object: a record.
+    Object,
+    /// An instance of a class that `instanceof` tests for.
+    Instance,
+    /// Whatever the abbreviated type is.
+    Alias(Ty),
+    /// Nothing the compiler can test for: an abstract type or a variant.
+    Unknown,
+}
+
+impl Runtime {
+    fn of(decl: &Decl) -> Runtime {
+        match (&decl.kind, &decl.class) {
+            (_, Some(_)) => Runtime::Instance,
+            (DeclKind::Record(_), None) => Runtime::Object,
+            (DeclKind::Alias(ty), None) => Runtime::Alias(ty.clone()),
+            (DeclKind::Abstract | DeclKind::Variant { .. }, None) => Runtime::Unknown,
+        }
+    }
 }
 
 enum Undo {
@@ -192,6 +218,44 @@ impl State {
         self.pending.truncate(mark.pending);
         for note in self.notes.drain(mark.notes..) {
             self.noted.remove(&note);
+        }
+    }
+
+    fn declare(&mut self, decl: Decl) {
+        self.runtime.insert(decl.name.clone(), Runtime::of(&decl));
+        self.pending.push(decl);
+    }
+
+    /// How an untagged variant recognizes a value of type `ty`: the name of
+    /// a `typeof`, `"array"`, `"object"` or `"instance"`. `None` when it
+    /// cannot.
+    fn runtime_of(&self, ty: &Ty, depth: usize) -> Option<&'static str> {
+        match ty {
+            Ty::Fn(..) => Some("function"),
+            Ty::Tuple(_) => Some("array"),
+            Ty::Var(_) | Ty::Poly(_) => None,
+            Ty::App(name, _) => match name.as_str() {
+                "string" => Some("string"),
+                "float" | "int" => Some("number"),
+                "bigint" => Some("bigint"),
+                "bool" => Some("boolean"),
+                "array" => Some("array"),
+                "dict" => Some("object"),
+                "Symbol.t" => Some("symbol"),
+                "promise" | "Date.t" | "RegExp.t" | "JsError.t" | "Map.t" | "Set.t" | "WeakMap.t" | "WeakSet.t"
+                | "ArrayBuffer.t" | "DataView.t" | "Int8Array.t" | "Uint8Array.t" | "Uint8ClampedArray.t"
+                | "Int16Array.t" | "Uint16Array.t" | "Int32Array.t" | "Uint32Array.t" | "Float32Array.t"
+                | "Float64Array.t" | "BigInt64Array.t" | "BigUint64Array.t" => Some("instance"),
+                _ => {
+                    let local = name.rsplit('.').next().unwrap_or(name);
+                    match self.runtime.get(local)? {
+                        Runtime::Object => Some("object"),
+                        Runtime::Instance => Some("instance"),
+                        Runtime::Alias(target) if depth < 16 => self.runtime_of(target, depth + 1),
+                        Runtime::Alias(_) | Runtime::Unknown => None,
+                    }
+                }
+            },
         }
     }
 
@@ -249,6 +313,18 @@ pub(crate) struct Converter<'a> {
     /// The declared type of the interface or class being declared: there it
     /// is the declaration's body, anywhere else a reference to it.
     declaring: Option<P<Type>>,
+    /// The modules the file imports from, by specifier.
+    modules: Vec<(String, P<Symbol>)>,
+    /// The classes those modules export, with the specifier and the export
+    /// name: where `instanceof` finds the class at run time. Filled on first
+    /// use.
+    class_exports: Option<HashMap<P<Symbol>, (String, String)>>,
+    /// The fields of each class declared as a record.
+    class_fields: HashMap<P<Symbol>, Vec<Field>>,
+    /// The superclass each declared class names.
+    declared_parents: HashMap<P<Symbol>, P<Symbol>>,
+    /// The classes whose declaration states the class.
+    declared_classes: HashSet<P<Symbol>>,
 }
 
 const MAX_DEPTH: usize = 48;
@@ -286,7 +362,153 @@ impl<'a> Converter<'a> {
             deferred_seen: false,
             depth: 0,
             declaring: None,
+            modules: Vec::new(),
+            class_exports: None,
+            class_fields: HashMap::new(),
+            declared_parents: HashMap::new(),
+            declared_classes: HashSet::new(),
         }
+    }
+
+    /// The modules the requests import from.
+    pub(crate) fn set_modules(&mut self, modules: Vec<(String, P<Symbol>)>) {
+        self.modules = modules;
+        self.class_exports = None;
+    }
+
+    // ----- classes --------------------------------------------------------
+
+    /// Where the class `symbol` is found at run time: its path and the
+    /// module that exports it, or a global path. `None` for a class nothing
+    /// names: `instanceof` cannot test for it.
+    fn class_ref(&mut self, symbol: P<Symbol>) -> Option<(String, Option<String>)> {
+        if self.is_lib_symbol(symbol) {
+            // A global with a constructor: `declare var URL: {prototype: URL; new(...): URL}`.
+            let name = symbol.name();
+            // Not classes to recognize values by: every object is an
+            // `Object`, arrays have `Array.isArray`, and the wrappers of
+            // primitives are not what the primitive types hold.
+            if matches!(
+                name,
+                "Object" | "Function" | "Array" | "ReadonlyArray" | "String" | "Number" | "Boolean" | "Symbol" | "BigInt"
+            ) || !symbol.flags().intersects(SymbolFlags::Variable | SymbolFlags::Class)
+            {
+                return None;
+            }
+            let statics = self.c.get_type_of_symbol(symbol);
+            return self
+                .c
+                .get_property_of_type(statics, "prototype")
+                .is_some()
+                .then(|| (name.to_string(), None));
+        }
+        if !symbol.flags().intersects(SymbolFlags::Class) {
+            return None;
+        }
+        if self.class_exports.is_none() {
+            let mut exports: HashMap<P<Symbol>, (String, String)> = HashMap::new();
+            for (module, module_symbol) in self.modules.clone() {
+                for export in self.c.get_exports_of_module_exported(module_symbol) {
+                    let target = self.c.skip_alias(export);
+                    if target.flags().intersects(SymbolFlags::Class) {
+                        exports.entry(target).or_insert_with(|| (module.clone(), export.name().to_string()));
+                    }
+                }
+            }
+            self.class_exports = Some(exports);
+        }
+        if let Some((module, name)) = self.class_exports.as_ref().and_then(|exports| exports.get(&symbol)) {
+            return Some((name.clone(), Some(module.clone())));
+        }
+        // A class of an ambient module: `declare module "node:stream" { class
+        // Readable {} }`, also inside a namespace the module exports with
+        // `export =`.
+        let mut node = symbol.declarations().first().copied();
+        while let Some(at) = node {
+            if tsrs_ast::is_ambient_module(at) {
+                let module_symbol = self.c.get_symbol_of_declaration_exported(at)?;
+                let module = module_symbol.name().trim_matches('"').to_string();
+                let exported = self
+                    .c
+                    .get_exports_of_module_exported(module_symbol)
+                    .into_iter()
+                    .find(|&export| self.c.skip_alias(export) == symbol)?;
+                return Some((exported.name().to_string(), Some(module)));
+            }
+            node = at.parent();
+        }
+        None
+    }
+
+    /// The class `symbol` extends, when that class can be named at run time
+    /// too, with its instance type.
+    fn base_class(&mut self, symbol: P<Symbol>) -> Option<(P<Symbol>, P<Type>)> {
+        let declared = self.c.get_declared_type_of_symbol(symbol);
+        let bases: Vec<P<Type>> = self.c.get_base_types_exported(declared).to_vec();
+        for base in bases {
+            if let Some(parent) = base.symbol()
+                && parent != symbol
+                && self.class_ref(parent).is_some()
+            {
+                return Some((parent, base));
+            }
+        }
+        None
+    }
+
+    /// The class of a record declared for the class `symbol`. The superclass
+    /// is named when the record has its fields exactly, which the compiler
+    /// requires of a subclass; a class that narrows a member stands alone.
+    fn record_class(&mut self, symbol: P<Symbol>, own: &Ty, fields: &[Field]) -> Option<Class> {
+        let (path, module) = self.class_ref(symbol)?;
+        self.class_fields.insert(symbol, fields.to_vec());
+        let mut parent = None;
+        if let Some((parent_symbol, base)) = self.base_class(symbol)
+            && !self.is_lib_symbol(parent_symbol)
+            && self.c.get_type_arguments(base).is_empty()
+        {
+            let parent_ty = self.convert(base);
+            // A method that returns `this` returns the subclass in the
+            // subclass, which is a subtype of what the superclass has.
+            let inherits = self.class_fields.get(&parent_symbol).is_some_and(|parent_fields| {
+                parent_fields.iter().all(|field| {
+                    fields.contains(field)
+                        || fields.contains(&Field { ty: returning(&field.ty, &parent_ty, own), ..field.clone() })
+                })
+            });
+            if inherits && matches!(parent_ty, Ty::App(..)) {
+                self.declared_parents.insert(symbol, parent_symbol);
+                parent = Some(parent_ty);
+            }
+        }
+        self.declared_classes.insert(symbol);
+        Some(Class { path, module, parent })
+    }
+
+    /// Whether the classes of a union can be cases of one variant: when one
+    /// extends another, the declarations say so, and the subclass is then
+    /// tested first.
+    fn class_cases_agree(&mut self, classes: &[P<Symbol>]) -> bool {
+        for &class in classes {
+            let mut declared: Vec<P<Symbol>> = Vec::new();
+            let mut at = class;
+            while let Some(&parent) = self.declared_parents.get(&at) {
+                if declared.contains(&parent) {
+                    break;
+                }
+                declared.push(parent);
+                at = parent;
+            }
+            let mut at = class;
+            for _ in 0..32 {
+                let Some((parent, _)) = self.base_class(at) else { break };
+                if classes.contains(&parent) && !declared.contains(&parent) {
+                    return false;
+                }
+                at = parent;
+            }
+        }
+        true
     }
 
     // ----- requests -------------------------------------------------------
@@ -465,6 +687,7 @@ impl<'a> Converter<'a> {
             params,
             kind: DeclKind::Alias(instance_ty),
             ts: None,
+            class: None,
         }])];
         let statics = self.c.get_type_of_symbol(symbol);
         let constructs = self.c.get_signatures_of_type(statics, SignatureKind::Construct);
@@ -537,11 +760,12 @@ impl<'a> Converter<'a> {
         let args = params.iter().map(|param| Ty::Var(param.clone())).collect();
         let target = Ty::App(self.reference(&existing), args);
         self.state.use_name(local.to_string());
-        self.state.pending.push(Decl {
+        self.state.declare(Decl {
             name: local.to_string(),
             params,
             kind: DeclKind::Alias(target),
             ts: None,
+            class: None,
         });
         Ok(())
     }
@@ -657,7 +881,7 @@ impl<'a> Converter<'a> {
     fn declare_anonymous(&mut self, ty: P<Type>, kind: DeclKind) -> Ty {
         let params = free_variables(&kind);
         let args = |params: &[String]| params.iter().cloned().map(Ty::Var).collect::<Vec<Ty>>();
-        let probe = Decl { name: String::new(), params, kind, ts: None };
+        let probe = Decl { name: String::new(), params, kind, ts: None, class: None };
         let key = shape_key(&probe);
         if let Some(named) = self.state.by_shape.get(&key).cloned() {
             self.state.set_type(ty, named.clone());
@@ -669,7 +893,7 @@ impl<'a> Converter<'a> {
         self.state.set_shape(key, named);
         let reference = Ty::App(name.clone(), args(&probe.params));
         self.state.anonymous_params.insert(name.clone(), probe.params.clone());
-        self.state.pending.push(Decl { name, ..probe });
+        self.state.declare(Decl { name, ..probe });
         reference
     }
 
@@ -752,6 +976,15 @@ impl<'a> Converter<'a> {
 
         let declared = self.c.get_declared_type_of_symbol(symbol);
         let is_object_declaration = symbol.flags().intersects(SymbolFlags::Class | SymbolFlags::Interface);
+        // A union inside the declaration may have the declaration itself as
+        // a member, before it is known what it becomes: a record, unless it
+        // can be called.
+        if is_object_declaration
+            && self.c.get_signatures_of_type(declared, SignatureKind::Call).is_empty()
+            && self.c.get_signatures_of_type(declared, SignatureKind::Construct).is_empty()
+        {
+            self.state.runtime.insert(name.clone(), Runtime::Object);
+        }
         let saved_declaring =
             std::mem::replace(&mut self.declaring, if is_object_declaration { Some(declared) } else { None });
         let kind = if symbol.flags().intersects(SymbolFlags::Enum) {
@@ -779,7 +1012,16 @@ impl<'a> Converter<'a> {
             self.opaque_aliases.insert(symbol);
             return false;
         }
-        self.state.pending.push(Decl { name, params: param_names, kind, ts: None });
+        // A class that can be named at run time is declared one, so that it
+        // can be a case of a union.
+        let class = match &kind {
+            DeclKind::Record(fields) if symbol.flags().intersects(SymbolFlags::Class) => {
+                let own = Ty::App(name.clone(), param_names.iter().cloned().map(Ty::Var).collect());
+                self.record_class(symbol, &own, fields)
+            }
+            _ => None,
+        };
+        self.state.declare(Decl { name, params: param_names, kind, ts: None, class });
         true
     }
 
@@ -1013,11 +1255,28 @@ impl<'a> Converter<'a> {
                 let type_name = self.fresh_type_name(name);
                 let named = Named { scope: self.scope.clone(), name: type_name.clone(), params: 0 };
                 self.state.set_symbol(symbol, named);
-                self.state.pending.push(Decl {
+                // A global class (`Element`, `URL`) is declared one, with the
+                // class it extends.
+                let class = match self.class_ref(symbol) {
+                    Some((path, module)) => {
+                        self.declared_classes.insert(symbol);
+                        let parent = match self.base_class(symbol) {
+                            Some((parent, _)) => {
+                                self.declared_parents.insert(symbol, parent);
+                                Some(self.lib_type(parent, &[]))
+                            }
+                            None => None,
+                        };
+                        Some(Class { path, module, parent })
+                    }
+                    None => None,
+                };
+                self.state.declare(Decl {
                     name: type_name.clone(),
                     params: Vec::new(),
                     kind: DeclKind::Abstract,
                     ts: Some(name.to_string()),
+                    class,
                 });
                 Ty::App(type_name, Vec::new())
             }
@@ -1438,36 +1697,71 @@ impl<'a> Converter<'a> {
         // First whether the members can be told apart at run time, from the
         // TypeScript types alone: converting a member declares what it
         // mentions, which is wasted on a union that is then given up.
-        let mut kinds: HashSet<&'static str> = HashSet::new();
+        // A member's kind is what tells it apart: a `typeof`, `Array.isArray`
+        // or a class for `instanceof`. A variant has one case per kind.
+        let mut kinds: HashSet<String> = HashSet::new();
         if whole_boolean {
-            kinds.insert("boolean");
+            kinds.insert("boolean".to_string());
         }
         let mut bases: Vec<Option<&'static str>> = Vec::with_capacity(members.len());
+        // The members that are classes declared for this file.
+        let mut classes: Vec<P<Symbol>> = Vec::new();
         for &member in members {
             if literal_tag(member).is_some() {
                 bases.push(None);
                 continue;
             }
             let flags = member.flags();
-            let (kind, base): (&'static str, &'static str) = if flags.intersects(TypeFlags::String | TypeFlags::TemplateLiteral | TypeFlags::StringMapping) {
-                ("string", "String")
+            let (kind, base): (String, &'static str) = if flags.intersects(TypeFlags::String | TypeFlags::TemplateLiteral | TypeFlags::StringMapping) {
+                ("string".into(), "String")
             } else if flags.intersects(TypeFlags::Number) {
-                ("number", "Number")
+                ("number".into(), "Number")
             } else if flags.intersects(TypeFlags::BigInt) {
-                ("bigint", "BigInt")
+                ("bigint".into(), "BigInt")
             } else if flags.intersects(TypeFlags::Boolean) {
-                ("boolean", "Boolean")
+                ("boolean".into(), "Boolean")
+            } else if flags.intersects(TypeFlags::ESSymbol | TypeFlags::UniqueESSymbol) {
+                ("symbol".into(), "Symbol")
             } else if flags.intersects(TypeFlags::Object) {
                 if self.c.is_array_or_tuple_type(member) {
-                    ("array", "Array")
+                    ("array".into(), "Array")
                 } else if !self.c.get_signatures_of_type(member, SignatureKind::Call).is_empty() {
-                    ("function", "Function")
+                    ("function".into(), "Function")
                 } else {
-                    match member.symbol().filter(|symbol| self.is_lib_symbol(*symbol)).map(|symbol| symbol.name()) {
-                        Some("Date") => ("date", "Date"),
-                        Some("RegExp") => ("regexp", "RegExp"),
-                        Some("Promise") => ("promise", "Promise"),
-                        _ => ("object", "Object"),
+                    match member.symbol() {
+                        Some(symbol) if self.is_lib_symbol(symbol) => match symbol.name() {
+                            "Date" => ("Date".into(), "Date"),
+                            "RegExp" => ("RegExp".into(), "RegExp"),
+                            "Promise" => ("Promise".into(), "Promise"),
+                            "Map" | "ReadonlyMap" => ("Map".into(), "Map"),
+                            "Set" | "ReadonlySet" => ("Set".into(), "Set"),
+                            "WeakMap" => ("WeakMap".into(), "WeakMap"),
+                            "WeakSet" => ("WeakSet".into(), "WeakSet"),
+                            "Error" | "TypeError" | "RangeError" | "SyntaxError" | "ReferenceError"
+                            | "EvalError" | "URIError" | "AggregateError" => ("Error".into(), "Error"),
+                            "ArrayBuffer" => ("ArrayBuffer".into(), "ArrayBuffer"),
+                            "DataView" => ("DataView".into(), "DataView"),
+                            name @ ("Int8Array" | "Uint8Array" | "Uint8ClampedArray" | "Int16Array"
+                            | "Uint16Array" | "Int32Array" | "Uint32Array" | "Float32Array"
+                            | "Float64Array" | "BigInt64Array" | "BigUint64Array") => {
+                                (name.to_string(), "TypedArray")
+                            }
+                            name => match self.class_ref(symbol) {
+                                Some(_) => {
+                                    classes.push(symbol);
+                                    (name.to_string(), "Object")
+                                }
+                                None => ("object".into(), "Object"),
+                            },
+                        },
+                        Some(symbol) => match self.class_ref(symbol) {
+                            Some((path, module)) => {
+                                classes.push(symbol);
+                                (format!("{path} of {}", module.unwrap_or_default()), "Object")
+                            }
+                            None => ("object".into(), "Object"),
+                        },
+                        None => ("object".into(), "Object"),
                     }
                 }
             } else {
@@ -1484,6 +1778,7 @@ impl<'a> Converter<'a> {
             ctors.push(Ctor { name: "Boolean".to_string(), tag: None, payload: Payload::Ty(Ty::name("bool")) });
         }
         let saved_free = std::mem::replace(&mut self.free_vars, false);
+        let mark = self.state.mark();
         for (&member, base) in members.iter().zip(bases) {
             let Some(base) = base else {
                 let tag = literal_tag(member).expect("a literal member");
@@ -1501,15 +1796,42 @@ impl<'a> Converter<'a> {
             self.path.push(base.to_string());
             let payload = self.convert(member);
             self.path.pop();
+            // The member's ReScript type is what the compiler tests for.
+            let expected: &[&str] = match base {
+                "String" => &["string"],
+                "Number" => &["number"],
+                "BigInt" => &["bigint"],
+                "Boolean" => &["boolean"],
+                "Symbol" => &["symbol"],
+                "Array" => &["array"],
+                "Function" => &["function"],
+                "Object" => &["object", "instance"],
+                _ => &["instance"],
+            };
+            if !self.state.runtime_of(&payload, 0).is_some_and(|found| expected.contains(&found)) {
+                self.free_vars = saved_free;
+                self.state.rollback(mark);
+                return None;
+            }
             // An object member is named after its type: `User(user)`.
             let base = match (&payload, base) {
                 (Ty::App(name, _), "Object") if !name.contains('.') && name != "dict" => capitalize(name),
+                (Ty::App(name, _), "TypedArray") => name.trim_end_matches(".t").to_string(),
                 _ => base.to_string(),
             };
             let name = unique_ctor(&ctors, &base);
             ctors.push(Ctor { name, tag: None, payload: Payload::Ty(payload) });
         }
         self.free_vars = saved_free;
+        // Each class member was declared a class, and a class that extends
+        // another member says so: the compiler then tests it first. If not,
+        // the members cannot be told apart after all.
+        if classes.iter().any(|class| !self.declared_classes.contains(class))
+            || !self.class_cases_agree(&classes)
+        {
+            self.state.rollback(mark);
+            return None;
+        }
         Some(DeclKind::Variant { tag: None, ctors })
     }
 
@@ -1702,6 +2024,19 @@ fn free_variables(kind: &DeclKind) -> Vec<String> {
         }
     }
     out
+}
+
+/// `ty` with `from` replaced by `to` where a value of the type comes out:
+/// the type itself, the elements of a tuple and what a function returns.
+fn returning(ty: &Ty, from: &Ty, to: &Ty) -> Ty {
+    if ty == from {
+        return to.clone();
+    }
+    match ty {
+        Ty::Tuple(items) => Ty::Tuple(items.iter().map(|item| returning(item, from, to)).collect()),
+        Ty::Fn(params, result) => Ty::Fn(params.clone(), Box::new(returning(result, from, to))),
+        Ty::App(..) | Ty::Var(_) | Ty::Poly(_) => ty.clone(),
+    }
 }
 
 fn order_decls(decls: Vec<Decl>) -> Vec<Item> {

@@ -135,6 +135,13 @@ pub fn resolve(files: &Files, importer: &str, requests: &[Request]) -> Result<Re
         .collect();
 
     let mut converter = Converter::new(checker, program);
+    converter.set_modules(
+        modules
+            .iter()
+            .zip(&module_symbols)
+            .filter_map(|(module, symbol)| Some((module.clone(), *symbol.as_ref().ok()?)))
+            .collect(),
+    );
     let mut expansions = Vec::with_capacity(requests.len());
     for request in requests {
         let index = modules.iter().position(|module| *module == request.module).unwrap_or(0);

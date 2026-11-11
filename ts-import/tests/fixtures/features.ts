@@ -170,12 +170,28 @@ export function withLevel(level?: Level): Level | null { return level ?? null; }
 export type Autocapitalize = "none" | "off" | "on" | (string & {});
 export function capitalize(mode?: Autocapitalize): void {}
 
+// Classes are cases of a union, told apart with `instanceof`. A subclass
+// names its superclass, so it is tested first.
+export class Vehicle { constructor(public wheels: number) {} }
+export class Car extends Vehicle { honk(): void {} }
+export class Boat { sail(): void {} }
+export function park(what: Car | Vehicle | string): void {}
+export function repair(what: Boat | Vehicle): Boat | Vehicle { return what; }
+
+// `symbol`, and global classes beside one plain object.
+export function onEvent(name: string | symbol, target: EventTarget | Map<string, string>): void {}
+export function setHeaders(init: Headers | Map<string, string> | Record<string, string>): void {}
+export function at(when: Date | number | URL): void {}
+export function pet(what: Dog | Animal | null): void {}
+
 // --- names and shapes that once produced declarations that do not compile ---
 // A literal that is a ReScript keyword.
 export type ReadyState = "open" | "closed" | "in" | "and" | "true";
 // A type named like a built-in ReScript type.
 export interface Dict<T> { [key: string]: T | undefined }
 export declare function env(): Dict<string>;
+// A callable library interface is no function type in ReScript.
+export declare function listen(callback: EventListener | EventListenerObject | null): void;
 // An unnamed member of a generic type has the type's parameters.
 export interface Ref<T> { current: T }
 export interface RefAttributes<T> { ref?: Ref<T | null> | ((instance: T | null) => void) }

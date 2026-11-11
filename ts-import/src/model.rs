@@ -122,6 +122,19 @@ pub struct Decl {
     pub kind: DeclKind,
     /// The TypeScript type this stands for, for the generated doc comment.
     pub ts: Option<String>,
+    /// The JavaScript class the values are instances of. A record with a
+    /// class is private: only the class's constructor builds one.
+    pub class: Option<Class>,
+}
+
+/// A JavaScript class that `instanceof` can test for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Class {
+    /// `Blob`, `Intl.Locale`: a global, or an export of `module`.
+    pub path: String,
+    pub module: Option<String>,
+    /// The ReScript type of the superclass.
+    pub parent: Option<Ty>,
 }
 
 impl Decl {
@@ -144,6 +157,9 @@ impl Decl {
             }
             DeclKind::Alias(ty) => ty.for_each_name(visit),
             DeclKind::Abstract => {}
+        }
+        if let Some(Class { parent: Some(parent), .. }) = &self.class {
+            parent.for_each_name(visit);
         }
     }
 }
@@ -434,14 +450,21 @@ fn write_decl_body(decl: &Decl, indent: &str, out: &mut String) {
         }
         out.push('>');
     }
+    let parent = decl.class.as_ref().and_then(|class| class.parent.as_ref());
     match &decl.kind {
-        DeclKind::Abstract => {}
+        // An abstract class type names its superclass by abbreviating it.
+        DeclKind::Abstract => {
+            if let Some(parent) = parent {
+                out.push_str(" = private ");
+                write_ty(parent, out);
+            }
+        }
         DeclKind::Alias(ty) => {
             out.push_str(" = ");
             write_ty(ty, out);
         }
         DeclKind::Record(fields) => {
-            out.push_str(" = ");
+            out.push_str(if decl.class.is_some() { " = private " } else { " = " });
             write_fields(fields, indent, out);
         }
         DeclKind::Variant { ctors, .. } => {
@@ -471,6 +494,19 @@ fn write_decl_body(decl: &Decl, indent: &str, out: &mut String) {
 }
 
 fn decl_attrs(decl: &Decl) -> String {
+    if let Some(class) = &decl.class {
+        let mut attrs = String::new();
+        if let Some(module) = &class.module {
+            let _ = write!(attrs, "@module({}) ", string_literal(module));
+        }
+        let _ = write!(attrs, "@instanceOf({}) ", string_literal(&class.path));
+        if let (Some(parent), DeclKind::Record(_)) = (&class.parent, &decl.kind) {
+            attrs.push_str("@extends(: ");
+            write_ty(parent, &mut attrs);
+            attrs.push_str(") ");
+        }
+        return attrs;
+    }
     match &decl.kind {
         DeclKind::Variant { tag: Some(tag), .. } => format!("@tag({}) ", string_literal(tag)),
         DeclKind::Variant { tag: None, ctors } => {
@@ -496,7 +532,14 @@ fn write_items(items: &[Item], indent: &str, out: &mut String) {
                 for (index, decl) in decls.iter().enumerate() {
                     write_doc(&decl.ts, indent, out);
                     out.push_str(indent);
-                    out.push_str(&decl_attrs(decl));
+                    let attrs = decl_attrs(decl);
+                    out.push_str(&attrs);
+                    // A class's attributes are a line of their own.
+                    if decl.class.is_some() {
+                        out.truncate(out.len() - 1);
+                        out.push('\n');
+                        out.push_str(indent);
+                    }
                     if index == 0 {
                         out.push_str(if rec { "type rec " } else { "type " });
                     } else {

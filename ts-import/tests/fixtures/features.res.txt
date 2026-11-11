@@ -175,14 +175,16 @@ module Features = {
     id: float,
     label: string,
   }
-  type rec animal = {
+  @module("./features.ts") @instanceOf("Animal")
+  type rec animal = private {
     name: string,
     legs: float,
     speak: (~loud: bool=?) => string,
     shout: string,
     rename: string => animal,
   }
-  type rec dog = {
+  @module("./features.ts") @instanceOf("Dog") @extends(: animal)
+  type rec dog = private {
     fetch: string => promise<string>,
     name: string,
     legs: float,
@@ -190,12 +192,14 @@ module Features = {
     shout: string,
     rename: string => dog,
   }
-  type stack<'t> = {
+  @module("./features.ts") @instanceOf("Stack")
+  type stack<'t> = private {
     push: 't => unit,
     pop: unit => option<'t>,
     size: float,
   }
-  type base = {
+  @module("./features.ts") @instanceOf("Base")
+  type base = private {
     id: unit => string,
   }
   /** TypeScript: `Iterable` */
@@ -203,14 +207,61 @@ module Features = {
   /** TypeScript: `AsyncIterable` */
   type asyncIterable
   /** TypeScript: `URL` */
+  @instanceOf("URL")
   type url
+  /** TypeScript: `EventTarget` */
+  @instanceOf("EventTarget")
+  type eventTarget
   /** TypeScript: `AbortSignal` */
-  type abortSignal
+  @instanceOf("AbortSignal")
+  type abortSignal = private eventTarget
   type fetchLikeInit = {
     signal?: abortSignal,
   }
   /** TypeScript: `Response` */
+  @instanceOf("Response")
   type response
+  @module("./features.ts") @instanceOf("Vehicle")
+  type vehicle = private {
+    wheels: float,
+  }
+  @module("./features.ts") @instanceOf("Car") @extends(: vehicle)
+  type car = private {
+    honk: unit => unit,
+    wheels: float,
+  }
+  @module("./features.ts") @instanceOf("Boat")
+  type boat = private {
+    sail: unit => unit,
+  }
+  @unboxed type parkWhat =
+    | String(string)
+    | Car(car)
+    | Vehicle(vehicle)
+  @unboxed type repairWhat =
+    | Boat(boat)
+    | Vehicle(vehicle)
+  @unboxed type onEventName =
+    | String(string)
+    | Symbol(Symbol.t)
+  @unboxed type onEventTarget =
+    | EventTarget(eventTarget)
+    | Map(Map.t<string, string>)
+  /** TypeScript: `Headers` */
+  @instanceOf("Headers")
+  type headers
+  @unboxed type setHeadersInit =
+    | Headers(headers)
+    | Map(Map.t<string, string>)
+    | Object(dict<string>)
+  @unboxed type atWhen_ =
+    | Number(float)
+    | Date(Date.t)
+    | Url(url)
+  @unboxed type petWhat =
+    | Animal(animal)
+    | Dog(dog)
+    | @as(null) Null
   type pickFrom<'t> = {
     items: array<'t>,
   }
@@ -469,9 +520,48 @@ module Features = {
   /** TypeScript: `(mode?: Autocapitalize | undefined) => void` */
   @module("./features.ts")
   external capitalize: (~mode: string=?) => unit = "capitalize"
+  module Vehicle = {
+    type t = vehicle
+    /** TypeScript: `typeof Vehicle` */
+    @module("./features.ts") @new
+    external make: float => vehicle = "Vehicle"
+  }
+  module Car = {
+    type t = car
+    /** TypeScript: `typeof Car` */
+    @module("./features.ts") @new
+    external make: float => car = "Car"
+  }
+  module Boat = {
+    type t = boat
+    /** TypeScript: `typeof Boat` */
+    @module("./features.ts") @new
+    external make: unit => boat = "Boat"
+  }
+  /** TypeScript: `(what: string | Car | Vehicle) => void` */
+  @module("./features.ts")
+  external park: parkWhat => unit = "park"
+  /** TypeScript: `(what: Boat | Vehicle) => Boat | Vehicle` */
+  @module("./features.ts")
+  external repair: repairWhat => repairWhat = "repair"
+  /** TypeScript: `(name: string | symbol, target: EventTarget | Map<string, string>) => void` */
+  @module("./features.ts")
+  external onEvent: (onEventName, onEventTarget) => unit = "onEvent"
+  /** TypeScript: `(init: Headers | Map<string, string> | Record<string, string>) => void` */
+  @module("./features.ts")
+  external setHeaders: setHeadersInit => unit = "setHeaders"
+  /** TypeScript: `(when: number | Date | URL) => void` */
+  @module("./features.ts")
+  external at: atWhen_ => unit = "at"
+  /** TypeScript: `(what: Animal | Dog | null) => void` */
+  @module("./features.ts")
+  external pet: petWhat => unit = "pet"
   /** TypeScript: `() => Dict<string>` */
   @module("./features.ts")
   external env: unit => dict2<string> = "env"
+  /** TypeScript: `(callback: EventListener | EventListenerObject | null) => void` */
+  @module("./features.ts")
+  external listen: Null.t<unknown> => unit = "listen"
   /** TypeScript: `<T>(from: { items: T[]; }) => T` */
   @module("./features.ts")
   external pick: pickFrom<'t> => 't = "pick"
@@ -507,3 +597,4 @@ module Features = {
 // [any] takesAny (result): `any`: `any` turns checking off; it is imported as `unknown` (or a type variable for an argument)
 // [any] anyValue: `any`: `any` turns checking off; it is imported as `unknown` (or a type variable for an argument)
 // [value-object] Util: `Util`: a namespace is not imported; import what it contains from its own module
+// [union] listen (callback): `EventListener | EventListenerObject | null`: ReScript cannot tell the members of this union apart at run time
