@@ -4399,7 +4399,7 @@ mod tests {
                 for path in [alias, child.md_path.as_ref().unwrap()] {
                     assert_eq!(*path, if shallow { source } else { expected });
                 }
-                let unknown = Path::pdot((*root), "unknown");
+                let unknown = Path::pdot(*root, "unknown");
                 let copied =
                     rewrite_path_with_shared_prefix(&unknown, &root, &target, &ctx).unwrap();
                 assert!(copied.same(&Path::pdot(*target, "unknown")));
@@ -4539,7 +4539,7 @@ mod tests {
         let root_id = Ident::create_local("Component");
         let root = Arc::new(Path::pident(root_id));
         let binder = Ident::create_local("t");
-        let source = Path::pdot((*root), binder.name_atom());
+        let source = Path::pdot(*root, binder.name_atom());
         let target = ctx.dotted_from_ident(root, binder, crate::types::path::NOPOS);
         assert_eq!(source, target);
         assert_eq!(source, target);
@@ -6442,7 +6442,7 @@ fn substitute_module_path(
     protected_module_head: Option<&(i32, Name)>,
 ) -> Path {
     if let Some(target) = module_stamp_map.path_target(path) {
-        return (**target);
+        return **target;
     }
     match &path.view() {
         PathView::Pident(ident) => module_path_target(
@@ -6451,7 +6451,7 @@ fn substitute_module_path(
             module_name_map,
             protected_module_head,
         )
-        .map_or_else(|| *path, |target| (**target)),
+        .map_or(*path, |target| **target),
         PathView::Pdot(..) => ctx.rebuild_dotted(path, |prefix| {
             substitute_shared_module_path(
                 ctx,
@@ -6598,7 +6598,7 @@ fn rewrite_path_prefix(
     ctx: &TypeContext,
 ) -> Option<Path> {
     match &path.view() {
-        PathView::Pident(id) if id.name() == old_name => Some((**new_prefix)),
+        PathView::Pident(id) if id.name() == old_name => Some(**new_prefix),
         PathView::Pdot(inner, _, _) => {
             let prefix = match &inner.view() {
                 PathView::Pident(id) if id.name() == old_name => new_prefix.clone(),
@@ -7081,7 +7081,7 @@ fn rewrite_path_with_shared_prefix(
     ctx: &TypeContext,
 ) -> Option<Path> {
     if path.same(old_prefix) {
-        return Some((**new_prefix));
+        return Some(**new_prefix);
     }
     match &path.view() {
         PathView::Pdot(inner, _, _) => {

@@ -2215,37 +2215,6 @@ mod identity_tests {
     use super::*;
     use crate::context::IdGenerator;
 
-    /// A saved graph with its entries.
-    fn save(ctx: &TypeContext, roots: &[TypeExprRef]) -> (Vec<usize>, PortableTypeGraph) {
-        let mut file_names = PortableFileNames::default();
-        let mut ser = TypeGraphSerializer::new(ctx, None, &mut file_names);
-        let indices = roots.iter().map(|&r| ser.serialize_type(r)).collect();
-        let graph = PortableTypeGraph {
-            entries: std::mem::take(&mut ser.entries),
-            variant_layouts: Vec::new(),
-            mutabilities: Vec::new(),
-        };
-        (indices, graph)
-    }
-
-    /// The nodes of `graph` imported into `ctx`, as `internalize_signature`
-    /// imports them.
-    fn import(ctx: &TypeContext, graph: &PortableTypeGraph) -> Vec<TypeExprRef> {
-        let remap: Vec<_> = graph.entries.iter().map(|_| ctx.new_var(None)).collect();
-        let locs = ctx.import_decl_locs(std::iter::empty(), &|file| file);
-        for (i, entry) in graph.entries.iter().enumerate() {
-            let desc = internalize_desc(&entry.desc, &remap, &[], &locs, ctx);
-            ctx.set_desc(remap[i], desc);
-        }
-        remap
-    }
-
-
-
-
-
-
-
     #[test]
     fn location_allocations_survive_cold_warm_store_and_shared_imports() {
         use crate::types::decl_loc::LocationIdentity;

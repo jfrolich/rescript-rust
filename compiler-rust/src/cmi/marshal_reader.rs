@@ -98,6 +98,7 @@ impl OcamlString {
         }
     }
 
+    /// The string's text.
     pub fn as_str(&self) -> &str {
         &self.text
     }
