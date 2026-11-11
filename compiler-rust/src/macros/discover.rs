@@ -1224,7 +1224,10 @@ fn resolve_generic(tctx: &mut TypeCheckContext<'_>, discovery: &mut Discovery, g
                 macro_args.push(code);
                 params.push(format!("{param}: {printed}"));
                 key_parts.push(printed.clone());
-                name_parts.push(printed);
+                // A unit argument says nothing about the instance.
+                if printed != "unit" {
+                    name_parts.push(printed);
+                }
                 if let Some(call) = &generic.call
                     && let Some((at, _)) = call.args.get(index)
                 {

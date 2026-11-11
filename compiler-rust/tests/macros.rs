@@ -725,3 +725,63 @@ fn generic_as_a_value_and_in_a_pipe() {
     );
     assert!(js.contains("ps.map(encode$p)"), "{js}");
 }
+
+#[test]
+fn companion_of_an_abstract_type() {
+    let mut project = Project::new();
+    compile_ok(&mut project, "Json.res", JSON);
+    compile_ok(
+        &mut project,
+        "Money.res",
+        "type t\n@new external make: int => t = \"Money\"\nlet toJson = (_: t): JSON.t => JSON.Encode.string(\"money\")\n",
+    );
+    let js = compile_ok(
+        &mut project,
+        "Invoice.res",
+        "type invoice = {id: string, total: Money.t}\nlet encode = (i: invoice) => Json.encode(i)\n",
+    );
+    assert!(js.contains("Money.toJson(i.total)"), "{js}");
+    assert!(project.expanded.as_deref().unwrap().contains("encode$Money_t"));
+
+    compile_ok(&mut project, "Opaque.res", "type t\n");
+    let error = compile_err(
+        &mut project,
+        "NoCompanion.res",
+        "let encode = (o: Opaque.t) => Json.encode(o)\n",
+    );
+    assert!(error.contains("is abstract and its module has no toJson"), "{error}");
+}
+
+#[test]
+fn generic_by_the_expected_type() {
+    let mut project = Project::new();
+    compile_ok(
+        &mut project,
+        "Default.res",
+        r#"
+open Macro
+
+@generic
+let rec value = (_: code<unit>): code<'a> =>
+  switch Type.info(expected()) {
+  | Int => %code(0)
+  | String => %code("")
+  | Bool => %code(false)
+  | Array(_) => %code([])
+  | Option(_) => %code(None)
+  | Record({fields}) => Code.record(fields->Array.map(f => (f.name, %code(value()))))
+  | _ => error(`Default.value: no default for ${Type.name(expected())}`)
+  }
+"#,
+    );
+    let js = compile_ok(
+        &mut project,
+        "Settings.res",
+        "type settings = {name: string, retries: int, verbose: bool, tags: array<string>}\nlet initial: settings = Default.value()\n",
+    );
+    let expanded = project.expanded.clone().unwrap();
+    assert!(expanded.contains("value$settings = "), "{expanded}");
+    assert!(expanded.contains("value$array_string = "), "{expanded}");
+    assert!(js.contains("retries: 0"), "{js}");
+    assert!(js.contains("verbose: false"), "{js}");
+}
