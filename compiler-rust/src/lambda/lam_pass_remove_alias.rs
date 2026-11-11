@@ -25,9 +25,9 @@ pub type ExternalInlineResolver<'a> = dyn FnMut(&Ident, &str) -> Option<Lambda> 
 /// `Lam_pass_remove_alias.outcome` (lam_pass_remove_alias.ml:25).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Outcome {
-    EvalFalse,
-    EvalTrue,
-    EvalUnknown,
+    False,
+    True,
+    Unknown,
 }
 
 /// `id_is_for_sure_true_in_boolean` (lam_pass_remove_alias.ml:27-42).
@@ -39,20 +39,20 @@ fn id_is_for_sure_true_in_boolean(a: &LamArena, tbl: &IdentTable, id: &Ident) ->
         )
     };
     match tbl.get(id) {
-        Some(IdKind::NormalOptional(l)) if a.as_const(*l).is_some_and(falsy) => Outcome::EvalFalse,
+        Some(IdKind::NormalOptional(l)) if a.as_const(*l).is_some_and(falsy) => Outcome::False,
         Some(IdKind::Constant(c)) => match a.constant(*c) {
-            Constant::JsTrue => Outcome::EvalTrue,
+            Constant::JsTrue => Outcome::True,
             Constant::Int { i, .. } => {
                 if *i == 0 {
-                    Outcome::EvalFalse
+                    Outcome::False
                 } else {
-                    Outcome::EvalTrue
+                    Outcome::True
                 }
             }
-            c if falsy(c) => Outcome::EvalFalse,
-            _ => Outcome::EvalUnknown,
+            c if falsy(c) => Outcome::False,
+            _ => Outcome::Unknown,
         },
-        _ => Outcome::EvalUnknown,
+        _ => Outcome::Unknown,
     }
 }
 
@@ -173,9 +173,9 @@ impl Simplifier<'_, '_> {
                 }
                 if let Some(id) = a.as_var(cond) {
                     return match id_is_for_sure_true_in_boolean(a, self.ident_tbl, &id) {
-                        Outcome::EvalTrue => self.simpl(a, then_),
-                        Outcome::EvalFalse => self.simpl(a, else_),
-                        Outcome::EvalUnknown => self.simpl_children(a, lam),
+                        Outcome::True => self.simpl(a, then_),
+                        Outcome::False => self.simpl(a, else_),
+                        Outcome::Unknown => self.simpl_children(a, lam),
                     };
                 }
                 self.simpl_children(a, lam)

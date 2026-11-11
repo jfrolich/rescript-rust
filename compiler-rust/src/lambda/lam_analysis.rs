@@ -373,6 +373,7 @@ fn size_lams(a: &LamArena, acc: i32, lams: &[Lam]) -> Option<i32> {
     Some(total)
 }
 
+/// Whether every argument is a constant node.
 pub fn args_all_const(a: &LamArena, args: &[Lam]) -> bool {
     args.iter().all(|x| a.is_const(*x))
 }

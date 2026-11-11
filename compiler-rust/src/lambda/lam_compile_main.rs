@@ -30,8 +30,11 @@ use crate::lambda::{HoistedFunction, lam_pass_guard_raises, lam_pass_sroa};
 /// (lam_coercion.ml:200-208). CMJ export arities are read from the final
 /// metadata rather than recollected.
 pub struct Simplified {
+    /// The arena holding the simplified program.
     pub arena: LamArena,
+    /// The simplified program.
     pub lam: Lam,
+    /// The metadata the program was simplified with.
     pub meta: LamStats,
 }
 
@@ -277,7 +280,7 @@ pub fn add_hoisted_function_aliases(s: &mut Simplified, hoisted: &[HoistedFuncti
         if !target.same(&item.binding) {
             continue;
         }
-        let id = s.meta.id_gen.create(&hoisted_export_name(&item.path));
+        let id = s.meta.id_gen.create(hoisted_export_name(&item.path));
         let mut access = a.var(*top_id);
         for (pos, name) in positions {
             access = a.prim(

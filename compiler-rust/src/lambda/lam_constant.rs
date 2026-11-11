@@ -39,12 +39,19 @@ pub struct ConstructorTag {
 /// Runtime representation selected for an untagged variant constructor.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ConstructorRuntimeTag {
+    /// An integer literal.
     Int(i64),
+    /// A string literal.
     String(String),
+    /// A float literal, in its source text.
     Float(String),
+    /// A bigint literal, in its source text.
     BigInt(String),
+    /// A boolean literal.
     Bool(bool),
+    /// `null`.
     Null,
+    /// `undefined`.
     Undefined,
 }
 

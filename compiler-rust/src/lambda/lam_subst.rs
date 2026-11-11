@@ -8,6 +8,7 @@ use ahash::AHashMap as HashMap;
 use crate::ident::Ident;
 use crate::lambda::arena::{Lam, LamArena, Node};
 
+/// A substitution of identifiers by Lambda terms.
 pub type Subst = HashMap<Ident, Lam>;
 
 /// `Lambda_traverse.subst_lambda` (lambda_traverse.ml:235-241): replace

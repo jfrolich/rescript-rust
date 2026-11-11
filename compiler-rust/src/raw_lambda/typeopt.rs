@@ -248,7 +248,7 @@ fn get_unboxed_repr_rec(
         return None; // Recursive type
     }
     match &*ctx.get_desc(ty) {
-        TypeDesc::Tconstr { path, args: _, .. } => {
+        TypeDesc::Tconstr { path, .. } => {
             let decl = find_type_decl(ctx, env, path)?;
             if decl.type_representation != crate::types::TypeRepresentation::Unboxed {
                 return Some(ty);
@@ -439,7 +439,6 @@ mod tests {
     use super::*;
     use crate::context::IdGenerator;
     use crate::ident::Ident;
-    use crate::location::Location;
     use crate::types::asttypes::PrivateFlag;
     use crate::types::decl::TypeDeclaration;
 

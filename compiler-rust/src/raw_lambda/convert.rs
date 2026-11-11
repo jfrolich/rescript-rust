@@ -22,7 +22,7 @@ use crate::lambda::lam_constant::{
 use crate::lambda::lam_primitive::{ExternalModuleName, ImportSource, Mutable};
 use crate::lambda::lam_tag_info::TagInfo;
 use crate::lambda::{
-    ApInfo, ApplyStatus, FieldDbgInfo, FunctionAttribute, InlineAttribute, Lambda, Primitive,
+    ApInfo, ApplyStatus, FieldDbgInfo, FunctionAttribute, InlineAttribute, Primitive,
     SetFieldDbgInfo,
 };
 use crate::location::Location;
@@ -44,8 +44,8 @@ use crate::types::typecore::TypeCoreWarning;
 use crate::types::typedtree::{
     ApplyArg, Case, Constant as TConstant, Expression, ExpressionDesc, FunctionParam,
     ModuleCoercion, ModuleExpr, ModuleExprDesc, Partial, Pattern, PatternDesc, RecordField,
-    RecordLabelDefinition, Structure, StructureItem, StructureItemDesc, TExprIdx, TExprList,
-    TPatIdx, TypedArena, ValueBinding,
+    RecordLabelDefinition, Structure, StructureItem, StructureItemDesc, TExprIdx, TPatIdx,
+    TypedArena, ValueBinding,
 };
 
 // Keep these aligned with compiler/ml/predef.ml's allocation order. The
@@ -270,7 +270,7 @@ fn config_payload_flags_contains(
         let PExpressionDesc::Pexp_record(record) = &expr.pexp_desc else {
             return false;
         };
-        let (fields, _) = &*record;
+        let (fields, _) = record;
         arena.expr_field_list(*fields).iter().any(|field| {
             let Longident::Lident(name_idx) = arena.get_longident(field.lid.txt) else {
                 return false;
@@ -287,7 +287,7 @@ fn config_payload_flags_contains(
                 matches!(
                     &elem.pexp_desc,
                     PExpressionDesc::Pexp_constant(c)
-                        if matches!(&*c, PConstant::String(s) if s.semantic(arena) == value)
+                        if matches!(c, PConstant::String(s) if s.semantic(arena) == value)
                 )
             })
         })
@@ -429,9 +429,22 @@ impl From<Location> for SrcLoc {
     }
 }
 
+/// A record label as `resolve_all_record_labels` reports it: name, position,
+/// mutability, record representation and attributes.
+type RecordLabelInfo = (
+    String,
+    i32,
+    TypeMutableFlag,
+    RecordRepresentation,
+    Vec<crate::types::decl::Attribute>,
+);
+
+/// An error found while translating to raw Lambda.
 #[derive(Debug, Clone)]
 pub struct RawLambdaDiagnostic {
+    /// Where the error is.
     pub loc: Location,
+    /// The error message.
     pub message: String,
 }
 
@@ -570,6 +583,7 @@ impl<'a> RawLambdaConverter<'a> {
         }
     }
 
+    /// Gives the conversion the persistent environment for cross-module lookups.
     pub fn set_persistent_env(
         &mut self,
         persistent_env: crate::cmi::persistent_env::PersistentEnv,
@@ -577,42 +591,53 @@ impl<'a> RawLambdaConverter<'a> {
         self.persistent_env = Some(persistent_env);
     }
 
+    /// Sets `-bs-noassertfalse`: `assert false` lowers to a plain constant.
     pub fn set_no_assert_false(&mut self, no_assert_false: bool) {
         self.no_assert_false = no_assert_false;
     }
 
+    /// Sets `-noassert`: ordinary assertions lower to unit.
     pub fn set_noassert(&mut self, noassert: bool) {
         self.noassert = noassert;
     }
 
+    /// Keeps sparse record literals expanded to every field, as the Lambda dumps
+    /// print them, instead of compacting them for JavaScript output.
     pub fn set_preserve_expanded_sparse_records(&mut self, preserve: bool) {
         self.preserve_expanded_sparse_records = preserve;
     }
 
+    /// Sets which warnings are reported and which are errors.
     pub fn set_warning_config(&mut self, warning_config: WarningConfig) {
         self.warning_config = warning_config;
     }
 
+    /// The current stamp of the conversion's identifier generator.
     pub fn current_stamp(&self) -> i32 {
         self.id_gen.current_stamp()
     }
 
+    /// Takes the modules the converted code may require.
     pub fn take_possible_required_modules(&mut self) -> ahash::AHashSet<ModuleId> {
         std::mem::take(&mut self.possible_required_modules)
     }
 
+    /// Takes the first error the conversion reported.
     pub fn take_diagnostic(&mut self) -> Option<RawLambdaDiagnostic> {
         self.diagnostic.take()
     }
 
+    /// Takes the warnings the conversion reported.
     pub fn take_warnings(&mut self) -> Vec<TypeCoreWarning> {
         std::mem::take(&mut self.warnings)
     }
 
+    /// Takes the `@res.hoistedFunction` bindings collected during conversion.
     pub fn take_hoisted_functions(&mut self) -> Vec<crate::lambda::HoistedFunction> {
         std::mem::take(&mut self.hoisted_functions)
     }
 
+    /// Takes the flat exports collected during conversion.
     pub fn take_hoisted_exports(&mut self) -> Vec<crate::lambda::HoistedExport> {
         std::mem::take(&mut self.hoisted_exports)
     }
@@ -727,16 +752,14 @@ impl<'a> RawLambdaConverter<'a> {
         partial: Partial,
     ) -> RawLambda {
         self.sync_matching_stamps();
-        let lambda = full_matching::compile_matching(
-            self.type_ctx,
-            self.ta,
-            &crate::raw_lambda::loc::LocArena::new(self.arena, &self.lam_locs, self.b),
-            handler_fun,
-            arg,
-            pat_act_list,
-            partial,
-            &mut self.next_static_raise,
-        );
+        let arena = crate::raw_lambda::loc::LocArena::new(self.arena, &self.lam_locs, self.b);
+        let env = full_matching::MatchEnv {
+            ctx_ref: self.type_ctx,
+            ta: self.ta,
+            arena: &arena,
+            next_raise_count: &mut self.next_static_raise,
+        };
+        let lambda = full_matching::compile_matching(env, handler_fun, arg, pat_act_list, partial);
         self.sync_matching_stamps();
         lambda
     }
@@ -754,16 +777,15 @@ impl<'a> RawLambdaConverter<'a> {
         // allocations back to the raw converter at the same boundary as the
         // other Matching entry points below.
         self.sync_matching_stamps();
-        let lambda = full_matching::for_let(
-            self.type_ctx,
-            self.ta,
-            &crate::raw_lambda::loc::LocArena::new(self.arena, &self.lam_locs, self.b),
-            self.loc(loc),
-            param,
-            pat,
-            body,
-            &mut self.next_static_raise,
-        );
+        let loc = self.loc(loc);
+        let arena = crate::raw_lambda::loc::LocArena::new(self.arena, &self.lam_locs, self.b);
+        let env = full_matching::MatchEnv {
+            ctx_ref: self.type_ctx,
+            ta: self.ta,
+            arena: &arena,
+            next_raise_count: &mut self.next_static_raise,
+        };
+        let lambda = full_matching::for_let(env, loc, param, pat, body);
         self.sync_matching_stamps();
         lambda
     }
@@ -776,16 +798,15 @@ impl<'a> RawLambdaConverter<'a> {
         partial: Partial,
     ) -> RawLambda {
         self.sync_matching_stamps();
-        let lambda = full_matching::for_function(
-            self.type_ctx,
-            self.ta,
-            &crate::raw_lambda::loc::LocArena::new(self.arena, &self.lam_locs, self.b),
-            self.loc(loc),
-            param,
-            pat_act_list,
-            partial,
-            &mut self.next_static_raise,
-        );
+        let loc = self.loc(loc);
+        let arena = crate::raw_lambda::loc::LocArena::new(self.arena, &self.lam_locs, self.b);
+        let env = full_matching::MatchEnv {
+            ctx_ref: self.type_ctx,
+            ta: self.ta,
+            arena: &arena,
+            next_raise_count: &mut self.next_static_raise,
+        };
+        let lambda = full_matching::for_function(env, loc, param, pat_act_list, partial);
         self.sync_matching_stamps();
         lambda
     }
@@ -796,14 +817,14 @@ impl<'a> RawLambdaConverter<'a> {
         pat_act_list: Vec<(&Pattern, full_matching::CaseAction)>,
     ) -> RawLambda {
         self.sync_matching_stamps();
-        let lambda = full_matching::for_trywith(
-            self.type_ctx,
-            self.ta,
-            &crate::raw_lambda::loc::LocArena::new(self.arena, &self.lam_locs, self.b),
-            param,
-            pat_act_list,
-            &mut self.next_static_raise,
-        );
+        let arena = crate::raw_lambda::loc::LocArena::new(self.arena, &self.lam_locs, self.b);
+        let env = full_matching::MatchEnv {
+            ctx_ref: self.type_ctx,
+            ta: self.ta,
+            arena: &arena,
+            next_raise_count: &mut self.next_static_raise,
+        };
+        let lambda = full_matching::for_trywith(env, param, pat_act_list);
         self.sync_matching_stamps();
         lambda
     }
@@ -816,16 +837,15 @@ impl<'a> RawLambdaConverter<'a> {
         partial: Partial,
     ) -> RawLambda {
         self.sync_matching_stamps();
-        let lambda = full_matching::for_multiple_match(
-            self.type_ctx,
-            self.ta,
-            &crate::raw_lambda::loc::LocArena::new(self.arena, &self.lam_locs, self.b),
-            self.loc(loc),
-            paraml,
-            pat_act_list,
-            partial,
-            &mut self.next_static_raise,
-        );
+        let loc = self.loc(loc);
+        let arena = crate::raw_lambda::loc::LocArena::new(self.arena, &self.lam_locs, self.b);
+        let env = full_matching::MatchEnv {
+            ctx_ref: self.type_ctx,
+            ta: self.ta,
+            arena: &arena,
+            next_raise_count: &mut self.next_static_raise,
+        };
+        let lambda = full_matching::for_multiple_match(env, loc, paraml, pat_act_list, partial);
         self.sync_matching_stamps();
         lambda
     }
@@ -864,10 +884,6 @@ impl<'a> RawLambdaConverter<'a> {
             Some(loc) => self.loc_idx_for_location(&loc),
             None => self.arena.none_loc(),
         }
-    }
-
-    fn loc_arena(&self) -> crate::raw_lambda::loc::LocArena<'_> {
-        crate::raw_lambda::loc::LocArena::new(self.arena, &self.lam_locs, self.b)
     }
 
     /// The table resolving every location handle in the converted Lambda
@@ -937,18 +953,7 @@ impl<'a> RawLambdaConverter<'a> {
     /// Look up all label declarations for a record type.
     /// OCaml's make_record_matching uses lbl_all to iterate over ALL fields.
     /// Since Rust's lbl_all is a placeholder, we resolve via the type context cache.
-    fn resolve_all_record_labels(
-        &self,
-        record_ty: TypeExprRef,
-    ) -> Option<
-        Vec<(
-            String,
-            i32,
-            TypeMutableFlag,
-            RecordRepresentation,
-            Vec<crate::types::decl::Attribute>,
-        )>,
-    > {
+    fn resolve_all_record_labels(&self, record_ty: TypeExprRef) -> Option<Vec<RecordLabelInfo>> {
         let ty = self.type_ctx.repr(record_ty);
         let desc = self.type_ctx.get_desc(ty);
         match &*desc {
@@ -1423,7 +1428,7 @@ impl<'a> RawLambdaConverter<'a> {
     }
 
     fn type_desc(&self, ty: TypeExprRef) -> TypeDesc {
-        (*self.type_ctx.get_desc(self.type_ctx.repr(ty)))
+        *self.type_ctx.get_desc(self.type_ctx.repr(ty))
     }
 
     fn is_function_type_with_env(
@@ -2389,7 +2394,6 @@ impl<'a> RawLambdaConverter<'a> {
         match segments(&path, Vec::new()) {
             Some((module_, path)) => Some(ImportSource::ImportModule { module_, path }),
             None => {
-                let loc = loc;
                 self.report_diagnostic(
                     self.loc(loc),
                     "Invalid argument: Dynamic import requires a module or module value that is a file as argument. Passing a value or local module is not allowed.".to_string(),
@@ -2422,21 +2426,41 @@ impl<'a> RawLambdaConverter<'a> {
     /// `Translcore.transl_adapted_external_import`: `import(f)` where `f`'s
     /// binding needs adaptation lowers to
     /// `import("module").then(m => (a1 .. an) => <adapted call of m.<f>>)`.
-    #[allow(clippy::too_many_arguments)]
+    ///
+    /// `None` when `arg` is not a `@module` external value whose binding
+    /// needs adaptation.
     fn transl_adapted_external_import(
         &mut self,
         loc: SrcLoc,
-        env: &crate::types::env::Env,
-        emn: &ExternalModuleName,
-        name: &str,
-        scopes: &[String],
-        variadic: bool,
-        arg_types: &[crate::types::external_ffi_types::Param],
-        return_wrapper: crate::types::external_ffi_types::ReturnWrapper,
-        prim: &crate::types::PrimitiveDescription,
-        val_type: TypeExprRef,
-    ) -> RawLambda {
+        arg: &Expression,
+    ) -> Option<RawLambda> {
+        use crate::types::decl::PrimKind;
+        use crate::types::external_ffi_types::{ExternalFfi, ModuleSource};
         let rb = self.b;
+        let ExpressionDesc::Texp_ident(_, _, desc) = &arg.exp_desc else {
+            return None;
+        };
+        let ValueKind::ValPrim(prim) = &desc.val_kind else {
+            return None;
+        };
+        let PrimKind::KindExternal(spec) = &prim.prim_kind else {
+            return None;
+        };
+        let ExternalFfi::FfiBs(arg_types, return_wrapper, decl) = spec.as_ref() else {
+            return None;
+        };
+        let (DeclKind::DeclVal { name }, Some(ModuleSource::ModuleNamed(emn))) =
+            (&decl.kind, &decl.module_)
+        else {
+            return None;
+        };
+        if !Self::external_import_needs_adaptation(arg_types, decl, *return_wrapper) {
+            return None;
+        }
+        let return_wrapper = *return_wrapper;
+        let (scopes, variadic, val_type) = (&decl.scopes, decl.variadic, desc.val_type);
+        let env = self.env_for_expr(arg);
+        let env = env.as_deref().unwrap_or(self.env);
         use crate::types::external_ffi_types::{DeclKind, ExternalDecl, Param};
         let returns_unit = self.external_returns_unit(env, prim, val_type);
         let node_loc = self.lam_loc(loc);
@@ -2509,7 +2533,7 @@ impl<'a> RawLambdaConverter<'a> {
             FunctionAttribute::default(),
             self.lam_loc(loc),
         );
-        rb.prim(
+        Some(rb.prim(
             Primitive::PjsCall(Box::new(crate::lambda::lam_primitive::JsCall {
                 prim_name: "then".to_string(),
                 arg_types: vec![Param::dummy(), Param::dummy()],
@@ -2536,36 +2560,14 @@ impl<'a> RawLambdaConverter<'a> {
                 callback,
             ],
             self.lam_loc(loc),
-        )
+        ))
     }
 
     /// `Translcore.transl_dynamic_import`.
     fn transl_dynamic_import(&mut self, loc: SrcLoc, arg: &Expression) -> RawLambda {
         let rb = self.b;
-        use crate::types::decl::PrimKind;
-        use crate::types::external_ffi_types::{DeclKind, ExternalFfi, ModuleSource};
-        if let ExpressionDesc::Texp_ident(_, _, desc) = &arg.exp_desc
-            && let ValueKind::ValPrim(p) = &desc.val_kind
-            && let PrimKind::KindExternal(spec) = &p.prim_kind
-            && let ExternalFfi::FfiBs(arg_types, return_wrapper, decl) = spec.as_ref()
-            && let DeclKind::DeclVal { name } = &decl.kind
-            && let Some(ModuleSource::ModuleNamed(emn)) = &decl.module_
-            && Self::external_import_needs_adaptation(arg_types, decl, *return_wrapper)
-        {
-            let env = self.env_for_expr(arg);
-            let env = env.as_deref().unwrap_or(self.env);
-            return self.transl_adapted_external_import(
-                loc,
-                env,
-                emn,
-                name,
-                &decl.scopes,
-                decl.variadic,
-                arg_types,
-                *return_wrapper,
-                p,
-                desc.val_type,
-            );
+        if let Some(lam) = self.transl_adapted_external_import(loc, arg) {
+            return lam;
         }
         match self.import_source_of_arg(arg) {
             Some(source) => rb.prim(Primitive::Pimport(Box::new(source)), &[], self.lam_loc(loc)),
@@ -3372,6 +3374,8 @@ impl<'a> RawLambdaConverter<'a> {
         self.convert_structure_with_coercion(structure, &ModuleCoercion::Tcoerce_none)
     }
 
+    /// [`Self::convert_structure`], then applies the coercion `cc` to the
+    /// module's exports.
     pub fn convert_structure_with_coercion(
         &mut self,
         structure: &Structure,
@@ -4031,7 +4035,7 @@ impl<'a> RawLambdaConverter<'a> {
             match normalized.view() {
                 crate::types::path::PathView::Pident(id) => {
                     if id.is_global() || id.is_persistent() {
-                        this.note_possible_required_module(&id);
+                        this.note_possible_required_module(id);
                     }
                 }
                 crate::types::path::PathView::Pdot(prefix, _, _) => {
@@ -4318,10 +4322,10 @@ impl<'a> RawLambdaConverter<'a> {
             ModuleCoercion::Tcoerce_alias(env_ref, path, inner) => {
                 self.name_lambda_raw(strict, arg, |this, _| {
                     let translated = if let Some(env) = this.type_ctx.get_typed_env(*env_ref) {
-                        this.translate_normal_path_raw_in_env(env.as_ref(), path, SrcLoc::from(loc))
+                        this.translate_normal_path_raw_in_env(env.as_ref(), path, loc)
                     } else {
                         let env = this.env;
-                        this.translate_normal_path_raw_in_env(env, path, SrcLoc::from(loc))
+                        this.translate_normal_path_raw_in_env(env, path, loc)
                     };
                     this.apply_coercion_raw(loc, LetKind::Alias, inner, translated)
                 })
@@ -5008,8 +5012,6 @@ impl<'a> RawLambdaConverter<'a> {
             .iter()
             .map(|binding| raw_free_variables(rb, &binding.rhs))
             .collect();
-        let ids: Vec<&Ident> = bindings.iter().map(|binding| &binding.id).collect();
-        let locs: Vec<Location> = bindings.iter().map(|binding| binding.loc).collect();
 
         #[derive(Clone, Copy, PartialEq)]
         enum Status {
@@ -5023,10 +5025,8 @@ impl<'a> RawLambdaConverter<'a> {
 
         fn emit_binding(
             i: usize,
-            ids: &[&Ident],
-            locs: &[Location],
+            bindings: &[RecModuleBinding],
             fvs: &[HashSet<Ident>],
-            inits: &[&Option<(RawLambda, RawLambda)>],
             status: &mut [Status],
             result: &mut Vec<usize>,
             diagnostic: &mut Option<(Location, String)>,
@@ -5036,21 +5036,21 @@ impl<'a> RawLambdaConverter<'a> {
                 Status::Inprogress => {
                     if diagnostic.is_none() {
                         *diagnostic = Some((
-                            locs[i],
+                            bindings[i].loc,
                             format!(
                                 "Cannot safely evaluate the definition of the recursively-defined module {}",
-                                ids[i].name()
+                                bindings[i].id.name()
                             ),
                         ));
                     }
                 }
                 Status::Undefined => {
-                    if inits[i].is_none() {
+                    if bindings[i].init.is_none() {
                         // Strict binding: must order after dependencies
                         status[i] = Status::Inprogress;
-                        for j in 0..ids.len() {
-                            if fvs[i].contains(ids[j]) {
-                                emit_binding(j, ids, locs, fvs, inits, status, result, diagnostic);
+                        for j in 0..bindings.len() {
+                            if fvs[i].contains(&bindings[j].id) {
+                                emit_binding(j, bindings, fvs, status, result, diagnostic);
                             }
                         }
                     }
@@ -5060,17 +5060,12 @@ impl<'a> RawLambdaConverter<'a> {
             }
         }
 
-        let inits: Vec<&Option<(RawLambda, RawLambda)>> =
-            bindings.iter().map(|binding| &binding.init).collect();
-
         for i in 0..n {
             if status[i] == Status::Undefined {
                 emit_binding(
                     i,
-                    &ids,
-                    &locs,
+                    &bindings,
                     &fvs,
-                    &inits,
                     &mut status,
                     &mut result_indices,
                     &mut diagnostic,
@@ -5504,13 +5499,12 @@ impl<'a> RawLambdaConverter<'a> {
                     Self::get_directive_attribute_from(self.ta.exp_attributes(expr), self.arena);
                 let inline = self.get_inline_attribute_from(self.ta.exp_attributes(expr));
                 self.convert_nary_function_raw(
-                    Some(expr),
+                    expr,
                     self.ta.function_params(*params),
                     self.ta.expr(*body),
                     *async_,
                     directive,
                     inline,
-                    expr.exp_loc,
                 )
             }
             // translcore.ml `Texp_tagged_template`: `transl_exp tag ::
@@ -5579,7 +5573,6 @@ impl<'a> RawLambdaConverter<'a> {
                         self.ta.cases(*cases),
                         self.ta.cases(*exn_cases),
                         partial,
-                        expr,
                         exn_id,
                     )
                 } else {
@@ -5945,7 +5938,6 @@ impl<'a> RawLambdaConverter<'a> {
         cases: &[Case],
         exn_cases: &[Case],
         partial: Partial,
-        _expr: &Expression,
         exn_id: Ident,
     ) -> RawLambda {
         let rb = self.b;
@@ -6780,18 +6772,17 @@ impl<'a> RawLambdaConverter<'a> {
 
     /// Mirrors compiler/ml/translcore.ml:615-637 and `transl_function` for the
     /// upstream n-ary Typedtree representation.
-    #[allow(clippy::too_many_arguments)]
     fn convert_nary_function_raw(
         &mut self,
-        function: Option<&Expression>,
+        function: &Expression,
         params: &[FunctionParam],
         body: &Expression,
         async_: bool,
         directive: Option<String>,
         inline: InlineAttribute,
-        loc: LocIdx,
     ) -> RawLambda {
         let rb = self.b;
+        let loc = function.exp_loc;
         fn pattern_binds_value(ta: &TypedArena, pattern: &Pattern) -> bool {
             match &pattern.pat_desc {
                 PatternDesc::Tpat_var(_, _) | PatternDesc::Tpat_alias(_, _, _) => true,
@@ -6847,7 +6838,7 @@ impl<'a> RawLambdaConverter<'a> {
         // `transl_function`, from the function's own type in `e.exp_env`.
         let one_unit_arg = match params {
             [param] if !pattern_binds_value(self.ta, self.ta.pattern(param.fp_pat)) => {
-                function.is_some_and(|function| self.function_takes_one_unit_arg(function))
+                self.function_takes_one_unit_arg(function)
             }
             _ => false,
         };
@@ -6871,7 +6862,6 @@ impl<'a> RawLambdaConverter<'a> {
     /// the expanded function type takes one unlabelled argument whose
     /// expanded type is a `Pident` named `unit`.
     fn function_takes_one_unit_arg(&self, function: &Expression) -> bool {
-        use crate::types::asttypes::ArgLabel;
         use crate::types::type_expr::TypeDesc;
         let env = self.env_for_expr(function);
         let env = env.as_deref().unwrap_or(self.env);
@@ -7048,7 +7038,6 @@ impl<'a> RawLambdaConverter<'a> {
         uncurried_partial_application: Option<i32>,
         inlined: InlineAttribute,
     ) -> RawLambda {
-        let loc = loc;
         let rb = self.b;
         fn lapply(
             rb: &RawArena,
@@ -7075,7 +7064,6 @@ impl<'a> RawLambdaConverter<'a> {
         }
 
         fn build_apply(
-            rb: &RawArena,
             conv: &mut RawLambdaConverter<'_>,
             lam: RawLambda,
             mut args_rev: Vec<(RawLambda, bool)>,
@@ -7084,6 +7072,7 @@ impl<'a> RawLambdaConverter<'a> {
             transformed_jsx: bool,
             inlined: InlineAttribute,
         ) -> RawLambda {
+            let rb = conv.b;
             match pending.pop_front() {
                 Some((None, optional)) => {
                     let mut defs: Vec<(Ident, RawLambda)> = Vec::new();
@@ -7134,7 +7123,6 @@ impl<'a> RawLambdaConverter<'a> {
                     next_args_rev.push((rb.var(id_arg), optional));
                     next_args_rev.extend(remaining_args);
                     let inner = build_apply(
-                        rb,
                         conv,
                         handle,
                         next_args_rev,
@@ -7159,16 +7147,7 @@ impl<'a> RawLambdaConverter<'a> {
                 }
                 Some((Some(arg), optional)) => {
                     args_rev.insert(0, (arg, optional));
-                    build_apply(
-                        rb,
-                        conv,
-                        lam,
-                        args_rev,
-                        pending,
-                        loc,
-                        transformed_jsx,
-                        inlined,
-                    )
+                    build_apply(conv, lam, args_rev, pending, loc, transformed_jsx, inlined)
                 }
                 None => lapply(
                     rb,
@@ -7230,7 +7209,6 @@ impl<'a> RawLambdaConverter<'a> {
                     })
                     .collect::<Vec<_>>();
                 build_apply(
-                    rb,
                     self,
                     lam,
                     Vec::new(),
@@ -7389,6 +7367,7 @@ mod tests {
     }
 
     use super::*;
+    use crate::lambda::Lambda;
     use crate::types::typedtree::EnvRef;
 
     use crate::context::IdGenerator;

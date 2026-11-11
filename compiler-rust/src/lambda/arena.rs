@@ -41,6 +41,7 @@ macro_rules! handle {
         pub struct $name(u32);
 
         impl $name {
+            /// Position of this handle in its arena table.
             #[inline]
             pub fn index(self) -> usize {
                 self.0 as usize
@@ -61,13 +62,34 @@ handle!(
     /// An identifier in the arena's identifier table.
     IdentId
 );
-handle!(ConstId);
-handle!(PrimId);
-handle!(ApplyId);
-handle!(FuncId);
-handle!(SwitchId);
-handle!(StrSwitchId);
-handle!(CatchId);
+handle!(
+    /// A constant in the arena's constant table.
+    ConstId
+);
+handle!(
+    /// A primitive payload in the arena's primitive table.
+    PrimId
+);
+handle!(
+    /// An application payload in the arena's application table.
+    ApplyId
+);
+handle!(
+    /// A function header in the arena's function table.
+    FuncId
+);
+handle!(
+    /// A switch payload in the arena's switch table.
+    SwitchId
+);
+handle!(
+    /// A string-switch payload in the arena's string-switch table.
+    StrSwitchId
+);
+handle!(
+    /// A static-catch header in the arena's catch table.
+    CatchId
+);
 
 #[inline]
 fn checked_u32(n: usize) -> u32 {
@@ -82,9 +104,11 @@ pub struct IdentSpan {
 }
 
 impl IdentSpan {
+    /// Number of identifiers in the run.
     pub fn len(self) -> usize {
         self.len as usize
     }
+    /// Whether the run holds no identifiers.
     pub fn is_empty(self) -> bool {
         self.len == 0
     }
@@ -93,165 +117,258 @@ impl IdentSpan {
 /// Hot node. Fields are handles into the arena tables; see the module docs.
 #[derive(Debug, Clone, Copy)]
 pub enum Node {
+    /// `Lvar`: a variable reference.
     Var(IdentId),
+    /// `LglobalModule`: a reference to a global module.
     GlobalModule(IdentId),
+    /// `Lconst`: a constant.
     Const(ConstId),
+    /// `Lapply`: a function application.
     Apply {
+        /// The applied function.
         func: Lam,
+        /// The arguments.
         args: LamList,
+        /// Location, inline and uncurry information.
         info: ApplyId,
     },
+    /// `Lfunction`: a function definition.
     Function {
+        /// The function body.
         body: Lam,
+        /// Arity, parameters, attributes and location.
         info: FuncId,
     },
+    /// `Llet`: a non-recursive binding.
     Let {
+        /// How the binding may be inlined or eliminated.
         kind: LetKind,
+        /// The bound identifier.
         id: IdentId,
+        /// The bound value.
         value: Lam,
+        /// The scope of the binding.
         body: Lam,
     },
     /// `ids` starts a run of `values.len()` identifiers.
     LetRec {
+        /// The first of the binders.
         ids: IdentId,
+        /// The bound values, one per binder.
         values: LamList,
+        /// The scope of the bindings.
         body: Lam,
     },
+    /// `Lprim`: a primitive operation.
     Prim {
+        /// The operands.
         args: LamList,
+        /// The primitive and its location.
         info: PrimId,
     },
     /// `actions` holds the const actions, then the block actions, then the
     /// fail action if the payload has one.
     Switch {
+        /// The value switched on.
         scrut: Lam,
+        /// Case actions, laid out as described above.
         actions: LamList,
+        /// Case keys, fullness flags and dispatch.
         info: SwitchId,
     },
     /// `actions` holds one action per key, then the default if any.
     StringSwitch {
+        /// The string switched on.
         scrut: Lam,
+        /// Case actions, laid out as described above.
         actions: LamList,
+        /// Case keys and default presence.
         info: StrSwitchId,
     },
+    /// `LstaticRaise`: a jump to the handler of an enclosing static catch.
     StaticRaise {
+        /// The handler's label.
         label: i32,
+        /// Values for the handler's parameters.
         args: LamList,
     },
+    /// `LstaticCatch`: a body whose static raises jump to `handler`.
     StaticCatch {
+        /// The protected body.
         body: Lam,
+        /// The code run on a static raise to this label.
         handler: Lam,
+        /// The label and the handler's parameters.
         info: CatchId,
     },
+    /// `LtryWith`: exception handling.
     TryWith {
+        /// The protected body.
         body: Lam,
+        /// The identifier bound to the raised exception.
         id: IdentId,
+        /// The code run when the body raises.
         handler: Lam,
     },
+    /// `LifThenElse`.
     If {
+        /// The condition.
         cond: Lam,
+        /// The branch taken when the condition holds.
         then_: Lam,
+        /// The branch taken otherwise.
         else_: Lam,
     },
+    /// `Lsequence`: evaluate the first, then the second.
     Sequence(Lam, Lam),
+    /// `Lbreak`: leave the enclosing loop.
     Break,
+    /// `Lcontinue`: start the enclosing loop's next iteration.
     Continue,
+    /// `Lwhile`: condition and body.
     While(Lam, Lam),
     /// `kids` is `[start; finish; body]`.
     For {
+        /// Whether the loop counts up or down.
         dir: DirectionFlag,
+        /// The loop variable.
         id: IdentId,
+        /// Bounds and body, as described above.
         kids: LamList,
     },
+    /// `LforOf`: a `for...of` loop.
     ForOf {
+        /// The loop variable.
         id: IdentId,
+        /// The iterated value.
         iter: Lam,
+        /// The loop body.
         body: Lam,
     },
+    /// `LforAwaitOf`: a `for await...of` loop.
     ForAwaitOf {
+        /// The loop variable.
         id: IdentId,
+        /// The async iterated value.
         iter: Lam,
+        /// The loop body.
         body: Lam,
     },
+    /// `Lassign`: assignment to a mutable variable.
     Assign {
+        /// The assigned variable.
         id: IdentId,
+        /// The new value.
         value: Lam,
     },
 }
 
+/// Side-table payload of a [`Node::Prim`].
 #[derive(Debug, Clone)]
 pub struct PrimPayload {
+    /// The operation.
     pub primitive: Primitive,
+    /// Where the operation comes from in the source.
     pub loc: LamLoc,
 }
 
+/// Side-table payload of a [`Node::Apply`].
 #[derive(Debug, Clone)]
 pub struct ApplyPayload {
+    /// Location, inline and uncurry information.
     pub info: ApInfo,
+    /// Whether the application is a JSX call produced by the JSX transform.
     pub transformed_jsx: bool,
 }
 
+/// Side-table payload of a [`Node::Function`].
 #[derive(Debug, Clone)]
 pub struct FuncPayload {
+    /// The function's arity.
     pub arity: i32,
+    /// The parameters, in the identifier table.
     pub params: IdentSpan,
+    /// Inline, async and other function attributes.
     pub attr: FunctionAttribute,
+    /// Where the function is defined.
     pub loc: LamLoc,
 }
 
+/// Side-table payload of a [`Node::Switch`]: keys and flags; the actions live in the node.
 #[derive(Debug, Clone)]
 pub struct SwitchPayload {
+    /// Whether the constant cases cover every constant constructor.
     pub consts_full: bool,
+    /// Whether the block cases cover every block constructor.
     pub blocks_full: bool,
+    /// Whether the node's action list ends with a fail action.
     pub has_fail: bool,
     const_keys: (u32, u32),
     block_keys: (u32, u32),
+    /// How the runtime tells the cases apart.
     pub dispatch: SwitchDispatch,
 }
 
 impl SwitchPayload {
+    /// Number of constant cases.
     pub fn n_consts(&self) -> usize {
         self.const_keys.1 as usize
     }
+    /// Number of block cases.
     pub fn n_blocks(&self) -> usize {
         self.block_keys.1 as usize
     }
 }
 
+/// Side-table payload of a [`Node::StringSwitch`]: the case keys; the actions live in the node.
 #[derive(Debug, Clone, Copy)]
 pub struct StrSwitchPayload {
     keys: (u32, u32),
+    /// Whether the node's action list ends with a default action.
     pub has_default: bool,
 }
 
 impl StrSwitchPayload {
+    /// Number of cases, not counting the default.
     pub fn n_cases(&self) -> usize {
         self.keys.1 as usize
     }
 }
 
+/// Side-table payload of a [`Node::StaticCatch`].
 #[derive(Debug, Clone, Copy)]
 pub struct CatchPayload {
+    /// The label static raises jump to.
     pub label: i32,
+    /// The handler's parameters, in the identifier table.
     pub params: IdentSpan,
 }
 
 /// Decoded view of a switch node's actions.
 #[derive(Debug, Clone, Copy)]
 pub struct SwitchActions<'a> {
+    /// Actions of the constant cases, in key order.
     pub consts: &'a [Lam],
+    /// Actions of the block cases, in key order.
     pub blocks: &'a [Lam],
+    /// The action taken when no case matches.
     pub fail: Option<Lam>,
 }
 
 /// Owned description of a new switch, used when keys are not reused.
 #[derive(Debug, Clone)]
 pub struct SwitchSpec {
+    /// Whether the constant cases cover every constant constructor.
     pub consts_full: bool,
+    /// Constant case keys and their actions.
     pub consts: Vec<(SwitchKey, Lam)>,
+    /// Whether the block cases cover every block constructor.
     pub blocks_full: bool,
+    /// Block case keys and their actions.
     pub blocks: Vec<(SwitchKey, Lam)>,
+    /// The action taken when no case matches.
     pub fail: Option<Lam>,
+    /// How the runtime tells the cases apart.
     pub dispatch: SwitchDispatch,
 }
 
@@ -260,54 +377,89 @@ pub struct SwitchSpec {
 /// the arena is mutated.
 #[derive(Clone, Copy)]
 pub enum View<'a> {
+    /// See [`Node::Var`].
     Var(Ident),
+    /// See [`Node::GlobalModule`].
     GlobalModule(Ident),
+    /// See [`Node::Const`].
     Const(&'a Constant),
+    /// See [`Node::Apply`].
     Apply {
+        /// The applied function.
         func: Lam,
+        /// The arguments.
         args: &'a [Lam],
+        /// Location, inline and uncurry information.
         info: &'a ApInfo,
+        /// Whether the application is a JSX call produced by the JSX transform.
         transformed_jsx: bool,
     },
+    /// See [`Node::Function`].
     Function {
+        /// The parameters.
         params: &'a [Ident],
+        /// The function body.
         body: Lam,
+        /// Arity, attributes and location.
         func: &'a FuncPayload,
     },
+    /// See [`Node::Let`]: kind, binder, value, body.
     Let(LetKind, Ident, Lam, Lam),
+    /// See [`Node::LetRec`]: binders, values, body.
     LetRec(&'a [Ident], &'a [Lam], Lam),
+    /// See [`Node::Prim`]: primitive, operands, location.
     Prim(&'a Primitive, &'a [Lam], LamLoc),
+    /// See [`Node::Switch`]: scrutinee and cases.
     Switch(Lam, SwitchView<'a>),
+    /// See [`Node::StringSwitch`]: scrutinee and cases.
     StringSwitch(Lam, StrSwitchView<'a>),
+    /// See [`Node::StaticRaise`]: label and arguments.
     StaticRaise(i32, &'a [Lam]),
+    /// See [`Node::StaticCatch`]: body, label, handler parameters, handler.
     StaticCatch(Lam, i32, &'a [Ident], Lam),
+    /// See [`Node::TryWith`]: body, exception binder, handler.
     TryWith(Lam, Ident, Lam),
+    /// See [`Node::If`]: condition, then branch, else branch.
     If(Lam, Lam, Lam),
+    /// See [`Node::Sequence`].
     Sequence(Lam, Lam),
+    /// See [`Node::Break`].
     Break,
+    /// See [`Node::Continue`].
     Continue,
+    /// See [`Node::While`]: condition and body.
     While(Lam, Lam),
+    /// See [`Node::For`]: variable, start, finish, direction, body.
     For(Ident, Lam, Lam, DirectionFlag, Lam),
+    /// See [`Node::ForOf`]: variable, iterable, body.
     ForOf(Ident, Lam, Lam),
+    /// See [`Node::ForAwaitOf`]: variable, iterable, body.
     ForAwaitOf(Ident, Lam, Lam),
+    /// See [`Node::Assign`]: variable and value.
     Assign(Ident, Lam),
 }
 
 /// The keys and actions of a switch node.
 #[derive(Clone, Copy)]
 pub struct SwitchView<'a> {
+    /// Flags and dispatch of the switch.
     pub payload: &'a SwitchPayload,
+    /// Keys of the constant cases.
     pub const_keys: &'a [SwitchKey],
+    /// Keys of the block cases.
     pub block_keys: &'a [SwitchKey],
+    /// The case actions.
     pub actions: SwitchActions<'a>,
 }
 
 impl<'a> SwitchView<'a> {
+    /// The constant cases as (key, action) pairs.
     pub fn consts(&self) -> impl Iterator<Item = (&'a SwitchKey, Lam)> + 'a {
         self.const_keys
             .iter()
             .zip(self.actions.consts.iter().copied())
     }
+    /// The block cases as (key, action) pairs.
     pub fn blocks(&self) -> impl Iterator<Item = (&'a SwitchKey, Lam)> + 'a {
         self.block_keys
             .iter()
@@ -320,20 +472,26 @@ impl<'a> SwitchView<'a> {
 pub struct StrSwitchView<'a> {
     arena: &'a LamArena,
     info: StrSwitchId,
+    /// One action per case, in key order.
     pub actions: &'a [Lam],
+    /// The action taken when no key matches.
     pub default: Option<Lam>,
 }
 
 impl<'a> StrSwitchView<'a> {
+    /// Number of cases, not counting the default.
     pub fn len(&self) -> usize {
         self.actions.len()
     }
+    /// Whether the switch has no cases.
     pub fn is_empty(&self) -> bool {
         self.actions.is_empty()
     }
+    /// The key of case `i`.
     pub fn key(&self, i: usize) -> &'a str {
         self.arena.str_switch_key(self.info, i)
     }
+    /// The cases as (key, action) pairs.
     pub fn cases(&self) -> impl Iterator<Item = (&'a str, Lam)> + 'a {
         let (arena, info) = (self.arena, self.info);
         self.actions
@@ -343,6 +501,7 @@ impl<'a> StrSwitchView<'a> {
     }
 }
 
+/// Owner of every Lambda node of a compilation unit and of their side tables; see the module docs.
 #[derive(Clone)]
 pub struct LamArena {
     nodes: Vec<Node>,
@@ -365,7 +524,9 @@ pub struct LamArena {
 /// A program: an arena and the root of its term.
 #[derive(Clone)]
 pub struct LamProgram {
+    /// The arena holding the program's nodes.
     pub arena: LamArena,
+    /// The program's term.
     pub root: Lam,
 }
 
@@ -385,8 +546,10 @@ impl Default for LamArena {
 const _: () = assert!(std::mem::size_of::<Node>() == 16);
 
 impl LamArena {
+    /// The shared empty list.
     pub const EMPTY: LamList = LamList(0);
 
+    /// An empty arena.
     pub fn new() -> Self {
         Self::with_capacity(0)
     }
@@ -412,6 +575,7 @@ impl LamArena {
         }
     }
 
+    /// Number of nodes pushed so far, reachable or not.
     pub fn node_count(&self) -> usize {
         self.nodes.len()
     }
@@ -425,16 +589,19 @@ impl LamArena {
 
     // ---------------------------------------------------------------- reads
 
+    /// The node behind `lam`.
     #[inline]
     pub fn node(&self, lam: Lam) -> Node {
         self.nodes[lam.index()]
     }
 
+    /// The identifier behind `id`.
     #[inline]
     pub fn ident(&self, id: IdentId) -> Ident {
         self.idents[id.index()]
     }
 
+    /// The identifiers of `span`.
     #[inline]
     pub fn idents(&self, span: IdentSpan) -> &[Ident] {
         &self.idents[span.start as usize..(span.start + span.len) as usize]
@@ -446,6 +613,7 @@ impl LamArena {
         &self.idents[start.index()..start.index() + len]
     }
 
+    /// The elements of `list`.
     #[inline]
     pub fn list(&self, list: LamList) -> &[Lam] {
         let h = list.index();
@@ -453,51 +621,61 @@ impl LamArena {
         &self.pool[h + 1..h + 1 + len]
     }
 
+    /// Number of elements of `list`.
     #[inline]
     pub fn list_len(&self, list: LamList) -> usize {
         self.pool[list.index()].0 as usize
     }
 
+    /// The constant behind `id`.
     #[inline]
     pub fn constant(&self, id: ConstId) -> &Constant {
         &self.consts[id.index()]
     }
 
+    /// The primitive payload behind `id`.
     #[inline]
     pub fn prim_payload(&self, id: PrimId) -> &PrimPayload {
         &self.prims[id.index()]
     }
 
+    /// The application payload behind `id`.
     #[inline]
     pub fn apply_payload(&self, id: ApplyId) -> &ApplyPayload {
         &self.applies[id.index()]
     }
 
+    /// The function header behind `id`.
     #[inline]
     pub fn func_payload(&self, id: FuncId) -> &FuncPayload {
         &self.funcs[id.index()]
     }
 
+    /// The parameters of the function header `id`.
     #[inline]
     pub fn params(&self, id: FuncId) -> &[Ident] {
         self.idents(self.funcs[id.index()].params)
     }
 
+    /// The switch payload behind `id`.
     #[inline]
     pub fn switch_payload(&self, id: SwitchId) -> &SwitchPayload {
         &self.switches[id.index()]
     }
 
+    /// Keys of the constant cases of switch `id`.
     pub fn switch_const_keys(&self, id: SwitchId) -> &[SwitchKey] {
         let (s, l) = self.switches[id.index()].const_keys;
         &self.switch_keys[s as usize..(s + l) as usize]
     }
 
+    /// Keys of the block cases of switch `id`.
     pub fn switch_block_keys(&self, id: SwitchId) -> &[SwitchKey] {
         let (s, l) = self.switches[id.index()].block_keys;
         &self.switch_keys[s as usize..(s + l) as usize]
     }
 
+    /// Splits a switch node's `actions` into constant, block and fail actions.
     pub fn switch_actions(&self, info: SwitchId, actions: LamList) -> SwitchActions<'_> {
         let p = &self.switches[info.index()];
         let all = self.list(actions);
@@ -510,11 +688,13 @@ impl LamArena {
         }
     }
 
+    /// The string-switch payload behind `id`.
     #[inline]
     pub fn str_switch_payload(&self, id: StrSwitchId) -> StrSwitchPayload {
         self.str_switches[id.index()]
     }
 
+    /// The key of case `i` of string switch `id`.
     pub fn str_switch_key(&self, id: StrSwitchId, i: usize) -> &str {
         let (s, l) = self.str_switches[id.index()].keys;
         assert!(i < l as usize);
@@ -538,6 +718,7 @@ impl LamArena {
         )
     }
 
+    /// The static-catch header behind `id`.
     #[inline]
     pub fn catch_payload(&self, id: CatchId) -> CatchPayload {
         self.catches[id.index()]
@@ -644,6 +825,7 @@ impl LamArena {
 
     // ------------------------------------------------------- shape helpers
 
+    /// The identifier of a variable node.
     #[inline]
     pub fn as_var(&self, lam: Lam) -> Option<Ident> {
         match self.node(lam) {
@@ -652,6 +834,7 @@ impl LamArena {
         }
     }
 
+    /// The constant of a constant node.
     #[inline]
     pub fn as_const(&self, lam: Lam) -> Option<&Constant> {
         match self.node(lam) {
@@ -660,6 +843,7 @@ impl LamArena {
         }
     }
 
+    /// Whether `lam` is a constant node.
     #[inline]
     pub fn is_const(&self, lam: Lam) -> bool {
         matches!(self.node(lam), Node::Const(_))
@@ -677,6 +861,7 @@ impl LamArena {
         }
     }
 
+    /// Whether `lam` is the unit constant.
     pub fn is_unit(&self, lam: Lam) -> bool {
         matches!(
             self.as_const(lam),
@@ -686,6 +871,7 @@ impl LamArena {
 
     // ------------------------------------------------------ payload pushes
 
+    /// Appends `node` and returns its handle.
     #[inline]
     pub fn push(&mut self, node: Node) -> Lam {
         let id = Lam(checked_u32(self.nodes.len()));
@@ -693,6 +879,7 @@ impl LamArena {
         id
     }
 
+    /// Appends one identifier to the identifier table.
     #[inline]
     pub fn add_ident(&mut self, id: Ident) -> IdentId {
         let i = IdentId(checked_u32(self.idents.len()));
@@ -700,6 +887,7 @@ impl LamArena {
         i
     }
 
+    /// Appends `ids` as one contiguous run.
     pub fn add_idents(&mut self, ids: &[Ident]) -> IdentSpan {
         let start = checked_u32(self.idents.len());
         self.idents.extend_from_slice(ids);
@@ -709,6 +897,7 @@ impl LamArena {
         }
     }
 
+    /// Appends `ids` as one contiguous run.
     pub fn add_idents_iter(&mut self, ids: impl IntoIterator<Item = Ident>) -> IdentSpan {
         let start = self.idents.len();
         self.idents.extend(ids);
@@ -718,6 +907,7 @@ impl LamArena {
         }
     }
 
+    /// Appends `items` as one list; an empty slice gives [`Self::EMPTY`].
     pub fn add_list(&mut self, items: &[Lam]) -> LamList {
         if items.is_empty() {
             return Self::EMPTY;
@@ -728,6 +918,7 @@ impl LamArena {
         h
     }
 
+    /// Appends `items` as one list; an empty iterator gives [`Self::EMPTY`].
     pub fn add_list_iter(&mut self, items: impl IntoIterator<Item = Lam>) -> LamList {
         let h = self.pool.len();
         self.pool.push(Lam(0));
@@ -747,18 +938,21 @@ impl LamArena {
         smallvec::SmallVec::from_slice(self.list(list))
     }
 
+    /// Appends a constant payload.
     pub fn add_const(&mut self, c: Constant) -> ConstId {
         let i = ConstId(checked_u32(self.consts.len()));
         self.consts.push(c);
         i
     }
 
+    /// Appends a primitive payload.
     pub fn add_prim(&mut self, primitive: Primitive, loc: LamLoc) -> PrimId {
         let i = PrimId(checked_u32(self.prims.len()));
         self.prims.push(PrimPayload { primitive, loc });
         i
     }
 
+    /// Appends an application payload.
     pub fn add_apply(&mut self, info: ApInfo, transformed_jsx: bool) -> ApplyId {
         let i = ApplyId(checked_u32(self.applies.len()));
         self.applies.push(ApplyPayload {
@@ -768,6 +962,7 @@ impl LamArena {
         i
     }
 
+    /// Appends a function header.
     pub fn add_func(
         &mut self,
         arity: i32,
@@ -831,6 +1026,8 @@ impl LamArena {
         i
     }
 
+    /// Payload for a string switch with the given keys; actions are supplied by
+    /// the node.
     pub fn add_str_switch<'k>(
         &mut self,
         keys: impl IntoIterator<Item = &'k str>,
@@ -862,6 +1059,7 @@ impl LamArena {
         i
     }
 
+    /// Appends a static-catch header.
     pub fn add_catch(&mut self, label: i32, params: IdentSpan) -> CatchId {
         let i = CatchId(checked_u32(self.catches.len()));
         self.catches.push(CatchPayload { label, params });
@@ -870,33 +1068,40 @@ impl LamArena {
 
     // ------------------------------------------------- plain constructors
 
+    /// A variable reference.
     pub fn var(&mut self, id: Ident) -> Lam {
         let id = self.add_ident(id);
         self.push(Node::Var(id))
     }
 
+    /// A global module reference.
     pub fn global_module(&mut self, id: Ident) -> Lam {
         let id = self.add_ident(id);
         self.push(Node::GlobalModule(id))
     }
 
+    /// A constant.
     pub fn const_(&mut self, c: Constant) -> Lam {
         let c = self.add_const(c);
         self.push(Node::Const(c))
     }
 
+    /// The `true` constant.
     pub fn true_(&mut self) -> Lam {
         self.const_(Constant::JsTrue)
     }
 
+    /// The `false` constant.
     pub fn false_(&mut self) -> Lam {
         self.const_(Constant::JsFalse)
     }
 
+    /// The unit constant.
     pub fn unit(&mut self) -> Lam {
         self.const_(Constant::JsUndefined { is_unit: true })
     }
 
+    /// A function definition.
     pub fn function_(
         &mut self,
         arity: i32,
@@ -915,6 +1120,7 @@ impl LamArena {
         self.push(Node::Function { body, info })
     }
 
+    /// A `let` binding.
     pub fn let_(&mut self, kind: LetKind, id: Ident, value: Lam, body: Lam) -> Lam {
         let id = self.add_ident(id);
         self.push(Node::Let {
@@ -925,6 +1131,7 @@ impl LamArena {
         })
     }
 
+    /// A `let` binding whose binder is already in the identifier table.
     pub fn let_with(&mut self, kind: LetKind, id: IdentId, value: Lam, body: Lam) -> Lam {
         self.push(Node::Let {
             kind,
@@ -934,6 +1141,7 @@ impl LamArena {
         })
     }
 
+    /// A `let rec` group.
     pub fn letrec(&mut self, bindings: &[(Ident, Lam)], body: Lam) -> Lam {
         let ids = self.add_idents_iter(bindings.iter().map(|(id, _)| *id));
         let values = self.add_list_iter(bindings.iter().map(|(_, v)| *v));
@@ -944,6 +1152,7 @@ impl LamArena {
         })
     }
 
+    /// A `let rec` group from an existing binder run and value list.
     pub fn letrec_with(&mut self, ids: IdentId, values: LamList, body: Lam) -> Lam {
         self.push(Node::LetRec { ids, values, body })
     }
@@ -955,20 +1164,24 @@ impl LamArena {
         self.push(Node::Prim { args, info })
     }
 
+    /// `Lprim` reusing an existing primitive payload, without constant folding.
     pub fn prim_raw_with(&mut self, info: PrimId, args: LamList) -> Lam {
         self.push(Node::Prim { args, info })
     }
 
+    /// `Lapply` without the simplifications of [`Self::apply`].
     pub fn apply_raw(&mut self, func: Lam, args: &[Lam], info: ApInfo, jsx: bool) -> Lam {
         let info = self.add_apply(info, jsx);
         let args = self.add_list(args);
         self.push(Node::Apply { func, args, info })
     }
 
+    /// `Lapply` reusing existing arguments and application payload.
     pub fn apply_raw_with(&mut self, func: Lam, args: LamList, info: ApplyId) -> Lam {
         self.push(Node::Apply { func, args, info })
     }
 
+    /// A switch node from existing actions and payload.
     pub fn switch_raw(&mut self, scrut: Lam, actions: LamList, info: SwitchId) -> Lam {
         self.push(Node::Switch {
             scrut,
@@ -977,6 +1190,7 @@ impl LamArena {
         })
     }
 
+    /// A string-switch node from existing actions and payload.
     pub fn string_switch_raw(&mut self, scrut: Lam, actions: LamList, info: StrSwitchId) -> Lam {
         self.push(Node::StringSwitch {
             scrut,
@@ -985,15 +1199,18 @@ impl LamArena {
         })
     }
 
+    /// A static raise to `label`.
     pub fn static_raise(&mut self, label: i32, args: &[Lam]) -> Lam {
         let args = self.add_list(args);
         self.push(Node::StaticRaise { label, args })
     }
 
+    /// A static raise to `label` with an existing argument list.
     pub fn static_raise_with(&mut self, label: i32, args: LamList) -> Lam {
         self.push(Node::StaticRaise { label, args })
     }
 
+    /// A static catch of `label` around `body`.
     pub fn static_catch(&mut self, body: Lam, label: i32, params: &[Ident], handler: Lam) -> Lam {
         let params = self.add_idents(params);
         let info = self.add_catch(label, params);
@@ -1004,6 +1221,7 @@ impl LamArena {
         })
     }
 
+    /// A static catch reusing an existing header.
     pub fn static_catch_with(&mut self, body: Lam, info: CatchId, handler: Lam) -> Lam {
         self.push(Node::StaticCatch {
             body,
@@ -1012,35 +1230,43 @@ impl LamArena {
         })
     }
 
+    /// A `try` around `body`, binding the exception to `exn` in `handler`.
     pub fn try_(&mut self, body: Lam, exn: Ident, handler: Lam) -> Lam {
         let id = self.add_ident(exn);
         self.push(Node::TryWith { body, id, handler })
     }
 
+    /// A `try` whose exception binder is already in the identifier table.
     pub fn try_with(&mut self, body: Lam, id: IdentId, handler: Lam) -> Lam {
         self.push(Node::TryWith { body, id, handler })
     }
 
+    /// An `if` without the simplifications of [`Self::if_`].
     pub fn if_raw(&mut self, cond: Lam, then_: Lam, else_: Lam) -> Lam {
         self.push(Node::If { cond, then_, else_ })
     }
 
+    /// A sequence without the simplifications of [`Self::seq`].
     pub fn seq_raw(&mut self, first: Lam, second: Lam) -> Lam {
         self.push(Node::Sequence(first, second))
     }
 
+    /// A `break`.
     pub fn break_(&mut self) -> Lam {
         self.push(Node::Break)
     }
 
+    /// A `continue`.
     pub fn continue_(&mut self) -> Lam {
         self.push(Node::Continue)
     }
 
+    /// A `while` loop.
     pub fn while_(&mut self, cond: Lam, body: Lam) -> Lam {
         self.push(Node::While(cond, body))
     }
 
+    /// A counted `for` loop.
     pub fn for_(
         &mut self,
         var: Ident,
@@ -1053,6 +1279,7 @@ impl LamArena {
         self.for_with(id, start, finish, dir, body)
     }
 
+    /// A counted `for` loop whose variable is already in the identifier table.
     pub fn for_with(
         &mut self,
         id: IdentId,
@@ -1065,21 +1292,25 @@ impl LamArena {
         self.push(Node::For { dir, id, kids })
     }
 
+    /// A `for...of` loop.
     pub fn for_of(&mut self, var: Ident, iter: Lam, body: Lam) -> Lam {
         let id = self.add_ident(var);
         self.push(Node::ForOf { id, iter, body })
     }
 
+    /// A `for await...of` loop.
     pub fn for_await_of(&mut self, var: Ident, iter: Lam, body: Lam) -> Lam {
         let id = self.add_ident(var);
         self.push(Node::ForAwaitOf { id, iter, body })
     }
 
+    /// An assignment to a mutable variable.
     pub fn assign(&mut self, var: Ident, value: Lam) -> Lam {
         let id = self.add_ident(var);
         self.push(Node::Assign { id, value })
     }
 
+    /// An assignment whose variable is already in the identifier table.
     pub fn assign_with(&mut self, id: IdentId, value: Lam) -> Lam {
         self.push(Node::Assign { id, value })
     }
@@ -2256,12 +2487,12 @@ impl LamArena {
                 let body = self.import(body);
                 self.for_(*id, start, finish, *dir, body)
             }
-            Lambda::Lfor_of(id, iter, body) => {
+            Lambda::LforOf(id, iter, body) => {
                 let iter = self.import(iter);
                 let body = self.import(body);
                 self.for_of(*id, iter, body)
             }
-            Lambda::Lfor_await_of(id, iter, body) => {
+            Lambda::LforAwaitOf(id, iter, body) => {
                 let iter = self.import(iter);
                 let body = self.import(body);
                 self.for_await_of(*id, iter, body)
@@ -2428,12 +2659,12 @@ impl LamArena {
                     Box::new(self.export(*b)),
                 )
             }
-            Node::ForOf { id, iter, body } => Lambda::Lfor_of(
+            Node::ForOf { id, iter, body } => Lambda::LforOf(
                 self.ident(id),
                 Box::new(self.export(iter)),
                 Box::new(self.export(body)),
             ),
-            Node::ForAwaitOf { id, iter, body } => Lambda::Lfor_await_of(
+            Node::ForAwaitOf { id, iter, body } => Lambda::LforAwaitOf(
                 self.ident(id),
                 Box::new(self.export(iter)),
                 Box::new(self.export(body)),

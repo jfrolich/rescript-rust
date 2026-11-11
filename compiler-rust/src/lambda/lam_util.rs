@@ -128,7 +128,7 @@ pub fn field_flatten_get(
         // lam_util.ml:204-207.
         Some(IdKind::Module(g)) => {
             let g = a.global_module(*g);
-            a.prim(Primitive::Pfield(i, info.clone()), &[g], LamLoc::NONE)
+            a.prim(Primitive::Pfield(i, *info), &[g], LamLoc::NONE)
         }
         // lam_util.ml:208-213.
         Some(IdKind::ImmutableBlock(arr)) => match arr.get(i as usize) {

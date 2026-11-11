@@ -5,7 +5,7 @@
 //!
 //! [`convert`] translates the typedtree into [`RawLambda`] (using
 //! [`matching`] for pattern matching and [`switch`] for integer switches),
-//! [`print`] renders it for `-drawlambda`, and [`lower`] turns it into the
+//! [`mod@print`] renders it for `-drawlambda`, and [`lower`] turns it into the
 //! lowered [`crate::lambda`] IR that the optimization passes and JS
 //! generation consume.
 
@@ -73,6 +73,7 @@ impl Default for RawArena {
 }
 
 impl RawArena {
+    /// An empty arena.
     pub fn new() -> Self {
         Self::with_capacity(1024)
     }
@@ -84,6 +85,7 @@ impl RawArena {
         Self::with_capacity(exprs * 5 / 2 + 16)
     }
 
+    /// An empty arena pre-sized for about `nodes` nodes.
     pub fn with_capacity(nodes: usize) -> Self {
         Self {
             a: RefCell::new(LamArena::with_capacity(nodes)),
@@ -114,15 +116,18 @@ impl RawArena {
 
     // ------------------------------------------------------------ reads
 
+    /// The node behind `lam`.
     #[inline]
     pub fn node(&self, lam: RawLambda) -> Node {
         self.a.borrow().node(lam)
     }
 
+    /// The identifier of a variable node.
     pub fn as_var(&self, lam: RawLambda) -> Option<Ident> {
         self.a.borrow().as_var(lam)
     }
 
+    /// Whether `lam` is a constant node.
     pub fn is_const(&self, lam: RawLambda) -> bool {
         self.a.borrow().is_const(lam)
     }
@@ -494,23 +499,20 @@ impl RawArena {
 /// `Lambda.has_boolean_type` (`compiler/ml/lambda.ml:1137-1147`).
 fn raw_has_boolean_type(a: &LamArena, lam: RawLambda) -> Option<LamLoc> {
     match a.view(lam) {
-        View::Prim(primitive, _, loc)
-            if matches!(
-                primitive,
-                Primitive::Pnot
-                    | Primitive::Psequand
-                    | Primitive::Psequor
-                    | Primitive::PisNotNone
-                    | Primitive::Pobjcomp(_)
-                    | Primitive::Pboolcomp(_)
-                    | Primitive::Pintcomp(_)
-                    | Primitive::Pfloatcomp(_)
-                    | Primitive::Pbigintcomp(_)
-                    | Primitive::Pstringcomp(_)
-            ) =>
-        {
-            Some(loc)
-        }
+        View::Prim(
+            Primitive::Pnot
+            | Primitive::Psequand
+            | Primitive::Psequor
+            | Primitive::PisNotNone
+            | Primitive::Pobjcomp(_)
+            | Primitive::Pboolcomp(_)
+            | Primitive::Pintcomp(_)
+            | Primitive::Pfloatcomp(_)
+            | Primitive::Pbigintcomp(_)
+            | Primitive::Pstringcomp(_),
+            _,
+            loc,
+        ) => Some(loc),
         _ => None,
     }
 }

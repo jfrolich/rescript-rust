@@ -3,7 +3,6 @@
 //! This module provides S-expression output for Lambda IR that matches
 //! the OCaml compiler's output, enabling parity testing between implementations.
 
-use crate::lambda::LamLoc;
 use std::io::Write;
 
 use crate::lambda::lam_compat::{Comparison, FieldDbgInfo, LetKind, SetFieldDbgInfo};
@@ -18,15 +17,19 @@ use crate::parser::ast::MutableFlag;
 
 /// Simple S-expression type for output.
 pub enum Sexp {
+    /// An atom, printed as is.
     Atom(String),
+    /// A parenthesized list.
     List(Vec<Sexp>),
 }
 
 impl Sexp {
+    /// An atom.
     pub fn atom(s: impl Into<String>) -> Self {
         Sexp::Atom(s.into())
     }
 
+    /// A list.
     pub fn list(items: Vec<Sexp>) -> Self {
         Sexp::List(items)
     }
@@ -723,8 +726,8 @@ fn lambda(lam: &Lambda, with_locs: bool) -> Sexp {
         ]),
         // OCaml compiler/core/sexp_lambda.ml:483-486 intentionally prints
         // these loop-control nodes as constructor-only sexps.
-        Lambda::Lfor_of(..) => Sexp::list(vec![Sexp::atom("Lfor_of")]),
-        Lambda::Lfor_await_of(..) => Sexp::list(vec![Sexp::atom("Lfor_await_of")]),
+        Lambda::LforOf(..) => Sexp::list(vec![Sexp::atom("Lfor_of")]),
+        Lambda::LforAwaitOf(..) => Sexp::list(vec![Sexp::atom("Lfor_await_of")]),
         Lambda::Lbreak => Sexp::list(vec![Sexp::atom("Lbreak")]),
         Lambda::Lcontinue => Sexp::list(vec![Sexp::atom("Lcontinue")]),
         Lambda::Lassign(var, value) => Sexp::list(vec![
@@ -801,7 +804,6 @@ pub fn print_lambda_with_locs(lam: &Lambda, out: &mut impl Write) -> std::io::Re
 #[cfg(test)]
 mod tests {
     use super::{Sexp, constant, escape_ocaml_string, switch_key};
-    use crate::lambda::LamLoc;
     use crate::lambda::lam_constant::Constant;
 
     #[test]

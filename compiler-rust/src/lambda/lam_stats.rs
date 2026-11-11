@@ -15,36 +15,54 @@ use crate::lambda::lam_compile_context::{BoxedNullable, ExternalArityTable, RecF
 /// `Lam_id_kind.element`.
 #[derive(Debug, Clone, Copy)]
 pub enum Element {
+    /// Nothing is known about the element.
     Na,
+    /// The element is this simple expression.
     SimpleForm(Lam),
 }
 
 /// `Lam_id_kind.t`.
 #[derive(Debug, Clone, Default)]
 pub enum IdKind {
+    /// An optional value with this payload.
     NormalOptional(Lam),
+    /// An optional block with this payload and nullable kind.
     OptionalBlock(Lam, BoxedNullable),
+    /// An immutable block with these elements.
     ImmutableBlock(Vec<Element>),
+    /// A mutable block with these elements.
     MutableBlock(Vec<Element>),
+    /// A constant.
     Constant(ConstId),
+    /// A module.
     Module(Ident),
+    /// A function.
     FunctionId {
+        /// The function's arity.
         arity: Arity,
+        /// The function's definition and whether it is recursive, when known.
         lambda: Option<(Lam, RecFlag)>,
     },
+    /// An exception.
     Exception,
+    /// A function parameter.
     Parameter,
+    /// Nothing is known.
     #[default]
     Na,
 }
 
+/// What is known about each identifier, by identifier.
 pub type IdentTable = HashMap<Ident, IdKind>;
 
 /// `Lam_stats.t`.
 #[derive(Debug, Clone)]
 pub struct LamStats {
+    /// The exported identifiers, as a set.
     pub export_idents: HashSet<Ident>,
+    /// The exported identifiers, in export order.
     pub exports: Vec<Ident>,
+    /// What is known about each identifier.
     pub ident_tbl: IdentTable,
     /// `Lam_compile_env.query_external_id_info` answers already fetched,
     /// per module and field.
@@ -55,6 +73,7 @@ pub struct LamStats {
 }
 
 impl LamStats {
+    /// Metadata for a module exporting `exports`, with nothing known yet.
     pub fn new(exports: Vec<Ident>) -> Self {
         let export_idents: HashSet<Ident> = exports.iter().cloned().collect();
         Self {
@@ -66,6 +85,7 @@ impl LamStats {
         }
     }
 
+    /// Whether `id` is exported.
     pub fn is_export(&self, id: &Ident) -> bool {
         self.export_idents.contains(id)
     }

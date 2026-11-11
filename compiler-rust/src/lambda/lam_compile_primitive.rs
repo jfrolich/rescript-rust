@@ -833,11 +833,7 @@ impl LambdaCompiler {
         // the RHS is the integer literal 0, so compare(x, y) > 0 lowers to x > y.
         if int_literal(&self.j, right) == Some(0) {
             if let Some((compare_left, compare_right)) = runtime_compare_call_args(&self.j, left) {
-                return self.compile_int_comparison(
-                    cmp,
-                    compare_left.clone(),
-                    compare_right.clone(),
-                );
+                return self.compile_int_comparison(cmp, compare_left, compare_right);
             }
         }
 

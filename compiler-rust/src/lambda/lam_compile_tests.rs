@@ -144,44 +144,6 @@ pub(super) fn external_module(bundle: &str) -> ExternalModuleName {
     }
 }
 
-fn external_module_with_attrs(
-    bundle: &str,
-    hint: &str,
-    attrs: &[(&str, &str)],
-) -> ExternalModuleName {
-    ExternalModuleName {
-        bundle: bundle.to_string(),
-        module_bind_name: ModuleBindName::PhintName(hint.to_string()),
-        import_attributes: Some(
-            attrs
-                .iter()
-                .map(|(key, value)| (key.to_string(), value.to_string()))
-                .collect(),
-        ),
-    }
-}
-
-fn js_var_external(name: &str, external_module_name: Option<ExternalModuleName>) -> Lambda {
-    Lambda::prim(
-        Primitive::PjsCall(Box::new(crate::lambda::lam_primitive::JsCall {
-            prim_name: name.to_string(),
-            arg_types: vec![],
-            ffi: ExternalDecl {
-                kind: DeclKind::DeclVal {
-                    name: name.to_string(),
-                },
-                module_: external_module_name.map(ModuleSource::ModuleNamed),
-                scopes: vec![],
-                variadic: false,
-                effective_arity: 0,
-            },
-            transformed_jsx: false,
-        })),
-        vec![],
-        LamLoc::NONE,
-    )
-}
-
 fn test_apply_info() -> ApInfo {
     ApInfo {
         loc: LamLoc::NONE,
@@ -320,107 +282,6 @@ fn recursive_binding_groups_share_dependency_vector_like_ocaml() {
         recursive_group_names(&bindings),
         vec![vec!["timerExpired".to_string(), "call".to_string()]]
     );
-}
-
-fn console_log_effect(arg: Lambda) -> Lambda {
-    Lambda::seq(
-        Lambda::prim(
-            Primitive::PjsCall(Box::new(crate::lambda::lam_primitive::JsCall {
-                prim_name: "console.log".to_string(),
-                arg_types: vec![],
-                ffi: crate::lambda::lam_primitive::ExternalDecl::test_val("", 0),
-                transformed_jsx: false,
-            })),
-            vec![arg],
-            LamLoc::NONE,
-        ),
-        Lambda::const_(Constant::JsUndefined { is_unit: true }),
-    )
-}
-
-pub(super) fn import_attributes_lowered_lambda() -> Lambda {
-    let include_json = Ident::create_local("include");
-    let my_json = Ident::create_local("myJson");
-    let include_css = Ident::create_local("include");
-    let button_css = Ident::create_local("buttonCss");
-
-    let json_module = external_module_with_attrs(
-        "./myJson.json",
-        "MyJsonJson",
-        &[("type", "json"), ("some-identifier", "yep")],
-    );
-    let css_module = external_module_with_attrs(
-        "./myCss.css",
-        "MyCssCss",
-        &[("type", "css"), ("some-identifier", "yep")],
-    );
-
-    Lambda::let_(
-        LetKind::Strict,
-        include_json,
-        Lambda::prim(
-            Primitive::Pmakeblock(
-                TagInfo::Module(vec!["myJson".to_string()]),
-                Mutable::Immutable,
-            ),
-            vec![js_var_external("default", Some(json_module))],
-            LamLoc::NONE,
-        ),
-        Lambda::let_(
-            LetKind::Alias,
-            my_json,
-            Lambda::prim(
-                Primitive::Pfield(
-                    0,
-                    FieldDbgInfo::Module {
-                        name: crate::name::Name::new("myJson"),
-                    },
-                ),
-                vec![Lambda::var(include_json)],
-                LamLoc::NONE,
-            ),
-            Lambda::seq(
-                console_log_effect(Lambda::var(my_json)),
-                Lambda::let_(
-                    LetKind::Strict,
-                    include_css,
-                    Lambda::prim(
-                        Primitive::Pmakeblock(
-                            TagInfo::Module(vec!["buttonCss".to_string()]),
-                            Mutable::Immutable,
-                        ),
-                        vec![js_var_external("button", Some(css_module))],
-                        LamLoc::NONE,
-                    ),
-                    Lambda::let_(
-                        LetKind::Alias,
-                        button_css,
-                        Lambda::prim(
-                            Primitive::Pfield(
-                                0,
-                                FieldDbgInfo::Module {
-                                    name: crate::name::Name::new("buttonCss"),
-                                },
-                            ),
-                            vec![Lambda::var(include_css)],
-                            LamLoc::NONE,
-                        ),
-                        Lambda::seq(
-                            console_log_effect(Lambda::var(button_css)),
-                            Lambda::prim(
-                                Primitive::Pmakeblock(
-                                    TagInfo::ModuleExport(vec![my_json, button_css]),
-                                    Mutable::Immutable,
-                                ),
-                                vec![Lambda::var(my_json), Lambda::var(button_css)],
-                                LamLoc::NONE,
-                            ),
-                        ),
-                    ),
-                ),
-            ),
-        ),
-    )
 }
 
 pub(super) fn resolver_with_checked_in_cmj() -> ModulePathResolver {
@@ -1238,7 +1099,7 @@ fn compile_effectful_underscore_binding_from_nested_js_function_calls_survives_s
             ap_func: Box::new(outer_value),
             ap_args: vec![starj_empty.clone()],
             ap_info: ApInfo {
-                loc: loc,
+                loc,
                 inlined: InlineAttribute::Default,
                 status: ApplyStatus::Uncurry,
             },
@@ -1246,7 +1107,7 @@ fn compile_effectful_underscore_binding_from_nested_js_function_calls_survives_s
         }))),
         ap_args: vec![starj_empty],
         ap_info: ApInfo {
-            loc: loc,
+            loc,
             inlined: InlineAttribute::Default,
             status: ApplyStatus::Uncurry,
         },
@@ -3137,59 +2998,6 @@ fn if_expression_result_temp_uses_tmp_name_like_ocaml() {
     expect_dump!(dump::expr(&compiler.j, compiled.expr), "tmp");
 }
 
-pub(super) fn mixed_untagged_string_overlap_switch(
-    space_body: Lambda,
-    default_body: Lambda,
-) -> LambdaSwitch {
-    LambdaSwitch {
-        sw_consts_full: false,
-        sw_consts: vec![
-            (
-                crate::lambda::SwitchKey::Constructor(
-                    crate::types::VariantConstructorCase::Constant(crate::types::VariantTag {
-                        name: crate::name::Name::new("a"),
-                        literal: Some(crate::types::VariantLiteralTag::String("a".to_string())),
-                    }),
-                ),
-                default_body.clone(),
-            ),
-            (
-                crate::lambda::SwitchKey::Constructor(
-                    crate::types::VariantConstructorCase::Constant(crate::types::VariantTag {
-                        name: crate::name::Name::new("b"),
-                        literal: Some(crate::types::VariantLiteralTag::String("b".to_string())),
-                    }),
-                ),
-                default_body.clone(),
-            ),
-            (
-                crate::lambda::SwitchKey::Constructor(
-                    crate::types::VariantConstructorCase::Constant(crate::types::VariantTag {
-                        name: crate::name::Name::new("space"),
-                        literal: Some(crate::types::VariantLiteralTag::String("space".to_string())),
-                    }),
-                ),
-                space_body,
-            ),
-        ],
-        sw_blocks_full: false,
-        sw_blocks: vec![],
-        sw_failaction: Some(Box::new(default_body)),
-        sw_dispatch: crate::lambda::SwitchDispatch::Variant(crate::types::VariantMatchingFacts {
-            tag_name: None,
-            block_types: vec![crate::types::VariantBlockType::String],
-            literal_tags: vec![
-                crate::types::VariantLiteralTag::String("space".to_string()),
-                crate::types::VariantLiteralTag::String("b".to_string()),
-                crate::types::VariantLiteralTag::String("a".to_string()),
-            ],
-            has_null: false,
-            has_undefined: false,
-            has_other_literal: true,
-        }),
-    }
-}
-
 pub(super) fn single_complete_array_block_switch(
     array_body: Lambda,
     undefined_body: Lambda,
@@ -3442,7 +3250,7 @@ fn nested_app_na_calls_reassociate_through_lam_apply_for_ari_regress_shape() {
                         Lambda::const_(Constant::int(5)),
                     ],
                     ap_info: ApInfo {
-                        loc: loc,
+                        loc,
                         inlined: InlineAttribute::Default,
                         status: ApplyStatus::Na,
                     },
@@ -3450,7 +3258,7 @@ fn nested_app_na_calls_reassociate_through_lam_apply_for_ari_regress_shape() {
                 }))),
                 ap_args: vec![Lambda::const_(Constant::int(6))],
                 ap_info: ApInfo {
-                    loc: loc,
+                    loc,
                     inlined: InlineAttribute::Default,
                     status: ApplyStatus::Na,
                 },
@@ -3541,7 +3349,7 @@ fn nested_app_na_calls_reassociate_multi_arg_returned_functions_for_test_demo_sh
                             Lambda::const_(Constant::int(4)),
                         ],
                         ap_info: ApInfo {
-                            loc: loc,
+                            loc,
                             inlined: InlineAttribute::Default,
                             status: ApplyStatus::Na,
                         },
@@ -3549,7 +3357,7 @@ fn nested_app_na_calls_reassociate_multi_arg_returned_functions_for_test_demo_sh
                     }))),
                     ap_args: vec![Lambda::const_(Constant::int(6)), Lambda::var(extra)],
                     ap_info: ApInfo {
-                        loc: loc,
+                        loc,
                         inlined: InlineAttribute::Default,
                         status: ApplyStatus::Na,
                     },
