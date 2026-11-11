@@ -55,7 +55,7 @@ code, read the matching OCaml source first.
 | Main implementation driver | `compiler/core/js_implementation.ml` | `src/driver.rs` | OCaml `implementation` parses, applies external PPX, runs `Ppx_entry`, then `after_parsing_impl`. Rust direct source mode follows the same broad stage order in `compile_source_to_js_with_options`, with external-PPX caveats documented below. |
 | Interface driver | `compiler/core/js_implementation.ml`, `compiler/ml/typemod.ml` | `src/driver.rs` | OCaml interfaces parse as signatures, run signature PPX/config/warnings, typecheck, self-check, force delayed checks, and write `.cmi`/`.cmti`. Rust in-process mode publishes a registry signature; direct Rust helpers currently typecheck/dump but do not write OCaml-compatible interface artifacts. |
 | ReScript syntax parser | `compiler/syntax/`, `compiler/ml/parsetree.ml` | `src/parser/*`, `src/parse_arena.rs` | Rust parser uses arena indices instead of OCaml heap records, but output shape and locations must match. |
-| Frozen PPX AST boundary | `compiler/ml/parsetree0.ml`, `ast_mapper_to0.ml`, `ast_mapper_from0.ml`, `binary_ast.ml` | `src/binary_ast/parsetree0.rs`, `mapper_to0.rs`, `mapper_from0.rs`, `writer.rs`, `marshal.rs` | `parsetree0` is a compatibility wire format. Do not evolve it for new syntax. |
+| Former PPX AST boundary | `compiler/ml/parsetree0.ml`, `ast_mapper_to0.ml`, `ast_mapper_from0.ml`, `binary_ast.ml` | `src/binary_ast/parsetree0.rs`, `mapper_to0.rs`, `mapper_from0.rs`, `writer.rs`, `marshal.rs` | PPX is not supported going forward; `parsetree0` is not frozen and not compared with OCaml. |
 | Frontend and PPX rewrites | `compiler/frontend/*`, `compiler/core/cmd_ppx_apply.ml`, `compiler/frontend/ppx_entry.ml`, `compiler/frontend/ast_config.ml` | `src/binary_ast/ppx.rs`, `src/parser/jsx_ppx.rs`, `src/driver.rs`, `rewatch/src/build/parse.rs` | Order is observable through warnings, errors, AST dumps, and generated code. Rust has several mode-specific caveats listed below. |
 | Initial environment | `compiler/core/res_compmisc.ml`, `compiler/ml/env.ml` | `src/types/predef.rs`, `src/types/env.rs`, `src/cmi/persistent_env.rs`, `src/driver.rs` | Pervasives/Stdlib loading and implicit opens must preserve OCaml lookup and force order. |
 | Persistent environment | `compiler/ml/env.ml`, `compiler/ml/cmi_format.ml`, `compiler/ml/cmi_format.mli`, `compiler/core/js_cmj_format.ml` | `src/cmi/persistent_env.rs`, `src/cmi/cmi_format.rs`, `src/cmi/sig_reader.rs`, `src/cmi/portable_types.rs` | Rust reads OCaml `.cmi`/`.cmj` data and has an in-memory registry mode. Disk writing of `.cmi`/`.cmj` is not currently equivalent to OCaml. |
@@ -409,7 +409,7 @@ Important files:
 Binary AST algorithm:
 
 1. Walk the current parsetree and extract a dependency section.
-2. Map the current parsetree to frozen `parsetree0` when writing the PPX wire
+2. Map the current parsetree to `parsetree0` when writing the PPX wire
    format.
 3. Serialize the dependency section and OCaml marshal-compatible AST payload.
 4. In subprocess mode, rewatch or the compiler can write `.ast`/`.iast` files
@@ -428,11 +428,10 @@ Dependency extraction algorithm:
 
 OCaml reference alignment:
 
-- `parsetree0` corresponds to the frozen OCaml/ReScript PPX boundary. New syntax
-  should change the current parsetree and mapper modules, not mutate
-  `parsetree0`.
-- OCaml marshal compatibility is required because external PPX tools are outside
-  the Rust compiler.
+- PPX is not supported going forward, so `parsetree0` is no longer a frozen
+  boundary and its bytes are not compared with OCaml. External `-ppx` flags and
+  the builtin Spice mapper still round-trip through it, so new syntax must
+  survive the mappers; changing `parsetree0` is allowed.
 
 Rust-specific diversion:
 

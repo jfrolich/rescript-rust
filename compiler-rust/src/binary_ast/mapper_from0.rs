@@ -3480,9 +3480,8 @@ enum DictEntry0<'e> {
 
 #[cfg(test)]
 mod tests {
-    //! The v0 encoding of literals with spreads, as
-    //! tests/ounit_tests/ounit_ast_mapper0_tests.ml
-    //! `test_spread_literal_through_ast0` checks it for the OCaml mapper.
+    //! Round trips through the v0 form, which external `-ppx` flags and the
+    //! builtin Spice mapper still take.
 
     use super::*;
     use crate::location::{Located as OldLocated, Location, Position};
@@ -3556,8 +3555,7 @@ mod tests {
         }
     }
 
-    /// ounit_ast_mapper0_tests.ml `test_template_locations_roundtrip_through_ast0`:
-    /// templates come back as they were parsed, locations included.
+    /// Templates come back as they were parsed, locations included.
     #[test]
     fn template_locations_roundtrip_through_ast0() {
         let source = "let a = `template`
@@ -3950,8 +3948,7 @@ let f = ``
         assert_eq!(decode(&mut arena, e), None);
     }
 
-    /// ounit_ast_mapper0_tests.ml `test_todo_roundtrips_through_ast0`: a
-    /// `%todo` without payload, with a string literal or with a template
+    /// A `%todo` without payload, with a string literal or with a template
     /// without interpolations is a todo node; any other payload stays an
     /// extension. On the v0 wire a todo node is the extension it is written
     /// as, and it comes back as parsed, locations included.

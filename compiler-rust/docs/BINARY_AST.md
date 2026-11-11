@@ -29,15 +29,10 @@ reads back what it wrote and the generated JavaScript is unchanged.
 The ReScript compiler uses binary AST files (`.ast` for implementations, `.iast` for interfaces) as an intermediate format for:
 
 1. **Incremental compilation**: Cached parsed ASTs avoid re-parsing unchanged files
-2. **PPX support**: Preprocessor extensions read and write binary ASTs
+2. **External PPXs** (not supported going forward): they read and write binary ASTs
 3. **Build system integration**: `rewatch` uses binary AST files for dependency tracking
 
-The goal is for the Rust compiler to generate byte-identical binary AST files, ensuring:
-- Full PPX compatibility
-- Drop-in replacement for the OCaml compiler
-- Verified correctness through byte comparison
-
-**Current challenge**: Position sharing patterns in the marshal output don't yet fully match OCaml's pointer-based sharing semantics.
+Byte-identical output with the OCaml compiler is not a goal.
 
 ---
 
@@ -378,7 +373,7 @@ When `partial: true`, add `[@res.partial]` attribute.
 - `compiler/syntax/src/res_scanner.ml` - Position allocation
 - `compiler/syntax/src/res_parser.ml` - Position assignment
 - `compiler/depends/binary_ast.ml` - Binary AST writing
-- `compiler/ml/parsetree0.ml` - Frozen PPX-compatible AST
+- `compiler/ml/parsetree0.ml` - The former PPX AST
 - `compiler/common/ast_mapper_to0.ml` - Current -> parsetree0 mapping
 
 ### Rust Implementation

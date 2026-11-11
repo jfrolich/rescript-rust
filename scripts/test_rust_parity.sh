@@ -197,7 +197,7 @@ run_syntax_tests() {
     find syntax_tests/data/{printer,conversion} -name "*.res" -o -name "*.resi" -o -name "*.ml" -o -name "*.mli" 2>/dev/null | sort > "$TEMP_DIR/syntax_printer.txt"
 
     # PPX tests
-    find syntax_tests/data/ppx/react -name "*.res" -o -name "*.resi" 2>/dev/null | sort > "$TEMP_DIR/syntax_ppx.txt"
+    find syntax_tests/data/ppx/react syntax_tests/data/printer-jsx4 -name "*.res" -o -name "*.resi" 2>/dev/null | sort > "$TEMP_DIR/syntax_ppx.txt"
 
     local file_count=$(cat "$TEMP_DIR"/syntax_*.txt | wc -l | tr -d ' ')
     echo "Testing $file_count files..."
