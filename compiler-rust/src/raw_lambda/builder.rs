@@ -85,6 +85,9 @@ impl RawLambdaRead for LamArena {
     }
 }
 
+/// Owned string-switch read-back: scrutinee, ordered cases and default action.
+pub type StringSwitchParts = (RawLambda, Vec<(String, RawLambda)>, Option<RawLambda>);
+
 /// Builds raw nodes bottom-up without dynamic dispatch.
 ///
 /// The two rewriting operations are explicit so implementations need not expose
@@ -130,7 +133,7 @@ pub trait RawLambdaBuilder {
     fn string_switch_parts(
         &self,
         lam: RawLambda,
-    ) -> Option<(RawLambda, Vec<(String, RawLambda)>, Option<RawLambda>)>;
+    ) -> Option<StringSwitchParts>;
     /// Push a node built from existing payload handles.
     fn push(&self, node: Node) -> RawLambda;
     /// Create a variable reference.
@@ -297,7 +300,7 @@ impl RawLambdaBuilder for RawArena {
     fn string_switch_parts(
         &self,
         lam: RawLambda,
-    ) -> Option<(RawLambda, Vec<(String, RawLambda)>, Option<RawLambda>)> {
+    ) -> Option<StringSwitchParts> {
         RawArena::string_switch_parts(self, lam)
     }
     #[inline]
