@@ -3867,6 +3867,39 @@ fn normalize_path_full_inner(
         return (path.clone(), NormRecipe::Same);
     }
 
+    // ctype.ml:1367-1372 normalizes the path of a type that does not expand,
+    // so most paths that arrive here end in a type name. No module has a
+    // lowercase name: `find_module` (env.ml:876-882) reads the components of
+    // the prefix (`find_module_descr`), finds no such module in them and
+    // forces nothing else, and `normalize_path` (env.ml:903-914) returns the
+    // path with its prefix normalized.
+    if let PathView::Pdot(parent, name, pos) = path.view()
+        && !may_name_module(name.as_str())
+    {
+        let (parent_norm, parent_recipe) = normalize_path_full_inner(
+            ctx,
+            env,
+            parent,
+            depth + 1,
+            visiting,
+            allow_reverse_local_aliases,
+            force_module_lookup_side_effects,
+        );
+        let mut persistent_env = in_process_module_resolution_env(ctx);
+        crate::types::typecore::with_resolved_module_components_for_path_with_cache_mode(
+            &parent_norm,
+            env,
+            &mut persistent_env,
+            ctx,
+            crate::types::typecore::ComponentLookupApi::FindModuleDescr,
+            |_| (),
+        );
+        return (
+            Path::pdot_pos(parent_norm, *name, *pos),
+            NormRecipe::Dot(Box::new(parent_recipe)),
+        );
+    }
+
     if let PathView::Pdot(parent, module_name, _) = path.view() {
         let path_starts_with_implicit_opened_component =
             env.path_starts_with_implicit_opened_component(path);
@@ -4035,6 +4068,14 @@ fn normalize_path_full_inner(
     }
 
     (path, recipe)
+}
+
+/// Whether a module can be called `name`: module names are capitalized.
+fn may_name_module(name: &str) -> bool {
+    !name
+        .as_bytes()
+        .first()
+        .is_some_and(|first| first.is_ascii_lowercase() || *first == b'_')
 }
 
 /// Follow a module alias: env.ml:878 `normalize_path lax env path1`, where
@@ -14632,6 +14673,66 @@ mod tests {
             );
         }
         assert_eq!(env.normalize_path_prefix(&ctx, &source), source);
+    }
+
+    #[test]
+    fn a_type_path_is_normalized_through_its_module_prefix() {
+        use crate::types::decl::AliasPresence;
+        assert!(may_name_module("M"));
+        assert!(may_name_module("Belt_List"));
+        // An exotic type name can start with anything else.
+        assert!(may_name_module("0"));
+        assert!(!may_name_module("t"));
+        assert!(!may_name_module("_t"));
+
+        let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
+        let mut env = Env::empty();
+        let m = ctx.create_ident("M");
+        let a = ctx.create_ident("A");
+        let b = ctx.create_ident("B");
+        let module = |md_type| ModuleDeclaration {
+            md_type,
+            md_attributes: vec![],
+            md_loc: crate::types::DeclLoc::none(),
+            md_path: None,
+        };
+        let inner = module(ModuleType::MtySignature(std::sync::Arc::new(vec![])));
+        env.add_module(
+            m,
+            module(ModuleType::MtySignature(std::sync::Arc::new(vec![
+                SignatureItem::SigModule(a, inner, RecStatus::TrecNot),
+            ]))),
+        );
+        env.add_module(
+            b,
+            module(ModuleType::MtyAlias(
+                AliasPresence::MtaPresent,
+                std::sync::Arc::new(Path::pident(m)),
+            )),
+        );
+        let t = crate::name::Name::new("t");
+        let type_in = |module: Path| Path::pdot_pos(module, t, 0);
+        let m_a = || Path::pdot_pos(Path::pident(m), a.name_atom(), 0);
+        let b_a = || Path::pdot_pos(Path::pident(b), a.name_atom(), 0);
+
+        // `M.t` and `M.A.t` name no alias anywhere.
+        for path in [type_in(Path::pident(m)), type_in(m_a())] {
+            assert_eq!(normalize_path_full(&ctx, &env, &path), path);
+            assert_eq!(normalize_path_forward_only(&ctx, &env, &path), path);
+        }
+        // `B.t` and `B.A.t`: only the alias `B = M` in the prefix is followed.
+        for (path, normalized) in [
+            (type_in(Path::pident(b)), type_in(Path::pident(m))),
+            (type_in(b_a()), type_in(m_a())),
+        ] {
+            for _ in 0..2 {
+                assert!(normalize_path_full(&ctx, &env, &path).same(&normalized));
+                assert!(normalize_path_forward_only(&ctx, &env, &path).same(&normalized));
+                assert!(
+                    force_normalize_path_full_side_effects(&ctx, &env, &path).same(&normalized)
+                );
+            }
+        }
     }
 
     #[test]
