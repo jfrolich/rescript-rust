@@ -1,5 +1,4 @@
-[2K
- No implementation file found for interface file (skipping): src/ModuleWithInterface.resi
+[2K No implementation file found for interface file (skipping): src/ModuleWithInterface.resi
 Cleaned 2/512
 Parsed 1 source files
 Compiled 1 modules

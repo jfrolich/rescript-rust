@@ -37,5 +37,4 @@ Unknown field 'some-new-field' found in the package config of '@testrepo/depreca
   
 
 
-Incremental build failed. Error: [2K
-  Failed to Compile. See Errors Above
+Incremental build failed. Error: [2K  Failed to Compile. See Errors Above
