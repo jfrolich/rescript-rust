@@ -9,6 +9,9 @@
 //! lowered [`crate::lambda`] IR that the optimization passes and JS
 //! generation consume.
 
+pub mod builder;
+pub use builder::RawLambdaBuilder;
+
 pub mod convert;
 mod key_encode;
 pub(crate) mod lambda_scc;
@@ -557,7 +560,11 @@ impl FreeVarSet for std::collections::BTreeSet<Ident> {
 /// Port of `Lambda_traverse.free_ids` with `free_variables`' getter
 /// (`compiler/ml/lambda_traverse.ml:200-231`): children are visited first,
 /// then the node's own variable is added or its binders removed.
-pub(crate) fn collect_free_variables<S: FreeVarSet>(a: &LamArena, lam: RawLambda, fv: &mut S) {
+pub(crate) fn collect_free_variables<S: FreeVarSet>(
+    a: &impl builder::RawLambdaRead,
+    lam: RawLambda,
+    fv: &mut S,
+) {
     let collect = collect_free_variables::<S>;
     match a.view(lam) {
         View::Var(id) => {

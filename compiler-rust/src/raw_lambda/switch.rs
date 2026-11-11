@@ -13,9 +13,10 @@
 
 use crate::fast_hash::AHashMap;
 use crate::lambda::LamLoc;
-use crate::lambda::arena::{LamArena, Node, View};
+use crate::lambda::arena::{Node, View};
 use crate::lambda::{Comparison, Constant, LetKind, Primitive};
-use crate::raw_lambda::{RawArena, RawLambda, RawLambdaSwitch};
+use crate::raw_lambda::builder::{RawLambdaBuilder, RawLambdaRead};
+use crate::raw_lambda::{RawLambda, RawLambdaSwitch};
 
 // ── Action store (port of Switch.Store) ────────────────────────────────
 
@@ -28,17 +29,17 @@ pub enum Shared<A> {
     Single(A),
 }
 
-fn make_const(b: &RawArena, i: i32) -> RawLambda {
+fn make_const<B: RawLambdaBuilder>(b: &B, i: i32) -> RawLambda {
     b.const_(Constant::int(i))
 }
 
-fn make_prim(b: &RawArena, prim: Primitive, args: &[RawLambda]) -> RawLambda {
+fn make_prim<B: RawLambdaBuilder>(b: &B, prim: Primitive, args: &[RawLambda]) -> RawLambda {
     b.prim(prim, args, LamLoc::NONE)
 }
 
 /// OCaml `Switch.covers_range` (switch.ml:104-111): `cases` is exactly the
 /// contiguous integer keys `start .. finish`, in order.
-fn covers_range(keys: &[crate::lambda::SwitchKey], start: i32, finish: i32) -> bool {
+pub(super) fn covers_range(keys: &[crate::lambda::SwitchKey], start: i32, finish: i32) -> bool {
     let mut start = start;
     for key in keys {
         match key {
@@ -52,7 +53,12 @@ fn covers_range(keys: &[crate::lambda::SwitchKey], start: i32, finish: i32) -> b
 /// OCaml `Switch.out_of_range` (switch.ml:113-118): `arg` is outside
 /// `lo .. hi`. A two-value range reads better as a pair of equality tests
 /// than as a pair of comparisons.
-pub(crate) fn out_of_range(b: &RawArena, arg: RawLambda, lo: i32, hi: i32) -> RawLambda {
+pub(crate) fn out_of_range<B: RawLambdaBuilder>(
+    b: &B,
+    arg: RawLambda,
+    lo: i32,
+    hi: i32,
+) -> RawLambda {
     let test = |cmp: Comparison, k: i32| {
         let k = make_const(b, k);
         make_prim(b, Primitive::Pintcomp(cmp), &[arg, k])
@@ -71,8 +77,8 @@ pub(crate) fn out_of_range(b: &RawArena, arg: RawLambda, lo: i32, hi: i32) -> Ra
 /// jump table with a range test; a JS `switch` has a native `default`, so
 /// when the table already covers the whole guarded range the guard is
 /// dropped and its action becomes the failaction.
-fn emit_if_out(
-    b: &RawArena,
+fn emit_if_out<B: RawLambdaBuilder>(
+    b: &B,
     offset: i32,
     range: i32,
     arg: RawLambda,
@@ -81,33 +87,7 @@ fn emit_if_out(
 ) -> RawLambda {
     let lo = -offset;
     let hi = range - offset;
-    let covered = b.with_mut(|a| {
-        let Node::Switch {
-            scrut,
-            actions,
-            info,
-        } = a.node(ifno)
-        else {
-            return None;
-        };
-        let p = a.switch_payload(info);
-        let same_var = matches!((a.as_var(arg), a.as_var(scrut)), (Some(x), Some(y)) if x.same(&y));
-        if !(same_var
-            && p.n_blocks() == 0
-            && p.blocks_full
-            && !p.has_fail
-            && covers_range(a.switch_const_keys(info), lo, hi))
-        {
-            return None;
-        }
-        let (blocks_full, dispatch) = (p.blocks_full, p.dispatch.clone());
-        let keys = a.switch_const_keys(info).to_vec();
-        let mut cases = a.list_small(actions);
-        cases.push(ifso);
-        let actions = a.add_list(&cases);
-        let info = a.add_switch(false, keys, blocks_full, [], true, dispatch);
-        Some(a.switch_raw(scrut, actions, info))
-    });
+    let covered = b.switch_with_range_default(arg, lo, hi, ifso, ifno);
     if let Some(switch) = covered {
         return switch;
     }
@@ -116,8 +96,8 @@ fn emit_if_out(
 }
 
 /// OCaml `Switch.emit_if_in` (switch.ml:140-142).
-fn emit_if_in(
-    b: &RawArena,
+fn emit_if_in<B: RawLambdaBuilder>(
+    b: &B,
     offset: i32,
     range: i32,
     arg: RawLambda,
@@ -131,13 +111,18 @@ fn emit_if_in(
     make_if(b, cond, ifso, ifno)
 }
 
-fn make_if(b: &RawArena, cond: RawLambda, ifso: RawLambda, ifnot: RawLambda) -> RawLambda {
+fn make_if<B: RawLambdaBuilder>(
+    b: &B,
+    cond: RawLambda,
+    ifso: RawLambda,
+    ifnot: RawLambda,
+) -> RawLambda {
     b.if_raw(cond, ifso, ifnot)
 }
 
 /// Build an Lswitch from a mapping table.
-fn build_lswitch(
-    b: &RawArena,
+fn build_lswitch<B: RawLambdaBuilder>(
+    b: &B,
     arg: RawLambda,
     tbl: &[usize],
     acts: &[RawLambda],
@@ -165,12 +150,12 @@ fn build_lswitch(
     )
 }
 
-fn make_exit(b: &RawArena, i: i32) -> RawLambda {
+fn make_exit<B: RawLambdaBuilder>(b: &B, i: i32) -> RawLambda {
     b.static_raise(i, &[])
 }
 
 /// Check if a lambda is a simple static raise.
-fn as_simple_exit(a: &LamArena, lam: RawLambda) -> Option<i32> {
+fn as_simple_exit(a: &impl RawLambdaRead, lam: RawLambda) -> Option<i32> {
     match a.view(lam) {
         View::StaticRaise(i, []) => Some(i),
         View::Let(LetKind::Alias, _, _, body) => as_simple_exit(a, body),
@@ -179,13 +164,13 @@ fn as_simple_exit(a: &LamArena, lam: RawLambda) -> Option<i32> {
 }
 
 /// OCaml's `make_catch_delayed`.
-fn make_catch_delayed(
-    b: &RawArena,
+fn make_catch_delayed<B: RawLambdaBuilder>(
+    b: &B,
     handler: RawLambda,
     next_raise: &mut dyn FnMut() -> i32,
 ) -> (i32, Option<RawLambda>) {
     // Returns (exit_id, Some(handler)) if wrapping needed, (exit_id, None) if already an exit
-    let simple = as_simple_exit(&b.get(), handler);
+    let simple = as_simple_exit(&*b.get(), handler);
     if let Some(i) = simple {
         (i, None)
     } else {
@@ -378,14 +363,14 @@ fn same_act(cases: &[(i32, i32, usize)]) -> bool {
 const INTER_LIMIT: i32 = 1 << 16;
 
 /// The main switch compiler. Handles memoization and test optimization.
-struct SwitchCompiler<'b> {
-    b: &'b RawArena,
+struct SwitchCompiler<'b, B: RawLambdaBuilder> {
+    b: &'b B,
     memo: AHashMap<Vec<Kind>, (TRet, (CTests, CTests))>,
     ok_inter: bool,
 }
 
-impl<'b> SwitchCompiler<'b> {
-    fn new(b: &'b RawArena, ok_inter: bool) -> Self {
+impl<'b, B: RawLambdaBuilder> SwitchCompiler<'b, B> {
+    fn new(b: &'b B, ok_inter: bool) -> Self {
         SwitchCompiler {
             b,
             memo: AHashMap::default(),
@@ -675,8 +660,8 @@ impl<'b> SwitchCompiler<'b> {
 
 // ── Comparison helpers ────────────────────────────────────────────────
 
-fn make_if_test(
-    b: &RawArena,
+fn make_if_test<B: RawLambdaBuilder>(
+    b: &B,
     prim: Primitive,
     arg: RawLambda,
     i: i32,
@@ -688,8 +673,8 @@ fn make_if_test(
     make_if(b, cond, ifso, ifnot)
 }
 
-fn make_if_lt(
-    b: &RawArena,
+fn make_if_lt<B: RawLambdaBuilder>(
+    b: &B,
     arg: RawLambda,
     i: i32,
     ifso: RawLambda,
@@ -701,8 +686,8 @@ fn make_if_lt(
     }
 }
 
-fn make_if_ge(
-    b: &RawArena,
+fn make_if_ge<B: RawLambdaBuilder>(
+    b: &B,
     arg: RawLambda,
     i: i32,
     ifso: RawLambda,
@@ -714,8 +699,8 @@ fn make_if_ge(
     }
 }
 
-fn make_if_eq(
-    b: &RawArena,
+fn make_if_eq<B: RawLambdaBuilder>(
+    b: &B,
     arg: RawLambda,
     i: i32,
     ifso: RawLambda,
@@ -724,8 +709,8 @@ fn make_if_eq(
     make_if_test(b, Primitive::Pintcomp(Comparison::Eq), arg, i, ifso, ifnot)
 }
 
-fn make_if_ne(
-    b: &RawArena,
+fn make_if_ne<B: RawLambdaBuilder>(
+    b: &B,
     arg: RawLambda,
     i: i32,
     ifso: RawLambda,
@@ -742,8 +727,8 @@ fn make_if_ne(
 /// OCaml `compiler/ml/switch.ml` stores cluster actions as closures over
 /// `ctx`; `ctx.off` stays 0 and `ctx.arg` is the original scrutinee for the
 /// whole `do_zyva` run, so dense cluster switches are built on `arg` directly.
-fn build_clustered_test(
-    compiler: &mut SwitchCompiler<'_>,
+fn build_clustered_test<B: RawLambdaBuilder>(
+    compiler: &mut SwitchCompiler<'_, B>,
     cases: &[(i32, i32, usize)],
     actions: &[RawLambda],
     arg: RawLambda,
@@ -807,7 +792,11 @@ fn build_clustered_test(
 /// cluster switches and has no OCaml counterpart (`switch.ml` invokes single
 /// actions unchanged). It is kept so output stays byte-identical; it only
 /// fires for an action whose own scrutinee is literally `()`.
-fn unit_switch_arg_fixup(b: &RawArena, lam: RawLambda, real_arg: RawLambda) -> RawLambda {
+fn unit_switch_arg_fixup<B: RawLambdaBuilder>(
+    b: &B,
+    lam: RawLambda,
+    real_arg: RawLambda,
+) -> RawLambda {
     if let Node::Switch {
         scrut,
         actions,
@@ -827,8 +816,8 @@ fn unit_switch_arg_fixup(b: &RawArena, lam: RawLambda, real_arg: RawLambda) -> R
 // ── Shared action handling ────────────────────────────────────────────
 
 /// Process shared actions, wrapping in catch/exit.
-fn abstract_shared(
-    b: &RawArena,
+fn abstract_shared<B: RawLambdaBuilder>(
+    b: &B,
     shared_actions: Vec<Shared<RawLambda>>,
     next_raise: &mut dyn FnMut() -> i32,
 ) -> (Vec<(i32, RawLambda)>, Vec<RawLambda>) {
@@ -851,8 +840,8 @@ fn abstract_shared(
 }
 
 /// Wrap result with catch handlers.
-fn wrap_handlers(
-    b: &RawArena,
+fn wrap_handlers<B: RawLambdaBuilder>(
+    b: &B,
     mut result: RawLambda,
     handlers: Vec<(i32, RawLambda)>,
 ) -> RawLambda {
@@ -876,8 +865,8 @@ fn wrap_handlers(
 ///
 /// This preserves the exact indices embedded in `cases`, matching OCaml's
 /// `Switcher.zyva` call where the `StoreExp` action array is passed directly.
-pub fn zyva_with_shared_actions(
-    b: &RawArena,
+pub fn zyva_with_shared_actions<B: RawLambdaBuilder>(
+    b: &B,
     edges: (i32, i32),
     arg: RawLambda,
     cases: &[(i32, i32, usize)],
