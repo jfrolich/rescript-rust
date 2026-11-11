@@ -105,16 +105,13 @@ pub fn of_payload(arena: &mut ParseArena, payload: &Payload) -> Option<RawSource
     }
     let pexp_loc = expr.pexp_loc;
     match &expr.pexp_desc {
-        ExpressionDesc::Pexp_constant(constant) => match *constant {
-            Constant::String(payload) => {
-                let source = payload.source(arena).to_string();
-                Some(RawSource::String(Located {
-                    txt: arena.intern(&source),
-                    loc: pexp_loc,
-                }))
-            }
-            _ => None,
-        },
+        ExpressionDesc::Pexp_constant(Constant::String(payload)) => {
+            let source = payload.source(arena).to_string();
+            Some(RawSource::String(Located {
+                txt: arena.intern(&source),
+                loc: pexp_loc,
+            }))
+        }
         ExpressionDesc::Pexp_template(template) => match template.source_segments.as_slice() {
             [source] if template.values.is_empty() => Some(RawSource::Template(*source)),
             _ => None,
