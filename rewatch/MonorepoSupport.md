@@ -117,7 +117,7 @@ Even when building from a leaf package, some settings are inherited from the **r
 |---------|-------|
 | `namespace`, `namespace-entry` | Each package can have its own namespace |
 | `compiler-flags` (`bsc-flags`) | Package-specific compiler options |
-| `ppx-flags` | PPX transformations are per-package |
+| `ppx-flags` | Built-in spice derives are per-package; external PPXs are rejected |
 | `warnings` | Warning configuration is per-package |
 | `sources` | Obviously per-package |
 

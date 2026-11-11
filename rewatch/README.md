@@ -49,7 +49,7 @@ location-enabled retry, then dropped with the AST after compilation.
   Subsequent watch builds can use the fast path again.
 - Location-valued generated code (`__LINE__`, assertions, match failures, recursive
   module initialization) retries only that module, before publishing its signature or JS.
-- External PPXs, source maps, editor tooling and requested IR dumps use locations.
+- Source maps, editor tooling and requested IR dumps use locations.
 
 The default standalone parser API still retains complete location side tables for
 formatting, AST marshalling and parity tests. Location-free compilation does not change
@@ -90,3 +90,10 @@ Put public Rust API contracts in source documentation, local algorithm or
 state invariants beside their implementation, and cross-module navigation in
 this guide. Update or remove focused documents when the implementation changes;
 do not preserve completed plans as descriptions of current behavior.
+
+## Derives
+
+`ppx-flags` accepts only built-in spice derives. Other entries fail configuration
+validation with the package name and flag; source-marker filtering cannot hide
+an unsupported PPX. Spice needs no installed executable and runs on the current
+AST, without a frozen-v0 conversion.

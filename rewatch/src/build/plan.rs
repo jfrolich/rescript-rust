@@ -333,18 +333,40 @@ fn mlmap_step(build_state: &BuildCommandState, package: &packages::Package, name
     })
 }
 
-/// Replace the executable after each `-ppx` whose path ends in an override's
-/// spec.
-fn override_ppxs(args: &mut [String], ppx_overrides: &[(String, PathBuf)]) {
-    for i in 1..args.len() {
-        if args[i - 1] != "-ppx" {
-            continue;
-        }
-        let ppx = Path::new(&args[i]);
-        if let Some((_, executable)) = ppx_overrides.iter().find(|(spec, _)| ppx.ends_with(spec)) {
-            args[i] = executable.to_string_lossy().into_owned();
-        }
+/// Only the test-only OCaml reference build needs an executable for spice.
+fn reference_spice_args(
+    args: &mut Vec<String>,
+    config: &crate::config::Config,
+    context: &ProjectContext,
+    overrides: &[(String, PathBuf)],
+) -> Result<()> {
+    if !args.iter().any(|arg| arg == "-bs-builtin-spice-ppx") {
+        return Ok(());
     }
+    args.retain(|arg| arg != "-bs-builtin-spice-ppx");
+    for flag in config.ppx_flags.iter().flatten() {
+        let parts = match flag {
+            crate::config::OneOrMore::Single(command) => std::slice::from_ref(command),
+            crate::config::OneOrMore::Multiple(parts) => parts.as_slice(),
+        };
+        let Some(command) = parts.first() else { continue };
+        let executable = if let Some((_, path)) = overrides.iter()
+            .find(|(spec, _)| Path::new(command).ends_with(spec))
+        {
+            path.clone()
+        } else {
+            let spec = if command.starts_with('.') {
+                format!("{}/{}", config.name, command)
+            } else {
+                command.clone()
+            };
+            helpers::try_package_path(config, context, &spec)?
+        };
+        args.push("-ppx".to_string());
+        args.push(std::iter::once(executable.to_string_lossy().into_owned())
+            .chain(parts[1..].iter().cloned()).collect::<Vec<_>>().join(" "));
+    }
+    Ok(())
 }
 
 fn source_step(
@@ -376,7 +398,7 @@ fn source_step(
             package.is_local_dep,
             None,
         )?;
-        override_ppxs(&mut args, ppx_overrides);
+        reference_spice_args(&mut args, &package.config, project_context, ppx_overrides)?;
         if let Some(parent) = build_path.join(&ast_path).parent() {
             mkdirs.push(parent.to_path_buf());
         }

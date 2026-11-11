@@ -1,7 +1,5 @@
 use crate::build::packages;
-use crate::helpers;
 use crate::helpers::deserialize::*;
-use crate::project_context::ProjectContext;
 use ahash::AHashSet;
 use anyhow::{Result, anyhow};
 use convert_case::{Case, Casing};
@@ -9,7 +7,7 @@ use serde::de::{Error as DeError, Visitor};
 use serde::{Deserialize, Deserializer};
 use std::collections::HashMap;
 use std::fs;
-use std::path::{MAIN_SEPARATOR, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 #[derive(Deserialize, Debug, Clone)]
 #[serde(untagged)]
@@ -620,67 +618,6 @@ pub fn flatten_flags(flags: &Option<Vec<OneOrMore<String>>>) -> Vec<String> {
     }
 }
 
-/// Since ppx-flags could be one or more, and could potentially be nested, this function takes the
-/// flags and flattens them.
-pub fn flatten_ppx_flags(
-    project_context: &ProjectContext,
-    package_config: &Config,
-    flags: &Option<Vec<OneOrMore<String>>>,
-) -> Result<Vec<String>> {
-    match flags {
-        None => Ok(vec![]),
-        Some(flags) => flags.iter().try_fold(Vec::new(), |mut acc, x| {
-            match x {
-                OneOrMore::Single(y) => {
-                    let first_character = y.chars().next();
-                    match first_character {
-                        Some('.') => {
-                            let path = helpers::try_package_path(
-                                package_config,
-                                project_context,
-                                &format!("{}{}{}", &package_config.name, MAIN_SEPARATOR, y),
-                            )
-                            .map(|p| p.to_string_lossy().to_string())?;
-
-                            acc.push(String::from("-ppx"));
-                            acc.push(path);
-                        }
-                        _ => {
-                            acc.push(String::from("-ppx"));
-                            let path = helpers::try_package_path(package_config, project_context, y)
-                                .map(|p| p.to_string_lossy().to_string())?;
-                            acc.push(path);
-                        }
-                    }
-                }
-                OneOrMore::Multiple(ys) if ys.is_empty() => (),
-                OneOrMore::Multiple(ys) => {
-                    let first_character = ys[0].chars().next();
-                    let ppx = match first_character {
-                        Some('.') => helpers::try_package_path(
-                            package_config,
-                            project_context,
-                            &format!("{}{}{}", package_config.name, MAIN_SEPARATOR, &ys[0]),
-                        )
-                        .map(|p| p.to_string_lossy().to_string())?,
-                        _ => helpers::try_package_path(package_config, project_context, &ys[0])
-                            .map(|p| p.to_string_lossy().to_string())?,
-                    };
-                    acc.push(String::from("-ppx"));
-                    acc.push(
-                        vec![ppx]
-                            .into_iter()
-                            .chain(ys[1..].to_owned())
-                            .collect::<Vec<String>>()
-                            .join(" "),
-                    );
-                }
-            };
-            Ok(acc)
-        }),
-    }
-}
-
 fn namespace_from_package_name(package_name: &str) -> String {
     let len = package_name.len();
     let mut buf = String::with_capacity(len);
@@ -728,7 +665,27 @@ impl Config {
         let mut config = Config::new_from_json_string(&read)?;
         config.set_path(path.to_path_buf())?;
         config.validate_namespace()?;
+        config.validate_ppx_flags()?;
         Ok(config)
+    }
+
+    /// Reject unsupported rewriters before source discovery or marker filtering.
+    fn validate_ppx_flags(&self) -> Result<()> {
+        for flag in self.ppx_flags.iter().flatten() {
+            let command = match flag {
+                OneOrMore::Single(command) => Some(command),
+                OneOrMore::Multiple(parts) => parts.first(),
+            };
+            if let Some(command) = command
+                && !command.contains("spice")
+            {
+                return Err(anyhow!(
+                    "Package '{}' has unsupported ppx-flags entry '{}': external PPXs are no longer supported; only built-in spice derives are supported",
+                    self.name, command
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// The namespace becomes a module, so a name the scanner cannot read as one
@@ -1409,6 +1366,31 @@ fn validate_package_spec_value(value: &serde_json::Value) -> Result<()> {
 
 #[cfg(test)]
 pub mod tests {
+    #[test]
+    fn external_ppx_flags_are_rejected_even_without_source_markers() {
+        for flag in [r#"["sury-ppx/bin"]"#, r#"[["graphql-ppx", "--arg"]]"#] {
+            let json = format!(r#"{{"name":"example","sources":[],"ppx-flags":{flag}}}"#);
+            let config = super::Config::new_from_json_string(&json).unwrap();
+            let error = config.validate_ppx_flags().unwrap_err().to_string();
+            assert!(error.contains("Package 'example'"));
+            assert!(error.contains("external PPXs are no longer supported"));
+            let command = if flag.contains("sury") {
+                "sury-ppx/bin"
+            } else {
+                "graphql-ppx"
+            };
+            assert!(error.contains(command));
+        }
+    }
+
+    #[test]
+    fn builtin_spice_flags_need_no_executable() {
+        let config = super::Config::new_from_json_string(
+            r#"{"name":"example","sources":[],"ppx-flags":["ppx-spice",["./spice", "--arg"]]}"#,
+        ).unwrap();
+        config.validate_ppx_flags().unwrap();
+    }
+
     use super::*;
 
     pub struct CreateConfigArgs {

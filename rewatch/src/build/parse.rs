@@ -258,11 +258,13 @@ pub fn parser_args(
     let root_config = project_context.get_root_config();
     let file = &filename;
     let ast_path = helpers::get_ast_path(file);
-    let ppx_flags = config::flatten_ppx_flags(
-        project_context,
-        package_config,
-        &filter_ppx_flags(&package_config.ppx_flags, contents),
-    )?;
+    let ppx_flags = if filter_ppx_flags(&package_config.ppx_flags, contents)
+        .is_some_and(|flags| !flags.is_empty())
+    {
+        vec!["-bs-builtin-spice-ppx".to_string()]
+    } else {
+        Vec::new()
+    };
     let jsx_args = root_config.get_jsx_args();
     let jsx_module_args = root_config.get_jsx_module_args();
     let jsx_preserve_args = root_config.get_jsx_preserve_args();
@@ -352,33 +354,11 @@ fn generate_ast(
     let source_bytes =
         std::fs::read(&file_path).with_context(|| format!("Failed to read {}", file_path.display()))?;
 
-    // The parser runs the same frontend as `bsc -bs-ast` in process, so it
-    // reads the flags OCaml's `-bs-ast` would receive (see `parser_args`).
-    // `-ppx` rewriters from `ppx-flags`, as `parser_args` passes them to
-    // `bsc -bs-ast`.
-    let mut external_ppxs: Vec<String> = match &package.config.ppx_flags {
-        Some(flags) if !flags.is_empty() => {
-            let contents = std::str::from_utf8(&source_bytes).unwrap_or_default();
-            let ppx_args = config::flatten_ppx_flags(
-                &build_state.project_context,
-                &package.config,
-                &filter_ppx_flags(&package.config.ppx_flags, contents),
-            )?;
-            ppx_args
-                .chunks(2)
-                .filter(|pair| pair[0] == "-ppx")
-                .map(|pair| pair[1].clone())
-                .collect()
-        }
-        _ => Vec::new(),
-    };
-    // The builtin spice mapper implements `ppx-spice`, so run it in process
-    // instead of spawning the configured executable for every module.
-    let spice_ppx = !external_ppxs.is_empty() && {
-        let before = external_ppxs.len();
-        external_ppxs.retain(|command| !command.contains("spice"));
-        external_ppxs.len() != before
-    };
+    // Configuration validation has already rejected all non-spice rewriters.
+    // The built-in mapper needs neither executable resolution nor a v0 AST.
+    let contents = std::str::from_utf8(&source_bytes).unwrap_or_default();
+    let spice_ppx = filter_ppx_flags(&package.config.ppx_flags, contents)
+        .is_some_and(|flags| !flags.is_empty());
     let frontend_options = {
         let root_config = build_state.project_context.get_root_config();
         let flags = [
@@ -403,7 +383,6 @@ fn generate_ast(
                 || rust_parser_let_unwrap_enabled(root_config, &package.config),
             no_builtin_ppx: parsed.no_builtin_ppx,
             spice_ppx,
-            external_ppxs,
             ..Default::default()
         }
     };
@@ -414,10 +393,8 @@ fn generate_ast(
         tracing::Span::none().entered()
     };
 
-    // External PPXs consume the location-bearing frozen AST protocol. A
-    // source map explicitly asks for source coordinates as generated output.
+    // A source map explicitly asks for source coordinates as generated output.
     let locations = !omit_locations
-        || !frontend_options.external_ppxs.is_empty()
         || build_state
             .get_root_config()
             .effective_source_map_mode(build_state.source_map_command)
@@ -493,24 +470,8 @@ pub(crate) fn reparse_arena_with_locations(
     }
 }
 
-const SOURCE_TRIGGERED_PPXES: &[(&[&str], &str)] = &[
-    (&["graphql-ppx", "graphql_ppx"], "%graphql"),
-    (&["spice"], "@spice"),
-    (&["rescript-relay"], "%relay"),
-    (&["re-formality"], "%form"),
-    (&["rescript-schema-ppx", "sury-ppx"], "@schema"),
-];
-
-// Only skip PPXs whose transformations are known to require a source marker;
-// unknown PPXs must keep running because they may transform unmarked sources.
 fn should_run_ppx(flag: &str, contents: &str) -> bool {
-    if flag.contains("bisect") {
-        return std::env::var("BISECT_ENABLE").is_ok();
-    }
-
-    SOURCE_TRIGGERED_PPXES
-        .iter()
-        .all(|(names, marker)| !names.iter().any(|name| flag.contains(name)) || contents.contains(marker))
+    flag.contains("spice") && contents.contains("@spice")
 }
 
 fn open_dependencies_from_bsc_flags(flags: &[String]) -> Vec<String> {
@@ -957,46 +918,17 @@ mod tests {
     }
 
     #[test]
-    fn source_triggered_ppxes_only_run_for_matching_sources() {
-        for command in [
-            "graphql-ppx",
-            "graphql_ppx",
-            "spice",
-            "rescript-relay",
-            "re-formality",
-            "rescript-schema-ppx",
-            "sury-ppx/bin",
-        ] {
-            assert!(!should_run_ppx(command, "let value = 1"), "{command}");
-        }
-
-        for (command, marker) in [
-            ("graphql-ppx", "%graphql"),
-            ("graphql_ppx", "%graphql"),
-            ("spice", "@spice"),
-            ("rescript-relay", "%relay"),
-            ("re-formality", "%form"),
-            ("rescript-schema-ppx", "@schema"),
-            ("sury-ppx/bin", "@schema"),
-        ] {
-            assert!(should_run_ppx(command, marker), "{command}");
-        }
-
-        assert!(should_run_ppx("unconditional-ppx", "let value = 1"));
+    fn spice_only_runs_for_matching_sources() {
+        assert!(!should_run_ppx("ppx-spice", "let value = 1"));
+        assert!(should_run_ppx("ppx-spice", "@spice type t = int"));
     }
 
     #[test]
     fn empty_ppx_commands_are_ignored() {
         let flags = Some(vec![
             OneOrMore::Multiple(vec![]),
-            OneOrMore::Single("unconditional-ppx".to_string()),
+            OneOrMore::Single("ppx-spice".to_string()),
         ]);
-        let filtered = filter_ppx_flags(&flags, "let value = 1").unwrap();
-
-        assert_eq!(filtered.len(), 1);
-        assert!(matches!(
-            &filtered[0],
-            OneOrMore::Single(command) if command == "unconditional-ppx"
-        ));
+        assert_eq!(filter_ppx_flags(&flags, "@spice").unwrap().len(), 1);
     }
 }

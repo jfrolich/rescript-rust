@@ -93,6 +93,7 @@ fi
 ./compile/23-root-source-dir-rebuild.sh &&
 ./compile/24-location-free-retry.sh &&
 ./compile/25-deterministic-records.sh &&
+./compile/26-external-ppx-rejected.sh &&
 ./compile/14-no-testrepo-changes.sh &&
 ./compile/15-no-new-files.sh &&
 ./compile/16-snapshots-unchanged.sh &&
