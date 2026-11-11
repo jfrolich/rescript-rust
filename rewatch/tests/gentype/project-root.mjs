@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import {spawnSync} from "node:child_process";
 import {existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync} from "node:fs";
 import {tmpdir} from "node:os";
-import {join} from "node:path";
+import {basename, dirname, join} from "node:path";
 
 const executable = process.env.REWATCH_EXECUTABLE;
 assert(executable, "REWATCH_EXECUTABLE must be set");
@@ -74,6 +74,18 @@ function getBuildDirectory(projectDir) {
   return shortPath;
 }
 
+// The compiler an editor runs on one file. The Rust build system links the
+// compiler in and runs it with its hidden `bsc` command; the OCaml build
+// system embeds its compiler, so the platform package's `bsc.exe` next to it
+// compiles the file.
+function editorCompiler() {
+  const name = basename(resolvedExecutable).replace(/\.(exe|cmd)$/, "");
+  if (name === "rescript-ocaml") {
+    return [join(dirname(resolvedExecutable), "bsc.exe"), []];
+  }
+  return [resolvedExecutable, ["bsc"]];
+}
+
 function checkEditorCompilation(buildDirectory) {
   const options = {encoding: "utf8", timeout: 30_000};
   const result = spawnSync(
@@ -94,9 +106,11 @@ function checkEditorCompilation(buildDirectory) {
   mkdirSync(incrementalDir);
   const source = join(incrementalDir, "Editor.res");
   writeFileSync(source, "@genType\nlet value = 42\n");
-  const compiled = spawnSync(process.env.RESCRIPT_BSC_EXE, [...args, source], {
+  const [compiler, compilerArgs] = editorCompiler();
+  const compiled = spawnSync(compiler, [...compilerArgs, ...args, source], {
     ...options,
     cwd: join(buildDirectory, "lib", "bs"),
+    shell: compiler.endsWith(".cmd"),
   });
   assert.ifError(compiled.error);
   assert.equal(compiled.status, 0, `${compiled.stdout}\n${compiled.stderr}`);
