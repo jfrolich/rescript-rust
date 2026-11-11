@@ -118,7 +118,6 @@ struct Options {
     transparent_modules: bool,
     no_builtin_ppx: bool,
     builtin_spice_ppx: bool,
-    external_ppxs: Vec<String>,
     gentype: bool,
     gentype_flags: crate::gentype::config::FlagState,
     make_runtime: bool,
@@ -363,7 +362,12 @@ fn run(args: Vec<String>, registry: Option<RegistryProvider>) -> Result<()> {
                 }
                 "-ppx" => {
                     if let Some(val) = args.next() {
-                        opts.external_ppxs.push(val);
+                        if val.contains("spice") {
+                            opts.builtin_spice_ppx = true;
+                        } else {
+                            eprintln!("External PPXs are no longer supported: {val}");
+                            std::process::exit(2);
+                        }
                     }
                 }
                 "-color" => {
@@ -440,7 +444,6 @@ fn run(args: Vec<String>, registry: Option<RegistryProvider>) -> Result<()> {
                 jsx_preserve: opts.jsx_preserve,
                 no_builtin_ppx: opts.no_builtin_ppx,
                 spice_ppx: opts.builtin_spice_ppx,
-                external_ppxs: opts.external_ppxs.clone(),
                 ..CompilerOptions::default()
             },
         );
@@ -525,9 +528,7 @@ fn run(args: Vec<String>, registry: Option<RegistryProvider>) -> Result<()> {
         noassert: opts.noassert,
         transparent_modules: opts.transparent_modules,
         no_builtin_ppx: opts.no_builtin_ppx,
-        // Standalone -ppx commands run externally, not through the in-process mapper.
         spice_ppx: opts.builtin_spice_ppx,
-        external_ppxs: opts.external_ppxs.clone(),
         nopervasives: opts.nopervasives,
         module_name: opts.module_name.clone(),
         package_name: opts.package_name.clone(),
@@ -605,7 +606,6 @@ fn compile_in_process(
         transparent_modules: opts.transparent_modules,
         no_builtin_ppx: opts.no_builtin_ppx,
         spice_ppx: opts.builtin_spice_ppx,
-        external_ppxs: opts.external_ppxs.clone(),
         nopervasives: opts.nopervasives,
         module_name: opts.module_name.clone(),
         package_name: opts.package_name.clone(),

@@ -52,7 +52,7 @@ code, read the matching OCaml source first.
 
 | Area | OCaml reference | Rust implementation | Notes |
 | --- | --- | --- | --- |
-| Main implementation driver | `compiler/core/js_implementation.ml` | `src/driver.rs` | OCaml `implementation` parses, applies external PPX, runs `Ppx_entry`, then `after_parsing_impl`. Rust direct source mode follows the same broad stage order in `compile_source_to_js_with_options`, with external-PPX caveats documented below. |
+| Main implementation driver | `compiler/core/js_implementation.ml` | `src/driver.rs` | OCaml `implementation` parses, applies external PPX, runs `Ppx_entry`, then `after_parsing_impl`. Rust direct source mode follows the same broad stage order in `compile_source_to_js_with_options`, but intentionally rejects external PPXs. |
 | Interface driver | `compiler/core/js_implementation.ml`, `compiler/ml/typemod.ml` | `src/driver.rs` | OCaml interfaces parse as signatures, run signature PPX/config/warnings, typecheck, self-check, force delayed checks, and write `.cmi`/`.cmti`. Rust in-process mode publishes a registry signature; direct Rust helpers currently typecheck/dump but do not write OCaml-compatible interface artifacts. |
 | ReScript syntax parser | `compiler/syntax/`, `compiler/ml/parsetree.ml` | `src/parser/*`, `src/parse_arena.rs` | Rust parser uses arena indices instead of OCaml heap records, but output shape and locations must match. |
 | Former PPX AST boundary | `compiler/ml/parsetree0.ml`, `ast_mapper_to0.ml`, `ast_mapper_from0.ml`, `binary_ast.ml` | `src/binary_ast/parsetree0.rs`, `mapper_to0.rs`, `mapper_from0.rs`, `writer.rs`, `marshal.rs` | PPX is not supported going forward; `parsetree0` is not frozen and not compared with OCaml. |
@@ -79,7 +79,7 @@ rescript.json + source graph
   -> rewatch package/source discovery
   -> parse .res/.resi into Parsetree nodes stored in ParseArena
   -> dependency extraction and optional binary .ast/.iast writing
-  -> external PPX where supported plus built-in frontend rewrites
+  -> built-in frontend rewrites and spice derives
   -> TypeContext + Env + PersistentEnv setup
   -> module/expression/pattern/type checking into Typedtree
   -> interface inclusion, signature simplification, and signature publishing
@@ -414,7 +414,7 @@ Binary AST algorithm:
 3. Serialize the dependency section and OCaml marshal-compatible AST payload.
 4. In subprocess mode, rewatch or the compiler can write `.ast`/`.iast` files
    for later compiler invocation.
-5. External PPX processes read and write the marshal-compatible payload.
+5. Tools and conversion tests can read and write the frozen v0 payload.
 6. A complete PPX round trip maps `parsetree0` back into the current parsetree
    after PPX. OCaml does this before later frontend processing; current Rust
    direct paths do not yet consume the transformed tree.
@@ -428,27 +428,21 @@ Dependency extraction algorithm:
 
 OCaml reference alignment:
 
-- PPX is not supported going forward, so `parsetree0` is no longer a frozen
-  boundary and its bytes are not compared with OCaml. External `-ppx` flags and
-  the builtin Spice mapper still round-trip through it, so new syntax must
-  survive the mappers; changing `parsetree0` is allowed.
+- External PPXs are no longer supported. `parsetree0` is not a frozen boundary
+  and its bytes are not compared with OCaml. The conversion modules remain
+  available for tooling, but built-in spice derives operate directly on the
+  current AST without a version-0 round trip.
 
 Rust-specific diversion:
 
 - In in-process mode, rewatch can skip writing `.ast`/`.iast` files and keep
   `StoredAst` values in memory. This removes serialization/process overhead but
   does not change the logical stage boundary.
-- In rewatch `--rust` parser mode, `generate_ast_with_rust_parser` applies the
-  Rust parser, per-file config, JSX transform, let-unwrap transform, built-in
-  PPX, no-export wrapping, and dependency extraction. It does not run external
-  `-ppx` rewriters; the default OCaml parser/subprocess path still passes PPX
-  flags to `bsc -bs-ast`.
-- The direct Rust `bsc -bs-ast` helper and direct source driver can execute
-  external PPX commands and validate the output magic, but the current
-  implementation does not re-read the transformed AST back into Rust. Dumps,
-  written ASTs, and continued compilation therefore still use the original Rust
-  parsetree. Treat external PPX parity in Rust paths as incomplete until that
-  round-trip is implemented.
+- External PPX execution is no longer supported. Package configuration rejects
+  every non-spice `ppx-flags` entry, even when its source marker is absent.
+- Spice derives run directly on the current AST, without a version-0 round trip.
+  `src/binary_ast/derive.rs` is the single seam between frontend rewrites and
+  the removable built-in spice implementation.
 
 ## Stage 5: Frontend Rewrites, Built-In PPX, And File Directives
 
@@ -495,13 +489,6 @@ OCaml reference order:
 
 Mode-specific caveats:
 
-- OCaml and the non-Rust parser subprocess path apply external PPX output as the
-  input to later frontend processing. Current Rust direct paths only validate
-  the external PPX output stream and do not consume the transformed tree.
-- Rewatch `--rust` parser mode does not pass external `-ppx` flags into
-  `generate_ast_with_rust_parser`; that path covers Rust parsing, per-file
-  config, JSX, let-unwrap, built-in PPX, no-export wrapping, and dependency
-  extraction.
 - Rust direct source mode collects file config and warning attributes before
   JSX and built-in rewriting, then runs `expand_extensions` before the full
   built-in structure rewrite. This should stay aligned with OCaml warning and
@@ -513,8 +500,6 @@ Why order matters:
 - Warning attributes must be collected before generated warnings are emitted.
 - File directives must be preserved until final JS printing.
 - JSX and let-unwrap rewrites must happen before general built-in rewrites.
-- External PPX output must be seen by built-in processing for reference parity;
-  current Rust direct/Rust-parser paths are known incomplete here.
 - `@@no_export` changes the structure shape before typechecking and export
   coercion.
 
@@ -2177,8 +2162,6 @@ Rewatch subprocess mode:
 - Compilation invokes a compiler process with compiler args.
 - Cross-module state moves through file artifacts.
 - This mode is closest to the historical process boundary.
-- When rewatch is not using the Rust parser, external PPX flags are passed to
-  the compiler subprocess while generating `.ast`/`.iast`.
 
 Rewatch in-process mode:
 
@@ -2191,7 +2174,7 @@ Rewatch in-process mode:
 - The pre-JS result carries lowered Lambda, possible required modules, current
   identifier stamp, directives, debug flags, JSX-preserve state, signature,
   optional registry updates, and captured intermediates.
-- External PPX output is not applied on the Rust parser/in-process path today.
+- Only built-in spice derives are supported; external PPXs are rejected.
 
 The in-process split is a Rust-specific execution-mode diversion. It must
 preserve OCaml's logical ordering:
@@ -2294,9 +2277,6 @@ Known algorithmic risk areas:
 
 Current semantic and coverage caveats:
 
-- External PPX output is not consumed by current Rust direct or Rust parser
-  in-process paths, even though the direct helper can run PPX commands and check
-  output magic.
 - Rust direct interface helpers typecheck and dump signatures but do not write
   `.cmi`/`.cmti`; in-process interface helpers publish registry signatures
   instead of running every OCaml file-artifact step.
@@ -2326,10 +2306,6 @@ suspected to differ from the OCaml reference algorithm. Some are intentional
 execution-mode differences, but each one needs care when claiming byte-for-byte
 parity.
 
-- External PPX round trips are incomplete in Rust direct and Rust parser
-  in-process paths. OCaml applies the transformed marshal AST before built-in
-  frontend processing; Rust currently runs/checks the PPX output magic in direct
-  helpers but keeps compiling the original parsetree.
 - Interface artifact behavior is not a full `after_parsing_sig` port. OCaml
   self-checks the signature, forces delayed checks, checks fatal warnings, saves
   `.cmi`, saves `.cmti`, and can run GenType. Rust direct helpers typecheck and

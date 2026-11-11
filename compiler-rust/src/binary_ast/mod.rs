@@ -4,7 +4,7 @@
 //! byte-identical to those produced by the OCaml compiler. These files are used for:
 //!
 //! 1. **Incremental compilation**: Cached parsed ASTs avoid re-parsing unchanged files
-//! 2. **PPX support**: Preprocessor extensions read and write binary ASTs
+//! 2. **Conversion tools**: Frozen v0 AST compatibility remains for tools and tests
 //! 3. **Build system integration**: `rewatch` uses binary ASTs for dependency tracking
 //!
 //! # Binary AST File Format
@@ -46,6 +46,7 @@
 //! - [`mapper_to0`] - Current parsetree → parsetree0 conversion
 //! - [`mapper_from0`] - parsetree0 → current parsetree conversion
 //! - [`ppx`] - Built-in PPX rewrites applied before marshalling
+//! - [`mod@derive`] - Single seam for removable built-in derives
 //! - [`spice_ppx`] - Built-in spice PPX
 //! - [`ast_iter`] - Port of OCaml `Ast_iterator` for the current parsetree
 //! - [`ffi_types`] - Marshalling of digested externals (`External_ffi_types`)
@@ -58,6 +59,7 @@ pub mod ast_dict;
 pub mod ast_iter;
 pub mod current_marshal;
 pub mod deps;
+pub mod derive;
 pub mod ffi_types;
 pub mod header;
 pub mod mapper_from0;
