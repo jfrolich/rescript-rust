@@ -9,6 +9,7 @@ use super::js_exp_make::{
     runtime_member_for_eta_wrapped_primitive, string_switch_iife,
 };
 use super::lam_compile::{ExternalModuleCacheKey, LambdaCompiler};
+use super::lam_compile_arguments::HeldArgs;
 use crate::ident::Ident;
 use crate::js_ir::arena::{Block, Expr, ExprKind, JsArena, JsxInfo, PropName, VarDecl};
 use crate::js_ir::build::{exp as JE, expression_has_no_side_effects, stmt as JS};
@@ -240,13 +241,9 @@ impl LambdaCompiler {
     /// lam_compile_external_call.ml `hold_args`: `hold_external_arg` for
     /// the compiled arguments of a call, paired with the specs as in
     /// `assemble_external_args_no_splice`.
-    pub(crate) fn hold_external_args(
-        &mut self,
-        arg_types: &[Param],
-        args: Vec<(Block, Expr)>,
-    ) -> Vec<(Block, Expr)> {
+    pub(crate) fn hold_external_args(&mut self, arg_types: &[Param], args: HeldArgs) -> HeldArgs {
         let mut args = args.into_iter();
-        let mut held = Vec::with_capacity(args.len());
+        let mut held = HeldArgs::with_capacity(args.len());
         for spec in arg_types {
             if matches!(spec.arg_type, Attr::ArgCst(_)) {
                 continue;
@@ -264,10 +261,10 @@ impl LambdaCompiler {
     pub(crate) fn hold_external_obj_args(
         &mut self,
         obj_params: &[ObjParam],
-        args: Vec<(Block, Expr)>,
-    ) -> Vec<(Block, Expr)> {
+        args: HeldArgs,
+    ) -> HeldArgs {
         let mut args = args.into_iter();
-        let mut held = Vec::with_capacity(args.len());
+        let mut held = HeldArgs::with_capacity(args.len());
         for param in obj_params {
             let arg_label = match &param.obj_arg_label {
                 Label::ObjLabel { .. } | Label::ObjEmpty

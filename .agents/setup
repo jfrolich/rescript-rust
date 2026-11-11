@@ -16,9 +16,9 @@ step() {
 OPAM_VERSION=2.5.0
 OCAML_VERSION=5.5.1
 OPAM_SWITCH=rescript
-# rewatch pins its toolchain in rewatch/rust-toolchain.toml; compiler-rust
-# builds with the same one.
-RUST_TOOLCHAIN="$(awk -F '"' '/^channel/ { print $2; exit }' rewatch/rust-toolchain.toml)"
+# rust-toolchain.toml at the repository root pins the toolchain every Rust
+# build here uses (rewatch and compiler-rust).
+RUST_TOOLCHAIN="$(awk -F '"' '/^channel/ { print $2; exit }' rust-toolchain.toml)"
 
 step "System packages"
 missing=()
@@ -58,11 +58,11 @@ opam install -y ounit2.2.2.7 ocamlformat.0.29.0
 step "Rust $RUST_TOOLCHAIN"
 if [[ ! -x "$HOME/.cargo/bin/rustup" ]]; then
   curl -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path --profile minimal \
-    --default-toolchain "$RUST_TOOLCHAIN" -c clippy -c rustfmt
+    --default-toolchain "$RUST_TOOLCHAIN" -c clippy -c rustfmt -c llvm-tools
 fi
 # shellcheck disable=SC1091
 source "$HOME/.cargo/env"
-rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal -c clippy -c rustfmt
+rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal -c clippy -c rustfmt -c llvm-tools
 rustup default "$RUST_TOOLCHAIN"
 
 step "Login shell environment"

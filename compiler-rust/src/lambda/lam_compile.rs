@@ -1174,15 +1174,15 @@ impl LambdaCompiler {
         let mut items = smallvec::SmallVec::<[Lam; 8]>::new();
         items.push(func);
         items.extend_from_slice(a.list(args));
-        let (prelude, mut values) = self.compile_arguments(a, method_callee, items);
-        let compiled_args = values.split_off(1);
-        let func_expr = values.pop().expect("compiled callee");
+        let (prelude, values) = self.compile_arguments(a, method_callee, items);
+        let (func_expr, compiled_args) = values.split_first().expect("compiled callee");
+        let func_expr = *func_expr;
 
         Compiled {
             prelude,
             expr: JE::call(
                 func_expr,
-                &compiled_args,
+                compiled_args,
                 call_info_of_apply_status(apply.info.status),
                 &mut self.j,
             ),
@@ -1325,7 +1325,9 @@ impl LambdaCompiler {
             // `apply_with_arity`, while missing/Submodule arity uses dummy
             // Call_na information.
             ApplyStatus::Na => match known_arity {
-                Some(arity) if !arity.is_na() => self.apply_with_arity(func, arity, compiled_args),
+                Some(arity) if !arity.is_na() => {
+                    self.apply_with_arity(func, arity, compiled_args.into_vec())
+                }
                 _ => JE::call(func, &compiled_args, CallInfo::default(), &mut self.j),
             },
         };
@@ -4570,7 +4572,7 @@ impl LambdaCompiler {
         compiled_args.remove(0);
         tail_loop.triggered = true;
         let args = if tail_loop.params.is_empty() {
-            Vec::new()
+            Default::default()
         } else {
             compiled_args
         };
