@@ -11,6 +11,10 @@ tella_args=()
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --reformat)
+            PARITY_COMPARE_MODE=reformat
+            shift
+            ;;
         --with-external)
             include_external=true
             shift
@@ -47,6 +51,7 @@ if [[ "${fixture_args[0]:-}" == "--help" || "${fixture_args[0]:-}" == "-h" ]]; t
     echo ""
     echo "Options:"
     echo "  --with-external  Include the external corpus via TELLA_DIR as well."
+    echo "  --reformat       Normalize JS comparisons (default: exact)."
     echo "  --release        Use target/release Rust compiler and rewatch artifacts."
     echo "  -q, --quick      Stop early in focused fixtures and external Tella build."
     echo ""
@@ -54,6 +59,16 @@ if [[ "${fixture_args[0]:-}" == "--help" || "${fixture_args[0]:-}" == "-h" ]]; t
     echo "  TELLA_DIR=$project_root/.no_external_js_corpus ./scripts/test_rust_parity.sh --skip-syntax [options]"
     exit 0
 fi
+
+# The external build comparator is not part of the reformat gate yet.
+if [[ "$include_external" == true && "${PARITY_COMPARE_MODE:-exact}" == reformat ]]; then
+    echo "--reformat does not support --with-external" >&2
+    exit 2
+fi
+PROJECT_ROOT="$project_root"
+RUST_TARGET="${RUST_TARGET:-debug}"
+source "$PROJECT_ROOT/scripts/parity_lib.sh"
+parity_init_comparison
 
 if [[ "$include_external" == "true" ]]; then
     set +e

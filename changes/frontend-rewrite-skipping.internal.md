@@ -1,0 +1,1 @@
+- Inventory the built-in frontend rewrites and retain certified rewrite-free expression subtrees instead of rebuilding them.
