@@ -14,7 +14,7 @@ use crate::lambda::lam_constant::{Constant, ConstructorRuntimeTag, PointerInfo};
 use crate::lambda::lam_primitive::Primitive;
 use crate::lambda::lam_tag_info::TagInfo;
 use crate::lambda::{ApInfo, ApplyStatus, Lambda};
-use crate::raw_lambda::{RawArena, RawLambda};
+use crate::raw_lambda::RawLambda;
 
 const EXCEPTION_ID_FIELD: &str = "RE_EXN_ID";
 
@@ -286,7 +286,11 @@ fn constant_is_lowered(constant: &Constant) -> bool {
 /// `Translcore.wrap_exn` (compiler/ml/translcore.ml:912-920): apply
 /// `Primitive_exceptions.internalToException` to a caught value, so matching
 /// sees a ReScript exception. Used by the conversion's `pack_trywith_exn`.
-pub(crate) fn wrap_exn_raw(b: &RawArena, loc: LamLoc, arg: RawLambda) -> RawLambda {
+pub(crate) fn wrap_exn_raw(
+    b: &impl super::RawLambdaBuilder,
+    loc: LamLoc,
+    arg: RawLambda,
+) -> RawLambda {
     let module = b.global_module(Ident::create_persistent("Primitive_exceptions"));
     let internal_to_exception = b.prim(
         Primitive::Pfield(
@@ -783,7 +787,11 @@ fn same_module_source(a: &LamArena, lhs: Lam, rhs: Lam) -> bool {
 
 /// `Translcore.exception_id_destructed` (translcore.ml:921-955): does `lam`
 /// use the caught value `exn` other than by re-raising it?
-pub(crate) fn exception_id_destructed_raw(a: &LamArena, lam: RawLambda, exn: &Ident) -> bool {
+pub(crate) fn exception_id_destructed_raw(
+    a: &impl super::builder::RawLambdaRead,
+    lam: RawLambda,
+    exn: &Ident,
+) -> bool {
     match a.view(lam) {
         View::Prim(Primitive::Praise, [arg], _) if a.as_var(*arg).is_some() => false,
         View::Var(id) => id.same(exn),
@@ -856,6 +864,7 @@ pub fn lower_to_lambda(arena: LamArena, raw: RawLambda) -> Lambda {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::raw_lambda::RawArena;
 
     use crate::lambda::lam_compat::LetKind;
     use crate::lambda::lam_constant::{ConstructorRuntimeTag, ConstructorTag};
