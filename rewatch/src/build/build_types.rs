@@ -22,6 +22,13 @@ pub struct DumpRequest {
 }
 
 impl DumpRequest {
+    /// Whether a requested dump prints source locations, so that modules
+    /// are parsed with them from the start. A build that only dumps
+    /// signatures parses and retries like a build without dumps.
+    pub fn needs_locations(&self) -> bool {
+        self.kinds.iter().any(|kind| kind.needs_locations())
+    }
+
     pub fn write(
         &self,
         package_name: &str,
@@ -489,6 +496,14 @@ impl BuildState {
 }
 
 impl BuildCommandState {
+    /// Whether modules are parsed with source locations from the start: in
+    /// the diagnostic rebuild, and when a requested dump prints them.
+    /// Otherwise a module is parsed without them and parsed again only when
+    /// a diagnostic or an output needs one.
+    pub fn parses_with_locations(&self) -> bool {
+        self.diagnostic_locations || self.dump.as_ref().is_some_and(DumpRequest::needs_locations)
+    }
+
     pub fn new(
         root_folder: PathBuf,
         project_context: ProjectContext,

@@ -66,7 +66,7 @@ note_line=$(printf "%s\n" "$output" | grep -n 'Annotation payload is ignored' | 
 [ "$(printf "%s\n" "$output" | grep -c 'Warning genType')" -eq 1 ] ||
   fail "The genType note was not shown exactly once" "$output"
 
-log=lib/bs/.compiler.log
+log=lib/rescript/.compiler.log
 [ -f "$log" ] || fail "No compiler log" "$output"
 grep -q 'unused variable a' "$log" || fail "The compiler log lacks A's warning" "$(cat "$log")"
 if grep -q 'Warning genType' "$log"; then

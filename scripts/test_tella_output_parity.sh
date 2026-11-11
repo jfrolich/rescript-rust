@@ -183,7 +183,7 @@ echo ""
 
 echo -e "${BOLD}Step 1: Finding source files...${RESET}"
 find "$TELLA_DIR" \
-    -type d \( -name .git -o -name target -o -name .next -o -name _build -o -path "*/lib/bs" -o -path "*/lib/ocaml" \) -prune \
+    -type d \( -name .git -o -name target -o -name .next -o -name _build -o -path "*/lib/rescript" -o -path "*/lib/bs" -o -path "*/lib/ocaml" \) -prune \
     -o -type f -name "*.res" -print 2>/dev/null | sort > "$TEMP_DIR/sources.all.txt"
 
 if [[ -n "$FILE_ARG" ]]; then
@@ -291,17 +291,17 @@ snapshot_artifacts() {
     local dest="$TELLA_ARTIFACTS_DIR/$1"
     mkdir -p "$dest"
     find "$dest" -type f \( -name '*.cmi' -o -name '*.cmt' -o -name '*.cmti' \) -delete
-    (cd "$TELLA_BUILD_DIR" && find . -path '*/node_modules' -prune -o -path '*/lib/bs/*' \
+    (cd "$TELLA_BUILD_DIR" && find . -path '*/node_modules' -prune -o -path '*/lib/rescript/*' \
         \( -name '*.cmi' -o -name '*.cmt' -o -name '*.cmti' \) -print) \
         | rsync -a --files-from=- "$TELLA_BUILD_DIR/" "$dest/"
     # ReScript dependency packages are built too.
     local pkg
     while IFS= read -r pkg; do
         pkg=$(dirname "$pkg")
-        [[ -d "$pkg/lib/bs" ]] || continue
+        [[ -d "$pkg/lib/rescript" ]] || continue
         local name=${pkg#"$TELLA_BUILD_DIR/"}
         mkdir -p "$dest/$name"
-        (cd "$pkg" && find -L lib/bs \( -name '*.cmi' -o -name '*.cmt' -o -name '*.cmti' \) -print) \
+        (cd "$pkg" && find -L lib/rescript \( -name '*.cmi' -o -name '*.cmt' -o -name '*.cmti' \) -print) \
             | rsync -aL --files-from=- "$pkg/" "$dest/$name/"
     done < <(find "$TELLA_BUILD_DIR" -maxdepth 6 -path '*/node_modules/*' \
         \( -name rescript.json -o -name bsconfig.json \) -not -path '*/node_modules/*/node_modules/*' 2>/dev/null)
@@ -312,8 +312,7 @@ if ! run_build "Step 3: Building expected outputs with OCaml bsc..." "$TEMP_DIR/
     set -e
     cd "$0"
     # The OCaml side reads the runtime .cmi files: build the runtime with the
-    # OCaml bsc after the in-process build that writes its lib/ocaml sources.
-    "$2" build "$RESCRIPT_RUNTIME" > /dev/null 2>&1 || true
+    # OCaml bsc.
     "$2" build-reference --bsc "$1" "$RESCRIPT_RUNTIME"
     "$2" clean
     # The Rust compiler expands @jfrolich/ppx-spice with its builtin port of

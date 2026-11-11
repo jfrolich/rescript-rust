@@ -117,7 +117,7 @@ find_project_root() {
     local d
     d=$(dirname "$1")
     while [[ "$d" != "/" && -n "$d" ]]; do
-        if [[ -f "$d/rescript.json" || -f "$d/bsconfig.json" ]] && [[ -d "$d/lib/bs" ]]; then
+        if [[ -f "$d/rescript.json" || -f "$d/bsconfig.json" ]] && [[ -d "$d/lib/rescript" ]]; then
             echo "$d"
             return 0
         fi
@@ -153,8 +153,8 @@ for res_file in "${failing_files[@]}"; do
     compile_output="$tmp_dir/compile.txt"
 
     compile_ok=false
-    if [[ "${#compiler_args[@]}" -gt 0 && -n "$project_dir" && -d "$project_dir/lib/bs" ]]; then
-        if (cd "$project_dir/lib/bs" && timeout "$TIMEOUT_SECONDS" "$RUST_BSC" "${compiler_args[@]}" -o "$actual_file") > "$compile_output" 2>&1; then
+    if [[ "${#compiler_args[@]}" -gt 0 && -n "$project_dir" && -d "$project_dir/lib/rescript" ]]; then
+        if (cd "$project_dir/lib/rescript" && timeout "$TIMEOUT_SECONDS" "$RUST_BSC" "${compiler_args[@]}" -o "$actual_file") > "$compile_output" 2>&1; then
             compile_ok=true
         fi
     else

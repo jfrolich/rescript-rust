@@ -745,12 +745,12 @@ pub fn read_cmt_files_recursively(
         }
     }
 
-    // Mirrors compiler/gentype/EmitJs.ml:438-453: resolve the imported
-    // module through ImportPath.to_cmt and Paths.get_cmt_file before reading
-    // declarations from that typed artifact.
+    // Mirrors compiler/gentype/emit_js.ml `read_cmt_files_recursively`:
+    // resolve the imported module through Import_path.to_cmt and
+    // Paths.get_cmt_file before reading declarations from that typed
+    // artifact.
     let cmt_file = get_cmt_file(&crate::gentype::import_path::to_cmt(
         config,
-        output_file_relative,
         &import_type.import_path,
     ));
 
