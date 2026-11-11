@@ -151,7 +151,9 @@ impl Deref for TypeDescRef<'_> {
 /// `Cmt_utils.deprecated_used_context`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeprecatedContext {
+    /// The deprecated function is called.
     FunctionCall,
+    /// The deprecated item is referenced without a call.
     Reference,
 }
 
@@ -159,10 +161,15 @@ pub enum DeprecatedContext {
 /// `.cmt` for `rescript-tools migrate`.
 #[derive(Debug, Clone)]
 pub struct DeprecatedUse {
+    /// Where the item is used.
     pub source_loc: crate::location::Location,
+    /// The deprecation message.
     pub text: String,
+    /// The `migrate` template expression, marshalled.
     pub migrate: Option<crate::binary_ast::marshal::MarshalFragment>,
+    /// The `migrateInPipeChain` template expression, marshalled.
     pub migrate_in_pipe_chain: Option<crate::binary_ast::marshal::MarshalFragment>,
+    /// How the item is used, when that matters for migration.
     pub context: Option<DeprecatedContext>,
 }
 
@@ -1267,6 +1274,8 @@ impl TypeContext {
         }
     }
 
+    /// Allocate a layout to be completed later, for a variant of a recursive
+    /// declaration group.
     pub fn pending_variant_layout(&self) -> super::variant_runtime::LayoutRef {
         // A pending layout is completed later by this compilation.
         self.poison_store_build();
@@ -1276,6 +1285,7 @@ impl TypeContext {
         layout_ref
     }
 
+    /// Allocate a completed layout.
     pub fn alloc_complete_variant_layout(
         &self,
         layout: super::variant_runtime::Layout,
@@ -1290,6 +1300,7 @@ impl TypeContext {
         layout_ref
     }
 
+    /// Complete a layout allocated with [`Self::pending_variant_layout`].
     pub fn complete_variant_layout(
         &self,
         layout_ref: super::variant_runtime::LayoutRef,
@@ -1338,6 +1349,7 @@ impl TypeContext {
         }
     }
 
+    /// A copy of the layout `layout_ref` refers to.
     pub fn variant_layout(
         &self,
         layout_ref: super::variant_runtime::LayoutRef,
@@ -1425,6 +1437,8 @@ impl TypeContext {
             .unwrap_or_else(|| arena.get_string(idx).to_string())
     }
 
+    /// The name of a longident component interned with
+    /// [`Self::intern_cmi_longident_name`].
     pub fn resolve_cmi_longident_component(&self, idx: StrIdx) -> Option<String> {
         self.cmi_longident_component_name(idx)
     }
@@ -3914,6 +3928,7 @@ impl TypeContext {
         Some(sig)
     }
 
+    /// Whether the raw signature of the persistent module `name` is loaded.
     pub fn has_raw_module_sig(&self, name: &str) -> bool {
         self.poison_store_build_for("read:has_raw_module_sig");
         self.raw_module_sigs.borrow().contains_key(name)
@@ -4803,6 +4818,7 @@ impl TypeContext {
         self.rigid_variants.replace(value)
     }
 
+    /// Whether GADT instances are being tracked (OCaml `Ctype.trace_gadt_instances`).
     pub fn trace_gadt_instances(&self) -> bool {
         self.trace_gadt_instances.get()
     }

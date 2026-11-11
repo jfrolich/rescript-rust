@@ -3292,66 +3292,126 @@ pub enum TypeModError {
     },
     /// Signature mismatch.
     SignatureMismatch {
+        /// Source location to report.
         loc: LocIdx,
+        /// Why the module is not included in its signature.
         error: Box<crate::types::includemod::IncludeModError>,
     },
     /// `Typedecl.Type_clash` (typedecl.ml:2176-2180) from `update_type`.
     TypeDeclTypeClash {
+        /// Source location to report.
         loc: LocIdx,
+        /// The unification trace of the clash.
         trace: Vec<(TypeExprRef, TypeExprRef)>,
     },
     /// Type declaration constraints are inconsistent.
     InconsistentConstraint {
+        /// Source location to report.
         loc: LocIdx,
+        /// The unification trace of the failed constraint.
         trace: Vec<(TypeExprRef, TypeExprRef)>,
     },
     /// An ordinary external declaration has no function arguments.
-    NullArityExternal { loc: LocIdx },
+    NullArityExternal {
+        /// Source location to report.
+        loc: LocIdx,
+    },
     /// Raw fatal compiler exception message.
-    FatalError { message: String },
+    FatalError {
+        /// The exception message.
+        message: String,
+    },
     /// A recursive abbreviation expansion does not satisfy its constraints.
     ConstraintFailed {
+        /// Source location to report.
         loc: LocIdx,
+        /// The type the expansion produced.
         actual: TypeExprRef,
+        /// The constrained type it should be an instance of.
         expected: TypeExprRef,
     },
     /// A manifest type and explicit record/variant representation do not agree.
     DefinitionMismatch {
+        /// Source location to report.
         loc: LocIdx,
+        /// The manifest type.
         ty: TypeExprRef,
+        /// Why the representations differ, if known.
         detail: Option<String>,
     },
     /// A private fixed row type has an invalid manifest.
-    BadFixedType { loc: LocIdx, reason: String },
+    BadFixedType {
+        /// Source location to report.
+        loc: LocIdx,
+        /// Why the manifest is invalid.
+        reason: String,
+    },
     /// A type parameter variance annotation is not satisfied by the declaration.
     BadVariance {
+        /// Source location to report.
         loc: LocIdx,
+        /// The 1-based position of the parameter, or a negative code for a
+        /// variable that is not a parameter (`Typedecl.Bad_variance`).
         param_index: i32,
+        /// The variance the definition gives the parameter: (covariant,
+        /// contravariant, injective).
         actual: (bool, bool, bool),
+        /// The variance its annotation requires.
         expected: (bool, bool, bool),
     },
     /// A GADT result type constrains a parameter whose variance cannot be checked.
-    VaryingAnonymous { loc: LocIdx },
+    VaryingAnonymous {
+        /// Source location to report.
+        loc: LocIdx,
+    },
     /// Invalid untagged variant definition.
-    InvalidUntaggedVariantDefinition { loc: Location, reason: String },
+    InvalidUntaggedVariantDefinition {
+        /// Source location to report.
+        loc: Location,
+        /// Why the definition is invalid.
+        reason: String,
+    },
     /// A variant type spread could not resolve its source type.
-    VariantSpreadCouldNotFindType { loc: LocIdx },
+    VariantSpreadCouldNotFindType {
+        /// Source location to report.
+        loc: LocIdx,
+    },
     /// A variant type spread source is not a concrete variant.
-    VariantSpreadInvalidType { loc: LocIdx },
+    VariantSpreadInvalidType {
+        /// Source location to report.
+        loc: LocIdx,
+    },
     /// Type parameters are not supported in variant type spreads.
-    VariantSpreadHasTypeParams { loc: LocIdx },
+    VariantSpreadHasTypeParams {
+        /// Source location to report.
+        loc: LocIdx,
+    },
     /// Variant type spread would duplicate a constructor already present in the target.
     VariantSpreadDuplicateConstructor {
+        /// Source location to report.
         loc: LocIdx,
+        /// The spread variant.
         variant_name: String,
+        /// The constructor both variants define.
         constructor_name: String,
     },
     /// Variant type spread source and target have different unboxed configuration.
-    VariantSpreadUnboxedMismatch { loc: LocIdx, source_unboxed: bool },
+    VariantSpreadUnboxedMismatch {
+        /// Source location to report.
+        loc: LocIdx,
+        /// Whether the spread variant is `@unboxed`.
+        source_unboxed: bool,
+    },
     /// Variant type spread source and target have different @tag configuration.
-    VariantSpreadTagMismatch { loc: LocIdx },
+    VariantSpreadTagMismatch {
+        /// Source location to report.
+        loc: LocIdx,
+    },
     /// A type declaration repeats the same type parameter.
-    RepeatedParameter { loc: LocIdx },
+    RepeatedParameter {
+        /// Source location to report.
+        loc: LocIdx,
+    },
     /// Duplicate constructor in a variant type declaration.
     DuplicateConstructor {
         /// Source location to report.
@@ -3387,28 +3447,56 @@ pub enum TypeModError {
         field_name: String,
     },
     /// A type abbreviation expands to itself.
-    RecursiveAbbrev { loc: LocIdx, name: String },
+    RecursiveAbbrev {
+        /// Source location to report.
+        loc: LocIdx,
+        /// The abbreviation.
+        name: String,
+    },
     /// A type definition contains an abbreviation cycle.
     CycleInDef {
+        /// Source location to report.
         loc: LocIdx,
+        /// The type being defined.
         name: String,
+        /// The abbreviation that leads back to it.
         ty: TypeExprRef,
     },
     /// A recursive type abbreviation is used with non-regular parameters.
     ParametersDiffer {
+        /// Source location to report.
         loc: LocIdx,
+        /// The recursive type.
         path: Path,
+        /// The occurrence with different arguments.
         actual: TypeExprRef,
+        /// The occurrence with the declared parameters.
         expected: TypeExprRef,
     },
     /// Invalid type declaration attribute usage.
-    InvalidAttribute { loc: LocIdx, message: String },
+    InvalidAttribute {
+        /// Source location to report.
+        loc: LocIdx,
+        /// What is wrong with the attribute.
+        message: String,
+    },
     /// `@unboxed` was used on a declaration shape that cannot be unboxed.
-    BadUnboxedAttribute { loc: LocIdx, message: String },
+    BadUnboxedAttribute {
+        /// Source location to report.
+        loc: LocIdx,
+        /// Why the declaration cannot be unboxed.
+        message: String,
+    },
     /// Both `@boxed` and `@unboxed` were used on the same type declaration.
-    BoxedAndUnboxed { loc: LocIdx },
+    BoxedAndUnboxed {
+        /// Source location to report.
+        loc: LocIdx,
+    },
     /// `@immediate` was used on a type that can contain pointer values.
-    BadImmediateAttribute { loc: LocIdx },
+    BadImmediateAttribute {
+        /// Source location to report.
+        loc: LocIdx,
+    },
     /// A declaration constructor extends a private extensible type.
     CannotExtendPrivateType {
         /// Constructor declaration location.
@@ -3466,7 +3554,9 @@ pub enum TypeModError {
     UnboundTypeVarInExtension {
         /// Extension constructor location.
         loc: LocIdx,
+        /// The free type variable.
         var: TypeExprRef,
+        /// The constructor arguments it occurs in.
         args: crate::types::ConstructorArguments,
     },
     /// An extension constructor contains an unbound type variable.

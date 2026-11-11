@@ -32,15 +32,19 @@ use std::io::Write;
 /// S-expression type
 #[derive(Debug, Clone)]
 pub enum Sexp {
+    /// An atom, printed as is.
     Atom(String),
+    /// A parenthesized list.
     List(Vec<Sexp>),
 }
 
 impl Sexp {
+    /// An atom of `s`.
     pub fn atom(s: &str) -> Self {
         Sexp::Atom(s.to_string())
     }
 
+    /// A list of `items`.
     pub fn list(items: Vec<Sexp>) -> Self {
         Sexp::List(items)
     }

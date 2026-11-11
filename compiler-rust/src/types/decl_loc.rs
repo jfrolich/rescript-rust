@@ -46,10 +46,15 @@ const INDEX_MASK: u32 = GHOST_BIT - 1;
 /// Owner of the location a [`DeclLoc`] denotes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeclLocKind {
+    /// The handle itself holds a location without coordinates.
     Source = 0,
+    /// An entry of the compiling `TypeContext`'s table.
     Local = 1,
+    /// An entry of the worker's `ThreadTypeStore` table.
     Store = 2,
+    /// An entry of a `SharedTypePool` graph's table.
     Shared = 3,
+    /// An entry of a [`DeclLocTable`] that travels with an owned value.
     Portable = 4,
 }
 
@@ -99,6 +104,7 @@ impl DeclLoc {
         }
     }
 
+    /// Which table, if any, holds the location.
     pub fn kind(self) -> DeclLocKind {
         match self.bits >> KIND_SHIFT {
             0 => DeclLocKind::Source,
@@ -207,18 +213,22 @@ impl PartialEq for DeclLocTable {
 impl Eq for DeclLocTable {}
 
 impl DeclLocTable {
+    /// Whether the table holds no locations.
     pub fn is_empty(&self) -> bool {
         self.locations.is_empty()
     }
 
+    /// The number of locations in the table.
     pub fn len(&self) -> usize {
         self.locations.len()
     }
 
+    /// The locations, by handle index.
     pub fn locations(&self) -> &[Location] {
         &self.locations
     }
 
+    /// The locations, by handle index, for rewriting in place.
     pub fn locations_mut(&mut self) -> &mut [Location] {
         &mut self.locations
     }

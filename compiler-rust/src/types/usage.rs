@@ -39,16 +39,22 @@ pub struct ConstructorUsageCell(u32);
 /// `Env.constructor_usage` (env.ml:38).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConstructorUsage {
+    /// The constructor is used to build a value.
     Positive,
+    /// The constructor is matched in a pattern.
     Pattern,
+    /// The constructor is exported through a private type.
     Privatize,
 }
 
 /// `Env.constructor_usages` (env.ml:39-43).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ConstructorUsages {
+    /// Whether the constructor is used to build a value.
     pub cu_positive: bool,
+    /// Whether it is matched in a pattern.
     pub cu_pattern: bool,
+    /// Whether it is exported through a private type.
     pub cu_privatize: bool,
 }
 
@@ -99,6 +105,9 @@ fn intern(name: impl NameKey) -> Name {
     name.name_key().unwrap_or_else(|| Name::new(name.text()))
 }
 
+/// The usage-tracking state of one compilation: OCaml's `Env` usage
+/// callback tables (env.ml:1146-1200) and the `ref` cells their callbacks
+/// set.
 #[derive(Debug, Default)]
 pub struct UsageTables {
     /// `Env.value_declarations`; a key's callbacks run in registration order
@@ -123,6 +132,7 @@ pub fn warns_for_name(name: &str) -> bool {
 }
 
 impl UsageTables {
+    /// A new usage cell, initially unused.
     pub fn new_cell(&mut self) -> UsedCell {
         self.cells.push(false);
         UsedCell(self.cells.len() as u32 - 1)
@@ -208,6 +218,7 @@ impl UsageTables {
         LetGroup(self.let_groups.len() as u32 - 1)
     }
 
+    /// A new slot of a `let` group, collecting the names bound in one binding.
     pub fn new_let_slot(&mut self) -> LetSlot {
         self.let_slots.push(Vec::new());
         LetSlot(self.let_slots.len() as u32 - 1)
@@ -218,6 +229,8 @@ impl UsageTables {
         self.let_groups[group.0 as usize].current_slot = slot;
     }
 
+    /// Whether the group's bindings use one another (`rec_needed`), so `rec`
+    /// is needed.
     pub fn let_rec_needed(&self, group: LetGroup) -> bool {
         self.let_groups[group.0 as usize].rec_needed
     }
@@ -247,10 +260,12 @@ impl UsageTables {
             });
     }
 
+    /// Whether the cell has been marked used.
     pub fn is_used(&self, cell: UsedCell) -> bool {
         self.cells[cell.0 as usize]
     }
 
+    /// How the constructor of `cell` has been used.
     pub fn constructor_usages(&self, cell: ConstructorUsageCell) -> ConstructorUsages {
         self.constructor_usages[cell.0 as usize]
     }

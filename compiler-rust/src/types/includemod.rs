@@ -125,66 +125,108 @@ fn deprecated_mutable_inclusion_warning(
 pub enum IncludeModError {
     /// Missing signature field in implementation.
     MissingField {
+        /// The missing item.
         id: Ident,
+        /// Where the signature declares it.
         loc: crate::types::DeclLoc,
+        /// What kind of item it is, as printed (e.g. "value", "type").
         kind: &'static str,
     },
     /// Value type mismatch.
     ValueTypeMismatch {
+        /// The value.
         name: Ident,
+        /// The implementation's declaration.
         actual: Box<ValueDescription>,
+        /// The signature's declaration.
         expected: Box<ValueDescription>,
+        /// The implementation's and the signature's arity, when they differ.
         arity_mismatch: Option<(usize, usize)>,
     },
     /// Type declaration mismatch.
-    TypeMismatch { name: Ident, reason: String },
+    TypeMismatch {
+        /// The type.
+        name: Ident,
+        /// Why the declarations differ.
+        reason: String,
+    },
     /// Type declaration mismatch with enough context to print OCaml's report.
     TypeDeclarationMismatch {
+        /// The type.
         name: Ident,
+        /// The implementation's declaration.
         actual: Box<TypeDeclaration>,
+        /// The signature's declaration.
         expected: Box<TypeDeclaration>,
+        /// How they differ.
         detail: TypeDeclarationMismatchDetail,
     },
     /// Extension constructor mismatch.
     ExtensionConstructorMismatch {
+        /// The constructor.
         name: Ident,
+        /// The implementation's constructor.
         actual: Box<ExtensionConstructor>,
+        /// The signature's constructor.
         expected: Box<ExtensionConstructor>,
     },
     /// Module type mismatch.
-    ModuleTypeMismatch { name: Ident, reason: String },
+    ModuleTypeMismatch {
+        /// The module type.
+        name: Ident,
+        /// Why the declarations differ.
+        reason: String,
+    },
     /// Module type declaration mismatch.
     ModuleTypeDeclarationMismatch {
+        /// The module type.
         name: Ident,
+        /// The implementation's declaration.
         actual: Box<ModtypeDeclaration>,
+        /// The signature's declaration.
         expected: Box<ModtypeDeclaration>,
+        /// Why they are not equivalent.
         error: Box<IncludeModError>,
     },
     /// Equivalent module type declarations require a structure-field permutation.
     ModtypePermutation,
     /// Nested module types do not include one another.
     ModuleTypesMismatch {
+        /// The implementation's module type.
         actual: Box<ModuleType>,
+        /// The signature's module type.
         expected: Box<ModuleType>,
+        /// Why the first is not included in the second.
         error: Box<IncludeModError>,
     },
     /// A module alias normalized to a path whose compiled interface is missing.
-    UnboundModulePath { path: Path },
+    UnboundModulePath {
+        /// The normalized path.
+        path: Path,
+    },
     /// Nested include error reported in a module context.
     InModule {
+        /// The module.
         name: Ident,
+        /// The error inside it.
         error: Box<IncludeModError>,
     },
     /// Nested include error reported in a functor result context.
     InFunctorBody {
+        /// The functor's parameter.
         param: Ident,
+        /// The implementation's functor type.
         actual: Box<ModuleType>,
+        /// The signature's functor type.
         expected: Box<ModuleType>,
+        /// The error in the result.
         error: Box<IncludeModError>,
     },
     /// Nested include error reported in a module type position.
     AtModtype {
+        /// The module type.
         name: Ident,
+        /// The error inside it.
         error: Box<IncludeModError>,
     },
     /// Functor parameter mismatch.
@@ -205,8 +247,11 @@ pub enum IncludeModError {
 /// variant layout rather than from a formatted declaration.
 #[derive(Debug, Clone)]
 pub enum TypeDeclarationMismatchDetail {
+    /// The `@tag` attributes differ.
     TagName,
+    /// The variances differ.
     Variance,
+    /// Any other difference, as its message.
     Rendered(String),
 }
 
@@ -232,6 +277,7 @@ impl From<&str> for TypeDeclarationMismatchDetail {
     }
 }
 
+/// Render an inclusion error as OCaml's "Signature mismatch" report.
 pub fn format_error(type_ctx: &TypeContext, filename: &str, error: &IncludeModError) -> String {
     let mut output = String::new();
     output.push_str("  Signature mismatch:\n");
@@ -974,6 +1020,8 @@ pub fn modtypes(
     modtypes_with_warnings(type_ctx, env, mty_impl, mty_sig, &mut warnings)
 }
 
+/// OCaml `Includemod.modtypes`: check that `mty_impl` is included in
+/// `mty_sig` and return the coercion, collecting warnings.
 pub fn modtypes_with_warnings(
     type_ctx: &TypeContext,
     env: &Env,
@@ -1532,6 +1580,8 @@ fn modtypes_inner(
 // Signature Inclusion
 // ============================================================================
 
+/// Whether a signature item has a runtime representation (and so a slot
+/// in the module's block).
 pub fn is_runtime_component(item: &SignatureItem) -> bool {
     match item {
         SignatureItem::SigValue(_, desc) => !matches!(desc.val_kind, ValueKind::ValPrim(_)),
@@ -1922,6 +1972,8 @@ fn check_paired_signature_items(
     Ok(coercions)
 }
 
+/// Drop every value declaration that a later one with the same name
+/// shadows (OCaml `Typemod.simplify_signature`).
 pub fn simplify_signature(sig: &Signature) -> Signature {
     let mut seen_values = HashSet::new();
     let mut simplified = Vec::with_capacity(sig.len());
@@ -2137,6 +2189,8 @@ fn mark_self_included_items_used(type_ctx: &TypeContext, env: &Env, sig: &Signat
     }
 }
 
+/// OCaml `Includemod.compunit`: check that a unit's implementation
+/// signature is included in its interface.
 pub fn compunit(
     type_ctx: &TypeContext,
     env: &Env,
@@ -2157,6 +2211,7 @@ pub fn compunit(
     )
 }
 
+/// [`compunit`], collecting warnings.
 pub fn compunit_with_warnings(
     type_ctx: &TypeContext,
     env: &Env,

@@ -501,7 +501,9 @@ impl<T: Copy + std::fmt::Debug> std::fmt::Debug for PoolSlice<'_, T> {
 /// Iterator over a [`PoolSlice`], yielding copies.
 #[derive(Clone)]
 pub enum PoolIter<'a, T: Copy> {
+    /// Over a pool slice whose items are cells.
     Cells(std::slice::Iter<'a, Cell<T>>),
+    /// Over a plain slice.
     Plain(std::slice::Iter<'a, T>),
 }
 
@@ -1357,8 +1359,11 @@ impl TypeArgLabel {
 /// The constructor of an [`ArgLabel`], for matching on a [`TypeArgLabel`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ArgLabelKind {
+    /// An unlabeled argument.
     Nolabel,
+    /// A labeled argument (`~x`).
     Labelled,
+    /// An optional argument (`?x`).
     Optional,
 }
 
@@ -1444,10 +1449,15 @@ pub enum AbbrevMemo {
     Mnil,
     /// Abbreviation: (private_flag, path, abbrev, expansion, next)
     Mcons {
+        /// Whether the expansion is of a private abbreviation.
         private_flag: PrivateFlag,
+        /// The abbreviation's path.
         path: Path,
+        /// The abbreviated type.
         abbrev: TypeExprRef,
+        /// What it expands to.
         expansion: TypeExprRef,
+        /// The rest of the memo.
         next: AbbrevMemoRef,
     },
     /// Link to another memo
@@ -1536,7 +1546,9 @@ impl AbbrevMemoRef {
 /// decision must use `TypeContext::mutability_repr`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FieldMutability {
+    /// A final value.
     Value(super::asttypes::MutableFlag),
+    /// A link to another cell of the same class.
     Link(MutabilityRef),
 }
 
@@ -1576,6 +1588,8 @@ impl MutabilityRef {
         Self(STORE_REF_TAG | (id << 1) | bit)
     }
 
+    /// Whether the cell is a persistent one, shared process-wide, rather than
+    /// local to a compilation.
     #[inline]
     pub fn is_persistent(self) -> bool {
         self.0 & STORE_REF_TAG != 0

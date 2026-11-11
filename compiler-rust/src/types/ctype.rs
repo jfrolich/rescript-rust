@@ -84,6 +84,7 @@ pub enum TypeError {
         /// The unification trace of the failed constraint, without its
         /// outermost pair.
         trace2: Vec<TypePair>,
+        /// What the coercion was checking, for the error's explanation.
         context: Option<SubtypeContext>,
     },
 }
@@ -92,39 +93,64 @@ pub enum TypeError {
 #[derive(Debug, Clone)]
 pub enum SubtypeContext {
     /// Generic error with error code.
-    Generic { error_code: String },
+    Generic {
+        /// The error code shown in the explanation.
+        error_code: String,
+    },
 
     /// Primitive-to-variant coercion target is not unboxed.
-    CoercionTargetVariantNotUnboxed { variant_name: Path, primitive: Path },
+    CoercionTargetVariantNotUnboxed {
+        /// The target variant.
+        variant_name: Path,
+        /// The primitive type coerced from.
+        primitive: Path,
+    },
 
     /// Primitive-to-variant coercion target does not cover the primitive type.
-    CoercionTargetVariantDoesNotCoverType { variant_name: Path, primitive: Path },
+    CoercionTargetVariantDoesNotCoverType {
+        /// The target variant.
+        variant_name: Path,
+        /// The primitive type coerced from.
+        primitive: Path,
+    },
 
     /// Variant constructors do not have the runtime representation required by the target.
     VariantConstructorRuntimeRepresentationMismatch {
+        /// The variant being coerced.
         variant_name: Path,
+        /// Each constructor whose representation does not fit.
         issues: Vec<VariantRuntimeRepresentationIssue>,
     },
 
     /// Variant type declarations have incompatible runtime configuration.
     VariantConfigurationsMismatch {
+        /// The source variant.
         left_variant_name: Path,
+        /// The target variant.
         right_variant_name: Path,
+        /// How their configurations differ.
         issue: Box<VariantConfigurationIssue>,
     },
 
     /// Different type kinds.
     DifferentTypeKinds {
+        /// The source type.
         left_typename: Path,
+        /// The target type.
         right_typename: Path,
+        /// The source type's kind.
         left_type_kind: SubtypeTypeKind,
+        /// The target type's kind.
         right_type_kind: SubtypeTypeKind,
     },
 
     /// Records have fields that are not compatible.
     RecordFieldsMismatch {
+        /// The source record.
         left_record_name: Path,
+        /// The target record.
         right_record_name: Path,
+        /// Each incompatible field.
         issues: Vec<RecordFieldSubtypeViolation>,
     },
 }
@@ -145,25 +171,41 @@ pub enum SubtypeTypeKind {
 /// Runtime representation problem for variant-to-primitive coercions.
 #[derive(Debug, Clone)]
 pub enum VariantRuntimeRepresentationIssue {
+    /// A constructor's unboxed payload is not of the target type.
     MismatchedUnboxedPayload {
+        /// The constructor.
         constructor_name: String,
+        /// The primitive type coerced to.
         expected_typename: Path,
     },
+    /// A constructor's `@as` value is not of the target type.
     MismatchedAsPayload {
+        /// The constructor.
         constructor_name: String,
+        /// The primitive type coerced to.
         expected_typename: Path,
+        /// The runtime type of the constructor's `@as` value, if it has one.
         as_payload: Option<VariantConstructorAsPayload>,
     },
+    /// A constructor's `@as` value has a type that cannot be coerced.
     AsPayloadNotEligibleForCoercion {
+        /// The constructor.
         constructor_name: String,
+        /// The primitive type coerced to.
         expected_typename: Path,
+        /// The runtime type of the constructor's `@as` value.
         as_payload: VariantConstructorAsPayload,
     },
+    /// A constructor with an inline record payload.
     InlineRecordCannotBeCoerced {
+        /// The constructor.
         constructor_name: String,
     },
+    /// A constructor of a boxed variant has a payload.
     CannotCoerceNonUnboxedWithPayload {
+        /// The constructor.
         constructor_name: String,
+        /// The primitive type coerced to.
         expected_typename: Path,
     },
 }
@@ -171,12 +213,19 @@ pub enum VariantRuntimeRepresentationIssue {
 /// Runtime type encoded by a variant constructor `@as` payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VariantConstructorAsPayload {
+    /// A string.
     String,
+    /// An `int`.
     Int,
+    /// A `float`.
     Float,
+    /// A `bigint`.
     BigInt,
+    /// A boolean.
     Bool,
+    /// `null`.
     Null,
+    /// `undefined`.
     Undefined,
 }
 
@@ -209,18 +258,27 @@ pub enum VariantConfigurationIssue {
 pub enum RecordFieldSubtypeViolation {
     /// One side marks a field optional and the other does not.
     OptionalMismatch {
+        /// The field.
         label: String,
+        /// Whether the source field is optional.
         left_optional: bool,
+        /// Whether the target field is optional.
         right_optional: bool,
     },
     /// The field runtime names differ, either by label or `@as` payload.
     FieldRuntimeNameMismatch {
+        /// The field.
         label: String,
+        /// The source field's `@as` name, if any.
         left_as: Option<String>,
+        /// The target field's `@as` name, if any.
         right_as: Option<String>,
     },
     /// A field present in the target record is missing from the source record.
-    FieldMissing { label: String },
+    FieldMissing {
+        /// The missing field.
+        label: String,
+    },
 }
 
 /// Result type for type operations.
@@ -1866,6 +1924,8 @@ fn binding_facts(ctx: &TypeContext, var: TypeExprRef, ty: TypeExprRef) -> Option
     Some(facts)
 }
 
+/// OCaml `Ctype.occur` as a predicate: whether `needle` occurs in
+/// `haystack` (through links and abbreviation memos).
 pub fn occurs(ctx: &TypeContext, needle: TypeExprRef, haystack: TypeExprRef) -> bool {
     fn occurs_rec(
         ctx: &TypeContext,
@@ -2921,6 +2981,8 @@ pub(crate) fn resolve_type_item_through_modules(
     result
 }
 
+/// The declaration of a dotted type path, found by walking the module
+/// components its prefix names.
 pub fn resolve_type_through_modules(
     ctx: &TypeContext,
     path: &Path,
@@ -3107,6 +3169,7 @@ fn resolve_module_type_through_env_path(
     }
 }
 
+/// The module type a module path denotes in `env`, following aliases.
 pub fn resolve_module_type_through_env(
     ctx: &TypeContext,
     env: &super::env::Env,
@@ -3272,6 +3335,8 @@ fn strengthen_module_type_for_module_access_path(
     }
 }
 
+/// OCaml `Mtype.strengthen ~aliasable:true`: make the abstract types of
+/// `mty` equal to their counterparts under `module_access_path`.
 pub fn strengthen_module_type_for_inclusion_path(
     ctx: &TypeContext,
     env: &super::env::Env,
@@ -3281,6 +3346,9 @@ pub fn strengthen_module_type_for_inclusion_path(
     strengthen_module_type_for_module_access_path(ctx, env, true, module_access_path, mty)
 }
 
+/// OCaml `Mtype.strengthen ~aliasable:false`: like
+/// [`strengthen_module_type_for_inclusion_path`], but submodules are not
+/// turned into aliases.
 pub fn strengthen_module_type_for_non_aliasable_path(
     ctx: &TypeContext,
     env: &super::env::Env,
@@ -6493,7 +6561,9 @@ pub fn filter_method(
 /// ctype.ml `object_field_write_error`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ObjectFieldWriteError {
+    /// The field is absent and the row is closed.
     OwriteMissing,
+    /// The field exists but is immutable.
     OwriteNotMutable,
 }
 
@@ -9471,6 +9541,8 @@ fn moregen(
     }
 }
 
+/// OCaml `Ctype.moregeneral`: whether the scheme `pat_sch` is at least as
+/// general as `subj_sch`.
 pub fn moregeneral(
     ctx: &TypeContext,
     env: &Env,
@@ -9608,6 +9680,8 @@ fn generalize_rec(ctx: &TypeContext, ty: TypeExprRef) {
     }
 }
 
+/// OCaml `Ctype.generalize`: raise to the generic level every node of `ty`
+/// above the current level.
 pub fn generalize(ctx: &TypeContext, ty: TypeExprRef) {
     // OCaml: simple_abbrevs := Mnil
     ctx.clear_simple_abbrevs();
@@ -9766,6 +9840,7 @@ fn lower_nongen_module_type_rec(
     }
 }
 
+/// OCaml `Ctype.lower_nongen` over every value type of a module type.
 pub fn lower_nongen_module_type(
     ctx: &TypeContext,
     nglev: i32,
@@ -9792,6 +9867,8 @@ fn force_generalize_sig_type_rec(ctx: &TypeContext, ty: TypeExprRef, seen: &mut 
     }
 }
 
+/// Generalize every node of a signature item's type, regardless of its
+/// level.
 pub fn force_generalize_sig_type(ctx: &TypeContext, ty: TypeExprRef) {
     ctx.clear_simple_abbrevs();
     let mut seen = TypeExprRefSet::new();
@@ -9837,11 +9914,13 @@ fn force_generalize_module_type_rec(
     }
 }
 
+/// [`force_generalize_sig_type`] on every value of a module type.
 pub fn force_generalize_module_sig_values(ctx: &TypeContext, mty: &crate::types::decl::ModuleType) {
     let mut seen = TypeExprRefSet::new();
     force_generalize_module_type_rec(ctx, mty, &mut seen);
 }
 
+/// [`force_generalize_sig_type`] on every value of a signature.
 pub fn force_generalize_signature_values(
     ctx: &TypeContext,
     sig_items: &[crate::types::decl::SignatureItem],
@@ -9936,6 +10015,8 @@ fn generalize_structure_rec(ctx: &TypeContext, var_level: i32, ty: TypeExprRef) 
     }
 }
 
+/// OCaml `Ctype.generalize_structure`: generalize the nodes above
+/// `var_level`, but leave type variables at their level.
 pub fn generalize_structure(ctx: &TypeContext, var_level: i32, ty: TypeExprRef) {
     // OCaml: simple_abbrevs := Mnil
     ctx.clear_simple_abbrevs();
@@ -10031,6 +10112,9 @@ fn generalize_expansive_rec(
     }
 }
 
+/// OCaml `Ctype.generalize_expansive`: generalize `ty` except where it
+/// appears in an expansive position (contravariant or under a mutable
+/// constructor), which is lowered to the non-generalizable level.
 pub fn generalize_expansive(ctx: &TypeContext, env: &Env, ty: TypeExprRef) {
     // OCaml: simple_abbrevs := Mnil
     ctx.clear_simple_abbrevs();
@@ -12165,6 +12249,8 @@ pub fn subst_identity_copy(ctx: &TypeContext, ty: TypeExprRef) -> TypeExprRef {
     subst_identity_copy_with_partial(ctx, ty, false)
 }
 
+/// [`subst_identity_copy`] of several types in one copy session, so nodes
+/// they share stay shared in the copies.
 pub fn subst_identity_copy_many(ctx: &TypeContext, types: &[TypeExprRef]) -> Vec<TypeExprRef> {
     let mut seen = super::type_marks::ref_table();
     // OCaml compiler/ml/subst.ml:273-301 calls `typexp` for every type slot
@@ -12179,6 +12265,8 @@ pub fn subst_identity_copy_many(ctx: &TypeContext, types: &[TypeExprRef]) -> Vec
     })
 }
 
+/// [`subst_identity_copy`], optionally reopening closed variant rows
+/// (`instance ~partial:false` for `erase_either`).
 pub fn subst_identity_copy_with_partial(
     ctx: &TypeContext,
     ty: TypeExprRef,
@@ -13698,6 +13786,8 @@ fn unroll_abbrev(
     unrolled
 }
 
+/// OCaml `Ctype.nondep_type_decl`: rewrite `decl` so it no longer mentions
+/// the module `mid`, or `None` when that is impossible.
 pub fn nondep_type_decl(
     ctx: &TypeContext,
     env: &Env,

@@ -432,6 +432,7 @@ list_pool_accessors! {
 }
 
 impl TypedArena {
+    /// An empty arena.
     pub fn new() -> Self {
         Self::default()
     }

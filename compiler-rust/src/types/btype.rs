@@ -83,6 +83,7 @@ pub fn row_field_repr(ctx: &TypeContext, field: &RowField) -> RowField {
     }
 }
 
+/// Whether the field is `Rabsent`, following `Reither` links.
 pub fn row_field_is_absent(ctx: &TypeContext, field: &RowField) -> bool {
     match field {
         RowField::Reither { link, .. } => ctx
@@ -93,6 +94,7 @@ pub fn row_field_is_absent(ctx: &TypeContext, field: &RowField) -> bool {
     }
 }
 
+/// Whether the field is an unresolved `Reither`, following its links.
 pub fn row_field_is_reither(ctx: &TypeContext, field: &RowField) -> bool {
     match field {
         RowField::Reither { link, .. } => ctx
@@ -102,6 +104,8 @@ pub fn row_field_is_reither(ctx: &TypeContext, field: &RowField) -> bool {
     }
 }
 
+/// The link of the final `Reither` a field resolves to, when that `Reither`
+/// is unlinked and not yet matched.
 pub fn row_field_unmatched_reither_link(
     ctx: &TypeContext,
     field: &RowField,
@@ -171,6 +175,7 @@ pub fn row_repr(ctx: &TypeContext, row: &RowDesc) -> RowDesc {
     }
 }
 
+/// [`row_repr`] without copying when the row has no nested variant rows.
 pub fn row_repr_ref<'row>(ctx: &TypeContext, row: &'row RowDesc) -> Cow<'row, RowDesc> {
     let more = ctx.repr(row.row_more);
     let desc = ctx.borrow_desc(more);

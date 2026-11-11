@@ -7,34 +7,60 @@
 
 use super::context::TypeContext;
 
+/// A JavaScript builtin class an untagged payload can be an instance of
+/// (OCaml `Variant_runtime.Instance.t`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Instance {
+    /// `Array`, recognized with `Array.isArray`.
     Array,
+    /// `ArrayBuffer`.
     ArrayBuffer,
+    /// `BigInt64Array`.
     BigInt64Array,
+    /// `BigUint64Array`.
     BigUint64Array,
+    /// `Blob`.
     Blob,
+    /// `DataView`.
     DataView,
+    /// `Date`.
     Date,
+    /// `File`.
     File,
+    /// `Float32Array`.
     Float32Array,
+    /// `Float64Array`.
     Float64Array,
+    /// `Int16Array`.
     Int16Array,
+    /// `Int32Array`.
     Int32Array,
+    /// `Int8Array`.
     Int8Array,
+    /// `Promise`.
     Promise,
+    /// `RegExp`.
     RegExp,
+    /// `Uint16Array`.
     Uint16Array,
+    /// `Uint32Array`.
     Uint32Array,
+    /// `Uint8Array`.
     Uint8Array,
+    /// `Uint8ClampedArray`.
     Uint8ClampedArray,
+    /// `Set`.
     Set,
+    /// `Map`.
     Map,
+    /// `WeakSet`.
     WeakSet,
+    /// `WeakMap`.
     WeakMap,
 }
 
 impl Instance {
+    /// The class's global name in JavaScript (`Instance.to_string`).
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Array => "Array",
@@ -64,16 +90,27 @@ impl Instance {
     }
 }
 
+/// OCaml `Variant_runtime.block_type`: the runtime shape of an untagged
+/// constructor's payload.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum BlockType {
+    /// A number holding an `int`.
     Int,
+    /// A string.
     String,
+    /// A number holding a `float`.
     Float,
+    /// A `bigint`.
     Bigint,
+    /// A boolean.
     Boolean,
+    /// An instance of a builtin class.
     Instance(Instance),
+    /// A function.
     Function,
+    /// An object.
     Object,
+    /// A shape the payload type does not determine; never emitted.
     Unknown,
 }
 
@@ -82,12 +119,19 @@ pub enum BlockType {
 /// states nothing). It never describes an inferred untagged payload shape.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum LiteralTag {
+    /// A string literal.
     String(String),
+    /// An integer literal.
     Int(i64),
+    /// A float literal, as written.
     Float(String),
+    /// A bigint literal's digits.
     BigInt(String),
+    /// A boolean literal.
     Bool(bool),
+    /// `null`.
     Null,
+    /// `undefined`.
     Undefined,
 }
 
@@ -97,7 +141,9 @@ pub enum LiteralTag {
 /// its payload.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TagType {
+    /// A literal value: a constant, or an object's tag field.
     Literal(LiteralTag),
+    /// The runtime shape of an untagged payload.
     PayloadShape(BlockType),
 }
 
@@ -105,7 +151,9 @@ pub enum TagType {
 /// explicitly declared runtime literal.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Tag {
+    /// The constructor's name.
     pub name: crate::name::Name,
+    /// The literal declared with `@as`, if any.
     pub literal: Option<LiteralTag>,
 }
 
@@ -113,7 +161,9 @@ pub struct Tag {
 /// an untagged payload shape can take part alongside declared literals.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct MatchableTag {
+    /// The constructor's name.
     pub name: String,
+    /// How the constructor is recognized, if it can be.
     pub tag_type: Option<TagType>,
 }
 
@@ -128,7 +178,9 @@ pub fn to_matchable_tag(tag: &Tag) -> MatchableTag {
 /// OCaml `Variant_runtime.tagged_block`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct TaggedBlock {
+    /// The constructor's tag.
     pub tag: Tag,
+    /// The object field holding the tag, from `@tag`; `None` means `TAG`.
     pub tag_name: Option<String>,
 }
 
@@ -137,8 +189,15 @@ pub struct TaggedBlock {
 /// field.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Block {
+    /// A constructor represented as an object with a tag field.
     Tagged(TaggedBlock),
-    Untagged { tag: Tag, block_type: BlockType },
+    /// A constructor represented directly by its payload.
+    Untagged {
+        /// The constructor's tag.
+        tag: Tag,
+        /// The payload's runtime shape, which matching dispatches on.
+        block_type: BlockType,
+    },
 }
 
 impl Block {
@@ -149,6 +208,7 @@ impl Block {
         }
     }
 
+    /// Whether the constructor is represented directly by its payload.
     pub fn is_untagged(&self) -> bool {
         matches!(self, Block::Untagged { .. })
     }
@@ -162,32 +222,53 @@ impl Block {
     }
 }
 
+/// OCaml `Variant_runtime.constructor_case`: how one constructor is
+/// represented.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum ConstructorCase {
+    /// A nullary constructor, represented by its literal.
     Constant(Tag),
+    /// A constructor with a payload.
     Block(Block),
 }
 
+/// OCaml `Variant_runtime.configuration`: the declaration's `@unboxed` and
+/// `@tag` attributes.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Configuration {
+    /// Whether the variant is `@unboxed`.
     pub unboxed: bool,
+    /// The `@tag` field name, if any.
     pub tag_name: Option<String>,
 }
 
+/// OCaml `Variant_runtime.matching_facts`: declaration-level facts needed
+/// when lowering a constructor match.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MatchingFacts {
+    /// Custom object field containing constructor tags; `None` means `TAG`.
     pub tag_name: Option<String>,
+    /// Runtime shapes of constructors represented directly by their payload.
     pub block_types: Vec<BlockType>,
+    /// Runtime values of all nullary constructors.
     pub literal_tags: Vec<LiteralTag>,
+    /// Whether a nullary constructor is `null`.
     pub has_null: bool,
+    /// Whether a nullary constructor is `undefined`.
     pub has_undefined: bool,
+    /// Whether a nullary constructor is some other literal.
     pub has_other_literal: bool,
 }
 
+/// OCaml `Variant_runtime.layout`: the completed runtime representation of
+/// a variant declaration, with constructors in source order.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Layout {
+    /// Whether the variant is `@unboxed`.
     pub unboxed: bool,
+    /// Each constructor's representation, in source order.
     pub constructors: Vec<ConstructorCase>,
+    /// Facts derived once from `constructors` for match lowering.
     pub matching_facts: MatchingFacts,
 }
 
@@ -197,6 +278,8 @@ pub(crate) enum LayoutState {
     Complete(Layout),
 }
 
+/// A stable reference to a variant layout, local to a compilation, in the
+/// per-thread store, or in the shared pool (OCaml `layout_ref`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct LayoutRef(pub(crate) u32);
 
@@ -270,13 +353,17 @@ impl LayoutRef {
     }
 }
 
+/// One constructor of a variant: its layout and position.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct ConstructorReference {
+    /// The variant's layout.
     pub variant: LayoutRef,
+    /// The constructor's position in declaration order.
     pub position: usize,
 }
 
 impl Layout {
+    /// Build a layout and derive its matching facts.
     pub fn new(configuration: Configuration, constructors: Vec<ConstructorCase>) -> Self {
         let mut block_types = Vec::new();
         let mut literal_tags = Vec::new();
@@ -323,30 +410,35 @@ impl Layout {
         }
     }
 
+    /// The `@unboxed` and `@tag` configuration the layout was built from.
     pub fn configuration(&self) -> Configuration {
         Configuration {
             unboxed: self.unboxed,
             tag_name: self.matching_facts.tag_name.clone(),
         }
     }
+    /// The number of nullary constructors.
     pub fn num_constants(&self) -> usize {
         self.constructors
             .iter()
             .filter(|c| matches!(c, ConstructorCase::Constant(_)))
             .count()
     }
+    /// The number of constructors with a payload.
     pub fn num_blocks(&self) -> usize {
         self.constructors.len() - self.num_constants()
     }
 }
 
 impl ConstructorReference {
+    /// The constructor's representation.
     pub fn representation(self, ctx: &TypeContext) -> ConstructorCase {
         ctx.with_variant_layout(self.variant, |layout| {
             layout.constructors[self.position].clone()
         })
     }
 
+    /// The constructor's index among the constructors with a payload.
     pub fn block_index(self, ctx: &TypeContext) -> usize {
         ctx.with_variant_layout(self.variant, |layout| {
             layout.constructors[..self.position]
@@ -356,11 +448,14 @@ impl ConstructorReference {
         })
     }
 
+    /// The number of constructors with a payload in the constructor's variant.
     pub fn num_blocks(self, ctx: &TypeContext) -> usize {
         ctx.with_variant_layout(self.variant, Layout::num_blocks)
     }
 }
 
+/// Allocate the layout of a variant with no `@unboxed`, `@tag` or `@as`:
+/// each case is a constructor name and whether it has a payload.
 pub fn plain_layout(
     ctx: &TypeContext,
     cases: impl IntoIterator<Item = (String, bool)>,

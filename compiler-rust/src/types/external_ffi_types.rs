@@ -15,45 +15,69 @@ use serde::{Deserialize, Serialize};
 /// `External_arg_spec.cst`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Cst {
+    /// An integer constant.
     ArgIntLit(i64),
+    /// A string constant.
     ArgStringLit(String),
+    /// A JSON constant, as written.
     ArgJsonLit(String),
 }
 
 /// `External_arg_spec.attr`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Attr {
+    /// A polymorphic variant argument passed as a string (`@string`).
     PolyVarString {
+        /// Each tag and the string it is passed as.
         descr: Vec<(String, String)>,
     },
+    /// A polymorphic variant argument.
     PolyVar {
+        /// Each tag and the string it is passed as, when `@as` names them.
         descr: Option<Vec<(String, String)>>,
     },
+    /// A polymorphic variant argument passed as an integer (`@int`), with each
+    /// tag's integer.
     Int(Vec<(String, i64)>),
+    /// A constant argument (`@as`), passed without a source argument.
     ArgCst(Cst),
+    /// A `unit` argument, which is not passed.
     ExternUnit,
+    /// An ordinary argument, passed as is.
     Nothing,
+    /// An argument dropped from the call (`@ignore`).
     Ignore,
+    /// A polymorphic variant whose payload is passed instead (`@unwrap`).
     Unwrap,
 }
 
 /// `External_arg_spec.label_noname`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum LabelNoname {
+    /// A labeled argument.
     ArgLabel,
+    /// A positional argument.
     ArgEmpty,
+    /// An optional argument.
     ArgOptional,
 }
 
 /// `External_arg_spec.label`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Label {
+    /// An argument that is not an object field.
     ObjEmpty,
+    /// A field of the created object.
     ObjLabel {
+        /// The field's name.
         name: String,
     },
+    /// An optional field, set only when the argument is `Some`.
     ObjOptional {
+        /// The field's name.
         name: String,
+        /// Whether the argument's value needs no unwrapping because it cannot be a
+        /// nested option.
         for_sure_no_nested_option: bool,
     },
 }
@@ -61,14 +85,18 @@ pub enum Label {
 /// `External_arg_spec.obj_param`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ObjParam {
+    /// How the argument is converted.
     pub obj_arg_type: Attr,
+    /// The object field it becomes.
     pub obj_arg_label: Label,
 }
 
 /// `External_arg_spec.param`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Param {
+    /// How the argument is converted.
     pub arg_type: Attr,
+    /// How the argument is passed.
     pub arg_label: LabelNoname,
 }
 
@@ -89,7 +117,9 @@ impl Param {
 /// `External_ffi_types.module_bind_name`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ModuleBindName {
+    /// An explicit name to bind the imported module to.
     PhintName(String),
+    /// No explicit name.
     PhintNothing,
 }
 
@@ -99,8 +129,11 @@ pub type ImportAttributes = Vec<(String, String)>;
 /// `External_ffi_types.external_module_name`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ExternalModuleName {
+    /// The imported module's path.
     pub bundle: String,
+    /// The name to bind it to.
     pub module_bind_name: ModuleBindName,
+    /// The `with` attributes of the import, ordered as written.
     pub import_attributes: Option<ImportAttributes>,
 }
 
@@ -117,21 +150,47 @@ pub enum ModuleSource {
 /// `External_ffi_types.decl_kind`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DeclKind {
-    DeclVal { name: String },
-    DeclSend { name: String },
-    DeclNew { name: String },
-    DeclGet { name: String },
-    DeclSet { name: String },
+    /// `@val`, or no attribute: a value or function.
+    DeclVal {
+        /// The JavaScript name.
+        name: String,
+    },
+    /// `@send`: a method call on the first argument.
+    DeclSend {
+        /// The method name.
+        name: String,
+    },
+    /// `@new`: a constructor call.
+    DeclNew {
+        /// The class name.
+        name: String,
+    },
+    /// `@get`: a property read.
+    DeclGet {
+        /// The property name.
+        name: String,
+    },
+    /// `@set`: a property write.
+    DeclSet {
+        /// The property name.
+        name: String,
+    },
+    /// `@get_index`: read an element by key.
     DeclGetIndex,
+    /// `@set_index`: write an element by key.
     DeclSetIndex,
 }
 
 /// `External_ffi_types.external_decl`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ExternalDecl {
+    /// What the external calls or reads.
     pub kind: DeclKind,
+    /// The module it comes from (`@module`), if any.
     pub module_: Option<ModuleSource>,
+    /// The `@scope` path it is reached through.
     pub scopes: Vec<String>,
+    /// Whether the last argument is spread (`@variadic`).
     pub variadic: bool,
     /// Counted (non-`@ignore`) declared parameters.
     pub effective_arity: i64,
@@ -140,9 +199,13 @@ pub struct ExternalDecl {
 /// `External_ffi_types.return_wrapper`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ReturnWrapper {
+    /// No `@return` attribute.
     ReturnUnset,
+    /// `@return(identity)`.
     ReturnIdentity,
+    /// `@return(null_to_opt)`: map `null` to `None`.
     ReturnNullToOpt,
+    /// `@return(nullable)`: map `null` and `undefined` to `None`.
     ReturnNullUndefinedToOpt,
 }
 
@@ -151,19 +214,28 @@ pub enum ReturnWrapper {
 pub enum InlineConst {
     /// A decoded runtime string value.
     ConstString(String),
+    /// A boolean.
     ConstBool(bool),
+    /// An `int`.
     ConstInt(i32),
+    /// A `bigint`.
     ConstBigint {
+        /// Whether the value is negative.
         negative: bool,
+        /// The decimal digits.
         digits: String,
     },
+    /// A float, as written.
     ConstFloat(String),
 }
 
 /// `External_ffi_types.t`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ExternalFfi {
+    /// A function call or property access, with its parameters, return
+    /// conversion and declaration.
     FfiBs(Vec<Param>, ReturnWrapper, ExternalDecl),
+    /// An object literal (`@obj`), with one parameter per field.
     FfiObjCreate(Vec<ObjParam>),
 }
 
@@ -211,6 +283,8 @@ pub fn inclusion_compatible(impl_: &ExternalFfi, intf: &ExternalFfi) -> bool {
 // (compiler/ml/ffi_debug.ml).
 // ============================================================================
 
+/// The fork's textual rendering of the FFI types for the sexp parity
+/// printers (`compiler/ml/ffi_debug.ml`).
 pub mod debug {
     use super::*;
 
@@ -295,6 +369,7 @@ pub mod debug {
         }
     }
 
+    /// Render an external module name.
     pub fn module_name(m: &ExternalModuleName) -> String {
         let bind = match &m.module_bind_name {
             ModuleBindName::PhintName(s) => format!("Phint_name({})", quote(s)),
@@ -344,6 +419,7 @@ pub mod debug {
         }
     }
 
+    /// Render an external's FFI specification.
     pub fn spec(s: &ExternalFfi) -> String {
         match s {
             ExternalFfi::FfiBs(params, ret, d) => format!(
@@ -367,6 +443,7 @@ pub mod debug {
         }
     }
 
+    /// Render an inline constant.
     pub fn inline_const(c: &InlineConst) -> String {
         match c {
             InlineConst::ConstString(s) => format!("Const_string({})", quote(s)),

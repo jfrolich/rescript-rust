@@ -125,8 +125,11 @@ pub enum EnvError {
     LabelNotFound(SmolStr),
     /// Inconsistent import.
     InconsistentImport {
+        /// The unit imported.
         name: String,
+        /// One interface file it was compiled against.
         source1: String,
+        /// The other, which disagrees.
         source2: String,
     },
     /// Illegal value name.
@@ -282,10 +285,15 @@ struct IdOpened<T> {
 /// argument of `Env.lookup`, or the table `lookup_module{,_descr}` reads).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpenLookupKind {
+    /// The value table.
     Value,
+    /// The type table.
     Type,
+    /// The module table, read for a module's declaration.
     Module,
+    /// The module component table, read for a module's components.
     Component,
+    /// The module type table.
     Modtype,
 }
 
@@ -480,6 +488,7 @@ pub struct IdTbl<T> {
 }
 
 impl<T: Clone> IdTbl<T> {
+    /// An empty table.
     pub fn new() -> Self {
         Self {
             current: PersistentHashMap::default(),
@@ -487,6 +496,7 @@ impl<T: Clone> IdTbl<T> {
         }
     }
 
+    /// Bind `id` to `value`, shadowing earlier bindings of its name.
     pub fn add(&mut self, id: Ident, value: T) {
         let key = id.name_atom();
         // `get_mut` copies the shared map path even when the key is absent,
@@ -500,6 +510,8 @@ impl<T: Clone> IdTbl<T> {
         }
     }
 
+    /// Add the components of an opened module, rooted at `root`, as a new
+    /// layer; `slot` identifies the open for unused-open warnings.
     pub fn add_open_layer(
         &mut self,
         root: Path,
@@ -600,14 +612,17 @@ impl<T: Clone> IdTbl<T> {
         }
     }
 
+    /// The innermost binding of `name`.
     pub fn find_by_name(&self, name: impl crate::name::NameKey) -> Option<&T> {
         self.find_name_entry(name).map(|(_, value)| value)
     }
 
+    /// The innermost binding of `name`, with its identifier.
     pub fn find_by_name_with_id(&self, name: impl crate::name::NameKey) -> Option<(&Ident, &T)> {
         self.find_name_entry(name)
     }
 
+    /// The innermost binding of `name`, with its path.
     pub fn find_by_name_with_path(&self, name: impl crate::name::NameKey) -> Option<(Path, &T)> {
         self.find_by_key_with_path(name.name_key()?)
     }
@@ -649,10 +664,13 @@ impl<T: Clone> IdTbl<T> {
             .and_then(|opened| opened.next.find_by_ident(id))
     }
 
+    /// The local binding of exactly `id`.
     pub fn find_local_by_ident(&self, id: &Ident) -> Option<&T> {
         self.find_by_ident(id)
     }
 
+    /// Replace the innermost binding of `name` by `f` of it, returning the new
+    /// binding.
     pub fn update_by_name<F>(&mut self, name: &str, f: &mut F) -> Option<(Ident, T)>
     where
         F: FnMut(&T) -> T,
@@ -686,6 +704,7 @@ impl<T: Clone> IdTbl<T> {
         None
     }
 
+    /// Every binding of `name`, innermost first.
     pub fn find_all(&self, name: impl crate::name::NameKey) -> Vec<&T> {
         let mut items = Vec::new();
         if let Some(key) = name.name_key() {
@@ -706,10 +725,12 @@ impl<T: Clone> IdTbl<T> {
         }
     }
 
+    /// Whether `name` is bound.
     pub fn contains(&self, name: impl crate::name::NameKey) -> bool {
         self.find_by_name(name).is_some()
     }
 
+    /// Every binding in the table.
     pub fn iter(&self) -> impl Iterator<Item = (&Ident, &T)> {
         let mut items = Vec::new();
         self.collect_iter(&mut items);
@@ -753,6 +774,8 @@ impl<T: Clone> IdTbl<T> {
         }
     }
 
+    /// The local bindings that neither a later local binding nor an open
+    /// shadows.
     pub fn visible_local_entries(&self) -> impl Iterator<Item = (&Ident, &T)> {
         let mut seen = HashSet::new();
         let mut shadowing_opens = Vec::new();
@@ -819,6 +842,7 @@ pub struct TycompTbl<T> {
 }
 
 impl<T: Clone> TycompTbl<T> {
+    /// An empty table.
     pub fn new() -> Self {
         Self {
             current: PersistentHashMap::default(),
@@ -827,6 +851,7 @@ impl<T: Clone> TycompTbl<T> {
         }
     }
 
+    /// Bind `id` to `value`, shadowing earlier bindings of its name.
     pub fn add(&mut self, id: Ident, value: T) {
         let key = id.name_atom();
         if self.current.contains_key(&key)
@@ -840,6 +865,8 @@ impl<T: Clone> TycompTbl<T> {
         }
     }
 
+    /// Add the components of an opened module as a new layer; `slot`
+    /// identifies the open for unused-open warnings.
     pub fn add_open_layer(&mut self, components: Vec<(Ident, T)>, slot: Option<u32>) {
         self.add_open_layer_table(Arc::new(tycomp_open_table(components)), slot);
     }
@@ -865,6 +892,7 @@ impl<T: Clone> TycompTbl<T> {
         };
     }
 
+    /// The innermost binding of `name`.
     pub fn find_by_name(&self, name: impl crate::name::NameKey) -> Option<&T> {
         self.find_by_key(name.name_key()?)
     }
@@ -886,6 +914,8 @@ impl<T: Clone> TycompTbl<T> {
         }
     }
 
+    /// The innermost binding of `name`, with its identifier and whether it is
+    /// local rather than opened.
     pub fn find_by_name_with_origin(
         &self,
         name: impl crate::name::NameKey,
@@ -908,6 +938,7 @@ impl<T: Clone> TycompTbl<T> {
         }
     }
 
+    /// The binding of exactly `id`.
     pub fn find_by_ident(&self, id: &Ident) -> Option<&T> {
         let stamp = id.stamp();
         if !self.current.is_empty()
@@ -932,6 +963,7 @@ impl<T: Clone> TycompTbl<T> {
             .and_then(|opened| opened.next.find_by_ident(id))
     }
 
+    /// Every binding of `name`, innermost first.
     pub fn find_all(&self, name: impl crate::name::NameKey) -> Vec<&T> {
         let mut items = Vec::new();
         if let Some(key) = name.name_key() {
@@ -994,6 +1026,7 @@ impl<T: Clone> TycompTbl<T> {
         items
     }
 
+    /// Every binding in the table.
     pub fn iter(&self) -> impl Iterator<Item = (&Ident, &T)> {
         let mut items = Vec::new();
         self.collect_iter(&mut items);

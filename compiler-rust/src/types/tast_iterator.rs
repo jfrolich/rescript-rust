@@ -17,45 +17,57 @@ use crate::parser::ast::RecFlag;
 pub trait TastIterator<'t> {
     /// The arena holding the nodes of the tree being walked.
     fn arena(&self) -> &'t TypedArena;
+    /// Visit a match case.
     fn case(&mut self, c: &Case) {
         walk_case(self, c)
     }
+    /// Visit each case of a match, in order.
     fn cases(&mut self, cases: &[Case]) {
         for c in cases {
             self.case(c);
         }
     }
+    /// Visit an expression.
     fn expr(&mut self, e: &Expression) {
         walk_expr(self, e)
     }
+    /// Visit an extension constructor.
     fn extension_constructor(&mut self, ext: &ExtensionConstructor) {
         walk_extension_constructor(self, ext)
     }
+    /// Visit a module binding.
     fn module_binding(&mut self, mb: &ModuleBinding) {
         self.module_expr(self.arena().module_expr(mb.mb_expr))
     }
+    /// Visit a module declaration.
     fn module_declaration(&mut self, md: &TypedModuleDeclaration) {
         self.module_type(self.arena().module_type(md.md_type))
     }
+    /// Visit a module expression.
     fn module_expr(&mut self, m: &ModuleExpr) {
         walk_module_expr(self, m)
     }
+    /// Visit a module type.
     fn module_type(&mut self, m: &ModuleType) {
         walk_module_type(self, m)
     }
+    /// Visit a module type declaration.
     fn module_type_declaration(&mut self, mtd: &ModuleTypeDeclaration) {
         if let Some(t) = &mtd.mtd_type {
             self.module_type(self.arena().module_type(*t));
         }
     }
+    /// Visit a package type.
     fn package_type(&mut self, pack: &PackageType) {
         for (_, t) in &pack.pack_fields {
             self.typ(self.arena().core_type(*t));
         }
     }
+    /// Visit a pattern.
     fn pat(&mut self, p: &Pattern) {
         walk_pat(self, p)
     }
+    /// Visit a polymorphic variant row field.
     fn row_field(&mut self, rf: &RowFieldType) {
         match &rf.rf_desc {
             RowFieldDesc::Rtag(_, _, types) => {
@@ -66,6 +78,7 @@ pub trait TastIterator<'t> {
             RowFieldDesc::Rinherit(t) => self.typ(self.arena().core_type(*t)),
         }
     }
+    /// Visit an object type field.
     fn object_field(&mut self, of: &ObjectField) {
         match &of.of_desc {
             ObjectFieldDesc::OTtag(_, t) | ObjectFieldDesc::OTinherit(t) => {
@@ -73,33 +86,41 @@ pub trait TastIterator<'t> {
             }
         }
     }
+    /// Visit a signature.
     fn signature(&mut self, s: &TypedSignature) {
         for item in self.arena().signature_items(s.sig_items) {
             self.signature_item(item);
         }
     }
+    /// Visit a signature item.
     fn signature_item(&mut self, item: &TypedSignatureItem) {
         walk_signature_item(self, item)
     }
+    /// Visit a structure.
     fn structure(&mut self, s: &Structure) {
         for item in self.arena().structure_items(s.str_items) {
             self.structure_item(item);
         }
     }
+    /// Visit a structure item.
     fn structure_item(&mut self, item: &StructureItem) {
         walk_structure_item(self, item)
     }
+    /// Visit a core type.
     fn typ(&mut self, t: &TypedCoreType) {
         walk_typ(self, t)
     }
+    /// Visit a type declaration.
     fn type_declaration(&mut self, td: &TypedTypeDeclaration) {
         walk_type_declaration(self, td)
     }
+    /// Visit a group of type declarations.
     fn type_declarations(&mut self, _rec_flag: &RecFlag, decls: &[TypedTypeDeclaration]) {
         for td in decls {
             self.type_declaration(td);
         }
     }
+    /// Visit a type extension.
     fn type_extension(&mut self, te: &TypeExtension) {
         for (t, _) in &te.tyext_params {
             self.typ(self.arena().core_type(*t));
@@ -108,6 +129,7 @@ pub trait TastIterator<'t> {
             self.extension_constructor(c);
         }
     }
+    /// Visit the kind of a type declaration.
     fn type_kind(&mut self, kind: &TypedTypeKind) {
         match kind {
             TypedTypeKind::Ttype_abstract | TypedTypeKind::Ttype_open => {}
@@ -137,19 +159,23 @@ pub trait TastIterator<'t> {
             }
         }
     }
+    /// Visit a value binding.
     fn value_binding(&mut self, vb: &ValueBinding) {
         self.pat(self.arena().pattern(vb.vb_pat));
         let ta = self.arena();
         self.expr(ta.expr(vb.vb_expr));
     }
+    /// Visit a group of value bindings.
     fn value_bindings(&mut self, _rec_flag: &RecFlag, vbs: &[ValueBinding]) {
         for vb in vbs {
             self.value_binding(vb);
         }
     }
+    /// Visit a value description.
     fn value_description(&mut self, vd: &TypedValueDescription) {
         self.typ(self.arena().core_type(vd.val_desc))
     }
+    /// Visit a `with` constraint.
     fn with_constraint(&mut self, wc: &WithConstraint) {
         match wc {
             WithConstraint::Twith_type(td) | WithConstraint::Twith_typesubst(td) => {
@@ -160,6 +186,7 @@ pub trait TastIterator<'t> {
     }
 }
 
+/// Visit a case's children: pattern, guard and body.
 pub fn walk_case<'t, I: TastIterator<'t> + ?Sized>(sub: &mut I, c: &Case) {
     let ta = sub.arena();
     sub.pat(sub.arena().pattern(c.c_lhs));
@@ -169,6 +196,7 @@ pub fn walk_case<'t, I: TastIterator<'t> + ?Sized>(sub: &mut I, c: &Case) {
     sub.expr(ta.expr(c.c_rhs));
 }
 
+/// Visit a structure item's children.
 pub fn walk_structure_item<'t, I: TastIterator<'t> + ?Sized>(sub: &mut I, item: &StructureItem) {
     match &item.str_desc {
         StructureItemDesc::Tstr_eval(e, _) => {
@@ -218,6 +246,7 @@ fn walk_constructor_args<'t, I: TastIterator<'t> + ?Sized>(
     }
 }
 
+/// Visit a type declaration's children.
 pub fn walk_type_declaration<'t, I: TastIterator<'t> + ?Sized>(
     sub: &mut I,
     td: &TypedTypeDeclaration,
@@ -235,6 +264,7 @@ pub fn walk_type_declaration<'t, I: TastIterator<'t> + ?Sized>(
     }
 }
 
+/// Visit an extension constructor's children.
 pub fn walk_extension_constructor<'t, I: TastIterator<'t> + ?Sized>(
     sub: &mut I,
     ext: &ExtensionConstructor,
@@ -250,6 +280,7 @@ pub fn walk_extension_constructor<'t, I: TastIterator<'t> + ?Sized>(
     }
 }
 
+/// Visit a pattern's children.
 pub fn walk_pat<'t, I: TastIterator<'t> + ?Sized>(sub: &mut I, p: &Pattern) {
     for (extra, _, _) in sub.arena().pat_extra(p).iter() {
         if let PatExtra::Tpat_constraint(ct) = extra {
@@ -299,6 +330,7 @@ fn walk_record_fields<'t, I: TastIterator<'t> + ?Sized>(
     }
 }
 
+/// Visit an expression's children.
 pub fn walk_expr<'t, I: TastIterator<'t> + ?Sized>(sub: &mut I, e: &Expression) {
     for (extra, _, _) in sub.arena().exp_extra(e).iter() {
         match extra {
@@ -420,6 +452,7 @@ pub fn walk_expr<'t, I: TastIterator<'t> + ?Sized>(sub: &mut I, e: &Expression) 
     }
 }
 
+/// Visit a signature item's children.
 pub fn walk_signature_item<'t, I: TastIterator<'t> + ?Sized>(
     sub: &mut I,
     item: &TypedSignatureItem,
@@ -449,6 +482,7 @@ pub fn walk_signature_item<'t, I: TastIterator<'t> + ?Sized>(
     }
 }
 
+/// Visit a module type's children.
 pub fn walk_module_type<'t, I: TastIterator<'t> + ?Sized>(sub: &mut I, m: &ModuleType) {
     match &m.mty_desc {
         ModuleTypeDesc::Tmty_ident(..) | ModuleTypeDesc::Tmty_alias(..) => {}
@@ -469,6 +503,7 @@ pub fn walk_module_type<'t, I: TastIterator<'t> + ?Sized>(sub: &mut I, m: &Modul
     }
 }
 
+/// Visit a module expression's children.
 pub fn walk_module_expr<'t, I: TastIterator<'t> + ?Sized>(sub: &mut I, m: &ModuleExpr) {
     match &m.mod_desc {
         ModuleExprDesc::Tmod_ident(..) => {}
@@ -496,6 +531,7 @@ pub fn walk_module_expr<'t, I: TastIterator<'t> + ?Sized>(sub: &mut I, m: &Modul
     }
 }
 
+/// Visit a core type's children.
 pub fn walk_typ<'t, I: TastIterator<'t> + ?Sized>(sub: &mut I, t: &TypedCoreType) {
     match &t.ctyp_desc {
         TypedCoreTypeDesc::Ttyp_var(_) => {}
