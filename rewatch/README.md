@@ -91,13 +91,6 @@ state invariants beside their implementation, and cross-module navigation in
 this guide. Update or remove focused documents when the implementation changes;
 do not preserve completed plans as descriptions of current behavior.
 
-## Derives
-
-`ppx-flags` accepts only built-in spice derives. Other entries fail configuration
-validation with the package name and flag; source-marker filtering cannot hide
-an unsupported PPX. Spice needs no installed executable and runs on the current
-AST, without a frozen-v0 conversion.
-
 ### Check without generating code
 
 ```sh
@@ -128,3 +121,11 @@ or `RESCRIPT_RUNTIME_TIMINGS=1` for runtime preparation timings. Check-only has 
 Lambda, codegen, printing or genType work. For a clean-build comparison, clean the
 normal build before each measurement; a normal incremental no-op is not comparable
 to check-only, which checks every module on every invocation.
+
+## Derives
+
+`ppx-flags` accepts only built-in spice derives. Other entries fail configuration
+validation with the package name and flag; source-marker filtering cannot hide
+an unsupported PPX. Spice needs no installed executable and runs on the current
+AST, without a frozen-v0 conversion.
+
