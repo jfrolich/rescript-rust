@@ -20,9 +20,6 @@
 
 #### :rocket: New Feature
 
-- Declare a class on a private record with `@instanceOf`, name its superclass with `@extends(: parent)`, and import the class with `@module` beside `@instanceOf`; such records are untagged variant cases, tested subclass first, and upcast with `:>`. https://github.com/jfrolich/rescript-rust/pull/103
-- An `@unboxed` variant can have several cases whose payload is a record, and one open object case, when a field tells them apart: the compiler tests a field with `"f" in x`, `x.f === literal` or `typeof x.f`. Rust compiler only. https://github.com/jfrolich/rescript-rust/pull/103
-
 #### :bug: Bug fix
 
 - JSX v4: keep `@directive` on an async component's own function instead of its generated sync wrapper, so `@react.component let make = @directive("'use cache';") async (...) => ...` compiles to an async function that starts with `'use cache'` (ReScript 12 dropped the directive; Next.js rejects it on a sync function).
