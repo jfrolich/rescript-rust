@@ -824,6 +824,49 @@ mod tests {
         );
     }
 
+    fn encoded(sig: &super::super::portable_types::PortableSignature) -> Vec<u8> {
+        crate::binser::to_vec(sig).unwrap()
+    }
+
+    #[test]
+    fn the_first_dependent_gets_the_signature_as_published() {
+        let published = published_unit();
+        let decoded = encoded(&published.signature());
+        assert!(published.has_signature_for_dependent());
+        // The signature set aside is what decoding gives, handed out once.
+        assert_eq!(encoded(&published.signature_for_dependent()), decoded);
+        assert!(!published.has_signature_for_dependent());
+        // Later dependents decode.
+        assert_eq!(encoded(&published.signature_for_dependent()), decoded);
+    }
+
+    #[test]
+    fn a_unit_without_dependents_gives_up_its_signature_for_them() {
+        let published = published_unit();
+        let decoded = encoded(&published.signature());
+        published.release_signature_for_dependent();
+        assert!(!published.has_signature_for_dependent());
+        // A dependent that shows up anyway decodes.
+        assert_eq!(encoded(&published.signature_for_dependent()), decoded);
+    }
+
+    #[test]
+    fn stored_and_copied_structs_set_no_signature_aside() {
+        let published = published_unit();
+        let copy = published.clone();
+        let stored: PortablePersStruct =
+            crate::binser::from_slice(&crate::binser::to_vec(&published).unwrap()).unwrap();
+        for other in [&copy, &stored] {
+            assert!(!other.has_signature_for_dependent());
+            assert_eq!(
+                encoded(&other.signature_for_dependent()),
+                encoded(&published.signature())
+            );
+        }
+        // Copying and storing took nothing from the original.
+        assert!(published.has_signature_for_dependent());
+    }
+
     #[test]
     fn lambda_units_extend_value_and_module_references() {
         struct Lambdas;

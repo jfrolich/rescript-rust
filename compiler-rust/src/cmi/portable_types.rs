@@ -165,6 +165,36 @@ pub struct PortablePersStruct {
     /// this on first use.
     #[serde(skip)]
     summary: std::sync::OnceLock<Arc<super::item_deps::SignatureSummary>>,
+    /// The signature as it was built, set aside for the first dependent that
+    /// loads the unit ([`Self::signature_for_dependent`]).
+    #[serde(skip)]
+    for_dependent: ReservedSignature,
+}
+
+/// A decoded signature set aside for the reader that follows the publication
+/// of a unit, so that reader does not decode what was just encoded. The
+/// reader takes it, which frees it once the reader is done. Empty for a
+/// struct read from storage and for a copy of a struct.
+#[derive(Default)]
+struct ReservedSignature(std::sync::Mutex<Option<PortableSignature>>);
+
+impl ReservedSignature {
+    fn take(&self) -> Option<PortableSignature> {
+        self.0.lock().unwrap().take()
+    }
+}
+
+impl Clone for ReservedSignature {
+    fn clone(&self) -> Self {
+        ReservedSignature::default()
+    }
+}
+
+impl std::fmt::Debug for ReservedSignature {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let reserved = self.0.lock().unwrap().is_some();
+        f.debug_tuple("ReservedSignature").field(&reserved).finish()
+    }
 }
 
 /// The decoded signature of a [`PortablePersStruct`].
@@ -209,7 +239,7 @@ impl PortablePersStruct {
         raw: Option<PortableRawSignature>,
         fingerprint: u64,
     ) -> Self {
-        Self::encode(
+        let mut portable = Self::encode(
             ps_name,
             ps_filename,
             ps_deprecated,
@@ -217,7 +247,15 @@ impl PortablePersStruct {
             &sig,
             raw.as_ref(),
             fingerprint,
-        )
+        );
+        portable.reserve_signature(sig);
+        portable
+    }
+
+    /// Set `sig`, the signature this struct was just encoded from, aside for
+    /// the first dependent that loads the unit.
+    fn reserve_signature(&mut self, sig: PortableSignature) {
+        self.for_dependent = ReservedSignature(std::sync::Mutex::new(Some(sig)));
     }
 
     /// [`Self::new`] from borrowed signatures.
@@ -241,6 +279,7 @@ impl PortablePersStruct {
             raw: raw.map(crate::binser::Encoded::encode),
             fingerprint,
             summary: std::sync::OnceLock::from(Arc::new(summary)),
+            for_dependent: ReservedSignature::default(),
         }
     }
 
@@ -257,6 +296,27 @@ impl PortablePersStruct {
     /// The signature, decoded.
     pub fn signature(&self) -> PortableSignature {
         self.sig.decode()
+    }
+
+    /// The signature for loading the unit into a dependent's compilation:
+    /// the one set aside when the unit was published if no dependent took it
+    /// yet, a decoded one otherwise.
+    pub fn signature_for_dependent(&self) -> PortableSignature {
+        self.for_dependent
+            .take()
+            .unwrap_or_else(|| self.signature())
+    }
+
+    /// Give up the signature set aside for a dependent: nothing depends on
+    /// the unit.
+    pub fn release_signature_for_dependent(&self) {
+        drop(self.for_dependent.take());
+    }
+
+    /// Whether a signature is set aside for a dependent.
+    #[cfg(test)]
+    pub(crate) fn has_signature_for_dependent(&self) -> bool {
+        self.for_dependent.0.lock().unwrap().is_some()
     }
 
     /// The raw signature, decoded, if the module has one.
@@ -787,9 +847,11 @@ pub fn serialize_pers_struct(
     // Store binders the signature mentions are saved with the local stamps
     // they stand for (see `TypeContext::saved_store_stamps`); most
     // signatures mention none, so the table is only built for those that do.
-    let (portable, has_store_stamps) =
+    let (mut portable, has_store_stamps) =
         crate::ident::saving_store_stamps(Default::default(), encode);
     if !has_store_stamps {
+        // The encoding holds the signature as it is here.
+        portable.reserve_signature(sig);
         return portable;
     }
     let (portable, unmapped) = crate::ident::saving_store_stamps(ctx.saved_store_stamps(), encode);
@@ -1389,7 +1451,7 @@ pub fn internalize_pers_struct(pps: Arc<PortablePersStruct>, ctx: &TypeContext) 
         // keeps the result so later units on this worker skip the pool map.
         let pool = store.shared_pool();
         let shared = pool.pers_struct(&pps, || {
-            let portable = pps.signature();
+            let portable = pps.signature_for_dependent();
             let intern = |name: &str| pool.intern_longident_name(name);
             let files = FileRemap::new(&portable.cmi_longident_names, &intern);
             let sig = internalize_signature_into_shared(
@@ -1413,14 +1475,14 @@ pub fn internalize_pers_struct(pps: Arc<PortablePersStruct>, ctx: &TypeContext) 
         }
     }
     let sig = if shareable {
-        let portable = pps.signature();
+        let portable = pps.signature_for_dependent();
         let intern = |name: &str| store.intern_longident_name(name);
         let files = FileRemap::new(&portable.cmi_longident_names, &intern);
         let map = |file| files.map(file);
         let locs = store.import_decl_locs(files.locations(&portable.locations), &map);
         internalize_signature_into_store(&portable.ps_sig, &portable.type_graph, &locs, store)
     } else {
-        let portable = pps.signature();
+        let portable = pps.signature_for_dependent();
         let intern = |name: &str| ctx.intern_cmi_longident_name(name);
         let files = FileRemap::new(&portable.cmi_longident_names, &intern);
         let map = |file| files.map(file);
