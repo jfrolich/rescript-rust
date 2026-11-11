@@ -46,7 +46,8 @@ pub struct ScannerSnapshot {
 #[derive(Debug)]
 pub struct Scanner<'src> {
     /// Macro-expanded source: identifiers may contain `$`, which source
-    /// written by hand cannot, so generated names never collide with it.
+    /// written by hand cannot, so generated names never collide with it,
+    /// and `Position::cnum` is the character offset.
     pub generated_names: bool,
     /// Source filename (interned string index for sharing in marshal output).
     pub filename: StrIdx,
@@ -195,7 +196,12 @@ impl<'src> Scanner<'src> {
             self.filename,
             self.lnum,
             self.line_offset as i32,
-            (self.line_offset + self.offset16) as i32, // UTF-16 code unit position
+            if self.generated_names {
+                // Macro expansion edits the text by character offset.
+                self.char_pos as i32
+            } else {
+                (self.line_offset + self.offset16) as i32 // UTF-16 code unit position
+            },
         )
     }
 

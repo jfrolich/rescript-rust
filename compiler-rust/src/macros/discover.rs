@@ -1,0 +1,1473 @@
+//! The type checker's side of macro expansion.
+//!
+//! The type checker knows where macros are used: it is the one that resolves
+//! `Json.encode` to a value marked `@generic`, and it has the types a macro
+//! asks about. It does not expand anything in place. In a discovery pass it
+//! runs the macro and records the result as an [`Edit`] of the source text;
+//! [`super::expand`] applies the edits and type checks the new text, until a
+//! pass records none.
+//!
+//! Outside a discovery pass ([`MacroMode::Off`], every ordinary compilation)
+//! the first macro use stops type checking with
+//! [`TypeCheckContext::macro_expansion_required`] set, which tells the driver
+//! to expand the file first.
+
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+
+use serde_json::{Value, json};
+
+use crate::parse_arena::{ExprIdx, LocIdx, ParseArena};
+use crate::parser::ast::{
+    ArgLabel, Constant, ExpressionDesc, Extension, PatternDesc, Payload, RecFlag,
+    StructureItem as ParsedStructureItem, StructureItemDesc as ParsedStructureItemDesc,
+};
+use crate::parser::longident::Longident;
+use crate::parser::module::HOLE_EXTENSION;
+use crate::types::context::TypeContext;
+use crate::types::decl::ValueDescription;
+use crate::types::env::Env;
+use crate::types::path::{Path, PathView};
+use crate::types::predef;
+use crate::types::type_expr::{TypeArg, TypeDesc, TypeExprRef};
+use crate::types::typecore::{
+    BuiltinExtensionError, TypeCheckContext, TypeCoreError, TypeCoreResult,
+};
+use crate::types::typedtree::{Expression, ExpressionDesc as TypedExpressionDesc};
+
+use super::edit::{Edit, SourceText};
+use super::reflect::{self, TypeTable};
+use super::{MacroHost, is_macro_name, quote};
+
+/// Whether the type checker expands macros.
+pub enum MacroMode {
+    /// An ordinary compilation: a macro use asks for expansion.
+    Off,
+    /// A discovery pass of [`super::expand`].
+    Discover(Box<Discovery>),
+}
+
+/// A problem a macro reported, or one with how a macro is used.
+#[derive(Debug, Clone)]
+pub struct MacroDiagnostic {
+    /// Characters of the text being expanded.
+    pub start: u32,
+    pub end: u32,
+    pub message: String,
+}
+
+/// A `%comptime(expr)` found by a pass: evaluated between passes, when no
+/// type checker is running.
+#[derive(Debug, Clone)]
+pub struct ComptimeSite {
+    pub start: u32,
+    pub end: u32,
+    /// The expression's source text.
+    pub expression: String,
+    /// How to write a value of the expression's type as a literal.
+    pub shape: Value,
+}
+
+/// A generated function: `Json.encode` at the type `user`.
+struct Instance {
+    name: String,
+    /// Original offset of the top-level item the instance was generated
+    /// for. Items at or after that offset can call it.
+    ordinal: u32,
+}
+
+/// The instances of a file, kept from pass to pass.
+#[derive(Default)]
+pub struct InstanceTable {
+    by_key: HashMap<String, Vec<Instance>>,
+    names: HashSet<String>,
+}
+
+impl InstanceTable {
+    fn find(&self, key: &str, ordinal: u32) -> Option<&str> {
+        self.by_key
+            .get(key)?
+            .iter()
+            .find(|instance| instance.ordinal <= ordinal)
+            .map(|instance| instance.name.as_str())
+    }
+
+    fn add(&mut self, key: String, base: &str, ordinal: u32) -> String {
+        let mut name = base.to_string();
+        let mut counter = 1;
+        while self.names.contains(&name) {
+            counter += 1;
+            name = format!("{base}${counter}");
+        }
+        self.names.insert(name.clone());
+        self.by_key.entry(key).or_default().push(Instance {
+            name: name.clone(),
+            ordinal,
+        });
+        name
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ParamKind {
+    /// `code<'a>`: the argument's syntax.
+    Code,
+    /// `typ`: a type.
+    Typ,
+    /// `Type.decl`: the type declaration the macro is attached to.
+    Decl,
+    /// `Decl.value`: the `let` the macro is attached to.
+    Binding,
+    /// A plain type: the argument's value, known at compile time.
+    Value,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ResultKind {
+    Code,
+    Decls,
+    Typ,
+    Pat,
+    Other,
+}
+
+struct Signature {
+    params: Vec<ParamKind>,
+    result: ResultKind,
+}
+
+fn macro_type_name(ctx: &TypeContext, ty: TypeExprRef) -> Option<(String, Vec<TypeExprRef>)> {
+    match &*ctx.get_desc(ctx.repr(ty)) {
+        TypeDesc::Tconstr { path, args, .. } => Some((
+            path.name(),
+            ctx.type_list(*args).iter().collect(),
+        )),
+        _ => None,
+    }
+}
+
+fn param_kind(ctx: &TypeContext, ty: TypeExprRef) -> ParamKind {
+    match macro_type_name(ctx, ty).as_ref().map(|(name, _)| name.as_str()) {
+        Some("Macro.code") | Some("Macro.decls") => ParamKind::Code,
+        Some("Macro.typ") => ParamKind::Typ,
+        Some("Macro.Type.decl") => ParamKind::Decl,
+        Some("Macro.Decl.value") => ParamKind::Binding,
+        _ => ParamKind::Value,
+    }
+}
+
+fn result_kind(ctx: &TypeContext, ty: TypeExprRef) -> ResultKind {
+    match macro_type_name(ctx, ty).as_ref().map(|(name, _)| name.as_str()) {
+        Some("Macro.code") => ResultKind::Code,
+        Some("Macro.decls") => ResultKind::Decls,
+        Some("Macro.typ") => ResultKind::Typ,
+        Some("Macro.pat") => ResultKind::Pat,
+        _ => ResultKind::Other,
+    }
+}
+
+fn is_unit(ctx: &TypeContext, ty: TypeExprRef) -> bool {
+    matches!(&*ctx.get_desc(ctx.repr(ty)), TypeDesc::Tconstr { path, .. } if path.same(&predef::path_unit()))
+}
+
+/// Parameters and result of a macro, read from its type.
+fn signature(ctx: &TypeContext, ty: TypeExprRef) -> (Signature, Vec<TypeExprRef>, TypeExprRef) {
+    match &*ctx.get_desc(ctx.repr(ty)) {
+        TypeDesc::Tarrow { args, ret } => {
+            let types: Vec<TypeExprRef> = ctx.type_args(*args).iter().map(|arg| arg.typ).collect();
+            // `() => ...` takes no argument.
+            let types: Vec<TypeExprRef> = if types.len() == 1 && is_unit(ctx, types[0]) {
+                Vec::new()
+            } else {
+                types
+            };
+            (
+                Signature {
+                    params: types.iter().map(|ty| param_kind(ctx, *ty)).collect(),
+                    result: result_kind(ctx, *ret),
+                },
+                types,
+                *ret,
+            )
+        }
+        _ => (
+            Signature {
+                params: Vec::new(),
+                result: result_kind(ctx, ty),
+            },
+            Vec::new(),
+            ty,
+        ),
+    }
+}
+
+/// The type a `@generic` has where it is used: `code<'a> => code<JSON.t>`
+/// is called as `'a => JSON.t`. `None` when the value is not a function
+/// that returns code.
+fn erased_type(ctx: &TypeContext, ty: TypeExprRef) -> Option<TypeExprRef> {
+    let TypeDesc::Tarrow { args, ret } = &*ctx.get_desc(ctx.repr(ty)) else {
+        return None;
+    };
+    let (name, result_args) = macro_type_name(ctx, *ret)?;
+    if name != "Macro.code" {
+        return None;
+    }
+    let erased_args: Vec<TypeArg> = ctx
+        .type_args(*args)
+        .iter()
+        .map(|arg| {
+            let erased = match macro_type_name(ctx, arg.typ) {
+                Some((name, inner)) if name == "Macro.code" && inner.len() == 1 => inner[0],
+                _ => arg.typ,
+            };
+            TypeArg::with_label(arg.label(), erased)
+        })
+        .collect();
+    Some(ctx.new_type(TypeDesc::Tarrow {
+        args: ctx.new_type_args(&erased_args),
+        ret: *result_args.first()?,
+    }))
+}
+
+/// How a value is marked.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum MacroKind {
+    /// `@macro`: used as `%M.f(...)` or `@M.f`.
+    Macro,
+    /// `@generic`: called like a function.
+    Generic,
+}
+
+pub fn macro_kind(desc: &ValueDescription) -> Option<MacroKind> {
+    desc.val_attributes
+        .iter()
+        .find_map(|attr| match attr.attr_name.txt.as_str() {
+            "macro" => Some(MacroKind::Macro),
+            "generic" => Some(MacroKind::Generic),
+            _ => None,
+        })
+}
+
+/// A generic use found while typing an item, resolved when the item's types
+/// are final.
+struct PendingGeneric {
+    /// The identifier.
+    callee: (u32, u32),
+    /// The call, when the identifier is applied directly.
+    call: Option<PendingCall>,
+    module: String,
+    name: String,
+    signature: Signature,
+    /// The erased type at this use.
+    ty: TypeExprRef,
+    env: Env,
+}
+
+struct PendingCall {
+    range: (u32, u32),
+    /// Per argument: its source range and, for a literal, its value.
+    args: Vec<((u32, u32), Option<Value>)>,
+}
+
+/// State of one discovery pass.
+pub struct Discovery {
+    host: Arc<dyn MacroHost>,
+    text: Arc<SourceText>,
+    /// Directory `readFile` paths are resolved from.
+    base_dir: std::path::PathBuf,
+    pub edits: Vec<Edit>,
+    pub errors: Vec<MacroDiagnostic>,
+    /// Start of each top-level item that failed to type check.
+    pub failed_items: Vec<u32>,
+    pub instances: InstanceTable,
+    pub comptime: Vec<ComptimeSite>,
+    pending: Vec<PendingGeneric>,
+    /// Nesting of `type_structure`: 1 while typing a top-level item.
+    depth: u32,
+    /// The top-level item being typed.
+    item_start: u32,
+    /// The item stopped because one of its macros was expanded.
+    item_pending: bool,
+    /// The application whose function is being typed.
+    apply: Option<(LocIdx, PendingCall)>,
+    /// End of the instance group already in the text, by ordinal.
+    group_ends: HashMap<u32, u32>,
+    /// Instances added by this pass that start a new group, by the offset of
+    /// the item they go before.
+    new_groups: Vec<(u32, Vec<String>)>,
+}
+
+/// What a discovery pass found.
+pub struct PassResult {
+    pub edits: Vec<Edit>,
+    pub errors: Vec<MacroDiagnostic>,
+    pub failed_items: Vec<u32>,
+    pub instances: InstanceTable,
+    pub comptime: Vec<ComptimeSite>,
+}
+
+impl Discovery {
+    pub fn new(
+        host: Arc<dyn MacroHost>,
+        text: Arc<SourceText>,
+        base_dir: std::path::PathBuf,
+        instances: InstanceTable,
+    ) -> Self {
+        Discovery {
+            host,
+            text,
+            base_dir,
+            edits: Vec::new(),
+            errors: Vec::new(),
+            failed_items: Vec::new(),
+            instances,
+            comptime: Vec::new(),
+            pending: Vec::new(),
+            depth: 0,
+            item_start: 0,
+            item_pending: false,
+            apply: None,
+            group_ends: HashMap::new(),
+            new_groups: Vec::new(),
+        }
+    }
+
+    pub fn finish(mut self) -> PassResult {
+        for (at, functions) in std::mem::take(&mut self.new_groups) {
+            self.edits.push(Edit::insert(
+                at,
+                format!(
+                    "%%private(@warning(\"-39\") let rec {})\n",
+                    functions.join("\nand ")
+                ),
+            ));
+        }
+        PassResult {
+            edits: self.edits,
+            errors: self.errors,
+            failed_items: self.failed_items,
+            instances: self.instances,
+            comptime: self.comptime,
+        }
+    }
+
+    fn error(&mut self, at: (u32, u32), message: impl Into<String>) {
+        self.errors.push(MacroDiagnostic {
+            start: at.0,
+            end: at.1,
+            message: message.into(),
+        });
+    }
+
+    fn add_instance(&mut self, function: String) {
+        let ordinal = self.text.origin(self.item_start);
+        if let Some(end) = self.group_ends.get(&ordinal).copied() {
+            // `%%private(let rec a = ... )`: stay inside the parentheses.
+            let at = if end > 0 && self.text.slice(end - 1, end) == ")" {
+                end - 1
+            } else {
+                end
+            };
+            self.edits.push(Edit::insert(at, format!("\nand {function}")));
+            return;
+        }
+        match self
+            .new_groups
+            .iter_mut()
+            .find(|(at, _)| *at == self.item_start)
+        {
+            Some((_, functions)) => functions.push(function),
+            None => self.new_groups.push((self.item_start, vec![function])),
+        }
+    }
+
+    /// Run a macro: ask the engine, answer its questions, ask again.
+    fn run(
+        &self,
+        tctx: &mut TypeCheckContext<'_>,
+        env: &Env,
+        table: &mut TypeTable,
+        mut request: Value,
+    ) -> Result<String, (String, Option<u32>)> {
+        let mut answers = serde_json::Map::new();
+        for _ in 0..4096 {
+            request["answers"] = Value::Object(answers.clone());
+            let response = self
+                .host
+                .call(&request.to_string())
+                .map_err(|message| (format!("The macro engine failed: {message}"), None))?;
+            let response: Value = serde_json::from_str(&response)
+                .map_err(|error| (format!("The macro engine returned invalid JSON: {error}"), None))?;
+            if let Some(code) = response.get("ok").and_then(Value::as_str) {
+                return Ok(code.to_string());
+            }
+            if let Some(message) = response.get("error").and_then(Value::as_str) {
+                let offset = response
+                    .get("offset")
+                    .and_then(Value::as_u64)
+                    .map(|offset| offset as u32);
+                return Err((message.to_string(), offset));
+            }
+            let Some(question) = response.get("need").and_then(Value::as_str) else {
+                return Err(("The macro engine returned an unknown response.".into(), None));
+            };
+            let answer = self.answer(tctx, env, table, question);
+            answers.insert(question.to_string(), answer);
+        }
+        Err(("The macro asked more than 4096 questions.".into(), None))
+    }
+
+    fn answer(
+        &self,
+        tctx: &mut TypeCheckContext<'_>,
+        env: &Env,
+        table: &mut TypeTable,
+        question: &str,
+    ) -> Value {
+        let ctx = tctx.type_ctx;
+        let failure = |message: String| json!({ "__error": message });
+        let (kind, rest) = question.split_once(':').unwrap_or((question, ""));
+        match kind {
+            "info" => match rest.parse::<usize>().ok().and_then(|id| table.get(id)) {
+                Some(ty) => reflect::type_info(ctx, env, table, ty),
+                None => failure("Type.info: unknown type.".into()),
+            },
+            "companion" => {
+                let (id, name) = rest.split_once(':').unwrap_or((rest, ""));
+                let Some(ty) = id.parse::<usize>().ok().and_then(|id| table.get(id)) else {
+                    return failure("Type.companion: unknown type.".into());
+                };
+                let TypeDesc::Tconstr { path, .. } = &*ctx.get_desc(ctx.repr(ty)) else {
+                    return Value::Null;
+                };
+                let PathView::Pdot(module, _, _) = path.view() else {
+                    return Value::Null;
+                };
+                let value = format!("{}.{}", module.name(), name);
+                match lookup_value(tctx, env, &value) {
+                    Some(_) => json!({ "c": value }),
+                    None => Value::Null,
+                }
+            }
+            _ => answer_input(&self.base_dir, question)
+                .unwrap_or_else(|| failure(format!("Unknown question `{question}`."))),
+        }
+    }
+}
+
+/// The answers that need no type checker: files and environment variables.
+pub(crate) fn answer_input(base_dir: &std::path::Path, question: &str) -> Option<Value> {
+    let (kind, rest) = question.split_once(':')?;
+    match kind {
+        "readFile" => Some(match read_file(base_dir, rest) {
+            Some(text) => Value::String(text),
+            None => json!({ "__error": format!("readFile: cannot read `{rest}`.") }),
+        }),
+        "env" => Some(match std::env::var(rest) {
+            Ok(value) => Value::String(value),
+            Err(_) => Value::Null,
+        }),
+        _ => None,
+    }
+}
+
+/// Read `path` relative to `base` or one of its ancestors.
+fn read_file(base: &std::path::Path, path: &str) -> Option<String> {
+    #[cfg(feature = "wasm")]
+    {
+        let _ = base;
+        let absolute = if path.starts_with('/') {
+            path.to_string()
+        } else {
+            format!("/{path}")
+        };
+        return crate::wasm_vfs::read_file(&absolute).or_else(|| crate::wasm_vfs::read_file(path));
+    }
+    #[cfg(not(feature = "wasm"))]
+    {
+        let relative = std::path::Path::new(path);
+        if relative.is_absolute() {
+            return std::fs::read_to_string(relative).ok();
+        }
+        let mut dir = Some(base);
+        while let Some(current) = dir {
+            if let Ok(text) = std::fs::read_to_string(current.join(relative)) {
+                return Some(text);
+            }
+            dir = current.parent();
+        }
+        std::fs::read_to_string(relative).ok()
+    }
+}
+
+fn range(arena: &ParseArena, loc: LocIdx) -> (u32, u32) {
+    let location = arena.to_location(loc);
+    (
+        location.loc_start.cnum.max(0) as u32,
+        location.loc_end.cnum.max(0) as u32,
+    )
+}
+
+fn error_at(loc: LocIdx, message: impl Into<String>) -> TypeCoreError {
+    TypeCoreError::ExtensionError(BuiltinExtensionError {
+        loc,
+        message: message.into(),
+        sub: Vec::new(),
+    })
+}
+
+/// Stop an ordinary compilation at a macro use.
+fn required(tctx: &mut TypeCheckContext<'_>, loc: LocIdx) -> TypeCoreError {
+    tctx.macro_expansion_required = true;
+    error_at(loc, "This file uses macros and has to be expanded first.")
+}
+
+/// Stop typing the current item of a discovery pass: its edit, or the
+/// macro's error, is recorded.
+fn pending(tctx: &mut TypeCheckContext<'_>, loc: LocIdx) -> TypeCoreError {
+    if let MacroMode::Discover(discovery) = &mut tctx.macro_mode {
+        discovery.item_pending = true;
+    }
+    error_at(loc, "(macro expansion pending)")
+}
+
+fn discovering(tctx: &TypeCheckContext<'_>) -> bool {
+    matches!(tctx.macro_mode, MacroMode::Discover(_))
+}
+
+/// Run `f` with the pass state taken out of the context, so `f` can use
+/// both.
+fn with_discovery<R>(
+    tctx: &mut TypeCheckContext<'_>,
+    f: impl FnOnce(&mut TypeCheckContext<'_>, &mut Discovery) -> R,
+) -> Option<R> {
+    let MacroMode::Discover(mut discovery) = std::mem::replace(&mut tctx.macro_mode, MacroMode::Off)
+    else {
+        return None;
+    };
+    let result = f(tctx, &mut discovery);
+    tctx.macro_mode = MacroMode::Discover(discovery);
+    Some(result)
+}
+
+fn longident_of(arena: &ParseArena, name: &str) -> Option<Longident> {
+    let mut longident: Option<Longident> = None;
+    for segment in name.split('.') {
+        if segment.is_empty() {
+            return None;
+        }
+        let idx = arena
+            .find_string_idx(segment)
+            .unwrap_or_else(|| arena.push_typecheck_string(segment.to_string()));
+        longident = Some(match longident {
+            None => Longident::Lident(idx),
+            Some(prefix) => Longident::Ldot(Box::new(prefix), idx),
+        });
+    }
+    longident
+}
+
+fn lookup_value(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    name: &str,
+) -> Option<(Path, Arc<ValueDescription>)> {
+    let longident = longident_of(tctx.arena, name)?;
+    env.lookup_value_by_lid(&longident, tctx.arena, &mut tctx.persistent_env, tctx.type_ctx)
+}
+
+/// `Json.encode` → (`Json`, `encode`): the module whose JavaScript the
+/// engine loads and the export it calls.
+fn split_macro_name(name: &str) -> (String, String) {
+    match name.rsplit_once('.') {
+        Some((module, value)) => (module.split('.').next().unwrap_or(module).to_string(), {
+            // A macro in a submodule is not reachable as an export by name.
+            let _ = module;
+            value.to_string()
+        }),
+        None => (String::new(), name.to_string()),
+    }
+}
+
+fn literal(arena: &ParseArena, expr: ExprIdx) -> Option<Value> {
+    let expr = arena.get_expr(expr);
+    match &expr.pexp_desc {
+        ExpressionDesc::Pexp_constant(constant) => match constant {
+            Constant::String(text) => Some(Value::String(text.semantic(arena).to_string())),
+            Constant::Integer(text, None) => {
+                arena.get_string(*text).replace('_', "").parse::<i64>().ok().map(Value::from)
+            }
+            Constant::Float(text, None) => {
+                arena.get_string(*text).replace('_', "").parse::<f64>().ok().map(Value::from)
+            }
+            _ => None,
+        },
+        ExpressionDesc::Pexp_construct(lid, args) if arena.expr_list(args.txt).is_empty() => {
+            match arena.get_longident(lid.txt) {
+                Longident::Lident(name) => match arena.get_string(*name) {
+                    "true" => Some(Value::Bool(true)),
+                    "false" => Some(Value::Bool(false)),
+                    "()" => Some(Value::Null),
+                    _ => None,
+                },
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// The argument expressions of `%M.f(a, b)`.
+fn payload_expressions(arena: &ParseArena, payload: &Payload, arity: usize) -> Result<Vec<ExprIdx>, String> {
+    let Payload::PStr(items) = payload else {
+        return Err("The arguments of a macro are expressions here.".into());
+    };
+    match items.as_slice() {
+        [] => Ok(Vec::new()),
+        [item] => {
+            let ParsedStructureItemDesc::Pstr_eval(eval) = &item.pstr_desc else {
+                return Err("The arguments of a macro are expressions here.".into());
+            };
+            match &arena.get_expr(eval.0).pexp_desc {
+                ExpressionDesc::Pexp_tuple(elements) if arity != 1 => Ok(arena.expr_list(*elements).to_vec()),
+                _ => Ok(vec![eval.0]),
+            }
+        }
+        _ => Err("The arguments of a macro are expressions here.".into()),
+    }
+}
+
+/// The JSON arguments of a `%M.f(...)` call.
+fn call_arguments(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    discovery: &Discovery,
+    table: &mut TypeTable,
+    name: &str,
+    signature: &Signature,
+    payload: &Payload,
+) -> Result<Vec<Value>, String> {
+    let exprs = payload_expressions(tctx.arena, payload, signature.params.len())?;
+    if exprs.len() != signature.params.len() {
+        return Err(format!(
+            "The macro `{name}` takes {} argument{}, and {} {} given.",
+            signature.params.len(),
+            if signature.params.len() == 1 { "" } else { "s" },
+            exprs.len(),
+            if exprs.len() == 1 { "is" } else { "are" },
+        ));
+    }
+    let mut args = Vec::with_capacity(exprs.len());
+    for (index, (expr_idx, kind)) in exprs.iter().zip(&signature.params).enumerate() {
+        let expr = tctx.arena.get_expr(*expr_idx);
+        let at = range(tctx.arena, expr.pexp_loc);
+        match kind {
+            ParamKind::Code => {
+                let mut code = json!({ "c": discovery.text.slice(at.0, at.1) });
+                // The type as far as it is known here. An argument that
+                // does not type check on its own has none.
+                let ctx = tctx.type_ctx;
+                let expected = ctx.new_var(None);
+                if let Ok(typed) = crate::types::typecore::type_expect(tctx, env, expr, expected, None) {
+                    code["t"] = reflect::type_ref(ctx, table, typed.exp_type);
+                }
+                args.push(code);
+            }
+            ParamKind::Value => match literal(tctx.arena, *expr_idx) {
+                Some(value) => args.push(value),
+                None => {
+                    return Err(format!(
+                        "Argument {} of the macro `{name}` is a compile-time value, so it has to be a literal.",
+                        index + 1
+                    ));
+                }
+            },
+            ParamKind::Typ => {
+                return Err(format!(
+                    "Argument {} of the macro `{name}` is a type. Use the macro where a type is written: `type t = %{name}(...)`.",
+                    index + 1
+                ));
+            }
+            ParamKind::Decl | ParamKind::Binding => {
+                return Err(format!(
+                    "The macro `{name}` works on a declaration. Attach it: `@{name}`."
+                ));
+            }
+        }
+    }
+    Ok(args)
+}
+
+/// Look up the macro an extension or attribute names.
+fn find_macro(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    loc: LocIdx,
+    name: &str,
+) -> Result<Arc<ValueDescription>, TypeCoreError> {
+    let Some((_, desc)) = lookup_value(tctx, env, name) else {
+        return Err(error_at(loc, format!("The macro `{name}` cannot be found.")));
+    };
+    match macro_kind(&desc) {
+        Some(_) => Ok(desc),
+        None => Err(error_at(
+            loc,
+            format!("`{name}` is not a macro. A macro is a function marked with @macro."),
+        )),
+    }
+}
+
+/// Run a macro for a call site and return its code, or record the failure.
+#[allow(clippy::too_many_arguments)]
+fn run_call(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    discovery: &mut Discovery,
+    table: &mut TypeTable,
+    at: (u32, u32),
+    name: &str,
+    args: Result<Vec<Value>, String>,
+    expected: Option<Value>,
+) -> Option<String> {
+    let args = match args {
+        Ok(args) => args,
+        Err(message) => {
+            discovery.error(at, message);
+            return None;
+        }
+    };
+    let (module, value) = split_macro_name(name);
+    let request = json!({
+        "kind": "call",
+        "module": module,
+        "name": value,
+        "args": args,
+        "expected": expected,
+    });
+    match discovery.run(tctx, env, table, request) {
+        Ok(code) => Some(code),
+        Err((message, _offset)) => {
+            discovery.error(at, format!("{name}: {message}"));
+            None
+        }
+    }
+}
+
+/// `%name(...)` where an expression is expected. `None`: not a macro, the
+/// type checker handles the extension as before.
+pub(crate) fn expression_extension(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    loc: LocIdx,
+    extension: &Extension,
+    expected_ty: TypeExprRef,
+) -> Option<TypeCoreResult<Expression>> {
+    let name = tctx.arena.get_string(extension.0.txt).to_string();
+    let is_hole = name == HOLE_EXTENSION;
+    if is_hole || quote::is_quote_name(&name) {
+        // Quotes are lowered before a discovery pass; one that is left has
+        // no payload.
+        return Some(Err(if !discovering(tctx) {
+            required(tctx, loc)
+        } else if is_hole {
+            error_at(
+                loc,
+                "A hole `${...}` can only be used inside a quote: %code(...), %type(...) or %pat(...).",
+            )
+        } else {
+            error_at(loc, format!("The quote `%{name}` needs a payload: `%{name}(...)`."))
+        }));
+    }
+    if name == "comptime" {
+        return Some(comptime(tctx, env, loc, extension, expected_ty));
+    }
+    if !is_macro_name(&name) {
+        return None;
+    }
+    let desc = match find_macro(tctx, env, loc, &name) {
+        Ok(desc) => desc,
+        Err(error) => return Some(Err(error)),
+    };
+    if !discovering(tctx) {
+        return Some(Err(required(tctx, loc)));
+    }
+    let ctx = tctx.type_ctx;
+    let macro_type = crate::types::instance(ctx, desc.val_type);
+    let (signature, _, result_type) = signature(ctx, macro_type);
+    let at = range(tctx.arena, loc);
+    if signature.result != ResultKind::Code {
+        return Some(Err(error_at(
+            loc,
+            format!("The macro `{name}` does not return an expression, so it cannot be used as one."),
+        )));
+    }
+    let mut table = TypeTable::default();
+    with_discovery(tctx, |tctx, discovery| {
+        let args = call_arguments(tctx, env, discovery, &mut table, &name, &signature, &extension.1);
+        if let Some(code) = run_call(tctx, env, discovery, &mut table, at, &name, args, None) {
+            discovery.edits.push(Edit::replace(at.0, at.1, format!("({code})")));
+        }
+    });
+    // Type the call as its declared result, `code<string>` as `string`, so
+    // the rest of the item is checked as far as possible in this pass.
+    if let Some((_, inner)) = macro_type_name(ctx, result_type)
+        && let Some(inner) = inner.first()
+    {
+        let mut state = crate::types::ctype::UnifyState::default();
+        let _ = crate::types::ctype::unify(ctx, &mut state, *inner, expected_ty);
+    }
+    Some(Ok(Expression::new(
+        TypedExpressionDesc::Texp_break,
+        loc,
+        expected_ty,
+        ctx.store_typed_env(env),
+    )))
+}
+
+/// `%comptime(expr)`: `expr` is typed as usual; its value replaces it
+/// between passes.
+fn comptime(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    loc: LocIdx,
+    extension: &Extension,
+    expected_ty: TypeExprRef,
+) -> TypeCoreResult<Expression> {
+    if !discovering(tctx) {
+        return Err(required(tctx, loc));
+    }
+    let expr_idx = match payload_expressions(tctx.arena, &extension.1, 1) {
+        Ok(exprs) if exprs.len() == 1 => exprs[0],
+        _ => return Err(error_at(loc, "%comptime takes one expression: `%comptime(expr)`.")),
+    };
+    let expr = tctx.arena.get_expr(expr_idx);
+    let typed = crate::types::typecore::type_expect(tctx, env, expr, expected_ty, None)?;
+    let at = range(tctx.arena, loc);
+    let inner = range(tctx.arena, expr.pexp_loc);
+    let ctx = tctx.type_ctx;
+    let shape = reflect::value_shape(ctx, env, typed.exp_type, 0);
+    with_discovery(tctx, |_, discovery| {
+        let expression = discovery.text.slice(inner.0, inner.1).to_string();
+        discovery.comptime.push(ComptimeSite {
+            start: at.0,
+            end: at.1,
+            expression,
+            shape,
+        });
+    });
+    Ok(typed)
+}
+
+/// An application is about to be typed: remember its arguments for the case
+/// that its function is a `@generic`.
+pub(crate) fn note_application(
+    tctx: &mut TypeCheckContext<'_>,
+    loc: LocIdx,
+    funct: &crate::parser::ast::Expression,
+    args: &[(ArgLabel, ExprIdx)],
+) {
+    let arena = tctx.arena;
+    let MacroMode::Discover(discovery) = &mut tctx.macro_mode else {
+        return;
+    };
+    if !matches!(funct.pexp_desc, ExpressionDesc::Pexp_ident(_)) {
+        return;
+    }
+    let call = PendingCall {
+        range: range(arena, loc),
+        args: args
+            .iter()
+            .map(|(label, arg)| {
+                let value = match label {
+                    ArgLabel::Nolabel => literal(arena, *arg),
+                    _ => None,
+                };
+                (range(arena, arena.get_expr(*arg).pexp_loc), value)
+            })
+            .collect(),
+    };
+    discovery.apply = Some((funct.pexp_loc, call));
+}
+
+/// An identifier resolved to `desc`. For a `@generic` of another file this
+/// returns the type the identifier has here; otherwise `None`.
+pub(crate) fn generic_use(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    loc: LocIdx,
+    path: &Path,
+    desc: &ValueDescription,
+) -> TypeCoreResult<Option<TypeExprRef>> {
+    let Some(kind) = macro_kind(desc) else {
+        return Ok(None);
+    };
+    // In its own file a macro is an ordinary function.
+    let PathView::Pdot(..) = path.view() else {
+        return Ok(None);
+    };
+    let name = path.name();
+    if kind == MacroKind::Macro {
+        return Err(error_at(
+            loc,
+            format!("`{name}` is a macro. Use it as `%{name}(...)` or attach it as `@{name}`."),
+        ));
+    }
+    if !discovering(tctx) {
+        return Err(required(tctx, loc));
+    }
+    let ctx = tctx.type_ctx;
+    let instance = crate::types::instance(ctx, desc.val_type);
+    let Some(erased) = erased_type(ctx, instance) else {
+        return Err(error_at(
+            loc,
+            format!("`{name}` is marked @generic, so it has to be a function that returns `code<...>`."),
+        ));
+    };
+    let (signature, _, _) = signature(ctx, instance);
+    let callee = range(tctx.arena, loc);
+    let (module, value) = split_macro_name(&name);
+    let env = env.clone();
+    if let MacroMode::Discover(discovery) = &mut tctx.macro_mode {
+        let call = match discovery.apply.take() {
+            Some((apply_loc, call)) if apply_loc == loc => Some(call),
+            _ => None,
+        };
+        discovery.pending.push(PendingGeneric {
+            callee,
+            call,
+            module,
+            name: value,
+            signature,
+            ty: erased,
+            env,
+        });
+    }
+    Ok(Some(erased))
+}
+
+fn instance_name(base: &str, parts: &[String]) -> String {
+    let mut name = String::from(base);
+    for part in parts {
+        name.push('$');
+        let mut last_underscore = true;
+        for ch in part.chars() {
+            if ch.is_ascii_alphanumeric() {
+                name.push(ch);
+                last_underscore = false;
+            } else if !last_underscore {
+                name.push('_');
+                last_underscore = true;
+            }
+        }
+        while name.ends_with('_') {
+            name.pop();
+        }
+    }
+    name
+}
+
+/// A top-level item is about to be typed.
+pub(crate) fn begin_item(tctx: &mut TypeCheckContext<'_>, item: &ParsedStructureItem) {
+    let arena = tctx.arena;
+    let MacroMode::Discover(discovery) = &mut tctx.macro_mode else {
+        return;
+    };
+    discovery.depth += 1;
+    if discovery.depth != 1 {
+        return;
+    }
+    let (start, end) = range(arena, item.pstr_loc);
+    discovery.item_start = start;
+    discovery.item_pending = false;
+    // An instance group that an earlier pass added.
+    if let ParsedStructureItemDesc::Pstr_value((RecFlag::Recursive, bindings)) = &item.pstr_desc
+        && let Some(first) = arena.vb_list(*bindings).first()
+        && let PatternDesc::Ppat_var(name) = &arena.get_pat(first.pvb_pat).ppat_desc
+        && arena.get_string(name.txt).contains('$')
+    {
+        let ordinal = discovery.text.origin(start);
+        discovery.group_ends.insert(ordinal, end);
+    }
+}
+
+/// A top-level item was typed (`ok`) or failed. Resolves the generic uses
+/// found in it. Returns whether the failure is only a recorded expansion.
+pub(crate) fn end_item(tctx: &mut TypeCheckContext<'_>, ok: bool) {
+    let MacroMode::Discover(discovery) = &mut tctx.macro_mode else {
+        return;
+    };
+    discovery.depth -= 1;
+    if discovery.depth != 0 {
+        return;
+    }
+    discovery.apply = None;
+    if !ok && !discovery.item_pending {
+        let start = discovery.item_start;
+        discovery.failed_items.push(start);
+    }
+    let pending = std::mem::take(&mut discovery.pending);
+    with_discovery(tctx, |tctx, discovery| {
+        for generic in pending {
+            resolve_generic(tctx, discovery, generic);
+        }
+    });
+}
+
+fn resolve_generic(tctx: &mut TypeCheckContext<'_>, discovery: &mut Discovery, generic: PendingGeneric) {
+    let ctx = tctx.type_ctx;
+    let full_name = format!("{}.{}", generic.module, generic.name);
+    let TypeDesc::Tarrow { args, ret } = &*ctx.get_desc(ctx.repr(generic.ty)) else {
+        return;
+    };
+    let ret = *ret;
+    let arg_types: Vec<TypeExprRef> = ctx.type_args(*args).iter().map(|arg| arg.typ).collect();
+
+    let mut table = TypeTable::default();
+    let mut macro_args = Vec::new();
+    let mut params = Vec::new();
+    let mut call_args = Vec::new();
+    let mut key_parts = Vec::new();
+    let mut name_parts = Vec::new();
+    for (index, kind) in generic.signature.params.iter().enumerate() {
+        match kind {
+            ParamKind::Code => {
+                let Some(ty) = arg_types.get(index).copied() else {
+                    return;
+                };
+                let printed = reflect::print_type(ctx, ty);
+                if reflect::is_unknown(ctx, ty) || printed.contains("'_") {
+                    discovery.error(
+                        generic.callee,
+                        format!(
+                            "`{full_name}` is generated per type, and the type of this argument is not known here. Add a type annotation."
+                        ),
+                    );
+                    return;
+                }
+                let param = format!("{}$", (b'a' + (params.len() % 26) as u8) as char);
+                let mut code = json!({ "c": param });
+                code["t"] = reflect::type_ref(ctx, &mut table, ty);
+                macro_args.push(code);
+                params.push(format!("{param}: {printed}"));
+                key_parts.push(printed.clone());
+                name_parts.push(printed);
+                if let Some(call) = &generic.call
+                    && let Some((at, _)) = call.args.get(index)
+                {
+                    call_args.push(discovery.text.slice(at.0, at.1).to_string());
+                }
+            }
+            ParamKind::Value => {
+                let value = generic
+                    .call
+                    .as_ref()
+                    .and_then(|call| call.args.get(index))
+                    .and_then(|(_, value)| value.clone());
+                let Some(value) = value else {
+                    discovery.error(
+                        generic.callee,
+                        format!(
+                            "Argument {} of `{full_name}` is a compile-time value: call `{full_name}` directly, with a literal.",
+                            index + 1
+                        ),
+                    );
+                    return;
+                };
+                key_parts.push(value.to_string());
+                name_parts.push(match &value {
+                    Value::String(text) => text.clone(),
+                    other => other.to_string(),
+                });
+                macro_args.push(value);
+            }
+            _ => {
+                discovery.error(
+                    generic.callee,
+                    format!("`{full_name}`: a @generic takes `code<...>` and compile-time values only."),
+                );
+                return;
+            }
+        }
+    }
+    let has_values = generic.signature.params.contains(&ParamKind::Value);
+    let result = reflect::print_type(ctx, ret);
+    let key = format!("{full_name}({})->{result}", key_parts.join(","));
+    let ordinal = discovery.text.origin(discovery.item_start);
+
+    let name = match discovery.instances.find(&key, ordinal) {
+        Some(name) => name.to_string(),
+        None => {
+            let expected = reflect::type_ref(ctx, &mut table, ret);
+            let request = json!({
+                "kind": "call",
+                "module": generic.module,
+                "name": generic.name,
+                "args": macro_args,
+                "expected": expected,
+            });
+            let body = match discovery.run(tctx, &generic.env, &mut table, request) {
+                Ok(body) => body,
+                Err((message, _)) => {
+                    discovery.error(generic.callee, format!("{full_name}: {message}"));
+                    return;
+                }
+            };
+            if name_parts.is_empty() {
+                name_parts.push(result.clone());
+            }
+            let name = discovery
+                .instances
+                .add(key, &instance_name(&generic.name, &name_parts), ordinal);
+            let annotation = if result.contains("'_") || reflect::is_unknown(ctx, ret) {
+                String::new()
+            } else {
+                format!(": {result}")
+            };
+            discovery.add_instance(format!(
+                "{name} = ({}){annotation} => {body}",
+                params.join(", ")
+            ));
+            name
+        }
+    };
+
+    if has_values {
+        // The compile-time arguments are part of the instance: the call
+        // keeps the others.
+        match &generic.call {
+            Some(call) => discovery.edits.push(Edit::replace(
+                call.range.0,
+                call.range.1,
+                format!("{name}({})", call_args.join(", ")),
+            )),
+            None => discovery.error(
+                generic.callee,
+                format!("`{full_name}` takes compile-time values, so it has to be called directly."),
+            ),
+        }
+    } else {
+        discovery
+            .edits
+            .push(Edit::replace(generic.callee.0, generic.callee.1, name));
+    }
+}
+
+/// Whether a failed top-level item is skipped: in a discovery pass, at the
+/// top level of the file.
+pub(crate) fn skips_failed_item(tctx: &TypeCheckContext<'_>) -> bool {
+    matches!(&tctx.macro_mode, MacroMode::Discover(discovery) if discovery.depth == 0)
+}
+
+/// An extension where a type is expected: `type t = %Partial.t(user)`.
+pub(crate) fn type_extension(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    loc: LocIdx,
+    extension: &Extension,
+) -> Option<TypeCoreError> {
+    let name = tctx.arena.get_string(extension.0.txt).to_string();
+    if name == HOLE_EXTENSION {
+        return Some(if discovering(tctx) {
+            error_at(loc, "A hole `${...}` can only be used inside a quote: %code(...), %type(...) or %pat(...).")
+        } else {
+            required(tctx, loc)
+        });
+    }
+    if !is_macro_name(&name) {
+        return None;
+    }
+    let desc = match find_macro(tctx, env, loc, &name) {
+        Ok(desc) => desc,
+        Err(error) => return Some(error),
+    };
+    if !discovering(tctx) {
+        return Some(required(tctx, loc));
+    }
+    let ctx = tctx.type_ctx;
+    let (signature, _, _) = signature(ctx, crate::types::instance(ctx, desc.val_type));
+    if signature.result != ResultKind::Typ {
+        return Some(error_at(
+            loc,
+            format!("The macro `{name}` does not return a type, so it cannot be used as one."),
+        ));
+    }
+    let arena = tctx.arena;
+    let types: Vec<crate::parse_arena::CoreTypeIdx> = match &extension.1 {
+        Payload::PTyp(idx) => match &arena.get_core_type(*idx).ptyp_desc {
+            crate::parser::ast::CoreTypeDesc::Ptyp_tuple(elements) if signature.params.len() != 1 => {
+                arena.type_list(*elements).to_vec()
+            }
+            _ => vec![*idx],
+        },
+        _ => Vec::new(),
+    };
+    let at = range(arena, loc);
+    let mut table = TypeTable::default();
+    let mut args: Result<Vec<Value>, String> = if types.len() == signature.params.len() {
+        Ok(Vec::new())
+    } else {
+        Err(format!(
+            "The macro `{name}` takes {} argument(s), and {} are given.",
+            signature.params.len(),
+            types.len()
+        ))
+    };
+    if let Ok(values) = &mut args {
+        for (idx, kind) in types.iter().zip(&signature.params) {
+            let styp = arena.get_core_type(*idx);
+            let type_range = range(arena, styp.ptyp_loc);
+            if *kind != ParamKind::Typ {
+                args = Err(format!("The macro `{name}` takes arguments that are not types."));
+                break;
+            }
+            match crate::types::typecore::transl_type(tctx, env, styp) {
+                Ok((_, ty)) => {
+                    let mut value = reflect::type_ref(ctx, &mut table, ty);
+                    with_discovery(tctx, |_, discovery| {
+                        value["c"] = Value::String(discovery.text.slice(type_range.0, type_range.1).to_string());
+                    });
+                    values.push(value);
+                }
+                Err(error) => return Some(error),
+            }
+        }
+    }
+    with_discovery(tctx, |tctx, discovery| {
+        if let Some(code) = run_call(tctx, env, discovery, &mut table, at, &name, args, None) {
+            discovery.edits.push(Edit::replace(at.0, at.1, format!("({code})")));
+        }
+    });
+    Some(pending(tctx, loc))
+}
+
+/// A structure item or module expression that is a macro call:
+/// `%M.f(...)` on its own, or `module X = %M.f(...)`.
+pub(crate) fn declarations_extension(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    loc: LocIdx,
+    extension: &Extension,
+    as_module: bool,
+) -> Option<TypeCoreError> {
+    let name = tctx.arena.get_string(extension.0.txt).to_string();
+    if !is_macro_name(&name) {
+        return None;
+    }
+    let desc = match find_macro(tctx, env, loc, &name) {
+        Ok(desc) => desc,
+        Err(error) => return Some(error),
+    };
+    if !discovering(tctx) {
+        return Some(required(tctx, loc));
+    }
+    let ctx = tctx.type_ctx;
+    let (signature, _, _) = signature(ctx, crate::types::instance(ctx, desc.val_type));
+    if signature.result != ResultKind::Decls {
+        return Some(error_at(
+            loc,
+            format!("The macro `{name}` does not return declarations (`decls`), so it cannot be used here."),
+        ));
+    }
+    let at = range(tctx.arena, loc);
+    let mut table = TypeTable::default();
+    with_discovery(tctx, |tctx, discovery| {
+        let args = call_arguments(tctx, env, discovery, &mut table, &name, &signature, &extension.1);
+        if let Some(code) = run_call(tctx, env, discovery, &mut table, at, &name, args, None) {
+            let text = if as_module {
+                format!("{{\n{code}\n}}")
+            } else {
+                code
+            };
+            discovery.edits.push(Edit::replace(at.0, at.1, text));
+        }
+    });
+    Some(pending(tctx, loc))
+}
+
+/// The macros attached to something: `@Json.codec`.
+fn macro_attributes(
+    arena: &ParseArena,
+    attributes: &crate::parser::ast::Attributes,
+) -> Vec<(String, LocIdx)> {
+    attributes
+        .iter()
+        .filter_map(|attr| {
+            let name = arena.get_string(attr.0.txt);
+            is_macro_name(name).then(|| (name.to_string(), attr.0.loc))
+        })
+        .collect()
+}
+
+/// Whether a `let` or a type declaration carries a macro attribute.
+pub(crate) fn has_macro_attribute(
+    arena: &ParseArena,
+    attributes: &crate::parser::ast::Attributes,
+) -> bool {
+    attributes
+        .iter()
+        .any(|attr| is_macro_name(arena.get_string(attr.0.txt)))
+}
+
+/// Mark an attribute as done: `@Json.codec` becomes `@expanded.Json.codec`,
+/// which is inert.
+fn retire_attribute(discovery: &mut Discovery, arena: &ParseArena, name: &str, loc: LocIdx) {
+    let at = range(arena, loc);
+    let text = discovery.text.slice(at.0, at.1).to_string();
+    discovery
+        .edits
+        .push(Edit::replace(at.0, at.1, text.replacen(name, &format!("expanded.{name}"), 1)));
+}
+
+/// `@M.f let x = ...`: the macro gets the binding as syntax and its result
+/// replaces the item. `None`: no macro attribute.
+pub(crate) fn value_item(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    item: &ParsedStructureItem,
+) -> Option<TypeCoreError> {
+    let arena = tctx.arena;
+    let ParsedStructureItemDesc::Pstr_value((_, bindings)) = &item.pstr_desc else {
+        return None;
+    };
+    let bindings = arena.vb_list(*bindings);
+    let (binding, (name, attr_loc)) = bindings.iter().find_map(|binding| {
+        macro_attributes(arena, &binding.pvb_attributes)
+            .into_iter()
+            .next()
+            .map(|found| (binding, found))
+    })?;
+    let loc = item.pstr_loc;
+    let desc = match find_macro(tctx, env, attr_loc, &name) {
+        Ok(desc) => desc,
+        Err(error) => return Some(error),
+    };
+    if !discovering(tctx) {
+        return Some(required(tctx, loc));
+    }
+    if bindings.len() != 1 {
+        return Some(error_at(attr_loc, format!("`@{name}` works on a `let` with one binding.")));
+    }
+    let ctx = tctx.type_ctx;
+    let (signature, _, _) = signature(ctx, crate::types::instance(ctx, desc.val_type));
+    if signature.params != [ParamKind::Binding] || signature.result != ResultKind::Decls {
+        return Some(error_at(
+            attr_loc,
+            format!("A macro on a `let` has the type `Decl.value => decls`, and `{name}` does not."),
+        ));
+    }
+    let pat = arena.get_pat(binding.pvb_pat);
+    let pat_range = range(arena, pat.ppat_loc);
+    let expr_range = range(arena, arena.get_expr(binding.pvb_expr).pexp_loc);
+    let bound = match &pat.ppat_desc {
+        PatternDesc::Ppat_var(name) => arena.get_string(name.txt).to_string(),
+        _ => String::new(),
+    };
+    let at = range(arena, loc);
+    let mut table = TypeTable::default();
+    with_discovery(tctx, |tctx, discovery| {
+        let args = Ok(vec![json!({
+            "name": bound,
+            "pat": { "c": discovery.text.slice(pat_range.0, pat_range.1) },
+            "expr": { "c": discovery.text.slice(expr_range.0, expr_range.1) },
+        })]);
+        if let Some(code) = run_call(tctx, env, discovery, &mut table, at, &name, args, None) {
+            discovery.edits.push(Edit::replace(at.0, at.1, code));
+        }
+    });
+    Some(pending(tctx, loc))
+}
+
+/// Whether a type item carries a macro, for an ordinary compilation to
+/// stop at.
+pub(crate) fn type_item_requires_expansion(
+    tctx: &mut TypeCheckContext<'_>,
+    item: &ParsedStructureItem,
+) -> Option<TypeCoreError> {
+    if discovering(tctx) {
+        return None;
+    }
+    let ParsedStructureItemDesc::Pstr_type(inner) = &item.pstr_desc else {
+        return None;
+    };
+    let arena = tctx.arena;
+    inner
+        .1
+        .iter()
+        .any(|decl| has_macro_attribute(arena, &decl.ptype_attributes))
+        .then(|| required(tctx, item.pstr_loc))
+}
+
+/// `@M.f type t = ...`, after the declaration is type checked in `env`: the
+/// macro gets the declaration and its result is added after the item.
+pub(crate) fn type_item(tctx: &mut TypeCheckContext<'_>, env: &Env, item: &ParsedStructureItem) {
+    if !discovering(tctx) {
+        return;
+    }
+    let ParsedStructureItemDesc::Pstr_type(inner) = &item.pstr_desc else {
+        return;
+    };
+    let arena = tctx.arena;
+    let item_range = range(arena, item.pstr_loc);
+    for decl in inner.1.iter() {
+        for (name, attr_loc) in macro_attributes(arena, &decl.ptype_attributes) {
+            let at = range(arena, attr_loc);
+            let desc = match find_macro(tctx, env, attr_loc, &name) {
+                Ok(desc) => desc,
+                Err(error) => {
+                    let message = match error {
+                        TypeCoreError::ExtensionError(error) => error.message,
+                        _ => format!("The macro `{name}` cannot be used here."),
+                    };
+                    with_discovery(tctx, |_, discovery| discovery.error(at, message));
+                    continue;
+                }
+            };
+            let ctx = tctx.type_ctx;
+            let (signature, _, _) = signature(ctx, crate::types::instance(ctx, desc.val_type));
+            if signature.params != [ParamKind::Decl] || signature.result != ResultKind::Decls {
+                with_discovery(tctx, |_, discovery| {
+                    discovery.error(
+                        at,
+                        format!("A macro on a type has the type `Type.decl => decls`, and `{name}` does not."),
+                    )
+                });
+                continue;
+            }
+            let type_name = arena.get_string(decl.ptype_name.txt).to_string();
+            let Some((path, type_decl)) = lookup_type(tctx, env, &type_name) else {
+                continue;
+            };
+            let ty = ctx.new_constr(path, type_decl.type_params.clone());
+            let mut table = TypeTable::default();
+            let mut type_value = reflect::type_ref(ctx, &mut table, ty);
+            if type_decl.type_params.is_empty() {
+                type_value["c"] = Value::String(type_name.clone());
+            }
+            let attrs: Vec<Value> = decl
+                .ptype_attributes
+                .iter()
+                .filter(|attr| !is_macro_name(arena.get_string(attr.0.txt)))
+                .map(|attr| json!({ "name": arena.get_string(attr.0.txt) }))
+                .collect();
+            with_discovery(tctx, |tctx, discovery| {
+                let args = Ok(vec![json!({ "name": type_name, "typ": type_value, "attrs": attrs })]);
+                if let Some(code) = run_call(tctx, env, discovery, &mut table, at, &name, args, None) {
+                    discovery
+                        .edits
+                        .push(Edit::insert(item_range.1, format!("\n{code}")));
+                    retire_attribute(discovery, arena, &name, attr_loc);
+                }
+            });
+        }
+    }
+}
+
+fn lookup_type(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    name: &str,
+) -> Option<(Path, crate::types::TypeDeclaration)> {
+    let _ = tctx;
+    let (path, decl) = env.find_type_with_path(name).ok()?;
+    Some((path, decl.clone()))
+}

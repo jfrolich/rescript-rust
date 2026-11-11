@@ -554,6 +554,9 @@ fn place_location_free_warnings(
 /// Compiler options that can be passed to the driver.
 #[derive(Clone)]
 pub struct CompilerOptions {
+    /// The JavaScript engine that runs macros. Without one, a file that
+    /// uses macros does not compile.
+    pub macro_host: Option<std::sync::Arc<dyn crate::macros::MacroHost>>,
     /// Print the Lambda IR to stderr (like OCaml's -drawlambda)
     pub dump_lambda: bool,
     /// Print the typed tree as sexp to stderr (like OCaml's -dtyped-sexp)
@@ -821,6 +824,7 @@ fn parse_diagnostics_report(parser: &Parser<'_>, source: &str, filename: &str) -
 impl Default for CompilerOptions {
     fn default() -> Self {
         Self {
+            macro_host: None,
             dump_lambda: false,
             dump_typed_sexp: false,
             dump_typed_sexp_locs: false,
@@ -12481,6 +12485,8 @@ pub struct InProcessCompileResult {
     pub dumps: Vec<(DumpKind, String)>,
     /// The warning reports the file compile prints to stderr.
     pub warnings: String,
+    /// The source after macro expansion, when the file uses macros.
+    pub expanded_source: Option<String>,
 }
 
 /// Owned in-process compilation state after typechecking and Lambda lowering,
@@ -12649,8 +12655,75 @@ pub fn compile_source_in_process(
     registry: &ModuleRegistry,
     has_interface: bool,
 ) -> Result<InProcessCompileResult> {
-    let mut parser = Parser::new(filename, source);
+    let compile = |expanded: Option<&crate::macros::edit::SourceText>| {
+        compile_parsed_source_in_process(
+            source,
+            expanded,
+            filename,
+            module_name,
+            options,
+            registry,
+            has_interface,
+        )
+    };
+    match compile(None) {
+        // The file uses macros: expand it, then compile the expanded source.
+        Err(error) if error.is::<crate::macros::MacroExpansionRequired>() => {
+            let Some(host) = options.macro_host.clone() else {
+                return Err(UserDiagnostic::new(
+                    format!("{filename}: this file uses macros, and this build has no macro engine.\n"),
+                    2,
+                )
+                .into());
+            };
+            let expanded = crate::macros::expand::expand_source(
+                source,
+                filename,
+                module_name,
+                options,
+                registry,
+                host,
+            )?;
+            match compile(Some(&expanded)) {
+                Err(error) if error.is::<crate::macros::MacroExpansionRequired>() => {
+                    Err(UserDiagnostic::new(
+                        format!("{filename}: macro expansion left a macro unexpanded.\n"),
+                        2,
+                    )
+                    .into())
+                }
+                Ok(mut compiled) => {
+                    compiled.expanded_source = Some(expanded.text().to_string());
+                    Ok(compiled)
+                }
+                Err(error) => Err(error),
+            }
+        }
+        result => result,
+    }
+}
+
+/// Compile `source`, or its macro-expanded text when the file was expanded.
+fn compile_parsed_source_in_process(
+    source: &str,
+    expanded: Option<&crate::macros::edit::SourceText>,
+    filename: &str,
+    module_name: &str,
+    options: &CompilerOptions,
+    registry: &ModuleRegistry,
+    has_interface: bool,
+) -> Result<InProcessCompileResult> {
+    let mut parser = match expanded {
+        Some(expanded) => Parser::for_expanded_source(filename, expanded.text()),
+        None => Parser::new(filename, source),
+    };
     let structure = module::parse_structure(&mut parser);
+    if let Some(expanded) = expanded
+        && !parser.has_errors()
+    {
+        // From here on every position is one of the source as written.
+        crate::macros::expand::remap_positions(parser.arena_mut(), expanded, source);
+    }
     let mut frontend_output = String::new();
     let frontend = run_implementation_frontend(
         &mut parser,
@@ -13000,7 +13073,7 @@ pub fn compile_preprocessed_structure_in_process_with_signature_hook(
 }
 
 /// A fresh type context with the stamp counter where OCaml's starts.
-fn fresh_type_context() -> TypeContext {
+pub(crate) fn fresh_type_context() -> TypeContext {
     crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
     let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
     // Match OCaml's Parmatch.extra_pat which eagerly calls Ident.create "+"
@@ -13013,7 +13086,7 @@ fn fresh_type_context() -> TypeContext {
 /// implementation or interface is typed in: the registry's units are the persistent
 /// environment, Pervasives (and `-open`s) opened as `Res_compmisc.initial_env`
 /// does (res_compmisc.ml:56-62).
-fn in_process_type_check_context<'a>(
+pub(crate) fn in_process_type_check_context<'a>(
     type_ctx: &'a TypeContext,
     arena: &'a crate::parse_arena::ParseArena,
     options: &CompilerOptions,
@@ -13242,6 +13315,9 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     let (typed_structure, final_env) = match typed {
         Ok(result) => result,
         Err(e) => {
+            if tctx.macro_expansion_required {
+                return Err(crate::macros::MacroExpansionRequired.into());
+            }
             // As in the file compile: the warnings reported so far precede
             // the error report.
             tctx.drain_open_slot_uses();
@@ -14043,6 +14119,7 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
         }
     });
     Ok(InProcessCompileResult {
+        expanded_source: None,
         js_output: js,
         js_outputs,
         signature: pre_js.signature,

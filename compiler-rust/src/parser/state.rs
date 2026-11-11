@@ -150,13 +150,28 @@ impl<'src> Parser<'src> {
         src: &'src str,
         store_locations: bool,
     ) -> Self {
+        Self::with_scanner_options(filename, src, store_locations, false)
+    }
+
+    /// Parse macro-expanded source, in which identifiers may contain `$`.
+    pub fn for_expanded_source(filename: impl Into<String>, src: &'src str) -> Self {
+        Self::with_scanner_options(filename, src, true, true)
+    }
+
+    fn with_scanner_options(
+        filename: impl Into<String>,
+        src: &'src str,
+        store_locations: bool,
+        generated_names: bool,
+    ) -> Self {
         // Create arena first so we can intern the filename
         let mut arena = ParseArena::with_locations(store_locations);
         arena.reserve_for_source(src.len());
         // Intern the filename - this StrIdx will be shared by all positions in this file
         let filename_idx = arena.intern_string(&filename.into());
         arena.set_source_file(filename_idx);
-        let scanner = Scanner::new(filename_idx, src);
+        let mut scanner = Scanner::new(filename_idx, src);
+        scanner.generated_names = generated_names;
         // Push initial default positions to arena
         let default_pos = Position::default();
         let default_pos_idx = arena.push_position(default_pos);
@@ -189,12 +204,6 @@ impl<'src> Parser<'src> {
         // Scan the first token
         parser.next();
         parser
-    }
-
-    /// Accept `$` inside identifiers, as macro-expanded source uses for
-    /// generated names. Call before the first token is consumed.
-    pub fn set_generated_names(&mut self, enabled: bool) {
-        self.scanner.generated_names = enabled;
     }
 
     /// Create a location for the current token (start_pos to end_pos).
