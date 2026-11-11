@@ -1,0 +1,44 @@
+name: Prepare the parity inputs
+description: >-
+  Put this run's rescript executable (from the build job) and OCaml reference
+  executables (from the ocaml job) where the parity scripts and the compiler
+  tests look for them. Then build the runtime, Belt and tests/tests with the
+  OCaml compiler, whose compiled files the OCaml side and the compiler test
+  fixtures read.
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/download-artifact@v8
+      with:
+        name: rescript
+
+    - uses: actions/download-artifact@v8
+      with:
+        name: ocaml
+        path: ${{ runner.temp }}/ocaml
+
+    - name: Install the executables
+      shell: bash
+      run: |
+        tar -xmf rescript.tar
+        rm rescript.tar
+        ./scripts/rust_compiler_shims.sh release
+        # Where the parity scripts look for them: the dune install directory
+        # and the platform npm package, as `make lib` leaves them.
+        ocaml="$RUNNER_TEMP/ocaml"
+        platform_bin="packages/@rescript/$(./scripts/platform.sh)/bin"
+        mkdir -p _build/install/default/bin "$platform_bin"
+        install -m 755 "$ocaml/bsc" "$ocaml/res_parser" _build/install/default/bin/
+        install -m 755 "$ocaml/bsc" "$platform_bin/bsc.exe"
+        install -m 755 rewatch/target/release/rescript "$platform_bin/rescript.exe"
+
+    - name: Build the runtime, Belt and tests/tests
+      shell: bash
+      run: |
+        export RESCRIPT_RUNTIME="$PWD/packages/@rescript/runtime"
+        rescript=rewatch/target/release/rescript
+        "$rescript" build packages/@rescript/runtime > /dev/null
+        "$rescript" build packages/@rescript/belt > /dev/null
+        PROJECT_ROOT="$PWD" RUST_TARGET=release bash -c \
+          'source scripts/parity_lib.sh && parity_build_ocaml_reference "$PROJECT_ROOT/tests/tests"'
