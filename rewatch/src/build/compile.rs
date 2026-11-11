@@ -323,6 +323,14 @@ fn apply_pending_registry_updates(
     let mut registry = build_command_state.module_registry.lock().unwrap();
     for update in updates {
         if let Some(pers_struct) = update.pers_struct {
+            // No compilation loads the signature of a module nothing depends
+            // on, so it need not keep a decoded one for that.
+            if build_command_state
+                .get_module(&update.module_name)
+                .is_some_and(|module| module.dependents.is_empty())
+            {
+                pers_struct.release_signature_for_dependent();
+            }
             registry.register_module_arc(&update.module_name, pers_struct, update.module_info);
         } else {
             registry.insert_module_info(update.module_name, update.module_info);
