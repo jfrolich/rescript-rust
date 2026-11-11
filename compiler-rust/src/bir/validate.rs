@@ -41,8 +41,8 @@ impl Bir {
         let mut uses = vec![0u32; nvars];
         let mut exits = vec![0u32; self.pools.catches.len()];
         let mut binders = vec![None; nvars];
-        let mut parents = vec![None; self.nodes.len()];
         let mut order = Vec::new();
+        let mut functions = vec![false; self.pools.funcs.len()];
         let mut stack: Vec<_> = root.map(|id| (id, None, 1u32)).into_iter().collect();
         while let Some((id, parent, weight)) = stack.pop() {
             if id.index() >= self.nodes.len()
@@ -55,7 +55,6 @@ impl Bir {
                 return fail("shared child or cycle");
             }
             seen[id.index()] = true;
-            parents[id.index()] = parent;
             order.push(id);
             if self.parents[id.index()] != parent {
                 return fail("stale parent link");
@@ -73,6 +72,21 @@ impl Bir {
                 }
             }
             match self.view(id) {
+                View::Fun { header, .. } | View::JFun { header, .. } => {
+                    if functions[header.index()] {
+                        return fail("shared function header");
+                    }
+                    functions[header.index()] = true;
+                }
+                View::SForOf { parts, .. } | View::SForAwaitOf { parts, .. }
+                    if parts.len() != 2 =>
+                {
+                    return fail("for-of needs iterable and body");
+                }
+                View::STry {
+                    parts,
+                    exception: None,
+                } if parts.len() != 2 => return fail("finally-only try needs body and finaliser"),
                 View::Var { var } => {
                     let Some(count) = uses.get_mut(var.index()) else {
                         return fail("invalid variable");

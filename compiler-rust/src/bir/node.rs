@@ -1,6 +1,7 @@
 //! Packed nodes and typed views. One schema defines encoding, decoding and
 //! traversal, so adding an operand cannot silently omit it from copy or release.
 use super::pools::*;
+use crate::js_ir::arena::FieldPos;
 use std::collections::HashMap;
 
 /// Cached effects and positional information.
@@ -41,6 +42,7 @@ pub(super) struct Renaming<'a> {
     pub funcs: &'a HashMap<FuncId, FuncId>,
     pub catches: &'a HashMap<CatchId, CatchId>,
     pub labels: &'a HashMap<u32, u32>,
+    pub js: &'a HashMap<JsId, JsId>,
 }
 
 trait Operand<'a>: Sized {
@@ -59,7 +61,7 @@ macro_rules! payload {
         }
     )*};
 }
-payload!(ConstId, PrimId, ApplyId, SwitchId, StrId, ImportId, JsId);
+payload!(ConstId, PrimId, ApplyId, SwitchId, StrId, ImportId);
 macro_rules! renamed {
     ($ty:ident, $table:ident) => {
         impl Operand<'_> for $ty {
@@ -78,6 +80,7 @@ macro_rules! renamed {
 renamed!(VarId, vars);
 renamed!(FuncId, funcs);
 renamed!(CatchId, catches);
+renamed!(JsId, js);
 impl Operand<'_> for u32 {
     fn encode(self, _lists: &mut Lists) -> u32 {
         self
@@ -119,6 +122,35 @@ impl Operand<'_> for Option<NodeId> {
         } else {
             map.nodes[&NodeId(raw)].0
         }
+    }
+}
+macro_rules! optional_payload {
+    ($ty:ident) => {
+        impl Operand<'_> for Option<$ty> {
+            fn encode(self, _lists: &mut Lists) -> u32 {
+                self.map_or(u32::MAX, |id| id.0)
+            }
+            fn decode(raw: u32, _lists: &Lists) -> Self {
+                (raw != u32::MAX).then_some($ty(raw))
+            }
+            fn remap(raw: u32, lists: &mut Lists, map: &Renaming<'_>) -> u32 {
+                if raw == u32::MAX {
+                    raw
+                } else {
+                    <$ty>::remap(raw, lists, map)
+                }
+            }
+        }
+    };
+}
+optional_payload!(StrId);
+optional_payload!(VarId);
+impl Operand<'_> for FieldPos {
+    fn encode(self, _lists: &mut Lists) -> u32 {
+        self.get().map_or(u32::MAX, |n| n as u32)
+    }
+    fn decode(raw: u32, _lists: &Lists) -> Self {
+        Self::new((raw != u32::MAX).then_some(raw as i32))
     }
 }
 impl<'a> Operand<'a> for &'a [NodeId] {
@@ -235,7 +267,7 @@ nodes! {
     JFlatCall { callee: NodeId, args: NodeId },
     JNew { callee: NodeId, args: &'a [NodeId] },
     JIndex { object: NodeId, index: NodeId },
-    JDot { object: NodeId, property: StrId },
+    JDot { object: NodeId, property: StrId, position: FieldPos },
     JLength { value: NodeId },
     JIsNullish { value: NodeId },
     JStrAppend { left: NodeId, right: NodeId },
@@ -250,7 +282,7 @@ nodes! {
     JRaw { text: StrId },
     JAwait { value: NodeId },
     JSpread { value: NodeId },
-    JQualified { module: ImportId, member: StrId },
+    JQualified { module: ImportId, member: Option<StrId> },
     JNumber { value: ConstId },
     JStr { text: StrId },
     JBool,
@@ -262,16 +294,16 @@ nodes! {
     SDecl { var: VarId, value: Option<NodeId> },
     SExp { value: NodeId },
     SIf { condition: NodeId, then_: NodeId, else_: Option<NodeId> },
-    SWhile { condition: NodeId, body: NodeId, label: StrId },
-    SForRange { var: VarId, parts: &'a [NodeId], label: StrId },
-    SForOf { var: VarId, iterable: NodeId, body: NodeId },
-    SForAwaitOf { var: VarId, iterable: NodeId, body: NodeId },
+    SWhile { condition: NodeId, body: NodeId, label: Option<StrId> },
+    SForRange { var: VarId, parts: &'a [NodeId], label: Option<StrId> },
+    SForOf { var: VarId, parts: &'a [NodeId], label: Option<StrId> },
+    SForAwaitOf { var: VarId, parts: &'a [NodeId], label: Option<StrId> },
     SSwitch { scrutinee: NodeId, actions: &'a [NodeId], header: SwitchId },
     SReturn { value: NodeId },
     SThrow { value: NodeId },
-    STry { parts: &'a [NodeId], exception: VarId },
-    SBreak { label: StrId },
-    SContinue { label: StrId },
+    STry { parts: &'a [NodeId], exception: Option<VarId> },
+    SBreak { label: Option<StrId> },
+    SContinue { label: Option<StrId> },
     SDebugger,
     SRest { var: VarId, value: NodeId, info: JsId },
 }

@@ -136,6 +136,12 @@ pub struct FuncHeader {
     /// Function properties, including self tail calls.
     pub flags: u32,
 }
+impl FuncHeader {
+    /// A tail-position application calls the function's own binding.
+    pub const SELF_TAILCALL: u32 = 1;
+    /// Print as a method-capable function, preserving `this`.
+    pub const METHOD: u32 = 2;
+}
 /// Static exception handler metadata.
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
@@ -234,6 +240,14 @@ pub struct TemplatePart {
     /// Decoded value; absent for an invalid escape in a tagged template.
     pub cooked: Option<StrId>,
 }
+/// A field excluded from record-rest destructuring.
+#[derive(Debug, Clone, Copy)]
+pub struct RestField {
+    /// Source property name.
+    pub name: StrId,
+    /// Optional local bound to the removed field by SRest.
+    pub binding: Option<VarId>,
+}
 /// JavaScript metadata without child ownership. All expressions stay in node lists.
 #[derive(Debug, Clone)]
 pub enum JsPayload {
@@ -250,7 +264,7 @@ pub enum JsPayload {
     /// Tagged template raw/cooked quasis.
     Tagged(Vec<TemplatePart>),
     /// Fields excluded from a record-rest expression/destructuring.
-    Rest(Vec<StrId>),
+    Rest(Vec<RestField>),
 }
 /// Imported module identity, retained in encounter order.
 #[derive(Debug, Clone, PartialEq, Eq)]

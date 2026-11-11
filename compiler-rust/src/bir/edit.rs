@@ -30,6 +30,12 @@ impl Bir {
         let packed = Node::pack(view, aux, &mut self.lists);
         let id = self.allocate(packed);
         self.check_shape(id);
+        if let View::Fun { header, .. } | View::JFun { header, .. } = self.view(id) {
+            assert!(!self.nodes.iter().enumerate().any(|(i, node)| {
+                i != id.index() && matches!(node.op(), Op::Fun | Op::JFun)
+                    && matches!(node.view(&self.lists), View::Fun { header: h, .. } | View::JFun { header: h, .. } if h == header)
+            }), "function header already owned");
+        }
         self.bind(id);
         for child in children {
             self.parents[child.index()] = Some(id);
@@ -68,7 +74,13 @@ impl Bir {
         match self.view(id) {
             View::For { parts, .. } => assert_eq!(parts.len(), 3),
             View::SForRange { parts, .. } => assert!((2..=3).contains(&parts.len())),
-            View::STry { parts, .. } => assert!((2..=3).contains(&parts.len())),
+            View::STry { parts, exception } => {
+                assert!((2..=3).contains(&parts.len()));
+                assert!(exception.is_some() || parts.len() == 2);
+            }
+            View::SForOf { parts, .. } | View::SForAwaitOf { parts, .. } => {
+                assert_eq!(parts.len(), 2)
+            }
             View::Switch {
                 actions, header, ..
             }
@@ -142,9 +154,16 @@ impl Bir {
             | View::ForAwaitOf { var, .. }
             | View::SForRange { var, .. }
             | View::SForOf { var, .. }
-            | View::SForAwaitOf { var, .. }
-            | View::SRest { var, .. } => vec![var],
-            View::Try { exception, .. } | View::STry { exception, .. } => vec![exception],
+            | View::SForAwaitOf { var, .. } => vec![var],
+            View::SRest { var, info, .. } => {
+                let mut binders = vec![var];
+                if let JsPayload::Rest(fields) = self.javascript(info) {
+                    binders.extend(fields.iter().filter_map(|field| field.binding));
+                }
+                binders
+            }
+            View::Try { exception, .. } => vec![exception],
+            View::STry { exception, .. } => exception.into_iter().collect(),
             View::LetRec { first, values, .. } => (0..index(values.len()))
                 .map(|i| VarId(first.0 + i))
                 .collect(),
@@ -237,6 +256,9 @@ impl Bir {
     fn update_facts(&mut self, id: NodeId) {
         for (var, fact) in self.binding_facts(id) {
             self.vars.fact[var.index()] = fact;
+            if matches!(fact, Fact::Module(_)) {
+                self.vars.flags[var.index()].0 |= VarFlags::MODULE;
+            }
             if fact == Fact::Param {
                 self.vars.flags[var.index()].0 |= VarFlags::PARAM;
             }
@@ -327,12 +349,18 @@ impl Bir {
         match self.view(id) {
             View::Var { .. }
             | View::Global { .. }
-            | View::Const { .. }
             | View::JNumber { .. }
             | View::JStr { .. }
             | View::JBool
             | View::JNull
             | View::JUndefined => (true, true),
+            View::Const { value } => (
+                true,
+                !matches!(
+                    self.constant(value),
+                    Constant::Block { .. } | Constant::Some(_)
+                ),
+            ),
             View::Fun { .. } | View::JFun { .. } => (true, false),
             View::Prim { primitive, args } => {
                 let p = &self.pools.prims[primitive.index()].primitive;
@@ -459,7 +487,7 @@ impl Bir {
             }
             self.nodes[id.index()].set_flags(flags);
             if let View::Fun { body, header } | View::JFun { body, header } = self.view(id) {
-                self.pools.funcs[header.index()].flags &= !1;
+                self.pools.funcs[header.index()].flags &= !FuncHeader::SELF_TAILCALL;
                 let own = self.parents[id.index()].and_then(|parent| match self.view(parent) {
                     View::Let {
                         var,
@@ -480,7 +508,7 @@ impl Bir {
                     if let View::Var { var } = self.view(callee) {
                         if Some(var) == self_var {
                             if let Some(header) = function {
-                                self.pools.funcs[header.index()].flags |= 1;
+                                self.pools.funcs[header.index()].flags |= FuncHeader::SELF_TAILCALL;
                             }
                         }
                     }
@@ -626,6 +654,7 @@ impl Bir {
         let mut funcs = HashMap::new();
         let mut catches = HashMap::new();
         let mut labels = HashMap::new();
+        let mut js = HashMap::new();
         for &id in &order {
             match self.view(id) {
                 View::Fun { header, .. } | View::JFun { header, .. } => {
@@ -639,6 +668,7 @@ impl Bir {
                         self.function_attributes(header).clone(),
                         old.loc,
                     );
+                    self.pools.funcs[new.index()].flags = old.flags;
                     funcs.insert(header, new);
                 }
                 View::Catch { header, .. } => {
@@ -663,6 +693,21 @@ impl Bir {
                 _ => {}
             }
         }
+        for &id in &order {
+            if let View::JRecordRest { info, .. } | View::SRest { info, .. } = self.view(id) {
+                if let JsPayload::Rest(fields) = self.javascript(info) {
+                    let fields = fields
+                        .iter()
+                        .map(|field| RestField {
+                            name: field.name,
+                            binding: field.binding.map(|v| vars.get(&v).copied().unwrap_or(v)),
+                        })
+                        .collect();
+                    let copied = self.js_info(JsPayload::Rest(fields));
+                    js.insert(info, copied);
+                }
+            }
+        }
         let mut nodes = HashMap::new();
         for &id in order.iter().rev() {
             let packed = self.node(id).remap(
@@ -673,6 +718,7 @@ impl Bir {
                     funcs: &funcs,
                     catches: &catches,
                     labels: &labels,
+                    js: &js,
                 },
             );
             let new = self.allocate(packed);
@@ -1463,7 +1509,14 @@ mod constructor_tests {
         |b| {
             let object = leaf(&mut b);
             let property = b.intern_text("text");
-            b.new_node(View::JDot { object, property }, 0)
+            b.new_node(
+                View::JDot {
+                    object,
+                    property,
+                    position: crate::js_ir::arena::FieldPos::NONE,
+                },
+                0,
+            )
         },
         JDot
     );
@@ -1645,7 +1698,13 @@ mod constructor_tests {
                 path,
             });
             let member = b.intern_text("text");
-            b.new_node(View::JQualified { module, member }, 0)
+            b.new_node(
+                View::JQualified {
+                    module,
+                    member: Some(member),
+                },
+                0,
+            )
         },
         JQualified
     );
@@ -1746,7 +1805,7 @@ mod constructor_tests {
                 View::SWhile {
                     condition,
                     body,
-                    label,
+                    label: Some(label),
                 },
                 0,
             )
@@ -1763,7 +1822,7 @@ mod constructor_tests {
                 View::SForRange {
                     var,
                     parts: &parts,
-                    label,
+                    label: Some(label),
                 },
                 0,
             )
@@ -1779,8 +1838,8 @@ mod constructor_tests {
             b.new_node(
                 View::SForOf {
                     var,
-                    iterable,
-                    body,
+                    parts: &[iterable, body],
+                    label: None,
                 },
                 0,
             )
@@ -1796,8 +1855,8 @@ mod constructor_tests {
             b.new_node(
                 View::SForAwaitOf {
                     var,
-                    iterable,
-                    body,
+                    parts: &[iterable, body],
+                    label: None,
                 },
                 0,
             )
@@ -1853,7 +1912,7 @@ mod constructor_tests {
             b.new_node(
                 View::STry {
                     parts: &parts,
-                    exception,
+                    exception: Some(exception),
                 },
                 0,
             )
@@ -1864,7 +1923,7 @@ mod constructor_tests {
         constructs_sbreak,
         |b| {
             let label = b.intern_text("text");
-            b.new_node(View::SBreak { label }, 0)
+            b.new_node(View::SBreak { label: Some(label) }, 0)
         },
         SBreak
     );
@@ -1872,7 +1931,7 @@ mod constructor_tests {
         constructs_scontinue,
         |b| {
             let label = b.intern_text("text");
-            b.new_node(View::SContinue { label }, 0)
+            b.new_node(View::SContinue { label: Some(label) }, 0)
         },
         SContinue
     );
@@ -2100,5 +2159,153 @@ mod boundary_tests {
         b.vars.flags[var.index()].0 |= VarFlags::CAPTURED;
         b.nodes[root.index()].set_flags(NodeFlags(0));
         assert!(b.validate(Some(root)).unwrap_err().contains("effect"));
+    }
+}
+
+#[cfg(test)]
+mod js_metadata_tests {
+    use super::*;
+    use crate::js_ir::arena::FieldPos;
+    use crate::name::Name;
+
+    #[test]
+    fn optional_js_operands_round_trip_through_copy() {
+        let mut b = Bir::default();
+        let body = b.new_node(View::SBlock { statements: &[] }, 0);
+        let finaliser = b.new_node(View::SBlock { statements: &[] }, 0);
+        let try_ = b.new_node(
+            View::STry {
+                parts: &[body, finaliser],
+                exception: None,
+            },
+            0,
+        );
+        let object = b.new_node(View::JNull, 0);
+        let property = b.intern_text("field");
+        let dot = b.new_node(
+            View::JDot {
+                object,
+                property,
+                position: FieldPos::new(Some(123456)),
+            },
+            0,
+        );
+        let label = b.new_node(View::SBreak { label: None }, 0);
+        let loop_body = b.new_node(
+            View::SBlock {
+                statements: &[label],
+            },
+            0,
+        );
+        let iterable = b.new_node(View::JArray { values: &[] }, 0);
+        let var = b.new_var_id(Name::new("item"), 0);
+        let loop_ = b.new_node(
+            View::SForOf {
+                var,
+                parts: &[iterable, loop_body],
+                label: None,
+            },
+            0,
+        );
+        let root = b.new_node(
+            View::SBlock {
+                statements: &[try_, dot, loop_],
+            },
+            0,
+        );
+        b.validate(Some(root)).unwrap();
+        let copy = b.copy_subtree(root, &[]);
+        b.replace(root, copy);
+        b.validate(Some(root)).unwrap();
+        let View::SBlock { statements } = b.view(root) else {
+            panic!()
+        };
+        assert!(matches!(
+            b.view(statements[0]),
+            View::STry {
+                exception: None,
+                ..
+            }
+        ));
+        let View::JDot { position, .. } = b.view(statements[1]) else {
+            panic!()
+        };
+        assert_eq!(position.get(), Some(123456));
+    }
+
+    #[test]
+    fn rest_fields_are_binders_and_are_freshened() {
+        let mut b = Bir::default();
+        let rest = b.new_var_id(Name::new("rest"), 0);
+        let field = b.new_var_id(Name::new("field"), 1);
+        let name = b.intern_text("field");
+        let info = b.js_info(JsPayload::Rest(vec![RestField {
+            name,
+            binding: Some(field),
+        }]));
+        let value = b.new_node(View::JNull, 0);
+        let decl = b.new_node(
+            View::SRest {
+                var: rest,
+                value,
+                info,
+            },
+            0,
+        );
+        let usage = b.new_node(View::Var { var: field }, 0);
+        let root = b.new_node(
+            View::SBlock {
+                statements: &[decl, usage],
+            },
+            0,
+        );
+        assert_eq!(b.vars.binder(field), Some(decl));
+        let copied = b.copy_subtree(root, &[]);
+        let View::SBlock { statements } = b.view(copied) else {
+            panic!()
+        };
+        let View::SRest { info, .. } = b.view(statements[0]) else {
+            panic!()
+        };
+        let JsPayload::Rest(fields) = b.javascript(info) else {
+            panic!()
+        };
+        let fresh = fields[0].binding.unwrap();
+        assert_ne!(fresh, field);
+        assert_eq!(b.vars.binder(fresh), Some(statements[0]));
+        let pair = b.new_node(
+            View::SBlock {
+                statements: &[root, copied],
+            },
+            0,
+        );
+        b.validate(Some(pair)).unwrap();
+    }
+
+    #[test]
+    fn methods_keep_their_representation_when_copied() {
+        let mut b = Bir::default();
+        let body = b.new_node(View::SBlock { statements: &[] }, 0);
+        let header = b.method_header(
+            VarSpan::default(),
+            FunctionAttribute::default(),
+            LamLoc::NONE,
+        );
+        let root = b.new_node(View::JFun { body, header }, 0);
+        let copied = b.copy_subtree(root, &[]);
+        let View::JFun { header, .. } = b.view(copied) else {
+            panic!()
+        };
+        assert_eq!(
+            b.function(header).flags & FuncHeader::METHOD,
+            FuncHeader::METHOD
+        );
+        let pair = b.new_node(
+            View::JArray {
+                values: &[root, copied],
+            },
+            0,
+        );
+        b.validate(Some(pair)).unwrap();
     }
 }

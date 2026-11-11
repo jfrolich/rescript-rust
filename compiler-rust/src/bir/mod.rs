@@ -221,6 +221,17 @@ impl Bir {
         });
         id
     }
+    /// Allocate a JavaScript method header, which preserves the `this` binding.
+    pub fn method_header(
+        &mut self,
+        params: VarSpan,
+        attr: FunctionAttribute,
+        loc: LamLoc,
+    ) -> FuncId {
+        let id = self.function_header(params, attr, loc);
+        self.pools.funcs[id.index()].flags |= FuncHeader::METHOD;
+        id
+    }
     /// Read a function header.
     pub fn function(&self, id: FuncId) -> &FuncHeader {
         &self.pools.funcs[id.index()]
