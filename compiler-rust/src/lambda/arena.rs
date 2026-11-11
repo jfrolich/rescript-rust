@@ -364,6 +364,10 @@ pub struct LamArena {
     str_keys: Vec<(u32, u32)>,
     text: String,
     catches: Vec<CatchPayload>,
+    /// Whether an assignment node was ever added. Most programs have none,
+    /// and the passes that ask which variables a term assigns then need no
+    /// walk (see `lambda_traverse::arena_assigned_variables`).
+    has_assign: bool,
 }
 
 /// A program: an arena and the root of its term.
@@ -413,7 +417,14 @@ impl LamArena {
             str_keys: Vec::new(),
             text: String::new(),
             catches: Vec::new(),
+            has_assign: false,
         }
+    }
+
+    /// False when no term of this arena can contain an assignment.
+    #[inline]
+    pub fn may_assign(&self) -> bool {
+        self.has_assign
     }
 
     pub fn node_count(&self) -> usize {
@@ -693,6 +704,7 @@ impl LamArena {
     #[inline]
     pub fn push(&mut self, node: Node) -> Lam {
         let id = Lam(checked_u32(self.nodes.len()));
+        self.has_assign |= matches!(node, Node::Assign { .. });
         self.nodes.push(node);
         id
     }
@@ -2542,6 +2554,35 @@ mod tests {
             crate::lambda::lam_beta_reduce::max_ident_stamp_in_lambda(&a, root),
             3,
         );
+    }
+
+    #[test]
+    fn an_arena_without_assignments_needs_no_walk_for_assigned_variables() {
+        use crate::lambda::lambda_traverse::arena_assigned_variables;
+        let mut a = LamArena::new();
+        let x = Ident::create_local("x");
+        let y = Ident::create_local("y");
+        let read = a.var(x);
+        let unit = a.unit();
+        let pure = a.seq(read, unit);
+        assert!(!a.may_assign());
+        assert!(arena_assigned_variables(&a, pure).is_empty());
+
+        // An assignment anywhere in the arena brings the walk back, for
+        // every term: one that contains it and one that does not.
+        let one = a.unit();
+        let assign = a.assign(y, one);
+        let assigning = a.seq(pure, assign);
+        assert!(a.may_assign());
+        let assigned = arena_assigned_variables(&a, assigning);
+        assert_eq!(assigned.len(), 1);
+        assert!(assigned.contains(&y));
+        assert!(arena_assigned_variables(&a, pure).is_empty());
+
+        // A copy of the arena keeps the answer.
+        let copy = a.clone();
+        assert!(copy.may_assign());
+        assert_eq!(arena_assigned_variables(&copy, assigning), assigned);
     }
 
     #[test]

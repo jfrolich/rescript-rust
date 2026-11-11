@@ -46,7 +46,12 @@ pub fn arena_assigned_variables(
         a.iter_children(lam, |child| walk(a, child, assigned));
     }
     let mut assigned = ahash::AHashSet::new();
-    walk(a, lam, &mut assigned);
+    // Assignments are rare (only a mutable variable kept local makes them),
+    // and this is asked for every pass and every inlined call: skip the walk
+    // of the whole term when the arena holds none.
+    if a.may_assign() {
+        walk(a, lam, &mut assigned);
+    }
     assigned
 }
 
