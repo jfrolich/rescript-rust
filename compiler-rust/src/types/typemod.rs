@@ -4137,16 +4137,31 @@ fn check_type_decl_variance_propagation(
     let tvl = crate::types::ctype::compute_variance_map_for_fields(ctx, env, &fields);
     let mut visited = HashSet::default();
 
-    fn check_type(
-        ctx: &crate::types::context::TypeContext,
-        env: &Env,
+    /// What every type node of the declaration is checked against.
+    struct VarianceCheck<'a> {
+        ctx: &'a crate::types::context::TypeContext,
+        env: &'a Env,
         loc: LocIdx,
+        /// Variances the fields give each node.
+        tvl: &'a HashMap<TypeExprRef, TypesVariance>,
+        /// Variances of the constrained parameters.
+        tvl2: &'a HashMap<TypeExprRef, TypesVariance>,
+        free_variables: &'a HashSet<TypeExprRef>,
+    }
+
+    fn check_type(
+        check: &VarianceCheck<'_>,
         ty: TypeExprRef,
-        tvl: &HashMap<TypeExprRef, TypesVariance>,
-        tvl2: &HashMap<TypeExprRef, TypesVariance>,
-        free_variables: &HashSet<TypeExprRef>,
         visited: &mut HashSet<TypeExprRef>,
     ) -> TypeModResult<()> {
+        let VarianceCheck {
+            ctx,
+            env,
+            loc,
+            tvl,
+            tvl2,
+            free_variables,
+        } = *check;
         let ty = ctx.repr(ty);
         if !visited.insert(ty) {
             return Ok(());
@@ -4183,24 +4198,23 @@ fn check_type_decl_variance_propagation(
             let mut children = Vec::new();
             crate::types::btype::iter_type_expr(ctx, ty, |child| children.push(child));
             for child in children {
-                check_type(ctx, env, loc, child, tvl, tvl2, free_variables, visited)?;
+                check_type(check, child, visited)?;
             }
         }
 
         Ok(())
     }
 
+    let check = VarianceCheck {
+        ctx,
+        env,
+        loc: parsed_decl.ptype_loc,
+        tvl: &tvl,
+        tvl2: &tvl2,
+        free_variables: &free_variables,
+    };
     for (_, ty) in fields {
-        check_type(
-            ctx,
-            env,
-            parsed_decl.ptype_loc,
-            ty,
-            &tvl,
-            &tvl2,
-            &free_variables,
-            &mut visited,
-        )?;
+        check_type(&check, ty, &mut visited)?;
     }
 
     Ok(())
@@ -4375,16 +4389,30 @@ fn compare_definition_record_labels(
     None
 }
 
+/// One side of a variant definition comparison.
+#[derive(Clone, Copy)]
+struct VariantDefinition<'a> {
+    params: &'a [TypeExprRef],
+    constructors: &'a [crate::types::decl::ConstructorDeclaration],
+    layout: &'a crate::types::VariantLayout,
+}
+
 fn compare_definition_constructors(
     ctx: &crate::types::context::TypeContext,
     env: &Env,
-    expected_params: &[TypeExprRef],
-    actual_params: &[TypeExprRef],
-    expected: &[crate::types::decl::ConstructorDeclaration],
-    actual: &[crate::types::decl::ConstructorDeclaration],
-    expected_layout: &crate::types::VariantLayout,
-    actual_layout: &crate::types::VariantLayout,
+    expected: VariantDefinition<'_>,
+    actual: VariantDefinition<'_>,
 ) -> Option<String> {
+    let VariantDefinition {
+        params: expected_params,
+        constructors: expected,
+        layout: expected_layout,
+    } = expected;
+    let VariantDefinition {
+        params: actual_params,
+        constructors: actual,
+        layout: actual_layout,
+    } = actual;
     let len = expected.len().min(actual.len());
     for idx in 0..len {
         let expected_constructor = &expected[idx];
@@ -4510,12 +4538,16 @@ fn definition_mismatch_detail(
         ) => compare_definition_constructors(
             ctx,
             env,
-            &expected.type_params,
-            &actual.type_params,
-            expected_constructors,
-            actual_constructors,
-            &ctx.variant_layout(*expected_layout),
-            &ctx.variant_layout(*actual_layout),
+            VariantDefinition {
+                params: &expected.type_params,
+                constructors: expected_constructors,
+                layout: &ctx.variant_layout(*expected_layout),
+            },
+            VariantDefinition {
+                params: &actual.type_params,
+                constructors: actual_constructors,
+                layout: &ctx.variant_layout(*actual_layout),
+            },
         ),
         _ => None,
     }
@@ -6478,19 +6510,35 @@ fn type_expr_lists_equal_for_abbrev_recursion(
         })
 }
 
-fn check_type_abbrev_recursion_regular(
-    ctx: &crate::types::context::TypeContext,
-    env: &Env,
+/// The declaration whose abbreviation recursion is checked for regularity.
+struct AbbrevRecursionCheck<'a> {
+    ctx: &'a crate::types::context::TypeContext,
+    env: &'a Env,
     loc: LocIdx,
-    target_path: &Path,
+    /// The declared type's path.
+    target_path: &'a Path,
+    /// Its parameters, which every recursive occurrence must repeat.
+    expected_args: &'a [TypeExprRef],
+    should_check_path: &'a dyn Fn(&Path) -> bool,
+    find_decl: &'a dyn Fn(&Path) -> Option<crate::types::TypeDeclaration>,
+}
+
+fn check_type_abbrev_recursion_regular(
+    check: &AbbrevRecursionCheck<'_>,
     current_path: &Path,
-    expected_args: &[TypeExprRef],
     prev_expansions: &[Path],
     ty: TypeExprRef,
-    should_check_path: &dyn Fn(&Path) -> bool,
-    find_decl: &dyn Fn(&Path) -> Option<crate::types::TypeDeclaration>,
     visited: &mut HashSet<TypeExprRef>,
 ) -> TypeModResult<()> {
+    let AbbrevRecursionCheck {
+        ctx,
+        env,
+        loc,
+        target_path,
+        expected_args,
+        should_check_path,
+        find_decl,
+    } = *check;
     let ty = ctx.repr(ty);
     if !visited.insert(ty) {
         return Ok(());
@@ -6545,32 +6593,20 @@ fn check_type_abbrev_recursion_regular(
                 let mut next_expansions = prev_expansions.to_vec();
                 next_expansions.push(path);
                 check_type_abbrev_recursion_regular(
-                    ctx,
-                    env,
-                    loc,
-                    target_path,
+                    check,
                     &path,
-                    expected_args,
                     &next_expansions,
                     body,
-                    should_check_path,
-                    find_decl,
                     visited,
                 )?;
             }
 
             for arg in ctx.type_list(args) {
                 check_type_abbrev_recursion_regular(
-                    ctx,
-                    env,
-                    loc,
-                    target_path,
+                    check,
                     current_path,
-                    expected_args,
                     prev_expansions,
                     arg,
-                    should_check_path,
-                    find_decl,
                     visited,
                 )?;
             }
@@ -6580,16 +6616,10 @@ fn check_type_abbrev_recursion_regular(
             let (_, body) =
                 crate::types::ctype::instance_poly(ctx, true, false, ctx.type_list(vars), body);
             check_type_abbrev_recursion_regular(
-                ctx,
-                env,
-                loc,
-                target_path,
+                check,
                 current_path,
-                expected_args,
                 prev_expansions,
                 body,
-                should_check_path,
-                find_decl,
                 visited,
             )
         }
@@ -6598,16 +6628,10 @@ fn check_type_abbrev_recursion_regular(
             crate::types::btype::iter_type_expr(ctx, ty, |child| children.push(child));
             for child in children {
                 check_type_abbrev_recursion_regular(
-                    ctx,
-                    env,
-                    loc,
-                    target_path,
+                    check,
                     current_path,
-                    expected_args,
                     prev_expansions,
                     child,
-                    should_check_path,
-                    find_decl,
                     visited,
                 )?;
             }
@@ -6637,19 +6661,16 @@ fn check_type_declaration_abbrev_recursion(
         &internal_decl.type_params,
         manifest,
     );
-    check_type_abbrev_recursion_regular(
+    let check = AbbrevRecursionCheck {
         ctx,
         env,
         loc,
         target_path,
-        target_path,
-        &args,
-        &[],
-        body,
+        expected_args: &args,
         should_check_path,
         find_decl,
-        &mut HashSet::new(),
-    )
+    };
+    check_type_abbrev_recursion_regular(&check, target_path, &[], body, &mut HashSet::new())
 }
 
 type WellFoundedParents = im_rc::HashSet<TypeExprRef>;
@@ -15617,35 +15638,48 @@ fn wrap_constraint_with_decl_mty<'a>(
         .unwrap_or(crate::types::decl::ModuleType::MtySignature(
             std::sync::Arc::new(vec![]),
         ));
-    wrap_constraint_with_decl_and_arg_mty(
+    let include_decl_mty = decl_mty.clone();
+    wrap_checked_constraint(
         tctx,
         env,
         arg,
-        arg_mty,
-        decl_mty,
-        explicit,
-        mod_loc,
-        mod_attributes,
+        &arg_mty,
+        &include_decl_mty,
+        ConstraintNode {
+            mty: decl_mty,
+            explicit,
+            loc: mod_loc,
+            attributes: mod_attributes,
+        },
     )
 }
 
-fn wrap_constraint_with_decl_and_arg_mty<'a>(
+/// The `Tmod_constraint` node wrapped around a module expression.
+struct ConstraintNode {
+    /// The module type the constraint gives the module.
+    mty: crate::types::decl::ModuleType,
+    explicit: crate::types::typedtree::ModuleTypeConstraint,
+    loc: LocIdx,
+    attributes: Attributes,
+}
+
+/// Check that `arg_mty` is included in `decl_mty` and wrap `arg` in the
+/// resulting coercion.
+fn wrap_checked_constraint<'a>(
     tctx: &mut TypeCheckContext<'a>,
     env: &Env,
     arg: ModuleExpr,
-    arg_mty: crate::types::decl::ModuleType,
-    decl_mty: crate::types::decl::ModuleType,
-    explicit: crate::types::typedtree::ModuleTypeConstraint,
-    mod_loc: LocIdx,
-    mod_attributes: Attributes,
+    arg_mty: &crate::types::decl::ModuleType,
+    decl_mty: &crate::types::decl::ModuleType,
+    node: ConstraintNode,
 ) -> TypeModResult<ModuleExpr> {
     let error_loc = arg.mod_loc;
     let mut inclusion_warnings = Vec::new();
     let coercion_result = crate::types::includemod::modtypes_with_warnings(
         tctx.type_ctx,
         env,
-        &arg_mty,
-        &decl_mty,
+        arg_mty,
+        decl_mty,
         &mut inclusion_warnings,
     );
     report_inclusion_warnings(tctx, error_loc, inclusion_warnings);
@@ -15658,14 +15692,14 @@ fn wrap_constraint_with_decl_and_arg_mty<'a>(
     Ok(ModuleExpr {
         mod_desc: ModuleExprDesc::Tmod_constraint(
             tctx.typed.push_module_expr(arg),
-            decl_mty.clone(),
-            explicit,
+            node.mty.clone(),
+            node.explicit,
             coercion,
         ),
-        mod_loc,
-        mod_type: decl_mty,
+        mod_loc: node.loc,
+        mod_type: node.mty,
         mod_env: env_ref,
-        mod_attributes,
+        mod_attributes: node.attributes,
     })
 }
 
@@ -15711,47 +15745,6 @@ fn recmodule_subst_and_strengthen(
         &module_path,
         &substituted,
     )
-}
-
-fn wrap_recmodule_constraint_with_inclusion_mtys<'a>(
-    tctx: &mut TypeCheckContext<'a>,
-    env: &Env,
-    arg: ModuleExpr,
-    output_decl_mty: crate::types::decl::ModuleType,
-    include_arg_mty: crate::types::decl::ModuleType,
-    include_decl_mty: crate::types::decl::ModuleType,
-    explicit: crate::types::typedtree::ModuleTypeConstraint,
-    mod_loc: LocIdx,
-    mod_attributes: Attributes,
-) -> TypeModResult<ModuleExpr> {
-    let error_loc = arg.mod_loc;
-    let mut inclusion_warnings = Vec::new();
-    let coercion_result = crate::types::includemod::modtypes_with_warnings(
-        tctx.type_ctx,
-        env,
-        &include_arg_mty,
-        &include_decl_mty,
-        &mut inclusion_warnings,
-    );
-    report_inclusion_warnings(tctx, error_loc, inclusion_warnings);
-    let coercion = coercion_result.map_err(|err| TypeModError::SignatureMismatch {
-        loc: error_loc,
-        error: Box::new(err),
-    })?;
-    let env_ref = tctx.type_ctx.store_typed_env(env);
-
-    Ok(ModuleExpr {
-        mod_desc: ModuleExprDesc::Tmod_constraint(
-            tctx.typed.push_module_expr(arg),
-            output_decl_mty.clone(),
-            explicit,
-            coercion,
-        ),
-        mod_loc,
-        mod_type: output_decl_mty,
-        mod_env: env_ref,
-        mod_attributes,
-    })
 }
 
 /// Type check a module expression.
@@ -19493,16 +19486,20 @@ fn type_structure_item<'a>(
                     &decl.md_id,
                     &typed_inner.mod_type,
                 );
-                let typed_mod = wrap_recmodule_constraint_with_inclusion_mtys(
+                let typed_mod = wrap_checked_constraint(
                     tctx,
                     &inclusion_env,
                     typed_inner,
-                    tctx.typed.module_type(decl.md_type).mty_type.clone(),
-                    include_actual_mty,
-                    include_decl_mty,
-                    crate::types::typedtree::ModuleTypeConstraint::Tmodtype_explicit(decl.md_type),
-                    inner_loc,
-                    Attributes::new(),
+                    &include_actual_mty,
+                    &include_decl_mty,
+                    ConstraintNode {
+                        mty: tctx.typed.module_type(decl.md_type).mty_type.clone(),
+                        explicit: crate::types::typedtree::ModuleTypeConstraint::Tmodtype_explicit(
+                            decl.md_type,
+                        ),
+                        loc: inner_loc,
+                        attributes: Attributes::new(),
+                    },
                 )?;
                 typed_bindings.push(ModuleBinding {
                     mb_id: decl.md_id,
