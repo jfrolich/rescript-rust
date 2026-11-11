@@ -95,6 +95,7 @@
 - Keep the bindings most recently added to a type-checking environment in a short list in front of its map, so a `let` no longer copies map nodes that every recorded environment then holds until the module is done. https://github.com/jfrolich/rescript-rust/pull/91
 
 - Type-check faster: lower argument levels directly, settle the checks before binding a type variable in one walk, and skip the inclusion check of a unit against its own inferred signature. https://github.com/jfrolich/rescript-rust/pull/84
+- Allocate the map of an environment table layer on its first binding, so an `open` no longer creates and drops empty maps in every table. https://github.com/jfrolich/rescript-rust/pull/93
 - Size the compile worker pool to one worker per core on CPUs with efficiency cores, instead of oversubscribing it. https://github.com/jfrolich/rescript-rust/pull/83
 - Reduce backend identifier-allocation setup work by scanning arena identifier tables instead of recursively walking Lambda and JavaScript trees. https://github.com/jfrolich/rescript-rust/pull/82
 - Remove OCaml leftovers: unused warning numbers, the `Record_float_unused` representation, the `ns.braces` attribute name and unused `Ast_helper` functions. https://github.com/rescript-lang/rescript/pull/8805
